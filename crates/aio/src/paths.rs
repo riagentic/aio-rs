@@ -494,6 +494,9 @@ pub struct Ask {
     pub host: Option<String>,
     /// `--expose`: served to the network, over TLS.
     pub expose: bool,
+    /// `--keep-server` (aio's): a desktop app goes on serving once its
+    /// window closes, until asked to stop (`Window { keep_server }`).
+    pub keep_server: bool,
     /// A debug build: a ported app's `[home] dev` applies ([`plan_app`]
     /// asks it in a debug build of the app).
     pub dev: bool,
@@ -503,8 +506,8 @@ pub struct Ask {
 
 /// The flags aio takes from a launch for itself, spelled once: a flag
 /// with `=` takes a value (`--home=<dir>` or `--home <dir>`).
-pub const FLAGS: [&str; 8] =
-    ["--home=", "--profile=", "--instance=", "--takeover", "--port=", "--host=", "--expose", "--no-persist"];
+pub const FLAGS: [&str; 9] =
+    ["--home=", "--profile=", "--instance=", "--takeover", "--port=", "--host=", "--expose", "--keep-server", "--no-persist"];
 
 impl Ask {
     /// A launch's `args` without aio's own [`FLAGS`] (and their values), in
@@ -534,6 +537,7 @@ impl Ask {
             match arg.as_str() {
                 "--takeover" => a.takeover = true,
                 "--expose" => a.expose = true,
+                "--keep-server" => a.keep_server = true,
                 "--no-persist" => a.no_persist = true,
                 _ => {}
             }
@@ -843,6 +847,7 @@ mod tests {
             "9000",
             "--host=0.0.0.0",
             "--expose",
+            "--keep-server",
             "--no-persist",
         ]))
         .unwrap();
@@ -854,6 +859,7 @@ mod tests {
             port: Some("9000".into()),
             host: Some("0.0.0.0".into()),
             expose: true,
+            keep_server: true,
             dev: false,
             no_persist: true,
         };
@@ -874,6 +880,7 @@ mod tests {
             "--port",
             "1",
             "--expose",
+            "--keep-server",
         ]);
         assert_eq!(Ask::app_args(&launch), ["a.md", "-v", "--homes=1"]);
         assert_eq!(Ask::app_args(&args(&["--home"])), Vec::<String>::new(), "a missing value takes nothing else");

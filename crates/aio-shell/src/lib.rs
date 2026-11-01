@@ -47,7 +47,25 @@ pub struct Window {
     pub confirm_unload: bool,
     /// The window's own keys given to the page (`guest::Keys`).
     pub keys: guest::Keys,
+    /// No window rather than one without Chromium's sandbox (aio's
+    /// `requireSandbox`): on a host that can't sandbox (a Linux with user
+    /// namespaces closed and no setuid helper) the app stops, saying why,
+    /// instead of starting the runtime with `--no-sandbox`.
+    pub require_sandbox: bool,
+    /// The window waits for its page's first paint at most this long
+    /// (aio's `showWhenPainted: { capMs }`); `Some(0)`: shown at once
+    /// (`false`); unset: 5000.
+    pub show_cap_ms: Option<u32>,
+    /// The app goes on serving once its window closes (or crashes), until
+    /// asked to stop (aio's `keepServer`; `--keep-server` asks it per launch).
+    pub keep_server: bool,
+    /// The app's say over its splash at run time (aio's `splash.show`),
+    /// asked just before it would open: a setting "no splash at start" is
+    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`.
+    pub splash_show: Option<fn() -> SplashShow>,
 }
+
+pub use aio::config::SplashShow;
 
 impl Window {
     /// The window `[app]` describes: its name as the title, its own icon
@@ -109,7 +127,7 @@ mod xroom;
 #[cfg(doctest)]
 mod guide;
 
-pub use guest::{Child, Web, open_window};
+pub use guest::{Child, Web, clear_partition, open_window};
 pub use instance::{Launch, Start, launches, start};
 /// The page: an empty root, the DOM-edit interpreter and the page scripts
 /// (`aio::page`), under its policy (`aio::page::sealed`).
@@ -330,7 +348,17 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
     let at = place::load(&dirs.data.join("window.json"))
         .map(|s| (s.normal.x + s.normal.width / 2, s.normal.y + s.normal.height / 2));
     let back = instance::APP.get().filter(|(id, v)| update::can_go_back(id, v)).map(|(id, _)| id.clone());
-    splash::install(&dir, splashed, win.title, &splash_colors)?;
+    // `[build.splash] show`, or the app's say at run time (aio's `splash.show`).
+    let (at_start, in_download) =
+        splashed.map_or((false, false), |s| splash::shown(win.splash_show.map_or(s.show, |f| f())));
+    splash::install(&dir, splashed.filter(|_| at_start), win.title, &splash_colors)?;
+    // A first start draws the splash in the download window, with its bar.
+    let downloading = splashed.filter(|_| in_download);
+    let dl_image = downloading.and_then(|s| Some((s.png, splash::image_box(s)?)));
+    let dl_colors = match downloading {
+        Some(s) => splash::look_colors(splash_colors.clone(), s),
+        None => firstrun::recolored(colors, firstrun::words()),
+    };
     let icon = match win.icon {
         Some(png) => match place::icon_size(png) {
             Some(size) => {
@@ -410,19 +438,21 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
             let shown = shown.as_deref();
             runtime::ensure_as(
                 win.title,
-                &colors,
+                &dl_colors,
                 at,
                 shown,
+                dl_image,
                 back.as_ref().map(|f| f as &dyn Fn() -> std::io::Result<()>),
             )
         })
         .await
         .map_err(std::io::Error::other)??;
-        let sandbox = runtime::sandbox_args(&rt);
+        let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
         // a GPU that failed here once is never asked again (AIORT_GPU=hardware is).
         let gpu_failed = data.join("gpu-failed");
         let (gpu, _) = gpu_choice(gpu_failed.exists(), &|k| std::env::var(k).ok());
-        aio::boot::say(&runtime_rows(&rt, &sandbox, gpu_failed.exists(), &|k| std::env::var(k).ok()));
+        let env = |k: &str| std::env::var(k).ok();
+        aio::boot::say(&runtime_rows(&rt, &sandbox, win.require_sandbox, gpu_failed.exists(), &env));
         // macOS: the app's own window bundle, its name in the Dock.
         let exe = if cfg!(target_os = "macos") {
             let (rt, id, name) = (rt.clone(), dirs.id.clone(), win.title.to_string());
@@ -552,6 +582,25 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         pid.into_iter().for_each(|p| only.disarm(p));
         r
     });
+    // aio's keepServer: the window is gone (closed, or crashed: said), the
+    // app serves on until asked to stop. A sandbox it requires and lacks
+    // (`require_sandbox`, `AIORT_SANDBOX=1`) stops it anyway.
+    let keep = win.keep_server || instance::KEEP_SERVER.get() == Some(&true);
+    let r = match r {
+        Err(e) if !keep || e.kind() == std::io::ErrorKind::PermissionDenied => Err(e),
+        _ if STOP_ASKED.load(std::sync::atomic::Ordering::Relaxed) || !keep => r,
+        _ => {
+            if let Err(e) = &r {
+                eprintln!("[aio] {}: the window failed: {e}", dirs.id);
+            }
+            eprintln!("{}", kept_serving(&dirs.id, std::fs::read_to_string(dirs.data.join("serving.json")).ok()));
+            instance::take_stops(&dirs.id, &dirs.data);
+            aio::rt().block_on(async {
+                aio::lifecycle::stop_asked()?.await;
+                std::io::Result::Ok(())
+            })
+        }
+    };
     // The doors went with their listeners (and the runtime with the block).
     _ = std::fs::remove_dir(&socks);
     // The window is gone: let the stores finish their effects.
@@ -564,6 +613,16 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
     );
     aio::log::finish();
     r
+}
+
+/// What a kept server says once its window is gone (pure): where it
+/// serves (its `serving.json`), and how to stop it.
+fn kept_serving(id: &str, serving: Option<String>) -> String {
+    let port = serving.and_then(|t| aio::serde_json::from_str::<aio::serde_json::Value>(&t).ok()?["port"].as_u64());
+    let at = port.map_or("its local door".to_string(), |p| format!("port {p} and its local door"));
+    format!(
+        "[aio] {id}: the window closed; the app goes on serving on {at} (keep_server) until asked to stop: ax stop {id}"
+    )
 }
 
 /// A server without a window: serve until asked to stop (SIGTERM, Ctrl-C,
@@ -645,6 +704,7 @@ fn gpu_choice(failed: bool, env: &dyn Fn(&str) -> Option<String>) -> (String, &'
 fn runtime_rows(
     rt: &Path,
     sandbox: &[String],
+    require: bool,
     gpu_failed: bool,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<aio::boot::Row> {
@@ -661,6 +721,7 @@ fn runtime_rows(
             row("gpu", g, from)
         },
         match (sandbox.is_empty(), set("AIORT_SANDBOX")) {
+            (true, _) if require => row("sandbox", "strict".into(), "Window { require_sandbox }"),
             (true, Some(_)) => row("sandbox", "strict".into(), "AIORT_SANDBOX"),
             (true, None) => row("sandbox", "on".into(), "default"),
             (false, _) => row("sandbox", "off: the runtime's sandbox helper can't be used".into(), "detected"),
@@ -768,7 +829,7 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
                 }
             }
             Some("picked") => page::picked(&m),
-            Some("opened") => guest::opened(&m),
+            Some("opened" | "done") => guest::opened(&m),
             Some("clicked" | "tray") => desktop::asks(&m, win.tray.as_ref()).into_iter().for_each(desktop::deliver),
             Some("window") => window_event(&m),
             Some("cdp" | "cdp-event") => inspect::hub().heard(&m),
@@ -794,8 +855,9 @@ pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, st
         }
         // `ax` stopping the app where there is no SIGTERM (Windows).
         if line.trim() == instance::QUIT {
-            _ = w.write_all(b"ok\n").await;
+            // Stop first: an "ok" says the stop is already under way.
             stop();
+            _ = w.write_all(b"ok\n").await;
             continue;
         }
         let Some(launch) = instance::read_launch(&line) else {
@@ -868,6 +930,19 @@ mod tests {
     fn pair() -> (aio::ipc::Stream, tokio::io::DuplexStream) {
         let (a, b) = tokio::io::duplex(1 << 16);
         (Box::new(a), b)
+    }
+
+    #[test]
+    fn a_kept_server_says_where_it_serves_and_how_to_stop_it() {
+        // aio electronClosedPlan with keepServer: "server still running <where>".
+        let said = kept_serving("notes", Some(r#"{"port":7420,"host":"127.0.0.1"}"#.into()));
+        assert_eq!(
+            said,
+            "[aio] notes: the window closed; the app goes on serving on port 7420 and its local door (keep_server) \
+             until asked to stop: ax stop notes"
+        );
+        assert!(kept_serving("notes", None).contains("serving on its local door (keep_server)"));
+        assert!(aio::paths::Ask::parse(&["--keep-server".into()]).unwrap().keep_server);
     }
 
     #[test]
@@ -962,7 +1037,7 @@ mod tests {
         assert_eq!(gpu_choice(true, &none).0, "software");
         let hw = |k: &str| (k == "AIORT_GPU").then(|| "hardware".to_string());
         assert_eq!(gpu_choice(true, &hw), ("hardware".into(), "AIORT_GPU"));
-        let rows = runtime_rows(Path::new("/rt"), &[], true, &none);
+        let rows = runtime_rows(Path::new("/rt"), &[], false, true, &none);
         assert!(rows.iter().any(|r| r.key == "gpu" && r.value == "software" && r.from.contains("failed here")));
     }
 
@@ -1243,7 +1318,7 @@ mod tests {
         assert_eq!(said[0], "W [vitals] render warning: an update took 25 ms to paint");
         // The runtime keeps the probe's lines, at their level.
         let js = include_str!("main.js");
-        assert!(js.contains("String(e.message).startsWith('[vitals] ')"));
+        assert!(js.contains("const word = { error: 'ERROR', warning: 'WARN ', debug: 'DEBUG' }[e.level] || 'INFO '"));
     }
 
     /// The race on a phone, replayed in Node: keys typed ahead of their echoes stay.

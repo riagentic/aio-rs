@@ -541,6 +541,10 @@ rest are fields:
 | `permissions` | what the page may also hold (`"clipboard-read"`…) |
 | `confirm_unload` | a page's `beforeunload` asks Leave / Stay |
 | `keys` | the window's own keys (reload, print) given to the page |
+| `require_sandbox` | no window rather than one without Chromium's sandbox: the app stops, saying why (aio's `requireSandbox`) |
+| `show_cap_ms` | the longest wait for the page's first paint (5000 unset); `Some(0)` shows it at once |
+| `keep_server` | the app serves on once the window closes, until asked to stop (aio's `keepServer`; `--keep-server` per launch) |
+| `splash_show` | the app's say over `[build.splash]` at run time: `Always`, `FirstStart` or `Never` (aio's `splash.show`) |
 
 - Notifications: `cx.tell(aio::tell::Tell::notify(..))` from a method
   ([effects](../state/effects.md)), or `aio_shell::desktop::notify(&Notice

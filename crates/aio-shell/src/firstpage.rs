@@ -50,6 +50,8 @@ struct Shared {
     title: String,
     /// The app's colours (`firstrun::Look`).
     colors: [[String; 4]; 2],
+    /// The splash's image over the page (a first start with `[build.splash]`), a PNG.
+    image: Option<Vec<u8>>,
     /// `127.0.0.1:<port>`: the only `Host` answered.
     host: String,
     /// The first path segment every request must have.
@@ -69,7 +71,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// The page (aio's `browserPage`) in the app's colours (`[light, dark]`, each
 /// background, text, bar, track): the title as text, never markup.
-pub(crate) fn html(title: &str, [l, d]: &[[String; 4]; 2]) -> String {
+pub(crate) fn html(title: &str, [l, d]: &[[String; 4]; 2], image: Option<&[u8]>) -> String {
     let title = title.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     // Colours reach CSS only as colours (`#hex`), never as markup.
     let c = |v: &String| if aio::config::hex_color(v) { v.clone() } else { "inherit".into() };
@@ -78,7 +80,7 @@ pub(crate) fn html(title: &str, [l, d]: &[[String; 4]; 2]) -> String {
 <style>body{{font:15px system-ui,sans-serif;max-width:480px;margin:15vh auto;padding:0 16px;color:{lt};background:{lb};accent-color:{la}}}
 @media (prefers-color-scheme:dark){{body{{color:{dt};background:{db};accent-color:{da}}}}}
 progress{{width:100%;height:22px}}button{{font:inherit;padding:6px 16px;margin-right:8px}}</style>
-<h2 id="h"></h2><p id="d"></p><progress id="p"></progress><p id="q" hidden><button id="r">Retry</button><button id="v" hidden></button><button id="x">Quit</button></p>
+{img}<h2 id="h"></h2><p id="d"></p><progress id="p"></progress><p id="q" hidden><button id="r">Retry</button><button id="v" hidden></button><button id="x">Quit</button></p>
 <script>
 const $=(i)=>document.getElementById(i);
 async function tick(){{let s;try{{s=await (await fetch('state')).json()}}catch{{$('d').textContent='The app has closed: you can close this tab.';return}}
@@ -90,6 +92,11 @@ $('r').onclick=()=>fetch('answer?retry',{{method:'POST'}});$('x').onclick=()=>fe
 $('v').onclick=()=>fetch('answer?previous',{{method:'POST'}});
 window.addEventListener('beforeunload',()=>navigator.sendBeacon('closed'));tick();
 </script>"#,
+        img = image.map_or(String::new(), |png| {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+            format!(r#"<img src="data:image/png;base64,{b64}" alt="" style="display:block;max-width:100%;margin:0 auto 8px">"#)
+        }),
         lb = c(&l[0]),
         lt = c(&l[1]),
         la = c(&l[2]),
@@ -132,7 +139,7 @@ fn answer(s: &Shared, line: &str, host: Option<&str>, origin: Option<&str>) -> (
             s.closed.store(true, Ordering::SeqCst);
             ("204 No Content", "text/plain", String::new())
         }
-        ("GET", "/") => ("200 OK", "text/html; charset=utf-8", html(&s.title, &s.colors)),
+        ("GET", "/") => ("200 OK", "text/html; charset=utf-8", html(&s.title, &s.colors, s.image.as_deref())),
         _ => ("404 Not Found", "text/plain", String::new()),
     }
 }
@@ -170,7 +177,13 @@ fn reply(s: &Shared, c: TcpStream) -> io::Result<()> {
 
 impl Page {
     /// Serve the page, in `colors`, and ask `opener` (`xdg-open`) to show it.
-    pub(crate) fn open(title: &str, heading: &str, opener: &Path, colors: &[[String; 4]; 2]) -> io::Result<Self> {
+    pub(crate) fn open(
+        title: &str,
+        heading: &str,
+        opener: &Path,
+        colors: &[[String; 4]; 2],
+        image: Option<&[u8]>,
+    ) -> io::Result<Self> {
         let l = TcpListener::bind("127.0.0.1:0")?;
         let host = l.local_addr()?.to_string();
         let token = aio::uuid_v4().simple().to_string();
@@ -179,6 +192,7 @@ impl Page {
         let shared = Arc::new(Shared {
             title: title.into(),
             colors: colors.clone(),
+            image: image.map(<[u8]>::to_vec),
             host,
             token,
             state: Mutex::new(state),
@@ -296,7 +310,7 @@ mod tests {
 
     #[test]
     fn the_page_shows_the_progress_and_its_tab_closing_is_a_cancel() {
-        let p = Page::open("Notes <beta>", "Getting Notes ready", Path::new("true"), &colors()).unwrap();
+        let p = Page::open("Notes <beta>", "Getting Notes ready", Path::new("true"), &colors(), None).unwrap();
         // Not asked for yet: lost only once its time is up.
         assert_eq!((p.lost(OPEN_WITHIN), p.lost(Duration::ZERO).is_some()), (None, true));
         let (status, page) = call(&p, "GET", "/");
@@ -330,7 +344,7 @@ mod tests {
 
     #[test]
     fn the_question_waits_for_a_click_and_nobody_seeing_it_is_a_quit() {
-        let p = Arc::new(Page::open("Notes", "Getting Notes ready", Path::new("true"), &colors()).unwrap());
+        let p = Arc::new(Page::open("Notes", "Getting Notes ready", Path::new("true"), &colors(), None).unwrap());
         call(&p, "GET", "/state");
         let ask = |previous: bool| {
             let p = p.clone();
@@ -352,7 +366,7 @@ mod tests {
         call(&p, "POST", "/answer?previous");
         assert_eq!(asked.join().unwrap(), Answer::Previous);
         // A browser that would not open: nobody sees the question, so Quit.
-        let refused = Page::open("Notes", "h", Path::new("false"), &colors()).unwrap();
+        let refused = Page::open("Notes", "h", Path::new("false"), &colors(), None).unwrap();
         assert!(refused.lost(OPEN_WITHIN).unwrap().starts_with("the browser could not be opened"));
         assert_eq!(refused.ask("Notes", "?", true, OPEN_WITHIN), Answer::Quit);
     }

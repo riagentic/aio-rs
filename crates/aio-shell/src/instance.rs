@@ -65,6 +65,8 @@ pub(crate) static SHOWN: std::sync::OnceLock<aio::config::Shown> = std::sync::On
 /// Its hue (`[ui] hue`, else its id's) and its splash: what is drawn
 /// outside its page (`splash`, `firstrun`).
 pub(crate) static LOOK: std::sync::OnceLock<(u16, Option<aio::config::Splash>)> = std::sync::OnceLock::new();
+/// `--keep-server`, as this launch asked it.
+pub(crate) static KEEP_SERVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The running instance's door for later launches.
 pub(crate) fn hand_addr(id: &str, data: &Path) -> io::Result<String> {
@@ -90,7 +92,7 @@ pub fn quit_at(id: &str, data: &Path) -> io::Result<()> {
 /// stop` asks here, the graceful way on every OS: Windows has no SIGTERM,
 /// and a kill would skip the last save and restart under the supervisor).
 /// No door is not fatal: SIGTERM still stops it where there is one.
-fn take_stops(id: &str, data: &Path) {
+pub(crate) fn take_stops(id: &str, data: &Path) {
     let _rt = aio::rt().enter();
     match hand_addr(id, data).and_then(|a| aio::ipc::Listener::bind(&a)) {
         Ok(l) => _ = aio::rt().spawn(crate::take_launches(l, Default::default(), aio::lifecycle::ask_stop)),
@@ -120,6 +122,9 @@ fn run_with(args: Vec<String>) -> io::Result<Start> {
 /// boot report), or hand `args` to the instance holding it. `version`: the
 /// app's, `env!("CARGO_PKG_VERSION")`.
 pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
+    // Windows: before anything starts a console program (the installer's
+    // `reg`, a dialog's PowerShell, the app's own), so none opens a window.
+    aio::process::hide_console();
     #[cfg(debug_assertions)]
     if let Some(args) = std::env::var(DEV_ARGS).ok().and_then(|a| serde_json::from_str::<Vec<String>>(&a).ok()) {
         return run_with(args);
@@ -169,6 +174,7 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
         return Ok(Start::Done);
     }
     let ask = aio::paths::Ask::parse(&args).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    _ = KEEP_SERVER.set(ask.keep_server);
     let plan = aio::paths::plan_app(cfg, &ask)?;
     // `<app> --quit`: the instance running on these dirs is asked to stop,
     // the graceful way (Windows has no SIGTERM: scripts, the smoke test).
@@ -183,6 +189,7 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
             _ = BUNDLE_ID.set(cfg.mac_bundle_id());
             _ = SHOWN.set(cfg.app.ui);
             _ = LOOK.set((cfg.hue(), cfg.build.splash.clone()));
+            _ = crate::firstrun::WORDS.set(crate::firstrun::words_of(cfg));
             if let crate::update::Next::Exit = crate::update::on_start(cfg, version, &d)? {
                 aio::health::stop();
                 aio::log::finish();

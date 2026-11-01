@@ -7,7 +7,7 @@
 //! window stands in for it, in the same colours (`firstrun`). The web's is
 //! laid over the page until the app has mounted ([`markup`], `web`);
 //! Android's is the starting window (`ax build --android`).
-use aio::config::Splash;
+use aio::config::{Align, Fit, Splash, TextPosition};
 
 /// The app's colours outside its page: `[light, dark]`, each `[background,
 /// text, bar, track]` (`aio::colors::identity`), the background `bg` when
@@ -46,27 +46,92 @@ pub const PAGE_JS: &str = "(() => {
   setTimeout(() => go(0), +s.dataset.max || 15000)
 })()";
 
+/// Is the splash up at every start, and does a first start's download draw
+/// it (pure)? `first-start`: only the download; `never`: neither (the
+/// download window is then the plain one).
+pub fn shown(show: aio::config::SplashShow) -> (bool, bool) {
+    use aio::config::SplashShow::*;
+    (show == Always, show != Never)
+}
+
+/// The image box's size in CSS pixels: `[build.splash] size`, else the
+/// image's own ([`size`]); `None`: the image is not a PNG.
+pub fn image_box(s: &Splash) -> Option<(u32, u32)> {
+    let own = size(s)?;
+    Some(s.size.map_or(own, |[w, h]| (w, h)))
+}
+
+/// The splash window's size: its image box, and the text strip below it
+/// when the text is there (`text_position = "below"`).
+pub fn window_size(s: &Splash) -> Option<(u32, u32)> {
+    let (w, h) = image_box(s)?;
+    let strip = if s.text.is_some() && s.text_position == TextPosition::Below { TEXT_STRIP } else { 0 };
+    Some((w, h + strip))
+}
+
+/// `base` (`[light, dark]`, each background, text, bar, track) with the
+/// splash's own `text_color`, `bar` and `track` (pure): the download
+/// window's colours while it draws the splash.
+pub fn look_colors(mut base: [[String; 4]; 2], s: &Splash) -> [[String; 4]; 2] {
+    for (i, pair) in [(1, &s.text_color), (2, &s.bar), (3, &s.track)] {
+        if let Some([l, d]) = pair {
+            base[0][i] = l.clone();
+            base[1][i] = d.clone();
+        }
+    }
+    base
+}
+
 /// The splash as `<style>` and a `#aio-splash` block, its image at `src`,
-/// light or dark as the OS is (`colors` as [`colors`] makes them; `title`
-/// fills the text's `{title}`). `over`: laid over a page (the web's), else
+/// light or dark as the OS is (`colors` as [`colors`] makes them, the
+/// splash's `text_color` over them; `title` fills the text's `{title}`),
+/// laid out by its look keys. `over`: laid over a page (the web's), else
 /// the whole window.
 pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, over: bool) -> String {
-    let (w, h) = size(s).unwrap_or((320, 200));
-    let [l, d] = colors;
+    let (w, h) = image_box(s).unwrap_or((320, 200));
+    let [l, d] = look_colors(colors.clone(), s);
     let text = s.text.as_deref().map(|t| format!("<p>{}</p>", esc(&t.replace("{title}", title)))).unwrap_or_default();
     let place = match over {
         true => "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center",
         false => "position:fixed;inset:0;display:flex;align-items:center;justify-content:center",
     };
+    let fit = match s.fit {
+        Fit::Contain => "contain",
+        Fit::Cover => "cover",
+    };
+    let align = match s.align {
+        Align::Left => "left",
+        Align::Center => "center",
+        Align::Right => "right",
+    };
+    let (side, bottom) = s.margin.map_or((24, 18), |m| (m, m));
+    let text_at = match s.text_position {
+        TextPosition::Below => format!("height:{TEXT_STRIP}px;line-height:{TEXT_STRIP}px;padding:0 {side}px"),
+        TextPosition::Over => format!("position:absolute;left:{side}px;right:{side}px;bottom:{bottom}px"),
+    };
+    // A rounded or bordered splash: the box itself, the window clear around it.
+    let frame = match (s.radius, s.border.as_deref().filter(|b| aio::config::hex_color(b))) {
+        (0, None) => String::new(),
+        (r, b) => format!(
+            "#aio-splash>div{{border-radius:{r}px;overflow:hidden;{}}}",
+            b.map_or(String::new(), |b| format!("border:1px solid {b};box-sizing:border-box"))
+        ),
+    };
     format!(
-        "<style>#aio-splash{{{place};flex-direction:column;background:{lb};color:{lt};\
-         font:13px system-ui,-apple-system,\"Segoe UI\",sans-serif;user-select:none;cursor:default}}\
-         #aio-splash img{{display:block;width:{w}px;height:{h}px;max-width:100%;object-fit:contain}}\
-         #aio-splash p{{margin:0;height:{TEXT_STRIP}px;line-height:{TEXT_STRIP}px;max-width:{w}px;\
-         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}\
-         @media (prefers-color-scheme: dark){{#aio-splash{{background:{db};color:{dt}}}}}</style>\
+        "<style>#aio-splash{{{place};background:{lb};color:{lt};\
+         font:{weight} {font}px {family}system-ui,-apple-system,\"Segoe UI\",sans-serif;user-select:none;cursor:default}}\
+         #aio-splash>div{{position:relative;display:flex;flex-direction:column;width:{w}px;max-width:100%;background:{lb}}}\
+         #aio-splash img{{display:block;width:{w}px;height:{h}px;max-width:100%;object-fit:{fit}}}\
+         #aio-splash p{{margin:0;{text_at};text-align:{align};box-sizing:border-box;\
+         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}{frame}\
+         @media (prefers-color-scheme: dark){{#aio-splash,#aio-splash>div{{background:{db};color:{dt}}}}}{clear}</style>\
          <div id=\"aio-splash\" role=\"img\" aria-label=\"{alt}\" data-min=\"{min}\" data-max=\"{max}\">\
-         <img src=\"{src}\" alt=\"\">{text}</div>",
+         <div><img src=\"{src}\" alt=\"\">{text}</div></div>",
+        // A desktop splash with a frame: the window is clear around its box.
+        clear = if !over && !frame.is_empty() { "html body #aio-splash{background:transparent}" } else { "" },
+        weight = if s.bold { "bold" } else { "normal" },
+        font = s.font_size.unwrap_or(13),
+        family = family(s.font.as_deref()),
         min = s.min_ms,
         max = s.max_ms,
         lb = l[0],
@@ -78,6 +143,18 @@ pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, ove
     )
 }
 
+/// `[build.splash] font` first in the CSS font list: a generic family as
+/// is, a named one quoted; a name with other than letters, digits, spaces
+/// and dashes is left out.
+fn family(font: Option<&str>) -> String {
+    match font.map(str::trim) {
+        Some(f @ ("serif" | "sans-serif" | "monospace" | "cursive" | "fantasy")) => format!("{f},"),
+        Some(f) if !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-') => {
+            format!("\"{f}\",")
+        }
+        _ => String::new(),
+    }
+}
 /// The desktop splash's page, its image beside it (`splash.png`).
 pub fn page(s: &Splash, title: &str, colors: &[[String; 4]; 2]) -> String {
     format!(
@@ -93,17 +170,20 @@ pub fn page(s: &Splash, title: &str, colors: &[[String; 4]; 2]) -> String {
 /// stays, its background by mode. None: no splash, or an image that is not
 /// a PNG (said).
 pub fn plan(s: &Splash, colors: &[[String; 4]; 2]) -> Option<aio::serde_json::Value> {
-    let Some((w, h)) = size(s) else {
+    let Some((w, h)) = window_size(s) else {
         eprintln!("[aio] the splash image is not a PNG: no splash");
         return None;
     };
-    let strip = if s.text.is_some() { TEXT_STRIP } else { 0 };
+    // Rounded or bordered: the window is clear, the page draws the box.
+    let clear = s.radius > 0 || s.border.is_some();
     Some(aio::serde_json::json!({
         "width": w,
-        "height": h + strip,
+        "height": h,
         "min": s.min_ms,
         "max": s.max_ms,
         "bg": [colors[0][0], colors[1][0]],
+        "clear": clear,
+        "fade": s.fade_ms.unwrap_or(100),
     }))
 }
 
@@ -146,6 +226,7 @@ mod tests {
             bold: false,
             fade_ms: None,
             png: png(640, 400),
+            ..Default::default()
         }
     }
 
@@ -179,8 +260,15 @@ mod tests {
         let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
         let dir = d.path().join("shell");
         crate::install(&dir, "splashed", &crate::Window { title: "Splashed", ..Default::default() }).unwrap();
+        // Rounded, faded: the clear window and the fade run in the real runtime too.
         // Its cap far off: a splash drawn later than it (a loaded machine) is never up.
-        let s = Splash { min_ms: 900, max_ms: 300_000, ..splash("assets/splash.png", Some("Starting {title}")) };
+        let s = Splash {
+            min_ms: 900,
+            max_ms: 300_000,
+            radius: 10,
+            fade_ms: Some(150),
+            ..splash("assets/splash.png", Some("Starting {title}"))
+        };
         // Built in: the Windows lane runs this binary away from the source tree.
         let s = Splash { png: include_bytes!("../../aio/tests/fixtures/splash.png"), ..s };
         install(&dir, Some(&s), "Splashed", &colors(210, None)).unwrap();
@@ -220,6 +308,77 @@ mod tests {
         _ = child.kill().await;
     }
 
+    /// aio's look keys: size, fit, text over or below, alignment, margin,
+    /// font, colours by mode, a rounded and bordered box on a clear window,
+    /// the fade.
+    #[test]
+    fn the_splash_takes_its_look_keys() {
+        use aio::config::{Align, Fit, TextPosition};
+        let c = colors(210, None);
+        let s = Splash {
+            size: Some([480, 300]),
+            fit: Fit::Cover,
+            text_position: TextPosition::Over,
+            align: Align::Left,
+            margin: Some(20),
+            radius: 12,
+            border: Some("#ccc".into()),
+            fade_ms: Some(250),
+            font_size: Some(15),
+            font: Some("Iosevka Term".into()),
+            bold: true,
+            text_color: Some(["#111".into(), "#eee".into()]),
+            ..splash("assets/splash.png", Some("Starting {title}"))
+        };
+        let html = page(&s, "Notes", &c);
+        for want in [
+            "width:480px;height:300px;max-width:100%;object-fit:cover",
+            "position:absolute;left:20px;right:20px;bottom:20px;text-align:left",
+            "font:bold 15px \"Iosevka Term\",system-ui",
+            &format!("background:{};color:#111", c[0][0]),
+            &format!("background:{};color:#eee", c[1][0]),
+            "#aio-splash>div{border-radius:12px;overflow:hidden;border:1px solid #ccc",
+            "html body #aio-splash{background:transparent}",
+        ] {
+            assert!(html.contains(want), "{want}: {html}");
+        }
+        let p = plan(&s, &c).unwrap();
+        // Text over the image: no strip under it.
+        assert_eq!((p["width"].as_u64(), p["height"].as_u64()), (Some(480), Some(300)));
+        assert_eq!((p["clear"].as_bool(), p["fade"].as_u64()), (Some(true), Some(250)));
+        // The defaults: as before the keys existed.
+        let plain = splash("assets/splash.png", Some("x"));
+        let html = page(&plain, "Notes", &c);
+        assert!(
+            html.contains("object-fit:contain")
+                && html.contains("text-align:center")
+                && html.contains("font:normal 13px")
+        );
+        assert!(!html.contains("border-radius") && !html.contains("transparent"));
+        // A generic family as is; a name that could leave the CSS, left out.
+        assert_eq!(
+            (family(Some("serif")), family(Some("a;}b")), family(None)),
+            ("serif,".into(), String::new(), String::new())
+        );
+        assert_eq!(window_size(&plain), Some((640, 400 + TEXT_STRIP)));
+        assert_eq!(
+            (plan(&plain, &c).unwrap()["clear"].as_bool(), plan(&plain, &c).unwrap()["fade"].as_u64()),
+            (Some(false), Some(100))
+        );
+        // The download window drawing the splash takes its bar and text colours.
+        let bar =
+            Splash { bar: Some(["#0f0".into(), "#0a0".into()]), track: Some(["#ddd".into(), "#333".into()]), ..plain };
+        let dl = look_colors(c.clone(), &bar);
+        assert_eq!(
+            (dl[0][2].as_str(), dl[1][2].as_str(), dl[1][3].as_str(), &dl[0][0]),
+            ("#0f0", "#0a0", "#333", &c[0][0])
+        );
+        let js = include_str!("main.js");
+        assert!(js.contains("transparent: !!SPLASH.clear") && js.contains("s.setOpacity(1 - i / steps)"));
+        use aio::config::SplashShow::*;
+        assert_eq!([shown(Always), shown(FirstStart), shown(Never)], [(true, true), (false, true), (false, false)]);
+    }
+
     #[test]
     fn the_splash_is_its_image_its_text_and_the_app_s_colours() {
         let c = colors(210, None);
@@ -229,7 +388,9 @@ mod tests {
         let html = page(&s, "Notes & Co", &c);
         assert!(html.contains("<p>Starting Notes &amp; Co &lt;beta&gt;</p>"), "{html}");
         assert!(html.contains(&format!("background:{};color:{}", c[0][0], c[0][1])));
-        assert!(html.contains(&format!("prefers-color-scheme: dark){{#aio-splash{{background:{}", c[1][0])));
+        assert!(
+            html.contains(&format!("prefers-color-scheme: dark){{#aio-splash,#aio-splash>div{{background:{}", c[1][0]))
+        );
         assert!(html.contains("default-src 'none'"), "the splash page runs nothing");
         let p = plan(&s, &c).unwrap();
         assert_eq!((p["width"].as_u64(), p["height"].as_u64()), (Some(640), Some(400 + u64::from(TEXT_STRIP))));

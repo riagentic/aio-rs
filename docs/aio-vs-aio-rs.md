@@ -229,12 +229,9 @@ beyond the aio-rs form.
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
 | Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
-| Desktop | custom window chrome (`ui.chrome`) | the OS title bar | ➖ | [desktop](clients/desktop.md#gaps) |
-| Desktop | app menus, a context-menu API | macOS's standard menus only | `kit::Menu`, the tray | [desktop](clients/desktop.md#gaps) |
-| Desktop | several app windows | one; child windows for other sites | ➖ | [desktop](clients/desktop.md#gaps) |
-| Desktop | `keepServer`, `--keep-server` | none | a server and a client | [desktop](clients/desktop.md#gaps) |
-| Desktop | `runCommand` with `stdin` | none | `std::process` in an effect | [desktop](clients/desktop.md#gaps) |
-| Desktop | `requireSandbox`, `allowLocalPeers`, `ignoreDebugEnv` | `AIORT_SANDBOX=1` | ➖ | [desktop](clients/desktop.md#gaps) |
+| Desktop | custom window chrome (`ui.chrome`) | the OS title bar; the window's verbs (`page::minimize`, `maximize`, `close`, `hide`, `show`) | the title bar on air | [desktop](clients/desktop.md#gaps) |
+| Desktop | the splash drawn by the OS before Electron at every start | only in a first start's download; Electron draws it otherwise | ➖ | [desktop](clients/desktop.md#gaps) |
+| Desktop | an AppImage menu entry with a private `TMPDIR` (aio's installer) | aio-rs installs no AppImage: the integrator's entry | ➖ | [desktop](clients/desktop.md#gaps) |
 | Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
 | Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |
 | Web | every `<webview>` method | `go` and events; desktop only | ➖ | [web](clients/web.md#gaps) |
