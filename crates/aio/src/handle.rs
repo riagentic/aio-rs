@@ -349,7 +349,7 @@ impl<T: Cell> Handle<T> {
     fn after_commit(&self, wake: bool) {
         // Before the state is shown: from then until its listeners are told.
         let telling = Telling::new();
-        let (started, done, changed) = {
+        let (started, done, changed, acting) = {
             // Another thread's commit may take these first: whoever takes
             // them sends and starts them before the next taker, so events
             // and queued effects keep commit order.
@@ -361,7 +361,8 @@ impl<T: Cell> Handle<T> {
                 *shown = (s.seq(), s.shared());
                 (s.take_effects(), s.take_committed(), changed)
             };
-            let reacting = !lock(&self.inner.reactions).is_empty();
+            let acting = crate::action_hooks();
+            let reacting = !lock(&self.inner.reactions).is_empty() || !acting.is_empty();
             let done: Vec<crate::Event> =
                 if reacting { events.iter().map(|(_, e)| e.clone()).collect() } else { vec![] };
             for e in events {
@@ -387,7 +388,7 @@ impl<T: Cell> Handle<T> {
                     },
                 }
             }
-            (started, done, changed)
+            (started, done, changed, acting)
         };
         // A call that changed nothing (a cursor already at the end) tells nobody.
         if changed {
@@ -397,6 +398,10 @@ impl<T: Cell> Handle<T> {
         }
         drop(telling);
         // After the order lock: a reaction may call back into this cell.
+        if !acting.is_empty() && !done.is_empty() {
+            let st = serde_json::to_value(&*self.state()).unwrap_or_default();
+            done.iter().for_each(|e| crate::acted(&acting, T::ID, e, &st));
+        }
         let rs = lock(&self.inner.reactions).clone();
         done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
         if started {

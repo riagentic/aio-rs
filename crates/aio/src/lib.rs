@@ -767,6 +767,32 @@ pub(crate) fn effect_started(cell: &str, key: &str) {
     }
 }
 
+pub(crate) type Acted = std::sync::Arc<dyn Fn(&str, &Event, &Value) + Send + Sync>;
+
+static ON_ACTION: std::sync::RwLock<Vec<Acted>> = std::sync::RwLock::new(Vec::new());
+
+/// Hear every committed call (aio's `onAction`), observe-only: its cell, its
+/// event (method, arguments, who made it, when) and the cell's state after
+/// it, as JSON. Hooks compose (the app's and each plugin's), each guarded:
+/// one that panics is logged, never takes the cell or the other hooks down.
+/// Never call a cell from it; react with [`Handle::listens_to`].
+pub fn on_action(f: impl Fn(&str, &Event, &Value) + Send + Sync + 'static) {
+    ON_ACTION.write().unwrap_or_else(|e| e.into_inner()).push(std::sync::Arc::new(f));
+}
+
+/// The `on_action` hooks, none when nobody listens (the state isn't copied then).
+pub(crate) fn action_hooks() -> Vec<Acted> {
+    ON_ACTION.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub(crate) fn acted(hooks: &[Acted], cell: &str, ev: &Event, state: &Value) {
+    for f in hooks {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(cell, ev, state))).is_err() {
+            eprintln!("[aio] an on_action hook panicked on {cell}.{}; the others still hear", ev.method);
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 type Hook = Box<dyn FnOnce() + Send>;
 
