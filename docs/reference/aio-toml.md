@@ -838,7 +838,7 @@ see [views](../ui/views.md) and the tables in
 | `schedules` | `#[every]`, `#[cron]`, `cx.every`, `cx.cron`, `cx.after` |
 | `isolate` | none (**gap**); `ax test <app> <filter>` runs some tests |
 | `beforeReduce` | `aio::before_call(f)` |
-| `onAction` | `Handle::listen(f)`, `on_change` |
+| `onAction` | `aio::on_action(f)`; one cell's: `Handle::listen(f)`, `on_change` |
 | `onEffect` | `aio::on_effect(f)` |
 | `onConnect`, `onDisconnect` | `Http::on_link(f)` (a `Presence`: online, user, address) |
 | `onStart` | `#[on_start]` per cell, or code in the launcher before `aio_shell::run` |

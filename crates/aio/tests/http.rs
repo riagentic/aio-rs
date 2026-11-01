@@ -567,6 +567,7 @@ async fn health_and_metrics_answer_this_machine_and_the_network_only_with_a_cred
     assert_eq!(v["appId"], "hooks");
     assert_eq!(v["pid"], std::process::id());
     assert!(["healthy", "degraded"].contains(&v["status"].as_str().unwrap()), "{v}");
+    assert!(v.get("exe").is_none() && v.get("cwd").is_none(), "where it runs is the file's only: {v}");
     let (s, head, body) = fetch(&addr, "GET", "/__aio/metrics", &[], "").await;
     assert_eq!((s, header(&head, "content-type")), (200, Some("text/plain; version=0.0.4")));
     for m in ["# TYPE aio_up gauge", "aio_uptime_seconds ", "aio_memory_rss_bytes ", "aio_clients_connected "] {

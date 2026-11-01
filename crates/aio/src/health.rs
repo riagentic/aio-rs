@@ -320,6 +320,12 @@ pub fn client_gone(link: u64) {
     CLIENTS.lock().unwrap_or_else(|e| e.into_inner()).remove(&link);
 }
 
+/// What the client on link `link` says is degraded, by name.
+pub(crate) fn client_parts(link: u64) -> Vec<(String, Episode)> {
+    let all = CLIENTS.lock().unwrap_or_else(|e| e.into_inner());
+    all.get(&link).map(|m| m.iter().map(|(n, e)| (n.clone(), e.clone())).collect()).unwrap_or_default()
+}
+
 /// What linked clients say is degraded, one row per name: how many say it,
 /// the most failures and the newest error.
 pub fn client_degraded() -> Vec<(String, usize, Episode)> {
@@ -613,8 +619,33 @@ pub fn now(id: &str) -> Value {
     let mem = memory().unwrap_or((0, 0));
     crate::budgets::measure_cells();
     let mut d = doc(&about, (started(), now_ms()), mem, memory_level(), &degraded(), &client_degraded(), &gauges());
-    d["cpuMs"] = cpu_ms().into();
+    live(&mut d);
     with_budgets(d, crate::budgets::report())
+}
+
+/// What `ax ui` reads of the running app on every OS: its CPU time
+/// (`cpuMs`) and the config it was started with (`config`).
+fn live(d: &mut Value) {
+    d["cpuMs"] = cpu_ms().into();
+    d["config"] = CONFIG.get().cloned().unwrap_or(Value::Null);
+}
+
+/// The live config `health.json` says ([`start`]'s).
+static CONFIG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+
+/// What of `cfg` `ax ui`'s runtime config card shows (pure): its title,
+/// how callers sign in, its mode.
+pub fn config_of(cfg: &crate::config::Config) -> Value {
+    let title = if cfg.app.name.is_empty() { &cfg.app.id } else { &cfg.app.name };
+    json!({
+        "title": title,
+        "auth": match (cfg.accounts.on, cfg.accounts.sessions) {
+            (true, _) => "accounts",
+            (false, true) => "sessions",
+            _ => "none",
+        },
+        "mode": serde_json::to_value(cfg.app.mode).unwrap_or(Value::Null),
+    })
 }
 
 /// `d` with the `[budgets]` verdict (`null`: none declared); a breach
@@ -628,9 +659,11 @@ pub fn with_budgets(mut d: Value, verdict: Value) -> Value {
 }
 
 /// Sample memory and write `data/health.json` every [`EVERY`], from now
-/// until the process ends (`stop` removes the file).
-pub fn start(data: &Path, limits: crate::config::Memory) {
+/// until the process ends (`stop` removes the file); `config`, what it
+/// says of the app's config ([`config_of`]).
+pub fn start(data: &Path, limits: crate::config::Memory, config: Value) {
     let Some(about) = crate::report::about() else { return };
+    _ = CONFIG.set(config);
     let file = data.join("health.json");
     *FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(file.clone());
     let started = started();
@@ -666,9 +699,12 @@ pub fn start(data: &Path, limits: crate::config::Memory) {
             *LEVEL.lock().unwrap_or_else(|e| e.into_inner()) = m;
             crate::budgets::measure_cells();
             let mut d = doc(&about, (started, now_ms()), (rss, total), m, &degraded(), &client_degraded(), &gauges());
-            d["cpuMs"] = cpu_ms().into();
+            live(&mut d);
             let (snap, loopback) = crate::vitals::snapshot();
             d["vitals"] = crate::vitals::doc(&snap, loopback, &crate::vitals::get());
+            // The file only (it is this user's, never served): what runs and where.
+            d["exe"] = std::env::current_exe().ok().map(|p| p.display().to_string()).into();
+            d["cwd"] = std::env::current_dir().ok().map(|p| p.display().to_string()).into();
             let d = with_budgets(d, crate::budgets::report());
             // Under the lock: never written after `stopping` or `stop`.
             let f = FILE.lock().unwrap_or_else(|e| e.into_inner());
@@ -871,6 +907,17 @@ mod tests {
     use super::*;
 
     const GB: u64 = 1 << 30;
+
+    /// `ax ui`'s runtime config card reads the live app, not its file.
+    #[test]
+    fn health_says_the_config_the_app_runs_with() {
+        let cfg = crate::config::Config::parse("[app]\nid = \"notes\"\nname = \"Notes\"\nmode = \"server\"\n[server]\nlisten = \"127.0.0.1:7420\"\n[accounts]\non = true\n").unwrap();
+        assert_eq!(config_of(&cfg), json!({ "title": "Notes", "auth": "accounts", "mode": "server" }));
+        let bare = crate::config::Config::parse("[app]\nid = \"notes\"").unwrap();
+        assert_eq!(config_of(&bare), json!({ "title": "notes", "auth": "none", "mode": "standalone" }));
+        let served = now("notes");
+        assert!(served["cpuMs"].is_u64() && served.get("exe").is_none(), "what runs where is the file's alone");
+    }
 
     #[test]
     fn the_memory_hook_hears_each_change_with_a_report_and_survives_its_own_panic() {

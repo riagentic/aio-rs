@@ -50,8 +50,10 @@ args go to the app (--instance <n>: a private copy; --fresh: on new data);
 --display auto|isolated|current|:N: with no terminal (an agent) the window
 goes on a nested display, not the person's, and opens no browser tab (auto);
 --size 390x844: the window at that size for this run (its saved one untouched);
---watch=false: build and run it once; --watch=src/ui,assets: rebuild
-on changes there only (dirs of the app);
+--watch=false (--no-watch): build and run it once; --watch=src/ui,assets:
+rebuild on changes there only (dirs of the app; with dx: rebuilds, no hot-patch);
+--detach: the session in the background (logs/dev.out; ax stop ends it);
+--verbose: the app's log at debug; --title <t>: the window's title this run;
 --cdp[=port]: its window opens the DevTools protocol on loopback (a free
 port, for other tools; ax shot, eval, surface and trigger need none);
 --tui: dx's own screen in a terminal (its keys), not ax's compact lines
@@ -173,9 +175,11 @@ key made for the run, until Ctrl-C)",
     v("config", "config <app>", "the app's aio.toml as its build bakes it in, defaults in"),
     v(
         "events",
-        "events <app> [cell] [--last N] [--diff] [--from file]",
+        "events <app> [cell] [--last N] [--diff] [--refused] [--from file]",
         "the newest events (default 20), oldest first; --diff: each with the
-changes it made (one cell); --from: of another store or backup file",
+changes it made (one cell); --from: of another store or backup file;
+--json of a running app: each with the time its method took (`ms`, this
+run's), --refused: its refused calls of late too",
     ),
     v(
         "timeline",
@@ -974,7 +978,9 @@ mod tests {
         assert!(all.lines().any(|l| l.starts_with("  ax data <app>") && l.ends_with("and what to back up")));
         let one = said("events --help");
         assert!(
-            one.starts_with("ax events <app> [cell] [--last N] [--diff] [--from file]\n\n  the newest events"),
+            one.starts_with(
+                "ax events <app> [cell] [--last N] [--diff] [--refused] [--from file]\n\n  the newest events"
+            ),
             "{one}"
         );
         assert!(one.contains("events takes --last"), "{one}");

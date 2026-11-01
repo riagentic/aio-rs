@@ -203,11 +203,19 @@ pub(crate) async fn send_ax(w: &mut Sock, v: &Value) -> std::result::Result<(), 
     send_text(w, v.to_string()).await
 }
 
-/// [`send_ax`] of a state or patch, counted for cell `meter`'s cost.
-pub(crate) async fn send_view(w: &mut Sock, meter: Option<&'static str>, v: &Value) -> std::result::Result<(), String> {
+/// [`send_ax`] of a state or patch, counted for cell `meter`'s cost and
+/// its link's bytes (`meter`: the cell and the link).
+pub(crate) async fn send_view(
+    w: &mut Sock,
+    meter: Option<(&'static str, u64)>,
+    v: &Value,
+) -> std::result::Result<(), String> {
     let text = v.to_string();
-    if let Some(cell) = meter {
+    if let Some((cell, link)) = meter {
         crate::cost::sent(cell, v, text.len());
+        if let Some(c) = lock(clients()).get_mut(&link) {
+            c.sent += text.len() as u64;
+        }
     }
     send_text(w, text).await
 }
@@ -351,6 +359,17 @@ pub(crate) struct Client {
     pub(crate) since: i64,
     /// Its last ping's round trip (ms), once one came back.
     pub(crate) rtt: Option<u64>,
+    /// The bytes of the states and patches it was sent.
+    pub(crate) sent: u64,
+    /// Changes it fell behind on, and got as one newer view (its backpressure).
+    pub(crate) behind: u64,
+}
+
+impl Client {
+    /// A link opened now, nothing sent yet.
+    pub(crate) fn new(cell: &'static str, user: String, wire: &'static str, from: String) -> Self {
+        Self { cell, user, wire, from, since: crate::store::now_ms(), rtt: None, sent: 0, behind: 0 }
+    }
 }
 
 /// Every open link of this process, by id.
@@ -450,7 +469,14 @@ pub(crate) fn listing(cell: &str) -> Value {
     ids.into_iter()
         .map(|id| {
             let c = &all[id];
-            json!({ "id": id, "user": c.user, "wire": c.wire, "from": c.from, "since": c.since, "rtt": c.rtt })
+            let degraded: Vec<Value> = crate::health::client_parts(*id)
+                .into_iter()
+                .map(|(name, e)| json!({ "name": name, "failures": e.failures, "since": e.since, "lastError": e.last_error }))
+                .collect();
+            json!({
+                "id": id, "user": c.user, "wire": c.wire, "from": c.from, "since": c.since, "rtt": c.rtt,
+                "sent": c.sent, "behind": c.behind, "degraded": degraded,
+            })
         })
         .collect()
 }
@@ -576,11 +602,11 @@ pub(crate) async fn session<T: Cell>(
     };
     let wire = if tool { "tool" } else { "aio-rs" };
     // What a client is sent counts for `ax cost`; a tool's look doesn't.
-    let meter = (!tool).then_some(T::ID);
     // A tool (`ax call`, the local door) is no client link.
     let _heard = Heard::new(on_link.filter(|_| !tool), &user, &from);
     let who = format!("{user} from {from}");
-    let listed = Listed::new(Client { cell: T::ID, user, wire, from, since: crate::store::now_ms(), rtt: None });
+    let listed = Listed::new(Client::new(T::ID, user, wire, from));
+    let meter = (!tool).then_some((T::ID, listed.0));
     pulse.link = (!tool).then(|| (listed.0, who.clone()));
     // What it sees goes by its role too, read again on every account change
     // (heard before the read: no change between them is missed).
@@ -655,6 +681,11 @@ pub(crate) async fn session<T: Cell>(
             ev = events.recv() => match ev {
                 // A slow client just gets the newest view.
                 Ok(_) | Err(RecvError::Lagged(_)) => {
+                    if let Err(RecvError::Lagged(n)) = &ev
+                        && let Some(c) = lock(clients()).get_mut(&listed.0)
+                    {
+                        c.behind += *n;
+                    }
                     if let Some(p) = view.advance(&h, &seer) {
                         pushes.push(&p, crate::store::now_ms());
                         send_view(&mut w, meter, &p).await?;
@@ -818,6 +849,23 @@ pub(crate) fn peer<T: Cell>(st: &T, ask: &Value) -> Value {
     json!({ "cell": T::ID, "v": T::VERSION, "methods": methods })
 }
 
+/// `ax events --json`'s live readings of `h` (an operator's `took`): the
+/// time each of events `seqs` took, when it ran in this run (`ms`, by seq),
+/// and the cell's refused calls of late (`refused`: `{at, call, ms,
+/// refused}`, never their arguments).
+fn took<T: Cell>(h: &Handle<T>, ask: &Value) -> Value {
+    let seqs: Vec<u64> = ask["seqs"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+    let ms: serde_json::Map<String, Value> = h.store(|s| {
+        seqs.iter().filter_map(|q| Some((q.to_string(), (s.took(*q)?.as_secs_f64() * 1000.0).into()))).collect()
+    });
+    let mine = format!("{}.", T::ID);
+    let refused: Vec<Value> = crate::report::timeline()
+        .into_iter()
+        .filter(|e| e["refused"].is_string() && e["call"].as_str().is_some_and(|c| c.starts_with(&mine)))
+        .collect();
+    json!({ "ms": ms, "refused": refused })
+}
+
 /// What a cell saves and sends, field by field (aio's trojan `fields`): saved
 /// at all (`persist`), its `#[transient]` fields (kept, never saved) and its
 /// `#[server]` ones (saved, never sent to a client) (pure).
@@ -827,7 +875,8 @@ pub(crate) fn fields<T: Cell>() -> Value {
 
 /// A local door's operator message `ask` on `h`, by `by`: `load` a state,
 /// the `shape` this version saves, the state right after an event (`at`, for diffs) or
-/// what the cell has sent its clients (`cost`), what a caller may call
+/// what the cell has sent its clients (`cost`), how long events of this
+/// run took and its refused calls (`took`), what a caller may call
 /// (`peer`), which fields are saved and which are sent (`fields`), write
 /// what is held now (`flush`), `drop` a stored cell nothing declares.
 /// The answer, or why not.
@@ -839,6 +888,7 @@ pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::resu
             Ok(h.snapshot().0.into())
         }
         Some("cost") => Ok(crate::cost::report(T::ID, ask["window"].as_i64())),
+        Some("took") => Ok(took(h, ask)),
         // `ax persist`: what is held (a coalesced run) written now.
         Some("flush") => h.store(|s| s.flush()).map(|_| json!(h.snapshot().0)).map_err(|e| e.why),
         // `ax persist --drop`: a stored cell no cell of this app declares.

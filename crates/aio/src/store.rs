@@ -18,6 +18,13 @@ const RESTORE: &str = "$restore";
 /// (`Cell::REDACTED`). No method's own arguments are an object (always a
 /// tuple or null), so none can pose as one.
 pub const REDACTED: &str = "$redacted";
+/// A transaction's logged arguments (`#[cell(transaction)]`): `{TX: <the
+/// state it left>, "args": <its call's arguments>}`, replayed as that state
+/// (without its `#[transient]` fields), as a `#[redact]` call's is.
+pub const TX: &str = "$tx";
+
+mod tx;
+pub(crate) use tx::On as TxOn;
 
 /// One committed call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -148,6 +155,8 @@ pub struct Store<T: Cell> {
     db: Connection,
     unsnapped: u32,
     effects: Vec<Box<dyn std::any::Any + Send>>,
+    /// Schedules due on another cell (`cx.on::<O>()`), fired by the handle.
+    foreign: Vec<Due>,
     /// Events committed since the runtime last took them, each with the
     /// cell's event before it (for synced copies to spot a gap).
     committed: Vec<(u64, Event)>,
@@ -186,6 +195,8 @@ pub struct Store<T: Cell> {
     /// stamped with that version (never lowered: rolling forward again
     /// migrates nothing twice).
     ahead: Option<(u32, Value)>,
+    /// `#[cell(transaction)]`: its async calls in flight.
+    txs: tx::Txs<T>,
 }
 
 /// A run of coalesced calls by one caller: each call (the last one is the
@@ -588,19 +599,23 @@ fn newest(db: &Connection, path: &Path, id: &str, version: u32, aio_file: bool) 
 /// one transaction: their history here and, in an aio file, their slices and
 /// stamps. Zeroed, not only unlinked (`secure_delete`, the WAL emptied), so
 /// a secret one held is gone from the file; never a cell still read here.
+/// A cell of `#[aio_cell]` fields may retire its own id: aio's slice of that
+/// name (an earlier build's, before it read aio's cells by field) and its
+/// stamp go, its own history here stays.
 fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
     if T::RETIRED.is_empty() {
         return Ok(());
     }
-    if let Some(c) = T::RETIRED.iter().find(|c| **c == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == **c)) {
+    let reads = |c: &str| (c == T::ID && T::AIO_CELLS.is_empty()) || T::AIO_CELLS.iter().any(|s| s.cell == c);
+    if let Some(c) = T::RETIRED.iter().find(|c| reads(c)) {
         return Err(Error(format!("{}: it retires cell {c}, which it still reads", T::ID)));
     }
-    erase(db, kv, T::RETIRED).map(|_| ())
+    erase(db, kv, T::RETIRED, T::ID).map(|_| ())
 }
 
 /// The history of `cells` gone from the file (and, in an aio file, their
-/// slices and stamps), zeroed; whether there was any.
-fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str]) -> Result<bool, Error> {
+/// slices and stamps), zeroed; whether there was any. `own`'s history is kept.
+fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &str) -> Result<bool, Error> {
     let secure: i64 = db.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
     db.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = db.unchecked_transaction()?;
@@ -609,7 +624,7 @@ fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str]) 
         None => false,
     };
     for t in TABLES {
-        for c in cells {
+        for c in cells.iter().filter(|c| **c != own) {
             gone |= tx.execute(&format!("DELETE FROM {t} WHERE cell = ?1"), [c])? > 0;
         }
     }
@@ -968,7 +983,8 @@ fn redacted<T: Cell>(method: &str, before: &T, after: &T) -> Result<Option<Value
 
 /// The state a `#[redact]` event's args keep (see [`REDACTED`]).
 fn made(args: &Value) -> Option<&Value> {
-    args.as_object()?.get(REDACTED)
+    let a = args.as_object()?;
+    a.get(REDACTED).or_else(|| a.get(TX))
 }
 
 /// A `#[redact]` event replayed: the state it left, with the `#[transient]`
@@ -1049,6 +1065,8 @@ impl<T: Cell> Store<T> {
             db,
             unsnapped: 0,
             effects: vec![],
+            foreign: vec![],
+            txs: Default::default(),
             committed: vec![],
             file: None,
             recovered: None,
@@ -1140,6 +1158,8 @@ impl<T: Cell> Store<T> {
             db,
             unsnapped: 0,
             effects: vec![],
+            foreign: vec![],
+            txs: Default::default(),
             committed: vec![],
             file,
             recovered,
@@ -1322,7 +1342,11 @@ impl<T: Cell> Store<T> {
         let now = self.now();
         let Some(op) = op else {
             let cx = Cx::live(now, by).with_role(role).with_reply(reply);
-            return self.apply_and_commit(by, method, args, cx, None, None).map(Some);
+            let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
+            if let Some(sweep) = tx::On::<T>::SWEEP {
+                sweep(self);
+            }
+            return out;
         };
         let op = crate::cx::Op::check(op, now).map_err(Rejected::new)?;
         let seen: bool = self
@@ -1337,7 +1361,11 @@ impl<T: Cell> Store<T> {
             return Ok(None);
         }
         let cx = Cx::synced(now, T::ID, by, &op).with_role(role).with_reply(reply);
-        self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some)
+        let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
+        if let Some(sweep) = tx::On::<T>::SWEEP {
+            sweep(self);
+        }
+        out
     }
 
     /// A failure of the cell not made by a call (an async method's awaited `?`).
@@ -1411,6 +1439,13 @@ impl<T: Cell> Store<T> {
         if self.panics.len() >= PANICS_MAX {
             crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", T::ID);
         }
+        let base = method.split_once('.').map_or(method, |(m, _)| m);
+        if let (Some(call), Some(cfg), Some(_)) = (tx::On::<T>::CALL, T::TRANSACTION, T::async_mode(base))
+            && let Some(reply) = cx.reply()
+        {
+            return call(self, cfg, by, method, args, cx, reply, op);
+        }
+        let cx = cx.with_live(self.state.clone());
         let t0 = std::time::Instant::now();
         let mut next = (*self.state).clone();
         let t1 = std::time::Instant::now();
@@ -1550,6 +1585,7 @@ impl<T: Cell> Store<T> {
         // call that set it, not found when it fires.
         for p in &asks.plans {
             if let Plan::Set { key, method: m, .. } = p
+                && !m.contains(':')
                 && !T::METHODS.contains(&m.as_str())
             {
                 crate::reject!("schedule `{key}`: {} has no method `{m}` (its methods: {})", T::ID, T::METHODS.join(", "));
@@ -1719,6 +1755,11 @@ impl<T: Cell> Store<T> {
             .flatten()
     }
 
+    /// The schedules due on other cells since the last take.
+    pub(crate) fn take_foreign(&mut self) -> Vec<Due> {
+        std::mem::take(&mut self.foreign)
+    }
+
     /// Effects asked for by committed calls, to be started by the runtime.
     pub(crate) fn take_effects(&mut self) -> Vec<Box<dyn std::any::Any + Send>> {
         std::mem::take(&mut self.effects)
@@ -1754,6 +1795,12 @@ impl<T: Cell> Store<T> {
         for d in &due {
             if skip(d) {
                 rearm::<T>(&self.db, d, now)?;
+                continue;
+            }
+            // Another cell's method (`cell:method`): its handle calls it.
+            if d.method.contains(':') {
+                rearm::<T>(&self.db, d, now)?;
+                self.foreign.push(d.clone());
                 continue;
             }
             let by = By::Schedule(d.key.clone());
@@ -1902,7 +1949,7 @@ impl<T: Cell> Store<T> {
         if cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell) {
             return Err(Error(format!("{}: it reads {cell}: a declared cell is never dropped", T::ID)));
         }
-        erase(&self.db, self.aio_kv.as_ref(), &[cell])
+        erase(&self.db, self.aio_kv.as_ref(), &[cell], "")
     }
 
     /// The state right after event `seq` (0: the start).
