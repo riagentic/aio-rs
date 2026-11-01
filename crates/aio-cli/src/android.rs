@@ -839,6 +839,7 @@ mod tests {
             max_ms: 9000,
             background: None,
             png: &[],
+            ..Default::default()
         };
         let colors = [
             ["#fff", "#111", "#00f", "#ccc"].map(String::from),

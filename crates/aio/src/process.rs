@@ -4,7 +4,8 @@
 //! lines while it runs (`\r` ends one too: a progress bar that rewrites
 //! its line); its stdin when asked for; paused and resumed as a group;
 //! killed when its [`Child`] is dropped (an aborted effect), and at the
-//! app's stop, named, if it still runs then.
+//! app's stop, named, if it still runs then. A program runs on the wall
+//! clock: its timeout too, also under `TestCells`' virtual one.
 //!
 //! On Windows no child opens a console window: each starts with
 //! `CREATE_NO_WINDOW`, and a release app (the `windows_subsystem` exe,
@@ -14,9 +15,10 @@
 //! ```no_run
 //! # async fn f() -> std::io::Result<()> {
 //! use aio::process::{Command, Stream};
-//! let mut job = Command::new("ffmpeg").args(["-i", "in.mov", "out.mp4"]).spawn(|line, from| {
-//!     if from == Stream::Stderr { eprintln!("{line}") }
-//! })?;
+//! let mut job = Command::new("ffmpeg")
+//!     .args(["-i", "in.mov", "out.mp4"])
+//!     .on_line(|line, from| if from == Stream::Stderr { eprintln!("{line}") })
+//!     .spawn()?;
 //! job.pause()?;
 //! job.resume()?;
 //! let status = job.wait().await?;
@@ -37,8 +39,10 @@ pub enum Stream {
     Stderr,
 }
 
+/// What hears each line.
+type OnLine = Box<dyn FnMut(&str, Stream) + Send>;
+
 /// A program to run: its arguments, folder, environment and stdin.
-#[derive(Clone, Debug)]
 pub struct Command {
     program: OsString,
     args: Vec<OsString>,
@@ -46,6 +50,7 @@ pub struct Command {
     env: Vec<(OsString, OsString)>,
     stdin: bool,
     grace: Duration,
+    on_line: Option<OnLine>,
 }
 
 /// What a program run to its end ([`Command::run`]) wrote, and how it ended.
@@ -71,6 +76,7 @@ impl Command {
             env: vec![],
             stdin: false,
             grace: Duration::from_secs(2),
+            on_line: None,
         }
     }
 
@@ -110,14 +116,19 @@ impl Command {
         self
     }
 
+    /// Each complete line of its output, as it comes (also with [`run`](Self::run)).
+    pub fn on_line(mut self, f: impl FnMut(&str, Stream) + Send + 'static) -> Self {
+        self.on_line = Some(Box::new(f));
+        self
+    }
+
     /// The program's name, as said in the log.
     fn name(&self) -> String {
         std::path::Path::new(&self.program).file_name().unwrap_or(&self.program).to_string_lossy().into_owned()
     }
 
-    /// Start it, each complete line of its output given to `on_line` as it
-    /// comes. Inside the app's runtime (an effect, a method's async part).
-    pub fn spawn(self, on_line: impl FnMut(&str, Stream) + Send + 'static) -> io::Result<Child> {
+    /// Start it. Inside the app's runtime (an effect, a method's async part).
+    pub fn spawn(self) -> io::Result<Child> {
         let mut cmd = tokio::process::Command::new(&self.program);
         crate::lifecycle::scrub(cmd.as_std_mut(), false);
         cmd.args(&self.args)
@@ -144,7 +155,7 @@ impl Command {
             _ = child.start_kill();
             io::Error::new(e.kind(), format!("{name}: no job object to hold its tree: {e}"))
         })?;
-        let on_line = Arc::new(Mutex::new(on_line));
+        let on_line = Arc::new(Mutex::new(self.on_line.unwrap_or_else(|| Box::new(|_, _| {}))));
         let read = |r: Option<Box<dyn AsyncRead + Unpin + Send>>, from| {
             let f = on_line.clone();
             r.map(|r| tokio::spawn(lines(r, move |l| (f.lock().unwrap_or_else(|e| e.into_inner()))(l, from))))
@@ -163,18 +174,33 @@ impl Command {
         Ok(Child { stdin: child.stdin.take(), child, readers: [out, err], group, status: None })
     }
 
-    /// Run it to its end and keep what it wrote; `timeout`: then the tree is
-    /// killed and what it wrote so far kept. A program that fails is an
+    /// Run it to its end and keep what it wrote (its lines also go to
+    /// [`on_line`](Self::on_line) as they come); `timeout`: then the tree
+    /// is killed and what it wrote so far kept. A program that fails is an
     /// [`Output`] (`status`), one that can't start an error.
-    pub async fn run(self, timeout: Option<Duration>) -> io::Result<Output> {
+    pub async fn run(mut self, timeout: Option<Duration>) -> io::Result<Output> {
         let got = Arc::new(Mutex::new([Vec::new(), Vec::new()]));
-        let keep = got.clone();
-        let mut child = self.spawn(move |l, from| keep.lock().unwrap_or_else(|e| e.into_inner())[from as usize].push(l.to_string()))?;
+        let (keep, mut theirs) = (got.clone(), self.on_line.take());
+        let mut child = self
+            .on_line(move |l, from| {
+                keep.lock().unwrap_or_else(|e| e.into_inner())[from as usize].push(l.to_string());
+                if let Some(f) = theirs.as_mut() {
+                    f(l, from);
+                }
+            })
+            .spawn()?;
         let (status, timed_out) = match timeout {
-            Some(t) => match tokio::time::timeout(t, child.wait()).await {
-                Ok(s) => (s?, false),
-                Err(_) => (child.kill().await?, true),
-            },
+            Some(t) => {
+                // The wall clock, off the runtime's (a test's runs virtual).
+                let (_alive, ended) = std::sync::mpsc::channel::<()>();
+                let mut clock = tokio::task::spawn_blocking(move || {
+                    ended.recv_timeout(t) == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                });
+                tokio::select! {
+                    s = child.wait() => (s?, false),
+                    Ok(true) = &mut clock => (child.kill().await?, true),
+                }
+            }
             None => (child.wait().await?, false),
         };
         let [out, err] = std::mem::take(&mut *got.lock().unwrap_or_else(|e| e.into_inner()));
@@ -245,6 +271,10 @@ impl Child {
         if let Some(s) = self.status {
             return Ok(s);
         }
+        // Held while it runs: a paused (test) clock never jumps past a
+        // program, which runs on the wall clock.
+        let (_running, ended) = std::sync::mpsc::channel::<()>();
+        let _held = tokio::task::spawn_blocking(move || _ = ended.recv());
         let s = self.child.wait().await?;
         self.stdin = None;
         for r in self.readers.iter_mut().filter_map(Option::take) {
@@ -521,7 +551,8 @@ mod tests {
         let mut c = Command::new("sh")
             .args(["-c", "read x; echo \"got $x\"; echo oops >&2; exit 3"])
             .stdin()
-            .spawn(move |l, from| keep.lock().unwrap().push((l.to_string(), from)))
+            .on_line(move |l, from| keep.lock().unwrap().push((l.to_string(), from)))
+            .spawn()
             .unwrap();
         c.write("milk\n").await.unwrap();
         let st = c.wait().await.unwrap();
@@ -578,7 +609,7 @@ mod tests {
         assert_eq!(out.stdout.trim(), "first");
         let ok = Command::new("cmd").args(["/C", "echo done"]).run(None).await.unwrap();
         assert_eq!((ok.status.success(), ok.stdout.trim()), (true, "done"));
-        let c = Command::new("cmd").args(["/C", "ping -n 30 127.0.0.1"]).spawn(|_, _| {}).unwrap();
+        let c = Command::new("cmd").args(["/C", "ping -n 30 127.0.0.1"]).spawn().unwrap();
         assert_eq!(c.pause().unwrap_err().kind(), io::ErrorKind::Unsupported);
         // Already in a console (the test's): nothing to adopt.
         hide_console();
@@ -587,7 +618,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_paused_tree_stops_and_is_still_killed() {
-        let mut c = Command::new("sh").args(["-c", "while :; do echo t; sleep 0.05; done"]).spawn(|_, _| {}).unwrap();
+        let mut c = Command::new("sh").args(["-c", "while :; do echo t; sleep 0.05; done"]).spawn().unwrap();
         c.pause().unwrap();
         assert!(c.paused());
         // A stopped process can't take a TERM: the kill resumes it first.
@@ -598,7 +629,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_apps_stop_kills_what_still_runs() {
-        let mut c = Command::new("sleep").arg("30").spawn(|_, _| {}).unwrap();
+        let mut c = Command::new("sleep").arg("30").spawn().unwrap();
         let pid = c.id();
         // Other tests' programs share the registry: this one's alone.
         let mine: Vec<_> = lock().iter().filter(|g| g.pid == pid).cloned().collect();

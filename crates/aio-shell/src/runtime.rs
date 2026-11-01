@@ -106,7 +106,7 @@ fn prefetch_in(root: &Path, version: &str, sha: Option<&str>, mirror: &str) -> i
     if !usable(std::env::consts::OS, &dir) {
         eprintln!("[aio] getting the Electron {version} runtime (once per machine)…");
         let colors = crate::splash::colors(aio::colors::hue("aio"), None);
-        let look = crate::firstrun::Look { colors: &colors, at: None };
+        let look = crate::firstrun::Look { colors: &colors, at: None, image: None };
         fetch(&dir, None, "", version, sha, mirror, &look).map_err(|(e, _)| e)?;
     }
     stamp(&dir);
@@ -374,17 +374,19 @@ fn mirror() -> String {
 /// `AIORT_ELECTRON_MIRROR` replaces
 /// `https://github.com/electron/electron/releases/download/`.
 pub fn ensure(title: &str) -> io::Result<PathBuf> {
-    ensure_as(title, &crate::splash::colors(aio::colors::hue("aio"), None), None, None)
+    ensure_as(title, &crate::splash::colors(aio::colors::hue("aio"), None), None, None, None)
 }
 
 /// [`ensure`] for an app: its windows in its `colors` (`splash::colors`),
 /// over its window's last place `at` (its middle, in Electron's points).
 /// With `back`, the failure question also offers the version an update
-/// replaced, and `back` starts it.
+/// replaced, and `back` starts it. `splash`: the app's splash image (its
+/// PNG and size on screen) drawn by the download window, above its bar.
 pub fn ensure_as(
     title: &str,
     colors: &[[String; 4]; 2],
     at: Option<(i32, i32)>,
+    splash: Option<(&[u8], (u32, u32))>,
     back: Option<&dyn Fn() -> io::Result<()>>,
 ) -> io::Result<PathBuf> {
     // Referenced, so no linker drops the marks from an app's binary.
@@ -410,7 +412,7 @@ pub fn ensure_as(
     }
     eprintln!("[aio] getting the Electron {VERSION} runtime (once per machine)…");
     let ui = crate::firstrun::here(std::env::consts::OS, &|k| std::env::var(k).ok(), &crate::firstrun::on_path);
-    let look = crate::firstrun::Look { colors, at };
+    let look = crate::firstrun::Look { colors, at, image: splash };
     let ask = |m: &str| ui.as_ref().map_or(crate::firstrun::Answer::Quit, |b| b.ask(title, m, back.is_some(), &look));
     let never = || Ok(());
     let sha = pinned_sha(VERSION);
@@ -575,7 +577,7 @@ fn fetch(
 ) -> Result<(), (io::Error, bool)> {
     use crate::firstrun::{Shown, download_detail};
     let mut win = ui.and_then(|b| {
-        b.progress(title, &format!("Getting {title} ready"), look)
+        b.progress(title, &crate::firstrun::heading(crate::firstrun::words(), title, version), look)
             .inspect_err(|e| eprintln!("[aio] runtime: no progress window ({e}): the log carries the progress"))
             .ok()
     });
@@ -602,7 +604,7 @@ fn fetch(
     install_into(dir, version, &slug, sha, mirror, &mut |got, total| match total {
         _ if got == 0 && total.is_none() => show(None, &format!("Looking for Electron {version}…")),
         Some(t) if got >= t => show(None, &format!("Verifying and unpacking Electron {version}…")),
-        _ => show(total.map(|t| got * 100 / t), &download_detail(version, got, total)),
+        _ => show(total.map(|t| got * 100 / t), &download_detail(crate::firstrun::words(), title, version, got, total)),
     })
 }
 

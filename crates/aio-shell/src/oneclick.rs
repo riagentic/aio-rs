@@ -68,15 +68,54 @@ pub fn with_runtime(exe: &[u8], zip: &[u8]) -> Vec<u8> {
     [exe, zip, &(zip.len() as u64).to_le_bytes(), RUNTIME_MARK].concat()
 }
 
-/// A download's exe and, if it carries one, its runtime's zip.
-pub fn split_runtime(file: &[u8]) -> (&[u8], Option<&[u8]>) {
-    let found = file.strip_suffix(RUNTIME_MARK).and_then(|rest| {
+/// A download's exe and, if it carries one, its runtime's zip. An
+/// Authenticode-signed download has its certificate table after the mark
+/// (the file padded to 8 bytes first): the mark is looked for before it too
+/// (aio's `sfx-trailer`), and the exe given back has no security directory
+/// (its signature covered the runtime, so it no longer holds).
+pub fn split_runtime(file: &[u8]) -> (std::borrow::Cow<'_, [u8]>, Option<&[u8]>) {
+    let at = |end: usize| {
+        let rest = file.get(..end)?.strip_suffix(RUNTIME_MARK)?;
         let (head, len) = rest.split_at_checked(rest.len().checked_sub(8)?)?;
         let len = usize::try_from(u64::from_le_bytes(len.try_into().ok()?)).ok()?;
         let (exe, zip) = head.split_at_checked(head.len().checked_sub(len)?)?;
-        Some((exe, Some(zip)))
-    });
-    found.unwrap_or((file, None))
+        Some((exe, zip))
+    };
+    if let Some((exe, zip)) = at(file.len()) {
+        return (exe.into(), Some(zip));
+    }
+    let signed =
+        security_dir(file).and_then(|(entry, cert)| Some((entry, (0..8).find_map(|pad| at(cert.checked_sub(pad)?))?)));
+    match signed {
+        Some((entry, (exe, zip))) => {
+            let mut exe = exe.to_vec();
+            if let Some(e) = exe.get_mut(entry..entry + 8) {
+                e.fill(0);
+            }
+            (exe.into(), Some(zip))
+        }
+        None => (file.into(), None),
+    }
+}
+
+/// A PE's security data directory (the one whose address is a file
+/// offset, the certificate table): where its entry is, and the table's
+/// offset; `None` unsigned or not a PE (pure).
+fn security_dir(pe: &[u8]) -> Option<(usize, usize)> {
+    let u32_at = |o: usize| Some(u32::from_le_bytes(pe.get(o..o + 4)?.try_into().ok()?) as usize);
+    let sig = u32_at(0x3c)?;
+    (u32_at(sig)? == 0x4550).then_some(())?; // "PE\0\0"
+    let opt = sig + 4 + 20;
+    let dirs = match u32_at(opt)? & 0xffff {
+        0x20b => opt + 112, // PE32+
+        0x10b => opt + 96,  // PE32
+        _ => return None,
+    };
+    const SECURITY: usize = 4;
+    (u32_at(dirs - 4)? > SECURITY).then_some(())?;
+    let entry = dirs + SECURITY * 8;
+    let (off, len) = (u32_at(entry)?, u32_at(entry + 4)?);
+    (off > 0 && len > 0 && off <= pe.len()).then_some((entry, off))
 }
 
 #[cfg(test)]
@@ -85,13 +124,52 @@ mod tests {
 
     #[test]
     fn an_offline_download_carries_its_runtime_after_the_exe() {
+        let split = |f: &[u8]| {
+            let (exe, zip) = split_runtime(f);
+            (exe.into_owned(), zip.map(<[u8]>::to_vec))
+        };
         let file = with_runtime(b"MZ exe", b"PK zip");
-        assert_eq!(split_runtime(&file), (b"MZ exe".as_slice(), Some(b"PK zip".as_slice())));
-        assert_eq!(split_runtime(b"MZ exe"), (b"MZ exe".as_slice(), None), "a download with none");
+        assert_eq!(split(&file), (b"MZ exe".to_vec(), Some(b"PK zip".to_vec())));
+        assert_eq!(split(b"MZ exe"), (b"MZ exe".to_vec(), None), "a download with none");
         // A mark whose length doesn't fit is no runtime.
         let bad = [b"MZ".as_slice(), &99u64.to_le_bytes(), RUNTIME_MARK].concat();
-        assert_eq!(split_runtime(&bad), (bad.as_slice(), None));
-        assert_eq!(split_runtime(RUNTIME_MARK), (RUNTIME_MARK, None));
+        assert_eq!(split(&bad), (bad.clone(), None));
+        assert_eq!(split(RUNTIME_MARK), (RUNTIME_MARK.to_vec(), None));
+    }
+
+    /// A PE32+ head whose security directory says a certificate table is at `cert`.
+    fn pe(cert: u32, len: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 0x200];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        let opt = 0x80 + 24;
+        b[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        b[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+        let entry = opt + 112 + 4 * 8;
+        b[entry..entry + 4].copy_from_slice(&cert.to_le_bytes());
+        b[entry + 4..entry + 8].copy_from_slice(&len.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn a_signed_download_still_carries_its_runtime() {
+        // aio sfx-trailer: Authenticode puts its table after the mark, padded to 8.
+        let unsigned = with_runtime(&pe(0, 0), b"PK zip");
+        let pad = (8 - unsigned.len() % 8) % 8;
+        let cert = (unsigned.len() + pad) as u32;
+        let mut signed = with_runtime(&pe(cert, 64), b"PK zip");
+        signed.extend(std::iter::repeat_n(0, pad));
+        signed.extend([7u8; 64]);
+        let (exe, zip) = split_runtime(&signed);
+        assert_eq!(zip, Some(b"PK zip".as_slice()));
+        assert_eq!(exe.len(), 0x200);
+        assert_eq!(security_dir(&exe), None, "the installed copy claims no signature it lost");
+        assert_eq!(&exe[..0x100], &pe(cert, 64)[..0x100]);
+        // Signed with no runtime: the file as it is.
+        let plain = [pe(0x200, 8), vec![1; 8]].concat();
+        assert_eq!(split_runtime(&plain), (plain.as_slice().into(), None));
+        assert_eq!(security_dir(b"MZ"), None, "not a PE");
     }
 
     #[test]

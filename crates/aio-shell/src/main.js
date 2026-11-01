@@ -35,7 +35,9 @@ function openSplash() {
   splash = new BrowserWindow({
     width: SPLASH.width, height: SPLASH.height, center: true, show: false, frame: false,
     resizable: false, movable: false, minimizable: false, maximizable: false, fullscreenable: false,
-    skipTaskbar: true, title: arg('title'), backgroundColor: nativeTheme.shouldUseDarkColors ? dark : light,
+    skipTaskbar: true, title: arg('title'),
+    // A rounded or bordered splash ([build.splash] radius, border): clear around its box.
+    transparent: !!SPLASH.clear, backgroundColor: SPLASH.clear ? '#00000000' : nativeTheme.shouldUseDarkColors ? dark : light,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
   })
   splash.webContents.on('will-navigate', (e) => e.preventDefault())
@@ -57,11 +59,23 @@ function endSplash(then) {
     if (splashAt) console.error(`[aio-shell] splash: gone after ${Date.now() - splashAt} ms${then ? ', the window shown' : ' (its cap)'}`)
     splashAt = 0
     // The last window closing would end the app before its own opened:
-    // hidden until the window shows.
-    if (BrowserWindow.getAllWindows().length > 1) {
-      splash.destroy()
-      splash = null
-    } else splash.hide()
+    // hidden until the window shows. Faded out first ([build.splash]
+    // fade_ms; where the OS fades windows: Windows, macOS).
+    const s = splash
+    const away = () => {
+      if (s.isDestroyed()) return
+      if (BrowserWindow.getAllWindows().length > 1) {
+        s.destroy()
+        if (splash === s) splash = null
+      } else s.hide()
+    }
+    const steps = Math.round((SPLASH.fade || 0) / 16)
+    if (steps < 2 || !s.isVisible()) return away()
+    let i = 0
+    const t = setInterval(() => {
+      if (s.isDestroyed() || ++i >= steps) { clearInterval(t); return away() }
+      s.setOpacity(1 - i / steps)
+    }, 16)
   }
   const left = splash && splashAt ? SPLASH.min - (Date.now() - splashAt) : 0
   if (left > 0) setTimeout(go, left)

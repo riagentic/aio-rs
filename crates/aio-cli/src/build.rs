@@ -47,11 +47,12 @@ pub fn app_of(pkg: &Pkg) -> Result<(App, aio::config::Config), String> {
 }
 
 /// The menu entry, written by `install.sh` with the installed binary's path.
-/// `StartupWMClass` is the app id: the window class aio gives it.
+/// `StartupWMClass` is the app id: the window class aio gives it. `%U`:
+/// the files and links "Open with" hands it, as its arguments.
 pub fn desktop_entry(app: &App, exec: &str) -> String {
     let icon = if app.icon.is_some() { format!("Icon={}\n", app.id) } else { String::new() };
     format!(
-        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\"\n{icon}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
+        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\" %U\n{icon}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
         app.name.replace('\n', " "),
         app.id
     )
@@ -1007,7 +1008,7 @@ mod tests {
     #[test]
     fn the_menu_entry_names_the_window_class() {
         let e = desktop_entry(&notes(true), "/h/.local/bin/notes");
-        assert!(e.contains("Exec=\"/h/.local/bin/notes\"\n") && e.contains("StartupWMClass=notes\n"), "{e}");
+        assert!(e.contains("Exec=\"/h/.local/bin/notes\" %U\n") && e.contains("StartupWMClass=notes\n"), "{e}");
         assert!(e.contains("Icon=notes\n"));
         assert!(!desktop_entry(&notes(false), "x").contains("Icon="));
         let arm = crate::platform::of("linux", "aarch64").unwrap();
