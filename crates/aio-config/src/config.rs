@@ -664,14 +664,6 @@ pub struct Splash {
     /// A 1 px border in this colour; unset: none.
     #[serde(default)]
     pub border: Option<String>,
-    /// Its fade out, ms; unset: 100.
-    #[serde(default)]
-    pub fade_ms: Option<u32>,
-    /// The text's size in px; unset: 13.
-    #[serde(default)]
-    pub font_size: Option<u32>,
-    #[serde(default)]
-    pub bold: bool,
     /// The text, `["#light", "#dark"]`; unset: the app's.
     #[serde(default)]
     pub text_color: Option<[String; 2]>,
@@ -680,6 +672,21 @@ pub struct Splash {
     pub bar: Option<[String; 2]>,
     #[serde(default)]
     pub track: Option<[String; 2]>,
+    /// The text's font family (Android: `sans-serif`, `serif`, `monospace`,
+    /// `sans-serif-condensed`…); unset: the system's.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// The text's size (px on the desktop, points on Android); unset: the
+    /// target's (13 px, 14 pt).
+    #[serde(default)]
+    pub font_size: Option<u16>,
+    /// The text in bold.
+    #[serde(default)]
+    pub bold: bool,
+    /// How long it fades out, in milliseconds; unset: the target's (100 on
+    /// the desktop, 200 on Android).
+    #[serde(default)]
+    pub fade_ms: Option<u64>,
     /// The PNG's bytes, put in by `aio::config!()` (empty elsewhere).
     #[serde(skip)]
     pub png: &'static [u8],
@@ -702,6 +709,7 @@ impl Default for Splash {
             margin: None,
             radius: 0,
             border: None,
+            font: None,
             fade_ms: None,
             font_size: None,
             bold: false,
@@ -818,6 +826,15 @@ pub struct AndroidBuild {
     /// Light or dark whatever the phone's setting; unset: the phone's.
     #[serde(default)]
     pub color_scheme: ColorScheme,
+    /// Also one APK for every CPU type (`…-android-universal.apk`), for
+    /// sharing as one file; the per-CPU APKs are still made.
+    #[serde(default)]
+    pub universal: bool,
+    /// An `android/` file that replaces a template file the template has
+    /// changed since, or a `MainActivity.java` without what the template's
+    /// does, fails the build instead of warning.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// `[build.android] color_scheme`.

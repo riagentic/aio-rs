@@ -79,7 +79,7 @@ version may break things.
   and the launch flag `--keep-server`.
 - `[build.splash]` look keys: `show`, `download_text`, `size`, `fit`,
   `text_position`, `align`, `margin`, `radius`, `border`, `fade_ms`,
-  `font_size`, `bold`, `text_color`, `bar`, `track`. A first start's
+  `font`, `font_size`, `bold`, `text_color`, `bar`, `track`. A first start's
   download draws the splash's image above its bar.
 - `[build.download_window]` (aio's `electron.downloadWindow`): heading,
   text, question, colours, Cancel.
@@ -99,6 +99,30 @@ version may break things.
   `.icns` built in Rust with every slot from 16 to 1024 px (no `sips`);
   `assets/icon.ico` used as is for the Windows exe; a warning for a
   non-square `icon.png`, an `icon.svg` or an `icon.png` outside `assets/`.
+- **A port installs over the aio APK, its data with it**: the version
+  code is aio's (`major·10⁸ + minor·10⁶ + patch`; every earlier aio-rs
+  code is lower, so 0.1 APKs update too), a port (`[app] port_of`) takes
+  aio's application id (`app.aio.<id>`) and, with no keystore named, the
+  machine's Android debug key aio signs with, and at its first start the
+  aio APK's state (`filesDir/aio-store`) becomes its `state.db` once
+  (`aio::compat::data::import_android`).
+- `ax test <app> --android`: the emulator lane.
+- `ax build --android --debug` (debuggable, `chrome://inspect`);
+  `armeabi-v7a` APKs; `[build.android] universal`; builds on macOS and
+  Windows (the NDK's host folder, `.cmd`/`.bat`/`.exe` tools, the OS's SDK
+  and JDK places); a JDK 17 to 23 found by its `javac`; any Gradle 8.9+
+  (9 too) writes a wrapper pinned to 8.14.3.
+- `ax install --android` takes the app's own APK exactly (`notes` never
+  installs `notes-pro`'s) and a universal one when there is none for the
+  CPU.
+- Android: the label is escaped as aapt reads it (`\`, a leading `?`/`@`), an
+  unfilled `{{TOKEN}}` is named, an own `MainActivity.java` is checked for
+  what the template's does, and `[build.android] strict` turns an overlay
+  warning into an error.
+- Android downloads: an http(s) link goes to Downloads (DownloadManager), a
+  `data:` one where the user picks. The phone's images show
+  (`aio::ui::local_file_url`). `[build.splash]` takes `font`, `font_size`,
+  `bold`, `fade_ms`.
 
 - `ax` covers aio's `am` verbs and flags ([ax](docs/clients/ax.md#coming-from-aios-am)):
   `--json` answers objects on every verb scripts branch on (`start`,
@@ -164,11 +188,25 @@ version may break things.
   `My Notes`, `my_notes` and `my-notes` are one colour.
 - `aio_shell::runtime::ensure_as` takes the icon of its windows and the
   splash image its download window draws.
+- **`ax dev --android` installs once**: a thin dev APK beside the real app
+  (`<id>.dev`, "(dev)") shows the page `ax dev --web` serves over
+  `adb reverse`, and each edit reloads it; `--native` (or an app without a
+  web build) rebuilds a debug dev copy for the device's CPU only. An
+  emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
+  ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
+  the app's log comes to the terminal (`[device]`).
 
 ### Fixed
 
 - A signed (Authenticode) one-click Windows download finds its runtime:
   the mark is looked for before the certificate table.
+- **Android: a crash at start on Android 10.** The activity's insets
+  called API-30 methods with minSdk 29; Android 10 now takes the older
+  path. A WebView too old for the page (Android 10's stock 74) says so on
+  the screen instead of a blank page.
+- **The dev page's scripts ran into each other** (`ax dev --web`,
+  and so `--android`): the splash script's `(() => …)()` called the live
+  reload's on its result, an error on every dev page.
 - `aio::testing::TestBrowser` starts one browser at a time per process
   (started together, eight took 22 s each on an 8-core Windows, one 0.5 s)
   and reads its DevTools port only once `DevToolsActivePort` is whole.

@@ -574,8 +574,9 @@ loaded, on the desktop, the web and Android (aio's `build.splash`).
 | `margin` | px | 24 at the sides, 18 at the bottom | The text's gap to the edges. |
 | `radius` | px | `0` | The box's corner radius (the window is clear around it). |
 | `border` | `#rgb` / `#rrggbb` | none | A 1 px border. |
-| `fade_ms` | ms | `100` | Its fade out (where the OS fades windows: Windows, macOS). |
-| `font_size`, `bold` | px, bool | `13`, `false` | The text's size and weight. |
+| `fade_ms` | ms | `100`; Android `200` | Its fade out (on the desktop where the OS fades windows: Windows, macOS). |
+| `font` | family | the system's | The text's font: a generic family (`serif`, `sans-serif`, `monospace`; Android also `sans-serif-condensed`…) or a font's name. |
+| `font_size`, `bold` | px (Android: points), bool | `13` (Android `14`), `false` | The text's size and weight. |
 | `text_color` | `["#light", "#dark"]` | the app's | The text's colour. |
 | `bar`, `track` | `["#light", "#dark"]` | the app's | The download bar's fill and ground, while the splash draws a first start's download. |
 

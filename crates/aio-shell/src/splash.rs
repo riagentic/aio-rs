@@ -119,7 +119,7 @@ pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, ove
     };
     format!(
         "<style>#aio-splash{{{place};background:{lb};color:{lt};\
-         font:{weight} {font}px system-ui,-apple-system,\"Segoe UI\",sans-serif;user-select:none;cursor:default}}\
+         font:{weight} {font}px {family}system-ui,-apple-system,\"Segoe UI\",sans-serif;user-select:none;cursor:default}}\
          #aio-splash>div{{position:relative;display:flex;flex-direction:column;width:{w}px;max-width:100%;background:{lb}}}\
          #aio-splash img{{display:block;width:{w}px;height:{h}px;max-width:100%;object-fit:{fit}}}\
          #aio-splash p{{margin:0;{text_at};text-align:{align};box-sizing:border-box;\
@@ -131,6 +131,7 @@ pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, ove
         clear = if !over && !frame.is_empty() { "html body #aio-splash{background:transparent}" } else { "" },
         weight = if s.bold { "bold" } else { "normal" },
         font = s.font_size.unwrap_or(13),
+        family = family(s.font.as_deref()),
         min = s.min_ms,
         max = s.max_ms,
         lb = l[0],
@@ -142,6 +143,18 @@ pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, ove
     )
 }
 
+/// `[build.splash] font` first in the CSS font list: a generic family as
+/// is, a named one quoted; a name with other than letters, digits, spaces
+/// and dashes is left out.
+fn family(font: Option<&str>) -> String {
+    match font.map(str::trim) {
+        Some(f @ ("serif" | "sans-serif" | "monospace" | "cursive" | "fantasy")) => format!("{f},"),
+        Some(f) if !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-') => {
+            format!("\"{f}\",")
+        }
+        _ => String::new(),
+    }
+}
 /// The desktop splash's page, its image beside it (`splash.png`).
 pub fn page(s: &Splash, title: &str, colors: &[[String; 4]; 2]) -> String {
     format!(
@@ -208,6 +221,10 @@ mod tests {
             min_ms: 400,
             max_ms: 15_000,
             background: None,
+            font: None,
+            font_size: None,
+            bold: false,
+            fade_ms: None,
             png: png(640, 400),
             ..Default::default()
         }
@@ -308,6 +325,7 @@ mod tests {
             border: Some("#ccc".into()),
             fade_ms: Some(250),
             font_size: Some(15),
+            font: Some("Iosevka Term".into()),
             bold: true,
             text_color: Some(["#111".into(), "#eee".into()]),
             ..splash("assets/splash.png", Some("Starting {title}"))
@@ -316,7 +334,7 @@ mod tests {
         for want in [
             "width:480px;height:300px;max-width:100%;object-fit:cover",
             "position:absolute;left:20px;right:20px;bottom:20px;text-align:left",
-            "font:bold 15px system-ui",
+            "font:bold 15px \"Iosevka Term\",system-ui",
             &format!("background:{};color:#111", c[0][0]),
             &format!("background:{};color:#eee", c[1][0]),
             "#aio-splash>div{border-radius:12px;overflow:hidden;border:1px solid #ccc",
@@ -337,6 +355,11 @@ mod tests {
                 && html.contains("font:normal 13px")
         );
         assert!(!html.contains("border-radius") && !html.contains("transparent"));
+        // A generic family as is; a name that could leave the CSS, left out.
+        assert_eq!(
+            (family(Some("serif")), family(Some("a;}b")), family(None)),
+            ("serif,".into(), String::new(), String::new())
+        );
         assert_eq!(window_size(&plain), Some((640, 400 + TEXT_STRIP)));
         assert_eq!(
             (plan(&plain, &c).unwrap()["clear"].as_bool(), plan(&plain, &c).unwrap()["fade"].as_u64()),

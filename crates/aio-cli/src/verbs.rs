@@ -53,8 +53,10 @@ on changes there only (dirs of the app);
 port, for other tools; ax shot, eval, surface and trigger need none);
 --tui: dx's own screen in a terminal (its keys), not ax's compact lines
 (dx's whole output: logs/dev.log);
---android [--device serial]: build, install and start it on the attached
-phone or emulator, again on every saved change;
+--android [--device serial] [--native]: on the attached emulator or phone
+(ANDROID_SERIAL; none: AIO_AVD booted): its web build in a dev APK installed
+once beside the app, each edit reloading it (--native, or no web build: the
+app itself for that CPU, again on every saved change); its log in the terminal;
 --web: its web build (debug) served on loopback, its tabs live: a saved
 stylesheet shows at once, any other edit builds anew and the tabs reload",
     ),
@@ -93,7 +95,7 @@ runtime), a clean stop, nothing left running (as ax build --smoke does)",
     ),
     v(
         "build",
-        "build <app> [--targets a,b] [--platforms a,b] [--list] [--sizes] [--smoke] [--deb] [--appimage] [--android] [--windows] [--web] [--dev]",
+        "build <app> [--targets a,b] [--platforms a,b] [--list] [--sizes] [--smoke] [--deb] [--appimage] [--android] [--debug] [--windows] [--web] [--dev]",
         "the app's [build] targets (aio.toml), else an installable app for
 this OS: dist/<id>-<version>-<os>-<arch>.* (Linux .tar.gz, macOS
 zipped .app, Windows one-click .exe + zip; --windows: cross-built from Linux);
@@ -108,7 +110,8 @@ crates take its space (over budget: always); size it so, not with a plain
 and AppImage headless, stop it, check its log; a Windows bundle on
 Windows (AIO_WINDOWS_SSH: one over ssh), stopped with <app> --quit;
 --deb: a Debian package ([app] maintainer); --appimage: one portable file;
---android: signed APKs instead (the app's lib calls android_app!);
+--android: signed APKs instead (the app's lib calls android_app!; --debug:
+debug APKs, the page in chrome://inspect);
 --web: an installable web app (PWA) in dist/<id>-web/ instead: the app's
 lib for wasm32, a manifest, Apple tags, icons and an offline service worker
 (--web --dev: a debug build, its page showing its errors on it)",
@@ -135,7 +138,7 @@ its APK installed once booted, --apk: which); --status, --stop, --reset
 install.sh run, nothing left aside; macOS, Windows: how to); --android:
 the newest APK for the attached phone's CPU onto it, then
 start it; refuses an APK older than the sources (--build: build first);
---emulator: an emulator may be the device",
+--emulator: an emulator may be the device; --device (else ANDROID_SERIAL): that one",
     ),
     v(
         "lint",
@@ -145,10 +148,12 @@ a11y, cell ids, plus clippy (exit 1: errors; `ax lint --help`)",
     ),
     v(
         "test",
-        "test <app> [filter] [--video out] [--pace ms]",
+        "test <app> [filter] [--video out] [--pace ms] [--android] [--device serial]",
         "the app's tests (cargo test); --video records each UI test, no test
 changed: out a folder (a video per test) or one .mp4/.webm, a frame per
-step, each --pace ms (800) on screen",
+step, each --pace ms (800) on screen; --android: the emulator lane instead (its
+APK for the device built, installed, started: passed once its window is ready
+and it still runs; AIO_AVD booted when none is attached, or --device)",
     ),
     v("apps", "apps", "the aio-rs apps and private instances on this machine, and which run"),
     v(

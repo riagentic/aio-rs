@@ -259,9 +259,11 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
     let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
     let (mut to_view, mut from_view) = StreamExt::split::<bytes::Bytes>(Framed::new(ours, codec));
     let b64 = base64::engine::general_purpose::STANDARD;
-    // Carry frames both ways until `expr` is true.
+    // Carry frames both ways until `expr` is true (by time: a busy machine
+    // takes longer per round).
     let mut until = async |expr: &str| {
-        for _ in 0..400 {
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < by {
             while let Ok(Some(Ok(f))) = tokio::time::timeout(Duration::from_millis(5), from_view.next()).await {
                 eval(&mut ws, &mut id, &format!("__aioIn({})", json!(b64.encode(&f)))).await;
             }
