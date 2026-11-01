@@ -12,7 +12,7 @@ which of aio's features aio-rs has. Moving an app over:
 | | aio | aio-rs |
 |---|---|---|
 | Language, runtime | TypeScript on Deno | Rust, native code |
-| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air; the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
+| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade and `TestUi`, not the kit yet, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
 | State model | cells, methods on an Immer draft, selectors | cells, methods on `&mut self` (a copy), `#[derived]`; every call an event in the store's log |
 | Data compatibility | `state.db` | the same `state.db`, both ways: a port opens aio's file as it is, and aio opens it after ([below](#data-the-same-statedb)) |
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
@@ -439,7 +439,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath until air) | 🔄 |
+| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath; air, feature `air`, for the facade and `TestUi`) | 🔄 |
 | Field-level reads | one signal per cell | `part(\|c\| &c.field)` | 🔄 |
 | Hooks | AIR and React names | `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`: AIR's names, no dependency arrays | 🔄 |
 | Server rendering, hydration | yes | ❌ (`ax preview --html`) | ❌ |

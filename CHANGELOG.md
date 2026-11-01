@@ -19,6 +19,30 @@ version may break things.
   `bar_position`, `bar_radius`. `Window { splash_show }` may take 50 ms;
   one that panics or takes longer leaves the build's `show`, said
   ([desktop](docs/clients/desktop.md#the-splash)).
+- **air, aio-rs's own renderer, phase 1** (docs/design/air.md): crates
+  `aio-rs-air` and `aio-rs-air-macro`, and feature `air` of aio-rs, where
+  `aio::ui::prelude` and `TestUi` run on air with no Dioxus in the build
+  (50 crates, against `kit`'s 116). A view's body runs once; each hole
+  of `rsx!` follows exactly the signals it read. Views are built where
+  they are placed (their context and boundaries), components are holes
+  whose hooks keep their state if the body waits for a resource, plus
+  keyed lists, context, `ErrorBoundary`, `Suspense`, resources and tasks,
+  typed W3C-shaped event payloads that bubble through the handlers
+  (`stop_propagation` works), page scripts (`eval`), `onmounted` and
+  globals per app instance. Dioxus stays the default renderer; with
+  `kit` on too the facade is Dioxus's (the kit moves in step 2).
+  Measured again on the spike's bench (`crates/air-bench`, now in the
+  workspace): a one-line edit rebuilds in 0.54x Dioxus's time, a clean
+  build in 0.30x with 8 crates instead of 77, a held key over 10 000 rows
+  answers in 0.32x.
+- air's gates, each shown failing on a planted bug first: views removed
+  (or replaced by an error boundary in the same pass) leave no node,
+  effect, subscription, cleanup, handler, task, page script or page node;
+  misuse fails in release builds too (a hook outside a view's body, a
+  write while a hole or a memo computes, an effect loop, a signal used
+  after its view, a view placed twice, two rows with one key, a missing
+  `key:` or an `if let` in `rsx!` at compile time); a renderer fault
+  planted in air fails `TestUi` in the Rust page and the Electron page.
 - **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
   makes each async method read the state as it was when it was called
   and commit what it wrote, ran and scheduled at its end as one event, or
@@ -217,6 +241,9 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
+  `aio::ui::chord`, renderer-free, so `TestUi` needs no kit; `aio::kit`
+  re-exports them as before.
 - **Breaking: `ax pin` and `ax pair` named as aio names them.** The
   pairing code is `ax pair <app> [--plain]` (aio's `am pair`), no longer
   `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
