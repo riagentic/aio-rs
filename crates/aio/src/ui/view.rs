@@ -16,7 +16,8 @@
 
 use __rsx::*;
 use dioxus::prelude as dx;
-use dx::{ReadableExt as _, WritableExt as _};
+use dioxus::prelude::{Key, KeyboardEvent, Modifiers};
+use dx::{Readable as _, ReadableExt as _, Writable as _, WritableExt as _};
 use std::ops::{Deref, DerefMut};
 
 pub use dioxus::dioxus_core::{Task, spawn, spawn_forever};
@@ -61,6 +62,13 @@ impl<T: 'static> Signal<T> {
     #[track_caller]
     pub fn new(v: T) -> Self {
         Self(dx::Signal::new(v))
+    }
+
+    /// Is its value still there? A signal ends with the view that made it;
+    /// work that may outlive the view (a task, a reply) asks before it
+    /// writes. Any other read or write of an ended signal panics.
+    pub fn alive(&self) -> bool {
+        !matches!(self.0.try_peek(), Err(dx::BorrowError::Dropped(_)))
     }
 
     /// The value, cloned; subscribes.
@@ -120,6 +128,18 @@ impl<T: 'static> Signal<T> {
     pub fn write(&self) -> impl DerefMut<Target = T> + use<T> {
         self.0.write_unchecked()
     }
+
+    /// [`write`](Self::write), or `None` once the signal ended (or while it
+    /// is borrowed): for work that may outlive its view.
+    pub fn try_write(&self) -> Option<impl DerefMut<Target = T> + use<T>> {
+        self.0.try_write_unchecked().ok()
+    }
+
+    /// [`read_untracked`](Self::read_untracked), or `None` once the signal
+    /// ended (or while it is written).
+    pub fn try_read_untracked(&self) -> Option<impl Deref<Target = T> + use<T>> {
+        self.0.try_peek_unchecked().ok()
+    }
 }
 
 impl Signal<bool> {
@@ -137,8 +157,9 @@ impl<T: std::fmt::Display + 'static> std::fmt::Display for Signal<T> {
 }
 
 impl<T: std::fmt::Debug + 'static> std::fmt::Debug for Signal<T> {
+    /// Subscribes too: `"{pick:?}"` in a view follows `pick`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.with_untracked(|v| v.fmt(f))
+        self.with(|v| v.fmt(f))
     }
 }
 
@@ -226,7 +247,7 @@ impl<T: PartialEq + std::fmt::Display + 'static> std::fmt::Display for Memo<T> {
 
 impl<T: PartialEq + std::fmt::Debug + 'static> std::fmt::Debug for Memo<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.with_untracked(|v| v.fmt(f))
+        self.with(|v| v.fmt(f))
     }
 }
 
@@ -298,10 +319,14 @@ pub fn try_context<T: Clone + 'static>() -> Option<T> {
 }
 
 /// Work for the view's life: `f()`'s future starts when the view is drawn
-/// and is cancelled when it goes away. (In a handler, [`spawn`].)
+/// and is cancelled when it goes away; what it ends with is dropped. (In a
+/// handler, [`spawn`].)
 #[track_caller]
-pub fn task<F: std::future::Future<Output = ()> + 'static>(f: impl FnMut() -> F + 'static) {
-    dx::use_future(f);
+pub fn task<F: std::future::Future + 'static>(mut f: impl FnMut() -> F + 'static) {
+    dx::use_future(move || {
+        let run = f();
+        async move { _ = run.await }
+    });
 }
 
 /// A value loaded by a future: `f()` runs when the view is drawn and again
@@ -433,6 +458,55 @@ impl<T: std::fmt::Display + 'static> std::fmt::Display for Global<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.signal().fmt(f)
     }
+}
+
+/// A [`memo`] in a `static`, one per app instance: `static N: GlobalMemo<usize> = GlobalMemo::new(|| rows().len());`.
+pub struct GlobalMemo<T: PartialEq + 'static>(dx::GlobalMemo<T>);
+
+impl<T: PartialEq + 'static> GlobalMemo<T> {
+    pub const fn new(f: fn() -> T) -> Self {
+        Self(dx::Memo::global(f))
+    }
+
+    fn memo(&self) -> Memo<T> {
+        Memo(self.0.memo())
+    }
+
+    pub fn get(&self) -> T
+    where
+        T: Clone,
+    {
+        self.memo().get()
+    }
+
+    pub fn get_untracked(&self) -> T
+    where
+        T: Clone,
+    {
+        self.memo().get_untracked()
+    }
+
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        self.memo().with(f)
+    }
+
+    pub fn read(&self) -> impl Deref<Target = T> + use<T> {
+        self.memo().read()
+    }
+}
+
+/// Are the app's views running on this thread (in a view, a handler, an
+/// effect or a task of theirs)? Not in a cell method or a test's own code.
+pub fn in_views() -> bool {
+    dioxus_core::Runtime::try_current().is_some()
+}
+
+/// A key press as the views get one, for a key heard elsewhere (a guest
+/// page, the host) and handed to the views' handlers.
+pub fn key_event(key: Key, modifiers: Modifiers, repeat: bool) -> KeyboardEvent {
+    use dioxus::html::{Code, KeyboardData, Location, SerializedKeyboardData};
+    let data = SerializedKeyboardData::new(key, Code::Unidentified, Location::Standard, repeat, modifiers, false);
+    dioxus_core::Event::new(std::rc::Rc::new(KeyboardData::new(data)), true)
 }
 
 /// A script run in the page (`aio.send(v)` hands a value to the view,

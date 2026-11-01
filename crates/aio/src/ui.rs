@@ -30,9 +30,9 @@ pub mod prelude {
     #[doc(hidden)]
     pub use super::view::__rsx::*;
     pub use super::view::{
-        Attribute, Callback, ErrorBoundary, Eval, EvalError, EventHandler, Fragment, Global, Memo, Props, Resource,
-        Signal, Suspense, Task, View, ViewError, callback, component, context, effect, eval, memo, on_cleanup, once,
-        provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task, try_context, watch,
+        Attribute, Callback, ErrorBoundary, Eval, EvalError, EventHandler, Fragment, Global, GlobalMemo, Memo, Props,
+        Resource, Signal, Suspense, Task, View, ViewError, callback, component, context, effect, eval, memo,
+        on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task, try_context, watch,
     };
     pub use crate::{act, use_css};
     #[doc(no_inline)]
@@ -613,7 +613,7 @@ impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fm
 #[cfg(feature = "kit")]
 impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt::Debug for Part<T, R, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.with_untracked(|v| v.fmt(f))
+        self.with(|v| v.fmt(f))
     }
 }
 
