@@ -507,9 +507,34 @@ pub fn in_views() -> bool {
 /// A key press as the views get one, for a key heard elsewhere (a guest
 /// page, the host) and handed to the views' handlers.
 pub fn key_event(key: Key, modifiers: Modifiers, repeat: bool) -> KeyboardEvent {
-    use dioxus::html::{Code, KeyboardData, Location, SerializedKeyboardData};
-    let data = SerializedKeyboardData::new(key, Code::Unidentified, Location::Standard, repeat, modifiers, false);
-    dioxus_core::Event::new(std::rc::Rc::new(KeyboardData::new(data)), true)
+    use dioxus::html::{Code, HasKeyboardData, KeyboardData, Location, ModifiersInteraction};
+    struct Pressed(Key, Modifiers, bool);
+    impl ModifiersInteraction for Pressed {
+        fn modifiers(&self) -> Modifiers {
+            self.1
+        }
+    }
+    impl HasKeyboardData for Pressed {
+        fn key(&self) -> Key {
+            self.0.clone()
+        }
+        fn code(&self) -> Code {
+            Code::Unidentified
+        }
+        fn location(&self) -> Location {
+            Location::Standard
+        }
+        fn is_auto_repeating(&self) -> bool {
+            self.2
+        }
+        fn is_composing(&self) -> bool {
+            false
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    dioxus_core::Event::new(std::rc::Rc::new(KeyboardData::new(Pressed(key, modifiers, repeat))), true)
 }
 
 /// A script run in the page (`aio.send(v)` hands a value to the view,
