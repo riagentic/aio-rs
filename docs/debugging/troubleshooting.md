@@ -184,8 +184,11 @@ More pitfalls, by symptom: [FAQ and pitfalls](../basics/faq.md#pitfalls).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ax build --android` fails before compiling | no Android SDK, NDK or JDK, or no `aarch64-linux-android` target | the build names what is missing; `ax setup` names the `rustup target add` line |
-| `ax install --android` finds no device | no phone attached with USB debugging, or only an emulator | attach one (`adb devices` lists it); `--device <serial>` picks one; `--emulator` allows an emulator |
+| `ax build --android` fails before compiling | no Android SDK, NDK, JDK 17-23 or Gradle 8.9+, or a missing Rust Android target | the build names what is missing; `ax setup` names the `rustup target add` line |
+| `ax install --android` finds no device | no phone attached with USB debugging, or only an emulator | attach one (`adb devices` lists it); `--device <serial>` (or `ANDROID_SERIAL`) picks one; `--emulator` allows an emulator |
+| `ax dev --android` boots no emulator | no AVD, or `AIO_AVD` names none | create one (Android Studio, `avdmanager create avd`); the error lists the AVDs there |
+| a port's APK won't install over the aio app | another key, or a lower version | sign with aio's key (the machine's `~/.android/debug.keystore`, or the aio release's keystore) and give it a version above the aio build's |
+| the app crashes at start on Android 10 | an own `android/` `MainActivity.java` calling API 30 | the build names it; re-base it on the template's (`[build.android] strict = true` refuses it) |
 | `ax install --android` refuses the APK | the newest APK is older than the sources | `--build` builds first, or `--apk <file>` names one |
 | the camera never asks | the APK doesn't declare it | `[build.android] camera = true` |
 | a `notes://` link doesn't open the app | the scheme isn't declared | `[build.android] schemes = ["notes"]` |

@@ -5,6 +5,47 @@ All notable changes to aio-rs are written here. The format follows
 follow [Semantic Versioning](https://semver.org/): before 1.0.0 a minor
 version may break things.
 
+## [Unreleased]
+
+### Android
+
+- **Fixed: a crash at start on Android 10.** The activity's insets
+  called API-30 methods with minSdk 29; Android 10 now takes the older
+  path. A WebView too old for the page (Android 10's stock 74) says so on
+  the screen instead of a blank page.
+- **A port installs over the aio APK, its data with it**: the version
+  code is aio's (`major·10⁸ + minor·10⁶ + patch`; every earlier aio-rs
+  code is lower, so 0.1 APKs update too), a port (`[app] port_of`) takes
+  aio's application id (`app.aio.<id>`) and, with no keystore named, the
+  machine's Android debug key aio signs with, and at its first start the
+  aio APK's state (`filesDir/aio-store`) becomes its `state.db` once
+  (`aio::compat::data::import_android`).
+- **`ax dev --android` installs once**: a thin dev APK beside the real app
+  (`<id>.dev`, "(dev)") shows the page `ax dev --web` serves over
+  `adb reverse`, and each edit reloads it; `--native` (or an app without a
+  web build) rebuilds a debug dev copy for the device's CPU only. An
+  emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
+  ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
+  the app's log comes to the terminal (`[device]`).
+- `ax test <app> --android`: the emulator lane. `ax lab <app> android`:
+  aio's emulator container with a browser viewer.
+- `ax build --android --debug` (debuggable, `chrome://inspect`);
+  `armeabi-v7a` APKs; `[build.android] universal`; builds on macOS and
+  Windows (the NDK's host folder, `.cmd`/`.bat`/`.exe` tools, the OS's SDK
+  and JDK places); a JDK 17 to 23 found by its `javac`; any Gradle 8.9+
+  (9 too) writes a wrapper pinned to 8.14.3.
+- `ax install --android` takes the app's own APK exactly (`notes` never
+  installs `notes-pro`'s) and a universal one when there is none for the
+  CPU.
+- The label is escaped as aapt reads it (`\`, a leading `?`/`@`), an
+  unfilled `{{TOKEN}}` is named, an own `MainActivity.java` is checked for
+  what the template's does, and `[build.android] strict` turns an overlay
+  warning into an error.
+- Downloads: an http(s) link goes to Downloads (DownloadManager), a
+  `data:` one where the user picks. The phone's images show
+  (`aio::ui::local_file_url`). `[build.splash]` takes `font`, `font_size`,
+  `bold`, `fade_ms`.
+
 ## [0.1.0] - 2026-11-01
 
 The first release of aio-rs (alpha): a Rust framework for apps whose state

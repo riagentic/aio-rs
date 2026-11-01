@@ -15,7 +15,7 @@ wire: [wire](wire.md)). Golden files: aio's `tests/fixtures/v1.0.9-*`,
 - `<home>/data/` (0700, the backup unit): `state.db` (+ `-wal`, `-shm`), `auth.db` (`users`, `one_shot_tokens`, `sessions`), `journal` (+ `.base`, `.replayed`), `tls/`, `files/blobs`, `app.key`, `control.key`, `meta.json`, `reports/`, `update-pending.json`.
 - `<home>/{cache,logs,app,backups}`, `launch.json`; the claim `<home>/.aio-instance.lock` (exclusive OS lock) + `.aio-instance.json`.
 - `meta.json` = `{appId, profile?, aio, app?, createdAt, updatedAt, dbPath?}` (tmp + rename, 0600). Another appId or profile: aio refuses to start.
-- Android standalone keeps no `state.db`: `filesDir/aio-store` (native store).
+- Android standalone keeps no `state.db`: `filesDir/aio-store` (native store): one file per key, `<key with non-[A-Za-z0-9._-] as _, 64 at most>.<Java hashCode, hex>.json`, the app's under `aio:<appId>` (the document `{"<cell>": {...}, "__versions": {...}}`). A port installed over the APK makes it its `state.db` once, at its first start (`aio::compat::data::import_android`); aio's files are kept.
 - The Electron profile is outside the home: `~/.config|~/Library/Application Support|%APPDATA%/<profile>`.
 
 ## state.db

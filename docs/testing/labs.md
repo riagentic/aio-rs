@@ -121,7 +121,7 @@ given APK, `--no-launch` only installs. Build the APKs with `ax build
 |---|---|
 | `am lab windows`, `am lab macos`: a VM it boots in Docker with KVM (an unattended Windows install, a macOS one you drive) | none: `ax lab` uses a machine you already have, over ssh |
 | `am lab linux`: an Ubuntu XFCE desktop in a container | none: a Linux machine with a desktop, over ssh |
-| `am lab android`: the emulator with a browser viewer | `ax install <app> --android --emulator` on an emulator you run |
+| `am lab android`: the emulator with a browser viewer | `ax lab <app> android`: the same container (docker, KVM), its viewer at `http://127.0.0.1:6080` |
 | a browser viewer (noVNC) of the guest's screen | none: look at the machine's own screen or your remote desktop |
 | `dist/` served to the guest at `:8007`, a hand-off folder | the bundle copied over ssh and started for you |
 | `--status`, `--reset`, `--port`, `--dist`, `--tunnel`, `--ram`, `--cpus`, `--disk` | `--stop` only |

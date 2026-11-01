@@ -238,7 +238,7 @@ The words after the app go to the app, except these, which `ax dev` reads:
 | `--watch=src/ui,assets` | rebuild on changes in those folders of the app only |
 | `--cdp[=port]` | the window opens the DevTools protocol on loopback (a free port without one), for other tools |
 | `--tui` | dx's own screen and keys instead of `ax`'s compact lines |
-| `--android [--device serial]` | build, install and start it on the attached phone or emulator, again on every saved change |
+| `--android [--device serial] [--native]` | on the attached emulator or phone (`ANDROID_SERIAL`; none: `AIO_AVD` booted): its web build in a dev APK installed once beside the app, each edit reloading it (`--native`, or no web build: the app itself for that CPU, again on every save); its log in the terminal |
 | `--web` | its web build (debug) served on loopback, its tabs live: a saved stylesheet shows at once, another edit builds anew and reloads |
 
 ```sh
@@ -256,7 +256,7 @@ dx's whole output is in the app's `logs/dev.log`. `ax shot`, `ax eval`,
 ### `ax test`
 
 ```text
-ax test <app> [filter] [--video out] [--pace ms]
+ax test <app> [filter] [--video out] [--pace ms] [--android] [--device serial]
 ```
 
 The app's tests (`cargo test`), UI tests included, headless: no window on
@@ -267,6 +267,8 @@ the screen.
 | `filter` | only tests whose name holds it |
 | `--video out` | record each UI test, no test changed: `out` a folder (a video per test) or one `.mp4`/`.webm` |
 | `--pace ms` | each step this long on screen in the video (800) |
+| `--android` | the emulator lane instead: its APK for the device built, installed and started; passed once its window is ready and it still runs (`AIO_AVD` booted when none is attached) |
+| `--device serial` | with `--android`: that device (else `ANDROID_SERIAL`) |
 
 ```sh
 ax test notes
@@ -1057,7 +1059,7 @@ ax preview notes ui::Card 'title: "Inbox".into(), count: 0'
 ### `ax build`
 
 ```text
-ax build <app> [--targets a,b] [--platforms a,b] [--list] [--sizes] [--smoke] [--deb] [--appimage] [--android] [--windows] [--web] [--dev]
+ax build <app> [--targets a,b] [--platforms a,b] [--list] [--sizes] [--smoke] [--deb] [--appimage] [--android] [--debug] [--windows] [--web] [--dev]
 ```
 
 The app's `[build] targets` (`aio.toml`), else an installable app for this
@@ -1073,6 +1075,7 @@ OS: `dist/<id>-<version>-<os>-<arch>.*` (Linux `.tar.gz`, macOS zipped
 | `--deb` | a Debian package (needs `[app] maintainer`) |
 | `--appimage` | one portable Linux file |
 | `--android` | signed APKs instead (the app's lib calls `android_app!`) |
+| `--debug` | with `--android`: debug APKs, debuggable, the page in `chrome://inspect` |
 | `--web` | an installable web app (PWA) in `dist/<id>-web/` instead: the app for wasm32, a manifest, icons, an offline service worker |
 | `--dev` | with `--web`: a debug build that shows its errors on its page |
 | `--sizes` | the release binary against its budget, and which crates take its space; packs nothing |
@@ -1116,7 +1119,7 @@ Windows: says how).
 | `--android` | the newest APK for the attached phone's CPU onto it, then starts it |
 | `--build` | build the APK first (it refuses one older than the sources) |
 | `--apk file` | that APK |
-| `--device serial` | which device |
+| `--device serial` | which device (else `ANDROID_SERIAL`) |
 | `--emulator` | an emulator may be the device |
 | `--no-launch` | install, don't start |
 
@@ -1132,6 +1135,12 @@ person to click around in. The machine is `AIO_LAB_WINDOWS`,
 for it, copied over ssh into `aio-rs-test/lab/<id>` there, and started
 with its data, runtime and caches inside that folder. `--stop`: what runs
 from it ended, the folder removed.
+
+`android` is aio's container instead (`am lab android`): Google's emulator
+(`budtmo/docker-android`, docker with KVM), its screen in a browser at
+`http://127.0.0.1:6080` (loopback only); the app's x86_64 APK is built,
+installed and started in it once it has booted (1 to 3 minutes the first
+time). `--stop` removes the container.
 
 ### `ax keygen`
 

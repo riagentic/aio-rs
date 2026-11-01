@@ -272,6 +272,60 @@ impl Home {
     }
 }
 
+/// Where aio's Android APK keeps key `key` in its store dir `dir`
+/// (`filesDir/aio-store`, the activity's `AioNativeStore.fileFor`): the
+/// key's readable part (each character outside `[A-Za-z0-9._-]` a `_`, at
+/// most 64), `.`, Java's `hashCode` of the key in hex, `.json`.
+pub fn android_store_file(dir: &Path, key: &str) -> PathBuf {
+    let safe: String =
+        key.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).take(64).collect();
+    let hash = key.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)));
+    dir.join(format!("{safe}.{:x}.json", hash as u32))
+}
+
+/// A port's first start on Android, over aio's APK of app `app` (the same
+/// application id, so the same files dir `files`): aio's state there
+/// (`aio-store`, key `aio:<app>`, the document aio's standalone runtime
+/// wrote) made `store`, a `state.db` in aio's layout (`aio_kv`: `state`, and
+/// `<app>:__versions` from the document's stamps), which `open_aio` then
+/// starts from as it does from aio's desktop file. Once: only while `store`
+/// is not there; aio's files are left as they are. Whether it imported; a
+/// document that is not aio's (not a JSON object) is refused, never dropped.
+pub fn import_android(files: &Path, app: &str, store: &Path) -> io::Result<bool> {
+    let from = android_store_file(&files.join("aio-store"), &format!("aio:{app}"));
+    if store.exists() || !from.is_file() {
+        return Ok(false);
+    }
+    let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
+    let text = std::fs::read_to_string(&from)?;
+    let doc: Value = serde_json::from_str(&text).map_err(|e| bad(format!("{}: {e}", from.display())))?;
+    let Some(versions) = doc.as_object().map(|d| d.get("__versions").cloned()) else {
+        return Err(bad(format!("{}: aio's state is not an object of cells; left as it is", from.display())));
+    };
+    if let Some(dir) = store.parent() {
+        crate::paths::private_dir(dir)?;
+    }
+    let making = store.with_extension("importing");
+    _ = std::fs::remove_file(&making);
+    let made = (|| {
+        let db = Connection::open(&making).map_err(|e| format!("storage: {e}"))?;
+        db.execute_batch("CREATE TABLE aio_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+            .map_err(|e| format!("storage: {e}"))?;
+        db.execute("INSERT INTO aio_kv (k, v) VALUES ('state', ?1)", [&text]).map_err(|e| format!("storage: {e}"))?;
+        put(&db, &format!("{app}:__schema"), &json!(SCHEMA))?;
+        if let Some(v) = versions.filter(Value::is_object) {
+            put(&db, &format!("{app}:__versions"), &v)?;
+        }
+        db.close().map_err(|(_, e)| format!("storage: {e}"))
+    })();
+    if let Err(e) = made {
+        _ = std::fs::remove_file(&making);
+        return Err(io::Error::other(e));
+    }
+    std::fs::rename(&making, store)?;
+    Ok(true)
+}
+
 /// Set the files `names` in `data` aside as `<name>.pre-migration`, each
 /// with its `-wal` and `-shm` and made private (0600), never deleted: a
 /// store the app no longer opens ([`crate::config::Data::retire`], aio's

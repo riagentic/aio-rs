@@ -111,7 +111,8 @@ person to click around in: the machine is AIO_LAB_WINDOWS, AIO_LAB_MACOS
 or AIO_LAB_LINUX ('[ssh options] [user@]host'); built for it, copied over
 ssh into aio-rs-test/lab/<id> there and started with its data, runtime
 and caches inside that folder; --stop: what runs from it ended, the
-folder removed",
+folder removed; android: in a container of Google's emulator (docker, KVM),
+its screen at http://127.0.0.1:6080 (--stop removes it)",
     ),
     v(
         "install",
@@ -130,10 +131,12 @@ a11y, cell ids, plus clippy (exit 1: errors; `ax lint --help`)",
     ),
     v(
         "test",
-        "test <app> [filter] [--video out] [--pace ms]",
+        "test <app> [filter] [--video out] [--pace ms] [--android] [--device serial]",
         "the app's tests (cargo test); --video records each UI test, no test
 changed: out a folder (a video per test) or one .mp4/.webm, a frame per
-step, each --pace ms (800) on screen",
+step, each --pace ms (800) on screen; --android: the emulator lane instead (its
+APK for the device built, installed, started: passed once its window is ready
+and it still runs; AIO_AVD booted when none is attached, or --device)",
     ),
     v("apps", "apps", "the aio-rs apps and private instances on this machine, and which run"),
     v(

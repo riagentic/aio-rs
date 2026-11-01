@@ -273,14 +273,17 @@ pub fn ensure_device(serial: Option<&str>) -> Result<Device, String> {
         );
         return wait_booted(d, booted, None);
     }
-    if serial.is_some() {
+    // A phone named and not there: nothing to boot. An emulator named
+    // (`emulator-<port>`) is booted on that port, as aio boots on a miss.
+    let named_port = serial.as_deref().and_then(|s| s.strip_prefix("emulator-")).map(String::from);
+    if serial.is_some() && named_port.is_none() {
         return pick_device(&attached()?, serial.as_deref(), Want::Any);
     }
     let emulator = sdk_tool("emulator", "emulator");
     let list =
         Command::new(&emulator).arg("-list-avds").output().map_err(|e| format!("{}: {e}", emulator.display()))?;
     let avd = pick_avd(&String::from_utf8_lossy(&list.stdout), std::env::var("AIO_AVD").ok().as_deref())?;
-    let port = std::env::var("AIO_AVD_PORT").ok().filter(|p| !p.is_empty());
+    let port = named_port.or_else(|| std::env::var("AIO_AVD_PORT").ok().filter(|p| !p.is_empty()));
     let headless = cfg!(target_os = "linux")
         && std::env::var_os("DISPLAY").is_none()
         && std::env::var_os("WAYLAND_DISPLAY").is_none();
@@ -455,6 +458,81 @@ pub fn android(name: &str, o: &Opts) -> Result<String, String> {
     }
 }
 
+/// What the app's log on the device says of a start (aio's emulator e2e
+/// lane): ready (`[aio] window ready`), crashed (the line why), or nothing
+/// yet (pure).
+pub fn start_said(log: &str) -> Option<Result<(), String>> {
+    let crash = [
+        "FATAL EXCEPTION",
+        "the app did not start",
+        "UnsatisfiedLinkError",
+        "NoSuchMethodError",
+        "NoClassDefFoundError",
+        "too old for the app's page",
+    ];
+    if let Some(l) = log.lines().find(|l| crash.iter().any(|c| l.contains(c))) {
+        let at = log.find(l).unwrap_or(0);
+        let why: Vec<&str> = log[at..].lines().take(8).collect();
+        return Some(Err(why.join("\n  ")));
+    }
+    log.contains("[aio] window ready").then_some(Ok(()))
+}
+
+/// `ax test <app> --android` (aio's `AIO_AVD` emulator lane): the app's
+/// APK for the device's CPU built, installed and started on the emulator
+/// (`AIO_AVD` booted when none is attached; a phone named by `--device` or
+/// `ANDROID_SERIAL`), passed when its window is ready within 60 s and it is
+/// still running 3 s later, failed with the device's own lines on a crash.
+pub fn lane(name: &str, device: Option<&str>) -> Result<String, String> {
+    let meta = crate::dev::metadata()?;
+    let (app, cfg) = crate::build::app_of(&crate::dev::locate(&meta, name)?)?;
+    let dev = ensure_device(device)?;
+    let sh = |args: &[&str]| adb_out(&[&["-s", dev.serial.as_str(), "shell"], args].concat());
+    let abi = abi_of(&sh(&["getprop", "ro.product.cpu.abilist"])?)
+        .and_then(|a| crate::android::ABIS.iter().find(|(b, _)| *b == a))
+        .ok_or_else(|| format!("{} runs a CPU ax builds no APK for", dev.label()))?;
+    let api = sh(&["getprop", "ro.build.version.sdk"])?.trim().to_string();
+    let ask = crate::android::Ask { abis: std::slice::from_ref(abi), ..crate::android::Ask::RELEASE };
+    let (_, apks) = crate::build::android(name, ask)?;
+    let apk = apks.first().ok_or("the build made no APK")?;
+    install_on(&dev, apk)?;
+    let id = crate::android::application_id_of(&app.id, cfg.app.port_of.as_deref(), &cfg.build.android);
+    adb_out(&["-s", &dev.serial, "logcat", "-c"])?;
+    let started = Instant::now();
+    start_on(&dev, &format!("{id}/aio.rt.MainActivity"), &[]).map_err(|why| format!("{id} did not start: {why}"))?;
+    let log = || adb_out(&["-s", &dev.serial, "logcat", "-d", "-v", "brief", "-s", "aio:V", "AndroidRuntime:E"]);
+    loop {
+        match start_said(&log()?) {
+            Some(Ok(())) => break,
+            Some(Err(why)) => return Err(format!("{} failed on {} (API {api}):\n  {why}", app.name, dev.label())),
+            None if started.elapsed() > Duration::from_secs(60) => {
+                return Err(format!(
+                    "{}: no window in 60 s on {} (API {api}); its log:\n{}",
+                    app.name,
+                    dev.label(),
+                    log()?
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+    let ready = started.elapsed().as_millis();
+    std::thread::sleep(Duration::from_secs(3));
+    if let Some(Err(why)) = start_said(&log()?) {
+        return Err(format!("{} crashed after its start on {} (API {api}):\n  {why}", app.name, dev.label()));
+    }
+    if sh(&["pidof", &id]).map_or(true, |p| p.trim().is_empty()) {
+        return Err(format!("{} is not running 3 s after its start on {} (API {api})", app.name, dev.label()));
+    }
+    _ = sh(&["am", "force-stop", &id]);
+    Ok(format!(
+        "{} on {} ({}, API {api}): window ready in {ready} ms, still running 3 s later",
+        app.name,
+        dev.label(),
+        dev.serial
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,5 +680,20 @@ emulator-5554          device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86
             ["-avd", "small_29", "-no-boot-anim", "-no-snapshot-save", "-port", "5600", "-no-window"]
         );
         assert_eq!(emulator_args("a", None, false).len(), 4, "a window where there is a display");
+    }
+
+    #[test]
+    fn the_emulator_lane_passes_on_a_ready_window_and_fails_on_a_crash_with_its_lines() {
+        assert_eq!(start_said("I/aio ( 812): splash: up\n"), None, "not yet");
+        assert_eq!(
+            start_said("I/aio ( 812): [aio] notes started on Android\nI/aio ( 812): [aio] window ready\n"),
+            Some(Ok(()))
+        );
+        let crash = "E/AndroidRuntime( 812): FATAL EXCEPTION: main\nE/AndroidRuntime( 812): java.lang.NoClassDefFoundError: android.view.WindowInsets$Type\n";
+        let why = start_said(crash).unwrap().unwrap_err();
+        assert!(why.contains("FATAL EXCEPTION") && why.contains("WindowInsets$Type"), "{why}");
+        assert!(start_said("E/aio ( 812): the app did not start\n").unwrap().is_err());
+        let old = "I/aio ( 812): [aio] window ready\nE/aio ( 812): this WebView (74.0) is too old for the app's page: update\n";
+        assert!(start_said(old).unwrap().is_err(), "a page that cannot run is no pass");
     }
 }

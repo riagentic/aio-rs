@@ -176,6 +176,9 @@ public final class MainActivity extends Activity {
                 String text = m.message();
                 if (text.length() > 8192) text = text.substring(0, 8192) + "…";
                 Log.i("aio", "[page] " + m.messageLevel() + ": " + text);
+                // A WebView too old for the page's script (Android 10 as
+                // shipped has 74): said on the screen, never a blank page.
+                if (!painted && text.contains("SyntaxError")) tooOld();
                 return true;
             }
 
@@ -343,6 +346,20 @@ public final class MainActivity extends Activity {
         } catch (java.io.IOException e) {
             Log.e("aio", "download NOT saved: " + to + " (" + e + ")");
         }
+    }
+
+    /** The page's script can't run in this WebView: say which and what to do. */
+    private void tooOld() {
+        android.content.pm.PackageInfo p = WebView.getCurrentWebViewPackage();
+        String v = p == null ? "?" : p.versionName;
+        Log.e("aio", "this WebView (" + v + ") is too old for the app's page: update Android System WebView");
+        TextView t = new TextView(this);
+        t.setText("This phone's WebView (" + v + ") is too old for this app.\n\n"
+                + "Update \"Android System WebView\" (or Chrome) in the Play Store, then open the app again.");
+        t.setPadding(48, 160, 48, 48);
+        painted = true;
+        dropSplash("the WebView is too old");
+        setContentView(t);
     }
 
     private void painted() {
