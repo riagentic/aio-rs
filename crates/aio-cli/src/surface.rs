@@ -46,10 +46,25 @@ async fn page(s: &mut Session, op: &str, arg: Value) -> Result<Value, String> {
     }
 }
 
-/// The surface under `path` (all of the window when `None`), one line each;
-/// `rects`: where each is, `@x,y wxh` in CSS px.
-pub async fn read(s: &mut Session, path: Option<&str>, rects: bool) -> Result<String, String> {
-    Ok(page(s, "surface", json!({ "path": path, "rects": rects })).await?.as_str().unwrap_or_default().into())
+/// What of the surface to read (aio's `am surface` flags).
+#[derive(Default)]
+pub struct Read<'a> {
+    /// That element and what is under it (all of the window when `None`).
+    pub path: Option<&'a str>,
+    /// Where each is, `@x,y wxh` in CSS px.
+    pub rects: bool,
+    /// Each element handled so, or `<it>-…` (every instance), with its subtree.
+    pub component: Option<&'a str>,
+    /// Levels below the first shown at most.
+    pub depth: Option<u32>,
+    /// Names whole, not cut at 40 characters.
+    pub full: bool,
+}
+
+/// The surface `r` asks for, one line each.
+pub async fn read(s: &mut Session, r: &Read<'_>) -> Result<String, String> {
+    let arg = json!({ "path": r.path, "rects": r.rects, "component": r.component, "depth": r.depth, "full": r.full });
+    Ok(page(s, "surface", arg).await?.as_str().unwrap_or_default().into())
 }
 
 /// The auto names in the window, in order.
@@ -257,19 +272,33 @@ mod tests {
         let Some(page) = crate::cdp::tests::Chromium::open(&ui.html()) else { return };
         aio::rt().block_on(async {
             let mut s = page.session().await;
-            assert_eq!(read(&mut s, None, false).await.unwrap(), ui.surface());
-            let placed = read(&mut s, None, true).await.unwrap();
+            let at = |path, rects| Read { path, rects, ..Default::default() };
+            assert_eq!(read(&mut s, &at(None, false)).await.unwrap(), ui.surface());
+            let placed = read(&mut s, &at(None, true)).await.unwrap();
             assert!(placed.lines().all(|l| l.contains(" @")), "--rects: each where it is: {placed}");
             assert_eq!(names(&mut s).await.unwrap(), ui.names());
-            let row = read(&mut s, Some("row-1"), false).await.unwrap();
+            let row = read(&mut s, &at(Some("row-1"), false)).await.unwrap();
             assert_eq!(row, "  generic \"One thingDelete\" [row-1]\n    button \"Delete\"", "a path: it, then under it");
-            let leaf = read(&mut s, Some("row-1/DeleteButton"), false).await.unwrap();
+            let leaf = read(&mut s, &at(Some("row-1/DeleteButton"), false)).await.unwrap();
             assert_eq!(leaf, "  button \"Delete\"", "a leaf is itself, never nothing");
-            let e = read(&mut s, Some("nope"), false).await.unwrap_err();
+            let e = read(&mut s, &at(Some("nope"), false)).await.unwrap_err();
             assert!(
                 e.contains("no element with data-t=\"nope\"; the handles there are: SaveButton3, agree, row-1, theme; by name: Form"),
                 "{e}"
             );
+            // aio's --component, --depth, --full.
+            let row = Read { component: Some("row"), ..Default::default() };
+            assert_eq!(read(&mut s, &row).await.unwrap(), "  generic \"One thingDelete\" [row-1]\n    button \"Delete\"");
+            let alone = Read { component: Some("row"), depth: Some(0), ..Default::default() };
+            assert_eq!(read(&mut s, &alone).await.unwrap(), "  generic \"One thingDelete\" [row-1]", "--depth 0: itself");
+            let e = read(&mut s, &Read { component: Some("nope"), ..Default::default() }).await.unwrap_err();
+            assert!(e.contains("no showing element is handled nope"), "{e}");
+            let top = read(&mut s, &Read { depth: Some(0), ..Default::default() }).await.unwrap();
+            assert!(top.contains("[row-1]") && top.lines().all(|l| !l.starts_with("    ")), "the top level alone: {top}");
+            let cut = read(&mut s, &at(None, false)).await.unwrap();
+            assert!(cut.contains("to be sho…") && !cut.contains("in full, cut"), "{cut}");
+            let whole = read(&mut s, &Read { full: true, ..Default::default() }).await.unwrap();
+            assert!(whole.contains("\"A heading that is far too long to be shown here in full, cut\""), "{whole}");
         });
     }
 

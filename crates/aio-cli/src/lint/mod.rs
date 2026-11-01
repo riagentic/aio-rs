@@ -395,9 +395,11 @@ pub fn project_root(dir: &Path) -> PathBuf {
     dir.into()
 }
 
-const FLAGS: [&str; 7] = ["--json", "--no-hints", "--quiet-hints", "--no-clippy", "--safe-fix", "--fix", "--help"];
+const FLAGS: [&str; 8] =
+    ["--json", "--no-hints", "--quiet-hints", "--no-clippy", "--safe-fix", "--fix", "--tests", "--help"];
 
-const USAGE: &str = "ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-clippy] [--safe-fix] [--fix]
+const USAGE: &str =
+    "ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-clippy] [--safe-fix] [--fix] [--from version] [--tests]
 
   dir          the project (the nearest Cargo.toml at or above it; default: here)
   --json       one JSON document on stdout (hints always in)
@@ -406,12 +408,40 @@ const USAGE: &str = "ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-cli
   --safe-fix   apply clippy's machine-applicable fixes first, then lint what is left
   --fix        move an app of the older layout to today's (ax create's) first: no launcher build.rs,
                no aio-rs build-dependency, no testing/video features; then lint
+  --from v     only what aio-rs changed after v (0.1.0) that the app still uses: the
+               migrate findings (aio's am migrate); exit 1 when there is any
+  --tests      only the test shapes a newer aio-rs turns red (TestUi's), in order; exit 0
 
 Exit: 0 no errors (warnings and hints don't fail), 1 errors, 2 bad usage.
 Silence one finding with a reason: // aio-ok: <why>, or // aio-ok(<area>): <why>.";
 
+/// The migrate findings of rules newer than `from` (pure): every rule today
+/// moves an app to the layout of [`layout::SINCE`].
+pub fn migrate_from(issues: Vec<Issue>, from: &str) -> Result<Vec<Issue>, String> {
+    let v = |s: &str| aio::update::parse_version(s).map(|(core, _)| core);
+    let from = v(from).ok_or(format!("--from {from}: an aio-rs version (0.1.0)"))?;
+    let newer = v(layout::SINCE).is_some_and(|since| since > from);
+    Ok(issues.into_iter().filter(|i| i.area == "migrate" && newer).collect())
+}
+
+/// A finding about a test's shape (TestUi's), which a newer aio-rs turns red.
+pub fn test_shape(i: &Issue) -> bool {
+    i.area == "migrate" && i.message.contains("TestUi")
+}
+
 pub fn main(args: &[String]) -> ExitCode {
-    let (flags, pos): (Vec<&str>, Vec<&str>) = args.iter().map(String::as_str).partition(|a| a.starts_with('-'));
+    // `--from v` (or `--from=v`) takes a value; the rest are switches or the dir.
+    let mut from = None;
+    let mut rest: Vec<&str> = vec![];
+    let mut it = args.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        match a.strip_prefix("--from") {
+            Some("") => from = Some(it.next().unwrap_or_default()),
+            Some(v) if v.starts_with('=') => from = Some(&v[1..]),
+            _ => rest.push(a),
+        }
+    }
+    let (flags, pos): (Vec<&str>, Vec<&str>) = rest.into_iter().partition(|a| a.starts_with('-'));
     let unknown: Vec<&&str> = flags.iter().filter(|f| !FLAGS.contains(f) && **f != "-h").collect();
     if !unknown.is_empty() || pos.len() > 1 {
         let what = unknown
@@ -454,7 +484,9 @@ pub fn main(args: &[String]) -> ExitCode {
             }
         }
     }
-    let clippy_on = !has("--no-clippy") && dir.join("Cargo.toml").is_file();
+    // A migration's question is aio-rs's changes alone: no clippy.
+    let only_migrate = from.is_some() || has("--tests");
+    let clippy_on = !has("--no-clippy") && !only_migrate && dir.join("Cargo.toml").is_file();
     if has("--safe-fix") && clippy_on {
         say("ax lint: applying clippy's safe fixes");
         if let Err(e) = clippy(&dir, true) {
@@ -476,6 +508,23 @@ pub fn main(args: &[String]) -> ExitCode {
                 line: None,
                 fix: Some("cargo clippy --all-targets says why".into()),
             }),
+        }
+    }
+    if let Some(v) = from {
+        match migrate_from(std::mem::take(&mut report.issues), v) {
+            // What the app still uses of what changed: CI fails on it.
+            Ok(i) => report.issues = i.into_iter().map(|i| Issue { severity: Severity::Error, ..i }).collect(),
+            Err(e) => {
+                eprintln!("ax lint: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if has("--tests") {
+        report.issues.retain(test_shape);
+        // A prediction, in the order they fail: never a failing exit.
+        for i in &mut report.issues {
+            i.severity = Severity::Warn;
         }
     }
     report.issues.sort_by(|a, b| (a.severity, &a.file, a.line).cmp(&(b.severity, &b.file, b.line)));

@@ -53,7 +53,14 @@ pub fn test(app: &str, ty: &str, name: &str, before: &Value, rows: &[Row], after
         match skip(r, None) {
             Some(why) => out.push_str(&format!("    // {} {}: not called again: {why}\n", r.seq, r.method)),
             None => {
-                out.push_str(&format!("    h.call({:?}, json!({})).unwrap(); // {}\n", r.method, json(&r.args), r.seq))
+                // As its caller: a method may keep who called (`cx.by()`).
+                out.push_str(&format!(
+                    "    h.by(by(json!({}))).call({:?}, json!({})).unwrap(); // {}\n",
+                    json(&r.by),
+                    r.method,
+                    json(&r.args),
+                    r.seq
+                ))
             }
         }
     }
@@ -67,7 +74,7 @@ pub fn test(app: &str, ty: &str, name: &str, before: &Value, rows: &[Row], after
             json(after)
         )),
     }
-    out.push_str("}\n");
+    out.push_str("}\n\n/// Who made a call, as the log has it.\nfn by(v: aio::serde_json::Value) -> aio::By {\n    aio::serde_json::from_value(v).unwrap_or_default()\n}\n");
     out
 }
 
@@ -106,9 +113,9 @@ mod tests {
     #[test]
     fn the_test_it_writes_is_the_one_that_compiles_and_passes() {
         let rows = [
-            row(4, "add", json!([2, "first"]), json!({ "User": "ana" })),
-            row(5, "$rewind", json!({ "to": 4 }), json!({ "User": "ops" })),
-            row(6, "add", json!([3, "second"]), json!({ "Agent": "bot" })),
+            row(4, "add", json!([2, "first"]), json!({ "kind": "user", "name": "ana" })),
+            row(5, "$rewind", json!({ "to": 4 }), json!({ "kind": "user", "name": "ops" })),
+            row(6, "add", json!([3, "second"]), json!({ "kind": "agent", "name": "bot" })),
         ];
         let before = json!({ "n": 1, "log": ["seed"] });
         let after = json!({ "n": 6, "log": ["seed", "first", "second"] });

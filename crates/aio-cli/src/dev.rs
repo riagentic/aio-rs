@@ -805,9 +805,27 @@ pub fn throw_away(plan: Option<&aio::paths::Plan>) -> Result<(), String> {
     }
     let home = p.data.parent().ok_or("an instance's data has a home")?;
     match std::fs::remove_dir_all(home) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", home.display())),
-        _ => Ok(()),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("{}: {e}", home.display())),
+        _ => {}
     }
+    // `ax stop` throws this run's data away too, once it is gone.
+    aio::paths::private_dir(home)
+        .and_then(|_| std::fs::write(home.join(FRESH), ""))
+        .map_err(|e| format!("{}: {e}", home.display()))
+}
+
+/// In a `--fresh` instance's home: its data goes when it stops.
+pub const FRESH: &str = "fresh";
+
+/// After `ax stop`: the stopped `--fresh` instance `plan`'s data thrown
+/// away (aio: `am stop --instance` discards it); `None` when it is no such run.
+pub fn discard_fresh(plan: &aio::paths::Plan) -> Option<Result<(), String>> {
+    let home = plan.data.parent()?;
+    (plan.from == "--instance" && home.join(FRESH).exists()).then(|| {
+        std::fs::remove_dir_all(home)
+            .or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+            .map_err(|e| format!("{}: {e}", home.display()))
+    })
 }
 
 /// `ax dev <app> --android [--device serial]`: build, install and start it
@@ -1271,8 +1289,13 @@ mod tests {
             std::thread::yield_now();
         }
         throw_away(Some(&plan("--instance"))).unwrap();
-        assert!(!home.exists());
+        assert!(!home.join("data").exists() && home.join(FRESH).exists(), "gone, marked for ax stop");
         throw_away(Some(&plan("--instance"))).unwrap();
+        // aio's `am stop --instance`: the stopped --fresh run's data goes too.
+        assert_eq!(discard_fresh(&plan("--instance")), Some(Ok(())));
+        assert!(!home.exists());
+        assert_eq!(discard_fresh(&plan("--instance")), None, "no such run: nothing");
+        assert_eq!(discard_fresh(&plan("default")), None);
     }
 
     #[test]

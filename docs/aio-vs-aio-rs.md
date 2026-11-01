@@ -242,10 +242,8 @@ beyond the aio-rs form.
 | Testing | `t.randomActions(n)`, an unseeded fuzz | every fuzz seeded | ➖ | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.settle(ms)` on real timers | virtual timers | `TestServer` for real I/O | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `ui.advance(ms)` under the page | `TestUi` time is real | `TestCells::advance` | [UI](testing/ui.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `am testgen` typed clients | none | `ui.names()`, `ax surface --names` | [UI](testing/ui.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `waitForPatch`, `clients[i].patches` | none | assert on each copy's `state()` | [multi-app](testing/multi-app.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | a corrupt cassette re-recorded; unserializable args as text | refused | fix or delete it | [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `am lab windows\|macos\|linux\|android`: VMs and containers it boots, a noVNC viewer | `ax lab` over ssh to a machine you have | an emulator you run | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `deno task lab`, `deno task test:wine` | none | by hand on a fresh machine | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `aiol` perf hints, `[fixable]` marks | `TestUi::components`, `ax components` | ➖ | [lint](testing/lint.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | an API snapshot gate, an `experimental` marker | review and the CHANGELOG | ➖ | [versions](basics/versioning.md#gaps-against-aios-policy) |
@@ -263,12 +261,10 @@ beyond the aio-rs form.
 | Build | `deno task check`/`test`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
 | Release | `canApply` awaited before every install, a warning with none | `can_apply` a plain function, not asked for an `auto` install | ➖ | [release](build/release.md#not-in-aio-rs) |
 | Release | a custom runtime refused beside `updates:` | replaced silently | ➖ | [release](build/release.md#not-in-aio-rs) |
-| `am` | `persist`, `persist --drop` | none | `#[cell(retire = [..])]` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | `snapshot load --force`, `dispatch` extras (`key=value`, `--body`, `--as-server`) | none | JSON arguments | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | `kill --stale`, `start --no-wait`, `errors --since=reload` | none | `--wait` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | `surface --component\|--depth\|--full`, `peer --types` | `ax surface` by path, `ax peer` signatures | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | `dispatch` plain actions, `--as-server` | none | cell methods; a debug build's door | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | `kill --stale`, `start --port` | none | the OS's lock; `[server] listen` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 | `am` | `migrate`, `add cell\|server`, `report` collecting a new one | the compiler; by hand | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | the control REST API, `--quiet`; the manager UI's V8 heap and per-action readings | the local door, `--json`; `ax ui`'s aio-rs counterparts | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | the manager UI's V8 heap and per-action readings | `ax ui`'s aio-rs counterparts | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 
 ## How aio-rs deviates from aio
 
@@ -367,7 +363,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | View-only state | `scope: "client"` | a cell without `persist`/`shared`, or a `GlobalSignal` | ✅ |
 | Visibility | `visible`, `forUser`; a hidden read throws | `#[cell(visible = f)]`, `#[server]` fields as `Hidden<T>` (a read on a copy panics) | ✅ |
 | Plugins | `definePlugin` | `aio::plugin::Plugin` | ✅ |
-| Retired cells | `am persist --drop` | `#[cell(retire = [..])]` | 🔄 |
+| Retired cells | `am persist --drop` | `ax persist --drop`, `#[cell(retire = [..])]` | ✅ |
 
 **Methods, effects, scheduling**
 
@@ -473,13 +469,13 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Cell tests | `testCell`, `bootCells` | `TestCells` (virtual time, seeded fuzz) | ✅ |
 | UI tests | `testUI` on happy-dom | `TestUi` on the real engine | ➕ |
 | Virtual clock under the page | `ui.advance` | ❌ (`TestCells::advance`) | ❌ |
-| Typed UI clients | `am testgen` | ❌ (`ax surface --names`) | ❌ |
+| Typed UI clients | `am testgen` | `ax testgen` (a Rust name table) | ✅ |
 | Server and multi-client | `testServer`, `testMultiClient` | `TestServer`, `Sim` | ✅ |
 | Patch assertions | `waitForPatch` | ❌ (each copy's `state()`) | ❌ |
 | Cassettes | `openCassette` | `Cassette` (stricter) | 🔄 |
 | Browser tests | `testBrowser` | `TestBrowser` | ✅ |
 | Lint | `aiol` | the compiler + `ax lint` | 🔄 |
-| Labs | VMs and containers it boots | `ax lab` over ssh | 🔄 |
+| Labs | VMs and containers it boots | the same images (`ax lab --boot`), or a machine over ssh | ✅ |
 | CLI run capture | `testIO()` | ❌ (test `parse`, the binary) | ❌ |
 | API snapshot gate | yes | ❌ (review, CHANGELOG) | ❌ |
 
@@ -524,11 +520,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | App control | `start`, `stop`, `kill`, `restart`, `status` | the same | ✅ |
 | State and history | `state`, `snapshot`, `migrations`, `replay`, `timetravel` | the same | ✅ |
-| Calls | `dispatch` | `ax call` | 🔄 |
+| Calls | `dispatch` (`k=v`, `--body`, `--wait`) | `ax call` (the same) | 🔄 |
 | Inspection | `surface`, `trigger`, `shot`, `eval`, `preview`, `sql`, `heap`, `cost` | the same | ✅ |
 | Pairing, trust | `discover`, `profile`, `pair`, `auth`, `trust` | the same (`ax pin` makes a pairing code; aio's `am pin` is a framework version: `ax framework`) | ✅ |
 | `where`, `check` | yes | the compiler | 🔄 |
-| `persist`, `testgen`, `add`, control REST API | yes | ❌ | ❌ |
+| `persist`, `testgen`, `timeline`, `top`, control REST API | yes | `ax persist`, `ax testgen`, `ax timeline`, `ax top`, `ax control` (loopback HTTP) | ✅ |
+| `add cell\|server` | yes | ❌ (written by hand) | ❌ |
 | `keygen`, `release`, `update`, `smoke`, `install`, `lint`, `test`, `events`, `components`, `adopt`, `import`, `runtime`, `setup` | — | yes | ➕ |
 
 **Tooling**

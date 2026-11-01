@@ -584,15 +584,21 @@ fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Res
     if let Some(c) = T::RETIRED.iter().find(|c| **c == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == **c)) {
         return Err(Error(format!("{}: it retires cell {c}, which it still reads", T::ID)));
     }
+    erase(db, kv, T::RETIRED).map(|_| ())
+}
+
+/// The history of `cells` gone from the file (and, in an aio file, their
+/// slices and stamps), zeroed; whether there was any.
+fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str]) -> Result<bool, Error> {
     let secure: i64 = db.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
     db.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = db.unchecked_transaction()?;
     let mut gone = match kv {
-        Some(kv) => kv.retire(&tx, T::RETIRED).map_err(Error)?,
+        Some(kv) => kv.retire(&tx, cells).map_err(Error)?,
         None => false,
     };
     for t in TABLES {
-        for c in T::RETIRED {
+        for c in cells {
             gone |= tx.execute(&format!("DELETE FROM {t} WHERE cell = ?1"), [c])? > 0;
         }
     }
@@ -601,7 +607,7 @@ fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Res
         db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     }
     db.execute_batch(&format!("PRAGMA secure_delete = {secure}"))?;
-    Ok(())
+    Ok(gone)
 }
 
 /// Saved state of version `v` as this version of the cell.
@@ -1728,6 +1734,16 @@ impl<T: Cell> Store<T> {
         let f: Option<i64> =
             self.db.query_row("SELECT seq FROM floor WHERE cell = ?1", [T::ID], |r| r.get(0)).optional()?;
         Ok(f.unwrap_or(0) as u64)
+    }
+
+    /// Another cell's history gone from this store's file (`ax persist
+    /// --drop`: one no build declares any more, as `#[cell(retire)]` does),
+    /// never this cell's or one it reads; whether there was any.
+    pub fn drop_cell(&self, cell: &str) -> Result<bool, Error> {
+        if cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell) {
+            return Err(Error(format!("{}: it reads {cell}: a declared cell is never dropped", T::ID)));
+        }
+        erase(&self.db, self.aio_kv.as_ref(), &[cell])
     }
 
     /// The state right after event `seq` (0: the start).
