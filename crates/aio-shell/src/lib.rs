@@ -537,10 +537,11 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         r
     });
     // aio's keepServer: the window is gone (closed, or crashed: said), the
-    // app serves on until asked to stop. A required sandbox stops it anyway.
+    // app serves on until asked to stop. A sandbox it requires and lacks
+    // (`require_sandbox`, `AIORT_SANDBOX=1`) stops it anyway.
     let keep = win.keep_server || instance::KEEP_SERVER.get() == Some(&true);
     let r = match r {
-        Err(e) if !keep || win.require_sandbox => Err(e),
+        Err(e) if !keep || e.kind() == std::io::ErrorKind::PermissionDenied => Err(e),
         _ if STOP_ASKED.load(std::sync::atomic::Ordering::Relaxed) || !keep => r,
         _ => {
             if let Err(e) = &r {
@@ -802,8 +803,9 @@ pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, st
         }
         // `ax` stopping the app where there is no SIGTERM (Windows).
         if line.trim() == instance::QUIT {
-            _ = w.write_all(b"ok\n").await;
+            // Stop first: an "ok" says the stop is already under way.
             stop();
+            _ = w.write_all(b"ok\n").await;
             continue;
         }
         let Some(launch) = instance::read_launch(&line) else {

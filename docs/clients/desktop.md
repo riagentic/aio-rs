@@ -59,8 +59,8 @@ up to 30 s for its lock: a new build replacing an old one.
   `Window { keep_server: true }` or the launch's `--keep-server` (aio's
   `keepServer`) keeps it serving: its cells, its port if it has one, its
   local door, until `ax stop`, SIGTERM or Ctrl-C. The log says where it
-  serves. A window that crashed keeps it serving too (said), unless
-  `require_sandbox` refused it.
+  serves. A window that crashed keeps it serving too (said), unless a
+  required sandbox refused it.
 - `ax stop <app>`, SIGTERM or Ctrl-C ask the window to quit; the runtime
   gets 5 s, then it is killed. The stores then drain as on a close.
 - A parent that goes (`ax dev`, a test harness) stops the app the same
