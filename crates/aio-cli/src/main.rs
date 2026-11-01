@@ -96,9 +96,12 @@ fn log_lines(dir: &Path, n: usize) -> Out {
 /// first), each under the start of the app it came from (pure): each start
 /// (its number, 0 before the first; its line) with its bad lines, and how
 /// many there were in all.
-fn bad_lines<'a>(lines: &[&'a str], n: usize) -> (Vec<(usize, String, Vec<&'a str>)>, usize) {
+/// A start (its number, its line) and the bad lines after it.
+type Run<'a> = (usize, String, Vec<&'a str>);
+
+fn bad_lines<'a>(lines: &[&'a str], n: usize) -> (Vec<Run<'a>>, usize) {
     // (start, its line, the bad lines after it)
-    let mut runs: Vec<(usize, String, Vec<&str>)> = vec![(0, String::new(), vec![])];
+    let mut runs: Vec<Run> = vec![(0, String::new(), vec![])];
     for l in lines {
         if starts(l) {
             runs.push((runs.len(), l.to_string(), vec![]));
