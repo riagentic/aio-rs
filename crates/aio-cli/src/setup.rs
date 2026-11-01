@@ -432,7 +432,12 @@ pub fn run(check: bool) -> Result<String, String> {
     needs.push(match rt {
         Ok(dir) => {
             let exe = aio_shell::runtime::exe(&dir);
-            let out = std::process::Command::new(&exe).arg("--version").env_remove("ELECTRON_RUN_AS_NODE").output();
+            // Started as an app starts it: with the sandbox flag this machine needs.
+            let out = std::process::Command::new(&exe)
+                .args(aio_shell::runtime::sandbox_args(&dir))
+                .arg("--version")
+                .env_remove("ELECTRON_RUN_AS_NODE")
+                .output();
             let ran = match out {
                 Ok(o) if o.status.success() => {
                     Ok(format!("{} at {}", String::from_utf8_lossy(&o.stdout).trim(), dir.display()))
