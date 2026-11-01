@@ -54,7 +54,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- runtime --fetch
-      - run: cargo test --workspace --all-features --locked
+      - run: cargo test --workspace --all-features --locked --no-fail-fast
   audit:
     runs-on: ubuntu-24.04
     steps:
