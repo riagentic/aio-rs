@@ -553,7 +553,11 @@ fn a_host_the_test_answers_never_reaches_the_network() {
         .fetch("cdn.example.invalid", move |a| {
             log.lock().unwrap().push(format!("{} {}", a.method, a.url));
             match a.url.ends_with(".svg") {
-                true => Answered::new(200, "image/svg+xml", r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>"#),
+                true => Answered::new(
+                    200,
+                    "image/svg+xml",
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>"#,
+                ),
                 false => Answered::new(404, "text/plain", "no such picture"),
             }
         })

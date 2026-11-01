@@ -496,7 +496,7 @@ fn credentials_in_source_and_assets() {
         ("assets/config.json", "{\"token\": \"abcdefghij0123456789xyz\"}\n"),
         ("aio.toml", "[app]\nid = \"demo\"\nname = \"Demo\"\n"),
         ("tests/fixture.json", "{\"token\": \"abcdefghij0123456789xyz\"}\n"),
-        ("tests/it.rs", "const PASSWORD: &str = \"hunter22\";\n#[test]\nfn t() {}\n"),
+        ("tests/it.rs", "const PASSWORD: &str = \"hunter22\";\n#[test]\nfn t() { assert!(!PASSWORD.is_empty()) }\n"),
         ("assets/logo.png", "\u{0}\u{159}PNG"),
     ]);
     let r = lint(d.path());
@@ -559,7 +559,7 @@ fn build_output_dot_dirs_and_test_modules_are_not_app_code() {
         (".git/x.toml", "password = \"hunter22\""),
         (
             "src/lib.rs",
-            "#[cfg(test)]\nmod tests { #[test] fn a() {} #[aio::test] fn b() {} fn App() -> Element { rsx! { img {} } } }\n",
+            "#[cfg(test)]\nmod tests { #[test] fn a() { assert!(1 < 2) } #[aio::test] fn b() { assert!(1 < 2) } fn App() -> Element { rsx! { img {} } } }\n",
         ),
         ("src/tests.rs", "fn x() -> Element { rsx! { img {} } }"),
     ]);
@@ -822,4 +822,72 @@ fn renamed_paths_are_told_and_moved_by_fix() {
         std::fs::read_to_string(d.path().join("src/lib.rs")).unwrap(),
         "use aio::testing::RandomCall;\nfn f() {\n    let _d = aio::deciding::start();\n    let _ = aio::effect::retry;\n    let _ = (aio::retry_later, aio::effect::retry);\n}\n"
     );
+}
+
+#[test]
+fn tests_that_check_nothing_are_named() {
+    let d = project(&[
+        (
+            "tests/notes.rs",
+            r#"
+#[test]
+fn adds() {
+    let n = Notes::default();
+    n.add("a".into());
+}
+
+#[test]
+fn compares_itself() {
+    let n = 1 + 1;
+    assert_eq!(n, n);
+}
+
+#[test]
+#[should_panic(expected = "full")]
+fn refuses() {
+    Notes::full().add("a".into());
+}
+
+#[test]
+fn checks() -> Result<(), String> {
+    let mut t = TestCells::new();
+    t.cell::<Notes>().add("a".into())?;
+    assert_eq!(t.effects(), ["Notes.save"]);
+    Ok(())
+}
+"#,
+        ),
+        (
+            "src/lib.rs",
+            r#"
+pub fn f() -> u8 { 1 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn calls_only() {
+        super::f();
+    }
+
+    #[test]
+    fn unwraps() {
+        "1".parse::<u8>().unwrap();
+    }
+}
+"#,
+        ),
+    ]);
+    let r = lint(d.path());
+    let t: Vec<_> = r
+        .issues
+        .iter()
+        .filter(|i| i.area == "testing" && i.message.contains("("))
+        .map(|i| (i.file.clone().unwrap(), i.line.unwrap(), i.message.clone()))
+        .collect();
+    assert_eq!(
+        t.iter().map(|(f, l, _)| format!("{f}:{l}")).collect::<Vec<_>>(),
+        ["src/lib.rs:7", "tests/notes.rs:3", "tests/notes.rs:11"],
+        "{t:?}"
+    );
+    assert!(t[1].2.contains("test `adds` checks nothing") && t[2].2.contains("compares `n` with itself"), "{t:?}");
 }
