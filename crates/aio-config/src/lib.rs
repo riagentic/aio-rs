@@ -4,6 +4,7 @@
 //! config written as Rust ([`config::Lit`]) names `aio::<module>::<type>`.
 pub mod budgets;
 pub mod config;
+pub mod icon;
 pub mod perf;
 pub mod security;
 pub mod vitals;

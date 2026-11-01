@@ -75,6 +75,7 @@ impl Item {
 
 /// The tray's text when the pointer rests on it, from now on.
 pub fn tooltip(text: &str) {
+    lock(&STATE).tooltip = Some(text.into());
     crate::tell_runtime(json!({ "t": "tooltip", "text": text }).to_string());
 }
 
@@ -99,11 +100,54 @@ pub const ICON_FPS: u8 = 12;
 /// later shows it too. A bad image is refused here, where it is passed.
 pub fn icon(which: Icon, frames: &[&[u8]], fps: u8) -> io::Result<()> {
     let line = icon_line(which, frames, fps)?;
-    let mut kept = ICONS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = lock(&ICONS);
     kept.retain(|(w, _)| *w != which);
     kept.push((which, line.clone()));
+    let mut state = lock(&STATE);
+    let now = match frames.len() {
+        0 => Showing::Own,
+        1 => Showing::Still,
+        n => Showing::Animated { frames: n, fps: fps.clamp(1, ICON_FPS) },
+    };
+    *match which {
+        Icon::Window => &mut state.window,
+        Icon::Tray => &mut state.tray,
+    } = now;
     crate::tell_runtime(line);
     Ok(())
+}
+
+/// What an icon shows ([`IconState`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Showing {
+    /// The app's own icon.
+    #[default]
+    Own,
+    /// One image [`icon`] gave.
+    Still,
+    /// Frames, looped.
+    Animated { frames: usize, fps: u8 },
+}
+
+/// What the app's icons and its tray's tooltip are now (aio's
+/// `iconState()`); `tooltip`: none set since the start (the tray's own).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IconState {
+    pub window: Showing,
+    pub tray: Showing,
+    pub tooltip: Option<String>,
+}
+
+/// The icons and the tooltip as [`icon`] and [`tooltip`] set them.
+pub fn icon_state() -> IconState {
+    lock(&STATE).clone()
+}
+
+static STATE: std::sync::Mutex<IconState> =
+    std::sync::Mutex::new(IconState { window: Showing::Own, tray: Showing::Own, tooltip: None });
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The icons set so far, as their control lines: said again to a runtime
@@ -111,7 +155,7 @@ pub fn icon(which: Icon, frames: &[&[u8]], fps: u8) -> io::Result<()> {
 static ICONS: std::sync::Mutex<Vec<(Icon, String)>> = std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn icon_lines() -> Vec<String> {
-    ICONS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, l)| l.clone()).collect()
+    lock(&ICONS).iter().map(|(_, l)| l.clone()).collect()
 }
 
 /// What a cell's call told the people using the app (`cx.tell`), as this
@@ -119,7 +163,8 @@ pub(crate) fn icon_lines() -> Vec<String> {
 #[derive(Debug, PartialEq)]
 pub enum Shown {
     Notice(Notice),
-    Icon(Icon, Vec<Vec<u8>>, u8),
+    /// Each icon to change and its frames, at the fps; the tray's tooltip.
+    Icons(Vec<(Icon, Vec<Vec<u8>>)>, u8, Option<String>),
 }
 
 /// `t` as this desktop shows it (pure): an icon's frames decoded.
@@ -134,18 +179,26 @@ pub fn shown(t: &aio::tell::Tell) -> io::Result<Shown> {
             silent: *silent,
             route: route.clone(),
         }),
-        Tell::Icon { tray, frames, fps } => {
+        Tell::Icon { window, tray, tooltip, fps } => {
             let b64 = base64::engine::general_purpose::STANDARD;
-            let frames = frames.iter().map(|f| b64.decode(f.trim_start_matches("data:image/png;base64,")));
-            let frames =
-                frames.collect::<Result<_, _>>().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            Shown::Icon(if *tray { Icon::Tray } else { Icon::Window }, frames, *fps)
+            let decode = |frames: &Vec<String>| {
+                let frames = frames.iter().map(|f| b64.decode(f.trim_start_matches("data:image/png;base64,")));
+                frames.collect::<Result<Vec<_>, _>>().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+            };
+            let mut icons = vec![];
+            for (which, frames) in [(Icon::Window, window), (Icon::Tray, tray)] {
+                if let Some(f) = frames {
+                    icons.push((which, decode(f)?));
+                }
+            }
+            Shown::Icons(icons, *fps, tooltip.clone())
         }
     })
 }
 
 /// Show `t` here (how `run` shows what cells tell): a notice through the
-/// runtime, on `rt`; an icon at once. What can't be shown is said in the log.
+/// runtime, on `rt`; icons and the tooltip at once. What can't be shown is
+/// said in the log.
 pub fn show(rt: &tokio::runtime::Handle, t: &aio::tell::Tell) {
     match shown(t) {
         Ok(Shown::Notice(n)) => {
@@ -155,10 +208,15 @@ pub fn show(rt: &tokio::runtime::Handle, t: &aio::tell::Tell) {
                 }
             })
         }
-        Ok(Shown::Icon(which, frames, fps)) => {
-            let frames: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
-            if let Err(e) = icon(which, &frames, fps) {
-                eprintln!("[aio-shell] icon: {e}");
+        Ok(Shown::Icons(icons, fps, tip)) => {
+            for (which, frames) in icons {
+                let frames: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+                if let Err(e) = icon(which, &frames, fps) {
+                    eprintln!("[aio-shell] icon: {e}");
+                }
+            }
+            if let Some(t) = tip {
+                tooltip(&t);
             }
         }
         Err(e) => eprintln!("[aio-shell] icon: {e}"),
@@ -282,9 +340,15 @@ mod tests {
         let n = shown(&Tell::notify("Done", "3 files")).unwrap();
         assert_eq!(n, Shown::Notice(Notice { title: "Done".into(), body: "3 files".into(), ..Default::default() }));
         let png = base64_of(b"\x89PNG");
-        let t = Tell::Icon { tray: true, frames: vec![png.clone(), format!("data:image/png;base64,{png}")], fps: 4 };
-        assert_eq!(shown(&t).unwrap(), Shown::Icon(Icon::Tray, vec![b"\x89PNG".to_vec(); 2], 4));
-        let bad = Tell::Icon { tray: false, frames: vec!["not base64!".into()], fps: 1 };
+        // aio's appIcon(): the window, the tray and the tooltip in one; what
+        // is left out stays as it is.
+        let frames = vec![png.clone(), format!("data:image/png;base64,{png}")];
+        let t = Tell::Icon { window: Some(vec![]), tray: Some(frames), tooltip: Some("Syncing".into()), fps: 4 };
+        let both = vec![(Icon::Window, vec![]), (Icon::Tray, vec![b"\x89PNG".to_vec(); 2])];
+        assert_eq!(shown(&t).unwrap(), Shown::Icons(both, 4, Some("Syncing".into())));
+        let tip = Tell::Icon { window: None, tray: None, tooltip: Some("Idle".into()), fps: 1 };
+        assert_eq!(shown(&tip).unwrap(), Shown::Icons(vec![], 1, Some("Idle".into())));
+        let bad = Tell::Icon { window: Some(vec!["not base64!".into()]), tray: None, tooltip: None, fps: 1 };
         assert_eq!(shown(&bad).unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 
@@ -319,6 +383,14 @@ mod tests {
         let kept = icon_lines();
         assert_eq!(kept.len(), 2);
         assert!(kept[0].contains(r#""target":"tray""#) && kept[0].contains(&base64_of(&b)));
+        // aio's iconState(): what each shows, and the tooltip.
+        icon(Icon::Tray, &[&a, &b], 30).unwrap();
+        tooltip("Syncing");
+        let s = icon_state();
+        assert_eq!((s.window, s.tray), (Showing::Still, Showing::Animated { frames: 2, fps: 12 }));
+        assert_eq!(s.tooltip.as_deref(), Some("Syncing"));
+        icon(Icon::Window, &[], 1).unwrap();
+        assert_eq!(icon_state().window, Showing::Own, "none: the app's own again");
     }
 
     fn base64_of(b: &[u8]) -> String {

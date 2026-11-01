@@ -15,8 +15,10 @@ pub struct Window {
     pub title: &'static str,
     pub width: u32,
     pub height: u32,
-    /// The window and taskbar icon: PNG bytes (`include_bytes!`), shown at
-    /// most 256 px a side.
+    /// The window's icon: its title bar, taskbar, Alt-Tab, Dock, tray and
+    /// notifications, and the page's favicon. PNG bytes, shown at most 256 px
+    /// a side; `Window::of` gives the app's. Unset: the app's monogram (its
+    /// title's letter in its hue, aio's generated icon).
     pub icon: Option<&'static [u8]>,
     /// The background until the page paints, `[light, dark]` by the OS theme
     ///; unset: the kit's page background.
@@ -66,11 +68,14 @@ pub struct Window {
 pub use aio::config::SplashShow;
 
 impl Window {
-    /// The window `[app]` describes: its name as the title, its `lang` and
-    /// `dir`; the rest default (`Window { width: 900, ..Window::of(&cfg) }`).
+    /// The window `[app]` describes: its name as the title, its own icon
+    /// (`assets/icon.png`, built in by `aio::config!()`; none: the shell draws
+    /// its monogram), its `lang` and `dir`; the rest default (`Window { width: 900,
+    /// ..Window::of(&cfg) }`).
     pub fn of(cfg: &aio::config::Config) -> Self {
         let lang = cfg.app.lang.clone().map(|l| &*l.leak());
-        Self { title: cfg.app.name.clone().leak(), lang, dir: cfg.app.dir, ..Self::default() }
+        let icon = Some(cfg.app.icon).filter(|i| !i.is_empty());
+        Self { title: cfg.app.name.clone().leak(), icon, lang, dir: cfg.app.dir, ..Self::default() }
     }
 }
 
@@ -137,18 +142,33 @@ pub use aio::page::overlay;
 /// title are the window's, escaped. Its policy names each inline script
 /// (the app's own `head` too) and connects to nothing.
 pub(crate) fn page_with(win: &Window, bridge: &str) -> String {
-    page_of(win, bridge, "'none'")
+    page_html(win, bridge, "'none'", "")
 }
 
-/// [`page_with`], connecting to `connect` (a browser tab: its own server).
+/// [`page_with`] for a browser tab, connecting to `connect` (its own
+/// server), with the window's icon (else the app's monogram) as its
+/// favicon (aio's `/__aio/icon`).
+#[cfg(any(feature = "web", test))]
 pub(crate) fn page_of(win: &Window, bridge: &str, connect: &str) -> String {
+    use base64::Engine;
+    let png = win.icon.map(<[u8]>::to_vec).unwrap_or_else(|| {
+        let id = instance::APP.get().map_or("app", |(id, _)| id.as_str());
+        let hue = instance::LOOK.get().map_or_else(|| aio::colors::hue(id), |l| l.0);
+        aio_config::icon::icon_png(if win.title.is_empty() { id } else { win.title }, hue, 64)
+    });
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    let icon = format!(r#"<link rel="icon" type="image/png" href="data:image/png;base64,{b64}">"#);
+    page_html(win, bridge, connect, &icon)
+}
+
+fn page_html(win: &Window, bridge: &str, connect: &str, icon: &str) -> String {
     let html = html_open(win.lang, win.dir);
     let viewport = match win.viewport.unwrap_or("width=device-width, initial-scale=1") {
         "" => String::new(),
         v => format!(r#"<meta name="viewport" content="{}">"#, esc(v)),
     };
     let page = format!(
-        r#"<!doctype html>{html}<head><meta charset="utf-8">{viewport}<title>{}</title>{}</head><body>{}</body></html>"#,
+        r#"<!doctype html>{html}<head><meta charset="utf-8">{viewport}<title>{}</title>{icon}{}</head><body>{}</body></html>"#,
         esc(win.title),
         win.head.unwrap_or(""),
         aio::page::body(bridge)
@@ -183,6 +203,22 @@ fn wire(s: aio::ipc::Stream) -> impl LiveViewSocket {
             .with(|v: Vec<u8>| std::future::ready(Ok::<_, std::io::Error>(Bytes::from(v))))
             .sink_map_err(|_| LiveViewError::SendingFailed),
     )
+}
+
+/// The monogram's edge: the largest a window or a tray shows an icon at
+/// (as aio draws it for its window).
+const MONOGRAM_PX: u32 = 256;
+
+/// The monogram of an app with no icon (aio's generated one): `label`'s
+/// letter in `hue`, as a PNG in `dir`, drawn again only when they change.
+fn monogram(dir: &Path, label: &str, hue: u16) -> std::io::Result<std::path::PathBuf> {
+    let (png, key) = (dir.join("monogram.png"), dir.join("monogram.key"));
+    let want = format!("{label}\n{hue}\n{MONOGRAM_PX}\n{}\n", env!("CARGO_PKG_VERSION"));
+    if !png.is_file() || std::fs::read_to_string(&key).ok().as_deref() != Some(want.as_str()) {
+        std::fs::write(&png, aio_config::icon::icon_png(label, hue, MONOGRAM_PX))?;
+        std::fs::write(&key, want)?;
+    }
+    Ok(png)
 }
 
 /// Write the shell files into `dir` (mode 0700: the socket next to them is
@@ -329,11 +365,17 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
                 Some((dir.join("icon.png"), size))
             }
             None => {
-                eprintln!("[aio] {}: the window icon is not a PNG; none is shown", dirs.id);
+                eprintln!("[aio] {}: the window icon is not a PNG; Electron's is shown", dirs.id);
                 None
             }
         },
-        None => None,
+        // None of its own: its monogram (aio's), so no window, taskbar
+        // entry or tray wears Electron's logo.
+        None => {
+            let label = if win.title.is_empty() { dirs.id.as_str() } else { win.title };
+            let hue = instance::LOOK.get().map_or_else(|| aio::colors::hue(&dirs.id), |l| l.0);
+            Some((monogram(&dir, label, hue)?, (MONOGRAM_PX, MONOGRAM_PX)))
+        }
     };
     let socks = aio::paths::sockets(&dirs.id, &dirs.data)?;
     let (sock, ctl_sock, hand) =
@@ -388,13 +430,16 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         // What cells tell the people using the app is shown by this window.
         let here = tokio::runtime::Handle::current();
         aio::tell::show_with(move |t| desktop::show(&here, t));
+        let shown = icon.as_ref().map(|(p, _)| p.clone());
         let rt = tokio::task::spawn_blocking(move || {
             let go_back = |id: &str| update::go_back(id);
             let back = back.as_deref().map(|id| move || go_back(id));
+            let shown = shown.as_deref();
             runtime::ensure_as(
                 win.title,
                 &dl_colors,
                 at,
+                shown,
                 dl_image,
                 back.as_ref().map(|f| f as &dyn Fn() -> std::io::Result<()>),
             )
@@ -1131,6 +1176,35 @@ mod tests {
         assert!(!page(&Window { viewport: Some(""), ..Default::default() }).contains(r#"name="viewport""#));
         let p = page(&Window { lang: Some(r#""><script>x"#), ..Default::default() });
         assert!(p.contains(r#"lang="&quot;&gt;&lt;script&gt;x""#), "a hostile value stays in its attribute");
+    }
+
+    #[test]
+    fn every_window_wears_the_apps_icon_or_its_monogram_and_a_browser_tab_too() {
+        let png: &'static [u8] = b"\x89PNG\r\n\x1a\n";
+        let mut cfg = aio::config::Config::default();
+        cfg.app.name = "Notes".into();
+        assert_eq!(Window::of(&cfg).icon, None, "none of its own: the shell draws its monogram");
+        cfg.app.icon = png;
+        assert_eq!(Window::of(&cfg).icon, Some(png));
+        // aio's /__aio/icon: a browser tab's favicon; the window's page needs none.
+        let win = Window::of(&cfg);
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let link = format!(r#"<link rel="icon" type="image/png" href="data:image/png;base64,{b64}">"#);
+        assert!(page_of(&win, "", "'self'").contains(&link));
+        assert!(!page(&win).contains("rel=\"icon\""));
+        let tab = page_of(&Window { title: "Notes", ..Default::default() }, "", "'self'");
+        assert!(
+            tab.contains(r#"<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgo"#),
+            "else its monogram"
+        );
+        // The window wears the monogram, drawn once while its letter and hue stay.
+        let d = tempfile::tempdir().unwrap();
+        let p = monogram(d.path(), "Notes", 210).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), aio_config::icon::icon_png("Notes", 210, MONOGRAM_PX));
+        std::fs::write(&p, b"kept").unwrap();
+        assert_eq!(std::fs::read(monogram(d.path(), "Notes", 210).unwrap()).unwrap(), b"kept");
+        assert_ne!(std::fs::read(monogram(d.path(), "Notes", 20).unwrap()).unwrap(), b"kept", "a new hue: drawn again");
     }
 
     #[test]

@@ -53,6 +53,18 @@ pub struct App {
     /// The page's direction, `<html dir>`. Never guessed from `lang`.
     #[serde(default)]
     pub dir: Dir,
+    /// The window's own icon, `assets/icon.png` beside `aio.toml`, put in
+    /// by `aio::config!()`; empty: none (the desktop shell then draws the
+    /// monogram, `aio::icon`, in the app's hue).
+    #[serde(skip)]
+    pub icon: &'static [u8],
+}
+
+impl App {
+    /// The name the monogram draws: the app's, else its id.
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() { &self.id } else { &self.name }
+    }
 }
 
 /// `[app] dir`: which way the page's text runs.
@@ -1213,6 +1225,12 @@ pub fn find(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 impl Config {
+    /// The app's one hue (aio's `hue ?? appId`): `[ui] hue`, else its id's
+    /// (`icon::hue`). Its page, icon, splash and download window share it.
+    pub fn hue(&self) -> u16 {
+        self.ui.hue.unwrap_or_else(|| crate::icon::hue(&self.app.id))
+    }
+
     /// The config as the Rust expression that makes it (paths from `aio::`).
     pub fn rust(&self) -> String {
         let mut o = String::new();

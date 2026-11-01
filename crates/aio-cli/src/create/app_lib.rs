@@ -32,7 +32,8 @@ aio::client!(Counter, counter);
 pub fn App() -> Element {
     use_live();
     let n = *part(|c| &c.count);
-    let theme = aio::kit::theme_css(aio::kit::theme::hue(env!("CARGO_PKG_NAME")));
+    // The app's one hue (`[ui] hue`, else its id's): its icon's and splash's too.
+    let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
         // `false`: the light theme (`true`: dark). First the kit's theme (what
         // `aio::ui::btn` and the kit's components are drawn with), then yours.

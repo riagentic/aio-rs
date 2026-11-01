@@ -429,12 +429,19 @@ pub fn label(app: &App) -> &str {
     if app.name.is_empty() { &app.id } else { &app.name }
 }
 
-/// The icon of an app that has none: its monogram (`icon`), 256 px, in the
-/// target dir.
-fn default_icon(target: &Path, app: &App) -> Result<PathBuf, String> {
+/// The icon of an app that has none, in the target dir: its monogram
+/// (`aio::icon`) in the app's hue as a 512 px PNG and an SVG beside it (aio's
+/// `writeDefaultIcon`), and for a Mac an `.icns` drawn at each slot's size.
+fn default_icon(target: &Path, app: &App, hue: u16, mac: bool) -> Result<PathBuf, String> {
     let p = target.join("aio").join(format!("{}-icon.png", app.id));
-    std::fs::create_dir_all(p.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
-    std::fs::write(&p, crate::icon::icon_png(label(app), &app.id, 256)).map_err(|e| e.to_string())?;
+    let e = |e: std::io::Error| e.to_string();
+    std::fs::create_dir_all(p.parent().ok_or("bad path")?).map_err(e)?;
+    std::fs::write(&p, aio_config::icon::icon_png(label(app), hue, 512)).map_err(e)?;
+    std::fs::write(p.with_extension("svg"), aio_config::icon::svg(label(app), hue, 512)).map_err(e)?;
+    match mac {
+        true => std::fs::write(p.with_extension("icns"), crate::icon::icon_icns(label(app), hue)).map_err(e)?,
+        false => _ = std::fs::remove_file(p.with_extension("icns")),
+    }
     Ok(p)
 }
 
@@ -529,11 +536,18 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
     let (os, cross) = (p.os, (p != host).then_some(p));
     let windows = os == "windows";
     let target = Path::new(meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?);
-    // The exe wears the app's icon (its own, else its monogram drawn per size).
+    let dir = app_dir(&pkg)?;
+    for hint in crate::icon::hints(&dir) {
+        eprintln!("ax build: {hint}");
+    }
+    // The exe wears the app's icon: its own `assets/icon.ico` as it is, else its
+    // `icon.png` scaled, else its monogram drawn per size.
+    let read = |p: &Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let exe_icon = match (windows, &app.icon) {
         (false, _) => None,
-        (true, Some(p)) => Some(crate::icon::ico_from_png(&std::fs::read(p).map_err(|e| e.to_string())?)?),
-        (true, None) => Some(crate::icon::icon_ico(label(&app), &app.id)),
+        (true, _) if dir.join("assets/icon.ico").is_file() => Some(read(&dir.join("assets/icon.ico"))?),
+        (true, Some(p)) => Some(crate::icon::ico_from_png(&read(p)?)?),
+        (true, None) => Some(crate::icon::icon_ico(label(&app), cfg.hue())),
     };
     let exe_icon = exe_icon
         .map(|ico| {
@@ -542,7 +556,7 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
         })
         .transpose()?;
     if app.icon.is_none() {
-        app.icon = Some(default_icon(target, &app)?);
+        app.icon = Some(default_icon(target, &app, cfg.hue(), os == "macos")?);
     }
     eprintln!("ax build: {} {} for {} (release)…", app.name, app.version, p.name);
     if let Some(did) = crate::css::step(&cfg, &app_dir(&pkg)?)? {
