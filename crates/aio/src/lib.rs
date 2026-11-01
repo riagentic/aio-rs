@@ -567,8 +567,8 @@ pub trait Cell: CellData {
     /// `#[coalesce]` methods: a cursor, a scroll, a selection, called many
     /// times a second (every plain method of a `#[cell(coalesce)]` cell).
     /// Each call shows its state at once, without a write; a run of them
-    /// goes into the log [`PERSIST_DEBOUNCE`] after its first call (aio's
-    /// debounced persistence), or when a call that can't wait (one with an
+    /// goes into the log `[data] coalesce_ms` (default [`PERSIST_DEBOUNCE`])
+    /// after its first call (aio's debounced persistence), or when a call that can't wait (one with an
     /// effect, a schedule, an id) or a time-travel step comes, or the app
     /// closes: as one event, its last call, when that alone ends where the
     /// run did (else call by call). A call that changes nothing logs

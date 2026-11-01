@@ -497,11 +497,14 @@ pub struct Ask {
     /// A debug build: a ported app's `[home] dev` applies ([`plan_app`]
     /// asks it in a debug build of the app).
     pub dev: bool,
+    /// `--no-persist` (aio's): this run keeps its state in memory only.
+    pub no_persist: bool,
 }
 
 /// The flags aio takes from a launch for itself, spelled once: a flag
 /// with `=` takes a value (`--home=<dir>` or `--home <dir>`).
-pub const FLAGS: [&str; 7] = ["--home=", "--profile=", "--instance=", "--takeover", "--port=", "--host=", "--expose"];
+pub const FLAGS: [&str; 8] =
+    ["--home=", "--profile=", "--instance=", "--takeover", "--port=", "--host=", "--expose", "--no-persist"];
 
 impl Ask {
     /// A launch's `args` without aio's own [`FLAGS`] (and their values), in
@@ -531,6 +534,7 @@ impl Ask {
             match arg.as_str() {
                 "--takeover" => a.takeover = true,
                 "--expose" => a.expose = true,
+                "--no-persist" => a.no_persist = true,
                 _ => {}
             }
             let (flag, inline) = arg.split_once('=').map_or((arg.as_str(), None), |(f, v)| (f, Some(v)));
@@ -839,6 +843,7 @@ mod tests {
             "9000",
             "--host=0.0.0.0",
             "--expose",
+            "--no-persist",
         ]))
         .unwrap();
         let want = Ask {
@@ -850,6 +855,7 @@ mod tests {
             host: Some("0.0.0.0".into()),
             expose: true,
             dev: false,
+            no_persist: true,
         };
         assert_eq!(a, want);
         assert_eq!(Ask::parse(&args(&["--verbose", "x"])).unwrap(), Ask::default());
