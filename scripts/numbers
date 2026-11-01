@@ -13,7 +13,8 @@ What is measured, and where the docs give it:
   scripts/dx-metrics measures them (that script's `measure`, in a
   temporary folder; nothing is written to scripts/dx-trend.csv).
 - docs/performance.md "Measured": a held key over a 1000-row list,
-  `cargo test -p aio-rs --test list_speed -- --nocapture`.
+  `cargo test -p aio-rs -F kit --test list_speed -- --nocapture` (it draws in
+  the Electron runtime `ax setup` fetches).
 
 Expect the shape, not the decimals: the docs' numbers are one run on one
 machine with other work beside it. Compare against aio, Tauri or Dioxus
@@ -84,7 +85,7 @@ def machine():
 
 
 def list_speed():
-    p = subprocess.run(["cargo", "test", "--locked", "-q", "-p", "aio-rs", "--test", "list_speed", "--", "--nocapture"],
+    p = subprocess.run(["cargo", "test", "--locked", "-q", "-p", "aio-rs", "-F", "kit", "--test", "list_speed", "--", "--nocapture"],
                        cwd=ROOT, capture_output=True, text=True)
     if p.returncode:
         sys.exit(f"numbers: list_speed failed:\n{p.stdout[-3000:]}{p.stderr[-3000:]}")
