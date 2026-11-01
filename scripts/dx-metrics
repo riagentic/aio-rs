@@ -155,12 +155,45 @@ def host():
     return next(l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("host: "))
 
 
+def idle(pid):
+    """Whether process `pid` used no CPU over the next 50 ms (Linux; elsewhere, yes)."""
+    stat = pathlib.Path(f"/proc/{pid}/stat")
+    cpu = lambda: sum(map(int, stat.read_text().rsplit(")", 1)[1].split()[11:13]))  # noqa: E731 utime, stime
+    try:
+        before = cpu()
+        time.sleep(0.05)
+        return cpu() == before
+    except (OSError, ValueError):
+        return True
+
+
+def building(root):
+    """Whether a build runs under process `root`: a cargo, rustc or linker
+    among its descendants (Linux; elsewhere, no)."""
+    procs = {}
+    for stat in pathlib.Path("/proc").glob("[0-9]*/stat"):
+        try:
+            t = stat.read_text()
+            procs[int(stat.parent.name)] = (t[t.index("(") + 1:t.rindex(")")], int(t.rsplit(")", 1)[1].split()[1]))
+        except (OSError, ValueError):
+            continue
+    tree, more = {root}, True
+    while more:
+        kids = {p for p, (_, parent) in procs.items() if parent in tree} - tree
+        tree, more = tree | kids, bool(kids)
+    tools = ("cargo", "rustc", "cc", "ld", "ld.lld", "rust-lld", "mold")
+    return any(procs[p][0] in tools for p in tree if p in procs)
+
+
 def live(aio, app, env, home):
     """Each of `EDITS`, saved while `ax dev` runs the app headless: seconds
     from the save to the page showing it (polled in the page every 5 ms).
     None without dx's hot-patching (a rebuild and restart is not this)."""
     env = env | {"AIORT_ELECTRON_ARGS": f"--ozone-platform=headless {env.get('AIORT_ELECTRON_ARGS', '')}".strip()}
-    log = app.parent / "dev.out"
+    # Outside the checkout: dx watches its tree, and each line written would
+    # be a change for it to handle while an edit is timed.
+    logs = tempfile.TemporaryDirectory(prefix="aio-dx-log-")
+    log = pathlib.Path(logs.name) / "dev.out"
     with log.open("w") as out:
         dev = subprocess.Popen([aio, "dev", NAME, "--display", "current", "--home", home], cwd=app, env=env,
                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
@@ -178,8 +211,7 @@ def live(aio, app, env, home):
         evaluate = [aio, "eval", NAME, None, "--home", home]
         page = lambda js: subprocess.Popen(evaluate[:3] + [js] + evaluate[4:], cwd=app, env=env,  # noqa: E731
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        answer = lambda p: p.communicate()[0].strip().strip('"')  # noqa: E731
-        while answer(page("1")) != "1":
+        while page("1").communicate()[0].strip() != "1":
             if time.monotonic() > end:
                 fail("its page doesn't answer")
             time.sleep(0.2)
@@ -189,26 +221,35 @@ def live(aio, app, env, home):
             text = f.read_text()
             if old and old not in text:
                 fail(f"the template has no {old} in {path} to edit")
-            # The page's poller is armed before the save, and its answer says
-            # so: a busy machine's slow `ax eval` start is not timed as the edit.
-            arm = (f"(() => {{ window.__dxShown = null; const t = setInterval(() => {{ try {{ if ({shows}) "
-                   f"{{ clearInterval(t); window.__dxShown = Date.now(); }} }} catch (_) {{}} }}, 5); return 'armed'; }})()")
-            if answer(page(arm)) != "armed":
-                fail("the page's poller didn't start")
+            # The save waits until the page's poller runs: the poller says so
+            # in the log (no other process to ask), so under load the `ax
+            # eval` start is not timed as the edit and nothing starts during it.
+            armed = f"[dx-metrics] armed {col}"
+            js = (f"new Promise(r => {{ const t = setInterval(() => {{ try {{ if ({shows}) "
+                  f"{{ clearInterval(t); r(Date.now()); }} }} catch (_) {{}} }}, 5); console.warn('{armed}'); }})")
+            waiter = page(js)
+            # …once the edit before is done with (`ax dev` said its burst, no
+            # build of it runs: dx patches a stylesheet in too) and the waiter
+            # has nothing left to do: their work would compete with the edit's.
+            done = len(row)
+            while (armed not in said() or said().count(" changed\n") < done or building(dev.pid)
+                   or not idle(waiter.pid)):
+                if waiter.poll() is not None or time.monotonic() > end:
+                    fail("the page's poller didn't start")
+                time.sleep(0.02)
             saved = time.time()
             f.write_text(text.replace(old, new, 1) if old else text + new)
-            # When it showed is the page's own stamp: how long asking takes is not timed.
-            shown = None
-            while shown is None:
-                if time.time() > saved + 60:
-                    fail(f"{path}: the edit didn't show in 60 s")
-                time.sleep(0.05)
-                shown = json.loads(answer(page("window.__dxShown")) or "null")
-            row[col] = shown / 1000 - saved
+            try:
+                shown, _ = waiter.communicate(timeout=60)
+                row[col] = json.loads(shown) / 1000 - saved
+            except (subprocess.TimeoutExpired, ValueError):
+                waiter.kill()
+                fail(f"{path}: the edit didn't show in 60 s")
         return row
     finally:
         dev.terminate()
         dev.wait(timeout=30)
+        logs.cleanup()
 
 
 def du_mb(path):
