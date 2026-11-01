@@ -242,7 +242,13 @@ mod tests {
         let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
         let dir = d.path().join("shell");
         crate::install(&dir, "splashed", &crate::Window { title: "Splashed", ..Default::default() }).unwrap();
-        let s = Splash { min_ms: 900, ..splash("assets/splash.png", Some("Starting {title}")) };
+        // Rounded, faded: the clear window and the fade run in the real runtime too.
+        let s = Splash {
+            min_ms: 900,
+            radius: 10,
+            fade_ms: Some(150),
+            ..splash("assets/splash.png", Some("Starting {title}"))
+        };
         // Built in: the Windows lane runs this binary away from the source tree.
         let s = Splash { png: include_bytes!("../../aio/tests/fixtures/splash.png"), ..s };
         install(&dir, Some(&s), "Splashed", &colors(210, None)).unwrap();
