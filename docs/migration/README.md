@@ -331,17 +331,17 @@ Rename it (`begin`) when porting.
 | `watch` | `ax dev <app>` (edits patch in or restart it) |
 | `instances` | `ax apps`, `ax status <app>` |
 | `state`, `expect`, `snapshot`, `migrations`, `replay`, `record`, `timetravel` | the same |
-| `timeline`, `actions` | `ax events <app> [cell] --diff`, `ax timetravel` |
+| `timeline`, `actions` | `ax timeline <app> [cell]` (a stopped app's too), `ax events`, `ax timetravel` |
 | `dispatch` | `ax call <app> <cell> <method> [arg…]` (`--as user` as a user; the operator's own door otherwise) |
-| `persist` | not needed: every commit is saved; `--drop`: `#[cell(retire = [..])]` |
+| `persist`, `persist --drop` | `ax persist <app>` (what a coalesced run holds, written now), `--drop <cell>`; or `#[cell(retire = [..])]` |
 | `ui`, `open`, `data`, `config`, `backup`, `restore`, `report`, `clients` | the same |
 | `client <index>` | `ax components <app>` |
 | `surface`, `trigger`, `shot`, `eval`, `preview`, `peer`, `feedback` | the same |
 | `where`, `check` | none: `cargo build` checks every build; which code runs where is `#[cfg]` ([dev](../build/dev.md)) |
-| `migrate`, `fix`, `link` | `ax lint --fix` (aio-rs's own layout upgrades); no `dep/aio` symlink |
-| `testgen` | none: `TestUi` names are checked at run time; `ax record` writes a test from the running app |
+| `migrate`, `fix`, `link` | `ax lint --from <version>`, `--tests`, `ax lint --fix` (aio-rs's own layout upgrades), `ax doctor --harden`; no `dep/aio` symlink |
+| `testgen` | `ax testgen <app>`: a Rust name table, a renamed element a compile error |
 | `sql`, `tables`, `schedules`, `logs`, `errors`, `metrics`, `heap`, `cost`, `health`, `doctor` | the same |
-| `top` | `ax heap <app> --watch` |
+| `top` | `ax top <app> [secs]` |
 | `discover`, `profile`, `pair`, `pin`, `auth`, `trust` | the same |
 | `create`, `build`, `dev`, `lab`, `theme`, `prune`, `remove`, `installed`, `version`, `agent`, `help` | the same |
 | `compile` | `ax build <app>` |
