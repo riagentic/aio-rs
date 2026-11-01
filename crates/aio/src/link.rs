@@ -282,12 +282,14 @@ pub(crate) async fn send_text(w: &mut Sock, text: String) -> std::result::Result
 pub(crate) struct View {
     pub(crate) seq: u64,
     pub(crate) shown: Value,
+    /// The view's JSON size when last measured (0: not yet), for [`whole`].
+    pub(crate) size: usize,
 }
 
 impl View {
     pub(crate) fn of<T: Cell>(h: &Handle<T>, viewer: &crate::Caller) -> Self {
         let (seq, st) = h.snapshot();
-        Self { seq, shown: st.project(viewer) }
+        Self { seq, shown: st.project(viewer), size: 0 }
     }
 
     fn full(&self) -> Value {
@@ -307,7 +309,8 @@ impl View {
             // Nothing visible changed: the client's patch chain stays as is.
             return None;
         }
-        let whole = whole(&ops, &now.shown, full_percent);
+        let mut size = self.size;
+        let whole = whole(&ops, full_percent, &mut size, || patch::json_len(&now.shown));
         let msg = match whole {
             true => now.full(),
             false => {
@@ -315,7 +318,7 @@ impl View {
                 json!({ "t": "patch", "prev": self.seq, "seq": now.seq, "ops": ops, "digest": digest })
             }
         };
-        *self = now;
+        *self = View { size, ..now };
         Some(msg)
     }
 }
@@ -323,14 +326,20 @@ impl View {
 /// A patch shorter than this always goes as a patch: the view isn't weighed.
 const WEIGH_FROM: usize = 256;
 
-/// Is the view `shown` cheaper to send than `ops` (aio's
-/// `fullStateThreshold`): the patch is over `percent` of the view (pure).
-pub(crate) fn whole(ops: &[patch::Op], shown: &Value, percent: u32) -> bool {
+/// Is the view cheaper to send than `ops` (aio's `fullStateThreshold`): the
+/// patch is over `percent` of the view's size. The view is measured
+/// (`view`) only when the patch may be that big: a patch under half that
+/// share of its size as last measured (`size`, kept here) is a patch.
+pub(crate) fn whole(ops: &[patch::Op], percent: u32, size: &mut usize, view: impl FnOnce() -> usize) -> bool {
     if percent == 0 {
         return true;
     }
-    let n = serde_json::to_string(ops).map_or(usize::MAX, |s| s.len());
-    n >= WEIGH_FROM && n as u128 * 100 > shown.to_string().len() as u128 * u128::from(percent)
+    let (n, p) = (patch::json_len(&ops) as u128, u128::from(percent));
+    if n < WEIGH_FROM as u128 || (*size > 0 && n * 200 <= *size as u128 * p) {
+        return false;
+    }
+    *size = view();
+    n * 100 > *size as u128 * p
 }
 
 /// When a link's next change goes (aio's `syncIntervalMs`): the first of a
@@ -1013,5 +1022,25 @@ pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::resu
             serde_json::to_value(&st).map_err(|e| e.to_string())
         }
         _ => h.store(|s| s.shape()).map(|shape| json!({ "v": T::VERSION, "shape": shape })).map_err(|e| e.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_view_is_weighed_only_when_a_patch_may_be_its_share() {
+        let op = |n: usize| vec![patch::Op::Set { path: vec![], value: json!("x".repeat(n)) }];
+        let never = || -> usize { panic!("measured") };
+        let mut size = 0;
+        assert!(whole(&op(1), 0, &mut size, never), "0: always the view");
+        assert!(!whole(&op(10), 50, &mut size, never), "a small patch is a patch, unmeasured");
+        assert!(whole(&op(600), 50, &mut size, || 1000) && size == 1000, "over half of 1000");
+        assert!(!whole(&op(300), 50, &mut size, || 1000), "under half: measured, a patch");
+        size = 100_000;
+        assert!(!whole(&op(1000), 50, &mut size, never), "far under its share of the last size");
+        assert!(whole(&op(40_000), 50, &mut size, || 50_000), "the view shrank: measured again");
+        assert_eq!(size, 50_000);
     }
 }

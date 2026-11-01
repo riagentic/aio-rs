@@ -83,6 +83,22 @@ fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>) {
     }
 }
 
+/// Bytes of `v` as JSON, counted without making the text.
+pub(crate) fn json_len(v: &impl serde::Serialize) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut c = Count(0);
+    serde_json::to_writer(&mut c, v).map_or(usize::MAX, |()| c.0)
+}
+
 /// Same-length arrays, item by item.
 fn items(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>) {
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
@@ -115,7 +131,7 @@ fn resized(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>) {
     let at = |path: &Vec<Step>, i: usize| [&path[..], &[Step::Index(i)]].concat();
     let mut best = None::<(usize, Vec<Op>)>;
     let mut weigh = |cand: Vec<Op>| {
-        let size = serde_json::to_string(&cand).map_or(usize::MAX, |s| s.len());
+        let size = json_len(&cand);
         if best.as_ref().is_none_or(|(n, _)| size < *n) {
             best = Some((size, cand));
         }
@@ -135,7 +151,7 @@ fn resized(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>) {
     weigh(common);
     let whole = Op::Set { path: path.clone(), value: Value::Array(b.to_vec()) };
     match best {
-        Some((size, cand)) if size < serde_json::to_string(&[&whole]).map_or(0, |s| s.len()) => ops.extend(cand),
+        Some((size, cand)) if size < json_len(&[&whole]) => ops.extend(cand),
         _ => ops.push(whole),
     }
 }

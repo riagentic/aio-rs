@@ -213,13 +213,13 @@ async fn catch_up<T: Cell>(
 ) -> Result<(), String> {
     let now = View::of(h, viewer);
     let mut ops = crate::patch::diff(&cells::<T>(&view.shown), &cells::<T>(&now.shown));
-    *view = now;
+    *view = View { size: view.size, ..now };
     ops.retain(|op| subs.as_ref().is_none_or(|s| cell_of(op).is_some_and(|c| s.iter().any(|x| x == c))));
     if !ops.is_empty() {
         // Over aio's `fullStateThreshold` of the view: the view instead.
-        let all = shown(cells::<T>(&view.shown), subs);
-        let msg = match crate::link::whole(&ops, &all, full_percent) {
-            true => json!({ "v": 2, "t": "state", "d": all, "s": subs }),
+        let all = || shown(cells::<T>(&view.shown), subs);
+        let msg = match crate::link::whole(&ops, full_percent, &mut view.size, || crate::patch::json_len(&all())) {
+            true => json!({ "v": 2, "t": "state", "d": all(), "s": subs }),
             false => enc("patches", wire_ops(&ops)),
         };
         pushes.push(&msg, crate::store::now_ms());
