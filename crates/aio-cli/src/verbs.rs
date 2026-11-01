@@ -20,12 +20,24 @@ const fn v(name: &'static str, usage: &'static str, about: &'static str) -> Verb
 pub const VERBS: &[Verb] = &[
     v(
         "create",
-        "create <name> [--template t] [--id id] [--aio dir] [--force]",
-        "a new app in ./<name> that runs, tests and builds as it is (its own
-workspace, aio.toml, the agent brief's pointer); --template app (a
-window, the default), cli (a command-line tool) or service (served, no
-window); --id: its id (its data's home; default: the name, refused when an
-installed app has it); --aio: the aio-rs checkout it builds on (default: this ax's)",
+        "create <name> [--template t] [--id id] [--aio-version v] [--aio dir] [--target a,b] [--css tailwind] [--force]",
+        "a new app in ./<name> that runs, tests and builds as it is, on any
+machine after a clone (its own workspace and git repository, aio.toml,
+README, the agent brief's pointer); --template app (a window, the
+default), cli (a command-line tool) or service (served, no window);
+--id: its id (its data's home; default: the name, refused when an
+installed app has it); --aio-version: its aio-rs release from git (default:
+this ax's; main, latest); --aio: an aio-rs checkout instead, named relative
+to the app; --target: its [build] targets (ax build --list); --css
+tailwind: Tailwind writes its stylesheet; a failure leaves nothing behind",
+    ),
+    v(
+        "framework",
+        "framework [version] [--aio dir]",
+        "the app's aio-rs (run in its folder): where its Cargo.toml files take
+it from; version (0.2.0, main, latest): every one moved to that release
+of aio-rs from git, --aio: to that checkout (relative), Cargo.lock
+following (a clone made on another machine: ax framework <version>)",
     ),
     v(
         "dev",
@@ -385,6 +397,22 @@ shared runtime and dx (ax dev's hot-patching) prebuilt and checked, and
 lists the optional tools; each missing one with the command that gets it;
 exit 1 while a needed one is missing; --check: look only, fetch nothing",
     ),
+    v(
+        "upgrade",
+        "upgrade [version] [--aio dir]",
+        "ax itself to aio-rs's newest release (or version), by the release's
+install script, checked against its SHA256SUMS (it checks the archive's
+SHA-256 before anything runs); --aio: ax built from that checkout instead
+(cargo install; plain ax upgrade returns to a release); apps keep their
+own aio-rs (ax framework)",
+    ),
+    v(
+        "uninstall",
+        "uninstall [--tools]",
+        "ax out of cargo's bin folder; your apps, their data and installs stay;
+--tools: also what ax fetched and built in the tool home (tools/, its
+build folder target/)",
+    ),
     v("runtime", "runtime [--fetch]", "where the shared runtime is (fetch it if missing); --prune: ax prune"),
     v("pin", "pin <app> [--plain]", "a pairing code from the running app (8 digits; 6 with --plain)"),
     v("pair", "pair <app> <host:port> <code>", "pair this device with an app's server"),
@@ -434,6 +462,10 @@ credential (--out writes it 0600); hand it to a client",
 /// Verbs that moved or aren't there, and what to do instead.
 const MOVED: &[(&str, &str)] = &[
     ("dispatch", "ax calls a method with `ax call <app> <cell> <method> [arg…]`"),
+    (
+        "fix",
+        "a clone builds as it is (aio-rs from git); ax framework <version> moves an app's aio-rs, --aio <dir> to a checkout",
+    ),
     ("prune versions", "ax has no version store to prune: an app pins aio-rs in its Cargo.lock"),
     ("theme", "ax theme adopt <app> [--force]: aio-rs's theme into the app, as its own file"),
 ];

@@ -7,19 +7,15 @@ version may break things.
 
 ## [Unreleased]
 
-### Android
+### Changed
 
-- **Fixed: a crash at start on Android 10.** The activity's insets
-  called API-30 methods with minSdk 29; Android 10 now takes the older
-  path. A WebView too old for the page (Android 10's stock 74) says so on
-  the screen instead of a blank page.
-- **A port installs over the aio APK, its data with it**: the version
-  code is aio's (`major·10⁸ + minor·10⁶ + patch`; every earlier aio-rs
-  code is lower, so 0.1 APKs update too), a port (`[app] port_of`) takes
-  aio's application id (`app.aio.<id>`) and, with no keystore named, the
-  machine's Android debug key aio signs with, and at its first start the
-  aio APK's state (`filesDir/aio-store`) becomes its `state.db` once
-  (`aio::compat::data::import_android`).
+- **`ax create` writes nothing of the machine it ran on**: the app takes
+  aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
+  commit), so a clone builds anywhere and a prebuilt `ax` needs no
+  checkout; `--aio <dir>` names a checkout relative to the app, refused
+  through the root. `AGENTS.md` holds the rules and the loop inline and
+  links the guide by URL, no local path
+  ([where an app gets aio-rs from](docs/basics/setup.md#where-an-app-gets-aio-rs-from)).
 - **`ax dev --android` installs once**: a thin dev APK beside the real app
   (`<id>.dev`, "(dev)") shows the page `ax dev --web` serves over
   `adb reverse`, and each edit reloads it; `--native` (or an app without a
@@ -27,9 +23,30 @@ version may break things.
   emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
   ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
   the app's log comes to the terminal (`[device]`).
-- **Fixed: the dev page's scripts ran into each other** (`ax dev --web`,
-  and so `--android`): the splash script's `(() => …)()` called the live
-  reload's on its result, an error on every dev page.
+
+### Added
+
+- `ax create --aio-version <v|main|latest>`, and `ax framework [version]
+  [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
+  `am pin`; all or nothing).
+- `ax create` makes a git repository with its first commit (not inside
+  another), a `README.md`, `.gitattributes` (`eol=lf`), a `.gitignore`
+  that keeps `.env` and release keys out; `--target a,b` writes
+  `[build] targets`, `--css tailwind` wires Tailwind; a failure leaves
+  nothing behind (`--force`: what it wrote over is put back); `--json`
+  gives the files and next steps; aio.toml no longer claims to show every
+  default, it links them.
+- `ax upgrade [version] [--aio dir]`: `ax` from aio-rs's newest (or that)
+  release by its install script, checked against `SHA256SUMS`, or built
+  from a checkout; `ax uninstall [--tools]`: `ax` (and what it fetched)
+  gone, apps and data kept ([setup](docs/basics/setup.md#upgrading-ax)).
+- **A port installs over the aio APK, its data with it**: the version
+  code is aio's (`major·10⁸ + minor·10⁶ + patch`; every earlier aio-rs
+  code is lower, so 0.1 APKs update too), a port (`[app] port_of`) takes
+  aio's application id (`app.aio.<id>`) and, with no keystore named, the
+  machine's Android debug key aio signs with, and at its first start the
+  aio APK's state (`filesDir/aio-store`) becomes its `state.db` once
+  (`aio::compat::data::import_android`).
 - `ax test <app> --android`: the emulator lane. `ax lab <app> android`:
   aio's emulator container with a browser viewer.
 - `ax build --android --debug` (debuggable, `chrome://inspect`);
@@ -40,14 +57,24 @@ version may break things.
 - `ax install --android` takes the app's own APK exactly (`notes` never
   installs `notes-pro`'s) and a universal one when there is none for the
   CPU.
-- The label is escaped as aapt reads it (`\`, a leading `?`/`@`), an
+- Android: the label is escaped as aapt reads it (`\`, a leading `?`/`@`), an
   unfilled `{{TOKEN}}` is named, an own `MainActivity.java` is checked for
   what the template's does, and `[build.android] strict` turns an overlay
   warning into an error.
-- Downloads: an http(s) link goes to Downloads (DownloadManager), a
+- Android downloads: an http(s) link goes to Downloads (DownloadManager), a
   `data:` one where the user picks. The phone's images show
   (`aio::ui::local_file_url`). `[build.splash]` takes `font`, `font_size`,
   `bold`, `fade_ms`.
+
+### Fixed
+
+- **Android: a crash at start on Android 10.** The activity's insets
+  called API-30 methods with minSdk 29; Android 10 now takes the older
+  path. A WebView too old for the page (Android 10's stock 74) says so on
+  the screen instead of a blank page.
+- **The dev page's scripts ran into each other** (`ax dev --web`,
+  and so `--android`): the splash script's `(() => …)()` called the live
+  reload's on its result, an error on every dev page.
 
 ## [0.1.0] - 2026-11-01
 

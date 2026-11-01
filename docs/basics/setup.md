@@ -49,18 +49,44 @@ cargo install --locked --path aio-rs/crates/aio-cli
 
 The package is `aio-rs-cli`, its binary `ax`.
 
-### Where an app gets aio-rs from
-
-An app `ax create` makes depends on an aio-rs source tree by path (aio-rs
-is not on crates.io). An `ax` built from a checkout uses that checkout.
-A prebuilt `ax` was built elsewhere, so it needs one named once per app:
+### Upgrading ax
 
 ```sh
-git clone https://github.com/riagentic/aio-rs
-ax create notes --aio aio-rs
+ax upgrade                    # to aio-rs's newest release
+ax upgrade 0.2.0              # to that release (again, if it is this one)
+ax upgrade --aio ../aio-rs    # ax built from a checkout (plain ax upgrade returns)
 ```
 
-Without `--aio`, a prebuilt `ax create` refuses and says this.
+`ax upgrade` takes the release's install script, checks its SHA-256
+against the release's `SHA256SUMS`, and runs it: the script checks the
+archive's own SHA-256 before anything is unpacked. An app keeps its own
+aio-rs until `ax framework` moves it (below).
+
+### Where an app gets aio-rs from
+
+aio-rs is not on crates.io: an app `ax create` makes takes it from git,
+at this `ax`'s release tag, in both of its `Cargo.toml` files:
+
+```toml
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.1.0", features = ["kit"] }
+```
+
+`Cargo.lock` pins the commit. A clone builds on any machine, with or
+without an aio-rs checkout, and nothing of the machine the app was made on
+is in it. To pick or change the version (aio's `am pin`):
+
+```sh
+ax create notes --aio-version 0.2.0   # another release (main: the branch; latest: the newest)
+ax framework                          # in the app: where each Cargo.toml takes aio-rs from
+ax framework 0.2.0                    # every one moved to that release, Cargo.lock with it
+ax framework --aio ../aio-rs          # to a checkout, co-developing aio-rs
+```
+
+`--aio <dir>` names the checkout relative to the app (`../aio-rs/crates`),
+never by its absolute path; the app and the checkout must share a folder
+below the root. A clone that holds such a path and has no checkout beside
+it: `ax framework <version>` moves it back to a release. A move cargo can't
+resolve (no such tag, no network) changes nothing.
 
 ## 3. ax setup
 
@@ -280,11 +306,14 @@ autostart `.desktop` entry); aio-rs adds no "start at login" switch.
 
 ### ax itself
 
-1. Delete `ax` (`ax.exe`) from `$CARGO_HOME/bin`.
-2. Delete what ax fetched: `electron/` and `tools/` in the tool home
-   ([where things are](#where-things-are)); the build folder `target/`
-   there can go too (ax builds it again).
-3. The rest of the tool home is your apps' data and installs.
+```sh
+ax uninstall            # ax out of $CARGO_HOME/bin
+ax uninstall --tools    # also tools/ and the build folder target/ in the tool home
+```
+
+Your apps, their data and installs stay (the rest of the tool home,
+[where things are](#where-things-are)). The shared Electron runtime is aio's
+store, shared with aio's apps: `ax prune` says what of it may go.
 
 ### An app
 
