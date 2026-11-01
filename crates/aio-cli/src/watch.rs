@@ -104,6 +104,12 @@ pub struct Watch {
     w: Arc<Mutex<Option<notify::RecommendedWatcher>>>,
 }
 
+/// `p` as the watcher names it: its real path (macOS' FSEvents says
+/// `/private/var/…` for `/var/…`), else as given.
+fn real(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
@@ -118,12 +124,12 @@ impl Watch {
                 let n = N.fetch_add(1, Relaxed);
                 let dir = std::env::temp_dir().join(format!("ax-watch-{}-{n}", std::process::id()));
                 std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join("sentinel"), "")).ok()?;
-                Some(dir.join("sentinel"))
+                Some(real(&dir).join("sentinel"))
             })
             .flatten();
         let shared = Arc::new(Shared {
             tx,
-            roots: roots.to_vec(),
+            roots: roots.iter().map(|r| real(r)).collect(),
             files: Mutex::default(),
             sentinel,
             heard: AtomicI64::new(now_ms()),
@@ -141,7 +147,7 @@ impl Watch {
         let mut known = self.shared.files.lock().unwrap_or_else(|e| e.into_inner());
         let dirs: BTreeSet<PathBuf> = known.iter().filter_map(|f| f.parent().map(Path::to_path_buf)).collect();
         let mut w = self.w.lock().unwrap_or_else(|e| e.into_inner());
-        for f in files {
+        for f in files.into_iter().map(|f| real(&f)) {
             if self.shared.roots.iter().any(|r| f.starts_with(r)) || !f.is_file() || !known.insert(f.clone()) {
                 continue;
             }
@@ -297,8 +303,10 @@ mod tests {
     #[test]
     fn it_hears_its_folders_and_the_files_it_was_given_and_again_once_revived() {
         let d = tempfile::tempdir().unwrap();
+        // What is heard is named by its real path (macOS: /private/var for /var).
+        let root = real(d.path());
         // An app that itself sits in a `target` folder is still heard.
-        let (src, other) = (d.path().join("target").join("src"), d.path().join("other"));
+        let (src, other) = (root.join("target").join("src"), root.join("other"));
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("notes.txt"), "a").unwrap();
