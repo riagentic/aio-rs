@@ -51,7 +51,7 @@ Each says what it found in words, with `--json` for scripts.
 | Cause | How you tell | Fix |
 |---|---|---|
 | no `use_live()` in the root component | calls from the view show at once, but changes from effects and schedules show only after the next click | call `use_live()` once in the root ([views](../ui/views.md)) |
-| a value read once, not in the render | it never changes after the first render | read it with `part(…)` in the render, not in `use_hook` |
+| a value read once, not in the render | it never changes after the first render | read it with `part(…)` in the render, not in `once` |
 | the copy is offline | `use_status()` says `Offline`, or `Blocked` (so many calls wait that new ones are refused) | it catches up on reconnect; `ax clients <server>` shows who is linked |
 | the view shows another copy than you think | `ax state <app> <cell>` differs from the window | name the copy: `<app>@<profile>`, `--instance`, the same `AIORT_DATA` |
 | a `visible` filter hides it from this user | `ax state <app> <cell> --as <user>` lacks it | that is the rule working; check the filter ([visibility](../state/visibility.md)) |
@@ -141,7 +141,7 @@ Nothing went red, yet something didn't happen:
 | a second launch shows nothing new | the app was running: a second launch hands over to the first and ends | that is by design; `--instance <n>` runs a private copy, `--takeover` asks the running one to stop and takes its place |
 | a server won't start: the port is in use | another process has `[server] listen`'s port | stop it, or `--port <n>` for this launch |
 | `ax dev` rebuilds and restarts on every edit | dx is missing, or the edit can't be patched (a new dependency, a changed type) | `ax setup` fetches dx; a rebuild for the rest is expected |
-| a CSS edit doesn't show under `ax dev` | the CSS is kept in `use_hook` (made once) | `aio::use_css!` in the render |
+| a CSS edit doesn't show under `ax dev` | the CSS is kept in `once` (made once) | `aio::use_css!` in the render |
 | `ax state` / `ax call` say the app isn't running | it runs from another home (a profile, an instance, `AIORT_DATA`) | name that copy: `notes@<profile>`, `--instance`, the same `AIORT_DATA` |
 | `ax shot`, `ax eval` can't reach the window | a release build has no dev door | run it with `ax dev`, or launch with `--cdp` (`ax start notes --cdp`) |
 | a UI test fails on a refusal at its end | `TestUi` / `TestCells` fail on refusals nobody looked at | take the expected ones with `failures()` ([testing](../testing/README.md)) |

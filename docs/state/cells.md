@@ -485,10 +485,10 @@ must survive a restart:
 | `#[cell(persist)]` | the app's `state.db`, never sent | data only this process uses |
 | a `#[transient]` field | memory, inside a saved cell | live status next to the data: a busy flag, a connection |
 | a cell opened with `Handle::memory()` | memory, its default on every start | scratch state of a tool or a test |
-| `static X: GlobalSignal<T>` | one window's views | a panel's layout, a filter shared by views |
-| `use_signal(..)` | one component | open or closed, hover, text being typed |
+| `static X: Global<T>` | one window's views | a panel's layout, a filter shared by views |
+| `signal(..)` | one component | open or closed, hover, text being typed |
 
-A Dioxus signal never reaches the log, the store, a test's replay or
+A view's signal never reaches the log, the store, a test's replay or
 another window; when a value must, make it cell state (a draft that must
 survive a restart is a field of a persisted cell, `#[coalesce]`d if it
 changes on every key). A limit: in a native app the store saves every
@@ -538,7 +538,7 @@ field. Signals in views: [views](../ui/views.md#local-state-and-hooks).
   `anyhow::Result`.
 - A method that panics: the call is refused like any other, and three
   panics within a minute stop the cell until the app restarts.
-- A value in a Dioxus signal that must survive a restart or reach another
+- A value in a view's signal that must survive a restart or reach another
   window: move it into a cell ([where state lives](#where-state-lives)).
 
 ## API

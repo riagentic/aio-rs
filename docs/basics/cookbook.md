@@ -90,12 +90,12 @@ assert_eq!(h.state().items, [Task { id: 1, text: "milk".into(), done: true }]);
 ## 2. View state the server never sees
 
 A filter, a sort order, an open tab: per window, never saved, never
-synced. That is Dioxus state, not a cell: `use_signal` in a component, or
-a `GlobalSignal` shared by the views of one window.
+synced. That is view state, not a cell: `signal` in a component, or
+a `Global` shared by the views of one window.
 
 ```rust,no_run
 use aio::act;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "tasks")]
 pub struct Tasks {
@@ -118,19 +118,19 @@ impl Tasks {
 aio::client!(Tasks, tasks);
 
 /// This window's filter: not in the cell, so not saved or sent anywhere.
-static OPEN_ONLY: GlobalSignal<bool> = Signal::global(|| false);
+static OPEN_ONLY: Global<bool> = Global::new(|| false);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
     let items = part(|t| &t.items);
-    let shown = items.iter().filter(|(_, done)| !OPEN_ONLY() || !done);
+    let shown = move || items.get().into_iter().filter(|(_, done)| !OPEN_ONLY.get() || !done);
     rsx! {
         button { "data-t": "add", onclick: move |_| _ = act!(add("tea".into())), "Add" }
         button { "data-t": "finish", onclick: move |_| _ = act!(finish(0)), "Finish first" }
-        label { input { r#type: "checkbox", "data-t": "open", checked: OPEN_ONLY(),
+        label { input { r#type: "checkbox", "data-t": "open", checked: OPEN_ONLY.get(),
             onchange: move |e| *OPEN_ONLY.write() = e.checked() } "Open only" }
-        ul { "data-t": "list", for (i, (text, _)) in shown.enumerate() { li { key: "{i}", "{text}" } } }
+        ul { "data-t": "list", for (i, (text, _)) in shown().enumerate() { li { key: "{i}", "{text}" } } }
     }
 }
 
@@ -141,7 +141,7 @@ ui.click("add");
 ui.click("finish");
 ui.check("open");
 assert_eq!(ui.text("list"), "tea");
-assert_eq!(HANDLE.peek().state().items.len(), 2, "the cell has both; the filter is the view's");
+assert_eq!(HANDLE.read_untracked().state().items.len(), 2, "the cell has both; the filter is the view's");
 # }
 ```
 
@@ -161,7 +161,7 @@ values only when the check finds nothing, and shows every error.
 ```rust,no_run
 use aio::act;
 use aio::kit::{Field, Input, Problems, use_form};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "members")]
 pub struct Members {
@@ -193,7 +193,7 @@ fn check(s: &Signup) -> Problems {
 }
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
     let f = use_form(Signup::default, check);
     rsx! {
@@ -216,10 +216,10 @@ fn App() -> Element {
 let mut ui = aio::testing::TestUi::new(App);
 ui.click("join");
 assert!(ui.text("form").contains("Two letters at least"), "the error shows on a submit");
-assert!(HANDLE.peek().state().names.is_empty(), "nothing was called");
+assert!(HANDLE.read_untracked().state().names.is_empty(), "nothing was called");
 ui.type_text("name", "Ada");
 ui.click("join");
-assert_eq!(HANDLE.peek().state().names, ["Ada"]);
+assert_eq!(HANDLE.read_untracked().state().names, ["Ada"]);
 # }
 ```
 
@@ -694,11 +694,11 @@ Render all three, so a signed-in app never flashes its sign-in form while
 the answer is on its way.
 
 ```rust,no_run
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 /// `None`: still asking; `Some(None)`: signed out; `Some(Some((id, role)))`.
 #[component]
-fn Account(who: Option<Option<(String, String)>>) -> Element {
+fn Account(who: Option<Option<(String, String)>>) -> View {
     rsx! {
         div { "data-t": "account",
             match who {
@@ -910,21 +910,21 @@ under the root's `GlobalKeys`. It stays quiet while typing in a field.
 
 ```rust,no_run
 use aio::kit::{GlobalKeys, use_global_key};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
-static PALETTE: GlobalSignal<bool> = Signal::global(|| false);
+static PALETTE: Global<bool> = Global::new(|| false);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     rsx! { GlobalKeys { Palette {} } }
 }
 
 #[component]
-fn Palette() -> Element {
+fn Palette() -> View {
     use_global_key("mod+k", |_| *PALETTE.write() = true); // Ctrl+K, ⌘K on macOS
     use_global_key("esc", |_| *PALETTE.write() = false);
     rsx! {
-        p { "data-t": "palette", if PALETTE() { "open" } else { "closed" } }
+        p { "data-t": "palette", if PALETTE.get() { "open" } else { "closed" } }
         input { "data-t": "search" }
     }
 }
@@ -949,12 +949,12 @@ assert_eq!(ui.text("palette"), "closed");
 A camera, a socket, a file handle. `aio::held::Held` opens one per key,
 shares it between holders and closes it when the last one lets go;
 `use_held` holds it for a view, re-opening when the key changes. Never
-open it in the render or in `use_drop`'s pair by hand.
+open it in the render or in `on_cleanup`'s pair by hand.
 
 ```rust,no_run
 use aio::held::{Held, State};
 use aio::kit::use_held;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::sync::OnceLock;
 
 /// Stands in for a device: opening takes a moment, closing is said.
@@ -969,16 +969,16 @@ fn cameras() -> &'static Held<String, String> {
 }
 
 #[component]
-fn App() -> Element {
-    let mut on = use_signal(|| true);
+fn App() -> View {
+    let on = signal(|| true);
     rsx! {
         button { "data-t": "toggle", onclick: move |_| on.toggle(), "Toggle" }
-        if on() { Preview { name: "front" } }
+        if on.get() { Preview { name: "front" } }
     }
 }
 
 #[component]
-fn Preview(name: String) -> Element {
+fn Preview(name: String) -> View {
     let text = match use_held(cameras(), Some(name)) {
         Some(State::Open(cam)) => cam.to_string(),
         Some(State::Failed(why)) => format!("failed: {why}"),
@@ -1006,17 +1006,17 @@ assert_eq!(cameras().len(), 0, "closed with its last holder");
 ## 19. Keep one broken panel from taking the page
 
 A component that fails with no boundary above it takes its whole tree.
-Dioxus's `ErrorBoundary` catches a child's render error and shows a
-fallback in its place; the rest of the page goes on.
+`ErrorBoundary` catches a child's render error and shows its `fallback`
+in its place; the rest of the page goes on.
 
 ```rust,no_run
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Dashboard() -> Element {
+fn Dashboard() -> View {
     rsx! {
         ErrorBoundary {
-            handle_error: |_: ErrorContext| rsx! { p { "data-t": "fallback", "This panel failed." } },
+            fallback: |_: String| rsx! { p { "data-t": "fallback", "This panel failed." } },
             Chart { data: "1,2,x".to_string() }
         }
         p { "data-t": "rest", "The rest works" }
@@ -1024,7 +1024,7 @@ fn Dashboard() -> Element {
 }
 
 #[component]
-fn Chart(data: String) -> Element {
+fn Chart(data: String) -> View {
     let points: Vec<i32> = data.split(',').map(str::parse).collect::<Result<_, _>>()?; // a render error
     rsx! { p { "{points.len()} points" } }
 }

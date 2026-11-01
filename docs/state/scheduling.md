@@ -386,7 +386,7 @@ skip all of that.
 
 | What | Where | Why |
 |---|---|---|
-| a frame-by-frame animation, a canvas, a game loop | the view: `aio::kit::use_frame`, a `use_signal` | frame work is rendering, not state |
+| a frame-by-frame animation, a canvas, a game loop | the view: `aio::kit::use_frame`, a `signal` | frame work is rendering, not state |
 | a cadence only this window needs (a clock, a beat) | the view: `aio::kit::use_interval` | a schedule runs in the app's process, for everyone |
 | a cursor, a scroll, a selection | a cell method with `#[coalesce]` | shown at once, written once per run ([coalesced writes](../persistence/README.md#coalesced-writes)) |
 | shared state that changes often (a price ticker) | a `shared` cell, fed by one effect | each commit that changes what a viewer sees is one patch to them |

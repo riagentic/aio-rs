@@ -25,6 +25,7 @@ and is many times slower than the aio app it replaces.
 5. [Data: the same state.db](#5-data-the-same-statedb)
 6. [The wire: aio pages, tools and apps](#6-the-wire-aio-pages-tools-and-apps)
 7. [Checklist](#7-checklist)
+8. [0.1 → 0.2: aio::ui instead of dioxus](#8-01--02-aioui-instead-of-dioxus)
 
 ## 1. Project and boot
 
@@ -127,7 +128,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `onInit` / `onDestroy` | `#[on_start]` / `#[on_stop]` |
 | `beforeReduce` | `aio::before_call(..)` |
 | `onEffect` | `aio::on_effect(..)` |
-| `scope: "client"` (view state) | a cell without `persist`/`shared` in the view's module, or a `GlobalSignal` |
+| `scope: "client"` (view state) | a cell without `persist`/`shared` in the view's module, or a `Global` |
 | `redactActions` | `#[redact]` |
 | `diagnostics: false` | `#[cell(diagnostics = false)]` |
 | `definePlugin` | `aio::plugin::Plugin` |
@@ -182,30 +183,30 @@ Rename it (`begin`) when porting.
 
 ### Components, signals, hooks
 
-| aio (AIR, TSX) | aio-rs (Dioxus, RSX) |
+| aio (AIR, TSX) | aio-rs (`aio::ui`, RSX) |
 |---|---|
-| `function Row(props) { return <li>..</li> }` | `#[component] fn Row(name: String) -> Element { rsx! { li { .. } } }` |
+| `function Row(props) { return <li>..</li> }` | `#[component] fn Row(name: String) -> View { rsx! { li { .. } } }` |
 | `<li class="row" data-t="x">{name}</li>` | `li { class: "row", "data-t": "x", "{name}" }` |
-| `{items.map(i => <Row key={i.id} .. />)}` | `for i in items.iter() { Row { key: "{i.id}", .. } }` |
+| `{items.map(i => <Row key={i.id} .. />)}` | `for i in items.get() { Row { key: "{i.id}", .. } }` (`key:` required) |
 | `{cond && <X />}`, `cond ? <A/> : <B/>` | `if cond { X {} }`, `if cond { A {} } else { B {} }` |
 | `onClick={() => ..}` | `onclick: move \|_\| ..` |
-| reading `todo.items` in a render | `part(\|t\| &t.items)` (after `aio::client!(Todo, todo)`) |
+| reading `todo.items` in a render | `part(\|t\| &t.items)`, a handle: `.get()`, `.with(\|v\| ..)`, `"{p}"` (after `aio::client!(Todo, todo)`) |
 | calling `todo.add(x)` from a handler | `act!(add(x))` |
 | reading the whole cell | `todo()`: in handlers only |
-| `signal(v)` at module level | `static S: GlobalSignal<T> = Signal::global(\|\| v);` |
-| `useLocal(v)` | `use_signal(\|\| v)` |
-| `computed(..)` | `use_memo(..)` |
-| `effect(..)` | `use_effect(..)` |
-| `onMount`, `onCleanup`, `onUnmount` | `use_hook`, `use_drop` |
+| `signal(v)` at module level | `static S: Global<T> = Global::new(\|\| v);` |
+| `useLocal(v)` | `signal(\|\| v)` |
+| `computed(..)` | `memo(..)` |
+| `effect(..)` | `effect(..)` |
+| `onMount`, `onCleanup`, `onUnmount` | `once`, `on_cleanup` |
 | `afterRender(() => el.scrollIntoView(..))` | `"data-aio-reveal"` on the row, or `onmounted` + `MountedData::scroll_to` |
 | `memo(Component)` | nothing: components with `PartialEq` props skip equal renders |
-| `batch(..)` | nothing: one render per tick |
+| `batch(..)` | nothing: a handler's writes render once |
 | `useVirtualList` | `aio::kit::VirtualList`, `aio::kit::window` |
 | `useForm`, `useFieldArray` | `aio::kit::use_form`, `move_item` |
 | `useRoute`, `navigate`, `<Route>`, `<Outlet>`, `<Link>` | `aio::routes!`, `aio::router!()`: `here()`, `go`, `Route`, `Outlet`, `Link` ([routing](../ui/routing.md)) |
 | `useHead`, `collectHead` | `aio::head::use_head` (`aio_shell::page::use_head` re-exports it) |
 | `useUser`, `<SignIn>` | `aio::kit::SignIn`, the session's `Caller` |
-| `ErrorBoundary` | Dioxus `ErrorBoundary` |
+| `ErrorBoundary` | `ErrorBoundary { fallback: \|e: String\| rsx! { .. }, .. }` |
 | `aio/ui`: `Alert` `Avatar` `Breadcrumb` `Button` `Card` `Checkbox` `Confirm` `ConfirmButton` `EmptyState` `Field` `Input` `Markdown` `Menu` `Modal` `Pagination` `Progress` `RadioGroup` `Row` `Select` `Skeleton` `Spinner` `Stack` `Switch` `Table` `Tabs` `Textarea` `ToastHost` `toast` `Tooltip` `ZoomPan` `fitView` `zoomAt` | `aio::kit`, the same names (`fit_view`, `zoom_at`) ([kit](../ui/kit.md)) |
 | `UI_CSS`, `UiStyles`, `css`, `collectCss`, `cx` | `aio::kit::CSS`, `aio::use_css!`, `aio::ui::cx(&[("on", cond)])` |
 | `guestPreload` | built in: `aio::kit::Browser` loads aio-shell's guest script |
@@ -221,14 +222,14 @@ Rename it (`begin`) when porting.
 | `h`, `Fragment` | `rsx!`, `Fragment {}` |
 | `mount`, `hydrate`, `page` | `aio_shell::run(App, ..)` (the window), `aio::web::launch(App)` (the web build) |
 | `renderToString`, `renderToStream` | `ax preview <app> <component> --html`; a served page paints its first view itself ([web](../clients/web.md)) |
-| `Show`, `Suspense`, `lazy` | `if`; Dioxus `SuspenseBoundary`; no lazy component loading (one binary) |
+| `Show`, `Suspense`, `lazy` | `if`; `Suspense { fallback, .. }` with `resource(..).suspend()?`; no lazy component loading (one binary) |
 | `Defer` | `aio::kit::Defer` |
 | `Portal` | `aio::kit::Portal`, `PortalHost` |
 | `NavLink`, `Redirect`, `routePath`, `routeSearch`, `useNavigate` | from `aio::router!()`: `Link`, `Redirect`, `here()`, `params()`, `go(..)` |
 | `TransitionGroup`, `fade`, `scale`, `slide` | `aio::kit::TransitionGroup`, `Motion` |
-| `createContext`, `useContext`, `useContextSelector` | Dioxus `use_context_provider`, `use_context`; `aio::kit::use_context_select` |
-| `useSignal`, `untrack`, `trackedMemo` | `use_signal`; `signal.peek()`; `part(..)` / `name_at(..)` |
-| `useRef` | `use_signal`, or `onmounted` for an element |
+| `createContext`, `useContext`, `useContextSelector` | `provide(\|\| v)`, `context::<T>()`; `aio::kit::use_context_select` |
+| `useSignal`, `untrack`, `trackedMemo` | `signal`; `s.get_untracked()`; `part(..)` / `name_at(..)` |
+| `useRef` | `signal`, or `onmounted` for an element |
 | `useId` | `aio::kit::use_id(prefix)` |
 | `useInterval`, `useRaf` | `aio::kit::use_interval`, `use_frame` |
 | `onWindowEvent`, `useDimensions` | `aio::kit::use_window_event(WindowEvent::Resize, ..)` |
@@ -547,7 +548,7 @@ browser with `data-aio-prevent`.
 # }
 use aio::act;
 use aio::kit::{GlobalKeys, use_global_key};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 // Both preludes name a `Result`; in the cell's file the methods mean `aio::Result`.
 use aio::Result;
 
@@ -560,7 +561,7 @@ static ROWS: aio::Cache<(u64, u64), (), Arc<Vec<Person>>> = aio::Cache::new();
 
 /// aio's `Row`: its data by props, so an unchanged row doesn't render.
 #[component]
-fn Row(name: String, email: String, active: bool, at: usize) -> Element {
+fn Row(name: String, email: String, active: bool, at: usize) -> View {
     rsx! {
         li {
             "data-cursor": active.then_some(""),
@@ -572,11 +573,11 @@ fn Row(name: String, email: String, active: bool, at: usize) -> Element {
 }
 
 #[component]
-pub fn ContactList() -> Element {
+pub fn ContactList() -> View {
     // Re-renders when people, filter or the cursor change; nothing else.
     let (people, filter) = (part(|c| &c.people), part(|c| &c.filter));
-    let rows = ROWS.get((people.ver(), filter.ver()), (), || Arc::new(matching(&people, &filter)));
-    let active = (*part(|c| &c.active_index)).min(rows.len().saturating_sub(1));
+    let rows = ROWS.get((people.ver(), filter.ver()), (), || Arc::new(people.with(|p| filter.with(|f| matching(p, f)))));
+    let active = part(|c| &c.active_index).get().min(rows.len().saturating_sub(1));
     let len = rows.len();
     use_global_key("ArrowDown", move |_| _ = act!(move_down(len)));
     use_global_key("ArrowUp", |_| _ = act!(move_up()));
@@ -591,7 +592,7 @@ pub fn ContactList() -> Element {
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
     rsx! { GlobalKeys { ContactList {} } }
 }
@@ -623,8 +624,8 @@ the details.
 | caches on an array's identity (`groupBy`, indexes, a per-frame panel cache) | indexes built once per change | `aio::Cache` keyed on `Ver::of(&state)` or `part(..).ver()` |
 | reading a cell's arrays without copying | no copy per read | `Arc` state; big fields as `Arc<…>` or `aio::imbl` |
 | shallow-equal props, `memo` | unchanged rows skip | `#[component]` props (`PartialEq`) |
-| renders batched per microtask | many writes, one render | built in (Dioxus) |
-| event delegation | few listeners | built in (Dioxus) |
+| renders batched per microtask | many writes, one render | built in (`aio::ui`) |
+| event delegation | few listeners | built in (`aio::ui`) |
 | windowed lists, stable keys | bounded DOM | `kit::VirtualList`, or a window by hand with `key:` |
 | `scrollIntoView({ block: "nearest", behavior: "auto" })` only when the cursor moved | no smooth scrolls piling up | `data-aio-reveal` |
 | scroll re-anchoring per frame | at most one window change per frame | built in: `VirtualList` renders only when its window moves |
@@ -732,3 +733,50 @@ Details: [wire](wire.md).
 - [ ] Measured against the aio app on the same machine: keypress to paint, CPU,
       memory, start time. The port is not done while it is slower.
 - [ ] `ax lint` clean; `ax build <app> --smoke` passes.
+
+## 8. 0.1 → 0.2: aio::ui instead of dioxus
+
+aio-rs 0.2 gives the views one renderer-neutral API, `aio::ui::prelude`,
+in the shape air (aio-rs's own renderer, [design](../design/air.md)) has,
+so the later swap from Dioxus to air is a framework change, not an app
+migration. An app names `aio::ui` only: `ax lint` refuses a `dioxus` path,
+a `dioxus` dependency, a page script's `dioxus.send`, and a `for` row
+without `key:`. Most of the move is mechanical; the compiler finds every
+place left.
+
+| 0.1 (dioxus) | 0.2 (`aio::ui`) |
+|---|---|
+| `dioxus = { version = "=0.7.10", .. }` in `Cargo.toml` | gone: `aio = { .., features = ["kit"] }` brings the views |
+| `use dioxus::prelude::*;` | `use aio::ui::prelude::*;` |
+| `-> Element` | `-> View` |
+| `use_signal(\|\| v)` | `signal(\|\| v)` (a `Copy` `Signal`: no `let mut` but for `+=`) |
+| `count()`, `count.cloned()` | `count.get()` |
+| `count.peek()` | `count.read_untracked()`, or `count.get_untracked()` |
+| `count.with_mut(f)` | `count.update(f)` |
+| `count.set(v)` | `count.set(v)`: readers are told only when `v` differs; a value without `PartialEq`: `*count.write() = v` |
+| `use_memo(f)` | `memo(f)` (a `Memo`: `.get()`, `.with(..)`, `.read()`) |
+| `use_effect(f)` | `effect(f)` |
+| `use_effect(use_reactive!(\|d\| ..))` | `watch(d, move \|d\| ..)` |
+| `use_hook(f)` | `once(f)` |
+| `use_drop(f)` | `on_cleanup(f)` |
+| `use_callback(f)` | `callback(f)` |
+| `use_context_provider(f)` | `provide(f)` |
+| `use_context::<T>()`, `try_use_context::<T>()`, `consume_context::<T>()` | `context::<T>()`, `try_context::<T>()` |
+| `provide_root_context(v)` | `provide_root(v)` |
+| `use_future(f)` | `task(f)` |
+| `use_resource(f)` (`r()`, `r.read()`) | `resource(f)` (`r.get()`, `r.with(..)`, `r.suspend()?`) |
+| `GlobalSignal<T>`, `Signal::global(f)` | `Global<T>`, `Global::new(f)` |
+| `ErrorBoundary { handle_error: \|e: ErrorContext\| .. }` | `ErrorBoundary { fallback: \|e: String\| .. }` |
+| `SuspenseBoundary { fallback: \|_\| .. }` | `Suspense { fallback: rsx! { .. } }` |
+| `document::eval(js)` | `eval(js)` |
+| `dioxus.send(v)`, `await dioxus.recv()` in a page script | `aio.send(v)`, `await aio.recv()` |
+| `*part(\|c\| &c.f)`, `part(..).len()`, `part(..)[i]` | `part(\|c\| &c.f).get()`, `part(..).with(\|v\| v.len())`, `part(..).with(\|v\| v[i].clone())` |
+| `name_at(..)()`, `use_status()()`, `use_pending(..)()` | `.get()` on the `Memo` they give |
+| `TestUi::read(&GLOBAL)` of a `GlobalSignal` | the same, of a `Global` |
+| `for x in xs { li { .. } }` | `for x in xs { li { key: "{x.id}", .. } }` |
+
+What `aio::ui` already shapes for air, though Dioxus doesn't need it yet:
+a view reads state where it shows it (`"{n}"`, `.get()` in `rsx!` or a
+`memo`), a prop that must follow state is a `Signal`, `Memo` or part
+handle, no `if let` inside `rsx!` (`{opt.map(|x| rsx! { .. })}`), and
+`once` is the only one-time setup ([views](../ui/views.md#ready-for-air)).

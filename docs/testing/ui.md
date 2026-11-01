@@ -17,7 +17,7 @@ runtime folder). `TestUi` needs the `kit` feature, which an app made by
 ```rust,no_run
 use aio::act;
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "todo")]
 pub struct Todo {
@@ -36,15 +36,15 @@ impl Todo {
 aio::client!(Todo, todo);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
     let items = part(|t| &t.items);
-    let mut draft = use_signal(String::new);
+    let draft = signal(String::new);
     rsx! {
         form {
             onsubmit: move |e| {
                 e.prevent_default();
-                if act!(add(draft())).is_some() {
+                if act!(add(draft.get())).is_some() {
                     draft.set(String::new());
                 }
             },
@@ -52,11 +52,11 @@ fn App() -> Element {
             button { r#type: "submit", "Add" }
         }
         ul { "data-t": "list",
-            for item in items.iter() {
-                li { "{item}" }
+            for (i, item) in items.get().into_iter().enumerate() {
+                li { key: "{i}", "{item}" }
             }
         }
-        p { "data-t": "count", "{items.len()} to do" }
+        p { "data-t": "count", {format!("{} to do", items.with(Vec::len))} }
     }
 }
 
@@ -70,7 +70,7 @@ assert_eq!(ui.value("WhatToDoInput"), "", "the field was cleared");
 ui.set_value("WhatToDoInput", "call Bo");
 ui.press("WhatToDoInput", "Enter"); // Enter in a form's field submits it
 assert_eq!(ui.text("list/CallBoItem"), "call Bo"); // a list item is named by its text
-assert_eq!(HANDLE.peek().state().items.len(), 2, "the cell, not only the page");
+assert_eq!(HANDLE.read_untracked().state().items.len(), 2, "the cell, not only the page");
 
 // An empty add is refused: take the refusal, or it fails the test at its end.
 ui.click("AddButton");
@@ -102,7 +102,7 @@ assert_eq!(ui.failures(), ["add: say what to do"]);
 | `.before(\|\| ..)` | runs in the app's root scope before its first render: a seed, a route, a global; repeatable |
 | `.network(&["api.example.org"])` | hosts the page may reach besides this machine (`"*"`: any) |
 
-Each mount is a fresh app instance: its `GlobalSignal`s, its `client!`
+Each mount is a fresh app instance: its `Global`s, its `client!`
 source and its context start over, so tests share nothing through them.
 Each mount also gets its own sandbox (see [the sandbox](README.md#every-test-runs-in-a-sandbox)).
 Every mount runs a contrast audit and prints, never fails, the text a
@@ -250,19 +250,19 @@ A component alone, with its props, driven by keys and its form:
 
 ```rust,no_run
 use aio::testing::{TestUi, fails};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn SignIn(remember: bool) -> Element {
-    let mut sent = use_signal(|| false);
-    let mut name = use_signal(String::new);
+fn SignIn(remember: bool) -> View {
+    let sent = signal(|| false);
+    let name = signal(String::new);
     rsx! {
         form { onsubmit: move |e| { e.prevent_default(); sent.set(true) },
             label { "Name" input { required: true, value: "{name}", oninput: move |e| name.set(e.value()) } }
             label { "Remember me" input { r#type: "checkbox", checked: remember } }
             button { r#type: "submit", "Sign in" }
         }
-        if sent() { p { "data-t": "hello", "Hello {name}" } }
+        if sent.get() { p { "data-t": "hello", "Hello {name}" } }
     }
 }
 
@@ -301,7 +301,7 @@ assert_eq!(ui.text("hello"), "Hello Ada");
 | `surface()` | what a person can see and use, nested, one line each |
 | `html()` | the page's HTML without Dioxus's ids, then what the app put on `<body>` (a tooltip, a portal) |
 | `contrast()` | text under WCAG AA on its background (4.5:1, 3:1 large), as `<tag> "text" 2.10:1, needs 4.5:1` |
-| `read(&GLOBAL)` | a `GlobalSignal`'s value in the app's root scope |
+| `read(&GLOBAL)` | a `Global`'s value in the app's root scope |
 
 A `surface()` line is `role "name" [handle] state`, indented by depth:
 
@@ -347,7 +347,7 @@ the same source:
 ```rust,no_run
 use aio::act;
 use aio::testing::{Mount, TestUi, seeded_source};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use serde_json::json;
 
 #[aio::cell(id = "inbox")]
@@ -365,12 +365,12 @@ impl Inbox {
 
 aio::client!(Inbox, inbox);
 
-static SHOW_ALL: GlobalSignal<bool> = Signal::global(|| false);
+static SHOW_ALL: Global<bool> = Global::new(|| false);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let n = *part(|s| &s.unread);
+    let n = part(|s| &s.unread).get();
     rsx! {
         p { "data-t": "badge", "{n} unread" }
         button { disabled: n == 0, onclick: move |_| _ = act!(read_all()), "Mark all read" }
@@ -383,7 +383,7 @@ fn App() -> Element {
 let mut ui = Mount::default().before(|| *HANDLE.write() = seeded_source(json!({"unread": 3}))).app(App);
 assert_eq!(ui.text("badge"), "3 unread");
 ui.click("MarkAllReadButton");
-ui.expect_cell(&*HANDLE.peek(), "all read", |s| s.unread == 0);
+ui.expect_cell(&*HANDLE.read_untracked(), "all read", |s| s.unread == 0);
 assert!(ui.disabled("MarkAllReadButton"));
 
 ui.click("ShowAllButton");
@@ -399,7 +399,7 @@ assert_eq!(ui.text("badge"), "1 unread");
 - `seeded_source::<C>(json)` merges the seed into the default state, as
   [`TestCells::seeded`](cells.md#seeded-state) does: a key the state lacks
   fails.
-- `expect_cell` takes any door: the source (`&*HANDLE.peek()`), a
+- `expect_cell` takes any door: the source (`&*HANDLE.read_untracked()`), a
   `Handle`, a `Remote`.
 - `ui.run(f)` runs `f` where the app's globals live, then settles.
 
@@ -434,7 +434,7 @@ real wire, put a copy from a `TestServer` in `HANDLE`:
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{Mount, TestServer};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::time::Duration;
 
 #[cell(shared, id = "votes")]
@@ -457,9 +457,9 @@ impl Votes {
 aio::client!(Votes, votes);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let yes = *part(|v| &v.yes);
+    let yes = part(|v| &v.yes).get();
     rsx! {
         p { "data-t": "yes", "{yes}" }
         button { onclick: move |_| _ = act!(vote()), "Vote" }
@@ -478,7 +478,7 @@ assert_eq!(ui.text("yes"), "1", "predicted: shown at once");
 ui.until("the server has it", || server.state().yes == 1); // a round trip later
 
 ui.click("ResetButton"); // not a #[client] method: the server refuses it
-ui.until("the refusal came back", || HANDLE.peek().pending(None) == 0);
+ui.until("the refusal came back", || HANDLE.read_untracked().pending(None) == 0);
 let refused = ui.failures();
 assert!(refused[0].starts_with("reset: "), "{refused:?}");
 # }
@@ -503,16 +503,16 @@ assert!(refused[0].starts_with("reset: "), "{refused:?}");
 
 ```rust,no_run
 use aio::testing::{Mount, TestUi};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Row(n: u32) -> Element {
+fn Row(n: u32) -> View {
     rsx! { li { "row {n}" } }
 }
 
 #[component]
-fn List() -> Element {
-    let mut sel = use_signal(|| 0u32);
+fn List() -> View {
+    let mut sel = signal(|| 0u32);
     rsx! {
         p { "data-t": "sel", "{sel}" }
         button { onclick: move |_| sel += 1, "Next" }

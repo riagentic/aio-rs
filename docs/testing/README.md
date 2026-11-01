@@ -125,7 +125,7 @@ assert_eq!(rich.state().balance, 5);
 ```rust,no_run
 use aio::act;
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "counter")]
 pub struct Counter {
@@ -142,9 +142,9 @@ impl Counter {
 aio::client!(Counter, counter);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let n = *part(|c| &c.count);
+    let n = part(|c| &c.count).get();
     rsx! {
         h1 { "data-t": "count", "{n}" }
         button { onclick: move |_| _ = act!(add(1)), "Add" }
@@ -155,7 +155,7 @@ fn App() -> Element {
 let mut ui = TestUi::new(App);
 ui.click("AddButton"); // named from its label and role
 assert_eq!(ui.text("count"), "1");
-assert_eq!(HANDLE.peek().state().count, 1, "the cell, not only the page");
+assert_eq!(HANDLE.read_untracked().state().count, 1, "the cell, not only the page");
 # }
 ```
 
@@ -186,7 +186,7 @@ runtime once). It drives the page as a person does:
   .app(App)`; `TestUi::with(Component, props)` mounts one component
   alone. By default a UI test refuses the real network: requests
   elsewhere are cancelled and fail the test.
-- **The cell beside the page**: `expect_cell(&HANDLE.peek(), "saved", |c|
+- **The cell beside the page**: `expect_cell(&HANDLE.read_untracked(), "saved", |c|
   ..)` waits until the cell holds; `read(&GLOBAL)` reads a global signal.
 - **When it fails**: the message shows the screen as text (`surface()`)
   and writes a trace (the steps, the page's warnings and errors) under

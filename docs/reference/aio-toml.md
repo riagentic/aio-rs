@@ -681,7 +681,7 @@ field attribute, a method attribute inside `#[methods]`, a key of this
 file, a call in the app's code (the launcher, an `Http` server, a
 `Handle`), or a launch flag or variable. Some have no place because Rust
 makes them unneeded; the rest are gaps, marked **gap**. The UI half of
-aio's page (`aio/air`'s hooks and components) maps to Dioxus and the kit:
+aio's page (`aio/air`'s hooks and components) maps to `aio::ui` and the kit:
 see [views](../ui/views.md) and the tables in
 [migration](../migration/README.md#2-construct-by-construct).
 
@@ -691,7 +691,7 @@ see [views](../ui/views.md) and the tables in
 |---|---|
 | `state` | the struct's fields; `#[cell(custom_default)]` when it implements `Default` itself |
 | `methods` | `#[methods] impl Cell { pub fn m(&mut self, …) -> Result }`; types in arguments are `#[aio::data]` |
-| `scope: "client"` | a cell neither `persist` nor `shared`, in the view's module, or a Dioxus `GlobalSignal` |
+| `scope: "client"` | a cell neither `persist` nor `shared`, in the view's module, or an `aio::ui::Global` |
 | `cancelOn` | `cx.abort("key")` from the method that should cancel ([effects](../state/effects.md)) |
 | `concurrency` | per effect, `.mode(Mode::Newest / Queue / First)`; calls are always one at a time per cell |
 | `ttl` | `#[ttl(ms)]` on a `pub async fn` |

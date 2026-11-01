@@ -14,7 +14,7 @@ choice. Every line is a feature of aio-rs 0.1.0 with the page that shows it.
 | A WebSocket server, diffs, reconnects, an offline queue, conflict rules, access checks | `#[cell(shared)]`, `[server] listen`: copies predict each call and the server confirms it; `#[client]` rules, `visible` per viewer, an offline queue that can survive a restart (`connect_saved`) ([sync](../state/sync.md), [offline](../persistence/offline.md)) |
 | Certificates, a pairing flow, LAN discovery, accounts | TLS on every exposed launch (a machine root for the LAN, your certificate for a public server), PAKE pairing (`ax pin`, `ax pair`), `ax discover`, `[accounts]` with TOTP and OIDC ([sync](../state/sync.md), [accounts](../auth/README.md)) |
 | One shell per target | one app as a desktop window (Linux, Windows, macOS), a web build (wasm, PWA), an Android APK, a headless service or a command-line tool: `[app] mode` and `ax build` ([targets](../build/targets.md)) |
-| Glue from your state to a UI crate, a list that stays fast | Dioxus views reading fields with `part`, calling with `act!`; the kit: controls, keys, windowed lists, forms, dialogs, toasts ([views](../ui/views.md), [kit](../ui/kit.md)) |
+| Glue from your state to a UI crate, a list that stays fast | `aio::ui` views (`rsx!`) reading fields with `part`, calling with `act!`; the kit: controls, keys, windowed lists, forms, dialogs, toasts ([views](../ui/views.md), [kit](../ui/kit.md)) |
 | Mocks of the store, a clock you can move, a headless browser harness | `TestCells` (virtual time, seeded fuzzing), `TestUi` (the real views in the runtime, headless), `TestServer`, cassettes ([testing](../testing/README.md)) |
 | `cargo watch` and a restart that loses the screen's state | `ax dev`: Rust edits hot-patched with the state kept, CSS live, a compile error on the window while the app keeps running ([dev](../build/dev.md)) |
 | Packaging per OS, signing keys, an updater, a way back from a bad release | `ax build` (`.tar.gz`, `.deb`, AppImage, Windows installer, macOS `.app`, APK, web), `ax keygen`, `ax release`: signed and delta updates, gated on data compatibility, rolled back when a new version fails to start ([release](../build/release.md)) |
@@ -58,7 +58,7 @@ app builds, so a typo in it is one too.
 - **No iOS.** And no prebuilt `ax` for macOS (build it from source).
 - **Not OS-signed yet.** Windows SmartScreen and macOS Gatekeeper warn on
   first start of the prebuilt archives and app bundles.
-- **Dioxus views only** in the app's window; another view library comes
+- **`aio::ui` views only** in the app's window; another view library comes
   in as an island or as a separate client over the wire.
 - **The state isn't the point.** Server-rendered, SEO-first pages; state
   redrawn every frame (a game, a 3D scene); one state across many servers;

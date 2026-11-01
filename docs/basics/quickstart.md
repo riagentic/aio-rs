@@ -140,9 +140,9 @@ assert_eq!(h.state().count, 1);
 aio::client!(Counter, counter);
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
-    let n = *part(|c| &c.count);
+    let n = part(|c| &c.count);
     let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
         style { {aio::use_css!(false, &theme; "assets/style.css")} }
@@ -150,7 +150,7 @@ pub fn App() -> Element {
             h1 { "data-t": "count", "{n}" }
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }
             button { class: aio::ui::btn("ghost"), onclick: move |_| _ = act!(add(-1)), "Subtract" }
-            button { class: aio::ui::btn("ghost"), disabled: n == 0, onclick: move |_| _ = act!(reset()), "Reset" }
+            button { class: aio::ui::btn("ghost"), disabled: n.get() == 0, onclick: move |_| _ = act!(reset()), "Reset" }
         }
     }
 }
@@ -158,7 +158,8 @@ pub fn App() -> Element {
 
 - `aio::client!` connects the views to the cell (it makes `SOURCE`,
   `part`, `use_live` and the rest for this cell).
-- `part(|c| &c.count)` reads one field and re-renders only when it changes.
+- `part(|c| &c.count)` is a handle on one field: the view reading it
+  (`"{n}"`, `n.get()`) re-renders only when it changes.
 - `act!(add(1))` calls a method from a handler.
 - `aio::use_css!` reads `assets/style.css`; under `ax dev` a saved edit
   shows at once, with no compile.
@@ -425,7 +426,7 @@ on disk, who decided each setting).
 | `cc` or `link.exe` not found | no C toolchain | [setup](setup.md#1-rust-and-a-c-toolchain) |
 | the window never opens (Linux) | Electron's system libraries are missing | install what `ax setup` names |
 | `ax dev` rebuilds on every edit | no dx, or an edit dx can't patch (a new dependency, a changed type) | `ax setup` fetches dx; the rest is expected |
-| a CSS edit doesn't show | the CSS is kept in `use_hook` (made once) | `aio::use_css!` in the render |
+| a CSS edit doesn't show | the CSS is kept in `once` (made once) | `aio::use_css!` in the render |
 | the app starts with no data | `[app] id` or the cell's `id` changed | change it back |
 | a second `ax dev` shows nothing new | the running app took the launch and the new one ended | stop the first, or `--instance <n>` |
 | a service won't start: the port is in use | another process has `[server] listen`'s port | stop it, or `--port <n>` for this launch |

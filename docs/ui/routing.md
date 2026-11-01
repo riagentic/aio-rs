@@ -62,7 +62,7 @@ scheme, another host) is `None`.
 ## The router in views: `router!`
 
 ```rust
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::router!(); // NAV, here(), go, redirect, back, use_back, Link, Route, Outlet, params, Redirect
 
@@ -74,7 +74,7 @@ aio::routes! {
 }
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     let page = Page::parse(&here().path); // reading here() subscribes the view
     rsx! {
         nav {
@@ -92,14 +92,14 @@ fn App() -> Element {
 
 /// A sheet over the page: Back closes it before it leaves the page.
 #[component]
-fn Sheet() -> Element {
-    let mut open = use_signal(|| true);
+fn Sheet() -> View {
+    let open = signal(|| true);
     use_back(move || {
-        let was = *open.peek();
+        let was = *open.read_untracked();
         open.set(false);
         was // true: Back is handled here
     });
-    rsx! { if open() { div { "data-t": "sheet", "details" } } }
+    rsx! { if open.get() { div { "data-t": "sheet", "details" } } }
 }
 
 # fn main() {
@@ -176,12 +176,12 @@ In a view, `here()` is the place (reading it subscribes the view) and
 it back with `redirect`, so typing doesn't fill the history:
 
 ```rust
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::router!();
 
 #[component]
-fn Search() -> Element {
+fn Search() -> View {
     let q = here().query("q").unwrap_or_default();
     rsx! {
         input { "data-t": "q", value: "{q}",
@@ -235,21 +235,21 @@ a deep link, or a notification that opens a screen.
 ## Nested routes
 
 ```rust
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::router!();
 
 #[component]
-fn Dash() -> Element {
+fn Dash() -> View {
     rsx! { section { h1 { "Dashboard" } Outlet {} } }
 }
 
 #[component]
-fn Who() -> Element {
+fn Who() -> View {
     rsx! { p { "{params():?}" } } // the enclosing routes' params
 }
 
-fn App() -> Element {
+fn App() -> View {
     rsx! {
         Route { path: "/dash", element: rsx! { Dash {} },
             Route { index: true, element: rsx! { p { "overview" } } }

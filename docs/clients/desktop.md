@@ -2,7 +2,7 @@
 
 On Linux, Windows and macOS an aio-rs app's views are drawn by the shared
 Electron runtime. The views themselves run in the app's Rust process: a
-Dioxus `VirtualDom` per window, whose DOM edits and events travel over a
+view tree per window (Dioxus's `VirtualDom` today, behind `aio::ui`), whose DOM edits and events travel over a
 private socket to a small page in Electron. The page loads from
 `aio://app/`, connects to nothing and runs no app code; Electron's main
 process opens the window, the tray, notifications and dialogs when the app
