@@ -179,7 +179,8 @@ recompiles the crate an edit is in:
 
 So a big aio-rs app is kept fast to edit by splitting it into crates
 ([what an edit costs](build/README.md#what-an-edit-costs)). The web build
-and Android have no hot-patching: each edit is a build.
+and Android have no hot-patching: each edit is a build (on Android, of the
+page only: the dev APK is installed once and reloads, as aio's `dev:android`).
 
 ### Feature gaps
 
@@ -256,10 +257,10 @@ beyond the aio-rs form.
 | Debugging | V8 heap snapshots, the health overlay | none | `ax heap`, `ax health` | [production](debugging/production.md#not-in-aio-rs) |
 | Debugging | `perfCheck: "off"`, a runtime benchmark gate | budgets always on | ➖ | [scaling](build/scaling.md#not-in-aio-rs) |
 | Debugging | reports screened by `visible`, timeline payloads | carried as saved, never arguments | `#[redact]` | [feedback](debugging/feedback.md#not-as-in-aio) |
-| Build | hot reload in a browser | no hot-patching in the web build or on Android | a build per edit | [dev](build/dev.md#limits) |
+| Build | hot reload in a browser | no hot-patching in the web build (a build per edit; on Android the dev page reloads) | a build per edit | [dev](build/dev.md#limits) |
 | Build | a run-from-a-link command | none | clone, `ax start` | [dev](build/dev.md#limits) |
 | Build | ios-client (a WKWebView thin client) | no iOS | ➖ | [targets](build/targets.md#limits) |
-| Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME`, an Android emulator test lane | none | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |
+| Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME` | none (the emulator lane is `ax test --android`) | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |
 | Build | `deno task check`/`test`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
 | Release | `canApply` awaited before every install, a warning with none | `can_apply` a plain function, not asked for an `auto` install | ➖ | [release](build/release.md#not-in-aio-rs) |
 | Release | a custom runtime refused beside `updates:` | replaced silently | ➖ | [release](build/release.md#not-in-aio-rs) |
@@ -499,12 +500,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Desktop | electron | Linux, Windows, macOS on a shared runtime | ✅ |
 | Web, PWA | `web` | `ax build --web` | ✅ |
-| Android | `android` | APK, built on Linux | ✅ |
+| Android | `android` | APKs (3 CPUs, universal optional, debug), built on Linux, macOS, Windows; a port installs over aio's APK, its state with it | ✅ |
 | Service, CLI | `server`, `cli` | `mode = "server"`, `cli` | ✅ |
-| Thin clients | electron-, android-, cli-client | `mode = "client"` | ✅ |
+| Thin clients | electron-, android-, cli-client | `mode = "client"`; an Android client has no connect page on the phone yet (paired from the desktop, `ax pair`) | 🔄 |
 | iOS | ios-client | ❌ | ❌ |
 | Dev reload | patch, reload, restart (~3 s) | hot-patch, state kept | 🔄 |
-| Hot reload in web, Android | page reload | ❌ (a build per edit) | ❌ |
+| Hot reload in web, Android | page reload | 🔄 the dev APK reloads the page each edit (`ax dev --android`); the web build reloads its tabs | 🔄 |
 | Single instance, takeover | `singleton`, `takeover` | always one per home, `--takeover` | ✅ |
 
 **Release and updates**

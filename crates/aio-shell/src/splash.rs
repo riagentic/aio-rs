@@ -141,6 +141,10 @@ mod tests {
             min_ms: 400,
             max_ms: 15_000,
             background: None,
+            font: None,
+            font_size: None,
+            bold: false,
+            fade_ms: None,
             png: png(640, 400),
         }
     }

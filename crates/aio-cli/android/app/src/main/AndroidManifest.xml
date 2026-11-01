@@ -4,7 +4,7 @@
   <uses-permission android:name="android.permission.INTERNET" />{{CAMERA}}
   <application
     android:allowBackup="false"
-    android:usesCleartextTraffic="false"
+    android:usesCleartextTraffic="{{CLEARTEXT}}"
     android:label="{{NAME}}"
     android:icon="@drawable/ic_launcher"
     android:theme="{{THEME}}"
@@ -12,7 +12,7 @@
     <!-- configChanges: a rotation, keyboard or font change must not recreate
          the activity (that reloads the page); the WebView resizes itself. -->
     <activity
-      android:name="aio.rt.MainActivity"
+      android:name="{{ACTIVITY}}"
       android:exported="true"{{LAUNCH_MODE}}
       android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|fontScale|density"
     >

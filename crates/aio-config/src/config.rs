@@ -600,6 +600,20 @@ pub struct Splash {
     /// Behind the image, `["#light", "#dark"]`; unset: the app's own colours.
     #[serde(default)]
     pub background: Option<[String; 2]>,
+    /// The text's font family (Android: `sans-serif`, `serif`, `monospace`,
+    /// `sans-serif-condensed`…); unset: the system's.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// The text's size in points; unset: 14.
+    #[serde(default)]
+    pub font_size: Option<u16>,
+    /// The text in bold.
+    #[serde(default)]
+    pub bold: bool,
+    /// How long it fades out, in milliseconds; unset: the target's (200 on
+    /// Android).
+    #[serde(default)]
+    pub fade_ms: Option<u64>,
     /// The PNG's bytes, put in by `aio::config!()` (empty elsewhere).
     #[serde(skip)]
     pub png: &'static [u8],
@@ -672,6 +686,15 @@ pub struct AndroidBuild {
     /// Light or dark whatever the phone's setting; unset: the phone's.
     #[serde(default)]
     pub color_scheme: ColorScheme,
+    /// Also one APK for every CPU type (`…-android-universal.apk`), for
+    /// sharing as one file; the per-CPU APKs are still made.
+    #[serde(default)]
+    pub universal: bool,
+    /// An `android/` file that replaces a template file the template has
+    /// changed since, or a `MainActivity.java` without what the template's
+    /// does, fails the build instead of warning.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// `[build.android] color_scheme`.
