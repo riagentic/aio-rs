@@ -1073,7 +1073,7 @@ mod tests {
     fn the_page_has_no_network_and_the_wire_comes_first() {
         let p = page(&Window { title: "t", ..Default::default() });
         assert!(p.contains("default-src 'none'"));
-        assert!(p.contains("connect-src 'none'") && !p.contains("unsafe-eval"), "{p}");
+        assert!(p.contains("connect-src 'none'") && !p.contains("'unsafe-eval'"), "{p}");
         assert!(p.find("window.WebSocket = class").unwrap() < p.find("aio://wire").unwrap());
         assert!(p.contains("[autofocus]") && p.contains("data-select"));
         assert!(

@@ -6,8 +6,10 @@
 
 /// What `html` (a whole page) may run and load (pure): its own inline
 /// scripts, each by its SHA-256, and the scripts the page builds itself
-/// ([`RUN`]: `blob:` URLs, which only a running script can make); no
-/// `eval`, no other inline script, no `<base>`, no form leaving the page;
+/// ([`RUN`]: `blob:` URLs, which only a running script can make), and
+/// WebAssembly (`'wasm-unsafe-eval'`: wasm only, never JS, as aio's
+/// `script-src`); no `eval`, no other inline script, no `<base>`, no form
+/// leaving the page;
 /// any image source; `connect`: what it may connect to (`'none'`); the
 /// sandboxed islands' boot script ([`crate::ISLAND_SANDBOX`]) by its hash.
 /// Injected markup (`onerror=`, a `<script>` in an article) runs nothing.
@@ -21,7 +23,7 @@ pub fn policy(html: &str, connect: &str) -> String {
         })
         .collect();
     format!(
-        "default-src 'none'; script-src {hashes}blob:; style-src 'unsafe-inline'; img-src * data: blob: aio:; \
+        "default-src 'none'; script-src {hashes}blob: 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src * data: blob: aio:; \
          media-src * data: blob:; font-src data:; connect-src {connect}; base-uri 'none'; form-action 'none'"
     )
 }
@@ -501,7 +503,8 @@ mod tests {
         let page = sealed(&page, "'none'");
         let csp = policy(&page, "'none'");
         let scripts = csp.split("script-src ").nth(1).unwrap().split(';').next().unwrap();
-        assert!(!csp.contains("unsafe-eval") && !scripts.contains("unsafe-inline") && !scripts.contains('*'), "{csp}");
+        assert!(!csp.contains("'unsafe-eval'") && !scripts.contains("unsafe-inline") && !scripts.contains('*'), "{csp}");
+        assert!(scripts.ends_with("blob: 'wasm-unsafe-eval'"), "wasm compiles, as in aio: {scripts}");
         assert!(csp.contains("base-uri 'none'") && csp.contains("form-action 'none'") && csp.contains("connect-src 'none'"));
         // Every inline script by its hash, the one with a src by none.
         let n = inline_scripts(&page).count();

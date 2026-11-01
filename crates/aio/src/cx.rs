@@ -121,6 +121,17 @@ pub enum Plan {
     Cancel(String),
 }
 
+/// When a schedule that was due at `due` (repeating every `every` ms, or on
+/// `cron`) runs next, once it fired at `now` (pure): its next slot after
+/// `now`, so missed slots fire once, not one by one; `None`: a one-shot,
+/// done.
+pub(crate) fn next_run(due: i64, every: Option<i64>, cron: Option<&str>, now: i64) -> Option<i64> {
+    if let Some(next) = cron.and_then(|c| crate::cron::Cron::parse(c).ok()?.next(now.max(due))) {
+        return Some(next);
+    }
+    every.map(|ms| if due + ms <= now { now + ms } else { due + ms })
+}
+
 /// One thing a call asks for after it commits (an effect, an abort, a
 /// tell); in a page an effect needn't be `Send` (`effect::Fut`).
 #[cfg(not(target_arch = "wasm32"))]
