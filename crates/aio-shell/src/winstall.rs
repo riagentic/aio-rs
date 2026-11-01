@@ -201,9 +201,10 @@ fn place(cfg: &aio::config::Config, version: &str, shortcut: bool) -> io::Result
             (None, None) => Ok(()),
         };
         let carries = runtime.is_some() || beside.is_some();
-        replace(&dir, &exe, bin, carries.then_some(&unpack as Unpack))?;
+        replace(&dir, &exe, &bin, carries.then_some(&unpack as Unpack))?;
     }
-    if shortcut {
+    // `[build.windows] shortcut = false`: never one.
+    if shortcut && cfg.build.windows.shortcut {
         let lnk = self::shortcut(name, id);
         lnk.parent().map(std::fs::create_dir_all).transpose()?;
         link(&lnk, &exe, &dir, id).map_err(|e| io::Error::other(format!("the Start menu entry: {e}")))?;
@@ -227,7 +228,8 @@ fn place(cfg: &aio::config::Config, version: &str, shortcut: bool) -> io::Result
 pub fn install(cfg: &aio::config::Config, version: &str) -> io::Result<()> {
     place(cfg, version, true)?;
     let exe = installed_exe(&cfg.app.id);
-    eprintln!("[aio] {} {version} is installed: {} and the Start menu", cfg.app.name, exe.display());
+    let menu = if cfg.build.windows.shortcut { " and the Start menu" } else { "" };
+    eprintln!("[aio] {} {version} is installed: {}{menu}", cfg.app.name, exe.display());
     Command::new(&exe).spawn().map(drop)
 }
 
