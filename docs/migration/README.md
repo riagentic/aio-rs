@@ -96,7 +96,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `plugins` | `aio::plugin::Plugin` |
 | `schedules` | `#[every]`, `#[cron]` on a cell's methods |
 | `isolate` | none: open only the cells you want in a test (`TestCells`) |
-| `beforeReduce`, `onAction` | `aio::before_call(f)`: it sees each call and may refuse it |
+| `beforeReduce`, `onAction` | `aio::before_call(f)`: it sees each call and may refuse it; `aio::on_action(f)` hears each committed one |
 | `onEffect` | `aio::on_effect(f)` |
 | `onStart`, `onStopping`, `onStop` | `#[on_start]`, `#[on_stop]` on a cell's methods |
 | `fatalOnStart` | none: an `#[on_start]` refusal is logged and reported; the app boots on |
@@ -162,7 +162,8 @@ Rename it (`begin`) when porting.
 | `Date.now()`, `crypto.randomUUID()`, `Math.random()` in a method | `cx.now()`, `cx.id()`, `cx.rand()` |
 | `schedules: { every: "5m" }`, `schedule.every` | `#[every("5m")]`, `cx.every(..)` |
 | `schedule.cron` | `#[cron("0 9 * * 1")]`, `cx.cron(..)`: UTC as in aio (`[app] tz = "local"` reads local time) |
-| `schedule.after`, a debounce | `cx.after(key, ms, method, args)` (the same key replaces) |
+| `schedule.after`, a debounce | `cx.after(key, ms, method, args)` (the same key replaces); another cell's: `cx.on::<Other>().after(..)` |
+| `transaction: true` / `{ serialize: true }`, `s.$commit()`, `s.$live` | `#[cell(transaction)]` / `transaction(serialize)`, `cx.commit()`, `cx.live_state::<Self>()` |
 | `schedule.backoff` / `poll` | `cx.backoff(key, attempt, aio::Backoff::from(ms), ..)` |
 | `notify()`, `appIcon()` | `cx.tell(aio::tell::Tell::notify(..))`, `cx.tell(Tell::Icon { window, tray, tooltip, fps })` |
 | `onChange`, `useResource` | `h.on_change(..)`, `aio::kit::use_held` |

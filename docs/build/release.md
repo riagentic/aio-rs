@@ -428,7 +428,8 @@ assert_eq!(h.state().dismissed.as_deref(), Some("1.5.0"));
 | `checked_at` | when the last check answered (ms) |
 | `error` | the last failure, verbatim |
 | `failed` | an install that failed: (version, why), said again while it is offered |
-| `backup` | the data's backup the update to this version took |
+| `backup` | the data's backup the update to this version took (a fresh start's: the store it set aside) |
+| `retired` | where a fresh start to this version set the data aside (`archive/<id>-<version>-<time>`), for the app to say on its first start (aio's `freshStartNotice`) |
 | `dismissed`, `pinned` | the release said no to, the channel chosen: the only saved fields |
 
 - `aio::update::can_apply(veto)`: asked before every install; `Err(why)`
