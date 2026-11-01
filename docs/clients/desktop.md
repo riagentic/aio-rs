@@ -432,9 +432,6 @@ What aio's Electron client has and aio-rs doesn't yet:
 - The splash is drawn by the OS before Electron starts only while a first
   start downloads Electron (as aio on Windows); on other starts Electron
   draws it, a moment after the app starts.
-- An AppImage's menu entry is the one an AppImage integrator writes:
-  aio's installer gave its `Exec` a private `TMPDIR` for the AppImage to
-  unpack into; aio-rs installs no AppImage, so it writes none.
 
 aio has no app menus beyond macOS's standard ones or a context-menu API,
 and opens one app window per process, as aio-rs does.

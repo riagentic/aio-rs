@@ -154,6 +154,29 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
+- `[build.assets]` (aio's `assets`): folders beside `aio.toml` built into
+  the app by URL prefix, answered at the same path in the window
+  (`aio://app/…`), by the app's server (`Http::assets`, public), in the web
+  build (cached offline) and in the APK; `ax build`, `ax dev` and `ax
+  start` build a file added later in.
+- `web` is a `[build] targets` kind: one `ax build` makes the web app
+  beside the other targets (aio's `build-all`).
+- A server's Linux CLI bundle gets a systemd system unit beside its user
+  unit (`<bundle>.system.service`, aio's `build-service`): it starts at
+  boot with no login or linger, as a user systemd makes, its data in
+  `/var/lib/<id>`.
+- `ax install <app> --appimage` (aio's installer): the AppImage in
+  `aio-rt/install/<id>-appimage/` and the app menu, its entry making a
+  private `TMPDIR` for the AppImage to unpack into; `ax installed` and
+  `ax remove` know it.
+- The web build makes iOS's launch images from `[build.splash]` (aio's
+  `iosLaunchImages`): a Home Screen app starts on the splash.
+- `ax dev --web`: the page's console (every level, uncaught errors,
+  refused promises) in `ax dev`'s output (aio's console forwarding).
+- A web page shows a `notify` tell as the browser's notification, asking
+  for the permission at the first one and saying once when it can't;
+  `aio::web::notify::request_permission()` for a click handler, `on_click`
+  for its route.
 ### Changed
 
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
@@ -245,6 +268,8 @@ version may break things.
   emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
   ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
   the app's log comes to the terminal (`[device]`).
+- `ax build`'s Linux bundle says the AppImage beside it (`--appimage`,
+  aio's default artifact).
 
 ### Fixed
 
