@@ -423,3 +423,36 @@ fn listening_to_a_method_that_isnt_there_panics_at_wiring() {
     let (session, prefs) = (Handle::<Session>::memory(), Handle::<Prefs>::memory());
     prefs.listens_to(&session, "logot", |p, _| p.clear());
 }
+
+/// aio's `aio.run({ onStart, onRestore, fatalOnStart })` and `getFullState()`.
+#[tokio::test]
+async fn app_hooks_run_around_the_start_and_see_every_cell() {
+    let said = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let (a, b) = (said.clone(), said.clone());
+    let cells = Cells::default()
+        .with(Handle::<Base>::memory(), &[])
+        .with(Handle::<Counter>::memory(), &[Base::ID])
+        .on_restore(move |c| {
+            // Not live yet: a repair across cells, through their methods.
+            c.get::<Base>().unwrap().hit()?;
+            a.lock().unwrap().push("restore".to_string());
+            Ok(())
+        })
+        .on_start(move |c| {
+            c.get::<Counter>().unwrap().add(2)?;
+            b.lock().unwrap().push(format!("start {}", serde_json::Value::Object(c.view())));
+            Ok(())
+        })
+        .start()
+        .unwrap();
+    assert_eq!(
+        *said.lock().unwrap(),
+        ["restore".to_string(), r#"start {"base":{"hits":1},"counter":{"n":2,"status":"","ticks":0}}"#.to_string()]
+    );
+    assert!(cells.get::<Upper>().is_none(), "not in the list");
+
+    let refusing = || Cells::default().with(Handle::<Base>::memory(), &[]).on_start(|_| aio::reject!("no seed data"));
+    assert!(refusing().start().is_ok(), "said, and the start goes on");
+    let e = refusing().fatal_on_start().start().err().unwrap();
+    assert!(e.0.contains("on_start refused at start: no seed data"), "{}", e.0);
+}

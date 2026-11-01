@@ -86,7 +86,15 @@ async fn a_plugins_cell_routes_functions_and_hooks_are_live_and_the_app_wins() {
             l1.lock().unwrap().push(format!("files {}", p.online));
             panic!("a link hook exploded");
         });
-    let stats = Plugin::new("stats").on_effect(move |c, k| e2.lock().unwrap().push(format!("stats {c} {k}")));
+    let started: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (s1, s2) = (started.clone(), started.clone());
+    let stats = Plugin::new("stats")
+        .on_effect(move |c, k| e2.lock().unwrap().push(format!("stats {c} {k}")))
+        // aio's plugin `onStart`: once the app's cells are live, after the app's own.
+        .on_start(move |c| {
+            s1.lock().unwrap().push(format!("stats sees {}", c.ids().join(",")));
+            Ok(())
+        });
     aio::on_effect(move |c, k| e3.lock().unwrap().push(format!("app {c} {k}")));
     let todo = Handle::<Todo>::memory();
     let app = Http::default()
@@ -94,8 +102,13 @@ async fn a_plugins_cell_routes_functions_and_hooks_are_live_and_the_app_wins() {
         .route(Route::get("/same", text("APP same")))
         .server_fn(WHO, Access::Open, |_, ()| async { Ok("app".to_string()) })
         .on_link(move |p: &Presence| l2.lock().unwrap().push(format!("app {}", p.online)));
-    let (cells, http) = compose(Cells::default().with(todo.clone(), &[]), app, vec![files, stats]).unwrap();
+    let app_cells = Cells::default().with(todo.clone(), &[]).on_start(move |_| {
+        s2.lock().unwrap().push("app".into());
+        Ok(())
+    });
+    let (cells, http) = compose(app_cells, app, vec![files, stats]).unwrap();
     let cells = cells.start().unwrap();
+    assert_eq!(*started.lock().unwrap(), ["app", "stats sees todo,audit"]);
     assert_eq!(cells.ids(), ["todo", "audit"], "the plugin's cell beside the app's");
     audit.record().unwrap();
     assert_eq!(audit.state().seen, 1);

@@ -149,6 +149,8 @@ pub struct Cx {
     used: RefCell<Inputs>,
     effects: RefCell<Vec<Asked>>,
     plans: RefCell<Vec<Plan>>,
+    /// Where this async call's end goes ([`crate::Answer`]).
+    reply: Option<crate::answer::Reply>,
 }
 
 impl Cx {
@@ -162,6 +164,27 @@ impl Cx {
             used: RefCell::default(),
             effects: RefCell::default(),
             plans: RefCell::default(),
+            reply: None,
+        }
+    }
+
+    /// A call whose end goes to `reply` (an async method's caller waits).
+    pub(crate) fn with_reply(self, reply: Option<crate::answer::Reply>) -> Self {
+        Self { reply, ..self }
+    }
+
+    /// Where this call's end goes, for the effect that resumes it; never on replay.
+    #[doc(hidden)]
+    pub fn reply(&self) -> Option<crate::answer::Reply> {
+        self.reply.clone().filter(|_| self.replay.is_none())
+    }
+
+    /// An async method ended with `v`: sent to its caller once the call
+    /// commits, and kept for its `#[ttl]`.
+    pub(crate) fn answer(&self, value: Value, ttl: Option<(String, i64)>) {
+        let reply = self.reply();
+        if self.replay.is_none() && (reply.is_some() || ttl.is_some()) {
+            self.effects.borrow_mut().push(Box::new(crate::answer::Answered { reply, value, ttl }));
         }
     }
 
@@ -239,7 +262,8 @@ impl Cx {
     }
 
     /// Call `method(args)` on a cron schedule (`"0 9 * * 1"`: Mondays at 9),
-    /// in this machine's local time (`aio::cron` has the clock rules).
+    /// in UTC as aio, or local time with `[app] tz = "local"` (`aio::cron`
+    /// has the clock rules).
     pub fn cron(&self, key: &str, expr: &str, method: &str, args: impl Serialize) -> crate::Result {
         let c = crate::cron::Cron::parse(expr).map_err(crate::Rejected::new)?;
         let due = c.next(self.at).ok_or_else(|| crate::Rejected::new(format!("cron `{expr}` never runs")))?;

@@ -72,6 +72,7 @@ version = "1.4"
 ui = "window"
 lang = "en"
 dir = "ltr"
+tz = "utc"
 maintainer = "Example Team <team@example.org>"
 # port_of = "notes"         # a port of the aio app "notes": its home and state.db
 
@@ -148,6 +149,7 @@ suppress = []
 
 [perf]
 effect = 5
+call_ceiling = 30000
 
 [perf.storm]
 rate = 200
@@ -193,6 +195,7 @@ Who the app is and where its cells live.
 | `ui` | `window`, `browser` | `"window"` | Where a `client-server` app shows its UI: `window` (the shared runtime's) or `browser` (its own page in the system browser, running until asked to stop). |
 | `lang` | language tag | `"en"` | The page's language, `<html lang>` (screen readers, spellcheck, translation). Letters, digits and `-`: `"en"`, `"pt-BR"`. |
 | `dir` | `ltr`, `rtl`, `auto` | `"ltr"` | The page's direction, `<html dir>`. `auto` is the browser's guess from the first strong character. Never guessed from `lang`. |
+| `tz` | `utc`, `local` | `"utc"` | The clock cron schedules read (`#[cron]`, `cx.cron`): UTC as aio's, so a port's jobs fire when they did, or this machine's local time (with its daylight-saving changes). |
 | `maintainer` | `"Name <email>"` | none | Who publishes it. A Debian package needs it (`ax build --deb`); `ax create` fills it from git. |
 | `port_of` | id | none | The aio app this app is a port of (its `appId`): it runs on that app's home (its profiles, `AIO_APPS_DIR`) and `state.db`, which aio can still open after. See [migration: data](../migration/data.md). |
 
@@ -564,6 +567,7 @@ its budget is a perf violation in the log and `ax health`.
 |---|---|---|---|
 | `method` | milliseconds | 16 (debug), 100 (release) | A method's own time. |
 | `effect` | milliseconds | `5` | One effect step. |
+| `call_ceiling` | milliseconds | `30000` | How long each await of an async method may take (aio's `effectTimeoutMs`); one that never settles is cut off, its caller told. A `#[long]` method has none. |
 | `methods` | table | `{}` | Per method, `"cell.method" = ms`: one meant to be slow while every other stays strict. A key naming no method of its cell is reported (a typo would budget nothing). |
 | `effects` | table | `{}` | Per effect, `"cell.name" = ms` (the name its key starts with). |
 

@@ -613,8 +613,12 @@ fn a_damaged_store_is_set_aside_and_the_good_copy_boots() {
         *x = 0xAB;
     }
     std::fs::write(&p, &b).unwrap();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    aio::on_recovered(move |cell, r| into.lock().unwrap().push((cell.to_string(), r.from)));
     let h = Handle::<Todo>::open(&p).unwrap();
     let r = h.store(|s| s.recovered().cloned()).unwrap();
+    assert!(heard.lock().unwrap().contains(&("todo".to_string(), r.from)), "aio's onCheckpointRestore heard it");
     let titles: Vec<String> = h.state().items.values().map(|i| i.title.clone()).collect();
     assert_eq!(titles, ["in the good copy"]);
     // Kept, not deleted.

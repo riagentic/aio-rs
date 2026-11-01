@@ -26,7 +26,10 @@ pub struct CellHealth {
 trait Part: Send + Sync {
     fn id(&self) -> &'static str;
     fn fire(&self);
-    fn start(&self);
+    /// Live: its `#[on_start]`'s refusal, if any.
+    fn start(&self) -> Result;
+    fn any(&self) -> &dyn std::any::Any;
+    fn state(&self) -> serde_json::Value;
     fn switch(&self, on: bool);
     fn trip_after(&self, max: u32, window: Option<Duration>);
     fn shutdown(&self, budget: Duration) -> Pin<Box<dyn Future<Output = Drained> + Send>>;
@@ -42,8 +45,18 @@ impl<T: Cell> Part for Handle<T> {
         Handle::fire(self);
     }
 
-    fn start(&self) {
+    fn start(&self) -> Result {
+        let r = self.live(true);
         drop(Handle::start(self));
+        r
+    }
+
+    fn any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn state(&self) -> serde_json::Value {
+        serde_json::to_value(&*Handle::state(self)).unwrap_or_default()
     }
 
     fn switch(&self, on: bool) {
@@ -72,12 +85,18 @@ impl<T: Cell> Part for Handle<T> {
     }
 }
 
+/// An app-wide hook of [`Cells::on_start`] / [`Cells::on_restore`].
+pub(crate) type Hook = Box<dyn FnOnce(&Cells) -> Result + Send>;
+
 /// The app's cells: `Cells::default().with(todo, &[]).with(mail, &[Todo::ID]).start()?`.
 #[derive(Default)]
 pub struct Cells {
     /// In dependency order once started.
     parts: Vec<(Box<dyn Part>, Vec<&'static str>)>,
     trip: Option<(u32, Option<Duration>)>,
+    on_restore: Vec<(&'static str, Hook)>,
+    on_start: Vec<(&'static str, Hook)>,
+    fatal: bool,
 }
 
 impl Cells {
@@ -87,10 +106,64 @@ impl Cells {
         self
     }
 
-    /// `other`'s cells too (a plugin's, [`crate::plugin`]).
+    /// `other`'s cells and hooks too (a plugin's, [`crate::plugin`]), its hooks after these.
     pub(crate) fn and(mut self, other: Cells) -> Self {
         self.parts.extend(other.parts);
+        self.on_restore.extend(other.on_restore);
+        self.on_start.extend(other.on_start);
         self
+    }
+
+    /// Run `f` once at `start`, after every cell's state is restored and
+    /// before any goes live (aio's app-wide `onRestore`): repair across
+    /// cells with their methods ([`Self::get`]); what it calls is logged.
+    pub fn on_restore(mut self, f: impl FnOnce(&Cells) -> Result + Send + 'static) -> Self {
+        self.on_restore.push(("on_restore", Box::new(f)));
+        self
+    }
+
+    /// Run `f` once at `start`, after every cell went live (its
+    /// `#[on_start]` ran): seed data, start the app's own timers (aio's
+    /// `aio.run({ onStart })`). A refusal is said in the log and a report;
+    /// with [`Self::fatal_on_start`] it fails the start.
+    pub fn on_start(mut self, f: impl FnOnce(&Cells) -> Result + Send + 'static) -> Self {
+        self.on_start.push(("on_start", Box::new(f)));
+        self
+    }
+
+    pub(crate) fn hooks(mut self, by: &'static str, start: Vec<Hook>) -> Self {
+        self.on_start.extend(start.into_iter().map(|f| (by, f)));
+        self
+    }
+
+    /// aio's `fatalOnStart`: a refused `on_restore`, `on_start` or cell's
+    /// `#[on_start]` fails [`Self::start`] (the app should exit) instead of
+    /// leaving a half-started app running.
+    pub fn fatal_on_start(mut self) -> Self {
+        self.fatal = true;
+        self
+    }
+
+    /// The cell `T`'s handle, when it is in the list.
+    pub fn get<T: Cell>(&self) -> Option<Handle<T>> {
+        self.parts.iter().find_map(|(p, _)| p.any().downcast_ref::<Handle<T>>()).cloned()
+    }
+
+    /// Every cell's state now, by id (aio's `app.getFullState()`): read
+    /// only, for a hook that looks across cells.
+    pub fn view(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.parts.iter().map(|(p, _)| (p.id().to_string(), p.state())).collect()
+    }
+
+    /// A hook's or cell's refusal at start: said; fatal, it fails the start.
+    fn refused(&self, what: &str, e: crate::Rejected) -> Result<(), crate::Error> {
+        let msg = format!("{what} refused at start: {e}");
+        eprintln!("[aio] {msg}");
+        crate::report::problem("hook", &msg);
+        match self.fatal {
+            true => Err(crate::Error(format!("{msg} (fatal_on_start)"))),
+            false => Ok(()),
+        }
     }
 
     /// Disable a cell after `max` failures (within `window`, if set); the
@@ -103,17 +176,41 @@ impl Cells {
     /// Check the list (a duplicate, an unknown dependency or a cycle
     /// refuses the boot), then in dependency order fire each cell's missed
     /// schedules and start its scheduler (inside a tokio runtime).
+    ///
+    /// `AIORT_ISOLATE=todo,mail` (aio's `isolate`) starts only those cells:
+    /// the others stay disabled (their calls refused, their schedules
+    /// held), said in the log, to look at a few cells alone.
     pub fn start(mut self) -> Result<Self, crate::Error> {
         let ids: Vec<_> = self.parts.iter().map(|(p, a)| (p.id(), a.as_slice())).collect();
         let order = order(&ids).map_err(crate::Error)?;
         let mut parts: Vec<_> = self.parts.into_iter().map(Some).collect();
         self.parts = order.into_iter().filter_map(|i| parts[i].take()).collect();
+        let only = isolated(std::env::var("AIORT_ISOLATE").ok().as_deref(), &self.ids()).map_err(crate::Error)?;
+        for (name, f) in std::mem::take(&mut self.on_restore) {
+            if let Err(e) = f(&self) {
+                self.refused(name, e)?;
+            }
+        }
         for (p, _) in &self.parts {
+            if let Some(only) = &only
+                && !only.contains(&p.id())
+            {
+                eprintln!("[aio] {}: not started (AIORT_ISOLATE)", p.id());
+                p.switch(false);
+                continue;
+            }
             if let Some((max, window)) = self.trip {
                 p.trip_after(max, window);
             }
             p.fire();
-            p.start();
+            if let Err(e) = p.start() {
+                self.refused(&format!("{}'s #[on_start]", p.id()), e)?;
+            }
+        }
+        for (name, f) in std::mem::take(&mut self.on_start) {
+            if let Err(e) = f(&self) {
+                self.refused(name, e)?;
+            }
         }
         Ok(self)
     }
@@ -167,6 +264,20 @@ impl Cells {
         }
         aborted
     }
+}
+
+/// The cells `AIORT_ISOLATE` names (`None`: every cell); a name the app
+/// has no cell of refuses the start (a typo would start nothing). Pure.
+fn isolated(var: Option<&str>, ids: &[&'static str]) -> std::result::Result<Option<Vec<&'static str>>, String> {
+    let Some(var) = var.filter(|v| !v.trim().is_empty()) else { return Ok(None) };
+    let mut only = vec![];
+    for n in var.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        match ids.iter().find(|i| **i == n) {
+            Some(i) => only.push(*i),
+            None => return Err(format!("AIORT_ISOLATE names `{n}`, no cell of this app; its cells: {}", ids.join(", "))),
+        }
+    }
+    Ok(Some(only))
 }
 
 /// The list's indexes in dependency order: each after the ones it names,
@@ -285,5 +396,15 @@ mod tests {
         assert!(!t.add(t0));
         assert!(!t.add(t0 + Duration::from_secs(2)), "the first one is out of the window");
         assert!(t.add(t0 + Duration::from_millis(2500)));
+    }
+
+    #[test]
+    fn isolate_names_cells_the_app_has() {
+        let ids = ["todo", "mail", "sync"];
+        assert_eq!(isolated(None, &ids), Ok(None));
+        assert_eq!(isolated(Some(" "), &ids), Ok(None), "set but empty: every cell");
+        assert_eq!(isolated(Some("mail, todo"), &ids), Ok(Some(vec!["mail", "todo"])));
+        let e = isolated(Some("mial"), &ids).unwrap_err();
+        assert!(e.contains("names `mial`, no cell of this app; its cells: todo, mail, sync"), "{e}");
     }
 }
