@@ -441,7 +441,7 @@ async fn a_tool_asks_what_a_caller_may_call_and_its_signatures() {
 pub struct Vault {
     pub label: String,
     #[server]
-    pub pin: String,
+    pub pin: Hidden<String>,
     #[transient]
     pub seen: u32,
 }

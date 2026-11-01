@@ -156,6 +156,58 @@ A bad list refuses the boot: a duplicate id, a dependency the list
 doesn't hold, a cycle. Dependencies order start and stop only; they give
 a cell no access to another's state ([composition.md](composition.md)).
 
+### App-wide hooks
+
+The app's own start code goes on the list (aio's `aio.run({ onStart,
+onRestore, fatalOnStart })`):
+
+- `.on_restore(|cells| ..)` runs once at `start()`, after every cell's
+  state is restored and before any goes live: repair across cells through
+  their methods (what it calls is logged).
+- `.on_start(|cells| ..)` runs once after every cell went live: seed data,
+  start the app's own timers. A plugin's `on_start` runs after the app's.
+- A refused hook, or a cell's refused `#[on_start]`, is said in the log
+  and a report and the start goes on; `.fatal_on_start()` makes it fail
+  `start()` instead, so the app exits rather than run half-started.
+- `cells.get::<Orders>()` is a cell's handle; `cells.view()` every cell's
+  state as JSON by id (aio's `getFullState()`), to read across cells.
+- `AIORT_ISOLATE=orders,reports` (aio's `isolate`) starts only those
+  cells: the others stay disabled, said in the log. A name the app has no
+  cell of refuses the start.
+
+```rust
+use aio::prelude::*;
+use aio::Cells;
+use aio::testing::TestCells;
+
+#[cell]
+pub struct Plans {
+    pub names: Vec<String>,
+}
+
+#[methods]
+impl Plans {
+    pub fn add(&mut self, name: String) {
+        self.names.push(name);
+    }
+}
+
+# fn main() {
+let mut t = TestCells::new();
+let plans = t.cell::<Plans>();
+let cells = Cells::default().with(plans.clone(), &[]).on_start(|cells| {
+    let p = cells.get::<Plans>().expect("listed");
+    if p.state().names.is_empty() {
+        p.add("free".into())?; // seed data, once
+    }
+    Ok(())
+});
+let cells = t.start(cells).unwrap();
+assert_eq!(plans.state().names, ["free"]);
+assert_eq!(cells.view()["plans"]["names"][0], "free");
+# }
+```
+
 ## Disable, enable and health
 
 | `Cells::` | What it does |
@@ -318,8 +370,11 @@ assert_eq!(h.state().resets, 0);
 
 - `aio::Call` holds `cell`, `method`, `args`, `by` and `role` (the
   network caller's, proven by its session).
-- There is one gate: a second `before_call` replaces the first. It can't
-  change a call, only let it in or refuse it.
+- There is one gate: a second `before_call` replaces the first. It lets
+  a call in or refuses it; `aio::rewrite_call(|call| ..)` may also change
+  it (aio's `beforeReduce` returning another action): `Ok(Some(args))`
+  runs it with those arguments, logged as it ran, so replay never asks
+  again.
 - It runs while the cell is locked: decide from the call alone, and never
   call a cell from it.
 - `aio::on_effect(|cell, key| ..)` hears each effect as it starts (aio's
@@ -341,17 +396,18 @@ view).
 | aio | aio-rs |
 |---|---|
 | `onInit`, `onDestroy` | `#[on_start]`, `#[on_stop]` |
-| `aio.run({ onStart })` | `#[on_start]` on a cell; no app-wide start hook |
-| `fatalOnStart: true` | not available: a refused or panicking `#[on_start]` is reported and the boot goes on |
+| `aio.run({ onStart })`, app-level `onRestore` | `Cells::on_start`, `Cells::on_restore`; `#[on_start]` on a cell |
+| `fatalOnStart: true` | `Cells::fatal_on_start()` |
 | `dependsOn` | `Cells::with(h, &[ids])` |
-| `isolate` (run only some cells) | not available |
+| `isolate` (run only some cells) | `AIORT_ISOLATE=a,b` |
+| `onCheckpointRestore` | `aio::on_recovered(|cell, recovered| ..)` (a store back from a damaged file) |
 | `app.cells.disable` resets the state | `Cells::disable` keeps it |
 | `circuitBreaker` | `Cells::trip_after` |
 | `GET /__aio/health` | `ax health`, `Cells::health()` |
 | `onStopping`, `onStop` | `aio::on_stopping`, `aio::on_stop` |
 | `AIO_PARENT_PID` | `aio::lifecycle::watched`, `watch_parent` |
-| `beforeReduce` may change an action | `before_call` lets in or refuses |
-| `app.getFullState()` in a hook | not available: a hook sees its own cell |
+| `beforeReduce` may change an action | `before_call` lets in or refuses; `rewrite_call` may change the arguments |
+| `app.getFullState()` in a hook | `Cells::view()`, `Cells::get::<T>()` |
 
 ## Common mistakes
 

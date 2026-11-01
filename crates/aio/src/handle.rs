@@ -129,8 +129,10 @@ struct Inner<T: Cell> {
     live: AtomicBool,
     /// Its failures, and when they disable it.
     tally: Mutex<crate::cells::Tally>,
-    /// `#[ttl]` calls answered, by effect key: when, and for how long.
-    answered: Mutex<HashMap<String, (i64, i64)>>,
+    /// `#[ttl]` calls answered, by effect key: when, for how long, and the answer.
+    answered: Mutex<HashMap<String, Answered>>,
+    /// The `#[mode(first)]` and `#[mode(newest)]` calls in flight.
+    inflight: crate::answer::Inflight,
     /// aio pages' CRDT sync of this cell (`compat::crdt`): its clock, the ops
     /// it passes on.
     #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
@@ -185,6 +187,7 @@ impl<T: Cell> Handle<T> {
             live: AtomicBool::new(false),
             tally: Mutex::default(),
             answered: Mutex::default(),
+            inflight: Default::default(),
             #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
             aio_sync: Default::default(),
         };
@@ -365,7 +368,10 @@ impl<T: Cell> Handle<T> {
                         Ok(a) => self.abort(&a.0),
                         Err(e) => match e.downcast::<crate::tell::Tell>() {
                             Ok(t) => self.say(*t),
-                            Err(_) => eprintln!("[aio] {}: an effect for another cell was dropped", T::ID),
+                            Err(e) => match e.downcast::<crate::answer::Answered>() {
+                                Ok(a) => self.answer(*a),
+                                Err(_) => eprintln!("[aio] {}: an effect for another cell was dropped", T::ID),
+                            },
                         },
                     },
                 }
@@ -429,11 +435,11 @@ impl<T: Cell> Handle<T> {
     /// from zero, and schedules missed meanwhile fire once.
     pub(crate) fn switch(&self, on: bool) {
         if !on {
-            self.live(false);
+            _ = self.live(false);
         }
         self.inner.off.store(!on, Ordering::SeqCst);
         if on {
-            self.live(true);
+            _ = self.live(true);
             lock(&self.inner.tally).clear();
             crate::health::ok(&format!("cell {}", T::ID));
             self.inner.wake.notify_one();
@@ -447,9 +453,9 @@ impl<T: Cell> Handle<T> {
     /// Going live or not: run its `#[on_start]` or `#[on_stop]` once each
     /// way. A refusal (or a panic) is said in the log and a report, never
     /// stops the boot or the shutdown.
-    pub(crate) fn live(&self, on: bool) {
+    pub(crate) fn live(&self, on: bool) -> Result {
         if self.inner.live.swap(on, Ordering::SeqCst) == on {
-            return;
+            return Ok(());
         }
         if on && !T::SCHEDULES.is_empty() {
             if let Err(e) = lock(&self.inner.store).declare() {
@@ -458,12 +464,15 @@ impl<T: Cell> Handle<T> {
             }
             self.inner.wake.notify_one();
         }
-        let (Some(m), hook) = (if on { (T::ON_START, "on_start") } else { (T::ON_STOP, "on_stop") }) else { return };
-        if let Err(e) = Door::call(self, m, Value::Null) {
+        let (Some(m), hook) = (if on { (T::ON_START, "on_start") } else { (T::ON_STOP, "on_stop") }) else {
+            return Ok(());
+        };
+        Door::call(self, m, Value::Null).map(drop).map_err(|e| {
             let msg = format!("{}: #[{hook}] {m} refused: {e}", T::ID);
             eprintln!("[aio] {msg}");
             crate::report::problem("hook", &msg);
-        }
+            crate::Rejected::new(msg)
+        })
     }
 
     /// Disable the cell after `max` failures (within `window`, if set).
@@ -527,24 +536,103 @@ impl<T: Cell> Handle<T> {
         running.entry(e.key).or_default().push((id, task.abort_handle()));
     }
 
-    /// A `#[ttl]` method's last step committed: the call it ends (this
-    /// effect's key: the method and its arguments) is answered for `ms`.
-    pub(crate) fn answered(&self, ms: i64) {
-        let By::Effect(key) = &self.by else { return };
+    /// An async call ended and committed: tell its caller, and keep a
+    /// `#[ttl]` answer for its key.
+    fn answer(&self, a: crate::answer::Answered) {
+        if let Some(r) = &a.reply {
+            r.send(Ok(a.value.clone()));
+        }
+        let Some((key, ms)) = a.ttl else { return };
         let now = lock(&self.inner.store).now();
-        let mut a = lock(&self.inner.answered);
-        a.insert(key.clone(), (now, ms));
-        sweep(&mut a, now, ANSWERED_MAX);
+        let mut m = lock(&self.inner.answered);
+        m.insert(key, (now, ms, a.value));
+        sweep(&mut m, now, ANSWERED_MAX);
     }
 
-    /// Was this call answered within its ttl? Then it needn't run again.
-    fn answers(&self, method: &str, args: &Value) -> bool {
+    /// This call's answer, when one within its ttl has it: it needn't run again.
+    fn answers(&self, method: &str, args: &Value) -> Option<Value> {
         if lock(&self.inner.answered).is_empty() {
-            return false;
+            return None;
         }
-        let Ok(key) = crate::effect::key(method, args) else { return false };
+        let key = crate::effect::key(method, args).ok()?;
         let now = lock(&self.inner.store).now();
-        lock(&self.inner.answered).get(&key).is_some_and(|&(at, ms)| fresh(at, ms, now))
+        lock(&self.inner.answered).get(&key).filter(|&&(at, ms, _)| fresh(at, ms, now)).map(|a| a.2.clone())
+    }
+
+    /// Run a call (by the network caller `who`, with a synced client's
+    /// `op`, if any), followed to its end when it is an async method's:
+    /// what it returned now (`None`: a re-sent `op`, not applied again), and
+    /// its end. `who`'s `#[client]` rule is asked on the very state the
+    /// call runs on.
+    fn enter(
+        &self,
+        who: Option<&crate::Caller>,
+        method: &str,
+        args: Value,
+        op: Option<&str>,
+    ) -> Result<(Option<Value>, crate::Answer)> {
+        self.open_for_calls()?;
+        if who.is_none()
+            && op.is_none()
+            && let Some(v) = self.answers(method, &args)
+        {
+            return Ok((Some(v.clone()), crate::Answer::ready(Ok(v))));
+        }
+        let mode = T::async_mode(method);
+        let (reply, answer) = match mode {
+            Some(_) => {
+                let (r, a) = crate::answer::Reply::new(method);
+                (Some(r), Some(a))
+            }
+            None => (None, None),
+        };
+        if let (Some(mode), Some(r)) = (mode, &reply)
+            && let Some(shared) = self.inner.inflight.enter(mode, crate::answer::key_of::<T>(method, &args), r)
+        {
+            return Ok((Some(Value::Null), shared));
+        }
+        let out = {
+            let mut s = lock(&self.inner.store);
+            match who.map_or(Ok(()), |w| s.state().allow(w, method, &args)) {
+                Ok(()) => s.call_as(&self.by, who.and_then(|w| w.role.as_deref()), method, args, op, reply.clone()),
+                Err(e) => Err(e),
+            }
+        };
+        self.settle(&out);
+        match (out, reply, answer) {
+            (Err(e), reply, _) => {
+                reply.inspect(|r| r.send(Err(e.clone())));
+                Err(e)
+            }
+            (Ok(None), Some(_), _) => {
+                let why = format!("{method}: ran before, when this call was first sent; its answer went with that link");
+                Ok((None, crate::Answer::ready(Err(crate::Rejected::new(why)))))
+            }
+            (Ok(v), _, Some(a)) => Ok((v, a)),
+            (Ok(v), _, None) => Ok((v.clone(), crate::Answer::ready(Ok(v.unwrap_or_default())))),
+        }
+    }
+
+    /// An async method's step `method` (`m.1`), run by its effect for the
+    /// call whose end goes to `reply`: refused once a newer call of a
+    /// `#[mode(newest)]` method came.
+    pub(crate) fn resume(&self, method: &str, args: Value, reply: Option<crate::answer::Reply>) -> Result<Value> {
+        self.open_for_calls()?;
+        let base = method.split_once('.').map_or(method, |(m, _)| m);
+        if let (Some(crate::Mode::Newest), Some(r), By::Effect(key)) = (T::async_mode(base), &reply, &self.by)
+            && !self.inner.inflight.current(key, r)
+        {
+            crate::reject!("{}.{base}: superseded by a newer call (#[mode(newest)])", T::ID);
+        }
+        let out = lock(&self.inner.store).call_as(&self.by, None, method, args, None, reply);
+        self.settle(&out);
+        out.map(Option::unwrap_or_default)
+    }
+
+    /// An async method's await refused (`io.await?`): a failure of the cell, as a refused step is.
+    pub(crate) fn failed(&self, why: &str) {
+        lock(&self.inner.store).failed(&self.by, why);
+        self.count_failures();
     }
 
     /// Stop the running and queued effects with this key, and drop the
@@ -580,6 +668,11 @@ impl<T: Cell> Handle<T> {
     /// The keys of the effects held, in the order they were asked for.
     pub(crate) fn held(&self) -> Vec<String> {
         lock(&self.inner.held).iter().flatten().map(|e| e.key.clone()).collect()
+    }
+
+    /// The effects held, each as its key, mode and timeout.
+    pub(crate) fn held_effects(&self) -> Vec<(String, Mode, Option<Duration>)> {
+        lock(&self.inner.held).iter().flatten().map(|e| (e.key.clone(), e.mode, e.timeout)).collect()
     }
 
     /// Start the held effects (inside a tokio runtime); how many.
@@ -677,7 +770,7 @@ impl<T: Cell> Handle<T> {
     /// stop the schedules, let running effects finish and commit; those
     /// still running at the deadline are aborted and named.
     pub async fn shutdown(&self, budget: Duration) -> Drained {
-        self.live(false);
+        _ = self.live(false);
         self.inner.closing.store(true, Ordering::SeqCst);
         // A held `#[coalesce]` run is saved before anything else stops.
         self.store(|s| s.flush()).ok();
@@ -715,15 +808,13 @@ impl<T: Cell> Handle<T> {
 
     /// A synced client's call (see `Store::call_from`); `Ok(None)`: a re-send, not applied again.
     pub fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
-        self.open_for_calls()?;
-        let out = lock(&self.inner.store).call_from(&self.by, method, args, op);
-        self.settle(&out);
-        out
+        self.enter(None, method, args, Some(op)).map(|(v, _)| v)
     }
 
     /// A call from the network by `who`, with the synced client's `op` if
     /// any: refused unless the method's `#[client]` rule lets `who` in, asked
     /// on the very state the call then runs on.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn call_by(
         &self,
         who: &crate::Caller,
@@ -731,14 +822,18 @@ impl<T: Cell> Handle<T> {
         args: Value,
         op: Option<&str>,
     ) -> Result<Option<Value>> {
-        self.open_for_calls()?;
-        let out = {
-            let mut s = lock(&self.inner.store);
-            s.state().allow(who, method, &args)?;
-            s.call_as(&self.by, who.role.as_deref(), method, args, op)
-        };
-        self.settle(&out);
-        out
+        self.enter(Some(who), method, args, op).map(|(v, _)| v)
+    }
+
+    /// [`Self::call_by`], followed to its end: an async method's answer comes later.
+    pub(crate) fn ask_by(
+        &self,
+        who: Option<&crate::Caller>,
+        method: &str,
+        args: Value,
+        op: Option<&str>,
+    ) -> Result<(Option<Value>, crate::Answer)> {
+        self.enter(who, method, args, op)
     }
 
     /// Committed events from now on, each with the event before it. A
@@ -840,7 +935,7 @@ impl<T: Cell> Handle<T> {
     /// Fire saved schedules on time, until the task is dropped or aborted.
     /// Schedules missed while the app was off fire once, right away.
     pub fn start(&self) -> tokio::task::JoinHandle<()> {
-        self.live(true);
+        _ = self.live(true);
         let h = self.clone();
         tokio::spawn(async move {
             loop {
@@ -901,13 +996,16 @@ fn fresh(at: i64, ms: i64, now: i64) -> bool {
     (0..ms).contains(&(now - at))
 }
 
+/// A `#[ttl]` answer: when, for how long (ms), and its value.
+type Answered = (i64, i64, Value);
+
 /// Over `max`, drop the stale answers, then the oldest.
-fn sweep(a: &mut HashMap<String, (i64, i64)>, now: i64, max: usize) {
+fn sweep(a: &mut HashMap<String, Answered>, now: i64, max: usize) {
     if a.len() <= max {
         return;
     }
-    a.retain(|_, &mut (at, ms)| fresh(at, ms, now));
-    let mut old: Vec<(i64, String)> = a.iter().map(|(k, &(at, _))| (at, k.clone())).collect();
+    a.retain(|_, (at, ms, _)| fresh(*at, *ms, now));
+    let mut old: Vec<(i64, String)> = a.iter().map(|(k, (at, _, _))| (*at, k.clone())).collect();
     old.sort();
     let over = old.len().saturating_sub(max);
     old.into_iter().take(over).for_each(|(_, k)| _ = a.remove(&k));
@@ -922,13 +1020,11 @@ fn wait_ms(next: Option<i64>, now: i64) -> u64 {
 
 impl<T: Cell> Door<T> for Handle<T> {
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.open_for_calls()?;
-        if self.answers(method, &args) {
-            return Ok(Value::Null);
-        }
-        let out = lock(&self.inner.store).call(&self.by, method, args);
-        self.settle(&out);
-        out
+        self.enter(None, method, args, None).map(|(v, _)| v.unwrap_or_default())
+    }
+
+    fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        self.enter(None, method, args, None).map(|(_, a)| a)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
@@ -960,9 +1056,9 @@ mod tests {
 
     #[test]
     fn answers_are_bounded_stale_ones_first_then_the_oldest() {
-        let mut a: std::collections::HashMap<String, (i64, i64)> =
+        let mut a: std::collections::HashMap<String, super::Answered> =
             [("stale", (0, 10)), ("old", (90, 1000)), ("mid", (95, 1000)), ("new", (99, 1000))]
-                .map(|(k, v)| (k.to_string(), v))
+                .map(|(k, (at, ms))| (k.to_string(), (at, ms, serde_json::Value::Null)))
                 .into();
         super::sweep(&mut a, 100, 4);
         assert_eq!(a.len(), 4, "within the bound: kept");

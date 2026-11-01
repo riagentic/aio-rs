@@ -1,5 +1,6 @@
-//! Cron schedules: `minute hour day-of-month month day-of-week`, in the
-//! machine's local time. Fields take `*`, numbers, `a-b`, lists and `/step`;
+//! Cron schedules: `minute hour day-of-month month day-of-week`, in UTC as
+//! aio's were (`[app] tz = "local"`: this machine's local time; see
+//! [`set_local`]). Fields take `*`, numbers, `a-b`, lists and `/step`;
 //! months and weekdays take names (`jan`, `mon`); weekday 0 and 7 are Sunday.
 //! As in cron, when both days are restricted, either one matching is enough.
 //!
@@ -7,7 +8,22 @@
 //! exists after it; a time that happens twice runs once, the first time. The
 //! next run is always found after the last one, so a clock step back never
 //! runs a slot twice (and after sleep a missed run fires once: the scheduler).
-use chrono::{Datelike, Duration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use chrono::{Datelike, Duration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static LOCAL: AtomicBool = AtomicBool::new(false);
+
+/// Read cron schedules in this machine's local time (`true`) or in UTC
+/// (`false`, the default, as aio): `aio::boot` sets it from `[app] tz`.
+/// A schedule already armed keeps its next run; the one after follows this.
+pub fn set_local(local: bool) {
+    LOCAL.store(local, Ordering::Relaxed);
+}
+
+/// Are cron schedules read in local time?
+pub fn local() -> bool {
+    LOCAL.load(Ordering::Relaxed)
+}
 
 /// A parsed expression: the allowed values of each field.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,16 +163,19 @@ impl Cron {
         }
     }
 
-    /// The next run after `after`, in this machine's local time.
+    /// The next run after `after`: in UTC, or local time after [`set_local`].
     pub fn next(&self, after: i64) -> Option<i64> {
-        self.next_in(&Local, after)
+        match local() {
+            true => self.next_in(&Local, after),
+            false => self.next_in(&Utc, after),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{FixedOffset, Utc};
+    use chrono::FixedOffset;
 
     fn ms(s: &str) -> i64 {
         chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()
@@ -175,6 +194,18 @@ mod tests {
         }
         let c = Cron::parse("0 0 * * 7").unwrap();
         assert_eq!(c.weekdays, 1, "7 is Sunday");
+    }
+
+    #[test]
+    fn cron_reads_utc_unless_told_local() {
+        let c = Cron::parse("0 9 * * *").unwrap();
+        assert!(!local(), "UTC by default, as aio");
+        assert_eq!(at(c.next(ms("2026-10-28T10:00:00Z")).unwrap()), "2026-10-29 09:00 Thu");
+        set_local(true);
+        let t = ms("2026-10-28T10:00:00Z");
+        assert_eq!(c.next(t), c.next_in(&Local, t), "[app] tz = \"local\"");
+        set_local(false);
+        assert_eq!(c.next(t), c.next_in(&Utc, t));
     }
 
     #[test]
