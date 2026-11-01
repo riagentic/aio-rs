@@ -324,8 +324,8 @@ impl std::io::Read for BodyReader {
     }
 }
 
-/// What a route answers: built with `text`, `json` or `redirect`, then
-/// `status`, `header` and `cookie` on top.
+/// What a route answers: built with `text`, `json`, `redirect` or
+/// `stream`, then `status`, `header` and `cookie` on top.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub status: u16,
@@ -333,11 +333,57 @@ pub struct Reply {
     pub body: Vec<u8>,
     /// A file sent as it is read, instead of `body`.
     window: Option<file::Window>,
+    /// A body sent as it is made, instead of `body`.
+    stream: Option<Streamed>,
+}
+
+/// A body made as it is sent ([`Reply::stream`]): taken once, by the send.
+#[derive(Clone)]
+struct Streamed(Arc<std::sync::Mutex<Option<axum::body::Body>>>);
+
+impl PartialEq for Streamed {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Streamed {}
+
+impl std::fmt::Debug for Streamed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Streamed")
+    }
 }
 
 impl Reply {
     fn of(content_type: &str, body: Vec<u8>) -> Self {
-        Self { status: 200, headers: vec![("content-type".into(), content_type.into())], body, window: None }
+        Self {
+            status: 200,
+            headers: vec![("content-type".into(), content_type.into())],
+            body,
+            window: None,
+            stream: None,
+        }
+    }
+
+    /// A body sent part by part as `parts` makes them, each at once (aio's
+    /// streamed `Response`): server-sent events (`text/event-stream`,
+    /// `data: …\n\n` each), NDJSON, a long download. The answer ends with
+    /// the stream; a client that leaves drops it. Never compressed, cached
+    /// or buffered by a proxy.
+    pub fn stream<S, B>(content_type: &str, parts: S) -> Self
+    where
+        S: futures_util::Stream<Item = B> + Send + 'static,
+        B: Into<axum::body::Bytes> + 'static,
+    {
+        use futures_util::StreamExt;
+        let body = axum::body::Body::from_stream(parts.map(|b| Ok::<_, std::convert::Infallible>(b.into())));
+        Self {
+            stream: Some(Streamed(Arc::new(std::sync::Mutex::new(Some(body))))),
+            ..Self::of(content_type, Vec::new())
+        }
+        .header("cache-control", "no-cache")
+        .header("x-accel-buffering", "no")
     }
 
     pub fn text(body: impl Into<String>) -> Self {
@@ -354,7 +400,7 @@ impl Reply {
 
     /// 302 to `to`; `.status(303)` etc. for another.
     pub fn redirect(to: &str) -> Self {
-        Self { status: 302, headers: vec![("location".into(), to.into())], body: Vec::new(), window: None }
+        Self { status: 302, headers: vec![("location".into(), to.into())], body: Vec::new(), window: None, stream: None }
     }
 
     pub fn status(mut self, code: u16) -> Self {
@@ -386,7 +432,9 @@ impl Reply {
         for (k, v) in &self.headers {
             b = b.header(k, v);
         }
+        let streamed = self.stream.and_then(|s| s.0.lock().unwrap_or_else(|e| e.into_inner()).take());
         let body = match self.window {
+            _ if let Some(body) = streamed => body,
             Some(w) => {
                 if !w.gzip {
                     b = b.header("content-length", w.len);
@@ -1170,6 +1218,10 @@ pub(crate) async fn answer(
         _ => reply,
     };
     let compress = http.compress;
+    // Streamed: each part goes as it comes, untouched.
+    if reply.stream.is_some() {
+        return reply.into_response();
+    }
     if reply.body.len() < encoding::MIN_COMPRESS {
         return encoding::encode(&method, &asked, reply, compress).into_response();
     }

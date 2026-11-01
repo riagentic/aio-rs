@@ -810,3 +810,43 @@ async fn blobs_are_served_with_ranges_and_cached_for_good_behind_the_key() {
     let plain = serve(Handle::memory(), Http::default()).await;
     assert_eq!(fetch(&plain, "GET", &url, &[KEY], "").await.0, 404);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_route_streams_its_answer_part_by_part() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(Some(rx)));
+    let http = Http::default().route(Route::get("/events", move |_| {
+        let rx = rx.lock().unwrap().take();
+        async move {
+            let Some(rx) = rx else { return Reply::text("taken").status(409) };
+            let parts = futures_util::stream::unfold(rx, |mut rx| async move { Some((rx.recv().await?, rx)) });
+            Reply::stream("text/event-stream", parts)
+        }
+    }));
+    let addr = serve(Handle::<Hooks>::memory(), http).await;
+    let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let req = "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n";
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut got = Vec::new();
+    // Each part arrives while the answer is still open.
+    for (i, n) in [1, 2].into_iter().enumerate() {
+        tx.send(format!("data: {n}\n\n")).unwrap();
+        while !String::from_utf8_lossy(&got).contains(&format!("data: {n}\n\n")) {
+            let mut buf = [0; 1024];
+            let k = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf)).await.unwrap().unwrap();
+            assert!(k > 0, "closed before part {i}");
+            got.extend_from_slice(&buf[..k]);
+        }
+    }
+    let head = String::from_utf8_lossy(&got).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("content-type: text/event-stream"), "{head}");
+    assert!(head.contains("cache-control: no-cache") && head.contains("transfer-encoding: chunked"), "{head}");
+    assert!(!head.contains("content-encoding"), "never compressed: {head}");
+    // Its end ends the answer.
+    drop(tx);
+    let mut rest = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut rest)).await.unwrap().unwrap();
+    assert!(rest.ends_with(b"0\r\n\r\n"), "{:?}", String::from_utf8_lossy(&rest));
+}
