@@ -74,11 +74,19 @@ window.__aioRun = (code) => {
 /// Dioxus's interpreter runs a query with `Function` (`unsafe-eval`).
 const QUERY_EVAL: &str = "Function(\"Eval\", `\"use strict\";${event.data};`)();";
 
-/// Dioxus's DOM-edit interpreter, its queries run by [`RUN`].
+/// The page object a query's script talks through (`send`, `recv`); `aio`
+/// is its name for apps (`aio::ui::eval`), the renderer's own stays too.
+const QUERY_PAGE: &str = "let dioxus = {";
+
+/// Dioxus's DOM-edit interpreter, its queries run by [`RUN`], each with
+/// its page object also named `aio`.
 fn interpreter() -> String {
     let glue = dioxus_liveview::interpreter_glue("aio://wire");
     assert!(glue.contains(QUERY_EVAL), "dioxus-liveview's query runner moved: see aio::page::QUERY_EVAL");
-    glue.replace(QUERY_EVAL, "window.__aioRun(`\"use strict\";${event.data};`);")
+    glue.replace(
+        QUERY_EVAL,
+        &format!("window.__aioRun(`\"use strict\";${{event.data.replace('{QUERY_PAGE}', 'let aio, dioxus = aio = {{')}};`);"),
+    )
 }
 
 /// The page's `<body>` content: the root, `bridge` (a script defining

@@ -2,8 +2,7 @@
 //! assistive tech, and does on a click or a key.
 use aio::kit::*;
 use aio::testing::TestUi;
-use dioxus::prelude::*;
-use keyboard_types::{Key, Modifiers};
+use aio::ui::prelude::*;
 use std::cell::RefCell;
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ fn said() -> Vec<String> {
     LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
 }
 
-fn styled(body: Element) -> Element {
+fn styled(body: View) -> View {
     rsx! {
         style { {aio::ui::page_css(&[&theme_css(theme::hue("kit")), ""], false)} }
         {body}
@@ -44,15 +43,15 @@ fn press(ui: &mut TestUi, t: &str, key: Key) {
     ui.press_key(key, Modifiers::empty());
 }
 
-fn buttons_and_inputs() -> Element {
-    let mut text = use_signal(String::new);
-    let mut on = use_signal(|| false);
+fn buttons_and_inputs() -> View {
+    let text = signal(String::new);
+    let on = signal(|| false);
     styled(rsx! {
         Button { variant: Variant::Primary, "data-t": "save", onclick: move |_| log("save"), "Save" }
         Button { size: Size::Sm, class: "mine", "data-t": "plain", "Plain" }
-        Input { "data-t": "name", value: text(), oninput: move |v| text.set(v), invalid: text().len() > 3 }
+        Input { "data-t": "name", value: text.get(), oninput: move |v| text.set(v), invalid: text.get().len() > 3 }
         p { "data-t": "echo", "{text}" }
-        Checkbox { "data-t": "agree", label: "Email me", checked: on(), onchange: move |c| on.set(c) }
+        Checkbox { "data-t": "agree", label: "Email me", checked: on.get(), onchange: move |c| on.set(c) }
         p { "data-t": "on", "{on}" }
         Select { "data-t": "pick", options: vec!["a".into(), Opt { value: "b".into(), label: "Bee".into(), disabled: false }], value: "b" }
         Textarea { "data-t": "bio", value: "hi", rows: 5 }
@@ -96,12 +95,12 @@ fn a_select_lists_its_options_and_a_textarea_its_rows() {
     assert_eq!(ui.count("textarea[data-t=bio].aio-textarea[rows='5']"), 1);
 }
 
-fn fields() -> Element {
-    let mut email = use_signal(String::new);
-    let error = email().is_empty().then(|| "Required".to_string());
+fn fields() -> View {
+    let email = signal(String::new);
+    let error = email.get().is_empty().then(|| "Required".to_string());
     rsx! {
         Field { label: "Email", error, required: true, "data-t": "email-field",
-            Input { "data-t": "email", value: email(), oninput: move |v| email.set(v) }
+            Input { "data-t": "email", value: email.get(), oninput: move |v| email.set(v) }
         }
         Field { label: "Name", hint: "As on your card",
             Input { "data-t": "name", id: "mine" }
@@ -153,15 +152,15 @@ fn no_for_onto_a_group_or_a_self_labelled_checkbox() {
     assert_eq!(ui.count("[data-t=size][role=group][aria-label=Size]"), 1, "the field names the group");
 }
 
-fn choices() -> Element {
-    let mut size = use_signal(|| "s".to_string());
-    let mut dark = use_signal(|| false);
+fn choices() -> View {
+    let size = signal(|| "s".to_string());
+    let dark = signal(|| false);
     rsx! {
         RadioGroup { label: "Size", options: vec!["s".into(), "m".into(), Opt { value: "l".into(), label: "l".into(), disabled: true }],
-            value: size(), onchange: move |v| size.set(v)
+            value: size.get(), onchange: move |v| size.set(v)
         }
         p { "data-t": "size", "{size}" }
-        Switch { "data-t": "dark", label: "Dark mode", checked: dark(), onchange: move |v| dark.set(v) }
+        Switch { "data-t": "dark", label: "Dark mode", checked: dark.get(), onchange: move |v| dark.set(v) }
         p { "data-t": "dark-on", "{dark}" }
     }
 }
@@ -183,14 +182,14 @@ fn a_switch_is_a_real_checkbox_and_reports_the_new_state() {
     assert_eq!(ui.text("dark-on"), "true");
 }
 
-fn tabs() -> Element {
-    let mut on = use_signal(|| true);
+fn tabs() -> View {
+    let on = signal(|| true);
     let mut tabs = vec![
         Tab::new("general settings", "General", rsx! { p { "data-t": "p1", "one" } }),
         Tab::new("b", "Beta", rsx! { p { "data-t": "p2", "two" } }).disabled(),
         Tab::new("c", "Gamma", rsx! { p { "data-t": "p3", "three" } }),
     ];
-    if !on() {
+    if !on.get() {
         tabs.remove(0);
     }
     rsx! {
@@ -234,11 +233,11 @@ fn arrows_move_home_and_end_jump_and_disabled_tabs_are_skipped() {
     assert_eq!(said(), Vec::<String>::new(), "a disabled tab can't be chosen");
 }
 
-fn mirrored() -> Element {
-    let mut rtl = use_signal(|| true);
+fn mirrored() -> View {
+    let rtl = signal(|| true);
     let three = |p: &str| ["a", "b", "c"].map(|t| Tab::new(format!("{p}{t}"), t, rsx! {})).to_vec();
     rsx! {
-        Direction { rtl: rtl(),
+        Direction { rtl: rtl.get(),
             Tabs { "data-t": "read", tabs: three(""), onchange: log }
             Tabs { "data-t": "said", rtl: false, tabs: three("x"), onchange: log }
         }
@@ -277,7 +276,7 @@ fn a_tab_that_is_gone_falls_back_to_the_first_enabled_one() {
 }
 
 // Unstyled: the menu as markup, its placement not under test.
-fn menu() -> Element {
+fn menu() -> View {
     rsx! {
         Menu { "data-t": "actions", label: "Actions", trigger: rsx! { "⋯" }, onselect: log,
             items: vec![MenuItem::new("edit", "Edit"), MenuItem::new("lock", "Lock").disabled(), MenuItem::new("delete", "Delete").danger()]
@@ -358,15 +357,15 @@ fn choosing_reports_the_id_and_a_disabled_item_does_nothing() {
     assert_eq!(ui.count("[role=menu]"), 0, "choosing closes it");
 }
 
-fn statuses() -> Element {
-    let mut shown = use_signal(|| true);
+fn statuses() -> View {
+    let shown = signal(|| true);
     styled(rsx! {
         div { "data-t": "half-row", Progress { "data-t": "half", value: 42.0, label: "Upload", show_value: true } }
         Progress { "data-t": "busy", label: "Working" }
         Progress { "data-t": "nan", value: f64::NAN, show_value: true }
         div { "data-t": "over-row", Progress { "data-t": "over", value: 150.0, show_value: true } }
         Alert { "data-t": "saved", tone: Tone::Success, title: "Saved", "All good" }
-        if shown() {
+        if shown.get() {
             Alert { "data-t": "failed", tone: Tone::Error, ondismiss: move |_| shown.set(false), "Broke" }
         }
         Tooltip { "data-t": "tip", text: "Copies the link",
@@ -444,9 +443,9 @@ struct Person {
     age: u32,
 }
 
-fn data() -> Element {
-    let mut page = use_signal(|| 1u32);
-    let mut stale = use_signal(|| 9u32);
+fn data() -> View {
+    let page = signal(|| 1u32);
+    let stale = signal(|| 9u32);
     let rows = vec![Person { name: "Ada", age: 36 }, Person { name: "Alan", age: 41 }];
     let cols = vec![
         Column::text("Name", |p: &Person| p.name.into()),
@@ -456,8 +455,8 @@ fn data() -> Element {
     rsx! {
         Table { "data-t": "people", columns: cols.clone(), rows, key_of: |p: Person| p.name.to_string(), onrow: move |(p, i): (Person, usize)| log(format!("{} {i}", p.name)) }
         Table { "data-t": "nobody", columns: Vec::<Column<Person>>::new(), rows: vec![], empty: rsx! { "Nobody yet" } }
-        Pagination { "data-t": "pager", page: page(), pages: 10, onpage: move |p| page.set(p) }
-        Pagination { "data-t": "stale", page: stale(), pages: 3, onpage: move |p| stale.set(p) }
+        Pagination { "data-t": "pager", page: page.get(), pages: 10, onpage: move |p| page.set(p) }
+        Pagination { "data-t": "stale", page: stale.get(), pages: 3, onpage: move |p| stale.set(p) }
         p { "data-t": "stale-page", "{stale}" }
         Card { "data-t": "card", title: rsx! { "Title" }, footer: rsx! { "Foot" }, "Body" }
         Stack { "data-t": "stack", gap: "4px", "a" }
@@ -510,22 +509,22 @@ fn cards_stacks_spinners_and_avatars() {
     assert_eq!(ui.count("[data-t=pic] img.aio-avatar__img[alt=Ada][width='48']"), 1);
 }
 
-fn dialogs() -> Element {
-    let mut a = use_signal(|| false);
-    let mut b = use_signal(|| false);
-    let mut stuck = use_signal(|| false);
+fn dialogs() -> View {
+    let a = signal(|| false);
+    let b = signal(|| false);
+    let stuck = signal(|| false);
     // Only room around each dialog: the headless layout misplaces the kit's fixed overlay.
     rsx! {
         style { ".aio-modal-backdrop{{padding:20px}}" }
         button { "data-t": "open-a", onclick: move |_| a.set(true), "a" }
-        Modal { open: a(), title: "Settings", onclose: move |_| { log("close a"); a.set(false) },
+        Modal { open: a.get(), title: "Settings", onclose: move |_| { log("close a"); a.set(false) },
             button { "data-t": "in-a", onclick: move |_| b.set(true), "open b" }
             button { "data-t": "stuck", onclick: move |_| stuck.set(true), "stuck" }
         }
-        Modal { open: b(), title: "Sure?", "data-t": "b-backdrop", onclose: move |_| { log("close b"); b.set(false) },
+        Modal { open: b.get(), title: "Sure?", "data-t": "b-backdrop", onclose: move |_| { log("close b"); b.set(false) },
             button { "data-t": "in-b", "b" }
         }
-        Modal { open: stuck(), dismissable: false, onclose: move |_| log("close stuck"),
+        Modal { open: stuck.get(), dismissable: false, onclose: move |_| log("close stuck"),
             button { "data-t": "in-stuck", "saving" }
         }
     }
@@ -576,7 +575,7 @@ fn a_dialog_that_cannot_be_dismissed_blocks_escape() {
 }
 
 // Unstyled: the headless layout misplaces a styled dialog's footer.
-fn confirming() -> Element {
+fn confirming() -> View {
     rsx! {
         ConfirmButton { "data-t": "delete", variant: Variant::Danger, confirm: "Delete it?", onconfirm: move |_| log("deleted"), "Delete" }
     }
@@ -596,7 +595,7 @@ fn a_confirm_button_acts_only_once_confirmed() {
     assert_eq!((said(), ui.count("[role=dialog]")), (vec!["deleted".to_string()], 0));
 }
 
-fn toaster() -> Element {
+fn toaster() -> View {
     rsx! {
         ToastHost { "data-t": "toasts" }
         button { "data-t": "ok", onclick: move |_| _ = toast_for("Saved", Tone::Success, None), "ok" }
@@ -621,7 +620,7 @@ fn a_toast_shows_in_the_host_until_dismissed_or_its_time_is_up() {
     assert_eq!(ui.text("toasts"), "Failed×");
 }
 
-fn docs() -> Element {
+fn docs() -> View {
     rsx! {
         Markdown { "data-t": "md", source: "# Hi\n\nSee [site](https://e.com) and [home](/h). <script>alert(1)</script> [x](javascript:alert(1))\n\n- a\n- b" }
     }
@@ -638,7 +637,7 @@ fn markdown_renders_elements_never_live_html() {
     assert_eq!(ui.count(".aio-md ul.aio-md__list li"), 2);
 }
 
-fn viewport() -> Element {
+fn viewport() -> View {
     rsx! {
         ZoomPan { "data-t": "zp", onview: move |v: ZoomView| log(format!("{}", v.scale)),
             div { "data-t": "content", onclick: |_| log("content"), "map" }
@@ -659,7 +658,7 @@ fn the_zoom_buttons_zoom_and_a_click_still_reaches_the_content() {
     assert_eq!(said(), ["content"], "a plain click is not a drag");
 }
 
-fn camera() -> Element {
+fn camera() -> View {
     rsx! {
         ZoomPan { "data-t": "zp", style: "width: 400px; height: 300px",
             onview: move |v: ZoomView| log(format!("{:.1} {:.1} {:.3}", v.x, v.y, v.scale)),
@@ -722,21 +721,21 @@ fn cameras() -> &'static aio::held::Held<&'static str, String> {
 /// What the cameras did (they run off the view's thread).
 static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-fn camera_view() -> Element {
-    let mut key = use_signal(|| Some("front"));
-    let mut shown = use_signal(|| true);
+fn camera_view() -> View {
+    let key = signal(|| Some("front"));
+    let shown = signal(|| true);
     rsx! {
         button { "data-t": "back", onclick: move |_| key.set(Some("back")), "back" }
         button { "data-t": "off", onclick: move |_| key.set(None), "off" }
         button { "data-t": "hide", onclick: move |_| shown.set(false), "hide" }
-        if shown() {
-            Preview { cam: key() }
+        if shown.get() {
+            Preview { cam: key.get() }
         }
     }
 }
 
 #[component]
-fn Preview(cam: Option<&'static str>) -> Element {
+fn Preview(cam: Option<&'static str>) -> View {
     let cam = use_held(cameras(), cam);
     let text = match &cam {
         None => "none".to_string(),
@@ -770,11 +769,11 @@ fn a_view_holds_one_camera_per_key_and_lets_go_on_a_change_and_at_unmount() {
     assert_eq!(cameras().len(), 0);
 }
 
-fn screens() -> Element {
-    let mut screen = use_signal(|| 2);
-    let mut dialog = use_signal(|| true);
+fn screens() -> View {
+    let mut screen = signal(|| 2);
+    let dialog = signal(|| true);
     use_back_button(move || {
-        if screen() == 0 {
+        if screen.get() == 0 {
             return false;
         }
         screen -= 1;
@@ -782,14 +781,14 @@ fn screens() -> Element {
     });
     rsx! {
         p { "data-t": "screen", "{screen}" }
-        if dialog() {
+        if dialog.get() {
             Dialog { close: move |_| dialog.set(false) }
         }
     }
 }
 
 #[component]
-fn Dialog(close: EventHandler) -> Element {
+fn Dialog(close: EventHandler) -> View {
     use_back_button(move || {
         close.call(());
         true
@@ -814,14 +813,14 @@ fn back_closes_the_dialog_first_then_goes_up_then_leaves() {
     assert!(!back(&mut ui), "at home nobody takes it: the app leaves");
 }
 
-fn window_app() -> Element {
-    let mut on = use_signal(|| true);
+fn window_app() -> View {
+    let on = signal(|| true);
     rsx! {
         GlobalKeys { style: "height: 300px",
             button { "data-t": "stop", onclick: move |e| e.stop_propagation(), "stop" }
             button { "data-t": "unmount", onclick: move |_| on.set(false), "unmount" }
             div { "data-t": "box", style: "width: 50px; height: 50px" }
-            if on() {
+            if on.get() {
                 Tracker {}
             }
         }
@@ -829,8 +828,8 @@ fn window_app() -> Element {
 }
 
 #[component]
-fn Tracker() -> Element {
-    let mut n = use_signal(|| 0);
+fn Tracker() -> View {
+    let mut n = signal(|| 0);
     use_global_key("ctrl+s", |_| log("saved"));
     use_window_event(move |e| {
         n += 1;
@@ -895,14 +894,14 @@ fn the_pointers_moves_reach_the_window_at_most_once_per_move_ms_the_last_too() {
 }
 
 #[component]
-fn Repeats() -> Element {
+fn Repeats() -> View {
     use_global_key("ctrl+s", |_| log("save"));
     use_global_key("ArrowDown", |_| log("down"));
     use_global_key(Chord::parse("ctrl+z").unwrap().repeating(true), |_| log("undo"));
     rsx! { p { "keys" } }
 }
 
-fn repeats() -> Element {
+fn repeats() -> View {
     rsx! {
         GlobalKeys { style: "height: 100px", Repeats {} }
     }
@@ -932,18 +931,18 @@ fn a_held_keys_repeats_fire_only_movement_and_bindings_that_say_so() {
     assert_eq!((n("save", &got), n("down", &got), n("undo", &got)), (1, 4, 4), "{got:?}");
 }
 
-fn forms() -> Element {
-    let mut sent = use_signal(|| 0);
-    let mut name = use_signal(String::new);
+fn forms() -> View {
+    let mut sent = signal(|| 0);
+    let name = signal(String::new);
     rsx! {
         p { "data-t": "sent", "{sent}" }
         form { onsubmit: move |e| { e.prevent_default(); sent += 1 },
             input { "data-t": "to" }
             input { "data-t": "amount" }
         }
-        form { onsubmit: move |e| { e.prevent_default(); if !name().is_empty() { sent += 10 } },
+        form { onsubmit: move |e| { e.prevent_default(); if !name.get().is_empty() { sent += 10 } },
             input { "data-t": "name", value: "{name}", oninput: move |e| name.set(e.value()) }
-            button { r#type: "submit", disabled: name().is_empty(), "Create" }
+            button { r#type: "submit", disabled: name.get().is_empty(), "Create" }
         }
     }
 }
@@ -966,20 +965,20 @@ fn enter_submits_a_form_with_no_submit_button_and_one_whose_button_the_view_is_e
     assert_eq!(ui.text("sent"), "21", "an enabled button: the browser's own submit");
 }
 
-fn portals() -> Element {
-    let mut open = use_signal(|| false);
-    let mut menu = use_signal(|| true);
-    let mut n = use_signal(|| 0);
+fn portals() -> View {
+    let open = signal(|| false);
+    let menu = signal(|| true);
+    let mut n = signal(|| 0);
     rsx! {
         PortalHost {
             div { "data-t": "clip", style: "overflow: hidden; height: 10px",
                 button { "data-t": "open", onclick: move |_| open.toggle(), "open" }
                 button { "data-t": "menu", onclick: move |_| menu.toggle(), "menu" }
-                if open() {
+                if open.get() {
                     Portal {
                         div { "data-t": "dialog",
                             button { "data-t": "inc", onclick: move |_| n += 1, "{n}" }
-                            if menu() {
+                            if menu.get() {
                                 Portal { ul { "data-t": "dropdown", "menu" } }
                             }
                             Counter {}
@@ -993,8 +992,8 @@ fn portals() -> Element {
 }
 
 #[component]
-fn Counter() -> Element {
-    let mut c = use_signal(|| 0);
+fn Counter() -> View {
+    let mut c = signal(|| 0);
     rsx! { button { "data-t": "own", onclick: move |_| c += 1, "own {c}" } }
 }
 
@@ -1017,11 +1016,11 @@ fn a_portal_draws_at_the_root_keeps_its_state_and_handlers_and_leaves_nothing() 
     assert_eq!(ui.count(".aio-portals > *"), 0, "closed: nothing left behind");
 }
 
-fn fading() -> Element {
-    let mut show = use_signal(|| true);
+fn fading() -> View {
+    let show = signal(|| true);
     rsx! {
         button { "data-t": "toggle", onclick: move |_| show.toggle(), "toggle" }
-        Transition { show: show(), enter: Motion::FADE, exit: Motion::FADE.ms(100), "data-t": "fx",
+        Transition { show: show.get(), enter: Motion::FADE, exit: Motion::FADE.ms(100), "data-t": "fx",
             p { "data-t": "msg", "hello" }
         }
     }
@@ -1044,9 +1043,10 @@ fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
     assert!(ui.attr("fx", "style").unwrap().contains("normal"));
 }
 
-fn list() -> Element {
-    let mut items = use_signal(|| vec!["a", "b", "c"]);
-    let rows: Vec<(String, Element)> = items()
+fn list() -> View {
+    let items = signal(|| vec!["a", "b", "c"]);
+    let rows: Vec<(String, View)> = items
+        .get()
         .into_iter()
         .map(|k| (k.to_string(), rsx! { p { "data-t": "{k}", style: "height: 20px; margin: 0", "{k}" } }))
         .collect();
@@ -1098,7 +1098,7 @@ fn a_group_keeps_a_leaving_row_in_its_place_until_it_is_gone_and_slides_moved_ro
 }
 
 #[component]
-fn Deferred(trigger: Trigger, t: &'static str) -> Element {
+fn Deferred(trigger: Trigger, t: &'static str) -> View {
     rsx! {
         Defer { trigger, "data-t": "{t}", placeholder: rsx! { span { "data-t": "{t}-wait", "…" } },
             p { "data-t": "{t}-shown", "chart" }
@@ -1106,7 +1106,7 @@ fn Deferred(trigger: Trigger, t: &'static str) -> Element {
     }
 }
 
-fn deferred() -> Element {
+fn deferred() -> View {
     rsx! {
         Deferred { trigger: Trigger::Now, t: "now" }
         Deferred { trigger: Trigger::After(Duration::from_millis(300)), t: "timer" }
@@ -1171,7 +1171,7 @@ fn signup_check(s: &Signup) -> Problems {
     p
 }
 
-fn signup() -> Element {
+fn signup() -> View {
     let f = use_form(Signup::default, signup_check);
     use_async_rule(
         f,
@@ -1277,12 +1277,12 @@ fn a_waiting_rule_answers_the_latest_value_after_its_debounce_and_yields_to_the_
     );
 }
 
-fn shortcuts() -> Element {
-    let mut on = use_signal(|| true);
+fn shortcuts() -> View {
+    let on = signal(|| true);
     rsx! {
         GlobalKeys {
             Bindings {}
-            if on() {
+            if on.get() {
                 Scoped {}
             }
             button { "data-t": "btn", "focus me" }
@@ -1293,7 +1293,7 @@ fn shortcuts() -> Element {
 }
 
 #[component]
-fn Bindings() -> Element {
+fn Bindings() -> View {
     use_global_key("ctrl+s", |_| log("save"));
     use_global_key("ctrl+shift+s", |_| log("save-as"));
     use_global_key("mod+k", |_| log("palette"));
@@ -1304,7 +1304,7 @@ fn Bindings() -> Element {
 }
 
 #[component]
-fn Scoped() -> Element {
+fn Scoped() -> View {
     use_global_key("escape", |_| log("escape"));
     rsx! {}
 }
@@ -1379,10 +1379,10 @@ thread_local! {
     static CONN: RefCell<Option<Signal<aio::Conn>>> = const { RefCell::new(None) };
 }
 
-fn connection() -> Element {
-    let conn = use_signal(|| aio::Conn::Online);
+fn connection() -> View {
+    let conn = signal(|| aio::Conn::Online);
     CONN.with(|c| *c.borrow_mut() = Some(conn));
-    rsx! { ConnectionStatus { status: aio::Status { conn: conn(), ..aio::Status::LOCAL } } }
+    rsx! { ConnectionStatus { status: aio::Status { conn: conn.get(), ..aio::Status::LOCAL } } }
 }
 
 #[test]
@@ -1408,13 +1408,13 @@ fn the_connection_pill_says_reconnecting_then_connected() {
     assert!(CSS.contains(".aio-conn--success") && CSS.contains("aio-conn-out"));
 }
 
-fn springy() -> Element {
+fn springy() -> View {
     let x = use_spring(0.0, Spring::default());
-    let mut ticks = use_signal(|| 0);
-    let mut on = use_signal(|| true);
-    let mut frames = use_signal(|| 0);
-    use_interval(Duration::from_millis(5), on(), move || ticks += 1);
-    use_frame(on(), move |_, _| frames += 1);
+    let mut ticks = signal(|| 0);
+    let on = signal(|| true);
+    let mut frames = signal(|| 0);
+    use_interval(Duration::from_millis(5), on.get(), move || ticks += 1);
+    use_frame(on.get(), move |_, _| frames += 1);
     rsx! {
         p { "data-t": "x", "{x.value():.2} {x.animating()}" }
         p { "data-t": "ticks", "{ticks}" }
@@ -1464,15 +1464,15 @@ thread_local! {
 }
 
 #[component]
-fn Ticker() -> Element {
+fn Ticker() -> View {
     use_interval(Duration::from_millis(5), true, || TICKS.with(|t| t.set(t.get() + 1)));
     rsx! { "ticking" }
 }
 
-fn mounted_ticker() -> Element {
-    let mut on = use_signal(|| true);
+fn mounted_ticker() -> View {
+    let on = signal(|| true);
     rsx! {
-        if on() { Ticker {} }
+        if on.get() { Ticker {} }
         button { "data-t": "unmount", onclick: move |_| on.set(false), "x" }
     }
 }
@@ -1499,21 +1499,21 @@ thread_local! {
 }
 
 #[component]
-fn ColorOf() -> Element {
+fn ColorOf() -> View {
     RENDERS.with(|r| r.borrow_mut().push("color"));
     let c = use_context_select(|l: &Look| l.color);
     rsx! { p { "data-t": "color", "{c}" } }
 }
 
 #[component]
-fn SizeOf() -> Element {
+fn SizeOf() -> View {
     RENDERS.with(|r| r.borrow_mut().push("size"));
     let s = use_context_select(|l: &Look| l.size);
     rsx! { p { "data-t": "size", "{s}" } }
 }
 
-fn looks() -> Element {
-    let mut look = use_context_provider(|| Signal::new(Look { color: "red", size: 1 }));
+fn looks() -> View {
+    let look = provide(|| Signal::new(Look { color: "red", size: 1 }));
     rsx! {
         ColorOf {}
         SizeOf {}
@@ -1545,10 +1545,10 @@ fn a_kit_control_on_a_page_nothing_styles_is_said() {
     assert_eq!(unstyled("", "aio-stack"), None, "a class the kit doesn't style can't lack it");
 }
 
-fn long_list() -> Element {
-    let mut to = use_signal(|| None::<usize>);
+fn long_list() -> View {
+    let to = signal(|| None::<usize>);
     rsx! {
-        VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: to(),
+        VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: to.get(),
             row: |i| rsx! { span { "data-t": "row{i}", "#{i}" } }
         }
         button { "data-t": "jump", onclick: move |_| to.set(Some(500)), "jump" }
@@ -1570,7 +1570,7 @@ fn a_virtual_list_renders_only_the_rows_its_scroll_shows() {
 
 thread_local!(static ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
 
-fn counted_list() -> Element {
+fn counted_list() -> View {
     rsx! {
         VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 3,
             row: |i| {
@@ -1611,15 +1611,15 @@ mod travel {
 
     aio::client!(Count, count);
 
-    fn app() -> Element {
+    fn app() -> View {
         use_live();
         let tl = use_time_travel();
         rsx! {
             GlobalKeys {
                 p { "data-t": "n", "{count().n}" }
-                p { "data-t": "hist", {tl().map_or("none".into(), |t| t.steps.len().to_string())} }
+                p { "data-t": "hist", {tl.get().map_or("none".into(), |t| t.steps.len().to_string())} }
                 button { "data-t": "inc", onclick: |_| _ = act!(inc()), "inc" }
-                TimeTravelPanel { timeline: tl(), onask: |a| if let Err(e) = time_travel(a) { log(e.why) } }
+                TimeTravelPanel { timeline: tl.get(), onask: |a| if let Err(e) = time_travel(a) { log(e.why) } }
             }
         }
     }
@@ -1668,7 +1668,7 @@ struct Chart {
 
 const CHART: Island = Island::js("return (el, p) => { el.textContent = p.series.join(','); };");
 
-fn island() -> Element {
+fn island() -> View {
     rsx! {
         WebIsland::<Chart, ()> {
             island: CHART,
@@ -1704,13 +1704,13 @@ struct Said {
     series: Vec<i32>,
 }
 
-fn sandboxed() -> Element {
-    let mut said = use_signal(String::new);
-    let mut n = use_signal(|| 2);
+fn sandboxed() -> View {
+    let said = signal(String::new);
+    let mut n = signal(|| 2);
     rsx! {
         WebIsland {
             island: PROBE,
-            props: Chart { series: vec![0; n()] },
+            props: Chart { series: vec![0; n.get()] },
             onevent: move |s: Said| said.set(format!("{:?}", s.series)),
             "data-t": "probe",
         }
@@ -1728,7 +1728,7 @@ fn a_sandboxed_island_runs_in_a_frame_of_its_own_and_still_talks_through_its_pro
     ui.until_text("said", "[0, 0, 0]");
 }
 
-fn browser() -> Element {
+fn browser() -> View {
     rsx! {
         Browser { src: "https://a.example/", class: "pane", "data-t": "web", host_keys: vec!["Escape".into()] }
     }
@@ -1744,12 +1744,12 @@ fn a_browser_is_a_box_of_the_view_that_the_page_fills_with_its_guest() {
     assert!(ui.attr("web", "data-aio-island").is_some());
 }
 
-fn coached() -> Element {
-    let mut coach = use_signal(|| false);
+fn coached() -> View {
+    let coach = signal(|| false);
     rsx! {
         GlobalKeys {
             Escapes {}
-            if coach() {
+            if coach.get() {
                 Coach {}
             }
             button { "data-t": "coach", onclick: move |_| coach.toggle(), "coach" }
@@ -1764,7 +1764,7 @@ fn coached() -> Element {
 }
 
 #[component]
-fn Escapes() -> Element {
+fn Escapes() -> View {
     use_global_key("escape", |_| log("escape"));
     use_window_event(|e| {
         if let WindowEvent::KeyDown(k) = e {
@@ -1775,7 +1775,7 @@ fn Escapes() -> Element {
 }
 
 #[component]
-fn Coach() -> Element {
+fn Coach() -> View {
     use_key_claim("enter", |e| log(format!("coach {}", e.key())));
     use_key_claim(Chord::parse("f1").unwrap().in_fields(), |_| log("hint"));
     rsx! {}

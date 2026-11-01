@@ -3,7 +3,7 @@
 //! ([`GlobalKeys`](super::GlobalKeys)): every pointer move, press and key
 //! anywhere in the window that no handler stopped on its way up, and the
 //! window's size. The latest `f` runs, so it sees the latest render.
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -49,13 +49,13 @@ impl Listeners {
 /// Hear the window's events while this component lives (a hook). Needs a
 /// [`GlobalKeys`](super::GlobalKeys) around the app.
 pub fn use_window_event(f: impl FnMut(WindowEvent) + 'static) {
-    let run = use_callback(f);
-    let ls = try_use_context::<Listeners>().expect("use_window_event needs a GlobalKeys around the app");
-    let id = use_hook(|| {
+    let run = callback(f);
+    let ls = try_context::<Listeners>().expect("use_window_event needs a GlobalKeys around the app");
+    let id = once(|| {
         let id = ls.next.get();
         ls.next.set(id + 1);
         ls.all.borrow_mut().push((id, run));
         id
     });
-    use_drop(move || ls.all.borrow_mut().retain(|(i, _)| *i != id));
+    on_cleanup(move || ls.all.borrow_mut().retain(|(i, _)| *i != id));
 }

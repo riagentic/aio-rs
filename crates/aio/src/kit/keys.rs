@@ -6,7 +6,7 @@
 //! pressed with nothing focused (`<body>`) reaches them too (the page's
 //! [`KEYS`](crate::page::KEYS)). [`use_key_claim`] takes a chord before
 //! anything else hears it (aio's window listener in capture mode).
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -261,8 +261,8 @@ struct Claims {
 
 impl Claims {
     /// The page's copy of the claimed chords, and the element for them.
-    fn changed(mut self) {
-        let all = self.keys.peek().all.clone();
+    fn changed(self) {
+        let all = self.keys.read_untracked().all.clone();
         let chords: Vec<serde_json::Value> = all
             .borrow()
             .iter()
@@ -272,9 +272,9 @@ impl Claims {
                     "cmd": c.cmd, "exact": c.exact, "in_fields": c.in_fields })
             })
             .collect();
-        _ = dioxus_document::eval(&format!("window.__aioClaims = {}", serde_json::Value::from(chords)));
+        _ = eval(&format!("window.__aioClaims = {}", serde_json::Value::from(chords)));
         let any = !all.borrow().is_empty();
-        if *self.any.peek() != any {
+        if *self.any.read_untracked() != any {
             self.any.set(any);
         }
     }
@@ -336,19 +336,19 @@ pub const MOVE_MS: u32 = 100;
 /// has it, so keys reach it from the start; a key pressed while nothing
 /// has focus (on `<body>`) reaches it too (the page's [`KEYS`](crate::page::KEYS)).
 #[component]
-pub fn GlobalKeys(#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>, children: Element) -> Element {
+pub fn GlobalKeys(#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>, children: View) -> View {
     use super::window::{Listeners, WindowEvent as W};
-    let keys = use_context_provider(Keys::default);
-    let win = use_context_provider(Listeners::default);
-    let claims = use_context_provider(|| Claims { keys: Signal::new(Keys::default()), any: Signal::new(false) });
-    let tell = use_callback(move |e| win.tell(e));
+    let keys = provide(Keys::default);
+    let win = provide(Listeners::default);
+    let claims = provide(|| Claims { keys: Signal::new(Keys::default()), any: Signal::new(false) });
+    let tell = callback(move |e| win.tell(e));
     rsx! {
         div {
             class: "aio-keys",
             "data-aio-keys": "",
             tabindex: "-1",
             onmounted: move |e| async move {
-                _ = dioxus_document::eval(&PAGE_KEYS.replace("MOVE_MS", &MOVE_MS.to_string()));
+                _ = eval(&PAGE_KEYS.replace("MOVE_MS", &MOVE_MS.to_string()));
                 _ = e.set_focus(true).await
             },
             onkeydown: move |e| {
@@ -369,14 +369,14 @@ pub fn GlobalKeys(#[props(extends = GlobalAttributes)] attributes: Vec<Attribute
             ..attributes,
             // The page tells the pointer's moves here, MOVE_MS apart.
             div { "data-aio-moves": "", hidden: true, onmousemove: move |e| tell(W::MouseMove(e)) }
-            if (claims.any)() {
+            if (claims.any).get() {
                 div {
                     "data-aio-claimed": "",
                     hidden: true,
                     onkeydown: move |e| {
                         // Claimed: nothing else hears it, the root's bindings neither.
                         e.stop_propagation();
-                        let k = claims.keys.peek().clone();
+                        let k = claims.keys.read_untracked().clone();
                         k.fire(e);
                     },
                 }
@@ -398,17 +398,17 @@ pub fn use_key_claim(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) +
         ChordSpec(Ok(c)) => c,
         ChordSpec(Err(e)) => panic!("{e}"),
     };
-    let run = use_callback(f);
-    let claims = try_use_context::<Claims>().expect("use_key_claim needs a GlobalKeys around the app");
-    let keys = claims.keys.peek().clone();
-    let id = use_hook(|| {
+    let run = callback(f);
+    let claims = try_context::<Claims>().expect("use_key_claim needs a GlobalKeys around the app");
+    let keys = claims.keys.read_untracked().clone();
+    let id = once(|| {
         let id = keys.next.get();
         keys.next.set(id + 1);
         keys.all.borrow_mut().push(Binding { id, chord: chord.clone(), run });
         id
     });
     // Told once it rendered (the claims' element is the root's to render).
-    use_effect(move || claims.changed());
+    effect(move || claims.changed());
     let moved = keys.all.borrow_mut().iter_mut().find(|b| b.id == id).is_some_and(|b| {
         let moved = b.chord != chord;
         b.chord = chord;
@@ -417,8 +417,8 @@ pub fn use_key_claim(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) +
     if moved {
         claims.changed();
     }
-    use_drop(move || {
-        claims.keys.peek().all.borrow_mut().retain(|b| b.id != id);
+    on_cleanup(move || {
+        claims.keys.read_untracked().all.borrow_mut().retain(|b| b.id != id);
         claims.changed();
     });
 }
@@ -431,9 +431,9 @@ pub fn use_global_key(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) 
         ChordSpec(Ok(c)) => c,
         ChordSpec(Err(e)) => panic!("{e}"),
     };
-    let run = use_callback(f);
-    let keys = try_use_context::<Keys>().expect("use_global_key needs a GlobalKeys around the app");
-    let id = use_hook(|| {
+    let run = callback(f);
+    let keys = try_context::<Keys>().expect("use_global_key needs a GlobalKeys around the app");
+    let id = once(|| {
         let id = keys.next.get();
         keys.next.set(id + 1);
         keys.all.borrow_mut().push(Binding { id, chord: chord.clone(), run });
@@ -442,7 +442,7 @@ pub fn use_global_key(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) 
     if let Some(b) = keys.all.borrow_mut().iter_mut().find(|b| b.id == id) {
         b.chord = chord;
     }
-    use_drop(move || keys.all.borrow_mut().retain(|b| b.id != id));
+    on_cleanup(move || keys.all.borrow_mut().retain(|b| b.id != id));
 }
 
 /// A chord as [`use_global_key`] and [`use_key_claim`] take it: a `&str`

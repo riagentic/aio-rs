@@ -95,10 +95,10 @@ mod tests {
         assert_eq!(asked(Some("v"), Some("x"), "t").unwrap().1, ms(800), "a bad pace is the default");
     }
 
-    fn swatch() -> dioxus::prelude::Element {
-        use dioxus::prelude::*;
-        let mut blue = use_signal(|| false);
-        let bg = if blue() { "rgb(0,0,255)" } else { "rgb(255,0,0)" };
+    fn swatch() -> crate::ui::View {
+        use crate::ui::prelude::*;
+        let blue = signal(|| false);
+        let bg = if blue.get() { "rgb(0,0,255)" } else { "rgb(255,0,0)" };
         rsx! {
             div { style: "margin:0;width:200px;height:100px;background:{bg}" }
             button { "data-t": "flip", onclick: move |_| blue.set(true), "Flip" }

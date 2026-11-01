@@ -7,7 +7,7 @@
 //! the step: back to the password.
 use super::{Alert, Button, Field, Input, Tone, Variant, join};
 use crate::auth::client::{AuthError, Client, Login, Me, Signed, Signup};
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -74,27 +74,27 @@ pub fn SignIn(
     forgot: bool,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
-    let mut mode = use_signal(|| Mode::Login);
-    let (mut id, mut password, mut code) = (use_signal(String::new), use_signal(String::new), use_signal(String::new));
-    let (mut mail, mut token) = (use_signal(String::new), use_signal(String::new));
-    let mut pending = use_signal(|| None::<String>);
-    let mut error = use_signal(|| None::<String>);
-    let mut notice = use_signal(|| None::<&'static str>);
-    let mut busy = use_signal(|| false);
+) -> View {
+    let mode = signal(|| Mode::Login);
+    let (id, password, code) = (signal(String::new), signal(String::new), signal(String::new));
+    let (mail, token) = (signal(String::new), signal(String::new));
+    let pending = signal(|| None::<String>);
+    let error = signal(|| None::<String>);
+    let notice = signal(|| None::<&'static str>);
+    let busy = signal(|| false);
     let c = client.clone();
-    let offers = use_resource(move || {
+    let offers = resource(move || {
         let c = c.clone();
         async move { asked(async move { c.me(None).await }).await.ok() }
     });
-    let me = offers().flatten().unwrap_or(Me::default());
+    let me = offers.get().flatten().unwrap_or(Me::default());
     let submit = move |e: FormEvent| {
         e.prevent_default();
-        if busy() {
+        if busy.get() {
             return;
         }
-        let (c, m, p) = (client.clone(), mode(), pending());
-        let (i, pw, cd, em, tk) = (id(), password(), code(), mail(), token());
+        let (c, m, p) = (client.clone(), mode.get(), pending.get());
+        let (i, pw, cd, em, tk) = (id.get(), password.get(), code.get(), mail.get(), token.get());
         busy.set(true);
         error.set(None);
         spawn(async move {
@@ -124,7 +124,7 @@ pub fn SignIn(
             .await;
             busy.set(false);
             // The person moved on (Back) while it was asked: only a session still counts.
-            if *mode.peek() != m && !matches!(got, Ok(Done::Signed(_))) {
+            if *mode.read_untracked() != m && !matches!(got, Ok(Done::Signed(_))) {
                 return;
             }
             code.set(String::new());
@@ -148,7 +148,7 @@ pub fn SignIn(
                     mode.set(Mode::Reset);
                 }
                 // The step is spent: its form would offer a retry that can't work.
-                Err(e) if pending.peek().is_some() => {
+                Err(e) if pending.read_untracked().is_some() => {
                     pending.set(None);
                     password.set(String::new());
                     error.set(Some(said(&e)));
@@ -157,12 +157,12 @@ pub fn SignIn(
             }
         });
     };
-    let mut to = move |m: Mode| {
+    let to = move |m: Mode| {
         mode.set(m);
         error.set(None);
         notice.set(None);
     };
-    let (m, step) = (mode(), pending().is_some());
+    let (m, step) = (mode.get(), pending.get().is_some());
     let heading = title.clone().unwrap_or_else(|| {
         match (step, m) {
             (true, _) => "Two-factor code",
@@ -186,37 +186,37 @@ pub fn SignIn(
             h2 { class: "aio-signin__title", "{heading}" }
             if step {
                 Field { label: "Code",
-                    Input { value: code(), "name": "code", "inputmode": "numeric", "autocomplete": "one-time-code", placeholder: "6-digit code", "data-t": "signinCode", oninput: move |v| code.set(v) }
+                    Input { value: code.get(), "name": "code", "inputmode": "numeric", "autocomplete": "one-time-code", placeholder: "6-digit code", "data-t": "signinCode", oninput: move |v| code.set(v) }
                 }
             } else {
                 if m != Mode::Reset {
                     Field { label: "User id",
-                        Input { value: id(), "name": "id", "autocomplete": "username", "data-t": "signinId", oninput: move |v| id.set(v) }
+                        Input { value: id.get(), "name": "id", "autocomplete": "username", "data-t": "signinId", oninput: move |v| id.set(v) }
                     }
                 }
                 if new && email {
                     Field { label: "Email",
-                        Input { value: mail(), r#type: "email", "name": "email", "autocomplete": "email", "data-t": "signinEmail", oninput: move |v| mail.set(v) }
+                        Input { value: mail.get(), r#type: "email", "name": "email", "autocomplete": "email", "data-t": "signinEmail", oninput: move |v| mail.set(v) }
                     }
                 }
                 if m == Mode::Reset {
                     Field { label: "Reset token",
-                        Input { value: token(), "name": "token", placeholder: "from the email", "data-t": "signinToken", oninput: move |v| token.set(v) }
+                        Input { value: token.get(), "name": "token", placeholder: "from the email", "data-t": "signinToken", oninput: move |v| token.set(v) }
                     }
                 }
                 if m != Mode::Forgot {
                     Field { label: if m == Mode::Reset { "New password" } else { "Password" },
-                        Input { value: password(), r#type: "password", "name": "password", "autocomplete": if matches!(m, Mode::Login) { "current-password" } else { "new-password" }, "data-t": "signinPassword", oninput: move |v| password.set(v) }
+                        Input { value: password.get(), r#type: "password", "name": "password", "autocomplete": if matches!(m, Mode::Login) { "current-password" } else { "new-password" }, "data-t": "signinPassword", oninput: move |v| password.set(v) }
                     }
                 }
             }
-            if let Some(e) = error() {
+            if let Some(e) = error.get() {
                 Alert { tone: Tone::Error, "data-t": "signinError", "{e}" }
             }
-            if let Some(n) = notice() {
+            if let Some(n) = notice.get() {
                 Alert { tone: Tone::Success, "data-t": "signinNotice", "{n}" }
             }
-            Button { variant: Variant::Primary, r#type: "submit", disabled: busy(), "data-t": "signinSubmit", "{action}" }
+            Button { variant: Variant::Primary, r#type: "submit", disabled: busy.get(), "data-t": "signinSubmit", "{action}" }
             if !step {
                 if signup && me.signup && matches!(m, Mode::Login | Mode::Signup) {
                     Button { variant: Variant::Ghost, "data-t": "signinToggle", onclick: move |_| to(if new { Mode::Login } else { Mode::Signup }),

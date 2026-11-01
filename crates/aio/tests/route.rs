@@ -1,7 +1,7 @@
 //! The router in a view: typed pages, links, Back (aio tests/router.test.ts,
 //! router-navlink-outlet, router-link-class-and-onclick, standalone-router).
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::router!();
 
@@ -14,23 +14,23 @@ aio::routes! {
 }
 
 #[component]
-fn Dialog() -> Element {
-    let mut open = use_signal(|| true);
+fn Dialog() -> View {
+    let open = signal(|| true);
     use_back(move || {
-        let was = *open.peek();
+        let was = *open.read_untracked();
         open.set(false);
         was
     });
     rsx! {
-        if open() {
+        if open.get() {
             p { "data-t": "dialog", "open" }
         }
     }
 }
 
-fn app() -> Element {
+fn app() -> View {
     let page = Page::parse(&here().path);
-    let mut closes = use_signal(|| 0);
+    let mut closes = signal(|| 0);
     rsx! {
         // Links as blocks: each a whole row to click.
         style { "a {{ display: block }}" }

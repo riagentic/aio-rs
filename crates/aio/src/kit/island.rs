@@ -27,7 +27,7 @@
 //! script (`esbuild x.js --bundle --format=iife --global-name=m
 //! --footer:js='return m.default'`) and give it with `include_str!`.
 use super::join;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -95,7 +95,7 @@ struct Sent(Rc<RefCell<HashSet<String>>>);
 struct Shown {
     key: String,
     props: Value,
-    task: dioxus::core::Task,
+    task: Task,
 }
 
 /// A box drawn by `island`'s JS with `props` (sent as JSON; a change calls
@@ -109,20 +109,18 @@ pub fn WebIsland<P: Serialize + Clone + PartialEq + 'static, E: DeserializeOwned
     island: Island,
     props: P,
     #[props(default)] onevent: EventHandler<E>,
-    loading: Option<Element>,
+    loading: Option<View>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     let id = super::use_id("island");
-    let sent = use_hook(|| {
-        try_consume_context::<Sent>().unwrap_or_else(|| dioxus::core::provide_root_context(Sent::default()))
-    });
+    let sent = once(|| try_context::<Sent>().unwrap_or_else(|| provide_root(Sent::default())));
     // The window's document, kept: at unmount there is no scope to ask.
-    let doc = use_hook(dioxus_document::document);
+    let doc = once(crate::ui::Page::here);
     // `None` until the box is in the page.
-    let shown = use_hook(|| Rc::new(RefCell::new(None::<Shown>)));
-    let ready = use_signal(|| false);
+    let shown = once(|| Rc::new(RefCell::new(None::<Shown>)));
+    let ready = signal(|| false);
     let now = serde_json::to_value(&props).unwrap_or(Value::Null);
     let start = {
         let (doc, id, now) = (doc.clone(), id.clone(), now.clone());
@@ -142,7 +140,7 @@ pub fn WebIsland<P: Serialize + Clone + PartialEq + 'static, E: DeserializeOwned
     }
     {
         let (doc, id) = (doc.clone(), id.clone());
-        use_drop(move || _ = doc.eval(unmount_js(&id)));
+        on_cleanup(move || _ = doc.eval(unmount_js(&id)));
     }
     rsx! {
         div {
@@ -155,7 +153,7 @@ pub fn WebIsland<P: Serialize + Clone + PartialEq + 'static, E: DeserializeOwned
                 }
             },
             ..attributes,
-            if !ready() {
+            if !ready.get() {
                 {loading}
             }
             {children}
@@ -166,12 +164,12 @@ pub fn WebIsland<P: Serialize + Clone + PartialEq + 'static, E: DeserializeOwned
 /// Mount box `id` in the page, sending `island`'s script first if this page
 /// has none of it yet, and hear it: mounted, its events, its failures.
 fn mount<E: DeserializeOwned + 'static>(
-    doc: &Rc<dyn dioxus_document::Document>,
+    doc: &crate::ui::Page,
     sent: &Sent,
     island: Island,
     id: &str,
     props: Value,
-    mut ready: Signal<bool>,
+    ready: Signal<bool>,
     onevent: EventHandler<E>,
 ) -> Shown {
     let key = island.key();
@@ -218,21 +216,21 @@ fn mount_js(key: &str, src: Option<&str>, id: &str, props: &Value) -> String {
         Some(m) => format!(
             "if (!(K in I.mods)) {{ try {{ const f = {m}; if (typeof f !== 'function') throw new Error('its script \
              returned no mount(el, props, emit) function'); I.mods[K] = f; }} catch (e) {{ return \
-             dioxus.send({{ t: 'error', why: 'the script failed to load: ' + {WHY} }}); }} }}"
+             aio.send({{ t: 'error', why: 'the script failed to load: ' + {WHY} }}); }} }}"
         ),
         None => String::new(),
     };
     format!(
         "{REG} const K = {key}, ID = {id};{load}
-         if (!(K in I.mods)) return dioxus.send({{ t: 'error', why: 'its script failed to load before' }});
+         if (!(K in I.mods)) return aio.send({{ t: 'error', why: 'its script failed to load before' }});
          const el = document.querySelector('[data-aio-island=\"' + ID + '\"]');
          if (!el || I.live[ID]) return;
-         I.out[ID] = (m) => dioxus.send(m);
-         const go = (p) => {{ const h = I.mods[K](el, p, (v) => dioxus.send({{ t: 'event', v }}));
+         I.out[ID] = (m) => aio.send(m);
+         const go = (p) => {{ const h = I.mods[K](el, p, (v) => aio.send({{ t: 'event', v }}));
            return Object.assign(typeof h === 'function' ? {{ unmount: h }} : h || {{}}, {{ go }}); }};
          try {{ I.live[ID] = go({props}); }}
-         catch (e) {{ return dioxus.send({{ t: 'error', why: 'its script loaded but mount() threw: ' + {WHY} }}); }}
-         dioxus.send({{ t: 'mounted' }});
+         catch (e) {{ return aio.send({{ t: 'error', why: 'its script loaded but mount() threw: ' + {WHY} }}); }}
+         aio.send({{ t: 'mounted' }});
          await new Promise(() => {{}});"
     )
 }
@@ -247,7 +245,7 @@ fn sandbox_js(src: &str, id: &str, props: &Value) -> String {
         "{REG} const ID = {id};
          const el = document.querySelector('[data-aio-island=\"' + ID + '\"]');
          if (!el || I.live[ID]) return;
-         I.out[ID] = (m) => dioxus.send(m);
+         I.out[ID] = (m) => aio.send(m);
          const f = document.createElement('iframe');
          f.setAttribute('sandbox', 'allow-scripts');
          f.className = 'aio-island-frame';
@@ -257,9 +255,9 @@ fn sandbox_js(src: &str, id: &str, props: &Value) -> String {
          const hear = (e) => {{
            if (e.source !== f.contentWindow || !e.data) return;
            const m = e.data;
-           if (m.t === 'event') dioxus.send({{ t: 'event', v: m.v }});
-           else if (m.t === 'mounted') dioxus.send({{ t: 'mounted' }});
-           else dioxus.send({{ t: 'error', why: String(m.why).slice(0, 4000) }});
+           if (m.t === 'event') aio.send({{ t: 'event', v: m.v }});
+           else if (m.t === 'mounted') aio.send({{ t: 'mounted' }});
+           else aio.send({{ t: 'error', why: String(m.why).slice(0, 4000) }});
          }};
          window.addEventListener('message', hear);
          f.addEventListener('load', () => to({{ t: 'mount', src: {src}, props: {props} }}), {{ once: true }});

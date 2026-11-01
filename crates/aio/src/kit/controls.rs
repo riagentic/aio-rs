@@ -5,7 +5,7 @@
 //! Escape back to its trigger, a tooltip closes on Escape).
 use super::form::{Opt, use_field};
 use super::{flag, join, use_id};
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -23,7 +23,7 @@ pub fn RadioGroup(
     onchange: Option<EventHandler<String>>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let own = use_id("radio");
     let name = name.unwrap_or(own);
     let w = use_field(false, true);
@@ -66,7 +66,7 @@ pub fn Switch(
     onchange: Option<EventHandler<bool>>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let w = use_field(label.is_some(), false);
     let own = label.as_deref().map(str::trim).filter(|l| !l.is_empty()).map(String::from);
     let input = rsx! {
@@ -102,11 +102,11 @@ pub struct Tab {
     pub id: String,
     pub label: String,
     pub disabled: bool,
-    pub panel: Element,
+    pub panel: View,
 }
 
 impl Tab {
-    pub fn new(id: impl Into<String>, label: impl Into<String>, panel: Element) -> Self {
+    pub fn new(id: impl Into<String>, label: impl Into<String>, panel: View) -> Self {
         Self { id: id.into(), label: label.into(), disabled: false, panel }
     }
 
@@ -142,11 +142,9 @@ struct Rtl(Signal<bool>);
 /// the kit controls inside follow it (aio read the closest `[dir]`). An app in
 /// a right-to-left language wraps its root in one.
 #[component]
-pub fn Direction(rtl: bool, children: Element) -> Element {
-    let Rtl(mut now) = use_context_provider(|| Rtl(Signal::new(rtl)));
-    use_effect(use_reactive!(|rtl| if *now.peek() != rtl {
-        now.set(rtl)
-    }));
+pub fn Direction(rtl: bool, children: View) -> View {
+    let Rtl(now) = provide(|| Rtl(Signal::new(rtl)));
+    watch(rtl, move |rtl| now.set(rtl));
     rsx! {
         div { dir: if rtl { "rtl" } else { "ltr" }, style: "display:contents", {children} }
     }
@@ -166,15 +164,15 @@ pub fn Tabs(
     onchange: Option<EventHandler<String>>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let base = use_id("tabs");
-    let around = try_use_context::<Rtl>();
-    let rtl = rtl.unwrap_or_else(|| around.is_some_and(|Rtl(r)| r()));
+    let around = try_context::<Rtl>();
+    let rtl = rtl.unwrap_or_else(|| around.is_some_and(|Rtl(r)| r.get()));
     let first = tabs.iter().find(|t| !t.disabled).or(tabs.first()).map(|t| t.id.clone()).unwrap_or_default();
-    let mut inner = use_signal(|| value.clone().unwrap_or(first.clone()));
-    let mut els = use_signal(HashMap::<String, Rc<MountedData>>::new);
+    let inner = signal(|| value.clone().unwrap_or(first.clone()));
+    let els = signal(HashMap::<String, Rc<MountedData>>::new);
     let active = value.clone().unwrap_or_else(|| {
-        let i = inner();
+        let i = inner.get();
         if tabs.iter().any(|t| t.id == i) { i } else { first.clone() }
     });
     let shown = tabs.iter().find(|t| t.id == active);
@@ -182,7 +180,7 @@ pub fn Tabs(
     let disabled: Vec<bool> = tabs.iter().map(|t| t.disabled).collect();
     let ids: Vec<String> = tabs.iter().map(|t| t.id.clone()).collect();
     let controlled = value.is_some();
-    let mut select = move |id: String| {
+    let select = move |id: String| {
         if !controlled {
             inner.set(id.clone());
         }
@@ -231,7 +229,7 @@ pub fn Tabs(
                                 if let Some(to) = tab_step(&disabled, from, delta) {
                                     select(ids[to].clone());
                                     // Roving focus: the next arrow must start from the new tab.
-                                    if let Some(el) = els.peek().get(&ids[to]).cloned() {
+                                    if let Some(el) = els.read_untracked().get(&ids[to]).cloned() {
                                         spawn(async move { _ = el.set_focus(true).await });
                                     }
                                 }
@@ -272,7 +270,7 @@ pub fn Progress(
     #[props(default)] show_value: bool,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let value = value.filter(|v| v.is_finite());
     let bar = rsx! {
         progress {
@@ -319,8 +317,8 @@ pub fn Alert(
     ondismiss: Option<EventHandler<()>>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     rsx! {
         div {
             class: join(&format!("aio-alert aio-alert--{}", tone.key()), &class),
@@ -359,8 +357,8 @@ pub fn ConnectionStatus(
     status: crate::Status,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
-    let lost = use_hook(|| Rc::new(std::cell::Cell::new(false)));
+) -> View {
+    let lost = once(|| Rc::new(std::cell::Cell::new(false)));
     lost.set(lost.get() || matches!(status.conn, crate::Conn::Offline | crate::Conn::Blocked));
     let Some((text, tone)) = conn_note(status.conn, lost.get()) else { return rsx! {} };
     rsx! {
@@ -399,17 +397,17 @@ pub fn Tooltip(
     #[props(into)] bubble_id: Option<String>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     let own = use_id("tip");
     let id = bubble_id.unwrap_or(own);
-    use_context_provider(|| Tip(id.clone()));
-    let mut hidden = use_signal(|| false);
+    provide(|| Tip(id.clone()));
+    let hidden = signal(|| false);
     let side = if placement == Placement::Top { "top" } else { "bottom" };
     rsx! {
         span {
             class: join(&format!("aio-tip aio-tip--{side}"), &class),
-            "data-hidden": hidden().then_some(""),
+            "data-hidden": hidden.get().then_some(""),
             onkeydown: move |e| if e.key() == Key::Escape { hidden.set(true) },
             onfocusout: move |_| hidden.set(false),
             onmouseleave: move |_| hidden.set(false),
@@ -454,7 +452,7 @@ fn menu_step(items: &[MenuItem], i: isize, dir: isize) -> Option<usize> {
 /// puts focus back on the trigger, Tab or a click outside closes it.
 #[component]
 pub fn Menu(
-    trigger: Element,
+    trigger: View,
     items: Vec<MenuItem>,
     /// The trigger's name when it isn't text.
     #[props(into)]
@@ -462,12 +460,12 @@ pub fn Menu(
     onselect: Option<EventHandler<String>>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let id = use_id("menu");
-    let mut open = use_signal(|| false);
-    let mut want = use_signal(|| None::<usize>);
-    let mut els = use_signal(Vec::<Option<Rc<MountedData>>>::new);
-    let mut button = use_signal(|| None::<Rc<MountedData>>);
+    let open = signal(|| false);
+    let want = signal(|| None::<usize>);
+    let els = signal(Vec::<Option<Rc<MountedData>>>::new);
+    let button = signal(|| None::<Rc<MountedData>>);
     let focus = move |el: Option<Rc<MountedData>>| {
         if let Some(el) = el {
             spawn(async move { _ = el.set_focus(true).await });
@@ -477,21 +475,21 @@ pub fn Menu(
     // Focus item `i` walking `dir`, opening the menu first if need be.
     let go = {
         let items = items.clone();
-        use_callback(move |(i, dir): (isize, isize)| {
+        callback(move |(i, dir): (isize, isize)| {
             let to = menu_step(&items, i, dir);
-            if *open.peek() {
-                focus(to.and_then(|k| els.peek().get(k).cloned().flatten()));
+            if *open.read_untracked() {
+                focus(to.and_then(|k| els.read_untracked().get(k).cloned().flatten()));
             } else {
                 want.set(to);
                 open.set(true);
             }
         })
     };
-    let mut close = move |refocus: bool| {
-        if open() {
+    let close = move |refocus: bool| {
+        if open.get() {
             open.set(false);
             if refocus {
-                focus(button.peek().clone());
+                focus(button.read_untracked().clone());
             }
         }
     };
@@ -500,7 +498,7 @@ pub fn Menu(
             class: join("aio-menu", &class),
             onkeydown: move |e| match e.key() {
                 // Only an open menu takes Escape: a dialog around it gets the next one.
-                Key::Escape if open() => {
+                Key::Escape if open.get() => {
                     e.prevent_default();
                     e.stop_propagation();
                     close(true);
@@ -514,11 +512,11 @@ pub fn Menu(
                 class: "aio-menu__trigger",
                 "data-t": "menuTrigger",
                 "aria-haspopup": "menu",
-                "aria-expanded": if open() { "true" } else { "false" },
-                "aria-controls": open().then(|| id.clone()),
+                "aria-expanded": if open.get() { "true" } else { "false" },
+                "aria-controls": open.get().then(|| id.clone()),
                 "aria-label": label.clone(),
-                onmounted: move |e| button.set(Some(e.data())),
-                onclick: move |_| if open() { close(true) } else { go((0, 1)) },
+                onmounted: move |e| *button.write() = Some(e.data()),
+                onclick: move |_| if open.get() { close(true) } else { go((0, 1)) },
                 onkeydown: move |e| match e.key() {
                     Key::ArrowDown => {
                         e.prevent_default();
@@ -532,7 +530,7 @@ pub fn Menu(
                 },
                 {trigger}
             }
-            if open() {
+            if open.get() {
                 div { class: "aio-menu__list", role: "menu", id: "{id}", "aria-label": label.clone(),
                     for (i, it) in items.iter().enumerate() {
                         button {
@@ -547,7 +545,7 @@ pub fn Menu(
                                 let mut v = els.write();
                                 v.resize(n, None);
                                 v[i] = Some(e.data());
-                                if *want.peek() == Some(i) {
+                                if *want.read_untracked() == Some(i) {
                                     want.set(None);
                                     focus(Some(e.data()));
                                 }
@@ -612,7 +610,7 @@ pub fn Breadcrumb(
     #[props(default = String::from("Breadcrumb"), into)] label: String,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let last = items.len().saturating_sub(1);
     rsx! {
         nav { class: join("aio-crumbs", &class), "aria-label": label, ..attributes,
@@ -644,7 +642,7 @@ pub fn Skeleton(
     #[props(default = 1)] lines: u32,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let cls = join(if circle { "aio-skel aio-skel--circle" } else { "aio-skel" }, &class);
     let style = [width.map(|w| format!("width:{w}")), height.map(|h| format!("height:{h}"))]
         .into_iter()
@@ -673,10 +671,10 @@ pub fn EmptyState(
     #[props(into)]
     icon: Option<String>,
     #[props(into)] description: Option<String>,
-    action: Option<Element>,
+    action: Option<View>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     rsx! {
         div { class: join("aio-empty", &class), ..attributes,
             if let Some(i) = icon {

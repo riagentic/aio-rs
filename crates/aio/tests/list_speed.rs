@@ -6,8 +6,7 @@
 use aio::act;
 use aio::kit::{GlobalKeys, use_global_key};
 use aio::testing::TestUi;
-use dioxus::prelude::*;
-use keyboard_types::{Key, Modifiers};
+use aio::ui::prelude::*;
 use std::time::{Duration, Instant};
 
 const ROWS: usize = 1000;
@@ -114,14 +113,14 @@ mod blunt {
     aio::client!(List, list);
 
     #[component]
-    fn Line(i: usize) -> Element {
+    fn Line(i: usize) -> View {
         let l = list();
         let r = &l.rows[i];
         rsx! { li { "aria-selected": l.cursor == i, "{r.name} {r.amount}" } }
     }
 
     #[component]
-    fn Lines() -> Element {
+    fn Lines() -> View {
         use_global_key("ArrowDown", |_| _ = act!(down()));
         let l = list();
         let from = l.cursor.saturating_sub(SHOWN / 2);
@@ -134,7 +133,7 @@ mod blunt {
         }
     }
 
-    pub fn app() -> Element {
+    pub fn app() -> View {
         use_live();
         rsx! { GlobalKeys { Lines {} } }
     }
@@ -165,25 +164,27 @@ mod fast {
     aio::client!(List, list);
 
     #[component]
-    fn Line(name: String, amount: u64, selected: bool) -> Element {
+    fn Line(name: String, amount: u64, selected: bool) -> View {
         rsx! { li { "aria-selected": selected, "{name} {amount}" } }
     }
 
     #[component]
-    fn Lines() -> Element {
+    fn Lines() -> View {
         use_global_key("ArrowDown", |_| _ = act!(down()));
-        let (rows, cursor) = (part(|l| &l.rows), *part(|l| &l.cursor));
+        let (rows, cursor) = (part(|l| &l.rows), part(|l| &l.cursor).get());
         let from = cursor.saturating_sub(SHOWN / 2);
-        rsx! {
-            ul { "data-t": "list",
-                for i in from..(from + SHOWN).min(rows.len()) {
-                    Line { key: "{i}", name: rows[i].name.clone(), amount: rows[i].amount, selected: cursor == i }
+        rows.with(|rows| {
+            rsx! {
+                ul { "data-t": "list",
+                    for i in from..(from + SHOWN).min(rows.len()) {
+                        Line { key: "{i}", name: rows[i].name.clone(), amount: rows[i].amount, selected: cursor == i }
+                    }
                 }
             }
-        }
+        })
     }
 
-    pub fn app() -> Element {
+    pub fn app() -> View {
         use_live();
         rsx! { GlobalKeys { Lines {} } }
     }

@@ -5,7 +5,7 @@
 //! (`use_resource`, [`use_held`](super::use_held)) with its own loading
 //! and error states.
 use super::join;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::time::Duration;
 
 /// When [`Defer`] shows its content.
@@ -28,13 +28,13 @@ pub enum Trigger {
 #[component]
 pub fn Defer(
     trigger: Trigger,
-    placeholder: Option<Element>,
+    placeholder: Option<View>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
-    let mut on = use_signal(|| trigger == Trigger::Now);
-    use_hook(|| {
+    children: View,
+) -> View {
+    let on = signal(|| trigger == Trigger::Now);
+    once(|| {
         let wait = match trigger {
             Trigger::After(d) => Some(d),
             Trigger::Idle => Some(super::FRAME),
@@ -48,10 +48,10 @@ pub fn Defer(
             });
         }
     });
-    if on() {
+    if on.get() {
         return children;
     }
-    let mut fire = move |when: Trigger| {
+    let fire = move |when: Trigger| {
         if when == trigger {
             on.set(true)
         }
