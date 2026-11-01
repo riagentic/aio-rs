@@ -226,7 +226,8 @@ pub fn toolchain() -> &'static str {
 }
 
 /// The targets an app's other platforms build with: Android's and the web's.
-pub const PLATFORM_TARGETS: [&str; 3] = ["aarch64-linux-android", "x86_64-linux-android", "wasm32-unknown-unknown"];
+pub const PLATFORM_TARGETS: [&str; 4] =
+    ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "wasm32-unknown-unknown"];
 
 /// aio's toolchain `tc` and its platform targets, from `rustup +tc target
 /// list --installed` (none: no such toolchain) (pure).
@@ -602,7 +603,10 @@ mod tests {
     fn the_platform_targets_are_named_for_aios_toolchain() {
         assert_eq!(toolchain(), include_str!("../../../rust-toolchain.toml").split('"').nth(1).unwrap());
         let e = targets("1.98.0", Some("x86_64-unknown-linux-gnu\naarch64-linux-android\n")).found.unwrap_err();
-        assert_eq!(e, "rustup target add --toolchain 1.98.0 x86_64-linux-android wasm32-unknown-unknown");
+        assert_eq!(
+            e,
+            "rustup target add --toolchain 1.98.0 armv7-linux-androideabi x86_64-linux-android wasm32-unknown-unknown"
+        );
         assert!(targets("1.98.0", Some(&PLATFORM_TARGETS.join("\n"))).found.is_ok());
         let none = targets("1.98.0", None);
         assert!(!none.required && none.found.unwrap_err().contains("rustup toolchain install 1.98.0"));

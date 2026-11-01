@@ -1389,6 +1389,42 @@ fn what_aio_changed_is_settled_by_on_aio_and_checked_by_the_invariants() {
     assert_eq!(Store::<Ledger>::open_aio(&p, "w").unwrap().state().settled, 2);
 }
 
+#[test]
+fn aio_apks_state_comes_in_once_on_the_ports_first_android_start() {
+    // aio android-template MainActivity.kt `AioNativeStore.fileFor`: Java's
+    // String.hashCode, in hex; aio's standalone runtime keys `aio:<appId>`.
+    let d = tempfile::tempdir().unwrap();
+    let files = d.path();
+    let file = aio::compat::data::android_store_file(&files.join("aio-store"), "aio:notes");
+    assert_eq!(file.file_name().unwrap(), "aio_notes.22588ace.json", "as the APK names it (checked with Java)");
+    let odd = aio::compat::data::android_store_file(Path::new("s"), &format!("aio:{}/é", "x".repeat(70)));
+    let name = odd.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with(&format!("aio_{}", "x".repeat(60))) && name.split('.').next().unwrap().len() == 64);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, r#"{"tally":{"n":4,"__aio_status":"active"},"__versions":{"tally":0}}"#).unwrap();
+    let store = files.join("data/state.db");
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    assert!(aio::compat::data::import_android(files, "notes", &store).unwrap());
+    assert_eq!(aio_reads(&store, "notes")["tally"]["n"], 4);
+    let mut s = Store::<Tally>::open_aio(&store, "notes").unwrap();
+    assert_eq!(s.state().n, 4, "the cell starts from aio's state");
+    s.call(&By::Test, "on_add", Value::Null).unwrap();
+    drop(s);
+    // Once: the port's own store from then on; aio's file kept as it was.
+    assert!(!aio::compat::data::import_android(files, "notes", &store).unwrap());
+    assert_eq!(Store::<Tally>::open_aio(&store, "notes").unwrap().state().n, 5);
+    assert!(std::fs::read_to_string(&file).unwrap().contains("\"n\":4"));
+    // Nothing of aio's: nothing made.
+    let none = d.path().join("none");
+    assert!(!aio::compat::data::import_android(&none, "notes", &none.join("state.db")).unwrap());
+    // Not aio's document: refused, never dropped or half made.
+    std::fs::write(&file, "[1]").unwrap();
+    let other = files.join("data/other.db");
+    let e = aio::compat::data::import_android(files, "notes", &other).unwrap_err();
+    assert!(e.to_string().contains("not an object of cells"), "{e}");
+    assert!(!other.exists() && !other.with_extension("importing").exists());
+}
+
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Task {
     id: i64,

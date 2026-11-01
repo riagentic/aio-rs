@@ -1,8 +1,7 @@
 //! `ax`: aio-rs's command (aio: `am`). Read-only views into an app's store work
 //! while the app runs (SQLite WAL readers never block its writer).
 mod agent;
-/// APKs: made on Linux (the NDK's Linux toolchain).
-#[cfg(unix)]
+/// APKs: made by the NDK and Gradle (Linux, macOS, Windows).
 mod android;
 mod auth;
 mod boxlab;
@@ -22,7 +21,6 @@ mod freeze;
 mod headless;
 mod icon;
 /// `ax install --android`: next to the APK build.
-#[cfg(unix)]
 mod install;
 mod installed;
 mod lab;
@@ -722,18 +720,19 @@ fn run(args: &[String]) -> Out {
     let reach = |t: &Target| cdp::reach(value("--cdp"), cdp::recorded(&t.plan), cdp::door(&t.id, &t.plan));
     match (args[0].as_str(), p.as_slice()) {
         ("dev", [name, "--android", rest @ ..]) => {
-            let device = match rest {
-                [] => None,
-                ["--device", serial] => Some(*serial),
-                _ => return Err("ax dev <app> --android [--device serial]".into()),
-            };
-            #[cfg(unix)]
-            return dev::android(name, device);
-            #[cfg(not(unix))]
-            return Err(format!("{name}: Android is built from Linux or macOS ({device:?})"));
+            let (mut device, mut native, mut it) = (None, false, rest.iter());
+            while let Some(a) = it.next() {
+                match *a {
+                    "--device" => device = Some(*it.next().ok_or("--device needs a serial")?),
+                    "--native" => native = true,
+                    _ => return Err("ax dev <app> --android [--device serial] [--native]".into()),
+                }
+            }
+            dev::android(name, device, native)
         }
         ("dev", [name, "--web"]) => web::dev(name),
         ("dev", [name, ..]) => dev::run(name, &pos[1..]),
+        ("test", [name]) if has("--android") => install::lane(name, value("--device")),
         ("test", [name, filter @ ..]) if filter.len() <= 1 => {
             testrun::run(name, filter.first().copied(), value("--video"), value("--pace"))
         }
@@ -813,7 +812,6 @@ fn run(args: &[String]) -> Out {
                 unsigned: has("--unsigned"),
             };
             match has("--android") {
-                #[cfg(unix)]
                 true => release::run_android(name, &ask),
                 _ => release::run(name, &ask),
             }
@@ -835,7 +833,6 @@ fn run(args: &[String]) -> Out {
             }
             Ok(format!("{}\n{}{note}", out.display(), bundle::how_to_install(&built.app, built.platform.os, &out)))
         }
-        #[cfg(unix)]
         ("install", [app]) => install::android(
             app,
             &install::Opts {
@@ -846,8 +843,6 @@ fn run(args: &[String]) -> Out {
                 launch: !has("--no-launch"),
             },
         ),
-        #[cfg(not(unix))]
-        ("install", [app]) => Err(format!("{app}: Android is built and installed from Linux or macOS")),
         // A machine named for the OS (AIO_LAB_*): over ssh; else (or --boot) a container here.
         ("lab", [app, os]) => {
             let machine = lab::machine(os, &|k| std::env::var(k).ok().filter(|v| !v.is_empty())).is_ok();
@@ -886,6 +881,10 @@ fn run(args: &[String]) -> Out {
         ("build", [_]) if has("--dev") && !has("--web") => {
             Err("--dev is a web build's: ax build <app> --web --dev".into())
         }
+        ("build", [app]) if has("--debug") => match has("--android") {
+            true => build::android(app, android::Ask { debug: true, ..android::Ask::RELEASE }).map(|(said, _)| said),
+            false => Err("--debug is an Android build's: ax build <app> --android --debug".into()),
+        },
         ("build", [app]) if has("--web") => web::build(app, has("--dev")).map(|(said, _)| said),
         ("build", [app]) => {
             // The kind flags name targets too; --deb and --appimage come with the bundle.

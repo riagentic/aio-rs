@@ -58,6 +58,8 @@ application_id = "org.example.lit"
 schemes = ["lit"]
 camera = true
 color_scheme = "light"
+universal = true
+strict = true
 [build.macos]
 bundle_id = "org.example.lit"
 host = "-p 2222 me@mac"
@@ -67,6 +69,10 @@ text = "Starting {title}"
 min_ms = 600
 max_ms = 10000
 background = ["#fff", "#101418"]
+font = "serif"
+font_size = 18
+bold = true
+fade_ms = 250
 [log]
 level = "debug"
 suppress = ["lit.tick"]
