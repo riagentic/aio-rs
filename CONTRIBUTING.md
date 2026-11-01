@@ -17,8 +17,9 @@ page is for working on aio-rs itself; building apps with it is in
 | `aio-rs-cli` | `crates/aio-cli` | `ax`, and the templates of `ax create` |
 
 From a checkout, `cargo install --locked --path crates/aio-cli` installs
-`ax`; an `ax` built from a checkout makes its new apps build on that
-checkout (`ax create --aio <dir>` names another).
+`ax`. A new app takes aio-rs from git at that `ax`'s version; one that
+builds on your checkout (a template change, say): `ax create <name> --aio <dir>`
+(named relative to the app, so make it beside the checkout).
 
 ## Before a pull request: `./ci.sh`
 

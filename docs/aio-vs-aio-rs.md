@@ -265,7 +265,7 @@ beyond the aio-rs form.
 | Build | a run-from-a-link command | none | clone, `ax start` | [dev](build/dev.md#limits) |
 | Build | ios-client (a WKWebView thin client) | no iOS | ➖ | [targets](build/targets.md#limits) |
 | Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME`, an Android emulator test lane | none | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |
-| Build | a CI file from `am create`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
+| Build | `deno task check`/`test`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
 | Release | `canApply` awaited before every install, a warning with none | `can_apply` a plain function, not asked for an `auto` install | ➖ | [release](build/release.md#not-in-aio-rs) |
 | Release | a custom runtime refused beside `updates:` | replaced silently | ➖ | [release](build/release.md#not-in-aio-rs) |
 | `am` | `persist`, `persist --drop` | none | `#[cell(retire = [..])]` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
@@ -529,7 +529,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | State and history | `state`, `snapshot`, `migrations`, `replay`, `timetravel` | the same | ✅ |
 | Calls | `dispatch` | `ax call` | 🔄 |
 | Inspection | `surface`, `trigger`, `shot`, `eval`, `preview`, `sql`, `heap`, `cost` | the same | ✅ |
-| Pairing, trust | `discover`, `profile`, `pair`, `pin`, `auth`, `trust` | the same | ✅ |
+| Pairing, trust | `discover`, `profile`, `pair`, `auth`, `trust` | the same (`ax pin` makes a pairing code; aio's `am pin` is a framework version: `ax framework`) | ✅ |
 | `where`, `check` | yes | the compiler | 🔄 |
 | `persist`, `testgen`, `add`, control REST API | yes | ❌ | ❌ |
 | `keygen`, `release`, `update`, `smoke`, `install`, `lint`, `test`, `events`, `components`, `adopt`, `import`, `runtime`, `setup` | — | yes | ➕ |
@@ -539,7 +539,8 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Agent brief | `am agent` | `ax agent`, `AGENTS.md`/`CLAUDE.md` in new apps | ✅ |
-| Framework version per app | `dep/aio` link, `am pin`, `am upgrade` | `Cargo.lock`: `cargo update -p aio-rs` | 🔄 |
+| Framework version per app | `dep/aio` link, `am pin`, `am fix` | aio-rs from git at a release tag in `Cargo.toml`, the commit in `Cargo.lock`: a clone builds as it is; `ax create --aio-version`, `ax framework <v>\|main\|latest`, `--aio <dir>` for a checkout | ✅ |
+| Upgrading the CLI | `am upgrade`, `am uninstall` | `ax upgrade` (the release's checked install script, or a checkout), `ax uninstall` | ✅ |
 | Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows) or source; no prebuilt macOS | 🔄 |
 | API reference | `api-reference.md` | `cargo doc -p aio-rs` | ✅ |
 

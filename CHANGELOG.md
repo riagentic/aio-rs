@@ -5,6 +5,35 @@ All notable changes to aio-rs are written here. The format follows
 follow [Semantic Versioning](https://semver.org/): before 1.0.0 a minor
 version may break things.
 
+## [Unreleased]
+
+### Changed
+
+- **`ax create` writes nothing of the machine it ran on**: the app takes
+  aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
+  commit), so a clone builds anywhere and a prebuilt `ax` needs no
+  checkout; `--aio <dir>` names a checkout relative to the app, refused
+  through the root. `AGENTS.md` holds the rules and the loop inline and
+  links the guide by URL, no local path
+  ([where an app gets aio-rs from](docs/basics/setup.md#where-an-app-gets-aio-rs-from)).
+
+### Added
+
+- `ax create --aio-version <v|main|latest>`, and `ax framework [version]
+  [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
+  `am pin`; all or nothing).
+- `ax create` makes a git repository with its first commit (not inside
+  another), a `README.md`, `.gitattributes` (`eol=lf`), a `.gitignore`
+  that keeps `.env` and release keys out; `--target a,b` writes
+  `[build] targets`, `--css tailwind` wires Tailwind; a failure leaves
+  nothing behind (`--force`: what it wrote over is put back); `--json`
+  gives the files and next steps; aio.toml no longer claims to show every
+  default, it links them.
+- `ax upgrade [version] [--aio dir]`: `ax` from aio-rs's newest (or that)
+  release by its install script, checked against `SHA256SUMS`, or built
+  from a checkout; `ax uninstall [--tools]`: `ax` (and what it fetched)
+  gone, apps and data kept ([setup](docs/basics/setup.md#upgrading-ax)).
+
 ## [0.1.0] - 2026-11-01
 
 The first release of aio-rs (alpha): a Rust framework for apps whose state

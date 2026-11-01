@@ -189,12 +189,16 @@ after upgrading aio-rs. [Setup](../basics/setup.md).
 ### `ax create`
 
 ```text
-ax create <name> [--template t] [--id id] [--aio dir] [--force]
+ax create <name> [--template t] [--id id] [--aio-version v] [--aio dir] [--target a,b] [--css tailwind] [--force]
 ```
 
-A new app in `./<name>` that runs, tests and builds as it is: its own
-workspace, `aio.toml`, a test, and the pointer to the agent brief
-(`AGENTS.md`, `CLAUDE.md`).
+A new app in `./<name>` that runs, tests and builds as it is, on any
+machine after a clone: its own workspace and git repository (a first
+commit; not inside another repository), `aio.toml`, a test, a `README.md`,
+and for coding agents `AGENTS.md` (the rules and the loop inline, the rest
+by `ax agent` and the guide's URL) and a `CLAUDE.md` importing it. aio-rs
+comes from git at a release tag; nothing of the machine it was made on is
+written in it.
 
 | Flag | Does |
 |---|---|
@@ -202,8 +206,15 @@ workspace, `aio.toml`, a test, and the pointer to the agent brief
 | `--template cli` | a command-line tool ([cli apps](cli-apps.md)) |
 | `--template service` | a served app, no window |
 | `--id id` | its id, its data's home (default: the name; refused when an installed app has it) |
-| `--aio dir` | the aio-rs checkout it builds on (default: the one this `ax` was built from; a prebuilt `ax` needs it) |
+| `--aio-version v` | the aio-rs release it takes from git: `0.2.0`, `main` (the branch), `latest` (the newest release); default: this `ax`'s |
+| `--aio dir` | an aio-rs checkout instead, named relative to the app (they share a folder below the root) |
+| `--target a,b` | its `[build] targets` (`ax build <app> --list` names the kinds) |
+| `--css tailwind` | `[build] css` runs Tailwind on `src/app.css` into `assets/style.css` (a window app) |
 | `--force` | write the template over a folder that holds files |
+| `--json` | the folder, its files, its aio-rs and the next steps, as one object |
+
+A failure part-way leaves nothing behind; with `--force`, the files it
+wrote over are put back.
 
 ```sh
 ax create notes
@@ -212,6 +223,24 @@ ax test notes && ax dev notes
 ```
 
 [Quickstart](../basics/quickstart.md), [the files it makes](../basics/project.md).
+
+### `ax framework`
+
+```text
+ax framework [version] [--aio dir]
+```
+
+The app's aio-rs (aio's `am pin`, and `am fix` on a clone), run in the
+app's folder. With nothing, where each of its `Cargo.toml` files takes
+aio-rs from; with a version (`0.2.0`, `main`, `latest`), every aio-rs
+dependency moved to that release from git; with `--aio`, to that checkout
+(relative). `Cargo.lock` follows (`cargo update --workspace`); a move cargo
+can't resolve (no such tag, no network) changes nothing.
+
+```sh
+ax framework              # Cargo.toml: aio = { package = "aio-rs", git = "…", tag = "v0.1.0" … }
+ax framework latest       # every one to the newest release; commit Cargo.toml and Cargo.lock
+```
 
 ### `ax dev`
 
@@ -1328,6 +1357,25 @@ every verb. It prints text even into a pipe (the text is the answer).
 app, pointing here, so an agent that reads no docs still finds it.
 [Agents](../agents.md).
 
+### `ax upgrade`, `ax uninstall`
+
+```text
+ax upgrade [version] [--aio dir]
+ax uninstall [--tools]
+```
+
+`ax upgrade` moves `ax` itself to aio-rs's newest release (or `version`):
+it takes the release's install script, checks its SHA-256 against the
+release's `SHA256SUMS`, and runs it (the script checks the archive's
+SHA-256 before anything runs). `--aio dir`: `ax` built from that checkout
+(`cargo install`); plain `ax upgrade` returns to a release. Apps keep their
+own aio-rs: [`ax framework`](#ax-framework).
+
+`ax uninstall` takes `ax` out of `$CARGO_HOME/bin`; `--tools` also what it
+fetched and built in the tool home (`tools/`, and `target/` unless
+`CARGO_TARGET_DIR` names another). Apps, their data and installs stay
+([setup](../basics/setup.md#uninstalling)).
+
 ### `ax feedback`
 
 ```text
@@ -1403,8 +1451,10 @@ ax stop notes
 | `am publish` | `ax release` |
 | `am pair` (a new PIN) | `ax pin`; `ax pair` pairs this device |
 | `am ui`, `am ui --client=browser` | `ax ui`, `ax ui --browser` |
-| `am pin`, `am upgrade`, `am prune versions` | the app's `Cargo.lock` pins aio-rs: `cargo update -p aio-rs` |
-| `am fix`, `am link` | nothing to repair: a clone builds with `cargo` (`ax lint --fix` moves an older layout) |
+| `am pin <v>\|main\|latest` | `ax framework <v>\|main\|latest` (`ax pin` is a pairing code); `ax create --aio-version` |
+| `am upgrade`, `am uninstall` | `ax upgrade`, `ax uninstall` (an app's aio-rs: `ax framework`) |
+| `am prune versions` | nothing to prune: an app pins aio-rs in its `Cargo.lock` |
+| `am fix`, `am link` | nothing to repair: a clone builds as it is (aio-rs from git); `ax framework <v>` moves a checkout's path back to a release |
 | `am check`, `am where` | the compiler: client and server code are resolved by rustc |
 
 The full map of aio's commands and constructs: [migration](../migration/README.md).
