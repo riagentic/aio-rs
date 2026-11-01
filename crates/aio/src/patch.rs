@@ -385,10 +385,8 @@ mod tests {
         round(json!([1, 1, 2, 1]), json!([1, 2, 1]));
         round(json!([1, 2]), json!([1, 1, 2, 2, 1]));
         round(json!([[1, 2], [3]]), json!([[1, 2, 3]]));
-        assert_eq!(
-            said(&json!([1, 2]), &diff(&json!([1, 2]), &json!([1, 2, 3, 4, 5, 6, 7, 8]))).split(", ").next(),
-            Some("2 +3")
-        );
+        let (long, longer) = (json!(["x".repeat(99), "y".repeat(99)]), json!(["x".repeat(99), "y".repeat(99), 3]));
+        assert_eq!(said(&long, &diff(&long, &longer)).split(", ").next(), Some("2 +3"));
     }
 
     #[test]
