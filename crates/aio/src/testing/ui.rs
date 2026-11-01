@@ -132,12 +132,14 @@ mod renders {
     pub(super) fn install() {
         ON.with_borrow_mut(|g| {
             g.get_or_insert_with(|| {
-                let on = tracing::subscriber::set_default(Spans);
-                // A render callsite another test thread registered at the same
-                // moment can be cached as of no interest (tracing-core): asked
-                // again with this listener in place, or its renders go uncounted.
-                tracing::callsite::rebuild_interest_cache();
-                on
+                // With one listener alive, tracing-core asks only the
+                // registering thread's own: a render callsite first met on a
+                // thread with none (a view off any test) is cached as of no
+                // interest for every thread, and renders go uncounted. A
+                // second one, kept for good, has it ask them all.
+                static KEPT: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+                KEPT.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+                tracing::subscriber::set_default(Spans)
             });
         });
     }
