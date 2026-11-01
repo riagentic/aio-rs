@@ -352,7 +352,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Argument schemas | `args` | the Rust types + `ensure!` | 🔄 |
 | State machines | `machine:` | `aio::machine!`, `#[cell(machine = field)]` | ✅ |
 | Many cells, order | `dependsOn`, `composeCells` | `Cells::with`, `#[aio_cell]` fields | ✅ |
-| Reactions across cells | `listensTo`, `cancelOn` | `listens_to`, `cx.abort` (committed calls only) | 🔄 |
+| Reactions across cells | `listensTo`, `cancelOn` (in the call's reduce and save) | `listens_to` (inside the call's commit: one SQLite transaction), `cx.abort`; committed calls only, and a refused reaction never undoes its call | 🔄 |
 | Transactions | `transaction: true` / `{ serialize, conflict }`, `$commit`, `$live`, `TX_CONFLICT` | `#[cell(transaction)]` / `transaction(serialize, conflict = "warn")`, `cx.commit()`, `cx.live_state()`, `Code::TxConflict`; a written field counts as read (a method reads only its own cell) | 🔄 |
 | Lifecycle hooks | `onInit`, `onDestroy`, `onStopping`, `onStop` | `#[on_start]`, `#[on_stop]`, `aio::on_stopping`, `aio::on_stop` | ✅ |
 | App-wide start hook, `fatalOnStart`, `isolate`, `onRestore`, `getFullState` | yes | `Cells::on_start`, `fatal_on_start`, `AIORT_ISOLATE`, `on_restore`, `view` | ✅ |

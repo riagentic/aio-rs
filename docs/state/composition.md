@@ -16,8 +16,8 @@ as a test of aio-rs.
 
 ## Observe: react to another cell
 
-`b.listens_to(&a, "method", |b, event| ..)` runs the closure after each
-committed call of `a.method` (aio's `listensTo`). `a` never knows who
+`b.listens_to(&a, "method", |b, event| ..)` runs the closure on each
+call of `a.method`, inside its commit (aio's `listensTo`). `a` never knows who
 listens. The closure gets `b`'s handle, made as the caller of `a`'s call,
 and the call's `aio::Event` (its `args`, `by`, `at`).
 
@@ -107,11 +107,17 @@ assert_eq!(stats.state().clears, 1);
 # }
 ```
 
-- The reaction runs right after the source commits, on the caller's
-  thread, before the source's call returns.
-- It runs only for a committed call. A refused call of the source runs no
-  reaction, and a refused reaction never undoes the source's call: it is
-  said in the log and a problem report (`reaction`).
+- The reaction runs inside the source's commit, on the caller's thread,
+  before the source's call returns: its own calls commit in the same
+  SQLite transaction as the source's call, so both are on disk or neither
+  (a crash, a refused commit), and listeners and views are told of both
+  at once, after it ([persistence](../persistence/README.md#how-the-store-works)).
+- It runs only for a call that commits. A refused call of the source runs
+  no reaction, and a refused (or panicking) reaction never undoes the
+  source's call: it is said in the log and a problem report (`reaction`).
+- It runs while the source's file is held: it calls methods, and never
+  waits for anything (an answer, another thread). A reaction to a
+  `#[coalesce]` method runs when its run is written, in that commit.
 - Listening to a method the source doesn't have panics as the app wires
   its cells, so a typo can't fail in silence.
 - The reaction's arguments are the source call's JSON: decode them with
@@ -276,7 +282,7 @@ assert_eq!(inventory.state().free, 1);
 |---|---|---|
 | a method | no: it has no handle, and does no I/O | |
 | `aio::before_call`, `aio::on_effect` | never: they run under the cell's lock | |
-| a `listens_to` reaction | yes: its own handle, or any other | the source call's caller |
+| a `listens_to` reaction | yes: its own handle, or any other, without waiting | the source call's caller |
 | an effect, an async method's await | yes, through a handle | its own cell's handle: `By::Effect(key)` |
 | a view | `act!(..)` on its cell's `Ui` door ([views](../ui/views.md)) | as that door calls |
 | `main`, a test, a tool | any handle; `ax call` | `By::System`, `By::Test`, the door's user |
@@ -321,8 +327,8 @@ already running finishes.
 - Reading another cell's state in a method: the method's result would
   depend on state its event doesn't record. Pass the value as an argument,
   or read it in the effect that makes the call.
-- Refusing in a reaction to stop the source: too late, the source has
-  committed. Check in the source (`ensure!`) or in `before_call`.
+- Refusing in a reaction to stop the source: a refused reaction never
+  undoes it. Check in the source (`ensure!`) or in `before_call`.
 - A reaction that calls back the source on every commit: a call storm.
   React to a specific method, not to every change.
 

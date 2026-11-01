@@ -535,8 +535,9 @@ stay apart, chain the calls and make each step undoable:
   ([scheduling](scheduling.md#schedules-from-a-call)).
 - One cell's commit triggers the other's call with `listens_to`
   ([composition.md](composition.md#observe-react-to-another-cell)). The
-  reaction runs only after the source committed, and a refused reaction
-  never undoes the source: refuse in the source, not the reaction.
+  reaction commits in the source's transaction (both on disk or neither),
+  and a refused reaction never undoes the source: refuse in the source,
+  not the reaction.
 - An effect calls the second cell and, if it refuses, calls a
   compensating method on the first (give the reservation back).
 

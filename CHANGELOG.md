@@ -207,6 +207,14 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- **A reaction commits with its call** (aio's `listensTo` in one reduce
+  and one save): a `listens_to` reaction runs inside its source call's
+  commit, and its own calls go into the same SQLite transaction, so a
+  crash or a refused commit leaves both or neither, and listeners and
+  views see both at once. Once some cells of a file react to each other,
+  that file's calls run one at a time (a file without reactions as before)
+  ([persistence](docs/persistence/README.md#how-the-store-works)).
+
 - **Breaking: `ax pin` and `ax pair` named as aio names them.** The
   pairing code is `ax pair <app> [--plain]` (aio's `am pair`), no longer
   `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as

@@ -311,9 +311,9 @@ assert_eq!(stats.state().added, 1);
 # }
 ```
 
-- The reaction runs after the source's call commits, as a call on
-  `stats` by the same caller. A refused reaction is logged and never
-  undoes the source's call.
+- The reaction runs inside the source's commit, as a call on `stats` by
+  the same caller: both commit in one transaction. A refused reaction is
+  logged and never undoes the source's call.
 - `_event` is the source's event (`aio::Event`): its method, arguments,
   caller and time.
 - A misspelled method name panics as the cells are wired, so it can't
