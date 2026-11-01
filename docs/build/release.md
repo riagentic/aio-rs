@@ -326,6 +326,12 @@ and when it goes wrong: `[aio] update failed: 1.5.0 did not start, so
 lines are in `logs/update.log`. `ax update <app>` shows the versions
 installed and the update state.
 
+aio-rs proves this path on every pull request, on Linux, macOS and
+Windows: `scripts/update-proof` installs a sample service from its bundle,
+updates it through a signed patch, then releases a build that dies as it
+starts and checks that the version before comes back with its data
+([ci](ci.md#aio-rss-own-proof-scripts)).
+
 ## Services and tools
 
 A server or command-line app run by a supervisor (the systemd unit,

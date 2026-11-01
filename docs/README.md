@@ -16,6 +16,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 
 ## 1. Get started
 
+- [When to use aio-rs, and when not](basics/when.md): read first. Window and state yes; SEO, CDN, edge no; pin the tag; what is experimental.
 - [Why aio-rs, not plain Rust](basics/why.md): what it gives over a UI crate, SQLite and sync by hand, and when not to use it.
 - [Install and set up](basics/setup.md): what each OS needs, installing `ax` prebuilt or from source, `ax setup`, uninstalling.
 - [Quickstart](basics/quickstart.md): from nothing to a running, tested, packaged app; what the template is made of.

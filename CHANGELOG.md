@@ -9,6 +9,22 @@ version may break things.
 
 ### Added
 
+- **Prebuilt `ax` for macOS** (arm64 and x86_64): the release workflow
+  (`.github/workflows/release.yml`) builds and smokes `ax` on a macOS
+  runner of each CPU beside Linux and Windows, pins every archive in
+  `install.sh` / `install.ps1`, writes `SHA256SUMS`, installs it with the
+  one-line installer on each OS, and on a tag makes a draft release; a
+  manual or pull-request run is a dry run.
+- `scripts/update-proof`, in GitHub CI on Linux, macOS and Windows: a
+  sample app installed from its bundle, updated through a signed patch,
+  then a broken update rolled back with its data read back.
+- `scripts/android-gate`, required before a release: a throwaway AVD on
+  port 5600, a sample APK started and upgraded in place with its data kept.
+- `scripts/numbers`: the README's and docs' numbers measured again, beside
+  the published ones, with the machine.
+- [When to use aio-rs, and when not](docs/basics/when.md), linked from the
+  README's top: what it is for, what not (SEO, CDN, edge), pinning the tag,
+  which parts are experimental.
 - **Async methods answer their caller** (aio's `await cell.method()`): a
   typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
   await is the value its last part returned or the refusal that ended it
@@ -258,6 +274,11 @@ version may break things.
 
 ### Fixed
 
+- An app's first update after its install is made from the patch again:
+  a bundle's `install.sh` kept only the binary in `versions/<v>/`, so the
+  patch (made over the whole bundle) missed its other files and the whole
+  release was downloaded. It now installs the bundle whole, as an update
+  stages one.
 - An app that isn't running or has no server, asked for a pairing code or
   its profile, is told so plainly with what to type ("notes isn't running:
   start it with `ax start notes`"; no server: the aio.toml lines that
