@@ -301,6 +301,8 @@ pub async fn session<T: Cell>(
     let mut bytes = crate::link::Pace::new(limits.bytes_per_sec);
     let mut running = tokio::task::JoinSet::new();
     let (held_tx, mut held) = tokio::sync::mpsc::unbounded_channel();
+    // An async method's ack, once its end comes (aio acks on completion).
+    let (ends_tx, mut ends) = tokio::sync::mpsc::unbounded_channel::<Value>();
     // Time travel: shown after each change (`sub`; unsaid until it says or
     // drives it), to whom it is the operator's.
     let (mut tt_sub, mut greeted) = (None::<bool>, false);
@@ -311,6 +313,11 @@ pub async fn session<T: Cell>(
         tokio::select! {
             Some(Ok(answer)) = running.join_next(), if !running.is_empty() => send_ax(&mut w, &answer).await?,
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
+            Some(ack) = ends.recv() => {
+                while events.try_recv().is_ok() {}
+                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
+                send_ax(&mut w, &enc("ack", ack)).await?;
+            }
             // Another link's op, to a link that syncs and sees its whole cell.
             p = next_passed(&mut passed) => if let Some(p) = p
                 && p.from != link
@@ -451,39 +458,56 @@ pub async fn session<T: Cell>(
                         let cid = d["cid"].clone();
                         let kind = d["type"].as_str().unwrap_or_default();
                         let method = kind.split_once(':').and_then(|(c, m)| method_of::<T>(c, m));
+                        let is_async = method.as_deref().is_some_and(|m| T::async_mode(m).is_some());
                         let r = match method {
                             None => Err(crate::Rejected::coded(crate::Code::ActionRefused, format!("unknown action {kind}"))),
                             Some(m) => {
                                 let (hh, gate, by) = (h.clone(), gate.clone(), viewer.clone());
                                 let args = d["payload"]["args"].clone();
                                 let args = if args.is_null() { json!([]) } else { args };
-                                let r = tokio::task::spawn_blocking(move || gate.call(&hh, &by, &m, args, None));
-                                r.await.map_err(|e| e.to_string())?.map(|v| v.unwrap_or(Value::Null))
+                                let r = tokio::task::spawn_blocking(move || gate.ask(&hh, &by, &m, args, None));
+                                r.await.map_err(|e| e.to_string())?
                             }
                         };
                         if cid.is_null() {
                             continue;
                         }
+                        // An async method is acked on its end, with its answer.
+                        let r = match r {
+                            Ok((_, answer)) if is_async => {
+                                let (tx, closing) = (ends_tx.clone(), h.clone());
+                                tokio::spawn(async move {
+                                    let end = answer.await;
+                                    _ = tx.send(ack_of(cid, end.map(Some), closing.closing()));
+                                });
+                                continue;
+                            }
+                            Ok((v, _)) => Ok(v),
+                            Err(e) => Err(e),
+                        };
                         // Its change first, then the ack (as aio).
                         while events.try_recv().is_ok() {}
                         catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
-                        let ack = match r {
-                            Ok(v) => json!({ "cid": cid, "ok": true, "value": v }),
-                            // aio clients re-send after `retryAfterMs`.
-                            Err(e) if h.closing() => json!({ "cid": cid, "ok": false, "error": e.why, "retryAfterMs": crate::RETRY_AFTER_MS }),
-                            // aio's `code` only when aio made the refusal.
-                            Err(e) => match e.code {
-                                Some(c) => json!({ "cid": cid, "ok": false, "error": e.why, "code": c }),
-                                None => json!({ "cid": cid, "ok": false, "error": e.why }),
-                            },
-                        };
-                        send_ax(&mut w, &enc("ack", ack)).await?;
+                        send_ax(&mut w, &enc("ack", ack_of(cid, r, h.closing()))).await?;
                     }
                     // "x" is reserved and ignored; other kinds aren't ours to answer.
                     _ => {}
                 }
             }
         }
+    }
+}
+
+/// An `action`'s ack: its answer, or its refusal (aio's `code` only when
+/// aio made it; while closing, a `retryAfterMs` so the page sends it again).
+fn ack_of(cid: Value, r: crate::Result<Option<Value>>, closing: bool) -> Value {
+    match r {
+        Ok(v) => json!({ "cid": cid, "ok": true, "value": v.unwrap_or(Value::Null) }),
+        Err(e) if closing => json!({ "cid": cid, "ok": false, "error": e.why, "retryAfterMs": crate::RETRY_AFTER_MS }),
+        Err(e) => match e.code {
+            Some(c) => json!({ "cid": cid, "ok": false, "error": e.why, "code": c }),
+            None => json!({ "cid": cid, "ok": false, "error": e.why }),
+        },
     }
 }
 

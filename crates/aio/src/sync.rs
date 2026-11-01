@@ -1583,7 +1583,9 @@ impl<T: Cell> Remote<T> {
                     let fs = lock(&self.inner.refusals).clone();
                     fs.iter().for_each(|f| f(&method, e));
                 }
-                if let (Err(e), Some(end)) = (&r, lock(&self.inner.ends).remove(&op)) {
+                if let Err(e) = &r
+                    && let Some(end) = lock(&self.inner.ends).remove(&op)
+                {
                     end.send(Err(e.clone()));
                 }
                 if let Some(tx) = lock(&self.inner.waiting).remove(&op) {

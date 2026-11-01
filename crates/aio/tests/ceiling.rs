@@ -39,11 +39,21 @@ impl Job {
 #[tokio::test(start_paused = true)]
 async fn an_await_past_the_ceiling_is_cut_off_and_a_long_one_is_not() {
     let h = Handle::<Job>::memory();
-    h.hang().unwrap();
+    let end = h.hang().unwrap();
     let t0 = tokio::time::Instant::now();
     h.done("hang").await;
     assert_eq!(t0.elapsed(), aio::effect::CALL_CEILING, "cut off at the ceiling");
     assert_eq!(h.state().status, "waiting", "its later steps never ran");
+    let e = end.await.unwrap_err();
+    assert!(e.why.contains("hang: ended before it answered"), "its caller is told: {e}");
+
+    // `[perf] call_ceiling` sets another.
+    aio::perf::set(aio::perf::Budgets { call_ceiling: Some(1000), ..Default::default() });
+    _ = h.hang().unwrap();
+    let t0 = tokio::time::Instant::now();
+    h.done("hang").await;
+    assert_eq!(t0.elapsed(), Duration::from_secs(1));
+    aio::perf::set(aio::perf::Budgets::default());
 
     h.colorize().unwrap();
     tokio::time::sleep(aio::effect::CALL_CEILING * 2).await;

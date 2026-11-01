@@ -177,6 +177,12 @@ mod ttl {
         }
 
         #[ttl(1000)]
+        pub async fn name(&mut self, id: u32) -> Result<String> {
+            let name: String = lookup(id).await;
+            Ok(name)
+        }
+
+        #[ttl(1000)]
         pub async fn pair(&mut self, a: u32, b: u32) -> Result {
             let x: String = lookup(a).await;
             let y: String = lookup(b).await;
@@ -226,6 +232,18 @@ mod ttl {
         t.settle();
         assert_eq!(runs(&h), 4, "a refused step answers nothing");
         assert_eq!(t.failures().len(), 2, "both loads of user 0 were refused");
+    }
+
+    #[test]
+    fn a_cached_call_answers_with_the_kept_value() {
+        let mut t = TestCells::new();
+        let h = t.cell::<Users>();
+        let mut first = h.name(3).unwrap();
+        t.settle();
+        assert_eq!(first.now(), Some(Ok("user-3".into())));
+        let mut again = h.name(3).unwrap();
+        assert!(t.effects().is_empty(), "answered from the cache");
+        assert_eq!(again.now(), Some(Ok("user-3".into())), "with the value it answered");
     }
 
     #[test]
@@ -481,5 +499,48 @@ mod modes {
         assert_eq!((a.await, b.await), (Ok(1), Ok(1)), "the second caller adopts the first's answer");
         assert_eq!(h.state().runs, 1, "and ran nothing");
         assert_eq!(h.refresh().unwrap().await, Ok(2), "once it ended, a call runs again");
+    }
+}
+
+/// ST1 over the wire: a synced copy's caller gets the server's end of an
+/// async method (its value, or a refusal after an await), and
+/// `call_confirmed` waits for that end.
+#[cfg(all(feature = "server", feature = "testing"))]
+mod remote {
+    use aio::prelude::*;
+    use aio::testing::TestServer;
+    use std::time::Duration;
+
+    #[cell(shared)]
+    pub struct Orders {
+        pub placed: Vec<String>,
+    }
+
+    async fn charge(item: String) -> std::result::Result<String, String> {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if item == "nothing" { Err("declined".into()) } else { Ok(format!("ref-{item}")) }
+    }
+
+    #[methods]
+    impl Orders {
+        #[client]
+        pub async fn checkout(&mut self, item: String) -> Result<String> {
+            let r: String = charge(item).await?;
+            self.placed.push(r.clone());
+            Ok(r)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_copy_awaits_the_servers_end() {
+        let server = TestServer::start(Handle::<Orders>::memory(), Default::default()).await.unwrap();
+        let ana = server.client("ana").await.unwrap();
+        assert_eq!(ana.checkout("book".into()).unwrap().await, Ok("ref-book".into()));
+        assert_eq!(ana.checkout("nothing".into()).unwrap().await, Err(Rejected::new("declined")));
+        let a = ana.clone();
+        let v = tokio::task::spawn_blocking(move || a.call_confirmed("checkout", serde_json::json!(["pen"])));
+        assert_eq!(v.await.unwrap(), Ok(serde_json::json!("ref-pen")), "call_confirmed waits for the end");
+        server.converged(&[&ana]).await;
+        assert_eq!(ana.state().placed, ["ref-book", "ref-pen"]);
     }
 }
