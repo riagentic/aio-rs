@@ -19,10 +19,10 @@ android {
     // One APK per CPU type, each within the size budget.
     splits {
         abi {
-            isEnable = true
+            isEnable = {{SPLITS}}
             reset()
             include({{ABIS}})
-            isUniversalApk = false
+            isUniversalApk = {{UNIVERSAL}}
         }
     }
 

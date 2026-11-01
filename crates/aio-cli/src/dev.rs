@@ -810,21 +810,79 @@ pub fn throw_away(plan: Option<&aio::paths::Plan>) -> Result<(), String> {
     }
 }
 
-/// `ax dev <app> --android [--device serial]`: build, install and start it
-/// on the attached phone or emulator, again on every saved change.
-#[cfg(unix)]
-pub fn android(name: &str, device: Option<&str>) -> Result<String, String> {
-    let pkg = locate(&metadata()?, name)?;
+/// `ax dev <app> --android [--device serial] [--native]` (aio's
+/// `dev:android`): on the attached emulator (before a phone) or phone, else
+/// an emulator booted (`AIO_AVD`). An app with a web build runs as its dev
+/// page: a thin dev APK, installed once beside the real app, shows what
+/// `ax dev --web` serves over `adb reverse`, and each edit reloads it
+/// there. Else (or `--native`) the app itself, as a debug dev copy beside
+/// the real app, built for that device's CPU only and installed again on
+/// every saved change. The app's log, its page's console and a crash reach
+/// the terminal (`[device]`).
+pub fn android(name: &str, device: Option<&str>, native: bool) -> Result<String, String> {
+    let meta = metadata()?;
+    let pkg = locate(&meta, name)?;
+    let (app, cfg) = crate::build::app_of(&pkg)?;
+    let dev = crate::install::ensure_device(device)?;
+    let id = crate::android::application_id_of(&app.id, cfg.app.port_of.as_deref(), &cfg.build.android) + ".dev";
+    if !native && crate::web::has_web(name) {
+        let target = Path::new(meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?);
+        let (apk, hash) = crate::android::dev_apk(&app, &cfg, &crate::build::app_dir(&pkg)?, target)?;
+        let record = target.join("aio").join("android-dev").join(format!("{}-{id}.installed", dev.serial));
+        let installed = crate::install::adb_out(&["-s", &dev.serial, "shell", "pm", "path", &id])
+            .is_ok_and(|o| o.contains("package:"));
+        if !installed || std::fs::read_to_string(&record).ok().as_deref() != Some(hash.as_str()) {
+            eprintln!("ax dev: installing {} on {}", apk.display(), dev.label());
+            crate::install::install_on(&dev, &apk)?;
+            _ = std::fs::write(&record, &hash);
+        }
+        let mut logs = crate::install::logcat(&dev.serial)?;
+        let on = dev.clone();
+        let ran = crate::web::dev_then(name, move |port| {
+            let p = format!("tcp:{port}");
+            crate::install::adb_out(&["-s", &on.serial, "reverse", &p, &p])
+                .map_err(|e| format!("{e}: the app can't reach the dev server"))?;
+            let url = format!("http://127.0.0.1:{port}/");
+            match crate::install::start_on(&on, &format!("{id}/{}", crate::android::DEV), &["--es", "url", &url]) {
+                Ok(()) => eprintln!("ax dev: on {} → {url}: edits reload it there; Ctrl-C ends it", on.label()),
+                Err(why) => eprintln!("ax dev: installed, but did not start ({why}): open \"(dev)\" from the launcher"),
+            }
+            Ok(())
+        });
+        _ = logs.kill();
+        _ = logs.wait();
+        _ = crate::install::adb_out(&["-s", &dev.serial, "reverse", "--remove-all"]);
+        return ran;
+    }
     let (_w, rx) = watch_these(&watched(&pkg, Path::new(""), &Watching::All))?;
-    let opts = crate::install::Opts { build: true, emulator: true, apk: None, device, launch: true };
+    let abi = crate::install::abi_of(&crate::install::adb_out(&[
+        "-s",
+        &dev.serial,
+        "shell",
+        "getprop",
+        "ro.product.cpu.abilist",
+    ])?)
+    .and_then(|a| crate::android::ABIS.iter().find(|(b, _)| *b == a))
+    .ok_or_else(|| format!("{} runs a CPU ax builds no APK for", dev.label()))?;
+    let ask = crate::android::Ask { debug: true, abis: std::slice::from_ref(abi), kind: crate::android::Apk::Dev };
+    let mut logs = crate::install::logcat(&dev.serial)?;
+    let component = format!("{id}/aio.rt.MainActivity");
     loop {
-        match crate::install::android(name, &opts) {
-            Ok(did) => eprintln!("ax dev: {did}; watching for changes"),
+        let did = crate::build::android(name, ask).and_then(|(_, apks)| {
+            let apk = apks.first().ok_or("the build made no APK")?;
+            crate::install::install_on(&dev, apk)?;
+            crate::install::start_on(&dev, &component, &[])
+                .map_err(|why| format!("installed, but did not start ({why})"))
+        });
+        match did {
+            Ok(()) => eprintln!("ax dev: {} (dev) runs on {}; watching for changes", app.name, dev.label()),
             Err(e) => eprintln!("ax dev: {e}"),
         }
         // What the build wrote (a CSS step's output) is not a change.
         settle(&rx);
         if rx.recv().is_err() {
+            _ = logs.kill();
+            _ = logs.wait();
             return Ok(String::new());
         }
         settle(&rx);

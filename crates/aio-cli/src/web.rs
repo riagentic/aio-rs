@@ -480,6 +480,17 @@ pub fn rebuilds(changed: &[PathBuf]) -> bool {
 /// the bundle again and the open tabs reload (`/aio-dev/build`). A failed
 /// build keeps the last page. Runs until Ctrl-C.
 pub fn dev(name: &str) -> Result<String, String> {
+    dev_then(name, |_| Ok(()))
+}
+
+/// Whether app `name` has a web build ([`dev`] can serve it).
+pub fn has_web(name: &str) -> bool {
+    Site::of(name).is_ok()
+}
+
+/// [`dev`], with `ready` called on its port once it serves (`ax dev
+/// --android` opens the page on the phone then); its error ends the run.
+pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send + 'static) -> Result<String, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     let site = Site::of(name)?;
     let out = site.target.join("aio").join("web-dev").join(&site.app.id);
@@ -527,9 +538,11 @@ pub fn dev(name: &str) -> Result<String, String> {
         }));
     aio::rt().block_on(async move {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
-        eprintln!("ax dev: http://{}/ (Ctrl-C ends it)", l.local_addr().map_err(|e| e.to_string())?);
+        let port = l.local_addr().map_err(|e| e.to_string())?.port();
+        eprintln!("ax dev: http://127.0.0.1:{port}/ (Ctrl-C ends it)");
         let opts = aio::sync::Options { open: true, http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(aio::Handle::<DevSite>::memory(), l, opts));
+        tokio::task::spawn_blocking(move || ready(port)).await.map_err(|e| e.to_string())??;
         tokio::task::spawn_blocking(move || {
             while let Ok(mut changed) = rx.recv() {
                 // A burst of saves is one change.
