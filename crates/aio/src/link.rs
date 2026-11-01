@@ -104,6 +104,7 @@ pub(crate) struct Hooks {
 
 /// A cell served beside the app's own on `/ws` ([`crate::http::Http::cell`]):
 /// a link's hello names it.
+#[cfg(feature = "server")]
 pub(crate) trait Beside: Send + Sync {
     fn id(&self) -> &'static str;
     /// [`session`] on this cell, its hello read.
@@ -121,6 +122,7 @@ pub(crate) trait Beside: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>;
 }
 
+#[cfg(feature = "server")]
 impl<U: Cell> Beside for Handle<U> {
     fn id(&self) -> &'static str {
         U::ID
@@ -660,7 +662,7 @@ pub(crate) async fn session<T: Cell>(
     from: String,
     gate: Gate,
     signed: Option<By>,
-    #[cfg_attr(not(feature = "server"), allow(unused_mut))] mut calls: Calls,
+    #[cfg_attr(not(feature = "server"), allow(unused_mut, unused_variables))] mut calls: Calls,
     hooks: Hooks,
     said: Option<Value>,
 ) -> std::result::Result<(), String> {

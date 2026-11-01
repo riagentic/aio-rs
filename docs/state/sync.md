@@ -575,7 +575,8 @@ What aio has and aio-rs does not, or does differently:
   side channel (`Route::socket`).
 - **One socket per cell.** A copy links to one cell; a server serves
   every cell on one `/ws` and port (`Http::cell`), but a client of three
-  cells opens three sockets where aio's page opens one.
+  cells opens three sockets where aio's page opens one. An aio page (feature
+  `compat`) sees the app's own cell only.
 - **A full offline queue refuses the call.** Both keep 500 waiting calls
   (aio's `pendingCap`) and let ones older than `retention` go; past that,
   aio drops the new op and aio-rs refuses the call, said to the caller.
