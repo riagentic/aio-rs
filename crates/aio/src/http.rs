@@ -614,6 +614,9 @@ pub struct Http {
     pub(crate) oidc: Option<Arc<crate::auth::oidc::Provider>>,
     pub(crate) ui: Option<Ui>,
     paint: Option<OnPaint>,
+    door_links: bool,
+    peers: Option<crate::link::Peers>,
+    pub(crate) beside: Vec<Arc<dyn crate::link::Beside>>,
 }
 
 impl Default for Http {
@@ -631,6 +634,9 @@ impl Default for Http {
             oidc: None,
             ui: None,
             paint: None,
+            door_links: false,
+            peers: None,
+            beside: Vec::new(),
         }
     }
 }
@@ -642,6 +648,44 @@ impl Http {
     pub fn on_link(mut self, f: impl Fn(&Presence) + Send + Sync + 'static) -> Self {
         self.on_link = Some(Arc::new(f));
         self
+    }
+
+    /// [`Self::on_link`] hears the links on the app's local door too (aio's
+    /// `localConnectHooks`): another app's typed copy ([`crate::peer`]), a
+    /// copy on this machine; `from` is `door`. Tools (`ax call`, a peer's
+    /// call by name) still aren't links.
+    pub fn door_links(mut self, on: bool) -> Self {
+        self.door_links = on;
+        self
+    }
+
+    /// Who another aio-rs app on this machine is to this one, by its id
+    /// (aio's `resolvePeer`): its links on the local door (only this user's
+    /// processes reach it) call and see as the [`crate::Caller`] this
+    /// gives, its server functions too; `None`: no one in particular
+    /// (`peer`, no role). Without it a peer is the user its id names, with
+    /// no role. A hook that panics is said and makes no one in particular.
+    pub fn resolve_peer(mut self, f: impl Fn(&str) -> Option<crate::Caller> + Send + Sync + 'static) -> Self {
+        self.peers = Some(Arc::new(f));
+        self
+    }
+
+    /// Serve cell `h` too, on the same `/ws`, key, accounts and port as the
+    /// app's own (aio serves every cell on one socket): a link's hello names
+    /// its cell, and each cell's rules (`#[client]`, `allow`, `visible`) say
+    /// what it may. Panics on a cell that isn't `#[cell(shared)]` (its state
+    /// stays off the network) or is served twice.
+    pub fn cell<U: crate::Cell>(mut self, h: crate::Handle<U>) -> Self {
+        assert!(U::SHARED, "Http::cell: {} isn't #[cell(shared)]: its state is never served", U::ID);
+        assert!(!self.beside.iter().any(|c| c.id() == U::ID), "Http::cell: {} is served twice", U::ID);
+        self.beside.push(Arc::new(h));
+        self
+    }
+
+    /// What the local door hears and resolves.
+    pub(crate) fn door_hooks(&self) -> crate::link::Hooks {
+        let on_link = self.on_link.clone().filter(|_| self.door_links);
+        crate::link::Hooks { on_link, peers: self.peers.clone() }
     }
 
     /// Compress answers (on by default; aio's `security.compress`). Off, they

@@ -335,6 +335,7 @@ fn ws<T: Cell>(
     limits: Limits,
     fns: Arc<crate::fns::Fns>,
     on_link: Option<crate::http::OnLink>,
+    beside: Arc<Vec<Arc<dyn crate::link::Beside>>>,
 ) -> axum::routing::MethodRouter {
     use crate::http::Query;
     use axum::extract::ConnectInfo;
@@ -343,8 +344,8 @@ fn ws<T: Cell>(
     let open_links = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     axum::routing::get(
         move |ws: WebSocketUpgrade, headers: HeaderMap, ext: Extensions, Query(q): Query| {
-            let (h, creds, auth, open_links, fns, on_link) =
-                (h.clone(), creds.clone(), auth.clone(), open_links.clone(), fns.clone(), on_link.clone());
+            let (h, creds, auth, open_links, fns, on_link, beside) =
+                (h.clone(), creds.clone(), auth.clone(), open_links.clone(), fns.clone(), on_link.clone(), beside.clone());
             async move {
                 let ip = ext.get::<ConnectInfo<Peer>>().map(|c| c.0.0.ip());
                 let refuse = |shown: bool, why: &str| match ip {
@@ -419,10 +420,10 @@ fn ws<T: Cell>(
                         let calls = crate::fns::Served { fns, account, known: caller, from: (ip, fn_headers(headers)) };
                         let run = async {
                             #[cfg(not(feature = "compat"))]
-                            let r = session(h, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
+                            let r = linked(h, &beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
                             #[cfg(feature = "compat")]
                             let r = if wire2 {
-                                session(h, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
+                                linked(h, &beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
                             } else {
                                 let user = match &viewer {
                                     Some(By::User(u)) => u.clone(),
@@ -460,6 +461,29 @@ fn ws<T: Cell>(
             }
         },
     )
+}
+
+/// One aio-rs link on `/ws`: to the cell its hello names, `h`'s or one
+/// served beside it.
+#[allow(clippy::too_many_arguments)]
+async fn linked<T: Cell>(
+    h: Handle<T>,
+    beside: &[Arc<dyn crate::link::Beside>],
+    mut w: Sock,
+    limits: Limits,
+    from: String,
+    gate: Gate,
+    viewer: Option<By>,
+    calls: crate::fns::Served,
+    on_link: Option<crate::http::OnLink>,
+) -> std::result::Result<(), String> {
+    let hooks = crate::link::Hooks { on_link, peers: None };
+    let (mut pulse, mut bytes) = (crate::link::Pulse::new(), Pace::new(limits.bytes_per_sec));
+    let hello = crate::link::hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?;
+    match beside.iter().find(|c| c.id() != T::ID && hello["cell"] == c.id()) {
+        Some(c) => c.session(w, limits, from, gate, viewer, calls, hooks, hello).await,
+        None => session(h, w, limits, from, gate, viewer, calls, hooks, Some(hello)).await,
+    }
 }
 
 /// `/__aio/ui`: one tab of the app's UI page ([`crate::http::Http::ui`]).
@@ -568,7 +592,7 @@ pub async fn serve_door_with<T: Cell>(
     http: &crate::http::Http,
 ) -> std::io::Result<()> {
     let calls = crate::fns::Served { fns: Arc::new(http.fns.clone()), ..crate::link::no_calls() };
-    crate::door::serve_with(h, l, limits, calls, crate::door::OPERATOR).await
+    crate::door::serve_with(h, l, limits, calls, crate::door::OPERATOR, http.door_hooks()).await
 }
 
 /// Serve `h` at `/ws` (and pairing, the app's HTTP, over TLS, as `opts` say)
@@ -610,7 +634,8 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         if let Some(ui) = http.ui.clone() {
             app = app.route("/__aio/ui", ui_socket::<T>(ui, creds.clone(), auth.clone(), limits));
         }
-        app = app.route("/ws", ws(h, creds, auth.clone(), limits, fns, http.on_link.clone()));
+        let beside = Arc::new(http.beside.clone());
+        app = app.route("/ws", ws(h, creds, auth.clone(), limits, fns, http.on_link.clone(), beside));
     }
     #[cfg(feature = "tls")]
     if let Some(pairing) = pairing {

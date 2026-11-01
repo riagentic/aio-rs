@@ -91,6 +91,65 @@ pub struct Presence {
 
 pub(crate) type OnLink = Arc<dyn Fn(&Presence) + Send + Sync>;
 
+/// Who another app on the door is to this one, by its id
+/// ([`crate::http::Http::resolve_peer`]); `None`: no one in particular.
+pub(crate) type Peers = Arc<dyn Fn(&str) -> Option<crate::Caller> + Send + Sync>;
+
+/// What the app hears of its links, and who a peer app is to it.
+#[derive(Clone, Default)]
+pub(crate) struct Hooks {
+    pub(crate) on_link: Option<OnLink>,
+    pub(crate) peers: Option<Peers>,
+}
+
+/// A cell served beside the app's own on `/ws` ([`crate::http::Http::cell`]):
+/// a link's hello names it.
+pub(crate) trait Beside: Send + Sync {
+    fn id(&self) -> &'static str;
+    /// [`session`] on this cell, its hello read.
+    #[allow(clippy::too_many_arguments)]
+    fn session(
+        &self,
+        w: Sock,
+        limits: Limits,
+        from: String,
+        gate: Gate,
+        signed: Option<By>,
+        calls: Calls,
+        hooks: Hooks,
+        hello: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>;
+}
+
+impl<U: Cell> Beside for Handle<U> {
+    fn id(&self) -> &'static str {
+        U::ID
+    }
+
+    fn session(
+        &self,
+        w: Sock,
+        limits: Limits,
+        from: String,
+        gate: Gate,
+        signed: Option<By>,
+        calls: Calls,
+        hooks: Hooks,
+        hello: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> {
+        Box::pin(session(self.clone(), w, limits, from, gate, signed, calls, hooks, Some(hello)))
+    }
+}
+
+/// The caller `f` makes of peer app `app`; a hook that panics is said and
+/// makes no one in particular.
+fn resolve(f: &Peers, app: &str) -> Option<crate::Caller> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(app))).unwrap_or_else(|_| {
+        eprintln!("[aio] sync: the resolve_peer hook panicked for app {app}; it is no one in particular");
+        None
+    })
+}
+
 /// What runs a link's server fns ([`crate::fns`]); a build without `net`
 /// has none.
 #[cfg(feature = "server")]
@@ -573,11 +632,17 @@ pub(crate) fn live(a: &crate::auth::Auth, token: &str) -> Option<crate::auth::Se
     a.session(token).inspect_err(|e| eprintln!("[aio] sync: {e}")).ok().flatten()
 }
 
+/// A link's first message, its hello (`None`: none came in time).
+pub(crate) async fn hello(w: &mut Sock, pulse: &mut Pulse, limits: &Limits, bytes: &mut Pace) -> Option<Value> {
+    tokio::time::timeout(Duration::from_secs(15), next_ax(w, pulse, limits.max_message, bytes)).await.ok().flatten()
+}
+
 /// One aio-rs client, until it leaves. A tool (`Live`) says `tool: true`: it
 /// keeps no copy, so another cell version is fine; on the door it may
 /// also ask for the open links. `gate`: what it may call. `signed`: the user
 /// its session proved; none: the user its hello names (a shared key proves
-/// no one in particular).
+/// no one in particular), or for a peer app the caller `hooks` make of it.
+/// `said`: its hello, when the server read it to find the cell.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session<T: Cell>(
     h: Handle<T>,
@@ -586,18 +651,17 @@ pub(crate) async fn session<T: Cell>(
     from: String,
     gate: Gate,
     signed: Option<By>,
-    #[cfg_attr(not(feature = "server"), allow(unused_variables))] calls: Calls,
-    on_link: Option<OnLink>,
+    #[cfg_attr(not(feature = "server"), allow(unused_mut))] mut calls: Calls,
+    hooks: Hooks,
+    said: Option<Value>,
 ) -> std::result::Result<(), String> {
     let mut pulse = Pulse::new();
     let mut pace = Pace::new(limits.calls_per_sec);
     let mut bytes = Pace::new(limits.bytes_per_sec);
-    let hello =
-        tokio::time::timeout(Duration::from_secs(15), next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes))
-            .await
-            .ok()
-            .flatten()
-            .ok_or("no hello")?;
+    let hello = match said {
+        Some(v) => v,
+        None => hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?,
+    };
     if hello["t"] != "hello" || hello["cell"] != T::ID {
         _ = send_ax(&mut w, &json!({ "t": "refused", "why": format!("this server has cell {}", T::ID) })).await;
         return Err("refused a client: wrong cell".into());
@@ -606,7 +670,21 @@ pub(crate) async fn session<T: Cell>(
     // Another app on the door ([`crate::peer`]) is a client there: what the
     // key lets in (`#[client]` methods, `visible`), never the operator's.
     let peer = matches!(gate, Gate::Door | Gate::Local) && hello["peer"] == true;
-    let gate = if peer { Gate::Key } else { gate };
+    let mut gate = if peer { Gate::Key } else { gate };
+    let mut said = hello["user"].as_str().map(|u| By::User(u.into()));
+    // A peer says its app id; the app's hook says who that is here.
+    if let (true, Some(f)) = (peer, &hooks.peers) {
+        let c = resolve(f, hello["user"].as_str().unwrap_or_default());
+        gate = match c.as_ref().and_then(|c| c.role.clone()) {
+            Some(role) => Gate::Known(role),
+            None => Gate::Key,
+        };
+        said = Some(c.as_ref().map_or_else(|| By::User("peer".into()), |c| c.by.clone()));
+        #[cfg(feature = "server")]
+        {
+            calls.known = c;
+        }
+    }
     let door = matches!(gate, Gate::Door);
     let not_here = match gate {
         Gate::Local => "a release build's door serves a client's rights: the operator's tools need a debug build",
@@ -625,7 +703,6 @@ pub(crate) async fn session<T: Cell>(
         _ = send_ax(&mut w, &json!({ "t": "refused", "why": why, "skew": true })).await;
         return Err(format!("refused a client: {why}"));
     }
-    let said = hello["user"].as_str().map(|u| By::User(u.into()));
     let viewer = match signed {
         // A client that predicts as someone else would make other ids: refused.
         Some(by) if said.as_ref().is_some_and(|s| *s != by) => {
@@ -645,7 +722,7 @@ pub(crate) async fn session<T: Cell>(
     // What a client is sent counts for `ax cost`; a tool's look doesn't.
     let meter = (!tool).then_some(T::ID);
     // A tool (`ax call`, the local door) is no client link.
-    let _heard = Heard::new(on_link.filter(|_| !tool), &user, &from);
+    let _heard = Heard::new(hooks.on_link.filter(|_| !tool), &user, &from);
     let who = format!("{user} from {from}");
     let listed = Listed::new(Client { cell: T::ID, user, wire, from, since: crate::store::now_ms(), rtt: None });
     pulse.link = (!tool).then(|| (listed.0, who.clone()));

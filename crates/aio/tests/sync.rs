@@ -1681,3 +1681,55 @@ async fn a_patch_bigger_than_its_share_of_the_view_goes_as_the_view() {
     h.add("whole".into()).unwrap();
     until("the copy follows a whole view", || *a.state() == *h.state()).await;
 }
+
+#[cell(shared)]
+pub struct Tally {
+    pub n: u64,
+}
+
+#[methods]
+impl Tally {
+    #[client]
+    pub fn bump(&mut self) -> Result<u64> {
+        self.n += 1;
+        Ok(self.n)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_shared_cell_on_one_port_and_socket_path() {
+    let (board, tally) = (Handle::<Board>::memory(), Handle::<Tally>::memory());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let http = aio::http::Http::default().cell(tally.clone());
+    let opts = aio::sync::Options { token: "secret".into(), http, ..Default::default() };
+    tokio::spawn(aio::sync::serve_with(board.clone(), l, opts));
+    let b = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    let t = Remote::<Tally>::connect(&addr, "secret", "ana").await.unwrap();
+    assert_eq!(t.bump().unwrap(), 1);
+    b.add("x".into()).unwrap();
+    until("both confirmed", || t.pending() == 0 && b.pending() == 0).await;
+    assert_eq!((tally.state().n, board.state().notes.len()), (1, 1));
+    tally.bump().unwrap();
+    until("the second cell's copy follows", || t.state().n == 2).await;
+    // The key holds for every cell; a cell nobody serves is refused.
+    assert!(Remote::<Tally>::connect(&addr, "nope", "ana").await.is_err());
+    let link = aio::sync::Link { addr: addr.clone(), token: "secret".into(), root: None };
+    let e = aio::sync::Live::connect(&link, "ghost", "ana").await.err().expect("no such cell");
+    assert!(e.to_string().contains("this server has cell board"), "{e}");
+    let mut tool = aio::sync::Live::connect(&link, "tally", "ops").await.unwrap();
+    assert_eq!(tool.view()["n"], 2);
+    assert_eq!(tool.call("bump", serde_json::json!([])).await, Ok(serde_json::json!(3)));
+}
+
+#[test]
+#[should_panic(expected = "isn't #[cell(shared)]")]
+fn a_cell_that_isnt_shared_is_never_served_beside() {
+    #[cell]
+    pub struct Mine {
+        pub n: u8,
+    }
+    #[methods]
+    impl Mine {}
+    let _ = aio::http::Http::default().cell(Handle::<Mine>::memory());
+}
