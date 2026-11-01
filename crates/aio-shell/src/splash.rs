@@ -187,6 +187,9 @@ mod tests {
             .arg(&dir)
             .args(crate::runtime::sandbox_args(&rt))
             .args(["--ozone-platform=headless", "--aio-title=Splashed", "--aio-width=640", "--aio-height=480"])
+            // GL drawn by SwiftShader, as TestUi's: with no display the default GL
+            // fails its start under load and a hidden window may never paint.
+            .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
             .arg(format!("--user-data-dir={}", d.path().join("profile").display()))
             .arg(format!("--aio-sock={sock}"))
             .arg(format!("--aio-ctl={ctl_sock}"))
