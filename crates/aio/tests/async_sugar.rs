@@ -235,6 +235,21 @@ mod ttl {
     }
 
     #[test]
+    fn held_effects_are_described() {
+        let mut t = TestCells::new();
+        let h = t.cell::<Users>();
+        _ = h.load(4).unwrap();
+        let held = aio::testing::HeldEffect {
+            cell: "Users",
+            key: "load:[4]".into(),
+            mode: Mode::Queue,
+            timeout: Some(aio::effect::CALL_CEILING),
+        };
+        assert_eq!(t.held_effects(), [held], "aio's t.getEffects()");
+        t.settle();
+    }
+
+    #[test]
     fn a_cached_call_answers_with_the_kept_value() {
         let mut t = TestCells::new();
         let h = t.cell::<Users>();

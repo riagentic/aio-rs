@@ -670,6 +670,11 @@ impl<T: Cell> Handle<T> {
         lock(&self.inner.held).iter().flatten().map(|e| e.key.clone()).collect()
     }
 
+    /// The effects held, each as its key, mode and timeout.
+    pub(crate) fn held_effects(&self) -> Vec<(String, Mode, Option<Duration>)> {
+        lock(&self.inner.held).iter().flatten().map(|e| (e.key.clone(), e.mode, e.timeout)).collect()
+    }
+
     /// Start the held effects (inside a tokio runtime); how many.
     pub(crate) fn start_held(&self) -> usize {
         let es = lock(&self.inner.held).as_mut().map(std::mem::take).unwrap_or_default();

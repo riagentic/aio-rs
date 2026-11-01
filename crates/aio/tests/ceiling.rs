@@ -82,3 +82,42 @@ async fn retry_tries_again_while_it_fails_each_try_timed() {
     assert_eq!(e, Err(Rejected::new("timed out after 5s")));
     assert_eq!(aio::effect::retry(0, Some(Duration::from_secs(11)), slow).await, Ok(1));
 }
+
+/// aio's `blocking(id, fn)` and `blocking.cancel(id)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn blocking_work_runs_off_the_runtime_and_stops_when_cancelled() {
+    let sum = aio::effect::blocking("sum", |_| (1..=100u64).sum::<u64>()).await;
+    assert_eq!(sum, Ok(5050));
+
+    let spin = |c: &aio::effect::Cancel| {
+        while !c.cancelled() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        "stopped"
+    };
+    let run = tokio::spawn(aio::effect::blocking("walk", spin));
+    while aio::effect::cancel_blocking("walk") == 0 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(run.await.unwrap(), Err(Rejected::new("blocking `walk` was cancelled")));
+    assert_eq!(aio::effect::cancel_blocking("walk"), 0, "unlisted once done");
+
+    // The effect awaiting it ends early: the work is told to stop.
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s = seen.clone();
+    let task = tokio::spawn(aio::effect::blocking("abandoned", move |c| {
+        while !c.cancelled() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        s.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    task.abort();
+    for _ in 0..500 {
+        if seen.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("the abandoned work was never told to stop");
+}

@@ -129,9 +129,22 @@ fn name<T>() -> &'static str {
     std::any::type_name::<T>().rsplit("::").next().unwrap_or("cell")
 }
 
+/// An effect a call asked for, not started yet (aio's `t.getEffects()`):
+/// its cell, its key (an async method's is the method, with `#[ttl]` its
+/// arguments too), how a second one with that key behaves, its timeout
+/// (an async method's await: the call ceiling, unless `#[long]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldEffect {
+    pub cell: &'static str,
+    pub key: String,
+    pub mode: crate::Mode,
+    pub timeout: Option<Duration>,
+}
+
 /// What `TestCells` needs of each cell, whatever its type.
 trait Booted {
     fn held(&self) -> Vec<String>;
+    fn held_effects(&self) -> Vec<HeldEffect>;
     fn start_held(&self) -> usize;
     fn running(&self) -> Vec<String>;
     fn fire_due(&self, now: i64);
@@ -141,6 +154,14 @@ trait Booted {
 impl<T: Cell> Booted for Handle<T> {
     fn held(&self) -> Vec<String> {
         Handle::held(self).into_iter().map(|k| format!("{}.{k}", name::<T>())).collect()
+    }
+
+    fn held_effects(&self) -> Vec<HeldEffect> {
+        let cell = name::<T>();
+        Handle::held_effects(self)
+            .into_iter()
+            .map(|(key, mode, timeout)| HeldEffect { cell, key, mode, timeout })
+            .collect()
     }
 
     fn start_held(&self) -> usize {
@@ -254,6 +275,11 @@ impl TestCells {
     /// The effects calls asked for that haven't started (`Cell.key`), in order.
     pub fn effects(&self) -> Vec<String> {
         self.cells.iter().flat_map(|c| c.held()).collect()
+    }
+
+    /// [`Self::effects`] as descriptions: each one's key, mode and timeout.
+    pub fn held_effects(&self) -> Vec<HeldEffect> {
+        self.cells.iter().flat_map(|c| c.held_effects()).collect()
     }
 
     /// Start the waiting effects and wait until they, and every effect they
