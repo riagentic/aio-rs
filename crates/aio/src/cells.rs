@@ -86,7 +86,7 @@ impl<T: Cell> Part for Handle<T> {
 }
 
 /// An app-wide hook of [`Cells::on_start`] / [`Cells::on_restore`].
-type Hook = Box<dyn FnOnce(&Cells) -> Result + Send>;
+pub(crate) type Hook = Box<dyn FnOnce(&Cells) -> Result + Send>;
 
 /// The app's cells: `Cells::default().with(todo, &[]).with(mail, &[Todo::ID]).start()?`.
 #[derive(Default)]

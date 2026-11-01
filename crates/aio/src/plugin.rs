@@ -46,7 +46,7 @@ use crate::{Cell, Handle};
 pub struct Plugin {
     name: &'static str,
     cells: Cells,
-    on_start: Vec<Box<dyn FnOnce(&Cells) -> crate::Result + Send>>,
+    on_start: Vec<crate::cells::Hook>,
     #[cfg(not(target_arch = "wasm32"))]
     stops: Vec<(bool, Box<dyn FnOnce() + Send>)>,
     #[cfg(feature = "server")]
