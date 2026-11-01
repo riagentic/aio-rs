@@ -156,7 +156,8 @@ mod tests {
         said: &mut Vec<String>,
     ) -> String {
         loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line()).await {
+            // A hang guard: a loaded machine took tens of seconds to draw it.
+            match tokio::time::timeout(std::time::Duration::from_secs(60), lines.next_line()).await {
                 Ok(Ok(Some(l))) if l.contains(want) => return l,
                 Ok(Ok(Some(l))) => said.push(l),
                 _ => panic!("never said {want:?}: {said:#?}"),
@@ -178,7 +179,8 @@ mod tests {
         let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
         let dir = d.path().join("shell");
         crate::install(&dir, "splashed", &crate::Window { title: "Splashed", ..Default::default() }).unwrap();
-        let s = Splash { min_ms: 900, ..splash("assets/splash.png", Some("Starting {title}")) };
+        // Its cap far off: a splash drawn later than it (a loaded machine) is never up.
+        let s = Splash { min_ms: 900, max_ms: 300_000, ..splash("assets/splash.png", Some("Starting {title}")) };
         // Built in: the Windows lane runs this binary away from the source tree.
         let s = Splash { png: include_bytes!("../../aio/tests/fixtures/splash.png"), ..s };
         install(&dir, Some(&s), "Splashed", &colors(210, None)).unwrap();
@@ -189,6 +191,9 @@ mod tests {
             .arg(&dir)
             .args(crate::runtime::sandbox_args(&rt))
             .args(["--ozone-platform=headless", "--aio-title=Splashed", "--aio-width=640", "--aio-height=480"])
+            // GL drawn by SwiftShader, as TestUi's: with no display the default GL
+            // fails its start under load and a hidden window may never paint.
+            .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
             .arg(format!("--user-data-dir={}", d.path().join("profile").display()))
             .arg(format!("--aio-sock={sock}"))
             .arg(format!("--aio-ctl={ctl_sock}"))
@@ -203,12 +208,12 @@ mod tests {
             .unwrap();
         let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
         let mut said = vec![];
-        let ctl = tokio::time::timeout(std::time::Duration::from_secs(20), ctls.accept()).await.unwrap().unwrap();
+        let ctl = tokio::time::timeout(std::time::Duration::from_secs(60), ctls.accept()).await.unwrap().unwrap();
         until(&mut lines, "[aio-shell] splash: up", &mut said).await;
         let (_r, mut ctl) = tokio::io::split(ctl);
         // The window opens only now: the splash was up before it.
         ctl.write_all(b"{\"t\":\"place\",\"width\":640,\"height\":480}\n").await.unwrap();
-        let _wire = tokio::time::timeout(std::time::Duration::from_secs(20), wires.accept()).await.unwrap().unwrap();
+        let _wire = tokio::time::timeout(std::time::Duration::from_secs(60), wires.accept()).await.unwrap().unwrap();
         let gone = until(&mut lines, "[aio-shell] splash: gone after", &mut said).await;
         let ms: u64 = gone.split("gone after ").nth(1).and_then(|t| t.split(' ').next()).unwrap().parse().unwrap();
         assert!(ms >= 900 && gone.ends_with(", the window shown"), "kept its minimum, gone with the window: {gone}");
