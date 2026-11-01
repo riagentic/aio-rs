@@ -106,10 +106,10 @@ mod written;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use dioxus::prelude::*;
+    use aio::ui::prelude::*;
 
     #[component]
-    pub fn Greeting(name: String, times: u32) -> Element {
+    pub fn Greeting(name: String, times: u32) -> View {
         rsx! { p { "data-t": "hi", "Hello {name} ×{times}" } button { "Wave" } }
     }
 

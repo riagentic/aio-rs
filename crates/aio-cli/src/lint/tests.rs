@@ -254,7 +254,7 @@ fn App() -> Element {
 }
 
 #[test]
-fn a_list_item_without_a_key_is_a_warning() {
+fn a_list_item_without_a_key_is_an_error() {
     let d = project(&[(
         "src/ui.rs",
         r#"
@@ -276,12 +276,82 @@ fn App() -> Element {
     assert_eq!(
         got,
         [
-            (5, "<li> in a for loop has no key: a removed or moved row hands its state to the next"),
-            (7, "<Row> in a for loop has no key: a removed or moved row hands its state to the next"),
+            (
+                5,
+                "<li> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)"
+            ),
+            (
+                7,
+                "<Row> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)"
+            ),
         ],
         "{:?}",
         r.issues
     );
+    assert!(r.issues.iter().filter(|i| i.area == "render").all(|i| i.severity == Severity::Error));
+}
+
+#[test]
+fn aio_ui_hooks_off_the_top_level_are_errors_too() {
+    let d = project(&[(
+        "src/ui.rs",
+        r#"
+fn App() -> View {
+    let a = signal(|| 0);
+    if a.get() > 1 {
+        let b = signal(|| 1);
+        effect(move || {});
+    }
+    let f = move |_| { let m = memo(|| 2); };
+    let kept = once(|| Signal::new(1));
+    let fresh = Signal::new(0);
+    for i in 0..3 { watch(i, |_| {}); }
+    rsx! {}
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let lines: Vec<_> = r.issues.iter().filter(|i| i.area == "hooks").map(|i| i.line.unwrap()).collect();
+    assert_eq!(lines, [5, 6, 8, 10, 11], "{:?}", r.issues);
+    assert!(r.issues.iter().any(|i| i.message.starts_with("`signal` in `App` runs only sometimes")));
+    assert!(r.issues.iter().any(|i| i.message.starts_with("`Signal::new` in the body of `App` makes a new signal")));
+}
+
+#[test]
+fn naming_the_renderer_behind_aio_ui_is_an_error() {
+    let d = project(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n\n[dependencies]\naio = { path = \"a\" }\ndioxus = \"0.7\"\n# dioxus = \"0.7\"\ndioxus-document = \"0.7\"\n",
+        ),
+        (
+            "src/ui.rs",
+            r#"
+use dioxus::prelude::*;
+use aio::ui::prelude::*;
+fn App() -> View {
+    let t = dioxus_document::eval("dioxus.send(1)");
+    // dioxus in a comment is prose
+    let dioxus = 1;
+    rsx! {}
+}
+"#,
+        ),
+        ("tests/ui.rs", "use dioxus::prelude::Key;\n"),
+    ]);
+    let r = lint(d.path());
+    let got: Vec<_> =
+        r.issues.iter().filter(|i| i.area == "renderer").map(|i| (i.file.clone().unwrap(), i.line.unwrap())).collect();
+    let at = |f: &str, l: usize| (f.to_string(), l);
+    let (path, script) = (at("src/ui.rs", 5), at("src/ui.rs", 5));
+    assert_eq!(
+        got,
+        [at("Cargo.toml", 6), at("Cargo.toml", 8), at("src/ui.rs", 2), path, script, at("tests/ui.rs", 1)],
+        "{:?}",
+        r.issues
+    );
+    assert!(r.issues.iter().all(|i| i.area != "renderer" || i.severity == Severity::Error));
+    assert!(r.issues.iter().any(|i| i.message.contains("its page object is `aio`")), "a page script's dioxus.send");
 }
 
 #[test]
@@ -593,19 +663,20 @@ fn page_css_kept_in_a_hook_is_an_error_because_edits_never_show() {
         "src/lib.rs",
         r#"
 #[component]
-pub fn App() -> Element {
-    let css = use_hook(|| aio::ui::page_css(&[CSS], false));
+pub fn App() -> View {
+    let css = once(|| aio::ui::page_css(&[CSS], false));
     let live = aio::use_css!(false; "assets/style.css");
     let fine = aio::ui::page_css(&[CSS], false);
-    let n = use_hook(|| 1);
+    let n = once(|| 1);
+    let old = use_hook(|| aio::ui::page_css(&[CSS], false));
     rsx! { style { {css} } }
 }
 "#,
     )]);
     let r = lint(d.path());
-    let stale: Vec<_> = r.issues.iter().filter(|i| i.message.contains("made in `use_hook`")).collect();
-    assert_eq!(stale.len(), 1, "{:?}", r.issues);
-    assert_eq!((stale[0].severity, stale[0].line), (Severity::Error, Some(4)));
+    let stale: Vec<_> = r.issues.iter().filter(|i| i.message.contains("made in `once`")).collect();
+    assert_eq!(stale.len(), 2, "{:?}", r.issues);
+    assert_eq!((stale[0].severity, stale[0].line, stale[1].line), (Severity::Error, Some(4), Some(8)));
     assert!(stale[0].fix.as_deref().unwrap().contains("aio::use_css!"));
 }
 

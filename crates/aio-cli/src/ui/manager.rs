@@ -8,8 +8,8 @@
 use super::proc::{self, FileNode, LogSource, Runtime};
 use super::scan::{self, Project};
 use aio::serde_json::{self, Value, json};
-use dioxus::core::spawn_forever;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
+use spawn_forever;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -511,7 +511,7 @@ async fn off<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 /// root (`spawn_forever`): a tab that asked and closed never drops the answer.
 #[derive(Clone, Copy)]
 pub struct Manager {
-    setup: CopyValue<Setup>,
+    setup: Signal<Setup>,
     pub projects: Signal<Vec<Project>>,
     pub selected: Signal<Option<String>>,
     pub detail: Signal<Option<Detail>>,
@@ -552,7 +552,7 @@ impl Manager {
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             .is_some_and(|v| v["showAll"] == true);
         Manager {
-            setup: CopyValue::new(setup),
+            setup: Signal::new(setup),
             projects: Signal::new(vec![]),
             selected: Signal::new(None),
             detail: Signal::new(None),
@@ -585,7 +585,7 @@ impl Manager {
     }
 
     fn setup(&self) -> Setup {
-        self.setup.read().clone()
+        self.setup.get_untracked()
     }
 
     /// The verb for entry `p`'s copy, and the folder its verbs run in: its
@@ -596,7 +596,7 @@ impl Manager {
     }
 
     /// Keep the person's choice of all apps or the running ones.
-    pub fn set_show_all(mut self, on: bool) {
+    pub fn set_show_all(self, on: bool) {
         self.show_all.set(on);
         if let Some(p) = self.setup().prefs {
             _ = std::fs::write(p, json!({ "showAll": on }).to_string());
@@ -604,8 +604,8 @@ impl Manager {
     }
 
     /// Find the apps again (amui's `discover`).
-    pub fn discover(mut self) {
-        if *self.scanning.peek() {
+    pub fn discover(self) {
+        if *self.scanning.read_untracked() {
             return;
         }
         self.scanning.set(true);
@@ -634,8 +634,8 @@ impl Manager {
     /// Fold a fresh scan in (amui's `applyScan`): the list, and the chosen
     /// app followed, dropped if gone, its running state reconciled (its
     /// readings cleared when its process changed).
-    pub fn apply_scan(mut self, found: Vec<Project>, roots: Vec<String>) {
-        let sel = self.selected.peek().clone();
+    pub fn apply_scan(self, found: Vec<Project>, roots: Vec<String>) {
+        let sel = self.selected.read_untracked().clone();
         let next = sel.as_deref().and_then(|id| scan::follow(&found, id)).cloned();
         self.scan_roots.set(roots);
         match (sel, next) {
@@ -647,7 +647,7 @@ impl Manager {
                 if p.id != id {
                     self.selected.set(Some(p.id.clone()));
                 }
-                let changed = self.detail.peek().as_ref().and_then(|d| reconcile(d, &p));
+                let changed = self.detail.read_untracked().as_ref().and_then(|d| reconcile(d, &p));
                 if let Some(d) = changed {
                     let up = d.running;
                     self.detail.set(Some(d));
@@ -659,14 +659,14 @@ impl Manager {
             }
             _ => {}
         }
-        if *self.projects.peek() != found {
+        if *self.projects.read_untracked() != found {
             self.projects.set(found);
         }
     }
 
     /// Drop every reading of a process that is gone (amui's
     /// `clearLiveDiagnostics`).
-    pub fn clear_live(mut self) {
+    pub fn clear_live(self) {
         self.hist.set(Hist::default());
         self.diag.set(Diag::default());
         self.control_error.set(None);
@@ -675,8 +675,8 @@ impl Manager {
 
     /// Choose an app (amui's `select`): its skeleton at once, then what is
     /// read of it; a newer choice drops this one's results.
-    pub fn select(mut self, key: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
+    pub fn select(self, key: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
         let id = p.id.clone();
         self.selected.set(Some(id.clone()));
         self.detail.set(Some(detail_of(&p)));
@@ -750,7 +750,7 @@ impl Manager {
                 (d, files, live)
             })
             .await;
-            if self.selected.peek().as_deref() != Some(id.as_str()) {
+            if self.selected.read_untracked().as_deref() != Some(id.as_str()) {
                 return;
             }
             let (d, files, diag) = got;
@@ -769,9 +769,9 @@ impl Manager {
 
     /// Read the chosen running app again for the charts and live fields
     /// (amui's `tick`): one at a time, never two over the same history.
-    pub fn tick(mut self) {
-        let Some(d) = self.detail.peek().clone().filter(|d| d.running && d.pid.is_some()) else { return };
-        if *self.ticking.peek() {
+    pub fn tick(self) {
+        let Some(d) = self.detail.read_untracked().clone().filter(|d| d.running && d.pid.is_some()) else { return };
+        if *self.ticking.read_untracked() {
             return;
         }
         self.ticking.set(true);
@@ -780,15 +780,15 @@ impl Manager {
         spawn_forever(async move {
             let (dg, ps) = off(move || (diag(&verb, &name, home.as_deref(), cwd), proc::ps_stats(pid))).await;
             self.ticking.set(false);
-            let Some(mut d) = self.detail.peek().clone().filter(|d| d.id == id && d.running) else { return };
+            let Some(mut d) = self.detail.read_untracked().clone().filter(|d| d.id == id && d.running) else { return };
             fill(&mut d, &dg, ps);
             if !dg.answered {
                 // A reading that can't be checked is no reading.
                 (d.uptime_s, d.connections) = (None, None);
             }
-            self.hist.with_mut(|h| sample(h, &d, &dg));
+            self.hist.update(|h| sample(h, &d, &dg));
             self.control_error.set(dg.control_error.clone());
-            let kept = self.diag.peek().clone();
+            let kept = self.diag.read_untracked().clone();
             // Each part degrades on its own: the last good one stays.
             self.diag.set(Diag {
                 health: dg.health.or(kept.health),
@@ -805,8 +805,8 @@ impl Manager {
 
     /// The chosen app's whole state for the State tab (amui's `loadState`):
     /// on demand only, never polled; too large is refused, not drawn.
-    pub fn load_state(mut self, key: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else {
+    pub fn load_state(self, key: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else {
             self.state.set(StateLoad {
                 of: Some(key.into()),
                 error: Some("app not running".into()),
@@ -818,15 +818,15 @@ impl Manager {
             self.state.set(StateLoad { of: Some(p.id), error: Some("app not running".into()), ..StateLoad::default() });
             return;
         }
-        self.state.with_mut(|s| (s.loading, s.error) = (true, None));
+        self.state.update(|s| (s.loading, s.error) = (true, None));
         let (verb, cwd) = self.verb_for(p.instance.as_deref(), p.path.as_deref());
         let (id, pid) = (p.id.clone(), p.running.as_ref().map(|r| r.pid));
         spawn_forever(async move {
             let r = off(move || verb(vec!["snapshot".into(), p.name.clone(), "--json".into()], cwd)).await;
-            if self.selected.peek().as_deref() != Some(id.as_str())
-                || self.detail.peek().as_ref().and_then(|d| d.pid) != pid
+            if self.selected.read_untracked().as_deref() != Some(id.as_str())
+                || self.detail.read_untracked().as_ref().and_then(|d| d.pid) != pid
             {
-                self.state.with_mut(|s| s.loading = false);
+                self.state.update(|s| s.loading = false);
                 return;
             }
             let mut s = StateLoad { of: Some(id), ..StateLoad::default() };
@@ -845,9 +845,9 @@ impl Manager {
 
     /// The chosen app's log tail (amui's `loadLogs`): on demand and on the
     /// follow poll; `source` picks another log.
-    pub fn load_logs(mut self, key: &str, source: Option<LogSource>) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
-        let src = source.unwrap_or(*self.log_source.peek());
+    pub fn load_logs(self, key: &str, source: Option<LogSource>) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
+        let src = source.unwrap_or(*self.log_source.read_untracked());
         self.log_source.set(src);
         self.log_loading.set(true);
         self.log_error.set(None);
@@ -855,7 +855,7 @@ impl Manager {
         spawn_forever(async move {
             let raw = off(move || p.logs().map(|l| proc::read_logs(&l, src, 500))).await;
             self.log_loading.set(false);
-            if self.selected.peek().as_deref() != Some(id.as_str()) {
+            if self.selected.read_untracked().as_deref() != Some(id.as_str()) {
                 return;
             }
             let raw = raw.unwrap_or(proc::RawLog { missing: true, ..Default::default() });
@@ -878,8 +878,10 @@ impl Manager {
     }
 
     /// Call a cell's method on the running app (amui's `dispatch`).
-    pub fn dispatch(mut self, key: &str, cell: &str, method: &str, args: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned().filter(|p| p.running.is_some()) else { return };
+    pub fn dispatch(self, key: &str, cell: &str, method: &str, args: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned().filter(|p| p.running.is_some()) else {
+            return;
+        };
         let (words, _) = match call_words(&p.name, cell, method, args) {
             Ok(c) => c,
             Err(e) => return self.dispatch_msg.set(Some(e)),
@@ -907,7 +909,7 @@ impl Manager {
     /// Start, stop or restart the app (amui's `start`, `stop`, `restart`):
     /// its own verb says how it went; the list is read again after.
     pub fn lifecycle(mut self, key: &str, what: &'static str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
         if self.refuse_self(&p) {
             return;
         }
@@ -922,7 +924,7 @@ impl Manager {
             _ => "starting",
         };
         self.action_msg.set(Some(format!("{ing} {}…", p.name)));
-        let cur = self.detail.peek().clone();
+        let cur = self.detail.read_untracked().clone();
         if what == "stop"
             && let Some(mut d) = cur.filter(|d| d.id == p.id)
         {
@@ -943,14 +945,14 @@ impl Manager {
 
     /// Run task `label` in the app's project (amui's `runTask`): its
     /// output captured; cancellable, and never longer than 5 min.
-    pub fn run_task(mut self, key: &str, label: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
+    pub fn run_task(self, key: &str, label: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
         let (Some(dir), Some(mut words)) = (p.path.clone(), task_words(label, &p.name)) else {
             return self
                 .task
                 .set(Task { output: format!("{label}: {} has no project folder here", p.name), ..Task::default() });
         };
-        if self.task.peek().running.is_some() {
+        if self.task.read_untracked().running.is_some() {
             return;
         }
         if let Some(i) = &p.instance {
@@ -958,7 +960,7 @@ impl Manager {
         }
         let shown = format!("$ ax {}", words.join(" "));
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel.set(Some(cancel.clone()));
+        *self.cancel.write() = Some(cancel.clone());
         self.task.set(Task {
             running: Some(label.into()),
             output: format!("{shown}\n(running — cancellable)…"),
@@ -972,7 +974,7 @@ impl Manager {
                 "timeout" => "timed out (5 min cap)".into(),
                 _ => r.code.map_or("ended by a signal".into(), |c| format!("exit {c}")),
             };
-            self.cancel.set(None);
+            *self.cancel.write() = None;
             self.task.set(Task {
                 running: None,
                 output: format!("{shown}\n{}\n\n[{tag}]", r.output),
@@ -983,27 +985,27 @@ impl Manager {
 
     /// Stop the running task (amui's `cancelTask`).
     pub fn cancel_task(&self) {
-        if let Some(c) = self.cancel.peek().as_ref() {
+        if let Some(c) = self.cancel.read_untracked().as_ref() {
             c.store(true, Ordering::Relaxed);
         }
     }
 
     /// The enclosing repo's tree for the Codebase tab (amui's `loadCodebase`).
-    pub fn load_codebase(mut self) {
-        let Some(root) = self.files.peek().repo.clone() else { return };
-        let id = self.selected.peek().clone();
-        self.files.with_mut(|f| f.repo_loading = true);
+    pub fn load_codebase(self) {
+        let Some(root) = self.files.read_untracked().repo.clone() else { return };
+        let id = self.selected.read_untracked().clone();
+        self.files.update(|f| f.repo_loading = true);
         spawn_forever(async move {
             let (tree, cut) = off(move || proc::list_files(&root)).await;
-            if *self.selected.peek() != id {
+            if *self.selected.read_untracked() != id {
                 return;
             }
-            self.files.with_mut(|f| (f.repo_tree, f.repo_truncated, f.repo_loading) = (Some(tree), cut, false));
+            self.files.update(|f| (f.repo_tree, f.repo_truncated, f.repo_loading) = (Some(tree), cut, false));
         });
     }
 
     /// Open a file in the viewer (amui's `openFile`): read-only, guarded.
-    pub fn open_file(mut self, base: PathBuf, rel: String) {
+    pub fn open_file(self, base: PathBuf, rel: String) {
         spawn_forever(async move {
             let (b, r) = (base.clone(), rel.clone());
             let read = off(move || proc::read_file(&b, &r)).await;
@@ -1016,10 +1018,10 @@ impl Manager {
     }
 
     /// Open where cell `cell` is defined (amui's `openCellSource`).
-    pub fn open_cell_source(mut self, cell: &str) {
-        let f = self.files.peek().clone();
+    pub fn open_cell_source(self, cell: &str) {
+        let f = self.files.read_untracked().clone();
         let Some(base) = f.repo.or(f.runtime.map(|r| r.root)) else { return };
-        let (cell, id) = (cell.to_string(), self.selected.peek().clone());
+        let (cell, id) = (cell.to_string(), self.selected.read_untracked().clone());
         self.open.set(None);
         spawn_forever(async move {
             let b = base.clone();
@@ -1027,7 +1029,7 @@ impl Manager {
             let found =
                 off(move || proc::find_cell_source(&b, &c).map(|(rel, line)| (proc::read_file(&b, &rel), rel, line)))
                     .await;
-            if *self.selected.peek() != id {
+            if *self.selected.read_untracked() != id {
                 return;
             }
             self.open.set(Some(match found {
@@ -1050,7 +1052,7 @@ impl Manager {
     }
 
     /// Make a new app (amui's `create`): `ax create` in `~/aio-apps`.
-    pub fn create(mut self, raw: &str) {
+    pub fn create(self, raw: &str) {
         let name = slug(raw);
         if name.is_empty() {
             return self.create_msg.set(Some("enter a name".into()));

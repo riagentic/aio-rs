@@ -832,8 +832,7 @@ pub(crate) mod browser {
              [lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n\
              aio = {{ package = \"aio-rs\", path = {:?}, default-features = false, features = [\"web\", \"kit\"] }}\n\
              wasm-bindgen = \"0.2\"\nwasm-bindgen-futures = \"0.4\"\njs-sys = \"0.3\"\n\
-             web-sys = {{ version = \"0.3\", features = [\"Location\", \"Window\"] }}\n\
-             dioxus = {{ version = \"=0.7.10\", default-features = false, features = [\"macro\", \"html\", \"signals\", \"hooks\"] }}\n\n[workspace]\n",
+             web-sys = {{ version = \"0.3\", features = [\"Location\", \"Window\"] }}\n\n[workspace]\n",
             aio.display().to_string()
         );
         for (f, text) in [

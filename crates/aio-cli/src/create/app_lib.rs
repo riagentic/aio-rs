@@ -1,7 +1,6 @@
 //! The app: its cell (the state, saved, and the only ways to change it)
 //! and its window. `ax dev` hot-patches all of this library.
-use aio::act;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 /// What the app keeps: each change shown at once and saved within 100 ms
 /// (`coalesce`: aio's debounced writes), its history kept (`ax events`).
@@ -27,11 +26,12 @@ impl Counter {
 aio::client!(Counter, counter);
 
 /// The window: the count, and the buttons that change it. `part(|c| &c.count)`
-/// re-renders a view only when that field changes (aio's signal per cell).
+/// is a handle on that field: a view reading it (`"{n}"`, `n.get()`)
+/// re-renders only when the field changes (aio's signal per cell).
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
-    let n = *part(|c| &c.count);
+    let n = part(|c| &c.count);
     // The app's one hue (`[ui] hue`, else its id's): its icon's and splash's too.
     let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
@@ -42,7 +42,7 @@ pub fn App() -> Element {
             h1 { "data-t": "count", "{n}" }
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }
             button { class: aio::ui::btn("ghost"), onclick: move |_| _ = act!(add(-1)), "Subtract" }
-            button { class: aio::ui::btn("ghost"), disabled: n == 0, onclick: move |_| _ = act!(reset()), "Reset" }
+            button { class: aio::ui::btn("ghost"), disabled: n.get() == 0, onclick: move |_| _ = act!(reset()), "Reset" }
         }
     }
 }

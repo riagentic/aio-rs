@@ -7,7 +7,7 @@ use super::proc::FileNode;
 use super::scan::{Meta, Project, Running};
 use aio::serde_json::{Value, json};
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -193,8 +193,8 @@ thread_local! {
     static SETUP: std::cell::RefCell<Option<Setup>> = const { std::cell::RefCell::new(None) };
 }
 
-fn mounted() -> Element {
-    use_context_provider(|| SETUP.with_borrow(|s| s.clone().unwrap()));
+fn mounted() -> View {
+    provide(|| SETUP.with_borrow(|s| s.clone().unwrap()));
     rsx! { super::app::App {} }
 }
 

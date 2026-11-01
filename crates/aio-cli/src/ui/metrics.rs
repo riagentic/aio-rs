@@ -6,7 +6,7 @@
 use super::charts::AreaChart;
 use super::manager::{Diag, Hist};
 use aio::serde_json::Value;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 /// The colour of a fill: red from 80 %, yellow from 50 %.
 fn gauge_color(pct: f64) -> &'static str {
@@ -21,7 +21,7 @@ fn gauge_color(pct: f64) -> &'static str {
 
 /// A labelled bar, current against its bound (amui's `Gauge`).
 #[component]
-fn Gauge(name: String, current: f64, capacity: f64, unit: String) -> Element {
+fn Gauge(name: String, current: f64, capacity: f64, unit: String) -> View {
     let pct = if capacity > 0.0 { (current / capacity * 100.0).clamp(0.0, 100.0) } else { 0.0 };
     let col = gauge_color(pct);
     let digits = if current < 10.0 { 2 } else { 0 };
@@ -37,7 +37,7 @@ fn Gauge(name: String, current: f64, capacity: f64, unit: String) -> Element {
 }
 
 #[component]
-fn Stat(k: String, v: String, #[props(default)] color: String) -> Element {
+fn Stat(k: String, v: String, #[props(default)] color: String) -> View {
     rsx! {
         div { class: "stat",
             span { "{k}" }
@@ -47,7 +47,7 @@ fn Stat(k: String, v: String, #[props(default)] color: String) -> Element {
 }
 
 #[component]
-fn Card(title: String, t: String, children: Element) -> Element {
+fn Card(title: String, t: String, children: View) -> View {
     rsx! {
         div { class: "card mcard", "data-t": "{t}",
             div { class: "mb8", style: "display:flex;justify-content:space-between;align-items:baseline",
@@ -110,7 +110,7 @@ pub fn component_rows(tree: &Value) -> Vec<(usize, String, u64, f64)> {
 
 /// The panel (amui's `MetricsPanel`), all from props.
 #[component]
-pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> Element {
+pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
     let cost = diag.cost.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
     let health = diag.health.clone().unwrap_or(Value::Null);
     let calls: f64 = cost.values().map(|c| num(&c["calls"])).sum();

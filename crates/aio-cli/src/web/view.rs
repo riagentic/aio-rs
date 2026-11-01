@@ -1,5 +1,5 @@
 // The board's view: painted on the server, then drawn in the page.
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::client!(Board, board);
 
@@ -7,14 +7,14 @@ aio::client!(Board, board);
 const DOUBLE: aio::kit::Island =
     aio::kit::Island::js("return (el, p, emit) => { el.textContent = 'island ' + p.n; emit(p.n * 2); };");
 
-fn view() -> Element {
+fn view() -> View {
     use_live();
     let b = board();
     aio::head::use_head(
         aio::head::Head::title(format!("{} items", b.items.len())).meta(&[("name", "description"), ("content", "board")]),
     );
-    let link = if use_status()().online { "online" } else { "offline" };
-    let mut doubled = use_signal(|| 0i64);
+    let link = if use_status().get().online { "online" } else { "offline" };
+    let doubled = signal(|| 0i64);
     rsx! {
         ul { id: "items",
             for i in b.items.iter() {

@@ -31,7 +31,7 @@ editing (this, then aio-rs's docs/README.md) · check → run → test · clean 
 3. NEVER script around ax. Assert: ax expect. Watch: ax state --watch (one
    line per change, pushed). Every verb takes --json and exits 0 ok, 1 failed,
    2 bad usage.
-4. LEARN BEFORE EDITING. aio-rs is Rust + Dioxus, not aio's TypeScript: guessed code
+4. LEARN BEFORE EDITING. aio-rs is Rust (views: aio::ui), not aio's TypeScript: guessed code
    compiles to the wrong thing or not at all. Read this, then the guide (docs/README.md
    in aio-rs: every part with examples that compile; a port from aio:
    docs/migration/README.md, keeping aio's optimizations: docs/performance.md), then
@@ -54,7 +54,7 @@ the only writes, pure, &mut self → aio::Result · effects do the I/O · views 
   them). The I/O happens around them (effects, flows) and hands results
   in as arguments.
 - A call commits before it answers: nothing is ever \"not saved yet\".
-- Views are Dioxus components that read cells; Handle::<Cell> calls methods.
+- Views are aio::ui components that read cells; Handle::<Cell> calls methods.
 - aio.toml is the one config; ax config <app> prints it as it runs.",
     },
     Section {
@@ -174,27 +174,35 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
     },
     Section {
         slug: "ui",
-        title: "UI: Dioxus views on cells",
+        title: "UI: aio::ui views on cells",
         deep: false,
-        min: "aio::client!(Cell, cell) → part(|c| &c.field) reads a field and re-renders only when
-it changes, act!(method(args)) calls · use_live() once at the root · data-t on what tests drive",
-        body: "- aio::client!(Todo, todo) makes SOURCE/HANDLE, part(|t| &t.items) (the view
-  re-renders only when that top-level field changes: aio's signal per cell;
-  pick the field, then index it), todo() (the whole state: every commit
+        min: "use aio::ui::prelude::*; (never dioxus) · aio::client!(Cell, cell) → part(|c| &c.field)
+a handle (.get(), \"{n}\") re-rendering only when that field changes, act!(method(args))
+calls · use_live() once at the root · data-t on what tests drive",
+        body: "- use aio::ui::prelude::*; is the whole view API: rsx!, #[component], View,
+  signal(|| v) (a Copy Signal: .get(), .set(v) tells only on a change,
+  .update(|v| ..), .read(), .write(), \"{s}\"), memo, effect, watch(deps, f),
+  once(|| ..), on_cleanup, provide/context, task/spawn, resource, Global,
+  ErrorBoundary, Suspense, eval (page scripts talk to `aio`). Call signal,
+  memo, effect, once.. at a view's top level. Never name dioxus (ax lint
+  refuses it): air replaces the renderer behind aio::ui. Rows in a for need key:.
+- aio::client!(Todo, todo) makes SOURCE/HANDLE, part(|t| &t.items) (a handle:
+  .get()/.with(|v| ..); the view re-renders only when that top-level field
+  changes: aio's signal per cell; pick the field, then index it), todo() (the whole state: every commit
   re-renders, so handlers only), use_status(), use_pending(method), and the
   Ui door: act!(add(title)) calls a method from a handler (a refusal is
   logged and gives None); a view's call renders at once, commits from
   effects and schedules at most once per 150 ms. use_live() once in the root.
 - aio's caches: #[derived(reads = [..])] (memoLast), aio::Cache (keyed caches
-  on a source: Ver::of(&state) or part(..).ver()), rows as props (Dioxus
-  skips equal props, as AIR did), kit::VirtualList for long lists.
-- Views are plain Dioxus (rsx!): real HTML and CSS; aio::kit has the
+  on a source: Ver::of(&state) or part(..).ver()), rows as props (equal
+  props skip a render, as AIR did), kit::VirtualList for long lists.
+- Views are rsx! over real HTML and CSS; aio::kit has the
   components (Button, Field, Modal, VList…). Styles: style { {aio::use_css!(
   false, &aio::kit::theme_css(hue); \"assets/style.css\")} }: false is the
   light theme (true dark), the kit's theme comes first (the kit's classes,
   aio::ui::btn included, are unstyled without it), then the app's files; a
   saved edit shows at once under ax dev, no compile. Never keep CSS or
-  anything an edit should change in use_hook: its value is made once, so a
+  anything an edit should change in once(..): its value is made once, so a
   hot-patched edit never shows.
 - data-t=\"name\" is an element's handle for tests and agents; without one, an
   element is named from its label and role (SaveButton, EmailInput).

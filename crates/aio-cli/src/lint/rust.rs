@@ -5,7 +5,7 @@ use super::{Issue, Severity, secrets};
 use dioxus_rsx::{AttributeName, AttributeValue, BodyNode, CallBody, ElementName, HotLiteral, IfChain};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use syn::visit::{self, Visit};
 use syn::{Attribute, Block, Expr, Item, ReturnType, Signature, spanned::Spanned};
 
@@ -126,6 +126,7 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
             return;
         }
     };
+    renderer(rel, ast.to_token_stream(), &mut f.issues);
     if test_file {
         let ts = ast.to_token_stream();
         f.tests += count_tests(&ts);
@@ -135,6 +136,71 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
     split_tests(&mut ast.items, f);
     secrets::tokens(rel, ast.to_token_stream(), &mut f.issues);
     Checks { file: rel, f, repeats: 0 }.visit_file(&ast);
+}
+
+/// What an app names of the renderer behind `aio::ui` (a `dioxus…` path,
+/// or a page script's `dioxus.send`): it ties the app to Dioxus, which air
+/// replaces (docs/design/air.md); `aio::ui` stays.
+fn renderer(rel: &str, ts: TokenStream, out: &mut Vec<Issue>) {
+    fn walk(ts: TokenStream, lines: &mut BTreeSet<(usize, bool)>) {
+        let tt: Vec<TokenTree> = ts.into_iter().collect();
+        for (i, t) in tt.iter().enumerate() {
+            match t {
+                TokenTree::Group(g) => walk(g.stream(), lines),
+                TokenTree::Ident(id) => {
+                    let s = id.to_string();
+                    let path = matches!(tt.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == ':');
+                    let named = s == "dioxus" || s.starts_with("dioxus_");
+                    let used = path
+                        || matches!(tt.get(i.wrapping_sub(1)), Some(TokenTree::Ident(u)) if u == "use" || u == "crate");
+                    if named && used {
+                        lines.insert((id.span().start().line, false));
+                    }
+                }
+                TokenTree::Literal(l) if l.to_string().contains("dioxus.") => {
+                    lines.insert((l.span().start().line, true));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut lines = BTreeSet::new();
+    walk(ts, &mut lines);
+    for (line, script) in lines {
+        let (msg, fix) = match script {
+            false => (
+                "names dioxus, the renderer behind aio::ui: the swap to air (docs/design/air.md) breaks it",
+                "use aio::ui::prelude::*; and its names (View, signal, memo, effect, once, eval, …)",
+            ),
+            true => (
+                "a page script talks to `dioxus`: its page object is `aio` (aio::ui::eval)",
+                "aio.send(v) / await aio.recv()",
+            ),
+        };
+        out.push(Issue::new(Severity::Error, "renderer", msg.into(), rel, line).fix(fix));
+    }
+}
+
+/// A manifest's dependency on a renderer crate (`dioxus`, `dioxus-…`):
+/// aio brings the one behind `aio::ui`.
+pub fn manifest(rel: &str, text: &str, out: &mut Vec<Issue>) {
+    for (i, l) in text.lines().enumerate() {
+        let l = l.trim_start();
+        let key = l.split(['=', '.', ' ', ']']).next().unwrap_or_default().trim_start_matches('[');
+        let dep = key == "dioxus" || key.starts_with("dioxus-") || l.contains("dependencies.dioxus");
+        if dep && !l.starts_with('#') {
+            out.push(
+                Issue::new(
+                    Severity::Error,
+                    "renderer",
+                    "depends on dioxus, the renderer behind aio::ui".into(),
+                    rel,
+                    i + 1,
+                )
+                .fix("drop it: aio (feature kit) brings the views' renderer, named through aio::ui"),
+            );
+        }
+    }
 }
 
 /// The id `#[cell]` gives `Name` without `id = "…"`.
@@ -161,11 +227,11 @@ impl Checks<'_> {
         self.f.issues.push(Issue::new(sev, area, msg, self.file, line).fix(fix));
     }
 
-    /// A component (returns `Element`) or a hook (`use_…`): its hooks run
-    /// on every render, in one order.
+    /// A view (returns `View`, or Dioxus's `Element`) or a hook (`use_…`):
+    /// what keeps something for it ([`HOOKS`]) runs on every render, in one order.
     fn hooks(&mut self, sig: &Signature, body: &Block) {
         let element = matches!(&sig.output, ReturnType::Type(_, t)
-            if matches!(&**t, syn::Type::Path(p) if last_is(&p.path, "Element")));
+            if matches!(&**t, syn::Type::Path(p) if last_is(&p.path, "View") || last_is(&p.path, "Element")));
         if !element && !sig.ident.to_string().starts_with("use_") {
             return;
         }
@@ -186,7 +252,7 @@ impl Checks<'_> {
                 "hooks",
                 format!("`{made}` in the body of `{}` makes a new signal every render: its value is lost on the next one, and each copy is kept until the component goes", sig.ident),
                 line,
-                "make it once: `use_signal(|| ..)` (or `use_hook(|| Signal::new(..))`)",
+                "make it once: `signal(|| ..)` (or `once(|| Signal::new(..))`)",
             );
         }
     }
@@ -208,7 +274,7 @@ impl Checks<'_> {
             "render",
             format!("`{guard}` in this `{kind}` stays borrowed until its block ends, and the block writes (`{write}`): a write to the same signal panics as already borrowed"),
             line,
-            "take the value first: `let v = X.peek().map(..);` then `if let Some(id) = v { .. }` (or read with X.cloned())",
+            "take the value first: `let v = X.get_untracked();` then `if let Some(id) = v { .. }` (or read with X.get())",
         );
     }
 }
@@ -232,7 +298,7 @@ impl<'ast> Visit<'ast> for Guards {
     fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
     fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
         let m = e.method.to_string();
-        if self.0.is_none() && e.args.is_empty() && ["read", "peek", "write"].contains(&m.as_str()) {
+        if self.0.is_none() && e.args.is_empty() && ["read", "read_untracked", "peek", "write"].contains(&m.as_str()) {
             let on = e.receiver.to_token_stream().to_string().replace(' ', "");
             self.0 = Some((format!("{on}.{m}()"), e.method.span().start().line));
         }
@@ -250,7 +316,8 @@ impl<'ast> Visit<'ast> for Writes {
     fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
     fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
         let m = e.method.to_string();
-        if self.0.is_none() && ["write", "set", "with_mut", "toggle", "take", "replace"].contains(&m.as_str()) {
+        if self.0.is_none() && ["write", "set", "update", "with_mut", "toggle", "take", "replace"].contains(&m.as_str())
+        {
             self.0 = Some(format!(".{m}()"));
         }
         visit::visit_expr_method_call(self, e);
@@ -339,13 +406,13 @@ impl<'ast> Visit<'ast> for Checks<'_> {
         // A hook's first value is made once: page CSS kept in one never sees
         // an edit, and live reload looks broken (`ax dev`).
         if let Expr::Path(p) = &*e.func
-            && last_is(&p.path, "use_hook")
+            && (last_is(&p.path, "once") || last_is(&p.path, "use_hook"))
             && e.args.to_token_stream().to_string().contains("page_css")
         {
             self.push(
                 Severity::Error,
                 "render",
-                "page CSS made in `use_hook` is made once: an edit to it never shows while `ax dev` runs".into(),
+                "page CSS made in `once` is made once: an edit to it never shows while `ax dev` runs".into(),
                 p.span().start().line,
                 "style { {aio::use_css!(dark; \"assets/style.css\")} } (live from the file, built in for release), or call aio::ui::page_css(..) in the component body",
             );
@@ -467,7 +534,12 @@ impl<'ast> Visit<'ast> for Impure {
     }
 }
 
-/// `use_…()` calls under a branch, a loop or a closure.
+/// What keeps something for a view in aio::ui (beside the `use_…` hooks):
+/// matched by call order, as Dioxus's hooks are.
+const HOOKS: &[&str] =
+    &["signal", "memo", "effect", "watch", "once", "on_cleanup", "callback", "provide", "task", "resource"];
+
+/// Hook calls (`use_…()`, [`HOOKS`]) under a branch, a loop or a closure.
 #[derive(Default)]
 struct Hooks {
     depth: u32,
@@ -544,7 +616,7 @@ impl<'ast> Visit<'ast> for Hooks {
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
         if let Expr::Path(p) = &*e.func
             && let Some(name) = p.path.segments.last().map(|s| s.ident.to_string())
-            && name.starts_with("use_")
+            && (name.starts_with("use_") || HOOKS.contains(&name.as_str()))
             && (self.depth > 0 || self.exits)
         {
             self.found.push((name, p.span().start().line));
@@ -754,8 +826,10 @@ fn unkeyed(roots: &[BodyNode]) -> Found {
         _ => None,
     };
     let say = |(what, line)| {
-        let msg = format!("<{what}> in a for loop has no key: a removed or moved row hands its state to the next");
-        (line, Severity::Warn, "render", msg, "key: \"{item.id}\"")
+        let msg = format!(
+            "<{what}> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)"
+        );
+        (line, Severity::Error, "render", msg, "key: \"{item.id}\"")
     };
     missing.map(say).into_iter().collect()
 }
