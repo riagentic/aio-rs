@@ -387,12 +387,14 @@ pub(crate) struct Status {
 /// A splash helper process (Cocoa, Forms) and its files: `progress`
 /// (`<pct>\t<text>`, `-1` hides the bar, or `close`), `shown` (the ack,
 /// what was drawn), `at` (the app's window where it really is).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // GTK draws in the process there
 struct Helper {
     child: Child,
     dir: PathBuf,
     last: String,
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 enum View {
     #[cfg(target_os = "linux")]
     Gtk(crate::gtksplash::Window),
@@ -404,6 +406,7 @@ pub(crate) fn line(pct: Option<u64>, text: &str) -> String {
     format!("{}\t{}", pct.map_or(-1, |p| p.min(100) as i64), text.replace(['\r', '\n', '\t'], " "))
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn spawn(kind: Kind, o: &Open) -> std::io::Result<Helper> {
     let dir = crate::firstrun::helper_dir()?;
     let made = (|| {
@@ -414,6 +417,7 @@ fn spawn(kind: Kind, o: &Open) -> std::io::Result<Helper> {
         let pid = std::process::id().to_string();
         let [light, dark] = o.colors.clone().map(|c| c.join(" "));
         let mut cmd = match kind {
+            #[cfg(target_os = "macos")]
             Kind::Cocoa => {
                 let script = dir.join("splash.js");
                 std::fs::write(&script, [MAC_PLACE_JXA, MAC_SPLASH_JXA].concat())?;
@@ -432,7 +436,8 @@ fn spawn(kind: Kind, o: &Open) -> std::io::Result<Helper> {
                     .arg(&at);
                 cmd
             }
-            Kind::Forms | Kind::Gtk => {
+            #[cfg(windows)]
+            Kind::Forms => {
                 let script = dir.join("splash.ps1");
                 std::fs::write(&script, [PS_DPI, PS_PLACE, WINDOWS_SPLASH_PS].concat())?;
                 let mut cmd = crate::firstrun::powershell(&script);
@@ -453,6 +458,8 @@ fn spawn(kind: Kind, o: &Open) -> std::io::Result<Helper> {
                     .env("AIO_SPL_AT", &at);
                 cmd
             }
+            // Each OS's own helper only.
+            _ => return Err(std::io::Error::other("no splash helper for this kind")),
         };
         cmd.spawn()
     })();
@@ -467,6 +474,7 @@ fn spawn(kind: Kind, o: &Open) -> std::io::Result<Helper> {
 
 /// How long a helper process has to show its window (PowerShell and
 /// osascript start slowly on a loaded machine).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const HELPER_SHOWS_WITHIN: Duration = Duration::from_secs(15);
 
 impl View {
@@ -474,10 +482,13 @@ impl View {
         match kind {
             #[cfg(target_os = "linux")]
             Kind::Gtk => crate::gtksplash::open(o, status.clone()).map(View::Gtk),
+            #[cfg(any(target_os = "macos", windows))]
             _ => {
                 _ = status;
                 spawn(kind, &o).map(View::Helper).map_err(|e| format!("its helper did not start ({e})"))
             }
+            #[cfg(not(any(target_os = "macos", windows)))]
+            _ => Err("no splash helper on this OS".into()),
         }
     }
 
@@ -915,6 +926,7 @@ pub(crate) fn end(why: Close) {
 /// exists: its coordinates are then physical screen pixels. `AioScaleAt x
 /// y`: the scale (DPI / 96) of the monitor at that physical point, what the
 /// helper sizes its contents by (aio's `PS_DPI`).
+#[cfg(windows)]
 pub(crate) const PS_DPI: &str = r#"
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -951,6 +963,7 @@ function AioScalePrimary {
 /// line (aio's `PS_PLACE`): `$T` is `[x|null, y|null, width, height]` in
 /// physical pixels, or `$null` for `$p`'s centre. Returns `@(x, y)`.
 /// JavaScript's and Rust's round is `Floor(v + 0.5)` here (.NET rounds to even).
+#[cfg(windows)]
 pub(crate) const PS_PLACE: &str = r#"
 function AioAll { @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $_.WorkingArea }) }
 function AioPrimary { [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea }
@@ -1000,6 +1013,7 @@ function AioPlace($T, $W, $H, $all, $p, $real = $false) {
 /// taskbar entry; the text and the bar over its lower part (or in a strip
 /// below the image). Reads `AIO_SPL_*` (`AIO_SPL_LOOK`: [`Look`] as JSON)
 /// and the progress file; writes the ack once shown. Exit 3: dismissed.
+#[cfg(windows)]
 pub(crate) const WINDOWS_SPLASH_PS: &str = r#"
 $L = $env:AIO_SPL_LOOK | ConvertFrom-Json
 # Electron's logical pixels to this screen's physical ones.
@@ -1210,6 +1224,7 @@ if ($f.Tag -eq 'done') { exit 0 } else { exit 3 }
 /// JavaScript, over the screens in Electron's coordinates (origin at the
 /// primary's top-left). `aioPlace(T, w, h, real)` is the Cocoa origin of a
 /// w×h frame centred where the app's window opens (`real`: where it is).
+#[cfg(target_os = "macos")]
 pub(crate) const MAC_PLACE_JXA: &str = r#"
 ObjC.import('Cocoa');
 ObjC.import('stdlib');
@@ -1278,6 +1293,7 @@ function aioPlace(T, w, h, real) {
 /// ack file, the app's pid, light colours, dark colours, image, scale, font
 /// family, size (px), bold (1/0), the look ([`Look`], JSON), the move file.
 /// Same file protocol as the Windows splash; `close` fades it out.
+#[cfg(target_os = "macos")]
 pub(crate) const MAC_SPLASH_JXA: &str = r#"
 function run(argv) {
   const text = argv[1], hasText = argv[2] === '1', file = argv[3], ack = argv[4];
