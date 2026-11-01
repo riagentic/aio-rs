@@ -1733,3 +1733,97 @@ fn a_cell_that_isnt_shared_is_never_served_beside() {
     impl Mine {}
     let _ = aio::http::Http::default().cell(Handle::<Mine>::memory());
 }
+
+#[cell(shared)]
+pub struct Memo {
+    pub title: String,
+    pub n: i64,
+}
+
+#[methods]
+impl Memo {
+    #[client]
+    pub fn set_title(&mut self, t: String) -> Result {
+        self.title = t;
+        Ok(())
+    }
+
+    #[client]
+    pub fn set_n(&mut self, n: i64) -> Result {
+        self.n = n;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_change_over_a_waiting_call_is_said_and_a_merged_field_shows_both() {
+    use aio::merge::{Conflict, Merge};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let fake = tokio::spawn(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let mut w = tokio_tungstenite::accept_async(s).await.unwrap();
+        let send = |v: serde_json::Value| Message::text(v.to_string());
+        let patch = |prev: u64, path: &str, v: serde_json::Value, st: &Memo, op: Option<&serde_json::Value>| {
+            let digest = aio::patch::digest(&serde_json::to_value(st).unwrap());
+            let mut p = serde_json::json!({ "t": "patch", "prev": prev, "seq": prev + 1,
+                "ops": [{ "op": "set", "path": [path], "value": v }], "digest": digest });
+            if let Some(op) = op {
+                p["op"] = op.clone();
+            }
+            send(p)
+        };
+        next_text(&mut w).await;
+        let mut st = Memo { title: "a".into(), n: 1 };
+        w.send(send(serde_json::json!({ "t": "state", "seq": 0, "state": st }))).await.unwrap();
+        let call = next_text(&mut w).await;
+        assert_eq!(call["method"], "set_title");
+        // Someone else's title first: it meets the waiting call.
+        st.title = "theirs".into();
+        w.send(patch(0, "title", "theirs".into(), &st, None)).await.unwrap();
+        // Then the call itself lands: its own change, never a conflict.
+        st.title = "mine".into();
+        w.send(patch(1, "title", "mine".into(), &st, Some(&call["op"]))).await.unwrap();
+        w.send(send(serde_json::json!({ "t": "reply", "op": call["op"], "ok": null }))).await.unwrap();
+        // A counter both changed: shown as both changes.
+        let call = next_text(&mut w).await;
+        assert_eq!(call["method"], "set_n");
+        st.n = 3;
+        w.send(patch(2, "n", 3.into(), &st, None)).await.unwrap();
+        next_text(&mut w).await;
+    });
+    let r = Remote::<Memo>::connect(&addr, "t", "u").await.unwrap();
+    let met: std::sync::Arc<std::sync::Mutex<Vec<Conflict>>> = Default::default();
+    let m2 = met.clone();
+    r.on_conflict(move |c| m2.lock().unwrap().extend_from_slice(c));
+    r.set_title("mine".into()).unwrap();
+    until("its call answered", || r.pending() == 0).await;
+    assert_eq!(
+        *met.lock().unwrap(),
+        [Conflict { field: "title".into(), local: "mine".into(), remote: "theirs".into() }],
+        "once, for the other's change"
+    );
+    assert_eq!(r.state().title, "mine");
+    r.merge("n", Merge::Counter);
+    r.set_n(5).unwrap();
+    until("both changes shown", || r.state().n == 7).await;
+    assert_eq!((r.confirmed().n, met.lock().unwrap().len()), (3, 1), "a counter never conflicts");
+    r.set_title("bye".into()).unwrap();
+    fake.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copys_own_calls_never_conflict_with_themselves() {
+    let (h, addr) = server().await;
+    let a = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n2 = n.clone();
+    a.on_conflict(move |c| _ = n2.fetch_add(c.len(), std::sync::atomic::Ordering::SeqCst));
+    // `luck` is the server's random number, never the predicted one: its own change still.
+    for i in 0..20 {
+        a.add(format!("n{i}")).unwrap();
+    }
+    until("all confirmed", || a.pending() == 0 && a.state().notes.len() == 20).await;
+    assert_eq!(*a.state(), *h.state());
+    assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

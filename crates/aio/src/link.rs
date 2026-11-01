@@ -869,9 +869,13 @@ pub(crate) async fn session<T: Cell>(
                             }
                             Err(e) => Err(e),
                         };
-                        // Its change first, then the reply.
+                        // Its change first, then the reply; named, so its copy
+                        // knows this change is its own (no conflict with itself).
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
+                        if let Some(mut p) = view.advance(&h, &seer, limits.full_state_percent) {
+                            if msg["op"].is_string() {
+                                p["op"] = msg["op"].clone();
+                            }
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }

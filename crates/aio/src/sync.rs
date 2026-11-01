@@ -1086,6 +1086,7 @@ async fn ended(a: Arc<crate::auth::Auth>, token: String) {
 type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
 type Refusal = Arc<dyn Fn(&str, &Rejected) + Send + Sync>;
 type OnSync = Arc<dyn Fn(&Synced) + Send + Sync>;
+type OnConflict = Arc<dyn Fn(&[crate::merge::Conflict]) + Send + Sync>;
 
 /// What one catch-up did (aio's `SyncStats`): the server's whole view reached
 /// the copy, on a reconnect or after a gap.
@@ -1097,6 +1098,8 @@ pub struct Synced {
     pub elapsed: Duration,
     /// How the copy stands with it.
     pub status: crate::Status,
+    /// Server changes that met a waiting call's ([`Remote::on_conflict`]).
+    pub conflicts: usize,
 }
 
 /// How the copy stands: `pending` calls waiting, the oldest made at `oldest`
@@ -1146,13 +1149,46 @@ struct Copy<T> {
     shown: Arc<T>,
     /// Who the waiting calls are by.
     by: By,
+    /// The server's view (and state) the oldest waiting call was made on.
+    base: Option<(Value, Arc<T>)>,
+    /// Fields shown merged ([`Remote::merge`]).
+    merges: Vec<(String, crate::merge::Merge)>,
 }
 
 impl<T: Cell> Copy<T> {
+    fn new(seq: u64, view: Value, st: Arc<T>, pending: Vec<Pending>, by: By) -> Self {
+        let base = (!pending.is_empty()).then(|| (view.clone(), st.clone()));
+        let mut c = Self { seq, view, confirmed: st.clone(), pending, shown: st, by, base, merges: Vec::new() };
+        c.reshow();
+        c
+    }
+
     /// What the client shows: the confirmed copy + the calls still waiting
-    /// (one that no longer applies is skipped; the server will refuse it).
+    /// (one that no longer applies is skipped; the server will refuse it),
+    /// the fields of [`Remote::merge`] both changed shown merged.
     fn reshow(&mut self) {
-        let mut st = (*self.confirmed).clone();
+        if self.pending.is_empty() {
+            self.base = None;
+        }
+        let st = self.replayed(&self.confirmed);
+        self.shown = Arc::new(match &self.base {
+            Some((view, base)) if !self.merges.is_empty() => {
+                let local = serde_json::to_value(self.replayed(base));
+                match (local, serde_json::to_value(&st)) {
+                    (Ok(local), Ok(mut shown)) => {
+                        crate::merge::show(&self.merges, view, &local, &self.view, &mut shown);
+                        crate::copy_of::<T>(shown).unwrap_or(st)
+                    }
+                    _ => st,
+                }
+            }
+            _ => st,
+        });
+    }
+
+    /// The calls still waiting, replayed on `from`.
+    fn replayed(&self, from: &T) -> T {
+        let mut st = from.clone();
         for p in self.pending.iter().filter(|p| !p.waits) {
             let cx = Cx::replay(p.at, p.inputs.clone(), &self.by);
             let mut next = st.clone();
@@ -1162,7 +1198,17 @@ impl<T: Cell> Copy<T> {
                 st = next;
             }
         }
-        self.shown = Arc::new(st);
+        st
+    }
+
+    /// Before a server view comes: what to check it against for conflicts
+    /// (its view, what it shows), unless no call waits or `own` is one of them
+    /// (the change is its own).
+    fn before(&self, own: &Value) -> Option<(Value, Value)> {
+        if self.pending.is_empty() || self.pending.iter().any(|p| own.as_str() == Some(p.op.as_str())) {
+            return None;
+        }
+        Some((self.view.clone(), serde_json::to_value(&*self.shown).ok()?))
     }
 }
 
@@ -1212,6 +1258,7 @@ struct Inner<T: Cell> {
     refusals: Mutex<Vec<Refusal>>,
     tells: Mutex<Vec<crate::tell::Show>>,
     syncs: Mutex<Vec<OnSync>>,
+    conflicts: Mutex<Vec<OnConflict>>,
     owned: Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>,
 }
 
@@ -1437,8 +1484,7 @@ impl<T: Cell> Remote<T> {
             tx
         });
         let connected = w.is_some();
-        let mut copy = Copy { seq, view, confirmed: st.clone(), pending, shown: st, by: By::User(user.into()) };
-        copy.reshow();
+        let copy = Copy::new(seq, view, st, pending, By::User(user.into()));
         let inner = Arc::new(Inner {
             by: By::User(user.into()),
             save,
@@ -1459,6 +1505,7 @@ impl<T: Cell> Remote<T> {
             refusals: Mutex::default(),
             tells: Mutex::default(),
             syncs: Mutex::default(),
+            conflicts: Mutex::default(),
             owned: Mutex::default(),
         });
         let weak = Arc::downgrade(&inner);
@@ -1631,6 +1678,8 @@ impl<T: Cell> Remote<T> {
             Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
                 Ok(st) => {
                     let mut events = 0;
+                    let before = lock(&self.inner.copy).before(&m["op"]);
+                    let met = self.met(before, &m["state"]);
                     self.update(|c| {
                         if let Some(l) = limits_from_wire(&m["limits"]) {
                             *lock(&self.inner.limits) = Some(l);
@@ -1642,7 +1691,8 @@ impl<T: Cell> Remote<T> {
                         c.confirmed = Arc::new(st);
                     });
                     let elapsed = lock(&self.inner.asked).take().map_or(Duration::ZERO, |t| t.elapsed());
-                    let synced = Synced { events, elapsed, status: self.status() };
+                    let synced = Synced { events, elapsed, status: self.status(), conflicts: met.len() };
+                    self.conflicted(&met);
                     let fs = lock(&self.inner.syncs).clone();
                     fs.iter().for_each(|f| f(&synced));
                 }
@@ -1650,9 +1700,9 @@ impl<T: Cell> Remote<T> {
             },
             Some("patch") => {
                 let (prev, seq) = (m["prev"].as_u64().unwrap_or(0), m["seq"].as_u64().unwrap_or(0));
-                let (mine, view) = {
+                let (mine, view, before) = {
                     let c = lock(&self.inner.copy);
-                    (c.seq, c.view.clone())
+                    (c.seq, c.view.clone(), c.before(&m["op"]))
                 };
                 if seq <= mine {
                     return; // already in the copy
@@ -1663,11 +1713,15 @@ impl<T: Cell> Remote<T> {
                 let st = patched(&view, &m)
                     .and_then(|v| crate::copy_of::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
                 match st {
-                    Ok((view, st)) => self.update(|c| {
-                        c.seq = seq;
-                        c.view = view;
-                        c.confirmed = Arc::new(st);
-                    }),
+                    Ok((view, st)) => {
+                        let met = self.met(before, &view);
+                        self.update(|c| {
+                            c.seq = seq;
+                            c.view = view;
+                            c.confirmed = Arc::new(st);
+                        });
+                        self.conflicted(&met);
+                    }
                     Err(e) => {
                         eprintln!("[aio] sync {}: patch to {seq} doesn't fit ({e}): resync", T::ID);
                         self.resync();
@@ -1740,6 +1794,22 @@ impl<T: Cell> Remote<T> {
             },
             _ => eprintln!("[aio] sync {}: unknown message {m}", T::ID),
         }
+    }
+
+    /// Where the server's view `now` met the copy's waiting calls, from
+    /// what `before` held.
+    fn met(&self, before: Option<(Value, Value)>, now: &Value) -> Vec<crate::merge::Conflict> {
+        let merges = lock(&self.inner.copy).merges.clone();
+        before.map_or_else(Vec::new, |(base, local)| crate::merge::conflicts(&base, now, &local, &merges))
+    }
+
+    /// Tell [`Self::on_conflict`] of `met`, if any.
+    fn conflicted(&self, met: &[crate::merge::Conflict]) {
+        if met.is_empty() {
+            return;
+        }
+        let fs = lock(&self.inner.conflicts).clone();
+        fs.iter().for_each(|f| f(met));
     }
 
     fn send(&self, m: Value) {
@@ -1874,6 +1944,27 @@ impl<T: Cell> Remote<T> {
         lock(&self.inner.refusals).push(Arc::new(f));
     }
 
+    /// Hear where a server change met a call of this copy's still waiting,
+    /// the two different (aio's `sync.onConflict`): live, and in a
+    /// reconnect's catch-up (counted in [`Synced::conflicts`]). The copy then
+    /// shows its calls replayed on the server's state, the server keeps
+    /// what its methods make. Its own call's change is never one.
+    pub fn on_conflict(&self, f: impl Fn(&[crate::merge::Conflict]) + Send + Sync + 'static) {
+        lock(&self.inner.conflicts).push(Arc::new(f));
+    }
+
+    /// Show top-level `field` merged as `how` says while a waiting call of
+    /// this copy and the server both changed it (aio's `sync.merge`), not
+    /// the call replayed alone: what the copy shows until the server's
+    /// answer comes. The server keeps what its methods make: a method that
+    /// edits (`n += d`, a push, a patched text) keeps both there too.
+    pub fn merge(&self, field: &str, how: crate::merge::Merge) {
+        self.update(|c| {
+            c.merges.retain(|(f, _)| f != field);
+            c.merges.push((field.into(), how));
+        });
+    }
+
     /// Make the call on the copy and send it (after registering `waiter`
     /// for its reply, so a fast reply can't be missed). In a full queue, a
     /// call that applies makes room by dropping the oldest one past `retain`.
@@ -1920,6 +2011,9 @@ impl<T: Cell> Remote<T> {
                 );
             }
             let dropped = room.filter(|_| c.pending.len() >= PENDING_MAX).map(|w| (c.pending.remove(0), w));
+            if c.pending.is_empty() {
+                c.base = Some((c.view.clone(), c.confirmed.clone()));
+            }
             c.pending.push(p.clone());
             (p.op.clone(), out, p, dropped)
         };
