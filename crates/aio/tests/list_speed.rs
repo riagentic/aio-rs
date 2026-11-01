@@ -76,6 +76,19 @@ fn hold(ui: &mut TestUi, keys: usize, events: &mut tokio::sync::broadcast::Recei
     }
 }
 
+/// The events `e` heard since it was last drained (those it fell behind on too).
+fn drained(e: &mut tokio::sync::broadcast::Receiver<(u64, aio::Event)>) -> usize {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut n = 0;
+    loop {
+        match e.try_recv() {
+            Ok(_) => n += 1,
+            Err(TryRecvError::Lagged(k)) => n += k as usize,
+            Err(_) => return n,
+        }
+    }
+}
+
 /// `n` calls of `f`: the p50 and p95 of one (the store's share of a key).
 fn timed(n: usize, f: impl Fn()) -> (Duration, Duration) {
     let mut t: Vec<Duration> = (0..n)
@@ -219,9 +232,29 @@ fn a_held_key_over_a_long_list_costs_a_few_renders_and_no_write_per_step() {
     assert_eq!(ui.count("[aria-selected=true]"), 1);
     eprintln!("list speed (1000 rows, {KEYS} × ↓): blunt {before:?} → aio-rs {after:?}");
     drop(ui);
-    let (bs, fs) = (timed(300, || b.down().unwrap()), timed(300, || f.down().unwrap()));
+    // The store's share of a key: written per call, or once per window. Counted,
+    // not timed: a loaded machine slows either side at random. The held keys'
+    // run above is saved first (its last window may still be open).
+    let saved = || {
+        let last = f.store(|s| s.events()).unwrap().pop().unwrap();
+        f.store(|s| s.state_at(last.seq)).unwrap().cursor
+    };
+    let end = Instant::now() + Duration::from_secs(10);
+    while saved() != KEYS {
+        assert!(Instant::now() < end, "the held keys were never saved");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drained(&mut be);
+    drained(&mut fe);
+    let bs = timed(300, || b.down().unwrap());
+    let blunt_logged = drained(&mut be);
+    let t = Instant::now();
+    let fs = timed(300, || f.down().unwrap());
+    let (fast_logged, fast_took) = (drained(&mut fe), t.elapsed());
     eprintln!("list speed, the store's share of a key (p50, p95): blunt {bs:?} → aio-rs {fs:?}");
-    assert!(fs.1 < bs.1, "a held call writes nothing: {fs:?} vs {bs:?}");
+    assert_eq!(blunt_logged, 300, "the blunt port writes every call");
+    let windows = (fast_took.as_secs_f64() / aio::PERSIST_DEBOUNCE.as_secs_f64()).ceil() + 1.0;
+    assert!(fast_logged as f64 <= windows, "a held call writes nothing: {fast_logged} rows in {fast_took:?}");
 
     assert!(after.renders <= 4.0, "the list and the two rows the cursor left and reached: {after:?}");
     assert!(before.renders > 4.0 * after.renders, "{before:?} vs {after:?}");

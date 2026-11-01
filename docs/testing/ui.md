@@ -632,7 +632,7 @@ the process: drive its page over the DevTools protocol.
 |---|---|
 | happy-dom, no layout | a real engine: `rect`, `style`, `shot` and scrolling measure for real |
 | `ui.App.SaveButton.click()` (a proxy) | `ui.click("SaveButton")`: names are strings, checked when the test runs |
-| `am testgen` typed clients | none: `ui.names()` and `ax surface <app> --names` list the names |
+| `am testgen` typed clients | `ax testgen <app>`: a Rust name table, a renamed element a compile error ([ax](../clients/ax.md#ax-testgen)) |
 | `ui.advance(ms)`: a virtual clock under the page | none: `TestUi` time is real; schedules are tested with `TestCells::advance` |
 | `testUI(App, { user })` | `TestServer::ui_source(user, latency)`: a real signed-in copy |
 | `testPageFetch` (the page's HTTP and cookies) | `TestServer::page()`: the HTTP side, cookies kept |

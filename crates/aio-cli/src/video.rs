@@ -65,11 +65,14 @@ type Taken = (Vec<(String, Duration)>, Duration, bool, u64, f64);
 
 /// Record the app's window into `dir` until `until` passed (none: Ctrl-C)
 /// or the window went away; the `journal` of its triggers opens at frame 0.
+/// `announce`: once frame 0 is taken, `{"event":"recording","file","t0"}`
+/// on stderr (`--json`), so a driver starts acting on the video's clock.
 async fn record(
     at: &crate::cdp::Reach,
     dir: &Path,
     until: Option<Duration>,
     journal: Option<&Path>,
+    announce: Option<&Path>,
 ) -> Result<Taken, String> {
     let mut s = crate::cdp::window(at, 0).await?;
     let scale = s.eval("devicePixelRatio").await?.as_f64().unwrap_or(1.0);
@@ -81,6 +84,9 @@ async fn record(
     // Frame 0: the window as it is (a still window paints nothing new).
     let first = s.call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 85 })).await?;
     let mut frames = vec![keep(dir, 0, Duration::ZERO, &first["data"])?];
+    if let Some(file) = announce {
+        eprintln!("{}", json!({ "event": "recording", "file": file, "t0": t0 }));
+    }
     s.call("Page.startScreencast", json!({ "format": "jpeg", "quality": 85 })).await?;
     let stop = async {
         match until {
@@ -221,6 +227,7 @@ pub fn run(
     at: &crate::cdp::Reach,
     until: Option<Duration>,
     journal: Option<&Path>,
+    json_out: bool,
 ) -> Result<String, String> {
     format_of(out)?;
     let dir = std::env::temp_dir().join(format!("aio-shot-{}", std::process::id()));
@@ -239,19 +246,20 @@ pub fn run(
         // One left by a recording that was cut short is no recording.
         _ = std::fs::remove_file(j);
     }
-    if until.is_none() {
+    if until.is_none() && !json_out {
         eprintln!("ax shot: recording; Ctrl-C to stop");
     }
-    let (frames, end, lost, t0, scale) = aio::rt().block_on(record(at, &dir, until, journal))?;
-    let marked = match journal {
+    let (frames, end, lost, t0, scale) =
+        aio::rt().block_on(record(at, &dir, until, journal, json_out.then_some(out)))?;
+    let (marked, marks) = match journal {
         Some(j) => {
             let m = markers(&std::fs::read_to_string(j).unwrap_or_default(), t0, end.as_millis() as u64, scale);
             let file = PathBuf::from(format!("{}.markers.json", out.display()));
             let n = m.as_array().map_or(0, Vec::len);
             std::fs::write(&file, m.to_string()).map_err(|e| format!("{}: {e}", file.display()))?;
-            format!(", {n} markers in {}", file.display())
+            (format!(", {n} markers in {}", file.display()), Some(file))
         }
-        None => String::new(),
+        None => (String::new(), None),
     };
     let by = match ffmpeg_here() {
         true => encode(&dir, &frames, end, out).map(|_| ""),
@@ -263,6 +271,14 @@ pub fn run(
             .map(|_| ", encoded by the window: no ffmpeg on PATH")
             .map_err(|e| format!("no ffmpeg on PATH, and the window could not encode it: {e}")),
     }?;
+    if json_out {
+        let bytes = std::fs::metadata(out).map_or(0, |m| m.len());
+        return Ok(json!({
+            "file": out, "bytes": bytes, "frames": frames.len(), "seconds": end.as_secs_f64(), "t0": t0,
+            "markers": marks, "lost": lost, "ffmpeg": by.is_empty(),
+        })
+        .to_string());
+    }
     Ok(format!(
         "wrote {} ({} frames, {:.1} s{marked}{by}){}",
         out.display(),
@@ -332,7 +348,7 @@ mod tests {
                 note(&j, "SaveButton", "click", Some(json!({ "x": 10, "y": 20, "w": 30, "h": 8 })));
             })
         };
-        let said = run(&out, port, Some(Duration::from_millis(400)), Some(&journal)).unwrap();
+        let said = run(&out, port, Some(Duration::from_millis(400)), Some(&journal), false).unwrap();
         marking.join().unwrap();
         assert!(said.contains("3 frames") && said.contains("1 markers"), "{said}");
         let m: Value =

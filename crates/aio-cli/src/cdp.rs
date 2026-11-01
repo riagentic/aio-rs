@@ -173,6 +173,26 @@ pub async fn window_within(at: &Reach, n: usize, wait: Duration) -> Result<Sessi
     }
 }
 
+/// Which of the app's windows opened newest (aio's trigger with no index:
+/// the newest client): the one whose page loaded last
+/// (`performance.timeOrigin`); 0 with one window.
+pub async fn newest(at: &Reach) -> Result<usize, String> {
+    let Reach::Port(port) = at else { return Ok(0) };
+    let port = *port;
+    let list = tokio::task::spawn_blocking(move || targets(port)).await.map_err(|e| e.to_string())??;
+    let n = app_pages(&list).len();
+    let mut best = (0, f64::MIN);
+    for i in 0..n {
+        let Ok(mut s) = window(at, i).await else { continue };
+        if let Some(t) = s.eval("performance.timeOrigin").await.ok().and_then(|v| v.as_f64())
+            && t > best.1
+        {
+            best = (i, t);
+        }
+    }
+    Ok(best.0)
+}
+
 /// The app's windows (aio's `am clients`), one line each: its number (as
 /// `--window` takes it), title and page.
 pub async fn windows(at: &Reach) -> Result<String, String> {

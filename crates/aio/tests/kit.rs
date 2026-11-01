@@ -747,20 +747,19 @@ fn Preview(cam: Option<&'static str>) -> View {
 
 #[test]
 fn a_view_holds_one_camera_per_key_and_lets_go_on_a_change_and_at_unmount() {
+    // The cameras open and close off the view's thread: waited for, not timed.
     let mut ui = TestUi::new(camera_view);
-    ui.wait(Duration::from_millis(30));
-    assert_eq!(ui.text("preview"), "cam front");
+    ui.until_text("preview", "cam front");
     ui.click("back");
-    ui.wait(Duration::from_millis(30));
-    assert_eq!(ui.text("preview"), "cam back");
+    ui.until_text("preview", "cam back");
     ui.click("off");
-    ui.wait(Duration::from_millis(5));
-    assert_eq!(ui.text("preview"), "none");
+    ui.until_text("preview", "none");
+    ui.until("the back camera closed", || cameras().is_empty());
     assert_eq!(cameras().len(), 0, "nothing held without a key");
     ui.click("back");
-    ui.wait(Duration::from_millis(30));
+    ui.until_text("preview", "cam back");
     ui.click("hide");
-    ui.wait(Duration::from_millis(5));
+    ui.until("the camera closed with its view", || SAID.lock().unwrap().len() == 6);
     assert_eq!(
         *SAID.lock().unwrap(),
         ["open front", "close cam front", "open back", "close cam back", "open back", "close cam back"],
@@ -1067,43 +1066,83 @@ fn order(ui: &TestUi) -> String {
         .collect()
 }
 
-/// Is row `t`'s style saying `what`?
-fn row_says(ui: &TestUi, t: &str, what: &str) -> bool {
-    ui.count(&format!(".aio-tgroup__row[style*='{what}'] [data-t={t}]")) == 1
-}
-
 #[test]
 fn a_group_keeps_a_leaving_row_in_its_place_until_it_is_gone_and_slides_moved_rows() {
     let mut ui = TestUi::new(list);
     ui.wait(Duration::from_millis(20));
+    // Each phase lasts a while or a frame in real time: the page notes each
+    // order its rows take and every style each row takes, as they are set,
+    // so none is missed however late the test looks on a loaded machine.
+    ui.eval(
+        "(() => { const g = document.querySelector('.aio-tgroup'), w = window.__tg = { orders: [], styles: {} };
+          const key = (row) => row.querySelector('[data-t]')?.dataset.t;
+          const note = (k, s) => { const l = (w.styles[k] ||= []); if (l[l.length - 1] !== s) l.push(s); };
+          const snap = () => {
+            const rows = [...g.children].filter((r) => r.classList.contains('aio-tgroup__row'));
+            const o = rows.map(key).join('');
+            if (w.orders[w.orders.length - 1] !== o) w.orders.push(o);
+            for (const r of rows) note(key(r), r.getAttribute('style') || '');
+          };
+          new MutationObserver((ms) => {
+            for (const m of ms) if (m.type === 'attributes' && m.target.classList.contains('aio-tgroup__row')) note(key(m.target), m.oldValue || '');
+            snap();
+          }).observe(g, { subtree: true, childList: true, attributes: true, attributeFilter: ['style'], attributeOldValue: true });
+          snap();
+        })()",
+    );
     ui.click("drop-b");
-    assert_eq!(order(&ui), "abcd", "b leaves where it was; d enters at the end");
-    assert!(row_says(&ui, "b", "reverse") && row_says(&ui, "d", "normal"));
-    // Each phase lasts a while or a frame in real time: watched for as it plays.
-    let seen = |ui: &mut TestUi, what: &str, f: &dyn Fn(&TestUi) -> bool| {
-        let end = std::time::Instant::now() + Duration::from_secs(2);
-        while !f(ui) {
-            assert!(std::time::Instant::now() < end, "never seen: {what}");
-            ui.wait(Duration::from_millis(1));
-        }
+    let orders = |ui: &mut TestUi| -> Vec<String> { serde_json::from_value(ui.eval("window.__tg.orders")).unwrap() };
+    // Row `t`'s styles in the order it took them.
+    let styles = |ui: &mut TestUi, t: &str| -> Vec<String> {
+        serde_json::from_value(ui.eval(&format!("window.__tg.styles['{t}'] || []"))).unwrap()
     };
-    seen(&mut ui, "gone once its exit is over", &|ui| order(ui) == "acd");
-    seen(&mut ui, "the rows below slide up from where they were", &|ui| {
-        row_says(ui, "c", "translate(0px,20px)") && row_says(ui, "d", "translate(0px,20px)")
-    });
-    assert!(!row_says(&ui, "a", "translate"), "a stays");
-    seen(&mut ui, "played back", &|ui| row_says(ui, "c", "transform:none;transition:transform 100ms"));
-    // (Dioxus keeps a style property the new style leaves out: `transform: none` stays.)
-    seen(&mut ui, "and landed", &|ui| !row_says(ui, "c", "translate") && !row_says(ui, "c", "transition:transform"));
+    let slid = |ss: &[String]| {
+        let from = ss.iter().position(|s| s.contains("translate(0px,20px)"));
+        let back =
+            from.and_then(|i| ss[i..].iter().position(|s| s.contains("transform:none;transition:transform 100ms")));
+        // (Dioxus keeps a style property the new style leaves out: `transform: none` stays.)
+        let now = ss.last().unwrap();
+        back.is_some() && !now.contains("translate") && !now.contains("transition:transform")
+    };
+    // A hang guard, not a measure: done when it is done.
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    while !(order(&ui) == "acd" && slid(&styles(&mut ui, "c")) && slid(&styles(&mut ui, "d"))) {
+        assert!(
+            std::time::Instant::now() < end,
+            "b gone once its exit is over, and the rows below slid up from where they were, played back and landed: \
+             orders {:?}, c {:?}, d {:?}",
+            orders(&mut ui),
+            styles(&mut ui, "c"),
+            styles(&mut ui, "d")
+        );
+        ui.wait(Duration::from_millis(10));
+    }
+    assert_eq!(orders(&mut ui), ["abc", "abcd", "acd"], "b leaves where it was; d enters at the end; then b is gone");
+    assert!(styles(&mut ui, "b").iter().any(|s| s.contains("reverse")), "b plays its exit");
+    assert!(styles(&mut ui, "d").iter().any(|s| s.contains("normal")), "d plays its enter");
+    assert!(styles(&mut ui, "a").iter().all(|s| !s.contains("translate")), "a stays");
 }
 
 #[component]
 fn Deferred(trigger: Trigger, t: &'static str) -> View {
     rsx! {
-        Defer { trigger, "data-t": "{t}", placeholder: rsx! { span { "data-t": "{t}-wait", "…" } },
-            p { "data-t": "{t}-shown", "chart" }
+        Defer { trigger, "data-t": "{t}", placeholder: rsx! { Waiting { t } },
+            Drawn { t }
         }
     }
+}
+
+/// The placeholder and the content, each saying when it is drawn.
+#[component]
+fn Waiting(t: &'static str) -> View {
+    log(format!("{t} wait"));
+    rsx! { span { "data-t": "{t}-wait", "…" } }
+}
+
+#[component]
+fn Drawn(t: &'static str) -> View {
+    log(format!("{t} shown"));
+    rsx! { p { "data-t": "{t}-shown", "chart" } }
 }
 
 fn deferred() -> View {
@@ -1125,12 +1164,16 @@ fn deferred_content_waits_for_its_trigger_then_stays() {
     // aio tests/defer.test.ts.
     let mut ui = TestUi::new(deferred);
     assert!(ui.present("now-shown"));
-    for t in ["timer", "hover", "tap", "seen"] {
+    for t in ["hover", "tap", "seen"] {
         assert!(ui.present(&format!("{t}-wait")) && ui.absent(&format!("{t}-shown")), "{t}: the placeholder first");
     }
+    // The timer's may be over by now on a loaded machine: told by what was drawn.
+    ui.until("the timer's content", || LOG.with(|l| l.borrow().iter().any(|s| s == "timer shown")));
+    let mut timer: Vec<String> = said().into_iter().filter(|s| s.starts_with("timer")).collect();
+    timer.dedup();
+    assert_eq!(timer, ["timer wait", "timer shown"], "timer: the placeholder first");
     ui.wait(Duration::from_millis(30));
     assert!(ui.present("idle-shown"), "idle: after the first frame");
-    ui.wait(Duration::from_millis(300));
     assert!(ui.present("timer-shown"));
     ui.hover("hover");
     assert!(ui.present("hover-shown"));
@@ -1171,6 +1214,12 @@ fn signup_check(s: &Signup) -> Problems {
     p
 }
 
+thread_local! {
+    /// Whether the name check may answer: a test holds it to see the wait
+    /// (each test, and its views, on a thread of its own).
+    static ANSWERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 fn signup() -> View {
     let f = use_form(Signup::default, signup_check);
     use_async_rule(
@@ -1180,6 +1229,9 @@ fn signup() -> View {
         Duration::from_millis(300),
         |name: String| async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
+            while !ANSWERS.get() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
             (name == "taken").then(|| "That name is taken".to_string())
         },
     );
@@ -1259,17 +1311,22 @@ fn a_form_shows_errors_once_left_or_submitted_and_sends_only_valid_values() {
 fn a_waiting_rule_answers_the_latest_value_after_its_debounce_and_yields_to_the_fields_own() {
     // aio tests/form-async.test.ts, form-async-superseded-by-sync-error.test.ts.
     let mut ui = TestUi::new(signup);
+    ANSWERS.set(false);
     ui.type_text("name", "taken");
     ui.blur("name");
     assert!(ui.text("state").ends_with("true"), "checking");
+    ANSWERS.set(true);
     pass(&mut ui, 500);
     assert!(ui.text("name-field").contains("That name is taken"));
     ui.type_text("name", "x");
     assert!(!ui.text("name-field").contains("taken"), "an edit makes the answer stale");
     pass(&mut ui, 500);
     assert!(!ui.text("name-field").contains("taken"), "takenx is free");
+    // The answer for 'taken' held until the field is emptied: it comes late.
+    ANSWERS.set(false);
     ui.set_value("name", "taken");
     ui.set_value("name", "");
+    ANSWERS.set(true);
     pass(&mut ui, 500);
     assert!(
         ui.text("name-field").contains("Required") && !ui.text("name-field").contains("taken"),
@@ -1415,6 +1472,7 @@ fn springy() -> View {
     let mut frames = signal(|| 0);
     use_interval(Duration::from_millis(5), on.get(), move || ticks += 1);
     use_frame(on.get(), move |_, _| frames += 1);
+    log(format!("{:.2}", x.value()));
     rsx! {
         p { "data-t": "x", "{x.value():.2} {x.animating()}" }
         p { "data-t": "ticks", "{ticks}" }
@@ -1429,13 +1487,15 @@ fn springy() -> View {
 fn a_spring_moves_to_its_target_and_rests_there() {
     let mut ui = TestUi::new(springy);
     assert_eq!(ui.text("x"), "0.00 false");
+    said();
     ui.click("go");
-    let mut seen = vec![];
+    // Every value it was drawn at, however late the test looks.
+    let end = std::time::Instant::now() + Duration::from_secs(20);
     while ui.text("x") != "100.00 false" {
-        assert!(seen.len() < 500, "never at rest: {}", ui.text("x"));
-        seen.push(ui.text("x").split(' ').next().unwrap().parse::<f64>().unwrap());
+        assert!(std::time::Instant::now() < end, "never at rest: {}", ui.text("x"));
         ui.wait(Duration::from_millis(10));
     }
+    let seen: Vec<f64> = said().iter().map(|v| v.parse().unwrap()).collect();
     assert!(seen.iter().any(|&v| v > 1.0 && v < 99.0), "it moved through the way: {seen:?}");
     assert!(seen.windows(2).all(|w| w[1] >= w[0]), "toward the target only: {seen:?}");
     ui.click("jump");

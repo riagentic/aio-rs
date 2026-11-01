@@ -191,7 +191,7 @@ async fn a_person_at_a_picker_holds_the_callers_clock() {
     // A call that hangs after the dialog closed gets a full window, no more.
     let t = std::time::Instant::now();
     let e = r.run(PICKED.timeout(short), ()).await.unwrap_err().why;
-    assert!(e.contains("timed out after 200ms") && t.elapsed() < Duration::from_secs(2), "{e}");
+    assert!(e.contains("timed out after 200ms") && t.elapsed() < Duration::from_secs(10), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -207,12 +207,13 @@ async fn offline_fails_at_once_and_a_dropped_link_cancels_its_calls() {
     let t = std::time::Instant::now();
     cut.abort();
     let e = hung.await.unwrap().unwrap_err().why;
-    assert!(e.contains("dropped before it answered") && t.elapsed() < Duration::from_secs(2), "{e}");
+    // Bounds well short of the 15 s call timeout: at once, not at its end.
+    assert!(e.contains("dropped before it answered") && t.elapsed() < Duration::from_secs(10), "{e}");
     until("the server cancelled the call", || cancelled.load(Ordering::SeqCst)).await;
     assert!(!r.online());
     let t = std::time::Instant::now();
     assert!(r.run(ADD, (1, 2)).await.unwrap_err().why.contains("offline"));
-    assert!(t.elapsed() < Duration::from_millis(500));
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -694,10 +694,28 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
         aio::config::Mode::Server | aio::config::Mode::Cli => crate::fleet::Kind::Cli,
         _ => crate::fleet::Kind::Desktop,
     };
-    let plan = crate::fleet::across(
+    let mut plan = crate::fleet::across(
         crate::fleet::plan(name, &cfg.build.targets, select, fallback)?,
         &crate::platform::resolve(&names, host)?,
     );
+    // `all` (aio's --all-platforms): what this machine can't build is said
+    // with why and left out, never a failure, and never quietly.
+    let mut skipped = vec![];
+    if names.iter().any(|n| n.trim() == "all") {
+        let missing = missing_targets(&crate::platform::ALL.map(|p| p.triple));
+        let has_target = |t: &str| !missing.contains(&t);
+        plan.retain(|t| {
+            let Some(p) = t.platform else { return true };
+            let why = crate::platform::blocker(p, host, &has_target, &on_path)
+                .filter(|_| !remote_mac(name, &meta, t).is_ok_and(|m| m.is_some()));
+            let keep = why.is_none();
+            skipped.extend(why.map(|w| format!("skipped {}: {w}", t.shown())));
+            keep
+        });
+        for s in &skipped {
+            eprintln!("ax build: {s}");
+        }
+    }
     let (apps, waits): (Vec<App>, Vec<crate::smoke::Wait>) = plan
         .iter()
         .map(|t| app_of(&crate::dev::locate(&meta, &t.bin)?).map(|(a, c)| (a, crate::smoke::Wait::of(&c.app.mode))))
@@ -739,6 +757,7 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
         }
     }
     record(&meta, name, &records);
+    out.extend(skipped);
     if !failed.is_empty() {
         out.push(format!("{} of {} targets failed:\n{}", failed.len(), plan.len(), failed.join("\n")));
         return Err(out.join("\n"));
@@ -795,6 +814,15 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
 
 /// Write `dist/<id>.manifest.json` for this build of `name`, saying what
 /// the last one tells about it.
+/// The manifest `ax build <name>` wrote at `since` or later (`ax build --json`).
+pub fn manifest_of(name: &str, since: std::time::SystemTime) -> Option<serde_json::Value> {
+    let meta = crate::dev::metadata().ok()?;
+    let app = app_of(&crate::dev::locate(&meta, name).ok()?).ok()?.0;
+    let file = crate::manifest::path(&Path::new(meta["workspace_root"].as_str()?).join("dist"), &app.id);
+    std::fs::metadata(&file).and_then(|m| m.modified()).ok().filter(|t| *t >= since)?;
+    serde_json::from_slice(&std::fs::read(file).ok()?).ok()
+}
+
 fn record(meta: &serde_json::Value, name: &str, targets: &[crate::manifest::Target]) {
     let wrote = (|| -> Result<(), String> {
         let pkg = crate::dev::locate(meta, name)?;

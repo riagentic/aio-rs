@@ -65,6 +65,31 @@ version may break things.
   `assets/icon.ico` used as is for the Windows exe; a warning for a
   non-square `icon.png`, an `icon.svg` or an `icon.png` outside `assets/`.
 
+- `ax` covers aio's `am` verbs and flags ([ax](docs/clients/ax.md#coming-from-aios-am)):
+  `--json` answers objects on every verb scripts branch on (`start`,
+  `stop`, `kill`, `errors`, `health`, `shot`, `doctor`, `expect`,
+  `backup`, `build`), a failure's object whole; `--quiet`; `ax help` the
+  everyday verbs on one screen, `--commands` all; `ax timeline` (every
+  cell's events with their diffs) and `ax record` on a stopped app or
+  another store, replayed by the app's own code; `ax record` calls as each
+  event's caller and names the app's library; `ax testgen` (a typed name
+  table for UI tests); `ax persist [--drop cell]`; `ax top [secs]`;
+  `ax control` (the verbs over loopback HTTP behind a key, aio's
+  `/__aio/trojan/*`); `ax lab --boot` (aio's Docker labs: Windows and
+  macOS VMs, an XFCE desktop, the Android emulator with the APK
+  installed; `--status`, `--reset`, `--ram`, `--cpus`, `--disk`,
+  `--os-version`, `--apk`, `--port`); `errors --since 15m|reload`;
+  `surface --component`, `--depth`, `--full`; `shot --json` and a
+  video's `recording` event with its `t0`; `snapshot load --force` (another
+  cell set refused without it); `call` `key=value` words, `--body`,
+  `--wait`; `start`/`stop --no-wait`; `stop` throws a `--fresh`
+  instance's data away; `cost --window 5m`; `discover --timeout`; `peer`
+  of a profile's remote app and `--types`; `lint --from <version>`,
+  `--tests`; `build --platforms all`; `doctor` hints (an old Electron, an
+  undecided security switch) and `--harden`; `trigger` acts on the newest
+  window.
+- The local door answers `flush` and `drop`; a network caller may ask
+  `peer` of itself (its own user and role, never a claimed one).
 ### Changed
 
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
@@ -141,6 +166,16 @@ version may break things.
   window when the view sends later than 50 ms after it asked, and takes a
   falsy value (`0`, `false`): the renderer's own `recv` waited in a busy
   loop the message could never get past.
+- `aio::testing::TestBrowser` starts one browser at a time per process
+  (started together, eight took 22 s each on an 8-core Windows, one 0.5 s)
+  and reads its DevTools port only once `DevToolsActivePort` is whole.
+- `aio::testing::TestUi` counts every render (`components()`) when tests
+  run in parallel: a render callsite another thread registered at the same
+  moment could be cached as of no interest, and its renders went uncounted.
+- The test suite holds under load: timing tests wait on what they check
+  (a condition, a gate the test opens, a page-side record of each style)
+  instead of a fixed sleep or a wall-clock window; bounds on time are hang
+  guards well short of what they guard against.
 
 ## [0.1.0] - 2026-11-01
 
