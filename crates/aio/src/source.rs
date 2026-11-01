@@ -423,6 +423,14 @@ impl<T: Cell> Door<T> for Source<T> {
         }
     }
 
+    fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        match self {
+            Self::Local(h) => h.ask(method, args),
+            #[cfg(feature = "server")]
+            Self::Remote(r) => r.ask(method, args),
+        }
+    }
+
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         f(&self.state())
     }

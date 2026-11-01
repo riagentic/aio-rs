@@ -7,6 +7,7 @@ version = "1.2-beta"
 ui = "browser"
 lang = "ar"
 dir = "rtl"
+tz = "local"
 [data]
 durability = "full"
 store = "vault.db"
@@ -94,6 +95,7 @@ level = "debug"
 suppress = ["lit.tick"]
 [perf]
 method = 50
+call_ceiling = 20000
 [perf.methods]
 "lit.import" = 5000
 [perf.storm]

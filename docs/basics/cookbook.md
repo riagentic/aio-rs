@@ -531,7 +531,7 @@ assert_eq!(h.state().sent, 3);
 
 - A schedule a call sets (and so can stop): `cx.every("digest", 300_000,
   "send", ())`, `cx.cancel("digest")`. At a wall-clock time:
-  `#[cron("0 9 * * 1")]` (local time).
+  `#[cron("0 9 * * 1")]` (UTC, as aio; `[app] tz = "local"` for local time).
 - `ax schedules <app>` lists what is armed.
 - Never a thread with a sleep loop: replay and tests can't see it.
 
@@ -593,7 +593,7 @@ use aio::CellData;
 pub struct Vault {
     pub label: String,
     #[server]
-    pub api_key: String, // saved, never sent
+    pub api_key: Hidden<String>, // saved, never sent
 }
 
 #[methods]
@@ -606,7 +606,7 @@ impl Vault {
     /// Not `#[client]`: only the app's own code may set it.
     #[redact]
     pub fn set_key(&mut self, key: String) {
-        self.api_key = key;
+        *self.api_key = key;
     }
 }
 
@@ -619,12 +619,16 @@ ana.rename("billing".into()).unwrap();
 assert!(ana.set_key("mine".into()).is_err(), "not callable from the network");
 let seen = h.state().project(&Caller { by: By::User("ana".into()), role: None });
 assert!(seen.get("api_key").is_none(), "never sent");
-assert_eq!(h.state().api_key, "sk-test");
+assert_eq!(*h.state().api_key, "sk-test");
 # }
 ```
 
 - A shared field named like a credential (`api_key`, `token`,
   `password`…) without `#[server]` fails the build.
+- A `#[server]` field of a shared cell is an `aio::Hidden<T>`: it reads
+  as its value in the app; on a synced copy, which never has it, a read
+  panics naming the field (aio throws), so a method that touches it is
+  `#[client(predict = false)]`.
 - A `#[client]` method's answer goes back to the caller: never return a
   secret from one.
 

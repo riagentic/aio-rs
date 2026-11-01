@@ -58,6 +58,19 @@ impl Port {
     pub fn see(&mut self) {
         self.seen += 1;
     }
+
+    /// An async method: aio acks it on completion, with its answer.
+    #[client]
+    pub async fn double(&mut self, n: u64) -> Result<u64> {
+        let x: u64 = async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            n * 2
+        }
+        .await;
+        ensure!(x > 0, "nothing to double");
+        self.purse.coins += x;
+        Ok(x)
+    }
 }
 
 async fn server() -> (Handle<Port>, String) {
@@ -122,6 +135,17 @@ async fn until(what: &str, f: impl Fn() -> bool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("timed out: {what}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_method_is_acked_on_its_end_with_its_answer() {
+    let (h, addr) = server().await;
+    let mut w = page(&addr).await;
+    let ack = act(&mut w, "port:double", json!([4]), "c1").await;
+    assert_eq!((&ack["cid"], &ack["ok"], &ack["value"]), (&json!("c1"), &json!(true), &json!(8)));
+    assert_eq!(h.state().purse.coins, 8, "acked once its last part committed");
+    let ack = act(&mut w, "port:double", json!([0]), "c2").await;
+    assert_eq!((&ack["ok"], &ack["error"]), (&json!(false), &json!("nothing to double")), "a refusal after the await");
 }
 
 #[tokio::test(flavor = "multi_thread")]
