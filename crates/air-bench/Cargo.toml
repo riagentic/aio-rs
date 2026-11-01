@@ -1,0 +1,19 @@
+[package]
+name = "air-bench"
+description = "air spike measurements: generated 50-view apps, the held-arrow harness"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+aio = { workspace = true, features = ["kit"] }
+air = { workspace = true }
+dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"] }
+dioxus-core = "=0.7.10"
+dioxus-liveview = { version = "=0.7.10", default-features = false, features = ["multi-thread"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec"] }
