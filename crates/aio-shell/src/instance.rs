@@ -322,6 +322,12 @@ mod tests {
         let stop = || _ = STOPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         aio::rt().spawn(crate::take_launches(l, Default::default(), stop));
         exchange(&addr, QUIT.into()).unwrap();
+        // The answer goes out before the stop: wait for it, not just the answer.
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while STOPPED.load(std::sync::atomic::Ordering::SeqCst) == 0 && std::time::Instant::now() < by {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(STOPPED.load(std::sync::atomic::Ordering::SeqCst), 1, "asked once, stopped once");
     }
 
