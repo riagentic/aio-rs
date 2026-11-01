@@ -198,6 +198,14 @@ version may break things.
 
 ### Fixed
 
+- The app quitting (it stops, its socket closes) right after the page
+  vetoed a close (`window.close()` with a beforeunload handler) quits: the
+  vetoed close, still settling, took the quit's own close of that window
+  with it and the runtime stayed up; the windows left are closed again
+  until they are gone.
+- The desktop splash shows a second after its page loaded when its window
+  never paints while hidden (a loaded machine): it stayed hidden for good;
+  a splash already gone never comes back.
 - A copy (`Remote`) hears this process's diagnostic bus from before it is
   online: a problem said just as the link came up was never relayed to the
   server's bus.
