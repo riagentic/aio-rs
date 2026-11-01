@@ -174,9 +174,11 @@ key made for the run, until Ctrl-C)",
     v("config", "config <app>", "the app's aio.toml as its build bakes it in, defaults in"),
     v(
         "events",
-        "events <app> [cell] [--last N] [--diff] [--from file]",
+        "events <app> [cell] [--last N] [--diff] [--refused] [--from file]",
         "the newest events (default 20), oldest first; --diff: each with the
-changes it made (one cell); --from: of another store or backup file",
+changes it made (one cell); --from: of another store or backup file;
+--json of a running app: each with the time its method took (`ms`, this
+run's), --refused: its refused calls of late too",
     ),
     v(
         "timeline",
@@ -974,7 +976,9 @@ mod tests {
         assert!(all.lines().any(|l| l.starts_with("  ax data <app>") && l.ends_with("and what to back up")));
         let one = said("events --help");
         assert!(
-            one.starts_with("ax events <app> [cell] [--last N] [--diff] [--from file]\n\n  the newest events"),
+            one.starts_with(
+                "ax events <app> [cell] [--last N] [--diff] [--refused] [--from file]\n\n  the newest events"
+            ),
             "{one}"
         );
         assert!(one.contains("events takes --last"), "{one}");

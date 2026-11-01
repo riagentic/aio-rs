@@ -30,6 +30,7 @@ const G = require(path.join(dir, 'guest.js'))
 const SPLASH = require(path.join(dir, 'splash.json'))
 let splash = null
 let splashAt = 0
+let splashEnded = false
 function openSplash() {
   if (!SPLASH) return
   const [light, dark] = SPLASH.bg
@@ -42,12 +43,16 @@ function openSplash() {
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
   })
   splash.webContents.on('will-navigate', (e) => e.preventDefault())
-  splash.once('ready-to-show', () => {
-    if (!splash) return
+  const up = () => {
+    if (!splash || splash.isDestroyed() || splashAt || splashEnded) return
     splashAt = Date.now()
     splash.show()
     console.error(`[aio-shell] splash: up ${Math.round(process.uptime() * 1000)} ms after the runtime started`)
-  })
+  }
+  splash.once('ready-to-show', up)
+  // A hidden window may never paint on a loaded machine (no 'ready-to-show'):
+  // up a second after its page loaded, on its background colour if need be.
+  splash.webContents.once('did-finish-load', () => setTimeout(up, 1000))
   splash.loadFile(path.join(dir, 'splash.html'))
   setTimeout(() => endSplash(), SPLASH.max)
 }
@@ -55,6 +60,7 @@ function openSplash() {
 // shows it; the splash goes with it (or at its cap, then).
 function endSplash(then) {
   const go = () => {
+    splashEnded = true
     if (then) then()
     if (!splash || splash.isDestroyed()) return (splash = null)
     if (splashAt) console.error(`[aio-shell] splash: gone after ${Date.now() - splashAt} ms${then ? ', the window shown' : ' (its cap)'}`)
@@ -89,7 +95,19 @@ app.on('before-quit', () => { quitting = true })
 // to refuse; the person's own close keeps the page's beforeunload say:
 // told once (aio), or asked Leave / Stay (Window { confirm_unload }).
 let leaving = false
-const leave = () => { leaving = true; app.quit() }
+// A quit asked while a vetoed close is still settling (the page's
+// window.close(), then the app stopping) loses its own close of that
+// window, and Electron, quitting already, asks no more: closed again
+// until the windows are gone.
+const leave = () => {
+  leaving = true
+  app.quit()
+  const again = setInterval(() => {
+    const open = BrowserWindow.getAllWindows()
+    if (!open.length) return clearInterval(again)
+    for (const x of open) x.close()
+  }, 250)
+}
 let vetoSaid = false
 app.on('web-contents-created', (_e, wc) => wc.on('will-prevent-unload', (e) => {
   const act = G.unload(leaving, SHELL.confirmUnload)
