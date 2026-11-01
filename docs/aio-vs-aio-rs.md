@@ -230,7 +230,6 @@ beyond the aio-rs form.
 | Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
 | Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
 | Desktop | custom window chrome (`ui.chrome`) | the OS title bar; the window's verbs (`page::minimize`, `maximize`, `close`, `hide`, `show`) | the title bar on air | [desktop](clients/desktop.md#gaps) |
-| Desktop | the splash drawn by the OS before Electron at every start | only in a first start's download; Electron draws it otherwise | ➖ | [desktop](clients/desktop.md#gaps) |
 | Desktop | an AppImage menu entry with a private `TMPDIR` (aio's installer) | aio-rs installs no AppImage: the integrator's entry | ➖ | [desktop](clients/desktop.md#gaps) |
 | Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
 | Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |

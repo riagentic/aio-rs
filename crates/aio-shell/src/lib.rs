@@ -62,7 +62,9 @@ pub struct Window {
     pub keep_server: bool,
     /// The app's say over its splash at run time (aio's `splash.show`),
     /// asked just before it would open: a setting "no splash at start" is
-    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`.
+    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`. It may
+    /// take 50 ms; one that panics or takes longer leaves the build's
+    /// `show`, said in the log.
     pub splash_show: Option<fn() -> SplashShow>,
 }
 
@@ -93,7 +95,7 @@ mod firstpage;
 mod firstrun;
 mod fresh;
 pub mod fuses;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, not(debug_assertions))))]
 mod gtksplash;
 pub mod guest;
 #[cfg(all(test, target_os = "linux"))]
@@ -110,6 +112,12 @@ pub mod os;
 pub mod page;
 pub mod pidlock;
 pub mod place;
+// The OS's splash: a release's and the tests'; a debug build (`ax dev`) has
+// Electron draw it, so the template's debug build stays lean (dx-metrics).
+#[cfg(any(test, not(debug_assertions)))]
+mod presplash;
+#[cfg(all(debug_assertions, not(test)))]
+#[path = "presplash_off.rs"]
 mod presplash;
 pub mod prune;
 #[cfg(debug_assertions)]
@@ -354,7 +362,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
     let back = instance::APP.get().filter(|(id, v)| update::can_go_back(id, v)).map(|(id, _)| id.clone());
     // `[build.splash] show`, or the app's say at run time (aio's `splash.show`).
     let (show, by_app) =
-        splashed.map_or((aio::config::SplashShow::Never, false), |s| presplash::run_time_show(win.splash_show, s.show));
+        splashed.map_or((aio::config::SplashShow::Never, false), |s| splash::run_time_show(win.splash_show, s.show));
     let (at_start, in_download) = splash::shown(show);
     let downloading = splashed.filter(|_| in_download);
     // Drawn by the OS before Electron starts (`presplash`), when it can.
@@ -365,7 +373,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             title: win.title,
             version: instance::APP.get().map_or("", |(_, v)| v.as_str()),
             colors: &splash::look_colors(splash_colors.clone(), s),
-            target: Some(presplash::target(saved.as_ref(), win.width, win.height)),
+            target: Some(splash::target(saved.as_ref(), win.width, win.height)),
             at_start,
             by_app,
             may_download: runtime::may_download(),
@@ -472,7 +480,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         // Electron is here: its main process draws the start's splash unless
         // the OS's is up (main.js reads `splash.json`).
         let electron_draws = native.as_ref().is_none_or(|n| n.handoff());
-        let t = presplash::target(saved.as_ref(), win.width, win.height);
+        let t = splash::target(saved.as_ref(), win.width, win.height);
         let target = t.0.zip(t.1).map(|(x, y)| [x, y, t.2, t.3]);
         splash::install(&dir, splashed.filter(|_| at_start && electron_draws), win.title, &splash_colors, target)?;
         let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
@@ -780,7 +788,7 @@ fn window_event(m: &aio::serde_json::Value) {
             aio::health::ok("window")
         }
         // On screen (main.js): the OS's splash may go once it has been up its minimum.
-        "shown" => presplash::ready(presplash::rect_of(&m["normal"])),
+        "shown" => presplash::ready(splash::rect_of(&m["normal"])),
         "unresponsive" => {
             aio::report::problem("window:frozen", "the window is not responding");
             aio::health::degrade("window", "not responding");
@@ -853,7 +861,7 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
                 }
             }
             Some("bounds") => {
-                if let Some(r) = presplash::rect_of(&m["normal"]) {
+                if let Some(r) = splash::rect_of(&m["normal"]) {
                     presplash::moved(r);
                 }
                 if let Some(s) = &state

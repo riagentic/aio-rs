@@ -9,6 +9,16 @@ version may break things.
 
 ### Added
 
+- **The splash drawn by the OS before Electron starts, at every start**
+  (aio's splash): GTK 3 over FFI on Linux (opened at run time, no new
+  crate), Cocoa on macOS, Windows Forms on Windows (for a download; when
+  Electron is here its main process draws it, as aio's). A first start's
+  Electron download runs on it, with its bar and a ✕ that cancels it.
+  New `[build.splash]` keys: `position`, `follow_window`, `shadow`,
+  `window_shadow`, `cancel`, `progress`, `bar_style`, `bar_height`,
+  `bar_position`, `bar_radius`. `Window { splash_show }` may take 50 ms;
+  one that panics or takes longer leaves the build's `show`, said
+  ([desktop](docs/clients/desktop.md#the-splash)).
 - **Async methods answer their caller** (aio's `await cell.method()`): a
   typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
   await is the value its last part returned or the refusal that ended it

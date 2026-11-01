@@ -34,7 +34,7 @@ function openSplash() {
   if (!SPLASH) return
   const [light, dark] = SPLASH.bg
   splash = new BrowserWindow({
-    width: SPLASH.width, height: SPLASH.height, ...splashAt(SPLASH.width, SPLASH.height), show: false, frame: false,
+    width: SPLASH.width, height: SPLASH.height, ...splashPlace(SPLASH.width, SPLASH.height), show: false, frame: false,
     hasShadow: !!SPLASH.windowShadow,
     resizable: false, movable: false, minimizable: false, maximizable: false, fullscreenable: false,
     skipTaskbar: true, title: arg('title'),
@@ -59,7 +59,7 @@ function openSplash() {
 // Where the splash opens ([build.splash] position, presplash.rs `origin`):
 // centred on the app's window as last placed (SPLASH.target), on the
 // primary display, or on the one under the pointer; kept 64 px inside it.
-function splashAt(w, h) {
+function splashPlace(w, h) {
   const t = SPLASH.target && { x: SPLASH.target[0], y: SPLASH.target[1], width: SPLASH.target[2], height: SPLASH.target[3] }
   const d = SPLASH.mode === 'pointer' ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
     : SPLASH.mode === 'window' && t ? screen.getDisplayMatching(t) : screen.getPrimaryDisplay()

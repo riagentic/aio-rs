@@ -1,13 +1,16 @@
 //! The splash (`[build.splash]`, aio's `build.splash`): the app's image, and
 //! its text under it, from the app's start until its window has loaded.
-//! The desktop's is a frameless window that Electron's main process opens
-//! before anything else (main.js `openSplash`): the app's window shows once
-//! it has painted and the splash has been up `min`, and the splash never
-//! stays past `max`. While Electron itself is downloaded, the download
-//! window stands in for it, in the same colours (`firstrun`). The web's is
+//! The desktop's is drawn by the OS before Electron starts (`presplash`);
+//! where it cannot be (Windows with Electron here, no GTK, a debug build),
+//! a frameless window that Electron's main process opens before anything
+//! else (main.js `openSplash`): the app's window shows once it has painted
+//! and the splash has been up `min`, and the splash never stays past
+//! `max`. While Electron itself is downloaded without the OS's splash, the
+//! download window stands in for it, in the same colours (`firstrun`). The web's is
 //! laid over the page until the app has mounted ([`markup`], `web`);
 //! Android's is the starting window (`ax build --android`).
-use aio::config::{Align, Fit, Splash, TextPosition};
+use aio::config::{Align, Fit, Splash, SplashShow, TextPosition};
+use std::time::{Duration, Instant};
 
 /// The app's colours outside its page: `[light, dark]`, each `[background,
 /// text, bar, track]` (`aio::colors::identity`), the background `bg` when
@@ -212,6 +215,64 @@ pub fn install(
     std::fs::write(dir.join("splash.png"), s.png)?;
     std::fs::write(dir.join("splash.html"), page(s, title, colors))?;
     std::fs::write(dir.join("splash.json"), plan.to_string())
+}
+
+/// Where the app's window opens: its saved position (none: the primary's
+/// centre) and its size, `[x|null, y|null, width, height]`.
+pub(crate) type Target = (Option<i32>, Option<i32>, i32, i32);
+
+/// Where the app's window opens, from its saved state (`window.json`) and
+/// the size it declares now: the saved size while the declared one is
+/// unchanged and the saved one is usable, else the declared one; the saved
+/// position when there is one. Pure.
+pub(crate) fn target(saved: Option<&crate::place::Saved>, dw: u32, dh: u32) -> Target {
+    let (dw, dh) = (dw as i32, dh as i32);
+    match saved.filter(|s| s.normal.width >= crate::place::MIN_SAVED.0 && s.normal.height >= crate::place::MIN_SAVED.1)
+    {
+        Some(s) if s.declared_width as i32 == dw && s.declared_height as i32 == dh => {
+            (Some(s.normal.x), Some(s.normal.y), s.normal.width, s.normal.height)
+        }
+        Some(s) => (Some(s.normal.x), Some(s.normal.y), dw, dh),
+        None => (None, None, dw, dh),
+    }
+}
+
+/// `[build.splash] show` as aio.toml spells it.
+pub(crate) fn show_name(s: SplashShow) -> &'static str {
+    match s {
+        SplashShow::Always => "always",
+        SplashShow::FirstStart => "first-start",
+        SplashShow::Never => "never",
+    }
+}
+
+/// How long the app's run-time say (`Window { splash_show }`) may take: the
+/// splash does not wait for it.
+pub(crate) const RUN_TIME_SHOW: Duration = Duration::from_millis(50);
+
+/// The app's run-time say over its splash (aio's `withRunTimeShow`), asked
+/// just before it opens; `true`: the result is the app's. One that panics or
+/// takes over [`RUN_TIME_SHOW`]: the build's `show`, said once.
+pub(crate) fn run_time_show(ask: Option<fn() -> SplashShow>, build: SplashShow) -> (SplashShow, bool) {
+    let Some(ask) = ask else { return (build, false) };
+    let keep = |why: String| {
+        eprintln!("[aio] splash: the app's run-time show {why}; the build's show (\"{}\") is used", show_name(build));
+        (build, false)
+    };
+    let t = Instant::now();
+    match std::panic::catch_unwind(ask) {
+        Err(p) => keep(format!("panicked ({})", aio::report::panic_text(&*p))),
+        Ok(_) if t.elapsed() > RUN_TIME_SHOW => {
+            keep(format!("took {} ms (over {} ms)", t.elapsed().as_millis(), RUN_TIME_SHOW.as_millis()))
+        }
+        Ok(v) => (v, true),
+    }
+}
+
+/// `{x, y, width, height}` as `[x, y, w, h]`.
+pub(crate) fn rect_of(v: &aio::serde_json::Value) -> Option<[i32; 4]> {
+    let n = |k: &str| v[k].as_f64().map(|n| n.round() as i32);
+    Some([n("x")?, n("y")?, n("width")?, n("height")?])
 }
 
 #[cfg(test)]

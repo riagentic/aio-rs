@@ -556,7 +556,10 @@ bar = "#14f195"
 ### [build.splash]
 
 The app's image (and text) on screen from its start until its window has
-loaded, on the desktop, the web and Android (aio's `build.splash`).
+loaded, on the desktop, the web and Android (aio's `build.splash`). On the
+desktop the OS draws it before Electron starts, at every start, and a first
+start's Electron download runs on it, its bar under the text
+([desktop](../clients/desktop.md#the-splash)).
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
@@ -579,6 +582,16 @@ loaded, on the desktop, the web and Android (aio's `build.splash`).
 | `font_size`, `bold` | px (Android: points), bool | `13` (Android `14`), `false` | The text's size and weight. |
 | `text_color` | `["#light", "#dark"]` | the app's | The text's colour. |
 | `bar`, `track` | `["#light", "#dark"]` | the app's | The download bar's fill and ground, while the splash draws a first start's download. |
+| `position` | `window`, `primary`, `pointer` | `"window"` | Where it opens: centred where the app's window will open (its last place), on the primary display, or on the one under the pointer. |
+| `follow_window` | bool | `true` | With `position = "window"`: once the app's window shows, the splash moves onto where it really is. |
+| `shadow` | bool | the OS's (macOS, Linux on; Windows off) | The text's shadow. |
+| `window_shadow` | bool | the OS's (macOS on) | The window's drop shadow. |
+| `cancel` | bool | `true` | The ✕ that cancels a first start's download. |
+| `progress` | bool | `true` | The bar while a first start downloads Electron. |
+| `bar_style` | `solid`, `thin` | `"solid"` | The bar's thickness: 6 or 3 points. |
+| `bar_height` | px, 1 to 64 | `bar_style`'s | The bar's height. |
+| `bar_position` | `under-text`, `bottom-edge` | `"under-text"` | Under the text inside the margins, or along the window's bottom edge, full width. |
+| `bar_radius` | px | half its height | The bar's corner radius. |
 
 ```toml
 [build.splash]

@@ -21,7 +21,8 @@
 //! [`gtksplash`]: crate::gtksplash
 use crate::firstrun::Shown;
 use crate::place::Rect;
-use aio::config::{Align, BarPosition, BarStyle, Fit, Splash, SplashPosition, SplashShow, TextPosition};
+use crate::splash::Target;
+use aio::config::{Align, BarPosition, BarStyle, Fit, Splash, SplashPosition, TextPosition};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Child;
@@ -29,10 +30,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 // ── the look ───────────────────────────────────────────────────────────────
-
-/// Where the app's window opens: its saved position (none: the primary's
-/// centre) and its size, `[x|null, y|null, width, height]`.
-pub(crate) type Target = (Option<i32>, Option<i32>, i32, i32);
 
 /// The look as a native helper reads it (aio's `helperLook`, one JSON
 /// argument): every "not set" resolved to that OS's own default. `sized`:
@@ -115,22 +112,6 @@ pub(crate) fn look(s: &Splash, os: &str, target: Option<Target>) -> Option<Look>
         cancel: s.cancel,
         bp,
     })
-}
-
-/// Where the app's window opens, from its saved state (`window.json`) and
-/// the size it declares now: the saved size while the declared one is
-/// unchanged and the saved one is usable, else the declared one; the saved
-/// position when there is one. Pure.
-pub(crate) fn target(saved: Option<&crate::place::Saved>, dw: u32, dh: u32) -> Target {
-    let (dw, dh) = (dw as i32, dh as i32);
-    match saved.filter(|s| s.normal.width >= crate::place::MIN_SAVED.0 && s.normal.height >= crate::place::MIN_SAVED.1)
-    {
-        Some(s) if s.declared_width as i32 == dw && s.declared_height as i32 == dh => {
-            (Some(s.normal.x), Some(s.normal.y), s.normal.width, s.normal.height)
-        }
-        Some(s) => (Some(s.normal.x), Some(s.normal.y), dw, dh),
-        None => (None, None, dw, dh),
-    }
 }
 
 /// The parts of the splash below or over the image, laid out the same on
@@ -341,38 +322,6 @@ pub(crate) fn step(s: State, e: Event, min_ms: u64, cap_ms: u64) -> State {
         Event::Download(false, at) => State { downloading: false, cap_from: at, ..s },
         Event::End(c) => State { closed: Some(c), ..s },
         Event::Ready(_) | Event::Tick(_) => s,
-    }
-}
-
-/// `[build.splash] show` as aio.toml spells it.
-pub(crate) fn show_name(s: SplashShow) -> &'static str {
-    match s {
-        SplashShow::Always => "always",
-        SplashShow::FirstStart => "first-start",
-        SplashShow::Never => "never",
-    }
-}
-
-/// How long the app's run-time say (`Window { splash_show }`) may take: the
-/// splash does not wait for it.
-pub(crate) const RUN_TIME_SHOW: Duration = Duration::from_millis(50);
-
-/// The app's run-time say over its splash (aio's `withRunTimeShow`), asked
-/// just before it opens; `true`: the result is the app's. One that panics or
-/// takes over [`RUN_TIME_SHOW`]: the build's `show`, said once.
-pub(crate) fn run_time_show(ask: Option<fn() -> SplashShow>, build: SplashShow) -> (SplashShow, bool) {
-    let Some(ask) = ask else { return (build, false) };
-    let keep = |why: String| {
-        eprintln!("[aio] splash: the app's run-time show {why}; the build's show (\"{}\") is used", show_name(build));
-        (build, false)
-    };
-    let t = Instant::now();
-    match std::panic::catch_unwind(ask) {
-        Err(p) => keep(format!("panicked ({})", aio::report::panic_text(&*p))),
-        Ok(_) if t.elapsed() > RUN_TIME_SHOW => {
-            keep(format!("took {} ms (over {} ms)", t.elapsed().as_millis(), RUN_TIME_SHOW.as_millis()))
-        }
-        Ok(v) => (v, true),
     }
 }
 
@@ -913,12 +862,6 @@ impl Session {
     fn state(&self) -> State {
         self.lock().st
     }
-}
-
-/// `{x, y, width, height}` as `[x, y, w, h]`.
-pub(crate) fn rect_of(v: &aio::serde_json::Value) -> Option<[i32; 4]> {
-    let n = |k: &str| v[k].as_f64().map(|n| n.round() as i32);
-    Some([n("x")?, n("y")?, n("width")?, n("height")?])
 }
 
 /// However the start ends (an error before Electron, Electron gone), the
@@ -1524,6 +1467,7 @@ function run(argv) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aio::config::SplashShow;
 
     fn splash(w: u32, h: u32) -> Splash {
         Splash { image: "assets/splash.png".into(), png: crate::splash::tests::png(w, h), ..Default::default() }
@@ -1605,11 +1549,11 @@ mod tests {
             declared_height: 800,
             ..Default::default()
         };
-        assert_eq!(target(Some(&saved), 1180, 800), (Some(100), Some(50), 1000, 700));
-        assert_eq!(target(Some(&saved), 900, 600), (Some(100), Some(50), 900, 600));
-        assert_eq!(target(None, 900, 600), (None, None, 900, 600));
+        assert_eq!(crate::splash::target(Some(&saved), 1180, 800), (Some(100), Some(50), 1000, 700));
+        assert_eq!(crate::splash::target(Some(&saved), 900, 600), (Some(100), Some(50), 900, 600));
+        assert_eq!(crate::splash::target(None, 900, 600), (None, None, 900, 600));
         let tiny = crate::place::Saved { normal: r(1, 1, 10, 10), ..saved };
-        assert_eq!(target(Some(&tiny), 900, 600), (None, None, 900, 600), "a broken saved size is none");
+        assert_eq!(crate::splash::target(Some(&tiny), 900, 600), (None, None, 900, 600), "a broken saved size is none");
     }
 
     /// aio's `splashFrame`, `fitRect` and `roundedRows`.
@@ -1702,18 +1646,18 @@ mod tests {
         panic!("no settings")
     }
     fn slow() -> SplashShow {
-        std::thread::sleep(RUN_TIME_SHOW + Duration::from_millis(20));
+        std::thread::sleep(crate::splash::RUN_TIME_SHOW + Duration::from_millis(20));
         SplashShow::Never
     }
 
     /// aio's `withRunTimeShow`: the app's say, unless it fails or is slow.
     #[test]
     fn the_app_has_its_say_at_run_time() {
-        assert_eq!(run_time_show(None, SplashShow::Always), (SplashShow::Always, false));
-        assert_eq!(run_time_show(Some(quick), SplashShow::Always), (SplashShow::FirstStart, true));
-        assert_eq!(run_time_show(Some(panics), SplashShow::Always), (SplashShow::Always, false));
-        assert_eq!(run_time_show(Some(slow), SplashShow::FirstStart), (SplashShow::FirstStart, false));
-        assert_eq!(show_name(SplashShow::FirstStart), "first-start");
+        assert_eq!(crate::splash::run_time_show(None, SplashShow::Always), (SplashShow::Always, false));
+        assert_eq!(crate::splash::run_time_show(Some(quick), SplashShow::Always), (SplashShow::FirstStart, true));
+        assert_eq!(crate::splash::run_time_show(Some(panics), SplashShow::Always), (SplashShow::Always, false));
+        assert_eq!(crate::splash::run_time_show(Some(slow), SplashShow::FirstStart), (SplashShow::FirstStart, false));
+        assert_eq!(crate::splash::show_name(SplashShow::FirstStart), "first-start");
     }
 
     #[test]
@@ -1727,7 +1671,10 @@ mod tests {
         assert_eq!(line(Some(140), "a\tb\nc"), "100\ta b c");
         assert_eq!(line(None, "x"), "-1\tx");
         assert_eq!(start_text(Some("{title} {version}"), "Notes", "1.2.0"), "Notes 1.2.0");
-        assert_eq!(rect_of(&aio::serde_json::json!({"x": 1, "y": 2.4, "width": 3, "height": 4})), Some([1, 2, 3, 4]));
+        assert_eq!(
+            crate::splash::rect_of(&aio::serde_json::json!({"x": 1, "y": 2.4, "width": 3, "height": 4})),
+            Some([1, 2, 3, 4])
+        );
     }
 
     fn plan<'a>(s: &'a Splash, colors: &'a [[String; 4]; 2], at_start: bool) -> Plan<'a> {
