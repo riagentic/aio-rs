@@ -138,6 +138,7 @@ class Gate:
             GIT_COMMITTER_NAME="gate",
             GIT_COMMITTER_EMAIL="gate@example.org",
         )
+        home.mkdir()
         Path(env["TMPDIR"]).mkdir()
         self.env = env
         self.app = work / APP
