@@ -160,9 +160,12 @@ pub fn appimage_entry(app: &crate::build::App, file: &Path, unpack: &Path) -> Re
         _ => Err(format!("{}: a menu entry can't name this path (a quote, $, % or \\ in it)", p.display())),
     };
     let (file, unpack) = (plain(file)?, plain(unpack)?);
-    let exec = format!(
-        "Exec=sh -c 'D=\"{unpack}\"; mkdir -p \"$D\"; chmod 700 \"$D\" 2>/dev/null; TMPDIR=\"$D\" exec \"{file}\" \"$@\"' _ %U"
-    );
+    let script = format!("D=\"{unpack}\"; mkdir -p \"$D\"; chmod 700 \"$D\" 2>/dev/null; TMPDIR=\"$D\" exec \"{file}\" \"$@\"");
+    // As the Desktop Entry spec quotes an argument (`"`, `` ` ``, `$`, `\`
+    // escaped), then escapes the value's backslashes (aio's single quotes
+    // are outside the spec: desktop-file-validate refuses them).
+    let quoted: String = script.chars().flat_map(|c| ['\\'].into_iter().filter(move |_| "\"`$\\".contains(c)).chain([c])).collect();
+    let exec = format!("Exec=sh -c \"{}\" _ %U", quoted.replace('\\', "\\\\"));
     Ok(crate::build::desktop_entry(app, "\0").replace("Exec=\"\0\" %U", &exec))
 }
 
@@ -281,8 +284,7 @@ mod tests {
     fn an_appimages_menu_entry_unpacks_it_in_a_private_tmpdir_as_aios_did() {
         let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: None };
         let e = appimage_entry(&app, Path::new("/h/i/notes.AppImage"), Path::new("/h/c/notes/tmp")).unwrap();
-        let exec = "Exec=sh -c 'D=\"/h/c/notes/tmp\"; mkdir -p \"$D\"; chmod 700 \"$D\" 2>/dev/null; \
-                    TMPDIR=\"$D\" exec \"/h/i/notes.AppImage\" \"$@\"' _ %U";
+        let exec = r#"Exec=sh -c "D=\\"/h/c/notes/tmp\\"; mkdir -p \\"\\$D\\"; chmod 700 \\"\\$D\\" 2>/dev/null; TMPDIR=\\"\\$D\\" exec \\"/h/i/notes.AppImage\\" \\"\\$@\\"" _ %U"#;
         assert!(e.lines().any(|l| l == exec), "{e}");
         assert!(e.contains("StartupWMClass=notes\n") && e.starts_with("[Desktop Entry]\n"), "{e}");
         for bad in ["/h/it's", "/h/$x", "/h/50%", "/h/a\\b", "/h/\"q\""] {
@@ -311,7 +313,13 @@ mod tests {
         assert!(p.share.join("icons/hicolor/256x256/apps/notes.png").is_file());
         // The menu's Exec, run as a launcher does (%U: the files handed to it).
         let entry = std::fs::read_to_string(p.share.join("applications/notes.desktop")).unwrap();
-        let exec = entry.lines().find_map(|l| l.strip_prefix("Exec=")).unwrap().replace("%U", "'a b.txt'");
+        // Valid to the spec, where its checker is here.
+        let desktop = p.share.join("applications/notes.desktop");
+        if let Ok(o) = std::process::Command::new("desktop-file-validate").arg(&desktop).output() {
+            assert!(o.status.success() && o.stdout.is_empty(), "{}", String::from_utf8_lossy(&o.stdout));
+        }
+        // The value's escapes undone (`\\\\` is `\\`), then quoted as the spec's (and sh's) double quotes are.
+        let exec = entry.lines().find_map(|l| l.strip_prefix("Exec=")).unwrap().replace("\\\\", "\\").replace("%U", "'a b.txt'");
         let out = std::process::Command::new("sh").arg("-c").arg(&exec).env("TMPDIR", "/tmp").output().unwrap();
         let tmp = p.cache.join("notes/tmp");
         assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{}|a b.txt\n", tmp.display()));
