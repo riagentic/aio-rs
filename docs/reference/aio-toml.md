@@ -150,6 +150,7 @@ keep = 5
 file_mb = 10
 heartbeat = 3600
 suppress = []
+per_run = false
 
 [perf]
 effect = 5
@@ -165,6 +166,7 @@ high = 50
 clear = 40
 critical = 80
 growth_mb = 256
+every = "10s"
 
 [budgets]
 
@@ -601,6 +603,7 @@ together, whatever the app does ([debugging](../debugging/README.md)).
 | `file_mb` | number | `10` | A file rotates at this size, at least 1. |
 | `heartbeat` | seconds | `3600` | Seconds between `heartbeat` lines (uptime, calls, errors); 0: none. |
 | `suppress` | methods | `[]` | Methods (`"notes.tick"`) whose calls are not logged, even at `debug`: a method called many times a second. |
+| `per_run` | bool | `false` | Each run starts fresh files (aio's per-run `debug.log`): the last run's move to `app.1.log`…, so `keep` runs are kept (a run past `file_mb` still rotates). |
 
 ```toml
 [log]
@@ -646,7 +649,7 @@ when it starts and once when it ends (aio's `dispatchStorm`).
 
 When the process's memory is a problem, in percent of the machine's
 (`ax health`, `ax heap`). Checked: `clear < high <= critical <= 100`, and
-`growth_mb` at least 1.
+`growth_mb` at least 1, `every` 1 s to 10 s.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
@@ -654,6 +657,7 @@ When the process's memory is a problem, in percent of the machine's
 | `clear` | percent | `40` | …and clear again below this one. |
 | `critical` | percent | `80` | About to swap or be killed. |
 | `growth_mb` | number | `256` | Growth said once per this many MB (or a tenth of the machine). |
+| `every` | span | `"10s"` | How often memory is sampled and `health.json` written, 1 s to 10 s (aio's `memory.interval`). Each change of level reaches `aio::health::on_memory`. |
 
 ## [budgets]
 

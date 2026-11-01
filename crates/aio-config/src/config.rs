@@ -568,11 +568,14 @@ pub struct Log {
     pub heartbeat: u64,
     /// Methods (`notes.tick`) whose calls are not logged even at `debug`.
     pub suppress: Vec<String>,
+    /// Each run starts fresh files (aio's per-run `debug.log`): the last
+    /// run's move to `app.1.log` …, `keep` runs (or size steps) kept.
+    pub per_run: bool,
 }
 
 impl Default for Log {
     fn default() -> Self {
-        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![] }
+        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![], per_run: false }
     }
 }
 
@@ -1190,11 +1193,15 @@ pub struct Memory {
     pub critical: u8,
     /// Growth said once per this many MB (or a tenth of the machine).
     pub growth_mb: u64,
+    /// How often memory is sampled (and `health.json` written): 1 s to
+    /// 10 s (aio's `memory.interval`).
+    #[serde(with = "span")]
+    pub every: Duration,
 }
 
 impl Default for Memory {
     fn default() -> Self {
-        Self { high: 50, clear: 40, critical: 80, growth_mb: 256 }
+        Self { high: 50, clear: 40, critical: 80, growth_mb: 256, every: Duration::from_secs(10) }
     }
 }
 
@@ -1425,6 +1432,12 @@ impl Config {
         let m = c.memory;
         if !(m.clear < m.high && m.high <= m.critical && m.critical <= 100) || m.growth_mb == 0 {
             return Err("aio.toml: [memory] needs clear < high <= critical <= 100, and growth_mb of 1 or more".into());
+        }
+        if !(Duration::from_secs(1)..=Duration::from_secs(10)).contains(&m.every) {
+            return Err(
+                "aio.toml: [memory] every must be 1s to 10s (ax health calls a health.json older than 30 s stuck)"
+                    .into(),
+            );
         }
         c.vitals.check()?;
         if c.log.keep == 0 || c.log.file_mb == 0 {

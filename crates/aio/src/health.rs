@@ -74,7 +74,9 @@ pub fn ok(name: &str) {
     let Some(e) = parts().remove(name) else { return };
     if e.failures >= after(name) {
         let secs = (now_ms() - e.since) / 1000;
-        eprintln!("[aio] {name} recovered ({secs} s after it began failing)");
+        let line = format!("{name} recovered ({secs} s after it began failing)");
+        eprintln!("[aio] {line}");
+        crate::report::say(&format!("degraded-recovered:{name}"), &line, crate::report::Severity::Info);
     }
 }
 
@@ -638,6 +640,9 @@ pub fn start(data: &Path, limits: crate::config::Memory) {
         loop {
             let (rss, total) = memory().unwrap_or((0, 0));
             let m = sampler.sample(rss, total);
+            if m != said {
+                memory_changed(m, rss, total);
+            }
             if m != said && m != Memory::Ok {
                 let mut what = format!(
                     "{} MB resident, {}% of the machine",
@@ -662,6 +667,8 @@ pub fn start(data: &Path, limits: crate::config::Memory) {
             crate::budgets::measure_cells();
             let mut d = doc(&about, (started, now_ms()), (rss, total), m, &degraded(), &client_degraded(), &gauges());
             d["cpuMs"] = cpu_ms().into();
+            let (snap, loopback) = crate::vitals::snapshot();
+            d["vitals"] = crate::vitals::doc(&snap, loopback, &crate::vitals::get());
             let d = with_budgets(d, crate::budgets::report());
             // Under the lock: never written after `stopping` or `stop`.
             let f = FILE.lock().unwrap_or_else(|e| e.into_inner());
@@ -672,11 +679,52 @@ pub fn start(data: &Path, limits: crate::config::Memory) {
                 eprintln!("[aio] health.json not written: {e}");
             }
             drop(f);
-            std::thread::sleep(EVERY);
+            std::thread::sleep(limits.every);
         }
     });
     if let Err(e) = spawned {
         eprintln!("[aio] no health monitor: {e}");
+    }
+}
+
+/// A change of [`Memory`] level, as [`on_memory`] hears it (aio's
+/// `onMemoryPressure` report).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryReport {
+    /// What it is now (`Ok`: back under the thresholds).
+    pub level: Memory,
+    /// This process's resident memory and the machine's, in bytes.
+    pub rss: u64,
+    pub total: u64,
+    /// The largest gauge ([`gauge`]): its name and value.
+    pub biggest: Option<(String, u64)>,
+    /// The largest cells by state size, bytes.
+    pub cells: Vec<(String, u64)>,
+}
+
+type MemoryHook = std::sync::Arc<dyn Fn(&MemoryReport) + Send + Sync>;
+static MEMORY_HOOK: Mutex<Option<MemoryHook>> = Mutex::new(None);
+
+/// Hear each change of the memory level (`[memory]`, sampled every
+/// `[memory] every`), back to `Ok` included: drop a cache, shed load. The
+/// log line and the `memory:<level>` problem come as before. Guarded: a
+/// hook that panics is logged. Never call a cell from it (hand it off).
+pub fn on_memory(f: impl Fn(&MemoryReport) + Send + Sync + 'static) {
+    *MEMORY_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+}
+
+/// The level changed to `m`: the [`on_memory`] hook hears it, guarded.
+pub(crate) fn memory_changed(level: Memory, rss: u64, total: u64) {
+    let report = MemoryReport {
+        level,
+        rss,
+        total,
+        biggest: gauges().into_iter().filter_map(|g| Some((g.name, g.value?))).max_by_key(|g| g.1),
+        cells: crate::report::sizes().into_iter().take(3).map(|(c, n)| (c.to_string(), n)).collect(),
+    };
+    let hook = MEMORY_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(Err(p)) = hook.map(|h| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h(&report)))) {
+        crate::error!("the on_memory hook panicked: {}", crate::report::panic_text(p.as_ref()));
     }
 }
 
@@ -798,12 +846,9 @@ pub fn watch(rt: tokio::runtime::Handle) {
             let late = (now_ms() - last.load(Ordering::Relaxed) - 1_000).max(0) as u64;
             let t = crate::vitals::get();
             let lp = crate::vitals::probe(late, track.since, &t);
+            crate::vitals::looped(&lp);
             if let Some(step) = track.step(lp.layer.status, now_ms()) {
-                let line = crate::vitals::says(step, &lp, &t);
-                match step {
-                    crate::vitals::Status::Recovered => crate::info!(cat: "vitals", "{line}"),
-                    _ => crate::warn!(cat: "vitals", "{line}"),
-                }
+                crate::vitals::stepped("loop", step, &crate::vitals::says(step, &lp, &t));
             }
             if t.event_loop.grade(late) == crate::vitals::Status::Frozen {
                 fail("runtime", &format!("no progress for {} ms", late + 1_000));
@@ -826,6 +871,23 @@ mod tests {
     use super::*;
 
     const GB: u64 = 1 << 30;
+
+    #[test]
+    fn the_memory_hook_hears_each_change_with_a_report_and_survives_its_own_panic() {
+        let heard = std::sync::Arc::new(Mutex::new(vec![]));
+        let h = heard.clone();
+        on_memory(move |r| {
+            h.lock().unwrap().push((r.level, r.rss, r.biggest.clone()));
+            assert_ne!(r.level, Memory::Critical, "a hook bug");
+        });
+        memory_changed(Memory::High, 6 * GB, 10 * GB);
+        memory_changed(Memory::Critical, 9 * GB, 10 * GB);
+        memory_changed(Memory::Ok, GB, 10 * GB);
+        let got = heard.lock().unwrap().clone();
+        assert_eq!(got.iter().map(|g| (g.0, g.1)).collect::<Vec<_>>(), [(Memory::High, 6 * GB), (Memory::Critical, 9 * GB), (Memory::Ok, GB)]);
+        assert_eq!(got[2].2, got[0].2, "the biggest gauge, if any, by name and value");
+        *MEMORY_HOOK.lock().unwrap() = None;
+    }
 
     #[test]
     fn a_part_degrades_after_five_failures_in_a_row_and_recovers() {
@@ -966,7 +1028,7 @@ mod tests {
         assert_eq!(s.sample(6 * GB, 16 * GB), Memory::Ok);
         assert_eq!(s.sample(14 * GB, 16 * GB), Memory::Critical, "80% and over: critical, whatever else");
         // Thresholds are config: a box that may use more says so later.
-        let lax = crate::config::Memory { high: 70, clear: 60, critical: 95, growth_mb: 1024 };
+        let lax = crate::config::Memory { high: 70, clear: 60, critical: 95, growth_mb: 1024, ..Default::default() };
         let mut s = Sampler::with(lax);
         assert_eq!((s.sample(9 * GB, 16 * GB), s.sample(12 * GB, 16 * GB)), (Memory::Ok, Memory::High));
         assert_eq!(s.sample(10 * GB, 16 * GB), Memory::High, "clear only below 60%");

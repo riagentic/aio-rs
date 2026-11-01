@@ -244,8 +244,7 @@ beyond the aio-rs form.
 | Testing | `deno task lab`, `deno task test:wine` | none | by hand on a fresh machine | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `aiol` perf hints, `[fixable]` marks | `TestUi::components`, `ax components` | ➖ | [lint](testing/lint.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | an API snapshot gate, an `experimental` marker | review and the CHANGELOG | ➖ | [versions](basics/versioning.md#gaps-against-aios-policy) |
-| Debugging | correlation ids, the error box with the state | the call's name; reports carry the state | `ax events` | [errors](debugging/errors.md#not-in-aio-rs) |
-| Debugging | `onError` with an error object, many error codes | `on_problem(kind, message)`, `Rejected` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
+| Debugging | the error box with the state | reports carry the state | `ax report` | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | a source-mapped `client.log`, `am logs` budgets | `[page]` lines in `app.log`; `file_mb` × `keep` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | `skipActions`, a switch turning time travel off | every event kept | `diagnostics = false`, `[log] suppress` | [time travel](debugging/time-travel.md#not-as-in-aio) |
 | Debugging | V8 heap snapshots, the health overlay | none | `ax heap`, `ax health` | [production](debugging/production.md#not-in-aio-rs) |
@@ -484,8 +483,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Time travel | dev only, 2000 entries | the whole store, release builds too | ➕ |
 | Replay, record | `am replay`, `am record` | `ax replay`, `ax record` (writes a Rust test) | ✅ |
-| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
-| Correlation ids, error box with state | yes | ❌ (`ax events`, reports) | ❌ |
+| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `ax vitals`, `/__aio/vitals`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
+| Diagnostic bus | `onDiagnostic`, severity, fix | `report::subscribe`: `severity`, `tip`, `code()`; `vitals:<layer>`, `degraded-recovered:<part>` | ✅ |
+| Memory pressure hook | `onMemoryPressure`, `interval` | `health::on_memory`, `[memory] every` | ✅ |
+| Per-run log files | `debug.log` per run | `[log] per_run` | ✅ |
+| Correlation ids | yes | `call=<id>` on a call's lines, its timeline entry and reports | ✅ |
+| Error box with state | yes | reports carry the state | 🔄 |
 | Heap snapshots | V8 | not needed: no GC heap; `ax heap` | 🔄 |
 | Problem reports | `feedback: true` | always on, no arguments | 🔄 |
 | Manager UI | `am ui` | `ax ui` (the same tabs) | ✅ |

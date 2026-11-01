@@ -676,8 +676,8 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             .layer(axum::extract::DefaultBodyLimit::max(4096)),
         );
     }
-    // For monitoring (aio's `/__aio/metrics`, `/__aio/health`).
-    for (path, metrics) in [("/__aio/health", false), ("/__aio/metrics", true)] {
+    // For monitoring (aio's `/__aio/metrics`, `/__aio/health`, `/__aio/vitals`).
+    for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
         let (h, guessed, trust) = (watched.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
         let who = Diagnostics { auth: auth.clone(), users: users.clone(), key: token.clone(), open };
         app = app.route(
@@ -698,12 +698,18 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                             );
                         }
                         let no_store = (axum::http::header::CACHE_CONTROL, "no-store");
-                        if metrics {
-                            let text = monitored(&h, started);
-                            ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4"), no_store], text)
-                                .into_response()
-                        } else {
-                            ([no_store], crate::http::json(health_now(&h))).into_response()
+                        match path {
+                            "/__aio/metrics" => {
+                                let text = monitored(&h, started);
+                                ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4"), no_store], text)
+                                    .into_response()
+                            }
+                            "/__aio/vitals" => {
+                                let (snap, loopback) = crate::vitals::snapshot();
+                                let doc = crate::vitals::doc(&snap, loopback, &crate::vitals::get());
+                                ([no_store], crate::http::json(doc)).into_response()
+                            }
+                            _ => ([no_store], crate::http::json(health_now(&h))).into_response(),
                         }
                     }
                 },
@@ -1593,7 +1599,7 @@ impl<T: Cell> Remote<T> {
             let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
             let _sub = crate::report::subscribe(move |d| {
                 if !d.kind.starts_with("client:") {
-                    _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held }));
+                    _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held, "severity": d.severity }));
                 }
             });
             loop {

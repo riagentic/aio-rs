@@ -205,7 +205,11 @@ last, and past the start by a step (the bigger of `growth_mb` and a
 quarter of the start). Each level is said once in the log and reported
 (`memory:high`, `memory:growing`, `memory:critical`), with the biggest
 cells and gauges named; the next growth step is said again, so a leak is
-said once per step, not once per sample.
+said once per step, not once per sample. `aio::health::on_memory(|r| ..)`
+hears each change of level, back to `ok` too, with a `MemoryReport` (the
+level, resident and machine bytes, the biggest gauge and cells): aio's
+`onMemoryPressure`, to drop a cache or shed load. `[memory] every`
+(1 s to 10 s, default 10 s) is how often it samples.
 
 ```toml
 [memory]
@@ -235,6 +239,16 @@ A step up to warning or frozen is said in the log, with a hint when
 and how sure (`likely`: two probes agree; `possible`: one measured it;
 `speculative`). The way back is said as recovered. A frozen `loop` fails
 the `runtime` part, so health says degraded.
+
+Every layer feeds one snapshot, so a hint sees them all at once: the
+loop each second, the worst link's round trip at each pong (and whether
+that link is on loopback), the window's paint at each step its probe
+says (read back from the page's `[vitals] render` line, with the call
+made last and the freezes of the last 30 s). Each step is also on the
+bus as `vitals:<layer>` (`vitals:loop`, `vitals:transport`,
+`vitals:render`; a warning, the way back info: aio's `onDiagnostic`).
+`ax vitals <app>` and `GET /__aio/vitals` say every layer now and the
+likely cause, with its fix; the document is in `health.json` too.
 
 | Hint | Said when |
 |---|---|

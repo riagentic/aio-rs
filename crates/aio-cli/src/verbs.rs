@@ -412,6 +412,7 @@ bytes (--keys: all of them); --window 5m: over the newest 5 minutes
 newest start or hot patch",
     ),
     v("health", "health <app>", "healthy, or why not (exit 1: degraded, stuck or not running)"),
+    v("vitals", "vitals <app>", "each layer's grade (loop, queue, transport, render) and the likely cause"),
     v(
         "status",
         "status <app> [app…]",

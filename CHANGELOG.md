@@ -20,6 +20,22 @@ version may break things.
   the socket; a resolver slower than 3 s keeps the last verdict.
 - `--tls-cert`, `--tls-key` and `--no-tls` launch flags (aio's), over
   `[server] cert`, `key` and `tls`.
+- **Vitals on the bus, as one snapshot** (aio's `onDiagnostic`, hints):
+  each layer's step is `vitals:loop`, `vitals:transport` or
+  `vitals:render` on the bus; the loop, the worst link (and whether it is
+  on loopback) and the window's paint feed one snapshot, so the
+  transport, client-main-thread, slow-call and freeze-recover hints fire.
+  `GET /__aio/vitals` and `ax vitals <app>` say every layer and the
+  likely cause (also in `health.json`).
+- Bus diagnostics carry `severity` and `tip`, and `Diagnostic::code()`
+  types them (aio's severity, fix and error object); a degraded part
+  that works again is `degraded-recovered:<part>` (`Code::Recovered`).
+- `aio::health::on_memory(|report| ..)` (aio's `onMemoryPressure`) and
+  `[memory] every` (aio's `memory.interval`).
+- `[log] per_run`: each run starts fresh log files (aio's per-run
+  `debug.log`).
+- Correlation ids: a call's log lines end with `call=<id>`, and its
+  timeline entry (`id`) and a report it causes (`call`) carry it.
 - An exposed boot prints a `share:` line (the address at this machine's
   LAN IP and what a caller shows; the key file, never the key) and, on
   Windows and macOS, a `firewall:` line (aio's).

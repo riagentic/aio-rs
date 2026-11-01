@@ -51,12 +51,17 @@ fn log_config_sets_level_files_heartbeat_and_suppressed_calls() {
     let calls: Vec<_> = app.lines().filter(|l| l[25..].starts_with("DEBUG [aio] call ")).collect();
     assert_eq!(calls.len(), 3, "tick.tick is suppressed: {app}");
     assert!(calls[0].contains("call tick.save took=") && !calls[0].contains("refused"), "{app}");
-    assert!(calls[1].ends_with("refused=empty"), "{app}");
+    assert!(calls[1].contains("refused=empty call="), "{app}");
     assert!(!app.contains("hunter2"), "a call's arguments are never logged");
     // A dev build says what each call changed; a suppressed method, nothing.
     let diffs: Vec<_> = app.lines().filter(|l| l[25..].starts_with("DEBUG [diff] ")).collect();
     let said: Vec<_> = diffs.iter().map(|l| &l[25..]).collect();
-    assert_eq!(said, ["DEBUG [diff] tick.rename: label \"\"→\"x\""], "save changes nothing, tick is suppressed");
+    assert_eq!(said.len(), 1, "save changes nothing, tick is suppressed: {app}");
+    assert!(said[0].starts_with("DEBUG [diff] tick.rename: label \"\"→\"x\" call="), "{app}");
+    // The call's id ties its lines together (aio's correlation id).
+    let id = |l: &str| l.rsplit_once(" call=").map(|(_, n)| n.to_string()).unwrap();
+    assert_eq!(id(said[0]), id(calls[2]), "the diff is the rename call's: {app}");
+    assert_ne!(id(calls[0]), id(calls[1]), "a number per call");
     let beat = app.lines().find(|l| l[25..].starts_with("INFO  [aio] heartbeat uptime=")).expect(&app);
     assert!(beat.ends_with("calls=4 errors=1"), "{beat}");
     assert!(read("error.log").ends_with("ERROR [db] gone\n"));
