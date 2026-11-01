@@ -102,6 +102,13 @@ version may break things.
   `My Notes`, `my_notes` and `my-notes` are one colour.
 - `aio_shell::runtime::ensure_as` takes the icon of its windows.
 
+### Fixed
+
+- A page script's `await aio.recv()` (`aio::ui::eval`) no longer hangs the
+  window when the view sends later than 50 ms after it asked, and takes a
+  falsy value (`0`, `false`): the renderer's own `recv` waited in a busy
+  loop the message could never get past.
+
 ## [0.1.0] - 2026-11-01
 
 The first release of aio-rs (alpha): a Rust framework for apps whose state

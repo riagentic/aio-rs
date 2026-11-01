@@ -78,6 +78,14 @@ const QUERY_EVAL: &str = "Function(\"Eval\", `\"use strict\";${event.data};`)();
 /// is its name for apps (`aio::ui::eval`), the renderer's own stays too.
 const QUERY_PAGE: &str = "let dioxus = {";
 
+/// Where a query's script starts: its `recv` is put there in place of the
+/// renderer's, whose `while (true)` held the page until a message came,
+/// one the page could then never take in (a `recv` waiting longer than
+/// 50 ms hung the window), and which skipped a falsy one (`0`, `false`).
+const QUERY_START: &str = "let _request_id = ";
+const RECV: &str =
+    "aio.recv = () => new Promise((r) => { const t = () => _message_queue.length ? r(_message_queue.shift()) : setTimeout(t, 4); t(); }); ";
+
 /// Dioxus's DOM-edit interpreter, its queries run by [`RUN`], each with
 /// its page object also named `aio`.
 fn interpreter() -> String {
@@ -85,7 +93,9 @@ fn interpreter() -> String {
     assert!(glue.contains(QUERY_EVAL), "dioxus-liveview's query runner moved: see aio::page::QUERY_EVAL");
     glue.replace(
         QUERY_EVAL,
-        &format!("window.__aioRun(`\"use strict\";${{event.data.replace('{QUERY_PAGE}', 'let aio, dioxus = aio = {{')}};`);"),
+        &format!(
+            "window.__aioRun(`\"use strict\";${{event.data.replace('{QUERY_PAGE}', 'let aio, dioxus = aio = {{').replace('{QUERY_START}', '{RECV}{QUERY_START}')}};`);"
+        ),
     )
 }
 

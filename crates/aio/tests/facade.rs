@@ -198,6 +198,35 @@ fn a_page_script_talks_to_its_view_through_aio() {
     ui.until_text("got", "84");
 }
 
+thread_local! {
+    static LATER: RefCell<Option<tokio::sync::oneshot::Receiver<i64>>> = const { RefCell::new(None) };
+}
+
+fn waits() -> View {
+    let got = signal(|| 0i64);
+    task(move || async move {
+        let mut e = eval("const v = await aio.recv(); const w = await aio.recv(); aio.send(v * 2 + w);");
+        let v = LATER.with_borrow_mut(Option::take).expect("the test's gate").await.unwrap_or(0);
+        _ = e.send(v);
+        _ = e.send(0);
+        if let Ok(v) = e.recv::<i64>().await {
+            got.set(v);
+        }
+    });
+    rsx! { p { "data-t": "got", "{got}" } }
+}
+
+#[test]
+fn a_page_script_waits_for_a_value_sent_late_and_takes_a_falsy_one() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    LATER.set(Some(rx));
+    let mut ui = TestUi::new(waits);
+    // Longer than the renderer's own `recv` looked before it held the page.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    tx.send(21).unwrap();
+    ui.until_text("got", "42");
+}
+
 static KEPT: Global<Option<Signal<u32>>> = Global::new(|| None);
 
 #[component]
