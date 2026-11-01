@@ -2,11 +2,9 @@
 //! tokens (`kit::theme`) and what is drawn outside the page, the splash and
 //! the first-run download window ([`identity`]). Pure.
 
-/// The app's hue from its id (aio's `appHue`: FNV-1a over its UTF-16 units).
-pub fn hue(id: &str) -> u16 {
-    let h = id.encode_utf16().fold(0x811c_9dc5_u32, |h, c| (h ^ u32::from(c)).wrapping_mul(0x0100_0193));
-    (h % 360) as u16
-}
+/// The app's hue from its id (aio's `appHue`: FNV-1a over the slug it
+/// makes); an app's own is `Config::hue` (`[ui] hue` first).
+pub use aio_config::icon::hue;
 
 pub(crate) type Hsl = (f64, f64, f64);
 

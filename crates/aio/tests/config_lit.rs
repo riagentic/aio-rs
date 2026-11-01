@@ -15,6 +15,9 @@ fn the_built_literal_is_the_parsed_config() {
     let splash = made.build.splash.as_mut().unwrap();
     assert_eq!(splash.png, include_bytes!("fixtures/splash.png"), "the splash's image is built in");
     splash.png = &[];
+    // No assets/icon.png beside it: the monogram, built in for the window.
+    assert_eq!(aio::icon::png_size(made.app.icon), Some((256, 256)), "the window's icon is built in");
+    made.app.icon = &[];
     assert_eq!(made, c, "aio::config!() builds the same config in, no Result");
     let bad = |toml: &str| Config::parse(&format!("[app]\nid = \"lit\"\n[build.splash]\n{toml}")).unwrap_err();
     assert!(bad("image = \"../s.png\"").contains("in the app's folder"));

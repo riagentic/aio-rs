@@ -15,7 +15,7 @@ name = "aio_config_macro"
 proc-macro = true
 
 [dependencies]
-aio-config = { workspace = true, features = ["toml"] }
+aio-config = { workspace = true, features = ["toml", "png"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
