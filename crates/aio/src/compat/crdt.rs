@@ -34,7 +34,8 @@
 //! - aio refuses at boot a sync cell with a view filter, since an op goes to
 //!   every peer as is. Here an op goes only to a link that sees its whole
 //!   cell; one that sees less follows by its state frames and snapshots.
-use super::wire::{cells, method_of};
+use super::data::method_of;
+use super::wire::cells;
 use crate::link::View;
 use crate::{Cell, Handle};
 use serde_json::{Value, json};

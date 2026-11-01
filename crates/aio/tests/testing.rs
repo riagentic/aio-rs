@@ -254,7 +254,8 @@ fn saved_data_boots_as_the_app_boots_it() {
 
     let refused = |t: &mut TestCells, v, data| t.saved::<Job>(v, data).err().unwrap().0;
     assert!(refused(&mut t, 1, json!({})).contains("migrate from v1 failed: no name"));
-    assert!(refused(&mut t, 3, json!({})).contains("data from a newer build (v3 > v2)"));
+    assert_eq!(t.saved::<Job>(3, json!({"title": "y", "later": 1})).unwrap().state().title, "y", "a rollback boots");
+    assert!(refused(&mut t, 3, json!({"title": 5})).contains("data from a newer build (v3 > v2) doesn't fit"));
     let undeclared = refused(&mut t, 2, json!({"title": "x", "owner": "ann"}));
     assert!(undeclared.contains("fields this build doesn't declare (owner)"), "{undeclared}");
 }

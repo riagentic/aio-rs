@@ -38,10 +38,14 @@ talk to each other, so an app can move one piece at a time.
 - **What it reads.** aio's snapshot in `aio_kv`, in either layout (`single`:
   one `state` row; `multi`: a row per cell), each cell at its
   `<appId>:__versions` stamp. An older stamp migrates (after a backup); a
-  newer one refuses the boot and keeps the file.
+  newer one (a rollback) boots on what this build declares, keeps the
+  rest in every write and parks a copy under `__downgraded:<cell>`, as aio
+  does; one that doesn't fit refuses the boot and keeps the file. Rolled
+  forward again, it boots and drops the older build's own fields, as aio
+  does.
 - **What it writes.** On every commit, in the same transaction as its own
   log: the cell's row in aio's layout with `JSON.stringify` semantics,
-  without `#[transient]` fields, keeping unknown cells and `__*` keys, and
+  without `#[transient]` fields and `persist(exclude)` paths, keeping unknown cells and `__*` keys, and
   stamping `__schema`, `__persistKey` and `__versions`. Its own history
   goes in tables of its own (`log`, `snap`, `floor`, `sched`, `ops`),
   which aio ignores.
@@ -58,9 +62,13 @@ talk to each other, so an app can move one piece at a time.
   so aio and the port never run on the same data at once: the second one
   to start finds the home held. aio-rs keeps `meta.json`'s `appId` and
   `profile`.
+- **aio's journal.** Calls a crash left in aio's journal past its save are
+  replayed at the port's boot, as aio's next boot would, and the
+  watermark moved with them; a tail aio-rs can't replay (time-travel or
+  write-set lines, calls of cells of another store) refuses the boot:
+  start the aio app once.
 - **Not ported:** aio's `profiles: false` and the `__shapes` stamps of
-  aio's dev-mode shape check. An aio journal not yet folded into the
-  snapshot is replayed by aio only: start the aio app once.
+  aio's dev-mode shape check.
 
 ### The wire
 
@@ -182,18 +190,12 @@ beyond the aio-rs form.
 |---|---|---|---|---|
 | State | `beforeReduce`/`onAction` on every call, `am where` | no module-graph answer of where code runs | the compiler and `cfg(target_arch = "wasm32")` | [architecture](basics/architecture.md#gaps-against-aio) |
 | Methods | `transaction: true`, `$commit`, `$live`, transactions across cells | none: each part of an async method is atomic | take what you need before the await | [methods](state/methods.md#differences-from-aio) |
-| Methods | `cellDefaults`, `persist: false` app-wide | none: flags per cell | `#[cell(persist)]` where wanted | [persistence](persistence/README.md#limits-compared-with-aio) |
+| Methods | `cellDefaults` (`visible`, `ui` for every cell) | none: flags per cell | `#[cell(...)]` on each | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Effects | `t.getEffects()`, effect objects in tests (`isScheduleEffect`) | `t.held_effects()`: key, mode, timeout; schedules apart | `Store::schedules` | [effects](state/effects.md#limits) |
 | Effects | notifications in a browser page (`requestNotificationPermission`) | none in a web build | `aio::tell::show_with(f)` | [effects](state/effects.md#limits) |
-| Persistence | `persist: { include, exclude }` path lists | none | `#[transient]`, `save = f` | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Persistence | `persistMode: "single" \| "multi"` | log + snapshots per cell; aio's layout read and written as found | ➖ | [persistence](persistence/README.md#limits-compared-with-aio) |
-| Persistence | state export and import over HTTP | none | `ax snapshot save`, `ax snapshot load` | [persistence](persistence/README.md#limits-compared-with-aio) |
-| Persistence | timed backups, a WAL-checkpoint setting | none | the OS's scheduler | [files](persistence/files.md#limits-compared-with-aio) |
 | Persistence | `launch.json`, a restart with the last flags | none | pass the flags again | [files](persistence/files.md#limits-compared-with-aio) |
-| Persistence | typed schema builder (`ColumnOpts`) | `columns = "…"` in SQL, no query builder | plain SQL | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Persistence | a size guard (warn 1 MB, error 16 MB) | only against `[budgets] state` | declare `[budgets] state` | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Persistence | `bool`, lists, nested values in table rows | flat rows | numbers or strings | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Persistence | — | blob reads by range or file, no async stream | `read`, `path` | [SQL](persistence/sql.md#limits-compared-with-aio) |
+| Persistence | a query builder (`where` objects) | plain SQL | `aio::db::Db` | [SQL](persistence/sql.md#limits-compared-with-aio) |
 | Sync | merge strategies per field (`lww`, `counter`, `set-add`, `text`…), HLC | methods replayed in order on the server | methods; `aio::merge::text3` for prose | [offline](persistence/offline.md#limits-compared-with-aio) |
 | Sync | peer-to-peer, server-less sync | a copy needs a server | a server | [offline](persistence/offline.md#limits-compared-with-aio) |
 | Sync | Immer add/remove ops for arrays | a `Vec` re-sent whole when its length changes | a map for a growing collection | [offline](persistence/offline.md#limits-compared-with-aio) |
@@ -309,8 +311,6 @@ construct-by-construct tables are in the
 - **Writes are committed before a call returns**; only `#[coalesce]`
   methods are held (aio debounces every write). Coalesce the methods a
   held key or a pointer calls. [data](migration/data.md#durability-what-each-saves-when)
-- **`#[transient]` instead of `persist: { exclude }`** path lists.
-  [persistence](persistence/README.md#limits-compared-with-aio)
 - **`aio.toml` is built in**, never read at run time: rebuild after an
   edit; per-launch settings are flags or variables. [FAQ](basics/faq.md)
 - **Forms touch a field on change**, not on blur: a field left untouched
@@ -385,20 +385,22 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | SQLite store | `state.db` | the same file | ✅ |
 | Event log, history | journal (opt-in) | every commit an event | ➕ |
-| Write debounce | every write, 100 ms | `#[coalesce]` methods only | 🔄 |
-| Excluded fields | `persist: { include, exclude }` | `#[transient]`, `save = f` | 🔄 |
+| Write debounce | every write, `persistDebounceMs` | `#[coalesce]` methods only, `[data] coalesce_ms` | 🔄 |
+| Excluded fields | `persist: { include, exclude }` | `#[cell(persist(include, exclude))]`, `#[transient]`, `save = f` | ✅ |
 | Store layout | `single` / `multi` | log + snapshots; aio's layout kept | 🔄 |
-| App-wide `persist: false`, `cellDefaults` | yes | ❌ (per cell) | ❌ |
+| App-wide `persist: false`, `--no-persist` | yes | `[data] persist = false`, `--no-persist` | ✅ |
+| Data from a newer build (rollback) | boots, parks `__downgraded:<cell>` | the same; refused only when it doesn't fit | ✅ |
+| aio's journal tail after a crash | replayed | replayed by the port | ✅ |
 | Migrations | `version`, `onMigrate` | `#[cell(version, migrate)]` | ✅ |
 | Integrity check | `checkIntegrityOnBoot` | every boot, with recovery | ✅ |
 | Backups, restore | `am backup`, `am restore` | `ax backup`, `ax restore` | ✅ |
-| Timed backups | yes | ❌ (the OS's scheduler) | ❌ |
-| State export over HTTP | snapshot endpoints | ❌ (`ax snapshot save`/`load`) | ❌ |
-| Bound tables | `db:` tables | `#[table]` (flat rows) | 🔄 |
-| Schema builder | column helpers | ❌ (`columns = "…"` SQL) | ❌ |
-| Raw SQL, live queries | `createDB`, `reactiveDB` | `aio::db::Db`, live queries | ✅ |
-| Blobs | `app.blobs` | `aio::blobs::Blobs` | ✅ |
-| Size guard | 1 MB warn, 16 MB error | ❌ (`[budgets] state`) | ❌ |
+| Timed backups | a recipe | `[data] backup_every`, `backup_keep` | ➕ |
+| State export over HTTP | `/__aio/snapshot` (dev) | `/__aio/snapshot` (dev), `Handle::export_snapshot`, `load_snapshot` | ✅ |
+| Bound tables | `db:` tables (flat rows) | `#[table]`; bools, lists, nested values in `BOOLEAN`/`JSON` columns | ➕ |
+| Schema builder | column helpers | `aio::columns` (`pk`, `text`, `refs`, …) | ✅ |
+| Raw SQL, live queries | `createDB`, `reactiveDB` | `aio::db::Db`, live queries woken by any `Db` of the file | ✅ |
+| Blobs | `app.blobs`, `stream` | `aio::blobs::Blobs`, `stream` | ✅ |
+| Size guard | 1 MB warn, 16 MB error | the same, unless `[budgets] state` | ✅ |
 | Homes, profiles, instances | `--home`, `--profile`, `--instance` | the same rules | ✅ |
 
 **Sync and offline**

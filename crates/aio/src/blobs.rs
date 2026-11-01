@@ -178,15 +178,31 @@ impl Blobs {
     /// Blob `id`'s bytes `start..end` (end exclusive, clamped to its size).
     /// A blob that isn't here is an error naming it.
     pub fn read(&self, id: &str, start: u64, end: u64) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.stream(id, Some(start..end.max(start)))?.read_to_end(&mut out)?;
+        Ok(out)
+    }
+
+    /// Blob `id`'s bytes as they are read, never held whole (aio's
+    /// `blobs.stream(id, {start, end})`): all of them, or `range` (end
+    /// exclusive, clamped to its size). A range that ends before it starts,
+    /// or a blob that isn't here, is an error naming it. It is a blocking
+    /// reader: async code reads it in `tokio::task::spawn_blocking`.
+    pub fn stream(&self, id: &str, range: Option<std::ops::Range<u64>>) -> io::Result<io::Take<std::fs::File>> {
         use std::io::Seek;
+        let range = range.unwrap_or(0..u64::MAX);
+        if range.end < range.start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("blobs: the range {}..{} of blob {id} ends before it starts", range.start, range.end),
+            ));
+        }
         let p = self.path(id)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("blobs: no blob {id} in {}", self.dir.display()))
         })?;
         let mut f = std::fs::File::open(p)?;
-        f.seek(io::SeekFrom::Start(start))?;
-        let mut out = Vec::new();
-        f.take(end.saturating_sub(start)).read_to_end(&mut out)?;
-        Ok(out)
+        f.seek(io::SeekFrom::Start(range.start))?;
+        Ok(f.take(range.end - range.start))
     }
 
     /// Remove blob `id` and its name: `false` when it wasn't here. Every put
@@ -260,6 +276,17 @@ mod tests {
         assert_eq!(s.read(&b.id, 4, 9).unwrap(), b"quick", "end exclusive");
         assert_eq!(s.read(&b.id, 40, 99).unwrap(), b"dog", "past the end: clamped");
         assert_eq!(s.read(&b.id, 50, 60).unwrap(), b"");
+        // Streamed: read as it goes, whole or a range, a backwards range refused.
+        let streamed = |r| {
+            let mut out = vec![];
+            s.stream(&b.id, r).unwrap().read_to_end(&mut out).unwrap();
+            out
+        };
+        assert_eq!(streamed(None), fox);
+        assert_eq!(streamed(Some(4..9)), b"quick");
+        assert_eq!(streamed(Some(40..99)), b"dog");
+        assert!(s.stream(&b.id, Some(std::ops::Range { start: 9, end: 4 })).unwrap_err().to_string().contains("ends before it starts"));
+        assert!(s.stream(&"0".repeat(64), None).unwrap_err().to_string().contains("no blob"));
         // Same bytes: same id, one file, the first name kept.
         let again = s.put(&fox[..], Some("other.txt")).unwrap();
         assert_eq!(again, b);

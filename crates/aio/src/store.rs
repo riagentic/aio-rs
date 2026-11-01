@@ -176,6 +176,16 @@ pub struct Store<T: Cell> {
     saved: Option<Value>,
     /// `[history] keep` in ms: events older are folded (`keep_history`).
     keep: Option<i64>,
+    /// How long a run of `#[coalesce]` calls is held (`[data] coalesce_ms`).
+    coalesce: std::time::Duration,
+    /// aio's journal watermark the next commit writes (an aio journal's
+    /// entry replayed at boot), in the transaction with what it did.
+    journal_wm: Option<i64>,
+    /// Booted on a newer build's data (a rollback): its version and its saved
+    /// state, whose fields this build doesn't declare every snapshot keeps,
+    /// stamped with that version (never lowered: rolling forward again
+    /// migrates nothing twice).
+    ahead: Option<(u32, Value)>,
 }
 
 /// A run of coalesced calls by one caller: each call (the last one is the
@@ -532,7 +542,8 @@ fn declare<'a>(
             return Err(Error(format!("{cell}.{field}: table {table} is aio-rs's own; bind the field to another")));
         }
         if let Some(cols) = cols {
-            crate::compat::data::declare(db, table, cols).map_err(|e| Error(format!("{cell}.{field}: {e}")))?;
+            let cols = cols.sql().map_err(|e| Error(format!("{cell}.{field}: table {table}: {e}")))?;
+            crate::compat::data::declare(db, table, &cols).map_err(|e| Error(format!("{cell}.{field}: {e}")))?;
         }
     }
     Ok(())
@@ -610,12 +621,39 @@ fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str]) 
     Ok(gone)
 }
 
+/// The journal beside aio's file at `path` past its watermark, as cell `T`
+/// replays it ([`crate::compat::data::journal_tail`]).
+fn journal_tail<T: Cell>(
+    db: &Connection,
+    kv: &crate::compat::data::Kv,
+    path: &Path,
+) -> Result<Vec<crate::compat::data::Journaled>, Error> {
+    let data = crate::paths::parent(path);
+    let wm = kv.journal_wm(db).map_err(Error)?;
+    crate::compat::data::journal_tail::<T>(data, wm).map_err(|e| {
+        Error(format!(
+            "{}: {e}: start the aio app once and stop it (it folds its journal into the snapshot), then open it here",
+            data.display()
+        ))
+    })
+}
+
 /// Saved state of version `v` as this version of the cell.
 fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
+    let mut old: Value = serde_json::from_str(text).map_err(|e| Error(format!("{}: corrupt snapshot: {e}", T::ID)))?;
+    // Written by an older build that booted on this data ([`DOWNGRADED`]).
+    let downgraded = old.as_object_mut().and_then(|m| m.remove(DOWNGRADED));
+    // A newer build's data (a rollback): what this build declares, read as it
+    // is; the rest is kept by every write (`Store::ahead`, aio's downgrade).
     if v > T::VERSION {
-        return Err(Error(format!("{}: data from a newer build (v{v} > v{})", T::ID, T::VERSION)));
+        return serde_json::from_value(old).map_err(|e| {
+            Error(format!(
+                "{}: data from a newer build (v{v} > v{}) doesn't fit this build: {e}; run the newer build, or give this one a version past v{v} with a `migrate` that converts it down",
+                T::ID,
+                T::VERSION
+            ))
+        });
     }
-    let old: Value = serde_json::from_str(text).map_err(|e| Error(format!("{}: corrupt snapshot: {e}", T::ID)))?;
     if v == T::VERSION {
         let st: T = serde_json::from_value(old.clone())
             .map_err(|e| Error(format!("{}: snapshot doesn't fit v{v}: {e}", T::ID)))?;
@@ -623,6 +661,16 @@ fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
         // snapshot. Never silently: refuse, and say what and how to fix it.
         let now = serde_json::to_value(&st).map_err(|e| Error(format!("{}: unserializable state: {e}", T::ID)))?;
         let lost = undeclared(&old, &now);
+        // Back from a rollback (aio's roll-forward): the older build's own
+        // fields go, as aio's restore merge drops them, said; the rest is ours.
+        if !lost.is_empty() && downgraded.is_some() {
+            eprintln!(
+                "[aio] {}: an older build ran on this data and wrote fields this build doesn't declare ({}); they are dropped, as aio drops them",
+                T::ID,
+                lost.join(", ")
+            );
+            return Ok(st);
+        }
         if !lost.is_empty() {
             return Err(Error(format!(
                 "{}: the saved data has fields this build doesn't declare ({}); declare them again, or bump the cell's version with a `migrate` that drops them on purpose",
@@ -634,6 +682,11 @@ fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
     }
     T::migrate(old, v).map_err(|e| Error(format!("{}: migrate from v{v} failed: {e}", T::ID)))
 }
+
+/// The key a snapshot written by an older build booted on newer data
+/// carries (that build's version): the newer build then drops the older
+/// one's fields it doesn't declare instead of refusing them, as aio does.
+pub(crate) const DOWNGRADED: &str = "__downgraded";
 
 /// The file's data (saved by version `v`) as this cell: its aio slice
 /// (`whole`), or only some fields (`#[aio_cell]` slices, bound tables' rows) over
@@ -698,34 +751,47 @@ pub fn shape_of(v: &Value) -> Value {
 fn shaped<T: Cell>(st: &T) -> Result<Option<Value>, Error> {
     let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| st.save()))
         .map_err(|_| Error(format!("{}: its `save` panicked; nothing was saved", T::ID)))?;
-    if saved.is_none() && transients::<T>().next().is_none() {
+    if saved.is_none() && filters::<T>().next().is_none() {
         return Ok(None);
     }
     let mut v = json(saved.as_ref().unwrap_or(st))?;
-    for (at, k) in transients::<T>() {
-        holder(&mut v, at).map(|m| m.remove(k));
-    }
+    unsaved_out::<T>(&mut v);
     Ok(Some(v))
 }
 
-/// Its `#[transient]` fields: the cell's own (`None`) and its `#[aio_cell]`
-/// slices' (`Some(field)`).
-fn transients<T: Cell>() -> impl Iterator<Item = (Option<&'static str>, &'static str)> {
-    let own = T::TRANSIENT.iter().map(|k| (None, *k));
-    own.chain(T::AIO_CELLS.iter().flat_map(|s| s.transient.iter().map(|k| (Some(s.field), *k))))
+/// What it doesn't save (`#[transient]`, `persist(include, exclude)`): the
+/// cell's own (`None`) and its `#[aio_cell]` slices' (`Some(field)`).
+fn filters<T: Cell>() -> impl Iterator<Item = (Option<&'static str>, crate::filter::Filter)> {
+    let own = crate::filter::Filter { include: T::PERSIST_INCLUDE, exclude: T::TRANSIENT };
+    let slices = T::AIO_CELLS.iter().map(|s| (Some(s.field), crate::filter::Filter { include: s.include, exclude: s.transient }));
+    std::iter::once((None, own)).chain(slices).filter(|(_, f)| !f.is_all())
 }
 
-/// The object holding a `transients` field in the state `v`.
-fn holder<'a>(v: &'a mut Value, at: Option<&str>) -> Option<&'a mut serde_json::Map<String, Value>> {
+/// The part of the state `v` a filter's `at` names.
+fn part<'a>(v: &'a mut Value, at: Option<&str>) -> Option<&'a mut Value> {
     match at {
-        None => v.as_object_mut(),
-        Some(f) => v.get_mut(f)?.as_object_mut(),
+        None => Some(v),
+        Some(f) => v.get_mut(f),
     }
 }
 
-/// A `transients` field's value in the state `v`.
-fn transient<'a>(v: &'a Value, at: Option<&str>, k: &str) -> Option<&'a Value> {
-    at.map_or(Some(v), |f| v.get(f))?.get(k)
+/// `v` without what it doesn't save.
+fn unsaved_out<T: Cell>(v: &mut Value) {
+    for (at, f) in filters::<T>() {
+        if let Some(p) = part(v, at) {
+            crate::filter::strip(p, f);
+        }
+    }
+}
+
+/// `v` (saved) with what it doesn't save taken from `was` (a state).
+fn unsaved_from<T: Cell>(v: &mut Value, was: &Value) {
+    for (at, f) in filters::<T>() {
+        let from = at.map_or(Some(was), |a| was.get(a));
+        if let (Some(p), Some(from)) = (part(v, at), from) {
+            *p = crate::filter::graft(p, from, f);
+        }
+    }
 }
 
 /// What a problem report shows of `st`: what is saved of it. During a
@@ -737,8 +803,9 @@ pub(crate) fn reported<T: Cell>(st: &T) -> Option<Value> {
         false => shaped(st).ok()?.or_else(|| json(st).ok())?,
         true => json(st).ok()?,
     };
-    for (at, k) in transients::<T>().chain(T::SERVER.iter().map(|k| (None, *k))) {
-        holder(&mut v, at).map(|m| m.remove(k));
+    unsaved_out::<T>(&mut v);
+    if let Some(m) = v.as_object_mut() {
+        T::SERVER.iter().for_each(|k| _ = m.remove(*k));
     }
     Some(v)
 }
@@ -886,16 +953,17 @@ fn redacted<T: Cell>(method: &str, before: &T, after: &T) -> Result<Option<Value
     if !T::redacts(method) {
         return Ok(None);
     }
-    let (was, mut left) = (crate::json(before)?, crate::json(after)?);
-    for (at, k) in transients::<T>() {
-        crate::ensure!(
-            transient(&was, at, k) == transient(&left, at, k),
-            "{}.{method} is #[redact] and can't change the #[transient] field `{k}`: its arguments aren't kept, so replay couldn't bring it back",
-            T::ID
-        );
-        holder(&mut left, at).map(|m| m.remove(k));
-    }
-    Ok(Some(serde_json::json!({ REDACTED: left })))
+    let (was, left) = (crate::json(before)?, crate::json(after)?);
+    let mut kept = left.clone();
+    unsaved_out::<T>(&mut kept);
+    let mut back = kept.clone();
+    unsaved_from::<T>(&mut back, &was);
+    crate::ensure!(
+        back == left,
+        "{}.{method} is #[redact] and can't change what isn't saved (#[transient], persist(include, exclude)): its arguments aren't kept, so replay couldn't bring it back",
+        T::ID
+    );
+    Ok(Some(serde_json::json!({ REDACTED: kept })))
 }
 
 /// The state a `#[redact]` event's args keep (see [`REDACTED`]).
@@ -908,11 +976,7 @@ fn made(args: &Value) -> Option<&Value> {
 fn unredacted<T: Cell>(st: &T, made: &Value, v: u32) -> Result<T, String> {
     let left: T = decode(&made.to_string(), v).map_err(|e| e.0)?;
     let (mut v, was) = (json(&left).map_err(|e| e.0)?, json(st).map_err(|e| e.0)?);
-    for (at, k) in transients::<T>() {
-        if let (Some(m), Some(x)) = (holder(&mut v, at), transient(&was, at, k)) {
-            m.insert(k.to_string(), x.clone());
-        }
-    }
+    unsaved_from::<T>(&mut v, &was);
     unshaped(v).map_err(|e| e.0)
 }
 
@@ -996,6 +1060,9 @@ impl<T: Cell> Store<T> {
             held: None,
             saved: None,
             keep: None,
+            coalesce: PERSIST_DEBOUNCE,
+            journal_wm: None,
+            ahead: None,
         };
         s.snap(true).expect("in-memory snapshot");
         s
@@ -1035,6 +1102,8 @@ impl<T: Cell> Store<T> {
         if let Some(r) = &recovered {
             told_recovered(T::ID, r);
         }
+        // aio's journal past its save, read (or refused) before anything is written.
+        let tail = aio_kv.as_ref().map(|kv| journal_tail::<T>(&db, kv, path)).transpose()?.unwrap_or_default();
         // aio's data that doesn't fit refuses the boot before anything is written.
         let whole = aio_kv.is_some() && T::AIO_CELLS.is_empty();
         let seed = match aio_kv.is_some() {
@@ -1049,10 +1118,18 @@ impl<T: Cell> Store<T> {
             (None, false) => bind(&db, T::ID, T::VERSION, T::TABLES)?.map(|(raw, v)| (None, raw, v)),
             _ => seed,
         };
-        let (from, mut st, migrated) = match base {
+        let (from, mut st, migrated) = match &base {
             None => (0, T::default(), false),
-            Some((seq, v, text)) => (seq as u64, decode::<T>(&text, v)?, v != T::VERSION),
+            Some((seq, v, text)) => (*seq as u64, decode::<T>(text, *v)?, *v < T::VERSION),
         };
+        let ahead = base.filter(|(_, v, _)| *v > T::VERSION).map(|(_, v, text)| {
+            eprintln!(
+                "[aio] {}: its data is from a newer build (v{v} > v{}): it boots, and keeps that build's fields it doesn't declare; fields it declares may be misread. Roll forward, or give this build a version past v{v} with a `migrate` that converts it down",
+                T::ID,
+                T::VERSION
+            );
+            (v, serde_json::from_str(&text).unwrap_or(Value::Null))
+        });
         let last = last.max(from);
         replay(&db, &mut st, from, last, true)?;
         let back = restored(&st)?;
@@ -1074,6 +1151,9 @@ impl<T: Cell> Store<T> {
             held: None,
             saved: None,
             keep: None,
+            coalesce: PERSIST_DEBOUNCE,
+            journal_wm: None,
+            ahead,
         };
         // A failed snapshot only costs time: the next boot replays the log.
         if (migrated || last > from)
@@ -1131,8 +1211,53 @@ impl<T: Cell> Store<T> {
             s.commit(&By::System, RESTORE, &Value::Null, &Asks::default(), now_ms(), Arc::new(back), None, &[])
                 .map_err(|e| Error(format!("{}: restore: {e}", T::ID)))?;
         }
+        s.replay_journal(tail)?;
         refresh_good(&s.db, path)?;
         Ok(s)
+    }
+
+    /// An aio file's journal entries past its watermark (a crash before aio's
+    /// save) run again as aio's next boot would run them: each call through
+    /// this build's method, at its time, as its caller, its effects dropped
+    /// (replay never runs I/O again), the watermark moved in the transaction
+    /// of each. A tail aio-rs can't replay refuses the boot, the file kept.
+    fn replay_journal(&mut self, tail: Vec<crate::compat::data::Journaled>) -> Result<(), Error> {
+        let Some(kv) = self.aio_kv.clone() else { return Ok(()) };
+        let Some(last) = tail.last().map(|j| match j {
+            crate::compat::data::Journaled::Call { seq, .. } | crate::compat::data::Journaled::Skip { seq, .. } => *seq,
+        }) else {
+            return Ok(());
+        };
+        let effects = self.effects.len();
+        for j in &tail {
+            match j {
+                crate::compat::data::Journaled::Skip { why, .. } => {
+                    if let Some(why) = why {
+                        eprintln!("[aio] {}: {why}", T::ID);
+                    }
+                }
+                crate::compat::data::Journaled::Call { seq, method, args, by, at } => {
+                    self.flush().map_err(|e| Error(e.why))?;
+                    self.journal_wm = Some(*seq);
+                    self.run(by, method, args.clone(), *at, None).map_err(|e| {
+                        Error(format!(
+                            "{}: aio's journal entry {seq} ({method}) doesn't run again here: {e}; start the aio app once and stop it, then open it here",
+                            T::ID
+                        ))
+                    })?;
+                }
+            }
+        }
+        self.flush().map_err(|e| Error(e.why))?;
+        self.effects.truncate(effects);
+        // Entries past the last call (skipped ones): the watermark alone.
+        self.journal_wm = None;
+        if kv.journal_wm(&self.db).map_err(Error)? < last {
+            kv.set_journal_wm(&self.db, last).map_err(Error)?;
+        }
+        let calls = tail.iter().filter(|j| matches!(j, crate::compat::data::Journaled::Call { .. })).count();
+        eprintln!("[aio] {}: replayed {calls} calls of aio's journal (up to entry {last})", T::ID);
+        Ok(())
     }
 
     /// The time this store's calls see: the wall clock, or a test's.
@@ -1297,7 +1422,7 @@ impl<T: Cell> Store<T> {
         asks.op = op.map(String::from);
         let quiet = asks.effects.is_empty() && asks.plans.is_empty() && asks.inputs == Default::default();
         let coalesced = T::COALESCED.contains(&method) || (T::COALESCE && !T::redacts(method));
-        if coalesced && fired.is_none() && asks.op.is_none() && quiet {
+        if coalesced && fired.is_none() && asks.op.is_none() && quiet && !self.coalesce.is_zero() {
             self.hold(by, method, args, at, next)?;
             let p = crate::perf::Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() };
             crate::perf::method(T::ID, method, p);
@@ -1366,16 +1491,16 @@ impl<T: Cell> Store<T> {
         Ok(())
     }
 
-    /// Flush a held run [`PERSIST_DEBOUNCE`] after its first call; else how
-    /// long until then.
+    /// Flush a held run [`Self::set_coalesce`] (default [`PERSIST_DEBOUNCE`])
+    /// after its first call; else how long until then.
     pub(crate) fn flush_idle(&mut self) -> Option<std::time::Duration> {
-        let left = PERSIST_DEBOUNCE.checked_sub(self.held.as_ref()?.since.elapsed());
+        let left = self.coalesce.checked_sub(self.held.as_ref()?.since.elapsed());
         match left {
             Some(d) if !d.is_zero() => Some(d),
             _ => {
                 if let Err(e) = self.flush() {
                     eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
-                    return Some(PERSIST_DEBOUNCE);
+                    return Some(self.coalesce.max(PERSIST_DEBOUNCE));
                 }
                 None
             }
@@ -1385,6 +1510,13 @@ impl<T: Cell> Store<T> {
     /// Is a run of coalesced calls waiting to go into the log?
     pub fn holds(&self) -> bool {
         self.held.is_some()
+    }
+
+    /// Hold a run of `#[coalesce]` calls `d` before it goes into the log
+    /// (`[data] coalesce_ms`, aio's `persistDebounceMs`); zero: each call at once.
+    pub fn set_coalesce(&mut self, d: std::time::Duration) -> Result {
+        self.coalesce = d;
+        if d.is_zero() { self.flush() } else { Ok(()) }
     }
 
     /// The event, its schedule changes and the fired schedule's re-arm go in
@@ -1487,6 +1619,9 @@ impl<T: Cell> Store<T> {
             _ => Ok(Value::Null),
         }
         .map_err(Rejected::new)?;
+        if let (Some(kv), Some(wm)) = (&self.aio_kv, self.journal_wm) {
+            kv.set_journal_wm(&tx, wm).map_err(Rejected::new)?;
+        }
         if let Some(op) = &asks.op {
             tx.execute("INSERT INTO ops (cell, op, seq) VALUES (?1, ?2, ?3)", params![T::ID, op, seq as i64])
                 .map_err(db)?;
@@ -1505,6 +1640,7 @@ impl<T: Cell> Store<T> {
             .map_err(db)?;
         }
         tx.commit().map_err(db)?;
+        self.journal_wm = None;
         for ((m, a, t), s) in earlier.iter().zip(logged_seqs) {
             let ev = Event { seq: s, method: m.clone(), args: a.clone(), inputs: Default::default(), by: by.clone(), at: *t, v: T::VERSION };
             self.committed.push((self.seq, ev));
@@ -1686,9 +1822,20 @@ impl<T: Cell> Store<T> {
     /// `SNAP_EVERY` events later).
     fn snap(&mut self, exact: bool) -> Result<(), Error> {
         let Some(text) = snapshot(&*self.state, exact)? else { return Ok(()) };
+        let (v, text) = match &self.ahead {
+            None => (T::VERSION, text),
+            Some((v, newer)) => {
+                let mut mine: Value = serde_json::from_str(&text).map_err(|e| Error(e.to_string()))?;
+                crate::filter::reattach(&mut mine, newer);
+                if let Some(m) = mine.as_object_mut() {
+                    m.insert(DOWNGRADED.into(), T::VERSION.into());
+                }
+                (*v, mine.to_string())
+            }
+        };
         self.db.execute(
             "INSERT OR REPLACE INTO snap (cell, seq, v, state) VALUES (?1, ?2, ?3, ?4)",
-            params![T::ID, self.seq as i64, T::VERSION, text],
+            params![T::ID, self.seq as i64, v, text],
         )?;
         self.unsnapped = 0;
         Ok(())

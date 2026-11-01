@@ -242,3 +242,21 @@ fn a_coalesced_cell_holds_every_plain_call_and_logs_them_in_order() {
     let s = Store::<Notes>::open(&path).unwrap();
     assert_eq!((s.state().lines.clone(), s.state().at, s.state().ids.len()), (vec!["a".into(), "b".into()], 2, 1));
 }
+
+#[test]
+fn coalesce_ms_sets_the_window_and_zero_logs_each_call() {
+    let mut s = Store::<List>::memory();
+    filled(&mut s);
+    s.set_coalesce(std::time::Duration::ZERO).unwrap();
+    let before = s.events().unwrap().len();
+    s.call(&By::Test, "focus", serde_json::json!([3])).unwrap();
+    assert!(!s.holds(), "a zero window holds nothing");
+    assert_eq!(s.events().unwrap().len(), before + 1);
+    // A held run when the window shrinks to zero goes into the log at once.
+    s.set_coalesce(std::time::Duration::from_secs(60)).unwrap();
+    s.call(&By::Test, "focus", serde_json::json!([4])).unwrap();
+    assert!(s.holds());
+    s.set_coalesce(std::time::Duration::ZERO).unwrap();
+    assert!(!s.holds());
+    assert_eq!(s.events().unwrap().len(), before + 2);
+}
