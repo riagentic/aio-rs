@@ -108,10 +108,20 @@ pub fn runtime_of(exe: Option<&Path>, project: Option<&Path>, installed: &Path) 
 }
 
 /// The executable and working folder of `pid`: `/proc` on Linux; elsewhere
-/// none (the project folder stands in).
+/// none ([`health_paths`] answers).
 pub fn process_paths(pid: u32) -> (Option<PathBuf>, Option<PathBuf>) {
     let link = |f: &str| std::fs::read_link(format!("/proc/{pid}/{f}")).ok();
     (link("exe"), link("cwd"))
+}
+
+/// The executable and working folder an app's `health.json` says it has,
+/// when it is `pid`'s (pure): on every OS, as the app knows them itself.
+pub fn health_paths(pid: u32, health: &aio::serde_json::Value) -> (Option<PathBuf>, Option<PathBuf>) {
+    if health["pid"].as_u64() != Some(pid.into()) {
+        return (None, None);
+    }
+    let at = |k: &str| health[k].as_str().filter(|p| !p.is_empty()).map(PathBuf::from);
+    (at("exe"), at("cwd"))
 }
 
 // ── files ────────────────────────────────────────────────────────────────────
@@ -439,10 +449,18 @@ pub struct Ran {
 }
 
 /// Run `program args` in `dir` (amui's `runTask`), its output and errors
-/// captured (capped), until it ends, `cancel` is set, or `timeout`: then
-/// its whole process group is asked to stop, and killed 2 s later. The
-/// manager's own environment (its runtime's variables) never reaches it.
-pub fn run_task(dir: &Path, program: &Path, args: &[String], cancel: &Arc<AtomicBool>, timeout: Duration) -> Ran {
+/// captured (capped) into `out` as they come, until it ends, `cancel` is
+/// set, or `timeout`: then its whole process group is asked to stop, and
+/// killed 2 s later. The manager's own environment (its runtime's
+/// variables) never reaches it.
+pub fn run_task(
+    dir: &Path,
+    program: &Path,
+    args: &[String],
+    cancel: &Arc<AtomicBool>,
+    timeout: Duration,
+    out: &Arc<std::sync::Mutex<Vec<u8>>>,
+) -> Ran {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args)
         .current_dir(dir)
@@ -456,7 +474,6 @@ pub fn run_task(dir: &Path, program: &Path, args: &[String], cancel: &Arc<Atomic
         Ok(c) => c,
         Err(e) => return Ran { code: None, output: format!("failed to spawn: {e}"), ended: "" },
     };
-    let out = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let pipe = |mut r: Box<dyn Read + Send>| {
         let out = out.clone();
         std::thread::spawn(move || {
@@ -667,7 +684,9 @@ mod tests {
         let sh = Path::new("/bin/sh");
         let no = Arc::new(AtomicBool::new(false));
         let w = |s: &str| vec!["-c".to_string(), s.to_string()];
-        let ok = run_task(d.path(), sh, &w("echo out; echo err >&2; exit 3"), &no, TASK_TIMEOUT);
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ok = run_task(d.path(), sh, &w("echo out; echo err >&2; exit 3"), &no, TASK_TIMEOUT, &buf);
+        assert_eq!(String::from_utf8_lossy(&buf.lock().unwrap()), ok.output, "as it came");
         assert_eq!((ok.code, ok.ended), (Some(3), ""));
         assert!(ok.output.contains("out") && ok.output.contains("err"), "{}", ok.output);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -677,12 +696,12 @@ mod tests {
             c.store(true, Ordering::Relaxed);
         });
         let t = Instant::now();
-        let r = run_task(d.path(), sh, &w("sleep 30 & sleep 30"), &cancel, TASK_TIMEOUT);
+        let r = run_task(d.path(), sh, &w("sleep 30 & sleep 30"), &cancel, TASK_TIMEOUT, &Arc::default());
         assert_eq!((r.code, r.ended), (None, "cancelled"));
         assert!(t.elapsed() < Duration::from_secs(5), "promptly: {:?}", t.elapsed());
-        let r = run_task(d.path(), sh, &w("sleep 30"), &no, Duration::from_millis(100));
+        let r = run_task(d.path(), sh, &w("sleep 30"), &no, Duration::from_millis(100), &Arc::default());
         assert_eq!(r.ended, "timeout");
-        let r = run_task(d.path(), Path::new("/no/such/program"), &[], &no, TASK_TIMEOUT);
+        let r = run_task(d.path(), Path::new("/no/such/program"), &[], &no, TASK_TIMEOUT, &Arc::default());
         assert!(r.output.starts_with("failed to spawn"));
     }
 }

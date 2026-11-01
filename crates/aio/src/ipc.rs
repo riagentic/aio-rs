@@ -55,7 +55,9 @@ impl Listener {
     pub fn bind(addr: &str) -> io::Result<Self> {
         _ = std::fs::remove_file(addr);
         let (at, _dir) = reach(addr)?;
-        Ok(Self { addr: addr.into(), inner: tokio::net::UnixListener::bind(at)? })
+        let l = Self { addr: addr.into(), inner: tokio::net::UnixListener::bind(at)? };
+        bound().push(addr.into());
+        Ok(l)
     }
 
     /// Listen at `addr` (inside a tokio runtime). A pipe someone else
@@ -177,7 +179,28 @@ pub fn refusal(pid: Option<u32>, armed: Option<&Process>, started: impl Fn(u32) 
 impl Drop for Listener {
     fn drop(&mut self) {
         #[cfg(unix)]
-        let _ = std::fs::remove_file(&self.addr);
+        {
+            bound().retain(|a| *a != self.addr);
+            _ = std::fs::remove_file(&self.addr);
+        }
+    }
+}
+
+/// The socket files of this process's listeners still open.
+#[cfg(unix)]
+fn bound() -> std::sync::MutexGuard<'static, Vec<String>> {
+    static B: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    B.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Remove the socket file of every listener still open: a door served on
+/// the runtime is never dropped (the process ends with it running), so a
+/// clean stop ([`crate::shutdown`]) unlinks them. A Windows pipe goes with
+/// its process.
+pub fn unlink_all() {
+    #[cfg(unix)]
+    for a in std::mem::take(&mut *bound()) {
+        _ = std::fs::remove_file(a);
     }
 }
 

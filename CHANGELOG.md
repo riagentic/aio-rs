@@ -158,6 +158,19 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
+- **`ax ui` as amui, on every OS**: the Tasks tab runs the project's own
+  tasks (its cargo aliases) beside the `ax` verbs, its output shown as it
+  comes; CPU, the project folder, the executable and the runtime kind on
+  macOS and Windows too (from `health.json`'s `cpuMs`, `exe`, `cwd`);
+  each linked client's health (and for how long a part is down), bytes a
+  second and in all, and the changes it fell behind on; each action's
+  method time and the refused ones with why; per cell its refused calls
+  and last action; the runtime config card from the live app
+  (`health.json`'s `config`: title, auth, mode).
+- `ax events --json` of a running app says each event's method time
+  (`ms`); `--refused` adds its refused calls of late. The local door
+  answers `took`; a client's listing (`ax clients --json`) has `sent`,
+  `behind` and its `degraded` parts.
 ### Changed
 
 - **Breaking: `ax pin` and `ax pair` named as aio names them.** The
@@ -165,7 +178,12 @@ version may break things.
   `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
   before. `ax pin` is aio's framework version (above); the unreleased
   framework verb is gone into it ([migration](docs/migration/README.md#ax-pin-and-ax-pair-in-02)).
-
+- `ax ui` reads in its own process (no `ax` child and no `cargo
+  metadata` per reading), all at once, each within 5 s; it lists the
+  running apps first, finds an app by its display name, shows a refusal
+  of who asked before a transport failure, and drops a process's readings
+  once it stops or restarts. `ax errors` keeps a panic's lines together
+  (`--json`: one string).
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
   they did; `[app] tz = "local"` reads this machine's local time (the
   0.1.0 behaviour).
@@ -280,6 +298,11 @@ version may break things.
   its profile, is told so plainly with what to type ("notes isn't running:
   start it with `ax start notes`"; no server: the aio.toml lines that
   give it one), not "the app isn't serving (no serving.json)".
+- A clean stop leaves no socket behind: a cell's door served on the
+  runtime was never dropped, so its `cell-<id>.sock` (and its folder)
+  outlived the app.
+- `ax ui` lists the clients of every cell, not the first 8; the Overview's
+  tiles wrap instead of cutting their value ("runni…").
 - A page script's `await aio.recv()` (`aio::ui::eval`) no longer hangs the
   window when the view sends later than 50 ms after it asked, and takes a
   falsy value (`0`, `false`): the renderer's own `recv` waited in a busy

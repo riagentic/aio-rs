@@ -37,6 +37,8 @@ pub struct Meta {
     pub listen: Option<String>,
     /// `[accounts] on`.
     pub accounts: bool,
+    /// Its own tasks: its cargo aliases ([`aliases`]), name and command.
+    pub tasks: Vec<(String, String)>,
 }
 
 /// A running app, from its `health.json` and `serving.json` (`ax apps`).
@@ -96,7 +98,30 @@ pub fn read_meta(dir: &Path) -> Option<Meta> {
         targets: cfg.build.targets.into_iter().map(|t| t.name).collect(),
         listen: cfg.server.listen,
         accounts: cfg.accounts.on,
+        tasks: aliases(dir),
     })
+}
+
+/// A project's own tasks (amui's deno tasks): the `[alias]`es of the
+/// `.cargo/config.toml` in its folder and each above it still in its
+/// workspace (one with a `Cargo.toml`), the nearest first, by name; each
+/// with what `cargo <alias>` runs.
+pub fn aliases(dir: &Path) -> Vec<(String, String)> {
+    let mut all: BTreeMap<String, String> = BTreeMap::new();
+    for d in dir.ancestors().take_while(|d| d.join("Cargo.toml").is_file()) {
+        let text =
+            ["config.toml", "config"].iter().find_map(|f| std::fs::read_to_string(d.join(".cargo").join(f)).ok());
+        let Some(t) = text.and_then(|t| t.parse::<toml::Table>().ok()) else { continue };
+        for (name, v) in t.get("alias").and_then(toml::Value::as_table).into_iter().flatten() {
+            let run = match v {
+                toml::Value::String(s) => s.clone(),
+                toml::Value::Array(a) => a.iter().filter_map(toml::Value::as_str).collect::<Vec<_>>().join(" "),
+                _ => continue,
+            };
+            all.entry(name.clone()).or_insert(run);
+        }
+    }
+    all.into_iter().collect()
 }
 
 /// Folders a project never lives in, skipped however the walk got there:
@@ -257,7 +282,7 @@ pub fn apps(json: &str) -> Result<Vec<Project>, String> {
 
 /// The list (amui's `discoverProjects`, pure): every app that ran, matched
 /// to its project by id (its running process's folder first, `cwd_of`),
-/// then the projects that never ran; by name, running and stopped alike.
+/// then the projects that never ran; the running first, each by name.
 pub fn merge(
     mut apps: Vec<Project>,
     disk: &BTreeMap<PathBuf, Meta>,
@@ -288,7 +313,9 @@ pub fn merge(
             });
         }
     }
-    apps.sort_by(|a, b| (&a.name, &a.instance, &a.id).cmp(&(&b.name, &b.instance, &b.id)));
+    apps.sort_by(|a, b| {
+        (a.running.is_none(), &a.name, &a.instance, &a.id).cmp(&(b.running.is_none(), &b.name, &b.instance, &b.id))
+    });
     apps
 }
 
@@ -408,11 +435,20 @@ mod tests {
         let list = merge(all, &disk, &|pid| (pid == 42).then(|| cwd.clone()));
         let names: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
         let todo = d.path().join("todo").display().to_string();
-        assert_eq!(names, ["aio-ui", "notes", "notes#2", todo.as_str()], "by name");
+        assert_eq!(names, ["aio-ui", "notes", "notes#2", todo.as_str()], "the running first, by name");
         assert_eq!(list[1].path.as_deref(), Some(cwd.as_path()), "the running one's own folder");
         assert!(list[3].running.is_none() && list[3].meta.id == "todo", "never ran: its folder");
         assert_eq!(find(&list, &todo).map(|p| p.name.as_str()), Some("todo"));
         assert_eq!(find(&list, "nope"), None);
         assert_eq!(follow(&list, "notes#2").map(|p| p.id.as_str()), Some("notes#2"));
+        // amui's order: the running first, whatever their names.
+        let one = |id: &str, up: bool| Project {
+            id: id.into(),
+            name: id.into(),
+            running: up.then(|| Running { pid: 9, ..Running::default() }),
+            ..Project::default()
+        };
+        let list = merge(vec![one("alpha", false), one("zeta", true)], &BTreeMap::new(), &|_| None);
+        assert_eq!(list.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["zeta", "alpha"]);
     }
 }

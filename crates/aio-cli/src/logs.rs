@@ -60,6 +60,12 @@ pub fn head(line: &str) -> Option<Head> {
     Some(Head { at, level, tag })
 }
 
+/// Does `line` continue the event above it (a panic's message, a
+/// backtrace): stamped, but no head of its own (pure)?
+pub fn continues(line: &str) -> bool {
+    split(line).is_some() && head(line).is_none()
+}
+
 /// Lines grouped into events, oldest first; blank lines are none (pure).
 pub fn events(lines: &[&str]) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
