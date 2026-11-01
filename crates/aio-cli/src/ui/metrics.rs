@@ -68,25 +68,59 @@ pub fn clock(ms: i64) -> String {
     chrono::Local.timestamp_millis_opt(ms).single().map_or("—".into(), |t| t.format("%H:%M:%S").to_string())
 }
 
-/// A linked client's row: id, cell, user, transport, wire, round trip, since.
-fn client_row(c: &Value) -> [String; 7] {
+/// A linked client's row (amui's clients table, pure): id, cell, health,
+/// transport, wire, user, bytes a second, bytes in all, changes it fell
+/// behind on (its backpressure), round trip, since; and what its health
+/// says on hover (each degraded part, for how long).
+pub fn client_row(c: &Value, now: i64) -> ([String; 11], String) {
     let s = |k: &str| c[k].as_str().unwrap_or("—").to_string();
-    [
+    let down: Vec<&Value> = c["degraded"].as_array().into_iter().flatten().collect();
+    let why = down
+        .iter()
+        .map(|d| {
+            let secs = d["since"].as_i64().map_or(0, |t| (now - t).max(0) / 1000);
+            format!("{} for {secs} s: {}", d["name"].as_str().unwrap_or("?"), d["lastError"].as_str().unwrap_or(""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let health = match (c["degraded"].is_array(), down.len()) {
+        (false, _) => "—".to_string(),
+        (true, 0) => "ok".into(),
+        (true, n) => format!("degraded ({n})"),
+    };
+    let bytes = |k: &str| c[k].as_f64().map_or("—".into(), |b| aio::fmt::bytes(b as u64));
+    let behind = match c["behind"].as_u64() {
+        Some(0) => "0".to_string(),
+        Some(n) => format!("{n} behind"),
+        None => "—".into(),
+    };
+    let row = [
         c["id"].to_string(),
         s("cell"),
-        s("user"),
+        health,
         s("from"),
         s("wire"),
+        s("user"),
+        c["bytesPerS"].as_f64().map_or("—".into(), |b| format!("{}/s", aio::fmt::bytes(b as u64))),
+        bytes("sent"),
+        behind,
         c["rtt"].as_u64().map_or("—".into(), |r| format!("{r} ms")),
         c["since"].as_i64().map_or("—".into(), clock),
-    ]
+    ];
+    (row, why)
 }
 
-/// An event's row: its seq, `cell.method`, its arguments, its time.
-fn action_row(e: &Value) -> (String, String, String, String) {
+/// An action's row (amui's recent actions, pure): `cell.method` (✗ when
+/// refused), its arguments or why it was refused, the time its method
+/// took, its time.
+pub fn action_row(e: &Value) -> (String, String, String, String) {
     let s = |k: &str| e[k].as_str().unwrap_or("?").to_string();
     let at = e["at"].as_i64().map_or(String::new(), clock);
-    (e["seq"].to_string(), format!("{}.{}", s("cell"), s("method")), e["args"].to_string(), at)
+    let ms = e["ms"].as_f64().map_or(String::new(), |m| format!("{m:.2} ms · "));
+    match e["refused"].as_str() {
+        Some(why) => (format!("✗ {}.{}", s("cell"), s("method")), why.to_string(), ms, at),
+        None => (format!("{}.{}", s("cell"), s("method")), e["args"].to_string(), ms, at),
+    }
 }
 
 /// The window's mounted components as rows, each under its parent (pure):
@@ -138,7 +172,7 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
     let last = diag
         .history
         .as_ref()
-        .and_then(|h| h.last())
+        .and_then(|h| h.iter().rev().find(|e| !e["refused"].is_string()))
         .map(|e| format!("{}.{}", e["cell"].as_str().unwrap_or("?"), e["method"].as_str().unwrap_or("?")));
     let mem = &health["memory"];
     let rss = mem["rssBytes"].as_u64();
@@ -215,14 +249,26 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                         table { class: "tbl",
                             thead {
                                 tr {
-                                    th { "id" } th { "cell" } th { "user" } th { "transport" } th { "wire" } th { "round trip" } th { "since" }
+                                    th { "id" } th { "cell" } th { "health" } th { "transport" } th { "wire" } th { "user" }
+                                    th { "bytes/s" } th { "total" } th { "bp" } th { "round trip" } th { "since" }
                                 }
                             }
                             tbody {
-                                for (i , row) in clients.iter().map(client_row).enumerate() {
+                                for (i , (row , why)) in clients.iter().map(|c| client_row(c, diag.at)).enumerate() {
                                     tr { key: "{i}",
                                         for (j , cell) in row.into_iter().enumerate() {
-                                            td { key: "{j}", class: if j == 1 { "blue" } else if j == 6 { "dim" }, "{cell}" }
+                                            td { key: "{j}",
+                                                class: match j {
+                                                    1 => "blue",
+                                                    2 if cell.starts_with("degraded") => "red",
+                                                    2 if cell == "ok" => "green",
+                                                    8 if cell.ends_with("behind") => "yellow",
+                                                    10 => "dim",
+                                                    _ => "",
+                                                },
+                                                title: if j == 2 { why.clone() } else { String::new() },
+                                                "{cell}"
+                                            }
                                         }
                                     }
                                 }
@@ -253,10 +299,10 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                         div { class: "dim", style: "font-size:12px", "no actions recorded yet" }
                     } else {
                         div { style: "max-height:260px;overflow-y:auto",
-                            for (seq , what , args , at) in history.iter().map(action_row) {
-                                div { key: "{seq}", class: "act-row",
-                                    span { class: "text2 ell", title: "{args}", "{what}" }
-                                    span { class: "dim", style: "flex-shrink:0", "{at}" }
+                            for (i , (what , args , ms , at)) in history.iter().map(action_row).enumerate() {
+                                div { key: "{i}", class: "act-row",
+                                    span { class: if what.starts_with('✗') { "red ell" } else { "text2 ell" }, title: "{args}", "{what}" }
+                                    span { class: "dim", style: "flex-shrink:0", "{ms}{at}" }
                                 }
                             }
                         }
