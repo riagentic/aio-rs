@@ -212,8 +212,12 @@ fn make(s: &Arc<Shared>) -> Result<notify::RecommendedWatcher, String> {
         let ps: Vec<PathBuf> = e
             .paths
             .into_iter()
-            .filter(|p| Some(p) != on.sentinel.as_ref() && crate::dev::relevant(p))
-            .filter(|p| on.roots.iter().any(|r| p.starts_with(r)) || files.contains(p))
+            .filter(|p| Some(p) != on.sentinel.as_ref())
+            // Judged inside its root: the app may itself sit in some `target` folder.
+            .filter(|p| match on.roots.iter().find_map(|r| p.strip_prefix(r).ok()) {
+                Some(rel) => crate::dev::relevant(rel),
+                None => files.contains(p),
+            })
             .collect();
         if !ps.is_empty() {
             _ = on.tx.send(ps);
@@ -293,7 +297,8 @@ mod tests {
     #[test]
     fn it_hears_its_folders_and_the_files_it_was_given_and_again_once_revived() {
         let d = tempfile::tempdir().unwrap();
-        let (src, other) = (d.path().join("src"), d.path().join("other"));
+        // An app that itself sits in a `target` folder is still heard.
+        let (src, other) = (d.path().join("target").join("src"), d.path().join("other"));
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("notes.txt"), "a").unwrap();

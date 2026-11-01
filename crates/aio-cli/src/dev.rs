@@ -270,7 +270,7 @@ pub fn free_port() -> u16 {
 /// own files (vim's `4913` probe and swap files, emacs' `#x#`, `x~`, `*.tmp`,
 /// JetBrains' safe-write copies, hidden files) (pure).
 pub fn relevant(p: &Path) -> bool {
-    let s = p.to_string_lossy().replace('\\', "/");
+    let s = format!("/{}", p.to_string_lossy().replace('\\', "/"));
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let editors = name == "4913"
         || name.starts_with('.')
@@ -1049,14 +1049,17 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     // (its `[home] dev`), whatever build ax itself is. A release ax planned
     // its own, the person's real home, and wrote its pid and port there.
     let plan = crate::build::app_of(&pkg).ok().and_then(|(_, cfg)| aio::paths::plan_app(&cfg, &dev_ask(args)?).ok());
-    if let Some(i) = args.iter().position(|a| a == "--detach") {
+    // ax's newer flags only before a bare `--`: after it, the app's own words.
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let mine = &args[..end];
+    if let Some(i) = mine.iter().position(|a| a == "--detach") {
         let rest: Vec<String> = args.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, a)| a.clone()).collect();
-        return detach(name, &rest, plan.as_ref().map(|p| p.logs.as_path()));
+        return detach(name, &rest, plan.as_ref());
     }
     let fresh = args.iter().any(|a| a == "--fresh");
     let tui = args.iter().any(|a| a == "--tui");
     // aio's `--verbose`: the app's log at debug, its boot report says so.
-    let verbose = args.iter().any(|a| a == "--verbose");
+    let verbose = mine.iter().any(|a| a == "--verbose");
     // `--display <d>` is aio's, like `--fresh`: neither reaches the app.
     let at = args.iter().position(|a| a == "--display");
     let asked = at.and_then(|i| args.get(i + 1)).cloned().or_else(|| std::env::var("AIORT_DISPLAY").ok());
@@ -1070,16 +1073,17 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         None => None,
     };
     // aio's `--title=X`: the window's title for this run.
-    let ti = args.iter().position(|a| a == "--title");
+    let ti = mine.iter().position(|a| a == "--title");
     let title = match ti {
         Some(i) => Some(args.get(i + 1).cloned().ok_or("--title needs a value: --title \"Notes (QA)\"")?),
-        None => args.iter().find_map(|a| a.strip_prefix("--title=").map(String::from)),
+        None => mine.iter().find_map(|a| a.strip_prefix("--title=").map(String::from)),
     };
     let ours = |i: usize| [at, sz, ti].iter().flatten().any(|f| i == *f || i == f + 1);
     let args: &[String] = &args
         .iter()
         .enumerate()
-        .filter(|(_, a)| !["--fresh", "--tui", "--verbose"].contains(&a.as_str()) && !a.starts_with("--title="))
+        .filter(|(_, a)| *a != "--fresh" && *a != "--tui")
+        .filter(|(i, a)| *i >= end || (*a != "--verbose" && !a.starts_with("--title=")))
         .filter(|(i, _)| !ours(*i))
         .map(|(_, a)| a.clone())
         .collect::<Vec<_>>();
@@ -1247,7 +1251,10 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                 eprintln!("ax dev: {said} changed — building…");
                 false
             }
-            Err(mpsc::RecvTimeoutError::Timeout) if asked(STOP) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) if asked(STOP) => {
+                eprintln!("ax dev: asked to stop; the session ends");
+                break;
+            }
             Err(mpsc::RecvTimeoutError::Timeout) if asked(RESTART) => {
                 eprintln!("ax dev: restart asked — building…");
                 true
@@ -1303,9 +1310,11 @@ fn lint_said(changed: &[PathBuf], cwd: &Path) {
 
 /// `ax dev <app> --detach` (aio's `am start` of a dev run): the session in
 /// the background, on the display this terminal would choose, its output in
-/// the app's `logs/dev.out`; up once its session is. `ax stop` ends it.
-fn detach(name: &str, args: &[String], logs: Option<&Path>) -> Result<String, String> {
-    let logs = logs.ok_or(format!("--detach: {name} has no aio.toml to keep the session's output by"))?;
+/// the app's `logs/dev.out`; back once the app is up, or its first build
+/// failed (the session waits for a fix). `ax stop` ends it.
+fn detach(name: &str, args: &[String], plan: Option<&aio::paths::Plan>) -> Result<String, String> {
+    let plan = plan.ok_or(format!("--detach: {name} has no aio.toml to keep the session's output by"))?;
+    let logs = plan.logs.as_path();
     if take_watch(args)?.1 == Watching::Off {
         return Err("--detach runs the dev loop: without watching, ax start runs the app".into());
     }
@@ -1341,9 +1350,13 @@ fn detach(name: &str, args: &[String], logs: Option<&Path>) -> Result<String, St
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
+    // A failed build of an earlier session is not this one's.
+    _ = std::fs::remove_file(logs.join(BUILD_LOG));
     let mut child = cmd.spawn().map_err(|e| format!("can't start ax dev: {e}"))?;
-    let end = std::time::Instant::now() + Duration::from_secs(30);
-    while !session(logs) {
+    // A first build may take minutes.
+    let end = std::time::Instant::now() + Duration::from_secs(600);
+    let up = || session(logs) && (aio::paths::running(&plan.data) || logs.join(BUILD_LOG).exists());
+    while !up() {
         if let Ok(Some(st)) = child.try_wait() {
             let said = std::fs::read_to_string(&out).unwrap_or_default();
             let tail: Vec<&str> = said.lines().rev().take(20).collect();
@@ -1703,6 +1716,7 @@ mod tests {
     fn ignores_build_output_and_editor_files() {
         assert!(relevant(Path::new("/w/notes/src/main.rs")));
         assert!(!relevant(Path::new("/w/target/debug/x")));
+        assert!(!relevant(Path::new("target/debug/x")), "relative to its root");
         assert!(!relevant(Path::new("/w/notes/src/.main.rs.swp")));
         assert!(!relevant(Path::new("/w/notes/src/main.rs~")));
         // vim's write probe, emacs' autosave, temp and safe-write copies.

@@ -732,3 +732,14 @@ fn renamed_paths_are_told_and_moved_by_fix() {
         "use aio::testing::RandomCall;\nfn f() {\n    let _d = aio::deciding::start();\n    let _ = aio::effect::retry;\n    let _ = (aio::retry_later, aio::effect::retry);\n}\n"
     );
 }
+
+#[test]
+fn ax_dev_lints_each_saved_file_alone() {
+    let ui = "use dioxus::prelude::*;\nfn Ui() -> Element {\n    rsx! {\n        div { onclick: move |_| {}, \"Open\" }\n    }\n}\n";
+    let d = project(&[("src/ui.rs", ui), ("src/half.rs", "fn x( {"), ("tests/t.rs", ui), ("assets/a.css", "x")]);
+    let files: Vec<PathBuf> =
+        ["src/ui.rs", "src/half.rs", "tests/t.rs", "assets/a.css"].map(|f| d.path().join(f)).into();
+    let said = changed(&files, d.path());
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].starts_with("warn src/ui.rs:4 [a11y] <div> takes clicks but no keys"), "{said:?}");
+}

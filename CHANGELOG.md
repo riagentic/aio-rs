@@ -126,6 +126,21 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
+- **`ax dev` watches as aio does** ([dev](docs/build/dev.md#the-loop)): a
+  burst of saves settles after 100 ms of quiet, 500 ms at most; the files
+  the last build read outside the app's folders are watched too (cargo's
+  dep-info: `aio.toml`, `include_str!` files, an aio-rs checkout), in
+  `--web` as well; a deaf watcher is made again (a sentinel, three times
+  at most); the terminal names the changed files and times each build; a
+  storm of restarts (a change within 1 s of each of 5 in a row) waits 5 s
+  before each and says why; the aio checks of each saved `.rs` file are
+  said after each burst (`ax lint`'s per-file ones).
+- `ax dev --detach` (the session in the background, `logs/dev.out`),
+  `--no-watch`, `--verbose`, `--title`; `ax stop` ends a session (the app
+  stopped the graceful way), `ax status` adds `ax dev: watching` or that
+  it waits for a fix; `ax errors` groups lines under each hot-patch too.
+- `AIORT_LOG` (the log's level for one run, said in the boot report's
+  `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
@@ -168,6 +183,23 @@ version may break things.
 
 ### Fixed
 
+- `ax dev` restarts ask the app to stop over its door first (calls in
+  flight finish, effects commit; Windows too, which has no SIGTERM), dx's
+  restarts on a `Cargo.toml` change included; a build that left the binary
+  as it was no longer restarts the app.
+- `ax dev`: editor files (vim's `4913`, `#x#`, `*.tmp`, safe-write copies)
+  no longer start builds; an app inside some `target` folder is heard.
+- `ax dev --watch=<dirs>` narrowed nothing under dx: ax now rebuilds and
+  restarts for it (dx watches all of the app).
+- `ax dev` without dx: a good build after a failed one says `fixed` and
+  takes the errors off the page even when the app keeps running.
+- `ax dev`'s session and dx pid files hold pid and start time: a pid the
+  OS handed out again is no longer taken for the session, on every OS,
+  and a stray dx is stopped on Windows and macOS too.
+- `ax dev` app args with spaces reach the app intact under dx (dx splits
+  its `--args`; they go in `AIORT_DEV_ARGS`).
+- `scripts/dx-metrics`: the live-edit times no longer include the page
+  poller's start under load (the poller is armed before the save).
 - **Android: a crash at start on Android 10.** The activity's insets
   called API-30 methods with minSdk 29; Android 10 now takes the older
   path. A WebView too old for the page (Android 10's stock 74) says so on

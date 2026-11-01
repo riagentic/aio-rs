@@ -47,8 +47,10 @@ args go to the app (--instance <n>: a private copy; --fresh: on new data);
 --display auto|isolated|current|:N: with no terminal (an agent) the window
 goes on a nested display, not the person's, and opens no browser tab (auto);
 --size 390x844: the window at that size for this run (its saved one untouched);
---watch=false: build and run it once; --watch=src/ui,assets: rebuild
-on changes there only (dirs of the app);
+--watch=false (--no-watch): build and run it once; --watch=src/ui,assets:
+rebuild on changes there only (dirs of the app; with dx: rebuilds, no hot-patch);
+--detach: the session in the background (logs/dev.out; ax stop ends it);
+--verbose: the app's log at debug; --title <t>: the window's title this run;
 --cdp[=port]: its window opens the DevTools protocol on loopback (a free
 port, for other tools; ax shot, eval, surface and trigger need none);
 --tui: dx's own screen in a terminal (its keys), not ax's compact lines
