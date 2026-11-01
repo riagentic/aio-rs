@@ -607,6 +607,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     let (Options { token, limits, hosts, http, auth, strict_origin, trust_proxy, security, open }, tls) =
         (opts, None::<std::convert::Infallible>);
     auth.iter().for_each(crate::auth::serve);
+    // `[server] hosts` and the plugins' `allowed_origins`, merged (aio's `allowedOrigins`).
+    let mut hosts = hosts;
+    http.hosts.iter().for_each(|h| if !hosts.contains(h) { hosts.push(h.clone()) });
     // Users known by token count only without accounts (sessions say who then).
     let users = http.users.clone().filter(|_| auth.is_none());
     #[cfg(feature = "tls")]

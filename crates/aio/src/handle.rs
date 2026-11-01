@@ -92,8 +92,18 @@ pub struct Moment {
     pub took: Option<Duration>,
 }
 
+/// Calls a cell by name, as a schedule of another cell fires it.
+type Reach = Arc<dyn Fn(&By, &str, Value) -> Result<Value> + Send + Sync>;
+
+/// The cells of one app (or one `TestCells`) by id: where a schedule set on
+/// another cell ([`crate::Cx::on`]) is called.
+#[derive(Clone, Default)]
+pub(crate) struct Dir(Arc<Mutex<HashMap<&'static str, Reach>>>);
+
 struct Inner<T: Cell> {
     store: Mutex<Store<T>>,
+    /// The app's other cells, once it joined them ([`Handle::join`]).
+    dir: Mutex<Option<Dir>>,
     /// The last committed state and its event, readable while a call runs.
     shown: Mutex<(u64, Arc<T>)>,
     listeners: Mutex<Vec<Listener<T>>>,
@@ -167,6 +177,7 @@ impl<T: Cell> Handle<T> {
         let inner = Inner {
             shown: Mutex::new((store.seq(), store.shared())),
             store: Mutex::new(store),
+            dir: Mutex::default(),
             listeners: Mutex::default(),
             reactions: Mutex::default(),
             watchers: Mutex::default(),
@@ -338,7 +349,7 @@ impl<T: Cell> Handle<T> {
     fn after_commit(&self, wake: bool) {
         // Before the state is shown: from then until its listeners are told.
         let telling = Telling::new();
-        let (started, done, changed) = {
+        let (started, done, changed, acting) = {
             // Another thread's commit may take these first: whoever takes
             // them sends and starts them before the next taker, so events
             // and queued effects keep commit order.
@@ -350,7 +361,8 @@ impl<T: Cell> Handle<T> {
                 *shown = (s.seq(), s.shared());
                 (s.take_effects(), s.take_committed(), changed)
             };
-            let reacting = !lock(&self.inner.reactions).is_empty();
+            let acting = crate::action_hooks();
+            let reacting = !lock(&self.inner.reactions).is_empty() || !acting.is_empty();
             let done: Vec<crate::Event> =
                 if reacting { events.iter().map(|(_, e)| e.clone()).collect() } else { vec![] };
             for e in events {
@@ -376,7 +388,7 @@ impl<T: Cell> Handle<T> {
                     },
                 }
             }
-            (started, done, changed)
+            (started, done, changed, acting)
         };
         // A call that changed nothing (a cursor already at the end) tells nobody.
         if changed {
@@ -386,6 +398,10 @@ impl<T: Cell> Handle<T> {
         }
         drop(telling);
         // After the order lock: a reaction may call back into this cell.
+        if !acting.is_empty() && !done.is_empty() {
+            let st = serde_json::to_value(&*self.state()).unwrap_or_default();
+            done.iter().for_each(|e| crate::acted(&acting, T::ID, e, &st));
+        }
         let rs = lock(&self.inner.reactions).clone();
         done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
         if started {
@@ -395,6 +411,12 @@ impl<T: Cell> Handle<T> {
             self.inner.wake.notify_one();
         }
         self.count_failures();
+        // A transaction its aborts ended: the next serialized call's turn.
+        if let Some(sweep) = crate::store::TxOn::<T>::SWEEP
+            && sweep(&mut lock(&self.inner.store))
+        {
+            self.after_commit(wake);
+        }
     }
 
     /// Count the failures the store saw; the breaker's trip disables the
@@ -582,6 +604,9 @@ impl<T: Cell> Handle<T> {
         let (reply, answer) = match mode {
             Some(_) => {
                 let (r, a) = crate::answer::Reply::new(method);
+                if let Some(gone) = Gone::<T>::ON {
+                    gone(self, &r);
+                }
                 (Some(r), Some(a))
             }
             None => (None, None),
@@ -611,6 +636,25 @@ impl<T: Cell> Handle<T> {
             (Ok(v), _, Some(a)) => Ok((v, a)),
             (Ok(v), _, None) => Ok((v.clone(), crate::Answer::ready(Ok(v.unwrap_or_default())))),
         }
+    }
+
+    /// Once nothing holds a transaction's call (its await aborted or cut
+    /// off), it is dropped with what it wrote, and the next serialized call
+    /// starts: off this thread, as the task's end may come inside this
+    /// cell's own commit. Off a runtime (an effect a test held, dropped by
+    /// an abort), the commit that dropped it does that ([`Self::after_commit`]).
+    fn on_gone(&self, r: &crate::answer::Reply) {
+        let me = Arc::downgrade(&self.inner);
+        r.on_drop(move || {
+            let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+            drop(rt.spawn_blocking(move || {
+                let Some(inner) = me.upgrade() else { return };
+                let h = Handle { inner, by: By::System };
+                if crate::store::TxOn::<T>::SWEEP.is_some_and(|sweep| sweep(&mut lock(&h.inner.store))) {
+                    h.after_commit(true);
+                }
+            }));
+        });
     }
 
     /// An async method's step `method` (`m.1`), run by its effect for the
@@ -939,7 +983,38 @@ impl<T: Cell> Handle<T> {
         };
         // Its own fires must not wake it again.
         self.after_commit(false);
+        self.fire_foreign();
         (next, now)
+    }
+
+    /// Join the app's cells in `dir`: reached there by the schedules other
+    /// cells set on it, and reaching them with its own.
+    pub(crate) fn join(&self, dir: &Dir) {
+        let me = Arc::downgrade(&self.inner);
+        let reach: Reach = Arc::new(move |by, method, args| {
+            let inner = me.upgrade().ok_or_else(|| crate::Rejected::new(format!("{} is gone", T::ID)))?;
+            Handle { inner, by: by.clone() }.call(method, args)
+        });
+        lock(&dir.0).insert(T::ID, reach);
+        *lock(&self.inner.dir) = Some(dir.clone());
+    }
+
+    /// Call the methods its schedules on other cells came due for, each
+    /// by its schedule: refused, it is that cell's failure, as its own
+    /// schedule's would be; on a cell the app doesn't hold, this cell's.
+    pub(crate) fn fire_foreign(&self) {
+        let due = lock(&self.inner.store).take_foreign();
+        if due.is_empty() {
+            return;
+        }
+        let dir = lock(&self.inner.dir).clone();
+        let failed = fire_on(T::ID, dir.as_ref(), due);
+        if !failed.is_empty() {
+            let mut s = lock(&self.inner.store);
+            failed.iter().for_each(|(by, why)| s.failed(by, why));
+            drop(s);
+            self.count_failures();
+        }
     }
 
     /// After a call: a commit tells everyone; a refusal may be a failure.
@@ -975,6 +1050,39 @@ impl<T: Cell> Handle<T> {
             }
         })
     }
+}
+
+/// Call each of `cell`'s schedules due on another cell there; those on a
+/// cell `dir` doesn't hold, as `cell`'s failures.
+fn fire_on(cell: &str, dir: Option<&Dir>, due: Vec<crate::Due>) -> Vec<(By, String)> {
+    let mut failed = vec![];
+    for d in due {
+        let (other, method) = d.method.split_once(':').expect("cell:method");
+        let by = By::Schedule(d.key.clone());
+        match dir.and_then(|dir| lock(&dir.0).get(other).cloned()) {
+            Some(f) => {
+                if let Err(e) = f(&by, method, d.args) {
+                    eprintln!("[aio] {cell}: schedule `{}` ({other}.{method}) refused: {e}", d.key);
+                }
+            }
+            None => {
+                let why = format!("{other}.{method}: {other} is not one of the app's cells");
+                eprintln!("[aio] {cell}: schedule `{}`: {why}", d.key);
+                failed.push((by, why));
+            }
+        }
+    }
+    failed
+}
+
+/// [`Handle::on_gone`], made only for a `#[cell(transaction)]` cell.
+struct Gone<T>(std::marker::PhantomData<T>);
+
+impl<T: Cell> Gone<T> {
+    const ON: Option<fn(&Handle<T>, &crate::answer::Reply)> = match T::TRANSACTION {
+        Some(_) => Some(Handle::<T>::on_gone),
+        None => None,
+    };
 }
 
 /// Held by an effect's task and dropped when it ends, however it ends (a

@@ -52,6 +52,8 @@ pub struct Plugin {
     #[cfg(feature = "server")]
     http: crate::http::Http,
     on_effect: Vec<crate::Started>,
+    #[cfg(not(target_arch = "wasm32"))]
+    on_action: Vec<crate::Acted>,
 }
 
 impl Plugin {
@@ -66,6 +68,8 @@ impl Plugin {
             #[cfg(feature = "server")]
             http: Default::default(),
             on_effect: vec![],
+            #[cfg(not(target_arch = "wasm32"))]
+            on_action: vec![],
         }
     }
 
@@ -108,6 +112,27 @@ impl Plugin {
         self
     }
 
+    /// Hear every committed call ([`crate::on_action`], aio's plugin `onAction`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn on_action(mut self, f: impl Fn(&str, &crate::Event, &serde_json::Value) + Send + Sync + 'static) -> Self {
+        self.on_action.push(std::sync::Arc::new(f));
+        self
+    }
+
+    /// Hosts the app may also be reached as (aio's plugin `allowedOrigins`):
+    /// names (`app.example.com`) or origins (`https://app.example.com`),
+    /// added to `[server] hosts`, never replacing them, for the Host gate,
+    /// the socket's Origin check and who may frame the page.
+    #[cfg(feature = "server")]
+    pub fn allowed_origins(mut self, hosts: &[&str]) -> Self {
+        let name = |h: &str| {
+            let h = h.split_once("://").map_or(h, |(_, rest)| rest);
+            crate::gate::name_of(h.split('/').next().unwrap_or(h)).to_ascii_lowercase()
+        };
+        self.http.hosts.extend(hosts.iter().map(|h| name(h)).filter(|h| !h.is_empty()));
+        self
+    }
+
     /// Run `f` once the app's cells are live (aio's plugin `onStart`), after
     /// the app's own [`Cells::on_start`].
     pub fn on_start(mut self, f: impl FnOnce(&Cells) -> crate::Result + Send + 'static) -> Self {
@@ -130,6 +155,8 @@ impl Plugin {
     /// Its hooks into the app: effects heard, stops queued, its cells with its starts.
     fn join(self, cells: Cells) -> Cells {
         self.on_effect.into_iter().for_each(|f| crate::on_effect(move |c, k| f(c, k)));
+        #[cfg(not(target_arch = "wasm32"))]
+        self.on_action.into_iter().for_each(|f| crate::on_action(move |c, e, s| f(c, e, s)));
         for (stopping, f) in self.stops {
             match stopping {
                 true => crate::on_stopping(f),

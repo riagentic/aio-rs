@@ -718,6 +718,8 @@ pub struct Http {
     door_links: bool,
     peers: Option<crate::link::Peers>,
     pub(crate) beside: Vec<Arc<dyn crate::link::Beside>>,
+    /// Hosts the plugins add to `[server] hosts` ([`crate::plugin::Plugin::allowed_origins`]).
+    pub(crate) hosts: Vec<String>,
 }
 
 impl Default for Http {
@@ -738,6 +740,7 @@ impl Default for Http {
             door_links: false,
             peers: None,
             beside: Vec::new(),
+            hosts: Vec::new(),
         }
     }
 }
@@ -873,6 +876,7 @@ impl Http {
     pub(crate) fn under(mut self, p: Http) -> Self {
         self.plugin_routes.extend(p.routes);
         self.fns.under(p.fns);
+        p.hosts.into_iter().for_each(|h| if !self.hosts.contains(&h) { self.hosts.push(h) });
         self.on_link = match (self.on_link.take(), p.on_link) {
             (Some(own), Some(theirs)) => Some(Arc::new(move |l: &Presence| {
                 for f in [&theirs, &own] {

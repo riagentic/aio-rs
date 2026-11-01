@@ -26,6 +26,7 @@ pub struct CellHealth {
 trait Part: Send + Sync {
     fn id(&self) -> &'static str;
     fn fire(&self);
+    fn join(&self, dir: &crate::handle::Dir);
     /// Live: its `#[on_start]`'s refusal, if any.
     fn start(&self) -> Result;
     fn any(&self) -> &dyn std::any::Any;
@@ -43,6 +44,10 @@ impl<T: Cell> Part for Handle<T> {
 
     fn fire(&self) {
         Handle::fire(self);
+    }
+
+    fn join(&self, dir: &crate::handle::Dir) {
+        Handle::join(self, dir);
     }
 
     fn start(&self) -> Result {
@@ -186,6 +191,8 @@ impl Cells {
         let mut parts: Vec<_> = self.parts.into_iter().map(Some).collect();
         self.parts = order.into_iter().filter_map(|i| parts[i].take()).collect();
         let only = isolated(std::env::var("AIORT_ISOLATE").ok().as_deref(), &self.ids()).map_err(crate::Error)?;
+        let dir = crate::handle::Dir::default();
+        self.parts.iter().for_each(|(p, _)| p.join(&dir));
         for (name, f) in std::mem::take(&mut self.on_restore) {
             if let Err(e) = f(&self) {
                 self.refused(name, e)?;

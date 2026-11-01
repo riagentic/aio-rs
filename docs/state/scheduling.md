@@ -146,9 +146,54 @@ assert!(h.broken().is_err());
   scheduled call refused when it fires (or one a new build renamed) is
   said in the log and a report, and the schedule is still moved on (or
   removed), so it never fires in a loop.
-- Schedules belong to a cell: they call only that cell. To reach another
-  cell, have the scheduled method's cell [listen](composition.md) or call
-  it from an effect.
+- `cx.on::<Other>()` has the same `after`, `every`, `at` and `cron` for a
+  method of another cell (aio's `schedule.after(id, ms,
+  other.method.action())`): the schedule is this cell's (its key, its
+  `cancel`, saved with this call), and when it fires the other cell's
+  method is called by `By::Schedule(key)`. A method `Other` doesn't have
+  refuses the call that sets it. It reaches the cells the app started
+  together (`Cells::start`, or one `TestCells`); a refusal there is that
+  cell's failure, a cell the app doesn't hold is this one's.
+
+```rust
+use aio::prelude::*;
+use aio::testing::TestCells;
+
+#[cell]
+pub struct Editor {
+    pub text: String,
+}
+
+#[cell]
+pub struct Drafts {
+    pub saved: Vec<String>,
+}
+
+#[methods]
+impl Editor {
+    /// Saved 3 s after the last keystroke, by the drafts cell.
+    pub fn typed(&mut self, cx: &Cx, text: String) -> Result {
+        self.text = text.clone();
+        cx.on::<Drafts>().after("autosave", 3_000, "save", (text,))
+    }
+}
+
+#[methods]
+impl Drafts {
+    pub fn save(&mut self, text: String) {
+        self.saved.push(text);
+    }
+}
+
+# fn main() {
+let mut t = TestCells::new();
+let (e, d) = (t.cell::<Editor>(), t.cell::<Drafts>());
+e.typed("hel".into()).unwrap();
+e.typed("hello".into()).unwrap();
+t.advance(3_000);
+assert_eq!(d.state().saved, ["hello"]);
+# }
+```
 
 ### Keys
 

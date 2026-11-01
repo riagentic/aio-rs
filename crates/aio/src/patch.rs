@@ -50,11 +50,20 @@ pub const APPEND_MIN: usize = 256;
 
 pub fn diff(old: &Value, new: &Value) -> Vec<Op> {
     let mut ops = Vec::new();
-    walk(old, new, &mut Vec::new(), &mut ops);
+    walk(old, new, &mut Vec::new(), &mut ops, true);
     ops
 }
 
-fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>) {
+/// [`diff`] with a resized array as one `set` of it, never by index: for
+/// ops put on a state others may have changed since (a transaction's
+/// commit), where an index would name another item.
+pub(crate) fn diff_whole(old: &Value, new: &Value) -> Vec<Op> {
+    let mut ops = Vec::new();
+    walk(old, new, &mut Vec::new(), &mut ops, false);
+    ops
+}
+
+fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>, narrow: bool) {
     if old == new {
         return;
     }
@@ -68,14 +77,14 @@ fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>) {
             for (k, v) in b {
                 path.push(Step::Key(k.clone()));
                 match a.get(k) {
-                    Some(old) => walk(old, v, path, ops),
+                    Some(old) => walk(old, v, path, ops, narrow),
                     None => ops.push(Op::Set { path: path.clone(), value: v.clone() }),
                 }
                 path.pop();
             }
         }
-        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => items(a, b, path, ops),
-        (Value::Array(a), Value::Array(b)) => resized(a, b, path, ops),
+        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => items(a, b, path, ops, narrow),
+        (Value::Array(a), Value::Array(b)) if narrow => resized(a, b, path, ops),
         (Value::String(a), Value::String(b)) if a.len() >= APPEND_MIN && b.starts_with(a.as_str()) => {
             ops.push(Op::Append { path: path.clone(), value: b[a.len()..].to_string() })
         }
@@ -100,10 +109,10 @@ pub(crate) fn json_len(v: &impl serde::Serialize) -> usize {
 }
 
 /// Same-length arrays, item by item.
-fn items(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>) {
+fn items(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>, narrow: bool) {
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
         path.push(Step::Index(i));
-        walk(x, y, path, ops);
+        walk(x, y, path, ops, narrow);
         path.pop();
     }
 }
@@ -145,7 +154,7 @@ fn resized(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>) {
     }
     let n = a.len().min(b.len());
     let mut common = Vec::new();
-    items(&a[..n], &b[..n], path, &mut common);
+    items(&a[..n], &b[..n], path, &mut common, true);
     common.extend((n..b.len()).map(|i| Op::Insert { path: at(path, i), value: b[i].clone() }));
     common.extend((n..a.len()).rev().map(|i| Op::Del { path: at(path, i) }));
     weigh(common);
@@ -387,6 +396,18 @@ mod tests {
         round(json!([[1, 2], [3]]), json!([[1, 2, 3]]));
         let (long, longer) = (json!(["x".repeat(99), "y".repeat(99)]), json!(["x".repeat(99), "y".repeat(99), 3]));
         assert_eq!(said(&long, &diff(&long, &longer)).split(", ").next(), Some("2 +3"));
+    }
+
+    #[test]
+    fn a_whole_diff_never_names_an_index_of_a_resized_array() {
+        let rows: Vec<Value> = (0..50).map(|i| json!(format!("row {i}"))).collect();
+        let mut more = rows.clone();
+        more.push(json!("new"));
+        let (a, b) = (json!({ "log": rows, "n": 1 }), json!({ "log": more, "n": 2 }));
+        let ops = diff_whole(&a, &b);
+        assert_eq!(ops.len(), 2);
+        assert!(ops.contains(&Op::Set { path: vec![Step::Key("log".into())], value: b["log"].clone() }));
+        assert!(matches!(diff(&a, &b)[..], [Op::Insert { .. }, Op::Set { .. }] | [Op::Set { .. }, Op::Insert { .. }]));
     }
 
     #[test]
