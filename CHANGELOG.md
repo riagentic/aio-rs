@@ -168,6 +168,16 @@ version may break things.
 
 ### Fixed
 
+- A copy (`Remote`) hears this process's diagnostic bus from before it is
+  online: a problem said just as the link came up was never relayed to the
+  server's bus.
+- `aio::testing::TestUi` counts every render however its tests share the
+  process: with one tracing listener alive, tracing-core asks only the
+  registering thread's own, so a render first met on a thread with none
+  muted it for all; a second listener is kept for good.
+- `aio::testing::TestBrowser` waits up to 120 s for a browser's DevTools
+  port (a hang guard): the first system Chrome of a Windows CI runner took
+  more than 30 s while running.
 - **Android: a crash at start on Android 10.** The activity's insets
   called API-30 methods with minSdk 29; Android 10 now takes the older
   path. A WebView too old for the page (Android 10's stock 74) says so on

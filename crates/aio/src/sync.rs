@@ -1503,6 +1503,15 @@ impl<T: Cell> Remote<T> {
         for p in lock(&self.inner.copy).pending.clone() {
             _ = tx.send(p.msg());
         }
+        // What this process's bus hears, for the server's (a relayed one is
+        // not sent back): heard from before the link is said online, so a
+        // problem said once it is (a test's, the app's first) is not missed.
+        let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
+        let _sub = crate::report::subscribe(move |d| {
+            if !d.kind.starts_with("client:") {
+                _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held }));
+            }
+        });
         *lock(&self.inner.out) = Some(tx);
         self.inner.online.store(true, Ordering::SeqCst);
         self.tell();
@@ -1517,13 +1526,6 @@ impl<T: Cell> Remote<T> {
             // send calls at the server's advertised rate.
             let mut pace = Pace::new(calls_per_sec);
             let mut told = Vec::new();
-            // What this process's bus hears, for the server's (a relayed one is not sent back).
-            let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
-            let _sub = crate::report::subscribe(move |d| {
-                if !d.kind.starts_with("client:") {
-                    _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held }));
-                }
-            });
             loop {
                 let m = tokio::select! {
                     m = rx.recv() => match m {
