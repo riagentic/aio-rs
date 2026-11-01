@@ -159,8 +159,17 @@ impl Aio {
         match v {
             "main" => Ok(Aio::Branch(v.into())),
             "latest" => newest(&tags()?).map(Aio::Tag).ok_or_else(|| format!("{REPO} has no release tag")),
-            _ if aio::update::parse_version(v).is_some() => Ok(Aio::Tag(format!("v{}", v.trim_start_matches('v')))),
-            _ => Err(format!("aio-rs version {v}: a release (0.2.0), main or latest")),
+            // `0.2` is the tag `v0.2.0`: release tags have three numbers.
+            _ => match aio::update::parse_version(v) {
+                Some((n, pre)) => Ok(Aio::Tag(format!(
+                    "v{}.{}.{}{}",
+                    n[0],
+                    n[1],
+                    n[2],
+                    pre.map_or(String::new(), |p| format!("-{p}"))
+                ))),
+                None => Err(format!("aio-rs version {v}: a release (0.2.0), main or latest")),
+            },
         }
     }
 
@@ -1016,6 +1025,8 @@ mod tests {
         let none = || -> Result<String, String> { panic!("asked for no tags") };
         assert_eq!(Aio::version("0.2.0", none), Ok(Aio::Tag("v0.2.0".into())));
         assert_eq!(Aio::version("v0.2.0", none), Ok(Aio::Tag("v0.2.0".into())));
+        assert_eq!(Aio::version("0.2", none), Ok(Aio::Tag("v0.2.0".into())), "a tag has three numbers");
+        assert_eq!(Aio::version("0.3.0-beta.1", none), Ok(Aio::Tag("v0.3.0-beta.1".into())));
         assert_eq!(Aio::version("main", none), Ok(Aio::Branch("main".into())));
         assert!(Aio::version("newest", none).unwrap_err().contains("a release (0.2.0), main or latest"));
         let ls = "a1\trefs/tags/v0.1.0\nb2\trefs/tags/v0.10.0-beta.1\nc3\trefs/tags/v0.2.0\nd4\trefs/tags/v0.2.0^{}\n\
