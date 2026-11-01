@@ -250,6 +250,34 @@ pub(crate) fn method(cell: &'static str, method: &str, p: Phases) {
     if took > budget {
         violated("method", &format!("{cell}.{method}"), took, budget, Some(&p));
     }
+    WATCHED.with_borrow_mut(|w| {
+        let Some((budgets, over)) = w else { return };
+        let label = format!("{cell}.{method}");
+        if let Some(b) = budgets.get(&label).filter(|b| took > **b) {
+            over.push(line("method", &label, took, *b, Some(&p)));
+        }
+    });
+}
+
+/// A test's own budgets on this thread (`TestCells::budget`), by
+/// `cell.method`, and the calls over them so far.
+type Watched = (HashMap<String, Duration>, Vec<String>);
+thread_local!(static WATCHED: std::cell::RefCell<Option<Watched>> = const { std::cell::RefCell::new(None) });
+
+/// Hold `label`'s calls on this thread to `budget` (a failure, not a log line).
+pub(crate) fn watch(label: String, budget: Duration) {
+    WATCHED.with_borrow_mut(|w| _ = w.get_or_insert_default().0.insert(label, budget));
+}
+
+/// The calls over a watched budget since the last take; `stop`: watch no more.
+pub(crate) fn watched(stop: bool) -> Vec<String> {
+    WATCHED.with_borrow_mut(|w| {
+        let over = w.as_mut().map(|(_, o)| std::mem::take(o)).unwrap_or_default();
+        if stop {
+            *w = None;
+        }
+        over
+    })
 }
 
 thread_local!(static IN_CALLS: Slot<Duration> = const { Slot::new(Duration::ZERO) });

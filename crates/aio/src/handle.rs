@@ -119,6 +119,9 @@ struct Inner<T: Cell> {
     tells: tokio::sync::broadcast::Sender<crate::tell::Tell>,
     /// Set by a test (`aio::testing`): effects wait here until it starts them.
     held: Mutex<Option<Vec<Effect<T>>>>,
+    /// Held, the keys of the effects its last commit asked for, stamped
+    /// in commit order across cells (`TestCells::last_effects`).
+    last_held: Mutex<(u64, Vec<String>)>,
     /// A test's ledger: its schedules' and effects' failures, until it takes them.
     failed: Mutex<Vec<String>>,
     /// Disabled (`Cells::disable`): calls refused, schedules paused.
@@ -181,6 +184,7 @@ impl<T: Cell> Handle<T> {
             events: tokio::sync::broadcast::channel(1024).0,
             tells: tokio::sync::broadcast::channel(64).0,
             held: Mutex::default(),
+            last_held: Mutex::default(),
             failed: Mutex::default(),
             off: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -353,15 +357,20 @@ impl<T: Cell> Handle<T> {
             let reacting = !lock(&self.inner.reactions).is_empty();
             let done: Vec<crate::Event> =
                 if reacting { events.iter().map(|(_, e)| e.clone()).collect() } else { vec![] };
+            let committed = !events.is_empty();
             for e in events {
                 // No subscribers is fine: nobody syncs this cell.
                 _ = self.inner.events.send(e);
             }
             let started = !effects.is_empty();
+            let mut asked = vec![];
             for e in effects {
                 match e.downcast::<Effect<T>>() {
                     Ok(e) => match lock(&self.inner.held).as_mut() {
-                        Some(held) => held.push(*e),
+                        Some(held) => {
+                            asked.push(e.key.clone());
+                            held.push(*e)
+                        }
                         None => self.spawn(*e),
                     },
                     Err(e) => match e.downcast::<Abort>() {
@@ -375,6 +384,10 @@ impl<T: Cell> Handle<T> {
                         },
                     },
                 }
+            }
+            if committed && lock(&self.inner.held).is_some() {
+                static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                *lock(&self.inner.last_held) = (STAMP.fetch_add(1, Ordering::Relaxed) + 1, asked);
             }
             (started, done, changed)
         };
@@ -673,6 +686,18 @@ impl<T: Cell> Handle<T> {
     /// The effects held, each as its key, mode and timeout.
     pub(crate) fn held_effects(&self) -> Vec<(String, Mode, Option<Duration>)> {
         lock(&self.inner.held).iter().flatten().map(|e| (e.key.clone(), e.mode, e.timeout)).collect()
+    }
+
+    /// The keys its last commit asked for while held, with the commit's stamp.
+    pub(crate) fn last_held(&self) -> (u64, Vec<String>) {
+        lock(&self.inner.last_held).clone()
+    }
+
+    /// Drop the held effects unstarted (a test resets the cell).
+    pub(crate) fn drop_held(&self) {
+        if let Some(h) = lock(&self.inner.held).as_mut() {
+            h.clear();
+        }
     }
 
     /// Start the held effects (inside a tokio runtime); how many.

@@ -659,3 +659,125 @@ async fn several_apps_in_one_test_keep_their_own_dirs_ports_and_lives() {
     assert_eq!(late.state().balance, 5);
     assert!(sd.store.is_file() && dd.store.is_file());
 }
+
+/// aio's `testApps`, as one harness: named apps, each its own dirs and
+/// server; a client of one; the wrong name or cell said.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_apps_boot_named_apps_apart_and_name_the_booted_ones() {
+    use aio::testing::{TestApps, fails};
+    let mut world = TestApps::new();
+    world.boot::<Ledger>("bank").await.unwrap();
+    world.boot::<Desk>("till").await.unwrap();
+    assert!(world.boot::<Desk>("till").await.is_err_and(|e| e.to_string().contains("booted already")));
+    assert_ne!(world.dirs("bank").logs, world.dirs("till").logs, "each app its own logs");
+    assert_ne!(world.get::<Ledger>("bank").addr, world.get::<Desk>("till").addr);
+    let client = world.connect::<Ledger>("bank", "till").await.unwrap();
+    world.get::<Ledger>("bank").handle.credit(3).unwrap();
+    world.get::<Ledger>("bank").converged(&[&client]).await;
+    assert_eq!(client.state().balance, 3);
+    assert!(world.dirs("bank").store.is_file());
+    assert!(fails(|| _ = world.get::<Ledger>("shop")).contains("no app \"shop\"; booted: bank, till"));
+    assert!(fails(|| _ = world.get::<Desk>("bank")).contains("serves another cell than Desk"));
+}
+
+/// aio's `patches`, `waitForPatch`, `dispatchAll`: the stream a client got,
+/// and one call from every client at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_s_updates_are_recorded_and_every_client_calls_at_once() {
+    use aio::testing::{TestServer, call_all, patches};
+    let server = TestServer::start(Handle::<Ledger>::memory(), aio::http::Http::default()).await.unwrap();
+    let (a, b) = (server.client("ana").await.unwrap(), server.client("bo").await.unwrap());
+    let seen = patches(&a);
+    let answers = call_all(&[&a, &b], "credit", json!([2]));
+    assert!(answers.iter().all(Result::is_ok), "{answers:?}");
+    server.converged(&[&a, &b]).await;
+    assert_eq!(server.state().balance, 4, "both calls landed once");
+    let p = seen.until(|p| p["t"] == "patch" && p["seq"].as_u64() == Some(2)).await;
+    assert!(p["ops"].is_array(), "a delta, not the whole state: {p}");
+    assert!(seen.all().iter().all(|p| p["t"] == "patch"), "no resync: {:?}", seen.all());
+}
+
+#[cell]
+pub struct Slow {
+    n: u32,
+}
+
+#[methods]
+impl Slow {
+    pub fn crawl(&mut self, ms: u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+        self.n += 1;
+    }
+}
+
+/// aio's `perfBudget`, for one test: a call over it fails the test.
+#[test]
+fn a_call_over_the_test_s_budget_is_a_failure() {
+    let mut t = TestCells::new();
+    let slow = t.cell::<Slow>();
+    t.budget::<Slow>("crawl", 15);
+    slow.crawl(0).unwrap();
+    assert!(t.failures().is_empty(), "within it");
+    slow.crawl(40).unwrap();
+    let f = t.failures();
+    assert!(f.len() == 1 && f[0].contains("crawl") && f[0].contains("> 15ms"), "{f:?}");
+    assert!(aio::testing::fails(|| t.budget::<Slow>("craw1", 5)).contains("its methods: crawl"));
+}
+
+/// aio's `expect.effects`: what the last call asked for, apart from the
+/// ones still waiting from before.
+#[test]
+fn the_last_call_s_effects_are_its_own() {
+    let mut t = TestCells::new();
+    let feed = t.seeded::<Feed>(json!({"cfg": {"url": "https://x"}}));
+    feed.refresh().unwrap();
+    assert_eq!(t.last_effects(), ["Feed.fetch"]);
+    feed.retry().unwrap();
+    assert_eq!(
+        (t.last_effects(), t.effects()),
+        (vec!["Feed.retry".into()], vec!["Feed.fetch".into(), "Feed.retry".into()])
+    );
+    feed.dismiss().unwrap();
+    assert!(t.last_effects().is_empty(), "it asked for none");
+    t.settle();
+}
+
+/// aio's `t.init(seed)` / `t.destroy()` mid-test.
+#[test]
+fn a_cell_is_reset_mid_test() {
+    let mut t = TestCells::new();
+    let feed = t.seeded::<Feed>(json!({"cfg": {"url": "https://x"}}));
+    feed.refresh().unwrap();
+    t.reset(&feed, json!({"cfg": {"url": "https://y"}}));
+    assert!(t.effects().is_empty(), "its waiting effects dropped");
+    expect(&feed, "reset", |s| s.cfg.url == "https://y" && !s.loading && s.items.is_empty());
+    t.reset(&feed, json!({}));
+    expect(&feed, "fresh", |s| s.cfg.url.is_empty());
+}
+
+/// aio's `fuzz({ skip })`: the methods and their arguments found from
+/// the cell itself.
+#[test]
+fn a_fuzz_finds_the_methods_and_makes_their_arguments() {
+    let mut t = TestCells::new();
+    let a = t.cell::<Account>();
+    let run = t.fuzz_methods(&a, 5, 300, &["audit"], |s| s.balance <= 1000);
+    assert!(run.iter().any(|c| c.starts_with("deposit([")) && run.iter().any(|c| c.starts_with("withdraw([")));
+    assert!(!run.iter().any(|c| c.starts_with("audit")), "skipped");
+    assert!(a.state().moves > 0, "calls landed");
+    let mut again = TestCells::new();
+    let b = again.cell::<Account>();
+    assert_eq!(again.fuzz_methods(&b, 5, 300, &["audit"], |_| true), run, "the same seed is the same run");
+    let e = aio::testing::fails(|| _ = again.fuzz_methods(&b, 5, 1, &["audt"], |_| true));
+    assert!(e.contains("Account has no method audt"), "{e}");
+}
+
+#[test]
+#[should_panic(expected = "account.audit panicked: unlucky audit")]
+fn a_fuzz_over_the_methods_finds_the_panic() {
+    for seed in 0..500 {
+        let mut t = TestCells::new();
+        let a = t.cell::<Account>();
+        t.fuzz_methods(&a, seed, 40, &[], |_| true);
+    }
+}
