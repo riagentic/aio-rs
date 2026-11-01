@@ -97,7 +97,7 @@ pub fn page_js(dev: bool) -> String {
     // `;` after each piece: an `(() => …)()` piece followed by another
     // would otherwise call its result
     let pieces: &[&str] = match dev {
-        true => &[OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS, RELOAD],
+        true => &[CONSOLE, OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS, RELOAD],
         false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS],
     };
     pieces.iter().map(|p| format!("{};\n", p.trim_end())).collect()
@@ -234,6 +234,86 @@ fn icons(app: &App, hue: u16, out: &Path) -> Result<(Vec<Icon>, Option<String>),
     Ok((made, problem))
 }
 
+/// The portrait screens iOS shows a Home Screen app's launch image on, as
+/// CSS width, height and pixel ratio (aio's `IOS_SCREENS`): iOS takes the
+/// one whose media query matches the screen exactly; any other shows the
+/// manifest's background colour.
+pub const IOS_SCREENS: [(u32, u32, u32); 21] = [
+    (320, 568, 2),
+    (375, 667, 2),
+    (414, 736, 3),
+    (375, 812, 3),
+    (414, 896, 2),
+    (414, 896, 3),
+    (390, 844, 3),
+    (428, 926, 3),
+    (393, 852, 3),
+    (430, 932, 3),
+    (402, 874, 3),
+    (440, 956, 3),
+    (768, 1024, 2),
+    (744, 1133, 2),
+    (810, 1080, 2),
+    (820, 1180, 2),
+    (834, 1112, 2),
+    (834, 1194, 2),
+    (834, 1210, 2),
+    (1024, 1366, 2),
+    (1032, 1376, 2),
+];
+
+/// `#rgb` or `#rrggbb` as RGB; black otherwise.
+fn rgb(hex: &str) -> [u8; 3] {
+    let h = hex.trim_start_matches('#');
+    let h: String = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { h.into() };
+    let at = |i: usize| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok()).unwrap_or(0);
+    [at(0), at(2), at(4)]
+}
+
+/// iOS launch images (aio's `iosLaunchImages`): per [`IOS_SCREENS`] the
+/// splash image `png` on its light background `bg`, the size the page
+/// draws it (its box `w`×`h` in CSS px, no wider than the screen), so the
+/// launch image and the page's splash are one picture. Each file's name,
+/// its `<link>` and its PNG.
+pub fn launch_images(png: &[u8], (w, h): (u32, u32), bg: &str) -> Result<Vec<(String, String, Vec<u8>)>, String> {
+    use image::{ImageEncoder, codecs::png};
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| format!("splash: {e}"))?
+        .to_rgba8();
+    let [r, g, b] = rgb(bg);
+    IOS_SCREENS
+        .iter()
+        .map(|&(cw, ch, ratio)| {
+            let (sw, sh) = (cw * ratio, ch * ratio);
+            let dw = w.min(cw) * ratio;
+            let dh = (u64::from(dw) * u64::from(h) / u64::from(w.max(1))) as u32;
+            // Contained in its box, as `object-fit` draws it by default.
+            let fit = (f64::from(dw) / f64::from(img.width())).min(f64::from(dh) / f64::from(img.height()));
+            let (iw, ih) = ((f64::from(img.width()) * fit) as u32, (f64::from(img.height()) * fit) as u32);
+            let mut screen = image::RgbaImage::from_pixel(sw, sh, image::Rgba([r, g, b, 255]));
+            let scaled = image::imageops::resize(&img, iw.max(1), ih.max(1), image::imageops::FilterType::Triangle);
+            image::imageops::overlay(
+                &mut screen,
+                &scaled,
+                i64::from((sw - iw) / 2),
+                i64::from(sh.saturating_sub(ih) / 2),
+            );
+            let rgb = image::DynamicImage::ImageRgba8(screen).to_rgb8();
+            let mut out = Vec::new();
+            png::PngEncoder::new_with_quality(&mut out, png::CompressionType::Fast, png::FilterType::Adaptive)
+                .write_image(&rgb, sw, sh, image::ExtendedColorType::Rgb8)
+                .map_err(|e| e.to_string())?;
+            let file = format!("apple-splash-{sw}x{sh}.png");
+            let link = format!(
+                "<link rel=\"apple-touch-startup-image\" media=\"screen and (device-width: {cw}px) and \
+                 (device-height: {ch}px) and (-webkit-device-pixel-ratio: {ratio}) and (orientation: portrait)\" \
+                 href=\"./{file}\">"
+            );
+            Ok((file, link, out))
+        })
+        .collect()
+}
+
 /// What a page needs beside the bundle `wasm-bindgen` made in `out`: the
 /// icons, the manifest, the page (with its splash, from the app's folder
 /// `dir`) and its service worker. `body`: the page's first paint. What was
@@ -250,8 +330,9 @@ pub fn pack(
     let (icons, problem) = icons(app, hue, out)?;
     let made: Vec<Icon> = icons.iter().filter(|(_, n)| *n != 180).cloned().collect();
     std::fs::write(out.join("manifest.webmanifest"), manifest(&app.name, hue, &made)).map_err(|e| e.to_string())?;
-    let head = head(&app.name, hue, "icon-192.png", "icon-180.png");
-    // The splash, over the page until the app has drawn its view.
+    let mut head = head(&app.name, hue, "icon-192.png", "icon-180.png");
+    // The splash, over the page until the app has drawn its view, and as
+    // iOS's launch images (a release build: a Home Screen app starts on it).
     let splash = match &cfg.build.splash {
         Some(s) => {
             let png = dir.join(&s.image);
@@ -259,7 +340,14 @@ pub fn pack(
             std::fs::write(out.join("splash.png"), &bytes).map_err(|e| e.to_string())?;
             let s = aio::config::Splash { png: Box::leak(bytes.into_boxed_slice()), ..s.clone() };
             let bg = s.background.as_ref().map(|[l, d]| [l.as_str(), d.as_str()]);
-            aio_shell::splash::markup(&s, &app.name, &aio_shell::splash::colors(hue, bg), "./splash.png", true)
+            let colors = aio_shell::splash::colors(hue, bg);
+            if let (false, Some(b)) = (dev, aio_shell::splash::image_box(&s)) {
+                for (file, link, png) in launch_images(s.png, b, &colors[0][0])? {
+                    std::fs::write(out.join(file), png).map_err(|e| e.to_string())?;
+                    head = format!("{head}\n{link}");
+                }
+            }
+            aio_shell::splash::markup(&s, &app.name, &colors, "./splash.png", true)
         }
         None => String::new(),
     };
@@ -268,7 +356,8 @@ pub fn pack(
     std::fs::write(out.join("page.js"), page_js(dev)).map_err(|e| e.to_string())?;
     std::fs::write(out.join("start.js"), start_js(dev)).map_err(|e| e.to_string())?;
     let mut files = site_files(out, out).map_err(|e| e.to_string())?;
-    files.retain(|(f, _)| f != "sw.js");
+    // iOS fetches its launch images itself: the worker needn't hold them.
+    files.retain(|(f, _)| f != "sw.js" && !f.starts_with("apple-splash-"));
     files.sort();
     std::fs::write(out.join("sw.js"), service_worker(&app.id, &files)).map_err(|e| e.to_string())?;
     Ok(problem.into_iter().collect())
@@ -470,6 +559,61 @@ pub const RELOAD: &str = "(() => {
   tick();
 })();";
 
+/// The dev page's console in `ax dev --web`'s log (`page.js` in a dev
+/// build, aio's console intercept): every level, uncaught errors and
+/// refused promises, each line cut at 4 KB, sent in batches to
+/// `/aio-dev/log` (at most 200 waiting: past that they are counted, and
+/// the count said). The page's own console still shows them. With no dev
+/// server (a static `--dev` build) it stops sending.
+pub const CONSOLE: &str = "(() => {
+  const MAX = 4096, CAP = 200
+  let queue = [], dropped = 0, timer = 0, off = false
+  const text = (a) => {
+    if (typeof a === 'string') return a
+    if (a instanceof Error) return a.stack || String(a)
+    try { return JSON.stringify(a) ?? String(a) } catch (_) { return String(a) }
+  }
+  const flush = () => {
+    timer = 0
+    if (off || !queue.length) return
+    if (dropped) { queue.push({ level: 'warn', msg: `[aio] ${dropped} console lines were dropped (over ${CAP} waiting)` }); dropped = 0 }
+    const body = JSON.stringify(queue)
+    queue = []
+    fetch('/aio-dev/log', { method: 'POST', body, keepalive: body.length < 60000, headers: { 'content-type': 'application/json' } })
+      .then((r) => { if (r.status === 404) off = true }, () => {})
+  }
+  const send = (level, args) => {
+    if (off) return
+    if (queue.length >= CAP) { dropped++; return }
+    queue.push({ level, msg: Array.from(args, text).join(' ').slice(0, MAX) })
+    if (!timer) timer = setTimeout(flush, 100)
+  }
+  for (const [name, level] of [['log', 'info'], ['info', 'info'], ['warn', 'warn'], ['error', 'error'], ['debug', 'debug']]) {
+    const own = console[name].bind(console)
+    console[name] = (...args) => { own(...args); send(level, args) }
+  }
+  addEventListener('error', (e) => send('error', ['[uncaught]', e.error || e.message]))
+  addEventListener('unhandledrejection', (e) => send('error', ['[unhandled rejection]', e.reason]))
+  addEventListener('pagehide', flush)
+})();";
+
+/// What the dev page's console sent (`CONSOLE`): one line per entry, its
+/// level and text, terminal escapes taken out (pure).
+pub fn page_lines(body: &[u8]) -> Vec<String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body).unwrap_or_default();
+    entries
+        .iter()
+        .map(|e| {
+            let level =
+                e["level"].as_str().filter(|l| ["error", "warn", "info", "debug"].contains(l)).unwrap_or("info");
+            let msg: String = (e["msg"].as_str().unwrap_or_default().chars().take(4096))
+                .map(|c| if c.is_control() && c != '\n' && c != '\t' { '\u{fffd}' } else { c })
+                .collect();
+            format!("[page] {level}: {msg}")
+        })
+        .collect()
+}
+
 /// Whether a change to `changed` needs a new bundle: a stylesheet's needs
 /// none (the page reads it again, `aio::use_css!`) (pure).
 pub fn rebuilds(changed: &[PathBuf]) -> bool {
@@ -524,6 +668,13 @@ pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send
         .route(aio::http::Route::get("/aio-dev/build", move |_| {
             let b = serde_json::json!({ "n": n.load(Ordering::SeqCst), "error": *error.lock().unwrap() });
             async move { aio::http::Reply::json(&b).header("cache-control", "no-store") }
+        }))
+        // The page's console, in this log (`CONSOLE`).
+        .route(aio::http::Route::post("/aio-dev/log", |r| {
+            for l in page_lines(r.body()) {
+                eprintln!("ax dev: {l}");
+            }
+            async { aio::http::Reply::text("").status(204) }
         }))
         .route(aio::http::Route::get("/aio-dev/sheet", move |r| {
             let file = r.query("path").and_then(|p| Path::new(p).canonicalize().ok());
@@ -680,6 +831,48 @@ mod tests {
         for dev in [false, true] {
             assert!(!page_js(dev).contains(")\n("), "{}", page_js(dev));
         }
+    }
+
+    #[test]
+    fn ios_launch_images_draw_the_splash_on_its_background_for_each_screen() {
+        // A 40×20 red image, its box 200×100 CSS px.
+        let red = image::RgbaImage::from_pixel(40, 20, image::Rgba([255, 0, 0, 255]));
+        let png = aio_config::icon::png(red.as_raw(), 40, 20);
+        let made = launch_images(&png, (200, 100), "#08f").unwrap();
+        assert_eq!(made.len(), IOS_SCREENS.len());
+        let (file, link, bytes) = &made[0];
+        assert_eq!(file, "apple-splash-640x1136.png");
+        assert_eq!(
+            link,
+            "<link rel=\"apple-touch-startup-image\" media=\"screen and (device-width: 320px) and \
+             (device-height: 568px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)\" \
+             href=\"./apple-splash-640x1136.png\">"
+        );
+        let img = image::load_from_memory(bytes).unwrap().to_rgb8();
+        assert_eq!((img.width(), img.height()), (640, 1136));
+        assert_eq!(img.get_pixel(0, 0).0, [0, 0x88, 0xff], "the splash's background");
+        assert_eq!(img.get_pixel(320, 568).0, [255, 0, 0], "the image, in the middle");
+        // Drawn as the page draws it: 200 CSS px wide at 2x, 400 px.
+        assert_eq!(img.get_pixel(320 - 199, 568).0, [255, 0, 0]);
+        assert_eq!(img.get_pixel(320 - 201, 568).0, [0, 0x88, 0xff]);
+        // No wider than a screen narrower than its box.
+        let narrow = launch_images(&png, (500, 250), "#fff").unwrap();
+        let img = image::load_from_memory(&narrow[0].2).unwrap().to_rgb8();
+        assert_eq!(img.get_pixel(0, 568).0, [255, 0, 0], "edge to edge");
+        assert!(launch_images(b"not a png", (1, 1), "#fff").unwrap_err().starts_with("splash:"));
+    }
+
+    #[test]
+    fn the_dev_pages_console_reaches_the_log_every_level_capped_without_escapes() {
+        let js = page_js(true);
+        assert!(js.contains("fetch('/aio-dev/log'") && js.find("CAP = 200").is_some(), "{js}");
+        assert!(js.starts_with("(() => {\n  const MAX = 4096"), "first: it hears the other pieces' lines");
+        assert!(!page_js(false).contains("/aio-dev/log"), "a release page sends nothing");
+        let body = br#"[{"level":"warn","msg":"low disk"},{"level":"log","msg":"a\u001b[2Jb\nc"},{"msg":7}]"#;
+        assert_eq!(page_lines(body), ["[page] warn: low disk", "[page] info: a\u{fffd}[2Jb\nc", "[page] info: "]);
+        assert!(page_lines(b"not json").is_empty());
+        let long = serde_json::json!([{ "level": "error", "msg": "x".repeat(10_000) }]).to_string();
+        assert_eq!(page_lines(long.as_bytes())[0].len(), "[page] error: ".len() + 4096);
     }
 
     /// aio's diagnostic page: a failed build's errors (not its warnings or
@@ -1100,6 +1293,51 @@ pub(crate) mod browser {
         // What the worker doesn't hold goes to the server as asked.
         let asked = "fetch('./missing.txt').then((r) => r.status, (e) => 'failed: ' + e)";
         assert_eq!(b.eval(asked).await.unwrap(), json!(404));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_dev_pages_console_and_its_uncaught_errors_reach_the_dev_log() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("index.html"),
+            "<!doctype html><html><body><div id=\"main\"></div><script src=\"./page.js\"></script></body></html>",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("page.js"), page_js(true)).unwrap();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = said.clone();
+        let http =
+            aio::http::Http::default().shell(dir.path()).route(aio::http::Route::post("/aio-dev/log", move |r| {
+                heard.lock().unwrap().extend(page_lines(r.body()));
+                async { aio::http::Reply::text("").status(204) }
+            }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let opts = aio::sync::Options { open: true, http, ..Default::default() };
+        tokio::spawn(aio::sync::serve_with(Handle::<DevSite>::memory(), l, opts));
+        let Some(c) = Chromium::open(&url) else {
+            return eprintln!("no Chromium: skipped");
+        };
+        let mut t = c.tabs(&url, 1).await.remove(0);
+        until(&mut t, "location.protocol + document.readyState", json!("http:complete")).await;
+        let did = "console.log('hello', { n: 1 }); console.debug('deep'); console.warn('careful'); \
+                   Promise.reject(new Error('no answer')); setTimeout(() => { throw new Error('boom') }); true";
+        assert_eq!(t.eval(did).await.unwrap(), json!(true));
+        let want = |l: &str| said.lock().unwrap().iter().any(|s| s.starts_with(l));
+        for _ in 0..200 {
+            if want("[page] error: [uncaught] Error: boom")
+                && want("[page] error: [unhandled rejection] Error: no answer")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let got = said.lock().unwrap().clone();
+        for l in ["[page] info: hello {\"n\":1}", "[page] debug: deep", "[page] warn: careful"] {
+            assert!(got.iter().any(|s| s == l), "{l} in {got:?}");
+        }
+        assert!(want("[page] error: [uncaught] Error: boom"), "{got:?}");
+        assert!(want("[page] error: [unhandled rejection] Error: no answer"), "{got:?}");
     }
 
     /// Types `text` into the field `t` names, as a person does.
