@@ -105,6 +105,13 @@ pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, ove
         Align::Right => "right",
     };
     let (side, bottom) = s.margin.map_or((24, 18), |m| (m, m));
+    // The text's shadow: the OS's on the desktop (macOS, Linux on; Windows
+    // off), only when asked on the web.
+    let shadow = match over {
+        true => s.shadow == Some(true),
+        false => s.shadow.unwrap_or(!cfg!(windows)),
+    };
+    let shadow = if shadow { "text-shadow:0 1px 2px rgba(0,0,0,.45);" } else { "" };
     let text_at = match s.text_position {
         TextPosition::Below => format!("height:{TEXT_STRIP}px;line-height:{TEXT_STRIP}px;padding:0 {side}px"),
         TextPosition::Over => format!("position:absolute;left:{side}px;right:{side}px;bottom:{bottom}px"),
@@ -122,7 +129,7 @@ pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, ove
          font:{weight} {font}px {family}system-ui,-apple-system,\"Segoe UI\",sans-serif;user-select:none;cursor:default}}\
          #aio-splash>div{{position:relative;display:flex;flex-direction:column;width:{w}px;max-width:100%;background:{lb}}}\
          #aio-splash img{{display:block;width:{w}px;height:{h}px;max-width:100%;object-fit:{fit}}}\
-         #aio-splash p{{margin:0;{text_at};text-align:{align};box-sizing:border-box;\
+         #aio-splash p{{margin:0;{text_at};text-align:{align};{shadow}box-sizing:border-box;\
          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}{frame}\
          @media (prefers-color-scheme: dark){{#aio-splash,#aio-splash>div{{background:{db};color:{dt}}}}}{clear}</style>\
          <div id=\"aio-splash\" role=\"img\" aria-label=\"{alt}\" data-min=\"{min}\" data-max=\"{max}\">\
@@ -167,9 +174,10 @@ pub fn page(s: &Splash, title: &str, colors: &[[String; 4]; 2]) -> String {
 }
 
 /// What main.js reads (`splash.json`): the window's size, how long it
-/// stays, its background by mode. None: no splash, or an image that is not
-/// a PNG (said).
-pub fn plan(s: &Splash, colors: &[[String; 4]; 2]) -> Option<aio::serde_json::Value> {
+/// stays, its background by mode, where it opens (`position`; `target`: the
+/// app's window as last placed, `[x, y, w, h]`) and its drop shadow. None:
+/// no splash, or an image that is not a PNG (said).
+pub fn plan(s: &Splash, colors: &[[String; 4]; 2], target: Option<[i32; 4]>) -> Option<aio::serde_json::Value> {
     let Some((w, h)) = window_size(s) else {
         eprintln!("[aio] the splash image is not a PNG: no splash");
         return None;
@@ -184,18 +192,22 @@ pub fn plan(s: &Splash, colors: &[[String; 4]; 2]) -> Option<aio::serde_json::Va
         "bg": [colors[0][0], colors[1][0]],
         "clear": clear,
         "fade": s.fade_ms.unwrap_or(100),
+        "mode": s.position,
+        "target": target,
+        "windowShadow": s.window_shadow.unwrap_or(cfg!(target_os = "macos")),
     }))
 }
 
 /// Lay the desktop splash out in the shell's dir: `splash.json` (`null`:
-/// none), and its page and image beside it.
+/// none), and its page and image beside it ([`plan`]'s `target`).
 pub fn install(
     dir: &std::path::Path,
     s: Option<&Splash>,
     title: &str,
     colors: &[[String; 4]; 2],
+    target: Option<[i32; 4]>,
 ) -> std::io::Result<()> {
-    let plan = s.and_then(|s| Some((s, plan(s, colors)?)));
+    let plan = s.and_then(|s| Some((s, plan(s, colors, target)?)));
     let Some((s, plan)) = plan else { return std::fs::write(dir.join("splash.json"), "null") };
     std::fs::write(dir.join("splash.png"), s.png)?;
     std::fs::write(dir.join("splash.html"), page(s, title, colors))?;
@@ -203,7 +215,7 @@ pub fn install(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A PNG header of `w`×`h` (all `png_size` reads).
@@ -271,7 +283,7 @@ mod tests {
         };
         // Built in: the Windows lane runs this binary away from the source tree.
         let s = Splash { png: include_bytes!("../../aio/tests/fixtures/splash.png"), ..s };
-        install(&dir, Some(&s), "Splashed", &colors(210, None)).unwrap();
+        install(&dir, Some(&s), "Splashed", &colors(210, None), None).unwrap();
         let (sock, ctl_sock) = (aio::ipc::addr(d.path(), "wire"), aio::ipc::addr(d.path(), "ctl"));
         let mut wires = aio::ipc::Listener::bind(&sock).unwrap();
         let mut ctls = aio::ipc::Listener::bind(&ctl_sock).unwrap();
@@ -342,7 +354,7 @@ mod tests {
         ] {
             assert!(html.contains(want), "{want}: {html}");
         }
-        let p = plan(&s, &c).unwrap();
+        let p = plan(&s, &c, None).unwrap();
         // Text over the image: no strip under it.
         assert_eq!((p["width"].as_u64(), p["height"].as_u64()), (Some(480), Some(300)));
         assert_eq!((p["clear"].as_bool(), p["fade"].as_u64()), (Some(true), Some(250)));
@@ -362,7 +374,7 @@ mod tests {
         );
         assert_eq!(window_size(&plain), Some((640, 400 + TEXT_STRIP)));
         assert_eq!(
-            (plan(&plain, &c).unwrap()["clear"].as_bool(), plan(&plain, &c).unwrap()["fade"].as_u64()),
+            (plan(&plain, &c, None).unwrap()["clear"].as_bool(), plan(&plain, &c, None).unwrap()["fade"].as_u64()),
             (Some(false), Some(100))
         );
         // The download window drawing the splash takes its bar and text colours.
@@ -392,16 +404,16 @@ mod tests {
             html.contains(&format!("prefers-color-scheme: dark){{#aio-splash,#aio-splash>div{{background:{}", c[1][0]))
         );
         assert!(html.contains("default-src 'none'"), "the splash page runs nothing");
-        let p = plan(&s, &c).unwrap();
+        let p = plan(&s, &c, None).unwrap();
         assert_eq!((p["width"].as_u64(), p["height"].as_u64()), (Some(640), Some(400 + u64::from(TEXT_STRIP))));
         assert_eq!((p["min"].as_u64(), p["max"].as_u64()), (Some(400), Some(15000)));
         let own = colors(210, Some(["#fff", "#000"]));
         assert_eq!((own[0][0].as_str(), own[1][0].as_str(), own[0][2].as_str()), ("#fff", "#000", c[0][2].as_str()));
-        assert!(plan(&Splash { png: b"GIF89a", ..s.clone() }, &c).is_none(), "not a PNG: no splash");
+        assert!(plan(&Splash { png: b"GIF89a", ..s.clone() }, &c, None).is_none(), "not a PNG: no splash");
         let d = tempfile::tempdir().unwrap();
-        install(d.path(), None, "T", &c).unwrap();
+        install(d.path(), None, "T", &c, None).unwrap();
         assert_eq!(std::fs::read_to_string(d.path().join("splash.json")).unwrap(), "null");
-        install(d.path(), Some(&s), "T", &c).unwrap();
+        install(d.path(), Some(&s), "T", &c, None).unwrap();
         assert_eq!(std::fs::read(d.path().join("splash.png")).unwrap(), s.png);
         assert!(d.path().join("splash.html").is_file());
     }
