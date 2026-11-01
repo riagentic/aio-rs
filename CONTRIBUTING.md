@@ -56,6 +56,11 @@ The Windows tests run on a real Windows when one is named:
 `AIO_CI_WINDOWS="user@host [ssh options]" ./ci.sh` (or
 `./ci-windows.sh user@host`; the machine needs only OpenSSH).
 
+GitHub (`.github/workflows/ci.yml`) runs `./ci.sh` on Ubuntu after
+`ax setup` (with `ffmpeg` for the test videos), the workspace clippy and
+tests on Windows and macOS with the Electron runtime (`ax runtime --fetch`),
+and `cargo audit` (accepted advisories in `.cargo/audit.toml`).
+
 ## The guide (`docs/`)
 
 - Every Rust block in a guide page is a doctest: the page is included by
