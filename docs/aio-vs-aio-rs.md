@@ -151,8 +151,6 @@ of lag.
 - **History.** Time travel reads the store: in a release build, over the
   whole history, after a restart; aio's is dev-only, 2000 entries in
   memory ([time travel](debugging/time-travel.md)).
-- **An offline queue that survives a restart** (`connect_saved`); aio's
-  lives in the page's memory ([sync](state/sync.md)).
 - **Real UI tests.** `TestUi` runs the real views in the real engine:
   rects, styles, screenshots and scrolling measure for real, where aio's
   happy-dom has no layout ([UI tests](testing/ui.md)).
@@ -196,13 +194,10 @@ beyond the aio-rs form.
 | Persistence | `persistMode: "single" \| "multi"` | log + snapshots per cell; aio's layout read and written as found | ➖ | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Persistence | `launch.json`, a restart with the last flags | none | pass the flags again | [files](persistence/files.md#limits-compared-with-aio) |
 | Persistence | a query builder (`where` objects) | plain SQL | `aio::db::Db` | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Sync | merge strategies per field (`lww`, `counter`, `set-add`, `text`…), HLC | methods replayed in order on the server | methods; `aio::merge::text3` for prose | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | peer-to-peer, server-less sync | a copy needs a server | a server | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | Immer add/remove ops for arrays | a `Vec` re-sent whole when its length changes | a map for a growing collection | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | `fullStateThreshold`, `syncIntervalMs`, staleness multipliers | none: a patch per event | `#[coalesce]` | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
+| Sync | `lww-per-key` and `set-remove` view merges, HLC | methods replayed in order on the server; `Remote::merge` shows `Text`, `Counter`, `SetAdd` | a method per key | [offline](persistence/offline.md#limits-compared-with-aio) |
+| Sync | render-staleness backpressure | every link paced the same (`sync_interval_ms`) | ➖ | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
 | Sync | path subscriptions | a copy gets every patch of its cell | split cells | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | binary side channels, framing, backpressure | JSON only; no binary route | blobs or a route | [transports](clients/transports.md#gaps), [sync](state/sync.md#limits) |
-| Sync | every cell served on one socket | `aio::sync::serve` serves one `Handle` | one served cell, or one app per cell | [CLI and service](examples/cli-service.md#limits) |
+| Sync | every cell on one socket | every cell on one `/ws` and port (`Http::cell`), a socket per cell | ➖ | [sync](state/sync.md#limits) |
 | Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
@@ -300,14 +295,13 @@ construct-by-construct tables are in the
   `call_confirmed` is the server's answer (aio's `await` gives the
   server's). An async method's `Answer` is the server's end.
   [sync](state/sync.md#limits)
-- **The offline queue holds 500 and refuses when full** (aio: 1000,
-  dropping the oldest) unless `[client] retention` is set; it can be kept
-  on disk. [sync](state/sync.md#limits)
-- **Merges are methods replayed on the server**, not per-field
-  strategies; a copy never merges with another copy.
-  [offline](persistence/offline.md#limits-compared-with-aio)
-- **A list is re-sent whole when its length changes**: keep a growing
-  collection in a map. [offline](persistence/offline.md#limits-compared-with-aio)
+- **A full offline queue refuses new calls** (500, as aio's `pendingCap`;
+  aio drops the new op) unless `[client] retention` lets the oldest past
+  it go; it can be kept on disk. [sync](state/sync.md#limits)
+- **Merges are methods replayed on the server** (as aio's CRDT ops run
+  through its methods); a copy may show a field merged while its call
+  waits (`Remote::merge`) and hears where a server change met it
+  (`on_conflict`). [offline](persistence/offline.md#conflicts-and-fields-shown-merged)
 - **Writes are committed before a call returns**; only `#[coalesce]`
   methods are held (aio debounces every write). Coalesce the methods a
   held key or a pointer calls. [data](migration/data.md#durability-what-each-saves-when)
@@ -410,15 +404,15 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Shared cells | `sync`, broadcast | `#[cell(shared)]` | ✅ |
 | Optimistic calls | `useOptimistic`, local-first | built in: copies predict | ✅ |
 | Access per method | `access` | `#[client(role, allow)]` | ✅ |
-| Merging | per-field CRDT strategies, HLC | ❌ (methods replayed on the server) | ❌ |
-| Server-less, peer-to-peer | yes | ❌ (a server confirms) | ❌ |
-| Offline queue | 1000, in memory, drops oldest | 500, refuses when full, on disk if asked | 🔄 |
-| Array patches | Immer ops | whole `Vec` on a length change | 🔄 |
-| Throttles | `syncIntervalMs`, `fullStateThreshold` | ❌ (a patch per event; `#[coalesce]`) | ❌ |
+| Merging | per-field view merges, `onConflict`, HLC | methods replayed on the server; `Remote::merge` (`Text`, `Counter`, `SetAdd`), `on_conflict` | 🔄 |
+| Offline queue | 500 per `sync:` cell, in the page's storage, `retention` | 500, refuses when full, `retention`, on disk if asked | ✅ |
+| Array patches | Immer `add`/`remove`, narrowed | `insert`/`del` per item, else the array | ✅ |
+| Throttles | `syncIntervalMs`, `fullStateThreshold` | `sync_interval_ms`, `full_state_percent` | ✅ |
 | Path subscriptions | yes | ❌ (split cells) | ❌ |
-| Binary wire, side channels | yes | ❌ (blobs, routes) | ❌ |
-| Server functions, routes | `serverFns`, `routes` | `aio::fns::ServerFn`, `aio::http` | ✅ |
-| One socket, every cell | yes | ❌ (`sync::serve` takes one `Handle`) | ❌ |
+| Binary side channels | a raw WebSocket route, a recipe | `Route::socket` with framing, drop or close, gap checks | ✅ |
+| Server functions, routes | `serverFns`, `routes`, streamed `Response` | `aio::fns::ServerFn`, `aio::http`, `Reply::stream` | ✅ |
+| One socket, every cell | yes | one `/ws` and port for every cell (`Http::cell`), a socket per cell | 🔄 |
+| Peer identity, door hooks | `resolvePeer`, `localConnectHooks` | `Http::resolve_peer`, `Http::door_links` | ✅ |
 | Pairing, discovery, peers | PIN, CPace, UDP 8099, `x-aio-peer` | the same formats | ✅ |
 | Calling another app | `peer()`, `call` | `Peer::find`, `AioLink` | ✅ |
 | Server limits | `maxConnections`, `wsLimits` | `[server.limits]` | ✅ |

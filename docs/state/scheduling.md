@@ -401,11 +401,11 @@ skip all of that.
 - Views re-render at most once per `aio::ui::BACKGROUND` (150 ms) for
   commits from effects, schedules and other threads; a call from the
   view renders at once ([performance](../performance.md)).
-- Pushes to a client follow commits: a client slower than the commits
-  gets one patch for several. There is no push-rate setting (aio's
-  `syncIntervalMs`); to send less, call less (one effect that commits
-  once per batch) or make the viewer's view smaller
-  ([visibility](visibility.md)).
+- Pushes to a client are paced: a schedule's or an effect's commits
+  reach a link at most once per `[server.limits] sync_interval_ms` (50
+  ms, aio's `syncIntervalMs`), folded into one patch; a person's call
+  goes at once. To send less, call less (one effect that commits once
+  per batch) or make the viewer's view smaller ([visibility](visibility.md)).
 - Keep a tick out of the timeline, reports and the debug log with
   `#[cell(diagnostics = false)]`; its events are still kept.
 - aio-rs says when it sees trouble. Over 30 pushes a second, 500 KB in

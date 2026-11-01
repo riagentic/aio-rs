@@ -170,11 +170,57 @@ one TCP port for everything network-facing:
 | your own UI asks the server for an answer | a server function (`Http::server_fn`) | nothing more: it rides the sync link, `/ws` or the door, typed at both ends |
 | a value a cell should keep | a `#[client]` method | the same link |
 | another program calls in (a webhook, an OAuth callback, `curl`) | a route (`Http::route`) | a listening port: routes are served only by `[server] listen`, never on a door |
+| events pushed to a page or a tool (SSE, NDJSON) | a route answering `Reply::stream(type, parts)` | the same port; each part goes as it is made |
 
 ## Binary data
 
-aio-rs's sync wire is JSON only; there is no binary side channel yet.
-Big or binary data travels these ways instead:
+aio-rs's sync wire is JSON only. A sustained binary stream (screen
+frames, audio, telemetry, remote input) goes on a side channel: the cell
+carries control (who, which session, start and stop), a WebSocket route
+carries the payload, never persisted, diffed or sent to every client
+(aio's binary streams).
+
+```rust
+use aio::http::side::{Frames, Seen};
+use aio::http::{Http, Reply, Route};
+
+fn http() -> Http {
+    Http::default().route(Route::socket("/stream", |req| async move {
+        // Decided before the upgrade: an unknown session never gets a socket.
+        if req.query("sid") != Some("s1") {
+            return Err(Reply::text("unknown session").status(403));
+        }
+        Ok(|mut f: Frames| async move {
+            while let Some(frame) = f.recv().await {
+                if let Seen::Gap(n) = frame.seen {
+                    eprintln!("lost {n} frames of kind {}", frame.kind);
+                }
+                // Kind 1 (video) is droppable: the next frame supersedes it.
+                if f.send(frame.kind, &frame.body, frame.kind == 1).is_err() {
+                    return; // backpressure on a frame that can't be dropped: over
+                }
+            }
+        })
+    }))
+}
+# fn main() { let _ = http(); }
+```
+
+- Frames are `[kind:u8][seq:u24 LE][payload]` (`side::encode`,
+  `side::decode`), one sequence counter per kind (`side::Seqs`), wrapping
+  at 2^24, so interleaved kinds never look like a loss.
+- `send(kind, body, droppable)`: past `side::HIGH_WATER` (4 MB) waiting
+  for a slow receiver, a droppable frame is dropped (`Ok(false)`) and any
+  other closes the stream with 1011 `backpressure`, never a silent desync.
+- `recv` gives each frame with `Seen::Next`, `Gap(n)` or `Old` against
+  the last of its kind: a gap on a droppable kind is information, on
+  another a broken stream to tear down.
+- The route is behind the key (`?token=` from a browser, or a session),
+  its frames up to `max_body`; a plain GET is 426. The side channel and
+  the sync link open and fail apart: let the cell say whether a session
+  exists.
+
+Other big or binary data travels these ways:
 
 | Need | How |
 |---|---|
@@ -189,9 +235,6 @@ Big or binary data travels these ways instead:
 
 What aio has here and aio-rs doesn't yet:
 
-- No binary side channels (aio's upgraded binary route with its framing,
-  per-kind drop or queue backpressure and gap detection). Use the table
-  above; a raw binary WebSocket route can't be declared.
 - Routes are never served over a socket: an app with routes and no
   `[server] listen` doesn't serve them (aio serves a desktop app's routes
   over its local socket through `aio://`).

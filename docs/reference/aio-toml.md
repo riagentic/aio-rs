@@ -757,7 +757,7 @@ see [views](../ui/views.md) and the tables in
 | `serveDirs`, `assets` | `[server.dirs]`, `[server.public_dirs]` |
 | `client` | `[app] mode` and `[app] ui` |
 | `keepServer` | `mode = "client-server"` with `ui = "browser"` runs until asked to stop; no `--keep-server` flag for a window app (**gap**) |
-| `localConnectHooks` | none: `Http::on_link` hears client links only, never a tool on the local door (**gap**) |
+| `localConnectHooks` | `Http::door_links(true)`: `Http::on_link` hears the local door's links too (a peer app's copy; tools never) |
 | `transport` | fixed: the window talks over a private socket, clients over `/ws` |
 | `takeover` | `--takeover` |
 | `serverUrl` | `[client] server` |
@@ -765,7 +765,7 @@ see [views](../ui/views.md) and the tables in
 | `key` | the app's key file and `AIORT_TOKEN`; `key: false` is `[server] open` |
 | `pairing` | `[server] pairing` |
 | `resolveUser` | `aio::auth::Users::resolve(f)` |
-| `resolvePeer`, `peerTypes` | `aio::peer::Peer` calls another app on this machine as a client (`describe` lists what it may call); no hook choosing a peer's user, no contract text (**gap**) |
+| `resolvePeer`, `peerTypes` | `Http::resolve_peer(f)`: the `Caller` (user, role) a peer app on this machine is; `aio::peer::Peer` calls one (`describe` lists what it may call); the contract is a crate both apps use, not text |
 | `db` | `#[table(...)]` fields, `aio::db::Db` |
 | `perfCheck`, `perfBudget` | `[perf]` |
 | `budgets` | `[budgets]` |
@@ -784,7 +784,7 @@ see [views](../ui/views.md) and the tables in
 | `childWindows`, `electron` | `aio_shell::Window { web, permissions, … }`; `AIORT_SANDBOX` |
 | `splash` | `[build.splash]` |
 | `libraryMode` | `Handle::memory()`, `Handle::open` without `aio_shell::start` (tests, embedding) |
-| `syncIntervalMs`, `fullStateThreshold` | none: when and how patches go out is aio-rs's own, not configurable (**gap**) |
+| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms`, `full_state_percent` (`0.5` is `50`) |
 | `routes` | `aio::http::Http::route(Route::get(…))` |
 | `maxConnections`, `wsLimits` | `[server.limits]` |
 | `appFlags` | not needed: aio-rs takes only its own flags (`aio::paths::FLAGS`) and passes the rest to the app |
