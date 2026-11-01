@@ -468,7 +468,7 @@ fn runtime(fetch: bool) -> Out {
 /// the installed one (its bin link).
 fn app_bin(t: &Target) -> Result<PathBuf, String> {
     match &t.pkg {
-        Some(pkg) => dev::build(&pkg.name, Some(&t.plan.logs))
+        Some(pkg) => dev::build(pkg, Some(&t.plan.logs))
             .ok_or_else(|| format!("{}: the build failed (`ax errors {}`)", t.name, t.name)),
         None => {
             let bin = places().bin.join(&t.id);

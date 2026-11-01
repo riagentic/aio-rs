@@ -54,6 +54,7 @@ css = "tailwindcss -i a.css -o b.css"
 platforms = ["linux", "macos-arm64"]
 runtime = "bundled"
 chromium_extras = "strip"
+assets = { "/built" = "media" }
 [build.android]
 application_id = "org.example.lit"
 schemes = ["lit"]

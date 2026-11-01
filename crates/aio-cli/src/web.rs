@@ -355,6 +355,12 @@ pub fn pack(
         }
         None => String::new(),
     };
+    // `[build] assets`: at their URL paths, held offline by the worker.
+    for (url, file) in aio::config::asset_files(dir, &cfg.build.assets)? {
+        let to = out.join(aio::config::asset_path(&url));
+        std::fs::create_dir_all(to.parent().unwrap_or(out)).map_err(|e| e.to_string())?;
+        std::fs::copy(&file, &to).map_err(|e| format!("{}: {e}", file.display()))?;
+    }
     let page = index_html(&app.name, &cfg.app, &head, body).replacen("<body>\n", &format!("<body>\n{splash}"), 1);
     std::fs::write(out.join("index.html"), page).map_err(|e| e.to_string())?;
     std::fs::write(out.join("page.js"), page_js(dev)).map_err(|e| e.to_string())?;
@@ -1074,14 +1080,22 @@ pub(crate) mod browser {
         }
         let cfg = aio::config::Config::parse(
             "[app]\nid = \"web-test\"\nname = \"Web test\"\nlang = \"cs\"\ndir = \"auto\"\n\
+             [build]\nassets = { \"/media\" = \"media\" }\n\
              [build.splash]\nimage = \"splash.png\"\ntext = \"Starting {title}\"\nmin_ms = 300",
         )
         .unwrap();
         std::fs::write(page.join("splash.png"), include_bytes!("../../aio/tests/fixtures/splash.png")).unwrap();
+        std::fs::create_dir_all(page.join("media")).unwrap();
+        std::fs::write(page.join("media/hi there.txt"), "hi").unwrap();
         assert_eq!(pack(&app, &cfg, &page, &out, "", false).unwrap(), Vec::<String>::new());
         let index = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(index.contains("<body>\n<style>#aio-splash{") && index.contains("<p>Starting Web test</p>"));
         assert!(out.join("splash.png").is_file());
+        // `[build] assets` at their paths, held offline by the worker; iOS's launch images beside.
+        assert_eq!(std::fs::read_to_string(out.join("media/hi there.txt")).unwrap(), "hi");
+        let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
+        assert!(sw.contains("./media/hi there.txt") && !sw.contains("apple-splash-"), "{sw}");
+        assert!(index.contains("apple-touch-startup-image") && out.join("apple-splash-1290x2796.png").is_file());
         Some(out)
     }
 
@@ -1248,6 +1262,9 @@ pub(crate) mod browser {
         until(&mut a, TALLY, json!({ "n": 3, "busy": true, "running": 0 })).await;
         let kept = "JSON.parse(localStorage.getItem('aio.web-test:tally')).view";
         until(&mut a, kept, json!({ "n": 3 })).await;
+        // A built-in file at its URL path.
+        let hi = "fetch('./media/hi%20there.txt').then((r) => r.text())";
+        assert_eq!(a.eval(hi).await.unwrap(), json!("hi"));
         // An async method: its effect runs on the page's timer, counted while it does.
         assert_eq!(a.eval(&format!("{APP}.then((m) => m.later())")).await.unwrap(), json!(true));
         assert_eq!(a.eval(TALLY).await.unwrap()["running"], json!(1));

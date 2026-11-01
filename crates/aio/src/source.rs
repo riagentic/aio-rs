@@ -338,7 +338,7 @@ impl<T: Cell> Source<T> {
             #[cfg(feature = "tls")]
             tls,
             hosts: cfg.server.hosts.clone(),
-            http: http.configured(&cfg.server, &dirs.files()),
+            http: http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files),
             auth: match cfg.accounts.on {
                 true => Some(std::sync::Arc::new(
                     crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy())

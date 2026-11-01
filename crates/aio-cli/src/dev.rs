@@ -272,9 +272,12 @@ pub fn changes(kind: &notify::EventKind) -> bool {
 /// Build package `name` ([`layout`]): its binary, as cargo says it wrote
 /// it; a failed build's errors are also kept in `logs/build.log` for `aio
 /// errors` (a good build removes it).
-pub fn build(name: &str, logs: Option<&Path>) -> Option<PathBuf> {
+pub fn build(pkg: &Pkg, logs: Option<&Path>) -> Option<PathBuf> {
+    let name = &pkg.name;
+    let stamp = pkg.dirs.first().map_or_else(String::new, |d| crate::build::assets_stamp(d));
     let out = Command::new("cargo")
         .args(["build", "-q", "-p", name, "--message-format=json-render-diagnostics"])
+        .env("AIORT_ASSETS", stamp)
         .args(layout())
         .stderr(std::process::Stdio::piped())
         .output();
@@ -1010,7 +1013,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         // Built and run once, in the foreground, no reload.
         let (_w, rx) = watch_these(&[])?;
         css(&pkg, &rx);
-        let bin = build(&pkg.name, logs.as_deref()).ok_or(format!("{name}: the build failed"))?;
+        let bin = build(&pkg, logs.as_deref()).ok_or(format!("{name}: the build failed"))?;
         let mut app = launch(&bin, args, &put).ok_or(format!("{name}: it didn't start"))?;
         let ended = app.0.wait().map_err(|e| e.to_string())?;
         return Ok(if ended.success() { String::new() } else { format!("{name} ended: {ended}") });
@@ -1073,7 +1076,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     };
     eprintln!("ax dev: {name} — watching {}", shown.join(", "));
     css(&pkg, &rx);
-    let mut app = build(&pkg.name, logs.as_deref()).and_then(|bin| launch(&bin, args, &put));
+    let mut app = build(&pkg, logs.as_deref()).and_then(|bin| launch(&bin, args, &put));
     let asked = || logs.as_ref().is_some_and(|l| std::fs::remove_file(l.join(RESTART)).is_ok());
     loop {
         // Wait for a change, then for the burst of saves to settle; or for `ax restart`.
@@ -1087,7 +1090,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
         css(&pkg, &rx);
-        if let Some(bin) = build(&pkg.name, logs.as_deref()) {
+        if let Some(bin) = build(&pkg, logs.as_deref()) {
             stop(&mut app);
             eprintln!("ax dev: restarting {name}");
             app = launch(&bin, args, &put);

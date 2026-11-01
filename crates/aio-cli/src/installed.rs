@@ -153,6 +153,7 @@ pub fn from_bundle(bundle: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<St
 /// AppImage runs, as the AppImage runtime unpacks into `TMPDIR` before
 /// anything of the app can, and `/tmp` is shared. A path the entry can't
 /// spell plainly (a quote, `$`, `%`, a backslash) is refused.
+#[cfg(unix)]
 pub fn appimage_entry(app: &crate::build::App, file: &Path, unpack: &Path) -> Result<String, String> {
     let plain = |p: &Path| match p.to_str() {
         Some(s) if !s.contains(['\'', '"', '\\', '$', '`', '%', '\n']) => Ok(s.to_string()),
@@ -275,6 +276,7 @@ mod tests {
         assert!(from_bundle(&t.path().join("notes.zip"), &env).unwrap_err().contains("not a Linux bundle"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_appimages_menu_entry_unpacks_it_in_a_private_tmpdir_as_aios_did() {
         let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: None };

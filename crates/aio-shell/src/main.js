@@ -5,6 +5,7 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, nativeTheme, net: enet, protocol, screen, session, shell, webContents } = require('electron')
 const net = require('node:net')
 const path = require('node:path')
+const fs = require('node:fs')
 const { pathToFileURL } = require('node:url')
 
 const arg = (k) => (process.argv.find((a) => a.startsWith(`--aio-${k}=`)) || '').slice(k.length + 7)
@@ -187,6 +188,13 @@ app.whenReady().then(() => {
     if (u.host === 'app' && u.pathname.startsWith('/file/')) {
       const p = path.resolve(decodeURIComponent(u.pathname.slice('/file'.length)))
       if (IMAGE.test(p)) return enet.fetch(pathToFileURL(p).toString())
+    }
+    // The app's built-in files ([build] assets), at their own paths.
+    const assets = path.join(dir, 'assets')
+    let own = null
+    try { own = path.resolve(assets, '.' + decodeURIComponent(u.pathname)) } catch (_) {}
+    if (u.host === 'app' && own && own.startsWith(assets + path.sep) && fs.existsSync(own) && fs.statSync(own).isFile()) {
+      return enet.fetch(pathToFileURL(own).toString())
     }
     return new Response('', { status: 404 })
   })
