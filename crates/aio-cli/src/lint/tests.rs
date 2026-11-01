@@ -890,6 +890,7 @@ mod tests {
         "{t:?}"
     );
     assert!(t[1].2.contains("test `adds` checks nothing") && t[2].2.contains("compares `n` with itself"), "{t:?}");
+}
 
 #[test]
 fn ax_dev_lints_each_saved_file_alone() {
