@@ -163,10 +163,14 @@ ax snapshot load notes notes-snapshot.json   # each cell put back as a new event
 
 ### Scheduled backups
 
-aio-rs makes no backups on a timer. To keep dated copies, run `ax backup`
-from the OS's scheduler (cron, a systemd timer, Task Scheduler), or call
-`aio::backup::backup_all(id, &dirs.store, to)` from the app's own code
-off the cell's thread.
+`[data] backup_every = "1d"` makes a whole backup (as `ax backup` does)
+into `<home>/backups` as `<id>-auto-<time>.aio-backup` while the app
+runs, keeping the newest `backup_keep` (default 7); backups made by hand
+are never removed. The clock runs from the newest timed backup, so a
+restart doesn't put one off; the first is made at the first launch. A
+failed one is said in the log and tried again a turn later. Outside the
+app, run `ax backup` from the OS's scheduler, or call
+`aio::backup::timed_once(id, &dirs.store, dir, keep)` yourself.
 
 ## Secrets in files
 
@@ -192,8 +196,7 @@ for a whole home.
 
 ## Limits, compared with aio
 
-- No backups on a timer and no WAL-checkpoint setting: use the OS's
-  scheduler ([above](#scheduled-backups)); SQLite checkpoints on its own.
+- No WAL-checkpoint setting: SQLite checkpoints on its own.
 - A whole backup reads each file of `data/` into memory as it copies it:
   a `files/` folder of many gigabytes makes a backup that large and slow.
   Back very large blob stores up with your own tools.
@@ -217,4 +220,4 @@ for a whole home.
 `cargo doc -p aio-rs --no-deps --open`: `aio::paths` (`app_dirs`,
 `AppDirs`, `Ask`, `FLAGS`, `plan`, `write_atomic`, `write_private`,
 `in_sandbox`, `sockets_at`), `aio::backup` (`backup`, `backup_all`,
-`restore`, `left_out`, `app_of`).
+`restore`, `left_out`, `app_of`, `timed`, `timed_once`).

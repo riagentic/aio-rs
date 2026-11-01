@@ -74,6 +74,7 @@ rt.block_on(async {
 | `#[table("contacts")]` | `Vec<Row>` | one per item |
 | `#[table("contacts", key = "id")]` | `BTreeMap<String, Row>` (or `HashMap`) | one per entry; each key must equal its row's `id` |
 | `…, columns = "id INTEGER PRIMARY KEY, name TEXT NOT NULL"` | either | the table's SQL columns, made at boot |
+| `…, columns = CONTACTS` (a `const CONTACTS: &[aio::columns::Col]`) | either | the same, typed (aio's `table({ id: pk(), … })`) |
 
 - **The field stays the source of truth.** It is still in the state, in
   memory and on the wire; only its storage is the table instead of the
@@ -81,11 +82,20 @@ rt.block_on(async {
 - **Writes are by row.** With a primary key (or `key = "col"`), a commit
   writes only the rows that changed and deletes the ones gone; without
   one it rewrites the table. All in the call's own transaction.
-- **What a row must look like.** The element type is a flat struct whose
-  field names are the columns. Each value is a number, a string or null
-  (`Option`); a `bool`, a list or a nested struct refuses the commit, as
-  does a field the table has no column for. Store a flag as `i64` (0/1)
-  or a string.
+- **What a row must look like.** The element type is a struct whose
+  field names are the columns. A number, a string or null (`Option`) goes
+  in any column; a `bool` needs a `BOOLEAN` column (stored 0/1), a list or
+  a nested value a `JSON` column (stored as JSON text): both read back as
+  they were. In any other column they refuse the commit (aio refuses
+  them in a row), as does a field the table has no column for.
+- **Typed columns** (`aio::columns`, aio's column helpers): `pk("id")`
+  (`INTEGER PRIMARY KEY`), `text`, `integer`, `real`, `refs("user_id",
+  "users")` (`INTEGER REFERENCES users`, its primary key whatever it is
+  named), and aio-rs's `boolean` and `json`; each `NOT NULL` unless
+  `.nullable()`, with `.unique()`, `.default_text("…")`,
+  `.default_int(0)`, `.default_real(0.5)`. Two primary keys refuse the
+  boot. `aio::columns::create("t", COLS)` gives the `CREATE TABLE` for
+  `Db`.
 - **Without `columns`** the field is a table only if the file already has
   it (a ported aio app's `db:` table); otherwise it stays in the
   snapshot like any field.
@@ -214,8 +224,9 @@ waits for the next new rows.
   in the log, since nothing will refresh it.
 - A write that leaves its rows as they were wakes nobody; writes it fell
   behind on run it once.
-- Only writes through the same `Db` wake it, after they commit; a write
-  by another process or another `Db` on the file doesn't.
+- Writes through any `Db` open on the same file in this process wake it,
+  after they commit (the path is resolved, so two spellings of it are one
+  file); a write by another process, or the store's own commits, don't.
 
 ## Blobs, files and big data
 
@@ -249,6 +260,7 @@ assert!(blobs.info(&photo.id).unwrap().is_none());
 | `put(reader, name)` | stores the bytes as they are read: `Blob { id, size, name }` |
 | `info(id)` | `Some(Blob)`, or `None` when it isn't here |
 | `read(id, start, end)` | bytes `start..end` (end exclusive, clamped to the size) |
+| `stream(id, range)` | a reader of all of it or `Some(start..end)`, never held whole (aio's `stream`); a range that ends before it starts is refused |
 | `path(id)` | the file holding it, to stream or hand to another tool |
 | `list()` | every blob |
 | `delete(id)` | removes it: `false` when it wasn't here |
@@ -446,6 +458,10 @@ under about a megabyte.
   is logged once with its worst reading, sent to `on_problem` as
   `budget:<name>`, and turns `/__aio/health` degraded, so a test or CI
   can fail on it ([aio.toml](../reference/aio-toml.md#budgets)).
+- Without a `state` budget, aio's guard: a cell saving over 1 MB is said
+  once as a warning, over 16 MB as an error each time it is measured (the
+  write still lands), each with the fix and the budget sized to it (×1.5,
+  a whole MB up) to declare when the size is meant.
 - Without a `payload` or `broadcast_rate` budget, a push to one client
   over 500 KB, more than 30 pushes a second to one client, or over 1 MB a
   second to one client is said in the log as pressure, naming the likely
@@ -460,30 +476,25 @@ under about a megabyte.
 
 ## Limits, compared with aio
 
-- **No typed schema builder.** aio's column helpers and `ColumnOpts`
-  are `columns = "…"` in SQL here; `aio::db` has no query builder.
-- **No size guard on state by default.** aio warns at 1 MB and errors at
-  16 MB on its own; aio-rs judges a cell's size only against a declared
-  `[budgets] state`.
-- **Bound rows are flat.** No `bool`, list or nested value in a
-  `#[table]` row (aio stores its JSON); use numbers or strings.
-- **Live queries see one `Db`'s writes**, as aio's `reactiveDB` sees its
-  own: no cross-process invalidation.
-- **Blob reads are by range into memory** (`read`) or by file (`path`);
-  there is no async stream type.
+- **No query builder.** `aio::db` takes plain SQL (aio's `where`
+  objects have no counterpart).
+- **Live queries are this process's**: no cross-process invalidation, as
+  in aio.
+- **A blob stream is a blocking reader** (`Blobs::stream`, `Read`):
+  async code reads it in `spawn_blocking`.
 
 ## Common mistakes
 
 - A `Vec<u8>` of file contents in a cell: every call copies it and every
   snapshot writes it. Put it in `Blobs` and keep the id.
-- A `bool` in a `#[table]` row: the commit is refused. Use `i64` or a
-  string.
+- A `bool` or a list in a `#[table]` row whose column is `INTEGER` or
+  `TEXT`: the commit is refused. Declare the column `boolean` or `json`.
 - `BEGIN … COMMIT` as statements: refused; use `batch` or `transaction`.
 - Writing to the store's own file with `Db`: the store owns its tables,
   and bound rows written from outside come in as an event at the next
   boot. Use methods and `#[table]` fields, or a file of your own.
-- Expecting a live query to see writes made by another process or
-  connection: only this `Db`'s writes wake it.
+- Expecting a live query to see writes made by another process: only
+  this process's `Db`s wake it.
 - Running a query inside a method: methods do no I/O. Query outside and
   pass the rows in.
 - Deleting a blob another record still names: same bytes, same id.
@@ -491,6 +502,8 @@ under about a megabyte.
 ## API
 
 `cargo doc -p aio-rs --no-deps --open`: `aio::db` (`Db`, `Opts`, `Rows`,
-`Done`, `Live`, `Tx`, `Sql`, `PRAGMAS`, `TIMEOUT`), `aio::blobs` (`Blobs`,
+`Done`, `Live`, `Tx`, `Sql`, `PRAGMAS`, `TIMEOUT`), `aio::columns` (`Col`,
+`Columns`, `pk`, `text`, `integer`, `real`, `refs`, `boolean`, `json`, `sql`,
+`create`), `aio::blobs` (`Blobs`,
 `Blob`, `url`, `id_ok`), `aio::http` (`Route::streamed`, `Req::body_reader`,
 `Http::blobs`, `serve_file`), `aio::budgets`, `aio::imbl`.

@@ -79,14 +79,59 @@ fn shown(name: &str, b: &Breach) -> String {
 }
 
 /// Every cell's saved size against `state` (from the health sampler and
-/// `/__aio/health`). Free when no `state` budget is declared.
+/// `/__aio/health`), else aio's default guard ([`guard`]).
 pub(crate) fn measure_cells() {
-    if declared().state.is_none() {
-        return;
-    }
+    let declared = declared().state;
     for (cell, n) in crate::report::sizes() {
-        record("state", n as f64, || format!("cell {cell}"));
+        match declared {
+            Some(_) => record("state", n as f64, || format!("cell {cell}")),
+            None => guarded(cell, n),
+        }
     }
+}
+
+/// aio's size guard where `[budgets] state` declares none: a cell's saved
+/// state over this is said once, as a warning…
+pub const STATE_WARN: u64 = 1 << 20;
+/// …and over this as an error, each time it is measured (the write still lands).
+pub const STATE_ERROR: u64 = 16 << 20;
+
+/// What the guard says of cell `cell` saving `n` bytes, and at which level;
+/// `None`: nothing (pure). The fix names the budget sized to it (×1.5, a whole MB up).
+pub fn guard(cell: &str, n: u64) -> Option<(crate::log::Level, String)> {
+    let (level, limit) = match n {
+        n if n > STATE_ERROR => (crate::log::Level::Error, STATE_ERROR),
+        n if n > STATE_WARN => (crate::log::Level::Warn, STATE_WARN),
+        _ => return None,
+    };
+    let mb = (n * 3 / 2).div_ceil(1 << 20);
+    Some((
+        level,
+        format!(
+            "persist: cell {cell} saves {} ({} threshold {}). A cell's state is the working set: it is saved and \
+             sent to every client whole. Fix: keep bulk rows in a #[table] or aio::db and page them into the \
+             state; if this size is meant, declare it: [budgets] state = \"{mb}MB\", payload = \"{mb}MB\" \
+             (docs/persistence/sql.md#how-big-a-cell-may-be)",
+            crate::fmt::bytes(n),
+            if level == crate::log::Level::Error { "error" } else { "warn" },
+            crate::fmt::bytes(limit),
+        ),
+    ))
+}
+
+/// [`guard`], said: a warning once per cell, an error every time.
+fn guarded(cell: &'static str, n: u64) {
+    static WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let Some((level, msg)) = guard(cell, n) else { return };
+    if level == crate::log::Level::Warn {
+        let mut w = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+        if w.contains(&cell) {
+            return;
+        }
+        w.push(cell);
+    }
+    eprintln!("[aio] {msg}");
+    crate::report::tell("budget:state", &msg);
 }
 
 /// aio's own limits where `[budgets]` declares none (aio's pressure monitor):
@@ -201,6 +246,18 @@ pub fn report() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_guard_warns_past_1mb_and_errs_past_16mb_as_aio() {
+        assert_eq!(guard("notes", STATE_WARN), None);
+        let (l, msg) = guard("inbox", 4_400_000).unwrap();
+        assert_eq!(l, crate::log::Level::Warn);
+        assert!(msg.starts_with("persist: cell inbox saves 4.2 MB (warn threshold 1.0 MB)"), "{msg}");
+        assert!(msg.contains("[budgets] state = \"7MB\", payload = \"7MB\""), "×1.5, a whole MB up: {msg}");
+        let (l, msg) = guard("inbox", STATE_ERROR + 1).unwrap();
+        assert_eq!(l, crate::log::Level::Error);
+        assert!(msg.contains("(error threshold 16.0 MB)") && msg.contains("state = \"25MB\""), "{msg}");
+    }
 
     #[test]
     fn sizes_and_rates_parse_as_a_person_writes_them() {

@@ -122,6 +122,57 @@ fn make(id: &str, store: &Path, to: &Path, all: bool) -> io::Result<()> {
     made
 }
 
+/// The timed backups in `dir`, by name (oldest first), and which of them to
+/// remove so the newest `keep` stay (pure).
+fn timed_names(id: &str, names: impl Iterator<Item = String>, keep: usize) -> (Vec<String>, Vec<String>) {
+    let prefix = format!("{id}-auto-");
+    let mut ours: Vec<String> = names.filter(|n| n.starts_with(&prefix) && n.ends_with(".aio-backup")).collect();
+    ours.sort();
+    let gone = ours[..ours.len().saturating_sub(keep.max(1))].to_vec();
+    (ours, gone)
+}
+
+/// One timed backup of app `id` into `dir` now, and the oldest beyond `keep`
+/// removed; the new file.
+pub fn timed_once(id: &str, store: &Path, dir: &Path, keep: usize) -> io::Result<PathBuf> {
+    crate::paths::private_dir(dir)?;
+    let stamp = crate::log::stamp(crate::store::now_ms()).replace([':', '.'], "-");
+    let to = dir.join(format!("{id}-auto-{stamp}.aio-backup"));
+    backup_all(id, store, &to)?;
+    let names = std::fs::read_dir(dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+    for old in timed_names(id, names, keep).1 {
+        std::fs::remove_file(dir.join(old))?;
+    }
+    Ok(to)
+}
+
+/// Timed backups (`[data] backup_every`): app `id`'s store and data, as
+/// `ax backup` makes them, into `dir` (`<home>/backups`) as
+/// `<id>-auto-<time>.aio-backup` every `every`, the newest `keep` kept
+/// (backups made by hand are never removed). The clock runs from the newest
+/// timed backup, so restarts don't put one off; the first is made at once.
+/// A failed one is said and tried again at the next turn.
+pub fn timed(id: &str, store: &Path, dir: &Path, every: std::time::Duration, keep: usize) {
+    let (id, store, dir) = (id.to_string(), store.to_path_buf(), dir.to_path_buf());
+    let run = move || {
+        loop {
+            let names = std::fs::read_dir(&dir).into_iter().flatten().flatten();
+            let newest = timed_names(&id, names.map(|e| e.file_name().to_string_lossy().into_owned()), keep).0.pop();
+            let age = newest
+                .and_then(|n| std::fs::metadata(dir.join(n)).ok()?.modified().ok()?.elapsed().ok())
+                .unwrap_or(every);
+            std::thread::sleep(every.saturating_sub(age));
+            if let Err(e) = timed_once(&id, &store, &dir, keep) {
+                eprintln!("[aio] backup: the timed backup of {id} failed: {e}; trying again in {every:?}");
+                std::thread::sleep(every);
+            }
+        }
+    };
+    if let Err(e) = std::thread::Builder::new().name("aio-backup".into()).spawn(run) {
+        eprintln!("[aio] backup: no thread for timed backups: {e}");
+    }
+}
+
 /// The app a backup file was made for.
 pub fn app_of(file: &Path) -> io::Result<String> {
     let db = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
@@ -204,4 +255,35 @@ pub fn restore(id: &str, file: &Path, store: &Path, _dirs: &crate::paths::AppDir
     }
     crate::paths::sync_dir(crate::paths::parent(store))?;
     Ok(aside)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timed_backups_keep_the_newest_and_never_a_hand_made_one() {
+        let names = ["notes-auto-2026-01-03.aio-backup", "notes-2026-01-01.aio-backup", "notes-auto-2026-01-01.aio-backup", "notes-auto-2026-01-02.aio-backup", "todo-auto-2026-01-01.aio-backup", "notes-auto-x.aio-backup.partial"];
+        let (ours, gone) = timed_names("notes", names.iter().map(|n| n.to_string()), 2);
+        assert_eq!(ours.len(), 3);
+        assert_eq!(gone, ["notes-auto-2026-01-01.aio-backup"]);
+        assert!(timed_names("notes", names.iter().map(|n| n.to_string()), 0).1.len() == 2, "at least one kept");
+    }
+
+    #[test]
+    fn a_timed_backup_is_a_whole_backup_and_the_oldest_go() {
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("data/state.db");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        Connection::open(&store).unwrap().execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1)").unwrap();
+        let dir = d.path().join("backups");
+        let made: Vec<PathBuf> = (0..3)
+            .map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                timed_once("notes", &store, &dir, 2).unwrap()
+            })
+            .collect();
+        assert_eq!(app_of(&made[2]).unwrap(), "notes");
+        assert!(!made[0].exists() && made[1].exists() && made[2].exists());
+    }
 }

@@ -446,6 +446,22 @@ pub struct Data {
     /// `user_version`: the store relies on them.
     #[serde(default)]
     pub pragmas: Vec<String>,
+    /// `false`: the state lives in memory only, never saved, and starts
+    /// from its defaults on every launch (aio's `persist: false`; the launch
+    /// flag `--no-persist` does it for one run).
+    #[serde(default = "yes")]
+    pub persist: bool,
+    /// How long a run of `#[coalesce]` calls is held before it goes into the
+    /// log, in ms (aio's `persistDebounceMs`): a crash loses at most this much.
+    #[serde(default = "Data::default_coalesce_ms")]
+    pub coalesce_ms: u64,
+    /// How often a running app backs its store up into `<home>/backups`
+    /// (`"1d"`, `"6h"`); `"off"` (the default): only when asked (`ax backup`).
+    #[serde(default, with = "span_or_off")]
+    pub backup_every: Option<Duration>,
+    /// Timed backups kept, the newest; older ones are removed (at least 1).
+    #[serde(default = "Data::default_backup_keep")]
+    pub backup_keep: usize,
 }
 
 /// The store's own pragmas, never an app's: `[data] pragmas` can't set them.
@@ -455,11 +471,28 @@ impl Data {
     fn default_store() -> String {
         "state.db".into()
     }
+
+    fn default_coalesce_ms() -> u64 {
+        100
+    }
+
+    fn default_backup_keep() -> usize {
+        7
+    }
 }
 
 impl Default for Data {
     fn default() -> Self {
-        Self { durability: Durability::default(), store: Self::default_store(), retire: vec![], pragmas: vec![] }
+        Self {
+            durability: Durability::default(),
+            store: Self::default_store(),
+            retire: vec![],
+            pragmas: vec![],
+            persist: true,
+            coalesce_ms: Self::default_coalesce_ms(),
+            backup_every: None,
+            backup_keep: Self::default_backup_keep(),
+        }
     }
 }
 
@@ -1078,6 +1111,15 @@ impl Config {
                 let why = if name == "synchronous" { "set [data] durability" } else { "the store relies on it" };
                 return Err(format!("aio.toml: [data] pragmas can't set {name}: {why}"));
             }
+        }
+        if c.data.backup_keep == 0 {
+            return Err("aio.toml: [data] backup_keep must keep at least 1 backup".into());
+        }
+        if c.data.coalesce_ms > 60_000 {
+            return Err(format!(
+                "aio.toml: [data] coalesce_ms = {} holds calls over a minute: a crash would lose them all",
+                c.data.coalesce_ms
+            ));
         }
         if c.data.retire.contains(&c.data.store) {
             return Err(format!("aio.toml: [data] retire names the store {:?} itself", c.data.store));

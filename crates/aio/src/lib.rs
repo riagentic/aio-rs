@@ -82,12 +82,14 @@ pub mod auth {
 }
 mod answer;
 pub mod colors;
+pub mod columns;
 mod hidden;
 pub use hidden::Hidden;
 pub mod cron;
 mod cx;
 mod derived;
 pub mod effect;
+pub mod filter;
 pub mod fmt;
 pub mod head;
 #[cfg(feature = "kit")]
@@ -391,8 +393,13 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
         let _ = viewer;
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
-    /// `#[transient]` fields: never saved, back to their default on every boot.
+    /// `#[transient]` fields and `#[cell(persist(exclude = ["feeds.*.busy"]))]`
+    /// paths (aio's `persist: { exclude }`): never saved, back to their
+    /// defaults on every boot ([`filter`]). A nested one's field needs a default.
     const TRANSIENT: &'static [&'static str] = &[];
+    /// `#[cell(persist(include = ["name", "profile.email"]))]` (aio's
+    /// `persist: { include }`): only these paths are saved; empty: all of it.
+    const PERSIST_INCLUDE: &'static [&'static str] = &[];
     /// `#[server]` fields: saved, never sent to a client, and left out of
     /// problem reports and the debug log (a report may be delivered). A
     /// shared cell's credential (a password, an API key…) must be one:
@@ -423,9 +430,10 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// aio-rs's own beside its history (a table of aio-rs's own refuses the boot), as
     /// `(field, table, key, columns)`. With `columns = "id INTEGER PRIMARY
     /// KEY, name TEXT NOT NULL"` the boot makes the table, or brings a
-    /// stored one to that shape (aio's declared schema).
+    /// stored one to that shape (aio's declared schema); `columns = CONTACTS`
+    /// (a `&[aio::columns::Col]`) declares it typed.
     #[allow(clippy::type_complexity)]
-    const TABLES: &'static [(&'static str, &'static str, Option<&'static str>, Option<&'static str>)] = &[];
+    const TABLES: &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)] = &[];
     /// `#[aio_cell]` fields (`#[aio_cell] accounts: Accounts`, `Accounts` a
     /// `#[cell(persist, id = "accounts", version = 3)]`): in an aio file, each
     /// is that aio cell's whole slice, read and written by its type's id,
@@ -567,8 +575,8 @@ pub trait Cell: CellData {
     /// `#[coalesce]` methods: a cursor, a scroll, a selection, called many
     /// times a second (every plain method of a `#[cell(coalesce)]` cell).
     /// Each call shows its state at once, without a write; a run of them
-    /// goes into the log [`PERSIST_DEBOUNCE`] after its first call (aio's
-    /// debounced persistence), or when a call that can't wait (one with an
+    /// goes into the log `[data] coalesce_ms` (default [`PERSIST_DEBOUNCE`])
+    /// after its first call (aio's debounced persistence), or when a call that can't wait (one with an
     /// effect, a schedule, an id) or a time-travel step comes, or the app
     /// closes: as one event, its last call, when that alone ends where the
     /// run did (else call by call). A call that changes nothing logs
