@@ -171,6 +171,21 @@ version may break things.
   (`ms`); `--refused` adds its refused calls of late. The local door
   answers `took`; a client's listing (`ax clients --json`) has `sent`,
   `behind` and its `degraded` parts.
+- **`ax dev` watches as aio does** ([dev](docs/build/dev.md#the-loop)): a
+  burst of saves settles after 100 ms of quiet, 500 ms at most; the files
+  the last build read outside the app's folders are watched too (cargo's
+  dep-info: `aio.toml`, `include_str!` files, an aio-rs checkout), in
+  `--web` as well; a deaf watcher is made again (a sentinel, three times
+  at most); the terminal names the changed files and times each build; a
+  storm of restarts (a change within 1 s of each of 5 in a row) waits 5 s
+  before each and says why; the aio checks of each saved `.rs` file are
+  said after each burst (`ax lint`'s per-file ones).
+- `ax dev --detach` (the session in the background, `logs/dev.out`),
+  `--no-watch`, `--verbose`, `--title`; `ax stop` ends a session (the app
+  stopped the graceful way), `ax status` adds `ax dev: watching` or that
+  it waits for a fix; `ax errors` groups lines under each hot-patch too.
+- `AIORT_LOG` (the log's level for one run, said in the boot report's
+  `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
 - **Breaking: `ax pin` and `ax pair` named as aio names them.** The
@@ -307,6 +322,24 @@ version may break things.
   window when the view sends later than 50 ms after it asked, and takes a
   falsy value (`0`, `false`): the renderer's own `recv` waited in a busy
   loop the message could never get past.
+- `ax dev` restarts ask the app to stop over its door first (calls in
+  flight finish, effects commit; Windows too, which has no SIGTERM), dx's
+  restarts on a `Cargo.toml` change included; a build that left the binary
+  as it was no longer restarts the app.
+- `ax dev`: editor files (vim's `4913`, `#x#`, `*.tmp`, safe-write copies)
+  no longer start builds; an app inside some `target` folder is heard.
+- `ax dev --watch=<dirs>` narrowed nothing under dx: ax now rebuilds and
+  restarts for it (dx watches all of the app).
+- `ax dev` without dx: a good build after a failed one says `fixed` and
+  takes the errors off the page even when the app keeps running.
+- `ax dev`'s session and dx pid files hold pid and start time: a pid the
+  OS handed out again is no longer taken for the session, on every OS,
+  and a stray dx is stopped on Windows and macOS too.
+- `ax dev` app args with spaces reach the app intact under dx (dx splits
+  its `--args`; they go in `AIORT_DEV_ARGS`).
+- `scripts/dx-metrics`: the live-edit times no longer include the page
+  poller's start or the previous edit's patch build under load (each
+  save waits until the loop is quiet).
 - A signed (Authenticode) one-click Windows download finds its runtime:
   the mark is looked for before the certificate table.
 - **Android: a crash at start on Android 10.** The activity's insets
