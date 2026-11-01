@@ -60,7 +60,7 @@ ax upgrade --aio ../aio-rs    # ax built from a checkout (plain ax upgrade retur
 `ax upgrade` takes the release's install script, checks its SHA-256
 against the release's `SHA256SUMS`, and runs it: the script checks the
 archive's own SHA-256 before anything is unpacked. An app keeps its own
-aio-rs until `ax framework` moves it (below).
+aio-rs until `ax pin` moves it (below).
 
 ### Where an app gets aio-rs from
 
@@ -77,15 +77,15 @@ is in it. To pick or change the version (aio's `am pin`):
 
 ```sh
 ax create notes --aio-version 0.2.0   # another release (main: the branch; latest: the newest)
-ax framework                          # in the app: where each Cargo.toml takes aio-rs from
-ax framework 0.2.0                    # every one moved to that release, Cargo.lock with it
-ax framework --aio ../aio-rs          # to a checkout, co-developing aio-rs
+ax pin                                # in the app: what Cargo.toml asks for, what Cargo.lock built, the releases
+ax pin 0.2.0                          # every one moved to that release, Cargo.lock with it
+ax pin ../aio-rs                      # to a checkout, co-developing aio-rs
 ```
 
-`--aio <dir>` names the checkout relative to the app (`../aio-rs/crates`),
+`ax pin <dir>` (and `ax create --aio <dir>`) names the checkout relative to the app (`../aio-rs/crates`),
 never by its absolute path; the app and the checkout must share a folder
 below the root. A clone that holds such a path and has no checkout beside
-it: `ax framework <version>` moves it back to a release. A move cargo can't
+it: `ax pin <version>` moves it back to a release. A move cargo can't
 resolve (no such tag, no network) changes nothing.
 
 ## 3. ax setup
