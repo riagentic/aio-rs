@@ -122,7 +122,7 @@ pub fn cost(rows: &[(String, Value)], all: bool, as_json: bool) -> String {
         ));
     }
     let watched = rows.iter().filter_map(|(_, c)| c["windowS"].as_f64()).fold(0.0, f64::max);
-    out.push(format!("watched {watched:.0} s, since the app's first send or call (its tools' looks not counted)"));
+    out.push(format!("watched {watched:.0} s, the newest window asked for or since the app's first send or call (its tools' looks not counted)"));
     out.join("\n")
 }
 
@@ -189,7 +189,7 @@ mod tests {
         );
         assert!(row.ends_with("cards 5.9 KB · a 10 B · b 9 B"), "the top three: {row}");
         assert!(cost(&[("board".into(), meter.clone())], true, false).contains("· c 8 B"));
-        assert!(text.ends_with("watched 4 s, since the app's first send or call (its tools' looks not counted)"));
+        assert!(text.ends_with("watched 4 s, the newest window asked for or since the app's first send or call (its tools' looks not counted)"));
         let j: Value = aio::serde_json::from_str(&cost(&[("board".into(), meter)], false, true)).unwrap();
         assert_eq!(j["board"]["meanBytes"], 4096);
     }
