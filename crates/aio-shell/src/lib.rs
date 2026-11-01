@@ -602,10 +602,10 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             })
         }
     };
-    // The doors went with their listeners (and the runtime with the block).
-    _ = std::fs::remove_dir(&socks);
     // The window is gone: let the stores finish their effects.
     let aborted = aio::shutdown(QUIT_BUDGET);
+    // Its doors are unlinked by now: their folder goes too.
+    _ = std::fs::remove_dir(&socks);
     aio::health::stop();
     eprintln!(
         "[aio] {} stopped{}",
@@ -642,6 +642,7 @@ pub fn serve(dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
         std::io::Result::Ok(())
     })?;
     let aborted = aio::shutdown(QUIT_BUDGET);
+    _ = std::fs::remove_dir(aio::paths::sockets_at(&dirs.id, &dirs.data));
     aio::health::stop();
     eprintln!(
         "[aio] {} stopped{}",

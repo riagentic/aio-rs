@@ -839,6 +839,8 @@ pub fn shutdown(budget: std::time::Duration) -> Vec<String> {
     let drained = rt().block_on(async { futures_util::future::join_all(fs.iter().map(|f| f(stores))).await });
     cut.extend(drained.into_iter().flat_map(|d| d.aborted));
     cut.extend(run_hooks("on_stop", stop, left()));
+    // Its doors: nothing is served past here.
+    ipc::unlink_all();
     // Last: a program the app started and never ended would outlive it.
     process::reap();
     cut

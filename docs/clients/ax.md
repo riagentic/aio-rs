@@ -577,9 +577,11 @@ ax ui [--window] [--browser]
 
 A window of aio-rs's own, on the shared runtime, for the apps on this
 machine: aio's manager (amui), ported screen for screen, dark or light
-with the OS. What it does to an app is an `ax` verb run as a child (a view
-of the verbs, never a second way in); what it reads of a project is read
-only, and never a secret folder (`.ssh`, `.gnupg`, `.aws`).
+with the OS. What it does to an app is an `ax` verb (a view of the verbs,
+never a second way in): its reads run in its own process, at once, each
+answered within 5 s or said as a failure; start, stop, a call and create
+run as children. What it reads of a project is read only, and never a
+secret folder (`.ssh`, `.gnupg`, `.aws`).
 
 | Flag | Does |
 |---|---|
@@ -588,7 +590,8 @@ only, and never a secret folder (`.ssh`, `.gnupg`, `.aws`).
 | `--browser` | serves the same view to this machine's browser on a loopback port, behind a key made for the run (its link sets the key as a cookie), until Ctrl-C |
 
 - **On the left**: the running apps and private instances (`ax apps`),
-  or all of them (remembered), searched by name or folder; Rescan; a new
+  or all of them (remembered), the running first, searched by name, id
+  or folder; Rescan; a new
   app by name (`ax create` in `~/aio-apps`, its name made safe). Stopped
   projects are found too, three levels deep: in `~/aio-apps`, your home
   folder (never its app state or machine folders), the current folder,
@@ -602,12 +605,12 @@ only, and never a secret folder (`.ssh`, `.gnupg`, `.aws`).
 
 | Tab | Shows | From |
 |---|---|---|
-| Overview | status, build, port, pid, uptime, clients, CPU, memory, state; process, cell health, project, config, build targets, newest errors, schedules | `health.json`, `ax metrics`, `ax errors`, `ax schedules`, `/proc` |
+| Overview | status, build, port, pid, uptime, clients, CPU, memory, state; process (what runs, from where), cell health (its size, links, refused calls, last action), project, the live config (title, auth, port), build targets, newest errors (a panic with all its lines), schedules | `health.json`, `ax metrics`, `ax events`, `ax errors --json`, `ax schedules` |
 | Cells | each cell's methods: run one with a JSON list of arguments, confirmed naming the exact call (and saying when it gets none); a link to the cell's source | `ax peer`, `ax call` |
 | State | each cell's fields as a foldable tree, each marked saved (`disk`) and sent to the window (`ui`), with its JSON size | `ax snapshot`, `ax peer` |
-| Metrics | trends of CPU, memory, state, the slowest call's p95 and pushes (the last 60 readings); calls, memory, linked clients, cell sizes, recent actions, the window's components | `ax cost`, `ax metrics`, `ax clients`, `ax events`, `ax components` |
+| Metrics | trends of CPU, memory, state, the slowest call's p95 and pushes (the last 60 readings); calls, memory, linked clients (each with its health, how long a part of it has been down, bytes a second and in all, changes it fell behind on), cell sizes, recent actions (each with its method's time; a refused one with why), the window's components | `ax cost`, `ax metrics`, `ax clients`, `ax events --refused`, `ax components` |
 | Logs | the newest 500 lines of all, the framework's, the warnings or the page's, by level and word; Follow reads again every 2 s | the app's `logs/` |
-| Tasks | `ax dev`, `test`, `lint`, `build` (each target), `doctor`, `config`, `data` in the project, its output live; Stop task ends it (and its children), and 5 minutes do | `ax` |
+| Tasks | the project's own tasks, its cargo aliases (`[alias]` of `.cargo/config.toml`, in its folder and up its workspace); `ax dev`, `test`, `lint`, `build` (each target), `doctor`, `config`, `data` in the project; the output shown as it comes; Stop task ends it (and its children), and 5 minutes do | `cargo`, `ax` |
 | Codebase | the app's folder, or its repository, as a foldable, filtered tree (the first 1200; no `target`, `.git`, `node_modules`, `dist`); a file highlighted, up to 2 MB | read only |
 
 A verb that fails says why where its answer would be, and an answer is
@@ -615,8 +618,10 @@ never shown as current once a read of it failed.
 
 Where amui reads what aio-rs hasn't, it shows aio-rs's counterpart:
 the cells' state for the V8 heap, the slowest call's p95 for reduce p95,
-pushes for the queue depth, degraded cells for breakers. CPU every 2.5 s
-needs `/proc` (Linux); elsewhere it is the app's own, every 10 s.
+pushes for the queue depth, degraded cells for breakers, changes a client
+fell behind on for its backpressure. CPU every 2.5 s needs `/proc` (Linux);
+elsewhere it comes from the app's own `health.json` (its CPU time, its
+executable and folder), every 10 s.
 
 ## Inspect a running app
 
@@ -686,17 +691,19 @@ A snapshot is for looking and for moving state between copies; a backup
 ### `ax events`
 
 ```text
-ax events <app> [cell] [--last N] [--diff] [--from file]
+ax events <app> [cell] [--last N] [--diff] [--refused] [--from file]
 ```
 
 The newest events of the app's log, oldest first: their number (seq), time,
 cell, method, arguments and caller. A `#[redact]` call's arguments show as
-`[redacted]`.
+`[redacted]`. Under `--json`, a running app's events also say how long
+their method took (`ms`, for the calls of this run).
 
 | Flag | Does |
 |---|---|
 | `--last N` | how many (20) |
 | `--diff` | each with the changes it made, `path: before → after` |
+| `--refused` | with `--json`: the running app's refused calls of late too, as rows of their own (`{at, cell, method, ms, refused}`, no seq, never their arguments) |
 | `--from file` | another store, or a backup file |
 
 ```sh
@@ -1681,6 +1688,5 @@ Not in aio-rs today; each with what to do instead:
   and shows the reports the app made.
 - **Piped output as JSON by default**: `ax` prints the same text to a pipe;
   ask for `--json`.
-- **amui's** V8 heap, effect backlog, per-action reduce time and action
-  errors: aio-rs has no such readings; `ax ui` shows its counterparts
-  ([above](#ax-ui-the-visual-app-manager)).
+- **amui's** V8 heap and effect backlog: aio-rs has no such readings;
+  `ax ui` shows its counterparts ([above](#ax-ui-the-visual-app-manager)).

@@ -112,7 +112,44 @@ pub struct Pkg {
 
 /// `cargo metadata` for the workspace here.
 pub fn metadata() -> Result<serde_json::Value, String> {
-    let out = Command::new("cargo")
+    let Some(dir) = IN.with_borrow(Clone::clone) else { return cargo_metadata(None) };
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    known.retain(|(_, at, _)| at.elapsed() < KNOWN_FOR);
+    if let Some((_, _, m)) = known.iter().find(|(d, ..)| *d == dir) {
+        return m.clone();
+    }
+    let m = cargo_metadata(Some(&dir));
+    known.push((dir, std::time::Instant::now(), m.clone()));
+    m
+}
+
+thread_local! {
+    /// The folder [`in_dir`] runs this thread's verbs in.
+    static IN: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What `cargo metadata` said of a folder [`in_dir`] ran in, and when.
+type Known = Vec<(PathBuf, std::time::Instant, Result<serde_json::Value, String>)>;
+static KNOWN: std::sync::Mutex<Known> = std::sync::Mutex::new(Vec::new());
+/// How long [`in_dir`]'s answers stand: a workspace's packages rarely change.
+const KNOWN_FOR: Duration = Duration::from_secs(30);
+
+/// `f`, its verbs run as if in folder `dir` (`ax ui` reads in-process, as
+/// many threads at once): `cargo metadata` asked there, its answer kept
+/// [`KNOWN_FOR`], not asked again on each read.
+pub fn in_dir<T>(dir: PathBuf, f: impl FnOnce() -> T) -> T {
+    IN.set(Some(dir));
+    let r = f();
+    IN.set(None);
+    r
+}
+
+fn cargo_metadata(dir: Option<&Path>) -> Result<serde_json::Value, String> {
+    let mut cmd = Command::new("cargo");
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    let out = cmd
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .output()
         .map_err(|e| format!("cargo: {e} (Rust is not on PATH: ax setup says how to get it)"))?;
