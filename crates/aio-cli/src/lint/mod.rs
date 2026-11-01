@@ -7,7 +7,7 @@
 //!   post-await reads, mixed method styles), imports and the client/server
 //!   split are resolved by rustc (import graph, browser imports, legacy
 //!   paths, Node APIs, `any`), cells reach each other only through typed
-//!   handles (inter-cell reads), Dioxus signals are handles (stale tuples,
+//!   handles (inter-cell reads), aio::ui signals are handles (stale tuples,
 //!   memo/projection), `Effect` is `#[must_use]` (a dropped effect warns,
 //!   an error under `-D warnings`);
 //! - **clippy**, run here with aio's lints: unused imports, deprecated
@@ -180,6 +180,9 @@ pub fn lint(dir: &Path) -> Report {
             rust::file(&rel, &text, is_test_path(&rel), &mut facts);
         } else if !is_test_path(&rel) {
             secrets::text(&rel, &text, &mut facts.issues);
+            if name == "Cargo.toml" {
+                rust::manifest(&rel, &text, &mut facts.issues);
+            }
             if name == "aio.toml" {
                 match aio::config::Config::parse(&text) {
                     Ok(c) => report.passed.push(format!("{rel}: app {}", c.app.id)),

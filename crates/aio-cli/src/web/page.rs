@@ -56,7 +56,7 @@ fn signin() {
     });
 }
 
-fn who() -> Element {
+fn who() -> View {
     match aio::web::use_user() {
         None => rsx! { p { id: "who", "asking" } },
         Some(None) => rsx! {

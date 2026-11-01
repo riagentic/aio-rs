@@ -23,7 +23,7 @@ show the label, hint and error, and wire `for`, `aria-describedby`,
 
 ```rust,no_run
 use aio::kit::{Button, Field, Input, Problems, Variant, use_form};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "contacts")]
 pub struct Contacts {
@@ -66,10 +66,10 @@ fn check(c: &NewContact) -> Problems {
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
     let f = use_form(NewContact::default, check);
-    let mut refused = use_signal(|| None::<String>);
+    let refused = signal(|| None::<String>);
     let v = f.values();
     let send = move |e: FormEvent| {
         e.prevent_default();
@@ -100,14 +100,12 @@ pub fn App() -> Element {
                     oninput: move |s: String| f.edit("age", |c| c.age = s.parse().ok()),
                     onchange: move |_| f.touch("age") }
             }
-            if let Some(why) = refused() {
-                p { class: "aio-field__error", role: "alert", "data-t": "refused", "{why}" }
-            }
+            {refused.get().map(|why| rsx! { p { class: "aio-field__error", role: "alert", "data-t": "refused", "{why}" } })}
             Button { r#type: "submit", variant: Variant::Primary, "data-t": "save", "Save" }
             Button { disabled: !f.dirty(), onclick: move |_| f.reset(), "data-t": "clear", "Clear" }
         }
         ul { "data-t": "names",
-            for n in part(|c| &c.names).iter() {
+            for n in part(|c| &c.names).get() {
                 li { key: "{n}", "{n}" }
             }
         }
@@ -229,7 +227,7 @@ ask something (is this name taken?):
 
 ```rust,no_run
 use aio::kit::{Field, Input, Problems, use_async_rule, use_form};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::time::Duration;
 
 #[derive(Clone, Default, PartialEq)]
@@ -247,7 +245,7 @@ async fn taken(name: String) -> bool {
 }
 
 #[component]
-fn NewAccount() -> Element {
+fn NewAccount() -> View {
     let f = use_form(Account::default, check);
     use_async_rule(f, "name", |a| a.name.clone(), Duration::from_millis(300), |name: String| async move {
         taken(name).await.then(|| "That name is taken".to_string())

@@ -2,8 +2,8 @@
 //! for `key` held while the component lives, the old one let go (and its
 //! close waited for) when the key changes.
 use crate::held::{Held, Hold, State};
-use dioxus::core::Task;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
+use Task;
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -17,11 +17,11 @@ where
     K: Clone + Eq + Hash + Debug + Send + Sync + 'static,
     T: Send + Sync + 'static,
 {
-    let mut seen = use_signal(|| 0u64);
-    let slot = use_hook(|| Rc::new(RefCell::new(None::<(Hold<K, T>, Task)>)));
+    let mut seen = signal(|| 0u64);
+    let slot = once(|| Rc::new(RefCell::new(None::<(Hold<K, T>, Task)>)));
     {
         let drop_slot = slot.clone();
-        use_drop(move || drop(drop_slot.borrow_mut().take()));
+        on_cleanup(move || drop(drop_slot.borrow_mut().take()));
     }
     let now = slot.borrow().as_ref().map(|(h, _)| h.key().clone());
     if now != key {
@@ -40,6 +40,6 @@ where
             *slot.borrow_mut() = Some((hold, task));
         }
     }
-    _ = seen();
+    _ = seen.get();
     slot.borrow().as_ref().map(|(h, _)| h.state())
 }

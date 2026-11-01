@@ -84,6 +84,7 @@ pub mod auth {
 mod answer;
 pub mod colors;
 pub mod columns;
+pub mod compat;
 mod hidden;
 pub use hidden::Hidden;
 pub mod cron;
@@ -92,16 +93,11 @@ mod derived;
 pub mod effect;
 pub mod filter;
 pub mod fmt;
+#[cfg(doctest)]
+mod guide;
 pub mod head;
 #[cfg(feature = "kit")]
 pub mod kit;
-/// The app's Dioxus, the one the kit is built on: `client!` and `routes!`
-/// `router!` name it through here.
-#[cfg(feature = "kit")]
-pub use dioxus;
-pub mod compat;
-#[cfg(doctest)]
-mod guide;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/log.rs"]
 pub mod log;

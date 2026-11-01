@@ -32,6 +32,11 @@ version may break things.
 - `aio::rewrite_call` (aio's `beforeReduce` changing a call),
   `aio::on_recovered` (aio's `onCheckpointRestore`),
   `TestCells::held_effects` (aio's `t.getEffects()`).
+- `aio::ui` beside the renames: `Signal::toggle`, `key_event` (a key heard
+  elsewhere handed to the views), `Fragment`, `Component`; `ci.sh` fails on
+  `dioxus` named in the template, the kit, `ax ui`, the tests or the guide.
+- [docs/design/air.md](docs/design/air.md): air's design, the spike's
+  measurements, the facade's API and what can't match air yet.
 - **Persistence as aio's** (docs/persistence): `#[cell(persist(exclude =
   ["feeds.*.busy"]))]` and `persist(include = [...])`, nested paths with
   `*` (aio's `persist` filter); `[data] persist = false` and the launch
@@ -161,6 +166,51 @@ version may break things.
   and `*self.key = k`.
 - A `#[ttl]` call answered from the cache returns the kept answer, not `null`.
 - An async method returns `aio::Result<R>` for any `R`.
+- **Breaking: views import `aio::ui`, not `dioxus`.** `aio::ui::prelude`
+  is the whole view API, renderer-neutral and shaped as air (aio-rs's own
+  renderer, [design](docs/design/air.md)) provides it, so the swap to air
+  needs no app change. It runs on Dioxus 0.7 until then. An app drops its
+  `dioxus` dependency (`aio` with feature `kit` brings it) and moves as
+  below ([migration guide](docs/migration/README.md), "0.1 → 0.2"):
+
+  | 0.1 | 0.2 |
+  |---|---|
+  | `use dioxus::prelude::*;` | `use aio::ui::prelude::*;` |
+  | `-> Element` | `-> View` |
+  | `use_signal(\|\| v)` | `signal(\|\| v)` |
+  | `count()`, `s.cloned()` | `count.get()`, `s.get()` |
+  | `s.peek()` | `s.read_untracked()` (`s.get_untracked()` for a copy) |
+  | `s.with_mut(f)` | `s.update(f)` |
+  | `s.try_write()`, `s.try_peek()` (`Result`) | `s.try_write()`, `s.try_read_untracked()` (`Option`), `s.alive()` |
+  | `s.set(v)` (always re-renders) | `s.set(v)` (re-renders only on a change; `v: PartialEq`, else `*s.write() = v`) |
+  | `use_memo(f)` | `memo(f)` |
+  | `use_effect(f)` | `effect(f)` |
+  | `use_effect(use_reactive!(\|d\| ..))` | `watch(d, \|d\| ..)` |
+  | `use_hook(f)` | `once(f)` |
+  | `use_drop(f)` | `on_cleanup(f)` |
+  | `use_callback(f)` | `callback(f)` |
+  | `use_context_provider(f)` | `provide(f)` |
+  | `use_context::<T>()`, `try_use_context`, `consume_context`, `try_consume_context` | `context::<T>()`, `try_context::<T>()` |
+  | `provide_root_context(v)` | `provide_root(v)` |
+  | `use_future(f)` | `task(f)` |
+  | `use_resource(f)` | `resource(f)` |
+  | `GlobalSignal<T>`, `Signal::global(f)` | `Global<T>`, `Global::new(f)` |
+  | `GlobalMemo<T>`, `Memo::global(f)` | `GlobalMemo<T>`, `GlobalMemo::new(f)` |
+  | `document::eval(js)`, `dioxus.send(v)` / `dioxus.recv()` in the script | `eval(js)`, `aio.send(v)` / `aio.recv()` |
+  | `ErrorBoundary { handle_error: \|e: ErrorContext\| .. }` | `ErrorBoundary { fallback: \|e: String\| .. }` |
+  | `SuspenseBoundary { fallback: \|_\| .. }` | `Suspense { fallback: rsx! { .. } }` |
+  | `*part(\|c\| &c.f)` (a value) | `part(\|c\| &c.f).get()` (a handle: `.get()`, `.with(\|v\| ..)`, `"{p}"`, `.ver()`) |
+  | `Runtime::try_current().is_some()` | `in_views()` |
+  | `aio::dioxus` | gone |
+  | `TestUi::read(&GlobalSignal<T>)` | `TestUi::read(&Global<T>)` |
+
+  The template, the kit, `ax ui`, the tests and the guide use it; the kit's
+  own hooks keep their names (`use_form`, `use_global_key`, …).
+- `ax lint`: naming `dioxus` (a path, a dependency, a page script's
+  `dioxus.send`) is an error (area `renderer`); the facade's hooks
+  (`signal`, `memo`, `effect`, `watch`, `once`, …) are held to a view's top
+  level like `use_…` ones; a `for` row without `key:` is an error (air
+  requires one); an `if let` in `rsx!` warns (air refuses it).
 - **An older build boots on a newer build's data** (a rollback), as aio's
   downgrade does: the fields it doesn't declare are kept in every write,
   the stamp is never lowered, an aio slice is parked under
@@ -216,6 +266,10 @@ version may break things.
 - `aio::testing::TestBrowser` waits up to 120 s for a browser's DevTools
   port (a hang guard): the first system Chrome of a Windows CI runner took
   more than 30 s while running.
+- A page script's `await aio.recv()` (`aio::ui::eval`) no longer hangs the
+  window when the view sends later than 50 ms after it asked, and takes a
+  falsy value (`0`, `false`): the renderer's own `recv` waited in a busy
+  loop the message could never get past.
 - A signed (Authenticode) one-click Windows download finds its runtime:
   the mark is looked for before the certificate table.
 - **Android: a crash at start on Android 10.** The activity's insets

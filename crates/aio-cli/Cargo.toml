@@ -41,8 +41,6 @@ tokio = { version = "1", features = ["time"] }
 # `ax shot`: the DevTools protocol of a window the app opened it for.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-# `ax ui`: the manager's view.
-dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"] }
 
 [target.'cfg(unix)'.dependencies]
 # `ax dev`: its dx ends with it (Linux), a stray one is stopped.

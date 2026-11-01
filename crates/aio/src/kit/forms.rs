@@ -4,7 +4,7 @@
 //! all that function), plus rules that wait (a uniqueness lookup).
 //! A field's error shows once it was left or a submit was tried; a list of
 //! rows is a `Vec` field ([`move_item`] reorders it).
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::time::Duration;
@@ -63,7 +63,7 @@ impl<T: Clone + PartialEq + 'static> Form<T> {
 
     /// Change `field` (`f` edits the values): it is edited, what a waiting
     /// rule said about it is stale, and so is the form's own error.
-    pub fn edit(mut self, field: &'static str, f: impl FnOnce(&mut T)) {
+    pub fn edit(self, field: &'static str, f: impl FnOnce(&mut T)) {
         let mut s = self.state.write();
         f(&mut s.values);
         s.edited.insert(field);
@@ -72,8 +72,8 @@ impl<T: Clone + PartialEq + 'static> Form<T> {
     }
 
     /// The field was left: its error may show now.
-    pub fn touch(mut self, field: &'static str) {
-        if !self.state.peek().touched.contains(field) {
+    pub fn touch(self, field: &'static str) {
+        if !self.state.read_untracked().touched.contains(field) {
             self.state.write().touched.insert(field);
         }
     }
@@ -120,21 +120,21 @@ impl<T: Clone + PartialEq + 'static> Form<T> {
     }
 
     /// Try a submit: every error shows; the values if valid.
-    pub fn submit(mut self) -> Option<T> {
+    pub fn submit(self) -> Option<T> {
         self.state.write().tried = true;
         self.valid().then(|| self.values())
     }
 
     /// Back to the initial values, nothing touched.
-    pub fn reset(mut self) {
-        let initial = self.state.peek().initial.clone();
+    pub fn reset(self) {
+        let initial = self.state.read_untracked().initial.clone();
         self.state.set(State::new(initial));
     }
 }
 
 /// A form starting at `initial`, checked by `check` (a hook).
 pub fn use_form<T: Clone + PartialEq + 'static>(initial: impl FnOnce() -> T, check: fn(&T) -> Problems) -> Form<T> {
-    let state = use_signal(|| State::new(initial()));
+    let state = signal(|| State::new(initial()));
     Form { state, check }
 }
 
@@ -153,20 +153,20 @@ pub fn use_async_rule<T, V, F>(
     V: Clone + PartialEq + 'static,
     F: Future<Output = Option<String>> + 'static,
 {
-    let mut state = form.state;
+    let state = form.state;
     let rule = std::rc::Rc::new(rule);
-    let value = use_memo(move || part(&state.read().values));
-    let mut runs = use_signal(|| 0u64);
-    let started = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(false)));
-    use_effect(move || {
-        let v = value();
+    let value = memo(move || part(&state.read().values));
+    let runs = signal(|| 0u64);
+    let started = once(|| std::rc::Rc::new(std::cell::Cell::new(false)));
+    effect(move || {
+        let v = value.get();
         // Not the starting value: only an edit asks.
         if !started.replace(true) {
             return;
         }
-        let run = *runs.peek() + 1;
+        let run = *runs.read_untracked() + 1;
         runs.set(run);
-        if (form.check)(&state.peek().values).iter().any(|(f, _)| *f == field) {
+        if (form.check)(&state.read_untracked().values).iter().any(|(f, _)| *f == field) {
             state.write().checking.remove(field);
             return;
         }
@@ -174,11 +174,11 @@ pub fn use_async_rule<T, V, F>(
         let rule = rule.clone();
         spawn(async move {
             super::sleep(debounce).await;
-            if *runs.peek() != run {
+            if *runs.read_untracked() != run {
                 return;
             }
             let said = rule(v).await;
-            if *runs.peek() != run {
+            if *runs.read_untracked() != run {
                 return;
             }
             let mut s = state.write();

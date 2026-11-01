@@ -4,7 +4,7 @@
 //! targets the control (`for`), the control is named, described by the hint or
 //! error, `aria-invalid` and `aria-required`. A caller's own attribute wins.
 use super::{flag, join, keys::field_key, use_id};
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 
 /// What a button is for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,8 +49,8 @@ pub fn Button(
     /// Its element, to focus it later.
     onmounted: Option<EventHandler<MountedEvent>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     let cls = join(&format!("aio-btn aio-btn--{} aio-btn--{}", variant.key(), size.key()), &class);
     let tip = use_tip();
     rsx! {
@@ -98,7 +98,7 @@ pub(super) struct Wiring {
 
 /// The bubble id of the tooltip around a control, if any.
 fn use_tip() -> Option<String> {
-    try_use_context::<super::controls::Tip>().map(|t| t.0)
+    try_context::<super::controls::Tip>().map(|t| t.0)
 }
 
 /// A control's wiring from the field around it, if any. `named`: it names
@@ -106,10 +106,10 @@ fn use_tip() -> Option<String> {
 /// `for`, no invalid or required).
 pub(super) fn use_field(named: bool, group: bool) -> Wiring {
     let tip = use_tip();
-    let cx = try_use_context::<FieldCx>();
-    let mine = use_hook(|| {
-        cx.is_some_and(|mut f| {
-            let free = !named && !group && f.said.peek().label.is_some() && !*f.claimed.peek();
+    let cx = try_context::<FieldCx>();
+    let mine = once(|| {
+        cx.is_some_and(|f| {
+            let free = !named && !group && f.said.read_untracked().label.is_some() && !*f.claimed.read_untracked();
             if free {
                 f.claimed.set(true);
             }
@@ -140,8 +140,8 @@ pub fn Field(
     #[props(default)] required: bool,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     let base = use_id("field");
     let label = label.map(|l| l.trim().to_owned()).filter(|l| !l.is_empty());
     let error = error.filter(|e| !e.is_empty());
@@ -151,12 +151,12 @@ pub fn Field(
         _ => None,
     };
     let now = Said { base: base.clone(), label: label.clone(), described, error: error.is_some(), required };
-    let cx = use_context_provider(|| FieldCx { said: Signal::new(now.clone()), claimed: Signal::new(false) });
-    let mut said = cx.said;
-    if *said.peek() != now {
+    let cx = provide(|| FieldCx { said: Signal::new(now.clone()), claimed: Signal::new(false) });
+    let said = cx.said;
+    if *said.read_untracked() != now {
         said.set(now);
     }
-    let target = (cx.claimed)().then(|| format!("{base}-control"));
+    let target = (cx.claimed).get().then(|| format!("{base}-control"));
     rsx! {
         div { class: join("aio-field", &class), ..attributes,
             if let Some(l) = &label {
@@ -190,7 +190,7 @@ pub fn Input(
     onchange: Option<EventHandler<String>>,
     onkeydown: Option<EventHandler<KeyboardEvent>>,
     #[props(extends = GlobalAttributes)] mut attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let w = use_field(false, false);
     let invalid = invalid || w.invalid.is_some();
     // Only a controlled input has a value attribute: Dioxus rewrites `value`
@@ -233,7 +233,7 @@ pub fn Textarea(
     oninput: Option<EventHandler<String>>,
     onkeydown: Option<EventHandler<KeyboardEvent>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let w = use_field(false, false);
     let invalid = invalid || w.invalid.is_some();
     rsx! {
@@ -284,7 +284,7 @@ pub fn Select(
     #[props(default, into)] class: String,
     onchange: Option<EventHandler<String>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let w = use_field(false, false);
     let invalid = invalid || w.invalid.is_some();
     rsx! {
@@ -315,7 +315,7 @@ pub fn Checkbox(
     #[props(default, into)] class: String,
     onchange: Option<EventHandler<bool>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let w = use_field(label.is_some(), false);
     let own = label.as_deref().map(str::trim).filter(|l| !l.is_empty()).map(String::from);
     let box_cls = if label.is_none() { join("aio-checkbox", &class) } else { "aio-checkbox".into() };

@@ -9,7 +9,7 @@ use super::metrics::{MetricsPanel, clock};
 use super::proc::{FileNode, LogSource};
 use super::state_view::StateOverview;
 use super::style;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::Duration;
@@ -55,7 +55,7 @@ pub struct Pending {
 /// The view's own state (amui's module signals): kept across renders,
 /// reset when another app is chosen.
 #[derive(Clone, Copy)]
-pub struct View {
+pub struct ViewState {
     pub tab: Signal<Tab>,
     pub search: Signal<String>,
     pub new_name: Signal<String>,
@@ -73,9 +73,9 @@ pub struct View {
     pub log_query: Signal<String>,
 }
 
-impl View {
+impl ViewState {
     fn new() -> Self {
-        View {
+        ViewState {
             tab: Signal::new(Tab::Overview),
             search: Signal::new(String::new()),
             new_name: Signal::new(String::new()),
@@ -92,7 +92,7 @@ impl View {
     }
 
     /// Another app chosen: its own view from the start.
-    fn reset(mut self) {
+    fn reset(self) {
         self.collapsed.set(BTreeSet::new());
         self.file_filter.set(String::new());
         self.repo.set(false);
@@ -124,42 +124,42 @@ const FOLLOW: Duration = Duration::from_secs(2);
 /// The window (amui's `App`): its manager on the context's [`Setup`] (else
 /// this machine's, its verbs the context's [`Verb`], else `ax` itself).
 #[component]
-pub fn App() -> Element {
-    let setup = try_use_context::<Setup>();
-    let verb = try_use_context::<Verb>();
-    let prefs = try_use_context::<super::Prefs>();
-    let m = use_hook(move || {
+pub fn App() -> View {
+    let setup = try_context::<Setup>();
+    let verb = try_context::<Verb>();
+    let prefs = try_context::<super::Prefs>();
+    let m = once(move || {
         let s = setup.unwrap_or_else(|| Setup::here(verb.unwrap_or_else(manager::child), prefs.and_then(|p| p.0)));
         Manager::new(s)
     });
-    use_context_provider(|| m);
-    let view = use_context_provider(View::new);
-    use_hook(move || m.discover());
+    provide(|| m);
+    let view = provide(ViewState::new);
+    once(move || m.discover());
     aio::kit::use_interval(TICK, true, move || {
-        if m.detail.peek().as_ref().is_some_and(|d| d.running) {
+        if m.detail.read_untracked().as_ref().is_some_and(|d| d.running) {
             m.tick();
         }
     });
     aio::kit::use_interval(RESCAN, true, move || {
-        if !*m.scanning.peek() && m.task.peek().running.is_none() {
+        if !*m.scanning.read_untracked() && m.task.read_untracked().running.is_none() {
             m.discover();
         }
     });
     aio::kit::use_interval(FOLLOW, true, move || {
-        let live = m.detail.peek().as_ref().filter(|d| d.running).map(|d| d.id.clone());
-        if *view.tab.peek() == Tab::Logs
-            && *m.log_follow.peek()
-            && !*m.log_loading.peek()
+        let live = m.detail.read_untracked().as_ref().filter(|d| d.running).map(|d| d.id.clone());
+        if *view.tab.read_untracked() == Tab::Logs
+            && *m.log_follow.read_untracked()
+            && !*m.log_loading.read_untracked()
             && let Some(id) = live
         {
             m.load_logs(&id, None);
         }
     });
     // Another app chosen: its view from the start.
-    let mut last = use_signal(|| None::<String>);
-    use_effect(move || {
+    let last = signal(|| None::<String>);
+    effect(move || {
         let id = m.detail.read().as_ref().map(|d| d.id.clone());
-        if id != *last.peek() {
+        if id != *last.read_untracked() {
             last.set(id);
             view.reset();
         }
@@ -180,8 +180,8 @@ pub fn App() -> Element {
 
 /// Nothing chosen yet.
 #[component]
-fn Pick() -> Element {
-    let m = use_context::<Manager>();
+fn Pick() -> View {
+    let m = context::<Manager>();
     let all = m.projects.read();
     let up = all.iter().filter(|p| p.running.is_some()).count();
     rsx! {
@@ -194,9 +194,9 @@ fn Pick() -> Element {
 
 /// The list of apps (amui's `Sidebar`).
 #[component]
-fn Sidebar() -> Element {
-    let m = use_context::<Manager>();
-    let mut view = use_context::<View>();
+fn Sidebar() -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     let all = m.projects.read();
     let q = view.search.read().clone();
     let show_all = *m.show_all.read();
@@ -205,8 +205,8 @@ fn Sidebar() -> Element {
     let shown = manager::listed(&all, &q, show_all, selected.as_deref());
     let scanning = *m.scanning.read();
     let busy = *m.create_busy.read();
-    let mut create = move || {
-        let n = view.new_name.peek().clone();
+    let create = move || {
+        let n = view.new_name.read_untracked().clone();
         if !n.trim().is_empty() {
             m.create(&n);
             view.new_name.set(String::new());
@@ -324,7 +324,7 @@ fn Sidebar() -> Element {
 
 /// The running state, as a chip (amui's `StatusChip`).
 #[component]
-fn StatusChip(running: bool, status: Option<String>) -> Element {
+fn StatusChip(running: bool, status: Option<String>) -> View {
     let (cls, bg, line) = if running {
         ("green", "var(--green-bg)", "var(--green-line)")
     } else {
@@ -338,9 +338,9 @@ fn StatusChip(running: bool, status: Option<String>) -> Element {
 
 /// The asked act, inline under the header (amui's `ConfirmBar`).
 #[component]
-fn ConfirmBar(id: String) -> Element {
-    let m = use_context::<Manager>();
-    let mut view = use_context::<View>();
+fn ConfirmBar(id: String) -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     let Some(p) = view.pending.read().clone().filter(|p| p.id == id) else { return rsx! {} };
     let run = move |_| {
         view.pending.set(None);
@@ -362,9 +362,9 @@ fn ConfirmBar(id: String) -> Element {
 /// The chosen app's header (amui's `Header`): name, state, build, folder,
 /// when last read, its actions, and the tabs.
 #[component]
-fn Header(d: Detail) -> Element {
-    let m = use_context::<Manager>();
-    let mut view = use_context::<View>();
+fn Header(d: Detail) -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     let tab = *view.tab.read();
     let loading = *m.detail_loading.read();
     let place = d.path.as_ref().or(d.home.as_ref()).map(|p| p.display().to_string()).unwrap_or_default();
@@ -375,7 +375,7 @@ fn Header(d: Detail) -> Element {
     } else {
         String::new()
     };
-    let mut ask = move |act: Act, msg: String, id: String| view.pending.set(Some(Pending { id, msg, act }));
+    let ask = move |act: Act, msg: String, id: String| view.pending.set(Some(Pending { id, msg, act }));
     let (id1, id2, id3, id4) = (d.id.clone(), d.id.clone(), d.id.clone(), d.id.clone());
     let (n1, n2) = (d.name.clone(), d.name.clone());
     rsx! {
@@ -439,7 +439,7 @@ fn Header(d: Detail) -> Element {
 
 /// A figure at a glance (amui's `Tile`).
 #[component]
-fn Tile(label: String, value: String, #[props(default)] color: String) -> Element {
+fn Tile(label: String, value: String, #[props(default)] color: String) -> View {
     rsx! {
         div { class: "card tile", "data-t": "tile-{label}",
             div { class: "label", "{label}" }
@@ -450,20 +450,20 @@ fn Tile(label: String, value: String, #[props(default)] color: String) -> Elemen
 
 /// A key and its value (amui's `Row`).
 #[component]
-fn Row(k: String, v: String) -> Element {
+fn Row(k: String, v: String) -> View {
     rsx! { div { class: "kv", span { "{k}" } span { "{v}" } } }
 }
 
 #[component]
-fn Empty(msg: String) -> Element {
+fn Empty(msg: String) -> View {
     rsx! { div { class: "empty", "data-t": "empty", "{msg}" } }
 }
 
 /// How the app runs and builds (amui's `TargetsCard`): each chip runs it.
 #[component]
-fn TargetsCard(d: Detail) -> Element {
-    let m = use_context::<Manager>();
-    let mut view = use_context::<View>();
+fn TargetsCard(d: Detail) -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     let busy = m.task.read().running.is_some();
     let dev = [("dev (default)", "dev"), ("web", "dev --web")];
     let mut compile: Vec<(String, String)> = if d.meta.targets.is_empty() {
@@ -515,8 +515,8 @@ fn TargetsCard(d: Detail) -> Element {
 
 /// The Overview tab (amui's `Overview`).
 #[component]
-fn Overview(d: Detail) -> Element {
-    let m = use_context::<Manager>();
+fn Overview(d: Detail) -> View {
+    let m = context::<Manager>();
     let f = m.files.read();
     let rt = f.runtime.clone();
     let diag = m.diag.read();
@@ -654,9 +654,9 @@ fn Overview(d: Detail) -> Element {
 /// runs on the running app with its JSON arguments, once confirmed naming
 /// the exact call; `</> source` opens where the cell is defined.
 #[component]
-fn CellsTab(d: Detail) -> Element {
-    let m = use_context::<Manager>();
-    let mut view = use_context::<View>();
+fn CellsTab(d: Detail) -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     if !d.running {
         return rsx! { Empty { msg: "start the app to inspect its cells" } };
     }
@@ -711,7 +711,7 @@ fn CellsTab(d: Detail) -> Element {
                                                                 act: Act::Call { cell: cell.clone(), method: method.clone(), args: a.clone() },
                                                             })),
                                                             Err(e) => {
-                                                                let mut d = m.dispatch_msg;
+                                                                let d = m.dispatch_msg;
                                                                 d.set(Some(e));
                                                             }
                                                         },
@@ -728,7 +728,7 @@ fn CellsTab(d: Detail) -> Element {
                                         input { class: "args", "aria-label": "JSON arguments", "data-t": "args-{name}",
                                             placeholder: "[] — JSON arguments, e.g. [\"ada@example.com\"]",
                                             value: "{a}",
-                                            oninput: move |e| view.args.with_mut(|m| _ = m.insert(n2.clone(), e.value())),
+                                            oninput: move |e| view.args.update(|m| _ = m.insert(n2.clone(), e.value())),
                                         }
                                     }
                                 }
@@ -743,11 +743,11 @@ fn CellsTab(d: Detail) -> Element {
 
 /// The State tab (amui's `StateTab`): loaded on first view, never polled.
 #[component]
-fn StateTab(id: String, running: bool, cells: Vec<manager::CellInfo>) -> Element {
-    let m = use_context::<Manager>();
+fn StateTab(id: String, running: bool, cells: Vec<manager::CellInfo>) -> View {
+    let m = context::<Manager>();
     let i = id.clone();
-    use_hook(move || {
-        if running && m.state.peek().of.as_deref() != Some(i.as_str()) {
+    once(move || {
+        if running && m.state.read_untracked().of.as_deref() != Some(i.as_str()) {
             m.load_state(&i);
         }
     });
@@ -756,7 +756,7 @@ fn StateTab(id: String, running: bool, cells: Vec<manager::CellInfo>) -> Element
     }
     let st = m.state.read().clone();
     let loaded = st.of.as_deref() == Some(id.as_str());
-    let shared = use_memo(move || m.state.read().value.clone().map(|v| super::json_tree::Shared(Rc::new(v))));
+    let shared = memo(move || m.state.read().value.clone().map(|v| super::json_tree::Shared(Rc::new(v))));
     rsx! {
         div { class: "col10",
             div { style: "display:flex;align-items:center;gap:10px",
@@ -776,7 +776,7 @@ fn StateTab(id: String, running: bool, cells: Vec<manager::CellInfo>) -> Element
                 }
             } else if st.loading && !loaded {
                 div { class: "dim", style: "font-size:13px;padding:12px", "loading state…" }
-            } else if let Some(v) = shared() {
+            } else if let Some(v) = shared.get() {
                 StateOverview { state: v, cells }
             }
         }
@@ -785,16 +785,16 @@ fn StateTab(id: String, running: bool, cells: Vec<manager::CellInfo>) -> Element
 
 /// The Logs tab (amui's `LogsTab`): its first read on first view.
 #[component]
-fn LogsTab(id: String) -> Element {
-    let m = use_context::<Manager>();
+fn LogsTab(id: String) -> View {
+    let m = context::<Manager>();
     let i = id.clone();
-    use_hook(move || {
-        if m.logs.peek().is_none() && !*m.log_loading.peek() {
+    once(move || {
+        if m.logs.read_untracked().is_none() && !*m.log_loading.read_untracked() {
             m.load_logs(&i, None);
         }
     });
     let (a, b) = (id.clone(), id.clone());
-    let mut follow = m.log_follow;
+    let follow = m.log_follow;
     rsx! {
         LogView {
             logs: m.logs.read().clone(),
@@ -807,7 +807,7 @@ fn LogsTab(id: String) -> Element {
             on_reload: move |_| m.load_logs(&a, None),
             on_source: move |s: LogSource| m.load_logs(&b, Some(s)),
             on_follow: move |_| {
-                let on = !*follow.peek();
+                let on = !*follow.read_untracked();
                 follow.set(on);
             },
         }
@@ -817,8 +817,8 @@ fn LogsTab(id: String) -> Element {
 /// The Tasks tab (amui's `TasksTab`): `ax` verbs on the app's project, its
 /// output captured; cancellable, 5 min at most.
 #[component]
-fn TasksTab(id: String, has_project: bool) -> Element {
-    let m = use_context::<Manager>();
+fn TasksTab(id: String, has_project: bool) -> View {
+    let m = context::<Manager>();
     let t = m.task.read().clone();
     let busy = t.running.is_some();
     rsx! {
@@ -901,17 +901,17 @@ const ROOT: &str = " root";
 
 /// A file tree beside its viewer (amui's `FileBrowser`).
 #[component]
-fn FileBrowser(nodes: Vec<FileNode>, truncated: bool, base: String, root_name: String) -> Element {
-    let m = use_context::<Manager>();
-    let mut view = use_context::<View>();
+fn FileBrowser(nodes: Vec<FileNode>, truncated: bool, base: String, root_name: String) -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     let q = view.file_filter.read().clone();
     let collapsed = view.collapsed.read().clone();
     let shown = visible(&nodes, &q, &collapsed);
     let files = nodes.iter().filter(|f| !f.dir).count();
     let root_folded = collapsed.contains(ROOT) && q.trim().is_empty();
     let open = m.open.read().clone();
-    let mut toggle = move |p: String| {
-        view.collapsed.with_mut(|s| {
+    let toggle = move |p: String| {
+        view.collapsed.update(|s| {
             if !s.remove(&p) {
                 s.insert(p);
             }
@@ -993,8 +993,8 @@ fn FileBrowser(nodes: Vec<FileNode>, truncated: bool, base: String, root_name: S
                                 }
                             }
                             span { role: "button", tabindex: "0", "aria-label": "close file", style: "cursor:pointer", "data-t": "closeFile",
-                                onclick: move |_| { let mut o = m.open; o.set(None) },
-                                onkeydown: move |e| if pressed(&e) { let mut o = m.open; o.set(None) },
+                                onclick: move |_| { let o = m.open; o.set(None) },
+                                onkeydown: move |e| if pressed(&e) { let o = m.open; o.set(None) },
                                 "✕"
                             }
                         }
@@ -1021,9 +1021,9 @@ fn FileBrowser(nodes: Vec<FileNode>, truncated: bool, base: String, root_name: S
 /// The Codebase tab (amui's `CodebaseTab`): the files of what runs, or of
 /// the whole repo it is in when that is a wider folder.
 #[component]
-fn CodebaseTab() -> Element {
-    let m = use_context::<Manager>();
-    let mut view = use_context::<View>();
+fn CodebaseTab() -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     let f = m.files.read().clone();
     let app_dir = f.runtime.as_ref().map(|r| r.root.clone());
     let can_repo = f.repo.is_some() && f.repo != app_dir;
@@ -1038,7 +1038,7 @@ fn CodebaseTab() -> Element {
             span { class: if on { "chip pill on" } else { "chip pill" }, role: "button", tabindex: "0", "data-t": "{t}",
                 onclick: move |_| {
                     view.repo.set(repo);
-                    if repo && m.files.peek().repo_tree.is_none() && !m.files.peek().repo_loading {
+                    if repo && m.files.read_untracked().repo_tree.is_none() && !m.files.read_untracked().repo_loading {
                         m.load_codebase();
                     }
                 },
@@ -1074,9 +1074,9 @@ fn CodebaseTab() -> Element {
 
 /// The chosen app (amui's `Detail`).
 #[component]
-fn DetailPane() -> Element {
-    let m = use_context::<Manager>();
-    let view = use_context::<View>();
+fn DetailPane() -> View {
+    let m = context::<Manager>();
+    let view = context::<ViewState>();
     let Some(d) = m.detail.read().clone() else { return rsx! {} };
     let tab = *view.tab.read();
     let pid = d.pid.unwrap_or(0);
@@ -1100,8 +1100,8 @@ fn DetailPane() -> Element {
 
 /// The Metrics tab (amui's `MetricsTab`).
 #[component]
-fn MetricsTab(running: bool, connections: Option<u64>) -> Element {
-    let m = use_context::<Manager>();
+fn MetricsTab(running: bool, connections: Option<u64>) -> View {
+    let m = context::<Manager>();
     if !running && m.hist.read().cpu.is_empty() {
         return rsx! { Empty { msg: "metrics stream once the app is running & selected" } };
     }

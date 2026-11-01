@@ -4,8 +4,9 @@
 use crate::{Window, page_with, wire};
 use aio::kit::{Island, WebIsland};
 use aio::serde_json::{Value, json};
+use aio::ui::prelude::*;
 use base64::Engine;
-use dioxus::prelude::*;
+use dioxus_core::VirtualDom;
 use dioxus_liveview::LiveViewPool;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
@@ -114,17 +115,17 @@ struct Label {
     label: String,
 }
 
-fn app() -> Element {
-    let mut n = use_signal(|| 0i64);
-    let mut on = use_signal(|| true);
-    let mut probe = use_signal(String::new);
+fn app() -> View {
+    let mut n = signal(|| 0i64);
+    let on = signal(|| true);
+    let probe = signal(String::new);
     rsx! {
         button { id: "hide", onclick: move |_| on.toggle(), "hide" }
-        if on() {
+        if on.get() {
             WebIsland {
                 id: "counter",
                 island: COUNTER,
-                props: Count { n: n() },
+                props: Count { n: n.get() },
                 onevent: move |b: Bump| n += b.by,
                 loading: rsx! { i { "loading" } },
             }
@@ -132,26 +133,26 @@ fn app() -> Element {
             WebIsland {
                 id: "react",
                 island: REACT,
-                props: Label { label: format!("hi {}", n()) },
+                props: Label { label: format!("hi {}", n.get()) },
                 onevent: move |b: Bump| n += b.by,
             }
             // Actions (aio's `use=`): the view's own children inside.
             WebIsland::<Label, ()> {
                 id: "tip",
                 island: TIP,
-                props: Label { label: format!("n is {}", n()) },
+                props: Label { label: format!("n is {}", n.get()) },
                 span { id: "inside", "{n}" }
             }
             WebIsland::<Label, ()> {
                 id: "swap",
-                island: if n() == 0 { TIP } else { MARK },
+                island: if n.get() == 0 { TIP } else { MARK },
                 props: Label { label: "swap".into() },
             }
             WebIsland::<Count, Bump> { id: "boundary", island: BOUNDARY, props: Count { n: 0 } }
             WebIsland {
                 id: "sandboxed",
                 island: SANDBOXED,
-                props: Count { n: n() },
+                props: Count { n: n.get() },
                 onevent: move |v: Value| probe.set(v.to_string()),
             }
         }

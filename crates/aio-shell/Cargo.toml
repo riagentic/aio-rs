@@ -52,7 +52,6 @@ tempfile = "3"
 aio-config = { workspace = true, features = ["toml"] }
 # The kit's islands, tested in the real page (`islands.rs`).
 aio = { workspace = true, features = ["kit"] }
-dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 
 [[test]]

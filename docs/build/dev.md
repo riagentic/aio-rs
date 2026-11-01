@@ -285,7 +285,7 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
   is saved).
 - A dx of another version on `PATH`: ax says so and rebuilds instead of
   patching; `ax setup` fetches the right one.
-- A CSS edit that doesn't show: the stylesheet is kept in a `use_hook`
+- A CSS edit that doesn't show: the stylesheet is kept in a `once`
   (made once) instead of `aio::use_css!` in the render.
 - Native-only code in a view the web build compiles: put it behind
   `#[cfg(not(target_arch = "wasm32"))]` or in a server function.
