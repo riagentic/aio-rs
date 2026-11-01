@@ -6,6 +6,7 @@
 # `in = "deb"`: the break is planted in the template app's built .deb (`file`
 # is a path in the package; a program's bytes keep their length) and `ax smoke`
 # must fail, saying `expect`. `fast`: GitHub CI runs it on every push.
+# `leaves`: what the broken code makes outside the tree, removed after.
 
 [[break]]
 id = "vacuous-lint"
@@ -76,6 +77,8 @@ file = "crates/aio/src/paths.rs"
 find = "if !real.as_os_str().is_empty() && p.starts_with(&real) && !p.starts_with(&tmp) {"
 put = "if false && p.starts_with(&real) && !p.starts_with(&tmp) {"
 test = "aio-rs test:sandbox a_test_runs_in_a_world_of_its_own_and_real_data_is_refused"
+# Broken, the test makes this in the home before it fails: removed after.
+leaves = "~/.aio-sandbox-probe-never-made"
 
 [[break]]
 id = "seed-typo"
@@ -139,3 +142,4 @@ file = "usr/lib/notes/notes"
 find = "window.__aioRunning = 0;"
 put = "window.__aioRunning = 0)"
 expect = "[page] Uncaught SyntaxError"
+fast = true

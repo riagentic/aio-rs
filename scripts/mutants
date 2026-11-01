@@ -116,6 +116,8 @@ def run_source(b):
         p = subprocess.run(cargo_test(b), cwd=ROOT, capture_output=True, text=True)
     finally:
         path.write_bytes(original)
+        if b.get("leaves"):
+            shutil.rmtree(os.path.expanduser(b["leaves"]), ignore_errors=True)
     return verdict(b["test"].split(" ")[2], p.stdout + p.stderr)
 
 

@@ -13,6 +13,7 @@ template already has a cell test and a UI test.
 | [Cassettes](cassettes.md) | an effect's I/O recorded once and replayed |
 | [Servers, sync and many apps](multi-app.md) | `TestServer`, `Sim`: routes, sign-in, synced copies, cuts, several apps |
 | [Lint and proving the tests](lint.md) | `ax lint`, and tests that can go red |
+| [Proving the tests](proving.md) | the mutation ledger: breaks planted in the source and in a built `.deb`, each caught by a named test |
 | [Real machines](labs.md) | `ax build --smoke`, `ax lab`: the built app on Windows, macOS, Linux |
 
 Which harness:
@@ -29,7 +30,11 @@ Which harness:
 | `testCell` | `Handle::<C>::memory()` | one cell's methods |
 | `bootCells` + `advance` | `aio::testing::TestCells` | cells, effects, schedules on a virtual clock |
 | `t.as(user)` | `TestCells::as_client(&h, caller)` | access rules as a network caller meets them |
-| `t.fuzz` | `TestCells::fuzz` | seeded random calls against invariants |
+| `t.fuzz` | `TestCells::fuzz`, `fuzz_methods` | seeded random calls against invariants |
+| `t.init`, `expect.effects`, `perfBudget` | `TestCells::reset`, `last_effects`, `budget` | a cell reset mid-test, the last call's effects, a per-test budget |
+| `testIO` | `aio::testing::TestIo` | a command-line run: stdin, a terminal or not, colour, what was written |
+| `testApps` | `aio::testing::TestApps` | several apps, each its own dirs and server |
+| `smoke()` | `aio::testing::smoke(bundle)` | the built bundle started and stopped, in a test |
 | `testUI` | `aio::testing::TestUi` | views in the real page, headless |
 | `testServer` | `aio::testing::TestServer` | real HTTP and WebSocket on loopback |
 | `testMultiClient` | `aio::testing::Sim` | a server and synced copies under seeded cuts |
@@ -355,5 +360,6 @@ up but what it was asked to write.
 ## API
 
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::testing`
-(`TestCells`, `TestUi`, `Mount`, `TestServer`, `Sim`, `TestBrowser`,
-`fails`, `totp_code`), `aio::cassette`.
+(`TestCells`, `TestUi`, `Mount`, `TestServer`, `TestApps`, `Sim`,
+`TestBrowser`, `TestIo`, `patches`, `call_all`, `smoke`, `fails`,
+`totp_code`), `aio::cassette`.

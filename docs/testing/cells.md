@@ -102,11 +102,15 @@ cell booted on it (`t.cell::<C>()`) is a real `Handle<C>` whose calls are
 | `saved::<C>(version, json)` | boot `C` from data a build of `version` saved, as the app's boot reads it |
 | `start(cells)` | start an `aio::Cells` list as the app does: order, `#[on_start]`, missed schedules |
 | `effects()` | the effects asked for and not started yet, `Cell.key`, in order |
+| `last_effects()` | the effects the last commit asked for (aio's `expect.effects`), `[]` for none |
 | `settle()` | start them and wait until they, and all they lead to, are done (5 s at most) |
 | `advance(ms)` | move both clocks on, fire what is due, settle |
 | `failures()` | take the failed schedules and effects so far |
 | `as_client(&h, caller)` | `h` as a network caller reaches it (feature `server`) |
 | `fuzz(&h, seed, n, &calls, holds)` | `n` seeded random calls, checked after each |
+| `fuzz_methods(&h, seed, n, &skip, holds)` | the same over the cell's own methods, arguments made from their types |
+| `reset(&h, json)` | `h` back at its default with `json` merged in, mid-test (aio's `t.init`; `json!({})`: `t.destroy`) |
+| `budget::<C>(method, ms)` | a call of `C.method` slower than `ms` fails the test (aio's `perfBudget`) |
 
 Free functions in `aio::testing`: `seeded::<C>(json)` (the state alone,
 no handle), `expect(&h, what, |s| ..)`, `dump(&state, max)`,
@@ -634,7 +638,13 @@ assert!(why.starts_with("fuzz seed 7: account.audit panicked: unlucky audit"), "
   `holds` returning false (after any call or after the final settle),
   fails.
 - The list is the allowlist: leave out the methods a fuzz can't call
-  (one that needs a real device). There is no `skip`.
+  (one that needs a real device).
+- `fuzz_methods(&h, seed, n, &["arm_watch"], holds)` finds the calls
+  itself (aio's `fuzz({ skip })`): every method `#[methods]` lists but
+  the skipped ones, each with arguments made from its parameter types
+  (numbers, text, `bool`, `char`, `Option`, `Vec`, sets, tuples, `Uuid`).
+  A type it doesn't know gets `null`, so that call refuses; give such a
+  method its arguments with `fuzz`. A skipped name the cell lacks fails.
 - `fuzz` returns the calls it made (`withdraw([12])`, …): assert on them,
   or print them while you write the test.
 - Pick the seed: there is no generated one. Several seeds in a loop cover
@@ -647,6 +657,31 @@ the message (it fails if the closure passes). Use it for a harness's own
 refusals (`settle`, `seeded`, `fuzz`, a `TestUi` lookup) where
 `#[should_panic(expected = ..)]` would end the test. A failure taken by
 `fails` leaves no UI trace behind; one under `#[should_panic]` keeps it.
+
+## A command line: `TestIo`
+
+`TestIo::new(input)` is a whole command-line run in a test (aio's
+`testIO`): stdin is `input` (used up, it is closed, so a prompt refuses
+and never hangs), a terminal (`.tty(false)`: a pipe, the prompts refuse)
+without colour (`.color(true)`). `io.prompt` asks, `io.style` paints,
+`io.err()` is stderr for `Progress::to` and `Spinner::to`; `stdout()` and
+`stderr()` are what was written.
+
+```rust
+use aio::cli::Progress;
+use aio::testing::TestIo;
+
+# fn main() {
+let mut io = TestIo::new("ana\n\n");
+assert_eq!(io.prompt.ask("name", None).unwrap(), "ana");
+assert!(io.prompt.confirm("save?", true).unwrap(), "Enter is the default");
+Progress::to(io.err(), io.prompt.tty, 3, "saving").done();
+assert_eq!(io.stdout(), "name: save? [Y/n]: ");
+assert!(io.stderr().ends_with("3/3 100%\n"));
+let mut piped = TestIo::new("").tty(false);
+assert!(piped.prompt.ask("name", None).unwrap_err().why.contains("needs a terminal"));
+# }
+```
 
 ## Logging in with a second factor
 
@@ -671,12 +706,12 @@ drives it ([Debugging](../debugging/README.md)).
 
 | aio | aio-rs |
 |---|---|
-| `t.init(seed)` mid-test, `t.destroy()` | boot another cell on the same `TestCells` (`seeded`) |
-| `t.expect.effects([..])` per last action | `effects()`: every waiting effect of every cell |
-| `t.fuzz` with a generated seed, `skip` | an explicit seed; the call list is the allowlist |
+| `t.init(seed)` mid-test, `t.destroy()` | `reset(&h, seed)`: hooks run, waiting effects dropped, one event (the history stays) |
+| `t.expect.effects([..])` per last action | `last_effects()`; `effects()` is every waiting one |
+| `t.fuzz` with a generated seed, `skip` | `fuzz_methods` with `skip`; the seed is always given |
 | `t.randomActions(n)` (unseeded) | none: every fuzz is seeded |
-| `t.settle(ms)` for real timers | none: timers are virtual; real I/O goes to `TestServer` |
-| `perfBudget` call ceilings in `bootCells` | `aio::effect::CALL_CEILING` and `Effect::timeout` apply as in the app |
+| `t.settle(ms)` for real timers | kept out: timers are virtual, so a 10 s backoff settles at once; real I/O goes to `TestServer` |
+| `perfBudget` per test | `budget::<C>(method, ms)`: over it, the test fails (not a log line) |
 | `testCell` skips `onInit` (a warning) | every booted cell runs `#[on_start]`, as the app does |
 
 ## Common mistakes

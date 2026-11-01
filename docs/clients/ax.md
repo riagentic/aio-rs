@@ -326,7 +326,7 @@ dx's whole output is in the app's `logs/dev.log`. `ax shot`, `ax eval`,
 ### `ax test`
 
 ```text
-ax test <app> [filter] [--video out] [--pace ms] [--android] [--device serial]
+ax test <app> [filter] [--video out] [--pace ms] [--android] [--device serial] [--mutants]
 ```
 
 The app's tests (`cargo test`), UI tests included, headless: no window on
@@ -339,6 +339,7 @@ the screen.
 | `--pace ms` | each step this long on screen in the video (800) |
 | `--android` | the emulator lane instead: its APK for the device built, installed and started; passed once its window is ready and it still runs (`AIO_AVD` booted when none is attached) |
 | `--device serial` | with `--android`: that device (else `ANDROID_SERIAL`) |
+| `--mutants` | `cargo mutants` over the app's packages: each function broken in turn, the ones no test noticed listed and failing the run (`cargo install cargo-mutants`; [proving the tests](../testing/proving.md)) |
 
 ```sh
 ax test notes
