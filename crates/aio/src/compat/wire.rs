@@ -170,7 +170,7 @@ fn shown(all: Value, subs: &Option<Vec<String>>) -> Value {
 
 /// The cell an op of [`cells`]'s diff is in.
 fn cell_of(op: &Op) -> Option<&str> {
-    let (Op::Set { path, .. } | Op::Del { path } | Op::Append { path, .. }) = op;
+    let (Op::Set { path, .. } | Op::Del { path } | Op::Insert { path, .. } | Op::Append { path, .. }) = op;
     match path.first() {
         Some(Step::Key(k)) => Some(k),
         _ => None,
@@ -192,7 +192,9 @@ fn wire_ops(ops: &[Op]) -> Value {
             Op::Set { path: p, value } => {
                 json!({ "op": "replace", "path": path(p), "value": value })
             }
+            // At an index, both splice (Immer's array ops).
             Op::Del { path: p } => json!({ "op": "remove", "path": path(p) }),
+            Op::Insert { path: p, value } => json!({ "op": "add", "path": path(p), "value": value }),
             // Protocol v3's `append` (why aio needs v3).
             Op::Append { path: p, value } => json!({ "op": "append", "path": path(p), "value": value }),
         })
@@ -825,6 +827,11 @@ mod tests {
             wire_ops(&ops),
             json!([{ "op": "remove", "path": ["c", "b"] }, { "op": "replace", "path": ["c", "a", 1], "value": 3 }])
         );
+        let long: Vec<i32> = (0..40).collect();
+        let mut more = long.clone();
+        more.push(40);
+        let ops = crate::patch::diff(&json!({ "c": { "a": long } }), &json!({ "c": { "a": more } }));
+        assert_eq!(wire_ops(&ops), json!([{ "op": "add", "path": ["c", "a", 40], "value": 40 }]));
     }
 
     #[test]
