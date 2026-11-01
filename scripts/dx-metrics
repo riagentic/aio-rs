@@ -362,7 +362,10 @@ def main():
         return trend(int(rest[0]) if rest and rest[0].isdigit() else 12)
     check = "--check" in args
     rows = history()
-    with tempfile.TemporaryDirectory(prefix="aio-dx-") as tmp:
+    # Beside the checkout (its target/): `ax create --aio` names the checkout
+    # relative to the app, never through the root.
+    (ROOT / "target").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=ROOT / "target") as tmp:
         row = measure(pathlib.Path(tmp))
     row |= {"date": datetime.date.today().isoformat(), "commit": commit(), "machine": machine()}
     for col in COLUMNS:

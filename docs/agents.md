@@ -19,7 +19,8 @@ The sections: `rules`, `model`, `test`, `debug`, `ship`, `new`, `cell`,
 which are deep, shown only with `--max` or by name).
 
 Every app `ax create` makes has an `AGENTS.md` (and a `CLAUDE.md` that
-imports it) pointing at the brief and at this guide.
+imports it): the rules and the loop below, inline, then the brief and this
+guide by URL (no path of the machine it was made on).
 
 ## The rules
 

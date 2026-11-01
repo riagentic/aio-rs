@@ -82,7 +82,8 @@ instead (`[build] runtime = "bundled"`) for offline installs.
 | `ax lint` | what types can't check: impure methods, secrets, hooks, a11y | `--safe-fix` rewrites what it safely can |
 
 aio's `am fix` and `am link` (repairing a checkout's `dep/aio` link) have
-no twin: an aio-rs app points at its checkout by path in `Cargo.toml`.
+no twin: an aio-rs app takes aio-rs from git at a release tag, so a clone
+builds as it is; `ax framework <version>` moves it (aio's `am pin`).
 
 **When is aio-rs the wrong tool?**
 
