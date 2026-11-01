@@ -23,8 +23,8 @@ pub type View = dioxus_core::Element;
 /// ([`provide`], [`context`]), async work ([`spawn`], [`spawn_forever`],
 /// [`task`], [`resource`]), boundaries ([`ErrorBoundary`], [`Suspense`]),
 /// handlers ([`EventHandler`], [`Callback`]), the event types
-/// (`KeyboardEvent`, `MouseEvent`, `FormEvent`, …) with [`Key`],
-/// [`Modifiers`], and the page ([`eval`]).
+/// (`KeyboardEvent`, `MouseEvent`, `FormEvent`, …) with [`Key`](prelude::Key),
+/// [`Modifiers`](prelude::Modifiers), and the page ([`eval`]).
 #[cfg(feature = "kit")]
 pub mod prelude {
     #[doc(hidden)]
