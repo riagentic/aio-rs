@@ -130,7 +130,7 @@ aio::client!(Counter, counter);
 pub fn App() -> Element {
     use_live();
     let n = *part(|c| &c.count);
-    let theme = aio::kit::theme_css(aio::kit::theme::hue(env!("CARGO_PKG_NAME")));
+    let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
         style { {aio::use_css!(false, &theme; "assets/style.css")} }
         main {

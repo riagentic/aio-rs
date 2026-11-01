@@ -230,7 +230,7 @@ beyond the aio-rs form.
 | Routing | the address bar, Back and reload follow the route (History API, SPA fallback) | history kept in the app; a web reload starts at `/` | keep the screen in a cell | [routing](ui/routing.md#gaps-against-aio) |
 | Theming | scoped `css` classes, a duplicate-class warning | none | prefix class names | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
-| Theming | `neutral = "soft"` key, the hue on icon, splash, download window | `theme::tokens_css(soft)`; the icon takes the id's hue | pass the app's own CSS variables | [theming](ui/theming.md#gaps-against-aio) |
+| Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
 | Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
 | Desktop | custom window chrome (`ui.chrome`) | the OS title bar | ➖ | [desktop](clients/desktop.md#gaps) |
 | Desktop | app menus, a context-menu API | macOS's standard menus only | `kit::Menu`, the tray | [desktop](clients/desktop.md#gaps) |
@@ -238,6 +238,7 @@ beyond the aio-rs form.
 | Desktop | `keepServer`, `--keep-server` | none | a server and a client | [desktop](clients/desktop.md#gaps) |
 | Desktop | `runCommand` with `stdin` | none | `std::process` in an effect | [desktop](clients/desktop.md#gaps) |
 | Desktop | `requireSandbox`, `allowLocalPeers`, `ignoreDebugEnv` | `AIORT_SANDBOX=1` | ➖ | [desktop](clients/desktop.md#gaps) |
+| Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
 | Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |
 | Web | every `<webview>` method | `go` and events; desktop only | ➖ | [web](clients/web.md#gaps) |
 | CLI apps | `testIO()` over a whole run | none | test `parse`, `failure`, or the binary | [CLI apps](clients/cli-apps.md#gaps-against-aio) |

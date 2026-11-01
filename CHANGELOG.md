@@ -5,6 +5,32 @@ All notable changes to aio-rs are written here. The format follows
 follow [Semantic Versioning](https://semver.org/): before 1.0.0 a minor
 version may break things.
 
+## [Unreleased]
+
+### Added
+
+- Every window app has its icon at run time, dev and installed: `aio::config!()`
+  builds in `assets/icon.png`, else the app's monogram (aio's generated icon,
+  now `aio::icon`), and `Window::of` wears it on the title bar, taskbar,
+  Alt-Tab, tray, notifications, the macOS Dock, the download window and a
+  browser tab's favicon. A `Window` with no icon is said in the log.
+- `Config::hue()` and `aio::hue!()`: the app's one hue (`[ui] hue`, else its
+  id's) for its page, icon, splash and download window; the template's page
+  takes it.
+- `desktop::icon_state()` (aio's `iconState()`).
+- `ax build`: the default icon at 512 px plus an SVG (AppImage, deb); a macOS
+  `.icns` built in Rust with every slot from 16 to 1024 px (no `sips`);
+  `assets/icon.ico` used as is for the Windows exe; a warning for a
+  non-square `icon.png`, an `icon.svg` or an `icon.png` outside `assets/`.
+
+### Changed
+
+- `Tell::Icon { window, tray, tooltip, fps }` (was `{ tray, frames, fps }`):
+  aio's `appIcon()` in one effect; `None` leaves that part as it is.
+- The hue is hashed over the slug the id makes (aio's `appHue`), so
+  `My Notes`, `my_notes` and `my-notes` are one colour.
+- `aio_shell::runtime::ensure_as` takes the icon of its windows.
+
 ## [0.1.0] - 2026-11-01
 
 The first release of aio-rs (alpha): a Rust framework for apps whose state
