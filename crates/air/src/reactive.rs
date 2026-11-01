@@ -356,10 +356,13 @@ fn run_effect(e: Key) {
     (body.borrow_mut())();
 }
 
-/// An effect that read nothing and made nothing is dropped after its
-/// first run: a static hole costs nothing later.
+/// An effect that read nothing and made, kept and provided nothing is
+/// dropped after its first run: a static hole costs nothing later.
 fn drop_if_idle(e: Key) {
-    let idle = rt(|rt| rt.node(e).is_some_and(|n| n.deps.is_empty() && n.owned.is_empty() && n.cleanups.is_empty()));
+    let idle = rt(|rt| {
+        rt.node(e)
+            .is_some_and(|n| n.deps.is_empty() && n.owned.is_empty() && n.cleanups.is_empty() && n.extra.is_none())
+    });
     if idle {
         dispose(e);
     }

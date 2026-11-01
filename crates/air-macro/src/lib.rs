@@ -586,6 +586,16 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                     // A macro: the `{name}`s of its format string, then its arguments.
                     if let Some(TokenTree::Group(g)) = toks.get(i + 2) {
                         let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+                        // A view inside: the names its nodes read, not its tags.
+                        if s == "rsx" {
+                            if let Ok(nodes) = parse_nodes(&inner) {
+                                let mut r = vec![];
+                                node_captures(&nodes, &mut r);
+                                out.extend(r.into_iter().filter(|n| !bound.contains(n)));
+                            }
+                            i += 3;
+                            continue;
+                        }
                         if let Some(TokenTree::Literal(l)) = inner.first()
                             && let Some(s) = lit_str(l)
                             && let Node::Fmt(_, r) = text(&s, l.span())
@@ -826,7 +836,7 @@ fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> Tok
     let mut r = vec![];
     captures(e, &mut r);
     let c = clones(&r);
-    call(quote!({ #c ::std::boxed::Box::new(move || #into(#e)) }))
+    call(quote!({ #c ::std::boxed::Box::new(move || #into({ #e })) }))
 }
 
 /// `Row { a: x, children… }` → `Row(RowProps { a: x.into(), children: … })`; no props: `Row()`.
