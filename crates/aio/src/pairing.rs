@@ -373,7 +373,8 @@ fn serving(data: &std::path::Path) -> std::io::Result<Serving> {
         || {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "the app isn't serving (no serving.json): set [server] listen and start it",
+                "the app isn't running, or has no server for other devices: start it, \
+                 after giving it one in its aio.toml ([app] mode = \"client-server\", [server] listen = \"0.0.0.0:8100\")",
             )
         },
     )

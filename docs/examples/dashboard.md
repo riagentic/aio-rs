@@ -406,7 +406,7 @@ ax build dash                       # the installable app
   system browser instead of a window ([targets](../build/targets.md#web)),
   or `ax build dash --web` makes the views a page of their own.
 - **Phones**: `ax build dash --android`; pair the phone with
-  `ax pin dash` and the code ([sync](../state/sync.md#pairing-and-discovery)).
+  `ax pair dash` and the code ([sync](../state/sync.md#pairing-and-discovery)).
 
 ## What maps to what
 

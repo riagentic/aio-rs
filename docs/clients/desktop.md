@@ -417,7 +417,7 @@ ax clients notes              # its windows
 
 A window on another machine's cells is `[app] mode = "client"` with
 `[client] server` naming the server: the same views, over a synced copy
-([sync](../state/sync.md)). `ax pin` and `ax pair` link a device without
+([sync](../state/sync.md)). `ax pair` (a code, then the device with it) links a device without
 typing the key; `ax discover` lists the aio-rs apps on this network that
 answer.
 
