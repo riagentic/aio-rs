@@ -1176,72 +1176,58 @@ assert_eq!(s.items, ["https://example.org/feed/1"], "the last good data stays");
 
 ## 22. A subprocess with a timeout and a stop button
 
-Run a tool, keep what it wrote even when it is cut short. The effect
-watches the child off the async threads, kills it at the deadline or when
-the cell says stop, and hands back the output so far.
+Run a tool, keep what it wrote even when it is cut short. `aio::process`
+runs it in a process group of its own, hands each line back as it comes,
+kills the whole tree at the deadline, and a stop aborts the effect, which
+kills the tree with it.
 
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cell]
 pub struct Tool {
     pub running: bool,
-    pub stop: bool,
-    pub output: String,
+    pub output: Vec<String>,
     pub ended: String,
-}
-
-/// Runs `cmd`, killed after `limit` or once `stop()` says so; the output so far either way.
-fn run(cmd: &str, args: &[&str], limit: Duration, stop: impl Fn() -> bool) -> (String, String) {
-    let mut child = match Command::new(cmd).args(args).stdout(Stdio::piped()).spawn() {
-        Ok(c) => c,
-        Err(e) => return (String::new(), format!("could not start: {e}")),
-    };
-    let t0 = Instant::now();
-    let ended = loop {
-        match child.try_wait() {
-            Ok(Some(code)) => break format!("exited: {code}"),
-            Err(e) => break format!("lost: {e}"),
-            Ok(None) if stop() => break "stopped".into(),
-            Ok(None) if t0.elapsed() > limit => break "timed out".into(),
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-        }
-    };
-    _ = child.kill();
-    _ = child.wait();
-    let mut out = String::new();
-    _ = child.stdout.take().map(|mut s| s.read_to_string(&mut out));
-    (out, ended)
 }
 
 #[methods]
 impl Tool {
     pub fn launch(&mut self, cx: &Cx, limit_ms: u64) -> Result {
         ensure!(!self.running, "already running");
-        (self.running, self.stop) = (true, false);
+        (self.running, self.output) = (true, vec![]);
         cx.run(Effect::new("tool", move |h: Handle<Tool>| async move {
-            let watch = h.clone();
-            let (out, ended) = tokio::task::spawn_blocking(move || {
-                // `exec`: the shell becomes the long command, so a kill ends it.
-                run("sh", &["-c", "echo first; exec sleep 5"], Duration::from_millis(limit_ms), || watch.state().stop)
-            })
-            .await
-            .unwrap_or_default();
-            _ = h.finished(out, ended);
+            let lines = h.clone();
+            let ran = aio::process::Command::new("sh")
+                .args(["-c", "echo first; sleep 5 & wait"])
+                // Each line as it comes: a stop keeps what it wrote.
+                .on_line(move |l, _| _ = lines.line(l.to_string()))
+                .run(Some(Duration::from_millis(limit_ms)))
+                .await;
+            let ended = match ran {
+                Ok(out) if out.timed_out => "timed out".into(),
+                Ok(out) => format!("exited: {}", out.status),
+                Err(e) => format!("could not start: {e}"),
+            };
+            _ = h.finished(ended);
         }));
         Ok(())
     }
 
-    pub fn stop(&mut self) {
-        self.stop = true;
+    pub fn line(&mut self, l: String) {
+        self.output.push(l);
     }
 
-    pub fn finished(&mut self, output: String, ended: String) {
-        (self.running, self.output, self.ended) = (false, output, ended);
+    /// The effect is dropped at its next await, and the program's tree with it.
+    pub fn stop(&mut self, cx: &Cx) {
+        cx.abort("tool");
+        (self.running, self.ended) = (false, "stopped".into());
+    }
+
+    pub fn finished(&mut self, ended: String) {
+        (self.running, self.ended) = (false, ended);
     }
 }
 
@@ -1251,16 +1237,14 @@ let mut t = TestCells::new();
 let h = t.cell::<Tool>();
 h.launch(300).unwrap();
 t.settle();
-assert_eq!((h.state().output.as_str(), h.state().ended.as_str()), ("first\n", "timed out"));
+assert_eq!((h.state().output.clone(), h.state().ended.as_str()), (vec!["first".to_string()], "timed out"));
 # }
 ```
 
-- The stop button calls `stop()`: the watcher sees it within 20 ms.
-- A kill ends the child, not processes it started: `exec`, or a process
-  group, keeps them one.
-- Gap: aio passes an abort signal to `Deno.Command`; aio-rs has no
-  subprocess helper (and no async process API in its runtime), so the
-  wait loop is yours, as above.
+- The tool's own children (`sleep` here) die with it: the kill is the
+  group's.
+- A tool that never ends needs no timeout of its own: the stop is the
+  effect's abort.
 
 ## Where to go next
 
