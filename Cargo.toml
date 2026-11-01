@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/air", "crates/air-macro", "crates/aio", "crates/aio-config", "crates/aio-config-macro", "crates/aio-macros", "crates/aio-shell", "crates/aio-cli"]
+members = ["crates/air", "crates/air-macro", "crates/air-bench", "crates/aio", "crates/aio-config", "crates/aio-config-macro", "crates/aio-macros", "crates/aio-shell", "crates/aio-cli"]
 
 [workspace.package]
 edition = "2024"

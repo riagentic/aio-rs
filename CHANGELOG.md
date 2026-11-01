@@ -9,6 +9,30 @@ version may break things.
 
 ### Added
 
+- **air, aio-rs's own renderer, phase 1** (docs/design/air.md): crates
+  `aio-rs-air` and `aio-rs-air-macro`, and feature `air` of aio-rs, where
+  `aio::ui::prelude` and `TestUi` run on air with no Dioxus in the build
+  (50 crates, against `kit`'s 116). A view's body runs once; each hole
+  of `rsx!` follows exactly the signals it read. Views are built where
+  they are placed (their context and boundaries), components are holes
+  whose hooks keep their state if the body waits for a resource, plus
+  keyed lists, context, `ErrorBoundary`, `Suspense`, resources and tasks,
+  typed W3C-shaped event payloads that bubble through the handlers
+  (`stop_propagation` works), page scripts (`eval`), `onmounted` and
+  globals per app instance. Dioxus stays the default renderer; with
+  `kit` on too the facade is Dioxus's (the kit moves in step 2).
+  Measured again on the spike's bench (`crates/air-bench`, now in the
+  workspace): a one-line edit rebuilds in 0.54x Dioxus's time, a clean
+  build in 0.30x with 8 crates instead of 77, a held key over 10 000 rows
+  answers in 0.32x.
+- air's gates, each shown failing on a planted bug first: views removed
+  (or replaced by an error boundary in the same pass) leave no node,
+  effect, subscription, cleanup, handler, task, page script or page node;
+  misuse fails in release builds too (a hook outside a view's body, a
+  write while a hole or a memo computes, an effect loop, a signal used
+  after its view, a view placed twice, two rows with one key, a missing
+  `key:` or an `if let` in `rsx!` at compile time); a renderer fault
+  planted in air fails `TestUi` in the Rust page and the Electron page.
 - **Async methods answer their caller** (aio's `await cell.method()`): a
   typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
   await is the value its last part returned or the refusal that ended it
@@ -156,6 +180,9 @@ version may break things.
   `peer` of itself (its own user and role, never a claimed one).
 ### Changed
 
+- Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
+  `aio::ui::chord`, renderer-free, so `TestUi` needs no kit; `aio::kit`
+  re-exports them as before.
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
   they did; `[app] tz = "local"` reads this machine's local time (the
   0.1.0 behaviour).
