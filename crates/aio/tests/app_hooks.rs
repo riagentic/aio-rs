@@ -105,3 +105,39 @@ fn the_app_gate_sees_every_call_and_refuses_what_it_will() {
     let h = Handle::<Tally>::open(&db).unwrap();
     assert_eq!((h.state().n, SEEN.lock().unwrap().len()), (2, 0));
 }
+
+#[cell(persist)]
+pub struct Clamp {
+    pub n: i64,
+}
+
+#[methods]
+impl Clamp {
+    pub fn add(&mut self, n: i64) {
+        self.n += n;
+    }
+}
+
+/// aio's `beforeReduce` returning another action: `aio::rewrite_call`.
+#[test]
+fn the_app_may_rewrite_a_call_and_the_log_keeps_what_ran() {
+    aio::rewrite_call(|c| {
+        if c.cell != "clamp" {
+            return Ok(None);
+        }
+        let n = c.args[0].as_i64().unwrap_or(0);
+        ensure!(n >= 0, "no taking away");
+        Ok((n > 10).then(|| serde_json::json!([10])))
+    });
+    let d = tempfile::tempdir().unwrap();
+    let db = d.path().join("state.db");
+    let h = Handle::<Clamp>::open(&db).unwrap();
+    h.add(3).unwrap();
+    h.add(500).unwrap();
+    assert_eq!(h.add(-1).unwrap_err().why, "no taking away");
+    assert_eq!(h.state().n, 13, "500 ran as 10");
+    let ev = h.store(|s| s.events().unwrap());
+    assert_eq!(ev[1].args, serde_json::json!([10]), "the log holds what ran");
+    drop(h);
+    assert_eq!(Handle::<Clamp>::open(&db).unwrap().state().n, 13, "replay never asks again");
+}

@@ -85,7 +85,7 @@ assert_eq!(h.state().n, 2); // the refused call changed nothing
 |---|---|
 | `aio::effect` (`Effect`, `Mode`, `retry`) | I/O a method asks for; its result comes back as a call. `Mode::Queue`, `Newest`, `First` decide a second run with the same key |
 | `aio::Backoff`, `aio::Plan`, `aio::Inputs` | retries and their spacing |
-| `aio::cron` | cron expressions, local time |
+| `aio::cron` | cron expressions, in UTC or local time (`[app] tz`) |
 | `aio::time` | `sleep`, `sleep_until`, `timeout`, `Instant` for async methods and effects |
 | `aio::tell` | telling people: a toast, a notification, the app icon's badge |
 | `aio::held` | a resource held open per key (camera, socket) while anyone uses it |

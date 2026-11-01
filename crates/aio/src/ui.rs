@@ -923,6 +923,14 @@ macro_rules! client {
                 r
             }
 
+            fn ask(&self, method: &str, args: $crate::serde_json::Value) -> $crate::Result<$crate::Answer> {
+                let _ = PARTS.read_untracked();
+                let h = HANDLE.get_untracked();
+                let r = $crate::Door::ask(&h, method, args);
+                tell(true);
+                r
+            }
+
             fn read<R>(&self, f: impl FnOnce(&$cell) -> R) -> R {
                 // In a render it follows every commit, as `$read()` (no
                 // hint: a flow reads through its door too).

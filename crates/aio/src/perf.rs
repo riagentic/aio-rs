@@ -230,6 +230,11 @@ fn violated(kind: &str, label: &str, took: Duration, budget: Duration, phases: O
     crate::report::tell(&format!("budget:{kind}"), &l);
 }
 
+/// The await ceiling of async methods (`[perf] call_ceiling`).
+pub(crate) fn ceiling() -> Duration {
+    budgets(|b| b.ceiling())
+}
+
 /// The budgets set for methods `T` does not have.
 pub(crate) fn unknown<T: crate::Cell>() -> Vec<String> {
     budgets(|b| b.unknown(T::ID, T::METHODS))

@@ -151,8 +151,9 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
   version + migrate = f (old data up), restore = f (repair on boot), save = f
   (what is written), visible = f (what each viewer is sent: fn(&Self, &By)
   or fn(&Self, &Caller) for their role), machine = field, diagnostics = false.
-- Fields: #[transient] never saved; #[server] never sent. A shared field named
-  like a credential (password, api_key, token…) must be #[server]: a compile error.
+- Fields: #[transient] never saved; #[server] never sent (on a shared cell an
+  aio::Hidden<T>: a read on a copy panics). A shared field named like a
+  credential (password, api_key, token…) must be #[server]: a compile error.
   A field (or method argument) of the app's own type: #[aio::data] on that
   struct or enum (it derives serde through aio: no serde dependency).
 - Methods (#[methods] impl): &mut self, plain args → () or aio::Result<T>;
@@ -161,6 +162,9 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
   predict = false); #[derived] cached reads (#[derived(reads = [rows])]: kept
   while those fields are, aio's memoLast); #[invariant] refuses a call
   that breaks it; #[every(\"5m\")] / #[cron(\"0 9 * * 1\")] (skip_if_running);
+  pub async fn: awaits anywhere (let x: T = io.await?; in if/match/loop),
+  each part atomic and logged; h.m(..)?.await is its end (value or refusal);
+  #[mode(newest|first)];
   #[ttl(ms)] reuses an answer; #[long] lifts the await ceiling; #[redact]
   keeps args out of logs; #[coalesce] on a cursor/scroll/selection method
   (called per keypress): each call shows at once, the run is written once,

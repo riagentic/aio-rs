@@ -46,6 +46,9 @@ use crate::{Cell, Handle};
 pub struct Plugin {
     name: &'static str,
     cells: Cells,
+    on_start: Vec<crate::cells::Hook>,
+    #[cfg(not(target_arch = "wasm32"))]
+    stops: Vec<(bool, Box<dyn FnOnce() + Send>)>,
     #[cfg(feature = "server")]
     http: crate::http::Http,
     on_effect: Vec<crate::Started>,
@@ -57,6 +60,9 @@ impl Plugin {
         Self {
             name,
             cells: Cells::default(),
+            on_start: vec![],
+            #[cfg(not(target_arch = "wasm32"))]
+            stops: vec![],
             #[cfg(feature = "server")]
             http: Default::default(),
             on_effect: vec![],
@@ -100,6 +106,37 @@ impl Plugin {
     pub fn on_effect(mut self, f: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
         self.on_effect.push(std::sync::Arc::new(f));
         self
+    }
+
+    /// Run `f` once the app's cells are live (aio's plugin `onStart`), after
+    /// the app's own [`Cells::on_start`].
+    pub fn on_start(mut self, f: impl FnOnce(&Cells) -> crate::Result + Send + 'static) -> Self {
+        self.on_start.push(Box::new(f));
+        self
+    }
+
+    /// [`crate::on_stopping`] for this plugin: stop its own producers first.
+    pub fn on_stopping(mut self, f: impl FnOnce() + Send + 'static) -> Self {
+        self.stops.push((true, Box::new(f)));
+        self
+    }
+
+    /// [`crate::on_stop`] for this plugin (aio's plugin `onStop`): let go of what it holds.
+    pub fn on_stop(mut self, f: impl FnOnce() + Send + 'static) -> Self {
+        self.stops.push((false, Box::new(f)));
+        self
+    }
+
+    /// Its hooks into the app: effects heard, stops queued, its cells with its starts.
+    fn join(self, cells: Cells) -> Cells {
+        self.on_effect.into_iter().for_each(|f| crate::on_effect(move |c, k| f(c, k)));
+        for (stopping, f) in self.stops {
+            match stopping {
+                true => crate::on_stopping(f),
+                false => crate::on_stop(f),
+            }
+        }
+        cells.and(self.cells).hooks(self.name, self.on_start)
     }
 }
 
@@ -173,11 +210,10 @@ pub fn compose(
 ) -> crate::Result<(Cells, crate::http::Http), crate::Error> {
     check(&cells.ids(), &plugins)?;
     let (mut cells, mut http) = (cells, http);
-    for p in plugins {
+    for mut p in plugins {
         eprintln!("[aio] plugin {}: cells {}", p.name, p.cells.ids().join(", "));
-        p.on_effect.into_iter().for_each(|f| crate::on_effect(move |c, k| f(c, k)));
-        cells = cells.and(p.cells);
-        http = http.under(p.http);
+        http = http.under(std::mem::take(&mut p.http));
+        cells = p.join(cells);
     }
     Ok((cells, http))
 }
@@ -188,8 +224,7 @@ pub fn compose(cells: Cells, plugins: Vec<Plugin>) -> crate::Result<Cells, crate
     check(&cells.ids(), &plugins)?;
     let mut cells = cells;
     for p in plugins {
-        p.on_effect.into_iter().for_each(|f| crate::on_effect(move |c, k| f(c, k)));
-        cells = cells.and(p.cells);
+        cells = p.join(cells);
     }
     Ok(cells)
 }

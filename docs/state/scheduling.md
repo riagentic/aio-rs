@@ -40,7 +40,7 @@ impl Reports {
         self.hourly += 1;
     }
 
-    /// Mondays at 9:00, this machine's local time.
+    /// Mondays at 9:00 UTC (local time with `[app] tz = "local"`).
     #[cron("0 9 * * mon")]
     pub fn weekly(&mut self, cx: &Cx) {
         let _ = cx.now(); // a declared method may take `cx`
@@ -229,8 +229,10 @@ and pass that count as the attempt.
 
 ### Cron lines
 
-Five fields: minute, hour, day of month, month, day of week, in this
-machine's local time.
+Five fields: minute, hour, day of month, month, day of week, in UTC as
+aio's were, so a ported app's jobs fire when they did: `0 9 * * *` is
+09:00 UTC. For this machine's local time (and its daylight-saving
+changes) set `[app] tz = "local"` in `aio.toml`.
 
 | Field | Values | Names |
 |---|---|---|
