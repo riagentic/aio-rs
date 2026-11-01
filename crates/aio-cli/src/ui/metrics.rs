@@ -172,7 +172,7 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
     let last = diag
         .history
         .as_ref()
-        .and_then(|h| h.last())
+        .and_then(|h| h.iter().rev().find(|e| !e["refused"].is_string()))
         .map(|e| format!("{}.{}", e["cell"].as_str().unwrap_or("?"), e["method"].as_str().unwrap_or("?")));
     let mem = &health["memory"];
     let rss = mem["rssBytes"].as_u64();

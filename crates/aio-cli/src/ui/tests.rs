@@ -502,6 +502,7 @@ fn the_metrics_tab_shows_trends_calls_memory_clients_sizes_and_actions() {
     assert!(ui.text("clients").contains("2.0 KB") && ui.text("clients").contains("ok"), "{}", ui.text("clients"));
     shows(&mut ui, "cellSizes", "120 B");
     shows(&mut ui, "actions", "board.add");
+    assert!(ui.text("calls").contains("board.add"), "a refused call is no last action: {}", ui.text("calls"));
     assert!(
         ui.text("actions").contains("0.50 ms") && ui.text("actions").contains("✗ board.clear"),
         "{}",
