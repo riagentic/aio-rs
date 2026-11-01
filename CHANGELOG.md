@@ -297,6 +297,10 @@ version may break things.
   patch (made over the whole bundle) missed its other files and the whole
   release was downloaded. It now installs the bundle whole, as an update
   stages one.
+- On macOS and Windows the first update after an install is made from the
+  patch too: it starts from the installed `.app` or `Programs\<id>` when
+  no staged copy of the running version is kept, as there is none until
+  the first update staged one.
 - The app quitting (it stops, its socket closes) right after the page
   vetoed a close (`window.close()` with a beforeunload handler) quits: the
   vetoed close, still settling, took the quit's own close of that window

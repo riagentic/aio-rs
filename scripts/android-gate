@@ -105,9 +105,16 @@ class Gate:
         self.avd_home.mkdir()
         self.emulator = None
         real = Path.home()
-        # The emulator keeps the user's HOME (its adb key, so adb may talk to
-        # it) and only this run's AVDs; ax runs in a home of its own.
-        self.emu_env = dict(os.environ, ANDROID_AVD_HOME=str(self.avd_home), ANDROID_HOME=str(self.root))
+        # The emulator's own home in the work folder (its console token, its
+        # modem file), with the public key of the adb server already running
+        # (ANDROID_USER_HOME, else ~/.android), so adb is let in.
+        emu_home = work / "android"
+        emu_home.mkdir()
+        key = Path(os.environ.get("ANDROID_USER_HOME", real / ".android")) / "adbkey.pub"
+        if key.exists():
+            shutil.copy(key, emu_home / "adbkey.pub")
+        self.emu_env = dict(os.environ, ANDROID_AVD_HOME=str(self.avd_home), ANDROID_HOME=str(self.root),
+                            ANDROID_EMULATOR_HOME=str(emu_home), ANDROID_USER_HOME=str(emu_home), HOME=str(work))
         home = work / "home"
         env = {k: v for k, v in os.environ.items() if not k.startswith(("AIORT_", "XDG_"))}
         env.update(
@@ -119,6 +126,7 @@ class Gate:
             TMPDIR=str(work / "tmp"),
             ANDROID_HOME=str(self.root),
             ANDROID_SERIAL=SERIAL,
+            ANDROID_USER_HOME=str(work / "android"),
             CARGO_HOME=os.environ.get("CARGO_HOME", str(real / ".cargo")),
             RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(real / ".rustup")),
             GRADLE_USER_HOME=os.environ.get("GRADLE_USER_HOME", str(real / ".gradle")),
@@ -205,13 +213,14 @@ class Gate:
 
     def stop(self):
         if self.emulator and self.emulator.poll() is None:
-            self.sh("emu", "kill", check=False)
+            # The console's token is in the emulator's home.
+            self.run(self.adb, "-s", SERIAL, "emu", "kill", env=self.emu_env, check=False)
             try:
                 self.emulator.wait(60)
             except subprocess.TimeoutExpired:
                 self.emulator.kill()
                 self.emulator.wait()
-        # The emulator writes this beside the user's AVDs whatever ANDROID_AVD_HOME says.
+        # An emulator that took the user's home anyway writes this beside their AVDs.
         for home in {Path.home() / ".android", Path(os.environ.get("ANDROID_EMULATOR_HOME", Path.home() / ".android"))}:
             (home / f"modem-nv-ram-{PORT}").unlink(missing_ok=True)
 

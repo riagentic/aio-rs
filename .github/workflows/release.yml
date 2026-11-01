@@ -41,7 +41,7 @@ jobs:
           file smoke/ax | grep -q "$(uname -m)"
           smoke/ax --version
           # The machine checks run (Electron is not fetched here: that one is said missing).
-          smoke/ax setup --check | tee check.txt || true
+          smoke/ax setup --check 2>&1 | tee check.txt || true
           grep -q 'git version' check.txt
       - uses: actions/upload-artifact@v4
         with:

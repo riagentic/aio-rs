@@ -1362,16 +1362,31 @@ fn by_patch(at: &str, m: &Manifest, d: &Path, version: &str, bin: &str, step: &d
         let list: up::Patches = aio::serde_json::from_slice(&list?.map(|(b, _)| b).unwrap_or_default())
             .map_err(|e| io::Error::other(format!("its patch list: {e}")))?;
         let p = up::patch_for(&list, m, version).map_err(io::Error::other)?;
-        let base = d.join("versions").join(version);
-        if !base.is_dir() {
-            return Err(io::Error::other(format!("{version} is not kept here to patch from")));
-        }
+        let base = patch_base(&d.join("versions").join(version), bin)
+            .ok_or_else(|| io::Error::other(format!("{version} is not kept here to patch from")))?;
         let bytes = fetch(&format!("{at}/{}", p.file), p.size, step)?;
         if bytes.len() as u64 != p.size || aio::sha256::hex(&Sha256::digest(&bytes)) != p.sha256 {
             return Err(io::Error::other(format!("{}: not the signed patch (size or SHA-256 differ)", p.file)));
         }
         stage(d, m, bin, |into| crate::delta::apply(&bytes, &base, into))
     })())
+}
+
+/// Where the running version lies as its bundle unpacks, for a patch to
+/// start from: its staged copy (`staged`, there once it came as an update),
+/// else, on macOS and Windows, the folder holding its place (the `.app` put
+/// there by hand, `Programs\<id>` the `.exe` installed itself into, with
+/// its runtime when it carries one).
+fn patch_base(staged: &Path, bin: &str) -> Option<PathBuf> {
+    if staged.is_dir() {
+        return Some(staged.to_path_buf());
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some((live, _)) = place(bin) {
+        return live.parent().map(Path::to_path_buf);
+    }
+    _ = bin;
+    None
 }
 
 /// What a look found, for the log.
@@ -1708,6 +1723,16 @@ mod tests {
         // A macOS bundle is a folder already.
         let app = d.path().join("versions/1.1.0/Notes.app");
         assert_eq!(with_runtime(pair(&live), pair(&app)), (pair(&live), pair(&app)));
+    }
+
+    #[test]
+    fn a_patch_starts_from_the_staged_copy_else_from_where_the_app_is_installed() {
+        let d = tempfile::tempdir().unwrap();
+        let staged = d.path().join("versions/1.0.0");
+        // Not installed (a test binary): nothing to patch from.
+        assert_eq!(patch_base(&staged, "notes"), None);
+        std::fs::create_dir_all(&staged).unwrap();
+        assert_eq!(patch_base(&staged, "notes"), Some(staged));
     }
 
     #[test]

@@ -55,6 +55,8 @@ class Proof:
         self.work = work
         home = work / "home"
         real = Path.home()
+        # The app's data and temp dir (its sockets) where a socket's path stays short (macOS: 104 bytes).
+        self.data = Path(tempfile.mkdtemp(prefix="aio-up-", dir=None if WIN else "/tmp"))
         env = {k: v for k, v in os.environ.items() if not k.startswith(("AIORT_", "XDG_"))}
         env.update(
             HOME=str(home),
@@ -64,10 +66,10 @@ class Proof:
             XDG_DATA_HOME=str(home / ".local" / "share"),
             XDG_CONFIG_HOME=str(home / ".config"),
             XDG_CACHE_HOME=str(home / ".cache"),
-            AIORT_DATA=str(work / "aiort"),
-            TMPDIR=str(work / "tmp"),
-            TEMP=str(work / "tmp"),
-            TMP=str(work / "tmp"),
+            AIORT_DATA=str(self.data),
+            TMPDIR=str(self.data / "tmp"),
+            TEMP=str(self.data / "tmp"),
+            TMP=str(self.data / "tmp"),
             CARGO_HOME=os.environ.get("CARGO_HOME", str(real / ".cargo")),
             RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(real / ".rustup")),
             CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")),
@@ -81,7 +83,7 @@ class Proof:
         self.env = env
         self.app = work / APP
         self.rel = work / "releases"
-        self.log = work / "aiort" / "logs" / "app.log"
+        self.log = self.data / "logs" / "app.log"
         self.installed_exe = None
 
     def run(self, *cmd, cwd=None, check=True):
@@ -276,9 +278,10 @@ def main():
     finally:
         cleanup(p)
         if keep:
-            say(f"kept {work}")
+            say(f"kept {work} and {p.data}")
         else:
             shutil.rmtree(work, ignore_errors=True)
+            shutil.rmtree(p.data, ignore_errors=True)
 
 
 if __name__ == "__main__":
