@@ -54,9 +54,13 @@ version may break things.
 - A ported app replays aio's journal past its save at boot (a crash
   before aio's save), moving `__journal_wm` with each call.
 
-- `ax create --aio-version <v|main|latest>`, and `ax framework [version]
-  [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
-  `am pin`; all or nothing).
+- `ax create --aio-version <v|main|latest>`, and `ax pin [app] [version]`
+  (aio's `am pin`): what the app's Cargo.toml files ask for, what its
+  Cargo.lock built, this ax's version and whether they match, aio-rs's
+  releases, drift (exit 1), how far behind; `ax pin <v>|main|latest|<checkout>`
+  moves every aio-rs dependency (workspace deps too) with `cargo update -p`
+  for the aio-rs crates only, offline from cargo's cache when needed, all
+  or nothing; `--major`, `--json` ([ax](docs/clients/ax.md#ax-pin)).
 - `ax create` makes a git repository with its first commit (not inside
   another), a `README.md`, `.gitattributes` (`eol=lf`), a `.gitignore`
   that keeps `.env` and release keys out; `--target a,b` writes
@@ -169,6 +173,11 @@ version may break things.
   `behind` and its `degraded` parts.
 ### Changed
 
+- **Breaking: `ax pin` and `ax pair` named as aio names them.** The
+  pairing code is `ax pair <app> [--plain]` (aio's `am pair`), no longer
+  `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
+  before. `ax pin` is aio's framework version (above); the unreleased
+  framework verb is gone into it ([migration](docs/migration/README.md#ax-pin-and-ax-pair-in-02)).
 - `ax ui` reads in its own process (no `ax` child and no `cargo
   metadata` per reading), all at once, each within 5 s; it lists the
   running apps first, finds an app by its display name, shows a refusal
@@ -267,6 +276,10 @@ version may break things.
 
 ### Fixed
 
+- An app that isn't running or has no server, asked for a pairing code or
+  its profile, is told so plainly with what to type ("notes isn't running:
+  start it with `ax start notes`"; no server: the aio.toml lines that
+  give it one), not "the app isn't serving (no serving.json)".
 - A clean stop leaves no socket behind: a cell's door served on the
   runtime was never dropped, so its `cell-<id>.sock` (and its folder)
   outlived the app.

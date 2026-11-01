@@ -33,6 +33,7 @@ mod mux;
 /// `.deb` and AppImage: made on Linux (dpkg-deb, mksquashfs).
 #[cfg(unix)]
 mod package;
+mod pin;
 mod places;
 mod platform;
 mod preview;
@@ -633,9 +634,33 @@ fn report(data: &Path, id: Option<&str>, json: bool) -> Out {
     }
 }
 
-fn pin(t: &Target, plain: bool) -> Out {
-    let pin = aio::rt().block_on(aio::pairing::mint(&t.plan.data, plain)).map_err(|e| e.to_string())?;
+/// `ax pair <app>` (aio's `am pair`): a fresh pairing code from the running app.
+fn pair_code(t: &Target, plain: bool) -> Out {
+    let pin = aio::rt().block_on(aio::pairing::mint(&t.plan.data, plain)).map_err(|e| unserved(t, e))?;
     Ok(format!("{pin}\n(valid 3 minutes, once: enter it on the new device)"))
+}
+
+/// Why the app serves no other device (aio's `"<id>" is not running —
+/// start it`), plainly: not running, or with no server.
+fn unserved(t: &Target, e: std::io::Error) -> String {
+    let server = t.pkg.as_ref().and_then(|p| build::app_of(p).ok()).map(|(_, c)| c.server.listen.is_some());
+    match e.kind() {
+        std::io::ErrorKind::NotFound => not_serving(&t.name, aio::paths::running(&t.plan.data), server),
+        _ => e.to_string(),
+    }
+}
+
+/// What [`unserved`] says (pure); `server`: whether its aio.toml gives it
+/// one (None: unknown, an installed app).
+fn not_serving(name: &str, running: bool, server: Option<bool>) -> String {
+    let give = "give it one in its aio.toml ([app] mode = \"client-server\", [server] listen = \"0.0.0.0:8100\")";
+    match (running, server) {
+        (false, Some(false)) => {
+            format!("{name} isn't running, and has no server for other devices: {give}, then `ax start {name}`")
+        }
+        (false, _) => format!("{name} isn't running: start it with `ax start {name}`"),
+        (true, _) => format!("{name} runs, but has no server for other devices: {give}, then `ax restart {name}`"),
+    }
 }
 
 /// Where a backup of the store at `store` goes unless named: `backups/`
@@ -698,7 +723,7 @@ fn pair(t: &Target, addr: &str, code: &str) -> Out {
 
 /// `ax profile`: the profile, printed or written 0600 (it holds the key).
 fn profile(t: &Target, out: Option<&str>) -> Out {
-    let (p, local) = aio::pairing::local_profile(&t.plan.data, &t.id).map_err(|e| e.to_string())?;
+    let (p, local) = aio::pairing::local_profile(&t.plan.data, &t.id).map_err(|e| unserved(t, e))?;
     if local {
         eprintln!(
             "[aio] {} listens on this machine only, so this profile connects from here only: \
@@ -814,15 +839,9 @@ fn run(args: &[String]) -> Out {
             made.notes.push(create::git_init(&made.at, maintainer.is_some()));
             Ok(made.said(json))
         }
-        ("framework", rest) if rest.len() <= 1 => {
-            let root = create::app_root(&std::env::current_dir().map_err(|e| e.to_string())?)?;
-            let to = match (value("--aio"), rest.first()) {
-                (Some(_), Some(_)) => return Err("a version or --aio <dir>, not both".into()),
-                (Some(d), None) => Some(create::Aio::checkout(&root, Path::new(d))?),
-                (None, Some(v)) => Some(create::Aio::version(v, create::tags)?),
-                (None, None) => None,
-            };
-            create::framework(&root, to.as_ref(), create::relock)
+        ("pin", [w]) if pin::is_target(w) => pin::run(None, Some(w), has("--major"), json),
+        ("pin", [app, rest @ ..]) if rest.len() <= 1 => {
+            pin::run(Some(app), rest.first().copied(), has("--major"), json)
         }
         ("upgrade", rest) if rest.len() <= 1 => upgrade::upgrade(rest.first().copied(), value("--aio").map(Path::new)),
         ("uninstall", []) => upgrade::uninstall(has("--tools"), &aio::paths::tool_home(), &upgrade::bin()),
@@ -1560,8 +1579,11 @@ fn run(args: &[String]) -> Out {
         }
         ("runtime", []) => runtime(has("--fetch")),
         ("setup", []) => setup::run(has("--check")),
-        ("pin", [app]) => pin(&t(app)?, has("--plain")),
+        ("pair", [app]) => pair_code(&t(app)?, has("--plain")),
         ("pair", [app, addr, code]) => pair(&t(app)?, addr, code),
+        ("pair", [_, addr]) => {
+            Err(format!("ax pair <app> {addr} <code>: the code too (ax pair <app> on the app's machine makes one)"))
+        }
         ("auth", [app, what @ ..]) => {
             let f = auth::Fields { role: value("--role"), email: value("--email"), password: value("--password") };
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
@@ -1776,6 +1798,19 @@ mod tests {
         #[redact]
         pub fn seal(&mut self, secret: String) {
             self.text = format!("sealed {}", secret.len());
+        }
+    }
+
+    #[test]
+    fn says_plainly_why_an_app_serves_no_device() {
+        assert_eq!(not_serving("notes", false, None), "notes isn't running: start it with `ax start notes`");
+        assert_eq!(not_serving("notes", false, Some(true)), "notes isn't running: start it with `ax start notes`");
+        let none = not_serving("notes", false, Some(false));
+        assert!(none.starts_with("notes isn't running, and has no server for other devices: give it one in its aio.toml ([app] mode = \"client-server\", [server] listen = "), "{none}");
+        assert!(none.ends_with("then `ax start notes`"));
+        assert!(not_serving("notes", true, Some(false)).ends_with("then `ax restart notes`"));
+        for m in [none, not_serving("notes", true, None)] {
+            assert!(!m.contains("serving.json"), "{m}");
         }
     }
 

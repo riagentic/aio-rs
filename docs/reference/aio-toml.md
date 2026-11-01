@@ -295,7 +295,7 @@ For `mode = "client-server"` and `"server"` ([sync](../state/sync.md)).
 |---|---|---|---|
 | `listen` | `host:port` | none | Where to serve (`"127.0.0.1:7420"`). Required by the two serving modes; a port in use stops the start. `--port`, `--host` and `--expose` change it per launch. |
 | `discover` | bool | `false` | Answer LAN discovery probes (UDP 8099, aio's format), so `ax discover` and clients find it. |
-| `pairing` | bool | `false` | Let new devices pair with a PIN (`ax pin`, `ax pair`). |
+| `pairing` | bool | `false` | Let new devices pair with a PIN (`ax pair`). |
 | `tls` | bool | `false` | Serve over TLS with this machine's local root (`ax trust` explains how browsers trust it). |
 | `cert`, `key` | absolute paths | none | With `tls`: the operator's own certificate chain and key (PEM) instead of the local root, e.g. one a public CA signed. |
 | `hosts` | strings | `[]` | Names it is reached as besides IPs, `localhost` and `.local` (a reverse proxy's, a domain); any other `Host` is refused. The same list says which origins may frame the app and open its socket (aio's `allowedOrigins`). |
