@@ -9,6 +9,11 @@ version may break things.
 
 ### Added
 
+- `aio::ui` beside the renames: `Signal::toggle`, `key_event` (a key heard
+  elsewhere handed to the views), `Fragment`, `Component`; `ci.sh` fails on
+  `dioxus` named in the template, the kit, `ax ui`, the tests or the guide.
+- [docs/design/air.md](docs/design/air.md): air's design, the spike's
+  measurements, the facade's API and what can't match air yet.
 - `ax create --aio-version <v|main|latest>`, and `ax framework [version]
   [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
   `am pin`; all or nothing).
@@ -39,6 +44,51 @@ version may break things.
 
 ### Changed
 
+- **Breaking: views import `aio::ui`, not `dioxus`.** `aio::ui::prelude`
+  is the whole view API, renderer-neutral and shaped as air (aio-rs's own
+  renderer, [design](docs/design/air.md)) provides it, so the swap to air
+  needs no app change. It runs on Dioxus 0.7 until then. An app drops its
+  `dioxus` dependency (`aio` with feature `kit` brings it) and moves as
+  below ([migration guide](docs/migration/README.md), "0.1 → 0.2"):
+
+  | 0.1 | 0.2 |
+  |---|---|
+  | `use dioxus::prelude::*;` | `use aio::ui::prelude::*;` |
+  | `-> Element` | `-> View` |
+  | `use_signal(\|\| v)` | `signal(\|\| v)` |
+  | `count()`, `s.cloned()` | `count.get()`, `s.get()` |
+  | `s.peek()` | `s.read_untracked()` (`s.get_untracked()` for a copy) |
+  | `s.with_mut(f)` | `s.update(f)` |
+  | `s.try_write()`, `s.try_peek()` (`Result`) | `s.try_write()`, `s.try_read_untracked()` (`Option`), `s.alive()` |
+  | `s.set(v)` (always re-renders) | `s.set(v)` (re-renders only on a change; `v: PartialEq`, else `*s.write() = v`) |
+  | `use_memo(f)` | `memo(f)` |
+  | `use_effect(f)` | `effect(f)` |
+  | `use_effect(use_reactive!(\|d\| ..))` | `watch(d, \|d\| ..)` |
+  | `use_hook(f)` | `once(f)` |
+  | `use_drop(f)` | `on_cleanup(f)` |
+  | `use_callback(f)` | `callback(f)` |
+  | `use_context_provider(f)` | `provide(f)` |
+  | `use_context::<T>()`, `try_use_context`, `consume_context`, `try_consume_context` | `context::<T>()`, `try_context::<T>()` |
+  | `provide_root_context(v)` | `provide_root(v)` |
+  | `use_future(f)` | `task(f)` |
+  | `use_resource(f)` | `resource(f)` |
+  | `GlobalSignal<T>`, `Signal::global(f)` | `Global<T>`, `Global::new(f)` |
+  | `GlobalMemo<T>`, `Memo::global(f)` | `GlobalMemo<T>`, `GlobalMemo::new(f)` |
+  | `document::eval(js)`, `dioxus.send(v)` / `dioxus.recv()` in the script | `eval(js)`, `aio.send(v)` / `aio.recv()` |
+  | `ErrorBoundary { handle_error: \|e: ErrorContext\| .. }` | `ErrorBoundary { fallback: \|e: String\| .. }` |
+  | `SuspenseBoundary { fallback: \|_\| .. }` | `Suspense { fallback: rsx! { .. } }` |
+  | `*part(\|c\| &c.f)` (a value) | `part(\|c\| &c.f).get()` (a handle: `.get()`, `.with(\|v\| ..)`, `"{p}"`, `.ver()`) |
+  | `Runtime::try_current().is_some()` | `in_views()` |
+  | `aio::dioxus` | gone |
+  | `TestUi::read(&GlobalSignal<T>)` | `TestUi::read(&Global<T>)` |
+
+  The template, the kit, `ax ui`, the tests and the guide use it; the kit's
+  own hooks keep their names (`use_form`, `use_global_key`, …).
+- `ax lint`: naming `dioxus` (a path, a dependency, a page script's
+  `dioxus.send`) is an error (area `renderer`); the facade's hooks
+  (`signal`, `memo`, `effect`, `watch`, `once`, …) are held to a view's top
+  level like `use_…` ones; a `for` row without `key:` is an error (air
+  requires one); an `if let` in `rsx!` warns (air refuses it).
 - **`ax create` writes nothing of the machine it ran on**: the app takes
   aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
   commit), so a clone builds anywhere and a prebuilt `ax` needs no
