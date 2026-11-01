@@ -610,14 +610,8 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             if let Some(c) = coalesce {
                 return Err(syn::Error::new(c.span(), "#[coalesce] goes on a `pub fn (&mut self, …)` method"));
             }
-            if ttl.is_some() || long.is_some() || f.sig.asyncness.is_some() {
-                let what = if ttl.is_some() {
-                    "#[ttl(ms)]"
-                } else if long.is_some() {
-                    "#[long]"
-                } else {
-                    "an async method"
-                };
+            if ttl.is_some() || long.is_some() {
+                let what = if ttl.is_some() { "#[ttl(ms)]" } else { "#[long]" };
                 return Err(syn::Error::new(f.sig.span(), format!("{what} goes on a `pub async fn` method")));
             }
             continue;
@@ -1127,8 +1121,6 @@ mod tests {
 
     #[test]
     fn async_methods_refuse_what_cannot_be_split() {
-        let r = refused(parse_quote!(impl S { pub async fn m(&mut self) -> Result<u32> { Ok(1) } }));
-        assert!(r.contains("returns aio::Result"), "{r}");
         let r = refused(parse_quote!(impl S { pub async fn m(&mut self) { } }));
         assert!(r.contains("returns aio::Result"), "{r}");
         let r = refused(parse_quote!(impl S { pub async fn m(&mut self, q: &str) -> Result { Ok(()) } }));
@@ -1136,9 +1128,48 @@ mod tests {
         let r = refused(parse_quote!(impl S { pub async fn m(&mut self) -> Result { let x = io().await; Ok(()) } }));
         assert!(r.contains("T is how x is saved"), "{r}");
         let r = refused(parse_quote!(impl S { pub async fn m(&mut self) -> Result { self.n = io().await; Ok(()) } }));
-        assert!(r.contains("`.await` goes only in"), "{r}");
-        let r = refused(parse_quote!(impl S { pub async fn m(&mut self) -> Result { if a { io().await; } Ok(()) } }));
-        assert!(r.contains("`.await` goes only in"), "{r}");
+        assert!(r.contains("one named value"), "{r}");
+        let r = refused(parse_quote!(impl S { pub async fn m(&mut self) -> Result { f(io().await); Ok(()) } }));
+        assert!(r.contains("`.await` goes in a statement of its own"), "{r}");
+        let r = refused(
+            parse_quote!(impl S { pub async fn m(&mut self) -> Result { for i in v { io(i).await; } Ok(()) } }),
+        );
+        assert!(r.contains("inside `for`"), "{r}");
+        let r = refused(parse_quote!(impl S { pub async fn m(&mut self) -> Result { let n = 1; io().await; g(n) } }));
+        assert!(r.contains("`n` is used after an await: give it a type"), "{r}");
+        let r = refused(parse_quote!(impl S {
+            pub async fn m(&mut self) -> Result { let n: u32 = 1; if a { let n: u32 = 2; io().await; } g(n) }
+        }));
+        assert!(r.contains("`n` hides a value of the same name"), "{r}");
+    }
+
+    #[test]
+    fn awaits_in_branches_and_loops_are_lowered_to_steps_and_joins() {
+        let mut imp: syn::ItemImpl = parse_quote! {
+            impl S {
+                pub async fn m(&mut self, n: u32) -> Result<u32> {
+                    let mut i: u32 = 0;
+                    while i < n {
+                        if i == 2 { i += 1; continue; }
+                        let x: u32 = io(i).await?;
+                        self.sum += x;
+                        i += 1;
+                    }
+                    let last: u32 = match n { 0 => 0, _ => io(n).await };
+                    Ok(last)
+                }
+            }
+        };
+        let out = expand(&mut imp).unwrap().to_string();
+        assert!(out.contains("\"m.1\" =>") && out.contains("\"m.2\" =>"), "{out}");
+        assert!(!out.contains("\"m.3\""), "two awaits, two steps: {out}");
+        assert!(out.contains("fn __aio_m_j1"), "joins are hidden fns: {out}");
+        assert!(
+            out.contains(
+                "ASYNC : & 'static [(& 'static str , :: aio :: Mode)] = & [(\"m\" , :: aio :: Mode :: Queue)]"
+            ),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1165,8 +1196,8 @@ mod tests {
             };
             expand(&mut imp).unwrap().to_string()
         };
-        assert!(src(false).contains("CALL_CEILING"));
-        assert!(!src(true).contains("CALL_CEILING"));
+        assert!(src(false).contains("call_ceiling"));
+        assert!(!src(true).contains("call_ceiling"));
     }
 
     #[test]
