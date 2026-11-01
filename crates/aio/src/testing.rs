@@ -20,6 +20,8 @@ pub use browser::TestBrowser;
 #[cfg(feature = "server")]
 pub use sim::Sim;
 #[cfg(feature = "kit")]
+pub use electron::{Answered, Asked};
+#[cfg(feature = "kit")]
 pub use ui::{Info, Key, Modifiers, Mount, MountedComponent, TestUi};
 
 use crate::{By, Cell, CellData, Cells, Door, Error, Handle, Store};
