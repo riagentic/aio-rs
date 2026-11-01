@@ -55,7 +55,10 @@ fn inline_scripts(html: &str) -> impl Iterator<Item = &str> {
 /// The page runs code from the app (a Dioxus query: a focus, a rect, an
 /// island's script) as a script of its own making, never through `eval`:
 /// a `blob:` script, which the [`policy`] allows and injected markup can't
-/// make. It runs as a task of its own, after the frame that asked;
+/// make. It runs as a task of its own, after the frame that asked, and
+/// in the order asked (a script the page adds runs whenever it has loaded,
+/// unless it is not `async`: an island's unmount could run after the mount
+/// that replaced it);
 /// `__aioRunning` counts the ones not run yet and `__aioRan` says one ran
 /// (a test waits for them, and for the frame that shows what they did).
 pub const RUN: &str = "window.__aioRunning = 0;
@@ -65,6 +68,7 @@ window.__aioRun = (code) => {
   const s = document.createElement('script');
   window.__aioRunning++;
   const done = () => { window.__aioRunning--; window.__aioRan = true; URL.revokeObjectURL(u); s.remove(); };
+  s.async = false;
   s.src = u;
   s.onload = done;
   s.onerror = () => { done(); console.error('[aio] a script from the app did not run: the page policy refused it'); };

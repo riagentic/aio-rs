@@ -719,3 +719,21 @@ mod parts {
         assert_eq!((ui.text("ticks"), ui.text("cursor")), ("41".into(), "1".into()));
     }
 }
+
+/// The app's scripts in the page (its queries: an island's mount, then its
+/// unmount) run in the order the app sent them, a big one before a small
+/// one sent after it.
+#[test]
+fn the_apps_scripts_run_in_the_order_sent() {
+    let mut ui = TestUi::new(app);
+    let order = ui.eval(
+        "new Promise((done) => {
+           window.__order = [];
+           const pad = '/*' + 'x'.repeat(1 << 20) + '*/';
+           for (let i = 0; i < 40; i++) window.__aioRun((i % 2 ? '' : pad) + `window.__order.push(${i});`);
+           const wait = () => window.__aioRunning ? setTimeout(wait, 5) : done(window.__order);
+           wait();
+         })",
+    );
+    assert_eq!(order, serde_json::json!((0..40).collect::<Vec<_>>()));
+}
