@@ -865,6 +865,24 @@ impl<T: Cell> Handle<T> {
         lock(&self.inner.shown).clone()
     }
 
+    /// The whole state as aio's `app.snapshot()` has it: an object of cells,
+    /// each its whole state (`#[server]` fields too), a `#[aio_cell]` field
+    /// under its aio cell's name. What [`Self::load_snapshot`] takes back.
+    pub fn export(&self) -> Result<Value> {
+        Ok(snapshot_cells::<T>(crate::json(&*self.state())?))
+    }
+
+    /// Replace the state with `snap`, as [`Self::export`] made it (aio's
+    /// `loadSnapshot`): a new event, saved before it returns, sent to every
+    /// client. Refused when it isn't an object of objects, or when its cells
+    /// aren't this app's (a file from another app would wipe the cells it
+    /// lacks); `force` loads it anyway: a missing cell starts from its
+    /// defaults, an unknown one is dropped (said).
+    pub fn load_snapshot(&self, snap: &Value, force: bool) -> Result {
+        let st = snapshot_state::<T>(snap, force)?;
+        self.store(|s| s.load(&By::System, st))
+    }
+
     /// How many calls of async method `method` are in flight (its effects
     /// running or queued, under any `#[ttl]` key); `None`: every effect of
     /// the cell. A count, never a flag: two overlapping calls are two.
@@ -1067,4 +1085,77 @@ mod tests {
         left.sort();
         assert_eq!(left, ["mid", "new"]);
     }
+}
+
+/// The cells of `T` a snapshot names: its own, then its `#[aio_cell]` slices'.
+fn snapshot_names<T: Cell>() -> Vec<&'static str> {
+    std::iter::once(T::ID).chain(T::AIO_CELLS.iter().map(|s| s.cell)).collect()
+}
+
+/// `T`'s state (`json`) as a snapshot of cells (pure).
+fn snapshot_cells<T: Cell>(json: Value) -> Value {
+    let mut own = match json {
+        Value::Object(m) => m,
+        v => return serde_json::json!({ T::ID: v }),
+    };
+    let mut out = serde_json::Map::new();
+    for s in T::AIO_CELLS {
+        if let Some(v) = own.remove(s.field) {
+            out.insert(s.cell.into(), v);
+        }
+    }
+    out.insert(T::ID.into(), own.into());
+    out.into()
+}
+
+/// A snapshot of cells back as `T`'s state, checked as aio checks one
+/// (`snapshotShapeError`, `snapshotCellsError`): pure but for the warnings.
+pub(crate) fn snapshot_state<T: Cell>(snap: &Value, force: bool) -> Result<Value> {
+    let Some(cells) = snap.as_object() else {
+        crate::reject!("snapshot must be a JSON object: pass the exact snapshot export gave");
+    };
+    for (c, v) in cells {
+        if !v.is_object() {
+            let got = match v {
+                Value::Null => "null",
+                Value::Array(_) => "an array",
+                Value::String(_) => "a string",
+                Value::Number(_) => "a number",
+                _ => "a boolean",
+            };
+            crate::reject!("snapshot value for cell \"{c}\" must be an object (a cell's state is always an object), got {got}");
+        }
+    }
+    let names = snapshot_names::<T>();
+    let missing: Vec<&str> = names.iter().copied().filter(|c| !cells.contains_key(*c)).collect();
+    let unknown: Vec<&str> = cells.keys().map(String::as_str).filter(|c| !names.contains(c)).collect();
+    let quoted = |cs: &[&str]| cs.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+    if !force && (!missing.is_empty() || !unknown.is_empty()) {
+        let mut parts = vec![];
+        if !missing.is_empty() {
+            parts.push(format!("it has nothing for {}, whose state would be DESTROYED", quoted(&missing)));
+        }
+        if !unknown.is_empty() {
+            parts.push(format!("it carries cells this app does not declare: {}", quoted(&unknown)));
+        }
+        crate::reject!(
+            "snapshot refused: {}. A snapshot replaces the WHOLE state, so this looks like a file from a different app. This app declares: {}. Load it anyway with force (`?force=1`)",
+            parts.join("; and "),
+            quoted(&names)
+        );
+    }
+    if !unknown.is_empty() {
+        eprintln!("[aio] snapshot: dropped cells this app does not declare: {}", quoted(&unknown));
+    }
+    if !missing.is_empty() {
+        eprintln!("[aio] snapshot: {} start from their defaults", quoted(&missing));
+    }
+    let mut own = match cells.get(T::ID) {
+        Some(Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    for s in T::AIO_CELLS {
+        own.insert(s.field.into(), cells.get(s.cell).cloned().unwrap_or_else(|| serde_json::json!({})));
+    }
+    Ok(own.into())
 }
