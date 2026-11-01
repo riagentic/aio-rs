@@ -178,7 +178,8 @@ def live(aio, app, env, home):
         evaluate = [aio, "eval", NAME, None, "--home", home]
         page = lambda js: subprocess.Popen(evaluate[:3] + [js] + evaluate[4:], cwd=app, env=env,  # noqa: E731
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        while page("1").communicate()[0].strip() != "1":
+        answer = lambda p: p.communicate()[0].strip().strip('"')  # noqa: E731
+        while answer(page("1")) != "1":
             if time.monotonic() > end:
                 fail("its page doesn't answer")
             time.sleep(0.2)
@@ -188,18 +189,22 @@ def live(aio, app, env, home):
             text = f.read_text()
             if old and old not in text:
                 fail(f"the template has no {old} in {path} to edit")
-            js = (f"new Promise(r => {{ const t = setInterval(() => {{ try {{ if ({shows}) "
-                  f"{{ clearInterval(t); r(Date.now()); }} }} catch (_) {{}} }}, 5); }})")
-            waiter = page(js)
-            time.sleep(0.5)
+            # The page's poller is armed before the save, and its answer says
+            # so: a busy machine's slow `ax eval` start is not timed as the edit.
+            arm = (f"(() => {{ window.__dxShown = null; const t = setInterval(() => {{ try {{ if ({shows}) "
+                   f"{{ clearInterval(t); window.__dxShown = Date.now(); }} }} catch (_) {{}} }}, 5); return 'armed'; }})()")
+            if answer(page(arm)) != "armed":
+                fail("the page's poller didn't start")
             saved = time.time()
             f.write_text(text.replace(old, new, 1) if old else text + new)
-            try:
-                shown, _ = waiter.communicate(timeout=60)
-                row[col] = json.loads(shown) / 1000 - saved
-            except (subprocess.TimeoutExpired, ValueError):
-                waiter.kill()
-                fail(f"{path}: the edit didn't show in 60 s")
+            # When it showed is the page's own stamp: how long asking takes is not timed.
+            shown = None
+            while shown is None:
+                if time.time() > saved + 60:
+                    fail(f"{path}: the edit didn't show in 60 s")
+                time.sleep(0.05)
+                shown = json.loads(answer(page("window.__dxShown")) or "null")
+            row[col] = shown / 1000 - saved
         return row
     finally:
         dev.terminate()
