@@ -77,8 +77,12 @@ Read by `ax` (the `aio-rs-cli` binary) and the install scripts.
 | `AIO_RELEASE_KEY` | `ax release --aio` | The key file that signs aio-rs's own `SHA256SUMS`, else `aio.release.key` in the keys folder (`ax keygen --aio`) |
 | `AIO_FEEDBACK_DIR` | `ax feedback` | Where findings about aio-rs go (`<XDG data home>/aio/feedback`, shared with aio) |
 | `AIO_DOWNLOAD` | `install.sh`, `install.ps1` | Where the installer downloads `ax` from, instead of the URL it was made with |
-| `ANDROID_HOME`, `ANDROID_SDK_ROOT` | `ax build --android` | The Android SDK (else `~/Android/Sdk`) |
-| `JAVA_HOME` | `ax build --android` | A JDK 17 or 21 for Gradle (its folder named `…-17…` or `…-21…`), else one in `/usr/lib/jvm` |
+| `ANDROID_HOME`, `ANDROID_SDK_ROOT` | `ax build --android`, `ax dev --android`, `ax install --android` | The Android SDK, or its parent (else the OS's default: `~/Android/Sdk`, `~/Library/Android/sdk`, `%LOCALAPPDATA%\Android\Sdk`) |
+| `ANDROID_SERIAL` | `ax install --android`, `ax dev --android`, `ax test --android` | adb's own: the device to use when `--device` names none |
+| `ANDROID_USER_HOME` | `ax build --android` | Where Android's debug key is (else `~/.android`): a port signs with it, as aio's APK is |
+| `AIO_AVD` | `ax dev --android`, `ax test --android` | The emulator (AVD) booted when no device is attached (else the first) |
+| `AIO_AVD_PORT` | `ax dev --android`, `ax test --android` | The booted emulator's console port (`emulator-<port>`; else the emulator's first free one) |
+| `JAVA_HOME` | `ax build --android` | The JDK for Gradle when its `javac` says 17 to 23, else the newest up to 21 in the OS's JDK folders (Android Studio's own too) |
 
 [Release](../build/release.md) has the signing steps; [targets](../build/targets.md) the builds.
 
@@ -148,6 +152,6 @@ Known gaps or deliberate changes against aio's list:
 | `AIO_MAX_HEAP_MB` | none: no V8 heap in the app's process |
 | `AIO_STDOUT_IS_LOG` | none: the log masks secrets everywhere |
 | `AIO_ELECTRON_PROTOCOL`, `AIO_STRIP_CHROMIUM`, `AIO_SKIP_TRIM`, `AIO_WINDOWS_FAT_EXE` | none (no such build switches) |
-| `AIO_AVD`, `AIO_ANDROID_SERIAL`, `AIO_PLAYWRIGHT_DIR` | gap: no Android emulator or WebKit test lane of `ax` |
+| `AIO_ANDROID_SERIAL`, `AIO_PLAYWRIGHT_DIR` | `ANDROID_SERIAL` (adb's own) names the device of `ax test --android`; no WebKit test lane |
 | `AIO_DEBUG`, `AIO_DEV`, `AIO_AM_NO_DELEGATE` | none |
 | `AIO_TEST_NAMES`, `AIO_TEST_WIRE`, `AIO_TEST_BROWSER_HOME`, `AIO_TEST_DISPLAY` | none: `TestUi` runs the real page in its own sandbox |

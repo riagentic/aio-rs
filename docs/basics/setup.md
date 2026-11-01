@@ -117,8 +117,8 @@ code is 1 until every needed one is there.
 | ffmpeg | package | `brew install ffmpeg` | `winget install Gyan.FFmpeg` | `ax test --video`, `ax shot --video` | checks |
 | Xephyr or Xvfb | package | – | – | an agent's windows off the person's screen | checks |
 | wasm-bindgen 0.2.129 | fetched | fetched | fetched (x86_64) | `ax dev --web`, `ax build --web` | fetches it (SHA-256 pinned in ax) |
-| aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
-| Android SDK, NDK, JDK | yes | yes | – | `ax build --android`, `ax dev --android` | the build says what is missing |
+| aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
+| Android SDK, NDK, JDK 17-23, Gradle 8.9+ | yes | yes | yes | `ax build --android`, `ax dev --android` | the build says what is missing |
 | `x86_64-w64-mingw32-gcc` + its rustup target | yes | yes | – | `ax build --windows` (cross-built) | `ax build --windows` names the package |
 | `dpkg-deb`, `mksquashfs` | yes | – | – | `ax build --deb`, `--appimage` | the build says what is missing |
 

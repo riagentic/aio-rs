@@ -59,7 +59,7 @@ little (that app: 15.8 → 16.4 MB).
 | `--fresh` | with `--instance`: that copy on new, empty data (never the app's own) |
 | `--size 390x844` | the window at that size for this run (its saved size untouched) |
 | `--web` | the web build (debug) on loopback, its tabs live |
-| `--android [--device serial]` | built, installed and started on a phone or emulator, again on every save |
+| `--android [--device serial] [--native]` | on an emulator or phone: the web build in a dev APK installed once, each edit reloading it (`--native`: the app itself, rebuilt for that CPU on every save) |
 | `--display auto\|isolated\|current\|:N` | where the window goes; with no terminal (an agent) a nested display, never the person's |
 | `--cdp[=port]` | the window's DevTools protocol on loopback, for other tools |
 | `--watch=false`, `--watch=src/ui,assets` | build once, or rebuild on changes there only |

@@ -90,7 +90,7 @@ real data.
 | `--cdp[=port]` | the window opens the DevTools protocol on loopback (a free port unless given) |
 | `--tui` | dx's own screen in the terminal |
 | `--web` | the web build instead ([below](#the-web-build-while-you-work)) |
-| `--android [--device serial]` | built, installed and started on a phone or emulator, again on every save |
+| `--android [--device serial] [--native]` | on an emulator or phone: the web build in a dev APK installed once, each edit reloading it (`--native`: the app itself, rebuilt for that CPU on every save) |
 
 Words after the app go to the app (`ax dev notes -- --route /users/7`);
 ax's own flags above are taken out first. `--display`, `--fresh`,
@@ -119,14 +119,19 @@ wasm-bindgen the lock names (`ax setup` fetches it).
 ## On a phone while you work
 
 ```sh
-ax dev notes --android                  # the attached phone, else an emulator
-ax dev notes --android --device R58N…   # one device of several
+ax dev notes --android                  # the attached emulator (before a phone), else AIO_AVD booted
+ax dev notes --android --device R58N…   # one device of several (or ANDROID_SERIAL)
+ax dev notes --android --native         # the app's own library, rebuilt on each save
 ```
 
-Builds the APKs, installs the one for the device's CPU, starts it, and
-does it again on every saved change: a full build each time, no patches.
-Its log is the device's (`adb logcat -s aio`). What Android needs:
-[targets](targets.md#android).
+As aio's `dev:android`: a thin dev APK, installed once beside the real
+app ("Notes (dev)"), shows the page `ax dev --web` serves, reached over
+`adb reverse`; each edit rebuilds the page on this machine and reloads
+it on the device, no APK built again. `--native` (or an app without a web
+build): a debug dev copy of the app, built for the device's CPU only and
+installed again on every save. The app's log, its page's console and a
+crash come to the terminal as `[device] …`. The details:
+[targets](targets.md#the-dev-loop).
 
 ## The app's own launch flags
 
@@ -289,7 +294,8 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
 
 ## Limits
 
-- No hot-patching in the web build or on Android: each edit is a build.
+- No hot-patching in the web build or on Android: each edit is a build
+  (on Android, of the page only, unless `--native`).
 - No verbose-everything switch: raise `[log] level` to `debug` or
   `trace` ([debugging](../debugging/README.md#3-logs)).
 - No flag that turns persistence off for a run: use `--instance` with

@@ -44,7 +44,11 @@ public final class MainActivity extends Activity {
     /** A second renderer loss within this long is a page that kills it on load. */
     private static final long RENDERER_LOSS_LOOP_MS = 10_000;
     /** Results of the system picker: the app's question, the page's file input; the camera's prompt. */
-    private static final int ASK = 1, FILES = 2, CAMERA = 3;
+    private static final int ASK = 1, FILES = 2, CAMERA = 3, SAVE = 4;
+    /** What the page may show from the phone's files (`aio::ui::local_file_url`):
+     *  images only, as on the desktop; it never reads other files. */
+    private static final java.util.regex.Pattern IMAGE =
+            java.util.regex.Pattern.compile("(?i).*\\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)$");
 
     /** When the renderer was last lost: outlives the activity recreate() replaces. */
     private static long lastRendererLoss;
@@ -66,6 +70,10 @@ public final class MainActivity extends Activity {
     /** The page's file input, while the system picker is open: answered exactly once. */
     private ValueCallback<Uri[]> pendingFiles;
     private PermissionRequest pendingCamera;
+    /** A `data:` download's bytes, while the system asks where to save them. */
+    private byte[] pendingSave;
+    /** The splash's fade out, ms. */
+    private long splashFade = 200;
     /** The font scale the WebView's text zoom was last set from. */
     private float zoomedFontScale;
 
@@ -87,6 +95,10 @@ public final class MainActivity extends Activity {
         Host.activity = this;
         // A cold start by a link (a recreate carries a state: it was given).
         if (state == null) link(getIntent());
+        // A debug APK (`ax build --android --debug`): the page in chrome://inspect.
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
         web = new WebView(this);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -104,6 +116,25 @@ public final class MainActivity extends Activity {
                     Log.w("aio", "no app on this device opens " + r.getUrl());
                 }
                 return true;
+            }
+
+            // The phone's images the page shows (`aio::ui::local_file_url`:
+            // ORIGIN/file/<path>), images only; nothing else is served.
+            @Override
+            public android.webkit.WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                Uri u = r.getUrl();
+                String path = u.getPath();
+                if (!"app.invalid".equals(u.getHost()) || path == null || !path.startsWith("/file/")) return null;
+                java.io.File f = new java.io.File(path.substring("/file".length()));
+                String ext = MimeTypeMap.getFileExtensionFromUrl(f.getName());
+                try {
+                    if (!IMAGE.matcher(f.getName()).matches()) throw new java.io.FileNotFoundException("not an image");
+                    String mime = "svg".equalsIgnoreCase(ext) ? "image/svg+xml"
+                            : MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase(java.util.Locale.ROOT));
+                    return new android.webkit.WebResourceResponse(mime, null, new java.io.FileInputStream(f));
+                } catch (java.io.IOException e) {
+                    return new android.webkit.WebResourceResponse("text/plain", null, 404, "Not Found", null, null);
+                }
             }
 
             @Override
@@ -145,6 +176,9 @@ public final class MainActivity extends Activity {
                 String text = m.message();
                 if (text.length() > 8192) text = text.substring(0, 8192) + "…";
                 Log.i("aio", "[page] " + m.messageLevel() + ": " + text);
+                // A WebView too old for the page's script (Android 10 as
+                // shipped has 74): said on the screen, never a blank page.
+                if (!painted && text.contains("SyntaxError")) tooOld();
                 return true;
             }
 
@@ -198,21 +232,18 @@ public final class MainActivity extends Activity {
                 }
             }
         });
-        // A download the page starts is never saved behind the app's back:
+        // A download the page starts (aio's): a link on the network goes to
+        // Android's DownloadManager (into Downloads, with the system's
+        // notification); a `data:` one is saved where the user picks. A
+        // `blob:` one stays in the page (it has no network to read it):
         // the app saves files (aio_shell::page::save). Said, never silent.
-        web.setDownloadListener((url, agent, disposition, mime, length) ->
-                Log.e("aio", "download NOT saved: " + url + ": the app saves files (aio_shell::page::save)"));
+        web.setDownloadListener((url, agent, disposition, mime, length) -> download(url, agent, disposition, mime));
         // Edge to edge (Android 15): the page stays clear of the system bars
-        // and the keyboard.
+        // and the keyboard; Android 10 says them the older way.
         android.widget.FrameLayout frame = new android.widget.FrameLayout(this);
         frame.addView(web);
-        frame.setOnApplyWindowInsetsListener((v, insets) -> {
-            android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars()
-                    | android.view.WindowInsets.Type.displayCutout()
-                    | android.view.WindowInsets.Type.ime());
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-            return android.view.WindowInsets.CONSUMED;
-        });
+        frame.setOnApplyWindowInsetsListener((v, insets) -> android.os.Build.VERSION.SDK_INT >= 30
+                ? Api30.pad(v, insets) : legacyPad(v, insets));
         setContentView(frame);
         splash = splash(frame);
         // The system's splash (the app's icon on its background) stays until
@@ -234,6 +265,101 @@ public final class MainActivity extends Activity {
             painted();
         }, SPLASH_CAP_MS);
         web.loadDataWithBaseURL(ORIGIN, page, "text/html", "utf-8", null);
+    }
+
+    /** Android 10 (API 29): the system window insets hold the bars and the
+     *  keyboard, the cutout its safe insets (the inset types are API 30). */
+    @SuppressWarnings("deprecation")
+    private static android.view.WindowInsets legacyPad(View v, android.view.WindowInsets insets) {
+        int l = insets.getSystemWindowInsetLeft(), t = insets.getSystemWindowInsetTop();
+        int r = insets.getSystemWindowInsetRight(), b = insets.getSystemWindowInsetBottom();
+        android.view.DisplayCutout c = insets.getDisplayCutout();
+        if (c != null) {
+            l = Math.max(l, c.getSafeInsetLeft());
+            t = Math.max(t, c.getSafeInsetTop());
+            r = Math.max(r, c.getSafeInsetRight());
+            b = Math.max(b, c.getSafeInsetBottom());
+        }
+        v.setPadding(l, t, r, b);
+        return insets.consumeSystemWindowInsets();
+    }
+
+    /** API 30+, apart: its classes are never resolved on Android 10. */
+    private static final class Api30 {
+        static android.view.WindowInsets pad(View v, android.view.WindowInsets insets) {
+            android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars()
+                    | android.view.WindowInsets.Type.displayCutout()
+                    | android.view.WindowInsets.Type.ime());
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return android.view.WindowInsets.CONSUMED;
+        }
+    }
+
+    /** The page started a download (see setDownloadListener). */
+    private void download(String url, String agent, String disposition, String mime) {
+        Uri uri = Uri.parse(url == null ? "" : url);
+        String name = android.webkit.URLUtil.guessFileName(url, disposition, mime);
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme();
+        if (scheme.equals("http") || scheme.equals("https")) {
+            try {
+                android.app.DownloadManager.Request req = new android.app.DownloadManager.Request(uri)
+                        .setMimeType(mime)
+                        .addRequestHeader("User-Agent", agent)
+                        .setTitle(name)
+                        .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        .setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, name);
+                ((android.app.DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(req);
+                Log.i("aio", "download started: " + name + " (Downloads)");
+            } catch (Exception e) {
+                Log.e("aio", "download NOT started: " + uri + " (" + e + ")");
+            }
+        } else if (scheme.equals("data") && url.contains(",")) {
+            String head = url.substring(5, url.indexOf(','));
+            String body = url.substring(url.indexOf(',') + 1);
+            try {
+                pendingSave = head.endsWith(";base64") ? android.util.Base64.decode(body, android.util.Base64.DEFAULT)
+                        : Uri.decode(body).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                String type = head.split(";")[0];
+                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                        .setType(type.isEmpty() ? "application/octet-stream" : type)
+                        .putExtra(Intent.EXTRA_TITLE, name);
+                startActivityForResult(i, SAVE);
+            } catch (IllegalArgumentException | ActivityNotFoundException e) {
+                pendingSave = null;
+                Log.e("aio", "download NOT saved: " + name + " (" + e + ")");
+            }
+        } else {
+            Log.e("aio", "download NOT saved: a " + scheme + ": link (" + mime + "): the page has no network to "
+                    + "read it; the app saves files (aio_shell::page::save)");
+        }
+    }
+
+    /** The `data:` download, into the document the user picked. */
+    private void saved(Uri to) {
+        byte[] bytes = pendingSave;
+        pendingSave = null;
+        if (bytes == null || to == null) return;
+        try (java.io.OutputStream o = getContentResolver().openOutputStream(to, "wt")) {
+            if (o == null) throw new java.io.IOException("no stream");
+            o.write(bytes);
+            Log.i("aio", "download saved: " + to);
+        } catch (java.io.IOException e) {
+            Log.e("aio", "download NOT saved: " + to + " (" + e + ")");
+        }
+    }
+
+    /** The page's script can't run in this WebView: say which and what to do. */
+    private void tooOld() {
+        android.content.pm.PackageInfo p = WebView.getCurrentWebViewPackage();
+        String v = p == null ? "?" : p.versionName;
+        Log.e("aio", "this WebView (" + v + ") is too old for the app's page: update Android System WebView");
+        TextView t = new TextView(this);
+        t.setText("This phone's WebView (" + v + ") is too old for this app.\n\n"
+                + "Update \"Android System WebView\" (or Chrome) in the Play Store, then open the app again.");
+        t.setPadding(48, 160, 48, 48);
+        painted = true;
+        dropSplash("the WebView is too old");
+        setContentView(t);
     }
 
     private void painted() {
@@ -282,13 +408,19 @@ public final class MainActivity extends Activity {
             TextView t = new TextView(this);
             t.setText(s.optString("text"));
             t.setTextColor(android.graphics.Color.parseColor(c.optString(1)));
-            t.setTextSize(14);
+            t.setTextSize(s.optInt("size", 14));
+            boolean bold = s.optBoolean("bold");
+            if (!s.isNull("font") || bold) {
+                t.setTypeface(android.graphics.Typeface.create(s.isNull("font") ? null : s.optString("font"),
+                        bold ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL));
+            }
             t.setGravity(android.view.Gravity.CENTER);
             t.setPadding(0, Math.round(14 * dm.density), 0, 0);
             l.addView(t);
         }
         frame.addView(l, new android.widget.FrameLayout.LayoutParams(-1, -1));
         splashMin = s.optLong("min");
+        splashFade = s.optLong("fade", 200);
         splashShown = SystemClock.uptimeMillis();
         main.postDelayed(() -> dropSplash("its cap"), s.optLong("max", SPLASH_CAP_MS));
         Log.i("aio", "splash: up");
@@ -297,8 +429,11 @@ public final class MainActivity extends Activity {
 
     private void dropSplash(String why) {
         if (splash == null) return;
-        ((android.view.ViewGroup) splash.getParent()).removeView(splash);
+        final View going = splash;
         splash = null;
+        going.animate().alpha(0f).setDuration(splashFade).withEndAction(() -> {
+            if (going.getParent() != null) ((android.view.ViewGroup) going.getParent()).removeView(going);
+        });
         Log.i("aio", "splash: gone " + (SystemClock.uptimeMillis() - splashShown) + " ms after it showed (" + why + ")");
     }
 
@@ -401,7 +536,9 @@ public final class MainActivity extends Activity {
                 for (int n = 0; n < data.getClipData().getItemCount(); n++) uris.add(data.getClipData().getItemAt(n).getUri());
             } else if (data.getData() != null) uris.add(data.getData());
         }
-        if (code == FILES) {
+        if (code == SAVE) {
+            saved(uris.isEmpty() ? null : uris.get(0));
+        } else if (code == FILES) {
             if (pendingFiles != null) pendingFiles.onReceiveValue(uris.isEmpty() ? null : uris.toArray(new Uri[0]));
             pendingFiles = null;
         } else if (code == ASK && asking >= 0) {

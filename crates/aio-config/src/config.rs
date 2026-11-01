@@ -121,7 +121,7 @@ impl Default for History {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
     /// `host:port` to serve synced cells on. A clash stops startup.
@@ -173,6 +173,34 @@ pub struct Server {
     /// with `[accounts]`, whose sessions are the gate then.
     #[serde(default)]
     pub open: bool,
+    /// Other processes of this user reach a release build's cells through
+    /// its local door (`ax state`, `ax call`, other apps as peers), with a
+    /// client's rights (aio's `allowLocalPeers`, which aio leaves off).
+    /// `false`: a release build opens no door; a debug build always does.
+    #[serde(default = "yes")]
+    pub local_peers: bool,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            discover: false,
+            pairing: false,
+            tls: false,
+            cert: None,
+            key: None,
+            security: Default::default(),
+            hosts: vec![],
+            strict_origin: false,
+            trust_proxy: None,
+            limits: Default::default(),
+            dirs: Default::default(),
+            public_dirs: Default::default(),
+            open: false,
+            local_peers: true,
+        }
+    }
 }
 
 /// The framework's own paths: `/ws` and `/__aio…`, never an app's.
@@ -556,6 +584,12 @@ pub struct Build {
     pub android: AndroidBuild,
     #[serde(default)]
     pub macos: MacBuild,
+    #[serde(default)]
+    pub windows: WindowsBuild,
+    /// The window a first start shows while Electron downloads, and its
+    /// Retry / Quit question (aio's `electron.downloadWindow`).
+    #[serde(default)]
+    pub download_window: DownloadWindow,
     /// Every build then starts each Linux artifact it made headless, stops
     /// it and checks its log, as `--smoke` does.
     #[serde(default)]
@@ -600,9 +634,129 @@ pub struct Splash {
     /// Behind the image, `["#light", "#dark"]`; unset: the app's own colours.
     #[serde(default)]
     pub background: Option<[String; 2]>,
+    /// When it shows: every start, only while a first start downloads
+    /// Electron, or never (a download then shows the plain download window).
+    #[serde(default)]
+    pub show: SplashShow,
+    /// The line under the bar while a first start downloads Electron in the
+    /// splash: `{title}`, `{version}`,
+    /// `{got}` and `{total}` (MB), `{pct}`. Unset: `[build.download_window] text`.
+    #[serde(default)]
+    pub download_text: Option<String>,
+    /// The window's size in px `[width, height]`; unset: the image's.
+    #[serde(default)]
+    pub size: Option<[u32; 2]>,
+    /// How the image fills `size` when its shape differs.
+    #[serde(default)]
+    pub fit: Fit,
+    /// The text in a strip below the image, or over its lower part.
+    #[serde(default)]
+    pub text_position: TextPosition,
+    #[serde(default)]
+    pub align: Align,
+    /// The text's and bar's gap to the window's edges, px; unset: 24 at the
+    /// sides, 18 at the bottom.
+    #[serde(default)]
+    pub margin: Option<u32>,
+    /// The window's corner radius, px.
+    #[serde(default)]
+    pub radius: u32,
+    /// A 1 px border in this colour; unset: none.
+    #[serde(default)]
+    pub border: Option<String>,
+    /// The text, `["#light", "#dark"]`; unset: the app's.
+    #[serde(default)]
+    pub text_color: Option<[String; 2]>,
+    /// The download bar's fill and its track, each `["#light", "#dark"]`.
+    #[serde(default)]
+    pub bar: Option<[String; 2]>,
+    #[serde(default)]
+    pub track: Option<[String; 2]>,
+    /// The text's font family (Android: `sans-serif`, `serif`, `monospace`,
+    /// `sans-serif-condensed`…); unset: the system's.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// The text's size (px on the desktop, points on Android); unset: the
+    /// target's (13 px, 14 pt).
+    #[serde(default)]
+    pub font_size: Option<u16>,
+    /// The text in bold.
+    #[serde(default)]
+    pub bold: bool,
+    /// How long it fades out, in milliseconds; unset: the target's (100 on
+    /// the desktop, 200 on Android).
+    #[serde(default)]
+    pub fade_ms: Option<u64>,
     /// The PNG's bytes, put in by `aio::config!()` (empty elsewhere).
     #[serde(skip)]
     pub png: &'static [u8],
+}
+
+impl Default for Splash {
+    fn default() -> Self {
+        Self {
+            image: Default::default(),
+            text: None,
+            min_ms: Self::default_min(),
+            max_ms: Self::default_max(),
+            background: None,
+            show: Default::default(),
+            download_text: None,
+            size: None,
+            fit: Default::default(),
+            text_position: Default::default(),
+            align: Default::default(),
+            margin: None,
+            radius: 0,
+            border: None,
+            font: None,
+            fade_ms: None,
+            font_size: None,
+            bold: false,
+            text_color: None,
+            bar: None,
+            track: None,
+            png: &[],
+        }
+    }
+}
+
+/// `[build.splash] show` (aio's `show`, and its run-time `splash.show`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplashShow {
+    #[default]
+    Always,
+    FirstStart,
+    Never,
+}
+
+/// `[build.splash] fit`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum Fit {
+    #[default]
+    Contain,
+    Cover,
+}
+
+/// `[build.splash] text_position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextPosition {
+    #[default]
+    Below,
+    Over,
+}
+
+/// `[build.splash] align`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum Align {
+    Left,
+    #[default]
+    Center,
+    Right,
 }
 
 impl Splash {
@@ -672,6 +826,15 @@ pub struct AndroidBuild {
     /// Light or dark whatever the phone's setting; unset: the phone's.
     #[serde(default)]
     pub color_scheme: ColorScheme,
+    /// Also one APK for every CPU type (`…-android-universal.apk`), for
+    /// sharing as one file; the per-CPU APKs are still made.
+    #[serde(default)]
+    pub universal: bool,
+    /// An `android/` file that replaces a template file the template has
+    /// changed since, or a `MainActivity.java` without what the template's
+    /// does, fails the build instead of warning.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// `[build.android] color_scheme`.
@@ -733,6 +896,70 @@ pub struct MacBuild {
     /// [user@]host`, as `AIO_MACOS_SSH`, which it outranks).
     #[serde(default)]
     pub host: Option<String>,
+}
+
+/// `[build.download_window]` (aio's `electron.downloadWindow`): every key
+/// optional, the defaults aio's. The texts take `{title}` and `{version}`
+/// (Electron's); `text` also `{got}` and `{total}` (MB), `question`
+/// `{reason}`. A colour set is used in light and dark mode alike; one not
+/// set is the app's own, as the OS's mode is.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadWindow {
+    /// Unset: "Getting {title} ready".
+    #[serde(default)]
+    pub heading: Option<String>,
+    /// Unset: "Downloading Electron {version} — first start only · {got} / {total} MB".
+    #[serde(default)]
+    pub text: Option<String>,
+    /// The Retry / Quit question; unset: aio's, which names what failed
+    /// (`{reason}`) and how to fix it.
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub background: Option<String>,
+    /// The text's colour.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// The bar's fill and its track.
+    #[serde(default)]
+    pub bar: Option<String>,
+    #[serde(default)]
+    pub track: Option<String>,
+    /// The Cancel button (closing the window cancels either way).
+    #[serde(default = "yes")]
+    pub cancel: bool,
+}
+
+impl Default for DownloadWindow {
+    fn default() -> Self {
+        Self {
+            heading: None,
+            text: None,
+            question: None,
+            background: None,
+            color: None,
+            bar: None,
+            track: None,
+            cancel: true,
+        }
+    }
+}
+
+/// `[build.windows]`: how the one-click download installs the app.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsBuild {
+    /// A Start menu entry on the first install (aio's
+    /// `build.windows.shortcut`); `false`: none.
+    #[serde(default = "yes")]
+    pub shortcut: bool,
+}
+
+impl Default for WindowsBuild {
+    fn default() -> Self {
+        Self { shortcut: true }
+    }
 }
 
 impl Config {
@@ -1144,6 +1371,12 @@ impl Config {
         if c.app.lang.as_deref().is_some_and(|l| !lang_ok(l)) {
             return Err("aio.toml: [app] lang is a language tag: letters, digits and '-' (\"en\", \"pt-BR\")".into());
         }
+        let dw = &c.build.download_window;
+        for (k, v) in [("background", &dw.background), ("color", &dw.color), ("bar", &dw.bar), ("track", &dw.track)] {
+            if v.as_deref().is_some_and(|v| !hex_color(v)) {
+                return Err(format!("aio.toml: [build.download_window] {k} is #rgb or #rrggbb"));
+            }
+        }
         if let Some(s) = &c.build.splash {
             if s.image.extension().is_none_or(|e| !e.eq_ignore_ascii_case("png"))
                 || s.image.is_absolute()
@@ -1153,10 +1386,20 @@ impl Config {
                     "aio.toml: [build.splash] image is a .png in the app's folder (\"assets/splash.png\")".into()
                 );
             }
-            if s.background.as_ref().is_some_and(|b| !b.iter().all(|c| hex_color(c))) {
-                return Err(
-                    "aio.toml: [build.splash] background is [\"#light\", \"#dark\"], each #rgb or #rrggbb".into()
-                );
+            let pairs =
+                [("background", &s.background), ("text_color", &s.text_color), ("bar", &s.bar), ("track", &s.track)];
+            for (k, v) in pairs {
+                if v.as_ref().is_some_and(|b| !b.iter().all(|c| hex_color(c))) {
+                    return Err(format!(
+                        "aio.toml: [build.splash] {k} is [\"#light\", \"#dark\"], each #rgb or #rrggbb"
+                    ));
+                }
+            }
+            if s.border.as_deref().is_some_and(|c| !hex_color(c)) {
+                return Err("aio.toml: [build.splash] border is #rgb or #rrggbb".into());
+            }
+            if s.size.is_some_and(|[w, h]| w == 0 || h == 0 || w > 4096 || h > 4096) {
+                return Err("aio.toml: [build.splash] size is [width, height], each 1 to 4096".into());
             }
             if s.min_ms > s.max_ms {
                 return Err("aio.toml: [build.splash] min_ms is more than max_ms".into());

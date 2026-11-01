@@ -91,8 +91,21 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
     // SAFETY: before any thread of this library reads the environment.
     unsafe { std::env::set_var("AIORT_DATA", &files) };
     let cfg = (app.config)();
-    let dirs = aio::paths::app(&cfg.app.id).map_err(|e| e.to_string())?;
+    // A port (`[app] port_of`) runs on aio's layout in its files dir, its
+    // `[data] store`, as on the desktop.
+    let plan = aio::paths::plan_app(&cfg, &aio::paths::Ask::default()).map_err(|e| e.to_string())?;
+    // Installed over aio's APK (the same id): aio's state comes in, once,
+    // before the home is claimed (its files dir then holds aio-rs's data).
+    let imported = match cfg.app.port_of.as_deref() {
+        Some(aio_app) => aio::compat::data::import_android(std::path::Path::new(&files), aio_app, &plan.store)
+            .map_err(|e| format!("aio's state of {aio_app}: {e}"))?,
+        None => false,
+    };
+    let dirs = aio::paths::AppDirs::planned(&cfg.app.id, plan).map_err(|e| e.to_string())?;
     aio::boot::begin(&cfg, app.version, &dirs).map_err(|e| e.to_string())?;
+    if imported {
+        eprintln!("[aio] the aio APK's state is now {}", dirs.store.display());
+    }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
     {
         let _in = rt.enter();

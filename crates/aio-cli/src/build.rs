@@ -47,11 +47,12 @@ pub fn app_of(pkg: &Pkg) -> Result<(App, aio::config::Config), String> {
 }
 
 /// The menu entry, written by `install.sh` with the installed binary's path.
-/// `StartupWMClass` is the app id: the window class aio gives it.
+/// `StartupWMClass` is the app id: the window class aio gives it. `%U`:
+/// the files and links "Open with" hands it, as its arguments.
 pub fn desktop_entry(app: &App, exec: &str) -> String {
     let icon = if app.icon.is_some() { format!("Icon={}\n", app.id) } else { String::new() };
     format!(
-        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\"\n{icon}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
+        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\" %U\n{icon}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
         app.name.replace('\n', " "),
         app.id
     )
@@ -730,10 +731,9 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
     for t in &plan {
         let r = target(name, &meta, t, &mut made, smoke);
         let application_id = match t.kind {
-            #[cfg(unix)]
             Kind::Android => {
                 let (a, c) = app_of(&crate::dev::locate(&meta, &t.bin)?)?;
-                Some(crate::android::application_id_of(&a.id, &c.build.android))
+                Some(crate::android::application_id_of(&a.id, c.app.port_of.as_deref(), &c.build.android))
             }
             _ => None,
         };
@@ -880,10 +880,7 @@ fn target(
     }
     let p = match t.kind {
         Kind::Android => {
-            #[cfg(unix)]
-            return android(&t.bin);
-            #[cfg(not(unix))]
-            return Err("android is built on Linux (the NDK's Linux toolchain)".into());
+            return android(&t.bin, crate::android::Ask::RELEASE);
         }
         Kind::Windows => t.platform.unwrap_or(windows()),
         Kind::Deb | Kind::AppImage if host.os != "linux" => {
@@ -928,9 +925,9 @@ fn size(p: &Path) -> f64 {
     std::fs::metadata(p).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0)
 }
 
-/// `--android`: the APKs, one per CPU type.
-#[cfg(unix)]
-pub(crate) fn android(name: &str) -> Result<(String, Vec<PathBuf>), String> {
+/// `--android`: the APKs `ask` names (each CPU type, `--debug`: debug
+/// APKs, a dev copy); how to install them, and the files.
+pub(crate) fn android(name: &str, ask: crate::android::Ask) -> Result<(String, Vec<PathBuf>), String> {
     let meta = crate::dev::metadata()?;
     let pkg = crate::dev::locate(&meta, name)?;
     let (app, cfg) = app_of(&pkg)?;
@@ -947,14 +944,18 @@ pub(crate) fn android(name: &str) -> Result<(String, Vec<PathBuf>), String> {
         .ok_or_else(|| format!("{}: no lib target (src/lib.rs calling aio_shell::android_app!)", pkg.name))?;
     let target = meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?;
     let root = meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?;
-    eprintln!("ax build: {} {} for Android (release)…", app.name, app.version);
+    let debug = ask.debug;
+    let flavour = if debug { "debug" } else { "release" };
+    eprintln!("ax build: {} {} for Android ({flavour})…", app.name, app.version);
     if let Some(did) = crate::css::step(&cfg, &app_dir(&pkg)?)? {
         eprintln!("ax build: {did}");
     }
     let dist = Path::new(root).join("dist");
-    let apks = crate::android::build(&app, &cfg, &app_dir(&pkg)?, &pkg.name, &lib, Path::new(target), &dist)?;
+    let lib = crate::android::Lib { pkg: &pkg.name, lib: &lib, target_dir: Path::new(target) };
+    let apks = crate::android::build(&app, &cfg, &app_dir(&pkg)?, &lib, &dist, ask)?;
     let how = |p: &Path| match p.extension().and_then(|e| e.to_str()) {
         Some("aab") => "upload it to Play".to_string(),
+        _ if debug => format!("ax install {name} --android --apk {}", p.display()),
         _ => format!("ax install {name} --android"),
     };
     let lines: Vec<String> = apks.iter().map(|p| format!("{} ({:.1} MB): {}", p.display(), size(p), how(p))).collect();
@@ -1049,7 +1050,7 @@ mod tests {
     #[test]
     fn the_menu_entry_names_the_window_class() {
         let e = desktop_entry(&notes(true), "/h/.local/bin/notes");
-        assert!(e.contains("Exec=\"/h/.local/bin/notes\"\n") && e.contains("StartupWMClass=notes\n"), "{e}");
+        assert!(e.contains("Exec=\"/h/.local/bin/notes\" %U\n") && e.contains("StartupWMClass=notes\n"), "{e}");
         assert!(e.contains("Icon=notes\n"));
         assert!(!desktop_entry(&notes(false), "x").contains("Icon="));
         let arm = crate::platform::of("linux", "aarch64").unwrap();

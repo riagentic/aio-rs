@@ -372,10 +372,11 @@ pub fn light_dark(css: &str, dark: bool) -> String {
     out + rest
 }
 
-/// A local image as the desktop page can load it (the shell serves image
-/// files only, from `aio://app/file/<path>`; `file://` is blocked).
+/// A local image as the page can load it (the shell serves image files
+/// only, from `aio://app/file/<path>`, on Android from the page's own
+/// origin, `https://app.invalid/file/<path>`; `file://` is blocked).
 pub fn local_file_url(abs: &str) -> String {
-    let mut out = String::from("aio://app/file");
+    let mut out = String::from(if cfg!(target_os = "android") { "https://app.invalid/file" } else { "aio://app/file" });
     for b in abs.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => out.push(b as char),

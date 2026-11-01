@@ -346,6 +346,23 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     let own = sh.ask(json!({ "t": "child", "url": format!("{base}/x"), "partition": "persist:" }), "opened").await;
     assert!(own["error"].as_str().unwrap().contains("the app's own session"), "{own}");
 
+    // A guest's session wiped (clear_partition); the app's own refused.
+    let done = sh.ask(json!({ "t": "clear-partition", "partition": "persist:t" }), "done").await;
+    assert!(done["error"].is_null(), "{done}");
+    let own = sh.ask(json!({ "t": "clear-partition", "partition": "" }), "done").await;
+    assert!(own["error"].as_str().unwrap().contains("partition's name"), "{own}");
+
+    // The page's console at its level (log as INFO); debug only in a dev build.
+    sh.eval("console.log('probe-log'); console.debug('probe-debug'); console.warn('probe-warn'); true").await;
+    for _ in 0..100 {
+        if sh.said("probe-warn") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(sh.said("INFO  [page] probe-log") && sh.said("WARN  [page] probe-warn"));
+    assert!(!sh.said("probe-debug"), "no --aio-dev: no debug lines");
+
     // A guest's pop-up: blocked without real input in it, said; after a
     // click, an http(s) link for the system browser (none in this run).
     sh.eval("document.getElementById('open').click()").await;
