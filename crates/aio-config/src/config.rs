@@ -53,6 +53,10 @@ pub struct App {
     /// The page's direction, `<html dir>`. Never guessed from `lang`.
     #[serde(default)]
     pub dir: Dir,
+    /// The clock cron schedules read (`#[cron]`, `cx.cron`): `utc`, as aio's
+    /// did, so a port's jobs fire when they did; `local`: this machine's time zone.
+    #[serde(default)]
+    pub tz: Tz,
     /// The window's own icon, `assets/icon.png` beside `aio.toml`, put in
     /// by `aio::config!()`; empty: none (the desktop shell then draws the
     /// monogram, `aio::icon`, in the app's hue).
@@ -65,6 +69,16 @@ impl App {
     pub fn label(&self) -> &str {
         if self.name.is_empty() { &self.id } else { &self.name }
     }
+}
+
+/// `[app] tz`: the clock of cron schedules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Tz {
+    #[default]
+    Utc,
+    /// This machine's local time (its DST changes too).
+    Local,
 }
 
 /// `[app] dir`: which way the page's text runs.

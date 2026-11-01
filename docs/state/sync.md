@@ -322,7 +322,7 @@ pub struct Payroll {
     pub names: Vec<String>,
     pub salaries: Vec<u32>,
     #[server]
-    pub bank_token: String, // saved, never sent
+    pub bank_token: Hidden<String>, // saved, never sent
 }
 
 fn by_role(p: &Payroll, who: &Caller) -> Payroll {
@@ -337,7 +337,7 @@ impl Payroll {}
 
 # fn main() {
 use aio::CellData;
-let p = Payroll { names: vec!["Ada".into()], salaries: vec![10], bank_token: "t".into() };
+let p = Payroll { names: vec!["Ada".into()], salaries: vec![10], bank_token: Hidden::new("t".into()) };
 let staff = p.project(&Caller { by: By::User("bo".into()), role: None });
 assert_eq!(staff["salaries"], serde_json::json!([]));
 assert!(staff.get("bank_token").is_none(), "#[server] fields never leave");
