@@ -141,7 +141,7 @@ pub enum Aio {
     /// A branch's tip (`main`), moving; Cargo.lock pins the commit built.
     Branch(String),
     /// A checkout's `crates` folder, relative to the app's root: aio-rs
-    /// co-developed on one machine (`ax framework` moves a clone elsewhere
+    /// co-developed on one machine (`ax pin` moves a clone elsewhere
     /// back to a release).
     Path(String),
 }
@@ -152,7 +152,7 @@ impl Aio {
         Aio::Tag(format!("v{}", env!("CARGO_PKG_VERSION")))
     }
 
-    /// A version as `--aio-version` and `ax framework` take it: `0.2.0` or
+    /// A version as `--aio-version` and `ax pin` take it: `0.2.0` or
     /// `v0.2.0` (a release), `main` (the branch), `latest` (the newest
     /// release in `tags`, `git ls-remote --tags` of aio-rs, asked only then).
     pub fn version(v: &str, tags: impl FnOnce() -> Result<String, String>) -> Result<Aio, String> {
@@ -284,24 +284,29 @@ fn drop_kv(line: &mut String, key: &str) {
 }
 
 /// `text`, a Cargo.toml `up` folders below the app's root, with each aio-rs
-/// dependency (`package = "aio-rs…"` on one line, as `ax create` writes
-/// them) taken from `aio` (pure); None: it has none.
+/// dependency (one line, as [`crate::pin::asked`] reads it) taken from
+/// `aio` (pure); None: it has none.
 pub fn repoint(text: &str, aio: &Aio, up: usize) -> Option<String> {
     let mut hit = false;
     let out = text
         .split_inclusive('\n')
         .map(|line| {
-            let tag = "package = \"aio-rs";
-            let Some(at) = line.find(tag) else { return line.to_string() };
-            let Some(len) = line[at + tag.len()..].find('"') else { return line.to_string() };
-            let package = &line[at + 11..at + tag.len() + len];
+            let Some((package, _)) = crate::pin::asked(line, up) else { return line.to_string() };
             let mut line = line.to_string();
-            for key in ["path", "git", "tag", "branch", "rev"] {
+            for key in ["path", "git", "tag", "branch", "rev", "version"] {
                 drop_kv(&mut line, key);
             }
-            let end = line.find(&format!("package = \"{package}\"")).map_or(0, |i| i + package.len() + 12);
             let krate = format!("aio{}", &package["aio-rs".len()..]);
-            line.insert_str(end, &format!(", {}", aio.source(&krate, up)));
+            let src = aio.source(&krate, up);
+            match line.find(&format!("package = \"{package}\"")) {
+                Some(i) => line.insert_str(i + package.len() + 12, &format!(", {src}")),
+                None => {
+                    let at = line.find('{').map_or(0, |i| i + 1);
+                    let rest = line[at..].trim_start().to_string();
+                    let sep = if rest.starts_with('}') { " " } else { ", " };
+                    line.replace_range(at.., &format!(" {src}{sep}{rest}"));
+                }
+            }
             hit = true;
             line
         })
@@ -319,7 +324,7 @@ pub fn app_root(here: &Path) -> Result<PathBuf, String> {
 
 /// The app's Cargo.toml files under `root`, each with how deep it is
 /// (build output and dot folders aside).
-fn manifests(root: &Path) -> Vec<(PathBuf, usize)> {
+pub fn manifests(root: &Path) -> Vec<(PathBuf, usize)> {
     fn walk(d: &Path, up: usize, out: &mut Vec<(PathBuf, usize)>) {
         if d.join("Cargo.toml").is_file() {
             out.push((d.join("Cargo.toml"), up));
@@ -344,63 +349,6 @@ fn manifests(root: &Path) -> Vec<(PathBuf, usize)> {
     let mut out = vec![];
     walk(root, 0, &mut out);
     out
-}
-
-/// `ax framework [version] [--aio dir]` (aio's `am pin`, and `am fix` on a
-/// clone): the aio-rs of the app at `root`, or each of its Cargo.toml files'
-/// aio-rs dependencies pointed at `to`, then `relock` (Cargo.lock): all
-/// or nothing.
-pub fn framework(
-    root: &Path,
-    to: Option<&Aio>,
-    relock: impl FnOnce(&Path) -> Result<(), String>,
-) -> Result<String, String> {
-    let (mut said, mut was) = (vec![], vec![]);
-    for (file, up) in manifests(root) {
-        let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy().replace('\\', "/");
-        match to.map(|aio| (aio, repoint(&text, aio, up))) {
-            None => said.extend(
-                text.lines().filter(|l| l.contains("package = \"aio-rs")).map(|l| format!("{rel}: {}", l.trim())),
-            ),
-            Some((aio, Some(new))) => {
-                said.push(format!("{rel}: {aio}"));
-                was.push((file, text, new));
-            }
-            Some((_, None)) => {}
-        }
-    }
-    if said.is_empty() {
-        return Err(format!("{}: no aio-rs dependency in its Cargo.toml files", root.display()));
-    }
-    if to.is_none() {
-        return Ok(said.join("\n"));
-    }
-    let write = |f: &Path, t: &str| std::fs::write(f, t).map_err(|e| format!("{}: {e}", f.display()));
-    let moved = was.iter().try_for_each(|(f, _, new)| write(f, new)).and_then(|()| relock(root));
-    match moved {
-        Ok(()) => Ok(said.join("\n") + "\nCargo.lock: updated (commit it with the change)"),
-        Err(e) => {
-            for (f, old, _) in &was {
-                _ = write(f, old);
-            }
-            Err(format!("{e}\nnothing changed"))
-        }
-    }
-}
-
-/// Cargo.lock after `ax framework` moved aio-rs: only aio-rs re-resolved
-/// (a tag or branch that isn't there fails here).
-pub fn relock(root: &Path) -> Result<(), String> {
-    let o = std::process::Command::new("cargo")
-        .args(["update", "--workspace", "--quiet"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("cargo: {e}"))?;
-    match o.status.success() {
-        true => Ok(()),
-        false => Err(format!("cargo could not resolve it:\n{}", String::from_utf8_lossy(&o.stderr).trim())),
-    }
 }
 
 /// What `ax create` is asked to make.
@@ -480,8 +428,8 @@ fn readme(n: &New, ui: bool) -> String {
          ax release {name}             # a signed release for its users' updates\n\
          ```\n\n\
          A fresh clone builds as it is: Cargo.toml takes aio-rs from git ({}), Cargo.lock\n\
-         pins its commit. `ax framework` says which; `ax framework <version>` (or `main`,\n\
-         `latest`) moves the app to another, `--aio <dir>` to a local aio-rs checkout.\n\
+         pins its commit. `ax pin` says which; `ax pin <version>` (or `main`, `latest`,\n\
+         an aio-rs checkout's folder) moves the app to another.\n\
          Needs: `ax` (aio-rs's install script, or `cargo install --locked --git {REPO} aio-rs-cli`),\n\
          then `ax setup` once per machine.\n\n\
          Its version is `[app] version` (major.minor) in aio.toml; each build is\n\
@@ -547,7 +495,7 @@ fn agents(n: &New, ui: bool) -> String {
          - `ax build {name}` makes its installable app; ax builds into one build folder per machine\n  \
          (plain `cargo` builds its own `target/`). A missing tool: `ax setup --check` names it.\n\
          {platforms}\
-         - Its aio-rs: {} (`ax framework` moves it).\n",
+         - Its aio-rs: {} (`ax pin` says which and moves it).\n",
         n.aio
     )
 }
@@ -614,7 +562,7 @@ edition.workspace = true
 publish.workspace = true
 
 # aio-rs from git at a release tag: a clone builds anywhere, Cargo.lock pins
-# the commit. `ax framework <version>` moves it (`--aio <dir>`: a checkout).
+# the commit. `ax pin` says which; `ax pin <version>` moves it.
 [dependencies]
 aio = {{ package = "aio-rs", {aio}{feats} }}
 {deps}
@@ -1146,50 +1094,6 @@ mod tests {
                 assert_eq!(seen, made.files.len(), "every file looked at");
             }
         }
-    }
-
-    #[test]
-    fn framework_says_and_moves_the_apps_aio_rs() {
-        let no_lock = |_: &Path| Ok(());
-        let d = tempfile::tempdir().unwrap();
-        let (target, installed) = (d.path().join("target"), d.path().join("install"));
-        let made = run(d.path(), &New { template: "cli", ..New::of("notes") }, (&target, &installed), false).unwrap();
-        let root = app_root(&made.at.join("app/src")).unwrap();
-        assert_eq!(root, made.at, "from inside it");
-        let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
-        let said = framework(&root, None, no_lock).unwrap();
-        assert!(
-            said.starts_with("Cargo.toml: aio = { package = \"aio-rs\", git =")
-                && said.contains("app/Cargo.toml: aio-shell"),
-            "{said}"
-        );
-        assert!(said.contains(&format!("tag = \"{tag}\"")), "{said}");
-        let said = framework(&root, Some(&Aio::Tag("v9.9.9".into())), no_lock).unwrap();
-        assert_eq!(
-            said,
-            "Cargo.toml: aio-rs v9.9.9\napp/Cargo.toml: aio-rs v9.9.9\nCargo.lock: updated (commit it with the change)"
-        );
-        let app = std::fs::read_to_string(root.join("app/Cargo.toml")).unwrap();
-        assert!(
-            app.contains(r#"package = "aio-rs-shell", git = "https://github.com/riagentic/aio-rs", tag = "v9.9.9" }"#),
-            "{app}"
-        );
-        assert!(!framework(&root, None, no_lock).unwrap().contains(&tag));
-        // Cargo refuses the move (no such tag, no network): every file as it was.
-        let before = std::fs::read_to_string(root.join("app/Cargo.toml")).unwrap();
-        let e = framework(&root, Some(&Aio::Branch("gone".into())), |_| Err("no branch gone".into())).unwrap_err();
-        assert_eq!(e, "no branch gone\nnothing changed");
-        assert_eq!(std::fs::read_to_string(root.join("app/Cargo.toml")).unwrap(), before);
-        // An app's other crates are its own: a dot folder or build output is never read.
-        std::fs::create_dir_all(root.join("target/x")).unwrap();
-        std::fs::write(root.join("target/x/Cargo.toml"), r#"a = { package = "aio-rs", path = "/p" }"#).unwrap();
-        assert_eq!(framework(&root, None, no_lock).unwrap().lines().count(), 3, "three aio-rs lines in two files");
-        let bare = d.path().join("bare");
-        std::fs::create_dir_all(&bare).unwrap();
-        std::fs::write(bare.join("Cargo.toml"), "[package]\nname = \"bare\"\n").unwrap();
-        std::fs::write(bare.join("aio.toml"), "").unwrap();
-        assert!(framework(&bare, None, no_lock).unwrap_err().contains("no aio-rs dependency"));
-        assert!(app_root(d.path()).unwrap_err().contains("in no app"));
     }
 
     #[test]
