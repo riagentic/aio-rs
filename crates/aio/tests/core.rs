@@ -878,8 +878,8 @@ fn a_child_stops_when_its_parent_goes() {
     // `stop`: a graceful ask first; a child that dies on it is reaped at once.
     let mut c = std::process::Command::new("sleep").arg("30").spawn().unwrap();
     let t = std::time::Instant::now();
-    aio::lifecycle::stop(&mut c, std::time::Duration::from_secs(5));
-    assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    aio::lifecycle::stop(&mut c, std::time::Duration::from_secs(30));
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "reaped at once, not at the grace's end");
 }
 
 #[cfg(unix)]

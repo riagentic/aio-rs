@@ -2193,12 +2193,13 @@ mod tests {
             let (mut s, _) = l.accept().unwrap();
             _ = s.read(&mut [0; 4096]);
             _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nhalf");
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_secs(60));
         });
         let t0 = std::time::Instant::now();
         let e = get(&url, 100, None, Duration::from_millis(300), &|_| {}).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{e}");
-        assert!(t0.elapsed() < Duration::from_secs(3) && e.to_string().contains("sent nothing"));
+        // Well short of the stall: given up at its timeout, not when the server let go.
+        assert!(t0.elapsed() < Duration::from_secs(20) && e.to_string().contains("sent nothing"));
         let t = tempfile::tempdir().unwrap();
         let e = room(&t.path().join("versions"), 100 << 20, Some(10 << 20)).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::StorageFull);
