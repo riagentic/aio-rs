@@ -163,7 +163,7 @@ mode = "client-server"   # its own window, and served to others
 [server]
 listen = "0.0.0.0:8100"
 tls = true
-pairing = true           # ax pin + ax pair hand the key to a phone
+pairing = true           # ax pair hands the key to a phone
 ```
 
 - The same app built with `mode = "client"` and `[client] server` is the
