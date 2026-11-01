@@ -209,7 +209,7 @@ type Icon = (String, u32);
 
 /// The icons: the app's own scaled, else its generated
 /// one; and why its own can't be installed, if so.
-fn icons(app: &App, out: &Path) -> Result<(Vec<Icon>, Option<String>), String> {
+fn icons(app: &App, hue: u16, out: &Path) -> Result<(Vec<Icon>, Option<String>), String> {
     let own = app.icon.as_ref().map(std::fs::read).transpose().map_err(|e| e.to_string())?;
     let img = own
         .map(|b| image::load_from_memory_with_format(&b, image::ImageFormat::Png).map(|i| i.to_rgba8()))
@@ -221,9 +221,9 @@ fn icons(app: &App, out: &Path) -> Result<(Vec<Icon>, Option<String>), String> {
         let png = match &img {
             Some(i) => {
                 let s = image::imageops::resize(i, n, n, image::imageops::FilterType::Lanczos3);
-                crate::icon::png(s.as_raw(), n, n)
+                aio_config::icon::png(s.as_raw(), n, n)
             }
-            None => crate::icon::icon_png(&app.name, &app.id, n),
+            None => aio_config::icon::icon_png(crate::build::label(app), hue, n),
         };
         let f = format!("icon-{n}.png");
         std::fs::write(out.join(&f), png).map_err(|e| e.to_string())?;
@@ -244,8 +244,8 @@ pub fn pack(
     body: &str,
     dev: bool,
 ) -> Result<Vec<String>, String> {
-    let hue = cfg.ui.hue.unwrap_or_else(|| aio::kit::theme::hue(&app.id));
-    let (icons, problem) = icons(app, out)?;
+    let hue = cfg.hue();
+    let (icons, problem) = icons(app, hue, out)?;
     let made: Vec<Icon> = icons.iter().filter(|(_, n)| *n != 180).cloned().collect();
     std::fs::write(out.join("manifest.webmanifest"), manifest(&app.name, hue, &made)).map_err(|e| e.to_string())?;
     let head = head(&app.name, hue, "icon-192.png", "icon-180.png");

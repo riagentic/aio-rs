@@ -503,11 +503,12 @@ assert_eq!(h.state().runs, 1);
 | `silent` | no sound |
 | `route` | a click brings the app forward and goes there |
 
-`Tell::notify(title, body)` is the short form. `Tell::Icon { tray,
-frames, fps }` sets the window's icon (`tray: true`: the tray's): PNG
-frames, base64, looped at `fps` (at most 12 shown a second, 64 frames of
-512 KB each at most); several frames need an `fps`, and no frames put the
-app's own icon back.
+`Tell::notify(title, body)` is the short form. `Tell::Icon { window, tray,
+tooltip, fps }` (aio's `appIcon()`) sets the window's icon, the tray's and
+the tray's tooltip in one: each PNG frames, base64, looped at `fps` (at
+most 12 shown a second, 64 frames of 512 KB each at most); `None` leaves
+that one as it is, `Some(vec![])` puts the app's own icon back, several
+frames need an `fps`, and a tell that changes nothing is refused.
 
 Where it is shown:
 

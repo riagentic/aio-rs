@@ -67,7 +67,6 @@ dependencies = [
  "aio-rs-shell",
  "base64 0.23.1",
  "chrono",
- "crc32fast",
  "dioxus",
  "dioxus-rsx",
  "flate2",
@@ -94,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "aio-rs-macros",
  "base64 0.23.1",
+ "flate2",
  "serde",
  "toml",
 ]

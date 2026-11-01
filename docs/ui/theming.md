@@ -14,7 +14,8 @@ compile. Feature `kit`.
 
 ```rust,ignore
 // ax create's template (src/lib.rs), compiled by ax's own tests:
-let theme = aio::kit::theme_css(aio::kit::theme::hue(env!("CARGO_PKG_NAME")));
+// The app's one hue (`[ui] hue`, else its id's): its icon's and splash's too.
+let theme = aio::kit::theme_css(aio::hue!());
 style { {aio::use_css!(false, &theme; "assets/style.css")} }
 ```
 
@@ -53,8 +54,11 @@ assert_eq!(theme::sheet(&Ui { theme: Look::None, ..ui }, "notes", false), "", "n
 # }
 ```
 
-- `aio::kit::theme::hue(id)`: the hue of an app id (a rename recolours;
-  a new machine doesn't).
+- `aio::kit::theme::hue(id)`: the hue of an app id (aio's `appHue`: hashed
+  over the slug the id makes, so `My Notes` and `my-notes` are one colour;
+  a rename recolours, a new machine doesn't).
+- `aio::hue!()`: the app's own hue as it builds (`Config::hue`: `[ui] hue`,
+  else its id's), the one its page, icon, splash and download window share.
 - `aio::kit::theme::tokens_css(hue, soft)`: the tokens alone, light and
   dark; `soft` keeps the neutrals near grey (the accent keeps the hue).
   The inks are solved for contrast against that hue, so text stays
@@ -366,9 +370,6 @@ keys.
 - **`neutral = "soft"`.** aio's key keeps the neutrals near grey across
   the app; in aio-rs the `soft` argument of `theme::tokens_css` does it,
   with no `[ui]` key, so an app passes its own tokens.
-- **The hue beyond the page.** aio's `hue` also colours the generated
-  icon, the splash and the download window; aio-rs's generated icon takes
-  the hue of the app's id, not `[ui] hue`.
 
 ## Common mistakes
 

@@ -224,7 +224,7 @@ beyond the aio-rs form.
 | Routing | the address bar, Back and reload follow the route (History API, SPA fallback) | history kept in the app; a web reload starts at `/` | keep the screen in a cell | [routing](ui/routing.md#gaps-against-aio) |
 | Theming | scoped `css` classes, a duplicate-class warning | none | prefix class names | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
-| Theming | `neutral = "soft"` key, the hue on icon, splash, download window | `theme::tokens_css(soft)`; the icon takes the id's hue | pass the app's own CSS variables | [theming](ui/theming.md#gaps-against-aio) |
+| Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
 | Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
 | Desktop | custom window chrome (`ui.chrome`) | the OS title bar | ➖ | [desktop](clients/desktop.md#gaps) |
 | Desktop | app menus, a context-menu API | macOS's standard menus only | `kit::Menu`, the tray | [desktop](clients/desktop.md#gaps) |
@@ -232,6 +232,7 @@ beyond the aio-rs form.
 | Desktop | `keepServer`, `--keep-server` | none | a server and a client | [desktop](clients/desktop.md#gaps) |
 | Desktop | `runCommand` with `stdin` | none | `std::process` in an effect | [desktop](clients/desktop.md#gaps) |
 | Desktop | `requireSandbox`, `allowLocalPeers`, `ignoreDebugEnv` | `AIORT_SANDBOX=1` | ➖ | [desktop](clients/desktop.md#gaps) |
+| Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
 | Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |
 | Web | every `<webview>` method | `go` and events; desktop only | ➖ | [web](clients/web.md#gaps) |
 | CLI apps | `testIO()` over a whole run | none | test `parse`, `failure`, or the binary | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
@@ -259,7 +260,7 @@ beyond the aio-rs form.
 | Build | a run-from-a-link command | none | clone, `ax start` | [dev](build/dev.md#limits) |
 | Build | ios-client (a WKWebView thin client) | no iOS | ➖ | [targets](build/targets.md#limits) |
 | Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME`, an Android emulator test lane | none | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |
-| Build | a CI file from `am create`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
+| Build | `deno task check`/`test`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
 | Release | `canApply` awaited before every install, a warning with none | `can_apply` a plain function, not asked for an `auto` install | ➖ | [release](build/release.md#not-in-aio-rs) |
 | Release | a custom runtime refused beside `updates:` | replaced silently | ➖ | [release](build/release.md#not-in-aio-rs) |
 | `am` | `persist`, `persist --drop` | none | `#[cell(retire = [..])]` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
@@ -525,7 +526,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | State and history | `state`, `snapshot`, `migrations`, `replay`, `timetravel` | the same | ✅ |
 | Calls | `dispatch` | `ax call` | 🔄 |
 | Inspection | `surface`, `trigger`, `shot`, `eval`, `preview`, `sql`, `heap`, `cost` | the same | ✅ |
-| Pairing, trust | `discover`, `profile`, `pair`, `pin`, `auth`, `trust` | the same | ✅ |
+| Pairing, trust | `discover`, `profile`, `pair`, `auth`, `trust` | the same (`ax pin` makes a pairing code; aio's `am pin` is a framework version: `ax framework`) | ✅ |
 | `where`, `check` | yes | the compiler | 🔄 |
 | `persist`, `testgen`, `add`, control REST API | yes | ❌ | ❌ |
 | `keygen`, `release`, `update`, `smoke`, `install`, `lint`, `test`, `events`, `components`, `adopt`, `import`, `runtime`, `setup` | — | yes | ➕ |
@@ -535,7 +536,8 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Agent brief | `am agent` | `ax agent`, `AGENTS.md`/`CLAUDE.md` in new apps | ✅ |
-| Framework version per app | `dep/aio` link, `am pin`, `am upgrade` | `Cargo.lock`: `cargo update -p aio-rs` | 🔄 |
+| Framework version per app | `dep/aio` link, `am pin`, `am fix` | aio-rs from git at a release tag in `Cargo.toml`, the commit in `Cargo.lock`: a clone builds as it is; `ax create --aio-version`, `ax framework <v>\|main\|latest`, `--aio <dir>` for a checkout | ✅ |
+| Upgrading the CLI | `am upgrade`, `am uninstall` | `ax upgrade` (the release's checked install script, or a checkout), `ax uninstall` | ✅ |
 | Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows) or source; no prebuilt macOS | 🔄 |
 | API reference | `api-reference.md` | `cargo doc -p aio-rs` | ✅ |
 

@@ -1569,7 +1569,7 @@ impl Exports {
     pub fn finish(&mut self, cx: &Cx, title: String) -> Result {
         self.done += 1;
         cx.tell(aio::tell::Tell::notify(&title, &format!("{} done", self.done)))?;
-        cx.tell(aio::tell::Tell::Icon { tray: true, frames: vec![], fps: 1 })
+        cx.tell(aio::tell::Tell::Icon { window: None, tray: Some(vec![]), tooltip: None, fps: 1 })
     }
 }
 
@@ -1599,7 +1599,7 @@ async fn what_a_server_call_tells_reaches_each_client_once() {
     assert_eq!(*to_ana.lock().unwrap(), got);
     assert_eq!(got[0], aio::tell::Tell::notify("Export", "1 done"));
     assert_eq!(got[2], aio::tell::Tell::notify("Again", "2 done"));
-    assert!(matches!(got[1], aio::tell::Tell::Icon { tray: true, .. }));
+    assert!(matches!(&got[1], aio::tell::Tell::Icon { tray: Some(f), .. } if f.is_empty()));
     // A blank card is refused where it is asked, and nothing commits.
     assert!(h.finish(" ".into()).unwrap_err().why.contains("title is empty"));
     assert_eq!(h.state().done, 2);

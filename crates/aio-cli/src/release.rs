@@ -557,8 +557,8 @@ fn aio_source(pkg: &aio::serde_json::Value) -> Option<(String, String)> {
 /// (`ax release`, the key from the `AIO_SIGNING_KEY` secret); then one job
 /// puts every file on the GitHub release, files before manifests, as a draft
 /// until all are there. `aio`: the git source and commit the app's aio-rs
-/// comes from (`ax` is installed from it); none, a path dependency (as `ax
-/// create` writes): aio-rs is checked out beside the app at this `ax`'s
+/// comes from (`ax` is installed from it, as `ax create` writes); none, a path dependency (`ax
+/// create --aio`): aio-rs is checked out beside the app at this `ax`'s
 /// release tag (repository variables `AIO_REPO`, `AIO_REF` name another),
 /// the app's aio-rs paths pointed there, and `ax` installed from it.
 pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>) -> String {
@@ -567,7 +567,7 @@ pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>) -
             "      - name: Install ax\n        run: cargo install --locked --git \"{src}\" --rev \"{rev}\" aio-rs-cli\n"
         ),
         None => format!(
-            r#"      # The app's aio-rs is a path dependency (`ax create`): aio-rs beside
+            r#"      # The app's aio-rs is a path dependency (`ax create --aio`): aio-rs beside
       # the app, its paths pointed there.
       - uses: actions/checkout@v4
         with:
@@ -707,7 +707,7 @@ jobs:
 }
 
 /// Perl's edit of an app's `Cargo.toml` in the workflow: each aio-rs crate's
-/// `path` (`ax create`'s checkout) to `$GITHUB_WORKSPACE/aio-rs/crates/<crate>`.
+/// `path` (`ax create --aio`'s checkout) to `$GITHUB_WORKSPACE/aio-rs/crates/<crate>`.
 const REPOINT: &str =
     r##"s#(package = "aio-rs[a-z-]*", path = ")[^"]*/(aio[a-z-]*)"#$1$ENV{GITHUB_WORKSPACE}/aio-rs/crates/$2"#"##;
 
@@ -731,7 +731,7 @@ pub fn write_workflow(name: &str, channel: Option<&str>) -> Result<String, Strin
     let from = match &source {
         Some((g, r)) => format!("ax is installed from {g} at {r}"),
         None => format!(
-            "aio-rs is a path dependency: the workflow checks out riagentic/aio-rs at v{} beside the app \
+            "aio-rs is a path dependency (ax create --aio): the workflow checks out riagentic/aio-rs at v{} beside the app \
              (repository variables AIO_REPO and AIO_REF name another)",
             env!("CARGO_PKG_VERSION")
         ),
@@ -1383,7 +1383,7 @@ mod tests {
             assert!(!w.contains("{{ os") && !w.contains("${{{{"), "no format braces left");
             assert!(w.contains("path: app\n") && w.contains("path: app/dist/"), "the app checked out in app/");
         }
-        // A path dependency (`ax create`): aio-rs at this ax's tag beside the app.
+        // A path dependency (`ax create --aio`): aio-rs at this ax's tag beside the app.
         let v = env!("CARGO_PKG_VERSION");
         for want in [
             "repository: ${{ vars.AIO_REPO || 'riagentic/aio-rs' }}".to_string(),
@@ -1397,7 +1397,7 @@ mod tests {
         assert!(!w.contains("path: aio-rs") && !w.contains("AIO_REF"), "a git dependency needs no checkout");
     }
 
-    /// The workflow's edit, run on what `ax create` writes: every aio-rs
+    /// The workflow's edit, run on what `ax create --aio` writes: every aio-rs
     /// path goes to the checkout, the app's own path stays.
     #[test]
     fn the_workflow_points_create_s_aio_paths_at_the_checkout() {
@@ -1406,9 +1406,11 @@ mod tests {
             return;
         }
         for t in ["app", "cli", "service"] {
-            for (rel, text) in
-                crate::create::files("notes", t, "/src/my aio/crates", "notes", "A <a@example.org>").unwrap()
-            {
+            for (rel, text) in {
+                let aio = crate::create::Aio::Path("../my aio/crates".into());
+                crate::create::files(&crate::create::New { template: t, aio, ..crate::create::New::of("notes") })
+                    .unwrap()
+            } {
                 if !rel.ends_with("Cargo.toml") {
                     continue;
                 }
@@ -1421,7 +1423,7 @@ mod tests {
                     .unwrap();
                 std::io::Write::write_all(&mut p.stdin.take().unwrap(), text.as_bytes()).unwrap();
                 let out = String::from_utf8(p.wait_with_output().unwrap().stdout).unwrap();
-                assert!(!out.contains("/src/my aio"), "{rel}: {out}");
+                assert!(!out.contains("my aio"), "{rel}: {out}");
                 assert!(out.contains(r#"package = "aio-rs", path = "/w/aio-rs/crates/aio""#), "{rel}: {out}");
                 if text.contains("aio-rs-shell") {
                     assert!(out.contains(r#"package = "aio-rs-shell", path = "/w/aio-rs/crates/aio-shell""#), "{out}");

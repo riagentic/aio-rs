@@ -116,8 +116,14 @@ pub use status::{Conn, Status};
 #[cfg(target_arch = "wasm32")]
 pub use web::{Handle, Source, sync};
 
+/// The app's monogram: its letter in its hue, as pixels or SVG.
+pub use aio_config::icon;
 #[doc(hidden)]
 pub use aio_config_macro::config as __config_lit;
+/// The app's one hue as a `u16`, from its `aio.toml` as it builds
+/// (`Config::hue`): what `kit::theme_css` takes, so the page is the colour
+/// of its icon and splash.
+pub use aio_config_macro::hue;
 pub use aio_macros::{cell, data, methods};
 pub use answer::Answer;
 #[doc(hidden)]

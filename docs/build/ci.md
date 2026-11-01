@@ -175,8 +175,8 @@ can't say was checked wasn't.
 ## Not in aio-rs
 
 - aio's `deno task check` / `deno task test` pair and their workflow
-  template: aio-rs has `ax lint` and `ax test`, and no CI file from
-  `ax create`.
+  template: aio-rs has `ax lint` and `ax test` (neither `am create` nor
+  `ax create` writes a CI file; `ax release <app> --workflow` writes one).
 - aio's lab boots throwaway containers and VMs; `ax lab` uses machines
   you already have.
 - aio's one-command validation of the whole release matrix: the hand

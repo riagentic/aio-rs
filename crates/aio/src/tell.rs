@@ -24,9 +24,20 @@ pub enum Tell {
         #[serde(default)]
         route: Option<String>,
     },
-    /// The window's icon (`tray`: the tray's): PNG frames, base64, looped
-    /// at `fps`; no frames: the app's own icon again.
-    Icon { tray: bool, frames: Vec<String>, fps: u8 },
+    /// The app's icons and its tray's tooltip from now on, in one (aio's
+    /// `appIcon()`): the `window`'s (and its taskbar entry's) and the
+    /// `tray`'s, each PNG frames (base64 or `data:` URLs) looped at `fps`,
+    /// at most 12; `Some([])`: the app's own again; `None`: as it is.
+    /// `tooltip`: the tray's text when the pointer rests on it.
+    Icon {
+        #[serde(default)]
+        window: Option<Vec<String>>,
+        #[serde(default)]
+        tray: Option<Vec<String>>,
+        #[serde(default)]
+        tooltip: Option<String>,
+        fps: u8,
+    },
 }
 
 impl Tell {
@@ -39,7 +50,11 @@ impl Tell {
     pub fn check(&self) -> crate::Result {
         match self {
             Tell::Notify { title, .. } => crate::ensure!(!title.trim().is_empty(), "notify: the title is empty"),
-            Tell::Icon { frames, fps, .. } => crate::ensure!(frames.len() < 2 || *fps > 0, "icon: frames need an fps"),
+            Tell::Icon { window, tray, tooltip, fps } => {
+                crate::ensure!(window.is_some() || tray.is_some() || tooltip.is_some(), "icon: nothing to change");
+                let moving = [window, tray].into_iter().flatten().any(|f| f.len() > 1);
+                crate::ensure!(!moving || *fps > 0, "icon: frames need an fps")
+            }
         }
         Ok(())
     }
@@ -87,7 +102,10 @@ mod tests {
         h.finish().unwrap();
         assert_eq!(*seen.lock().unwrap(), [Tell::notify("Done", "the job")]);
         assert!(Tell::notify("", "x").check().is_err());
-        assert!(Tell::Icon { tray: false, frames: vec!["a".into(), "b".into()], fps: 0 }.check().is_err());
+        let icon = |window: Option<Vec<String>>, fps| Tell::Icon { window, tray: None, tooltip: None, fps };
+        assert!(icon(Some(vec!["a".into(), "b".into()]), 0).check().unwrap_err().why.contains("need an fps"));
+        assert!(icon(None, 1).check().unwrap_err().why.contains("nothing to change"));
+        assert!(icon(Some(vec![]), 0).check().is_ok(), "the app's own again");
         assert_eq!(serde_json::to_value(Tell::notify("a", "b")).unwrap()["kind"], "notify");
     }
 }

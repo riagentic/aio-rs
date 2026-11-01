@@ -68,8 +68,15 @@ pub fn mac_app(
     std::fs::write(contents.join("PkgInfo"), "APPL????").map_err(e)?;
     std::fs::copy(binary, contents.join("MacOS").join(&app.id)).map_err(e)?;
     if let Some(icon) = &app.icon {
-        let icns = contents.join("Resources/AppIcon.icns");
-        run(Command::new("/usr/bin/sips").args(["-s", "format", "icns"]).arg(icon).arg("--out").arg(icns), "sips")?;
+        // Built here, every slot from 16 to 1024 px: the monogram's drawn
+        // beside it at each size, an `icon.icns` of the app's own as it is,
+        // else its `icon.png` scaled (no `sips`, so any host can make it).
+        let icns = icon.with_extension("icns");
+        let icns = match icns.is_file() {
+            true => std::fs::read(&icns).map_err(e)?,
+            false => crate::icon::icns_from_png(&std::fs::read(icon).map_err(e)?)?,
+        };
+        std::fs::write(contents.join("Resources/AppIcon.icns"), icns).map_err(e)?;
     }
     if let Some(rt) = runtime {
         let into = contents.join("MacOS").join(aio_shell::runtime::BUNDLED).join("Electron.app");

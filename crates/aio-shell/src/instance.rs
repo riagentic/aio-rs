@@ -160,7 +160,7 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
             _ = APP.set((id.into(), version.into()));
             _ = BUNDLE_ID.set(cfg.mac_bundle_id());
             _ = SHOWN.set(cfg.app.ui);
-            _ = LOOK.set((cfg.ui.hue.unwrap_or_else(|| aio::colors::hue(id)), cfg.build.splash.clone()));
+            _ = LOOK.set((cfg.hue(), cfg.build.splash.clone()));
             if let crate::update::Next::Exit = crate::update::on_start(cfg, version, &d)? {
                 aio::health::stop();
                 aio::log::finish();

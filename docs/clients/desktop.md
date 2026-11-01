@@ -159,15 +159,33 @@ called once in the root component with the router's `go` (`router!` makes
 one): items then run where every button runs, with the cells, signals and
 router at hand.
 
+### The app's icon
+
+Every window app has its icon at run time, in a dev build and an installed
+one: `aio::config!()` builds in `assets/icon.png` beside `aio.toml` and
+`Window::of(&cfg)` wears it; a `Window` with no icon wears the app's
+monogram (its name's first letter, deep on a pastel gradient, aio's
+generated icon), drawn by the shell once and kept while its letter and hue
+stay, in the app's hue (`Config::hue`: `[ui] hue`, else its id's), the one
+its page, splash and download window share. It is on the title bar, the
+taskbar and Alt-Tab, the tray, notifications, the window bundle in the
+macOS Dock, the download window (Windows, macOS, GTK) and a browser tab's
+favicon. A first `assets/icon.png` is built in the next time the crate
+compiles (an edit, or `cargo clean -p <app>`); a changed one is noticed by
+itself.
+
 ### Changing the icon
 
 `aio_shell::desktop::icon(Icon::Window | Icon::Tray, frames, fps)` changes
 an icon from now on: one PNG, or up to `ICON_FRAMES` (64) PNG frames of at
 most `ICON_BYTES` (512 KB) each, looped by the runtime at `fps` (at most
 `ICON_FPS`, 12). No frames: the app's own icon again. A bad image is
-refused where it is passed. A cell asks the same with
-`cx.tell(Tell::Icon { tray, frames, fps })` (base64 frames), so a server's
-state can badge every window showing it.
+refused where it is passed. A cell asks for the window's, the tray's and
+the tray's tooltip in one with `cx.tell(Tell::Icon { window, tray,
+tooltip, fps })` (aio's `appIcon()`: base64 frames; `None` leaves that
+one as it is), so a server's state can badge every window showing it.
+`desktop::icon_state()` says what each shows now (aio's `iconState()`):
+`Own`, `Still` or `Animated { frames, fps }`, and the tooltip.
 
 ## Notifications
 
@@ -408,7 +426,7 @@ What aio's Electron client has and aio-rs doesn't yet:
 ## API
 
 `cargo doc -p aio-rs-shell --no-deps --open`: `Window`, `start`, `run`,
-`launches`, `desktop` (`Tray`, `Item`, `Notice`, `notify`, `icon`,
+`launches`, `desktop` (`Tray`, `Item`, `Notice`, `notify`, `icon`, `icon_state`,
 `use_asks`), `page`, `guest` (`Web`, `Keys`, `Child`, `open_window`,
 `PERMISSIONS`), `runtime`, `switches`. `cargo doc -p aio-rs --no-deps
 --all-features --open`: `aio::tell`, `aio::effect`, `aio::lifecycle`.
