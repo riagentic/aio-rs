@@ -125,11 +125,20 @@ async fn a_plugins_cell_routes_functions_and_hooks_are_live_and_the_app_wins() {
     assert_eq!(cells.ids(), ["todo", "audit"], "the plugin's cell beside the app's");
     audit.record().unwrap();
     assert_eq!(audit.state().seen, 1);
-    assert!(actions.lock().unwrap().contains(&r#"audit.record {"seen":1}"#.to_string()), "{:?}", actions.lock().unwrap());
+    assert!(
+        actions.lock().unwrap().contains(&r#"audit.record {"seen":1}"#.to_string()),
+        "{:?}",
+        actions.lock().unwrap()
+    );
 
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    let opts = aio::sync::Options { token: "secret".into(), http, hosts: vec!["app.example.com".into()], ..Default::default() };
+    let opts = aio::sync::Options {
+        token: "secret".into(),
+        http,
+        hosts: vec!["app.example.com".into()],
+        ..Default::default()
+    };
     tokio::spawn(aio::sync::serve_with(todo.clone(), l, opts));
     until("served", || std::net::TcpStream::connect(&addr).is_ok()).await;
     // The app's routes match first; what it leaves is the plugin's.

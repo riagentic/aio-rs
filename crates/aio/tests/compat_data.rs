@@ -1340,7 +1340,9 @@ fn a_cell_of_aio_cells_retires_aios_slice_of_its_own_id_and_keeps_its_history() 
         let c = rusqlite::Connection::open(&p).unwrap();
         let bridge = json!({ "seen": "BRIDGE-ERA-SLICE" });
         match multi {
-            true => _ = c.execute("INSERT INTO aio_kv (k, v) VALUES ('state\x1fpurse3', ?1)", [bridge.to_string()]).unwrap(),
+            true => {
+                _ = c.execute("INSERT INTO aio_kv (k, v) VALUES ('state\x1fpurse3', ?1)", [bridge.to_string()]).unwrap()
+            }
             false => {
                 let doc: String = c.query_row("SELECT v FROM aio_kv WHERE k = 'state'", [], |r| r.get(0)).unwrap();
                 let mut doc: Value = serde_json::from_str(&doc).unwrap();
