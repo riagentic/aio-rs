@@ -160,11 +160,13 @@ pub fn appimage_entry(app: &crate::build::App, file: &Path, unpack: &Path) -> Re
         _ => Err(format!("{}: a menu entry can't name this path (a quote, $, % or \\ in it)", p.display())),
     };
     let (file, unpack) = (plain(file)?, plain(unpack)?);
-    let script = format!("D=\"{unpack}\"; mkdir -p \"$D\"; chmod 700 \"$D\" 2>/dev/null; TMPDIR=\"$D\" exec \"{file}\" \"$@\"");
+    let script =
+        format!("D=\"{unpack}\"; mkdir -p \"$D\"; chmod 700 \"$D\" 2>/dev/null; TMPDIR=\"$D\" exec \"{file}\" \"$@\"");
     // As the Desktop Entry spec quotes an argument (`"`, `` ` ``, `$`, `\`
     // escaped), then escapes the value's backslashes (aio's single quotes
     // are outside the spec: desktop-file-validate refuses them).
-    let quoted: String = script.chars().flat_map(|c| ['\\'].into_iter().filter(move |_| "\"`$\\".contains(c)).chain([c])).collect();
+    let quoted: String =
+        script.chars().flat_map(|c| ['\\'].into_iter().filter(move |_| "\"`$\\".contains(c)).chain([c])).collect();
     let exec = format!("Exec=sh -c \"{}\" _ %U", quoted.replace('\\', "\\\\"));
     Ok(crate::build::desktop_entry(app, "\0").replace("Exec=\"\0\" %U", &exec))
 }
@@ -319,7 +321,12 @@ mod tests {
             assert!(o.status.success() && o.stdout.is_empty(), "{}", String::from_utf8_lossy(&o.stdout));
         }
         // The value's escapes undone (`\\\\` is `\\`), then quoted as the spec's (and sh's) double quotes are.
-        let exec = entry.lines().find_map(|l| l.strip_prefix("Exec=")).unwrap().replace("\\\\", "\\").replace("%U", "'a b.txt'");
+        let exec = entry
+            .lines()
+            .find_map(|l| l.strip_prefix("Exec="))
+            .unwrap()
+            .replace("\\\\", "\\")
+            .replace("%U", "'a b.txt'");
         let out = std::process::Command::new("sh").arg("-c").arg(&exec).env("TMPDIR", "/tmp").output().unwrap();
         let tmp = p.cache.join("notes/tmp");
         assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{}|a b.txt\n", tmp.display()));
