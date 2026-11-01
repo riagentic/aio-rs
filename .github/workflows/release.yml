@@ -1,0 +1,122 @@
+name: release
+# aio-rs's own prebuilt `ax`: macOS (arm64, x86_64), Linux and Windows
+# archives, install.sh / install.ps1 with each SHA-256 pinned, SHA256SUMS.
+# A tag `v<version>` (pushed by the owner) makes a draft release with them;
+# any other run (by hand, or a PR that changes how it is made) is a dry run:
+# the same files as a workflow artifact, no release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - crates/aio-cli/src/release.rs
+      - crates/aio-cli/src/aio-install.sh
+      - crates/aio-cli/src/aio-install.ps1
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+jobs:
+  # macOS builds only on a Mac: one runner per CPU, each archive smoked there.
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, triple: aarch64-apple-darwin }
+          - { os: macos-15-intel, triple: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked -p aio-rs-cli -- release --aio --dir dist
+      - name: smoke the archive
+        run: |
+          mkdir smoke
+          tar -xzf dist/aio-rs-*-${{ matrix.triple }}.tar.gz -C smoke
+          file smoke/ax | grep -q "$(uname -m)"
+          smoke/ax --version
+          smoke/ax setup --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ax-${{ matrix.triple }}
+          path: dist/aio-rs-*-${{ matrix.triple }}.tar.gz
+          if-no-files-found: error
+  # Linux, last: builds Linux and Windows, pins every archive (the Macs' too)
+  # in the installers, writes SHA256SUMS and signs it when the key is set.
+  assemble:
+    needs: macos
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - run: rustup toolchain install && rustup target add x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ax-*
+          path: dist
+          merge-multiple: true
+      - name: the update key (only when the secret is set)
+        env:
+          KEY: ${{ secrets.AIO_RELEASE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            umask 077
+            printf '%s\n' "$KEY" > "$RUNNER_TEMP/aio.release.key"
+            echo "AIO_RELEASE_KEY=$RUNNER_TEMP/aio.release.key" >> "$GITHUB_ENV"
+          fi
+      - run: cargo run --locked -p aio-rs-cli -- release --aio --windows --dir dist
+      - run: rm -f "$RUNNER_TEMP/aio.release.key"
+      - run: cd dist && sha256sum -c SHA256SUMS
+      - name: every OS is pinned
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            grep -q "  $t) want=" dist/install.sh
+          done
+          grep -q "'x86_64-pc-windows-gnu' = '" dist/install.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aio-rs-release
+          path: dist/
+          if-no-files-found: error
+  # The one-line installer on each OS: it picks that machine's archive,
+  # checks its SHA-256, installs ax and runs ax setup.
+  install:
+    needs: assemble
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aio-rs-release
+          path: dist
+      - if: runner.os != 'Windows'
+        run: sh dist/install.sh
+      - if: runner.os == 'Windows'
+        run: powershell -ExecutionPolicy Bypass -File dist/install.ps1
+      - run: ax --version
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: install
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aio-rs-release
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -f "dist/aio-rs-${GITHUB_REF_NAME#v}-x86_64-unknown-linux-gnu.tar.gz" # the tag is the version
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --prerelease \
+            --title "aio-rs ${GITHUB_REF_NAME#v}" --notes "See CHANGELOG.md." dist/*
