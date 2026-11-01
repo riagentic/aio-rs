@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-// One script run: its body in an async function given `dioxus` (`send`,
+// One script run: its body in an async function given `aio` (`send`,
 // `recv`), its result, and its messages both ways as JSON text.
 #[wasm_bindgen(inline_js = r#"
 let n = 0;
@@ -29,7 +29,7 @@ export function run(code) {
     no: (e) => end(done.no, String((e && e.stack) || e)),
   };
   const r = `__aioRuns[${id}]`;
-  const src = `${r}.started = 1; (async (dioxus) => {\n${code}\n})(${r}.dioxus).then((v) => ${r}.ok(v), (e) => ${r}.no(e));`;
+  const src = `${r}.started = 1; (async (aio, dioxus) => {\n${code}\n})(${r}.dioxus, ${r}.dioxus).then((v) => ${r}.ok(v), (e) => ${r}.no(e));`;
   const u = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
   const s = document.createElement('script');
   const gone = () => { URL.revokeObjectURL(u); s.remove(); };

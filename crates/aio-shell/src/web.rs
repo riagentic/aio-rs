@@ -9,7 +9,8 @@
 //! native verbs stays in this process, each tab drawn over its socket.
 use crate::{Window, wire};
 use aio::Cell;
-use dioxus_core::{Element, VirtualDom};
+use aio::ui::View;
+use dioxus_core::VirtualDom;
 use dioxus_liveview::LiveViewPool;
 use std::sync::{Arc, OnceLock};
 
@@ -62,7 +63,7 @@ pub fn page(win: &Window) -> String {
 /// `http`, serving view `app` to browser tabs that show the key, each its
 /// own view in this process (aio's tools: `ax ui --browser`). An app's
 /// page is its wasm build: [`painted`].
-pub fn tabs(http: aio::http::Http, app: fn() -> Element, win: Window) -> aio::http::Http {
+pub fn tabs(http: aio::http::Http, app: fn() -> View, win: Window) -> aio::http::Http {
     static POOL: OnceLock<Arc<LiveViewPool>> = OnceLock::new();
     let pool = POOL.get_or_init(|| Arc::new(LiveViewPool::new())).clone();
     http.ui(page(&win), move |t| {
@@ -83,14 +84,14 @@ pub fn tabs(http: aio::http::Http, app: fn() -> Element, win: Window) -> aio::ht
 pub fn painted<T: Cell>(
     http: aio::http::Http,
     h: aio::Handle<T>,
-    app: fn() -> Element,
+    app: fn() -> View,
     dist: impl Into<std::path::PathBuf>,
 ) -> aio::http::Http {
     http.shell(dist).paint(move |v| paint(&h, app, v))
 }
 
 /// `app`'s first paint over what viewer `v` may see of `h`'s state.
-fn paint<T: Cell>(h: &aio::Handle<T>, app: fn() -> Element, v: &aio::http::Viewer) -> aio::http::Paint {
+fn paint<T: Cell>(h: &aio::Handle<T>, app: fn() -> View, v: &aio::http::Viewer) -> aio::http::Paint {
     let who = aio::Caller { by: aio::By::User(v.user.clone().unwrap_or_else(|| "peer".into())), role: v.role.clone() };
     let seen: T = aio::serde_json::from_value(h.state().project(&who)).unwrap_or_default();
     let copy = aio::Source::Local(aio::Handle::new(aio::Store::with(seen)));

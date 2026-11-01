@@ -26,7 +26,7 @@ style { {aio::use_css!(false, &theme; "assets/style.css")} }
 - A dev build re-reads a saved file and redraws within 0.2 s, no compile;
   in a browser under `ax dev --web` the page asks the dev server. A
   release build has the files built in (`include_str!`) and reads none.
-- It is made on every render: never keep CSS in `use_hook` (made once,
+- It is made on every render: never keep CSS in `once` (made once,
   stale after an edit).
 - `dark` is the app's theme, not the OS's (below).
 
@@ -214,7 +214,7 @@ phone in dark mode must not darken half of a light app). To offer a
 choice, keep it in a cell and pass it:
 
 ```rust
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "look")]
 pub struct Look {
@@ -231,9 +231,9 @@ impl Look {
 aio::client!(Look, look);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let dark = *part(|l| &l.dark);
+    let dark = part(|l| &l.dark).get();
     let theme = aio::kit::theme_css(aio::kit::theme::hue("notes"));
     rsx! {
         style { {aio::ui::page_css(&[&theme, "body { font-size: 15px }"], dark)} }
@@ -273,10 +273,10 @@ said in the test's output. `TestUi::contrast()` returns the findings, to
 fail on them:
 
 ```rust
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     rsx! {
         p { style: "color: #111; background: #fff", "Readable" }
         p { style: "color: #ccc; background: #fff", "Faint" }
@@ -378,7 +378,7 @@ keys.
 - Expecting the OS's dark mode: the app passes `dark`.
 - `!important` to beat the theme: not needed, an unlayered rule wins.
 - `[ui] theme = "none"` and the kit: the controls are then bare, by design.
-- CSS in `use_hook`: stale after an edit (above).
+- CSS in `once`: stale after an edit (above).
 - Setting `--aio-hue` in CSS and expecting new colours: the colours were
   solved from the hue in Rust; use `[ui] hue`.
 - A rebrand that sets `--aio-accent` but not `--aio-accent-ink`: links

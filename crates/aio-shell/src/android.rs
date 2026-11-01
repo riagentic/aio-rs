@@ -6,8 +6,9 @@
 //! An app's library says what it is with [`android_app!`](crate::android_app);
 //! `ax build <app> --android` makes the APKs.
 use crate::{Window, page_with, wire};
+use aio::ui::View;
 use base64::Engine;
-use dioxus_core::{Element, VirtualDom};
+use dioxus_core::VirtualDom;
 use dioxus_liveview::LiveViewPool;
 use futures_util::{SinkExt, StreamExt};
 pub use jni;
@@ -23,7 +24,7 @@ pub struct App {
     pub config: fn() -> aio::config::Config,
     /// `env!("CARGO_PKG_VERSION")`.
     pub version: &'static str,
-    pub root: fn() -> Element,
+    pub root: fn() -> View,
     pub window: Window,
     /// Runs once the app's dirs are locked, before the first page: open the
     /// app's cells here (as desktop `main` does).
@@ -59,7 +60,7 @@ struct Host {
     class: GlobalRef,
     rt: tokio::runtime::Runtime,
     pool: Arc<LiveViewPool>,
-    root: fn() -> Element,
+    root: fn() -> View,
     page: String,
     /// Frames from the page now showing, to its view.
     to_view: Mutex<Option<tokio::sync::mpsc::UnboundedSender<bytes::Bytes>>>,

@@ -20,20 +20,20 @@ slower with every field the app adds.
 ## What a view follows
 
 A view re-renders when something it read **while it rendered** changes,
-and only then. Dioxus collects those reads again on every render, so a
+and only then. Today's renderer collects those reads again on every render, so a
 branch not taken this time follows nothing, and one taken for the first
 time follows from then on.
 
 | Where the read happens | Followed? |
 |---|---|
-| the component's body (its render), `use_memo`, `use_effect` | yes |
+| the component's body (its render), `memo`, `effect` | yes |
 | `part(\|c\| &c.field)` in a render | that one field |
 | `name()` (the whole state) in a render | every commit of the cell |
 | an event handler (`onclick`, `oninput`…), `act!` | no |
 | `spawn(async { .. })`, after an `.await`, a timer | no |
-| `.peek()` of a signal, anywhere | no |
+| `.get_untracked()`, `.read_untracked()` of a signal, anywhere | no |
 | a cell method or an effect (they write state, they don't render) | no |
-| a value kept outside a render (a `static`, `use_hook`) | no: it is made once |
+| a value kept outside a render (a `static`, `once`) | no: it is made once |
 
 - `part` is per top-level field: reading two fields of a cell follows
   those two, not the cell (in aio one cell is one signal, so aio splits
@@ -42,14 +42,14 @@ time follows from then on.
   its key is a part's stamp: `ROWS.get(part(|c| &c.rows).ver(), ..)` reads
   the part first, then asks the cache ([memoize](#3-memoize)).
 - A stale view: is the read in the render (not a handler, not a
-  `use_hook`)? Is it a `part` of the field that changed (not a reference
+  `once`)? Is it a `part` of the field that changed (not a reference
   into it)? Does the root call `use_live()` (for commits from effects,
   sync and schedules)?
 
 ## 1. Read fields
 
 ```rust,no_run
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "inbox")]
 pub struct Inbox {
@@ -64,14 +64,14 @@ impl Inbox {}
 aio::client!(Inbox, inbox);
 
 #[component]
-fn Badge() -> Element {
+fn Badge() -> View {
     // Re-renders when `unread` changes, never on a cursor step.
-    let n = *part(|i| &i.unread);
+    let n = part(|i| &i.unread).get();
     rsx! { span { "{n}" } }
 }
 
 #[component]
-fn Slow() -> Element {
+fn Slow() -> View {
     // Re-renders on every commit of the cell: avoid in a render.
     let n = inbox().unread;
     rsx! { span { "{n}" } }
@@ -175,7 +175,7 @@ assert!(Arc::ptr_eq(&titles_of(&st, "Le Guin"), &titles_of(&st, "Le Guin")), "on
 ```rust,no_run
 use aio::act;
 use aio::kit::{GlobalKeys, use_global_key};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 const SHOWN: usize = 30; // rows drawn around the cursor
 
@@ -204,7 +204,7 @@ aio::client!(Ledger, ledger);
 
 /// A row by props: unchanged rows are skipped.
 #[component]
-fn Line(name: String, amount: u64, selected: bool, i: usize) -> Element {
+fn Line(name: String, amount: u64, selected: bool, i: usize) -> View {
     rsx! {
         li {
             "aria-selected": selected,
@@ -216,21 +216,23 @@ fn Line(name: String, amount: u64, selected: bool, i: usize) -> Element {
 }
 
 #[component]
-fn Lines() -> Element {
+fn Lines() -> View {
     use_global_key("ArrowDown", |_| _ = act!(down()));
-    let (rows, cursor) = (part(|l| &l.rows), *part(|l| &l.cursor));
+    let (rows, cursor) = (part(|l| &l.rows), part(|l| &l.cursor).get());
     let from = cursor.saturating_sub(SHOWN / 2);
-    rsx! {
-        ul { "data-aio-prevent": "ArrowUp ArrowDown PageUp PageDown Home End",
-            for i in from..(from + SHOWN).min(rows.len()) {
-                Line { key: "{i}", name: rows[i].name.clone(), amount: rows[i].amount, selected: cursor == i, i }
+    rows.with(|rows| {
+        rsx! {
+            ul { "data-aio-prevent": "ArrowUp ArrowDown PageUp PageDown Home End",
+                for i in from..(from + SHOWN).min(rows.len()) {
+                    Line { key: "{i}", name: rows[i].name.clone(), amount: rows[i].amount, selected: cursor == i, i }
+                }
             }
         }
-    }
+    })
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
     rsx! { GlobalKeys { Lines {} } }
 }
@@ -464,7 +466,7 @@ test can hold a key press to a cost:
 ```rust
 use aio::act;
 use aio::testing::{MountedComponent, TestUi};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(id = "counter")]
 pub struct Counter {
@@ -482,19 +484,19 @@ impl Counter {
 aio::client!(Counter, counter);
 
 #[component]
-fn Label() -> Element {
+fn Label() -> View {
     let label = part(|c| &c.label);
     rsx! { h1 { "{label}" } }
 }
 
 #[component]
-fn Count() -> Element {
-    let n = *part(|c| &c.n);
+fn Count() -> View {
+    let n = part(|c| &c.n).get();
     rsx! { button { "data-t": "inc", onclick: move |_| _ = act!(inc()), "{n}" } }
 }
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     rsx! { Label {} Count {} }
 }
 

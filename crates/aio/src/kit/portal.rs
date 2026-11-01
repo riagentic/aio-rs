@@ -4,27 +4,23 @@
 //! the component that made it. Portals show in the order they mounted, so
 //! a menu opened inside a portalled dialog is drawn over it, and never
 //! inside it. With no host, or `disabled`, the content stays in place.
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// The host's portals, by id in mount order, and how to redraw it.
 #[derive(Clone)]
 struct Outlet {
-    all: Rc<RefCell<Vec<(u64, Element)>>>,
+    all: Rc<RefCell<Vec<(u64, View)>>>,
     next: Rc<Cell<u64>>,
-    host: ScopeId,
+    host: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Where portals are drawn: put it around the app once.
 #[component]
-pub fn PortalHost(children: Element) -> Element {
-    let out = use_context_provider(|| Outlet {
-        all: Default::default(),
-        next: Default::default(),
-        host: dioxus::core::current_scope_id(),
-    });
-    let shown: Vec<(u64, Element)> = out.all.borrow().clone();
+pub fn PortalHost(children: View) -> View {
+    let out = provide(|| Outlet { all: Default::default(), next: Default::default(), host: crate::ui::redraw() });
+    let shown: Vec<(u64, View)> = out.all.borrow().clone();
     rsx! {
         {children}
         div { class: "aio-portals",
@@ -37,19 +33,19 @@ pub fn PortalHost(children: Element) -> Element {
 
 /// Draw `children` in the [`PortalHost`] while this component lives.
 #[component]
-pub fn Portal(#[props(default)] disabled: bool, children: Element) -> Element {
-    let host = try_use_context::<Outlet>();
-    let id = use_hook(|| Rc::new(Cell::new(None::<u64>)));
+pub fn Portal(#[props(default)] disabled: bool, children: View) -> View {
+    let host = try_context::<Outlet>();
+    let id = once(|| Rc::new(Cell::new(None::<u64>)));
     {
         let (host, id) = (host.clone(), id.clone());
-        use_drop(move || {
+        on_cleanup(move || {
             if let (Some(h), Some(i)) = (host, id.get()) {
                 take(&h, i)
             }
         });
     }
     let Some(out) = host.filter(|_| !disabled) else {
-        if let (Some(h), Some(i)) = (try_consume_context::<Outlet>(), id.take()) {
+        if let (Some(h), Some(i)) = (try_context::<Outlet>(), id.take()) {
             take(&h, i);
         }
         return children;
@@ -67,12 +63,12 @@ pub fn Portal(#[props(default)] disabled: bool, children: Element) -> Element {
             None => all.push((i, children)),
         }
     }
-    dioxus::core::needs_update_any(out.host);
+    (out.host)();
     rsx! {}
 }
 
 /// Portal `id` leaves the host.
 fn take(out: &Outlet, id: u64) {
     out.all.borrow_mut().retain(|(k, _)| *k != id);
-    dioxus::core::needs_update_any(out.host);
+    (out.host)();
 }

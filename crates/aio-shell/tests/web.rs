@@ -5,7 +5,7 @@
 use aio::prelude::*;
 use aio::serde_json::{Value, json};
 use aio::sync::{Options, serve_with};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -16,9 +16,9 @@ static VIEWS: AtomicU32 = AtomicU32::new(0);
 
 /// A view of aio's tools in a tab: its own state, a field the view focuses
 /// (a query the page runs), and markup a sanitizer missed.
-fn app() -> Element {
-    let view = use_hook(|| VIEWS.fetch_add(1, Ordering::SeqCst) + 1);
-    let mut n = use_signal(|| 0);
+fn app() -> View {
+    let view = once(|| VIEWS.fetch_add(1, Ordering::SeqCst) + 1);
+    let mut n = signal(|| 0);
     rsx! {
         p { id: "view", "{view}" }
         p { id: "n", "{n}" }

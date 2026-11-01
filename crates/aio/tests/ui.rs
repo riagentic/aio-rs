@@ -2,7 +2,7 @@
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{TestUi, fails};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
 #[cell]
@@ -38,27 +38,27 @@ static RIGHT: AtomicUsize = AtomicUsize::new(0);
 static WHOLE: AtomicUsize = AtomicUsize::new(0);
 
 #[component]
-fn Left() -> Element {
+fn Left() -> View {
     LEFT.fetch_add(1, SeqCst);
     let n = pair_at(|p| p.left);
     rsx! { span { "data-t": "left", "{n}" } }
 }
 
 #[component]
-fn Right() -> Element {
+fn Right() -> View {
     RIGHT.fetch_add(1, SeqCst);
     let n = pair_at(|p| p.right);
     rsx! { span { "data-t": "right", "{n}" } }
 }
 
 #[component]
-fn Whole() -> Element {
+fn Whole() -> View {
     WHOLE.fetch_add(1, SeqCst);
     let p = pair();
     rsx! { span { "{p.left + p.right}" } }
 }
 
-fn app() -> Element {
+fn app() -> View {
     use_live();
     rsx! {
         Left {}
@@ -77,7 +77,7 @@ fn a_view_re_renders_only_when_its_part_changes() {
     assert_eq!(ui.text("left"), "1");
     assert_eq!(counts(), (l + 1, r, w + 1), "the right view didn't re-render; the whole-state reader did");
     // A commit made off the UI (an effect, a synced copy) is the same.
-    let h = ui.run(|| HANDLE.peek().clone());
+    let h = ui.run(|| HANDLE.read_untracked().clone());
     std::thread::spawn(move || h.bump_right().unwrap()).join().unwrap();
     ui.until("the commit is seen", || RIGHT.load(SeqCst) > r);
     assert_eq!(ui.text("right"), "1");
@@ -86,12 +86,12 @@ fn a_view_re_renders_only_when_its_part_changes() {
 
 /// A view reading through the door (`Ui.read`, as an app's `with(|s| ..)`).
 #[component]
-fn ByDoor() -> Element {
+fn ByDoor() -> View {
     let n = aio::Door::read(&Ui, |p| p.right);
     rsx! { span { "data-t": "door", "{n}" } }
 }
 
-fn by_door() -> Element {
+fn by_door() -> View {
     use_live();
     rsx! { ByDoor {} }
 }
@@ -101,7 +101,7 @@ fn a_view_reading_through_the_door_follows_every_commit() {
     let mut ui = TestUi::new(by_door);
     ui.run(|| act!(bump_right()));
     assert_eq!(ui.text("door"), "1", "a call from the views");
-    let h = ui.run(|| HANDLE.peek().clone());
+    let h = ui.run(|| HANDLE.read_untracked().clone());
     std::thread::spawn(move || h.bump_right().unwrap()).join().unwrap();
     ui.until_text("door", "2");
 }
@@ -110,13 +110,13 @@ thread_local!(static QUIET: std::cell::Cell<u32> = const { std::cell::Cell::new(
 
 /// The whole state, read in a render (counted on this test's thread).
 #[component]
-fn Quiet() -> Element {
+fn Quiet() -> View {
     QUIET.set(QUIET.get() + 1);
     let p = pair(); // the hint names this line
     rsx! { span { "data-t": "sum", "{p.left + p.right}" } }
 }
 
-fn quiet() -> Element {
+fn quiet() -> View {
     use_live();
     rsx! { Quiet {} }
 }
@@ -153,11 +153,11 @@ fn a_dev_build_says_where_a_render_reads_the_whole_state_once() {
     ui.settle();
 }
 
-fn shows() -> Element {
-    let mut on = use_signal(|| false);
+fn shows() -> View {
+    let on = signal(|| false);
     rsx! {
         button { "data-t": "toggle", onclick: move |_| on.toggle(), "toggle" }
-        if on() {
+        if on.get() {
             p { "data-t": "advice", "advice" }
         }
         p { "data-t": "styled", style: "display: none", "x" }
@@ -211,9 +211,9 @@ fn a_missing_handle_lists_the_ones_there() {
 static LABELLED: AtomicUsize = AtomicUsize::new(0);
 
 #[component]
-fn Labelled(t: &'static str) -> Element {
+fn Labelled(t: &'static str) -> View {
     LABELLED.fetch_add(1, SeqCst);
-    let id = use_hook(aio::ui::unique_id);
+    let id = once(aio::ui::unique_id);
     let left = pair().left;
     rsx! {
         label { r#for: "{id}", "data-t": t, "{id} {left}" }
@@ -221,9 +221,9 @@ fn Labelled(t: &'static str) -> Element {
     }
 }
 
-fn local() -> Element {
+fn local() -> View {
     use_live();
-    let s = use_status()();
+    let s = use_status().get();
     let p = pair();
     rsx! {
         p { "data-t": "link", "{s.online} {s.pending} {s.degraded}" }
@@ -283,9 +283,9 @@ mod synced {
 
     static ONLINE: AtomicBool = AtomicBool::new(false);
 
-    fn app() -> Element {
+    fn app() -> View {
         use_live();
-        let s = use_status()();
+        let s = use_status().get();
         ONLINE.store(s.online, SeqCst);
         rsx! { p { "data-t": "link", "{s.online} {s.pending} {s.degraded}" } }
     }
@@ -316,7 +316,7 @@ mod synced {
     }
 }
 
-fn controls() -> Element {
+fn controls() -> View {
     rsx! {
         a { "data-t": "link", href: "/docs", "aria-pressed": "true", "docs" }
         input { "data-t": "box", r#type: "checkbox", checked: true }
@@ -375,9 +375,9 @@ mod spinner {
 
     aio::client!(Scan, scan_state);
 
-    fn app() -> Element {
+    fn app() -> View {
         use_live();
-        let n = use_pending(Some("scan"))();
+        let n = use_pending(Some("scan")).get();
         SHOWN.store(n, SeqCst);
         rsx! { p { "data-t": "busy", "{n}" } }
     }
@@ -397,7 +397,7 @@ mod spinner {
     }
 }
 
-fn refusing() -> Element {
+fn refusing() -> View {
     use_live();
     rsx! { button { "data-t": "add", onclick: move |_| _ = act!(full()), "Add" } }
 }
@@ -419,11 +419,11 @@ fn a_refusal_taken_is_looked_at() {
     assert!(ui.failures().is_empty(), "taken");
 }
 
-fn duplicated() -> Element {
-    let mut rows = use_signal(|| vec![1, 2]);
+fn duplicated() -> View {
+    let rows = signal(|| vec![1, 2]);
     rsx! {
         button { onclick: move |_| rows.set(vec![1, 1]), "Dup" }
-        for r in rows() {
+        for r in rows.get() {
             p { key: "{r}", "{r}" }
         }
     }
@@ -465,7 +465,7 @@ mod gate {
 
     aio::client!(Gate, gate);
 
-    fn app() -> Element {
+    fn app() -> View {
         use_live();
         rsx! {
             if gate().open {
@@ -478,10 +478,10 @@ mod gate {
     fn a_click_after_an_off_thread_change_meets_the_screen_it_made() {
         // A listener told first that takes its time: the view hears of
         // each commit 50 ms after its state is readable.
-        let slow = || HANDLE.peek().listen(|_| std::thread::sleep(std::time::Duration::from_millis(50)));
+        let slow = || HANDLE.read_untracked().listen(|_| std::thread::sleep(std::time::Duration::from_millis(50)));
         let mut ui = aio::testing::Mount::default().before(slow).app(app);
         for _ in 0..3 {
-            let h = ui.run(|| HANDLE.peek().clone());
+            let h = ui.run(|| HANDLE.read_untracked().clone());
             let t = std::thread::spawn(move || h.open().unwrap());
             ui.until("open", || gate().open);
             ui.click("go");
@@ -493,7 +493,7 @@ mod gate {
 }
 
 #[component]
-fn Pictures(port: u16) -> Element {
+fn Pictures(port: u16) -> View {
     rsx! {
         img { alt: "far", src: "https://example.invalid/far.png" }
         img { alt: "near", src: "http://127.0.0.1:{port}/near.png" }
@@ -538,8 +538,8 @@ static HEARD: AtomicUsize = AtomicUsize::new(0);
 
 /// Two buttons whose box keeps Tab and ArrowDown, one outside it, and a
 /// list whose cursor row is revealed by the page.
-fn keyed() -> Element {
-    let mut at = use_signal(|| 0usize);
+fn keyed() -> View {
+    let mut at = signal(|| 0usize);
     rsx! {
         div { "data-aio-prevent": "Tab ArrowDown",
             onkeydown: move |e| {
@@ -556,7 +556,7 @@ fn keyed() -> Element {
         button { "data-t": "far", onclick: move |_| at.set(80), "Far" }
         div { "data-t": "box", style: "height: 100px; overflow: auto",
             for i in 0..100usize {
-                div { key: "{i}", style: "height: 20px", "data-aio-reveal": (i == at()).then(|| i.to_string()), "row {i}" }
+                div { key: "{i}", style: "height: 20px", "data-aio-reveal": (i == at.get()).then(|| i.to_string()), "row {i}" }
             }
         }
     }
@@ -564,7 +564,7 @@ fn keyed() -> Element {
 
 #[test]
 fn the_page_keeps_the_keys_an_element_names_and_the_view_still_hears_them() {
-    use keyboard_types::{Key, Modifiers};
+    use aio::ui::prelude::{Key, Modifiers};
     let mut ui = TestUi::new(keyed);
     ui.eval("document.querySelector('[data-t=a]').focus()");
     let before = HEARD.load(SeqCst);
@@ -595,7 +595,7 @@ fn the_row_with_the_cursor_is_scrolled_into_view_without_a_script_from_the_app()
     let top = ui.eval("document.querySelector('[data-t=box]').scrollTop").as_f64().unwrap();
     assert!((1520.0..=1600.0).contains(&top), "row 80 at the box's bottom edge: {top}");
     ui.eval("document.querySelector('[data-t=a]').focus()");
-    ui.press_key(keyboard_types::Key::ArrowDown, keyboard_types::Modifiers::empty());
+    ui.press_key(Key::ArrowDown, Modifiers::empty());
     ui.settle();
     let next = ui.eval("document.querySelector('[data-t=box]').scrollTop").as_f64().unwrap();
     assert!((next - top - 20.0).abs() < 1.0, "one row on: {top} → {next}");
@@ -639,36 +639,36 @@ mod parts {
     }
 
     #[component]
-    fn Cursor() -> Element {
+    fn Cursor() -> View {
         CURSOR.set(CURSOR.get() + 1);
         let at = part(|b| &b.cursor);
         rsx! { span { "data-t": "cursor", "{at}" } }
     }
 
     #[component]
-    fn Rows() -> Element {
+    fn Rows() -> View {
         ROWS.set(ROWS.get() + 1);
         let rows = part(|b| &b.rows);
         VER.set(rows.ver());
-        rsx! { span { "data-t": "rows", "{rows.len()}" } }
+        rsx! { span { "data-t": "rows", {rows.with(Vec::len).to_string()} } }
     }
 
     /// Into the list's heap: no field to name, so it follows every commit.
     #[component]
-    fn First() -> Element {
+    fn First() -> View {
         FIRST.set(FIRST.get() + 1);
         let first = part(|b| b.rows.first().map_or("", |r| r.as_str()));
         rsx! { span { "data-t": "first", "{first}" } }
     }
 
     #[component]
-    fn Ticks() -> Element {
+    fn Ticks() -> View {
         TICKS.set(TICKS.get() + 1);
         let n = part(|b| &b.ticks);
         rsx! { span { "data-t": "ticks", "{n}" } }
     }
 
-    fn app() -> Element {
+    fn app() -> View {
         use_live();
         rsx! {
             Cursor {}
@@ -698,7 +698,7 @@ mod parts {
     #[test]
     fn commits_off_the_ui_thread_render_at_most_once_a_background_window() {
         let mut ui = TestUi::new(app);
-        let h = ui.run(|| HANDLE.peek().clone());
+        let h = ui.run(|| HANDLE.read_untracked().clone());
         let t0 = (TICKS.get(), std::time::Instant::now());
         let feed = h.clone();
         std::thread::spawn(move || {

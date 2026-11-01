@@ -12,7 +12,7 @@ which of aio's features aio-rs has. Moving an app over:
 | | aio | aio-rs |
 |---|---|---|
 | Language, runtime | TypeScript on Deno | Rust, native code |
-| Renderer | AIR (React-shaped, fine-grained signals) | Dioxus 0.7 views; the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
+| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air; the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
 | State model | cells, methods on an Immer draft, selectors | cells, methods on `&mut self` (a copy), `#[derived]`; every call an event in the store's log |
 | Data compatibility | `state.db` | the same `state.db`, both ways: a port opens aio's file as it is, and aio opens it after ([below](#data-the-same-statedb)) |
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
@@ -214,10 +214,10 @@ beyond the aio-rs form.
 | Auth | a `firewall:` line at boot | none | allow the app in the OS firewall | [setup](basics/setup.md) |
 | Views | server rendering, hydration, `collectHead` | none | `ax preview --html`; `aio::head::html` | [views](ui/views.md#gaps-against-aio), [islands](ui/islands.md#gaps) |
 | Views | code splitting, `lazy` | one binary | `Defer` defers the render | [islands](ui/islands.md#gaps) |
-| Views | other view libraries (`aio/state-core`), `h()`, React compat | Dioxus `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
+| Views | other view libraries (`aio/state-core`), `h()`, React compat | `aio::ui` `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
 | Views | accessibility checked in the running page | static (`ax lint`) | `TestUi` audits | [islands](ui/islands.md#gaps) |
 | Views | Redux DevTools | none | `TimeTravelPanel`, `ax timetravel`, `ax events` | [views](ui/views.md#gaps-against-aio) |
-| Views | `watch()`, `on()`, `trackedMemo()` | none as such | `use_effect`, `use_memo` | [views](ui/views.md#gaps-against-aio) |
+| Views | `watch()`, `on()`, `trackedMemo()` | `watch(deps, f)` | `effect`, `memo` | [views](ui/views.md#gaps-against-aio) |
 | Views | a 12 ms frame deadline mid-render | one batch per tick | keep renders small | [performance](performance.md#gaps-against-aio) |
 | Views | `Worker` script bundling | none | Rust off the thread (`spawn_blocking`) | [performance](performance.md#gaps-against-aio) |
 | Kit | `<UiStyles/>` | `theme_css`, `theme::sheet` | ➖ | [kit](ui/kit.md#gaps-against-aio) |
@@ -275,7 +275,7 @@ construct-by-construct tables are in the
 - **Rust types instead of TypeScript.** Arguments are typed and serde
   refuses a wrong one; ranges go in `ensure!`. A field aio left
   `undefined` is an `Option`. [migration](migration/README.md#cells-and-methods)
-- **Dioxus views instead of AIR/TSX.** `rsx!` instead of JSX; a
+- **`aio::ui` views instead of AIR/TSX.** `rsx!` instead of JSX; a
   component re-renders when a signal it read changes or its props
   differ. Read fields with `part`, pass rows as props.
   [views](ui/views.md#coming-from-aios-air-or-react)
@@ -358,7 +358,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Disable, breaker | resets state; `circuitBreaker` | keeps state; `Cells::trip_after` | 🔄 |
 | Call hook | `beforeReduce` (may change) | `before_call` (lets in or refuses), `rewrite_call` (may change) | ✅ |
 | Worker cells | `worker: true` | not needed: native code, `spawn_blocking` | 🔄 |
-| View-only state | `scope: "client"` | a cell without `persist`/`shared`, or a `GlobalSignal` | ✅ |
+| View-only state | `scope: "client"` | a cell without `persist`/`shared`, or a `Global` | ✅ |
 | Visibility | `visible`, `forUser`; a hidden read throws | `#[cell(visible = f)]`, `#[server]` fields as `Hidden<T>` (a read on a copy panics) | ✅ |
 | Plugins | `definePlugin` | `aio::plugin::Plugin` | ✅ |
 | Retired cells | `am persist --drop` | `ax persist --drop`, `#[cell(retire = [..])]` | ✅ |
@@ -439,9 +439,9 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Renderer | AIR, TSX | Dioxus, `rsx!` | 🔄 |
+| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath until air) | 🔄 |
 | Field-level reads | one signal per cell | `part(\|c\| &c.field)` | 🔄 |
-| Hooks | AIR and React names | Dioxus hooks, no dependency arrays | 🔄 |
+| Hooks | AIR and React names | `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`: AIR's names, no dependency arrays | 🔄 |
 | Server rendering, hydration | yes | ❌ (`ax preview --html`) | ❌ |
 | Code splitting, `lazy` | yes | ❌ (`Defer`) | ❌ |
 | Other view libraries, `h()` | `aio/state-core`, React compat | ❌ (islands) | ❌ |
@@ -540,11 +540,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 ## Plans
 
-- **0.2.0: aio-rs's own renderer, "air".** It is planned to replace
-  Dioxus with a fine-grained renderer of aio-rs's own: a cell's fields as
-  signals, direct DOM edits for what changed, and a lean macro so
-  rebuilds get faster. This is the plan, not a promised date; until
-  then the views are Dioxus, as documented.
+- **0.2.0: aio-rs's own renderer, "air".** It replaces Dioxus with a
+  fine-grained renderer of aio-rs's own: a cell's fields as signals,
+  direct DOM edits for what changed, and a lean macro so rebuilds get
+  faster ([design](design/air.md)). Apps are already written against
+  `aio::ui`, which names no renderer, so the swap is a framework change,
+  not an app migration.
 
 ## Moving
 

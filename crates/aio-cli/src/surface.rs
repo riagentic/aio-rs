@@ -235,10 +235,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    use dioxus::prelude::*;
+    use aio::ui::prelude::*;
 
     #[cfg(unix)]
-    fn screen() -> Element {
+    fn screen() -> View {
         rsx! {
             form {
                 select { "data-t": "theme",

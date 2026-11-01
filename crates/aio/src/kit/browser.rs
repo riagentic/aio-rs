@@ -11,7 +11,7 @@
 //! where it was, and the next `Browser` under that id opens there (its
 //! scroll and forms cannot be kept; its session's cookies always are).
 use super::{Island, WebIsland};
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -92,7 +92,7 @@ pub fn go(id: &str, what: Go) {
          if (w && typeof w.getWebContentsId === 'function') try {{ w.{call} }} catch (e) {{}}",
         Value::from(id)
     );
-    _ = dioxus_document::eval(&js);
+    _ = eval(&js);
 }
 
 /// Why `keys` cannot be host keys, if they cannot (aio's `isHostKeyList`):
@@ -214,15 +214,13 @@ pub fn Browser(
     #[props(default)] onevent: EventHandler<GuestEvent>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
-    let keep = use_hook(|| {
-        try_consume_context::<Keep>().unwrap_or_else(|| dioxus::core::provide_root_context(Keep::default()))
-    });
-    let start = use_hook(|| reopen(keep_alive.as_ref().and_then(|k| keep.0.borrow().get(k).cloned()).as_ref(), &src));
+) -> View {
+    let keep = once(|| try_context::<Keep>().unwrap_or_else(|| provide_root(Keep::default())));
+    let start = once(|| reopen(keep_alive.as_ref().and_then(|k| keep.0.borrow().get(k).cloned()).as_ref(), &src));
     // Where it is (its last landing, else what it was given), and under
     // which id and `src` it is kept when it goes.
     let now =
-        use_hook(|| Rc::new(RefCell::new((Kept { at: start.clone().unwrap_or_default(), src: String::new() }, None))));
+        once(|| Rc::new(RefCell::new((Kept { at: start.clone().unwrap_or_default(), src: String::new() }, None))));
     {
         let mut n = now.borrow_mut();
         n.0.src.clone_from(&src);
@@ -230,14 +228,14 @@ pub fn Browser(
     }
     {
         let (keep, now) = (keep.clone(), now.clone());
-        use_drop(move || {
+        on_cleanup(move || {
             if let (k, Some(id)) = &*now.borrow() {
                 keep.0.borrow_mut().insert(id.clone(), k.clone());
             }
         });
     }
     // Read once, as the guest does.
-    let keys = use_hook(|| match host_keys_refusal(&host_keys) {
+    let keys = once(|| match host_keys_refusal(&host_keys) {
         _ if host_keys.is_empty() => vec![],
         Some(why) => {
             crate::warn!(cat: "ui", "<Browser> {why}: none is relayed");

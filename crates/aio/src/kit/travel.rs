@@ -4,8 +4,8 @@
 //! takes its asks. Needs a [`GlobalKeys`](super::GlobalKeys) around the app.
 use super::flag;
 use super::keys::use_global_key;
+use crate::ui::prelude::*;
 use crate::{TimeAsk, Timeline};
-use dioxus::prelude::*;
 
 /// What the rewinds are named in the log.
 const REWIND: &str = "$rewind";
@@ -13,14 +13,10 @@ const REWIND: &str = "$rewind";
 /// The panel, hidden until Ctrl+. (or `open`); `timeline` `None` (a synced
 /// copy) shows nothing.
 #[component]
-pub fn TimeTravelPanel(
-    timeline: Option<Timeline>,
-    onask: EventHandler<TimeAsk>,
-    #[props(default)] open: bool,
-) -> Element {
-    let mut shown = use_signal(|| open);
+pub fn TimeTravelPanel(timeline: Option<Timeline>, onask: EventHandler<TimeAsk>, #[props(default)] open: bool) -> View {
+    let shown = signal(|| open);
     use_global_key("ctrl+.", move |_| shown.toggle());
-    let Some(tl) = timeline.filter(|_| shown()) else { return rsx! {} };
+    let Some(tl) = timeline.filter(|_| shown.get()) else { return rsx! {} };
     // Nothing to undo at the start; nothing to redo unless an undo was last.
     let undo = tl.at > 0;
     let redo = tl.steps.last().is_some_and(|s| s.method == REWIND);

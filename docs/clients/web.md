@@ -10,7 +10,7 @@ its own window a fourth:
 | [`[app] ui = "browser"`](#the-ui-in-the-system-browser) | a client-server app's UI in the system browser instead of a window | `aio.toml` |
 | [Embedded pages](#embedded-pages) | someone else's site in a box of a view, or in a child window | `aio::kit::Browser`, `aio_shell::open_window` |
 
-The views are the same Dioxus components everywhere
+The views are the same `aio::ui` components everywhere
 ([views](../ui/views.md)); what changes is where the cells live.
 
 ## The web build
@@ -145,12 +145,12 @@ itself over its socket; a link that drops shows `offline` and is retried.
 ```rust,no_run
 use aio::kit::{GuestEvent, Go, go};
 use aio::kit::Browser;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Reader() -> Element {
-    let mut at = use_signal(|| "https://example.org/".to_string());
-    let mut title = use_signal(String::new);
+fn Reader() -> View {
+    let at = signal(|| "https://example.org/".to_string());
+    let title = signal(String::new);
     rsx! {
         nav {
             button { onclick: move |_| go("reader", Go::Back), "Back" }

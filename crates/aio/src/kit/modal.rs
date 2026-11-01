@@ -7,8 +7,7 @@
 use super::controls::Tone;
 use super::form::{Button, Variant};
 use super::{flag, join, use_id};
-use dioxus::core::{Task, spawn_forever};
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
@@ -30,16 +29,16 @@ pub fn Modal(
     open: bool,
     onclose: Option<EventHandler<()>>,
     #[props(into)] title: Option<String>,
-    footer: Option<Element>,
+    footer: Option<View>,
     #[props(default = true)] dismissable: bool,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     let id = use_id("modal");
     let close = onclose.filter(|_| dismissable);
     // Open order, not mount order: a dialog opened later is on top.
-    let was = use_hook(|| Rc::new(Cell::new(false)));
+    let was = once(|| Rc::new(Cell::new(false)));
     OPEN.with(|o| {
         let mut o = o.borrow_mut();
         match (open, was.replace(open)) {
@@ -50,10 +49,10 @@ pub fn Modal(
         }
     });
     let gone = id.clone();
-    use_drop(move || OPEN.with(|o| o.borrow_mut().retain(|(k, _)| *k != gone)));
-    let mut dialog = use_signal(|| None::<Rc<MountedData>>);
+    on_cleanup(move || OPEN.with(|o| o.borrow_mut().retain(|(k, _)| *k != gone)));
+    let dialog = signal(|| None::<Rc<MountedData>>);
     let to_box = move |_| {
-        if let Some(el) = dialog.peek().clone() {
+        if let Some(el) = dialog.read_untracked().clone() {
             spawn(async move { _ = el.set_focus(true).await });
         }
     };
@@ -84,7 +83,7 @@ pub fn Modal(
                 "aria-labelledby": title.as_ref().map(|_| format!("{id}-title")),
                 tabindex: "-1",
                 onmounted: move |e| async move {
-                    dialog.set(Some(e.data()));
+                    *dialog.write() = Some(e.data());
                     _ = e.set_focus(true).await;
                 },
                 // A click in the dialog is not a click on the backdrop.
@@ -117,7 +116,7 @@ pub fn Confirm(
     #[props(default)]
     danger: bool,
     #[props(default, into)] class: String,
-) -> Element {
+) -> View {
     rsx! {
         Modal { open, onclose: oncancel, title, class,
             footer: rsx! {
@@ -150,13 +149,13 @@ pub fn ConfirmButton(
     #[props(default)] disabled: bool,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
-    let mut open = use_signal(|| false);
-    let mut me = use_signal(|| None::<Rc<MountedData>>);
-    let mut done = move || {
+    children: View,
+) -> View {
+    let open = signal(|| false);
+    let me = signal(|| None::<Rc<MountedData>>);
+    let done = move || {
         open.set(false);
-        if let Some(el) = me.peek().clone() {
+        if let Some(el) = me.read_untracked().clone() {
             spawn(async move { _ = el.set_focus(true).await });
         }
     };
@@ -165,13 +164,13 @@ pub fn ConfirmButton(
             r#type: "button",
             class: join(&format!("aio-btn aio-btn--{} aio-btn--md", variant.key()), &class),
             disabled: flag(disabled),
-            onmounted: move |e| me.set(Some(e.data())),
+            onmounted: move |e| *me.write() = Some(e.data()),
             onclick: move |_| open.set(true),
             ..attributes,
             {children}
         }
         Confirm {
-            open: open(),
+            open: open.get(),
             title: confirm_title,
             message: confirm,
             confirm_label,
@@ -194,7 +193,7 @@ struct Notice {
     tone: Tone,
 }
 
-static TOASTS: GlobalSignal<Vec<Notice>> = GlobalSignal::with_name(Vec::new, "aio::kit::TOASTS");
+static TOASTS: Global<Vec<Notice>> = Global::named(Vec::new, "aio::kit::TOASTS");
 
 thread_local! {
     static NEXT: Cell<u64> = const { Cell::new(0) };
@@ -256,10 +255,10 @@ pub fn toast_for(message: impl Into<String>, tone: Tone, stay: Option<Duration>)
 pub fn ToastHost(
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     rsx! {
         div { class: join("aio-toasts", &class), role: "status", "aria-live": "polite", ..attributes,
-            for n in TOASTS() {
+            for n in TOASTS.get() {
                 div { key: "{n.id}", class: "aio-toast aio-toast--{n.tone.key()}", role: (n.tone == Tone::Error).then_some("alert"),
                     span { class: "aio-toast__msg", "{n.message}" }
                     button { r#type: "button", class: "aio-toast__x", "aria-label": "Dismiss", "data-t": "toastDismiss", onclick: move |_| Toast(n.id).dismiss(), "×" }
