@@ -7,7 +7,8 @@
 use crate::{Window, guest, install, runtime, wire};
 use aio::kit::{Browser, Go, GuestEvent, go};
 use aio::serde_json::{Value, json};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
+use dioxus_core::VirtualDom;
 use dioxus_liveview::LiveViewPool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -27,28 +28,28 @@ ipcRenderer.on('perm', () => navigator.permissions.query({ name: 'clipboard-read
 
 static PRELOADS: [(&str, &str); 1] = [("probe.js", PROBE)];
 
-fn app() -> Element {
+fn app() -> View {
     let base = BASE.get().cloned().unwrap_or_default();
-    let mut src = use_signal(|| format!("{base}/a"));
-    let mut at = use_signal(String::new);
-    let mut on = use_signal(|| true);
-    let mut log = use_signal(Vec::<String>::new);
+    let src = signal(|| format!("{base}/a"));
+    let at = signal(String::new);
+    let on = signal(|| true);
+    let log = signal(Vec::<String>::new);
     let send = |channel: &str, args: Vec<Value>| go("b", Go::Send { channel: channel.into(), args });
     let c = format!("{base}/c");
     let b = format!("{base}/b");
     rsx! {
         button { id: "hide", onclick: move |_| on.toggle(), "hide" }
-        button { id: "follow", onclick: move |_| src.set(at()), "follow" }
+        button { id: "follow", onclick: move |_| src.set(at.get()), "follow" }
         button { id: "to-b", onclick: move |_| src.set(b.clone()), "b" }
         button { id: "ping", onclick: move |_| send("ping", vec![json!(7)]), "ping" }
         button { id: "go-c", onclick: move |_| send("go", vec![json!(c.clone())]), "c" }
         button { id: "perm", onclick: move |_| send("perm", vec![]), "perm" }
         button { id: "back", onclick: move |_| go("b", Go::Back), "back" }
         button { id: "open", onclick: move |_| send("open", vec![]), "open" }
-        if on() {
+        if on.get() {
             Browser {
                 id: "b",
-                src: src(),
+                src: src.get(),
                 keep_alive: "k",
                 partition: "persist:t",
                 preload: "probe.js",
@@ -59,7 +60,7 @@ fn app() -> Element {
                     if let GuestEvent::Navigated { url, .. } = &e {
                         at.set(url.clone());
                     }
-                    log.push(format!("{e:?}"));
+                    log.write().push(format!("{e:?}"));
                 },
             }
         }
@@ -72,7 +73,7 @@ fn app() -> Element {
             referrer: "http://ref.example/",
             style: "width:100px;height:100px",
         }
-        pre { id: "log", {log().join("\n")} }
+        pre { id: "log", {log.get().join("\n")} }
     }
 }
 

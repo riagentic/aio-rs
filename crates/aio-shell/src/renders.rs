@@ -360,14 +360,14 @@ mod tests {
     /// mounted components with their renders and time; one unmounted goes.
     #[test]
     fn the_tree_is_each_mounted_component_with_its_renders_and_time() {
-        use dioxus::prelude::*;
+        use aio::ui::prelude::*;
         thread_local!(static SHOW: std::cell::Cell<bool> = const { std::cell::Cell::new(true) });
         #[component]
-        fn Row(n: u32) -> Element {
+        fn Row(n: u32) -> View {
             rsx! { li { "{n}" } }
         }
         #[component]
-        fn List() -> Element {
+        fn List() -> View {
             rsx! {
                 ul {
                     Row { n: 1 }
@@ -375,9 +375,10 @@ mod tests {
                 }
             }
         }
-        fn app() -> Element {
+        fn app() -> View {
             rsx! {
-                SuspenseBoundary { fallback: |_| rsx! {}, List {} }
+                // The renderer's own components stay out of the tree.
+                dioxus_core::SuspenseBoundary { fallback: |_| rsx! {}, List {} }
                 if SHOW.get() {
                     Row { n: 3 }
                 }
@@ -422,23 +423,23 @@ mod tests {
     /// props stayed is not run at all.
     #[test]
     fn a_render_says_whether_a_signal_or_new_props_made_it() {
-        use dioxus::prelude::*;
+        use aio::ui::prelude::*;
         thread_local!(static TICK: std::cell::Cell<Option<Signal<u32>>> = const { std::cell::Cell::new(None) });
         #[component]
-        fn Label(n: u32) -> Element {
+        fn Label(n: u32) -> View {
             rsx! { b { "{n}" } }
         }
         #[component]
-        fn Same() -> Element {
+        fn Same() -> View {
             rsx! { i {} }
         }
         #[component]
-        fn Ticker() -> Element {
-            let t = use_signal(|| 0);
+        fn Ticker() -> View {
+            let t = signal(|| 0);
             TICK.set(Some(t));
-            rsx! { Label { n: t() } Same {} }
+            rsx! { Label { n: t.get() } Same {} }
         }
-        fn app() -> Element {
+        fn app() -> View {
             rsx! { Ticker {} }
         }
         let wire = Tripwire::new(|_| {});

@@ -2,8 +2,9 @@
 //! Electron runtime (as in aio) draws it. DOM edits and events travel as
 //! length-prefixed frames over a private socket (a 0700 runtime dir): no
 //! listening port, no network for the page (it loads from `aio://app`).
+use aio::ui::View;
 use bytes::Bytes;
-use dioxus_core::{Element, VirtualDom};
+use dioxus_core::VirtualDom;
 use dioxus_liveview::{LiveViewError, LiveViewPool, LiveViewSocket};
 use futures_util::{SinkExt, StreamExt};
 use std::path::Path;
@@ -238,7 +239,7 @@ fn said_contract() -> Option<std::io::Result<()>> {
 
 /// Open `app` in the shared runtime; returns when the window closes.
 /// The runtime's profile and the socket live in the app's own dirs.
-pub fn run(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
+pub fn run(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
     let dev = std::env::var_os("AIORT_DEV_CLOSED").filter(|_| cfg!(debug_assertions));
     // Under `ax dev`'s dx: a dx that goes (its session killed) stops us
     // gracefully, as a parent that goes does; dx sets no watch of its own.
@@ -281,7 +282,7 @@ fn window_panicked(payload: &(dyn std::any::Any + Send)) -> String {
 /// The window ended because a stop was asked (SIGTERM, Ctrl-C), not closed.
 static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
+fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
     aio::lifecycle::harden();
     if let Some(said) = said_contract() {
         return said;
