@@ -203,9 +203,10 @@ pub(crate) fn send(req: &HeaderMap, f: &Opened, headers: Vec<(String, String)>) 
         body: Vec::new(),
         window: Some(Window { file: f.file.clone(), start, len, gzip: false }),
         stream: None,
+        upgrade: None,
     };
     if headers.iter().any(|(k, v)| k == "etag" && etag_matches(h("if-none-match"), v)) {
-        return Reply { status: 304, headers, body: Vec::new(), window: None, stream: None };
+        return Reply { status: 304, headers, body: Vec::new(), window: None, stream: None, upgrade: None };
     }
     let range = if req.contains_key("if-range") { Range::Whole } else { parse_range(h("range"), f.size) };
     match range {

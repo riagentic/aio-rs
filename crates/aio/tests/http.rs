@@ -850,3 +850,57 @@ async fn a_route_streams_its_answer_part_by_part() {
     tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut rest)).await.unwrap().unwrap();
     assert!(rest.ends_with(b"0\r\n\r\n"), "{:?}", String::from_utf8_lossy(&rest));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_socket_route_carries_binary_frames_per_kind() {
+    use aio::http::side::{Seen, Seqs, decode, encode};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<(u8, Seen)>>> = Default::default();
+    let log = seen.clone();
+    let http = Http::default().route(Route::socket("/stream", move |req| {
+        let log = log.clone();
+        async move {
+            // Decided before the upgrade: an unknown session never gets a socket.
+            if req.query("sid") != Some("s1") {
+                return Err(Reply::text("unknown session").status(403));
+            }
+            Ok(move |mut f: aio::http::side::Frames| async move {
+                while let Some(fr) = f.recv().await {
+                    log.lock().unwrap().push((fr.kind, fr.seen));
+                    f.send(fr.kind, &fr.body, true).unwrap();
+                }
+            })
+        }
+    }));
+    let addr = serve(Handle::<Hooks>::memory(), http).await;
+    let req = |sid: &str| {
+        let mut r = format!("ws://{addr}/stream?sid={sid}").into_client_request().unwrap();
+        r.headers_mut().insert("authorization", "Bearer secret".parse().unwrap());
+        r
+    };
+    let e = tokio_tungstenite::connect_async(req("nope")).await.unwrap_err();
+    assert!(e.to_string().contains("403"), "{e}");
+    let (status, _, _) = fetch(&addr, "GET", "/stream?sid=s1", &[KEY], "").await;
+    assert_eq!(status, 426, "not an upgrade");
+    let mut no_key = format!("ws://{addr}/stream?sid=s1").into_client_request().unwrap();
+    no_key.headers_mut().remove("authorization");
+    assert!(tokio_tungstenite::connect_async(no_key).await.unwrap_err().to_string().contains("401"));
+    let (mut w, _) = tokio_tungstenite::connect_async(req("s1")).await.unwrap();
+    let mut out = Seqs::default();
+    // Two kinds interleaved, then one frame of kind 2 lost on the way.
+    for (kind, body) in [(1u8, &b"a"[..]), (2, b"b"), (1, b"c"), (2, b"d")] {
+        w.send(Message::binary(encode(kind, out.next(kind), body))).await.unwrap();
+    }
+    out.next(2);
+    w.send(Message::binary(encode(2, out.next(2), b"f"))).await.unwrap();
+    let mut back = Seqs::default();
+    for want in ["a", "b", "c", "d", "f"] {
+        let Message::Binary(b) = w.next().await.unwrap().unwrap() else { panic!("binary") };
+        let (kind, seq, body) = decode(&b).unwrap();
+        assert_eq!((body, back.accept(kind, seq)), (want.as_bytes(), Seen::Next), "the server numbers its own");
+    }
+    let s = seen.lock().unwrap().clone();
+    assert_eq!(s[..4].iter().map(|x| x.1).collect::<Vec<_>>(), [Seen::Next; 4], "interleaved kinds are no gap");
+    assert_eq!(s[4], (2, Seen::Gap(1)));
+}

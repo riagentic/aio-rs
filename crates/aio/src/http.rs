@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 pub mod encoding;
 mod file;
+pub mod side;
 pub use file::serve_file;
 
 /// Largest request body a route is handed unless it says
@@ -334,24 +335,44 @@ pub struct Reply {
     /// A file sent as it is read, instead of `body`.
     window: Option<file::Window>,
     /// A body sent as it is made, instead of `body`.
-    stream: Option<Streamed>,
+    stream: Option<Once<axum::body::Body>>,
+    /// A socket route's taker of its socket ([`Route::socket`]).
+    upgrade: Option<Once<Taker>>,
 }
 
-/// A body made as it is sent ([`Reply::stream`]): taken once, by the send.
-#[derive(Clone)]
-struct Streamed(Arc<std::sync::Mutex<Option<axum::body::Body>>>);
+/// What takes a side channel's socket.
+type Taker = Box<dyn FnOnce(side::Frames) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
-impl PartialEq for Streamed {
+/// Something a [`Reply`] carries to its send, taken once there.
+struct Once<X>(Arc<std::sync::Mutex<Option<X>>>);
+
+impl<X> Once<X> {
+    fn new(x: X) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(x))))
+    }
+
+    fn take(&self) -> Option<X> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+impl<X> Clone for Once<X> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<X> PartialEq for Once<X> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl Eq for Streamed {}
+impl<X> Eq for Once<X> {}
 
-impl std::fmt::Debug for Streamed {
+impl<X> std::fmt::Debug for Once<X> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Streamed")
+        f.write_str("Once")
     }
 }
 
@@ -363,6 +384,7 @@ impl Reply {
             body,
             window: None,
             stream: None,
+            upgrade: None,
         }
     }
 
@@ -379,7 +401,7 @@ impl Reply {
         use futures_util::StreamExt;
         let body = axum::body::Body::from_stream(parts.map(|b| Ok::<_, std::convert::Infallible>(b.into())));
         Self {
-            stream: Some(Streamed(Arc::new(std::sync::Mutex::new(Some(body))))),
+            stream: Some(Once::new(body)),
             ..Self::of(content_type, Vec::new())
         }
         .header("cache-control", "no-cache")
@@ -400,7 +422,7 @@ impl Reply {
 
     /// 302 to `to`; `.status(303)` etc. for another.
     pub fn redirect(to: &str) -> Self {
-        Self { status: 302, headers: vec![("location".into(), to.into())], body: Vec::new(), window: None, stream: None }
+        Self { status: 302, headers: vec![("location".into(), to.into())], body: Vec::new(), window: None, stream: None, upgrade: None }
     }
 
     pub fn status(mut self, code: u16) -> Self {
@@ -432,7 +454,7 @@ impl Reply {
         for (k, v) in &self.headers {
             b = b.header(k, v);
         }
-        let streamed = self.stream.and_then(|s| s.0.lock().unwrap_or_else(|e| e.into_inner()).take());
+        let streamed = self.stream.and_then(|s| s.take());
         let body = match self.window {
             _ if let Some(body) = streamed => body,
             Some(w) => {
@@ -469,6 +491,7 @@ pub struct Route {
     public: bool,
     max_body: usize,
     streamed: bool,
+    socket: bool,
     run: Run,
 }
 
@@ -488,8 +511,38 @@ impl Route {
             public: false,
             max_body: MAX_BODY,
             streamed: false,
+            socket: false,
             run: Arc::new(move |r| Box::pin(f(r))),
         }
+    }
+
+    /// A WebSocket at `pattern` for a binary side channel ([`side`], aio's
+    /// upgraded route): `f` decides first, before the upgrade, from the
+    /// request (who, which session): `Err(reply)` refuses it (`403 unknown
+    /// session`), `Ok(take)` upgrades and `take` gets the socket. Behind the
+    /// key, as any route (`public` to drop it); frames up to `max_body`
+    /// bytes; a request that isn't an upgrade is 426.
+    pub fn socket<F, Fut, T, TFut>(pattern: &str, f: F) -> Self
+    where
+        F: Fn(Req) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<T, Reply>> + Send + 'static,
+        T: FnOnce(side::Frames) -> TFut + Send + 'static,
+        TFut: Future<Output = ()> + Send + 'static,
+    {
+        let f = Arc::new(f);
+        let run = move |r: Req| {
+            let f = f.clone();
+            async move {
+                match f(r).await {
+                    Ok(take) => {
+                        let take: Taker = Box::new(move |s| Box::pin(take(s)));
+                        Reply { upgrade: Some(Once::new(take)), ..Reply::of("text/plain", Vec::new()).status(101) }
+                    }
+                    Err(refused) => refused,
+                }
+            }
+        };
+        Self { socket: true, ..Self::new(&["GET"], pattern, run) }
     }
 
     pub fn get<F, Fut>(pattern: &str, f: F) -> Self
@@ -1097,7 +1150,7 @@ pub(crate) async fn answer(
     req: axum::extract::Request,
     ip: IpAddr,
 ) -> axum::response::Response {
-    let (head, body) = req.into_parts();
+    let (mut head, body) = req.into_parts();
     let asked = head.headers.clone();
     let method = head.method.as_str().to_ascii_uppercase();
     let path = head.uri.path().to_string();
@@ -1161,8 +1214,20 @@ pub(crate) async fn answer(
     if cookie.is_some() {
         warn_token_in_url();
     }
+    // A socket route's upgrade, taken before the request is the handler's.
+    let upgrading = match &found {
+        Some(Ok((route, _))) if route.socket => {
+            use axum::extract::FromRequestParts;
+            let ws = axum::extract::WebSocketUpgrade::from_request_parts(&mut head, &()).await.ok();
+            ws.map(|ws| (ws, route.max_body))
+        }
+        _ => None,
+    };
     let reply = match found {
         None if let Some((blobs, id)) = blob => serve_blob(blobs, &asked, &method, id).await,
+        Some(Ok((route, _))) if route.socket && upgrading.is_none() => {
+            plain(426, "a WebSocket route: upgrade to it").header("upgrade", "websocket")
+        }
         Some(Ok((route, params))) => match buffered(route, &asked, body).await {
             Err(_) => plain(413, &format!("the body is too big: the limit is {} bytes", route.max_body)),
             Ok((body, stream)) => {
@@ -1218,6 +1283,12 @@ pub(crate) async fn answer(
         _ => reply,
     };
     let compress = http.compress;
+    if let (Some((ws, max)), Some(take)) = (upgrading, reply.upgrade.as_ref().and_then(Once::take)) {
+        return ws
+            .max_message_size(max)
+            .max_frame_size(max)
+            .on_upgrade(move |s| take(side::Frames::new(s)));
+    }
     // Streamed: each part goes as it comes, untouched.
     if reply.stream.is_some() {
         return reply.into_response();
