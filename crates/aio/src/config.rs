@@ -597,6 +597,15 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_start_menu_entry_can_be_left_out() {
+        // aio's build.windows.shortcut: on unless set false.
+        let c = |t: &str| Config::parse(&format!("[app]\nid = \"notes\"\n{t}")).map(|c| c.build.windows.shortcut);
+        assert_eq!(c(""), Ok(true));
+        assert_eq!(c("[build.windows]\nshortcut = false"), Ok(false));
+        assert!(c("[build.windows]\nshortcuts = false").is_err(), "unknown keys are refused");
+    }
+
+    #[test]
     fn the_android_identity_and_key_are_declared_and_checked() {
         let c = |t: &str| Config::parse(&format!("[app]\nid = \"t\"\n[build.android]\n{t}"));
         assert_eq!(Config::parse("[app]\nid = \"t\"").unwrap().build.android, AndroidBuild::default());

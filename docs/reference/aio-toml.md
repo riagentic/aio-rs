@@ -304,6 +304,7 @@ For `mode = "client-server"` and `"server"` ([sync](../state/sync.md)).
 | `strict_origin` | bool | `false` | Served beyond loopback: a socket upgrade must say its `Origin`. |
 | `trust_proxy` | header name | none | Behind a reverse proxy: the header it overwrites with the client's address (`"x-forwarded-for"`); its last hop is then the client. |
 | `open` | bool | `false` | Open on purpose (aio's `key: false`): links and routes need no key, so anyone who reaches the port reads the state and calls `#[client]` methods. Said loudly at boot and by `ax doctor`. |
+| `local_peers` | bool | `true` | Other processes of this user reach a release build's cells through its local door, with a client's rights (`ax state`, `ax call`, other apps as peers: aio's `allowLocalPeers`, which aio leaves off). `false`: a release build opens no door; a debug build always does. |
 
 Checked: `cert` and `key` go together, need `tls = true` and are absolute
 (the file is built into the app: a relative path has no folder to be
@@ -530,6 +531,32 @@ budget_mb = 14
 | `bundle_id` | bundle id | `aio.rt.<id>` | The app's permanent macOS identity (`CFBundleIdentifier`): two or more dot-separated segments of letters, digits and `-` (`com.example.notes`). Used as written. |
 | `host` | string | none | The Mac a build away from one runs on, over SSH (`[ssh options] [user@]host`); it outranks `AIO_MACOS_SSH`. |
 
+### [build.windows]
+
+| Key | Type | Default | What it is |
+|---|---|---|---|
+| `shortcut` | bool | `true` | The one-click download adds a Start menu entry on its first install (aio's `build.windows.shortcut`); `false`: none. |
+
+### [build.download_window]
+
+The window a first start shows while Electron downloads, and its Retry /
+Quit question (aio's `electron.downloadWindow`). Every key is optional; the
+defaults are aio's. The texts take `{title}` and `{version}` (Electron's).
+
+| Key | Type | Default | What it is |
+|---|---|---|---|
+| `heading` | string | `"Getting {title} ready"` | Its heading. |
+| `text` | string | `"Downloading Electron {version} — first start only · {got} / {total} MB"` | The line under the bar: also `{got}`, `{total}` (MB, `?` while unknown) and `{pct}`. |
+| `question` | string | aio's, naming what failed and how to fix it | The Retry / Quit question; `{reason}` is what failed. |
+| `background`, `color`, `bar`, `track` | `#rgb` / `#rrggbb` | the app's, light or dark as the OS is | Its background, text, bar fill and bar ground; one set is used in both modes. |
+| `cancel` | bool | `true` | Its Cancel button; closing the window cancels either way. |
+
+```toml
+[build.download_window]
+heading = "Setting up {title}"
+bar = "#14f195"
+```
+
 ### [build.splash]
 
 The app's image (and text) on screen from its start until its window has
@@ -542,6 +569,20 @@ loaded, on the desktop, the web and Android (aio's `build.splash`).
 | `min_ms` | milliseconds | `400` | It stays at least this long once shown. |
 | `max_ms` | milliseconds | `15000` | No window by then: it goes anyway. At least `min_ms`. |
 | `background` | `["#light", "#dark"]` | the app's colours | Each `#rgb` or `#rrggbb`. |
+| `show` | `always`, `first-start`, `never` | `"always"` | When it shows: every start; only while a first start downloads Electron; never (the download window is then the plain one). `Window { splash_show }` decides at run time instead. |
+| `download_text` | string | `[build.download_window] text` | The line under the bar while the splash draws a first start's download: `{title}`, `{version}`, `{got}` and `{total}` (MB), `{pct}`. |
+| `size` | `[width, height]` | the image's | The image box in px, 1 to 4096 each. |
+| `fit` | `contain`, `cover` | `"contain"` | How the image fills `size` when its shape differs. |
+| `text_position` | `below`, `over` | `"below"` | The text in a strip under the image, or over its lower part. |
+| `align` | `left`, `center`, `right` | `"center"` | The text's alignment. |
+| `margin` | px | 24 at the sides, 18 at the bottom | The text's gap to the edges. |
+| `radius` | px | `0` | The box's corner radius (the window is clear around it). |
+| `border` | `#rgb` / `#rrggbb` | none | A 1 px border. |
+| `fade_ms` | ms | `100`; Android `200` | Its fade out (on the desktop where the OS fades windows: Windows, macOS). |
+| `font` | family | the system's | The text's font: a generic family (`serif`, `sans-serif`, `monospace`; Android also `sans-serif-condensed`…) or a font's name. |
+| `font_size`, `bold` | px (Android: points), bool | `13` (Android `14`), `false` | The text's size and weight. |
+| `text_color` | `["#light", "#dark"]` | the app's | The text's colour. |
+| `bar`, `track` | `["#light", "#dark"]` | the app's | The download bar's fill and ground, while the splash draws a first start's download. |
 
 ```toml
 [build.splash]
@@ -756,7 +797,7 @@ see [views](../ui/views.md) and the tables in
 | `baseDir`, `watch` | `ax dev` watches the app's crate; not configurable |
 | `serveDirs`, `assets` | `[server.dirs]`, `[server.public_dirs]` |
 | `client` | `[app] mode` and `[app] ui` |
-| `keepServer` | `mode = "client-server"` with `ui = "browser"` runs until asked to stop; no `--keep-server` flag for a window app (**gap**) |
+| `keepServer` | `aio_shell::Window { keep_server }`, `--keep-server` per launch |
 | `localConnectHooks` | `Http::door_links(true)`: `Http::on_link` hears the local door's links too (a peer app's copy; tools never) |
 | `transport` | fixed: the window talks over a private socket, clients over `/ws` |
 | `takeover` | `--takeover` |
@@ -781,8 +822,8 @@ see [views](../ui/views.md) and the tables in
 | `refusalsReject` | always: a refusal is the call's `Err` |
 | `journal` | always: the state and its event commit in one transaction |
 | `redactActions` | `#[redact]` on a method |
-| `childWindows`, `electron` | `aio_shell::Window { web, permissions, … }`; `AIORT_SANDBOX` |
-| `splash` | `[build.splash]` |
+| `childWindows`, `electron` | `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, … }`; `electron.downloadWindow` is `[build.download_window]`, `allowLocalPeers` `[server] local_peers`; `ignoreDebugEnv` is always on in a release build |
+| `splash` | `[build.splash]`; its `show` at run time: `Window { splash_show }` |
 | `libraryMode` | `Handle::memory()`, `Handle::open` without `aio_shell::start` (tests, embedding) |
 | `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms`, `full_state_percent` (`0.5` is `50`) |
 | `routes` | `aio::http::Http::route(Route::get(…))` |

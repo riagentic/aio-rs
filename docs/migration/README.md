@@ -64,7 +64,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `ui` (title, size, entry, head, lang, dir, theme, chrome, tray) | `[app] name`, `lang`, `dir`; `[ui]`; `aio_shell::Window` in the launcher; `aio::head::use_head` ([desktop](../clients/desktop.md)) |
 | `baseDir`, `serveDirs`, `assets` | the app's `assets/` (built in), `[server.dirs]`, `[server.public_dirs]` |
 | `client` (`electron`, `browser`, `cli`, `server-only`) | `[app] mode` (`standalone`, `client-server`, `server`, `client`, `cli`) and `[app] ui = "browser"` |
-| `keepServer` | none: a served app is `mode = "server"` (no window) or `client-server` (stops with its window) |
+| `keepServer` | `aio_shell::Window { keep_server: true }`, or `--keep-server` per launch: the app serves on once its window closes |
 | `localConnectHooks`, `onConnect`, `onDisconnect` | `Http::on_link(f)`, `Plugin::on_link(f)`: each link's `Presence`; `Http::door_links(true)` hears the local door's links too |
 | `transport` | built in: the window talks over IPC, other local tools over the local door, the network over `/ws` |
 | `takeover`, `singleton` | always one instance per home; `--takeover` per launch; `--instance <n>` for a second, private one |
@@ -84,8 +84,8 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `freezeState`, `strictCells`, `guardDispatches`, `refusalsReject` | built in: Rust ownership freezes the state; a cell is a type, opened or not at compile time; a panic refuses its call and the app goes on; a refusal is always `Err` |
 | `journal` | built in: every commit is an event in the store, so a kill loses nothing committed |
 | `singleton: false`, `libraryMode` | open cells in a library or a test with `Handle::memory()` / `Store::open(..)`: no boot, no lock |
-| `childWindows`, `electron` (sandbox, permissions, `webviewTag`) | `aio::kit::Browser` for other sites; the window's security is aio-shell's (its fuses, `AIORT_ELECTRON_ARGS`' allow-list), not an app option |
-| `splash` | `[build.splash]` |
+| `childWindows`, `electron` (sandbox, permissions, `webviewTag`) | `aio::kit::Browser` and `open_window` for other sites, `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, confirm_unload, keys }`; `downloadWindow` is `[build.download_window]`, `allowLocalPeers` is `[server] local_peers`, `ignoreDebugEnv` is always on in a release build |
+| `splash` | `[build.splash]` (its look keys, `show`); its `show` at run time: `Window { splash_show }` |
 | `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms` (50) and `full_state_percent` (50, aio's 0.5 as a percent) |
 | `maxConnections`, `wsLimits` | `[server.limits]` (`clients`, `max_message`, `calls_per_sec`, `bytes_per_sec`) |
 | `allowedOrigins`, `strictOrigin`, `trustProxyHeader` | `[server] hosts`, `strict_origin`, `trust_proxy` |
@@ -247,7 +247,8 @@ Rename it (`begin`) when porting.
 | `signOut` | `aio::auth::client::Client::logout` |
 | `appVersion` | `aio::app_version!()` |
 | `nativeFetch` | `aio::capabilities::agent(..)` (feature `outbound`), held to `[capabilities] network` |
-| `print` | none: the window's own print (Ctrl+P) |
+| `print` | `aio_shell::page::print()` (the window's Ctrl+P too) |
+| `__aioWindow` (`minimize`, `maximize`, `close`), `__aioShell.clearPartition` | `aio_shell::page::minimize()`, `maximize()`, `close()`, `hide()`, `show()`; `aio_shell::clear_partition(name)` |
 | `requestNotificationPermission` | not needed: `cx.tell(Tell::notify(..))` asks the OS |
 | `connectAioDevTools`, `connectReduxDevTools`, `setDevMode` | `ax components`, `ax events`, `ax ui`; a debug build is dev mode |
 
@@ -258,6 +259,7 @@ Rename it (`begin`) when porting.
 | `call` | `aio::call!(door, method(..))` |
 | `self("tick")`, `own` | a method calls its own cell's method directly, or `cx.after(key, ms, "tick", args)` |
 | `blocking` | `tokio::task::spawn_blocking` inside an effect |
+| `spawn`, `runCommand` (`aio/server`) | `aio::process::Command::new(p).args(..).on_line(f)`, `.spawn()` (a `Child`: `write`, `close_stdin`, `pause`, `resume`, `kill`, `wait`) or `.run(timeout)`; aborting the effect kills the tree |
 | `isCellWorker` | none (no worker cells) |
 | `table`, `pk`, `integer`, `text`, `real`, `bytes`, `count`, `ref` | `#[table("name")]` on a `Vec`/map field of `#[data]` rows; columns are the row's Rust types |
 | `serverUser`, `serverRequest` | `cx.by()`, `cx.role()` in a method; the request in a route or server function |

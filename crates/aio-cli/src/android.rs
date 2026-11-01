@@ -1283,6 +1283,7 @@ mod tests {
             bold: false,
             fade_ms: None,
             png: &[],
+            ..Default::default()
         };
         let colors = [
             ["#fff", "#111", "#00f", "#ccc"].map(String::from),
@@ -1662,6 +1663,7 @@ mod tests {
             bold: true,
             fade_ms: Some(350),
             png: &[],
+            ..Default::default()
         };
         let colors =
             [["#fff", "#111", "#00f", "#ccc"].map(String::from), ["#000", "#eee", "#00f", "#333"].map(String::from)];
