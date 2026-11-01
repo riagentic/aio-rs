@@ -264,7 +264,7 @@ beyond the aio-rs form.
 | `am` | `dispatch` plain actions, `--as-server` | none | cell methods; a debug build's door | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 | `am` | `kill --stale`, `start --port` | none | the OS's lock; `[server] listen` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 | `am` | `migrate`, `add cell\|server`, `report` collecting a new one | the compiler; by hand | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | the manager UI's V8 heap and per-action readings | `ax ui`'s aio-rs counterparts | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | the manager UI's V8 heap | `ax ui`'s aio-rs counterparts (per-action time and refusals as aio's) | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 
 ## How aio-rs deviates from aio
 
