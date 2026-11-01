@@ -301,6 +301,14 @@ version may break things.
   patch too: it starts from the installed `.app` or `Programs\<id>` when
   no staged copy of the running version is kept, as there is none until
   the first update staged one.
+- On macOS, Windows and from an AppImage, a new version whose binary dies
+  as it starts no longer leaves no version running: its binary is the
+  install helper, so the old app exited for a helper that never ran. The
+  old app now exits only once the helper says it is up (20 s); else it
+  runs on, and that release is never offered again.
+- `ax release` of the service template on Windows: its default size
+  budget is half again there (a server 9 MB, a desktop app 15 MB), as its
+  build is about a third bigger (7.1 MB against 5.3 on Linux).
 - The app quitting (it stops, its socket closes) right after the page
   vetoed a close (`window.close()` with a beforeunload handler) quits: the
   vetoed close, still settling, took the quit's own close of that window

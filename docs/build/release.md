@@ -294,6 +294,13 @@ is not blocked: there is nothing to read.
    never offers that release again, and files an `update:failed` report.
    Some version always runs.
 
+On macOS, Windows and from an AppImage the helper is the new version's
+own binary (the old one is in the place being replaced). The old app
+exits only once the helper said it is up; a new binary that dies as it
+starts (a crash before `aio_shell::start`, a missing library) is not
+installed: the old version runs on, that release is never offered again
+(`update failed: 1.5.0 could not be installed (…), so 1.4.11 runs on`).
+
 When the first boot is claimed the install is final: `installed.json`
 names the version, and versions past `keep` are removed (never the
 running one or the one before it). A swap that couldn't be made (a file

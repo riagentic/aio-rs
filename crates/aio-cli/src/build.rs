@@ -129,10 +129,12 @@ pub const BUDGET_MB: u64 = 10;
 /// A server's (no window, no `kit`).
 pub const SERVER_BUDGET_MB: u64 = 6;
 
-/// The budget `cfg` builds within: its own, else its mode's.
-pub fn budget_of(cfg: &aio::config::Config) -> u64 {
+/// The budget `cfg` builds within for `os`: its own, else its mode's, half
+/// again on Windows, whose build of the same code is about a third bigger
+/// (the service template: 7.1 MB against 5.3 on Linux).
+pub fn budget_of(cfg: &aio::config::Config, os: &str) -> u64 {
     let default = if cfg.app.mode == aio::config::Mode::Server { SERVER_BUDGET_MB } else { BUDGET_MB };
-    cfg.build.budget_mb.unwrap_or(default)
+    cfg.build.budget_mb.unwrap_or(if os == "windows" { default * 3 / 2 } else { default })
 }
 
 /// Why a binary of `bytes` is refused, if it is over `budget_mb`.
@@ -484,7 +486,7 @@ pub fn sizes_of(name: &str) -> Result<String, String> {
     let bytes = std::fs::metadata(&b.binary).map_err(|e| format!("{}: {e}", b.binary.display()))?.len();
     let meta = crate::dev::metadata()?;
     let pkg = crate::dev::locate(&meta, name)?;
-    let budget = budget_of(&b.cfg);
+    let budget = budget_of(&b.cfg, b.platform.os);
     Ok(format!(
         "{name}: {:.2} MB of its {budget} MB budget\n{}",
         bytes as f64 / 1e6,
@@ -575,7 +577,7 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
             app.name, app.version
         ));
     }
-    if let Some(why) = over_budget(bytes, budget_of(&cfg)) {
+    if let Some(why) = over_budget(bytes, budget_of(&cfg, p.os)) {
         let sizes = sizes(&meta, &pkg.name, name, cross).unwrap_or_else(|e| format!("(no size report: {e})"));
         return Err(format!("{}: {why}\n{sizes}", app.name));
     }
@@ -1119,10 +1121,13 @@ mod tests {
         assert_eq!(over_budget(25_000_001, 25).as_deref(), Some("25.0 MB is over the 25 MB budget"));
         let toml =
             |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"relay\"\nname = \"Relay\"\n{t}")).unwrap();
-        assert_eq!(budget_of(&toml("")), BUDGET_MB);
+        assert_eq!(budget_of(&toml(""), "linux"), BUDGET_MB);
         let server = "mode = \"server\"\n[server]\nlisten = \"127.0.0.1:8080\"\n";
-        assert_eq!(budget_of(&toml(server)), SERVER_BUDGET_MB, "a server: 6 MB");
-        assert_eq!(budget_of(&toml(&format!("{server}[build]\nbudget_mb = 8\n"))), 8, "unless it says");
+        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 6 MB");
+        assert_eq!(budget_of(&toml(server), "windows"), 9, "half again on Windows");
+        assert_eq!(budget_of(&toml(""), "windows"), 15);
+        let own = toml(&format!("{server}[build]\nbudget_mb = 8\n"));
+        assert_eq!((budget_of(&own, "linux"), budget_of(&own, "windows")), (8, 8), "unless it says");
     }
 
     #[cfg(target_os = "linux")]

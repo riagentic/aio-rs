@@ -15,7 +15,7 @@ starting point.
 | lint | `ax lint` | what types can't check (credentials in shared state, impure methods, hooks, accessibility, cell ids) plus clippy; exit 1 on errors |
 | tests | `ax test notes` | the cells' and the views' tests, UI tests headless in the real runtime |
 | build | `ax build notes --smoke` | the release bundle, started headless, stopped cleanly, its log checked |
-| size | `ax build notes --sizes` | the release binary against its budget (`[build] budget_mb`, 10 by default), and which crates take the space |
+| size | `ax build notes --sizes` | the release binary against its budget (`[build] budget_mb`, 10 by default, 15 on Windows), and which crates take the space |
 | docs | `cargo doc --no-deps` | broken links in your own API docs |
 
 - `ax test` is `cargo test` with what aio-rs's tests need: UI tests draw

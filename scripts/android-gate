@@ -106,13 +106,15 @@ class Gate:
         self.emulator = None
         real = Path.home()
         # The emulator's own home in the work folder (its console token, its
-        # modem file), with the public key of the adb server already running
-        # (ANDROID_USER_HOME, else ~/.android), so adb is let in.
-        emu_home = work / "android"
+        # modem file), holding links to the adb key of the adb server already
+        # running (ANDROID_USER_HOME, else ~/.android): the emulator puts it in
+        # the new AVD on its first boot, so adb is let in. Linked, never copied.
+        emu_home = work / ".android"
         emu_home.mkdir()
-        key = Path(os.environ.get("ANDROID_USER_HOME", real / ".android")) / "adbkey.pub"
-        if key.exists():
-            shutil.copy(key, emu_home / "adbkey.pub")
+        keys = Path(os.environ.get("ANDROID_USER_HOME", real / ".android"))
+        for f in ("adbkey", "adbkey.pub"):
+            if (keys / f).exists():
+                (emu_home / f).symlink_to(keys / f)
         self.emu_env = dict(os.environ, ANDROID_AVD_HOME=str(self.avd_home), ANDROID_HOME=str(self.root),
                             ANDROID_EMULATOR_HOME=str(emu_home), ANDROID_USER_HOME=str(emu_home), HOME=str(work))
         home = work / "home"
@@ -126,7 +128,7 @@ class Gate:
             TMPDIR=str(work / "tmp"),
             ANDROID_HOME=str(self.root),
             ANDROID_SERIAL=SERIAL,
-            ANDROID_USER_HOME=str(work / "android"),
+            ANDROID_USER_HOME=str(work / ".android"),
             CARGO_HOME=os.environ.get("CARGO_HOME", str(real / ".cargo")),
             RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(real / ".rustup")),
             GRADLE_USER_HOME=os.environ.get("GRADLE_USER_HOME", str(real / ".gradle")),

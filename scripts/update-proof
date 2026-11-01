@@ -82,7 +82,8 @@ class Proof:
             Path(env[k]).mkdir(parents=True, exist_ok=True)
         self.env = env
         self.app = work / APP
-        self.rel = work / "releases"
+        self.out = work / "made"  # where ax release lays them out
+        self.rel = work / "releases"  # what the app downloads from
         self.log = self.data / "logs" / "app.log"
         self.installed_exe = None
 
@@ -108,14 +109,24 @@ class Proof:
 
     def release(self, patch_from=None):
         extra = ["--patch-from", patch_from] if patch_from else []
-        out = self.ax("release", APP, "--dir", self.rel, *extra)
+        out = self.ax("release", APP, "--dir", self.out, *extra)
         m = re.search(rf"^{APP} (\S+) on stable, signed", out, re.M)
         if not m:
             fail(f"ax release said no version:\n{out[-2000:]}")
         if patch_from and ".patch" not in out:
             fail(f"release {m[1]} carries no patch from {patch_from}:\n{out[-2000:]}")
+        self.publish()
         say(f"released {m[1]}" + (f" (with a patch from {patch_from})" if patch_from else ""))
         return m[1]
+
+    def publish(self):
+        """Upload as a host would: the files, then the patch list, the manifest last."""
+        made, served = self.out / "stable", self.rel / "stable"
+        served.mkdir(parents=True, exist_ok=True)
+        last = lambda f: (f.suffix == ".json", not f.name.endswith(".patches.json"))  # noqa: E731
+        for f in sorted((f for f in made.iterdir() if f.is_file()), key=last):
+            shutil.copy(f, served / f".{f.name}")
+            os.replace(served / f".{f.name}", served / f.name)
 
     def bundle(self):
         manifests = [p for p in (self.rel / "stable").glob("*.json") if not p.name.endswith(".patches.json")]
@@ -221,7 +232,8 @@ def prove(p):
     v2 = p.release(patch_from=v1)
     p.wait(f"{v2} is installed", lambda: p.status()[:2] == (v2, False))
     if not p.logged(f"update {v2}: made from {v1} and a patch"):
-        fail(f"{v2} was not made from the patch")
+        why = [l for l in p.log.read_text(errors="replace").splitlines() if "no patch used" in l]
+        fail(f"{v2} was not made from the patch: {why}")
     p.wait(f"{v2} serves", lambda: p.logged(f"update to {v2} is in place"), 60)
     p.post("written by the second version")
     say(f"{v1} -> {v2}: found, signature checked, made from the patch, installed, restarted")
