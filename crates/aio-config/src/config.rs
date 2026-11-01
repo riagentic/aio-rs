@@ -1525,7 +1525,7 @@ impl Config {
             return Err(format!("aio.toml: {e}"));
         }
         // `[build] assets`: the same rules, in the app's folder.
-        if let Some((p, _)) = c.build.assets.iter().find(|(_, d)| d.is_absolute()) {
+        if let Some((p, _)) = c.build.assets.iter().find(|(_, d)| d.is_absolute() || d.has_root()) {
             return Err(format!("aio.toml: [build] assets {p:?}: a folder beside aio.toml (it is built into the app)"));
         }
         if let Some(e) = dirs_problem(&Server { dirs: c.build.assets.clone(), ..Server::default() }) {

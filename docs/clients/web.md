@@ -254,8 +254,9 @@ browser grants notifications only from a user gesture: the first tell asks,
 and one refused for lack of a gesture (or blocked in the site's settings)
 is said once on the console with the fix. Ask from a click:
 
-```rust
-button { onclick: |_| aio::web::notify::request_permission(), "Enable alerts" }
+```rust,ignore
+// in a view (a wasm32 build):
+button { onclick: move |_| aio::web::notify::request_permission(), "Enable alerts" }
 ```
 
 A click on a notification brings the page forward and, with `route`, goes
