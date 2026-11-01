@@ -430,14 +430,7 @@ fn ws<T: Cell>(
                                 };
                                 let _heard = Heard::new(on_link, &user, &from);
                                 let who = format!("{user} from {from} (aio)");
-                                let listed = Listed::new(Client {
-                                    cell: T::ID,
-                                    user,
-                                    wire: "aio",
-                                    from,
-                                    since: crate::store::now_ms(),
-                                    rtt: None,
-                                });
+                                let listed = Listed::new(Client::new(T::ID, user, "aio", from));
                                 let link = (listed.0, who);
                                 crate::compat::wire::session(h, Sock::Ws(s), limits, gate, viewer, calls, link).await
                             };

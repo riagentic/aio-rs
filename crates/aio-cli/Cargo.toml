@@ -18,6 +18,8 @@ path = "src/main.rs"
 aio = { workspace = true, features = ["kit", "net"] }
 # `Config::parse` and `find`: aio.toml as `ax config`, `ax build` and `ax lint` read it.
 aio-config = { workspace = true, features = ["toml", "png"] }
+# `ax ui`'s Tasks: a project's cargo aliases (`.cargo/config.toml`), aio-config's own toml.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 # `ax ui --browser`: the manager served to the browser's tabs (`aio_shell::web`).
 aio-shell = { workspace = true, features = ["web"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }

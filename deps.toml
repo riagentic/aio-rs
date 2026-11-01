@@ -230,7 +230,7 @@ allow = [
     { crate = "tokio-stream", reason = "aio-rs-shell/core via dioxus-liveview" },
     { crate = "tokio-tungstenite", reason = "aio-rs/net: sync's WebSocket client; aio-rs-cli: ax shot (CDP)" },
     { crate = "tokio-util", reason = "aio-rs/core: the local door's frames (aio::door), the shell's pipes" },
-    { crate = "toml", reason = "aio-rs-config/toml: aio.toml parsed by aio::config!() as the app builds, and by aio's tools" },
+    { crate = "toml", reason = "aio-rs-config/toml: aio.toml parsed by aio::config!() as the app builds, and by aio's tools (ax ui: a project's cargo aliases)" },
     { crate = "toml_datetime", reason = "aio-rs-config/toml via toml" },
     { crate = "toml_parser", reason = "aio-rs-config/toml via toml" },
     { crate = "toml_writer", reason = "aio-rs-config/toml via toml" },
