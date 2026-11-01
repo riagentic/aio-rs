@@ -376,7 +376,7 @@ async fn the_operator_moves_loads_pauses_and_shapes_on_the_door_alone() {
     assert_eq!(t.ask(json!({ "t": "cost" })).await.unwrap()["pushes"], 0);
     let _ana = Remote::<Steps>::connect(&addr, "secret", "ana").await.unwrap();
     h.inc().unwrap();
-    let cost = || aio::cost::report("steps");
+    let cost = || aio::cost::report("steps", None);
     until("the patch is counted", || cost()["pushes"] == 2).await;
     let c = t.ask(json!({ "t": "cost" })).await.unwrap();
     assert_eq!((c["fullResends"].as_u64(), c["keys"][0]["key"].as_str()), (Some(1), Some("n")));
@@ -434,6 +434,16 @@ async fn a_tool_asks_what_a_caller_may_call_and_its_signatures() {
     );
     let admin = t.ask(json!({ "t": "peer", "user": "bo", "role": "admin" })).await.unwrap();
     assert_eq!(m(&admin, 0, "may"), "yes");
+    // Over the network (aio's `am peer <url>`): the key holder asks about
+    // itself; the user and role it claims in the ask are not taken.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(aio::sync::serve(h.clone(), l, "secret".into()));
+    let mut net = Live::connect(&Link { addr, token: "secret".into(), root: None }, "gated", "cy").await.unwrap();
+    let cy = net.ask(json!({ "t": "peer", "user": "bo", "role": "admin" })).await.unwrap();
+    assert_eq!(m(&cy, 1, "sig"), "add(by: u32, why: Option<String>) -> u32");
+    assert!(m(&cy, 0, "may").as_str().unwrap().contains("needs the role admin"), "never the claimed role: {cy}");
+    assert!(net.ask(json!({ "t": "fields" })).await.unwrap_err().to_string().contains("only on the app's local door"));
 }
 
 /// Only `a_tool_asks_which_fields_are_saved_and_which_are_sent` serves it.
@@ -473,4 +483,44 @@ async fn a_tool_asks_which_fields_are_saved_and_which_are_sent() {
         t.ask(json!({ "t": "fields" })).await.unwrap(),
         json!({ "persist": false, "transient": [], "server": [] })
     );
+}
+
+/// Only `the_operator_writes_now_and_drops_a_cell_nothing_declares` serves it.
+#[cell(persist, shared)]
+pub struct Kept {
+    pub n: u32,
+}
+
+#[methods]
+impl Kept {
+    pub fn inc(&mut self) {
+        self.n += 1;
+    }
+}
+
+/// aio's `am persist` and `am persist --drop`: the door writes what it
+/// holds now, and drops a stored cell this app doesn't declare, never its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operator_writes_now_and_drops_a_cell_nothing_declares() {
+    use serde_json::json;
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("state.db");
+    // A cell an older build stored, then no more.
+    let old = Handle::<Steps>::open(&file).unwrap();
+    old.inc().unwrap();
+    drop(old);
+    let h = Handle::<Kept>::open(&file).unwrap();
+    h.inc().unwrap();
+    let mut t = Live::connect(&door(&h, d.path(), "cell-kept"), "kept", "ops").await.unwrap();
+    assert!(t.ask(json!({ "t": "flush" })).await.unwrap().as_u64().is_some());
+    let rows = |cell: &str| {
+        let db = rusqlite::Connection::open(&file).unwrap();
+        db.query_row("SELECT COUNT(*) FROM log WHERE cell = ?1", [cell], |r| r.get::<_, i64>(0)).unwrap()
+    };
+    assert_eq!(rows("steps"), 1);
+    assert_eq!(t.ask(json!({ "t": "drop", "cell": "steps" })).await.unwrap(), true);
+    assert_eq!((rows("steps"), rows("kept")), (0, 1), "only the cell nothing declares");
+    assert_eq!(t.ask(json!({ "t": "drop", "cell": "steps" })).await.unwrap(), false, "gone already");
+    let e = t.ask(json!({ "t": "drop", "cell": "kept" })).await.unwrap_err();
+    assert!(e.to_string().contains("never dropped"), "{e}");
 }

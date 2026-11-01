@@ -438,6 +438,11 @@ pub(crate) fn watch(id: &'static str, withheld: bool, snap: impl Fn() -> Option<
     c.push((id, withheld, Box::new(snap)));
 }
 
+/// Whether `id` is a cell of this app's own (one [`watch`]ed).
+pub(crate) fn own(id: &str) -> bool {
+    CELLS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(i, ..)| *i == id)
+}
+
 /// A call ran, in `took`: the newest [`TIMELINE`] are kept in memory
 /// ([`timeline`]) and go in reports (no arguments: they may be anything the
 /// user typed).

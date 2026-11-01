@@ -707,13 +707,20 @@ pub(crate) async fn session<T: Cell>(
                         };
                         send_ax(&mut w, &reply).await?;
                     }
-                    // A loaded snapshot, the saved shape, diffs, cost, peer, fields: the operator's tools only.
-                    // What it may call is a peer's to ask too.
-                    Some(t @ ("load" | "shape" | "at" | "cost" | "peer" | "fields")) if !door && !(peer && t == "peer") => {
+                    // A loaded snapshot, the saved shape, diffs, cost, fields, writes: the operator's tools only.
+                    // What it may call is any caller's to ask, of itself (aio's `am peer <url>`).
+                    Some(t @ ("load" | "shape" | "at" | "cost" | "fields" | "flush" | "drop")) if !door => {
                         send_ax(&mut w, &json!({ "t": t, "err": not_here })).await?;
                     }
-                    Some(t @ ("load" | "shape" | "at" | "cost" | "peer" | "fields")) => {
-                        let (hh, by, ask) = (h.clone(), viewer.clone(), msg.clone());
+                    Some(t @ ("load" | "shape" | "at" | "cost" | "peer" | "fields" | "flush" | "drop")) => {
+                        let ask = match door {
+                            true => msg.clone(),
+                            false => {
+                                let me = if let By::User(u) = &seer.by { u.as_str() } else { "peer" };
+                                json!({ "t": "peer", "user": me, "role": seer.role })
+                            }
+                        };
+                        let (hh, by) = (h.clone(), viewer.clone());
                         let r = tokio::task::spawn_blocking(move || operate(&hh, &by, &ask))
                             .await
                             .map_err(|e| e.to_string())?;
@@ -769,7 +776,8 @@ pub(crate) fn fields<T: Cell>() -> Value {
 /// A local door's operator message `ask` on `h`, by `by`: `load` a state,
 /// the `shape` this version saves, the state right after an event (`at`, for diffs) or
 /// what the cell has sent its clients (`cost`), what a caller may call
-/// (`peer`), which fields are saved and which are sent (`fields`).
+/// (`peer`), which fields are saved and which are sent (`fields`), write
+/// what is held now (`flush`), `drop` a stored cell nothing declares.
 /// The answer, or why not.
 pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::result::Result<Value, String> {
     match ask["t"].as_str() {
@@ -778,7 +786,17 @@ pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::resu
             h.store(|s| s.load(by, ask["state"].clone())).map_err(|e| e.why)?;
             Ok(h.snapshot().0.into())
         }
-        Some("cost") => Ok(crate::cost::report(T::ID)),
+        Some("cost") => Ok(crate::cost::report(T::ID, ask["window"].as_i64())),
+        // `ax persist`: what is held (a coalesced run) written now.
+        Some("flush") => h.store(|s| s.flush()).map(|_| json!(h.snapshot().0)).map_err(|e| e.why),
+        // `ax persist --drop`: a stored cell no cell of this app declares.
+        Some("drop") => {
+            let cell = ask["cell"].as_str().ok_or("drop: `cell` names the stored cell")?;
+            if crate::report::own(cell) {
+                return Err(format!("{cell} is a cell of this app: only a cell no build declares is dropped"));
+            }
+            h.store(|s| s.drop_cell(cell)).map(Value::Bool).map_err(|e| e.0)
+        }
         Some("peer") => Ok(peer::<T>(&h.state(), ask)),
         Some("at") => {
             let at = ask["to"].as_u64().ok_or("at: `to` names an event (a number)")?;
