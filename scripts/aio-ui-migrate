@@ -34,6 +34,8 @@ TEXT = [
     (r"use dioxus::prelude::\*;", "use aio::ui::prelude::*;"),
     (r"[ \t]*use dioxus::prelude::(?:ReadableExt|WritableExt)(?: as _)?;\n", ""),
     (r"use dioxus::prelude::\{", "use aio::ui::prelude::{"),
+    (r"(?<=[{,]) ?(?:ReadableExt|WritableExt)(?: as _)?,", ""),
+    (r", ?(?:ReadableExt|WritableExt)(?: as _)?(?=\})", ""),
     (r"\bdioxus::prelude::(?=[A-Za-z_])", "aio::ui::prelude::"),
     (r"\bdioxus::(?:dioxus_)?core::provide_root_context\(", "aio::ui::provide_root("),
     (r"\bdioxus::(?:dioxus_)?core::(Task|spawn_forever|spawn)\b", r"aio::ui::\1"),
@@ -58,7 +60,7 @@ TEXT = [
     (r"\bGlobalSignal\b", "Global"),
     (r"\bSignal::global\(", "Global::new("),
     (r"\bMemo::global\(", "GlobalMemo::new("),
-    (r"(?<!instanceof )\bElement\b(?!\.)", "View"),
+    (r"(?<!instanceof )(?<![.\w])Element\b(?![.(])", "View"),
 ]
 
 
@@ -178,14 +180,16 @@ def compile_pass(root, args):
             if not spans or d["level"] not in ("error", "warning"):
                 continue
             s, code = spans[0], (d.get("code") or {}).get("code")
-            if (s["file_name"], s["byte_start"], d["message"]) in seen:
+            path = (root / s["file_name"]).resolve()
+            if (path, s["byte_start"], d["message"]) in seen:
                 continue
-            seen.add((s["file_name"], s["byte_start"], d["message"]))
-            if not fix(s, code, d["message"], edits):
+            seen.add((path, s["byte_start"], d["message"]))
+            # The app's own files only, never a dependency's (aio's included).
+            if not path.is_relative_to(root) or not fix(dict(s, file_name=str(path)), code, d["message"], edits):
                 left.append(f"{s['file_name']}:{s['line_start']}: {d['level']}: {d['message']}")
         n = 0
         for f, es in edits.items():
-            p = (root / f) if not pathlib.Path(f).is_absolute() else pathlib.Path(f)
+            p = pathlib.Path(f)
             b = p.read_bytes()
             for st, en, was, new in sorted(set(es), reverse=True):
                 if b[st:en] == was:
