@@ -24,6 +24,7 @@ pub const REDACTED: &str = "$redacted";
 pub const TX: &str = "$tx";
 
 mod tx;
+pub(crate) use tx::On as TxOn;
 
 /// One committed call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1342,8 +1343,8 @@ impl<T: Cell> Store<T> {
         let Some(op) = op else {
             let cx = Cx::live(now, by).with_role(role).with_reply(reply);
             let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
-            if T::TRANSACTION.is_some() {
-                self.tx_sweep();
+            if let Some(sweep) = tx::On::<T>::SWEEP {
+                sweep(self);
             }
             return out;
         };
@@ -1361,8 +1362,8 @@ impl<T: Cell> Store<T> {
         }
         let cx = Cx::synced(now, T::ID, by, &op).with_role(role).with_reply(reply);
         let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
-        if T::TRANSACTION.is_some() {
-            self.tx_sweep();
+        if let Some(sweep) = tx::On::<T>::SWEEP {
+            sweep(self);
         }
         out
     }
@@ -1427,8 +1428,10 @@ impl<T: Cell> Store<T> {
             crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", T::ID);
         }
         let base = method.split_once('.').map_or(method, |(m, _)| m);
-        if let (Some(cfg), Some(reply), Some(_)) = (T::TRANSACTION, cx.reply(), T::async_mode(base)) {
-            return self.tx_call(cfg, by, method, args, cx, reply, op);
+        if let (Some(call), Some(cfg), Some(_)) = (tx::On::<T>::CALL, T::TRANSACTION, T::async_mode(base))
+            && let Some(reply) = cx.reply()
+        {
+            return call(self, cfg, by, method, args, cx, reply, op);
         }
         let cx = cx.with_live(self.state.clone());
         let t0 = std::time::Instant::now();

@@ -118,11 +118,29 @@ fn overlaps(a: &[crate::patch::Step], b: &[crate::patch::Step]) -> bool {
     a.iter().zip(b).all(|(x, y)| x == y)
 }
 
+/// A part of a transaction ([`Store::tx_call`]).
+type Call<T> = fn(&mut Store<T>, crate::Transaction, &By, &str, Value, Cx, Reply, Option<&str>) -> Result<Value>;
+
+/// The transaction code of cell `T`, made only for a `#[cell(transaction)]`
+/// cell: every other cell's build holds none of it.
+pub(crate) struct On<T>(std::marker::PhantomData<T>);
+
+impl<T: Cell> On<T> {
+    pub(super) const CALL: Option<Call<T>> = match T::TRANSACTION {
+        Some(_) => Some(Store::<T>::tx_call),
+        None => None,
+    };
+    pub(crate) const SWEEP: Option<fn(&mut Store<T>) -> bool> = match T::TRANSACTION {
+        Some(_) => Some(Store::<T>::tx_sweep),
+        None => None,
+    };
+}
+
 impl<T: Cell> Store<T> {
     /// A part of a `#[cell(transaction)]` cell's async call (`method`,
     /// `method.N`) whose end goes to `reply` (see the module).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn tx_call(
+    fn tx_call(
         &mut self,
         cfg: crate::Transaction,
         by: &By,
@@ -279,7 +297,7 @@ impl<T: Cell> Store<T> {
     /// Calls whose replies nobody holds (their await aborted or cut off)
     /// dropped, with what they wrote; then the next serialized call's turn.
     /// Whether anything changed (effects may wait to be started).
-    pub(crate) fn tx_sweep(&mut self) -> bool {
+    fn tx_sweep(&mut self) -> bool {
         let gone: Vec<usize> = self.txs.open.iter().filter(|(_, t)| t.reply.strong_count() == 0).map(|(i, _)| *i).collect();
         let freed = self.txs.turn.is_some_and(|t| !self.txs.open.contains_key(&t) || gone.contains(&t));
         gone.iter().for_each(|i| _ = self.txs.open.remove(i));

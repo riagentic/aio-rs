@@ -412,7 +412,9 @@ impl<T: Cell> Handle<T> {
         }
         self.count_failures();
         // A transaction its aborts ended: the next serialized call's turn.
-        if T::TRANSACTION.is_some() && lock(&self.inner.store).tx_sweep() {
+        if let Some(sweep) = crate::store::TxOn::<T>::SWEEP
+            && sweep(&mut lock(&self.inner.store))
+        {
             self.after_commit(wake);
         }
     }
@@ -602,8 +604,8 @@ impl<T: Cell> Handle<T> {
         let (reply, answer) = match mode {
             Some(_) => {
                 let (r, a) = crate::answer::Reply::new(method);
-                if T::TRANSACTION.is_some() {
-                    self.on_gone(&r);
+                if let Some(gone) = Gone::<T>::ON {
+                    gone(self, &r);
                 }
                 (Some(r), Some(a))
             }
@@ -648,7 +650,7 @@ impl<T: Cell> Handle<T> {
             drop(rt.spawn_blocking(move || {
                 let Some(inner) = me.upgrade() else { return };
                 let h = Handle { inner, by: By::System };
-                if lock(&h.inner.store).tx_sweep() {
+                if crate::store::TxOn::<T>::SWEEP.is_some_and(|sweep| sweep(&mut lock(&h.inner.store))) {
                     h.after_commit(true);
                 }
             }));
@@ -1006,22 +1008,12 @@ impl<T: Cell> Handle<T> {
             return;
         }
         let dir = lock(&self.inner.dir).clone();
-        for d in due {
-            let (cell, method) = d.method.split_once(':').expect("cell:method");
-            let by = By::Schedule(d.key.clone());
-            match dir.as_ref().and_then(|dir| lock(&dir.0).get(cell).cloned()) {
-                Some(f) => {
-                    if let Err(e) = f(&by, method, d.args) {
-                        eprintln!("[aio] {}: schedule `{}` ({cell}.{method}) refused: {e}", T::ID, d.key);
-                    }
-                }
-                None => {
-                    let why = format!("{cell}.{method}: {cell} is not one of the app's cells");
-                    eprintln!("[aio] {}: schedule `{}`: {why}", T::ID, d.key);
-                    lock(&self.inner.store).failed(&by, &why);
-                    self.count_failures();
-                }
-            }
+        let failed = fire_on(T::ID, dir.as_ref(), due);
+        if !failed.is_empty() {
+            let mut s = lock(&self.inner.store);
+            failed.iter().for_each(|(by, why)| s.failed(by, why));
+            drop(s);
+            self.count_failures();
         }
     }
 
@@ -1058,6 +1050,39 @@ impl<T: Cell> Handle<T> {
             }
         })
     }
+}
+
+/// Call each of `cell`'s schedules due on another cell there; those on a
+/// cell `dir` doesn't hold, as `cell`'s failures.
+fn fire_on(cell: &str, dir: Option<&Dir>, due: Vec<crate::Due>) -> Vec<(By, String)> {
+    let mut failed = vec![];
+    for d in due {
+        let (other, method) = d.method.split_once(':').expect("cell:method");
+        let by = By::Schedule(d.key.clone());
+        match dir.and_then(|dir| lock(&dir.0).get(other).cloned()) {
+            Some(f) => {
+                if let Err(e) = f(&by, method, d.args) {
+                    eprintln!("[aio] {cell}: schedule `{}` ({other}.{method}) refused: {e}", d.key);
+                }
+            }
+            None => {
+                let why = format!("{other}.{method}: {other} is not one of the app's cells");
+                eprintln!("[aio] {cell}: schedule `{}`: {why}", d.key);
+                failed.push((by, why));
+            }
+        }
+    }
+    failed
+}
+
+/// [`Handle::on_gone`], made only for a `#[cell(transaction)]` cell.
+struct Gone<T>(std::marker::PhantomData<T>);
+
+impl<T: Cell> Gone<T> {
+    const ON: Option<fn(&Handle<T>, &crate::answer::Reply)> = match T::TRANSACTION {
+        Some(_) => Some(Handle::<T>::on_gone),
+        None => None,
+    };
 }
 
 /// Held by an effect's task and dropped when it ends, however it ends (a
