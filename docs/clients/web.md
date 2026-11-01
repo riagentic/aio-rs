@@ -252,12 +252,9 @@ A method's `cx.tell(Tell::Notify { .. })` shows in a web build as the
 browser's own notification, with the app's icon (`icon-192.png`). A
 browser grants notifications only from a user gesture: the first tell asks,
 and one refused for lack of a gesture (or blocked in the site's settings)
-is said once on the console with the fix. Ask from a click:
-
-```rust,ignore
-// in a view (a wasm32 build):
-button { onclick: move |_| aio::web::notify::request_permission(), "Enable alerts" }
-```
+is said once on the console with the fix: ask from a click, an "Enable
+alerts" button whose `onclick` calls `aio::web::notify::request_permission()`
+(a wasm32 build's).
 
 A click on a notification brings the page forward and, with `route`, goes
 there through `aio::web::notify::on_click(go)` (the app's `router!` `go`).
