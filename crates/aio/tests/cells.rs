@@ -130,9 +130,27 @@ impl Slow {
         self.done += 1;
     }
 
-    pub fn stall_soon(&mut self, cx: &Cx) -> Result {
-        cx.after("stall", 0, "block", (600,))
+    /// Block until the test opens `gate`: as long as it takes, not a guess.
+    pub fn hold(&mut self, gate: usize) {
+        let mut open = GATES.0.lock().unwrap();
+        while !open[gate] {
+            open = GATES.1.wait(open).unwrap();
+        }
+        self.done += 1;
     }
+
+    pub fn stall_soon(&mut self, cx: &Cx) -> Result {
+        cx.after("stall", 0, "hold", (1,))
+    }
+}
+
+/// Gates `Slow::hold` waits on, one per test.
+static GATES: (std::sync::Mutex<[bool; 2]>, std::sync::Condvar) =
+    (std::sync::Mutex::new([false; 2]), std::sync::Condvar::new());
+
+fn open(gate: usize) {
+    GATES.0.lock().unwrap()[gate] = true;
+    GATES.1.notify_all();
 }
 
 /// A source that never knows who listens (aio's `listensTo`'s case).
@@ -337,17 +355,26 @@ async fn a_blocking_cell_never_delays_another_cells_calls_or_schedules() {
     let _cells = Cells::default().with(slow.clone(), &[]).with(c.clone(), &[]).start().unwrap();
     c.start_ticking().unwrap();
     let s = slow.clone();
-    let blocked = tokio::task::spawn_blocking(move || s.block(600));
+    let blocked = tokio::task::spawn_blocking(move || s.hold(0));
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let t = Instant::now();
-    c.add(1).unwrap();
-    assert!(t.elapsed() < Duration::from_millis(100), "another cell's call runs at once");
+    let add = tokio::task::spawn_blocking({
+        let c = c.clone();
+        move || c.add(1)
+    });
+    // A hang guard: the slow call never ends until the gate opens.
+    tokio::time::timeout(Duration::from_secs(10), add)
+        .await
+        .expect("another cell's call runs at once")
+        .unwrap()
+        .unwrap();
     let ticks = c.state().ticks;
     until("its schedule ticks meanwhile", || c.state().ticks > ticks + 3).await;
     assert_eq!(slow.state().done, 0, "its call still runs, and its state stays readable");
     // Its own calls keep their order: the next one waits for the first.
     let s = slow.clone();
-    tokio::task::spawn_blocking(move || s.block(0)).await.unwrap().unwrap();
+    let next = tokio::task::spawn_blocking(move || s.block(0));
+    open(0);
+    next.await.unwrap().unwrap();
     blocked.await.unwrap().unwrap();
     assert_eq!(slow.state().done, 2);
 }
@@ -363,6 +390,7 @@ async fn a_blocking_schedule_never_stalls_the_runtime() {
     let ticks = c.state().ticks;
     until("ticks while the other cell's schedule blocks", || c.state().ticks > ticks + 3).await;
     assert_eq!(slow.state().done, 0, "its scheduled call still runs");
+    open(1);
     until("the slow call", || slow.state().done == 1).await;
 }
 
