@@ -105,7 +105,7 @@ pub fn verdict(f: &Facts) -> (Vec<String>, Vec<String>) {
     if let Some(rt) = f.runtime.as_deref().filter(|v| older(v, aio_shell::runtime::VERSION)) {
         found.push(format!(
             "its window runs Electron {rt}, older than the {} this aio-rs is tested with: build it with this \
-             aio-rs (ax framework {}, then build it again)",
+             aio-rs (ax pin {}, then build it again)",
             aio_shell::runtime::VERSION,
             env!("CARGO_PKG_VERSION")
         ));
