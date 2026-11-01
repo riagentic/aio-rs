@@ -58,8 +58,9 @@ pub fn desktop_entry(app: &App, exec: &str) -> String {
     )
 }
 
-/// `install.sh`: for this user only, into the XDG dirs. The binary goes in
-/// `aio-rt/install/<id>/versions/<version>/` with `current` pointing at it
+/// `install.sh`: for this user only, into the XDG dirs. The bundle goes
+/// whole in `aio-rt/install/<id>/versions/<version>/` (as an update stages
+/// one, so the first update can be a patch from it) with `current` pointing at it
 /// (how updates swap versions), `~/.local/bin/<id>` through `current`,
 /// and `installed.json` saying what and from where (`bundle`: its name).
 /// `menu`: and in the app menu, with its icon (a CLI is not). POSIX `sh`:
@@ -89,8 +90,9 @@ pub fn install_sh(app: &App, bundle: &str, menu: bool) -> String {
          bin=\"${{XDG_BIN_HOME:-$HOME/.local/bin}}\"\ndata=\"${{XDG_DATA_HOME:-$HOME/.local/share}}\"\n\
          home=\"$data/aio-rt/install/{id}\"\n\
          mkdir -p \"$bin\" \"$home/versions/{v}\"\n\
-         install -m 0755 \"$here/{id}\" \"$home/versions/{v}/{id}\"\n\
-         if [ -d \"$here/electron\" ]; then rm -rf \"$home/versions/{v}/electron\"; cp -R \"$here/electron\" \"$home/versions/{v}/electron\"; fi\n\
+         to=$(cd \"$home/versions/{v}\" && pwd)\n\
+         if [ \"$here\" != \"$to\" ]; then rm -rf \"$to\"; mkdir -p \"$to\"; cp -R \"$here/.\" \"$to/\"; fi\n\
+         chmod 0755 \"$to/{id}\"\n\
          rm -f \"$home/pending.json\" \"$home/first-boot\" \"$home/update-failed\"\n\
          ln -sfn \"versions/{v}\" \"$home/current\"\n\
          ln -sfn \"$home/current/{id}\" \"$bin/{id}\"\n\
@@ -1159,6 +1161,13 @@ mod tests {
         assert_eq!(std::fs::read_link(&bin).unwrap(), install.join("current/notes"));
         assert_eq!(Command::new(&bin).output().unwrap().stdout, b"hi\n");
         assert!(install.join("versions/1.2.0/electron/locales/en-US.pak").exists());
+        // The bundle whole, as an update stages one: what the first update patches.
+        assert!(
+            install.join("versions/1.2.0/notes.png").exists() && install.join("versions/1.2.0/install.sh").exists()
+        );
+        // Run again from that copy, it keeps it.
+        run(&install.join("versions/1.2.0"), "install.sh", &[]);
+        assert_eq!(Command::new(&bin).output().unwrap().stdout, b"hi\n");
         let rec: aio::serde_json::Value =
             aio::serde_json::from_slice(&std::fs::read(install.join("installed.json")).unwrap()).unwrap();
         assert_eq!(
