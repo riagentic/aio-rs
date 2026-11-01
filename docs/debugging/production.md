@@ -88,13 +88,15 @@ Every 10 s the app writes `data/health.json` (owner-only):
 A served app answers `GET /__aio/health` with the same document, made
 fresh, plus `cell` (`id`, `enabled`, `failures`), and `GET
 /__aio/metrics` in Prometheus' text format; both `Cache-Control:
-no-store`. Without `[accounts]` they answer anyone who reaches the port
-(they say how the app is, not what it holds); with accounts, only the
-app's key or a signed-in session.
+no-store`. They describe the app (its cells, sizes, clients, errors), so
+beyond this machine they need the app's key (`Authorization: Bearer`),
+a signed-in session or a user's token; on this machine (loopback, not
+relayed by a proxy) an app without accounts or users answers without
+one. `[server] open` opens them to anyone.
 
 ```sh
 ax health notes || systemctl restart notes   # a timer's check
-curl -s https://notes.example.org/__aio/health
+curl -s -H "Authorization: Bearer <key>" https://notes.example.org/__aio/health
 ```
 
 ### Parts of your own

@@ -265,6 +265,13 @@ pub struct Accounts {
     /// user is the session's.
     #[serde(default)]
     pub on: bool,
+    /// Sessions without accounts (aio's `sessions: true`): no users, no
+    /// login doors; the app issues sessions itself (`auth::serving()`'s
+    /// `issue`, say from a server fn that checked its own credential), and
+    /// a session token is that user on every door until it expires or is
+    /// revoked. `on` includes it.
+    #[serde(default)]
+    pub sessions: bool,
     /// Anyone may make an account (`POST /__aio/auth/signup`).
     #[serde(default)]
     pub signup: bool,
@@ -291,7 +298,14 @@ fn thirty_days() -> Duration {
 
 impl Default for Accounts {
     fn default() -> Self {
-        Self { on: false, signup: false, session: thirty_days(), max_sessions: ten(), require_verified: false }
+        Self {
+            on: false,
+            sessions: false,
+            signup: false,
+            session: thirty_days(),
+            max_sessions: ten(),
+            require_verified: false,
+        }
     }
 }
 
@@ -1416,7 +1430,12 @@ impl Config {
         if c.log.keep == 0 || c.log.file_mb == 0 {
             return Err("aio.toml: [log] keep and file_mb must be at least 1".into());
         }
-        if c.accounts.on {
+        if !c.accounts.on && c.accounts.sessions && (c.accounts.signup || c.accounts.require_verified) {
+            return Err(
+                "aio.toml: [accounts] signup and require_verified need accounts (on = true), not sessions alone".into(),
+            );
+        }
+        if c.accounts.on || c.accounts.sessions {
             let p = c.accounts.policy();
             if !(1..=crate::auth::MAX_TTL_MS).contains(&p.ttl_ms) {
                 return Err("aio.toml: [accounts] session must be 1s to 100 years".into());
@@ -1425,8 +1444,8 @@ impl Config {
                 return Err("aio.toml: [accounts] max_sessions must be at least 1".into());
             }
         }
-        if c.server.open && c.accounts.on {
-            return Err("aio.toml: [server] open and [accounts] on both say who gets in: give one".into());
+        if c.server.open && (c.accounts.on || c.accounts.sessions) {
+            return Err("aio.toml: [server] open and [accounts] both say who gets in: give one".into());
         }
         // A name no request can carry would trust nothing, silently.
         if let Some(h) = &c.server.trust_proxy

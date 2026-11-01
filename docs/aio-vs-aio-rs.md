@@ -207,11 +207,8 @@ beyond the aio-rs form.
 | Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
-| Auth | sessions without accounts | sessions come with `[accounts]` | `aio::auth::serving()`, `issue(user, role)` | [accounts](auth/README.md#limits) |
-| Auth | `--tls-cert`, `--tls-key`, `--no-tls` | `[server] cert`, `key`; `tls = false` | `aio.toml` | [accounts](auth/README.md#limits) |
-| Auth | a share link printed at boot | none | `ax profile`, pairing | [accounts](auth/README.md#limits) |
+| Auth | a share link carrying the key | the share line names the key file | `?token=<key>` by hand, `ax profile`, pairing | [accounts](auth/README.md#limits) |
 | Auth | `useUser()` | `Client::me`, `SignIn`'s `on_signed` | ➖ | [accounts](auth/README.md#limits) |
-| Auth | a `firewall:` line at boot | none | allow the app in the OS firewall | [setup](basics/setup.md) |
 | Views | server rendering, hydration, `collectHead` | none | `ax preview --html`; `aio::head::html` | [views](ui/views.md#gaps-against-aio), [islands](ui/islands.md#gaps) |
 | Views | code splitting, `lazy` | one binary | `Defer` defers the render | [islands](ui/islands.md#gaps) |
 | Views | other view libraries (`aio/state-core`), `h()`, React compat | `aio::ui` `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
@@ -426,12 +423,14 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Accounts, roles, TOTP, OIDC | `auth`, `sessions` | `[accounts]` | ✅ |
-| Sessions without accounts | yes | ❌ (`auth::serving()`, `issue`) | ❌ |
-| TLS | `--tls-cert`/`--tls-key`, own LAN CA | `[server] cert`/`key`, a machine root for the LAN | 🔄 |
+| Sessions without accounts | `sessions: true` | `[accounts] sessions`, `auth::serving()`'s `issue` | ✅ |
+| Users tokens re-checked on open sockets | every 5 s | every 5 s, and at once on a revoke | ✅ |
+| TLS | `--tls-cert`/`--tls-key`, `--no-tls`, own LAN CA | the same flags, `[server] cert`/`key`, a machine root for the LAN | ✅ |
+| Health and metrics beyond loopback | open without a key | a credential, always (fail closed) | ➕ |
 | Security headers | yes | `[server.security]` | ✅ |
 | Origins, proxies | `allowedOrigins`, `trustProxyHeader` | `[server] hosts`, `trust_proxy` | ✅ |
 | CORS, passkeys | none | none | ✅ |
-| Share link at boot, firewall line | yes | ❌ (`ax profile`, pairing) | ❌ |
+| Share link at boot, firewall line | yes | `share:` (names the key file) and `firewall:` lines | ✅ |
 | Outbound network list | `nativeFetch` | `[capabilities] network` | ✅ |
 | Secrets in logs | `redactActions` | `#[redact]`, masked logs | ✅ |
 

@@ -9,6 +9,20 @@ version may break things.
 
 ### Added
 
+- **Sessions without accounts** (aio's `sessions: true`): `[accounts]
+  sessions = true` keeps the session store with no users and no login
+  doors; the app issues sessions (`auth::serving()`'s `issue`), and a
+  session is that user on every door (`Users::sessions`, composing with
+  `Http::users`).
+- **A user's token is re-checked on its open socket** (aio's
+  `users:`/`resolveUser` re-check): every 5 s and at once on a revoke; one
+  no longer resolved (or a panicking resolver, or a changed role) closes
+  the socket; a resolver slower than 3 s keeps the last verdict.
+- `--tls-cert`, `--tls-key` and `--no-tls` launch flags (aio's), over
+  `[server] cert`, `key` and `tls`.
+- An exposed boot prints a `share:` line (the address at this machine's
+  LAN IP and what a caller shows; the key file, never the key) and, on
+  Windows and macOS, a `firewall:` line (aio's).
 - **Async methods answer their caller** (aio's `await cell.method()`): a
   typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
   await is the value its last part returned or the refusal that ended it
@@ -156,6 +170,11 @@ version may break things.
   `peer` of itself (its own user and role, never a claimed one).
 ### Changed
 
+- **Fail closed**: `/__aio/health` and `/__aio/metrics` need the key, a
+  session or a user's token beyond this machine, also without accounts
+  (they answered anyone before); on loopback they stay open on an app
+  without accounts or users, and `[server] open` opens them. Every
+  endpoint and its default: [accounts](docs/auth/README.md#every-endpoint-and-what-opens-it).
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
   they did; `[app] tz = "local"` reads this machine's local time (the
   0.1.0 behaviour).
