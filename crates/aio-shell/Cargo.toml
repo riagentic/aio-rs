@@ -30,7 +30,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Unpacks the runtime's archive: inflate only (the CLI writes archives).
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Delta updates: a release made from the version installed (`delta`).
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "macros", "fs", "io-util", "sync", "signal", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
