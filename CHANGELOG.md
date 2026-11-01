@@ -90,6 +90,9 @@ version may break things.
 - `aio::testing::TestBrowser` starts one browser at a time per process
   (started together, eight took 22 s each on an 8-core Windows, one 0.5 s)
   and reads its DevTools port only once `DevToolsActivePort` is whole.
+- `aio::testing::TestUi` counts every render (`components()`) when tests
+  run in parallel: a render callsite another thread registered at the same
+  moment could be cached as of no interest, and its renders went uncounted.
 - The test suite holds under load: timing tests wait on what they check
   (a condition, a gate the test opens, a page-side record of each style)
   instead of a fixed sleep or a wall-clock window; bounds on time are hang
