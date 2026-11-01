@@ -162,16 +162,17 @@ router at hand.
 ### The app's icon
 
 Every window app has its icon at run time, in a dev build and an installed
-one: `aio::config!()` builds in `assets/icon.png` beside `aio.toml`, else
-the app's monogram (its name's first letter, deep on a pastel gradient,
-aio's generated icon) in the app's hue (`Config::hue`: `[ui] hue`, else its
-id's), the one its page, splash and download window share.
-`Window::of(&cfg)` wears it: the title bar, the taskbar and Alt-Tab, the
-tray, notifications, the window bundle in the macOS Dock, the download
-window (Windows, macOS, GTK) and a browser tab's favicon. A `Window` with
-no `icon` shows Electron's, and the log says so once. A first
-`assets/icon.png` is built in the next time the crate compiles (an edit,
-or `cargo clean -p <app>`); a changed one is noticed by itself.
+one: `aio::config!()` builds in `assets/icon.png` beside `aio.toml` and
+`Window::of(&cfg)` wears it; a `Window` with no icon wears the app's
+monogram (its name's first letter, deep on a pastel gradient, aio's
+generated icon), drawn by the shell once and kept while its letter and hue
+stay, in the app's hue (`Config::hue`: `[ui] hue`, else its id's), the one
+its page, splash and download window share. It is on the title bar, the
+taskbar and Alt-Tab, the tray, notifications, the window bundle in the
+macOS Dock, the download window (Windows, macOS, GTK) and a browser tab's
+favicon. A first `assets/icon.png` is built in the next time the crate
+compiles (an edit, or `cargo clean -p <app>`); a changed one is noticed by
+itself.
 
 ### Changing the icon
 

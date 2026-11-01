@@ -10,10 +10,10 @@ version may break things.
 ### Added
 
 - Every window app has its icon at run time, dev and installed: `aio::config!()`
-  builds in `assets/icon.png`, else the app's monogram (aio's generated icon,
-  now `aio::icon`), and `Window::of` wears it on the title bar, taskbar,
-  Alt-Tab, tray, notifications, the macOS Dock, the download window and a
-  browser tab's favicon. A `Window` with no icon is said in the log.
+  builds in `assets/icon.png` and `Window::of` wears it; a window with none
+  wears the app's monogram (aio's generated icon, now `aio::icon`). It is on
+  the title bar, taskbar, Alt-Tab, tray, notifications, the macOS Dock, the
+  download window and a browser tab's favicon.
 - `Config::hue()` and `aio::hue!()`: the app's one hue (`[ui] hue`, else its
   id's) for its page, icon, splash and download window; the template's page
   takes it.

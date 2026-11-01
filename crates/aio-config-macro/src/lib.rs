@@ -25,17 +25,10 @@ pub fn config(input: TokenStream) -> TokenStream {
                 s.png = include_bytes!(#png);
             })
         });
-        let icon = match icon {
-            Icon::None => None,
-            Icon::File(p) => {
-                let p = p.to_string_lossy().into_owned();
-                Some(quote::quote!(c.app.icon = include_bytes!(#p);))
-            }
-            Icon::Drawn(png) => {
-                let png = Literal::byte_string(&png);
-                Some(quote::quote!(c.app.icon = #png;))
-            }
-        };
+        let icon = icon.map(|p| {
+            let p = p.to_string_lossy().into_owned();
+            quote::quote!(c.app.icon = include_bytes!(#p);)
+        });
         Ok(quote::quote!({
             const _: &str = include_str!(#file);
             #[allow(unused_mut)]
@@ -82,28 +75,15 @@ fn asked(input: TokenStream) -> syn::Result<Option<String>> {
     }
 }
 
-/// The window's icon, as `config!` builds it in.
-#[derive(Debug, PartialEq)]
-enum Icon {
-    /// A CLI or a server: no window.
-    None,
-    /// `assets/icon.png`.
-    File(PathBuf),
-    /// The monogram, as a PNG.
-    Drawn(Vec<u8>),
-}
-
 /// What `config!` builds in.
 struct Read {
     file: PathBuf,
     config: Config,
     splash: Option<PathBuf>,
-    icon: Icon,
+    /// The window's icon, `assets/icon.png` (none: a CLI, a server, or the
+    /// monogram the shell draws).
+    icon: Option<PathBuf>,
 }
-
-/// The monogram's edge: the largest a window or a tray shows (Electron's
-/// icons are fitted to 256), as aio draws it for its window.
-const DRAWN_PX: u32 = 256;
 
 /// The config file for a crate in `dir` (`asked`: from there), parsed and
 /// checked; else what is wrong, as `aio::config::build` said it.
@@ -132,22 +112,22 @@ fn read(dir: &Path, asked: Option<&str>) -> Result<Read, String> {
     }
     let own = at.join("assets/icon.png");
     let icon = match c.app.mode {
-        Mode::Cli | Mode::Server => Icon::None,
+        Mode::Cli | Mode::Server => None,
         _ if own.is_file() => {
             let png = std::fs::read(&own).map_err(|e| format!("{}: {e}", own.display()))?;
             if aio_config::icon::png_size(&png).is_none() {
                 return Err(format!("{}: not a PNG (the window's icon is a PNG)", own.display()));
             }
-            Icon::File(own)
+            Some(own)
         }
-        _ => Icon::Drawn(aio_config::icon::icon_png(c.app.label(), c.hue(), DRAWN_PX)),
+        _ => None,
     };
     Ok(Read { file, config: c, splash, icon })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Icon, read};
+    use super::read;
 
     #[test]
     fn the_nearest_aio_toml_is_read_and_a_mistake_is_said_as_the_build_said_it() {
@@ -180,27 +160,21 @@ mod tests {
     }
 
     #[test]
-    fn a_window_app_always_has_its_icon_its_own_or_its_monogram_in_its_hue() {
-        use aio_config::icon::{hue, icon_png, png_size};
+    fn a_window_apps_own_icon_is_built_in_by_path() {
         let d = std::env::temp_dir().join(format!("aio-config-macro-icon-{}", std::process::id()));
         std::fs::create_dir_all(d.join("assets")).unwrap();
         let icon = |toml: &str| {
             std::fs::write(d.join("aio.toml"), toml).unwrap();
             read(&d, None).map(|r| r.icon)
         };
-        // None drawn: the monogram of the app's name, in its id's hue, at 256.
-        let drawn = icon("[app]\nid = \"notes\"\nname = \"My Notes\"\n").unwrap();
-        assert_eq!(drawn, Icon::Drawn(icon_png("My Notes", hue("notes"), 256)));
-        let Icon::Drawn(png) = &drawn else { unreachable!() };
-        assert_eq!(png_size(png), Some((256, 256)));
-        // `[ui] hue` is the icon's too: page, icon and splash, one colour.
-        let tinted = icon("[app]\nid = \"notes\"\n[ui]\nhue = 210\n").unwrap();
-        assert_eq!(tinted, Icon::Drawn(icon_png("notes", 210, 256)));
-        // No window, no icon.
-        assert_eq!(icon("[app]\nid = \"notes\"\nmode = \"cli\"\n").unwrap(), Icon::None);
+        // None: the shell draws the monogram.
+        assert_eq!(icon("[app]\nid = \"notes\"\n").unwrap(), None);
         // Its own, by path (cargo then rebuilds when it changes); a non-PNG is refused.
-        std::fs::write(d.join("assets/icon.png"), icon_png("x", 1, 8)).unwrap();
-        assert_eq!(icon("[app]\nid = \"notes\"\n").unwrap(), Icon::File(d.join("assets/icon.png")));
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x08\0\0\0\x08";
+        std::fs::write(d.join("assets/icon.png"), png).unwrap();
+        assert_eq!(icon("[app]\nid = \"notes\"\n").unwrap(), Some(d.join("assets/icon.png")));
+        // No window, no icon.
+        assert_eq!(icon("[app]\nid = \"notes\"\nmode = \"cli\"\n").unwrap(), None);
         std::fs::write(d.join("assets/icon.png"), b"<svg/>").unwrap();
         assert!(icon("[app]\nid = \"notes\"\n").unwrap_err().ends_with("not a PNG (the window's icon is a PNG)"));
         std::fs::remove_dir_all(&d).unwrap();

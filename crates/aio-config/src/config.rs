@@ -53,9 +53,9 @@ pub struct App {
     /// The page's direction, `<html dir>`. Never guessed from `lang`.
     #[serde(default)]
     pub dir: Dir,
-    /// The window's, taskbar's, tray's and notifications' icon, a PNG put in
-    /// by `aio::config!()`: `assets/icon.png` beside `aio.toml`, else the
-    /// monogram (`aio::icon`) in the app's hue; empty elsewhere.
+    /// The window's own icon, `assets/icon.png` beside `aio.toml`, put in
+    /// by `aio::config!()`; empty: none (the desktop shell then draws the
+    /// monogram, `aio::icon`, in the app's hue).
     #[serde(skip)]
     pub icon: &'static [u8],
 }

@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 base64 = "0.23"
 # The parser: in `aio::config!()` (the build's host) and aio's tools, never in an app.
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"], optional = true }
-# PNG writing: in `aio::config!()` (the monogram it builds in) and `ax`, never in an app.
+# PNG writing: the desktop shell's monogram and `ax`; never in a web build.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"], optional = true }
 
 [features]

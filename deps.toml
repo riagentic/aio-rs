@@ -86,7 +86,7 @@ allow = [
     { crate = "fdeflate", reason = "aio-rs-cli/core via image" },
     { crate = "fiat-crypto", reason = "aio-rs/tls via curve25519-dalek" },
     { crate = "find-msvc-tools", reason = "aio-rs/core via ring" },
-    { crate = "flate2", reason = "aio-rs/server: gzip answers; aio-rs-config/png: PNG writing (aio::config!, ax); on zlib-rs, the backend zip already needs" },
+    { crate = "flate2", reason = "aio-rs/server: gzip answers; aio-rs-config/png: PNG writing (the shell's monogram, ax); on zlib-rs, the backend zip already needs" },
     { crate = "fnv", reason = "aio-rs-shell/core via dioxus-document" },
     { crate = "futures-channel", reason = "aio-rs-shell/core via dioxus-core" },
     { crate = "futures-core", reason = "aio-rs/core via futures-util" },
