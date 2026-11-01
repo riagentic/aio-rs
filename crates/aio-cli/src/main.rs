@@ -237,9 +237,11 @@ fn events(db: &Connection, cell: Option<&str>, last: u32, json: bool, diff: &Dif
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?);
             let args: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::Value::String(args));
             // A `#[redact]` call: what is logged is the state it made, never shown here.
-            let args = match args.get(aio::REDACTED).is_some() {
-                true => serde_json::Value::String("[redacted]".into()),
-                false => args,
+            let args = match (args.get(aio::REDACTED).is_some(), args.get(aio::TX)) {
+                (true, _) => serde_json::Value::String("[redacted]".into()),
+                // A transaction: logged with the state it left; its call's arguments shown.
+                (false, Some(_)) => args["args"].clone(),
+                (false, None) => args,
             };
             let changes = diff(seq);
             Ok(match json {

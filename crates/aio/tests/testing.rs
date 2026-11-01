@@ -781,3 +781,91 @@ fn a_fuzz_over_the_methods_finds_the_panic() {
         t.fuzz_methods(&a, seed, 40, &[], |_| true);
     }
 }
+
+/// aio's `schedule.after(id, ms, other.method.action())`: a schedule one cell
+/// sets fires a method of another.
+#[cell]
+pub struct Drafts {
+    pub text: String,
+}
+
+#[methods]
+impl Drafts {
+    pub fn edit(&mut self, cx: &Cx, text: String) -> Result {
+        self.text = text.clone();
+        cx.on::<Archive>().after("autosave", 3_000, "save", (text,))
+    }
+
+    pub fn stop(&mut self, cx: &Cx) {
+        cx.cancel("autosave");
+    }
+
+    pub fn typo(&mut self, cx: &Cx) -> Result {
+        cx.on::<Archive>().after("x", 1, "sav", ())
+    }
+
+    pub fn hourly(&mut self, cx: &Cx) -> Result {
+        cx.on::<Archive>().every("tick", 1_000, "tick", ())
+    }
+}
+
+#[cell]
+pub struct Archive {
+    pub saved: Vec<String>,
+    pub ticks: u32,
+}
+
+#[methods]
+impl Archive {
+    pub fn save(&mut self, cx: &Cx, text: String) -> Result {
+        ensure!(!text.is_empty(), "nothing to save");
+        assert_eq!(cx.by(), &By::Schedule("autosave".into()));
+        self.saved.push(text);
+        Ok(())
+    }
+
+    pub fn tick(&mut self) {
+        self.ticks += 1;
+    }
+}
+
+#[test]
+fn a_schedule_fires_another_cells_method() {
+    let mut t = TestCells::new();
+    let (d, a) = (t.cell::<Drafts>(), t.cell::<Archive>());
+    d.edit("one".into()).unwrap();
+    d.edit("two".into()).unwrap(); // the same key replaces: a debounce
+    t.advance(2_999);
+    assert!(a.state().saved.is_empty());
+    t.advance(1);
+    assert_eq!(a.state().saved, ["two"]);
+    t.advance(10_000);
+    assert_eq!(a.state().saved, ["two"], "once");
+    // Cancelled with the cell's own schedules.
+    d.edit("three".into()).unwrap();
+    d.stop().unwrap();
+    t.advance(5_000);
+    assert_eq!(a.state().saved, ["two"]);
+    // A repeat, re-armed each time.
+    d.hourly().unwrap();
+    t.advance(1_000);
+    t.advance(1_000);
+    assert_eq!(a.state().ticks, 2);
+    // A typo refuses the call that sets it; a refusal where it fires is the schedule's failure.
+    let e = d.typo().unwrap_err();
+    assert!(e.why.contains("archive has no method `sav`"), "{e}");
+    d.edit(String::new()).unwrap();
+    t.advance(3_000);
+    let f = t.failures();
+    assert_eq!(f, ["Archive.save: nothing to save (schedule `autosave`)"], "the cell that refused it");
+}
+
+#[test]
+fn a_schedule_on_a_cell_the_app_doesnt_hold_is_a_failure() {
+    let mut t = TestCells::new();
+    let d = t.cell::<Drafts>();
+    d.edit("x".into()).unwrap();
+    t.advance(3_000);
+    let f = t.failures();
+    assert!(f.iter().any(|f| f.contains("archive is not one of the app's cells")), "{f:?}");
+}

@@ -178,6 +178,7 @@ impl<T: Cell> Booted for Handle<T> {
     fn fire_due(&self, now: i64) {
         self.store(|s| s.fire_due_but(now, |d| self.skips(d)))
             .unwrap_or_else(|e| panic!("{}: schedules: {e}", name::<T>()));
+        self.fire_foreign();
     }
 
     fn failed(&self) -> Vec<String> {
@@ -206,6 +207,8 @@ impl<T: Cell> Booted for Handle<T> {
 pub struct TestCells {
     rt: tokio::runtime::Runtime,
     cells: Vec<Box<dyn Booted>>,
+    /// Its cells by id, for the schedules one sets on another.
+    dir: crate::handle::Dir,
     /// The cells' clock: the wall clock at the start, then moved only by `advance`.
     clock: std::sync::Arc<std::sync::atomic::AtomicI64>,
     /// The tokio instant and the schedule clock at the start: tokio's virtual
@@ -231,6 +234,7 @@ impl TestCells {
         Self {
             rt,
             cells: vec![],
+            dir: Default::default(),
             clock,
             epoch: (start, at),
             _sandbox: crate::paths::sandbox().expect("a test sandbox"),
@@ -312,6 +316,7 @@ impl TestCells {
         let h = Handle::new(store).by(By::Test);
         h.hold();
         _ = h.live(true);
+        h.join(&self.dir);
         self.cells.push(Box::new(h.clone()));
         h
     }

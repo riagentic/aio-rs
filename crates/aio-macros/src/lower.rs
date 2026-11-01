@@ -517,7 +517,7 @@ impl Lower {
         Ok(quote! {
             let __aio_io = #io;
             let __aio_reply = #cx.reply();
-            #cx.run(::aio::Effect::new(&__aio_key, move |__aio_h: ::aio::Handle<Self>| async move {
+            #cx.then(::aio::Effect::new(&__aio_key, move |__aio_h: ::aio::Handle<Self>| async move {
                 #recv
                 ::aio::step(&__aio_h, #step, ::aio::json(&(#(#names,)*)), __aio_reply);
             })#mode #ceiling);
