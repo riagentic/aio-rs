@@ -119,8 +119,8 @@ pub async fn sign_out() {
 /// accounts). A hook.
 #[cfg(all(target_arch = "wasm32", feature = "kit"))]
 pub fn use_user() -> Option<Option<(String, String)>> {
-    let me = dioxus::prelude::use_resource(|| async { client().me(None).await.ok().and_then(|m| m.user) });
-    me()
+    let me = crate::ui::resource(|| async { client().me(None).await.ok().and_then(|m| m.user) });
+    me.get()
 }
 
 /// The page's `localStorage` as a [`storage::Kv`]: none in a context that
@@ -172,7 +172,7 @@ impl storage::Kv for Local {
 /// wrong nodes or on none, and the next edit throws in the interpreter;
 /// it also needs dioxus-fullstack's serialized hydration data in the page.
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
-pub fn launch(root: fn() -> dioxus_core::Element) {
+pub fn launch(root: fn() -> crate::ui::View) {
     use dioxus_core::VirtualDom;
     // The copies are open now: what no copy syncs is said.
     let open = SYNCING.with_borrow(Clone::clone);

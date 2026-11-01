@@ -74,7 +74,7 @@ pub fn test(krate: &str, root: &str, modules: &[String]) -> String {
          }}\n\n\
          /// Cell `T`'s live copy, over the running app's local door.\n\
          fn live<T: aio::Cell>(\n    \
-         _: &dioxus::prelude::GlobalSignal<aio::Source<T>>,\n    \
+         _: &aio::ui::Global<aio::Source<T>>,\n    \
          app: &str,\n    \
          data: &str,\n    \
          user: &str,\n\
@@ -146,7 +146,7 @@ mod written;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use dioxus::prelude::*;
+    use aio::ui::prelude::*;
 
     #[aio::cell(shared, id = "shelf")]
     pub struct Shelf {
@@ -163,7 +163,7 @@ pub(crate) mod tests {
     aio::client!(Shelf, shelf);
 
     #[allow(non_snake_case)]
-    pub fn Books() -> Element {
+    pub fn Books() -> View {
         use_live();
         let s = shelf();
         rsx! {

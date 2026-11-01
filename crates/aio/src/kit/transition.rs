@@ -4,7 +4,7 @@
 //! slides the rows that moved from where they were (FLIP). The list
 //! bookkeeping is pure, for tests without a clock.
 use super::join;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -59,12 +59,12 @@ pub fn Transition(
     exit: Option<Motion>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     // (shown last render, leaving since run, runs so far): a show again cancels a leave's end.
-    let state = use_hook(|| Rc::new(Cell::new((show, None::<u64>, 0u64))));
-    let mut tick = use_signal(|| 0u64);
-    _ = tick();
+    let state = once(|| Rc::new(Cell::new((show, None::<u64>, 0u64))));
+    let mut tick = signal(|| 0u64);
+    _ = tick.get();
     let (was, mut leaving, mut runs) = state.get();
     if was
         && !show
@@ -126,14 +126,14 @@ pub fn moved<K: Eq + std::hash::Hash + Clone>(
 }
 
 /// One row's box and handle.
-type Rows = Rc<RefCell<HashMap<String, (Element, Option<Rc<MountedData>>)>>>;
+type Rows = Rc<RefCell<HashMap<String, (View, Option<Rc<MountedData>>)>>>;
 
 /// A keyed list whose rows animate as they come and go (aio
 /// `TransitionGroup`); with `flip`, rows that moved slide from where they
 /// were over `flip_ms`. Each row sits in a box of its own (`row_class`).
 #[component]
 pub fn TransitionGroup(
-    items: Vec<(String, Element)>,
+    items: Vec<(String, View)>,
     enter: Option<Motion>,
     exit: Option<Motion>,
     #[props(default)] flip: bool,
@@ -141,16 +141,16 @@ pub fn TransitionGroup(
     #[props(default, into)] class: String,
     #[props(default, into)] row_class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
-    let drawn = use_hook(|| Rc::new(RefCell::new(Vec::<(String, bool)>::new())));
+) -> View {
+    let drawn = once(|| Rc::new(RefCell::new(Vec::<(String, bool)>::new())));
     // Leaving rows whose exit is over.
-    let gone = use_hook(|| Rc::new(RefCell::new(HashSet::<String>::new())));
-    let rows: Rows = use_hook(Rows::default);
+    let gone = once(|| Rc::new(RefCell::new(HashSet::<String>::new())));
+    let rows: Rows = once(Rows::default);
     // Where each row was last laid out, and the slide each one is making now.
-    let at = use_hook(|| Rc::new(RefCell::new(HashMap::<String, (f64, f64)>::new())));
-    let mut slide = use_signal(HashMap::<String, ((f64, f64), bool)>::new);
-    let mut tick = use_signal(|| 0u64);
-    _ = tick();
+    let at = once(|| Rc::new(RefCell::new(HashMap::<String, (f64, f64)>::new())));
+    let slide = signal(HashMap::<String, ((f64, f64), bool)>::new);
+    let mut tick = signal(|| 0u64);
+    _ = tick.get();
     let keys: Vec<String> = items.iter().map(|(k, _)| k.clone()).collect();
     let before = drawn.borrow().clone();
     let mut now = merge_rows(&before, &keys);
@@ -211,11 +211,11 @@ pub fn TransitionGroup(
         });
     }
     *drawn.borrow_mut() = now.clone();
-    let shown: Vec<(String, bool, Element)> = {
+    let shown: Vec<(String, bool, View)> = {
         let rs = rows.borrow();
         now.iter().filter_map(|(k, out)| Some((k.clone(), *out, rs.get(k)?.0.clone()))).collect()
     };
-    let slides = slide();
+    let slides = slide.get();
     rsx! {
         div { class: join("aio-tgroup", &class), ..attributes,
             for (k, out, el) in shown {

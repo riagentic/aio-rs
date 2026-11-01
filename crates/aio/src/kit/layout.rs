@@ -1,17 +1,17 @@
 //! Surfaces, layout and data (aio's `Card`, `Stack`, `Row`, `Spinner`, `Avatar`,
 //! `Pagination`, `Table`).
 use super::{flag, join};
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 
 /// A bordered surface with an optional title and footer.
 #[component]
 pub fn Card(
-    title: Option<Element>,
-    footer: Option<Element>,
+    title: Option<View>,
+    footer: Option<View>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     rsx! {
         div { class: join("aio-card", &class), ..attributes,
             if let Some(t) = title {
@@ -39,8 +39,8 @@ pub fn Stack(
     #[props(default, into)] align: String,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     rsx! {
         div { class: join("aio-stack", &class), style: flex(false, &gap, &align), ..attributes, {children} }
     }
@@ -53,8 +53,8 @@ pub fn Row(
     #[props(default, into)] align: String,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
+    children: View,
+) -> View {
     rsx! {
         div { class: join("aio-stack", &class), style: flex(true, &gap, &align), ..attributes, {children} }
     }
@@ -66,7 +66,7 @@ pub fn Spinner(
     #[props(default = String::from("Loading"), into)] label: String,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     rsx! {
         span { class: join("aio-spinner", &class), role: "status", "aria-label": label, ..attributes }
     }
@@ -102,7 +102,7 @@ pub fn Avatar(
     color: Option<String>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let bg = color.unwrap_or_else(|| format!("hsl({}, 55%, 45%)", avatar_hue(&name)));
     let font = (f64::from(size) * 0.4).round();
     rsx! {
@@ -145,7 +145,7 @@ pub fn Pagination(
     #[props(default = String::from("Pagination"), into)] label: String,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let clamp = |p: u32| p.clamp(1, pages.max(1));
     let (prev, next) = (clamp(page.saturating_sub(1)), clamp(page + 1));
     let go = move |p: u32| {
@@ -190,7 +190,7 @@ pub enum Align {
 #[derive(Clone, PartialEq)]
 pub struct Column<R: 'static> {
     pub header: String,
-    pub cell: Callback<(R, usize), Element>,
+    pub cell: Callback<(R, usize), View>,
     pub align: Align,
     /// Any CSS width.
     pub width: Option<String>,
@@ -203,7 +203,7 @@ impl<R: 'static> Column<R> {
     }
 
     /// A column of anything (`f` gets the row and its index).
-    pub fn view(header: impl Into<String>, f: impl Fn(&R, usize) -> Element + 'static) -> Self {
+    pub fn view(header: impl Into<String>, f: impl Fn(&R, usize) -> View + 'static) -> Self {
         Self { header: header.into(), cell: Callback::new(move |(r, i)| f(&r, i)), align: Align::Start, width: None }
     }
 
@@ -238,11 +238,11 @@ pub fn Table<R: Clone + PartialEq + 'static>(
     key_of: Option<Callback<R, String>>,
     /// Shown when there are no rows.
     #[props(default = rsx! { "No rows" })]
-    empty: Element,
+    empty: View,
     onrow: Option<EventHandler<(R, usize)>>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     let span = columns.len().max(1);
     rsx! {
         table { class: join("aio-table", &class), ..attributes,

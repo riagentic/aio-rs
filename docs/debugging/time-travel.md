@@ -154,7 +154,7 @@ Undo, Redo, Pause or Resume, and the newest steps (a click goes there).
 ```rust
 use aio::act;
 use aio::kit::{GlobalKeys, TimeTravelPanel};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "counter")]
 pub struct Counter {
@@ -171,7 +171,7 @@ impl Counter {
 aio::client!(Counter, counter);
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
     let n = part(|c| &c.n);
     let tl = use_time_travel();
@@ -182,7 +182,7 @@ pub fn App() -> Element {
                 button { onclick: move |_| _ = act!(add()), "Add" }
             }
             // Shown open here; in an app leave `open` out: Ctrl+. shows it.
-            TimeTravelPanel { timeline: tl(), open: true, onask: move |ask| _ = time_travel(ask) }
+            TimeTravelPanel { timeline: tl.get(), open: true, onask: move |ask| _ = time_travel(ask) }
         }
     }
 }

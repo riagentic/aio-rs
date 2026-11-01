@@ -10,8 +10,9 @@ use super::electron::Page;
 use super::{PATIENCE, TRACES, UNSEEN, dump, failing_on_purpose, wire_refusals};
 use crate::{Cell, Door};
 use base64::Engine;
-use dioxus::dioxus_core::{ComponentFunction, Element, ScopeId, VirtualDom};
-pub use dioxus::html::{Key, Modifiers};
+use crate::ui::{Component, View};
+pub use crate::ui::prelude::{Key, Modifiers};
+use dioxus::dioxus_core::{ScopeId, VirtualDom};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -303,12 +304,12 @@ impl Mount {
         self
     }
 
-    pub fn app(self, app: fn() -> Element) -> TestUi {
+    pub fn app(self, app: fn() -> View) -> TestUi {
         self.mount(VirtualDom::new(app))
     }
 
     /// Mount one component alone, with its props (aio's `testComponent`).
-    pub fn component<P: Clone + 'static, M: 'static>(self, c: impl ComponentFunction<P, M>, props: P) -> TestUi {
+    pub fn component<P: Clone + 'static, M: 'static>(self, c: impl Component<P, M>, props: P) -> TestUi {
         self.mount(VirtualDom::new_with_props(c, props))
     }
 
@@ -504,12 +505,12 @@ fn bits(m: Modifiers) -> u32 {
 
 impl TestUi {
     /// Mount `app` (its globals are fresh: one app instance per test).
-    pub fn new(app: fn() -> Element) -> Self {
+    pub fn new(app: fn() -> View) -> Self {
         Mount::default().app(app)
     }
 
     /// Mount component `c` alone with `props` (aio's `testComponent`).
-    pub fn with<P: Clone + 'static, M: 'static>(c: impl ComponentFunction<P, M>, props: P) -> Self {
+    pub fn with<P: Clone + 'static, M: 'static>(c: impl Component<P, M>, props: P) -> Self {
         Mount::default().component(c, props)
     }
 
@@ -642,9 +643,8 @@ impl TestUi {
     }
 
     /// Global `g`'s value, read in the app's root scope (`ui.read(&DIALOG)`).
-    pub fn read<T: Clone + 'static>(&self, g: &'static dioxus::prelude::GlobalSignal<T>) -> T {
-        use dioxus::prelude::ReadableExt as _;
-        self.in_root(|| g.cloned())
+    pub fn read<T: Clone + 'static>(&self, g: &'static crate::ui::Global<T>) -> T {
+        self.in_root(|| g.get_untracked())
     }
 
     /// `f` in the app's root scope (where its globals live, and its tasks).

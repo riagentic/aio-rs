@@ -152,19 +152,19 @@ fn flag(on: bool) -> Option<bool> {
 pub fn use_id(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    dioxus::prelude::use_hook(|| format!("aio-{prefix}-{}", NEXT.fetch_add(1, Ordering::Relaxed)))
+    crate::ui::once(|| format!("aio-{prefix}-{}", NEXT.fetch_add(1, Ordering::Relaxed)))
 }
 
 /// A part of a context (aio's `useContextSelector`): the provider gives a
-/// `Signal<T>` (`use_context_provider(|| Signal::new(t))`), and this view
+/// `Signal<T>` (`provide(|| Signal::new(t))`), and this view
 /// re-renders only when `f`'s answer changes, not on every change to `T`.
 /// With no provider above, `f` reads `T::default()` (aio's context default).
 pub fn use_context_select<T: Default + 'static, R: PartialEq + 'static>(
     f: impl Fn(&T) -> R + 'static,
-) -> dioxus::prelude::Memo<R> {
-    use dioxus::prelude::*;
-    let ctx = use_hook(try_consume_context::<Signal<T>>);
-    use_memo(move || match ctx {
+) -> crate::ui::Memo<R> {
+    use crate::ui::prelude::*;
+    let ctx = once(try_context::<Signal<T>>);
+    memo(move || match ctx {
         Some(s) => f(&s.read()),
         None => f(&T::default()),
     })

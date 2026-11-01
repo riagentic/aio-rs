@@ -1,8 +1,8 @@
 //! A long list rendered a window at a time (aio's `useVirtualList`): only the
 //! rows the scroll position shows, and a few more each side, are elements.
 use super::join;
-use dioxus::html::geometry::PixelsVector2D;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
+use geometry::PixelsVector2D;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -28,28 +28,28 @@ pub fn VirtualList(
     height: f64,
     #[props(default = 3)] overscan: usize,
     scroll_to: Option<usize>,
-    row: Callback<usize, Element>,
+    row: Callback<usize, View>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
-    let mut top = use_signal(|| 0.0);
-    let mut el = use_signal(|| None::<Rc<MountedData>>);
+) -> View {
+    let top = signal(|| 0.0);
+    let el = signal(|| None::<Rc<MountedData>>);
     let h = row_height.max(1.0);
-    use_effect(use_reactive!(|scroll_to| {
-        let (Some(i), Some(el)) = (scroll_to, el.peek().clone()) else { return };
+    watch(scroll_to, move |scroll_to| {
+        let (Some(i), Some(el)) = (scroll_to, el.get_untracked()) else { return };
         spawn(async move { _ = el.scroll(PixelsVector2D::new(0.0, i as f64 * h), ScrollBehavior::Instant).await });
-    }));
-    let rows = window(len, h, height, overscan, top());
+    });
+    let rows = window(len, h, height, overscan, top.get());
     rsx! {
         div {
             class: join("aio-vlist", &class),
             style: "overflow:auto;position:relative;height:{height}px",
-            onmounted: move |e| el.set(Some(e.data())),
+            onmounted: move |e| *el.write() = Some(e.data()),
             // The browser tells a scroll once a frame at most; the list
             // renders again only when that moves its window of rows.
             onscroll: move |e| {
                 let at = e.scroll_top();
-                if window(len, h, height, overscan, at) != window(len, h, height, overscan, *top.peek()) {
+                if window(len, h, height, overscan, at) != window(len, h, height, overscan, *top.read_untracked()) {
                     top.set(at);
                 }
             },

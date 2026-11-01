@@ -2,10 +2,10 @@
 //! the manager reads again on demand and while following. A source
 //! (combined, the app's log, its errors, its window's lines), a level floor,
 //! a text filter, and lines coloured by level.
-use super::app::{View, pressed};
+use super::app::{ViewState, pressed};
 use super::manager::LogLine;
 use super::proc::LogSource;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 /// The lowest level shown (amui's level floor).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,8 +66,8 @@ pub fn LogView(
     on_reload: EventHandler<()>,
     on_source: EventHandler<LogSource>,
     on_follow: EventHandler<()>,
-) -> Element {
-    let mut view = use_context::<View>();
+) -> View {
+    let view = context::<ViewState>();
     let floor = *view.log_floor.read();
     let q = view.log_query.read().clone();
     let all = logs.unwrap_or_default();

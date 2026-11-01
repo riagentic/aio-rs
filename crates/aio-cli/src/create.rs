@@ -513,14 +513,14 @@ fn agents(n: &New, ui: bool) -> String {
             "- The same window elsewhere: `ax dev {name} --web` / `ax build {name} --web` (a browser: `src/lib.rs`'s\n  \
              `web`), `ax build {name} --android` (`app/src/lib.rs`).\n\
              - Styles live in `assets/style.css`, read by `aio::use_css!`: a saved edit shows at once under\n  \
-             `ax dev`, no compile. Never keep CSS (or anything an edit should change) in `use_hook`: a\n  \
-             hook's value is made once, so a hot-patched edit never shows (`ax lint` says so).\n"
+             `ax dev`, no compile. Never keep CSS (or anything an edit should change) in `once(..)`: its\n  \
+             value is made once, so a hot-patched edit never shows (`ax lint` says so).\n"
         ),
         false => String::new(),
     };
     format!(
         "# {name}\n\n\
-         An aio-rs app: Rust, cells and Dioxus views, not aio's TypeScript, React or Next. Code guessed\n\
+         An aio-rs app: Rust, cells and aio::ui views, not aio's TypeScript, React or Next. Code guessed\n\
          from those compiles to the wrong thing or not at all.\n\n\
          ## Read this first\n\n    ax agent\n\n\
          One page: how aio-rs works, every verb, adding state, UI and tests, debugging, shipping\n\
@@ -583,7 +583,6 @@ pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
         return Err(format!("--css tailwind: a window app's (--template app), not a {template}'s"));
     }
     let (aio, aio1, shell1) = (n.aio.source("aio", 0), n.aio.source("aio", 1), n.aio.source("aio-shell", 1));
-    let dioxus = r#"dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"] }"#;
     // The window in a browser: aio's page half and the `start` binding.
     let web = format!(
         r#"
@@ -637,7 +636,7 @@ debug = false
 inherits = "dev"
 strip = false
 "#,
-        deps = if ui { format!("{dioxus}\n{web}") } else { String::new() }
+        deps = if ui { web } else { String::new() }
     );
     let launcher = format!(
         r#"# The launcher alone: the app is the `{name}` library, so `ax dev` can
@@ -976,7 +975,11 @@ mod tests {
         let mode = |t| aio::config::Config::parse(get(&of("x", t), "aio.toml")).unwrap().app.mode;
         use aio::config::Mode;
         assert_eq!([mode("app"), mode("cli"), mode("service")], [Mode::Standalone, Mode::Cli, Mode::Server]);
-        assert!(get(&of("x", "app"), "Cargo.toml").contains("dioxus"), "a window needs Dioxus");
+        let app = get(&of("x", "app"), "Cargo.toml").to_string();
+        assert!(
+            app.contains(r#"features = ["kit"]"#) && !app.contains("dioxus"),
+            "a window's views come from aio::ui: {app}"
+        );
         let android = |t| of("x", t).into_iter().find(|(f, _)| f == "app/src/lib.rs");
         let lib = android("app").expect("a window app builds for Android as it is").1;
         assert!(
@@ -992,7 +995,7 @@ mod tests {
         assert!(root.contains(web) && !root.contains("crate-type"), "{root}");
         assert!(APP_LIB.contains("#[wasm_bindgen::prelude::wasm_bindgen(start)]") && APP_LIB.contains("launch(App)"));
         assert!(!get(&of("x", "cli"), "Cargo.toml").contains("wasm32"), "a tool has no page");
-        assert!(!get(&of("x", "cli"), "Cargo.toml").contains("dioxus"), "a tool doesn't");
+        assert!(!get(&of("x", "cli"), "Cargo.toml").contains("kit"), "a tool has no views");
         let game = files(&New { template: "game", ..New::of("x") });
         assert!(game.unwrap_err().contains("one of app, cli, service"));
     }

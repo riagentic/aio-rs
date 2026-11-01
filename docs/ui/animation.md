@@ -25,14 +25,14 @@ for state that changes over time.
 
 ```rust,no_run
 use aio::kit::{Motion, Transition};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Notice() -> Element {
-    let mut show = use_signal(|| true);
+fn Notice() -> View {
+    let show = signal(|| true);
     rsx! {
         button { "data-t": "toggle", onclick: move |_| show.toggle(), "Toggle" }
-        Transition { show: show(), enter: Motion::FADE, exit: Motion::FADE.ms(100), "data-t": "fx",
+        Transition { show: show.get(), enter: Motion::FADE, exit: Motion::FADE.ms(100), "data-t": "fx",
             p { "data-t": "msg", "Saved" }
         }
     }
@@ -105,12 +105,12 @@ assert_eq!(RISE.total().as_millis(), 180);
 
 ```rust,no_run
 use aio::kit::{Motion, TransitionGroup};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Queue() -> Element {
-    let mut items = use_signal(|| vec!["milk", "eggs", "bread"]);
-    let rows: Vec<(String, Element)> = items()
+fn Queue() -> View {
+    let items = signal(|| vec!["milk", "eggs", "bread"]);
+    let rows: Vec<(String, View)> = items.get()
         .into_iter()
         .map(|k| (k.to_string(), rsx! { p { "data-t": "{k}", "{k}" } }))
         .collect();
@@ -132,7 +132,7 @@ assert!(ui.absent("eggs") && ui.present("tea"));
 
 | Prop | Default | Does |
 |---|---|---|
-| `items` | | the rows, `Vec<(key, Element)>`, in order; the key says which row is which |
+| `items` | | the rows, `Vec<(key, View)>`, in order; the key says which row is which |
 | `enter`, `exit` | none | as `Transition`'s, per row |
 | `flip` | `false` | rows that moved slide from where they were |
 | `flip_ms` | 300 | how long that slide takes |
@@ -153,10 +153,10 @@ assert!(ui.absent("eggs") && ui.present("tea"));
 
 ```rust,no_run
 use aio::kit::{Spring, use_spring};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Drawer() -> Element {
+fn Drawer() -> View {
     let x = use_spring(0.0, Spring::default());
     rsx! {
         button { "data-t": "open", onclick: move |_| x.to(if x.value() > 0.0 { 0.0 } else { 240.0 }), "Menu" }

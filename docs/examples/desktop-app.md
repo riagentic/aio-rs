@@ -225,7 +225,7 @@ assert!(h.state().problem.as_deref().unwrap().starts_with("couldn't import"));
 use aio::act;
 use aio::kit::{GlobalKeys, Menu, MenuItem, ToastHost, Tone, toast, use_global_key};
 use aio_shell::page::{Pick, Save};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::client!(Notes, notes);
 aio::router!();
@@ -267,11 +267,11 @@ async fn ask_import() {
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live(); // once, in the root
     updates::use_live();
     aio_shell::desktop::use_asks(go); // tray clicks: their `run`, then their route
-    use_hook(|| {
+    once(|| {
         // A later launch (`notes todo.md` while it runs) hands its files here.
         let mut later = aio_shell::launches();
         spawn(async move {
@@ -297,7 +297,7 @@ pub fn App() -> Element {
 }
 
 #[component]
-fn Sidebar() -> Element {
+fn Sidebar() -> View {
     use_global_key("mod+n", |_| new_note()); // under GlobalKeys: bindings fire there
     let search = part(|n| &n.search);
     let shown = notes().shown(); // derived: computed once per notes and search
@@ -315,7 +315,7 @@ fn Sidebar() -> Element {
 }
 
 #[component]
-fn Body() -> Element {
+fn Body() -> View {
     match Page::parse(&here().path) {
         Some(Page::Note { id }) => rsx! { Editor { id } },
         Some(Page::Settings) => rsx! { p { "data-t": "settings", "Settings go here." } },
@@ -324,9 +324,9 @@ fn Body() -> Element {
 }
 
 #[component]
-fn Editor(id: Uuid) -> Element {
+fn Editor(id: Uuid) -> View {
     let all = part(|n| &n.notes);
-    let Some(note) = all.iter().find(|n| n.id == id).cloned() else {
+    let Some(note) = all.with(|ns| ns.iter().find(|n| n.id == id).cloned()) else {
         return rsx! { p { "data-t": "gone", "This note is gone." } };
     };
     let title = note.title.clone();
@@ -357,14 +357,14 @@ fn Editor(id: Uuid) -> Element {
 pub mod updates {
     use aio::act;
     use aio::update::{Phase, Updates, UpdatesCalls};
-    use dioxus::prelude::*;
+    use aio::ui::prelude::*;
 
     aio::client!(Updates, updates);
 
     #[component]
-    pub fn Banner() -> Element {
-        let phase = *part(|u| &u.phase);
-        let offer = part(|u| &u.available).as_ref().cloned();
+    pub fn Banner() -> View {
+        let phase = part(|u| &u.phase).get();
+        let offer = part(|u| &u.available).get();
         let (Phase::Available, Some(o)) = (phase, offer) else { return rsx! {} };
         rsx! {
             div { role: "status", "data-t": "update",
@@ -381,7 +381,7 @@ let mut ui = aio::testing::TestUi::new(App);
 ui.click("new");
 ui.type_text("body", "milk");
 ui.press("body", "ctrl+n");
-assert_eq!(HANDLE.peek().state().notes.len(), 2);
+assert_eq!(HANDLE.read_untracked().state().notes.len(), 2);
 # }
 ```
 
@@ -414,12 +414,12 @@ The template's launcher, with the tray and the `updates` cell's source:
 # pub struct Notes { pub n: u32 }
 # #[aio::methods]
 # impl Notes {}
-# use dioxus::prelude::*;
+# use aio::ui::prelude::*;
 # aio::client!(Notes, notes);
 # #[component]
-# pub fn App() -> Element { rsx! {} }
+# pub fn App() -> View { rsx! {} }
 # pub fn new_note() {}
-# pub mod updates { use dioxus::prelude::*; aio::client!(aio::update::Updates, updates); }
+# pub mod updates { use aio::ui::prelude::*; aio::client!(aio::update::Updates, updates); }
 use aio_shell::Start;
 use aio_shell::desktop::{Item, Tray};
 

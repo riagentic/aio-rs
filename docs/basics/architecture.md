@@ -9,7 +9,7 @@ methods, effects, views and the log.
 ```text
  ┌──────────────────────────── the app's process (Rust) ─────────────────────────────┐
  │                                                                                   │
- │  views (Dioxus) ──act!──▶ cells: state + methods ◀── effects, schedules (aio::rt) │
+ │  views (aio::ui) ──act!──▶ cells: state + methods ◀── effects, schedules (aio::rt) │
  │     ▲        part()          │       ▲                                            │
  │     │                        │       └── doors: Handle, local door (ax, peers),   │
  │     │ re-render              ▼           /ws for synced copies (mode server)      │
@@ -28,7 +28,7 @@ methods, effects, views and the log.
   process. Nothing else writes a cell; everything else calls a method
   through a door.
 - **The page only draws.** On the desktop, the view tree lives in Rust
-  (`dioxus-liveview`), and the shared Electron runtime renders it from DOM
+  (Dioxus's liveview today, behind `aio::ui`), and the shared Electron runtime renders it from DOM
   edits sent over a private socket (a 0700 folder, loaded from
   `aio://app`). The page has no Node, no network and no key.
 - **A synced copy is a cell too.** A window in `client` mode, a browser
@@ -53,7 +53,7 @@ methods, effects, views and the log.
 
 | Code | Runs | It may | What surprises people |
 |---|---|---|---|
-| a component body (`#[component] fn`) | in the app's process (desktop, Android), or as wasm in the page (web build) | read cells (`part`, `name()`), keep local state (`use_signal`) | only reads made while it renders subscribe; a read in a handler doesn't |
+| a component body (`#[component] fn`) | in the app's process (desktop, Android), or as wasm in the page (web build) | read cells (`part`, `name()`), keep local state (`signal`) | only reads made while it renders subscribe; a read in a handler doesn't |
 | a handler (`onclick: move \|_\| ..`) | the same, after the render | call methods (`act!`), set signals, spawn | a refusal gives `None` and is logged; check input before calling |
 | a method (`pub fn m(&mut self, ..)`) | where the cell lives; on a synced copy **also** locally, as a prediction | change `self`, refuse, ask for effects and schedules, read `cx` | it may run twice (the copy's prediction, then the server): no I/O, no clock, no randomness but `cx` ([methods](../state/cells.md)) |
 | an async method (`pub async fn`) | split at each `let x: T = io.await;`: the parts are methods, each await an effect | everything a method may, plus I/O in the awaited futures | each await is cut off after `aio::effect::CALL_CEILING` (30 s) unless `#[long]` |
