@@ -147,7 +147,9 @@ fn a_dev_build_says_where_a_render_reads_the_whole_state_once() {
     assert_eq!(hints.len(), 1, "once: {lines:?}");
     let line = include_str!("ui.rs").lines().position(|l| l.ends_with("// the hint names this line")).unwrap();
     let at = format!("tests/ui.rs:{}:", line + 1);
-    assert!(hints[0].contains(&at) && hints[0].contains("part(|c| &c.field)"), "{at}: {}", hints[0]);
+    // The caller's file as the compiler spells it: `crates\aio\tests\ui.rs` on Windows.
+    let hint = hints[0].replace('\\', "/");
+    assert!(hint.contains(&at) && hint.contains("part(|c| &c.field)"), "{at}: {hint}");
     ui.settle();
 }
 
