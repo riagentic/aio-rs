@@ -758,6 +758,7 @@ for a person (a `try_write` match, a `*part(..)` value).
 | `count.peek()` | `count.read_untracked()`, or `count.get_untracked()` |
 | `count.with_mut(f)` | `count.update(f)` |
 | `count.set(v)` | `count.set(v)`: readers are told only when `v` differs; a value without `PartialEq`: `*count.write() = v` |
+| `count.try_write()`, `count.try_peek()` (a `Result`) | `count.try_write()`, `count.try_read_untracked()` (an `Option`: `None` once its view is gone), `count.alive()` |
 | `use_memo(f)` | `memo(f)` (a `Memo`: `.get()`, `.with(..)`, `.read()`) |
 | `use_effect(f)` | `effect(f)` |
 | `use_effect(use_reactive!(\|d\| ..))` | `watch(d, move \|d\| ..)` |
@@ -770,6 +771,8 @@ for a person (a `try_write` match, a `*part(..)` value).
 | `use_future(f)` | `task(f)` |
 | `use_resource(f)` (`r()`, `r.read()`) | `resource(f)` (`r.get()`, `r.with(..)`, `r.suspend()?`) |
 | `GlobalSignal<T>`, `Signal::global(f)` | `Global<T>`, `Global::new(f)` |
+| `GlobalMemo<T>`, `Memo::global(f)` | `GlobalMemo<T>`, `GlobalMemo::new(f)` |
+| `Runtime::try_current().is_some()` | `in_views()` |
 | `ErrorBoundary { handle_error: \|e: ErrorContext\| .. }` | `ErrorBoundary { fallback: \|e: String\| .. }` |
 | `SuspenseBoundary { fallback: \|_\| .. }` | `Suspense { fallback: rsx! { .. } }` |
 | `document::eval(js)` | `eval(js)` |
