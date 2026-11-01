@@ -366,9 +366,11 @@ mod tests {
         std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
         link(&lnk, &exe, t.path(), "com.example.notes").unwrap();
         assert_eq!(read(&lnk, "System.AppUserModel.ID"), "com.example.notes");
+        // The same file however spelled: the shell writes the long path where
+        // TEMP may be a short one (`C:\Users\RUNNER~1\…`).
         assert_eq!(
-            read(&lnk, "System.Link.TargetParsingPath").to_lowercase(),
-            exe.display().to_string().to_lowercase()
+            std::fs::canonicalize(read(&lnk, "System.Link.TargetParsingPath")).unwrap(),
+            std::fs::canonicalize(&exe).unwrap()
         );
         // Written again (an upgrade), it is replaced, not refused.
         link(&lnk, &exe, t.path(), "com.example.notes2").unwrap();
