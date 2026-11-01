@@ -828,6 +828,11 @@ fn run(args: &[String]) -> Out {
             let note =
                 if running { format!("\n{app} runs the old version until `ax restart {app}`") } else { String::new() };
             #[cfg(unix)]
+            if built.platform.os == "linux" && has("--appimage") {
+                let image = package::appimage(&built)?;
+                return installed::from_appimage(&places(), &built.app, &image).map(|s| s + &note);
+            }
+            #[cfg(unix)]
             if built.platform.os == "linux" {
                 return installed::from_bundle(&out, &[]).map(|s| s + &note);
             }

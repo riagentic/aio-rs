@@ -133,9 +133,10 @@ its APK installed once booted, --apk: which); --status, --stop, --reset
     ),
     v(
         "install",
-        "install <app> [--android] [--build] [--emulator] [--device serial] [--apk file] [--no-launch]",
+        "install <app> [--appimage] [--android] [--build] [--emulator] [--device serial] [--apk file] [--no-launch]",
         "build this OS's bundle from source and install it for this user (Linux: its
-install.sh run, nothing left aside; macOS, Windows: how to); --android:
+install.sh run, nothing left aside; macOS, Windows: how to); --appimage
+(Linux): the AppImage, in the app menu, unpacked in a private TMPDIR; --android:
 the newest APK for the attached phone's CPU onto it, then
 start it; refuses an APK older than the sources (--build: build first);
 --emulator: an emulator may be the device; --device (else ANDROID_SERIAL): that one",

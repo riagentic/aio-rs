@@ -668,6 +668,13 @@ fn cli(b: &Built) -> Result<(String, Vec<PathBuf>), String> {
         std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
         how = format!("{how}\n{install}");
         files.push(p);
+        if b.platform.os == "linux" {
+            let (file, text, install) = crate::service::system(&b.app, &name);
+            let p = dist.join(file);
+            std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+            how = format!("{how}\n{install}");
+            files.push(p);
+        }
     }
     Ok((format!("{} ({:.1} MB)\n{how}", out.display(), size(&out)), files))
 }
@@ -882,6 +889,7 @@ fn target(
         Kind::Android => {
             return android(&t.bin, crate::android::Ask::RELEASE);
         }
+        Kind::Web => return crate::web::build(&t.bin, false).map(|(said, out)| (said, vec![out])),
         Kind::Windows => t.platform.unwrap_or(windows()),
         Kind::Deb | Kind::AppImage if host.os != "linux" => {
             return Err(format!("{} is a Linux package: build it on Linux", t.kind.name()));
