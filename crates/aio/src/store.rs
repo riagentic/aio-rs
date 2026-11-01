@@ -176,6 +176,11 @@ pub struct Store<T: Cell> {
     saved: Option<Value>,
     /// `[history] keep` in ms: events older are folded (`keep_history`).
     keep: Option<i64>,
+    /// How long a run of `#[coalesce]` calls is held (`[data] coalesce_ms`).
+    coalesce: std::time::Duration,
+    /// aio's journal watermark the next commit writes (an aio journal's
+    /// entry replayed at boot), in the transaction with what it did.
+    journal_wm: Option<i64>,
 }
 
 /// A run of coalesced calls by one caller: each call (the last one is the
@@ -604,6 +609,23 @@ fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Res
     Ok(())
 }
 
+/// The journal beside aio's file at `path` past its watermark, as cell `T`
+/// replays it ([`crate::compat::data::journal_tail`]).
+fn journal_tail<T: Cell>(
+    db: &Connection,
+    kv: &crate::compat::data::Kv,
+    path: &Path,
+) -> Result<Vec<crate::compat::data::Journaled>, Error> {
+    let data = crate::paths::parent(path);
+    let wm = kv.journal_wm(db).map_err(Error)?;
+    crate::compat::data::journal_tail::<T>(data, wm).map_err(|e| {
+        Error(format!(
+            "{}: {e}: start the aio app once and stop it (it folds its journal into the snapshot), then open it here",
+            data.display()
+        ))
+    })
+}
+
 /// Saved state of version `v` as this version of the cell.
 fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
     if v > T::VERSION {
@@ -990,6 +1012,8 @@ impl<T: Cell> Store<T> {
             held: None,
             saved: None,
             keep: None,
+            coalesce: PERSIST_DEBOUNCE,
+            journal_wm: None,
         };
         s.snap(true).expect("in-memory snapshot");
         s
@@ -1029,6 +1053,8 @@ impl<T: Cell> Store<T> {
         if let Some(r) = &recovered {
             told_recovered(T::ID, r);
         }
+        // aio's journal past its save, read (or refused) before anything is written.
+        let tail = aio_kv.as_ref().map(|kv| journal_tail::<T>(&db, kv, path)).transpose()?.unwrap_or_default();
         // aio's data that doesn't fit refuses the boot before anything is written.
         let whole = aio_kv.is_some() && T::AIO_CELLS.is_empty();
         let seed = match aio_kv.is_some() {
@@ -1068,6 +1094,8 @@ impl<T: Cell> Store<T> {
             held: None,
             saved: None,
             keep: None,
+            coalesce: PERSIST_DEBOUNCE,
+            journal_wm: None,
         };
         // A failed snapshot only costs time: the next boot replays the log.
         if (migrated || last > from)
@@ -1125,8 +1153,53 @@ impl<T: Cell> Store<T> {
             s.commit(&By::System, RESTORE, &Value::Null, &Asks::default(), now_ms(), Arc::new(back), None, &[])
                 .map_err(|e| Error(format!("{}: restore: {e}", T::ID)))?;
         }
+        s.replay_journal(tail)?;
         refresh_good(&s.db, path)?;
         Ok(s)
+    }
+
+    /// An aio file's journal entries past its watermark (a crash before aio's
+    /// save) run again as aio's next boot would run them: each call through
+    /// this build's method, at its time, as its caller, its effects dropped
+    /// (replay never runs I/O again), the watermark moved in the transaction
+    /// of each. A tail aio-rs can't replay refuses the boot, the file kept.
+    fn replay_journal(&mut self, tail: Vec<crate::compat::data::Journaled>) -> Result<(), Error> {
+        let Some(kv) = self.aio_kv.clone() else { return Ok(()) };
+        let Some(last) = tail.last().map(|j| match j {
+            crate::compat::data::Journaled::Call { seq, .. } | crate::compat::data::Journaled::Skip { seq, .. } => *seq,
+        }) else {
+            return Ok(());
+        };
+        let effects = self.effects.len();
+        for j in &tail {
+            match j {
+                crate::compat::data::Journaled::Skip { why, .. } => {
+                    if let Some(why) = why {
+                        eprintln!("[aio] {}: {why}", T::ID);
+                    }
+                }
+                crate::compat::data::Journaled::Call { seq, method, args, by, at } => {
+                    self.flush().map_err(|e| Error(e.why))?;
+                    self.journal_wm = Some(*seq);
+                    self.run(by, method, args.clone(), *at, None).map_err(|e| {
+                        Error(format!(
+                            "{}: aio's journal entry {seq} ({method}) doesn't run again here: {e}; start the aio app once and stop it, then open it here",
+                            T::ID
+                        ))
+                    })?;
+                }
+            }
+        }
+        self.flush().map_err(|e| Error(e.why))?;
+        self.effects.truncate(effects);
+        // Entries past the last call (skipped ones): the watermark alone.
+        self.journal_wm = None;
+        if kv.journal_wm(&self.db).map_err(Error)? < last {
+            kv.set_journal_wm(&self.db, last).map_err(Error)?;
+        }
+        let calls = tail.iter().filter(|j| matches!(j, crate::compat::data::Journaled::Call { .. })).count();
+        eprintln!("[aio] {}: replayed {calls} calls of aio's journal (up to entry {last})", T::ID);
+        Ok(())
     }
 
     /// The time this store's calls see: the wall clock, or a test's.
@@ -1291,7 +1364,7 @@ impl<T: Cell> Store<T> {
         asks.op = op.map(String::from);
         let quiet = asks.effects.is_empty() && asks.plans.is_empty() && asks.inputs == Default::default();
         let coalesced = T::COALESCED.contains(&method) || (T::COALESCE && !T::redacts(method));
-        if coalesced && fired.is_none() && asks.op.is_none() && quiet {
+        if coalesced && fired.is_none() && asks.op.is_none() && quiet && !self.coalesce.is_zero() {
             self.hold(by, method, args, at, next)?;
             let p = crate::perf::Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() };
             crate::perf::method(T::ID, method, p);
@@ -1360,16 +1433,16 @@ impl<T: Cell> Store<T> {
         Ok(())
     }
 
-    /// Flush a held run [`PERSIST_DEBOUNCE`] after its first call; else how
-    /// long until then.
+    /// Flush a held run [`Self::set_coalesce`] (default [`PERSIST_DEBOUNCE`])
+    /// after its first call; else how long until then.
     pub(crate) fn flush_idle(&mut self) -> Option<std::time::Duration> {
-        let left = PERSIST_DEBOUNCE.checked_sub(self.held.as_ref()?.since.elapsed());
+        let left = self.coalesce.checked_sub(self.held.as_ref()?.since.elapsed());
         match left {
             Some(d) if !d.is_zero() => Some(d),
             _ => {
                 if let Err(e) = self.flush() {
                     eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
-                    return Some(PERSIST_DEBOUNCE);
+                    return Some(self.coalesce.max(PERSIST_DEBOUNCE));
                 }
                 None
             }
@@ -1379,6 +1452,13 @@ impl<T: Cell> Store<T> {
     /// Is a run of coalesced calls waiting to go into the log?
     pub fn holds(&self) -> bool {
         self.held.is_some()
+    }
+
+    /// Hold a run of `#[coalesce]` calls `d` before it goes into the log
+    /// (`[data] coalesce_ms`, aio's `persistDebounceMs`); zero: each call at once.
+    pub fn set_coalesce(&mut self, d: std::time::Duration) -> Result {
+        self.coalesce = d;
+        if d.is_zero() { self.flush() } else { Ok(()) }
     }
 
     /// The event, its schedule changes and the fired schedule's re-arm go in
@@ -1481,6 +1561,9 @@ impl<T: Cell> Store<T> {
             _ => Ok(Value::Null),
         }
         .map_err(Rejected::new)?;
+        if let (Some(kv), Some(wm)) = (&self.aio_kv, self.journal_wm) {
+            kv.set_journal_wm(&tx, wm).map_err(Rejected::new)?;
+        }
         if let Some(op) = &asks.op {
             tx.execute("INSERT INTO ops (cell, op, seq) VALUES (?1, ?2, ?3)", params![T::ID, op, seq as i64])
                 .map_err(db)?;
@@ -1499,6 +1582,7 @@ impl<T: Cell> Store<T> {
             .map_err(db)?;
         }
         tx.commit().map_err(db)?;
+        self.journal_wm = None;
         for ((m, a, t), s) in earlier.iter().zip(logged_seqs) {
             let ev = Event { seq: s, method: m.clone(), args: a.clone(), inputs: Default::default(), by: by.clone(), at: *t, v: T::VERSION };
             self.committed.push((self.seq, ev));

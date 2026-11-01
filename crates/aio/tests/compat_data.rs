@@ -305,9 +305,99 @@ fn the_home_is_claimed_and_checked_as_aio_does() {
     std::fs::write(&meta, json!({ "appId": APP, "profile": "dev" }).to_string()).unwrap();
     assert!(Home::open(&home, APP, None).unwrap_err().to_string().contains("profile"));
     drop(Home::open(&home, APP, Some("dev")).unwrap());
-    // An aio journal not yet folded: only aio can replay it.
+    // An aio journal not yet folded is the store's to replay, not the claim's to refuse.
     std::fs::write(home.join("data/journal"), b"{}\n").unwrap();
-    assert!(Home::open(&home, APP, Some("dev")).unwrap_err().to_string().contains("start the aio app once"));
+    drop(Home::open(&home, APP, Some("dev")).unwrap());
+}
+
+/// A copy of aio's `v1.0.9-crashed-streaming` home: killed after its save
+/// at journal entry 10, two `inbox:post` calls in the journal past it.
+fn crashed() -> (tempfile::TempDir, PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    let data = d.path().join("home/data");
+    std::fs::create_dir_all(&data).unwrap();
+    for (f, b) in [
+        ("state.db", &include_bytes!("fixtures/aio-1.0.9-crashed-streaming/state.db")[..]),
+        ("meta.json", include_bytes!("fixtures/aio-1.0.9-crashed-streaming/meta.json")),
+        ("journal", include_bytes!("fixtures/aio-1.0.9-crashed-streaming/journal")),
+        ("journal.base", include_bytes!("fixtures/aio-1.0.9-crashed-streaming/journal.base")),
+    ] {
+        std::fs::write(data.join(f), b).unwrap();
+    }
+    (d, data.join("state.db"))
+}
+
+const WM: &str = "sync-listener-journal-probe:__journal_wm";
+
+#[test]
+fn an_aio_journal_past_its_save_is_replayed_once_and_aio_finds_it_folded() {
+    let (_d, db) = crashed();
+    let posts = |s: &Store<Inbox>| s.state().posts.clone();
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(posts(&s).len(), 12);
+    assert_eq!(posts(&s)[10..], ["p54", "p59"], "the two calls the kill left in the journal");
+    drop(s);
+    // aio's next boot: the snapshot holds them, the watermark says so (nothing replayed twice).
+    assert_eq!(kv(&db)[WM], json!(12));
+    let cells = aio_reads(&db, APP);
+    assert_eq!(cells["inbox"]["posts"].as_array().unwrap().len(), 12);
+    assert_eq!(cells["tally"], json!({ "n": 21, "__aio_status": "active" }), "other cells as aio left them");
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(posts(&s).len(), 12, "aio-rs's own next boot replays nothing again");
+    assert_eq!(s.events().unwrap().iter().filter(|e| e.method == "post").count(), 2);
+}
+
+#[test]
+fn a_journal_of_another_cells_calls_is_left_to_aio() {
+    let (_d, db) = crashed();
+    let s = Store::<Tally>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().n, 21);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(10), "the watermark is the inbox's to move");
+}
+
+#[test]
+fn a_journal_aio_rs_cant_replay_refuses_the_boot_and_keeps_the_file() {
+    let line = |l: &str| format!("{l}\n");
+    for (tail, why) in [
+        (line(r#"{"seq":11,"type":"aio:__timeTravel","payload":{},"ts":1}"#), "carries state"),
+        (line(r#"{"seq":11,"type":"inbox:__setPosts","payload":{},"ts":1}"#), "carries state"),
+        (line(r#"{"seq":11,"type":"custom","payload":{},"ts":1}"#), "no call aio-rs can replay"),
+        (
+            line(r#"{"seq":11,"type":"inbox:post","payload":{"args":["a"]},"ts":1}"#)
+                + &line(r#"{"seq":12,"type":"tally:onAdd","payload":{"args":[]},"ts":1}"#),
+            "and of another cell (tally:onAdd)",
+        ),
+    ] {
+        let (_d, db) = crashed();
+        std::fs::write(db.with_file_name("journal"), tail).unwrap();
+        let before = dump(&db);
+        let e = Store::<Inbox>::open_aio(&db, APP).err().unwrap().0;
+        assert!(e.contains(why) && e.contains("start the aio app once"), "{e}");
+        assert_eq!(dump(&db), before);
+    }
+    // The store put back to before what the journal dropped: a gap only aio may judge.
+    let (_d, db) = crashed();
+    std::fs::write(db.with_file_name("journal.base"), r#"{"wm":11,"cells":{}}"#).unwrap();
+    assert!(Store::<Inbox>::open_aio(&db, APP).err().unwrap().0.contains("put back to an older copy"));
+}
+
+#[test]
+fn torn_withheld_and_bookkeeping_lines_are_skipped_as_aio_skips_them() {
+    let (_d, db) = crashed();
+    let lines = [
+        r#"{"seq":9,"type":"inbox:post","payload":{"args":["old"]},"ts":1}"#,
+        r#"{"seq":11,"type":"__aioBatch","entries":[{"seq":11,"type":"inbox:post","payload":{"args":["a"]},"ts":1}]}"#,
+        r#"{"seq":12,"type":"inbox:post","payload":"[redacted]","redacted":true,"ts":1}"#,
+        r#"{"seq":13,"type":"__aioSyncApplied","ts":1}"#,
+        r#"{"seq":14,"type":"inbox:po"#,
+    ];
+    std::fs::write(db.with_file_name("journal"), lines.join("\n")).unwrap();
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().posts.last().map(String::as_str), Some("a"), "the batch's call, not the one before the save");
+    assert_eq!(s.state().posts.len(), 11);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(13), "past every entry it read");
 }
 
 /// What aio reads of the file at `p` for app `app` (`stored-state.ts`): an

@@ -198,8 +198,8 @@ fn refused(why: String) -> io::Error {
 
 impl Home {
     /// Claim `home` for app `app` (under `profile`). Refused, with nothing
-    /// written, when another process holds it, its `meta.json` names another
-    /// app or profile, or an aio journal waits to be replayed (only aio can).
+    /// written, when another process holds it or its `meta.json` names
+    /// another app or profile. (aio's journal is replayed by the store's boot.)
     pub fn open(home: &Path, app: &str, profile: Option<&str>) -> io::Result<Self> {
         let data = home.join("data");
         // The home holds logs and keys too: private, as aio makes it.
@@ -240,12 +240,6 @@ impl Home {
                     profile.map_or("none".into(), |p| format!("{p:?}"))
                 )));
             }
-        }
-        if std::fs::metadata(data.join("journal")).is_ok_and(|m| m.len() > 0) {
-            return Err(refused(format!(
-                "{} has an aio journal not yet folded into its snapshot: start the aio app once, stop it, then open it here",
-                data.display()
-            )));
         }
         crate::paths::write_atomic(
             &info,
@@ -703,7 +697,123 @@ fn has_table(db: &Connection, name: &str) -> Result<bool, String> {
         .map_err(|e| format!("storage: {e}"))
 }
 
+/// The method of `T` that aio's `<cell>:<method>` is (pure): `T`'s own
+/// under its id; under a `#[aio_cell]` field's cell `<cell>_<method>` when `T`
+/// has it, else `<method>`. `None`: no cell of `T`'s, or an internal method.
+pub(crate) fn method_of<T: crate::Cell>(cell: &str, method: &str) -> Option<String> {
+    if method.is_empty() || method.starts_with("__") {
+        return None;
+    }
+    if cell == T::ID {
+        return Some(method.into());
+    }
+    T::AIO_CELLS.iter().any(|s| s.cell == cell).then(|| {
+        let own = format!("{cell}_{method}");
+        if T::METHODS.contains(&own.as_str()) { own } else { method.into() }
+    })
+}
+
+/// aio's journal lines that carry no change to a cell (`journal.ts`).
+const JOURNAL_NO_OPS: [&str; 2] = ["__aioSyncIntent", "__aioSyncApplied"];
+
+/// One aio journal entry past the store's watermark, as aio-rs replays it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Journaled {
+    /// `<cell>:<method>`: the call, its arguments, who made it, when.
+    Call { seq: i64, method: String, args: Value, by: crate::By, at: i64 },
+    /// No change to replay: aio's own bookkeeping, a call on a cell that saves
+    /// nothing, or a call whose arguments aio withheld (said).
+    Skip { seq: i64, why: Option<String> },
+}
+
+/// What `<data>/journal` (aio's `journal.ts`, one JSON entry a line) holds past
+/// `wm` (the store's `__journal_wm`) for cell type `T`, in order; empty when
+/// it holds nothing of `T`'s cells. Refused when aio-rs can't replay it as
+/// aio would: a store older than what the journal already dropped
+/// (`journal.base`), an entry that isn't a plain call (a time-travel or
+/// write-set line, an action without a cell), or a tail mixing `T`'s calls
+/// with another cell's (only aio could then move the watermark). A torn line
+/// (a crash mid-append) is skipped, as aio does.
+pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<Journaled>, String> {
+    let text = match std::fs::read_to_string(data.join("journal")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(format!("{}/journal: {e}", data.display())),
+    };
+    if let Ok(b) = std::fs::read(data.join("journal.base"))
+        && let Some(dropped) = serde_json::from_slice::<Value>(&b).ok().and_then(|v| v["wm"].as_i64())
+        && dropped > wm
+    {
+        return Err(format!(
+            "its journal dropped calls up to {dropped} but the store holds only up to {wm} (the store was put back to an older copy)"
+        ));
+    }
+    let mut lines = vec![];
+    for (i, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        match serde_json::from_str::<Value>(line) {
+            Ok(e) if e["type"] == "__aioBatch" => lines.extend(e["entries"].as_array().cloned().unwrap_or_default()),
+            Ok(e) => lines.push(e),
+            Err(_) => eprintln!("[aio] data: {}/journal line {} is torn (a crash mid-write): skipped, as aio does", data.display(), i + 1),
+        }
+    }
+    let (mut ours, mut others) = (vec![], vec![]);
+    for e in lines {
+        let Some(seq) = e["seq"].as_i64().filter(|s| *s > wm) else { continue };
+        let kind = e["type"].as_str().unwrap_or_default();
+        let Some((cell, m)) = kind.split_once(':') else {
+            match JOURNAL_NO_OPS.contains(&kind) {
+                true => ours.push(Journaled::Skip { seq, why: None }),
+                false => return Err(format!("journal entry {seq} ({kind}) is no call aio-rs can replay")),
+            }
+            continue;
+        };
+        let Some(method) = method_of::<T>(cell, m) else {
+            match m.starts_with("__") && (cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell)) || cell == "aio" {
+                true => return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay")),
+                false => others.push(kind.to_string()),
+            }
+            continue;
+        };
+        let j = match (e["unstored"] == true, e["redacted"] == true) {
+            (true, _) => Journaled::Skip { seq, why: None },
+            (_, true) => Journaled::Skip {
+                seq,
+                why: Some(format!("journal entry {seq} ({kind}): aio withheld its arguments (redactActions), so it can't run again: skipped, as aio does")),
+            },
+            _ => Journaled::Call {
+                seq,
+                method,
+                args: match &e["payload"]["args"] {
+                    Value::Null => json!([]),
+                    a => a.clone(),
+                },
+                by: e["user"]["id"].as_str().map_or(crate::By::System, |u| crate::By::User(u.into())),
+                at: e["ts"].as_i64().unwrap_or(0),
+            },
+        };
+        ours.push(j);
+    }
+    let calls = ours.iter().any(|j| matches!(j, Journaled::Call { .. }));
+    match (calls, others.first()) {
+        (true, Some(other)) => Err(format!("its journal holds calls of {} and of another cell ({other})", T::ID)),
+        (false, _) => Ok(vec![]),
+        (true, None) => Ok(ours),
+    }
+}
+
 impl Kv {
+    /// aio's journal watermark (`<app>:__journal_wm`): the last journal
+    /// entry the snapshot holds (0: none).
+    pub(crate) fn journal_wm(&self, db: &Connection) -> Result<i64, String> {
+        Ok(get(db, &format!("{}:__journal_wm", self.app))?.and_then(|v| v.as_i64()).unwrap_or(0))
+    }
+
+    /// Move aio's journal watermark to `seq`, in `db`'s transaction (with the
+    /// snapshot that holds the entries up to it, as aio writes it).
+    pub(crate) fn set_journal_wm(&self, db: &Connection, seq: i64) -> Result<(), String> {
+        put(db, &format!("{}:__journal_wm", self.app), &json!(seq))
+    }
+
     /// Read only: app `app`'s snapshot layout, or what makes aio refuse the
     /// file (aio-rs refuses it too). A file without `aio_kv` gets aio's defaults.
     pub(crate) fn find(db: &Connection, app: &str) -> Result<Self, String> {
