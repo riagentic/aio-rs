@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Install, update, break, roll back: aio-rs's signed update path on a real
+install of a sample app, on this machine (Linux, macOS, Windows).
+
+  scripts/update-proof          run it; prints each step, exits 1 on a miss
+  scripts/update-proof --keep   leave the work folder for a look
+
+1. `ax create board --template service` (a server: no window needed), its
+   release key (`ax keygen`), `[updates] url` on a loopback HTTP server.
+2. Release 1 (`ax release`), installed from its bundle as a user would
+   (Linux: its install.sh; macOS: the .app unzipped; Windows: `--install`),
+   started; a post written.
+3. Release 2 with a patch from 1 (`--patch-from`): the running app finds it,
+   checks its signature, makes it from the patch, installs it and restarts
+   as 2. A second post.
+4. Release 3, broken (it says its version and data, then dies as it
+   starts), patched from 2: the app installs it, 3 fails its first boot
+   twice, the helper puts 2 back, 2 restores the data from before and
+   never offers 3 again. Both posts are read back from the running app.
+
+Everything lives in a throwaway home under dist/ (the app must share a
+folder with this checkout) and is removed after, the app's install too.
+Needs Rust, git and this checkout; takes about 5 minutes (three release
+builds and the app's first update check, 30-90 s after it starts).
+"""
+
+import http.server
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+WIN, MAC = os.name == "nt", sys.platform == "darwin"
+APP = "board"
+
+
+def say(what):
+    print(f"update-proof: {what}", flush=True)
+
+
+def fail(what):
+    raise SystemExit(f"update-proof: FAILED: {what}")
+
+
+class Proof:
+    def __init__(self, work):
+        self.work = work
+        home = work / "home"
+        real = Path.home()
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("AIORT_", "XDG_"))}
+        env.update(
+            HOME=str(home),
+            USERPROFILE=str(home),
+            APPDATA=str(home / "AppData" / "Roaming"),
+            LOCALAPPDATA=str(home / "AppData" / "Local"),
+            XDG_DATA_HOME=str(home / ".local" / "share"),
+            XDG_CONFIG_HOME=str(home / ".config"),
+            XDG_CACHE_HOME=str(home / ".cache"),
+            AIORT_DATA=str(work / "aiort"),
+            TMPDIR=str(work / "tmp"),
+            TEMP=str(work / "tmp"),
+            TMP=str(work / "tmp"),
+            CARGO_HOME=os.environ.get("CARGO_HOME", str(real / ".cargo")),
+            RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(real / ".rustup")),
+            CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")),
+            GIT_AUTHOR_NAME="proof",
+            GIT_AUTHOR_EMAIL="proof@example.org",
+            GIT_COMMITTER_NAME="proof",
+            GIT_COMMITTER_EMAIL="proof@example.org",
+        )
+        for k in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "TMPDIR"):
+            Path(env[k]).mkdir(parents=True, exist_ok=True)
+        self.env = env
+        self.app = work / APP
+        self.rel = work / "releases"
+        self.log = work / "aiort" / "logs" / "app.log"
+        self.installed_exe = None
+
+    def run(self, *cmd, cwd=None, check=True):
+        p = subprocess.run(
+            [str(c) for c in cmd], cwd=cwd or self.app, env=self.env, capture_output=True, text=True, errors="replace"
+        )
+        if check and p.returncode != 0:
+            fail(f"{' '.join(map(str, cmd))} exited {p.returncode}:\n{p.stdout[-3000:]}{p.stderr[-3000:]}")
+        return p.stdout + p.stderr
+
+    def ax(self, *args, **kw):
+        return self.run(self.exe, *args, **kw)
+
+    def build_ax(self):
+        say("building ax from this checkout")
+        self.run("cargo", "build", "--locked", "-q", "-p", "aio-rs-cli", cwd=ROOT)
+        self.exe = Path(self.env["CARGO_TARGET_DIR"]) / "debug" / ("ax.exe" if WIN else "ax")
+
+    def commit(self, what):
+        self.run("git", "add", "-A")
+        self.run("git", "commit", "-q", "-m", what)
+
+    def release(self, patch_from=None):
+        extra = ["--patch-from", patch_from] if patch_from else []
+        out = self.ax("release", APP, "--dir", self.rel, *extra)
+        m = re.search(rf"^{APP} (\S+) on stable, signed", out, re.M)
+        if not m:
+            fail(f"ax release said no version:\n{out[-2000:]}")
+        if patch_from and ".patch" not in out:
+            fail(f"release {m[1]} carries no patch from {patch_from}:\n{out[-2000:]}")
+        say(f"released {m[1]}" + (f" (with a patch from {patch_from})" if patch_from else ""))
+        return m[1]
+
+    def bundle(self):
+        manifests = [p for p in (self.rel / "stable").glob("*.json") if not p.name.endswith(".patches.json")]
+        if len(manifests) != 1:
+            fail(f"not one release manifest: {manifests}")
+        return self.rel / "stable" / json.loads(manifests[0].read_text())["release"]["file"]
+
+    def install(self):
+        b = self.bundle()
+        to = self.work / "unpacked"
+        to.mkdir()
+        if WIN:
+            shutil.unpack_archive(b, to)
+            self.run(next(to.rglob(f"{APP}.exe")), "--install", cwd=to)
+            self.installed_exe = Path(self.env["LOCALAPPDATA"]) / "Programs" / APP / f"{APP}.exe"
+        elif MAC:
+            self.run("ditto", "-x", "-k", b, to, cwd=to)
+            apps = self.work / "Applications"
+            apps.mkdir()
+            app = next(to.glob("*.app"))
+            shutil.move(str(app), apps / app.name)
+            self.installed_exe = apps / app.name / "Contents" / "MacOS" / APP
+        else:
+            self.run("tar", "-xzf", b, "-C", to, cwd=to)
+            self.run("sh", next(to.glob("*/install.sh")), cwd=to)
+            self.installed_exe = self.work / "home" / ".local" / "bin" / APP
+        if not self.installed_exe.exists():
+            fail(f"the install left no {self.installed_exe}")
+        say(f"installed {b.name}: {self.installed_exe}")
+
+    def status(self):
+        out = self.ax("update", APP, check=False)
+        m = re.search(r"^installed: (\{.*\})$", out, re.M)
+        never = re.search(r"^never offered again: (\[.*\])$", out, re.M)
+        return (
+            json.loads(m[1]).get("version") if m else None,
+            "waiting for the first start of" in out,
+            json.loads(never[1]) if never else [],
+        )
+
+    def wait(self, what, ok, seconds=240):
+        end = time.time() + seconds
+        while time.time() < end:
+            # Reaped once it exits: a zombie would hold up the restart that waits for it to be gone.
+            if getattr(self, "started", None):
+                self.started.poll()
+            if ok():
+                return
+            time.sleep(2)
+        tail = self.log.read_text(errors="replace")[-3000:] if self.log.exists() else "(no app.log)"
+        fail(f"{what}: not within {seconds} s; app.log ends:\n{tail}")
+
+    def logged(self, line):
+        return self.log.exists() and line in self.log.read_text(errors="replace")
+
+    def post(self, text):
+        self.ax("call", APP, APP, "post", text)
+
+    def posts(self):
+        out = self.ax("state", APP, APP)
+        return [p["text"] for p in json.loads(out[out.index("{") :])["posts"]]
+
+
+class Releases(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+
+def prove(p):
+    p.build_ax()
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a: Releases(*a, directory=str(p.rel)))
+    p.rel.mkdir()
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    p.httpd = httpd
+    url = f"http://127.0.0.1:{httpd.server_address[1]}"
+    p.ax("create", APP, "--template", "service", "--aio", ROOT, cwd=p.work)
+    p.run("git", "init", "-q")
+    key = re.search(r"ed25519:[A-Za-z0-9+/=]+", p.ax("keygen", APP))
+    if not key:
+        fail("ax keygen printed no public key")
+    toml = p.app / "aio.toml"
+    text = toml.read_text().replace("network = []", 'network = ["127.0.0.1"]')
+    toml.write_text(text + f'\n[updates]\nurl = "{url}"\nkeys = ["{key[0]}"]\nevery = "10s"\n')
+    p.commit("one")
+    v1 = p.release()
+    p.install()
+    port = free_port()
+    p.started = subprocess.Popen(
+        [str(p.installed_exe), "--port", str(port)],
+        env=p.env,
+        cwd=p.work,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    p.wait(f"{v1} starts", lambda: p.logged(f"{APP} listens on 127.0.0.1:{port}"), 60)
+    p.post("written by the first version")
+    say(f"{v1} runs and holds a post")
+
+    lib = p.app / "src" / "lib.rs"
+    lib.write_text(lib.read_text() + "// release 2\n")
+    p.commit("two")
+    v2 = p.release(patch_from=v1)
+    p.wait(f"{v2} is installed", lambda: p.status()[:2] == (v2, False))
+    if not p.logged(f"update {v2}: made from {v1} and a patch"):
+        fail(f"{v2} was not made from the patch")
+    p.wait(f"{v2} serves", lambda: p.logged(f"update to {v2} is in place"), 60)
+    p.post("written by the second version")
+    say(f"{v1} -> {v2}: found, signature checked, made from the patch, installed, restarted")
+
+    main = p.app / "app" / "src" / "main.rs"
+    broken = (
+        "    // A broken build: it says its version and data, then dies as it starts.\n"
+        '    let asked = std::env::args().nth(1).is_some_and(|a| a == "--version")\n'
+        '        || std::env::var_os("AIORT_DATA_CONTRACT").is_some();\n'
+        '    assert!(asked, "a broken build");\n'
+    )
+    head = "fn main() -> std::io::Result<std::process::ExitCode> {\n"
+    main.write_text(main.read_text().replace(head, head + broken))
+    p.commit("three, broken")
+    v3 = p.release(patch_from=v2)
+    p.wait(f"{v3} is rolled back", lambda: v3 in p.status()[2])
+    version, first_boot, _ = p.status()
+    if (version, first_boot) != (v2, False):
+        fail(f"after the rollback: installed {version}, first boot pending {first_boot}; want {v2}")
+    back = f"update failed: {v3} did not start, so {v2} runs again; the data from before it is back"
+    p.wait(f"{v2} restores its data", lambda: p.logged(back), 60)
+    p.wait(f"{v2} serves again", lambda: p.log.read_text(errors="replace").count(f"listens on 127.0.0.1:{port}") >= 3)
+    got = p.posts()
+    if got != ["written by the first version", "written by the second version"]:
+        fail(f"the data after the rollback: {got}")
+    say(f"{v2} -> {v3} (broken): its first boot failed, {v2} is back with both posts, {v3} never offered again")
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def cleanup(p):
+    if getattr(p, "exe", None) and p.app.exists():
+        p.ax("stop", APP, check=False)
+    if getattr(p, "started", None) and p.started.poll() is None:
+        p.started.kill()
+    if getattr(p, "httpd", None):
+        p.httpd.shutdown()
+    if WIN and p.installed_exe and p.installed_exe.exists():
+        p.run(p.installed_exe, "--uninstall", cwd=p.work, check=False)
+
+
+def main():
+    keep = "--keep" in sys.argv[1:]
+    (ROOT / "dist").mkdir(exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="update-proof-", dir=ROOT / "dist"))
+    p = Proof(work)
+    try:
+        prove(p)
+        say("PASS: install -> update (signed, delta) -> broken update -> rollback, data kept")
+    finally:
+        cleanup(p)
+        if keep:
+            say(f"kept {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
