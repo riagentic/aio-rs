@@ -89,6 +89,7 @@ pub mod cron;
 mod cx;
 mod derived;
 pub mod effect;
+pub mod filter;
 pub mod fmt;
 pub mod head;
 #[cfg(feature = "kit")]
@@ -392,8 +393,13 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
         let _ = viewer;
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
-    /// `#[transient]` fields: never saved, back to their default on every boot.
+    /// `#[transient]` fields and `#[cell(persist(exclude = ["feeds.*.busy"]))]`
+    /// paths (aio's `persist: { exclude }`): never saved, back to their
+    /// defaults on every boot ([`filter`]). A nested one's field needs a default.
     const TRANSIENT: &'static [&'static str] = &[];
+    /// `#[cell(persist(include = ["name", "profile.email"]))]` (aio's
+    /// `persist: { include }`): only these paths are saved; empty: all of it.
+    const PERSIST_INCLUDE: &'static [&'static str] = &[];
     /// `#[server]` fields: saved, never sent to a client, and left out of
     /// problem reports and the debug log (a report may be delivered). A
     /// shared cell's credential (a password, an API key…) must be one:

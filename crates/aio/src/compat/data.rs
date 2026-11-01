@@ -301,15 +301,32 @@ pub struct Slice {
     pub cell: &'static str,
     pub version: u32,
     pub transient: &'static [&'static str],
+    pub include: &'static [&'static str],
     pub tables: &'static [Bound],
     pub migrate: fn(Value, u32) -> Result<Value, String>,
+    /// A newer build's slice as this build's type reads it (its fields only).
+    pub fit: fn(Value) -> Result<Value, String>,
 }
 
 impl Slice {
     /// Field `field`, of cell type `C`.
     pub const fn of<C: crate::CellData>(field: &'static str) -> Self {
-        Slice { field, cell: C::ID, version: C::VERSION, transient: C::TRANSIENT, tables: C::TABLES, migrate: up::<C> }
+        Slice {
+            field,
+            cell: C::ID,
+            version: C::VERSION,
+            transient: C::TRANSIENT,
+            include: C::PERSIST_INCLUDE,
+            tables: C::TABLES,
+            migrate: up::<C>,
+            fit: fit::<C>,
+        }
     }
+}
+
+/// A slice read as `C` and written again: `C`'s fields only.
+fn fit<C: crate::CellData>(v: Value) -> Result<Value, String> {
+    serde_json::from_value::<C>(v).and_then(serde_json::to_value).map_err(|e| e.to_string())
 }
 
 /// `C`'s `migrate`, slice to slice.
@@ -952,15 +969,23 @@ impl Kv {
         let (mut got, mut older) = (Map::new(), None);
         for s in of {
             let Some((v, at)) = self.slice(db, s.cell, s.tables)? else { continue };
-            if at > s.version {
-                return Err(format!("{}: aio data from a newer build (v{at} > v{})", s.cell, s.version));
-            }
             if at < s.version {
                 older = older.or(Some((s.cell, at)));
             }
-            let v = match at < s.version {
-                true => (s.migrate)(v, at).map_err(|e| format!("{}: migrate from v{at} failed: {e}", s.cell))?,
-                false => v,
+            let v = match at.cmp(&s.version) {
+                std::cmp::Ordering::Less => {
+                    (s.migrate)(v, at).map_err(|e| format!("{}: migrate from v{at} failed: {e}", s.cell))?
+                }
+                // A newer build's (a rollback): what this build declares; each
+                // write keeps the rest (`Kv::write`).
+                std::cmp::Ordering::Greater => {
+                    eprintln!(
+                        "[aio] {}: aio data from a newer build (v{at} > v{}): it boots, keeping that build's fields it doesn't declare",
+                        s.cell, s.version
+                    );
+                    (s.fit)(v).map_err(|e| format!("{}: aio data from a newer build (v{at} > v{}) doesn't fit: {e}", s.cell, s.version))?
+                }
+                std::cmp::Ordering::Equal => v,
             };
             got.insert(s.field.into(), v);
         }
@@ -1032,22 +1057,38 @@ impl Kv {
         tables: &[Bound],
     ) -> Result<(), String> {
         write_bound(db, cell, &mut state, prev, tables)?;
-        if let (Some(old), Some(m)) = (self.raw(db, cell)?, state.as_object_mut()) {
+        let mut versions = self.versions(db)?;
+        let stored = versions.get(cell).and_then(Value::as_u64).unwrap_or(0);
+        let old = self.raw(db, cell)?;
+        if let (Some(old), Some(m)) = (&old, state.as_object_mut()) {
             for (k, v) in old.as_object().into_iter().flatten().filter(|(k, _)| k.starts_with("__")) {
                 m.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
+        // A newer build's slice (a rollback, aio's downgrade): its fields this
+        // build doesn't know stay, and a verbatim copy is parked once under
+        // `__downgraded:<cell>`, as aio parks it.
+        let newer = stored > u64::from(version);
+        if let (true, Some(old)) = (newer, &old) {
+            crate::filter::reattach(&mut state, old);
+        }
+        let park = format!("__downgraded:{cell}");
         if self.multi {
             put(db, &format!("{}{SEP}{cell}", self.key), &state)?;
+            let parked = format!("{}{SEP}{park}", self.key);
+            if let (true, Some(old), None) = (newer, &old, get(db, &parked)?) {
+                put(db, &parked, old)?;
+            }
         } else {
             let mut doc = get(db, &self.key)?.filter(Value::is_object).unwrap_or_else(|| json!({}));
+            if let (true, Some(old), None) = (newer, &old, doc.get(&park)) {
+                doc[&park] = old.clone();
+            }
             doc[cell] = state;
             put(db, &self.key, &doc)?;
         }
         put(db, &format!("{}:__schema", self.app), &json!(SCHEMA))?;
         put(db, &format!("{}:__persistKey", self.app), &json!(self.key))?;
-        let mut versions = self.versions(db)?;
-        let stored = versions.get(cell).and_then(Value::as_u64).unwrap_or(0);
         if u64::from(version) > stored {
             versions.insert(cell.into(), json!(version));
             put(db, &format!("{}:__versions", self.app), &Value::Object(versions))?;

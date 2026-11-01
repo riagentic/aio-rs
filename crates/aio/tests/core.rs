@@ -373,7 +373,7 @@ mod upgrade {
     }
 
     #[test]
-    fn migrates_with_a_backup_and_refuses_newer_data() {
+    fn migrates_with_a_backup_and_an_older_build_boots_on_newer_data() {
         let (_d, p) = super::tmp();
         use v1::NotesCalls as _;
         let old = Handle::<v1::Notes>::open(&p).unwrap();
@@ -401,10 +401,15 @@ mod upgrade {
             assert_eq!(s.state_at(2).unwrap().lines, ["a", "b"]);
             assert!(s.state_at(1).unwrap_err().0.contains("before the upgrade"));
         });
-        // An older build refuses newer data and leaves it as it was: the stored version only goes up.
-        let before = super::bytes(&p);
-        assert!(Store::<v1::Notes>::open(&p).err().unwrap().0.contains("newer build"));
-        assert_eq!(super::bytes(&p), before);
+        // An older build boots on newer data (aio's downgrade): its writes keep
+        // what it doesn't declare, and the stored version only goes up.
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["t"])).unwrap();
+        drop(old);
+        // Rolled forward: the old build's `text` is kept too, so this build
+        // says so rather than drop it (strict restore), nothing lost.
+        let e = Store::<Notes>::open(&p).err().unwrap().0;
+        assert!(e.contains("fields this build doesn't declare (text)"), "{e}");
     }
 
     #[test]
@@ -1199,7 +1204,7 @@ mod redact {
         let (_d, p) = tmp();
         let h = Handle::<Vault>::open(&p).unwrap();
         let e = h.unlock("Correct horse".into()).unwrap_err();
-        assert!(e.why.contains("vault.unlock is #[redact] and can't change the #[transient] field `open`"), "{e}");
+        assert!(e.why.contains("vault.unlock is #[redact] and can't change what isn't saved"), "{e}");
         assert!(h.store(|s| s.events().unwrap()).is_empty() && !h.state().open, "refused whole");
         h.open().unwrap();
         h.unlock("Correct horse".into()).unwrap();

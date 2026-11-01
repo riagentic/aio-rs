@@ -484,7 +484,8 @@ assert_eq!(t.saved::<Todo>(1, json!({"name": "old"})).unwrap().state().title, "o
 
 let refused = |t: &mut TestCells, v, data| t.saved::<Todo>(v, data).err().unwrap().0;
 assert!(refused(&mut t, 1, json!({})).contains("migrate from v1 failed: no name"));
-assert!(refused(&mut t, 3, json!({})).contains("data from a newer build"));
+assert_eq!(t.saved::<Todo>(3, json!({"title": "y", "later": 1})).unwrap().state().title, "y", "a rollback boots");
+assert!(refused(&mut t, 3, json!({"title": 5})).contains("data from a newer build (v3 > v2) doesn't fit"));
 assert!(refused(&mut t, 2, json!({"title": "x", "owner": "ann"})).contains("fields this build doesn't declare (owner)"));
 # }
 ```

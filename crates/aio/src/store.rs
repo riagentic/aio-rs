@@ -181,6 +181,11 @@ pub struct Store<T: Cell> {
     /// aio's journal watermark the next commit writes (an aio journal's
     /// entry replayed at boot), in the transaction with what it did.
     journal_wm: Option<i64>,
+    /// Booted on a newer build's data (a rollback): its version and its saved
+    /// state, whose fields this build doesn't declare every snapshot keeps,
+    /// stamped with that version (never lowered: rolling forward again
+    /// migrates nothing twice).
+    ahead: Option<(u32, Value)>,
 }
 
 /// A run of coalesced calls by one caller: each call (the last one is the
@@ -629,10 +634,18 @@ fn journal_tail<T: Cell>(
 
 /// Saved state of version `v` as this version of the cell.
 fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
-    if v > T::VERSION {
-        return Err(Error(format!("{}: data from a newer build (v{v} > v{})", T::ID, T::VERSION)));
-    }
     let old: Value = serde_json::from_str(text).map_err(|e| Error(format!("{}: corrupt snapshot: {e}", T::ID)))?;
+    // A newer build's data (a rollback): what this build declares, read as it
+    // is; the rest is kept by every write (`Store::ahead`, aio's downgrade).
+    if v > T::VERSION {
+        return serde_json::from_value(old).map_err(|e| {
+            Error(format!(
+                "{}: data from a newer build (v{v} > v{}) doesn't fit this build: {e}; run the newer build, or give this one a version past v{v} with a `migrate` that converts it down",
+                T::ID,
+                T::VERSION
+            ))
+        });
+    }
     if v == T::VERSION {
         let st: T = serde_json::from_value(old.clone())
             .map_err(|e| Error(format!("{}: snapshot doesn't fit v{v}: {e}", T::ID)))?;
@@ -715,34 +728,45 @@ pub fn shape_of(v: &Value) -> Value {
 fn shaped<T: Cell>(st: &T) -> Result<Option<Value>, Error> {
     let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| st.save()))
         .map_err(|_| Error(format!("{}: its `save` panicked; nothing was saved", T::ID)))?;
-    if saved.is_none() && transients::<T>().next().is_none() {
+    if saved.is_none() && filters::<T>().next().is_none() {
         return Ok(None);
     }
     let mut v = json(saved.as_ref().unwrap_or(st))?;
-    for (at, k) in transients::<T>() {
-        holder(&mut v, at).map(|m| m.remove(k));
-    }
+    unsaved_out::<T>(&mut v);
     Ok(Some(v))
 }
 
-/// Its `#[transient]` fields: the cell's own (`None`) and its `#[aio_cell]`
-/// slices' (`Some(field)`).
-fn transients<T: Cell>() -> impl Iterator<Item = (Option<&'static str>, &'static str)> {
-    let own = T::TRANSIENT.iter().map(|k| (None, *k));
-    own.chain(T::AIO_CELLS.iter().flat_map(|s| s.transient.iter().map(|k| (Some(s.field), *k))))
+/// What it doesn't save (`#[transient]`, `persist(include, exclude)`): the
+/// cell's own (`None`) and its `#[aio_cell]` slices' (`Some(field)`).
+fn filters<T: Cell>() -> impl Iterator<Item = (Option<&'static str>, crate::filter::Filter)> {
+    let own = crate::filter::Filter { include: T::PERSIST_INCLUDE, exclude: T::TRANSIENT };
+    let slices = T::AIO_CELLS.iter().map(|s| (Some(s.field), crate::filter::Filter { include: s.include, exclude: s.transient }));
+    std::iter::once((None, own)).chain(slices).filter(|(_, f)| !f.is_all())
 }
 
-/// The object holding a `transients` field in the state `v`.
-fn holder<'a>(v: &'a mut Value, at: Option<&str>) -> Option<&'a mut serde_json::Map<String, Value>> {
+/// The part of the state `v` a filter's `at` names.
+fn part<'a>(v: &'a mut Value, at: Option<&str>) -> Option<&'a mut Value> {
     match at {
-        None => v.as_object_mut(),
-        Some(f) => v.get_mut(f)?.as_object_mut(),
+        None => Some(v),
+        Some(f) => v.get_mut(f),
     }
 }
 
-/// A `transients` field's value in the state `v`.
-fn transient<'a>(v: &'a Value, at: Option<&str>, k: &str) -> Option<&'a Value> {
-    at.map_or(Some(v), |f| v.get(f))?.get(k)
+/// `v` without what it doesn't save.
+fn unsaved_out<T: Cell>(v: &mut Value) {
+    for (at, f) in filters::<T>() {
+        part(v, at).map(|p| crate::filter::strip(p, f));
+    }
+}
+
+/// `v` (saved) with what it doesn't save taken from `was` (a state).
+fn unsaved_from<T: Cell>(v: &mut Value, was: &Value) {
+    for (at, f) in filters::<T>() {
+        let from = at.map_or(Some(was), |a| was.get(a));
+        if let (Some(p), Some(from)) = (part(v, at), from) {
+            *p = crate::filter::graft(p, from, f);
+        }
+    }
 }
 
 /// What a problem report shows of `st`: what is saved of it. During a
@@ -754,8 +778,9 @@ pub(crate) fn reported<T: Cell>(st: &T) -> Option<Value> {
         false => shaped(st).ok()?.or_else(|| json(st).ok())?,
         true => json(st).ok()?,
     };
-    for (at, k) in transients::<T>().chain(T::SERVER.iter().map(|k| (None, *k))) {
-        holder(&mut v, at).map(|m| m.remove(k));
+    unsaved_out::<T>(&mut v);
+    if let Some(m) = v.as_object_mut() {
+        T::SERVER.iter().for_each(|k| _ = m.remove(*k));
     }
     Some(v)
 }
@@ -903,16 +928,17 @@ fn redacted<T: Cell>(method: &str, before: &T, after: &T) -> Result<Option<Value
     if !T::redacts(method) {
         return Ok(None);
     }
-    let (was, mut left) = (crate::json(before)?, crate::json(after)?);
-    for (at, k) in transients::<T>() {
-        crate::ensure!(
-            transient(&was, at, k) == transient(&left, at, k),
-            "{}.{method} is #[redact] and can't change the #[transient] field `{k}`: its arguments aren't kept, so replay couldn't bring it back",
-            T::ID
-        );
-        holder(&mut left, at).map(|m| m.remove(k));
-    }
-    Ok(Some(serde_json::json!({ REDACTED: left })))
+    let (was, left) = (crate::json(before)?, crate::json(after)?);
+    let mut kept = left.clone();
+    unsaved_out::<T>(&mut kept);
+    let mut back = kept.clone();
+    unsaved_from::<T>(&mut back, &was);
+    crate::ensure!(
+        back == left,
+        "{}.{method} is #[redact] and can't change what isn't saved (#[transient], persist(include, exclude)): its arguments aren't kept, so replay couldn't bring it back",
+        T::ID
+    );
+    Ok(Some(serde_json::json!({ REDACTED: kept })))
 }
 
 /// The state a `#[redact]` event's args keep (see [`REDACTED`]).
@@ -925,11 +951,7 @@ fn made(args: &Value) -> Option<&Value> {
 fn unredacted<T: Cell>(st: &T, made: &Value, v: u32) -> Result<T, String> {
     let left: T = decode(&made.to_string(), v).map_err(|e| e.0)?;
     let (mut v, was) = (json(&left).map_err(|e| e.0)?, json(st).map_err(|e| e.0)?);
-    for (at, k) in transients::<T>() {
-        if let (Some(m), Some(x)) = (holder(&mut v, at), transient(&was, at, k)) {
-            m.insert(k.to_string(), x.clone());
-        }
-    }
+    unsaved_from::<T>(&mut v, &was);
     unshaped(v).map_err(|e| e.0)
 }
 
@@ -1015,6 +1037,7 @@ impl<T: Cell> Store<T> {
             keep: None,
             coalesce: PERSIST_DEBOUNCE,
             journal_wm: None,
+            ahead: None,
         };
         s.snap(true).expect("in-memory snapshot");
         s
@@ -1070,10 +1093,18 @@ impl<T: Cell> Store<T> {
             (None, false) => bind(&db, T::ID, T::VERSION, T::TABLES)?.map(|(raw, v)| (None, raw, v)),
             _ => seed,
         };
-        let (from, mut st, migrated) = match base {
+        let (from, mut st, migrated) = match &base {
             None => (0, T::default(), false),
-            Some((seq, v, text)) => (seq as u64, decode::<T>(&text, v)?, v != T::VERSION),
+            Some((seq, v, text)) => (*seq as u64, decode::<T>(text, *v)?, *v < T::VERSION),
         };
+        let ahead = base.filter(|(_, v, _)| *v > T::VERSION).map(|(_, v, text)| {
+            eprintln!(
+                "[aio] {}: its data is from a newer build (v{v} > v{}): it boots, and keeps that build's fields it doesn't declare; fields it declares may be misread. Roll forward, or give this build a version past v{v} with a `migrate` that converts it down",
+                T::ID,
+                T::VERSION
+            );
+            (v, serde_json::from_str(&text).unwrap_or(Value::Null))
+        });
         let last = last.max(from);
         replay(&db, &mut st, from, last, true)?;
         let back = restored(&st)?;
@@ -1097,6 +1128,7 @@ impl<T: Cell> Store<T> {
             keep: None,
             coalesce: PERSIST_DEBOUNCE,
             journal_wm: None,
+            ahead,
         };
         // A failed snapshot only costs time: the next boot replays the log.
         if (migrated || last > from)
@@ -1765,9 +1797,17 @@ impl<T: Cell> Store<T> {
     /// `SNAP_EVERY` events later).
     fn snap(&mut self, exact: bool) -> Result<(), Error> {
         let Some(text) = snapshot(&*self.state, exact)? else { return Ok(()) };
+        let (v, text) = match &self.ahead {
+            None => (T::VERSION, text),
+            Some((v, newer)) => {
+                let mut mine: Value = serde_json::from_str(&text).map_err(|e| Error(e.to_string()))?;
+                crate::filter::reattach(&mut mine, newer);
+                (*v, mine.to_string())
+            }
+        };
         self.db.execute(
             "INSERT OR REPLACE INTO snap (cell, seq, v, state) VALUES (?1, ?2, ?3, ?4)",
-            params![T::ID, self.seq as i64, T::VERSION, text],
+            params![T::ID, self.seq as i64, v, text],
         )?;
         self.unsnapped = 0;
         Ok(())

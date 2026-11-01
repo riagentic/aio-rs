@@ -270,7 +270,10 @@ fn files_aio_would_refuse_are_refused_and_kept() {
     let cases: [(&[(&str, Value)], &str); 4] = [
         (&[("app:__schema", json!(2))], "newer aio"),
         (&[("state", json!([1]))], "not an object of cells"),
-        (&[("state", json!({ "inbox": {} })), ("app:__versions", json!({ "inbox": 2 }))], "newer build"),
+        (
+            &[("state", json!({ "inbox": { "posts": "one" } })), ("app:__versions", json!({ "inbox": 2 }))],
+            "newer build (v2 > v1) doesn't fit this build",
+        ),
         (&[("state", json!({}))], "a table `log`"),
     ];
     for (i, (rows, why)) in cases.into_iter().enumerate() {
@@ -1144,14 +1147,28 @@ fn a_cell_of_many_slices_writes_them_all_or_none() {
 }
 
 #[test]
-fn a_slice_from_a_newer_aio_is_refused_and_the_file_kept() {
+fn a_slice_from_a_newer_aio_boots_and_keeps_its_fields_one_that_doesnt_fit_is_refused() {
     let (_d, p) = purse_file(true);
     let c = rusqlite::Connection::open(&p).unwrap();
     c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'w:__versions'", [json!({ "network": 3 }).to_string()]).unwrap();
+    c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'state\x1fnetwork'", [json!({ "rpc": "r", "later": 1 }).to_string()])
+        .unwrap();
+    drop(c);
+    let mut w = Store::<Purse>::open_aio(&p, "w").unwrap();
+    assert_eq!(w.state().network.rpc, "r");
+    w.call(&By::Test, "theme", json!(["calm"])).unwrap();
+    drop(w);
+    let rows = kv(&p);
+    assert_eq!(rows["state\x1fnetwork"], json!({ "rpc": "r", "later": 1 }), "the newer build's field kept");
+    assert_eq!(rows["w:__versions"]["network"], json!(3), "its stamp never lowered");
+    let (_d, p) = purse_file(true);
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'w:__versions'", [json!({ "network": 3 }).to_string()]).unwrap();
+    c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'state\x1fnetwork'", [json!({ "rpc": [1] }).to_string()]).unwrap();
     drop(c);
     let before = kv(&p);
     let e = Store::<Purse>::open_aio(&p, "w").err().unwrap().0;
-    assert!(e.contains("network: aio data from a newer build (v3 > v2)"), "{e}");
+    assert!(e.contains("network: aio data from a newer build (v3 > v2) doesn't fit"), "{e}");
     assert_eq!(kv(&p), before);
     assert!(table(&p, "sqlite_master").iter().all(|t| !t.contains("\"log\"")), "no aio-rs table made");
 }
