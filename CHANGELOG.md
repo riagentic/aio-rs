@@ -276,6 +276,24 @@ version may break things.
 
 ### Fixed
 
+- The app quitting (it stops, its socket closes) right after the page
+  vetoed a close (`window.close()` with a beforeunload handler) quits: the
+  vetoed close, still settling, took the quit's own close of that window
+  with it and the runtime stayed up; the windows left are closed again
+  until they are gone.
+- The desktop splash shows a second after its page loaded when its window
+  never paints while hidden (a loaded machine): it stayed hidden for good;
+  a splash already gone never comes back.
+- A copy (`Remote`) hears this process's diagnostic bus from before it is
+  online: a problem said just as the link came up was never relayed to the
+  server's bus.
+- `aio::testing::TestUi` counts every render however its tests share the
+  process: with one tracing listener alive, tracing-core asks only the
+  registering thread's own, so a render first met on a thread with none
+  muted it for all; a second listener is kept for good.
+- `aio::testing::TestBrowser` waits up to 120 s for a browser's DevTools
+  port (a hang guard): the first system Chrome of a Windows CI runner took
+  more than 30 s while running.
 - An app that isn't running or has no server, asked for a pairing code or
   its profile, is told so plainly with what to type ("notes isn't running:
   start it with `ax start notes`"; no server: the aio.toml lines that
@@ -305,9 +323,6 @@ version may break things.
   unmount, a focus, a rect) run in the order the app sent them; a big one
   could run after a small one sent later, so two `<Browser>`s could leave
   one empty and an island swapped for another could stay the old one.
-- `aio::testing::TestUi` counts every render (`components()`) when tests
-  run in parallel: a render callsite another thread registered at the same
-  moment could be cached as of no interest, and its renders went uncounted.
 - The test suite holds under load: timing tests wait on what they check
   (a condition, a gate the test opens, a page-side record of each style)
   instead of a fixed sleep or a wall-clock window; bounds on time are hang

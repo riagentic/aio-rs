@@ -11,9 +11,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How long a browser may take to open its DevTools port (a cold start on a
-/// loaded machine took more than 10 s in aio).
-const START: Duration = Duration::from_secs(30);
+/// How long a browser may take to open its DevTools port: a hang guard, not
+/// a measure. A cold start on a loaded machine took more than 10 s in aio;
+/// the first system Chrome of a Windows CI runner (its files read cold and
+/// scanned) took more than 30 s while running, one start at a time.
+const START: Duration = Duration::from_secs(120);
 
 /// A launched headless Chromium; dropped, it is killed and its profile goes.
 pub struct TestBrowser {

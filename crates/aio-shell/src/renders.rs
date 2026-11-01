@@ -318,6 +318,49 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    /// A second listener kept for good. With one alive, tracing-core asks only
+    /// the registering thread's own: a callsite first met on a thread with
+    /// none (another test's view) is cached as of no interest for every
+    /// thread, and this test's subscriber misses its diffs.
+    fn kept() {
+        static KEPT: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        KEPT.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+    }
+
+    /// The case `kept` is for: this test's listener hears a span another
+    /// thread, with none of its own, met first.
+    #[test]
+    fn a_listener_hears_a_span_first_met_on_a_thread_with_none() {
+        struct Probe(Arc<std::sync::atomic::AtomicUsize>);
+        impl tracing::Subscriber for Probe {
+            fn register_callsite(&self, m: &'static Metadata<'static>) -> Interest {
+                if m.name() == "aio_probe" { Interest::always() } else { Interest::never() }
+            }
+            fn enabled(&self, m: &Metadata<'_>) -> bool {
+                m.name() == "aio_probe"
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, _: &Event<'_>) {}
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+        fn probe() {
+            drop(tracing::info_span!("aio_probe"));
+        }
+        kept();
+        let heard = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tracing::subscriber::with_default(Probe(heard.clone()), || {
+            std::thread::spawn(probe).join().unwrap();
+            probe();
+        });
+        assert_eq!(heard.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn a_burst_is_fifty_renders_within_a_second_said_once_by_name() {
         let (mut b, t) = (Bursts::default(), Instant::now());
@@ -344,10 +387,7 @@ mod tests {
         let s = said.clone();
         let wire = Tripwire::new(move |l| s.lock().unwrap().push(l.into()));
         tracing::subscriber::with_default(wire, || {
-            // A scoped subscriber's interest in a callsite another test thread
-            // registered at the same moment can be cached as none (tracing-core):
-            // asked again with this one in place.
-            tracing::callsite::rebuild_interest_cache();
+            kept();
             let mut dom = dioxus_core::VirtualDom::new(app);
             dom.rebuild_in_place();
             for _ in 0..LIMIT {
@@ -398,7 +438,7 @@ mod tests {
             v.as_array().unwrap().iter().map(walk).collect()
         };
         tracing::subscriber::with_default(wire, || {
-            tracing::callsite::rebuild_interest_cache();
+            kept();
             let mut dom = dioxus_core::VirtualDom::new(app);
             dom.rebuild_in_place();
             let row = |n: u32| json!(["Row", n, []]);
@@ -450,7 +490,7 @@ mod tests {
         let wire = Tripwire::new(|_| {});
         let tree = wire.tree();
         tracing::subscriber::with_default(wire, || {
-            tracing::callsite::rebuild_interest_cache();
+            kept();
             let mut dom = dioxus_core::VirtualDom::new(app);
             dom.rebuild_in_place();
             dom.in_runtime(|| TICK.get().unwrap().set(1));
