@@ -314,8 +314,12 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
         let line = crate::report::redact(&line);
         let line = runtime_noise(&line).unwrap_or(line);
         // The window's render probe, into vitals (off this thread: what it
-        // says goes to stderr, which this thread drains).
-        if let Some((status, ms)) = crate::vitals::render_step(&line) {
+        // says goes to stderr, which this thread drains); ten a second at most.
+        static HEARD: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        if let Some((status, ms)) = crate::vitals::render_step(&line)
+            && now_ms() - HEARD.load(Relaxed) >= 100
+        {
+            HEARD.store(now_ms(), Relaxed);
             _ = std::thread::Builder::new().name("aio-vitals".into()).spawn(move || crate::vitals::render_heard(status, ms));
         }
         tally.count(&line);

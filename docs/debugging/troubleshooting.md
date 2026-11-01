@@ -133,7 +133,7 @@ Nothing went red, yet something didn't happen:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| A clone fails: no aio-rs at `../…/crates/aio` | the app was made with `--aio` (a checkout beside it) | `ax framework <version>`: aio-rs from git ([setup](../basics/setup.md#where-an-app-gets-aio-rs-from)) |
+| A clone fails: no aio-rs at `../…/crates/aio` | the app was made with `--aio` (a checkout beside it) | `ax pin <version>`: aio-rs from git ([setup](../basics/setup.md#where-an-app-gets-aio-rs-from)) |
 | `ax create --aio` refuses: the app and the checkout share no folder | a path through the root would name this machine's folders | put the app and the checkout in one folder, or leave out `--aio` |
 | the build fails naming an `aio.toml` key | `aio.toml` is parsed as the app builds: a typo or a refused value | fix that key ([reference](../reference/aio-toml.md#common-mistakes)) |
 | the build fails at link time (`cc`, `link.exe` not found) | no C toolchain | [setup: Rust and a C toolchain](../basics/setup.md#1-rust-and-a-c-toolchain) |

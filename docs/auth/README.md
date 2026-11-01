@@ -13,7 +13,7 @@ three).
 | You want | Use |
 |---|---|
 | a tool for yourself on this machine | nothing: loopback and the key, as made |
-| the app on your phone or another PC on the LAN | `--expose` (TLS on), `ax pin` + `ax pair` |
+| the app on your phone or another PC on the LAN | `--expose` (TLS on), `ax pair` |
 | a small team with logins | `[accounts] on = true`, `ax auth <app> create` |
 | sign-in with an identity provider | `[accounts]` and `Http::oidc` (feature `oidc`) |
 | a service whose callers are machines | `Http::users(Users::map(..))`: a token per caller |
@@ -48,7 +48,7 @@ A served app (`[app] mode = "client-server"` or `"server"`) listens where
   `share:` line): `share: https://192.168.1.5:8443/ — with the app's
   key, …; key file: <data>/sync.token`. A wildcard bind is shown at this
   machine's LAN address. The key itself is never printed (the log masks
-  any `token=`): its file is named, and with `[server] pairing`, `ax pin`
+  any `token=`): its file is named, and with `[server] pairing`, `ax pair`
   for a code. With users, sessions or accounts the line says what each
   caller shows instead.
 - On Windows and macOS an exposed boot also prints a `firewall:` line:
@@ -115,16 +115,16 @@ ax profile notes --out notes.aioapp                         # the key, for anoth
 ## Pairing a device
 
 `[server] pairing = true` (feature `tls`) lets a new device get the key
-with a short code: `ax pin <app>` asks the running app for one, and the
+with a short code: `ax pair <app>` asks the running app for one, and the
 device runs `ax pair <app> <host:port> <code>`.
 
 - The code is 8 digits and never crosses the wire: both sides run CPace
   (a PAKE) bound to the TLS certificate the device sees, so a relay with
   a certificate of its own learns nothing and the code is not spent.
-  `ax pin <app> --plain` makes a 6-digit code that is sent as it is, for
+  `ax pair <app> --plain` makes a 6-digit code that is sent as it is, for
   aio's older clients.
 - A code lives 3 minutes and works once. 8 wrong guesses from one address
-  lock that address out; 20 wrong in all burn the code (`ax pin` makes a
+  lock that address out; 20 wrong in all burn the code (`ax pair <app>` makes a
   new one, no restart).
 - The device keeps the profile and pins the app's root certificate, never
   the OS trust store.

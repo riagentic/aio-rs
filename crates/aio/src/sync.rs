@@ -629,7 +629,7 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     }
     #[cfg(feature = "tls")]
     if let Some(pairing) = pairing {
-        // Same-machine tools that hold the key mint PINs (`ax pin`); a
+        // Same-machine tools that hold the key mint PINs (`ax pair <app>`); a
         // request a proxy relayed is from elsewhere, whatever the socket says.
         let (minter, key, trust) = (pairing.clone(), token.clone(), Arc::new(trust_proxy.clone()));
         app = app.route(

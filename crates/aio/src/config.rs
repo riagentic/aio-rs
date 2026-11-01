@@ -138,7 +138,7 @@ pub fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
 /// pure): the address another device opens (a wildcard bind as `lan`, else
 /// said to substitute it) and what it must show. The key itself is never
 /// printed (logs mask it anyway): its file is named, and with `pairing`,
-/// `ax pin` for a code.
+/// `ax pair` for a code.
 pub fn share_says(l: &Listen, lan: Option<std::net::Ipv4Addr>, gate: Gate, key_file: &std::path::Path, pairing: bool) -> Vec<String> {
     let (host, port) = l.addr.rsplit_once(':').unwrap_or((l.addr.as_str(), "0"));
     let wildcard = matches!(host, "0.0.0.0" | "[::]");
@@ -160,7 +160,7 @@ pub fn share_says(l: &Listen, lan: Option<std::net::Ipv4Addr>, gate: Gate, key_f
     };
     let mut out = vec![format!("share: {url}{note} — {who}")];
     if pairing && gate == Gate::Key {
-        out.push("pair a device: `ax pin <app>` makes a code it enters once".into());
+        out.push("pair a device: `ax pair <app>` makes a code it enters once".into());
     }
     out
 }
@@ -564,7 +564,7 @@ mod tests {
         let lan = Some(std::net::Ipv4Addr::new(192, 168, 1, 5));
         let say = share_says(&at("0.0.0.0:8443", true), lan, Gate::Key, key, true);
         assert!(say[0].starts_with("share: https://192.168.1.5:8443/ — with the app's key"), "{say:?}");
-        assert!(say[0].contains("/d/sync.token") && say[1].contains("ax pin"), "{say:?}");
+        assert!(say[0].contains("/d/sync.token") && say[1].contains("ax pair <app>"), "{say:?}");
         let say = share_says(&at("0.0.0.0:80", false), None, Gate::Accounts, key, true);
         assert_eq!(say.len(), 1, "a code pairs with the key only");
         assert!(say[0].starts_with("share: http://0.0.0.0:80/ (substitute this machine's LAN address) — users sign in"));

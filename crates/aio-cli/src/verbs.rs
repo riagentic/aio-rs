@@ -32,12 +32,15 @@ to the app; --target: its [build] targets (ax build --list); --css
 tailwind: Tailwind writes its stylesheet; a failure leaves nothing behind",
     ),
     v(
-        "framework",
-        "framework [version] [--aio dir]",
-        "the app's aio-rs (run in its folder): where its Cargo.toml files take
-it from; version (0.2.0, main, latest): every one moved to that release
-of aio-rs from git, --aio: to that checkout (relative), Cargo.lock
-following (a clone made on another machine: ax framework <version>)",
+        "pin",
+        "pin <app> [version] [--major]",
+        "which aio-rs the app uses (aio's am pin): what its Cargo.toml files
+ask for, what its Cargo.lock built, this ax's version and whether they
+match, aio-rs's releases (exit 1: drift); version: every aio-rs
+dependency moved to that release (0.2.0), main (the branch tip), latest
+(the newest in the app's major; --major: any) or an aio-rs checkout's
+folder (this machine only), Cargo.lock following; all or nothing; <app>:
+its name or folder, left out inside it",
     ),
     v(
         "dev",
@@ -460,7 +463,7 @@ exit 1 while a needed one is missing; --check: look only, fetch nothing",
 install script, checked against its SHA256SUMS (it checks the archive's
 SHA-256 before anything runs); --aio: ax built from that checkout instead
 (cargo install; plain ax upgrade returns to a release); apps keep their
-own aio-rs (ax framework)",
+own aio-rs (ax pin)",
     ),
     v(
         "uninstall",
@@ -470,8 +473,13 @@ own aio-rs (ax framework)",
 build folder target/)",
     ),
     v("runtime", "runtime [--fetch]", "where the shared runtime is (fetch it if missing); --prune: ax prune"),
-    v("pin", "pin <app> [--plain]", "a pairing code from the running app (8 digits; 6 with --plain)"),
-    v("pair", "pair <app> <host:port> <code>", "pair this device with an app's server"),
+    v(
+        "pair",
+        "pair <app> [host:port] [code] [--plain]",
+        "a fresh pairing code from the running app (aio's am pair; 8 digits,
+6 with --plain; valid 3 minutes, once); with host:port and code: pair
+this device with that app's server by its code",
+    ),
     v(
         "prune",
         "prune [--yes] [--days N] [--keep a,b]",
@@ -533,7 +541,7 @@ const MOVED: &[(&str, &str)] = &[
     ("dispatch", "ax calls a method with `ax call <app> <cell> <method> [arg…]`"),
     (
         "fix",
-        "a clone builds as it is (aio-rs from git); ax framework <version> moves an app's aio-rs, --aio <dir> to a checkout",
+        "a clone builds as it is (aio-rs from git); ax pin <version> moves an app's aio-rs, ax pin <dir> to a checkout",
     ),
     ("prune versions", "ax has no version store to prune: an app pins aio-rs in its Cargo.lock"),
     ("theme", "ax theme adopt <app> [--force]: aio-rs's theme into the app, as its own file"),
@@ -590,8 +598,8 @@ const EVERYDAY: &[(&str, &str)] = &[
 /// Flags that pick where the app runs (its home), and the verbs about an
 /// app that take none: they work on its source, not a running copy.
 const HOMED: [&str; 4] = ["--app", "--profile", "--instance", "--home"];
-const UNHOMED: [&str; 9] =
-    ["dev", "keygen", "release", "update", "build", "config", "remove", "install", "theme adopt"];
+const UNHOMED: [&str; 10] =
+    ["dev", "keygen", "release", "update", "build", "config", "remove", "install", "theme adopt", "pin"];
 
 const FOOT: &str = "Inside an app's folder <app> may be left out; --app <name> names it anywhere.
 <app>@<profile>, --profile, --instance, --home: that copy of the app (as its launch takes them);
@@ -925,7 +933,8 @@ mod tests {
         assert!(r("events app --last").unwrap_err().contains("--last needs a value"));
         assert!(r("health app --json=1").unwrap_err().contains("--json takes no value"));
         assert!(r("health app extra").unwrap_err().contains("one word too many: extra"));
-        assert!(r("pair host").unwrap_err().contains("too few words"));
+        assert!(r("smoke").unwrap_err().contains("too few words"));
+        assert!(r("pair app host code extra").unwrap_err().contains("one word too many: extra"));
         // After `--`, a word that looks like a flag is a word.
         assert_eq!(run("call app c m -- --x"), ["call", "--", "app", "c", "m", "--x"]);
         assert_eq!(run("health app --json"), ["health", "--json", "--", "app"]);
