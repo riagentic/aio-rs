@@ -392,13 +392,14 @@ assert!(!h.state().importing);
 
 ## 7. The window
 
-Views are Dioxus components. `aio::client!` connects them to the cell;
-`part(|c| &c.field)` reads one field and re-renders only when it changes;
+Views are `aio::ui` components (`use aio::ui::prelude::*`). `aio::client!`
+connects them to the cell; `part(|c| &c.field)` is a handle on one field,
+re-rendering the view only when it changes;
 `act!(method(args))` calls a method from a handler:
 
 ```rust,no_run
 use aio::act;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::data]
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -439,7 +440,7 @@ impl Todo {
 aio::client!(Todo, todo);
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live(); // once, in the root
     rsx! {
         main { NewTask {} Tasks {} }
@@ -447,24 +448,24 @@ pub fn App() -> Element {
 }
 
 #[component]
-fn NewTask() -> Element {
+fn NewTask() -> View {
     let draft = part(|t| &t.draft);
     rsx! {
         form { onsubmit: move |e| { e.prevent_default(); _ = act!(add()); },
             input { "data-t": "title", placeholder: "What needs doing?", value: "{draft}",
                 oninput: move |e| _ = act!(type_draft(e.value())) }
-            button { r#type: "submit", class: aio::ui::btn("primary"), disabled: draft.trim().is_empty(), "Add" }
+            button { r#type: "submit", class: aio::ui::btn("primary"), disabled: draft.with(|d| d.trim().is_empty()), "Add" }
         }
     }
 }
 
 #[component]
-fn Tasks() -> Element {
+fn Tasks() -> View {
     let tasks = part(|t| &t.tasks);
-    let left = tasks.iter().filter(|t| !t.done).count();
+    let left = tasks.with(|ts| ts.iter().filter(|t| !t.done).count());
     rsx! {
         ul { "data-t": "tasks",
-            for t in tasks.iter() {
+            for t in tasks.get() {
                 li { key: "{t.id}",
                     label {
                         input { r#type: "checkbox", checked: t.done,
@@ -491,9 +492,10 @@ assert_eq!(ui.text("left"), "1 left");
 - Plain `cargo test` or `ax test todo` runs the window's test in the real
   page, headless: no screen needed.
 - The draft lives in the cell, so it survives a restart; view-only state
-  (an open menu) goes in Dioxus signals.
+  (an open menu) goes in a view's `signal`.
 - A view that reads the whole state (`todo()`) in its render re-renders
-  on every commit; the dev build names it. Read fields with `part`.
+  on every commit; the dev build names it. Read fields with `part`: a
+  handle (`.get()`, `.with(|v| ..)`, `"{p}"`) that follows its field only.
 
 More: [views](../ui/views.md), [the kit](../ui/kit.md) (inputs, lists,
 dialogs, keys).

@@ -271,26 +271,26 @@ charting library can run inside a view as a `WebIsland`
 # }
 use aio::act;
 use aio::kit::ConnectionStatus;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::client!(Metrics, metrics);
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live(); // once, in the root: effects, schedules and other screens re-render it
     let theme = aio::kit::theme_css(aio::kit::theme::hue("dash"));
     rsx! {
         style { {aio::ui::page_css(&[theme.as_str()], false)} }
-        ConnectionStatus { status: use_status()() }
+        ConnectionStatus { status: use_status().get() }
         main { Cards {} Chart {} }
     }
 }
 
 #[component]
-fn Cards() -> Element {
-    let load = *part(|m| &m.load);
-    let mem = *part(|m| &m.mem_mb);
-    let requests = *part(|m| &m.requests);
+fn Cards() -> View {
+    let load = part(|m| &m.load).get();
+    let mem = part(|m| &m.mem_mb).get();
+    let requests = part(|m| &m.requests).get();
     rsx! {
         section { class: "cards",
             Card { label: "Load", value: format!("{load:.2}") }
@@ -302,7 +302,7 @@ fn Cards() -> Element {
 }
 
 #[component]
-fn Card(label: &'static str, value: String) -> Element {
+fn Card(label: &'static str, value: String) -> View {
     rsx! {
         div { class: "card", "data-t": "{label}",
             small { "{label}" }
@@ -319,12 +319,12 @@ fn points(loads: &[f64], peak: f64, (w, h): (f64, f64)) -> String {
 }
 
 #[component]
-fn Chart() -> Element {
+fn Chart() -> View {
     let history = part(|m| &m.history);
-    if history.is_empty() {
+    if history.with(Vec::is_empty) {
         return rsx! { p { "data-t": "no-history", "No history for this account." } };
     }
-    let loads: Vec<f64> = history.iter().map(|s| s.load).collect();
+    let loads: Vec<f64> = history.with(|h| h.iter().map(|s| s.load).collect());
     let line = points(&loads, metrics().peak(), (300.0, 60.0));
     rsx! {
         svg { "data-t": "chart", view_box: "0 0 300 60", width: "100%", height: "120", role: "img",

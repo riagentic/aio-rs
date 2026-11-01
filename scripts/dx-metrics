@@ -107,7 +107,8 @@ EDITS = {
     "live_css_s": ("assets/style.css", None, "\nh1 { letter-spacing: 3px; }\n",
                    f"getComputedStyle({COUNT}).letterSpacing == '3px'"),
     "live_rsx_s": ("src/lib.rs", '"Add"', '"Add one"', "document.querySelector('button').textContent == 'Add one'"),
-    "live_logic_s": ("src/lib.rs", "*part(|c| &c.count);", "*part(|c| &c.count) + 100;", f"{COUNT}.textContent == '100'"),
+    "live_logic_s": ("src/lib.rs", 'h1 { "data-t": "count", "{n}" }', 'h1 { "data-t": "count", {(n.get() + 100).to_string()} }',
+                     f"{COUNT}.textContent == '100'"),
 }
 
 

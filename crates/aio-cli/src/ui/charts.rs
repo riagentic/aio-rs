@@ -1,6 +1,6 @@
 //! Metric charts (amui's `ui/charts.tsx`): an area trend as inline SVG, no
 //! dependency, with the current value, the peak and the mean as text.
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 const W: f64 = 420.0;
 const H: f64 = 90.0;
@@ -40,7 +40,7 @@ pub fn peak_mean(values: &[f64]) -> (f64, f64) {
 
 /// A filled trend of `values` (amui's `AreaChart`), in `color` (a CSS colour).
 #[component]
-pub fn AreaChart(title: String, values: Vec<f64>, unit: String, color: String) -> Element {
+pub fn AreaChart(title: String, values: Vec<f64>, unit: String, color: String) -> View {
     let t = trend(&values, &unit);
     let (peak, avg) = peak_mean(&values);
     let digits = if unit == "%" { 1 } else { 0 };

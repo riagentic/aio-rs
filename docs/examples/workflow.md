@@ -24,7 +24,7 @@ aio-rs. Prerequisites: [cells](../state/cells.md) and
 | `Stock` | a cell | what is on hand, and what each order holds |
 | `Checkout` | a cell with a machine | the cart, the phase, the receipt or the error |
 | `pay` | an effect of `Checkout` | reserve the stock, charge the card, report back |
-| the window | Dioxus views | the cart, a Pay button, the outcome |
+| the window | `aio::ui` views | the cart, a Pay button, the outcome |
 
 The phases of a checkout, and the calls that move between them:
 
@@ -469,7 +469,7 @@ buttons are a courtesy.
 #     pub fn total(&self) -> u64 { self.lines.iter().map(|l| u64::from(l.qty) * l.cents).sum() }
 # }
 use aio::act;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::client!(Checkout, checkout);
 
@@ -478,19 +478,19 @@ fn money(cents: u64) -> String {
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
     rsx! { main { Cart {} Pay {} } }
 }
 
 #[component]
-fn Cart() -> Element {
+fn Cart() -> View {
     let lines = part(|c| &c.lines);
-    let shopping = *part(|c| &c.phase) == Phase::Shopping;
+    let shopping = part(|c| &c.phase).get() == Phase::Shopping;
     rsx! {
         button { "data-t": "add-tea", disabled: !shopping, onclick: move |_| _ = act!(add("tea".into(), 1, 450)), "Add tea" }
         ul { "data-t": "lines",
-            for l in lines.iter() {
+            for l in lines.get() {
                 li { key: "{l.item}", "{l.qty} × {l.item} ",
                     button { disabled: !shopping, onclick: { let item = l.item.clone(); move |_| _ = act!(remove(item.clone())) }, "Remove" }
                 }
@@ -500,10 +500,10 @@ fn Cart() -> Element {
 }
 
 #[component]
-fn Pay() -> Element {
-    let phase = *part(|c| &c.phase);
+fn Pay() -> View {
+    let phase = part(|c| &c.phase).get();
     let total = checkout().total(); // a derived value, cached per state
-    let why = part(|c| &c.error).as_deref().unwrap_or_default().to_string();
+    let why = part(|c| &c.error).get().unwrap_or_default();
     rsx! {
         p { "data-t": "phase", "{phase:?}" }
         match phase {

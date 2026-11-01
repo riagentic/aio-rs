@@ -3,7 +3,7 @@
 //! air-router-path-matching). Its own process: the host's Back in
 //! tests/route.rs is one per process, asked of every live router.
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::router!();
 
@@ -23,19 +23,19 @@ fn a_page_names_its_title_with_its_fields() {
 }
 
 #[component]
-fn Layout(name: String) -> Element {
+fn Layout(name: String) -> View {
     rsx! {
         section { "data-t": "{name}", h1 { "{name}" } Outlet {} }
     }
 }
 
 #[component]
-fn Who() -> Element {
+fn Who() -> View {
     let ps = params();
     rsx! { p { "data-t": "who", "{ps:?}" } }
 }
 
-fn tree() -> Element {
+fn tree() -> View {
     rsx! {
         div { "data-t": "bare", Outlet {} }
         Route { path: "/dash", element: rsx! { Layout { name: "dash" } },

@@ -130,7 +130,7 @@ Every app `ax create` makes pins aio-rs's Rust in its
 - Node, npm or Deno: nothing of aio-rs runs on them.
 - A system Chromium for UI tests: they draw in the pinned Electron.
 - OpenSSL or pkg-config: TLS is rustls.
-- `cargo install dioxus-cli`: `ax setup` fetches the pinned dx.
+- Building `dx` (the hot-patch tool `ax dev` drives) from source: `ax setup` fetches the pinned one.
 - curl for AppImages: aio-rs fetches the AppImage runtime itself (SHA-256 checked).
 
 ## 4. Typing the commands on each OS

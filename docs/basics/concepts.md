@@ -160,7 +160,7 @@ methods later or on a cadence, and survive restarts.
 
 ## Views
 
-Dioxus components read a cell's fields (`part(|c| &c.field)`) and call its
+Components (`aio::ui`, `rsx!`) read a cell's fields (`part(|c| &c.field)`) and call its
 methods (`act!(method(args))`). A view re-renders when a field it reads
 changes. [Views](../ui/views.md).
 

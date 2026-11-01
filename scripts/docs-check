@@ -24,8 +24,10 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
-# Pages of measurements, not the guide: no doctests needed.
+# Pages of measurements and design records (docs/design/, whose code is a
+# spike's on its own branch), not the guide: no doctests needed.
 RECORDS = {"comparison.md"}
+DESIGN = DOCS / "design"
 # Personal paths, v2 as a name, real-looking emails; plus the words
 # (one per line) of the file AIO_PRIVATE_TERMS names: private names are
 # kept out of this public file too.
@@ -103,7 +105,7 @@ for page in pages:
     for n, line in enumerate(text.splitlines(), 1):
         if PRIVATE.search(line):
             say(page, n, f"names something private: {PRIVATE.search(line).group(0)}")
-    if page.parent == ROOT or page.name in RECORDS and page.parent == DOCS:
+    if page.parent in (ROOT, DESIGN) or page.name in RECORDS and page.parent == DOCS:
         continue
     rel = page.relative_to(DOCS).as_posix()
     rust = [b for b in blocks(text) if b[0].startswith("rust")]

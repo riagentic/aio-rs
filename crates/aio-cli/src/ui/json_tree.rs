@@ -2,9 +2,9 @@
 //! fold, primitives are coloured by type, a folded container shows its
 //! count. One set of open paths drives it; a node with thousands of
 //! children shows its first [`CAP`] (a huge node would freeze the page).
-use super::app::View;
+use super::app::ViewState;
 use aio::serde_json::Value;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::rc::Rc;
 
 /// Children shown per node.
@@ -26,7 +26,7 @@ fn step(k: &str) -> String {
 }
 
 /// A primitive, coloured by its type (strings cut at 120).
-fn primitive(v: &Value) -> Element {
+fn primitive(v: &Value) -> View {
     match v {
         Value::Null => rsx! { span { class: "dim", "null" } },
         Value::String(s) if s.chars().count() > 120 => {
@@ -41,8 +41,8 @@ fn primitive(v: &Value) -> Element {
 }
 
 #[component]
-fn Node(root: Shared, ptr: String, k: String, path: String, depth: usize) -> Element {
-    let mut view = use_context::<View>();
+fn Node(root: Shared, ptr: String, k: String, path: String, depth: usize) -> View {
+    let view = context::<ViewState>();
     let Some(v) = root.0.pointer(&ptr) else { return rsx! {} };
     let pad = format!("padding-left:{}px", depth * 14);
     if !(v.is_object() || v.is_array()) {
@@ -59,14 +59,14 @@ fn Node(root: Shared, ptr: String, k: String, path: String, depth: usize) -> Ele
     let open = view.tree_open.read().contains(&path);
     let (l, r) = if v.is_array() { ("[", "]") } else { ("{", "}") };
     let p = path.clone();
-    let mut toggle = move || {
-        view.tree_open.with_mut(|s| {
+    let toggle = move || {
+        view.tree_open.update(|s| {
             if !s.remove(&p) {
                 s.insert(p.clone());
             }
         })
     };
-    let mut t2 = toggle.clone();
+    let t2 = toggle.clone();
     rsx! {
         div {
             div { class: "jrow", style: "{pad};cursor:pointer", role: "button", tabindex: "0",
@@ -99,7 +99,7 @@ fn Node(root: Shared, ptr: String, k: String, path: String, depth: usize) -> Ele
 
 /// `data`'s fields as a tree, its open paths under `prefix`.
 #[component]
-pub fn JsonTree(data: Shared, prefix: String) -> Element {
+pub fn JsonTree(data: Shared, prefix: String) -> View {
     if !(data.0.is_object() || data.0.is_array()) {
         return rsx! { div { class: "small dim", "no state" } };
     }

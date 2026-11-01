@@ -5,7 +5,7 @@
 //! centre or fit. The camera math is
 //! pure, for tests without a DOM.
 use super::join;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::rc::Rc;
 
 /// The camera: content point (0, 0) sits at (`x`, `y`) in the viewport,
@@ -66,14 +66,14 @@ pub fn ZoomPan(
     controls: bool,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: Element,
-) -> Element {
-    let mut view = use_signal(|| initial);
-    let mut press = use_signal(|| None::<Press>);
-    let mut boxed = use_signal(|| None::<Rc<MountedData>>);
-    let mut stage = use_signal(|| None::<Rc<MountedData>>);
+    children: View,
+) -> View {
+    let view = signal(|| initial);
+    let press = signal(|| None::<Press>);
+    let boxed = signal(|| None::<Rc<MountedData>>);
+    let stage = signal(|| None::<Rc<MountedData>>);
     let range = (min_scale, max_scale);
-    let mut set = move |v: ZoomView| {
+    let set = move |v: ZoomView| {
         view.set(v);
         if let Some(f) = onview {
             f.call(v)
@@ -86,42 +86,42 @@ pub fn ZoomPan(
         }
     };
     let zoom = move |factor: f64| async move {
-        let (w, h) = size(boxed.peek().clone()).await;
-        let now = *view.peek();
+        let (w, h) = size(boxed.read_untracked().clone()).await;
+        let now = *view.read_untracked();
         set(zoom_at(now, factor, (w / 2.0, h / 2.0), range));
     };
     let fit = move |_| async move {
-        let (outer, inner) = (size(boxed.peek().clone()).await, size(stage.peek().clone()).await);
+        let (outer, inner) = (size(boxed.read_untracked().clone()).await, size(stage.read_untracked().clone()).await);
         // The stage is drawn scaled: its unscaled size is what fits.
-        let s = view.peek().scale;
+        let s = view.read_untracked().scale;
         set(fit_view((inner.0 / s, inner.1 / s), outer, 16.0, range));
     };
-    let v = view();
-    let dragging = press().is_some_and(|p| p.dragged);
+    let v = view.get();
+    let dragging = press.get().is_some_and(|p| p.dragged);
     rsx! {
         div {
             class: join("aio-zoompan", &class),
-            onmounted: move |e| boxed.set(Some(e.data())),
+            onmounted: move |e| *boxed.write() = Some(e.data()),
             onwheel: move |e: WheelEvent| {
                 e.prevent_default();
                 let p = e.element_coordinates();
-                let now = *view.peek();
+                let now = *view.read_untracked();
                 set(zoom_at(now, (-e.delta().strip_units().y * 0.0015).exp(), (p.x, p.y), range));
             },
             onpointerdown: move |e: PointerEvent| {
-                if e.trigger_button() == Some(dioxus::html::input_data::MouseButton::Primary) {
+                if e.trigger_button() == Some(MouseButton::Primary) {
                     let c = e.client_coordinates();
-                    press.set(Some(Press { at: (c.x, c.y), from: *view.peek(), id: e.pointer_id(), dragged: false }));
+                    *press.write() = Some(Press { at: (c.x, c.y), from: *view.read_untracked(), id: e.pointer_id(), dragged: false });
                 }
             },
             onpointermove: move |e: PointerEvent| {
-                let Some(mut p) = *press.peek() else { return };
+                let Some(mut p) = *press.read_untracked() else { return };
                 if e.pointer_id() != p.id {
                     return;
                 }
                 // No button held: the release happened outside; the drag is over.
-                if !e.held_buttons().contains(dioxus::html::input_data::MouseButton::Primary) {
-                    press.set(None);
+                if !e.held_buttons().contains(MouseButton::Primary) {
+                    *press.write() = None;
                     return;
                 }
                 let c = e.client_coordinates();
@@ -130,17 +130,17 @@ pub fn ZoomPan(
                     return;
                 }
                 p.dragged = true;
-                press.set(Some(p));
+                *press.write() = Some(p);
                 set(ZoomView { x: p.from.x + dx, y: p.from.y + dy, ..p.from });
             },
-            onpointerup: move |_| press.set(None),
-            onpointercancel: move |_| press.set(None),
+            onpointerup: move |_| *press.write() = None,
+            onpointercancel: move |_| *press.write() = None,
             ..attributes,
             div {
                 class: "aio-zoompan__stage",
                 "data-t": "zoomStage",
                 style: "transform:translate({v.x}px,{v.y}px) scale({v.scale})",
-                onmounted: move |e| stage.set(Some(e.data())),
+                onmounted: move |e| *stage.write() = Some(e.data()),
                 {children}
             }
             if dragging {

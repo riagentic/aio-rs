@@ -110,9 +110,9 @@ A view reads the fields it shows and calls methods with `act!`:
 aio::client!(Counter, counter);
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
-    let n = *part(|c| &c.count);
+    let n = part(|c| &c.count);
     rsx! {
         main {
             h1 { "data-t": "count", "{n}" }
@@ -122,7 +122,9 @@ pub fn App() -> Element {
 }
 ```
 
-`part(|c| &c.count)` re-renders the view only when that field changes.
+`part(|c| &c.count)` is a handle on that field: the view reading it
+re-renders only when it changes. Views are written against `aio::ui`
+(`use aio::ui::prelude::*`), which names no renderer.
 `count` is saved to SQLite, comes back on restart, and is checked by the
 compiler everywhere it is used: a misspelt field is a build error.
 
@@ -152,7 +154,7 @@ The running app is drivable too: `ax surface` prints what is on screen,
 | | |
 |---|---|
 | 💾 **Data** | SQLite with an event log · replay and time travel · migrations · coalesced writes · backups · SQL tables and blobs · offline queue |
-| 🎨 **UI** | Dioxus views with field-level reads · the kit: controls, keys, windowed lists, forms, dialogs, toasts · themes, live CSS · routing · islands |
+| 🎨 **UI** | `aio::ui` views with field-level reads · the kit: controls, keys, windowed lists, forms, dialogs, toasts · themes, live CSS · routing · islands |
 | 🔐 **Auth** | the app's key · accounts, roles, sessions · TOTP · OIDC · PAKE pairing · TLS on every exposed launch |
 | 🧪 **Testing** | `TestCells` (virtual time, seeded fuzzing) · `TestUi` (the real views, headless) · `TestServer` · cassettes · `ax lint` |
 | 🚚 **Ship** | desktop (Linux, Windows, macOS) · web (wasm, PWA) · Android · service · CLI · signed delta updates, gated on the data, rolled back on a failed start |

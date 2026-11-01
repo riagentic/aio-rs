@@ -5,7 +5,7 @@
 //! A common subset: headings, bold, italic, code, fences, links, images,
 //! lists, quotes, rules, paragraphs. Linear in its input, any input.
 use super::join;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 
 /// Inline content.
 #[derive(Clone, Debug, PartialEq)]
@@ -281,7 +281,7 @@ fn blocks(src: &str, depth: usize) -> Vec<Block> {
     out
 }
 
-fn inlines(xs: &[Inline]) -> Element {
+fn inlines(xs: &[Inline]) -> View {
     rsx! {
         for x in xs {
             match x {
@@ -300,7 +300,7 @@ fn inlines(xs: &[Inline]) -> Element {
     }
 }
 
-fn render(bs: &[Block]) -> Element {
+fn render(bs: &[Block]) -> View {
     rsx! {
         for b in bs {
             match b {
@@ -343,7 +343,7 @@ pub fn Markdown(
     #[props(into)] source: String,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     rsx! {
         div { class: join("aio-md", &class), ..attributes, {render(&parse(&source))} }
     }
