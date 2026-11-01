@@ -149,7 +149,7 @@ Rename it (`begin`) when porting.
 | aio | aio-rs |
 |---|---|
 | `async save(s) { s.x = ..; await io(); s.y = .. }` | `pub async fn save(&mut self, ..) -> Result<R>` with `let v: T = io().await;` anywhere a statement goes (split into atomic steps) |
-| `await cell.method()` (the async method's value or throw) | `h.method(..)?.await` ([`aio::Answer`](../state/methods.md#async-methods)) |
+| `await cell.method()` (the async method's value or throw) | `h.method(..)?.await` ([`aio::Answer`](../state/effects.md#async-methods)) |
 | `s.$do(effect)` | `cx.run(Effect::new("key", move \|h\| async move { .. h.done(v) }))` |
 | `concurrency: "newest" / "first" / "queue"` on a method | `#[mode(newest)]` / `#[mode(first)]` (the second caller shares the first's answer) / the default |
 | `concurrency` of an effect | `.mode(Mode::Newest / First / Queue)` |
@@ -170,7 +170,7 @@ Rename it (`begin`) when porting.
 |---|---|
 | `shared` cells, the server broadcast | `#[cell(shared)]` |
 | `visible` / `visible.forUser` | `#[cell(visible = f)]`, `fn(&Self, &By)` or `fn(&Self, &Caller)` |
-| server-only fields | `#[server]` |
+| server-only fields (a read on the client throws) | `#[server] pub f: Hidden<T>` on a shared cell (a read on a copy panics) |
 | `access` per method | `#[client]`, `#[client(role = "admin", allow = f)]` |
 | optimistic calls, `useOptimistic` | built in: copies predict; `#[client(predict = false)]` to wait |
 | CRDT strategies (`counter`, `set-add`, `text`) | methods merge by replay; `aio::merge::text3` for prose |

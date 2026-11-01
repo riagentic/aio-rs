@@ -349,10 +349,11 @@ it lasts.
 
 ## Async methods and atomicity
 
-A `pub async fn` is split at each `let x: T = io.await;`
+A `pub async fn` is split at each await, wherever it stands
 ([effects.md](effects.md#async-methods)): the part before the first await
 is one call, and each part after an await is another call, made when the
-awaited value arrives. Each part is atomic; the method as a whole is not.
+awaited value arrives. Its caller awaits the end: `h.sell(1)?.await` is
+the value the last part returned, or the refusal that ended it. Each part is atomic; the method as a whole is not.
 Between two parts other calls may commit, and the next part sees the state
 they left (aio's live reads; aio-rs has no snapshot mode).
 
@@ -403,29 +404,30 @@ impl Stock {
 let mut t = TestCells::new();
 let h = t.cell::<Stock>();
 h.restock(6).unwrap();
-h.sell(1).unwrap(); // its first part committed; the charge waits
+_ = h.sell(1).unwrap(); // its first part committed; the charge waits
 assert_eq!((h.state().free, h.state().held), (5, 1));
 assert_eq!(h.sell(6).unwrap_err().why, "only 5 left", "the held one is not for sale");
-h.sell(5).unwrap(); // declined below
+_ = h.sell(5).unwrap(); // declined below
 t.settle();
 assert_eq!((h.state().free, h.state().held, h.state().sold), (5, 0, 1));
 # }
 ```
 
-- The call returns once the first part commits; the rest follows. Wait
-  for it with `h.done("sell").await` (the effects are keyed by the
-  method's name), count calls in flight with `h.pending(Some("sell"))`,
-  and in a view with `use_pending`.
+- The call returns once the first part commits, with an `aio::Answer`:
+  await it for the end. Count calls in flight with
+  `h.pending(Some("sell"))`, and in a view with `use_pending`.
 - Overlapping calls of one async method run their awaits in turn, the
-  second after the first (`Mode::Queue`); `#[ttl(ms)]` keys them by the
-  arguments instead.
+  second after the first; `#[mode(newest)]` lets a new call supersede
+  the running one, `#[mode(first)]` shares the running one's answer, and
+  `#[ttl(ms)]` keys them by the arguments.
 - A refusal in a later part refuses that part only. What earlier parts
   committed stays, so a later part must leave the state whole on its
   own (the `free += n` above).
-- Each await may take `aio::effect::CALL_CEILING` (30 s). One that takes
-  longer is cut off, said in the log and a report, and its later parts
-  never run: undo what the first part held in `restore` or with a
-  schedule. `#[long]` lifts the ceiling for a method that waits by nature.
+- Each await may take the call ceiling: 30 s, or `[perf] call_ceiling`.
+  One that takes longer is cut off, said in the log and a report, its
+  caller is told, and its later parts never run: undo what the first part
+  held in `restore` or with a schedule. `#[long]` lifts the ceiling for a
+  method that waits by nature.
 - `cx.abort("sell")` from another method (a cancel button) stops the
   waiting awaits; their later parts never run, so that method gives back
   what they held.
@@ -466,15 +468,17 @@ stay apart, chain the calls and make each step undoable:
 
 | aio | aio-rs |
 |---|---|
-| sync and async methods on a draft (Immer) | `&mut self` on a copy; async methods split at their awaits |
+| sync and async methods on a draft (Immer) | `&mut self` on a copy; async methods split at their awaits (anywhere a statement goes) |
+| `await cell.method()`: the async method's value or throw | `h.method(..)?.await`: an `aio::Answer` of its end |
 | `throw` in a sync method discards, in an async one keeps | a refusal discards the part it is in; earlier parts of an async method stay |
 | `s.$call(other, …)` | `self.other(..)`: a plain call, inside the same event |
 | `s.$do(effect)` | `cx.run(Effect::new(..))` |
 | `args` schema | the argument types, then `ensure!` |
 | `transaction: true` / `{ serialize: true }`, `s.$commit()`, `s.$live`, `TX_CONFLICT` | not available: each part of an async method is atomic and reads the live state; take what you need before the await |
 | `cancelOn`, `s.$signal` | `cx.abort(key)`; an aborted await's later parts never run |
-| `concurrency`, `ttl` | `Mode` on an effect; `#[ttl(ms)]` |
-| `long: [...]`, `effectTimeoutMs` | `#[long]`; `aio::effect::CALL_CEILING` is fixed |
+| `concurrency: "newest" / "first" / "queue"`, `ttl` | `#[mode(newest)]` / `#[mode(first)]` / the default; `#[ttl(ms)]`; `Mode` on an effect |
+| `long: [...]`, `effectTimeoutMs` | `#[long]`; `[perf] call_ceiling` |
+| `blocking(id, fn)`, `blocking.cancel(id)` | `aio::effect::blocking(key, f)`, `cancel_blocking(key)` |
 | `cell.$pending()` | `h.pending(Some("m"))`, `use_pending` |
 | `.type`, generated actions | the method's name; `Cell::METHODS`, `Cell::SIGNATURES` |
 | a transaction across cells | not available ([above](#work-across-cells)) |
