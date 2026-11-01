@@ -1,0 +1,20 @@
+[package]
+name = "aio-rs-macros"
+description = "The #[cell] and #[methods] macros of aio-rs"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+name = "aio_macros"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

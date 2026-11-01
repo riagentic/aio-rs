@@ -1,0 +1,88 @@
+[app]
+id = "lit"
+name = "Lit \"quoted\" ✓"
+mode = "client-server"
+maintainer = "A <a@example.org>"
+version = "1.2-beta"
+ui = "browser"
+lang = "ar"
+dir = "rtl"
+[data]
+durability = "full"
+store = "vault.db"
+retire = ["old.db"]
+pragmas = ["PRAGMA cache_size = -16000"]
+[history]
+keep = "36h"
+[server]
+listen = "127.0.0.1:8080"
+discover = true
+hosts = ["example.org"]
+trust_proxy = "x-forwarded-for"
+[server.security]
+csp = "strict"
+hsts = "max-age=60"
+directives = { img-src = "'self'", frame-src = false }
+[server.limits]
+clients = 9
+[server.dirs]
+"/media" = "media"
+[client]
+retention = "7d"
+timeouts = { "lit.slow" = "60s", "lit.wait" = "off" }
+[accounts]
+on = true
+max_sessions = 4
+[capabilities]
+network = ["api.example.org", "example.org"]
+[updates]
+url = "https://example.org/releases"
+keys = ["ed25519:k"]
+every = "off"
+every_by_channel = { dev = "1m" }
+prerelease = true
+[build]
+targets = ["deb", { name = "srv", kind = "cli", bin = "lit-server" }]
+budget_mb = 12
+css = "tailwindcss -i a.css -o b.css"
+platforms = ["linux", "macos-arm64"]
+runtime = "bundled"
+chromium_extras = "strip"
+[build.android]
+application_id = "org.example.lit"
+schemes = ["lit"]
+camera = true
+color_scheme = "light"
+[build.macos]
+bundle_id = "org.example.lit"
+host = "-p 2222 me@mac"
+[build.splash]
+image = "splash.png"
+text = "Starting {title}"
+min_ms = 600
+max_ms = 10000
+background = ["#fff", "#101418"]
+[log]
+level = "debug"
+suppress = ["lit.tick"]
+[perf]
+method = 50
+[perf.methods]
+"lit.import" = 5000
+[perf.storm]
+breaker = true
+[memory]
+high = 60
+[budgets]
+state = "1MB"
+broadcast_rate = "20.5/s"
+[feedback]
+url = "https://example.org/fb"
+timeout = "30s"
+[ui]
+theme = "full"
+hue = 200
+[vitals.loop]
+degraded = 10
+warning = 20
+frozen = 30

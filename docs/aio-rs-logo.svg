@@ -1,0 +1,41 @@
+<svg width="480" height="160" viewBox="0 0 480 160" fill="none"
+  xmlns="http://www.w3.org/2000/svg" role="img"
+  aria-label="aio-rs — the all-in-one app framework, in Rust">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f5a33b" />
+      <stop offset="1" stop-color="#c2410c" />
+    </linearGradient>
+  </defs>
+
+  <!-- mark: aio's three layers (state · persistence · ui) converging into
+       one node; in aio-rs the node is a gear. Same tile and bars as aio's
+       mark, so the two read as one family; the gear keeps 8 chunky teeth
+       and a wide hole so it still reads as a gear at 16px. -->
+  <rect x="16" y="24" width="112" height="112" rx="26" fill="url(#g)" />
+  <g stroke="#ffffff" stroke-width="9" stroke-linecap="round" fill="none">
+    <path d="M33 60 H64" />
+    <path d="M33 80 H72" />
+    <path d="M33 100 H64" />
+  </g>
+  <path fill="#ffffff" fill-rule="evenodd"
+    d="M115.3 77.5 L119.9 77.8 L119.9 82.2 L115.3 82.5 L113.4 86.9 L116.5 90.4
+       L113.4 93.5 L109.9 90.4 L105.5 92.3 L105.2 96.9 L100.8 96.9 L100.5 92.3
+       L96.1 90.4 L92.6 93.5 L89.5 90.4 L92.6 86.9 L90.7 82.5 L86.1 82.2
+       L86.1 77.8 L90.7 77.5 L92.6 73.1 L89.5 69.6 L92.6 66.5 L96.1 69.6
+       L100.5 67.7 L100.8 63.1 L105.2 63.1 L105.5 67.7 L109.9 69.6 L113.4 66.5
+       L116.5 69.6 L113.4 73.1 Z
+       M103 74.5 A5.5 5.5 0 1 0 103 85.5 A5.5 5.5 0 1 0 103 74.5 Z" />
+
+  <!-- wordmark: aio as in aio's logo, -rs in the darker rust tone -->
+  <text x="156" y="92"
+    font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    font-size="72" font-weight="800" letter-spacing="-2"
+    fill="url(#g)">aio<tspan fill="#c2410c">-rs</tspan></text>
+
+  <!-- tagline -->
+  <text x="160" y="122"
+    font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    font-size="17" font-weight="500" letter-spacing="0.5"
+    fill="#8a94a6">all-in-one · batteries included · in Rust</text>
+</svg>

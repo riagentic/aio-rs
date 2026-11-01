@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""The dependency gate: every crate in the workspace's graph (all features,
+all targets, dev and build included) is in deps.toml `[bans] allow`, every
+entry there is still used, and no crate is built in two versions unless all
+but one are in `[bans] skip`. Same file shape as cargo-deny's bans.
+
+  scripts/deps-check            check
+  scripts/deps-check --suggest  print allow entries for crates not listed
+"""
+import collections
+import json
+import pathlib
+import subprocess
+import sys
+import tomllib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def metadata():
+    out = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--all-features"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    if out.returncode:
+        sys.exit(out.stderr)
+    return json.loads(out.stdout)
+
+
+def owners(meta):
+    """Each crate's way in: `member/feature via direct-dependency`, the
+    lightest way first (core before features, features before dev and build)."""
+    pkgs = {p["id"]: p for p in meta["packages"]}
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    order = ["aio-rs", "aio-rs-config", "aio-rs-config-macro", "aio-rs-macros", "aio-rs-shell", "aio-rs-cli"]
+    tiers = collections.defaultdict(list)
+    for m in meta["workspace_members"]:
+        manifest = pkgs[m]
+        feats = manifest.get("features", {})
+        for d in manifest["dependencies"]:
+            if d.get("path"):
+                continue
+            kind = d["kind"] or ""
+            gate = [f for f, on in feats.items() if f"dep:{d.get('rename') or d['name']}" in on] if d["optional"] else []
+            how = f"{manifest['name']}/{gate[0] if gate else kind or 'core'}"
+            tier = (bool(kind), d["optional"], order.index(manifest["name"]))
+            tiers[tier] += [(n["pkg"], how, d["name"]) for n in nodes[m]["deps"] if pkgs[n["pkg"]]["name"] == d["name"]]
+    found = {}
+    for tier in sorted(tiers):
+        queue = collections.deque(tiers[tier])
+        seen = set()
+        while queue:
+            pid, how, via = queue.popleft()
+            name = pkgs[pid]["name"]
+            if pid in seen:
+                continue
+            seen.add(pid)
+            found.setdefault(name, how if via == name else f"{how} via {via}")
+            queue.extend((n["pkg"], how, via) for n in nodes[pid]["deps"])
+    return found
+
+
+def main():
+    meta = metadata()
+    bans = tomllib.loads((ROOT / "deps.toml").read_text())["bans"]
+    used = {n["id"] for n in meta["resolve"]["nodes"]} - set(meta["workspace_members"])
+    versions = collections.defaultdict(set)
+    for p in meta["packages"]:
+        if p["id"] in used:
+            versions[p["name"]].add(p["version"])
+    allow = {a["crate"] for a in bans["allow"]}
+    if "--suggest" in sys.argv[1:]:
+        way = owners(meta)
+        for name in sorted(set(versions) - allow):
+            print(f'    {{ crate = "{name}", reason = "{way.get(name, "?")}" }},')
+        return
+    errors = [f"not allowed: {n} (scripts/deps-check --suggest)" for n in sorted(set(versions) - allow)]
+    errors += [f"allowed but unused: {n}" for n in sorted(allow - set(versions))]
+    skip = collections.defaultdict(set)
+    for s in bans.get("skip", []):
+        name, _, version = s["crate"].partition("@")
+        if version not in versions.get(name, ()):
+            errors.append(f"skip unused: {s['crate']}")
+        skip[name].add(version)
+    for name, vs in sorted(versions.items()):
+        if len(vs - skip[name]) > 1:
+            errors.append(f"multiple versions: {name} {', '.join(sorted(vs))} (one may stay; skip the others with a reason)")
+    if errors:
+        sys.exit("deps.toml:\n  " + "\n  ".join(errors))
+    print(f"deps: {len(versions)} crates allowed, {sum(len(v) > 1 for v in versions.values())} with skipped duplicates")
+
+
+if __name__ == "__main__":
+    main()

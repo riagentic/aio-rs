@@ -1,0 +1,253 @@
+//! A cell of the page itself: its state in memory, saved to the browser's
+//! storage after each call when it persists. A call is atomic as on the
+//! native store (its machine, the method, the invariants), then its effects
+//! start on the page's tasks, keyed and moded as there.
+use super::storage;
+use crate::effect::{Abort, Mode};
+use crate::{By, Call, Cell, Cx, Door, Effect, Result};
+use futures_util::future::{AbortHandle, Abortable};
+use serde_json::Value;
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
+
+struct Inner<T: Cell> {
+    state: Mutex<Arc<T>>,
+    /// Its document key in the browser's storage; `None`: memory only.
+    key: Option<String>,
+    listeners: Mutex<Vec<Listener<T>>>,
+    watchers: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
+    owned: Mutex<HashMap<String, Box<dyn Any + Send>>>,
+    /// The effects running (or queued) per key, each with its number.
+    running: Mutex<HashMap<String, Vec<(u64, AbortHandle)>>>,
+    /// Per key, the end of the last queued effect: the next one waits for it.
+    tails: Mutex<HashMap<String, tokio::sync::oneshot::Receiver<()>>>,
+    ran: AtomicU64,
+}
+
+pub struct Handle<T: Cell> {
+    inner: Arc<Inner<T>>,
+    by: By,
+}
+
+impl<T: Cell> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        Self { inner: self.inner.clone(), by: self.by.clone() }
+    }
+}
+
+fn lock<X>(m: &Mutex<X>) -> MutexGuard<'_, X> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What is kept of `st`: its `save` hook's, without `#[transient]` fields (pure).
+fn kept<T: Cell>(st: &T) -> Value {
+    let mut v = serde_json::to_value(st.save().as_ref().unwrap_or(st)).unwrap_or(Value::Null);
+    if let Some(m) = v.as_object_mut() {
+        T::TRANSIENT.iter().for_each(|f| _ = m.remove(*f));
+    }
+    v
+}
+
+impl<T: Cell> Handle<T> {
+    fn new(st: T, key: Option<String>) -> Self {
+        let inner = Inner {
+            state: Mutex::new(Arc::new(st)),
+            key,
+            listeners: Mutex::default(),
+            watchers: Mutex::default(),
+            owned: Mutex::default(),
+            running: Mutex::default(),
+            tails: Mutex::default(),
+            ran: AtomicU64::new(0),
+        };
+        Self { inner: Arc::new(inner), by: By::System }
+    }
+
+    /// A fresh cell, in memory only.
+    pub fn memory() -> Self {
+        Self::new(T::default(), None)
+    }
+
+    /// App `app`'s cell, back as the browser kept it (`#[cell(persist)]`
+    /// is saved after each call; another starts fresh), its `restore` run.
+    pub fn saved(app: &str) -> Self {
+        let key = T::PERSIST.then(|| storage::key(app, T::ID));
+        let doc = key.as_deref().and_then(|k| storage::load(&super::Local, k, super::say));
+        let st = match doc {
+            Some(d) if d.cell == T::ID => match T::migrate(d.view, d.v) {
+                Ok(st) => st.restore(),
+                Err(e) => {
+                    super::say(&format!("{}: the saved state can't be read ({e}); starting fresh", T::ID));
+                    T::default()
+                }
+            },
+            _ => T::default(),
+        };
+        Self::new(st, key)
+    }
+
+    /// The same cell, with calls recorded as caused by `by`.
+    pub fn by(&self, by: By) -> Self {
+        Self { inner: self.inner.clone(), by }
+    }
+
+    pub fn state(&self) -> Arc<T> {
+        lock(&self.inner.state).clone()
+    }
+
+    /// Call `f` with the state after each call.
+    pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
+        lock(&self.inner.listeners).push(Arc::new(f));
+    }
+
+    /// Call `f` when `pending` may have changed (an effect started or ended).
+    pub fn on_pending(&self, f: impl Fn() + Send + Sync + 'static) {
+        lock(&self.inner.watchers).push(Arc::new(f));
+    }
+
+    /// Effects of async method `method` running or queued (`None`: all).
+    pub fn pending(&self, method: Option<&str>) -> usize {
+        let of = |k: &str| method.is_none_or(|m| k.strip_prefix(m).is_some_and(|r| r.is_empty() || r.starts_with(':')));
+        lock(&self.inner.running).iter().filter(|(k, _)| of(k)).map(|(_, rs)| rs.len()).sum()
+    }
+
+    /// Is an effect with this key still running?
+    pub fn busy(&self, key: &str) -> bool {
+        lock(&self.inner.running).contains_key(key)
+    }
+
+    /// A `#[ttl]` method's step: a page cell runs every call (no answer cache).
+    pub(crate) fn answered(&self, _ms: i64) {}
+
+    fn commit(&self, st: T, effects: Vec<crate::cx::Asked>) {
+        let st = Arc::new(st);
+        *lock(&self.inner.state) = st.clone();
+        if let Some(key) = &self.inner.key {
+            let doc = storage::Doc {
+                cell: T::ID.into(),
+                v: T::VERSION,
+                user: String::new(),
+                seq: 0,
+                view: kept(&*st),
+                pending: Vec::new(),
+            };
+            if let Err(e) = storage::save(&super::Local, key, doc, &Default::default(), super::say) {
+                super::say(&format!("{}: not saved in this browser ({e}); it lives on in this page", T::ID));
+            }
+        }
+        for e in effects {
+            match e.downcast::<Effect<T>>() {
+                Ok(e) => self.spawn(*e),
+                Err(e) => match e.downcast::<Abort>() {
+                    Ok(a) => self.abort(&a.0),
+                    Err(e) => match e.downcast::<crate::tell::Tell>() {
+                        Ok(t) if !crate::tell::show(&t) => super::say(&format!("{}: nobody to tell: {t:?}", T::ID)),
+                        Ok(_) => {}
+                        Err(_) => super::say(&format!("{}: an effect for another cell was dropped", T::ID)),
+                    },
+                },
+            }
+        }
+        let ls = lock(&self.inner.listeners).clone();
+        ls.iter().for_each(|f| f(&st));
+    }
+
+    fn watchers(&self) {
+        let ws = lock(&self.inner.watchers).clone();
+        ws.iter().for_each(|f| f());
+    }
+
+    fn abort(&self, key: &str) {
+        if let Some(rs) = lock(&self.inner.running).get(key) {
+            rs.iter().for_each(|(_, a)| a.abort());
+        }
+    }
+
+    /// Start `e` as its mode says: `First` skips while one runs, `Newest`
+    /// cancels the running ones, `Queue` waits for the one asked before.
+    fn spawn(&self, e: Effect<T>) {
+        let (next, after) = {
+            let mut running = lock(&self.inner.running);
+            let busy = running.contains_key(&e.key);
+            match e.mode {
+                Mode::First if busy => return,
+                Mode::Newest if busy => running[&e.key].iter().for_each(|(_, a)| a.abort()),
+                _ => {}
+            }
+            crate::effect_started(T::ID, &e.key);
+            let (next, after) = match e.mode {
+                Mode::Queue => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    (Some(tx), lock(&self.inner.tails).insert(e.key.clone(), rx))
+                }
+                _ => (None, None),
+            };
+            let id = self.inner.ran.fetch_add(1, Ordering::Relaxed);
+            let (abort, reg) = AbortHandle::new_pair();
+            running.entry(e.key.clone()).or_default().push((id, abort));
+            ((next, id, reg), after)
+        };
+        let ((next, id, reg), key, timeout) = (next, e.key.clone(), e.timeout);
+        let run = (e.run)(self.by(By::Effect(key.clone())));
+        let h = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let _next = next;
+            if let Some(rx) = after {
+                _ = rx.await;
+            }
+            let run = Abortable::new(run, reg);
+            match timeout {
+                None => _ = run.await,
+                Some(d) => {
+                    if crate::effect::within(d, run).await.is_none() {
+                        super::say(&format!("{}: effect `{key}` timed out after {d:?}", T::ID));
+                    }
+                }
+            }
+            {
+                let mut running = lock(&h.inner.running);
+                if let Some(rs) = running.get_mut(&key) {
+                    rs.retain(|(i, _)| *i != id);
+                    if rs.is_empty() {
+                        running.remove(&key);
+                    }
+                }
+            }
+            h.watchers();
+        });
+        self.watchers();
+    }
+}
+
+impl<T: Cell> Door<T> for Handle<T> {
+    fn call(&self, method: &str, args: Value) -> Result<Value> {
+        crate::ask_before(&Call { cell: T::ID, method, args: &args, by: &self.by, role: None })?;
+        let cx = Cx::live(super::now_ms(), &self.by);
+        let mut st = (*self.state()).clone();
+        st.advance(method)?;
+        let out = st.apply(&cx, method, args)?;
+        st.check()?;
+        let asks = cx.into_asks();
+        if !asks.plans.is_empty() {
+            super::say(&format!("{}.{method}: schedules don't run in a page; dropped", T::ID));
+        }
+        self.commit(st, asks.effects);
+        Ok(out)
+    }
+
+    fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        f(&self.state())
+    }
+
+    fn own(&self, key: &str, res: Option<Box<dyn Any + Send>>) {
+        let old = match res {
+            Some(r) => lock(&self.inner.owned).insert(key.into(), r),
+            None => lock(&self.inner.owned).remove(key),
+        };
+        drop(old);
+    }
+}

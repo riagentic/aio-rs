@@ -1,0 +1,21 @@
+<script>window.L = []; function log(s) { L.push(s) }
+addEventListener("keydown", (e) => e.target === document.body && log("window " + e.key))</script>
+<form onsubmit="event.preventDefault(); log('submit')">
+  <label>Email <input onchange="log('change ' + this.value)" onfocus="log('focus')" onblur="log('blur')"></label>
+  <button type=button onclick="log('save1')">Save</button>
+  <button type=button onclick="log('save2')" ondblclick="log('dbl')">Save</button>
+  <input type=checkbox data-t=agree onchange="log('agree ' + this.checked)">
+  <select data-t=theme onchange="log('theme ' + this.value)"><option>light<option>dark<option disabled>neon</select>
+  <input data-t=key onkeydown="log('down ' + event.key + (event.ctrlKey ? ' ctrl' : ''))" onkeyup="log('up ' + event.key)">
+  <div data-t=pane style="height:40px;overflow:auto" onscroll="log('scroll ' + this.scrollTop)"><div style="height:400px"></div></div>
+  <button type=button data-t=off disabled onclick="log('off')">Off</button>
+  <div data-t=from style="width:20px;height:20px" onmousedown="log('grab')"></div>
+  <div data-t=onto style="width:20px;height:20px" onmouseup="log('drop')"></div>
+  <div data-t=tip style="width:20px;height:20px" onmouseover="log('hover')"></div>
+  <ul>
+    <li data-t=row-1>Task 1 <button type=button onclick="log('del1')">Delete</button></li>
+    <li data-t=row-2>Task 2 <button type=button onclick="log('del2')">Delete</button></li>
+  </ul>
+  <button>Go</button>
+  <button type=button style="display:none">Hidden</button>
+</form>

@@ -1,0 +1,24 @@
+[package]
+name = "aio-rs-config"
+description = "aio.toml's types and checks, shared by the app and aio::config!()"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "aio_config"
+
+[dependencies]
+aio-macros = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+base64 = "0.23"
+# The parser: in `aio::config!()` (the build's host) and aio's tools, never in an app.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"], optional = true }
+
+[features]
+toml = ["dep:toml"]

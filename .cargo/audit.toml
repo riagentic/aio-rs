@@ -1,0 +1,3 @@
+# Known advisories, each with why it's accepted. Anything new fails CI.
+[advisories]
+ignore = []

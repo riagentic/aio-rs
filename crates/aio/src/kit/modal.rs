@@ -1,0 +1,270 @@
+//! Dialogs and notices (aio's `Modal`, `Confirm`, `ConfirmButton`, `toast`,
+//! `ToastHost`). Escape closes the most recently opened dialog and only that
+//! one (a non-dismissable one on top blocks it); focus moves into a dialog
+//! when it opens and Tab stays inside it. In the window, the shell's page
+//! script does what needs the DOM (`aio_shell` `DIALOG`): the first control
+//! takes focus, Shift+Tab wraps to the last, and the opener gets it back.
+use super::controls::Tone;
+use super::form::{Button, Variant};
+use super::{flag, join, use_id};
+use dioxus::core::{Task, spawn_forever};
+use dioxus::prelude::*;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Duration;
+
+thread_local! {
+    /// The open dialogs, in the order they opened, each with how it closes
+    /// (none: not dismissable).
+    static OPEN: RefCell<Vec<(String, Option<EventHandler<()>>)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn top_close() -> Option<Option<EventHandler<()>>> {
+    OPEN.with(|o| o.borrow().last().map(|(_, c)| *c))
+}
+
+/// A dialog over a backdrop: Escape or a backdrop click call `onclose` (when
+/// `dismissable`). It renders nothing while closed.
+#[component]
+pub fn Modal(
+    open: bool,
+    onclose: Option<EventHandler<()>>,
+    #[props(into)] title: Option<String>,
+    footer: Option<Element>,
+    #[props(default = true)] dismissable: bool,
+    #[props(default, into)] class: String,
+    #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
+    children: Element,
+) -> Element {
+    let id = use_id("modal");
+    let close = onclose.filter(|_| dismissable);
+    // Open order, not mount order: a dialog opened later is on top.
+    let was = use_hook(|| Rc::new(Cell::new(false)));
+    OPEN.with(|o| {
+        let mut o = o.borrow_mut();
+        match (open, was.replace(open)) {
+            (true, false) => o.push((id.clone(), close)),
+            (false, true) => o.retain(|(k, _)| *k != id),
+            (true, true) => o.iter_mut().filter(|(k, _)| *k == id).for_each(|e| e.1 = close),
+            _ => {}
+        }
+    });
+    let gone = id.clone();
+    use_drop(move || OPEN.with(|o| o.borrow_mut().retain(|(k, _)| *k != gone)));
+    let mut dialog = use_signal(|| None::<Rc<MountedData>>);
+    let to_box = move |_| {
+        if let Some(el) = dialog.peek().clone() {
+            spawn(async move { _ = el.set_focus(true).await });
+        }
+    };
+    if !open {
+        return rsx! {};
+    }
+    rsx! {
+        div {
+            class: join("aio-modal-backdrop", &class),
+            role: "presentation",
+            "data-t": "modalBackdrop",
+            onclick: move |_| if let Some(f) = close { f.call(()) },
+            onkeydown: move |e| {
+                if e.key() == Key::Escape && !e.is_composing() && let Some(top) = top_close() {
+                    e.stop_propagation();
+                    if let Some(f) = top {
+                        f.call(())
+                    }
+                }
+            },
+            ..attributes,
+            // Focus guards: Tab past either end comes back to the dialog.
+            span { tabindex: "0", onfocus: to_box }
+            div {
+                class: "aio-modal",
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-labelledby": title.as_ref().map(|_| format!("{id}-title")),
+                tabindex: "-1",
+                onmounted: move |e| async move {
+                    dialog.set(Some(e.data()));
+                    _ = e.set_focus(true).await;
+                },
+                // A click in the dialog is not a click on the backdrop.
+                onclick: |e| e.stop_propagation(),
+                if let Some(t) = &title {
+                    div { class: "aio-modal__title", id: "{id}-title", "{t}" }
+                }
+                div { class: "aio-modal__body", {children} }
+                if let Some(f) = footer {
+                    div { class: "aio-modal__footer", {f} }
+                }
+            }
+            span { tabindex: "0", onfocus: to_box }
+        }
+    }
+}
+
+/// "Are you sure?": a dialog with a cancel and a confirm button. Escape and
+/// the backdrop cancel.
+#[component]
+pub fn Confirm(
+    open: bool,
+    onconfirm: EventHandler<()>,
+    oncancel: EventHandler<()>,
+    #[props(into)] title: Option<String>,
+    #[props(into)] message: Option<String>,
+    #[props(default = String::from("Confirm"), into)] confirm_label: String,
+    #[props(default = String::from("Cancel"), into)] cancel_label: String,
+    /// The confirm button is destructive.
+    #[props(default)]
+    danger: bool,
+    #[props(default, into)] class: String,
+) -> Element {
+    rsx! {
+        Modal { open, onclose: oncancel, title, class,
+            footer: rsx! {
+                Button { variant: Variant::Ghost, "data-t": "confirmCancel", onclick: move |_| oncancel.call(()), "{cancel_label}" }
+                Button {
+                    variant: if danger { Variant::Danger } else { Variant::Primary },
+                    "data-t": "confirmOk",
+                    onclick: move |_| onconfirm.call(()),
+                    "{confirm_label}"
+                }
+            },
+            if let Some(m) = message {
+                div { class: "aio-confirm__msg", "{m}" }
+            }
+        }
+    }
+}
+
+/// A button that asks first: `onconfirm` runs only once the dialog is
+/// confirmed. A danger button makes the confirm button danger too. Focus
+/// returns to the button when the dialog closes.
+#[component]
+pub fn ConfirmButton(
+    #[props(into)] confirm: String,
+    onconfirm: EventHandler<()>,
+    #[props(into)] confirm_title: Option<String>,
+    #[props(default = String::from("Confirm"), into)] confirm_label: String,
+    #[props(default = String::from("Cancel"), into)] cancel_label: String,
+    #[props(default)] variant: Variant,
+    #[props(default)] disabled: bool,
+    #[props(default, into)] class: String,
+    #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
+    children: Element,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut me = use_signal(|| None::<Rc<MountedData>>);
+    let mut done = move || {
+        open.set(false);
+        if let Some(el) = me.peek().clone() {
+            spawn(async move { _ = el.set_focus(true).await });
+        }
+    };
+    rsx! {
+        button {
+            r#type: "button",
+            class: join(&format!("aio-btn aio-btn--{} aio-btn--md", variant.key()), &class),
+            disabled: flag(disabled),
+            onmounted: move |e| me.set(Some(e.data())),
+            onclick: move |_| open.set(true),
+            ..attributes,
+            {children}
+        }
+        Confirm {
+            open: open(),
+            title: confirm_title,
+            message: confirm,
+            confirm_label,
+            cancel_label,
+            danger: variant == Variant::Danger,
+            oncancel: move |_| done(),
+            onconfirm: move |_| {
+                done();
+                onconfirm.call(());
+            },
+        }
+    }
+}
+
+/// A shown notice.
+#[derive(Clone, Debug, PartialEq)]
+struct Notice {
+    id: u64,
+    message: String,
+    tone: Tone,
+}
+
+static TOASTS: GlobalSignal<Vec<Notice>> = GlobalSignal::with_name(Vec::new, "aio::kit::TOASTS");
+
+thread_local! {
+    static NEXT: Cell<u64> = const { Cell::new(0) };
+    /// Each notice's auto-dismiss timer, cancelled however it goes.
+    static TIMERS: RefCell<Vec<(u64, Task)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A toast, to dismiss it early.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Toast(u64);
+
+impl Toast {
+    /// The one way a toast goes (its ×, its timer, this): the timer goes too.
+    pub fn dismiss(self) {
+        if let Some(task) = self.forget() {
+            task.cancel();
+        }
+    }
+
+    /// Take it off the screen; its timer, if it has one still waiting.
+    fn forget(self) -> Option<Task> {
+        TOASTS.write().retain(|n| n.id != self.0);
+        TIMERS.with(|t| {
+            let mut t = t.borrow_mut();
+            let at = t.iter().position(|(id, _)| *id == self.0)?;
+            Some(t.remove(at).1)
+        })
+    }
+}
+
+/// The notices showing now, oldest first (for tests and agents).
+pub fn toasts() -> Vec<String> {
+    TOASTS.read().iter().map(|n| n.message.clone()).collect()
+}
+
+/// Show a notice in the [`ToastHost`] for 4 seconds. Call it on the UI thread
+/// (a handler, a view's task).
+pub fn toast(message: impl Into<String>, tone: Tone) -> Toast {
+    toast_for(message, tone, Some(Duration::from_secs(4)))
+}
+
+/// Show a notice for `stay` (`None`: until dismissed).
+pub fn toast_for(message: impl Into<String>, tone: Tone, stay: Option<Duration>) -> Toast {
+    let id = NEXT.with(|n| n.replace(n.get() + 1));
+    TOASTS.write().push(Notice { id, message: message.into(), tone });
+    if let Some(d) = stay {
+        let task = spawn_forever(async move {
+            super::sleep(d).await;
+            _ = Toast(id).forget();
+        });
+        TIMERS.with(|t| t.borrow_mut().push((id, task)));
+    }
+    Toast(id)
+}
+
+/// Where toasts show: once, at the app root (a polite live region; an
+/// error is an alert).
+#[component]
+pub fn ToastHost(
+    #[props(default, into)] class: String,
+    #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
+) -> Element {
+    rsx! {
+        div { class: join("aio-toasts", &class), role: "status", "aria-live": "polite", ..attributes,
+            for n in TOASTS() {
+                div { key: "{n.id}", class: "aio-toast aio-toast--{n.tone.key()}", role: (n.tone == Tone::Error).then_some("alert"),
+                    span { class: "aio-toast__msg", "{n.message}" }
+                    button { r#type: "button", class: "aio-toast__x", "aria-label": "Dismiss", "data-t": "toastDismiss", onclick: move |_| Toast(n.id).dismiss(), "×" }
+                }
+            }
+        }
+    }
+}

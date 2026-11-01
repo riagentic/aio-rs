@@ -1,0 +1,64 @@
+@layer aio {
+:root{
+  --aio-hue:61;
+  --aio-accent:hsl(61 82% 64%);
+  --aio-on-accent:hsl(61 45% 11%);
+  --aio-accent-ink:hsl(61 68% 27%);
+  --aio-bg:hsl(61 40% 99%);
+  --aio-surface:#fff;
+  --aio-surface-2:hsl(61 30% 97%);
+  --aio-text:hsl(61 14% 12%);
+  --aio-muted:hsl(61 8% 42%);
+  --aio-border:hsl(61 12% 88%);
+  --aio-danger:hsl(2 72% 45%);
+  --aio-on-danger:#fff;
+  --aio-ok:hsl(152 62% 32%);
+  --aio-warn:hsl(38 82% 38%);
+  --aio-r-1:6px; --aio-r-2:10px; --aio-r-3:14px; --aio-r-4:20px;
+  --aio-page:72rem;
+  --aio-s-1:.25rem; --aio-s-2:.5rem; --aio-s-3:.75rem;
+  --aio-s-4:1rem; --aio-s-5:1.5rem; --aio-s-6:2.5rem;
+  --aio-font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,Roboto,
+    "Helvetica Neue",Arial,sans-serif;
+  --aio-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,
+    "Liberation Mono",monospace;
+  --aio-shadow-1:0 1px 2px #23231a14;
+  --aio-shadow-2:0 6px 24px -8px #23231a2e,0 1px 2px #23231a14;
+  --aio-ring:0 0 0 3px color-mix(in oklab, var(--aio-accent) 35%, transparent);
+  --aio-tint:color-mix(in oklab, var(--aio-accent) 10%, var(--aio-surface));
+}
+@media (prefers-color-scheme: dark){:root{
+  --aio-accent-ink:hsl(61 68% 48%);
+  --aio-bg:hsl(61 14% 9%);
+  --aio-surface:hsl(61 12% 13%);
+  --aio-surface-2:hsl(61 10% 17%);
+  --aio-text:hsl(61 10% 94%);
+  --aio-muted:hsl(61 8% 64%);
+  --aio-border:hsl(61 10% 26%);
+  --aio-danger:hsl(2 78% 66%);
+  --aio-ok:hsl(152 52% 58%);
+  --aio-warn:hsl(38 84% 62%);
+  --aio-shadow-1:0 1px 2px #0006;
+  --aio-shadow-2:0 8px 28px -10px #0009,0 1px 2px #0006;
+}}
+/* The ink ON a danger fill, solved from the fill itself: white where the
+   fill is darker than the WCAG white/black crossover (relative luminance
+   1791 in ten-thousandths), black where it is lighter — the better of the two, never under
+   4.58:1. A fixed dark ink for the lightened dark-mode fill broke every app
+   that sets its own --aio-danger (white on #d32f2f became 3.65:1); an engine
+   without relative colour keeps white, as before. */
+@supports (color: color(from red srgb-linear calc(r * 0.5) g b)){:root{
+  --aio-on-danger:color(from var(--aio-danger) srgb-linear calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)));
+}}
+
+/* "prefers-contrast: more", the TOKEN half: inert custom properties, so it
+   belongs with the tokens every mode keeps — the kit and any app reading
+   var(--aio-border) get the high-contrast values in "tokens" mode too. The
+   rules that paint (focus ring, border width) stay in the visual half. */
+@media (prefers-contrast:more){:root{
+  --aio-border:var(--aio-text);
+  --aio-muted:var(--aio-text);
+  --aio-shadow-1:none;
+  --aio-shadow-2:none;
+}}
+}

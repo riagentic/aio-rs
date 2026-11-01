@@ -1,0 +1,67 @@
+[package]
+name = "aio-rs-shell"
+description = "aio-rs's desktop host: the app's view tree in Rust, drawn by the shared Electron runtime"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "aio_shell"
+
+[dependencies]
+aio = { workspace = true, features = ["outbound", "web"] }
+base64 = "0.23"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+# The store's ISO times, as aio writes them (`toISOString`).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dioxus-core = "=0.7.10"
+dioxus-document = "=0.7.10"
+dioxus-liveview = { version = "=0.7.10", default-features = false, features = ["multi-thread"] }
+# The first paint of a web build's page, rendered on the server (`web::painted`).
+dioxus-ssr = { version = "=0.7.10", optional = true }
+subsecond = { version = "=0.7.10", optional = true }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Unpacks the runtime's archive: inflate only (the CLI writes archives).
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Delta updates: a release made from the version installed (`delta`).
+zstd = { version = "0.13", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "macros", "fs", "io-util", "sync", "signal", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+# Dioxus names each render in a span: the dev build's burst tripwire counts them.
+tracing = "0.1"
+
+[features]
+# The app's UI in browsers, served by its own server (`web`).
+web = ["aio/br", "dep:dioxus-ssr"]
+# `ax dev` (it passes `--features aio-shell/dev`): rsx! reloaded live, Rust hot-patched.
+# A release build leaves both out.
+dev = ["dioxus-liveview/devtools", "dep:subsecond", "aio/dev"]
+
+[dev-dependencies]
+tempfile = "3"
+# The update tests read aio.toml text (`Config::parse`).
+aio-config = { workspace = true, features = ["toml"] }
+# The kit's islands, tested in the real page (`islands.rs`).
+aio = { workspace = true, features = ["kit"] }
+dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+
+[[test]]
+name = "web"
+required-features = ["web"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }

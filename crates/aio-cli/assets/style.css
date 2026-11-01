@@ -1,0 +1,4 @@
+/* The app's styles: while ax dev runs, a saved edit shows at once, no compile. */
+main {
+  max-width: 40rem;
+}

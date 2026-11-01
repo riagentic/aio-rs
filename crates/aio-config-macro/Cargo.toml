@@ -1,0 +1,21 @@
+[package]
+name = "aio-rs-config-macro"
+description = "aio::config!(): the app's aio.toml, parsed and checked as it builds"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+name = "aio_config_macro"
+proc-macro = true
+
+[dependencies]
+aio-config = { workspace = true, features = ["toml"] }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

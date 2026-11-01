@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""The docs gate (./ci.sh): the guide in docs/ holds together.
+
+- Every relative link in README.md, CHANGELOG.md, CONTRIBUTING.md and
+  docs/ resolves: the file exists, and a #fragment names a heading of that
+  page.
+- Every guide page with Rust in it is a doctest (crates/aio/src/guide.rs
+  includes it, or crates/aio-shell/src/guide.rs for a page that calls the
+  desktop host), so its examples compile and run with `cargo test`.
+- A Rust block may skip the doctest (`ignore`) only as an excerpt of the
+  app template that ax's own tests compile: its first line says so, and
+  every other line is one of the template's.
+- docs/clients/ax.md names every ax verb.
+- Those pages name no personal path or address, and none of the words in
+  the file AIO_PRIVATE_TERMS names; their prose calls the Deno-based
+  framework aio, never v1 (identifiers in `code` aside).
+
+`scripts/docs-check` prints each problem and exits 1 if there is one.
+"""
+import os
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+DOCS = ROOT / "docs"
+# Pages of measurements, not the guide: no doctests needed.
+RECORDS = {"comparison.md"}
+# Personal paths, v2 as a name, real-looking emails; plus the words
+# (one per line) of the file AIO_PRIVATE_TERMS names: private names are
+# kept out of this public file too.
+TERMS = os.environ.get("AIO_PRIVATE_TERMS")
+EXTRA = [re.escape(w.strip()) for w in pathlib.Path(TERMS).read_text().splitlines() if w.strip()] if TERMS else []
+PRIVATE = re.compile("|".join([r"/home/|/Users/[a-z]|\bv2\b",
+                               r"@(?!users\.noreply\.github\.com|example\.)[a-z0-9-]+\.(?:com|me|org|net)\b"] + EXTRA), re.I)
+EXCERPT = "// ax create's"
+TEMPLATE = [ROOT / "crates/aio-cli/src/create.rs", ROOT / "crates/aio-cli/src/create/app_lib.rs"]
+
+problems = []
+
+
+def say(page, line, why):
+    problems.append(f"{page.relative_to(ROOT)}:{line}: {why}")
+
+
+def slug(heading):
+    """GitHub's anchor for a heading."""
+    h = re.sub(r"[`*_]", "", heading.strip().lower())
+    h = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", h)
+    h = re.sub(r"[^\w\- ]", "", h)
+    return h.replace(" ", "-")
+
+
+def blocks(text):
+    """(info, first line number, lines) of each fenced block."""
+    out, info, start, body = [], None, 0, []
+    for n, line in enumerate(text.splitlines(), 1):
+        fence = re.match(r"\s*```(.*)", line)
+        if fence and info is None:
+            info, start, body = fence.group(1).strip(), n, []
+        elif fence:
+            out.append((info, start, body))
+            info = None
+        elif info is not None:
+            body.append(line)
+    return out
+
+
+def prose(text):
+    """The text outside code blocks and inline code, line by line."""
+    inside = False
+    for n, line in enumerate(text.splitlines(), 1):
+        if re.match(r"\s*```", line):
+            inside = not inside
+            continue
+        if not inside:
+            yield n, re.sub(r"`[^`]*`", "", line)
+
+
+def anchors(page):
+    return {slug(m.group(1)) for m in re.finditer(r"^#+\s+(.*)$", page.read_text(), re.M)}
+
+
+pages = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "CONTRIBUTING.md"] + sorted(DOCS.rglob("*.md"))
+guide_rs = "".join((ROOT / f).read_text() for f in ["crates/aio/src/guide.rs", "crates/aio-shell/src/guide.rs"])
+template = {l.strip().replace('\\"', '"') for f in TEMPLATE for l in f.read_text().splitlines() if l.strip()}
+
+for page in pages:
+    text = page.read_text()
+    for n, line in prose(text):
+        for target in re.findall(r"\]\(([^)\s]+)\)", line):
+            if re.match(r"[a-z]+:", target):
+                continue
+            path, _, frag = target.partition("#")
+            dest = (page.parent / path).resolve() if path else page
+            if not dest.exists():
+                say(page, n, f"a link to {target}: no such file")
+            elif frag and dest.suffix == ".md" and frag not in anchors(dest):
+                say(page, n, f"a link to {target}: no such heading")
+    for n, line in prose(text):
+        if re.search(r"\bv1\b", line, re.I):
+            say(page, n, "names aio (the Deno-based framework) v1: call it aio")
+    for n, line in enumerate(text.splitlines(), 1):
+        if PRIVATE.search(line):
+            say(page, n, f"names something private: {PRIVATE.search(line).group(0)}")
+    if page.parent == ROOT or page.name in RECORDS and page.parent == DOCS:
+        continue
+    rel = page.relative_to(DOCS).as_posix()
+    rust = [b for b in blocks(text) if b[0].startswith("rust")]
+    if rust and f'"{rel}"' not in guide_rs:
+        say(page, rust[0][1], "has Rust examples but no guide.rs (crates/aio, crates/aio-shell) includes it")
+    for info, start, body in rust:
+        if "ignore" not in info:
+            continue
+        if not body or not body[0].startswith(EXCERPT):
+            say(page, start, f"`{info}`: a guide example compiles; only a template excerpt ({EXCERPT}…) may skip")
+            continue
+        for k, l in enumerate(body[1:], start + 2):
+            if l.strip() and l.strip() not in template:
+                say(page, k, "a template excerpt line the template doesn't have")
+
+verbs = re.findall(r'\bv\(\s*"([^"]+)",', (ROOT / "crates/aio-cli/src/verbs.rs").read_text())
+ax_md = (DOCS / "clients/ax.md").read_text()
+for v in verbs:
+    if f"`ax {v}`" not in ax_md:
+        problems.append(f"docs/clients/ax.md: no `ax {v}`")
+
+# Every `ax <verb> … --flag` a page shows (shell blocks, inline code) names a
+# verb ax has and flags that verb's help names (usage and text), the global
+# ones, or `ax lint`'s own.
+cli = ROOT / "crates/aio-cli/src"
+table = re.findall(r'\bv\(\s*"([^"]+)",\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)"', (cli / "verbs.rs").read_text(), re.S)
+glob = set(re.findall(r'"(--[a-z-]+)', re.search(r"const GLOBAL[^=]*=([^;]*);", (cli / "verbs.rs").read_text()).group(1)))
+flags_of = {name: set(re.findall(r"--[a-z][a-z-]*", usage + about)) | glob for name, usage, about in table}
+flags_of["lint"] |= set(re.findall(r'"(--[a-z-]+)"', re.search(r"const FLAGS[^=]*=([^;]*);", (cli / "lint/mod.rs").read_text()).group(1)))
+SHELL = {"sh", "bash", "shell", "console"}
+
+
+def ax_commands(text):
+    """(line, words after `ax`) of each ax command a page shows."""
+    inside, info = False, ""
+    for n, line in enumerate(text.splitlines(), 1):
+        fence = re.match(r"\s*```(.*)", line)
+        if fence:
+            inside, info = not inside, fence.group(1).strip()
+            continue
+        if inside and info in SHELL:
+            for m in re.finditer(r"(?:^|[\s;&|(])ax\s+([^;&|)\n]*)", re.sub(r"(^|\s)#.*", "", line)):
+                yield n, m.group(1)
+        elif not inside:
+            for m in re.finditer(r"`ax\s+([^`]*)`", line):
+                yield n, m.group(1)
+
+
+for page in pages:
+    for n, words in ax_commands(page.read_text()):
+        w = words.split()
+        if not w or not re.fullmatch(r"[a-z][a-z-]*", w[0]):
+            continue
+        verb = " ".join(w[:2]) if " ".join(w[:2]) in flags_of else w[0]
+        if verb not in flags_of:
+            say(page, n, f"`ax {verb}`: ax has no such verb")
+            continue
+        for word in w[len(verb.split()):]:
+            if word == "--":
+                break
+            flag = re.match(r"--[a-z][a-z-]*", word)
+            if flag and flag.group(0) not in flags_of[verb]:
+                say(page, n, f"`ax {verb} {flag.group(0)}`: not a flag of ax {verb}")
+
+for p in problems:
+    print(p, file=sys.stderr)
+if problems:
+    sys.exit(f"docs-check: {len(problems)} problem(s)")
+print(f"docs-check: {len(pages)} pages, {len(verbs)} verbs: ok")

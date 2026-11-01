@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""How big aio's builds are: crates per package and feature set, duplicate
+versions, the target folder's size and how many aio-rs builds it holds.
+
+  scripts/slim-metrics           print the table
+  scripts/slim-metrics --check   also fail when a set is above its ceiling
+                                 in deps.toml `[ceilings]`
+
+Counts are distinct `name version` pairs of normal dependencies (the shipped
+graph, host target unless the set names one), the package itself excluded.
+"""
+import os
+import pathlib
+import subprocess
+import sys
+import tomllib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# (name, cargo tree arguments): the fixed sets apps and CI build.
+SETS = [
+    ("aio-rs core", ["-p", "aio-rs", "--no-default-features"]),
+    ("aio-rs kit", ["-p", "aio-rs", "--no-default-features", "-F", "kit"]),
+    ("aio-rs server", ["-p", "aio-rs", "--no-default-features", "-F", "server"]),
+    ("aio-rs tls", ["-p", "aio-rs", "--no-default-features", "-F", "tls"]),
+    ("aio-rs net", ["-p", "aio-rs", "--no-default-features", "-F", "net"]),
+    ("aio-rs kit,net", ["-p", "aio-rs", "--no-default-features", "-F", "kit,net"]),
+    ("aio-rs default", ["-p", "aio-rs"]),
+    ("aio-rs web (wasm)", ["-p", "aio-rs", "--no-default-features", "-F", "web", "--target", "wasm32-unknown-unknown"]),
+    ("aio-rs web,kit (wasm)", ["-p", "aio-rs", "--no-default-features", "-F", "web,kit", "--target", "wasm32-unknown-unknown"]),
+    ("aio-rs-shell", ["-p", "aio-rs-shell"]),
+    ("aio-rs-shell dev", ["-p", "aio-rs-shell", "-F", "dev"]),
+    # A template app's whole release graph: its launcher's aio-rs-shell and its aio-rs set.
+    ("app kit", ["-p", "aio-rs-shell", "-F", "aio/kit"]),
+    ("app kit,net", ["-p", "aio-rs-shell", "-F", "aio/kit,aio/net"]),
+    ("aio-rs-cli", ["-p", "aio-rs-cli"]),
+    ("workspace all (dev+build)", ["--workspace", "--all-features", "-e", "normal,build,dev"]),
+]
+
+
+def cargo(*args):
+    out = subprocess.run(["cargo", *args], cwd=ROOT, capture_output=True, text=True)
+    if out.returncode:
+        sys.exit(f"cargo {' '.join(args)}:\n{out.stderr}")
+    return out.stdout
+
+
+def features_of(folder):
+    return set(tomllib.loads((ROOT / "crates" / folder / "Cargo.toml").read_text()).get("features", {}))
+
+
+def crates(args):
+    edges = [] if "-e" in args else ["-e", "normal"]
+    lines = cargo("tree", "--locked", *edges, *args, "--prefix", "none", "--format", "{p}").splitlines()
+    pkgs = {" ".join(l.split()[:2]) for l in lines if l.strip()}
+    roots = {" ".join(l.split()[:2]) for l in lines if f"({ROOT}" in l}
+    return pkgs - roots
+
+
+def duplicates():
+    out = cargo("tree", "--locked", "--workspace", "--all-features", "-e", "normal,build", "-d",
+                "--depth", "0", "--prefix", "none", "--format", "{p}")
+    return sorted({" ".join(l.split()[:2]) for l in out.splitlines() if l.strip()})
+
+
+def target_dir():
+    return pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+
+
+def du(path):
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file() and not f.is_symlink()) if path.exists() else 0
+
+
+def main():
+    check = "--check" in sys.argv[1:]
+    ceilings = tomllib.loads((ROOT / "deps.toml").read_text()).get("ceilings", {})
+    # A set naming a feature the package doesn't have (yet) is skipped.
+    have = {"aio-rs": features_of("aio"), "aio-rs-shell": features_of("aio-shell")}
+    failed = []
+    print(f"{'set':34} {'crates':>6}  ceiling")
+    for name, args in SETS:
+        pkg = args[1]
+        if pkg in have and "-F" in args and not {f for f in args[args.index("-F") + 1].split(",") if "/" not in f} <= have[pkg]:
+            continue
+        n = len(crates(args))
+        cap = ceilings.get(name)
+        over = cap is not None and n > cap
+        failed += [f"{name}: {n} crates, ceiling {cap}"] if over else []
+        print(f"{name:34} {n:>6}  {cap if cap is not None else '-'}{'  OVER' if over else ''}")
+    dups = duplicates()
+    print(f"\nduplicate versions ({len(dups)}): {', '.join(dups) or 'none'}")
+    t = target_dir()
+    rlibs = sorted(t.rglob("libaio-*.rlib")) if t.exists() else []
+    print(f"target {t.name}: {du(t) / 1e6:.0f} MB, libaio rlibs: {len(rlibs)}")
+    if check and failed:
+        sys.exit("over the ceiling:\n  " + "\n  ".join(failed))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,219 @@
+[package]
+name = "aio-rs"
+description = "aio-rs core: cells, the event log, replay and time travel"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "aio"
+
+[dependencies]
+aio-macros = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# aio.toml's types and checks; never its parser (that runs in `aio::config!()`, on the build's host).
+aio-config = { workspace = true }
+# `aio::config!()`: aio.toml parsed as the app builds (the parser runs on the build's host only).
+aio-config-macro = { workspace = true }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "io-util"] }
+axum = { version = "0.8", default-features = false, features = ["ws", "tokio", "http1"], optional = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+socket2 = { version = "0.6", optional = true }
+percent-encoding = { version = "2", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+time = { version = "0.3", optional = true }
+# X25519 for pairing's CPace (`cpace`): the curve alone, no RNG traits.
+curve25519-dalek = { version = "4", default-features = false, optional = true }
+base64 = "0.23"
+# Account ids are one key however they are typed (NFC).
+unicode-normalization = { version = "0.1", default-features = false }
+# HTTP answers compressed as the client asks (`aio::http::encoding`).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"], optional = true }
+brotli = { version = "8", optional = true }
+# The identity provider's HTTPS (`aio::auth::oidc`): blocking, rustls, the public roots.
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"], optional = true }
+# Ids: their bits from `aio::random_bytes` (ring, or the page's crypto), so no getrandom.
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+imbl = { version = "7", features = ["serde"], optional = true }
+
+# The UI kit (`aio::kit`): the app's own Dioxus, so the kit's components are its components.
+dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"], optional = true }
+# The kit's islands talk to the page (`kit::WebIsland`).
+dioxus-document = { version = "=0.7.10", optional = true }
+
+dioxus-core = { version = "=0.7.10", optional = true }
+# The UI tests' component tree: the span Dioxus opens for each render (`aio::testing`).
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+
+[features]
+# The core alone: cells, the event log, replay, the local door. Each
+# feature adds one capability; an app picks one fixed set (a template's).
+default = []
+# aio's HTTPS client, held to `[capabilities] network` (`aio::capabilities::agent`).
+outbound = ["dep:ureq"]
+# Sync and its server (`aio::sync`, `aio::http`, server fns, accounts'
+# doors), plain HTTP and WebSocket.
+server = ["dep:axum", "dep:tokio-tungstenite", "dep:percent-encoding", "dep:flate2"]
+# The server over TLS, pairing (PIN, CPace) and LAN discovery.
+tls = ["server", "dep:rustls", "dep:tokio-rustls", "dep:time", "dep:curve25519-dalek", "dep:rcgen", "dep:socket2", "tokio-tungstenite/__rustls-tls"]
+# Sign-in with an identity provider (`aio::auth::oidc`).
+oidc = ["server", "outbound"]
+# Brotli answers beside gzip (`aio::http::encoding`): about 1 MB of encoder and
+# tables, so a server that serves no app page (`aio-shell/web`) leaves it out.
+br = ["server", "dep:brotli"]
+# Everything networked: what `default` was before the split.
+net = ["tls", "oidc"]
+# With it, `aio::testing::TestUi`: UI tests in the page the app's window shows.
+kit = ["dep:dioxus", "dep:dioxus-document", "dep:dioxus-liveview", "dep:tracing"]
+# The app's views mounted in its own page (`aio::web::launch`, `ax build --web`).
+web = ["dep:dioxus-web", "dep:dioxus-core", "dep:dioxus-document", "dep:dioxus-liveview"]
+# Working with aio, the Deno-based framework (`aio::compat`): aio pages and
+# tools on `/ws` (protocol v3, with `server`), `AioLink` (an aio-rs app calling
+# an aio app), aio's move of a scattered layout into its home, `#[on_aio]`.
+# A ported app's `state.db` needs none of it.
+compat = []
+# `ax dev`: cell methods hot-patched (through `aio-shell/dev`); a release has none of it.
+dev = ["dep:subsecond"]
+# `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
+imbl = ["dep:imbl"]
+# Kept so older manifests resolve: `aio::testing` needs no feature (the
+# UI half comes with `kit`), so a test build is the app's own build of aio.
+testing = []
+# Kept likewise: `AIO_TEST_VIDEO=<dir>` records each UI test (`ax test --video`).
+video = []
+
+[dev-dependencies]
+aio-config = { workspace = true, features = ["toml"] }
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tempfile = "3"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+serde_json = "1"
+rusqlite = { version = "0.40", default-features = false }
+ureq = "3"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "rt-multi-thread", "test-util"] }
+
+[[test]]
+name = "ui"
+required-features = ["kit"]
+
+[[test]]
+name = "route"
+required-features = ["kit"]
+
+[[test]]
+name = "route_tree"
+required-features = ["kit"]
+
+[[test]]
+name = "kit"
+required-features = ["kit"]
+
+[[test]]
+name = "wire"
+required-features = ["kit", "net"]
+
+[[test]]
+name = "signin"
+required-features = ["kit", "net"]
+
+[[test]]
+name = "sync"
+required-features = ["net"]
+
+[[test]]
+name = "compat_wire"
+required-features = ["net", "compat"]
+
+[[test]]
+name = "budgets"
+required-features = ["net"]
+
+[[test]]
+name = "door"
+required-features = ["net"]
+
+[[test]]
+name = "auth"
+required-features = ["net"]
+
+[[test]]
+name = "oidc"
+required-features = ["net"]
+
+# Native only: the browser build (wasm32) keeps cells in the page and the
+# browser's storage, links over the page's own socket, and has no TLS.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "hooks"] }
+# `test-util`: `TestCells`' virtual clock, always on so tests build no other aio.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "test-util"] }
+ring = "0.17"
+# The local door's frames (`door`).
+bytes = "1"
+tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
+subsecond = { version = "=0.7.10", optional = true }
+# The page views are drawn in (`aio::page`): Dioxus's DOM-edit interpreter.
+dioxus-liveview = { version = "=0.7.10", default-features = false, optional = true }
+
+# The browser build: the page's clock, randomness, socket and storage.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["wasmbind"] }
+js-sys = "0.3"
+# `aio::sha256` in the page (natively it is ring's).
+sha2 = "0.10"
+# Pinned: an app's lock then has this one too, the version of the CLI `aio
+# build --web` binds with (aio-cli `setup::WASM_BINDGEN`, fetched prebuilt).
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console", "Document", "Element", "Event", "EventTarget", "Headers", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "WebSocket", "Window"] }
+# The app's views in the page (`web`): the real DOM, from Dioxus.
+# Its document is aio's (`web::page`): the page's DOM, no `eval`.
+dioxus-web = { version = "=0.7.10", default-features = false, features = ["mounted"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+[[test]]
+name = "http"
+required-features = ["net"]
+
+[[test]]
+name = "access"
+required-features = ["net"]
+
+[[test]]
+name = "driver"
+required-features = ["kit"]
+
+[[test]]
+name = "capabilities"
+required-features = ["net"]
+
+[[test]]
+name = "plugins"
+required-features = ["net"]
+
+[[test]]
+name = "peer"
+required-features = ["net"]
+
+[[test]]
+name = "sim"
+required-features = ["net"]
