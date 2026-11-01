@@ -349,13 +349,22 @@ fn wait_booted(
 /// a crash), into the terminal as `[device] …` until the child is stopped
 /// (aio's dev:android console).
 pub fn logcat(serial: &str) -> Result<Child, String> {
-    let mut child = Command::new(adb())
-        .args(["-s", serial, "logcat", "-v", "brief", "-T", "1", "-s", "aio:V", "AndroidRuntime:E", "chromium:W"])
+    let mut cmd = Command::new(adb());
+    cmd.args(["-s", serial, "logcat", "-v", "brief", "-T", "1", "-s", "aio:V", "AndroidRuntime:E", "chromium:W"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("adb logcat: {e}"))?;
+        .stderr(Stdio::null());
+    // Ended with ax even when ax is killed (elsewhere: its next write fails).
+    #[cfg(target_os = "linux")]
+    // SAFETY: only prctl between fork and exec (async-signal-safe).
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| match libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("adb logcat: {e}"))?;
     let out = child.stdout.take().ok_or("adb logcat: no output")?;
     std::thread::spawn(move || {
         use std::io::BufRead;

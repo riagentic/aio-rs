@@ -461,7 +461,7 @@ installs over the aio APK of that app, its data with it:
 - Its version code is aio's formula (above): give it a version above
   the aio build's (`1.2.346` over aio's `1.2.345`).
 - No keystore named: it signs with this machine's Android debug key
-  (`~/.android/debug.keystore`, `ANDROID_USER_HOME` moves it), the key
+  (`~/.android/debug.keystore`; `ANDROID_USER_HOME`, or `$XDG_CONFIG_HOME/.android` when Gradle put it there), the key
   aio's default build signs with; the build says so. An aio release that
   was signed with your keystore: name the same one (`keystore`, or
   `AIO_ANDROID_KEYSTORE`).
@@ -485,7 +485,8 @@ ax dev notes --android --native        # the app itself, rebuilt on each save
   on this machine, `adb reverse` brings it to the device's
   `http://127.0.0.1:<port>`, and each edit rebuilds it there and reloads
   it on the device. The page is the web build's: its cells run in the
-  page, not in a native library.
+  page, not in a native library. Ctrl-C removes ax's reverse (only its
+  own); one a killed session left is removed at the next start.
 - `--native`, or an app without a web build: the app's own library as a
   debug dev copy beside the real app (`.dev`), built for that device's
   CPU only, installed and started again on every save.
@@ -494,7 +495,8 @@ ax dev notes --android --native        # the app itself, rebuilt on each save
   display, and waited for (up to 180 s); it is left running for the next
   run.
 - The app's log, its page's console and a crash reach the terminal as
-  `[device] …` (`adb logcat -s aio AndroidRuntime chromium`).
+  `[device] …` (`adb logcat -s aio AndroidRuntime chromium`), a page
+  error with its file and line.
 
 ### The emulator lane
 

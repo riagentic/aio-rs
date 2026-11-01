@@ -836,12 +836,21 @@ pub fn android(name: &str, device: Option<&str>, native: bool) -> Result<String,
             crate::install::install_on(&dev, &apk)?;
             _ = std::fs::write(&record, &hash);
         }
+        // A session ended by a signal leaves its reverse: drop it now. Only
+        // ax's own: another tool's reverses on the device stay.
+        let reversed = target.join("aio").join("android-dev").join(format!("{}-{id}.reverse", dev.serial));
+        if let Ok(p) = std::fs::read_to_string(&reversed) {
+            _ = crate::install::adb_out(&["-s", &dev.serial, "reverse", "--remove", p.trim()]);
+            _ = std::fs::remove_file(&reversed);
+        }
         let mut logs = crate::install::logcat(&dev.serial)?;
         let on = dev.clone();
+        let record = reversed.clone();
         let ran = crate::web::dev_then(name, move |port| {
             let p = format!("tcp:{port}");
             crate::install::adb_out(&["-s", &on.serial, "reverse", &p, &p])
                 .map_err(|e| format!("{e}: the app can't reach the dev server"))?;
+            _ = std::fs::write(&record, &p);
             let url = format!("http://127.0.0.1:{port}/");
             match crate::install::start_on(&on, &format!("{id}/{}", crate::android::DEV), &["--es", "url", &url]) {
                 Ok(()) => eprintln!("ax dev: on {} → {url}: edits reload it there; Ctrl-C ends it", on.label()),
@@ -851,7 +860,10 @@ pub fn android(name: &str, device: Option<&str>, native: bool) -> Result<String,
         });
         _ = logs.kill();
         _ = logs.wait();
-        _ = crate::install::adb_out(&["-s", &dev.serial, "reverse", "--remove-all"]);
+        if let Ok(p) = std::fs::read_to_string(&reversed) {
+            _ = crate::install::adb_out(&["-s", &dev.serial, "reverse", "--remove", p.trim()]);
+            _ = std::fs::remove_file(&reversed);
+        }
         return ran;
     }
     let (_w, rx) = watch_these(&watched(&pkg, Path::new(""), &Watching::All))?;

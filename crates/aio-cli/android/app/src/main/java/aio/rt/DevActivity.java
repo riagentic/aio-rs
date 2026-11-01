@@ -64,7 +64,7 @@ public final class DevActivity extends Activity {
         web.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onConsoleMessage(ConsoleMessage m) {
-                Log.i("aio", "[page] " + m.messageLevel() + ": " + m.message());
+                Log.i("aio", "[page] " + m.messageLevel() + ": " + m.message() + " (" + m.sourceId() + ":" + m.lineNumber() + ")");
                 return true;
             }
         });

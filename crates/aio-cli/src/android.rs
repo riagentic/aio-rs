@@ -782,17 +782,17 @@ fn key(id: &str, jdk: &Path) -> Result<Signing, String> {
 
 /// The key aio's APKs are signed with when no keystore is named (aio's
 /// default build is a debug one): Android's debug key of this machine,
-/// `~/.android/debug.keystore` (`ANDROID_USER_HOME` moves it). A port signs
-/// with it so that it installs over the aio APK (Android updates an app
-/// only from the same key).
-pub fn aio_key(user_home: Option<PathBuf>, home: &Path) -> Option<Signing> {
-    let ks = user_home.unwrap_or_else(|| home.join(".android")).join("debug.keystore");
-    ks.is_file().then(|| Signing {
-        keystore: ks,
-        alias: "androiddebugkey".into(),
-        pass: Pass::Plain("android"),
-        key_pass: None,
-    })
+/// `debug.keystore` where Android's tools keep it: `ANDROID_USER_HOME`
+/// when set, else `$XDG_CONFIG_HOME/.android` when it holds one (Gradle
+/// puts it there then), else `~/.android`. A port signs with it so that it
+/// installs over the aio APK (Android updates an app only from the same key).
+pub fn aio_key(user_home: Option<PathBuf>, xdg_config: Option<PathBuf>, home: &Path) -> Option<Signing> {
+    let dirs: Vec<PathBuf> = match user_home {
+        Some(u) => vec![u],
+        None => xdg_config.map(|x| x.join(".android")).into_iter().chain([home.join(".android")]).collect(),
+    };
+    let ks = dirs.into_iter().map(|d| d.join("debug.keystore")).find(|k| k.is_file())?;
+    Some(Signing { keystore: ks, alias: "androiddebugkey".into(), pass: Pass::Plain("android"), key_pass: None })
 }
 
 fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
@@ -986,7 +986,7 @@ pub fn build(
         let tools = newest(&sdk.join("build-tools")).ok_or("no Android build-tools in the SDK")?;
         let sign = match (given, port_of) {
             (Some(s), _) => s,
-            (None, Some(aio)) => match aio_key(env_dir("ANDROID_USER_HOME"), &home()) {
+            (None, Some(aio)) => match aio_key(env_dir("ANDROID_USER_HOME"), env_dir("XDG_CONFIG_HOME"), &home()) {
                 Some(s) => {
                     eprintln!(
                         "ax build: signed with this machine's Android debug key, as aio signs {aio}'s APK: it installs over it"
@@ -1502,13 +1502,21 @@ mod tests {
         assert!(gradle.contains("applicationId = \"app.aio.notes\""), "{gradle}");
         // aio's default APK is a debug one: Android's debug key of the machine.
         let d = tempfile::tempdir().unwrap();
-        assert_eq!(aio_key(None, d.path()), None);
+        assert_eq!(aio_key(None, None, d.path()), None);
         std::fs::create_dir_all(d.path().join(".android")).unwrap();
         std::fs::write(d.path().join(".android/debug.keystore"), b"ks").unwrap();
-        let k = aio_key(None, d.path()).unwrap();
+        let k = aio_key(None, None, d.path()).unwrap();
         assert_eq!((k.alias.as_str(), k.pass.apksigner()), ("androiddebugkey", "pass:android".into()));
         assert_eq!(k.pass.jarsigner("-storepass"), ["-storepass", "android"]);
-        assert_eq!(aio_key(Some(d.path().join("elsewhere")), d.path()), None, "ANDROID_USER_HOME moves it");
+        assert_eq!(aio_key(Some(d.path().join("elsewhere")), None, d.path()), None, "ANDROID_USER_HOME moves it");
+        let xdg = d.path().join("xdg");
+        std::fs::create_dir_all(xdg.join(".android")).unwrap();
+        std::fs::write(xdg.join(".android/debug.keystore"), b"ks").unwrap();
+        assert_eq!(
+            aio_key(None, Some(xdg.clone()), d.path()).unwrap().keystore,
+            xdg.join(".android/debug.keystore"),
+            "Gradle's, under XDG_CONFIG_HOME"
+        );
     }
 
     #[test]
