@@ -111,6 +111,10 @@ async fn serve(seen: Arc<Mutex<Vec<String>>>) -> String {
     base
 }
 
+/// How long a wait for the shell or a guest may take: a hang guard, not a
+/// measure (a guest's page on a loaded machine took past 10 s).
+const PATIENCE: Duration = Duration::from_secs(60);
+
 /// The runtime under test: its control line, its stderr.
 struct Shell {
     child: tokio::process::Child,
@@ -127,7 +131,7 @@ impl Shell {
         m["id"] = json!(self.next);
         self.ctl.write_all(format!("{m}\n").as_bytes()).await.unwrap();
         loop {
-            let v = tokio::time::timeout(Duration::from_secs(10), self.heard.recv()).await.unwrap().unwrap();
+            let v = tokio::time::timeout(PATIENCE, self.heard.recv()).await.unwrap().unwrap();
             if v["t"] == t && v["id"] == self.next {
                 return v;
             }
@@ -145,7 +149,8 @@ impl Shell {
     /// Wait until `expr` is true in the page (one that throws is not yet).
     async fn until(&mut self, expr: &str) {
         let t = format!("(() => {{ try {{ return {expr}; }} catch (e) {{ return false; }} }})()");
-        for _ in 0..200 {
+        let end = std::time::Instant::now() + PATIENCE;
+        while std::time::Instant::now() < end {
             if self.eval(&t).await == json!(true) {
                 return;
             }
@@ -238,7 +243,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     sh.until(&format!("document.getElementById('log').textContent.includes('Navigated {{ url: \"{base}/a\"')")).await;
     // Undeclared: refused and said; no partition: the guests' own session.
     sh.until("document.querySelectorAll('webview').length === 2").await;
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if sh.said("preload REFUSED") && sh.said("persist:aio-webview") {
             break;
         }
@@ -260,7 +266,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
             "document.querySelector('#b webview').sendInputEvent({{ type: 'keyDown', keyCode: '{k}', modifiers: ['shift'] }})"
         )
     };
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         sh.eval(&key("a")).await;
         sh.eval(&key("Escape")).await;
         if sh.eval("document.getElementById('log').textContent.includes('Key(HostKey')").await == json!(true) {
@@ -322,7 +329,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     );
     let ok: Value = aio::serde_json::from_str(&ok.unwrap()).unwrap();
     assert!(sh.ask(ok.clone(), "opened").await["error"].is_null());
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if loads("/child") == 1 {
             break;
         }
@@ -337,7 +345,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     // A guest's pop-up: blocked without real input in it, said; after a
     // click, an http(s) link for the system browser (none in this run).
     sh.eval("document.getElementById('open').click()").await;
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if sh.said("pop-up BLOCKED") {
             break;
         }
@@ -347,7 +356,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     assert!(sh.said("no click or key in that page in the last 5 s"));
     sh.eval("const w = document.querySelector('#b webview'); w.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 }); w.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 }); true").await;
     sh.eval("document.getElementById('open').click()").await;
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if sh.said("not opened (AIORT_NO_OPEN") {
             break;
         }
@@ -359,7 +369,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     // (said once); the app's own quit leaves past it.
     sh.eval("window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; }); true").await;
     sh.eval("window.close(); true").await;
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if sh.said("the page vetoed leaving") {
             break;
         }
