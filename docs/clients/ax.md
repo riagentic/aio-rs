@@ -232,22 +232,55 @@ ax test notes && ax dev notes
 
 [Quickstart](../basics/quickstart.md), [the files it makes](../basics/project.md).
 
-### `ax framework`
+### `ax pin`
 
 ```text
-ax framework [version] [--aio dir]
+ax pin <app> [version] [--major]
 ```
 
-The app's aio-rs (aio's `am pin`, and `am fix` on a clone), run in the
-app's folder. With nothing, where each of its `Cargo.toml` files takes
-aio-rs from; with a version (`0.2.0`, `main`, `latest`), every aio-rs
-dependency moved to that release from git; with `--aio`, to that checkout
-(relative). `Cargo.lock` follows (`cargo update --workspace`); a move cargo
-can't resolve (no such tag, no network) changes nothing.
+Which aio-rs the app uses, and how to change it (aio's `am pin`). `<app>`
+is its name or folder, left out inside it. No running app is needed.
 
-```sh
-ax framework              # Cargo.toml: aio = { package = "aio-rs", git = "…", tag = "v0.1.0" … }
-ax framework latest       # every one to the newest release; commit Cargo.toml and Cargo.lock
+With no version it changes nothing and says what each `Cargo.toml` file
+asks for (a release tag, a branch, a checkout), what `Cargo.lock` built
+(version, source, commit), this `ax`'s version and whether they match,
+and aio-rs's releases (its git tags; offline: said). Then, as aio does:
+drift (Cargo.lock built something Cargo.toml didn't ask for: exit 1),
+files that disagree, no Cargo.lock yet, a local-dev pin, how many releases
+behind the newest it is, and what to type next.
+
+With a version, every aio-rs dependency of every `Cargo.toml` (workspace
+dependencies too) moves there, and `Cargo.lock` follows (`cargo update -p`
+for the aio-rs crates only; offline, from what cargo has, said); a move
+cargo can't resolve changes nothing:
+
+| version | moves to |
+|---|---|
+| `0.2.0`, `v0.2.0`, `0.2` | that release's git tag (refused when aio-rs has no such tag) |
+| `latest` | the newest release in the app's major; `--major`: any (a breaking move, said) |
+| `main` | the branch tip; `Cargo.lock` holds the exact commit; re-run to advance |
+| `../aio-rs` | an aio-rs checkout, named relative to the app: this machine only (said) |
+
+A move back to an older release says what may break. `--json`: the facts,
+or what moved, as one object.
+
+```text
+$ ax pin notes
+  aio-rs    v0.1.0  Cargo.toml, app/Cargo.toml
+  built     0.1.0 (tag v0.1.0 @ ab0cada)
+  ax        0.1.0  matches
+  latest    v0.1.0
+  releases  v0.1.0
+
+  ax pin latest     the newest release in this app's major
+  ax pin <version>  switch this app (Cargo.toml and Cargo.lock)
+  ax pin main       follow the branch tip (a moving target)
+  ax pin <path>     follow an aio-rs checkout on this machine
+$ ax pin 0.1
+pinned to aio-rs v0.1.0  (resolved from "0.1")
+  recorded in Cargo.toml, app/Cargo.toml
+  Cargo.lock: aio-rs 0.1.0 @ ab0cada
+  commit Cargo.toml and Cargo.lock so a clone builds against the same version
 ```
 
 ### `ax dev`
@@ -541,9 +574,11 @@ ax ui [--window] [--browser]
 
 A window of aio-rs's own, on the shared runtime, for the apps on this
 machine: aio's manager (amui), ported screen for screen, dark or light
-with the OS. What it does to an app is an `ax` verb run as a child (a view
-of the verbs, never a second way in); what it reads of a project is read
-only, and never a secret folder (`.ssh`, `.gnupg`, `.aws`).
+with the OS. What it does to an app is an `ax` verb (a view of the verbs,
+never a second way in): its reads run in its own process, at once, each
+answered within 5 s or said as a failure; start, stop, a call and create
+run as children. What it reads of a project is read only, and never a
+secret folder (`.ssh`, `.gnupg`, `.aws`).
 
 | Flag | Does |
 |---|---|
@@ -552,7 +587,8 @@ only, and never a secret folder (`.ssh`, `.gnupg`, `.aws`).
 | `--browser` | serves the same view to this machine's browser on a loopback port, behind a key made for the run (its link sets the key as a cookie), until Ctrl-C |
 
 - **On the left**: the running apps and private instances (`ax apps`),
-  or all of them (remembered), searched by name or folder; Rescan; a new
+  or all of them (remembered), the running first, searched by name, id
+  or folder; Rescan; a new
   app by name (`ax create` in `~/aio-apps`, its name made safe). Stopped
   projects are found too, three levels deep: in `~/aio-apps`, your home
   folder (never its app state or machine folders), the current folder,
@@ -566,12 +602,12 @@ only, and never a secret folder (`.ssh`, `.gnupg`, `.aws`).
 
 | Tab | Shows | From |
 |---|---|---|
-| Overview | status, build, port, pid, uptime, clients, CPU, memory, state; process, cell health, project, config, build targets, newest errors, schedules | `health.json`, `ax metrics`, `ax errors`, `ax schedules`, `/proc` |
+| Overview | status, build, port, pid, uptime, clients, CPU, memory, state; process (what runs, from where), cell health (its size, links, refused calls, last action), project, the live config (title, auth, port), build targets, newest errors (a panic with all its lines), schedules | `health.json`, `ax metrics`, `ax events`, `ax errors --json`, `ax schedules` |
 | Cells | each cell's methods: run one with a JSON list of arguments, confirmed naming the exact call (and saying when it gets none); a link to the cell's source | `ax peer`, `ax call` |
 | State | each cell's fields as a foldable tree, each marked saved (`disk`) and sent to the window (`ui`), with its JSON size | `ax snapshot`, `ax peer` |
-| Metrics | trends of CPU, memory, state, the slowest call's p95 and pushes (the last 60 readings); calls, memory, linked clients, cell sizes, recent actions, the window's components | `ax cost`, `ax metrics`, `ax clients`, `ax events`, `ax components` |
+| Metrics | trends of CPU, memory, state, the slowest call's p95 and pushes (the last 60 readings); calls, memory, linked clients (each with its health, how long a part of it has been down, bytes a second and in all, changes it fell behind on), cell sizes, recent actions (each with its method's time; a refused one with why), the window's components | `ax cost`, `ax metrics`, `ax clients`, `ax events --refused`, `ax components` |
 | Logs | the newest 500 lines of all, the framework's, the warnings or the page's, by level and word; Follow reads again every 2 s | the app's `logs/` |
-| Tasks | `ax dev`, `test`, `lint`, `build` (each target), `doctor`, `config`, `data` in the project, its output live; Stop task ends it (and its children), and 5 minutes do | `ax` |
+| Tasks | the project's own tasks, its cargo aliases (`[alias]` of `.cargo/config.toml`, in its folder and up its workspace); `ax dev`, `test`, `lint`, `build` (each target), `doctor`, `config`, `data` in the project; the output shown as it comes; Stop task ends it (and its children), and 5 minutes do | `cargo`, `ax` |
 | Codebase | the app's folder, or its repository, as a foldable, filtered tree (the first 1200; no `target`, `.git`, `node_modules`, `dist`); a file highlighted, up to 2 MB | read only |
 
 A verb that fails says why where its answer would be, and an answer is
@@ -579,8 +615,10 @@ never shown as current once a read of it failed.
 
 Where amui reads what aio-rs hasn't, it shows aio-rs's counterpart:
 the cells' state for the V8 heap, the slowest call's p95 for reduce p95,
-pushes for the queue depth, degraded cells for breakers. CPU every 2.5 s
-needs `/proc` (Linux); elsewhere it is the app's own, every 10 s.
+pushes for the queue depth, degraded cells for breakers, changes a client
+fell behind on for its backpressure. CPU every 2.5 s needs `/proc` (Linux);
+elsewhere it comes from the app's own `health.json` (its CPU time, its
+executable and folder), every 10 s.
 
 ## Inspect a running app
 
@@ -650,17 +688,19 @@ A snapshot is for looking and for moving state between copies; a backup
 ### `ax events`
 
 ```text
-ax events <app> [cell] [--last N] [--diff] [--from file]
+ax events <app> [cell] [--last N] [--diff] [--refused] [--from file]
 ```
 
 The newest events of the app's log, oldest first: their number (seq), time,
 cell, method, arguments and caller. A `#[redact]` call's arguments show as
-`[redacted]`.
+`[redacted]`. Under `--json`, a running app's events also say how long
+their method took (`ms`, for the calls of this run).
 
 | Flag | Does |
 |---|---|
 | `--last N` | how many (20) |
 | `--diff` | each with the changes it made, `path: before → after` |
+| `--refused` | with `--json`: the running app's refused calls of late too, as rows of their own (`{at, cell, method, ms, refused}`, no seq, never their arguments) |
 | `--from file` | another store, or a backup file |
 
 ```sh
@@ -1412,17 +1452,23 @@ The app's accounts, running or not.
 Without `--password` one is made and shown once.
 [Accounts](../auth/README.md#accounts).
 
-### `ax pin`, `ax pair`
+### `ax pair`
 
 ```text
-ax pin <app> [--plain]
+ax pair <app> [--plain]
 ax pair <app> <host:port> <code>
 ```
 
-- `ax pin`: a pairing code from the running app: 8 digits (6 with
-  `--plain`), valid 3 minutes, once. A new one needs no restart.
-- `ax pair`: pairs this device with an app's server by that code. Over TLS
-  the server's root is pinned; refused when the server serves another app.
+- `ax pair <app>` (aio's `am pair`): a fresh pairing code from the running
+  app: 8 digits (6 with `--plain`), valid 3 minutes, once. A new one needs
+  no restart. An app that isn't running, or has no server, is told how to
+  start it or give it one.
+- `ax pair <app> <host:port> <code>`: pairs this device with an app's
+  server by that code. Over TLS the server's root is pinned; refused when
+  the server serves another app.
+
+Before 0.2.0 the code was `ax pin <app>`; `ax pin` is now aio's framework
+version.
 
 [Pairing](../state/sync.md#pairing-and-discovery).
 
@@ -1492,7 +1538,7 @@ it takes the release's install script, checks its SHA-256 against the
 release's `SHA256SUMS`, and runs it (the script checks the archive's
 SHA-256 before anything runs). `--aio dir`: `ax` built from that checkout
 (`cargo install`); plain `ax upgrade` returns to a release. Apps keep their
-own aio-rs: [`ax framework`](#ax-framework).
+own aio-rs: [`ax pin`](#ax-pin).
 
 `ax uninstall` takes `ax` out of `$CARGO_HOME/bin`; `--tools` also what it
 fetched and built in the tool home (`tools/`, and `target/` unless
@@ -1609,12 +1655,12 @@ ax stop notes
 | `--quiet`, `--json` | `--quiet`, `--json` |
 | `am surface` (`--component --depth --full`), `am trigger`, `am shot` (`--json`), `am eval`, `am preview` | the same verbs and flags |
 | `am publish` | `ax release` |
-| `am pair` (a new PIN) | `ax pin`; `ax pair` pairs this device |
+| `am pair` (a new PIN) | `ax pair <app>`; `ax pair <app> <host:port> <code>` pairs this device |
 | `am ui`, `am ui --client=browser` | `ax ui`, `ax ui --browser` |
-| `am pin <v>\|main\|latest` | `ax framework <v>\|main\|latest` (`ax pin` is a pairing code); `ax create --aio-version` |
-| `am upgrade`, `am uninstall` | `ax upgrade`, `ax uninstall` (an app's aio-rs: `ax framework`) |
+| `am pin`, `am pin <v>\|main\|latest\|<path>`, `--latest`, `--major` | `ax pin`, `ax pin <v>\|main\|latest\|<path>`, `--major`; `ax create --aio-version` |
+| `am upgrade`, `am uninstall` | `ax upgrade`, `ax uninstall` (an app's aio-rs: `ax pin`) |
 | `am prune versions` | nothing to prune: an app pins aio-rs in its `Cargo.lock` |
-| `am fix`, `am link` | nothing to repair: a clone builds as it is (aio-rs from git); `ax framework <v>` moves a checkout's path back to a release |
+| `am fix`, `am link` | nothing to repair: a clone builds as it is (aio-rs from git); `ax pin <v>` moves a checkout's path back to a release |
 | `am check`, `am where` | the compiler: client and server code are resolved by rustc |
 
 The full map of aio's commands and constructs: [migration](../migration/README.md).
@@ -1628,6 +1674,10 @@ Not in aio-rs today; each with what to do instead:
 - **`am start --port`**: the port is the app's `[server] listen`.
 - **`am dispatch` plain actions and `--as-server`**: there are no
   non-cell actions; a debug build's door already has the operator's rights.
+- **`am pin`'s preflight** (a forward move refused while the app uses an
+  API the target removed, `--force`), its Electron alignment and its
+  `requires Deno ≥`: `cargo check` after `ax pin` names each removed API
+  at its line; an app's Electron and Rust come with its aio-rs crates.
 - **`am build --force`**: `ax build` always builds anew.
 - **`am watch`, `am add cell|server`**: `ax dev` watches; cells are
   written by hand.
@@ -1635,6 +1685,5 @@ Not in aio-rs today; each with what to do instead:
   and shows the reports the app made.
 - **Piped output as JSON by default**: `ax` prints the same text to a pipe;
   ask for `--json`.
-- **amui's** V8 heap, effect backlog, per-action reduce time and action
-  errors: aio-rs has no such readings; `ax ui` shows its counterparts
-  ([above](#ax-ui-the-visual-app-manager)).
+- **amui's** V8 heap and effect backlog: aio-rs has no such readings;
+  `ax ui` shows its counterparts ([above](#ax-ui-the-visual-app-manager)).

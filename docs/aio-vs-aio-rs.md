@@ -259,7 +259,7 @@ beyond the aio-rs form.
 | `am` | `dispatch` plain actions, `--as-server` | none | cell methods; a debug build's door | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 | `am` | `kill --stale`, `start --port` | none | the OS's lock; `[server] listen` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 | `am` | `migrate`, `add cell\|server`, `report` collecting a new one | the compiler; by hand | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | the manager UI's V8 heap and per-action readings | `ax ui`'s aio-rs counterparts | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | the manager UI's V8 heap | `ax ui`'s aio-rs counterparts (per-action time and refusals as aio's) | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 
 ## How aio-rs deviates from aio
 
@@ -516,7 +516,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | State and history | `state`, `snapshot`, `migrations`, `replay`, `timetravel` | the same | ✅ |
 | Calls | `dispatch` (`k=v`, `--body`, `--wait`) | `ax call` (the same) | 🔄 |
 | Inspection | `surface`, `trigger`, `shot`, `eval`, `preview`, `sql`, `heap`, `cost` | the same | ✅ |
-| Pairing, trust | `discover`, `profile`, `pair`, `auth`, `trust` | the same (`ax pin` makes a pairing code; aio's `am pin` is a framework version: `ax framework`) | ✅ |
+| Pairing, trust | `discover`, `profile`, `pair`, `auth`, `trust` | the same (`ax pair <app>` makes a pairing code, `ax pair <app> <host:port> <code>` pairs this device) | ✅ |
 | `where`, `check` | yes | the compiler | 🔄 |
 | `persist`, `testgen`, `timeline`, `top`, control REST API | yes | `ax persist`, `ax testgen`, `ax timeline`, `ax top`, `ax control` (loopback HTTP) | ✅ |
 | `add cell\|server` | yes | ❌ (written by hand) | ❌ |
@@ -527,7 +527,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Agent brief | `am agent` | `ax agent`, `AGENTS.md`/`CLAUDE.md` in new apps | ✅ |
-| Framework version per app | `dep/aio` link, `am pin`, `am fix` | aio-rs from git at a release tag in `Cargo.toml`, the commit in `Cargo.lock`: a clone builds as it is; `ax create --aio-version`, `ax framework <v>\|main\|latest`, `--aio <dir>` for a checkout | ✅ |
+| Framework version per app | `dep/aio` link, `am pin`, `am fix` | aio-rs from git at a release tag in `Cargo.toml`, the commit in `Cargo.lock`: a clone builds as it is; `ax create --aio-version`; `ax pin` says what Cargo.toml asks for, what Cargo.lock built, this ax and the releases (drift: exit 1), `ax pin <v>\|main\|latest\|<checkout>` moves it, `--major`, `--json`; no preflight of removed APIs (`cargo check` names them) | ✅ |
 | Upgrading the CLI | `am upgrade`, `am uninstall` | `ax upgrade` (the release's checked install script, or a checkout), `ax uninstall` | ✅ |
 | Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows) or source; no prebuilt macOS | 🔄 |
 | API reference | `api-reference.md` | `cargo doc -p aio-rs` | ✅ |

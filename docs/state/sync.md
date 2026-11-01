@@ -96,7 +96,7 @@ mode = "client-server"
 [server]
 listen = "0.0.0.0:8100"
 tls = true          # this machine's own root; `ax trust` says how browsers trust it
-pairing = true      # `ax pin` + `ax pair` hand the key to a device
+pairing = true      # `ax pair` hands the key to a device
 discover = true     # answers `ax discover` on the LAN
 ```
 
@@ -456,14 +456,14 @@ rt.block_on(async {
 A device gets a served app's key without anyone typing it:
 
 ```sh
-ax pin board                       # on the server's machine: an 8-digit code (3 minutes, once)
+ax pair board                      # on the server's machine: an 8-digit code (3 minutes, once)
 ax pair board 192.168.1.20:8100 12345678   # on the device
 ax discover                        # the aio-rs apps on this LAN that answer
 ```
 
 - The default code is a PAKE (CPace bound to the TLS certificate the
   device sees): the code never crosses the network and a relay learns
-  nothing. `ax pin --plain` makes aio's plain 6-digit PIN, sent to
+  nothing. `ax pair <app> --plain` makes aio's plain 6-digit PIN, sent to
   `POST /__aio/pair`.
 - 8 wrong guesses from one address (one /64 for IPv6) lock that address
   out; 20 wrong in all burn the code. Needs `[server] pairing = true`.

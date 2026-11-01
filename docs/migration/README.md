@@ -38,7 +38,7 @@ and is many times slower than the aio app it replaces.
 | `src/cell/*.ts` | `src/*.rs` modules, one per aio cell file |
 | `src/ui/*.tsx` | `src/ui/*.rs` modules, one per aio component file |
 | `am create` | `ax create <name>` (`--template app`, `cli`, `service`; `--aio-version`, `--target`, `--css tailwind`) |
-| `am pin`, `am fix` | `ax framework <version>`: the app's aio-rs; a clone needs no repair |
+| `am pin`, `am pin <v>\|main\|latest\|<path>`, `am fix` | `ax pin`, `ax pin <v>\|main\|latest\|<path>`: the app's aio-rs (Cargo.toml and Cargo.lock); a clone needs no repair |
 | `am upgrade`, `am uninstall` | `ax upgrade`, `ax uninstall` |
 
 `ax create` makes the whole layout; copy the aio app's cells and components
@@ -71,7 +71,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `takeover`, `singleton` | always one instance per home; `--takeover` per launch; `--instance <n>` for a second, private one |
 | `serverUrl` | `mode = "client"` with `[client] server`, or a pairing (`ax pair`) |
 | `users`, `key` | the app's key (`AIORT_TOKEN`, else `data/sync.token`), `[server] open`; per-user tokens: `[accounts]` ([accounts](../auth/README.md)) |
-| `pairing` | `[server] pairing`, `ax pin`, `ax pair` |
+| `pairing` | `[server] pairing`, `ax pair <app>` (the code), `ax pair <app> <host:port> <code>` |
 | `resolveUser`, `sessions`, `auth` | `[accounts]` (users, roles, sessions, TOTP, OIDC) |
 | `resolvePeer`, `peerTypes` | `Http::resolve_peer(\|app\| ..)`: the `Caller` a peer app is here; `aio::peer::Peer::find(app, ..)` calls one; `ax peer <app>` prints what it may call, as Rust signatures (the contract is a crate both apps use) |
 | `db` | `#[table("name")]` fields, `aio::db::Db` ([SQL](../persistence/sql.md)) |
@@ -345,7 +345,7 @@ Rename it (`begin`) when porting.
 | `testgen` | `ax testgen <app>`: a Rust name table, a renamed element a compile error |
 | `sql`, `tables`, `schedules`, `logs`, `errors`, `metrics`, `heap`, `cost`, `health`, `doctor` | the same |
 | `top` | `ax top <app> [secs]` |
-| `discover`, `profile`, `pair`, `pin`, `auth`, `trust` | the same |
+| `discover`, `profile`, `pair`, `pin`, `auth`, `trust` | the same (`ax pair <app>`: aio's fresh PIN; `ax pin`: aio's framework version) |
 | `create`, `build`, `dev`, `lab`, `theme`, `prune`, `remove`, `installed`, `version`, `agent`, `help` | the same |
 | `compile` | `ax build <app>` |
 | `publish` | `ax keygen <app>`, `ax release <app>` |
@@ -792,3 +792,17 @@ a view reads state where it shows it (`"{n}"`, `.get()` in `rsx!` or a
 `memo`), a prop that must follow state is a `Signal`, `Memo` or part
 handle, no `if let` inside `rsx!` (`{opt.map(|x| rsx! { .. })}`), and
 `once` is the only one-time setup ([views](../ui/views.md#ready-for-air)).
+
+### `ax pin` and `ax pair` in 0.2
+
+`ax` 0.2 names these as aio does. `ax pin <app>` was a pairing code and is
+now aio's `am pin`: which aio-rs the app uses, and `ax pin <version>`
+moves it. A script that asked for a code says `ax pair <app>` now (same
+flags: `--plain`); `ax pair <app> <host:port> <code>` pairs a device as
+before. The unreleased framework verb is `ax pin` too.
+
+| 0.1 | 0.2 |
+|---|---|
+| `ax pin <app> [--plain]` (a pairing code) | `ax pair <app> [--plain]` |
+| `ax pair <app> <host:port> <code>` | the same |
+| the framework verb, `[version] [--aio dir]` (unreleased) | `ax pin [app] [version]`, `ax pin <checkout dir>` |

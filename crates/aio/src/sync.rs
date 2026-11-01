@@ -431,14 +431,7 @@ fn ws<T: Cell>(
                                 };
                                 let _heard = Heard::new(on_link, &user, &from);
                                 let who = format!("{user} from {from} (aio)");
-                                let listed = Listed::new(Client {
-                                    cell: T::ID,
-                                    user,
-                                    wire: "aio",
-                                    from,
-                                    since: crate::store::now_ms(),
-                                    rtt: None,
-                                });
+                                let listed = Listed::new(Client::new(T::ID, user, "aio", from));
                                 let link = (listed.0, who);
                                 crate::compat::wire::session(h, Sock::Ws(s), limits, gate, viewer, calls, link).await
                             };
@@ -639,7 +632,7 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     }
     #[cfg(feature = "tls")]
     if let Some(pairing) = pairing {
-        // Same-machine tools that hold the key mint PINs (`ax pin`); a
+        // Same-machine tools that hold the key mint PINs (`ax pair <app>`); a
         // request a proxy relayed is from elsewhere, whatever the socket says.
         let (minter, key, trust) = (pairing.clone(), token.clone(), Arc::new(trust_proxy.clone()));
         app = app.route(
@@ -1575,6 +1568,15 @@ impl<T: Cell> Remote<T> {
         for p in lock(&self.inner.copy).pending.clone() {
             _ = tx.send(p.msg());
         }
+        // What this process's bus hears, for the server's (a relayed one is
+        // not sent back): heard from before the link is said online, so a
+        // problem said once it is (a test's, the app's first) is not missed.
+        let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
+        let _sub = crate::report::subscribe(move |d| {
+            if !d.kind.starts_with("client:") {
+                _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held }));
+            }
+        });
         *lock(&self.inner.out) = Some(tx);
         self.inner.online.store(true, Ordering::SeqCst);
         self.tell();
@@ -1589,13 +1591,6 @@ impl<T: Cell> Remote<T> {
             // send calls at the server's advertised rate.
             let mut pace = Pace::new(calls_per_sec);
             let mut told = Vec::new();
-            // What this process's bus hears, for the server's (a relayed one is not sent back).
-            let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
-            let _sub = crate::report::subscribe(move |d| {
-                if !d.kind.starts_with("client:") {
-                    _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held }));
-                }
-            });
             loop {
                 let m = tokio::select! {
                     m = rx.recv() => match m {

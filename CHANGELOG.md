@@ -54,9 +54,13 @@ version may break things.
 - A ported app replays aio's journal past its save at boot (a crash
   before aio's save), moving `__journal_wm` with each call.
 
-- `ax create --aio-version <v|main|latest>`, and `ax framework [version]
-  [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
-  `am pin`; all or nothing).
+- `ax create --aio-version <v|main|latest>`, and `ax pin [app] [version]`
+  (aio's `am pin`): what the app's Cargo.toml files ask for, what its
+  Cargo.lock built, this ax's version and whether they match, aio-rs's
+  releases, drift (exit 1), how far behind; `ax pin <v>|main|latest|<checkout>`
+  moves every aio-rs dependency (workspace deps too) with `cargo update -p`
+  for the aio-rs crates only, offline from cargo's cache when needed, all
+  or nothing; `--major`, `--json` ([ax](docs/clients/ax.md#ax-pin)).
 - `ax create` makes a git repository with its first commit (not inside
   another), a `README.md`, `.gitattributes` (`eol=lf`), a `.gitignore`
   that keeps `.env` and release keys out; `--target a,b` writes
@@ -179,8 +183,32 @@ version may break things.
   `Remote::merge(field, Merge::Text | Counter | SetAdd(id))` (aio's
   `sync.merge`) shows that field merged while the call waits. In the page
   too.
+- **`ax ui` as amui, on every OS**: the Tasks tab runs the project's own
+  tasks (its cargo aliases) beside the `ax` verbs, its output shown as it
+  comes; CPU, the project folder, the executable and the runtime kind on
+  macOS and Windows too (from `health.json`'s `cpuMs`, `exe`, `cwd`);
+  each linked client's health (and for how long a part is down), bytes a
+  second and in all, and the changes it fell behind on; each action's
+  method time and the refused ones with why; per cell its refused calls
+  and last action; the runtime config card from the live app
+  (`health.json`'s `config`: title, auth, mode).
+- `ax events --json` of a running app says each event's method time
+  (`ms`); `--refused` adds its refused calls of late. The local door
+  answers `took`; a client's listing (`ax clients --json`) has `sent`,
+  `behind` and its `degraded` parts.
 ### Changed
 
+- **Breaking: `ax pin` and `ax pair` named as aio names them.** The
+  pairing code is `ax pair <app> [--plain]` (aio's `am pair`), no longer
+  `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
+  before. `ax pin` is aio's framework version (above); the unreleased
+  framework verb is gone into it ([migration](docs/migration/README.md#ax-pin-and-ax-pair-in-02)).
+- `ax ui` reads in its own process (no `ax` child and no `cargo
+  metadata` per reading), all at once, each within 5 s; it lists the
+  running apps first, finds an app by its display name, shows a refusal
+  of who asked before a transport failure, and drops a process's readings
+  once it stops or restarts. `ax errors` keeps a panic's lines together
+  (`--json`: one string).
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
   they did; `[app] tz = "local"` reads this machine's local time (the
   0.1.0 behaviour).
@@ -273,6 +301,33 @@ version may break things.
 
 ### Fixed
 
+- The app quitting (it stops, its socket closes) right after the page
+  vetoed a close (`window.close()` with a beforeunload handler) quits: the
+  vetoed close, still settling, took the quit's own close of that window
+  with it and the runtime stayed up; the windows left are closed again
+  until they are gone.
+- The desktop splash shows a second after its page loaded when its window
+  never paints while hidden (a loaded machine): it stayed hidden for good;
+  a splash already gone never comes back.
+- A copy (`Remote`) hears this process's diagnostic bus from before it is
+  online: a problem said just as the link came up was never relayed to the
+  server's bus.
+- `aio::testing::TestUi` counts every render however its tests share the
+  process: with one tracing listener alive, tracing-core asks only the
+  registering thread's own, so a render first met on a thread with none
+  muted it for all; a second listener is kept for good.
+- `aio::testing::TestBrowser` waits up to 120 s for a browser's DevTools
+  port (a hang guard): the first system Chrome of a Windows CI runner took
+  more than 30 s while running.
+- An app that isn't running or has no server, asked for a pairing code or
+  its profile, is told so plainly with what to type ("notes isn't running:
+  start it with `ax start notes`"; no server: the aio.toml lines that
+  give it one), not "the app isn't serving (no serving.json)".
+- A clean stop leaves no socket behind: a cell's door served on the
+  runtime was never dropped, so its `cell-<id>.sock` (and its folder)
+  outlived the app.
+- `ax ui` lists the clients of every cell, not the first 8; the Overview's
+  tiles wrap instead of cutting their value ("runni…").
 - A page script's `await aio.recv()` (`aio::ui::eval`) no longer hangs the
   window when the view sends later than 50 ms after it asked, and takes a
   falsy value (`0`, `false`): the renderer's own `recv` waited in a busy
@@ -293,9 +348,6 @@ version may break things.
   unmount, a focus, a rect) run in the order the app sent them; a big one
   could run after a small one sent later, so two `<Browser>`s could leave
   one empty and an island swapped for another could stay the old one.
-- `aio::testing::TestUi` counts every render (`components()`) when tests
-  run in parallel: a render callsite another thread registered at the same
-  moment could be cached as of no interest, and its renders went uncounted.
 - The test suite holds under load: timing tests wait on what they check
   (a condition, a gate the test opens, a page-side record of each style)
   instead of a fixed sleep or a wall-clock window; bounds on time are hang

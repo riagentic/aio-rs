@@ -33,6 +33,7 @@ mod mux;
 /// `.deb` and AppImage: made on Linux (dpkg-deb, mksquashfs).
 #[cfg(unix)]
 mod package;
+mod pin;
 mod places;
 mod platform;
 mod preview;
@@ -95,18 +96,28 @@ fn log_lines(dir: &Path, n: usize) -> Out {
 /// (its number, 0 before the first; its line) with its bad lines, and how
 /// many there were in all.
 /// A start (its number, its line) and the bad lines after it.
-type Run<'a> = (usize, String, Vec<&'a str>);
+type Run = (usize, String, Vec<String>);
 
-fn bad_lines<'a>(lines: &[&'a str], n: usize) -> (Vec<Run<'a>>, usize) {
-    // (start, its line, the bad lines after it)
+fn bad_lines(lines: &[&str], n: usize) -> (Vec<Run>, usize) {
+    // (start, its line, the bad events after it: a panic's lines are one)
     let mut runs: Vec<Run> = vec![(0, String::new(), vec![])];
+    let mut in_bad = false;
     for l in lines {
         if starts(l) {
             runs.push((runs.len(), l.to_string(), vec![]));
+            in_bad = false;
         } else if bad(l)
             && let Some(r) = runs.last_mut()
         {
-            r.2.push(l);
+            r.2.push(l.to_string());
+            in_bad = true;
+        } else if in_bad && logs::continues(l) {
+            if let Some(e) = runs.last_mut().and_then(|r| r.2.last_mut()) {
+                e.push('\n');
+                e.push_str(l);
+            }
+        } else {
+            in_bad = false;
         }
     }
     let total: usize = runs.iter().map(|r| r.2.len()).sum();
@@ -176,7 +187,7 @@ fn errors(build: Option<&str>, lines: &[&str], n: usize, json: bool) -> String {
     }
     for (k, start, bad) in runs {
         out.push(if k == 0 { "before the first start in the log:".into() } else { format!("start {k}: {start}") });
-        out.extend(bad.iter().map(|l| format!("  {l}")));
+        out.extend(bad.iter().map(|l| format!("  {}", l.replace('\n', "\n  "))));
     }
     if total == 0 {
         out.push(format!("no warnings or errors in the log ({} lines)", lines.len()));
@@ -245,6 +256,34 @@ fn events(db: &Connection, cell: Option<&str>, last: u32, json: bool, diff: &Dif
         false if lines.is_empty() => "no events".into(),
         false => lines.join("\n"),
     })
+}
+
+/// `ax events --json`'s rows with what the running app read of them
+/// (`read`: each cell's `took` answer): each event's `ms` when it ran in
+/// this run, and with `refused` its refused calls as rows of their own
+/// (`{at, cell, method, ms, refused}`, no seq), all by time (pure).
+fn timed(rows: &mut Vec<serde_json::Value>, read: &[(String, serde_json::Value)], refused: bool) {
+    for r in rows.iter_mut() {
+        let at = read.iter().find(|(c, _)| r["cell"] == c.as_str());
+        if let Some(ms) = at.and_then(|(_, v)| v["ms"].get(r["seq"].to_string())).filter(|m| m.is_number()) {
+            r["ms"] = ms.clone();
+        }
+    }
+    if !refused {
+        return;
+    }
+    for (cell, v) in read {
+        for e in v["refused"].as_array().into_iter().flatten() {
+            let method = e["call"].as_str().and_then(|c| c.strip_prefix(cell.as_str())?.strip_prefix('.'));
+            let at = e["at"].as_str().and_then(|a| chrono::DateTime::parse_from_rfc3339(a).ok());
+            if let (Some(method), Some(at)) = (method, at) {
+                rows.push(serde_json::json!({
+                    "at": at.timestamp_millis(), "cell": cell, "method": method, "ms": e["ms"], "refused": e["refused"],
+                }));
+            }
+        }
+    }
+    rows.sort_by_key(|r| r["at"].as_i64().unwrap_or(0));
 }
 
 fn short(s: &str, max: usize) -> String {
@@ -595,9 +634,33 @@ fn report(data: &Path, id: Option<&str>, json: bool) -> Out {
     }
 }
 
-fn pin(t: &Target, plain: bool) -> Out {
-    let pin = aio::rt().block_on(aio::pairing::mint(&t.plan.data, plain)).map_err(|e| e.to_string())?;
+/// `ax pair <app>` (aio's `am pair`): a fresh pairing code from the running app.
+fn pair_code(t: &Target, plain: bool) -> Out {
+    let pin = aio::rt().block_on(aio::pairing::mint(&t.plan.data, plain)).map_err(|e| unserved(t, e))?;
     Ok(format!("{pin}\n(valid 3 minutes, once: enter it on the new device)"))
+}
+
+/// Why the app serves no other device (aio's `"<id>" is not running —
+/// start it`), plainly: not running, or with no server.
+fn unserved(t: &Target, e: std::io::Error) -> String {
+    let server = t.pkg.as_ref().and_then(|p| build::app_of(p).ok()).map(|(_, c)| c.server.listen.is_some());
+    match e.kind() {
+        std::io::ErrorKind::NotFound => not_serving(&t.name, aio::paths::running(&t.plan.data), server),
+        _ => e.to_string(),
+    }
+}
+
+/// What [`unserved`] says (pure); `server`: whether its aio.toml gives it
+/// one (None: unknown, an installed app).
+fn not_serving(name: &str, running: bool, server: Option<bool>) -> String {
+    let give = "give it one in its aio.toml ([app] mode = \"client-server\", [server] listen = \"0.0.0.0:8100\")";
+    match (running, server) {
+        (false, Some(false)) => {
+            format!("{name} isn't running, and has no server for other devices: {give}, then `ax start {name}`")
+        }
+        (false, _) => format!("{name} isn't running: start it with `ax start {name}`"),
+        (true, _) => format!("{name} runs, but has no server for other devices: {give}, then `ax restart {name}`"),
+    }
 }
 
 /// Where a backup of the store at `store` goes unless named: `backups/`
@@ -660,7 +723,7 @@ fn pair(t: &Target, addr: &str, code: &str) -> Out {
 
 /// `ax profile`: the profile, printed or written 0600 (it holds the key).
 fn profile(t: &Target, out: Option<&str>) -> Out {
-    let (p, local) = aio::pairing::local_profile(&t.plan.data, &t.id).map_err(|e| e.to_string())?;
+    let (p, local) = aio::pairing::local_profile(&t.plan.data, &t.id).map_err(|e| unserved(t, e))?;
     if local {
         eprintln!(
             "[aio] {} listens on this machine only, so this profile connects from here only: \
@@ -776,15 +839,9 @@ fn run(args: &[String]) -> Out {
             made.notes.push(create::git_init(&made.at, maintainer.is_some()));
             Ok(made.said(json))
         }
-        ("framework", rest) if rest.len() <= 1 => {
-            let root = create::app_root(&std::env::current_dir().map_err(|e| e.to_string())?)?;
-            let to = match (value("--aio"), rest.first()) {
-                (Some(_), Some(_)) => return Err("a version or --aio <dir>, not both".into()),
-                (Some(d), None) => Some(create::Aio::checkout(&root, Path::new(d))?),
-                (None, Some(v)) => Some(create::Aio::version(v, create::tags)?),
-                (None, None) => None,
-            };
-            create::framework(&root, to.as_ref(), create::relock)
+        ("pin", [w]) if pin::is_target(w) => pin::run(None, Some(w), has("--major"), json),
+        ("pin", [app, rest @ ..]) if rest.len() <= 1 => {
+            pin::run(Some(app), rest.first().copied(), has("--major"), json)
         }
         ("upgrade", rest) if rest.len() <= 1 => upgrade::upgrade(rest.first().copied(), value("--aio").map(Path::new)),
         ("uninstall", []) => upgrade::uninstall(has("--tools"), &aio::paths::tool_home(), &upgrade::bin()),
@@ -936,7 +993,30 @@ fn run(args: &[String]) -> Out {
             let file = from.clone().unwrap_or_else(|| t.store());
             let db = open(&file)?;
             if args[0] == "events" && !has("--diff") {
-                return events(&db, cell, n, json, &|_| vec![]);
+                let out = events(&db, cell, n, json, &|_| vec![])?;
+                if !json || from.is_some() || !aio::paths::running(&t.plan.data) {
+                    return Ok(out);
+                }
+                // The running app's own readings: each event's time, its refused calls.
+                let mut rows: Vec<serde_json::Value> = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+                let mut cells: Vec<String> = rows.iter().filter_map(|r| r["cell"].as_str().map(String::from)).collect();
+                if has("--refused") {
+                    cells.extend(cell.map(String::from).map_or_else(|| metrics::cells(&db), |c| Ok(vec![c]))?);
+                }
+                cells.sort();
+                cells.dedup();
+                let read: Vec<(String, serde_json::Value)> = cells
+                    .into_iter()
+                    .filter_map(|c| {
+                        let seqs: Vec<&serde_json::Value> =
+                            rows.iter().filter(|r| r["cell"] == c.as_str()).map(|r| &r["seq"]).collect();
+                        let ask = serde_json::json!({ "t": "took", "seqs": seqs });
+                        let (v, _) = travel::ask(&door(&t, &c).ok()?, &c, &user(None), ask).ok()?;
+                        Some((c, v))
+                    })
+                    .collect();
+                timed(&mut rows, &read, has("--refused"));
+                return Ok(serde_json::Value::from(rows).to_string());
             }
             // Each event shown with the state before and after it, of its cell.
             let mut q = db
@@ -1499,8 +1579,11 @@ fn run(args: &[String]) -> Out {
         }
         ("runtime", []) => runtime(has("--fetch")),
         ("setup", []) => setup::run(has("--check")),
-        ("pin", [app]) => pin(&t(app)?, has("--plain")),
+        ("pair", [app]) => pair_code(&t(app)?, has("--plain")),
         ("pair", [app, addr, code]) => pair(&t(app)?, addr, code),
+        ("pair", [_, addr]) => {
+            Err(format!("ax pair <app> {addr} <code>: the code too (ax pair <app> on the app's machine makes one)"))
+        }
         ("auth", [app, what @ ..]) => {
             let f = auth::Fields { role: value("--role"), email: value("--email"), password: value("--password") };
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
@@ -1719,6 +1802,19 @@ mod tests {
     }
 
     #[test]
+    fn says_plainly_why_an_app_serves_no_device() {
+        assert_eq!(not_serving("notes", false, None), "notes isn't running: start it with `ax start notes`");
+        assert_eq!(not_serving("notes", false, Some(true)), "notes isn't running: start it with `ax start notes`");
+        let none = not_serving("notes", false, Some(false));
+        assert!(none.starts_with("notes isn't running, and has no server for other devices: give it one in its aio.toml ([app] mode = \"client-server\", [server] listen = "), "{none}");
+        assert!(none.ends_with("then `ax start notes`"));
+        assert!(not_serving("notes", true, Some(false)).ends_with("then `ax restart notes`"));
+        for m in [none, not_serving("notes", true, None)] {
+            assert!(!m.contains("serving.json"), "{m}");
+        }
+    }
+
+    #[test]
     fn beside_an_apps_folder_a_source_verb_runs_in_it() {
         let a = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
         let notes = |d: &str| d == "notes";
@@ -1877,6 +1973,49 @@ mod tests {
         );
         assert_eq!(v["starts"][0]["lines"][1], log[4]);
         assert_eq!(v["starts"][0]["line"], log[2]);
+    }
+
+    /// amui's structured errors: a panic's lines are one error, never cut
+    /// to its first.
+    #[test]
+    fn a_panic_is_one_error_with_all_its_lines() {
+        let log = [
+            "2026-10-28T10:00:00.000Z [aio] notes 1 starting (pid 10)",
+            "2026-10-28T10:01:00.000Z ERROR [aio] panicked at src/lib.rs:3:5",
+            "2026-10-28T10:01:00.000Z   index out of bounds",
+            "2026-10-28T10:01:01.000Z INFO  [x] fine",
+            "2026-10-28T10:01:02.000Z   not a panic's",
+        ];
+        let v: serde_json::Value = serde_json::from_str(&errors(None, &log, 20, true)).unwrap();
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["starts"][0]["lines"][0], format!("{}\n{}", log[1], log[2]));
+        let text = errors(None, &log, 20, false);
+        assert!(text.ends_with(&format!("  {}\n  {}", log[1], log[2])), "{text}");
+    }
+
+    /// amui's per-action reduce time and errors: each event with its
+    /// method's time, the refused calls as rows of their own, by time.
+    #[test]
+    fn events_carry_their_time_and_the_refused_calls_join_them() {
+        let row = |seq: i64, at: i64| serde_json::json!({ "seq": seq, "cell": "board", "method": "add", "at": at });
+        let read = [(
+            "board".to_string(),
+            serde_json::json!({ "ms": { "7": 0.5 }, "refused": [
+                { "at": "2026-10-28T10:00:01.000Z", "call": "board.clear", "ms": 0.1, "refused": "only an admin" },
+                { "at": "2026-10-28T10:00:01.000Z", "call": "boardx.clear", "ms": 0.1, "refused": "another cell's" },
+            ] }),
+        )];
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-28T10:00:00Z").unwrap().timestamp_millis();
+        let mut rows = vec![row(7, at), row(8, at + 5_000)];
+        timed(&mut rows, &read, false);
+        assert_eq!((rows.len(), &rows[0]["ms"], rows[1].get("ms")), (2, &serde_json::json!(0.5), None));
+        timed(&mut rows, &read, true);
+        assert_eq!(rows.len(), 3, "board's refused call only");
+        assert_eq!(
+            (&rows[1]["method"], &rows[1]["refused"], rows[1].get("seq")),
+            (&"clear".into(), &"only an admin".into(), None)
+        );
+        assert_eq!(rows[2]["seq"], 8, "by time");
     }
 
     #[test]

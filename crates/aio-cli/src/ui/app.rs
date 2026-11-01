@@ -120,6 +120,8 @@ const TICK: Duration = Duration::from_millis(2500);
 const RESCAN: Duration = Duration::from_secs(9);
 /// A followed log read again this often.
 const FOLLOW: Duration = Duration::from_secs(2);
+/// How often a running task's output is shown as it grows.
+const TASK_POLL: Duration = Duration::from_millis(300);
 
 /// The window (amui's `App`): its manager on the context's [`Setup`] (else
 /// this machine's, its verbs the context's [`Verb`], else `ax` itself).
@@ -129,7 +131,7 @@ pub fn App() -> View {
     let verb = try_context::<Verb>();
     let prefs = try_context::<super::Prefs>();
     let m = once(move || {
-        let s = setup.unwrap_or_else(|| Setup::here(verb.unwrap_or_else(manager::child), prefs.and_then(|p| p.0)));
+        let s = setup.unwrap_or_else(|| Setup::here(verb.unwrap_or_else(manager::local), prefs.and_then(|p| p.0)));
         Manager::new(s)
     });
     provide(|| m);
@@ -145,6 +147,7 @@ pub fn App() -> View {
             m.discover();
         }
     });
+    aio::kit::use_interval(TASK_POLL, true, move || m.task_progress());
     aio::kit::use_interval(FOLLOW, true, move || {
         let live = m.detail.read_untracked().as_ref().filter(|d| d.running).map(|d| d.id.clone());
         if *view.tab.read_untracked() == Tab::Logs
@@ -542,8 +545,12 @@ fn Overview(d: Detail) -> View {
     let state = diag.state_bytes();
     let errors = d.errors.clone().unwrap_or_default();
     let schedules = d.schedules.clone().unwrap_or_default();
-    let (tasks, cells) =
-        (TASKS.len(), d.cells.as_ref().map(|c| c.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ")));
+    let (tasks, cells) = (
+        d.meta.tasks.len() + TASKS.len(),
+        d.cells.as_ref().map(|c| c.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ")),
+    );
+    let live = health["config"].clone();
+    let history = diag.history.clone().unwrap_or_default();
     rsx! {
         div { class: "col",
             div { class: "wrap10",
@@ -583,6 +590,9 @@ fn Overview(d: Detail) -> View {
                                 let c = &sizes.get(&name).cloned().unwrap_or_default();
                                 let links = c["links"].as_u64().map_or(String::new(), |l| format!(" · {l} link{}", if l == 1 { "" } else { "s" }));
                                 let size = c["bytes"].as_u64().map_or(String::new(), |b| format!(" · {}", aio::fmt::bytes(b)));
+                                let (errs, last) = cell_calls(&history, &name);
+                                let errs = if errs > 0 { format!(" · {errs} err") } else { String::new() };
+                                let last = last.map_or(String::new(), |l| format!(" · {l}"));
                                 rsx! {
                                     div { key: "{name}", class: "hrow",
                                         span { class: if bad.is_some() { "red" } else { "green" }, style: "font-size:10px", "●" }
@@ -590,7 +600,7 @@ fn Overview(d: Detail) -> View {
                                         span { class: "dim", style: "font-size:11px",
                                             match &bad {
                                                 Some(why) => format!("degraded · {why}"),
-                                                None => format!("ok{size}{links}"),
+                                                None => format!("ok{size}{links}{errs}{last}"),
                                             }
                                         }
                                     }
@@ -613,9 +623,9 @@ fn Overview(d: Detail) -> View {
                 div { class: "card box", "data-t": "config",
                     div { class: "label mb8", "runtime config" }
                     if d.running {
-                        Row { k: "title", v: d.meta.name.clone() }
+                        Row { k: "title", v: live["title"].as_str().map_or(d.meta.name.clone(), String::from) }
                         Row { k: "port", v: d.port.map(|p| p.to_string()).or(d.meta.listen.clone()).unwrap_or_else(dash) }
-                        Row { k: "auth", v: if d.meta.accounts { "accounts" } else { "none" } }
+                        Row { k: "auth", v: live["auth"].as_str().unwrap_or(if d.meta.accounts { "accounts" } else { "none" }).to_string() }
                         Row { k: "mode", v: d.build.unwrap_or("—") }
                         Row { k: "cells", v: cells.unwrap_or_else(dash) }
                     } else {
@@ -629,7 +639,12 @@ fn Overview(d: Detail) -> View {
                     div { class: "card box", style: "padding:12px 16px", "data-t": "errors",
                         div { class: if errors.is_empty() { "label mb6" } else { "label mb6 red" }, "errors ({errors.len()})" }
                         for (i , e) in errors.iter().enumerate() {
-                            div { key: "{i}", class: "small red", "{e}" }
+                            div { key: "{i}", class: "mb6", style: "overflow-wrap:anywhere",
+                                div { class: "small red", "{e.head.raw}" }
+                                for (j , l) in e.more.iter().take(8).enumerate() {
+                                    div { key: "{j}", class: "small dim", style: "padding-left:12px", "{l}" }
+                                }
+                            }
                         }
                         if errors.is_empty() {
                             div { class: "dim", style: "font-size:12px", "none" }
@@ -648,6 +663,16 @@ fn Overview(d: Detail) -> View {
             }
         }
     }
+}
+
+/// A cell's refused calls and its newest action among `history` (`ax
+/// events --refused`'s rows), as the cell health row says them (pure).
+pub fn cell_calls(history: &[aio::serde_json::Value], cell: &str) -> (usize, Option<String>) {
+    let mine: Vec<_> = history.iter().filter(|e| e["cell"] == cell).collect();
+    let errs = mine.iter().filter(|e| e["refused"].is_string()).count();
+    let last =
+        mine.iter().rev().find(|e| !e["refused"].is_string()).and_then(|e| e["method"].as_str().map(String::from));
+    (errs, last)
 }
 
 /// The Cells tab (amui's `CellsTab`): each cell and its methods; a method
@@ -817,12 +842,38 @@ fn LogsTab(id: String) -> View {
 /// The Tasks tab (amui's `TasksTab`): `ax` verbs on the app's project, its
 /// output captured; cancellable, 5 min at most.
 #[component]
-fn TasksTab(id: String, has_project: bool) -> View {
+fn TasksTab(id: String, has_project: bool, own: Vec<(String, String)>) -> View {
     let m = context::<Manager>();
     let t = m.task.read().clone();
     let busy = t.running.is_some();
+    let i = id.clone();
     rsx! {
         div { class: "col",
+            if has_project {
+                div { class: "card", style: "padding:14px 16px", "data-t": "ownTasks",
+                    div { class: "label mb10", "cargo aliases" }
+                    if own.is_empty() {
+                        div { class: "dim", style: "font-size:13px", "no [alias] in .cargo/config.toml" }
+                    }
+                    div { style: "display:flex;gap:8px;flex-wrap:wrap",
+                        for (name , run) in own {
+                            {
+                                let label = format!("cargo {name}");
+                                let on = t.running.as_deref() == Some(label.as_str());
+                                let i = i.clone();
+                                rsx! {
+                                    button { key: "{name}", r#type: "button", class: if on { "btn act" } else { "btn" }, disabled: busy,
+                                        title: "cargo {run}", "data-t": "task-{label}",
+                                        onclick: move |_| m.run_task(&i, &label),
+                                        if on { "◇ " } else { "▷ " }
+                                        "{name}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             div { class: "card", style: "padding:14px 16px",
                 div { class: "label mb10", "ax tasks" }
                 if !has_project {
@@ -1090,7 +1141,7 @@ fn DetailPane() -> View {
                     Tab::State => rsx! { StateTab { key: "{d.id}@{pid}", id: d.id.clone(), running: d.running, cells: d.cells.clone().unwrap_or_default() } },
                     Tab::Metrics => rsx! { MetricsTab { running: d.running, connections: d.connections } },
                     Tab::Logs => rsx! { LogsTab { key: "{d.id}", id: d.id.clone() } },
-                    Tab::Tasks => rsx! { TasksTab { id: d.id.clone(), has_project: d.path.is_some() } },
+                    Tab::Tasks => rsx! { TasksTab { id: d.id.clone(), has_project: d.path.is_some(), own: d.meta.tasks.clone() } },
                     Tab::Codebase => rsx! { CodebaseTab {} },
                 }
             }
