@@ -12,6 +12,9 @@ pub struct Budgets {
     pub method: Option<u64>,
     /// One effect step. Unset: 5.
     pub effect: Option<u64>,
+    /// How long each await of an async method may take, unless the method
+    /// is `#[long]` (aio's `effectTimeoutMs`). Unset: 30000.
+    pub call_ceiling: Option<u64>,
     /// Per method, `"cell.method" = ms`: one meant to be slow, while every
     /// other stays strict.
     #[serde(default)]
@@ -43,6 +46,11 @@ impl Default for Storm {
 }
 
 impl Budgets {
+    /// The await ceiling of async methods ([`Self::call_ceiling`], at least 1 ms).
+    pub fn ceiling(&self) -> Duration {
+        Duration::from_millis(self.call_ceiling.unwrap_or(30_000).max(1))
+    }
+
     /// The budget of method `label` (`cell.method`).
     pub fn method(&self, label: &str) -> Duration {
         let default = if cfg!(debug_assertions) { 16 } else { 100 };

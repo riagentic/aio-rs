@@ -26,6 +26,8 @@ struct Inner<T: Cell> {
     /// Per key, the end of the last queued effect: the next one waits for it.
     tails: Mutex<HashMap<String, tokio::sync::oneshot::Receiver<()>>>,
     ran: AtomicU64,
+    /// The `#[mode(first)]` and `#[mode(newest)]` calls in flight.
+    inflight: crate::answer::Inflight,
 }
 
 pub struct Handle<T: Cell> {
@@ -63,6 +65,7 @@ impl<T: Cell> Handle<T> {
             running: Mutex::default(),
             tails: Mutex::default(),
             ran: AtomicU64::new(0),
+            inflight: Default::default(),
         };
         Self { inner: Arc::new(inner), by: By::System }
     }
@@ -120,8 +123,58 @@ impl<T: Cell> Handle<T> {
         lock(&self.inner.running).contains_key(key)
     }
 
-    /// A `#[ttl]` method's step: a page cell runs every call (no answer cache).
-    pub(crate) fn answered(&self, _ms: i64) {}
+    /// Run one call atomically; an async method's end goes to `reply`.
+    fn run(&self, method: &str, args: Value, reply: Option<crate::Reply>) -> Result<Value> {
+        crate::ask_before(&Call { cell: T::ID, method, args: &args, by: &self.by, role: None })?;
+        let cx = Cx::live(super::now_ms(), &self.by).with_reply(reply);
+        let mut st = (*self.state()).clone();
+        st.advance(method)?;
+        let out = st.apply(&cx, method, args)?;
+        st.check()?;
+        let asks = cx.into_asks();
+        if !asks.plans.is_empty() {
+            super::say(&format!("{}.{method}: schedules don't run in a page; dropped", T::ID));
+        }
+        self.commit(st, asks.effects);
+        Ok(out)
+    }
+
+    /// A call, followed to its end when it is an async method's (a page
+    /// cell keeps no `#[ttl]` answers: it runs every call).
+    fn enter(&self, method: &str, args: Value) -> Result<(Value, crate::Answer)> {
+        let Some(mode) = T::async_mode(method) else {
+            let v = self.run(method, args, None)?;
+            return Ok((v.clone(), crate::Answer::ready(Ok(v))));
+        };
+        let (reply, answer) = crate::Reply::new(method);
+        let key = crate::answer::key_of::<T>(method, &args);
+        if let Some(shared) = self.inner.inflight.enter(mode, key, &reply) {
+            return Ok((Value::Null, shared));
+        }
+        match self.run(method, args, Some(reply.clone())) {
+            Ok(v) => Ok((v, answer)),
+            Err(e) => {
+                reply.send(Err(e.clone()));
+                Err(e)
+            }
+        }
+    }
+
+    /// An async method's step, for the call whose end goes to `reply`.
+    pub(crate) fn resume(&self, method: &str, args: Value, reply: Option<crate::Reply>) -> Result<Value> {
+        let base = method.split_once('.').map_or(method, |(m, _)| m);
+        if let (Some(Mode::Newest), Some(r), By::Effect(key)) = (T::async_mode(base), &reply, &self.by)
+            && !self.inner.inflight.current(key, r)
+        {
+            crate::reject!("{}.{base}: superseded by a newer call (#[mode(newest)])", T::ID);
+        }
+        self.run(method, args, reply)
+    }
+
+    /// An async method's await refused (`io.await?`): said in the page's log.
+    pub(crate) fn failed(&self, why: &str) {
+        super::say(&format!("{}.{why}", T::ID));
+    }
 
     fn commit(&self, st: T, effects: Vec<crate::cx::Asked>) {
         let st = Arc::new(st);
@@ -147,7 +200,10 @@ impl<T: Cell> Handle<T> {
                     Err(e) => match e.downcast::<crate::tell::Tell>() {
                         Ok(t) if !crate::tell::show(&t) => super::say(&format!("{}: nobody to tell: {t:?}", T::ID)),
                         Ok(_) => {}
-                        Err(_) => super::say(&format!("{}: an effect for another cell was dropped", T::ID)),
+                        Err(e) => match e.downcast::<crate::answer::Answered>() {
+                            Ok(a) => a.reply.iter().for_each(|r| r.send(Ok(a.value.clone()))),
+                            Err(_) => super::say(&format!("{}: an effect for another cell was dropped", T::ID)),
+                        },
                     },
                 },
             }
@@ -225,18 +281,11 @@ impl<T: Cell> Handle<T> {
 
 impl<T: Cell> Door<T> for Handle<T> {
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        crate::ask_before(&Call { cell: T::ID, method, args: &args, by: &self.by, role: None })?;
-        let cx = Cx::live(super::now_ms(), &self.by);
-        let mut st = (*self.state()).clone();
-        st.advance(method)?;
-        let out = st.apply(&cx, method, args)?;
-        st.check()?;
-        let asks = cx.into_asks();
-        if !asks.plans.is_empty() {
-            super::say(&format!("{}.{method}: schedules don't run in a page; dropped", T::ID));
-        }
-        self.commit(st, asks.effects);
-        Ok(out)
+        self.enter(method, args).map(|(v, _)| v)
+    }
+
+    fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        self.enter(method, args).map(|(_, a)| a)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {

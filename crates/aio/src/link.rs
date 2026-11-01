@@ -299,6 +299,26 @@ impl Gate {
         h.call_by(&crate::Caller { by: viewer.clone(), role }, method, args, op)
     }
 
+    /// [`Self::call`], followed to its end: an async method's answer to come.
+    pub(crate) fn ask<T: Cell>(
+        &self,
+        h: &Handle<T>,
+        viewer: &By,
+        method: &str,
+        args: Value,
+        op: Option<&str>,
+    ) -> Result<(Option<Value>, crate::Answer)> {
+        let role = match self {
+            Gate::Door => return h.ask_by(None, method, args, op),
+            Gate::Local | Gate::Key => None,
+            Gate::Known(role) => Some(role.clone()),
+            Gate::Signed(a, t) => {
+                Some(live(a, t).ok_or_else(|| Rejected::coded(crate::Code::AccessDenied, "sign in first: this session ended"))?.role)
+            }
+        };
+        h.ask_by(Some(&crate::Caller { by: viewer.clone(), role }), method, args, op)
+    }
+
     /// The link's role now, for what it may see (`#[cell(visible = f)]`).
     /// Blocking: it may read the session.
     pub(crate) fn role(&self) -> Option<String> {
@@ -597,6 +617,8 @@ pub(crate) async fn session<T: Cell>(
     // What they say while running: a person is deciding (`deciding::start`).
     #[cfg_attr(not(feature = "server"), allow(unused_variables))]
     let (held_tx, mut held) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    // Async methods' ends (`end {op, ok | err}`), each after its last change.
+    let (ends_tx, mut ends) = tokio::sync::mpsc::unbounded_channel::<Value>();
     loop {
         tokio::select! {
             Some(Ok(answer)) = running.join_next(), if !running.is_empty() => {
@@ -607,6 +629,14 @@ pub(crate) async fn session<T: Cell>(
             }
             Some(p) = parts.recv() => send_ax(&mut w, &p).await?,
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
+            Some(end) = ends.recv() => {
+                while events.try_recv().is_ok() {}
+                if let Some(p) = view.advance(&h, &seer) {
+                    pushes.push(&p, crate::store::now_ms());
+                    send_view(&mut w, meter, &p).await?;
+                }
+                send_ax(&mut w, &end).await?;
+            }
             Ok(t) = tells.recv(), if !tool => send_ax(&mut w, &json!({ "t": "tell", "d": t })).await?,
             more = changed(&mut accounts) => {
                 if !more {
@@ -663,21 +693,41 @@ pub(crate) async fn session<T: Cell>(
                         let (hh, g, by) = (h.clone(), gate.clone(), viewer.clone());
                         let (method, args) = (msg["method"].as_str().unwrap_or_default().to_string(), msg["args"].clone());
                         let op = msg["op"].as_str().map(String::from);
-                        let r = tokio::task::spawn_blocking(move || {
-                            g.call(&hh, &by, &method, args, op.as_deref()).map(|v| v.unwrap_or(Value::Null))
-                        })
-                        .await
-                        .map_err(|e| e.to_string())?;
+                        let is_async = T::async_mode(&method).is_some();
+                        let r = tokio::task::spawn_blocking(move || g.ask(&hh, &by, &method, args, op.as_deref()))
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        // An async method's end goes after its reply, once it comes.
+                        let r = match r {
+                            Ok((v, answer)) => {
+                                if is_async {
+                                    let (tx, op) = (ends_tx.clone(), msg["op"].clone());
+                                    tokio::spawn(async move {
+                                        let end = match answer.await {
+                                            Ok(v) => json!({ "t": "end", "op": op, "ok": v }),
+                                            Err(e) => json!({ "t": "end", "op": op, "err": e.why, "code": e.code }),
+                                        };
+                                        _ = tx.send(end);
+                                    });
+                                }
+                                Ok(v.unwrap_or(Value::Null))
+                            }
+                            Err(e) => Err(e),
+                        };
                         // Its change first, then the reply.
                         while events.try_recv().is_ok() {}
                         if let Some(p) = view.advance(&h, &seer) {
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
-                        let reply = match r {
+                        let mut reply = match r {
                             Ok(v) => json!({ "t": "reply", "op": msg["op"], "ok": v }),
                             Err(e) => json!({ "t": "reply", "op": msg["op"], "err": e.why, "code": e.code }),
                         };
+                        if is_async && reply.get("ok").is_some() {
+                            // Its answer is the `end` that follows.
+                            reply["async"] = true.into();
+                        }
                         send_ax(&mut w, &reply).await?;
                     }
                     // What is degraded on the client's side, for this app's health (aio's `cdiag`).

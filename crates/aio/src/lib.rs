@@ -80,6 +80,7 @@ native! {
 pub mod auth {
     pub mod client;
 }
+mod answer;
 pub mod colors;
 pub mod cron;
 mod cx;
@@ -116,6 +117,9 @@ pub use web::{Handle, Source, sync};
 #[doc(hidden)]
 pub use aio_config_macro::config as __config_lit;
 pub use aio_macros::{cell, data, methods};
+pub use answer::Answer;
+#[doc(hidden)]
+pub use answer::{Reply, Step, finish, ttl_key};
 pub use cx::{Backoff, By, Cx, Inputs, Plan};
 pub use derived::{Cache, Derived, Reads, Ver, Watching};
 pub use effect::{Effect, Mode};
@@ -235,8 +239,8 @@ pub mod prelude {
     #[cfg(not(target_arch = "wasm32"))]
     pub use crate::Store;
     pub use crate::{
-        By, Caller, Cell, CellData, Code, Cx, Door, Effect, Handle, Mode, Rejected, Result, Uuid, act, call, cell,
-        data, ensure, methods, reject,
+        Answer, By, Caller, Cell, CellData, Code, Cx, Door, Effect, Handle, Mode, Rejected, Result, Uuid, act, call,
+        cell, data, ensure, methods, reject,
     };
 }
 
@@ -551,6 +555,15 @@ pub trait Cell: CellData {
     /// run did (else call by call). A call that changes nothing logs
     /// nothing. A crash loses at most the window not yet logged, as in aio.
     const COALESCED: &'static [&'static str] = &[];
+    /// Its `pub async fn` methods, each with its `#[mode]` (`Queue` unless
+    /// set): a call of one ends later, in a step ([`crate::Answer`]).
+    const ASYNC: &'static [(&'static str, crate::Mode)] = &[];
+    /// Its `#[ttl]` async methods: their effects are keyed by their arguments too.
+    const TTL: &'static [&'static str] = &[];
+    /// The async method `method` is, and its mode (`None`: a plain method).
+    fn async_mode(method: &str) -> Option<crate::Mode> {
+        Self::ASYNC.iter().find(|(m, _)| *m == method).map(|(_, mode)| *mode)
+    }
     /// Is `method` (or a step of it, `method.N`) `#[redact]`?
     fn redacts(method: &str) -> bool {
         Self::REDACTED.iter().any(|r| method.strip_prefix(r).is_some_and(|s| s.is_empty() || s.starts_with('.')))
@@ -585,6 +598,17 @@ pub trait Cell: CellData {
 /// `<Name>Calls` trait gives every door typed methods.
 pub trait Door<T: Cell> {
     fn call(&self, method: &str, args: Value) -> Result<Value>;
+    /// Call `method` and follow it to its end: an async method's last
+    /// value, or the refusal that ended it after an await (aio's `await
+    /// cell.method()`); a plain method's answer at once. `Err` here: refused
+    /// before anything committed.
+    fn ask(&self, method: &str, args: Value) -> Result<Answer> {
+        let v = self.call(method, args)?;
+        Ok(Answer::ready(match T::async_mode(method) {
+            None => Ok(v),
+            Some(_) => Err(Rejected::new(format!("{method}: this door can't follow an async method to its end"))),
+        }))
+    }
     /// Read the current state. `f` must not call the same door.
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R;
     /// Keep a resource (a watcher, a socket) under `key`, dropping the one it
@@ -801,13 +825,27 @@ pub fn ret<R: Serialize>(r: Result<R>) -> Result<Value> {
 }
 
 /// An async method's effect hands its awaited result to the next step; a
-/// refused step changes nothing and ends the method there. `ttl`: this is a
-/// `#[ttl]` method's last step, so its committing answers the call for that long.
+/// refused step changes nothing and ends the method there, said to its
+/// caller ([`Answer`]).
 #[doc(hidden)]
-pub fn step<T: Cell>(h: &Handle<T>, method: &str, args: Result<Value>, ttl: Option<i64>) {
-    match args.and_then(|a| h.call(method, a)) {
-        Ok(_) => ttl.into_iter().for_each(|ms| h.answered(ms)),
-        Err(e) => eprintln!("[aio] {}: {method} refused: {e}", T::ID),
+pub fn step<T: Cell>(h: &Handle<T>, method: &str, args: Result<Value>, reply: Option<Reply>) {
+    if let Err(e) = args.and_then(|a| h.resume(method, a, reply.clone())) {
+        eprintln!("[aio] {}: {method} refused: {e}", T::ID);
+        if let Some(r) = reply {
+            r.send(Err(e));
+        }
+    }
+}
+
+/// An awaited `io.await?` failed: the method ends there, as if its step
+/// refused (nothing more commits), said to its caller and counted as the
+/// cell's failure.
+#[doc(hidden)]
+pub fn fail<T: Cell>(h: &Handle<T>, method: &str, e: Rejected, reply: Option<Reply>) {
+    eprintln!("[aio] {}: {method} refused: {e}", T::ID);
+    h.failed(&format!("{method}: {e}"));
+    if let Some(r) = reply {
+        r.send(Err(e));
     }
 }
 

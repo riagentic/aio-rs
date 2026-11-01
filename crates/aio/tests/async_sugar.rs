@@ -98,7 +98,7 @@ async fn an_async_method_commits_each_part_and_records_each_result() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_first_part_commits_nothing_and_starts_no_io() {
     let h = Handle::<Shop>::memory();
-    assert_eq!(h.checkout(String::new(), 1000), Err(Rejected::new("nothing to buy")));
+    assert_eq!(h.checkout(String::new(), 1000).unwrap_err(), Rejected::new("nothing to buy"));
     tokio::time::sleep(Duration::from_millis(60)).await;
     assert!(!h.busy("checkout"));
     assert!(methods(&h).is_empty());
@@ -115,10 +115,21 @@ async fn a_refused_step_keeps_the_parts_before_and_ends_the_method() {
     assert_eq!(s.status, "pricing", "the step's own writes are dropped (aio kept them)");
     assert_eq!((s.total, s.order.clone()), (0, None));
 
-    h.note("no".into()).unwrap();
-    until("note ran", || !h.busy("note")).await;
+    let refused = h.note("no".into()).unwrap();
+    assert_eq!(refused.await, Err(Rejected::new("refused after the await")), "the caller hears the refusal");
     assert_eq!(methods(&h), ["checkout", "note"]);
     assert!(h.state().notes.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caller_awaits_the_end_of_the_method() {
+    let h = Handle::<Shop>::memory();
+    let end = h.checkout("book".into(), 1000).unwrap();
+    assert_eq!(h.state().status, "pricing", "the call returned after its first part");
+    end.await.unwrap();
+    assert!(h.state().status.starts_with("done"), "settled once its last part committed");
+    let over = h.checkout("television".into(), 10).unwrap().await.unwrap_err();
+    assert!(over.why.starts_with("television costs"), "{over}");
 }
 
 #[test]
@@ -255,5 +266,220 @@ mod ttl {
         h.load(1).unwrap();
         t.settle();
         assert_eq!(h.state().names, ["user-1"], "loaded again");
+    }
+}
+
+/// ST1/ST2: an async method answers its caller, and awaits anywhere a
+/// statement goes (branches, matches, loops, blocks), each part still one
+/// atomic, logged call.
+mod anywhere {
+    use aio::prelude::*;
+    use std::time::Duration;
+
+    #[cell(persist)]
+    pub struct Feed {
+        pub pages: Vec<String>,
+        pub seen: u32,
+        pub log: Vec<String>,
+        pub cache: Option<u64>,
+    }
+
+    async fn page(n: u32) -> Vec<String> {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        if n >= 3 { vec![] } else { vec![format!("p{n}-{}", aio::uuid_v4().simple())] }
+    }
+
+    async fn lookup(id: u32) -> std::result::Result<u64, String> {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        if id == 0 { Err("no such id".into()) } else { Ok(u64::from(id) * 10) }
+    }
+
+    async fn tick() {}
+
+    #[methods]
+    impl Feed {
+        /// A value back, a cached answer without awaiting, a `?` on the await.
+        pub async fn price(&mut self, id: u32) -> Result<u64> {
+            if let Some(p) = self.cache {
+                return Ok(p);
+            }
+            let p: u64 = lookup(id).await?;
+            self.cache = Some(p);
+            Ok(p)
+        }
+
+        /// The last expression awaited: its `Ok` is the answer.
+        pub async fn peek(&mut self, id: u32) -> Result<u64> {
+            self.log.push(format!("peek {id}"));
+            lookup(id).await
+        }
+
+        /// A loop with an await each turn, `break` and `continue`.
+        pub async fn load(&mut self, skip: u32) -> Result<u32> {
+            let mut n: u32 = 0;
+            loop {
+                let rows: Vec<String> = page(n).await;
+                n += 1;
+                if rows.is_empty() {
+                    break;
+                }
+                if n - 1 == skip {
+                    continue;
+                }
+                self.pages.extend(rows);
+            }
+            self.seen = n;
+            Ok(n)
+        }
+
+        /// `while`, `match` and `if` with awaits in some arms only.
+        pub async fn mixed(&mut self, mode: u32) -> Result<String> {
+            let mut left: u32 = 2;
+            while left > 0 {
+                tick().await;
+                left -= 1;
+            }
+            let said: String = match mode {
+                0 => "zero".into(),
+                1 => {
+                    let p: u64 = lookup(1).await?;
+                    format!("one {p}")
+                }
+                _ => {
+                    tick().await;
+                    "many".into()
+                }
+            };
+            if mode == 7 {
+                let more: u64 = lookup(7).await?;
+                self.log.push(format!("{said} {more}"));
+            } else {
+                self.log.push(said.clone());
+            }
+            Ok(said)
+        }
+    }
+
+    fn methods(h: &Handle<Feed>) -> Vec<String> {
+        h.store(|s| s.events().unwrap()).into_iter().map(|e| e.method).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_async_method_answers_with_its_value_or_its_refusal() {
+        let h = Handle::<Feed>::memory();
+        assert_eq!(h.price(4).unwrap().await, Ok(40));
+        assert_eq!(methods(&h), ["price", "price.1"]);
+        assert_eq!(h.price(9).unwrap().await, Ok(40), "an early return answers in the first part");
+        assert_eq!(h.call("price", serde_json::json!([9])), Ok(serde_json::json!(40)), "a plain call too");
+        assert_eq!(methods(&h), ["price", "price.1", "price", "price"]);
+
+        let h = Handle::<Feed>::memory();
+        assert_eq!(h.price(0).unwrap().await, Err(Rejected::new("no such id")), "an awaited `?` reaches the caller");
+        assert_eq!(methods(&h), ["price"], "and nothing after it committed");
+        assert_eq!(h.peek(3).unwrap().await, Ok(30));
+        assert_eq!(h.peek(0).unwrap().await, Err(Rejected::new("no such id")));
+        assert_eq!(h.state().log, ["peek 3", "peek 0"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn awaits_in_loops_and_branches_resume_where_they_were() {
+        let h = Handle::<Feed>::memory();
+        assert_eq!(h.load(1).unwrap().await, Ok(4));
+        let s = h.state();
+        assert_eq!(s.seen, 4);
+        assert_eq!(s.pages.len(), 2, "page 1 skipped by `continue`: {:?}", s.pages);
+        assert!(s.pages[0].starts_with("p0-") && s.pages[1].starts_with("p2-"));
+        assert_eq!(methods(&h), ["load", "load.1", "load.1", "load.1", "load.1"], "one step per turn");
+
+        assert_eq!(h.mixed(0).unwrap().await, Ok("zero".into()));
+        assert_eq!(h.mixed(1).unwrap().await, Ok("one 10".into()));
+        assert_eq!(h.mixed(2).unwrap().await, Ok("many".into()));
+        assert_eq!(h.mixed(7).unwrap().await, Ok("many".into()));
+        assert_eq!(h.state().log, ["zero", "one 10", "many", "many 70"]);
+    }
+
+    #[test]
+    fn replay_of_loops_and_branches_is_exact_and_does_no_io() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f.db");
+        let live = {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let h = Handle::<Feed>::open(&p).unwrap();
+            rt.block_on(async {
+                h.load(9).unwrap().await.unwrap();
+                h.mixed(7).unwrap().await.unwrap();
+                h.mixed(1).unwrap().await.unwrap();
+            });
+            h.state()
+        };
+        let h = Handle::<Feed>::open(&p).unwrap();
+        assert_eq!(h.state(), live, "the random pages come back from the log");
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn under_test_cells_the_answer_is_there_once_settled() {
+        let mut t = aio::testing::TestCells::new();
+        let h = t.cell::<Feed>();
+        let mut a = h.price(2).unwrap();
+        assert_eq!(a.now(), None, "its await is held");
+        t.settle();
+        assert_eq!(a.now(), Some(Ok(20)));
+    }
+}
+
+/// ST3/ST6: `#[mode(newest)]` and `#[mode(first)]` on async methods.
+mod modes {
+    use aio::prelude::*;
+    use std::time::Duration;
+
+    #[cell]
+    pub struct Search {
+        pub shown: Vec<String>,
+        pub runs: u32,
+    }
+
+    async fn find(q: String, ms: u64) -> String {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        format!("hits for {q}")
+    }
+
+    #[methods]
+    impl Search {
+        #[mode(newest)]
+        pub async fn query(&mut self, q: String, ms: u64) -> Result<String> {
+            let hits: String = find(q, ms).await;
+            self.shown.push(hits.clone());
+            Ok(hits)
+        }
+
+        #[mode(first)]
+        pub async fn refresh(&mut self) -> Result<u32> {
+            self.runs += 1;
+            let n: u32 = self.runs;
+            let _ = find("all".into(), 30).await;
+            Ok(n)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn newest_supersedes_the_running_call() {
+        let h = Handle::<Search>::memory();
+        let slow = h.query("a".into(), 200).unwrap();
+        let fast = h.query("ab".into(), 5).unwrap();
+        assert_eq!(fast.await, Ok("hits for ab".into()));
+        let e = slow.await.unwrap_err();
+        assert!(e.why.contains("ended before it answered"), "{e}");
+        assert_eq!(h.state().shown, ["hits for ab"], "the superseded call shows nothing");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_shares_the_running_calls_answer() {
+        let h = Handle::<Search>::memory();
+        let a = h.refresh().unwrap();
+        let b = h.refresh().unwrap();
+        assert_eq!((a.await, b.await), (Ok(1), Ok(1)), "the second caller adopts the first's answer");
+        assert_eq!(h.state().runs, 1, "and ran nothing");
+        assert_eq!(h.refresh().unwrap().await, Ok(2), "once it ended, a call runs again");
     }
 }

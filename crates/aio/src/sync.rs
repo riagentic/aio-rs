@@ -1086,6 +1086,8 @@ struct Inner<T: Cell> {
     copy: Mutex<Copy<T>>,
     out: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
     waiting: Mutex<HashMap<String, mpsc::Sender<Result<Value>>>>,
+    /// Async methods' callers waiting for their end (`end` frames), by call.
+    ends: Mutex<HashMap<String, crate::Reply>>,
     /// Server fn calls waiting for their answer; dropped when the link drops.
     /// Each with whether a person is deciding on the server (`sfnh`).
     running: Mutex<HashMap<String, Running>>,
@@ -1340,6 +1342,7 @@ impl<T: Cell> Remote<T> {
             copy: Mutex::new(copy),
             out: Mutex::new(None),
             waiting: Mutex::default(),
+            ends: Mutex::default(),
             running: Mutex::default(),
             parts: Mutex::default(),
             online: AtomicBool::new(false),
@@ -1580,8 +1583,21 @@ impl<T: Cell> Remote<T> {
                     let fs = lock(&self.inner.refusals).clone();
                     fs.iter().for_each(|f| f(&method, e));
                 }
+                if let (Err(e), Some(end)) = (&r, lock(&self.inner.ends).remove(&op)) {
+                    end.send(Err(e.clone()));
+                }
                 if let Some(tx) = lock(&self.inner.waiting).remove(&op) {
                     _ = tx.send(r);
+                }
+            }
+            // An async method's end, after its reply.
+            Some("end") => {
+                let r = match m.get("err").and_then(Value::as_str) {
+                    Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
+                    None => Ok(m["ok"].clone()),
+                };
+                if let Some(end) = m["op"].as_str().and_then(|op| lock(&self.inner.ends).remove(op)) {
+                    end.send(r);
                 }
             }
             Some("sfnc") => {
@@ -1760,6 +1776,7 @@ impl<T: Cell> Remote<T> {
         method: &str,
         args: Value,
         waiter: Option<mpsc::Sender<Result<Value>>>,
+        end: Option<crate::Reply>,
     ) -> Result<(String, Value)> {
         let (op, out, p, dropped) = {
             let mut c = lock(&self.inner.copy);
@@ -1811,11 +1828,17 @@ impl<T: Cell> Remote<T> {
             if let Some(tx) = lock(&self.inner.waiting).remove(&gone.op) {
                 _ = tx.send(Err(why.clone()));
             }
+            if let Some(end) = lock(&self.inner.ends).remove(&gone.op) {
+                end.send(Err(why.clone()));
+            }
             let fs = lock(&self.inner.refusals).clone();
             fs.iter().for_each(|f| f(&gone.method, &why));
         }
         if let Some(tx) = waiter {
             lock(&self.inner.waiting).insert(op.clone(), tx);
+        }
+        if let Some(end) = end {
+            lock(&self.inner.ends).insert(op.clone(), end);
         }
         self.update(|_| {});
         self.send(p.msg());
@@ -1944,8 +1967,22 @@ impl<T: Cell> Remote<T> {
     /// task's thread without `spawn_blocking`.
     pub fn call_confirmed(&self, method: &str, args: Value) -> Result<Value> {
         let wait = lock(&self.inner.timeouts).get(method).copied().unwrap_or(Some(CALL_TIMEOUT));
+        if T::async_mode(method).is_some() {
+            // An async method's answer is its end: up to its wait for the
+            // reply, and the call ceiling for its awaits.
+            let (end, answer) = crate::Reply::new(method);
+            let (op, _) = self.predict(method, args, None, Some(end))?;
+            let r = match wait {
+                Some(w) => crate::rt().block_on(tokio::time::timeout(w + crate::effect::call_ceiling(), answer)).ok(),
+                None => Some(crate::rt().block_on(answer)),
+            };
+            return r.unwrap_or_else(|| {
+                lock(&self.inner.ends).remove(&op);
+                Err(Rejected::new(format!("{method}: no end in time (it stays queued)")))
+            });
+        }
         let (tx, rx) = mpsc::channel();
-        let (op, _) = self.predict(method, args, Some(tx))?;
+        let (op, _) = self.predict(method, args, Some(tx), None)?;
         let r = match wait {
             Some(w) => rx.recv_timeout(w).ok(),
             None => rx.recv().ok(),
@@ -1964,7 +2001,18 @@ impl<T: Cell> Door<T> for Remote<T> {
     /// `predict = false` method is only sent: it shows once the server ran it
     /// (`pending_of` counts it until then).
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.predict(method, args, None).map(|(_, out)| out)
+        self.predict(method, args, None, None).map(|(_, out)| out)
+    }
+
+    /// Predicted like `call`; an async method's end comes from the server
+    /// (a refused reply ends it at once), even across a dropped link.
+    fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        if T::async_mode(method).is_none() {
+            return self.call(method, args).map(|v| crate::Answer::ready(Ok(v)));
+        }
+        let (end, answer) = crate::Reply::new(method);
+        self.predict(method, args, None, Some(end))?;
+        Ok(answer)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
@@ -2055,10 +2103,27 @@ impl Live {
                 self.take(&m).await?;
             }
         };
-        let m = tokio::time::timeout(CALL_TIMEOUT, answer)
+        let mut m = tokio::time::timeout(CALL_TIMEOUT, answer)
             .await
             .map_err(|_| Rejected::new(format!("{method}: no answer in {CALL_TIMEOUT:?}")))?
             .map_err(gone)?;
+        // An async method: its answer is its end, after its last await.
+        if m["async"] == true {
+            let wait = crate::effect::call_ceiling() + CALL_TIMEOUT;
+            let end = async {
+                loop {
+                    let e = self.next().await?;
+                    if e["t"] == "end" {
+                        return Ok(e);
+                    }
+                    self.take(&e).await?;
+                }
+            };
+            m = tokio::time::timeout(wait, end)
+                .await
+                .map_err(|_| Rejected::new(format!("{method}: no end in {wait:?} (it may still run)")))?
+                .map_err(gone)?;
+        }
         match m.get("err").and_then(Value::as_str) {
             Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
             None => Ok(m["ok"].clone()),

@@ -1,11 +1,13 @@
 //! `#[cell]` makes a struct a cell; `#[methods]` makes its `pub fn (&mut self, …)`
 //! callable by name (so the log replays) and typed for callers (`<Name>Calls`).
 use proc_macro::TokenStream;
-use proc_macro2::{Ident, TokenStream as Tokens, TokenTree};
+use proc_macro2::{Ident, TokenStream as Tokens};
 use quote::{format_ident, quote};
+mod lower;
+
 use syn::{
-    Attribute, Expr, FnArg, GenericArgument, ImplItem, ImplItemFn, ItemImpl, ItemStruct, LitInt, LitStr, Pat, Path,
-    PathArguments, ReturnType, Stmt, Type, Visibility, parse_macro_input, parse_quote, spanned::Spanned,
+    Attribute, Expr, FnArg, GenericArgument, ImplItem, ItemImpl, ItemStruct, LitInt, LitStr, Pat, Path, PathArguments,
+    ReturnType, Type, Visibility, parse_macro_input, parse_quote, spanned::Spanned,
 };
 
 #[derive(Default)]
@@ -441,203 +443,6 @@ fn ok_type(r: &ReturnType) -> syn::Result<Option<Type>> {
     Err(syn::Error::new(t.span(), "a cell method returns aio::Result<T> (or nothing)"))
 }
 
-/// A value an async method keeps across an await: an argument, a typed
-/// `let`, or an awaited result.
-#[derive(Clone)]
-struct Var {
-    name: Ident,
-    pat: Pat,
-    ty: Type,
-}
-
-/// An async method's code up to an await, and that await: the future and
-/// where its result goes.
-type Part = (Vec<Stmt>, Option<(Expr, Var)>);
-
-fn var(pat: &Pat, ty: &Type) -> Option<Var> {
-    let Pat::Ident(p) = pat else { return None };
-    Some(Var { name: p.ident.clone(), pat: pat.clone(), ty: ty.clone() })
-}
-
-/// `pub async fn m(&mut self, cx: &Cx, …) -> Result`, split at each top-level
-/// `let x: T = io.await;`: the code before the first await stays the method,
-/// each await becomes an effect started after that part commits, and the
-/// code after it a step method (`m.1`, `m.2`, …) the effect calls with `x`.
-/// Each part is one atomic call and the log holds every awaited result, so
-/// replay does no I/O. Only arguments and typed `let`s live across an await.
-///
-/// `#[ttl(ms)]` on it: a call with the same arguments within `ms` of one whose
-/// every part committed is answered `Ok(())` without running (no event, no
-/// I/O; aio's `ttl`). Its effects are then keyed by the arguments too, so
-/// `fetch(1)` and `fetch(2)` neither share an answer nor wait for each other.
-fn split(f: &mut ImplItemFn, ttl: Option<i64>, long: bool) -> syn::Result<Vec<(ImplItemFn, Tokens)>> {
-    let err = |s: &dyn Spanned, msg: &str| Err(syn::Error::new(s.span(), msg));
-    let m = f.sig.ident.clone();
-    if !matches!(ok_type(&f.sig.output)?, Some(Type::Tuple(t)) if t.elems.is_empty()) {
-        return err(&f.sig, "an async method returns aio::Result: a step after an await may refuse");
-    }
-    let (mut cx, mut known) = (None, vec![]);
-    let mut first = vec![];
-    for (i, a) in f.sig.inputs.iter().skip(1).enumerate() {
-        let FnArg::Typed(pt) = a else { continue };
-        if i == 0 && is_cx(&pt.ty) {
-            let Pat::Ident(p) = &*pt.pat else { return err(pt, "name the `Cx` argument") };
-            cx = Some(p.ident.clone());
-            continue;
-        }
-        if has_ref(&pt.ty) {
-            return err(&pt.ty, "an async method takes its arguments owned: they live across awaits");
-        }
-        match var(&pt.pat, &pt.ty) {
-            Some(v) => {
-                first.push(v.name.clone());
-                known.push(v);
-            }
-            None => return err(&pt.pat, "name each argument of an async method"),
-        }
-    }
-    let cx = cx.unwrap_or_else(|| {
-        f.sig.inputs.insert(1, parse_quote!(__aio_cx: &::aio::Cx));
-        format_ident!("__aio_cx")
-    });
-    // The parts between awaits, each with the await that ends it.
-    let mut parts: Vec<Part> = vec![(vec![], None)];
-    for s in std::mem::take(&mut f.block.stmts) {
-        if let Stmt::Local(l) = &s
-            && let Some(init) = &l.init
-            && let Expr::Await(a) = &*init.expr
-            && init.diverge.is_none()
-        {
-            let Pat::Type(pt) = &l.pat else { return err(&l.pat, "write `let x: T = io.await;`: T is how x is saved") };
-            let Some(v) = var(&pt.pat, &pt.ty) else {
-                return err(&pt.pat, "an awaited result goes into one named `let`");
-            };
-            parts.last_mut().expect("a part").1 = Some(((*a.base).clone(), v));
-            parts.push((vec![], None));
-        } else if scan(quote!(#s), &mut vec![]) {
-            return err(&s, "in an async method, `.await` goes only in `let x: T = io.await;`");
-        } else {
-            parts.last_mut().expect("a part").0.push(s);
-        }
-    }
-    if ttl.is_some() && parts.len() == 1 {
-        return err(&f.sig, "#[ttl] caches what an async method awaits: this one awaits nothing");
-    }
-    // The names used from each part on.
-    let mut later = vec![vec![]; parts.len() + 1];
-    for (k, (stmts, end)) in parts.iter().enumerate().rev() {
-        let mut names = later[k + 1].clone();
-        let end = end.as_ref().map(|(io, _)| io);
-        scan(quote!(#(#stmts)* #end), &mut names);
-        later[k] = names;
-    }
-    let (mut steps, mut args, last) = (vec![], vec![], parts.len() - 1);
-    for (k, (stmts, end)) in parts.into_iter().enumerate() {
-        for s in &stmts {
-            if let Stmt::Local(l) = s
-                && let Pat::Type(pt) = &l.pat
-            {
-                known.extend(var(&pt.pat, &pt.ty));
-            }
-        }
-        let body = match end {
-            None => quote!(#(#stmts)*),
-            Some((io, r)) => {
-                // The latest of each name the next parts use, then the result.
-                let mut next: Vec<Var> = vec![];
-                for x in known.iter().rev() {
-                    let n = x.name.to_string();
-                    if x.name != r.name && later[k + 1].contains(&n) && !next.iter().any(|y| y.name == x.name) {
-                        next.insert(0, x.clone());
-                    }
-                }
-                next.push(r.clone());
-                known.push(r);
-                let (step, key, names) = (format!("{m}.{}", k + 1), m.to_string(), next.iter().map(|x| &x.name));
-                let (r, rt) = (&next[next.len() - 1].name, &next[next.len() - 1].ty);
-                args.push(next.clone());
-                // With a ttl: the first part keys its effect by the arguments,
-                // and each step passes on the key its effect had.
-                let keyed = match (ttl, k) {
-                    (None, _) => quote!(let __aio_key = ::std::string::String::from(#key);),
-                    (Some(_), 0) => quote! {
-                        let __aio_key = ::aio::effect::key(#key, &::aio::json(&(#(&#first,)*))?)?;
-                    },
-                    (Some(_), _) => quote! {
-                        let __aio_key = match #cx.by() {
-                            ::aio::By::Effect(k) => k.clone(),
-                            _ => ::std::string::String::from(#key),
-                        };
-                    },
-                };
-                let ceiling = (!long).then(|| quote!(.timeout(::aio::effect::CALL_CEILING)));
-                let cache = match ttl.filter(|_| k + 1 == last) {
-                    Some(ms) => quote!(Some(#ms)),
-                    None => quote!(::std::option::Option::None),
-                };
-                quote! {
-                    #keyed
-                    #(#stmts)*
-                    let __aio_io = #io;
-                    #cx.run(::aio::Effect::new(&__aio_key, move |__aio_h: ::aio::Handle<Self>| async move {
-                        let #r: #rt = __aio_io.await;
-                        ::aio::step(&__aio_h, #step, ::aio::json(&(#(#names,)*)), #cache);
-                    })#ceiling);
-                    Ok(())
-                }
-            }
-        };
-        if k == 0 {
-            // A `let mut` may change only in a later step.
-            f.attrs.push(parse_quote!(#[allow(unused_mut)]));
-            f.sig.asyncness = None;
-            f.block = parse_quote!({ #body });
-            continue;
-        }
-        let (name, fun, vars) = (format!("{m}.{k}"), format_ident!("__aio_{m}_{k}"), &args[k - 1]);
-        let (pats, names, tys) =
-            (vars.iter().map(|x| &x.pat), vars.iter().map(|x| &x.name), vars.iter().map(|x| &x.ty));
-        let (names2, tys2) = (names.clone(), tys.clone());
-        steps.push((
-            parse_quote! {
-                #[doc(hidden)]
-                #[allow(unused_mut, unused_variables, clippy::too_many_arguments)]
-                fn #fun(&mut self, #cx: &::aio::Cx, #(#pats: #tys),*) -> ::aio::Result { #body }
-            },
-            quote! {
-                #name => {
-                    let (#(#names,)*): (#(#tys2,)*) = ::aio::args(args)?;
-                    ::aio::ret(self.#fun(cx, #(#names2),*))
-                }
-            },
-        ));
-    }
-    Ok(steps)
-}
-
-/// The names `t` uses (not `.field`s; `{name}`s in format strings too), and
-/// whether it awaits (outside its own `async` blocks).
-fn scan(t: Tokens, names: &mut Vec<String>) -> bool {
-    let (mut dot, mut asyncb, mut awaits) = (false, false, false);
-    for tt in t {
-        match &tt {
-            TokenTree::Group(g) => awaits |= scan(g.stream(), names) && !asyncb,
-            TokenTree::Ident(i) if dot => awaits |= i == "await",
-            TokenTree::Ident(i) => names.push(i.to_string()),
-            TokenTree::Literal(l) => names.extend(
-                l.to_string()
-                    .split('{')
-                    .skip(1)
-                    .map(|p| p.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect()),
-            ),
-            TokenTree::Punct(_) => {}
-        }
-        dot = matches!(&tt, TokenTree::Punct(p) if p.as_char() == '.');
-        asyncb = matches!(&tt, TokenTree::Ident(i) if i == "async" || (asyncb && i == "move"));
-    }
-    awaits
-}
-
 /// `#[methods] impl Todo { pub fn add(&mut self, cx: &Cx, title: String) -> Result<Id> … }`.
 /// `#[invariant] fn …(&self) -> Result` runs after every method; `#[client]`
 /// marks the methods clients may call over the network (see `client_rule`:
@@ -649,7 +454,8 @@ fn scan(t: Tokens, names: &mut Vec<String>) -> bool {
 /// …(&self, …) -> T` is a derived value (aio selector), cached through
 /// `<Name>Derived` per state, or with `#[derived(reads = [rows, prices])]`
 /// while those fields stay the same (aio's `memoLast`). A `pub async fn`
-/// awaits I/O inline, and `#[ttl(ms)]` reuses its answer (see `split`).
+/// awaits I/O inline (see `lower`), `#[ttl(ms)]` reuses its answer, and
+/// `#[mode(newest)]` / `#[mode(first)]` say what a second call does while one runs.
 /// `#[every("5m")]` or `#[cron("0 9 * * 1")]` (`, skip_if_running`) on a
 /// method without arguments runs it on that schedule (`aio::Declared`).
 /// `aio::Handle`'s own `&self` methods (native and web): a cell method
@@ -699,7 +505,7 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         (vec![], vec![], vec![], vec![], vec![], vec![]);
     let (mut dsigs, mut dbodies) = (vec![], vec![]);
     let (mut steps, mut rules, mut unpredicted, mut redacted, mut said) = (vec![], vec![], vec![], vec![], vec![]);
-    let (mut schedules, mut coalesced) = (vec![], vec![]);
+    let (mut schedules, mut coalesced, mut asyncs, mut ttls) = (vec![], vec![], vec![], vec![]);
     let (mut on_start, mut on_stop, mut on_aio) = (None, None, None);
     for it in &mut imp.items {
         let ImplItem::Fn(f) = it else { continue };
@@ -732,6 +538,18 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         {
             return Err(syn::Error::new(a.span(), "#[long] goes on a `pub async fn` method"));
         }
+        let mode = match take(&mut f.attrs, "mode") {
+            Some(a) if f.sig.asyncness.is_none() => {
+                return Err(syn::Error::new(a.span(), "#[mode(..)] goes on a `pub async fn` method"));
+            }
+            Some(a) => match a.parse_args::<Ident>()?.to_string().as_str() {
+                "newest" => quote!(::aio::Mode::Newest),
+                "first" => quote!(::aio::Mode::First),
+                "queue" => quote!(::aio::Mode::Queue),
+                _ => return Err(syn::Error::new(a.span(), "#[mode(newest)], #[mode(first)] or #[mode(queue)]")),
+            },
+            None => quote!(::aio::Mode::Queue),
+        };
         let hooks = [("on_start", &mut on_start), ("on_stop", &mut on_stop), ("on_aio", &mut on_aio)];
         let hook = hooks.into_iter().find_map(|(h, slot)| take(&mut f.attrs, h).map(|a| (h, a, slot)));
         let timed = ["every", "cron"].into_iter().find_map(|h| take(&mut f.attrs, h).map(|a| (h, a)));
@@ -775,8 +593,14 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             if let Some(c) = coalesce {
                 return Err(syn::Error::new(c.span(), "#[coalesce] goes on a `pub fn (&mut self, …)` method"));
             }
-            if ttl.is_some() || long.is_some() {
-                let what = if ttl.is_some() { "#[ttl(ms)]" } else { "#[long]" };
+            if ttl.is_some() || long.is_some() || f.sig.asyncness.is_some() {
+                let what = if ttl.is_some() {
+                    "#[ttl(ms)]"
+                } else if long.is_some() {
+                    "#[long]"
+                } else {
+                    "an async method"
+                };
                 return Err(syn::Error::new(f.sig.span(), format!("{what} goes on a `pub async fn` method")));
             }
             continue;
@@ -793,10 +617,23 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             );
             return Err(syn::Error::new(m.span(), why));
         }
-        if f.sig.asyncness.is_some() {
-            for (fun, arm) in split(f, ttl, long.is_some())? {
-                steps.push(ImplItem::Fn(fun));
-                arms.push(arm);
+        let is_async = f.sig.asyncness.is_some();
+        // What the method answers: an async one's own type, before it is lowered.
+        let ok = ok_type(&f.sig.output)?;
+        if is_async {
+            let Some(r) = ok.clone() else {
+                return Err(syn::Error::new(
+                    f.sig.span(),
+                    "an async method returns aio::Result<T>: a step after an await may refuse",
+                ));
+            };
+            let newest = mode.to_string().contains("Newest");
+            let l = lower::lower(f, r, ttl, long.is_some(), newest)?;
+            steps.extend(l.fns.into_iter().map(ImplItem::Fn));
+            arms.extend(l.arms);
+            asyncs.push(quote!((#mname, #mode)));
+            if ttl.is_some() {
+                ttls.push(mname.clone());
             }
         }
         if redact.is_some() {
@@ -835,31 +672,53 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             des.push(de);
             vars.push(v);
         }
-        let ok = ok_type(&f.sig.output)?;
         let run = quote!(self.#m(#cx #(#pass),*));
-        let run =
-            if ok.is_some() { quote!(::aio::ret(#run)) } else { quote!({ #run; Ok(::aio::serde_json::Value::Null) }) };
+        let run = if is_async {
+            let ttl = match ttl {
+                Some(ms) => quote!(Some((::aio::effect::key(#mname, &::aio::json(&(#(&#vars,)*))?)?, #ms))),
+                None => quote!(::std::option::Option::None),
+            };
+            quote! {
+                let __aio_ttl = #ttl;
+                let __aio_r = #run;
+                ::aio::finish(self, cx, __aio_r, __aio_ttl)
+            }
+        } else if ok.is_some() {
+            quote!(::aio::ret(#run))
+        } else {
+            quote!({ #run; Ok(::aio::serde_json::Value::Null) })
+        };
         arms.push(quote! {
             #mname => {
                 let (#(#vars,)*): (#(#des,)*) = ::aio::args(args)?;
                 #run
             }
         });
-        let r = ok.unwrap_or_else(|| parse_quote!(()));
+        let r = ok.clone().unwrap_or_else(|| parse_quote!(()));
         let text = |t: Tokens| t.to_string().replace(' ', "").replace(',', ", ");
         let ps: Vec<String> = params.iter().map(|p| text(p.clone()).replacen(':', ": ", 1)).collect();
-        said.push(format!("{mname}({}) -> {}", ps.join(", "), text(quote!(#r))));
-        sigs.push(quote!(fn #m(&self, #(#params),*) -> ::aio::Result<#r>;));
-        bodies.push(quote! {
-            fn #m(&self, #(#params),*) -> ::aio::Result<#r> {
-                ::aio::typed(self.call(#mname, ::aio::json(&(#(&#vars,)*))?))
-            }
-        });
+        let prefix = if is_async { "async " } else { "" };
+        said.push(format!("{prefix}{mname}({}) -> {}", ps.join(", "), text(quote!(#r))));
+        if is_async {
+            sigs.push(quote!(fn #m(&self, #(#params),*) -> ::aio::Result<::aio::Answer<#r>>;));
+            bodies.push(quote! {
+                fn #m(&self, #(#params),*) -> ::aio::Result<::aio::Answer<#r>> {
+                    self.ask(#mname, ::aio::json(&(#(&#vars,)*))?).map(::aio::Answer::typed)
+                }
+            });
+        } else {
+            sigs.push(quote!(fn #m(&self, #(#params),*) -> ::aio::Result<#r>;));
+            bodies.push(quote! {
+                fn #m(&self, #(#params),*) -> ::aio::Result<#r> {
+                    ::aio::typed(self.call(#mname, ::aio::json(&(#(&#vars,)*))?))
+                }
+            });
+        }
         if let Some(c) = &client {
             let (role, allow, predict) = client_rule(c)?;
             if !predict {
                 // Its answer comes from the server, later: the call itself returns nothing.
-                if ok_type(&f.sig.output)?.is_some_and(|t| quote!(#t).to_string() != "()") {
+                if ok.as_ref().is_some_and(|t| quote!(#t).to_string() != "()") {
                     return Err(syn::Error::new(
                         f.sig.output.span(),
                         "a predict = false method returns nothing: its answer comes from the server later (call_confirmed)",
@@ -928,6 +787,8 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             const REDACTED: &'static [&'static str] = &[#(#redacted),*];
             const COALESCED: &'static [&'static str] = &[#(#coalesced),*];
             const SCHEDULES: &'static [::aio::Declared] = &[#(#schedules),*];
+            const ASYNC: &'static [(&'static str, ::aio::Mode)] = &[#(#asyncs),*];
+            const TTL: &'static [&'static str] = &[#(#ttls),*];
             #on_start
             #on_stop
             #on_aio

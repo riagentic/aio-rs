@@ -1150,7 +1150,7 @@ impl<T: Cell> Store<T> {
     /// `op` its id. A call with an `op` seen before is not applied again:
     /// `Ok(None)`.
     pub fn call_from(&mut self, by: &By, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
-        self.call_as(by, None, method, args, Some(op))
+        self.call_as(by, None, method, args, Some(op), None)
     }
 
     /// A network caller's call, with the role its gate proved ([`Cx::role`]);
@@ -1162,10 +1162,12 @@ impl<T: Cell> Store<T> {
         method: &str,
         args: Value,
         op: Option<&str>,
+        reply: Option<crate::Reply>,
     ) -> Result<Option<Value>> {
         let now = self.now();
         let Some(op) = op else {
-            return self.apply_and_commit(by, method, args, Cx::live(now, by).with_role(role), None, None).map(Some);
+            let cx = Cx::live(now, by).with_role(role).with_reply(reply);
+            return self.apply_and_commit(by, method, args, cx, None, None).map(Some);
         };
         let op = crate::cx::Op::check(op, now).map_err(Rejected::new)?;
         let seen: bool = self
@@ -1179,8 +1181,14 @@ impl<T: Cell> Store<T> {
         if seen {
             return Ok(None);
         }
-        let cx = Cx::synced(now, T::ID, by, &op).with_role(role);
+        let cx = Cx::synced(now, T::ID, by, &op).with_role(role).with_reply(reply);
         self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some)
+    }
+
+    /// A failure of the cell not made by a call (an async method's awaited `?`).
+    pub(crate) fn failed(&mut self, by: &By, why: &str) {
+        crate::report::tell("refused", &format!("{}.{why}", T::ID));
+        self.failures.push((by.clone(), why.into()));
     }
 
     fn run(&mut self, by: &By, method: &str, args: Value, at: i64, fired: Option<&Due>) -> Result<Value> {

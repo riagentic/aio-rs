@@ -350,6 +350,10 @@ impl<T: Cell> Door<T> for AsClient<T> {
         self.h.call_by(&self.who, method, args, None).map(Option::unwrap_or_default)
     }
 
+    fn ask(&self, method: &str, args: Value) -> crate::Result<crate::Answer> {
+        self.h.ask_by(Some(&self.who), method, args, None).map(|(_, a)| a)
+    }
+
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         self.h.read(f)
     }

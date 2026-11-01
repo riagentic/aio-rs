@@ -89,6 +89,8 @@ struct Inner<T: Cell> {
     listeners: Mutex<Vec<Listener<T>>>,
     refusals: Mutex<Vec<Refusal>>,
     owned: Mutex<std::collections::HashMap<String, Box<dyn std::any::Any + Send>>>,
+    /// Async methods' callers waiting for their end (`end` frames), by call.
+    ends: Mutex<std::collections::HashMap<String, crate::Reply>>,
 }
 
 /// A synced copy of a server's cell in the page. Reads and calls are local
@@ -227,6 +229,7 @@ impl<T: Cell> Remote<T> {
             listeners: Mutex::default(),
             refusals: Mutex::default(),
             owned: Mutex::default(),
+            ends: Mutex::default(),
         });
         let r = Self { inner };
         r.mirror_twins();
@@ -322,11 +325,26 @@ impl<T: Cell> Remote<T> {
                     }
                 }
                 self.update(|c| c.pending.retain(|q| q.op != op));
-                if let (Some(e), Some(method)) = (m.get("err").and_then(Value::as_str), method) {
+                if let Some(e) = m.get("err").and_then(Value::as_str) {
                     let e = Rejected { why: e.into(), code: crate::Code::of(&m["code"]) };
-                    say(&format!("sync {}: the server refused {method}: {e}", T::ID));
-                    let fs = lock(&self.inner.refusals).clone();
-                    fs.iter().for_each(|f| f(&method, &e));
+                    if let Some(end) = lock(&self.inner.ends).remove(&op) {
+                        end.send(Err(e.clone()));
+                    }
+                    if let Some(method) = method {
+                        say(&format!("sync {}: the server refused {method}: {e}", T::ID));
+                        let fs = lock(&self.inner.refusals).clone();
+                        fs.iter().for_each(|f| f(&method, &e));
+                    }
+                }
+            }
+            // An async method's end, after its reply.
+            Some("end") => {
+                let r = match m.get("err").and_then(Value::as_str) {
+                    Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
+                    None => Ok(m["ok"].clone()),
+                };
+                if let Some(end) = m["op"].as_str().and_then(|op| lock(&self.inner.ends).remove(op)) {
+                    end.send(r);
                 }
             }
             Some("tell") => match serde_json::from_value::<crate::tell::Tell>(m["d"].clone()) {
@@ -513,8 +531,9 @@ async fn pump<T: Cell>(r: Remote<T>, mut link: Link) {
 }
 
 impl<T: Cell> Remote<T> {
-    /// Make the call on the copy and send it. In a full queue it is refused.
-    fn predict(&self, method: &str, args: Value) -> Result<Value> {
+    /// Make the call on the copy and send it (an async method's caller waits
+    /// at `end` for its end). In a full queue it is refused.
+    fn predict(&self, method: &str, args: Value, end: Option<crate::Reply>) -> Result<Value> {
         let (out, q) = {
             let c = lock(&self.inner.copy);
             crate::ensure!(c.pending.len() < PENDING_MAX, "blocked: {PENDING_MAX} calls wait for the server");
@@ -531,6 +550,9 @@ impl<T: Cell> Remote<T> {
                 Queued { op: op.to_string(), method: method.into(), args, inputs: cx.into_asks().inputs, at, waits };
             (out, q)
         };
+        if let Some(end) = end {
+            lock(&self.inner.ends).insert(q.op.clone(), end);
+        }
         self.update(|c| c.pending.push(q.clone()));
         self.send(q.msg());
         Ok(out)
@@ -540,7 +562,17 @@ impl<T: Cell> Remote<T> {
 impl<T: Cell> Door<T> for Remote<T> {
     /// Predicted: applied to the copy at once and sent; works offline (queued).
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.predict(method, args)
+        self.predict(method, args, None)
+    }
+
+    /// Predicted like `call`; an async method's end comes from the server.
+    fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        if T::async_mode(method).is_none() {
+            return self.call(method, args).map(|v| crate::Answer::ready(Ok(v)));
+        }
+        let (end, answer) = crate::Reply::new(method);
+        self.predict(method, args, Some(end))?;
+        Ok(answer)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {

@@ -26,10 +26,20 @@ pub trait MaybeSend {}
 #[cfg(target_arch = "wasm32")]
 impl<T> MaybeSend for T {}
 
-/// How long each await of an async method may take, unless it is `#[long]`:
-/// one that never settles is cut off (said in the log and a report) and its
-/// later steps never run, instead of hanging its caller forever.
+/// How long each await of an async method may take by default, unless it is
+/// `#[long]`: one that never settles is cut off (said in the log and a
+/// report) and its later steps never run, its caller told, instead of
+/// hanging forever. `[perf] call_ceiling` sets another ([`call_ceiling`]).
 pub const CALL_CEILING: Duration = Duration::from_secs(30);
+
+/// The app's await ceiling: `[perf] call_ceiling` (ms), else [`CALL_CEILING`];
+/// in a page, always [`CALL_CEILING`].
+pub fn call_ceiling() -> Duration {
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::perf::ceiling();
+    #[cfg(target_arch = "wasm32")]
+    CALL_CEILING
+}
 
 /// aio's `call({ timeoutMs, retries })`: run `f`, each try cut off after
 /// `timeout` (if set), and again up to `retries` more times while it fails;

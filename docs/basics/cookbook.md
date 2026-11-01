@@ -531,7 +531,7 @@ assert_eq!(h.state().sent, 3);
 
 - A schedule a call sets (and so can stop): `cx.every("digest", 300_000,
   "send", ())`, `cx.cancel("digest")`. At a wall-clock time:
-  `#[cron("0 9 * * 1")]` (local time).
+  `#[cron("0 9 * * 1")]` (UTC, as aio; `[app] tz = "local"` for local time).
 - `ax schedules <app>` lists what is armed.
 - Never a thread with a sleep loop: replay and tests can't see it.
 
