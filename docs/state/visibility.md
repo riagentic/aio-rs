@@ -45,7 +45,7 @@ pub struct Mailbox {
     #[server]
     pub imap_password: Hidden<String>,
     /// The fact clients read, published beside the secret.
-    pub has_password: bool,
+    pub can_sync: bool,
     /// Sent; never saved: back to the default on every start.
     #[transient]
     pub syncing: bool,
@@ -60,7 +60,7 @@ impl Mailbox {
     /// The app's own code sets it; its argument stays out of the log.
     #[redact]
     pub fn set_password(&mut self, pw: String) {
-        self.has_password = !pw.is_empty();
+        self.can_sync = !pw.is_empty();
         *self.imap_password = pw;
     }
 }
@@ -70,7 +70,7 @@ use aio::CellData;
 let m = Mailbox {
     subjects: vec!["hi".into()],
     imap_password: Hidden::new("pw".into()),
-    has_password: true,
+    can_sync: true,
     syncing: true,
     last_count: Hidden::new(3),
 };
@@ -295,7 +295,7 @@ rt.block_on(async {
   the server runs them once.
 
 As in aio, reading a `#[server]` field on a copy throws (panics); publish a
-fact field next to a secret (`has_password`) and read that. In return,
+fact field next to a secret (`can_sync`) and read that. In return,
 aio-rs needs no rule against `visible` on a synced cell (aio refuses
 `sync` with a filter): copies sync by replaying calls on the server, and
 each client is sent only its own view.
