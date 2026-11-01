@@ -192,9 +192,6 @@ version may break things.
   unmount, a focus, a rect) run in the order the app sent them; a big one
   could run after a small one sent later, so two `<Browser>`s could leave
   one empty and an island swapped for another could stay the old one.
-- `aio::testing::TestUi` counts every render (`components()`) when tests
-  run in parallel: a render callsite another thread registered at the same
-  moment could be cached as of no interest, and its renders went uncounted.
 - The test suite holds under load: timing tests wait on what they check
   (a condition, a gate the test opens, a page-side record of each style)
   instead of a fixed sleep or a wall-clock window; bounds on time are hang
