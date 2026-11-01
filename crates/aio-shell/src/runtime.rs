@@ -639,10 +639,16 @@ pub fn sandbox_missing(
 }
 
 /// The flag Electron needs on this machine, said every time it is used.
-/// `AIORT_SANDBOX=1` keeps the sandbox strict (no window rather than none).
-pub fn sandbox_args(#[cfg_attr(not(unix), allow(unused))] dir: &Path) -> Vec<String> {
-    if std::env::consts::OS != "linux" || std::env::var_os("AIORT_SANDBOX").is_some_and(|v| v == "1") {
-        return vec![];
+pub fn sandbox_args(dir: &Path) -> Vec<String> {
+    sandbox_for(dir, false).unwrap_or_default()
+}
+
+/// [`sandbox_args`], or with `require` (`Window { require_sandbox }`, or
+/// `AIORT_SANDBOX=1`) the reason there will be no window: a host that
+/// can't sandbox stops the app rather than run its page unsandboxed.
+pub fn sandbox_for(#[cfg_attr(not(unix), allow(unused))] dir: &Path, require: bool) -> io::Result<Vec<String>> {
+    if std::env::consts::OS != "linux" {
+        return Ok(vec![]);
     }
     let probe = || {
         let mut cmd = std::process::Command::new("unshare");
@@ -657,14 +663,32 @@ pub fn sandbox_args(#[cfg_attr(not(unix), allow(unused))] dir: &Path) -> Vec<Str
     };
     #[cfg(not(unix))]
     let helper = None;
-    match sandbox_missing(|p| std::fs::read_to_string(p).unwrap_or_default(), probe, helper) {
-        None => vec![],
-        Some(why) => {
+    let missing = sandbox_missing(|p| std::fs::read_to_string(p).unwrap_or_default(), probe, helper);
+    let by_env = std::env::var_os("AIORT_SANDBOX").is_some_and(|v| v == "1");
+    no_sandbox(missing, require, by_env).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))
+}
+
+/// The runtime's switches for a host whose sandbox is `missing` (why it
+/// can't start), or why the app stops instead (pure).
+pub(crate) fn no_sandbox(missing: Option<String>, require: bool, by_env: bool) -> Result<Vec<String>, String> {
+    let Some(why) = missing else { return Ok(vec![]) };
+    let who = match (require, by_env) {
+        (true, _) => Some("this app requires it (Window { require_sandbox: true })"),
+        (false, true) => Some("AIORT_SANDBOX=1 requires it"),
+        _ => None,
+    };
+    match who {
+        Some(who) => Err(format!(
+            "Chromium's sandbox can't start here ({why}), and {who}: the window does not open unsandboxed. Make \
+             chrome-sandbox root-owned 4755, or allow unprivileged user namespaces"
+        )),
+        None => {
             eprintln!(
                 "[aio] runtime: {why}: starting it with --no-sandbox (the page is this app's own UI; set \
-                 AIORT_SANDBOX=1 to refuse instead, or make chrome-sandbox root-owned 4755)"
+                 AIORT_SANDBOX=1 or Window {{ require_sandbox: true }} to refuse instead, or make chrome-sandbox \
+                 root-owned 4755)"
             );
-            vec!["--no-sandbox".into()]
+            Ok(vec!["--no-sandbox".into()])
         }
     }
 }
@@ -1048,6 +1072,18 @@ mod tests {
         assert!(sandbox_missing(host(""), || false, Some((1000, 0o755))).unwrap().contains("container"));
         let off = |p: &str| if p.ends_with("unprivileged_userns_clone") { "0".into() } else { String::new() };
         assert!(sandbox_missing(off, || true, Some((1000, 0o755))).is_some());
+    }
+
+    /// aio's requireSandbox: a host that can't sandbox stops the app, with
+    /// the reason and the way out; elsewhere `--no-sandbox`, said.
+    #[test]
+    fn a_required_sandbox_stops_the_app_rather_than_run_without_one() {
+        let why = || Some("AppArmor restricts unprivileged user namespaces".to_string());
+        assert_eq!(no_sandbox(None, true, true), Ok(vec![]), "a host that sandboxes needs nothing");
+        assert_eq!(no_sandbox(why(), false, false), Ok(vec!["--no-sandbox".to_string()]));
+        let e = no_sandbox(why(), true, false).unwrap_err();
+        assert!(e.contains("AppArmor") && e.contains("require_sandbox: true") && e.contains("4755"), "{e}");
+        assert!(no_sandbox(why(), false, true).unwrap_err().contains("AIORT_SANDBOX=1"));
     }
 
     #[test]

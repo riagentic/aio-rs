@@ -45,6 +45,15 @@ pub struct Window {
     pub confirm_unload: bool,
     /// The window's own keys given to the page (`guest::Keys`).
     pub keys: guest::Keys,
+    /// No window rather than one without Chromium's sandbox (aio's
+    /// `requireSandbox`): on a host that can't sandbox (a Linux with user
+    /// namespaces closed and no setuid helper) the app stops, saying why,
+    /// instead of starting the runtime with `--no-sandbox`.
+    pub require_sandbox: bool,
+    /// The window waits for its page's first paint at most this long
+    /// (aio's `showWhenPainted: { capMs }`); `Some(0)`: shown at once
+    /// (`false`); unset: 5000.
+    pub show_cap_ms: Option<u32>,
 }
 
 impl Window {
@@ -104,7 +113,7 @@ mod xroom;
 #[cfg(doctest)]
 mod guide;
 
-pub use guest::{Child, Web, open_window};
+pub use guest::{Child, Web, clear_partition, open_window};
 pub use instance::{Launch, Start, launches, start};
 /// The page: an empty root, the DOM-edit interpreter and the page scripts
 /// (`aio::page`), under its policy (`aio::page::sealed`).
@@ -367,11 +376,12 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         })
         .await
         .map_err(std::io::Error::other)??;
-        let sandbox = runtime::sandbox_args(&rt);
+        let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
         // a GPU that failed here once is never asked again (AIORT_GPU=hardware is).
         let gpu_failed = data.join("gpu-failed");
         let (gpu, _) = gpu_choice(gpu_failed.exists(), &|k| std::env::var(k).ok());
-        aio::boot::say(&runtime_rows(&rt, &sandbox, gpu_failed.exists(), &|k| std::env::var(k).ok()));
+        let env = |k: &str| std::env::var(k).ok();
+        aio::boot::say(&runtime_rows(&rt, &sandbox, win.require_sandbox, gpu_failed.exists(), &env));
         // macOS: the app's own window bundle, its name in the Dock.
         let exe = if cfg!(target_os = "macos") {
             let (rt, id, name) = (rt.clone(), dirs.id.clone(), win.title.to_string());
@@ -594,6 +604,7 @@ fn gpu_choice(failed: bool, env: &dyn Fn(&str) -> Option<String>) -> (String, &'
 fn runtime_rows(
     rt: &Path,
     sandbox: &[String],
+    require: bool,
     gpu_failed: bool,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<aio::boot::Row> {
@@ -610,6 +621,7 @@ fn runtime_rows(
             row("gpu", g, from)
         },
         match (sandbox.is_empty(), set("AIORT_SANDBOX")) {
+            (true, _) if require => row("sandbox", "strict".into(), "Window { require_sandbox }"),
             (true, Some(_)) => row("sandbox", "strict".into(), "AIORT_SANDBOX"),
             (true, None) => row("sandbox", "on".into(), "default"),
             (false, _) => row("sandbox", "off: the runtime's sandbox helper can't be used".into(), "detected"),
@@ -711,7 +723,7 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
                 }
             }
             Some("picked") => page::picked(&m),
-            Some("opened") => guest::opened(&m),
+            Some("opened" | "done") => guest::opened(&m),
             Some("clicked" | "tray") => desktop::asks(&m, win.tray.as_ref()).into_iter().for_each(desktop::deliver),
             Some("window") => window_event(&m),
             Some("cdp" | "cdp-event") => inspect::hub().heard(&m),
@@ -903,7 +915,7 @@ mod tests {
         assert_eq!(gpu_choice(true, &none).0, "software");
         let hw = |k: &str| (k == "AIORT_GPU").then(|| "hardware".to_string());
         assert_eq!(gpu_choice(true, &hw), ("hardware".into(), "AIORT_GPU"));
-        let rows = runtime_rows(Path::new("/rt"), &[], true, &none);
+        let rows = runtime_rows(Path::new("/rt"), &[], false, true, &none);
         assert!(rows.iter().any(|r| r.key == "gpu" && r.value == "software" && r.from.contains("failed here")));
     }
 
@@ -1155,7 +1167,7 @@ mod tests {
         assert_eq!(said[0], "W [vitals] render warning: an update took 25 ms to paint");
         // The runtime keeps the probe's lines, at their level.
         let js = include_str!("main.js");
-        assert!(js.contains("String(e.message).startsWith('[vitals] ')"));
+        assert!(js.contains("const word = { error: 'ERROR', warning: 'WARN ', debug: 'DEBUG' }[e.level] || 'INFO '"));
     }
 
     /// The race on a phone, replayed in Node: keys typed ahead of their echoes stay.

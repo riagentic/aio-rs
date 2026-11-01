@@ -210,10 +210,20 @@ app.whenReady().then(() => {
       if (m.t === 'cdp') devtools(m)
       if (m.t === 'cdp-end') undevtools()
       if (m.t === 'child') child(m)
+      if (m.t === 'clear-partition') clearPartition(m)
     }
-    if (l === 'focus') forward()
+    if (l === 'focus' || l === 'show') forward()
+    // The window's verbs (aio_shell::page): close is the title bar's own,
+    // so close-to-tray hides and the bounds are saved, whoever asked.
+    if (w && !w.isDestroyed()) {
+      if (l === 'minimize') w.minimize()
+      if (l === 'maximize') w.isMaximized() ? w.unmaximize() : w.maximize()
+      if (l === 'close') w.close()
+      if (l === 'hide') w.hide()
+    }
+    // CSS backgrounds and colours printed too (aio's printBackground).
     if (l === 'print' && w && !w.isDestroyed()) {
-      w.webContents.print({}, (ok, why) => { if (!ok && why !== 'Print job canceled') console.error(`[aio-shell] print: ${why}`) })
+      w.webContents.print({ silent: false, printBackground: true }, (ok, why) => { if (!ok && why !== 'Print job canceled') console.error(`[aio-shell] print: ${why}`) })
     }
     // The app is shutting down (a signal): close like the user did, past
     // the page's veto.
@@ -336,6 +346,19 @@ app.whenReady().then(() => {
     }
   }
 
+  // A guest's session wiped (aio_shell::clear_partition, aio's
+  // __aioShell.clearPartition: an app that locks drops what its guests
+  // stored): storage, cache and HTTP auth. Never the app's own session,
+  // by whatever spelling. Answered {"t":"done"}, with the reason it was not.
+  function clearPartition(m) {
+    const answer = (r) => tell({ t: 'done', id: m.id, ...r })
+    const name = m.partition
+    if (typeof name !== 'string' || !name) return answer({ error: "pass the partition's name (a <Browser>'s, or a child window's)" })
+    const ses = session.fromPartition(name)
+    if (ses === session.defaultSession) return answer({ error: `${JSON.stringify(name)} is the app's own session, not a partition: clearing it would sign the app itself out` })
+    Promise.all([ses.clearStorageData(), ses.clearCache(), ses.clearAuthCache()]).then(() => answer({}), (e) => answer({ error: e.message }))
+  }
+
   // The window's DevTools protocol for `aio surface`, `trigger`, `shot`
   // and `eval` (inspect.rs): run in this process, no port opened. Attached
   // on the first call, let go when the last asker leaves ({"t":"cdp-end"}).
@@ -369,6 +392,11 @@ app.whenReady().then(() => {
     w.show()
     w.focus()
   }
+  // macOS: opening the running app again (its Dock icon, Finder, `open`)
+  // only activates it; a window hidden to the tray or minimized comes back.
+  app.on('activate', forward)
+  // The page's own window.close() (preload.js): the close path above.
+  ipcMain.on('aio:close', (e) => { if (w && !w.isDestroyed() && e.sender === w.webContents) w.close() })
 
   // Notifications from the main process: no permission to ask, the app's
   // icon, and a click that works while the window is hidden. Each is held
@@ -534,10 +562,15 @@ app.whenReady().then(() => {
     const later = () => { clearTimeout(timer); timer = setTimeout(report, 400) }
     for (const ev of ['resize', 'move', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) w.on(ev, later)
     w.on('close', report)
-    // shown once painted, 5 s cap.
+    // shown once painted, at most SHELL.showCapMs later (Window { show_cap_ms }); 0: at once.
     const show = () => endSplash(() => { if (!w.isDestroyed() && !w.isVisible()) w.show() })
-    w.once('ready-to-show', show)
-    setTimeout(show, 5000)
+    let painted = false
+    w.once('ready-to-show', () => { painted = true; show() })
+    if (!SHELL.showCapMs) show()
+    else setTimeout(() => {
+      if (!painted) console.error(`[aio-shell] the page did not paint within ${SHELL.showCapMs} ms: the window is shown anyway (Window { show_cap_ms })`)
+      show()
+    }, SHELL.showCapMs)
     w.webContents.on('did-finish-load', () => {
       loaded = true
       for (const f of early.splice(0)) w.webContents.send('aio:wire', f)
@@ -599,16 +632,15 @@ app.whenReady().then(() => {
     w.webContents.on('will-navigate', (e) => e.preventDefault())
     w.webContents.on('did-fail-load', (_e, code, desc, url) => console.error(`[aio-shell] load failed ${code} ${desc} ${url}`))
     w.webContents.on('preload-error', (_e, p, err) => console.error(`[aio-shell] preload ${p} failed: ${err && err.stack || err}`.replace(/\n/g, '\\n')))
-    // Page warnings and errors go to the app's log as its own WARN and
-    // ERROR lines, with the file they came from: 8 KB each, at most 100 a
-    // second (one line says how many were dropped). The log tells the
-    // runtime's own errors from the app's by both (aio::log::runtime_noise).
+    // The page's console goes to the app's log at its own level (log and
+    // info as INFO; debug in a dev build only), with the file it came from:
+    // 8 KB each, at most 100 a second (one line says how many were
+    // dropped). The log tells the runtime's own errors from the app's by
+    // both (aio::log::runtime_noise).
     let second = 0
     let count = 0
     w.webContents.on('console-message', (e) => {
-      // The page's info is dropped, but the render probe's (a recovery).
-      const quiet = e.level === 'info' || e.level === 'debug'
-      if (quiet && !String(e.message).startsWith('[vitals] ')) return
+      if (e.level === 'debug' && !dev) return
       const now = Math.floor(Date.now() / 1000)
       if (now !== second) {
         if (count > 100) console.error(`WARN  [page] ${count - 100} more messages dropped (over 100 a second)`)
@@ -616,7 +648,7 @@ app.whenReady().then(() => {
         count = 0
       }
       if (++count > 100) return
-      const word = e.level === 'error' ? 'ERROR' : quiet ? 'INFO ' : 'WARN '
+      const word = { error: 'ERROR', warning: 'WARN ', debug: 'DEBUG' }[e.level] || 'INFO '
       // file:line as written: no page script is bundled, so it needs no source map.
       const line = Number.isInteger(e.lineNumber) && e.lineNumber > 0 ? `:${e.lineNumber}` : ''
       const src = e.sourceId ? ` src=${String(e.sourceId).slice(0, 512).replace(/\s/g, '%20')}${line}` : ''

@@ -102,6 +102,9 @@ fn take_stops(id: &str, data: &Path) {
 /// boot report), or hand `args` to the instance holding it. `version`: the
 /// app's, `env!("CARGO_PKG_VERSION")`.
 pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
+    // Windows: before anything starts a console program (the installer's
+    // `reg`, a dialog's PowerShell, the app's own), so none opens a window.
+    aio::process::hide_console();
     let id = cfg.app.id.as_str();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // A staged new version, run as the update swap helper (macOS, Windows).
