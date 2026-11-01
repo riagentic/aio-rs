@@ -275,6 +275,7 @@ pub(crate) enum Gate {
 impl Gate {
     /// A call by `viewer` through this link, `op` its synced id if any.
     /// Blocking: it may read the session.
+    #[cfg_attr(not(all(feature = "compat", feature = "server")), allow(dead_code))]
     pub(crate) fn call<T: Cell>(
         &self,
         h: &Handle<T>,

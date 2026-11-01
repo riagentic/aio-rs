@@ -814,6 +814,7 @@ impl<T: Cell> Handle<T> {
     /// A call from the network by `who`, with the synced client's `op` if
     /// any: refused unless the method's `#[client]` rule lets `who` in, asked
     /// on the very state the call then runs on.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn call_by(
         &self,
         who: &crate::Caller,

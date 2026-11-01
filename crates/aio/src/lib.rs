@@ -893,6 +893,7 @@ pub fn allowed(method: &str, rule: &str, f: impl FnOnce() -> bool) -> Result {
 }
 
 /// A synced copy's state from the view the server sent: its `#[server]` fields absent.
+#[cfg(any(feature = "server", target_arch = "wasm32"))]
 pub(crate) fn copy_of<T: CellData>(view: Value) -> serde_json::Result<T> {
     let mut t: T = serde_json::from_value(view)?;
     t.conceal();
