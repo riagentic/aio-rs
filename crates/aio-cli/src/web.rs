@@ -94,11 +94,13 @@ pub fn start_js(dev: bool) -> String {
 /// that shows the page's errors on it and the live reload ([`RELOAD`]) (pure).
 pub fn page_js(dev: bool) -> String {
     use aio::page::{ADOPT, DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, WHEEL};
-    let js = [KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS].join("\n");
-    match dev {
-        true => format!("{OVERLAY}\n{js}\n{RELOAD}\n"),
-        false => js + "\n",
-    }
+    // `;` after each piece: an `(() => …)()` piece followed by another
+    // would otherwise call its result
+    let pieces: &[&str] = match dev {
+        true => &[OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS, RELOAD],
+        false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS],
+    };
+    pieces.iter().map(|p| format!("{};\n", p.trim_end())).collect()
 }
 
 /// The page: its language and direction (`[app] lang`, `dir`), viewport,
@@ -674,6 +676,10 @@ mod tests {
         assert!(page_js(false).contains("aria-modal") && page_js(false).contains("autofocus"));
         assert!(!page_js(false).contains("__aioDiag") && page_js(true).contains("window.__aioDiag = add"));
         assert!(!page_js(false).contains("/aio-dev/build") && page_js(true).contains("/aio-dev/build"));
+        // no piece runs into the next: `})()\n(() =>` calls the first's result
+        for dev in [false, true] {
+            assert!(!page_js(dev).contains(")\n("), "{}", page_js(dev));
+        }
     }
 
     /// aio's diagnostic page: a failed build's errors (not its warnings or

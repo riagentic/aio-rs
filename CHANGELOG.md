@@ -27,6 +27,9 @@ version may break things.
   emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
   ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
   the app's log comes to the terminal (`[device]`).
+- **Fixed: the dev page's scripts ran into each other** (`ax dev --web`,
+  and so `--android`): the splash script's `(() => …)()` called the live
+  reload's on its result, an error on every dev page.
 - `ax test <app> --android`: the emulator lane. `ax lab <app> android`:
   aio's emulator container with a browser viewer.
 - `ax build --android --debug` (debuggable, `chrome://inspect`);
