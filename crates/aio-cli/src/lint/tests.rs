@@ -890,4 +890,14 @@ mod tests {
         "{t:?}"
     );
     assert!(t[1].2.contains("test `adds` checks nothing") && t[2].2.contains("compares `n` with itself"), "{t:?}");
+
+#[test]
+fn ax_dev_lints_each_saved_file_alone() {
+    let ui = "use aio::ui::prelude::*;\nfn Ui() -> Element {\n    rsx! {\n        div { onclick: move |_| {}, \"Open\" }\n    }\n}\n";
+    let d = project(&[("src/ui.rs", ui), ("src/half.rs", "fn x( {"), ("tests/t.rs", ui), ("assets/a.css", "x")]);
+    let files: Vec<PathBuf> =
+        ["src/ui.rs", "src/half.rs", "tests/t.rs", "assets/a.css"].map(|f| d.path().join(f)).into();
+    let said = changed(&files, d.path());
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].starts_with("warn src/ui.rs:4 [a11y] <div> takes clicks but no keys"), "{said:?}");
 }

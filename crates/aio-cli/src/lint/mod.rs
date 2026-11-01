@@ -206,6 +206,32 @@ pub fn lint(dir: &Path) -> Report {
     report
 }
 
+/// The aio checks of each saved `.rs` file alone (`ax dev`, after each
+/// burst of saves; aio's lint while editing): its errors and warnings as
+/// lines, paths relative to `root`. A file mid-edit that doesn't parse is
+/// the compiler's to say.
+pub fn changed(files: &[PathBuf], root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in files.iter().filter(|p| p.extension().is_some_and(|e| e == "rs")) {
+        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        if is_test_path(&rel) || text.len() as u64 > MAX {
+            continue;
+        }
+        let mut facts = rust::Facts::default();
+        rust::file(&rel, &text, false, &mut facts);
+        let lines: Vec<&str> = text.lines().collect();
+        for i in facts.issues.iter().filter(|i| i.severity != Severity::Hint && i.area != "scan") {
+            if i.line.is_some_and(|l| suppressed(&lines, l - 1, i.area)) {
+                continue;
+            }
+            let at = i.line.map_or(String::new(), |l| format!(":{l}"));
+            out.push(format!("{} {rel}{at} [{}] {}", i.severity.name(), i.area, i.message));
+        }
+    }
+    out
+}
+
 /// The checks that need every file: duplicate cell ids, untested cells.
 fn across(f: &mut rust::Facts, report: &mut Report) {
     let mut by_id: BTreeMap<&str, &rust::Cell> = BTreeMap::new();

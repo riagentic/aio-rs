@@ -304,8 +304,11 @@ The words after the app go to the app, except these, which `ax dev` reads:
 | `--display auto` | with a terminal, your desktop; with none (an agent), a nested display, and no browser tab opened (the default) |
 | `--display isolated`, `current`, `:N` | always nested; always your desktop; that X display |
 | `--size 390x844` | the window at that size for this run (its saved size untouched) |
-| `--watch=false` | build and run it once, no watching |
-| `--watch=src/ui,assets` | rebuild on changes in those folders of the app only |
+| `--watch=false`, `--no-watch` | build and run it once, no watching |
+| `--watch=src/ui,assets` | rebuild on changes in those folders of the app only (with dx: rebuilds, no hot-patch) |
+| `--detach` | the session in the background, its output in `logs/dev.out`; `ax stop` ends it |
+| `--verbose` | the app's log at `debug` (`AIORT_LOG`) |
+| `--title <t>` | the window's title for this run (`AIORT_TITLE`) |
 | `--cdp[=port]` | the window opens the DevTools protocol on loopback (a free port without one), for other tools |
 | `--tui` | dx's own screen and keys instead of `ax`'s compact lines |
 | `--android [--device serial] [--native]` | on the attached emulator or phone (`ANDROID_SERIAL`; none: `AIO_AVD` booted): its web build in a dev APK installed once beside the app, each edit reloading it (`--native`, or no web build: the app itself for that CPU, again on every save); its log in the terminal |
