@@ -38,7 +38,7 @@ version may break things.
   flag `--no-persist`; `[data] coalesce_ms` (aio's `persistDebounceMs`);
   timed backups (`[data] backup_every`, `backup_keep`); aio's default size
   guard (warn over 1 MB, error over 16 MB) where `[budgets] state` declares
-  none; `GET`/`POST /__aio/snapshot` in a dev build, `Handle::export` and
+  none; `GET`/`POST /__aio/snapshot` in a dev build, `Handle::export_snapshot` and
   `Handle::load_snapshot` (aio's `snapshot`, `loadSnapshot`).
 - `aio::columns`: typed table columns (`pk`, `text`, `integer`, `real`,
   `refs`, `boolean`, `json`, `.nullable()`, `.unique()`, defaults), for

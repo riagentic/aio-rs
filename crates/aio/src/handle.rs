@@ -868,11 +868,11 @@ impl<T: Cell> Handle<T> {
     /// The whole state as aio's `app.snapshot()` has it: an object of cells,
     /// each its whole state (`#[server]` fields too), a `#[aio_cell]` field
     /// under its aio cell's name. What [`Self::load_snapshot`] takes back.
-    pub fn export(&self) -> Result<Value> {
+    pub fn export_snapshot(&self) -> Result<Value> {
         Ok(snapshot_cells::<T>(crate::json(&*self.state())?))
     }
 
-    /// Replace the state with `snap`, as [`Self::export`] made it (aio's
+    /// Replace the state with `snap`, as [`Self::export_snapshot`] made it (aio's
     /// `loadSnapshot`): a new event, saved before it returns, sent to every
     /// client. Refused when it isn't an object of objects, or when its cells
     /// aren't this app's (a file from another app would wipe the cells it

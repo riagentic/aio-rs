@@ -167,7 +167,7 @@ refuses the boot, the file kept.
 
 ### State export and import
 
-`h.export()` is the whole state as aio's `app.snapshot()` has it: an
+`h.export_snapshot()` is the whole state as aio's `app.snapshot()` has it: an
 object of cells (`{"notes": {...}}`, a `#[aio_cell]` field under its aio
 cell's name, `#[server]` fields included). `h.load_snapshot(&snap, force)`
 puts one back as a new event, saved before it returns and sent to every
@@ -508,5 +508,5 @@ counts twice, a set's `insert` keeps both). Prose needs
 `newest`, `state_at`, `flush`, `fold_before`, `open`, `recovered`,
 `durability`), `aio::Handle::open`, `aio::Event`, `aio::Recovered`,
 `aio::PERSIST_DEBOUNCE`, `aio::CellData` (`save`, `restore`, `migrate`,
-`TRANSIENT`, `PERSIST_INCLUDE`), `aio::filter`, `aio::Handle::export`,
+`TRANSIENT`, `PERSIST_INCLUDE`), `aio::filter`, `aio::Handle::export_snapshot`,
 `load_snapshot`, `aio::merge`, `aio::testing::TestCells::saved`.

@@ -544,7 +544,7 @@ const HANDLE_METHODS: &[&str] = &[
     "done",
     "enabled",
     "events",
-    "export",
+    "export_snapshot",
     "listen",
     "listens_to",
     "load_snapshot",

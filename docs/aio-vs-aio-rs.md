@@ -397,7 +397,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Integrity check | `checkIntegrityOnBoot` | every boot, with recovery | ✅ |
 | Backups, restore | `am backup`, `am restore` | `ax backup`, `ax restore` | ✅ |
 | Timed backups | a recipe | `[data] backup_every`, `backup_keep` | ➕ |
-| State export over HTTP | `/__aio/snapshot` (dev) | `/__aio/snapshot` (dev), `Handle::export`, `load_snapshot` | ✅ |
+| State export over HTTP | `/__aio/snapshot` (dev) | `/__aio/snapshot` (dev), `Handle::export_snapshot`, `load_snapshot` | ✅ |
 | Bound tables | `db:` tables (flat rows) | `#[table]`; bools, lists, nested values in `BOOLEAN`/`JSON` columns | ➕ |
 | Schema builder | column helpers | `aio::columns` (`pk`, `text`, `refs`, …) | ✅ |
 | Raw SQL, live queries | `createDB`, `reactiveDB` | `aio::db::Db`, live queries woken by any `Db` of the file | ✅ |

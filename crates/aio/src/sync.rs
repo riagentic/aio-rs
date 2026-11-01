@@ -825,7 +825,7 @@ async fn snapshot_reply<T: Cell>(
     body: &[u8],
 ) -> (u16, String) {
     match *method {
-        axum::http::Method::GET | axum::http::Method::HEAD => match h.export() {
+        axum::http::Method::GET | axum::http::Method::HEAD => match h.export_snapshot() {
             Ok(v) => (200, v.to_string()),
             Err(e) => (500, format!("snapshot refused: {e}")),
         },
