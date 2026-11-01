@@ -755,7 +755,9 @@ fn part<'a>(v: &'a mut Value, at: Option<&str>) -> Option<&'a mut Value> {
 /// `v` without what it doesn't save.
 fn unsaved_out<T: Cell>(v: &mut Value) {
     for (at, f) in filters::<T>() {
-        part(v, at).map(|p| crate::filter::strip(p, f));
+        if let Some(p) = part(v, at) {
+            crate::filter::strip(p, f);
+        }
     }
 }
 

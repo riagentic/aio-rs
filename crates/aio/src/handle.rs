@@ -1054,39 +1054,6 @@ impl<T: Cell> Door<T> for Handle<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn the_scheduler_wakes_at_least_every_minute() {
-        assert_eq!(super::wait_ms(None, 0), 60_000);
-        assert_eq!(super::wait_ms(Some(30 * 86_400_000), 0), 60_000, "a far slot is re-checked");
-        assert_eq!(super::wait_ms(Some(500), 0), 500);
-        assert_eq!(super::wait_ms(Some(-5), 0), 0, "overdue: now");
-    }
-
-    #[test]
-    fn an_answer_is_fresh_for_its_ttl_and_not_from_the_future() {
-        assert!(super::fresh(1000, 500, 1000));
-        assert!(super::fresh(1000, 500, 1499));
-        assert!(!super::fresh(1000, 500, 1500), "expired");
-        assert!(!super::fresh(1000, 500, 999), "the clock stepped back");
-    }
-
-    #[test]
-    fn answers_are_bounded_stale_ones_first_then_the_oldest() {
-        let mut a: std::collections::HashMap<String, super::Answered> =
-            [("stale", (0, 10)), ("old", (90, 1000)), ("mid", (95, 1000)), ("new", (99, 1000))]
-                .map(|(k, (at, ms))| (k.to_string(), (at, ms, serde_json::Value::Null)))
-                .into();
-        super::sweep(&mut a, 100, 4);
-        assert_eq!(a.len(), 4, "within the bound: kept");
-        super::sweep(&mut a, 100, 2);
-        let mut left: Vec<&str> = a.keys().map(|k| k.as_str()).collect();
-        left.sort();
-        assert_eq!(left, ["mid", "new"]);
-    }
-}
-
 /// The cells of `T` a snapshot names: its own, then its `#[aio_cell]` slices'.
 fn snapshot_names<T: Cell>() -> Vec<&'static str> {
     std::iter::once(T::ID).chain(T::AIO_CELLS.iter().map(|s| s.cell)).collect()
@@ -1158,4 +1125,37 @@ pub(crate) fn snapshot_state<T: Cell>(snap: &Value, force: bool) -> Result<Value
         own.insert(s.field.into(), cells.get(s.cell).cloned().unwrap_or_else(|| serde_json::json!({})));
     }
     Ok(own.into())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_scheduler_wakes_at_least_every_minute() {
+        assert_eq!(super::wait_ms(None, 0), 60_000);
+        assert_eq!(super::wait_ms(Some(30 * 86_400_000), 0), 60_000, "a far slot is re-checked");
+        assert_eq!(super::wait_ms(Some(500), 0), 500);
+        assert_eq!(super::wait_ms(Some(-5), 0), 0, "overdue: now");
+    }
+
+    #[test]
+    fn an_answer_is_fresh_for_its_ttl_and_not_from_the_future() {
+        assert!(super::fresh(1000, 500, 1000));
+        assert!(super::fresh(1000, 500, 1499));
+        assert!(!super::fresh(1000, 500, 1500), "expired");
+        assert!(!super::fresh(1000, 500, 999), "the clock stepped back");
+    }
+
+    #[test]
+    fn answers_are_bounded_stale_ones_first_then_the_oldest() {
+        let mut a: std::collections::HashMap<String, super::Answered> =
+            [("stale", (0, 10)), ("old", (90, 1000)), ("mid", (95, 1000)), ("new", (99, 1000))]
+                .map(|(k, (at, ms))| (k.to_string(), (at, ms, serde_json::Value::Null)))
+                .into();
+        super::sweep(&mut a, 100, 4);
+        assert_eq!(a.len(), 4, "within the bound: kept");
+        super::sweep(&mut a, 100, 2);
+        let mut left: Vec<&str> = a.keys().map(|k| k.as_str()).collect();
+        left.sort();
+        assert_eq!(left, ["mid", "new"]);
+    }
 }

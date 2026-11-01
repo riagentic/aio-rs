@@ -111,7 +111,7 @@ pub fn guard(cell: &str, n: u64) -> Option<(crate::log::Level, String)> {
             "persist: cell {cell} saves {} ({} threshold {}). A cell's state is the working set: it is saved and \
              sent to every client whole. Fix: keep bulk rows in a #[table] or aio::db and page them into the \
              state; if this size is meant, declare it: [budgets] state = \"{mb}MB\", payload = \"{mb}MB\" \
-             (docs/persistence/README.md#big-state)",
+             (docs/persistence/sql.md#how-big-a-cell-may-be)",
             crate::fmt::bytes(n),
             if level == crate::log::Level::Error { "error" } else { "warn" },
             crate::fmt::bytes(limit),

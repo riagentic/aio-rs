@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(streamed(None), fox);
         assert_eq!(streamed(Some(4..9)), b"quick");
         assert_eq!(streamed(Some(40..99)), b"dog");
-        assert!(s.stream(&b.id, Some(9..4)).unwrap_err().to_string().contains("ends before it starts"));
+        assert!(s.stream(&b.id, Some(std::ops::Range { start: 9, end: 4 })).unwrap_err().to_string().contains("ends before it starts"));
         assert!(s.stream(&"0".repeat(64), None).unwrap_err().to_string().contains("no blob"));
         // Same bytes: same id, one file, the first name kept.
         let again = s.put(&fox[..], Some("other.txt")).unwrap();

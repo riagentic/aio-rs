@@ -1116,7 +1116,10 @@ impl Config {
             return Err("aio.toml: [data] backup_keep must keep at least 1 backup".into());
         }
         if c.data.coalesce_ms > 60_000 {
-            return Err(format!("aio.toml: [data] coalesce_ms = {} holds calls over a minute: a crash would lose them all", c.data.coalesce_ms));
+            return Err(format!(
+                "aio.toml: [data] coalesce_ms = {} holds calls over a minute: a crash would lose them all",
+                c.data.coalesce_ms
+            ));
         }
         if c.data.retire.contains(&c.data.store) {
             return Err(format!("aio.toml: [data] retire names the store {:?} itself", c.data.store));

@@ -62,7 +62,12 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
                     for e in list.elems {
                         match e {
                             Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => into.push(s),
-                            e => return Err(syn::Error::new(e.span(), "a path into the state: \"field\", \"a.b\", \"feeds.*.busy\"")),
+                            e => {
+                                return Err(syn::Error::new(
+                                    e.span(),
+                                    "a path into the state: \"field\", \"a.b\", \"feeds.*.busy\"",
+                                ));
+                            }
                         }
                     }
                     Ok(())
@@ -145,7 +150,9 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         let why = match () {
             _ if segs.iter().any(|s| s.is_empty()) => Some("has an empty segment".to_string()),
             _ if include && segs.contains(&"*") => Some("has a `*`, which only exclude takes".into()),
-            _ if segs[0] != "*" && !fields.iter().any(|f| f == segs[0]) => Some(format!("starts at `{}`, no field of this cell", segs[0])),
+            _ if segs[0] != "*" && !fields.iter().any(|f| f == segs[0]) => {
+                Some(format!("starts at `{}`, no field of this cell", segs[0]))
+            }
             _ => None,
         };
         if let Some(why) = why {
@@ -260,7 +267,8 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!(fn conceal(&mut self) { #(::aio::Hidden::conceal(&mut self.#fields, #labels);)* })
     });
     let include = &f.include;
-    let include = (!include.is_empty()).then(|| quote!(const PERSIST_INCLUDE: &'static [&'static str] = &[#(#include),*];));
+    let include =
+        (!include.is_empty()).then(|| quote!(const PERSIST_INCLUDE: &'static [&'static str] = &[#(#include),*];));
     let tables = (!tables.is_empty()).then(|| {
         quote!(const TABLES: &'static [(&'static str, &'static str, ::std::option::Option<&'static str>, ::std::option::Option<::aio::columns::Columns>)] = &[#(#tables),*];)
     });

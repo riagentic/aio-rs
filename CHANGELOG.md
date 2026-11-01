@@ -32,6 +32,23 @@ version may break things.
 - `aio::rewrite_call` (aio's `beforeReduce` changing a call),
   `aio::on_recovered` (aio's `onCheckpointRestore`),
   `TestCells::held_effects` (aio's `t.getEffects()`).
+- **Persistence as aio's** (docs/persistence): `#[cell(persist(exclude =
+  ["feeds.*.busy"]))]` and `persist(include = [...])`, nested paths with
+  `*` (aio's `persist` filter); `[data] persist = false` and the launch
+  flag `--no-persist`; `[data] coalesce_ms` (aio's `persistDebounceMs`);
+  timed backups (`[data] backup_every`, `backup_keep`); aio's default size
+  guard (warn over 1 MB, error over 16 MB) where `[budgets] state` declares
+  none; `GET`/`POST /__aio/snapshot` in a dev build, `Handle::export` and
+  `Handle::load_snapshot` (aio's `snapshot`, `loadSnapshot`).
+- `aio::columns`: typed table columns (`pk`, `text`, `integer`, `real`,
+  `refs`, `boolean`, `json`, `.nullable()`, `.unique()`, defaults), for
+  `#[table(…, columns = CONST)]` and `aio::columns::create`. `#[table]` rows
+  hold bools (`BOOLEAN`, 0/1), lists and nested values (`JSON` text).
+- `Blobs::stream(id, range)`: a blob's bytes as a reader (aio's `stream`).
+- A live query wakes on writes through any `Db` of its file in the process.
+- A ported app replays aio's journal past its save at boot (a crash
+  before aio's save), moving `__journal_wm` with each call.
+
 - `ax create --aio-version <v|main|latest>`, and `ax framework [version]
   [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
   `am pin`; all or nothing).
@@ -72,6 +89,12 @@ version may break things.
   and `*self.key = k`.
 - A `#[ttl]` call answered from the cache returns the kept answer, not `null`.
 - An async method returns `aio::Result<R>` for any `R`.
+- **An older build boots on a newer build's data** (a rollback), as aio's
+  downgrade does: the fields it doesn't declare are kept in every write,
+  the stamp is never lowered, an aio slice is parked under
+  `__downgraded:<cell>`; only data its fields can't hold refuses the boot.
+- An aio home with a journal is no longer refused at the claim: the store
+  replays it, or says why it can't.
 - **`ax create` writes nothing of the machine it ran on**: the app takes
   aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
   commit), so a clone builds anywhere and a prebuilt `ax` needs no

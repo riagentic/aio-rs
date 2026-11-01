@@ -584,7 +584,10 @@ async fn the_snapshot_endpoint_exports_and_loads_the_whole_state_as_aios() {
     assert_eq!(fetch(&addr, "GET", "/__aio/snapshot", &[], "").await.0, 401);
     let (s, head, body) = fetch(&addr, "GET", "/__aio/snapshot", &[KEY], "").await;
     assert_eq!((s, header(&head, "cache-control")), (200, Some("no-store")));
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap(), serde_json::json!({ "hooks": { "paid": { "a1": 5 } } }));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({ "hooks": { "paid": { "a1": 5 } } })
+    );
     let post = |body: &'static str, path: &'static str, x: bool| {
         let addr = addr.clone();
         async move {

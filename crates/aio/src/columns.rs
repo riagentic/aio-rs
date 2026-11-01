@@ -155,7 +155,9 @@ pub fn sql(cols: &[Col]) -> Result<String, String> {
             pks.join(", ")
         ));
     }
-    if let Some((i, c)) = cols.iter().enumerate().find(|(i, c)| cols[..*i].iter().any(|d| d.name.eq_ignore_ascii_case(c.name))) {
+    if let Some((i, c)) =
+        cols.iter().enumerate().find(|(i, c)| cols[..*i].iter().any(|d| d.name.eq_ignore_ascii_case(c.name)))
+    {
         return Err(format!("column {} is declared twice (the {}th)", c.name, i + 1));
     }
     Ok(cols.iter().map(Col::sql).collect::<Result<Vec<_>, _>>()?.join(", "))
@@ -190,13 +192,19 @@ mod tests {
 
     #[test]
     fn columns_render_as_aios_column_helpers() {
-        assert_eq!(sql(&[pk("id"), text("email").unique().nullable()]).unwrap(), "\"id\" INTEGER PRIMARY KEY, \"email\" TEXT UNIQUE");
+        assert_eq!(
+            sql(&[pk("id"), text("email").unique().nullable()]).unwrap(),
+            "\"id\" INTEGER PRIMARY KEY, \"email\" TEXT UNIQUE"
+        );
         assert_eq!(text("t").default_text("it's").sql().unwrap(), "\"t\" TEXT NOT NULL DEFAULT 'it''s'");
         assert_eq!(integer("n").default_int(-3).sql().unwrap(), "\"n\" INTEGER NOT NULL DEFAULT -3");
         assert!(real("x").default_real(f64::NAN).sql().unwrap_err().contains("not a finite number"));
         assert!(sql(&[pk("a"), pk("b")]).unwrap_err().contains("2 primary keys declared (a, b)"));
         assert!(sql(&[text("a"), integer("A")]).unwrap_err().contains("declared twice"));
-        assert_eq!(create("my \"t\"", &[pk("id")]).unwrap(), "CREATE TABLE IF NOT EXISTS \"my \"\"t\"\"\" (\"id\" INTEGER PRIMARY KEY)");
+        assert_eq!(
+            create("my \"t\"", &[pk("id")]).unwrap(),
+            "CREATE TABLE IF NOT EXISTS \"my \"\"t\"\"\" (\"id\" INTEGER PRIMARY KEY)"
+        );
         assert_eq!(Columns::Sql("id INTEGER").sql().unwrap(), "id INTEGER");
     }
 }

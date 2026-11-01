@@ -584,11 +584,11 @@ fn rows(db: &Connection, table: &str, cols: &[Col]) -> Result<Vec<Value>, String
 fn plain(v: rusqlite::types::ValueRef<'_>) -> Value {
     use rusqlite::types::ValueRef;
     match v {
-                    ValueRef::Null => Value::Null,
-                    ValueRef::Integer(n) => json!(n),
-                    ValueRef::Real(f) => json!(f),
-                    ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    ValueRef::Blob(b) => json!(b),
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(n) => json!(n),
+        ValueRef::Real(f) => json!(f),
+        ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+        ValueRef::Blob(b) => json!(b),
     }
 }
 
@@ -818,7 +818,11 @@ pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<J
         match serde_json::from_str::<Value>(line) {
             Ok(e) if e["type"] == "__aioBatch" => lines.extend(e["entries"].as_array().cloned().unwrap_or_default()),
             Ok(e) => lines.push(e),
-            Err(_) => eprintln!("[aio] data: {}/journal line {} is torn (a crash mid-write): skipped, as aio does", data.display(), i + 1),
+            Err(_) => eprintln!(
+                "[aio] data: {}/journal line {} is torn (a crash mid-write): skipped, as aio does",
+                data.display(),
+                i + 1
+            ),
         }
     }
     let (mut ours, mut others) = (vec![], vec![]);
@@ -833,8 +837,11 @@ pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<J
             continue;
         };
         let Some(method) = method_of::<T>(cell, m) else {
-            match m.starts_with("__") && (cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell)) || cell == "aio" {
-                true => return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay")),
+            match m.starts_with("__") && (cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell)) || cell == "aio"
+            {
+                true => {
+                    return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay"));
+                }
                 false => others.push(kind.to_string()),
             }
             continue;
@@ -843,7 +850,9 @@ pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<J
             (true, _) => Journaled::Skip { seq, why: None },
             (_, true) => Journaled::Skip {
                 seq,
-                why: Some(format!("journal entry {seq} ({kind}): aio withheld its arguments (redactActions), so it can't run again: skipped, as aio does")),
+                why: Some(format!(
+                    "journal entry {seq} ({kind}): aio withheld its arguments (redactActions), so it can't run again: skipped, as aio does"
+                )),
             },
             _ => Journaled::Call {
                 seq,
@@ -983,7 +992,9 @@ impl Kv {
                         "[aio] {}: aio data from a newer build (v{at} > v{}): it boots, keeping that build's fields it doesn't declare",
                         s.cell, s.version
                     );
-                    (s.fit)(v).map_err(|e| format!("{}: aio data from a newer build (v{at} > v{}) doesn't fit: {e}", s.cell, s.version))?
+                    (s.fit)(v).map_err(|e| {
+                        format!("{}: aio data from a newer build (v{at} > v{}) doesn't fit: {e}", s.cell, s.version)
+                    })?
                 }
                 std::cmp::Ordering::Equal => v,
             };

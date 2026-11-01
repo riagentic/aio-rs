@@ -47,9 +47,8 @@ impl Account {
 
 fn saved_state(p: &std::path::Path, cell: &str) -> Value {
     let c = rusqlite::Connection::open(p).unwrap();
-    let t: String = c
-        .query_row("SELECT state FROM snap WHERE cell = ?1 ORDER BY seq DESC LIMIT 1", [cell], |r| r.get(0))
-        .unwrap();
+    let t: String =
+        c.query_row("SELECT state FROM snap WHERE cell = ?1 ORDER BY seq DESC LIMIT 1", [cell], |r| r.get(0)).unwrap();
     serde_json::from_str(&t).unwrap()
 }
 
@@ -142,7 +141,8 @@ fn an_older_build_boots_on_newer_data_and_keeps_what_it_doesnt_know() {
     s.call(&By::Test, "edit", json!(["b"])).unwrap();
     drop(s);
     let c = rusqlite::Connection::open(&p).unwrap();
-    let v: u32 = c.query_row("SELECT v FROM snap WHERE cell = 'note' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    let v: u32 =
+        c.query_row("SELECT v FROM snap WHERE cell = 'note' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
     assert_eq!(v, 2, "the stamp is never lowered");
     drop(c);
     // Rolled forward: nothing is migrated again, nothing was lost.

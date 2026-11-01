@@ -1464,7 +1464,10 @@ fn typed_columns_hold_bools_lists_and_nested_values_both_ways() {
 fn a_bool_or_a_list_in_a_plain_column_is_refused_naming_the_column_kind() {
     let (_d, p) = bound_file(true);
     let c = rusqlite::Connection::open(&p).unwrap();
-    c.execute_batch("CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, done INTEGER, tags TEXT, meta TEXT)").unwrap();
+    c.execute_batch(
+        "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, done INTEGER, tags TEXT, meta TEXT)",
+    )
+    .unwrap();
     drop(c);
     let mut s = Store::<Board>::open_aio(&p, APP).unwrap();
     let e = s.call(&By::Test, "add", json!([1, "plan", [], null])).unwrap_err().why;

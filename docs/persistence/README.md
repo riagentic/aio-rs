@@ -70,11 +70,12 @@ assert_eq!(h.store(|s| s.state_at(events[0].seq)).unwrap().n, 2, "any past state
 
 ## What is saved
 
-Everything in the cell, unless you say otherwise. Four tools shape it:
+Everything in the cell, unless you say otherwise. Five tools shape it:
 
 | Tool | Does | Use it for |
 |---|---|---|
 | `#[transient]` on a field | never written; back to its default on every boot | hover, focus, a progress value, a cache of a derived value |
+| `#[cell(persist(exclude = ["feeds.*.busy"]))]`, `persist(include = ["name", "profile.email"])` | paths into the state left out, or the only ones written (aio's `persist: { include, exclude }`) | a flag inside each row of a map or list, a token inside a profile |
 | `#[cell(restore = f)]`, `fn(Self) -> Self` | runs on the state on every boot and every rewind | clearing a "busy" flag a crash left set |
 | `#[cell(save = f)]`, `fn(&Self) -> Self` | shapes what is written (the state in memory stays whole) | dropping rows that are only shown, trimming a list to its last 100 |
 | `#[redact]` on a method | logs the state the call made, never its arguments | a passphrase, a token: anything the log must not keep |
@@ -145,6 +146,37 @@ assert!(events.iter().all(|e| !e.args.to_string().contains("correct horse")), "n
   ([visibility](../state/visibility.md)).
 - `#[cell(diagnostics = false)]` keeps a cell's calls out of the
   timeline and problem reports; it is still saved and logged.
+- Persist paths are dot paths from a field (checked as the app builds):
+  a `*` segment of an exclude path names every key, and a list is walked
+  item by item (`feeds.*.busy` reaches each feed of a map or a list). A
+  field a path reaches inside a struct needs a default (`#[serde(default)]`
+  on its type): it comes back at it. `include` and `exclude` don't mix.
+- `[data] persist = false` (aio's `persist: false`), or the launch flag
+  `--no-persist`, keeps the whole app in memory: no store is opened, and
+  every launch starts from the defaults.
+
+### Data from a newer build
+
+A build opening data a newer build wrote (a rollback) boots on what it
+declares, as aio's downgrade boot does: every snapshot keeps the newer
+build's other fields, stamped with the newer version (never lowered, so
+rolling forward migrates nothing twice); in an aio file the slice keeps
+them too, and a verbatim copy is parked once under `__downgraded:<cell>`.
+Fields this build declares may be misread. Data its fields can't hold
+refuses the boot, the file kept.
+
+### State export and import
+
+`h.export()` is the whole state as aio's `app.snapshot()` has it: an
+object of cells (`{"notes": {...}}`, a `#[aio_cell]` field under its aio
+cell's name, `#[server]` fields included). `h.load_snapshot(&snap, force)`
+puts one back as a new event, saved before it returns and sent to every
+client; a snapshot whose cells aren't this app's is refused unless
+`force` (a missing cell starts from its defaults, an unknown one is
+dropped). A dev build also serves them as aio does: `GET` and `POST`
+`/__aio/snapshot` (`X-AIO: 1` on a `POST`, `?force=1`), to this machine's
+tools with the app's key or to an admin; `ax snapshot save` and `load` go
+through the local door in any build.
 
 ## How the store works
 
@@ -245,7 +277,8 @@ assert_eq!(h.store(|s| s.events()).unwrap().len(), before + 1, "five steps, one 
 ```
 
 Each call shows its state at once. The run is written in one transaction
-`aio::PERSIST_DEBOUNCE` (100 ms) after its first call, or as soon as a call
+`[data] coalesce_ms` after its first call (aio's `persistDebounceMs`;
+default `aio::PERSIST_DEBOUNCE`, 100 ms; `0` writes each call), or as soon as a call
 that can't wait comes (one with an effect, a schedule or an id), a
 time-travel step, or the close. When the last call alone ends where the
 run did (`focus(5)` above), the run is logged as that one event;
@@ -442,17 +475,14 @@ counts twice, a set's `insert` keeps both). Prose needs
 
 ## Limits, compared with aio
 
-- **No path lists for what is saved.** aio's `persist: { include,
-  exclude }` with `*` segments has no counterpart: mark fields
-  `#[transient]`, or shape the saved state with `save = f`.
 - **No store layouts to pick.** aio's `persistMode: "single" | "multi"`
   doesn't apply: aio-rs keeps a log and snapshots per cell. A ported app
   reads and writes aio's layout as aio left it ([data](../migration/data.md)).
-- **No app-wide switch.** aio's `persist: false` and `cellDefaults`
-  aren't there: a cell persists when it says `persist`.
-- **No state export and import over HTTP.** aio's snapshot endpoints are
-  `ax snapshot save` and `ax snapshot load` on this machine
-  ([files](files.md#backups)).
+- **No `cellDefaults`.** A cell says its own flags; the app-wide switch is
+  `[data] persist`.
+- **Strict restore when rolling forward.** Data an older build wrote over
+  a newer build's keeps the older build's own fields too; the newer build
+  then refuses to drop them silently (declare them, or migrate them away).
 
 ## Common mistakes
 
@@ -478,4 +508,5 @@ counts twice, a set's `insert` keeps both). Prose needs
 `newest`, `state_at`, `flush`, `fold_before`, `open`, `recovered`,
 `durability`), `aio::Handle::open`, `aio::Event`, `aio::Recovered`,
 `aio::PERSIST_DEBOUNCE`, `aio::CellData` (`save`, `restore`, `migrate`,
-`TRANSIENT`), `aio::merge`, `aio::testing::TestCells::saved`.
+`TRANSIENT`, `PERSIST_INCLUDE`), `aio::filter`, `aio::Handle::export`,
+`load_snapshot`, `aio::merge`, `aio::testing::TestCells::saved`.
