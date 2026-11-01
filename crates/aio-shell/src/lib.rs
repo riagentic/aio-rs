@@ -314,6 +314,7 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         Some((width, height)) => Window { width, height, ..win },
         None => win,
     };
+    let win = Window { title: titled(std::env::var("AIORT_TITLE").ok(), win.title), ..win };
     let data = dirs.data.join("electron");
     let dir = dirs.cache.join("shell");
     _ = ASK_MOVE.set((win.title, dirs.data.clone()));
@@ -736,6 +737,12 @@ fn asked_size(v: Option<&str>) -> Option<(u32, u32)> {
     Some((w.parse().ok().filter(|n| *n > 0)?, h.parse().ok().filter(|n| *n > 0)?))
 }
 
+/// The window's title for this run: `AIORT_TITLE` (aio's `--title=`,
+/// `ax dev --title`) when set, else the app's (pure).
+fn titled(asked: Option<String>, app: &'static str) -> &'static str {
+    asked.filter(|t| !t.trim().is_empty()).map_or(app, |t| t.leak())
+}
+
 /// What the runtime says on its control line: its screens (answered with
 /// where to open), the window's bounds as they change (saved),
 /// the answers to open dialogs (`page::pick`), clicks on a notice or the
@@ -867,6 +874,8 @@ mod tests {
     fn a_dev_size_is_w_by_h() {
         assert_eq!(asked_size(Some("390x844")), Some((390, 844)));
         assert_eq!([asked_size(None), asked_size(Some("390")), asked_size(Some("0x9"))], [None, None, None]);
+        assert_eq!(titled(Some("Notes (QA)".into()), "Notes"), "Notes (QA)");
+        assert_eq!([titled(None, "Notes"), titled(Some(" ".into()), "Notes")], ["Notes", "Notes"]);
     }
 
     #[tokio::test]
