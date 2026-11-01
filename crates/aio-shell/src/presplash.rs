@@ -773,12 +773,14 @@ impl Session {
             let mut i = self.lock();
             (i.st.closed, i.view.take())
         };
-        let mut cur = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
-        if cur.as_ref().is_some_and(|c| std::ptr::eq(&**c, self)) {
-            *cur = None;
-        }
-        drop(cur);
-        let Some(view) = view else { return };
+        // Current until its window is gone: whoever waits on it sees it done.
+        let forget = || {
+            let mut cur = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
+            if cur.as_ref().is_some_and(|c| std::ptr::eq(&**c, self)) {
+                *cur = None;
+            }
+        };
+        let Some(view) = view else { return forget() };
         match why {
             Some(Close::Cap) => eprintln!(
                 "[aio] splash: closed after {} s without the app's window ([build.splash] max_ms)",
@@ -788,6 +790,7 @@ impl Session {
             Some(c) => eprintln!("[aio] splash: closed ({})", format!("{c:?}").to_lowercase()),
         }
         view.close(self.fade_ms);
+        forget();
     }
 
     /// The download is starting: false when the splash is gone (the plain
@@ -1310,7 +1313,6 @@ function run(argv) {
     label = $.NSTextField.labelWithString(text);
     label.font = f;
     label.textColor = hex(cs[1]);
-    label.alignment = L.align === 'center' ? 2 : L.align === 'right' ? 1 : 0;
     label.lineBreakMode = 4; // NSLineBreakByTruncatingTail
     if (L.shadow) {
       const sh = $.NSShadow.alloc.init;
@@ -1368,8 +1370,16 @@ function run(argv) {
   const yb = edge ? 0 : bottom, bx = edge ? 0 : side, bw = edge ? W : W - 2 * side;
   const br = L.barRadius === null ? bp / 2 : L.barRadius;
   let track = null, fill = null, close = null;
+  // Aligned by its frame, sized to its text: NSTextAlignment's numbers
+  // differ by architecture (center is 1 on Apple silicon, 2 on Intel) and
+  // JXA bridges Intel's.
+  const lay = () => {
+    const w = Math.min(Math.ceil(label.fittingSize.width) + 2, W - 2 * side);
+    const x = L.align === 'center' ? Math.round((W - w) / 2) : L.align === 'right' ? W - side - w : side;
+    label.frame = $.NSMakeRect(x, (bp > 0 && !edge ? yb + bp + 8 : bottom), w, lh);
+  };
   if (label) {
-    label.frame = $.NSMakeRect(side, (bp > 0 && !edge ? yb + bp + 8 : bottom), W - 2 * side, lh);
+    lay();
     view.addSubview(label);
   }
   const box = (w, col) => {
@@ -1453,7 +1463,7 @@ function run(argv) {
     if (str === 'close') { fade(); $.exit(0); }
     const i = str.indexOf('\t');
     if (i < 0) continue;
-    if (label) label.stringValue = str.slice(i + 1);
+    if (label && label.stringValue.js !== str.slice(i + 1)) { label.stringValue = str.slice(i + 1); lay(); }
     if (track) {
       const n = parseInt(str.slice(0, i), 10);
       const on = n >= 0;
@@ -1787,7 +1797,7 @@ mod tests {
         }
         n.click();
         until("dismissed", &|| n.progress(Some(50), "x") == Shown::Cancelled);
-        assert!(current().is_none(), "gone");
+        until("gone", &|| current().is_none());
         // A start with Electron here: the app's window shows, the splash
         // stays its minimum, then goes.
         let n = Session::start(&plan(&s, &c, true), Kind::Gtk, "linux").unwrap();
