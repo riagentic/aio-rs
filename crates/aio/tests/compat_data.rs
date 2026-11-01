@@ -1371,3 +1371,85 @@ fn what_aio_changed_is_settled_by_on_aio_and_checked_by_the_invariants() {
     drop(db);
     assert_eq!(Store::<Ledger>::open_aio(&p, "w").unwrap().state().settled, 2);
 }
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Task {
+    id: i64,
+    title: String,
+    done: bool,
+    tags: Vec<String>,
+    meta: Option<BTreeMap<String, Value>>,
+}
+
+/// Typed columns (aio's `table({ id: pk(), … })`), a bool, a list and a nested value among them.
+const TASKS: &[aio::columns::Col] = &[
+    aio::columns::pk("id"),
+    aio::columns::text("title"),
+    aio::columns::boolean("done").default_int(0),
+    aio::columns::json("tags"),
+    aio::columns::json("meta").nullable(),
+];
+
+#[cell(persist, id = "board")]
+pub struct Board {
+    #[table("tasks", columns = TASKS)]
+    tasks: Vec<Task>,
+}
+
+#[methods]
+impl Board {
+    pub fn add(&mut self, id: i64, title: String, tags: Vec<String>, meta: Option<BTreeMap<String, Value>>) {
+        self.tasks.push(Task { id, title, done: false, tags, meta });
+    }
+    pub fn finish(&mut self, id: i64) {
+        self.tasks.iter_mut().filter(|t| t.id == id).for_each(|t| t.done = true);
+    }
+}
+
+#[test]
+fn typed_columns_hold_bools_lists_and_nested_values_both_ways() {
+    let meta = json!({ "due": { "day": 3 }, "who": ["ana"] });
+    for aio_file in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("state.db");
+        let open = || if aio_file { Store::<Board>::open_aio(&p, APP) } else { Store::<Board>::open(&p) };
+        let mut s = open().unwrap();
+        let ddl: String = rusqlite::Connection::open(&p)
+            .unwrap()
+            .query_row("SELECT sql FROM sqlite_master WHERE name = 'tasks'", [], |r| r.get(0))
+            .unwrap();
+        assert!(ddl.contains(r#""done" BOOLEAN NOT NULL DEFAULT 0, "tags" JSON NOT NULL, "meta" JSON)"#), "{ddl}");
+        s.call(&By::Test, "add", json!([1, "plan", ["a", "b"], meta])).unwrap();
+        s.call(&By::Test, "add", json!([2, "[not a list]", [], null])).unwrap();
+        s.call(&By::Test, "finish", json!([1])).unwrap();
+        assert_eq!(
+            table(&p, "tasks"),
+            [
+                r#"Integer(1)|Text("plan")|Integer(1)|Text("[\"a\",\"b\"]")|Text("{\"due\":{\"day\":3},\"who\":[\"ana\"]}")"#,
+                r#"Integer(2)|Text("[not a list]")|Integer(0)|Text("[]")|Null"#,
+            ],
+            "0/1 and JSON text, as aio (and any SQL tool) can read them"
+        );
+        let want = s.state().tasks.clone();
+        drop(s);
+        // Back as they were, from the rows: the app's own SQL changes them too.
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute(r#"UPDATE tasks SET done = 0, tags = '["x"]' WHERE id = 1"#, []).unwrap();
+        drop(c);
+        let s = open().unwrap();
+        assert_eq!(s.state().tasks[1], want[1]);
+        assert_eq!((s.state().tasks[0].done, s.state().tasks[0].tags.clone()), (false, vec!["x".to_string()]));
+        assert_eq!(s.state().tasks[0].meta.as_ref().map(|m| json!(m)), Some(meta.clone()));
+    }
+}
+
+#[test]
+fn a_bool_or_a_list_in_a_plain_column_is_refused_naming_the_column_kind() {
+    let (_d, p) = bound_file(true);
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch("CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, done INTEGER, tags TEXT, meta TEXT)").unwrap();
+    drop(c);
+    let mut s = Store::<Board>::open_aio(&p, APP).unwrap();
+    let e = s.call(&By::Test, "add", json!([1, "plan", [], null])).unwrap_err().why;
+    assert!(e.contains("done = false") && e.contains("a bool needs a BOOLEAN column"), "{e}");
+}

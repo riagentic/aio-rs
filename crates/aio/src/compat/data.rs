@@ -290,7 +290,7 @@ pub fn retire(data: &Path, names: &[String]) -> io::Result<Vec<PathBuf>> {
 
 /// A cell field bound to aio's `db:` table: `(field, table, key, columns)`
 /// ([`crate::CellData::TABLES`]).
-pub type Bound = (&'static str, &'static str, Option<&'static str>, Option<&'static str>);
+pub type Bound = (&'static str, &'static str, Option<&'static str>, Option<crate::columns::Columns>);
 
 /// A `#[aio_cell]` field ([`crate::CellData::AIO_CELLS`]): aio cell `cell`'s whole slice,
 /// kept as the field's own cell type keeps it: its id, version, `migrate`,
@@ -485,14 +485,39 @@ fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Table `table`'s columns, its primary key's marked; `None`: no such table.
-fn columns(db: &Connection, table: &str) -> Result<Option<Vec<(String, bool)>>, String> {
+/// A column as a bound row's value goes in and comes out of it: a `bool` as
+/// 0/1 in a `BOOLEAN` column, a list or an object as JSON text in a `JSON`
+/// one, each value as its JSON text (aio-rs's [`crate::columns::boolean`],
+/// [`crate::columns::json`]); in any other, a number, a string or null, as
+/// aio stores them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Plain,
+    Bool,
+    Json,
+}
+
+impl Kind {
+    fn of(ty: &str) -> Self {
+        match ty.to_ascii_uppercase().as_str() {
+            "BOOLEAN" => Kind::Bool,
+            "JSON" => Kind::Json,
+            _ => Kind::Plain,
+        }
+    }
+}
+
+/// One of a table's columns: its name, whether it is the primary key, its kind.
+type Col = (String, bool, Kind);
+
+/// Table `table`'s columns; `None`: no such table.
+fn columns(db: &Connection, table: &str) -> Result<Option<Vec<Col>>, String> {
     if !has_table(db, table)? {
         return Ok(None);
     }
     let mut q = db.prepare(&format!("PRAGMA table_info({})", quoted(table))).map_err(|e| format!("storage: {e}"))?;
     let cols = q
-        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)? == 1)))
+        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)? == 1, Kind::of(&r.get::<_, String>(2)?))))
         .and_then(|r| r.collect::<Result<Vec<_>, _>>())
         .map_err(|e| format!("storage: {e}"))?;
     Ok(Some(cols))
@@ -506,23 +531,28 @@ fn synced(db: &Connection, table: &str) -> Result<bool, String> {
         .map_err(|e| format!("storage: {e}"))
 }
 
-/// Every row of `table` as aio reads it (`SELECT *`): an object of its
-/// columns, numbers, strings and nulls (a blob as its bytes).
-fn rows(db: &Connection, table: &str) -> Result<Vec<Value>, String> {
+/// Every row of `table` (columns `cols`) as aio reads it (`SELECT *`): an
+/// object of its columns, numbers, strings and nulls (a blob as its bytes);
+/// a `BOOLEAN` column's 0/1 as a bool, a `JSON` column's text as its value.
+fn rows(db: &Connection, table: &str, cols: &[Col]) -> Result<Vec<Value>, String> {
     use rusqlite::types::ValueRef;
     let err = |e: rusqlite::Error| format!("aio table {table}: {e}");
     let mut q = db.prepare(&format!("SELECT * FROM {}", quoted(table))).map_err(err)?;
-    let names: Vec<String> = q.column_names().into_iter().map(String::from).collect();
+    let names: Vec<(String, Kind)> = q
+        .column_names()
+        .into_iter()
+        .map(|n| (n.to_string(), cols.iter().find(|c| c.0 == n).map_or(Kind::Plain, |c| c.2)))
+        .collect();
     let rows = q
         .query_map([], |r| {
             let mut m = Map::new();
-            for (i, n) in names.iter().enumerate() {
-                let v = match r.get_ref(i)? {
-                    ValueRef::Null => Value::Null,
-                    ValueRef::Integer(n) => json!(n),
-                    ValueRef::Real(f) => json!(f),
-                    ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    ValueRef::Blob(b) => json!(b),
+            for (i, (n, kind)) in names.iter().enumerate() {
+                let v = match (r.get_ref(i)?, kind) {
+                    (ValueRef::Integer(b @ (0 | 1)), Kind::Bool) => json!(b == 1),
+                    (ValueRef::Text(t), Kind::Json) => {
+                        serde_json::from_slice(t).unwrap_or_else(|_| json!(String::from_utf8_lossy(t)))
+                    }
+                    (v, _) => plain(v),
                 };
                 m.insert(n.clone(), v);
             }
@@ -531,6 +561,18 @@ fn rows(db: &Connection, table: &str) -> Result<Vec<Value>, String> {
         .and_then(|r| r.collect::<Result<Vec<_>, _>>())
         .map_err(err)?;
     Ok(rows)
+}
+
+/// A stored value as aio reads it.
+fn plain(v: rusqlite::types::ValueRef<'_>) -> Value {
+    use rusqlite::types::ValueRef;
+    match v {
+                    ValueRef::Null => Value::Null,
+                    ValueRef::Integer(n) => json!(n),
+                    ValueRef::Real(f) => json!(f),
+                    ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                    ValueRef::Blob(b) => json!(b),
+    }
 }
 
 /// A map binding's key for a row's key value (aio's `String(row[pk])`).
@@ -567,12 +609,12 @@ fn rows_of(v: &Value, key: Option<&str>) -> Result<Vec<Row>, String> {
 fn sync(
     db: &Connection,
     table: &str,
-    cols: &[(String, bool)],
+    cols: &[Col],
     key: Option<&str>,
     old: Option<&Value>,
     new: &Value,
 ) -> Result<(), String> {
-    let pk = key.or_else(|| cols.iter().find(|(_, pk)| *pk).map(|(c, _)| c.as_str()));
+    let pk = key.or_else(|| cols.iter().find(|c| c.1).map(|c| c.0.as_str()));
     let keyed = |v: &Value| rows_of(v, pk);
     let new = keyed(new)?;
     let st = |e: rusqlite::Error| format!("storage: {e}");
@@ -580,18 +622,26 @@ fn sync(
         let mut names = vec![];
         let mut vals: Vec<rusqlite::types::Value> = vec![];
         for (k, v) in r {
-            if !cols.iter().any(|(c, _)| c == k) {
+            let Some(col) = cols.iter().find(|c| c.0 == *k) else {
                 return Err(format!("the table has no column {k}"));
-            }
+            };
             names.push(quoted(k));
-            vals.push(match v {
-                Value::Null => rusqlite::types::Value::Null,
-                Value::String(s) => s.clone().into(),
-                Value::Number(n) => match n.as_i64() {
+            vals.push(match (v, col.2) {
+                (Value::Null, _) => rusqlite::types::Value::Null,
+                // Every value as its JSON text: a string reads back a string.
+                (v, Kind::Json) => v.to_string().into(),
+                (Value::String(s), _) => s.clone().into(),
+                (Value::Number(n), _) => match n.as_i64() {
                     Some(i) => i.into(),
                     None => n.as_f64().unwrap_or(f64::NAN).into(),
                 },
-                v => return Err(format!("{k} = {v}: aio stores a number, a string or null in a column")),
+                (Value::Bool(b), Kind::Bool) => i64::from(*b).into(),
+                (v, _) => {
+                    return Err(format!(
+                        "{k} = {v}: a column holds a number, a string or null (as in aio); a bool needs a BOOLEAN \
+                         column and a list or an object a JSON one (aio::columns::boolean, json)"
+                    ));
+                }
             });
         }
         let marks = vec!["?"; names.len()].join(", ");
@@ -626,10 +676,8 @@ fn sync(
 pub(crate) fn bound(db: &Connection, tables: &[Bound]) -> Result<Map<String, Value>, String> {
     let mut got = Map::new();
     for &(field, table, key, _) in tables {
-        if columns(db, table)?.is_none() {
-            continue;
-        }
-        let rows = rows(db, table)?;
+        let Some(cols) = columns(db, table)? else { continue };
+        let rows = rows(db, table, &cols)?;
         if rows.is_empty() && !synced(db, table)? {
             continue;
         }

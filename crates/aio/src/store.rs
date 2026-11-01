@@ -537,7 +537,8 @@ fn declare<'a>(
             return Err(Error(format!("{cell}.{field}: table {table} is aio-rs's own; bind the field to another")));
         }
         if let Some(cols) = cols {
-            crate::compat::data::declare(db, table, cols).map_err(|e| Error(format!("{cell}.{field}: {e}")))?;
+            let cols = cols.sql().map_err(|e| Error(format!("{cell}.{field}: table {table}: {e}")))?;
+            crate::compat::data::declare(db, table, &cols).map_err(|e| Error(format!("{cell}.{field}: {e}")))?;
         }
     }
     Ok(())

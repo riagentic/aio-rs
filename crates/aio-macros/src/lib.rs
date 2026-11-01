@@ -128,24 +128,28 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut tables = Vec::new();
     for field in s.fields.iter_mut() {
         let Some(a) = take(&mut field.attrs, "table") else { continue };
-        let (mut name, mut key, mut cols) = (None::<LitStr>, None::<LitStr>, None::<LitStr>);
+        let (mut name, mut key, mut cols) = (None::<LitStr>, None::<LitStr>, None::<Expr>);
         let parsed = a.parse_args_with(|p: syn::parse::ParseStream| {
             name = Some(p.parse()?);
             while p.parse::<Option<syn::Token![,]>>()?.is_some() {
                 let k: syn::Ident = p.parse()?;
-                let into = match k.to_string().as_str() {
-                    "key" if key.is_none() => &mut key,
-                    "columns" if cols.is_none() => &mut cols,
+                match k.to_string().as_str() {
+                    "key" if key.is_none() => {
+                        p.parse::<syn::Token![=]>()?;
+                        key = Some(p.parse()?);
+                    }
+                    "columns" if cols.is_none() => {
+                        p.parse::<syn::Token![=]>()?;
+                        cols = Some(p.parse()?);
+                    }
                     _ => return Err(syn::Error::new(k.span(), "expected key = \"col\" or columns = \"…\"")),
-                };
-                p.parse::<syn::Token![=]>()?;
-                *into = Some(p.parse()?);
+                }
             }
             Ok(())
         });
         let (Ok(()), Some(name), Some(i)) = (parsed, name, &field.ident) else {
             let msg = "#[table(\"name\")] on a named field, or #[table(\"name\", key = \"col\")] for a map; \
-                       columns = \"id INTEGER PRIMARY KEY, …\" declares its schema";
+                       columns = \"id INTEGER PRIMARY KEY, …\" (or a `&[aio::columns::Col]` const) declares its schema";
             return syn::Error::new(field.span(), msg).to_compile_error().into();
         };
         if field.attrs.iter().any(|a| a.path().is_ident("serde")) {
@@ -159,7 +163,10 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             None => quote!(::std::option::Option::None),
         };
         let cols = match cols {
-            Some(c) => quote!(::std::option::Option::Some(#c)),
+            Some(Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(c), .. })) => {
+                quote!(::std::option::Option::Some(::aio::columns::Columns::Sql(#c)))
+            }
+            Some(c) => quote!(::std::option::Option::Some(::aio::columns::Columns::Typed(#c))),
             None => quote!(::std::option::Option::None),
         };
         tables.push(quote!((#i, #name, #key, #cols)));
@@ -212,7 +219,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!(fn conceal(&mut self) { #(::aio::Hidden::conceal(&mut self.#fields, #labels);)* })
     });
     let tables = (!tables.is_empty()).then(|| {
-        quote!(const TABLES: &'static [(&'static str, &'static str, ::std::option::Option<&'static str>, ::std::option::Option<&'static str>)] = &[#(#tables),*];)
+        quote!(const TABLES: &'static [(&'static str, &'static str, ::std::option::Option<&'static str>, ::std::option::Option<::aio::columns::Columns>)] = &[#(#tables),*];)
     });
     // aio files are a native store's: a browser build has none.
     let slices = (!slices.is_empty()).then(

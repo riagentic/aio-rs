@@ -82,6 +82,7 @@ pub mod auth {
 }
 mod answer;
 pub mod colors;
+pub mod columns;
 mod hidden;
 pub use hidden::Hidden;
 pub mod cron;
@@ -423,9 +424,10 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// aio-rs's own beside its history (a table of aio-rs's own refuses the boot), as
     /// `(field, table, key, columns)`. With `columns = "id INTEGER PRIMARY
     /// KEY, name TEXT NOT NULL"` the boot makes the table, or brings a
-    /// stored one to that shape (aio's declared schema).
+    /// stored one to that shape (aio's declared schema); `columns = CONTACTS`
+    /// (a `&[aio::columns::Col]`) declares it typed.
     #[allow(clippy::type_complexity)]
-    const TABLES: &'static [(&'static str, &'static str, Option<&'static str>, Option<&'static str>)] = &[];
+    const TABLES: &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)] = &[];
     /// `#[aio_cell]` fields (`#[aio_cell] accounts: Accounts`, `Accounts` a
     /// `#[cell(persist, id = "accounts", version = 3)]`): in an aio file, each
     /// is that aio cell's whole slice, read and written by its type's id,
