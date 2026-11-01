@@ -90,7 +90,10 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
                             "abort" => false,
                             "warn" => true,
                             _ => {
-                                return Err(syn::Error::new(v.span(), "conflict = \"abort\" (the default) or \"warn\""));
+                                return Err(syn::Error::new(
+                                    v.span(),
+                                    "conflict = \"abort\" (the default) or \"warn\"",
+                                ));
                             }
                         };
                     } else {
