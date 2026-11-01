@@ -106,7 +106,7 @@ fn prefetch_in(root: &Path, version: &str, sha: Option<&str>, mirror: &str) -> i
     if !usable(std::env::consts::OS, &dir) {
         eprintln!("[aio] getting the Electron {version} runtime (once per machine)…");
         let colors = crate::splash::colors(aio::colors::hue("aio"), None);
-        let look = crate::firstrun::Look { colors: &colors, at: None };
+        let look = crate::firstrun::Look { colors: &colors, at: None, icon: None };
         fetch(&dir, None, "", version, sha, mirror, &look).map_err(|(e, _)| e)?;
     }
     stamp(&dir);
@@ -374,17 +374,18 @@ fn mirror() -> String {
 /// `AIORT_ELECTRON_MIRROR` replaces
 /// `https://github.com/electron/electron/releases/download/`.
 pub fn ensure(title: &str) -> io::Result<PathBuf> {
-    ensure_as(title, &crate::splash::colors(aio::colors::hue("aio"), None), None, None)
+    ensure_as(title, &crate::splash::colors(aio::colors::hue("aio"), None), None, None, None)
 }
 
 /// [`ensure`] for an app: its windows in its `colors` (`splash::colors`),
-/// over its window's last place `at` (its middle, in Electron's points).
-/// With `back`, the failure question also offers the version an update
-/// replaced, and `back` starts it.
+/// over its window's last place `at` (its middle, in Electron's points),
+/// wearing its `icon` (a PNG file). With `back`, the failure question also
+/// offers the version an update replaced, and `back` starts it.
 pub fn ensure_as(
     title: &str,
     colors: &[[String; 4]; 2],
     at: Option<(i32, i32)>,
+    icon: Option<&Path>,
     back: Option<&dyn Fn() -> io::Result<()>>,
 ) -> io::Result<PathBuf> {
     // Referenced, so no linker drops the marks from an app's binary.
@@ -410,7 +411,7 @@ pub fn ensure_as(
     }
     eprintln!("[aio] getting the Electron {VERSION} runtime (once per machine)…");
     let ui = crate::firstrun::here(std::env::consts::OS, &|k| std::env::var(k).ok(), &crate::firstrun::on_path);
-    let look = crate::firstrun::Look { colors, at };
+    let look = crate::firstrun::Look { colors, at, icon };
     let ask = |m: &str| ui.as_ref().map_or(crate::firstrun::Answer::Quit, |b| b.ask(title, m, back.is_some(), &look));
     let never = || Ok(());
     let sha = pinned_sha(VERSION);

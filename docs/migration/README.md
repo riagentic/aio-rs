@@ -160,7 +160,7 @@ Rename it (`begin`) when porting.
 | `schedule.cron` | `#[cron("0 9 * * 1")]`, `cx.cron(..)` |
 | `schedule.after`, a debounce | `cx.after(key, ms, method, args)` (the same key replaces) |
 | `schedule.backoff` / `poll` | `cx.backoff(key, attempt, aio::Backoff::from(ms), ..)` |
-| `notify()`, `appIcon()` | `cx.tell(aio::tell::Tell::notify(..))` |
+| `notify()`, `appIcon()` | `cx.tell(aio::tell::Tell::notify(..))`, `cx.tell(Tell::Icon { window, tray, tooltip, fps })` |
 | `onChange`, `useResource` | `h.on_change(..)`, `aio::kit::use_held` |
 
 ### Sync, access, server code
@@ -265,7 +265,7 @@ Rename it (`begin`) when porting.
 | `log` | `aio::info!`, `aio::warn!`, … ([errors](../debugging/errors.md#logs)) |
 | `dur` | `aio::fmt::dur` |
 | `VERSION` | `aio::VERSION` |
-| `notify`, `appIcon` | `cx.tell(aio::tell::Tell::notify(..))` |
+| `notify`, `appIcon` | `cx.tell(aio::tell::Tell::notify(..))`, `Tell::Icon { .. }` |
 | `route`, `serverFn`, `serverFns`, `schedule` | see the tables above |
 | `aio/updates` (`updates` cell) | `aio::update::Updates` |
 | `aio/feedback` (`feedback` cell) | `aio::feedback::Feedback`, `aio::feedback::cell()` |

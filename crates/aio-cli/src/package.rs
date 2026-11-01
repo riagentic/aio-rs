@@ -123,6 +123,9 @@ pub fn deb(b: &Built) -> Result<PathBuf, String> {
         if let Some(icon) = &app.icon {
             let png = std::fs::read(icon).map_err(|e| e.to_string())?;
             put(&root.join(format!("usr/share/icons/hicolor/256x256/apps/{id}.png")), &png, 0o644)?;
+            if let Ok(svg) = std::fs::read(icon.with_extension("svg")) {
+                put(&root.join(format!("usr/share/icons/hicolor/scalable/apps/{id}.svg")), &svg, 0o644)?;
+            }
         }
         let control = deb_control(app, b.platform.arch, maintainer, dir_kb(&root));
         put(&root.join("DEBIAN/control"), control.as_bytes(), 0o644)?;
@@ -182,6 +185,10 @@ pub fn appimage(b: &Built) -> Result<PathBuf, String> {
         if let Some(icon) = &app.icon {
             put(&appdir.join(format!("{id}.png")), &std::fs::read(icon).map_err(|e| e.to_string())?, 0o644)?;
             std::os::unix::fs::symlink(format!("{id}.png"), appdir.join(".DirIcon")).map_err(|e| e.to_string())?;
+            // The monogram's SVG too (aio's): sharp at any size the desktop asks.
+            if let Ok(svg) = std::fs::read(icon.with_extension("svg")) {
+                put(&appdir.join(format!("{id}.svg")), &svg, 0o644)?;
+            }
         }
         open_dirs(&appdir)?;
         sh(Command::new("mksquashfs").arg(&appdir).arg(&squash).args([
