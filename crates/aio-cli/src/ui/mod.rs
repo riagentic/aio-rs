@@ -35,7 +35,7 @@ mod tests;
 
 use aio::serde_json::Value;
 use aio::ui::prelude::*;
-pub use manager::{Verb, child};
+pub use manager::{Verb, local};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -160,6 +160,6 @@ fn in_browser() -> Result<(), String> {
             Ok(()) => eprintln!("ax ui: {at} (Ctrl-C ends it)"),
             Err(e) => eprintln!("ax ui: open {link} in a browser ({e}); Ctrl-C ends it"),
         }
-        serve(l, key, child()).await.map_err(|e| format!("ax ui: {e}"))
+        serve(l, key, local()).await.map_err(|e| format!("ax ui: {e}"))
     })
 }

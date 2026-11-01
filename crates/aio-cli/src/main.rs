@@ -63,6 +63,7 @@ mod upgrade;
 mod verbs;
 mod version;
 mod video;
+mod watch;
 mod web;
 
 use rusqlite::{Connection, OpenFlags, params};
@@ -92,22 +93,32 @@ fn log_lines(dir: &Path, n: usize) -> Out {
 }
 
 /// The newest `n` warnings and errors in the log lines `lines` (oldest
-/// first), each under the start of the app it came from (pure): each start
-/// (its number, 0 before the first; its line) with its bad lines, and how
-/// many there were in all.
+/// first), each under the code generation it came from (pure): each start
+/// or hot-patch (its number, 0 before the first; its line) with its bad
+/// lines, and how many there were in all (aio's log generation per reload).
 /// A start (its number, its line) and the bad lines after it.
-type Run<'a> = (usize, String, Vec<&'a str>);
+type Run = (usize, String, Vec<String>);
 
-fn bad_lines<'a>(lines: &[&'a str], n: usize) -> (Vec<Run<'a>>, usize) {
-    // (start, its line, the bad lines after it)
+fn bad_lines(lines: &[&str], n: usize) -> (Vec<Run>, usize) {
+    // (start, its line, the bad events after it: a panic's lines are one)
     let mut runs: Vec<Run> = vec![(0, String::new(), vec![])];
+    let mut in_bad = false;
     for l in lines {
-        if starts(l) {
+        if starts(l) || patched(l) {
             runs.push((runs.len(), l.to_string(), vec![]));
+            in_bad = false;
         } else if bad(l)
             && let Some(r) = runs.last_mut()
         {
-            r.2.push(l);
+            r.2.push(l.to_string());
+            in_bad = true;
+        } else if in_bad && logs::continues(l) {
+            if let Some(e) = runs.last_mut().and_then(|r| r.2.last_mut()) {
+                e.push('\n');
+                e.push_str(l);
+            }
+        } else {
+            in_bad = false;
         }
     }
     let total: usize = runs.iter().map(|r| r.2.len()).sum();
@@ -127,6 +138,12 @@ fn bad_lines<'a>(lines: &[&'a str], n: usize) -> (Vec<Run<'a>>, usize) {
 fn starts(l: &str) -> bool {
     let rest = l.split_once(' ').map_or("", |(_, r)| r);
     rest.starts_with("[aio] ") && rest.contains(" starting (pid ")
+}
+
+/// A log line of a hot-patch applied (`aio::log::hot_patched`): new code.
+fn patched(l: &str) -> bool {
+    let rest = l.split_once(' ').map_or("", |(_, r)| r);
+    rest.starts_with("[aio] hot-patch ") && rest.contains(" applied")
 }
 
 /// A warning, an error or a panic.
@@ -176,8 +193,12 @@ fn errors(build: Option<&str>, lines: &[&str], n: usize, json: bool) -> String {
         out.extend(b.lines().skip(1).take(60).map(|l| format!("  {l}")));
     }
     for (k, start, bad) in runs {
-        out.push(if k == 0 { "before the first start in the log:".into() } else { format!("start {k}: {start}") });
-        out.extend(bad.iter().map(|l| format!("  {l}")));
+        out.push(match k {
+            0 => "before the first start in the log:".into(),
+            _ if patched(&start) => format!("patch {k}: {start}"),
+            _ => format!("start {k}: {start}"),
+        });
+        out.extend(bad.iter().map(|l| format!("  {}", l.replace('\n', "\n  "))));
     }
     if total == 0 {
         out.push(format!("no warnings or errors in the log ({} lines)", lines.len()));
@@ -248,6 +269,34 @@ fn events(db: &Connection, cell: Option<&str>, last: u32, json: bool, diff: &Dif
         false if lines.is_empty() => "no events".into(),
         false => lines.join("\n"),
     })
+}
+
+/// `ax events --json`'s rows with what the running app read of them
+/// (`read`: each cell's `took` answer): each event's `ms` when it ran in
+/// this run, and with `refused` its refused calls as rows of their own
+/// (`{at, cell, method, ms, refused}`, no seq), all by time (pure).
+fn timed(rows: &mut Vec<serde_json::Value>, read: &[(String, serde_json::Value)], refused: bool) {
+    for r in rows.iter_mut() {
+        let at = read.iter().find(|(c, _)| r["cell"] == c.as_str());
+        if let Some(ms) = at.and_then(|(_, v)| v["ms"].get(r["seq"].to_string())).filter(|m| m.is_number()) {
+            r["ms"] = ms.clone();
+        }
+    }
+    if !refused {
+        return;
+    }
+    for (cell, v) in read {
+        for e in v["refused"].as_array().into_iter().flatten() {
+            let method = e["call"].as_str().and_then(|c| c.strip_prefix(cell.as_str())?.strip_prefix('.'));
+            let at = e["at"].as_str().and_then(|a| chrono::DateTime::parse_from_rfc3339(a).ok());
+            if let (Some(method), Some(at)) = (method, at) {
+                rows.push(serde_json::json!({
+                    "at": at.timestamp_millis(), "cell": cell, "method": method, "ms": e["ms"], "refused": e["refused"],
+                }));
+            }
+        }
+    }
+    rows.sort_by_key(|r| r["at"].as_i64().unwrap_or(0));
 }
 
 fn short(s: &str, max: usize) -> String {
@@ -957,7 +1006,30 @@ fn run(args: &[String]) -> Out {
             let file = from.clone().unwrap_or_else(|| t.store());
             let db = open(&file)?;
             if args[0] == "events" && !has("--diff") {
-                return events(&db, cell, n, json, &|_| vec![]);
+                let out = events(&db, cell, n, json, &|_| vec![])?;
+                if !json || from.is_some() || !aio::paths::running(&t.plan.data) {
+                    return Ok(out);
+                }
+                // The running app's own readings: each event's time, its refused calls.
+                let mut rows: Vec<serde_json::Value> = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+                let mut cells: Vec<String> = rows.iter().filter_map(|r| r["cell"].as_str().map(String::from)).collect();
+                if has("--refused") {
+                    cells.extend(cell.map(String::from).map_or_else(|| metrics::cells(&db), |c| Ok(vec![c]))?);
+                }
+                cells.sort();
+                cells.dedup();
+                let read: Vec<(String, serde_json::Value)> = cells
+                    .into_iter()
+                    .filter_map(|c| {
+                        let seqs: Vec<&serde_json::Value> =
+                            rows.iter().filter(|r| r["cell"] == c.as_str()).map(|r| &r["seq"]).collect();
+                        let ask = serde_json::json!({ "t": "took", "seqs": seqs });
+                        let (v, _) = travel::ask(&door(&t, &c).ok()?, &c, &user(None), ask).ok()?;
+                        Some((c, v))
+                    })
+                    .collect();
+                timed(&mut rows, &read, has("--refused"));
+                return Ok(serde_json::Value::from(rows).to_string());
             }
             // Each event shown with the state before and after it, of its cell.
             let mut q = db
@@ -1877,6 +1949,11 @@ mod tests {
                 "  t5 WARN  [x] two",
             ]
         );
+        // A hot-patch is new code: what it says is under it, not its start.
+        let mut patched = log.to_vec();
+        patched.insert(6, "t3 [aio] hot-patch 1 applied (12 functions)");
+        let out = errors(None, &patched, 20, false);
+        assert!(out.ends_with("patch 3: t3 [aio] hot-patch 1 applied (12 functions)\n  t4 thread 'main' panicked at src/lib.rs:3:5\n  t5 WARN  [x] two"), "{out}");
         // The newest n, still under their start.
         assert_eq!(errors(None, &log, 1, false), "start 2: t3 [aio] notes 2.0.0 starting (pid 11)\n  t5 WARN  [x] two");
         assert!(errors(None, &log[..1], 20, false).starts_with("no warnings or errors in the log (1 lines)"));
@@ -1914,6 +1991,49 @@ mod tests {
         );
         assert_eq!(v["starts"][0]["lines"][1], log[4]);
         assert_eq!(v["starts"][0]["line"], log[2]);
+    }
+
+    /// amui's structured errors: a panic's lines are one error, never cut
+    /// to its first.
+    #[test]
+    fn a_panic_is_one_error_with_all_its_lines() {
+        let log = [
+            "2026-10-28T10:00:00.000Z [aio] notes 1 starting (pid 10)",
+            "2026-10-28T10:01:00.000Z ERROR [aio] panicked at src/lib.rs:3:5",
+            "2026-10-28T10:01:00.000Z   index out of bounds",
+            "2026-10-28T10:01:01.000Z INFO  [x] fine",
+            "2026-10-28T10:01:02.000Z   not a panic's",
+        ];
+        let v: serde_json::Value = serde_json::from_str(&errors(None, &log, 20, true)).unwrap();
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["starts"][0]["lines"][0], format!("{}\n{}", log[1], log[2]));
+        let text = errors(None, &log, 20, false);
+        assert!(text.ends_with(&format!("  {}\n  {}", log[1], log[2])), "{text}");
+    }
+
+    /// amui's per-action reduce time and errors: each event with its
+    /// method's time, the refused calls as rows of their own, by time.
+    #[test]
+    fn events_carry_their_time_and_the_refused_calls_join_them() {
+        let row = |seq: i64, at: i64| serde_json::json!({ "seq": seq, "cell": "board", "method": "add", "at": at });
+        let read = [(
+            "board".to_string(),
+            serde_json::json!({ "ms": { "7": 0.5 }, "refused": [
+                { "at": "2026-10-28T10:00:01.000Z", "call": "board.clear", "ms": 0.1, "refused": "only an admin" },
+                { "at": "2026-10-28T10:00:01.000Z", "call": "boardx.clear", "ms": 0.1, "refused": "another cell's" },
+            ] }),
+        )];
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-28T10:00:00Z").unwrap().timestamp_millis();
+        let mut rows = vec![row(7, at), row(8, at + 5_000)];
+        timed(&mut rows, &read, false);
+        assert_eq!((rows.len(), &rows[0]["ms"], rows[1].get("ms")), (2, &serde_json::json!(0.5), None));
+        timed(&mut rows, &read, true);
+        assert_eq!(rows.len(), 3, "board's refused call only");
+        assert_eq!(
+            (&rows[1]["method"], &rows[1]["refused"], rows[1].get("seq")),
+            (&"clear".into(), &"only an admin".into(), None)
+        );
+        assert_eq!(rows[2]["seq"], 8, "by time");
     }
 
     #[test]
