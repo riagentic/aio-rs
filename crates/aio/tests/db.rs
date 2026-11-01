@@ -299,6 +299,24 @@ async fn a_live_query_reruns_when_a_write_changes_what_it_reads() {
 }
 
 #[tokio::test]
+async fn a_live_query_wakes_on_writes_through_any_db_of_its_file() {
+    let (dir, db) = with_notes(Opts::default()).await;
+    let mut l = db.live("SELECT count(*) FROM n", vec![]).await.unwrap();
+    // Another `Db` on the same file, named another way: one feed.
+    std::fs::create_dir(dir.path().join("sub/x")).unwrap();
+    let other = Db::open(dir.path().join("sub/x/../app.db"), Opts::default()).unwrap();
+    other.execute("INSERT INTO n (t) VALUES ('a')", vec![]).await.unwrap();
+    assert_eq!(woke(&mut l).await.map(|r| r.rows[0][0].clone()), Some(Sql::Integer(1)));
+    // Closed, it leaves the feed to the rest; another file's writes wake nobody.
+    other.close().await;
+    db.execute("INSERT INTO n (t) VALUES ('b')", vec![]).await.unwrap();
+    assert_eq!(woke(&mut l).await.map(|r| r.rows[0][0].clone()), Some(Sql::Integer(2)));
+    let (_d2, elsewhere) = with_notes(Opts::default()).await;
+    elsewhere.execute("INSERT INTO n (t) VALUES ('c')", vec![]).await.unwrap();
+    assert_eq!(woke(&mut l).await, None);
+}
+
+#[tokio::test]
 async fn a_live_query_knows_its_tables_through_views_joins_and_triggers() {
     let (_dir, db) = with_notes(Opts { readers: 1, ..Default::default() }).await;
     for s in [
