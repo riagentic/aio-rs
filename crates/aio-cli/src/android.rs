@@ -843,12 +843,11 @@ pub fn activity_losses(own: &str, splash: bool) -> Vec<String> {
     out
 }
 
+/// Files by their path in the project.
+type Files = Vec<(String, Vec<u8>)>;
+
 /// The app's icon, splash and `android/` files, for its project.
-fn parts(
-    app: &App,
-    full: &aio::config::Config,
-    app_dir: &Path,
-) -> Result<(Vec<u8>, Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>), String> {
+fn parts(app: &App, full: &aio::config::Config, app_dir: &Path) -> Result<(Vec<u8>, Files, Files), String> {
     let cfg = &full.build.android;
     let splash = match &full.build.splash {
         Some(s) => {
