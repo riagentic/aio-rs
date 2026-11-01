@@ -452,9 +452,10 @@ mod tests {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, LocalFree};
         use windows_sys::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo,
+            SDDL_REVISION_1, SE_KERNEL_OBJECT,
         };
-        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, ImpersonateAnonymousToken, RevertToSelf};
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, EqualSid, ImpersonateAnonymousToken, RevertToSelf};
         use windows_sys::Win32::System::Threading::GetCurrentThread;
         let a = addr(Path::new("x"), &format!("acl{}", std::process::id()));
         let l = Listener::bind(&a).unwrap();
@@ -490,10 +491,28 @@ mod tests {
             LocalFree(sd);
             t
         };
-        let me = win::user_sid().unwrap();
         // One allow entry, for this user, nothing inherited.
-        assert!(sddl.starts_with("D:P(A;;") && sddl.ends_with(&format!(";;;{me})")), "{sddl}");
+        assert!(sddl.starts_with("D:P(A;;") && sddl.ends_with(')'), "{sddl}");
         assert_eq!(sddl.matches('(').count(), 1, "{sddl}");
+        // Its trustee is this user. The text may name a well-known account by
+        // its alias (`LA` for the built-in Administrator), so the SIDs are compared.
+        let sid = |s: &str| {
+            let w: Vec<u16> = s.encode_utf16().chain([0]).collect();
+            let mut p = std::ptr::null_mut();
+            // SAFETY: a NUL-terminated SID string; the SID is freed by the caller.
+            assert_ne!(unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut p) }, 0, "{s}");
+            p
+        };
+        let trustee = sid(sddl[..sddl.len() - 1].rsplit(';').next().unwrap());
+        let me = sid(&win::user_sid().unwrap());
+        // SAFETY: two valid SIDs from ConvertStringSidToSidW, each freed once.
+        let same = unsafe {
+            let same = EqualSid(trustee, me) != 0;
+            LocalFree(trustee);
+            LocalFree(me);
+            same
+        };
+        assert!(same, "{sddl}");
         assert!(Listener::bind(&a).is_err(), "nobody else may hold the app's door");
         // Another identity (anonymous, on its own thread) is denied.
         let other = std::thread::spawn({
