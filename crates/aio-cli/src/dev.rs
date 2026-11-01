@@ -112,7 +112,44 @@ pub struct Pkg {
 
 /// `cargo metadata` for the workspace here.
 pub fn metadata() -> Result<serde_json::Value, String> {
-    let out = Command::new("cargo")
+    let Some(dir) = IN.with_borrow(Clone::clone) else { return cargo_metadata(None) };
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    known.retain(|(_, at, _)| at.elapsed() < KNOWN_FOR);
+    if let Some((_, _, m)) = known.iter().find(|(d, ..)| *d == dir) {
+        return m.clone();
+    }
+    let m = cargo_metadata(Some(&dir));
+    known.push((dir, std::time::Instant::now(), m.clone()));
+    m
+}
+
+thread_local! {
+    /// The folder [`in_dir`] runs this thread's verbs in.
+    static IN: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What `cargo metadata` said of a folder [`in_dir`] ran in, and when.
+type Known = Vec<(PathBuf, std::time::Instant, Result<serde_json::Value, String>)>;
+static KNOWN: std::sync::Mutex<Known> = std::sync::Mutex::new(Vec::new());
+/// How long [`in_dir`]'s answers stand: a workspace's packages rarely change.
+const KNOWN_FOR: Duration = Duration::from_secs(30);
+
+/// `f`, its verbs run as if in folder `dir` (`ax ui` reads in-process, as
+/// many threads at once): `cargo metadata` asked there, its answer kept
+/// [`KNOWN_FOR`], not asked again on each read.
+pub fn in_dir<T>(dir: PathBuf, f: impl FnOnce() -> T) -> T {
+    IN.set(Some(dir));
+    let r = f();
+    IN.set(None);
+    r
+}
+
+fn cargo_metadata(dir: Option<&Path>) -> Result<serde_json::Value, String> {
+    let mut cmd = Command::new("cargo");
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    let out = cmd
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .output()
         .map_err(|e| format!("cargo: {e} (Rust is not on PATH: ax setup says how to get it)"))?;
@@ -237,11 +274,23 @@ pub fn dx_args(pkg: &str, port: u16, dev: bool, interactive: bool, args: &[Strin
         v.extend(["--interactive".into(), "false".into()]);
     }
     // One `--args=` word: a separate value starting with `--` (`--home <dir>`)
-    // is taken by dx's parser for a flag of its own. dx splits it on spaces.
-    if !args.is_empty() {
+    // is taken by dx's parser for a flag of its own. dx splits it on spaces:
+    // args it can't carry go in `AIORT_DEV_ARGS` ([`dev_args_env`]).
+    if !args.is_empty() && dx_carries(args) {
         v.push(format!("--args={}", args.join(" ")));
     }
     v
+}
+
+/// Whether dx's `--args=` carries `args` intact: none empty or with a space (pure).
+pub fn dx_carries(args: &[String]) -> bool {
+    args.iter().all(|a| !a.is_empty() && !a.contains(char::is_whitespace))
+}
+
+/// The app's args dx can't carry, for the app's debug build to run with
+/// (`aio_shell::DEV_ARGS`, as JSON); `None` when dx's `--args=` does (pure).
+pub fn dev_args_env(args: &[String]) -> Option<(&'static str, String)> {
+    (!dx_carries(args)).then(|| (aio_shell::instance::DEV_ARGS, serde_json::Value::from(args.to_vec()).to_string()))
 }
 
 fn dx_version() -> Option<String> {
@@ -254,11 +303,17 @@ pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_or(18731, |a| a.port())
 }
 
-/// Changes that matter: sources and assets, not build output or editor files.
+/// Changes that matter: sources and assets, not build output or an editor's
+/// own files (vim's `4913` probe and swap files, emacs' `#x#`, `x~`, `*.tmp`,
+/// JetBrains' safe-write copies, hidden files) (pure).
 pub fn relevant(p: &Path) -> bool {
-    let s = p.to_string_lossy();
+    let s = format!("/{}", p.to_string_lossy().replace('\\', "/"));
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    !s.contains("/target/") && !name.starts_with('.') && !name.ends_with('~') && !name.ends_with(".swp")
+    let editors = name == "4913"
+        || name.starts_with('.')
+        || (name.starts_with('#') && name.ends_with('#'))
+        || [".swp", ".swx", ".tmp", "~", "___jb_tmp___", "___jb_old___"].iter().any(|e| name.ends_with(e));
+    !s.contains("/target/") && !editors
 }
 
 /// A real change. Not a read: a build reads every source, and reads (access
@@ -533,7 +588,7 @@ pub enum Watching {
     Only(Vec<String>),
 }
 
-/// `--watch=false` or `--watch=<dir,dir>` taken out of a launch's args,
+/// `--watch=false` (`--no-watch`) or `--watch=<dir,dir>` taken out of a launch's args,
 /// before a bare `--` (pure).
 pub fn take_watch(args: &[String]) -> Result<(Vec<String>, Watching), String> {
     let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
@@ -551,6 +606,7 @@ pub fn take_watch(args: &[String]) -> Result<(Vec<String>, Watching), String> {
                 }
                 w = Watching::Only(dirs);
             }
+            _ if i < end && a == "--no-watch" => w = Watching::Off,
             _ if i < end && a == "--watch" => return Err("--watch=false, or --watch=<dir,dir> inside the app".into()),
             _ => rest.push(a.clone()),
         }
@@ -567,44 +623,66 @@ pub fn watched(pkg: &Pkg, app: &Path, w: &Watching) -> Vec<PathBuf> {
     }
 }
 
-/// A watcher on `paths` (those there): a message on each real change,
-/// true when a `Cargo.toml` changed (a dependency dx can't hot-patch in).
-fn watch_these(paths: &[PathBuf]) -> Result<(notify::RecommendedWatcher, mpsc::Receiver<bool>), String> {
-    let (tx, rx) = mpsc::channel();
-    let mut w = notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
-        if let Ok(e) = e
-            && changes(&e.kind)
-            && e.paths.iter().any(|p| relevant(p))
-        {
-            _ = tx.send(e.paths.iter().any(|p| p.file_name().is_some_and(|n| n == "Cargo.toml")));
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    for p in paths.iter().filter(|p| p.exists()) {
-        notify::Watcher::watch(&mut w, p, notify::RecursiveMode::Recursive).map_err(|e| e.to_string())?;
-    }
-    Ok((w, rx))
+/// What a change of `changed` is to dx: a `Cargo.toml` (a dependency) it
+/// can't hot-patch in (pure).
+fn manifest(changed: &[PathBuf]) -> bool {
+    changed.iter().any(|p| p.file_name().is_some_and(|n| n == "Cargo.toml"))
 }
 
-/// Wait out a burst of saves: true when one changed a `Cargo.toml`.
-fn settle(rx: &mpsc::Receiver<bool>) -> bool {
-    let mut manifest = false;
-    while let Ok(m) = rx.recv_timeout(Duration::from_millis(300)) {
-        manifest |= m;
+/// The files the build of `artifact` read, from cargo's dep-info beside it
+/// (`<bin>.d`), none of cargo's own or the build folder's: `aio.toml`,
+/// `include_str!` files, an aio-rs checkout the app depends on by path.
+pub fn deps_of(artifact: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(artifact.with_extension("d")) else { return vec![] };
+    // `<target>/<triple>/<profile>/<bin>`.
+    let target = artifact.ancestors().nth(3).unwrap_or(artifact);
+    crate::watch::dep_info(&text, &crate::watch::not_the_apps(target))
+}
+
+/// The bytes of `bin`, hashed: a build that changed nothing leaves them as they were.
+fn digest(bin: &Path) -> Option<u64> {
+    use std::hash::Hasher;
+    use std::io::Read;
+    let mut f = std::fs::File::open(bin).ok()?;
+    let (mut h, mut buf) = (std::hash::DefaultHasher::new(), vec![0; 1 << 20]);
+    loop {
+        match f.read(&mut buf).ok()? {
+            0 => return Some(h.finish()),
+            n => h.write(&buf[..n]),
+        }
     }
-    manifest
+}
+
+/// aio's restart-storm guard (`server/dev-restart.ts`): a change this soon
+/// after a restart, this many restarts in a row, is a loop (a formatter, a
+/// generator, another watcher), not a person saving: each next rebuild waits.
+pub const STORM: Duration = Duration::from_secs(1);
+pub const STORM_LIMIT: u32 = 5;
+pub const STORM_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// The storm guard's count of fast restarts in a row.
+#[derive(Default)]
+pub struct Storm(u32);
+
+impl Storm {
+    /// A change came `since` the last restart: how long to wait before the
+    /// rebuild, if this is a storm.
+    pub fn wait(&mut self, since: Duration) -> Option<Duration> {
+        self.0 = if since < STORM { self.0 + 1 } else { 0 };
+        (self.0 >= STORM_LIMIT).then_some(STORM_COOLDOWN)
+    }
 }
 
 /// The app's `[build] css` step, if any: a failure is said, the app kept.
 /// What the step wrote is not a change of its own.
-fn css(pkg: &Pkg, rx: &mpsc::Receiver<bool>) {
+fn css(pkg: &Pkg, rx: &mpsc::Receiver<Vec<PathBuf>>) {
     let Ok((_, cfg)) = crate::build::app_of(pkg) else { return };
     match crate::build::app_dir(pkg).and_then(|dir| crate::css::step(&cfg, &dir)) {
         Ok(Some(did)) => eprintln!("ax dev: {did}"),
         Ok(None) => return,
         Err(e) => eprintln!("ax dev: {e}"),
     }
-    settle(rx);
+    crate::watch::settle(rx, vec![]);
 }
 
 /// The app, started so it stops when `ax dev` does, placed by `put`
@@ -627,6 +705,10 @@ fn launch(bin: &Path, args: &[String], put: &dyn Fn(&mut Command)) -> Option<(Ch
 const DX_PID: &str = "dev-dx.pid";
 const CLOSED: &str = "dev-closed";
 const RESTART: &str = "dev-restart";
+/// The mark that asks the session to end (`ax stop`).
+const STOP: &str = "dev-stop";
+/// What a detached session (`ax dev --detach`) says.
+pub const DETACHED: &str = "dev.out";
 /// The session's own pid, while it runs.
 const SESSION: &str = "dev.pid";
 /// When the session's last build or hot-patch landed (ms).
@@ -634,13 +716,70 @@ pub const PATCHED: &str = "dev-patched";
 
 /// Whether an `ax dev` session runs the app whose logs are `logs`.
 pub fn session(logs: &Path) -> bool {
-    let pid = std::fs::read_to_string(logs.join(SESSION)).ok().and_then(|s| s.trim().parse::<u32>().ok());
-    // A session ended by a signal leaves its file: its pid must still run.
-    #[cfg(unix)]
-    // SAFETY: signal 0 only asks whether the pid is there.
-    return pid.is_some_and(|p| unsafe { libc::kill(p as i32, 0) } == 0);
-    #[cfg(not(unix))]
-    pid.is_some()
+    running_pid(&logs.join(SESSION)).is_some()
+}
+
+/// A pid file's text: `pid start` (when the OS says when it started).
+fn pid_record(pid: u32) -> String {
+    aio::lifecycle::started(pid).map_or_else(|| pid.to_string(), |s| format!("{pid} {s}"))
+}
+
+/// The pid a pid file's `text` names, while that very process runs: one
+/// ended by a signal leaves its file, and the OS hands its pid out again
+/// (pure: `started` and `alive` ask the OS).
+pub fn recorded(text: &str, started: &dyn Fn(u32) -> Option<String>, alive: &dyn Fn(u32) -> bool) -> Option<u32> {
+    let mut w = text.split_whitespace();
+    let pid: u32 = w.next()?.parse().ok()?;
+    let same = match w.next() {
+        Some(s) => started(pid).as_deref() == Some(s),
+        None => alive(pid),
+    };
+    same.then_some(pid)
+}
+
+fn running_pid(file: &Path) -> Option<u32> {
+    recorded(&std::fs::read_to_string(file).ok()?, &aio::lifecycle::started, &aio::lifecycle::alive)
+}
+
+/// How long `ax stop` gives a session to end once asked, a build included.
+const SESSION_WAIT: Duration = Duration::from_secs(20);
+
+/// End the `ax dev` session of `logs`, if one runs (aio: `am stop` ends the
+/// dev session; it would start the app again on the next save): asked, so
+/// its app stops the graceful way and its dx with it; still there after
+/// [`SESSION_WAIT`], ended. True when there was one.
+pub fn end_session(logs: &Path) -> bool {
+    let file = logs.join(SESSION);
+    let Some(pid) = running_pid(&file).filter(|p| *p != std::process::id()) else { return false };
+    _ = std::fs::write(logs.join(STOP), b"");
+    let end = std::time::Instant::now() + SESSION_WAIT;
+    while running_pid(&file) == Some(pid) && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if running_pid(&file) == Some(pid) {
+        _ = aio::lifecycle::terminate(pid, true);
+        aio::lifecycle::wait_gone(pid, Duration::from_secs(5));
+    }
+    _ = std::fs::remove_file(logs.join(STOP));
+    true
+}
+
+/// How long a restart gives the app to stop once asked.
+const QUIT_WAIT: Duration = Duration::from_secs(15);
+
+/// Ask the app `window` names to stop the graceful way, over its door (any
+/// OS: its calls in flight finish, its effects commit), and wait until it
+/// is gone, `budget` at most: what ax does before it restarts it, or ends
+/// the dx that would give it 1 s.
+fn quit_app(window: Option<&(String, aio::paths::Plan)>, budget: Duration) {
+    let Some((id, p)) = window else { return };
+    if !aio::paths::running(&p.data) || aio_shell::instance::quit_at(id, &p.data).is_err() {
+        return;
+    }
+    let end = std::time::Instant::now() + budget;
+    while aio::paths::running(&p.data) && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The session's pid file, removed when dropped.
@@ -649,9 +788,10 @@ struct Session(PathBuf);
 impl Session {
     fn open(logs: &Path) -> Option<Self> {
         _ = std::fs::remove_file(logs.join(RESTART));
+        _ = std::fs::remove_file(logs.join(STOP));
         _ = std::fs::remove_file(logs.join(PATCHED));
         let file = logs.join(SESSION);
-        aio::paths::private_dir(logs).and_then(|()| std::fs::write(&file, std::process::id().to_string())).ok()?;
+        aio::paths::private_dir(logs).and_then(|()| std::fs::write(&file, pid_record(std::process::id()))).ok()?;
         Some(Session(file))
     }
 }
@@ -681,11 +821,12 @@ fn serve(
     relayed: bool,
     window: Option<(String, aio::paths::Plan)>,
 ) -> std::io::Result<()> {
-    let files = logs.map(|l| (l.join(DX_PID), l.join(CLOSED), l.join(RESTART)));
-    if let Some((pid, closed, again)) = &files {
+    let files = logs.map(|l| (l.join(DX_PID), l.join(CLOSED), l.join(RESTART), l.join(STOP)));
+    let app = window.clone();
+    if let Some((pid, closed, again, _)) = &files {
         _ = std::fs::remove_file(closed);
         _ = std::fs::remove_file(again);
-        if let Some(p) = std::fs::read_to_string(pid).ok().and_then(|s| s.trim().parse::<u32>().ok())
+        if let Some(p) = running_pid(pid)
             && stop_stray(p)
         {
             eprintln!("ax dev: stopped the dx an earlier `ax dev` of this app left running (pid {p})");
@@ -698,7 +839,7 @@ fn serve(
     }
     let spawn = || -> std::io::Result<Child> {
         let mut dx = make();
-        if let Some((_, closed, _)) = &files {
+        if let Some((_, closed, ..)) = &files {
             dx.env("AIORT_DEV_CLOSED", closed);
         }
         #[cfg(target_os = "linux")]
@@ -728,7 +869,7 @@ fn serve(
             pipe(child.stderr.take().map(|o| Box::new(o) as _), true, tx.clone());
         }
         if let Some((pid, ..)) = &files {
-            _ = std::fs::write(pid, child.id().to_string());
+            _ = std::fs::write(pid, pid_record(child.id()));
         }
         Ok(child)
     };
@@ -737,30 +878,41 @@ fn serve(
         if child.try_wait()?.is_some() {
             break Ok(());
         }
-        if files.as_ref().is_some_and(|(_, closed, _)| closed.exists()) {
+        if files.as_ref().is_some_and(|(_, closed, ..)| closed.exists()) {
             eprintln!("ax dev: the window was closed; the session ends");
             aio::lifecycle::stop(&mut child, Duration::from_secs(5));
             break Ok(());
         }
-        if let Some((.., again)) = &files
+        if let Some((.., stop)) = &files
+            && std::fs::remove_file(stop).is_ok()
+        {
+            eprintln!("ax dev: asked to stop; the session ends");
+            quit_app(app.as_ref(), QUIT_WAIT);
+            aio::lifecycle::stop(&mut child, Duration::from_secs(5));
+            break Ok(());
+        }
+        if let Some((_, _, again, _)) = &files
             && std::fs::remove_file(again).is_ok()
         {
             eprintln!("ax dev: rebuilding the app whole and starting it again");
+            // The app first, the graceful way: dx would give it 1 s.
+            quit_app(app.as_ref(), QUIT_WAIT);
             aio::lifecycle::stop(&mut child, Duration::from_secs(10));
             child = spawn()?;
         }
         std::thread::sleep(Duration::from_millis(250));
     };
-    if let Some((pid, closed, again)) = &files {
-        _ = std::fs::remove_file(pid);
-        _ = std::fs::remove_file(closed);
-        _ = std::fs::remove_file(again);
+    if let Some((pid, closed, again, stop)) = &files {
+        for f in [pid, closed, again, stop] {
+            _ = std::fs::remove_file(f);
+        }
     }
     ended
 }
 
-/// Stop pid `p` if it is still a `dx serve` (an earlier session's, by its
-/// pid file: never a process found by name). True when one was stopped.
+/// Stop pid `p`, an earlier session's dx by its pid file (the same process:
+/// its pid and start; never one found by name), on every OS. True when one
+/// was stopped.
 fn stop_stray(p: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -770,25 +922,24 @@ fn stop_stray(p: u32) -> bool {
         if !is_dx {
             return false;
         }
-        // SAFETY: a signal to one pid this session's file named.
-        unsafe { libc::kill(p as i32, libc::SIGTERM) };
-        for _ in 0..50 {
-            if !std::path::Path::new(&format!("/proc/{p}")).exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        true
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        _ = p;
-        false
+    // Windows has no SIGTERM: ended.
+    if aio::lifecycle::terminate(p, false).or_else(|_| aio::lifecycle::terminate(p, true)).is_err() {
+        return false;
     }
+    aio::lifecycle::wait_gone(p, Duration::from_secs(5));
+    true
 }
 
-fn stop(app: &mut Option<(Child, aio::lifecycle::Watch)>) {
-    if let Some((mut c, _watch)) = app.take() {
+/// Stop the app the graceful way (asked over its door, then its watch let
+/// go and signalled) and wait for it.
+fn stop(app: &mut Option<(Child, aio::lifecycle::Watch)>, window: Option<&(String, aio::paths::Plan)>) {
+    if let Some((mut c, watch)) = app.take() {
+        if c.try_wait().ok().flatten().is_none() {
+            quit_app(window, QUIT_WAIT);
+        }
+        // A Windows child stops once its watch is let go (no SIGTERM there).
+        drop(watch);
         aio::lifecycle::stop(&mut c, Duration::from_secs(10));
     }
 }
@@ -884,7 +1035,8 @@ pub fn android(name: &str, device: Option<&str>, native: bool) -> Result<String,
         }
         return ran;
     }
-    let (_w, rx) = watch_these(&watched(&pkg, Path::new(""), &Watching::All))?;
+    let (_w, rx) = crate::watch::Watch::new(&watched(&pkg, Path::new(""), &Watching::All))?;
+    let cwd = std::env::current_dir().unwrap_or_default();
     let abi = crate::install::abi_of(&crate::install::adb_out(&[
         "-s",
         &dev.serial,
@@ -909,14 +1061,14 @@ pub fn android(name: &str, device: Option<&str>, native: bool) -> Result<String,
             Err(e) => eprintln!("ax dev: {e}"),
         }
         // What the build wrote (a CSS step's output) is not a change.
-        settle(&rx);
-        if rx.recv().is_err() {
+        crate::watch::settle(&rx, vec![]);
+        let Ok(first) = rx.recv() else {
             _ = logs.kill();
             _ = logs.wait();
             return Ok(String::new());
-        }
-        settle(&rx);
-        eprintln!("ax dev: change — building for Android…");
+        };
+        let changed = crate::watch::settle(&rx, first);
+        eprintln!("ax dev: {} changed — building for Android…", crate::watch::describe(&changed, &cwd));
     }
 }
 
@@ -934,8 +1086,17 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     // (its `[home] dev`), whatever build ax itself is. A release ax planned
     // its own, the person's real home, and wrote its pid and port there.
     let plan = crate::build::app_of(&pkg).ok().and_then(|(_, cfg)| aio::paths::plan_app(&cfg, &dev_ask(args)?).ok());
+    // ax's newer flags only before a bare `--`: after it, the app's own words.
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let mine = &args[..end];
+    if let Some(i) = mine.iter().position(|a| a == "--detach") {
+        let rest: Vec<String> = args.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, a)| a.clone()).collect();
+        return detach(name, &rest, plan.as_ref());
+    }
     let fresh = args.iter().any(|a| a == "--fresh");
     let tui = args.iter().any(|a| a == "--tui");
+    // aio's `--verbose`: the app's log at debug, its boot report says so.
+    let verbose = mine.iter().any(|a| a == "--verbose");
     // `--display <d>` is aio's, like `--fresh`: neither reaches the app.
     let at = args.iter().position(|a| a == "--display");
     let asked = at.and_then(|i| args.get(i + 1)).cloned().or_else(|| std::env::var("AIORT_DISPLAY").ok());
@@ -948,11 +1109,19 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         Some(i) => Some(crate::shot::size(args.get(i + 1).map_or("", String::as_str))?),
         None => None,
     };
-    let ours = |i: usize| [at, sz].iter().flatten().any(|f| i == *f || i == f + 1);
+    // aio's `--title=X`: the window's title for this run.
+    let ti = mine.iter().position(|a| a == "--title");
+    let title = match ti {
+        Some(i) => Some(args.get(i + 1).cloned().ok_or("--title needs a value: --title \"Notes (QA)\"")?),
+        None => mine.iter().find_map(|a| a.strip_prefix("--title=").map(String::from)),
+    };
+    let ours = |i: usize| [at, sz, ti].iter().flatten().any(|f| i == *f || i == f + 1);
     let args: &[String] = &args
         .iter()
         .enumerate()
-        .filter(|(i, a)| *a != "--fresh" && *a != "--tui" && !ours(*i))
+        .filter(|(_, a)| *a != "--fresh" && *a != "--tui")
+        .filter(|(i, a)| *i >= end || (*a != "--verbose" && !a.starts_with("--title=")))
+        .filter(|(i, _)| !ours(*i))
         .map(|(_, a)| a.clone())
         .collect::<Vec<_>>();
     let (args, cdp) = crate::cdp::take_flag(args)?;
@@ -991,6 +1160,12 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         if let Some((w, h)) = size {
             cmd.env("AIORT_WINDOW_SIZE", format!("{w}x{h}"));
         }
+        if verbose {
+            cmd.env("AIORT_LOG", "debug");
+        }
+        if let Some(t) = &title {
+            cmd.env("AIORT_TITLE", t);
+        }
         match (&choice, &nested) {
             (_, Some(n)) => n.onto(cmd, inherited.as_deref()),
             (Choice::Named(d), _) => {
@@ -1008,27 +1183,35 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     let _session = logs.as_deref().filter(|_| watching != Watching::Off).and_then(Session::open);
     if watching == Watching::Off {
         // Built and run once, in the foreground, no reload.
-        let (_w, rx) = watch_these(&[])?;
+        let (_w, rx) = crate::watch::Watch::new(&[])?;
         css(&pkg, &rx);
         let bin = build(&pkg.name, logs.as_deref()).ok_or(format!("{name}: the build failed"))?;
         let mut app = launch(&bin, args, &put).ok_or(format!("{name}: it didn't start"))?;
         let ended = app.0.wait().map_err(|e| e.to_string())?;
         return Ok(if ended.success() { String::new() } else { format!("{name} ended: {ended}") });
     }
+    let cwd = std::env::current_dir().unwrap_or_default();
     match dx_version() {
+        // dx's hot-patch watches all of the app: `--watch=<dirs>` is ax's to keep.
+        Some(v) if dx_matches(&v) && matches!(watching, Watching::Only(_)) => eprintln!(
+            "ax dev: --watch narrows what reloads, so ax rebuilds on change and restarts {name} (no hot-patch: \
+             dx watches all of the app)"
+        ),
         Some(v) if dx_matches(&v) => {
             eprintln!("ax dev: {name} with hot-patching (dx {DIOXUS})");
             // dx rebuilds on change (all of the app); the CSS step is aio's to run again.
-            let (w, rx) = watch_these(&paths)?;
+            let (w, rx) = crate::watch::Watch::new(&paths)?;
             css(&pkg, &rx);
             // A changed Cargo.toml (a dependency added): dx can't patch that in, so a full rebuild.
             let (p, l) = (pkg.clone(), logs.clone());
             std::thread::spawn(move || {
-                while let Ok(m) = rx.recv() {
+                while let Ok(first) = rx.recv() {
                     SAVED.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-                    let manifest = settle(&rx) | m;
+                    let changed = crate::watch::settle(&rx, first);
+                    eprintln!("ax dev: {} changed", crate::watch::describe(&changed, &cwd));
+                    lint_said(&changed, &cwd);
                     css(&p, &rx);
-                    if let Some(l) = l.as_deref().filter(|_| manifest) {
+                    if let Some(l) = l.as_deref().filter(|_| manifest(&changed)) {
                         eprintln!("ax dev: Cargo.toml changed");
                         _ = ask_restart(l);
                     }
@@ -1051,6 +1234,9 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             let make = || {
                 let mut dx = Command::new(crate::setup::dx());
                 put(dx.args(dx_args(&pkg.name, port, dev, tui, args)));
+                if let Some((k, v)) = dev_args_env(args) {
+                    dx.env(k, v);
+                }
                 dx
             };
             let served = serve(&make, logs.as_deref(), !tui, window);
@@ -1066,32 +1252,57 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             crate::setup::dx_fallback()
         ),
     }
-    let (_w, rx) = watch_these(&paths)?;
+    let (w, rx) = crate::watch::Watch::new(&paths)?;
     let shown: Vec<String> = match &watching {
         Watching::Only(_) => paths.iter().map(|p| p.display().to_string()).collect(),
         _ => pkg.dirs.iter().map(|d| d.display().to_string()).collect(),
     };
     eprintln!("ax dev: {name} — watching {}", shown.join(", "));
     css(&pkg, &rx);
-    let mut app = build(&pkg.name, logs.as_deref()).and_then(|bin| launch(&bin, args, &put));
-    let asked = || logs.as_ref().is_some_and(|l| std::fs::remove_file(l.join(RESTART)).is_ok());
+    let bin = build(&pkg.name, logs.as_deref());
+    // A failed build's errors are on the page (once it runs) until a good one.
+    let mut red = bin.is_none();
+    if let (Some(b), false) = (&bin, matches!(watching, Watching::Only(_))) {
+        w.add_files(deps_of(b));
+    }
+    let mut running = bin.as_deref().and_then(digest);
+    let mut app = bin.and_then(|bin| launch(&bin, args, &put));
+    let (mut launched, mut storm) = (std::time::Instant::now(), Storm::default());
+    let asked = |mark: &str| logs.as_ref().is_some_and(|l| std::fs::remove_file(l.join(mark)).is_ok());
     loop {
-        // Wait for a change, then for the burst of saves to settle; or for `ax restart`.
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(_) => {
-                settle(&rx);
-                eprintln!("ax dev: change — building…");
+        // Wait for a change, then for the burst of saves to settle; or for `ax restart`, `ax stop`.
+        let restart = match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(first) => {
+                let changed = crate::watch::settle(&rx, first);
+                let said = crate::watch::describe(&changed, &cwd);
+                if let Some(wait) = storm.wait(launched.elapsed()) {
+                    eprintln!(
+                        "ax dev: {said} changed right after each of the last {STORM_LIMIT} restarts (a formatter, \
+                         a generator, another watcher?): each rebuild waits {} s",
+                        wait.as_secs()
+                    );
+                    std::thread::sleep(wait);
+                    crate::watch::settle(&rx, vec![]);
+                }
+                lint_said(&changed, &cwd);
+                eprintln!("ax dev: {said} changed — building…");
+                false
             }
-            Err(mpsc::RecvTimeoutError::Timeout) if asked() => eprintln!("ax dev: restart asked — building…"),
+            Err(mpsc::RecvTimeoutError::Timeout) if asked(STOP) => {
+                eprintln!("ax dev: asked to stop; the session ends");
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if asked(RESTART) => {
+                eprintln!("ax dev: restart asked — building…");
+                true
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
+        };
         css(&pkg, &rx);
-        if let Some(bin) = build(&pkg.name, logs.as_deref()) {
-            stop(&mut app);
-            eprintln!("ax dev: restarting {name}");
-            app = launch(&bin, args, &put);
-        } else {
+        let started = std::time::Instant::now();
+        let Some(bin) = build(&pkg.name, logs.as_deref()) else {
+            red = true;
             eprintln!("ax dev: build failed; the running app is unchanged and shows why");
             if let (Some(w), Some(l)) = (&window, &logs) {
                 let errors = crate::web::fatal(&std::fs::read_to_string(l.join(BUILD_LOG)).unwrap_or_default());
@@ -1099,10 +1310,106 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                     eprintln!("ax dev: the errors aren't on its page: {e}");
                 }
             }
+            continue;
+        };
+        let took = started.elapsed().as_secs_f64();
+        if !matches!(watching, Watching::Only(_)) {
+            w.add_files(deps_of(&bin));
         }
+        // Red to green: said, and off the page, whether or not it restarts.
+        if std::mem::take(&mut red) {
+            eprintln!("ax dev: fixed: the build is good again");
+            _ = on_page(window.as_ref(), SHOWN_FIXED);
+        }
+        let now = digest(&bin);
+        let up = app.as_mut().is_some_and(|(c, _)| c.try_wait().ok().flatten().is_none());
+        if !restart && up && now.is_some() && now == running {
+            eprintln!("ax dev: built in {took:.1} s, the same binary: {name} keeps running");
+            continue;
+        }
+        stop(&mut app, window.as_ref());
+        eprintln!("ax dev: built in {took:.1} s; restarting {name}");
+        running = now;
+        app = launch(&bin, args, &put);
+        launched = std::time::Instant::now();
     }
-    stop(&mut app);
+    stop(&mut app, window.as_ref());
     Ok(String::new())
+}
+
+/// aio's lint while editing (`air/dev-air.ts`): the aio checks of the saved
+/// `.rs` files (keys, accessible names, hooks…), said in the terminal.
+fn lint_said(changed: &[PathBuf], cwd: &Path) {
+    for l in crate::lint::changed(changed, cwd) {
+        eprintln!("ax dev: lint: {l}");
+    }
+}
+
+/// `ax dev <app> --detach` (aio's `am start` of a dev run): the session in
+/// the background, on the display this terminal would choose, its output in
+/// the app's `logs/dev.out`; back once the app is up, or its first build
+/// failed (the session waits for a fix). `ax stop` ends it.
+fn detach(name: &str, args: &[String], plan: Option<&aio::paths::Plan>) -> Result<String, String> {
+    let plan = plan.ok_or(format!("--detach: {name} has no aio.toml to keep the session's output by"))?;
+    let logs = plan.logs.as_path();
+    if take_watch(args)?.1 == Watching::Off {
+        return Err("--detach runs the dev loop: without watching, ax start runs the app".into());
+    }
+    if session(logs) {
+        return Err(format!("{name} already runs under ax dev: ax stop {name} ends it"));
+    }
+    let out = logs.join(DETACHED);
+    let file = aio::paths::private_dir(logs)
+        .and_then(|()| std::fs::File::create(&out))
+        .map_err(|e| format!("{}: {e}", out.display()))?;
+    let err = file.try_clone().map_err(|e| e.to_string())?;
+    let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    cmd.args(["dev", name]).args(args).stdin(std::process::Stdio::null()).stdout(file).stderr(err);
+    if !args.iter().any(|a| a == "--display") {
+        use std::io::IsTerminal;
+        let asked = std::env::var("AIORT_DISPLAY").ok();
+        let choice =
+            crate::display::choose(asked.as_deref(), std::io::stdin().is_terminal(), crate::display::desktop())?;
+        let word = match choice {
+            crate::display::Choice::Current => "current".to_string(),
+            crate::display::Choice::Nested => "isolated".to_string(),
+            crate::display::Choice::Named(d) => d,
+        };
+        cmd.args(["--display", &word]);
+    }
+    // Out of this terminal's process group: its Ctrl-C is not the session's.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x8;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    // A failed build of an earlier session is not this one's.
+    _ = std::fs::remove_file(logs.join(BUILD_LOG));
+    let mut child = cmd.spawn().map_err(|e| format!("can't start ax dev: {e}"))?;
+    // A first build may take minutes.
+    let end = std::time::Instant::now() + Duration::from_secs(600);
+    let up = || session(logs) && (aio::paths::running(&plan.data) || logs.join(BUILD_LOG).exists());
+    while !up() {
+        if let Ok(Some(st)) = child.try_wait() {
+            let said = std::fs::read_to_string(&out).unwrap_or_default();
+            let tail: Vec<&str> = said.lines().rev().take(20).collect();
+            return Err(format!("ax dev ended ({st}):\n{}", tail.into_iter().rev().collect::<Vec<_>>().join("\n")));
+        }
+        if std::time::Instant::now() > end {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(format!(
+        "{name} runs under ax dev in the background (pid {}): its output in {}; ax status {name} says how it is, \
+         ax stop {name} ends it",
+        child.id(),
+        out.display()
+    ))
 }
 
 #[cfg(test)]
@@ -1446,7 +1753,90 @@ mod tests {
     fn ignores_build_output_and_editor_files() {
         assert!(relevant(Path::new("/w/notes/src/main.rs")));
         assert!(!relevant(Path::new("/w/target/debug/x")));
+        assert!(!relevant(Path::new("target/debug/x")), "relative to its root");
         assert!(!relevant(Path::new("/w/notes/src/.main.rs.swp")));
         assert!(!relevant(Path::new("/w/notes/src/main.rs~")));
+        // vim's write probe, emacs' autosave, temp and safe-write copies.
+        for editor in ["4913", "#lib.rs#", "lib.rs.tmp", "lib.rs.swx", "lib.rs___jb_tmp___", ".#lib.rs"] {
+            assert!(!relevant(&Path::new("/w/notes/src").join(editor)), "{editor}");
+        }
+        assert!(relevant(Path::new("/w/notes/src/4913.rs")) && relevant(Path::new("/w/notes/assets/a#b.css")));
+        assert!(!relevant(Path::new("C:\\w\\target\\debug\\x")), "Windows' separators");
+    }
+
+    #[test]
+    fn no_watch_is_watch_false() {
+        let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(take_watch(&s(&["--no-watch", "a.md"])), Ok((s(&["a.md"]), Watching::Off)));
+        assert_eq!(take_watch(&s(&["--", "--no-watch"])).unwrap().1, Watching::All, "the app's own word");
+    }
+
+    #[test]
+    fn args_dx_would_split_go_whole_in_an_env_var() {
+        let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert!(dx_carries(&s(&["--home", "/tmp/a"])) && dx_carries(&[]));
+        let spaced = s(&["--open", "my notes.md", ""]);
+        assert!(!dx_carries(&spaced));
+        assert!(!dx_args("n", 1, false, false, &spaced).iter().any(|a| a.starts_with("--args")), "no split args");
+        let (k, v) = dev_args_env(&spaced).unwrap();
+        assert_eq!(k, "AIORT_DEV_ARGS");
+        assert_eq!(serde_json::from_str::<Vec<String>>(&v).unwrap(), spaced, "intact");
+        assert_eq!(dev_args_env(&s(&["a.md"])), None);
+    }
+
+    #[test]
+    fn a_pid_file_names_its_process_only_while_that_one_runs() {
+        let started = |p: u32| (p == 7).then(|| "100".to_string());
+        let alive = |p: u32| p == 7 || p == 8;
+        assert_eq!(recorded("7 100", &started, &alive), Some(7));
+        assert_eq!(recorded("7 99", &started, &alive), None, "the pid handed out again");
+        assert_eq!(recorded("9 100", &started, &alive), None, "gone");
+        assert_eq!(recorded("8\n", &started, &alive), Some(8), "an older file: the pid alone");
+        assert_eq!(recorded("x", &started, &alive), None);
+        assert_eq!(
+            recorded(&pid_record(std::process::id()), &aio::lifecycle::started, &aio::lifecycle::alive),
+            Some(std::process::id())
+        );
+    }
+
+    #[test]
+    fn a_restart_storm_cools_down_and_a_pause_ends_it() {
+        // aio's RESTART_STORM_MS, _LIMIT, _COOLDOWN_MS.
+        let mut s = Storm::default();
+        let fast = Duration::from_millis(300);
+        for _ in 1..STORM_LIMIT {
+            assert_eq!(s.wait(fast), None);
+        }
+        assert_eq!(s.wait(fast), Some(Duration::from_secs(5)));
+        assert_eq!(s.wait(fast), Some(Duration::from_secs(5)), "still a storm");
+        assert_eq!(s.wait(Duration::from_secs(3)), None, "a person's pace");
+        assert_eq!(s.wait(fast), None);
+    }
+
+    #[test]
+    fn a_manifest_change_and_an_unchanged_binary_are_told() {
+        assert!(manifest(&[PathBuf::from("/w/src/lib.rs"), PathBuf::from("/w/Cargo.toml")]));
+        assert!(!manifest(&[PathBuf::from("/w/src/lib.rs")]));
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        std::fs::write(&a, vec![7u8; 3 << 20]).unwrap();
+        std::fs::write(&b, vec![7u8; 3 << 20]).unwrap();
+        assert_eq!(digest(&a), digest(&b));
+        std::fs::write(&b, [vec![7u8; 3 << 20], vec![1]].concat()).unwrap();
+        assert_ne!(digest(&a), digest(&b));
+        assert_eq!(digest(&d.path().join("none")), None);
+    }
+
+    #[test]
+    fn the_files_a_build_read_come_from_its_dep_info() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("target");
+        let bin = target.join("x86").join("desktop-dev").join("notes");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let gen_rs = target.join("x86/desktop-dev/build/out/gen.rs");
+        std::fs::write(bin.with_extension("d"), format!("{}: /w/aio.toml {}\n", bin.display(), gen_rs.display()))
+            .unwrap();
+        assert_eq!(deps_of(&bin), [PathBuf::from("/w/aio.toml")], "not the build folder's own");
+        assert_eq!(deps_of(&d.path().join("none")), Vec::<PathBuf>::new());
     }
 }

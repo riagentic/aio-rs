@@ -33,6 +33,25 @@ version may break things.
   after its view, a view placed twice, two rows with one key, a missing
   `key:` or an `if let` in `rsx!` at compile time); a renderer fault
   planted in air fails `TestUi` in the Rust page and the Electron page.
+- **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
+  makes each async method read the state as it was when it was called
+  and commit what it wrote, ran and scheduled at its end as one event, or
+  nothing; a field another call changed meanwhile refuses it with
+  `Code::TxConflict` (`TX_CONFLICT`). `transaction(serialize)` runs them
+  one at a time, `conflict = "warn"` commits over a conflict;
+  `cx.commit()`, `cx.commit_every(ms)` and `cx.live_state::<Self>()` are
+  aio's `$commit` and `$live` ([methods](docs/state/methods.md#transactions)).
+- `cx.on::<Other>().after/every/at/cron(..)`: a schedule that calls another
+  cell's method (aio's `schedule.after(id, ms, other.method.action())`).
+- `aio::on_action(f)` (aio's `onAction`): every committed call heard;
+  `Plugin::on_action` and `Plugin::allowed_origins` (aio's plugin
+  `onAction`, `allowedOrigins`, merged with `[server] hosts`).
+- A cell of `#[aio_cell]` fields may `retire` its own id: aio's slice of
+  that name and its stamp go, its history stays.
+- `Updates::retired` (and `Ready::retired`): where a fresh start set the
+  data aside, for the new version's first start to say; its `backup` is
+  the store set aside (aio's `updates-retire.ts`).
+
 - **Async methods answer their caller** (aio's `await cell.method()`): a
   typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
   await is the value its last part returned or the refusal that ended it
@@ -182,6 +201,34 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
+- **`ax ui` as amui, on every OS**: the Tasks tab runs the project's own
+  tasks (its cargo aliases) beside the `ax` verbs, its output shown as it
+  comes; CPU, the project folder, the executable and the runtime kind on
+  macOS and Windows too (from `health.json`'s `cpuMs`, `exe`, `cwd`);
+  each linked client's health (and for how long a part is down), bytes a
+  second and in all, and the changes it fell behind on; each action's
+  method time and the refused ones with why; per cell its refused calls
+  and last action; the runtime config card from the live app
+  (`health.json`'s `config`: title, auth, mode).
+- `ax events --json` of a running app says each event's method time
+  (`ms`); `--refused` adds its refused calls of late. The local door
+  answers `took`; a client's listing (`ax clients --json`) has `sent`,
+  `behind` and its `degraded` parts.
+- **`ax dev` watches as aio does** ([dev](docs/build/dev.md#the-loop)): a
+  burst of saves settles after 100 ms of quiet, 500 ms at most; the files
+  the last build read outside the app's folders are watched too (cargo's
+  dep-info: `aio.toml`, `include_str!` files, an aio-rs checkout), in
+  `--web` as well; a deaf watcher is made again (a sentinel, three times
+  at most); the terminal names the changed files and times each build; a
+  storm of restarts (a change within 1 s of each of 5 in a row) waits 5 s
+  before each and says why; the aio checks of each saved `.rs` file are
+  said after each burst (`ax lint`'s per-file ones).
+- `ax dev --detach` (the session in the background, `logs/dev.out`),
+  `--no-watch`, `--verbose`, `--title`; `ax stop` ends a session (the app
+  stopped the graceful way), `ax status` adds `ax dev: watching` or that
+  it waits for a fix; `ax errors` groups lines under each hot-patch too.
+- `AIORT_LOG` (the log's level for one run, said in the boot report's
+  `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
 - Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
@@ -192,7 +239,12 @@ version may break things.
   `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
   before. `ax pin` is aio's framework version (above); the unreleased
   framework verb is gone into it ([migration](docs/migration/README.md#ax-pin-and-ax-pair-in-02)).
-
+- `ax ui` reads in its own process (no `ax` child and no `cargo
+  metadata` per reading), all at once, each within 5 s; it lists the
+  running apps first, finds an app by its display name, shows a refusal
+  of who asked before a transport failure, and drops a process's readings
+  once it stops or restarts. `ax errors` keeps a panic's lines together
+  (`--json`: one string).
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
   they did; `[app] tz = "local"` reads this machine's local time (the
   0.1.0 behaviour).
@@ -285,15 +337,55 @@ version may break things.
 
 ### Fixed
 
+- The app quitting (it stops, its socket closes) right after the page
+  vetoed a close (`window.close()` with a beforeunload handler) quits: the
+  vetoed close, still settling, took the quit's own close of that window
+  with it and the runtime stayed up; the windows left are closed again
+  until they are gone.
+- The desktop splash shows a second after its page loaded when its window
+  never paints while hidden (a loaded machine): it stayed hidden for good;
+  a splash already gone never comes back.
+- A copy (`Remote`) hears this process's diagnostic bus from before it is
+  online: a problem said just as the link came up was never relayed to the
+  server's bus.
+- `aio::testing::TestUi` counts every render however its tests share the
+  process: with one tracing listener alive, tracing-core asks only the
+  registering thread's own, so a render first met on a thread with none
+  muted it for all; a second listener is kept for good.
+- `aio::testing::TestBrowser` waits up to 120 s for a browser's DevTools
+  port (a hang guard): the first system Chrome of a Windows CI runner took
+  more than 30 s while running.
 - An app that isn't running or has no server, asked for a pairing code or
   its profile, is told so plainly with what to type ("notes isn't running:
   start it with `ax start notes`"; no server: the aio.toml lines that
   give it one), not "the app isn't serving (no serving.json)".
-
+- A clean stop leaves no socket behind: a cell's door served on the
+  runtime was never dropped, so its `cell-<id>.sock` (and its folder)
+  outlived the app.
+- `ax ui` lists the clients of every cell, not the first 8; the Overview's
+  tiles wrap instead of cutting their value ("runni…").
 - A page script's `await aio.recv()` (`aio::ui::eval`) no longer hangs the
   window when the view sends later than 50 ms after it asked, and takes a
   falsy value (`0`, `false`): the renderer's own `recv` waited in a busy
   loop the message could never get past.
+- `ax dev` restarts ask the app to stop over its door first (calls in
+  flight finish, effects commit; Windows too, which has no SIGTERM), dx's
+  restarts on a `Cargo.toml` change included; a build that left the binary
+  as it was no longer restarts the app.
+- `ax dev`: editor files (vim's `4913`, `#x#`, `*.tmp`, safe-write copies)
+  no longer start builds; an app inside some `target` folder is heard.
+- `ax dev --watch=<dirs>` narrowed nothing under dx: ax now rebuilds and
+  restarts for it (dx watches all of the app).
+- `ax dev` without dx: a good build after a failed one says `fixed` and
+  takes the errors off the page even when the app keeps running.
+- `ax dev`'s session and dx pid files hold pid and start time: a pid the
+  OS handed out again is no longer taken for the session, on every OS,
+  and a stray dx is stopped on Windows and macOS too.
+- `ax dev` app args with spaces reach the app intact under dx (dx splits
+  its `--args`; they go in `AIORT_DEV_ARGS`).
+- `scripts/dx-metrics`: the live-edit times no longer include the page
+  poller's start or the previous edit's patch build under load (each
+  save waits until the loop is quiet).
 - A signed (Authenticode) one-click Windows download finds its runtime:
   the mark is looked for before the certificate table.
 - **Android: a crash at start on Android 10.** The activity's insets
@@ -310,9 +402,6 @@ version may break things.
   unmount, a focus, a rect) run in the order the app sent them; a big one
   could run after a small one sent later, so two `<Browser>`s could leave
   one empty and an island swapped for another could stay the old one.
-- `aio::testing::TestUi` counts every render (`components()`) when tests
-  run in parallel: a render callsite another thread registered at the same
-  moment could be cached as of no interest, and its renders went uncounted.
 - The test suite holds under load: timing tests wait on what they check
   (a condition, a gate the test opens, a page-side record of each style)
   instead of a fixed sleep or a wall-clock window; bounds on time are hang

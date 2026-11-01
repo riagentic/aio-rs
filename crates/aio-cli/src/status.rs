@@ -62,18 +62,31 @@ pub fn main(names: &[&str], ask: &aio::paths::Ask, json: bool) -> std::process::
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     let mut all = Vec::new();
     for name in names {
-        let data = match crate::target::of(name, ask) {
-            Ok(t) => t.plan.data,
+        let (data, logs) = match crate::target::of(name, ask) {
+            Ok(t) => (t.plan.data, t.plan.logs),
             Err(e) => {
                 eprintln!("ax: {name}: {e}");
                 return std::process::ExitCode::FAILURE;
             }
         };
         let doc = std::fs::read(data.join("health.json")).ok().and_then(|b| aio::serde_json::from_slice(&b).ok());
-        all.push(of(name, doc.as_ref(), aio::paths::running(&data), now));
+        let mut said = of(name, doc.as_ref(), aio::paths::running(&data), now);
+        if crate::dev::session(&logs) {
+            said.line += dev_note(logs.join(crate::dev::BUILD_LOG).exists());
+        }
+        all.push(said);
     }
     println!("{}", show(&all, json));
     std::process::ExitCode::from(code(&all))
+}
+
+/// What an app `ax dev` runs adds to its line (aio's `am status`):
+/// `failed`, its last build failed and it waits for a fix (pure).
+pub fn dev_note(failed: bool) -> &'static str {
+    match failed {
+        true => " (ax dev: the last build failed, waiting for a fix: ax errors)",
+        false => " (ax dev: watching)",
+    }
 }
 
 /// One exit code for many apps: 0 when all are started, else 1 when any is
@@ -146,6 +159,12 @@ mod tests {
         assert!(!d.path().join("health.json").exists(), "after it, a plain stopped app");
         let failed: Result<(), &str> = held(d.path(), "notes", "restore", || Err("bad backup")).unwrap();
         assert!(failed.is_err() && !d.path().join("health.json").exists());
+    }
+
+    #[test]
+    fn an_app_under_ax_dev_says_whether_it_waits_for_a_fix() {
+        assert!(dev_note(true).contains("waiting for a fix"));
+        assert_eq!(dev_note(false), " (ax dev: watching)");
     }
 
     #[test]

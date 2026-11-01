@@ -1343,6 +1343,8 @@ async fn what_a_copys_bus_hears_reaches_its_servers_bus() {
     // once as its own, and once as the client's, relayed (and not again).
     // The other tests' copies, linked in this process too, relay it as
     // well: the first to arrive is said, the rest held (one kind).
+    // Online first: `connect` waits for that only so long (a loaded machine).
+    until_long("online", || r.online()).await;
     aio::report::problem("window:frozen", "copy stuck token=abc");
     until_long("relayed", || heard.lock().unwrap().iter().any(|(k, _)| k == "client:window:frozen")).await;
     tokio::time::sleep(Duration::from_millis(100)).await;

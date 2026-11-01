@@ -75,7 +75,7 @@ assert_eq!(h.state().n, 2); // the refused call changed nothing
 | `aio::Derived`, `Cache`, `Reads`, `Ver`, `Watching` | derived values, memoized on the fields they read |
 | `aio::machine`, `machine!` | a cell's state machine: states and the methods that move between them |
 | `aio::merge` | merging concurrent offline edits (`text3`, tokens) |
-| `aio::before_call`, `aio::on_effect` | hooks on every call and every effect (aio's `beforeReduce`, `onAction`, `onEffect`) |
+| `aio::before_call`, `aio::rewrite_call`, `aio::on_action`, `aio::on_effect` | hooks on every call, every committed call and every effect (aio's `beforeReduce`, `onAction`, `onEffect`) |
 | `aio::visible` | the rows a caller may see |
 | `aio::keys!` | an enum of names usable as keys, CSS classes and handles |
 
