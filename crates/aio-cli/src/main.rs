@@ -62,6 +62,7 @@ mod upgrade;
 mod verbs;
 mod version;
 mod video;
+mod watch;
 mod web;
 
 use rusqlite::{Connection, OpenFlags, params};
@@ -91,9 +92,9 @@ fn log_lines(dir: &Path, n: usize) -> Out {
 }
 
 /// The newest `n` warnings and errors in the log lines `lines` (oldest
-/// first), each under the start of the app it came from (pure): each start
-/// (its number, 0 before the first; its line) with its bad lines, and how
-/// many there were in all.
+/// first), each under the code generation it came from (pure): each start
+/// or hot-patch (its number, 0 before the first; its line) with its bad
+/// lines, and how many there were in all (aio's log generation per reload).
 /// A start (its number, its line) and the bad lines after it.
 type Run<'a> = (usize, String, Vec<&'a str>);
 
@@ -101,7 +102,7 @@ fn bad_lines<'a>(lines: &[&'a str], n: usize) -> (Vec<Run<'a>>, usize) {
     // (start, its line, the bad lines after it)
     let mut runs: Vec<Run> = vec![(0, String::new(), vec![])];
     for l in lines {
-        if starts(l) {
+        if starts(l) || patched(l) {
             runs.push((runs.len(), l.to_string(), vec![]));
         } else if bad(l)
             && let Some(r) = runs.last_mut()
@@ -126,6 +127,12 @@ fn bad_lines<'a>(lines: &[&'a str], n: usize) -> (Vec<Run<'a>>, usize) {
 fn starts(l: &str) -> bool {
     let rest = l.split_once(' ').map_or("", |(_, r)| r);
     rest.starts_with("[aio] ") && rest.contains(" starting (pid ")
+}
+
+/// A log line of a hot-patch applied (`aio::log::hot_patched`): new code.
+fn patched(l: &str) -> bool {
+    let rest = l.split_once(' ').map_or("", |(_, r)| r);
+    rest.starts_with("[aio] hot-patch ") && rest.contains(" applied")
 }
 
 /// A warning, an error or a panic.
@@ -175,7 +182,11 @@ fn errors(build: Option<&str>, lines: &[&str], n: usize, json: bool) -> String {
         out.extend(b.lines().skip(1).take(60).map(|l| format!("  {l}")));
     }
     for (k, start, bad) in runs {
-        out.push(if k == 0 { "before the first start in the log:".into() } else { format!("start {k}: {start}") });
+        out.push(match k {
+            0 => "before the first start in the log:".into(),
+            _ if patched(&start) => format!("patch {k}: {start}"),
+            _ => format!("start {k}: {start}"),
+        });
         out.extend(bad.iter().map(|l| format!("  {l}")));
     }
     if total == 0 {
@@ -1840,6 +1851,11 @@ mod tests {
                 "  t5 WARN  [x] two",
             ]
         );
+        // A hot-patch is new code: what it says is under it, not its start.
+        let mut patched = log.to_vec();
+        patched.insert(6, "t3 [aio] hot-patch 1 applied (12 functions)");
+        let out = errors(None, &patched, 20, false);
+        assert!(out.ends_with("patch 3: t3 [aio] hot-patch 1 applied (12 functions)\n  t4 thread 'main' panicked at src/lib.rs:3:5\n  t5 WARN  [x] two"), "{out}");
         // The newest n, still under their start.
         assert_eq!(errors(None, &log, 1, false), "start 2: t3 [aio] notes 2.0.0 starting (pid 11)\n  t5 WARN  [x] two");
         assert!(errors(None, &log[..1], 20, false).starts_with("no warnings or errors in the log (1 lines)"));
