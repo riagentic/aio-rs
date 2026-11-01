@@ -110,6 +110,8 @@ clients = 256
 max_message = 4194304
 calls_per_sec = 200
 bytes_per_sec = 8388608
+sync_interval_ms = 50
+full_state_percent = 50
 
 [client]
 retention = "off"
@@ -365,6 +367,8 @@ learn them on connect, check sizes before sending and pace themselves.
 | `max_message` | bytes | `4194304` (4 MB) | Largest message a client may send. |
 | `calls_per_sec` | number | `200` | Calls a link may make per second (bursts up to twice that). |
 | `bytes_per_sec` | bytes | `8388608` (8 MB) | Bytes a link may send per second (bursts up to twice that). |
+| `sync_interval_ms` | ms | `50` | A link is sent at most one change per this window (aio's `syncIntervalMs`): the first of a burst at once, the rest folded into one patch; a person's call (a user's or an agent's) goes at once. `0`: each change at once. |
+| `full_state_percent` | percent | `50` | A patch over this share of the whole view goes as the view (aio's `fullStateThreshold`, `0.5` = `50`). `0`: always the view. Patches under 256 bytes always go as patches. |
 
 ### [server.dirs], [server.public_dirs]
 

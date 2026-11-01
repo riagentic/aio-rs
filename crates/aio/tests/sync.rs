@@ -1604,3 +1604,80 @@ async fn what_a_server_call_tells_reaches_each_client_once() {
     assert!(h.finish(" ".into()).unwrap_err().why.contains("title is empty"));
     assert_eq!(h.state().done, 2);
 }
+
+/// A raw aio-rs link to `addr`, past its first state.
+async fn raw_link(addr: &str) -> (Sock, serde_json::Value) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{addr}/ws?token=secret").into_client_request().unwrap();
+    req.headers_mut().insert("x-aio-wire", "2".parse().unwrap());
+    let (mut w, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    send(&mut w, serde_json::json!({ "t": "hello", "cell": "board", "v": 1, "user": "ana" })).await;
+    let full = recv(&mut w).await;
+    assert_eq!(full["t"], "state");
+    (w, full)
+}
+
+/// The views a link is sent within `wait`.
+async fn views(w: &mut Sock, wait: Duration) -> Vec<serde_json::Value> {
+    let mut got = Vec::new();
+    while let Ok(Some(Ok(m))) = tokio::time::timeout(wait, w.next()).await {
+        if let Message::Text(t) = m {
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            if matches!(v["t"].as_str(), Some("state" | "patch")) {
+                got.push(v);
+            }
+        }
+    }
+    got
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_changes_are_paced_and_a_persons_go_at_once() {
+    let (h, addr) = limited(aio::sync::Limits { sync_interval_ms: 200, ..Default::default() }).await;
+    let (mut w, _) = raw_link(&addr).await;
+    // A schedule's burst: the first at once, the rest folded into one patch.
+    let tick = h.by(By::Schedule("tick".into()));
+    for i in 0..20 {
+        tick.add(format!("t{i}")).unwrap();
+    }
+    let got = views(&mut w, Duration::from_millis(600)).await;
+    assert!((1..=3).contains(&got.len()), "{} views for 20 changes", got.len());
+    assert_eq!(got.last().unwrap()["seq"], h.snapshot().0);
+    // A person's changes skip the window, each one.
+    let ana = h.by(By::User("ana".into()));
+    for i in 0..5 {
+        ana.add(format!("a{i}")).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(views(&mut w, Duration::from_millis(300)).await.len(), 5);
+    // 0: every change at once.
+    let (h, addr) = limited(aio::sync::Limits { sync_interval_ms: 0, ..Default::default() }).await;
+    let (mut w, _) = raw_link(&addr).await;
+    let tick = h.by(By::Schedule("tick".into()));
+    for i in 0..10 {
+        tick.add(format!("t{i}")).unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(views(&mut w, Duration::from_millis(300)).await.len(), 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_patch_bigger_than_its_share_of_the_view_goes_as_the_view() {
+    for (percent, want) in [(1, "state"), (50, "patch")] {
+        let (h, addr) = limited(aio::sync::Limits { full_state_percent: percent, ..Default::default() }).await;
+        for i in 0..50 {
+            h.add(format!("note {i} {}", "x".repeat(200))).unwrap();
+        }
+        let (mut w, _) = raw_link(&addr).await;
+        h.by(By::User("bo".into())).add("y".repeat(300)).unwrap();
+        let got = views(&mut w, Duration::from_millis(300)).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["t"], want, "at {percent}%");
+        assert_eq!(got[0]["seq"], h.snapshot().0);
+    }
+    // A copy follows either way.
+    let (h, addr) = limited(aio::sync::Limits { full_state_percent: 0, ..Default::default() }).await;
+    let a = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    h.add("whole".into()).unwrap();
+    until("the copy follows a whole view", || *a.state() == *h.state()).await;
+}

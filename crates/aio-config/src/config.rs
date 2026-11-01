@@ -221,11 +221,26 @@ pub struct Limits {
     pub calls_per_sec: u32,
     /// Bytes a link may send per second (bursts up to twice that).
     pub bytes_per_sec: u32,
+    /// A link is sent at most one change per this many ms (aio's
+    /// `syncIntervalMs`): the first of a burst at once, the rest folded
+    /// into one; a person's call goes at once. `0`: each change at once.
+    pub sync_interval_ms: u64,
+    /// A change whose patch is more than this percent of the whole view is
+    /// sent as the view (aio's `fullStateThreshold`, as a percent). `0`:
+    /// always the view.
+    pub full_state_percent: u32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { clients: 256, max_message: 4 << 20, calls_per_sec: 200, bytes_per_sec: 8 << 20 }
+        Self {
+            clients: 256,
+            max_message: 4 << 20,
+            calls_per_sec: 200,
+            bytes_per_sec: 8 << 20,
+            sync_interval_ms: 50,
+            full_state_percent: 50,
+        }
     }
 }
 

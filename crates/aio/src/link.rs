@@ -237,7 +237,8 @@ impl View {
 
     /// The patch from what was sent to what the viewer sees now, with the
     /// digest of the view it makes; `None` if nothing they may see changed.
-    fn advance<T: Cell>(&mut self, h: &Handle<T>, viewer: &crate::Caller) -> Option<Value> {
+    /// A patch over `full_percent` of the view is the view instead.
+    fn advance<T: Cell>(&mut self, h: &Handle<T>, viewer: &crate::Caller, full_percent: u32) -> Option<Value> {
         let now = View::of(h, viewer);
         if now.seq <= self.seq {
             return None;
@@ -247,11 +248,78 @@ impl View {
             // Nothing visible changed: the client's patch chain stays as is.
             return None;
         }
-        let digest = patch::digest(&now.shown);
-        let msg = json!({ "t": "patch", "prev": self.seq, "seq": now.seq, "ops": ops, "digest": digest });
+        let whole = whole(&ops, &now.shown, full_percent);
+        let msg = match whole {
+            true => now.full(),
+            false => {
+                let digest = patch::digest(&now.shown);
+                json!({ "t": "patch", "prev": self.seq, "seq": now.seq, "ops": ops, "digest": digest })
+            }
+        };
         *self = now;
         Some(msg)
     }
+}
+
+/// A patch shorter than this always goes as a patch: the view isn't weighed.
+const WEIGH_FROM: usize = 256;
+
+/// Is the view `shown` cheaper to send than `ops` (aio's
+/// `fullStateThreshold`): the patch is over `percent` of the view (pure).
+pub(crate) fn whole(ops: &[patch::Op], shown: &Value, percent: u32) -> bool {
+    if percent == 0 {
+        return true;
+    }
+    let n = serde_json::to_string(ops).map_or(usize::MAX, |s| s.len());
+    n >= WEIGH_FROM && n as u128 * 100 > shown.to_string().len() as u128 * u128::from(percent)
+}
+
+/// When a link's next change goes (aio's `syncIntervalMs`): the first of a
+/// burst at once, then at most one per `every`, the changes between folded
+/// into one patch; a change a person made (a user's or an agent's call)
+/// goes at once. A link that is slow to take its messages is sent only the
+/// newest view once it takes them again (backpressure: nothing queues).
+pub(crate) struct Paced {
+    every: Duration,
+    last: Option<tokio::time::Instant>,
+    due: Option<tokio::time::Instant>,
+}
+
+impl Paced {
+    pub(crate) fn new(ms: u64) -> Self {
+        Self { every: Duration::from_millis(ms), last: None, due: None }
+    }
+
+    /// A change came (`urgent`: a person's): send it now, or `false`: when
+    /// [`Self::due`] ends.
+    pub(crate) fn now(&mut self, urgent: bool) -> bool {
+        let now = tokio::time::Instant::now();
+        match self.last {
+            Some(last) if !urgent && now < last + self.every => {
+                self.due.get_or_insert(last + self.every);
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// The link is up to date as of now.
+    pub(crate) fn sent(&mut self) {
+        (self.last, self.due) = (Some(tokio::time::Instant::now()), None);
+    }
+
+    /// Ends when a held change is due; never, with none held.
+    pub(crate) async fn due(&self) {
+        match self.due {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Did a person make the event (their change skips the pacing window)?
+pub(crate) fn urgent(ev: &std::result::Result<(u64, crate::Event), RecvError>) -> bool {
+    matches!(ev, Ok((_, e)) if matches!(e.by, By::User(_) | By::Agent(_)))
 }
 
 /// Who may call through one link. A debug build's local door: its tools may
@@ -606,6 +674,7 @@ pub(crate) async fn session<T: Cell>(
     }
     .into();
     let mut pushes = crate::budgets::Pushes::default();
+    let mut paced = Paced::new(limits.sync_interval_ms);
     pushes.push(&first, crate::store::now_ms());
     send_view(&mut w, meter, &first).await?;
     let h = h.by(viewer.clone());
@@ -632,7 +701,7 @@ pub(crate) async fn session<T: Cell>(
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
             Some(end) = ends.recv() => {
                 while events.try_recv().is_ok() {}
-                if let Some(p) = view.advance(&h, &seer) {
+                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                     pushes.push(&p, crate::store::now_ms());
                     send_view(&mut w, meter, &p).await?;
                 }
@@ -651,15 +720,23 @@ pub(crate) async fn session<T: Cell>(
                     send_view(&mut w, meter, &view.full()).await?;
                 }
             }
+            () = paced.due() => {
+                paced.sent();
+                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
+                    pushes.push(&p, crate::store::now_ms());
+                    send_view(&mut w, meter, &p).await?;
+                }
+            }
             ev = events.recv() => match ev {
-                // A slow client just gets the newest view.
-                Ok(_) | Err(RecvError::Lagged(_)) => {
-                    if let Some(p) = view.advance(&h, &seer) {
+                Err(RecvError::Closed) => return Ok(()),
+                // Held for the window, or now; a slow client just gets the newest view.
+                ev => if paced.now(urgent(&ev)) {
+                    paced.sent();
+                    if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                         pushes.push(&p, crate::store::now_ms());
                         send_view(&mut w, meter, &p).await?;
                     }
-                }
-                Err(RecvError::Closed) => return Ok(()),
+                },
             },
             msg = next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes) => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -717,7 +794,7 @@ pub(crate) async fn session<T: Cell>(
                         };
                         // Its change first, then the reply.
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer) {
+                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
@@ -776,7 +853,7 @@ pub(crate) async fn session<T: Cell>(
                             .await
                             .map_err(|e| e.to_string())?;
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer) {
+                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
