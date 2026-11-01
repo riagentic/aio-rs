@@ -1302,6 +1302,73 @@ fn a_retired_cell_is_gone_from_the_file_in_either_layout() {
     assert!(e.contains("selfish: it retires cell settings, which it still reads"), "{e}");
 }
 
+/// A port whose bridge-era build kept a slice under its own id (`state\x1fpurse3`)
+/// before it read aio's cells by field: it retires that slice, its history kept.
+#[cell(persist, id = "purse3", retire = ["purse3"])]
+pub struct Purse3 {
+    #[aio_cell]
+    settings: Settings,
+    #[aio_cell]
+    network: Net,
+    locked: bool,
+}
+
+#[methods]
+impl Purse3 {
+    pub fn lock(&mut self) {
+        self.locked = true;
+    }
+}
+
+/// A one-slice cell reads aio's slice of its own id: it can't retire it.
+#[cell(persist, id = "settings", retire = ["settings"])]
+pub struct SelfRetired {
+    dark: bool,
+}
+
+#[methods]
+impl SelfRetired {}
+
+#[test]
+fn a_cell_of_aio_cells_retires_aios_slice_of_its_own_id_and_keeps_its_history() {
+    for multi in [false, true] {
+        let (_d, p) = purse_file(multi);
+        let mut w = Store::<Purse3>::open_aio(&p, "w").unwrap();
+        w.call(&By::Test, "lock", Value::Null).unwrap();
+        drop(w);
+        // An older build's slice of its own id, and its stamp.
+        let c = rusqlite::Connection::open(&p).unwrap();
+        let bridge = json!({ "seen": "BRIDGE-ERA-SLICE" });
+        match multi {
+            true => _ = c.execute("INSERT INTO aio_kv (k, v) VALUES ('state\x1fpurse3', ?1)", [bridge.to_string()]).unwrap(),
+            false => {
+                let doc: String = c.query_row("SELECT v FROM aio_kv WHERE k = 'state'", [], |r| r.get(0)).unwrap();
+                let mut doc: Value = serde_json::from_str(&doc).unwrap();
+                doc["purse3"] = bridge;
+                c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'state'", [doc.to_string()]).unwrap();
+            }
+        }
+        let mut versions = kv(&p)["w:__versions"].clone();
+        versions["purse3"] = json!(1);
+        c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'w:__versions'", [versions.to_string()]).unwrap();
+        drop(c);
+        assert!(aio_reads(&p, "w").contains_key("purse3"));
+
+        let w = Store::<Purse3>::open_aio(&p, "w").unwrap();
+        assert!(w.state().locked, "its own history stays");
+        assert!(w.events().unwrap().iter().any(|e| e.method == "lock"));
+        drop(w);
+        let after = aio_reads(&p, "w");
+        assert!(!after.contains_key("purse3"), "multi = {multi}");
+        assert!(after.contains_key("settings") && after.contains_key("c00"));
+        assert!(kv(&p)["w:__versions"].get("purse3").is_none());
+        assert!(!holds(&bytes(&p), "BRIDGE-ERA-SLICE"), "zeroed");
+    }
+    let (_d, p) = purse_file(false);
+    let e = Store::<SelfRetired>::open_aio(&p, "w").err().unwrap().0;
+    assert!(e.contains("settings: it retires cell settings, which it still reads"), "{e}");
+}
+
 /// aio's `counts`: ids handed out, and the next one.
 #[cell(persist, id = "counts")]
 #[serde(rename_all = "camelCase")]

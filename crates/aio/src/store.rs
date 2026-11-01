@@ -588,19 +588,23 @@ fn newest(db: &Connection, path: &Path, id: &str, version: u32, aio_file: bool) 
 /// one transaction: their history here and, in an aio file, their slices and
 /// stamps. Zeroed, not only unlinked (`secure_delete`, the WAL emptied), so
 /// a secret one held is gone from the file; never a cell still read here.
+/// A cell of `#[aio_cell]` fields may retire its own id: aio's slice of that
+/// name (an earlier build's, before it read aio's cells by field) and its
+/// stamp go, its own history here stays.
 fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
     if T::RETIRED.is_empty() {
         return Ok(());
     }
-    if let Some(c) = T::RETIRED.iter().find(|c| **c == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == **c)) {
+    let reads = |c: &str| (c == T::ID && T::AIO_CELLS.is_empty()) || T::AIO_CELLS.iter().any(|s| s.cell == c);
+    if let Some(c) = T::RETIRED.iter().find(|c| reads(c)) {
         return Err(Error(format!("{}: it retires cell {c}, which it still reads", T::ID)));
     }
-    erase(db, kv, T::RETIRED).map(|_| ())
+    erase(db, kv, T::RETIRED, T::ID).map(|_| ())
 }
 
 /// The history of `cells` gone from the file (and, in an aio file, their
-/// slices and stamps), zeroed; whether there was any.
-fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str]) -> Result<bool, Error> {
+/// slices and stamps), zeroed; whether there was any. `own`'s history is kept.
+fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &str) -> Result<bool, Error> {
     let secure: i64 = db.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
     db.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = db.unchecked_transaction()?;
@@ -609,7 +613,7 @@ fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str]) 
         None => false,
     };
     for t in TABLES {
-        for c in cells {
+        for c in cells.iter().filter(|c| **c != own) {
             gone |= tx.execute(&format!("DELETE FROM {t} WHERE cell = ?1"), [c])? > 0;
         }
     }
@@ -1890,7 +1894,7 @@ impl<T: Cell> Store<T> {
         if cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell) {
             return Err(Error(format!("{}: it reads {cell}: a declared cell is never dropped", T::ID)));
         }
-        erase(&self.db, self.aio_kv.as_ref(), &[cell])
+        erase(&self.db, self.aio_kv.as_ref(), &[cell], "")
     }
 
     /// The state right after event `seq` (0: the start).
