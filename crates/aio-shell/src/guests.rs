@@ -196,6 +196,9 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     cmd.arg(&dir)
         .args(runtime::sandbox_args(&rt))
         .args(["--ozone-platform=headless", "--aio-title=guests", "--aio-width=800", "--aio-height=600"])
+        // GL drawn by SwiftShader, as TestUi's: with no display the default GL
+        // fails its start under load and a hidden window may never paint.
+        .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
         // A link a guest opens goes nowhere (never the person's browser).
         .arg("--aio-no-open=1")
         .arg(format!("--user-data-dir={}", d.path().join("profile").display()))
