@@ -1097,6 +1097,7 @@ mod tests {
     }
 
     /// What is in `root`, sorted.
+    #[cfg(not(target_os = "macos"))]
     fn left(root: &Path) -> Vec<String> {
         let mut v: Vec<String> =
             std::fs::read_dir(root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
