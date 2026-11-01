@@ -13,6 +13,10 @@ durability = "full"
 store = "vault.db"
 retire = ["old.db"]
 pragmas = ["PRAGMA cache_size = -16000"]
+persist = false
+coalesce_ms = 250
+backup_every = "1d"
+backup_keep = 3
 [history]
 keep = "36h"
 [server]

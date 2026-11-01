@@ -576,6 +576,41 @@ async fn health_and_metrics_answer_a_monitor_without_the_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_snapshot_endpoint_exports_and_loads_the_whole_state_as_aios() {
+    let h = Handle::<Hooks>::memory();
+    h.call("pay", serde_json::json!(["a1", 5])).unwrap();
+    let addr = serve(h.clone(), Http::default()).await;
+    // Without the key: refused; with it, this machine's tool gets every cell.
+    assert_eq!(fetch(&addr, "GET", "/__aio/snapshot", &[], "").await.0, 401);
+    let (s, head, body) = fetch(&addr, "GET", "/__aio/snapshot", &[KEY], "").await;
+    assert_eq!((s, header(&head, "cache-control")), (200, Some("no-store")));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({ "hooks": { "paid": { "a1": 5 } } })
+    );
+    let post = |body: &'static str, path: &'static str, x: bool| {
+        let addr = addr.clone();
+        async move {
+            let headers: Vec<(&str, &str)> = if x { vec![KEY, JSON, ("X-AIO", "1")] } else { vec![KEY, JSON] };
+            fetch(&addr, "POST", path, &headers, body).await
+        }
+    };
+    assert_eq!(post(r#"{"hooks":{"paid":{}}}"#, "/__aio/snapshot", false).await.0, 403, "aio's CSRF header");
+    let (s, _, why) = post(r#"{"hooks":42}"#, "/__aio/snapshot", true).await;
+    assert!(s == 400 && why.contains(r#"cell "hooks" must be an object"#), "{s} {why}");
+    let (s, _, why) = post(r#"{"other":{}}"#, "/__aio/snapshot", true).await;
+    assert!(s == 400 && why.contains("whose state would be DESTROYED") && why.contains(r#""other""#), "{why}");
+    assert_eq!(post("{nope", "/__aio/snapshot", true).await.2, "Invalid JSON");
+    assert_eq!(h.state().paid.len(), 1, "nothing refused changed anything");
+    assert_eq!(post(r#"{"hooks":{"paid":{"b2":7}}}"#, "/__aio/snapshot", true).await.0, 200);
+    assert_eq!(h.state().paid, BTreeMap::from([("b2".into(), 7)]));
+    // Forced: a missing cell starts from its defaults, an unknown one is dropped.
+    assert_eq!(post(r#"{"other":{}}"#, "/__aio/snapshot?force=1", true).await.0, 200);
+    assert!(h.state().paid.is_empty());
+    assert_eq!(h.store(|s| s.events().unwrap()).last().unwrap().method, "$rewind", "a new event, the old state kept");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_form_post_navigation_to_a_client_route_gets_the_shell_and_nothing_runs() {
     let t = tempfile::tempdir().unwrap();
     std::fs::write(t.path().join("index.html"), "<html>shell</html>").unwrap();

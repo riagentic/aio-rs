@@ -201,6 +201,14 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
     });
     let write = |rec: &Value| aio::paths::write_atomic(&plan.logs.join(RECORD), rec.to_string().as_bytes(), false);
     write(&rec).map_err(|e| format!("{}: {e}", plan.logs.join(RECORD).display()))?;
+    // `--no-wait` (`--wait 0`): spawned is all; its display goes on with it.
+    if wait.is_zero() {
+        std::mem::forget(nested);
+        return Ok(format!(
+            "{name}: spawned (pid {}), not waited for: `aio status {name}` says when it is up",
+            child.id()
+        ));
+    }
     let end = Instant::now() + wait;
     loop {
         let ended = child.try_wait().ok().flatten().map(|s| s.to_string());

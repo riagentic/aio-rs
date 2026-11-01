@@ -198,8 +198,8 @@ fn refused(why: String) -> io::Error {
 
 impl Home {
     /// Claim `home` for app `app` (under `profile`). Refused, with nothing
-    /// written, when another process holds it, its `meta.json` names another
-    /// app or profile, or an aio journal waits to be replayed (only aio can).
+    /// written, when another process holds it or its `meta.json` names
+    /// another app or profile. (aio's journal is replayed by the store's boot.)
     pub fn open(home: &Path, app: &str, profile: Option<&str>) -> io::Result<Self> {
         let data = home.join("data");
         // The home holds logs and keys too: private, as aio makes it.
@@ -240,12 +240,6 @@ impl Home {
                     profile.map_or("none".into(), |p| format!("{p:?}"))
                 )));
             }
-        }
-        if std::fs::metadata(data.join("journal")).is_ok_and(|m| m.len() > 0) {
-            return Err(refused(format!(
-                "{} has an aio journal not yet folded into its snapshot: start the aio app once, stop it, then open it here",
-                data.display()
-            )));
         }
         crate::paths::write_atomic(
             &info,
@@ -350,7 +344,7 @@ pub fn retire(data: &Path, names: &[String]) -> io::Result<Vec<PathBuf>> {
 
 /// A cell field bound to aio's `db:` table: `(field, table, key, columns)`
 /// ([`crate::CellData::TABLES`]).
-pub type Bound = (&'static str, &'static str, Option<&'static str>, Option<&'static str>);
+pub type Bound = (&'static str, &'static str, Option<&'static str>, Option<crate::columns::Columns>);
 
 /// A `#[aio_cell]` field ([`crate::CellData::AIO_CELLS`]): aio cell `cell`'s whole slice,
 /// kept as the field's own cell type keeps it: its id, version, `migrate`,
@@ -361,15 +355,32 @@ pub struct Slice {
     pub cell: &'static str,
     pub version: u32,
     pub transient: &'static [&'static str],
+    pub include: &'static [&'static str],
     pub tables: &'static [Bound],
     pub migrate: fn(Value, u32) -> Result<Value, String>,
+    /// A newer build's slice as this build's type reads it (its fields only).
+    pub fit: fn(Value) -> Result<Value, String>,
 }
 
 impl Slice {
     /// Field `field`, of cell type `C`.
     pub const fn of<C: crate::CellData>(field: &'static str) -> Self {
-        Slice { field, cell: C::ID, version: C::VERSION, transient: C::TRANSIENT, tables: C::TABLES, migrate: up::<C> }
+        Slice {
+            field,
+            cell: C::ID,
+            version: C::VERSION,
+            transient: C::TRANSIENT,
+            include: C::PERSIST_INCLUDE,
+            tables: C::TABLES,
+            migrate: up::<C>,
+            fit: fit::<C>,
+        }
     }
+}
+
+/// A slice read as `C` and written again: `C`'s fields only.
+fn fit<C: crate::CellData>(v: Value) -> Result<Value, String> {
+    serde_json::from_value::<C>(v).and_then(serde_json::to_value).map_err(|e| e.to_string())
 }
 
 /// `C`'s `migrate`, slice to slice.
@@ -545,14 +556,39 @@ fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Table `table`'s columns, its primary key's marked; `None`: no such table.
-fn columns(db: &Connection, table: &str) -> Result<Option<Vec<(String, bool)>>, String> {
+/// A column as a bound row's value goes in and comes out of it: a `bool` as
+/// 0/1 in a `BOOLEAN` column, a list or an object as JSON text in a `JSON`
+/// one, each value as its JSON text (aio-rs's [`crate::columns::boolean`],
+/// [`crate::columns::json`]); in any other, a number, a string or null, as
+/// aio stores them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Plain,
+    Bool,
+    Json,
+}
+
+impl Kind {
+    fn of(ty: &str) -> Self {
+        match ty.to_ascii_uppercase().as_str() {
+            "BOOLEAN" => Kind::Bool,
+            "JSON" => Kind::Json,
+            _ => Kind::Plain,
+        }
+    }
+}
+
+/// One of a table's columns: its name, whether it is the primary key, its kind.
+type Col = (String, bool, Kind);
+
+/// Table `table`'s columns; `None`: no such table.
+fn columns(db: &Connection, table: &str) -> Result<Option<Vec<Col>>, String> {
     if !has_table(db, table)? {
         return Ok(None);
     }
     let mut q = db.prepare(&format!("PRAGMA table_info({})", quoted(table))).map_err(|e| format!("storage: {e}"))?;
     let cols = q
-        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)? == 1)))
+        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)? == 1, Kind::of(&r.get::<_, String>(2)?))))
         .and_then(|r| r.collect::<Result<Vec<_>, _>>())
         .map_err(|e| format!("storage: {e}"))?;
     Ok(Some(cols))
@@ -566,23 +602,28 @@ fn synced(db: &Connection, table: &str) -> Result<bool, String> {
         .map_err(|e| format!("storage: {e}"))
 }
 
-/// Every row of `table` as aio reads it (`SELECT *`): an object of its
-/// columns, numbers, strings and nulls (a blob as its bytes).
-fn rows(db: &Connection, table: &str) -> Result<Vec<Value>, String> {
+/// Every row of `table` (columns `cols`) as aio reads it (`SELECT *`): an
+/// object of its columns, numbers, strings and nulls (a blob as its bytes);
+/// a `BOOLEAN` column's 0/1 as a bool, a `JSON` column's text as its value.
+fn rows(db: &Connection, table: &str, cols: &[Col]) -> Result<Vec<Value>, String> {
     use rusqlite::types::ValueRef;
     let err = |e: rusqlite::Error| format!("aio table {table}: {e}");
     let mut q = db.prepare(&format!("SELECT * FROM {}", quoted(table))).map_err(err)?;
-    let names: Vec<String> = q.column_names().into_iter().map(String::from).collect();
+    let names: Vec<(String, Kind)> = q
+        .column_names()
+        .into_iter()
+        .map(|n| (n.to_string(), cols.iter().find(|c| c.0 == n).map_or(Kind::Plain, |c| c.2)))
+        .collect();
     let rows = q
         .query_map([], |r| {
             let mut m = Map::new();
-            for (i, n) in names.iter().enumerate() {
-                let v = match r.get_ref(i)? {
-                    ValueRef::Null => Value::Null,
-                    ValueRef::Integer(n) => json!(n),
-                    ValueRef::Real(f) => json!(f),
-                    ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    ValueRef::Blob(b) => json!(b),
+            for (i, (n, kind)) in names.iter().enumerate() {
+                let v = match (r.get_ref(i)?, kind) {
+                    (ValueRef::Integer(b @ (0 | 1)), Kind::Bool) => json!(b == 1),
+                    (ValueRef::Text(t), Kind::Json) => {
+                        serde_json::from_slice(t).unwrap_or_else(|_| json!(String::from_utf8_lossy(t)))
+                    }
+                    (v, _) => plain(v),
                 };
                 m.insert(n.clone(), v);
             }
@@ -591,6 +632,18 @@ fn rows(db: &Connection, table: &str) -> Result<Vec<Value>, String> {
         .and_then(|r| r.collect::<Result<Vec<_>, _>>())
         .map_err(err)?;
     Ok(rows)
+}
+
+/// A stored value as aio reads it.
+fn plain(v: rusqlite::types::ValueRef<'_>) -> Value {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(n) => json!(n),
+        ValueRef::Real(f) => json!(f),
+        ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+        ValueRef::Blob(b) => json!(b),
+    }
 }
 
 /// A map binding's key for a row's key value (aio's `String(row[pk])`).
@@ -627,12 +680,12 @@ fn rows_of(v: &Value, key: Option<&str>) -> Result<Vec<Row>, String> {
 fn sync(
     db: &Connection,
     table: &str,
-    cols: &[(String, bool)],
+    cols: &[Col],
     key: Option<&str>,
     old: Option<&Value>,
     new: &Value,
 ) -> Result<(), String> {
-    let pk = key.or_else(|| cols.iter().find(|(_, pk)| *pk).map(|(c, _)| c.as_str()));
+    let pk = key.or_else(|| cols.iter().find(|c| c.1).map(|c| c.0.as_str()));
     let keyed = |v: &Value| rows_of(v, pk);
     let new = keyed(new)?;
     let st = |e: rusqlite::Error| format!("storage: {e}");
@@ -640,18 +693,26 @@ fn sync(
         let mut names = vec![];
         let mut vals: Vec<rusqlite::types::Value> = vec![];
         for (k, v) in r {
-            if !cols.iter().any(|(c, _)| c == k) {
+            let Some(col) = cols.iter().find(|c| c.0 == *k) else {
                 return Err(format!("the table has no column {k}"));
-            }
+            };
             names.push(quoted(k));
-            vals.push(match v {
-                Value::Null => rusqlite::types::Value::Null,
-                Value::String(s) => s.clone().into(),
-                Value::Number(n) => match n.as_i64() {
+            vals.push(match (v, col.2) {
+                (Value::Null, _) => rusqlite::types::Value::Null,
+                // Every value as its JSON text: a string reads back a string.
+                (v, Kind::Json) => v.to_string().into(),
+                (Value::String(s), _) => s.clone().into(),
+                (Value::Number(n), _) => match n.as_i64() {
                     Some(i) => i.into(),
                     None => n.as_f64().unwrap_or(f64::NAN).into(),
                 },
-                v => return Err(format!("{k} = {v}: aio stores a number, a string or null in a column")),
+                (Value::Bool(b), Kind::Bool) => i64::from(*b).into(),
+                (v, _) => {
+                    return Err(format!(
+                        "{k} = {v}: a column holds a number, a string or null (as in aio); a bool needs a BOOLEAN \
+                         column and a list or an object a JSON one (aio::columns::boolean, json)"
+                    ));
+                }
             });
         }
         let marks = vec!["?"; names.len()].join(", ");
@@ -686,10 +747,8 @@ fn sync(
 pub(crate) fn bound(db: &Connection, tables: &[Bound]) -> Result<Map<String, Value>, String> {
     let mut got = Map::new();
     for &(field, table, key, _) in tables {
-        if columns(db, table)?.is_none() {
-            continue;
-        }
-        let rows = rows(db, table)?;
+        let Some(cols) = columns(db, table)? else { continue };
+        let rows = rows(db, table, &cols)?;
         if rows.is_empty() && !synced(db, table)? {
             continue;
         }
@@ -757,7 +816,132 @@ fn has_table(db: &Connection, name: &str) -> Result<bool, String> {
         .map_err(|e| format!("storage: {e}"))
 }
 
+/// The method of `T` that aio's `<cell>:<method>` is (pure): `T`'s own
+/// under its id; under a `#[aio_cell]` field's cell `<cell>_<method>` when `T`
+/// has it, else `<method>`. `None`: no cell of `T`'s, or an internal method.
+pub(crate) fn method_of<T: crate::Cell>(cell: &str, method: &str) -> Option<String> {
+    if method.is_empty() || method.starts_with("__") {
+        return None;
+    }
+    if cell == T::ID {
+        return Some(method.into());
+    }
+    T::AIO_CELLS.iter().any(|s| s.cell == cell).then(|| {
+        let own = format!("{cell}_{method}");
+        if T::METHODS.contains(&own.as_str()) { own } else { method.into() }
+    })
+}
+
+/// aio's journal lines that carry no change to a cell (`journal.ts`).
+const JOURNAL_NO_OPS: [&str; 2] = ["__aioSyncIntent", "__aioSyncApplied"];
+
+/// One aio journal entry past the store's watermark, as aio-rs replays it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Journaled {
+    /// `<cell>:<method>`: the call, its arguments, who made it, when.
+    Call { seq: i64, method: String, args: Value, by: crate::By, at: i64 },
+    /// No change to replay: aio's own bookkeeping, a call on a cell that saves
+    /// nothing, or a call whose arguments aio withheld (said).
+    Skip { seq: i64, why: Option<String> },
+}
+
+/// What `<data>/journal` (aio's `journal.ts`, one JSON entry a line) holds past
+/// `wm` (the store's `__journal_wm`) for cell type `T`, in order; empty when
+/// it holds nothing of `T`'s cells. Refused when aio-rs can't replay it as
+/// aio would: a store older than what the journal already dropped
+/// (`journal.base`), an entry that isn't a plain call (a time-travel or
+/// write-set line, an action without a cell), or a tail mixing `T`'s calls
+/// with another cell's (only aio could then move the watermark). A torn line
+/// (a crash mid-append) is skipped, as aio does.
+pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<Journaled>, String> {
+    let text = match std::fs::read_to_string(data.join("journal")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(format!("{}/journal: {e}", data.display())),
+    };
+    if let Ok(b) = std::fs::read(data.join("journal.base"))
+        && let Some(dropped) = serde_json::from_slice::<Value>(&b).ok().and_then(|v| v["wm"].as_i64())
+        && dropped > wm
+    {
+        return Err(format!(
+            "its journal dropped calls up to {dropped} but the store holds only up to {wm} (the store was put back to an older copy)"
+        ));
+    }
+    let mut lines = vec![];
+    for (i, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        match serde_json::from_str::<Value>(line) {
+            Ok(e) if e["type"] == "__aioBatch" => lines.extend(e["entries"].as_array().cloned().unwrap_or_default()),
+            Ok(e) => lines.push(e),
+            Err(_) => eprintln!(
+                "[aio] data: {}/journal line {} is torn (a crash mid-write): skipped, as aio does",
+                data.display(),
+                i + 1
+            ),
+        }
+    }
+    let (mut ours, mut others) = (vec![], vec![]);
+    for e in lines {
+        let Some(seq) = e["seq"].as_i64().filter(|s| *s > wm) else { continue };
+        let kind = e["type"].as_str().unwrap_or_default();
+        let Some((cell, m)) = kind.split_once(':') else {
+            match JOURNAL_NO_OPS.contains(&kind) {
+                true => ours.push(Journaled::Skip { seq, why: None }),
+                false => return Err(format!("journal entry {seq} ({kind}) is no call aio-rs can replay")),
+            }
+            continue;
+        };
+        let Some(method) = method_of::<T>(cell, m) else {
+            match m.starts_with("__") && (cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell)) || cell == "aio"
+            {
+                true => {
+                    return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay"));
+                }
+                false => others.push(kind.to_string()),
+            }
+            continue;
+        };
+        let j = match (e["unstored"] == true, e["redacted"] == true) {
+            (true, _) => Journaled::Skip { seq, why: None },
+            (_, true) => Journaled::Skip {
+                seq,
+                why: Some(format!(
+                    "journal entry {seq} ({kind}): aio withheld its arguments (redactActions), so it can't run again: skipped, as aio does"
+                )),
+            },
+            _ => Journaled::Call {
+                seq,
+                method,
+                args: match &e["payload"]["args"] {
+                    Value::Null => json!([]),
+                    a => a.clone(),
+                },
+                by: e["user"]["id"].as_str().map_or(crate::By::System, |u| crate::By::User(u.into())),
+                at: e["ts"].as_i64().unwrap_or(0),
+            },
+        };
+        ours.push(j);
+    }
+    let calls = ours.iter().any(|j| matches!(j, Journaled::Call { .. }));
+    match (calls, others.first()) {
+        (true, Some(other)) => Err(format!("its journal holds calls of {} and of another cell ({other})", T::ID)),
+        (false, _) => Ok(vec![]),
+        (true, None) => Ok(ours),
+    }
+}
+
 impl Kv {
+    /// aio's journal watermark (`<app>:__journal_wm`): the last journal
+    /// entry the snapshot holds (0: none).
+    pub(crate) fn journal_wm(&self, db: &Connection) -> Result<i64, String> {
+        Ok(get(db, &format!("{}:__journal_wm", self.app))?.and_then(|v| v.as_i64()).unwrap_or(0))
+    }
+
+    /// Move aio's journal watermark to `seq`, in `db`'s transaction (with the
+    /// snapshot that holds the entries up to it, as aio writes it).
+    pub(crate) fn set_journal_wm(&self, db: &Connection, seq: i64) -> Result<(), String> {
+        put(db, &format!("{}:__journal_wm", self.app), &json!(seq))
+    }
+
     /// Read only: app `app`'s snapshot layout, or what makes aio refuse the
     /// file (aio-rs refuses it too). A file without `aio_kv` gets aio's defaults.
     pub(crate) fn find(db: &Connection, app: &str) -> Result<Self, String> {
@@ -812,6 +996,15 @@ impl Kv {
         })
     }
 
+    /// Has a downgrade boot parked cell `cell`'s slice (`__downgraded:<cell>`)?
+    fn parked(&self, db: &Connection, cell: &str) -> Result<bool, String> {
+        let park = format!("__downgraded:{cell}");
+        Ok(match self.multi {
+            true => get(db, &format!("{}{SEP}{park}", self.key))?.is_some(),
+            false => get(db, &self.key)?.is_some_and(|d| d.get(&park).is_some()),
+        })
+    }
+
     fn versions(&self, db: &Connection) -> Result<Map<String, Value>, String> {
         Ok(get(db, &format!("{}:__versions", self.app))?.and_then(|v| v.as_object().cloned()).unwrap_or_default())
     }
@@ -829,8 +1022,13 @@ impl Kv {
             st.get_or_insert_with(|| json!({}))[field] = v;
         }
         let Some(mut st) = st else { return Ok(None) };
+        let parked = self.parked(db, cell)?;
         if let Some(m) = st.as_object_mut() {
             m.retain(|k, _| !k.starts_with("__"));
+            // An older build ran on it (aio's downgrade park): see `store::DOWNGRADED`.
+            if parked {
+                m.insert(crate::store::DOWNGRADED.into(), json!(true));
+            }
         }
         let v = self.versions(db)?.get(cell).and_then(Value::as_u64).unwrap_or(0);
         Ok(Some((st, u32::try_from(v).unwrap_or(u32::MAX))))
@@ -847,16 +1045,47 @@ impl Kv {
     ) -> Result<Option<(Map<String, Value>, Option<(&'static str, u32)>)>, String> {
         let (mut got, mut older) = (Map::new(), None);
         for s in of {
-            let Some((v, at)) = self.slice(db, s.cell, s.tables)? else { continue };
-            if at > s.version {
-                return Err(format!("{}: aio data from a newer build (v{at} > v{})", s.cell, s.version));
-            }
+            let Some((mut v, at)) = self.slice(db, s.cell, s.tables)? else { continue };
+            let downgraded = v.as_object_mut().and_then(|m| m.remove(crate::store::DOWNGRADED)).is_some();
             if at < s.version {
                 older = older.or(Some((s.cell, at)));
             }
-            let v = match at < s.version {
-                true => (s.migrate)(v, at).map_err(|e| format!("{}: migrate from v{at} failed: {e}", s.cell))?,
-                false => v,
+            let v = match at.cmp(&s.version) {
+                std::cmp::Ordering::Less => {
+                    (s.migrate)(v, at).map_err(|e| format!("{}: migrate from v{at} failed: {e}", s.cell))?
+                }
+                // A newer build's (a rollback): what this build declares; each
+                // write keeps the rest (`Kv::write`).
+                std::cmp::Ordering::Greater => {
+                    eprintln!(
+                        "[aio] {}: aio data from a newer build (v{at} > v{}): it boots, keeping that build's fields it doesn't declare",
+                        s.cell, s.version
+                    );
+                    (s.fit)(v).map_err(|e| {
+                        format!("{}: aio data from a newer build (v{at} > v{}) doesn't fit: {e}", s.cell, s.version)
+                    })?
+                }
+                // Back from a rollback: the older build's own fields go, said
+                // (aio's restore merge drops them).
+                std::cmp::Ordering::Equal if downgraded => {
+                    let fit = (s.fit)(v.clone()).map_err(|e| format!("{}: {e}", s.cell))?;
+                    let gone: Vec<&str> = v
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|m| m.keys())
+                        .filter(|k| fit.get(k.as_str()).is_none())
+                        .map(String::as_str)
+                        .collect();
+                    if !gone.is_empty() {
+                        eprintln!(
+                            "[aio] {}: an older build ran on this data and wrote fields this build doesn't declare ({}); they are dropped, as aio drops them",
+                            s.cell,
+                            gone.join(", ")
+                        );
+                    }
+                    fit
+                }
+                std::cmp::Ordering::Equal => v,
             };
             got.insert(s.field.into(), v);
         }
@@ -928,22 +1157,38 @@ impl Kv {
         tables: &[Bound],
     ) -> Result<(), String> {
         write_bound(db, cell, &mut state, prev, tables)?;
-        if let (Some(old), Some(m)) = (self.raw(db, cell)?, state.as_object_mut()) {
+        let mut versions = self.versions(db)?;
+        let stored = versions.get(cell).and_then(Value::as_u64).unwrap_or(0);
+        let old = self.raw(db, cell)?;
+        if let (Some(old), Some(m)) = (&old, state.as_object_mut()) {
             for (k, v) in old.as_object().into_iter().flatten().filter(|(k, _)| k.starts_with("__")) {
                 m.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
+        // A newer build's slice (a rollback, aio's downgrade): its fields this
+        // build doesn't know stay, and a verbatim copy is parked once under
+        // `__downgraded:<cell>`, as aio parks it.
+        let newer = stored > u64::from(version);
+        if let (true, Some(old)) = (newer, &old) {
+            crate::filter::reattach(&mut state, old);
+        }
+        let park = format!("__downgraded:{cell}");
         if self.multi {
             put(db, &format!("{}{SEP}{cell}", self.key), &state)?;
+            let parked = format!("{}{SEP}{park}", self.key);
+            if let (true, Some(old), None) = (newer, &old, get(db, &parked)?) {
+                put(db, &parked, old)?;
+            }
         } else {
             let mut doc = get(db, &self.key)?.filter(Value::is_object).unwrap_or_else(|| json!({}));
+            if let (true, Some(old), None) = (newer, &old, doc.get(&park)) {
+                doc[&park] = old.clone();
+            }
             doc[cell] = state;
             put(db, &self.key, &doc)?;
         }
         put(db, &format!("{}:__schema", self.app), &json!(SCHEMA))?;
         put(db, &format!("{}:__persistKey", self.app), &json!(self.key))?;
-        let mut versions = self.versions(db)?;
-        let stored = versions.get(cell).and_then(Value::as_u64).unwrap_or(0);
         if u64::from(version) > stored {
             versions.insert(cell.into(), json!(version));
             put(db, &format!("{}:__versions", self.app), &Value::Object(versions))?;

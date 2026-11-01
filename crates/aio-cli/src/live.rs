@@ -173,8 +173,9 @@ fn walk(at: &Value, steps: &[Step], done: &mut Vec<String>) -> Result<Value, Str
 
 /// A call's arguments: `--args` exactly (a JSON list; `@file` reads it from
 /// a file, `-` from stdin), else each word as JSON when it is (`3`, `true`,
-/// `{"a":1}`), as text when not. None is `null`, what a method without
-/// parameters takes.
+/// `{"a":1}`), as text when not; words that are all `key=value` (aio's
+/// named payload) one object of them, each value read as a word. None is
+/// `null`, what a method without parameters takes.
 pub(crate) fn call_args(words: &[&str], exact: Option<&str>) -> Result<Value, String> {
     let list = match exact {
         Some(_) if !words.is_empty() => return Err("give the arguments as words or as --args, not both".into()),
@@ -191,9 +192,34 @@ pub(crate) fn call_args(words: &[&str], exact: Option<&str>) -> Result<Value, St
                 _ => return Err(format!("--args takes a JSON list, like --args '[\"text\", 3]'; got {text}")),
             }
         }
+        None if !words.is_empty() && words.iter().all(|w| pair(w).is_some()) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in words.iter().filter_map(|w| pair(w)) {
+                if obj.insert(k.into(), word(v)?).is_some() {
+                    return Err(format!("{k}= is given twice"));
+                }
+            }
+            vec![Value::Object(obj)]
+        }
         None => words.iter().map(|w| word(w)).collect::<Result<_, _>>()?,
     };
     Ok(if list.is_empty() { Value::Null } else { Value::Array(list) })
+}
+
+/// `key=value`, its key a name (`title=x`; not `https://x/?a=b`).
+fn pair(w: &str) -> Option<(&str, &str)> {
+    let (k, v) = w.split_once('=')?;
+    let name = k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    name.then_some((k, v))
+}
+
+/// `--body '{..}'`: that one object as the call's one argument.
+pub(crate) fn body(text: &str) -> Result<Value, String> {
+    match serde_json::from_str::<Value>(text) {
+        Ok(v @ Value::Object(_)) => Ok(Value::Array(vec![v])),
+        _ => Err(format!("--body takes one JSON object, like --body '{{\"title\": \"x\"}}'; got {text}")),
+    }
 }
 
 /// One word: its JSON value, or the word as text. A whole number too big
@@ -347,9 +373,28 @@ pub(crate) fn expect(
 
 /// Call `method` with `args`, as `user`; the method's answer.
 pub(crate) fn call(link: &Link, cell: &str, method: &str, args: Value, user: &str) -> Out {
+    call_within(link, cell, method, args, user, None)
+}
+
+/// [`call`], its answer waited for `wait` at most (`--wait`).
+pub(crate) fn call_within(
+    link: &Link,
+    cell: &str,
+    method: &str,
+    args: Value,
+    user: &str,
+    wait: Option<std::time::Duration>,
+) -> Out {
     let mut t = connect(link, cell, user).map_err(|e| e.to_string())?;
-    let r = aio::rt().block_on(t.call(method, args)).map_err(|e| format!("refused: {e}"))?;
-    Ok(pretty(&r))
+    let r = aio::rt().block_on(async {
+        match wait {
+            Some(w) => tokio::time::timeout(w, t.call(method, args)).await.map_err(|_| {
+                format!("no answer within {} s (it may still run in the app: ax events says)", w.as_secs_f64())
+            }),
+            None => Ok(t.call(method, args).await),
+        }
+    })?;
+    Ok(pretty(&r.map_err(|e| format!("refused: {e}"))?))
 }
 
 /// `ax peer <app>` (aio: `am peer`): what a network caller may call of each
@@ -384,6 +429,37 @@ pub(crate) fn peer(cells: &[Value], json: bool) -> String {
         }
     }
     if out.is_empty() { "no cell answers on the running app's door".into() } else { out.join("\n") }
+}
+
+/// `ax peer --types`: what `cells` (as [`peer`] reads them) let a caller
+/// call, as Rust (pure): a module a cell, its `ID` and a `&str` const a
+/// method under its signature, so a peer's call by name breaks at compile
+/// time when the method is renamed (aio's peer types).
+pub(crate) fn peer_types(app: &str, cells: &[Value]) -> String {
+    let mut out = format!(
+        "//! Written by `ax peer {app} --types` from what {app} answered: its cells and\n\
+         //! methods by name, for `aio::peer::Peer::call`. Run it again when {app} changes.\n\
+         #![allow(dead_code, non_upper_case_globals)]\n"
+    );
+    for c in cells {
+        let cell = c["cell"].as_str().unwrap_or("?");
+        out.push_str(&format!(
+            "\n/// {cell} v{}\npub mod {} {{\n    pub const ID: &str = {cell:?};\n",
+            c["v"],
+            crate::testgen::ident(cell)
+        ));
+        for m in c["methods"].as_array().into_iter().flatten() {
+            let name = m["method"].as_str().unwrap_or("?");
+            let sig = m["sig"].as_str().unwrap_or(name);
+            out.push_str(&format!(
+                "    /// `{sig}`: {}\n    pub const {}: &str = {name:?};\n",
+                m["may"].as_str().unwrap_or("?"),
+                crate::testgen::ident(name)
+            ));
+        }
+        out.push_str("}\n");
+    }
+    out
 }
 
 /// The links open to the app's cell, oldest first.
@@ -546,6 +622,21 @@ mod tests {
         );
         assert_eq!(call_args(&["https://x.example/?a=b"], None), Ok(json!(["https://x.example/?a=b"])));
         assert_eq!(call_args(&[], None), Ok(Value::Null));
+        // aio's named payload: key=value words, all of them, are one object.
+        assert_eq!(
+            call_args(&["title=milk", "n=2", "done=false"], None),
+            Ok(json!([{ "title": "milk", "n": 2, "done": false }]))
+        );
+        assert_eq!(call_args(&["title=a=b"], None), Ok(json!([{ "title": "a=b" }])));
+        assert_eq!(call_args(&["title=x", "plain"], None), Ok(json!(["title=x", "plain"])), "not all pairs: words");
+        assert!(call_args(&["a=1", "a=2"], None).unwrap_err().contains("a= is given twice"));
+        assert_eq!(body("{\"a\":1}"), Ok(json!([{ "a": 1 }])));
+        assert!(body("[1]").unwrap_err().contains("one JSON object"));
+        let cells = [
+            json!({ "cell": "todo", "v": 2, "methods": [{ "method": "add", "sig": "add(text: String) -> u32", "may": "yes" }] }),
+        ];
+        let t = peer_types("notes", &cells);
+        assert!(t.contains("pub mod todo {\n    pub const ID: &str = \"todo\";\n    /// `add(text: String) -> u32`: yes\n    pub const add: &str = \"add\";\n}"), "{t}");
         // Exact: --args is the list as given.
         assert_eq!(call_args(&[], Some("[\"3\"]")), Ok(json!(["3"])));
         assert_eq!(call_args(&[], Some("[]")), Ok(Value::Null));

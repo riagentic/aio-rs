@@ -130,7 +130,16 @@ mod renders {
 
     /// Listen on this thread (the views render where their test runs).
     pub(super) fn install() {
-        ON.with_borrow_mut(|g| _ = g.get_or_insert_with(|| tracing::subscriber::set_default(Spans)));
+        ON.with_borrow_mut(|g| {
+            g.get_or_insert_with(|| {
+                let on = tracing::subscriber::set_default(Spans);
+                // A render callsite another test thread registered at the same
+                // moment can be cached as of no interest (tracing-core): asked
+                // again with this listener in place, or its renders go uncounted.
+                tracing::callsite::rebuild_interest_cache();
+                on
+            });
+        });
     }
 
     /// The test, or the page, had its turn: the loop count starts over.

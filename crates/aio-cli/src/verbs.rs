@@ -101,7 +101,8 @@ this OS: dist/<id>-<version>-<os>-<arch>.* (Linux .tar.gz, macOS
 zipped .app, Windows one-click .exe + zip; --windows: cross-built from Linux);
 --targets: some of them, or kinds; --list: the kinds and targets;
 --platforms ([build] platforms): each desktop target for each of linux,
-linux-arm64, windows, windows-arm64, macos, macos-arm64 or host;
+linux-arm64, windows, windows-arm64, macos, macos-arm64 or host; all:
+every one, what this machine can't build said with why and left out;
 --sizes: the release binary against its budget, packed nowhere, and which
 crates take its space (over budget: always); size it so, not with a plain
 `cargo build --release` (no ax link flags: some % bigger);
@@ -117,14 +118,18 @@ lib for wasm32, a manifest, Apple tags, icons and an offline service worker
     ),
     v(
         "lab",
-        "lab <app> <os> [--stop]",
-        "the app on a real windows, macos or linux machine's desktop, for a
-person to click around in: the machine is AIO_LAB_WINDOWS, AIO_LAB_MACOS
-or AIO_LAB_LINUX ('[ssh options] [user@]host'); built for it, copied over
-ssh into aio-rs-test/lab/<id> there and started with its data, runtime
-and caches inside that folder; --stop: what runs from it ended, the
-folder removed; android: in a container of Google's emulator (docker, KVM),
-its screen at http://127.0.0.1:6080 (--stop removes it)",
+        "lab <app> <os> [--stop] [--boot] [--status] [--reset] [--ram size] [--cpus n] [--disk size] [--os-version v] [--apk file] [--port n]",
+        "the app on a real windows, macos, linux or android desktop, for a
+person to click around in. A machine named in AIO_LAB_WINDOWS,
+AIO_LAB_MACOS or AIO_LAB_LINUX ('[ssh options] [user@]host'): built for
+it, copied over ssh into aio-rs-test/lab/<id> there and started with
+its data, runtime and caches inside that folder; --stop: what runs from
+it ended, the folder removed. Else (or --boot) aio's lab here, in Docker:
+a Windows or macOS VM, an XFCE desktop or the Android emulator, its
+viewer on a loopback port, the app's dist/ in it at /shared (android:
+its APK installed once booted, --apk: which); --status, --stop, --reset
+(a VM's disk too); a VM's --ram 8G --cpus 4 --disk 64G --os-version 11;
+--port: the viewer's (first Windows run: ~30 min, ~8.5 GB)",
     ),
     v(
         "install",
@@ -137,7 +142,7 @@ start it; refuses an APK older than the sources (--build: build first);
     ),
     v(
         "lint",
-        "lint [dir] [--json] [--no-hints] [--no-clippy] [--safe-fix]",
+        "lint [dir] [--json] [--no-hints] [--no-clippy] [--safe-fix] [--fix] [--from version] [--tests]",
         "what types can't check: credentials, impure methods, hooks,
 a11y, cell ids, plus clippy (exit 1: errors; `ax lint --help`)",
     ),
@@ -167,8 +172,15 @@ key made for the run, until Ctrl-C)",
         "events",
         "events <app> [cell] [--last N] [--diff] [--from file]",
         "the newest events (default 20), oldest first; --diff: each with the
-changes it made (one cell, the app running); --from: of another store
-or backup file",
+changes it made (one cell); --from: of another store or backup file",
+    ),
+    v(
+        "timeline",
+        "timeline <app> [cell] [--last N] [--from file]",
+        "what happened and what it changed: the newest events of every cell
+(default 20), oldest first, each with its state diff (the running
+app's, else its store's replayed by the app's code, built by cargo as
+its tests are); --from: another store or backup file",
     ),
     v(
         "state",
@@ -186,10 +198,12 @@ picks (owner.{id,name}); --watch: a line now and after each change",
     ),
     v(
         "snapshot load",
-        "snapshot load <app> <file>",
+        "snapshot load <app> <file> [--force]",
         "put a snapshot file's cells in place on the running app, each as a
-new event (ax timetravel goto steps back); a snapshot taken --as
-someone holds only what they saw",
+new event (ax timetravel goto steps back); refused when its cells
+aren't the app's (another app's, an older build's) unless --force,
+which loads the ones the app has; a snapshot taken --as someone
+holds only what they saw",
     ),
     v(
         "replay",
@@ -202,9 +216,19 @@ backup); what they caused (schedules, effects) the app makes again;
     v(
         "record",
         "record <app> <cell> <file> [range] [--from file] [--type path]",
-        "a Rust test from what the running app's cell just did: booted on the
-state before the range, its calls made again, the state they left
-asserted (--type: the cell's type, default <crate>::<Cell>)",
+        "a Rust test from what the app's cell did: booted on the state before
+the range, its calls made again, the state they left asserted; the
+running app's, else (stopped, or --from) its store replayed by the
+app's code, built by cargo as its tests are (--type: the cell's type,
+default <crate>::<Cell>)",
+    ),
+    v(
+        "persist",
+        "persist <app> [--drop cell]",
+        "write what the running app holds back now (coalesced calls, held
+runs) instead of when it would; --drop: a stored cell this build no
+longer declares, its history gone from the store (refused for a
+cell the app declares)",
     ),
     v(
         "migrations",
@@ -214,9 +238,12 @@ drift: fields stored but no longer declared, or of another type",
     ),
     v(
         "call",
-        "call <app> <cell> <method> [arg…] [--args json] [--as user]",
+        "call <app> <cell> <method> [arg…] [--args json] [--body json] [--wait s] [--as user]",
         "call a method of the running app, print its answer; each arg
-is JSON or text; --args '[..]' exact (@file, - for stdin)",
+is JSON or text; k=v words (all of them): one object, its fields;
+--args '[..]' exact (@file, - for stdin); --body '{..}': that one
+object; --wait: its answer waited for s seconds at most (default:
+until it comes)",
     ),
     v(
         "expect",
@@ -233,7 +260,8 @@ the links open to its cell",
     v(
         "shot",
         "shot <app> [file] [--cdp port] [--window n] [--check base] [--update base] [--threshold n] [--max-diff r] [--selector css] [--full] [--size WxH] [--video file] [--duration s] [--markers]",
-        "a PNG of the app's window (default <id>-<time>.png), over the DevTools
+        "a PNG of the app's window (default <id>-<time>.png; --json: {file,
+bytes, width, height}), over the DevTools
 protocol (a dev build's own door: no flag; --cdp port, else AIORT_CDP,
 else the port a launch with --cdp opened, when there is one);
 --check: exit 1 unless it looks like base (a channel may move --threshold,
@@ -244,7 +272,9 @@ default 2; a share --max-diff of pixels may differ, default 0);
 --video file.mp4|.webm: record the window until Ctrl-C (or --duration
 seconds), encoded by ffmpeg (none: by the window itself, slower);
 --markers: each ax trigger meanwhile in
-file.markers.json, [{t, path, action, rect}] (ms, video px)",
+file.markers.json, [{t, path, action, rect}] (ms, video px);
+--json: {\"event\":\"recording\",\"file\",\"t0\"} on stderr once its first
+frame is taken (t0: its epoch ms)",
     ),
     v(
         "eval",
@@ -267,17 +297,29 @@ its own door",
     ),
     v(
         "surface",
-        "surface <app> [path] [--names] [--rects] [--headless] [--root c] [--cdp port] [--window n] [--wait-client ms]",
+        "surface <app> [path] [--names] [--rects] [--component name] [--depth N] [--full] [--headless] [--root c] [--cdp port] [--window n] [--wait-client ms]",
         "what a person can see and use in the app's window, one line each,
 nested: role \"name\" [handle] state, named as TestUi names them (a
 data-t handle, else SaveButton, EmailInput, SaveButton2…); path: that
 element and what is under it (row-2, list/row-3; none there: exit 1);
+--component row: each element handled row or row-<n> (every
+instance), with what is under it; --depth N: N levels down at most
+(0: the elements alone); --full: names whole (else cut at 40);
 --names: the auto names, in order;
 --rects: where each is, @x,y wxh in CSS px; --wait-client: wait so long
 for the window (right after a start or reload); --window, the protocol:
 as ax eval; --headless: with no window open (a server), the app's views
 (--root, default App) mounted headless on its running cells, built by
 cargo as its tests are",
+    ),
+    v(
+        "testgen",
+        "testgen <app> [--out file] [--cdp port] [--window n] [--wait-client ms]",
+        "a typed name table of what the running app's window shows, for its
+UI tests: a const per handle and auto name (ui::SaveButton,
+ui::row_2), so a renamed element fails to compile, not to run; written
+to --out (default tests/ui_names/mod.rs; `mod ui_names;` in a test);
+run it again after a UI change",
     ),
     v(
         "preview",
@@ -294,8 +336,8 @@ type-checked and rendered as the app's tests are, by cargo",
 keys: click dblclick hover focus blur, type <text> (appends), setValue
 <text> (replaces), clear, press|keyDown|keyUp <key> (Enter, ctrl+k, mod+s),
 select <value>, check uncheck, scroll <top[,left]>, dragTo <path>; path
-window: a key to the window itself (a global key); --wait-client,
---window, the protocol: as ax surface",
+window: a key to the window itself (a global key); --window: which
+(default: the newest open); --wait-client, the protocol: as ax surface",
     ),
     v(
         "timetravel",
@@ -307,16 +349,20 @@ step is a new event: none is lost",
     ),
     v(
         "doctor",
-        "doctor <app>",
-        "is the running app the code on disk (version, build, edits since), and
-who decided each setting (config, dirs, environment)",
+        "doctor <app> [--harden]",
+        "is the running app the code on disk (version, build, edits since),
+who decided each setting (config, dirs, environment), and hints: a
+runtime older than this ax ships, an open door ([server] open);
+--harden: the security switches it hasn't decided on written into its
+aio.toml (a server beyond loopback: [server] strict_origin = true), said",
     ),
     v(
         "heap",
         "heap <app> [--watch]",
         "what the app holds: its memory, each cell's state and events;
---watch: again every 2 s (a top view)",
+--watch: again every 2 s (a top view; ax top: another interval)",
     ),
+    v("top", "top <app> [secs]", "ax heap again every secs (2) seconds, until Ctrl-C; --json: once"),
     v("schedules", "schedules <app>", "saved schedules, soonest first"),
     v(
         "sql",
@@ -341,22 +387,29 @@ app runs, else stored)",
     ),
     v(
         "peer",
-        "peer <app> [--as user] [--role r]",
+        "peer <app> [cell…] [--as user] [--role r] [--types file]",
         "what a caller (user, role) may call of the running app over the
-network: each method's Rust signature and what its #[client] rule says",
+network: each method's Rust signature and what its #[client] rule says
+(cells: those, default all); app: one here, or another machine's by its
+profile (a .aioapp, ax profile's file; its cells named), asked as that
+profile's key holder; --types: written as Rust consts (a module a cell,
+a const a method), so a call by a renamed name fails to compile",
     ),
     v(
         "cost",
-        "cost <app> [cell] [--keys]",
+        "cost <app> [cell] [--keys] [--window s]",
         "what each cell of the running app sent its clients (pushes, bytes per
 second, mean, full resends) and its methods' p95 time; its top keys by
-bytes (--keys: all of them)",
+bytes (--keys: all of them); --window 5m: over the newest 5 minutes
+(seconds, or 30s, 5m, 1h; default: since its first send)",
     ),
     v(
         "errors",
-        "errors <app> [--last N]",
+        "errors <app> [--last N] [--since s]",
         "ax dev's failed build, then the newest warnings and errors
-(default 20), each under the start of the app it came from",
+(default 20), each under the start of the app it came from;
+--since: newer than s (15m, 2h, 2026-10-28T10:00), reload: since its
+newest start or hot patch",
     ),
     v("health", "health <app>", "healthy, or why not (exit 1: degraded, stuck or not running)"),
     v(
@@ -367,16 +420,18 @@ bytes (--keys: all of them)",
     ),
     v(
         "stop",
-        "stop <app> [app…] [--all] [--wait s]",
+        "stop <app> [app…] [--all] [--wait s] [--no-wait]",
         "ask the app to close (any OS) and wait until it is gone; still there
-after s (15) seconds: SIGTERM, then SIGKILL; --all: every app of this
-workspace",
+after s (15) seconds: SIGTERM, then SIGKILL; --no-wait: asked, not
+waited for; --all: every app of this workspace; an --instance started
+--fresh: its data thrown away once it is gone",
     ),
     v(
         "start",
-        "start <app> [arg…] [--wait s] [--fresh] [--display d] [--cdp] [--all]",
+        "start <app> [arg…] [--wait s] [--no-wait] [--fresh] [--display d] [--cdp] [--all]",
         "run the app in the background (built first in its workspace, else
-the installed one) and wait until it is up, at most s (30) seconds; args
+the installed one) and wait until it is up, at most s (30) seconds
+(--no-wait: until it is spawned); args
 after -- go to the app; its output: logs/start.log; --fresh, --display,
 --cdp: as ax dev; --all: every app of this workspace (its components)",
     ),
@@ -452,10 +507,23 @@ credential (--out writes it 0600); hand it to a client",
     v("import", "import <app> <file>", "link this device to an app by its profile, as pair does"),
     v("backup", "backup <app> [file]", "copy the app's data (safe while it runs)"),
     v("restore", "restore <app> <file>", "put a backup back (the app must be closed; the data it replaces is kept)"),
-    v("discover", "discover", "the aio-rs apps on this LAN that answer ([server] discover = true)"),
+    v(
+        "discover",
+        "discover [--timeout ms]",
+        "the aio-rs apps on this LAN that answer ([server] discover = true), within ms (1200)",
+    ),
     v("feedback", "feedback [app] [--create]", "where findings about aio-rs go; one app's file (--create: make it)"),
     v("agent", "agent [section] [--list] [--min] [--max]", "the brief for agents: the rules first, then how aio-rs works"),
-    v("help", "help [verb]", "this, or one verb in full"),
+    v(
+        "control",
+        "control <app> [--port n]",
+        "the running app's verbs over loopback HTTP, for tools that can't run
+ax (aio's /__aio/trojan/*): GET /__aio/trojan/<verb>?<arg>&<flag>=v
+answers what ax <verb> <app> <arg> --<flag> v --json does, behind a
+key made for the run (Authorization: Bearer <key>, printed first);
+until Ctrl-C",
+    ),
+    v("help", "help [verb] [--commands]", "the everyday verbs; --commands: every verb; verb: that one in full"),
     v("version", "version", "the aio-rs version of this ax"),
 ];
 
@@ -482,8 +550,41 @@ const NO_APP_WITH: &[(&str, &str)] =
     &[("stop", "--all"), ("start", "--all"), ("restart", "--all"), ("release", "--aio"), ("keygen", "--aio")];
 
 /// Flags every verb takes.
-const GLOBAL: &[&str] =
-    &["--help", "--version", "--json", "--app <name>", "--profile <name>", "--instance <name>", "--home <dir>"];
+const GLOBAL: &[&str] = &[
+    "--help",
+    "--version",
+    "--json",
+    "--quiet",
+    "--app <name>",
+    "--profile <name>",
+    "--instance <name>",
+    "--home <dir>",
+];
+
+/// What `ax help` shows (aio's `EVERYDAY`): what it takes to get from
+/// nothing to a running, inspected, driven app; the rest is one
+/// `--commands` away.
+const EVERYDAY: &[(&str, &str)] = &[
+    ("agent", "the brief for agents: the rules, then how aio-rs works"),
+    ("create", "a new app in ./<name> that runs, tests and builds as it is"),
+    ("dev", "run an app; edits hot-patch in, else rebuild + restart"),
+    ("test", "the app's tests (cargo test), --video to watch them"),
+    ("start", "run it in the background and wait until it is up"),
+    ("stop", "ask it to close and wait until it is gone"),
+    ("restart", "stop it, start it again with the flags it had"),
+    ("status", "started, starting, stopping or stopped (exit 0, 2, 1)"),
+    ("logs", "the newest log events; --follow for new ones"),
+    ("errors", "the failed build, then the newest warnings and errors"),
+    ("state", "a cell's state, live (else stored); --watch for changes"),
+    ("call", "call a method of the running app"),
+    ("surface", "what a person can see and use in the window"),
+    ("trigger", "click, type, press… on an element, as a person"),
+    ("shot", "a PNG (or --video) of the window; --check a baseline"),
+    ("timeline", "the newest events of every cell, each with its diff"),
+    ("doctor", "is the running app the code on disk; who set what"),
+    ("build", "an installable app for this OS (or the [build] targets)"),
+    ("release", "build, sign and lay out a release for updates"),
+];
 
 /// Flags that pick where the app runs (its home), and the verbs about an
 /// app that take none: they work on its source, not a running copy.
@@ -494,7 +595,8 @@ const UNHOMED: [&str; 9] =
 const FOOT: &str = "Inside an app's folder <app> may be left out; --app <name> names it anywhere.
 <app>@<profile>, --profile, --instance, --home: that copy of the app (as its launch takes them);
 asked for none, and the app runs from exactly one other home, the verbs follow it.
---json: one JSON object on stdout ({\"ok\":…}); exit 0 ok, 1 failed, 2 bad usage.
+--json: one JSON object on stdout ({\"ok\":…}); --quiet: nothing on stdout but failures;
+exit 0 ok, 1 failed, 2 bad usage.
 AIORT_DATA=<dir> points at one app's dirs instead of the tool home.";
 
 pub fn find(name: &str) -> Option<&'static Verb> {
@@ -556,8 +658,19 @@ fn version() -> String {
     format!("aio-rs {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// The whole help.
+/// The everyday verbs, one line each: one screen.
 pub fn help() -> String {
+    let mut out = String::from("ax — the aio-rs command\n\n");
+    for (name, about) in EVERYDAY {
+        out.push_str(&format!("  ax {name:<10}{about}\n"));
+    }
+    out.push_str("\nax help --commands: every verb; ax help <verb>: one in full.\n");
+    out.push_str(FOOT);
+    out
+}
+
+/// Every verb, each with all it says.
+pub fn commands() -> String {
     let mut out = String::from("ax — the aio-rs command\n\n");
     for v in VERBS {
         let usage = format!("ax {}", v.usage);
@@ -648,8 +761,10 @@ fn read_one(args: &[String], here: &dyn Fn() -> Result<String, String>) -> Resul
         return Ok(Ask::Say(verb_help(verb)));
     }
     if verb.name == "help" {
+        let every = args[1..own].iter().any(|a| a == "--commands");
         return match args.get(1) {
             None => Ok(Ask::Say(help())),
+            Some(_) if every && own == 2 => Ok(Ask::Say(commands())),
             Some(_) => {
                 let name = args[1..own].join(" ");
                 find(&name).map(|v| Ask::Say(verb_help(v))).ok_or_else(|| format!("no verb `{name}`"))
@@ -838,11 +953,15 @@ mod tests {
 
     #[test]
     fn help_and_version_on_any_verb() {
-        let all = said("help");
+        // aio's tiers: the everyday verbs on one screen, every verb a flag away.
+        let day = said("help");
+        assert!(day.lines().count() <= 30 && day.contains("  ax state     a cell's state"), "{day}");
+        assert!(EVERYDAY.iter().all(|(v, _)| find(v).is_some()), "an everyday verb is a verb");
+        assert_eq!(said(""), day);
+        assert_eq!(said("--help"), day);
+        let all = said("help --commands");
         assert!(all.contains("ax state <app> <cell> [path] [--watch] [--as user]"), "{all}");
         assert!(all.lines().any(|l| l.starts_with("  ax data <app>") && l.ends_with("and what to back up")));
-        assert_eq!(said(""), all);
-        assert_eq!(said("--help"), all);
         let one = said("events --help");
         assert!(
             one.starts_with("ax events <app> [cell] [--last N] [--diff] [--from file]\n\n  the newest events"),
@@ -862,11 +981,26 @@ mod tests {
     }
 
     #[test]
+    fn the_new_flags_read_as_their_verbs_take_them() {
+        assert_eq!(run("health app --quiet"), ["health", "--quiet", "--", "app"]);
+        assert_eq!(run("timeline app --last 5"), ["timeline", "--last", "5", "--", "app"]);
+        assert_eq!(run("stop app --no-wait"), ["stop", "--no-wait", "--", "app"]);
+        assert_eq!(run("top app 5"), ["top", "--", "app", "5"]);
+        assert_eq!(run("call app c m title=x --wait 2"), ["call", "--wait", "2", "--", "app", "c", "m", "title=x"]);
+        assert_eq!(
+            run("surface app --component row --depth 1 --full")[..5],
+            ["surface", "--component", "row", "--depth", "1"]
+        );
+        assert!(r("lab app linux --version 2").is_ok_and(|a| matches!(a, Ask::Say(_))), "--version stays ax's own");
+        assert_eq!(run("lab app windows --boot --os-version 10")[..4], ["lab", "--boot", "--os-version", "10"]);
+    }
+
+    #[test]
     fn another_spelling_reads_as_its_verb() {
         assert_eq!(run("runtime --prune --yes --days 3"), run("prune --yes --days 3"));
         assert_eq!(run("runtime --prune"), ["prune", "--"]);
         assert_eq!(run("runtime --fetch"), ["runtime", "--fetch", "--"]);
         assert!(r("runtime --prune --fetch").unwrap_err().contains("prune: unknown flag --fetch"));
-        assert!(said("help").contains("also: ax runtime --prune"));
+        assert!(said("help --commands").contains("also: ax runtime --prune"));
     }
 }

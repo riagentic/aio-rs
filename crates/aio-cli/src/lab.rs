@@ -1,4 +1,4 @@
-//! `ax lab <app> <windows|macos|linux|android> [--stop]` (aio's `am lab`): the app
+//! `ax lab <app> <windows|macos|linux> [--stop]` (aio's `am lab`): the app
 //! on a real machine of that OS, on its desktop, for a person to click
 //! around in. aio booted containers (dockurr, webtop); aio-rs uses machines that
 //! are there already: `AIO_LAB_WINDOWS`, `AIO_LAB_MACOS`, `AIO_LAB_LINUX`,
@@ -10,8 +10,6 @@
 //! Linux: its `DISPLAY`). Its data, runtime and caches stay inside that
 //! folder (its homes point there), so `--stop` ends what runs from it and
 //! removes it whole: nothing else on the machine is touched.
-//! `android` is aio's container instead: Google's emulator (KVM), its screen in
-//! a browser at http://127.0.0.1:6080; `--stop` removes the container.
 use crate::platform::Platform;
 use crate::remote::Host;
 use std::process::{Command, Stdio};
@@ -198,84 +196,9 @@ fn ran(mut cmd: Command) -> Result<String, String> {
     }
 }
 
-/// The Android lab (aio's `am lab android`): Google's emulator in a
-/// container, KVM-accelerated, its screen in a browser (noVNC); `adb` in it
-/// installs the APK.
-pub const ANDROID_IMAGE: &str = "budtmo/docker-android:emulator_14.0";
-pub const ANDROID_CONTAINER: &str = "aio-lab-android";
-/// The noVNC viewer's port, on this machine's loopback only.
-pub const VIEWER: u16 = 6080;
-
-/// `docker run` of the Android lab (pure).
-pub fn android_run_args() -> Vec<String> {
-    let port = format!("127.0.0.1:{VIEWER}:{VIEWER}");
-    ["run", "-d", "--name", ANDROID_CONTAINER, "--device", "/dev/kvm", "--shm-size=2g", "-p", &port]
-        .into_iter()
-        .chain(["-e", "EMULATOR_DEVICE=Samsung Galaxy S10", "-e", "WEB_VNC=true", ANDROID_IMAGE])
-        .map(String::from)
-        .collect()
-}
-
-/// `adb` inside the lab's container, with `args`.
-fn in_lab(args: &[&str]) -> Command {
-    let mut c = Command::new("docker");
-    c.args(["exec", ANDROID_CONTAINER, "adb"]).args(args);
-    c
-}
-
-/// `ax lab <app> android [--stop]`: the container started (or the running
-/// one used), its emulator waited for (the first boot takes 1 to 3 min),
-/// the app's x86_64 APK built, installed and started; `--stop` removes the
-/// container, and with it everything the app did there.
-fn android(app: &str, stop: bool) -> Result<String, String> {
-    if stop {
-        let mut rm = Command::new("docker");
-        rm.args(["rm", "-f", ANDROID_CONTAINER]);
-        return ran(rm).map(|_| format!("{ANDROID_CONTAINER} removed"));
-    }
-    if !std::path::Path::new("/dev/kvm").exists() {
-        return Err("the Android lab needs KVM (/dev/kvm): a Linux machine with virtualisation on".into());
-    }
-    let mut running = Command::new("docker");
-    running.args(["inspect", "-f", "{{.State.Running}}", ANDROID_CONTAINER]);
-    if ran(running).ok().as_deref() != Some("true") {
-        eprintln!("ax lab: starting {ANDROID_IMAGE} (the first pull is a few GB)…");
-        let mut run = Command::new("docker");
-        run.args(android_run_args());
-        ran(run)?;
-    }
-    eprintln!("ax lab: waiting for the emulator to boot (1 to 3 min the first time)…");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    while ran(in_lab(&["shell", "getprop", "sys.boot_completed"])).ok().as_deref() != Some("1") {
-        if std::time::Instant::now() > deadline {
-            return Err(format!("the lab's emulator did not boot in 300 s: docker logs {ANDROID_CONTAINER}"));
-        }
-        std::thread::sleep(std::time::Duration::from_secs(5));
-    }
-    let meta = crate::dev::metadata()?;
-    let (a, cfg) = crate::build::app_of(&crate::dev::locate(&meta, app)?)?;
-    let x86 = crate::android::ABIS.iter().find(|(abi, _)| *abi == "x86_64").ok_or("no x86_64 ABI")?;
-    let ask = crate::android::Ask { abis: std::slice::from_ref(x86), ..crate::android::Ask::RELEASE };
-    let (_, apks) = crate::build::android(app, ask)?;
-    let apk = apks.first().ok_or("the build made no APK")?;
-    let mut cp = Command::new("docker");
-    cp.arg("cp").arg(apk).arg(format!("{ANDROID_CONTAINER}:/tmp/app.apk"));
-    ran(cp)?;
-    ran(in_lab(&["install", "-r", "/tmp/app.apk"]))?;
-    let id = crate::android::application_id_of(&a.id, cfg.app.port_of.as_deref(), &cfg.build.android);
-    ran(in_lab(&["shell", "am", "start", "-n", &format!("{id}/aio.rt.MainActivity")]))?;
-    Ok(format!(
-        "{} runs in the Android lab: its screen at http://127.0.0.1:{VIEWER}/\nstop it, and remove all of it: ax lab {app} android --stop",
-        a.name
-    ))
-}
-
 /// `ax lab <app> <os>`: built, copied, started there; `stop`: what runs
 /// from its lab folder there ended and the folder removed.
 pub fn run(app: &str, os: &str, stop: bool) -> Result<String, String> {
-    if os == "android" {
-        return android(app, stop);
-    }
     let h = machine(os, &|k| std::env::var(k).ok())?;
     let p = platform(os)?;
     let meta = crate::dev::metadata()?;
@@ -306,7 +229,7 @@ mod tests {
         let h = machine("windows", &env).unwrap();
         assert_eq!((h.opts.len(), h.target.as_str()), (4, "me@vm"));
         assert!(machine("macos", &env).unwrap_err().contains("set AIO_LAB_MACOS"));
-        assert!(machine("beos", &env).unwrap_err().contains("windows, macos, linux"));
+        assert!(machine("android", &env).unwrap_err().contains("windows, macos, linux"));
         assert_eq!(platform("windows").unwrap().name, "windows");
         assert_eq!(platform("macos").unwrap().name, "macos-arm64");
     }
@@ -337,15 +260,5 @@ mod tests {
         let u = stop_script("macos", "notes");
         assert!(u.contains("index($2, d) == 1") && u.contains("rm -rf \"$d\""), "{u}");
         assert!(!u.contains("pkill") && !w.contains("taskkill"), "never by name");
-    }
-
-    #[test]
-    fn the_android_lab_is_aios_container_its_viewer_on_loopback_only() {
-        // aio am-cmd-lab.ts `android`.
-        let a = android_run_args();
-        assert!(a.windows(2).any(|w| w == ["--device", "/dev/kvm"]) && a.contains(&"--shm-size=2g".to_string()));
-        assert!(a.windows(2).any(|w| w == ["-p", "127.0.0.1:6080:6080"]), "never on the network: {a:?}");
-        assert!(a.contains(&"WEB_VNC=true".to_string()) && a.last().map(String::as_str) == Some(ANDROID_IMAGE));
-        assert_eq!(&a[..4], ["run", "-d", "--name", ANDROID_CONTAINER]);
     }
 }

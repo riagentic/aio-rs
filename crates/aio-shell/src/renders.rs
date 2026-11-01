@@ -344,6 +344,10 @@ mod tests {
         let s = said.clone();
         let wire = Tripwire::new(move |l| s.lock().unwrap().push(l.into()));
         tracing::subscriber::with_default(wire, || {
+            // A scoped subscriber's interest in a callsite another test thread
+            // registered at the same moment can be cached as none (tracing-core):
+            // asked again with this one in place.
+            tracing::callsite::rebuild_interest_cache();
             let mut dom = dioxus_core::VirtualDom::new(app);
             dom.rebuild_in_place();
             for _ in 0..LIMIT {
@@ -393,6 +397,7 @@ mod tests {
             v.as_array().unwrap().iter().map(walk).collect()
         };
         tracing::subscriber::with_default(wire, || {
+            tracing::callsite::rebuild_interest_cache();
             let mut dom = dioxus_core::VirtualDom::new(app);
             dom.rebuild_in_place();
             let row = |n: u32| json!(["Row", n, []]);
@@ -444,6 +449,7 @@ mod tests {
         let wire = Tripwire::new(|_| {});
         let tree = wire.tree();
         tracing::subscriber::with_default(wire, || {
+            tracing::callsite::rebuild_interest_cache();
             let mut dom = dioxus_core::VirtualDom::new(app);
             dom.rebuild_in_place();
             dom.in_runtime(|| TICK.get().unwrap().set(1));

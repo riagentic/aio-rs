@@ -11,25 +11,6 @@ use std::collections::BTreeMap;
 
 type Out = Result<String, String>;
 
-/// What the store marks a rewind (and a loaded state) with.
-const REWIND: &str = "$rewind";
-
-/// A cell's log as time travel reads it: each event's seq, and for a
-/// rewind the event it went back to.
-pub fn log(db: &Connection, cell: &str) -> Result<Vec<(u64, Option<u64>)>, String> {
-    let mut q =
-        db.prepare("SELECT seq, method, args FROM log WHERE cell = ?1 ORDER BY seq").map_err(|e| e.to_string())?;
-    let rows = q
-        .query_map([cell], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-        .map_err(|e| e.to_string())?;
-    rows.map(|r| {
-        let (seq, method, args) = r.map_err(|e| e.to_string())?;
-        let to = (method == REWIND).then(|| serde_json::from_str::<Value>(&args).ok()?["to"].as_u64()).flatten();
-        Ok((seq as u64, to))
-    })
-    .collect()
-}
-
 pub fn ask(link: &Link, cell: &str, user: &str, msg: Value) -> Result<(Value, Value), String> {
     aio::rt().block_on(async {
         let mut l = Live::connect(link, cell, user).await.map_err(|e| e.to_string())?;
@@ -87,19 +68,47 @@ pub fn said((path, before, after): &(String, Value, Value)) -> String {
 
 /// `ax snapshot load <app> <file>`: each cell the file holds (`aio
 /// snapshot`'s one object) put in place over its door, a new event each.
-pub fn load(links: &dyn Fn(&str) -> Result<Link, String>, text: &str, user: &str) -> Out {
+/// `app`: the cells the running app serves; a file of another cell set (another
+/// app's, an older build's) is refused unless `force`, which loads the
+/// cells the app has and says the rest.
+pub fn load(links: &dyn Fn(&str) -> Result<Link, String>, text: &str, user: &str, app: &[String], force: bool) -> Out {
     let all: serde_json::Map<String, Value> =
         serde_json::from_str(text).map_err(|e| format!("not a snapshot (one JSON object of cells): {e}"))?;
+    let held: Vec<&String> = all.iter().filter(|(_, v)| !v.is_null()).map(|(c, _)| c).collect();
+    let (extra, missing): (Vec<&String>, Vec<&String>) = (
+        held.iter().copied().filter(|c| !app.contains(c)).collect(),
+        app.iter().filter(|c| !held.contains(c)).collect(),
+    );
+    let list = |v: &[&String]| v.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ");
+    if (!extra.is_empty() || !missing.is_empty()) && !force {
+        let mut why = vec![];
+        if !extra.is_empty() {
+            why.push(format!("it holds {}, which the app hasn't", list(&extra)));
+        }
+        if !missing.is_empty() {
+            why.push(format!("it lacks {}, which the app has", list(&missing)));
+        }
+        return Err(format!(
+            "not this app's cells: {} (another app's snapshot, or an older build's); --force loads the cells the app has",
+            why.join("; ")
+        ));
+    }
     let mut said = vec![];
-    for (cell, state) in all.iter().filter(|(_, v)| !v.is_null()) {
-        let (seq, _) = ask(&links(cell)?, cell, user, json!({ "t": "load", "state": state }))?;
+    for cell in held.iter().filter(|c| !extra.contains(c)) {
+        let (seq, _) = ask(&links(cell)?, cell, user, json!({ "t": "load", "state": all[cell.as_str()] }))?;
         let back = seq.as_u64().unwrap_or(1).saturating_sub(1);
         said.push(format!(
             "{cell}: loaded as event {seq} (the state before it: `ax timetravel <app> {cell} goto {back}`)"
         ));
     }
     if said.is_empty() {
-        return Err("the snapshot holds no cell's state".into());
+        return Err("the snapshot holds no cell's state the app has".into());
+    }
+    if !extra.is_empty() {
+        said.push(format!("left out (the app hasn't them): {}", list(&extra)));
+    }
+    if !missing.is_empty() {
+        said.push(format!("as they were (not in the snapshot): {}", list(&missing)));
     }
     Ok(said.join("\n"))
 }
@@ -448,12 +457,25 @@ mod tests {
         h.inc().unwrap();
         // A snapshot file loaded back: each cell a new event.
         let links = |c: &str| if c == "steps" { Ok(link.clone()) } else { Err(format!("no door for {c}")) };
-        let said = load(&links, r#"{ "steps": { "n": 40 } }"#, "ops").unwrap();
+        let app = ["steps".to_string()];
+        let said = load(&links, r#"{ "steps": { "n": 40 } }"#, "ops", &app, false).unwrap();
         assert!(said.starts_with("steps: loaded as event"), "{said}");
         assert_eq!(h.state().n, 40);
-        assert!(load(&links, r#"{ "steps": { "n": "x" } }"#, "ops").unwrap_err().contains("doesn't fit"));
-        assert!(load(&links, "[1]", "ops").unwrap_err().contains("not a snapshot"));
-        assert!(load(&links, r#"{ "other": {} }"#, "ops").unwrap_err().contains("no door for other"));
+        assert!(load(&links, r#"{ "steps": { "n": "x" } }"#, "ops", &app, false).unwrap_err().contains("doesn't fit"));
+        assert!(load(&links, "[1]", "ops", &app, false).unwrap_err().contains("not a snapshot"));
+        // aio: another cell set is refused unless --force, which loads what the app has.
+        let other = r#"{ "steps": { "n": 41 }, "other": {} }"#;
+        let e = load(&links, other, "ops", &app, false).unwrap_err();
+        assert!(e.contains("it holds other, which the app hasn't") && e.contains("--force"), "{e}");
+        assert_eq!(h.state().n, 40, "nothing loaded");
+        let e = load(&links, "{}", "ops", &app, false).unwrap_err();
+        assert!(e.contains("it lacks steps"), "{e}");
+        let said = load(&links, other, "ops", &app, true).unwrap();
+        assert!(said.ends_with("left out (the app hasn't them): other"), "{said}");
+        assert_eq!(h.state().n, 41);
+        assert!(
+            load(&links, r#"{ "other": {} }"#, "ops", &app, true).unwrap_err().contains("no cell's state the app has")
+        );
         // Replay: an input sent again, by the running app's rules.
         crate::live::call(&link, "steps", "inc", json!([]), "ana").unwrap();
         let seq = h.snapshot().0;
