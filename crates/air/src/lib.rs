@@ -55,8 +55,8 @@ pub use event::*;
 pub use global::{Global, GlobalMemo};
 pub use reactive::{
     Callback, EventHandler, Memo, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback, context,
-    current_owner, detached, effect, in_views, memo, on_cleanup, once, parent_context, provide, provide_root, scope,
-    selector, signal, try_context, untrack, watch, with_owner,
+    current_owner, detached, effect, in_body, in_views, memo, on_cleanup, once, parent_context, provide, provide_root,
+    scope, selector, signal, try_context, untrack, watch, with_owner,
 };
 pub use task::{Resource, Task, live_tasks, on_wake, resource, run_tasks, spawn, spawn_forever, task};
 

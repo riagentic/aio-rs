@@ -1,4 +1,6 @@
-//! air's `rsx!` and `#[component]`. Dioxus's syntax, a different output:
+//! air's `rsx!` and `#[component]`. Dioxus's syntax, a different output
+//! (its paths start at `air`: the crate, or the name `aio::ui::prelude`
+//! brings in, so an app needs no `air` dependency of its own):
 //! one static template per element tree (its markup pre-encoded as a byte
 //! string: one token, whatever its size) and one call per dynamic hole.
 //! No syn: the input is split on token trees, expressions are passed
@@ -718,7 +720,7 @@ impl Tpl {
                 let id = self.mark();
                 let c = clones(r);
                 self.holes
-                    .push(quote!(::air::__rt::text(#id, { #c ::std::boxed::Box::new(move || ::std::format!(#f)) });));
+                    .push(quote!(air::__rt::text(#id, { #c ::std::boxed::Box::new(move || ::std::format!(#f)) });));
             }
             Node::El { tag, attrs, children, .. } => {
                 self.bytes.push(1);
@@ -745,26 +747,24 @@ impl Tpl {
                         let hole = match v {
                             Val::Fmt(f, r) => {
                                 let c = clones(r);
-                                quote!(::air::__rt::attr(#id, #k, { #c ::std::boxed::Box::new(move || ::air::IntoAttr::into_attr(::std::format!(#f))) });)
+                                quote!(air::__rt::attr(#id, #k, { #c ::std::boxed::Box::new(move || air::IntoAttr::into_attr(::std::format!(#f))) });)
                             }
-                            Val::Expr(e) => hole_fn(
-                                e,
-                                quote!(::air::IntoAttr::into_attr),
-                                |e| quote!(::air::__rt::attr(#id, #k, #e);),
-                            ),
+                            Val::Expr(e) => {
+                                hole_fn(e, quote!(air::IntoAttr::into_attr), |e| quote!(air::__rt::attr(#id, #k, #e);))
+                            }
                             Val::Event(ev, e) => {
                                 let mut r = vec![];
                                 captures(e, &mut r);
                                 let c = clones(&r);
                                 let (dom, data) = payload(ev).expect("checked at parse");
                                 if dom == "mounted" {
-                                    quote!(::air::__rt::mounted(#id, { #c ::air::__rt::mounted_fn(#e) });)
+                                    quote!(air::__rt::mounted(#id, { #c air::__rt::mounted_fn(#e) });)
                                 } else {
                                     let data = Ident::new(data, Span::call_site());
                                     // A closure gets its parameter's type from a direct bound.
                                     let closure = e.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
                                     let h = if closure { quote!(handler_fn) } else { quote!(handler) };
-                                    quote!(::air::__rt::on(#id, #dom, { #c ::air::__rt::#h::<::air::__rt::#data>(#e) });)
+                                    quote!(air::__rt::on(#id, #dom, { #c air::__rt::#h::<air::__rt::#data>(#e) });)
                                 }
                             }
                             _ => continue,
@@ -781,7 +781,7 @@ impl Tpl {
                 let id = self.mark();
                 let hole = match n {
                     Node::Expr(e) => {
-                        hole_fn(e, quote!(::air::IntoChild::into_child), |e| quote!(::air::__rt::child(#id, #e);))
+                        hole_fn(e, quote!(air::IntoChild::into_child), |e| quote!(air::__rt::child(#id, #e);))
                     }
                     Node::Comp { props, children, .. } => {
                         let mut r = vec![];
@@ -789,7 +789,7 @@ impl Tpl {
                         node_captures(children, &mut r);
                         let c = clones(&r);
                         let call = comp(n);
-                        quote!(::air::__rt::comp(#id, { #c ::std::boxed::Box::new(move || { #c #call }) });)
+                        quote!(air::__rt::comp(#id, { #c ::std::boxed::Box::new(move || { #c #call }) });)
                     }
                     Node::For { pat, expr, body: rows } => {
                         let key = match rows.first() {
@@ -810,7 +810,7 @@ impl Tpl {
                         cr.retain(|n| !b.contains(n));
                         let (ce, ck, cr) = (clones(&ce), clones(&ck), clones(&cr));
                         let view = body(rows);
-                        quote!(#[allow(unused_variables)] ::air::__rt::each(#id,
+                        quote!(#[allow(unused_variables)] air::__rt::each(#id,
                             { #ce move || ::std::iter::IntoIterator::into_iter(#expr).collect::<::std::vec::Vec<_>>() },
                             { #ck move |#pat: &_| (#key).to_owned() },
                             { #cr move |#pat| #view });)
@@ -822,7 +822,7 @@ impl Tpl {
                         node_captures(otherwise, &mut c);
                         let (a, b, c) = (clones(&a), clones(&b), clones(&c));
                         let (t, o) = (body(then), body(otherwise));
-                        quote!(::air::__rt::show(#id, { #a ::std::boxed::Box::new(move || #cond) }, { #b ::std::boxed::Box::new(move || #t) }, { #c ::std::boxed::Box::new(move || #o) });)
+                        quote!(air::__rt::show(#id, { #a ::std::boxed::Box::new(move || #cond) }, { #b ::std::boxed::Box::new(move || #t) }, { #c ::std::boxed::Box::new(move || #o) });)
                     }
                     _ => unreachable!(),
                 };
@@ -869,7 +869,7 @@ fn comp(n: &Node) -> TokenStream {
 /// placed (the names it reads are cloned in first).
 fn body(nodes: &[Node]) -> TokenStream {
     if nodes.is_empty() {
-        return quote!(::core::result::Result::<::air::Tree, ::air::ViewError>::Ok(::air::Tree::empty()));
+        return quote!(::core::result::Result::<air::Tree, air::ViewError>::Ok(air::Tree::empty()));
     }
     let mut t = Tpl { bytes: vec![], count: 0, marks: 0, holes: vec![] };
     // A view is a range: what goes before a first anchor needs a start of its own.
@@ -899,11 +899,11 @@ fn body(nodes: &[Node]) -> TokenStream {
     let c = clones(&names);
     quote!({
         #c
-        ::core::result::Result::<::air::Tree, ::air::ViewError>::Ok(::air::Tree::new(move || {
-            static #tn: ::air::__rt::Template = ::air::__rt::Template { nodes: #bytes, count: #count, roots: #roots, marks: #marks, first: #first, last: #last };
-            let #b = ::air::__rt::tpl(&#tn);
+        ::core::result::Result::<air::Tree, air::ViewError>::Ok(air::Tree::new(move || {
+            static #tn: air::__rt::Template = air::__rt::Template { nodes: #bytes, count: #count, roots: #roots, marks: #marks, first: #first, last: #last };
+            let #b = air::__rt::tpl(&#tn);
             #(#holes)*
-            ::air::__rt::view(&#tn, #b)
+            air::__rt::view(&#tn, #b)
         }))
     })
 }

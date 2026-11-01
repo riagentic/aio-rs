@@ -83,8 +83,10 @@
     }])
     // A script of the page's own making where the page's policy allows no eval (aio::page RUN).
     const code = `(() => { const [aio, done] = window.__airEval.get(${id}); (async () => {\n${js}\n})().then((v) => done(true, v), (e) => done(false, e)); })();`
-    if (window.__aioRun) window.__aioRun(code)
-    else Function(code)()
+    if (window.__aioRun) return window.__aioRun(code)
+    const u = URL.createObjectURL(new Blob([code], { type: 'text/javascript' })), el = document.createElement('script')
+    el.src = u, el.onload = () => (URL.revokeObjectURL(u), el.remove())
+    document.head.appendChild(el)
   }
   const forget = (n) => {
     if (n.__airId !== undefined) nodes.delete(n.__airId)

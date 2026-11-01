@@ -26,8 +26,8 @@ fn Rich(n: Signal<u32>) -> View {
     let double = memo(move || n.get() * 2);
     effect(move || _ = local.get() + n.get());
     provide(|| Ctx(1));
-    task(|| forever());
-    let waits = resource(|| forever());
+    task(forever);
+    let waits = resource(forever);
     let _script = once(|| eval("await aio.recv();"));
     let sel = once(move || selector(move || n.get()));
     rsx! {
@@ -70,7 +70,7 @@ fn Throws() -> View {
 
 #[component]
 fn Waits() -> View {
-    let r = resource(|| forever());
+    let r = resource(forever);
     let v = r.suspend()?;
     rsx! { p { "{v}" } }
 }
@@ -247,4 +247,18 @@ fn gate_2_one_root_per_thread() {
     let _a = Root::mount(|| rsx! { p {} });
     let e = says(|| _ = Root::new());
     assert!(e.contains("one Root per thread"), "{e}");
+}
+
+#[test]
+fn gate_2_two_rows_with_one_key_fail() {
+    fn app() -> View {
+        let rows = signal(|| vec![1, 2]);
+        rsx! {
+            button { "data-t": "dup", onclick: move |_| rows.set(vec![1, 1]), "dup" }
+            for r in rows.get() { p { key: r, "{r}" } }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let e = says(std::panic::AssertUnwindSafe(move || p.click("dup")));
+    assert!(e.contains("has the key of a row before it"), "{e}");
 }

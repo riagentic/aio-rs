@@ -640,6 +640,12 @@ pub(crate) fn hook<T: Clone + 'static>(name: &str, f: impl FnOnce() -> T) -> T {
     v
 }
 
+/// Is a view's body running now (not a hole, a handler, an effect)?
+#[doc(hidden)]
+pub fn in_body() -> bool {
+    RT.with_borrow(|rt| rt.frames.last().is_some_and(Option::is_some))
+}
+
 /// The owner of the view whose body runs now (its hole), for `provide`.
 pub(crate) fn view_owner(hook: &str) -> Owner {
     Owner(frame(hook).hole)

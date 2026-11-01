@@ -140,7 +140,9 @@ pub struct Range(Option<(u32, u32)>);
 /// A view not built yet: built once, where it is placed. Cloning shares it;
 /// a view placed twice fails (each place needs a view of its own).
 #[derive(Clone, Default)]
-pub struct Tree(Option<Rc<RefCell<Option<Box<dyn FnOnce() -> Range>>>>>);
+pub struct Tree(Option<Rc<RefCell<Option<Build>>>>);
+
+type Build = Box<dyn FnOnce() -> Range>;
 
 impl Tree {
     #[doc(hidden)]
@@ -636,7 +638,7 @@ pub fn comp(at: u32, f: Box<dyn Fn() -> View>) {
     render(move || {
         dom(|d| d.remove(std::mem::take(&mut shown)));
         let fr = frame.get_or_insert_with(Frame::new).clone();
-        let v = body(&fr, || f());
+        let v = body(&fr, &f);
         shown = place(v);
         dom(|d| d.insert(at, shown));
     });
@@ -694,8 +696,16 @@ where
             let mut by_key: HashMap<K, usize> =
                 old.iter().flatten().enumerate().map(|(i, r)| (r.key.clone(), i)).collect();
             let mut src = Vec::with_capacity(next.len());
-            for item in next {
+            let mut seen = std::collections::HashSet::with_capacity(next.len());
+            for (at, item) in next.into_iter().enumerate() {
                 let k = key(&item);
+                if !seen.insert(k.clone()) {
+                    panic!(
+                        "air: row {at} of a list has the key of a row before it (a `{}` key): keyed siblings must each \
+                         have a unique key (an id, not a place or a name)",
+                        std::any::type_name::<K>()
+                    );
+                }
                 let kept = by_key.remove(&k).filter(|i| old[*i].as_ref().is_some_and(|r| r.item == item));
                 match kept {
                     Some(i) => {
