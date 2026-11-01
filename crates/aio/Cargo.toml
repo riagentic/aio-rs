@@ -123,6 +123,10 @@ name = "kit"
 required-features = ["kit"]
 
 [[test]]
+name = "facade"
+required-features = ["kit"]
+
+[[test]]
 name = "wire"
 required-features = ["kit", "net"]
 

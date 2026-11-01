@@ -392,6 +392,8 @@ pub fn resource<T: 'static, F: std::future::Future<Output = T> + 'static>(
 pub struct Global<T: 'static>(dx::GlobalSignal<T>);
 
 impl<T: 'static> Global<T> {
+    /// Keyed by where it is written: one `static` each.
+    #[track_caller]
     pub const fn new(init: fn() -> T) -> Self {
         Self(dx::GlobalSignal::new(init))
     }
@@ -464,6 +466,7 @@ impl<T: std::fmt::Display + 'static> std::fmt::Display for Global<T> {
 pub struct GlobalMemo<T: PartialEq + 'static>(dx::GlobalMemo<T>);
 
 impl<T: PartialEq + 'static> GlobalMemo<T> {
+    #[track_caller]
     pub const fn new(f: fn() -> T) -> Self {
         Self(dx::Memo::global(f))
     }

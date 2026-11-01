@@ -31,8 +31,9 @@ pub mod prelude {
     pub use super::view::__rsx::*;
     pub use super::view::{
         Attribute, Callback, ErrorBoundary, Eval, EvalError, EventHandler, Fragment, Global, GlobalMemo, Memo, Props,
-        Resource, Signal, Suspense, Task, View, ViewError, callback, component, context, effect, eval, memo,
-        on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task, try_context, watch,
+        Resource, Signal, Suspense, Task, View, ViewError, callback, component, context, effect, eval, in_views,
+        key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task,
+        try_context, watch,
     };
     pub use crate::{act, use_css};
     #[doc(no_inline)]
