@@ -36,7 +36,9 @@ and is many times slower than the aio app it replaces.
 | `main.ts` | `app/src/main.rs`: `aio_shell::start`, `aio::Source::for_app`, `aio_shell::run` |
 | `src/cell/*.ts` | `src/*.rs` modules, one per aio cell file |
 | `src/ui/*.tsx` | `src/ui/*.rs` modules, one per aio component file |
-| `am create` | `ax create <name>` (`--template app`, `cli`, `service`) |
+| `am create` | `ax create <name>` (`--template app`, `cli`, `service`; `--aio-version`, `--target`, `--css tailwind`) |
+| `am pin`, `am fix` | `ax framework <version>`: the app's aio-rs; a clone needs no repair |
+| `am upgrade`, `am uninstall` | `ax upgrade`, `ax uninstall` |
 
 `ax create` makes the whole layout; copy the aio app's cells and components
 into it file by file.

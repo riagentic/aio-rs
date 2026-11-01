@@ -11,9 +11,9 @@ ax test notes       # its tests, the UI test included
 ax build notes      # an installable app for this OS in dist/
 ```
 
-Installing `ax` itself: [setup](setup.md). A prebuilt `ax` also needs the
-aio-rs source tree the app builds on: `ax create notes --aio <checkout>`
-([where an app gets aio-rs from](setup.md#where-an-app-gets-aio-rs-from)).
+Installing `ax` itself: [setup](setup.md). The app takes aio-rs from git at
+this `ax`'s release, so a clone builds anywhere and no aio-rs checkout is
+needed ([where an app gets aio-rs from](setup.md#where-an-app-gets-aio-rs-from)).
 
 ## Before you start
 
@@ -31,7 +31,10 @@ ax create notes                      # a window app (the default template)
 ax create notes --template cli       # a command-line tool on a saved cell
 ax create board --template service   # cells served to clients, no window
 ax create notes --id notes-dev       # its id apart from its name (its data's home)
-ax create notes --aio ../aio-rs      # the aio-rs checkout it builds on
+ax create notes --aio-version 0.2.0  # another aio-rs release (main, latest)
+ax create notes --aio ../aio-rs      # an aio-rs checkout instead, named relative to the app
+ax create notes --target deb,android # its [build] targets
+ax create notes --css tailwind       # Tailwind writes its stylesheet
 ax create notes --force              # into a folder that holds files already
 ```
 
@@ -40,14 +43,22 @@ ax create notes --force              # into a folder that holds files already
 | `<name>` | the folder, the package, the binary: lowercase letters, digits and `-`, starting with a letter, not `app` or ending in `-app` | – |
 | `--template` | `app`, `cli` or `service` | `app` |
 | `--id` | `[app] id`: where its data lives; refused when an installed app has it (the two would share data) | the name |
-| `--aio` | the aio-rs checkout (`crates/aio`, `crates/aio-shell`) its `Cargo.toml` points at | the checkout this `ax` was built from |
+| `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.2.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
+| `--aio` | an aio-rs checkout (`crates/aio`, `crates/aio-shell`) instead, named relative to the app; the two share a folder below the root | – |
+| `--target` | `[build] targets`: the kinds `ax build` makes (`ax build <app> --list`); `android` a window app's | none: this OS's bundle |
+| `--css tailwind` | `[build] css` runs `tailwindcss -i src/app.css -o assets/style.css` before every build; `src/app.css` starts with the template's styles (window app) | – |
 | `--force` | write the template's files into a folder that isn't empty (only those files) | refused |
 
 - A name another app already builds in ax's shared build folder is
   refused: two apps with one binary name would overwrite each other there.
 - When an app with that id already keeps data on this machine, `ax create`
   says so: the new app opens that data.
-- It writes `Cargo.lock` too, so the first commit is a clean build.
+- It writes `Cargo.lock` too, makes a git repository with a first commit
+  (not inside another repository), so the first build is a clean release.
+- A failure part-way leaves nothing behind (with `--force`, the files it
+  wrote over are put back). `--json`: the files and the next steps.
+- Nothing of the machine it was made on is in the app (no folder of yours,
+  no checkout's absolute path): a clone builds anywhere.
 
 ### The three templates
 
@@ -70,8 +81,10 @@ notes/
 ├── app/src/lib.rs        the same window on Android (app only)
 ├── rust-toolchain.toml   aio-rs's Rust, so one build folder serves every app
 ├── .cargo/config.toml    the bundled SQLite without the extensions aio never uses
-├── .gitignore            target/, .data/, dist/
-├── AGENTS.md, CLAUDE.md  the pointer for coding agents (ax agent)
+├── .gitignore            target/, .data/, dist/, .env, release keys
+├── .gitattributes        LF line endings in every checkout
+├── README.md             run, test, build, ship; where its aio-rs comes from
+├── AGENTS.md, CLAUDE.md  for coding agents: the rules, the loop, ax agent
 └── Cargo.lock
 ```
 

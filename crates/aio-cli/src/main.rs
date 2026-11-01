@@ -56,6 +56,7 @@ mod theme;
 mod travel;
 mod trust;
 mod ui;
+mod upgrade;
 mod verbs;
 mod version;
 mod video;
@@ -607,20 +608,53 @@ fn run(args: &[String]) -> Out {
             preview::run(&lib, &dir, component, props.first().copied(), has("--html"))
         }
         ("create", [name]) => {
-            let aio = match (value("--aio"), create::this_checkout()) {
-                (Some(p), _) => PathBuf::from(p),
-                (None, Some(p)) => p.to_path_buf(),
-                (None, None) => {
-                    return Err("this ax was released without its checkout: name one with --aio <dir>".into());
-                }
-            };
             let here = std::env::current_dir().map_err(|e| e.to_string())?;
+            let aio = match (value("--aio"), value("--aio-version")) {
+                (Some(_), Some(_)) => return Err("--aio (a checkout) or --aio-version (a release), not both".into()),
+                (Some(d), None) => create::Aio::checkout(&here.join(name), Path::new(d))?,
+                (None, Some(v)) => create::Aio::version(v, create::tags)?,
+                (None, None) => create::Aio::this(),
+            };
+            let css = match value("--css") {
+                None => false,
+                Some("tailwind") => true,
+                Some(c) => return Err(format!("--css {c}: tailwind (any other tool: [build] css in aio.toml)")),
+            };
+            let maintainer = create::git_maintainer(&here);
+            let new = create::New {
+                template: value("--template").unwrap_or("app"),
+                id: value("--id").unwrap_or(name),
+                maintainer: maintainer.as_deref().unwrap_or(create::NO_MAINTAINER),
+                aio,
+                targets: value("--target").map_or(vec![], |t| t.split(',').map(str::trim).collect()),
+                tailwind: css,
+                ..create::New::of(name)
+            };
             let (target, installed) = (dev::shared_target(), places().install);
-            let template = value("--template").unwrap_or("app");
-            let made =
-                create::run(&here, (name, value("--id")), template, &aio, (&target, &installed), has("--force"))?;
-            Ok(made + &create::lock(&here.join(name)))
+            let mut made = create::run(&here, &new, (&target, &installed), has("--force"))?;
+            if let (Some(dir), create::Aio::Tag(t)) = (create::this_checkout(), &new.aio) {
+                made.notes.push(format!(
+                    "note: this ax is built from the checkout {}: its templates may be newer than {t}; \
+                     --aio <that checkout> builds the app on it",
+                    dir.display()
+                ));
+            }
+            made.notes.extend(create::lock(&made.at));
+            made.notes.push(create::git_init(&made.at, maintainer.is_some()));
+            Ok(made.said(json))
         }
+        ("framework", rest) if rest.len() <= 1 => {
+            let root = create::app_root(&std::env::current_dir().map_err(|e| e.to_string())?)?;
+            let to = match (value("--aio"), rest.first()) {
+                (Some(_), Some(_)) => return Err("a version or --aio <dir>, not both".into()),
+                (Some(d), None) => Some(create::Aio::checkout(&root, Path::new(d))?),
+                (None, Some(v)) => Some(create::Aio::version(v, create::tags)?),
+                (None, None) => None,
+            };
+            create::framework(&root, to.as_ref(), create::relock)
+        }
+        ("upgrade", rest) if rest.len() <= 1 => upgrade::upgrade(rest.first().copied(), value("--aio").map(Path::new)),
+        ("uninstall", []) => upgrade::uninstall(has("--tools"), &aio::paths::tool_home(), &upgrade::bin()),
         ("keygen", []) if has("--aio") => release::keygen_aio(&release::keys_dir(), has("--rotate")),
         ("keygen", [name]) => release::keygen(&release::keys_dir(), &app_id(name)?, has("--rotate")),
         ("release", []) if has("--aio") => {

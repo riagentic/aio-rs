@@ -9,6 +9,20 @@ version may break things.
 
 ### Added
 
+- `ax create --aio-version <v|main|latest>`, and `ax framework [version]
+  [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
+  `am pin`; all or nothing).
+- `ax create` makes a git repository with its first commit (not inside
+  another), a `README.md`, `.gitattributes` (`eol=lf`), a `.gitignore`
+  that keeps `.env` and release keys out; `--target a,b` writes
+  `[build] targets`, `--css tailwind` wires Tailwind; a failure leaves
+  nothing behind (`--force`: what it wrote over is put back); `--json`
+  gives the files and next steps; aio.toml no longer claims to show every
+  default, it links them.
+- `ax upgrade [version] [--aio dir]`: `ax` from aio-rs's newest (or that)
+  release by its install script, checked against `SHA256SUMS`, or built
+  from a checkout; `ax uninstall [--tools]`: `ax` (and what it fetched)
+  gone, apps and data kept ([setup](docs/basics/setup.md#upgrading-ax)).
 - Every window app has its icon at run time, dev and installed: `aio::config!()`
   builds in `assets/icon.png` and `Window::of` wears it; a window with none
   wears the app's monogram (aio's generated icon, now `aio::icon`). It is on
@@ -25,6 +39,13 @@ version may break things.
 
 ### Changed
 
+- **`ax create` writes nothing of the machine it ran on**: the app takes
+  aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
+  commit), so a clone builds anywhere and a prebuilt `ax` needs no
+  checkout; `--aio <dir>` names a checkout relative to the app, refused
+  through the root. `AGENTS.md` holds the rules and the loop inline and
+  links the guide by URL, no local path
+  ([where an app gets aio-rs from](docs/basics/setup.md#where-an-app-gets-aio-rs-from)).
 - `Tell::Icon { window, tray, tooltip, fps }` (was `{ tray, frames, fps }`):
   aio's `appIcon()` in one effect; `None` leaves that part as it is.
 - The hue is hashed over the slug the id makes (aio's `appHue`), so
