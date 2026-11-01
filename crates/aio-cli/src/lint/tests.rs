@@ -428,10 +428,10 @@ fn Avatar(src: String) -> Element {
     assert_eq!(
         got,
         [
-            (6, "key on <Row>, not its block's first node: Dioxus ignores it (the first node keys the block)"),
-            (11, "key on <Dialog> in no list: Dioxus never remounts it when the key changes"),
-            (13, "key on <li> in no list: Dioxus never remounts it when the key changes"),
-            (20, "key on <img> in no list: Dioxus never remounts it when the key changes"),
+            (6, "key on <Row>, not its block's first node: aio::ui ignores it (the first node keys the block)"),
+            (11, "key on <Dialog> in no list: aio::ui never remounts it when the key changes"),
+            (13, "key on <li> in no list: aio::ui never remounts it when the key changes"),
+            (20, "key on <img> in no list: aio::ui never remounts it when the key changes"),
         ],
         "{:?}",
         r.issues

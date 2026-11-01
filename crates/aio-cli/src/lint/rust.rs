@@ -880,7 +880,7 @@ fn keys(nodes: &[BodyNode], block: Nodes, out: &mut Found) {
         if let Some((what, line)) = keyed {
             if i > 0 && block != Nodes::Children {
                 let msg = format!(
-                    "key on <{what}>, not its block's first node: Dioxus ignores it (the first node keys the block)"
+                    "key on <{what}>, not its block's first node: aio::ui ignores it (the first node keys the block)"
                 );
                 out.push((
                     line,
@@ -890,7 +890,7 @@ fn keys(nodes: &[BodyNode], block: Nodes, out: &mut Found) {
                     "Fragment { key: \"{item.id}\", … } around the block's nodes",
                 ));
             } else if !matches!(block, Nodes::Loop | Nodes::Macro) {
-                let msg = format!("key on <{what}> in no list: Dioxus never remounts it when the key changes");
+                let msg = format!("key on <{what}> in no list: aio::ui never remounts it when the key changes");
                 out.push((line, Severity::Warn, "render", msg, "a one-item for: for k in [key] { … key: \"{k}\" … }"));
             }
         }

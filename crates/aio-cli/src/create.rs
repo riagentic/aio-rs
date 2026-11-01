@@ -513,14 +513,14 @@ fn agents(n: &New, ui: bool) -> String {
             "- The same window elsewhere: `ax dev {name} --web` / `ax build {name} --web` (a browser: `src/lib.rs`'s\n  \
              `web`), `ax build {name} --android` (`app/src/lib.rs`).\n\
              - Styles live in `assets/style.css`, read by `aio::use_css!`: a saved edit shows at once under\n  \
-             `ax dev`, no compile. Never keep CSS (or anything an edit should change) in `use_hook`: a\n  \
-             hook's value is made once, so a hot-patched edit never shows (`ax lint` says so).\n"
+             `ax dev`, no compile. Never keep CSS (or anything an edit should change) in `once(..)`: its\n  \
+             value is made once, so a hot-patched edit never shows (`ax lint` says so).\n"
         ),
         false => String::new(),
     };
     format!(
         "# {name}\n\n\
-         An aio-rs app: Rust, cells and Dioxus views, not aio's TypeScript, React or Next. Code guessed\n\
+         An aio-rs app: Rust, cells and aio::ui views, not aio's TypeScript, React or Next. Code guessed\n\
          from those compiles to the wrong thing or not at all.\n\n\
          ## Read this first\n\n    ax agent\n\n\
          One page: how aio-rs works, every verb, adding state, UI and tests, debugging, shipping\n\
