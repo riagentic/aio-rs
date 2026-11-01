@@ -85,6 +85,19 @@ version may break things.
   `My Notes`, `my_notes` and `my-notes` are one colour.
 - `aio_shell::runtime::ensure_as` takes the icon of its windows.
 
+### Fixed
+
+- `aio::testing::TestBrowser` starts one browser at a time per process
+  (started together, eight took 22 s each on an 8-core Windows, one 0.5 s)
+  and reads its DevTools port only once `DevToolsActivePort` is whole.
+- `aio::testing::TestUi` counts every render (`components()`) when tests
+  run in parallel: a render callsite another thread registered at the same
+  moment could be cached as of no interest, and its renders went uncounted.
+- The test suite holds under load: timing tests wait on what they check
+  (a condition, a gate the test opens, a page-side record of each style)
+  instead of a fixed sleep or a wall-clock window; bounds on time are hang
+  guards well short of what they guard against.
+
 ## [0.1.0] - 2026-11-01
 
 The first release of aio-rs (alpha): a Rust framework for apps whose state
