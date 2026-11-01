@@ -942,6 +942,15 @@ impl Kv {
         })
     }
 
+    /// Has a downgrade boot parked cell `cell`'s slice (`__downgraded:<cell>`)?
+    fn parked(&self, db: &Connection, cell: &str) -> Result<bool, String> {
+        let park = format!("__downgraded:{cell}");
+        Ok(match self.multi {
+            true => get(db, &format!("{}{SEP}{park}", self.key))?.is_some(),
+            false => get(db, &self.key)?.is_some_and(|d| d.get(&park).is_some()),
+        })
+    }
+
     fn versions(&self, db: &Connection) -> Result<Map<String, Value>, String> {
         Ok(get(db, &format!("{}:__versions", self.app))?.and_then(|v| v.as_object().cloned()).unwrap_or_default())
     }
@@ -959,8 +968,13 @@ impl Kv {
             st.get_or_insert_with(|| json!({}))[field] = v;
         }
         let Some(mut st) = st else { return Ok(None) };
+        let parked = self.parked(db, cell)?;
         if let Some(m) = st.as_object_mut() {
             m.retain(|k, _| !k.starts_with("__"));
+            // An older build ran on it (aio's downgrade park): see `store::DOWNGRADED`.
+            if parked {
+                m.insert(crate::store::DOWNGRADED.into(), json!(true));
+            }
         }
         let v = self.versions(db)?.get(cell).and_then(Value::as_u64).unwrap_or(0);
         Ok(Some((st, u32::try_from(v).unwrap_or(u32::MAX))))
@@ -977,7 +991,8 @@ impl Kv {
     ) -> Result<Option<(Map<String, Value>, Option<(&'static str, u32)>)>, String> {
         let (mut got, mut older) = (Map::new(), None);
         for s in of {
-            let Some((v, at)) = self.slice(db, s.cell, s.tables)? else { continue };
+            let Some((mut v, at)) = self.slice(db, s.cell, s.tables)? else { continue };
+            let downgraded = v.as_object_mut().and_then(|m| m.remove(crate::store::DOWNGRADED)).is_some();
             if at < s.version {
                 older = older.or(Some((s.cell, at)));
             }
@@ -995,6 +1010,26 @@ impl Kv {
                     (s.fit)(v).map_err(|e| {
                         format!("{}: aio data from a newer build (v{at} > v{}) doesn't fit: {e}", s.cell, s.version)
                     })?
+                }
+                // Back from a rollback: the older build's own fields go, said
+                // (aio's restore merge drops them).
+                std::cmp::Ordering::Equal if downgraded => {
+                    let fit = (s.fit)(v.clone()).map_err(|e| format!("{}: {e}", s.cell))?;
+                    let gone: Vec<&str> = v
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|m| m.keys())
+                        .filter(|k| fit.get(k.as_str()).is_none())
+                        .map(String::as_str)
+                        .collect();
+                    if !gone.is_empty() {
+                        eprintln!(
+                            "[aio] {}: an older build ran on this data and wrote fields this build doesn't declare ({}); they are dropped, as aio drops them",
+                            s.cell,
+                            gone.join(", ")
+                        );
+                    }
+                    fit
                 }
                 std::cmp::Ordering::Equal => v,
             };

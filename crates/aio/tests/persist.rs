@@ -186,6 +186,94 @@ fn an_older_build_on_an_aio_slice_from_a_newer_one_parks_it_as_aio_does() {
     assert_eq!(get("notes:__versions"), json!({ "note": 5 }));
 }
 
+#[cell(persist, id = "memo", version = 1)]
+pub struct MemoV1 {
+    text: String,
+    pin: bool,
+}
+
+#[methods]
+impl MemoV1 {
+    pub fn edit(&mut self, text: String, pin: bool) {
+        (self.text, self.pin) = (text, pin);
+    }
+}
+
+fn memo_up(old: Value, from: u32) -> Result<MemoV2, String> {
+    assert_eq!(from, 1);
+    Ok(MemoV2 { text: old["text"].as_str().ok_or("no text")?.into(), color: "none".into() })
+}
+
+/// v2 drops v1's `pin` and adds `color`.
+#[cell(persist, id = "memo", version = 2, migrate = memo_up)]
+pub struct MemoV2 {
+    text: String,
+    color: String,
+}
+
+#[methods]
+impl MemoV2 {
+    pub fn paint(&mut self, text: String, color: String) {
+        (self.text, self.color) = (text, color);
+    }
+}
+
+/// old -> new -> old -> new, with fields only the old build declares: every
+/// boot succeeds as in aio (upgrade migrates, downgrade keeps, roll-forward
+/// drops the old build's fields), and nothing the new build wrote is lost.
+fn round_trip(open1: impl Fn() -> Store<MemoV1>, open2: impl Fn() -> Store<MemoV2>) {
+    let mut s = open1();
+    s.call(&By::Test, "edit", json!(["a", true])).unwrap();
+    drop(s);
+    let mut s = open2();
+    assert_eq!((s.state().text.as_str(), s.state().color.as_str()), ("a", "none"), "the upgrade migrates");
+    s.call(&By::Test, "paint", json!(["b", "red"])).unwrap();
+    drop(s);
+    let mut s = open1();
+    assert_eq!(s.state().text, "b", "the downgrade boots");
+    s.call(&By::Test, "edit", json!(["c", true])).unwrap();
+    drop(s);
+    let mut s = open2();
+    assert_eq!((s.state().text.as_str(), s.state().color.as_str()), ("c", "red"), "the roll-forward boots");
+    s.call(&By::Test, "paint", json!(["d", "blue"])).unwrap();
+    drop(s);
+    let s = open2();
+    assert_eq!((s.state().text.as_str(), s.state().color.as_str()), ("d", "blue"));
+    drop(s);
+    // And down again: still boots.
+    assert_eq!(open1().state().text, "d");
+}
+
+#[test]
+fn a_down_and_up_round_trip_boots_every_time_as_in_aio() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("state.db");
+    round_trip(|| Store::<MemoV1>::open(&p).unwrap(), || Store::<MemoV2>::open(&p).unwrap());
+    let p = d.path().join("aio.db");
+    round_trip(|| Store::<MemoV1>::open_aio(&p, "memos").unwrap(), || Store::<MemoV2>::open_aio(&p, "memos").unwrap());
+}
+
+#[test]
+fn a_file_aio_rolled_back_and_forward_boots() {
+    // What aio leaves after new -> old: the slice widened with the old build's
+    // `pin`, the newer stamp, and the parked copy.
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("state.db");
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch(
+        r#"CREATE TABLE aio_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+           INSERT INTO aio_kv VALUES ('state', '{"memo":{"text":"c","color":"red","pin":true},"__downgraded:memo":{"text":"b","color":"red"}}');
+           INSERT INTO aio_kv VALUES ('memos:__versions', '{"memo":2}');"#,
+    )
+    .unwrap();
+    drop(c);
+    let mut s = Store::<MemoV2>::open_aio(&p, "memos").unwrap();
+    assert_eq!((s.state().text.as_str(), s.state().color.as_str()), ("c", "red"));
+    s.call(&By::Test, "paint", json!(["d", "blue"])).unwrap();
+    drop(s);
+    assert_eq!(Store::<MemoV2>::open_aio(&p, "memos").unwrap().state().text, "d");
+}
+
 #[cell(persist, id = "kept")]
 pub struct Kept {
     n: u32,

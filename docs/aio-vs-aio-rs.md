@@ -40,7 +40,9 @@ talk to each other, so an app can move one piece at a time.
   `<appId>:__versions` stamp. An older stamp migrates (after a backup); a
   newer one (a rollback) boots on what this build declares, keeps the
   rest in every write and parks a copy under `__downgraded:<cell>`, as aio
-  does; one that doesn't fit refuses the boot and keeps the file.
+  does; one that doesn't fit refuses the boot and keeps the file. Rolled
+  forward again, it boots and drops the older build's own fields, as aio
+  does.
 - **What it writes.** On every commit, in the same transaction as its own
   log: the cell's row in aio's layout with `JSON.stringify` semantics,
   without `#[transient]` fields and `persist(exclude)` paths, keeping unknown cells and `__*` keys, and

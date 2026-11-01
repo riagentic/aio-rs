@@ -93,6 +93,8 @@ version may break things.
   downgrade does: the fields it doesn't declare are kept in every write,
   the stamp is never lowered, an aio slice is parked under
   `__downgraded:<cell>`; only data its fields can't hold refuses the boot.
+  Rolled forward again, the newer build boots and drops the fields only
+  the older build declares, as aio's restore merge does.
 - An aio home with a journal is no longer refused at the claim: the store
   replays it, or says why it can't.
 - **`ax create` writes nothing of the machine it ran on**: the app takes

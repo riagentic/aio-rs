@@ -163,7 +163,10 @@ build's other fields, stamped with the newer version (never lowered, so
 rolling forward migrates nothing twice); in an aio file the slice keeps
 them too, and a verbatim copy is parked once under `__downgraded:<cell>`.
 Fields this build declares may be misread. Data its fields can't hold
-refuses the boot, the file kept.
+refuses the boot, the file kept. Rolled forward again (new, old, new),
+the newer build boots on the snapshot the older one wrote and drops the
+fields only the older build declares, as aio's restore merge does; its
+own fields are as the older build left them.
 
 ### State export and import
 

@@ -634,7 +634,9 @@ fn journal_tail<T: Cell>(
 
 /// Saved state of version `v` as this version of the cell.
 fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
-    let old: Value = serde_json::from_str(text).map_err(|e| Error(format!("{}: corrupt snapshot: {e}", T::ID)))?;
+    let mut old: Value = serde_json::from_str(text).map_err(|e| Error(format!("{}: corrupt snapshot: {e}", T::ID)))?;
+    // Written by an older build that booted on this data ([`DOWNGRADED`]).
+    let downgraded = old.as_object_mut().and_then(|m| m.remove(DOWNGRADED));
     // A newer build's data (a rollback): what this build declares, read as it
     // is; the rest is kept by every write (`Store::ahead`, aio's downgrade).
     if v > T::VERSION {
@@ -653,6 +655,16 @@ fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
         // snapshot. Never silently: refuse, and say what and how to fix it.
         let now = serde_json::to_value(&st).map_err(|e| Error(format!("{}: unserializable state: {e}", T::ID)))?;
         let lost = undeclared(&old, &now);
+        // Back from a rollback (aio's roll-forward): the older build's own
+        // fields go, as aio's restore merge drops them, said; the rest is ours.
+        if !lost.is_empty() && downgraded.is_some() {
+            eprintln!(
+                "[aio] {}: an older build ran on this data and wrote fields this build doesn't declare ({}); they are dropped, as aio drops them",
+                T::ID,
+                lost.join(", ")
+            );
+            return Ok(st);
+        }
         if !lost.is_empty() {
             return Err(Error(format!(
                 "{}: the saved data has fields this build doesn't declare ({}); declare them again, or bump the cell's version with a `migrate` that drops them on purpose",
@@ -664,6 +676,11 @@ fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
     }
     T::migrate(old, v).map_err(|e| Error(format!("{}: migrate from v{v} failed: {e}", T::ID)))
 }
+
+/// The key a snapshot written by an older build booted on newer data
+/// carries (that build's version): the newer build then drops the older
+/// one's fields it doesn't declare instead of refusing them, as aio does.
+pub(crate) const DOWNGRADED: &str = "__downgraded";
 
 /// The file's data (saved by version `v`) as this cell: its aio slice
 /// (`whole`), or only some fields (`#[aio_cell]` slices, bound tables' rows) over
@@ -1804,6 +1821,9 @@ impl<T: Cell> Store<T> {
             Some((v, newer)) => {
                 let mut mine: Value = serde_json::from_str(&text).map_err(|e| Error(e.to_string()))?;
                 crate::filter::reattach(&mut mine, newer);
+                if let Some(m) = mine.as_object_mut() {
+                    m.insert(DOWNGRADED.into(), T::VERSION.into());
+                }
                 (*v, mine.to_string())
             }
         };

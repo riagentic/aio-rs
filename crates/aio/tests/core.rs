@@ -406,10 +406,13 @@ mod upgrade {
         let mut old = Store::<v1::Notes>::open(&p).unwrap();
         old.call(&By::Test, "set", serde_json::json!(["t"])).unwrap();
         drop(old);
-        // Rolled forward: the old build's `text` is kept too, so this build
-        // says so rather than drop it (strict restore), nothing lost.
-        let e = Store::<Notes>::open(&p).err().unwrap().0;
-        assert!(e.contains("fields this build doesn't declare (text)"), "{e}");
+        // Rolled forward (new -> old -> new): it boots as aio does, keeping
+        // its own fields and dropping the old build's `text`.
+        let h = Handle::<Notes>::open(&p).unwrap();
+        assert_eq!(h.state().lines, ["a", "b", "c"]);
+        h.push("d".into()).unwrap();
+        drop(h);
+        assert_eq!(Handle::<Notes>::open(&p).unwrap().state().lines, ["a", "b", "c", "d"]);
     }
 
     #[test]
