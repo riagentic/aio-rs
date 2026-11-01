@@ -318,6 +318,26 @@ fn App() -> View {
 }
 
 #[test]
+fn an_if_let_in_rsx_is_a_warning() {
+    let d = project(&[(
+        "src/ui.rs",
+        r#"
+fn App() -> View {
+    rsx! {
+        if let Some(n) = pick.get() { p { "{n}" } }
+        if pick.get().is_some() { p { "some" } } else if let Some(m) = other() { p { "{m}" } }
+        {pick.get().map(|n| rsx! { p { "{n}" } })}
+    }
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let got: Vec<_> =
+        r.issues.iter().filter(|i| i.message.contains("`if let`")).map(|i| (i.severity, i.line.unwrap())).collect();
+    assert_eq!(got, [(Severity::Warn, 4), (Severity::Warn, 5)], "{:?}", r.issues);
+}
+
+#[test]
 fn naming_the_renderer_behind_aio_ui_is_an_error() {
     let d = project(&[
         (

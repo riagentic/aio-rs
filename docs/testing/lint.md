@@ -52,7 +52,7 @@ ax lint 0.1.0 · notes
       fix: aria_label: "…", or wrap it in label { }
   ⚠ warn src/lib.rs:26  [a11y] <div> takes clicks but no keys: keyboard users and agents can't use it
       fix: use a button, or give it role, tabindex: 0 and onkeydown
-  ⚠ warn src/lib.rs:28  [render] <li> in a for loop has no key: a removed or moved row hands its state to the next
+  ✗ error src/lib.rs:28  [render] <li> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)
       fix: key: "{item.id}"
   · hint src/lib.rs:5  [testing] no test names cell `Notes`
       fix: test its methods with Handle::<Cell>::open on a temp store, or aio::testing
@@ -146,6 +146,7 @@ I/O](../state/cells.md#methods-do-no-io)).
 | a `for` loop's element or component with no `key` (air, `aio::ui`'s next renderer, requires one) | error |
 | a `for` loop over a block (its `rsx!` inside an unkeyed node) | warn |
 | a `key` on a node that isn't its block's first, or on a node in no list | warn |
+| an `if let` in `rsx!` (air refuses it): a bool, or a child `{x.map(\|v\| rsx! { … })}` | warn |
 | a `.read()`, `.read_untracked()` or `.write()` guard held across an `if let`, `while let` or `match` whose block writes: it panics as already borrowed | warn |
 | page CSS made in `once`: an edit never shows under `ax dev` | error |
 | `ondragstart` that calls `set_data`: the view runs after the browser's drag start, so the drop never gets it | warn: `"data-drag": "{id}"` |

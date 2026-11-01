@@ -901,6 +901,11 @@ fn keys(nodes: &[BodyNode], block: Nodes, out: &mut Found) {
             BodyNode::IfChain(c) => {
                 let mut at = Some(c);
                 while let Some(c) = at {
+                    if let Expr::Let(l) = &*c.cond {
+                        let msg = "`if let` in rsx!: air (aio::ui's next renderer) refuses it".to_string();
+                        let fix = "branch on a bool (`if x.is_some()`), or a child: {x.map(|v| rsx! { … })}";
+                        out.push((l.let_token.span.start().line, Severity::Warn, "render", msg, fix));
+                    }
                     keys(&c.then_branch.roots, Nodes::Branch, out);
                     if let Some(e) = &c.else_branch {
                         keys(&e.roots, Nodes::Branch, out);
