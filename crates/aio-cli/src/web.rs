@@ -192,6 +192,10 @@ self.addEventListener('activate', (e) => {{\n\
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter(older).map((k) => caches.delete(k))))\n\
     .then(() => self.clients.claim()));\n\
 }});\n\
+self.addEventListener('notificationclick', (e) => {{\n\
+  e.notification.close();\n\
+  e.waitUntil(self.clients.matchAll({{ type: 'window' }}).then((cs) => (cs[0] ? cs[0].focus() : self.clients.openWindow(self.registration.scope))));\n\
+}});\n\
 const own = (u) => u.pathname === '/ws' || u.pathname.startsWith('/__aio/');\n\
 self.addEventListener('fetch', (e) => {{\n\
   const r = e.request, u = new URL(r.url);\n\
@@ -1154,6 +1158,12 @@ pub(crate) mod browser {
     const REFUSED: &str = "window.refused = []; document.addEventListener('securitypolicyviolation', \
                            (e) => window.refused.push(e.violatedDirective + ' ' + e.blockedURI))";
 
+    /// The browser's notifications, granted, kept in `window.notices`
+    /// (a headless browser shows none).
+    const NOTICES: &str = "window.notices = []; window.Notification = class { static permission = 'granted'; \
+                           static requestPermission() { return Promise.resolve('granted') } \
+                           constructor(t, o) { notices.push([t, o.body, o.tag, o.icon, o.silent]) } }";
+
     /// What tab `t` shows: its items, calls waiting, link.
     const SHOWN: &str = "import('./app.js').then((m) => JSON.parse(m.shown()))";
     const APP: &str = "import('./app.js')";
@@ -1192,6 +1202,7 @@ pub(crate) mod browser {
         // What the page's policy refuses, counted from now on (it reloads).
         a.call("Page.enable", json!({})).await.unwrap();
         a.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": REFUSED })).await.unwrap();
+        a.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": NOTICES })).await.unwrap();
         a.eval("location.reload()").await.ok();
         for t in [&mut a, &mut b] {
             until(t, "window.ready", json!("yes")).await;
@@ -1241,6 +1252,9 @@ pub(crate) mod browser {
         assert_eq!(a.eval(&format!("{APP}.then((m) => m.later())")).await.unwrap(), json!(true));
         assert_eq!(a.eval(TALLY).await.unwrap()["running"], json!(1));
         until(&mut a, TALLY, json!({ "n": 13, "busy": true, "running": 0 })).await;
+        // A tell of the page's cell: the page's own notification, the app's icon on it.
+        assert_eq!(a.eval(&format!("{APP}.then((m) => m.finish())")).await.unwrap(), json!(true));
+        until(&mut a, "window.notices", json!([["Done", "the tally", "tally", "./icon-192.png", true]])).await;
         // The network is back on its port: the call reaches the server once,
         // sent by both tabs (the server applies a call id once).
         let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
