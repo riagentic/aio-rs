@@ -59,6 +59,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio-rs-air"
+version = "0.1.0"
+dependencies = [
+ "aio-rs-air-macro",
+ "keyboard-types",
+]
+
+[[package]]
+name = "aio-rs-air-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "aio-rs-cli"
 version = "0.1.0"
 dependencies = [

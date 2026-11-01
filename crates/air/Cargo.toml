@@ -1,0 +1,25 @@
+[package]
+name = "aio-rs-air"
+description = "air: aio-rs's fine-grained renderer (views run once, holes follow signals)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["gui", "web-programming"]
+
+[lib]
+name = "air"
+
+[dependencies]
+air-macro = { workspace = true }
+# The W3C key tables (`Key`, `Code`, `Location`, `Modifiers`): the same
+# types the facade named on Dioxus, so key handling is one code either way.
+keyboard-types = { version = "0.7", default-features = false }
+
+[features]
+# Planted renderer faults (`air::__fault`), for the gate tests that prove
+# a broken render fails `TestUi`; never in an app's build.
+fault = []
