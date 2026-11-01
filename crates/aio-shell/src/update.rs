@@ -61,6 +61,7 @@ fn supervised(cfg: &aio::config::Config) -> bool {
 /// was rolled back, the backup the one now running took.
 static ROLLED_BACK: OnceLock<String> = OnceLock::new();
 static BACKUP: OnceLock<String> = OnceLock::new();
+static RETIRED: OnceLock<String> = OnceLock::new();
 
 /// `aio-rt/install/<id>`; an app run from an AppImage keeps its updates
 /// apart, in `<id>-appimage` (the same app installed from its bundle may be
@@ -292,6 +293,9 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
         if let Some(b) = p["backup"].as_str() {
             _ = BACKUP.set(b.into());
         }
+        if let Some(a) = p["retired"].as_str() {
+            _ = RETIRED.set(a.into());
+        }
         eprintln!("[aio] first start of {version} after an update: it is kept once the window opens");
         return Ok(Next::Boot);
     }
@@ -331,7 +335,9 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
     } else {
         None
     };
-    let backup = if store.exists() {
+    let backup = if let Some(a) = &retired {
+        aside_store(a, &store, &dirs.data)
+    } else if store.exists() {
         let b = dirs
             .data
             .join("backups")
@@ -372,6 +378,12 @@ pub fn can_go_back(id: &str, version: &str) -> bool {
 /// before back and starts it, as for a version that never booted.
 pub fn go_back(id: &str) -> io::Result<()> {
     std::fs::write(dir(id).join(crate::swap::BACK), b"")
+}
+
+/// A fresh start's backup: the store it set aside in `retired` (aio's
+/// `updates-retire.ts` ⑤), when the store was in `data`.
+fn aside_store(retired: &Path, store: &Path, data: &Path) -> Option<PathBuf> {
+    Some(retired.join(store.strip_prefix(data).ok()?)).filter(|b| b.exists())
 }
 
 /// What stays in the data dir when it starts fresh: the lock, the release
@@ -1502,6 +1514,7 @@ pub(crate) fn open(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::
         current: version.into(),
         rolled_back: ROLLED_BACK.get().cloned(),
         backup: BACKUP.get().cloned(),
+        retired: RETIRED.get().cloned(),
     })
     .map_err(|e| io::Error::other(e.why))?;
     *CELL.write().unwrap_or_else(|e| e.into_inner()) = Some(s);
@@ -1973,6 +1986,9 @@ mod tests {
         assert_eq!(names(&data), ["instance.lock", "update-keys.json"]);
         assert_eq!(names(&archive), ["backups", "state.db"]);
         assert_eq!(std::fs::read_to_string(archive.join("backups/pre.db")).unwrap(), "backups/pre.db");
+        // The new version's first start is told the store set aside as its backup.
+        assert_eq!(aside_store(&archive, &data.join("state.db"), &data), Some(archive.join("state.db")));
+        assert_eq!(aside_store(&archive, &t.path().join("elsewhere.db"), &data), None);
         // The new version wrote its own; going back keeps that aside.
         std::fs::write(data.join("state.db"), "new").unwrap();
         retire(&data, &t.path().join("archive/failed"), &keep).unwrap();

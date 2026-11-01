@@ -655,21 +655,11 @@ pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send
     let built = std::sync::Arc::new(AtomicU64::new(1));
     let dirs: Vec<PathBuf> = site.pkg.dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
     let paths = crate::dev::watched(&site.pkg, Path::new(""), &crate::dev::Watching::All);
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    let mut w = notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
-        if let Ok(e) = e
-            && crate::dev::changes(&e.kind)
-        {
-            let ps: Vec<PathBuf> = e.paths.into_iter().filter(|p| crate::dev::relevant(p)).collect();
-            if !ps.is_empty() {
-                _ = tx.send(ps);
-            }
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    for p in paths.iter().filter(|p| p.exists()) {
-        notify::Watcher::watch(&mut w, p, notify::RecursiveMode::Recursive).map_err(|e| e.to_string())?;
-    }
+    let (w, rx) = crate::watch::Watch::new(&paths)?;
+    // What the wasm build read beside the app's folders (`aio.toml`, an aio-rs checkout).
+    let deps = site.target.join("wasm32-unknown-unknown").join("debug").join(format!("{}.wasm", site.lib));
+    w.add_files(crate::dev::deps_of(&deps));
+    let cwd = std::env::current_dir().unwrap_or_default();
     // The last build's errors, until a good one.
     let failed = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let (n, error) = (built.clone(), failed.clone());
@@ -707,18 +697,23 @@ pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send
         tokio::spawn(aio::sync::serve_with(aio::Handle::<DevSite>::memory(), l, opts));
         tokio::task::spawn_blocking(move || ready(port)).await.map_err(|e| e.to_string())??;
         tokio::task::spawn_blocking(move || {
-            while let Ok(mut changed) = rx.recv() {
+            while let Ok(first) = rx.recv() {
                 // A burst of saves is one change.
-                while let Ok(more) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
-                    changed.extend(more);
-                }
+                let changed = crate::watch::settle(&rx, first);
+                let said = crate::watch::describe(&changed, &cwd);
                 if !rebuilds(&changed) {
+                    eprintln!("ax dev: {said} changed: restyled");
                     continue;
                 }
+                eprintln!("ax dev: {said} changed — building…");
                 let started = std::time::Instant::now();
                 match site.make(&out, true) {
                     Ok(_) => {
-                        *failed.lock().unwrap() = None;
+                        w.add_files(crate::dev::deps_of(&deps));
+                        // Red to green: said; the page drops its errors as it reloads.
+                        if failed.lock().unwrap().take().is_some() {
+                            eprintln!("ax dev: fixed: the build is good again");
+                        }
                         built.fetch_add(1, Ordering::SeqCst);
                         eprintln!("ax dev: built in {} ms; the page reloads", started.elapsed().as_millis());
                     }
