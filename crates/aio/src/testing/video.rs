@@ -121,10 +121,20 @@ mod tests {
         let first = ui.page().shot();
         assert_eq!(&first[1..4], b"PNG", "the browser's own capture");
         r.frame(first.clone());
-        r.frame(first);
+        r.frame(first.clone());
         assert_eq!(r.frames.len(), 1, "a step that changed nothing adds no frame");
         ui.click("flip");
-        r.frame(ui.page().shot());
+        // The new colour is drawn a frame or more after the click (later on a
+        // loaded machine): captured once it shows.
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        let flipped = loop {
+            let s = ui.page().shot();
+            if s != first || std::time::Instant::now() > end {
+                break s;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        r.frame(flipped);
         assert_eq!(r.frames.iter().map(|(_, at)| at.as_millis()).collect::<Vec<_>>(), [0, 100], "the new colour");
         let has_ffmpeg =
             std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success());

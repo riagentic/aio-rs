@@ -681,7 +681,7 @@ mod tests {
     pub struct Diary {
         pub entries: Vec<(String, String)>,
         #[server]
-        pub audit: Vec<String>,
+        pub audit: aio::Hidden<Vec<String>>,
     }
 
     fn mine(d: &Diary, viewer: &aio::Caller) -> Diary {

@@ -96,7 +96,10 @@ fn an_id_token_is_proven_by_its_signature_and_every_claim() {
     let iss = "https://idp.example";
     let (rsa, ec) = (Key::rsa(), Key::ec());
     let keys = [rsa.jwk("r1"), ec.jwk("e1")];
-    let ms = now() * 1000;
+    // One moment for the whole test: claims dated by a later clock read would
+    // drift past `ms` (an exp of now - 1 is still ahead of a start a second ago).
+    let at = now();
+    let ms = at * 1000;
     let ok = |c: &Value, k: &Key, kid| verify(&k.sign(kid, c), iss, CLIENT, &keys, ms);
     let c = claims(iss, "alice");
     assert_eq!(ok(&c, &rsa, Some("r1")).unwrap()["sub"], "alice", "RS256");
@@ -128,11 +131,11 @@ fn an_id_token_is_proven_by_its_signature_and_every_claim() {
     assert!(with("aud", json!([CLIENT])).is_ok());
     assert_eq!(with("aud", json!([CLIENT, "x"])), Err("oidc_azp_required"), "many audiences: azp names the client");
     assert_eq!(with("azp", json!("x")), Err("oidc_bad_azp"));
-    assert_eq!(with("exp", json!(now() - 1)), Err("oidc_expired"));
+    assert_eq!(with("exp", json!(at - 1)), Err("oidc_expired"));
     assert_eq!(with("exp", Value::Null), Err("oidc_expired"));
-    assert_eq!(with("nbf", json!(now() + 600)), Err("oidc_not_yet_valid"));
-    assert!(with("nbf", json!(now() + 30)).is_ok(), "within the skew");
-    assert_eq!(with("iat", json!(now() + 600)), Err("oidc_not_yet_valid"));
+    assert_eq!(with("nbf", json!(at + 600)), Err("oidc_not_yet_valid"));
+    assert!(with("nbf", json!(at + 30)).is_ok(), "within the skew");
+    assert_eq!(with("iat", json!(at + 600)), Err("oidc_not_yet_valid"));
     assert_eq!(with("sub", json!("")), Err("oidc_no_sub"));
 }
 

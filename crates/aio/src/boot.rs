@@ -148,6 +148,7 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
     crate::log::start(&dirs.logs)?;
     crate::paths::booted(dirs);
     crate::perf::set(cfg.perf.clone());
+    crate::cron::set_local(cfg.app.tz == crate::config::Tz::Local);
     crate::vitals::set(cfg.vitals);
     crate::capabilities::set(&cfg.capabilities.network);
     crate::budgets::declare(cfg.budgets);

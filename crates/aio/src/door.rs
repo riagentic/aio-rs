@@ -186,7 +186,7 @@ mod tests {
     pub struct Vault {
         pub n: u32,
         #[server]
-        pub secret: String,
+        pub secret: crate::Hidden<String>,
     }
 
     #[crate::methods]

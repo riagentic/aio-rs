@@ -303,9 +303,9 @@ assert_eq!(h.state().polls, 2);
   `#[every]` runs under the key `@<method>`.
 - A negative `advance` moves the schedule clock back (to test a clock
   change); tokio's clock never runs backwards.
-- Cron schedules (`#[cron("0 9 * * 1")]`, `cx.cron`) are local time:
-  advance from a known seed time, or test the next run with
-  `aio::cron` directly.
+- Cron schedules (`#[cron("0 9 * * 1")]`, `cx.cron`) are UTC (local
+  time with `[app] tz = "local"`): advance from a known seed time, or
+  test the next run with `aio::cron` directly.
 
 ### Failures nobody looked at
 

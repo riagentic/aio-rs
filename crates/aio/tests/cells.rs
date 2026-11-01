@@ -130,9 +130,27 @@ impl Slow {
         self.done += 1;
     }
 
-    pub fn stall_soon(&mut self, cx: &Cx) -> Result {
-        cx.after("stall", 0, "block", (600,))
+    /// Block until the test opens `gate`: as long as it takes, not a guess.
+    pub fn hold(&mut self, gate: usize) {
+        let mut open = GATES.0.lock().unwrap();
+        while !open[gate] {
+            open = GATES.1.wait(open).unwrap();
+        }
+        self.done += 1;
     }
+
+    pub fn stall_soon(&mut self, cx: &Cx) -> Result {
+        cx.after("stall", 0, "hold", (1,))
+    }
+}
+
+/// Gates `Slow::hold` waits on, one per test.
+static GATES: (std::sync::Mutex<[bool; 2]>, std::sync::Condvar) =
+    (std::sync::Mutex::new([false; 2]), std::sync::Condvar::new());
+
+fn open(gate: usize) {
+    GATES.0.lock().unwrap()[gate] = true;
+    GATES.1.notify_all();
 }
 
 /// A source that never knows who listens (aio's `listensTo`'s case).
@@ -337,17 +355,26 @@ async fn a_blocking_cell_never_delays_another_cells_calls_or_schedules() {
     let _cells = Cells::default().with(slow.clone(), &[]).with(c.clone(), &[]).start().unwrap();
     c.start_ticking().unwrap();
     let s = slow.clone();
-    let blocked = tokio::task::spawn_blocking(move || s.block(600));
+    let blocked = tokio::task::spawn_blocking(move || s.hold(0));
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let t = Instant::now();
-    c.add(1).unwrap();
-    assert!(t.elapsed() < Duration::from_millis(100), "another cell's call runs at once");
+    let add = tokio::task::spawn_blocking({
+        let c = c.clone();
+        move || c.add(1)
+    });
+    // A hang guard: the slow call never ends until the gate opens.
+    tokio::time::timeout(Duration::from_secs(10), add)
+        .await
+        .expect("another cell's call runs at once")
+        .unwrap()
+        .unwrap();
     let ticks = c.state().ticks;
     until("its schedule ticks meanwhile", || c.state().ticks > ticks + 3).await;
     assert_eq!(slow.state().done, 0, "its call still runs, and its state stays readable");
     // Its own calls keep their order: the next one waits for the first.
     let s = slow.clone();
-    tokio::task::spawn_blocking(move || s.block(0)).await.unwrap().unwrap();
+    let next = tokio::task::spawn_blocking(move || s.block(0));
+    open(0);
+    next.await.unwrap().unwrap();
     blocked.await.unwrap().unwrap();
     assert_eq!(slow.state().done, 2);
 }
@@ -363,6 +390,7 @@ async fn a_blocking_schedule_never_stalls_the_runtime() {
     let ticks = c.state().ticks;
     until("ticks while the other cell's schedule blocks", || c.state().ticks > ticks + 3).await;
     assert_eq!(slow.state().done, 0, "its scheduled call still runs");
+    open(1);
     until("the slow call", || slow.state().done == 1).await;
 }
 
@@ -394,4 +422,37 @@ fn a_cell_reacts_to_another_cells_calls_with_their_arguments_and_caller() {
 fn listening_to_a_method_that_isnt_there_panics_at_wiring() {
     let (session, prefs) = (Handle::<Session>::memory(), Handle::<Prefs>::memory());
     prefs.listens_to(&session, "logot", |p, _| p.clear());
+}
+
+/// aio's `aio.run({ onStart, onRestore, fatalOnStart })` and `getFullState()`.
+#[tokio::test]
+async fn app_hooks_run_around_the_start_and_see_every_cell() {
+    let said = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let (a, b) = (said.clone(), said.clone());
+    let cells = Cells::default()
+        .with(Handle::<Base>::memory(), &[])
+        .with(Handle::<Counter>::memory(), &[Base::ID])
+        .on_restore(move |c| {
+            // Not live yet: a repair across cells, through their methods.
+            c.get::<Base>().unwrap().hit()?;
+            a.lock().unwrap().push("restore".to_string());
+            Ok(())
+        })
+        .on_start(move |c| {
+            c.get::<Counter>().unwrap().add(2)?;
+            b.lock().unwrap().push(format!("start {}", serde_json::Value::Object(c.view())));
+            Ok(())
+        })
+        .start()
+        .unwrap();
+    assert_eq!(
+        *said.lock().unwrap(),
+        ["restore".to_string(), r#"start {"base":{"hits":1},"counter":{"n":2,"status":"","ticks":0}}"#.to_string()]
+    );
+    assert!(cells.get::<Upper>().is_none(), "not in the list");
+
+    let refusing = || Cells::default().with(Handle::<Base>::memory(), &[]).on_start(|_| aio::reject!("no seed data"));
+    assert!(refusing().start().is_ok(), "said, and the start goes on");
+    let e = refusing().fatal_on_start().start().err().unwrap();
+    assert!(e.0.contains("on_start refused at start: no seed data"), "{}", e.0);
 }

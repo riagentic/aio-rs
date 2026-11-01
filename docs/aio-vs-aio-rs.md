@@ -180,16 +180,10 @@ beyond the aio-rs form.
 
 | Area | aio | aio-rs | Workaround | Page |
 |---|---|---|---|---|
-| State | `aio.run({ onStart })`, an app-wide start hook | none | `#[on_start]` on a cell | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `fatalOnStart: true` | none: a refused `#[on_start]` is reported, the boot goes on | check in `main` before `run` | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `isolate` (run only some cells) | none | open only those cells (`TestCells`) | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `app.getFullState()` in a hook | none: a hook sees its own cell | pass what it needs | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `beforeReduce` may change an action | `before_call` lets in or refuses | change it in the method | [lifecycle](state/lifecycle.md#differences-from-aio) |
 | State | `beforeReduce`/`onAction` on every call, `am where` | no module-graph answer of where code runs | the compiler and `cfg(target_arch = "wasm32")` | [architecture](basics/architecture.md#gaps-against-aio) |
 | Methods | `transaction: true`, `$commit`, `$live`, transactions across cells | none: each part of an async method is atomic | take what you need before the await | [methods](state/methods.md#differences-from-aio) |
 | Methods | `cellDefaults`, `persist: false` app-wide | none: flags per cell | `#[cell(persist)]` where wanted | [persistence](persistence/README.md#limits-compared-with-aio) |
-| Effects | `blocking.cancel(id)` stops a task | `spawn_blocking` can't be stopped | check a flag between chunks | [effects](state/effects.md#limits) |
-| Effects | `t.getEffects()`, effect objects in tests | `t.effects()` lists keys | `t.settle()` runs them | [effects](state/effects.md#limits) |
+| Effects | `t.getEffects()`, effect objects in tests (`isScheduleEffect`) | `t.held_effects()`: key, mode, timeout; schedules apart | `Store::schedules` | [effects](state/effects.md#limits) |
 | Effects | notifications in a browser page (`requestNotificationPermission`) | none in a web build | `aio::tell::show_with(f)` | [effects](state/effects.md#limits) |
 | Persistence | `persist: { include, exclude }` path lists | none | `#[transient]`, `save = f` | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Persistence | `persistMode: "single" \| "multi"` | log + snapshots per cell; aio's layout read and written as found | ➖ | [persistence](persistence/README.md#limits-compared-with-aio) |
@@ -296,11 +290,13 @@ construct-by-construct tables are in the
 - **Disabling keeps the state** (aio resets it). [lifecycle](state/lifecycle.md)
 - **A listener runs only for a committed call** (aio's also on a
   refusal). [composition](state/composition.md#differences-from-aio)
-- **A hidden field reads as its default on a copy** (aio throws). Publish
-  a fact field beside the secret (`has_password`); mark a method that
-  needs it `#[client(predict = false)]`. [visibility](state/visibility.md)
-- **A typed call on a copy returns the prediction**; `call_confirmed` is
-  the server's answer (aio's `await` gives the server's).
+- **A `#[server]` field of a shared cell is an `aio::Hidden<T>`**: a copy
+  never has it and any use there panics naming it (aio throws on a read);
+  a method that touches it is `#[client(predict = false)]`.
+  [visibility](state/visibility.md)
+- **A typed call of a plain method on a copy returns the prediction**;
+  `call_confirmed` is the server's answer (aio's `await` gives the
+  server's). An async method's `Answer` is the server's end.
   [sync](state/sync.md#limits)
 - **The offline queue holds 500 and refuses when full** (aio: 1000,
   dropping the oldest) unless `[client] retention` is set; it can be kept
@@ -360,12 +356,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Reactions across cells | `listensTo`, `cancelOn` | `listens_to`, `cx.abort` (committed calls only) | 🔄 |
 | Transactions | `transaction: true`, across cells | ❌ (each part atomic; read before the await) | ❌ |
 | Lifecycle hooks | `onInit`, `onDestroy`, `onStopping`, `onStop` | `#[on_start]`, `#[on_stop]`, `aio::on_stopping`, `aio::on_stop` | ✅ |
-| App-wide start hook, `fatalOnStart`, `isolate` | yes | ❌ (`#[on_start]` per cell) | ❌ |
+| App-wide start hook, `fatalOnStart`, `isolate`, `onRestore`, `getFullState` | yes | `Cells::on_start`, `fatal_on_start`, `AIORT_ISOLATE`, `on_restore`, `view` | ✅ |
 | Disable, breaker | resets state; `circuitBreaker` | keeps state; `Cells::trip_after` | 🔄 |
-| Call hook | `beforeReduce` (may change) | `before_call` (lets in or refuses) | 🔄 |
+| Call hook | `beforeReduce` (may change) | `before_call` (lets in or refuses), `rewrite_call` (may change) | ✅ |
 | Worker cells | `worker: true` | not needed: native code, `spawn_blocking` | 🔄 |
 | View-only state | `scope: "client"` | a cell without `persist`/`shared`, or a `GlobalSignal` | ✅ |
-| Visibility | `visible`, `forUser` | `#[cell(visible = f)]`, `#[server]` fields (hidden reads as default) | 🔄 |
+| Visibility | `visible`, `forUser`; a hidden read throws | `#[cell(visible = f)]`, `#[server]` fields as `Hidden<T>` (a read on a copy panics) | ✅ |
 | Plugins | `definePlugin` | `aio::plugin::Plugin` | ✅ |
 | Retired cells | `am persist --drop` | `ax persist --drop`, `#[cell(retire = [..])]` | ✅ |
 
@@ -373,13 +369,13 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Async methods | `async` on a draft | `async fn`, split at its awaits | 🔄 |
-| Effects and modes | `$do`, `concurrency` | `cx.run(Effect::new(..))`, `Mode` | ✅ |
+| Async methods | `async` on a draft; `await cell.method()` gives its value or throw | `async fn`, split at its awaits (in branches and loops too); `h.m(..)?.await` gives its end | ✅ |
+| Effects and modes | `$do`, `concurrency` | `cx.run(Effect::new(..))`, `Mode`; `#[mode(newest \| first)]` on async methods | ✅ |
 | `ttl`, `long` | yes | `#[ttl(ms)]`, `#[long]` | ✅ |
 | Retries, timeouts | `call({ timeoutMs, retries })` | `aio::effect::retry`, `Effect::timeout`, `cx.backoff` | ✅ |
-| Schedules | `every`, `cron`, `after`, `backoff` | `#[every]`, `#[cron]`, `cx.after`, `cx.backoff` | ✅ |
+| Schedules | `every`, `cron` (UTC), `after`, `backoff` | `#[every]`, `#[cron]` (UTC; `[app] tz = "local"`), `cx.after`, `cx.backoff` | ✅ |
 | Clock, ids, randomness in methods | allowed, linted | `cx.now()`, `cx.id()`, `cx.rand()` | 🔄 |
-| CPU work | `blocking(id, fn)`, `cancel` | `spawn_blocking` (not cancellable) | 🔄 |
+| CPU work | `blocking(id, fn)`, `cancel` | `aio::effect::blocking(key, f)`, `cancel_blocking` | ✅ |
 | Notifications | `notify()` | `cx.tell(..)`; a web build needs `show_with` | 🔄 |
 | Pending calls | `$pending()` | `h.pending(..)`, `use_pending` | ✅ |
 

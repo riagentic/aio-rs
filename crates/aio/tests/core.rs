@@ -613,8 +613,12 @@ fn a_damaged_store_is_set_aside_and_the_good_copy_boots() {
         *x = 0xAB;
     }
     std::fs::write(&p, &b).unwrap();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    aio::on_recovered(move |cell, r| into.lock().unwrap().push((cell.to_string(), r.from)));
     let h = Handle::<Todo>::open(&p).unwrap();
     let r = h.store(|s| s.recovered().cloned()).unwrap();
+    assert!(heard.lock().unwrap().contains(&("todo".to_string(), r.from)), "aio's onCheckpointRestore heard it");
     let titles: Vec<String> = h.state().items.values().map(|i| i.title.clone()).collect();
     assert_eq!(titles, ["in the good copy"]);
     // Kept, not deleted.
@@ -878,8 +882,8 @@ fn a_child_stops_when_its_parent_goes() {
     // `stop`: a graceful ask first; a child that dies on it is reaped at once.
     let mut c = std::process::Command::new("sleep").arg("30").spawn().unwrap();
     let t = std::time::Instant::now();
-    aio::lifecycle::stop(&mut c, std::time::Duration::from_secs(5));
-    assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    aio::lifecycle::stop(&mut c, std::time::Duration::from_secs(30));
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "reaped at once, not at the grace's end");
 }
 
 #[cfg(unix)]

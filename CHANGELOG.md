@@ -9,6 +9,29 @@ version may break things.
 
 ### Added
 
+- **Async methods answer their caller** (aio's `await cell.method()`): a
+  typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
+  await is the value its last part returned or the refusal that ended it
+  after an await. A synced copy's `Answer` and `call_confirmed` wait for
+  the server's end, `ax call` prints it, and an aio page's action is
+  acked on completion ([effects](docs/state/effects.md#async-methods)).
+- **Awaits anywhere a statement goes** in an async method: in `if`,
+  `if let`, `match`, `loop`, `while` and blocks (with `break` and
+  `continue`), as `let x: T = io.await?`, `x = io.await`, `io.await`, a
+  `let` bound to a branch's awaited value, or the last expression. Each
+  part stays one atomic, logged call; replay does no I/O.
+- `#[mode(newest)]` and `#[mode(first)]` on async methods (aio's
+  `concurrency`): a new call supersedes the running one, or shares its
+  answer.
+- `[perf] call_ceiling` (aio's `effectTimeoutMs`); `[app] tz`.
+- `aio::effect::blocking(key, f)` with a `Cancel` token and
+  `cancel_blocking(key)` (aio's `blocking`, `blocking.cancel`).
+- `Cells::on_start`, `on_restore`, `fatal_on_start`, `get`, `view`, and
+  `AIORT_ISOLATE` (aio's `onStart`, `onRestore`, `fatalOnStart`,
+  `getFullState`, `isolate`); `Plugin::on_start`, `on_stopping`, `on_stop`.
+- `aio::rewrite_call` (aio's `beforeReduce` changing a call),
+  `aio::on_recovered` (aio's `onCheckpointRestore`),
+  `TestCells::held_effects` (aio's `t.getEffects()`).
 - `ax create --aio-version <v|main|latest>`, and `ax framework [version]
   [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
   `am pin`; all or nothing).
@@ -64,6 +87,16 @@ version may break things.
   `peer` of itself (its own user and role, never a claimed one).
 ### Changed
 
+- **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
+  they did; `[app] tz = "local"` reads this machine's local time (the
+  0.1.0 behaviour).
+- **A `#[server]` field of a shared cell is an `aio::Hidden<T>`**: a
+  synced copy never has it, and any use there panics naming the field
+  (aio throws), instead of reading a default. A method that touches it is
+  `#[client(predict = false)]`. Write `#[server] pub key: Hidden<String>`
+  and `*self.key = k`.
+- A `#[ttl]` call answered from the cache returns the kept answer, not `null`.
+- An async method returns `aio::Result<R>` for any `R`.
 - **`ax create` writes nothing of the machine it ran on**: the app takes
   aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
   commit), so a clone builds anywhere and a prebuilt `ax` needs no
@@ -76,6 +109,19 @@ version may break things.
 - The hue is hashed over the slug the id makes (aio's `appHue`), so
   `My Notes`, `my_notes` and `my-notes` are one colour.
 - `aio_shell::runtime::ensure_as` takes the icon of its windows.
+
+### Fixed
+
+- `aio::testing::TestBrowser` starts one browser at a time per process
+  (started together, eight took 22 s each on an 8-core Windows, one 0.5 s)
+  and reads its DevTools port only once `DevToolsActivePort` is whole.
+- `aio::testing::TestUi` counts every render (`components()`) when tests
+  run in parallel: a render callsite another thread registered at the same
+  moment could be cached as of no interest, and its renders went uncounted.
+- The test suite holds under load: timing tests wait on what they check
+  (a condition, a gate the test opens, a page-side record of each style)
+  instead of a fixed sleep or a wall-clock window; bounds on time are hang
+  guards well short of what they guard against.
 
 ## [0.1.0] - 2026-11-01
 
