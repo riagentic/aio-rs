@@ -246,7 +246,7 @@ impl TestCells {
         store.set_clock(self.clock.clone());
         let h = Handle::new(store).by(By::Test);
         h.hold();
-        h.live(true);
+        _ = h.live(true);
         self.cells.push(Box::new(h.clone()));
         h
     }

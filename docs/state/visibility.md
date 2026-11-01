@@ -43,27 +43,37 @@ pub struct Mailbox {
     pub subjects: Vec<String>,
     /// Kept and saved; never sent to a client, a tool or a report.
     #[server]
-    pub imap_password: String,
+    pub imap_password: Hidden<String>,
+    /// The fact clients read, published beside the secret.
+    pub has_password: bool,
     /// Sent; never saved: back to the default on every start.
     #[transient]
     pub syncing: bool,
     /// Neither: scratch the methods use (the last count seen).
     #[server]
     #[transient]
-    pub last_count: u32,
+    pub last_count: Hidden<u32>,
 }
 
 #[methods]
 impl Mailbox {
-    #[client]
-    pub fn has_password(&mut self) -> Result<bool> {
-        Ok(!self.imap_password.is_empty()) // a fact, not the secret
+    /// The app's own code sets it; its argument stays out of the log.
+    #[redact]
+    pub fn set_password(&mut self, pw: String) {
+        self.has_password = !pw.is_empty();
+        *self.imap_password = pw;
     }
 }
 
 # fn main() {
 use aio::CellData;
-let m = Mailbox { subjects: vec!["hi".into()], imap_password: "pw".into(), syncing: true, last_count: 3 };
+let m = Mailbox {
+    subjects: vec!["hi".into()],
+    imap_password: Hidden::new("pw".into()),
+    has_password: true,
+    syncing: true,
+    last_count: Hidden::new(3),
+};
 let view = m.project(&Caller::default());
 assert!(view.get("imap_password").is_none() && view.get("last_count").is_none());
 assert_eq!(view["syncing"], true);
@@ -75,6 +85,7 @@ assert_eq!(Mailbox::TRANSIENT, ["syncing", "last_count"]);
 - `#[server]` fields are left out of every view, whatever `visible`
   returns, and out of problem reports and the debug log (a report may be
   sent to someone). They are saved, so the app has them after a restart.
+  On a shared cell each is an `aio::Hidden<T>` (below).
 - `#[transient]` fields are never saved and start at their default on
   every boot. They are sent, so a view can show them.
 - Neither may carry `#[serde(..)]` (a build error says so).
@@ -199,9 +210,13 @@ assert on it, as above, without a server. `aio::testing::TestCells`
 ## What a synced copy holds
 
 A copy (`aio::sync::Remote`, a window in `client` mode, a page) holds the
-viewer's view, deserialized into the cell's own type. A field the view
-left out holds its default there: the copy can't tell "hidden" from
-"empty".
+viewer's view, deserialized into the cell's own type. A `#[server]`
+field of a shared cell is an `aio::Hidden<T>`: in the app it reads and
+writes as its value (`self.seed.len()`, `*self.seed = 7`); on a copy,
+which never has it, any read or write panics, naming the field, as aio
+throws when client code reads a field its view hides. `Hidden::get`
+(`None` on a copy) is for code that runs on both sides. A `#[server]`
+field of a shared cell of another type fails the build.
 
 ```rust
 use aio::prelude::*;
@@ -212,7 +227,7 @@ use std::time::Duration;
 pub struct Scores {
     pub mine: Vec<(String, u32)>,
     #[server]
-    pub seed: u64,
+    pub seed: Hidden<u64>,
 }
 
 fn by_user(s: &Scores, who: &By) -> Scores {
@@ -247,7 +262,7 @@ async fn until(f: impl Fn() -> bool) {
 let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 rt.block_on(async {
     let h = Handle::<Scores>::memory();
-    h.store(|s| s.state().seed); // the app reads every field
+    h.store(|s| *s.state().seed); // the app reads every field
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
     tokio::spawn(serve(h.clone(), l, "secret".into()));
@@ -259,7 +274,9 @@ rt.block_on(async {
     until(|| h.state().mine.len() == 2 && ana.pending() == 0 && bo.pending() == 0).await;
     until(|| ana.state().mine == [("ana".to_string(), 10)]).await;
     until(|| bo.state().mine == [("bo".to_string(), 7)]).await;
-    assert_eq!(ana.state().seed, 0, "a #[server] field reads as its default on a copy");
+    assert_eq!(ana.state().seed.get(), None, "a copy never has a #[server] field");
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| *ana.state().seed));
+    assert!(read.is_err(), "and reading it there fails loudly");
 });
 # }
 ```
@@ -269,19 +286,19 @@ rt.block_on(async {
   change no viewer can see sends them nothing; a client never learns that
   rows it can't see changed.
 - Calls are predicted on the copy, so a predicted method runs on the
-  view. One that reads a hidden field there reads its default and may
-  predict wrong; the server's answer replaces the prediction when it
-  comes. Mark it `#[client(predict = false)]` so the copy waits for the
-  server instead ([sync](sync.md)).
+  view. One that touches a `#[server]` field panics there, and the call
+  is refused at once with the field's name: mark it
+  `#[client(predict = false)]` so the copy waits for the server instead
+  ([sync](sync.md)). A field `visible` leaves out (a row, a column of a
+  row) is not there to read: that view is all the copy knows.
 - Effects and schedules a predicted call asks for are dropped on the copy:
   the server runs them once.
 
-Limit, compared with aio: aio throws when client code reads a field its
-view hides; aio-rs can't, since the copy is a plain value of the cell's
-type. Publish a fact field next to a secret (`has_password`) and read
-that. In return, aio-rs needs no rule against `visible` on a synced cell
-(aio refuses `sync` with a filter): copies sync by replaying calls on the
-server, and each client is sent only its own view.
+As in aio, reading a `#[server]` field on a copy throws (panics); publish a
+fact field next to a secret (`has_password`) and read that. In return,
+aio-rs needs no rule against `visible` on a synced cell (aio refuses
+`sync` with a filter): copies sync by replaying calls on the server, and
+each client is sent only its own view.
 
 ## Cost
 
@@ -347,8 +364,8 @@ Rules that follow, and what refuses them:
 - Starting `visible` from `s.clone()` and blanking fields one by one: a
   field added later is sent to everyone. Build the view up instead.
 - Trusting `visible` to keep a secret a `#[client]` method returns.
-- Reading a `#[server]` field in client code and taking its default as
-  data (`""` as "no password set"): publish the fact as its own field.
+- Reading a `#[server]` field in client code: it panics there (a copy
+  never has it); publish the fact as its own field.
 - Expecting `Caller::default()` (a key with no user name) to see what a
   user sees: write `visible` for it on purpose.
 - A big `visible` on a cell with many viewers, called many times a

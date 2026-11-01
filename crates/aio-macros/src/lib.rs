@@ -98,6 +98,11 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let msg = format!("a #[{flag}] field can't have #[serde(...)] yet");
                 return syn::Error::new(field.span(), msg).to_compile_error().into();
             }
+            if flag == "server" && f.shared && !is_hidden(&field.ty) {
+                let msg = "a #[server] field of a shared cell is `aio::Hidden<T>`: a synced copy never has it, \
+                           and reading it there fails loudly instead of reading a default";
+                return syn::Error::new(field.ty.span(), msg).to_compile_error().into();
+            }
             match &field.ident {
                 Some(i) => into.push(i.to_string()),
                 None => {
@@ -200,6 +205,12 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let transient =
         (!transient.is_empty()).then(|| quote!(const TRANSIENT: &'static [&'static str] = &[#(#transient),*];));
     let server = (!hidden.is_empty()).then(|| quote!(const SERVER: &'static [&'static str] = &[#(#hidden),*];));
+    // A copy never has its #[server] fields: reading one there fails loudly.
+    let conceal = (shared && !hidden.is_empty()).then(|| {
+        let (fields, labels) =
+            (hidden.iter().map(|h| format_ident!("{h}")), hidden.iter().map(|h| format!("{}.{h}", s.ident)));
+        quote!(fn conceal(&mut self) { #(::aio::Hidden::conceal(&mut self.#fields, #labels);)* })
+    });
     let tables = (!tables.is_empty()).then(|| {
         quote!(const TABLES: &'static [(&'static str, &'static str, ::std::option::Option<&'static str>, ::std::option::Option<&'static str>)] = &[#(#tables),*];)
     });
@@ -306,6 +317,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             #project
             #transient
             #server
+            #conceal
             #tables
             #slices
             #save
@@ -374,6 +386,11 @@ fn snake(s: &str) -> String {
 fn take(attrs: &mut Vec<Attribute>, name: &str) -> Option<Attribute> {
     let i = attrs.iter().position(|a| a.path().is_ident(name))?;
     Some(attrs.remove(i))
+}
+
+/// `Hidden<T>` (`aio::Hidden<T>`).
+fn is_hidden(t: &Type) -> bool {
+    matches!(t, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Hidden"))
 }
 
 fn is_cx(t: &Type) -> bool {

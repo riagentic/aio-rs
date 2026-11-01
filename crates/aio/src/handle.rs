@@ -435,11 +435,11 @@ impl<T: Cell> Handle<T> {
     /// from zero, and schedules missed meanwhile fire once.
     pub(crate) fn switch(&self, on: bool) {
         if !on {
-            self.live(false);
+            _ = self.live(false);
         }
         self.inner.off.store(!on, Ordering::SeqCst);
         if on {
-            self.live(true);
+            _ = self.live(true);
             lock(&self.inner.tally).clear();
             crate::health::ok(&format!("cell {}", T::ID));
             self.inner.wake.notify_one();
@@ -453,9 +453,9 @@ impl<T: Cell> Handle<T> {
     /// Going live or not: run its `#[on_start]` or `#[on_stop]` once each
     /// way. A refusal (or a panic) is said in the log and a report, never
     /// stops the boot or the shutdown.
-    pub(crate) fn live(&self, on: bool) {
+    pub(crate) fn live(&self, on: bool) -> Result {
         if self.inner.live.swap(on, Ordering::SeqCst) == on {
-            return;
+            return Ok(());
         }
         if on && !T::SCHEDULES.is_empty() {
             if let Err(e) = lock(&self.inner.store).declare() {
@@ -464,12 +464,15 @@ impl<T: Cell> Handle<T> {
             }
             self.inner.wake.notify_one();
         }
-        let (Some(m), hook) = (if on { (T::ON_START, "on_start") } else { (T::ON_STOP, "on_stop") }) else { return };
-        if let Err(e) = Door::call(self, m, Value::Null) {
+        let (Some(m), hook) = (if on { (T::ON_START, "on_start") } else { (T::ON_STOP, "on_stop") }) else {
+            return Ok(());
+        };
+        Door::call(self, m, Value::Null).map(drop).map_err(|e| {
             let msg = format!("{}: #[{hook}] {m} refused: {e}", T::ID);
             eprintln!("[aio] {msg}");
             crate::report::problem("hook", &msg);
-        }
+            crate::Rejected::new(msg)
+        })
     }
 
     /// Disable the cell after `max` failures (within `window`, if set).
@@ -762,7 +765,7 @@ impl<T: Cell> Handle<T> {
     /// stop the schedules, let running effects finish and commit; those
     /// still running at the deadline are aborted and named.
     pub async fn shutdown(&self, budget: Duration) -> Drained {
-        self.live(false);
+        _ = self.live(false);
         self.inner.closing.store(true, Ordering::SeqCst);
         // A held `#[coalesce]` run is saved before anything else stops.
         self.store(|s| s.flush()).ok();
@@ -926,7 +929,7 @@ impl<T: Cell> Handle<T> {
     /// Fire saved schedules on time, until the task is dropped or aborted.
     /// Schedules missed while the app was off fire once, right away.
     pub fn start(&self) -> tokio::task::JoinHandle<()> {
-        self.live(true);
+        _ = self.live(true);
         let h = self.clone();
         tokio::spawn(async move {
             loop {

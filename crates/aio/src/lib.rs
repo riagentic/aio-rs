@@ -73,7 +73,7 @@ native! {
     pub use cells::{CellHealth, Cells};
     pub use handle::{Drained, Handle, Moment, RETRY_AFTER_MS, TIMELINE_STEPS, TimeAsk, Timeline};
     pub use source::Source;
-    pub use store::{Due, Error, Event, Position, REDACTED, Recovered, Steps, Store, Travel, PERSIST_DEBOUNCE, apply_event, shape_of};
+    pub use store::{Due, Error, Event, Position, REDACTED, Recovered, Steps, Store, Travel, PERSIST_DEBOUNCE, apply_event, on_recovered, shape_of};
 }
 /// In a page: the login doors of the server that served it.
 #[cfg(target_arch = "wasm32")]
@@ -82,6 +82,8 @@ pub mod auth {
 }
 mod answer;
 pub mod colors;
+mod hidden;
+pub use hidden::Hidden;
 pub mod cron;
 mod cx;
 mod derived;
@@ -239,8 +241,8 @@ pub mod prelude {
     #[cfg(not(target_arch = "wasm32"))]
     pub use crate::Store;
     pub use crate::{
-        Answer, By, Caller, Cell, CellData, Code, Cx, Door, Effect, Handle, Mode, Rejected, Result, Uuid, act, call,
-        cell, data, ensure, methods, reject,
+        Answer, By, Caller, Cell, CellData, Code, Cx, Door, Effect, Handle, Hidden, Mode, Rejected, Result, Uuid, act,
+        call, cell, data, ensure, methods, reject,
     };
 }
 
@@ -395,9 +397,20 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// ```
     /// ```
     /// #[aio::cell(shared)]
-    /// pub struct Keys { #[server] pub api_key: String, pub api_key_id: u32 }
+    /// pub struct Keys { #[server] pub api_key: aio::Hidden<String>, pub api_key_id: u32 }
+    /// ```
+    ///
+    /// On a shared cell it is an [`Hidden`]: a copy never has it, and
+    /// reading it there fails loudly instead of reading a default.
+    ///
+    /// ```compile_fail
+    /// #[aio::cell(shared)]
+    /// pub struct Keys { #[server] pub api_key: String }
     /// ```
     const SERVER: &'static [&'static str] = &[];
+    /// On a synced copy, mark the `#[server]` fields absent (`#[cell]` writes it).
+    #[doc(hidden)]
+    fn conceal(&mut self) {}
     /// `#[table("name")]` fields (`#[table("name", key = "col")]` for a map
     /// keyed by that column): the rows of the `db:` table `name`, in an aio
     /// file ([`crate::Store::open_aio`]) instead of the `aio_kv` slice, in
@@ -695,11 +708,30 @@ pub fn before_call(f: impl Fn(&Call) -> Result + Send + Sync + 'static) {
     *BEFORE.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
 
-pub(crate) fn ask_before(call: &Call) -> Result {
-    let Some(f) = BEFORE.read().unwrap_or_else(|e| e.into_inner()).clone() else { return Ok(()) };
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(call))).unwrap_or_else(|_| {
-        Err(Rejected::new(format!("{}.{}: refused: the before_call hook panicked", call.cell, call.method)))
-    })
+type Rewrite = std::sync::Arc<dyn Fn(&Call) -> Result<Option<Value>> + Send + Sync>;
+
+static REWRITE: std::sync::RwLock<Option<Rewrite>> = std::sync::RwLock::new(None);
+
+/// [`before_call`] that may also change the call (aio's `beforeReduce`
+/// returning another action): `Ok(Some(args))` runs it with those
+/// arguments instead (a default filled in, a value normalized), `Ok(None)`
+/// as it came, `Err` refuses it. The log holds what ran, so replay never
+/// asks again. It runs after `before_call`, under the same rules.
+pub fn rewrite_call(f: impl Fn(&Call) -> Result<Option<Value>> + Send + Sync + 'static) {
+    *REWRITE.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+}
+
+/// The app's gates on `call`: refused, or the arguments it runs with
+/// (`None`: as it came).
+pub(crate) fn ask_before(call: &Call) -> Result<Option<Value>> {
+    let panicked =
+        |hook: &str| Rejected::new(format!("{}.{}: refused: the {hook} hook panicked", call.cell, call.method));
+    if let Some(f) = BEFORE.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(call)))
+            .unwrap_or_else(|_| Err(panicked("before_call")))?;
+    }
+    let Some(f) = REWRITE.read().unwrap_or_else(|e| e.into_inner()).clone() else { return Ok(None) };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(call))).unwrap_or_else(|_| Err(panicked("rewrite_call")))
 }
 
 pub(crate) type Started = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
@@ -858,6 +890,13 @@ pub fn allowed(method: &str, rule: &str, f: impl FnOnce() -> bool) -> Result {
         Ok(false) => Err(Rejected::denied(method, &format!("is refused by {rule}"))),
         Err(_) => Err(Rejected::denied(method, &format!("is refused: {rule} panicked"))),
     }
+}
+
+/// A synced copy's state from the view the server sent: its `#[server]` fields absent.
+pub(crate) fn copy_of<T: CellData>(view: Value) -> serde_json::Result<T> {
+    let mut t: T = serde_json::from_value(view)?;
+    t.conceal();
+    Ok(t)
 }
 
 #[doc(hidden)]

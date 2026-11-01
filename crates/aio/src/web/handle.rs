@@ -125,7 +125,8 @@ impl<T: Cell> Handle<T> {
 
     /// Run one call atomically; an async method's end goes to `reply`.
     fn run(&self, method: &str, args: Value, reply: Option<crate::Reply>) -> Result<Value> {
-        crate::ask_before(&Call { cell: T::ID, method, args: &args, by: &self.by, role: None })?;
+        let args =
+            crate::ask_before(&Call { cell: T::ID, method, args: &args, by: &self.by, role: None })?.unwrap_or(args);
         let cx = Cx::live(super::now_ms(), &self.by).with_reply(reply);
         let mut st = (*self.state()).clone();
         st.advance(method)?;

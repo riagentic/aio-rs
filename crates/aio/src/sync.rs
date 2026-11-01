@@ -1313,7 +1313,7 @@ impl<T: Cell> Remote<T> {
             (None, Some(s)) => (None, s.seq, s.view),
             (None, None) => unreachable!("offline without a saved copy returned above"),
         };
-        let st: Arc<T> = Arc::new(serde_json::from_value(view.clone()).map_err(std::io::Error::other)?);
+        let st: Arc<T> = Arc::new(crate::copy_of(view.clone()).map_err(std::io::Error::other)?);
         let save = file.map(|f| {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Saved>();
             tokio::spawn(async move {
@@ -1524,7 +1524,7 @@ impl<T: Cell> Remote<T> {
             *lock(&self.inner.last_sync) = Some(crate::store::now_ms());
         }
         match m["t"].as_str() {
-            Some("state") => match serde_json::from_value::<T>(m["state"].clone()) {
+            Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
                 Ok(st) => {
                     let mut events = 0;
                     self.update(|c| {
@@ -1557,7 +1557,7 @@ impl<T: Cell> Remote<T> {
                     return self.resync(); // a gap: never guess
                 }
                 let st = patched(&view, &m)
-                    .and_then(|v| serde_json::from_value::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
+                    .and_then(|v| crate::copy_of::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
                 match st {
                     Ok((view, st)) => self.update(|c| {
                         c.seq = seq;

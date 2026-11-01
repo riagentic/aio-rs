@@ -261,17 +261,24 @@ pub struct Diary {
     /// id → (author, text)
     pub entries: BTreeMap<Uuid, (String, String)>,
     #[server]
-    pub audit: Vec<String>,
+    pub audit: Hidden<Vec<String>>,
 }
 
 #[methods]
 impl Diary {
-    #[client]
-    pub fn write(&mut self, cx: &Cx, who: String, text: String) -> Result<Uuid> {
+    /// It writes a `#[server]` field, which a copy never has: only the server runs it.
+    #[client(predict = false)]
+    pub fn write(&mut self, cx: &Cx, who: String, text: String) -> Result {
         let id = cx.id();
         self.audit.push(format!("{who} wrote"));
         self.entries.insert(id, (who, text));
-        Ok(id)
+        Ok(())
+    }
+
+    /// Predicted, it would read the audit on the copy: it fails loudly there.
+    #[client]
+    pub fn audited(&mut self) -> Result<usize> {
+        Ok(self.audit.len())
     }
 }
 
@@ -283,16 +290,25 @@ async fn each_user_sees_only_what_they_may() {
     tokio::spawn(serve(h.clone(), l, "secret".into()));
     let ana = Remote::<Diary>::connect(&addr, "secret", "ana").await.unwrap();
     let bo = Remote::<Diary>::connect(&addr, "secret", "bo").await.unwrap();
-    let a = ana.write("ana".into(), "ana's".into()).unwrap();
+    ana.write("ana".into(), "ana's".into()).unwrap();
     bo.write("bo".into(), "bo's".into()).unwrap();
     until("confirmed", || ana.pending() == 0 && bo.pending() == 0).await;
     until("ana sees hers", || ana.confirmed().entries.len() == 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(h.state().entries.len(), 2);
     assert_eq!(h.state().audit.len(), 2);
-    assert_eq!(ana.confirmed().entries.keys().collect::<Vec<_>>(), [&a]);
+    let hers: Vec<_> = h.state().entries.iter().filter(|(_, (w, _))| w == "ana").map(|(id, _)| *id).collect();
+    assert_eq!(ana.confirmed().entries.keys().copied().collect::<Vec<_>>(), hers);
     assert_eq!(bo.confirmed().entries.len(), 1);
-    assert!(ana.confirmed().audit.is_empty() && bo.confirmed().audit.is_empty(), "#[server] stays on the server");
+    assert!(
+        ana.confirmed().audit.get().is_none() && bo.confirmed().audit.get().is_none(),
+        "#[server] stays on the server"
+    );
+    let e = ana.audited().unwrap_err();
+    assert!(
+        e.why.contains("Diary.audit: a #[server] field, never sent to a synced copy"),
+        "read on a copy fails loudly: {e}"
+    );
     let p = h.state().project(&Caller { by: By::User("ana".into()), role: None });
     assert!(p.get("audit").is_none());
 }
@@ -1417,7 +1433,7 @@ async fn concurrent_edits_merge_counters_sets_and_text() {
 pub struct Till {
     pub balance: i64,
     #[server]
-    pub ledger: Vec<i64>,
+    pub ledger: Hidden<Vec<i64>>,
 }
 
 #[methods]
@@ -1468,7 +1484,7 @@ async fn an_unpredicted_call_shows_only_what_the_server_made_of_it() {
     r.on_refused(move |m, e| s2.lock().unwrap().push(format!("{m}: {e}")));
     r.pay(4).unwrap();
     until("the server ran it", || r.pending() == 0).await;
-    assert_eq!((r.state().balance, h.state().ledger.clone()), (6, vec![10, -4]));
+    assert_eq!((r.state().balance, (*h.state().ledger).clone()), (6, vec![10, -4]));
     // The server's refusal: nothing was ever shown, and it is said.
     r.pay(100).unwrap();
     until("refused", || r.pending() == 0).await;
