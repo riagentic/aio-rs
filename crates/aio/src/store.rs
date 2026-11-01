@@ -148,6 +148,8 @@ pub struct Store<T: Cell> {
     db: Connection,
     unsnapped: u32,
     effects: Vec<Box<dyn std::any::Any + Send>>,
+    /// Schedules due on another cell (`cx.on::<O>()`), fired by the handle.
+    foreign: Vec<Due>,
     /// Events committed since the runtime last took them, each with the
     /// cell's event before it (for synced copies to spot a gap).
     committed: Vec<(u64, Event)>,
@@ -1053,6 +1055,7 @@ impl<T: Cell> Store<T> {
             db,
             unsnapped: 0,
             effects: vec![],
+            foreign: vec![],
             committed: vec![],
             file: None,
             recovered: None,
@@ -1144,6 +1147,7 @@ impl<T: Cell> Store<T> {
             db,
             unsnapped: 0,
             effects: vec![],
+            foreign: vec![],
             committed: vec![],
             file,
             recovered,
@@ -1542,6 +1546,7 @@ impl<T: Cell> Store<T> {
         // call that set it, not found when it fires.
         for p in &asks.plans {
             if let Plan::Set { key, method: m, .. } = p
+                && !m.contains(':')
                 && !T::METHODS.contains(&m.as_str())
             {
                 crate::reject!("schedule `{key}`: {} has no method `{m}` (its methods: {})", T::ID, T::METHODS.join(", "));
@@ -1711,6 +1716,11 @@ impl<T: Cell> Store<T> {
             .flatten()
     }
 
+    /// The schedules due on other cells since the last take.
+    pub(crate) fn take_foreign(&mut self) -> Vec<Due> {
+        std::mem::take(&mut self.foreign)
+    }
+
     /// Effects asked for by committed calls, to be started by the runtime.
     pub(crate) fn take_effects(&mut self) -> Vec<Box<dyn std::any::Any + Send>> {
         std::mem::take(&mut self.effects)
@@ -1746,6 +1756,12 @@ impl<T: Cell> Store<T> {
         for d in &due {
             if skip(d) {
                 rearm::<T>(&self.db, d, now)?;
+                continue;
+            }
+            // Another cell's method (`cell:method`): its handle calls it.
+            if d.method.contains(':') {
+                rearm::<T>(&self.db, d, now)?;
+                self.foreign.push(d.clone());
                 continue;
             }
             let by = By::Schedule(d.key.clone());

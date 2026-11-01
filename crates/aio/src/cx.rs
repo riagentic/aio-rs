@@ -280,6 +280,15 @@ impl Cx {
         self.after(key, b.ms(attempt), method, args)
     }
 
+    /// Schedules of this cell that call a method of cell `O` (aio's
+    /// `schedule.after(id, ms, other.method.action())`): kept and cancelled
+    /// by key with this cell's own, fired on `O` by the app's cells
+    /// ([`crate::Cells::start`], `TestCells`). A `method` `O` doesn't have
+    /// refuses here.
+    pub fn on<O: crate::Cell>(&self) -> On<'_> {
+        On { cx: self, cell: O::ID, methods: O::METHODS }
+    }
+
     pub fn cancel(&self, key: &str) {
         self.plans.borrow_mut().push(Plan::Cancel(key.into()));
     }
@@ -341,6 +350,45 @@ impl Cx {
             .unwrap_or_else(|| crate::uuid_v4().as_u64_pair().0);
         u.rands.push(n);
         n
+    }
+}
+
+/// Schedules on another cell ([`Cx::on`]).
+pub struct On<'a> {
+    cx: &'a Cx,
+    cell: &'static str,
+    methods: &'static [&'static str],
+}
+
+impl On<'_> {
+    fn method(&self, key: &str, method: &str) -> crate::Result<String> {
+        crate::ensure!(
+            self.methods.contains(&method),
+            "schedule `{key}`: {} has no method `{method}` (its methods: {})",
+            self.cell,
+            self.methods.join(", ")
+        );
+        Ok(format!("{}:{method}", self.cell))
+    }
+
+    /// [`Cx::after`] on the other cell.
+    pub fn after(&self, key: &str, ms: i64, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.after(key, ms, &self.method(key, method)?, args)
+    }
+
+    /// [`Cx::every`] on the other cell.
+    pub fn every(&self, key: &str, ms: i64, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.every(key, ms, &self.method(key, method)?, args)
+    }
+
+    /// [`Cx::at`] on the other cell.
+    pub fn at(&self, key: &str, at: i64, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.at(key, at, &self.method(key, method)?, args)
+    }
+
+    /// [`Cx::cron`] on the other cell.
+    pub fn cron(&self, key: &str, expr: &str, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.cron(key, expr, &self.method(key, method)?, args)
     }
 }
 

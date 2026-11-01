@@ -127,7 +127,7 @@ pub use aio_macros::{cell, data, methods};
 pub use answer::Answer;
 #[doc(hidden)]
 pub use answer::{Reply, Step, finish, ttl_key};
-pub use cx::{Backoff, By, Cx, Inputs, Plan};
+pub use cx::{Backoff, By, Cx, Inputs, On, Plan};
 pub use derived::{Cache, Derived, Reads, Ver, Watching};
 pub use effect::{Effect, Mode};
 /// Persistent collections for cell state: a call copies the state, and with

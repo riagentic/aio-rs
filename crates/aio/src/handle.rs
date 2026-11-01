@@ -92,8 +92,18 @@ pub struct Moment {
     pub took: Option<Duration>,
 }
 
+/// Calls a cell by name, as a schedule of another cell fires it.
+type Reach = Arc<dyn Fn(&By, &str, Value) -> Result<Value> + Send + Sync>;
+
+/// The cells of one app (or one `TestCells`) by id: where a schedule set on
+/// another cell ([`crate::Cx::on`]) is called.
+#[derive(Clone, Default)]
+pub(crate) struct Dir(Arc<Mutex<HashMap<&'static str, Reach>>>);
+
 struct Inner<T: Cell> {
     store: Mutex<Store<T>>,
+    /// The app's other cells, once it joined them ([`Handle::join`]).
+    dir: Mutex<Option<Dir>>,
     /// The last committed state and its event, readable while a call runs.
     shown: Mutex<(u64, Arc<T>)>,
     listeners: Mutex<Vec<Listener<T>>>,
@@ -167,6 +177,7 @@ impl<T: Cell> Handle<T> {
         let inner = Inner {
             shown: Mutex::new((store.seq(), store.shared())),
             store: Mutex::new(store),
+            dir: Mutex::default(),
             listeners: Mutex::default(),
             reactions: Mutex::default(),
             watchers: Mutex::default(),
@@ -939,7 +950,48 @@ impl<T: Cell> Handle<T> {
         };
         // Its own fires must not wake it again.
         self.after_commit(false);
+        self.fire_foreign();
         (next, now)
+    }
+
+    /// Join the app's cells in `dir`: reached there by the schedules other
+    /// cells set on it, and reaching them with its own.
+    pub(crate) fn join(&self, dir: &Dir) {
+        let me = Arc::downgrade(&self.inner);
+        let reach: Reach = Arc::new(move |by, method, args| {
+            let inner = me.upgrade().ok_or_else(|| crate::Rejected::new(format!("{} is gone", T::ID)))?;
+            Handle { inner, by: by.clone() }.call(method, args)
+        });
+        lock(&dir.0).insert(T::ID, reach);
+        *lock(&self.inner.dir) = Some(dir.clone());
+    }
+
+    /// Call the methods its schedules on other cells came due for, each
+    /// by its schedule: refused, it is that cell's failure, as its own
+    /// schedule's would be; on a cell the app doesn't hold, this cell's.
+    pub(crate) fn fire_foreign(&self) {
+        let due = lock(&self.inner.store).take_foreign();
+        if due.is_empty() {
+            return;
+        }
+        let dir = lock(&self.inner.dir).clone();
+        for d in due {
+            let (cell, method) = d.method.split_once(':').expect("cell:method");
+            let by = By::Schedule(d.key.clone());
+            match dir.as_ref().and_then(|dir| lock(&dir.0).get(cell).cloned()) {
+                Some(f) => {
+                    if let Err(e) = f(&by, method, d.args) {
+                        eprintln!("[aio] {}: schedule `{}` ({cell}.{method}) refused: {e}", T::ID, d.key);
+                    }
+                }
+                None => {
+                    let why = format!("{cell}.{method}: {cell} is not one of the app's cells");
+                    eprintln!("[aio] {}: schedule `{}`: {why}", T::ID, d.key);
+                    lock(&self.inner.store).failed(&by, &why);
+                    self.count_failures();
+                }
+            }
+        }
     }
 
     /// After a call: a commit tells everyone; a refusal may be a failure.
