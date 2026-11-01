@@ -864,7 +864,7 @@ pub fn android(name: &str, device: Option<&str>, native: bool) -> Result<String,
         let mut logs = crate::install::logcat(&dev.serial)?;
         let on = dev.clone();
         let record = reversed.clone();
-        let ran = crate::web::dev_then(name, move |port| {
+        let ran = crate::web::dev_then(name, crate::web::Serve::default(), move |port| {
             let p = format!("tcp:{port}");
             crate::install::adb_out(&["-s", &on.serial, "reverse", &p, &p])
                 .map_err(|e| format!("{e}: the app can't reach the dev server"))?;

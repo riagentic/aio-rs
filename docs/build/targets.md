@@ -590,7 +590,8 @@ pub fn web() {
   new `sw.js`: the browser installs it.
 - Installing needs a square icon of at least 144 px: a smaller or
   non-square `assets/icon.png` is said, and the generated one used.
-- The page's policy allows no inline script and no `eval`; `[app] lang`
+- The page's policy allows no inline script and no `eval` (WebAssembly
+  compiles: `'wasm-unsafe-eval'`); `[app] lang`
   and `dir` are its `<html lang>` and `dir`.
 - The cells run in the page: `aio::Handle::saved(id)` is a cell of the
   page, kept in the browser's `localStorage` (per origin: scheme, host and

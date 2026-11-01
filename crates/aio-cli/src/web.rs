@@ -476,13 +476,42 @@ pub fn rebuilds(changed: &[PathBuf]) -> bool {
     changed.iter().any(|p| p.extension().is_none_or(|e| e != "css"))
 }
 
-/// `ax dev <name> --web`: the web build (debug) served on loopback, built
-/// again on each saved change to its sources: a stylesheet shows at once
-/// (`/aio-dev/sheet`, the page asks), any other edit (`rsx!`, Rust) builds
-/// the bundle again and the open tabs reload (`/aio-dev/build`). A failed
-/// build keeps the last page. Runs until Ctrl-C.
-pub fn dev(name: &str) -> Result<String, String> {
-    dev_then(name, |_| Ok(()))
+/// Where `ax dev --web` serves: `port` (0: a free one); `expose`: to the
+/// network (`0.0.0.0`) over TLS, behind a fresh key (aio's `--expose`),
+/// else on loopback, open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Serve {
+    pub port: u16,
+    pub expose: bool,
+}
+
+impl Serve {
+    /// The words after the app in `ax dev <app> --web …`, in any order (pure).
+    pub fn parse(words: &[&str]) -> Result<Self, String> {
+        let mut s = Self::default();
+        let mut it = words.iter();
+        while let Some(w) = it.next() {
+            match w.split_once('=').map_or((*w, None), |(f, v)| (f, Some(v))) {
+                ("--web", None) => {}
+                ("--expose", None) => s.expose = true,
+                ("--port", v) => {
+                    let v = v.or_else(|| it.next().copied()).ok_or("--port needs a number")?;
+                    s.port = v.parse().map_err(|_| format!("--port {v}: a port number, 0 to 65535 (0: a free one)"))?;
+                }
+                _ => return Err(format!("{w}: not a flag of ax dev <app> --web [--port N] [--expose]")),
+            }
+        }
+        Ok(s)
+    }
+}
+
+/// `ax dev <name> --web`: the web build (debug) served as `serve` says,
+/// built again on each saved change to its sources: a stylesheet shows at
+/// once (`/aio-dev/sheet`, the page asks), any other edit (`rsx!`, Rust)
+/// builds the bundle again and the open tabs reload (`/aio-dev/build`). A
+/// failed build keeps the last page. Runs until Ctrl-C.
+pub fn dev(name: &str, serve: Serve) -> Result<String, String> {
+    dev_then(name, serve, |_| Ok(()))
 }
 
 /// Whether app `name` has a web build ([`dev`] can serve it).
@@ -492,7 +521,11 @@ pub fn has_web(name: &str) -> bool {
 
 /// [`dev`], with `ready` called on its port once it serves (`ax dev
 /// --android` opens the page on the phone then); its error ends the run.
-pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send + 'static) -> Result<String, String> {
+pub fn dev_then(
+    name: &str,
+    serve: Serve,
+    ready: impl FnOnce(u16) -> Result<(), String> + Send + 'static,
+) -> Result<String, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     let site = Site::of(name)?;
     let out = site.target.join("aio").join("web-dev").join(&site.app.id);
@@ -538,11 +571,33 @@ pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send
                 }
             }
         }));
+    // Exposed: over TLS (aio-rs's own root, as an exposed app), behind a key
+    // made for this run, which the printed link carries once (a cookie then).
+    let tls = match serve.expose {
+        true => Some(aio::tls::server(&aio::paths::tool_home().join("tls"), &site.app.id).map_err(|e| e.to_string())?),
+        false => None,
+    };
+    let token = match serve.expose {
+        true => format!("{}{}", aio::uuid_v4().simple(), aio::uuid_v4().simple()),
+        false => String::new(),
+    };
     aio::rt().block_on(async move {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+        let host = if serve.expose { "0.0.0.0" } else { "127.0.0.1" };
+        let l = tokio::net::TcpListener::bind((host, serve.port))
+            .await
+            .map_err(|e| format!("{host}:{}: {e}", serve.port))?;
         let port = l.local_addr().map_err(|e| e.to_string())?.port();
-        eprintln!("ax dev: http://127.0.0.1:{port}/ (Ctrl-C ends it)");
-        let opts = aio::sync::Options { open: true, http, ..Default::default() };
+        match serve.expose {
+            true => {
+                let at = aio::pairing::reached_at(Some(host), &aio::tls::local_addrs());
+                eprintln!(
+                    "ax dev: https://{at}:{port}/?token={token} (open to the network over TLS, behind this run's key; \
+                     the browser asks to trust aio-rs's own certificate; Ctrl-C ends it)"
+                );
+            }
+            false => eprintln!("ax dev: http://127.0.0.1:{port}/ (Ctrl-C ends it)"),
+        }
+        let opts = aio::sync::Options { open: !serve.expose, token, tls, http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(aio::Handle::<DevSite>::memory(), l, opts));
         tokio::task::spawn_blocking(move || ready(port)).await.map_err(|e| e.to_string())??;
         tokio::task::spawn_blocking(move || {
@@ -586,6 +641,18 @@ impl DevSite {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_web_takes_its_flags_in_any_order_and_refuses_others() {
+        let p = |w: &str| Serve::parse(&w.split(' ').collect::<Vec<_>>());
+        assert_eq!(p("--web"), Ok(Serve::default()));
+        assert_eq!(p("--port 8080 --web --expose"), Ok(Serve { port: 8080, expose: true }));
+        assert_eq!(p("--web --port=0"), Ok(Serve { port: 0, expose: false }));
+        assert!(p("--web --port").unwrap_err().contains("needs a number"));
+        assert!(p("--web --port 70000").unwrap_err().contains("0 to 65535"));
+        assert!(p("--web --fresh").unwrap_err().starts_with("--fresh: not a flag of ax dev <app> --web"));
+        assert!(p("--web --expose=yes").is_err());
+    }
 
     #[test]
     fn the_lock_names_the_bindgen_the_build_needs() {

@@ -154,6 +154,14 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
+- **Schedules in the web build**: a page cell's `cx.after`, `every`, `at`,
+  `cron`, `backoff` and its declared `#[every]`/`#[cron]` run on the page's
+  timer, kept with its state in the browser's storage (a reload keeps them,
+  missed ones fire once, re-armed as natively); `skip_if_running` holds.
+- **`#[ttl]` answers in the web build**: a page cell answers a repeat
+  within its ttl without running it, with the native answer cache.
+- `ax dev <app> --web --port N --expose`: a fixed port, and the LAN over
+  TLS behind a key made for the run, carried once by the printed link.
 ### Changed
 
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
@@ -248,6 +256,10 @@ version may break things.
 
 ### Fixed
 
+- `ax dev <app> --web` with any other flag ran the desktop app; it now
+  takes `--port` and `--expose` in any order and refuses other flags.
+- The desktop window's page policy lets WebAssembly compile
+  (`'wasm-unsafe-eval'`, as aio's `script-src`; still no `eval`).
 - A page script's `await aio.recv()` (`aio::ui::eval`) no longer hangs the
   window when the view sends later than 50 ms after it asked, and takes a
   falsy value (`0`, `false`): the renderer's own `recv` waited in a busy

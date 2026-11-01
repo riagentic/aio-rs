@@ -730,7 +730,7 @@ fn run(args: &[String]) -> Out {
             }
             dev::android(name, device, native)
         }
-        ("dev", [name, "--web"]) => web::dev(name),
+        ("dev", [name, rest @ ..]) if rest.contains(&"--web") => web::dev(name, web::Serve::parse(rest)?),
         ("dev", [name, ..]) => dev::run(name, &pos[1..]),
         ("test", [name]) if has("--android") => install::lane(name, value("--device")),
         ("test", [name, filter @ ..]) if filter.len() <= 1 => {
