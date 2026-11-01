@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Move an aio-rs 0.1 app's views from `dioxus` to `aio::ui` (0.2).
+
+    scripts/aio-ui-migrate <app dir> [cargo check args…]
+
+Run it in a clean git tree: it rewrites files in place, then `git diff`
+shows what it did. Two passes (docs/migration/README.md, "0.1 → 0.2"):
+
+1. Text: `use dioxus::prelude::*` → `use aio::ui::prelude::*`, the hook
+   names (`use_signal` → `signal`, `use_hook` → `once`, …),
+   `use_effect(use_reactive!(|d| ..))` → `watch(d, move |d| ..)`,
+   `Element` → `View`, `GlobalSignal`/`Signal::global` → `Global`,
+   `document::eval` → `eval`, `dioxus.send`/`recv` → `aio.send`/`recv`;
+   `dioxus` dependencies leave the app's manifests.
+2. Compiler: `cargo check --message-format=json` (default
+   `--workspace --all-targets`) again and again, each time fixing what it
+   reports at its place: `count()` → `count.get()`, `.cloned()` →
+   `.get()`, `.peek()` → `.read_untracked()`, `.with_mut` → `.update`,
+   `.set(v)` of a value that can't be compared → `*s.write() = v`, a
+   `mut` no longer needed, a facade name a file uses without the prelude.
+
+What it can't fix it lists (file:line: the error) for a person: a
+`try_write` match (`Result` → `Option`), a `*part(..)` value (now a
+handle: `.get()`), a dependency of `watch` used again after it (clone it).
+"""
+import collections
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+TEXT = [
+    (r"use dioxus::prelude::\*;", "use aio::ui::prelude::*;"),
+    (r"[ \t]*use dioxus::prelude::(?:ReadableExt|WritableExt)(?: as _)?;\n", ""),
+    (r"use dioxus::prelude::\{", "use aio::ui::prelude::{"),
+    (r"\bdioxus::prelude::(?=[A-Za-z_])", "aio::ui::prelude::"),
+    (r"\bdioxus::(?:dioxus_)?core::provide_root_context\(", "aio::ui::provide_root("),
+    (r"\bdioxus::(?:dioxus_)?core::(Task|spawn_forever|spawn)\b", r"aio::ui::\1"),
+    (r"\bdioxus::html::input_data::MouseButton\b", "aio::ui::prelude::MouseButton"),
+    (r"\bdioxus::html::geometry::", "aio::ui::prelude::geometry::"),
+    (r"\bdioxus::dioxus_core::Runtime::try_current\(\)\.is_some\(\)", "aio::ui::in_views()"),
+    (r"\bdioxus::dioxus_core::Runtime::try_current\(\)\.is_none\(\)", "!aio::ui::in_views()"),
+    (r"\b(?:dioxus_document|document)::eval\(", "eval("),
+    (r"\bdioxus\.(send|recv)\(", r"aio.\1("),
+    (r"(?<![\w:])use_signal\(", "signal("),
+    (r"(?<![\w:])use_memo\(", "memo("),
+    (r"(?<![\w:])use_hook\(", "once("),
+    (r"(?<![\w:])use_drop\(", "on_cleanup("),
+    (r"(?<![\w:])use_callback\(", "callback("),
+    (r"(?<![\w:])use_context_provider\(", "provide("),
+    (r"(?<![\w:])(?:try_use_context|try_consume_context)::<", "try_context::<"),
+    (r"(?<![\w:])(?:use_context|consume_context)::<", "context::<"),
+    (r"(?<![\w:])use_future\(", "task("),
+    (r"(?<![\w:])use_resource\(", "resource("),
+    (r"(?<![\w:])use_effect\((?!use_reactive)", "effect("),
+    (r"\.with_mut\(", ".update("),
+    (r"\bGlobalSignal\b", "Global"),
+    (r"\bSignal::global\(", "Global::new("),
+    (r"\bMemo::global\(", "GlobalMemo::new("),
+    (r"(?<!instanceof )\bElement\b(?!\.)", "View"),
+]
+
+
+def reactive(s):
+    """use_effect(use_reactive!(|PAT| BODY)) -> watch(DEPS, move |PAT| BODY)."""
+    key = "use_effect(use_reactive!(|"
+    while key in s:
+        i = s.index(key)
+        j = s.index("|", i + len(key))
+        pat = s[i + len(key) : j].strip()
+        k, depth = i + len("use_effect("), 0
+        while True:
+            if s[k] in "([{":
+                depth += 1
+            elif s[k] in ")]}":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        if s[k + 1] != ")":
+            break
+        tup = pat if pat.startswith("(") or "," not in pat else f"({pat})"
+        s = s[:i] + f"watch({tup}, move |{tup}|{s[j + 1 : k]})" + s[k + 2 :]
+    return s
+
+
+def text_pass(root):
+    for f in sorted(root.rglob("*.rs")):
+        if "target" in f.relative_to(root).parts:
+            continue
+        s = f.read_text()
+        o = s
+        s = reactive(s)
+        for a, b in TEXT:
+            s = re.sub(a, b, s)
+        if s != o:
+            f.write_text(s)
+    for f in sorted(root.rglob("Cargo.toml")):
+        if "target" in f.relative_to(root).parts:
+            continue
+        s = f.read_text()
+        o = re.sub(r"(?m)^dioxus(?:-[a-z-]+)?(?:\.workspace = true| = [^\n]*)\n", "", s)
+        if o != s:
+            f.write_text(o)
+
+
+FACADE = ("Signal<", "Memo<", "Global<", "Resource<", "Part<")
+RENAME = {"cloned": "get", "peek": "read_untracked", "with_mut": "update", "try_peek": "try_read_untracked"}
+UI = {"spawn", "spawn_forever", "View", "Global", "GlobalMemo", "Signal", "Memo", "signal", "memo", "effect",
+      "once", "eval", "task", "provide_root"}
+PRELUDE = {"Key", "Modifiers", "Code", "KeyboardEvent", "MouseEvent", "FormEvent", "MouseButton", "geometry"}
+
+
+def matching(b, k):
+    """The index of the `)` closing the `(` at `k`."""
+    depth = 0
+    while True:
+        c = b[k : k + 1]
+        if c == b"(":
+            depth += 1
+        elif c == b")":
+            depth -= 1
+            if depth == 0:
+                return k
+        k += 1
+
+
+def fix(span, code, msg, edits):
+    f = span["file_name"]
+    t = span["text"][0]
+    txt = t["text"][t["highlight_start"] - 1 : t["highlight_end"] - 1] if span["line_start"] == span["line_end"] else None
+    st, en = span["byte_start"], span["byte_end"]
+    if txt is None:
+        return False
+    if code == "E0618" and any(x in msg for x in FACADE):
+        edits[f].append((en, en + 2, b"()", ".get()"))
+        return True
+    m = re.match(r"no method named `(\w+)`", msg)
+    if code == "E0599" and m and any(x in msg for x in FACADE) and txt in RENAME:
+        edits[f].append((st, en, txt.encode(), RENAME[txt]))
+        return True
+    cannot_set = re.match(r"the method `set` exists for (struct|reference) `&?(aio::ui::)?(Signal|Global)<", msg)
+    if txt == "set" and (code == "E0599" and cannot_set or code == "E0277" and msg.startswith("can't compare")):
+        b = pathlib.Path(f).read_bytes()
+        j = st - 1
+        while j > 0 and (chr(b[j - 1]).isalnum() or b[j - 1 : j] in (b"_", b".", b":")):
+            j -= 1
+        recv = b[j : st - 1].decode()
+        if recv and b[st - 1 : st] == b"." and b[en : en + 1] == b"(":
+            e = matching(b, en)
+            edits[f].append((j, e + 1, b[j : e + 1], f"*{recv}.write() = {b[en + 1 : e].decode()}"))
+            return True
+    if msg == "variable does not need to be mutable" and txt.startswith("mut "):
+        edits[f].append((st, st + 4, b"mut ", ""))
+        return True
+    m = re.match(r"cannot find (?:function|type|value|module or crate) `(\w+)` in this scope", msg)
+    if code in ("E0425", "E0433") and m and txt == m.group(1) and m.group(1) in UI | PRELUDE:
+        edits[f].append((st, st, b"", "aio::ui::" if m.group(1) in UI else "aio::ui::prelude::"))
+        return True
+    return False
+
+
+def compile_pass(root, args):
+    left = []
+    for _ in range(20):
+        out = subprocess.run(["cargo", "check", "--message-format=json", *args], cwd=root, capture_output=True, text=True)
+        edits, left, seen = collections.defaultdict(list), [], set()
+        for line in out.stdout.splitlines():
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if m.get("reason") != "compiler-message":
+                continue
+            d = m["message"]
+            spans = [s for s in d["spans"] if s["is_primary"]]
+            if not spans or d["level"] not in ("error", "warning"):
+                continue
+            s, code = spans[0], (d.get("code") or {}).get("code")
+            if (s["file_name"], s["byte_start"], d["message"]) in seen:
+                continue
+            seen.add((s["file_name"], s["byte_start"], d["message"]))
+            if not fix(s, code, d["message"], edits):
+                left.append(f"{s['file_name']}:{s['line_start']}: {d['level']}: {d['message']}")
+        n = 0
+        for f, es in edits.items():
+            p = (root / f) if not pathlib.Path(f).is_absolute() else pathlib.Path(f)
+            b = p.read_bytes()
+            for st, en, was, new in sorted(set(es), reverse=True):
+                if b[st:en] == was:
+                    b, n = b[:st] + new.encode() + b[en:], n + 1
+            p.write_bytes(b)
+        print(f"aio-ui-migrate: {n} fixed", file=sys.stderr)
+        if n == 0:
+            break
+    return left
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    root = pathlib.Path(sys.argv[1]).resolve()
+    text_pass(root)
+    left = compile_pass(root, sys.argv[2:] or ["--workspace", "--all-targets"])
+    for l in sorted(set(left)):
+        print(l)
+    sys.exit(1 if any(": error:" in l for l in left) else 0)
+
+
+main()

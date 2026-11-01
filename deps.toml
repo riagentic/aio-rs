@@ -53,7 +53,7 @@ allow = [
     { crate = "der-parser", reason = "aio-rs/tls via rcgen" },
     { crate = "deranged", reason = "aio-rs/tls via time" },
     { crate = "digest", reason = "aio-rs/core (wasm) via sha2; aio-rs/server via sha1 (tungstenite)" },
-    { crate = "dioxus", reason = "aio-rs/kit: the app's Dioxus, the kit's components; aio-rs-cli: ax ui" },
+    { crate = "dioxus", reason = "aio-rs/kit: the renderer behind aio::ui (the kit, ax ui, apps through the facade)" },
     { crate = "dioxus-cli-config", reason = "aio-rs-shell/core via dioxus-liveview" },
     { crate = "dioxus-config-macros", reason = "aio-rs-cli/core via dioxus" },
     { crate = "dioxus-core", reason = "aio-rs-shell/core: the window's VirtualDom; aio-rs/web, testing" },

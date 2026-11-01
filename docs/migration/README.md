@@ -742,7 +742,11 @@ so the later swap from Dioxus to air is a framework change, not an app
 migration. An app names `aio::ui` only: `ax lint` refuses a `dioxus` path,
 a `dioxus` dependency, a page script's `dioxus.send`, and a `for` row
 without `key:`. Most of the move is mechanical; the compiler finds every
-place left.
+place left. `scripts/aio-ui-migrate <app dir>` (in aio-rs; a clean git
+tree) does the mechanical part: the renames below, then `cargo check`
+again and again, fixing each `count()`, `.cloned()`, `.peek()` and
+uncomparable `.set(v)` where the compiler points; it lists what is left
+for a person (a `try_write` match, a `*part(..)` value).
 
 | 0.1 (dioxus) | 0.2 (`aio::ui`) |
 |---|---|
