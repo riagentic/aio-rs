@@ -81,6 +81,10 @@ durability = "normal"
 store = "state.db"
 retire = []
 pragmas = []
+persist = true
+coalesce_ms = 100
+backup_every = "off"
+backup_keep = 7
 
 [history]
 keep = "90d"
@@ -231,6 +235,10 @@ The store: one SQLite file in the app's `data/` folder
 | `store` | file name | `"state.db"` | The store's file name in `data/` (aio's `dbPath`). |
 | `retire` | file names | `[]` | Files in `data/` set aside at boot as `<name>.pre-migration` (with their `-wal` and `-shm`), never deleted: an old store the app no longer opens. |
 | `pragmas` | statements | `[]` | Extra `PRAGMA` statements run on the store after aio's own (aio's `dbPragmas`). One SQLite ignores refuses the boot. |
+| `persist` | bool | `true` | `false`: the state lives in memory only, no store is opened, every launch starts from the defaults (aio's `persist: false`; the flag `--no-persist` does it for one launch). |
+| `coalesce_ms` | ms | `100` | How long a run of `#[coalesce]` calls is held before it is written (aio's `persistDebounceMs`); `0` writes each call. At most 60000. |
+| `backup_every` | span or `"off"` | `"off"` | Timed whole backups into `<home>/backups` while the app runs ([backups](../persistence/files.md#scheduled-backups)). |
+| `backup_keep` | count | `7` | Timed backups kept, the newest (at least 1); hand-made ones are never removed. |
 
 Checked: `store` and each `retire` entry are file names (no `/`, `\`, `.`
 or `..`); `retire` can't name the store; each pragma is a `PRAGMA`
@@ -770,7 +778,7 @@ see [views](../ui/views.md) and the tables in
 | `appId` | `[app] id` |
 | `cells` | the handles the launcher opens (`aio::Source::for_app`, `Handle::open`), or one `aio::Cells` list |
 | `localFirst` | built in: synced copies predict each call and replay offline calls on the server |
-| `cellDefaults` | none: each cell says its own flags |
+| `cellDefaults` | none: each cell says its own flags (`[data] persist` for the app-wide switch) |
 | `port`, `host`, `expose` | `[server] listen`; `--port`, `--host`, `--expose` per launch |
 | `tls` | `[server] tls`, `cert`, `key` |
 | `appDir`, `profiles` | `--home`, `--profile`, `--instance`, `AIORT_DATA`; a port's `[home]`. Profiles can't be turned off (**gap**) |
@@ -778,8 +786,8 @@ see [views](../ui/views.md) and the tables in
 | `checkIntegrityOnBoot` | always: `PRAGMA quick_check` and recovery at every open |
 | `updates` | `[updates]` |
 | `feedback` | `[feedback]` |
-| `persist`, `persistKey`, `persistMode` | `#[cell(persist)]` per cell; each cell is its own row, keyed by its id |
-| `persistDebounceMs` | `#[coalesce]`: a run's calls are written once per 100 ms (`aio::PERSIST_DEBOUNCE`, fixed) |
+| `persist`, `persistKey`, `persistMode` | `#[cell(persist)]` per cell, `[data] persist = false` or `--no-persist` app-wide; each cell is its own row, keyed by its id |
+| `persistDebounceMs` | `[data] coalesce_ms` for `#[coalesce]` runs (default `aio::PERSIST_DEBOUNCE`, 100 ms) |
 | `ui` | `aio_shell::Window` in the launcher (title, size, icon, tray, head, lang, dir), `[app] lang`/`dir`, `[ui]` |
 | `baseDir`, `watch` | `ax dev` watches the app's crate; not configurable |
 | `serveDirs`, `assets` | `[server.dirs]`, `[server.public_dirs]` |

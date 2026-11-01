@@ -164,19 +164,21 @@
     return cs.length > max ? cs.slice(0, max).join("") + "…" : s;
   };
   const disabled = (el) => el.hasAttribute("disabled") || el.matches(":disabled");
-  // `self`: the root is a path the caller named, so its own line comes first.
-  const surface = (root, rects, self) => {
-    const lines = [], depth = new Map();
+  // `self`: the root is a path the caller named, so its own line comes first;
+  // `depth`: levels below the first shown at most; `full`: names uncut.
+  const surface = (root, rects, self, depth = Infinity, full = false) => {
+    const lines = [], depths = new Map();
     for (const el of self ? [root, ...under(root)] : under(root)) {
       if (hidden(el)) continue;
       const i = info(el), t = el.getAttribute("data-t");
       if (t === null && i.role === "generic") continue;
       let d = 0;
       for (let a = el.parentElement; a && a !== root.parentElement; a = a.parentElement) {
-        if (depth.has(a)) { d = depth.get(a) + 1; break; }
+        if (depths.has(a)) { d = depths.get(a) + 1; break; }
       }
-      depth.set(el, d);
-      let line = `${"  ".repeat(d + 1)}${i.role} ${debug(cutText(i.name, 40))}`;
+      depths.set(el, d);
+      if (d > depth) continue;
+      let line = `${"  ".repeat(d + 1)}${i.role} ${debug(full ? i.name : cutText(i.name, 40))}`;
       if (t !== null) line += ` [${t}]`;
       if (el.localName === "input" && ["checkbox", "radio"].includes(el.type)) line += el.checked ? " checked" : " unchecked";
       if (i.role === "textbox" || i.role === "combobox") line += ` = ${debug(el.value ?? "")}`;
@@ -217,7 +219,20 @@
     if (!root) return missing(arg.path);
     const why = arg.path && hidden(root);
     if (why) return { error: `data-t="${arg.path}" is there but hidden (${why}): nothing of it shows` };
-    return { ok: surface(root, arg.rects, !!arg.path) };
+    const depth = arg.depth ?? Infinity, full = !!arg.full;
+    // A component: each instance (handle `c`, or `c-…`) under the root, with what is under it.
+    if (arg.component) {
+      const c = arg.component, of = (el) => { const t = el.getAttribute("data-t"); return t === c || t.startsWith(c + "-"); };
+      const all = [...root.querySelectorAll("[data-t]")].filter((el) => of(el) && !hidden(el));
+      const outer = all.filter((el) => !all.some((o) => o !== el && o.contains(el)));
+      if (!outer.length) return { error: `no showing element is handled ${c} or ${c}-…; the handles there are: ${handles().join(", ")}` };
+      return { ok: outer.map((el) => surface(el, arg.rects, true, depth, full)).join("\n") };
+    }
+    return { ok: surface(root, arg.rects, !!arg.path, depth, full) };
+  }
+  if (op === "names" && arg.path) {
+    const root = find(arg.path);
+    return root ? { ok: named(root).map(([n]) => n) } : missing(arg.path);
   }
   if (op === "names") return { ok: names() };
   if (op === "handles") return { ok: handles() };

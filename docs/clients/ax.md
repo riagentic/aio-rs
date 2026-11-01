@@ -89,13 +89,13 @@ Every verb takes these:
 | Flag | Does |
 |---|---|
 | `--json` | one JSON object on stdout, for scripts (below) |
+| `--quiet` | nothing on stdout when it worked: the exit code says it; a failure still says why on stderr |
 | `--app <name>` | the app, wherever you are |
 | `--profile <name>`, `--instance <name>`, `--home <dir>` | which copy |
 | `--help` (`-h`) | this verb's help, and nothing run |
 | `--version` (`-V`) | `aio-rs <version>`, and nothing run |
 
-There is no `--quiet`: the exit code is the short answer, `--json` the
-whole one.
+`--json` wins over `--quiet`.
 
 ### How the command line is read
 
@@ -123,7 +123,15 @@ is refused with exit 2 and the right usage, never guessed or dropped:
 - With `--json`, every verb prints one object: `{"ok":true,"value":…}` when
   the answer is JSON (a state, a call's answer, a list), `{"ok":true,
   "text":"…"}` when it is text, `{"ok":false,"error":"…","exit":1}` when it
-  failed.
+  failed. The verbs scripts branch on answer objects, not sentences:
+  `start`/`restart` (`app`, `state`, `pid`, `version`, `startedAt`, `cdp`,
+  `log`), `stop`/`kill` (`how`: stopped, sigterm, sigkill or asked;
+  `seconds`, `discarded`), `errors` (`build`, `starts` with their `lines`,
+  `total`), `health` (`healthy`, the `health.json`), `expect` (`pass`, the
+  check), `doctor` (`findings`, `said`), `backup` (`file`, `bytes`),
+  `shot` (`file`, `bytes`, `width`, `height`), `build` (the manifest) and
+  `create`. A failure that has its own object (an unhealthy `health`, a
+  failed `expect`, one app of several) carries it as `value`.
 - Exit codes: **0** ok, **1** failed, **2** bad usage. Two verbs have their
   own: `ax status` (0 started, 1 stopped, 2 on the way) and `ax lint` (0 no
   errors, 1 errors, 2 bad usage).
@@ -308,7 +316,7 @@ ax test notes --video videos/
 ### `ax lint`
 
 ```text
-ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-clippy] [--safe-fix] [--fix]
+ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-clippy] [--safe-fix] [--fix] [--from version] [--tests]
 ```
 
 What the compiler and the macros can't check: credentials in source,
@@ -325,6 +333,8 @@ accessible name; duplicate cell ids; cells no test names; `aio.toml`;
 | `--no-clippy` | aio's own checks only: fast, no build |
 | `--safe-fix` | clippy's machine-applicable fixes first, then lint what is left |
 | `--fix` | move an app of the older layout to today's (what `ax create` makes) first, then lint |
+| `--from version` | only what aio-rs changed after that version (0.1.0) that the app still uses (aio's `am migrate`), as errors: CI fails on them; no clippy |
+| `--tests` | only the test shapes a newer aio-rs turns red (TestUi's), in order, as warnings (a prediction: exit 0) |
 
 Exit 0 with no errors (warnings and hints don't fail), 1 with errors, 2 on
 bad usage. Silence one finding, with its reason, on its line or in the
@@ -334,7 +344,7 @@ silence without a reason is itself a finding. [Lint](../testing/README.md).
 ### `ax start`
 
 ```text
-ax start <app> [arg…] [--wait s] [--fresh] [--display d] [--cdp] [--all]
+ax start <app> [arg…] [--wait s] [--no-wait] [--fresh] [--display d] [--cdp] [--all]
 ```
 
 Runs the app in the background, detached from your terminal (its own
@@ -346,7 +356,8 @@ the installed one runs.
 | Flag | Does |
 |---|---|
 | `--wait s` | wait at most `s` seconds for it to be up (30) |
-| `--fresh`, `--display d`, `--cdp` | as `ax dev` |
+| `--no-wait` | return once it is spawned (`--wait 0` too); `ax status` says when it is up |
+| `--fresh`, `--display d`, `--cdp` | as `ax dev`; an `--instance` started `--fresh` throws its data away again when `ax stop` ends it |
 | `--all` | every app of this workspace (each binary beside an `aio.toml`) |
 
 Args after `--` go to the app. Its output goes to `logs/start.log`; a start
@@ -366,7 +377,7 @@ arguments to the running one, which comes to the front, and exits.
 ### `ax stop`
 
 ```text
-ax stop <app> [app…] [--all] [--wait s]
+ax stop <app> [app…] [--all] [--wait s] [--no-wait]
 ```
 
 Asks the app to close, on any OS, over its local door, and waits until it
@@ -377,7 +388,12 @@ window closed.
 | Flag | Does |
 |---|---|
 | `--wait s` | how long asking may take (15); then SIGTERM, then SIGKILL, 5 s each |
+| `--no-wait` | ask it to close and return: no waiting, no signal |
 | `--all` | every running app of this workspace; the rest are said |
+
+A private instance started with `--fresh` (`ax start notes --instance a1
+--fresh`) is a throwaway run: once `ax stop` has seen it gone, its data is
+thrown away too (`its --fresh data thrown away`, `"discarded": true`).
 
 It says how it ended: `notes: stopped (0.4 s)`, `stopped by SIGTERM: asking
 didn't do it within 15 s`, or `killed: neither asking nor SIGTERM stopped
@@ -474,7 +490,7 @@ folder's size, and what to back up. [Files](../persistence/files.md).
 ### `ax doctor`
 
 ```text
-ax doctor <app>
+ax doctor <app> [--harden]
 ```
 
 Is the running app the code on disk? A process keeps the code it started
@@ -482,6 +498,14 @@ with: a rebuild or an edit since is a finding, with its fix (stop it and start i
 another aio-rs than this `ax`. Then who decided each setting it runs with: `aio.toml`, the
 folders, the environment variables aio reads (a token's value is never
 shown).
+
+Hints, running or not, each saying what ends it: a window app whose binary
+pins an Electron older than the one this aio-rs is tested with (build it
+with this aio-rs), an app served `[server] open`, and an opt-in security
+switch it hasn't decided on: a server beyond loopback that takes a socket
+saying no Origin. `--harden` writes those switches into its `aio.toml`
+(`[server] strict_origin = true`) and says each; a value the app already
+set, either way, stays (aio's `am fix --harden`).
 
 ### `ax theme adopt`
 
@@ -597,7 +621,7 @@ that misses says how far it got and prints the syntax.
 ```text
 ax snapshot <app> [--as user]
 ax snapshot save <app> [file] [--as user]
-ax snapshot load <app> <file>
+ax snapshot load <app> <file> [--force]
 ```
 
 - `ax snapshot`: every cell's state as one JSON object (live per cell, else
@@ -606,7 +630,9 @@ ax snapshot load <app> <file>
   `<id>-snapshot.json`; an existing file is refused, never overwritten).
 - `ax snapshot load`: each cell the file holds put in place on the running
   app, each as a new event, and it says how to step back (`ax timetravel
-  notes todo goto 41`). Cells the file doesn't hold are left as they are. A
+  notes todo goto 41`). A file of another cell set than the running app's
+  (another app's snapshot, an older build's) is refused, naming the cells
+  that differ; `--force` loads the cells the app has and says the rest. A
   snapshot taken `--as` someone holds only what they saw, so loading it
   puts back only that.
 
@@ -632,12 +658,25 @@ cell, method, arguments and caller. A `#[redact]` call's arguments show as
 | Flag | Does |
 |---|---|
 | `--last N` | how many (20) |
-| `--diff` | each with the changes it made, `path: before → after` (one cell, the app running) |
+| `--diff` | each with the changes it made, `path: before → after` |
 | `--from file` | another store, or a backup file |
 
 ```sh
 ax events notes todo --last 5 --diff
 ```
+
+### `ax timeline`
+
+```text
+ax timeline <app> [cell] [--last N] [--from file]
+```
+
+What happened and what it changed (aio's `am timeline`): the newest events
+of every cell (or one), oldest first, each with its state diff. The states
+come from the running app; a stopped app's store, or another one
+(`--from`: a backup, a copy), is replayed by the app's own code, built by
+cargo as its tests are (in its workspace), on a copy: nothing in it moves.
+`ax events --diff` is the same.
 
 ### `ax timetravel`
 
@@ -724,12 +763,15 @@ ax logs notes --tag cell:todo -f
 ### `ax errors`
 
 ```text
-ax errors <app> [--last N]
+ax errors <app> [--last N] [--since s]
 ```
 
 `ax dev`'s failed build first (the app runs its last good build meanwhile),
 then the newest warnings, errors and panics (20), each under the start of
 the app it came from. The first thing to run when something broke.
+`--since 15m` (or `2h`, `2026-10-28T10:00`): only newer ones; `--since
+reload`: only since the app's newest start, or `ax dev`'s hot patch after
+it. aio's `--lines N` is `--last N`.
 
 ### `ax report`
 
@@ -759,7 +801,7 @@ ax metrics <app> [--as user]
 Uptime, open links, schedules and each cell's size: live when the app runs
 (a cell without a door: its stored size), else stored.
 
-### `ax heap`
+### `ax heap`, `ax top`
 
 ```text
 ax heap <app> [--watch]
@@ -767,17 +809,33 @@ ax heap <app> [--watch]
 
 What the app holds: its resident memory and share of RAM, then per cell
 its newest state's size, its event count and their arguments' size.
-`--watch`: again every 2 s, a top view. Not running: the stored cells
-only.
+`--watch`: again every 2 s, a top view; `ax top <app> [secs]` (aio's
+`am top`) at another interval, `--json` once. Not running: the stored
+cells only.
+
+### `ax persist`
+
+```text
+ax persist <app> [--drop cell]
+```
+
+Writes what the running app holds back now (a coalesced run of calls)
+instead of when it would. `--drop cell`: a stored cell this build no
+longer declares (the boot's "stored cell is not declared"): its history
+is gone from the store, zeroed as `#[cell(retire)]` does; refused for a
+cell the app declares.
 
 ### `ax cost`
 
 ```text
-ax cost <app> [cell] [--keys]
+ax cost <app> [cell] [--keys] [--window s]
 ```
 
 What each cell sent its clients (pushes, bytes per second, mean size, full
 resends) and its methods' p95 time; its top keys by bytes (`--keys`: all).
+Since its first send, or `--window 5m` over the newest 5 minutes (seconds,
+or `30s`, `5m`, `1h`; an hour at most: the app keeps a meter a second that
+long).
 For "why is this cell slow to sync". [Performance](../performance.md).
 
 ### `ax clients`
@@ -794,7 +852,7 @@ aio page or tool on protocol v3).
 ### `ax peer`
 
 ```text
-ax peer <app> [--as user] [--role r]
+ax peer <app> [cell…] [--as user] [--role r] [--types file]
 ```
 
 What a network caller (a user, a role) may call of the running app: each
@@ -802,7 +860,14 @@ cell's methods with their Rust signatures, and what each `#[client]` rule
 answers for that caller. To check the rules before a client meets them.
 Each cell also says which of its fields are never sent (`#[server]`) and
 never saved (`#[transient]`, or a cell kept in memory); `--json` gives them
-as `fields: {persist, server, transient}`.
+as `fields: {persist, server, transient}`. Cells named: those only.
+
+Another machine's app (aio's `am peer <url>`): name its profile, `ax
+profile`'s `.aioapp` file, and its cells (a server lists none): `ax peer
+notes.aioapp todo`. It answers for that profile's key holder, never for a
+user or role asked for. `--types file` writes the answer as Rust: a module
+a cell, its `ID` and a const a method (`todo::add`), each under its
+signature, for `aio::peer::Peer::call`: a renamed method fails to compile.
 
 ### Common mistakes
 
@@ -818,7 +883,7 @@ as `fields: {persist, server, transient}`.
 ### `ax call`
 
 ```text
-ax call <app> <cell> <method> [arg…] [--args json] [--as user]
+ax call <app> <cell> <method> [arg…] [--args json] [--body json] [--wait s] [--as user]
 ```
 
 Calls a method of the running app and prints its answer (JSON), or its
@@ -827,7 +892,10 @@ refusal (exit 1).
 | Arg, flag | Does |
 |---|---|
 | `arg…` | the method's arguments in order: each word as JSON when it reads as JSON (`3`, `true`, `null`, `[1,2]`, `{"a":1}`), else as text |
+| `key=value…` | words that are all `key=value` (aio's named payload): one object argument, each value read as a word (`title=milk n=2` is `{"title":"milk","n":2}`) |
 | `--args json` | all of them exactly, as a JSON list; `@file` reads it from a file, `-` from stdin |
+| `--body json` | one JSON object as the one argument (aio's `--body`) |
+| `--wait s` | its answer waited for `s` seconds at most (default: until it comes); then exit 1, the call maybe still running |
 | `--as user` | as that user (default: you) |
 
 ```sh
@@ -837,12 +905,13 @@ ax call notes todo rename --args '[3, "true"]'     # "true" as text
 ax call notes todo import --args @rows.json       # too big for a command line
 echo '["buy milk"]' | ax call notes todo add --args -
 ax call notes todo clear                          # no arguments
+ax call notes todo add_item title=milk qty=2      # one object {title, qty}
 ```
 
 - A whole number too big for JSON would arrive changed, so it is refused;
   pass it as a string with `--args`.
-- A text that reads as JSON (`true`, `3`) becomes JSON: use `--args` with
-  the value in quotes.
+- A text that reads as JSON (`true`, `3`) becomes JSON, and a lone text
+  `a=b` an object: use `--args` with the value in quotes.
 - An answer means the call ran and committed; it reaches the disk with the
   next coalesced write ([durability](../persistence/README.md)).
 - On a release build only the methods a client may call are reachable.
@@ -906,14 +975,17 @@ still sent, each saying how it went.
 ax record <app> <cell> <file> [range] [--from file] [--type path]
 ```
 
-A Rust test from what the running app's cell just did: it boots the cell
-on the state before the range, makes the calls it took (inputs only), and
-asserts the state they left. Reproduce the bug, then record.
+A Rust test from what the app's cell did: it boots the cell on the state
+before the range, makes the calls it took (inputs only, each as its
+caller), and asserts the state they left. Reproduce the bug, then record.
+The states come from the running app; a stopped app's store (or `--from`
+another) is replayed by the app's own code, built by cargo as its tests
+are, so a crash is recorded after the app is gone.
 
 | Flag | Does |
 |---|---|
 | `--from file` | the events of another store or backup |
-| `--type path` | the cell's type (default `<crate>::<Cell>`) |
+| `--type path` | the cell's type (default `<the app's library>::<Cell>`) |
 
 ```sh
 ax events notes todo --last 10
@@ -945,7 +1017,10 @@ finds the other one's.
 ax shot <app> [file] [--cdp port] [--window n] [--check base] [--update base] [--threshold n] [--max-diff r] [--selector css] [--full] [--size WxH] [--video file] [--duration s] [--markers]
 ```
 
-A PNG of the window (default `<id>-<time>.png`).
+A PNG of the window (default `<id>-<time>.png`). `--json`: `{file, bytes,
+width, height, did}`; with `--video`, `{"event":"recording","file","t0"}`
+on stderr once its first frame is taken (`t0`: its epoch ms, the video's
+clock), then the video's `{file, bytes, frames, seconds, t0, markers}`.
 
 | Flag | Does |
 |---|---|
@@ -970,7 +1045,7 @@ ax shot notes --video demo.mp4 --duration 20 --markers
 ### `ax surface`
 
 ```text
-ax surface <app> [path] [--names] [--rects] [--headless] [--root c] [--cdp port] [--window n] [--wait-client ms]
+ax surface <app> [path] [--names] [--rects] [--component name] [--depth N] [--full] [--headless] [--root c] [--cdp port] [--window n] [--wait-client ms]
 ```
 
 What a person can see and use in the window, one line each, nested: role,
@@ -984,6 +1059,9 @@ path.
 | `path` | that element and what is under it (`row-2`, `list/row-3`); none there: exit 1 |
 | `--names` | the automatic names only, in order |
 | `--rects` | where each is: `@x,y wxh` in CSS px |
+| `--component name` | each element handled `name` or `name-…` (every instance: `row` is `row-1`, `row-2`), with what is under it |
+| `--depth N` | `N` levels below the first shown at most (0: those alone) |
+| `--full` | names whole (else cut at 40 characters, marked `…`) |
 | `--headless` | no window open (a server): the app's views mounted headless on its running cells, built as its tests are |
 | `--root c` | the component `--headless` mounts (`App`) |
 
@@ -1015,13 +1093,29 @@ events:
 | `scroll <top[,left]>` | scrolls it |
 | `dragTo <path>` | drags it onto another element |
 
-Path `window`: a key to the window itself (a global key).
+Path `window`: a key to the window itself (a global key). With no
+`--window` it acts on the window opened (or reloaded) last, as aio's
+trigger does on the newest client.
 
 ```sh
 ax trigger notes draft type "buy milk"
 ax trigger notes AddButton click
 ax trigger notes window press mod+k
 ```
+
+### `ax testgen`
+
+```text
+ax testgen <app> [--out file] [--cdp port] [--window n] [--wait-client ms]
+```
+
+A typed name table of what the window shows, for the app's UI tests (aio's
+`am testgen`): a `&str` const per `data-t` handle and auto name, and a
+module per handle with the names inside it (`ui_names::row_1::DeleteButton`
+is `"row-1/DeleteButton"`). A test takes it with `mod ui_names;` and
+writes `ui.click(ui_names::SaveButton)`; after a UI change run it again,
+and a test naming a renamed element no longer compiles. Default `--out`:
+`tests/ui_names/mod.rs` in the app.
 
 ### `ax eval`
 
@@ -1097,7 +1191,7 @@ OS: `dist/<id>-<version>-<os>-<arch>.*` (Linux `.tar.gz`, macOS zipped
 |---|---|
 | `--targets a,b` | some of the declared targets (by label), or kinds |
 | `--list` | the kinds and the declared targets |
-| `--platforms a,b` | each desktop target for each of `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host` (`[build] platforms`) |
+| `--platforms a,b` | each desktop target for each of `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host` (`[build] platforms`); `all`: every one, what this machine can't build said with why and left out (aio's `--all-platforms`) |
 | `--windows` | cross-built for Windows from Linux |
 | `--deb` | a Debian package (needs `[app] maintainer`) |
 | `--appimage` | one portable Linux file |
@@ -1116,8 +1210,12 @@ flags. [Build](../build/README.md#build-ax-build), [targets](../build/targets.md
 ax build notes --list
 ax build notes --targets desktop --smoke
 ax build notes --platforms linux,windows
+ax build notes --platforms all
 ax build notes --web
 ```
+
+`ax build` always builds anew (cargo rebuilds what changed), so aio's
+`--force` has nothing to force.
 
 ### `ax smoke`
 
@@ -1152,15 +1250,36 @@ Windows: says how).
 ### `ax lab`
 
 ```text
-ax lab <app> <os> [--stop]
+ax lab <app> <os> [--stop] [--boot] [--status] [--reset] [--ram size] [--cpus n] [--disk size] [--os-version v] [--apk file] [--port n]
 ```
 
-The app on a real `windows`, `macos` or `linux` machine's desktop, for a
-person to click around in. The machine is `AIO_LAB_WINDOWS`,
-`AIO_LAB_MACOS` or `AIO_LAB_LINUX` (`'[ssh options] [user@]host'`). Built
-for it, copied over ssh into `aio-rs-test/lab/<id>` there, and started
-with its data, runtime and caches inside that folder. `--stop`: what runs
-from it ended, the folder removed.
+The app on a real `windows`, `macos`, `linux` or `android` desktop, for a
+person to click around in. Manual: no gate runs it.
+
+- **A machine you have**: `AIO_LAB_WINDOWS`, `AIO_LAB_MACOS` or
+  `AIO_LAB_LINUX` (`'[ssh options] [user@]host'`) names it. Built for it,
+  copied over ssh into `aio-rs-test/lab/<id>` there, and started with its
+  data, runtime and caches inside that folder. `--stop`: what runs from it
+  ended, the folder removed.
+- **A lab booted here** (aio's `am lab`; with no machine named, or
+  `--boot`): in Docker, aio's images and container names (`aio-lab-<os>`),
+  so `am lab` sees the same lab: a Windows or macOS VM (QEMU, KVM, its
+  disk under `~/.cache/aio/labs/<os>`), an XFCE desktop (a container, up
+  in seconds) or the Android 14 emulator. Its viewer is on a loopback port
+  (`--port`, else a free one); the app's `dist/` is in it at `/shared`
+  (a VM's guest: `http://host.lan:8007/`; Android: the newest signed APK,
+  or `--apk`, installed over adb once it has booted). `--status`: up, and
+  where; `--stop`: ended and removed (a VM's disk stays); `--reset`: its
+  disk too. A VM's `--ram 8G --cpus 4 --disk 64G --os-version 11`. The
+  first Windows run downloads ~8.5 GB and installs itself (~30 min); macOS
+  is installed by hand in the viewer.
+
+```sh
+ax build notes --android && ax lab notes android
+ax lab notes linux --status
+ax lab notes windows --boot --ram 16G
+ax lab notes windows --stop
+```
 
 ### `ax keygen`
 
@@ -1321,10 +1440,11 @@ ax import <app> <file>
 ### `ax discover`
 
 ```text
-ax discover
+ax discover [--timeout ms]
 ```
 
-The aio-rs apps on this LAN that answer (`[server] discover = true`).
+The aio-rs apps on this LAN that answer (`[server] discover = true`),
+within `--timeout` ms (1200).
 
 ### `ax trust`
 
@@ -1389,11 +1509,37 @@ app's file (`--create`: make it).
 ### `ax help`, `ax version`
 
 ```text
-ax help [verb]
+ax help [verb] [--commands]
 ax version
 ```
 
-Every verb, or one in full; the aio-rs version of this `ax`.
+`ax help` (and a bare `ax`): the everyday verbs on one screen (aio's
+tiers); `--commands`: every verb with all it says; `ax help <verb>` or
+`ax <verb> --help`: one in full. `ax version`: the aio-rs version of this
+`ax`.
+
+### `ax control`
+
+```text
+ax control <app> [--port n]
+```
+
+The running app's verbs over loopback HTTP, for a tool that can't run
+`ax` (aio's control REST API, `/__aio/trojan/*`). A mirror of the command
+line, not a second API: `GET /__aio/trojan/<verb>?arg=…&flag=v&switch`
+answers what `ax <verb> <app> … --flag v --switch --json` does (`arg`: the
+verb's words in order; a two-word verb: `snapshot/load`), with the status
+of its exit code (200, 422 failed, 400 bad usage). The verbs about a
+running app that answer once (`state`, `call`, `expect`, `timeline`,
+`surface`, `trigger`, `shot`, `logs`, `health`, `stop`…; never `--follow`
+or `--watch`). Only on `127.0.0.1`, only with the key it prints first,
+made for the run (`Authorization: Bearer <key>`), never from a page (a
+request with an `Origin`, or another `Host`, is refused). Until Ctrl-C.
+
+```sh
+ax control notes --port 7811 > key &
+curl -H "Authorization: Bearer $(head -1 key)" 'http://127.0.0.1:7811/__aio/trojan/state?arg=todo&arg=items.0'
+```
 
 ## Scripts and agents
 
@@ -1436,18 +1582,29 @@ ax stop notes
 |---|---|
 | `am create --template=…` | `ax create --template app\|cli\|service` |
 | `am dev`, `am build`, `am compile` | `ax dev`, `ax build`, `ax build --targets <one>` |
-| `am start`, `am stop`, `am restart`, `am kill`, `am status` | the same verbs (they always wait; `--wait s` bounds it) |
+| `am start`, `am stop`, `am restart`, `am kill`, `am status` | the same verbs (`--wait s`, `--no-wait`) |
 | `am instances` | `ax apps` |
-| `am dispatch cell:method args` | `ax call <app> <cell> <method> args` |
+| `am dispatch cell:method args`, `k=v`, `--body`, `--wait=N` | `ax call <app> <cell> <method> args`, `k=v`, `--body`, `--wait N` |
 | `am state`, `am state --ui <user>` | `ax state`, `ax state --as <user>` |
 | `am state --prod` | `ax state` on a release build (its door gives the client's view) |
 | `am state --offline` | `ax state` on a stopped app (it falls back to the store) |
-| `am timeline`, `am actions` | `ax events --diff`, `ax events` |
-| `am timetravel`, `am replay`, `am record` | the same verbs (`ax record` writes a Rust test) |
-| `am snapshot`, `am migrations` | the same verbs |
-| `am logs --filter=x` | `ax logs <app> x` |
-| `am client`, `am top` | `ax components`, `ax heap --watch` |
-| `am surface`, `am trigger`, `am shot`, `am eval`, `am preview` | the same verbs |
+| `am timeline [--from=J]`, `am actions` | `ax timeline [--from file]` (a stopped app's too), `ax events` |
+| `am timetravel`, `am replay`, `am record` | the same verbs (`ax record` writes a Rust test, of a stopped app too) |
+| `am snapshot`, `am snapshot load --force`, `am migrations` | the same verbs |
+| `am persist`, `am persist --drop=<cell>` | `ax persist`, `ax persist --drop <cell>` |
+| `am logs --filter=x`, `--lines=N` | `ax logs <app> x`, `--last N` |
+| `am errors --since=15m\|reload`, `--lines=N` | `ax errors --since 15m\|reload`, `--last N` |
+| `am client`, `am top [secs]` | `ax components`, `ax top <app> [secs]` |
+| `am cost --window=5m`, `am discover --timeout=ms` | `ax cost --window 5m`, `ax discover --timeout ms` |
+| `am peer <app\|url> --types=<file>` | `ax peer <app\|profile.aioapp> --types <file>` (Rust consts) |
+| `am testgen` | `ax testgen` (a Rust name table) |
+| `am migrate --from=X`, `--tests` | `ax lint --from X`, `--tests` |
+| `am lab <os> --status\|--stop\|--reset`, `--ram --cpus --disk --version --apk --port` | `ax lab <app> <os>` the same, `--os-version` |
+| `am build --all-platforms` | `ax build --platforms all` |
+| `am doctor`, `am fix --harden` | `ax doctor`, `ax doctor --harden` |
+| `/__aio/trojan/*` (the control REST API) | `ax control <app>`: the verbs over loopback HTTP |
+| `--quiet`, `--json` | `--quiet`, `--json` |
+| `am surface` (`--component --depth --full`), `am trigger`, `am shot` (`--json`), `am eval`, `am preview` | the same verbs and flags |
 | `am publish` | `ax release` |
 | `am pair` (a new PIN) | `ax pin`; `ax pair` pairs this device |
 | `am ui`, `am ui --client=browser` | `ax ui`, `ax ui --browser` |
@@ -1463,32 +1620,18 @@ The full map of aio's commands and constructs: [migration](../migration/README.m
 
 Not in aio-rs today; each with what to do instead:
 
-- **`am persist`, `am persist --drop`**: no verb forces a write or drops a
-  stored cell the build no longer declares. Writes are coalesced and flushed
-  by `ax stop`; an undeclared cell's data is kept (`ax migrations` lists it).
-- **`am snapshot load --force`** and its refusal of another app's snapshot:
-  `ax snapshot load` loads each cell the file holds and leaves the others.
-- **`am dispatch` extras**: `key=value` pairs as one object argument (pass
-  the object as JSON), `--body` raw envelopes, plain non-cell actions, and
-  `--as-server` (a debug build's door already has the operator's rights).
 - **`am kill --stale`** (orphans serving without a lock): an aio-rs app's
   lock is the OS's, held by the process itself, so there are none to reap.
-- **`am start --no-wait`, `--port`**: `ax start` always waits (bound it with
-  `--wait`); the port is the app's `[server]` setting.
-- **`am errors --since=reload`**: `ax errors` groups by start, not by
-  hot reload.
-- **`am surface --component`, `--depth`, `--full`**: `ax surface` takes a
-  path, `--names` and `--rects`.
-- **`am peer --types`**: `ax peer` prints the signatures; no types file.
-- **`am testgen`** (a typed test client): write `TestUi` tests by handle.
-- **`am migrate`, `am migrate --tests`** (retired APIs an app still uses):
-  the compiler names them.
-- **`am watch`, `am add cell|server`**: `ax dev` watches; cells are written
-  by hand.
+- **`am start --port`**: the port is the app's `[server] listen`.
+- **`am dispatch` plain actions and `--as-server`**: there are no
+  non-cell actions; a debug build's door already has the operator's rights.
+- **`am build --force`**: `ax build` always builds anew.
+- **`am watch`, `am add cell|server`**: `ax dev` watches; cells are
+  written by hand.
 - **`am report`** collecting a new report from the CLI: `ax report` lists
   and shows the reports the app made.
-- **The control REST API** (`/__aio/trojan/*`) and `--quiet`: tools reach a
-  running app over its local door only; use `--json` and exit codes.
+- **Piped output as JSON by default**: `ax` prints the same text to a pipe;
+  ask for `--json`.
 - **amui's** V8 heap, effect backlog, per-action reduce time and action
   errors: aio-rs has no such readings; `ax ui` shows its counterparts
   ([above](#ax-ui-the-visual-app-manager)).

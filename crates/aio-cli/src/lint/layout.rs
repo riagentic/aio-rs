@@ -8,6 +8,10 @@
 //! Line edits, so a manifest keeps its comments and order.
 use super::{Issue, Severity};
 
+/// The release whose layout every rule here moves an app to (`ax lint
+/// --from`: a rule newer than the version named is said).
+pub const SINCE: &str = "0.1.0";
+
 /// What the old layout's issues say to do.
 const FIX: &str = "ax lint --fix";
 

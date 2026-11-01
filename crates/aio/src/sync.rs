@@ -693,6 +693,36 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             ),
         );
     }
+    // aio's `/__aio/snapshot` (a dev build's only): the whole state out, or in.
+    if cfg!(debug_assertions) {
+        let (h, auth, key, guessed, trust) =
+            (watched.clone(), auth.clone(), token.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
+        let snap = move |ConnectInfo(Peer(from)): ConnectInfo<Peer>,
+                         method: axum::http::Method,
+                         headers: HeaderMap,
+                         crate::http::Query(q): crate::http::Query,
+                         body: axum::body::Bytes| {
+            let (h, auth, key, guessed, trust) = (h.clone(), auth.clone(), key.clone(), guessed.clone(), trust.clone());
+            async move {
+                let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
+                if !snapshot_open(auth, &key, &headers, &q, here).await {
+                    let why = "the whole state: this machine's tools with the app's key, or an admin";
+                    return unauthorized(&guessed, from.ip(), shown_key(&headers, &q).is_some(), why);
+                }
+                let (code, text) = snapshot_reply(&h, &method, headers.contains_key("x-aio"), &q, &body).await;
+                let ty = if code == 200 { "application/json" } else { "text/plain; charset=utf-8" };
+                let code = axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::BAD_REQUEST);
+                (code, [(axum::http::header::CONTENT_TYPE, ty), (axum::http::header::CACHE_CONTROL, "no-store")], text)
+                    .into_response()
+            }
+        };
+        app = app.route(
+            "/__aio/snapshot",
+            axum::routing::get(snap.clone())
+                .post(snap)
+                .layer(axum::extract::DefaultBodyLimit::max(SNAPSHOT_MAX_BODY)),
+        );
+    }
     #[cfg(feature = "tls")]
     if let Some(t) = &tls {
         // Before the key gate: the caller decides whether this server may be sent the key.
@@ -761,6 +791,55 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         Some(t) => axum::serve(TlsListener::new(listener, t.server)?, app).await,
         #[cfg(not(feature = "tls"))]
         Some(t) => match t {},
+    }
+}
+
+/// The largest snapshot `POST /__aio/snapshot` takes (aio's 10 MB).
+const SNAPSHOT_MAX_BODY: usize = 10_000_000;
+
+/// Who may read or replace the whole state: this machine's tools with the
+/// app's key (`here`: loopback, not relayed), or an admin's session.
+async fn snapshot_open(
+    auth: Option<Arc<crate::auth::Auth>>,
+    key: &str,
+    headers: &axum::http::HeaderMap,
+    query: &HashMap<String, String>,
+    here: bool,
+) -> bool {
+    let shown = shown_key(headers, query).unwrap_or_default();
+    if here && !key.is_empty() && same(&shown, key) {
+        return true;
+    }
+    let Some(a) = auth else { return false };
+    tokio::task::spawn_blocking(move || live(&a, &shown).is_some_and(|s| s.role == "admin")).await.unwrap_or(false)
+}
+
+/// aio's `handleSnapshot`: `GET` the snapshot; `POST` one (with `X-AIO`,
+/// aio's CSRF guard) to load it, `?force=1` past the cell-set check. The
+/// status and the answer's text.
+async fn snapshot_reply<T: Cell>(
+    h: &Handle<T>,
+    method: &axum::http::Method,
+    x_aio: bool,
+    q: &HashMap<String, String>,
+    body: &[u8],
+) -> (u16, String) {
+    match *method {
+        axum::http::Method::GET | axum::http::Method::HEAD => match h.export_snapshot() {
+            Ok(v) => (200, v.to_string()),
+            Err(e) => (500, format!("snapshot refused: {e}")),
+        },
+        axum::http::Method::POST if !x_aio => (403, "Missing X-AIO header".into()),
+        axum::http::Method::POST => {
+            let Ok(snap) = serde_json::from_slice::<Value>(body) else { return (400, "Invalid JSON".into()) };
+            let (h, force) = (h.clone(), q.get("force").is_some_and(|f| f == "1"));
+            match tokio::task::spawn_blocking(move || h.load_snapshot(&snap, force)).await {
+                Ok(Ok(())) => (200, "OK".into()),
+                Ok(Err(e)) => (400, format!("snapshot refused: {e}")),
+                Err(e) => (500, format!("snapshot refused: {e}")),
+            }
+        }
+        _ => (405, "Method Not Allowed".into()),
     }
 }
 

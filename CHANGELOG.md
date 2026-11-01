@@ -32,6 +32,23 @@ version may break things.
 - `aio::rewrite_call` (aio's `beforeReduce` changing a call),
   `aio::on_recovered` (aio's `onCheckpointRestore`),
   `TestCells::held_effects` (aio's `t.getEffects()`).
+- **Persistence as aio's** (docs/persistence): `#[cell(persist(exclude =
+  ["feeds.*.busy"]))]` and `persist(include = [...])`, nested paths with
+  `*` (aio's `persist` filter); `[data] persist = false` and the launch
+  flag `--no-persist`; `[data] coalesce_ms` (aio's `persistDebounceMs`);
+  timed backups (`[data] backup_every`, `backup_keep`); aio's default size
+  guard (warn over 1 MB, error over 16 MB) where `[budgets] state` declares
+  none; `GET`/`POST /__aio/snapshot` in a dev build, `Handle::export_snapshot` and
+  `Handle::load_snapshot` (aio's `snapshot`, `loadSnapshot`).
+- `aio::columns`: typed table columns (`pk`, `text`, `integer`, `real`,
+  `refs`, `boolean`, `json`, `.nullable()`, `.unique()`, defaults), for
+  `#[table(…, columns = CONST)]` and `aio::columns::create`. `#[table]` rows
+  hold bools (`BOOLEAN`, 0/1), lists and nested values (`JSON` text).
+- `Blobs::stream(id, range)`: a blob's bytes as a reader (aio's `stream`).
+- A live query wakes on writes through any `Db` of its file in the process.
+- A ported app replays aio's journal past its save at boot (a crash
+  before aio's save), moving `__journal_wm` with each call.
+
 - `ax create --aio-version <v|main|latest>`, and `ax framework [version]
   [--aio dir]`: the app's aio-rs said, or moved with `Cargo.lock` (aio's
   `am pin`; all or nothing).
@@ -83,6 +100,31 @@ version may break things.
   `assets/icon.ico` used as is for the Windows exe; a warning for a
   non-square `icon.png`, an `icon.svg` or an `icon.png` outside `assets/`.
 
+- `ax` covers aio's `am` verbs and flags ([ax](docs/clients/ax.md#coming-from-aios-am)):
+  `--json` answers objects on every verb scripts branch on (`start`,
+  `stop`, `kill`, `errors`, `health`, `shot`, `doctor`, `expect`,
+  `backup`, `build`), a failure's object whole; `--quiet`; `ax help` the
+  everyday verbs on one screen, `--commands` all; `ax timeline` (every
+  cell's events with their diffs) and `ax record` on a stopped app or
+  another store, replayed by the app's own code; `ax record` calls as each
+  event's caller and names the app's library; `ax testgen` (a typed name
+  table for UI tests); `ax persist [--drop cell]`; `ax top [secs]`;
+  `ax control` (the verbs over loopback HTTP behind a key, aio's
+  `/__aio/trojan/*`); `ax lab --boot` (aio's Docker labs: Windows and
+  macOS VMs, an XFCE desktop, the Android emulator with the APK
+  installed; `--status`, `--reset`, `--ram`, `--cpus`, `--disk`,
+  `--os-version`, `--apk`, `--port`); `errors --since 15m|reload`;
+  `surface --component`, `--depth`, `--full`; `shot --json` and a
+  video's `recording` event with its `t0`; `snapshot load --force` (another
+  cell set refused without it); `call` `key=value` words, `--body`,
+  `--wait`; `start`/`stop --no-wait`; `stop` throws a `--fresh`
+  instance's data away; `cost --window 5m`; `discover --timeout`; `peer`
+  of a profile's remote app and `--types`; `lint --from <version>`,
+  `--tests`; `build --platforms all`; `doctor` hints (an old Electron, an
+  undecided security switch) and `--harden`; `trigger` acts on the newest
+  window.
+- The local door answers `flush` and `drop`; a network caller may ask
+  `peer` of itself (its own user and role, never a claimed one).
 ### Changed
 
 - **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
@@ -95,6 +137,14 @@ version may break things.
   and `*self.key = k`.
 - A `#[ttl]` call answered from the cache returns the kept answer, not `null`.
 - An async method returns `aio::Result<R>` for any `R`.
+- **An older build boots on a newer build's data** (a rollback), as aio's
+  downgrade does: the fields it doesn't declare are kept in every write,
+  the stamp is never lowered, an aio slice is parked under
+  `__downgraded:<cell>`; only data its fields can't hold refuses the boot.
+  Rolled forward again, the newer build boots and drops the fields only
+  the older build declares, as aio's restore merge does.
+- An aio home with a journal is no longer refused at the claim: the store
+  replays it, or says why it can't.
 - **`ax create` writes nothing of the machine it ran on**: the app takes
   aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
   commit), so a clone builds anywhere and a prebuilt `ax` needs no
@@ -119,9 +169,6 @@ version may break things.
 
 - A signed (Authenticode) one-click Windows download finds its runtime:
   the mark is looked for before the certificate table.
-
-### Fixed
-
 - `aio::testing::TestBrowser` starts one browser at a time per process
   (started together, eight took 22 s each on an 8-core Windows, one 0.5 s)
   and reads its DevTools port only once `DevToolsActivePort` is whole.

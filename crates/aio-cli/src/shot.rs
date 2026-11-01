@@ -122,26 +122,36 @@ async fn frame(s: &mut crate::cdp::Session, selector: Option<&str>, full: bool) 
     base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| format!("Page.captureScreenshot: {e}"))
 }
 
-/// Take the shot into `out`, then check or record it.
+/// What `ax shot --json` says of a PNG written to `file` (pure): its size
+/// in bytes and pixels (its header's), what was done with it.
+pub fn said(file: &Path, png: &[u8], did: &str) -> String {
+    let px = |i: usize| png.get(i..i + 4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    aio::serde_json::json!({ "file": file, "bytes": png.len(), "width": px(16), "height": px(20), "did": did })
+        .to_string()
+}
+
+/// Take the shot into `out`, then check or record it; `json`: [`said`].
 pub fn run(
     out: &Path,
     at: (&crate::cdp::Reach, usize),
     (selector, full, size): (Option<&str>, bool, Option<(u32, u32)>),
     base: Baseline,
     tol: Tolerance,
+    json: bool,
 ) -> Result<String, String> {
     let png = aio::rt().block_on(capture(at, selector, full, size))?;
+    let say = |file: &Path, did: &str, line: String| if json { said(file, &png, did) } else { line };
     let write = |p: &Path| std::fs::write(p, &png).map_err(|e| format!("{}: {e}", p.display()));
     match base {
         Baseline::Update(b) => {
             write(b)?;
-            Ok(format!("recorded the baseline {}", b.display()))
+            Ok(say(b, "baseline", format!("recorded the baseline {}", b.display())))
         }
         Baseline::Check(b) => {
             let want =
                 std::fs::read(b).map_err(|e| format!("{}: {e} (record it: --update {})", b.display(), b.display()))?;
             match differs(&decode(&png, "the shot")?, &decode(&want, &b.display().to_string())?, tol) {
-                None => Ok(format!("matches {}", b.display())),
+                None => Ok(say(b, "matches", format!("matches {}", b.display()))),
                 Some(why) => {
                     write(out)?;
                     Err(format!("does not match {}: {why}; this shot is {}", b.display(), out.display()))
@@ -150,7 +160,7 @@ pub fn run(
         }
         Baseline::None => {
             write(out)?;
-            Ok(format!("wrote {}", out.display()))
+            Ok(say(out, "wrote", format!("wrote {}", out.display())))
         }
     }
 }
@@ -200,18 +210,40 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (out, base) = (d.path().join("now.png"), d.path().join("base.png"));
         let t = tolerance(None, None).unwrap();
-        assert!(run(&out, (port, 0), (None, false, None), Baseline::None, t).unwrap().starts_with("wrote"));
+        assert!(run(&out, (port, 0), (None, false, None), Baseline::None, t, false).unwrap().starts_with("wrote"));
         assert_eq!(std::fs::read(&out).unwrap(), png);
-        assert!(run(&out, (port, 0), (None, false, None), Baseline::Check(&base), t).unwrap_err().contains("--update"));
-        assert!(run(&out, (port, 0), (None, false, None), Baseline::Update(&base), t).unwrap().starts_with("recorded"));
-        let e = run(&out, (port, 1), (None, false, None), Baseline::None, t).unwrap_err();
+        assert!(
+            run(&out, (port, 0), (None, false, None), Baseline::Check(&base), t, false)
+                .unwrap_err()
+                .contains("--update")
+        );
+        assert!(
+            run(&out, (port, 0), (None, false, None), Baseline::Update(&base), t, false)
+                .unwrap()
+                .starts_with("recorded")
+        );
+        let e = run(&out, (port, 1), (None, false, None), Baseline::None, t, false).unwrap_err();
         assert!(e.contains("no window 1: the app has 1"), "a window that is not there: {e}");
-        assert!(run(&out, (port, 0), (None, false, None), Baseline::Check(&base), t).unwrap().starts_with("matches"));
-        assert!(run(&out, (port, 0), (None, false, Some((390, 844))), Baseline::None, t).unwrap().starts_with("wrote"));
+        assert!(
+            run(&out, (port, 0), (None, false, None), Baseline::Check(&base), t, false).unwrap().starts_with("matches")
+        );
+        assert!(
+            run(&out, (port, 0), (None, false, Some((390, 844))), Baseline::None, t, false)
+                .unwrap()
+                .starts_with("wrote")
+        );
+        // --json: the file, its bytes and pixels (its header's).
+        let said: serde_json::Value =
+            serde_json::from_str(&run(&out, (port, 0), (None, false, None), Baseline::None, t, true).unwrap()).unwrap();
+        assert_eq!((said["bytes"].as_u64(), said["did"].as_str()), (Some(png.len() as u64), Some("wrote")));
+        assert_eq!(
+            (said["width"].as_u64(), said["height"].as_u64(), said["file"].as_str()),
+            (Some(4), Some(4), out.to_str())
+        );
         let mut other = vec![];
         img(4, 4, [200, 9, 9, 255]).write_to(&mut std::io::Cursor::new(&mut other), image::ImageFormat::Png).unwrap();
         std::fs::write(&base, other).unwrap();
-        let e = run(&out, (port, 0), (None, false, None), Baseline::Check(&base), t).unwrap_err();
+        let e = run(&out, (port, 0), (None, false, None), Baseline::Check(&base), t, false).unwrap_err();
         assert!(e.contains("16 of 16 pixels differ") && e.contains("now.png"), "{e}");
     }
 }

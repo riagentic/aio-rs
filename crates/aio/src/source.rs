@@ -211,6 +211,19 @@ impl<T: Cell> Source<T> {
                 format!("{}: mode = \"client\" needs aio::Source::for_app, not for_server", T::ID),
             )),
             mode => {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                let asked = crate::paths::Ask::parse(&args).is_ok_and(|a| a.no_persist);
+                if !cfg.data.persist || asked {
+                    let why = if asked { "--no-persist" } else { "[data] persist = false" };
+                    eprintln!("[aio] {}: {why}: the state lives in memory only, nothing is saved", T::ID);
+                    let s = Self::run(Handle::memory()).map_err(|e| std::io::Error::other(e.0))?;
+                    let door = http.clone();
+                    if matches!(mode, Mode::ClientServer | Mode::Server) {
+                        s.serve_app(cfg, dirs, http)?;
+                    }
+                    s.serve_door(dirs, &door);
+                    return Ok(s);
+                }
                 if let Some(app) = &dirs.port_of {
                     #[cfg(feature = "compat")]
                     crate::compat::scatter::adopt_here(app, dirs);
@@ -237,6 +250,12 @@ impl<T: Cell> Source<T> {
                     h.store(|st| st.set_durability(durability)).map_err(|e| std::io::Error::other(e.0))?;
                     h.store(|st| st.set_pragmas(&cfg.data.pragmas)).map_err(|e| std::io::Error::other(e.0))?;
                     h.store(|st| st.keep_history(cfg.history.keep)).map_err(|e| std::io::Error::other(e.0))?;
+                    let coalesce = std::time::Duration::from_millis(cfg.data.coalesce_ms);
+                    h.store(|st| st.set_coalesce(coalesce)).map_err(|e| std::io::Error::other(e.why))?;
+                }
+                if let Some(every) = cfg.data.backup_every {
+                    let home = crate::paths::parent(&dirs.data).join("backups");
+                    crate::backup::timed(&cfg.app.id, &dirs.store, &home, every, cfg.data.backup_keep);
                 }
                 let door = http.clone();
                 if matches!(mode, Mode::ClientServer | Mode::Server) {

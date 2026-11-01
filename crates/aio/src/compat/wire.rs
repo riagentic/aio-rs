@@ -24,7 +24,7 @@
 //! `settings`), the app's cell keeping its other fields ([`cells`]). Each
 //! is subscribed, patched, snapshotted and called on its own: `settings:m`
 //! calls the app cell's method `settings_m`, or `m` when it has none
-//! ([`method_of`]). A path inside a cell subscribes the whole cell.
+//! ([`super::data::method_of`]). A path inside a cell subscribes the whole cell.
 //!
 //! aio's offline CRDT sync (`op`, `sync-req`) is [`super::crdt`].
 use crate::link::{Sock, View, next_ax, send_ax};
@@ -156,22 +156,6 @@ pub(super) fn cells<T: Cell>(shown: &Value) -> Value {
         T::AIO_CELLS.iter().filter_map(|s| Some((s.cell.to_string(), own.remove(s.field)?))).collect();
     out.insert(T::ID.into(), own.into());
     out.into()
-}
-
-/// The method of `T` that aio's `<cell>:<method>` is (pure): `T`'s own
-/// under its id; under a `#[aio_cell]` field's cell `<cell>_<method>` when `T`
-/// has it, else `<method>`. `None`: no cell of `T`'s, or an internal method.
-pub(super) fn method_of<T: Cell>(cell: &str, method: &str) -> Option<String> {
-    if method.is_empty() || method.starts_with("__") {
-        return None;
-    }
-    if cell == T::ID {
-        return Some(method.into());
-    }
-    T::AIO_CELLS.iter().any(|s| s.cell == cell).then(|| {
-        let own = format!("{cell}_{method}");
-        if T::METHODS.contains(&own.as_str()) { own } else { method.into() }
-    })
 }
 
 /// The cells `subs` shows of `all` (`None`: all of them).
@@ -457,7 +441,7 @@ pub async fn session<T: Cell>(
                     "action" => {
                         let cid = d["cid"].clone();
                         let kind = d["type"].as_str().unwrap_or_default();
-                        let method = kind.split_once(':').and_then(|(c, m)| method_of::<T>(c, m));
+                        let method = kind.split_once(':').and_then(|(c, m)| super::data::method_of::<T>(c, m));
                         let is_async = method.as_deref().is_some_and(|m| T::async_mode(m).is_some());
                         let r = match method {
                             None => Err(crate::Rejected::coded(crate::Code::ActionRefused, format!("unknown action {kind}"))),

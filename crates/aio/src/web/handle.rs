@@ -45,12 +45,11 @@ fn lock<X>(m: &Mutex<X>) -> MutexGuard<'_, X> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// What is kept of `st`: its `save` hook's, without `#[transient]` fields (pure).
+/// What is kept of `st`: its `save` hook's, without what it doesn't save
+/// (`#[transient]`, `persist(include, exclude)`; pure).
 fn kept<T: Cell>(st: &T) -> Value {
     let mut v = serde_json::to_value(st.save().as_ref().unwrap_or(st)).unwrap_or(Value::Null);
-    if let Some(m) = v.as_object_mut() {
-        T::TRANSIENT.iter().for_each(|f| _ = m.remove(*f));
-    }
+    crate::filter::strip(&mut v, crate::filter::Filter { include: T::PERSIST_INCLUDE, exclude: T::TRANSIENT });
     v
 }
 

@@ -8,7 +8,8 @@
 //! statement's: a stray `BEGIN` can't swallow the next caller's writes.
 //! Pragmas are checked after they're set: one SQLite ignored refuses the open.
 //! A live query ([`Db::live`]) runs again when a write changes a table it
-//! reads; both sides are known from SQLite itself, not from parsing SQL.
+//! reads, through any `Db` of the same file in this process; both sides are
+//! known from SQLite itself, not from parsing SQL.
 use crate::Error;
 use rusqlite::Connection;
 use std::collections::BTreeSet;
@@ -243,6 +244,26 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 /// Tables, lowercased.
 pub type Tables = BTreeSet<String>;
 
+/// Where a file's writers say which tables they changed.
+type Feed = tokio::sync::broadcast::Sender<Arc<Tables>>;
+
+/// The feed of the file at `path`, shared by every `Db` open on it in this
+/// process (a live query wakes on a write through any of them); kept only
+/// while one is open.
+fn feed_of(path: &Path) -> Arc<Feed> {
+    static FEEDS: Mutex<Vec<(PathBuf, std::sync::Weak<Feed>)>> = Mutex::new(Vec::new());
+    let new = || Arc::new(tokio::sync::broadcast::channel(256).0);
+    let Ok(path) = std::fs::canonicalize(path) else { return new() };
+    let mut feeds = FEEDS.lock().unwrap_or_else(|e| e.into_inner());
+    feeds.retain(|(_, f)| f.strong_count() > 0);
+    if let Some(f) = feeds.iter().find(|(p, _)| *p == path).and_then(|(_, f)| f.upgrade()) {
+        return f;
+    }
+    let f = new();
+    feeds.push((path, Arc::downgrade(&f)));
+    f
+}
+
 /// The tables the statements of one request read and may write, as SQLite
 /// itself names them while it prepares them (its authorizer): views,
 /// triggers, `WITH`, quoted and qualified names included, no SQL parsing.
@@ -258,7 +279,7 @@ struct Worker {
     jobs: Option<std::sync::mpsc::Sender<Job>>,
     thread: Option<std::thread::JoinHandle<()>>,
     seen: Arc<Mutex<Seen>>,
-    feed: Option<tokio::sync::broadcast::Sender<Arc<Tables>>>,
+    feed: Option<Arc<Feed>>,
 }
 
 fn lock(m: &Mutex<Seen>) -> std::sync::MutexGuard<'_, Seen> {
@@ -269,7 +290,7 @@ impl Worker {
     fn start(
         name: String,
         c: Connection,
-        feed: Option<tokio::sync::broadcast::Sender<Arc<Tables>>>,
+        feed: Option<Arc<Feed>>,
     ) -> Result<Self, Error> {
         use rusqlite::hooks::{AuthAction as A, Authorization};
         let seen = Arc::new(Mutex::new(Seen::default()));
@@ -354,7 +375,7 @@ pub struct Db {
     timeout: Option<Duration>,
     path: PathBuf,
     recovered: Option<crate::Recovered>,
-    feed: tokio::sync::broadcast::Sender<Arc<Tables>>,
+    feed: Arc<Feed>,
 }
 
 impl Db {
@@ -394,7 +415,10 @@ impl Db {
             crate::store::refresh_good(&c, &path)?;
         }
         let name = path.file_name().map_or("db".into(), |n| n.to_string_lossy().into_owned());
-        let (feed, _) = tokio::sync::broadcast::channel(256);
+        let feed = match memory {
+            true => Arc::new(tokio::sync::broadcast::channel(256).0),
+            false => feed_of(&path),
+        };
         let writer = Worker::start(format!("aio-db-{name}"), c, Some(feed.clone()))?;
         let readers = (0..if memory { 0 } else { opts.readers })
             .map(|i| connect(true).and_then(|c| Worker::start(format!("aio-db-{name}-r{i}"), c, None)))
@@ -469,7 +493,8 @@ impl Db {
     }
 
     /// A live query (aio's `reactiveDB().select`): its rows now, then again
-    /// each time a write through this `Db` changes a table it reads.
+    /// each time a write through this `Db`, or another open on the same file
+    /// in this process, changes a table it reads.
     pub async fn live(&self, sql: &str, params: Vec<Sql>) -> Result<Live<'_>, Error> {
         // Listening before the first run: no write between them is missed.
         let feed = self.feed.subscribe();

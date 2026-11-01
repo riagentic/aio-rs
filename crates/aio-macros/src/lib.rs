@@ -25,6 +25,9 @@ struct Flags {
     quiet: bool,
     coalesce: bool,
     machine: Option<Ident>,
+    /// `persist(include = [...])`, `persist(exclude = [...])`: saved paths.
+    include: Vec<LitStr>,
+    exclude: Vec<LitStr>,
 }
 
 /// `#[cell(persist, shared, version = 2, id = "todo", migrate = up)]`;
@@ -35,7 +38,8 @@ struct Flags {
 /// `visible = f` (`fn(&Self, &By) -> Self`, or `fn(&Self, &Caller) -> Self`
 /// for who with their role) filters what a viewer gets, and
 /// `#[server]` on a field keeps it off the wire. What is saved: `#[transient]`
-/// on a field keeps it off disk, `save = f` (`fn(&Self) -> Self`) shapes it,
+/// on a field keeps it off disk, as `persist(exclude = ["feeds.*.busy"])` does
+/// paths into it (`persist(include = ["name"])`: only those), `save = f` (`fn(&Self) -> Self`) shapes it,
 /// `restore = f` (`fn(Self) -> Self`) repairs it on every boot. In an aio file,
 /// `#[table("name")]` on a field (`#[table("name", key = "col")]` on a map)
 /// keeps it as the rows of aio's `db:` table `name`, and `#[aio_cell]` on a field
@@ -47,6 +51,28 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let parser = syn::meta::parser(|m| {
         if m.path.is_ident("persist") {
             f.persist = true;
+            if m.input.peek(syn::token::Paren) {
+                m.parse_nested_meta(|n| {
+                    let into = match () {
+                        _ if n.path.is_ident("include") => &mut f.include,
+                        _ if n.path.is_ident("exclude") => &mut f.exclude,
+                        _ => return Err(n.error("expected persist(exclude = [\"a.b\"]) or persist(include = [\"a\"])")),
+                    };
+                    let list: syn::ExprArray = n.value()?.parse()?;
+                    for e in list.elems {
+                        match e {
+                            Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => into.push(s),
+                            e => {
+                                return Err(syn::Error::new(
+                                    e.span(),
+                                    "a path into the state: \"field\", \"a.b\", \"feeds.*.busy\"",
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
         } else if m.path.is_ident("shared") {
             f.shared = true;
         } else if m.path.is_ident("version") {
@@ -112,6 +138,28 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     }
+    // `persist(include, exclude)`: paths into the state, from a field (or `*`).
+    if !f.include.is_empty() && !f.exclude.is_empty() {
+        let msg = "persist takes include or exclude, not both (as aio's persist filter)";
+        return syn::Error::new(f.include[0].span(), msg).to_compile_error().into();
+    }
+    let fields: Vec<String> = s.fields.iter().filter_map(|x| x.ident.as_ref().map(|i| i.to_string())).collect();
+    for (p, include) in f.include.iter().map(|p| (p, true)).chain(f.exclude.iter().map(|p| (p, false))) {
+        let v = p.value();
+        let segs: Vec<&str> = v.split('.').collect();
+        let why = match () {
+            _ if segs.iter().any(|s| s.is_empty()) => Some("has an empty segment".to_string()),
+            _ if include && segs.contains(&"*") => Some("has a `*`, which only exclude takes".into()),
+            _ if segs[0] != "*" && !fields.iter().any(|f| f == segs[0]) => {
+                Some(format!("starts at `{}`, no field of this cell", segs[0]))
+            }
+            _ => None,
+        };
+        if let Some(why) = why {
+            return syn::Error::new(p.span(), format!("persist path {v:?} {why}")).to_compile_error().into();
+        }
+    }
+    transient.extend(f.exclude.iter().map(LitStr::value));
     // A shared cell sends every field but its #[server] ones to each client:
     // an unambiguous credential among them is refused, never sent.
     if f.shared && f.visible.is_none() {
@@ -128,24 +176,28 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut tables = Vec::new();
     for field in s.fields.iter_mut() {
         let Some(a) = take(&mut field.attrs, "table") else { continue };
-        let (mut name, mut key, mut cols) = (None::<LitStr>, None::<LitStr>, None::<LitStr>);
+        let (mut name, mut key, mut cols) = (None::<LitStr>, None::<LitStr>, None::<Expr>);
         let parsed = a.parse_args_with(|p: syn::parse::ParseStream| {
             name = Some(p.parse()?);
             while p.parse::<Option<syn::Token![,]>>()?.is_some() {
                 let k: syn::Ident = p.parse()?;
-                let into = match k.to_string().as_str() {
-                    "key" if key.is_none() => &mut key,
-                    "columns" if cols.is_none() => &mut cols,
+                match k.to_string().as_str() {
+                    "key" if key.is_none() => {
+                        p.parse::<syn::Token![=]>()?;
+                        key = Some(p.parse()?);
+                    }
+                    "columns" if cols.is_none() => {
+                        p.parse::<syn::Token![=]>()?;
+                        cols = Some(p.parse()?);
+                    }
                     _ => return Err(syn::Error::new(k.span(), "expected key = \"col\" or columns = \"…\"")),
-                };
-                p.parse::<syn::Token![=]>()?;
-                *into = Some(p.parse()?);
+                }
             }
             Ok(())
         });
         let (Ok(()), Some(name), Some(i)) = (parsed, name, &field.ident) else {
             let msg = "#[table(\"name\")] on a named field, or #[table(\"name\", key = \"col\")] for a map; \
-                       columns = \"id INTEGER PRIMARY KEY, …\" declares its schema";
+                       columns = \"id INTEGER PRIMARY KEY, …\" (or a `&[aio::columns::Col]` const) declares its schema";
             return syn::Error::new(field.span(), msg).to_compile_error().into();
         };
         if field.attrs.iter().any(|a| a.path().is_ident("serde")) {
@@ -159,7 +211,10 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             None => quote!(::std::option::Option::None),
         };
         let cols = match cols {
-            Some(c) => quote!(::std::option::Option::Some(#c)),
+            Some(Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(c), .. })) => {
+                quote!(::std::option::Option::Some(::aio::columns::Columns::Sql(#c)))
+            }
+            Some(c) => quote!(::std::option::Option::Some(::aio::columns::Columns::Typed(#c))),
             None => quote!(::std::option::Option::None),
         };
         tables.push(quote!((#i, #name, #key, #cols)));
@@ -211,8 +266,11 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             (hidden.iter().map(|h| format_ident!("{h}")), hidden.iter().map(|h| format!("{}.{h}", s.ident)));
         quote!(fn conceal(&mut self) { #(::aio::Hidden::conceal(&mut self.#fields, #labels);)* })
     });
+    let include = &f.include;
+    let include =
+        (!include.is_empty()).then(|| quote!(const PERSIST_INCLUDE: &'static [&'static str] = &[#(#include),*];));
     let tables = (!tables.is_empty()).then(|| {
-        quote!(const TABLES: &'static [(&'static str, &'static str, ::std::option::Option<&'static str>, ::std::option::Option<&'static str>)] = &[#(#tables),*];)
+        quote!(const TABLES: &'static [(&'static str, &'static str, ::std::option::Option<&'static str>, ::std::option::Option<::aio::columns::Columns>)] = &[#(#tables),*];)
     });
     // aio files are a native store's: a browser build has none.
     let slices = (!slices.is_empty()).then(
@@ -316,6 +374,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             #migrate
             #project
             #transient
+            #include
             #server
             #conceal
             #tables
@@ -485,8 +544,10 @@ const HANDLE_METHODS: &[&str] = &[
     "done",
     "enabled",
     "events",
+    "export_snapshot",
     "listen",
     "listens_to",
+    "load_snapshot",
     "on_change",
     "on_pending",
     "owns",

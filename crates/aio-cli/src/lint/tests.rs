@@ -694,6 +694,22 @@ fn a_typed_newline_is_told_it_no_longer_presses_enter() {
     let r = lint(d.path());
     let got: Vec<_> = found(&r).into_iter().filter(|(a, _)| *a == "migrate").map(|(_, at)| at).collect();
     assert_eq!(got, ["tests/ui.rs:2"], "{:?}", r.issues);
+    // aio's `am migrate --tests`: the test shapes alone.
+    let shapes: Vec<&Issue> = r.issues.iter().filter(|i| test_shape(i)).collect();
+    assert_eq!(shapes.len(), 1, "{:?}", r.issues);
+}
+
+#[test]
+fn from_a_version_only_what_changed_after_it() {
+    // aio's `am migrate --from`: an app made with a release has its layout.
+    let src = "fn f() {\n    let _ = aio::retry;\n}\n";
+    let d = project(&[("Cargo.toml", "[package]\nname = \"x\"\n"), ("src/lib.rs", src)]);
+    let all = lint(d.path()).issues;
+    assert!(all.iter().any(|i| i.area == "migrate"), "{all:?}");
+    let before = migrate_from(lint(d.path()).issues, "0.0.9").unwrap();
+    assert!(!before.is_empty() && before.iter().all(|i| i.area == "migrate"), "{before:?}");
+    assert!(migrate_from(all, layout::SINCE).unwrap().is_empty(), "made with it: nothing to move");
+    assert!(migrate_from(vec![], "soon").unwrap_err().contains("an aio-rs version"));
 }
 
 #[test]
