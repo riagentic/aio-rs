@@ -626,7 +626,8 @@ pub struct Build {
 /// The files of `[build] assets` under `at` (`aio.toml`'s folder): each
 /// one's URL path, percent-encoded as a browser asks for it (`/media/a%20b.png`),
 /// and its file, sorted. Dotfiles are left out (never served); a folder that
-/// isn't there is refused.
+/// isn't there is refused. Read where `aio.toml` is (the build, not the app).
+#[cfg(feature = "toml")]
 pub fn asset_files(
     at: &std::path::Path,
     assets: &std::collections::BTreeMap<String, std::path::PathBuf>,
@@ -684,6 +685,7 @@ pub fn asset_path(url: &str) -> std::path::PathBuf {
 }
 
 /// A path segment as a URL spells it: what isn't unreserved, percent-encoded.
+#[cfg(feature = "toml")]
 fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
