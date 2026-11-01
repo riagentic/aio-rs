@@ -516,6 +516,12 @@ const KEYWORDS: &[&str] = &[
     "super", "trait", "true", "type", "unsafe", "use", "where", "while",
 ];
 
+/// Types no local can be named after.
+const PRIMITIVES: &[&str] = &[
+    "bool", "char", "str", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+    "f32", "f64",
+];
+
 /// The local names `ts` reads (a heuristic over tokens: not a field,
 /// method, path, call, macro or type; closure params, `let` and match
 /// patterns left out), so a hole's `move` closure can take clones.
@@ -576,6 +582,8 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                 let next = toks.get(i + 1);
                 let skip = s == "_"
                     || KEYWORDS.contains(&s.as_str())
+                    || PRIMITIVES.contains(&s.as_str())
+                    || prev.is_some_and(|t| is_ident(t, "as"))
                     || s.starts_with(|c: char| c.is_uppercase())
                     || is_punct(prev, '.')
                     || (is_punct(prev, ':') && i >= 2 && is_punct(toks.get(i - 2), ':'))

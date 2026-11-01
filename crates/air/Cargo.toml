@@ -23,3 +23,7 @@ keyboard-types = { version = "0.7", default-features = false }
 # Planted renderer faults (`air::__fault`), for the gate tests that prove
 # a broken render fails `TestUi`; never in an app's build.
 fault = []
+
+[[test]]
+name = "fault"
+required-features = ["fault"]
