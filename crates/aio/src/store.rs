@@ -18,6 +18,12 @@ const RESTORE: &str = "$restore";
 /// (`Cell::REDACTED`). No method's own arguments are an object (always a
 /// tuple or null), so none can pose as one.
 pub const REDACTED: &str = "$redacted";
+/// A transaction's logged arguments (`#[cell(transaction)]`): `{TX: <the
+/// state it left>, "args": <its call's arguments>}`, replayed as that state
+/// (without its `#[transient]` fields), as a `#[redact]` call's is.
+pub const TX: &str = "$tx";
+
+mod tx;
 
 /// One committed call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,6 +194,8 @@ pub struct Store<T: Cell> {
     /// stamped with that version (never lowered: rolling forward again
     /// migrates nothing twice).
     ahead: Option<(u32, Value)>,
+    /// `#[cell(transaction)]`: its async calls in flight.
+    txs: tx::Txs<T>,
 }
 
 /// A run of coalesced calls by one caller: each call (the last one is the
@@ -974,7 +982,8 @@ fn redacted<T: Cell>(method: &str, before: &T, after: &T) -> Result<Option<Value
 
 /// The state a `#[redact]` event's args keep (see [`REDACTED`]).
 fn made(args: &Value) -> Option<&Value> {
-    args.as_object()?.get(REDACTED)
+    let a = args.as_object()?;
+    a.get(REDACTED).or_else(|| a.get(TX))
 }
 
 /// A `#[redact]` event replayed: the state it left, with the `#[transient]`
@@ -1056,6 +1065,7 @@ impl<T: Cell> Store<T> {
             unsnapped: 0,
             effects: vec![],
             foreign: vec![],
+            txs: Default::default(),
             committed: vec![],
             file: None,
             recovered: None,
@@ -1148,6 +1158,7 @@ impl<T: Cell> Store<T> {
             unsnapped: 0,
             effects: vec![],
             foreign: vec![],
+            txs: Default::default(),
             committed: vec![],
             file,
             recovered,
@@ -1330,7 +1341,11 @@ impl<T: Cell> Store<T> {
         let now = self.now();
         let Some(op) = op else {
             let cx = Cx::live(now, by).with_role(role).with_reply(reply);
-            return self.apply_and_commit(by, method, args, cx, None, None).map(Some);
+            let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
+            if T::TRANSACTION.is_some() {
+                self.tx_sweep();
+            }
+            return out;
         };
         let op = crate::cx::Op::check(op, now).map_err(Rejected::new)?;
         let seen: bool = self
@@ -1345,7 +1360,11 @@ impl<T: Cell> Store<T> {
             return Ok(None);
         }
         let cx = Cx::synced(now, T::ID, by, &op).with_role(role).with_reply(reply);
-        self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some)
+        let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
+        if T::TRANSACTION.is_some() {
+            self.tx_sweep();
+        }
+        out
     }
 
     /// A failure of the cell not made by a call (an async method's awaited `?`).
@@ -1407,6 +1426,11 @@ impl<T: Cell> Store<T> {
         if self.panics.len() >= PANICS_MAX {
             crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", T::ID);
         }
+        let base = method.split_once('.').map_or(method, |(m, _)| m);
+        if let (Some(cfg), Some(reply), Some(_)) = (T::TRANSACTION, cx.reply(), T::async_mode(base)) {
+            return self.tx_call(cfg, by, method, args, cx, reply, op);
+        }
+        let cx = cx.with_live(self.state.clone());
         let t0 = std::time::Instant::now();
         let mut next = (*self.state).clone();
         let t1 = std::time::Instant::now();

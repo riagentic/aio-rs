@@ -52,6 +52,7 @@ pub struct Plugin {
     #[cfg(feature = "server")]
     http: crate::http::Http,
     on_effect: Vec<crate::Started>,
+    #[cfg(not(target_arch = "wasm32"))]
     on_action: Vec<crate::Acted>,
 }
 
@@ -67,6 +68,7 @@ impl Plugin {
             #[cfg(feature = "server")]
             http: Default::default(),
             on_effect: vec![],
+            #[cfg(not(target_arch = "wasm32"))]
             on_action: vec![],
         }
     }
@@ -111,6 +113,7 @@ impl Plugin {
     }
 
     /// Hear every committed call ([`crate::on_action`], aio's plugin `onAction`).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn on_action(mut self, f: impl Fn(&str, &crate::Event, &serde_json::Value) + Send + Sync + 'static) -> Self {
         self.on_action.push(std::sync::Arc::new(f));
         self
@@ -152,6 +155,7 @@ impl Plugin {
     /// Its hooks into the app: effects heard, stops queued, its cells with its starts.
     fn join(self, cells: Cells) -> Cells {
         self.on_effect.into_iter().for_each(|f| crate::on_effect(move |c, k| f(c, k)));
+        #[cfg(not(target_arch = "wasm32"))]
         self.on_action.into_iter().for_each(|f| crate::on_action(move |c, e, s| f(c, e, s)));
         for (stopping, f) in self.stops {
             match stopping {

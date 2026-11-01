@@ -28,6 +28,8 @@ struct Flags {
     /// `persist(include = [...])`, `persist(exclude = [...])`: saved paths.
     include: Vec<LitStr>,
     exclude: Vec<LitStr>,
+    /// `transaction`, `transaction(serialize, conflict = "warn")`.
+    transaction: Option<(bool, bool)>,
 }
 
 /// `#[cell(persist, shared, version = 2, id = "todo", migrate = up)]`;
@@ -45,6 +47,9 @@ struct Flags {
 /// keeps it as the rows of aio's `db:` table `name`, and `#[aio_cell]` on a field
 /// whose type is a cell keeps it as that aio cell's slice. `retire = ["old"]`
 /// deletes cells no build reads any more from the file at its boot.
+/// `transaction` makes its async methods transactions (aio's `transaction:
+/// true`): `transaction(serialize)` one at a time, `conflict = "warn"`
+/// commits over a conflict, said.
 #[proc_macro_attribute]
 pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut f = Flags::default();
@@ -73,6 +78,28 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
                     Ok(())
                 })?;
             }
+        } else if m.path.is_ident("transaction") {
+            let (mut serialize, mut warn) = (false, false);
+            if m.input.peek(syn::token::Paren) {
+                m.parse_nested_meta(|n| {
+                    if n.path.is_ident("serialize") {
+                        serialize = true;
+                    } else if n.path.is_ident("conflict") {
+                        let v: LitStr = n.value()?.parse()?;
+                        warn = match v.value().as_str() {
+                            "abort" => false,
+                            "warn" => true,
+                            _ => {
+                                return Err(syn::Error::new(v.span(), "conflict = \"abort\" (the default) or \"warn\""));
+                            }
+                        };
+                    } else {
+                        return Err(n.error("expected transaction(serialize) or transaction(conflict = \"warn\")"));
+                    }
+                    Ok(())
+                })?;
+            }
+            f.transaction = Some((serialize, warn));
         } else if m.path.is_ident("shared") {
             f.shared = true;
         } else if m.path.is_ident("version") {
@@ -105,7 +132,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         } else {
             return Err(m.error(
-                "unknown cell flag: expected persist, shared, version, id, migrate, visible, save, restore, retire, machine, diagnostics, coalesce or custom_default",
+                "unknown cell flag: expected persist, shared, version, id, migrate, visible, save, restore, retire, machine, diagnostics, coalesce, transaction or custom_default",
             ));
         }
         Ok(())
@@ -280,6 +307,9 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let restore = f.restore.map(|p| quote!(fn restore(self) -> Self { #p(self) }));
     let retire = &f.retire;
     let retire = (!retire.is_empty()).then(|| quote!(const RETIRED: &'static [&'static str] = &[#(#retire),*];));
+    let transaction = f.transaction.map(|(serialize, warn)| {
+        quote!(const TRANSACTION: ::std::option::Option<::aio::Transaction> = ::std::option::Option::Some(::aio::Transaction { serialize: #serialize, warn: #warn });)
+    });
     let default = (!f.custom_default).then(|| quote!(Default,));
     let coalesce = f.coalesce.then(|| {
         quote!(
@@ -382,6 +412,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             #save
             #restore
             #retire
+            #transaction
             #fields
         }
     }

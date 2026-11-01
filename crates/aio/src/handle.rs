@@ -411,6 +411,10 @@ impl<T: Cell> Handle<T> {
             self.inner.wake.notify_one();
         }
         self.count_failures();
+        // A transaction its aborts ended: the next serialized call's turn.
+        if T::TRANSACTION.is_some() && lock(&self.inner.store).tx_sweep() {
+            self.after_commit(wake);
+        }
     }
 
     /// Count the failures the store saw; the breaker's trip disables the
@@ -598,6 +602,9 @@ impl<T: Cell> Handle<T> {
         let (reply, answer) = match mode {
             Some(_) => {
                 let (r, a) = crate::answer::Reply::new(method);
+                if T::TRANSACTION.is_some() {
+                    self.on_gone(&r);
+                }
                 (Some(r), Some(a))
             }
             None => (None, None),
@@ -627,6 +634,25 @@ impl<T: Cell> Handle<T> {
             (Ok(v), _, Some(a)) => Ok((v, a)),
             (Ok(v), _, None) => Ok((v.clone(), crate::Answer::ready(Ok(v.unwrap_or_default())))),
         }
+    }
+
+    /// Once nothing holds a transaction's call (its await aborted or cut
+    /// off), it is dropped with what it wrote, and the next serialized call
+    /// starts: off this thread, as the task's end may come inside this
+    /// cell's own commit. Off a runtime (an effect a test held, dropped by
+    /// an abort), the commit that dropped it does that ([`Self::after_commit`]).
+    fn on_gone(&self, r: &crate::answer::Reply) {
+        let me = Arc::downgrade(&self.inner);
+        r.on_drop(move || {
+            let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+            drop(rt.spawn_blocking(move || {
+                let Some(inner) = me.upgrade() else { return };
+                let h = Handle { inner, by: By::System };
+                if lock(&h.inner.store).tx_sweep() {
+                    h.after_commit(true);
+                }
+            }));
+        });
     }
 
     /// An async method's step `method` (`m.1`), run by its effect for the

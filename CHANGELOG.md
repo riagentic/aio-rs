@@ -9,6 +9,25 @@ version may break things.
 
 ### Added
 
+- **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
+  makes each async method read the state as it was when it was called
+  and commit what it wrote, ran and scheduled at its end as one event, or
+  nothing; a field another call changed meanwhile refuses it with
+  `Code::TxConflict` (`TX_CONFLICT`). `transaction(serialize)` runs them
+  one at a time, `conflict = "warn"` commits over a conflict;
+  `cx.commit()`, `cx.commit_every(ms)` and `cx.live_state::<Self>()` are
+  aio's `$commit` and `$live` ([methods](docs/state/methods.md#transactions)).
+- `cx.on::<Other>().after/every/at/cron(..)`: a schedule that calls another
+  cell's method (aio's `schedule.after(id, ms, other.method.action())`).
+- `aio::on_action(f)` (aio's `onAction`): every committed call heard;
+  `Plugin::on_action` and `Plugin::allowed_origins` (aio's plugin
+  `onAction`, `allowedOrigins`, merged with `[server] hosts`).
+- A cell of `#[aio_cell]` fields may `retire` its own id: aio's slice of
+  that name and its stamp go, its history stays.
+- `Updates::retired` (and `Ready::retired`): where a fresh start set the
+  data aside, for the new version's first start to say; its `backup` is
+  the store set aside (aio's `updates-retire.ts`).
+
 - **Async methods answer their caller** (aio's `await cell.method()`): a
   typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
   await is the value its last part returned or the refusal that ended it

@@ -74,7 +74,7 @@ native! {
     pub use cells::{CellHealth, Cells};
     pub use handle::{Drained, Handle, Moment, RETRY_AFTER_MS, TIMELINE_STEPS, TimeAsk, Timeline};
     pub use source::Source;
-    pub use store::{Due, Error, Event, Position, REDACTED, Recovered, Steps, Store, Travel, PERSIST_DEBOUNCE, apply_event, on_recovered, shape_of};
+    pub use store::{Due, Error, Event, Position, REDACTED, Recovered, TX, Steps, Store, Travel, PERSIST_DEBOUNCE, apply_event, on_recovered, shape_of};
 }
 /// In a page: the login doors of the server that served it.
 #[cfg(target_arch = "wasm32")]
@@ -261,6 +261,16 @@ pub struct Rejected {
     pub code: Option<Code>,
 }
 
+/// How a `#[cell(transaction)]` cell's async methods commit (aio's
+/// `transaction: { serialize, conflict }`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Transaction {
+    /// One at a time: a call waits for the one before it to end.
+    pub serialize: bool,
+    /// Commit over a conflict, said, instead of refusing with `TX_CONFLICT`.
+    pub warn: bool,
+}
+
 /// The kinds of refusal aio makes, on either side of the wire (aio
 /// `errorCode`). Stable: a code keeps its meaning and its wire name
 /// (`ACCESS_DENIED`) across versions; new ones may be added.
@@ -274,6 +284,9 @@ pub enum Code {
     ActionRefused,
     /// The link to the app dropped or never came up: the call may have run.
     ConnectionLost,
+    /// A transaction's write met another call's (`#[cell(transaction)]`):
+    /// nothing it wrote committed; call it again.
+    TxConflict,
 }
 
 impl Code {
@@ -283,6 +296,7 @@ impl Code {
             Self::AccessDenied => "ACCESS_DENIED",
             Self::ActionRefused => "ACTION_REFUSED",
             Self::ConnectionLost => "CONNECTION_LOST",
+            Self::TxConflict => "TX_CONFLICT",
         }
     }
 
@@ -442,6 +456,10 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// any more, deleted from the file at this cell's boot (their history,
     /// and in an aio file their slices and stamps), zeroed, never left behind.
     const RETIRED: &'static [&'static str] = &[];
+    /// `#[cell(transaction)]` (aio's `transaction`): its async methods read
+    /// the state as it was when they were called and commit all they wrote
+    /// at their end, at once, or nothing (docs/state/methods.md).
+    const TRANSACTION: Option<Transaction> = None;
     /// What is saved of the state, by `#[cell(save = f)]` (`fn(&Self) -> Self`);
     /// `None`: the state as is. Keep it idempotent: a crash and a clean stop
     /// then come back the same.
@@ -767,10 +785,13 @@ pub(crate) fn effect_started(cell: &str, key: &str) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type Acted = std::sync::Arc<dyn Fn(&str, &Event, &Value) + Send + Sync>;
 
+#[cfg(not(target_arch = "wasm32"))]
 static ON_ACTION: std::sync::RwLock<Vec<Acted>> = std::sync::RwLock::new(Vec::new());
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Hear every committed call (aio's `onAction`), observe-only: its cell, its
 /// event (method, arguments, who made it, when) and the cell's state after
 /// it, as JSON. Hooks compose (the app's and each plugin's), each guarded:
@@ -780,11 +801,13 @@ pub fn on_action(f: impl Fn(&str, &Event, &Value) + Send + Sync + 'static) {
     ON_ACTION.write().unwrap_or_else(|e| e.into_inner()).push(std::sync::Arc::new(f));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The `on_action` hooks, none when nobody listens (the state isn't copied then).
 pub(crate) fn action_hooks() -> Vec<Acted> {
     ON_ACTION.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn acted(hooks: &[Acted], cell: &str, ev: &Event, state: &Value) {
     for f in hooks {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(cell, ev, state))).is_err() {
