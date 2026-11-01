@@ -7,23 +7,6 @@ version may break things.
 
 ## [Unreleased]
 
-### Changed
-
-- **`ax create` writes nothing of the machine it ran on**: the app takes
-  aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
-  commit), so a clone builds anywhere and a prebuilt `ax` needs no
-  checkout; `--aio <dir>` names a checkout relative to the app, refused
-  through the root. `AGENTS.md` holds the rules and the loop inline and
-  links the guide by URL, no local path
-  ([where an app gets aio-rs from](docs/basics/setup.md#where-an-app-gets-aio-rs-from)).
-- **`ax dev --android` installs once**: a thin dev APK beside the real app
-  (`<id>.dev`, "(dev)") shows the page `ax dev --web` serves over
-  `adb reverse`, and each edit reloads it; `--native` (or an app without a
-  web build) rebuilds a debug dev copy for the device's CPU only. An
-  emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
-  ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
-  the app's log comes to the terminal (`[device]`).
-
 ### Added
 
 - `ax create --aio-version <v|main|latest>`, and `ax framework [version]
@@ -40,6 +23,19 @@ version may break things.
   release by its install script, checked against `SHA256SUMS`, or built
   from a checkout; `ax uninstall [--tools]`: `ax` (and what it fetched)
   gone, apps and data kept ([setup](docs/basics/setup.md#upgrading-ax)).
+- Every window app has its icon at run time, dev and installed: `aio::config!()`
+  builds in `assets/icon.png` and `Window::of` wears it; a window with none
+  wears the app's monogram (aio's generated icon, now `aio::icon`). It is on
+  the title bar, taskbar, Alt-Tab, tray, notifications, the macOS Dock, the
+  download window and a browser tab's favicon.
+- `Config::hue()` and `aio::hue!()`: the app's one hue (`[ui] hue`, else its
+  id's) for its page, icon, splash and download window; the template's page
+  takes it.
+- `desktop::icon_state()` (aio's `iconState()`).
+- `ax build`: the default icon at 512 px plus an SVG (AppImage, deb); a macOS
+  `.icns` built in Rust with every slot from 16 to 1024 px (no `sips`);
+  `assets/icon.ico` used as is for the Windows exe; a warning for a
+  non-square `icon.png`, an `icon.svg` or an `icon.png` outside `assets/`.
 - **A port installs over the aio APK, its data with it**: the version
   code is aio's (`major·10⁸ + minor·10⁶ + patch`; every earlier aio-rs
   code is lower, so 0.1 APKs update too), a port (`[app] port_of`) takes
@@ -65,6 +61,28 @@ version may break things.
   `data:` one where the user picks. The phone's images show
   (`aio::ui::local_file_url`). `[build.splash]` takes `font`, `font_size`,
   `bold`, `fade_ms`.
+
+### Changed
+
+- **`ax create` writes nothing of the machine it ran on**: the app takes
+  aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
+  commit), so a clone builds anywhere and a prebuilt `ax` needs no
+  checkout; `--aio <dir>` names a checkout relative to the app, refused
+  through the root. `AGENTS.md` holds the rules and the loop inline and
+  links the guide by URL, no local path
+  ([where an app gets aio-rs from](docs/basics/setup.md#where-an-app-gets-aio-rs-from)).
+- `Tell::Icon { window, tray, tooltip, fps }` (was `{ tray, frames, fps }`):
+  aio's `appIcon()` in one effect; `None` leaves that part as it is.
+- The hue is hashed over the slug the id makes (aio's `appHue`), so
+  `My Notes`, `my_notes` and `my-notes` are one colour.
+- `aio_shell::runtime::ensure_as` takes the icon of its windows.
+- **`ax dev --android` installs once**: a thin dev APK beside the real app
+  (`<id>.dev`, "(dev)") shows the page `ax dev --web` serves over
+  `adb reverse`, and each edit reloads it; `--native` (or an app without a
+  web build) rebuilds a debug dev copy for the device's CPU only. An
+  emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
+  ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
+  the app's log comes to the terminal (`[device]`).
 
 ### Fixed
 

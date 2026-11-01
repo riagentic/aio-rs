@@ -853,7 +853,7 @@ fn parts(app: &App, full: &aio::config::Config, app_dir: &Path) -> Result<(Vec<u
         Some(s) => {
             let p = app_dir.join(&s.image);
             let png = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            let hue = full.ui.hue.unwrap_or_else(|| aio::colors::hue(&app.id));
+            let hue = full.hue();
             let bg = s.background.as_ref().map(|[l, d]| [l.as_str(), d.as_str()]);
             let colors = aio_shell::splash::colors(hue, bg);
             splash_files(s, &png, crate::build::label(app), &colors, cfg.color_scheme)
@@ -863,7 +863,7 @@ fn parts(app: &App, full: &aio::config::Config, app_dir: &Path) -> Result<(Vec<u
     let overlay = overlay_of(&app_dir.join("android"))?;
     let icon = match &app.icon {
         Some(p) => std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?,
-        None => crate::icon::icon_png(crate::build::label(app), &app.id, 192),
+        None => aio_config::icon::icon_png(crate::build::label(app), full.hue(), 192),
     };
     Ok((icon, splash, overlay))
 }

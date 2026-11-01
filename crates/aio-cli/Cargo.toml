@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 aio = { workspace = true, features = ["kit", "net"] }
 # `Config::parse` and `find`: aio.toml as `ax config`, `ax build` and `ax lint` read it.
-aio-config = { workspace = true, features = ["toml"] }
+aio-config = { workspace = true, features = ["toml", "png"] }
 # `ax ui --browser`: the manager served to the browser's tabs (`aio_shell::web`).
 aio-shell = { workspace = true, features = ["web"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
@@ -30,7 +30,6 @@ object = { version = "0.37", default-features = false, features = ["read", "std"
 rustc-demangle = "0.1"
 # The default app icon's PNG; an app's own icon scaled for the exe's .ico.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-crc32fast = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 # `ax lint`: Rust and rsx! parsed as the compiler and Dioxus parse them.

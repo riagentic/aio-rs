@@ -42,10 +42,12 @@ pub(crate) const PREVIOUS: &str = "Start the previous version";
 
 /// How the windows look: the app's colours (`splash::colors`: `[light,
 /// dark]`, each background, text, bar, track) and the middle of its window
-/// as last placed, in Electron's screen points, to open over it.
+/// as last placed, in Electron's screen points, to open over it. Its `icon`:
+/// the app's PNG, on each window (title bar, taskbar, Dock).
 pub(crate) struct Look<'a> {
     pub(crate) colors: &'a [[String; 4]; 2],
     pub(crate) at: Option<(i32, i32)>,
+    pub(crate) icon: Option<&'a Path>,
 }
 
 /// `#rgb` as `#rrggbb` (the helpers read six digits).
@@ -60,6 +62,10 @@ impl Look<'_> {
     /// `AIO_DLG_LIGHT` / `AIO_DLG_DARK`: `"#bg #text #bar #track"`.
     pub(crate) fn env(&self) -> [String; 2] {
         self.colors.clone().map(|c| c.iter().map(|x| hex6(x)).collect::<Vec<_>>().join(" "))
+    }
+    /// `AIO_DLG_ICON`: the icon's path, or empty (the helper's own).
+    pub(crate) fn icon(&self) -> &std::ffi::OsStr {
+        self.icon.map_or("".as_ref(), Path::as_os_str)
     }
     /// `AIO_DLG_AT`: `"x y"`, or empty (the screen's middle).
     pub(crate) fn at(&self) -> String {
@@ -438,6 +444,7 @@ impl Backend {
                 }
                 let child = cmd
                     .args(zenity_progress_args(*yad, title, heading))
+                    .args(look.icon.map(|p| format!("--window-icon={}", p.display())))
                     .stdin(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn();
@@ -455,6 +462,7 @@ impl Backend {
                 let spawned = if *helper == Backend::Cocoa {
                     std::fs::write(dir.join("progress.js"), [MAC_LOOK_JXA, MAC_PROGRESS_JXA].concat())?;
                     osascript(&dir.join("progress.js"))
+                        .env("AIO_DLG_ICON", look.icon())
                         .args([title, heading])
                         .arg(&file)
                         .arg(&ack)
@@ -471,6 +479,7 @@ impl Backend {
                         .env("AIO_DLG_LIGHT", &light)
                         .env("AIO_DLG_DARK", &dark)
                         .env("AIO_DLG_AT", look.at())
+                        .env("AIO_DLG_ICON", look.icon())
                         .spawn()
                 };
                 match spawned {
@@ -496,7 +505,12 @@ impl Backend {
                 if let Some(d) = &css {
                     cmd.env("XDG_CONFIG_HOME", d);
                 }
-                let out = cmd.args(zenity_ask_args(*yad, title, message, previous)).stdout(Stdio::piped()).output();
+                let icon = look.icon.map(|p| format!("--window-icon={}", p.display()));
+                let out = cmd
+                    .args(zenity_ask_args(*yad, title, message, previous))
+                    .args(icon)
+                    .stdout(Stdio::piped())
+                    .output();
                 _ = css.map(std::fs::remove_dir_all);
                 out.map(|o| zenity_answer(*yad, o.status.code(), &String::from_utf8_lossy(&o.stdout)))
             }
@@ -504,6 +518,7 @@ impl Backend {
                 let script = dir.join("ask.js");
                 let out = std::fs::write(&script, [MAC_LOOK_JXA, MAC_ASK_JXA].concat()).and_then(|()| {
                     osascript(&script)
+                        .env("AIO_DLG_ICON", look.icon())
                         .args([title, message, if previous { PREVIOUS } else { "" }, &light, &dark, &look.at()])
                         .stdout(Stdio::piped())
                         .output()
@@ -522,6 +537,7 @@ impl Backend {
                         .env("AIO_DLG_LIGHT", &light)
                         .env("AIO_DLG_DARK", &dark)
                         .env("AIO_DLG_AT", look.at())
+                        .env("AIO_DLG_ICON", look.icon())
                         .status()
                 });
                 let answer = std::fs::read_to_string(&file).unwrap_or_default();
@@ -542,7 +558,8 @@ impl Backend {
 /// text, sizes scaled by `AutoScaleMode`), and `Look $form` giving a form
 /// the app's colours (`AIO_DLG_LIGHT` / `AIO_DLG_DARK`, as Windows' app
 /// mode is light or dark) and its place over the app's window
-/// (`AIO_DLG_AT`, Electron's points, scaled to this screen's pixels).
+/// (`AIO_DLG_AT`, Electron's points, scaled to this screen's pixels) and its
+/// icon (`AIO_DLG_ICON`, a PNG).
 pub(crate) const WINDOWS_LOOK_PS: &str = r#"
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -564,6 +581,9 @@ function Look($form) {
   $form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
   $form.AutoScaleMode = 'Dpi'
   if ($bg) { $form.BackColor = $bg; $form.ForeColor = $fg }
+  if ($env:AIO_DLG_ICON) {
+    try { $form.Icon = [System.Drawing.Icon]::FromHandle((New-Object System.Drawing.Bitmap $env:AIO_DLG_ICON).GetHicon()) } catch {}
+  }
   if ($env:AIO_DLG_AT) {
     $form.StartPosition = 'Manual'
     $at = $env:AIO_DLG_AT.Split(' ')
@@ -701,7 +721,8 @@ $a = $(if ($f.Tag) { [string]$f.Tag } else { 'quit' })
 /// colours at argv i and i+1, light and dark, picked as the app's
 /// appearance is: `[bg, text, bar, track]` or null) and `place(win, at,
 /// W, H)` (over the app's window: `"x y"` in Electron's points, top-left
-/// origin; else the screen's middle).
+/// origin; else the screen's middle) and `icon(app)` (the app's, `AIO_DLG_ICON`,
+/// in the Dock).
 pub(crate) const MAC_LOOK_JXA: &str = r#"
 ObjC.import('Cocoa');
 ObjC.import('stdlib');
@@ -715,6 +736,12 @@ function look(argv, i) {
   const s = (name.indexOf('Dark') >= 0 ? argv[i + 1] : argv[i]) || '';
   const c = s.split(' ');
   return c.length === 4 ? c.map(col) : null;
+}
+function icon(app) {
+  const p = ObjC.unwrap($.NSProcessInfo.processInfo.environment.objectForKey('AIO_DLG_ICON'));
+  if (!p) return;
+  const img = $.NSImage.alloc.initWithContentsOfFile(p);
+  if (img && !img.isNil()) app.applicationIconImage = img;
 }
 function place(win, at, W, H) {
   const p = (at || '').split(' ').map(Number);
@@ -735,6 +762,7 @@ function run(argv) {
   let ticks = 0;
   const app = $.NSApplication.sharedApplication;
   app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+  icon(app);
   const W = 460, H = 150, BW = W - 40;
   const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
     $.NSMakeRect(0, 0, W, H),
@@ -822,6 +850,7 @@ function run(argv) {
   const title = argv[0], message = argv[1], previous = argv[2] || '';
   const app = $.NSApplication.sharedApplication;
   app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+  icon(app);
   const W = 460;
   const msg = $.NSTextField.wrappingLabelWithString(message);
   msg.preferredMaxLayoutWidth = W - 40;
@@ -996,10 +1025,10 @@ mod tests {
     #[test]
     fn the_windows_are_in_the_app_s_colours_light_or_dark() {
         let c = [["#fff".to_string(), "#111111".into(), "#0a84ff".into(), "#ddd".into()], Default::default()];
-        let look = Look { colors: &c, at: Some((640, -12)) };
+        let look = Look { colors: &c, at: Some((640, -12)), icon: None };
         assert_eq!(look.env()[0], "#ffffff #111111 #0a84ff #dddddd", "six digits for the helpers");
         assert_eq!(look.at(), "640 -12");
-        assert_eq!(Look { colors: &c, at: None }.at(), "");
+        assert_eq!(Look { colors: &c, at: None, icon: None }.at(), "");
         let css = gtk_css(&c[0]);
         assert!(
             css.contains("background-color: #fff; color: #111111;")
@@ -1015,6 +1044,13 @@ mod tests {
         );
         assert!(WINDOWS_ASK_PS.contains("$env:AIO_DLG_PREVIOUS") && MAC_ASK_JXA.contains("argv[2]"));
         assert!(MAC_PROGRESS_JXA.contains("look(argv, 5)") && MAC_ASK_JXA.contains("look(argv, 3)"));
+        // Each window wears the app's icon: Windows' title bar and taskbar, the Dock.
+        assert!(WINDOWS_LOOK_PS.contains("$form.Icon = ") && WINDOWS_LOOK_PS.contains("$env:AIO_DLG_ICON"));
+        assert!(MAC_LOOK_JXA.contains("'AIO_DLG_ICON'") && MAC_LOOK_JXA.contains("app.applicationIconImage = img"));
+        assert!(MAC_PROGRESS_JXA.contains("icon(app);") && MAC_ASK_JXA.contains("icon(app);"));
+        let icon = Path::new("/a/icon.png");
+        assert_eq!(Look { colors: &c, at: None, icon: Some(icon) }.icon(), icon.as_os_str());
+        assert_eq!(Look { colors: &c, at: None, icon: None }.icon(), "");
     }
 
     #[test]
@@ -1059,7 +1095,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let b = Backend::Zenity { bin: fake_zenity(d.path(), "49", 0), yad: false };
         let c: [[String; 4]; 2] = Default::default();
-        let look = Look { colors: &c, at: None };
+        let icon = d.path().join("icon.png");
+        let look = Look { colors: &c, at: None, icon: Some(&icon) };
+        let wears = || std::fs::read_to_string(d.path().join("fed.args")).unwrap().contains("--window-icon=");
         let mut w = b.progress("Notes", "Getting Notes ready", &look).unwrap();
         assert_eq!(w.show(Some(10), "10 MB"), Shown::On);
         assert_eq!(w.show(Some(10), "10 MB"), Shown::On, "the same line is not sent again");
@@ -1073,11 +1111,13 @@ mod tests {
         };
         assert_eq!(shown, Shown::Cancelled);
         drop(w);
+        assert!(wears(), "the download window wears the app's icon");
         let fed = std::fs::read_to_string(d.path().join("fed")).unwrap();
         assert_eq!(fed.lines().filter(|l| l.starts_with("# Getting Notes ready")).count(), 1, "{fed}");
         assert!(fed.starts_with("9\n# Getting Notes ready\\n10 MB\n49\n"), "{fed}");
         // The question: exit 0 is Retry, 1 is Quit.
         assert_eq!(b.ask("Notes", "why", false, &look), Answer::Retry);
+        assert!(wears(), "and so does the question");
         let quit = Backend::Zenity { bin: fake_zenity(d.path(), "x", 1), yad: false };
         assert_eq!(quit.ask("Notes", "why", true, &look), Answer::Quit);
         let missing = Backend::Zenity { bin: d.path().join("none"), yad: false };
@@ -1090,7 +1130,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let b = Backend::Zenity { bin: fake_zenity(d.path(), "never", 0), yad: false };
         let c: [[String; 4]; 2] = Default::default();
-        let mut w = b.progress("Notes", "h", &Look { colors: &c, at: None }).unwrap();
+        let mut w = b.progress("Notes", "h", &Look { colors: &c, at: None, icon: None }).unwrap();
         assert_eq!(w.show(None, "Looking"), Shown::On);
         drop(w);
         let fed = std::fs::read_to_string(d.path().join("fed")).unwrap();

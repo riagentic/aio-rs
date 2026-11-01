@@ -141,8 +141,12 @@ strict = false
 The app's name, version and icon come from `[app]` and the app's folder:
 `[app] name` is the window title, the menu entry and the bundle's name;
 `[app] id` is the binary, the package name and the data's home;
-`assets/icon.png` beside `aio.toml` is the icon everywhere (none: a
-monogram of the name, drawn at each size). Versions:
+`assets/icon.png` beside `aio.toml` (a square PNG, 512 px or more) is the
+icon of every package and, built in by `aio::config!()`, of the running
+window; `assets/icon.ico` is the Windows exe's as it is. None: a
+monogram of the name in the app's hue, drawn at each size, 512 px plus an
+SVG for Linux. `ax build` says when an icon can't be used: not square,
+an `icon.svg` (not read), an `icon.png` outside `assets/`. Versions:
 [build](README.md#versions).
 
 ### One repo, several apps
@@ -323,7 +327,8 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 | `notes-1.4.7-macos-arm64.zip` | unzip, drag `Notes.app` to Applications |
 | `notes-1.4.7-macos-arm64.dmg` (kind `dmg`) | open, drag `Notes.app` onto the Applications link |
 
-- The `.app` holds the binary, its icon (`assets/icon.png` as `.icns`),
+- The `.app` holds the binary, its icon (an `.icns` made in Rust with every
+  slot from 16 to 1024 px: `assets/icon.png` scaled, or the monogram drawn),
   `Info.plist` with `[build.macos] bundle_id` (else `aio.rt.<id>`; it is
   the app's identity, never change it) and macOS 11 as the minimum. It is
   signed ad hoc (Apple silicon runs nothing unsigned), not with a
