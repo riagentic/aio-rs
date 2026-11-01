@@ -330,11 +330,13 @@ skip = [
 
 # Most crates (normal dependencies, host target) per set in `scripts/slim-metrics`.
 # kit holds the page and TestUi (dioxus-liveview), moved from aio-rs-shell: an
-# app's whole graph (aio-rs-shell) is no bigger. `app kit` / `app kit,net`: a
+# app's whole graph (aio-rs-shell) is no bigger. `aio-rs air`: the facade and
+# TestUi on air (no Dioxus). `app kit` / `app kit,net`: a
 # template app's whole release graph (its launcher's aio-rs-shell with that set).
 [ceilings]
 "aio-rs core" = 49
 "aio-rs kit" = 116
+"aio-rs air" = 50
 "aio-rs server" = 88
 "aio-rs tls" = 105
 "aio-rs net" = 109
