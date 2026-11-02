@@ -512,6 +512,18 @@ version may break things.
 
 ### Fixed
 
+- `ax lint`: the `testing` check no longer errs on a workspace-inherited
+  aio-rs: `[dev-dependencies] aio = { workspace = true, features = ["testing"] }`,
+  or `features = ["testing"]` on the `[workspace.dependencies]` entry, renamed
+  (`package = "aio-rs"`) or not; dotted and `[target.….dev-dependencies]`
+  tables count too.
+- A Unix socket path past the OS limit (108 bytes with the NUL on Linux, 104
+  on macOS): the app's socket dir falls back to `/tmp/aio-rt-<uid>/` when
+  `XDG_RUNTIME_DIR`/`TMPDIR` is too long, as aio's `resolveSocketPath` fell
+  back to `/tmp/aio`, and a path still too long is refused at once in words
+  (the path, its length, the limit, the fix) by the app, the shell (before
+  Electron connects) and `ax`, instead of EINVAL and no window.
+
 - A cell's or a synced copy's listeners (a view, `watch`) never hear an
   older state after a newer one: a tell from another thread, or from a
   listener itself, between reading the state and telling it, was told

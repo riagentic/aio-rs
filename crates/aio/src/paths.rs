@@ -374,7 +374,9 @@ pub fn short_temp() -> PathBuf {
 
 /// A short, private dir for the app's sockets (Unix socket paths must stay
 /// under ~100 bytes, so never inside a deep data dir): `$XDG_RUNTIME_DIR/
-/// aio-rt/<id>-<hash of the data dir>`, else the temp dir. Mode 0700.
+/// aio-rt/<id>-<hash of the data dir>`, else the temp dir; when that is too
+/// long for a socket in it, `/tmp/aio-rt-<uid>/<id, 40 bytes at most>-<hash>`
+/// (aio's fallback, `resolveSocketPath`). Mode 0700.
 pub fn sockets(id: &str, data: &std::path::Path) -> io::Result<PathBuf> {
     let dir = sockets_at(id, data);
     private_dir(parent(&dir))?;
@@ -388,7 +390,28 @@ pub fn sockets_at(id: &str, data: &std::path::Path) -> PathBuf {
     // path rebuilt from its parts: `a/b` and `a\b` are one folder on Windows.
     let data: PathBuf = data.components().collect();
     let h = data.to_string_lossy().bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
-    env("XDG_RUNTIME_DIR").unwrap_or_else(std::env::temp_dir).join("aio-rt").join(format!("{id}-{h:08x}"))
+    let base = env("XDG_RUNTIME_DIR").unwrap_or_else(std::env::temp_dir);
+    #[cfg(unix)]
+    // SAFETY: getuid has no preconditions.
+    let uid = Some(unsafe { libc::getuid() });
+    #[cfg(not(unix))]
+    let uid = None; // a pipe's name has no such limit
+    socket_dir(&base, id, h, uid)
+}
+
+/// `<base>/aio-rt/<id>-<h>`, or for a Unix user (`uid`) whose base leaves no
+/// room for a 24-byte socket name (`cell-<name>.sock`) in aio's 100 bytes of
+/// path (`ipc::SUN_PATH` is 108 on Linux, 104 on macOS),
+/// `/tmp/aio-rt-<uid>/<id, 40 bytes at most>-<h>`. Pure.
+fn socket_dir(base: &std::path::Path, id: &str, h: u32, uid: Option<u32>) -> PathBuf {
+    let dir = base.join("aio-rt").join(format!("{id}-{h:08x}"));
+    match uid {
+        Some(uid) if dir.as_os_str().len() + "/".len() + 24 > 100 => {
+            let id: String = id.char_indices().take_while(|(i, c)| i + c.len_utf8() <= 40).map(|(_, c)| c).collect();
+            PathBuf::from(format!("/tmp/aio-rt-{uid}")).join(format!("{id}-{h:08x}"))
+        }
+        _ => dir,
+    }
 }
 
 fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -802,6 +825,35 @@ mod tests {
             let moved = electron_store_in(os, &with(&[("HOME", "/u"), ("AIO_SHARED_ELECTRON_DIR", "rel/store")]));
             assert!(moved.is_absolute() && moved.ends_with("rel/store"), "{}", moved.display());
         }
+    }
+
+    #[test]
+    fn a_base_too_long_for_sockets_falls_back_to_a_short_private_dir() {
+        let p = std::path::Path::new;
+        let short = p("/run/user/1000");
+        assert_eq!(socket_dir(short, "notes", 0xab, Some(1000)), p("/run/user/1000/aio-rt/notes-000000ab"));
+        // An agent's scratch folder as XDG_RUNTIME_DIR or TMPDIR (aio's
+        // `resolveSocketPath` fallback): every name the app binds fits.
+        let long = p("/tmp/claude-1000/a-project-folder-of-some-length/0123456789abcdef/scratchpad");
+        let dir = socket_dir(long, "notes", 0xab, Some(1000));
+        assert_eq!(dir, p("/tmp/aio-rt-1000/notes-000000ab"));
+        // A long id is cut to 40 bytes there, on a char boundary.
+        let id = format!("{}é{}", "a".repeat(39), "b".repeat(30));
+        let cut = socket_dir(long, &id, 0xab, Some(1000));
+        assert_eq!(cut, PathBuf::from(format!("/tmp/aio-rt-1000/{}-000000ab", "a".repeat(39))));
+        for d in [&dir, &cut] {
+            let longest = d.join("cell-0123456789abcd.sock");
+            assert!(longest.as_os_str().len() <= 100, "{}", longest.display());
+            for limit in [108, 104] {
+                assert_eq!(crate::ipc::too_long(&longest.to_string_lossy(), limit), None);
+            }
+        }
+        // The edge: room for exactly a 24-byte name stays.
+        let edge = p("/x").join("y".repeat(50)); // + "/aio-rt/notes-000000ab": 75 bytes
+        assert_eq!(socket_dir(&edge, "notes", 0xab, Some(1)).as_os_str().len(), 75);
+        assert!(socket_dir(&edge.join("z"), "notes", 0xab, Some(1)).starts_with("/tmp/aio-rt-1"));
+        // Windows pipes take any length.
+        assert!(socket_dir(long, "notes", 0xab, None).starts_with(long));
     }
 
     #[test]
