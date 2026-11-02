@@ -45,6 +45,10 @@ impl Relay {
         if method == HOT {
             return Err(answer(&m["id"], hot(&m["params"]).as_ref().map_err(String::as_str)));
         }
+        // `ax dev`'s hot-patch: where this process is loaded, then a patch.
+        if method == ASLR || method == PATCH {
+            return Err(answer(&m["id"], patching(method, &m["params"]).as_ref().map_err(String::as_str)));
+        }
         self.next += 1;
         self.asks.insert(self.next, (from, m["id"].clone()));
         Ok(json!({ "t": "cdp", "id": self.next, "method": method, "params": m.get("params").unwrap_or(&json!({})) })
@@ -117,6 +121,35 @@ fn hot(params: &Value) -> Result<Value, String> {
     {
         _ = params;
         Err("the views are Dioxus's: its devtools reload them".into())
+    }
+}
+
+/// The door's own methods for `ax dev`'s hot-patch (a dev build with
+/// aio-shell's `dev`): `Aio.aslr` answers `{"aslr": n}`, where this process
+/// is loaded (subsecond's `aslr_reference`, which a patch is linked
+/// against); `Aio.patch` takes `{"table": <subsecond's JumpTable>}`, loads
+/// the patch and answers `{"applied": true}`: the code calls the new
+/// functions from then on (the views on air are built again on them).
+pub const ASLR: &str = "Aio.aslr";
+pub const PATCH: &str = "Aio.patch";
+
+fn patching(method: &str, params: &Value) -> Result<Value, String> {
+    #[cfg(all(debug_assertions, feature = "dev"))]
+    {
+        if method == ASLR {
+            return Ok(json!({ "aslr": subsecond::aslr_reference() }));
+        }
+        let table: subsecond::JumpTable =
+            aio::serde_json::from_value(params["table"].clone()).map_err(|e| format!("not a jump table: {e}"))?;
+        // SAFETY: a table `ax dev` linked against this very binary at the
+        // address it answered (`Aio.aslr`); subsecond checks the base.
+        unsafe { subsecond::apply_patch(table) }.map_err(|e| format!("the patch didn't load: {e}"))?;
+        Ok(json!({ "applied": true }))
+    }
+    #[cfg(not(all(debug_assertions, feature = "dev")))]
+    {
+        _ = (method, params);
+        Err("not built for hot-patching: ax dev builds with aio-shell's dev feature".into())
     }
 }
 

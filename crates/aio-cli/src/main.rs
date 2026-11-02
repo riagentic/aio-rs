@@ -19,8 +19,6 @@ mod eval;
 mod fleet;
 mod freeze;
 mod headless;
-// `fat_build` and `patch` are ax dev's, wired there next (air-3).
-#[allow(dead_code)]
 mod hotpatch;
 mod icon;
 /// `ax install --android`: next to the APK build.

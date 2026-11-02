@@ -1271,7 +1271,9 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     let workspace = PathBuf::from(meta["workspace_root"].as_str().unwrap_or_default());
     // What the running app was built from: markup edits are told against it.
     let mut built = air.then(|| crate::reload::Built::snapshot(&pkg.dirs));
-    let bin = build(&pkg, logs.as_deref());
+    // On air, Rust is hot-patched by ax itself: a fat build, then patches.
+    let (mut fat, mut patching) = (None, air);
+    let bin = dev_build(&pkg, name, logs.as_deref(), &mut fat, &mut patching);
     // A failed build's errors are on the page (once it runs) until a good one.
     let mut red = bin.is_none();
     if let (Some(b), false) = (&bin, matches!(watching, Watching::Only(_))) {
@@ -1310,6 +1312,19 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                         Err(e) => eprintln!("ax dev: the markup didn't reach the window ({e}): building"),
                     }
                 }
+                // Code (on air): patched into the running app, its state kept.
+                if let Some(f) = fat.as_mut().filter(|_| up && !red && !manifest(&changed)) {
+                    eprintln!("ax dev: {said} changed");
+                    let snapshot = crate::reload::Built::snapshot(&pkg.dirs);
+                    match hot_patch(window.as_ref(), f, &changed) {
+                        Ok(said) => {
+                            eprintln!("{said}");
+                            built = Some(snapshot);
+                            continue;
+                        }
+                        Err(e) => eprintln!("ax dev: not hot-patched ({}): building", e.trim_end()),
+                    }
+                }
                 eprintln!("ax dev: {said} changed — building…");
                 false
             }
@@ -1327,7 +1342,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         css(&pkg, &rx);
         let started = std::time::Instant::now();
         let snapshot = air.then(|| crate::reload::Built::snapshot(&pkg.dirs));
-        let Some(bin) = build(&pkg, logs.as_deref()) else {
+        let Some(bin) = dev_build(&pkg, name, logs.as_deref(), &mut fat, &mut patching) else {
             red = true;
             eprintln!("ax dev: build failed; the running app is unchanged and shows why");
             if let (Some(w), Some(l)) = (&window, &logs) {
@@ -1362,6 +1377,80 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     }
     stop(&mut app, window.as_ref());
     Ok(String::new())
+}
+
+/// Build binary `name` of `pkg` for `ax dev`: fat (every crate's rustc
+/// call recorded, all its code linked in: [`crate::hotpatch`]) while
+/// `patching`, with aio-shell's `dev` (the app takes patches), else as
+/// [`build`] does. A fat build that fails where a plain one doesn't (a
+/// platform ax can't patch on yet) turns `patching` off for the session.
+fn dev_build(
+    pkg: &Pkg,
+    name: &str,
+    logs: Option<&Path>,
+    fat: &mut Option<crate::hotpatch::Fat>,
+    patching: &mut bool,
+) -> Option<PathBuf> {
+    *fat = None;
+    if !*patching {
+        return build(pkg, logs);
+    }
+    let stamp = pkg.dirs.first().map_or_else(String::new, |d| crate::build::assets_stamp(d));
+    let mut cargo_args = layout();
+    cargo_args.extend(["--features".into(), "aio-shell/dev".into()]);
+    let req = crate::hotpatch::Request {
+        dir: pkg.dirs.first().cloned().unwrap_or_default(),
+        package: pkg.name.clone(),
+        bin: name.into(),
+        cargo_args,
+        envs: vec![("AIORT_ASSETS".into(), stamp)],
+        ax: std::env::current_exe().unwrap_or_else(|_| "ax".into()),
+    };
+    match crate::hotpatch::fat_build(&req) {
+        Ok(f) => {
+            if let Some(dir) = logs {
+                _ = std::fs::remove_file(dir.join(BUILD_LOG));
+            }
+            let exe = f.exe.clone();
+            let (b, l) = (f.build.as_secs_f64(), f.link.as_secs_f64() * 1000.0);
+            eprintln!("ax dev: built for hot-patching in {b:.1} s (its link {l:.0} ms)");
+            *fat = Some(f);
+            Some(exe)
+        }
+        Err(e) => {
+            let bin = build(pkg, logs)?;
+            *patching = false;
+            eprintln!("ax dev: no hot-patching ({}): code edits rebuild and restart", e.trim_end());
+            Some(bin)
+        }
+    }
+}
+
+/// Patch the running app's code with `changed` (its window's door: where
+/// it is loaded, then the patch): what to say.
+fn hot_patch(
+    window: Option<&(String, aio::paths::Plan)>,
+    fat: &mut crate::hotpatch::Fat,
+    changed: &[PathBuf],
+) -> Result<String, String> {
+    let (id, p) = window.ok_or("no app to patch")?;
+    let door = crate::cdp::door(id, p).ok_or("it isn't running")?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+    let mut s = rt.block_on(crate::cdp::Session::door(&door))?;
+    let aslr = rt.block_on(s.call(aio_shell::inspect::ASLR, serde_json::json!({})))?;
+    let aslr = aslr["aslr"].as_u64().ok_or_else(|| format!("{}: {aslr}", aio_shell::inspect::ASLR))?;
+    let p = crate::hotpatch::patch(fat, aslr, changed)?;
+    let table = serde_json::to_value(&p.table).map_err(|e| e.to_string())?;
+    rt.block_on(s.call(aio_shell::inspect::PATCH, serde_json::json!({ "table": table })))?;
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let t = p.times;
+    Ok(format!(
+        "ax dev: hot-patched in {:.0} ms (rustc {:.0}, stub {:.0}, link {:.0}), state kept",
+        ms(t.total),
+        ms(t.compile),
+        ms(t.stub),
+        ms(t.link)
+    ))
 }
 
 /// Whether binary `name`'s package draws on air: it takes aio-rs-shell
