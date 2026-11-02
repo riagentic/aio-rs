@@ -46,13 +46,31 @@ async fn probe() {
         let t0 = std::time::Instant::now();
         {
             let l = log.clone();
-            sim.server.handle.listen(move |s| l.lock().unwrap().push(format!("{:?} server n{} last{:?}", t0.elapsed(), s.ids.len(), s.ids.last().map(|x| x % 10000))));
+            sim.server.handle.listen(move |s| {
+                l.lock().unwrap().push(format!(
+                    "{:?} server n{} last{:?}",
+                    t0.elapsed(),
+                    s.ids.len(),
+                    s.ids.last().map(|x| x % 10000)
+                ))
+            });
         }
         for (i, c) in sim.clients().iter().enumerate() {
             let l = log.clone();
-            c.on_patch(move |m| l.lock().unwrap().push(format!("{:?} c{i} {} prev{} seq{}", t0.elapsed(), m["t"], m["prev"], m["seq"])));
+            c.on_patch(move |m| {
+                l.lock().unwrap().push(format!("{:?} c{i} {} prev{} seq{}", t0.elapsed(), m["t"], m["prev"], m["seq"]))
+            });
             let (l, c2) = (log.clone(), c.clone());
-            c.listen(move |s| l.lock().unwrap().push(format!("{:?} c{i} shown n{} last{:?} pend{} online{}", t0.elapsed(), s.ids.len(), s.ids.last().map(|x| x % 10000), c2.pending(), c2.online())));
+            c.listen(move |s| {
+                l.lock().unwrap().push(format!(
+                    "{:?} c{i} shown n{} last{:?} pend{} online{}",
+                    t0.elapsed(),
+                    s.ids.len(),
+                    s.ids.last().map(|x| x % 10000),
+                    c2.pending(),
+                    c2.online()
+                ))
+            });
         }
         let script = sim.run(120, &calls, once).await;
         log.lock().unwrap().push(format!("{:?} SETTLED server seq {}", t0.elapsed(), sim.server.handle.snapshot().0));
@@ -61,10 +79,12 @@ async fn probe() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let after: Vec<bool> = (0..3).map(|i| *sim.clients()[i].state() == *sim.server.state()).collect();
             let l = log.lock().unwrap();
-            panic!("PROBE round {round} bad {bad:?} equal-after-500ms {after:?} server {:?} seqs {:?}\nLOG:\n{}\nSCRIPT {script:?}",
+            panic!(
+                "PROBE round {round} bad {bad:?} equal-after-500ms {after:?} server {:?} seqs {:?}\nLOG:\n{}\nSCRIPT {script:?}",
                 sim.server.state().ids.iter().map(|x| x % 10000).collect::<Vec<_>>(),
                 sim.clients().iter().map(|c| c.seq()).collect::<Vec<_>>(),
-                l[l.len().saturating_sub(150)..].join("\n"));
+                l[l.len().saturating_sub(150)..].join("\n")
+            );
         }
     }
 }

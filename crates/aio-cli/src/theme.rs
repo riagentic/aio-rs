@@ -77,7 +77,7 @@ mod tests {
         assert!(text.ends_with(&theme) && text.starts_with("/* aio-rs's default theme"));
         assert!(text.contains(&format!("--aio-hue:{};", aio::kit::theme::hue("notes"))));
         assert_ne!(css("notes", &Ui::default()), css("todo", &Ui::default()), "the hue is the app's");
-        let knobs = Ui { theme: Look::Tokens, hue: Some(210), layout: false };
+        let knobs = Ui { theme: Look::Tokens, hue: Some(210), layout: false, ..Ui::default() };
         let own = css("notes", &knobs);
         assert!(
             own.contains("--aio-hue:210;") && own.contains("body{"),

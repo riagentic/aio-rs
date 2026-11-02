@@ -257,6 +257,17 @@ async fn aio_toml_serves_dirs_from_the_files_tier_and_public_ones_without_the_ke
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn built_in_assets_are_served_at_their_paths_to_anyone() {
+    static FILES: &[(&str, &[u8])] = &[("/media/a%20b.svg", b"<svg/>"), ("/media/song.mp3", b"la")];
+    let addr = serve(Handle::memory(), Http::default().assets(FILES)).await;
+    let (status, headers, body) = fetch(&addr, "GET", "/media/song.mp3", &[], "").await;
+    assert_eq!((status, body.as_str()), (200, "la"), "they ship with the app: no key");
+    assert!(headers.contains("content-type: audio/mpeg"), "{headers}");
+    assert_eq!(fetch(&addr, "GET", "/media/a%20b.svg", &[], "").await.2, "<svg/>");
+    assert_eq!(fetch(&addr, "GET", "/media/other.mp3", &[], "").await.0, 401, "only what is built in");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_open_app_needs_no_key_but_minting_a_pin_still_does() {
     let opts = |open| aio::sync::Options {
         token: "secret".into(),
@@ -841,4 +852,98 @@ async fn blobs_are_served_with_ranges_and_cached_for_good_behind_the_key() {
     // Not served unless the app asks.
     let plain = serve(Handle::memory(), Http::default()).await;
     assert_eq!(fetch(&plain, "GET", &url, &[KEY], "").await.0, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_route_streams_its_answer_part_by_part() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(Some(rx)));
+    let http = Http::default().route(Route::get("/events", move |_| {
+        let rx = rx.lock().unwrap().take();
+        async move {
+            let Some(rx) = rx else { return Reply::text("taken").status(409) };
+            let parts = futures_util::stream::unfold(rx, |mut rx| async move { Some((rx.recv().await?, rx)) });
+            Reply::stream("text/event-stream", parts)
+        }
+    }));
+    let addr = serve(Handle::<Hooks>::memory(), http).await;
+    let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let req = "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n";
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut got = Vec::new();
+    // Each part arrives while the answer is still open.
+    for (i, n) in [1, 2].into_iter().enumerate() {
+        tx.send(format!("data: {n}\n\n")).unwrap();
+        while !String::from_utf8_lossy(&got).contains(&format!("data: {n}\n\n")) {
+            let mut buf = [0; 1024];
+            let k = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf)).await.unwrap().unwrap();
+            assert!(k > 0, "closed before part {i}");
+            got.extend_from_slice(&buf[..k]);
+        }
+    }
+    let head = String::from_utf8_lossy(&got).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("content-type: text/event-stream"), "{head}");
+    assert!(head.contains("cache-control: no-cache") && head.contains("transfer-encoding: chunked"), "{head}");
+    assert!(!head.contains("content-encoding"), "never compressed: {head}");
+    // Its end ends the answer.
+    drop(tx);
+    let mut rest = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut rest)).await.unwrap().unwrap();
+    assert!(rest.ends_with(b"0\r\n\r\n"), "{:?}", String::from_utf8_lossy(&rest));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_socket_route_carries_binary_frames_per_kind() {
+    use aio::http::side::{Seen, Seqs, decode, encode};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<(u8, Seen)>>> = Default::default();
+    let log = seen.clone();
+    let http = Http::default().route(Route::socket("/stream", move |req| {
+        let log = log.clone();
+        async move {
+            // Decided before the upgrade: an unknown session never gets a socket.
+            if req.query("sid") != Some("s1") {
+                return Err(Reply::text("unknown session").status(403));
+            }
+            Ok(move |mut f: aio::http::side::Frames| async move {
+                while let Some(fr) = f.recv().await {
+                    log.lock().unwrap().push((fr.kind, fr.seen));
+                    f.send(fr.kind, &fr.body, true).unwrap();
+                }
+            })
+        }
+    }));
+    let addr = serve(Handle::<Hooks>::memory(), http).await;
+    let req = |sid: &str| {
+        let mut r = format!("ws://{addr}/stream?sid={sid}").into_client_request().unwrap();
+        r.headers_mut().insert("authorization", "Bearer secret".parse().unwrap());
+        r
+    };
+    let e = tokio_tungstenite::connect_async(req("nope")).await.unwrap_err();
+    assert!(e.to_string().contains("403"), "{e}");
+    let (status, _, _) = fetch(&addr, "GET", "/stream?sid=s1", &[KEY], "").await;
+    assert_eq!(status, 426, "not an upgrade");
+    let mut no_key = format!("ws://{addr}/stream?sid=s1").into_client_request().unwrap();
+    no_key.headers_mut().remove("authorization");
+    assert!(tokio_tungstenite::connect_async(no_key).await.unwrap_err().to_string().contains("401"));
+    let (mut w, _) = tokio_tungstenite::connect_async(req("s1")).await.unwrap();
+    let mut out = Seqs::default();
+    // Two kinds interleaved, then one frame of kind 2 lost on the way.
+    for (kind, body) in [(1u8, &b"a"[..]), (2, b"b"), (1, b"c"), (2, b"d")] {
+        w.send(Message::binary(encode(kind, out.next(kind), body))).await.unwrap();
+    }
+    out.next(2);
+    w.send(Message::binary(encode(2, out.next(2), b"f"))).await.unwrap();
+    let mut back = Seqs::default();
+    for want in ["a", "b", "c", "d", "f"] {
+        let Message::Binary(b) = w.next().await.unwrap().unwrap() else { panic!("binary") };
+        let (kind, seq, body) = decode(&b).unwrap();
+        assert_eq!((body, back.accept(kind, seq)), (want.as_bytes(), Seen::Next), "the server numbers its own");
+    }
+    let s = seen.lock().unwrap().clone();
+    assert_eq!(s[..4].iter().map(|x| x.1).collect::<Vec<_>>(), [Seen::Next; 4], "interleaved kinds are no gap");
+    assert_eq!(s[4], (2, Seen::Gap(1)));
 }

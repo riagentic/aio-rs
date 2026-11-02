@@ -36,29 +36,39 @@ impl Pair {
 
 aio::client!(Pair, pair, pair_at);
 
+/// What a hole shows, its runs counted: a hole runs when its view renders
+/// on Dioxus, and when what it reads changes on air, so counting it holds
+/// both to AIR's rule (what didn't read a change doesn't re-run).
+fn seen<T>(runs: &AtomicUsize, v: T) -> T {
+    runs.fetch_add(1, SeqCst);
+    v
+}
+
+/// The whole state's sum (read in a hole).
+fn sum() -> String {
+    let p = pair();
+    (p.left + p.right).to_string()
+}
+
 static LEFT: AtomicUsize = AtomicUsize::new(0);
 static RIGHT: AtomicUsize = AtomicUsize::new(0);
 static WHOLE: AtomicUsize = AtomicUsize::new(0);
 
 #[component]
 fn Left() -> View {
-    LEFT.fetch_add(1, SeqCst);
     let n = pair_at(|p| p.left);
-    rsx! { span { "data-t": "left", "{n}" } }
+    rsx! { span { "data-t": "left", {seen(&LEFT, n.get().to_string())} } }
 }
 
 #[component]
 fn Right() -> View {
-    RIGHT.fetch_add(1, SeqCst);
     let n = pair_at(|p| p.right);
-    rsx! { span { "data-t": "right", "{n}" } }
+    rsx! { span { "data-t": "right", {seen(&RIGHT, n.get().to_string())} } }
 }
 
 #[component]
 fn Whole() -> View {
-    WHOLE.fetch_add(1, SeqCst);
-    let p = pair();
-    rsx! { span { "{p.left + p.right}" } }
+    rsx! { span { {seen(&WHOLE, sum())} } }
 }
 
 fn app() -> View {
@@ -70,10 +80,6 @@ fn app() -> View {
     }
 }
 
-#[cfg_attr(
-    all(feature = "air", not(feature = "kit")),
-    ignore = "air: counts body re-runs; on air only the holes that read a part re-run"
-)]
 #[test]
 fn a_view_re_renders_only_when_its_part_changes() {
     let mut ui = TestUi::new(app);
@@ -94,8 +100,7 @@ fn a_view_re_renders_only_when_its_part_changes() {
 /// A view reading through the door (`Ui.read`, as an app's `with(|s| ..)`).
 #[component]
 fn ByDoor() -> View {
-    let n = aio::Door::read(&Ui, |p| p.right);
-    rsx! { span { "data-t": "door", "{n}" } }
+    rsx! { span { "data-t": "door", {aio::Door::read(&Ui, |p| p.right).to_string()} } }
 }
 
 fn by_door() -> View {
@@ -103,10 +108,6 @@ fn by_door() -> View {
     rsx! { ByDoor {} }
 }
 
-#[cfg_attr(
-    all(feature = "air", not(feature = "kit")),
-    ignore = "air: reads through the door in the body (a snapshot on air)"
-)]
 #[test]
 fn a_view_reading_through_the_door_follows_every_commit() {
     let mut ui = TestUi::new(by_door);
@@ -117,12 +118,9 @@ fn a_view_reading_through_the_door_follows_every_commit() {
     ui.until_text("door", "2");
 }
 
-thread_local!(static QUIET: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
-
-/// The whole state, read in a render (counted on this test's thread).
+/// The whole state, read in a render.
 #[component]
 fn Quiet() -> View {
-    QUIET.set(QUIET.get() + 1);
     let p = pair(); // the hint names this line
     rsx! { span { "data-t": "sum", "{p.left + p.right}" } }
 }
@@ -132,21 +130,30 @@ fn quiet() -> View {
     rsx! { Quiet {} }
 }
 
-#[cfg_attr(
-    all(feature = "air", not(feature = "kit")),
-    ignore = "air: counts body re-runs of a body that reads the whole state"
-)]
+static SUMS: AtomicUsize = AtomicUsize::new(0);
+
+/// The whole state, read in a hole.
+#[component]
+fn Sum() -> View {
+    rsx! { span { "data-t": "sum", {seen(&SUMS, sum())} } }
+}
+
+fn sums() -> View {
+    use_live();
+    rsx! { Sum {} }
+}
+
 #[test]
 fn a_call_that_changes_nothing_re_renders_nothing() {
-    let mut ui = TestUi::new(quiet);
+    let mut ui = TestUi::new(sums);
     ui.run(|| act!(set_left(3)));
     ui.settle();
-    let n = QUIET.get();
+    let n = SUMS.load(SeqCst);
     for _ in 0..5 {
         ui.run(|| act!(set_left(3)));
     }
     ui.settle();
-    assert_eq!(QUIET.get(), n, "Down on the last row: no render");
+    assert_eq!(SUMS.load(SeqCst), n, "Down on the last row: no render");
     assert_eq!(ui.text("sum"), "3");
 }
 
@@ -227,31 +234,24 @@ static LABELLED: AtomicUsize = AtomicUsize::new(0);
 
 #[component]
 fn Labelled(t: &'static str) -> View {
-    LABELLED.fetch_add(1, SeqCst);
     let id = once(aio::ui::unique_id);
-    let left = pair().left;
     rsx! {
-        label { r#for: "{id}", "data-t": t, "{id} {left}" }
+        label { r#for: "{id}", "data-t": t, {seen(&LABELLED, format!("{id} {}", pair().left))} }
         input { id: "{id}" }
     }
 }
 
 fn local() -> View {
     use_live();
-    let s = use_status().get();
-    let p = pair();
+    let s = use_status();
     rsx! {
-        p { "data-t": "link", "{s.online} {s.pending} {s.degraded}" }
-        p { "data-t": "n", "n={p.left}" }
+        p { "data-t": "link", {s.with(|s| format!("{} {} {}", s.online, s.pending, s.degraded))} }
+        p { "data-t": "n", {format!("n={}", pair().left)} }
         Labelled { t: "a" }
         Labelled { t: "b" }
     }
 }
 
-#[cfg_attr(
-    all(feature = "air", not(feature = "kit")),
-    ignore = "air: reads the state in the body (a snapshot on air): read it in a hole"
-)]
 #[test]
 fn a_local_cell_is_online_and_its_state_is_there_at_the_first_render() {
     let mut ui = TestUi::new(local);
@@ -263,7 +263,6 @@ fn a_local_cell_is_online_and_its_state_is_there_at_the_first_render() {
     assert_eq!(ui.text("link"), "true 0 false");
 }
 
-#[cfg_attr(all(feature = "air", not(feature = "kit")), ignore = "air: expects a re-render from a body read")]
 #[test]
 fn ids_are_unique_and_stable_per_instance() {
     let mut ui = TestUi::new(local);
@@ -305,9 +304,16 @@ mod synced {
 
     fn app() -> View {
         use_live();
-        let s = use_status().get();
-        ONLINE.store(s.online, SeqCst);
-        rsx! { p { "data-t": "link", "{s.online} {s.pending} {s.degraded}" } }
+        let s = use_status();
+        rsx! {
+            p { "data-t": "link",
+                {
+                    let s = s.get();
+                    ONLINE.store(s.online, SeqCst);
+                    format!("{} {} {}", s.online, s.pending, s.degraded)
+                }
+            }
+        }
     }
 
     #[test]
@@ -397,15 +403,18 @@ mod spinner {
 
     fn app() -> View {
         use_live();
-        let n = use_pending(Some("scan")).get();
-        SHOWN.store(n, SeqCst);
-        rsx! { p { "data-t": "busy", "{n}" } }
+        let n = use_pending(Some("scan"));
+        rsx! {
+            p { "data-t": "busy",
+                {
+                    let n = n.get();
+                    SHOWN.store(n, SeqCst);
+                    n.to_string()
+                }
+            }
+        }
     }
 
-    #[cfg_attr(
-        all(feature = "air", not(feature = "kit")),
-        ignore = "air: reads use_pending in the body (a snapshot on air)"
-    )]
     #[test]
     fn a_spinner_follows_the_calls_in_flight() {
         let mut ui = TestUi::new(app);
@@ -704,34 +713,42 @@ mod parts {
         static VER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
+    /// What a hole shows, its runs counted (as `super::seen`).
+    fn ran(runs: &'static std::thread::LocalKey<std::cell::Cell<u32>>, v: String) -> String {
+        runs.set(runs.get() + 1);
+        v
+    }
+
     #[component]
     fn Cursor() -> View {
-        CURSOR.set(CURSOR.get() + 1);
         let at = part(|b| &b.cursor);
-        rsx! { span { "data-t": "cursor", "{at}" } }
+        rsx! { span { "data-t": "cursor", {ran(&CURSOR, at.to_string())} } }
     }
 
     #[component]
     fn Rows() -> View {
-        ROWS.set(ROWS.get() + 1);
         let rows = part(|b| &b.rows);
-        VER.set(rows.ver());
-        rsx! { span { "data-t": "rows", {rows.with(Vec::len).to_string()} } }
+        rsx! {
+            span { "data-t": "rows",
+                {
+                    VER.set(rows.ver());
+                    ran(&ROWS, rows.with(Vec::len).to_string())
+                }
+            }
+        }
     }
 
     /// Into the list's heap: no field to name, so it follows every commit.
     #[component]
     fn First() -> View {
-        FIRST.set(FIRST.get() + 1);
         let first = part(|b| b.rows.first().map_or("", |r| r.as_str()));
-        rsx! { span { "data-t": "first", "{first}" } }
+        rsx! { span { "data-t": "first", {ran(&FIRST, first.to_string())} } }
     }
 
     #[component]
     fn Ticks() -> View {
-        TICKS.set(TICKS.get() + 1);
         let n = part(|b| &b.ticks);
-        rsx! { span { "data-t": "ticks", "{n}" } }
+        rsx! { span { "data-t": "ticks", {ran(&TICKS, n.to_string())} } }
     }
 
     fn app() -> View {
@@ -744,7 +761,6 @@ mod parts {
         }
     }
 
-    #[cfg_attr(all(feature = "air", not(feature = "kit")), ignore = "air: counts body re-runs")]
     #[test]
     fn a_view_re_renders_only_for_the_field_it_reads() {
         let mut ui = TestUi::new(app);
@@ -803,4 +819,56 @@ fn the_apps_scripts_run_in_the_order_sent() {
          })",
     );
     assert_eq!(order, serde_json::json!((0..40).collect::<Vec<_>>()));
+}
+
+fn schemed() -> View {
+    let dark = aio::ui::use_dark();
+    let css = "p { color: rgb(0, 0, 0) } @media (prefers-color-scheme: dark) { p { color: rgb(255, 255, 255) } }";
+    rsx! {
+        style { {aio::ui::page_css(&[css], aio::ui::Scheme::System)} }
+        p { "data-t": "dark", {dark.get().to_string()} }
+    }
+}
+
+#[test]
+fn the_page_follows_the_oss_light_or_dark_as_it_changes() {
+    let mut ui = TestUi::new(schemed);
+    ui.until_text("dark", "false");
+    assert_eq!(ui.style("dark", "color"), "rgb(0, 0, 0)");
+    ui.set_os_dark(true);
+    ui.until_text("dark", "true");
+    assert_eq!(ui.style("dark", "color"), "rgb(255, 255, 255)", "the sheets' dark rules, no render needed");
+    ui.set_os_dark(false);
+    ui.until_text("dark", "false");
+    let mut ui = aio::testing::Mount::default().dark().app(schemed);
+    ui.until_text("dark", "true");
+}
+
+/// Scoped CSS on air (aio's `css`): a class per rule, its rule in the page
+/// once, nesting scoped to it.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn a_scoped_rule_styles_its_class_only_and_is_put_in_the_page_once() {
+    #[component]
+    fn Tag() -> View {
+        let c = aio::ui::css("color: rgb(1, 2, 3); & b { color: rgb(4, 5, 6) }");
+        rsx! { p { class: "{c}", "data-t": "tag", "x" b { "data-t": "inner", "y" } } }
+    }
+    let mut ui = TestUi::new(|| {
+        rsx! {
+            Tag {}
+            Tag {}
+            p { "data-t": "plain", "z" }
+        }
+    });
+    assert_eq!(ui.style("css=[data-t=tag]:first-child", "color"), "rgb(1, 2, 3)");
+    assert_eq!(
+        ui.style("css=[data-t=tag]:first-child [data-t=inner]", "color"),
+        "rgb(4, 5, 6)",
+        "a nested rule, scoped"
+    );
+    assert_ne!(ui.style("plain", "color"), "rgb(1, 2, 3)", "only its class");
+    let rules = ui.eval("document.querySelector('style[data-aio-css]').sheet.cssRules.length");
+    assert_eq!(rules.as_u64(), Some(1), "two uses, one rule");
+    assert!(ui.run(aio::ui::collect_css).starts_with(".aio-"));
 }

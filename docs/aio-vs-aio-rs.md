@@ -12,7 +12,7 @@ which of aio's features aio-rs has. Moving an app over:
 | | aio | aio-rs |
 |---|---|---|
 | Language, runtime | TypeScript on Deno | Rust, native code |
-| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade, the router and `TestUi`, not the kit yet, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
+| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade, the kit, the router and `TestUi`, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
 | State model | cells, methods on an Immer draft, selectors | cells, methods on `&mut self` (a copy), `#[derived]`; every call an event in the store's log |
 | Data compatibility | `state.db` | the same `state.db`, both ways: a port opens aio's file as it is, and aio opens it after ([below](#data-the-same-statedb)) |
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
@@ -151,8 +151,6 @@ of lag.
 - **History.** Time travel reads the store: in a release build, over the
   whole history, after a restart; aio's is dev-only, 2000 entries in
   memory ([time travel](debugging/time-travel.md)).
-- **An offline queue that survives a restart** (`connect_saved`); aio's
-  lives in the page's memory ([sync](state/sync.md)).
 - **Real UI tests.** `TestUi` runs the real views in the real engine:
   rects, styles, screenshots and scrolling measure for real, where aio's
   happy-dom has no layout ([UI tests](testing/ui.md)).
@@ -193,24 +191,20 @@ beyond the aio-rs form.
 | Methods | `transaction: true` tracks reads: a blind write never conflicts | `#[cell(transaction)]` sees no reads: a field written counts as read, so a blind write another call changed conflicts | write it in a plain method, or `transaction(conflict = "warn")` | [methods](state/methods.md#transactions) |
 | Methods | `cellDefaults` (`visible`, `ui` for every cell) | none: flags per cell | `#[cell(...)]` on each | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Effects | `t.getEffects()`, effect objects in tests (`isScheduleEffect`) | `t.held_effects()`: key, mode, timeout; schedules apart | `Store::schedules` | [effects](state/effects.md#limits) |
-| Effects | notifications in a browser page (`requestNotificationPermission`) | none in a web build | `aio::tell::show_with(f)` | [effects](state/effects.md#limits) |
 | Persistence | `persistMode: "single" \| "multi"` | log + snapshots per cell; aio's layout read and written as found | ➖ | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Persistence | `launch.json`, a restart with the last flags | none | pass the flags again | [files](persistence/files.md#limits-compared-with-aio) |
 | Persistence | a query builder (`where` objects) | plain SQL | `aio::db::Db` | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Sync | merge strategies per field (`lww`, `counter`, `set-add`, `text`…), HLC | methods replayed in order on the server | methods; `aio::merge::text3` for prose | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | peer-to-peer, server-less sync | a copy needs a server | a server | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | Immer add/remove ops for arrays | a `Vec` re-sent whole when its length changes | a map for a growing collection | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | `fullStateThreshold`, `syncIntervalMs`, staleness multipliers | none: a patch per event | `#[coalesce]` | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
+| Sync | `lww-per-key` and `set-remove` view merges, HLC | methods replayed in order on the server; `Remote::merge` shows `Text`, `Counter`, `SetAdd` | a method per key | [offline](persistence/offline.md#limits-compared-with-aio) |
+| Sync | render-staleness backpressure | every link paced the same (`sync_interval_ms`) | ➖ | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
 | Sync | path subscriptions | a copy gets every patch of its cell | split cells | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | binary side channels, framing, backpressure | JSON only; no binary route | blobs or a route | [transports](clients/transports.md#gaps), [sync](state/sync.md#limits) |
-| Sync | every cell served on one socket | `aio::sync::serve` serves one `Handle` | one served cell, or one app per cell | [CLI and service](examples/cli-service.md#limits) |
+| Sync | every cell on one socket | every cell on one `/ws` and port (`Http::cell`), a socket per cell | ➖ | [sync](state/sync.md#limits) |
 | Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
 | Auth | a share link carrying the key | the share line names the key file | `?token=<key>` by hand, `ax profile`, pairing | [accounts](auth/README.md#limits) |
 | Auth | `useUser()` | `Client::me`, `SignIn`'s `on_signed` | ➖ | [accounts](auth/README.md#limits) |
 | Views | server rendering, hydration, `collectHead` | none | `ax preview --html`; `aio::head::html` | [views](ui/views.md#gaps-against-aio), [islands](ui/islands.md#gaps) |
-| Views | code splitting, `lazy` | one binary | `Defer` defers the render | [islands](ui/islands.md#gaps) |
+| Views | code splitting, `lazy` | one binary | `Defer` defers the render; on air it loads (`load`, `loading`, `error`, `loading_min_ms`) | [islands](ui/islands.md#gaps) |
 | Views | other view libraries (`aio/state-core`), `h()`, React compat | `aio::ui` `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
 | Views | accessibility checked in the running page | static (`ax lint`) | `TestUi` audits | [islands](ui/islands.md#gaps) |
 | Views | Redux DevTools | none | `TimeTravelPanel`, `ax timetravel`, `ax events` | [views](ui/views.md#gaps-against-aio) |
@@ -220,16 +214,13 @@ beyond the aio-rs form.
 | Kit | `<UiStyles/>` | `theme_css`, `theme::sheet` | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Kit | `Tooltip` to the side | `Top` or `Bottom` only | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Forms | Standard Schema (Zod, Valibot, ArkType), `parsed()` | a Rust check function | parse in the check | [forms](ui/forms.md#gaps) |
-| Forms | `bind(name)` | two handlers per input | ➖ | [forms](ui/forms.md#gaps) |
-| Theming | scoped `css` classes, a duplicate-class warning | none | prefix class names | [theming](ui/theming.md#gaps-against-aio) |
+| Forms | `bind(name)` | two handlers per input; on air `form.bind(aio::field!(name))` | the `air` feature | [forms](ui/forms.md#gaps) |
+| Theming | scoped `css` classes, a duplicate-class warning | on air `aio::ui::css(rule)`, no warning (a class is its rule's hash) | prefix class names, or the `air` feature | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
-| Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
-| Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
+| Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name; on air `Motion::of(name, css)` | write keyframes, or the `air` feature | [animation](ui/animation.md#gaps) |
 | Desktop | custom window chrome (`ui.chrome`) | the OS title bar; the window's verbs (`page::minimize`, `maximize`, `close`, `hide`, `show`) | the title bar on air | [desktop](clients/desktop.md#gaps) |
-| Desktop | the splash drawn by the OS before Electron at every start | only in a first start's download; Electron draws it otherwise | ➖ | [desktop](clients/desktop.md#gaps) |
-| Desktop | an AppImage menu entry with a private `TMPDIR` (aio's installer) | aio-rs installs no AppImage: the integrator's entry | ➖ | [desktop](clients/desktop.md#gaps) |
 | Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
-| Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |
+| Web | the page's console forwarded to the server's log, in a release too | in `ax dev --web`'s log; a release page's stays in the page | ➖ | [web](clients/web.md#gaps) |
 | Web | every `<webview>` method | `go` and events; desktop only | ➖ | [web](clients/web.md#gaps) |
 | CLI apps | `watch` hiding the cursor, one frame per tick | a frame per change | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
 | CLI apps | flag types inferred from the spec | read by name (`a.number("n")`) | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
@@ -291,23 +282,24 @@ construct-by-construct tables are in the
   `call_confirmed` is the server's answer (aio's `await` gives the
   server's). An async method's `Answer` is the server's end.
   [sync](state/sync.md#limits)
-- **The offline queue holds 500 and refuses when full** (aio: 1000,
-  dropping the oldest) unless `[client] retention` is set; it can be kept
-  on disk. [sync](state/sync.md#limits)
-- **Merges are methods replayed on the server**, not per-field
-  strategies; a copy never merges with another copy.
-  [offline](persistence/offline.md#limits-compared-with-aio)
-- **A list is re-sent whole when its length changes**: keep a growing
-  collection in a map. [offline](persistence/offline.md#limits-compared-with-aio)
+- **A full offline queue refuses new calls** (500, as aio's `pendingCap`;
+  aio drops the new op) unless `[client] retention` lets the oldest past
+  it go; it can be kept on disk. [sync](state/sync.md#limits)
+- **Merges are methods replayed on the server** (as aio's CRDT ops run
+  through its methods); a copy may show a field merged while its call
+  waits (`Remote::merge`) and hears where a server change met it
+  (`on_conflict`). [offline](persistence/offline.md#conflicts-and-fields-shown-merged)
 - **Writes are committed before a call returns**; only `#[coalesce]`
   methods are held (aio debounces every write). Coalesce the methods a
   held key or a pointer calls. [data](migration/data.md#durability-what-each-saves-when)
 - **`aio.toml` is built in**, never read at run time: rebuild after an
   edit; per-launch settings are flags or variables. [FAQ](basics/faq.md)
 - **Forms touch a field on change**, not on blur: a field left untouched
-  shows its error after a submit. [forms](ui/forms.md#gaps)
+  shows its error after a submit (on air a bound input, `form.bind`, is
+  touched on blur). [forms](ui/forms.md#gaps)
 - **`Transition` takes children and `show`**, not a conditional child,
-  and motions are CSS keyframes. [animation](ui/animation.md)
+  and motions are CSS keyframes (on air also a function, `Motion::of`,
+  and no box of its own). [animation](ui/animation.md)
 - **Tests boot every cell's `#[on_start]`** (aio's `testCell` skipped
   `onInit`), timers in `TestCells` are virtual, `TestUi` time is real until `advance`,
   and an unread refusal fails the test. [testing cells](testing/cells.md#what-aio-has-that-aio-rs-does-without)
@@ -342,7 +334,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Argument schemas | `args` | the Rust types + `ensure!` | 🔄 |
 | State machines | `machine:` | `aio::machine!`, `#[cell(machine = field)]` | ✅ |
 | Many cells, order | `dependsOn`, `composeCells` | `Cells::with`, `#[aio_cell]` fields | ✅ |
-| Reactions across cells | `listensTo`, `cancelOn` | `listens_to`, `cx.abort` (committed calls only) | 🔄 |
+| Reactions across cells | `listensTo`, `cancelOn` (in the call's reduce and save) | `listens_to` (inside the call's commit: one SQLite transaction), `cx.abort`; committed calls only, and a refused reaction never undoes its call | 🔄 |
 | Transactions | `transaction: true` / `{ serialize, conflict }`, `$commit`, `$live`, `TX_CONFLICT` | `#[cell(transaction)]` / `transaction(serialize, conflict = "warn")`, `cx.commit()`, `cx.live_state()`, `Code::TxConflict`; a written field counts as read (a method reads only its own cell) | 🔄 |
 | Lifecycle hooks | `onInit`, `onDestroy`, `onStopping`, `onStop` | `#[on_start]`, `#[on_stop]`, `aio::on_stopping`, `aio::on_stop` | ✅ |
 | App-wide start hook, `fatalOnStart`, `isolate`, `onRestore`, `getFullState` | yes | `Cells::on_start`, `fatal_on_start`, `AIORT_ISOLATE`, `on_restore`, `view` | ✅ |
@@ -365,7 +357,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Schedules | `every`, `cron` (UTC), `after`, `backoff`, another cell's action | `#[every]`, `#[cron]` (UTC; `[app] tz = "local"`), `cx.after`, `cx.backoff`, `cx.on::<Other>()` | ✅ |
 | Clock, ids, randomness in methods | allowed, linted | `cx.now()`, `cx.id()`, `cx.rand()` | 🔄 |
 | CPU work | `blocking(id, fn)`, `cancel` | `aio::effect::blocking(key, f)`, `cancel_blocking` | ✅ |
-| Notifications | `notify()` | `cx.tell(..)`; a web build needs `show_with` | 🔄 |
+| Notifications | `notify()` | `cx.tell(..)`; a web page shows the browser's own, asking for the permission | ✅ |
 | Pending calls | `$pending()` | `h.pending(..)`, `use_pending` | ✅ |
 
 **Persistence**
@@ -399,15 +391,15 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Shared cells | `sync`, broadcast | `#[cell(shared)]` | ✅ |
 | Optimistic calls | `useOptimistic`, local-first | built in: copies predict | ✅ |
 | Access per method | `access` | `#[client(role, allow)]` | ✅ |
-| Merging | per-field CRDT strategies, HLC | ❌ (methods replayed on the server) | ❌ |
-| Server-less, peer-to-peer | yes | ❌ (a server confirms) | ❌ |
-| Offline queue | 1000, in memory, drops oldest | 500, refuses when full, on disk if asked | 🔄 |
-| Array patches | Immer ops | whole `Vec` on a length change | 🔄 |
-| Throttles | `syncIntervalMs`, `fullStateThreshold` | ❌ (a patch per event; `#[coalesce]`) | ❌ |
+| Merging | per-field view merges, `onConflict`, HLC | methods replayed on the server; `Remote::merge` (`Text`, `Counter`, `SetAdd`), `on_conflict` | 🔄 |
+| Offline queue | 500 per `sync:` cell, in the page's storage, `retention` | 500, refuses when full, `retention`, on disk if asked | ✅ |
+| Array patches | Immer `add`/`remove`, narrowed | `insert`/`del` per item, else the array | ✅ |
+| Throttles | `syncIntervalMs`, `fullStateThreshold` | `sync_interval_ms`, `full_state_percent` | ✅ |
 | Path subscriptions | yes | ❌ (split cells) | ❌ |
-| Binary wire, side channels | yes | ❌ (blobs, routes) | ❌ |
-| Server functions, routes | `serverFns`, `routes` | `aio::fns::ServerFn`, `aio::http` | ✅ |
-| One socket, every cell | yes | ❌ (`sync::serve` takes one `Handle`) | ❌ |
+| Binary side channels | a raw WebSocket route, a recipe | `Route::socket` with framing, drop or close, gap checks | ✅ |
+| Server functions, routes | `serverFns`, `routes`, streamed `Response` | `aio::fns::ServerFn`, `aio::http`, `Reply::stream` | ✅ |
+| One socket, every cell | yes | one `/ws` and port for every cell (`Http::cell`), a socket per cell | 🔄 |
+| Peer identity, door hooks | `resolvePeer`, `localConnectHooks` | `Http::resolve_peer`, `Http::door_links` | ✅ |
 | Pairing, discovery, peers | PIN, CPace, UDP 8099, `x-aio-peer` | the same formats | ✅ |
 | Calling another app | `peer()`, `call` | `Peer::find`, `AioLink` | ✅ |
 | Server limits | `maxConnections`, `wsLimits` | `[server.limits]` | ✅ |
@@ -432,24 +424,24 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath; air, feature `air`, for the facade, the router and `TestUi`) | 🔄 |
+| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath; air, feature `air`, for the facade, the kit, the router and `TestUi`) | 🔄 |
 | Field-level reads | one signal per cell | `part(\|c\| &c.field)` | 🔄 |
 | Hooks | AIR and React names | `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`: AIR's names, no dependency arrays | 🔄 |
 | Server rendering, hydration | yes | ❌ (`ax preview --html`) | ❌ |
-| Code splitting, `lazy` | yes | ❌ (`Defer`) | ❌ |
+| Code splitting, `lazy` | yes | ❌ (`Defer`; on air with `load`) | ❌ |
 | Other view libraries, `h()` | `aio/state-core`, React compat | ❌ (islands) | ❌ |
 | Islands, React islands, `<Browser>` | yes | `WebIsland`, `Island::react`, `kit::Browser` | ✅ |
 | Kit components | `aio/ui` | `aio::kit`, the same names | ✅ |
 | Side tooltips | yes | ❌ (`Top`, `Bottom`) | ❌ |
 | Keys | `onGlobalKey`, `REPEATABLE_KEYS` | `use_global_key`, `Chord::repeating` | ✅ |
 | Long lists | `useVirtualList` | `kit::VirtualList` | ✅ |
-| Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check, touched on change | 🔄 |
+| Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check, touched on change; on air `bind`, touched on blur, `reset_field`, `use_field_array`, `use_on_change` | 🔄 |
 | Routing | History API, address bar | history in the app; in a browser the address bar, Back and a reload follow it; typed `routes!` | ✅ |
 | Head | `useHead` | `aio::head::use_head` | ✅ |
-| Theme, hue, CSS variables | `ui.theme`, `hue` | `theme_css(hue)`, `--aio-*` | ✅ |
-| Scoped CSS classes | `css` tag | ❌ (prefix by hand) | ❌ |
+| Theme, hue, CSS variables | `ui.theme`, `hue`, `neutral`, dark follows the OS | `theme_css(hue)`, `--aio-*`, `[ui] neutral`, `[ui] scheme` (the OS's by default) | ✅ |
+| Scoped CSS classes | `css` tag | on air `aio::ui::css` (prefix by hand on Dioxus) | 🔄 |
 | Live CSS in dev | yes | yes, plus `[build] css` toolchains | ✅ |
-| Transitions | `TransitionFn`, shared `options` | CSS keyframes, a `Motion` each | 🔄 |
+| Transitions | `TransitionFn`, shared `options` | CSS keyframes, a `Motion` each; on air `Motion::of`, no box | 🔄 |
 | Runtime a11y check | dev mode | `TestUi::a11y()`, aio's rules, said at each mount (not in the running dev page yet) | 🔄 |
 | Window chrome, app menus, several windows | yes | ❌ (OS title bar, `kit::Menu`, child windows) | ❌ |
 | Redux DevTools | yes | ❌ (`TimeTravelPanel`) | ❌ |

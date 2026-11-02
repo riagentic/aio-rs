@@ -176,7 +176,7 @@ with aio's apps, [desktop](../clients/desktop.md#one-store-with-aio)). `~` is
 | this machine's TLS root (`ax trust`) | `<tool home>/tls/` | the same | the same |
 | release signing keys (`ax keygen`) | `~/.config/aio-rt/keys/` (`$XDG_CONFIG_HOME`) | the same | the same |
 | an app installed from its bundle | `<tool home>/install/<id>/`, `~/.local/bin/<id>`, a menu entry | `/Applications/<Name>.app` (the app offers the move) | `%LOCALAPPDATA%\Programs\<id>\`, a Start menu entry, Settings › Apps |
-| the app's sockets (`ax` talks to it here) | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/`, else the temp dir | the temp dir | named pipes `\\.\pipe\aio-rt-<id>-<hash>-…` |
+| the app's sockets (`ax` talks to it here) | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/`, else the temp dir; `/tmp/aio-rt-<uid>/…` when that is too long | the temp dir; `/tmp/aio-rt-<uid>/…` when that is too long | named pipes `\\.\pipe\aio-rt-<id>-<hash>-…` |
 
 - `ax data <app>` prints an app's folders and what to back up; `ax doctor
   <app>` says who chose them (a flag, a variable, the default).
@@ -278,6 +278,7 @@ line that installs it (`ax build` prints it):
 | OS | File | Installs with |
 |---|---|---|
 | Linux | `<bundle>.service`, a systemd user unit | `cp` it to `~/.config/systemd/user/<id>.service`, `systemctl --user daemon-reload`, `systemctl --user enable --now <id>` (`loginctl enable-linger`: it runs without a login too) |
+| Linux | `<bundle>.system.service`, a systemd system unit (starts at boot, as a user systemd makes, data in `/var/lib/<id>`) | `sudo install -m 0755 <bundle>/<id> /usr/local/bin/<id>`, `sudo cp` it to `/etc/systemd/system/<id>.service`, `sudo systemctl daemon-reload`, `sudo systemctl enable --now <id>` |
 | macOS | `<bundle>.plist`, a launchd agent | `cp` it to `~/Library/LaunchAgents/app.aio.<id>.plist`, then `launchctl bootstrap gui/<uid> <that file>` |
 | Windows | `<bundle>.ps1`, a Task Scheduler script | `powershell -ExecutionPolicy Bypass -File .\<bundle>.ps1 -Install`, as an administrator (`-Uninstall` removes the task) |
 

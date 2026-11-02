@@ -54,6 +54,7 @@ css = "tailwindcss -i a.css -o b.css"
 platforms = ["linux", "macos-arm64"]
 runtime = "bundled"
 chromium_extras = "strip"
+assets = { "/built" = "media" }
 [build.android]
 application_id = "org.example.lit"
 schemes = ["lit"]
@@ -86,6 +87,16 @@ fade_ms = 250
 text_color = ["#111", "#eee"]
 bar = ["#14f195", "#14f195"]
 track = ["#ddd", "#333"]
+position = "pointer"
+follow_window = false
+shadow = true
+window_shadow = false
+cancel = false
+progress = true
+bar_style = "thin"
+bar_height = 5
+bar_position = "bottom-edge"
+bar_radius = 2
 [build.windows]
 shortcut = false
 [build.download_window]
@@ -117,7 +128,9 @@ url = "https://example.org/fb"
 timeout = "30s"
 [ui]
 theme = "full"
+scheme = "light"
 hue = 200
+neutral = "soft"
 [vitals.loop]
 degraded = 10
 warning = 20

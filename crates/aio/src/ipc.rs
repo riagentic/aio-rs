@@ -18,8 +18,35 @@ fn reach(addr: &str) -> io::Result<(String, Option<std::fs::File>)> {
             let dir = std::fs::File::open(dir)?;
             Ok((format!("/proc/self/fd/{}/{}", dir.as_raw_fd(), name.to_string_lossy()), Some(dir)))
         }
-        _ => Ok((addr.into(), None)),
+        _ => fits(addr).map(|()| (addr.into(), None)),
     }
+}
+
+/// The bytes of a Unix socket's path, its NUL included: 108 on Linux, 104 on
+/// macOS and the BSDs (`sockaddr_un.sun_path`).
+pub const SUN_PATH: usize = if cfg!(target_os = "linux") { 108 } else { 104 };
+
+/// Can `addr` be bound or connected as it is spelled (Electron's Node takes
+/// it so)? A Windows pipe always can; a socket path past [`SUN_PATH`] is
+/// refused at once, in words, not as the kernel's EINVAL.
+pub fn fits(addr: &str) -> io::Result<()> {
+    match too_long(addr, if cfg!(windows) { usize::MAX } else { SUN_PATH }) {
+        Some(m) => Err(io::Error::new(io::ErrorKind::InvalidInput, m)),
+        None => Ok(()),
+    }
+}
+
+/// What is wrong with a socket path `addr` where paths take `limit` bytes with
+/// their NUL: nothing, or what to do. Pure.
+pub fn too_long(addr: &str, limit: usize) -> Option<String> {
+    (addr.len() >= limit).then(|| {
+        format!(
+            "the socket path {addr} is {} bytes; a Unix socket path here takes at most {} ({limit} with its NUL). \
+             Fix: a shorter XDG_RUNTIME_DIR or TMPDIR, or a shorter app id",
+            addr.len(),
+            limit - 1
+        )
+    })
 }
 
 /// A connection, either end.
@@ -388,6 +415,25 @@ mod tests {
         }
         server.await.unwrap();
         assert!(connect(&a).await.is_err(), "the door went with its listener");
+    }
+
+    #[test]
+    fn a_socket_path_past_the_limit_is_told_in_words() {
+        let at = |n: usize| format!("/{}", "x".repeat(n - 1));
+        for limit in [108, 104] {
+            assert_eq!(too_long(&at(limit - 1), limit), None, "{limit}: the longest that fits");
+            let m = too_long(&at(limit), limit).unwrap();
+            assert!(m.contains(&at(limit)) && m.contains(&format!("is {limit} bytes")), "{m}");
+            assert!(m.contains(&format!("at most {} ({limit} with its NUL)", limit - 1)), "{m}");
+            assert!(m.contains("XDG_RUNTIME_DIR or TMPDIR") && m.contains("app id"), "{m}");
+        }
+        assert_eq!(SUN_PATH, if cfg!(target_os = "linux") { 108 } else { 104 });
+        #[cfg(unix)]
+        {
+            assert!(fits(&at(SUN_PATH - 1)).is_ok());
+            let e = fits(&at(SUN_PATH)).unwrap_err();
+            assert!(e.kind() == io::ErrorKind::InvalidInput && e.to_string().contains("Fix:"), "{e}");
+        }
     }
 
     #[cfg(target_os = "linux")]

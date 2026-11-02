@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 pub mod encoding;
 mod file;
+pub mod side;
 pub use file::serve_file;
 
 /// Largest request body a route is handed unless it says
@@ -324,8 +325,8 @@ impl std::io::Read for BodyReader {
     }
 }
 
-/// What a route answers: built with `text`, `json` or `redirect`, then
-/// `status`, `header` and `cookie` on top.
+/// What a route answers: built with `text`, `json`, `redirect` or
+/// `stream`, then `status`, `header` and `cookie` on top.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub status: u16,
@@ -333,11 +334,78 @@ pub struct Reply {
     pub body: Vec<u8>,
     /// A file sent as it is read, instead of `body`.
     window: Option<file::Window>,
+    /// A body sent as it is made, instead of `body`.
+    stream: Option<Once<axum::body::Body>>,
+    /// A socket route's taker of its socket ([`Route::socket`]).
+    upgrade: Option<Once<Taker>>,
+}
+
+/// What takes a side channel's socket.
+type Taker = Box<dyn FnOnce(side::Frames) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
+/// Something a [`Reply`] carries to its send, taken once there.
+struct Once<X>(Arc<std::sync::Mutex<Option<X>>>);
+
+impl<X> Once<X> {
+    fn new(x: X) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(x))))
+    }
+
+    fn take(&self) -> Option<X> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+impl<X> Clone for Once<X> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<X> PartialEq for Once<X> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<X> Eq for Once<X> {}
+
+impl<X> std::fmt::Debug for Once<X> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Once")
+    }
 }
 
 impl Reply {
     fn of(content_type: &str, body: Vec<u8>) -> Self {
-        Self { status: 200, headers: vec![("content-type".into(), content_type.into())], body, window: None }
+        Self {
+            status: 200,
+            headers: vec![("content-type".into(), content_type.into())],
+            body,
+            window: None,
+            stream: None,
+            upgrade: None,
+        }
+    }
+
+    /// A body sent part by part as `parts` makes them, each at once (aio's
+    /// streamed `Response`): server-sent events (`text/event-stream`,
+    /// `data: …\n\n` each), NDJSON, a long download. The answer ends with
+    /// the stream; a client that leaves drops it. Never compressed, cached
+    /// or buffered by a proxy.
+    pub fn stream<S, B>(content_type: &str, parts: S) -> Self
+    where
+        S: futures_util::Stream<Item = B> + Send + 'static,
+        B: Into<axum::body::Bytes> + 'static,
+    {
+        use futures_util::StreamExt;
+        let body = axum::body::Body::from_stream(parts.map(|b| Ok::<_, std::convert::Infallible>(b.into())));
+        Self {
+            stream: Some(Once::new(body)),
+            ..Self::of(content_type, Vec::new())
+        }
+        .header("cache-control", "no-cache")
+        .header("x-accel-buffering", "no")
     }
 
     pub fn text(body: impl Into<String>) -> Self {
@@ -354,7 +422,7 @@ impl Reply {
 
     /// 302 to `to`; `.status(303)` etc. for another.
     pub fn redirect(to: &str) -> Self {
-        Self { status: 302, headers: vec![("location".into(), to.into())], body: Vec::new(), window: None }
+        Self { status: 302, headers: vec![("location".into(), to.into())], body: Vec::new(), window: None, stream: None, upgrade: None }
     }
 
     pub fn status(mut self, code: u16) -> Self {
@@ -386,7 +454,9 @@ impl Reply {
         for (k, v) in &self.headers {
             b = b.header(k, v);
         }
+        let streamed = self.stream.and_then(|s| s.take());
         let body = match self.window {
+            _ if let Some(body) = streamed => body,
             Some(w) => {
                 if !w.gzip {
                     b = b.header("content-length", w.len);
@@ -421,6 +491,7 @@ pub struct Route {
     public: bool,
     max_body: usize,
     streamed: bool,
+    socket: bool,
     run: Run,
 }
 
@@ -440,8 +511,38 @@ impl Route {
             public: false,
             max_body: MAX_BODY,
             streamed: false,
+            socket: false,
             run: Arc::new(move |r| Box::pin(f(r))),
         }
+    }
+
+    /// A WebSocket at `pattern` for a binary side channel ([`side`], aio's
+    /// upgraded route): `f` decides first, before the upgrade, from the
+    /// request (who, which session): `Err(reply)` refuses it (`403 unknown
+    /// session`), `Ok(take)` upgrades and `take` gets the socket. Behind the
+    /// key, as any route (`public` to drop it); frames up to `max_body`
+    /// bytes; a request that isn't an upgrade is 426.
+    pub fn socket<F, Fut, T, TFut>(pattern: &str, f: F) -> Self
+    where
+        F: Fn(Req) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<T, Reply>> + Send + 'static,
+        T: FnOnce(side::Frames) -> TFut + Send + 'static,
+        TFut: Future<Output = ()> + Send + 'static,
+    {
+        let f = Arc::new(f);
+        let run = move |r: Req| {
+            let f = f.clone();
+            async move {
+                match f(r).await {
+                    Ok(take) => {
+                        let take: Taker = Box::new(move |s| Box::pin(take(s)));
+                        Reply { upgrade: Some(Once::new(take)), ..Reply::of("text/plain", Vec::new()).status(101) }
+                    }
+                    Err(refused) => refused,
+                }
+            }
+        };
+        Self { socket: true, ..Self::new(&["GET"], pattern, run) }
     }
 
     pub fn get<F, Fut>(pattern: &str, f: F) -> Self
@@ -614,6 +715,9 @@ pub struct Http {
     pub(crate) oidc: Option<Arc<crate::auth::oidc::Provider>>,
     pub(crate) ui: Option<Ui>,
     paint: Option<OnPaint>,
+    door_links: bool,
+    peers: Option<crate::link::Peers>,
+    pub(crate) beside: Vec<Arc<dyn crate::link::Beside>>,
     /// Hosts the plugins add to `[server] hosts` ([`crate::plugin::Plugin::allowed_origins`]).
     pub(crate) hosts: Vec<String>,
 }
@@ -633,6 +737,9 @@ impl Default for Http {
             oidc: None,
             ui: None,
             paint: None,
+            door_links: false,
+            peers: None,
+            beside: Vec::new(),
             hosts: Vec::new(),
         }
     }
@@ -645,6 +752,44 @@ impl Http {
     pub fn on_link(mut self, f: impl Fn(&Presence) + Send + Sync + 'static) -> Self {
         self.on_link = Some(Arc::new(f));
         self
+    }
+
+    /// [`Self::on_link`] hears the links on the app's local door too (aio's
+    /// `localConnectHooks`): another app's typed copy ([`crate::peer`]), a
+    /// copy on this machine; `from` is `door`. Tools (`ax call`, a peer's
+    /// call by name) still aren't links.
+    pub fn door_links(mut self, on: bool) -> Self {
+        self.door_links = on;
+        self
+    }
+
+    /// Who another aio-rs app on this machine is to this one, by its id
+    /// (aio's `resolvePeer`): its links on the local door (only this user's
+    /// processes reach it) call and see as the [`crate::Caller`] this
+    /// gives, its server functions too; `None`: no one in particular
+    /// (`peer`, no role). Without it a peer is the user its id names, with
+    /// no role. A hook that panics is said and makes no one in particular.
+    pub fn resolve_peer(mut self, f: impl Fn(&str) -> Option<crate::Caller> + Send + Sync + 'static) -> Self {
+        self.peers = Some(Arc::new(f));
+        self
+    }
+
+    /// Serve cell `h` too, on the same `/ws`, key, accounts and port as the
+    /// app's own (aio serves every cell on one socket): a link's hello names
+    /// its cell, and each cell's rules (`#[client]`, `allow`, `visible`) say
+    /// what it may. Panics on a cell that isn't `#[cell(shared)]` (its state
+    /// stays off the network) or is served twice.
+    pub fn cell<U: crate::Cell>(mut self, h: crate::Handle<U>) -> Self {
+        assert!(U::SHARED, "Http::cell: {} isn't #[cell(shared)]: its state is never served", U::ID);
+        assert!(!self.beside.iter().any(|c| c.id() == U::ID), "Http::cell: {} is served twice", U::ID);
+        self.beside.push(Arc::new(h));
+        self
+    }
+
+    /// What the local door hears and resolves.
+    pub(crate) fn door_hooks(&self) -> crate::link::Hooks {
+        let on_link = self.on_link.clone().filter(|_| self.door_links);
+        crate::link::Hooks { on_link, peers: self.peers.clone() }
     }
 
     /// Compress answers (on by default; aio's `security.compress`). Off, they
@@ -798,6 +943,19 @@ impl Http {
     /// what a page shown before sign-in needs.
     pub fn public_dir(self, prefix: &str, dir: impl Into<PathBuf>) -> Self {
         self.root(prefix, dir.into(), true)
+    }
+
+    /// The files built into the app (`[build] assets`, aio's `assets`:
+    /// `Build::asset_files`), each at its URL path, to anyone: they ship
+    /// with the app, as its page does.
+    pub fn assets(self, files: &'static [(&'static str, &'static [u8])]) -> Self {
+        files.iter().fold(self, |h, &(path, bytes)| {
+            let name = path.rsplit('/').next().unwrap_or_default();
+            let ty = served_type(name, bytes);
+            // Routes match the path as decoded.
+            let at: String = path.split('/').map(decode).collect::<Vec<_>>().join("/");
+            h.route(Route::get(&at, move |_| std::future::ready(Reply::of(&ty, bytes.to_vec()))).public())
+        })
     }
 
     /// The dirs `aio.toml` serves (`[server] dirs`, `public_dirs`), a
@@ -1009,7 +1167,7 @@ pub(crate) async fn answer(
     req: axum::extract::Request,
     ip: IpAddr,
 ) -> axum::response::Response {
-    let (head, body) = req.into_parts();
+    let (mut head, body) = req.into_parts();
     let asked = head.headers.clone();
     let method = head.method.as_str().to_ascii_uppercase();
     let path = head.uri.path().to_string();
@@ -1073,8 +1231,20 @@ pub(crate) async fn answer(
     if cookie.is_some() {
         warn_token_in_url();
     }
+    // A socket route's upgrade, taken before the request is the handler's.
+    let upgrading = match &found {
+        Some(Ok((route, _))) if route.socket => {
+            use axum::extract::FromRequestParts;
+            let ws = axum::extract::WebSocketUpgrade::from_request_parts(&mut head, &()).await.ok();
+            ws.map(|ws| (ws, route.max_body))
+        }
+        _ => None,
+    };
     let reply = match found {
         None if let Some((blobs, id)) = blob => serve_blob(blobs, &asked, &method, id).await,
+        Some(Ok((route, _))) if route.socket && upgrading.is_none() => {
+            plain(426, "a WebSocket route: upgrade to it").header("upgrade", "websocket")
+        }
         Some(Ok((route, params))) => match buffered(route, &asked, body).await {
             Err(_) => plain(413, &format!("the body is too big: the limit is {} bytes", route.max_body)),
             Ok((body, stream)) => {
@@ -1130,6 +1300,16 @@ pub(crate) async fn answer(
         _ => reply,
     };
     let compress = http.compress;
+    if let (Some((ws, max)), Some(take)) = (upgrading, reply.upgrade.as_ref().and_then(Once::take)) {
+        return ws
+            .max_message_size(max)
+            .max_frame_size(max)
+            .on_upgrade(move |s| take(side::Frames::new(s)));
+    }
+    // Streamed: each part goes as it comes, untouched.
+    if reply.stream.is_some() {
+        return reply.into_response();
+    }
     if reply.body.len() < encoding::MIN_COMPRESS {
         return encoding::encode(&method, &asked, reply, compress).into_response();
     }

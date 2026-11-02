@@ -42,8 +42,12 @@ fn each_global_is_its_own_state_and_a_global_memo_follows_them() {
 }
 
 fn counted() -> View {
-    RENDERS.set(RENDERS.get() + 1);
     let mut n = signal(|| 1);
+    // Told: a reader re-runs (a render on Dioxus, this effect on both).
+    effect(move || {
+        let _ = n.get();
+        RENDERS.set(RENDERS.get() + 1);
+    });
     rsx! {
         button { "data-t": "same", onclick: move |_| n.set(1), "same" }
         button { "data-t": "next", onclick: move |_| n += 1, "next" }
@@ -52,10 +56,6 @@ fn counted() -> View {
     }
 }
 
-#[cfg_attr(
-    all(feature = "air", not(feature = "kit")),
-    ignore = "air: a body runs once; it counts body re-runs (air's own: crates/air/tests/core.rs)"
-)]
 #[test]
 fn set_tells_only_on_a_change_and_write_always_does() {
     let mut ui = TestUi::new(counted);
@@ -69,13 +69,30 @@ fn set_tells_only_on_a_change_and_write_always_does() {
     assert_eq!((RENDERS.get(), ui.text("n")), (at + 3, "1".into()), "a write guard always tells");
 }
 
+// A prop that follows its caller's state: re-given on each render on
+// Dioxus, a `Prop` on air (a body runs once there).
+#[cfg(feature = "kit")]
 #[component]
 fn Shown(n: u32) -> View {
-    let made = once(move || {
-        log(format!("made {n}"));
-        n
+    shown(n)
+}
+
+#[cfg(not(feature = "kit"))]
+#[component]
+fn Shown(n: Prop<u32>) -> View {
+    shown(n)
+}
+
+fn shown<N: std::fmt::Display + Clone + PartialEq + 'static>(n: N) -> View {
+    let made = once({
+        let n = n.clone();
+        move || {
+            let n = n.to_string();
+            log(format!("made {n}"));
+            n
+        }
     });
-    watch(n, |n| log(format!("watched {n}")));
+    watch(n.clone(), |n| log(format!("watched {n}")));
     on_cleanup(|| log("gone"));
     rsx! { p { "data-t": "shown", "{n} (first {made})" } }
 }
@@ -92,10 +109,6 @@ fn lifetime() -> View {
     }
 }
 
-#[cfg_attr(
-    all(feature = "air", not(feature = "kit")),
-    ignore = "air: props are evaluated once; `n.get()` as a prop is a snapshot (pass the Signal)"
-)]
 #[test]
 fn once_is_made_once_watch_follows_its_deps_and_on_cleanup_ends_it() {
     let mut ui = TestUi::new(lifetime);
@@ -129,11 +142,9 @@ fn a_view_reads_what_one_above_provided() {
 }
 
 #[component]
-fn Fails(fail: bool) -> View {
-    if fail {
-        Err(std::io::Error::other("the disk is gone"))?;
-    }
-    rsx! { p { "data-t": "fine", "fine" } }
+fn Fails() -> View {
+    Err(std::io::Error::other("the disk is gone"))?;
+    rsx! { p { "unreachable" } }
 }
 
 fn guarded() -> View {
@@ -141,15 +152,15 @@ fn guarded() -> View {
     rsx! {
         button { "data-t": "break", onclick: move |_| fail.set(true), "break" }
         ErrorBoundary { fallback: |e: String| rsx! { p { "data-t": "caught", "{e}" } },
-            Fails { fail: fail.get() }
+            if fail.get() {
+                Fails {}
+            } else {
+                p { "data-t": "fine", "fine" }
+            }
         }
     }
 }
 
-#[cfg_attr(
-    all(feature = "air", not(feature = "kit")),
-    ignore = "air: props are evaluated once; `fail.get()` as a prop never flips (air's own: crates/air/tests/core.rs)"
-)]
 #[test]
 fn an_error_thrown_in_a_view_shows_the_nearest_boundarys_fallback() {
     let mut ui = TestUi::new(guarded);

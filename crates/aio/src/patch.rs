@@ -1,8 +1,11 @@
 //! Patches: the change between two JSON values, as a list of set/delete ops
 //! by path. Objects are compared key by key, same-length arrays item by item;
-//! a long string that grew is sent as its new tail (`append`, as aio:
-//! streamed text costs its growth, not its length); anything else is
-//! replaced whole. `apply(old, diff(old, new)) == new`. A patch carries the
+//! an array that grew or shrank is sent as the items put in (`insert`) or
+//! taken out (`del` of an index), as aio narrows Immer's patches: a push, a
+//! spread or a filter costs its items, not the array; when that would carry
+//! as much as the array itself, the array goes whole. A long string that grew
+//! is sent as its new tail (`append`, as aio: streamed text costs its growth,
+//! not its length); anything else is replaced whole. `apply(old, diff(old, new)) == new`. A patch carries the
 //! [`digest`] of the value it makes, so a copy that patched its way somewhere
 //! else finds out at once (aio's state digest).
 use serde::{Deserialize, Serialize};
@@ -23,8 +26,16 @@ pub enum Op {
         path: Vec<Step>,
         value: Value,
     },
+    /// The key at `path` is gone; at an array index: that item, later ones
+    /// move down.
     Del {
         path: Vec<Step>,
+    },
+    /// `value` put in at array index `path` (the array's length: at its
+    /// end), later items move up.
+    Insert {
+        path: Vec<Step>,
+        value: Value,
     },
     /// The string at `path` grew by `value`.
     Append {
@@ -39,11 +50,20 @@ pub const APPEND_MIN: usize = 256;
 
 pub fn diff(old: &Value, new: &Value) -> Vec<Op> {
     let mut ops = Vec::new();
-    walk(old, new, &mut Vec::new(), &mut ops);
+    walk(old, new, &mut Vec::new(), &mut ops, true);
     ops
 }
 
-fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>) {
+/// [`diff`] with a resized array as one `set` of it, never by index: for
+/// ops put on a state others may have changed since (a transaction's
+/// commit), where an index would name another item.
+pub(crate) fn diff_whole(old: &Value, new: &Value) -> Vec<Op> {
+    let mut ops = Vec::new();
+    walk(old, new, &mut Vec::new(), &mut ops, false);
+    ops
+}
+
+fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>, narrow: bool) {
     if old == new {
         return;
     }
@@ -57,23 +77,91 @@ fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>) {
             for (k, v) in b {
                 path.push(Step::Key(k.clone()));
                 match a.get(k) {
-                    Some(old) => walk(old, v, path, ops),
+                    Some(old) => walk(old, v, path, ops, narrow),
                     None => ops.push(Op::Set { path: path.clone(), value: v.clone() }),
                 }
                 path.pop();
             }
         }
-        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
-            for (i, (x, y)) in a.iter().zip(b).enumerate() {
-                path.push(Step::Index(i));
-                walk(x, y, path, ops);
-                path.pop();
-            }
-        }
+        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => items(a, b, path, ops, narrow),
+        (Value::Array(a), Value::Array(b)) if narrow => resized(a, b, path, ops),
         (Value::String(a), Value::String(b)) if a.len() >= APPEND_MIN && b.starts_with(a.as_str()) => {
             ops.push(Op::Append { path: path.clone(), value: b[a.len()..].to_string() })
         }
         _ => ops.push(Op::Set { path: path.clone(), value: new.clone() }),
+    }
+}
+
+/// Bytes of `v` as JSON, counted without making the text.
+pub(crate) fn json_len(v: &impl serde::Serialize) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut c = Count(0);
+    serde_json::to_writer(&mut c, v).map_or(usize::MAX, |()| c.0)
+}
+
+/// Same-length arrays, item by item.
+fn items(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>, narrow: bool) {
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        path.push(Step::Index(i));
+        walk(x, y, path, ops, narrow);
+        path.pop();
+    }
+}
+
+/// The indexes of `long` that aren't in `short`, when `short` is `long` with
+/// only some items taken out (in order: the first match is taken).
+fn left_out(long: &[Value], short: &[Value]) -> Option<Vec<usize>> {
+    let mut j = 0;
+    let out: Vec<usize> = (0..long.len())
+        .filter(|&i| match short.get(j) {
+            Some(x) if *x == long[i] => {
+                j += 1;
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    (j == short.len()).then_some(out)
+}
+
+/// An array that grew or shrank: the cheapest on the wire of its items put in
+/// or taken out (a push, a spread, a filter), its common part item by item
+/// with the rest put in or cut off at the end, or the array whole.
+fn resized(a: &[Value], b: &[Value], path: &mut Vec<Step>, ops: &mut Vec<Op>) {
+    let at = |path: &Vec<Step>, i: usize| [&path[..], &[Step::Index(i)]].concat();
+    let mut best = None::<(usize, Vec<Op>)>;
+    let mut weigh = |cand: Vec<Op>| {
+        let size = json_len(&cand);
+        if best.as_ref().is_none_or(|(n, _)| size < *n) {
+            best = Some((size, cand));
+        }
+    };
+    // Only taken out (from the back, so each index is still the old one's),
+    // or only put in (from the front, at each item's new index).
+    if let Some(out) = left_out(a, b) {
+        weigh(out.into_iter().rev().map(|i| Op::Del { path: at(path, i) }).collect());
+    } else if let Some(put) = left_out(b, a) {
+        weigh(put.into_iter().map(|i| Op::Insert { path: at(path, i), value: b[i].clone() }).collect());
+    }
+    let n = a.len().min(b.len());
+    let mut common = Vec::new();
+    items(&a[..n], &b[..n], path, &mut common, true);
+    common.extend((n..b.len()).map(|i| Op::Insert { path: at(path, i), value: b[i].clone() }));
+    common.extend((n..a.len()).rev().map(|i| Op::Del { path: at(path, i) }));
+    weigh(common);
+    let whole = Op::Set { path: path.clone(), value: Value::Array(b.to_vec()) };
+    match best {
+        Some((size, cand)) if size < json_len(&[&whole]) => ops.extend(cand),
+        _ => ops.push(whole),
     }
 }
 
@@ -107,6 +195,7 @@ pub fn said(old: &Value, ops: &[Op]) -> String {
     let one = |op: &Op| match op {
         Op::Set { path, value } => format!("{} {}→{}", name(path), short(at(path)), short(Some(value))),
         Op::Del { path } => format!("{} {}→none", name(path), short(at(path))),
+        Op::Insert { path, value } => format!("{} +{}", name(path), short(Some(value))),
         Op::Append { path, value } => format!("{} +{} chars", name(path), value.chars().count()),
     };
     ops.iter().map(one).collect::<Vec<_>>().join(", ")
@@ -119,6 +208,20 @@ pub fn apply(v: &mut Value, ops: &[Op]) -> Result<(), String> {
         let (path, value) = match op {
             Op::Set { path, value } => (path, Some(value.clone())),
             Op::Del { path } => (path, None),
+            Op::Insert { path, value } => {
+                let Some((Step::Index(i), parents)) = path.split_last() else {
+                    return Err("insert at a path that ends in no index".into());
+                };
+                match parents.iter().try_fold(&mut *v, |at, s| match (s, at) {
+                    (Step::Key(k), Value::Object(m)) => m.get_mut(k),
+                    (Step::Index(i), Value::Array(a)) => a.get_mut(*i),
+                    _ => None,
+                }) {
+                    Some(Value::Array(a)) if *i <= a.len() => a.insert(*i, value.clone()),
+                    _ => return Err(format!("no array to insert into at index {i}")),
+                }
+                continue;
+            }
             Op::Append { path, value } => {
                 let old = path.iter().try_fold(&*v, |at, s| match s {
                     Step::Key(k) => at.get(k),
@@ -151,6 +254,7 @@ pub fn apply(v: &mut Value, ops: &[Op]) -> Result<(), String> {
             (Step::Index(i), Value::Array(a), Some(x)) => {
                 *a.get_mut(*i).ok_or_else(|| format!("no index {i}"))? = x.clone()
             }
+            (Step::Index(i), Value::Array(a), None) if *i < a.len() => _ = a.remove(*i),
             (s, _, _) => return Err(format!("path step {s:?} doesn't fit")),
         }
     }
@@ -242,6 +346,91 @@ mod tests {
         round(json!({ "a": [1, 2, 3] }), json!({ "a": [1] }));
         round(json!({ "a": [{ "x": 1 }, { "x": 2 }] }), json!({ "a": [{ "x": 1 }, { "x": 3, "y": 0 }] }));
         round(json!(1), json!("s"));
+    }
+
+    #[test]
+    fn a_resized_array_sends_the_items_put_in_or_taken_out() {
+        let rows: Vec<Value> =
+            (0..160).map(|i| json!({ "id": i, "name": format!("row {i}"), "pad": "x".repeat(40) })).collect();
+        let at = |i: usize| vec![Step::Key("c".into()), Step::Index(i)];
+        // A push (or a spread with new items at the end): one insert per item.
+        let mut pushed = rows.clone();
+        pushed.extend([json!(1), json!(2)]);
+        assert_eq!(
+            round(json!({ "c": rows }), json!({ "c": pushed })),
+            vec![Op::Insert { path: at(160), value: json!(1) }, Op::Insert { path: at(161), value: json!(2) }]
+        );
+        // A filter: one del per item, from the back.
+        let kept: Vec<Value> = rows.iter().filter(|r| ![3, 90].contains(&r["id"].as_i64().unwrap())).cloned().collect();
+        assert_eq!(
+            round(json!({ "c": rows }), json!({ "c": kept })),
+            vec![Op::Del { path: at(90) }, Op::Del { path: at(3) }]
+        );
+        // Put in at the front and in the middle, at their new indexes.
+        let mut mid = rows.clone();
+        mid.insert(0, json!("a"));
+        mid.insert(50, json!("b"));
+        assert_eq!(
+            round(json!({ "c": rows }), json!({ "c": mid })),
+            vec![Op::Insert { path: at(0), value: json!("a") }, Op::Insert { path: at(50), value: json!("b") }]
+        );
+        // An edit and a push: item by item, then the new one.
+        let mut both = rows.clone();
+        both[7]["name"] = json!("seven");
+        both.push(json!(0));
+        let ops = round(json!({ "c": rows }), json!({ "c": both }));
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(&ops[1], Op::Insert { path, .. } if *path == at(160)));
+        // Cut at the end: dels from the back; a small array goes whole.
+        assert_eq!(
+            round(json!({ "c": rows }), json!({ "c": rows[..158] })),
+            vec![Op::Del { path: at(159) }, Op::Del { path: at(158) }]
+        );
+        assert!(matches!(round(json!([1, 2, 3, 4]), json!([1, 2]))[..], [Op::Set { .. }]));
+        // A reorder or a rebuild that costs as much as the array: whole.
+        assert!(matches!(round(json!([1, 2, 3]), json!([3, 2, 1, 0]))[..], [Op::Set { .. }]));
+        assert_eq!(round(json!([1]), json!([])), vec![Op::Del { path: vec![Step::Index(0)] }]);
+        // Duplicates match the first one: still right.
+        round(json!([1, 1, 2, 1]), json!([1, 2, 1]));
+        round(json!([1, 2]), json!([1, 1, 2, 2, 1]));
+        round(json!([[1, 2], [3]]), json!([[1, 2, 3]]));
+        let (long, longer) = (json!(["x".repeat(99), "y".repeat(99)]), json!(["x".repeat(99), "y".repeat(99), 3]));
+        assert_eq!(said(&long, &diff(&long, &longer)).split(", ").next(), Some("2 +3"));
+    }
+
+    #[test]
+    fn a_whole_diff_never_names_an_index_of_a_resized_array() {
+        let rows: Vec<Value> = (0..50).map(|i| json!(format!("row {i}"))).collect();
+        let mut more = rows.clone();
+        more.push(json!("new"));
+        let (a, b) = (json!({ "log": rows, "n": 1 }), json!({ "log": more, "n": 2 }));
+        let ops = diff_whole(&a, &b);
+        assert_eq!(ops.len(), 2);
+        assert!(ops.contains(&Op::Set { path: vec![Step::Key("log".into())], value: b["log"].clone() }));
+        assert!(matches!(diff(&a, &b)[..], [Op::Insert { .. }, Op::Set { .. }] | [Op::Set { .. }, Op::Insert { .. }]));
+    }
+
+    #[test]
+    fn inserts_and_index_dels_fit_only_an_array() {
+        let ins = |path: Vec<Step>| Op::Insert { path, value: json!(0) };
+        assert!(apply(&mut json!([1]), &[ins(vec![Step::Index(2)])]).is_err(), "past the end");
+        assert!(apply(&mut json!({ "a": 1 }), &[ins(vec![Step::Key("a".into())])]).is_err(), "no index");
+        assert!(apply(&mut json!({ "a": 1 }), &[ins(vec![Step::Key("a".into()), Step::Index(0)])]).is_err());
+        assert!(apply(&mut json!([1]), &[Op::Del { path: vec![Step::Index(1)] }]).is_err());
+        let mut v = json!({ "a": [1, 2] });
+        apply(
+            &mut v,
+            &[
+                ins(vec![Step::Key("a".into()), Step::Index(2)]),
+                Op::Del { path: vec![Step::Key("a".into()), Step::Index(0)] },
+            ],
+        )
+        .unwrap();
+        assert_eq!(v, json!({ "a": [2, 0] }));
+        assert_eq!(
+            serde_json::to_value(ins(vec![Step::Index(1)])).unwrap(),
+            json!({ "op": "insert", "path": [1], "value": 0 })
+        );
     }
 
     #[test]

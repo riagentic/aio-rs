@@ -337,7 +337,7 @@ impl<T: Cell> Source<T> {
                 return Err(crate::left_out("tls", what));
             }
         }
-        let mut http = http.configured(&cfg.server, &dirs.files());
+        let mut http = http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files);
         let auth_db = || crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy()).map_err(std::io::Error::other);
         // Sessions without accounts: a session is a user known by its token.
         if cfg.accounts.sessions && !cfg.accounts.on {
@@ -425,12 +425,14 @@ impl<T: Cell> Source<T> {
         let _in = crate::rt().enter();
         let l = crate::door::at(&dirs.id, &dirs.data, T::ID).and_then(|a| crate::ipc::Listener::bind(&a));
         #[cfg(feature = "server")]
-        let calls = crate::fns::Served { fns: std::sync::Arc::new(http.fns.clone()), ..crate::link::no_calls() };
+        let (calls, hooks) =
+            (crate::fns::Served { fns: std::sync::Arc::new(http.fns.clone()), ..crate::link::no_calls() }, http.door_hooks());
         #[cfg(not(feature = "server"))]
-        let (calls, _) = (crate::link::no_calls(), http);
+        let (calls, hooks, _) = (crate::link::no_calls(), crate::link::Hooks::default(), http);
         match l {
             Ok(l) => drop(crate::rt().spawn(async move {
-                if let Err(e) = crate::door::serve_with(h, l, Default::default(), calls, crate::door::OPERATOR).await {
+                let r = crate::door::serve_with(h, l, Default::default(), calls, crate::door::OPERATOR, hooks).await;
+                if let Err(e) = r {
                     eprintln!("[aio] {}: the local door stopped: {e}", T::ID);
                 }
             })),

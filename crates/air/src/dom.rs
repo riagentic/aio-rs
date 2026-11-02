@@ -16,8 +16,8 @@
 //! applies them and sends events back ([`Root::event`]).
 use crate::event::{EVAL, EVENT, Event, Flow, FromRaw, R, Raw};
 use crate::reactive::{
-    Callback, Frame, Owner, Signal, batch, body, child_scope, cleanup, current_owner, detached, memo_now, provide_on,
-    render, render_comp, scope, try_context, untrack, with_owner,
+    Callback, Frame, Owner, Signal, batch, body, child_scope, cleanup, current_owner, current_root, detached, in_root,
+    memo_now, provide_on, render, render_comp, scope, set_root, try_context, untrack, with_owner,
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -54,6 +54,7 @@ pub(crate) mod op {
     pub const PARK: u8 = 13;
     pub const EVAL: u8 = 14;
     pub const EVAL_SEND: u8 = 15;
+    pub const STYLE: u8 = 16;
 }
 
 /// An event hole's handler: the page's event, and its flow (stop, prevent).
@@ -85,7 +86,11 @@ struct Dom {
     uncaught: Vec<String>,
 }
 
-thread_local!(static DOM: RefCell<Dom> = RefCell::default());
+thread_local! {
+    /// Each root's page (0: code run outside any root).
+    static DOMS: RefCell<HashMap<u32, Dom>> = RefCell::default();
+    static NEXT_ROOT: Cell<u32> = const { Cell::new(1) };
+}
 
 impl Dom {
     fn op(&mut self, code: u8) -> &mut Self {
@@ -123,11 +128,14 @@ impl Dom {
     }
 }
 
+/// The current root's page.
 fn dom<R>(f: impl FnOnce(&mut Dom) -> R) -> R {
-    DOM.with_borrow_mut(f)
+    let at = current_root();
+    DOMS.with_borrow_mut(|ds| f(ds.entry(at).or_default()))
 }
 
-/// The edits made since the last call, for the page (one frame).
+/// The edits made since the last call for the current root's page (the
+/// last made, outside one; [`Root::take_edits`] with more than one).
 pub fn take_edits() -> Vec<u8> {
     dom(|d| std::mem::take(&mut d.out))
 }
@@ -137,17 +145,16 @@ pub fn take_edits() -> Vec<u8> {
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub struct Range(Option<(u32, u32)>);
 
-/// A view not built yet: built once, where it is placed. Cloning shares it;
-/// a view placed twice fails (each place needs a view of its own).
+/// A view not built yet: built where it is placed, and again each time it
+/// is placed (a dialog opened again, a tab shown again, a view placed in
+/// two places: each place gets its own build and state). Cloning shares it.
 #[derive(Clone, Default)]
-pub struct Tree(Option<Rc<RefCell<Option<Build>>>>);
-
-type Build = Box<dyn FnOnce() -> Range>;
+pub struct Tree(Option<Rc<dyn Fn() -> Range>>);
 
 impl Tree {
     #[doc(hidden)]
-    pub fn new(f: impl FnOnce() -> Range + 'static) -> Self {
-        Self(Some(Rc::new(RefCell::new(Some(Box::new(f))))))
+    pub fn new(f: impl Fn() -> Range + 'static) -> Self {
+        Self(Some(Rc::new(f)))
     }
 
     /// Nothing (`rsx! {}`).
@@ -155,20 +162,23 @@ impl Tree {
         Self(None)
     }
 
-    fn build(self) -> Range {
-        let Some(f) = self.0 else { return Range::default() };
-        let f = f.borrow_mut().take();
-        match f {
-            Some(f) => f(),
-            None => panic!(
-                "air: a view was placed twice: each place takes a view of its own (make it again, or pass a component)"
-            ),
-        }
+    fn build(&self) -> Range {
+        self.0.as_ref().map_or_else(Range::default, |f| f())
     }
 
     /// Is it nothing (`rsx! {}`, no children given)?
     pub fn is_empty(&self) -> bool {
         self.0.is_none()
+    }
+}
+
+impl PartialEq for Tree {
+    /// The same view (not the same markup).
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
     }
 }
 
@@ -212,6 +222,16 @@ impl ViewError {
     /// Is it a resource still loading (not an error)?
     pub fn is_suspended(&self) -> bool {
         matches!(self.0, Why::Suspended(_))
+    }
+}
+
+impl PartialEq for ViewError {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Why::Error(a), Why::Error(b)) => a == b,
+            (Why::Suspended(a), Why::Suspended(b)) => a == b,
+            _ => false,
+        }
     }
 }
 
@@ -406,7 +426,13 @@ num_attr!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, char);
 
 /// The attributes the page sets as properties (what a control shows now).
 fn is_prop(name: &str) -> bool {
-    matches!(name, "value" | "checked" | "selected" | "indeterminate" | "innerHTML")
+    matches!(name, "value" | "innerHTML") || is_flag_prop(name)
+}
+
+/// The properties that are on or off: `false` sets them off (a value's
+/// `false`, an `Option`'s `None`, removes it).
+fn is_flag_prop(name: &str) -> bool {
+    matches!(name, "checked" | "selected" | "indeterminate")
 }
 
 /// An attribute hole: `name` of node `id` is `f()`.
@@ -418,7 +444,7 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
         let same = match (&last, &v) {
             (Some(AttrValue::Str(a)), AttrValue::Str(b)) => a == b,
             (Some(AttrValue::Bool(a)), AttrValue::Bool(b)) => a == b,
-            (None, AttrValue::Bool(false)) => !is_prop(name),
+            (None, AttrValue::Bool(false)) => !is_flag_prop(name),
             _ => false,
         };
         if same {
@@ -434,30 +460,33 @@ pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
     dom(|d| match (v, is_prop(name)) {
         (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
         (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
-        (AttrValue::Bool(b), true) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
+        (AttrValue::Bool(b), true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
+        (AttrValue::Bool(true), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(""),
+        (AttrValue::Bool(false), true) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
         (AttrValue::Bool(true), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(""),
         (AttrValue::Bool(false), false) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
     });
 }
 
-/// What an event attribute takes: a closure of the event, or a handler prop.
-pub trait IntoHandler<T> {
+/// What an event attribute takes: a closure of the event (that may be
+/// `async`), or a handler prop.
+pub trait IntoHandler<T, M = ()> {
     fn into_handler(self) -> Box<dyn FnMut(Event<T>)>;
 }
 
-impl<T, F: FnMut(Event<T>) + 'static> IntoHandler<T> for F {
-    fn into_handler(self) -> Box<dyn FnMut(Event<T>)> {
-        Box::new(self)
+impl<T, M, R: HandlerReturn<M>, F: FnMut(Event<T>) -> R + 'static> IntoHandler<T, (M, R)> for F {
+    fn into_handler(mut self) -> Box<dyn FnMut(Event<T>)> {
+        Box::new(move |e| self(e).run())
     }
 }
 
-impl<T: 'static> IntoHandler<T> for Callback<Event<T>> {
+impl<T: 'static> IntoHandler<T, Plain> for Callback<Event<T>> {
     fn into_handler(self) -> Box<dyn FnMut(Event<T>)> {
         Box::new(move |e| self.call(e))
     }
 }
 
-impl<T: 'static> IntoHandler<T> for Option<Callback<Event<T>>> {
+impl<T: 'static> IntoHandler<T, Plain> for Option<Callback<Event<T>>> {
     fn into_handler(self) -> Box<dyn FnMut(Event<T>)> {
         Box::new(move |e| {
             if let Some(c) = self {
@@ -469,26 +498,57 @@ impl<T: 'static> IntoHandler<T> for Option<Callback<Event<T>>> {
 
 /// A handler for [`on`], typed by its event's payload (the macro names it).
 #[doc(hidden)]
-pub fn handler<T: FromRaw>(f: impl IntoHandler<T>) -> Handler {
-    let mut f = f.into_handler();
+pub fn handler<T: FromRaw, M>(f: impl IntoHandler<T, M>) -> Handler {
+    boxed(f.into_handler())
+}
+
+// A handler costs its closure and nothing else: what wraps it is generic
+// over the payload alone, so every handler of one event shares it (a
+// wrapper generic over the closure made 36% of a view crate's LLVM IR).
+fn boxed<T: FromRaw>(mut f: Box<dyn FnMut(Event<T>)>) -> Handler {
     Rc::new(RefCell::new(move |r: &Raw, flow: &Rc<Flow>| f(Event::with_flow(T::from_raw(r), flow.clone()))))
 }
 
-/// [`handler`] of a closure (its parameter typed by this bound).
+/// What a handler closure returns: nothing, or work to run (`async move
+/// { … }`: spawned under the element's view, so it ends with it).
 #[doc(hidden)]
-pub fn handler_fn<T: FromRaw>(f: impl FnMut(Event<T>) + 'static) -> Handler {
-    handler(f)
+pub trait HandlerReturn<M> {
+    fn run(self);
 }
 
-/// An `onmounted` closure, typed.
 #[doc(hidden)]
-pub fn mounted_fn(f: impl FnMut(Event<MountedData>) + 'static) -> impl FnMut(Event<MountedData>) + 'static {
-    f
+pub struct Plain;
+#[doc(hidden)]
+pub struct Async;
+
+impl HandlerReturn<Plain> for () {
+    fn run(self) {}
+}
+
+impl<F: std::future::Future<Output = ()> + 'static> HandlerReturn<Async> for F {
+    fn run(self) {
+        _ = crate::task::spawn(self);
+    }
+}
+
+/// [`handler`] of a closure (`rsx!` boxes it, and this type gives its
+/// parameter's); it may be `async`.
+#[doc(hidden)]
+pub fn handler_fn<T: FromRaw, M, R: HandlerReturn<M> + 'static>(mut f: Box<dyn FnMut(Event<T>) -> R>) -> Handler {
+    boxed::<T>(Box::new(move |e| f(e).run()))
+}
+
+/// An `onmounted` closure, typed; it may be `async`.
+#[doc(hidden)]
+pub fn mounted_fn<M, R: HandlerReturn<M>>(
+    mut f: impl FnMut(Event<MountedData>) -> R + 'static,
+) -> impl FnMut(Event<MountedData>) + 'static {
+    move |e| f(e).run()
 }
 
 /// An `onmounted` handler: it runs once the element is drawn.
 #[doc(hidden)]
-pub fn mounted(id: u32, f: impl IntoHandler<MountedData>) {
+pub fn mounted<M>(id: u32, f: impl IntoHandler<MountedData, M>) {
     let mut f = f.into_handler();
     let owner = current_owner();
     crate::reactive::later(move || {
@@ -632,6 +692,48 @@ pub fn child(at: u32, f: Box<dyn Fn() -> Child>) {
             }
         };
     });
+}
+
+/// Text as a view: `f()` in one text node, re-written when what it reads
+/// changes (a label prop given a string or a format string).
+pub fn text_view(f: impl Fn() -> String + 'static) -> View {
+    let f: Rc<dyn Fn() -> String> = Rc::new(f);
+    Ok(Tree::new(move || {
+        let (s, live) = crate::reactive::reads(|| f());
+        let id = dom(|d| {
+            let id = d.alloc(1);
+            d.op(op::TEXT).u32(id).str(&s);
+            id
+        });
+        if live {
+            let f = f.clone();
+            text(id, Box::new(move || f()));
+        }
+        Range(Some((id, id)))
+    }))
+}
+
+/// `view` with one style property of its first element (`"animation"`)
+/// following `f()` (`None`: none): a component that animates or places
+/// what it is given without a box of its own (aio's `Transition`).
+pub fn styled(view: View, property: &'static str, f: impl Fn() -> Option<String> + 'static) -> View {
+    let tree = view?;
+    let f = Rc::new(f);
+    Ok(Tree::new(move || {
+        let r = tree.build();
+        if let Some((a, b)) = r.0 {
+            let f = f.clone();
+            let mut last: Option<Option<String>> = None;
+            render(move || {
+                let v = f();
+                if last.as_ref() != Some(&v) {
+                    dom(|d| _ = d.op(op::STYLE).u32(a).u32(b).str(property).str(v.as_deref().unwrap_or("")));
+                    last = Some(v);
+                }
+            });
+        }
+        r
+    }))
 }
 
 /// A component in a template: `f()` (its body, run once, untracked, with
@@ -816,13 +918,13 @@ pub fn ErrorBoundary(p: ErrorBoundaryProps) -> View {
     let owner = current_owner().expect("air: a boundary is made in a view");
     provide_on(owner, Catch(Rc::new(move |e| error.set_quiet(Some(e)))));
     let ErrorBoundaryProps { fallback, children } = p;
-    let children = RefCell::new(Some(children));
     Ok(Tree::new(move || {
         let (range, at) = slot();
+        let children = children.clone();
         child(
             at,
             Box::new(move || match error.get() {
-                None => children.borrow_mut().take().into_child(),
+                None => children.clone().into_child(),
                 Some(e) => untrack(|| fallback.call(e)).into_child(),
             }),
         );
@@ -848,9 +950,9 @@ pub fn Suspense(p: SuspenseProps) -> View {
     let SuspenseProps { fallback, children } = p;
     Ok(Tree::new(move || {
         let (range, at) = slot();
-        let kids = place(children);
+        let kids = place(children.clone());
         dom(|d| d.insert(at, kids));
-        let fallback = RefCell::new(Some(fallback));
+        let fallback = fallback.clone();
         let fb: Rc<Cell<Option<Range>>> = Rc::default();
         let showing = Rc::new(Cell::new(false));
         let (f, s) = (fb.clone(), showing.clone());
@@ -872,7 +974,7 @@ pub fn Suspense(p: SuspenseProps) -> View {
                 let r = match fb.get() {
                     Some(r) => r,
                     None => {
-                        let v = fallback.borrow_mut().take().unwrap_or(Ok(Tree::empty()));
+                        let v = fallback.clone();
                         let r = with_owner(owner, || place(v));
                         fb.set(Some(r));
                         r
@@ -926,6 +1028,12 @@ pub fn eval(js: &str) -> Eval {
     });
     cleanup(move || dom(|d| _ = d.evals.remove(&id)));
     Eval { id }
+}
+
+/// Run `js` in the page and forget it (no reply is kept): what a view's
+/// cleanup tells the page as it goes.
+pub fn exec(js: &str) {
+    dom(|d| _ = d.op(op::EVAL).u32(0).str(js));
 }
 
 impl Eval {
@@ -1010,6 +1118,18 @@ impl MountedData {
         async move { e.join_json().await }
     }
 
+    /// Run `js` on the element (`el` in it) and forget it: a canvas's
+    /// drawing, a video's play, a selection. One call is one script, so a
+    /// frame's drawing is one call (`const c = el.getContext('2d'); c.fillRect(…); …`).
+    pub fn run(&self, js: &str) {
+        exec(&format!("const el = aio.node({}); if (el) {{ {js} }}", self.id));
+    }
+
+    /// A script on the element (`el`) that talks back ([`Eval`]: `aio.send`, `return`).
+    pub fn eval(&self, js: &str) -> Eval {
+        eval(&format!("const el = aio.node({}); if (!el) throw new Error('gone'); {js}", self.id))
+    }
+
     /// Focus it (or take the focus away).
     pub fn set_focus(&self, on: bool) -> impl std::future::Future<Output = Result<(), String>> + use<> {
         let f = self.call(if on { "n.focus(); return true;" } else { "n.blur(); return true;" });
@@ -1023,6 +1143,17 @@ impl MountedData {
         async move { f.await.map(drop) }
     }
 
+    /// Scroll it to `to` (its scrollLeft and scrollTop).
+    pub fn scroll(
+        &self,
+        to: crate::geometry::PixelsVector2D,
+        behavior: crate::ScrollBehavior,
+    ) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+        let b = if behavior == crate::ScrollBehavior::Smooth { "smooth" } else { "instant" };
+        let f = self.call(&format!("n.scrollTo({{ left: {}, top: {}, behavior: '{b}' }}); return true;", to.x, to.y));
+        async move { f.await.map(drop) }
+    }
+
     /// Its box in the window.
     pub fn get_client_rect(&self) -> impl std::future::Future<Output = Result<crate::geometry::Rect, String>> + use<> {
         let f = self.call("const r = n.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join(',');");
@@ -1030,7 +1161,10 @@ impl MountedData {
             let s = f.await?;
             let v: Vec<f64> = s.trim_matches('"').split(',').filter_map(|x| x.parse().ok()).collect();
             match v[..] {
-                [x, y, width, height] => Ok(crate::geometry::Rect { x, y, width, height }),
+                [x, y, width, height] => Ok(crate::geometry::Rect::new(
+                    crate::geometry::PixelsPoint::new(x, y),
+                    crate::geometry::PixelsSize::new(width, height),
+                )),
                 _ => Err(format!("a rect the page did not give: {s}")),
             }
         }
@@ -1041,27 +1175,38 @@ impl MountedData {
 
 /// A window's views: mounted into the page's root (node 0). One per thread.
 pub struct Root {
+    id: u32,
     owner: Owner,
     range: Rc<Cell<Range>>,
 }
 
 impl Root {
-    /// A root with nothing in it yet ([`show`](Self::show)); its globals
-    /// and context are fresh. Panics if one is mounted on this thread.
+    /// A root with nothing in it yet ([`show`](Self::show)): a page (a
+    /// window) of its own, its globals and context fresh. Roots on one
+    /// thread are apart: each one's views, edits, events and globals are
+    /// its own. The new root is the current one outside any root.
     pub fn new() -> Self {
-        if dom(|d| d.root.is_some_and(|r| r.alive())) {
-            panic!("air: one Root per thread: drop the last one first");
-        }
-        dom(|d| *d = Dom { next: 1, ..Dom::default() });
-        let ((), owner) = detached(|| scope(|| ()));
-        let caught = Catch(Rc::new(|e: String| {
-            eprintln!("air: a view failed and no ErrorBoundary is above it: {e}");
-            dom(|d| d.uncaught.push(e));
-        }));
-        provide_on(owner, caught);
-        dom(|d| d.root = Some(owner));
-        crate::global::reset();
-        Self { owner, range: Rc::default() }
+        let id = NEXT_ROOT.replace(NEXT_ROOT.get() + 1);
+        // Pages of roots dropped and taken are forgotten.
+        DOMS.with_borrow_mut(|ds| ds.retain(|&k, d| k == 0 || d.root.is_some()));
+        set_root(id);
+        let owner = in_root(id, || {
+            dom(|d| *d = Dom { next: 1, ..Dom::default() });
+            let ((), owner) = detached(|| scope(|| ()));
+            let caught = Catch(Rc::new(|e: String| {
+                eprintln!("air: a view failed and no ErrorBoundary is above it: {e}");
+                dom(|d| d.uncaught.push(e));
+            }));
+            provide_on(owner, caught);
+            dom(|d| d.root = Some(owner));
+            owner
+        });
+        Self { id, owner, range: Rc::default() }
+    }
+
+    /// The edits this root made since the last call, for its page (one frame).
+    pub fn take_edits(&self) -> Vec<u8> {
+        in_root(self.id, take_edits)
     }
 
     /// Build `app` once (its body runs once, its holes follow); its edits wait in [`take_edits`].
@@ -1086,7 +1231,7 @@ impl Root {
 
     /// `f` in the root's scope (where the app's globals and context live), in a batch.
     pub fn within<R>(&self, f: impl FnOnce() -> R) -> R {
-        with_owner(self.owner, || batch(f))
+        in_root(self.id, || with_owner(self.owner, || batch(f)))
     }
 
     pub fn owner(&self) -> Owner {
@@ -1097,6 +1242,10 @@ impl Root {
     /// in one batch) or a script's reply. False if nothing took it (the
     /// nodes are gone, or the frame is malformed).
     pub fn event(&self, frame: &[u8]) -> bool {
+        in_root(self.id, || self.event_in(frame))
+    }
+
+    fn event_in(&self, frame: &[u8]) -> bool {
         match frame.first() {
             Some(&EVAL) => return eval_reply(frame),
             Some(&EVENT) => {}
@@ -1129,7 +1278,7 @@ impl Root {
 
     /// The errors no boundary caught (each also said on stderr), taken.
     pub fn uncaught(&self) -> Vec<String> {
-        dom(|d| std::mem::take(&mut d.uncaught))
+        in_root(self.id, || dom(|d| std::mem::take(&mut d.uncaught)))
     }
 }
 
@@ -1141,11 +1290,13 @@ impl Default for Root {
 
 impl Drop for Root {
     fn drop(&mut self) {
-        let r = self.range.get();
-        dom(|d| d.remove(r));
-        crate::global::reset();
-        self.owner.dispose();
-        dom(|d| d.root = None);
+        in_root(self.id, || {
+            let r = self.range.get();
+            dom(|d| d.remove(r));
+            crate::global::reset();
+            self.owner.dispose();
+            dom(|d| d.root = None);
+        });
     }
 }
 
@@ -1156,7 +1307,9 @@ pub(crate) fn root_owner() -> Option<Owner> {
 
 /// Handlers and scripts alive on this thread's page.
 pub(crate) fn live_dom() -> (usize, usize) {
-    dom(|d| (d.handlers.values().map(Vec::len).sum(), d.evals.len()))
+    DOMS.with_borrow(|ds| {
+        ds.values().fold((0, 0), |(h, e), d| (h + d.handlers.values().map(Vec::len).sum::<usize>(), e + d.evals.len()))
+    })
 }
 
 /// Planted renderer faults, for the gates that prove a broken render fails a test.

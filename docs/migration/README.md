@@ -66,14 +66,14 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `baseDir`, `serveDirs`, `assets` | the app's `assets/` (built in), `[server.dirs]`, `[server.public_dirs]` |
 | `client` (`electron`, `browser`, `cli`, `server-only`) | `[app] mode` (`standalone`, `client-server`, `server`, `client`, `cli`) and `[app] ui = "browser"` |
 | `keepServer` | `aio_shell::Window { keep_server: true }`, or `--keep-server` per launch: the app serves on once its window closes |
-| `localConnectHooks`, `onConnect`, `onDisconnect` | `Http::on_link(f)`, `Plugin::on_link(f)`: each link's `Presence` |
+| `localConnectHooks`, `onConnect`, `onDisconnect` | `Http::on_link(f)`, `Plugin::on_link(f)`: each link's `Presence`; `Http::door_links(true)` hears the local door's links too |
 | `transport` | built in: the window talks over IPC, other local tools over the local door, the network over `/ws` |
 | `takeover`, `singleton` | always one instance per home; `--takeover` per launch; `--instance <n>` for a second, private one |
 | `serverUrl` | `mode = "client"` with `[client] server`, or a pairing (`ax pair`) |
 | `users`, `key` | the app's key (`AIORT_TOKEN`, else `data/sync.token`), `[server] open`; per-user tokens: `[accounts]` ([accounts](../auth/README.md)) |
 | `pairing` | `[server] pairing`, `ax pair <app>` (the code), `ax pair <app> <host:port> <code>` |
 | `resolveUser`, `sessions`, `auth` | `[accounts]` (users, roles, sessions, TOTP, OIDC) |
-| `resolvePeer`, `peerTypes` | `aio::peer::Peer::find(app, ..)`: a peer on this machine calls as a client; `ax peer <app>` prints what it may call, as Rust signatures |
+| `resolvePeer`, `peerTypes` | `Http::resolve_peer(\|app\| ..)`: the `Caller` a peer app is here; `aio::peer::Peer::find(app, ..)` calls one; `ax peer <app>` prints what it may call, as Rust signatures (the contract is a crate both apps use) |
 | `db` | `#[table("name")]` fields, `aio::db::Db` ([SQL](../persistence/sql.md)) |
 | `perfCheck`, `perfBudget` | `[perf]`, `[perf.methods]`, `[perf.effects]` |
 | `budgets`, `memory`, `vitals`, `renderBudget` | `[budgets]`, `[memory]`, `[vitals]` (`render`, `transport`, `loop`, `queue`) |
@@ -87,7 +87,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `singleton: false`, `libraryMode` | open cells in a library or a test with `Handle::memory()` / `Store::open(..)`: no boot, no lock |
 | `childWindows`, `electron` (sandbox, permissions, `webviewTag`) | `aio::kit::Browser` and `open_window` for other sites, `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, confirm_unload, keys }`; `downloadWindow` is `[build.download_window]`, `allowLocalPeers` is `[server] local_peers`, `ignoreDebugEnv` is always on in a release build |
 | `splash` | `[build.splash]` (its look keys, `show`); its `show` at run time: `Window { splash_show }` |
-| `syncIntervalMs`, `fullStateThreshold` | built in: pushes are patches, batched (`aio::ui::BACKGROUND`); a full state goes only to a client that fell behind or came back |
+| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms` (50) and `full_state_percent` (50, aio's 0.5 as a percent) |
 | `maxConnections`, `wsLimits` | `[server.limits]` (`clients`, `max_message`, `calls_per_sec`, `bytes_per_sec`) |
 | `allowedOrigins`, `strictOrigin`, `trustProxyHeader` | `[server] hosts`, `strict_origin`, `trust_proxy` |
 | `security` | `[server.security]` |
@@ -177,7 +177,7 @@ Rename it (`begin`) when porting.
 | server-only fields (a read on the client throws) | `#[server] pub f: Hidden<T>` on a shared cell (a read on a copy panics) |
 | `access` per method | `#[client]`, `#[client(role = "admin", allow = f)]` |
 | optimistic calls, `useOptimistic` | built in: copies predict; `#[client(predict = false)]` to wait |
-| CRDT strategies (`counter`, `set-add`, `text`) | methods merge by replay; `aio::merge::text3` for prose |
+| CRDT strategies (`counter`, `set-add`, `text`) | methods merge by replay; `aio::merge::text3` for prose; `remote.merge(field, Merge::..)` shows a field merged while a call waits |
 | `serverFns`, `serverFn("pay").charge(..)` | `aio::fns::ServerFn` + `Http::server_fn`, `remote.run(F, args)` |
 | `routes`, `route()` | `aio::http::Http`, `Route::get(..)` |
 | `peer()` | `aio::peer::Peer::find(..)` |

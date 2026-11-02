@@ -9,6 +9,18 @@ version may break things.
 
 ### Added
 
+- **The splash drawn by the OS before Electron starts, at every start**
+  (aio's splash): GTK 3 over FFI on Linux (opened at run time, no new
+  crate), Cocoa on macOS, Windows Forms on Windows (for a download; when
+  Electron is here its main process draws it, as aio's). A first start's
+  Electron download runs on it, with its bar and a ✕ that cancels it.
+  New `[build.splash]` keys: `position`, `follow_window`, `shadow`,
+  `window_shadow`, `cancel`, `progress`, `bar_style`, `bar_height`,
+  `bar_position`, `bar_radius`. `ax build` builds it in for an app with a
+  `[build.splash]` (aio-rs-shell's `native-splash` feature), so an app
+  without one carries none of it. `Window { splash_show }` may take 50 ms;
+  one that panics or takes longer leaves the build's `show`, said
+  ([desktop](docs/clients/desktop.md#the-splash)).
 - **Prebuilt `ax` for macOS** (arm64 and x86_64): the release workflow
   (`.github/workflows/release.yml`) builds and smokes `ax` on a macOS
   runner of each CPU beside Linux and Windows, pins every archive in
@@ -106,7 +118,45 @@ version may break things.
   on an element sets them after its own, so the caller's win; one that
   reads state follows it. A prop typed `Prop<T>` follows what it is given
   (`value: name.get()`) while the component's body still runs once; given
-  a constant it holds no state.
+  a constant it holds no state. A `View` prop takes a view or text (a
+  string, a number, a format string, a signal: text that reads state
+  follows it), an `Option<View>` `None` too. Components may be generic
+  (`List<T>`), and a handler may be async.
+- air: a `View` is built again each time it is placed (a dialog opened
+  again, a tab shown again, one view in two places), each place with its
+  own state, as a Dioxus `Element`; it no longer fails when placed twice.
+- air: roots on one thread are apart (a test's two windows): each `Root`
+  has its own page, edits (`Root::take_edits`), events, globals and
+  tasks; the "one Root per thread" limit is gone.
+- **The kit on air** (`aio::kit` with feature `air`, air phase 2a): every
+  control, as aio's AIR draws it, each body run once and its holes
+  following state; the kit, facade, ui and sign-in tests run on air in
+  CI, none ignored. On air only, so far (aio's, gap package WA1):
+  - labels and titles take any content (Field, Checkbox, Switch, Alert,
+    Modal, Confirm, ConfirmButton, EmptyState, Tab, MenuItem, Crumb,
+    Table headers; `toast_view` for a toast);
+  - forms: `form.bind(aio::field!(name))` wires an Input, Textarea or
+    Select (its value, edits and blur: a field is touched when left),
+    `set_field`, `reset_field`, `touched`, `use_field_array`, and
+    `use_on_change` / `use_on_change_now` (aio's `onChange`, with a
+    cleanup);
+  - `Defer` loads: `load`, `loading`, `error`, `loading_min_ms`;
+  - `Transition` draws no box of its own (`air::styled`: one style
+    property of its content's element), `Motion::of` writes a motion as
+    a function of its progress (aio's `TransitionFn`);
+  - scoped CSS: `aio::ui::css(rule)` is a class named by its rule's
+    hash, put in the page once; `collect_css` gives them all;
+  - an element handed out by `onmounted` runs scripts on itself
+    (`MountedData::run`, `eval`): a canvas, a video, a selection.
+- Dark mode follows the OS: `[ui] scheme = "system"` (the default) keeps
+  the sheets' dark rules as written, so the page follows
+  `prefers-color-scheme` as it changes; `"light"` and `"dark"` fix one,
+  and a `bool` given to `use_css!` stays the app's own choice. The
+  template passes `aio::ui::scheme()`; `aio::ui::use_dark()` is a
+  `Memo<bool>` for code that draws its own colours;
+  `TestUi::set_os_dark` turns a test's OS dark.
+- `[ui] neutral = "soft"` keeps the page's greys near grey (aio's
+  `"neutral": "soft"`).
 - The router on air (`router!`): `Route`, `Outlet`, `Link`, `Redirect`,
   `params()` and Back are the same views on either renderer; on air a
   `Route`'s body runs again only when its match changes (a query or
@@ -136,7 +186,7 @@ version may break things.
   effect, subscription, cleanup, handler, task, page script or page node;
   misuse fails in release builds too (a hook outside a view's body, a
   write while a hole or a memo computes, an effect loop, a signal used
-  after its view, a view placed twice, two rows with one key, a missing
+  after its view, two rows with one key, a missing
   `key:` or an `if let` in `rsx!` at compile time); a renderer fault
   planted in air fails `TestUi` in the Rust page and the Electron page.
 - **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
@@ -307,6 +357,54 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
+- **Patches carry a resized array's items** (aio's narrowed Immer ops): a
+  push, a spread or a filter sends one `insert` per item put in or `del`
+  per item taken out, not the array; a sort or a rebuild still sends it
+  whole. aio pages get them as `add` and `remove`.
+- **Pacing and the full-state switch** (aio's `syncIntervalMs`,
+  `fullStateThreshold`): `[server.limits] sync_interval_ms` (50) folds a
+  link's background changes into one patch per window, a person's call
+  going at once; `full_state_percent` (50) sends the view instead of a
+  bigger patch. Both on aio pages too.
+- **Every shared cell on one server**: `Http::cell(handle)` serves another
+  cell on the same `/ws`, key and port; a link's hello names its cell.
+- `Http::resolve_peer(f)` (aio's `resolvePeer`): who a peer app on this
+  machine is here, its user and role; `Http::door_links(true)` (aio's
+  `localConnectHooks`): `on_link` hears the local door's links too.
+- `Reply::stream(type, parts)`: a route's answer sent part by part
+  (server-sent events, NDJSON), never compressed or buffered.
+- **Binary side channels** (aio's binary streams): `Route::socket(path, f)`
+  upgrades once `f` accepts the request; `aio::http::side` frames
+  `[kind][seq:u24][payload]` with a counter per kind, drops a droppable
+  frame or closes (1011) on a slow receiver, and says each frame's gap.
+- `Remote::on_conflict(f)` (aio's `onConflict`): where a server change met
+  a waiting call of the copy, live and in a catch-up (`Synced::conflicts`);
+  `Remote::merge(field, Merge::Text | Counter | SetAdd(id))` (aio's
+  `sync.merge`) shows that field merged while the call waits. In the page
+  too.
+- `[build.assets]` (aio's `assets`): folders beside `aio.toml` built into
+  the app by URL prefix, answered at the same path in the window
+  (`aio://app/…`), by the app's server (`Http::assets`, public), in the web
+  build (cached offline) and in the APK; `ax build`, `ax dev` and `ax
+  start` build a file added later in.
+- `web` is a `[build] targets` kind: one `ax build` makes the web app
+  beside the other targets (aio's `build-all`).
+- A server's Linux CLI bundle gets a systemd system unit beside its user
+  unit (`<bundle>.system.service`, aio's `build-service`): it starts at
+  boot with no login or linger, as a user systemd makes, its data in
+  `/var/lib/<id>`.
+- `ax install <app> --appimage` (aio's installer): the AppImage in
+  `aio-rt/install/<id>-appimage/` and the app menu, its entry making a
+  private `TMPDIR` for the AppImage to unpack into; `ax installed` and
+  `ax remove` know it.
+- The web build makes iOS's launch images from `[build.splash]` (aio's
+  `iosLaunchImages`): a Home Screen app starts on the splash.
+- `ax dev --web`: the page's console (every level, uncaught errors,
+  refused promises) in `ax dev`'s output (aio's console forwarding).
+- A web page shows a `notify` tell as the browser's notification, asking
+  for the permission at the first one and saying once when it can't;
+  `aio::web::notify::request_permission()` for a click handler, `on_click`
+  for its route.
 - **`ax ui` as amui, on every OS**: the Tasks tab runs the project's own
   tasks (its cargo aliases) beside the `ax` verbs, its output shown as it
   comes; CPU, the project folder, the executable and the runtime kind on
@@ -337,6 +435,13 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- `ax create`'s template follows the OS's light or dark (`[ui] scheme`,
+  `use_css!(aio::ui::scheme(), …)`) instead of a fixed light page;
+  `page_css` and `use_css!` take a `Scheme` or, as before, a `bool`.
+- A server's default size budget is 7 MB (was 6): the service template
+  is 6.03 MB on Linux after 0.2's additions (sync, vitals, routes, auth,
+  updates: 50 KB, no crate more than 7 KB), and the budget is that plus the
+  size gate's 5% headroom, to the next whole MB.
 - **Fail closed**: `/__aio/health` and `/__aio/metrics` need the key, a
   session or a user's token beyond this machine, also without accounts
   (they answered anyone before); on loopback they stay open on an app
@@ -361,6 +466,13 @@ version may break things.
 - Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
   `aio::ui::chord`, renderer-free, so `TestUi` needs no kit; `aio::kit`
   re-exports them as before.
+- **A reaction commits with its call** (aio's `listensTo` in one reduce
+  and one save): a `listens_to` reaction runs inside its source call's
+  commit, and its own calls go into the same SQLite transaction, so a
+  crash or a refused commit leaves both or neither, and listeners and
+  views see both at once. Once some cells of a file react to each other,
+  that file's calls run one at a time (a file without reactions as before)
+  ([persistence](docs/persistence/README.md#how-the-store-works)).
 - **Breaking: `ax pin` and `ax pair` named as aio names them.** The
   pairing code is `ax pair <app> [--plain]` (aio's `am pair`), no longer
   `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
@@ -461,9 +573,32 @@ version may break things.
   emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
   ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
   the app's log comes to the terminal (`[device]`).
+- `ax build`'s Linux bundle says the AppImage beside it (`--appimage`,
+  aio's default artifact).
 
 ### Fixed
 
+- air's code size: an event handler costs its closure alone (its wrappers
+  were generic over it, 36% of the bench's IR): 50 views make 1.13 M lines
+  of LLVM IR, 0.31x Dioxus's (phase 1: 0.49x), a held key over 10 000
+  rows answers in 0.21x; `scripts/air-ir` in `ci.sh` fails past 25 000
+  lines a view (docs/design/air.md).
+- `ax lint`: the `testing` check no longer errs on a workspace-inherited
+  aio-rs: `[dev-dependencies] aio = { workspace = true, features = ["testing"] }`,
+  or `features = ["testing"]` on the `[workspace.dependencies]` entry, renamed
+  (`package = "aio-rs"`) or not; dotted and `[target.….dev-dependencies]`
+  tables count too.
+- A Unix socket path past the OS limit (108 bytes with the NUL on Linux, 104
+  on macOS): the app's socket dir falls back to `/tmp/aio-rt-<uid>/` when
+  `XDG_RUNTIME_DIR`/`TMPDIR` is too long, as aio's `resolveSocketPath` fell
+  back to `/tmp/aio`, and a path still too long is refused at once in words
+  (the path, its length, the limit, the fix) by the app, the shell (before
+  Electron connects) and `ax`, instead of EINVAL and no window.
+- A cell's or a synced copy's listeners (a view, `watch`) never hear an
+  older state after a newer one: a tell from another thread, or from a
+  listener itself, between reading the state and telling it, was told
+  first, and the older one after it (a watch on a copy saw `[0, 4, 0, 5]`).
+  One teller at a time now tells until nothing is left untold.
 - An app's first update after its install is made from the patch again:
   a bundle's `install.sh` kept only the binary in `versions/<v>/`, so the
   patch (made over the whole bundle) missed its other files and the whole
@@ -479,7 +614,7 @@ version may break things.
   old app now exits only once the helper says it is up (20 s); else it
   runs on, and that release is never offered again.
 - `ax release` of the service template on Windows: its default size
-  budget is half again there (a server 9 MB, a desktop app 15 MB), as its
+  budget is half again there (a server 10 MB, a desktop app 15 MB), as its
   build is about a third bigger (7.1 MB against 5.3 on Linux).
 - `scripts/dx-metrics --check` compares like with like: every gated
   number, sizes and crate counts too, is judged against the same machine's

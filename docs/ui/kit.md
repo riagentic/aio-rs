@@ -578,6 +578,13 @@ controls aio apps wrote by hand (`Tabs`' right-to-left keys, `Defer`,
 - **Data grids, charts, date pickers**: neither has them; mount a
   library as an [island](islands.md).
 - **A `Tooltip` to the side**: `Placement` is `Top` or `Bottom` only.
+- **Labels and titles as markup** (aio's `string | VNode`): on air
+  (feature `air`, the 0.2 renderer) every label and title is a `View`
+  that takes text too: `Field`, `Checkbox`, `Switch`, `Alert`, `Modal`,
+  `Confirm`, `ConfirmButton`, `EmptyState`, `Tab::new`, `MenuItem::new`,
+  `Crumb::new`, `Column` headers, and `toast_view` for a toast
+  (`label: rsx! { b { "Name" } }`, or `label: "{n} picked"`, which
+  follows `n`). On Dioxus they are text.
 
 ## Common mistakes
 

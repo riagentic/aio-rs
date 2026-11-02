@@ -145,7 +145,7 @@ pub fn App() -> View {
     let n = part(|c| &c.count);
     let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
-        style { {aio::use_css!(false, &theme; "assets/style.css")} }
+        style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
         main {
             h1 { "data-t": "count", "{n}" }
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }

@@ -85,6 +85,11 @@ pub fn bump() -> bool {
 }
 
 #[wasm_bindgen]
+pub fn finish() -> bool {
+    TALLY.with(|t| t.finish().is_ok())
+}
+
+#[wasm_bindgen]
 pub fn later() -> bool {
     TALLY.with(|t| t.later().is_ok())
 }

@@ -169,6 +169,7 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
     crate::capabilities::set(&cfg.capabilities.network);
     crate::budgets::declare(cfg.budgets);
     crate::ui::set_look(cfg.ui.theme);
+    crate::ui::set_scheme(cfg.ui.scheme);
     crate::perf::start(&dirs.logs)?;
     crate::report::init(crate::report::About {
         id: cfg.app.id.clone(),

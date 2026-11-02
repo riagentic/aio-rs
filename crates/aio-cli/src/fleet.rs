@@ -17,11 +17,12 @@ pub enum Kind {
     Dmg,
     Cli,
     Android,
+    Web,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] =
-        [Kind::Desktop, Kind::Windows, Kind::Deb, Kind::AppImage, Kind::Dmg, Kind::Cli, Kind::Android];
+    pub const ALL: [Kind; 8] =
+        [Kind::Desktop, Kind::Windows, Kind::Deb, Kind::AppImage, Kind::Dmg, Kind::Cli, Kind::Android, Kind::Web];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -32,6 +33,7 @@ impl Kind {
             Kind::Dmg => "dmg",
             Kind::Cli => "cli",
             Kind::Android => "android",
+            Kind::Web => "web",
         }
     }
 
@@ -44,6 +46,7 @@ impl Kind {
             Kind::Dmg => "a macOS disk image to drag into Applications (on a Mac)",
             Kind::Cli => "a headless binary on PATH, no menu entry (a cli or server app, or a remote client's bin)",
             Kind::Android => "signed APKs, one per CPU type (the app's lib calls android_app!)",
+            Kind::Web => "the app as a static site, an installable PWA (the app's lib runs in the page, aio::web)",
         }
     }
 
@@ -110,8 +113,8 @@ pub fn plan(app: &str, declared: &[Target], select: Option<&str>, fallback: Kind
 
 /// `plan` across `platforms` (none: as planned): a desktop target once per
 /// platform, a Windows one per Windows platform and a Linux package per
-/// Linux one (none of theirs listed: as planned); Android is the same file
-/// everywhere, built once. Pure.
+/// Linux one (none of theirs listed: as planned); Android and the web are
+/// the same files everywhere, built once. Pure.
 pub fn across(plan: Vec<Planned>, platforms: &[&'static Platform]) -> Vec<Planned> {
     if platforms.is_empty() {
         return plan;
@@ -123,7 +126,7 @@ pub fn across(plan: Vec<Planned>, platforms: &[&'static Platform]) -> Vec<Planne
                 Kind::Windows => p.os == "windows",
                 Kind::Deb | Kind::AppImage => p.os == "linux",
                 Kind::Dmg => p.os == "macos",
-                Kind::Android => false,
+                Kind::Android | Kind::Web => false,
             };
             let on: Vec<&'static Platform> = platforms.iter().filter(fits).copied().collect();
             if on.is_empty() {
@@ -229,7 +232,7 @@ mod tests {
         assert!(e.contains("needs a kind") && e.contains("kind = \"desktop\""), "{e}");
         let e = plan("notes", &[t("pro", Some("electron"), None)], None).unwrap_err();
         assert!(
-            e.contains("no kind `electron`") && e.contains("desktop, windows, deb, appimage, dmg, cli, android"),
+            e.contains("no kind `electron`") && e.contains("desktop, windows, deb, appimage, dmg, cli, android, web"),
             "{e}"
         );
         assert!(plan("notes", &[], Some("rpm")).unwrap_err().contains("no target `rpm`"));
@@ -255,7 +258,13 @@ mod tests {
     #[test]
     fn each_desktop_target_is_built_for_each_platform_it_fits() {
         let at = |names: &[&str]| crate::platform::resolve(names, &crate::platform::ALL[0]).unwrap();
-        let d = [t("desktop", None, None), t("deb", None, None), t("windows", None, None), t("android", None, None)];
+        let d = [
+            t("desktop", None, None),
+            t("deb", None, None),
+            t("windows", None, None),
+            t("android", None, None),
+            t("web", None, None),
+        ];
         let shown = |p: Vec<Planned>| p.iter().map(Planned::shown).collect::<Vec<_>>();
         let p = across(plan("notes", &d, None).unwrap(), &at(&["linux", "linux-arm64", "macos-arm64"]));
         assert_eq!(
@@ -267,12 +276,16 @@ mod tests {
                 "deb [linux]",
                 "deb [linux-arm64]",
                 "windows",
-                "android"
+                "android",
+                "web"
             ]
         );
         let p = across(plan("notes", &d[2..3], None).unwrap(), &at(&["windows-arm64", "windows"]));
         assert_eq!(shown(p), ["windows [windows-arm64]", "windows [windows]"]);
-        assert_eq!(shown(across(plan("notes", &d, None).unwrap(), &[])), ["desktop", "deb", "windows", "android"]);
+        assert_eq!(
+            shown(across(plan("notes", &d, None).unwrap(), &[])),
+            ["desktop", "deb", "windows", "android", "web"]
+        );
         let p = across(plan("notes", &[t("cli", None, None)], None).unwrap(), &at(&["linux", "windows"]));
         assert_eq!(shown(p), ["cli [linux]", "cli [windows]"], "a CLI goes everywhere");
         // One app on two platforms is two files, not a clash.
@@ -283,7 +296,8 @@ mod tests {
     #[test]
     fn the_list_shows_kinds_and_declared_targets() {
         let l = list("notes", &[t("pro", Some("desktop"), Some("notes-pro"))]);
-        assert!(l.contains("  appimage  ") && l.contains("  pro (kind desktop) (bin notes-pro)"), "{l}");
+        assert!(l.contains("  appimage  ") && l.contains("  web       the app as a static site"), "{l}");
+        assert!(l.contains("  pro (kind desktop) (bin notes-pro)"), "{l}");
         assert!(list("notes", &[]).contains("makes desktop"));
     }
 }

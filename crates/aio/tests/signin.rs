@@ -1,4 +1,5 @@
 //! The ready sign-in form, driven like a person against a real app.
+#![cfg(any(feature = "kit", feature = "air"))]
 use aio::auth::client::{Client, Signed};
 use aio::auth::{Auth, Policy};
 use aio::kit::SignIn;

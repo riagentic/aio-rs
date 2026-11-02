@@ -249,11 +249,26 @@ pub struct Limits {
     pub calls_per_sec: u32,
     /// Bytes a link may send per second (bursts up to twice that).
     pub bytes_per_sec: u32,
+    /// A link is sent at most one change per this many ms (aio's
+    /// `syncIntervalMs`): the first of a burst at once, the rest folded
+    /// into one; a person's call goes at once. `0`: each change at once.
+    pub sync_interval_ms: u64,
+    /// A change whose patch is more than this percent of the whole view is
+    /// sent as the view (aio's `fullStateThreshold`, as a percent). `0`:
+    /// always the view.
+    pub full_state_percent: u32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { clients: 256, max_message: 4 << 20, calls_per_sec: 200, bytes_per_sec: 8 << 20 }
+        Self {
+            clients: 256,
+            max_message: 4 << 20,
+            calls_per_sec: 200,
+            bytes_per_sec: 8 << 20,
+            sync_interval_ms: 50,
+            full_state_percent: 50,
+        }
     }
 }
 
@@ -630,6 +645,86 @@ pub struct Build {
     /// its window has loaded, on the desktop, the web and Android.
     #[serde(default)]
     pub splash: Option<Splash>,
+    /// Folders built into the app by URL prefix (aio's `assets`): `"/media"
+    /// = "media"` (from `aio.toml`'s folder) is the app's `/media/…` in its
+    /// window, its server, its web build and its APK.
+    #[serde(default)]
+    pub assets: std::collections::BTreeMap<String, std::path::PathBuf>,
+    /// Their files, `(URL path, bytes)`, put in by `aio::config!()` (empty elsewhere).
+    #[serde(skip)]
+    pub asset_files: &'static [(&'static str, &'static [u8])],
+}
+
+/// The files of `[build] assets` under `at` (`aio.toml`'s folder): each
+/// one's URL path, percent-encoded as a browser asks for it (`/media/a%20b.png`),
+/// and its file, sorted. Dotfiles are left out (never served); a folder that
+/// isn't there is refused. Read where `aio.toml` is (the build, not the app).
+#[cfg(feature = "toml")]
+pub fn asset_files(
+    at: &std::path::Path,
+    assets: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    fn walk(dir: &std::path::Path, url: &str, out: &mut Vec<(String, std::path::PathBuf)>) -> Result<(), String> {
+        let rd = std::fs::read_dir(dir).map_err(|e| format!("[build] assets: {}: {e}", dir.display()))?;
+        for e in rd {
+            let e = e.map_err(|e| e.to_string())?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if name.contains([':', '*']) {
+                return Err(format!(
+                    "[build] assets: {}: a name with : or * can't be a URL path (rename it)",
+                    e.path().display()
+                ));
+            }
+            let (p, url) = (e.path(), format!("{url}/{}", encode(&name)));
+            match p.is_dir() {
+                true => walk(&p, &url, out)?,
+                false if p.is_file() => out.push((url, p)),
+                false => {}
+            }
+        }
+        Ok(())
+    }
+    let mut out = vec![];
+    for (prefix, dir) in assets {
+        let d = at.join(dir);
+        if !d.is_dir() {
+            return Err(format!("[build] assets {prefix:?}: {} is not a folder", d.display()));
+        }
+        walk(&d, prefix.trim_end_matches('/'), &mut out)?;
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// An asset's URL path ([`asset_files`]) as a relative file path: its
+/// segments, `%XX` decoded.
+pub fn asset_path(url: &str) -> std::path::PathBuf {
+    let decode = |s: &str| {
+        let b = s.as_bytes();
+        let (mut out, mut i) = (Vec::with_capacity(b.len()), 0);
+        while i < b.len() {
+            match (b[i] == b'%').then(|| s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())).flatten() {
+                Some(v) => (out.push(v), i += 3),
+                None => (out.push(b[i]), i += 1),
+            };
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    url.split('/').filter(|s| !s.is_empty()).map(decode).collect()
+}
+
+/// A path segment as a URL spells it: what isn't unreserved, percent-encoded.
+#[cfg(feature = "toml")]
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// `[build.splash]` (aio's `build.splash`).
@@ -704,6 +799,39 @@ pub struct Splash {
     /// the desktop, 200 on Android).
     #[serde(default)]
     pub fade_ms: Option<u64>,
+    /// Where it opens: centred where the app's window opens, on the primary
+    /// display, or on the one under the pointer.
+    #[serde(default)]
+    pub position: SplashPosition,
+    /// `position = "window"`: once the app's window shows, the splash moves
+    /// onto where it really is.
+    #[serde(default = "yes")]
+    pub follow_window: bool,
+    /// The text's shadow; unset: the OS's (macOS and Linux on, Windows off).
+    #[serde(default)]
+    pub shadow: Option<bool>,
+    /// The window's drop shadow; unset: the OS's (macOS on).
+    #[serde(default)]
+    pub window_shadow: Option<bool>,
+    /// The ✕ that cancels a first start's download.
+    #[serde(default = "yes")]
+    pub cancel: bool,
+    /// The bar while a first start downloads Electron.
+    #[serde(default = "yes")]
+    pub progress: bool,
+    /// The bar's thickness: `solid` 6 pt, `thin` 3 pt.
+    #[serde(default)]
+    pub bar_style: BarStyle,
+    /// The bar's height in px; unset: `bar_style`'s.
+    #[serde(default)]
+    pub bar_height: Option<u32>,
+    /// Under the text (inside the margins), or along the window's bottom
+    /// edge, full width.
+    #[serde(default)]
+    pub bar_position: BarPosition,
+    /// The bar's corner radius in px; unset: half its height.
+    #[serde(default)]
+    pub bar_radius: Option<u32>,
     /// The PNG's bytes, put in by `aio::config!()` (empty elsewhere).
     #[serde(skip)]
     pub png: &'static [u8],
@@ -733,6 +861,16 @@ impl Default for Splash {
             text_color: None,
             bar: None,
             track: None,
+            position: Default::default(),
+            follow_window: true,
+            shadow: None,
+            window_shadow: None,
+            cancel: true,
+            progress: true,
+            bar_style: Default::default(),
+            bar_height: None,
+            bar_position: Default::default(),
+            bar_radius: None,
             png: &[],
         }
     }
@@ -774,6 +912,34 @@ pub enum Align {
     #[default]
     Center,
     Right,
+}
+
+/// `[build.splash] position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplashPosition {
+    #[default]
+    Window,
+    Primary,
+    Pointer,
+}
+
+/// `[build.splash] bar_style`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarStyle {
+    #[default]
+    Solid,
+    Thin,
+}
+
+/// `[build.splash] bar_position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarPosition {
+    #[default]
+    UnderText,
+    BottomEdge,
 }
 
 impl Splash {
@@ -1145,14 +1311,18 @@ impl Default for Feedback {
     }
 }
 
-/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `ui.layout`);
+/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`, dark mode);
 /// `aio::kit::theme::sheet` makes its CSS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ui {
     pub theme: Look,
+    /// Light or dark: the OS's, as it changes (aio's automatic dark mode), or one fixed.
+    pub scheme: Scheme,
     /// The accent's hue in degrees, instead of the one hashed from the id.
     pub hue: Option<u16>,
+    /// The page's greys: tinted with the hue, or near grey (aio's `"neutral": "soft"`).
+    pub neutral: Neutral,
     /// With the look, the page layout: `<main>` as a centred page and the
     /// `.card`/`.row`/`.stack`/`.grid` classes. Off: only how elements look.
     pub layout: bool,
@@ -1160,8 +1330,37 @@ pub struct Ui {
 
 impl Default for Ui {
     fn default() -> Self {
-        Self { theme: Look::Auto, hue: None, layout: true }
+        Self { theme: Look::Auto, scheme: Scheme::System, hue: None, neutral: Neutral::Tinted, layout: true }
     }
+}
+
+/// Light or dark (`[ui] scheme`, `aio::ui::page_css`'s choice).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    /// The OS's, following it as it changes (`prefers-color-scheme`).
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl From<bool> for Scheme {
+    /// The app's own choice: `true` dark.
+    fn from(dark: bool) -> Self {
+        if dark { Self::Dark } else { Self::Light }
+    }
+}
+
+/// The page's neutrals (its page, surfaces and borders); the accent keeps the hue either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Neutral {
+    /// Tinted with the hue.
+    #[default]
+    Tinted,
+    /// Near grey: a warm or magenta hue would tint large surfaces visibly.
+    Soft,
 }
 
 /// How much of aio's look a page takes. Every one but `None` keeps the
@@ -1248,6 +1447,12 @@ impl Lit for Duration {
 }
 
 impl Lit for &'static [u8] {
+    fn lit(&self, o: &mut String) {
+        o.push_str("&[]");
+    }
+}
+
+impl Lit for &'static [(&'static str, &'static [u8])] {
     fn lit(&self, o: &mut String) {
         o.push_str("&[]");
     }
@@ -1422,6 +1627,9 @@ impl Config {
             if s.size.is_some_and(|[w, h]| w == 0 || h == 0 || w > 4096 || h > 4096) {
                 return Err("aio.toml: [build.splash] size is [width, height], each 1 to 4096".into());
             }
+            if s.bar_height.is_some_and(|h| h == 0 || h > 64) {
+                return Err("aio.toml: [build.splash] bar_height is px, 1 to 64".into());
+            }
             if s.min_ms > s.max_ms {
                 return Err("aio.toml: [build.splash] min_ms is more than max_ms".into());
             }
@@ -1471,6 +1679,19 @@ impl Config {
         crate::security::headers(&c.server.security, &c.server.hosts, true).map_err(|e| format!("aio.toml: {e}"))?;
         if let Some(e) = dirs_problem(&c.server) {
             return Err(format!("aio.toml: {e}"));
+        }
+        // `[build] assets`: the same rules, in the app's folder.
+        if let Some((p, _)) = c.build.assets.iter().find(|(_, d)| d.is_absolute() || d.has_root()) {
+            return Err(format!("aio.toml: [build] assets {p:?}: a folder beside aio.toml (it is built into the app)"));
+        }
+        if let Some(e) = dirs_problem(&Server { dirs: c.build.assets.clone(), ..Server::default() }) {
+            let e = e.replace("[server.dirs]", "[build] assets").replace("[server]", "[build] assets");
+            return Err(format!("aio.toml: {}", e.replace("in the files tier or an absolute one", "beside aio.toml")));
+        }
+        if let Some(p) =
+            c.build.assets.keys().find(|p| c.server.dirs.contains_key(*p) || c.server.public_dirs.contains_key(*p))
+        {
+            return Err(format!("aio.toml: {p:?} is both in [build] assets and [server] dirs"));
         }
         // Half a pair would serve aio's own certificate instead, silently.
         match (&c.server.cert, &c.server.key) {
