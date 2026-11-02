@@ -605,6 +605,13 @@ pub fn provide_now<T: Clone + 'static>(v: T) -> T {
     dioxus_core::provide_context(v)
 }
 
+/// In a view's body: `f()`'s value, the body running again when it changes:
+/// on Dioxus every render reads it (on air, a memo: `ui::on_air::follow`).
+#[doc(hidden)]
+pub fn follow<T: Clone + PartialEq + 'static>(f: impl Fn() -> T + 'static) -> T {
+    f()
+}
+
 /// What the views above this one provided, skipping its own.
 #[doc(hidden)]
 pub fn parent_context<T: Clone + 'static>() -> Option<T> {
