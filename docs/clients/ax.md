@@ -329,7 +329,7 @@ dx's whole output is in the app's `logs/dev.log`. `ax shot`, `ax eval`,
 ### `ax test`
 
 ```text
-ax test <app> [filter] [--video out] [--pace ms] [--android] [--device serial]
+ax test <app> [filter] [--video out] [--pace ms] [--android] [--device serial] [--mutants]
 ```
 
 The app's tests (`cargo test`), UI tests included, headless: no window on
@@ -342,6 +342,7 @@ the screen.
 | `--pace ms` | each step this long on screen in the video (800) |
 | `--android` | the emulator lane instead: its APK for the device built, installed and started; passed once its window is ready and it still runs (`AIO_AVD` booted when none is attached) |
 | `--device serial` | with `--android`: that device (else `ANDROID_SERIAL`) |
+| `--mutants` | `cargo mutants` over the app's packages: each function broken in turn, the ones no test noticed listed and failing the run (`cargo install cargo-mutants`; [proving the tests](../testing/proving.md)) |
 
 ```sh
 ax test notes
@@ -836,6 +837,19 @@ ax health <app>
 Healthy, or why not: exit 1 when it is degraded, stuck or not running.
 Read from the `health.json` the app writes, so it answers without reaching
 the app.
+
+### `ax vitals`
+
+```text
+ax vitals <app>
+```
+
+Each layer's grade now (aio's vitals): the loop (how late the runtime's
+tick is, the effects waiting, the newest call), the worst link's round
+trip, the window's paint, and the likely cause across them, with its fix.
+Read from the running app's `health.json` (written every 10 s), so it answers
+without reaching the app; a served app answers the same as `GET
+/__aio/vitals`. `--json`: the document.
 
 ### `ax metrics`
 

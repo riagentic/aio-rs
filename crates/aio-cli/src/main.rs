@@ -625,6 +625,53 @@ fn health(data: &Path, json: bool) -> Out {
     if healthy { Ok(v.to_string()) } else { Err(v.to_string()) }
 }
 
+/// `ax vitals`: the vitals the running app wrote in its `health.json`.
+fn vitals(data: &Path, json: bool) -> Out {
+    let file = data.join("health.json");
+    let text = std::fs::read(&file).ok().filter(|_| aio::paths::running(data));
+    let text = text.ok_or_else(|| format!("not running (no live {})", file.display()))?;
+    let doc: serde_json::Value = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
+    let v = doc.get("vitals").cloned().ok_or("this app's runtime writes no vitals: update aio-rs")?;
+    Ok(if json { v.to_string() } else { vitals_text(&v) })
+}
+
+/// The vitals as lines (pure): one per layer, then the likely cause.
+fn vitals_text(v: &serde_json::Value) -> String {
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
+    let lp = &v["loop"];
+    let mut out = vec![
+        format!("loop       {}  {} ms late, {} effects waiting", s(&lp["status"]), lp["lateMs"], lp["queue"]),
+        format!("transport  {}  round trip {} ms", s(&v["transport"]["status"]), v["transport"]["measured"]),
+        format!("render     {}  {} ms to paint", s(&v["render"]["status"]), v["render"]["measured"]),
+    ];
+    if let Some(c) = lp["lastCall"]["call"].as_str() {
+        out.push(format!("last call  {c} ({} ms)", lp["lastCall"]["ms"]));
+    }
+    if let Some(h) = v["hint"].as_object() {
+        out.push(format!("likely: {} → fix: {}", s(&h["cause"]), s(&h["fix"])));
+    }
+    out.join("\n")
+}
+
+#[cfg(test)]
+#[test]
+fn vitals_say_each_layer_and_the_likely_cause() {
+    let (snap, t) = (aio::vitals::Snapshot::default(), aio::vitals::Vitals::default());
+    let v = aio::vitals::doc(&snap, false, &t);
+    let text = vitals_text(&v);
+    assert!(text.starts_with("loop       healthy  0 ms late, 0 effects waiting\ntransport  healthy"), "{text}");
+    assert!(!text.contains("likely"), "nothing to say");
+    let frozen = aio::vitals::Snapshot {
+        transport: aio::vitals::Layer { status: aio::vitals::Status::Frozen, measured: 5000, since: Some(1) },
+        ..snap
+    };
+    let text = vitals_text(&aio::vitals::doc(&frozen, false, &t));
+    assert!(
+        text.contains("transport  frozen  round trip 5000 ms") && text.contains("likely: The network link stalled"),
+        "{text}"
+    );
+}
+
 /// The problem reports: a list, or the one whose id starts with `id`.
 fn report(data: &Path, id: Option<&str>, json: bool) -> Out {
     let dir = data.join("reports");
@@ -809,6 +856,7 @@ fn run(args: &[String]) -> Out {
         ("dev", [name, "--web"]) => web::dev(name),
         ("dev", [name, ..]) => dev::run(name, &pos[1..]),
         ("test", [name]) if has("--android") => install::lane(name, value("--device")),
+        ("test", [name]) if has("--mutants") => testrun::mutants(name),
         ("test", [name, filter @ ..]) if filter.len() <= 1 => {
             testrun::run(name, filter.first().copied(), value("--video"), value("--pace"))
         }
@@ -1082,6 +1130,7 @@ fn run(args: &[String]) -> Out {
             if has("--follow") { logs::watch(&dir, n, &f) } else { logs::tail(&dir, n, &f, json) }
         }
         ("health", [app]) => health(&t(app)?.plan.data, json),
+        ("vitals", [app]) => vitals(&t(app)?.plan.data, json),
         ("stop", []) => stop::all(if has("--no-wait") { None } else { Some(wait()?) }, json),
         ("stop", apps) => {
             let wait = if has("--no-wait") { None } else { Some(wait()?) };

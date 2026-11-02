@@ -5,7 +5,8 @@
 // `{id, open: {width, height}}`, `{id, page, method, params}`,
 // `{id, shot}` (a PNG, base64: a hidden window draws for no DevTools
 // screenshot) and `{id, close}` in on stdin; `{id, result}` or `{id, error}`, and the
-// page's warnings and errors `{page, console}`, out on stdout. Stdin's end
+// page's warnings and errors `{page, console}`, its refused requests
+// `{page, refused}` and the ones a test answers `{page, paused}`, out on stdout. Stdin's end
 // quits, and the folder this runs from goes with it.
 const { app, BrowserWindow, protocol, session } = require('electron')
 const fs = require('fs')
@@ -55,6 +56,10 @@ async function open({ width, height, network = [] }) {
     if (e.level === 'error' || e.level === 'warning') out({ page: id, console: `${e.level}: ${e.message}` })
   })
   wc.debugger.attach('1.3')
+  // A request a test answers (`Mount::fetch`, through `Fetch.enable`): to the test.
+  wc.debugger.on('message', (_e, method, params) => {
+    if (method === 'Fetch.requestPaused') out({ page: id, paused: params })
+  })
   windows.set(id, w)
   await w.loadURL('aio://app/')
   return { page: id }
