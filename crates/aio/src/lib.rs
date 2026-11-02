@@ -49,6 +49,8 @@ native! {
     pub mod lifecycle;
     mod link;
     pub mod log;
+    #[cfg(feature = "server")]
+    mod mux;
     #[cfg(feature = "tls")]
     pub mod pairing;
     #[cfg(any(feature = "kit", feature = "web", feature = "air"))]

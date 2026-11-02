@@ -151,6 +151,10 @@ name = "sync"
 required-features = ["net"]
 
 [[test]]
+name = "one_socket"
+required-features = ["net"]
+
+[[test]]
 name = "compat_wire"
 required-features = ["net", "compat"]
 

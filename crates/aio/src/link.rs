@@ -32,6 +32,9 @@ pub(crate) enum Sock {
     Door(crate::door::Frames),
     #[cfg(feature = "server")]
     Ws(axum::extract::ws::WebSocket),
+    /// One link of a socket that carries several ([`crate::mux`]).
+    #[cfg(feature = "server")]
+    Chan(crate::mux::Chan),
 }
 
 impl Sock {
@@ -50,6 +53,8 @@ impl Sock {
                     M::Binary(_) | M::Close(_) => None,
                 }
             }
+            #[cfg(feature = "server")]
+            Self::Chan(c) => c.recv().await,
         }
     }
 
@@ -67,6 +72,8 @@ impl Sock {
                 };
                 w.send(m).await.map_err(std::io::Error::other)
             }
+            #[cfg(feature = "server")]
+            Self::Chan(c) => c.send(m).await,
         }
     }
 
