@@ -425,6 +425,14 @@ Let a host in with `Mount::default().network(&["api.example.org"])`, or
 better, put a [cassette](cassettes.md) in front of the call so the test
 needs no network at all.
 
+The page's own requests to a host (a picture, a video: what the window's
+policy lets a page reach) are answered by the test with
+`Mount::default().fetch("cdn.example.org", |asked| Answered::new(200,
+"image/svg+xml", SVG))` (aio's `testUI({ fetch })`): from before the
+first render, each one is handed to the closure (`asked.method`, `url`,
+`body`) and gets its status, `Content-Type` and body, never reaching the
+network (the DevTools protocol's `Fetch` domain, in the page's engine).
+
 ## A served cell under the page
 
 `TestUi::new(App)` runs the cell in-process. To test the view against the
@@ -633,13 +641,13 @@ the process: drive its page over the DevTools protocol.
 | happy-dom, no layout | a real engine: `rect`, `style`, `shot` and scrolling measure for real |
 | `ui.App.SaveButton.click()` (a proxy) | `ui.click("SaveButton")`: names are strings, checked when the test runs |
 | `am testgen` typed clients | `ax testgen <app>`: a Rust name table, a renamed element a compile error ([ax](../clients/ax.md#ax-testgen)) |
-| `ui.advance(ms)`: a virtual clock under the page | none: `TestUi` time is real; schedules are tested with `TestCells::advance` |
+| `ui.advance(ms)`: a virtual clock under the page | none yet (air): `TestUi` time is real; schedules are tested with `TestCells::advance` |
 | `testUI(App, { user })` | `TestServer::ui_source(user, latency)`: a real signed-in copy |
 | `testPageFetch` (the page's HTTP and cookies) | `TestServer::page()`: the HTTP side, cookies kept |
 | `wire: { strict: true }`, the JSON-loss table | none needed: arguments are Rust types the wire encodes; `ui_source` crosses the real wire |
 | `ui.find("TodoRow", key)` by list key | a `data-t` per row (`row-{id}`), `list/MilkItem`, or `css=li:nth-child(2)` |
 | `serverImport` stubs | a trait the effect calls, with a test implementation; or a [cassette](cassettes.md) |
-| `smoke()` boot smoke | `ax build --smoke` |
+| `smoke()` boot smoke | `aio::testing::smoke(bundle)` in a test (`ax smoke` underneath), `ax build --smoke` |
 | `uiRects` from a measured client | `rect(t)` in the test; `ax surface <app> --rects` |
 | `--video-scheme` | `Mount::dark()` |
 

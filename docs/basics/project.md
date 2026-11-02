@@ -164,8 +164,9 @@ of aio-rs.
 
 | Feature | Adds |
 |---|---|
-| none | the core: cells, the log, replay, persistence, the local door, `aio::cli`, `aio::testing` (cells) |
-| `kit` | the UI kit, `client!`, `router!`, `TestUi` |
+| none | the core: cells, the log, replay, persistence, the local door, `aio::cli` |
+| `testing` | `aio::testing`, the test kit (`TestCells`; `TestServer` with `server`, `TestUi` with `kit`): a dev-dependency only, so the app's builds leave it out |
+| `kit` | the UI kit, `client!`, `router!` |
 | `net` | `tls` + `oidc`: everything networked |
 | `server` | sync and its server, HTTP routes, server functions, accounts' doors |
 | `tls` | the server over TLS, pairing, LAN discovery |
@@ -178,8 +179,8 @@ of aio-rs.
 | `dev` | `ax dev`'s hot-patching (never in a release; `ax dev` turns it on) |
 
 The templates: `app` uses `kit` (and `web` for its browser build),
-`service` uses `net`, `cli` none. A feature is added in the app's
-`Cargo.toml`:
+`service` uses `net`, `cli` none; each gives its tests `testing` as a
+dev-dependency. A feature is added in the app's `Cargo.toml`:
 
 ```toml
 aio = { package = "aio-rs", path = "<aio-rs checkout>/crates/aio", features = ["kit", "net"] }

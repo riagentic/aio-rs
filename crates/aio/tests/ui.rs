@@ -567,6 +567,48 @@ fn a_ui_test_refuses_the_real_network_and_reaches_this_machine() {
     );
 }
 
+#[component]
+fn Remote() -> View {
+    rsx! {
+        img { alt: "pic", src: "https://cdn.example.invalid/pic.svg" }
+        img { alt: "gone", src: "https://cdn.example.invalid/gone.png" }
+    }
+}
+
+/// aio's `testUI({ fetch })`: the page's requests to a host are answered by
+/// the test from before the first render, never reaching the network.
+#[test]
+fn a_host_the_test_answers_never_reaches_the_network() {
+    use aio::testing::Answered;
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let log = asked.clone();
+    let mut ui = aio::testing::Mount::default()
+        .fetch("cdn.example.invalid", move |a| {
+            log.lock().unwrap().push(format!("{} {}", a.method, a.url));
+            match a.url.ends_with(".svg") {
+                true => Answered::new(
+                    200,
+                    "image/svg+xml",
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>"#,
+                ),
+                false => Answered::new(404, "text/plain", "no such picture"),
+            }
+        })
+        .component(Remote, ());
+    let sizes = "[...document.images].map((i) => i.complete ? i.naturalWidth : -1)";
+    for _ in 0..400 {
+        if !ui.eval(sizes).as_array().unwrap().contains(&serde_json::json!(-1)) {
+            break;
+        }
+        ui.wait(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(ui.eval(sizes), serde_json::json!([10, 0]), "the answered picture drew, the 404 did not");
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked.contains(&"GET https://cdn.example.invalid/gone.png".to_string()), "{asked:?}");
+    assert!(ui.failures().is_empty(), "nothing refused: it never went out");
+}
+
 static HEARD: AtomicUsize = AtomicUsize::new(0);
 
 /// Two buttons whose box keeps Tab and ArrowDown, one outside it, and a
