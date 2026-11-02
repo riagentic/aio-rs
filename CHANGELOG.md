@@ -353,6 +353,17 @@ version may break things.
   bigger patch. Both on aio pages too.
 - **Every shared cell on one server**: `Http::cell(handle)` serves another
   cell on the same `/ws`, key and port; a link's hello names its cell.
+- **One socket for every cell** (aio's one socket per page): a process's or
+  page's copies of one server's cells share one socket, each a link of its
+  own on it (`x-aio-mux: 1`, the page's protocol `aio-mux`; frames
+  `<link>:<message>`); a server that doesn't say yes gets a socket per copy.
+  Three cells' copies: 3 connections → 1, patch latency unchanged.
+- **aio pages see every shared cell**: an aio page's `state`, `patches`,
+  `subs` and `<cell>:<method>` actions cover the cells `Http::cell` serves
+  too, each by its own rules.
+- **A whole app on one `TestServer`** (aio's `testServer({ cells })`):
+  `TestServer::cell::<C>()`, `client_of::<C>(user)`, and `converged` for a
+  copy of any served cell.
 - `Http::resolve_peer(f)` (aio's `resolvePeer`): who a peer app on this
   machine is here, its user and role; `Http::door_links(true)` (aio's
   `localConnectHooks`): `on_link` hears the local door's links too.

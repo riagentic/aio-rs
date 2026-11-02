@@ -163,6 +163,37 @@ one TCP port for everything network-facing:
 - `open = true` drops the key on purpose: anyone who reaches the port
   reads and calls. Said at boot and by `ax doctor`.
 
+### One socket for every cell
+
+aio's page carries every cell on one socket; so does an aio-rs client.
+`Http::cell(handle)` serves more `#[cell(shared)]` cells on the same
+`/ws`, and every copy (`Remote`, a page's `Remote::open`, a `Live` tool)
+of one server, key and pinned root shares one socket of the process or
+page: each copy is a link of its own on it (its hello, user, rules, view
+and pace), and one copy dropped closes its link, not the socket.
+
+- **Asked for**: wire 2 plus `x-aio-mux: 1` (a page: the WebSocket
+  protocol `aio-mux`, as it sets no header); the server answers with the
+  same header (or protocol). A server that doesn't (an older aio-rs) gets
+  a socket per copy, as before.
+- **Frames**: each text frame is `<link><kind><rest>`, `<link>` a number
+  the client gives each new link: `:` a link's message (`7:{"t":"hello",…}`),
+  `?` a ping and `.` its pong (`rest` the payload, hex), `!` a link closes
+  (`<code> <why>`). A link the server refuses (`too many clients`, another
+  cell) gets its `refused` message and its close; the socket stays.
+- **Limits**: each link past a socket's first counts as a client of
+  `[server.limits] clients`, at most 64 links on one socket; a link that
+  lets more than 8 MB (or one `max_message`) wait unread is closed; a
+  socket with no link for 15 s is closed.
+- **Who**: the socket's key or session is every link's; a session that
+  ends closes the socket and all its links. Each cell's own rules
+  (`#[client]`, roles, `visible`) still decide per link.
+- Measured on loopback (a copy of each of three cells, 300 server
+  changes): 3 connections before, 1 now; patch latency p50 44 → 47 µs,
+  p99 207 → 188 µs with `sync_interval_ms = 0` (the pacing window, 50 ms
+  by default, dominates otherwise:
+  `cargo test -p aio-rs --features net,testing --test one_socket -- --ignored --nocapture`).
+
 ### Routes or server functions
 
 | You need | Use | It costs |

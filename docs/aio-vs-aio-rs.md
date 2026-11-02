@@ -197,7 +197,6 @@ beyond the aio-rs form.
 | Sync | `lww-per-key` and `set-remove` view merges, HLC | methods replayed in order on the server; `Remote::merge` shows `Text`, `Counter`, `SetAdd` | a method per key | [offline](persistence/offline.md#limits-compared-with-aio) |
 | Sync | render-staleness backpressure | every link paced the same (`sync_interval_ms`) | ➖ | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
 | Sync | path subscriptions | a copy gets every patch of its cell | split cells | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | every cell on one socket | every cell on one `/ws` and port (`Http::cell`), a socket per cell | ➖ | [sync](state/sync.md#limits) |
 | Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
@@ -397,7 +396,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Path subscriptions | yes | ❌ (split cells) | ❌ |
 | Binary side channels | a raw WebSocket route, a recipe | `Route::socket` with framing, drop or close, gap checks | ✅ |
 | Server functions, routes | `serverFns`, `routes`, streamed `Response` | `aio::fns::ServerFn`, `aio::http`, `Reply::stream` | ✅ |
-| One socket, every cell | yes | one `/ws` and port for every cell (`Http::cell`), a socket per cell | 🔄 |
+| One socket, every cell | yes | `Http::cell`: one `/ws`, port and socket for every cell, a link per cell on it; an aio page sees every shared cell | ✅ |
 | Peer identity, door hooks | `resolvePeer`, `localConnectHooks` | `Http::resolve_peer`, `Http::door_links` | ✅ |
 | Pairing, discovery, peers | PIN, CPace, UDP 8099, `x-aio-peer` | the same formats | ✅ |
 | Calling another app | `peer()`, `call` | `Peer::find`, `AioLink` | ✅ |
