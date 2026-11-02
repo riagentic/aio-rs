@@ -10,6 +10,8 @@ include!("view.rs");
 
 thread_local! {
     static COPY: std::cell::RefCell<Option<aio::sync::Remote<Board>>> = Default::default();
+    /// The votes' copy, when the server serves them.
+    static VOTES: std::cell::RefCell<Option<aio::sync::Remote<Votes>>> = Default::default();
 }
 
 fn copy() -> aio::sync::Remote<Board> {
@@ -28,6 +30,9 @@ fn start() {
                 COPY.with_borrow_mut(|c| *c = Some(r.clone()));
                 _ = SOURCE.set(aio::Source::Remote(r));
                 aio::web::launch(view);
+                if let Ok(v) = aio::sync::Remote::<Votes>::open("web-test").await {
+                    VOTES.with_borrow_mut(|c| *c = Some(v));
+                }
                 "yes".to_string()
             }
             Err(e) => e.to_string(),
@@ -108,4 +113,18 @@ pub fn shown() -> String {
     let r = copy();
     let s = r.status();
     aio::serde_json::json!({ "items": r.state().items, "pending": s.pending, "online": s.online }).to_string()
+}
+
+/// The votes as the page's copy shows them (`null`: not served).
+#[wasm_bindgen]
+pub fn votes() -> String {
+    VOTES.with_borrow(|v| match v {
+        Some(v) => aio::serde_json::json!({ "n": v.state().n, "online": v.status().online }).to_string(),
+        None => "null".into(),
+    })
+}
+
+#[wasm_bindgen]
+pub fn vote() -> bool {
+    VOTES.with_borrow(|v| v.as_ref().is_some_and(|v| v.vote().is_ok()))
 }

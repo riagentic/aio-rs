@@ -110,7 +110,7 @@ mod tests {
         let p = page(&Window { title: "Board <1>", ..Default::default() });
         assert!(p.contains("<title>Board &lt;1&gt;</title>"), "{p}");
         assert!(p.contains("connect-src 'self'") && !p.contains("connect-src *"), "{p}");
-        assert!(!p.contains("unsafe-eval") && !p.contains("script-src 'unsafe-inline'"), "{p}");
+        assert!(!p.contains("'unsafe-eval'") && !p.contains("script-src 'unsafe-inline'"), "{p}");
         assert!(p.contains("'/__aio/ui'") && p.contains("window.__aioWire"), "{p}");
         // The bridge comes before the interpreter that opens it.
         assert!(p.find("__aioWire = ").unwrap() < p.find("WS_ADDR").unwrap());

@@ -84,8 +84,11 @@ new user ([auth](../auth/README.md)).
 
 ### What a browser leaves out
 
-The store's history, time travel, files, blobs, SQL tables, the server,
-schedules that outlive the page and anything native. A page has no log
+The store's history, time travel, files, blobs, SQL tables, the server
+and anything native. A page cell's schedules (`cx.after`, `every`, `at`,
+`cron`, `#[every]`, `#[cron]`) run on the page's timer while it is open and
+are kept with its state, so a reload keeps them and a missed one fires
+once, as natively; its `#[ttl]` answers are kept as natively. A page has no log
 files: `aio::info!` and its kin write to the console (`aio::web::log`).
 `aio_shell::page` (dialogs, print) is the desktop's; use the browser's
 own `<input type="file">` and `window.print()` in a page.

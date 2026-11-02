@@ -147,7 +147,7 @@ fn page_line(who: &str, d: &Value) -> Option<(crate::log::Level, String)> {
 
 /// The cells an aio page sees in `shown`, a view of `T` (pure): `T` under
 /// its id, and each `#[aio_cell]` field instead as the aio cell it is.
-pub(super) fn cells<T: Cell>(shown: &Value) -> Value {
+pub(crate) fn cells<T: Cell>(shown: &Value) -> Value {
     if T::AIO_CELLS.is_empty() {
         return json!({ T::ID: shown });
     }
@@ -201,10 +201,72 @@ fn wire_ops(ops: &[Op]) -> Value {
         .collect()
 }
 
+/// The app's other shared cells ([`crate::http::Http::cell`]), as a page
+/// sees them: what it was sent of each (its aio cells), and which changed.
+struct Others {
+    cells: Vec<std::sync::Arc<dyn crate::link::Beside>>,
+    seen: Vec<Value>,
+    moved: Vec<bool>,
+}
+
+impl Others {
+    fn new(cells: Vec<std::sync::Arc<dyn crate::link::Beside>>, seer: &crate::Caller) -> Self {
+        let seen = cells.iter().map(|c| c.aio_cells(seer)).collect();
+        Self { moved: vec![false; cells.len()], cells, seen }
+    }
+
+    /// Every cell a page sees: `own`'s (the app cell's) and the others'.
+    fn all(&self, own: Value) -> Value {
+        let mut all = own.as_object().cloned().unwrap_or_default();
+        for c in &self.seen {
+            all.extend(c.as_object().cloned().unwrap_or_default());
+        }
+        all.into()
+    }
+
+    /// The ops from what was sent to what `seer` sees now of the ones that moved.
+    fn advance(&mut self, seer: &crate::Caller) -> Vec<Op> {
+        let mut ops = vec![];
+        for (i, c) in self.cells.iter().enumerate() {
+            if std::mem::take(&mut self.moved[i]) {
+                let now = c.aio_cells(seer);
+                ops.extend(crate::patch::diff(&self.seen[i], &now));
+                self.seen[i] = now;
+            }
+        }
+        ops
+    }
+
+    /// Seen again whole (`seer`'s role changed).
+    fn reseen(&mut self, seer: &crate::Caller) {
+        *self = Self::new(std::mem::take(&mut self.cells), seer);
+    }
+
+    /// Its changes, each the index of the cell that moved and whether it is
+    /// a person's call (sent at once), until the session ends.
+    fn watch(&self, tasks: &mut tokio::task::JoinSet<()>) -> tokio::sync::mpsc::UnboundedReceiver<(usize, bool)> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        for (i, c) in self.cells.iter().enumerate() {
+            let (mut events, tx) = (c.events(), tx.clone());
+            tasks.spawn(async move {
+                loop {
+                    let ev = events.recv().await;
+                    if matches!(ev, Err(RecvError::Closed)) || tx.send((i, crate::link::urgent(&ev))).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        rx
+    }
+}
+
 /// Send what changed since `view` in the cells `subs` shows; `view` is now.
+#[allow(clippy::too_many_arguments)]
 async fn catch_up<T: Cell>(
     w: &mut Sock,
     view: &mut View,
+    others: &mut Others,
     h: &Handle<T>,
     viewer: &crate::Caller,
     subs: &Option<Vec<String>>,
@@ -214,10 +276,11 @@ async fn catch_up<T: Cell>(
     let now = View::of(h, viewer);
     let mut ops = crate::patch::diff(&cells::<T>(&view.shown), &cells::<T>(&now.shown));
     *view = View { size: view.size, ..now };
+    ops.extend(others.advance(viewer));
     ops.retain(|op| subs.as_ref().is_none_or(|s| cell_of(op).is_some_and(|c| s.iter().any(|x| x == c))));
     if !ops.is_empty() {
         // Over aio's `fullStateThreshold` of the view: the view instead.
-        let all = || shown(cells::<T>(&view.shown), subs);
+        let all = || shown(others.all(cells::<T>(&view.shown)), subs);
         let msg = match crate::link::whole(&ops, full_percent, &mut view.size, || crate::patch::json_len(&all())) {
             true => json!({ "v": 2, "t": "state", "d": all(), "s": subs }),
             false => enc("patches", wire_ops(&ops)),
@@ -253,9 +316,13 @@ async fn travel<T: Cell>(h: &Handle<T>, ask: Option<crate::TimeAsk>) -> Result<V
 
 /// One aio client, until it leaves.
 /// `gate`: what it may call. `signed`: the user its session proved (else
-/// everyone is `peer`). `link`: its id and who it is, for health.
+/// everyone is `peer`). `link`: its id and who it is, for health. `beside`:
+/// the app's other shared cells, each seen, patched and called as its own
+/// rules say (time travel and aio's CRDT sync are the app cell's).
+#[allow(clippy::too_many_arguments)]
 pub async fn session<T: Cell>(
     h: Handle<T>,
+    beside: &[std::sync::Arc<dyn crate::link::Beside>],
     mut w: Sock,
     limits: crate::sync::Limits,
     gate: crate::link::Gate,
@@ -279,13 +346,16 @@ pub async fn session<T: Cell>(
     let mut seer = crate::Caller { by: viewer.clone(), role: role(&gate).await.map_err(|e| e.to_string())? };
     let mut events = h.events();
     let mut view = View::of(&h, &seer);
+    let mut others = Others::new(beside.iter().filter(|c| c.id() != T::ID).cloned().collect(), &seer);
+    let mut watching = tokio::task::JoinSet::new();
+    let mut moved = others.watch(&mut watching);
     let mut subs: Option<Vec<String>> = None;
-    let state = |view: &View, subs: &Option<Vec<String>>| json!({ "v": 2, "t": "state", "d": shown(cells::<T>(&view.shown), subs), "s": subs });
+    let state = |view: &View, others: &Others, subs: &Option<Vec<String>>| json!({ "v": 2, "t": "state", "d": shown(others.all(cells::<T>(&view.shown)), subs), "s": subs });
     let hello = json!({ "v": VERSION, "min": MIN, "ver": crate::BUILT_BY, "maxMessageBytes": limits.max_message, "rate": limits.calls_per_sec, "cfg": false, "appId": T::ID, "user": null });
     send_ax(&mut w, &enc("proto", hello)).await?;
     let mut pushes = crate::budgets::Pushes::default();
     let mut paced = crate::link::Paced::new(limits.sync_interval_ms);
-    send_ax(&mut w, &state(&view, &subs)).await?;
+    send_ax(&mut w, &state(&view, &others, &subs)).await?;
     send_ax(&mut w, &enc("boot", json!({ "id": boot_id() }))).await?;
     let h = h.by(viewer.clone());
     let mut pulse = crate::link::Pulse::new();
@@ -294,8 +364,9 @@ pub async fn session<T: Cell>(
     let mut bytes = crate::link::Pace::new(limits.bytes_per_sec);
     let mut running = tokio::task::JoinSet::new();
     let (held_tx, mut held) = tokio::sync::mpsc::unbounded_channel();
-    // An async method's ack, once its end comes (aio acks on completion).
-    let (ends_tx, mut ends) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    // An async method's ack, once its end comes (aio acks on completion),
+    // and the other cell it ran on.
+    let (ends_tx, mut ends) = tokio::sync::mpsc::unbounded_channel::<(Value, Option<usize>)>();
     // Time travel: shown after each change (`sub`; unsaid until it says or
     // drives it), to whom it is the operator's.
     let (mut tt_sub, mut greeted) = (None::<bool>, false);
@@ -306,9 +377,12 @@ pub async fn session<T: Cell>(
         tokio::select! {
             Some(Ok(answer)) = running.join_next(), if !running.is_empty() => send_ax(&mut w, &answer).await?,
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
-            Some(ack) = ends.recv() => {
+            Some((ack, other)) = ends.recv() => {
                 while events.try_recv().is_ok() {}
-                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                if let Some(i) = other {
+                    others.moved[i] = true;
+                }
+                catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                 send_ax(&mut w, &enc("ack", ack)).await?;
             }
             // Another link's op, to a link that syncs and sees its whole cell.
@@ -327,12 +401,13 @@ pub async fn session<T: Cell>(
                 if now != seer.role {
                     seer.role = now;
                     view = View::of(&h, &seer);
-                    send_ax(&mut w, &state(&view, &subs)).await?;
+                    others.reseen(&seer);
+                    send_ax(&mut w, &state(&view, &others, &subs)).await?;
                 }
             }
             () = paced.due() => {
                 paced.sent();
-                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                 if tt_sub == Some(true) && travels(&seer.role) && let Ok(tt) = travel(&h, None).await {
                     send_ax(&mut w, &tt).await?;
                 }
@@ -342,12 +417,20 @@ pub async fn session<T: Cell>(
                 // Held for the window (`syncIntervalMs`), or now.
                 ev => if paced.now(crate::link::urgent(&ev)) {
                     paced.sent();
-                    catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                    catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                     if tt_sub == Some(true) && travels(&seer.role) && let Ok(tt) = travel(&h, None).await {
                         send_ax(&mut w, &tt).await?;
                     }
                 },
             },
+            // Another cell's change, paced as the app cell's.
+            Some((i, urgent)) = moved.recv() => {
+                others.moved[i] = true;
+                if paced.now(urgent) {
+                    paced.sent();
+                    catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                }
+            }
             msg = next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes) => {
                 let Some(msg) = msg else { return Ok(()) };
                 if matches!(msg["t"].as_str(), Some("action" | "sfn" | "op" | "sync-req")) {
@@ -366,14 +449,14 @@ pub async fn session<T: Cell>(
                     "subs" => match parse_subs(&d["subs"]) {
                         Ok(s) => {
                             subs = s;
-                            send_ax(&mut w, &state(&view, &subs)).await?;
+                            send_ax(&mut w, &state(&view, &others, &subs)).await?;
                         }
                         Err(()) => {
                             let diag = json!({ "type": "subs-refused", "severity": "warning", "source": "server-ws", "message": "this page's subscription set was refused by the server", "hint": "send 1 to 1024 cell names or paths, or [\"*\"]" });
                             send_ax(&mut w, &enc("diag", diag)).await?;
                         }
                     },
-                    "resync" => send_ax(&mut w, &state(&view, &subs)).await?,
+                    "resync" => send_ax(&mut w, &state(&view, &others, &subs)).await?,
                     // A UI is greeted with where time travel is (its panel binds on it).
                     "type" if matches!(d["kind"].as_str(), Some("browser" | "electron")) => {
                         if !std::mem::replace(&mut greeted, true) && travels(&seer.role) && let Ok(tt) = travel(&h, None).await {
@@ -398,7 +481,7 @@ pub async fn session<T: Cell>(
                                 let r = travel(&h, Some(ask)).await;
                                 // Its change first, then where the cell is (as an ack).
                                 while events.try_recv().is_ok() {}
-                                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                                catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                                 match r {
                                     Ok(tt) => send_ax(&mut w, &tt).await?,
                                     Err(e) => eprintln!("[aio] aio page: time travel {cmd:?}: {e}"),
@@ -442,7 +525,7 @@ pub async fn session<T: Cell>(
                             super::crdt::Taken::Held(f) => Some(f),
                         };
                         while events.try_recv().is_ok() {}
-                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                        catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                         if let Some(f) = said {
                             send_ax(&mut w, &f).await?;
                         }
@@ -451,7 +534,7 @@ pub async fn session<T: Cell>(
                         passed.get_or_insert_with(|| h.aio_sync().ops.subscribe());
                         let frames = super::crdt::answer(&h, &gate, &seer, link, d).await?;
                         while events.try_recv().is_ok() {}
-                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                        catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                         for f in frames {
                             send_ax(&mut w, &f).await?;
                         }
@@ -459,15 +542,28 @@ pub async fn session<T: Cell>(
                     "action" => {
                         let cid = d["cid"].clone();
                         let kind = d["type"].as_str().unwrap_or_default();
-                        let method = kind.split_once(':').and_then(|(c, m)| super::data::method_of::<T>(c, m));
-                        let is_async = method.as_deref().is_some_and(|m| T::async_mode(m).is_some());
+                        // The app cell's method, or another cell's (`None`: the app cell).
+                        let method = kind.split_once(':').and_then(|(c, m)| {
+                            super::data::method_of::<T>(c, m).map(|m| (None, m)).or_else(|| {
+                                others.cells.iter().enumerate().find_map(|(i, o)| Some((Some(i), o.aio_method(c, m)?)))
+                            })
+                        });
+                        let is_async = method.as_ref().is_some_and(|(i, m)| match i {
+                            None => T::async_mode(m).is_some(),
+                            Some(i) => others.cells[*i].is_async(m),
+                        });
+                        let on = method.as_ref().and_then(|(i, _)| *i);
                         let r = match method {
                             None => Err(crate::Rejected::coded(crate::Code::ActionRefused, format!("unknown action {kind}"))),
-                            Some(m) => {
+                            Some((i, m)) => {
                                 let (hh, gate, by) = (h.clone(), gate.clone(), viewer.clone());
+                                let other = i.map(|i| others.cells[i].clone());
                                 let args = d["payload"]["args"].clone();
                                 let args = if args.is_null() { json!([]) } else { args };
-                                let r = tokio::task::spawn_blocking(move || gate.ask(&hh, &by, &m, args, None));
+                                let r = tokio::task::spawn_blocking(move || match other {
+                                    None => gate.ask(&hh, &by, &m, args, None),
+                                    Some(o) => o.ask(&gate, &by, &m, args),
+                                });
                                 r.await.map_err(|e| e.to_string())?
                             }
                         };
@@ -477,10 +573,12 @@ pub async fn session<T: Cell>(
                         // An async method is acked on its end, with its answer.
                         let r = match r {
                             Ok((_, answer)) if is_async => {
-                                let (tx, closing) = (ends_tx.clone(), h.clone());
+                                let tx = ends_tx.clone();
+                                let (hh, other) = (h.clone(), on.map(|i| others.cells[i].clone()));
                                 tokio::spawn(async move {
                                     let end = answer.await;
-                                    _ = tx.send(ack_of(cid, end.map(Some), closing.closing()));
+                                    let closing = other.map_or_else(|| hh.closing(), |o| o.closing());
+                                    _ = tx.send((ack_of(cid, end.map(Some), closing), on));
                                 });
                                 continue;
                             }
@@ -489,8 +587,12 @@ pub async fn session<T: Cell>(
                         };
                         // Its change first, then the ack (as aio).
                         while events.try_recv().is_ok() {}
-                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
-                        send_ax(&mut w, &enc("ack", ack_of(cid, r, h.closing()))).await?;
+                        if let Some(i) = on {
+                            others.moved[i] = true;
+                        }
+                        catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                        let closing = on.map_or_else(|| h.closing(), |i| others.cells[i].closing());
+                        send_ax(&mut w, &enc("ack", ack_of(cid, r, closing))).await?;
                     }
                     // "x" is reserved and ignored; other kinds aren't ours to answer.
                     _ => {}

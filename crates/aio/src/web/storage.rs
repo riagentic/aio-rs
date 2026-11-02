@@ -54,6 +54,63 @@ pub struct Doc {
     pub seq: u64,
     pub view: Value,
     pub pending: Vec<Queued>,
+    /// A page cell's schedules (a synced copy has none: its server runs them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sched: Vec<Due>,
+}
+
+/// A schedule a page's cell set (`cx.after`, `every`, `at`, `cron`, and its
+/// declared ones as `@<method>`), kept in its document: the native store's
+/// `sched` row.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Due {
+    pub key: String,
+    /// When it runs next (ms since the epoch).
+    pub due: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    pub method: String,
+    pub args: Value,
+}
+
+/// `have` once `d` fired at `now`, as the native store re-arms (pure): a
+/// repeating one moves to its next slot after `now` (missed slots fire
+/// once), a one-shot goes. Only the one that fired: one its method set
+/// again meanwhile keeps its own time.
+pub fn rearm(have: &mut Vec<Due>, d: &Due, now: i64) {
+    let Some(i) = have.iter().position(|x| x.key == d.key && x.due == d.due) else { return };
+    match crate::cx::next_run(d.due, d.every, d.cron.as_deref(), now) {
+        Some(next) => have[i].due = next,
+        None => _ = have.remove(i),
+    }
+}
+
+/// `have` with a cell's declared schedules (`#[every]`, `#[cron]`) armed as
+/// `@<method>`, as the native store arms them (pure): one kept with the same
+/// timing keeps its next run, a changed one starts over from `now`, and an
+/// `@` one no longer declared goes.
+pub fn declare(have: &mut Vec<Due>, declared: &[crate::Declared], now: i64) -> Result<(), String> {
+    have.retain(|d| d.key.strip_prefix('@').is_none_or(|m| declared.iter().any(|s| s.method == m)));
+    for s in declared {
+        let key = format!("@{}", s.method);
+        if have.iter().any(|d| d.key == key && d.every == s.every && d.cron.as_deref() == s.cron) {
+            continue;
+        }
+        let due = match (s.every, s.cron) {
+            (Some(ms), _) => now + ms,
+            (None, Some(c)) => {
+                let c = crate::cron::Cron::parse(c).map_err(|e| format!("{}: #[cron]: {e}", s.method))?;
+                c.next(now).ok_or_else(|| format!("{}: #[cron] never runs", s.method))?
+            }
+            (None, None) => continue,
+        };
+        have.retain(|d| d.key != key);
+        let cron = s.cron.map(String::from);
+        have.push(Due { key, due, every: s.every, cron, method: s.method.into(), args: Value::Null });
+    }
+    Ok(())
 }
 
 /// The namespace of app `app`'s documents. `localStorage` is per origin, not
@@ -197,7 +254,8 @@ mod tests {
     }
 
     fn doc(user: &str, seq: u64, pending: Vec<Queued>) -> Doc {
-        Doc { cell: "todos".into(), v: 1, user: user.into(), seq, view: serde_json::json!({ "seq": seq }), pending }
+        let view = serde_json::json!({ "seq": seq });
+        Doc { cell: "todos".into(), v: 1, user: user.into(), seq, view, pending, sched: Vec::new() }
     }
 
     fn ops(kv: &Map, key: &str) -> Vec<String> {
@@ -304,5 +362,58 @@ mod tests {
         kv.set("aio.app:gone.corrupt", "{").unwrap();
         assert_eq!(orphans(&kv, "app", &["todos"]), [("old".to_string(), 2)]);
         assert!(orphans(&kv, "app", &["todos", "old"]).is_empty());
+    }
+
+    fn due(key: &str, due: i64, every: Option<i64>, cron: Option<&str>) -> Due {
+        Due { key: key.into(), due, every, cron: cron.map(String::from), method: "tick".into(), args: Value::Null }
+    }
+
+    #[test]
+    fn a_fired_schedule_rearms_as_natively_missed_slots_once_a_one_shot_goes() {
+        let mut have = vec![due("poll", 1000, Some(100), None), due("once", 1000, None, None)];
+        let (poll, once) = (have[0].clone(), have[1].clone());
+        rearm(&mut have, &poll, 1050);
+        assert_eq!(have[0].due, 1100, "its next slot");
+        rearm(&mut have, &due("poll", 1100, Some(100), None), 1450);
+        assert_eq!(have[0].due, 1550, "missed slots fire once, then on from now");
+        rearm(&mut have, &once, 1000);
+        assert_eq!(have.len(), 1, "a one-shot goes");
+        // Set again meanwhile (another due): what fired doesn't touch it.
+        rearm(&mut have, &poll, 2000);
+        assert_eq!(have[0].due, 1550);
+        // A cron one: its next slot after now (a minute's).
+        let mut c = vec![due("c", 60_000, None, Some("* * * * *"))];
+        let fired = c[0].clone();
+        rearm(&mut c, &fired, 150_000);
+        assert_eq!(c[0].due, 180_000);
+    }
+
+    #[test]
+    fn declared_schedules_arm_as_at_method_keep_their_time_and_go_once_undeclared() {
+        let d = |method, every, cron| crate::Declared { method, every, cron, skip_if_running: false };
+        let mut have = vec![due("mine", 5, None, None), due("@gone", 5, Some(10), None)];
+        declare(&mut have, &[d("tick", Some(1000), None), d("daily", None, Some("0 9 * * *"))], 0).unwrap();
+        let keys: Vec<&str> = have.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys, ["mine", "@tick", "@daily"], "an app-set one stays; an undeclared @ one goes");
+        assert_eq!((have[1].due, have[2].due), (1000, 9 * 3_600_000));
+        // Booted again later with the same timing: the next run is kept.
+        declare(&mut have, &[d("tick", Some(1000), None), d("daily", None, Some("0 9 * * *"))], 500).unwrap();
+        assert_eq!(have[1].due, 1000);
+        // A changed timing starts over from now.
+        declare(&mut have, &[d("tick", Some(2000), None)], 500).unwrap();
+        assert_eq!((have.len(), have[1].key.as_str(), have[1].due), (2, "@tick", 2500));
+        assert!(declare(&mut have, &[d("bad", None, Some("nope"))], 0).unwrap_err().contains("bad: #[cron]"));
+    }
+
+    #[test]
+    fn a_document_keeps_its_schedules_and_one_saved_before_them_reads() {
+        let kv = Map::default();
+        let mut d = doc("", 0, vec![]);
+        d.sched = vec![due("poll", 1000, Some(100), None)];
+        save(&kv, K, d.clone(), &none(), |_| {}).unwrap();
+        assert_eq!(load(&kv, K, |_| {}).unwrap().sched, d.sched);
+        kv.set(K, r#"{"cell":"todos","v":1,"seq":0,"view":null,"pending":[]}"#).unwrap();
+        assert!(load(&kv, K, |_| panic!("read")).unwrap().sched.is_empty());
+        assert!(!serde_json::to_string(&doc("", 0, vec![])).unwrap().contains("sched"), "a copy's stays as it was");
     }
 }
