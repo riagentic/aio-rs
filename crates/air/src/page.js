@@ -148,8 +148,8 @@
     }
     const range = () => span(node(), node())
     // `style:<property>`: a CSS property (rsx!'s style attributes), else an
-    // attribute. A `style` string keeps the properties it doesn't set, as
-    // Dioxus did: `position: "fixed", style: "inset: 0"` is both.
+    // attribute. A `style` string keeps the properties it doesn't set:
+    // `position: "fixed", style: "inset: 0"` is both.
     const attr = (n, k, v) => {
       if (k.startsWith('style:')) return n.style.setProperty(k.slice(6), v)
       if (k !== 'style') return n.setAttribute(k, v)
