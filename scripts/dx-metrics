@@ -345,11 +345,15 @@ def live(aio, app, env, home):
                 if waiter.poll() is not None or time.monotonic() > end:
                     fail("the page's poller didn't start")
                 time.sleep(0.02)
-            saved = time.time()
+            before, saved = len(said()), time.time()
             f.write_bytes((text.replace(old, new, 1) if old else text + new).encode())
             try:
                 shown, _ = waiter.communicate(timeout=60)
                 row[col] = json.loads(shown) / 1000 - saved
+                # How it came: ax dev's lines of this edit (a reload, a patch, a rebuild).
+                for line in said()[before:].splitlines():
+                    if line.startswith("ax dev:"):
+                        print(f"{col}: {line}", file=sys.stderr)
             except (subprocess.TimeoutExpired, ValueError):
                 waiter.kill()
                 fail(f"{path}: the edit didn't show in 60 s")

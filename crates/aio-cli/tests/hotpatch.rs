@@ -57,7 +57,7 @@ fn named() -> u32 {
         return 1;
     }
     let bt = std::backtrace::Backtrace::force_capture().to_string();
-    if bt.lines().any(|l| l.trim_end().ends_with(": fixture_app::named")) { TRACE } else { eprintln!("{bt}"); 0 }
+    if bt.lines().any(|l| l.trim_end().ends_with(": fixture_app::named")) { TRACE } else { 0 }
 }
 
 // Windows (MSVC), as aio-shell does after each patch (`refresh_symbols`):
