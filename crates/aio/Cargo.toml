@@ -123,11 +123,9 @@ name = "ui"
 
 [[test]]
 name = "route"
-required-features = ["kit"]
 
 [[test]]
 name = "route_tree"
-required-features = ["kit"]
 
 [[test]]
 name = "kit"
@@ -196,7 +194,7 @@ sha2 = "0.10"
 # build --web` binds with (aio-cli `setup::WASM_BINDGEN`, fetched prebuilt).
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["console", "Document", "Element", "Event", "EventTarget", "Headers", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "Notification", "NotificationOptions", "NotificationPermission", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "WebSocket", "Window"] }
+web-sys = { version = "0.3", features = ["console", "Document", "Element", "Event", "EventTarget", "Headers", "History", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "Notification", "NotificationOptions", "NotificationPermission", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "WebSocket", "Window"] }
 # The app's views in the page (`web`): the real DOM, from Dioxus.
 # Its document is aio's (`web::page`): the page's DOM, no `eval`.
 dioxus-web = { version = "=0.7.10", default-features = false, features = ["mounted"], optional = true }

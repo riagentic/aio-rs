@@ -1,5 +1,7 @@
 //! The router in a view: typed pages, links, Back (aio tests/router.test.ts,
 //! router-navlink-outlet, router-link-class-and-onclick, standalone-router).
+//! The same views on either renderer.
+#![cfg(any(feature = "kit", feature = "air"))]
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
 
@@ -17,7 +19,7 @@ aio::routes! {
 fn Dialog() -> View {
     let open = signal(|| true);
     use_back(move || {
-        let was = *open.read_untracked();
+        let was = open.get_untracked();
         open.set(false);
         was
     });
@@ -29,8 +31,7 @@ fn Dialog() -> View {
 }
 
 fn app() -> View {
-    let page = Page::parse(&here().path);
-    let mut closes = signal(|| 0);
+    let closes = signal(|| 0);
     rsx! {
         // Links as blocks: each a whole row to click.
         style { "a {{ display: block }}" }
@@ -38,15 +39,18 @@ fn app() -> View {
             Link { to: "/", exact: true, "data-t": "home", "Home" }
             Link { to: Page::User { id: 7 }.href(), class: "nav", "data-t": "user", "User 7" }
             Link { to: "/files/a b/c.md", replace: true, "data-t": "file", "File" }
-            Link { to: "/users/8", onclick: move |e: MouseEvent| { e.prevent_default(); closes += 1; }, "data-t": "kept", "Menu" }
+            Link { to: "/users/8", onclick: move |e: MouseEvent| { e.prevent_default(); closes.update(|c| *c += 1); }, "data-t": "kept", "Menu" }
             Link { to: "https://example.com/", "data-t": "out", "Out" }
         }
         p { "data-t": "closes", "{closes}" }
-        match page {
-            Some(Page::Home) => rsx! { p { "data-t": "page", "home" } },
-            Some(Page::User { id }) => rsx! { p { "data-t": "page", "user {id}" } Dialog {} },
-            Some(Page::Files { path }) => rsx! { p { "data-t": "page", "file {path}" } },
-            None => rsx! { p { "data-t": "page", "not found" } },
+        // The page follows the place where it is drawn (a hole on air).
+        {
+            match Page::parse(&here().path) {
+                Some(Page::Home) => rsx! { p { "data-t": "page", "home" } },
+                Some(Page::User { id }) => rsx! { p { "data-t": "page", "user {id}" } Dialog {} },
+                Some(Page::Files { path }) => rsx! { p { "data-t": "page", "file {path}" } },
+                None => rsx! { p { "data-t": "page", "not found" } },
+            }
         }
     }
 }
