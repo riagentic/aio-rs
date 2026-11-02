@@ -312,7 +312,7 @@ The words after the app go to the app, except these, which `ax dev` reads:
 | `--cdp[=port]` | the window opens the DevTools protocol on loopback (a free port without one), for other tools |
 | `--tui` | dx's own screen and keys instead of `ax`'s compact lines |
 | `--android [--device serial] [--native]` | on the attached emulator or phone (`ANDROID_SERIAL`; none: `AIO_AVD` booted): its web build in a dev APK installed once beside the app, each edit reloading it (`--native`, or no web build: the app itself for that CPU, again on every save); its log in the terminal |
-| `--web` | its web build (debug) served on loopback, its tabs live: a saved stylesheet shows at once, another edit builds anew and reloads |
+| `--web [--port N] [--expose]` | its web build (debug) served on loopback (`--port`: that port; `--expose`: the network over TLS, behind a key the printed link carries), its tabs live: a saved stylesheet shows at once, another edit builds anew and reloads |
 
 ```sh
 ax dev notes                              # the window, hot-patched

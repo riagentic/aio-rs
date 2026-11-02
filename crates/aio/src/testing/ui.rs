@@ -1260,10 +1260,13 @@ impl TestUi {
         let dir = trace_dir();
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let file = dir.join(format!("ui-{stamp}.json"));
-        // Another test that passed may remove the shared folders above
-        // `dir` (when empty) between our making them and our file: again.
+        // Another test's passing `TestUi` removes the shared parent folders
+        // while they are empty (its `Drop`), which can land between the steps
+        // of `create_dir_all`: a NotFound is that race, tried again.
         let write = || std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, body.to_string()));
-        if (0..5).all(|_| write().is_err()) {
+        let raced = |r: &std::io::Result<()>| matches!(r, Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+        let wrote = (0..5).map(|_| write()).find(|r| !raced(r));
+        if !matches!(wrote, Some(Ok(()))) {
             return String::new();
         }
         let mut old: Vec<_> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).collect();

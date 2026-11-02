@@ -425,9 +425,6 @@ ax build dash                       # the installable app
 
 - The load and memory reads are Linux's; on macOS and Windows `sample()`
   returns zeros until it is given that OS's call.
-- One server serves one shared cell (`aio::sync::serve` takes one
-  `Handle`); aio serves every cell on one socket. Keep what the screens
-  share in one cell, or one served app per cell.
 - No chart component in the kit: SVG by hand, or a library in a
   `WebIsland`.
 

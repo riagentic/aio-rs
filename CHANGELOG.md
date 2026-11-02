@@ -357,6 +357,14 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
+- **Schedules in the web build**: a page cell's `cx.after`, `every`, `at`,
+  `cron`, `backoff` and its declared `#[every]`/`#[cron]` run on the page's
+  timer, kept with its state in the browser's storage (a reload keeps them,
+  missed ones fire once, re-armed as natively); `skip_if_running` holds.
+- **`#[ttl]` answers in the web build**: a page cell answers a repeat
+  within its ttl without running it, with the native answer cache.
+- `ax dev <app> --web --port N --expose`: a fixed port, and the LAN over
+  TLS behind a key made for the run, carried once by the printed link.
 - **Patches carry a resized array's items** (aio's narrowed Immer ops): a
   push, a spread or a filter sends one `insert` per item put in or `del`
   per item taken out, not the array; a sort or a rebuild still sends it
@@ -368,6 +376,17 @@ version may break things.
   bigger patch. Both on aio pages too.
 - **Every shared cell on one server**: `Http::cell(handle)` serves another
   cell on the same `/ws`, key and port; a link's hello names its cell.
+- **One socket for every cell** (aio's one socket per page): a process's or
+  page's copies of one server's cells share one socket, each a link of its
+  own on it (`x-aio-mux: 1`, the page's protocol `aio-mux`; frames
+  `<link>:<message>`); a server that doesn't say yes gets a socket per copy.
+  Three cells' copies: 3 connections → 1, patch latency unchanged.
+- **aio pages see every shared cell**: an aio page's `state`, `patches`,
+  `subs` and `<cell>:<method>` actions cover the cells `Http::cell` serves
+  too, each by its own rules.
+- **A whole app on one `TestServer`** (aio's `testServer({ cells })`):
+  `TestServer::cell::<C>()`, `client_of::<C>(user)`, and `converged` for a
+  copy of any served cell.
 - `Http::resolve_peer(f)` (aio's `resolvePeer`): who a peer app on this
   machine is here, its user and role; `Http::door_links(true)` (aio's
   `localConnectHooks`): `on_link` hears the local door's links too.
@@ -578,10 +597,6 @@ version may break things.
 
 ### Fixed
 
-- `TestUi`'s failure trace is written even while another test that passed
-  clears its own: that one removes the shared trace folders when empty, and
-  could between this one making them and writing its file (the failure
-  then named no trace; seen on Windows).
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled
@@ -662,6 +677,10 @@ version may break things.
   its profile, is told so plainly with what to type ("notes isn't running:
   start it with `ax start notes`"; no server: the aio.toml lines that
   give it one), not "the app isn't serving (no serving.json)".
+- `ax dev <app> --web` with any other flag ran the desktop app; it now
+  takes `--port` and `--expose` in any order and refuses other flags.
+- The desktop window's page policy lets WebAssembly compile
+  (`'wasm-unsafe-eval'`, as aio's `script-src`; still no `eval`).
 - A clean stop leaves no socket behind: a cell's door served on the
   runtime was never dropped, so its `cell-<id>.sock` (and its folder)
   outlived the app.

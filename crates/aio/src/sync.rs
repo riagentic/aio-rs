@@ -402,6 +402,10 @@ fn ws<T: Cell>(
                 }
                 // A browser can't set a header on its socket: it says `?wire=2`.
                 let wire2 = headers.get(WIRE_HEADER).is_some_and(|v| v == "2") || q.get("wire").is_some_and(|v| v == "2");
+                // Every link of the client on this one socket (a page asks by protocol).
+                let ws = if wire2 { ws.protocols([crate::mux::PROTOCOL]) } else { ws };
+                let mux = wire2
+                    && (headers.get(crate::mux::HEADER).is_some_and(|v| v == "1") || ws.selected_protocol().is_some());
                 if !wire2 && !cfg!(feature = "compat") {
                     open_links.fetch_sub(1, Ordering::SeqCst);
                     let why = "this app speaks aio-rs's wire 2 only: send `x-aio-wire: 2` or `?wire=2` (aio clients need aio-rs's feature `compat`)";
@@ -414,7 +418,8 @@ fn ws<T: Cell>(
                     // Never the door's rights over the network.
                     _ => Gate::Key,
                 };
-                ws.max_message_size(MAX_MESSAGE)
+                let slots = open_links.clone();
+                let mut reply = ws.max_message_size(MAX_MESSAGE)
                     .on_upgrade(move |s| async move {
                         let viewer = signed.as_ref().or(known.as_ref()).map(|(by, _)| by.clone());
                         let account = auth.clone().zip(signed.as_ref().map(|(_, t)| t.clone()));
@@ -424,11 +429,26 @@ fn ws<T: Cell>(
                         });
                         let calls = crate::fns::Served { fns, account, known: caller, from: (ip, fn_headers(headers)) };
                         let run = async {
+                            if mux {
+                                let run: crate::mux::Run = Arc::new(move |w| {
+                                    let (h, beside, from, gate, viewer, calls, on_link) = (
+                                        h.clone(),
+                                        beside.clone(),
+                                        from.clone(),
+                                        gate.clone(),
+                                        viewer.clone(),
+                                        calls.clone(),
+                                        on_link.clone(),
+                                    );
+                                    Box::pin(linked(h, beside, w, limits, from, gate, viewer, calls, on_link))
+                                });
+                                return crate::mux::serve(s, run, slots, limits.clients, limits.max_message).await;
+                            }
                             #[cfg(not(feature = "compat"))]
-                            let r = linked(h, &beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
+                            let r = linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
                             #[cfg(feature = "compat")]
                             let r = if wire2 {
-                                linked(h, &beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
+                                linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
                             } else {
                                 let user = match &viewer {
                                     Some(By::User(u)) => u.clone(),
@@ -438,7 +458,7 @@ fn ws<T: Cell>(
                                 let who = format!("{user} from {from} (aio)");
                                 let listed = Listed::new(Client::new(T::ID, user, "aio", from));
                                 let link = (listed.0, who);
-                                crate::compat::wire::session(h, Sock::Ws(s), limits, gate, viewer, calls, link).await
+                                crate::compat::wire::session(h, &beside, Sock::Ws(s), limits, gate, viewer, calls, link).await
                             };
                             r
                         };
@@ -459,7 +479,11 @@ fn ws<T: Cell>(
                             eprintln!("[aio] sync: {e}");
                         }
                     })
-                    .into_response()
+                    .into_response();
+                if mux {
+                    reply.headers_mut().insert(crate::mux::HEADER, axum::http::HeaderValue::from_static("1"));
+                }
+                reply
             }
         },
     )
@@ -470,7 +494,7 @@ fn ws<T: Cell>(
 #[allow(clippy::too_many_arguments)]
 async fn linked<T: Cell>(
     h: Handle<T>,
-    beside: &[Arc<dyn crate::link::Beside>],
+    beside: Arc<Vec<Arc<dyn crate::link::Beside>>>,
     mut w: Sock,
     limits: Limits,
     from: String,
@@ -1409,7 +1433,6 @@ fn cleartext_refusal(os: &str, link: &Link) -> Option<String> {
 /// The socket to `link`'s `/ws`, the key shown; `wire2`: as an aio-rs client
 /// (else the server speaks aio's protocol v3, as to an aio page).
 pub(crate) async fn dial(link: &Link, wire2: bool) -> std::io::Result<Wire> {
-    let bad = |m: String| std::io::Error::other(m);
     if is_door(&link.addr) {
         return match wire2 {
             true => Ok(Box::new(door_wire(crate::door::dial(&link.addr).await?))),
@@ -1425,27 +1448,49 @@ pub(crate) async fn dial(link: &Link, wire2: bool) -> std::io::Result<Wire> {
     if link.root.is_some() {
         return Err(crate::left_out("tls", "a link pinned to a root (wss)"));
     }
+    #[cfg(not(feature = "tls"))]
+    let connector = ();
     let scheme = if link.root.is_some() { "wss" } else { "ws" };
     if let Some(why) = cleartext_refusal(std::env::consts::OS, link) {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, why));
     }
     crate::capabilities::check("sync", &link.addr)?;
+    match wire2 {
+        // Every link to this server on one socket.
+        true => crate::mux::link(link, socket(link, true, scheme, connector)).await,
+        false => Ok(socket(link, false, scheme, connector).await?.0),
+    }
+}
+
+/// A new socket to `link`'s `/ws` (`wire2`: asking for every link on it); is
+/// it the server's yes to that.
+async fn socket(
+    link: &Link,
+    wire2: bool,
+    scheme: &str,
+    #[cfg(feature = "tls")] connector: Option<tokio_tungstenite::Connector>,
+    #[cfg(not(feature = "tls"))] _: (),
+) -> std::io::Result<(Wire, bool)> {
+    let bad = |m: String| std::io::Error::other(m);
     let stream = tokio::net::TcpStream::connect(&link.addr).await?;
     let mut req = format!("{scheme}://{}/ws", link.addr).into_client_request().map_err(|e| bad(e.to_string()))?;
     req.headers_mut()
         .insert("authorization", format!("Bearer {}", link.token).parse().map_err(|_| bad("bad token".into()))?);
     if wire2 {
         req.headers_mut().insert(WIRE_HEADER, axum::http::HeaderValue::from_static("2"));
+        req.headers_mut().insert(crate::mux::HEADER, axum::http::HeaderValue::from_static("1"));
     }
     let cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE));
     #[cfg(feature = "tls")]
     let r = tokio_tungstenite::client_async_tls_with_config(req, stream, Some(cfg), connector)
         .await
-        .map(|(w, _)| Box::new(w) as Wire);
+        .map(|(w, r)| (Box::new(w) as Wire, r));
     #[cfg(not(feature = "tls"))]
-    let r = tokio_tungstenite::client_async_with_config(req, stream, Some(cfg)).await.map(|(w, _)| Box::new(w) as Wire);
+    let r = tokio_tungstenite::client_async_with_config(req, stream, Some(cfg))
+        .await
+        .map(|(w, r)| (Box::new(w) as Wire, r));
     match r {
-        Ok(w) => Ok(w),
+        Ok((w, r)) => Ok((w, wire2 && r.headers().get(crate::mux::HEADER).is_some_and(|v| v == "1"))),
         Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == 401 => {
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "refused: wrong key"))
         }

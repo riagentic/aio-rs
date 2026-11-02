@@ -630,13 +630,42 @@ pub fn rebuilds(changed: &[PathBuf]) -> bool {
     changed.iter().any(|p| p.extension().is_none_or(|e| e != "css"))
 }
 
-/// `ax dev <name> --web`: the web build (debug) served on loopback, built
-/// again on each saved change to its sources: a stylesheet shows at once
-/// (`/aio-dev/sheet`, the page asks), any other edit (`rsx!`, Rust) builds
-/// the bundle again and the open tabs reload (`/aio-dev/build`). A failed
-/// build keeps the last page. Runs until Ctrl-C.
-pub fn dev(name: &str) -> Result<String, String> {
-    dev_then(name, |_| Ok(()))
+/// Where `ax dev --web` serves: `port` (0: a free one); `expose`: to the
+/// network (`0.0.0.0`) over TLS, behind a fresh key (aio's `--expose`),
+/// else on loopback, open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Serve {
+    pub port: u16,
+    pub expose: bool,
+}
+
+impl Serve {
+    /// The words after the app in `ax dev <app> --web …`, in any order (pure).
+    pub fn parse(words: &[&str]) -> Result<Self, String> {
+        let mut s = Self::default();
+        let mut it = words.iter();
+        while let Some(w) = it.next() {
+            match w.split_once('=').map_or((*w, None), |(f, v)| (f, Some(v))) {
+                ("--web", None) => {}
+                ("--expose", None) => s.expose = true,
+                ("--port", v) => {
+                    let v = v.or_else(|| it.next().copied()).ok_or("--port needs a number")?;
+                    s.port = v.parse().map_err(|_| format!("--port {v}: a port number, 0 to 65535 (0: a free one)"))?;
+                }
+                _ => return Err(format!("{w}: not a flag of ax dev <app> --web [--port N] [--expose]")),
+            }
+        }
+        Ok(s)
+    }
+}
+
+/// `ax dev <name> --web`: the web build (debug) served as `serve` says,
+/// built again on each saved change to its sources: a stylesheet shows at
+/// once (`/aio-dev/sheet`, the page asks), any other edit (`rsx!`, Rust)
+/// builds the bundle again and the open tabs reload (`/aio-dev/build`). A
+/// failed build keeps the last page. Runs until Ctrl-C.
+pub fn dev(name: &str, serve: Serve) -> Result<String, String> {
+    dev_then(name, serve, |_| Ok(()))
 }
 
 /// Whether app `name` has a web build ([`dev`] can serve it).
@@ -646,7 +675,11 @@ pub fn has_web(name: &str) -> bool {
 
 /// [`dev`], with `ready` called on its port once it serves (`ax dev
 /// --android` opens the page on the phone then); its error ends the run.
-pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send + 'static) -> Result<String, String> {
+pub fn dev_then(
+    name: &str,
+    serve: Serve,
+    ready: impl FnOnce(u16) -> Result<(), String> + Send + 'static,
+) -> Result<String, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     let site = Site::of(name)?;
     let out = site.target.join("aio").join("web-dev").join(&site.app.id);
@@ -689,11 +722,33 @@ pub fn dev_then(name: &str, ready: impl FnOnce(u16) -> Result<(), String> + Send
                 }
             }
         }));
+    // Exposed: over TLS (aio-rs's own root, as an exposed app), behind a key
+    // made for this run, which the printed link carries once (a cookie then).
+    let tls = match serve.expose {
+        true => Some(aio::tls::server(&aio::paths::tool_home().join("tls"), &site.app.id).map_err(|e| e.to_string())?),
+        false => None,
+    };
+    let token = match serve.expose {
+        true => format!("{}{}", aio::uuid_v4().simple(), aio::uuid_v4().simple()),
+        false => String::new(),
+    };
     aio::rt().block_on(async move {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+        let host = if serve.expose { "0.0.0.0" } else { "127.0.0.1" };
+        let l = tokio::net::TcpListener::bind((host, serve.port))
+            .await
+            .map_err(|e| format!("{host}:{}: {e}", serve.port))?;
         let port = l.local_addr().map_err(|e| e.to_string())?.port();
-        eprintln!("ax dev: http://127.0.0.1:{port}/ (Ctrl-C ends it)");
-        let opts = aio::sync::Options { open: true, http, ..Default::default() };
+        match serve.expose {
+            true => {
+                let at = aio::pairing::reached_at(Some(host), &aio::tls::local_addrs());
+                eprintln!(
+                    "ax dev: https://{at}:{port}/?token={token} (open to the network over TLS, behind this run's key; \
+                     the browser asks to trust aio-rs's own certificate; Ctrl-C ends it)"
+                );
+            }
+            false => eprintln!("ax dev: http://127.0.0.1:{port}/ (Ctrl-C ends it)"),
+        }
+        let opts = aio::sync::Options { open: !serve.expose, token, tls, http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(aio::Handle::<DevSite>::memory(), l, opts));
         tokio::task::spawn_blocking(move || ready(port)).await.map_err(|e| e.to_string())??;
         tokio::task::spawn_blocking(move || {
@@ -742,6 +797,18 @@ impl DevSite {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_web_takes_its_flags_in_any_order_and_refuses_others() {
+        let p = |w: &str| Serve::parse(&w.split(' ').collect::<Vec<_>>());
+        assert_eq!(p("--web"), Ok(Serve::default()));
+        assert_eq!(p("--port 8080 --web --expose"), Ok(Serve { port: 8080, expose: true }));
+        assert_eq!(p("--web --port=0"), Ok(Serve { port: 0, expose: false }));
+        assert!(p("--web --port").unwrap_err().contains("needs a number"));
+        assert!(p("--web --port 70000").unwrap_err().contains("0 to 65535"));
+        assert!(p("--web --fresh").unwrap_err().starts_with("--fresh: not a flag of ax dev <app> --web"));
+        assert!(p("--web --expose=yes").is_err());
+    }
 
     #[test]
     fn the_lock_names_the_bindgen_the_build_needs() {
@@ -1024,6 +1091,8 @@ pub(crate) mod browser {
     use super::*;
     use aio::prelude::*;
     use aio::serde_json::{Value, json};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     include!("web/board.rs");
@@ -1094,13 +1163,21 @@ pub(crate) mod browser {
         Some(out)
     }
 
-    /// The network between the browser and the server: up while its task runs.
-    fn link(l: tokio::net::TcpListener, to: String) -> tokio::task::JoinHandle<()> {
+    /// The network between the browser and the server: up while its task
+    /// runs; `sockets` counts the sync sockets (`GET /ws`) it carries.
+    fn link(l: tokio::net::TcpListener, to: String, sockets: Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut links = tokio::task::JoinSet::new();
             while let Ok((mut a, _)) = l.accept().await {
-                let to = to.clone();
+                let (to, sockets) = (to.clone(), sockets.clone());
                 links.spawn(async move {
+                    let mut head = [0u8; 8];
+                    while matches!(a.peek(&mut head).await, Ok(n) if n > 0 && n < head.len()) {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    if &head == b"GET /ws?" {
+                        sockets.fetch_add(1, Ordering::SeqCst);
+                    }
                     let mut b = tokio::net::TcpStream::connect(to).await.unwrap();
                     _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
                 });
@@ -1190,15 +1267,16 @@ pub(crate) mod browser {
         .unwrap() else {
             return;
         };
-        let h = Handle::<Board>::memory();
+        let (h, votes) = (Handle::<Board>::memory(), Handle::<Votes>::memory());
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server = l.local_addr().unwrap().to_string();
-        let http = aio_shell::web::painted(aio::http::Http::default(), h.clone(), view, &site);
+        let http = aio_shell::web::painted(aio::http::Http::default(), h.clone(), view, &site).cell(votes.clone());
         let opts = aio::sync::Options { token: KEY.into(), http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(h.clone(), l, opts));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        let up = link(l, server.clone());
+        let sockets = Arc::new(AtomicUsize::new(0));
+        let up = link(l, server.clone(), sockets.clone());
         let url = format!("http://{addr}/?token={KEY}");
         let Some(c) = Chromium::open(&url) else {
             return eprintln!("no Chromium: skipped");
@@ -1220,13 +1298,33 @@ pub(crate) mod browser {
             // Installed: the worker serves the page from now on.
             until(t, "!!navigator.serviceWorker.controller", json!(true)).await;
         }
+        // Both synced cells on the page's one socket: a reload opens one.
+        const VOTES: &str = "import('./app.js').then((m) => JSON.parse(m.votes()))";
+        until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
+        let before = sockets.load(Ordering::SeqCst);
+        b.eval("window.stale = true; location.reload()").await.ok();
+        until(&mut b, "!window.stale && window.ready", json!("yes")).await;
+        until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
+        until(&mut b, &format!("{SHOWN}.then((s) => s.online)"), json!(true)).await;
+        assert_eq!(sockets.load(Ordering::SeqCst) - before, 1, "one socket for the board and the votes");
+        assert_eq!(b.eval(&format!("{APP}.then((m) => m.vote())")).await.unwrap(), json!(true));
+        until(&mut a, VOTES, json!({ "n": 1, "online": true })).await;
+        for _ in 0..200 {
+            if votes.state().n == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(votes.state().n, 1);
         // The page's language and direction, as aio.toml says them.
         let html = "[document.documentElement.lang, document.documentElement.dir]";
         assert_eq!(a.eval(html).await.unwrap(), json!(["cs", "auto"]));
         // Online: a call reaches the server, and both tabs show it.
         assert_eq!(a.eval("import('./app.js').then((m) => m.add('a'))").await.unwrap(), json!(true));
         served(&h, &["a"]).await;
-        until(&mut b, SHOWN, json!({ "items": ["a"], "pending": 0, "online": true })).await;
+        for t in [&mut a, &mut b] {
+            until(t, SHOWN, json!({ "items": ["a"], "pending": 0, "online": true })).await;
+        }
         // The network goes: both tabs are offline.
         up.abort();
         _ = up.await;
@@ -1270,7 +1368,7 @@ pub(crate) mod browser {
         // The network is back on its port: the call reaches the server once,
         // sent by both tabs (the server applies a call id once).
         let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        let _up = link(l, server);
+        let _up = link(l, server, sockets.clone());
         for t in [&mut a, &mut b] {
             until(t, SHOWN, json!({ "items": ["a", "b"], "pending": 0, "online": true })).await;
         }

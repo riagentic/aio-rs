@@ -469,9 +469,6 @@ exits for the supervisor to start the new version.
 
 ## Limits
 
-- More shared cells of the service are served beside the first on the
-  same port and `/ws` (`Http::cell(handle)`); each copy opens its own
-  socket, where aio's page carries every cell on one.
 - `aio::cli::watch` draws the whole view again on each change; there is
   no diffing screen library (aio has none either).
 

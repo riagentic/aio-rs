@@ -81,6 +81,17 @@ async fn server() -> (Handle<Port>, String) {
     (h, addr)
 }
 
+/// [`server`] with another shared cell beside the app's (`Http::cell`).
+async fn server_with_tally() -> (Handle<Port>, Handle<Tally>, String) {
+    let (h, tally) = (Handle::<Port>::memory(), Handle::<Tally>::memory());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let http = aio::http::Http::default().cell(tally.clone());
+    let opts = aio::sync::Options { token: "secret".into(), http, ..Default::default() };
+    tokio::spawn(aio::sync::serve_with(h.clone(), l, opts));
+    (h, tally, addr)
+}
+
 type Sock = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn page(addr: &str) -> Sock {
@@ -321,7 +332,7 @@ async fn aios_crdt_ops_are_acked_once_passed_on_and_caught_up_by_snapshot() {
 }
 
 /// aio's own sync client (its `sync-engine.ts`, two pages, online, offline
-/// and refused) against this app: run when `AIO_DENO_SRC` names a copy of
+/// and refused) against this app, another shared cell beside it: run when `AIO_DENO_SRC` names a copy of
 /// aio's `src` and `deno` is on PATH, else it says it skipped.
 #[tokio::test(flavor = "multi_thread")]
 async fn aios_own_sync_client_converges_with_an_aio_rs_app() {
@@ -329,7 +340,7 @@ async fn aios_own_sync_client_converges_with_an_aio_rs_app() {
         eprintln!("skipped: set AIO_DENO_SRC to a copy of aio's src (and have deno) to run aio's own client");
         return;
     };
-    let (h, addr) = server().await;
+    let (h, _tally, addr) = server_with_tally().await;
     h.earn(1).unwrap();
     h.theme("light".into()).unwrap();
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/aio_client/sync.ts");
@@ -353,4 +364,73 @@ async fn aios_own_sync_client_converges_with_an_aio_rs_app() {
     assert_eq!(got["a"]["rejected"], 1);
     assert_eq!(got["b"]["confirmed"], server, "{got}");
     assert!(got["b"]["ops"].as_u64().unwrap() >= 3, "b got a's ops as ops: {got}");
+}
+
+/// Another shared cell of the app, served beside `Port` (`Http::cell`).
+#[cell(shared, id = "tally")]
+pub struct Tally {
+    pub n: u64,
+}
+
+#[methods]
+impl Tally {
+    #[client]
+    pub fn bump(&mut self) -> Result<u64> {
+        self.n += 1;
+        Ok(self.n)
+    }
+
+    /// Never a client's.
+    pub fn wipe(&mut self) {
+        self.n = 0;
+    }
+}
+
+/// An aio page sees every shared cell of the app on its one socket, as aio
+/// serves them: each seen, patched, subscribed and called as its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aio_page_sees_and_calls_every_shared_cell() {
+    use aio::{compat::AioLink, sync::Link};
+    let (h, tally, addr) = server_with_tally().await;
+    let (mut w, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?token=secret")).await.unwrap();
+    assert_eq!(recv(&mut w).await["t"], "proto");
+    let st = recv(&mut w).await;
+    assert_eq!(
+        st["d"],
+        json!({ "settings": { "theme": "" }, "purse": { "coins": 0 }, "port": { "seen": 0 }, "tally": { "n": 0 } })
+    );
+    assert_eq!(recv(&mut w).await["t"], "boot");
+    send(&mut w, json!({ "t": "proto", "d": { "v": 3, "min": 3 } })).await;
+    // Its change first, then the ack.
+    send(&mut w, json!({ "t": "action", "d": { "type": "tally:bump", "payload": { "args": [] }, "cid": "1" } })).await;
+    let p = recv(&mut w).await;
+    assert_eq!(
+        (&p["t"], &p["d"]),
+        (&json!("patches"), &json!([{ "op": "replace", "path": ["tally", "n"], "value": 1 }]))
+    );
+    let ack = recv_kind(&mut w, "ack").await;
+    assert_eq!((&ack["ok"], &ack["value"]), (&json!(true), &json!(1)));
+    tally.bump().unwrap();
+    assert_eq!(recv_kind(&mut w, "patches").await, json!([{ "op": "replace", "path": ["tally", "n"], "value": 2 }]));
+    // Its own rules: a method no client may call is refused.
+    let refused = act(&mut w, "tally:wipe", json!([]), "2").await;
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(tally.state().n, 2);
+    // Subscribed to it alone: the app cell's changes aren't sent.
+    send(&mut w, json!({ "t": "subs", "d": { "subs": ["tally"] } })).await;
+    assert_eq!(recv_kind(&mut w, "state").await, json!({ "tally": { "n": 2 } }));
+    h.see().unwrap();
+    quiet(&mut w, "patches").await;
+    tally.bump().unwrap();
+    assert_eq!(recv_kind(&mut w, "patches").await, json!([{ "op": "replace", "path": ["tally", "n"], "value": 3 }]));
+    // aio's protocol both ways: an aio-rs app's AioLink sees and calls it too,
+    // and an aio-rs copy sees the page's call.
+    let copy = Remote::<Tally>::connect(&addr, "secret", "ana").await.unwrap();
+    let mut tool = AioLink::connect(&Link { addr, token: "secret".into(), root: None }).await.unwrap();
+    assert_eq!(tool.cell::<Tally>("tally").unwrap().n, 3);
+    tool.call("tally", "bump", json!([])).await.unwrap();
+    assert_eq!(tool.cell::<Tally>("tally").unwrap().n, 4);
+    until("the copy sees the tool's call", || copy.state().n == 4).await;
+    assert_eq!(act(&mut w, "tally:bump", json!([]), "3").await["value"], 5);
+    until("the copy sees the page's call", || copy.state().n == 5).await;
 }

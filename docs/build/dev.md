@@ -123,7 +123,7 @@ real data.
 | `--title "Notes (QA)"`, `--title=…` | the window's title for this run (`AIORT_TITLE`) |
 | `--cdp[=port]` | the window opens the DevTools protocol on loopback (a free port unless given) |
 | `--tui` | dx's own screen in the terminal |
-| `--web` | the web build instead ([below](#the-web-build-while-you-work)) |
+| `--web [--port N] [--expose]` | the web build instead ([below](#the-web-build-while-you-work)) |
 | `--android [--device serial] [--native]` | on an emulator or phone: the web build in a dev APK installed once, each edit reloading it (`--native`: the app itself, rebuilt for that CPU on every save) |
 
 Words after the app go to the app (`ax dev notes -- --route /users/7`);
@@ -146,7 +146,12 @@ ax dev notes --web
 ```
 
 Builds the app's library for `wasm32` (debug), serves it on a free
-loopback port and prints the address. A saved stylesheet shows at once in
+loopback port (`--port N`: that one) and prints the address. `--expose`
+serves it to the network (`0.0.0.0`) over TLS behind a key made for the
+run: open the printed `https://<lan-ip>:<port>/?token=…` link on a phone
+or another machine (the browser asks to trust aio-rs's own certificate;
+the link sets a cookie, so the page's own requests need no key in their
+address). A saved stylesheet shows at once in
 every open tab; any other saved source builds the bundle again and the
 tabs reload. A failed build keeps the last page and shows the errors on
 it. There is no hot-patching in the browser: every Rust edit is a new
@@ -333,7 +338,8 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
 ## Limits
 
 - No hot-patching in the web build or on Android: each edit is a build
-  (on Android, of the page only, unless `--native`).
+  and the page reloads, slower than a patch (on Android, of the page only,
+  unless `--native`).
 - dx's own restarts (a change it can't hot-patch) give the app 1 s; ax's
   (a `Cargo.toml`, `ax restart`) ask it to stop first.
 - No flag that turns persistence off for a run: use `--instance` with

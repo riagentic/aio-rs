@@ -80,6 +80,8 @@ rt.block_on(async {
     let saved = || std::fs::read_to_string(&copy).unwrap_or_default();
     until(|| saved().contains("milk") && saved().contains(r#""pending":[]"#)).await;
     drop(first);
+    // Its socket closes once no copy uses it (within half a second).
+    aio::time::sleep(Duration::from_secs(1)).await;
 
     // The server goes away; the app starts anyway, from the saved copy.
     server.abort();
@@ -359,8 +361,9 @@ assert_eq!(diff(&a, &b), [Op::Append { path: vec![Step::Key("reply".into())], va
   the diff of *that* view, so a change another user can't see sends this
   viewer nothing, and a change of role sends the new view whole.
 - One link carries one cell: a copy gets only the cell it follows. A
-  server serves every shared cell on one `/ws` (`Http::cell`), each link
-  naming its cell in its hello.
+  server serves every shared cell on one `/ws` (`Http::cell`), and a
+  client's links (one per cell, each naming its cell in its hello) share
+  one socket.
 - **Pacing** (aio's `syncIntervalMs`, `[server.limits] sync_interval_ms`,
   50 ms): a link gets the first change of a burst at once, then at most
   one patch per window, the changes between folded into one. A person's
