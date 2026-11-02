@@ -39,15 +39,16 @@ scripts/mutants --check
 # air is aio-rs's one renderer since 0.2.0: no crate of the workspace's
 # graph (every target, feature and kind) is Dioxus's, and no file names it
 # but the record (CHANGELOG, the migration guide, the design notes), the
-# tools that refuse or find it (ax lint, air-ship, dx-metrics' planted
-# dependency, the 0.1 migration script) and license attributions.
+# tools that refuse or find it (ax lint, air-ship, public-api, dx-metrics' planted
+# dependency, the 0.1 migration script), license attributions and the
+# comparisons with other frameworks.
 if cargo tree --locked --workspace --all-features --target all -e all --prefix none | grep -i dioxus; then
   echo "ci: the crates above are Dioxus's" >&2
   exit 1
 fi
 if git grep -n -I -i dioxus -- . ':!CHANGELOG.md' ':!docs/migration' ':!docs/design' ':!docs/comparison.md' \
-  ':!crates/aio-cli/src/lint' ':!scripts/air-ship' ':!scripts/dx-metrics' ':!scripts/aio-ui-migrate' ':!ci.sh' \
-  | grep -v 'Ported from'; then
+  ':!crates/aio-cli/src/lint' ':!scripts/air-ship' ':!scripts/dx-metrics' ':!scripts/aio-ui-migrate' ':!scripts/public-api' ':!ci.sh' \
+  | grep -v -e 'Ported from' -e '[Cc]ompar'; then
   echo "ci: the lines above name Dioxus: aio::ui is air's (the migration guide has the names)" >&2
   exit 1
 fi
