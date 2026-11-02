@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 /// How [`Defer`] makes its content once triggered (aio's `load`): an
 /// async fn whose view (or the failure it says) shows when it is done.
 #[derive(Clone)]
-pub struct Load(Rc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<View, String>>>>>);
+pub struct Load(Rc<dyn Fn() -> Loading>);
+
+/// A [`Load`]'s run: the view it made, or what it said.
+type Loading = Pin<Box<dyn Future<Output = Result<View, String>>>>;
 
 impl PartialEq for Load {
     fn eq(&self, o: &Self) -> bool {
