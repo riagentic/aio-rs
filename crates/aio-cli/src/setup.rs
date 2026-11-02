@@ -2,64 +2,12 @@
 //! toolchain it links with (each missing one said with the command that
 //! gets it), and the optional tools. Fetched prebuilt and checked before
 //! anything runs: the shared Electron runtime (then started once, so a
-//! missing system library is named) and `dx`, the Dioxus CLI `ax dev`
-//! hot-patches with, and the wasm-bindgen of aio's lock the web build binds
-//! with (their release binaries, SHA-256 pinned here; minutes of `cargo
-//! install` saved). aio's Rust toolchain is checked for the targets
+//! missing system library is named) and the wasm-bindgen of aio's lock the
+//! web build binds with (its release binary, SHA-256 pinned here; minutes
+//! of `cargo install` saved). aio's Rust toolchain is checked for the targets
 //! Android and the web build with. docs/basics/setup.md lists it all per OS.
 use std::io::Read;
 use std::path::{Path, PathBuf};
-
-/// Dioxus's release zip per host (OS, arch) and its SHA-256: the
-/// `dx-<triple>.zip` assets of DioxusLabs/dioxus v[`crate::dev::DIOXUS`].
-const DX: &[(&str, &str, &str, &str)] = &[
-    ("linux", "x86_64", "x86_64-unknown-linux-gnu", "61d2132eaf3cd70ca1ac89a7ecc891fcd770e917a5869e29d465459371b26c83"),
-    (
-        "linux",
-        "aarch64",
-        "aarch64-unknown-linux-gnu",
-        "16985f1e1f88fbcf48f3a3cbdbb0c10c9673d0846d88cbc43783b92fd60c8c95",
-    ),
-    ("macos", "x86_64", "x86_64-apple-darwin", "b2751a700b8b02f85fcdd8fe6e63c20876b4af9f0921c5be4c703e6f872b67ee"),
-    ("macos", "aarch64", "aarch64-apple-darwin", "4aff37aea6b8fbce7bee3f8bbbea1bd71f60e0fa09537f35759f6494da861e37"),
-    ("windows", "x86_64", "x86_64-pc-windows-msvc", "45eb4f87b7f86fdba8508ee7e0ef1f9e13cf8f2ffcc6a2d5858d0e8ea7dd1531"),
-    (
-        "windows",
-        "aarch64",
-        "aarch64-pc-windows-msvc",
-        "77e807cc7e5e036b3283186efd13fc2c2501f085ef93aaf817fd1728392f29a3",
-    ),
-];
-
-/// The release zip for `os`/`arch` and its SHA-256 (pure).
-pub fn dx_release(os: &str, arch: &str) -> Option<(String, &'static str)> {
-    let (.., triple, sha) = DX.iter().find(|(o, a, ..)| *o == os && *a == arch)?;
-    Some((
-        format!("https://github.com/DioxusLabs/dioxus/releases/download/v{}/dx-{triple}.zip", crate::dev::DIOXUS),
-        sha,
-    ))
-}
-
-/// Where `ax setup` puts dx: aio's own, beside the runtime, never on PATH.
-pub fn dx_home(tool_home: &Path) -> PathBuf {
-    tool_home
-        .join("tools")
-        .join(format!("dx-{}", crate::dev::DIOXUS))
-        .join(format!("dx{}", std::env::consts::EXE_SUFFIX))
-}
-
-/// What to say when dx can't be fetched: how to build it instead.
-pub fn dx_fallback() -> String {
-    format!(
-        "cargo install dioxus-cli --version {} --locked (a source build, minutes), then ax dev finds it on PATH",
-        crate::dev::DIOXUS
-    )
-}
-
-/// The dx `ax dev` runs: aio's own (`ax setup`), else the one on PATH.
-pub fn dx() -> PathBuf {
-    Some(dx_home(&aio::paths::tool_home())).filter(|p| p.is_file()).unwrap_or_else(|| "dx".into())
-}
 
 /// `bytes` as the executable `to` (written aside, then moved in place).
 fn write_exe(bytes: &[u8], to: &Path) -> Result<(), String> {
@@ -71,17 +19,6 @@ fn write_exe(bytes: &[u8], to: &Path) -> Result<(), String> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
     std::fs::rename(&tmp, to).map_err(|e| format!("{}: {e}", to.display()))
-}
-
-/// The `dx` entry of release zip `zip`, written to `to` (executable).
-fn unpack_dx(zip: &Path, to: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(zip).map_err(|e| e.to_string())?;
-    let mut z = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", zip.display()))?;
-    let name = format!("dx{}", std::env::consts::EXE_SUFFIX);
-    let mut entry = z.by_name(&name).map_err(|e| format!("{}: no {name} in it ({e})", zip.display()))?;
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    write_exe(&bytes, to)
 }
 
 /// The file of tar archive `tar` whose path ends in `/name` (pure; a
@@ -134,11 +71,6 @@ pub fn fetch_tool(
     r
 }
 
-/// dx at `to` ([`fetch_tool`]).
-pub fn fetch_dx(url: &str, sha: &str, to: &Path) -> Result<(), String> {
-    fetch_tool(url, sha, to, unpack_dx)
-}
-
 /// The wasm-bindgen aio's lock and aio-rs pin (`=` in its Cargo.toml), so
 /// every app's lock has it too: the web build's CLI must be the same version.
 pub const WASM_BINDGEN: &str = "0.2.129";
@@ -174,7 +106,7 @@ pub fn wasm_bindgen_release(os: &str, arch: &str) -> Option<(String, &'static st
     ))
 }
 
-/// Where aio keeps wasm-bindgen `version`: its own, beside dx, never on PATH.
+/// Where aio keeps wasm-bindgen `version`: its own, beside the runtime, never on PATH.
 pub fn wasm_bindgen_home(tool_home: &Path, version: &str) -> PathBuf {
     tool_home
         .join("tools")
@@ -407,7 +339,7 @@ fn c_found(os: &str, host: &str) -> Option<String> {
 }
 
 /// `ax setup`: check what making apps needs and fetch what aio can (the
-/// shared runtime and dx, prebuilt and checked); `check`: only look. Every
+/// shared runtime and wasm-bindgen, prebuilt and checked); `check`: only look. Every
 /// missing piece is said with the command that gets it.
 pub fn run(check: bool) -> Result<String, String> {
     let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
@@ -450,23 +382,6 @@ pub fn run(check: bool) -> Result<String, String> {
         }
         Err(e) => need(runtime, "draws every window and UI test", true, Err(e)),
     });
-    let to = dx_home(&aio::paths::tool_home());
-    // `ax dev` runs aio's own dx, else a matching one on PATH: either will do.
-    let on_path = || ran("dx", &["--version"]).is_some_and(|v| crate::dev::dx_matches(&v));
-    let dx = match (check, dx_release(os, arch)) {
-        _ if to.is_file() => Ok(format!("at {}", to.display())),
-        _ if on_path() => Ok("on PATH".to_string()),
-        (true, _) => Err("not here; ax setup fetches it".to_string()),
-        (false, Some((url, sha))) => fetch_dx(&url, sha, &to).map(|()| format!("at {}", to.display())),
-        (false, None) => Err(format!("no prebuilt dx for {os} {arch}")),
-    };
-    let dx = dx.map_err(|e| format!("{e}; instead: {}", dx_fallback()));
-    needs.push(need(
-        format!("dx {}", crate::dev::DIOXUS),
-        "ax dev's edits in under a second (else a rebuild)",
-        false,
-        dx,
-    ));
     let tc = toolchain();
     let installed = std::process::Command::new("rustup")
         .args(["target", "list", "--installed", "--toolchain", tc])
@@ -493,19 +408,6 @@ pub fn run(check: bool) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn each_desktop_host_has_its_pinned_dx_release() {
-        for (os, arch) in [("linux", "x86_64"), ("linux", "aarch64"), ("macos", "aarch64"), ("windows", "x86_64")] {
-            let (url, sha) = dx_release(os, arch).unwrap_or_else(|| panic!("{os} {arch}"));
-            assert!(url.starts_with("https://github.com/DioxusLabs/dioxus/releases/download/v0.7.10/dx-"), "{url}");
-            assert!(url.ends_with(".zip") && sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()));
-        }
-        assert!(dx_release("linux", "x86_64").unwrap().0.ends_with("dx-x86_64-unknown-linux-gnu.zip"));
-        assert_eq!(dx_release("freebsd", "x86_64"), None);
-        assert!(dx_home(Path::new("/h")).starts_with("/h/tools/dx-0.7.10"));
-        assert!(dx_fallback().contains("cargo install dioxus-cli --version 0.7.10 --locked"));
-    }
 
     #[test]
     fn each_missing_need_says_the_command_that_gets_it_per_os() {
@@ -613,15 +515,15 @@ mod tests {
     }
 
     #[test]
-    fn a_dx_that_fails_its_checksum_is_never_unpacked() {
+    fn a_tool_that_fails_its_checksum_is_never_unpacked() {
         let d = tempfile::tempdir().unwrap();
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file(format!("dx{}", std::env::consts::EXE_SUFFIX), zip::write::SimpleFileOptions::default())
-            .unwrap();
-        std::io::Write::write_all(&mut zip, b"#!/bin/sh\n").unwrap();
-        let body = zip.finish().unwrap().into_inner();
+        let body = b"#!/bin/sh\n".to_vec();
+        fn copy(from: &Path, to: &Path) -> Result<(), String> {
+            write_exe(&std::fs::read(from).map_err(|e| e.to_string())?, to)
+        }
+        let fetch_tool = |url: &str, sha: &str, to: &Path| fetch_tool(url, sha, to, copy);
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/dx.zip", l.local_addr().unwrap());
+        let url = format!("http://{}/tool", l.local_addr().unwrap());
         let served = body.clone();
         std::thread::spawn(move || {
             for _ in 0..2 {
@@ -632,13 +534,13 @@ mod tests {
                 _ = std::io::Write::write_all(&mut s, &served);
             }
         });
-        let to = d.path().join("tools/dx");
-        let e = fetch_dx(&url, &"0".repeat(64), &to).unwrap_err();
+        let to = d.path().join("tools/tool");
+        let e = fetch_tool(&url, &"0".repeat(64), &to).unwrap_err();
         assert!(e.contains("expected 000") && !to.exists(), "{e}");
         assert_eq!(std::fs::read_dir(d.path().join("tools")).unwrap().count(), 0, "nothing left behind");
         let sha = aio::sha256::hex(&aio::sha256::Sha256::digest(&body));
-        fetch_dx(&url, &sha, &to).unwrap();
+        fetch_tool(&url, &sha, &to).unwrap();
         assert_eq!(std::fs::read(&to).unwrap(), b"#!/bin/sh\n");
-        fetch_dx("http://127.0.0.1:1/never", &sha, &to).expect("there already: nothing fetched");
+        fetch_tool("http://127.0.0.1:1/never", &sha, &to).expect("there already: nothing fetched");
     }
 }

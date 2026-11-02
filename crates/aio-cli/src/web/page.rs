@@ -62,16 +62,19 @@ fn signin() {
 }
 
 fn who() -> View {
-    match aio::web::use_user() {
-        None => rsx! { p { id: "who", "asking" } },
-        Some(None) => rsx! {
+    // `None` while the server is asked, then who (`None`: nobody).
+    let me = aio::web::use_user();
+    let who = memo(move || me.get());
+    rsx! {
+        if who.get().is_none() {
+            p { id: "who", "asking" }
+        } else if who.get().flatten().is_none() {
             p { id: "who", "nobody" }
             aio::kit::SignIn { client: aio::web::client(), on_signed: |_| aio::web::restart() }
-        },
-        Some(Some((id, role))) => rsx! {
-            p { id: "who", "{id} {role}" }
-            button { id: "out", onclick: |_| aio::web::sign_out(), "Sign out" }
-        },
+        } else {
+            p { id: "who", {who.get().flatten().map(|(id, role)| format!("{id} {role}")).unwrap_or_default()} }
+            button { id: "out", onclick: |_| _ = spawn(aio::web::sign_out()), "Sign out" }
+        }
     }
 }
 

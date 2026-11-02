@@ -81,7 +81,7 @@ assert_eq!(h.state().items, [Task { id: 1, text: "milk".into(), done: true }]);
 ```
 
 - In an app the launcher opens the cell (`aio::Source::for_app`); every
-  view showing it re-renders on each commit.
+  hole showing it follows each commit.
 - A shared cell (`#[cell(persist, shared)]`) is the same list live on
   every synced window ([sync](../state/sync.md)).
 
@@ -705,11 +705,11 @@ use aio::ui::prelude::*;
 fn Account(who: Option<Option<(String, String)>>) -> View {
     rsx! {
         div { "data-t": "account",
-            match who {
+            {match who.clone() {
                 None => rsx! { aio::kit::Spinner {} },
                 Some(None) => rsx! { a { href: "/signin", "Sign in" } },
                 Some(Some((id, _role))) => rsx! { "Signed in as {id}" },
-            }
+            }}
         }
     }
 }
@@ -953,7 +953,7 @@ assert_eq!(ui.text("palette"), "closed");
 A camera, a socket, a file handle. `aio::held::Held` opens one per key,
 shares it between holders and closes it when the last one lets go;
 `use_held` holds it for a view, re-opening when the key changes. Never
-open it in the render or in `on_cleanup`'s pair by hand.
+open it in a view's body or in `on_cleanup`'s pair by hand.
 
 ```rust,no_run
 use aio::held::{Held, State};
@@ -983,11 +983,14 @@ fn App() -> View {
 
 #[component]
 fn Preview(name: String) -> View {
-    let text = match use_held(cameras(), Some(name)) {
-        Some(State::Open(cam)) => cam.to_string(),
-        Some(State::Failed(why)) => format!("failed: {why}"),
-        _ => "opening".into(),
-    };
+    let held = use_held(cameras(), Some(name));
+    let text = memo(move || {
+        held.with(|h| match h {
+            Some(State::Open(cam)) => cam.to_string(),
+            Some(State::Failed(why)) => format!("failed: {why}"),
+            _ => "opening".into(),
+        })
+    });
     rsx! { p { "data-t": "preview", "{text}" } }
 }
 

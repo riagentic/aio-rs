@@ -4,12 +4,10 @@
 //! served over the wire as `run` serves it, and the guests' pages from a
 //! local HTTP server. The page is read and driven over the shell's own
 //! DevTools line (`{"t":"cdp"}`). Skipped where the runtime is not installed.
-use crate::{Window, guest, install, runtime, wire};
+use crate::{Window, guest, install, runtime};
 use aio::kit::{Browser, Go, GuestEvent, go};
 use aio::serde_json::{Value, json};
 use aio::ui::prelude::*;
-use dioxus_core::VirtualDom;
-use dioxus_liveview::LiveViewPool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -238,8 +236,7 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     });
     ctl.write_all(b"{\"t\":\"place\",\"width\":800,\"height\":600}\n").await.unwrap();
     let s = tokio::time::timeout(Duration::from_secs(20), wires.accept()).await.unwrap().unwrap();
-    let pool = Arc::new(LiveViewPool::new());
-    tokio::spawn(async move { _ = pool.launch_virtualdom(wire(s), || VirtualDom::new(app)).await });
+    tokio::spawn(async move { _ = crate::views::Views::new().launch(s, app).await });
     let mut sh = Shell { child, ctl, heard, said, next: 0 };
 
     // The guest loads its page with the declared preload, and says where it landed.

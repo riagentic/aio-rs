@@ -46,13 +46,13 @@ ax lint 0.1.0 · notes
       fix: mark it #[server] (kept and saved, never sent) or filter it with #[cell(visible = f)]; if it really is public, say why: // aio-ok(security): <why>
   ✗ error src/lib.rs:14  [cells] `Notes::add` uses the clock (`std::time::SystemTime::now`): methods replay from the log, so they must give the same result every time
       fix: use cx.now(): the time of the call, logged with it
-  ✗ error src/lib.rs:22  [hooks] `signal` in `List` runs only sometimes (in a branch, a loop or a closure, or after an early `return` or `?`): hooks are matched by call order, so a render that skips one hands the next hook its state
-      fix: call it at the top of the function, every render, before any early `return` or `?`, and branch on its value
+  ✗ error src/lib.rs:22  [hooks] `signal` in `List` runs only sometimes (in a branch, a loop or a closure, or after an early `return` or `?`): hooks are matched by call order, so a run of the body that skips one hands the next hook its state
+      fix: call it at the top of the function, on every run, before any early `return` or `?`, and branch on its value
   ✗ error src/lib.rs:25  [a11y] <input> has no label: screen readers and agents can't name it
       fix: aria_label: "…", or wrap it in label { }
   ⚠ warn src/lib.rs:26  [a11y] <div> takes clicks but no keys: keyboard users and agents can't use it
       fix: use a button, or give it role, tabindex: 0 and onkeydown
-  ✗ error src/lib.rs:28  [render] <li> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)
+  ✗ error src/lib.rs:28  [render] <li> in a for loop has no key: a removed or moved row would hand its state to the next (air refuses it)
       fix: key: "{item.id}"
   · hint src/lib.rs:5  [testing] no test names cell `Notes`
       fix: test its methods with Handle::<Cell>::open on a temp store, or aio::testing
@@ -137,13 +137,13 @@ I/O](../state/cells.md#methods-do-no-io)).
 | Finding | Level |
 |---|---|
 | a hook (`use_*`, or `aio::ui`'s `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`, `callback`, `provide`, `task`, `resource`) in a component or a `use_` function called in a branch, a loop, a closure, or after an early `return` or `?` | error |
-| `Signal::new(..)` (and the like) in a component's body: a new signal every render, its value lost | error: `signal(\|\| ..)` |
+| `Signal::new(..)` (and the like) in a component's body: a new signal each time the body runs (again once a resource loads, after a hot reload), its value lost | error: `signal(\|\| ..)` |
 
 ### `render`
 
 | Finding | Level |
 |---|---|
-| a `for` loop's element or component with no `key` (air, `aio::ui`'s next renderer, requires one) | error |
+| a `for` loop's element or component with no `key` (air refuses it) | error |
 | a `for` loop over a block (its `rsx!` inside an unkeyed node) | warn |
 | a `key` on a node that isn't its block's first, or on a node in no list | warn |
 | an `if let` in `rsx!` (air refuses it): a bool, or a child `{x.map(\|v\| rsx! { … })}` | warn |
@@ -155,9 +155,9 @@ I/O](../state/cells.md#methods-do-no-io)).
 
 | Finding | Level |
 |---|---|
-| a path to the renderer's crates in the app's Rust (a `use` of them, tests too): views name `aio::ui` only | error |
-| a page script that talks to the renderer's own page object (its `send`/`recv`): the page object is `aio` (`aio::ui::eval`) | error |
-| a `Cargo.toml` dependency on a renderer crate: `aio` with feature `kit` brings it | error |
+| a path to aio-rs 0.1's renderer crates in the app's Rust (a `use` of them, tests too): views name `aio::ui` only | error |
+| a page script that talks to aio-rs 0.1's renderer's page object (its `send`/`recv`): the page object is `aio` (`aio::ui::eval`) | error |
+| a `Cargo.toml` dependency on aio-rs 0.1's renderer crates: `aio` with feature `kit` brings air | error |
 
 ### `a11y`
 

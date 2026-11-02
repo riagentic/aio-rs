@@ -9,6 +9,7 @@ const P: f64 = 4.0;
 /// The trend's paths (pure): the area, the line, the last point, the three
 /// grid lines' heights, and the ceiling (15 % over the peak; at least 10
 /// for a percentage, 1 otherwise).
+#[derive(Clone)]
 pub struct Trend {
     pub area: String,
     pub line: String,
@@ -44,23 +45,24 @@ pub fn AreaChart(title: String, values: Vec<f64>, unit: String, color: String) -
     let t = trend(&values, &unit);
     let (peak, avg) = peak_mean(&values);
     let digits = if unit == "%" { 1 } else { 0 };
-    let fmt = |v: f64| format!("{v:.digits$}");
+    let fmt = move |v: f64| format!("{v:.digits$}");
     let n = values.len();
+    let now = values.last().map_or_else(|| "—".to_string(), |v| fmt(*v));
+    let last = t.last.map(|(cx, cy)| (format!("{cx:.1}"), format!("{cy:.1}")));
+    let has_last = last.is_some();
+    let (cx, cy) = last.unwrap_or_default();
     rsx! {
         div { class: "chart", "data-t": "chart-{title}",
             div { style: "display:flex;justify-content:space-between;align-items:baseline",
                 span { class: "label", "{title}" }
                 span { class: "mono", style: "font-size:18px;font-weight:700;color:{color}",
-                    match values.last() {
-                        Some(v) => fmt(*v),
-                        None => "—".into(),
-                    }
+                    "{now}"
                     span { class: "dim", style: "font-size:11px", " {unit}" }
                 }
             }
             svg { view_box: "0 0 {W} {H}", preserve_aspect_ratio: "none", "aria-hidden": "true",
                 g {
-                    for (i , y) in t.grid.iter().enumerate() {
+                    for (i , y) in t.grid.into_iter().enumerate() {
                         line { key: "{i}", x1: "{P}", y1: "{y:.1}", x2: "{W - P}", y2: "{y:.1}", style: "stroke:var(--border)", stroke_width: "0.5", stroke_dasharray: "2 3" }
                     }
                 }
@@ -68,8 +70,8 @@ pub fn AreaChart(title: String, values: Vec<f64>, unit: String, color: String) -
                     path { d: "{t.area}", style: "fill:{color}", fill_opacity: "0.16" }
                     path { d: "{t.line}", fill: "none", style: "stroke:{color}", stroke_width: "1.6", stroke_linejoin: "round" }
                 }
-                if let Some((cx, cy)) = t.last {
-                    circle { cx: "{cx:.1}", cy: "{cy:.1}", r: "2.4", style: "fill:{color}" }
+                if has_last {
+                    circle { cx: "{cx}", cy: "{cy}", r: "2.4", style: "fill:{color}" }
                 }
             }
             div { class: "small dim", style: "font-size:10px",

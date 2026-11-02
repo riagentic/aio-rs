@@ -265,7 +265,7 @@ impl<T> Event<T> {
         self.flow.prevented.get()
     }
 
-    /// Not [`prevent_default`](Self::prevent_default)ed (Dioxus's name).
+    /// Not [`prevent_default`](Self::prevent_default)ed (aio-rs 0.1's name).
     pub fn default_action_enabled(&self) -> bool {
         !self.default_prevented()
     }
@@ -608,6 +608,48 @@ impl FromRaw for WheelData {
     }
 }
 
+/// A drag's event: the mouse's, and the text it carries
+/// (`dataTransfer`'s `text/plain`, read by the page as the event fires).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DragData {
+    mouse: MouseData,
+    text: String,
+}
+
+impl std::ops::Deref for DragData {
+    type Target = MouseData;
+    fn deref(&self) -> &MouseData {
+        &self.mouse
+    }
+}
+
+impl DragData {
+    /// What the drag carries.
+    pub fn data_transfer(&self) -> DataTransfer {
+        DataTransfer { text: self.text.clone() }
+    }
+}
+
+impl FromRaw for DragData {
+    fn from_raw(r: &Raw) -> Self {
+        Self { mouse: MouseData::from_raw(r), text: r.value.clone() }
+    }
+}
+
+/// A drag's data, as the page read it: its `text/plain` (the page puts an
+/// element's `data-drag` there as its drag starts).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DataTransfer {
+    text: String,
+}
+
+impl DataTransfer {
+    /// The `text/plain` item, if any.
+    pub fn get_as_text(&self) -> Option<String> {
+        Some(self.text.clone()).filter(|t| !t.is_empty())
+    }
+}
+
 /// A field's or a form's event (`input`, `change`, `submit`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FormData {
@@ -733,8 +775,7 @@ pub type PointerEvent = Event<PointerData>;
 pub type WheelEvent = Event<WheelData>;
 pub type FormEvent = Event<FormData>;
 pub type ScrollEvent = Event<ScrollData>;
-pub type DragEvent = Event<MouseData>;
-pub type DragData = MouseData;
+pub type DragEvent = Event<DragData>;
 pub type FocusData = PlainData;
 pub type FocusEvent = Event<PlainData>;
 pub type ClipboardEvent = Event<PlainData>;

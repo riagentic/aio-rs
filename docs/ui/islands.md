@@ -273,13 +273,17 @@ fn cameras() -> &'static Held<String, String> {
 }
 
 #[component]
-fn Preview(camera: Option<String>) -> View {
-    let text = match use_held(cameras(), camera) {
-        None => "off".to_string(),
-        Some(State::Opening) => "…".to_string(),
-        Some(State::Open(c)) => c.to_string(),
-        Some(State::Failed(why)) => why,
-    };
+fn Preview(camera: Prop<Option<String>>) -> View {
+    // A `Prop`: the held key follows the parent's `cam`.
+    let held = use_held(cameras(), camera);
+    let text = memo(move || {
+        held.with(|h| match h {
+            None => "off".to_string(),
+            Some(State::Opening) => "…".to_string(),
+            Some(State::Open(c)) => c.to_string(),
+            Some(State::Failed(why)) => why.clone(),
+        })
+    });
     rsx! { p { "data-t": "preview", "{text}" } }
 }
 
@@ -360,7 +364,7 @@ once when a kit control renders on a page that doesn't style the kit.
   and hydration have no aio-rs counterpart: views render in the page
   (desktop, Android) or in the browser (the web build).
 - **No code splitting.** One binary holds every view; `Defer` defers the
-  render, not a download. On air `Defer` also loads, as aio's: `load:
+  render, not a download, and loads, as aio's: `load:
   load(|| async { … Ok(rsx! { … }) })` runs once it is triggered,
   `loading` shows meanwhile (at least `loading_min_ms`), then what it
   made, or `error` of what it said.
@@ -376,7 +380,7 @@ once when a kit control renders on a page that doesn't style the kit.
 
 - An island whose library fetches from a CDN: the page's policy blocks it.
   Bundle it.
-- Rebuilding a big props value every render: a changed value calls
+- Rebuilding a big props value on every commit: a changed value calls
   `update` each time. Derive props from `part(..)` so they change only
   when the data does.
 - `Island::js` for a library fed what a stranger typed (Markdown, HTML):

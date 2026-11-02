@@ -429,7 +429,7 @@ fn an_element_handed_out_runs_scripts_on_itself() {
 fn Draft(saved: Signal<String>) -> View {
     let text = signal(|| "typed".to_string());
     let shown = memo(move || format!("{} chars", text.with(String::len)));
-    // A view's cleanup reads its own state (Dioxus's `use_drop`, Solid's `onCleanup`).
+    // A view's cleanup reads its own state (Solid's `onCleanup`).
     on_cleanup(move || saved.set(format!("{} ({})", text.get_untracked(), shown.get_untracked())));
     rsx! { p { "data-t": "draft", "{text}" } }
 }

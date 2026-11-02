@@ -66,7 +66,7 @@
       (!!e.isComposing << 5) | ((t.checked === true) << 6) | (!!e.isPrimary << 7)
     parts.push(['u8', flags], ['u8', typeof e.button === 'number' ? e.button : 255], ['u16', e.buttons || 0])
     for (const v of [e.clientX, e.clientY, e.pageX, e.pageY, e.offsetX, e.offsetY, e.screenX, e.screenY, e.deltaX, e.deltaY, e.deltaZ]) parts.push(f(v))
-    parts.push(['u8', e.deltaMode || 0], s(typeof t.value === 'string' ? t.value : ''))
+    parts.push(['u8', e.deltaMode || 0], s(e.dataTransfer ? e.dataTransfer.getData('text/plain') : typeof t.value === 'string' ? t.value : ''))
     for (const v of [sc.scrollTop, sc.scrollLeft, sc.scrollWidth, sc.scrollHeight, sc.clientWidth, sc.clientHeight]) parts.push(f(v))
     parts.push(['u32', e.pointerId || 0], s(e.pointerType), ['u16', form.length])
     for (const [k, v] of form) parts.push(s(k), s(typeof v === 'string' ? v : v.name))
@@ -85,6 +85,7 @@
     send(ids, e)
   }
   const reply = (id, kind, v) => window.__aioWire.send(frame([['u8', 2], ['u32', id], ['u8', kind], s(v)]))
+  let execs = 0
   const run = (id, js) => {
     const inbox = [], waiting = []
     const aio = {
@@ -92,14 +93,17 @@
       recv: () => new Promise((r) => (inbox.length ? r(inbox.shift()) : waiting.push(r))),
       node: (n) => nodes.get(n),
     }
-    evals.set(id, (v) => (waiting.length ? waiting.shift()(v) : inbox.push(v)))
+    // An `exec` (id 0) has no answer: a slot of its own, so the several of
+    // one batch (their scripts load later, one by one) each find theirs.
+    const slot = id || `x${++execs}`
+    if (id) evals.set(id, (v) => (waiting.length ? waiting.shift()(v) : inbox.push(v)))
     window.__airEval = window.__airEval || new Map()
-    window.__airEval.set(id, [aio, (ok, v) => {
-      evals.delete(id), window.__airEval.delete(id)
+    window.__airEval.set(slot, [aio, (ok, v) => {
+      evals.delete(id), window.__airEval.delete(slot)
       ok ? reply(id, 1, JSON.stringify(v === undefined ? null : v)) : reply(id, 2, String((v && v.message) || v))
     }])
     // A script of the page's own making where the page's policy allows no eval (aio::page RUN).
-    const code = `(() => { const [aio, done] = window.__airEval.get(${id}); (async () => {\n${js}\n})().then((v) => done(true, v), (e) => done(false, e)); })();`
+    const code = `(() => { const [aio, done] = window.__airEval.get(${JSON.stringify(slot)}); (async () => {\n${js}\n})().then((v) => done(true, v), (e) => done(false, e)); })();`
     if (window.__aioRun) return window.__aioRun(code)
     const u = URL.createObjectURL(new Blob([code], { type: 'text/javascript' })), el = document.createElement('script')
     el.src = u, el.onload = () => (URL.revokeObjectURL(u), el.remove())

@@ -106,55 +106,62 @@ struct Shown {
 /// a drag handle) leaves them be.
 #[component]
 pub fn WebIsland<P: Serialize + Clone + PartialEq + 'static, E: DeserializeOwned + 'static>(
-    island: Island,
-    props: P,
+    island: Prop<Island>,
+    props: Prop<P>,
     #[props(default)] onevent: EventHandler<E>,
     loading: Option<View>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
     let id = super::use_id("island");
     let sent = once(|| try_context::<Sent>().unwrap_or_else(|| provide_root(Sent::default())));
-    // The window's document, kept: at unmount there is no scope to ask.
-    let doc = once(crate::ui::Page::here);
     // `None` until the box is in the page.
     let shown = once(|| Rc::new(RefCell::new(None::<Shown>)));
     let ready = signal(|| false);
-    let now = serde_json::to_value(&props).unwrap_or(Value::Null);
+    let now = memo(move || serde_json::to_value(props.get()).unwrap_or(Value::Null));
+    let script = memo(move || island.get());
     let start = {
-        let (doc, id, now) = (doc.clone(), id.clone(), now.clone());
-        move || mount(&doc, &sent, island, &id, now.clone(), ready, onevent)
+        let (id, sent) = (id.clone(), sent.clone());
+        callback(move |()| mount(&sent, script.get_untracked(), &id, now.get_untracked(), ready, onevent))
     };
-    match shown.borrow_mut().as_mut() {
-        Some(s) if s.key != island.key() => {
-            s.task.cancel();
-            _ = doc.eval(unmount_js(&id));
-            *s = start();
-        }
-        Some(s) if s.props != now => {
-            _ = doc.eval(update_js(&id, &now));
-            s.props = now;
-        }
-        _ => {}
+    {
+        let (id, shown) = (id.clone(), shown.clone());
+        effect(move || {
+            let (island, now) = (script.get(), now.get());
+            let mut s = shown.borrow_mut();
+            match s.as_mut() {
+                Some(s) if s.key != island.key() => {
+                    s.task.cancel();
+                    ::air::exec(&unmount_js(&id));
+                    ready.set(false);
+                    *s = start.call(());
+                }
+                Some(s) if s.props != now => {
+                    ::air::exec(&update_js(&id, &now));
+                    s.props = now;
+                }
+                _ => {}
+            }
+        });
     }
     {
-        let (doc, id) = (doc.clone(), id.clone());
-        on_cleanup(move || _ = doc.eval(unmount_js(&id)));
+        let id = id.clone();
+        on_cleanup(move || ::air::exec(&unmount_js(&id)));
     }
     rsx! {
         div {
-            class: join("aio-island", &class),
+            class: join("aio-island", &class.get()),
             "data-aio-island": "{id}",
             onmounted: move |_| {
                 let mut s = shown.borrow_mut();
                 if s.is_none() {
-                    *s = Some(start());
+                    *s = Some(start.call(()));
                 }
             },
             ..attributes,
             if !ready.get() {
-                {loading}
+                {loading.clone()}
             }
             {children}
         }
@@ -164,7 +171,6 @@ pub fn WebIsland<P: Serialize + Clone + PartialEq + 'static, E: DeserializeOwned
 /// Mount box `id` in the page, sending `island`'s script first if this page
 /// has none of it yet, and hear it: mounted, its events, its failures.
 fn mount<E: DeserializeOwned + 'static>(
-    doc: &crate::ui::Page,
     sent: &Sent,
     island: Island,
     id: &str,
@@ -179,7 +185,7 @@ fn mount<E: DeserializeOwned + 'static>(
             mount_js(&key, sent.0.borrow_mut().insert(key.clone()).then(|| island.module()).as_deref(), id, &props)
         }
     };
-    let mut ev = doc.eval(js);
+    let mut ev = eval(&js);
     let task = spawn(async move {
         while let Ok(m) = ev.recv::<Value>().await {
             match m["t"].as_str() {

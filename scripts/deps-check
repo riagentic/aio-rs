@@ -32,7 +32,8 @@ def owners(meta):
     lightest way first (core before features, features before dev and build)."""
     pkgs = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-    order = ["aio-rs", "aio-rs-config", "aio-rs-config-macro", "aio-rs-macros", "aio-rs-shell", "aio-rs-cli"]
+    order = ["aio-rs", "aio-rs-config", "aio-rs-config-macro", "aio-rs-macros", "aio-rs-air", "aio-rs-air-macro",
+             "aio-rs-hotpatch", "aio-rs-shell", "aio-rs-cli", "air-bench"]
     tiers = collections.defaultdict(list)
     for m in meta["workspace_members"]:
         manifest = pkgs[m]

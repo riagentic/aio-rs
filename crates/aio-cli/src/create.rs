@@ -929,7 +929,7 @@ mod tests {
         assert_eq!([mode("app"), mode("cli"), mode("service")], [Mode::Standalone, Mode::Cli, Mode::Server]);
         let app = get(&of("x", "app"), "Cargo.toml").to_string();
         assert!(
-            app.contains(r#"features = ["kit"]"#) && !app.contains("dioxus"),
+            app.contains(r#"features = ["kit"]"#) && !app.contains(crate::lint::RENDERER_0_1),
             "a window's views come from aio::ui: {app}"
         );
         let android = |t| of("x", t).into_iter().find(|(f, _)| f == "app/src/lib.rs");

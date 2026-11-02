@@ -6,7 +6,12 @@ Measured once each on one Linux x86_64 machine (other work running beside
 it), 2026-10-31; one run, not a benchmark: read the shape, not the decimals.
 
 - aio-rs: `ax create` (app template), the cell holds count and items
-  (saved, with history). aio-rs 0.1.0, Dioxus 0.7.10, Electron 44.
+  (saved, with history). aio-rs 0.1.0, which drew its views with Dioxus
+  0.7.10, Electron 44. From 0.2.0 aio-rs draws with air, its own renderer,
+  and has no Dioxus in its graph: the template's sizes and edit times on
+  air are in [air's measurements](design/air.md#measured-scriptsdx-metrics-the-template)
+  (a smaller binary, markup in ~3 ms, Rust patched in ~0.5 s); this page
+  wasn't measured again.
 - Tauri 2.12 (CLI 2.12.4): create-tauri-app's vanilla shape: `src/` HTML,
   CSS and JS, state in a `Mutex` behind three `#[tauri::command]`s.
 - Dioxus 0.7.10 desktop (wry, WebKitGTK), signals, `asset!()` stylesheet.

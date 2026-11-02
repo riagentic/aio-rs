@@ -204,7 +204,7 @@ const GUEST: Island = Island::js(
 /// `id` to [`go`] its guest.
 #[component]
 pub fn Browser(
-    src: String,
+    src: Prop<String>,
     keep_alive: Option<String>,
     partition: Option<String>,
     preload: Option<String>,
@@ -216,15 +216,17 @@ pub fn Browser(
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     let keep = once(|| try_context::<Keep>().unwrap_or_else(|| provide_root(Keep::default())));
-    let start = once(|| reopen(keep_alive.as_ref().and_then(|k| keep.0.borrow().get(k).cloned()).as_ref(), &src));
+    let start = once(|| {
+        reopen(keep_alive.as_ref().and_then(|k| keep.0.borrow().get(k).cloned()).as_ref(), &src.get_untracked())
+    });
     // Where it is (its last landing, else what it was given), and under
     // which id and `src` it is kept when it goes.
     let now =
         once(|| Rc::new(RefCell::new((Kept { at: start.clone().unwrap_or_default(), src: String::new() }, None))));
+    now.borrow_mut().1.clone_from(&keep_alive);
     {
-        let mut n = now.borrow_mut();
-        n.0.src.clone_from(&src);
-        n.1.clone_from(&keep_alive);
+        let (now, src) = (now.clone(), src.clone());
+        effect(move || src.with(|s| now.borrow_mut().0.src.clone_from(s)));
     }
     {
         let (keep, now) = (keep.clone(), now.clone());
@@ -243,11 +245,20 @@ pub fn Browser(
         }
         None => host_keys.clone(),
     });
-    let props = Shown { src, start, partition, preload, referrer, keys, popups };
+    // A changed `src` is an update of the guest's props: it navigates there.
+    let props = memo(move || Shown {
+        src: src.get(),
+        start: start.clone(),
+        partition: partition.clone(),
+        preload: preload.clone(),
+        referrer: referrer.clone(),
+        keys: keys.clone(),
+        popups,
+    });
     rsx! {
         WebIsland::<Shown, GuestEvent> {
             island: GUEST,
-            props,
+            props: props.get(),
             onevent: move |e: GuestEvent| {
                 if let GuestEvent::Navigated { url, .. } = &e {
                     now.borrow_mut().0.at.clone_from(url);

@@ -15,8 +15,8 @@ name = "air"
 
 [dependencies]
 air-macro = { workspace = true }
-# The W3C key tables (`Key`, `Code`, `Location`, `Modifiers`): the same
-# types the facade named on Dioxus, so key handling is one code either way.
+# The W3C key tables (`Key`, `Code`, `Location`, `Modifiers`): the types
+# aio::ui's key handling names.
 keyboard-types = { version = "0.7", default-features = false }
 
 [features]

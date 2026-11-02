@@ -7,21 +7,21 @@
 // run in a sandbox (`paths::sandbox`): the home and the OS data dirs are a
 // temp world, and the user's real data is refused.
 mod browser;
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 mod electron;
 #[cfg(feature = "server")]
 mod sim;
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 mod ui;
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 mod video;
 
 pub use browser::TestBrowser;
 #[cfg(feature = "server")]
 pub use sim::Sim;
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub use electron::{Answered, Asked};
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub use ui::{Info, Key, Modifiers, Mount, MountedComponent, Surface, SurfaceElement, TestUi};
 
 use crate::{By, Cell, CellData, Cells, Door, Error, Handle, Store};
@@ -48,7 +48,7 @@ pub fn fails(f: impl FnOnce()) -> String {
 }
 
 /// Is the failure under way one a test asked for (`fails`)?
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 fn failing_on_purpose() -> bool {
     FAILING.get()
 }
@@ -1142,15 +1142,15 @@ pub(crate) fn unseen(what: String) {
     UNSEEN.with_borrow_mut(|u| u.as_mut().map(|u| u.push(what)));
 }
 
-#[cfg(any(feature = "kit", feature = "air", feature = "server"))]
+#[cfg(any(feature = "kit", feature = "server"))]
 type Said = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 // What the servers of the UI sources made on this thread (`ui_source`) refused.
-#[cfg(any(feature = "kit", feature = "air", feature = "server"))]
+#[cfg(any(feature = "kit", feature = "server"))]
 thread_local!(static WIRED: std::cell::RefCell<Vec<Said>> = const { std::cell::RefCell::new(Vec::new()) });
 
 /// Take the wire's refusals so far.
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 fn wire_refusals() -> Vec<String> {
     WIRED.with_borrow(|w| {
         w.iter().flat_map(|s| std::mem::take(&mut *s.lock().unwrap_or_else(|e| e.into_inner()))).collect()
@@ -1158,7 +1158,7 @@ fn wire_refusals() -> Vec<String> {
 }
 
 /// Failure traces kept (the newest; aio kept 20 too).
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 const TRACES: usize = 20;
 
 /// Cell `T`'s local source at its default state with `seed` merged in
