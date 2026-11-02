@@ -21,6 +21,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SETS = [
     ("aio-rs core", ["-p", "aio-rs", "--no-default-features"]),
     ("aio-rs kit", ["-p", "aio-rs", "--no-default-features", "-F", "kit"]),
+    ("aio-rs air", ["-p", "aio-rs", "--no-default-features", "-F", "air"]),
     ("aio-rs server", ["-p", "aio-rs", "--no-default-features", "-F", "server"]),
     ("aio-rs tls", ["-p", "aio-rs", "--no-default-features", "-F", "tls"]),
     ("aio-rs net", ["-p", "aio-rs", "--no-default-features", "-F", "net"]),

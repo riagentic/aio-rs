@@ -127,6 +127,7 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
         }
     };
     renderer(rel, ast.to_token_stream(), &mut f.issues);
+    Vacuous { file: rel, out: &mut f.issues }.visit_file(&ast);
     if test_file {
         let ts = ast.to_token_stream();
         f.tests += count_tests(&ts);
@@ -136,6 +137,93 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
     split_tests(&mut ast.items, f);
     secrets::tokens(rel, ast.to_token_stream(), &mut f.issues);
     Checks { file: rel, f, repeats: 0 }.visit_file(&ast);
+}
+
+/// Tests that can pass without checking anything (aio's `check:vacuous`):
+/// a `#[test]` with no assertion, no `?`, no `unwrap`/`expect` and no
+/// harness wait in it (`no-assertions`; `#[should_panic]` is its check),
+/// and an `assert_eq!`/`assert_ne!` of a thing with itself (`self-comparison`).
+struct Vacuous<'a> {
+    file: &'a str,
+    out: &'a mut Vec<Issue>,
+}
+
+/// Calls that fail a test when what they check is false.
+const CHECKS: [&str; 13] = [
+    "expect",
+    "unwrap",
+    "unwrap_err",
+    "expect_err",
+    "fails",
+    "expect_cell",
+    "until",
+    "until_text",
+    "until_contains",
+    "until_within",
+    "converged",
+    "smoke",
+    "settle",
+];
+
+/// Do the tokens check anything (pure)?
+fn checks(ts: TokenStream) -> bool {
+    let tt: Vec<TokenTree> = ts.into_iter().collect();
+    tt.iter().enumerate().any(|(i, t)| match t {
+        TokenTree::Ident(id) => {
+            let s = id.to_string();
+            match matches!(tt.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                true => s.starts_with("assert") || s.starts_with("debug_assert") || s == "panic" || s == "unreachable",
+                false => CHECKS.contains(&s.as_str()),
+            }
+        }
+        TokenTree::Punct(p) => p.as_char() == '?',
+        TokenTree::Group(g) => checks(g.stream()),
+        _ => false,
+    })
+}
+
+impl<'ast> Visit<'ast> for Vacuous<'_> {
+    fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
+        if is_test_fn(&i.attrs) && !has(&i.attrs, "should_panic") && !checks(i.block.to_token_stream()) {
+            let name = i.sig.ident.to_string();
+            self.out.push(
+                Issue::new(
+                    Severity::Warn,
+                    "testing",
+                    format!("test `{name}` checks nothing: it passes whatever the code does (no-assertions)"),
+                    self.file,
+                    i.sig.ident.span().start().line,
+                )
+                .fix("assert what it should prove (assert!, assert_eq!, expect, a TestUi wait)"),
+            );
+        }
+        visit::visit_item_fn(self, i);
+    }
+
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        if last_is(&m.path, "assert_eq") || last_is(&m.path, "assert_ne") {
+            let args = m.parse_body_with(syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated);
+            if let Ok(args) = args
+                && let (Some(a), Some(b)) = (args.get(0), args.get(1))
+                && a.to_token_stream().to_string() == b.to_token_stream().to_string()
+            {
+                self.out.push(
+                    Issue::new(
+                        Severity::Warn,
+                        "testing",
+                        format!(
+                            "compares `{}` with itself: true whatever it is (self-comparison)",
+                            a.to_token_stream()
+                        ),
+                        self.file,
+                        m.path.span().start().line,
+                    )
+                    .fix("compare with the value it should have"),
+                );
+            }
+        }
+        visit::visit_macro(self, m);
+    }
 }
 
 /// What an app names of the renderer behind `aio::ui` (a `dioxus…` path,

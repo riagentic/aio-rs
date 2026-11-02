@@ -30,6 +30,9 @@ jobs:
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- setup
       - run: ./ci.sh
+      # Known breaks planted one at a time, in the source and in a built .deb:
+      # each one's test must go red (docs/testing/proving.md).
+      - run: scripts/mutants --fast
   # The same tests on each desktop OS (fmt and lint are the same everywhere).
   test:
     strategy:
@@ -55,6 +58,9 @@ jobs:
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- runtime --fetch
       - run: cargo test --workspace --all-features --locked --no-fail-fast
+      # air (docs/design/air.md): the facade and TestUi on it, its gates in release.
+      - run: cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --locked --no-fail-fast
+      - run: cargo test -p aio-rs-air --release --all-features --locked
   audit:
     runs-on: ubuntu-24.04
     steps:

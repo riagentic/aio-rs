@@ -154,12 +154,14 @@ a11y, cell ids, plus clippy (exit 1: errors; `ax lint --help`)",
     ),
     v(
         "test",
-        "test <app> [filter] [--video out] [--pace ms] [--android] [--device serial]",
+        "test <app> [filter] [--video out] [--pace ms] [--android] [--device serial] [--mutants]",
         "the app's tests (cargo test); --video records each UI test, no test
 changed: out a folder (a video per test) or one .mp4/.webm, a frame per
 step, each --pace ms (800) on screen; --android: the emulator lane instead (its
 APK for the device built, installed, started: passed once its window is ready
-and it still runs; AIO_AVD booted when none is attached, or --device)",
+and it still runs; AIO_AVD booted when none is attached, or --device);
+--mutants: cargo mutants over the app's packages (each function broken in
+turn: the ones no test noticed are listed; `cargo install cargo-mutants`)",
     ),
     v("apps", "apps", "the aio-rs apps and private instances on this machine, and which run"),
     v(
