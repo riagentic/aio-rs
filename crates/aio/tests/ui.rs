@@ -778,3 +778,26 @@ fn the_apps_scripts_run_in_the_order_sent() {
     );
     assert_eq!(order, serde_json::json!((0..40).collect::<Vec<_>>()));
 }
+
+fn schemed() -> View {
+    let dark = aio::ui::use_dark();
+    let css = "p { color: rgb(0, 0, 0) } @media (prefers-color-scheme: dark) { p { color: rgb(255, 255, 255) } }";
+    rsx! {
+        style { {aio::ui::page_css(&[css], aio::ui::Scheme::System)} }
+        p { "data-t": "dark", {dark.get().to_string()} }
+    }
+}
+
+#[test]
+fn the_page_follows_the_oss_light_or_dark_as_it_changes() {
+    let mut ui = TestUi::new(schemed);
+    ui.until_text("dark", "false");
+    assert_eq!(ui.style("dark", "color"), "rgb(0, 0, 0)");
+    ui.set_os_dark(true);
+    ui.until_text("dark", "true");
+    assert_eq!(ui.style("dark", "color"), "rgb(255, 255, 255)", "the sheets' dark rules, no render needed");
+    ui.set_os_dark(false);
+    ui.until_text("dark", "false");
+    let mut ui = aio::testing::Mount::default().dark().app(schemed);
+    ui.until_text("dark", "true");
+}

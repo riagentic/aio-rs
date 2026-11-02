@@ -16,10 +16,10 @@ compile. Feature `kit`.
 // ax create's template (src/lib.rs), compiled by ax's own tests:
 // The app's one hue (`[ui] hue`, else its id's): its icon's and splash's too.
 let theme = aio::kit::theme_css(aio::hue!());
-style { {aio::use_css!(false, &theme; "assets/style.css")} }
+style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
 ```
 
-`aio::use_css!(dark, made…; "file.css", …)` makes the page's stylesheet:
+`aio::use_css!(scheme, made…; "file.css", …)` makes the page's stylesheet:
 
 - Sheets made in code go before the `;` and come first (here the kit's
   theme); files follow, paths from the package's folder.
@@ -28,9 +28,10 @@ style { {aio::use_css!(false, &theme; "assets/style.css")} }
   release build has the files built in (`include_str!`) and reads none.
 - It is made on every render: never keep CSS in `once` (made once,
   stale after an edit).
-- `dark` is the app's theme, not the OS's (below).
+- `scheme` is light or dark: `aio::ui::scheme()` (`[ui] scheme`: the
+  OS's by default), or the app's own `bool` (below).
 
-`aio::ui::page_css(&[sheets], dark)` is the same without the live
+`aio::ui::page_css(&[sheets], scheme)` is the same without the live
 reload, for CSS an app builds itself.
 
 ## One hue
@@ -207,11 +208,21 @@ build says so once in the log.
 
 ## Dark mode
 
-`dark` in `use_css!` decides: `true` applies the sheets'
-`@media (prefers-color-scheme: dark)` rules and the dark side of every
-`light-dark(a, b)`, `false` the light ones. The OS's setting doesn't (a
-phone in dark mode must not darken half of a light app). To offer a
-choice, keep it in a cell and pass it:
+By default the page follows the OS, as it changes (aio's automatic dark
+mode): `[ui] scheme = "system"` in `aio.toml`, what `aio::ui::scheme()`
+gives the template. The sheets stay as written, so every
+`@media (prefers-color-scheme: dark)` rule and `light-dark(a, b)` follows
+the OS with no render. `scheme = "light"` or `"dark"` fixes one. Code
+that draws its own colours (a canvas, a chart) reads
+`aio::ui::use_dark()`, a `Memo<bool>` that follows the OS too. A test
+turns the OS dark with `ui.set_os_dark(true)` (or mounts dark:
+`aio::testing::Mount::default().dark()`).
+
+A `bool` instead of the scheme is the app's own choice: `true` applies
+the sheets' dark rules and the dark side of every `light-dark(a, b)`,
+`false` the light ones, whatever the OS says (a phone in dark mode never
+darkens half of a light app). To offer a choice, keep it in a cell and
+pass it:
 
 ```rust
 use aio::ui::prelude::*;

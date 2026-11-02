@@ -251,13 +251,15 @@ pub fn numbered(bases: Vec<String>) -> Vec<String> {
 /// set on `:root` are set on that root too, so the ones made from others
 /// (`--aio-tint` from the accent) are made from the app's, not inherited
 /// ready-made. It mounts into `<main id="main">`, which aio styles as a
-/// centred page, so that box is reset to aio's full-window `#root`. The app's
-/// theme, not the OS's, decides `light-dark()` and `prefers-color-scheme`
-/// (a phone in dark mode must not darken half of a light app). Under `[ui] theme = "none"` ([`set_look`])
+/// centred page, so that box is reset to aio's full-window `#root`.
+/// `scheme` decides `light-dark()` and `prefers-color-scheme`: the OS's as
+/// it changes ([`Scheme::System`], what [`scheme`] gives by default), or
+/// the app's own choice (a `bool`: `true` dark; a phone in dark mode then
+/// never darkens half of a light app). Under `[ui] theme = "none"` ([`set_look`])
 /// even aio's base rules are left out: the app brings every rule. The last
 /// page CSS is kept for [`page_sheet`].
-pub fn page_css(sheets: &[&str], dark: bool) -> String {
-    let css = sheets_css(sheets, dark, !BARE.load(std::sync::atomic::Ordering::Relaxed));
+pub fn page_css(sheets: &[&str], scheme: impl Into<Scheme>) -> String {
+    let css = sheets_css(sheets, scheme.into(), !BARE.load(std::sync::atomic::Ordering::Relaxed));
     *PAGE.write().unwrap_or_else(|e| e.into_inner()) = css.clone();
     css
 }
@@ -378,19 +380,78 @@ macro_rules! use_css {
 }
 
 /// [`page_css`] without the globals: `base` keeps aio's base rules.
-fn sheets_css(sheets: &[&str], dark: bool, base: bool) -> String {
+fn sheets_css(sheets: &[&str], scheme: Scheme, base: bool) -> String {
     let base: &[&str] = if base { &["*,*::before,*::after{box-sizing:border-box}body{margin:0}"] } else { &[] };
     let css = [base, sheets].concat().join("\n");
-    let scheme = if dark { "@media all" } else { "@media not all" };
     let css = css
         .replace(":root[data-theme", "[data-theme")
         .replace(":root{", ":root,[data-theme]{")
-        .replace(":root {", ":root,[data-theme] {")
-        .replace("@media (prefers-color-scheme: dark)", scheme)
-        .replace("@media (prefers-color-scheme:dark)", scheme);
-    light_dark(&css, dark)
-        + "\n#main{max-width:none;margin:0;padding:0;height:100%;overflow:hidden}"
+        .replace(":root {", ":root,[data-theme] {");
+    let css = match scheme {
+        // The OS's: the sheets as written, the page following `prefers-color-scheme`.
+        Scheme::System => css + "\n:root{color-scheme:light dark}",
+        fixed => {
+            let dark = fixed == Scheme::Dark;
+            let media = if dark { "@media all" } else { "@media not all" };
+            let css = css
+                .replace("@media (prefers-color-scheme: dark)", media)
+                .replace("@media (prefers-color-scheme:dark)", media);
+            light_dark(&css, dark)
+        }
+    };
+    css + "\n#main{max-width:none;margin:0;padding:0;height:100%;overflow:hidden}"
         + "\n[data-theme]{background:var(--aio-bg);color:var(--aio-text)}"
+}
+
+pub use aio_config::config::Scheme;
+
+/// The app's `[ui] scheme` (what `aio::boot::begin` took; `System` before
+/// it, and in tests): the template's `use_css!(aio::ui::scheme(), …)`.
+pub fn scheme() -> Scheme {
+    match SCHEME.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Scheme::Light,
+        2 => Scheme::Dark,
+        _ => Scheme::System,
+    }
+}
+
+/// Take the app's `[ui] scheme` for [`scheme`] (`aio::boot::begin` does it).
+pub fn set_scheme(s: Scheme) {
+    let n = match s {
+        Scheme::System => 0,
+        Scheme::Light => 1,
+        Scheme::Dark => 2,
+    };
+    SCHEME.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+static SCHEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Is the page dark now (a hook): the app's `[ui] scheme`, or under
+/// `system` the OS's `prefers-color-scheme`, followed as it changes (a
+/// canvas or a chart that draws its own colours reads it). The page's CSS
+/// follows the OS without it ([`page_css`] with [`Scheme::System`]).
+#[cfg(any(feature = "kit", feature = "air"))]
+pub fn use_dark() -> Memo<bool> {
+    let fixed = scheme();
+    let os = signal(|| false);
+    once(move || {
+        if fixed == Scheme::System {
+            spawn(async move {
+                let mut page = eval(
+                    "const m = matchMedia('(prefers-color-scheme: dark)'); aio.send(m.matches);
+                     m.addEventListener('change', (e) => aio.send(e.matches)); await new Promise(() => {});",
+                );
+                while let Ok(dark) = page.recv::<bool>().await {
+                    os.set(dark);
+                }
+            });
+        }
+    });
+    memo(move || match fixed {
+        Scheme::System => os.get(),
+        s => s == Scheme::Dark,
+    })
 }
 
 /// Take the app's `[ui] theme` for [`page_css`] (`aio::boot::begin` does it).
@@ -1109,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn the_apps_theme_not_the_oss_decides_and_tokens_are_made_on_the_app_root() {
+    fn a_fixed_scheme_rewrites_the_sheets_the_oss_keeps_them_and_tokens_are_made_on_the_app_root() {
         let kit = ":root{--accent:green;--tint:color-mix(in oklab,var(--accent) 10%,white)}\n\
                    @media (prefers-color-scheme: dark){:root{--bg:black}}";
         let app = ":root[data-theme=\"light\"]{--accent:blue}";
@@ -1118,14 +1179,17 @@ mod tests {
         assert!(light.contains("@media not all{:root,[data-theme]{--bg:black}}"), "{light}");
         assert!(light.contains("[data-theme=\"light\"]{--accent:blue}"));
         assert!(page_css(&[kit], true).contains("@media all{"));
+        let os = page_css(&[kit], Scheme::System);
+        assert!(os.contains("@media (prefers-color-scheme: dark){:root,[data-theme]{--bg:black}}"), "the OS's: {os}");
+        assert!(os.contains(":root{color-scheme:light dark}"));
     }
 
     #[test]
     fn theme_none_drops_even_the_base_rules() {
         // aio server-html-gen: `theme: "none"` emits no data-aio-box-base.
         let base = "*,*::before,*::after{box-sizing:border-box}body{margin:0}";
-        assert!(sheets_css(&["a{}"], false, true).starts_with(base));
-        let bare = sheets_css(&["a{}"], false, false);
+        assert!(sheets_css(&["a{}"], Scheme::Light, true).starts_with(base));
+        let bare = sheets_css(&["a{}"], Scheme::Light, false);
         assert!(!bare.contains("box-sizing") && bare.starts_with("a{}"), "{bare}");
     }
 }

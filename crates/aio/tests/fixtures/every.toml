@@ -117,6 +117,7 @@ url = "https://example.org/fb"
 timeout = "30s"
 [ui]
 theme = "full"
+scheme = "light"
 hue = 200
 neutral = "soft"
 [vitals.loop]

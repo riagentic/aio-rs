@@ -943,6 +943,14 @@ impl TestUi {
         self.must("attr", json!({ "path": t, "name": name })).as_str().map(String::from)
     }
 
+    /// The OS turns dark (or light) while the app runs: the page's
+    /// `prefers-color-scheme` changes, as on a phone at dusk.
+    pub fn set_os_dark(&mut self, dark: bool) {
+        let scheme = if dark { "dark" } else { "light" };
+        self.page.cmd("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }));
+        self.settle();
+    }
+
     /// A CSS property's computed value (`color`, a custom one: `--split-a`), trimmed.
     pub fn style(&self, t: &str, property: &str) -> String {
         self.must("style", json!({ "path": t, "name": property })).as_str().unwrap_or_default().into()

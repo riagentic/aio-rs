@@ -1128,12 +1128,14 @@ impl Default for Feedback {
     }
 }
 
-/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`);
+/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`, dark mode);
 /// `aio::kit::theme::sheet` makes its CSS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ui {
     pub theme: Look,
+    /// Light or dark: the OS's, as it changes (aio's automatic dark mode), or one fixed.
+    pub scheme: Scheme,
     /// The accent's hue in degrees, instead of the one hashed from the id.
     pub hue: Option<u16>,
     /// The page's greys: tinted with the hue, or near grey (aio's `"neutral": "soft"`).
@@ -1145,7 +1147,25 @@ pub struct Ui {
 
 impl Default for Ui {
     fn default() -> Self {
-        Self { theme: Look::Auto, hue: None, neutral: Neutral::Tinted, layout: true }
+        Self { theme: Look::Auto, scheme: Scheme::System, hue: None, neutral: Neutral::Tinted, layout: true }
+    }
+}
+
+/// Light or dark (`[ui] scheme`, `aio::ui::page_css`'s choice).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    /// The OS's, following it as it changes (`prefers-color-scheme`).
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl From<bool> for Scheme {
+    /// The app's own choice: `true` dark.
+    fn from(dark: bool) -> Self {
+        if dark { Self::Dark } else { Self::Light }
     }
 }
 
