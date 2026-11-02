@@ -141,9 +141,10 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     let stats = |hits: u32| if live { format!("{hits} app") } else { "0 ?".to_string() };
 
     let aslr: u64 = next().strip_prefix("aslr ").unwrap().parse().unwrap();
-    // Before any patch, stats reads the original (running) statics on every
-    // platform; only after a patch does the platform decide.
-    assert_eq!(next(), format!("value 1 10 {} 1 app", ticks(1)));
+    // Before any patch the app itself runs: the real values on every
+    // platform (one loop: TICKS 1 + 100*SEEN 1 = 101, HITS 1, NAME set).
+    // Only a patched function's view then depends on the platform.
+    assert_eq!(next(), "value 1 10 101 1 app");
 
     let main_rs = ws.join("app/src/main.rs");
     let lib_rs = ws.join("lib/src/lib.rs");
