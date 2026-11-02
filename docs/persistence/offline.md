@@ -80,6 +80,8 @@ rt.block_on(async {
     let saved = || std::fs::read_to_string(&copy).unwrap_or_default();
     until(|| saved().contains("milk") && saved().contains(r#""pending":[]"#)).await;
     drop(first);
+    // Its socket closes once no copy uses it (within half a second).
+    aio::time::sleep(Duration::from_secs(1)).await;
 
     // The server goes away; the app starts anyway, from the saved copy.
     server.abort();
