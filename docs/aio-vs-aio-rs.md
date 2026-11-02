@@ -551,7 +551,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
   fine-grained renderer of aio-rs's own: a cell's fields as signals,
   direct DOM edits for what changed, and a lean macro so rebuilds get
   faster ([design](design/air.md)). Apps are written against `aio::ui`;
-  what a 0.1 app changes is in the migration guide's section 8, [0.1 → 0.2](migration/README.md#8-01--02-dioxus-is-gone).
+  what a 0.1 app changes is in the migration guide's section 8, [0.1 → 0.2](migration/README.md).
 - **Next: key-to-paint at or under aio's** on large states
   ([key to paint](#key-to-paint)).
 
