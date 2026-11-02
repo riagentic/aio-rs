@@ -92,22 +92,16 @@ pub struct Moment {
     pub took: Option<Duration>,
 }
 
-/// What follows a turn's commits ([`Handle::end`]).
-#[derive(Clone, Copy)]
-enum Then {
-    Nothing,
-    /// A refused call: its failures counted.
-    Failures,
-    /// Listeners told, effects started; `wake`: the scheduler too.
-    Told { wake: bool },
-    /// The schedules fired: told, then those due on other cells called.
-    Fired,
-}
+use crate::store::{Hold as Turn, Then};
 
-/// A call's hold on its cell's file ([`Handle::turn`]), and the joint commit it opened.
-struct Turn {
-    file: Result<crate::store::Turn, crate::store::Loose>,
-    owner: Option<crate::store::Owner>,
+/// A commit shown ([`Handle::after_commit`]), its listeners still to be told.
+struct Shown {
+    telling: Telling,
+    started: bool,
+    done: Vec<crate::Event>,
+    changed: bool,
+    acting: Vec<crate::Acted>,
+    wake: bool,
 }
 
 /// Calls a cell by name, as a schedule of another cell fires it.
@@ -183,6 +177,34 @@ pub struct Handle<T: Cell> {
 impl<T: Cell> crate::store::Member for Inner<T> {
     fn end(&self, joint: u64, kept: bool) {
         lock(&self.store).joint_end(joint, kept);
+    }
+
+    fn react(&self) {
+        let rs = lock(&self.reactions).clone();
+        if rs.is_empty() {
+            return;
+        }
+        let done = lock(&self.store).unreacted();
+        done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
+    }
+
+    fn show(self: Arc<Self>, t: Then) -> Box<dyn FnOnce()> {
+        let h = Handle { inner: self, by: By::System };
+        let shown = match t {
+            Then::Told { wake } => Some(h.after_commit(wake)),
+            Then::Fired => Some(h.after_commit(false)),
+            Then::Nothing | Then::Failures => None,
+        };
+        Box::new(move || {
+            if let Some(s) = shown {
+                h.tell_committed(s);
+            }
+            match t {
+                Then::Failures => h.count_failures(),
+                Then::Fired => h.fire_foreign(),
+                Then::Nothing | Then::Told { .. } => {}
+            }
+        })
     }
 }
 
@@ -385,10 +407,10 @@ impl<T: Cell> Handle<T> {
     }
 
     /// Show the commits' state, send their events and start the effects
-    /// they asked for; then (what it returns) tell the listeners and let the
-    /// scheduler see changed schedules. A joint commit shows every cell in
-    /// it before it tells any, so each listener sees all of it.
-    fn after_commit(&self, wake: bool) -> Box<dyn FnOnce()> {
+    /// they asked for; then ([`Self::tell_committed`]) tell the listeners
+    /// and let the scheduler see changed schedules. A joint commit shows
+    /// every cell in it before it tells any, so each listener sees all of it.
+    fn after_commit(&self, wake: bool) -> Shown {
         // Before the state is shown: from then until its listeners are told.
         let telling = Telling::new();
         // In the file's turn: never a joint commit's state before it commits.
@@ -434,19 +456,11 @@ impl<T: Cell> Handle<T> {
             (started, done, changed, acting)
         };
         drop(hold);
-        let me = self.clone();
-        Box::new(move || me.tell_committed(telling, started, done, changed, acting, wake))
+        Shown { telling, started, done, changed, acting, wake }
     }
 
-    fn tell_committed(
-        &self,
-        telling: Telling,
-        started: bool,
-        done: Vec<crate::Event>,
-        changed: bool,
-        acting: Vec<crate::Acted>,
-        wake: bool,
-    ) {
+    fn tell_committed(&self, s: Shown) {
+        let Shown { telling, started, done, changed, acting, wake } = s;
         // A call that changed nothing (a cursor already at the end) tells nobody.
         if changed {
             let st = self.state();
@@ -475,67 +489,16 @@ impl<T: Cell> Handle<T> {
         }
     }
 
-    /// Its turn at its file, before its store's lock: a joint commit holds
-    /// the turn while it takes the stores of the cells reacting, so nobody
-    /// waits for the turn while holding a store. When other cells react to
-    /// it, the joint commit its calls and their reactions go into: one this
-    /// thread has open, joined, or a new one.
+    /// Its hold on its file for a call ([`crate::store::hold`]).
     fn turn(&self) -> Turn {
-        let file = self.inner.file.call();
-        let owner = match file.is_ok() && !lock(&self.inner.reactions).is_empty() {
-            true => crate::store::open_joint(&self.inner.file),
-            false => None,
-        };
-        if file.is_ok() {
-            let key = Arc::as_ptr(&self.inner) as *const () as usize;
-            crate::store::join(key, || self.inner.clone());
-        }
-        Turn { file, owner }
+        // Not held while it waits for the turn: a joint commit's reactions take it.
+        let reacts = !lock(&self.inner.reactions).is_empty();
+        crate::store::hold(&self.inner.file, reacts, self.inner.clone())
     }
 
-    /// A turn's end: the reactions to what it committed run now (inside
-    /// the joint commit), then what follows a commit (`then`: listeners,
-    /// effects) at the joint commit's end, or now when there is none.
-    /// Ending the joint commit it opened commits it: refused, nothing of
-    /// it is kept, and that is the call's answer.
+    /// A call's end ([`crate::store::release`]).
     fn end(&self, turn: Turn, then: Then) -> Result {
-        self.react();
-        let me = self.clone();
-        let then: crate::store::After = Box::new(move || me.then(then));
-        let Some(owner) = turn.owner else {
-            drop(turn.file);
-            crate::store::after(false, then);
-            return Ok(());
-        };
-        crate::store::after(true, then);
-        owner.end(turn.file.ok()).map_err(crate::Rejected::new)
-    }
-
-    /// Show what follows a turn's commits now; then (what it returns) tell it.
-    fn then(&self, t: Then) -> Box<dyn FnOnce()> {
-        let h = self.clone();
-        match t {
-            Then::Nothing => Box::new(|| {}),
-            Then::Failures => Box::new(move || h.count_failures()),
-            Then::Told { wake } => self.after_commit(wake),
-            Then::Fired => {
-                let tell = self.after_commit(false);
-                Box::new(move || {
-                    tell();
-                    h.fire_foreign();
-                })
-            }
-        }
-    }
-
-    /// Run the reactions to its calls committed since they last ran.
-    fn react(&self) {
-        let rs = lock(&self.inner.reactions).clone();
-        if rs.is_empty() {
-            return;
-        }
-        let done = lock(&self.inner.store).unreacted();
-        done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
+        crate::store::release(turn, self.inner.clone(), then).map_err(crate::Rejected::new)
     }
 
     /// Count the failures the store saw; the breaker's trip disables the

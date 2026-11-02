@@ -26,7 +26,7 @@ pub const TX: &str = "$tx";
 mod shared;
 mod tx;
 use shared::Db;
-pub(crate) use shared::{After, Loose, Member, Owner, Shared, Turn, after, join, open_joint};
+pub(crate) use shared::{Hold, Member, Shared, Then, hold, release};
 pub(crate) use tx::On as TxOn;
 
 /// One committed call.
@@ -1995,26 +1995,13 @@ impl<T: Cell> Store<T> {
             crate::config::Durability::Normal => "NORMAL",
             crate::config::Durability::Full => "FULL",
         };
-        Ok(self.db.each(|c| c.execute_batch(&format!("PRAGMA synchronous = {mode}")))?)
+        self.db.pragmas(&[format!("PRAGMA synchronous = {mode}")]).map_err(Error)
     }
 
     /// Set the app's own pragmas (`[data] pragmas`) on the store's file;
     /// one SQLite ignores is refused, never left looking set.
     pub fn set_pragmas(&mut self, ps: &[String]) -> Result<(), Error> {
-        for p in ps {
-            let mut why = None;
-            self.db
-                .each(|c| {
-                    c.execute_batch(p)?;
-                    why = why.take().or_else(|| crate::db::not_taken(c, p));
-                    Ok(())
-                })
-                .map_err(|e| Error(format!("[data] pragmas {p:?}: {e}")))?;
-            if let Some(why) = why {
-                return Err(Error(format!("[data] pragmas {why}")));
-            }
-        }
-        Ok(())
+        self.db.pragmas(ps).map_err(Error)
     }
 
     /// How hard commits are saved, as SQLite says (not a remembered setting).

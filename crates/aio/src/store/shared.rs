@@ -166,12 +166,19 @@ impl Db {
         }
     }
 
-    /// Run `f` on each of its connections (a pragma is per connection).
-    pub(crate) fn each(&self, mut f: impl FnMut(&Connection) -> rusqlite::Result<()>) -> rusqlite::Result<()> {
-        if let Some(c) = &self.own {
-            f(c)?;
+    /// Set pragmas `ps` on each of its connections (a pragma is per
+    /// connection); one SQLite ignores is refused, never left looking set.
+    pub(crate) fn pragmas(&self, ps: &[String]) -> Result<(), String> {
+        let file = self.file.conn();
+        for c in self.own.iter().chain([&*file]) {
+            for p in ps {
+                c.execute_batch(p).map_err(|e| format!("[data] pragmas {p:?}: {e}"))?;
+                if let Some(why) = crate::db::not_taken(c, p) {
+                    return Err(format!("[data] pragmas {why}"));
+                }
+            }
         }
-        f(&self.file.conn())
+        Ok(())
     }
 
     /// Before a write: the joint commit this thread has open on this file
@@ -241,14 +248,71 @@ impl std::ops::Deref for Conn<'_> {
     }
 }
 
-/// A cell in a joint commit: told its end, `kept` or refused (then it is
-/// put back as it was before it wrote there).
-pub(crate) trait Member {
-    fn end(&self, joint: u64, kept: bool);
+/// What follows a call's commits ([`release`]).
+#[derive(Clone, Copy)]
+pub(crate) enum Then {
+    Nothing,
+    /// A refused call: its failures counted.
+    Failures,
+    /// Listeners told, effects started; `wake`: the scheduler too.
+    Told { wake: bool },
+    /// The schedules fired: told, then those due on other cells called.
+    Fired,
 }
 
-/// What follows a commit: shows the state, then (what it returns) tells it.
-pub(crate) type After = Box<dyn FnOnce() -> Box<dyn FnOnce()>>;
+/// A cell, as a call's hold and a joint commit see it.
+pub(crate) trait Member {
+    /// The joint commit it wrote in ended: `kept`, or refused (then it is
+    /// put back as it was before it wrote there).
+    fn end(&self, joint: u64, kept: bool);
+    /// Run the reactions to its calls committed since they last ran.
+    fn react(&self);
+    /// Show what follows its commits (`then`) now; what it returns tells it.
+    fn show(self: Arc<Self>, then: Then) -> Box<dyn FnOnce()>;
+}
+
+/// What follows a commit, shown then told at the joint commit's end.
+type After = (Arc<dyn Member>, Then);
+
+/// A call's hold on its cell's file ([`hold`]), and the joint commit it opened.
+pub(crate) struct Hold {
+    file: Result<Turn, Loose>,
+    owner: Option<Owner>,
+}
+
+/// A call's hold on `cell`'s file, taken before its lock: once the file's
+/// cells react to each other, its turn (a joint commit holds the turn while
+/// it takes the locks of the cells it reaches, so nobody waits for the turn
+/// holding one). When other cells react to it (`reacts`), the joint commit
+/// its calls and their reactions go into: one this thread has open,
+/// joined, or a new one.
+pub(crate) fn hold(file: &Shared, reacts: bool, cell: Arc<dyn Member>) -> Hold {
+    let turn = file.call();
+    let owner = match turn.is_ok() && reacts {
+        true => open_joint(file),
+        false => None,
+    };
+    if turn.is_ok() {
+        join(Arc::as_ptr(&cell) as *const () as usize, || cell);
+    }
+    Hold { file: turn, owner }
+}
+
+/// A call's end: the reactions to what it committed run now (inside the
+/// joint commit), then what follows (`then`: listeners, effects) at the
+/// joint commit's end, or now when there is none. Ending the joint commit
+/// it opened commits it: refused, nothing of it is kept, and that is the
+/// call's answer.
+pub(crate) fn release(h: Hold, cell: Arc<dyn Member>, then: Then) -> Result<(), String> {
+    cell.react();
+    let Some(owner) = h.owner else {
+        drop(h.file);
+        after(false, (cell, then));
+        return Ok(());
+    };
+    after(true, (cell, then));
+    owner.end(h.file.ok())
+}
 
 /// The joint commit this thread has open: begun at its first write.
 struct Joint {
@@ -268,7 +332,7 @@ thread_local! {
 
 /// Open a joint commit on `file` (in this thread's turn at it), unless one
 /// is open: its owner, who ends it.
-pub(crate) fn open_joint(file: &Shared) -> Option<Owner> {
+fn open_joint(file: &Shared) -> Option<Owner> {
     JOINT.with(|j| {
         let mut j = j.borrow_mut();
         if j.is_some() {
@@ -281,7 +345,7 @@ pub(crate) fn open_joint(file: &Shared) -> Option<Owner> {
 }
 
 /// Join the open joint commit as `key` (once).
-pub(crate) fn join(key: usize, m: impl FnOnce() -> Arc<dyn Member>) {
+fn join(key: usize, m: impl FnOnce() -> Arc<dyn Member>) {
     JOINT.with(|j| {
         if let Some(j) = j.borrow_mut().as_mut()
             && !j.joined.iter().any(|(k, _)| *k == key)
@@ -292,7 +356,7 @@ pub(crate) fn join(key: usize, m: impl FnOnce() -> Arc<dyn Member>) {
 }
 
 /// Run `f` at the open joint commit's end (`first`: before the rest), else now.
-pub(crate) fn after(first: bool, f: After) {
+fn after(first: bool, f: After) {
     let now = JOINT.with(|j| match j.borrow_mut().as_mut() {
         Some(j) if first => {
             j.after.insert(0, f);
@@ -304,13 +368,13 @@ pub(crate) fn after(first: bool, f: After) {
         }
         None => Some(f),
     });
-    if let Some(f) = now {
-        f()()
+    if let Some((m, t)) = now {
+        m.show(t)()
     }
 }
 
 /// The thread's joint commit, to end.
-pub(crate) struct Owner {
+struct Owner {
     ended: bool,
 }
 
@@ -337,12 +401,12 @@ fn finish(j: &Joint, commit: bool) -> Result<(), String> {
 impl Owner {
     /// Commit it, then, out of `turn` (the caller's turn at the file), show
     /// and tell what follows each of its commits.
-    pub(crate) fn end(mut self, turn: Option<Turn>) -> Result<(), String> {
+    fn end(mut self, turn: Option<Turn>) -> Result<(), String> {
         self.ended = true;
         let Some(j) = JOINT.with(|j| j.borrow_mut().take()) else { return Ok(()) };
         let out = finish(&j, true);
         drop(turn);
-        let tells: Vec<_> = j.after.into_iter().map(|f| f()).collect();
+        let tells: Vec<_> = j.after.into_iter().map(|(m, t)| m.show(t)).collect();
         tells.into_iter().for_each(|t| t());
         out
     }
