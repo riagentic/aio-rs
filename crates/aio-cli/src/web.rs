@@ -1544,3 +1544,151 @@ pub(crate) mod browser {
         until(&mut t, who, json!("nobody")).await;
     }
 }
+
+/// The web build on air in a real browser (a headless Chromium, the wasm32
+/// target and the lock's wasm-bindgen; skipped without them): the page's
+/// view drawn by air's interpreter talking to the module, no Dioxus in it.
+#[cfg(all(test, unix))]
+mod browser_air {
+    use super::browser::{Chromium, until};
+    use super::*;
+    use aio::serde_json::json;
+    use std::time::Duration;
+
+    /// The test page's site on air, built and bound into `dir/site`; `None`
+    /// (said) without the wasm32 target or the right wasm-bindgen.
+    fn site(dir: &Path) -> Option<PathBuf> {
+        let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
+        let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
+        if !sysroot.join("lib/rustlib/wasm32-unknown-unknown").is_dir() {
+            eprintln!("no wasm32 target: skipped");
+            return None;
+        }
+        let page = dir.join("page");
+        std::fs::create_dir_all(page.join("src")).unwrap();
+        let aio = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aio");
+        let manifest = format!(
+            "[package]\nname = \"airpage\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n\
+             [lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n\
+             aio = {{ package = \"aio-rs\", path = {:?}, default-features = false, features = [\"web\", \"air\"] }}\n\
+             wasm-bindgen = \"0.2\"\n\n[workspace]\n",
+            aio.display().to_string()
+        );
+        for (f, text) in [
+            ("Cargo.toml", manifest.as_str()),
+            ("Cargo.lock", include_str!("../../../Cargo.lock")),
+            ("rust-toolchain.toml", include_str!("../../../rust-toolchain.toml")),
+            ("src/lib.rs", include_str!("web/air.rs")),
+        ] {
+            std::fs::write(page.join(f), text).unwrap();
+        }
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
+        let app = App { id: "air-web-test".into(), name: "Air web test".into(), version: "1.0.0".into(), icon: None };
+        let out = dir.join("site");
+        match bind(&page, &target, ("airpage", "airpage"), &app, &out, true, false) {
+            Err(e) if e.contains("needs wasm-bindgen") => {
+                eprintln!("{e}: skipped");
+                return None;
+            }
+            r => r.unwrap(),
+        }
+        let cfg = aio::config::Config::parse("[app]\nid = \"air-web-test\"\nname = \"Air web test\"").unwrap();
+        assert_eq!(pack(&app, &cfg, &page, &out, "", true).unwrap(), Vec::<String>::new());
+        // No Dioxus in the page's build.
+        let tree = Command::new("cargo")
+            .args(["tree", "--offline", "-e", "normal", "--prefix", "none", "--target", "wasm32-unknown-unknown"])
+            .current_dir(&page)
+            .output()
+            .unwrap();
+        let tree = String::from_utf8_lossy(&tree.stdout);
+        assert!(tree.lines().any(|l| l.starts_with("aio-rs-air ")), "air draws it: {tree}");
+        assert!(!tree.lines().any(|l| l.starts_with("dioxus")), "{tree}");
+        Some(out)
+    }
+
+    /// The site's files over HTTP, by path (a static host), until dropped.
+    fn serve(site: PathBuf, l: tokio::net::TcpListener) -> tokio::task::JoinHandle<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let site = site.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/");
+                    let path = if path == "/" { "/index.html" } else { path };
+                    let file = site.join(path.trim_start_matches('/'));
+                    let (status, body) = match std::fs::read(&file) {
+                        Ok(b) if !path.contains("..") => ("200 OK", b),
+                        _ => ("404 Not Found", vec![]),
+                    };
+                    let kind = match file.extension().and_then(|e| e.to_str()) {
+                        Some("html") => "text/html",
+                        Some("js") => "text/javascript",
+                        Some("wasm") => "application/wasm",
+                        Some("png") => "image/png",
+                        _ => "application/octet-stream",
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    _ = s.write_all(head.as_bytes()).await;
+                    _ = s.write_all(&body).await;
+                });
+            }
+        })
+    }
+
+    const REFUSED: &str = "window.refused = []; document.addEventListener('securitypolicyviolation', \
+                           (e) => window.refused.push(e.violatedDirective + ' ' + e.blockedURI))";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_page_draws_its_view_on_air_and_keeps_its_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(site) = tokio::task::spawn_blocking({
+            let d = dir.path().to_path_buf();
+            move || site(&d)
+        })
+        .await
+        .unwrap() else {
+            return;
+        };
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let _server = serve(site, l);
+        let Some(c) = Chromium::open(&url) else {
+            return eprintln!("no Chromium: skipped");
+        };
+        let mut t = c.tabs(&url, 1).await.remove(0);
+        t.call("Page.enable", json!({})).await.unwrap();
+        t.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": REFUSED })).await.unwrap();
+        t.eval("location.reload()").await.ok();
+        let text = |id: &str| format!("document.querySelector('[data-t={id}]')?.textContent ?? null");
+        until(&mut t, &text("n"), json!("0")).await;
+        assert_eq!(t.eval("typeof window.__airApply").await.unwrap(), json!("function"), "air's interpreter");
+        // A click: the page's event to the module, the cell's call, its hole redrawn.
+        for _ in 0..2 {
+            t.eval("document.querySelector('[data-t=add]').click()").await.unwrap();
+        }
+        until(&mut t, &text("n"), json!("2")).await;
+        // Typing: the value follows, and what shows it.
+        let typed = "{ const i = document.querySelector('[data-t=name]'); i.value = 'hey'; \
+                     i.dispatchEvent(new Event('input', { bubbles: true })); }";
+        t.eval(typed).await.unwrap();
+        until(&mut t, &text("typed"), json!("hey")).await;
+        // A keyed list: each row its own state, kept as the rows move.
+        t.eval("document.querySelector('[data-t=b]').click()").await.unwrap();
+        until(&mut t, &text("b"), json!("b 1")).await;
+        t.eval("document.querySelector('[data-t=flip]').click()").await.unwrap();
+        let order = "[...document.querySelectorAll('li')].map((l) => l.textContent)";
+        until(&mut t, order, json!(["b 1", "a 0"])).await;
+        // The page's policy refused nothing (the interpreter is a script of the page's own making).
+        assert_eq!(t.eval("window.refused").await.unwrap(), json!([]));
+        // Reloaded: the cell as the browser kept it.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        t.eval("location.reload()").await.ok();
+        until(&mut t, &text("n"), json!("2")).await;
+    }
+}

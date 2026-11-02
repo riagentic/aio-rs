@@ -642,6 +642,12 @@ pub fn deps_of(artifact: &Path) -> Vec<PathBuf> {
     crate::watch::dep_info(&text, &crate::watch::not_the_apps(target))
 }
 
+/// Whether `changed` is stylesheets alone (pure): a debug build's
+/// `use_css!` reads them from disk as they are saved.
+fn sheets_only(changed: &[PathBuf]) -> bool {
+    !changed.is_empty() && changed.iter().all(|p| p.extension().is_some_and(|x| x == "css"))
+}
+
 /// The bytes of `bin`, hashed: a build that changed nothing leaves them as they were.
 fn digest(bin: &Path) -> Option<u64> {
     use std::hash::Hasher;
@@ -1194,7 +1200,9 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         return Ok(if ended.success() { String::new() } else { format!("{name} ended: {ended}") });
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    match dx_version() {
+    // An app on air: no dx (it drives Dioxus's devtools); markup reloads live.
+    let air = on_air(&meta, name);
+    match dx_version().filter(|_| !air) {
         // dx's hot-patch watches all of the app: `--watch=<dirs>` is ax's to keep.
         Some(v) if dx_matches(&v) && matches!(watching, Watching::Only(_)) => eprintln!(
             "ax dev: --watch narrows what reloads, so ax rebuilds on change and restarts {name} (no hot-patch: \
@@ -1249,6 +1257,10 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         Some(v) => {
             eprintln!("ax dev: dx is {}, ax needs {DIOXUS} to hot-patch; rebuilding on change instead", v.trim())
         }
+        None if air => eprintln!(
+            "ax dev: {name} on air: a stylesheet or an rsx! markup edit shows at once, a Rust edit is \
+             hot-patched, state kept; a Cargo.toml edit rebuilds"
+        ),
         None => eprintln!(
             "ax dev: no dx; rebuilding on change instead (for edits in under a second: ax setup fetches it, \
              or {})",
@@ -1262,7 +1274,12 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     };
     eprintln!("ax dev: {name} — watching {}", shown.join(", "));
     css(&pkg, &rx);
-    let bin = build(&pkg, logs.as_deref());
+    let workspace = PathBuf::from(meta["workspace_root"].as_str().unwrap_or_default());
+    // What the running app was built from: markup edits are told against it.
+    let mut built = air.then(|| crate::reload::Built::snapshot(&pkg.dirs));
+    // On air, Rust is hot-patched by ax itself: a fat build, then patches.
+    let (mut fat, mut patching) = (None, air);
+    let bin = dev_build(&pkg, name, logs.as_deref(), &mut fat, &mut patching);
     // A failed build's errors are on the page (once it runs) until a good one.
     let mut red = bin.is_none();
     if let (Some(b), false) = (&bin, matches!(watching, Watching::Only(_))) {
@@ -1276,6 +1293,15 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         // Wait for a change, then for the burst of saves to settle; or for `ax restart`, `ax stop`.
         let restart = match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(first) => {
+                // Markup alone (on air) goes to the window at once, before the
+                // burst settles: a file still being written reads as code, and
+                // waits for it like any other change.
+                let up = app.as_mut().is_some_and(|(c, _)| c.try_wait().ok().flatten().is_none());
+                let early = built
+                    .as_ref()
+                    .filter(|_| up && !red)
+                    .and_then(|b| b.edits(&first, &workspace))
+                    .and_then(|e| reload_markup(window.as_ref(), &e).ok().map(|said| (e, said)));
                 let changed = crate::watch::settle(&rx, first);
                 let said = crate::watch::describe(&changed, &cwd);
                 if let Some(wait) = storm.wait(launched.elapsed()) {
@@ -1288,6 +1314,43 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                     crate::watch::settle(&rx, vec![]);
                 }
                 lint_said(&changed, &cwd);
+                css(&pkg, &rx);
+                let up = app.as_mut().is_some_and(|(c, _)| c.try_wait().ok().flatten().is_none());
+                // Stylesheets alone (on air): `use_css!` reads them live, nothing to build.
+                if air && up && sheets_only(&changed) {
+                    eprintln!("ax dev: {said} changed");
+                    eprintln!("ax dev: the window reads it live: nothing to build");
+                    continue;
+                }
+                // Markup alone (on air): to the running window, no build.
+                let edits = built.as_ref().filter(|_| up && !red).and_then(|b| b.edits(&changed, &workspace));
+                if let Some(edits) = edits {
+                    eprintln!("ax dev: {said} changed");
+                    if let Some((_, said)) = early.as_ref().filter(|(e, _)| *e == edits) {
+                        eprintln!("{said}");
+                        continue;
+                    }
+                    match reload_markup(window.as_ref(), &edits) {
+                        Ok(said) => {
+                            eprintln!("{said}");
+                            continue;
+                        }
+                        Err(e) => eprintln!("ax dev: the markup didn't reach the window ({e}): building"),
+                    }
+                }
+                // Code (on air): patched into the running app, its state kept.
+                if let Some(f) = fat.as_mut().filter(|_| up && !red && !manifest(&changed)) {
+                    eprintln!("ax dev: {said} changed");
+                    let snapshot = crate::reload::Built::snapshot(&pkg.dirs);
+                    match hot_patch(window.as_ref(), f, &changed) {
+                        Ok(said) => {
+                            eprintln!("{said}");
+                            built = Some(snapshot);
+                            continue;
+                        }
+                        Err(e) => eprintln!("ax dev: not hot-patched ({}): building", e.trim_end()),
+                    }
+                }
                 eprintln!("ax dev: {said} changed — building…");
                 false
             }
@@ -1302,9 +1365,12 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        css(&pkg, &rx);
+        if restart {
+            css(&pkg, &rx);
+        }
         let started = std::time::Instant::now();
-        let Some(bin) = build(&pkg, logs.as_deref()) else {
+        let snapshot = air.then(|| crate::reload::Built::snapshot(&pkg.dirs));
+        let Some(bin) = dev_build(&pkg, name, logs.as_deref(), &mut fat, &mut patching) else {
             red = true;
             eprintln!("ax dev: build failed; the running app is unchanged and shows why");
             if let (Some(w), Some(l)) = (&window, &logs) {
@@ -1333,11 +1399,125 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         stop(&mut app, window.as_ref());
         eprintln!("ax dev: built in {took:.1} s; restarting {name}");
         running = now;
+        built = snapshot;
         app = launch(&bin, args, &put);
         launched = std::time::Instant::now();
     }
     stop(&mut app, window.as_ref());
     Ok(String::new())
+}
+
+/// Build binary `name` of `pkg` for `ax dev`: fat (every crate's rustc
+/// call recorded, all its code linked in: [`crate::hotpatch`]) while
+/// `patching`, with aio-shell's `dev` (the app takes patches), else as
+/// [`build`] does. A fat build that fails where a plain one doesn't (a
+/// platform ax can't patch on yet) turns `patching` off for the session.
+fn dev_build(
+    pkg: &Pkg,
+    name: &str,
+    logs: Option<&Path>,
+    fat: &mut Option<crate::hotpatch::Fat>,
+    patching: &mut bool,
+) -> Option<PathBuf> {
+    *fat = None;
+    if !*patching {
+        return build(pkg, logs);
+    }
+    let stamp = pkg.dirs.first().map_or_else(String::new, |d| crate::build::assets_stamp(d));
+    let mut cargo_args = layout();
+    cargo_args.extend(["--features".into(), "aio-shell/dev".into()]);
+    let req = crate::hotpatch::Request {
+        dir: pkg.dirs.first().cloned().unwrap_or_default(),
+        package: pkg.name.clone(),
+        bin: name.into(),
+        cargo_args,
+        envs: vec![("AIORT_ASSETS".into(), stamp)],
+        ax: std::env::current_exe().unwrap_or_else(|_| "ax".into()),
+    };
+    match crate::hotpatch::fat_build(&req) {
+        Ok(f) => {
+            if let Some(dir) = logs {
+                _ = std::fs::remove_file(dir.join(BUILD_LOG));
+            }
+            let exe = f.exe.clone();
+            let (b, l) = (f.build.as_secs_f64(), f.link.as_secs_f64() * 1000.0);
+            eprintln!("ax dev: built for hot-patching in {b:.1} s (its link {l:.0} ms)");
+            *fat = Some(f);
+            Some(exe)
+        }
+        Err(e) => {
+            let bin = build(pkg, logs)?;
+            *patching = false;
+            eprintln!("ax dev: no hot-patching ({}): code edits rebuild and restart", e.trim_end());
+            Some(bin)
+        }
+    }
+}
+
+/// Patch the running app's code with `changed` (its window's door: where
+/// it is loaded, then the patch): what to say.
+fn hot_patch(
+    window: Option<&(String, aio::paths::Plan)>,
+    fat: &mut crate::hotpatch::Fat,
+    changed: &[PathBuf],
+) -> Result<String, String> {
+    let (id, p) = window.ok_or("no app to patch")?;
+    let door = crate::cdp::door(id, p).ok_or("it isn't running")?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+    let mut s = rt.block_on(crate::cdp::Session::door(&door))?;
+    let aslr = rt.block_on(s.call(aio_shell::inspect::ASLR, serde_json::json!({})))?;
+    let aslr = aslr["aslr"].as_u64().ok_or_else(|| format!("{}: {aslr}", aio_shell::inspect::ASLR))?;
+    let p = crate::hotpatch::patch(fat, aslr, changed)?;
+    let table = serde_json::to_value(&p.table).map_err(|e| e.to_string())?;
+    rt.block_on(s.call(aio_shell::inspect::PATCH, serde_json::json!({ "table": table })))?;
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let t = p.times;
+    Ok(format!(
+        "ax dev: hot-patched in {:.0} ms (rustc {:.0}, stub {:.0}, link {:.0}), state kept",
+        ms(t.total),
+        ms(t.compile),
+        ms(t.stub),
+        ms(t.link)
+    ))
+}
+
+/// Whether binary `name`'s package draws on air: it takes aio-rs-shell
+/// with `air` and without Dioxus (its default features) (pure).
+pub fn on_air(meta: &serde_json::Value, name: &str) -> bool {
+    let Some(pkg) = pkg_with(meta, name, "bin") else { return false };
+    let Some(p) = meta["packages"].as_array().into_iter().flatten().find(|p| p["name"] == pkg.name.as_str()) else {
+        return false;
+    };
+    p["dependencies"].as_array().into_iter().flatten().any(|d| {
+        d["name"] == "aio-rs-shell"
+            && d["uses_default_features"] == false
+            && d["features"].as_array().is_some_and(|f| f.iter().any(|f| f == "air"))
+    })
+}
+
+/// Send markup `edits` to the running app's window (`Aio.hot`): what to say.
+fn reload_markup(
+    window: Option<&(String, aio::paths::Plan)>,
+    edits: &[(String, Vec<crate::reload::Edited>)],
+) -> Result<String, String> {
+    let n: usize = edits.iter().map(|(_, e)| e.len()).sum();
+    if n == 0 {
+        return Ok("ax dev: no markup changed: nothing to build".into());
+    }
+    let (id, p) = window.ok_or("no app to reload")?;
+    let door = crate::cdp::door(id, p).ok_or("it isn't running")?;
+    let t = std::time::Instant::now();
+    let windows = crate::reload::send(&door, edits)?;
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    Ok(format!(
+        "ax dev: reloaded {n} template{} in {windows} window{} ({ms:.0} ms), state kept",
+        plural(n),
+        plural(windows as usize)
+    ))
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// aio's lint while editing (`air/dev-air.ts`): the aio checks of the saved
@@ -1820,6 +2000,9 @@ mod tests {
     fn a_manifest_change_and_an_unchanged_binary_are_told() {
         assert!(manifest(&[PathBuf::from("/w/src/lib.rs"), PathBuf::from("/w/Cargo.toml")]));
         assert!(!manifest(&[PathBuf::from("/w/src/lib.rs")]));
+        assert!(sheets_only(&[PathBuf::from("/w/assets/style.css"), PathBuf::from("/w/assets/kit.css")]));
+        assert!(!sheets_only(&[PathBuf::from("/w/assets/style.css"), PathBuf::from("/w/src/lib.rs")]));
+        assert!(!sheets_only(&[]));
         let d = tempfile::tempdir().unwrap();
         let (a, b) = (d.path().join("a"), d.path().join("b"));
         std::fs::write(&a, vec![7u8; 3 << 20]).unwrap();

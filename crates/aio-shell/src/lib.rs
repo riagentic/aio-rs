@@ -4,8 +4,6 @@
 //! listening port, no network for the page (it loads from `aio://app`).
 use aio::ui::View;
 use bytes::Bytes;
-use dioxus_core::VirtualDom;
-use dioxus_liveview::{LiveViewError, LiveViewPool, LiveViewSocket};
 use futures_util::{SinkExt, StreamExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -98,13 +96,13 @@ pub mod fuses;
 #[cfg(all(target_os = "linux", any(test, feature = "native-splash")))]
 mod gtksplash;
 pub mod guest;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", feature = "dioxus"))]
 mod guests;
 #[cfg(any(target_os = "android", all(test, unix)))]
 mod handover;
 pub mod inspect;
 pub mod instance;
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "dioxus"))]
 mod islands;
 pub mod macmove;
 pub mod oneclick;
@@ -120,7 +118,7 @@ mod presplash;
 #[path = "presplash_off.rs"]
 mod presplash;
 pub mod prune;
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, feature = "dioxus"))]
 mod renders;
 pub mod runtime;
 pub mod splash;
@@ -129,6 +127,7 @@ pub mod swap;
 pub mod switches;
 pub mod update;
 mod urls;
+mod views;
 #[cfg(feature = "web")]
 pub mod web;
 #[cfg(windows)]
@@ -136,7 +135,8 @@ mod winstall;
 #[cfg(target_os = "linux")]
 mod xroom;
 // The guide's pages that call this crate (`docs/`), as doctests.
-#[cfg(doctest)]
+// The guide's examples are written for the kit on Dioxus (its default).
+#[cfg(all(doctest, feature = "dioxus"))]
 mod guide;
 
 pub use guest::{Child, Web, clear_partition, open_window};
@@ -207,13 +207,29 @@ fn esc(s: &str) -> String {
 
 /// One window's frames as the interpreter's socket, a held key's stale
 /// repeats left out ([`fresh`]).
-fn wire(s: aio::ipc::Stream) -> impl LiveViewSocket {
+#[cfg(feature = "dioxus")]
+fn wire(s: aio::ipc::Stream) -> impl dioxus_liveview::LiveViewSocket {
+    use dioxus_liveview::LiveViewError;
     let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
     fresh::Fresh::new(
         Framed::new(s, codec)
             .map(|r| r.map(|b| b.to_vec()).map_err(|_| LiveViewError::SendingFailed))
             .with(|v: Vec<u8>| std::future::ready(Ok::<_, std::io::Error>(Bytes::from(v))))
             .sink_map_err(|_| LiveViewError::SendingFailed),
+    )
+}
+
+/// One window's frames, both ways, a held key's stale repeats left out ([`fresh`]).
+#[cfg(all(feature = "air", not(feature = "dioxus")))]
+fn wire(
+    s: aio::ipc::Stream,
+) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> + futures_util::Sink<Vec<u8>, Error = std::io::Error> + Unpin
+{
+    let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
+    fresh::Fresh::new(
+        Framed::new(s, codec)
+            .map(|r| r.map(|b| b.to_vec()))
+            .with(|v: Vec<u8>| std::future::ready(Ok::<_, std::io::Error>(Bytes::from(v)))),
     )
 }
 
@@ -350,11 +366,14 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         // SAFETY: read at once, not kept across patches.
         let fns = unsafe { subsecond::get_jump_table() }.map_or(0, |t| t.map.len());
-        eprintln!("{}", aio::log::hot_patched(n, fns))
+        eprintln!("{}", aio::log::hot_patched(n, fns));
+        // air runs a view's body once: its views are built again on the new code.
+        #[cfg(all(feature = "air", not(feature = "dioxus")))]
+        views::on_air::patched();
     }));
     // A dev build says a component caught in a render loop, by name, and
     // keeps the component tree for `ax components`.
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "dioxus"))]
     {
         let wire = renders::Tripwire::new(|l| aio::warn!(cat: "ui", "{l}"));
         _ = renders::TREE.set(wire.tree());
@@ -472,16 +491,12 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             tokio::spawn(inspect::serve(ui, inspect::hub().clone(), ctl.clone()));
         }
         say_window_panics();
-        let (pool, wire_only) = (Arc::new(LiveViewPool::new()), only.clone());
+        let (views, wire_only) = (views::Views::new(), only.clone());
         tokio::spawn(async move {
             while let Ok(s) = listener.accept_only(&wire_only).await {
-                let pool = pool.clone();
+                let views = views.clone();
                 tokio::spawn(async move {
-                    let dom = move || {
-                        WINDOW_THREAD.set(true);
-                        VirtualDom::new(app)
-                    };
-                    if let Err(e) = pool.launch_virtualdom(wire(s), dom).await {
+                    if let Err(e) = views.launch(s, app).await {
                         eprintln!("[aio-shell] window: {e}");
                     }
                 });
@@ -1149,6 +1164,7 @@ mod tests {
         assert_eq!(&b, b"focus\n");
     }
 
+    #[cfg(feature = "dioxus")]
     #[test]
     fn the_page_has_no_network_and_the_wire_comes_first() {
         let p = page(&Window { title: "t", ..Default::default() });
@@ -1160,6 +1176,17 @@ mod tests {
             p.find("aio://wire").unwrap() < p.find("const sent = new WeakMap()").unwrap(),
             "typing wraps a live interpreter"
         );
+        assert!(p.contains(DIALOG));
+    }
+
+    #[cfg(all(feature = "air", not(feature = "dioxus")))]
+    #[test]
+    fn the_page_on_air_has_no_network_and_airs_interpreter() {
+        let p = page(&Window { title: "t", ..Default::default() });
+        assert!(p.contains("default-src 'none'"));
+        assert!(p.contains("connect-src 'none'") && !p.contains("'unsafe-eval'"), "{p}");
+        assert!(p.contains(air::PAGE_JS), "air's interpreter, talking to the preload's wire");
+        assert!(!p.contains("aio://wire") && !p.contains("window.WebSocket = class"), "no Dioxus glue");
         assert!(p.contains(DIALOG));
     }
 

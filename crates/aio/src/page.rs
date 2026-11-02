@@ -77,28 +77,28 @@ window.__aioRun = (code) => {
   document.head.appendChild(s);
 };";
 
-#[cfg(any(feature = "kit", feature = "web"))]
+#[cfg(feature = "liveview")]
 /// Dioxus's interpreter runs a query with `Function` (`unsafe-eval`).
 const QUERY_EVAL: &str = "Function(\"Eval\", `\"use strict\";${event.data};`)();";
 
-#[cfg(any(feature = "kit", feature = "web"))]
+#[cfg(feature = "liveview")]
 /// The page object a query's script talks through (`send`, `recv`); `aio`
 /// is its name for apps (`aio::ui::eval`), the renderer's own stays too.
 const QUERY_PAGE: &str = "let dioxus = {";
 
-#[cfg(any(feature = "kit", feature = "web"))]
+#[cfg(feature = "liveview")]
 /// Where a query's script starts: its `recv` is put there in place of the
 /// renderer's, whose `while (true)` held the page until a message came,
 /// one the page could then never take in (a `recv` waiting longer than
 /// 50 ms hung the window), and which skipped a falsy one (`0`, `false`).
 const QUERY_START: &str = "let _request_id = ";
-#[cfg(any(feature = "kit", feature = "web"))]
+#[cfg(feature = "liveview")]
 const RECV: &str =
     "aio.recv = () => new Promise((r) => { const t = () => _message_queue.length ? r(_message_queue.shift()) : setTimeout(t, 4); t(); }); ";
 
 /// Dioxus's DOM-edit interpreter, its queries run by [`RUN`], each with
 /// its page object also named `aio`.
-#[cfg(any(feature = "kit", feature = "web"))]
+#[cfg(feature = "liveview")]
 fn interpreter() -> String {
     let glue = dioxus_liveview::interpreter_glue("aio://wire");
     assert!(glue.contains(QUERY_EVAL), "dioxus-liveview's query runner moved: see aio::page::QUERY_EVAL");
@@ -114,7 +114,7 @@ fn interpreter() -> String {
 /// `window.__aioWire` where no preload does; may be empty), the render
 /// probe, the interpreter and the page scripts, and in a dev build the
 /// overlay. Put it in a page with [`sealed`].
-#[cfg(any(feature = "kit", feature = "web"))]
+#[cfg(feature = "liveview")]
 pub fn body(bridge: &str) -> String {
     let bridge = if bridge.is_empty() { String::new() } else { format!("<script>{bridge}</script>") };
     format!(
@@ -129,7 +129,7 @@ pub fn body(bridge: &str) -> String {
 /// air's interpreter (`air::PAGE_JS`: it keeps typed text itself, and
 /// talks to `window.__aioWire` with no socket) and the page scripts that
 /// need no renderer's internals.
-#[cfg(all(feature = "air", not(any(feature = "kit", feature = "web"))))]
+#[cfg(all(feature = "air", not(feature = "liveview")))]
 pub fn body(bridge: &str) -> String {
     let bridge = if bridge.is_empty() { String::new() } else { format!("<script>{bridge}</script>") };
     format!(
@@ -507,7 +507,7 @@ mod tests {
     /// The interpreter still catches file inputs at the window, and the
     /// page stops the click before it gets there (on Android, measured:
     /// "Refused to connect to …/__file_dialog" and no picker before).
-    #[cfg(any(feature = "kit", feature = "web"))]
+    #[cfg(feature = "liveview")]
     #[test]
     fn a_file_input_opens_the_system_picker_not_the_desktop_hosts() {
         let glue = interpreter();

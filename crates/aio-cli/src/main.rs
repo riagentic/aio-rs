@@ -19,6 +19,7 @@ mod eval;
 mod fleet;
 mod freeze;
 mod headless;
+mod hotpatch;
 mod icon;
 /// `ax install --android`: next to the APK build.
 mod install;
@@ -40,6 +41,7 @@ mod preview;
 mod prune;
 mod record;
 mod release;
+mod reload;
 mod remote;
 mod replayed;
 mod service;
@@ -1798,6 +1800,10 @@ fn steps_in<'a>(args: &'a [String], in_workspace: bool, has_manifest: &dyn Fn(&s
 }
 
 fn main() -> ExitCode {
+    // ax as its own hot-patch build's rustc wrapper or linker: first, as little as can be.
+    if let Some(code) = hotpatch::hook() {
+        return code;
+    }
     // Every cargo and dx ax runs builds into one folder per machine.
     // SAFETY: before any thread is started.
     unsafe { std::env::set_var("CARGO_TARGET_DIR", dev::shared_target()) };

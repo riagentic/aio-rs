@@ -51,7 +51,7 @@ native! {
     pub mod log;
     #[cfg(feature = "tls")]
     pub mod pairing;
-    #[cfg(any(feature = "kit", feature = "web", feature = "air"))]
+    #[cfg(any(feature = "liveview", feature = "air"))]
     pub mod page;
     pub mod paths;
     #[cfg(feature = "server")]

@@ -134,7 +134,7 @@ pub fn html(m: &Merged) -> String {
 /// the page its own title back. A hook: call it at the top of a component,
 /// on every render; the page is written only when the merged head changed.
 /// On the server ([`Heads`] in the root) its first paint's head is read.
-#[cfg(feature = "web")]
+#[cfg(feature = "liveview")]
 pub fn use_head(head: Head) {
     use std::{cell::RefCell, rc::Rc};
     type Shared = Rc<RefCell<Heads>>;
@@ -159,7 +159,7 @@ pub fn use_head(head: Head) {
 }
 
 /// `m` written to the page as [`head_js`] writes it, through its DOM.
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[cfg(all(target_arch = "wasm32", feature = "liveview"))]
 fn write_page(m: &Merged) {
     thread_local! {
         /// The page's own title while an owner sets one.
@@ -190,7 +190,7 @@ fn write_page(m: &Merged) {
 }
 
 /// What a rendered view asked for in `<head>` (its first paint, on the server).
-#[cfg(feature = "web")]
+#[cfg(feature = "liveview")]
 pub fn of(dom: &dioxus_core::VirtualDom) -> Merged {
     use std::{cell::RefCell, rc::Rc};
     let heads =
@@ -201,7 +201,7 @@ pub fn of(dom: &dioxus_core::VirtualDom) -> Merged {
 /// The script writing `m` to the page: the title (the page's own kept, and
 /// restored when no owner sets one) and aio's tags (`data-aio-head`)
 /// replaced; tags the page came with are never touched.
-#[cfg(any(feature = "web", test))]
+#[cfg(any(feature = "liveview", test))]
 fn head_js(m: &Merged) -> String {
     let tags: Vec<_> = m.tags.iter().map(|(kind, attrs)| serde_json::json!([kind, attrs])).collect();
     format!(

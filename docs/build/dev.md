@@ -56,6 +56,27 @@ reads from the newest of them. An error ax knows the fix for gets a hint
 under it: a type a cell keeps that isn't serializable is told to wear
 `#[aio::data]`.
 
+### An app on air
+
+An app on air (its launcher takes `aio-shell` with
+`default-features = false, features = ["air"]`) needs no dx: `ax dev`
+reloads and patches it itself.
+
+| You saved | On air |
+|---|---|
+| a view's `rsx!` markup | sent to the window at the first save event (`Aio.hot`), its views built again with their state: ~3 ms |
+| Rust in the app's crates | a thin patch built by ax against the first ("fat") build, applied in the running process: ~0.45 s; cells and view state stay |
+| a stylesheet `aio::use_css!` reads | read by the window within 20 ms; nothing built |
+| a `Cargo.toml`, or a patch that fails | rebuild + restart |
+
+A view keeps its state by its place among the mounted components (its
+name, its key, or its turn among its siblings); a view whose hooks changed
+starts afresh from the first that differs. What the page held (focus,
+scroll, a field's selection) is drawn anew. Patches are built on Linux and
+macOS; on Windows a Rust edit rebuilds and restarts.
+
+### Hot-patching on Dioxus
+
 Hot-patching needs three things, and `ax dev` says which one is missing
 and falls back to rebuilds:
 
@@ -337,9 +358,11 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
 
 ## Limits
 
-- No hot-patching in the web build or on Android: each edit is a build
-  and the page reloads, slower than a patch (on Android, of the page only,
-  unless `--native`).
+- No hot-patching in the web build or on Android, on either renderer:
+  each edit is a build and the page reloads, slower than a patch (on
+  Android, of the page only, unless `--native`).
+- On air, no hot-patching on Windows yet: a Rust edit rebuilds and
+  restarts.
 - dx's own restarts (a change it can't hot-patch) give the app 1 s; ax's
   (a `Cargo.toml`, `ax restart`) ask it to stop first.
 - No flag that turns persistence off for a run: use `--instance` with

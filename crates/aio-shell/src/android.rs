@@ -5,17 +5,15 @@
 //!
 //! An app's library says what it is with [`android_app!`](crate::android_app);
 //! `ax build <app> --android` makes the APKs.
-use crate::{Window, page_with, wire};
+use crate::{Window, page_with};
 use aio::ui::View;
 use base64::Engine;
-use dioxus_core::VirtualDom;
-use dioxus_liveview::LiveViewPool;
 use futures_util::{SinkExt, StreamExt};
 pub use jni;
 use jni::objects::{GlobalRef, JClass, JIntArray, JObjectArray, JString, JValue};
 use jni::sys::jstring;
 use jni::{JNIEnv, JavaVM};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// What an app's library hands the host.
@@ -59,7 +57,7 @@ struct Host {
     /// class loader can't).
     class: GlobalRef,
     rt: tokio::runtime::Runtime,
-    pool: Arc<LiveViewPool>,
+    views: crate::views::Views,
     root: fn() -> View,
     page: String,
     /// Frames from the page now showing, to its view.
@@ -121,7 +119,7 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
         vm: env.get_java_vm().map_err(|e| e.to_string())?,
         class: env.new_global_ref(class).map_err(|e| e.to_string())?,
         rt,
-        pool: Arc::new(LiveViewPool::new()),
+        views: crate::views::Views::new(),
         root: app.root,
         page: page_with(&app.window, BRIDGE),
         to_view: Mutex::new(None),
@@ -142,9 +140,9 @@ pub fn connect() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
     *h.to_view.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     let (view, ours) = tokio::io::duplex(1 << 20);
-    let (pool, root) = (h.pool.clone(), h.root);
+    let (views, root) = (h.views.clone(), h.root);
     h.rt.spawn(async move {
-        if let Err(e) = pool.launch_virtualdom(wire(Box::new(view)), move || VirtualDom::new(root)).await {
+        if let Err(e) = views.launch(Box::new(view), root).await {
             eprintln!("[aio-shell] window: {e}");
         }
     });

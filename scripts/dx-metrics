@@ -32,6 +32,9 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
                                 base's row of this machine is reused
   scripts/dx-metrics --trend [n]  the last n rows (12) and today's limits
   scripts/dx-metrics --self-test  the gate's rules, on made-up rows
+  scripts/dx-metrics --live     the live edits only, on Dioxus (dx) and on
+                                air (`ax dev`'s own reload and hot-patch),
+                                one after the other here: printed, no row
 
 A limit comes from the rows before (`GATED`): crates no more than deps.toml's
 ceiling; sizes and disk (stable to 0.01%) 5% over their rolling best, the best
@@ -267,6 +270,42 @@ def live(aio, app, env, home):
         dev.terminate()
         dev.wait(timeout=30)
         logs.cleanup()
+
+
+def to_air(app):
+    """The template app on air: aio-rs with `air` for `kit`, the shell with
+    `air` alone (as scripts/android-gate --air makes it)."""
+    for f, old, new in [
+        (app / "Cargo.toml", 'features = ["kit"] }', 'features = ["air"] }'),
+        (app / "app" / "Cargo.toml", 'aio-shell = { package = "aio-rs-shell", ',
+         'aio-shell = { package = "aio-rs-shell", default-features = false, features = ["air"], '),
+    ]:
+        text = f.read_text()
+        if old not in text:
+            sys.exit(f"{f}: the template changed ({old!r}); update dx-metrics' to_air")
+        f.write_text(text.replace(old, new, 1))
+
+
+def live_both(tmp):
+    """`live`'s edits on a template app on Dioxus, then on one on air, each
+    built first (its build not timed): {renderer: row}."""
+    here = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], ROOT, os.environ)
+    env = {k: v for k, v in os.environ.items() if k not in ("CARGO_INCREMENTAL", "DISPLAY", "WAYLAND_DISPLAY")}
+    env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
+    aio = here / "debug" / "ax"
+    rows = {}
+    for renderer in ("dioxus", "air"):
+        (tmp / renderer).mkdir()
+        env["CARGO_TARGET_DIR"] = str(tmp / renderer / "target")
+        run([aio, "create", NAME, "--aio", ROOT], tmp / renderer, env)
+        app = tmp / renderer / NAME
+        shutil.copy(ROOT / "Cargo.lock", app / "Cargo.lock")
+        if renderer == "air":
+            to_air(app)
+        run(["cargo", "build", "-p", f"{NAME}-app", "--profile", "desktop-dev", "--target", host()], app, env)
+        rows[renderer] = rounded(live(aio, app, env, tmp / renderer / "home"))
+    return rows
 
 
 def du_mb(path):
@@ -523,6 +562,15 @@ def main():
     if "--trend" in args:
         rest = args[args.index("--trend") + 1:]
         return trend(int(rest[0]) if rest and rest[0].isdigit() else 12)
+    if "--live" in args:
+        (ROOT / "target").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=ROOT / "target") as tmp:
+            rows = live_both(pathlib.Path(tmp))
+        print(f"live edits, machine {machine()}, commit {commit()}:")
+        print(f"{'':16} {'dioxus':>8} {'air':>8}")
+        for col in EDITS:
+            print(f"{col:16} " + " ".join(f"{rows[r].get(col, ''):>8}" for r in ("dioxus", "air")))
+        return
     check = "--check" in args
     rev, cache = (args[args.index(f) + 1] if f in args else None for f in ("--base", "--rows"))
     cache = cache and pathlib.Path(cache).expanduser()

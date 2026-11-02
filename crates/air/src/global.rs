@@ -7,8 +7,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Each root's globals (by root, then by the static's address).
-type Globals = HashMap<(u32, usize), Rc<dyn Any>>;
+/// Each root's globals (by root, then by the static: its name, else its address).
+type Globals = HashMap<(u32, Key), Rc<dyn Any>>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Key {
+    At(usize),
+    Named(&'static str),
+}
 
 thread_local!(static GLOBALS: RefCell<Globals> = RefCell::default());
 
@@ -22,7 +28,7 @@ pub(crate) fn reset() {
     drop(old);
 }
 
-fn get_or<T: Clone + 'static>(at: usize, make: impl FnOnce() -> T) -> T {
+fn get_or<T: Clone + 'static>(at: Key, make: impl FnOnce() -> T) -> T {
     let at = (current_root(), at);
     if let Some(v) = GLOBALS.with_borrow(|g| g.get(&at).cloned()) {
         return v.downcast_ref::<T>().cloned().expect("air: a global of another type");
@@ -38,23 +44,30 @@ fn get_or<T: Clone + 'static>(at: usize, make: impl FnOnce() -> T) -> T {
 /// A signal in a `static`: `static THEME: Global<String> = Global::new(|| "dark".into());`.
 pub struct Global<T: 'static> {
     init: fn() -> T,
+    name: Option<&'static str>,
 }
 
 impl<T: 'static> Global<T> {
     /// One per `static`.
     pub const fn new(init: fn() -> T) -> Self {
-        Self { init }
+        Self { init, name: None }
     }
 
-    /// Kept for the facade's macros: a `static` is its own key on air.
+    /// One per `name` (the facade's macros: `module_path!()::NAME`): the
+    /// same global for the code a hot-patch brings in, whose `static` is
+    /// a copy of its own.
     #[doc(hidden)]
-    pub const fn named(init: fn() -> T, _name: &'static str) -> Self {
-        Self { init }
+    pub const fn named(init: fn() -> T, name: &'static str) -> Self {
+        Self { init, name: Some(name) }
+    }
+
+    fn key(&self) -> Key {
+        self.name.map_or(Key::At(self as *const Self as usize), Key::Named)
     }
 
     /// This app instance's signal.
     pub fn signal(&self) -> Signal<T> {
-        get_or(self as *const Self as usize, || Signal::new((self.init)()))
+        get_or(self.key(), || Signal::new((self.init)()))
     }
 
     pub fn get(&self) -> T
@@ -121,7 +134,7 @@ impl<T: PartialEq + 'static> GlobalMemo<T> {
 
     pub fn memo(&self) -> Memo<T> {
         let f = self.f;
-        get_or(self as *const Self as usize, move || memo_now(f))
+        get_or(Key::At(self as *const Self as usize), move || memo_now(f))
     }
 
     pub fn get(&self) -> T

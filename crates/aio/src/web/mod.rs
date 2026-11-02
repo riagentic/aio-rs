@@ -12,7 +12,7 @@ pub mod storage;
 mod handle;
 #[cfg(target_arch = "wasm32")]
 pub mod notify;
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[cfg(all(target_arch = "wasm32", feature = "liveview"))]
 mod page;
 #[cfg(target_arch = "wasm32")]
 mod source;
@@ -173,7 +173,7 @@ impl storage::Kv for Local {
 /// one this browser kept, or newer). A mismatch then leaves ids on the
 /// wrong nodes or on none, and the next edit throws in the interpreter;
 /// it also needs dioxus-fullstack's serialized hydration data in the page.
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "liveview"))]
 pub fn launch(root: fn() -> crate::ui::View) {
     use dioxus_core::VirtualDom;
     // A `notify` tell is the page's notification, unless the app shows its own.
@@ -228,6 +228,122 @@ pub fn launch(root: fn() -> crate::ui::View) {
     }
     let dom = VirtualDom::new_with_props(take_place, root).with_root_context(doc());
     dioxus_web::launch::launch_virtual_dom(dom, dioxus_web::Config::new().rootelement(next));
+}
+
+/// Mount the app's root view into the page's `<div id="main">`, on air:
+/// its interpreter (`air::PAGE_JS`) runs in the page as a script of the
+/// page's own making (its policy allows `blob:`), and talks to the views
+/// in this module with no socket: each flush's edits handed to it as a
+/// view of the module's memory (no copy), its events straight to the
+/// root. Set the cells' sources (`aio::client!`'s `SOURCE`) first. The
+/// page's splash goes once the view is drawn (`aio:mounted`). No server
+/// paint on air: the page's view is the first.
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "air", not(feature = "liveview")))]
+pub fn launch(root: fn() -> crate::ui::View) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::*;
+    // A `notify` tell is the page's notification, unless the app shows its own.
+    crate::tell::show_unless_set(notify::show);
+    let open = SYNCING.with_borrow(Clone::clone);
+    for (app, cells) in &open {
+        warn_orphans(app, &cells.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+    let Some(w) = web_sys::window() else { return };
+    // The wire the interpreter talks to: its frames to the root, here.
+    let wire = js_sys::Object::new();
+    let send = Closure::<dyn Fn(js_sys::Uint8Array)>::new(|f: js_sys::Uint8Array| {
+        let f = f.to_vec();
+        on_air::with_root(|r| _ = r.event(&f));
+        on_air::flush();
+    });
+    let listen = Closure::<dyn Fn(JsValue)>::new(|_: JsValue| {});
+    _ = js_sys::Reflect::set(&wire, &"send".into(), send.as_ref());
+    _ = js_sys::Reflect::set(&wire, &"listen".into(), listen.as_ref());
+    send.forget();
+    listen.forget();
+    _ = js_sys::Reflect::set(&w, &"__aioWire".into(), &wire);
+    // The interpreter, then the views once it has run.
+    let started = Closure::once_into_js(move || {
+        air::on_wake(on_air::woken);
+        on_air::mount(root);
+        mounted();
+    });
+    let parts = js_sys::Array::of1(&air::PAGE_JS.into());
+    let opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("text/javascript");
+    let (Some(doc), Ok(blob)) = (w.document(), web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts)) else {
+        return say("the page can't take air's interpreter");
+    };
+    let (Ok(url), Ok(el)) = (web_sys::Url::create_object_url_with_blob(&blob), doc.create_element("script")) else {
+        return say("the page can't take air's interpreter");
+    };
+    _ = el.set_attribute("src", &url);
+    _ = el.add_event_listener_with_callback("load", started.unchecked_ref());
+    match doc.head() {
+        Some(h) => _ = h.append_child(&el),
+        None => say("the page has no <head> for air's interpreter"),
+    }
+}
+
+/// The views of the page, on air: one root, flushed after each event, and
+/// whenever a task wakes (once per turn of the page's event loop).
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "air", not(feature = "liveview")))]
+mod on_air {
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static ROOT: RefCell<Option<air::Root>> = const { RefCell::new(None) };
+        static QUEUED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn mount(app: fn() -> crate::ui::View) {
+        let root = air::Root::new();
+        root.show(app);
+        ROOT.set(Some(root));
+        flush();
+    }
+
+    pub(super) fn with_root(f: impl FnOnce(&air::Root)) {
+        ROOT.with_borrow(|r| r.as_ref().map(f));
+    }
+
+    /// The views' work done and their edits applied by the interpreter.
+    pub(super) fn flush() {
+        air::run_tasks();
+        ROOT.with_borrow(|r| {
+            let Some(r) = r else { return };
+            let edits = r.take_edits();
+            if !edits.is_empty() {
+                // SAFETY: a view of this module's memory, read by the
+                // interpreter at once (it allocates nothing of ours meanwhile).
+                let view = unsafe { js_sys::Uint8Array::view(&edits) };
+                let apply = web_sys::window().and_then(|w| js_sys::Reflect::get(&w, &"__airApply".into()).ok());
+                let apply = apply.and_then(|f| wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f).ok());
+                match apply.map(|f| f.call1(&wasm_bindgen::JsValue::NULL, &view)) {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => super::say(&format!("air's interpreter failed: {e:?}")),
+                    None => super::say("air's interpreter is not in the page"),
+                }
+            }
+            for e in r.uncaught() {
+                super::say(&format!("a view failed and no ErrorBoundary is above it: {e}"));
+            }
+        });
+    }
+
+    /// A task woke: flush once the page's current work is done.
+    pub(super) fn woken() {
+        if QUEUED.replace(true) {
+            return;
+        }
+        let run = wasm_bindgen::closure::Closure::once_into_js(|| {
+            QUEUED.set(false);
+            flush();
+        });
+        if let Some(w) = web_sys::window() {
+            _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(wasm_bindgen::JsCast::unchecked_ref(&run), 0);
+        }
+    }
 }
 
 /// Say the app's view is drawn: `aio:mounted` on the document.

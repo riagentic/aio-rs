@@ -271,7 +271,8 @@ What is measured, in aio-rs's own repository:
   under `ax dev`; each run is a row of `scripts/dx-trend.csv`, and
   `--check` fails on a regression past its limit, judged against the same
   machine's rows only (in CI: against the base commit measured on the same
-  runner). The latest row (Linux
+  runner). `--live` times only the save-to-screen edits, on Dioxus and
+  on air one after the other, printed side by side. The latest row (Linux
   x86_64): a 0.2 to 0.6 s boot, about 81 MB private memory for the window
   (166 MB PSS), a 5.4 MB release binary, a 3.6 MB AppImage.
 - [Comparison](../comparison.md): one small app in aio-rs, Tauri and

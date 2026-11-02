@@ -203,6 +203,9 @@ another emulator, a phone or the AVDs already on the machine:
 - After: the emulator stopped (`adb -s emulator-5600 emu kill`), the AVD
   and work folder removed, and `modem-nv-ram-5600`, which the emulator
   writes beside the user's AVDs, deleted.
+- `--air`: the same with the template on air (aio-rs `air`, the shell
+  with `default-features = false, features = ["air"]`): no Dioxus in its
+  graph, and no `panicked` or failed view in the app's log.
 
 Needs the SDK's `emulator`, `platform-tools`, `cmdline-tools/latest`, an
 x86_64 system image, KVM, and what `ax build --android` needs

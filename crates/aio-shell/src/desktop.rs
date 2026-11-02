@@ -298,9 +298,9 @@ pub(crate) fn deliver(a: Ask) {
 /// Take the clicks' asks while this component lives (the app's root):
 /// items run here, routes go through `go` (the app's `router!` `go`).
 pub fn use_asks(go: fn(&str) -> bool) {
-    dioxus_core::use_hook(|| {
+    aio::ui::prelude::once(|| {
         let mut rx = channel().subscribe();
-        dioxus_core::spawn(async move {
+        aio::ui::prelude::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(Ask::Run(f)) => f(),
@@ -451,6 +451,7 @@ mod tests {
         assert_eq!(said(asks(&json!({ "t": "tray", "i": 0 }), Some(&t))), ["run pause", "go /b"]);
     }
 
+    #[cfg(feature = "dioxus")]
     #[tokio::test]
     async fn the_root_takes_the_asks_in_its_scope() {
         use std::sync::Mutex;

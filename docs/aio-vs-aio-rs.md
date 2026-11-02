@@ -12,7 +12,7 @@ which of aio's features aio-rs has. Moving an app over:
 | | aio | aio-rs |
 |---|---|---|
 | Language, runtime | TypeScript on Deno | Rust, native code |
-| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade, the kit, the router and `TestUi`, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
+| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade, the kit, the router, `TestUi`, the shell's windows (desktop, Android) and the web build, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
 | State model | cells, methods on an Immer draft, selectors | cells, methods on `&mut self` (a copy), `#[derived]`; every call an event in the store's log |
 | Data compatibility | `state.db` | the same `state.db`, both ways: a port opens aio's file as it is, and aio opens it after ([below](#data-the-same-statedb)) |
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
@@ -156,7 +156,8 @@ of lag.
   happy-dom has no layout ([UI tests](testing/ui.md)).
 - **Hot-patching with the state kept** for Rust, views and methods
   alike, and a compile error shown on the window while the app keeps
-  running ([dev](build/dev.md)).
+  running ([dev](build/dev.md)). On air `ax dev` does it alone (no dx):
+  a markup edit shows in ~3 ms, a Rust edit in ~0.45 s.
 - **Smaller first steps on an existing machine.** One native binary per
   app (5.3 MB for the template), the window runtime shared by every app.
 
@@ -494,7 +495,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Service, CLI | `server`, `cli` | `mode = "server"`, `cli` | ✅ |
 | Thin clients | electron-, android-, cli-client | `mode = "client"`; an Android client has no connect page on the phone yet (paired from the desktop, `ax pair`) | 🔄 |
 | iOS | ios-client | ❌ | ❌ |
-| Dev reload | patch, reload, restart (~3 s) | hot-patch, state kept; the in-page overlay shows build errors only (server diagnostics, live a11y and contrast wait for air) | 🔄 |
+| Dev reload | patch, reload, restart (~3 s) | hot-patch, state kept; on air `ax dev` reloads markup (3 ms) and patches Rust (~0.45 s) itself, no dx (Linux, macOS); the in-page overlay shows build errors only (server diagnostics, live a11y and contrast wait for air) | 🔄 |
 | Dev watcher | 100 ms debounce, 500 ms ceiling, editor files ignored, served files watched, health sentinel, restart drain and storm guard, files named | the same (cargo's dep-info for the files a build read); an unchanged binary isn't restarted | ✅ |
 | Dev session | `am start` of a dev run, `--no-watch`, `--verbose`, `--title`, `am stop` ends it | `ax dev --detach`, `--no-watch`, `--verbose` (`AIORT_LOG`), `--title` (`AIORT_TITLE`), `ax stop` ends it, `ax status` says it waits for a fix | ✅ |
 | Hot reload in web, Android | page reload | 🔄 the dev APK reloads the page each edit (`ax dev --android`); the web build reloads its tabs | 🔄 |

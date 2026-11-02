@@ -40,15 +40,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-
   --all-features --locked
 # Each feature alone stays clean (none: the core a standalone app builds).
 if cargo hack --version >/dev/null 2>&1; then
-  cargo hack clippy -p aio-rs -p aio-rs-shell --lib --each-feature --locked -- -D warnings
+  cargo hack clippy -p aio-rs --lib --each-feature --locked -- -D warnings
 else
-  for f in "" outbound server tls oidc br net kit air imbl web dev testing video compat; do
+  for f in "" outbound server tls oidc br net kit air imbl web liveview dev testing video compat; do
     cargo clippy -p aio-rs --lib --no-default-features --features "$f" --locked -- -D warnings
   done
-  for f in "" web dev; do
-    cargo clippy -p aio-rs-shell --lib --no-default-features --features "$f" --locked -- -D warnings
-  done
 fi
+# The shell needs a renderer: each feature with each one (Dioxus's, air).
+for f in dioxus air web dioxus,dev air,dev; do
+  cargo clippy -p aio-rs-shell --lib --no-default-features --features "$f" --locked -- -D warnings
+done
 # Working with aio over the network: aio pages and tools on `/ws`, `AioLink`.
 cargo clippy -p aio-rs --lib --no-default-features --features compat,net --locked -- -D warnings
 # Without `compat` a socket that doesn't say wire 2 is refused (the rest runs with every feature, below).
@@ -62,6 +63,13 @@ if cargo tree --locked -p aio-rs --no-default-features --features air -e normal 
   exit 1
 fi
 cargo test -p aio-rs --no-default-features --features air,net --test air_ui --test facade --test ui --test kit --test signin --test route --test route_tree --locked
+# The shell on air: the window's views, Android's, with no Dioxus in its graph.
+cargo clippy -p aio-rs-shell --all-targets --no-default-features --features air,dev --locked -- -D warnings
+if cargo tree --locked -p aio-rs-shell --no-default-features --features air,dev -e normal --prefix none | grep -q '^dioxus'; then
+  echo "ci: aio-rs-shell with \`air\` pulls dioxus" >&2
+  exit 1
+fi
+cargo test -p aio-rs-shell --no-default-features --features air,dev --locked
 cargo test -p aio-rs-air --release --all-features --locked
 # air's code-size rule: LLVM IR lines per view of the bench's 50 views.
 air_ir=$(mktemp -d)
@@ -71,6 +79,8 @@ rm -rf "$air_ir"
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
 # With the kit: its controls and the sign-in form in the page.
 cargo clippy -p aio-rs --lib --no-default-features --features web,kit --locked --target wasm32-unknown-unknown -- -D warnings
+# On air: its views drawn in the page by air's interpreter, no Dioxus.
+cargo clippy -p aio-rs --lib --no-default-features --features web,air --locked --target wasm32-unknown-unknown -- -D warnings
 # The web build's browser test binds with the lock's wasm-bindgen, on PATH or
 # aio's own (`ax setup` fetches it); without it the test skips, said here and last.
 wb=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q}' Cargo.lock)
@@ -94,6 +104,8 @@ if [ -n "$ndk" ]; then
   bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
   CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
     cargo clippy -p aio-rs -p aio-rs-shell --locked --target aarch64-linux-android -- -D warnings
+  CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
+    cargo clippy -p aio-rs-shell --no-default-features --features air --locked --target aarch64-linux-android -- -D warnings
 fi
 # The DX trend: a template app built, edited live under `ax dev` and
 # smoke-run, its row added to scripts/dx-trend.csv (commit it); a number past

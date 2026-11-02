@@ -321,3 +321,32 @@ fn a11y_says_what_fails_a_keyboard_or_a_screen_reader() {
     }
     assert_eq!(got.len(), 7, "an option's keyboard is its list's; a labelled field, a typed button pass: {got:#?}");
 }
+
+#[test]
+fn a_saved_stylesheet_redraws_its_hole_on_air() {
+    // `use_css!` in a hole (an effect: no hooks there), as the template has it.
+    static SHEETS: std::sync::OnceLock<&'static [aio::ui::Sheet]> = std::sync::OnceLock::new();
+    let dir = std::env::temp_dir().join(format!("aio-air-css-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("style.css");
+    std::fs::write(&file, "h1{color:red}").unwrap();
+    let path: &'static str = Box::leak(file.to_string_lossy().into_owned().into_boxed_str());
+    SHEETS.set(Box::leak(Box::new([(path, "")]))).unwrap();
+    fn app() -> View {
+        let sheets = *SHEETS.get().unwrap();
+        rsx! {
+            p { "data-t": "css", {{ aio::ui::follow_sheets(sheets); aio::ui::sheet_texts(sheets).concat() }} }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    assert_eq!(ui.text("css"), "h1{color:red}");
+    std::fs::write(&file, "h1{color:blue}").unwrap();
+    ui.until_text("css", "h1{color:blue}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    // The template's own line, in its hole.
+    fn template() -> View {
+        let theme = aio::kit::theme_css(aio::hue!());
+        rsx! { style { "data-t": "page", {aio::use_css!(aio::ui::scheme(), &theme; "assets/kit.css")} } }
+    }
+    assert!(TestUi::new(template).text("page").contains("box-sizing"));
+}

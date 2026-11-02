@@ -625,17 +625,26 @@ pub fn parent_context<T: Clone + 'static>() -> Option<T> {
 /// body run again (it waited for a resource) gets the same state back.
 pub(crate) struct Frame {
     /// The view's owner (its hole): context goes there.
-    hole: Key,
+    hole: Cell<Key>,
     slots: RefCell<Vec<Rc<dyn Any>>>,
     at: Cell<usize>,
     /// Owns what the hooks made; kept by the hole across its re-runs.
     keeper: Cell<Option<Key>>,
+    /// Taken over by a view built again (a hot reload): a hook of another
+    /// kind at a place starts afresh there instead of failing.
+    adopted: Cell<bool>,
 }
 
 impl Frame {
     pub(crate) fn new() -> Rc<Self> {
         let hole = RT.with_borrow(|rt| rt.owner).expect("air: a view's frame is made under its hole");
-        Rc::new(Self { hole, slots: RefCell::default(), at: Cell::new(0), keeper: Cell::new(None) })
+        Rc::new(Self {
+            hole: Cell::new(hole),
+            slots: RefCell::default(),
+            at: Cell::new(0),
+            keeper: Cell::new(None),
+            adopted: Cell::new(false),
+        })
     }
 
     /// The owner its hooks' state lives under.
@@ -644,14 +653,51 @@ impl Frame {
             return k;
         }
         let k = rt(|rt| {
-            let k = rt.alloc_detached(self.hole);
-            if let Some(h) = rt.node_mut(self.hole) {
+            let k = rt.alloc_detached(self.hole.get());
+            if let Some(h) = rt.node_mut(self.hole.get()) {
                 h.extra.get_or_insert_default().kept.push(k);
             }
             k
         });
         self.keeper.set(Some(k));
         k
+    }
+
+    /// Its hooks' state no longer ends with its hole (a hot reload keeps
+    /// it for the view built again in its place).
+    pub(crate) fn detach(&self) {
+        let (Some(k), hole) = (self.keeper.get(), self.hole.get()) else { return };
+        rt(|rt| {
+            if let Some(e) = rt.node_mut(hole).and_then(|h| h.extra.as_mut()) {
+                e.kept.retain(|x| *x != k);
+            }
+        });
+    }
+
+    /// Taken over by the view whose hole is the current owner: its hooks'
+    /// state lives under that hole from now on.
+    pub(crate) fn adopt(&self) {
+        let hole = RT.with_borrow(|rt| rt.owner).expect("air: a view's frame is made under its hole");
+        self.hole.set(hole);
+        self.adopted.set(true);
+        let Some(k) = self.keeper.get() else { return };
+        rt(|rt| {
+            let root = rt.node(hole).map_or(rt.root, |h| h.root);
+            if let Some(n) = rt.node_mut(k) {
+                n.parent = Some(hole);
+                n.root = root;
+            }
+            if let Some(h) = rt.node_mut(hole) {
+                h.extra.get_or_insert_default().kept.push(k);
+            }
+        });
+    }
+
+    /// Not taken over: its hooks' state ends.
+    pub(crate) fn end(&self) {
+        if let Some(k) = self.keeper.take() {
+            dispose(k);
+        }
     }
 }
 
@@ -674,7 +720,9 @@ impl Rt {
 pub(crate) fn body<R>(frame: &Rc<Frame>, f: impl FnOnce() -> R) -> R {
     frame.at.set(0);
     let _p = push_frame(Some(frame.clone()));
-    untrack(f)
+    let r = untrack(f);
+    frame.adopted.set(false);
+    r
 }
 
 fn frame(hook: &str) -> Rc<Frame> {
@@ -700,10 +748,16 @@ pub(crate) fn hook<T: Clone + 'static>(name: &str, f: impl FnOnce() -> T) -> T {
     let fr = frame(name);
     let i = fr.at.get();
     fr.at.set(i + 1);
-    if let Some(v) = fr.slots.borrow().get(i) {
-        return v.downcast_ref::<T>().cloned().unwrap_or_else(|| {
-            panic!("air: this view called its hooks in another order than before (`{name}` at place {i}): call them at the top of the body, never in a branch or a loop")
-        });
+    let had = fr.slots.borrow().get(i).cloned();
+    if let Some(v) = had {
+        match v.downcast_ref::<T>() {
+            Some(v) => return v.clone(),
+            // Its code changed (a hot reload): this hook and the ones after start afresh.
+            None if fr.adopted.get() => fr.slots.borrow_mut().truncate(i),
+            None => panic!(
+                "air: this view called its hooks in another order than before (`{name}` at place {i}): call them at the top of the body, never in a branch or a loop"
+            ),
+        }
     }
     let k = fr.keeper();
     let v = with_owner(Owner(k), f);
@@ -725,7 +779,7 @@ pub fn in_body() -> bool {
 /// alone). `f` reads; a memo keeps the re-runs to real changes.
 #[track_caller]
 pub fn follow<R>(f: impl FnOnce() -> R) -> R {
-    let hole = frame("follow").hole;
+    let hole = frame("follow").hole.get();
     let was = rt(|rt| rt.observer.replace(hole));
     struct Back(Option<Key>);
     impl Drop for Back {
@@ -748,7 +802,7 @@ pub fn provide_now<T: Clone + 'static>(v: T) -> T {
 
 /// The owner of the view whose body runs now (its hole), for `provide`.
 pub(crate) fn view_owner(hook: &str) -> Owner {
-    Owner(frame(hook).hole)
+    Owner(frame(hook).hole.get())
 }
 
 // ---------------------------------------------------------------- signals

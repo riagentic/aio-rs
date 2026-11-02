@@ -60,6 +60,7 @@ extern crate self as air;
 mod dom;
 mod event;
 mod global;
+pub mod hot;
 mod props;
 mod reactive;
 mod task;
@@ -154,6 +155,7 @@ pub mod __rt {
         DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ResizeData, ScrollData, VisibleData,
         WheelData,
     };
+    pub use crate::hot::At;
     pub use crate::props::{
         ByMemo, ByOpt, ByProp, BySignal, ByText, ByVal, ByView, CallbackOf, GlobalAttributeNames, GlobalAttributes,
         IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, NoPropsBuilder, Props, Set,

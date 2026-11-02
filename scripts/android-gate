@@ -4,6 +4,7 @@ emulator, then upgraded in place with its data kept. A release needs it
 green (CONTRIBUTING.md, "Make a release").
 
   scripts/android-gate          run it; exits 1 on a miss
+  scripts/android-gate --air    the same app on air (aio-rs's own renderer, no Dioxus)
   scripts/android-gate --keep   leave the work folder (the AVD stops either way)
 
 1. An AVD made for this run only (ANDROID_AVD_HOME in the work folder, the
@@ -98,8 +99,8 @@ def image(root):
 
 
 class Gate:
-    def __init__(self, work):
-        self.work, self.root = work, sdk()
+    def __init__(self, work, on_air=False):
+        self.work, self.root, self.on_air = work, sdk(), on_air
         self.adb = self.root / "platform-tools" / "adb"
         self.avd_home = work / "avd"
         self.avd_home.mkdir()
@@ -194,8 +195,24 @@ class Gate:
         if hook not in text:
             fail(f"{android}: the template's setup changed; update the gate")
         android.write_text(text.replace(hook, hook + "        app::count_start(cfg, dirs)?;\n"))
+        if self.on_air:
+            self.to_air()
         self.run("git", "init", "-q", cwd=self.app)
         self.commit("one")
+
+    def to_air(self):
+        """The template on air: aio-rs with `air` for `kit`, the shell with
+        `air` alone; its code as it is."""
+        edits = [
+            (self.app / "Cargo.toml", 'features = ["kit"] }', 'features = ["air"] }'),
+            (self.app / "app" / "Cargo.toml", 'aio-shell = { package = "aio-rs-shell", ',
+             'aio-shell = { package = "aio-rs-shell", default-features = false, features = ["air"], '),
+        ]
+        for f, old, new in edits:
+            text = f.read_text()
+            if old not in text:
+                fail(f"{f}: the template changed ({old!r}); update the gate's --air")
+            f.write_text(text.replace(old, new, 1))
 
     def commit(self, what):
         self.run("git", "add", "-A", cwd=self.app)
@@ -233,7 +250,7 @@ def main():
     (ROOT / "dist").mkdir(exist_ok=True)
     # Under dist/: the app must share a folder with this checkout.
     work = Path(tempfile.mkdtemp(prefix="android-gate-", dir=ROOT / "dist"))
-    g = Gate(work)
+    g = Gate(work, "--air" in sys.argv[1:])
     try:
         say("building ax from this checkout")
         g.run("cargo", "build", "--locked", "-q", "-p", "aio-rs-cli", cwd=ROOT)
@@ -245,7 +262,14 @@ def main():
         v2 = g.release(2)
         if v1 and v2 and v1 == v2:
             fail(f"release 2 is the same version as 1 ({v1}): no upgrade was made")
-        say(f"PASS: {v1} started, upgraded to {v2} in place, its data kept")
+        if g.on_air:
+            log = g.sh("logcat", "-d")
+            if "panicked" in log or "a view failed" in log:
+                fail(f"the views on air failed:\n{log[-3000:]}")
+            tree = g.run("cargo", "tree", "-p", f"{APP}-app", "-e", "normal", "--prefix", "none", cwd=g.app)
+            if any(l.startswith("dioxus") for l in tree.splitlines()):
+                fail("the app on air pulls dioxus")
+        say(f"PASS: {v1} started, upgraded to {v2} in place, its data kept{' (on air)' if g.on_air else ''}")
     finally:
         g.stop()
         if keep:

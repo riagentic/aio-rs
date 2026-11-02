@@ -6,20 +6,69 @@
 //! No syn: the input is split on token trees, expressions are passed
 //! through as written (their spans kept), so the macro runs in
 //! microseconds and its expansion stays near the size of its input.
+//!
+//! `ax dev` compiles this file too (not as a proc-macro: `cfg(proc_macro)`
+//! is off there) to read an edited `rsx!` as the compiler will:
+//! `templates` says whether only its markup changed (its holes the same),
+//! and what its templates are now (template hot reload).
+// Read by `ax dev` (and by this crate's tests) without the macros: not all of it is used there.
+#![cfg_attr(not(proc_macro), allow(dead_code))]
 use proc_macro2::{Delimiter, Ident, Literal, Spacing, Span, TokenStream, TokenTree};
-use quote::{format_ident, quote, quote_spanned};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
+use std::cell::RefCell;
 
 /// Elements, text, `{expr}`, components, `for … in … { … }` (keyed rows:
 /// `key:` on the row), `if … { … } else { … }`, as Dioxus's `rsx!`. A
 /// literal is static; a `"{x}"` string and every other expression is a
 /// hole that follows what it reads (the names it uses are cloned in).
+#[cfg(proc_macro)]
 #[proc_macro]
 pub fn rsx(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let toks: Vec<TokenTree> = TokenStream::from(input).into_iter().collect();
+    // Where it is written: its templates' key for a hot reload (`ax dev`).
+    let at = proc_macro::Span::call_site();
+    let at = (at.file().replace('\\', "/"), at.line() as u32, at.column() as u32);
+    expand(TokenStream::from(input), Some(at)).into()
+}
+
+/// `rsx!`'s expansion of `input`, written at `at` (file, line, column of
+/// the call, 1-based).
+pub(crate) fn expand(input: TokenStream, at: Option<(String, u32, u32)>) -> TokenStream {
+    let toks: Vec<TokenTree> = input.into_iter().collect();
+    HOT.with_borrow_mut(|h| *h = Hot { at, ..Hot::default() });
     match parse_nodes(&toks) {
-        Ok(nodes) => body(&nodes).into(),
-        Err((span, msg)) => quote_spanned!(span=> ::core::compile_error!(#msg)).into(),
+        Ok(nodes) => body(&nodes),
+        Err((span, msg)) => quote_spanned!(span=> ::core::compile_error!(#msg)),
     }
+}
+
+/// One template of an `rsx!` as the page gets it (air's `Template`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Made {
+    pub(crate) nodes: Vec<u8>,
+    pub(crate) count: u32,
+}
+
+#[derive(Default)]
+struct Hot {
+    at: Option<(String, u32, u32)>,
+    /// The templates made so far, by index (`templates`).
+    made: Option<Vec<Made>>,
+    next: u32,
+}
+
+thread_local!(static HOT: RefCell<Hot> = RefCell::default());
+
+/// The `rsx!` call `input` read for a hot reload: its shape (the
+/// expansion with its templates' markup left out: two calls of one shape
+/// differ in markup alone, so the running code fits the new markup) and
+/// its templates, in the order their indices are given. Err: it doesn't parse.
+#[cfg(not(proc_macro))]
+pub(crate) fn templates(input: TokenStream) -> Result<(String, Vec<Made>), String> {
+    let toks: Vec<TokenTree> = input.into_iter().collect();
+    HOT.with_borrow_mut(|h| *h = Hot { made: Some(vec![]), ..Hot::default() });
+    let shape = parse_nodes(&toks).map(|nodes| body(&nodes).to_string()).map_err(|(_, msg)| msg);
+    let made = HOT.with_borrow_mut(|h| h.made.take()).unwrap_or_default();
+    Ok((shape?, made))
 }
 
 /// `fn Row(name: String, on: Signal<bool>) -> View`: a props struct
@@ -32,6 +81,7 @@ pub fn rsx(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// the attributes given (`"data-t": …`, `id`, `..attributes`); a [`Prop`]
 /// follows what it is given. Any other prop is required (a compile error
 /// without it).
+#[cfg(proc_macro)]
 #[proc_macro_attribute]
 pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let toks: Vec<TokenTree> = TokenStream::from(item).into_iter().collect();
@@ -84,6 +134,7 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
 
 /// The builder of a hand-written props struct (as `#[component]` makes for
 /// its own): `#[props(…)]` on its fields as there.
+#[cfg(proc_macro)]
 #[proc_macro_derive(Props, attributes(props))]
 pub fn props(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let toks: Vec<TokenTree> = TokenStream::from(item).into_iter().collect();
@@ -1460,6 +1511,14 @@ fn body(nodes: &[Node]) -> TokenStream {
     if nodes.is_empty() {
         return quote!(::core::result::Result::<air::Tree, air::ViewError>::Ok(air::Tree::empty()));
     }
+    // Its index in the call: pre-order, as `templates` lists them.
+    let idx = HOT.with_borrow_mut(|h| {
+        h.next += 1;
+        if let Some(m) = &mut h.made {
+            m.push(Made::default());
+        }
+        h.next - 1
+    });
     let mut t = Tpl { bytes: vec![], count: 0, marks: 0, holes: vec![] };
     // A view is a range: what goes before a first anchor needs a start of its own.
     let lead = anchored(&nodes[0]);
@@ -1481,7 +1540,18 @@ fn body(nodes: &[Node]) -> TokenStream {
     }
     let (first, last) = first_last;
     let Tpl { bytes, count, marks, holes } = t;
-    let bytes = Literal::byte_string(&bytes);
+    let (bytes, count, at) = HOT.with_borrow_mut(|h| match &mut h.made {
+        // Read for a hot reload: the markup left out of the shape.
+        Some(m) => {
+            m[idx as usize] = Made { nodes: bytes, count };
+            (quote!(__markup), quote!(__count), quote!(__at))
+        }
+        None => {
+            let (file, line, col) = h.at.clone().unwrap_or_default();
+            let at = quote!(air::__rt::At { file: if cfg!(debug_assertions) { #file } else { "" }, line: #line, col: #col, idx: #idx });
+            (Literal::byte_string(&bytes).into_token_stream(), count.into_token_stream(), at)
+        }
+    });
     let (tn, b) = (Ident::new("__AIR_T", Span::mixed_site()), Ident::new("__air_b", Span::mixed_site()));
     let mut names = vec![];
     node_captures(nodes, &mut names);
@@ -1489,7 +1559,7 @@ fn body(nodes: &[Node]) -> TokenStream {
     quote!({
         #c
         ::core::result::Result::<air::Tree, air::ViewError>::Ok(air::Tree::new(move || {
-            static #tn: air::__rt::Template = air::__rt::Template { nodes: #bytes, count: #count, roots: #roots, marks: #marks, first: #first, last: #last };
+            static #tn: air::__rt::Template = air::__rt::Template { nodes: #bytes, count: #count, roots: #roots, marks: #marks, first: #first, last: #last, at: #at };
             let #b = air::__rt::tpl(&#tn);
             #(#holes)*
             air::__rt::view(&#tn, #b)
