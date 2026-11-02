@@ -704,6 +704,10 @@ version may break things.
 
 ### Fixed
 
+- **An `rsx!` hole may return a borrow of what it reads again**: `{t(&x)}`
+  or `{t(&r.name)}` (a `&str` of the hole's own clone of `x`) failed with
+  E0716 "temporary value dropped while borrowed" since holes clone their
+  names per run; the clones now live until the value is converted.
 - **On air, a handler's work is its component's** (Dioxus's scope): a task
   an `async` click handler spawned ended when the `if` branch or `for`
   row that drew its button was drawn again; it now ends with the

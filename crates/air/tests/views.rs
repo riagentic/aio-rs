@@ -228,3 +228,28 @@ fn a_component_takes_props_and_children_and_frees_all_it_made() {
     assert_eq!(air::live(), live, "no signal, effect, subscription, handler or owner left behind");
     assert_eq!(p.named(), named, "no node left named in the page");
 }
+
+#[test]
+fn a_hole_may_return_a_borrow_of_what_it_reads() {
+    // `t(&x)` borrows the hole's own clone of `x`: a child or a row's
+    // child (each was E0716 "temporary value dropped while borrowed").
+    fn t(s: &str) -> &str {
+        s
+    }
+    fn app() -> View {
+        let name = String::from("Ada");
+        let names = vec![String::from("Bo")];
+        rsx! {
+            p { "data-t": "one", {t(&name)} }
+            ul { "data-t": "rows",
+                for x in names.clone() {
+                    li { key: "{x}", {t(&x)} }
+                }
+            }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.flush();
+    assert_eq!(p.text("one"), "Ada");
+    assert_eq!(p.texts("rows"), ["Bo"]);
+}
