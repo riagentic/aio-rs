@@ -2,7 +2,7 @@
 //! page the window shows (the pinned Electron, headless), driven like a
 //! person. Gate 3 of docs/design/air.md: a renderer fault planted in air
 //! (`air::__fault`) fails the same test that passes on the sound one.
-#![cfg(all(feature = "air", not(feature = "kit")))]
+#![cfg(feature = "kit")]
 use aio::testing::{TestUi, fails};
 use aio::ui::prelude::*;
 

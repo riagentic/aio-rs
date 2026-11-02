@@ -12,8 +12,6 @@ pub mod storage;
 mod handle;
 #[cfg(target_arch = "wasm32")]
 pub mod notify;
-#[cfg(all(target_arch = "wasm32", feature = "liveview"))]
-mod page;
 #[cfg(target_arch = "wasm32")]
 mod source;
 #[cfg(target_arch = "wasm32")]
@@ -116,13 +114,12 @@ pub async fn sign_out() {
     restart();
 }
 
-/// Who this page is signed in as (aio's `useUser`), as `(id, role)`: `None`
-/// while the server is asked, then `Some(None)` signed out (or no
-/// accounts). A hook.
+/// Who this page is signed in as (aio's `useUser`), as `(id, role)`: its
+/// `get()` is `None` while the server is asked, then `Some(None)` signed out
+/// (or no accounts). A hook; read it in a hole.
 #[cfg(all(target_arch = "wasm32", feature = "kit"))]
-pub fn use_user() -> Option<Option<(String, String)>> {
-    let me = crate::ui::resource(|| async { client().me(None).await.ok().and_then(|m| m.user) });
-    me.get()
+pub fn use_user() -> crate::ui::Resource<Option<(String, String)>> {
+    crate::ui::resource(|| async { client().me(None).await.ok().and_then(|m| m.user) })
 }
 
 /// The page's `localStorage` as a [`storage::Kv`]: none in a context that
@@ -160,76 +157,6 @@ impl storage::Kv for Local {
     }
 }
 
-/// Mount the app's root view into the page's `<div id="main">`: the real
-/// DOM, edited as the view changes, its events the view's. Set the cells'
-/// sources (`aio::client!`'s `SOURCE`) first. A page painted on the server
-/// (`aio_shell::web::painted`) shows its paint until the view is drawn
-/// beside it, unseen, from the page's own copies; then the view takes its
-/// place in one step, with what a person did to the paint meanwhile (its
-/// scroll, focus, typed text: [`crate::page::ADOPT`]). Not adopted in place (hydration): dioxus-web 0.7's
-/// `rehydrate` binds the view's node ids to the paint's
-/// `data-node-hydration` marks by position and never checks they match,
-/// and the page's first view may differ from the paint (its copy is the
-/// one this browser kept, or newer). A mismatch then leaves ids on the
-/// wrong nodes or on none, and the next edit throws in the interpreter;
-/// it also needs dioxus-fullstack's serialized hydration data in the page.
-#[cfg(all(target_arch = "wasm32", feature = "web", feature = "liveview"))]
-pub fn launch(root: fn() -> crate::ui::View) {
-    use dioxus_core::VirtualDom;
-    // A `notify` tell is the page's notification, unless the app shows its own.
-    crate::tell::show_unless_set(notify::show);
-    // The copies are open now: what no copy syncs is said.
-    let open = SYNCING.with_borrow(Clone::clone);
-    for (app, cells) in &open {
-        warn_orphans(app, &cells.iter().map(String::as_str).collect::<Vec<_>>());
-    }
-    let doc = web_sys::window().and_then(|w| w.document());
-    let main = doc.as_ref().and_then(|d| d.get_element_by_id("main"));
-    let next = match (&doc, &main) {
-        (Some(d), Some(m)) if m.has_child_nodes() => d.create_element("div").ok().filter(|n| {
-            _ = n.set_attribute("hidden", "");
-            m.after_with_node_1(n).is_ok()
-        }),
-        _ => None,
-    };
-    // The page's own document: its DOM, never `eval`.
-    let doc = || std::rc::Rc::new(page::Page) as std::rc::Rc<dyn dioxus_document::Document>;
-    /// The view, and once it is drawn, the page told (`aio:mounted`: its
-    /// splash goes, `page.js`).
-    fn drawn(app: fn() -> dioxus_core::Element) -> dioxus_core::Element {
-        dioxus_core::use_hook(|| dioxus_core::queue_effect(mounted));
-        app()
-    }
-    let Some(next) = next else {
-        let dom = VirtualDom::new_with_props(drawn, root).with_root_context(doc());
-        return dioxus_web::launch::launch_virtual_dom(dom, dioxus_web::Config::new().rootname("main"));
-    };
-    /// The view, and once it is drawn, its place taken from the paint.
-    fn take_place(app: fn() -> dioxus_core::Element) -> dioxus_core::Element {
-        dioxus_core::use_hook(|| {
-            dioxus_core::queue_effect(|| {
-                let d = web_sys::window().and_then(|w| w.document());
-                let Some(main) = d.and_then(|d| d.get_element_by_id("main")) else { return };
-                if let Some(next) = main.next_element_sibling() {
-                    // With what was done to the paint (`page::ADOPT`, in page.js).
-                    let adopt = web_sys::window()
-                        .and_then(|w| js_sys::Reflect::get(&w, &"__aioAdopt".into()).ok())
-                        .and_then(|f| wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f).ok());
-                    if adopt.is_none_or(|f| f.call2(&wasm_bindgen::JsValue::NULL, &main, &next).is_err()) {
-                        main.remove();
-                        next.set_id("main");
-                        _ = next.remove_attribute("hidden");
-                    }
-                }
-                mounted();
-            })
-        });
-        app()
-    }
-    let dom = VirtualDom::new_with_props(take_place, root).with_root_context(doc());
-    dioxus_web::launch::launch_virtual_dom(dom, dioxus_web::Config::new().rootelement(next));
-}
-
 /// Mount the app's root view into the page's `<div id="main">`, on air:
 /// its interpreter (`air::PAGE_JS`) runs in the page as a script of the
 /// page's own making (its policy allows `blob:`), and talks to the views
@@ -238,7 +165,7 @@ pub fn launch(root: fn() -> crate::ui::View) {
 /// root. Set the cells' sources (`aio::client!`'s `SOURCE`) first. The
 /// page's splash goes once the view is drawn (`aio:mounted`). No server
 /// paint on air: the page's view is the first.
-#[cfg(all(target_arch = "wasm32", feature = "web", feature = "air", not(feature = "liveview")))]
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
 pub fn launch(root: fn() -> crate::ui::View) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -287,7 +214,7 @@ pub fn launch(root: fn() -> crate::ui::View) {
 
 /// The views of the page, on air: one root, flushed after each event, and
 /// whenever a task wakes (once per turn of the page's event loop).
-#[cfg(all(target_arch = "wasm32", feature = "web", feature = "air", not(feature = "liveview")))]
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
 mod on_air {
     use std::cell::{Cell, RefCell};
 

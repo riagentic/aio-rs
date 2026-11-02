@@ -8,30 +8,31 @@ Android need: [targets](targets.md).
 ## Develop: `ax dev`
 
 ```sh
-ax dev notes                     # build, run; edits hot-patch in
+ax dev notes                     # build, run; edits reach it live
 ax dev notes --instance try --fresh   # a private copy, on new, empty data
 ax dev notes --web               # the web build on loopback, its tabs live
 ```
 
-`ax dev <app>` builds and runs the app. With the dx that `ax setup`
-fetched, a saved edit hot-patches into the running app, its state
-kept: Rust in every workspace crate (views and cell methods alike),
-`rsx!` markup at once. An edit a patch can't take, or no dx:
-the app is built again, and a good build restarts it (its state comes
-back from the log) while a failed one leaves the running app alone.
-A saved stylesheet shows at once, no compile
-([theming](../ui/theming.md)); with `[build] css`, its toolchain runs
-first. After each patch or build `ax dev` says how long it took from
-the save (`ax dev: in 0.6 s from the save`); dx's own "took" leaves out
-the compile.
+`ax dev <app>` builds and runs the app. A saved edit reaches the running
+app, its state kept: `rsx!` markup at once (~3 ms, nothing compiled),
+Rust in every workspace crate (views and cell methods alike) hot-patched
+by ax itself (Linux, macOS). An edit a patch can't take (a
+`Cargo.toml`), or Windows: the app is built again, and a good build
+restarts it (its state comes back from the log) while a failed one
+leaves the running app alone. A saved stylesheet shows at once, no
+compile ([theming](../ui/theming.md)); with `[build] css`, its toolchain
+runs first. After each patch or build `ax dev` says how long it took
+from the save (`ax dev: in 0.6 s from the save`).
 
 ### What an edit costs
 
 A Rust edit recompiles the whole crate it is in (rustc reruns every
 macro, `rsx!` included, and rewrites the crate's metadata), so its time
-grows with that crate, not with the edit. Measured with `ax dev`
-(headless, 32 cores; the two bigger apps build their libraries at
-`opt-level = 1`, so their first build is longer):
+grows with that crate, not with the edit. Measured with `ax dev` in
+0.1 (headless, 32 cores; the two bigger apps build their libraries at
+`opt-level = 1`, so their first build is longer); the compile, which is
+most of each, is the same in 0.2, and the template's patch now lands in
+~0.45 s ([dev](dev.md)):
 
 | The edited crate | A patch lands | A start after an edit | A start, nothing changed | First build |
 |---|---|---|---|---|
@@ -47,7 +48,7 @@ the often-edited code (views, pages) in leaf crates, and the shared core
 small and stable. Measured on a 74 000-line app split into 10 crates: an
 edit in a page crate lands in 1.9 s (was 10 s); one in the shared kit or
 core still takes 8-14 s. `ax dev` watches every workspace crate the app
-uses, and dx patches the ones that changed.
+uses, and patches the ones that changed.
 
 Splitting has a cost in release builds: generic code, async functions
 included, is copied into each crate that uses it, so the binary grows a
@@ -63,7 +64,6 @@ little (that app: 15.8 → 16.4 MB).
 | `--display auto\|isolated\|current\|:N` | where the window goes; with no terminal (an agent) a nested display, never the person's |
 | `--cdp[=port]` | the window's DevTools protocol on loopback, for other tools |
 | `--watch=false`, `--watch=src/ui,assets` | build once, or rebuild on changes there only |
-| `--tui` | dx's own screen in the terminal |
 
 Args after the app go to the app (`ax dev notes -- --route /users/7`).
 Every flag, the app's own launch flags, and which code goes into which

@@ -1,0 +1,659 @@
+air::AttrValue::Bool(bool)
+air::AttrValue::None
+air::AttrValue::Str(std::borrow::Cow<'static, str>)
+air::Attribute.name: &'static str
+air::Attribute::derive: fn derive(name: &'static str, f: Box<dyn Fn() -> AttrValue>) -> Self
+air::Attribute::live: fn live<X: IntoAttr>(name: &'static str, f: impl Fn() -> X + 'static) -> Self
+air::Attribute::new: fn new(name: &'static str, v: impl IntoAttr) -> Self
+air::Attribute::value: fn value(&self) -> AttrValue
+air::Callback::call: fn call(&self, a: A) -> R
+air::Callback::new: fn new(f: impl FnMut(A) -> R + 'static) -> Self
+air::Child::Text(String)
+air::Child::Views(Vec<View>)
+air::Component::call: fn call(&self, props: P) -> View
+air::DataTransfer::get_as_text: fn get_as_text(&self) -> Option<String>
+air::DragData::data_transfer: fn data_transfer(&self) -> DataTransfer
+air::ErrorBoundary: fn ErrorBoundary(p: ErrorBoundaryProps) -> View
+air::ErrorBoundaryProps.children: View
+air::ErrorBoundaryProps.fallback: crate::reactive::Callback<String, View>
+air::Eval::join_json: fn join_json(&self) -> impl std::future::Future<Output = Result<String, String>> + use<>
+air::Eval::recv_json: fn recv_json(&self) -> impl std::future::Future<Output = Result<String, String>> + use<>
+air::Eval::send_json: fn send_json(&self, json: &str) -> Result<(), String>
+air::Event::data: fn data(&self) -> Rc<T>
+air::Event::default_action_enabled: fn default_action_enabled(&self) -> bool
+air::Event::default_prevented: fn default_prevented(&self) -> bool
+air::Event::map: fn map<U>(&self, f: impl FnOnce(&T) -> U) -> Event<U>
+air::Event::new: fn new(data: T) -> Self
+air::Event::prevent_default: fn prevent_default(&self)
+air::Event::stop_propagation: fn stop_propagation(&self)
+air::FormData::checked: fn checked(&self) -> bool
+air::FormData::value: fn value(&self) -> String
+air::FormData::values: fn values(&self) -> Vec<(String, String)>
+air::Fragment: fn Fragment(p: FragmentProps) -> View
+air::FragmentProps.children: View
+air::FromRaw::from_raw: fn from_raw(r: &Raw) -> Self
+air::Global::get: fn get(&self) -> T where T: Clone
+air::Global::get_untracked: fn get_untracked(&self) -> T where T: Clone
+air::Global::new: const fn new(init: fn() -> T) -> Self
+air::Global::read: fn read(&self) -> ReadGuard<T>
+air::Global::read_untracked: fn read_untracked(&self) -> ReadGuard<T>
+air::Global::set: fn set(&self, v: T) where T: PartialEq
+air::Global::signal: fn signal(&self) -> Signal<T>
+air::Global::update: fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> R
+air::Global::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Global::with_untracked: fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Global::write: fn write(&self) -> WriteGuard<T>
+air::GlobalMemo::get: fn get(&self) -> T where T: Clone
+air::GlobalMemo::get_untracked: fn get_untracked(&self) -> T where T: Clone
+air::GlobalMemo::memo: fn memo(&self) -> Memo<T>
+air::GlobalMemo::new: const fn new(f: fn() -> T) -> Self
+air::GlobalMemo::read: fn read(&self) -> ReadGuard<T>
+air::GlobalMemo::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::IntoAttr::into_attr: fn into_attr(self) -> AttrValue
+air::IntoChild::into_child: fn into_child(self) -> Child
+air::IntoHandler::into_handler: fn into_handler(self) -> Box<dyn FnMut(Event<T>)>
+air::IntoOpt::into_opt: fn into_opt(self) -> Option<T>
+air::IntoOptView::into_opt_view: fn into_opt_view(self) -> Option<crate::View>
+air::IntoOptViewValue::into_opt_view_value: fn into_opt_view_value(self) -> Option<crate::View>
+air::IntoValue::into_value: fn into_value(self) -> T
+air::IntoView::into_view: fn into_view(self) -> crate::View
+air::IntoViewValue::into_view_value: fn into_view_value(self) -> crate::View
+air::KeyboardData::code: fn code(&self) -> Code
+air::KeyboardData::is_auto_repeating: fn is_auto_repeating(&self) -> bool
+air::KeyboardData::is_composing: fn is_composing(&self) -> bool
+air::KeyboardData::key: fn key(&self) -> Key
+air::KeyboardData::location: fn location(&self) -> Location
+air::KeyboardData::modifiers: fn modifiers(&self) -> Modifiers
+air::KeyboardData::new: fn new(key: Key, code: Code, location: Location, modifiers: Modifiers, repeat: bool) -> Self
+air::Live.cleanups: usize
+air::Live.effects: usize
+air::Live.handlers: usize
+air::Live.nodes: usize
+air::Live.scripts: usize
+air::Live.subscriptions: usize
+air::Live.tasks: usize
+air::Memo::alive: fn alive(&self) -> bool
+air::Memo::get: fn get(&self) -> T where T: Clone
+air::Memo::get_untracked: fn get_untracked(&self) -> T where T: Clone
+air::Memo::read: fn read(&self) -> ReadGuard<T>
+air::Memo::read_untracked: fn read_untracked(&self) -> ReadGuard<T>
+air::Memo::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Memo::with_untracked: fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Mounted.children: Vec<Mounted>
+air::Mounted.key: Option<String>
+air::Mounted.name: &'static str
+air::Mounted.nodes: Option<(u32, u32)>
+air::Mounted.renders: u32
+air::Mounted.updates: u32
+air::MountedData::eval: fn eval(&self, js: &str) -> Eval
+air::MountedData::get_client_rect: fn get_client_rect(&self) -> impl std::future::Future<Output = Result<crate::geometry::Rect, String>> + use<>
+air::MountedData::run: fn run(&self, js: &str)
+air::MountedData::scroll: fn scroll(&self, to: crate::geometry::PixelsVector2D, behavior: crate::ScrollBehavior) -> impl std::future::Future<Output = Result<(), String>> + use<>
+air::MountedData::scroll_to: fn scroll_to(&self, smooth: bool) -> impl std::future::Future<Output = Result<(), String>> + use<>
+air::MountedData::set_focus: fn set_focus(&self, on: bool) -> impl std::future::Future<Output = Result<(), String>> + use<>
+air::MouseButton::Auxiliary
+air::MouseButton::Fifth
+air::MouseButton::Fourth
+air::MouseButton::Primary
+air::MouseButton::Secondary
+air::MouseButton::Unknown
+air::MouseButtons(_)
+air::MouseButtons::contains: fn contains(&self, b: MouseButton) -> bool
+air::MouseButtons::is_empty: fn is_empty(&self) -> bool
+air::MouseData::client_coordinates: fn client_coordinates(&self) -> ClientPoint
+air::MouseData::element_coordinates: fn element_coordinates(&self) -> ElementPoint
+air::MouseData::held_buttons: fn held_buttons(&self) -> MouseButtons
+air::MouseData::modifiers: fn modifiers(&self) -> Modifiers
+air::MouseData::page_coordinates: fn page_coordinates(&self) -> PagePoint
+air::MouseData::screen_coordinates: fn screen_coordinates(&self) -> ScreenPoint
+air::MouseData::trigger_button: fn trigger_button(&self) -> Option<MouseButton>
+air::Owner(_)
+air::Owner::alive: fn alive(self) -> bool
+air::Owner::dispose: fn dispose(self)
+air::PointerData::is_primary: fn is_primary(&self) -> bool
+air::PointerData::pointer_id: fn pointer_id(&self) -> i32
+air::PointerData::pointer_type: fn pointer_type(&self) -> String
+air::Prop::Const(T)
+air::Prop::Live(crate::reactive::Memo<T>)
+air::Prop::derive: fn derive(f: Box<dyn Fn() -> T>) -> Self where T: PartialEq
+air::Prop::get: fn get(&self) -> T where T: Clone
+air::Prop::get_untracked: fn get_untracked(&self) -> T where T: Clone
+air::Prop::is_live: fn is_live(&self) -> bool
+air::Prop::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Prop::with_untracked: fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Props::Builder: type
+air::Props::builder: fn builder() -> <Self as >::Builder
+air::Raw.alt: bool
+air::Raw.button: Option<u8>
+air::Raw.buttons: u16
+air::Raw.checked: bool
+air::Raw.code: String
+air::Raw.composing: bool
+air::Raw.ctrl: bool
+air::Raw.delta: [f64; 3]
+air::Raw.delta_mode: u8
+air::Raw.ids: Vec<u32>
+air::Raw.key: String
+air::Raw.location: u8
+air::Raw.meta: bool
+air::Raw.name: String
+air::Raw.pointer_id: i32
+air::Raw.pointer_type: String
+air::Raw.points: [f64; 8]
+air::Raw.primary: bool
+air::Raw.repeat: bool
+air::Raw.scroll: [f64; 6]
+air::Raw.shift: bool
+air::Raw.value: String
+air::Raw.values: Vec<(String, String)>
+air::Raw::decode: fn decode(b: &[u8]) -> Option<Raw>
+air::Raw::encode: fn encode(&self) -> Vec<u8>
+air::ResizeData::get_border_box_size: fn get_border_box_size(&self) -> Result<geometry::PixelsSize, String>
+air::ResizeData::get_content_box_size: fn get_content_box_size(&self) -> Result<geometry::PixelsSize, String>
+air::Resource::get: fn get(&self) -> Option<T> where T: Clone
+air::Resource::pending: fn pending(&self) -> bool
+air::Resource::restart: fn restart(&self)
+air::Resource::suspend: fn suspend(&self) -> Result<T, crate::dom::ViewError> where T: Clone
+air::Resource::with: fn with<R>(&self, f: impl FnOnce(Option<&T>) -> R) -> R
+air::Root::event: fn event(&self, frame: &[u8]) -> bool
+air::Root::hot: fn hot(&self)
+air::Root::mount: fn mount(app: impl Fn() -> View + 'static) -> Self
+air::Root::new: fn new() -> Self
+air::Root::owner: fn owner(&self) -> Owner
+air::Root::show: fn show(&self, app: impl Fn() -> View + 'static)
+air::Root::take_edits: fn take_edits(&self) -> Vec<u8>
+air::Root::uncaught: fn uncaught(&self) -> Vec<String>
+air::Root::within: fn within<R>(&self, f: impl FnOnce() -> R) -> R
+air::ScrollBehavior::Instant
+air::ScrollBehavior::Smooth
+air::ScrollData::client_height: fn client_height(&self) -> f64
+air::ScrollData::client_width: fn client_width(&self) -> f64
+air::ScrollData::scroll_height: fn scroll_height(&self) -> f64
+air::ScrollData::scroll_left: fn scroll_left(&self) -> f64
+air::ScrollData::scroll_top: fn scroll_top(&self) -> f64
+air::ScrollData::scroll_width: fn scroll_width(&self) -> f64
+air::Selector::is: fn is(&self, k: K) -> bool
+air::Signal::alive: fn alive(&self) -> bool
+air::Signal::get: fn get(&self) -> T where T: Clone
+air::Signal::get_untracked: fn get_untracked(&self) -> T where T: Clone
+air::Signal::new: fn new(v: T) -> Self
+air::Signal::read: fn read(&self) -> ReadGuard<T>
+air::Signal::read_untracked: fn read_untracked(&self) -> ReadGuard<T>
+air::Signal::set: fn set(&self, v: T) where T: PartialEq
+air::Signal::toggle: fn toggle(&self)
+air::Signal::try_read_untracked: fn try_read_untracked(&self) -> Option<ReadGuard<T>>
+air::Signal::try_write: fn try_write(&self) -> Option<WriteGuard<T>>
+air::Signal::update: fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> R
+air::Signal::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Signal::with_untracked: fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::Signal::write: fn write(&self) -> WriteGuard<T>
+air::Suspense: fn Suspense(p: SuspenseProps) -> View
+air::SuspenseProps.children: View
+air::SuspenseProps.fallback: View
+air::Task::alive: fn alive(self) -> bool
+air::Task::cancel: fn cancel(self)
+air::Tree(_)
+air::Tree::empty: fn empty() -> Self
+air::Tree::is_empty: fn is_empty(&self) -> bool
+air::ViewError(_)
+air::ViewError::is_suspended: fn is_suspended(&self) -> bool
+air::ViewError::new: fn new(msg: impl Into<String>) -> Self
+air::VisibleData::is_intersecting: fn is_intersecting(&self) -> Result<bool, String>
+air::WheelData::delta: fn delta(&self) -> WheelDelta
+air::batch: fn batch<R>(f: impl FnOnce() -> R) -> R
+air::callback: fn callback<A: 'static, R: 'static>(f: impl FnMut(A) -> R + 'static) -> Callback<A, R>
+air::components: fn components() -> Vec<Mounted>
+air::context: fn context<T: Clone + 'static>() -> T
+air::current_owner: fn current_owner() -> Option<Owner>
+air::detached: fn detached<R>(f: impl FnOnce() -> R) -> R
+air::effect: fn effect(f: impl FnMut() + 'static)
+air::eval: fn eval(js: &str) -> Eval
+air::exec: fn exec(js: &str)
+air::follow: fn follow<R>(f: impl FnOnce() -> R) -> R
+air::geometry::ClientPoint.x: f64
+air::geometry::ClientPoint.y: f64
+air::geometry::ClientPoint::new: fn new(x: f64, y: f64) -> Self
+air::geometry::ElementPoint.x: f64
+air::geometry::ElementPoint.y: f64
+air::geometry::ElementPoint::new: fn new(x: f64, y: f64) -> Self
+air::geometry::PagePoint.x: f64
+air::geometry::PagePoint.y: f64
+air::geometry::PagePoint::new: fn new(x: f64, y: f64) -> Self
+air::geometry::PixelsSize.height: f64
+air::geometry::PixelsSize.width: f64
+air::geometry::PixelsSize::new: fn new(width: f64, height: f64) -> Self
+air::geometry::PixelsVector2D.x: f64
+air::geometry::PixelsVector2D.y: f64
+air::geometry::PixelsVector2D::new: fn new(x: f64, y: f64) -> Self
+air::geometry::Rect.origin: PixelsPoint
+air::geometry::Rect.size: PixelsSize
+air::geometry::Rect::height: fn height(&self) -> f64
+air::geometry::Rect::max_x: fn max_x(&self) -> f64
+air::geometry::Rect::max_y: fn max_y(&self) -> f64
+air::geometry::Rect::min_x: fn min_x(&self) -> f64
+air::geometry::Rect::min_y: fn min_y(&self) -> f64
+air::geometry::Rect::new: fn new(origin: PixelsPoint, size: PixelsSize) -> Self
+air::geometry::Rect::width: fn width(&self) -> f64
+air::geometry::ScreenPoint.x: f64
+air::geometry::ScreenPoint.y: f64
+air::geometry::ScreenPoint::new: fn new(x: f64, y: f64) -> Self
+air::geometry::Vector.x: f64
+air::geometry::Vector.y: f64
+air::geometry::Vector.z: f64
+air::geometry::WheelDelta::Lines(Vector)
+air::geometry::WheelDelta::Pages(Vector)
+air::geometry::WheelDelta::Pixels(Vector)
+air::geometry::WheelDelta::strip_units: fn strip_units(&self) -> Vector
+air::hot::Markup.col: u32
+air::hot::Markup.count: u32
+air::hot::Markup.file: String
+air::hot::Markup.idx: u32
+air::hot::Markup.line: u32
+air::hot::Markup.nodes: Vec<u8>
+air::hot::clear_markup: fn clear_markup()
+air::hot::set_markup: fn set_markup(files: &[String], markup: Vec<Markup>)
+air::in_views: fn in_views() -> bool
+air::is_empty: fn is_empty(v: &View) -> bool
+air::key_event: fn key_event(key: Key, modifiers: Modifiers, repeat: bool) -> KeyboardEvent
+air::live: fn live() -> Live
+air::live_tasks: fn live_tasks() -> usize
+air::longest_increasing: fn longest_increasing(seq: &[isize]) -> Vec<bool>
+air::memo: fn memo<T: PartialEq + 'static>(f: impl FnMut() -> T + 'static) -> Memo<T>
+air::on_cleanup: fn on_cleanup(f: impl FnOnce() + 'static)
+air::on_wake: fn on_wake(f: impl Fn() + Send + Sync + 'static)
+air::once: fn once<T: Clone + 'static>(f: impl FnOnce() -> T) -> T
+air::provide: fn provide<T: Clone + 'static>(f: impl FnOnce() -> T) -> T
+air::provide_now: fn provide_now<T: Clone + 'static>(v: T) -> T
+air::provide_root: fn provide_root<T: Clone + 'static>(v: T) -> T
+air::resource: fn resource<T: 'static, F: Future<Output = T> + 'static>(f: impl FnMut() -> F + 'static) -> Resource<T>
+air::run_tasks: fn run_tasks() -> usize
+air::scope: fn scope<R>(f: impl FnOnce() -> R) -> (R, Owner)
+air::selector: fn selector<K: Hash + Eq + Clone + 'static>(src: impl Fn() -> K + 'static) -> Selector<K>
+air::signal: fn signal<T: 'static>(init: impl FnOnce() -> T) -> Signal<T>
+air::spawn: fn spawn(fut: impl Future<Output = ()> + 'static) -> Task
+air::spawn_forever: fn spawn_forever(fut: impl Future<Output = ()> + 'static) -> Task
+air::styled: fn styled(view: View, property: &'static str, f: impl Fn() -> Option<String> + 'static) -> View
+air::take_edits: fn take_edits() -> Vec<u8>
+air::task: fn task<F: Future + 'static>(f: impl FnOnce() -> F + 'static)
+air::testing::TestPage.bytes: usize
+air::testing::TestPage.frames: usize
+air::testing::TestPage.scripts: Vec<(u32, String)>
+air::testing::TestPage::answer: fn answer(&mut self, id: u32, kind: u8, json: &str)
+air::testing::TestPage::attr: fn attr(&self, t: &str, name: &str) -> Option<String>
+air::testing::TestPage::check: fn check(&mut self, t: &str, on: bool)
+air::testing::TestPage::click: fn click(&mut self, t: &str)
+air::testing::TestPage::fire: fn fire(&mut self, t: &str, e: Raw)
+air::testing::TestPage::flush: fn flush(&mut self)
+air::testing::TestPage::html: fn html(&self) -> String
+air::testing::TestPage::input: fn input(&mut self, t: &str, value: &str)
+air::testing::TestPage::key: fn key(&mut self, t: &str, key: &str)
+air::testing::TestPage::mount: fn mount(app: impl Fn() -> View + 'static) -> Self
+air::testing::TestPage::named: fn named(&self) -> usize
+air::testing::TestPage::on: fn on(root: Root) -> Self
+air::testing::TestPage::present: fn present(&self, t: &str) -> bool
+air::testing::TestPage::root: fn root(&self) -> &Root
+air::testing::TestPage::text: fn text(&self, t: &str) -> String
+air::testing::TestPage::texts: fn texts(&self, t: &str) -> Vec<String>
+air::testing::TestPage::within: fn within<R>(&mut self, f: impl FnOnce() -> R) -> R
+air::text_view: fn text_view(f: impl Fn() -> String + 'static) -> View
+air::try_context: fn try_context<T: Clone + 'static>() -> Option<T>
+air::untrack: fn untrack<R>(f: impl FnOnce() -> R) -> R
+air::watch: fn watch<D: Clone + PartialEq + 'static>(deps: D, f: impl FnMut(D) + 'static)
+air::with_owner: fn with_owner<R>(owner: Owner, f: impl FnOnce() -> R) -> R
+const air::PAGE_JS: &str
+enum air::AttrValue
+enum air::Child
+enum air::MouseButton
+enum air::Prop<T: 'static>
+enum air::ScrollBehavior
+enum air::geometry::WheelDelta
+impl Clone for AttrValue
+impl Clone for Attribute
+impl Clone for ClientPoint
+impl Clone for DataTransfer
+impl Clone for DragData
+impl Clone for ElementPoint
+impl Clone for Eval
+impl Clone for FormData
+impl Clone for KeyboardData
+impl Clone for Live
+impl Clone for Markup
+impl Clone for Mounted
+impl Clone for MountedData
+impl Clone for MouseButton
+impl Clone for MouseButtons
+impl Clone for MouseData
+impl Clone for Owner
+impl Clone for PagePoint
+impl Clone for PixelsSize
+impl Clone for PixelsVector2D
+impl Clone for PlainData
+impl Clone for PointerData
+impl Clone for Raw
+impl Clone for Rect
+impl Clone for ResizeData
+impl Clone for ScreenPoint
+impl Clone for ScrollBehavior
+impl Clone for ScrollData
+impl Clone for Task
+impl Clone for Tree
+impl Clone for Vector
+impl Clone for ViewError
+impl Clone for VisibleData
+impl Clone for WheelData
+impl Clone for WheelDelta
+impl Copy for ClientPoint
+impl Copy for ElementPoint
+impl Copy for Live
+impl Copy for MouseButton
+impl Copy for MouseButtons
+impl Copy for Owner
+impl Copy for PagePoint
+impl Copy for PixelsSize
+impl Copy for PixelsVector2D
+impl Copy for Rect
+impl Copy for ScreenPoint
+impl Copy for ScrollBehavior
+impl Copy for Task
+impl Copy for Vector
+impl Copy for WheelDelta
+impl Debug for AttrValue
+impl Debug for Attribute
+impl Debug for ClientPoint
+impl Debug for DataTransfer
+impl Debug for DragData
+impl Debug for ElementPoint
+impl Debug for Eval
+impl Debug for FormData
+impl Debug for KeyboardData
+impl Debug for Live
+impl Debug for Markup
+impl Debug for Mounted
+impl Debug for MountedData
+impl Debug for MouseButton
+impl Debug for MouseButtons
+impl Debug for MouseData
+impl Debug for Owner
+impl Debug for PagePoint
+impl Debug for PixelsSize
+impl Debug for PixelsVector2D
+impl Debug for PlainData
+impl Debug for PointerData
+impl Debug for Raw
+impl Debug for Rect
+impl Debug for ResizeData
+impl Debug for ScreenPoint
+impl Debug for ScrollBehavior
+impl Debug for ScrollData
+impl Debug for Task
+impl Debug for Tree
+impl Debug for Vector
+impl Debug for ViewError
+impl Debug for VisibleData
+impl Debug for WheelData
+impl Debug for WheelDelta
+impl Default for ClientPoint
+impl Default for DataTransfer
+impl Default for DragData
+impl Default for ElementPoint
+impl Default for FormData
+impl Default for KeyboardData
+impl Default for Live
+impl Default for MouseButtons
+impl Default for MouseData
+impl Default for PagePoint
+impl Default for PixelsSize
+impl Default for PixelsVector2D
+impl Default for PlainData
+impl Default for PointerData
+impl Default for Raw
+impl Default for Rect
+impl Default for ResizeData
+impl Default for Root
+impl Default for ScreenPoint
+impl Default for ScrollBehavior
+impl Default for ScrollData
+impl Default for Tree
+impl Default for Vector
+impl Default for VisibleData
+impl Default for WheelData
+impl Deref for DragData
+impl Deref for PointerData
+impl Deref for WheelData
+impl Display for ViewError
+impl Drop for Root
+impl Eq for Eval
+impl Eq for Live
+impl Eq for Markup
+impl Eq for Mounted
+impl Eq for MouseButton
+impl Eq for MouseButtons
+impl Eq for Owner
+impl Eq for ScrollBehavior
+impl Eq for Task
+impl FromRaw for DragData
+impl FromRaw for FormData
+impl FromRaw for KeyboardData
+impl FromRaw for MouseData
+impl FromRaw for PlainData
+impl FromRaw for PointerData
+impl FromRaw for ResizeData
+impl FromRaw for ScrollData
+impl FromRaw for VisibleData
+impl FromRaw for WheelData
+impl Hash for MouseButton
+impl IntoChild for Tree
+impl PartialEq for AttrValue
+impl PartialEq for Attribute
+impl PartialEq for ClientPoint
+impl PartialEq for DataTransfer
+impl PartialEq for DragData
+impl PartialEq for ElementPoint
+impl PartialEq for Eval
+impl PartialEq for FormData
+impl PartialEq for KeyboardData
+impl PartialEq for Live
+impl PartialEq for Markup
+impl PartialEq for Mounted
+impl PartialEq for MountedData
+impl PartialEq for MouseButton
+impl PartialEq for MouseButtons
+impl PartialEq for MouseData
+impl PartialEq for Owner
+impl PartialEq for PagePoint
+impl PartialEq for PixelsSize
+impl PartialEq for PixelsVector2D
+impl PartialEq for PlainData
+impl PartialEq for PointerData
+impl PartialEq for Raw
+impl PartialEq for Rect
+impl PartialEq for ResizeData
+impl PartialEq for ScreenPoint
+impl PartialEq for ScrollBehavior
+impl PartialEq for ScrollData
+impl PartialEq for Task
+impl PartialEq for Tree
+impl PartialEq for Vector
+impl PartialEq for ViewError
+impl PartialEq for VisibleData
+impl PartialEq for WheelData
+impl PartialEq for WheelDelta
+impl Props for ErrorBoundaryProps
+impl Props for FragmentProps
+impl Props for SuspenseProps
+impl StructuralPartialEq for AttrValue
+impl StructuralPartialEq for ClientPoint
+impl StructuralPartialEq for DataTransfer
+impl StructuralPartialEq for DragData
+impl StructuralPartialEq for ElementPoint
+impl StructuralPartialEq for Eval
+impl StructuralPartialEq for FormData
+impl StructuralPartialEq for KeyboardData
+impl StructuralPartialEq for Live
+impl StructuralPartialEq for Markup
+impl StructuralPartialEq for Mounted
+impl StructuralPartialEq for MountedData
+impl StructuralPartialEq for MouseButton
+impl StructuralPartialEq for MouseButtons
+impl StructuralPartialEq for MouseData
+impl StructuralPartialEq for Owner
+impl StructuralPartialEq for PagePoint
+impl StructuralPartialEq for PixelsSize
+impl StructuralPartialEq for PixelsVector2D
+impl StructuralPartialEq for PlainData
+impl StructuralPartialEq for PointerData
+impl StructuralPartialEq for Raw
+impl StructuralPartialEq for Rect
+impl StructuralPartialEq for ResizeData
+impl StructuralPartialEq for ScreenPoint
+impl StructuralPartialEq for ScrollBehavior
+impl StructuralPartialEq for ScrollData
+impl StructuralPartialEq for Task
+impl StructuralPartialEq for Vector
+impl StructuralPartialEq for VisibleData
+impl StructuralPartialEq for WheelData
+impl StructuralPartialEq for WheelDelta
+impl<A, R> Clone for Callback<A, R>
+impl<A, R> Copy for Callback<A, R>
+impl<A, R> PartialEq for Callback<A, R>
+impl<A: 'static, R: 'static, F: FnMut(A) -> R + 'static> From<F> for Callback<A, R>
+impl<A: 'static, R: Default + 'static> Default for Callback<A, R>
+impl<E: std::error::Error> From<E> for ViewError
+impl<F: Fn() -> View + 'static> Component<(), NoProps> for F
+impl<K> Clone for Selector<K>
+impl<K> PartialEq for Selector<K>
+impl<T: 'static> Deref for ReadGuard<T>
+impl<T: 'static> Deref for WriteGuard<T>
+impl<T: 'static> DerefMut for WriteGuard<T>
+impl<T: 'static> Drop for ReadGuard<T>
+impl<T: 'static> Drop for WriteGuard<T>
+impl<T: Clone + std::ops::Add<Output = T> + 'static> AddAssign<T> for Signal<T>
+impl<T: Clone + std::ops::Sub<Output = T> + 'static> SubAssign<T> for Signal<T>
+impl<T: Clone> Clone for Prop<T>
+impl<T: Copy> Copy for Prop<T>
+impl<T: Default> Default for Prop<T>
+impl<T: IntoAttr + Clone + 'static> IntoAttr for crate::Memo<T>
+impl<T: IntoAttr + Clone + 'static> IntoAttr for crate::reactive::Signal<T>
+impl<T: IntoAttr + Clone> IntoAttr for Prop<T>
+impl<T: PartialEq + Clone> From<Signal<T>> for Prop<T>
+impl<T: PartialEq + Clone> PartialEq for Prop<T>
+impl<T: PartialEq + std::fmt::Display + 'static> Display for GlobalMemo<T>
+impl<T: std::fmt::Debug + 'static> Debug for Memo<T>
+impl<T: std::fmt::Debug + 'static> Debug for Signal<T>
+impl<T: std::fmt::Debug> Debug for Event<T>
+impl<T: std::fmt::Debug> Debug for Prop<T>
+impl<T: std::fmt::Display + 'static> Display for Global<T>
+impl<T: std::fmt::Display + 'static> Display for Memo<T>
+impl<T: std::fmt::Display + 'static> Display for Signal<T>
+impl<T: std::fmt::Display + 'static> IntoChild for crate::Memo<T>
+impl<T: std::fmt::Display + 'static> IntoChild for crate::reactive::Signal<T>
+impl<T: std::fmt::Display> Display for Prop<T>
+impl<T: std::fmt::Display> IntoChild for Prop<T>
+impl<T> Clone for Event<T>
+impl<T> Clone for Memo<T>
+impl<T> Clone for Resource<T>
+impl<T> Clone for Signal<T>
+impl<T> Copy for Memo<T>
+impl<T> Copy for Resource<T>
+impl<T> Copy for Signal<T>
+impl<T> Deref for Event<T>
+impl<T> Eq for Signal<T>
+impl<T> From<Memo<T>> for Prop<T>
+impl<T> From<T> for Prop<T>
+impl<T> PartialEq for Memo<T>
+impl<T> PartialEq for Resource<T>
+impl<T> PartialEq for Signal<T>
+mod air
+mod air::geometry
+mod air::hot
+mod air::testing
+struct air::Attribute
+struct air::Callback<A, R>
+struct air::DataTransfer
+struct air::DragData
+struct air::ErrorBoundaryProps
+struct air::Eval
+struct air::Event<T>
+struct air::FormData
+struct air::FragmentProps
+struct air::Global<T: 'static>
+struct air::GlobalMemo<T: PartialEq + 'static>
+struct air::KeyboardData
+struct air::Live
+struct air::Memo<T>
+struct air::Mounted
+struct air::MountedData
+struct air::MouseButtons
+struct air::MouseData
+struct air::NoProps
+struct air::Owner
+struct air::PlainData
+struct air::PointerData
+struct air::Raw
+struct air::ReadGuard<T: 'static>
+struct air::ResizeData
+struct air::Resource<T>
+struct air::Root
+struct air::ScrollData
+struct air::Selector<K>
+struct air::Signal<T>
+struct air::SuspenseProps
+struct air::Task
+struct air::Tree
+struct air::ViewError
+struct air::VisibleData
+struct air::WheelData
+struct air::WriteGuard<T: 'static>
+struct air::geometry::ClientPoint
+struct air::geometry::ElementPoint
+struct air::geometry::PagePoint
+struct air::geometry::PixelsSize
+struct air::geometry::PixelsVector2D
+struct air::geometry::Rect
+struct air::geometry::ScreenPoint
+struct air::geometry::Vector
+struct air::hot::Markup
+struct air::testing::TestPage
+trait air::Component<P, M>: 'static
+trait air::FromRaw: Sized + 'static
+trait air::IntoAttr
+trait air::IntoChild
+trait air::IntoHandler<T, M>
+trait air::IntoOpt<T, M>
+trait air::IntoOptView<M>
+trait air::IntoOptViewValue<M>
+trait air::IntoValue<T, M>
+trait air::IntoView<M>
+trait air::IntoViewValue<M>
+trait air::Props: Sized
+type air::AnimationEvent = Event<PlainData>
+type air::ClipboardEvent = Event<PlainData>
+type air::CompositionEvent = Event<PlainData>
+type air::DragEvent = Event<DragData>
+type air::EventHandler<T> = Callback<T, ()>
+type air::FocusData = PlainData
+type air::FocusEvent = Event<PlainData>
+type air::FormEvent = Event<FormData>
+type air::ImageEvent = Event<PlainData>
+type air::KeyboardEvent = Event<KeyboardData>
+type air::MediaEvent = Event<PlainData>
+type air::MountedEvent = Event<crate::dom::MountedData>
+type air::MouseEvent = Event<MouseData>
+type air::PointerEvent = Event<PointerData>
+type air::ResizeEvent = Event<ResizeData>
+type air::ScrollEvent = Event<ScrollData>
+type air::SelectionEvent = Event<PlainData>
+type air::ToggleEvent = Event<PlainData>
+type air::TouchEvent = Event<PointerData>
+type air::TransitionEvent = Event<PlainData>
+type air::View = Result<Tree, ViewError>
+type air::VisibleEvent = Event<VisibleData>
+type air::WheelEvent = Event<WheelData>
+type air::geometry::PixelsPoint = ClientPoint
+use air::Code = keyboard_types::code::Code
+use air::Key = keyboard_types::key::Key
+use air::Location = keyboard_types::location::Location
+use air::Modifiers = keyboard_types::modifiers::Modifiers
+use air::Props = air_macro::Props
+use air::component = air_macro::component
+use air::rsx = air_macro::rsx

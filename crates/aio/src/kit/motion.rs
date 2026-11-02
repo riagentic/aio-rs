@@ -128,25 +128,25 @@ fn guarded(which: &str, fails: &Cell<u64>, tick: impl FnOnce()) {
     }
 }
 
-/// A loop task per component, (re)started while `active` and stopped
-/// otherwise (and with the component).
-fn use_loop(active: bool, start: impl FnOnce() -> Task) {
+/// A loop task per component, (re)started while `active` holds and
+/// stopped otherwise (and with the component).
+fn use_loop(active: Prop<bool>, start: impl Fn() -> Task + 'static) {
     let task = once(|| Rc::new(Cell::new(None::<Task>)));
-    match (active, task.get()) {
+    effect(move || match (active.get(), task.get()) {
         (true, None) => task.set(Some(start())),
         (false, Some(t)) => {
             t.cancel();
             task.set(None);
         }
         _ => {}
-    }
+    });
 }
 
-/// Call `tick` every `every` while `active` (aio's `useInterval`); it always
-/// sees the latest closure.
-pub fn use_interval(every: Duration, active: bool, mut tick: impl FnMut() + 'static) {
+/// Call `tick` every `every` while `active` (aio's `useInterval`; a
+/// signal or a memo is followed, a `bool` is fixed).
+pub fn use_interval(every: Duration, active: impl Into<Prop<bool>>, mut tick: impl FnMut() + 'static) {
     let tick = callback(move |()| tick());
-    use_loop(active, || {
+    use_loop(active.into(), move || {
         spawn(async move {
             let fails = Cell::new(0);
             loop {
@@ -160,9 +160,9 @@ pub fn use_interval(every: Duration, active: bool, mut tick: impl FnMut() + 'sta
 /// Call `frame(since_start, since_last)` once a frame (60 Hz) while
 /// `active` (aio's `useRaf`; the first frame's `since_last` is zero). For
 /// state that moves; a canvas drawn per frame belongs in the page.
-pub fn use_frame(active: bool, mut frame: impl FnMut(Duration, Duration) + 'static) {
+pub fn use_frame(active: impl Into<Prop<bool>>, mut frame: impl FnMut(Duration, Duration) + 'static) {
     let frame = callback(move |(t, dt)| frame(t, dt));
-    use_loop(active, || {
+    use_loop(active.into(), move || {
         spawn(async move {
             let (start, fails) = (Instant::now(), Cell::new(0));
             let mut last = None;

@@ -48,8 +48,8 @@ app builds, so a typo in it is one too.
   is fetched once per machine and shared by every aio-rs app, or bundled
   into a release (`[build] runtime = "bundled"`). An idle window costs
   ~81 MB private, ~167 MB PSS ([comparison](../comparison.md)). If a
-  system webview and a small download matter most, Tauri or Dioxus
-  desktop fit better.
+  system webview and a small download matter most, Tauri or another
+  system-webview stack fits better ([comparison](../comparison.md)).
 - **Rust compile times.** A Rust edit recompiles its whole crate:
   0.6 s in the template, ~10 s in a crate of about 74 000 lines; a first build
   takes 15 s to ~60 s. Splitting a big app into crates brings a page edit

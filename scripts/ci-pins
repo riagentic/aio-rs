@@ -1,9 +1,8 @@
 #!/bin/sh
-# The pinned versions of what `ax setup` fetches (Electron, wasm-bindgen,
-# dx), as one word: CI's cache key for them.
+# The pinned versions of what `ax setup` fetches (Electron, wasm-bindgen),
+# as one word: CI's cache key for them.
 set -eu
 cd "$(dirname "$0")/.."
 electron=$(sed -n '/^macro_rules! electron_version/{n;n;p;q;}' crates/aio/src/paths.rs | tr -dc '0-9.')
 bindgen=$(sed -n 's/^pub const WASM_BINDGEN: &str = "\(.*\)";$/\1/p' crates/aio-cli/src/setup.rs)
-dx=$(sed -n 's/^pub const DIOXUS: &str = "\(.*\)";$/\1/p' crates/aio-cli/src/dev.rs)
-echo "electron-$electron-wasm-bindgen-$bindgen-dx-$dx"
+echo "electron-$electron-wasm-bindgen-$bindgen"

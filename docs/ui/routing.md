@@ -2,7 +2,7 @@
 
 Routes name the places of an app (`/`, `/users/7`, `/settings`) so a
 view can show one, a link can lead to one, Back can return from one and
-the app can open at one. Feature `kit` or `air`: the same views on either renderer.
+the app can open at one. Feature `kit` (the app template has it).
 
 - **Use routes** when the app has pages a person moves between, links
   into it (a notification's click, a deep link), or Back to honour (a
@@ -120,7 +120,7 @@ assert_eq!(ui.text("page"), "home");
 
 | Item | Does |
 |---|---|
-| `here()` | the current place (`aio::route::Loc`: `path`, `query`, `hash`, `.query("key")`); read in a hole (`{ .. }`, an attribute), it follows the place; on air a body's read is a snapshot |
+| `here()` | the current place (`aio::route::Loc`: `path`, `query`, `hash`, `.query("key")`); read in a hole (`{ .. }`, an attribute) or a `memo`, it follows the place; a body's read is a snapshot |
 | `go(to)` | goes there (resolved from here); false if it leaves the app |
 | `redirect(to)` | goes there without a Back step |
 | `back()` | the newest `use_back` handler, then history; false at the first place |
@@ -128,8 +128,8 @@ assert_eq!(ui.text("page"), "home");
 | `Link { to, exact, replace, class, active_class }` | an `<a>` that routes in the app; the current place's link gets `active_class` (`active`) and `aria-current="page"`; a link out of the app opens in the system browser; the author's `onclick` runs first, and its `prevent_default()` keeps the place |
 | `NAV` | the window's `aio::route::History` (50 places, as Chromium keeps) |
 
-A `Route` runs again only when its match changes (on air its body runs
-again then and its element is made anew; a query, a fragment or another
+A `Route` runs again only when its match changes (its body runs again
+then and its element is made anew; a query, a fragment or another
 route's place runs nothing). A view that reads `params()` in its body
 gets the new ones that way.
 
@@ -183,7 +183,7 @@ assert_eq!(of_link("myapp://users/7?tab=a"), "/users/7?tab=a");
 | `start(args)` | the launch's `--route`, else `/` |
 | `of_link(url)` | the place a `myapp://…` link leads to |
 
-In a view, `here()` is the place (reading it subscribes the view) and
+In a view, `here()` is the place (a hole or `memo` reading it follows it) and
 `NAV.write().go(1)` is Forward. A search page reads its query and writes
 it back with `redirect`, so typing doesn't fill the history:
 
@@ -194,9 +194,9 @@ aio::router!();
 
 #[component]
 fn Search() -> View {
-    let q = here().query("q").unwrap_or_default();
+    let q = memo(|| here().query("q").unwrap_or_default());
     rsx! {
-        input { "data-t": "q", value: "{q}",
+        input { "data-t": "q", "aria-label": "Search", value: "{q}",
             oninput: move |e| _ = redirect(&format!("/search?q={}", e.value())) }
         p { "data-t": "shown", "results for {q}" }
     }
@@ -320,7 +320,7 @@ sheet), then step history; at the first place the host does its default
 
 ## Common mistakes
 
-- Reading `NAV` in a render instead of `here()`: `here()` also wires the
+- Reading `NAV` in a view instead of `here()`: `here()` also wires the
   host's Back and the app's links the first time it is read.
 - Pushing in a redirect: `go("/login")` from a page leaves a Back step
   that sends the person straight back; use `redirect` or `Redirect`.

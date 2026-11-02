@@ -734,7 +734,9 @@ pub struct Splash {
     /// A PNG, from `aio.toml`'s folder; `…@2x.png` is drawn at half its
     /// pixel size (crisp on a 2x screen). Built into the app.
     pub image: std::path::PathBuf,
-    /// Under the image; `{title}` is the app's name.
+    /// Under the image; `{title}` is the app's name, `{version}` its version
+    /// (the string `--version` prints); `{got}`, `{total}`, `{pct}` read
+    /// `0`, `?`, `?` (aio's set).
     #[serde(default)]
     pub text: Option<String>,
     /// It stays at least this many milliseconds once shown.
@@ -751,7 +753,7 @@ pub struct Splash {
     #[serde(default)]
     pub show: SplashShow,
     /// The line under the bar while a first start downloads Electron in the
-    /// splash: `{title}`, `{version}`,
+    /// splash: `{title}`, `{version}` (the app's),
     /// `{got}` and `{total}` (MB), `{pct}`. Unset: `[build.download_window] text`.
     #[serde(default)]
     pub download_text: Option<String>,

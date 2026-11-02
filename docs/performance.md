@@ -19,32 +19,37 @@ slower with every field the app adds.
 
 ## What a view follows
 
-A view re-renders when something it read **while it rendered** changes,
-and only then. Today's renderer collects those reads again on every render, so a
-branch not taken this time follows nothing, and one taken for the first
-time follows from then on.
+A view's body runs once. What follows state is its holes: each text,
+attribute, child, `if` and `for` of its `rsx!` that isn't a literal is an
+effect that runs again when something it read changes, and writes only its
+own part of the page. A read in the body itself (a `let` before `rsx!`)
+happens once. A hole collects its reads again each run, so a branch not
+taken this time follows nothing, and one taken for the first time follows
+from then on.
 
 | Where the read happens | Followed? |
 |---|---|
-| the component's body (its render), `memo`, `effect` | yes |
-| `part(\|c\| &c.field)` in a render | that one field |
-| `name()` (the whole state) in a render | every commit of the cell |
+| a hole of `rsx!` (`"{n}"`, `{x.get()}`, `disabled: !ok.get()`, an `if`, a `for`), a `memo`, an `effect` | yes |
+| `part(\|c\| &c.field)` read in a hole | that one field |
+| `name()` (the whole state) in a hole | every commit of the cell |
+| the component's body, before `rsx!` | no: read once, as it mounts |
 | an event handler (`onclick`, `oninput`…), `act!` | no |
 | `spawn(async { .. })`, after an `.await`, a timer | no |
 | `.get_untracked()`, `.read_untracked()` of a signal, anywhere | no |
 | a cell method or an effect (they write state, they don't render) | no |
-| a value kept outside a render (a `static`, `once`) | no: it is made once |
+| a value kept outside a view (a `static`, `once`) | no: it is made once |
 
 - `part` is per top-level field: reading two fields of a cell follows
   those two, not the cell (in aio one cell is one signal, so aio splits
   state across cells; aio-rs splits it across fields).
 - A cache that answers before reading still follows the right thing when
-  its key is a part's stamp: `ROWS.get(part(|c| &c.rows).ver(), ..)` reads
-  the part first, then asks the cache ([memoize](#3-memoize)).
-- A stale view: is the read in the render (not a handler, not a
-  `once`)? Is it a `part` of the field that changed (not a reference
-  into it)? Does the root call `use_live()` (for commits from effects,
-  sync and schedules)?
+  its key is a part's stamp: `ROWS.get(part(|c| &c.rows).ver(), ..)` in a
+  hole or `memo` reads the part first, then asks the cache
+  ([memoize](#3-memoize)).
+- A stale view: is the read in a hole or a `memo` (not the body, a
+  handler, a `once`)? Is it a `part` of the field that changed (not a
+  reference into it)? Does the root call `use_live()` (for commits from
+  effects, sync and schedules)?
 
 ## 1. Read fields
 
@@ -65,25 +70,25 @@ aio::client!(Inbox, inbox);
 
 #[component]
 fn Badge() -> View {
-    // Re-renders when `unread` changes, never on a cursor step.
-    let n = part(|i| &i.unread).get();
+    // Its hole runs again when `unread` changes, never on a cursor step.
+    let n = part(|i| &i.unread);
     rsx! { span { "{n}" } }
 }
 
 #[component]
 fn Slow() -> View {
-    // Re-renders on every commit of the cell: avoid in a render.
-    let n = inbox().unread;
-    rsx! { span { "{n}" } }
+    // Its hole runs again on every commit of the cell: avoid.
+    rsx! { span { {inbox().unread} } }
 }
 # fn main() {}
 ```
 
-`part` subscribes the view to one top-level field (aio's signal per cell;
-`#[cell]` lays the fields out and says which changed). Pick the field,
-then index it: `part(|c| &c.rows)[i]`, not a part inside a row. A dev
-build names, once, each render that reads the whole state (`[hint]` in
-the log). Handlers may read `inbox()` freely: they don't subscribe.
+`part` makes a reader of one top-level field (aio's signal per cell;
+`#[cell]` lays the fields out and says which changed): a hole reading it
+follows that field. Pick the field, then index it: `part(|c| &c.rows)[i]`,
+not a part inside a row. A dev build names, once, each view body that
+reads the whole state (`[hint]` in the log): read there, it is read once.
+Handlers may read `inbox()` freely: they don't subscribe.
 
 Split state that changes at different rates into fields (or cells): a
 cursor that moves 30 times a second next to rows that change once a
@@ -99,9 +104,9 @@ transaction within `aio::PERSIST_DEBOUNCE` (100 ms), as aio's
 [persistence](persistence/README.md#coalesced-writes).
 
 Commits that don't come from the views (effects, schedules, other
-threads: prices, sync, file scans) re-render at most once per
+threads: prices, sync, file scans) reach the views at most once per
 `aio::ui::BACKGROUND` (150 ms), as aio's broadcast coalescer does. A call from the
-views renders at once and takes along what came meanwhile (aio's
+views shows at once and takes along what came meanwhile (aio's
 `flushAllUrgent`).
 
 ## 3. Memoize
@@ -202,14 +207,15 @@ impl Ledger {
 
 aio::client!(Ledger, ledger);
 
-/// A row by props: unchanged rows are skipped.
+/// A row by props: unchanged rows are skipped; `selected` follows the
+/// cursor (a `Prop`), so a step re-runs the holes of two rows.
 #[component]
-fn Line(name: String, amount: u64, selected: bool, i: usize) -> View {
+fn Line(name: String, amount: u64, selected: Prop<bool>, i: usize) -> View {
     rsx! {
         li {
-            "aria-selected": selected,
+            "aria-selected": selected.get(),
             // Scrolled into view as its frame is applied: no script per step.
-            "data-aio-reveal": selected.then(|| i.to_string()),
+            "data-aio-reveal": selected.get().then(|| i.to_string()),
             "{name} {amount}"
         }
     }
@@ -218,17 +224,25 @@ fn Line(name: String, amount: u64, selected: bool, i: usize) -> View {
 #[component]
 fn Lines() -> View {
     use_global_key("ArrowDown", |_| _ = act!(down()));
-    let (rows, cursor) = (part(|l| &l.rows), part(|l| &l.cursor).get());
-    let from = cursor.saturating_sub(SHOWN / 2);
-    rows.with(|rows| {
-        rsx! {
-            ul { "data-aio-prevent": "ArrowUp ArrowDown PageUp PageDown Home End",
-                for i in from..(from + SHOWN).min(rows.len()) {
-                    Line { key: "{i}", name: rows[i].name.clone(), amount: rows[i].amount, selected: cursor == i, i }
+    let (rows, cursor) = (part(|l| &l.rows), part(|l| &l.cursor));
+    // The rows shown: the list's hole runs again only when the window moves.
+    let shown = memo(move || {
+        let from = cursor.get().saturating_sub(SHOWN / 2);
+        from..(from + SHOWN).min(rows.with(Vec::len))
+    });
+    rsx! {
+        ul { "data-aio-prevent": "ArrowUp ArrowDown PageUp PageDown Home End",
+            for i in shown.get() {
+                Line {
+                    key: "{i}",
+                    name: rows.with(|r| r[i].name.clone()),
+                    amount: rows.with(|r| r[i].amount),
+                    selected: cursor.get() == i,
+                    i,
                 }
             }
         }
-    })
+    }
 }
 
 #[component]
@@ -242,11 +256,11 @@ pub fn App() -> View {
 - Draw a window (aio's `useVirtualList`, or a window by hand):
   `kit::VirtualList` for fixed-height rows, or a window by hand as above
   with stable keys.
-- Put the key on the element the iterator yields
-  (`items.iter().map(|it| rsx! { Row { key: "{it.id}", .. } })`). A `for`
-  loop whose body is a block (`for it in items { { let x = ..; rsx! { .. } } }`)
-  keys each row inside an unkeyed wrapper, so every row is rebuilt when the
-  list shifts (a window moving up, a row removed); `ax lint` warns on it.
+- A `for` row takes `key:` on its first node (`rsx!` refuses one
+  without): rows are kept by key when the list shifts (a window moving up,
+  a row removed), and an item that changed (by `PartialEq`) gets a new row.
+  Give a row what changes per step as a `Prop` (`selected: cursor.get() == i`)
+  so a step re-runs that row's holes, not the list.
 - Show the cursor by attribute (`aria-selected`, `data-cursor`) and CSS,
   with `transition: none` on rows: a step changes two attributes.
 - Clamp the cursor in the view (`cursor.min(len - 1)`), not by a write,
@@ -453,15 +467,17 @@ length ([wire](migration/wire.md)).
 ## What renders: `ax components`
 
 ```sh
-ax components notes             # the mounted tree, renders and time per component
-ax components notes --renders   # its last 200 renders, as they happened
+ax components notes             # the mounted tree: each component's renders and updates
 ax components notes --json
 ```
 
-It reads a dev build of a running app through its door. In a test,
-`TestUi::components()` gives the same tree (`name`, `renders`,
-`children`) and `TestUi::wire_bytes()` what the views sent the page, so a
-test can hold a key press to a cost:
+It reads a dev build of a running app through its door. A component's
+`renders` are its body's runs (once, as it mounts, unless a `follow` or a
+hot reload runs it again); its `updates` are its own holes' writes, what
+a change cost it. In a test, `TestUi::components()` gives the same tree
+(`name`, `key`, `renders`, `updates`, `children`) and
+`TestUi::wire_bytes()` what the views sent the page, so a test can hold a
+key press to a cost:
 
 ```rust
 use aio::act;
@@ -491,8 +507,8 @@ fn Label() -> View {
 
 #[component]
 fn Count() -> View {
-    let n = part(|c| &c.n).get();
-    rsx! { button { "data-t": "inc", onclick: move |_| _ = act!(inc()), "{n}" } }
+    let n = part(|c| &c.n);
+    rsx! { button { "data-t": "inc", r#type: "button", onclick: move |_| _ = act!(inc()), "{n}" } }
 }
 
 #[component]
@@ -500,32 +516,36 @@ fn App() -> View {
     rsx! { Label {} Count {} }
 }
 
-fn renders(tree: &[MountedComponent], name: &str) -> u32 {
-    tree.iter().map(|c| if c.name == name { c.renders } else { renders(&c.children, name) }).sum()
+fn costs(tree: &[MountedComponent], name: &str) -> (u32, u32) {
+    let c = tree.iter().find(|c| c.name == name).expect(name);
+    (c.renders, c.updates)
 }
 
 # fn main() {
 let mut ui = TestUi::new(App);
 ui.click("inc");
 ui.click("inc");
+assert_eq!(ui.text("inc"), "2");
 let tree = ui.components();
-assert_eq!(renders(&tree, "Count"), 3, "the first render and one a click");
-assert_eq!(renders(&tree, "Label"), 1, "a field it doesn't read never renders it");
+assert_eq!(costs(&tree, "Count"), (1, 2), "its body once, its hole once a click");
+assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it nothing");
 # }
 ```
 
 ## Measured
 
 - `cargo test -p aio-rs -F kit --test list_speed -- --nocapture`: a held ↓ over
-  1000 rows (30 drawn), a view of the whole state against the list
+  1000 rows (30 drawn), views of the whole state against the list
   above (debug build; in an aio-rs checkout):
 
   | per key | whole state, a commit per step | parts, coalesced, rows by props |
   |---|---|---|
-  | components rendered | 8.25 | 1.5 |
+  | views' work (bodies run and holes rewritten) | 15.5 | 1.27 |
   | writes to the file | 1.0 | 0.2 (one per 100 ms window) |
-  | wire bytes to the page | 155 | 155 |
-  | the store's share (p50 / p95) | 53 / 141 µs | 39 / 46 µs |
+  | wire bytes to the page | 151 | 141 |
+  | the store's share (p50 / p95) | 92 µs / 1.9 ms | 69 / 872 µs |
+
+  One run, a loaded machine: the counts are exact, the times noisy.
 
 - `ax heap <app>` shows memory per cell (`--watch`: every 2 s);
   `ax metrics <app>` each cell's size.
@@ -539,10 +559,13 @@ assert_eq!(renders(&tree, "Label"), 1, "a field it doesn't read never renders it
   loses its warning. Name the one in `[perf.methods]`.
 - Computing in an `async fn` method or an effect without
   `spawn_blocking`: `.await` only yields at the await, after the work.
-- Reading `name()` in a render: the view follows every commit.
+- Reading state in a view's body (`let n = part(..).get();` before
+  `rsx!`): read once, it never follows. Read it in a hole (`"{n}"` with
+  `let n = part(..)`, `{name().x}`) or a `memo`.
+- Reading `name()` in a hole: the hole follows every commit.
 - A cursor beside the rows in one field (`Vec<(Row, bool)>`): a step
   rewrites the list. Keep the cursor its own field.
-- Building a derived list in the render of each row: build it once
+- Building a derived list in each row: build it once
   (`#[derived]`, `aio::Cache`) and pass `Arc`s down.
 - Smooth scrolling (`behavior: smooth`) on a list a key moves through:
   the scrolls pile up under key repeat. `data-aio-reveal` uses `auto`.
@@ -554,9 +577,12 @@ assert_eq!(renders(&tree, "Label"), 1, "a field it doesn't read never renders it
   worker bundling. Heavy work in aio-rs runs in Rust, off the cell's
   thread (`spawn_blocking`); a web build's own worker script is the
   app's to ship as a file.
-- aio's renderer yields at a 12 ms frame deadline mid-render; Dioxus
-  renders one batch per tick, so keep a render small (parts, windows,
-  rows by props).
+- aio's renderer yields at a 12 ms frame deadline mid-render; air runs
+  the holes a change woke in one batch per tick, so keep what a change
+  wakes small (parts, windows, rows by props).
+- `ax components` has no time per component and no `--renders` log of
+  the last renders yet (aio DevTools' profile): it counts renders and
+  updates.
 - aio's `blocking.cancel(id)` stops a running task; `spawn_blocking`
   can't be stopped once it runs: `cx.abort(key)` drops the effect at
   its next await, and the thread's result is thrown away.

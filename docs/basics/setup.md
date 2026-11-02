@@ -112,7 +112,6 @@ code is 1 until every needed one is there.
 
 | | Linux | macOS | Windows | What for | ax setup |
 |---|---|---|---|---|---|
-| dx 0.7.10 | fetched | fetched | fetched | `ax dev`'s hot-patching (a small crate's edit in under a second; without it: a rebuild on change) | fetches it (SHA-256 pinned in ax) |
 | git | package | Command Line Tools | `winget install Git.Git` | build numbers `M.m.<commits>` and releases (without it: `M.m.0-nogit`, no release) | checks |
 | ffmpeg | package | `brew install ffmpeg` | `winget install Gyan.FFmpeg` | `ax test --video`, `ax shot --video` | checks |
 | Xephyr or Xvfb | package | – | – | an agent's windows off the person's screen | checks |
@@ -130,7 +129,7 @@ Every app `ax create` makes pins aio-rs's Rust in its
 - Node, npm or Deno: nothing of aio-rs runs on them.
 - A system Chromium for UI tests: they draw in the pinned Electron.
 - OpenSSL or pkg-config: TLS is rustls.
-- Building `dx` (the hot-patch tool `ax dev` drives) from source: `ax setup` fetches the pinned one.
+- Any tool for hot-patching: `ax dev` builds and applies the patches itself.
 - curl for AppImages: aio-rs fetches the AppImage runtime itself (SHA-256 checked).
 
 ## 4. Typing the commands on each OS
@@ -171,7 +170,7 @@ with aio's apps, [desktop](../clients/desktop.md#one-store-with-aio)). `~` is
 | the window's browser profile | `<app home>/data/electron/profile/` | the same | the same |
 | a private instance (`--instance n`) | `<tool home>/instances/<n>/<id>/` | the same | the same |
 | the shared Electron runtime (aio's store, shared with aio's apps) | `~/.local/share/aio/electron/<version>-<os>-<arch>/` (`$XDG_DATA_HOME`) | `~/Library/Application Support/aio/electron/…` | `%LOCALAPPDATA%\aio\electron\…` |
-| dx, wasm-bindgen (fetched) | `<tool home>/tools/` | the same | the same |
+| wasm-bindgen (fetched) | `<tool home>/tools/` | the same | the same |
 | ax's one build folder | `<tool home>/target/` (`CARGO_TARGET_DIR` wins) | the same | the same |
 | this machine's TLS root (`ax trust`) | `<tool home>/tls/` | the same | the same |
 | release signing keys (`ax keygen`) | `~/.config/aio-rt/keys/` (`$XDG_CONFIG_HOME`) | the same | the same |
@@ -352,10 +351,10 @@ store, shared with aio's apps: `ax prune` says what of it may go.
 ## Checked on
 
 - Linux x86_64 (Ubuntu 24.04): the prebuilt install, then `ax setup`
-  into an empty home: 62 s, runtime and dx included.
+  into an empty home: 62 s, runtime included (0.1, which fetched dx too).
 - Windows 11 (no Rust, no compilers): `install.ps1` installed the
   prebuilt `ax` and refused a wrong pin; `ax setup` fetched the runtime
-  and dx (56 s) and named Rust and the Build Tools as missing; the
+  (56 s in 0.1, dx included) and named Rust and the Build Tools as missing; the
   uninstall above left nothing. The workspace tests, UI tests included,
   pass there.
 - macOS 14 x86_64: `ax setup --check` and the workspace tests, UI tests

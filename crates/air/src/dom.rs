@@ -364,7 +364,7 @@ fn slot() -> (Range, u32) {
 
 // The holes take boxed closures, never generics: a hole costs its own
 // closure and nothing else (generic holes copied these bodies into every
-// call site: 4x the LLVM IR of Dioxus, measured, `docs/design/air.md`).
+// call site: 4x the LLVM IR, measured, `docs/design/air.md`).
 
 /// A text hole: node `id` shows `f()`, re-written when it changes.
 #[doc(hidden)]
@@ -382,14 +382,17 @@ pub fn text(id: u32, f: Box<dyn Fn() -> String>) {
     });
 }
 
-/// What an attribute hole holds: a value, or presence (`false`: none).
+/// What an attribute hole holds: a value, presence (`false`: none, but
+/// `"false"` on `aria-*`/`data-*`), or none at all (an `Option`'s `None`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum AttrValue {
     Str(Cow<'static, str>),
     Bool(bool),
+    None,
 }
 
-/// What an attribute takes: a string, a number, a `bool` (present or not),
+/// What an attribute takes: a string, a number, a `bool` (present or not;
+/// `"true"`/`"false"` on `aria-*` and `data-*`),
 /// an `Option` (none: not there), a `Signal` (followed).
 pub trait IntoAttr {
     fn into_attr(self) -> AttrValue;
@@ -422,7 +425,7 @@ impl IntoAttr for bool {
 }
 impl<T: IntoAttr> IntoAttr for Option<T> {
     fn into_attr(self) -> AttrValue {
-        self.map_or(AttrValue::Bool(false), T::into_attr)
+        self.map_or(AttrValue::None, T::into_attr)
     }
 }
 impl<T: IntoAttr + Clone + 'static> IntoAttr for Signal<T> {
@@ -458,6 +461,15 @@ fn is_flag_prop(name: &str) -> bool {
     matches!(name, "checked" | "selected" | "indeterminate")
 }
 
+/// The attributes whose `true`/`false` is text, not presence (`aria-*`,
+/// `data-*` and HTML's enumerated ones): `aria-selected: false` writes
+/// `"false"`, where `disabled: false` removes `disabled`.
+pub(crate) fn is_text_bool(name: &str) -> bool {
+    name.starts_with("aria-")
+        || name.starts_with("data-")
+        || matches!(name, "draggable" | "contenteditable" | "spellcheck")
+}
+
 /// An attribute hole: `name` of node `id` is `f()`.
 #[doc(hidden)]
 pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
@@ -467,7 +479,9 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
         let same = match (&last, &v) {
             (Some(AttrValue::Str(a)), AttrValue::Str(b)) => a == b,
             (Some(AttrValue::Bool(a)), AttrValue::Bool(b)) => a == b,
-            (None, AttrValue::Bool(false)) => !is_flag_prop(name),
+            (Some(AttrValue::None), AttrValue::None) => true,
+            (None, AttrValue::None) => !is_flag_prop(name),
+            (None, AttrValue::Bool(false)) => !is_flag_prop(name) && !is_text_bool(name),
             _ => false,
         };
         if same {
@@ -481,13 +495,16 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
 /// `name` of node `id` set to `v` now (no hole).
 pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
     dom(|d| match (v, is_prop(name)) {
+        (AttrValue::Bool(b), _) if is_text_bool(name) => {
+            _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" })
+        }
         (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
         (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
         (AttrValue::Bool(b), true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
+        (AttrValue::None, true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(0),
         (AttrValue::Bool(true), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(""),
-        (AttrValue::Bool(false), true) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
         (AttrValue::Bool(true), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(""),
-        (AttrValue::Bool(false), false) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
+        (AttrValue::Bool(false) | AttrValue::None, _) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
     });
 }
 
@@ -1078,7 +1095,7 @@ impl Eval {
 
     /// The next JSON value the script sent (`aio.send(v)`); an error once it
     /// failed or its view ended. A script that returned may still send (its
-    /// listeners, its timers), so its return ends no `recv`, as on Dioxus.
+    /// listeners, its timers), so its return ends no `recv`.
     pub fn recv_json(&self) -> impl std::future::Future<Output = Result<String, String>> + use<> {
         let id = self.id;
         std::future::poll_fn(move |cx| {

@@ -179,7 +179,7 @@ match (&fb.state().status, &fb.state().last) {
 ```
 
 In a view, call it from an event handler and read its state with
-`fb.state()` (or `fb.listen(…)` to re-render on its changes); the
+`fb.state()` (or `fb.listen(…)` to follow its changes); the
 `status` and `last` fields are what a "thanks, saved" line shows.
 
 ## aio-rs's own feedback

@@ -70,7 +70,6 @@ pub fn App() -> View {
     use_live();
     let f = use_form(NewContact::default, check);
     let refused = signal(|| None::<String>);
-    let v = f.values();
     let send = move |e: FormEvent| {
         e.prevent_default();
         // Every error shows; the values only when they pass.
@@ -86,12 +85,12 @@ pub fn App() -> View {
     rsx! {
         form { onsubmit: send,
             Field { label: "Name", required: true, error: f.error("name"),
-                Input { "data-t": "name", value: v.name,
+                Input { "data-t": "name", value: f.values().name,
                     oninput: move |s| f.edit("name", |c| c.name = s),
                     onchange: move |_| f.touch("name") }
             }
             Field { label: "Email", required: true, hint: "We never share it", error: f.error("email"),
-                Input { "data-t": "email", r#type: "email", value: v.email,
+                Input { "data-t": "email", r#type: "email", value: f.values().email,
                     oninput: move |s| f.edit("email", |c| c.email = s),
                     onchange: move |_| f.touch("email") }
             }
@@ -150,7 +149,7 @@ What happens, step by step:
 | Call | Gives | Does |
 |---|---|---|
 | `use_form(initial, check)` | `Form<T>` | a hook: the form, starting at `initial()`, checked by `check` (a `fn(&T) -> Problems`) |
-| `f.values()` | `T` | the values now; reading them in a render re-renders on each edit |
+| `f.values()` | `T` | the values now; a hole reading them follows each edit |
 | `f.edit(field, \|v\| ..)` | | changes the values; `field` is edited, a waiting rule's answer for it and the form's own error are dropped |
 | `f.touch(field)` | | the field was left: its error may show |
 | `f.error(field)` | `Option<String>` | the field's first problem, once it was left or a submit was tried |
@@ -167,8 +166,8 @@ What happens, step by step:
 
 ## Rules
 
-One function holds every rule. It runs on the values at each render that
-asks for an error, so keep it cheap (string checks, comparisons, a
+One function holds every rule. It runs on the values each time a hole
+that shows an error asks, so keep it cheap (string checks, comparisons, a
 regex built once).
 
 - **The first problem per field wins.** Push a field's own rules before
@@ -293,7 +292,7 @@ ui.until_contains("field", "That name is taken");
 | `Switch` | `checked`, `onchange` | a checkbox drawn as a switch |
 
 - **Controlled or not.** `Input` with `value: Some(..)` is controlled:
-  each render writes it, so what a person types must reach the values
+  each change of the value writes it, so what a person types must reach the values
   through `oninput`. Without `value` the input keeps what was typed,
   as aio's `defaultValue` does; read it from `oninput`.
 - **A list of rows** (aio's `useFieldArray`) is a `Vec` field: push and
@@ -356,6 +355,21 @@ such a form.
 A field left as it was found fires no `change` (the browser's rule): to
 test an error that shows on leaving, type something first.
 
+## Bound fields
+
+aio's `bind(name)` spread `value`, `onInput` and `onBlur` in one go;
+`form.bind(aio::field!(name))` does the same, and a bound input is touched
+on blur, as aio's: `Input { bind: form.bind(aio::field!(name)) }` in a
+`Field { error: form.error("name"), … }`. `aio::field!(name)` names a
+field of the values (it reads and writes `v.name`); `set_field` and
+`reset_field` change one field (aio's `field.set`, `field.reset`),
+`touched(name)` says whether it was left, `use_field_array(|| rows)` is
+aio's `useFieldArray` (`push`, `remove`, `move_item`, `set`, `reset`),
+and `use_on_change(selector, f)` is aio's `onChange` (only the selector
+is followed; `f` may return its cleanup). An input with its own two
+handlers (`oninput`, `onchange: f.touch(..)`) is touched on `change`
+(leaving a field that changed), not on blur.
+
 ## Common mistakes
 
 - Reading `f.error(..)` with no `onchange: f.touch(..)`: the error only
@@ -363,7 +377,7 @@ test an error that shows on leaving, type something first.
 - A rule that names a field no input edits: it never shows, and the form
   is never valid. Use `""` for the form as a whole.
 - `Input { value }` with no `oninput`: the input is controlled, so the
-  next render puts the old text back.
+  next write of its value puts the old text back.
 - Calling the method from `oninput`: every keystroke becomes an event in
   the log. Edit the form's values; call the method on submit (or keep a
   coalesced draft, as above).
@@ -376,20 +390,6 @@ test an error that shows on leaving, type something first.
 - aio's `useForm` took a Standard Schema (Zod, Valibot, ArkType) and had
   `parsed()` for its output: aio-rs has no schema adapter. The check is a
   Rust function; parse into your own type in it.
-- aio's `bind(name)` spread `value`, `onInput` and `onBlur` in one go:
-  aio-rs on Dioxus writes the two handlers per input. On air (feature
-  `air`, the 0.2 renderer) `bind` is there, and a bound input is touched
-  on blur, as aio's: `Input { bind: form.bind(aio::field!(name)) }` in a
-  `Field { error: form.error("name"), … }`. `aio::field!(name)` names a field of the values (it reads and writes
-  `v.name`); `set_field` and `reset_field` change one field (aio's
-  `field.set`, `field.reset`), `touched(name)` says whether it was left,
-  `use_field_array(|| rows)` is aio's `useFieldArray` (`push`, `remove`,
-  `move_item`, `set`, `reset`), and `use_on_change(selector, f)` is aio's
-  `onChange` (only the selector is followed; `f` may return its cleanup).
-- aio's form touched a field on `blur`. On Dioxus the kit's `Input`
-  reports `change` (leaving a field that changed), not `blur`, so a field
-  left untouched shows its error only after a submit; on air a bound
-  input is touched on blur.
 
 ## API
 

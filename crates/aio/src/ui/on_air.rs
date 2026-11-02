@@ -1,6 +1,6 @@
 //! The view API (`aio::ui::prelude`) on air, aio-rs's own renderer
-//! (feature `air`, docs/design/air.md): the same names as on Dioxus, air
-//! underneath. A view's body runs once; its holes follow what they read.
+//! (feature `kit`, docs/design/air.md). A view's body runs once; its holes
+//! follow what they read.
 //! Most names are air's own; the page's scripts are typed here (serde).
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -15,8 +15,8 @@ pub use air::{
 
 /// In a view's body: `f()`'s value, the body running again when it changes
 /// (its hooks kept, its view made anew): for a view whose shape follows
-/// state its body must read (the router's `Route`). On air a memo, so the
-/// body runs again only for a new value; on Dioxus every render reads it.
+/// state its body must read (the router's `Route`). A memo, so the body
+/// runs again only for a new value.
 /// Read state in a hole where it can be: a hole re-runs alone.
 #[doc(hidden)]
 pub fn follow<T: Clone + PartialEq + 'static>(f: impl Fn() -> T + 'static) -> T {
@@ -27,11 +27,11 @@ pub fn follow<T: Clone + PartialEq + 'static>(f: impl Fn() -> T + 'static) -> T 
 /// The event kinds and their payloads.
 pub mod events {
     pub use air::{
-        AnimationEvent, ClipboardEvent, CompositionEvent, DragData, DragEvent, Event, FocusData, FocusEvent, FormData,
-        FormEvent, ImageEvent, KeyboardData, KeyboardEvent, MediaEvent, MountedData, MountedEvent, MouseData,
-        MouseEvent, PlainData, PointerData, PointerEvent, ResizeData, ResizeEvent, ScrollBehavior, ScrollData,
-        ScrollEvent, SelectionEvent, ToggleEvent, TouchEvent, TransitionEvent, VisibleData, VisibleEvent, WheelData,
-        WheelEvent,
+        AnimationEvent, ClipboardEvent, CompositionEvent, DataTransfer, DragData, DragEvent, Event, FocusData,
+        FocusEvent, FormData, FormEvent, ImageEvent, KeyboardData, KeyboardEvent, MediaEvent, MountedData,
+        MountedEvent, MouseData, MouseEvent, PlainData, PointerData, PointerEvent, ResizeData, ResizeEvent,
+        ScrollBehavior, ScrollData, ScrollEvent, SelectionEvent, ToggleEvent, TouchEvent, TransitionEvent, VisibleData,
+        VisibleEvent, WheelData, WheelEvent,
     };
 }
 

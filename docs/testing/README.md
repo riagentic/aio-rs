@@ -158,7 +158,7 @@ aio::client!(Counter, counter);
 #[component]
 fn App() -> View {
     use_live();
-    let n = part(|c| &c.count).get();
+    let n = part(|c| &c.count);
     rsx! {
         h1 { "data-t": "count", "{n}" }
         button { onclick: move |_| _ = act!(add(1)), "Add" }

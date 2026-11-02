@@ -26,8 +26,9 @@ style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
 - A dev build re-reads a saved file and redraws within 0.05 s, no compile;
   in a browser under `ax dev --web` the page asks the dev server. A
   release build has the files built in (`include_str!`) and reads none.
-- It is made on every render: never keep CSS in `once` (made once,
-  stale after an edit).
+- Put it in a hole (`style { {aio::use_css!(..)} }`), where it follows
+  the saved files; never keep CSS in `once` (made once, stale after an
+  edit).
 - `scheme` is light or dark: `aio::ui::scheme()` (`[ui] scheme`: the
   OS's by default), or the app's own `bool` (below).
 
@@ -245,11 +246,11 @@ aio::client!(Look, look);
 #[component]
 fn App() -> View {
     use_live();
-    let dark = part(|l| &l.dark).get();
+    let dark = part(|l| &l.dark);
     let theme = aio::kit::theme_css(aio::kit::theme::hue("notes"));
     rsx! {
-        style { {aio::ui::page_css(&[&theme, "body { font-size: 15px }"], dark)} }
-        aio::kit::Switch { checked: dark, label: "Dark", "data-t": "dark",
+        style { {aio::ui::page_css(&[&theme, "body { font-size: 15px }"], dark.get())} }
+        aio::kit::Switch { checked: dark.get(), label: "Dark", "data-t": "dark",
             onchange: move |on| _ = aio::act!(set_dark(on)) }
         p { "data-t": "text", "Notes" }
     }
@@ -376,11 +377,11 @@ keys.
 
 - **Scoped classes.** aio's `css` tag makes a class from a hash of its
   rule, and `aiol` warns when two stylesheets define one class
-  differently. On air `aio::ui::css("color: red; &:hover { … }")` is
-  that class (FNV-1a of the rule, as aio's), its rule put in the page once
-  per window and scoped by native nesting (`@keyframes` lifted out), and
+  differently. `aio::ui::css("color: red; &:hover { … }")` is that class
+  (FNV-1a of the rule, as aio's), its rule put in the page once per
+  window and scoped by native nesting (`@keyframes` lifted out), and
   `aio::ui::collect_css()` gives every rule; no warning, since a class is
-  its rule's hash. On Dioxus: prefix class names by hand.
+  its rule's hash.
 - **The dev contrast check in a running app.** aio warns in the dev
   page's console; aio-rs audits in `TestUi` (above), not in `ax dev`.
 

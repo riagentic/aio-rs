@@ -1027,7 +1027,7 @@ pub(crate) fn apply_guarded<T: Cell>(st: &mut T, cx: &Cx, method: &str, args: Va
     let run = || {
         #[cfg(feature = "dev")]
         if cfg!(debug_assertions) {
-            return subsecond::HotFn::current(<T as Cell>::apply).call((st, cx, method, args));
+            return aio_hotpatch::HotFn::current(<T as Cell>::apply).call((st, cx, method, args));
         }
         st.apply(cx, method, args)
     };

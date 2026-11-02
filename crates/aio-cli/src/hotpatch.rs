@@ -1,9 +1,9 @@
-//! `ax dev`'s hot-patching, without dx: a "fat" build of the app (every
+//! `ax dev`'s hot-patching: a "fat" build of the app (every
 //! dependency's code kept, every workspace crate's rustc call recorded),
 //! then per edit a "thin" build: the edited crates' rustc calls replayed,
 //! the app's crate linked into a small shared library whose missing symbols
 //! jump into the running fat binary, and a jump table (old address → new)
-//! for subsecond's `apply_patch` in the app.
+//! for `aio_hotpatch::apply_patch` in the app.
 //! Ported from dioxus-cli 0.7.10 (MIT/Apache-2.0): build/{link,patch,request}.rs, rustcwrapper.rs.
 //!
 //! ax takes two roles in the fat build, chosen by env var at the top of
@@ -18,6 +18,7 @@
 //! is a DLL linked at a fixed base the app names, near the fat binary, and
 //! the fat binary has a COFF symbol table (no PDB reading): see
 //! [`rewrite_coff`] for how a patch reaches the running binary's data.
+pub use aio_hotpatch::JumpTable;
 use object::write::{MachOBuildVersion, SectionId, StandardSection, Symbol, SymbolId, SymbolSection};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolFlags, SymbolKind, SymbolScope};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -25,7 +26,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-pub use subsecond_types::JumpTable;
 
 /// Set by [`fat_build`] on cargo: ax was run as rustc's workspace wrapper;
 /// each crate's call is recorded in this folder.
@@ -396,7 +396,7 @@ pub const PATCH_ROOM: u64 = 256 << 20;
 const FAT_PREFIX: &str = "aio$fat$";
 
 /// The symbol at the same place in the fat binary and each patch: `main`
-/// (subsecond's `aslr_reference`), `_main` in Mach-O's symbol table.
+/// (`aio_hotpatch::aslr_reference`), `_main` in Mach-O's symbol table.
 const MAIN: &str = if MACHO { "_main" } else { "main" };
 
 /// What to build: the app's binary, as `ax dev` builds it.
@@ -443,7 +443,7 @@ pub struct Times {
 }
 
 pub struct Patch {
-    /// For the app: subsecond's `apply_patch`.
+    /// For the app: `aio_hotpatch::apply_patch`.
     pub table: JumpTable,
     pub times: Times,
 }
@@ -790,7 +790,7 @@ fn fat_link(link: &Link, app: &Rustc, linker: &str, msvc: bool, exe: &Path, targ
     }
 }
 
-/// A COFF object whose directives export `main` (subsecond finds the
+/// A COFF object whose directives export `main` (aio-rs-hotpatch finds the
 /// binary and each patch by it), for GNU ld and lld-link alike.
 fn exports_main() -> Result<Vec<u8>, String> {
     let mut obj = object::write::Object::new(
@@ -1592,7 +1592,7 @@ fn sh_link_info(b: &[u8], header: usize) -> usize {
 /// of the app's workspace crates): the edited crates (and the crates built
 /// on them) and the app's own crate built again, linked into a new shared
 /// library, the symbols it misses resolved into the running binary
-/// (`aslr_reference`: subsecond's, from the app; Windows: `base`, where the
+/// (`aio_hotpatch::aslr_reference`, from the app; Windows: `base`, where the
 /// app has [`PATCH_ROOM`] free for the DLL). Any file no crate builds from
 /// (a manifest, a build script): an error, for a rebuild.
 pub fn patch(fat: &mut Fat, aslr_reference: u64, base: Option<u64>, changed: &[PathBuf]) -> Result<Patch, String> {
@@ -1783,16 +1783,27 @@ impl Fat {
 /// Windows: the patch link's args but its inputs and output: a DLL at
 /// `base` with no relocations (the loader can't move it: it fails to load
 /// rather than resolve the binary's data wrongly), every section kept, its
-/// COFF symbol table written, `main` exported (the stub's `.drectve`), its
+/// COFF symbol table written (MSVC: and its PDB beside it, which the
+/// backtrace resolver reads), `main` exported (the stub's `.drectve`), its
 /// entry the stub's (no C runtime of its own), the app link's library
 /// search paths and system libraries (pure).
 fn coff_thin_link_args(link_args: &[String], msvc: bool, base: u64) -> Vec<String> {
     let mut out: Vec<String> = match msvc {
-        true => ["/DLL", "/NOLOGO", "/MACHINE:X64", "/FIXED", "/OPT:NOREF", "/OPT:NOICF", "/DEBUG:SYMTAB", "/NOIMPLIB"]
-            .map(String::from)
-            .into_iter()
-            .chain([format!("/ENTRY:{PATCH_ENTRY}"), format!("/BASE:{base:#x}")])
-            .collect(),
+        true => [
+            "/DLL",
+            "/NOLOGO",
+            "/MACHINE:X64",
+            "/FIXED",
+            "/OPT:NOREF",
+            "/OPT:NOICF",
+            "/DEBUG",
+            "/DEBUG:SYMTAB",
+            "/NOIMPLIB",
+        ]
+        .map(String::from)
+        .into_iter()
+        .chain([format!("/ENTRY:{PATCH_ENTRY}"), format!("/BASE:{base:#x}")])
+        .collect(),
         false => {
             ["-shared", "-nostartfiles", "-nodefaultlibs", "-Wl,--disable-dynamicbase", "-Wl,--disable-reloc-section"]
                 .map(String::from)
@@ -2072,7 +2083,7 @@ fn used(bytes: &[u8], undefined: &mut HashSet<String>, defined: &mut HashSet<Str
 }
 
 /// Old address → new, of each symbol the patch library `lib` and the fat
-/// binary share; `main` of each for subsecond to find both in memory.
+/// binary share; `main` of each for the app to find both in memory.
 fn jump_table(lib: &Path, symbols: &Symbols) -> Result<JumpTable, String> {
     let fail = |e: &dyn std::fmt::Display| format!("hot-patch: {}: {e}", lib.display());
     let bytes = std::fs::read(lib).map_err(|e| fail(&e))?;
@@ -2084,7 +2095,7 @@ fn jump_table(lib: &Path, symbols: &Symbols) -> Result<JumpTable, String> {
         }
     }
     let new = obj.symbol_map();
-    let mut map = subsecond_types::AddressMap::default();
+    let mut map = aio_hotpatch::AddressMap::default();
     let mut new_base = None;
     for s in new.symbols() {
         if s.name() == MAIN {
@@ -2192,9 +2203,15 @@ mod tests {
         ]
         .map(String::from);
         let thin = coff_thin_link_args(&msvc, true, 0x7ff6_1000_0000);
-        for kept in
-            ["/DLL", "/FIXED", "/BASE:0x7ff610000000", "/ENTRY:aio_patch_entry", "/DEBUG:SYMTAB", "kernel32.lib"]
-        {
+        for kept in [
+            "/DLL",
+            "/FIXED",
+            "/BASE:0x7ff610000000",
+            "/ENTRY:aio_patch_entry",
+            "/DEBUG",
+            "/DEBUG:SYMTAB",
+            "kernel32.lib",
+        ] {
             assert!(thin.contains(&kept.to_string()), "{kept}: {thin:?}");
         }
         assert!(thin.iter().any(|a| a.starts_with("/LIBPATH:")), "{thin:?}");

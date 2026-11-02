@@ -181,26 +181,32 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
         slug: "ui",
         title: "UI: aio::ui views on cells",
         deep: false,
-        min: "use aio::ui::prelude::*; (never dioxus) · aio::client!(Cell, cell) → part(|c| &c.field)
-a handle (.get(), \"{n}\") re-rendering only when that field changes, act!(method(args))
-calls · use_live() once at the root · data-t on what tests drive",
+        min: "use aio::ui::prelude::*; (the whole view API) · aio::client!(Cell, cell) → part(|c| &c.field)
+a handle (.get(), \"{n}\") whose holes run again only when that field changes · a body runs
+once: state shows through holes ({x.get()}, \"{n}\") · act!(method(args)) calls · use_live()
+once at the root · data-t on what tests drive",
         body: "- use aio::ui::prelude::*; is the whole view API: rsx!, #[component], View,
   signal(|| v) (a Copy Signal: .get(), .set(v) tells only on a change,
   .update(|v| ..), .read(), .write(), \"{s}\"), memo, effect, watch(deps, f),
   once(|| ..), on_cleanup, provide/context, task/spawn, resource, Global,
   ErrorBoundary, Suspense, eval (page scripts talk to `aio`). Call signal,
-  memo, effect, once.. at a view's top level. Never name dioxus (ax lint
-  refuses it): air replaces the renderer behind aio::ui. Rows in a for need key:.
+  memo, effect, once.. at a view's top level. Name no renderer crate (ax lint
+  refuses aio-rs 0.1's): air is the renderer behind aio::ui. A body runs once;
+  a text, attribute or {child} that reads state is a hole that runs again when
+  it changes (a value read in the body is read once). Rows in a for need
+  key: on their first node; no if let / match nodes (a bool, or {match ..}).
+  A component's prop follows its caller's state only as a Signal, Part or
+  Prop<T>.
 - aio::client!(Todo, todo) makes SOURCE/HANDLE, part(|t| &t.items) (a handle:
-  .get()/.with(|v| ..); the view re-renders only when that top-level field
-  changes: aio's signal per cell; pick the field, then index it), todo() (the whole state: every commit
-  re-renders, so handlers only), use_status(), use_pending(method), and the
+  .get()/.with(|v| ..); a hole reading it runs again only when that top-level
+  field changes: aio's signal per cell; pick the field, then index it), todo()
+  (the whole state: a hole reading it runs on every commit, so handlers only), use_status(), use_pending(method), and the
   Ui door: act!(add(title)) calls a method from a handler (a refusal is
-  logged and gives None); a view's call renders at once, commits from
+  logged and gives None); a view's call shows at once, commits from
   effects and schedules at most once per 150 ms. use_live() once in the root.
 - aio's caches: #[derived(reads = [..])] (memoLast), aio::Cache (keyed caches
-  on a source: Ver::of(&state) or part(..).ver()), rows as props (equal
-  props skip a render, as AIR did), kit::VirtualList for long lists.
+  on a source: Ver::of(&state) or part(..).ver()), rows as props (Prop<T>:
+  a row's holes run only when its own props change), kit::VirtualList for long lists.
 - Views are rsx! over real HTML and CSS; aio::kit has the
   components (Button, Field, Modal, VList…). Styles: style { {aio::use_css!(
   false, &aio::kit::theme_css(hue); \"assets/style.css\")} }: false is the
@@ -229,8 +235,8 @@ calls · use_live() once at the root · data-t on what tests drive",
   and modal dialogs inside keep theirs). The keyboard cursor's row:
   \"data-aio-reveal\": selected.then(|| i.to_string()) scrolls it into view,
   no eval per step.
-- Speed: cell() in a render re-renders that component on every commit (a
-  dev build says where, once: [hint]); read the field with part(|c| ..),
+- cell() in a view's body is read once and never follows (a dev build says
+  where, once: [hint]); read the field in a hole with part(|c| ..),
   and build row lists once per list (aio::Cache), not per cursor step.
 - Forms: Enter submits a form with no submit button (as in aio), and one whose
   button the view enables a frame later. Held keys: a binding fires once
@@ -343,7 +349,7 @@ at run time · a refusal nobody took · sleeping in a test instead of TestCells:
   expected ones with failures().
 - Waiting in real time in a cell test: TestCells::advance(ms) moves the
   schedule and the effects' clock; settle() runs effects to their end.
-- Calling a method from a view without act!/Ui: the view doesn't re-render.
+- Calling a method from a view without act!/Ui: the view isn't told.
 - A signal read in an if let / while let / match scrutinee (X.peek()…,
   X.read()) stays borrowed in its block: a write to X there panics
   (already borrowed). Bind it first: let v = X.peek().map(..); if let

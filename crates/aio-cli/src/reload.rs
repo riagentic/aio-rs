@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 #[allow(clippy::all, unused)]
 #[path = "../../air-macro/src/lib.rs"]
-mod air_rsx;
+pub(crate) mod air_rsx;
 
 /// An edited template: its `rsx!` call's place in the built source (line,
 /// column, 1-based), its index in the call, its markup now.

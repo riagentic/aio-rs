@@ -85,15 +85,25 @@ pub fn look_colors(mut base: [[String; 4]; 2], s: &Splash) -> [[String; 4]; 2] {
     base
 }
 
+/// The splash's text, filled (pure; aio's `splashWithVersion` and
+/// `splashText`): `{title}`, `{version}` (the app's), `{got}` and
+/// `{total}` in MB and `{pct}`, `0`, `?` and `?` with no download; any
+/// other `{word}` is left as written.
+pub fn text(t: &str, title: &str, version: &str) -> String {
+    [("{title}", title), ("{version}", version), ("{got}", "0"), ("{total}", "?"), ("{pct}", "?")]
+        .iter()
+        .fold(t.to_string(), |t, (k, v)| t.replace(k, v))
+}
+
 /// The splash as `<style>` and a `#aio-splash` block, its image at `src`,
 /// light or dark as the OS is (`colors` as [`colors`] makes them, the
-/// splash's `text_color` over them; `title` fills the text's `{title}`),
-/// laid out by its look keys. `over`: laid over a page (the web's), else
-/// the whole window.
-pub fn markup(s: &Splash, title: &str, colors: &[[String; 4]; 2], src: &str, over: bool) -> String {
+/// splash's `text_color` over them; its text as [`text`] fills it with
+/// `title` and `version`), laid out by its look keys. `over`: laid over a
+/// page (the web's), else the whole window.
+pub fn markup(s: &Splash, title: &str, version: &str, colors: &[[String; 4]; 2], src: &str, over: bool) -> String {
     let (w, h) = image_box(s).unwrap_or((320, 200));
     let [l, d] = look_colors(colors.clone(), s);
-    let text = s.text.as_deref().map(|t| format!("<p>{}</p>", esc(&t.replace("{title}", title)))).unwrap_or_default();
+    let text = s.text.as_deref().map(|t| format!("<p>{}</p>", esc(&text(t, title, version)))).unwrap_or_default();
     let place = match over {
         true => "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center",
         false => "position:fixed;inset:0;display:flex;align-items:center;justify-content:center",
@@ -166,13 +176,13 @@ fn family(font: Option<&str>) -> String {
     }
 }
 /// The desktop splash's page, its image beside it (`splash.png`).
-pub fn page(s: &Splash, title: &str, colors: &[[String; 4]; 2]) -> String {
+pub fn page(s: &Splash, title: &str, version: &str, colors: &[[String; 4]; 2]) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src file:; style-src 'unsafe-inline'\">\
          <title>{}</title><style>html,body{{margin:0;height:100%;overflow:hidden}}</style></head><body>{}</body></html>",
         esc(title),
-        markup(s, title, colors, "splash.png", false)
+        markup(s, title, version, colors, "splash.png", false)
     )
 }
 
@@ -207,13 +217,14 @@ pub fn install(
     dir: &std::path::Path,
     s: Option<&Splash>,
     title: &str,
+    version: &str,
     colors: &[[String; 4]; 2],
     target: Option<[i32; 4]>,
 ) -> std::io::Result<()> {
     let plan = s.and_then(|s| Some((s, plan(s, colors, target)?)));
     let Some((s, plan)) = plan else { return std::fs::write(dir.join("splash.json"), "null") };
     std::fs::write(dir.join("splash.png"), s.png)?;
-    std::fs::write(dir.join("splash.html"), page(s, title, colors))?;
+    std::fs::write(dir.join("splash.html"), page(s, title, version, colors))?;
     std::fs::write(dir.join("splash.json"), plan.to_string())
 }
 
@@ -344,7 +355,7 @@ pub(crate) mod tests {
         };
         // Built in: the Windows lane runs this binary away from the source tree.
         let s = Splash { png: include_bytes!("../../aio/tests/fixtures/splash.png"), ..s };
-        install(&dir, Some(&s), "Splashed", &colors(210, None), None).unwrap();
+        install(&dir, Some(&s), "Splashed", "1.0.0", &colors(210, None), None).unwrap();
         let (sock, ctl_sock) = (aio::ipc::addr(d.path(), "wire"), aio::ipc::addr(d.path(), "ctl"));
         let mut wires = aio::ipc::Listener::bind(&sock).unwrap();
         let mut ctls = aio::ipc::Listener::bind(&ctl_sock).unwrap();
@@ -403,7 +414,7 @@ pub(crate) mod tests {
             text_color: Some(["#111".into(), "#eee".into()]),
             ..splash("assets/splash.png", Some("Starting {title}"))
         };
-        let html = page(&s, "Notes", &c);
+        let html = page(&s, "Notes", "1.0.0", &c);
         for want in [
             "width:480px;height:300px;max-width:100%;object-fit:cover",
             "position:absolute;left:20px;right:20px;bottom:20px;text-align:left",
@@ -421,7 +432,7 @@ pub(crate) mod tests {
         assert_eq!((p["clear"].as_bool(), p["fade"].as_u64()), (Some(true), Some(250)));
         // The defaults: as before the keys existed.
         let plain = splash("assets/splash.png", Some("x"));
-        let html = page(&plain, "Notes", &c);
+        let html = page(&plain, "Notes", "1.0.0", &c);
         assert!(
             html.contains("object-fit:contain")
                 && html.contains("text-align:center")
@@ -458,8 +469,15 @@ pub(crate) mod tests {
         let s = splash("assets/splash.png", Some("Starting {title} <beta>"));
         assert_eq!(size(&s), Some((640, 400)));
         assert_eq!(size(&splash("assets/splash@2x.png", None)), Some((320, 200)), "@2x: half its pixels");
-        let html = page(&s, "Notes & Co", &c);
+        let html = page(&s, "Notes & Co", "1.2.0", &c);
         assert!(html.contains("<p>Starting Notes &amp; Co &lt;beta&gt;</p>"), "{html}");
+        // aio's full set; an unknown word stays as written.
+        assert_eq!(
+            text("{title} {version} {got}/{total} MB {pct}% {x}", "Notes", "1.2.0"),
+            "Notes 1.2.0 0/? MB ?% {x}"
+        );
+        let v = Splash { text: Some("v{version}".into()), ..s.clone() };
+        assert!(page(&v, "N", "1.2.0", &c).contains("<p>v1.2.0</p>"));
         assert!(html.contains(&format!("background:{};color:{}", c[0][0], c[0][1])));
         assert!(
             html.contains(&format!("prefers-color-scheme: dark){{#aio-splash,#aio-splash>div{{background:{}", c[1][0]))
@@ -472,9 +490,9 @@ pub(crate) mod tests {
         assert_eq!((own[0][0].as_str(), own[1][0].as_str(), own[0][2].as_str()), ("#fff", "#000", c[0][2].as_str()));
         assert!(plan(&Splash { png: b"GIF89a", ..s.clone() }, &c, None).is_none(), "not a PNG: no splash");
         let d = tempfile::tempdir().unwrap();
-        install(d.path(), None, "T", &c, None).unwrap();
+        install(d.path(), None, "T", "1.0.0", &c, None).unwrap();
         assert_eq!(std::fs::read_to_string(d.path().join("splash.json")).unwrap(), "null");
-        install(d.path(), Some(&s), "T", &c, None).unwrap();
+        install(d.path(), Some(&s), "T", "1.0.0", &c, None).unwrap();
         assert_eq!(std::fs::read(d.path().join("splash.png")).unwrap(), s.png);
         assert!(d.path().join("splash.html").is_file());
     }

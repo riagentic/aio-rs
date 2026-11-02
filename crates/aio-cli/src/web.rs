@@ -89,16 +89,15 @@ pub fn start_js(dev: bool) -> String {
 }
 
 /// The window's page scripts (`page.js`): keys, focus, drag data and
-/// dialogs as on the desktop (`aio::page`), the paint's state handed to the
-/// first view (`ADOPT`), and in a dev build the overlay
+/// dialogs as on the desktop (`aio::page`), and in a dev build the overlay
 /// that shows the page's errors on it and the live reload ([`RELOAD`]) (pure).
 pub fn page_js(dev: bool) -> String {
-    use aio::page::{ADOPT, DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, WHEEL};
+    use aio::page::{DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, WHEEL};
     // `;` after each piece: an `(() => …)()` piece followed by another
     // would otherwise call its result
     let pieces: &[&str] = match dev {
-        true => &[CONSOLE, OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS, RELOAD],
-        false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS],
+        true => &[CONSOLE, OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS, RELOAD],
+        false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS],
     };
     pieces.iter().map(|p| format!("{};\n", p.trim_end())).collect()
 }
@@ -351,7 +350,7 @@ pub fn pack(
                     head = format!("{head}\n{link}");
                 }
             }
-            aio_shell::splash::markup(&s, &app.name, &colors, "./splash.png", true)
+            aio_shell::splash::markup(&s, &app.name, &app.version, &colors, "./splash.png", true)
         }
         None => String::new(),
     };
@@ -1024,63 +1023,6 @@ mod tests {
         // The app's own server is never cached.
         assert!(sw.contains("u.pathname === '/ws' || u.pathname.startsWith('/__aio/')"));
     }
-
-    /// What a person did to the paint before the view was drawn is done to
-    /// the view as it takes the paint's place (aio's hydration kept it by
-    /// keeping the nodes), in a real Chromium (skipped without one).
-    #[cfg(unix)]
-    #[test]
-    fn the_first_view_takes_the_paints_place_with_what_was_done_to_it() {
-        use aio::serde_json::json;
-        let tree = |id: &str| {
-            format!(
-                "<form><input id=t{id} value=a><textarea id=x{id}>b</textarea><input type=checkbox id=c{id}>\
-                 <select id=s{id}><option>1</option><option>2</option></select></form>\
-                 <div id=box{id} style='height:40px;overflow:auto'><p style='height:400px'>tall</p></div>\
-                 <details id=d{id}><summary>more</summary>in</details><audio id=a{id}></audio>"
-            )
-        };
-        // The view draws one part otherwise: there it is the view's.
-        let view = tree("v").replace("<details id=dv><summary>more</summary>in</details>", "<p id=dv>other</p>");
-        let html = format!(
-            "<div id=main>{}</div><div hidden>{view}</div><p style='height:3000px'>page</p><script>{}</script>",
-            tree("p"),
-            aio::page::ADOPT
-        );
-        let Some(page) = crate::cdp::tests::Chromium::open(&html) else { return };
-        aio::rt().block_on(async {
-            let mut s = page.session().await;
-            // Two seconds of silence, playable in both trees.
-            let audio = "var $ = (i) => document.getElementById(i);
-                 const n = 16000, b = new DataView(new ArrayBuffer(44 + n));
-                 [[0, 0x52494646], [8, 0x57415645], [12, 0x666d7420], [36, 0x64617461]].forEach(([o, v]) => b.setUint32(o, v));
-                 [[4, 36 + n], [16, 16], [24, 8000], [28, 8000], [40, n]].forEach(([o, v]) => b.setUint32(o, v, true));
-                 [[20, 1], [22, 1], [32, 1], [34, 8]].forEach(([o, v]) => b.setUint16(o, v, true));
-                 const url = URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }));
-                 const ready = (a) => new Promise((ok) => { a.onloadedmetadata = ok; a.src = url; });
-                 Promise.all([ready($('ap')), ready($('av'))]).then(() => { $('ap').currentTime = 1.25; return $('ap').duration; })";
-            assert_eq!(s.eval(audio).await.unwrap(), json!(2));
-            let did = "var $ = (i) => document.getElementById(i);
-                 $('tp').value = 'typed'; $('tp').focus(); $('tp').setSelectionRange(1, 3);
-                 $('xp').value = 'more text'; $('cp').checked = true; $('sp').selectedIndex = 1;
-                 $('boxp').scrollTop = 120; $('dp').open = true; scrollTo(0, 500);
-                 window.heard = [];
-                 for (const i of ['tv', 'xv', 'cv', 'sv']) for (const t of ['input', 'change'])
-                   $(i).addEventListener(t, () => heard.push(i + ' ' + t));
-                 __aioAdopt($('main'), document.querySelector('[hidden]'));
-                 [document.querySelectorAll('#main').length, document.querySelector('[hidden]'), $('tv').value,
-                  document.activeElement.id, $('tv').selectionStart, $('tv').selectionEnd, $('xv').value,
-                  $('cv').checked, $('sv').selectedIndex, $('boxv').scrollTop, scrollY, $('dv').tagName, heard,
-                  $('av').currentTime]";
-            let got = s.eval(did).await.unwrap();
-            let heard = json!(["tv input", "xv input", "cv change", "sv change"]);
-            assert_eq!(
-                got,
-                json!([1, null, "typed", "tv", 1, 3, "more text", true, 1, 120, 500, "P", heard, 1.25]),
-                "the paint is gone, the view shows and has what was done"
-            );
-        });
-    }
 }
 
 /// The web build in a real browser (a headless Chromium, the wasm32 target
@@ -1096,7 +1038,6 @@ pub(crate) mod browser {
     use std::time::Duration;
 
     include!("web/board.rs");
-    include!("web/view.rs");
 
     const KEY: &str = "a-long-random-app-key-for-tests";
 
@@ -1270,7 +1211,7 @@ pub(crate) mod browser {
         let (h, votes) = (Handle::<Board>::memory(), Handle::<Votes>::memory());
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server = l.local_addr().unwrap().to_string();
-        let http = aio_shell::web::painted(aio::http::Http::default(), h.clone(), view, &site).cell(votes.clone());
+        let http = aio::http::Http::default().shell(&site).cell(votes.clone());
         let opts = aio::sync::Options { token: KEY.into(), http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(h.clone(), l, opts));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1383,9 +1324,8 @@ pub(crate) mod browser {
         served(&h, &["a", "b", "ui"]).await;
         h.call("add", json!(["server"])).unwrap();
         until(&mut b, items, json!(["a", "b", "ui", "server"])).await;
-        // The view took the paint's place, through the page's `__aioAdopt`
-        // (what was done to the paint goes with it): one main, nothing left unseen.
-        let one = "typeof __aioAdopt === 'function' && document.querySelectorAll('#main').length === 1 && !document.querySelector('[hidden]')";
+        // One main, nothing left unseen.
+        let one = "document.querySelectorAll('#main').length === 1 && !document.querySelector('[hidden]')";
         until(&mut a, one, json!(true)).await;
         // The window's page scripts and kit in the page: the field that
         // asks for focus has it (it came after the page loaded), and an
@@ -1395,7 +1335,8 @@ pub(crate) mod browser {
         until(&mut a, "document.getElementById('island').textContent", json!("island 4")).await;
         until(&mut a, "document.getElementById('doubled').textContent", json!("8")).await;
         assert_eq!(a.eval("window.refused").await.unwrap(), json!([]));
-        // The page as the server paints it now: the view over its state, for this viewer.
+        // The page as the server serves it: the web build's, its view drawn
+        // by the page itself (no server paint on air).
         let page = {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -1406,11 +1347,8 @@ pub(crate) mod browser {
             String::from_utf8_lossy(&got).into_owned()
         };
         assert!(page.contains("cache-control: no-store"), "{page}");
-        let painted = r#"<div id="main"><ul id="items"><li>a</li><li>b</li><li>ui</li><li>server</li></ul>"#;
-        assert!(page.contains(painted) && page.contains("./start.js"), "{page}");
-        // Its head as the view asks for it, collected on the server and kept in the page.
-        assert!(page.contains("<title>4 items</title>"), "{page}");
-        assert!(page.contains(r#"<meta name="description" content="board" data-aio-head></head>"#), "{page}");
+        assert!(page.contains(r#"<div id="main"></div>"#) && page.contains("./start.js"), "{page}");
+        // Its head as the view asks for it, written into the page by the view.
         until(&mut a, "document.title", json!("4 items")).await;
         let tags = "document.querySelectorAll('meta[name=description][data-aio-head]').length";
         assert_eq!(a.eval(tags).await.unwrap(), json!(1));
@@ -1547,7 +1485,7 @@ pub(crate) mod browser {
 
 /// The web build on air in a real browser (a headless Chromium, the wasm32
 /// target and the lock's wasm-bindgen; skipped without them): the page's
-/// view drawn by air's interpreter talking to the module, no Dioxus in it.
+/// view drawn by air's interpreter talking to the module, air alone in it.
 #[cfg(all(test, unix))]
 mod browser_air {
     use super::browser::{Chromium, until};
@@ -1594,7 +1532,7 @@ mod browser_air {
         }
         let cfg = aio::config::Config::parse("[app]\nid = \"air-web-test\"\nname = \"Air web test\"").unwrap();
         assert_eq!(pack(&app, &cfg, &page, &out, "", true).unwrap(), Vec::<String>::new());
-        // No Dioxus in the page's build.
+        // air alone in the page's build.
         let tree = Command::new("cargo")
             .args(["tree", "--offline", "-e", "normal", "--prefix", "none", "--target", "wasm32-unknown-unknown"])
             .current_dir(&page)
@@ -1602,7 +1540,7 @@ mod browser_air {
             .unwrap();
         let tree = String::from_utf8_lossy(&tree.stdout);
         assert!(tree.lines().any(|l| l.starts_with("aio-rs-air ")), "air draws it: {tree}");
-        assert!(!tree.lines().any(|l| l.starts_with("dioxus")), "{tree}");
+        assert!(!tree.lines().any(|l| l.starts_with(crate::lint::RENDERER_0_1)), "{tree}");
         Some(out)
     }
 

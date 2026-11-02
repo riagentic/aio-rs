@@ -2,7 +2,7 @@
 //! redirects, and a page's title (aio tests/router-navlink-outlet,
 //! air-router-path-matching). Its own process: the host's Back in
 //! tests/route.rs is one per process, asked of every live router.
-#![cfg(any(feature = "kit", feature = "air"))]
+#![cfg(feature = "kit")]
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
 
@@ -100,7 +100,7 @@ fn a_route_follows_navigation_and_a_redirect_leaves_no_back_step() {
 
 /// On air a route's body runs again only when its match changes: a query
 /// or another route's place runs nothing; a new param makes its view anew.
-#[cfg(all(feature = "air", not(feature = "kit")))]
+#[cfg(feature = "kit")]
 #[test]
 fn on_air_a_route_runs_again_only_for_a_new_match() {
     fn routes(c: &[aio::testing::MountedComponent]) -> u32 {

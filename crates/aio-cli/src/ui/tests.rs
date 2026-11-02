@@ -355,8 +355,10 @@ fn window(dir: &Path, dark: bool) -> (TestUi, Arc<Mutex<Vec<String>>>) {
     (if dark { m.dark() } else { m }.app(mounted), said)
 }
 
+/// Wait until `t` shows `has`: a hang guard, not a measure (a loaded CI
+/// runner took past 5 s for a tab's first poll and its draw).
 fn shows(ui: &mut TestUi, t: &str, has: &str) {
-    for _ in 0..500 {
+    for _ in 0..3000 {
         if ui.present(t) && ui.text(t).contains(has) {
             return;
         }
@@ -688,6 +690,9 @@ async fn in_a_browser_tab() {
     until(&mut t, &format!("!!{}", q("app-notes")), json!(true)).await;
     t.eval(&format!("{}.click() || true", q("app-notes"))).await.unwrap();
     until(&mut t, &text("name"), json!("notes")).await;
+    // Its detail read (the header drawn for it, not for the list's entry):
+    // a click on the header it replaces would reach no button.
+    until(&mut t, &format!("!!{0} && !{0}.textContent.includes('loading')", q("where")), json!(true)).await;
     t.eval(&format!("{}.click() || true", q("stop"))).await.unwrap();
     until(&mut t, &format!("!!{}", q("confirmOk")), json!(true)).await;
     t.eval(&format!("{}.click() || true", q("confirmOk"))).await.unwrap();

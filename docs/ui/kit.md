@@ -60,10 +60,10 @@ fn Profile() -> View {
     let news = signal(|| false);
     let sync = signal(|| true);
     let mut saved = signal(|| 0);
-    let missing = name.get().trim().is_empty();
+    let missing = memo(move || name.with(|n| n.trim().is_empty()));
     rsx! {
         Field { label: "Name", hint: "As others see it", required: true,
-            error: missing.then(|| "Your name, please".to_string()),
+            error: missing.get().then(|| "Your name, please".to_string()),
             Input { "data-t": "name", value: name.get(), placeholder: "Ada", oninput: move |v| name.set(v) }
         }
         Field { label: "About you",
@@ -81,7 +81,7 @@ fn Profile() -> View {
             value: size.get(), onchange: move |v| size.set(v) }
         Checkbox { "data-t": "news", label: "Send me news", checked: news.get(), onchange: move |on| news.set(on) }
         Switch { "data-t": "sync", label: "Sync", checked: sync.get(), onchange: move |on| sync.set(on) }
-        Button { "data-t": "save", variant: Variant::Primary, size: Size::Lg, disabled: missing,
+        Button { "data-t": "save", variant: Variant::Primary, size: Size::Lg, disabled: missing.get(),
             onclick: move |_| saved += 1, "Save" }
         p { "data-t": "out", "{saved} {lang} {size} {news} {sync}" }
     }
@@ -379,11 +379,10 @@ fn check(s: &Signup) -> Problems {
 #[component]
 fn Form() -> View {
     let f = use_form(Signup::default, check);
-    let v = f.values();
     rsx! {
         form { onsubmit: move |e| { e.prevent_default(); if let Some(_ok) = f.submit() { /* act!(..) */ } },
             Field { label: "Name", error: f.error("name"),
-                Input { "data-t": "name", value: v.name, oninput: move |n| f.edit("name", |s| s.name = n), onchange: move |_| f.touch("name") }
+                Input { "data-t": "name", value: f.values().name, oninput: move |n| f.edit("name", |s| s.name = n), onchange: move |_| f.touch("name") }
             }
             Field { label: "Age", error: f.error("age"),
                 Input { r#type: "number", oninput: move |n: String| f.edit("age", |s| s.age = n.parse().ok()) }
@@ -448,7 +447,7 @@ assert!(drawn > 10 && drawn < 30, "{drawn} of 10000 rows are elements");
 | `row: \|i\| rsx! { .. }` | the row at an index |
 
 Only the rows the scroll shows, and `overscan` more each side, are
-elements; a scroll within the rows drawn renders nothing; `scroll_to`
+elements; a scroll within the rows drawn writes nothing; `scroll_to`
 brings a row to the top. A keyboard list windowed by hand uses
 `aio::kit::window(len, row, height, overscan, top)` and
 `data-aio-reveal` on the cursor's row ([performance](../performance.md)).
@@ -561,11 +560,18 @@ assert!(ui.present("comments"));
 | `TimeTravelPanel { timeline: use_time_travel().get(), onask: move \|a\| _ = time_travel(a) }` | the cell's history in a corner, hidden until Ctrl+.; undo, redo, pause, a step to go to (handles `timeTravel`, `ttUndo`, `ttRedo`, `ttPause`) |
 | `SignIn { client, on_signed }` (feature `server`) | a ready sign-in form: sign-up when the server allows it (`signup`), an email (`email`), the second-factor step, a forgotten password when the server sends mail (`forgot`), `title`; parts `signinId`, `signinEmail`, `signinPassword`, `signinCode`, `signinSubmit`… ([auth](../auth/README.md)) |
 | `use_id(prefix)` | a stable, unique id per component, for `aria-controls`, `for` |
-| `use_context_select(\|t: &T\| ..)` | a part of a `Signal<T>` context; re-renders only when it changes |
+| `use_context_select(\|t: &T\| ..)` | a part of a `Signal<T>` context; follows only when it changes |
 | `use_held(&pool, key)` | a held resource (a connection, a file) for this view, let go when the key changes or the view goes |
 | `use_window_event(\|e\| ..)`, `WindowEvent` | the window's `MouseMove` (every `MOVE_MS`, 100 ms), `MouseDown`, `MouseUp`, `Click`, `Wheel`, `KeyDown`, `KeyUp`, `Resize { width, height }`; inside `GlobalKeys` |
 | `use_back_button(\|\| ..)` | Back while the view lives; true: taken ([routing](routing.md#back)) |
 | `Browser { src, .. }` | someone else's site in the view ([islands](islands.md)) |
+
+Labels and titles are markup, as aio's `string | VNode`: every label and
+title is a `View` that takes text too: `Field`, `Checkbox`, `Switch`,
+`Alert`, `Modal`, `Confirm`, `ConfirmButton`, `EmptyState`, `Tab::new`,
+`MenuItem::new`, `Crumb::new`, `Column` headers, and `toast_view` for a
+toast (`label: rsx! { b { "Name" } }`, or `label: "{n} picked"`, which
+follows `n`).
 
 ## Gaps against aio
 
@@ -578,13 +584,6 @@ controls aio apps wrote by hand (`Tabs`' right-to-left keys, `Defer`,
 - **Data grids, charts, date pickers**: neither has them; mount a
   library as an [island](islands.md).
 - **A `Tooltip` to the side**: `Placement` is `Top` or `Bottom` only.
-- **Labels and titles as markup** (aio's `string | VNode`): on air
-  (feature `air`, the 0.2 renderer) every label and title is a `View`
-  that takes text too: `Field`, `Checkbox`, `Switch`, `Alert`, `Modal`,
-  `Confirm`, `ConfirmButton`, `EmptyState`, `Tab::new`, `MenuItem::new`,
-  `Crumb::new`, `Column` headers, and `toast_view` for a toast
-  (`label: rsx! { b { "Name" } }`, or `label: "{n} picked"`, which
-  follows `n`). On Dioxus they are text.
 
 ## Common mistakes
 

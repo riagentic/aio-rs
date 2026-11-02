@@ -1,7 +1,7 @@
 //! The router in a view: typed pages, links, Back (aio tests/router.test.ts,
 //! router-navlink-outlet, router-link-class-and-onclick, standalone-router).
 //! The same views on either renderer.
-#![cfg(any(feature = "kit", feature = "air"))]
+#![cfg(feature = "kit")]
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
 

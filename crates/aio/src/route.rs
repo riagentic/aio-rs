@@ -1,7 +1,7 @@
 //! In-app navigation (aio's `air/router-core.ts`, `air/router.ts`,
 //! `air/back-button.ts`): routes, params, a history the app owns, links and
-//! Back. Plain functions; the Dioxus glue is a macro over the app's own
-//! Dioxus ([`router!`](crate::router)), like `client!`.
+//! Back. Plain functions; the view glue is a macro over the app's own
+//! views ([`router!`](crate::router)), like `client!`.
 //!
 //! The history lives in Rust, not in the page's `location`: the desktop page
 //! is `aio://app/index.html` and Android's an asset, so aio's route base (the
@@ -534,7 +534,7 @@ impl Backs {
 /// `User { id: u32 } = "/users/:id" => "User {id}"`.
 ///
 /// `parse` takes the first variant, in written order, whose pattern matches
-/// and whose params parse (Dioxus renders one page, where aio rendered every
+/// and whose params parse (one page shows, where aio rendered every
 /// matching `<Route>`).
 #[macro_export]
 macro_rules! routes {

@@ -300,14 +300,14 @@ pub fn App() -> View {
 fn Sidebar() -> View {
     use_global_key("mod+n", |_| new_note()); // under GlobalKeys: bindings fire there
     let search = part(|n| &n.search);
-    let shown = notes().shown(); // derived: computed once per notes and search
+    let shown = memo(|| notes().shown()); // derived: computed once per notes and search
     rsx! {
         nav {
             button { "data-t": "new", onclick: |_| new_note(), "New note" }
             input { "data-t": "search", r#type: "search", placeholder: "Search", value: "{search}",
                 oninput: move |e| _ = act!(find(e.value())) }
-            for (id, title) in shown.iter() {
-                Link { key: "{id}", to: Page::Note { id: *id }.href(), "{title}" }
+            for (id, title) in shown.get().to_vec() {
+                Link { key: "{id}", to: Page::Note { id }.href(), "{title}" }
             }
             Link { to: Page::Settings.href(), "Settings" }
         }
@@ -316,40 +316,48 @@ fn Sidebar() -> View {
 
 #[component]
 fn Body() -> View {
-    match Page::parse(&here().path) {
-        Some(Page::Note { id }) => rsx! { Editor { id } },
-        Some(Page::Settings) => rsx! { p { "data-t": "settings", "Settings go here." } },
-        _ => rsx! { p { "data-t": "empty", "Pick a note, or make one (Ctrl+N)." } },
+    // The page follows the place; a new page swaps what is drawn.
+    let page = memo(|| Page::parse(&here().path));
+    rsx! {
+        {match page.get() {
+            Some(Page::Note { id }) => rsx! { Editor { id } },
+            Some(Page::Settings) => rsx! { p { "data-t": "settings", "Settings go here." } },
+            _ => rsx! { p { "data-t": "empty", "Pick a note, or make one (Ctrl+N)." } },
+        }}
     }
 }
 
 #[component]
 fn Editor(id: Uuid) -> View {
     let all = part(|n| &n.notes);
-    let Some(note) = all.with(|ns| ns.iter().find(|n| n.id == id).cloned()) else {
-        return rsx! { p { "data-t": "gone", "This note is gone." } };
-    };
-    let title = note.title.clone();
+    // The note as it is now (None once it is deleted), its title and body.
+    let note = memo(move || all.with(|ns| ns.iter().find(|n| n.id == id).cloned()));
+    let title = memo(move || note.with(|n| n.as_ref().map(|n| n.title.clone()).unwrap_or_default()));
+    let body = memo(move || note.with(|n| n.as_ref().map(|n| n.body.clone()).unwrap_or_default()));
     rsx! {
-        header {
-            input { "data-t": "title", value: "{note.title}", oninput: move |e| _ = act!(rename(id, e.value())) }
-            Menu { label: "Note", trigger: rsx! { "⋯" },
-                items: vec![
-                    MenuItem::new("export", "Export…"),
-                    MenuItem::new("import", "Import…"),
-                    MenuItem::new("delete", "Delete"),
-                ],
-                onselect: move |what: String| match what.as_str() {
-                    "export" => _ = spawn(ask_export(id, title.clone())),
-                    "import" => _ = spawn(ask_import()),
-                    _ => {
-                        _ = act!(delete(id));
-                        redirect("/");
-                    }
-                },
+        if note.with(Option::is_none) {
+            p { "data-t": "gone", "This note is gone." }
+        } else {
+            header {
+                input { "data-t": "title", value: "{title}", oninput: move |e| _ = act!(rename(id, e.value())) }
+                Menu { label: "Note", trigger: rsx! { "⋯" },
+                    items: vec![
+                        MenuItem::new("export", "Export…"),
+                        MenuItem::new("import", "Import…"),
+                        MenuItem::new("delete", "Delete"),
+                    ],
+                    onselect: move |what: String| match what.as_str() {
+                        "export" => _ = spawn(ask_export(id, title.get())),
+                        "import" => _ = spawn(ask_import()),
+                        _ => {
+                            _ = act!(delete(id));
+                            redirect("/");
+                        }
+                    },
+                }
             }
+            textarea { "data-t": "body", value: "{body}", oninput: move |e| _ = act!(edit(id, e.value())) }
         }
-        textarea { "data-t": "body", value: "{note.body}", oninput: move |e| _ = act!(edit(id, e.value())) }
     }
 }
 
@@ -363,15 +371,20 @@ pub mod updates {
 
     #[component]
     pub fn Banner() -> View {
-        let phase = part(|u| &u.phase).get();
-        let offer = part(|u| &u.available).get();
-        let (Phase::Available, Some(o)) = (phase, offer) else { return rsx! {} };
+        let (phase, offer) = (part(|u| &u.phase), part(|u| &u.available));
+        // The offer while there is one to make.
+        let open = memo(move || match (phase.get(), offer.get()) {
+            (Phase::Available, Some(o)) => Some(o),
+            _ => None,
+        });
         rsx! {
-            div { role: "status", "data-t": "update",
-                "Version {o.version} is ready. {o.notes} "
-                button { onclick: |_| _ = act!(apply()), "Restart to update" }
-                button { onclick: |_| _ = act!(dismiss()), "Not now" }
-            }
+            {open.get().map(|o| rsx! {
+                div { role: "status", "data-t": "update",
+                    "Version {o.version} is ready. {o.notes} "
+                    button { r#type: "button", onclick: |_| _ = act!(apply()), "Restart to update" }
+                    button { r#type: "button", onclick: |_| _ = act!(dismiss()), "Not now" }
+                }
+            })}
         }
     }
 }

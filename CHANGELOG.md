@@ -7,8 +7,41 @@ version may break things.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Dioxus is gone: air is aio-rs's one renderer** (air phase 5,
+  docs/design/air.md). Every Dioxus crate (dioxus, dioxus-*,
+  generational-box, subsecond) is out of the graph: the lock holds 253
+  packages, from 327; an app's whole graph (`app kit`) 76 crates, from
+  141; aio-rs-cli 146, from 211 (`deps.toml [ceilings]`). Feature `kit` is
+  air; `air` stays, a name for `kit`; `liveview` is gone. aio-rs-shell has
+  no `dioxus` feature, `ax dev` needs no dx (`ax setup` installs none),
+  and no `--dioxus` lane is left in `scripts/dx-metrics`,
+  `scripts/android-gate` or GitHub CI. No public signature names a Dioxus
+  type ([migration: 0.1 → 0.2](docs/migration/README.md#8-01--02-dioxus-is-gone),
+  a before → after table).
+- A view's body runs once; what shows state is a hole (a text, an
+  attribute, a `{child}`) that runs again when what it reads changes. A
+  value read in the body (`let s = shop();` then `"{s.stock}"`) is read
+  once: a dev build says where (`hint`). A component's prop follows its
+  caller only as a `Signal`, a `Part` or a `Prop<T>`.
+- `rsx!` refuses `if let`, `match`, `while` and `loop` nodes (a bool, a
+  `{match ..}` hole) and a `for` row without `key:` on its first node.
+- `aio-rs-hotpatch` (`aio_hotpatch::HotFn`, `JumpTable`, `apply_patch`)
+  replaces subsecond in an app's dev build: the same jump table as
+  dioxus-cli 0.7.10's, read by `ax dev`.
+- `ax components`: each component's key, how many times its body ran and
+  how many times its holes wrote (`updates`), where 0.1 gave renders and
+  their time.
+- The page scripts made for Dioxus's interpreter are gone from
+  `aio::page`: `WIRE`, `TYPING`, `SET_FOCUS`, `FILE_INPUT`.
+
 ### Added
 
+- **TS21: the published crates' public API is checked in**
+  (`scripts/api/<crate>.txt`, from rustdoc's JSON): `scripts/public-api
+  --check` in `./ci.sh lint` fails on a change not written there, and on
+  any item naming aio-rs 0.1's renderer.
 - **The app's routes in its window with no TCP port** (aio's `aio://app/<path>`
   over the app socket): a standalone or client-server app whose
   `Source::for_app_with` serves a path (routes, `[server] dirs`, blobs)
@@ -678,6 +711,46 @@ version may break things.
   arrived is still dropped (AIR never runs a removed element's handler);
   a dev build says so once per event name on the diagnostic bus
   (`ui:stale-event`, `air::on_warn`). `TestPage::aim` makes such an event.
+- air: every `exec` of one batch runs (an island's update, a second
+  island's mount): on a page without `__aioRun` all but the first found
+  the slot the first had freed, and did nothing.
+- air: `aria-*`, `data-*` and HTML's enumerated attributes take
+  `true`/`false` as text (`aria-selected="false"`), as ARIA reads them;
+  an `Option`'s `None` writes no attribute at all.
+- air: a constant `dangerous_inner_html` is set as the `innerHTML`
+  property at mount (the page's policy sees it), not as an attribute.
+- air: a hole may take what it reads by value (`{match who { .. }}`,
+  `{note.map(..)}`): its names are cloned in per run, as a component's
+  props.
+- air: attributes given to a component that takes none say so (the
+  `GlobalAttributes` message), not "no method `__attr_const`".
+- `kit::Browser`'s `src` follows its caller's state (a `Prop`): a changed
+  `src` navigates the guest, on air as it did on Dioxus.
+- `TestUi::html` leaves out air's anchor comments.
+- A reply that sets the key cookie (a `?token=` link's page) is
+  `cache-control: no-store` with no `etag`; on air the shell's page was
+  otherwise served revalidatable (no server paint makes it `no-store`).
+- `ax dev` on Windows reloads an `rsx!` edit as markup again (~ms)
+  instead of hot-patching it (~1.5 s): the watcher named a changed file
+  with the `\\?\` prefix `canonicalize` adds, so it never matched the
+  build's snapshot; it names it as the snapshot does now. Found by
+  `dx-metrics --live` on the Windows runner (live_rsx_s 1.5 s, its line
+  "hot-patched in 1316 ms").
+- A backtrace in hot-patched code on Windows (MSVC) names its functions:
+  each patch DLL is linked with its PDB (`/DEBUG` beside `/DEBUG:SYMTAB`)
+  and std's resolver (dbghelp) is told the modules again after each
+  patch, under its own lock. Linux, macOS and MinGW name a patch's frames
+  only when it loaded before the first backtrace was resolved (std lists
+  the libraries once); the hotpatch test checks both, on each OS.
+- `scripts/dx-metrics --live` runs on Windows (it imported the Unix-only
+  `resource`): CPU and the build check through the Win32 API, `ax dev`'s
+  tree stopped with `taskkill`, edits written byte for byte; the Windows
+  CI job prints its live-edit times.
+- The splash's `text` takes aio's full set on every splash (Electron's,
+  the OS's, the web's and Android's): `{title}`, `{version}` (the app's,
+  what `--version` prints), and `{got}`, `{total}`, `{pct}` as `0`, `?`,
+  `?`; Electron's, the web's and Android's filled only `{title}`. A
+  `download_text`'s `{version}` is the app's too, as aio's, not Electron's.
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled
