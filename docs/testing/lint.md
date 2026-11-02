@@ -31,7 +31,7 @@ ax lint --fix            # move an app of an older layout to today's, then lint
 | `--no-hints`, `--quiet-hints` | hint lines left out of the report, still counted in the summary |
 | `--no-clippy` | only aio-rs's checks: no build, about a second |
 | `--safe-fix` | `cargo clippy --fix` (only machine-applicable fixes; denied lints only warn while fixing), then the lint |
-| `--fix` | moves an app of an older layout to `ax create`'s: no launcher `build.rs`, no aio-rs build-dependency, no `testing`/`video` features, renamed paths rewritten; then the lint |
+| `--fix` | moves an app of an older layout to `ax create`'s: no launcher `build.rs`, no aio-rs build-dependency, no `video` feature, renamed paths rewritten; then the lint |
 
 Exit: 0 with no errors (warnings and hints don't fail), 1 with errors,
 2 for bad usage.
@@ -176,8 +176,11 @@ name has no [auto name](ui.md#auto-names) either.
 | Area | Finding | Level |
 |---|---|---|
 | `testing` | a cell no test names (its type isn't mentioned in any test) | hint |
+| `testing` | tests that use `aio::testing` with no manifest giving them aio-rs's `testing` feature | error |
+| `testing` | a `#[test]` that checks nothing: no assertion, `?`, `unwrap`/`expect` or harness wait in it (`no-assertions`; `#[should_panic]` is a check) | warn |
+| `testing` | `assert_eq!(x, x)`, `assert_ne!(x, x)`: a thing compared with itself (`self-comparison`) | warn |
 | `config` | an `aio.toml` that doesn't parse or check | error |
-| `migrate` | an older layout: a launcher `build.rs`, `aio::config!()?`, renamed paths, an aio-rs build-dependency, the empty `testing`/`video` features | warn or error (`--fix` moves it) |
+| `migrate` | an older layout: a launcher `build.rs`, `aio::config!()?`, renamed paths, an aio-rs build-dependency, the `video` feature (`testing` brings it) | warn or error (`--fix` moves it) |
 | `scan` | a `.rs` file that doesn't parse, a text file over 1 MiB (not checked) | warn, hint |
 | `clippy`, `rustc` | the project's own clippy and compiler warnings, plus `dbg!` (warn), `todo!()` and `unimplemented!()` (error) | as reported |
 
@@ -230,13 +233,14 @@ bug. aio-rs's harnesses are built so that a test can't pass by accident:
 | a random test that can't be re-run | `fuzz` and `Sim` are seeded and print the seed |
 | the real network reached by accident | `TestUi` refuses it; a cassette never calls through on replay |
 | a cell nobody tests | `ax lint`'s `testing` hint |
+| a test that checks nothing, a value compared with itself | `ax lint`'s `testing` warnings |
 
-What aio checks in its own repository and aio-rs leaves to you:
+aio's three gates on its own tests, and aio-rs's:
 
 | aio | aio-rs |
 |---|---|
-| `check:mutations`: a ledger of invariants, each broken on purpose, its named test required to go red | none built in; a mutation tool for Rust (`cargo mutants`) does this for an app |
-| `check:vacuous`: tests with no assertion, assertions in an empty loop, `length > 0`, a value compared with itself, a swallowing `try` | none: review for these shapes (below) |
+| `check:mutations`: a ledger of invariants, each broken on purpose, its named test required to go red | `scripts/mutants` in the aio-rs repository, in the source and in a built `.deb` ([Proving the tests](proving.md)); for an app, `ax test <app> --mutants` (`cargo mutants`) |
+| `check:vacuous`: tests with no assertion, assertions in an empty loop, `length > 0`, a value compared with itself, a swallowing `try` | `ax lint`: no assertion, self-comparison; review for the rest (below) |
 | `check:dead-wiring`: exports nothing in `src/` reaches | rustc's `dead_code` warnings for private items; `pub` items unused by the app aren't flagged |
 
 The shapes to look for in review, and their fix:

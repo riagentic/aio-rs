@@ -757,7 +757,7 @@ version = "0.1.0"
         let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
         let now = info(&root, || Err("offline".into())).unwrap();
         assert_eq!(now.pinned(), Some(&Src::Tag(tag.clone())));
-        assert_eq!(now.asks.len(), 3, "three aio-rs lines in two files");
+        assert_eq!(now.asks.len(), 4, "four aio-rs lines in two files (the tests' one too)");
         let said = pin(&root, "9.9.9", &Aio::Tag("v9.9.9".into()), now.pinned(), no_lock, false).unwrap();
         assert!(said.starts_with("pinned to aio-rs v9.9.9\n  recorded in Cargo.toml, app/Cargo.toml"), "{said}");
         assert!(said.ends_with("commit Cargo.toml and Cargo.lock so a clone builds against the same version"));
@@ -781,7 +781,7 @@ version = "0.1.0"
         // An app's other crates are its own: a dot folder or build output is never read.
         std::fs::create_dir_all(root.join("target/x")).unwrap();
         std::fs::write(root.join("target/x/Cargo.toml"), r#"a = { package = "aio-rs", path = "/p" }"#).unwrap();
-        assert_eq!(info(&root, || Err("x".into())).unwrap().asks.len(), 3);
+        assert_eq!(info(&root, || Err("x".into())).unwrap().asks.len(), 4);
         let bare = d.path().join("bare");
         std::fs::create_dir_all(&bare).unwrap();
         std::fs::write(bare.join("Cargo.toml"), "[package]\nname = \"bare\"\n").unwrap();

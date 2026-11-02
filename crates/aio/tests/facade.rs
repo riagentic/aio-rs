@@ -1,5 +1,8 @@
 //! `aio::ui::prelude`, the view API apps are written against: each name
 //! does what its air shape says, on the renderer underneath today.
+#![cfg(any(feature = "kit", feature = "air"))]
+// Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
+#![cfg_attr(not(feature = "kit"), allow(unused_mut))]
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -49,6 +52,10 @@ fn counted() -> View {
     }
 }
 
+#[cfg_attr(
+    all(feature = "air", not(feature = "kit")),
+    ignore = "air: a body runs once; it counts body re-runs (air's own: crates/air/tests/core.rs)"
+)]
 #[test]
 fn set_tells_only_on_a_change_and_write_always_does() {
     let mut ui = TestUi::new(counted);
@@ -85,6 +92,10 @@ fn lifetime() -> View {
     }
 }
 
+#[cfg_attr(
+    all(feature = "air", not(feature = "kit")),
+    ignore = "air: props are evaluated once; `n.get()` as a prop is a snapshot (pass the Signal)"
+)]
 #[test]
 fn once_is_made_once_watch_follows_its_deps_and_on_cleanup_ends_it() {
     let mut ui = TestUi::new(lifetime);
@@ -135,6 +146,10 @@ fn guarded() -> View {
     }
 }
 
+#[cfg_attr(
+    all(feature = "air", not(feature = "kit")),
+    ignore = "air: props are evaluated once; `fail.get()` as a prop never flips (air's own: crates/air/tests/core.rs)"
+)]
 #[test]
 fn an_error_thrown_in_a_view_shows_the_nearest_boundarys_fallback() {
     let mut ui = TestUi::new(guarded);

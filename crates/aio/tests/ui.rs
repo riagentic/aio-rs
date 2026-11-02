@@ -1,4 +1,7 @@
 //! Views re-render only for the parts they read (AIR-level updates).
+#![cfg(any(feature = "kit", feature = "air"))]
+// Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
+#![cfg_attr(not(feature = "kit"), allow(unused_mut))]
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{TestUi, fails};
@@ -67,6 +70,10 @@ fn app() -> View {
     }
 }
 
+#[cfg_attr(
+    all(feature = "air", not(feature = "kit")),
+    ignore = "air: counts body re-runs; on air only the holes that read a part re-run"
+)]
 #[test]
 fn a_view_re_renders_only_when_its_part_changes() {
     let mut ui = TestUi::new(app);
@@ -96,6 +103,10 @@ fn by_door() -> View {
     rsx! { ByDoor {} }
 }
 
+#[cfg_attr(
+    all(feature = "air", not(feature = "kit")),
+    ignore = "air: reads through the door in the body (a snapshot on air)"
+)]
 #[test]
 fn a_view_reading_through_the_door_follows_every_commit() {
     let mut ui = TestUi::new(by_door);
@@ -121,6 +132,10 @@ fn quiet() -> View {
     rsx! { Quiet {} }
 }
 
+#[cfg_attr(
+    all(feature = "air", not(feature = "kit")),
+    ignore = "air: counts body re-runs of a body that reads the whole state"
+)]
 #[test]
 fn a_call_that_changes_nothing_re_renders_nothing() {
     let mut ui = TestUi::new(quiet);
@@ -233,6 +248,10 @@ fn local() -> View {
     }
 }
 
+#[cfg_attr(
+    all(feature = "air", not(feature = "kit")),
+    ignore = "air: reads the state in the body (a snapshot on air): read it in a hole"
+)]
 #[test]
 fn a_local_cell_is_online_and_its_state_is_there_at_the_first_render() {
     let mut ui = TestUi::new(local);
@@ -244,6 +263,7 @@ fn a_local_cell_is_online_and_its_state_is_there_at_the_first_render() {
     assert_eq!(ui.text("link"), "true 0 false");
 }
 
+#[cfg_attr(all(feature = "air", not(feature = "kit")), ignore = "air: expects a re-render from a body read")]
 #[test]
 fn ids_are_unique_and_stable_per_instance() {
     let mut ui = TestUi::new(local);
@@ -382,6 +402,10 @@ mod spinner {
         rsx! { p { "data-t": "busy", "{n}" } }
     }
 
+    #[cfg_attr(
+        all(feature = "air", not(feature = "kit")),
+        ignore = "air: reads use_pending in the body (a snapshot on air)"
+    )]
     #[test]
     fn a_spinner_follows_the_calls_in_flight() {
         let mut ui = TestUi::new(app);
@@ -534,6 +558,48 @@ fn a_ui_test_refuses_the_real_network_and_reaches_this_machine() {
     );
 }
 
+#[component]
+fn Remote() -> View {
+    rsx! {
+        img { alt: "pic", src: "https://cdn.example.invalid/pic.svg" }
+        img { alt: "gone", src: "https://cdn.example.invalid/gone.png" }
+    }
+}
+
+/// aio's `testUI({ fetch })`: the page's requests to a host are answered by
+/// the test from before the first render, never reaching the network.
+#[test]
+fn a_host_the_test_answers_never_reaches_the_network() {
+    use aio::testing::Answered;
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let log = asked.clone();
+    let mut ui = aio::testing::Mount::default()
+        .fetch("cdn.example.invalid", move |a| {
+            log.lock().unwrap().push(format!("{} {}", a.method, a.url));
+            match a.url.ends_with(".svg") {
+                true => Answered::new(
+                    200,
+                    "image/svg+xml",
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>"#,
+                ),
+                false => Answered::new(404, "text/plain", "no such picture"),
+            }
+        })
+        .component(Remote, ());
+    let sizes = "[...document.images].map((i) => i.complete ? i.naturalWidth : -1)";
+    for _ in 0..400 {
+        if !ui.eval(sizes).as_array().unwrap().contains(&serde_json::json!(-1)) {
+            break;
+        }
+        ui.wait(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(ui.eval(sizes), serde_json::json!([10, 0]), "the answered picture drew, the 404 did not");
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked.contains(&"GET https://cdn.example.invalid/gone.png".to_string()), "{asked:?}");
+    assert!(ui.failures().is_empty(), "nothing refused: it never went out");
+}
+
 static HEARD: AtomicUsize = AtomicUsize::new(0);
 
 /// Two buttons whose box keeps Tab and ArrowDown, one outside it, and a
@@ -678,6 +744,7 @@ mod parts {
         }
     }
 
+    #[cfg_attr(all(feature = "air", not(feature = "kit")), ignore = "air: counts body re-runs")]
     #[test]
     fn a_view_re_renders_only_for_the_field_it_reads() {
         let mut ui = TestUi::new(app);

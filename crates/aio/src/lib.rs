@@ -51,7 +51,7 @@ native! {
     pub mod log;
     #[cfg(feature = "tls")]
     pub mod pairing;
-    #[cfg(any(feature = "kit", feature = "web"))]
+    #[cfg(any(feature = "kit", feature = "web", feature = "air"))]
     pub mod page;
     pub mod paths;
     #[cfg(feature = "server")]
@@ -67,6 +67,7 @@ native! {
     pub mod sync;
     #[cfg(feature = "tls")]
     pub mod tls;
+    #[cfg(feature = "testing")]
     pub mod testing;
     pub mod update;
     pub mod video;
@@ -684,7 +685,7 @@ macro_rules! app_version {
 #[doc(hidden)]
 pub fn refused(method: &str, e: &Rejected) {
     eprintln!("[aio] {method} refused: {e}");
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
     testing::unseen(format!("{method}: {e}"));
 }
 
