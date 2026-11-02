@@ -203,17 +203,6 @@ fn gate_2_a_signal_used_after_its_view_ended_fails_unless_asked_first() {
 }
 
 #[test]
-fn gate_2_a_view_placed_twice_fails() {
-    fn app() -> View {
-        let v = rsx! { p { "once" } };
-        let again = v.clone();
-        rsx! { div { {v} {again} } }
-    }
-    let e = says(|| _ = TestPage::mount(app));
-    assert!(e.contains("placed twice"), "{e}");
-}
-
-#[test]
 fn gate_2_hooks_called_in_another_order_on_a_rerun_fail() {
     thread_local!(static RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
     #[component]

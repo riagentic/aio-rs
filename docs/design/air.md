@@ -266,7 +266,9 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
 - A body runs once, untracked; one that `?`s a resource still loading
   runs again when it is loaded, its hooks (`signal`, `memo`, `resource`,
   `once`, …) handing back what the first run made, by call order.
-- A `View` is placed once: placing the same one twice fails.
+- A `View` is built where it is placed, and again each time it is placed
+  (a dialog opened again, a tab shown again, one view in two places): each
+  place gets its own build and state, as a Dioxus `Element` rendered again.
 - A view is a range of siblings, first to last; a template starting with a
   hole gets an empty comment as its start, so a hole's content at a root
   moves and goes with its view.
@@ -586,7 +588,7 @@ as on air.
    `--release` by `ci.sh`): a hook outside a view's body (or in a
    handler), a write while a hole or a memo computes, an effect loop (the
    round guard, 1000 rounds as AIR's), a signal used after its view, a
-   view placed twice, hooks in another order on a re-run, two rows with one
+   hooks in another order on a re-run, two rows with one
    key, two roots on a thread; a `for` without `key:` and `if let` are
    compile errors (`compile_fail` doc tests). Shown red first by making
    the write check and the round guard debug-only and running `--release`

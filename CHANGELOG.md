@@ -37,6 +37,9 @@ version may break things.
   reads state follows it. A prop typed `Prop<T>` follows what it is given
   (`value: name.get()`) while the component's body still runs once; given
   a constant it holds no state.
+- air: a `View` is built again each time it is placed (a dialog opened
+  again, a tab shown again, one view in two places), each place with its
+  own state, as a Dioxus `Element`; it no longer fails when placed twice.
 - air's gates, each shown failing on a planted bug first: views removed
   (or replaced by an error boundary in the same pass) leave no node,
   effect, subscription, cleanup, handler, task, page script or page node;

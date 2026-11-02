@@ -322,3 +322,27 @@ fn a_callback_prop_is_called_by_the_child_and_writes_the_parents_state() {
     p.click("pick");
     assert_eq!(p.text("picked"), "7");
 }
+
+#[test]
+fn a_view_placed_twice_or_shown_again_is_built_again_each_with_its_own_state() {
+    fn app() -> View {
+        let open = signal(|| true);
+        let v = rsx! { Counter { start: 1 } };
+        let again = v.clone();
+        rsx! {
+            div { "data-t": "a", {v.clone()} }
+            div { "data-t": "b", {again} }
+            button { "data-t": "toggle", onclick: move |_| open.toggle(), "toggle" }
+            if open.get() { section { "data-t": "c", {v.clone()} } }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let all = |p: &TestPage| [p.text("a"), p.text("b"), p.text("c")];
+    assert_eq!(all(&p), ["+1", "+1", "+1"], "three places, three builds");
+    p.click("inc");
+    assert_eq!(all(&p), ["+2", "+1", "+1"], "each its own state");
+    p.click("toggle");
+    assert!(!p.present("c"));
+    p.click("toggle");
+    assert_eq!(all(&p), ["+2", "+1", "+1"], "shown again: built again");
+}

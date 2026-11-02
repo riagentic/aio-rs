@@ -280,6 +280,12 @@ impl Attribute {
         Self { name, value }
     }
 
+    /// `name` set to `f()`, following what it reads (a control's own
+    /// attribute that a caller's may replace).
+    pub fn live<X: IntoAttr>(name: &'static str, f: impl Fn() -> X + 'static) -> Self {
+        Self::derive(name, Box::new(move || f().into_attr()))
+    }
+
     /// Its value now (untracked).
     pub fn value(&self) -> AttrValue {
         match &self.value {

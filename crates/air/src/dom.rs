@@ -137,17 +137,16 @@ pub fn take_edits() -> Vec<u8> {
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub struct Range(Option<(u32, u32)>);
 
-/// A view not built yet: built once, where it is placed. Cloning shares it;
-/// a view placed twice fails (each place needs a view of its own).
+/// A view not built yet: built where it is placed, and again each time it
+/// is placed (a dialog opened again, a tab shown again, a view placed in
+/// two places: each place gets its own build and state). Cloning shares it.
 #[derive(Clone, Default)]
-pub struct Tree(Option<Rc<RefCell<Option<Build>>>>);
-
-type Build = Box<dyn FnOnce() -> Range>;
+pub struct Tree(Option<Rc<dyn Fn() -> Range>>);
 
 impl Tree {
     #[doc(hidden)]
-    pub fn new(f: impl FnOnce() -> Range + 'static) -> Self {
-        Self(Some(Rc::new(RefCell::new(Some(Box::new(f))))))
+    pub fn new(f: impl Fn() -> Range + 'static) -> Self {
+        Self(Some(Rc::new(f)))
     }
 
     /// Nothing (`rsx! {}`).
@@ -155,20 +154,23 @@ impl Tree {
         Self(None)
     }
 
-    fn build(self) -> Range {
-        let Some(f) = self.0 else { return Range::default() };
-        let f = f.borrow_mut().take();
-        match f {
-            Some(f) => f(),
-            None => panic!(
-                "air: a view was placed twice: each place takes a view of its own (make it again, or pass a component)"
-            ),
-        }
+    fn build(&self) -> Range {
+        self.0.as_ref().map_or_else(Range::default, |f| f())
     }
 
     /// Is it nothing (`rsx! {}`, no children given)?
     pub fn is_empty(&self) -> bool {
         self.0.is_none()
+    }
+}
+
+impl PartialEq for Tree {
+    /// The same view (not the same markup).
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
     }
 }
 
@@ -212,6 +214,16 @@ impl ViewError {
     /// Is it a resource still loading (not an error)?
     pub fn is_suspended(&self) -> bool {
         matches!(self.0, Why::Suspended(_))
+    }
+}
+
+impl PartialEq for ViewError {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Why::Error(a), Why::Error(b)) => a == b,
+            (Why::Suspended(a), Why::Suspended(b)) => a == b,
+            _ => false,
+        }
     }
 }
 
@@ -805,13 +817,13 @@ pub fn ErrorBoundary(p: ErrorBoundaryProps) -> View {
     let owner = current_owner().expect("air: a boundary is made in a view");
     provide_on(owner, Catch(Rc::new(move |e| error.set_quiet(Some(e)))));
     let ErrorBoundaryProps { fallback, children } = p;
-    let children = RefCell::new(Some(children));
     Ok(Tree::new(move || {
         let (range, at) = slot();
+        let children = children.clone();
         child(
             at,
             Box::new(move || match error.get() {
-                None => children.borrow_mut().take().into_child(),
+                None => children.clone().into_child(),
                 Some(e) => untrack(|| fallback.call(e)).into_child(),
             }),
         );
@@ -837,9 +849,9 @@ pub fn Suspense(p: SuspenseProps) -> View {
     let SuspenseProps { fallback, children } = p;
     Ok(Tree::new(move || {
         let (range, at) = slot();
-        let kids = place(children);
+        let kids = place(children.clone());
         dom(|d| d.insert(at, kids));
-        let fallback = RefCell::new(Some(fallback));
+        let fallback = fallback.clone();
         let fb: Rc<Cell<Option<Range>>> = Rc::default();
         let showing = Rc::new(Cell::new(false));
         let (f, s) = (fb.clone(), showing.clone());
@@ -861,7 +873,7 @@ pub fn Suspense(p: SuspenseProps) -> View {
                 let r = match fb.get() {
                     Some(r) => r,
                     None => {
-                        let v = fallback.borrow_mut().take().unwrap_or(Ok(Tree::empty()));
+                        let v = fallback.clone();
                         let r = with_owner(owner, || place(v));
                         fb.set(Some(r));
                         r
