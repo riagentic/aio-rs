@@ -153,9 +153,9 @@ pub mod __rt {
     pub use crate::event::{
         DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ScrollData, WheelData,
     };
-    pub use crate::tree::{KeyByDebug, KeyByDisplay, KeyByNone, KeyOf};
     pub use crate::props::{
         ByMemo, ByOpt, ByProp, BySignal, ByVal, CallbackOf, GlobalAttributeNames, GlobalAttributes, IntoOpt, IntoValue,
         NoPropsBuilder, Props, Set, builder_of, spread,
     };
+    pub use crate::tree::{KeyByDebug, KeyByDisplay, KeyByNone, KeyOf};
 }

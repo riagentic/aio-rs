@@ -120,11 +120,9 @@ name = "ui"
 
 [[test]]
 name = "route"
-required-features = ["kit"]
 
 [[test]]
 name = "route_tree"
-required-features = ["kit"]
 
 [[test]]
 name = "kit"

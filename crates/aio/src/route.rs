@@ -598,11 +598,16 @@ macro_rules! router {
                 element: Option<View>,
                 children: View,
             ) -> View {
-                let at = here();
+                here();
                 // From above: this view holds its own since its first render.
                 let up = $crate::ui::parent_context::<RouteAt>().map(|r| r.0).unwrap_or_default();
                 let layout = !$crate::ui::is_empty(&children);
-                let Some(nest) = up.child(&path, index, layout, &at.path) else { return rsx! {} };
+                // Its match follows the place, and its view only a new match
+                // (on air its body runs again then; a query alone runs nothing).
+                let nest = $crate::ui::follow(move || {
+                    super::NAV.with(|n| up.child(&path, index, layout, &n.here().path))
+                });
+                let Some(nest) = nest else { return rsx! {} };
                 $crate::ui::provide_now(RouteAt(nest, layout.then(|| children.clone())));
                 match element {
                     Some(e) => e,
@@ -649,21 +654,21 @@ macro_rules! router {
                 children: View,
             ) -> View {
                 let own = onclick;
-                let at = here();
-                if $crate::route::resolve(&to, &at).is_none() {
+                if $crate::route::resolve(&to, &here()).is_none() {
                     return rsx! {
                         a { href: "{to}", target: "_blank", rel: "noopener noreferrer", class, ..attributes, {children} }
                     };
                 }
-                let on = $crate::route::is_active(&to, &at, exact);
-                let class = $crate::ui::cx(&[(&class, !class.is_empty()), (&active_class, on)]);
+                // Read where they are drawn: on air these holes alone follow the place.
+                let on = move |to: &str| super::NAV.with(|n| $crate::route::is_active(to, n.here(), exact));
+                let go_to = to.clone();
                 rsx! {
                     a {
                         href: "{to}",
-                        class,
-                        "aria-current": if on { "page" },
+                        class: $crate::ui::cx(&[(&class, !class.is_empty()), (&active_class, on(&to))]),
+                        "aria-current": on(&to).then_some("page"),
                         onclick: move |e: MouseEvent| {
-                            if let Some(f) = own {
+                            if let Some(f) = &own {
                                 f.call(e.clone());
                             }
                             let routed = e.default_action_enabled();
@@ -671,7 +676,7 @@ macro_rules! router {
                             if !routed {
                                 return;
                             }
-                            if replace { redirect(&to) } else { go(&to) };
+                            if replace { redirect(&go_to) } else { go(&go_to) };
                         },
                         ..attributes,
                         {children}
