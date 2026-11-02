@@ -457,6 +457,7 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     const AIO_CELLS: &'static [compat::data::Slice] = &[];
     /// The `#[aio_cell]` field `field` as JSON (`None`: not one): a commit
     /// serializes only the slices that changed (aio's per-cell serialization cache).
+    #[doc(hidden)]
     #[cfg(not(target_arch = "wasm32"))]
     fn slice_json(&self, field: &str) -> Option<serde_json::Result<Value>> {
         let _ = field;
