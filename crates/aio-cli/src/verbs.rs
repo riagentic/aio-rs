@@ -97,7 +97,8 @@ other edit builds anew and the tabs reload",
         "smoke <artifact>",
         "start a window app's Linux bundle, .deb or AppImage headless as a user would,
 then stop it: its boot time, its window's memory (PSS of the app and its
-runtime), a clean stop, nothing left running (as ax build --smoke does)",
+runtime), a clean stop, nothing left running (as ax build --smoke does);
+a macOS app's zip on a Mac, a Windows bundle on Windows (AIO_WINDOWS_SSH)",
     ),
     v(
         "build",
@@ -113,8 +114,10 @@ every one, what this machine can't build said with why and left out;
 crates take its space (over budget: always); size it so, not with a plain
 `cargo build --release` (no ax link flags: some % bigger);
 --smoke ([build] smoke: always): then start each Linux bundle, .deb
-and AppImage headless, stop it, check its log; a Windows bundle on
-Windows (AIO_WINDOWS_SSH: one over ssh), stopped with <app> --quit;
+and AppImage headless, stop it, check its log; a macOS app's zip on
+the Mac that built it (here, or [build.macos] host / AIO_MACOS_SSH); a
+Windows bundle on Windows (AIO_WINDOWS_SSH: one over ssh), stopped with
+<app> --quit;
 --deb: a Debian package ([app] maintainer); --appimage: one portable file;
 --android: signed APKs instead (the app's lib calls android_app!; --debug:
 debug APKs, the page in chrome://inspect);
@@ -303,9 +306,10 @@ the window's DevTools protocol as for ax shot",
         "the running app's mounted components, nested, each with its key,
 how many times its body ran and how many times its holes wrote (aio
 DevTools' tree and profile; a body runs once, a change runs only the holes
-that read it); --renders: its last 200 renders as they happened, where the
-app keeps them (aio DevTools' render events); --json: all of it as JSON. A
-dev build's, through its own door",
+that read it); --renders: its last 200 renders as they happened, timed:
+each body's run and each hole's rewrite, by component and key (aio
+DevTools' render events); --json: all of it as JSON. A dev build's,
+through its own door",
     ),
     v(
         "surface",

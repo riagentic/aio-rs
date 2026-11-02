@@ -999,7 +999,10 @@ fn run(args: &[String]) -> Out {
             let file = Path::new(artifact);
             let id =
                 smoke::id_of(file).ok_or_else(|| format!("{artifact}: not <id>-<version>-… as ax build names it"))?;
-            smoke::run(file, id, smoke::Wait::Window)
+            match smoke::is_windows_zip(file) {
+                true => smoke::windows(file, id, smoke::Wait::Window),
+                false => smoke::run(file, id, smoke::Wait::Window),
+            }
         }
         ("build", [app]) if has("--list") => build::list(app),
         ("build", [app]) if has("--sizes") => build::sizes_of(app),

@@ -580,6 +580,7 @@ pub fn run(artifact: &Path, id: &str, wait: Wait) -> Result<String, String> {
     for pid in &left {
         _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
     }
+    forget_starts(&aio_shell::runtime::root(), &dir);
     let r = report(id, wait, &Seen { booted, answer, stop, left, log: read_log(), memory }, "SIGTERM");
     match artifact.extension().is_some_and(|x| x == "deb") {
         true => with_package(r, &desktop_problems(&dir.join("unpack"), id)),
@@ -587,11 +588,34 @@ pub fn run(artifact: &Path, id: &str, wait: Wait) -> Result<String, String> {
     }
 }
 
+/// The shared runtime store's records of the programs started from
+/// `sandbox` (the smoke's own starts: `apps/<key>-<version>.json`) go, and
+/// a macOS window bundle they name that no other record names.
+pub fn forget_starts(store: &Path, sandbox: &Path) {
+    let Ok(all) = aio_shell::prune::uses(store) else { return };
+    let real = sandbox.canonicalize().ok();
+    let ours = |u: &aio_shell::prune::Use| {
+        let exe = Path::new(&u.exe);
+        exe.starts_with(sandbox) || real.as_ref().is_some_and(|r| exe.starts_with(r))
+    };
+    for (file, u, _) in &all {
+        let Some(u) = u.as_ref().filter(|u| ours(u)) else { continue };
+        _ = std::fs::remove_file(file);
+        let named_else = |w: &String| {
+            all.iter().any(|(_, o, _)| o.as_ref().is_some_and(|o| !ours(o) && o.window.as_ref() == Some(w)))
+        };
+        if let Some(w) = u.window.as_ref().filter(|w| !named_else(w)) {
+            _ = std::fs::remove_dir_all(w);
+        }
+    }
+}
+
 /// The PowerShell that smoke-tests `zip` (already in `sandbox`, a fresh
 /// folder) of app `id` on Windows, and says what it saw ([`seen_of`]): the
 /// bundle unpacked there, started with its data there, asked to stop with
-/// `--quit`; its door's folder in `%TEMP%\aio-rt` and the sandbox go
-/// again, pass or fail. Pure.
+/// `--quit`; its door's folder in `%TEMP%\aio-rt`, its record in the
+/// runtime store's app list ([`forget_starts`]) and the sandbox go again,
+/// pass or fail. Pure.
 pub fn windows_script(sandbox: &str, zip: &str, id: &str, wait: Wait) -> String {
     let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let args = wait.args().iter().map(|a| q(a)).collect::<Vec<_>>().join(",");
@@ -647,6 +671,10 @@ try {{
 }} finally {{
   if ($p -and -not $p.HasExited) {{ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }}
   Get-ChildItem -LiteralPath $doors -Directory -Filter "$id-*" -ErrorAction SilentlyContinue | Where-Object {{ $had -notcontains $_.Name }} | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  $store = if ($env:AIO_SHARED_ELECTRON_DIR) {{ $env:AIO_SHARED_ELECTRON_DIR }} else {{ Join-Path $env:LOCALAPPDATA 'aio\electron' }}
+  Get-ChildItem -LiteralPath (Join-Path $store 'apps') -File -Filter '*.json' -ErrorAction SilentlyContinue | Where-Object {{
+    try {{ "$((Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json).exe)".StartsWith("$sb\", [StringComparison]::OrdinalIgnoreCase) }} catch {{ $false }}
+  }} | Remove-Item -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 500
   Remove-Item -LiteralPath $sb -Recurse -Force -ErrorAction SilentlyContinue
 }}
@@ -948,14 +976,49 @@ while :; do sleep 0.1; done"#,
             "$_.CommandLine.Contains($sb)",
             "Remove-Item -LiteralPath $sb -Recurse -Force",
             "Where-Object { $had -notcontains $_.Name } | Remove-Item",
+            r#"Get-ChildItem -LiteralPath (Join-Path $store 'apps') -File -Filter '*.json'"#,
+            r#".StartsWith("$sb\", [StringComparison]::OrdinalIgnoreCase)"#,
         ] {
             assert!(ps.contains(part), "{part}\n{ps}");
         }
         assert!(ps.find("} finally {").unwrap() < ps.find("Remove-Item -LiteralPath $sb").unwrap(), "pass or fail");
+        assert!(ps.find("} finally {").unwrap() < ps.find("(Join-Path $store 'apps')").unwrap(), "pass or fail");
         let server = windows_script("C:\\t\\s", "a.zip", "it's", Wait::Boot);
         assert!(server.contains("$id = 'it''s'") && server.contains("$args = @('--port=0')"));
         assert!(server.contains("if ($null -ne (Pid-Of))"));
         assert!(windows_script("C:\\t", "a.zip", "relay", Wait::Answer).contains("$args = @('--version')"));
+    }
+
+    #[test]
+    fn a_smoke_forgets_its_own_starts_in_the_runtime_store_and_nothing_else() {
+        use aio_shell::prune::{Use, record, uses};
+        let t = tempfile::tempdir().unwrap();
+        let (store, sb) = (t.path().join("store"), t.path().join("aio-smoke-notes-7"));
+        let win = |n: &str| store.join("windows").join(n).to_string_lossy().into_owned();
+        let at = |exe: &Path, window: Option<String>| Use {
+            exe: exe.to_string_lossy().into(),
+            version: "44.9.3".into(),
+            slug: "linux-x64".into(),
+            window,
+            pending: false,
+        };
+        for w in ["notes", "mine"] {
+            std::fs::create_dir_all(win(w)).unwrap();
+        }
+        record(&store, &at(&sb.join("unpack/notes/notes"), Some(win("notes")))).unwrap();
+        record(&store, &at(&sb.join("unpack/Mine.app/x"), Some(win("mine")))).unwrap();
+        record(&store, &at(Path::new("/opt/notes/notes"), Some(win("notes")))).unwrap();
+        record(&store, &at(&t.path().join("aio-smoke-notes-70/x"), None)).unwrap();
+        forget_starts(&store, &sb);
+        let mut left: Vec<PathBuf> =
+            uses(&store).unwrap().into_iter().map(|(_, u, _)| PathBuf::from(u.unwrap().exe)).collect();
+        left.sort();
+        let mut want = vec![t.path().join("aio-smoke-notes-70/x"), PathBuf::from("/opt/notes/notes")];
+        want.sort();
+        assert_eq!(left, want, "the installed app's and another sandbox's stay");
+        assert!(Path::new(&win("notes")).is_dir(), "a window another record names stays");
+        assert!(!Path::new(&win("mine")).exists(), "the smoke's own window goes");
+        forget_starts(&t.path().join("none"), &sb);
     }
 
     #[test]

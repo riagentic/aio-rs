@@ -834,9 +834,10 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
         match (here.is_empty(), on_mac) {
             (true, true) => return Ok(out.join("\n")),
             (true, false) => {
-                return Err("--smoke starts a Linux bundle, .deb or AppImage, or a macOS server's or CLI's \
-                            bundle, of this machine: build one there; a Windows bundle on Windows \
-                            (AIO_WINDOWS_SSH names one)"
+                return Err("--smoke starts a Linux bundle, .deb or AppImage, or a macOS app's zip or a \
+                            server's or CLI's bundle, of this machine: build one there (a macOS one \
+                            on its Mac: [build.macos] host or AIO_MACOS_SSH); a Windows bundle on \
+                            Windows (AIO_WINDOWS_SSH names one)"
                     .into());
             }
             _ => {}

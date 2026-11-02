@@ -34,12 +34,17 @@ impl Views {
 
 /// A dev build's mounted components of every open window (`Aio.components`,
 /// `ax components`): each one's name, key, body runs (`renders`), its own
-/// holes' rewrites (`updates`) and its children, as of the last flush.
+/// holes' rewrites (`updates`) and its children, as of the last flush; the
+/// windows' last renders, oldest first (`renders`, `ax components --renders`),
+/// and how many they rendered in all (`total`).
 pub(crate) fn components() -> aio::serde_json::Value {
-    let all: Vec<_> =
-        on_air::TREES.lock().unwrap_or_else(|e| e.into_inner()).iter().flat_map(|t| t.1.clone()).collect();
-    let total: u64 = all.iter().map(on_air::runs).sum();
-    aio::serde_json::json!({ "components": all, "renders": [], "total": total })
+    let t = on_air::TREES.lock().unwrap_or_else(|e| e.into_inner());
+    let all: Vec<_> = t.iter().flat_map(|w| w.tree.clone()).collect();
+    let mut renders: Vec<_> = t.iter().flat_map(|w| w.renders.clone()).collect();
+    renders.sort_by_key(|r| r["at"].as_u64());
+    let cut = renders.len().saturating_sub(air::RENDERS_KEPT);
+    let total: u64 = t.iter().map(|w| w.total).sum();
+    aio::serde_json::json!({ "components": all, "renders": &renders[cut..], "total": total })
 }
 
 /// `ax dev`'s hot reload (the door's `Aio.hot`): `markup` for the
@@ -60,8 +65,17 @@ pub(crate) mod on_air {
     /// Each open window's way to be told to build its views again.
     static WINDOWS: Mutex<Vec<UnboundedSender<()>>> = Mutex::new(Vec::new());
 
-    /// A dev build's component trees, one per open window (its thread's id).
-    pub(super) static TREES: Mutex<Vec<(std::thread::ThreadId, Vec<Value>)>> = Mutex::new(Vec::new());
+    /// What a dev build keeps of each open window (by its thread's id): its
+    /// component tree, its last renders and how many it rendered in all.
+    pub(super) static TREES: Mutex<Vec<Shown>> = Mutex::new(Vec::new());
+
+    /// One open window's.
+    pub(super) struct Shown {
+        thread: std::thread::ThreadId,
+        pub tree: Vec<Value>,
+        pub renders: Vec<Value>,
+        pub total: u64,
+    }
 
     /// One component and its children as `Aio.components` says them (pure).
     fn json(c: air::Mounted) -> Value {
@@ -69,18 +83,18 @@ pub(crate) mod on_air {
         aio::serde_json::json!({ "name": c.name, "key": c.key, "renders": c.renders, "updates": c.updates, "children": children })
     }
 
-    /// A tree's body runs and hole rewrites, all of it.
-    pub(super) fn runs(v: &Value) -> u64 {
-        let own = v["renders"].as_u64().unwrap_or(0) + v["updates"].as_u64().unwrap_or(0);
-        own + v["children"].as_array().map_or(0, |c| c.iter().map(runs).sum())
+    /// One render as `Aio.components` says it (pure); the root's own view is "root".
+    fn render(r: air::Render) -> Value {
+        let component = if r.component.is_empty() { "root" } else { r.component };
+        aio::serde_json::json!({ "component": component, "key": r.key, "at": r.at, "ms": r.ms, "trigger": r.trigger })
     }
 
-    /// This window's tree, kept for the door (a dev build's), or dropped as it goes.
-    fn keep_tree(tree: Option<Vec<Value>>) {
-        let me = std::thread::current().id();
+    /// This window's tree and renders, kept for the door (a dev build's), or dropped as it goes.
+    fn keep_tree(kept: Option<(Vec<Value>, Vec<Value>, u64)>) {
+        let thread = std::thread::current().id();
         let mut t = TREES.lock().unwrap_or_else(|e| e.into_inner());
-        t.retain(|(id, _)| *id != me);
-        t.extend(tree.map(|tree| (me, tree)));
+        t.retain(|w| w.thread != thread);
+        t.extend(kept.map(|(tree, renders, total)| Shown { thread, tree, renders, total }));
     }
 
     /// Drops this window's tree when its pump ends, however it ends.
@@ -135,7 +149,12 @@ pub(crate) mod on_air {
             let edits = root.take_edits();
             if !edits.is_empty() {
                 if cfg!(debug_assertions) {
-                    keep_tree(Some(root.within(air::components).into_iter().map(json).collect()));
+                    let (tree, (renders, total)) = root.within(|| (air::components(), air::renders()));
+                    keep_tree(Some((
+                        tree.into_iter().map(json).collect(),
+                        renders.into_iter().map(render).collect(),
+                        total,
+                    )));
                 }
                 to_page.send(edits).await.map_err(|_| "the page is gone".to_string())?;
             }
@@ -230,5 +249,38 @@ mod tests {
         air::hot::clear_markup();
         drop(page);
         window.await.unwrap().unwrap();
+    }
+
+    #[aio::ui::prelude::component]
+    fn Logged() -> View {
+        use aio::ui::prelude::*;
+        let n = signal(|| 0u32);
+        task(move || async move { n.set(1) });
+        rsx! { p { "logged {n}" } }
+    }
+
+    #[tokio::test]
+    async fn the_door_says_the_windows_last_renders_as_they_happened() {
+        use aio::ui::prelude::*;
+        let (ours, page) = tokio::io::duplex(1 << 20);
+        let window = tokio::spawn(async move { Views::new().launch(Box::new(ours), || rsx! { Logged {} }).await });
+        let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
+        let mut page = Framed::new(page, codec);
+        let ours = || -> Vec<String> {
+            let c = components();
+            let r = c["renders"].as_array().unwrap().iter().filter(|r| r["component"] == "Logged");
+            r.map(|r| format!("{} {}", r["trigger"].as_str().unwrap(), r["ms"].is_f64() && r["at"].as_u64() > Some(0)))
+                .collect()
+        };
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ours().len() < 2 {
+            assert!(std::time::Instant::now() < end, "no renders logged: {}", components());
+            _ = tokio::time::timeout(std::time::Duration::from_millis(100), page.next()).await;
+        }
+        assert_eq!(ours(), ["mount true", "signal true"], "its body's run, then its hole's rewrite");
+        assert!(components()["total"].as_u64() >= Some(2));
+        drop(page);
+        window.await.unwrap().unwrap();
+        assert!(ours().is_empty(), "a closed window's renders go with it");
     }
 }

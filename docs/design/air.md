@@ -611,8 +611,10 @@ as on air.
   `e.modifiers()`, `e.value()`, `e.client_coordinates()`, …), so handler
   code is the same; `prevent_default()` can't reach the page in time on
   either (the page keeps keys with `data-aio-prevent`; a handled `submit`
-  and a handled link click never navigate). Not decoded yet: files, a
-  drag's data, touch lists (step 2, with the kit's file inputs).
+  and a handled link click never navigate). A file input's picked
+  files come whole (`e.files()`: name, size, type, `read_bytes().await`),
+  read by the page before it sends the event. Not decoded yet: a drag's
+  files, touch lists.
 - **`MountedData`** on air: `set_focus`, `scroll_to`, `scroll`,
   `get_client_rect`, and `run` / `eval` (a script with the element as
   `el`: a canvas, a video, a selection), as page calls on the element
@@ -869,9 +871,9 @@ on both: air's renderer saves 0.47 MB of it.
   air alone; the tests that counted a body's re-runs count its holes'
   `updates`.
 - Left for after 0.2.0, said where they show: no hot-patch on Windows
-  (a Rust edit rebuilds and restarts), `ax components` has no time per
-  component and no `--renders` log, a file input's files aren't in a
-  form's data yet.
+  (a Rust edit rebuilds and restarts). `ax components --renders` is air's
+  render log (each body run and hole rewrite, timed); a file input's files
+  reach its `change` and its form's `submit` (`e.files()`).
 
 ## Plan for 0.2.0
 

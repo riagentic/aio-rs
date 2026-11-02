@@ -460,10 +460,12 @@ pub(crate) fn render(mut f: impl FnMut() + 'static) {
     let mut first = true;
     effect_of(Kind::Render, move || {
         let _in = crate::tree::enter(c);
-        if !std::mem::take(&mut first) {
-            crate::tree::updated(c);
+        if std::mem::take(&mut first) {
+            return f();
         }
-        f()
+        let t0 = crate::tree::start();
+        f();
+        crate::tree::updated(c, t0);
     });
 }
 

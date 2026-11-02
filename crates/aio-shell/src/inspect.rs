@@ -80,8 +80,9 @@ impl Relay {
 }
 
 /// The door's own method: the running view's component tree,
-/// `{"components": [{name, renders, ms, children}]}`, its last renders,
-/// `"renders": [{component, at, ms, trigger}]`, and `"total"` renders.
+/// `{"components": [{name, key, renders, updates, children}]}`, its last
+/// renders, `"renders": [{component, key, at, ms, trigger}]` (a dev build's),
+/// and `"total"` renders.
 pub const COMPONENTS: &str = "Aio.components";
 
 /// The door's own method: `ax dev`'s template hot reload. Its params:

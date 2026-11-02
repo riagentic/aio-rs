@@ -26,7 +26,15 @@ air::Event::map: fn map<U>(&self, f: impl FnOnce(&T) -> U) -> Event<U>
 air::Event::new: fn new(data: T) -> Self
 air::Event::prevent_default: fn prevent_default(&self)
 air::Event::stop_propagation: fn stop_propagation(&self)
+air::FileData::content_type: fn content_type(&self) -> Option<String>
+air::FileData::field: fn field(&self) -> String
+air::FileData::last_modified: fn last_modified(&self) -> u64
+air::FileData::name: fn name(&self) -> String
+air::FileData::read_bytes: async fn read_bytes(&self) -> std::io::Result<Vec<u8>>
+air::FileData::read_string: async fn read_string(&self) -> std::io::Result<String>
+air::FileData::size: fn size(&self) -> u64
 air::FormData::checked: fn checked(&self) -> bool
+air::FormData::files: fn files(&self) -> Vec<FileData>
 air::FormData::value: fn value(&self) -> String
 air::FormData::values: fn values(&self) -> Vec<(String, String)>
 air::Fragment: fn Fragment(p: FragmentProps) -> View
@@ -132,6 +140,7 @@ air::Raw.composing: bool
 air::Raw.ctrl: bool
 air::Raw.delta: [f64; 3]
 air::Raw.delta_mode: u8
+air::Raw.files: Vec<FileData>
 air::Raw.ids: Vec<u32>
 air::Raw.key: String
 air::Raw.location: u8
@@ -148,6 +157,11 @@ air::Raw.value: String
 air::Raw.values: Vec<(String, String)>
 air::Raw::decode: fn decode(b: &[u8]) -> Option<Raw>
 air::Raw::encode: fn encode(&self) -> Vec<u8>
+air::Render.at: u64
+air::Render.component: &'static str
+air::Render.key: Option<String>
+air::Render.ms: f64
+air::Render.trigger: &'static str
 air::ResizeData::get_border_box_size: fn get_border_box_size(&self) -> Result<geometry::PixelsSize, String>
 air::ResizeData::get_content_box_size: fn get_content_box_size(&self) -> Result<geometry::PixelsSize, String>
 air::Resource::get: fn get(&self) -> Option<T> where T: Clone
@@ -266,6 +280,7 @@ air::once: fn once<T: Clone + 'static>(f: impl FnOnce() -> T) -> T
 air::provide: fn provide<T: Clone + 'static>(f: impl FnOnce() -> T) -> T
 air::provide_now: fn provide_now<T: Clone + 'static>(v: T) -> T
 air::provide_root: fn provide_root<T: Clone + 'static>(v: T) -> T
+air::renders: fn renders() -> (Vec<Render>, u64)
 air::resource: fn resource<T: 'static, F: Future<Output = T> + 'static>(f: impl FnMut() -> F + 'static) -> Resource<T>
 air::run_tasks: fn run_tasks() -> usize
 air::scope: fn scope<R>(f: impl FnOnce() -> R) -> (R, Owner)
@@ -303,6 +318,7 @@ air::untrack: fn untrack<R>(f: impl FnOnce() -> R) -> R
 air::watch: fn watch<D: Clone + PartialEq + 'static>(deps: D, f: impl FnMut(D) + 'static)
 air::with_owner: fn with_owner<R>(owner: Owner, f: impl FnOnce() -> R) -> R
 const air::PAGE_JS: &str
+const air::RENDERS_KEPT: usize
 enum air::AttrValue
 enum air::Child
 enum air::MouseButton
@@ -316,6 +332,7 @@ impl Clone for DataTransfer
 impl Clone for DragData
 impl Clone for ElementPoint
 impl Clone for Eval
+impl Clone for FileData
 impl Clone for FormData
 impl Clone for KeyboardData
 impl Clone for Live
@@ -333,6 +350,7 @@ impl Clone for PlainData
 impl Clone for PointerData
 impl Clone for Raw
 impl Clone for Rect
+impl Clone for Render
 impl Clone for ResizeData
 impl Clone for ScreenPoint
 impl Clone for ScrollBehavior
@@ -366,6 +384,7 @@ impl Debug for DataTransfer
 impl Debug for DragData
 impl Debug for ElementPoint
 impl Debug for Eval
+impl Debug for FileData
 impl Debug for FormData
 impl Debug for KeyboardData
 impl Debug for Live
@@ -383,6 +402,7 @@ impl Debug for PlainData
 impl Debug for PointerData
 impl Debug for Raw
 impl Debug for Rect
+impl Debug for Render
 impl Debug for ResizeData
 impl Debug for ScreenPoint
 impl Debug for ScrollBehavior
@@ -398,6 +418,7 @@ impl Default for ClientPoint
 impl Default for DataTransfer
 impl Default for DragData
 impl Default for ElementPoint
+impl Default for FileData
 impl Default for FormData
 impl Default for KeyboardData
 impl Default for Live
@@ -452,6 +473,7 @@ impl PartialEq for DataTransfer
 impl PartialEq for DragData
 impl PartialEq for ElementPoint
 impl PartialEq for Eval
+impl PartialEq for FileData
 impl PartialEq for FormData
 impl PartialEq for KeyboardData
 impl PartialEq for Live
@@ -469,6 +491,7 @@ impl PartialEq for PlainData
 impl PartialEq for PointerData
 impl PartialEq for Raw
 impl PartialEq for Rect
+impl PartialEq for Render
 impl PartialEq for ResizeData
 impl PartialEq for ScreenPoint
 impl PartialEq for ScrollBehavior
@@ -489,6 +512,7 @@ impl StructuralPartialEq for DataTransfer
 impl StructuralPartialEq for DragData
 impl StructuralPartialEq for ElementPoint
 impl StructuralPartialEq for Eval
+impl StructuralPartialEq for FileData
 impl StructuralPartialEq for FormData
 impl StructuralPartialEq for KeyboardData
 impl StructuralPartialEq for Live
@@ -506,6 +530,7 @@ impl StructuralPartialEq for PlainData
 impl StructuralPartialEq for PointerData
 impl StructuralPartialEq for Raw
 impl StructuralPartialEq for Rect
+impl StructuralPartialEq for Render
 impl StructuralPartialEq for ResizeData
 impl StructuralPartialEq for ScreenPoint
 impl StructuralPartialEq for ScrollBehavior
@@ -576,6 +601,7 @@ struct air::DragData
 struct air::ErrorBoundaryProps
 struct air::Eval
 struct air::Event<T>
+struct air::FileData
 struct air::FormData
 struct air::FragmentProps
 struct air::Global<T: 'static>
@@ -593,6 +619,7 @@ struct air::PlainData
 struct air::PointerData
 struct air::Raw
 struct air::ReadGuard<T: 'static>
+struct air::Render
 struct air::ResizeData
 struct air::Resource<T>
 struct air::Root

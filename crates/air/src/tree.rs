@@ -5,10 +5,12 @@
 //! of its holes wrote its part of the page again (`updates`: air's
 //! re-render). Counts cost an increment, as in aio; the tree is walked only
 //! when asked. The page's ids of each one's first and last node let a test
-//! find what a component drew (`TestUi::find`).
+//! find what a component drew (`TestUi::find`). A debug build also logs
+//! the last [`RENDERS_KEPT`] renders as they happened ([`renders`], aio
+//! DevTools' `renders`): each body run and hole rewrite, timed.
 use crate::reactive::Frame;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 
 /// A component instance's slot: its index and the generation of that index.
@@ -36,6 +38,71 @@ struct Tree {
     seq: u64,
     /// Each root's own view's frame (the app's body), by root.
     roots: HashMap<u32, Weak<Frame>>,
+    /// The last renders (debug builds), each with its root; and each
+    /// root's count of them all.
+    log: VecDeque<(u32, Render)>,
+    logged: HashMap<u32, u64>,
+}
+
+/// How many renders [`renders`] keeps (aio DevTools' `MAX_RENDER_EVENTS`).
+pub const RENDERS_KEPT: usize = 200;
+
+/// One render as it happened ([`renders`]; aio DevTools' `RenderEvent`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Render {
+    /// The component's name; "" for the root's own view (the app's body).
+    pub component: &'static str,
+    pub key: Option<String>,
+    /// When it ended, in ms since the Unix epoch.
+    pub at: u64,
+    /// How long it took (a body's run: the children it placed included).
+    pub ms: f64,
+    /// `"mount"`: its body's first run; `"signal"`: a state change ran its
+    /// body again (a wait, a `follow`) or one of its holes.
+    pub trigger: &'static str,
+}
+
+/// Log a render that started at `t0` (debug builds; the release's views pay nothing).
+fn log(id: Option<Id>, t0: std::time::Instant, trigger: &'static str) {
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let (component, key) = with(id, |c| (c.name, c.key.clone())).unwrap_or(("", None));
+    let root = crate::reactive::current_root();
+    TREE.with_borrow_mut(|t| {
+        if t.log.len() == RENDERS_KEPT {
+            t.log.pop_front();
+        }
+        t.log.push_back((root, Render { component, key, at, ms, trigger }));
+        *t.logged.entry(root).or_default() += 1;
+    });
+}
+
+/// The time a render starts at, where renders are logged: debug builds,
+/// but in a browser's wasm (no clock there: `Instant::now` panics).
+pub(crate) fn start() -> Option<std::time::Instant> {
+    cfg!(all(debug_assertions, not(target_arch = "wasm32"))).then(std::time::Instant::now)
+}
+
+/// Root `root` is gone: its log and its view's frame go too.
+pub(crate) fn end_root(root: u32) {
+    _ = TREE.try_with(|t| {
+        let mut t = t.borrow_mut();
+        t.log.retain(|(r, _)| *r != root);
+        t.logged.remove(&root);
+        t.roots.remove(&root);
+    });
+}
+
+/// The current root's last renders, oldest first (at most [`RENDERS_KEPT`],
+/// fewer where other roots of the thread rendered since), and how many it
+/// rendered in all. Logged in debug builds only (not a browser's wasm):
+/// a release's is empty.
+pub fn renders() -> (Vec<Render>, u64) {
+    let root = crate::reactive::current_root();
+    TREE.with_borrow(|t| {
+        let kept = t.log.iter().filter(|(r, _)| *r == root).map(|(_, e)| e.clone()).collect();
+        (kept, t.logged.get(&root).copied().unwrap_or(0))
+    })
 }
 
 thread_local! {
@@ -109,17 +176,24 @@ pub(crate) fn enter(id: Option<Id>) -> Enter {
     Enter(CURRENT.replace(id))
 }
 
-/// Its body ran; its view is the page's nodes `first..=last`.
-pub(crate) fn rendered(id: Id, nodes: Option<(u32, u32)>) {
-    with(Some(id), |c| {
+/// Its body ran (from `t0`); its view is the page's nodes `first..=last`.
+pub(crate) fn rendered(id: Id, nodes: Option<(u32, u32)>, t0: Option<std::time::Instant>) {
+    let first = with(Some(id), |c| {
         c.renders += 1;
         c.nodes = nodes;
+        c.renders == 1
     });
+    if let (Some(first), Some(t0)) = (first, t0) {
+        log(Some(id), t0, if first { "mount" } else { "signal" });
+    }
 }
 
-/// One of its holes wrote the page again.
-pub(crate) fn updated(id: Option<Id>) {
+/// One of its holes wrote the page again (from `t0`).
+pub(crate) fn updated(id: Option<Id>, t0: Option<std::time::Instant>) {
     with(id, |c| c.updates += 1);
+    if let Some(t0) = t0 {
+        log(id, t0, "signal");
+    }
 }
 
 /// The frame of component `id` (none: the current root's own view).
