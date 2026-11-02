@@ -21,6 +21,10 @@
 **aio-rs is early ALPHA.** 0.1.0 is its first release; until 1.0.0 a
 minor version may break things ([versions](docs/basics/versioning.md)).
 
+**Read first: [when to use aio-rs, and when not](docs/basics/when.md).**
+Yes for an app with a window and state; no for SEO pages, a CDN or the
+edge. Pin a release tag; experimental parts are marked there.
+
 ### aio or aio-rs?
 
 aio-rs is the Rust successor of [aio](https://github.com/riagentic/aio),
@@ -48,8 +52,9 @@ ax setup                                             # checks the machine, fetch
 ```
 
 Or a prebuilt `ax` for Linux x86_64 (Windows x86_64: `install.ps1` from
-the [release](https://github.com/riagentic/aio-rs/releases/tag/v0.1.0)),
-each archive's SHA-256 pinned in the installer:
+the [release](https://github.com/riagentic/aio-rs/releases/tag/v0.1.0);
+macOS arm64 and x86_64 from the next release on), each archive's SHA-256
+pinned in the installer:
 
 ```sh
 curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.1.0/install.sh | sh   # then runs ax setup
@@ -174,11 +179,14 @@ plain Rust: [why aio-rs](docs/basics/why.md).
   Linux (fmt, dependency and docs checks, clippy for every feature set,
   wasm, Windows and Android, the whole test suite, a measured template
   app) and the Windows lane on a real Windows machine; the Mac runs the
-  workspace tests and smoke-tests the template app; the template's APK
-  is started on an emulator. Not gated: a physical Android device and
+  workspace tests and smoke-tests the template app; the Android gate
+  (`scripts/android-gate`) starts a sample APK on an emulator and upgrades
+  it with its data kept; GitHub CI installs a sample app on Linux, macOS
+  and Windows, updates it through a signed patch and rolls a broken
+  update back (`scripts/update-proof`). The README's numbers rerun with
+  `scripts/numbers`. Not gated: a physical Android device and
   OS-signing of bundles (SmartScreen and Gatekeeper warn on first start).
-- 🚧 **Not there yet.** No prebuilt `ax` for macOS (build from source),
-  no iOS, crates not on crates.io (apps build on a checkout), no
+- 🚧 **Not there yet.** No iOS, crates not on crates.io (apps build on a checkout), no
   hot-patching in the web build or on Android. A Rust edit recompiles its
   crate: keep a big app in several crates
   ([what an edit costs](docs/build/README.md#what-an-edit-costs)).

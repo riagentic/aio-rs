@@ -126,7 +126,7 @@ text = "{title}"
   `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`
   (`--platforms` for one run). A macOS bundle is made on a Mac:
   `[build.macos] host` (or `AIO_MACOS_SSH`) names one over ssh.
-- `budget_mb`: the desktop binary's size budget (default 10); a build
+- `budget_mb`: the desktop binary's size budget (default 10, 15 on Windows); a build
   above it fails and names the crates that take the space. Size with
   `--sizes`, not a plain `cargo build --release` (it lacks ax's link
   flags and is bigger).
@@ -165,7 +165,7 @@ tree under `dist/<channel>/` ([release](release.md)).
 - The release binary says the version the build gave it: a launcher that
   passes `env!("CARGO_PKG_VERSION")` instead of `aio::app_version!()` to
   `aio_shell::start` is refused (its updates would never match).
-- It is within its budget (`budget_mb`; 10 MB, a server 6 MB), else it
+- It is within its budget (`budget_mb`; 10 MB, a server 6 MB, each half again on Windows), else it
   isn't packed and the crates that take the space are listed.
 - It holds no path of the build machine's home (a shipped binary never
   names who built it).

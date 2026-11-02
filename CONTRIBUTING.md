@@ -102,34 +102,45 @@ How aio-rs itself is released and what signs it. An app's own releases
 
 ### Make a release
 
-Set the version (below), then, in a clean checkout of the commit to
-release:
+Set the version (below), then, on the commit to release:
 
-1. **Gates**: `./ci.sh` green, with the Windows lane (`AIO_CI_WINDOWS`)
-   and the web build's browser test; the Mac's `cargo test --workspace`;
-   the template app's APK started on an emulator.
-2. **Mac** (macOS builds only on a Mac): `ax release --aio --dir <d>` makes
-   `aio-rs-<version>-aarch64-apple-darwin.tar.gz` (`ax` inside), signed and
-   notarized when the macOS keys are set. Copy it into the Linux release
-   folder.
-3. **Template app** (the app pipeline proven on each OS): in a throwaway
+1. **Gates**, each green on that commit:
+   - `./ci.sh`, with the Windows lane (`AIO_CI_WINDOWS`) and the web
+     build's browser test; the Mac's `cargo test --workspace`;
+   - GitHub CI on the pull request or `main`: the tests on Linux, Windows
+     and macOS, and `update-proof` on each (a sample app installed,
+     updated through a signed patch, a broken update rolled back with its
+     data: `scripts/update-proof`);
+   - **the Android gate**, required: `scripts/android-gate` (a throwaway
+     emulator on port 5600; a sample APK started, upgraded in place, its
+     data kept; [ci](docs/build/ci.md#the-android-gate));
+   - a dry run of the release workflow (Actions → release → Run
+     workflow): every archive built, smoked and installed by the one-line
+     installer on its OS, the files as the artifact `aio-rs-release`.
+2. **Template app** (the app pipeline proven on each OS): in a throwaway
    folder, `ax create template`, `git init` and one commit (the build
    number), then on Linux `ax build template --deb --appimage --smoke`,
    `--windows` and `--android`; on the Mac `ax build template --smoke`.
-   Keep the packages out of the release folder (`SHA256SUMS` covers
-   every file in it).
-4. **Linux, last**: `ax release --aio --windows --dir dist/v<version>`
-   builds the Linux and Windows archives, pins every aio-rs archive in the
-   folder (the Mac's too) in `install.sh` / `install.ps1`, writes
-   `SHA256SUMS` over every file in the folder and signs it.
-5. **Check**: `cd dist/v<version> && sha256sum -c SHA256SUMS`.
-6. **Tag and publish**: `git tag -a v<version> -m "aio-rs <version>"`,
-   `git push origin v<version>`, then attach every file of the folder to
-   the tag's GitHub release:
-   `gh release create v<version> --repo riagentic/aio-rs dist/v<version>/*`.
-   The installers download from there
+3. **Tag**: `git tag -a v<version> -m "aio-rs <version>"`,
+   `git push origin v<version>`. The release workflow
+   (`.github/workflows/release.yml`) builds `ax` on macOS (arm64 and
+   x86_64, each on its own runner), then on Linux the Linux and Windows
+   archives, pins every archive in `install.sh` / `install.ps1`, writes
+   `SHA256SUMS` (signed when the repository secret `AIO_RELEASE_KEY`
+   holds the update key file), installs it on each OS and makes a
+   **draft** release with every file. A tag that isn't the version
+   fails it.
+4. **Check and publish**: download the draft's files,
+   `sha256sum -c SHA256SUMS`, then publish the draft. The installers
+   download from there
    (`https://github.com/riagentic/aio-rs/releases/download/v<version>/`,
    the default of `--url`).
+
+By hand instead (OS signing needs it: the workflow holds no Windows
+certificate or Apple identity): on a Mac `ax release --aio --dir <d>`,
+copy the archive into the Linux folder, then on Linux
+`ax release --aio --windows --dir dist/v<version>`, check, and
+`gh release create v<version> --repo riagentic/aio-rs dist/v<version>/*`.
 
 `dist/` is git-ignored. The version is `[workspace.package] version` in
 `Cargo.toml` (every crate takes it) and the five `[workspace.dependencies]`
