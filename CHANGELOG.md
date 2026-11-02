@@ -342,6 +342,31 @@ version may break things.
   for the permission at the first one and saying once when it can't;
   `aio::web::notify::request_permission()` for a click handler, `on_click`
   for its route.
+- **Patches carry a resized array's items** (aio's narrowed Immer ops): a
+  push, a spread or a filter sends one `insert` per item put in or `del`
+  per item taken out, not the array; a sort or a rebuild still sends it
+  whole. aio pages get them as `add` and `remove`.
+- **Pacing and the full-state switch** (aio's `syncIntervalMs`,
+  `fullStateThreshold`): `[server.limits] sync_interval_ms` (50) folds a
+  link's background changes into one patch per window, a person's call
+  going at once; `full_state_percent` (50) sends the view instead of a
+  bigger patch. Both on aio pages too.
+- **Every shared cell on one server**: `Http::cell(handle)` serves another
+  cell on the same `/ws`, key and port; a link's hello names its cell.
+- `Http::resolve_peer(f)` (aio's `resolvePeer`): who a peer app on this
+  machine is here, its user and role; `Http::door_links(true)` (aio's
+  `localConnectHooks`): `on_link` hears the local door's links too.
+- `Reply::stream(type, parts)`: a route's answer sent part by part
+  (server-sent events, NDJSON), never compressed or buffered.
+- **Binary side channels** (aio's binary streams): `Route::socket(path, f)`
+  upgrades once `f` accepts the request; `aio::http::side` frames
+  `[kind][seq:u24][payload]` with a counter per kind, drops a droppable
+  frame or closes (1011) on a slow receiver, and says each frame's gap.
+- `Remote::on_conflict(f)` (aio's `onConflict`): where a server change met
+  a waiting call of the copy, live and in a catch-up (`Synced::conflicts`);
+  `Remote::merge(field, Merge::Text | Counter | SetAdd(id))` (aio's
+  `sync.merge`) shows that field merged while the call waits. In the page
+  too.
 - **`ax ui` as amui, on every OS**: the Tasks tab runs the project's own
   tasks (its cargo aliases) beside the `ax` verbs, its output shown as it
   comes; CPU, the project folder, the executable and the runtime kind on
