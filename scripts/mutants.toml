@@ -44,7 +44,7 @@ what = "a call that breaks an #[invariant] is refused, never committed"
 in = "source"
 file = "crates/aio/src/store.rs"
 find = """
-        next.check()?;
+        next.check().map_err(|e| self.refused_op(op, e))?;
         let t3"""
 put = """
         _ = next.check();

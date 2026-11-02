@@ -211,6 +211,46 @@ Needs the SDK's `emulator`, `platform-tools`, `cmdline-tools/latest`, an
 x86_64 system image, KVM, and what `ax build --android` needs
 ([setup](../basics/setup.md)).
 
+### air's package gates
+
+An app on air (aio-rs's own renderer, [the design](../design/air.md))
+ships no Dioxus, and its packages and edit loop are measured, in
+`ci.sh` and GitHub CI:
+
+- `scripts/air-ship <app> [artifacts...]` fails, naming each find, on a
+  Dioxus crate the app ships (its `cargo metadata` graph of normal
+  dependencies for the desktop, wasm32 and Android: a crate by that name
+  or from DioxusLabs' repositories, such as `generational-box`) and on the
+  word in any package byte for byte, any case: the release binary, a
+  folder (the web build), a `.tar.gz`, an AppImage (its squashfs
+  unpacked), an APK (each member). A stripped binary still holds a
+  crate's source paths and strings. `--self-test` (in `ci.sh`) plants
+  one in each kind of artifact and in a graph, and requires each found.
+- `scripts/dx-metrics` builds the template a second time on air (aio-rs
+  `air`, the shell with `default-features = false, features = ["air"]`),
+  plants a Dioxus dependency in it and requires air-ship to fail, then
+  runs air-ship on its release binary, `.tar.gz`, AppImage and web
+  build. Its row adds `air_binary_b`, `air_targz_b`, `air_appimage_b`,
+  `air_web_b`: held 5% over the base measured on the same runner
+  (`--base`, as the other sizes; 10 KB slack for the web build, 50 KB
+  for the rest), or over this machine's best. `air_rebuild_cpu` (one line
+  changed, debug rebuild) and `air_live_css_s`, `air_live_rsx_s`,
+  `air_live_logic_s` (`ax dev`'s own reload and hot-patch, headless) are
+  gated against this machine's rows only, 50% over their median: on a
+  runner with none they are printed, never failing.
+- `scripts/dx-metrics --apk`: the same for the air template's APKs
+  (`ax build --android`, each checked, `air_apk_b` the arm64 one).
+  `ci.sh` runs it where the NDK and Rust's three Android targets are; in
+  GitHub CI the `air-apk` job does (`rustup target add
+  armv7-linux-androideabi x86_64-linux-android`, the runner's SDK).
+
+A base before air phase 3 has no shell on air: its air sizes are said
+as not gated. What it costs on a GitHub runner: about 5 minutes more in
+the `check` job (the air template's debug build, three rebuilds, the
+live edits, its release and web builds), about 3 more once the base has
+air (its release and web builds); the `air-apk` job runs beside it, about
+5 minutes (10 with the base's APKs).
+
 ## Not in aio-rs
 
 - aio's `deno task check` / `deno task test` pair and their workflow

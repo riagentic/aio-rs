@@ -204,6 +204,21 @@ version may break things.
   runs air in the browser. `scripts/android-gate --air` and
   `scripts/dx-metrics --live` (the live edits on Dioxus and on air,
   side by side) check and time them.
+- **air phase 4: the gates in CI** (docs/design/air.md). `scripts/air-ship
+  <app> [artifacts]` fails on any Dioxus crate an app ships (its
+  `cargo metadata` graph for the desktop, wasm32 and Android: crates named
+  so or from DioxusLabs' repositories) and on the word in any of its
+  packages, byte for byte (the release binary, the `.tar.gz`, the
+  AppImage's squashfs, the web build's folder, each APK member).
+  `scripts/dx-metrics` measures the template on air beside the Dioxus one:
+  `air_binary_b`, `air_targz_b`, `air_appimage_b`, `air_web_b` gated like
+  the other sizes (5% over the base measured on the same runner, or this
+  machine's best), `air_rebuild_cpu` and `air_live_css_s` /
+  `air_live_rsx_s` / `air_live_logic_s` against this machine's rows only;
+  each run first plants a Dioxus dependency in the air app and requires
+  air-ship to fail on it. `--apk`: the air template's APKs alone
+  (`air_apk_b`, the arm64 one), GitHub CI's new `air-apk` job
+  ([CI](docs/build/ci.md#airs-package-gates)).
 - **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
   makes each async method read the state as it was when it was called
   and commit what it wrote, ran and scheduled at its end as one event, or
@@ -617,6 +632,14 @@ version may break things.
 
 ### Fixed
 
+- A cell's breaker never lets a caller see it enabled past its trip: the
+  schedule thread's count could take the failure that tripped it while the
+  caller's own count found none and returned before the cell was disabled
+  (`a_trip_keeps_saved_data_through_enable_and_restart`). One count at a
+  time per cell now.
+- A synced client's call the server refused stays refused when it is sent
+  again (its answer went with a cut link): it was applied on the later
+  state its client was never told of.
 - air's code size: an event handler costs its closure alone (its wrappers
   were generic over it, 36% of the bench's IR): 50 views make 1.13 M lines
   of LLVM IR, 0.31x Dioxus's (phase 1: 0.49x), a held key over 10 000

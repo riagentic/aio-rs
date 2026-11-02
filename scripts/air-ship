@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""No Dioxus in a packaged app (air's gate 4, docs/design/air.md): an app
+on air ships none of it, in its build graph or in what it packages.
+
+  scripts/air-ship <app dir> [<artifact>...]   exit 1 naming each Dioxus found
+  scripts/air-ship --self-test                 each check, on planted artifacts
+
+The graph: the app workspace's normal dependencies (`cargo metadata`, the
+features it builds with) for the desktop host, the browser (wasm32) and
+Android: no crate named dioxus* or from DioxusLabs' repositories
+(generational-box, warnings, subsecond...). Dev-dependencies and build
+scripts' don't ship and don't count.
+
+The artifacts, byte for byte: a release binary, a folder (the web build's
+wasm and scripts), a .tar.gz, an AppImage (its squashfs unpacked), an APK
+(each member): no `dioxus` in any case. A stripped binary still holds a
+crate's paths and strings (`dioxus-liveview-0.7.10/src/...`,
+`data-dioxus-id`), and the symbols where it isn't stripped.
+"""
+import json
+import os
+import pathlib
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import zipfile
+
+WORD = re.compile(rb"[\w./-]*dioxus[\w./-]*", re.I)
+TARGETS = ("wasm32-unknown-unknown", "aarch64-linux-android")
+
+
+def dioxus(pkg):
+    """Whether package `pkg` (cargo metadata's) is Dioxus's (pure)."""
+    return "dioxus" in pkg["name"] or "github.com/dioxuslabs/" in (pkg.get("repository") or "").lower()
+
+
+def shipped(meta):
+    """The packages `meta`'s workspace ships: its members and their normal
+    dependencies, transitively (pure)."""
+    deps = {n["id"]: [d["pkg"] for d in n["deps"] if any(k["kind"] is None for k in d["dep_kinds"])]
+            for n in meta["resolve"]["nodes"]}
+    seen, todo = set(), list(meta["workspace_members"])
+    while todo:
+        i = todo.pop()
+        if i not in seen:
+            seen.add(i)
+            todo += deps[i]
+    return [p for p in meta["packages"] if p["id"] in seen]
+
+
+def host():
+    out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True).stdout
+    return next(l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("host: "))
+
+
+def graph(app):
+    """Each Dioxus crate the app at `app` ships, per target."""
+    hits = []
+    for target in (host(), *TARGETS):
+        cmd = ["cargo", "metadata", "--format-version", "1", "--filter-platform", target]
+        out = subprocess.run(cmd, cwd=app, capture_output=True, text=True)
+        if out.returncode:
+            sys.exit(f"air-ship: {' '.join(cmd)} in {app}:\n{out.stderr[-3000:]}")
+        hits += [f"{target}: {p['name']} {p['version']}" for p in shipped(json.loads(out.stdout)) if dioxus(p)]
+    return hits
+
+
+def squashfs_at(head):
+    """Where an AppImage's squashfs starts: after its ELF runtime's section
+    headers (pure; `head` is the file's first 64 bytes)."""
+    if head[:5] != b"\x7fELF\x02":
+        return None
+    shoff, = struct.unpack_from("<Q", head, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", head, 0x3A)
+    return shoff + shentsize * shnum
+
+
+def members(path, tmp):
+    """(name, bytes) of each file `path` packs."""
+    if path.is_dir():
+        for f in sorted(p for p in path.rglob("*") if p.is_file()):
+            yield f"{path.name}/{f.relative_to(path)}", f.read_bytes()
+    elif path.name.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(path) as t:
+            for m in t.getmembers():
+                if m.isfile():
+                    yield f"{path.name}:{m.name}", t.extractfile(m).read()
+    elif path.suffix in (".apk", ".aab", ".zip"):
+        with zipfile.ZipFile(path) as z:
+            for n in z.namelist():
+                yield f"{path.name}:{n}", z.read(n)
+    elif path.suffix == ".AppImage":
+        with path.open("rb") as f:
+            at = squashfs_at(f.read(64))
+            f.seek(at or 0)
+            if at is None or f.read(4) != b"hsqs":
+                sys.exit(f"air-ship: {path}: no squashfs after an ELF runtime: not an AppImage")
+        root = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / "root"
+        subprocess.run(["unsquashfs", "-q", "-no-xattrs", "-o", str(at), "-d", str(root), str(path)],
+                       check=True, capture_output=True)
+        for name, data in members(root, tmp):
+            yield f"{path.name}:{name.removeprefix('root/')}", data
+    else:
+        yield path.name, path.read_bytes()
+
+
+def scan(paths):
+    """Each artifact member of `paths` that names dioxus, with what it says."""
+    hits = []
+    with tempfile.TemporaryDirectory(prefix="air-ship-") as tmp:
+        for p in paths:
+            for name, data in members(pathlib.Path(p), tmp):
+                words = sorted({w.decode(errors="replace") for w in WORD.findall(data)})
+                if words:
+                    hits.append(f"{name}: {', '.join(words[:5])}{' ...' if len(words) > 5 else ''}")
+    return hits
+
+
+def self_test():
+    """Each check red on a planted Dioxus, green without (`--self-test`, in ci.sh)."""
+    planted = b"\0\0_ZN11dioxus_core6events\0"
+    clean = b"\0\0_ZN3air4tree\0aio-rs-air\0"
+    with tempfile.TemporaryDirectory(prefix="air-ship-test-") as d:
+        d = pathlib.Path(d)
+        for kind in ("clean", "planted"):
+            body = planted if kind == "planted" else clean
+            (d / kind).mkdir()
+            (d / kind / "app").write_bytes(body)
+            (d / kind / "web").mkdir()
+            (d / kind / "web" / "app_bg.wasm").write_bytes(body)
+            with tarfile.open(d / kind / "app.tar.gz", "w:gz") as t:
+                t.add(d / kind / "app", "app-1.0/app")
+            with zipfile.ZipFile(d / kind / "app.apk", "w") as z:
+                z.writestr("lib/arm64-v8a/libapp.so", body)
+            if shutil.which("mksquashfs"):
+                # An ELF header with no sections, then the squashfs, as an AppImage is laid out.
+                elf = bytearray(64)
+                elf[:7] = b"\x7fELF\x02\x01\x01"
+                struct.pack_into("<QHH", elf, 0x28, 64, 0, 0)
+                struct.pack_into("<HH", elf, 0x3A, 64, 0)
+                squash = d / kind / "squash"
+                subprocess.run(["mksquashfs", d / kind / "web", squash, "-quiet", "-no-progress", "-noappend"], check=True)
+                (d / kind / "app.AppImage").write_bytes(bytes(elf) + squash.read_bytes())
+                squash.unlink()
+            arts = sorted(p for p in (d / kind).iterdir())
+            hits = scan(arts)
+            if kind == "clean":
+                assert hits == [], hits
+            else:
+                named = {h.split(":")[0].split("/")[0] for h in hits}
+                assert named == {p.name for p in arts}, f"each planted artifact named: {hits}"
+                assert any("dioxus_core6events" in h for h in hits), hits
+        if not shutil.which("mksquashfs"):
+            print("air-ship: the AppImage check not self-tested: no mksquashfs", file=sys.stderr)
+        # The graph: a Dioxus crate (a path crate by that name) shipped on one
+        # target, as a dev-dependency and in a build script (neither ships).
+        ws = d / "ws"
+        for name, deps in {
+            "app": '[target.\'cfg(target_arch = "wasm32")\'.dependencies]\ndioxus-web = { path = "../dioxus-web" }\n'
+                   '[dev-dependencies]\ndioxus-ssr = { path = "../dioxus-ssr" }\n'
+                   '[build-dependencies]\ndioxus-rsx = { path = "../dioxus-rsx" }\n',
+            "dioxus-web": "", "dioxus-ssr": "", "dioxus-rsx": "",
+        }.items():
+            (ws / name / "src").mkdir(parents=True)
+            (ws / name / "src" / "lib.rs").write_text("")
+            (ws / name / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2024"\n\n{deps}')
+        (ws / "Cargo.toml").write_text('[workspace]\nresolver = "3"\nmembers = ["app"]\nexclude = ["dioxus-web", "dioxus-ssr", "dioxus-rsx"]\n')
+        assert graph(ws) == ["wasm32-unknown-unknown: dioxus-web 0.1.0"], graph(ws)
+        assert dioxus({"name": "generational-box", "repository": "https://github.com/DioxusLabs/dioxus/"})
+        assert not dioxus({"name": "air", "repository": "https://github.com/riagentic/aio-rs"})
+    print("air-ship: each check fails on a planted Dioxus")
+
+
+def main(args):
+    if args == ["--self-test"]:
+        return self_test()
+    if not args or args[0].startswith("-"):
+        sys.exit(__doc__)
+    hits = [f"graph: {h}" for h in graph(args[0])] + scan(args[1:])
+    if hits:
+        sys.exit("air-ship: Dioxus in the package (an app on air ships none: docs/design/air.md):\n  "
+                 + "\n  ".join(hits))
+    print(f"air-ship: none in {args[0]}'s graph or its {len(args) - 1} artifacts")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
