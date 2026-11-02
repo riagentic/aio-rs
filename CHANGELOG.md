@@ -649,6 +649,16 @@ version may break things.
 
 ### Fixed
 
+- A backtrace in hot-patched code on Windows (MSVC) names its functions:
+  each patch DLL is linked with its PDB (`/DEBUG` beside `/DEBUG:SYMTAB`)
+  and std's resolver (dbghelp) is told the modules again after each
+  patch, under its own lock. Linux, macOS and MinGW name a patch's frames
+  only when it loaded before the first backtrace was resolved (std lists
+  the libraries once); the hotpatch test checks both, on each OS.
+- `scripts/dx-metrics --live` runs on Windows (it imported the Unix-only
+  `resource`): CPU and the build check through the Win32 API, `ax dev`'s
+  tree stopped with `taskkill`, edits written byte for byte; the Windows
+  CI job prints its live-edit times.
 - The splash's `text` takes aio's full set on every splash (Electron's,
   the OS's, the web's and Android's): `{title}`, `{version}` (the app's,
   what `--version` prints), and `{got}`, `{total}`, `{pct}` as `0`, `?`,

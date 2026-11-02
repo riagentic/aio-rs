@@ -60,6 +60,39 @@ fn named() -> u32 {
     if bt.lines().any(|l| l.trim_end().ends_with(": fixture_app::named")) { TRACE } else { eprintln!("{bt}"); 0 }
 }
 
+// Windows (MSVC), as aio-shell does after each patch (`refresh_symbols`):
+// std's backtrace resolver (dbghelp) lists the modules again, under its lock.
+#[cfg(all(windows, target_env = "msvc"))]
+fn refresh_symbols() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleA(name: *const u8) -> usize;
+        fn GetProcAddress(module: usize, name: *const u8) -> usize;
+        fn CreateMutexA(attributes: usize, owned: i32, name: *const u8) -> usize;
+        fn WaitForSingleObject(handle: usize, ms: u32) -> u32;
+        fn ReleaseMutex(handle: usize) -> i32;
+        fn CloseHandle(handle: usize) -> i32;
+        fn GetCurrentProcessId() -> u32;
+    }
+    unsafe {
+        let module = GetModuleHandleA(b"dbghelp.dll\0".as_ptr());
+        let f = if module == 0 { 0 } else { GetProcAddress(module, b"SymRefreshModuleList\0".as_ptr()) };
+        if f == 0 {
+            return;
+        }
+        let refresh: unsafe extern "system" fn(isize) -> i32 = std::mem::transmute(f);
+        let name = format!("Local\\RustBacktraceMutex{:08X}\0", GetCurrentProcessId());
+        let lock = CreateMutexA(0, 0, name.as_ptr());
+        WaitForSingleObject(lock, u32::MAX);
+        refresh(-1);
+        ReleaseMutex(lock);
+        CloseHandle(lock);
+    }
+}
+
+#[cfg(not(all(windows, target_env = "msvc")))]
+fn refresh_symbols() {}
+
 // Windows: where the next patch DLL can load (as aio-shell's `Aio.aslr`
 // answers before each patch): a free 256 MiB span past `main`, within
 // 1.5 GiB of it; each patch loaded takes one.
@@ -114,6 +147,7 @@ fn main() {
         let table = std::fs::read_to_string(line.trim()).unwrap();
         let table: subsecond::JumpTable = serde_json::from_str(&table).unwrap();
         unsafe { subsecond::apply_patch(table).unwrap() };
+        refresh_symbols();
     }
 }
 "#;
@@ -211,6 +245,10 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     // binary): its own, on every platform, so the result is 20.
     let new_static = "    static NEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(20);\n    \
                       NEW.load(std::sync::atomic::Ordering::Relaxed)\n";
+    // A later patch's frames too with dbghelp (MSVC); std's other resolver
+    // lists the loaded libraries once, at its first backtrace, so a library
+    // loaded after it is a stranger to it (Linux, macOS, MinGW: `<unknown>`).
+    let later = if host().ends_with("-msvc") { 3 } else { 0 };
     let steps = [
         (&main_rs, "    1\n", "    2\n", format!("value 2 10 {} {} 1", ticks(2), stats(2))),
         (&main_rs, "    2\n", "    3\n", format!("value 3 10 {} {} 1", ticks(3), stats(3))),
@@ -218,7 +256,7 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
         // A backtrace in patched code names its function: the first one
         // resolved, and one after a later patch.
         (&main_rs, "TRACE: u32 = 0", "TRACE: u32 = 2", format!("value 3 20 {} {} 2", ticks(5), stats(5))),
-        (&main_rs, "TRACE: u32 = 2", "TRACE: u32 = 3", format!("value 3 20 {} {} 3", ticks(6), stats(6))),
+        (&main_rs, "TRACE: u32 = 2", "TRACE: u32 = 3", format!("value 3 20 {} {} {later}", ticks(6), stats(6))),
     ];
     for (i, (file, from, to, want)) in steps.into_iter().enumerate() {
         edit(file, from, to);
