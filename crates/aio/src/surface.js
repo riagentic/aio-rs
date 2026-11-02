@@ -555,6 +555,16 @@
       }
       return { ok: { x, y } };
     }
+    // Files picked in a file input's picker: its `files`, then `input` and `change`.
+    case "files": {
+      if (!(el instanceof HTMLInputElement) || el.type !== "file") return { error: `data-t="${arg.path}" is no file input` };
+      const dt = new DataTransfer();
+      for (const f of arg.files) dt.items.add(new File([Uint8Array.from(atob(f.b64), (c) => c.charCodeAt(0))], f.name, { type: f.type }));
+      el.files = dt.files;
+      el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { ok: null };
+    }
     // HTML drag and drop onto `onto`: one data transfer from dragstart to dragend.
     case "drag": {
       const [to, no] = target(arg.onto, null);

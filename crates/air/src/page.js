@@ -70,8 +70,25 @@
     for (const v of [sc.scrollTop, sc.scrollLeft, sc.scrollWidth, sc.scrollHeight, sc.clientWidth, sc.clientHeight]) parts.push(f(v))
     parts.push(['u32', e.pointerId || 0], s(e.pointerType), ['u16', form.length])
     for (const [k, v] of form) parts.push(s(k), s(typeof v === 'string' ? v : v.name))
-    window.__aioWire.send(frame(parts))
+    // The picked files, read here (a view can't reach the page's `File`s):
+    // a file input's on its `input`/`change`, a form's on `submit`.
+    const picked = e.type === 'submit' ? form.filter(([, v]) => typeof v !== 'string' && v.name)
+      : (e.type === 'input' || e.type === 'change') && t instanceof HTMLInputElement && t.type === 'file' && t.files ? [...t.files].map((v) => ['', v]) : []
+    const out = () => window.__aioWire.send(frame(parts))
+    if (!picked.length && !reading) return parts.push(['u16', 0]), out()
+    // Reading is async: the events after it wait, so the views get them in order.
+    reading++
+    queue = queue.then(async () => {
+      const got = []
+      for (const [k, v] of picked) try { got.push([k, v, new Uint8Array(await v.arrayBuffer())]) } catch {}
+      parts.push(['u16', got.length])
+      for (const [k, v, b] of got) parts.push(s(k), s(v.name), s(v.type), f(v.lastModified), ['s', b])
+      out()
+    }).catch(() => {}).finally(() => reading--)
   }
+  let reading = 0, queue = Promise.resolve()
+  // How many events wait for their files (a test waits for none).
+  window.__airReading = () => reading
   const handle = (e) => {
     const ids = []
     for (const n of e.composedPath()) {

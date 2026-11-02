@@ -27,8 +27,8 @@ pub fn follow<T: Clone + PartialEq + 'static>(f: impl Fn() -> T + 'static) -> T 
 /// The event kinds and their payloads.
 pub mod events {
     pub use air::{
-        AnimationEvent, ClipboardEvent, CompositionEvent, DataTransfer, DragData, DragEvent, Event, FocusData,
-        FocusEvent, FormData, FormEvent, ImageEvent, KeyboardData, KeyboardEvent, MediaEvent, MountedData,
+        AnimationEvent, ClipboardEvent, CompositionEvent, DataTransfer, DragData, DragEvent, Event, FileData,
+        FocusData, FocusEvent, FormData, FormEvent, ImageEvent, KeyboardData, KeyboardEvent, MediaEvent, MountedData,
         MountedEvent, MouseData, MouseEvent, PlainData, PointerData, PointerEvent, ResizeData, ResizeEvent,
         ScrollBehavior, ScrollData, ScrollEvent, SelectionEvent, ToggleEvent, TouchEvent, TransitionEvent, VisibleData,
         VisibleEvent, WheelData, WheelEvent,

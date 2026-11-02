@@ -791,10 +791,11 @@ fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Fn() -> View>) {
                 fr
             })
             .clone();
+        let t0 = crate::tree::start();
         let v = body(&fr, &f);
         shown = place(v);
         if let Some(m) = &mounted {
-            crate::tree::rendered(m.0, shown.0);
+            crate::tree::rendered(m.0, shown.0, t0);
         }
         dom(|d| d.insert(at, shown));
     });
@@ -1358,6 +1359,7 @@ impl Drop for Root {
             dom(|d| d.root = None);
         });
         crate::task::end_root(self.id);
+        crate::tree::end_root(self.id);
     }
 }
 

@@ -418,3 +418,35 @@ fn html_reads_what_the_page_shows_without_airs_anchors() {
     let ui = TestUi::new(app);
     assert!(ui.html().contains("<p>Remove <b>Alice</b> from your address book?<i>!</i></p>"), "{}", ui.html());
 }
+
+#[test]
+fn a_file_input_hands_its_files_to_change_and_to_the_forms_submit() {
+    fn app() -> View {
+        let picked = signal(String::new);
+        let sent = signal(String::new);
+        let say = |files: Vec<FileData>| {
+            let one = |f: &FileData| {
+                format!("{}:{} {} {}", f.field(), f.name(), f.size(), f.content_type().unwrap_or_default())
+            };
+            files.iter().map(one).collect::<Vec<_>>().join(", ")
+        };
+        rsx! {
+            form { "data-t": "form", onsubmit: move |e: FormEvent| sent.set(format!("{} / {:?}", say(e.files()), e.values())),
+                input { "data-t": "pick", r#type: "file", name: "photo", multiple: true, onchange: move |e: FormEvent| picked.set(say(e.files())) }
+                input { name: "title", value: "Trip" }
+                button { "data-t": "send", r#type: "submit", "Send" }
+            }
+            p { "data-t": "picked", "{picked}" }
+            p { "data-t": "sent", "{sent}" }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    ui.pick_files("pick", &[("a.png", "image/png", &[137, 80, 78, 71]), ("b.txt", "text/plain", "hé".as_bytes())]);
+    assert_eq!(ui.text("picked"), ":a.png 4 image/png, :b.txt 3 text/plain", "the input's change carries its files");
+    ui.click("send");
+    assert_eq!(
+        ui.text("sent"),
+        r#"photo:a.png 4 image/png, photo:b.txt 3 text/plain / [("photo", "a.png"), ("photo", "b.txt"), ("title", "Trip")]"#,
+        "the form's submit carries them by field, its values by name"
+    );
+}

@@ -2,7 +2,9 @@
 //! body runs, hole updates; and `follow`, a body that runs again when what
 //! it read changes.
 use air::testing::TestPage;
-use air::{Mounted, Signal, View, component, components, follow, memo, provide_now, rsx, try_context};
+use air::{
+    Mounted, RENDERS_KEPT, Signal, View, component, components, follow, memo, provide_now, renders, rsx, try_context,
+};
 
 fn names(c: &[Mounted]) -> Vec<String> {
     c.iter()
@@ -64,6 +66,47 @@ fn the_tree_names_each_component_with_its_key_and_counts_its_work() {
     assert_eq!(find(&tree, "List").updates, 1);
     drop(p);
     assert!(components().is_empty(), "a dropped root leaves no entry");
+}
+
+/// The render log (aio DevTools' `renders`): each body run and hole
+/// rewrite as it happened, its component, key, trigger and time.
+#[test]
+fn the_render_log_says_each_render_as_it_happened() {
+    let ids = Signal::new(vec![1, 2]);
+    let count = Signal::new(0);
+    let mut p = TestPage::mount(move || rsx! { main { List { ids, count } } });
+    let said = |r: &[air::Render]| -> Vec<String> {
+        r.iter()
+            .map(|e| {
+                format!(
+                    "{}{} {}",
+                    e.component,
+                    e.key.as_deref().map(|k| format!("[{k}]")).unwrap_or_default(),
+                    e.trigger
+                )
+            })
+            .collect()
+    };
+    let (log, total) = p.within(renders);
+    assert_eq!(
+        said(&log),
+        ["Row[1] mount", "Row[2] mount", "Static mount", "List mount"],
+        "each body's first run, as it ended (a parent's holds its children's)"
+    );
+    assert_eq!(total, 4);
+    p.within(|| count.set(1));
+    let (log, total) = p.within(renders);
+    assert_eq!(said(&log[4..]), ["Row[1] signal", "Row[2] signal"], "the holes the change ran, nothing else");
+    assert_eq!(total, 6);
+    assert!(log.iter().all(|e| e.ms >= 0.0 && e.at > 1_600_000_000_000), "timed, stamped");
+    for n in 2..2 + RENDERS_KEPT as u32 {
+        p.within(|| count.set(n));
+    }
+    let (log, total) = p.within(renders);
+    assert_eq!((log.len(), total), (RENDERS_KEPT, 6 + 2 * RENDERS_KEPT as u64), "the last ones kept, all counted");
+    drop(p);
+    let mut other = TestPage::mount(|| rsx! { p { "x" } });
+    assert_eq!(other.within(renders), (vec![], 0), "a root's log is its own and ends with it");
 }
 
 #[test]

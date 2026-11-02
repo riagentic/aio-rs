@@ -82,7 +82,7 @@ pub use reactive::{
     provide_now, provide_root, scope, selector, signal, try_context, untrack, watch, with_owner,
 };
 pub use task::{Resource, Task, live_tasks, on_wake, resource, run_tasks, spawn, spawn_forever, task};
-pub use tree::{Mounted, components};
+pub use tree::{Mounted, RENDERS_KEPT, Render, components, renders};
 
 #[cfg(feature = "fault")]
 pub use dom::__fault;

@@ -38,6 +38,15 @@ version may break things.
 
 ### Added
 
+- air: a file input's picked files reach the views, read whole by the
+  page: `e.files()` on its `input`/`change` and on its form's `submit`
+  (`FileData`: `name`, `size`, `content_type`, `last_modified`, `field`,
+  `read_bytes().await`, `read_string().await`, as Dioxus's), in order
+  with the events after them; `TestUi::pick_files` picks them in a test.
+- `ax components --renders` on air: the last 200 renders as they happened
+  (each body run, `mount` or `signal`, and each hole rewrite, `signal`),
+  by component and key, timed, and how many in all; `air::renders()`
+  gives the same in a test. A debug build logs them; a release doesn't.
 - **TS21: the published crates' public API is checked in**
   (`scripts/api/<crate>.txt`, from rustdoc's JSON): `scripts/public-api
   --check` in `./ci.sh lint` fails on a change not written there, and on

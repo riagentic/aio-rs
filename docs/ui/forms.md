@@ -300,6 +300,28 @@ ui.until_contains("field", "That name is taken");
   from, to)` (out of range moves nothing).
 - **Radio buttons** need no binding per button: `RadioGroup` keeps the
   one value, the arrow keys move it, and the group is one tab stop.
+- **Files**: a plain `input { r#type: "file" }` opens the system's
+  picker; its `onchange` (and its form's `onsubmit`) gets the picked
+  files whole, read by the page: `e.files()`, each with `name()`,
+  `size()`, `content_type()`, `field()` (its form field on a submit) and
+  `read_bytes().await` / `read_string().await`. `e.values()` names each
+  file by its file name. A file of many MB travels in the event, so send
+  big uploads through an HTTP route instead
+  ([cookbook](../basics/cookbook.md#15-an-upload-that-keeps-only-metadata-in-state)).
+
+```rust
+use aio::ui::prelude::*;
+
+#[component]
+fn Pick() -> View {
+    let names = signal(String::new);
+    rsx! {
+        input { r#type: "file", multiple: true,
+            onchange: move |e: FormEvent| names.set(e.files().iter().map(|f| f.name()).collect::<Vec<_>>().join(", ")) }
+        p { "{names}" }
+    }
+}
+```
 
 ## Submitting
 
@@ -350,6 +372,7 @@ such a form.
 | `ui.blur(t)` | leaves it (fires `change` when it changed) |
 | `ui.press(t, "Enter")` | a key in it |
 | `ui.select(t, value)`, `ui.check(t)` | a `Select`'s choice, a checkbox |
+| `ui.pick_files(t, &[(name, type, bytes)])` | files picked in file input `t` (`input` and `change`) |
 | `ui.until_contains(t, part)` | waits until an async rule's answer shows |
 
 A field left as it was found fires no `change` (the browser's rule): to

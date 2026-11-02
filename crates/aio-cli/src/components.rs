@@ -2,7 +2,9 @@
 //! and `renders`): the running app's mounted components, nested, each with
 //! its key, how many times its body ran and how many times its holes wrote
 //! (air: a body runs once, a change runs only the holes that read it); with
-//! `--renders`, its last renders as they happened, where the app keeps them.
+//! `--renders`, its last renders as they happened, timed: each body's run
+//! (`mount`, or `signal` when a wait or a `follow` ran it again) and each
+//! hole's rewrite (`signal`).
 //! A dev build's `ui` door answers `Aio.components`.
 use crate::cdp::Session;
 use aio::serde_json::{Value, json};
@@ -34,15 +36,16 @@ pub fn lines(tree: &Value) -> Vec<String> {
 }
 
 /// The last renders, one a line, then how many in all (pure):
-/// `2026-10-29T10:00:00.000Z Row signal 0.05 ms`.
+/// `2026-10-29T10:00:00.000Z Row[42] signal 0.05 ms`.
 pub fn render_lines(renders: &Value, total: u64) -> Vec<String> {
     let mut out: Vec<String> = renders
         .as_array()
         .into_iter()
         .flatten()
         .map(|r| {
+            let key = r["key"].as_str().map(|k| format!("[{k}]")).unwrap_or_default();
             format!(
-                "{} {} {} {:.2} ms",
+                "{} {}{key} {} {:.2} ms",
                 aio::log::stamp(r["at"].as_i64().unwrap_or(0)),
                 r["component"].as_str().unwrap_or("?"),
                 r["trigger"].as_str().unwrap_or("?"),
@@ -88,6 +91,8 @@ mod tests {
         assert_eq!(lines(&air), ["Row[42] ×1 3 updates", "  Cell ×1 1 update"], "air's: key and updates, no time");
         let r = json!([{ "component": "Row", "at": 0, "ms": 0.051, "trigger": "signal" }]);
         assert_eq!(render_lines(&r, 7), ["1970-01-01T00:00:00.000Z Row signal 0.05 ms", "1 of 7 renders"]);
+        let r = json!([{ "component": "Row", "key": "42", "at": 0, "ms": 0.0, "trigger": "mount" }]);
+        assert_eq!(render_lines(&r, 1)[0], "1970-01-01T00:00:00.000Z Row[42] mount 0.00 ms", "keyed, as in the tree");
     }
 
     #[tokio::test(flavor = "multi_thread")]

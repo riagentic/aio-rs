@@ -43,6 +43,9 @@ pub struct Raw {
     pub primary: bool,
     /// A form's fields (`submit`), name and value.
     pub values: Vec<(String, String)>,
+    /// The picked files: a file input's (`input`, `change`), a form's
+    /// (`submit`), in order.
+    pub files: Vec<FileData>,
 }
 
 struct W(Vec<u8>);
@@ -61,8 +64,11 @@ impl W {
         self.0.extend_from_slice(&v.to_le_bytes())
     }
     fn str(&mut self, s: &str) {
-        self.u32(s.len() as u32);
-        self.0.extend_from_slice(s.as_bytes())
+        self.bytes(s.as_bytes())
+    }
+    fn bytes(&mut self, b: &[u8]) {
+        self.u32(b.len() as u32);
+        self.0.extend_from_slice(b)
     }
 }
 
@@ -90,8 +96,11 @@ impl R<'_> {
         Some(f64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
     pub(crate) fn str(&mut self) -> Option<String> {
+        String::from_utf8(self.bytes()?.to_vec()).ok()
+    }
+    fn bytes(&mut self) -> Option<&[u8]> {
         let n = self.u32()? as usize;
-        String::from_utf8(self.take(n)?.to_vec()).ok()
+        self.take(n)
     }
 }
 
@@ -124,6 +133,14 @@ impl Raw {
         for (k, v) in &self.values {
             w.str(k);
             w.str(v);
+        }
+        w.u16(self.files.len() as u16);
+        for f in &self.files {
+            w.str(&f.field);
+            w.str(&f.name);
+            w.str(&f.content_type);
+            w.f64(f.last_modified as f64);
+            w.bytes(&f.bytes);
         }
         w.0
     }
@@ -160,6 +177,13 @@ impl Raw {
         let pointer_type = r.str()?;
         let n = r.u16()?;
         let values = (0..n).map(|_| Some((r.str()?, r.str()?))).collect::<Option<Vec<_>>>()?;
+        let n = r.u16()?;
+        let files = (0..n)
+            .map(|_| {
+                let (field, name, content_type, last_modified) = (r.str()?, r.str()?, r.str()?, r.f64()? as u64);
+                Some(FileData { field, name, content_type, last_modified, bytes: r.bytes()?.into() })
+            })
+            .collect::<Option<Vec<_>>>()?;
         (r.p == b.len()).then_some(Raw {
             ids,
             name,
@@ -184,6 +208,7 @@ impl Raw {
             pointer_id,
             pointer_type,
             values,
+            files,
         })
     }
 
@@ -656,6 +681,46 @@ pub struct FormData {
     value: String,
     checked: bool,
     values: Vec<(String, String)>,
+    files: Vec<FileData>,
+}
+
+/// A picked file, its contents read by the page (Dioxus's `FileData`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileData {
+    pub(crate) field: String,
+    pub(crate) name: String,
+    pub(crate) content_type: String,
+    pub(crate) last_modified: u64,
+    pub(crate) bytes: std::sync::Arc<[u8]>,
+}
+
+impl FileData {
+    /// The form field it came from (`submit`); a file input's own event: "".
+    pub fn field(&self) -> String {
+        self.field.clone()
+    }
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+    pub fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+    /// Its MIME type as the browser guessed it from the name.
+    pub fn content_type(&self) -> Option<String> {
+        Some(self.content_type.clone()).filter(|t| !t.is_empty())
+    }
+    /// When it was last changed, in ms since the Unix epoch.
+    pub fn last_modified(&self) -> u64 {
+        self.last_modified
+    }
+    /// Its contents (already here: the page read them before it sent the event).
+    pub async fn read_bytes(&self) -> std::io::Result<Vec<u8>> {
+        Ok(self.bytes.to_vec())
+    }
+    /// Its contents as UTF-8 text.
+    pub async fn read_string(&self) -> std::io::Result<String> {
+        String::from_utf8(self.bytes.to_vec()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
 }
 
 impl FormData {
@@ -670,11 +735,15 @@ impl FormData {
     pub fn values(&self) -> Vec<(String, String)> {
         self.values.clone()
     }
+    /// The picked files: a file input's, or a submitted form's (each with its field).
+    pub fn files(&self) -> Vec<FileData> {
+        self.files.clone()
+    }
 }
 
 impl FromRaw for FormData {
     fn from_raw(r: &Raw) -> Self {
-        Self { value: r.value.clone(), checked: r.checked, values: r.values.clone() }
+        Self { value: r.value.clone(), checked: r.checked, values: r.values.clone(), files: r.files.clone() }
     }
 }
 
@@ -800,6 +869,7 @@ pub fn key_event(key: Key, modifiers: Modifiers, repeat: bool) -> KeyboardEvent 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
 
     #[test]
     fn an_event_frame_reads_back_as_written() {
@@ -819,6 +889,43 @@ mod tests {
         assert_eq!(Raw::decode(&e.encode()), Some(e));
         assert_eq!(Raw::decode(&[1, 2]), None, "cut short");
         assert_eq!(Raw::decode(&[9]), None, "not an event");
+    }
+
+    #[test]
+    fn picked_files_travel_whole_and_read_as_dioxus_reads_them() {
+        let f = |field: &str, name: &str, t: &str, b: &[u8]| FileData {
+            field: field.into(),
+            name: name.into(),
+            content_type: t.into(),
+            last_modified: 1_700_000_000_123,
+            bytes: b.into(),
+        };
+        let e = Raw {
+            name: "submit".into(),
+            values: vec![("photo".into(), "a.png".into())],
+            files: vec![f("photo", "a.png", "image/png", &[0, 255, 10]), f("", "b", "", b"h\xc3\xa9")],
+            ..Raw::default()
+        };
+        let back = Raw::decode(&e.encode()).expect("decodes");
+        assert_eq!(back, e);
+        let files = FormData::from_raw(&back).files();
+        assert_eq!((files[0].field(), files[0].name(), files[0].size()), ("photo".into(), "a.png".into(), 3));
+        assert_eq!((files[0].content_type(), files[1].content_type()), (Some("image/png".into()), None));
+        assert_eq!(files[0].last_modified(), 1_700_000_000_123);
+        let read = |f: &FileData| {
+            let w = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(w);
+            let s = std::pin::pin!(f.read_string()).poll(&mut cx);
+            let b = std::pin::pin!(f.read_bytes()).poll(&mut cx);
+            match (s, b) {
+                (std::task::Poll::Ready(s), std::task::Poll::Ready(b)) => (s.ok(), b.unwrap()),
+                _ => panic!("the contents are already here"),
+            }
+        };
+        assert_eq!(read(&files[1]), (Some("hé".into()), "hé".as_bytes().to_vec()));
+        assert_eq!(read(&files[0]).0, None, "not UTF-8");
+        let cut = &e.encode()[..e.encode().len() - 1];
+        assert_eq!(Raw::decode(cut), None, "a file cut short");
     }
 
     #[test]

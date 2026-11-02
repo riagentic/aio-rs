@@ -1106,6 +1106,17 @@ impl TestUi {
         self.settle();
     }
 
+    /// Pick `files` (name, MIME type, contents) in file input `t`, as a
+    /// person does in its picker: `input` and `change` follow, their
+    /// `e.files()` (and a form's `submit`) carrying them.
+    pub fn pick_files(&mut self, t: &str, files: &[(&str, &str, &[u8])]) {
+        let files: Vec<Value> =
+            files.iter().map(|(name, ty, b)| json!({ "name": name, "type": ty, "b64": B64.encode(b) })).collect();
+        self.must("files", json!({ "path": t, "files": files }));
+        self.page.eval("(async () => { while (window.__airReading?.()) await new Promise((r) => setTimeout(r, 1)) })()");
+        self.settle();
+    }
+
     /// HTML drag and drop of `t` onto `onto`: `dragstart`, `dragenter`,
     /// `dragover`, `drop`, `dragend`, sharing one data transfer.
     pub fn drag_to(&mut self, t: &str, onto: &str) {

@@ -468,8 +468,17 @@ length ([wire](migration/wire.md)).
 
 ```sh
 ax components notes             # the mounted tree: each component's renders and updates
+ax components notes --renders   # the last 200 renders as they happened, timed
 ax components notes --json
 ```
+
+`--renders` is aio DevTools' render log on air: a line per body run
+(`mount`, or `signal` when a wait or a `follow` ran it again) and per
+hole rewrite (`signal`), each with its component and key (`root`: the
+app's own view), when it ended and how long it took (a body's time holds
+the children it placed), then how many in all. A debug build logs them;
+a release keeps no log. In a test, `air::renders()` inside the root
+(`TestPage::within`) gives the same.
 
 It reads a dev build of a running app through its door. A component's
 `renders` are its body's runs (once, as it mounts, unless a `follow` or a
@@ -580,9 +589,8 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
 - aio's renderer yields at a 12 ms frame deadline mid-render; air runs
   the holes a change woke in one batch per tick, so keep what a change
   wakes small (parts, windows, rows by props).
-- `ax components` has no time per component and no `--renders` log of
-  the last renders yet (aio DevTools' profile): it counts renders and
-  updates.
+- `ax components` has no time per component in the tree (aio DevTools'
+  `lastRenderMs`): the time is per render, in `--renders`.
 - aio's `blocking.cancel(id)` stops a running task; `spawn_blocking`
   can't be stopped once it runs: `cx.abort(key)` drops the effect at
   its next await, and the thread's result is thrown away.
