@@ -452,24 +452,25 @@ pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
     });
 }
 
-/// What an event attribute takes: a closure of the event, or a handler prop.
-pub trait IntoHandler<T> {
+/// What an event attribute takes: a closure of the event (that may be
+/// `async`), or a handler prop.
+pub trait IntoHandler<T, M = ()> {
     fn into_handler(self) -> Box<dyn FnMut(Event<T>)>;
 }
 
-impl<T, F: FnMut(Event<T>) + 'static> IntoHandler<T> for F {
-    fn into_handler(self) -> Box<dyn FnMut(Event<T>)> {
-        Box::new(self)
+impl<T, M, R: HandlerReturn<M>, F: FnMut(Event<T>) -> R + 'static> IntoHandler<T, (M, R)> for F {
+    fn into_handler(mut self) -> Box<dyn FnMut(Event<T>)> {
+        Box::new(move |e| self(e).run())
     }
 }
 
-impl<T: 'static> IntoHandler<T> for Callback<Event<T>> {
+impl<T: 'static> IntoHandler<T, Plain> for Callback<Event<T>> {
     fn into_handler(self) -> Box<dyn FnMut(Event<T>)> {
         Box::new(move |e| self.call(e))
     }
 }
 
-impl<T: 'static> IntoHandler<T> for Option<Callback<Event<T>>> {
+impl<T: 'static> IntoHandler<T, Plain> for Option<Callback<Event<T>>> {
     fn into_handler(self) -> Box<dyn FnMut(Event<T>)> {
         Box::new(move |e| {
             if let Some(c) = self {
@@ -481,7 +482,7 @@ impl<T: 'static> IntoHandler<T> for Option<Callback<Event<T>>> {
 
 /// A handler for [`on`], typed by its event's payload (the macro names it).
 #[doc(hidden)]
-pub fn handler<T: FromRaw>(f: impl IntoHandler<T>) -> Handler {
+pub fn handler<T: FromRaw, M>(f: impl IntoHandler<T, M>) -> Handler {
     let mut f = f.into_handler();
     Rc::new(RefCell::new(move |r: &Raw, flow: &Rc<Flow>| f(Event::with_flow(T::from_raw(r), flow.clone()))))
 }
@@ -511,7 +512,7 @@ impl<F: std::future::Future<Output = ()> + 'static> HandlerReturn<Async> for F {
 /// [`handler`] of a closure (its parameter typed by this bound); it may be `async`.
 #[doc(hidden)]
 pub fn handler_fn<T: FromRaw, M, R: HandlerReturn<M>>(mut f: impl FnMut(Event<T>) -> R + 'static) -> Handler {
-    handler(move |e| f(e).run())
+    handler::<T, (Plain, ())>(move |e| f(e).run())
 }
 
 /// An `onmounted` closure, typed; it may be `async`.
@@ -524,7 +525,7 @@ pub fn mounted_fn<M, R: HandlerReturn<M>>(
 
 /// An `onmounted` handler: it runs once the element is drawn.
 #[doc(hidden)]
-pub fn mounted(id: u32, f: impl IntoHandler<MountedData>) {
+pub fn mounted<M>(id: u32, f: impl IntoHandler<MountedData, M>) {
     let mut f = f.into_handler();
     let owner = current_owner();
     crate::reactive::later(move || {
@@ -953,6 +954,12 @@ pub fn eval(js: &str) -> Eval {
     Eval { id }
 }
 
+/// Run `js` in the page and forget it (no reply is kept): what a view's
+/// cleanup tells the page as it goes.
+pub fn exec(js: &str) {
+    dom(|d| _ = d.op(op::EVAL).u32(0).str(js));
+}
+
 impl Eval {
     /// Hand the script a JSON value (its `await aio.recv()`).
     pub fn send_json(&self, json: &str) -> Result<(), String> {
@@ -1048,6 +1055,17 @@ impl MountedData {
         async move { f.await.map(drop) }
     }
 
+    /// Scroll it to `to` (its scrollLeft and scrollTop).
+    pub fn scroll(
+        &self,
+        to: crate::geometry::PixelsVector2D,
+        behavior: crate::ScrollBehavior,
+    ) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+        let b = if behavior == crate::ScrollBehavior::Smooth { "smooth" } else { "instant" };
+        let f = self.call(&format!("n.scrollTo({{ left: {}, top: {}, behavior: '{b}' }}); return true;", to.x, to.y));
+        async move { f.await.map(drop) }
+    }
+
     /// Its box in the window.
     pub fn get_client_rect(&self) -> impl std::future::Future<Output = Result<crate::geometry::Rect, String>> + use<> {
         let f = self.call("const r = n.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join(',');");
@@ -1055,7 +1073,10 @@ impl MountedData {
             let s = f.await?;
             let v: Vec<f64> = s.trim_matches('"').split(',').filter_map(|x| x.parse().ok()).collect();
             match v[..] {
-                [x, y, width, height] => Ok(crate::geometry::Rect { x, y, width, height }),
+                [x, y, width, height] => Ok(crate::geometry::Rect::new(
+                    crate::geometry::PixelsPoint::new(x, y),
+                    crate::geometry::PixelsSize::new(width, height),
+                )),
                 _ => Err(format!("a rect the page did not give: {s}")),
             }
         }

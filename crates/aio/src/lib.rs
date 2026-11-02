@@ -98,6 +98,10 @@ mod guide;
 pub mod head;
 #[cfg(feature = "kit")]
 pub mod kit;
+/// The kit on air (feature `air` without `kit`): the same names.
+#[cfg(all(feature = "air", not(feature = "kit")))]
+#[path = "kit_air/mod.rs"]
+pub mod kit;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/log.rs"]
 pub mod log;

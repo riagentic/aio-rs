@@ -254,7 +254,9 @@ fn builder(
     let b = format_ident!("{}Builder", props);
     let required: Vec<usize> = (0..fields.len())
         .filter(|&k| {
-            fields[k].default.is_none() && !fields[k].extends && matches!(fields[k].kind, Kind::Plain | Kind::Prop(..))
+            fields[k].default.is_none()
+                && !fields[k].extends
+                && matches!(fields[k].kind, Kind::Plain | Kind::Prop(_, false))
         })
         .collect();
     let params: Vec<Ident> = (0..required.len()).map(|k| format_ident!("__R{}", k)).collect();
@@ -262,6 +264,8 @@ fn builder(
     let tys: Vec<&TokenStream> = fields.iter().map(|f| &f.ty).collect();
     let unit = params.iter().map(|_| quote!(()));
     let air = quote!(air);
+    let mut generic_names = vec![];
+    idents_in(&gn.clone().into_iter().collect::<Vec<_>>(), &mut generic_names);
 
     // Setters: `n(f)` takes a closure of the value (a `Prop` keeps it),
     // `__fn_n(v)` the value itself (a closure given to a handler prop).
@@ -275,7 +279,31 @@ fn builder(
             _ => (false, false),
         };
         let cb = is_callback(head.as_deref()) || inner_cb;
+        // A type of the component's own parameters (`Vec<R>`): taken as it is,
+        // so the value names the parameter.
+        let mut used = vec![];
+        idents_in(&ty.clone().into_iter().collect::<Vec<_>>(), &mut used);
+        let exact = used.iter().any(|u| generic_names.contains(u));
         let (gens, param, val, fgen, fparam, fval) = match &f.kind {
+            Kind::Prop(i, opt) if exact => {
+                let t = if *opt { quote!(::core::option::Option<#i>) } else { quote!(#i) };
+                (
+                    quote!(),
+                    quote!(f: impl ::core::ops::Fn() -> #t + 'static),
+                    quote!(#air::Prop::derive(::std::boxed::Box::new(f))),
+                    quote!(),
+                    quote!(v: #t),
+                    quote!(#air::Prop::Const(v)),
+                )
+            }
+            _ if exact => (
+                quote!(),
+                quote!(f: impl ::core::ops::FnOnce() -> #ty),
+                quote!(#air::untrack(f)),
+                quote!(),
+                quote!(v: #ty),
+                quote!(v),
+            ),
             Kind::Opt(i) => (
                 quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
@@ -318,6 +346,14 @@ fn builder(
         } else {
             (fgen, fparam, fval)
         };
+        // `__val_n(v)`: a literal number, `true`, `Variant::A`: the type is the prop's.
+        let vname = format_ident!("__val_{}", n.to_string().trim_start_matches("r#"));
+        let (vty, vval) = match &f.kind {
+            Kind::Opt(i) => (i.clone(), quote!(::core::option::Option::Some(v))),
+            Kind::Prop(i, false) => (i.clone(), quote!(#air::Prop::Const(v))),
+            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::Const(::core::option::Option::Some(v)))),
+            Kind::Plain | Kind::View => (ty.clone(), quote!(v)),
+        };
         let docs = &f.docs;
         match required.iter().position(|&r| r == k) {
             None => (
@@ -326,6 +362,8 @@ fn builder(
                     pub fn #n #gens (mut self, #param) -> Self { self.#n = ::core::option::Option::Some(#val); self }
                     #[doc(hidden)]
                     pub fn #fname #fgen (mut self, #fparam) -> Self { self.#n = ::core::option::Option::Some(#fval); self }
+                    #[doc(hidden)]
+                    pub fn #vname(mut self, v: #vty) -> Self { self.#n = ::core::option::Option::Some(#vval); self }
                 ),
                 quote!(),
             ),
@@ -340,7 +378,7 @@ fn builder(
                     .collect();
                 let rest: Vec<&Ident> = names.iter().copied().filter(|m| *m != n).collect();
                 let mk = |v: &TokenStream| quote!(#b { #n: ::core::option::Option::Some(#v), #(#rest: self.#rest,)* __s: ::core::marker::PhantomData });
-                let (mv, mfv) = (mk(&val), mk(&fval));
+                let (mv, mfv, mvv) = (mk(&val), mk(&fval), mk(&vval));
                 (
                     quote!(),
                     quote!(
@@ -350,6 +388,8 @@ fn builder(
                             pub fn #n #gens (self, #param) -> #b<#gn #(#after),*> { #mv }
                             #[doc(hidden)]
                             pub fn #fname #fgen (self, #fparam) -> #b<#gn #(#after),*> { #mfv }
+                            #[doc(hidden)]
+                            pub fn #vname(self, v: #vty) -> #b<#gn #(#after),*> { #mvv }
                         }
                     ),
                 )
@@ -377,6 +417,7 @@ fn builder(
             (Some(d), Kind::Prop(..)) => quote!(#air::Prop::Const(#d)),
             (Some(d), _) => d.clone(),
             (None, Kind::Opt(_)) => quote!(::core::option::Option::None),
+            (None, Kind::Prop(_, true)) => quote!(#air::Prop::Const(::core::option::Option::None)),
             (None, Kind::View) => quote!(::core::result::Result::Ok(#air::Tree::empty())),
             (None, _) if f.extends => quote!(::std::vec::Vec::new()),
             (None, _) => quote!(::core::unreachable!()),
@@ -573,7 +614,11 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
             _ => None,
         });
         let comp = path.len() > 1 || last.as_ref().is_some_and(|s| s.starts_with(|c: char| c.is_uppercase()));
-        if path.is_empty() || path.iter().any(|t| !matches!(t, TokenTree::Ident(_) | TokenTree::Punct(_))) {
+        // A component's turbofish (`WebIsland::<Chart, ()>`) may hold any type.
+        let turbofish = path.iter().any(|t| is_punct(Some(t), '<'));
+        if path.is_empty()
+            || (!turbofish && path.iter().any(|t| !matches!(t, TokenTree::Ident(_) | TokenTree::Punct(_))))
+        {
             return Err((span_of(toks, start), "air: expected an element or a component".into()));
         }
         return element(path, &inner, comp);
@@ -695,6 +740,8 @@ fn payload(ev: &str) -> Option<(String, &'static str)> {
         | "pointerleave" | "pointercancel" | "gotpointercapture" | "lostpointercapture" | "touchstart" | "touchend"
         | "touchmove" | "touchcancel" => "PointerData",
         "wheel" => "WheelData",
+        "resize" => "ResizeData",
+        "visible" => "VisibleData",
         "input" | "change" | "submit" | "reset" | "invalid" => "FormData",
         "scroll" | "scrollend" => "ScrollData",
         "mounted" => "",
@@ -704,7 +751,7 @@ fn payload(ev: &str) -> Option<(String, &'static str)> {
         | "load" | "error" | "abort" | "canplay" | "canplaythrough" | "durationchange" | "emptied" | "encrypted"
         | "ended" | "loadeddata" | "loadedmetadata" | "loadstart" | "pause" | "play" | "playing" | "progress"
         | "ratechange" | "seeked" | "seeking" | "stalled" | "suspend" | "timeupdate" | "volumechange" | "waiting"
-        | "select" | "selectstart" | "selectionchange" | "resize" | "visible" | "cancel" | "close" => "PlainData",
+        | "select" | "selectstart" | "selectionchange" | "cancel" | "close" => "PlainData",
         _ => return None,
     };
     let dom = if ev == "doubleclick" { "dblclick" } else { ev };
@@ -869,8 +916,8 @@ const PRIMITIVES: &[&str] = &[
 /// patterns left out), so a hole's `move` closure can take clones.
 fn captures(ts: &TokenStream, out: &mut Vec<String>) {
     let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
-    let mut bound = vec![];
-    scan(&toks, out, &mut bound);
+    let (mut bound, mut lets) = (vec![], vec![]);
+    scan(&toks, out, &mut bound, &mut lets);
     out.retain(|n| !bound.contains(n));
 }
 
@@ -884,7 +931,11 @@ fn idents_in(toks: &[TokenTree], into: &mut Vec<String>) {
     }
 }
 
-fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
+/// `bound`: closure parameters and match patterns (never a capture);
+/// `lets`: names a `let` bound, from the end of its statement on (its
+/// right side may read an outer name of the same name).
+fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>, lets: &mut Vec<String>) {
+    let mut pending: Vec<String> = vec![];
     // Match arms: what comes before each `=>` is a pattern.
     let arrows = toks.windows(2).any(|w| is_punct(Some(&w[0]), '=') && is_punct(Some(&w[1]), '>'));
     let mut i = 0;
@@ -898,6 +949,16 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                 continue;
             }
             TokenTree::Punct(p) if arrows && p.as_char() == ',' => pat_start = i + 1,
+            // `a || b`: no closure.
+            TokenTree::Punct(p)
+                if p.as_char() == '|'
+                    && is_punct(toks.get(i + 1), '|')
+                    && !matches!(prev, None | Some(TokenTree::Punct(_)))
+                    && !prev.is_some_and(|t| is_ident(t, "move")) =>
+            {
+                i += 2;
+                continue;
+            }
             TokenTree::Punct(p)
                 if p.as_char() == '|'
                     && (prev.is_none()
@@ -909,12 +970,25 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                     continue;
                 }
                 let end = (i + 1..toks.len()).find(|k| is_punct(toks.get(*k), '|')).unwrap_or(toks.len());
+                if end == toks.len() {
+                    // No closing `|`: not a closure's parameters.
+                    i += 1;
+                    continue;
+                }
                 idents_in(&toks[i + 1..end], bound);
                 i = end + 1;
                 continue;
             }
             TokenTree::Ident(id) if id == "let" => {
                 let end = (i + 1..toks.len()).find(|k| is_punct(toks.get(*k), '=')).unwrap_or(toks.len());
+                // `if let` / `while let`: the pattern binds for the block that follows.
+                let cond = prev.is_some_and(|t| is_ident(t, "if") || is_ident(t, "while")) || is_punct(prev, '&');
+                idents_in(&toks[i + 1..end], if cond { &mut *bound } else { &mut pending });
+                i = end;
+                continue;
+            }
+            TokenTree::Ident(id) if id == "for" => {
+                let end = (i + 1..toks.len()).find(|k| is_ident(&toks[*k], "in")).unwrap_or(toks.len());
                 idents_in(&toks[i + 1..end], bound);
                 i = end;
                 continue;
@@ -931,8 +1005,13 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                     || (is_punct(prev, ':') && i >= 2 && is_punct(toks.get(i - 2), ':'))
                     || (is_punct(next, ':') && is_punct(toks.get(i + 2), ':'))
                     || is_colon(toks, i + 1)
+                    // A call: a function (a local closure called in a hole is
+                    // cloned in by a `let` of the hole's own, or is a `Callback`).
                     || matches!(next, Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis);
-                if is_punct(next, '!') {
+                if is_punct(next, '!')
+                    && !KEYWORDS.contains(&s.as_str())
+                    && matches!(toks.get(i + 2), Some(TokenTree::Group(_)))
+                {
                     // A macro: the `{name}`s of its format string, then its arguments.
                     if let Some(TokenTree::Group(g)) = toks.get(i + 2) {
                         let inner: Vec<TokenTree> = g.stream().into_iter().collect();
@@ -952,16 +1031,17 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                         {
                             out.extend(r);
                         }
-                        scan(&inner, out, bound);
+                        scan(&inner, out, bound, lets);
                     }
                     i += 3;
                     continue;
                 }
-                if !skip && !out.contains(&s) {
+                if !skip && !out.contains(&s) && !lets.contains(&s) {
                     out.push(s);
                 }
             }
-            TokenTree::Group(g) => scan(&g.stream().into_iter().collect::<Vec<_>>(), out, bound),
+            TokenTree::Group(g) => scan(&g.stream().into_iter().collect::<Vec<_>>(), out, bound, lets),
+            TokenTree::Punct(p) if p.as_char() == ';' => lets.append(&mut pending),
             _ => {}
         }
         i += 1;
@@ -970,7 +1050,10 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
 
 /// `{ let a = a.clone(); … }` for the names a hole reads.
 fn clones(names: &[String]) -> TokenStream {
-    let n = names.iter().map(|n| Ident::new(n, Span::call_site()));
+    let n = names.iter().map(|n| match n.strip_prefix("r#") {
+        Some(raw) => Ident::new_raw(raw, Span::call_site()),
+        None => Ident::new(n, Span::call_site()),
+    });
     quote!(#(#[allow(unused_mut)] let mut #n = ::std::clone::Clone::clone(&#n);)*)
 }
 
@@ -1105,11 +1188,11 @@ impl Tpl {
                                 } else {
                                     let data = Ident::new(data, Span::call_site());
                                     // A closure gets its parameter's type from a direct bound.
-                                    let closure = e.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
+                                    let closure = is_closure(e);
                                     let h = if closure {
                                         quote!(handler_fn::<air::__rt::#data, _, _>)
                                     } else {
-                                        quote!(handler::<air::__rt::#data>)
+                                        quote!(handler::<air::__rt::#data, _>)
                                     };
                                     quote!(air::__rt::on(#id, #dom, { #c air::__rt::#h(#e) });)
                                 }
@@ -1164,7 +1247,7 @@ impl Tpl {
                         let (ce, ck, cr) = (clones(&ce), clones(&ck), clones(&cr));
                         let view = body(rows);
                         quote!(#[allow(unused_variables)] air::__rt::each(#id,
-                            { #ce move || ::std::iter::IntoIterator::into_iter(#expr).collect::<::std::vec::Vec<_>>() },
+                            { #ce move || { #ce ::std::iter::IntoIterator::into_iter(#expr).collect::<::std::vec::Vec<_>>() } },
                             { #ck move |#pat: &_| (#key).to_owned() },
                             { #cr move |#pat| #view });)
                     }
@@ -1208,19 +1291,25 @@ fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> Tok
 fn comp(n: &Node) -> TokenStream {
     let Node::Comp { path, props, spreads, children, .. } = n else { unreachable!() };
     let path: TokenStream = path.iter().cloned().collect();
+    // Cloned in, and again per call: a `Prop` calls it again, so it never
+    // moves what it captured.
     let thunk = |e: &TokenStream| {
         let mut r = vec![];
         captures(e, &mut r);
         let c = clones(&r);
-        quote!({ #c move || { #e } })
+        quote!({ #c move || { #c #e } })
     };
     let mut calls = vec![];
     for (k, v) in props {
-        let closure = v.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
+        let closure = is_closure(v);
         calls.push(match k {
             // A constant needs no closure (and a `Prop` of it holds no state).
+            // A literal string converts (`"a"` to a `String`); any other
+            // constant is the prop's own type (`5` a `u32`).
             PropName::Field(f) if constant(v) => {
-                let f = format_ident!("__fn_{}", f.to_string().trim_start_matches("r#"));
+                let text = matches!(v.clone().into_iter().next(), Some(TokenTree::Literal(l)) if lit_str(&l).is_some());
+                let f =
+                    format_ident!("__{}_{}", if text { "fn" } else { "val" }, f.to_string().trim_start_matches("r#"));
                 quote!(.#f(#v))
             }
             PropName::Attr(a) if constant(v) => {
@@ -1264,6 +1353,21 @@ fn comp(n: &Node) -> TokenStream {
         let __air_c = &#path;
         air::Component::call(__air_c, air::__rt::builder_of(__air_c) #(#calls)* .build())
     })
+}
+
+/// Is `v` a closure (`move |e| …`), or a block ending in one
+/// (`{ let id = id.clone(); move |_| … }`)? Its parameters are typed then.
+fn is_closure(v: &TokenStream) -> bool {
+    let t: Vec<TokenTree> = v.clone().into_iter().collect();
+    if let [TokenTree::Group(g)] = t.as_slice()
+        && g.delimiter() == Delimiter::Brace
+    {
+        let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+        let tail = inner.iter().rposition(|t| is_punct(Some(t), ';')).map_or(0, |k| k + 1);
+        return is_closure(&inner[tail..].iter().cloned().collect());
+    }
+    let at = usize::from(t.first().is_some_and(|t| is_ident(t, "move")));
+    is_punct(t.get(at), '|')
 }
 
 /// Is `v` a constant: a literal (`"a"`, `3`, `-1.5`, `true`) or an enum's
@@ -1327,4 +1431,38 @@ fn body(nodes: &[Node]) -> TokenStream {
             air::__rt::view(&#tn, #b)
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(src: &str) -> Vec<String> {
+        let mut out = vec![];
+        captures(&src.parse().unwrap(), &mut out);
+        out
+    }
+
+    #[test]
+    fn a_hole_clones_the_names_it_reads() {
+        assert_eq!(names("last || (c.href.is_none() && c.onclick.is_none())"), ["last", "c"], "`||` is no closure");
+        assert_eq!(names("move |e| { if !keys.fire(e.clone()) { tell.call(W::KeyDown(e)) } }"), ["keys", "tell"]);
+        assert_eq!(names("|x| x + y"), ["y"]);
+        assert_eq!(names("|| a"), ["a"]);
+        assert_eq!(names("move |_| start(x)"), ["x"], "a call is a function's");
+        assert_eq!(names("{ let start = start.clone(); move |_| start() }"), ["start"], "a closure, cloned in");
+        assert_eq!(names("{ let (h, k) = (h.clone(), k.clone()); move |e| f(h, k, e, z) }"), ["h", "k", "z"]);
+        assert_eq!(names("{ let n = 1; n + m }"), ["m"], "a let's own name, after it");
+        assert_eq!(names("move |_| if let Some(f) = on { f.call(v) }"), ["on", "v"]);
+        assert_eq!(names("for x in xs { g(x) }"), ["xs"]);
+        assert_eq!(names("if a && let Some(t) = top() { t.go() }"), ["a"], "a let chain");
+    }
+
+    #[test]
+    fn a_block_ending_in_a_closure_is_a_closure() {
+        assert!(is_closure(&"move |e| f(e)".parse().unwrap()));
+        assert!(is_closure(&"{ let r = row.clone(); move |e| f(r, e) }".parse().unwrap()));
+        assert!(!is_closure(&"{ handler }".parse().unwrap()));
+        assert!(!is_closure(&"a || b".parse().unwrap()));
+    }
 }

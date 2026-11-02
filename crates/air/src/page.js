@@ -11,7 +11,24 @@
   const tpls = new Map()
   const evals = new Map()
   const dec = new TextDecoder(), enc = new TextEncoder()
-  const NO_BUBBLE = new Set(['focus', 'blur', 'mouseenter', 'mouseleave', 'pointerenter', 'pointerleave', 'load', 'error', 'scroll'])
+  const NO_BUBBLE = new Set(['focus', 'blur', 'mouseenter', 'mouseleave', 'pointerenter', 'pointerleave', 'load', 'error', 'scroll', 'resize', 'visible'])
+  // `onresize` and `onvisible` of an element: observed, told as an event of
+  // its own (the box, or 1/0 for in view, in its client point).
+  const tell = (n, type, x, y) => {
+    const e = new Event(type)
+    Object.defineProperties(e, { clientX: { value: x }, clientY: { value: y } })
+    n.dispatchEvent(e)
+  }
+  let resizes, visibles
+  const observe = (n, name) => {
+    if (name === 'resize') {
+      resizes ||= new ResizeObserver((es) => { for (const r of es) { const b = r.borderBoxSize && r.borderBoxSize[0]; tell(r.target, 'resize', b ? b.inlineSize : r.contentRect.width, b ? b.blockSize : r.contentRect.height) } })
+      resizes.observe(n)
+    } else if (name === 'visible') {
+      visibles ||= new IntersectionObserver((es) => { for (const r of es) tell(r.target, 'visible', r.isIntersecting ? 1 : 0, 0) })
+      visibles.observe(n)
+    }
+  }
   const SVG = 'http://www.w3.org/2000/svg'
   const delegated = new Set()
   // Typing is never undone: a field keeps the values it sent until the
@@ -90,6 +107,7 @@
   }
   const forget = (n) => {
     if (n.__airId !== undefined) nodes.delete(n.__airId)
+    if (n.__airOn) resizes?.unobserve(n), visibles?.unobserve(n)
     for (let c = n.firstChild; c; c = c.nextSibling) forget(c)
   }
   // The siblings of a view, first to last.
@@ -178,6 +196,7 @@
         case 8: {
           const n = node(), name = str()
           ;(n.__airOn ||= new Set()).add(name)
+          observe(n, name)
           if (!delegated.has(name)) delegated.add(name), document.addEventListener(name, handle, NO_BUBBLE.has(name))
           break
         }

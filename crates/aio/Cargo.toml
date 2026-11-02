@@ -128,7 +128,6 @@ required-features = ["kit"]
 
 [[test]]
 name = "kit"
-required-features = ["kit"]
 
 [[test]]
 name = "facade"

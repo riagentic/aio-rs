@@ -318,14 +318,73 @@ pub mod geometry {
         }
     }
 
-    /// An element's box (`MountedData::get_client_rect`).
+    /// A size in CSS px.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
-    pub struct Rect {
-        pub x: f64,
-        pub y: f64,
+    pub struct PixelsSize {
         pub width: f64,
         pub height: f64,
     }
+
+    impl PixelsSize {
+        pub fn new(width: f64, height: f64) -> Self {
+            Self { width, height }
+        }
+    }
+
+    /// A point in CSS px.
+    pub type PixelsPoint = ClientPoint;
+
+    /// An offset in CSS px (`MountedData::scroll`).
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct PixelsVector2D {
+        pub x: f64,
+        pub y: f64,
+    }
+
+    impl PixelsVector2D {
+        pub fn new(x: f64, y: f64) -> Self {
+            Self { x, y }
+        }
+    }
+
+    /// An element's box (`MountedData::get_client_rect`): its corner and size.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Rect {
+        pub origin: PixelsPoint,
+        pub size: PixelsSize,
+    }
+
+    impl Rect {
+        pub fn new(origin: PixelsPoint, size: PixelsSize) -> Self {
+            Self { origin, size }
+        }
+        pub fn width(&self) -> f64 {
+            self.size.width
+        }
+        pub fn height(&self) -> f64 {
+            self.size.height
+        }
+        pub fn min_x(&self) -> f64 {
+            self.origin.x
+        }
+        pub fn min_y(&self) -> f64 {
+            self.origin.y
+        }
+        pub fn max_x(&self) -> f64 {
+            self.origin.x + self.size.width
+        }
+        pub fn max_y(&self) -> f64 {
+            self.origin.y + self.size.height
+        }
+    }
+}
+
+/// How a scroll moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollBehavior {
+    #[default]
+    Instant,
+    Smooth,
 }
 use geometry::*;
 
@@ -605,6 +664,50 @@ impl FromRaw for ScrollData {
     }
 }
 
+/// An element's new size (`onresize`: the page watches the element).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResizeData {
+    size: geometry::PixelsSize,
+}
+
+impl ResizeData {
+    /// Its border box.
+    pub fn get_border_box_size(&self) -> Result<geometry::PixelsSize, String> {
+        Ok(self.size)
+    }
+
+    /// Its content box (the border box here: the kit's boxes have none).
+    pub fn get_content_box_size(&self) -> Result<geometry::PixelsSize, String> {
+        Ok(self.size)
+    }
+}
+
+impl FromRaw for ResizeData {
+    /// The page puts the box in the event's client point.
+    fn from_raw(r: &Raw) -> Self {
+        Self { size: geometry::PixelsSize::new(r.points[0], r.points[1]) }
+    }
+}
+
+/// Whether an element came into view or left it (`onvisible`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VisibleData {
+    on: bool,
+}
+
+impl VisibleData {
+    pub fn is_intersecting(&self) -> Result<bool, String> {
+        Ok(self.on)
+    }
+}
+
+impl FromRaw for VisibleData {
+    /// The page puts 1 (in view) or 0 in the event's client x.
+    fn from_raw(r: &Raw) -> Self {
+        Self { on: r.points[0] != 0.0 }
+    }
+}
+
 /// An event that carries nothing the views read (focus, clipboard, media…).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlainData {}
@@ -639,6 +742,8 @@ pub type ImageEvent = Event<PlainData>;
 pub type SelectionEvent = Event<PlainData>;
 pub type TouchEvent = Event<PointerData>;
 pub type MountedEvent = Event<crate::dom::MountedData>;
+pub type ResizeEvent = Event<ResizeData>;
+pub type VisibleEvent = Event<VisibleData>;
 
 /// A key press as the views get one, for a key heard elsewhere (a guest
 /// page, the host) and handed to the views' handlers.

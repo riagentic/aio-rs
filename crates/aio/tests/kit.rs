@@ -1,5 +1,9 @@
 //! The UI kit, driven like a person: what each control renders, says to
-//! assistive tech, and does on a click or a key.
+//! assistive tech, and does on a click or a key. On Dioxus (`kit`) and on
+//! air (`air`), the same tests.
+#![cfg(any(feature = "kit", feature = "air"))]
+// Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
+#![cfg_attr(all(feature = "air", not(feature = "kit")), allow(unused_mut))]
 use aio::kit::*;
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
@@ -449,8 +453,11 @@ fn data() -> View {
     let rows = vec![Person { name: "Ada", age: 36 }, Person { name: "Alan", age: 41 }];
     let cols = vec![
         Column::text("Name", |p: &Person| p.name.into()),
-        Column::view("Age", |p: &Person, _| rsx! { input { "data-t": "age-{p.name}", value: "{p.age}" } })
-            .align(Align::End),
+        Column::view("Age", |p: &Person, _| {
+            let (name, age) = (p.name, p.age);
+            rsx! { input { "data-t": "age-{name}", value: "{age}" } }
+        })
+        .align(Align::End),
     ];
     rsx! {
         Table { "data-t": "people", columns: cols.clone(), rows, key_of: |p: Person| p.name.to_string(), onrow: move |(p, i): (Person, usize)| log(format!("{} {i}", p.name)) }
@@ -1253,9 +1260,7 @@ fn signup() -> View {
         p { "data-t": "tags", "{tags}" }
         button { "data-t": "add-tag", onclick: move |_| f.edit("tags", |s| s.tags.push(format!("t{}", s.tags.len()))), "add" }
         button { "data-t": "move-tag", onclick: move |_| f.edit("tags", |s| move_item(&mut s.tags, 0, 1)), "move" }
-        if let Some(e) = f.form_error() {
-            p { "data-t": "form-error", "{e}" }
-        }
+        {f.form_error().map(|e| rsx! { p { "data-t": "form-error", "{e}" } })}
         p { "data-t": "state", "{f.valid()} {f.dirty()} {f.checking(\"name\")}" }
         button { "data-t": "submit", onclick: move |_| if let Some(s) = f.submit() { log(format!("sent {} {:?}", s.name, s.age)) }, "submit" }
         button { "data-t": "reset", onclick: move |_| f.reset(), "reset" }

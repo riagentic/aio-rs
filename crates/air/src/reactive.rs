@@ -1152,6 +1152,13 @@ impl<A: 'static, R: 'static> Callback<A, R> {
     }
 }
 
+impl<A: 'static, R: Default + 'static> Default for Callback<A, R> {
+    /// One that does nothing (answers `R::default()`): a handler prop left out.
+    fn default() -> Self {
+        Self::new(|_| R::default())
+    }
+}
+
 impl<A: 'static, R: 'static, F: FnMut(A) -> R + 'static> From<F> for Callback<A, R> {
     fn from(f: F) -> Self {
         Self::new(f)

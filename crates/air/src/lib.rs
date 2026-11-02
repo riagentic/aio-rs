@@ -68,8 +68,8 @@ pub mod testing;
 pub use air_macro::{Props, component, rsx};
 pub use dom::{
     AttrValue, Child, ErrorBoundary, ErrorBoundaryProps, Eval, Fragment, FragmentProps, IntoAttr, IntoChild,
-    IntoHandler, MountedData, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, is_empty, longest_increasing,
-    take_edits,
+    IntoHandler, MountedData, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, exec, is_empty,
+    longest_increasing, take_edits,
 };
 pub use event::*;
 pub use global::{Global, GlobalMemo};
@@ -149,7 +149,8 @@ pub mod __rt {
         Range, Template, attr, child, comp, each, handler, handler_fn, mounted, mounted_fn, on, show, text, tpl, view,
     };
     pub use crate::event::{
-        DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ScrollData, WheelData,
+        DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ResizeData, ScrollData, VisibleData,
+        WheelData,
     };
     pub use crate::props::{
         ByMemo, ByOpt, ByProp, BySignal, ByVal, CallbackOf, GlobalAttributeNames, GlobalAttributes, IntoOpt, IntoValue,
