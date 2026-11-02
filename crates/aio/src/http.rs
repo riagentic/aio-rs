@@ -800,6 +800,19 @@ impl Http {
         self.root(prefix, dir.into(), true)
     }
 
+    /// The files built into the app (`[build] assets`, aio's `assets`:
+    /// `Build::asset_files`), each at its URL path, to anyone: they ship
+    /// with the app, as its page does.
+    pub fn assets(self, files: &'static [(&'static str, &'static [u8])]) -> Self {
+        files.iter().fold(self, |h, &(path, bytes)| {
+            let name = path.rsplit('/').next().unwrap_or_default();
+            let ty = served_type(name, bytes);
+            // Routes match the path as decoded.
+            let at: String = path.split('/').map(decode).collect::<Vec<_>>().join("/");
+            h.route(Route::get(&at, move |_| std::future::ready(Reply::of(&ty, bytes.to_vec()))).public())
+        })
+    }
+
     /// The dirs `aio.toml` serves (`[server] dirs`, `public_dirs`), a
     /// relative one in `files` (the app's files tier).
     pub fn configured(self, server: &crate::config::Server, files: &Path) -> Self {

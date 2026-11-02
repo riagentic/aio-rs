@@ -524,8 +524,8 @@ pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
     if let Some(t) = n.targets.iter().find(|t| !kinds.contains(t)) {
         return Err(format!("--target {t}: one of {}", kinds.join(", ")));
     }
-    if !ui && n.targets.contains(&"android") {
-        return Err(format!("--target android: a window app's (--template app), not a {template}'s"));
+    if let Some(t) = n.targets.iter().find(|t| !ui && ["android", "web"].contains(t)) {
+        return Err(format!("--target {t}: a window app's (--template app), not a {template}'s"));
     }
     if !ui && n.tailwind {
         return Err(format!("--css tailwind: a window app's (--template app), not a {template}'s"));

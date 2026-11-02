@@ -337,7 +337,7 @@ impl<T: Cell> Source<T> {
                 return Err(crate::left_out("tls", what));
             }
         }
-        let mut http = http.configured(&cfg.server, &dirs.files());
+        let mut http = http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files);
         let auth_db = || crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy()).map_err(std::io::Error::other);
         // Sessions without accounts: a session is a user known by its token.
         if cfg.accounts.sessions && !cfg.accounts.on {

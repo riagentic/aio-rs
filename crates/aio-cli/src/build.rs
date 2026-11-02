@@ -290,6 +290,24 @@ pub fn missing_targets<'a>(targets: &[&'a str]) -> Vec<&'a str> {
     targets.iter().copied().filter(|t| !have.lines().any(|l| l.trim() == *t)).collect()
 }
 
+/// `AIORT_ASSETS` for a build of the app in `dir` (or below its
+/// `aio.toml`): its `[build] assets`' files, sizes and times, hashed.
+/// `aio::config!()` reads it, so cargo builds the app again when a file
+/// comes, goes or changes (it can't watch a folder itself).
+pub fn assets_stamp(dir: &Path) -> String {
+    let Some(file) = aio_config::config::find(dir) else { return String::new() };
+    let cfg = std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|t| aio::config::Config::parse(&t));
+    let at = file.parent().unwrap_or(Path::new("."));
+    let files = cfg.and_then(|c| aio::config::asset_files(at, &c.build.assets)).unwrap_or_default();
+    let mut h = aio::sha256::Sha256::new();
+    for (url, p) in &files {
+        let m = std::fs::metadata(p).ok();
+        let at = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        h.update(format!("{url}\t{}\t{}\n", m.map_or(0, |m| m.len()), at.map_or(0, |d| d.as_nanos())));
+    }
+    aio::sha256::hex(&h.finalize())
+}
+
 /// The cargo for a build for `cross` (None: this machine): refused before it
 /// runs when the platform can't be built here (`platform::blocker`), else
 /// told its target and linker.
@@ -412,6 +430,10 @@ pub fn release_binary(
     let root = Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?);
     let mut cargo = cargo_for("the release build", &["rustc", "--release", "-p", pkg, "--bin", name], cross)?;
     remap(&mut cargo, root);
+    let dir = meta["packages"].as_array().into_iter().flatten().find(|p| p["name"] == pkg);
+    if let Some(dir) = dir.and_then(|p| Path::new(p["manifest_path"].as_str()?).parent().map(Path::to_path_buf)) {
+        cargo.env("AIORT_ASSETS", assets_stamp(&dir));
+    }
     if let Some(f) = splash.then(|| native_splash(meta, pkg)).flatten() {
         cargo.args(["--features", &f]);
     }
@@ -690,6 +712,13 @@ fn cli(b: &Built) -> Result<(String, Vec<PathBuf>), String> {
         std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
         how = format!("{how}\n{install}");
         files.push(p);
+        if b.platform.os == "linux" {
+            let (file, text, install) = crate::service::system(&b.app, &name);
+            let p = dist.join(file);
+            std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+            how = format!("{how}\n{install}");
+            files.push(p);
+        }
     }
     Ok((format!("{} ({:.1} MB)\n{how}", out.display(), size(&out)), files))
 }
@@ -904,6 +933,7 @@ fn target(
         Kind::Android => {
             return android(&t.bin, crate::android::Ask::RELEASE);
         }
+        Kind::Web => return crate::web::build(&t.bin, false).map(|(said, out)| (said, vec![out])),
         Kind::Windows => t.platform.unwrap_or(windows()),
         Kind::Deb | Kind::AppImage if host.os != "linux" => {
             return Err(format!("{} is a Linux package: build it on Linux", t.kind.name()));

@@ -496,7 +496,7 @@ What `ax build <app>` makes ([build](../build/README.md),
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
-| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
+| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`, `web`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
 | `platforms` | list | `[]` | The OS and CPU each desktop target is built for: `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`. Empty: this machine. `--platforms a,b` per build. |
 | `budget_mb` | number | 10 (a server: 6) | The binary's size budget in MB; the build fails above it and names the crates that take the space (`ax build --sizes`). For apps with heavy libraries. |
 | `css` | command or list | none | A CSS toolchain run before every build and on every change under `ax dev`: a command line split on spaces, or an argv list. Never through a shell. |
@@ -510,6 +510,22 @@ targets = ["desktop", "deb", { name = "pro", kind = "desktop", bin = "notes-pro"
 platforms = ["linux", "windows"]
 css = ["tailwindcss", "-i", "src/app.css", "-o", "assets/style.css"]
 budget_mb = 14
+```
+
+### [build.assets]
+
+Folders built into the app by URL prefix (aio's `assets`): each file is
+answered at the same path in the window (`aio://app/media/…`), by the
+app's server (to anyone: it ships with the app, as its page does), in the
+web build (cached offline) and in the APK. A folder is beside `aio.toml`
+(relative, no `..`), a prefix is a path like `/media` (not `/`, `/ws` or
+`/__aio…`) and not also in `[server] dirs`; dotfiles are left out, and a
+file name with `:` or `*` is refused. `ax build`, `ax dev` and `ax start`
+build a file added later in; a plain `cargo build` doesn't see a new one.
+
+```toml
+[build.assets]
+"/media" = "media"   # media/song.mp3 is /media/song.mp3
 ```
 
 ### [build.android]

@@ -193,7 +193,6 @@ beyond the aio-rs form.
 | Methods | `transaction: true` tracks reads: a blind write never conflicts | `#[cell(transaction)]` sees no reads: a field written counts as read, so a blind write another call changed conflicts | write it in a plain method, or `transaction(conflict = "warn")` | [methods](state/methods.md#transactions) |
 | Methods | `cellDefaults` (`visible`, `ui` for every cell) | none: flags per cell | `#[cell(...)]` on each | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Effects | `t.getEffects()`, effect objects in tests (`isScheduleEffect`) | `t.held_effects()`: key, mode, timeout; schedules apart | `Store::schedules` | [effects](state/effects.md#limits) |
-| Effects | notifications in a browser page (`requestNotificationPermission`) | none in a web build | `aio::tell::show_with(f)` | [effects](state/effects.md#limits) |
 | Persistence | `persistMode: "single" \| "multi"` | log + snapshots per cell; aio's layout read and written as found | ➖ | [persistence](persistence/README.md#limits-compared-with-aio) |
 | Persistence | `launch.json`, a restart with the last flags | none | pass the flags again | [files](persistence/files.md#limits-compared-with-aio) |
 | Persistence | a query builder (`where` objects) | plain SQL | `aio::db::Db` | [SQL](persistence/sql.md#limits-compared-with-aio) |
@@ -226,9 +225,8 @@ beyond the aio-rs form.
 | Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
 | Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
 | Desktop | custom window chrome (`ui.chrome`) | the OS title bar; the window's verbs (`page::minimize`, `maximize`, `close`, `hide`, `show`) | the title bar on air | [desktop](clients/desktop.md#gaps) |
-| Desktop | an AppImage menu entry with a private `TMPDIR` (aio's installer) | aio-rs installs no AppImage: the integrator's entry | ➖ | [desktop](clients/desktop.md#gaps) |
 | Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
-| Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |
+| Web | the page's console forwarded to the server's log, in a release too | in `ax dev --web`'s log; a release page's stays in the page | ➖ | [web](clients/web.md#gaps) |
 | Web | every `<webview>` method | `go` and events; desktop only | ➖ | [web](clients/web.md#gaps) |
 | CLI apps | `watch` hiding the cursor, one frame per tick | a frame per change | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
 | CLI apps | flag types inferred from the spec | read by name (`a.number("n")`) | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
@@ -364,7 +362,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Schedules | `every`, `cron` (UTC), `after`, `backoff`, another cell's action | `#[every]`, `#[cron]` (UTC; `[app] tz = "local"`), `cx.after`, `cx.backoff`, `cx.on::<Other>()` | ✅ |
 | Clock, ids, randomness in methods | allowed, linted | `cx.now()`, `cx.id()`, `cx.rand()` | 🔄 |
 | CPU work | `blocking(id, fn)`, `cancel` | `aio::effect::blocking(key, f)`, `cancel_blocking` | ✅ |
-| Notifications | `notify()` | `cx.tell(..)`; a web build needs `show_with` | 🔄 |
+| Notifications | `notify()` | `cx.tell(..)`; a web page shows the browser's own, asking for the permission | ✅ |
 | Pending calls | `$pending()` | `h.pending(..)`, `use_pending` | ✅ |
 
 **Persistence**

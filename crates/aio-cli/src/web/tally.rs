@@ -21,6 +21,17 @@ impl Tally {
         Ok(())
     }
 
+    /// A notification, which the page shows (`aio::web::notify`).
+    pub fn finish(&mut self, cx: &aio::Cx) -> aio::Result {
+        cx.tell(aio::tell::Tell::Notify {
+            title: "Done".into(),
+            body: "the tally".into(),
+            tag: Some("tally".into()),
+            silent: true,
+            route: None,
+        })
+    }
+
     /// An async method: its effect runs on the page's tasks.
     pub async fn later(&mut self) -> aio::Result {
         let got: u32 = tick().await;

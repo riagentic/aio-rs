@@ -520,7 +520,7 @@ fn runtime(fetch: bool) -> Out {
 /// the installed one (its bin link).
 fn app_bin(t: &Target) -> Result<PathBuf, String> {
     match &t.pkg {
-        Some(pkg) => dev::build(&pkg.name, Some(&t.plan.logs))
+        Some(pkg) => dev::build(pkg, Some(&t.plan.logs))
             .ok_or_else(|| format!("{}: the build failed (`ax errors {}`)", t.name, t.name)),
         None => {
             let bin = places().bin.join(&t.id);
@@ -945,6 +945,11 @@ fn run(args: &[String]) -> Out {
             let running = aio::paths::running(&places().apps.join(&built.app.id).join("data"));
             let note =
                 if running { format!("\n{app} runs the old version until `ax restart {app}`") } else { String::new() };
+            #[cfg(unix)]
+            if built.platform.os == "linux" && has("--appimage") {
+                let image = package::appimage(&built)?;
+                return installed::from_appimage(&places(), &built.app, &image).map(|s| s + &note);
+            }
             #[cfg(unix)]
             if built.platform.os == "linux" {
                 return installed::from_bundle(&out, &[]).map(|s| s + &note);

@@ -257,6 +257,17 @@ async fn aio_toml_serves_dirs_from_the_files_tier_and_public_ones_without_the_ke
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn built_in_assets_are_served_at_their_paths_to_anyone() {
+    static FILES: &[(&str, &[u8])] = &[("/media/a%20b.svg", b"<svg/>"), ("/media/song.mp3", b"la")];
+    let addr = serve(Handle::memory(), Http::default().assets(FILES)).await;
+    let (status, headers, body) = fetch(&addr, "GET", "/media/song.mp3", &[], "").await;
+    assert_eq!((status, body.as_str()), (200, "la"), "they ship with the app: no key");
+    assert!(headers.contains("content-type: audio/mpeg"), "{headers}");
+    assert_eq!(fetch(&addr, "GET", "/media/a%20b.svg", &[], "").await.2, "<svg/>");
+    assert_eq!(fetch(&addr, "GET", "/media/other.mp3", &[], "").await.0, 401, "only what is built in");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_open_app_needs_no_key_but_minting_a_pin_still_does() {
     let opts = |open| aio::sync::Options {
         token: "secret".into(),

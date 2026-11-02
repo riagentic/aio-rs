@@ -10,6 +10,8 @@ pub mod storage;
 
 #[cfg(target_arch = "wasm32")]
 mod handle;
+#[cfg(target_arch = "wasm32")]
+pub mod notify;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 mod page;
 #[cfg(target_arch = "wasm32")]
@@ -174,6 +176,8 @@ impl storage::Kv for Local {
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub fn launch(root: fn() -> crate::ui::View) {
     use dioxus_core::VirtualDom;
+    // A `notify` tell is the page's notification, unless the app shows its own.
+    crate::tell::show_unless_set(notify::show);
     // The copies are open now: what no copy syncs is said.
     let open = SYNCING.with_borrow(Clone::clone);
     for (app, cells) in &open {

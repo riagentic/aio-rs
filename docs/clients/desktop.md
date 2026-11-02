@@ -460,9 +460,6 @@ What aio's Electron client has and aio-rs doesn't yet:
   bar): the OS title bar is always there. The window's verbs are there
   (`page::minimize` and the rest); the title bar comes with the air
   renderer.
-- An AppImage's menu entry is the one an AppImage integrator writes:
-  aio's installer gave its `Exec` a private `TMPDIR` for the AppImage to
-  unpack into; aio-rs installs no AppImage, so it writes none.
 
 aio has no app menus beyond macOS's standard ones or a context-menu API,
 and opens one app window per process, as aio-rs does.

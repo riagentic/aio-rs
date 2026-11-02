@@ -254,7 +254,33 @@ fn install(dir: &Path, id: &str, win: &Window) -> std::io::Result<()> {
     guest::install(dir, win)?;
     // No splash until `splash::install` lays one out.
     std::fs::write(dir.join("splash.json"), "null")?;
+    assets(dir, instance::ASSETS.get().copied().unwrap_or_default())?;
     std::fs::write(dir.join("index.html"), page(win))
+}
+
+/// The app's built-in files (`[build] assets`) in `dir/assets` at their
+/// URL paths, where the page's `aio://app/…` finds them (main.js); written
+/// again only when they changed (`assets.key`: their paths and hash).
+fn assets(dir: &Path, files: &[(&str, &[u8])]) -> std::io::Result<()> {
+    let (root, key) = (dir.join("assets"), dir.join("assets.key"));
+    let mut h = aio::sha256::Sha256::new();
+    for (path, bytes) in files {
+        h.update(path);
+        h.update([0]);
+        h.update(bytes);
+    }
+    let want = aio::sha256::hex(&h.finalize());
+    if root.is_dir() && std::fs::read_to_string(&key).ok().as_deref() == Some(want.as_str()) {
+        return Ok(());
+    }
+    _ = std::fs::remove_dir_all(&root);
+    for (path, bytes) in files {
+        let to = root.join(aio::config::asset_path(path));
+        std::fs::create_dir_all(to.parent().unwrap_or(&root))?;
+        std::fs::write(to, bytes)?;
+    }
+    std::fs::create_dir_all(&root)?;
+    std::fs::write(key, want)
 }
 
 /// `ax release` asks what data this build reads (`AIORT_DATA_CONTRACT`:
@@ -1399,6 +1425,22 @@ mod tests {
         assert_eq!(&b.next().await.unwrap().unwrap()[..], b"edits");
         b.send(Bytes::from_static(b"{\"event\":1}")).await.unwrap();
         assert_eq!(a.next().await.unwrap().unwrap(), b"{\"event\":1}");
+    }
+
+    #[test]
+    fn built_in_assets_are_laid_out_at_their_paths_and_rewritten_only_when_changed() {
+        let d = tempfile::tempdir().unwrap();
+        assets(d.path(), &[("/media/a%20b.txt", b"one"), ("/media/x/y.txt", b"two")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/a b.txt")).unwrap(), b"one");
+        assert_eq!(std::fs::read(d.path().join("assets/media/x/y.txt")).unwrap(), b"two");
+        // The same files: nothing written (a file changed by hand stays).
+        std::fs::write(d.path().join("assets/media/x/y.txt"), "hand").unwrap();
+        assets(d.path(), &[("/media/a%20b.txt", b"one"), ("/media/x/y.txt", b"two")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/x/y.txt")).unwrap(), b"hand");
+        // Another build: its files only.
+        assets(d.path(), &[("/media/a%20b.txt", b"new")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/a b.txt")).unwrap(), b"new");
+        assert!(!d.path().join("assets/media/x").exists());
     }
 
     #[test]

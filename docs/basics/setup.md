@@ -278,6 +278,7 @@ line that installs it (`ax build` prints it):
 | OS | File | Installs with |
 |---|---|---|
 | Linux | `<bundle>.service`, a systemd user unit | `cp` it to `~/.config/systemd/user/<id>.service`, `systemctl --user daemon-reload`, `systemctl --user enable --now <id>` (`loginctl enable-linger`: it runs without a login too) |
+| Linux | `<bundle>.system.service`, a systemd system unit (starts at boot, as a user systemd makes, data in `/var/lib/<id>`) | `sudo install -m 0755 <bundle>/<id> /usr/local/bin/<id>`, `sudo cp` it to `/etc/systemd/system/<id>.service`, `sudo systemctl daemon-reload`, `sudo systemctl enable --now <id>` |
 | macOS | `<bundle>.plist`, a launchd agent | `cp` it to `~/Library/LaunchAgents/app.aio.<id>.plist`, then `launchctl bootstrap gui/<uid> <that file>` |
 | Windows | `<bundle>.ps1`, a Task Scheduler script | `powershell -ExecutionPolicy Bypass -File .\<bundle>.ps1 -Install`, as an administrator (`-Uninstall` removes the task) |
 
