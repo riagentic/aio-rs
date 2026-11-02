@@ -372,7 +372,7 @@ method notes.add 43ms > 16ms (clone=0.1ms apply=42.6ms check=0.2ms commit=0.4ms)
 
 | Phase | Is | If it dominates |
 |---|---|---|
-| `clone` | copying the state the method changes | big fields: hold them as `Arc<…>` or `aio::imbl` collections |
+| `clone` | copying the state the method changes (a state slow to copy, 250 µs or more, is copied ahead on a thread of its own after each call, so the next one starts at once: ~0 here) | big fields: hold them as `Arc<…>` or `aio::imbl` collections; they are also compared after each commit (the views' re-render, a `#[coalesce]` run's write) |
 | `apply` | the method's body | move the work to an effect (above) |
 | `check` | the cell's invariants | an invariant that walks a big list on every call |
 | `commit` | writing the event (and now and then a snapshot) | not counted against the budget: it is the disk's and `[data] durability`'s |

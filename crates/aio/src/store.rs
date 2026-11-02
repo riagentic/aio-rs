@@ -28,6 +28,7 @@ mod tx;
 use shared::Db;
 pub(crate) use shared::{Hold, Member, Shared, Then, hold, release};
 pub(crate) use tx::On as TxOn;
+mod spare;
 
 /// One committed call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -192,6 +193,8 @@ pub struct Store<T: Cell> {
     /// What is saved of the committed state, kept from its commit so the
     /// next one needn't serialize it again; `None`: not known.
     saved: Option<Value>,
+    /// The next call's copy of the state, made ahead when copying is slow.
+    spare: spare::Spare<T>,
     /// `[history] keep` in ms: events older are folded (`keep_history`).
     keep: Option<i64>,
     /// How long a run of `#[coalesce]` calls is held (`[data] coalesce_ms`).
@@ -225,6 +228,40 @@ struct Held<T> {
     calls: Vec<(String, Value, i64)>,
     base: Arc<T>,
     since: std::time::Instant,
+}
+
+/// A held run as its flush weighs it ([`Store::due`]).
+pub(crate) struct Run<T> {
+    by: By,
+    calls: Vec<(String, Value, i64)>,
+    base: Arc<T>,
+    now: Arc<T>,
+}
+
+/// What a flush needs of a run: whether it ends where it began (`same`:
+/// nothing to log), and whether its last call alone makes it (`alone`: one
+/// event). The costly part of a flush (a copy, the call again, two
+/// comparisons of the whole state), worked out on the run's own states.
+pub(crate) struct Weighed<T> {
+    calls: usize,
+    now: Arc<T>,
+    same: bool,
+    alone: bool,
+}
+
+impl<T: Cell> Run<T> {
+    /// Weigh it (pure; off the store's lock: a key held meanwhile goes on).
+    pub(crate) fn weigh(self) -> Weighed<T> {
+        let same = *self.now == *self.base;
+        let alone = !same && {
+            let (method, args, at) = self.calls.last().expect("a run has a call");
+            self.calls.iter().all(|c| c.0 == *method) && {
+                let mut st = (*self.base).clone();
+                apply_guarded(&mut st, &Cx::live(*at, &self.by), method, args.clone()).is_ok() && st == *self.now
+            }
+        };
+        Weighed { calls: self.calls.len(), now: self.now, same, alone }
+    }
 }
 
 /// A store as a joint commit found it ([`Store::mark`]).
@@ -838,6 +875,43 @@ fn shaped<T: Cell>(st: &T) -> Result<Option<Value>, Error> {
     Ok(Some(v))
 }
 
+/// `next`'s saved form made from `prev`, the committed state `was`'s: only
+/// the `#[aio_cell]` slices whose field changed are serialized again, each
+/// given with its saved form before (aio's per-cell serialization cache,
+/// which its Immer drafts tell by identity; here the fields' comparison).
+/// A cursor step serializes the one small slice it moved, not 1000 rows.
+/// `Err(prev)`: the cell's shape needs the whole (its `save`, a
+/// `persist(include)` of its own), or a slice did not serialize.
+#[allow(clippy::type_complexity)]
+fn quick_saved<T: Cell>(
+    next: &T,
+    was: &T,
+    mut prev: Value,
+) -> std::result::Result<(Value, Vec<(&'static crate::compat::data::Slice, Option<Value>)>), Value> {
+    if !T::PERSIST_INCLUDE.is_empty() || !prev.is_object() || next.save().is_some() {
+        return Err(prev);
+    }
+    let mask = next.changed_fields(was);
+    let changed = |name: &str| T::FIELDS.iter().position(|f| f.name == name).is_none_or(|i| mask & (1 << i.min(63)) != 0);
+    let mut news = vec![];
+    for s in T::AIO_CELLS.iter().filter(|s| changed(s.field)) {
+        let Some(Ok(mut v)) = next.slice_json(s.field) else { return Err(prev) };
+        let f = crate::filter::Filter { include: s.include, exclude: s.transient };
+        if !f.is_all() {
+            crate::filter::strip(&mut v, f);
+        }
+        news.push((s, v));
+    }
+    let Some(m) = prev.as_object_mut() else { return Err(prev) };
+    let was = news.into_iter().map(|(s, v)| (s, m.insert(s.field.into(), v))).collect();
+    // Its own paths left out (`#[transient]`, `persist(exclude)`), into the new slices too.
+    let own = crate::filter::Filter { include: &[], exclude: T::TRANSIENT };
+    if !own.is_all() {
+        crate::filter::strip(&mut prev, own);
+    }
+    Ok((prev, was))
+}
+
 /// What it doesn't save (`#[transient]`, `persist(include, exclude)`): the
 /// cell's own (`None`) and its `#[aio_cell]` slices' (`Some(field)`).
 fn filters<T: Cell>() -> impl Iterator<Item = (Option<&'static str>, crate::filter::Filter)> {
@@ -1144,6 +1218,7 @@ impl<T: Cell> Store<T> {
             took: Default::default(),
             held: None,
             saved: None,
+            spare: Default::default(),
             keep: None,
             coalesce: PERSIST_DEBOUNCE,
             journal_wm: None,
@@ -1243,6 +1318,7 @@ impl<T: Cell> Store<T> {
             took: Default::default(),
             held: None,
             saved: None,
+            spare: Default::default(),
             keep: None,
             coalesce: PERSIST_DEBOUNCE,
             journal_wm: None,
@@ -1486,6 +1562,8 @@ impl<T: Cell> Store<T> {
         let (panics, t) = (self.panics.last().copied(), std::time::Instant::now());
         let out = self.apply_and_commit_once(by, method, args, cx, fired, op);
         let took = t.elapsed();
+        // The next call's copy, made meanwhile.
+        self.spare.ahead(&self.state);
         crate::perf::called(took);
         let refused = out.as_ref().err().map(|e| e.why.as_str());
         if T::DIAGNOSTICS {
@@ -1529,7 +1607,7 @@ impl<T: Cell> Store<T> {
         }
         let cx = cx.with_live(self.state.clone());
         let t0 = std::time::Instant::now();
-        let mut next = (*self.state).clone();
+        let mut next = self.spare.copy(&self.state);
         let t1 = std::time::Instant::now();
         // a panic is this call's refusal; the state (only a copy was
         // touched) stays as it was.
@@ -1613,21 +1691,26 @@ impl<T: Cell> Store<T> {
     /// in the other; `down` after `down`). A run that came back to where it
     /// began logs nothing. Refused (storage), the run stays held.
     pub fn flush(&mut self) -> Result {
+        self.flush_with(None)
+    }
+
+    /// [`Self::flush`], with what [`Run::weigh`] found of the run if that
+    /// is still the run held.
+    fn flush_with(&mut self, weighed: Option<Weighed<T>>) -> Result {
         if self.held.is_none() {
             return Ok(());
         }
         self.joining().map_err(|e| Rejected::new(format!("storage: {e}")))?;
         let Some(h) = self.held.take() else { return Ok(()) };
+        let weighed = weighed.filter(|w| w.calls == h.calls.len() && Arc::ptr_eq(&w.now, &self.state));
+        let w = weighed.unwrap_or_else(|| Run { by: h.by.clone(), calls: h.calls.clone(), base: h.base.clone(), now: self.state.clone() }.weigh());
         let now = std::mem::replace(&mut self.state, h.base.clone());
-        if *now == *h.base {
+        if w.same {
             return Ok(());
         }
         let last = h.calls.len() - 1;
         let (method, args, at) = &h.calls[last];
-        let alone = h.calls.iter().all(|c| c.0 == *method) && {
-            let mut st = (*h.base).clone();
-            apply_guarded(&mut st, &Cx::live(*at, &h.by), method, args.clone()).is_ok() && st == *now
-        };
+        let alone = w.alone;
         let earlier = if alone { &[][..] } else { &h.calls[..last] };
         // The state shown all along stays the same `Arc`: the views have
         // nothing new to draw, the caches keyed on it hold.
@@ -1639,14 +1722,22 @@ impl<T: Cell> Store<T> {
         Ok(())
     }
 
+    /// The held run, once due to go into the log: [`Run::weigh`] it off the
+    /// store's lock, then [`Self::flush_idle`] with what it found.
+    pub(crate) fn due(&self) -> Option<Run<T>> {
+        let h = self.held.as_ref().filter(|h| h.since.elapsed() >= self.coalesce)?;
+        Some(Run { by: h.by.clone(), calls: h.calls.clone(), base: h.base.clone(), now: self.state.clone() })
+    }
+
     /// Flush a held run [`Self::set_coalesce`] (default [`PERSIST_DEBOUNCE`])
-    /// after its first call; else how long until then.
-    pub(crate) fn flush_idle(&mut self) -> Option<std::time::Duration> {
+    /// after its first call; else how long until then. `weighed`: the run
+    /// [`Self::due`] gave, weighed (unused if more calls came since).
+    pub(crate) fn flush_idle(&mut self, weighed: Option<Weighed<T>>) -> Option<std::time::Duration> {
         let left = self.coalesce.checked_sub(self.held.as_ref()?.since.elapsed());
         match left {
             Some(d) if !d.is_zero() => Some(d),
             _ => {
-                if let Err(e) = self.flush() {
+                if let Err(e) = self.flush_with(weighed) {
                     eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
                     return Some(self.coalesce.max(PERSIST_DEBOUNCE));
                 }
@@ -1703,11 +1794,21 @@ impl<T: Cell> Store<T> {
         };
         // aio-rs's own file keeps its bound tables too.
         let bound = self.aio_kv.is_some() || !T::TABLES.is_empty();
-        let kv_state = bound.then(|| saved(&next)).transpose().map_err(|e| Rejected::new(e.0))?;
+        let quick = match (self.aio_kv.is_some() && !T::AIO_CELLS.is_empty(), self.saved.take()) {
+            (true, Some(prev)) => quick_saved(&*next, &*self.state, prev).map_err(|prev| self.saved = Some(prev)).ok(),
+            (_, prev) => {
+                self.saved = prev;
+                None
+            }
+        };
+        let kv_state = match quick {
+            Some(_) => None,
+            None => bound.then(|| saved(&next)).transpose().map_err(|e| Rejected::new(e.0))?,
+        };
         // What its tables hold now: only the rows that changed are written.
         // With `#[aio_cell]` fields, only the slices that changed are written.
         // The committed state's saved form is kept from its own commit.
-        let kv_prev = match bound && !(T::TABLES.is_empty() && T::AIO_CELLS.is_empty()) {
+        let kv_prev = match quick.is_none() && bound && !(T::TABLES.is_empty() && T::AIO_CELLS.is_empty()) {
             true => Some(match self.saved.take() {
                 Some(v) => v,
                 None => saved(&self.state).map_err(|e| Rejected::new(e.0))?,
@@ -1757,8 +1858,20 @@ impl<T: Cell> Store<T> {
             logged_seqs.push(tx.last_insert_rowid() as u64);
         }
         let seq = logged_seqs.pop().expect("this call's event");
-        let keep = kv_prev.is_some();
+        let keep = kv_prev.is_some() || quick.is_some();
         let kept_saved = match (&self.aio_kv, kv_state, &kv_prev) {
+            (Some(kv), _, _) if quick.is_some() => {
+                let (st, was) = quick.expect("checked");
+                was.into_iter()
+                    .try_for_each(|(s, old)| {
+                        let new = st.get(s.field).cloned().unwrap_or_else(|| serde_json::json!({}));
+                        match old.as_ref() == Some(&new) {
+                            true => Ok(()),
+                            false => kv.write(&tx, s.cell, s.version, new, old.as_ref(), s.tables),
+                        }
+                    })
+                    .map(|_| st)
+            }
             (Some(kv), Some(st), Some(prev)) if !T::AIO_CELLS.is_empty() => kv.write_slices(&tx, T::AIO_CELLS, &st, prev).map(|_| st),
             (Some(kv), Some(st), prev) => {
                 let copy = st.clone();
@@ -2332,5 +2445,63 @@ impl<T: Cell> Drop for Store<T> {
         {
             eprintln!("[aio] {}: snapshot at close failed: {e}", T::ID);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[crate::cell(persist, id = "cursor")]
+    pub struct Cursor {
+        rows: Vec<String>,
+        at: u32,
+    }
+
+    #[crate::methods]
+    impl Cursor {
+        #[coalesce]
+        pub fn focus(&mut self, at: u32) {
+            self.at = at;
+        }
+
+        pub fn add(&mut self, row: String) {
+            self.rows.push(row);
+        }
+    }
+
+    fn held(s: &mut Store<Cursor>, steps: u32) {
+        s.set_coalesce(std::time::Duration::from_millis(1)).unwrap();
+        for i in 1..=steps {
+            s.call(&By::Test, "focus", serde_json::json!([i])).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    #[test]
+    fn a_held_run_weighed_off_the_lock_is_logged_as_one_flushed_on_it() {
+        let mut s = Store::<Cursor>::memory();
+        s.call(&By::Test, "add", serde_json::json!(["a"])).unwrap();
+        held(&mut s, 3);
+        let w = s.due().expect("due").weigh();
+        assert!(w.alone && !w.same, "its last call alone makes it");
+        assert_eq!(s.flush_idle(Some(w)), None, "flushed");
+        let seq = s.seq();
+        assert_eq!(s.state().at, 3);
+        // Weighed, then another step came: the weighing is not used, the run is weighed again.
+        held(&mut s, 2);
+        let w = s.due().expect("due").weigh();
+        s.call(&By::Test, "focus", serde_json::json!([9])).unwrap();
+        assert_eq!(s.flush_idle(Some(w)), None);
+        assert_eq!((s.state().at, s.seq()), (9, seq + 1), "one event for the run, its last step's");
+        // A run that came back where it began logs nothing.
+        held(&mut s, 0);
+        s.call(&By::Test, "focus", serde_json::json!([1])).unwrap();
+        s.call(&By::Test, "focus", serde_json::json!([9])).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let w = s.due().expect("due").weigh();
+        assert!(w.same);
+        assert_eq!(s.flush_idle(Some(w)), None);
+        assert_eq!(s.seq(), seq + 1);
     }
 }
