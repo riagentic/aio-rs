@@ -40,6 +40,7 @@ mod preview;
 mod prune;
 mod record;
 mod release;
+mod reload;
 mod remote;
 mod replayed;
 mod service;

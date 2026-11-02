@@ -135,7 +135,8 @@ mod winstall;
 #[cfg(target_os = "linux")]
 mod xroom;
 // The guide's pages that call this crate (`docs/`), as doctests.
-#[cfg(doctest)]
+// The guide's examples are written for the kit on Dioxus (its default).
+#[cfg(all(doctest, feature = "dioxus"))]
 mod guide;
 
 pub use guest::{Child, Web, clear_partition, open_window};
@@ -365,7 +366,10 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         // SAFETY: read at once, not kept across patches.
         let fns = unsafe { subsecond::get_jump_table() }.map_or(0, |t| t.map.len());
-        eprintln!("{}", aio::log::hot_patched(n, fns))
+        eprintln!("{}", aio::log::hot_patched(n, fns));
+        // air runs a view's body once: its views are built again on the new code.
+        #[cfg(all(feature = "air", not(feature = "dioxus")))]
+        views::on_air::patched();
     }));
     // A dev build says a component caught in a render loop, by name, and
     // keeps the component tree for `ax components`.
@@ -1156,6 +1160,7 @@ mod tests {
         assert_eq!(&b, b"focus\n");
     }
 
+    #[cfg(feature = "dioxus")]
     #[test]
     fn the_page_has_no_network_and_the_wire_comes_first() {
         let p = page(&Window { title: "t", ..Default::default() });
@@ -1167,6 +1172,17 @@ mod tests {
             p.find("aio://wire").unwrap() < p.find("const sent = new WeakMap()").unwrap(),
             "typing wraps a live interpreter"
         );
+        assert!(p.contains(DIALOG));
+    }
+
+    #[cfg(all(feature = "air", not(feature = "dioxus")))]
+    #[test]
+    fn the_page_on_air_has_no_network_and_airs_interpreter() {
+        let p = page(&Window { title: "t", ..Default::default() });
+        assert!(p.contains("default-src 'none'"));
+        assert!(p.contains("connect-src 'none'") && !p.contains("unsafe-eval"), "{p}");
+        assert!(p.contains(air::PAGE_JS), "air's interpreter, talking to the preload's wire");
+        assert!(!p.contains("aio://wire") && !p.contains("window.WebSocket = class"), "no Dioxus glue");
         assert!(p.contains(DIALOG));
     }
 

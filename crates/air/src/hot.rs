@@ -53,13 +53,16 @@ static ON: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static MARKUP: RwLock<Option<HashMap<Key, Arc<Override>>>> = RwLock::new(None);
 
-/// Use `markup` in place of the built templates it names, from the next
-/// view built on (every thread's): [`Root::hot`](crate::Root::hot) builds
-/// a root's views again. Templates it doesn't name keep theirs.
-pub fn set_markup(markup: Vec<Markup>) {
+/// The templates of `files` (each as the compiler names it) are `markup`
+/// from the next view built on (every thread's), where it names one, else
+/// their built ones: [`Root::hot`](crate::Root::hot) builds a root's
+/// views again. Other files' markup sent before stays.
+pub fn set_markup(files: &[String], markup: Vec<Markup>) {
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let mut m = MARKUP.write().unwrap_or_else(|e| e.into_inner());
     let all = m.get_or_insert_default();
+    let files: Vec<String> = files.iter().map(|f| f.replace('\\', "/")).collect();
+    all.retain(|k, _| !files.contains(&k.0));
     for t in markup {
         let o = Override { nodes: t.nodes.into(), count: t.count, generation };
         all.insert((t.file.replace('\\', "/"), t.line, t.col, t.idx), Arc::new(o));

@@ -118,12 +118,17 @@ fn markup_sent_for_a_template_replaces_it_and_the_state_stays() {
     page.click("hi");
     assert_eq!(page.text("hi"), "Hello");
     let edit = Markup { file: file!().into(), line: AT.get(), col: 5, idx: 0, nodes: markup("Hi there"), count: 4 };
-    air::hot::set_markup(vec![edit]);
+    air::hot::set_markup(&[file!().into()], vec![edit]);
     page.root().hot();
     page.flush();
-    air::hot::clear_markup();
     assert_eq!(page.text("hi"), "Hi there", "the new markup, nothing compiled: {}", page.html());
     assert!(page.html().contains("<span>1</span>"), "the hole still follows its signal: {}", page.html());
     page.click("hi");
+    assert!(page.html().contains("<span>2</span>"), "{}", page.html());
+    // The file's markup sent again without that template: its built one is back.
+    air::hot::set_markup(&[file!().into()], vec![]);
+    page.root().hot();
+    page.flush();
+    assert_eq!(page.text("hi"), "Hello");
     assert!(page.html().contains("<span>2</span>"), "{}", page.html());
 }

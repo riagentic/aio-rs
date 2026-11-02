@@ -1194,7 +1194,9 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         return Ok(if ended.success() { String::new() } else { format!("{name} ended: {ended}") });
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    match dx_version() {
+    // An app on air: no dx (it drives Dioxus's devtools); markup reloads live.
+    let air = on_air(&meta, name);
+    match dx_version().filter(|_| !air) {
         // dx's hot-patch watches all of the app: `--watch=<dirs>` is ax's to keep.
         Some(v) if dx_matches(&v) && matches!(watching, Watching::Only(_)) => eprintln!(
             "ax dev: --watch narrows what reloads, so ax rebuilds on change and restarts {name} (no hot-patch: \
@@ -1249,6 +1251,10 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         Some(v) => {
             eprintln!("ax dev: dx is {}, ax needs {DIOXUS} to hot-patch; rebuilding on change instead", v.trim())
         }
+        None if air => eprintln!(
+            "ax dev: {name} on air: an rsx! markup edit (text, a static attribute or element) shows at once, \
+             its state kept; other edits rebuild"
+        ),
         None => eprintln!(
             "ax dev: no dx; rebuilding on change instead (for edits in under a second: ax setup fetches it, \
              or {})",
@@ -1262,6 +1268,9 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     };
     eprintln!("ax dev: {name} — watching {}", shown.join(", "));
     css(&pkg, &rx);
+    let workspace = PathBuf::from(meta["workspace_root"].as_str().unwrap_or_default());
+    // What the running app was built from: markup edits are told against it.
+    let mut built = air.then(|| crate::reload::Built::snapshot(&pkg.dirs));
     let bin = build(&pkg, logs.as_deref());
     // A failed build's errors are on the page (once it runs) until a good one.
     let mut red = bin.is_none();
@@ -1288,6 +1297,19 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                     crate::watch::settle(&rx, vec![]);
                 }
                 lint_said(&changed, &cwd);
+                // Markup alone (on air): to the running window, no build.
+                let up = app.as_mut().is_some_and(|(c, _)| c.try_wait().ok().flatten().is_none());
+                let edits = built.as_ref().filter(|_| up && !red).and_then(|b| b.edits(&changed, &workspace));
+                if let Some(edits) = edits {
+                    eprintln!("ax dev: {said} changed");
+                    match reload_markup(window.as_ref(), &edits) {
+                        Ok(said) => {
+                            eprintln!("{said}");
+                            continue;
+                        }
+                        Err(e) => eprintln!("ax dev: the markup didn't reach the window ({e}): building"),
+                    }
+                }
                 eprintln!("ax dev: {said} changed — building…");
                 false
             }
@@ -1304,6 +1326,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         };
         css(&pkg, &rx);
         let started = std::time::Instant::now();
+        let snapshot = air.then(|| crate::reload::Built::snapshot(&pkg.dirs));
         let Some(bin) = build(&pkg, logs.as_deref()) else {
             red = true;
             eprintln!("ax dev: build failed; the running app is unchanged and shows why");
@@ -1333,11 +1356,51 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         stop(&mut app, window.as_ref());
         eprintln!("ax dev: built in {took:.1} s; restarting {name}");
         running = now;
+        built = snapshot;
         app = launch(&bin, args, &put);
         launched = std::time::Instant::now();
     }
     stop(&mut app, window.as_ref());
     Ok(String::new())
+}
+
+/// Whether binary `name`'s package draws on air: it takes aio-rs-shell
+/// with `air` and without Dioxus (its default features) (pure).
+pub fn on_air(meta: &serde_json::Value, name: &str) -> bool {
+    let Some(pkg) = pkg_with(meta, name, "bin") else { return false };
+    let Some(p) = meta["packages"].as_array().into_iter().flatten().find(|p| p["name"] == pkg.name.as_str()) else {
+        return false;
+    };
+    p["dependencies"].as_array().into_iter().flatten().any(|d| {
+        d["name"] == "aio-rs-shell"
+            && d["uses_default_features"] == false
+            && d["features"].as_array().is_some_and(|f| f.iter().any(|f| f == "air"))
+    })
+}
+
+/// Send markup `edits` to the running app's window (`Aio.hot`): what to say.
+fn reload_markup(
+    window: Option<&(String, aio::paths::Plan)>,
+    edits: &[(String, Vec<crate::reload::Edited>)],
+) -> Result<String, String> {
+    let n: usize = edits.iter().map(|(_, e)| e.len()).sum();
+    if n == 0 {
+        return Ok("ax dev: no markup changed: nothing to build".into());
+    }
+    let (id, p) = window.ok_or("no app to reload")?;
+    let door = crate::cdp::door(id, p).ok_or("it isn't running")?;
+    let t = std::time::Instant::now();
+    let windows = crate::reload::send(&door, edits)?;
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    Ok(format!(
+        "ax dev: reloaded {n} template{} in {windows} window{} ({ms:.0} ms), state kept",
+        plural(n),
+        plural(windows as usize)
+    ))
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// aio's lint while editing (`air/dev-air.ts`): the aio checks of the saved

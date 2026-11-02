@@ -41,6 +41,10 @@ impl Relay {
         if method == COMPONENTS {
             return Err(answer(&m["id"], Ok(&components())));
         }
+        // `ax dev`'s template hot reload: the views built again, answered here.
+        if method == HOT {
+            return Err(answer(&m["id"], hot(&m["params"]).as_ref().map_err(String::as_str)));
+        }
         self.next += 1;
         self.asks.insert(self.next, (from, m["id"].clone()));
         Ok(json!({ "t": "cdp", "id": self.next, "method": method, "params": m.get("params").unwrap_or(&json!({})) })
@@ -75,6 +79,46 @@ impl Relay {
 /// `{"components": [{name, renders, ms, children}]}`, its last renders,
 /// `"renders": [{component, at, ms, trigger}]`, and `"total"` renders.
 pub const COMPONENTS: &str = "Aio.components";
+
+/// The door's own method: `ax dev`'s template hot reload. Its params:
+/// `{"files": [file], "templates": [{file, line, col, idx, nodes (base64),
+/// count}]}` (the files' templates edited since they were built, each by
+/// where its `rsx!` call is written; the files' others as built); the
+/// answer `{"windows": n}`, the windows told to build their views again.
+pub const HOT: &str = "Aio.hot";
+
+/// Apply a hot reload's templates (air's: Dioxus has its own devtools).
+fn hot(params: &Value) -> Result<Value, String> {
+    #[cfg(all(feature = "air", not(feature = "dioxus")))]
+    {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let one = |t: &Value| -> Option<air::hot::Markup> {
+            Some(air::hot::Markup {
+                file: t["file"].as_str()?.into(),
+                line: u32::try_from(t["line"].as_u64()?).ok()?,
+                col: u32::try_from(t["col"].as_u64()?).ok()?,
+                idx: u32::try_from(t["idx"].as_u64()?).ok()?,
+                nodes: b64.decode(t["nodes"].as_str()?).ok()?,
+                count: u32::try_from(t["count"].as_u64()?).ok()?,
+            })
+        };
+        let ts = params["templates"].as_array().ok_or("no templates")?;
+        let markup = ts.iter().map(one).collect::<Option<Vec<_>>>().ok_or("a template is malformed")?;
+        let files = params["files"].as_array().ok_or("no files")?;
+        let files = files
+            .iter()
+            .map(|f| f.as_str().map(String::from))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("a file is not text")?;
+        Ok(json!({ "windows": crate::views::hot(&files, markup) }))
+    }
+    #[cfg(feature = "dioxus")]
+    {
+        _ = params;
+        Err("the views are Dioxus's: its devtools reload them".into())
+    }
+}
 
 /// What the dev build keeps; nothing before the window's view runs.
 fn components() -> Value {
