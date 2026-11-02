@@ -357,7 +357,15 @@ def live(aio, app, env, home):
         else:
             dev.terminate()
         dev.wait(timeout=30)
-        logs.cleanup()
+        # Windows: a process of its tree may hold the log open a moment longer.
+        for _ in range(50):
+            try:
+                logs.cleanup()
+                break
+            except PermissionError:
+                time.sleep(0.2)
+        else:
+            print(f"dx-metrics: {logs.name} is still in use: left behind", file=sys.stderr)
 
 
 def to_air(app):
