@@ -62,8 +62,10 @@ port, for other tools; ax shot, eval, surface and trigger need none);
 (ANDROID_SERIAL; none: AIO_AVD booted): its web build in a dev APK installed
 once beside the app, each edit reloading it (--native, or no web build: the
 app itself for that CPU, again on every saved change); its log in the terminal;
---web: its web build (debug) served on loopback, its tabs live: a saved
-stylesheet shows at once, any other edit builds anew and the tabs reload",
+--web [--port N] [--expose]: its web build (debug) served on loopback (a free
+port unless --port; --expose: on the network over TLS, behind a key the
+printed link carries), its tabs live: a saved stylesheet shows at once, any
+other edit builds anew and the tabs reload",
     ),
     v(
         "keygen",

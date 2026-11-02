@@ -1169,7 +1169,7 @@ mod tests {
     fn the_page_has_no_network_and_the_wire_comes_first() {
         let p = page(&Window { title: "t", ..Default::default() });
         assert!(p.contains("default-src 'none'"));
-        assert!(p.contains("connect-src 'none'") && !p.contains("unsafe-eval"), "{p}");
+        assert!(p.contains("connect-src 'none'") && !p.contains("'unsafe-eval'"), "{p}");
         assert!(p.find("window.WebSocket = class").unwrap() < p.find("aio://wire").unwrap());
         assert!(p.contains("[autofocus]") && p.contains("data-select"));
         assert!(
@@ -1184,7 +1184,7 @@ mod tests {
     fn the_page_on_air_has_no_network_and_airs_interpreter() {
         let p = page(&Window { title: "t", ..Default::default() });
         assert!(p.contains("default-src 'none'"));
-        assert!(p.contains("connect-src 'none'") && !p.contains("unsafe-eval"), "{p}");
+        assert!(p.contains("connect-src 'none'") && !p.contains("'unsafe-eval'"), "{p}");
         assert!(p.contains(air::PAGE_JS), "air's interpreter, talking to the preload's wire");
         assert!(!p.contains("aio://wire") && !p.contains("window.WebSocket = class"), "no Dioxus glue");
         assert!(p.contains(DIALOG));

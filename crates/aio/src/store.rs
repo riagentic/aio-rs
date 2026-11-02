@@ -2285,26 +2285,11 @@ impl<T: Cell> Store<T> {
 /// (missed slots fire once, not one by one); a one-shot is removed. Only the
 /// row that fired: a method that set the same key meanwhile keeps its row.
 fn rearm<T: Cell>(db: &Connection, d: &Due, now: i64) -> rusqlite::Result<()> {
-    // A cron schedule: its next slot after now (a missed one fired once).
-    if let Some(next) = d.cron.as_deref().and_then(|c| crate::cron::Cron::parse(c).ok()?.next(now.max(d.due))) {
-        return db
-            .execute(
-                "UPDATE sched SET due = ?3 WHERE cell = ?1 AND key = ?2 AND due = ?4",
-                params![T::ID, d.key, next, d.due],
-            )
-            .map(|_| ());
-    }
-    match d.every {
-        Some(ms) => {
-            let mut next = d.due + ms;
-            if next <= now {
-                next = now + ms;
-            }
-            db.execute(
-                "UPDATE sched SET due = ?3 WHERE cell = ?1 AND key = ?2 AND due = ?4",
-                params![T::ID, d.key, next, d.due],
-            )
-        }
+    match crate::cx::next_run(d.due, d.every, d.cron.as_deref(), now) {
+        Some(next) => db.execute(
+            "UPDATE sched SET due = ?3 WHERE cell = ?1 AND key = ?2 AND due = ?4",
+            params![T::ID, d.key, next, d.due],
+        ),
         None => db.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2 AND due = ?3", params![T::ID, d.key, d.due]),
     }
     .map(|_| ())

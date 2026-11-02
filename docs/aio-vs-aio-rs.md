@@ -198,7 +198,6 @@ beyond the aio-rs form.
 | Sync | `lww-per-key` and `set-remove` view merges, HLC | methods replayed in order on the server; `Remote::merge` shows `Text`, `Counter`, `SetAdd` | a method per key | [offline](persistence/offline.md#limits-compared-with-aio) |
 | Sync | render-staleness backpressure | every link paced the same (`sync_interval_ms`) | ➖ | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
 | Sync | path subscriptions | a copy gets every patch of its cell | split cells | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | every cell on one socket | every cell on one `/ws` and port (`Http::cell`), a socket per cell | ➖ | [sync](state/sync.md#limits) |
 | Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
@@ -238,7 +237,7 @@ beyond the aio-rs form.
 | Debugging | V8 heap snapshots, the health overlay | none | `ax heap`, `ax health` | [production](debugging/production.md#not-in-aio-rs) |
 | Debugging | `perfCheck: "off"`, a runtime benchmark gate | budgets always on | ➖ | [scaling](build/scaling.md#not-in-aio-rs) |
 | Debugging | reports screened by `visible`, timeline payloads | carried as saved, never arguments | `#[redact]` | [feedback](debugging/feedback.md#not-as-in-aio) |
-| Build | hot reload in a browser | no hot-patching in the web build (a build per edit; on Android the dev page reloads) | a build per edit | [dev](build/dev.md#limits) |
+| Build | hot-patching in a browser | `ax dev --web` rebuilds and reloads its tabs per edit, slower than a patch (on Android the dev page reloads) | ➖ | [dev](build/dev.md#limits) |
 | Build | a run-from-a-link command | none | clone, `ax start` | [dev](build/dev.md#limits) |
 | Build | ios-client (a WKWebView thin client) | no iOS | ➖ | [targets](build/targets.md#limits) |
 | Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME` | none (the emulator lane is `ax test --android`) | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |
@@ -399,7 +398,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Path subscriptions | yes | ❌ (split cells) | ❌ |
 | Binary side channels | a raw WebSocket route, a recipe | `Route::socket` with framing, drop or close, gap checks | ✅ |
 | Server functions, routes | `serverFns`, `routes`, streamed `Response` | `aio::fns::ServerFn`, `aio::http`, `Reply::stream` | ✅ |
-| One socket, every cell | yes | one `/ws` and port for every cell (`Http::cell`), a socket per cell | 🔄 |
+| One socket, every cell | yes | `Http::cell`: one `/ws`, port and socket for every cell, a link per cell on it; an aio page sees every shared cell | ✅ |
 | Peer identity, door hooks | `resolvePeer`, `localConnectHooks` | `Http::resolve_peer`, `Http::door_links` | ✅ |
 | Pairing, discovery, peers | PIN, CPace, UDP 8099, `x-aio-peer` | the same formats | ✅ |
 | Calling another app | `peer()`, `call` | `Peer::find`, `AioLink` | ✅ |
