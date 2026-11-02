@@ -176,7 +176,7 @@ with aio's apps, [desktop](../clients/desktop.md#one-store-with-aio)). `~` is
 | this machine's TLS root (`ax trust`) | `<tool home>/tls/` | the same | the same |
 | release signing keys (`ax keygen`) | `~/.config/aio-rt/keys/` (`$XDG_CONFIG_HOME`) | the same | the same |
 | an app installed from its bundle | `<tool home>/install/<id>/`, `~/.local/bin/<id>`, a menu entry | `/Applications/<Name>.app` (the app offers the move) | `%LOCALAPPDATA%\Programs\<id>\`, a Start menu entry, Settings › Apps |
-| the app's sockets (`ax` talks to it here) | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/`, else the temp dir | the temp dir | named pipes `\\.\pipe\aio-rt-<id>-<hash>-…` |
+| the app's sockets (`ax` talks to it here) | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/`, else the temp dir; `/tmp/aio-rt-<uid>/…` when that is too long | the temp dir; `/tmp/aio-rt-<uid>/…` when that is too long | named pipes `\\.\pipe\aio-rt-<id>-<hash>-…` |
 
 - `ax data <app>` prints an app's folders and what to back up; `ax doctor
   <app>` says who chose them (a flag, a variable, the default).

@@ -14,7 +14,7 @@ is either made again or belongs to every app ([below](#outside-the-apps-home)).
 |---|---|---|---|
 | the app's home | `~/.local/share/aio-rt/apps/<id>/` | `~/Library/Application Support/aio-rt/apps/<id>/` | `%LOCALAPPDATA%\aio-rt\apps\<id>\` |
 | its cache | `~/.cache/aio-rt/<id>/` | `~/Library/Caches/aio-rt/<id>/` | `%LOCALAPPDATA%\aio-rt\cache\<id>\` |
-| its sockets | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/` (else the temp dir) | the temp dir, `aio-rt/<id>-<hash>/` | the temp dir, `aio-rt\<id>-<hash>\` |
+| its sockets | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/` (else the temp dir; `/tmp/aio-rt-<uid>/…` when too long for a socket) | the temp dir, `aio-rt/<id>-<hash>/` (`/tmp/aio-rt-<uid>/…` when too long) | the temp dir, `aio-rt\<id>-<hash>\` |
 
 `XDG_DATA_HOME` and `XDG_CACHE_HOME` move the Linux ones as usual.
 
