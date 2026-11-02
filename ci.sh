@@ -16,6 +16,9 @@ scripts/dx-metrics --self-test
 # The guide (docs/): links resolve, each page with Rust is a doctest (run by
 # the workspace tests below), the verb list is whole, the wording public.
 scripts/docs-check
+# The mutation ledger holds together: each break's line found once, its test there
+# (scripts/mutants runs the breaks; GitHub CI runs the fast ones).
+scripts/mutants --check
 # Apps are written against aio::ui, never the renderer behind it (air
 # replaces it: docs/design/air.md): the template, the kit, `ax ui`, the views
 # ax writes, the tests and the guide name no `dioxus` (ax lint holds apps to it).

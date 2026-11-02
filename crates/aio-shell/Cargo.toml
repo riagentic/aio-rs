@@ -51,7 +51,7 @@ tempfile = "3"
 # The update tests read aio.toml text (`Config::parse`).
 aio-config = { workspace = true, features = ["toml"] }
 # The kit's islands, tested in the real page (`islands.rs`).
-aio = { workspace = true, features = ["kit"] }
+aio = { workspace = true, features = ["kit", "testing"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 
 [[test]]

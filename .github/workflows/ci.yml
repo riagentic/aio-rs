@@ -50,6 +50,9 @@ jobs:
         with:
           path: ~/.cache/aio-dx-rows
           key: aio-dx-rows-${{ github.event_name == 'push' && github.sha || steps.dx.outputs.base }}
+      # Known breaks planted one at a time, in the source and in a built .deb:
+      # each one's test must go red (docs/testing/proving.md).
+      - run: scripts/mutants --fast
   # The same tests on each desktop OS (fmt and lint are the same everywhere).
   test:
     strategy:

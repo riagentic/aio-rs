@@ -40,6 +40,11 @@ The gates, in order:
 - `scripts/slim-metrics --check`: each feature set's crate count stays
   under its ceiling (`deps.toml [ceilings]`).
 - `scripts/docs-check`: the guide holds together (below).
+- `scripts/mutants --check`: the mutation ledger (`scripts/mutants.toml`)
+  holds together. `scripts/mutants` plants each break, in the source or in
+  the template app's built `.deb`, and needs its named test red; run it
+  after changing a line the ledger names, and commit
+  `scripts/mutants-ledger.csv` ([Proving the tests](docs/testing/proving.md)).
 - clippy with `-D warnings`: the workspace with every feature, each
   feature of `aio-rs` alone, the browser build (wasm32), Windows, and
   Android when an NDK is found.
@@ -62,7 +67,8 @@ The Windows tests run on a real Windows when one is named:
 `./ci-windows.sh user@host`; the machine needs only OpenSSH).
 
 GitHub (`.github/workflows/ci.yml`) runs `./ci.sh` on Ubuntu after
-`ax setup` (with `ffmpeg` for the test videos), the workspace clippy and
+`ax setup` (with `ffmpeg` for the test videos) and then the ledger's fast
+breaks (`scripts/mutants --fast`), the workspace clippy and
 tests on Windows and macOS with the Electron runtime (`ax runtime --fetch`),
 and `cargo audit` (accepted advisories in `.cargo/audit.toml`).
 
