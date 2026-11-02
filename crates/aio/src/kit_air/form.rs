@@ -171,7 +171,7 @@ pub fn Field(
         memo(move || error.get().filter(|e| !e.is_empty()))
     };
     let said = {
-        let (base, hint, required) = (base.clone(), hint.clone(), required.clone());
+        let (base, hint, required) = (base.clone(), hint.clone(), required);
         memo(move || Said {
             base: base.clone(),
             label: label.get(),

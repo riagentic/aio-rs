@@ -39,10 +39,7 @@ pub fn Modal(
     let id = use_id("modal");
     let close = memo(move || onclose.filter(|_| dismissable.get()));
     // Open order, not mount order: a dialog opened later is on top.
-    let shown = {
-        let open = open.clone();
-        memo(move || open.get())
-    };
+    let shown = memo(move || open.get());
     let was = once(|| Rc::new(Cell::new(false)));
     {
         let id = id.clone();

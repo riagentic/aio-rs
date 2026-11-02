@@ -147,10 +147,7 @@ struct Rtl(Memo<bool>);
 /// a right-to-left language wraps its root in one.
 #[component]
 pub fn Direction(rtl: Prop<bool>, children: View) -> View {
-    let now = {
-        let rtl = rtl.clone();
-        memo(move || rtl.get())
-    };
+    let now = memo(move || rtl.get());
     provide(|| Rtl(now));
     rsx! {
         div { dir: if now.get() { "rtl" } else { "ltr" }, style: "display:contents", {children} }

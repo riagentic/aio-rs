@@ -142,7 +142,7 @@ required-features = ["kit", "net"]
 
 [[test]]
 name = "signin"
-required-features = ["kit", "net"]
+required-features = ["net"]
 
 [[test]]
 name = "sync"
