@@ -578,6 +578,10 @@ version may break things.
 
 ### Fixed
 
+- `TestUi`'s failure trace is written even while another test that passed
+  clears its own: that one removes the shared trace folders when empty, and
+  could between this one making them and writing its file (the failure
+  then named no trace; seen on Windows).
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled

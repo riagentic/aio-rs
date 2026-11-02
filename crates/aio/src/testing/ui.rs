@@ -1260,8 +1260,10 @@ impl TestUi {
         let dir = trace_dir();
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let file = dir.join(format!("ui-{stamp}.json"));
-        let wrote = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, body.to_string()));
-        if wrote.is_err() {
+        // Another test that passed may remove the shared folders above
+        // `dir` (when empty) between our making them and our file: again.
+        let write = || std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, body.to_string()));
+        if (0..5).all(|_| write().is_err()) {
             return String::new();
         }
         let mut old: Vec<_> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
