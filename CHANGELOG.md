@@ -9,6 +9,17 @@ version may break things.
 
 ### Added
 
+- **The app's routes in its window with no TCP port** (aio's `aio://app/<path>`
+  over the app socket): a standalone or client-server app whose
+  `Source::for_app_with` serves a path (routes, `[server] dirs`, blobs)
+  answers its window's `fetch`, `<img>` and streams over a private socket
+  (a Unix socket, a named pipe on Windows) that admits only the Electron
+  process aio-shell spawned; no window, no answer. The window's side is
+  aio's `socketFetch` (6 connections, small and error bodies read at once,
+  streams both ways, 504 after 30 s with no first byte,
+  `AIO_SOCKET_TIMEOUT_MS`). New: `aio::http::serve_window`,
+  `aio::ipc::Only::window`, `aio::ipc::window_http`. No new dependency
+  (axum's own server, already built for `[server] listen`).
 - **`ax dev` hot-patches Rust on Windows too** (an app on air, x86_64,
   MSVC or MinGW): the fat binary is linked at a fixed base below 4 GiB
   with a COFF symbol table (rust-lld for MSVC, its PDB kept), each patch
@@ -656,6 +667,27 @@ version may break things.
   arrived is still dropped (AIR never runs a removed element's handler);
   a dev build says so once per event name on the diagnostic bus
   (`ui:stale-event`, `air::on_warn`). `TestPage::aim` makes such an event.
+- `ax dev` on Windows reloads an `rsx!` edit as markup again (~ms)
+  instead of hot-patching it (~1.5 s): the watcher named a changed file
+  with the `\\?\` prefix `canonicalize` adds, so it never matched the
+  build's snapshot; it names it as the snapshot does now. Found by
+  `dx-metrics --live` on the Windows runner (live_rsx_s 1.5 s, its line
+  "hot-patched in 1316 ms").
+- A backtrace in hot-patched code on Windows (MSVC) names its functions:
+  each patch DLL is linked with its PDB (`/DEBUG` beside `/DEBUG:SYMTAB`)
+  and std's resolver (dbghelp) is told the modules again after each
+  patch, under its own lock. Linux, macOS and MinGW name a patch's frames
+  only when it loaded before the first backtrace was resolved (std lists
+  the libraries once); the hotpatch test checks both, on each OS.
+- `scripts/dx-metrics --live` runs on Windows (it imported the Unix-only
+  `resource`): CPU and the build check through the Win32 API, `ax dev`'s
+  tree stopped with `taskkill`, edits written byte for byte; the Windows
+  CI job prints its live-edit times.
+- The splash's `text` takes aio's full set on every splash (Electron's,
+  the OS's, the web's and Android's): `{title}`, `{version}` (the app's,
+  what `--version` prints), and `{got}`, `{total}`, `{pct}` as `0`, `?`,
+  `?`; Electron's, the web's and Android's filled only `{title}`. A
+  `download_text`'s `{version}` is the app's too, as aio's, not Electron's.
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled

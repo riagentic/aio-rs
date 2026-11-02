@@ -105,9 +105,17 @@ pub struct Watch {
 }
 
 /// `p` as the watcher names it: its real path (macOS' FSEvents says
-/// `/private/var/…` for `/var/…`), else as given.
+/// `/private/var/…` for `/var/…`), else as given; on Windows without the
+/// `\\?\` canonicalize adds, so a change names the file as the build's
+/// snapshot does (else no `rsx!` edit is a markup reload).
 fn real(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    plain(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+/// `\\?\C:\x` as `C:\x` (pure); any other path as it is.
+fn plain(p: PathBuf) -> PathBuf {
+    let disk = p.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|r| r.as_bytes().get(1) == Some(&b':'));
+    disk.map_or_else(|| p.clone(), PathBuf::from)
 }
 
 fn now_ms() -> i64 {
@@ -250,6 +258,9 @@ mod tests {
     #[test]
     fn a_burst_waits_100_ms_of_quiet_and_500_ms_at_most() {
         // aio's DEBOUNCE_MS, DEBOUNCE_MAX_MS.
+        assert_eq!(plain(PathBuf::from(r"\\?\D:\a\lib.rs")), PathBuf::from(r"D:\a\lib.rs"));
+        assert_eq!(plain(PathBuf::from(r"\\?\UNC\h\s")), PathBuf::from(r"\\?\UNC\h\s"), "a share: as it is");
+        assert_eq!(plain(PathBuf::from("/w/lib.rs")), PathBuf::from("/w/lib.rs"));
         assert_eq!(debounce(Duration::ZERO), Duration::from_millis(100));
         assert_eq!(debounce(Duration::from_millis(450)), Duration::from_millis(50));
         assert_eq!(debounce(Duration::from_millis(900)), Duration::ZERO);

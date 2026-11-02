@@ -10,6 +10,7 @@ a served app adds. A standalone desktop app opens no TCP port at all.
 |---|---|---|---|---|
 | the window's wire | the views' DOM edits and events, length-prefixed frames | a socket in the app's private socket dir | only the Electron process this app spawned (its pid and start time) | a window app, while its window is open |
 | the window's control line | focus, quit, dialogs, notifications, tray clicks, bounds; one JSON per line | the same dir | only that process | likewise |
+| the window's routes | HTTP/1.1: the app's routes, `[server] dirs` and blobs, for the page's `aio://app/<path>` | the same dir (`http`) | only that process | an app whose cell lives in it (`standalone`, `client-server`) and that serves a path |
 | later launches | a second launch's working dir and arguments | the same dir | this user | every app, from `aio_shell::start` |
 | the local door, one per cell | the sync protocol: state, patches, calls, server functions | the same dir (`cell-<id>`) | any process of this user | every app whose cell lives in it, in every build |
 | the inspector door | Chrome's DevTools protocol, one JSON per line | the same dir (`ui`) | this user | a debug build's window only |
@@ -35,6 +36,38 @@ a served app adds. A standalone desktop app opens no TCP port at all.
   socket. A port opens only in the serving modes (`client-server`,
   `server`), where `[server] listen` names it; `--port`, `--host` and
   `--expose` move it per launch.
+
+## Routes in the window
+
+An app's own routes (`Route`, `[server] dirs`, blobs: what
+`Source::for_app_with` is given) answer its window without a port, as
+aio's do (`aio://app/<path>` over the app's socket). The page asks
+`fetch('/api/items')`, `<img src="/media/a.png">` or `new
+EventSource('/feed')`; Electron's main process (`main.js`) takes every
+`aio://app` path that isn't the page, a `[build.assets]` file or an image
+by path, and sends it, path and query as they are, over the app's `http`
+socket (a named pipe on Windows) to `aio::http::serve_window`. The boot
+says it: `[aio] notes: 2 route(s) served to the window over its private
+socket (aio://app/<path>): no TCP port`.
+
+- **Admission is the key.** Only the Electron process aio-shell spawned is
+  answered (its pid and start time: `aio::ipc::Only::window`, the one gate
+  the wire and the control line ask too); any other process, of this user
+  or not, is dropped unanswered, and with no window started no one is
+  (fail closed). So no key is asked, as on the wire.
+- **What the window does with it** is aio's `socketFetch`: at most 6
+  connections (Chromium's per host), kept alive; a small or error body
+  read at once, so a body nobody reads (an `<img>`'s 404) never holds a
+  connection; anything else streamed both ways (`Reply::stream`, an
+  upload), and a stream the page drops closes its connection. No first
+  byte in 30 s (`AIO_SOCKET_TIMEOUT_MS`) is a 504 and a line in the log;
+  an app that can't be reached is a 502 that says so.
+- **The page may fetch its own origin, and only it**: with routes its
+  policy is `connect-src 'self'` (`aio://app`), without them `'none'`.
+- **Another process needs a port.** A webhook, an OAuth callback, a
+  browser, a peer: `[server] listen` (mode `client-server`) serves the
+  same routes on TCP, behind the key, as before. Server functions need
+  neither: they cross the wire.
 
 `ax data <app>` says where an app's files are; `ax clients <app> [cell]`
 lists its windows or the links open to a cell (user, wire, address,
@@ -269,9 +302,6 @@ Other big or binary data travels these ways:
 
 What aio has here and aio-rs doesn't yet:
 
-- Routes are never served over a socket: an app with routes and no
-  `[server] listen` doesn't serve them (aio serves a desktop app's routes
-  over its local socket through `aio://`).
 - No `transport` switch: `--port`, `--host` and `--expose` only move
   where a serving mode listens; they open no port on a `standalone` or
   `client` app.

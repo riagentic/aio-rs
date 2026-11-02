@@ -130,6 +130,8 @@ mod urls;
 mod views;
 #[cfg(feature = "web")]
 pub mod web;
+#[cfg(test)]
+mod window_routes;
 #[cfg(windows)]
 mod winstall;
 #[cfg(target_os = "linux")]
@@ -254,6 +256,12 @@ fn monogram(dir: &Path, label: &str, hue: u16) -> std::io::Result<std::path::Pat
 /// `id` names the runtime's app, so the OS sees each aio-rs app as its own
 /// (window class / Wayland app id, taskbar grouping).
 fn install(dir: &Path, id: &str, win: &Window) -> std::io::Result<()> {
+    install_with(dir, id, win, aio::ipc::window_http().is_some())
+}
+
+/// [`install`]; `routes`: the app serves routes to the window (`aio://app/<path>`,
+/// `--aio-http`), so its page may fetch from its own origin, and only it.
+fn install_with(dir: &Path, id: &str, win: &Window, routes: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -271,7 +279,7 @@ fn install(dir: &Path, id: &str, win: &Window) -> std::io::Result<()> {
     // No splash until `splash::install` lays one out.
     std::fs::write(dir.join("splash.json"), "null")?;
     assets(dir, instance::ASSETS.get().copied().unwrap_or_default())?;
-    std::fs::write(dir.join("index.html"), page(win))
+    std::fs::write(dir.join("index.html"), if routes { page_html(win, "", "'self'", "") } else { page(win) })
 }
 
 /// The app's built-in files (`[build] assets`) in `dir/assets` at their
@@ -464,8 +472,9 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         let mut listener = aio::ipc::Listener::bind(&sock)?;
         // The runtime's control line (Rust → Electron main): "focus".
         let mut ctl_listener = aio::ipc::Listener::bind(&ctl_sock)?;
-        // Both serve the window this spawns and no other process of the user.
-        let only = aio::ipc::Only::default();
+        // Both serve the window this spawns and no other process of the user,
+        // as the app's route door does: the one gate (`Only::window`).
+        let only = aio::ipc::Only::window();
         let ctl: Ctl = Arc::new(tokio::sync::Mutex::new(None));
         _ = CTL.set(ctl.clone());
         let (c, state, ctl_only) = (ctl.clone(), sized.is_none().then(|| dirs.data.join("window.json")), only.clone());
@@ -527,7 +536,15 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         let electron_draws = native.as_ref().is_none_or(|n| n.handoff());
         let t = splash::target(saved.as_ref(), win.width, win.height);
         let target = t.0.zip(t.1).map(|(x, y)| [x, y, t.2, t.3]);
-        splash::install(&dir, splashed.filter(|_| at_start && electron_draws), win.title, &splash_colors, target)?;
+        let version = instance::APP.get().map_or("", |(_, v)| v.as_str());
+        splash::install(
+            &dir,
+            splashed.filter(|_| at_start && electron_draws),
+            win.title,
+            version,
+            &splash_colors,
+            target,
+        )?;
         let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
         // a GPU that failed here once is never asked again (AIORT_GPU=hardware is).
         let gpu_failed = data.join("gpu-failed");
@@ -603,6 +620,8 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 .arg("--ozone-platform-hint=auto")
                 .arg(format!("--aio-sock={sock}"))
                 .arg(format!("--aio-ctl={ctl_sock}"))
+                // The app's routes, if it serves any (`aio://app/<path>`, no TCP).
+                .args(aio::ipc::window_http().map(|a| format!("--aio-http={a}")))
                 .arg(format!("--aio-id={}", dirs.id))
                 .arg(format!("--aio-title={}", win.title))
                 .arg(format!("--aio-width={}", win.width))
@@ -1487,6 +1506,10 @@ mod tests {
             assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
         }
         assert!(d.join("preload.js").exists() && d.join("index.html").exists());
+        // No routes for the window: its page connects to nothing; with them, to its own origin only.
+        assert!(std::fs::read_to_string(d.join("index.html")).unwrap().contains("connect-src 'none'"));
+        install_with(&d, "my-app", &Window::default(), true).unwrap();
+        assert!(std::fs::read_to_string(d.join("index.html")).unwrap().contains("connect-src 'self';"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

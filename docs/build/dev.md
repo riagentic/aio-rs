@@ -76,6 +76,11 @@ scroll, a field's selection) is drawn anew. Patches are built on Linux,
 macOS and Windows (x86_64; MSVC, or MinGW with its gcc on `PATH` or
 rustc's bundled one); on Windows the app runs at a fixed base without
 ASLR in `ax dev` (a system that forces ASLR gets a rebuild and restart).
+A backtrace (a panic's) names the functions of patched code: with MSVC
+each patch carries its PDB and the resolver learns of it; on Linux, macOS
+and MinGW std's resolver lists the loaded libraries at its first
+backtrace, so a patch loaded after that shows as `<unknown>` frames until
+a restart.
 
 ### Hot-patching on Dioxus
 
