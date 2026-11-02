@@ -16,6 +16,7 @@
 
 mod back;
 mod browser;
+mod change;
 mod controls;
 mod defer;
 mod form;
@@ -42,10 +43,11 @@ mod zoom;
 
 pub use back::use_back_button;
 pub use browser::{Browser, Go, GuestEvent, HostKey, go};
+pub use change::{use_on_change, use_on_change_now};
 pub use controls::*;
 pub use defer::{Defer, Trigger};
 pub use form::*;
-pub use forms::{Form, Problems, move_item, use_async_rule, use_form};
+pub use forms::{Bind, FieldArray, FieldOf, Form, Problems, move_item, use_async_rule, use_field_array, use_form};
 #[cfg(not(target_arch = "wasm32"))]
 pub use held::use_held;
 pub use island::{Island, WebIsland};

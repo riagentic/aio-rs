@@ -214,6 +214,9 @@ fn input_class(base: &str, invalid: bool, class: &str) -> String {
 #[component]
 pub fn Input(
     #[props(into)] value: Prop<Option<String>>,
+    /// Wired to a form's field ([`Form::bind`](super::Form::bind)): its
+    /// value, edits and blur; its error marks the input invalid.
+    bind: Option<super::Bind>,
     #[props(default = String::from("text"), into)] r#type: Prop<String>,
     #[props(into)] placeholder: Prop<Option<String>>,
     #[props(default)] disabled: Prop<bool>,
@@ -225,13 +228,16 @@ pub fn Input(
     #[props(extends = GlobalAttributes)] mut attributes: Vec<Attribute>,
 ) -> View {
     let w = use_field(false, false);
-    if value.is_live() || value.with_untracked(Option::is_some) {
+    if let Some(b) = bind.clone() {
+        attributes.insert(0, Attribute::live("value", move || b.value()));
+    } else if value.is_live() || value.with_untracked(Option::is_some) {
         attributes.insert(0, Attribute::live("value", move || value.get().unwrap_or_default()));
     }
     let bad = {
-        let w = w.clone();
-        memo(move || invalid.get() || w.invalid())
+        let (w, bind) = (w.clone(), bind.clone());
+        memo(move || invalid.get() || w.invalid() || bind.as_ref().is_some_and(super::Bind::invalid))
     };
+    let (typed, left) = (bind.clone(), bind);
     rsx! {
         input {
             r#type,
@@ -242,7 +248,15 @@ pub fn Input(
             "aria-describedby": w.described(),
             "aria-invalid": bad.get().then_some("true"),
             "aria-required": w.required(),
-            oninput: move |e| if let Some(f) = oninput { f.call(e.value()) },
+            oninput: move |e| {
+                if let Some(b) = &typed {
+                    b.input(e.value());
+                }
+                if let Some(f) = oninput {
+                    f.call(e.value())
+                }
+            },
+            onblur: move |_| if let Some(b) = &left { b.blur() },
             onchange: move |e| if let Some(f) = onchange { f.call(e.value()) },
             onkeydown: move |e| {
                 field_key(&e);
@@ -259,6 +273,8 @@ pub fn Input(
 #[component]
 pub fn Textarea(
     #[props(default, into)] value: Prop<String>,
+    /// Wired to a form's field, as [`Input`]'s.
+    bind: Option<super::Bind>,
     #[props(into)] placeholder: Prop<Option<String>>,
     #[props(default = 3)] rows: Prop<u32>,
     #[props(default)] disabled: Prop<bool>,
@@ -270,13 +286,14 @@ pub fn Textarea(
 ) -> View {
     let w = use_field(false, false);
     let bad = {
-        let w = w.clone();
-        memo(move || invalid.get() || w.invalid())
+        let (w, bind) = (w.clone(), bind.clone());
+        memo(move || invalid.get() || w.invalid() || bind.as_ref().is_some_and(super::Bind::invalid))
     };
+    let (shown, typed, left) = (bind.clone(), bind.clone(), bind);
     rsx! {
         textarea {
             class: input_class("aio-input aio-textarea", bad.get(), &class.get()),
-            value,
+            value: match &shown { Some(b) => b.value(), None => value.get() },
             placeholder,
             rows,
             disabled,
@@ -284,7 +301,15 @@ pub fn Textarea(
             "aria-describedby": w.described(),
             "aria-invalid": bad.get().then_some("true"),
             "aria-required": w.required(),
-            oninput: move |e| if let Some(f) = oninput { f.call(e.value()) },
+            oninput: move |e| {
+                if let Some(b) = &typed {
+                    b.input(e.value());
+                }
+                if let Some(f) = oninput {
+                    f.call(e.value())
+                }
+            },
+            onblur: move |_| if let Some(b) = &left { b.blur() },
             onkeydown: move |e| {
                 field_key(&e);
                 if let Some(f) = onkeydown {
@@ -316,6 +341,8 @@ impl<S: Into<String>> From<S> for Opt {
 pub fn Select(
     #[props(into)] options: Prop<Vec<Opt>>,
     #[props(default, into)] value: Prop<String>,
+    /// Wired to a form's field, as [`Input`]'s.
+    bind: Option<super::Bind>,
     #[props(default)] disabled: Prop<bool>,
     #[props(default)] invalid: Prop<bool>,
     #[props(default, into)] class: Prop<String>,
@@ -324,9 +351,17 @@ pub fn Select(
 ) -> View {
     let w = use_field(false, false);
     let bad = {
-        let w = w.clone();
-        memo(move || invalid.get() || w.invalid())
+        let (w, bind) = (w.clone(), bind.clone());
+        memo(move || invalid.get() || w.invalid() || bind.as_ref().is_some_and(super::Bind::invalid))
     };
+    let chosen = {
+        let bind = bind.clone();
+        memo(move || match &bind {
+            Some(b) => b.value(),
+            None => value.get(),
+        })
+    };
+    let (picked, left) = (bind.clone(), bind);
     rsx! {
         select {
             class: input_class("aio-input aio-select", bad.get(), &class.get()),
@@ -335,11 +370,19 @@ pub fn Select(
             "aria-describedby": w.described(),
             "aria-invalid": bad.get().then_some("true"),
             "aria-required": w.required(),
-            onchange: move |e| if let Some(f) = onchange { f.call(e.value()) },
+            onchange: move |e| {
+                if let Some(b) = &picked {
+                    b.input(e.value());
+                }
+                if let Some(f) = onchange {
+                    f.call(e.value())
+                }
+            },
+            onblur: move |_| if let Some(b) = &left { b.blur() },
             onkeydown: move |e| field_key(&e),
             ..attributes,
             for o in options.get() {
-                option { key: "{o.value}", value: "{o.value}", disabled: o.disabled, selected: o.value == value.get(), "{o.label}" }
+                option { key: "{o.value}", value: "{o.value}", disabled: o.disabled, selected: o.value == chosen.get(), "{o.label}" }
             }
         }
     }

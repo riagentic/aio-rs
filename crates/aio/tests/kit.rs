@@ -1993,3 +1993,123 @@ fn labels_and_titles_take_any_content() {
     ui.click("toast");
     assert!(ui.present("undo"), "a toast shows a view");
 }
+
+#[cfg(not(feature = "kit"))]
+#[derive(Clone, Default, PartialEq)]
+struct Sign {
+    name: String,
+    city: String,
+}
+
+#[cfg(not(feature = "kit"))]
+fn sign_check(s: &Sign) -> Problems {
+    if s.name.is_empty() { vec![("name", "Required".into())] } else { vec![] }
+}
+
+/// A bound input (aio's `form.bind`): its value, edits and blur in one
+/// prop; its error shows once it was left; one field resets alone.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn a_bound_input_shows_its_error_once_left_and_one_field_resets_alone() {
+    let mut ui = TestUi::new(|| {
+        let form = use_form(|| Sign { name: String::new(), city: "Rome".into() }, sign_check);
+        rsx! {
+            Field { label: "Name", error: form.error("name"), Input { "data-t": "name", bind: form.bind(aio::field!(name)) } }
+            Input { "data-t": "city", bind: form.bind(aio::field!(city)) }
+            p { "data-t": "said", {form.values().city} }
+            p { "data-t": "touched", {form.touched("city").to_string()} }
+            button { "data-t": "reset-city", onclick: move |_| form.reset_field(aio::field!(city)), "reset" }
+        }
+    });
+    let value = |ui: &mut TestUi, t: &str| {
+        ui.eval(&format!("document.querySelector('[data-t={t}]').value")).as_str().unwrap_or_default().to_string()
+    };
+    assert_eq!(value(&mut ui, "city"), "Rome", "the field's value");
+    assert_eq!(ui.count(".aio-field__error"), 0, "not left yet: no error");
+    ui.click("name");
+    ui.click("city");
+    assert_eq!(ui.text("css=.aio-field__error"), "Required", "left: its error shows");
+    assert_eq!(ui.count("[data-t=name][aria-invalid=true]"), 1);
+    ui.type_text("city", "x");
+    assert_eq!(ui.text("said"), "Romex", "an edit writes the field");
+    ui.click("reset-city");
+    assert_eq!(
+        (ui.text("said"), value(&mut ui, "city"), ui.text("touched")),
+        ("Rome".into(), "Rome".into(), "false".into())
+    );
+    assert_eq!(ui.text("css=.aio-field__error"), "Required", "the other field keeps its state");
+}
+
+/// A list of rows (aio's `useFieldArray`): push, move, set, remove, reset;
+/// out of range changes nothing.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn a_field_array_edits_its_rows() {
+    let mut ui = TestUi::new(|| {
+        let rows = use_field_array(|| vec!["a".to_string()]);
+        let r = rows.clone();
+        rsx! {
+            p { "data-t": "rows", {rows.items().join(",")} }
+            button { "data-t": "go", onclick: move |_| {
+                r.push("b".into());
+                r.push("c".into());
+                r.move_item(0, 2);
+                r.set(0, "B".into());
+                r.remove(1);
+                r.remove(9);
+            }, "go" }
+            button { "data-t": "reset", onclick: move |_| rows.reset(), "reset" }
+        }
+    });
+    ui.click("go");
+    assert_eq!(ui.text("rows"), "B,a");
+    ui.click("reset");
+    assert_eq!(ui.text("rows"), "a");
+}
+
+/// A reaction to a change (aio's `onChange`): only the selector is
+/// followed, it waits for a change, and its cleanup runs before the next
+/// change and when the view goes.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn a_reaction_runs_on_a_change_with_the_previous_value_and_cleans_up() {
+    let mut ui = TestUi::new(|| {
+        let n = signal(|| 0u32);
+        let other = signal(|| 0u32);
+        let open = signal(|| true);
+        rsx! {
+            button { "data-t": "inc", onclick: move |_| n += 1, "inc" }
+            button { "data-t": "other", onclick: move |_| other += 1, "other" }
+            button { "data-t": "close", onclick: move |_| open.set(false), "close" }
+            if open.get() {
+                Reacts { n, other }
+            }
+        }
+    });
+    assert_eq!(said(), Vec::<String>::new(), "it waits for a change");
+    ui.click("inc");
+    assert_eq!(said(), Vec::<String>::new(), "0 / 2 is still 0: no change");
+    ui.click("inc");
+    assert_eq!(said(), ["1 after Some(0) (other 0)"]);
+    ui.click("other");
+    assert_eq!(said(), Vec::<String>::new(), "what f reads is not followed");
+    ui.click("inc");
+    ui.click("inc");
+    assert_eq!(said(), ["cleanup 1", "2 after Some(1) (other 1)"]);
+    ui.click("close");
+    assert_eq!(said(), ["cleanup 2"]);
+}
+
+#[cfg(not(feature = "kit"))]
+#[component]
+fn Reacts(n: Signal<u32>, other: Signal<u32>) -> View {
+    use_on_change(
+        move || n.get() / 2,
+        move |v, prev| {
+            log(format!("{v} after {prev:?} (other {})", other.get()));
+            let v = *v;
+            move || log(format!("cleanup {v}"))
+        },
+    );
+    rsx! {}
+}

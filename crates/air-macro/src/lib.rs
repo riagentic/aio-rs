@@ -1041,6 +1041,11 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>, lets
                     && matches!(toks.get(i + 2), Some(TokenTree::Group(_)))
                 {
                     // A macro: the `{name}`s of its format string, then its arguments.
+                    // `field!(name)` (aio's form field) names a struct field: no capture.
+                    if s == "field" {
+                        i += 3;
+                        continue;
+                    }
                     if let Some(TokenTree::Group(g)) = toks.get(i + 2) {
                         let inner: Vec<TokenTree> = g.stream().into_iter().collect();
                         // A view inside: the names its nodes read, not its tags.
@@ -1502,6 +1507,7 @@ mod tests {
         assert_eq!(names("move |_| if let Some(f) = on { f.call(v) }"), ["on", "v"]);
         assert_eq!(names("for x in xs { g(x) }"), ["xs"]);
         assert_eq!(names("if a && let Some(t) = top() { t.go() }"), ["a"], "a let chain");
+        assert_eq!(names("form.bind(aio::field!(name))"), ["form"], "field!(name) names a field");
     }
 
     #[test]
