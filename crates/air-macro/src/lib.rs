@@ -244,9 +244,9 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
                     quote!(<__X: #tr + 'static, __M>),
                     quote!(f: impl ::core::ops::Fn() -> __X + 'static),
                     quote!(#air::Prop::derive(::std::boxed::Box::new(move || #call))),
-                    quote!(<__X: #tr + ::core::clone::Clone + 'static, __M>),
+                    quote!(<__X: #tr, __M>),
                     quote!(v: __X),
-                    quote!(#air::Prop::derive(::std::boxed::Box::new(move || { let f = || ::core::clone::Clone::clone(&v); #call }))),
+                    quote!(#air::Prop::Const({ let f = || v; #call })),
                 )
             }
             Kind::Plain | Kind::View => (
@@ -1164,6 +1164,15 @@ fn comp(n: &Node) -> TokenStream {
     for (k, v) in props {
         let closure = v.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
         calls.push(match k {
+            // A constant needs no closure (and a `Prop` of it holds no state).
+            PropName::Field(f) if constant(v) => {
+                let f = format_ident!("__fn_{}", f.to_string().trim_start_matches("r#"));
+                quote!(.#f(#v))
+            }
+            PropName::Attr(a) if constant(v) => {
+                let a = attr_name(a);
+                quote!(.__attr_const(#a, #v))
+            }
             PropName::Field(f) if closure => {
                 let f = format_ident!("__fn_{}", f.to_string().trim_start_matches("r#"));
                 let mut r = vec![];
@@ -1201,6 +1210,26 @@ fn comp(n: &Node) -> TokenStream {
         let __air_c = &#path;
         air::Component::call(__air_c, air::__rt::builder_of(__air_c) #(#calls)* .build())
     })
+}
+
+/// Is `v` a constant: a literal (`"a"`, `3`, `-1.5`, `true`) or an enum's
+/// variant (`Variant::Primary`)?
+fn constant(v: &TokenStream) -> bool {
+    let t: Vec<TokenTree> = v.clone().into_iter().collect();
+    match t.as_slice() {
+        [TokenTree::Literal(_)] => true,
+        [TokenTree::Punct(p), TokenTree::Literal(_)] => p.as_char() == '-',
+        [t] => is_ident(t, "true") || is_ident(t, "false"),
+        [.., TokenTree::Ident(last)] if t.len() >= 4 => {
+            last.to_string().starts_with(|c: char| c.is_uppercase())
+                && t.iter().enumerate().all(|(k, x)| match x {
+                    TokenTree::Ident(_) => true,
+                    TokenTree::Punct(p) => p.as_char() == ':' && (k % 3 != 0),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
 }
 
 /// The view of `nodes`: one template and its holes, built where it is

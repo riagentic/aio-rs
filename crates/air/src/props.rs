@@ -328,6 +328,11 @@ pub trait GlobalAttributes: Sized {
         self
     }
 
+    fn __attr_const<X: IntoAttr>(mut self, name: &'static str, v: X) -> Self {
+        self.__push(Attribute::new(name, v));
+        self
+    }
+
     fn __spread(mut self, attrs: Vec<Attribute>) -> Self {
         attrs.into_iter().for_each(|a| self.__push(a));
         self
@@ -335,35 +340,88 @@ pub trait GlobalAttributes: Sized {
 }
 
 macro_rules! globals {
-    ($($m:ident $n:literal),* $(,)?) => {
+    ($($m:ident $f:ident $n:literal),* $(,)?) => {
         /// The global attributes by name (`id: "x"`), for a component's builder.
         #[doc(hidden)]
         pub trait GlobalAttributeNames: GlobalAttributes {
-            $(fn $m<X: IntoAttr, F: Fn() -> X + 'static>(self, f: F) -> Self { self.__attr($n, f) })*
+            $(
+                fn $m<X: IntoAttr, F: Fn() -> X + 'static>(self, f: F) -> Self { self.__attr($n, f) }
+                fn $f<X: IntoAttr>(self, v: X) -> Self { self.__attr_const($n, v) }
+            )*
         }
         impl<B: GlobalAttributes> GlobalAttributeNames for B {}
     };
 }
 
 globals!(
-    accesskey "accesskey", autocapitalize "autocapitalize", autofocus "autofocus",
-    contenteditable "contenteditable", dir "dir", draggable "draggable", enterkeyhint "enterkeyhint",
-    hidden "hidden", id "id", inert "inert", inputmode "inputmode", is "is", itemid "itemid",
-    itemprop "itemprop", itemref "itemref", itemscope "itemscope", itemtype "itemtype", lang "lang",
-    nonce "nonce", part "part", popover "popover", role "role", slot "slot", spellcheck "spellcheck",
-    style "style", tabindex "tabindex", title "title", translate "translate",
-    aria_activedescendant "aria-activedescendant", aria_atomic "aria-atomic", aria_autocomplete "aria-autocomplete",
-    aria_busy "aria-busy", aria_checked "aria-checked", aria_colcount "aria-colcount", aria_colindex "aria-colindex",
-    aria_controls "aria-controls", aria_current "aria-current", aria_describedby "aria-describedby",
-    aria_details "aria-details", aria_disabled "aria-disabled", aria_errormessage "aria-errormessage",
-    aria_expanded "aria-expanded", aria_haspopup "aria-haspopup", aria_hidden "aria-hidden",
-    aria_invalid "aria-invalid", aria_keyshortcuts "aria-keyshortcuts", aria_label "aria-label",
-    aria_labelledby "aria-labelledby", aria_level "aria-level", aria_live "aria-live", aria_modal "aria-modal",
-    aria_multiselectable "aria-multiselectable", aria_orientation "aria-orientation", aria_owns "aria-owns",
-    aria_placeholder "aria-placeholder", aria_posinset "aria-posinset", aria_pressed "aria-pressed",
-    aria_readonly "aria-readonly", aria_relevant "aria-relevant", aria_required "aria-required",
-    aria_roledescription "aria-roledescription", aria_rowcount "aria-rowcount", aria_rowindex "aria-rowindex",
-    aria_selected "aria-selected", aria_setsize "aria-setsize", aria_sort "aria-sort",
-    aria_valuemax "aria-valuemax", aria_valuemin "aria-valuemin", aria_valuenow "aria-valuenow",
-    aria_valuetext "aria-valuetext",
+    accesskey __fn_accesskey "accesskey",
+    autocapitalize __fn_autocapitalize "autocapitalize",
+    autofocus __fn_autofocus "autofocus",
+    contenteditable __fn_contenteditable "contenteditable",
+    dir __fn_dir "dir",
+    draggable __fn_draggable "draggable",
+    enterkeyhint __fn_enterkeyhint "enterkeyhint",
+    hidden __fn_hidden "hidden",
+    id __fn_id "id",
+    inert __fn_inert "inert",
+    inputmode __fn_inputmode "inputmode",
+    is __fn_is "is",
+    itemid __fn_itemid "itemid",
+    itemprop __fn_itemprop "itemprop",
+    itemref __fn_itemref "itemref",
+    itemscope __fn_itemscope "itemscope",
+    itemtype __fn_itemtype "itemtype",
+    lang __fn_lang "lang",
+    nonce __fn_nonce "nonce",
+    part __fn_part "part",
+    popover __fn_popover "popover",
+    role __fn_role "role",
+    slot __fn_slot "slot",
+    spellcheck __fn_spellcheck "spellcheck",
+    style __fn_style "style",
+    tabindex __fn_tabindex "tabindex",
+    title __fn_title "title",
+    translate __fn_translate "translate",
+    aria_activedescendant __fn_aria_activedescendant "aria-activedescendant",
+    aria_atomic __fn_aria_atomic "aria-atomic",
+    aria_autocomplete __fn_aria_autocomplete "aria-autocomplete",
+    aria_busy __fn_aria_busy "aria-busy",
+    aria_checked __fn_aria_checked "aria-checked",
+    aria_colcount __fn_aria_colcount "aria-colcount",
+    aria_colindex __fn_aria_colindex "aria-colindex",
+    aria_controls __fn_aria_controls "aria-controls",
+    aria_current __fn_aria_current "aria-current",
+    aria_describedby __fn_aria_describedby "aria-describedby",
+    aria_details __fn_aria_details "aria-details",
+    aria_disabled __fn_aria_disabled "aria-disabled",
+    aria_errormessage __fn_aria_errormessage "aria-errormessage",
+    aria_expanded __fn_aria_expanded "aria-expanded",
+    aria_haspopup __fn_aria_haspopup "aria-haspopup",
+    aria_hidden __fn_aria_hidden "aria-hidden",
+    aria_invalid __fn_aria_invalid "aria-invalid",
+    aria_keyshortcuts __fn_aria_keyshortcuts "aria-keyshortcuts",
+    aria_label __fn_aria_label "aria-label",
+    aria_labelledby __fn_aria_labelledby "aria-labelledby",
+    aria_level __fn_aria_level "aria-level",
+    aria_live __fn_aria_live "aria-live",
+    aria_modal __fn_aria_modal "aria-modal",
+    aria_multiselectable __fn_aria_multiselectable "aria-multiselectable",
+    aria_orientation __fn_aria_orientation "aria-orientation",
+    aria_owns __fn_aria_owns "aria-owns",
+    aria_placeholder __fn_aria_placeholder "aria-placeholder",
+    aria_posinset __fn_aria_posinset "aria-posinset",
+    aria_pressed __fn_aria_pressed "aria-pressed",
+    aria_readonly __fn_aria_readonly "aria-readonly",
+    aria_relevant __fn_aria_relevant "aria-relevant",
+    aria_required __fn_aria_required "aria-required",
+    aria_roledescription __fn_aria_roledescription "aria-roledescription",
+    aria_rowcount __fn_aria_rowcount "aria-rowcount",
+    aria_rowindex __fn_aria_rowindex "aria-rowindex",
+    aria_selected __fn_aria_selected "aria-selected",
+    aria_setsize __fn_aria_setsize "aria-setsize",
+    aria_sort __fn_aria_sort "aria-sort",
+    aria_valuemax __fn_aria_valuemax "aria-valuemax",
+    aria_valuemin __fn_aria_valuemin "aria-valuemin",
+    aria_valuenow __fn_aria_valuenow "aria-valuenow",
+    aria_valuetext __fn_aria_valuetext "aria-valuetext",
 );
