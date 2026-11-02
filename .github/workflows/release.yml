@@ -100,6 +100,13 @@ jobs:
         with:
           name: aio-rs-release
           path: dist
+      # A machine with Rust as rustup's installer leaves it (a runner may
+      # carry Homebrew's rustup, with no ~/.cargo/bin for ax to go in).
+      - if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup default stable
       - if: runner.os != 'Windows'
         run: sh dist/install.sh
       - if: runner.os == 'Windows'
