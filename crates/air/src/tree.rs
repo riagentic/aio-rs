@@ -131,6 +131,18 @@ pub(crate) fn set_frame(id: Option<Id>, f: &Rc<Frame>) {
     }
 }
 
+/// The frame of the component whose view is built or updated now (the
+/// root's own view's outside any): what its handlers' work belongs to.
+pub(crate) fn current_frame() -> Weak<Frame> {
+    TREE.with_borrow(|t| match CURRENT.get() {
+        Some(Id(i, g)) => match t.slots.get(i as usize) {
+            Some((v, Some(c))) if *v == g => c.frame.clone(),
+            _ => Weak::new(),
+        },
+        None => t.roots.get(&crate::reactive::current_root()).cloned().unwrap_or_default(),
+    })
+}
+
 /// Where component `id` is among the mounted ones (pure but for the tree):
 /// each ancestor's name with its key, or its turn among its parent's
 /// unkeyed children of that name; the root's own view is "".

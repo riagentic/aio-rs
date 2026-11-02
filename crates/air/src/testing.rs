@@ -395,7 +395,16 @@ impl TestPage {
     /// Fire `e` at `data-t="t"`: every node on its path up that listens for
     /// it gets it, innermost first (as the page's delegation sends it); then
     /// the edits apply. A field's `value` property is sent as its value.
-    pub fn fire(&mut self, t: &str, mut e: Raw) {
+    pub fn fire(&mut self, t: &str, e: Raw) {
+        let e = self.aim(t, e);
+        assert!(self.root.event(&e.encode()), "the views took the event");
+        self.flush();
+    }
+
+    /// `e` as the page sends it for `data-t="t"` now (the nodes on its path
+    /// that listen for it, a field's value), not sent: to send later, as an
+    /// event that crossed a redraw on the wire.
+    pub fn aim(&self, t: &str, mut e: Raw) -> Raw {
         let at = self.find(t);
         if e.value.is_empty()
             && let Some((_, v)) = self.nodes[at].props.iter().find(|(k, _)| k == "value")
@@ -411,8 +420,7 @@ impl TestPage {
             n = self.nodes[i].parent;
         }
         assert!(!e.ids.is_empty(), "nothing listens for {} at data-t={t:?}", e.name);
-        assert!(self.root.event(&e.encode()), "the views took the event");
-        self.flush();
+        e
     }
 
     pub fn click(&mut self, t: &str) {

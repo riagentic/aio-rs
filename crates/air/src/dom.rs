@@ -23,7 +23,7 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// One element tree of an `rsx!`: its nodes in pre-order, encoded for the
 /// page (`DEFINE`'s body). Marked nodes (roots, nodes with holes) get ids
@@ -65,7 +65,17 @@ type Handler = Rc<RefCell<dyn FnMut(&Raw, &Rc<Flow>)>>;
 struct Listening {
     name: &'static str,
     run: Handler,
+    /// The element's view: the handler goes with it.
     owner: Option<Owner>,
+    /// The component that drew it: what the handler makes and spawns is
+    /// its (a scope of the component), so a branch drawn again cancels none of it.
+    comp: Weak<Frame>,
+}
+
+/// What a handler of the element drawn now runs under: the component
+/// that drew it, or the element's own owner outside any.
+fn handler_owner(comp: &Weak<Frame>, owner: Owner) -> Owner {
+    comp.upgrade().map_or(owner, |f| f.owner())
 }
 
 struct EvalState {
@@ -540,7 +550,8 @@ fn boxed<T: FromRaw>(mut f: Box<dyn FnMut(Event<T>)>) -> Handler {
 }
 
 /// What a handler closure returns: nothing, or work to run (`async move
-/// { … }`: spawned under the element's view, so it ends with it).
+/// { … }`: spawned under the component that drew the element, so it ends
+/// with that component, not with a branch or a row of it drawn again).
 #[doc(hidden)]
 pub trait HandlerReturn<M> {
     fn run(self);
@@ -580,12 +591,12 @@ pub fn mounted_fn<M, R: HandlerReturn<M>>(
 #[doc(hidden)]
 pub fn mounted<M>(id: u32, f: impl IntoHandler<MountedData, M>) {
     let mut f = f.into_handler();
-    let owner = current_owner();
+    let (owner, comp) = (current_owner(), crate::tree::current_frame());
     crate::reactive::later(move || {
         if owner.is_none_or(|o| o.alive()) {
             let mut run = || batch(|| f(Event::new(MountedData { id })));
             match owner {
-                Some(o) => with_owner(o, run),
+                Some(o) => with_owner(handler_owner(&comp, o), run),
                 None => run(),
             }
         }
@@ -595,9 +606,9 @@ pub fn mounted<M>(id: u32, f: impl IntoHandler<MountedData, M>) {
 /// An event hole: `name` on node `id` runs `h` (in a batch: its writes are drawn once).
 #[doc(hidden)]
 pub fn on(id: u32, name: &'static str, h: Handler) {
-    let owner = current_owner();
+    let (owner, comp) = (current_owner(), crate::tree::current_frame());
     dom(|d| {
-        d.handlers.entry(id).or_default().push(Listening { name, run: h, owner });
+        d.handlers.entry(id).or_default().push(Listening { name, run: h, owner, comp });
         d.op(op::LISTEN).u32(id).str(name);
     });
     cleanup(move || {
@@ -1318,27 +1329,49 @@ impl Root {
             for id in &raw.ids {
                 let h = dom(|d| {
                     let ls = d.handlers.get(id)?;
-                    ls.iter().find(|l| l.name == raw.name).map(|l| (l.run.clone(), l.owner))
+                    ls.iter().find(|l| l.name == raw.name).map(|l| (l.run.clone(), l.owner, l.comp.clone()))
                 });
-                let Some((h, owner)) = h else { continue };
-                took = true;
+                let Some((h, owner, comp)) = h else { continue };
                 let run = || (h.borrow_mut())(&raw, &flow);
                 match owner {
-                    Some(o) if o.alive() => with_owner(o, run),
+                    Some(o) if o.alive() => with_owner(handler_owner(&comp, o), run),
                     Some(_) => continue,
                     None => run(),
                 }
+                took = true;
                 if flow.stopped.get() {
                     break;
                 }
             }
         });
+        if !took && cfg!(debug_assertions) {
+            stale(&raw.name, &raw.ids);
+        }
         took
     }
 
     /// The errors no boundary caught (each also said on stderr), taken.
     pub fn uncaught(&self) -> Vec<String> {
         in_root(self.id, || dom(|d| std::mem::take(&mut d.uncaught)))
+    }
+}
+
+/// An event the page sent for nodes whose handlers are gone (drawn again
+/// or removed before it arrived) is dropped. In AIR an event on a removed
+/// element never reaches a handler either (`vdom-events.ts:108-111`: the
+/// root's listener walks the live path), but over the wire the page can
+/// send it first: a dev build says so once per event name, as AIR's
+/// handler that "silently never fires" is warned (`dev-events.ts:7-8,70-73`).
+fn stale(name: &str, ids: &[u32]) {
+    thread_local!(static SAID: RefCell<std::collections::HashSet<String>> = RefCell::default());
+    if SAID.with_borrow_mut(|s| s.insert(name.to_owned())) {
+        crate::warn(
+            "ui:stale-event",
+            &format!(
+                "a `{name}` the page sent for nodes {ids:?} was dropped: their handlers are gone (the element was \
+                 drawn again or removed before the event arrived; said once per event name)"
+            ),
+        );
     }
 }
 

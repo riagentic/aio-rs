@@ -141,6 +141,23 @@ pub fn live() -> Live {
     }
 }
 
+type Warn = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
+static WARN: std::sync::Mutex<Option<Warn>> = std::sync::Mutex::new(None);
+
+/// Where air's dev-build warnings go (`kind`, message): aio-rs puts them on
+/// its diagnostic bus; on stderr until a host sets one.
+pub fn on_warn(f: impl Fn(&str, &str) + Send + Sync + 'static) {
+    *WARN.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+}
+
+pub(crate) fn warn(kind: &str, msg: &str) {
+    let hook = WARN.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match hook {
+        Some(f) => f(kind, msg),
+        None => eprintln!("WARN  [air] {kind}: {msg}"),
+    }
+}
+
 /// The page's interpreter (after `<div id="main">`, with `window.__aioWire`
 /// as the shell's preload gives it).
 pub const PAGE_JS: &str = include_str!("page.js");
