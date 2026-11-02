@@ -809,6 +809,7 @@ fn run(args: &[String]) -> Out {
         ("dev", [name, "--web"]) => web::dev(name),
         ("dev", [name, ..]) => dev::run(name, &pos[1..]),
         ("test", [name]) if has("--android") => install::lane(name, value("--device")),
+        ("test", [name]) if has("--mutants") => testrun::mutants(name),
         ("test", [name, filter @ ..]) if filter.len() <= 1 => {
             testrun::run(name, filter.first().copied(), value("--video"), value("--pace"))
         }

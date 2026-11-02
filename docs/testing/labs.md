@@ -29,7 +29,15 @@ window or dialog reaches anyone's screen. It must:
   app: answer `--version` with its id and exit 0);
 - stop on SIGTERM in time (Windows: when asked with `<app> --quit`),
   leaving no process behind;
-- log no panic, problem report or degraded part.
+- log no panic, problem report, degraded part or page script that
+  throws (`ERROR [page] Uncaught …`);
+- for a `.deb`: ship what its menu entry names (its `Exec` program, and
+  an icon of its `Icon` name under `usr/share/icons`).
+
+`ax smoke <artifact>` smokes a bundle already built, and
+`aio::testing::smoke(&bundle)` does it inside a test (aio's `smoke()`):
+its report, or a failure with what `ax` said (`ax` from `AIO_AX`, else
+`PATH`).
 
 The sandbox, the display and everything started go away again, pass or
 fail. `[build] smoke = true` in `aio.toml` smokes every build. A Windows
@@ -133,8 +141,8 @@ given APK, `--no-launch` only installs. Build the APKs with `ax build
 | aio | aio-rs |
 |---|---|
 | `--dist`, `--tunnel` (a viewer through `docker exec` when docker's port publishing is broken) | none: the app's `dist/` is shared; the viewer is a published loopback port |
-| `deno task lab`: install, create, dev and build scenarios in fresh Ubuntu containers, with a real-browser check of the screen | none: run `ax create`, `ax test` and `ax build --smoke` on a fresh machine (a lab machine) by hand |
-| `deno task test:wine`: the Windows `.exe` under Wine | none: Windows bundles are smoked on Windows (`AIO_WINDOWS_SSH`) |
+| `deno task lab`: install, create, dev and build scenarios in fresh Ubuntu containers, with a real-browser check of the screen | `ax lab <app> linux --boot` (aio's lab, in Docker) for a person; the framework's own gates are GitHub CI on Linux, Windows and macOS and `scripts/mutants` (a built `.deb` broken on purpose must fail its smoke test) |
+| `deno task test:wine`: the Windows `.exe` under Wine | none: Windows bundles are smoked on Windows (`AIO_WINDOWS_SSH`, `./ci-windows.sh`) |
 
 ## Common mistakes
 

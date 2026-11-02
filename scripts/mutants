@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""The mutation ledger (docs/testing/proving.md): would a test notice?
+
+scripts/mutants.toml lists the invariants whose silent loss would cost data,
+security or a shipped app: the line that enforces each, that line broken,
+and the test that must then go red. Each break is planted alone, the named
+test run, and the break taken out again:
+
+- `in = "source"`: in the repo's file; the named test must FAIL (a break
+  that doesn't compile, or a test that doesn't run, is no proof).
+- `in = "deb"`: in the template app's .deb (`ax create`, `ax build --deb`),
+  unpacked, edited and packed again; `ax smoke` must fail, saying `expect`.
+  The untouched .deb must pass first.
+
+A break that leaves its test green SURVIVED: the finding, nothing guards
+that line. Results go to scripts/mutants-ledger.csv (a whole run only).
+
+  scripts/mutants              every break, the ledger file written
+  scripts/mutants --fast       the `fast` ones (GitHub CI)
+  scripts/mutants --only id,…  these
+  scripts/mutants --check      the ledger holds together (each line found
+                               once, each test there), nothing run (./ci.sh)
+  scripts/mutants --deb file   the .deb to break, instead of building one
+
+Exit 1 when a break survived or the ledger is stale. The tree is restored
+after each break; one left behind (an interrupted run) is refused at start.
+"""
+import argparse
+import csv
+import datetime
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+LEDGER = ROOT / "scripts" / "mutants.toml"
+RESULTS = ROOT / "scripts" / "mutants-ledger.csv"
+APP = "notes"
+
+
+def fail(msg):
+    print(f"mutants: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def breaks():
+    with open(LEDGER, "rb") as f:
+        bs = tomllib.load(f)["break"]
+    ids = [b["id"] for b in bs]
+    if len(set(ids)) != len(ids):
+        fail("an id is listed twice")
+    return bs
+
+
+def target_files(b):
+    """The files a source break's test is in (to check that it is there)."""
+    pkg, target, _ = b["test"].split(" ")
+    crate = ROOT / "crates" / {"aio-rs": "aio", "aio-rs-cli": "aio-cli"}.get(pkg, pkg.removeprefix("aio-rs-"))
+    if target.startswith("test:"):
+        return [crate / "tests" / f"{target[5:]}.rs"]
+    return list((crate / "src").rglob("*.rs"))
+
+
+def check(b):
+    """What is wrong with one ledger entry (pure but for reading the tree)."""
+    if b["in"] == "deb":
+        return [] if all(k in b for k in ("file", "find", "put", "expect")) else ["needs file, find, put, expect"]
+    if b["in"] != "source":
+        return [f"in = {b['in']!r}: source or deb"]
+    text = (ROOT / b["file"]).read_text()
+    problems = []
+    if text.count(b["find"]) != 1:
+        problems.append(f"{b['file']}: the line to break is there {text.count(b['find'])} times, not once")
+    name = b["test"].split(" ")[2].split("::")[-1]
+    if not any(re.search(rf"\bfn {re.escape(name)}\(", f.read_text()) for f in target_files(b) if f.is_file()):
+        problems.append(f"no test `{name}` where {b['test']} says")
+    return problems
+
+
+def leftover(b):
+    """Is this source break still planted (an interrupted run)?"""
+    if b["in"] != "source":
+        return False
+    text = (ROOT / b["file"]).read_text()
+    return b["put"] in text and b["find"] not in text
+
+
+def cargo_test(b):
+    pkg, target, name = b["test"].split(" ")
+    kind = {"lib": ["--lib"]}.get(target) or [f"--{target.split(':')[0]}", target.split(":")[1]]
+    return ["cargo", "test", "-p", pkg, "--all-features", "--locked", *kind, "--", "--exact", name]
+
+
+def verdict(name, out):
+    """killed, survived, no-compile or not-run, from cargo's output (pure)."""
+    if "could not compile" in out:
+        return "no-compile"
+    m = re.search(rf"^test {re.escape(name)}( - should panic)? \.\.\. (FAILED|ok)", out, re.M)
+    if not m:
+        return "not-run"
+    return "killed" if m.group(2) == "FAILED" else "survived"
+
+
+def run_source(b):
+    path = ROOT / b["file"]
+    original = path.read_bytes()
+    text = original.decode()
+    path.write_text(text.replace(b["find"], b["put"], 1))
+    try:
+        p = subprocess.run(cargo_test(b), cwd=ROOT, capture_output=True, text=True)
+    finally:
+        path.write_bytes(original)
+        if b.get("leaves"):
+            shutil.rmtree(os.path.expanduser(b["leaves"]), ignore_errors=True)
+    return verdict(b["test"].split(" ")[2], p.stdout + p.stderr)
+
+
+def ax():
+    subprocess.run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], cwd=ROOT, check=True)
+    return pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target") / "debug" / "ax"
+
+
+def built_deb(ax_bin):
+    """The template app's .deb, built in target/mutants (the app sits beside
+    the checkout, so its path dependency is relative)."""
+    work = ROOT / "target" / "mutants"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(pathlib.Path(env.get("CARGO_TARGET_DIR") or ROOT / "target") / "mutants-app")
+    subprocess.run([ax_bin, "create", APP, "--aio", ROOT], cwd=work, env=env, check=True, capture_output=True)
+    shutil.copy(ROOT / "Cargo.lock", work / APP / "Cargo.lock")
+    subprocess.run([ax_bin, "build", APP, "--deb"], cwd=work / APP, env=env, check=True, capture_output=True)
+    debs = list((work / APP / "dist").glob("*.deb"))
+    if len(debs) != 1:
+        fail(f"ax build --deb made {len(debs)} .deb files")
+    return debs[0]
+
+
+def smoke(ax_bin, deb):
+    p = subprocess.run([ax_bin, "smoke", deb], capture_output=True, text=True)
+    return p.returncode, p.stdout + p.stderr
+
+
+def run_deb(b, ax_bin, deb, tmp):
+    work = pathlib.Path(tempfile.mkdtemp(dir=tmp))
+    tree, out = work / "pkg", work / "out"
+    out.mkdir()
+    subprocess.run(["dpkg-deb", "-R", deb, tree], check=True)
+    f = tree / b["file"]
+    data, find, put = f.read_bytes(), b["find"].encode(), b["put"].encode()
+    if data.count(find) != 1:
+        return f"stale: {b['file']} has the bytes to break {data.count(find)} times"
+    if f.is_relative_to(tree / "usr" / "lib") and len(find) != len(put):
+        return "stale: a program's bytes must keep their length"
+    f.write_bytes(data.replace(find, put, 1))
+    subprocess.run(["dpkg-deb", "--root-owner-group", "-Zxz", "--build", tree, out / deb.name], check=True, capture_output=True)
+    code, said = smoke(ax_bin, out / deb.name)
+    shutil.rmtree(work)
+    if code == 0:
+        return "survived"
+    return "killed" if b["expect"] in said else f"failed, not saying {b['expect']!r}"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="scripts/mutants", description="the mutation ledger (scripts/mutants.toml)")
+    ap.add_argument("--fast", action="store_true", help="the fast breaks only (GitHub CI)")
+    ap.add_argument("--only", help="these breaks (ids, comma-separated)")
+    ap.add_argument("--check", action="store_true", help="the ledger holds together; nothing run")
+    ap.add_argument("--deb", help="the .deb to break, instead of building one")
+    args = ap.parse_args(argv)
+    bs = breaks()
+    stale = [f"{b['id']}: {p}" for b in bs for p in check(b)]
+    planted = [f"{b['id']}: still planted in {b['file']}: restore it (git checkout -- {b['file']})" for b in bs if leftover(b)]
+    if stale or planted:
+        fail("the ledger is stale:\n  " + "\n  ".join(planted + stale))
+    if args.check:
+        print(f"mutants: {len(bs)} breaks, each line found once, each test there")
+        return 0
+    chosen = bs
+    if args.fast:
+        chosen = [b for b in bs if b.get("fast")]
+    if args.only:
+        want = args.only.split(",")
+        unknown = [w for w in want if w not in {b["id"] for b in bs}]
+        if unknown:
+            fail(f"no break {', '.join(unknown)} in {LEDGER.name}")
+        chosen = [b for b in bs if b["id"] in want]
+    whole = chosen is bs
+    rows, ax_bin, deb = [], None, None
+    with tempfile.TemporaryDirectory() as tmp:
+        for b in chosen:
+            t = time.monotonic()
+            if b["in"] == "source":
+                result = run_source(b)
+            else:
+                if deb is None:
+                    ax_bin = ax()
+                    deb = pathlib.Path(args.deb).resolve() if args.deb else built_deb(ax_bin)
+                    code, said = smoke(ax_bin, deb)
+                    if code != 0:
+                        fail(f"the untouched {deb.name} fails its smoke test: no break would prove anything\n{said}")
+                result = run_deb(b, ax_bin, deb, tmp)
+            secs = round(time.monotonic() - t)
+            where = b["test"] if b["in"] == "source" else "ax smoke"
+            mark = "✓ killed  " if result == "killed" else "✗ " + result.upper()
+            print(f"{mark} {b['id']} ({secs} s): {b['what']}\n    broken in {b['file']}, caught by {where}", flush=True)
+            rows.append([b["id"], b["in"], where, result, secs])
+    if deb is not None and not args.deb:
+        shutil.rmtree(ROOT / "target" / "mutants", ignore_errors=True)
+    if whole:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+        with open(RESULTS, "w", newline="") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(["id", "in", "caught_by", "result", "seconds", "commit", "date"])
+            day = datetime.date.today().isoformat()
+            w.writerows(r + [commit, day] for r in rows)
+    bad = [r for r in rows if r[3] != "killed"]
+    print(f"mutants: {len(rows) - len(bad)} of {len(rows)} breaks caught")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
