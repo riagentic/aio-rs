@@ -705,6 +705,7 @@ struct Symbols {
     /// ELF: how far below the thread pointer its thread-local block starts
     /// (x86_64's variant II layout): a thread-local's offset from the thread
     /// pointer is its symbol's value less this.
+    #[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(dead_code))]
     tls_block: Option<u64>,
 }
 
