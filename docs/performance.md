@@ -477,8 +477,9 @@ ax components notes --json
 hole rewrite (`signal`), each with its component and key (`root`: the
 app's own view), when it ended and how long it took (a body's time holds
 the children it placed), then how many in all. A debug build logs them;
-a release keeps no log. In a test, `air::renders()` inside the root
-(`TestPage::within`) gives the same.
+a release, and a browser's wasm (no clock there), keep no log. In a
+test, `air::renders()` inside the root (`TestPage::within`) gives the
+same.
 
 It reads a dev build of a running app through its door. A component's
 `renders` are its body's runs (once, as it mounts, unless a `follow` or a

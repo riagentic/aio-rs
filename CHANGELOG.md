@@ -46,7 +46,8 @@ version may break things.
 - `ax components --renders` on air: the last 200 renders as they happened
   (each body run, `mount` or `signal`, and each hole rewrite, `signal`),
   by component and key, timed, and how many in all; `air::renders()`
-  gives the same in a test. A debug build logs them; a release doesn't.
+  gives the same in a test. A debug build logs them (a browser's wasm
+  and a release don't).
 - **TS21: the published crates' public API is checked in**
   (`scripts/api/<crate>.txt`, from rustdoc's JSON): `scripts/public-api
   --check` in `./ci.sh lint` fails on a change not written there, and on

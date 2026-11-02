@@ -77,9 +77,10 @@ fn log(id: Option<Id>, t0: std::time::Instant, trigger: &'static str) {
     });
 }
 
-/// The time a render starts at, where renders are logged (debug builds).
+/// The time a render starts at, where renders are logged: debug builds,
+/// but in a browser's wasm (no clock there: `Instant::now` panics).
 pub(crate) fn start() -> Option<std::time::Instant> {
-    cfg!(debug_assertions).then(std::time::Instant::now)
+    cfg!(all(debug_assertions, not(target_arch = "wasm32"))).then(std::time::Instant::now)
 }
 
 /// Root `root` is gone: its log and its view's frame go too.
@@ -94,7 +95,8 @@ pub(crate) fn end_root(root: u32) {
 
 /// The current root's last renders, oldest first (at most [`RENDERS_KEPT`],
 /// fewer where other roots of the thread rendered since), and how many it
-/// rendered in all. Logged in debug builds only: a release's is empty.
+/// rendered in all. Logged in debug builds only (not a browser's wasm):
+/// a release's is empty.
 pub fn renders() -> (Vec<Render>, u64) {
     let root = crate::reactive::current_root();
     TREE.with_borrow(|t| {
