@@ -1259,7 +1259,7 @@ OS: `dist/<id>-<version>-<os>-<arch>.*` (Linux `.tar.gz`, macOS zipped
 | `--web` | an installable web app (PWA) in `dist/<id>-web/` instead: the app for wasm32, a manifest, icons, an offline service worker |
 | `--dev` | with `--web`: a debug build that shows its errors on its page |
 | `--sizes` | the release binary against its budget, and which crates take its space; packs nothing |
-| `--smoke` | then start each Linux bundle, `.deb` and AppImage headless, stop it, check its log (a Windows bundle on Windows, or over `AIO_WINDOWS_SSH`) |
+| `--smoke` | then start each Linux bundle, `.deb` and AppImage headless, stop it, check its log (a macOS app's `.zip` on the Mac that built it, this one or `[build.macos] host` / `AIO_MACOS_SSH`; a Windows bundle on Windows, or over `AIO_WINDOWS_SSH`) |
 
 A macOS target built on Linux or Windows is built on a Mac over ssh
 (`[build.macos] host`, else `AIO_MACOS_SSH`). Size a binary with `ax build

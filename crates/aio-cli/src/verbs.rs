@@ -114,8 +114,10 @@ every one, what this machine can't build said with why and left out;
 crates take its space (over budget: always); size it so, not with a plain
 `cargo build --release` (no ax link flags: some % bigger);
 --smoke ([build] smoke: always): then start each Linux bundle, .deb
-and AppImage headless, stop it, check its log; a Windows bundle on
-Windows (AIO_WINDOWS_SSH: one over ssh), stopped with <app> --quit;
+and AppImage headless, stop it, check its log; a macOS app's zip on
+the Mac that built it (here, or [build.macos] host / AIO_MACOS_SSH); a
+Windows bundle on Windows (AIO_WINDOWS_SSH: one over ssh), stopped with
+<app> --quit;
 --deb: a Debian package ([app] maintainer); --appimage: one portable file;
 --android: signed APKs instead (the app's lib calls android_app!; --debug:
 debug APKs, the page in chrome://inspect);
