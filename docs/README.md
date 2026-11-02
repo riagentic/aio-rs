@@ -4,7 +4,7 @@ aio-rs is a Rust framework for apps whose state is cells with an event
 log: every change is saved, replayable, inspectable and synced; one
 codebase runs as a desktop window, in a browser, on Android, as a server
 or as a command-line tool. Its command is `ax`. This is the guide for
-aio-rs 0.1.0 (alpha). Every Rust example in it compiles and runs as a
+aio-rs 0.2.0 (alpha). Every Rust example in it compiles and runs as a
 test of aio-rs, and every `ax` command shown exists with those flags.
 Pages marked are being written.
 
@@ -16,6 +16,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 
 ## 1. Get started
 
+- [When to use aio-rs, and when not](basics/when.md): read first. Window and state yes; SEO, CDN, edge no; pin the tag; what is experimental.
 - [Why aio-rs, not plain Rust](basics/why.md): what it gives over a UI crate, SQLite and sync by hand, and when not to use it.
 - [Install and set up](basics/setup.md): what each OS needs, installing `ax` prebuilt or from source, `ax setup`, uninstalling.
 - [Quickstart](basics/quickstart.md): from nothing to a running, tested, packaged app; what the template is made of.
@@ -62,6 +63,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [Cassettes](testing/cassettes.md): recording and replaying I/O.
 - [Servers, sync and many apps](testing/multi-app.md): `TestServer`, sync simulation, tests close to production.
 - [Lint and proving the tests](testing/lint.md): `ax lint`, what it catches, tests that test something.
+- [Proving the tests](testing/proving.md): the mutation ledger, breaks in the source and in a built `.deb`.
 - [Real machines](testing/labs.md): `ax lab`: the app on a real Windows, macOS or Linux desktop.
 
 **Debugging**
@@ -105,7 +107,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [API map](reference/api.md): the public modules and items of each crate, with links into cargo doc.
 - API docs: `cargo doc -p aio-rs --no-deps --open` (the core, `use aio::…`); `-p aio-rs-shell` for the desktop host.
 - [aio-rs for coding agents](agents.md): `ax agent` and its rules.
-- [aio-rs next to Tauri and Dioxus](comparison.md): one app built in each, measured.
+- [aio-rs next to other Rust app stacks](comparison.md): one app built in each, measured.
 - [CHANGELOG](../CHANGELOG.md): what each version ships, and its known limits.
 
 ## 4. Coming from aio
@@ -148,7 +150,7 @@ Where each page of aio's documentation is covered here.
 | `basics/migration.md` | [Migrating from aio to aio-rs](migration/README.md) |
 | `basics/pitfalls.md` | [FAQ and pitfalls](basics/faq.md) |
 | `basics/plugins.md` | [Plugins and other apps](state/plugins.md) |
-| `basics/positioning.md` | [aio-rs next to Tauri and Dioxus](comparison.md) |
+| `basics/positioning.md` | [aio-rs next to other Rust app stacks](comparison.md) |
 | `basics/project-structure.md` | [Project layout, `aio.toml` and features](basics/project.md) |
 | `basics/quickstart.md` | [Quickstart](basics/quickstart.md) |
 | `basics/semver-policy.md` | [Versions and stability](basics/versioning.md) |
@@ -229,7 +231,7 @@ Where each page of aio's documentation is covered here.
 | `testing/multi-app.md` | [Servers, sync and many apps](testing/multi-app.md) |
 | `testing/onboarding-lab.md` | [Real machines](testing/labs.md) |
 | `testing/prod-parity.md` | [Servers, sync and many apps](testing/multi-app.md) |
-| `testing/proving-the-tests.md` | [Lint and proving the tests](testing/lint.md) |
+| `testing/proving-the-tests.md` | [Proving the tests](testing/proving.md), [Lint](testing/lint.md) |
 | `testing/ui-testing.md` | [Testing views](testing/ui.md) |
 | `testing/vm-labs.md` | [Real machines](testing/labs.md) |
 | `ui/README.md` | [Views](ui/views.md) |

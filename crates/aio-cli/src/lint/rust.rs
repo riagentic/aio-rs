@@ -2,10 +2,10 @@
 //! fields named like credentials, methods that aren't pure, hooks off the
 //! top level of a component, and rsx! markup without accessible names.
 use super::{Issue, Severity, secrets};
-use dioxus_rsx::{AttributeName, AttributeValue, BodyNode, CallBody, ElementName, HotLiteral, IfChain};
+use crate::reload::air_rsx::{Node, Val};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use syn::visit::{self, Visit};
 use syn::{Attribute, Block, Expr, Item, ReturnType, Signature, spanned::Spanned};
 
@@ -126,6 +126,8 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
             return;
         }
     };
+    renderer(rel, ast.to_token_stream(), &mut f.issues);
+    Vacuous { file: rel, out: &mut f.issues }.visit_file(&ast);
     if test_file {
         let ts = ast.to_token_stream();
         f.tests += count_tests(&ts);
@@ -135,6 +137,158 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
     split_tests(&mut ast.items, f);
     secrets::tokens(rel, ast.to_token_stream(), &mut f.issues);
     Checks { file: rel, f, repeats: 0 }.visit_file(&ast);
+}
+
+/// Tests that can pass without checking anything (aio's `check:vacuous`):
+/// a `#[test]` with no assertion, no `?`, no `unwrap`/`expect` and no
+/// harness wait in it (`no-assertions`; `#[should_panic]` is its check),
+/// and an `assert_eq!`/`assert_ne!` of a thing with itself (`self-comparison`).
+struct Vacuous<'a> {
+    file: &'a str,
+    out: &'a mut Vec<Issue>,
+}
+
+/// Calls that fail a test when what they check is false.
+const CHECKS: [&str; 13] = [
+    "expect",
+    "unwrap",
+    "unwrap_err",
+    "expect_err",
+    "fails",
+    "expect_cell",
+    "until",
+    "until_text",
+    "until_contains",
+    "until_within",
+    "converged",
+    "smoke",
+    "settle",
+];
+
+/// Do the tokens check anything (pure)?
+fn checks(ts: TokenStream) -> bool {
+    let tt: Vec<TokenTree> = ts.into_iter().collect();
+    tt.iter().enumerate().any(|(i, t)| match t {
+        TokenTree::Ident(id) => {
+            let s = id.to_string();
+            match matches!(tt.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                true => s.starts_with("assert") || s.starts_with("debug_assert") || s == "panic" || s == "unreachable",
+                false => CHECKS.contains(&s.as_str()),
+            }
+        }
+        TokenTree::Punct(p) => p.as_char() == '?',
+        TokenTree::Group(g) => checks(g.stream()),
+        _ => false,
+    })
+}
+
+impl<'ast> Visit<'ast> for Vacuous<'_> {
+    fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
+        if is_test_fn(&i.attrs) && !has(&i.attrs, "should_panic") && !checks(i.block.to_token_stream()) {
+            let name = i.sig.ident.to_string();
+            self.out.push(
+                Issue::new(
+                    Severity::Warn,
+                    "testing",
+                    format!("test `{name}` checks nothing: it passes whatever the code does (no-assertions)"),
+                    self.file,
+                    i.sig.ident.span().start().line,
+                )
+                .fix("assert what it should prove (assert!, assert_eq!, expect, a TestUi wait)"),
+            );
+        }
+        visit::visit_item_fn(self, i);
+    }
+
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        if last_is(&m.path, "assert_eq") || last_is(&m.path, "assert_ne") {
+            let args = m.parse_body_with(syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated);
+            if let Ok(args) = args
+                && let (Some(a), Some(b)) = (args.get(0), args.get(1))
+                && a.to_token_stream().to_string() == b.to_token_stream().to_string()
+            {
+                self.out.push(
+                    Issue::new(
+                        Severity::Warn,
+                        "testing",
+                        format!(
+                            "compares `{}` with itself: true whatever it is (self-comparison)",
+                            a.to_token_stream()
+                        ),
+                        self.file,
+                        m.path.span().start().line,
+                    )
+                    .fix("compare with the value it should have"),
+                );
+            }
+        }
+        visit::visit_macro(self, m);
+    }
+}
+
+/// What a 0.1 app still names of Dioxus (a `dioxus…` path, or a page
+/// script's `dioxus.send`), its renderer before air: aio-rs has none of it
+/// since 0.2.0 (docs/migration, "0.1 → 0.2").
+fn renderer(rel: &str, ts: TokenStream, out: &mut Vec<Issue>) {
+    fn walk(ts: TokenStream, lines: &mut BTreeSet<(usize, bool)>) {
+        let tt: Vec<TokenTree> = ts.into_iter().collect();
+        for (i, t) in tt.iter().enumerate() {
+            match t {
+                TokenTree::Group(g) => walk(g.stream(), lines),
+                TokenTree::Ident(id) => {
+                    let s = id.to_string();
+                    let path = matches!(tt.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == ':');
+                    let named = s == "dioxus" || s.starts_with("dioxus_");
+                    let used = path
+                        || matches!(tt.get(i.wrapping_sub(1)), Some(TokenTree::Ident(u)) if u == "use" || u == "crate");
+                    if named && used {
+                        lines.insert((id.span().start().line, false));
+                    }
+                }
+                TokenTree::Literal(l) if l.to_string().contains("dioxus.") => {
+                    lines.insert((l.span().start().line, true));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut lines = BTreeSet::new();
+    walk(ts, &mut lines);
+    for (line, script) in lines {
+        let (msg, fix) = match script {
+            false => (
+                "names dioxus, aio-rs 0.1's renderer: 0.2 draws with air, behind aio::ui (docs/migration)",
+                "use aio::ui::prelude::*; and its names (View, signal, memo, effect, once, eval, …)",
+            ),
+            true => (
+                "a page script talks to `dioxus`: its page object is `aio` (aio::ui::eval)",
+                "aio.send(v) / await aio.recv()",
+            ),
+        };
+        out.push(Issue::new(Severity::Error, "renderer", msg.into(), rel, line).fix(fix));
+    }
+}
+
+/// A manifest's dependency on a Dioxus crate (`dioxus`, `dioxus-…`): aio
+/// brings the renderer behind `aio::ui` (air).
+pub fn manifest(rel: &str, text: &str, out: &mut Vec<Issue>) {
+    for (i, l) in text.lines().enumerate() {
+        let l = l.trim_start();
+        let key = l.split(['=', '.', ' ', ']']).next().unwrap_or_default().trim_start_matches('[');
+        let dep = key == "dioxus" || key.starts_with("dioxus-") || l.contains("dependencies.dioxus");
+        if dep && !l.starts_with('#') {
+            out.push(
+                Issue::new(
+                    Severity::Error,
+                    "renderer",
+                    "depends on dioxus, aio-rs 0.1's renderer: 0.2 draws with air, behind aio::ui".into(),
+                    rel,
+                    i + 1,
+                )
+                .fix("drop it: aio (feature kit) brings the views' renderer, named through aio::ui"),
+            );
+        }
+    }
 }
 
 /// The id `#[cell]` gives `Name` without `id = "…"`.
@@ -161,11 +315,12 @@ impl Checks<'_> {
         self.f.issues.push(Issue::new(sev, area, msg, self.file, line).fix(fix));
     }
 
-    /// A component (returns `Element`) or a hook (`use_…`): its hooks run
-    /// on every render, in one order.
+    /// A view (returns `View`, or `Element`, its 0.1 name) or a hook (`use_…`):
+    /// what keeps something for it ([`HOOKS`]) runs each time its body runs
+    /// (again once a resource it `?`s loads, after a hot reload), in one order.
     fn hooks(&mut self, sig: &Signature, body: &Block) {
         let element = matches!(&sig.output, ReturnType::Type(_, t)
-            if matches!(&**t, syn::Type::Path(p) if last_is(&p.path, "Element")));
+            if matches!(&**t, syn::Type::Path(p) if last_is(&p.path, "View") || last_is(&p.path, "Element")));
         if !element && !sig.ident.to_string().starts_with("use_") {
             return;
         }
@@ -175,18 +330,18 @@ impl Checks<'_> {
             self.push(
                 Severity::Error,
                 "hooks",
-                format!("`{hook}` in `{}` runs only sometimes (in a branch, a loop or a closure, or after an early `return` or `?`): hooks are matched by call order, so a render that skips one hands the next hook its state", sig.ident),
+                format!("`{hook}` in `{}` runs only sometimes (in a branch, a loop or a closure, or after an early `return` or `?`): hooks are matched by call order, so a run of the body that skips one hands the next hook its state", sig.ident),
                 line,
-                "call it at the top of the function, every render, before any early `return` or `?`, and branch on its value",
+                "call it at the top of the function, on every run, before any early `return` or `?`, and branch on its value",
             );
         }
         for (made, line) in h.fresh {
             self.push(
                 Severity::Error,
                 "hooks",
-                format!("`{made}` in the body of `{}` makes a new signal every render: its value is lost on the next one, and each copy is kept until the component goes", sig.ident),
+                format!("`{made}` in the body of `{}` makes a new signal each time its body runs (again once a resource it `?`s loads, after a hot reload): its value is lost then, and each copy is kept until the component goes", sig.ident),
                 line,
-                "make it once: `use_signal(|| ..)` (or `use_hook(|| Signal::new(..))`)",
+                "make it once: `signal(|| ..)` (or `once(|| Signal::new(..))`)",
             );
         }
     }
@@ -208,7 +363,7 @@ impl Checks<'_> {
             "render",
             format!("`{guard}` in this `{kind}` stays borrowed until its block ends, and the block writes (`{write}`): a write to the same signal panics as already borrowed"),
             line,
-            "take the value first: `let v = X.peek().map(..);` then `if let Some(id) = v { .. }` (or read with X.cloned())",
+            "take the value first: `let v = X.get_untracked();` then `if let Some(id) = v { .. }` (or read with X.get())",
         );
     }
 }
@@ -232,7 +387,7 @@ impl<'ast> Visit<'ast> for Guards {
     fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
     fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
         let m = e.method.to_string();
-        if self.0.is_none() && e.args.is_empty() && ["read", "peek", "write"].contains(&m.as_str()) {
+        if self.0.is_none() && e.args.is_empty() && ["read", "read_untracked", "peek", "write"].contains(&m.as_str()) {
             let on = e.receiver.to_token_stream().to_string().replace(' ', "");
             self.0 = Some((format!("{on}.{m}()"), e.method.span().start().line));
         }
@@ -250,7 +405,8 @@ impl<'ast> Visit<'ast> for Writes {
     fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
     fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
         let m = e.method.to_string();
-        if self.0.is_none() && ["write", "set", "with_mut", "toggle", "take", "replace"].contains(&m.as_str()) {
+        if self.0.is_none() && ["write", "set", "update", "with_mut", "toggle", "take", "replace"].contains(&m.as_str())
+        {
             self.0 = Some(format!(".{m}()"));
         }
         visit::visit_expr_method_call(self, e);
@@ -339,13 +495,13 @@ impl<'ast> Visit<'ast> for Checks<'_> {
         // A hook's first value is made once: page CSS kept in one never sees
         // an edit, and live reload looks broken (`ax dev`).
         if let Expr::Path(p) = &*e.func
-            && last_is(&p.path, "use_hook")
+            && (last_is(&p.path, "once") || last_is(&p.path, "use_hook"))
             && e.args.to_token_stream().to_string().contains("page_css")
         {
             self.push(
                 Severity::Error,
                 "render",
-                "page CSS made in `use_hook` is made once: an edit to it never shows while `ax dev` runs".into(),
+                "page CSS made in `once` is made once: an edit to it never shows while `ax dev` runs".into(),
                 p.span().start().line,
                 "style { {aio::use_css!(dark; \"assets/style.css\")} } (live from the file, built in for release), or call aio::ui::page_css(..) in the component body",
             );
@@ -467,7 +623,12 @@ impl<'ast> Visit<'ast> for Impure {
     }
 }
 
-/// `use_…()` calls under a branch, a loop or a closure.
+/// What keeps something for a view in aio::ui (beside the `use_…` hooks):
+/// matched by call order (a body run again: `follow`, a hot reload).
+const HOOKS: &[&str] =
+    &["signal", "memo", "effect", "watch", "once", "on_cleanup", "callback", "provide", "task", "resource"];
+
+/// Hook calls (`use_…()`, [`HOOKS`]) under a branch, a loop or a closure.
 #[derive(Default)]
 struct Hooks {
     depth: u32,
@@ -478,7 +639,7 @@ struct Hooks {
     exits: bool,
     found: Vec<(String, usize)>,
     /// `Signal::new(..)` in the body (not in a hook's closure): a new signal
-    /// every render.
+    /// each run of the body.
     fresh: Vec<(String, usize)>,
 }
 
@@ -544,7 +705,7 @@ impl<'ast> Visit<'ast> for Hooks {
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
         if let Expr::Path(p) = &*e.func
             && let Some(name) = p.path.segments.last().map(|s| s.ident.to_string())
-            && name.starts_with("use_")
+            && (name.starts_with("use_") || HOOKS.contains(&name.as_str()))
             && (self.depth > 0 || self.exits)
         {
             self.found.push((name, p.span().start().line));
@@ -580,10 +741,11 @@ impl Checks<'_> {
     }
 
     fn rsx(&mut self, ts: TokenStream, roots: Nodes) {
-        let Ok(body) = syn::parse2::<CallBody>(ts) else { return };
+        // As the compiler reads it (air's own parser); one that doesn't parse is the compiler's to say.
+        let Ok(body) = crate::reload::air_rsx::nodes(ts) else { return };
         let mut found = Vec::new();
-        a11y(&body.body.roots, Within::default(), &mut found);
-        keys(&body.body.roots, roots, &mut found);
+        a11y(&body, Within::default(), &mut found);
+        keys(&body, roots, &mut found);
         found.sort_by_key(|f| f.0);
         for (line, sev, area, msg, fix) in found {
             self.push(sev, area, msg, line, fix);
@@ -596,43 +758,34 @@ type Attrs = BTreeMap<String, Option<String>>;
 type Found = Vec<(usize, Severity, &'static str, String, &'static str)>;
 
 /// An element's attributes, `aria-label` and `aria_label` alike; the value
-/// when it is a literal.
-fn attrs(el: &dioxus_rsx::Element) -> Option<Attrs> {
-    let mut out = Attrs::new();
-    for a in &el.raw_attributes {
-        let name = match &a.name {
-            AttributeName::BuiltIn(i) => i.to_string().trim_start_matches("r#").to_string(),
-            AttributeName::Custom(s) => s.value(),
-            AttributeName::Spread(_) => return None,
-        };
-        let value = match &a.value {
-            AttributeValue::AttrLiteral(HotLiteral::Fmted(s)) => s.to_static(),
-            AttributeValue::AttrLiteral(HotLiteral::Bool(b)) => Some(b.value.to_string()),
-            AttributeValue::AttrLiteral(HotLiteral::Int(i)) => Some(i.base10_digits().to_string()),
-            _ => None,
-        };
-        out.insert(name.replace('-', "_"), value);
-    }
-    el.spreads.is_empty().then_some(out)
+/// when it is a literal. None: some come from a spread (`..attributes`).
+fn attrs(attrs: &[(String, Val)], spreads: &[TokenStream]) -> Option<Attrs> {
+    let value = |v: &Val| match v {
+        Val::Static(s) => Some(s.clone()),
+        Val::Present(b) => Some(b.to_string()),
+        _ => None,
+    };
+    let out = attrs.iter().map(|(name, v)| (name.replace('-', "_"), value(v))).collect();
+    spreads.is_empty().then_some(out)
 }
 
 /// Could the children give the element a name? Anything not known (an
 /// expression, a component, a branch) counts as yes: a false alarm costs
 /// more than a missed one.
-fn speaks(nodes: &[BodyNode]) -> bool {
+fn speaks(nodes: &[Node]) -> bool {
     nodes.iter().any(|n| match n {
-        BodyNode::Text(t) => !t.input.source.value().trim().is_empty(),
-        BodyNode::Element(el) => {
-            attrs(el)
+        Node::Text(t) => !t.trim().is_empty(),
+        Node::El { attrs: a, spreads, children, .. } => {
+            attrs(a, spreads)
                 .is_none_or(|a| ["aria_label", "aria_labelledby", "title", "alt"].iter().any(|k| a.contains_key(*k)))
-                || speaks(&el.children)
+                || speaks(children)
         }
         _ => true,
     })
 }
 
 /// What `el` is missing to have an accessible name, and how to give it one.
-fn unnamed(tag: &str, a: &Attrs, children: &[BodyNode], in_label: bool) -> Option<(String, &'static str)> {
+fn unnamed(tag: &str, a: &Attrs, children: &[Node], in_label: bool) -> Option<(String, &'static str)> {
     let key = |k: &str| a.contains_key(k);
     let val = |k: &str| a.get(k).cloned().flatten();
     let named = key("aria_label") || key("aria_labelledby") || key("title");
@@ -732,20 +885,19 @@ fn misused(tag: &str, a: &Attrs, within: Within) -> Vec<(String, &'static str)> 
 }
 
 /// A list's items without a `key` (aio's missing-key tripwire): matched by
-/// place, a row removed or moved hands its state (a field's text, focus,
-/// a component's signals) to its neighbour. Duplicate keys Dioxus itself
-/// refuses (`rsx!` and debug builds).
-fn unkeyed(roots: &[BodyNode]) -> Found {
+/// place, a row removed or moved would hand its state (a field's text,
+/// focus, a component's signals) to its neighbour, so air refuses it.
+fn unkeyed(roots: &[Node]) -> Found {
     // The body's first node keys each pass: only that one takes a key.
     let missing = match roots.first() {
-        Some(BodyNode::Element(el)) if !has_key(el) => Some(el_name(&el.name)),
-        Some(BodyNode::Component(c)) if c.get_key().is_none() => Some(component_name(c)),
+        Some(n @ (Node::El { key: None, .. } | Node::Comp { key: None, .. })) => name_of(n),
         // A block's rsx! is a node inside the pass's unkeyed one: its key keys nothing.
-        Some(BodyNode::RawExpr(e)) => {
-            let msg = "a for loop over a block keys nothing (the block's rsx! sits inside an unkeyed node): a shift of the list rebuilds every row";
+        Some(Node::Expr(e)) => {
+            let msg =
+                "a for loop over a block keys nothing (the block's rsx! sits inside an unkeyed node): air refuses it";
             return vec![(
-                e.span().start().line,
-                Severity::Warn,
+                line_of(e),
+                Severity::Error,
                 "render",
                 msg.into(),
                 "{items.iter().map(|it| { …; rsx! { div { key: \"{it.id}\", … } } })}",
@@ -754,27 +906,29 @@ fn unkeyed(roots: &[BodyNode]) -> Found {
         _ => None,
     };
     let say = |(what, line)| {
-        let msg = format!("<{what}> in a for loop has no key: a removed or moved row hands its state to the next");
-        (line, Severity::Warn, "render", msg, "key: \"{item.id}\"")
+        let msg = format!(
+            "<{what}> in a for loop has no key: a removed or moved row would hand its state to the next (air refuses it)"
+        );
+        (line, Severity::Error, "render", msg, "key: \"{item.id}\"")
     };
     missing.map(say).into_iter().collect()
 }
 
-fn has_key(el: &dioxus_rsx::Element) -> bool {
-    el.raw_attributes.iter().any(|a| a.name.is_likely_key())
+/// The line `ts` starts on.
+fn line_of(ts: &TokenStream) -> usize {
+    ts.clone().into_iter().next().map_or(0, |t| t.span().start().line)
 }
 
-/// An element's tag and line.
-fn el_name(name: &ElementName) -> (String, usize) {
-    match name {
-        ElementName::Ident(i) => (i.to_string(), i.span().start().line),
-        ElementName::Custom(s) => (s.value(), s.span().start().line),
+/// An element's tag or a component's name, and its line.
+fn name_of(n: &Node) -> Option<(String, usize)> {
+    match n {
+        Node::El { tag, at, .. } => Some((tag.clone(), at.start().line)),
+        Node::Comp { path, .. } => path.iter().rev().find_map(|t| match t {
+            TokenTree::Ident(i) => Some((i.to_string(), i.span().start().line)),
+            _ => None,
+        }),
+        _ => None,
     }
-}
-
-/// A component's name and line.
-fn component_name(c: &dioxus_rsx::Component) -> (String, usize) {
-    (c.name.segments.last().map_or(String::new(), |s| s.ident.to_string()), c.name.span().start().line)
 }
 
 /// What a run of nodes is, for the keys on them.
@@ -792,21 +946,19 @@ enum Nodes {
     Children,
 }
 
-/// Keys Dioxus ignores without a word at run time: one on a block's later
-/// node (the first node keys the block: "Keys are only allowed on the
-/// first node in the block"), and one on a node in no list (only a list's
-/// items are told apart by key: a changed key remounts nothing).
-fn keys(nodes: &[BodyNode], block: Nodes, out: &mut Found) {
+/// Keys air ignores: one on a block's later node (the first node keys the
+/// block), and one on a node in no list (only a list's items are told apart
+/// by key: a changed key remounts nothing).
+fn keys(nodes: &[Node], block: Nodes, out: &mut Found) {
     for (i, n) in nodes.iter().enumerate() {
         let keyed = match n {
-            BodyNode::Element(el) => has_key(el).then(|| el_name(&el.name)),
-            BodyNode::Component(c) => c.get_key().is_some().then(|| component_name(c)),
+            Node::El { key: Some(_), .. } | Node::Comp { key: Some(_), .. } => name_of(n),
             _ => None,
         };
         if let Some((what, line)) = keyed {
             if i > 0 && block != Nodes::Children {
                 let msg = format!(
-                    "key on <{what}>, not its block's first node: Dioxus ignores it (the first node keys the block)"
+                    "key on <{what}>, not its block's first node: aio::ui ignores it (the first node keys the block)"
                 );
                 out.push((
                     line,
@@ -816,23 +968,17 @@ fn keys(nodes: &[BodyNode], block: Nodes, out: &mut Found) {
                     "Fragment { key: \"{item.id}\", … } around the block's nodes",
                 ));
             } else if !matches!(block, Nodes::Loop | Nodes::Macro) {
-                let msg = format!("key on <{what}> in no list: Dioxus never remounts it when the key changes");
+                let msg = format!("key on <{what}> in no list: aio::ui never remounts it when the key changes");
                 out.push((line, Severity::Warn, "render", msg, "a one-item for: for k in [key] { … key: \"{k}\" … }"));
             }
         }
         match n {
-            BodyNode::Element(el) => keys(&el.children, Nodes::Children, out),
-            BodyNode::Component(c) => keys(&c.children.roots, Nodes::Branch, out),
-            BodyNode::ForLoop(f) => keys(&f.body.roots, Nodes::Loop, out),
-            BodyNode::IfChain(c) => {
-                let mut at = Some(c);
-                while let Some(c) = at {
-                    keys(&c.then_branch.roots, Nodes::Branch, out);
-                    if let Some(e) = &c.else_branch {
-                        keys(&e.roots, Nodes::Branch, out);
-                    }
-                    at = c.else_if_branch.as_deref();
-                }
+            Node::El { children, .. } => keys(children, Nodes::Children, out),
+            Node::Comp { children, .. } => keys(children, Nodes::Branch, out),
+            Node::For { body, .. } => keys(body, Nodes::Loop, out),
+            Node::If { then, otherwise, .. } => {
+                keys(then, Nodes::Branch, out);
+                keys(otherwise, Nodes::Branch, out);
             }
             _ => {}
         }
@@ -846,46 +992,47 @@ struct Within {
     form: bool,
 }
 
-fn a11y(nodes: &[BodyNode], within: Within, out: &mut Found) {
+fn a11y(nodes: &[Node], within: Within, out: &mut Found) {
     for n in nodes {
         match n {
-            BodyNode::Element(el) => {
-                let (tag, line) = el_name(&el.name);
-                if let Some(a) = attrs(el) {
+            Node::El { tag, at, attrs: a, spreads, children, .. } => {
+                let (tag, line) = (tag.as_str(), at.start().line);
+                if let Some(a) = attrs(a, spreads) {
                     out.extend(
-                        unnamed(&tag, &a, &el.children, within.label)
+                        unnamed(tag, &a, children, within.label)
                             .map(|(msg, fix)| (line, Severity::Error, "a11y", msg, fix)),
                     );
-                    out.extend(keyless(&tag, &a).map(|msg| {
+                    out.extend(keyless(tag, &a).map(|msg| {
                         (line, Severity::Warn, "a11y", msg, "use a button, or give it role, tabindex: 0 and onkeydown")
                     }));
                     out.extend(
-                        misused(&tag, &a, within)
-                            .into_iter()
-                            .map(|(msg, fix)| (line, Severity::Warn, "a11y", msg, fix)),
+                        misused(tag, &a, within).into_iter().map(|(msg, fix)| (line, Severity::Warn, "a11y", msg, fix)),
                     );
                 }
-                if drag_set(el) {
+                if drag_set(a) {
                     let msg = format!(
-                        "<{tag}>'s ondragstart set_data never reaches the drop: the view runs after the browser's dragstart"
+                        "<{tag}>'s ondragstart sets the drag's data, which never reaches the drop: the view runs after the browser's dragstart"
                     );
                     out.push((
                         line,
                         Severity::Warn,
                         "render",
                         msg,
-                        "\"data-drag\": \"{id}\" on the element (the drop reads it as text/plain)",
+                        "\"data-drag\": \"{id}\" on the element (the drop reads it with data_transfer().get_as_text())",
                     ));
                 }
                 let within = Within { label: within.label || tag == "label", form: within.form || tag == "form" };
-                a11y(&el.children, within, out);
+                a11y(children, within, out);
             }
-            BodyNode::Component(c) => a11y(&c.children.roots, within, out),
-            BodyNode::ForLoop(f) => {
-                out.extend(unkeyed(&f.body.roots));
-                a11y(&f.body.roots, within, out)
+            Node::Comp { children, .. } => a11y(children, within, out),
+            Node::For { body, .. } => {
+                out.extend(unkeyed(body));
+                a11y(body, within, out)
             }
-            BodyNode::IfChain(c) => chain(c, within, out),
+            Node::If { then, otherwise, .. } => {
+                a11y(then, within, out);
+                a11y(otherwise, within, out);
+            }
             _ => {}
         }
     }
@@ -893,19 +1040,8 @@ fn a11y(nodes: &[BodyNode], within: Within, out: &mut Found) {
 
 /// An `ondragstart` that sets the drag's data: lost, since a view's handler
 /// runs after the browser's dragstart is over (aio's page sets `data-drag`).
-fn drag_set(el: &dioxus_rsx::Element) -> bool {
-    el.raw_attributes.iter().any(|a| {
-        matches!(&a.name, AttributeName::BuiltIn(i) if i == "ondragstart")
-            && a.value.to_token_stream().to_string().contains("set_data")
-    })
-}
-
-fn chain(c: &IfChain, within: Within, out: &mut Found) {
-    a11y(&c.then_branch.roots, within, out);
-    if let Some(e) = &c.else_if_branch {
-        chain(e, within, out);
-    }
-    if let Some(e) = &c.else_branch {
-        a11y(&e.roots, within, out);
-    }
+fn drag_set(attrs: &[(String, Val)]) -> bool {
+    attrs
+        .iter()
+        .any(|(name, v)| name == "ondragstart" && matches!(v, Val::Event(_, h) if h.to_string().contains("set_data")))
 }

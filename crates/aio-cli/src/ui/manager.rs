@@ -2,17 +2,19 @@
 //! one's detail and its live readings, its state, logs, tasks and files,
 //! and what the person asked it to do. Every field is a signal of its own,
 //! so a view re-renders only for what it reads (aio's `part()`). The work
-//! runs off the view's thread: `ax` verbs as children (what `ax` does, done
-//! the way `ax` does it) and plain file reads; a result that comes back
-//! after the person moved on is dropped, never shown on another app.
+//! runs off the view's thread: `ax`'s own verbs (what `ax` does, done the
+//! way `ax` does it), the reads in this process and bounded, the rest as
+//! children, and plain file reads; a result that comes back after the
+//! person moved on is dropped, never shown on another app.
 use super::proc::{self, FileNode, LogSource, Runtime};
 use super::scan::{self, Project};
 use aio::serde_json::{self, Value, json};
-use dioxus::core::spawn_forever;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
+use spawn_forever;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Runs one `ax` verb (its words, in a folder): what it printed, or why it
 /// failed.
@@ -35,6 +37,53 @@ pub fn child() -> Verb {
             (false, "") => Err(out),
             (false, e) => Err(e.trim_start_matches("ax: ").to_string()),
         }
+    })
+}
+
+/// The verbs that only read: run in this process, never a child (amui
+/// polls in-process), each within [`READ_WITHIN`].
+const READS: [&str; 10] =
+    ["apps", "metrics", "cost", "events", "components", "clients", "peer", "errors", "schedules", "snapshot"];
+/// A read not answered by then is said as a failure (amui's 5 s bound).
+pub const READ_WITHIN: Duration = Duration::from_secs(5);
+
+/// The manager's verbs: its reads in this process ([`within`]), the rest
+/// (start, stop, a call, create) this `ax` as a child.
+pub fn local() -> Verb {
+    let child = child();
+    Arc::new(move |w: Vec<String>, cwd: Option<PathBuf>| match READS.contains(&w[0].as_str()) {
+        true => within(READ_WITHIN, w, cwd),
+        false => child(w, cwd),
+    })
+}
+
+/// `ax <w>` run in this process, as in folder `cwd`, answered within
+/// `limit`: one that takes longer is a failure (its thread finishes alone).
+pub fn within(limit: Duration, w: Vec<String>, cwd: Option<PathBuf>) -> Result<String, String> {
+    let what = format!("ax {}", w.first().map_or("", String::as_str));
+    bounded(limit, &what, move || {
+        let run = || crate::outcome(crate::verbs::read(&w, &crate::here)).1;
+        match cwd {
+            Some(d) => crate::dev::in_dir(d, run),
+            None => run(),
+        }
+    })
+}
+
+/// `f` on a thread of its own, its answer within `limit`; else why not
+/// (`what` names it).
+pub fn bounded(
+    limit: Duration,
+    what: &str,
+    f: impl FnOnce() -> Result<String, String> + Send + 'static,
+) -> Result<String, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new().name("ax-ui-read".into()).spawn(move || _ = tx.send(f())).map_err(|e| e.to_string())?;
+    rx.recv_timeout(limit).unwrap_or_else(|e| {
+        Err(match e {
+            std::sync::mpsc::RecvTimeoutError::Timeout => format!("{what}: no answer within {} s", limit.as_secs()),
+            std::sync::mpsc::RecvTimeoutError::Disconnected => format!("{what} failed (it panicked)"),
+        })
     })
 }
 
@@ -157,10 +206,13 @@ pub struct Detail {
     pub own: bool,
     pub cells: Option<Vec<CellInfo>>,
     pub cpu_pct: Option<f64>,
+    /// Its `health.json`'s last CPU reading (`cpuMs`, `updatedAt`): the
+    /// next one makes a CPU % where `/proc` can't tell.
+    pub cpu_mark: Option<(u64, i64)>,
     pub mem_mb: Option<f64>,
     pub uptime_s: Option<u64>,
     pub connections: Option<u64>,
-    pub errors: Option<Vec<String>>,
+    pub errors: Option<Vec<Problem>>,
     pub schedules: Option<Vec<String>>,
     /// When it was last read (ms).
     pub at: i64,
@@ -227,17 +279,42 @@ pub fn reconcile(d: &Detail, fresh: &Project) -> Option<Detail> {
         ..d.clone()
     };
     if !same {
-        (n.cpu_pct, n.mem_mb, n.uptime_s, n.connections) = (None, None, None, None);
+        (n.cpu_pct, n.cpu_mark, n.mem_mb, n.uptime_s, n.connections) = (None, None, None, None, None);
         (n.cells, n.errors, n.schedules) = (None, None, None);
     }
     Some(n)
 }
 
-/// The first failed read among a set, as the banner says it (amui's
-/// `controlErrorOf`): reads are only made of an app that runs, so one it
-/// didn't answer is news.
+/// The failed read among a set the banner says (amui's `controlErrorOf`):
+/// a refusal of who asked first (it says what to do), else the first
+/// failure. Reads are only made of an app that runs, so one it didn't
+/// answer is news.
 pub fn control_error_of(results: &[&Result<String, String>]) -> Option<String> {
-    results.iter().find_map(|r| r.as_ref().err().cloned())
+    let refusal = |e: &&String| {
+        let e = e.to_lowercase();
+        ["unauthor", "forbidden", "credential", "admin", "denied"].iter().any(|w| e.contains(w))
+    };
+    let mut failed = results.iter().filter_map(|r| r.as_ref().err());
+    failed.clone().find(refusal).or_else(|| failed.next()).cloned()
+}
+
+/// CPU in % of one core between two `health.json` readings (`cpuMs`,
+/// `updatedAt`), where `/proc` can't tell (pure): none without a newer one.
+pub fn cpu_between(was: Option<(u64, i64)>, now: (u64, i64)) -> Option<f64> {
+    let ((c0, t0), (c1, t1)) = (was?, now);
+    (t1 > t0 && c1 >= c0).then(|| ((c1 - c0) as f64 / (t1 - t0) as f64 * 1000.0).round() / 10.0)
+}
+
+/// Each linked client's bytes a second since the last reading `was`,
+/// `secs` ago (pure): a link seen in both, its `sent` grown.
+pub fn with_rates(now: &mut [Value], was: &[Value], secs: f64) {
+    for c in now.iter_mut() {
+        let before = was.iter().find(|w| w["cell"] == c["cell"] && w["id"] == c["id"]);
+        let (Some(b), Some(n)) = (before.and_then(|w| w["sent"].as_u64()), c["sent"].as_u64()) else { continue };
+        if secs > 0.0 && n >= b {
+            c["bytesPerS"] = ((n - b) as f64 / secs).into();
+        }
+    }
 }
 
 /// Rolling readings for the charts, at most [`HIST`] each.
@@ -281,6 +358,8 @@ pub struct Diag {
     /// Did any read get an answer?
     pub answered: bool,
     pub control_error: Option<String>,
+    /// When it was read (ms).
+    pub at: i64,
 }
 
 impl Diag {
@@ -313,7 +392,7 @@ pub fn diag(verb: &Verb, name: &str, home: Option<&Path>, cwd: Option<PathBuf>) 
         };
         let m = run(w(&["metrics", name, "--json"]));
         let c = run(w(&["cost", name, "--json"]));
-        let e = run(w(&["events", name, "--last", "60", "--json"]));
+        let e = run(w(&["events", name, "--last", "60", "--refused", "--json"]));
         let u = run(w(&["components", name, "--json"]));
         let j =
             |h: std::thread::ScopedJoinHandle<'_, Result<String, String>>| h.join().unwrap_or(Err("panicked".into()));
@@ -331,11 +410,20 @@ pub fn diag(verb: &Verb, name: &str, home: Option<&Path>, cwd: Option<PathBuf>) 
         .and_then(|m| m["cells"].as_object())
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
-    // Who is linked, each cell's (at most 8 cells asked).
+    // Who is linked, to every cell, asked at once.
+    let asked: Vec<Result<String, String>> = std::thread::scope(|s| {
+        let all: Vec<_> = cells
+            .iter()
+            .map(|c| {
+                let (v, a, cwd) = (verb.clone(), w(&["clients", name, c, "--json"]), cwd.clone());
+                s.spawn(move || v(a, cwd))
+            })
+            .collect();
+        all.into_iter().map(|h| h.join().unwrap_or(Err("panicked".into()))).collect()
+    });
     let mut clients: Vec<Value> = vec![];
-    for c in cells.iter().take(8) {
-        let rows = value(&verb(w(&["clients", name, c, "--json"]), cwd.clone())).and_then(|v| v.as_array().cloned());
-        for mut r in rows.into_iter().flatten().filter(Value::is_object) {
+    for (c, r) in cells.iter().zip(&asked) {
+        for mut r in value(r).and_then(|v| v.as_array().cloned()).into_iter().flatten().filter(Value::is_object) {
             r["cell"] = c.clone().into();
             clients.push(r);
         }
@@ -354,6 +442,7 @@ pub fn diag(verb: &Verb, name: &str, home: Option<&Path>, cwd: Option<PathBuf>) 
         cost: value(&cost),
         components: value(&comps).filter(|v| v["components"].is_array()),
         history,
+        at: now_ms(),
     }
 }
 
@@ -426,8 +515,9 @@ pub struct Task {
     pub code: Option<i32>,
 }
 
-/// The tasks of a project: `ax` verbs on its source (amui's deno tasks):
-/// a label, the words after `ax` (`{app}`: the app).
+/// The `ax` verbs every project has, beside its own tasks (its cargo
+/// aliases, `cargo <alias>`: amui's deno tasks): a label, the words after
+/// `ax` (`{app}`: the app).
 pub const TASKS: &[(&str, &[&str])] = &[
     ("dev", &["dev", "{app}"]),
     ("dev --web", &["dev", "{app}", "--web"]),
@@ -440,6 +530,16 @@ pub const TASKS: &[(&str, &[&str])] = &[
     ("config", &["config", "{app}"]),
     ("data", &["data", "{app}"]),
 ];
+
+/// Whether task `label` of project `meta` (app `app`) is cargo's, and its
+/// words (pure): one of its own tasks (`cargo <alias>`), else an `ax` verb
+/// ([`task_words`]); `None` when it has none such.
+pub fn task_of(label: &str, app: &str, meta: &scan::Meta) -> Option<(bool, Vec<String>)> {
+    match label.strip_prefix("cargo ") {
+        Some(a) => meta.tasks.iter().any(|(n, _)| n == a).then(|| (true, vec![a.to_string()])),
+        None => task_words(label, app).map(|w| (false, w)),
+    }
+}
 
 /// The words of task `label` for app `app` (pure): a build target's
 /// (`build:<target>`) too.
@@ -499,6 +599,9 @@ pub fn call_words(app: &str, cell: &str, method: &str, args: &str) -> Result<(Ve
     Ok((words, format!("Run {cell}.{method}({}) on {app}?{note}", &shown[1..shown.len() - 1])))
 }
 
+/// A running task's output, as it comes.
+type Output = Arc<Mutex<Vec<u8>>>;
+
 /// Run `f` off the view's thread.
 async fn off<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     match aio::rt().spawn_blocking(f).await {
@@ -511,7 +614,7 @@ async fn off<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 /// root (`spawn_forever`): a tab that asked and closed never drops the answer.
 #[derive(Clone, Copy)]
 pub struct Manager {
-    setup: CopyValue<Setup>,
+    setup: Signal<Setup>,
     pub projects: Signal<Vec<Project>>,
     pub selected: Signal<Option<String>>,
     pub detail: Signal<Option<Detail>>,
@@ -533,6 +636,8 @@ pub struct Manager {
     pub state: Signal<StateLoad>,
     pub task: Signal<Task>,
     cancel: Signal<Option<Arc<AtomicBool>>>,
+    /// The running task's output so far, and how it was shown.
+    task_out: Signal<Option<(Output, String)>>,
     pub files: Signal<Files>,
     pub open: Signal<Option<Open>>,
     pub create_busy: Signal<bool>,
@@ -552,7 +657,7 @@ impl Manager {
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             .is_some_and(|v| v["showAll"] == true);
         Manager {
-            setup: CopyValue::new(setup),
+            setup: Signal::new(setup),
             projects: Signal::new(vec![]),
             selected: Signal::new(None),
             detail: Signal::new(None),
@@ -574,6 +679,7 @@ impl Manager {
             state: Signal::new(StateLoad::default()),
             task: Signal::new(Task::default()),
             cancel: Signal::new(None),
+            task_out: Signal::new(None),
             files: Signal::new(Files::default()),
             open: Signal::new(None),
             create_busy: Signal::new(false),
@@ -585,7 +691,7 @@ impl Manager {
     }
 
     fn setup(&self) -> Setup {
-        self.setup.read().clone()
+        self.setup.get_untracked()
     }
 
     /// The verb for entry `p`'s copy, and the folder its verbs run in: its
@@ -596,7 +702,7 @@ impl Manager {
     }
 
     /// Keep the person's choice of all apps or the running ones.
-    pub fn set_show_all(mut self, on: bool) {
+    pub fn set_show_all(self, on: bool) {
         self.show_all.set(on);
         if let Some(p) = self.setup().prefs {
             _ = std::fs::write(p, json!({ "showAll": on }).to_string());
@@ -604,8 +710,8 @@ impl Manager {
     }
 
     /// Find the apps again (amui's `discover`).
-    pub fn discover(mut self) {
-        if *self.scanning.peek() {
+    pub fn discover(self) {
+        if *self.scanning.read_untracked() {
             return;
         }
         self.scanning.set(true);
@@ -615,13 +721,20 @@ impl Manager {
                 let listed = (s.verb)(vec!["apps".into(), "--json".into()], Some(aio::paths::tool_home()))
                     .and_then(|j| scan::apps(&j));
                 let apps = listed.unwrap_or_default();
-                let cwds: Vec<PathBuf> =
-                    apps.iter().filter_map(|a| proc::process_paths(a.running.as_ref()?.pid).1).collect();
+                let at: Vec<(u32, PathBuf)> = apps
+                    .iter()
+                    .filter_map(|a| {
+                        let pid = a.running.as_ref()?.pid;
+                        Some((pid, paths_of(pid, a.home.as_deref()).1?))
+                    })
+                    .collect();
+                let cwds: Vec<PathBuf> = at.iter().map(|(_, c)| c.clone()).collect();
                 let roots = scan::roots_for(&s.roots, &s.home, s.cwd.as_deref(), &cwds);
                 let mut disk = scan::scan_disk(&roots, scan::DEPTH, &scan::never_walk(&s.home));
                 // A running app is found where it runs, wherever that is.
                 disk.extend(cwds.iter().filter_map(|c| Some((c.clone(), scan::read_meta(c)?))));
-                let list = scan::merge(apps, &disk, &|pid| proc::process_paths(pid).1);
+                let cwd_of = |pid| at.iter().find(|(p, _)| *p == pid).map(|(_, c)| c.clone());
+                let list = scan::merge(apps, &disk, &cwd_of);
                 (list, roots.iter().map(|r| r.display().to_string()).collect::<Vec<_>>())
             })
             .await;
@@ -634,20 +747,21 @@ impl Manager {
     /// Fold a fresh scan in (amui's `applyScan`): the list, and the chosen
     /// app followed, dropped if gone, its running state reconciled (its
     /// readings cleared when its process changed).
-    pub fn apply_scan(mut self, found: Vec<Project>, roots: Vec<String>) {
-        let sel = self.selected.peek().clone();
+    pub fn apply_scan(self, found: Vec<Project>, roots: Vec<String>) {
+        let sel = self.selected.read_untracked().clone();
         let next = sel.as_deref().and_then(|id| scan::follow(&found, id)).cloned();
         self.scan_roots.set(roots);
         match (sel, next) {
             (Some(_), None) => {
                 self.selected.set(None);
                 self.detail.set(None);
+                self.clear_live();
             }
             (Some(id), Some(p)) => {
                 if p.id != id {
                     self.selected.set(Some(p.id.clone()));
                 }
-                let changed = self.detail.peek().as_ref().and_then(|d| reconcile(d, &p));
+                let changed = self.detail.read_untracked().as_ref().and_then(|d| reconcile(d, &p));
                 if let Some(d) = changed {
                     let up = d.running;
                     self.detail.set(Some(d));
@@ -659,14 +773,14 @@ impl Manager {
             }
             _ => {}
         }
-        if *self.projects.peek() != found {
+        if *self.projects.read_untracked() != found {
             self.projects.set(found);
         }
     }
 
     /// Drop every reading of a process that is gone (amui's
     /// `clearLiveDiagnostics`).
-    pub fn clear_live(mut self) {
+    pub fn clear_live(self) {
         self.hist.set(Hist::default());
         self.diag.set(Diag::default());
         self.control_error.set(None);
@@ -675,8 +789,8 @@ impl Manager {
 
     /// Choose an app (amui's `select`): its skeleton at once, then what is
     /// read of it; a newer choice drops this one's results.
-    pub fn select(mut self, key: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
+    pub fn select(self, key: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
         let id = p.id.clone();
         self.selected.set(Some(id.clone()));
         self.detail.set(Some(detail_of(&p)));
@@ -699,7 +813,7 @@ impl Manager {
             let got = off(move || {
                 let mut d = detail_of(&p);
                 let r = p.running.clone();
-                let (exe, run_cwd) = r.as_ref().map_or((None, None), |r| proc::process_paths(r.pid));
+                let (exe, run_cwd) = r.as_ref().map_or((None, None), |r| paths_of(r.pid, p.home.as_deref()));
                 let runtime = match &r {
                     Some(_) => proc::runtime_of(exe.as_deref(), p.path.as_deref().or(run_cwd.as_deref()), &s.installed),
                     None => Runtime {
@@ -722,7 +836,7 @@ impl Manager {
                             sc.spawn(move || v(a, c))
                         };
                         let pe = run(w(&["peer", name, "--json"]));
-                        let er = run(w(&["errors", name, "--last", "6"]));
+                        let er = run(w(&["errors", name, "--last", "6", "--json"]));
                         let sh = run(w(&["schedules", name, "--json"]));
                         let dg = diag(&verb, name, p.home.as_deref(), cwd.clone());
                         let j = |h: std::thread::ScopedJoinHandle<'_, Result<String, String>>| {
@@ -737,7 +851,7 @@ impl Manager {
                             .map(|v| v.get("value").cloned().unwrap_or(v))
                     };
                     d.cells = json_of(&peer).map(|v| cells_of(&v));
-                    d.errors = errors.as_ref().ok().map(|t| errors_of(t));
+                    d.errors = json_of(&errors).map(|v| errors_of(&v));
                     d.schedules = json_of(&schedules).map(|v| schedules_of(&v));
                     let ps = proc::ps_stats(r.pid);
                     fill(&mut d, &dg, ps);
@@ -750,7 +864,7 @@ impl Manager {
                 (d, files, live)
             })
             .await;
-            if self.selected.peek().as_deref() != Some(id.as_str()) {
+            if self.selected.read_untracked().as_deref() != Some(id.as_str()) {
                 return;
             }
             let (d, files, diag) = got;
@@ -769,9 +883,9 @@ impl Manager {
 
     /// Read the chosen running app again for the charts and live fields
     /// (amui's `tick`): one at a time, never two over the same history.
-    pub fn tick(mut self) {
-        let Some(d) = self.detail.peek().clone().filter(|d| d.running && d.pid.is_some()) else { return };
-        if *self.ticking.peek() {
+    pub fn tick(self) {
+        let Some(d) = self.detail.read_untracked().clone().filter(|d| d.running && d.pid.is_some()) else { return };
+        if *self.ticking.read_untracked() {
             return;
         }
         self.ticking.set(true);
@@ -780,15 +894,19 @@ impl Manager {
         spawn_forever(async move {
             let (dg, ps) = off(move || (diag(&verb, &name, home.as_deref(), cwd), proc::ps_stats(pid))).await;
             self.ticking.set(false);
-            let Some(mut d) = self.detail.peek().clone().filter(|d| d.id == id && d.running) else { return };
+            let Some(mut d) = self.detail.read_untracked().clone().filter(|d| d.id == id && d.running) else { return };
             fill(&mut d, &dg, ps);
             if !dg.answered {
                 // A reading that can't be checked is no reading.
                 (d.uptime_s, d.connections) = (None, None);
             }
-            self.hist.with_mut(|h| sample(h, &d, &dg));
+            self.hist.update(|h| sample(h, &d, &dg));
             self.control_error.set(dg.control_error.clone());
-            let kept = self.diag.peek().clone();
+            let kept = self.diag.read_untracked().clone();
+            let mut dg = dg;
+            if let (Some(now), Some(was)) = (dg.clients.as_mut(), kept.clients.as_ref()) {
+                with_rates(now, was, (dg.at - kept.at) as f64 / 1000.0);
+            }
             // Each part degrades on its own: the last good one stays.
             self.diag.set(Diag {
                 health: dg.health.or(kept.health),
@@ -805,8 +923,8 @@ impl Manager {
 
     /// The chosen app's whole state for the State tab (amui's `loadState`):
     /// on demand only, never polled; too large is refused, not drawn.
-    pub fn load_state(mut self, key: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else {
+    pub fn load_state(self, key: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else {
             self.state.set(StateLoad {
                 of: Some(key.into()),
                 error: Some("app not running".into()),
@@ -818,15 +936,15 @@ impl Manager {
             self.state.set(StateLoad { of: Some(p.id), error: Some("app not running".into()), ..StateLoad::default() });
             return;
         }
-        self.state.with_mut(|s| (s.loading, s.error) = (true, None));
+        self.state.update(|s| (s.loading, s.error) = (true, None));
         let (verb, cwd) = self.verb_for(p.instance.as_deref(), p.path.as_deref());
         let (id, pid) = (p.id.clone(), p.running.as_ref().map(|r| r.pid));
         spawn_forever(async move {
             let r = off(move || verb(vec!["snapshot".into(), p.name.clone(), "--json".into()], cwd)).await;
-            if self.selected.peek().as_deref() != Some(id.as_str())
-                || self.detail.peek().as_ref().and_then(|d| d.pid) != pid
+            if self.selected.read_untracked().as_deref() != Some(id.as_str())
+                || self.detail.read_untracked().as_ref().and_then(|d| d.pid) != pid
             {
-                self.state.with_mut(|s| s.loading = false);
+                self.state.update(|s| s.loading = false);
                 return;
             }
             let mut s = StateLoad { of: Some(id), ..StateLoad::default() };
@@ -845,9 +963,9 @@ impl Manager {
 
     /// The chosen app's log tail (amui's `loadLogs`): on demand and on the
     /// follow poll; `source` picks another log.
-    pub fn load_logs(mut self, key: &str, source: Option<LogSource>) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
-        let src = source.unwrap_or(*self.log_source.peek());
+    pub fn load_logs(self, key: &str, source: Option<LogSource>) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
+        let src = source.unwrap_or(*self.log_source.read_untracked());
         self.log_source.set(src);
         self.log_loading.set(true);
         self.log_error.set(None);
@@ -855,7 +973,7 @@ impl Manager {
         spawn_forever(async move {
             let raw = off(move || p.logs().map(|l| proc::read_logs(&l, src, 500))).await;
             self.log_loading.set(false);
-            if self.selected.peek().as_deref() != Some(id.as_str()) {
+            if self.selected.read_untracked().as_deref() != Some(id.as_str()) {
                 return;
             }
             let raw = raw.unwrap_or(proc::RawLog { missing: true, ..Default::default() });
@@ -878,8 +996,10 @@ impl Manager {
     }
 
     /// Call a cell's method on the running app (amui's `dispatch`).
-    pub fn dispatch(mut self, key: &str, cell: &str, method: &str, args: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned().filter(|p| p.running.is_some()) else { return };
+    pub fn dispatch(self, key: &str, cell: &str, method: &str, args: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned().filter(|p| p.running.is_some()) else {
+            return;
+        };
         let (words, _) = match call_words(&p.name, cell, method, args) {
             Ok(c) => c,
             Err(e) => return self.dispatch_msg.set(Some(e)),
@@ -907,7 +1027,7 @@ impl Manager {
     /// Start, stop or restart the app (amui's `start`, `stop`, `restart`):
     /// its own verb says how it went; the list is read again after.
     pub fn lifecycle(mut self, key: &str, what: &'static str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
         if self.refuse_self(&p) {
             return;
         }
@@ -922,7 +1042,7 @@ impl Manager {
             _ => "starting",
         };
         self.action_msg.set(Some(format!("{ing} {}…", p.name)));
-        let cur = self.detail.peek().clone();
+        let cur = self.detail.read_untracked().clone();
         if what == "stop"
             && let Some(mut d) = cur.filter(|d| d.id == p.id)
         {
@@ -930,8 +1050,19 @@ impl Manager {
             self.detail.set(Some(d));
         }
         let (verb, cwd) = self.verb_for(p.instance.as_deref(), p.path.as_deref());
+        let id = p.id.clone();
         spawn_forever(async move {
             let r = off(move || verb(words, cwd)).await;
+            // That process is gone: none of its readings stay (amui's stop).
+            let mine = self.detail.read_untracked().clone().filter(|d| d.id == id);
+            if let Some(mut d) = mine.filter(|_| r.is_ok() && what != "start") {
+                if what == "stop" {
+                    d.running = false;
+                }
+                (d.cpu_pct, d.cpu_mark, d.mem_mb, d.uptime_s, d.connections) = (None, None, None, None, None);
+                self.detail.set(Some(d));
+                self.clear_live();
+            }
             self.action_msg.set(Some(match r {
                 Ok(t) if t.is_empty() => format!("{what}: done"),
                 Ok(t) => t,
@@ -942,37 +1073,40 @@ impl Manager {
     }
 
     /// Run task `label` in the app's project (amui's `runTask`): its
-    /// output captured; cancellable, and never longer than 5 min.
-    pub fn run_task(mut self, key: &str, label: &str) {
-        let Some(p) = scan::find(&self.projects.peek(), key).cloned() else { return };
-        let (Some(dir), Some(mut words)) = (p.path.clone(), task_words(label, &p.name)) else {
+    /// output shown as it comes; cancellable, and never longer than 5 min.
+    pub fn run_task(self, key: &str, label: &str) {
+        let Some(p) = scan::find(&self.projects.read_untracked(), key).cloned() else { return };
+        let (Some(dir), Some((cargo, mut words))) = (p.path.clone(), task_of(label, &p.name, &p.meta)) else {
             return self
                 .task
                 .set(Task { output: format!("{label}: {} has no project folder here", p.name), ..Task::default() });
         };
-        if self.task.peek().running.is_some() {
+        if self.task.read_untracked().running.is_some() {
             return;
         }
-        if let Some(i) = &p.instance {
+        if let Some(i) = p.instance.as_ref().filter(|_| !cargo) {
             words.splice(1..1, ["--instance".to_string(), i.clone()]);
         }
-        let shown = format!("$ ax {}", words.join(" "));
+        let shown = format!("$ {} {}", if cargo { "cargo" } else { "ax" }, words.join(" "));
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel.set(Some(cancel.clone()));
+        *self.cancel.write() = Some(cancel.clone());
+        let out = Arc::new(Mutex::new(Vec::new()));
+        *self.task_out.write() = Some((out.clone(), shown.clone()));
         self.task.set(Task {
             running: Some(label.into()),
             output: format!("{shown}\n(running — cancellable)…"),
             code: None,
         });
-        let program = self.setup().program;
+        let program = if cargo { PathBuf::from("cargo") } else { self.setup().program };
         spawn_forever(async move {
-            let r = off(move || proc::run_task(&dir, &program, &words, &cancel, proc::TASK_TIMEOUT)).await;
+            let r = off(move || proc::run_task(&dir, &program, &words, &cancel, proc::TASK_TIMEOUT, &out)).await;
+            *self.task_out.write() = None;
             let tag = match r.ended {
                 "cancelled" => "cancelled".to_string(),
                 "timeout" => "timed out (5 min cap)".into(),
                 _ => r.code.map_or("ended by a signal".into(), |c| format!("exit {c}")),
             };
-            self.cancel.set(None);
+            *self.cancel.write() = None;
             self.task.set(Task {
                 running: None,
                 output: format!("{shown}\n{}\n\n[{tag}]", r.output),
@@ -981,29 +1115,40 @@ impl Manager {
         });
     }
 
+    /// The running task's output so far, shown (amui streams it).
+    pub fn task_progress(self) {
+        let Some((out, shown)) = self.task_out.read_untracked().clone() else { return };
+        let text = String::from_utf8_lossy(&out.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
+        let now = format!("{shown}\n{text}");
+        if self.task.read_untracked().running.is_some() && self.task.read_untracked().output != now && !text.is_empty()
+        {
+            self.task.update(|t| t.output = now);
+        }
+    }
+
     /// Stop the running task (amui's `cancelTask`).
     pub fn cancel_task(&self) {
-        if let Some(c) = self.cancel.peek().as_ref() {
+        if let Some(c) = self.cancel.read_untracked().as_ref() {
             c.store(true, Ordering::Relaxed);
         }
     }
 
     /// The enclosing repo's tree for the Codebase tab (amui's `loadCodebase`).
-    pub fn load_codebase(mut self) {
-        let Some(root) = self.files.peek().repo.clone() else { return };
-        let id = self.selected.peek().clone();
-        self.files.with_mut(|f| f.repo_loading = true);
+    pub fn load_codebase(self) {
+        let Some(root) = self.files.read_untracked().repo.clone() else { return };
+        let id = self.selected.read_untracked().clone();
+        self.files.update(|f| f.repo_loading = true);
         spawn_forever(async move {
             let (tree, cut) = off(move || proc::list_files(&root)).await;
-            if *self.selected.peek() != id {
+            if *self.selected.read_untracked() != id {
                 return;
             }
-            self.files.with_mut(|f| (f.repo_tree, f.repo_truncated, f.repo_loading) = (Some(tree), cut, false));
+            self.files.update(|f| (f.repo_tree, f.repo_truncated, f.repo_loading) = (Some(tree), cut, false));
         });
     }
 
     /// Open a file in the viewer (amui's `openFile`): read-only, guarded.
-    pub fn open_file(mut self, base: PathBuf, rel: String) {
+    pub fn open_file(self, base: PathBuf, rel: String) {
         spawn_forever(async move {
             let (b, r) = (base.clone(), rel.clone());
             let read = off(move || proc::read_file(&b, &r)).await;
@@ -1016,10 +1161,10 @@ impl Manager {
     }
 
     /// Open where cell `cell` is defined (amui's `openCellSource`).
-    pub fn open_cell_source(mut self, cell: &str) {
-        let f = self.files.peek().clone();
+    pub fn open_cell_source(self, cell: &str) {
+        let f = self.files.read_untracked().clone();
         let Some(base) = f.repo.or(f.runtime.map(|r| r.root)) else { return };
-        let (cell, id) = (cell.to_string(), self.selected.peek().clone());
+        let (cell, id) = (cell.to_string(), self.selected.read_untracked().clone());
         self.open.set(None);
         spawn_forever(async move {
             let b = base.clone();
@@ -1027,7 +1172,7 @@ impl Manager {
             let found =
                 off(move || proc::find_cell_source(&b, &c).map(|(rel, line)| (proc::read_file(&b, &rel), rel, line)))
                     .await;
-            if *self.selected.peek() != id {
+            if *self.selected.read_untracked() != id {
                 return;
             }
             self.open.set(Some(match found {
@@ -1050,7 +1195,7 @@ impl Manager {
     }
 
     /// Make a new app (amui's `create`): `ax create` in `~/aio-apps`.
-    pub fn create(mut self, raw: &str) {
+    pub fn create(self, raw: &str) {
         let name = slug(raw);
         if name.is_empty() {
             return self.create_msg.set(Some("enter a name".into()));
@@ -1077,13 +1222,17 @@ impl Manager {
 }
 
 /// The live fields of `d` from readings `dg` and the process's `ps`; where
-/// `/proc` can't tell (macOS, Windows), the app's own `health.json`.
+/// `/proc` can't tell (macOS, Windows), the app's own `health.json` (its
+/// CPU from two of its readings).
 fn fill(d: &mut Detail, dg: &Diag, ps: Option<proc::Stats>) {
     let h = dg.health.as_ref();
     if d.status.as_deref() != Some("stopping") {
         d.status = Some(status_of(h));
     }
-    d.cpu_pct = ps.map(|p| p.cpu_pct).or(d.cpu_pct);
+    let mark = h.and_then(|h| Some((h["cpuMs"].as_u64()?, h["updatedAt"].as_i64()?)));
+    let between = mark.and_then(|m| cpu_between(d.cpu_mark, m));
+    d.cpu_mark = mark.or(d.cpu_mark);
+    d.cpu_pct = ps.map(|p| p.cpu_pct).or(between).or(d.cpu_pct);
     d.mem_mb =
         ps.map(|p| p.mem_mb).or(h.and_then(|h| h["memory"]["rssBytes"].as_f64()).map(|b| (b / 1_048_576.0).round()));
     d.aio = h.and_then(|h| h["aio"].as_str().map(String::from)).or(d.aio.take());
@@ -1108,17 +1257,48 @@ fn sample(h: &mut Hist, d: &Detail, dg: &Diag) {
     keep(&mut h.pushes, pushes);
 }
 
-/// The warnings and errors of `ax errors`, newest first (pure).
-pub fn errors_of(text: &str) -> Vec<String> {
-    let mut v: Vec<String> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.contains(" ERROR ") || l.contains(" WARN ") || l.contains("panicked"))
-        .map(String::from)
+/// One warning or error of the app (amui's structured errors): its line,
+/// and what its event goes on with (a panic's message, a backtrace).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Problem {
+    pub head: LogLine,
+    pub more: Vec<String>,
+}
+
+/// The newest warnings and errors of `ax errors --json`, newest first,
+/// at most 6, the failed build first (pure).
+pub fn errors_of(v: &Value) -> Vec<Problem> {
+    let mut all: Vec<Problem> = v["starts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["lines"].as_array().into_iter().flatten().filter_map(Value::as_str))
+        .map(|e| {
+            let mut lines = e.lines();
+            let head = parse_log_line(lines.next().unwrap_or_default());
+            let more = lines.map(|l| l.split_once(' ').map_or(l, |(_, r)| r).trim().to_string()).collect();
+            Problem { head, more }
+        })
         .collect();
-    v.reverse();
-    v.truncate(6);
-    v
+    all.reverse();
+    if let Some(b) = v["build"].as_str() {
+        let mut lines = b.lines().map(String::from);
+        let msg = lines.next().unwrap_or_default();
+        let head =
+            LogLine { level: "error".into(), scope: "build".into(), raw: msg.clone(), msg, ..LogLine::default() };
+        all.insert(0, Problem { head, more: lines.take(8).collect() });
+    }
+    all.truncate(6);
+    all
+}
+
+/// What runs as `pid` and where (app home `home`): `/proc`, else what the
+/// app wrote in its `health.json` while that pid (macOS, Windows).
+pub fn paths_of(pid: u32, home: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+    match proc::process_paths(pid) {
+        (None, None) => home_json(home, "health.json").map_or((None, None), |h| proc::health_paths(pid, &h)),
+        found => found,
+    }
 }
 
 /// The schedules of `ax schedules --json`, one line each (pure).
@@ -1150,6 +1330,7 @@ pub fn listed<'a>(all: &'a [Project], q: &str, show_all: bool, selected: Option<
                 show_all || p.running.is_some() || selected == Some(p.id.as_str())
             } else {
                 p.name.to_lowercase().contains(&q)
+                    || p.meta.name.to_lowercase().contains(&q)
                     || p.path.as_ref().is_some_and(|d| d.to_string_lossy().to_lowercase().contains(&q))
             }
         })

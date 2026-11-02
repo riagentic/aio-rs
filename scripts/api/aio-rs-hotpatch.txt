@@ -1,0 +1,45 @@
+aio_hotpatch::AddressHasher(_)
+aio_hotpatch::HotFn::call: fn call(&mut self, args: A) -> <F as >::Return
+aio_hotpatch::HotFn::current: const fn current(f: F) -> Self
+aio_hotpatch::HotFunction::Real: type
+aio_hotpatch::HotFunction::Return: type
+aio_hotpatch::HotFunction::call_as_ptr: unsafe fn call_as_ptr(&mut self, args: Args) -> <Self as >::Return
+aio_hotpatch::HotFunction::call_it: fn call_it(&mut self, args: Args) -> <Self as >::Return
+aio_hotpatch::JumpTable.aslr_reference: u64
+aio_hotpatch::JumpTable.ifunc_count: u64
+aio_hotpatch::JumpTable.lib: std::path::PathBuf
+aio_hotpatch::JumpTable.map: AddressMap
+aio_hotpatch::JumpTable.new_base_address: u64
+aio_hotpatch::PatchError::Dlopen(String)
+aio_hotpatch::apply_patch: unsafe fn apply_patch(table: JumpTable) -> Result<(), PatchError>
+aio_hotpatch::aslr_reference: fn aslr_reference() -> usize
+aio_hotpatch::get_jump_table: unsafe fn get_jump_table() -> Option<&'static JumpTable>
+aio_hotpatch::register_handler: fn register_handler(handler: std::sync::Arc<dyn Fn() + Send + Sync + 'static>)
+enum aio_hotpatch::PatchError
+impl Clone for AddressHasher
+impl Clone for JumpTable
+impl Clone for PatchError
+impl Copy for AddressHasher
+impl Debug for AddressHasher
+impl Debug for JumpTable
+impl Debug for PatchError
+impl Default for AddressHasher
+impl Display for PatchError
+impl Eq for AddressHasher
+impl Eq for PatchError
+impl Error for PatchError
+impl Hasher for AddressHasher
+impl PartialEq for AddressHasher
+impl PartialEq for JumpTable
+impl PartialEq for PatchError
+impl Serialize for JumpTable
+impl StructuralPartialEq for AddressHasher
+impl StructuralPartialEq for JumpTable
+impl StructuralPartialEq for PatchError
+impl<'de> Deserialize<'de> for JumpTable
+mod aio_hotpatch
+struct aio_hotpatch::AddressHasher
+struct aio_hotpatch::HotFn<A, M, F: HotFunction<A, M>>
+struct aio_hotpatch::JumpTable
+trait aio_hotpatch::HotFunction<Args, Marker>
+type aio_hotpatch::AddressMap = std::collections::HashMap<u64, u64, std::hash::BuildHasherDefault<AddressHasher>>

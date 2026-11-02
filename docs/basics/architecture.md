@@ -9,10 +9,10 @@ methods, effects, views and the log.
 ```text
  ┌──────────────────────────── the app's process (Rust) ─────────────────────────────┐
  │                                                                                   │
- │  views (Dioxus) ──act!──▶ cells: state + methods ◀── effects, schedules (aio::rt) │
+ │  views (aio::ui) ──act!──▶ cells: state + methods ◀── effects, schedules (aio::rt) │
  │     ▲        part()          │       ▲                                            │
  │     │                        │       └── doors: Handle, local door (ax, peers),   │
- │     │ re-render              ▼           /ws for synced copies (mode server)      │
+ │     │ holes update           ▼           /ws for synced copies (mode server)      │
  │     │               the store: state.db (snapshots + the event log, SQLite)       │
  │     │                                                                             │
  └─────┼─────────────────────────────────────────────────────────────────────────────┘
@@ -28,7 +28,7 @@ methods, effects, views and the log.
   process. Nothing else writes a cell; everything else calls a method
   through a door.
 - **The page only draws.** On the desktop, the view tree lives in Rust
-  (`dioxus-liveview`), and the shared Electron runtime renders it from DOM
+  (air's, behind `aio::ui`), and the shared Electron runtime renders it from DOM
   edits sent over a private socket (a 0700 folder, loaded from
   `aio://app`). The page has no Node, no network and no key.
 - **A synced copy is a cell too.** A window in `client` mode, a browser
@@ -44,16 +44,17 @@ methods, effects, views and the log.
 3. `Ok`: the event (method, arguments, caller, time, the ids and random
    numbers used) and the new state commit in one SQLite transaction
    (coalesced for `#[coalesce]` methods, [persistence](../persistence/README.md)).
-4. After the commit: views whose fields changed re-render, synced copies
-   get a patch, effects the call asked for start, listeners and
-   `listens_to` reactions run.
+   `listens_to` reactions run inside that commit: their calls commit in
+   the same transaction.
+4. After the commit: the views' holes that read a changed field run again, synced copies
+   get a patch, effects the call asked for start, listeners run.
 5. An effect's result comes back as a call, so it goes through 1-4 too.
 
 ## Where each part of the code runs
 
 | Code | Runs | It may | What surprises people |
 |---|---|---|---|
-| a component body (`#[component] fn`) | in the app's process (desktop, Android), or as wasm in the page (web build) | read cells (`part`, `name()`), keep local state (`use_signal`) | only reads made while it renders subscribe; a read in a handler doesn't |
+| a component body (`#[component] fn`) | in the app's process (desktop, Android), or as wasm in the page (web build) | read cells (`part`, `name()`), keep local state (`signal`) | only reads made while it renders subscribe; a read in a handler doesn't |
 | a handler (`onclick: move \|_\| ..`) | the same, after the render | call methods (`act!`), set signals, spawn | a refusal gives `None` and is logged; check input before calling |
 | a method (`pub fn m(&mut self, ..)`) | where the cell lives; on a synced copy **also** locally, as a prediction | change `self`, refuse, ask for effects and schedules, read `cx` | it may run twice (the copy's prediction, then the server): no I/O, no clock, no randomness but `cx` ([methods](../state/cells.md)) |
 | an async method (`pub async fn`) | split at each `let x: T = io.await;`: the parts are methods, each await an effect | everything a method may, plus I/O in the awaited futures | each await is cut off after `aio::effect::CALL_CEILING` (30 s) unless `#[long]` |
@@ -129,9 +130,9 @@ The items of `aio`, grouped (the full list: [API map](../reference/api.md)):
 | another app on this machine | `aio::peer::Peer` | [sync](../state/sync.md#other-apps-other-machines) |
 | an aio app | `aio::compat` (feature `compat`) | [wire](../migration/wire.md) |
 
-There is no hook on every call (aio's `beforeReduce`, `onAction`): a rule
-is an invariant or an access rule on the cell, and an observer is a
-listener or `h.events()`.
+A rule on every call (aio's `beforeReduce`) is `aio::before_call` (or an
+invariant, an access rule on the cell); an observer of every call (aio's
+`onAction`) is `aio::on_action`, of one cell a listener or `h.events()`.
 
 ## The shapes an app takes
 
@@ -163,7 +164,7 @@ mode = "client-server"   # its own window, and served to others
 [server]
 listen = "0.0.0.0:8100"
 tls = true
-pairing = true           # ax pin + ax pair hand the key to a phone
+pairing = true           # ax pair hands the key to a phone
 ```
 
 - The same app built with `mode = "client"` and `[client] server` is the
@@ -288,7 +289,6 @@ over to the first).
 - No `am where`: aio answers which context a file runs in from its module
   graph. In aio-rs the answer is the table above, and the compiler
   enforces the one boundary that matters (`cfg(target_arch = "wasm32")`).
-- No `beforeReduce` / `onAction` hook on every call (see extension points).
 - No module-boundary gate inside `aio-rs`: the crate split and Cargo
   features are the boundaries.
 

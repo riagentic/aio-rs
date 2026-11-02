@@ -10,7 +10,7 @@ its own window a fourth:
 | [`[app] ui = "browser"`](#the-ui-in-the-system-browser) | a client-server app's UI in the system browser instead of a window | `aio.toml` |
 | [Embedded pages](#embedded-pages) | someone else's site in a box of a view, or in a child window | `aio::kit::Browser`, `aio_shell::open_window` |
 
-The views are the same Dioxus components everywhere
+The views are the same `aio::ui` components everywhere
 ([views](../ui/views.md)); what changes is where the cells live.
 
 ## The web build
@@ -84,8 +84,11 @@ new user ([auth](../auth/README.md)).
 
 ### What a browser leaves out
 
-The store's history, time travel, files, blobs, SQL tables, the server,
-schedules that outlive the page and anything native. A page has no log
+The store's history, time travel, files, blobs, SQL tables, the server
+and anything native. A page cell's schedules (`cx.after`, `every`, `at`,
+`cron`, `#[every]`, `#[cron]`) run on the page's timer while it is open and
+are kept with its state, so a reload keeps them and a missed one fires
+once, as natively; its `#[ttl]` answers are kept as natively. A page has no log
 files: `aio::info!` and its kin write to the console (`aio::web::log`).
 `aio_shell::page` (dialogs, print) is the desktop's; use the browser's
 own `<input type="file">` and `window.print()` in a page.
@@ -145,12 +148,12 @@ itself over its socket; a link that drops shows `offline` and is retried.
 ```rust,no_run
 use aio::kit::{GuestEvent, Go, go};
 use aio::kit::Browser;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Reader() -> Element {
-    let mut at = use_signal(|| "https://example.org/".to_string());
-    let mut title = use_signal(String::new);
+fn Reader() -> View {
+    let at = signal(|| "https://example.org/".to_string());
+    let title = signal(String::new);
     rsx! {
         nav {
             button { onclick: move |_| go("reader", Go::Back), "Back" }
@@ -232,14 +235,45 @@ any site, never the app's scheme or a file); `size` defaults to 1100 ×
   `origins` set, or in an island's sandboxed iframe
   ([islands](../ui/islands.md)).
 
+## The dev page's console
+
+Under `ax dev <app> --web` the page's console comes to `ax dev`'s output,
+as aio's client log forwarding did: every level (`console.log` is
+`info`), uncaught errors (`[uncaught]`) and refused promises (`[unhandled
+rejection]`), each line cut at 4 KB, sent in batches to the dev server's
+`/aio-dev/log`; past 200 lines waiting the rest are counted and the count
+said. The page's own console still shows them. A release page sends nothing.
+
+```text
+ax dev: [page] warn: low disk
+ax dev: [page] error: [uncaught] TypeError: x is undefined
+```
+
+## Notifications
+
+A method's `cx.tell(Tell::Notify { .. })` shows in a web build as the
+browser's own notification, with the app's icon (`icon-192.png`). A
+browser grants notifications only from a user gesture: the first tell asks,
+and one refused for lack of a gesture (or blocked in the site's settings)
+is said once on the console with the fix: ask from a click, an "Enable
+alerts" button whose `onclick` calls `aio::web::notify::request_permission()`
+(a wasm32 build's).
+
+A click on a notification brings the page forward and, with `route`, goes
+there through `aio::web::notify::on_click(go)` (the app's `router!` `go`).
+Where a page may not make a notification itself (Chrome on Android) the
+app's service worker shows it. `aio::tell::show_with(f)` set before
+`aio::web::launch` replaces all of this.
+
 ## Gaps
 
 - The browser's address bar and Back don't follow the app's routes in the
   web build ([routing](../ui/routing.md#common-mistakes)).
 - A page's copy has no time travel, history or blobs.
-- No forwarding of a web build's console to the server's log, as aio's
-  client log forwarding does: a page's lines stay in its console. (The
-  desktop window's lines do reach the app's log.)
+- A page's console reaches a log only under `ax dev --web` (its lines in
+  `ax dev`'s output, [the dev page](#the-dev-pages-console)); a release
+  page's lines stay in its console, where aio forwarded them in a release
+  too. (The desktop window's lines do reach the app's log.)
 - `Browser` exposes `go` and the events above, not every `<webview>`
   method (no `executeJavaScript`, `insertCSS` or DevTools of the guest).
 - `Browser` is Electron's `<webview>`: a desktop window's only, not a

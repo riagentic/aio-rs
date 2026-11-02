@@ -5,7 +5,7 @@
 //! A common subset: headings, bold, italic, code, fences, links, images,
 //! lists, quotes, rules, paragraphs. Linear in its input, any input.
 use super::join;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 
 /// Inline content.
 #[derive(Clone, Debug, PartialEq)]
@@ -281,71 +281,66 @@ fn blocks(src: &str, depth: usize) -> Vec<Block> {
     out
 }
 
-fn inlines(xs: &[Inline]) -> Element {
-    rsx! {
-        for x in xs {
-            match x {
-                Inline::Text(s) => rsx! { "{s}" },
-                Inline::Code(s) => rsx! { code { class: "aio-md__code", "{s}" } },
-                Inline::Strong(c) => rsx! { strong { {inlines(c)} } },
-                Inline::Em(c) => rsx! { em { {inlines(c)} } },
-                Inline::Link { href, external: true, label } => rsx! {
-                    a { href: "{href}", class: "aio-md__a", target: "_blank", rel: "noopener noreferrer", {inlines(label)} }
-                },
-                Inline::Link { href, label, .. } => rsx! { a { href: "{href}", class: "aio-md__a", {inlines(label)} } },
-                Inline::Image { src, alt } => rsx! { img { src: "{src}", alt: "{alt}", class: "aio-md__img" } },
-                Inline::Break => rsx! { br {} },
-            }
-        }
+fn inlines(xs: &[Inline]) -> View {
+    let views: Vec<View> = xs.iter().cloned().map(inline_view).collect();
+    rsx! { {views} }
+}
+
+fn inline_view(x: Inline) -> View {
+    match x {
+        Inline::Text(s) => rsx! { "{s}" },
+        Inline::Code(s) => rsx! { code { class: "aio-md__code", "{s}" } },
+        Inline::Strong(c) => rsx! { strong { {inlines(&c)} } },
+        Inline::Em(c) => rsx! { em { {inlines(&c)} } },
+        Inline::Link { href, external: true, label } => rsx! {
+            a { href: "{href}", class: "aio-md__a", target: "_blank", rel: "noopener noreferrer", {inlines(&label)} }
+        },
+        Inline::Link { href, label, .. } => rsx! { a { href: "{href}", class: "aio-md__a", {inlines(&label)} } },
+        Inline::Image { src, alt } => rsx! { img { src: "{src}", alt: "{alt}", class: "aio-md__img" } },
+        Inline::Break => rsx! { br {} },
     }
 }
 
-fn render(bs: &[Block]) -> Element {
-    rsx! {
-        for b in bs {
-            match b {
-                Block::Heading(1, c) => rsx! { h1 { {inlines(c)} } },
-                Block::Heading(2, c) => rsx! { h2 { {inlines(c)} } },
-                Block::Heading(3, c) => rsx! { h3 { {inlines(c)} } },
-                Block::Heading(4, c) => rsx! { h4 { {inlines(c)} } },
-                Block::Heading(5, c) => rsx! { h5 { {inlines(c)} } },
-                Block::Heading(_, c) => rsx! { h6 { {inlines(c)} } },
-                Block::Paragraph(c) => rsx! { p { class: "aio-md__p", {inlines(c)} } },
-                Block::Fence { lang, text } => rsx! {
-                    pre { class: "aio-md__pre",
-                        code { "data-lang": (!lang.is_empty()).then(|| lang.clone()), "{text}" }
-                    }
-                },
-                Block::Quote(c) => rsx! { blockquote { class: "aio-md__quote", {render(c)} } },
-                Block::List { ordered: true, items } => rsx! {
-                    ol { class: "aio-md__list",
-                        for it in items {
-                            li { {inlines(it)} }
-                        }
-                    }
-                },
-                Block::List { items, .. } => rsx! {
-                    ul { class: "aio-md__list",
-                        for it in items {
-                            li { {inlines(it)} }
-                        }
-                    }
-                },
-                Block::Rule => rsx! { hr { class: "aio-md__hr" } },
+fn render(bs: &[Block]) -> View {
+    let views: Vec<View> = bs.iter().cloned().map(block_view).collect();
+    rsx! { {views} }
+}
+
+fn items(items: Vec<Vec<Inline>>) -> View {
+    let views: Vec<View> = items.into_iter().map(|it| rsx! { li { {inlines(&it)} } }).collect();
+    rsx! { {views} }
+}
+
+fn block_view(b: Block) -> View {
+    match b {
+        Block::Heading(1, c) => rsx! { h1 { {inlines(&c)} } },
+        Block::Heading(2, c) => rsx! { h2 { {inlines(&c)} } },
+        Block::Heading(3, c) => rsx! { h3 { {inlines(&c)} } },
+        Block::Heading(4, c) => rsx! { h4 { {inlines(&c)} } },
+        Block::Heading(5, c) => rsx! { h5 { {inlines(&c)} } },
+        Block::Heading(_, c) => rsx! { h6 { {inlines(&c)} } },
+        Block::Paragraph(c) => rsx! { p { class: "aio-md__p", {inlines(&c)} } },
+        Block::Fence { lang, text } => rsx! {
+            pre { class: "aio-md__pre",
+                code { "data-lang": (!lang.is_empty()).then(|| lang.clone()), "{text}" }
             }
-        }
+        },
+        Block::Quote(c) => rsx! { blockquote { class: "aio-md__quote", {render(&c)} } },
+        Block::List { ordered: true, items: it } => rsx! { ol { class: "aio-md__list", {items(it.clone())} } },
+        Block::List { items: it, .. } => rsx! { ul { class: "aio-md__list", {items(it.clone())} } },
+        Block::Rule => rsx! { hr { class: "aio-md__hr" } },
     }
 }
 
 /// `source` as safe elements.
 #[component]
 pub fn Markdown(
-    #[props(into)] source: String,
-    #[props(default, into)] class: String,
+    #[props(into)] source: Prop<String>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
+) -> View {
     rsx! {
-        div { class: join("aio-md", &class), ..attributes, {render(&parse(&source))} }
+        div { class: join("aio-md", &class.get()), ..attributes, {source.with(|s| render(&parse(s)))} }
     }
 }
 

@@ -1,5 +1,5 @@
-// The board's view: painted on the server, then drawn in the page.
-use dioxus::prelude::*;
+// The board's view, drawn in the page.
+use aio::ui::prelude::*;
 
 aio::client!(Board, board);
 
@@ -7,18 +7,19 @@ aio::client!(Board, board);
 const DOUBLE: aio::kit::Island =
     aio::kit::Island::js("return (el, p, emit) => { el.textContent = 'island ' + p.n; emit(p.n * 2); };");
 
-fn view() -> Element {
+fn view() -> View {
     use_live();
-    let b = board();
-    aio::head::use_head(
-        aio::head::Head::title(format!("{} items", b.items.len())).meta(&[("name", "description"), ("content", "board")]),
-    );
-    let link = if use_status()().online { "online" } else { "offline" };
-    let mut doubled = use_signal(|| 0i64);
+    let items = part(|b| &b.items);
+    aio::head::use_head(move || {
+        aio::head::Head::title(format!("{} items", items.with(Vec::len))).meta(&[("name", "description"), ("content", "board")])
+    });
+    let status = use_status();
+    let link = memo(move || if status.get().online { "online" } else { "offline" });
+    let doubled = signal(|| 0i64);
     rsx! {
         ul { id: "items",
-            for i in b.items.iter() {
-                li { "{i}" }
+            for (k, i) in items.get().into_iter().enumerate() {
+                li { key: "{k}", "{i}" }
             }
         }
         p { id: "link", "{link}" }
@@ -27,7 +28,7 @@ fn view() -> Element {
         aio::kit::WebIsland {
             id: "island",
             island: DOUBLE,
-            props: aio::serde_json::json!({ "n": b.items.len() }),
+            props: aio::serde_json::json!({ "n": items.with(Vec::len) }),
             onevent: move |v: i64| doubled.set(v),
         }
         p { id: "doubled", "{doubled}" }

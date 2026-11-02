@@ -42,14 +42,19 @@ pub(crate) const PREVIOUS: &str = "Start the previous version";
 
 /// How the windows look: the app's colours (`splash::colors`: `[light,
 /// dark]`, each background, text, bar, track) and the middle of its window
-/// as last placed, in Electron's screen points, to open over it.
+/// as last placed, in Electron's screen points, to open over it. Its `icon`:
+/// the app's PNG, on each window (title bar, taskbar, Dock).
 pub(crate) struct Look<'a> {
     pub(crate) colors: &'a [[String; 4]; 2],
     pub(crate) at: Option<(i32, i32)>,
+    /// The splash shown while Electron downloads (`[build.splash]`): its PNG
+    /// and its size on screen in px; unset: the plain download window.
+    pub(crate) image: Option<(&'a [u8], (u32, u32))>,
+    pub(crate) icon: Option<&'a Path>,
 }
 
 /// `#rgb` as `#rrggbb` (the helpers read six digits).
-fn hex6(c: &str) -> String {
+pub(crate) fn hex6(c: &str) -> String {
     match c.strip_prefix('#') {
         Some(h) if h.len() == 3 => h.chars().fold("#".into(), |s, x| format!("{s}{x}{x}")),
         _ => c.into(),
@@ -60,6 +65,10 @@ impl Look<'_> {
     /// `AIO_DLG_LIGHT` / `AIO_DLG_DARK`: `"#bg #text #bar #track"`.
     pub(crate) fn env(&self) -> [String; 2] {
         self.colors.clone().map(|c| c.iter().map(|x| hex6(x)).collect::<Vec<_>>().join(" "))
+    }
+    /// `AIO_DLG_ICON`: the icon's path, or empty (the helper's own).
+    pub(crate) fn icon(&self) -> &std::ffi::OsStr {
+        self.icon.map_or("".as_ref(), Path::as_os_str)
     }
     /// `AIO_DLG_AT`: `"x y"`, or empty (the screen's middle).
     pub(crate) fn at(&self) -> String {
@@ -158,10 +167,66 @@ pub(crate) fn progress_line(pct: Option<u64>, detail: &str) -> String {
     format!("{pct}\t{}", detail.replace(['\r', '\n', '\t'], " "))
 }
 
-/// "Downloading Electron 44.9.3 — first start only · 45 / 110 MB".
-pub(crate) fn download_detail(version: &str, got: u64, total: Option<u64>) -> String {
+/// The app's `[build.download_window]` (`instance::start` sets it).
+pub(crate) static WORDS: std::sync::OnceLock<aio::config::DownloadWindow> = std::sync::OnceLock::new();
+
+/// The download window's words and colours: the app's, else aio's.
+pub(crate) fn words() -> &'static aio::config::DownloadWindow {
+    WORDS.get_or_init(Default::default)
+}
+
+/// The download window's words for app `cfg` (pure): its
+/// `[build.download_window]`, the line under the bar the splash's
+/// `download_text` when the splash draws the download, its `{version}`
+/// the app's (aio's `splashWithVersion`; the window's own is Electron's).
+pub(crate) fn words_of(cfg: &aio::config::Config, version: &str) -> aio::config::DownloadWindow {
+    let mut w = cfg.build.download_window.clone();
+    let splash = cfg.build.splash.as_ref().filter(|s| s.show != aio::config::SplashShow::Never);
+    if let Some(t) = splash.and_then(|s| s.download_text.as_deref()) {
+        w.text = Some(t.replace("{version}", version));
+    }
+    w
+}
+
+/// `t` with `{title}`, `{version}` and each of `more` filled (pure).
+fn fill(t: &str, title: &str, version: &str, more: &[(&str, &str)]) -> String {
+    let t = t.replace("{title}", title).replace("{version}", version);
+    more.iter().fold(t, |t, (k, v)| t.replace(&format!("{{{k}}}"), v))
+}
+
+/// The download window's heading: `w.heading`, else "Getting <title> ready".
+pub(crate) fn heading(w: &aio::config::DownloadWindow, title: &str, version: &str) -> String {
+    fill(w.heading.as_deref().unwrap_or("Getting {title} ready"), title, version, &[])
+}
+
+/// `colors` (`[light, dark]`, each background, text, bar, track) with the
+/// ones `w` sets, in both modes (pure).
+pub(crate) fn recolored(mut colors: [[String; 4]; 2], w: &aio::config::DownloadWindow) -> [[String; 4]; 2] {
+    for (i, c) in [&w.background, &w.color, &w.bar, &w.track].into_iter().enumerate() {
+        if let Some(c) = c {
+            colors[0][i] = c.clone();
+            colors[1][i] = c.clone();
+        }
+    }
+    colors
+}
+
+/// "Downloading Electron 44.9.3 — first start only · 45 / 110 MB", or the
+/// app's `text` with `{got}` and `{total}` (`?` while unknown).
+pub(crate) fn download_detail(
+    w: &aio::config::DownloadWindow,
+    title: &str,
+    version: &str,
+    got: u64,
+    total: Option<u64>,
+) -> String {
     let mb = |n: u64| format!("{:.0}", n as f64 / 1e6);
-    match total.filter(|t| *t > 0) {
+    let total = total.filter(|t| *t > 0);
+    if let Some(t) = &w.text {
+        let pct = total.map_or("?".into(), |t| (got.min(t) * 100 / t).to_string());
+        return fill(t, title, version, &[("got", &mb(got)), ("total", &total.map_or("?".into(), mb)), ("pct", &pct)]);
+    }
+    match total {
         Some(t) => format!("Downloading Electron {version} — first start only · {} / {} MB", mb(got), mb(t)),
         None => format!("Downloading Electron {version} — first start only · {} MB", mb(got)),
     }
@@ -169,8 +234,18 @@ pub(crate) fn download_detail(version: &str, got: u64, total: Option<u64>) -> St
 
 /// The question asked when the runtime could not be had. `download`: it
 /// failed coming down (then the connection is the advice), not on disk.
-pub(crate) fn failure_message(title: &str, version: &str, why: &str, download: bool) -> String {
+/// The app's `question` takes `{reason}`.
+pub(crate) fn failure_message(
+    w: &aio::config::DownloadWindow,
+    title: &str,
+    version: &str,
+    why: &str,
+    download: bool,
+) -> String {
     let why = why.lines().next().unwrap_or("").trim();
+    if let Some(q) = &w.question {
+        return fill(q, title, version, &[("reason", why)]);
+    }
     match download {
         true => format!(
             "{title} needs Electron {version} to open its window, and it could not be downloaded.\n\n{why}\n\n\
@@ -182,7 +257,6 @@ pub(crate) fn failure_message(title: &str, version: &str, why: &str, download: b
         ),
     }
 }
-
 /// `attempt` until it works, the user cancels (`Interrupted`) or, asked
 /// with the failure (`ask`), quits or takes the previous version (`back`
 /// starts it, then this start ends). An attempt's error says if it was the
@@ -200,7 +274,7 @@ pub(crate) fn retrying(
             return Err(e);
         }
         eprintln!("[aio] runtime: could not get Electron {version}: {e}");
-        match ask(&failure_message(title, version, &e.to_string(), download)) {
+        match ask(&failure_message(words(), title, version, &e.to_string(), download)) {
             Answer::Retry => eprintln!("[aio] runtime: retrying"),
             Answer::Quit => return Err(e),
             Answer::Previous => {
@@ -217,8 +291,9 @@ pub(crate) fn pango(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// The zenity / yad download window. yad: Cancel is its one button.
-pub(crate) fn zenity_progress_args(yad: bool, title: &str, heading: &str) -> Vec<String> {
+/// The zenity / yad download window. yad: Cancel is its one button;
+/// `cancel` false: none (closing the window still cancels).
+pub(crate) fn zenity_progress_args(yad: bool, title: &str, heading: &str, cancel: bool) -> Vec<String> {
     let mut a = vec![
         "--progress".into(),
         format!("--title={title}"),
@@ -227,9 +302,15 @@ pub(crate) fn zenity_progress_args(yad: bool, title: &str, heading: &str) -> Vec
         "--width=460".into(),
         "--auto-close".into(),
     ];
-    if yad {
-        a.push("--button=Cancel:1".into());
-    }
+    a.extend(
+        match (yad, cancel) {
+            (true, true) => Some("--button=Cancel:1"),
+            (true, false) => Some("--no-buttons"),
+            (false, true) => None,
+            (false, false) => Some("--no-cancel"),
+        }
+        .map(String::from),
+    );
     a
 }
 
@@ -385,7 +466,7 @@ impl Drop for Progress {
 }
 
 /// A fresh dir for one helper's files.
-fn helper_dir() -> io::Result<PathBuf> {
+pub(crate) fn helper_dir() -> io::Result<PathBuf> {
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("aio-dialog-{}-{at}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
@@ -408,7 +489,7 @@ fn osascript(script: &Path) -> Command {
 
 /// PowerShell, running the script `$env:AIO_PS_SCRIPT` names: read as a
 /// script block, so the execution policy treats it as a typed command.
-fn powershell(script: &Path) -> Command {
+pub(crate) fn powershell(script: &Path) -> Command {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let mut cmd = quiet(Command::new(Path::new(&root).join("System32/WindowsPowerShell/v1.0/powershell.exe")));
     cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden"])
@@ -433,11 +514,18 @@ impl Backend {
             Backend::Zenity { bin, yad } => {
                 let mut cmd = quiet(Command::new(bin));
                 if let Ok(d) = gtk_config(look) {
+                    // yad draws the splash above its bar; zenity has no image.
+                    if let Some((png, _)) = look.image.filter(|_| *yad)
+                        && std::fs::write(d.join("splash.png"), png).is_ok()
+                    {
+                        cmd.arg(format!("--image={}", d.join("splash.png").display()));
+                    }
                     cmd.env("XDG_CONFIG_HOME", &d);
                     css = Some(d);
                 }
                 let child = cmd
-                    .args(zenity_progress_args(*yad, title, heading))
+                    .args(zenity_progress_args(*yad, title, heading, words().cancel))
+                    .args(look.icon.map(|p| format!("--window-icon={}", p.display())))
                     .stdin(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn();
@@ -445,20 +533,32 @@ impl Backend {
                 (Some(child), Feed::Stdin(heading.into()))
             }
             Backend::Browser { opener } => {
-                (None, Feed::Page(crate::firstpage::Page::open(title, heading, opener, look.colors)?))
+                let image = look.image.map(|(png, _)| png);
+                (None, Feed::Page(crate::firstpage::Page::open(title, heading, opener, look.colors, image)?))
             }
             helper => {
                 let dir = helper_dir()?;
                 let (file, ack, pid) = (dir.join("progress"), dir.join("shown"), std::process::id().to_string());
                 std::fs::write(&file, progress_line(None, ""))?;
                 let [light, dark] = look.env();
+                // The splash above the bar: its file, and its size on screen.
+                let (image, image_size) = match look.image {
+                    Some((png, (w, h))) => {
+                        std::fs::write(dir.join("splash.png"), png)?;
+                        (dir.join("splash.png").display().to_string(), format!("{w} {h}"))
+                    }
+                    None => (String::new(), String::new()),
+                };
                 let spawned = if *helper == Backend::Cocoa {
                     std::fs::write(dir.join("progress.js"), [MAC_LOOK_JXA, MAC_PROGRESS_JXA].concat())?;
                     osascript(&dir.join("progress.js"))
+                        .env("AIO_DLG_ICON", look.icon())
                         .args([title, heading])
                         .arg(&file)
                         .arg(&ack)
                         .args([&pid, &light, &dark, &look.at()])
+                        .arg(if words().cancel { "1" } else { "0" })
+                        .args([&image, &image_size])
                         .spawn()
                 } else {
                     std::fs::write(dir.join("progress.ps1"), [WINDOWS_LOOK_PS, WINDOWS_PROGRESS_PS].concat())?;
@@ -471,6 +571,10 @@ impl Backend {
                         .env("AIO_DLG_LIGHT", &light)
                         .env("AIO_DLG_DARK", &dark)
                         .env("AIO_DLG_AT", look.at())
+                        .env("AIO_DLG_CANCEL", if words().cancel { "1" } else { "0" })
+                        .env("AIO_DLG_IMAGE", &image)
+                        .env("AIO_DLG_IMAGE_SIZE", &image_size)
+                        .env("AIO_DLG_ICON", look.icon())
                         .spawn()
                 };
                 match spawned {
@@ -496,7 +600,12 @@ impl Backend {
                 if let Some(d) = &css {
                     cmd.env("XDG_CONFIG_HOME", d);
                 }
-                let out = cmd.args(zenity_ask_args(*yad, title, message, previous)).stdout(Stdio::piped()).output();
+                let icon = look.icon.map(|p| format!("--window-icon={}", p.display()));
+                let out = cmd
+                    .args(zenity_ask_args(*yad, title, message, previous))
+                    .args(icon)
+                    .stdout(Stdio::piped())
+                    .output();
                 _ = css.map(std::fs::remove_dir_all);
                 out.map(|o| zenity_answer(*yad, o.status.code(), &String::from_utf8_lossy(&o.stdout)))
             }
@@ -504,6 +613,7 @@ impl Backend {
                 let script = dir.join("ask.js");
                 let out = std::fs::write(&script, [MAC_LOOK_JXA, MAC_ASK_JXA].concat()).and_then(|()| {
                     osascript(&script)
+                        .env("AIO_DLG_ICON", look.icon())
                         .args([title, message, if previous { PREVIOUS } else { "" }, &light, &dark, &look.at()])
                         .stdout(Stdio::piped())
                         .output()
@@ -522,13 +632,14 @@ impl Backend {
                         .env("AIO_DLG_LIGHT", &light)
                         .env("AIO_DLG_DARK", &dark)
                         .env("AIO_DLG_AT", look.at())
+                        .env("AIO_DLG_ICON", look.icon())
                         .status()
                 });
                 let answer = std::fs::read_to_string(&file).unwrap_or_default();
                 _ = std::fs::remove_dir_all(&dir);
                 ran.map(|_| said_answer(&answer))
             }),
-            Backend::Browser { opener } => crate::firstpage::Page::open(title, title, opener, look.colors)
+            Backend::Browser { opener } => crate::firstpage::Page::open(title, title, opener, look.colors, None)
                 .map(|p| p.ask(title, message, previous, crate::firstpage::OPEN_WITHIN)),
         };
         asked.unwrap_or_else(|e| {
@@ -542,7 +653,8 @@ impl Backend {
 /// text, sizes scaled by `AutoScaleMode`), and `Look $form` giving a form
 /// the app's colours (`AIO_DLG_LIGHT` / `AIO_DLG_DARK`, as Windows' app
 /// mode is light or dark) and its place over the app's window
-/// (`AIO_DLG_AT`, Electron's points, scaled to this screen's pixels).
+/// (`AIO_DLG_AT`, Electron's points, scaled to this screen's pixels) and its
+/// icon (`AIO_DLG_ICON`, a PNG).
 pub(crate) const WINDOWS_LOOK_PS: &str = r#"
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -564,6 +676,9 @@ function Look($form) {
   $form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
   $form.AutoScaleMode = 'Dpi'
   if ($bg) { $form.BackColor = $bg; $form.ForeColor = $fg }
+  if ($env:AIO_DLG_ICON) {
+    try { $form.Icon = [System.Drawing.Icon]::FromHandle((New-Object System.Drawing.Bitmap $env:AIO_DLG_ICON).GetHicon()) } catch {}
+  }
   if ($env:AIO_DLG_AT) {
     $form.StartPosition = 'Manual'
     $at = $env:AIO_DLG_AT.Split(' ')
@@ -605,13 +720,29 @@ $fl.Size = New-Object System.Drawing.Size(127, 6)
 $fl.BackColor = $(if ($bg) { $barc } else { [System.Drawing.SystemColors]::Highlight })
 $tr.Controls.Add($fl)
 # Cancel, the one button: it ends the download, as the window's close does.
-$c = New-Object System.Windows.Forms.Button
-$c.Text = 'Cancel'
-$c.Location = New-Object System.Drawing.Point(354, 96)
-$c.Size = New-Object System.Drawing.Size(88, 26)
-$c.Add_Click({ $f.Close() })
-$f.CancelButton = $c
-$f.Controls.AddRange(@($h, $d, $tr, $c))
+$f.Controls.AddRange(@($h, $d, $tr))
+if ($env:AIO_DLG_CANCEL -ne '0') {
+  $c = New-Object System.Windows.Forms.Button
+  $c.Text = 'Cancel'
+  $c.Location = New-Object System.Drawing.Point(354, 96)
+  $c.Size = New-Object System.Drawing.Size(88, 26)
+  $c.Add_Click({ $f.Close() })
+  $f.CancelButton = $c
+  $f.Controls.Add($c)
+}
+# The splash ([build.splash]) above it all: the window grows to hold it.
+if ($env:AIO_DLG_IMAGE) {
+  $iw, $ih = $env:AIO_DLG_IMAGE_SIZE.Split(' ') | ForEach-Object { [int]$_ }
+  $W = [Math]::Max(460, $iw)
+  foreach ($x in $f.Controls) { $x.Top += $ih }
+  $pic = New-Object System.Windows.Forms.PictureBox
+  $pic.SizeMode = 'Zoom'
+  $pic.Location = New-Object System.Drawing.Point([int](($W - $iw) / 2), 0)
+  $pic.Size = New-Object System.Drawing.Size($iw, $ih)
+  $pic.Image = [System.Drawing.Image]::FromFile($env:AIO_DLG_IMAGE)
+  $f.Controls.Add($pic)
+  $f.ClientSize = New-Object System.Drawing.Size($W, (138 + $ih))
+}
 Look $f
 $TW = $tr.Width
 $script:pulse = $true
@@ -701,7 +832,8 @@ $a = $(if ($f.Tag) { [string]$f.Tag } else { 'quit' })
 /// colours at argv i and i+1, light and dark, picked as the app's
 /// appearance is: `[bg, text, bar, track]` or null) and `place(win, at,
 /// W, H)` (over the app's window: `"x y"` in Electron's points, top-left
-/// origin; else the screen's middle).
+/// origin; else the screen's middle) and `icon(app)` (the app's, `AIO_DLG_ICON`,
+/// in the Dock).
 pub(crate) const MAC_LOOK_JXA: &str = r#"
 ObjC.import('Cocoa');
 ObjC.import('stdlib');
@@ -716,6 +848,12 @@ function look(argv, i) {
   const c = s.split(' ');
   return c.length === 4 ? c.map(col) : null;
 }
+function icon(app) {
+  const p = ObjC.unwrap($.NSProcessInfo.processInfo.environment.objectForKey('AIO_DLG_ICON'));
+  if (!p) return;
+  const img = $.NSImage.alloc.initWithContentsOfFile(p);
+  if (img && !img.isNil()) app.applicationIconImage = img;
+}
 function place(win, at, W, H) {
   const p = (at || '').split(' ').map(Number);
   if (p.length !== 2 || p.some(isNaN)) return win.center;
@@ -726,7 +864,8 @@ function place(win, at, W, H) {
 
 /// The download window over Cocoa. argv: title, heading, progress file,
 /// ack file, the app's pid, its colours (light, dark) and place
-/// ([`MAC_LOOK_JXA`]). Exit 3: the user closed it. The event loop is
+/// ([`MAC_LOOK_JXA`]), then `0` for no Cancel button, then the splash image
+/// and its size (`"w h"`), both empty for none. Exit 3: the user closed it. The event loop is
 /// run by hand: an NSTimer needs a target from ObjC.registerSubclass, which
 /// never returned on macOS 14 (aio, measured).
 pub(crate) const MAC_PROGRESS_JXA: &str = r#"
@@ -735,7 +874,11 @@ function run(argv) {
   let ticks = 0;
   const app = $.NSApplication.sharedApplication;
   app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
-  const W = 460, H = 150, BW = W - 40;
+  icon(app);
+  // argv[9], argv[10]: the splash ([build.splash]) and its size, drawn above the rest.
+  const img = argv[9] || '', is = (argv[10] || '').split(' ').map(Number);
+  const IH = img && is.length === 2 ? is[1] : 0, IW = IH ? is[0] : 0;
+  const W = Math.max(460, IW), H0 = 150, H = H0 + IH, BW = W - 40;
   const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
     $.NSMakeRect(0, 0, W, H),
     $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable,
@@ -744,9 +887,9 @@ function run(argv) {
   win.releasedWhenClosed = false;
   const head = $.NSTextField.labelWithString(heading);
   head.font = $.NSFont.boldSystemFontOfSize(13);
-  head.frame = $.NSMakeRect(20, H - 40, BW, 20);
+  head.frame = $.NSMakeRect(20, H0 - 40, BW, 20);
   const det = $.NSTextField.labelWithString('');
-  det.frame = $.NSMakeRect(20, H - 66, BW, 18);
+  det.frame = $.NSMakeRect(20, H0 - 66, BW, 18);
   function box(x, y, w, h, col) {
     const b = $.NSBox.alloc.initWithFrame($.NSMakeRect(x, y, w, h));
     b.boxType = 4; // NSBoxCustom
@@ -770,7 +913,14 @@ function run(argv) {
   cancel.bezelStyle = $.NSBezelStyleRounded;
   cancel.setButtonType($.NSButtonTypePushOnPushOff);
   cancel.keyEquivalent = '\u001b';
-  for (const v of [head, det, track, fill, cancel]) win.contentView.addSubview(v);
+  // argv[8] '0' ([build.download_window] cancel = false): no button; the close still cancels.
+  for (const v of [head, det, track, fill, ...(argv[8] === '0' ? [] : [cancel])]) win.contentView.addSubview(v);
+  if (IH) {
+    const iv = $.NSImageView.imageViewWithImage($.NSImage.alloc.initWithContentsOfFile(img));
+    iv.imageScaling = $.NSImageScaleProportionallyUpOrDown;
+    iv.frame = $.NSMakeRect((W - IW) / 2, H0, IW, IH);
+    win.contentView.addSubview(iv);
+  }
   place(win, argv[7], W, H);
   win.makeKeyAndOrderFront(null);
   app.activateIgnoringOtherApps(true);
@@ -822,6 +972,7 @@ function run(argv) {
   const title = argv[0], message = argv[1], previous = argv[2] || '';
   const app = $.NSApplication.sharedApplication;
   app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+  icon(app);
   const W = 460;
   const msg = $.NSTextField.wrappingLabelWithString(message);
   msg.preferredMaxLayoutWidth = W - 40;
@@ -911,18 +1062,39 @@ mod tests {
         assert_eq!(progress_line(Some(140), ""), "100\t");
         assert_eq!(progress_line(None, "x"), "-1\tx");
         assert_eq!(
-            download_detail("44.9.3", 45_000_000, Some(110_000_000)),
+            download_detail(&Default::default(), "Notes", "44.9.3", 45_000_000, Some(110_000_000)),
             "Downloading Electron 44.9.3 — first start only · 45 / 110 MB"
         );
-        assert_eq!(download_detail("1", 3_000_000, None), "Downloading Electron 1 — first start only · 3 MB");
+        let none = aio::config::DownloadWindow::default;
+        assert_eq!(
+            download_detail(&none(), "N", "1", 3_000_000, None),
+            "Downloading Electron 1 — first start only · 3 MB"
+        );
+        // aio's downloadWindow.text: {got} / {total} MB, {title}, {version}.
+        let own =
+            aio::config::DownloadWindow { text: Some("{title}: {got} of {total} MB ({version})".into()), ..none() };
+        assert_eq!(download_detail(&own, "Notes", "44", 3_000_000, Some(9_000_000)), "Notes: 3 of 9 MB (44)");
+        assert_eq!(download_detail(&own, "Notes", "44", 3_000_000, None), "Notes: 3 of ? MB (44)");
+        let h = aio::config::DownloadWindow { heading: Some("Setting up {title}".into()), ..none() };
+        assert_eq!(heading(&none(), "Notes", "1"), "Getting Notes ready");
+        assert_eq!(heading(&h, "Notes", "1"), "Setting up Notes");
+        // A colour set is the window's in both modes; the rest stay the app's.
+        let c = [["a", "b", "c", "d"].map(String::from), ["e", "f", "g", "h"].map(String::from)];
+        let bar = aio::config::DownloadWindow { bar: Some("#14f195".into()), ..none() };
+        assert_eq!(recolored(c.clone(), &bar), [["a", "b", "#14f195", "d"], ["e", "f", "#14f195", "h"]]);
+        assert_eq!(recolored(c.clone(), &none()), c);
     }
 
     #[test]
     fn the_question_names_the_cause_and_what_to_do() {
-        let m = failure_message("Notes", "44.9.3", "connection refused\nhttps://x (for developers)", true);
+        let w = aio::config::DownloadWindow::default();
+        let m = failure_message(&w, "Notes", "44.9.3", "connection refused\nhttps://x (for developers)", true);
         assert!(m.starts_with("Notes needs Electron 44.9.3") && m.contains("\n\nconnection refused\n\n"), "{m}");
         assert!(m.ends_with("Check the internet connection, then Retry.") && !m.contains("developers"));
-        assert!(failure_message("Notes", "1", "disk full", false).ends_with("Fix the cause above, then Retry."));
+        assert!(failure_message(&w, "Notes", "1", "disk full", false).ends_with("Fix the cause above, then Retry."));
+        // aio's downloadWindow.question, {reason} the first line of what failed.
+        let q = aio::config::DownloadWindow { question: Some("{title} could not start: {reason}".into()), ..w };
+        assert_eq!(failure_message(&q, "Notes", "1", "disk full\nmore", true), "Notes could not start: disk full");
     }
 
     #[test]
@@ -965,10 +1137,14 @@ mod tests {
 
     #[test]
     fn zenity_and_yad_get_text_not_markup_and_say_how_they_ended() {
-        let a = zenity_progress_args(false, "Notes", "Getting A&B <ready>");
+        let a = zenity_progress_args(false, "Notes", "Getting A&B <ready>", true);
         assert!(a.contains(&"--text=Getting A&amp;B &lt;ready&gt;".to_string()) && a.contains(&"--auto-close".into()));
-        assert!(!a.iter().any(|x| x.starts_with("--button")));
-        assert!(zenity_progress_args(true, "Notes", "h").contains(&"--button=Cancel:1".into()));
+        assert!(!a.iter().any(|x| x.starts_with("--button") || x == "--no-cancel"));
+        assert!(zenity_progress_args(true, "Notes", "h", true).contains(&"--button=Cancel:1".into()));
+        // [build.download_window] cancel = false: no button (the close still cancels).
+        assert!(zenity_progress_args(false, "Notes", "h", false).contains(&"--no-cancel".into()));
+        let yad = zenity_progress_args(true, "Notes", "h", false);
+        assert!(yad.contains(&"--no-buttons".into()) && !yad.iter().any(|x| x.starts_with("--button")));
         let q = zenity_ask_args(false, "Notes", "why", false);
         assert!(q.contains(&"--ok-label=Retry".into()) && q.contains(&"--cancel-label=Quit".into()), "{q:?}");
         assert!(!q.iter().any(|a| a.contains(PREVIOUS)));
@@ -996,10 +1172,10 @@ mod tests {
     #[test]
     fn the_windows_are_in_the_app_s_colours_light_or_dark() {
         let c = [["#fff".to_string(), "#111111".into(), "#0a84ff".into(), "#ddd".into()], Default::default()];
-        let look = Look { colors: &c, at: Some((640, -12)) };
+        let look = Look { colors: &c, at: Some((640, -12)), icon: None, image: None };
         assert_eq!(look.env()[0], "#ffffff #111111 #0a84ff #dddddd", "six digits for the helpers");
         assert_eq!(look.at(), "640 -12");
-        assert_eq!(Look { colors: &c, at: None }.at(), "");
+        assert_eq!(Look { colors: &c, at: None, icon: None, image: None }.at(), "");
         let css = gtk_css(&c[0]);
         assert!(
             css.contains("background-color: #fff; color: #111111;")
@@ -1015,6 +1191,50 @@ mod tests {
         );
         assert!(WINDOWS_ASK_PS.contains("$env:AIO_DLG_PREVIOUS") && MAC_ASK_JXA.contains("argv[2]"));
         assert!(MAC_PROGRESS_JXA.contains("look(argv, 5)") && MAC_ASK_JXA.contains("look(argv, 3)"));
+        // Each window wears the app's icon: Windows' title bar and taskbar, the Dock.
+        assert!(WINDOWS_LOOK_PS.contains("$form.Icon = ") && WINDOWS_LOOK_PS.contains("$env:AIO_DLG_ICON"));
+        assert!(MAC_LOOK_JXA.contains("'AIO_DLG_ICON'") && MAC_LOOK_JXA.contains("app.applicationIconImage = img"));
+        assert!(MAC_PROGRESS_JXA.contains("icon(app);") && MAC_ASK_JXA.contains("icon(app);"));
+        let icon = Path::new("/a/icon.png");
+        assert_eq!(Look { colors: &c, at: None, icon: Some(icon), image: None }.icon(), icon.as_os_str());
+        assert_eq!(Look { colors: &c, at: None, icon: None, image: None }.icon(), "");
+    }
+
+    /// The macOS helpers are JavaScript: a syntax error is a download with
+    /// no window, found here rather than on a Mac.
+    #[test]
+    fn the_macos_helpers_parse() {
+        let d = tempfile::tempdir().unwrap();
+        for (name, js) in [("progress.js", MAC_PROGRESS_JXA), ("ask.js", MAC_ASK_JXA)] {
+            std::fs::write(d.path().join(name), [MAC_LOOK_JXA, js].concat()).unwrap();
+            let Ok(out) = Command::new("node").arg("--check").arg(d.path().join(name)).output() else {
+                return eprintln!("skipped: no node");
+            };
+            assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        // The splash above the bar, and no Cancel when the app says so.
+        assert!(MAC_PROGRESS_JXA.contains("argv[9]") && MAC_PROGRESS_JXA.contains("argv[8] === '0'"));
+        assert!(
+            WINDOWS_PROGRESS_PS.contains("$env:AIO_DLG_IMAGE_SIZE")
+                && WINDOWS_PROGRESS_PS.contains("$env:AIO_DLG_CANCEL -ne '0'")
+        );
+    }
+
+    #[test]
+    fn the_splash_s_download_text_is_the_download_window_s() {
+        let parse = |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"n\"\n{t}")).unwrap();
+        let own = "[build.splash]\nimage = \"s.png\"\ndownload_text = \"{pct}%\"";
+        assert_eq!(words_of(&parse(own), "2.0.0").text.as_deref(), Some("{pct}%"));
+        let v = "[build.splash]\nimage = \"s.png\"\ndownload_text = \"{title} {version}\"";
+        assert_eq!(words_of(&parse(v), "2.0.0").text.as_deref(), Some("{title} 2.0.0"), "the app's version");
+        let never = format!("{own}\nshow = \"never\"\n[build.download_window]\ntext = \"t\"");
+        assert_eq!(
+            words_of(&parse(&never), "2.0.0").text.as_deref(),
+            Some("t"),
+            "no splash in the download: the window's own"
+        );
+        let w = aio::config::DownloadWindow { text: Some("{pct}% of {total} MB".into()), ..Default::default() };
+        assert_eq!(download_detail(&w, "N", "1", 25_000_000, Some(100_000_000)), "25% of 100 MB");
     }
 
     #[test]
@@ -1059,7 +1279,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let b = Backend::Zenity { bin: fake_zenity(d.path(), "49", 0), yad: false };
         let c: [[String; 4]; 2] = Default::default();
-        let look = Look { colors: &c, at: None };
+        let icon = d.path().join("icon.png");
+        let look = Look { colors: &c, at: None, icon: Some(&icon), image: None };
+        let wears = || std::fs::read_to_string(d.path().join("fed.args")).unwrap().contains("--window-icon=");
         let mut w = b.progress("Notes", "Getting Notes ready", &look).unwrap();
         assert_eq!(w.show(Some(10), "10 MB"), Shown::On);
         assert_eq!(w.show(Some(10), "10 MB"), Shown::On, "the same line is not sent again");
@@ -1073,11 +1295,13 @@ mod tests {
         };
         assert_eq!(shown, Shown::Cancelled);
         drop(w);
+        assert!(wears(), "the download window wears the app's icon");
         let fed = std::fs::read_to_string(d.path().join("fed")).unwrap();
         assert_eq!(fed.lines().filter(|l| l.starts_with("# Getting Notes ready")).count(), 1, "{fed}");
         assert!(fed.starts_with("9\n# Getting Notes ready\\n10 MB\n49\n"), "{fed}");
         // The question: exit 0 is Retry, 1 is Quit.
         assert_eq!(b.ask("Notes", "why", false, &look), Answer::Retry);
+        assert!(wears(), "and so does the question");
         let quit = Backend::Zenity { bin: fake_zenity(d.path(), "x", 1), yad: false };
         assert_eq!(quit.ask("Notes", "why", true, &look), Answer::Quit);
         let missing = Backend::Zenity { bin: d.path().join("none"), yad: false };
@@ -1090,7 +1314,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let b = Backend::Zenity { bin: fake_zenity(d.path(), "never", 0), yad: false };
         let c: [[String; 4]; 2] = Default::default();
-        let mut w = b.progress("Notes", "h", &Look { colors: &c, at: None }).unwrap();
+        let mut w = b.progress("Notes", "h", &Look { colors: &c, at: None, icon: None, image: None }).unwrap();
         assert_eq!(w.show(None, "Looking"), Shown::On);
         drop(w);
         let fed = std::fs::read_to_string(d.path().join("fed")).unwrap();

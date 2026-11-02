@@ -51,13 +51,14 @@ native! {
     pub mod log;
     #[cfg(feature = "tls")]
     pub mod pairing;
-    #[cfg(any(feature = "kit", feature = "web"))]
+    #[cfg(feature = "kit")]
     pub mod page;
     pub mod paths;
     #[cfg(feature = "server")]
     pub mod peer;
     pub mod perf;
     pub mod plugin;
+    pub mod process;
     pub mod report;
     pub mod security;
     mod source;
@@ -66,6 +67,7 @@ native! {
     pub mod sync;
     #[cfg(feature = "tls")]
     pub mod tls;
+    #[cfg(feature = "testing")]
     pub mod testing;
     pub mod update;
     pub mod video;
@@ -73,29 +75,32 @@ native! {
     pub use cells::{CellHealth, Cells};
     pub use handle::{Drained, Handle, Moment, RETRY_AFTER_MS, TIMELINE_STEPS, TimeAsk, Timeline};
     pub use source::Source;
-    pub use store::{Due, Error, Event, Position, REDACTED, Recovered, Steps, Store, Travel, PERSIST_DEBOUNCE, apply_event, shape_of};
+    pub use store::{Due, Error, Event, Position, REDACTED, Recovered, TX, Steps, Store, Travel, PERSIST_DEBOUNCE, apply_event, on_recovered, shape_of};
 }
 /// In a page: the login doors of the server that served it.
 #[cfg(target_arch = "wasm32")]
 pub mod auth {
     pub mod client;
 }
+mod answer;
 pub mod colors;
+pub mod columns;
+pub mod compat;
+mod hidden;
+#[cfg(any(feature = "server", all(feature = "web", target_arch = "wasm32")))]
+mod mux;
+pub use hidden::Hidden;
 pub mod cron;
 mod cx;
 mod derived;
 pub mod effect;
+pub mod filter;
 pub mod fmt;
+#[cfg(doctest)]
+mod guide;
 pub mod head;
 #[cfg(feature = "kit")]
 pub mod kit;
-/// The app's Dioxus, the one the kit is built on: `client!` and `routes!`
-/// `router!` name it through here.
-#[cfg(feature = "kit")]
-pub use dioxus;
-pub mod compat;
-#[cfg(doctest)]
-mod guide;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/log.rs"]
 pub mod log;
@@ -113,10 +118,19 @@ pub use status::{Conn, Status};
 #[cfg(target_arch = "wasm32")]
 pub use web::{Handle, Source, sync};
 
+/// The app's monogram: its letter in its hue, as pixels or SVG.
+pub use aio_config::icon;
 #[doc(hidden)]
 pub use aio_config_macro::config as __config_lit;
+/// The app's one hue as a `u16`, from its `aio.toml` as it builds
+/// (`Config::hue`): what `kit::theme_css` takes, so the page is the colour
+/// of its icon and splash.
+pub use aio_config_macro::hue;
 pub use aio_macros::{cell, data, methods};
-pub use cx::{Backoff, By, Cx, Inputs, Plan};
+pub use answer::Answer;
+#[doc(hidden)]
+pub use answer::{Reply, Step, finish, ttl_key};
+pub use cx::{Backoff, By, Cx, Inputs, On, Plan};
 pub use derived::{Cache, Derived, Reads, Ver, Watching};
 pub use effect::{Effect, Mode};
 /// Persistent collections for cell state: a call copies the state, and with
@@ -235,8 +249,8 @@ pub mod prelude {
     #[cfg(not(target_arch = "wasm32"))]
     pub use crate::Store;
     pub use crate::{
-        By, Caller, Cell, CellData, Code, Cx, Door, Effect, Handle, Mode, Rejected, Result, Uuid, act, call, cell,
-        data, ensure, methods, reject,
+        Answer, By, Caller, Cell, CellData, Code, Cx, Door, Effect, Handle, Hidden, Mode, Rejected, Result, Uuid, act,
+        call, cell, data, ensure, methods, reject,
     };
 }
 
@@ -248,6 +262,16 @@ pub struct Rejected {
     pub why: String,
     /// `None` for a method's own refusal.
     pub code: Option<Code>,
+}
+
+/// How a `#[cell(transaction)]` cell's async methods commit (aio's
+/// `transaction: { serialize, conflict }`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Transaction {
+    /// One at a time: a call waits for the one before it to end.
+    pub serialize: bool,
+    /// Commit over a conflict, said, instead of refusing with `TX_CONFLICT`.
+    pub warn: bool,
 }
 
 /// The kinds of refusal aio makes, on either side of the wire (aio
@@ -263,6 +287,9 @@ pub enum Code {
     ActionRefused,
     /// The link to the app dropped or never came up: the call may have run.
     ConnectionLost,
+    /// A transaction's write met another call's (`#[cell(transaction)]`):
+    /// nothing it wrote committed; call it again.
+    TxConflict,
 }
 
 impl Code {
@@ -272,6 +299,7 @@ impl Code {
             Self::AccessDenied => "ACCESS_DENIED",
             Self::ActionRefused => "ACTION_REFUSED",
             Self::ConnectionLost => "CONNECTION_LOST",
+            Self::TxConflict => "TX_CONFLICT",
         }
     }
 
@@ -379,8 +407,13 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
         let _ = viewer;
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
-    /// `#[transient]` fields: never saved, back to their default on every boot.
+    /// `#[transient]` fields and `#[cell(persist(exclude = ["feeds.*.busy"]))]`
+    /// paths (aio's `persist: { exclude }`): never saved, back to their
+    /// defaults on every boot ([`filter`]). A nested one's field needs a default.
     const TRANSIENT: &'static [&'static str] = &[];
+    /// `#[cell(persist(include = ["name", "profile.email"]))]` (aio's
+    /// `persist: { include }`): only these paths are saved; empty: all of it.
+    const PERSIST_INCLUDE: &'static [&'static str] = &[];
     /// `#[server]` fields: saved, never sent to a client, and left out of
     /// problem reports and the debug log (a report may be delivered). A
     /// shared cell's credential (a password, an API key…) must be one:
@@ -391,18 +424,30 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// ```
     /// ```
     /// #[aio::cell(shared)]
-    /// pub struct Keys { #[server] pub api_key: String, pub api_key_id: u32 }
+    /// pub struct Keys { #[server] pub api_key: aio::Hidden<String>, pub api_key_id: u32 }
+    /// ```
+    ///
+    /// On a shared cell it is an [`Hidden`]: a copy never has it, and
+    /// reading it there fails loudly instead of reading a default.
+    ///
+    /// ```compile_fail
+    /// #[aio::cell(shared)]
+    /// pub struct Keys { #[server] pub api_key: String }
     /// ```
     const SERVER: &'static [&'static str] = &[];
+    /// On a synced copy, mark the `#[server]` fields absent (`#[cell]` writes it).
+    #[doc(hidden)]
+    fn conceal(&mut self) {}
     /// `#[table("name")]` fields (`#[table("name", key = "col")]` for a map
     /// keyed by that column): the rows of the `db:` table `name`, in an aio
     /// file ([`crate::Store::open_aio`]) instead of the `aio_kv` slice, in
     /// aio-rs's own beside its history (a table of aio-rs's own refuses the boot), as
     /// `(field, table, key, columns)`. With `columns = "id INTEGER PRIMARY
     /// KEY, name TEXT NOT NULL"` the boot makes the table, or brings a
-    /// stored one to that shape (aio's declared schema).
+    /// stored one to that shape (aio's declared schema); `columns = CONTACTS`
+    /// (a `&[aio::columns::Col]`) declares it typed.
     #[allow(clippy::type_complexity)]
-    const TABLES: &'static [(&'static str, &'static str, Option<&'static str>, Option<&'static str>)] = &[];
+    const TABLES: &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)] = &[];
     /// `#[aio_cell]` fields (`#[aio_cell] accounts: Accounts`, `Accounts` a
     /// `#[cell(persist, id = "accounts", version = 3)]`): in an aio file, each
     /// is that aio cell's whole slice, read and written by its type's id,
@@ -410,10 +455,22 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// owns many of aio's (docs/migration/data.md). Its other fields are aio-rs's only.
     #[cfg(not(target_arch = "wasm32"))]
     const AIO_CELLS: &'static [compat::data::Slice] = &[];
+    /// The `#[aio_cell]` field `field` as JSON (`None`: not one): a commit
+    /// serializes only the slices that changed (aio's per-cell serialization cache).
+    #[doc(hidden)]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn slice_json(&self, field: &str) -> Option<serde_json::Result<Value>> {
+        let _ = field;
+        None
+    }
     /// `#[cell(retire = ["drafts", "draftsSeen"])]`: cells no build reads
     /// any more, deleted from the file at this cell's boot (their history,
     /// and in an aio file their slices and stamps), zeroed, never left behind.
     const RETIRED: &'static [&'static str] = &[];
+    /// `#[cell(transaction)]` (aio's `transaction`): its async methods read
+    /// the state as it was when they were called and commit all they wrote
+    /// at their end, at once, or nothing (docs/state/methods.md).
+    const TRANSACTION: Option<Transaction> = None;
     /// What is saved of the state, by `#[cell(save = f)]` (`fn(&Self) -> Self`);
     /// `None`: the state as is. Keep it idempotent: a crash and a clean stop
     /// then come back the same.
@@ -544,13 +601,22 @@ pub trait Cell: CellData {
     /// `#[coalesce]` methods: a cursor, a scroll, a selection, called many
     /// times a second (every plain method of a `#[cell(coalesce)]` cell).
     /// Each call shows its state at once, without a write; a run of them
-    /// goes into the log [`PERSIST_DEBOUNCE`] after its first call (aio's
-    /// debounced persistence), or when a call that can't wait (one with an
+    /// goes into the log `[data] coalesce_ms` (default [`PERSIST_DEBOUNCE`])
+    /// after its first call (aio's debounced persistence), or when a call that can't wait (one with an
     /// effect, a schedule, an id) or a time-travel step comes, or the app
     /// closes: as one event, its last call, when that alone ends where the
     /// run did (else call by call). A call that changes nothing logs
     /// nothing. A crash loses at most the window not yet logged, as in aio.
     const COALESCED: &'static [&'static str] = &[];
+    /// Its `pub async fn` methods, each with its `#[mode]` (`Queue` unless
+    /// set): a call of one ends later, in a step ([`crate::Answer`]).
+    const ASYNC: &'static [(&'static str, crate::Mode)] = &[];
+    /// Its `#[ttl]` async methods: their effects are keyed by their arguments too.
+    const TTL: &'static [&'static str] = &[];
+    /// The async method `method` is, and its mode (`None`: a plain method).
+    fn async_mode(method: &str) -> Option<crate::Mode> {
+        Self::ASYNC.iter().find(|(m, _)| *m == method).map(|(_, mode)| *mode)
+    }
     /// Is `method` (or a step of it, `method.N`) `#[redact]`?
     fn redacts(method: &str) -> bool {
         Self::REDACTED.iter().any(|r| method.strip_prefix(r).is_some_and(|s| s.is_empty() || s.starts_with('.')))
@@ -585,6 +651,17 @@ pub trait Cell: CellData {
 /// `<Name>Calls` trait gives every door typed methods.
 pub trait Door<T: Cell> {
     fn call(&self, method: &str, args: Value) -> Result<Value>;
+    /// Call `method` and follow it to its end: an async method's last
+    /// value, or the refusal that ended it after an await (aio's `await
+    /// cell.method()`); a plain method's answer at once. `Err` here: refused
+    /// before anything committed.
+    fn ask(&self, method: &str, args: Value) -> Result<Answer> {
+        let v = self.call(method, args)?;
+        Ok(Answer::ready(match T::async_mode(method) {
+            None => Ok(v),
+            Some(_) => Err(Rejected::new(format!("{method}: this door can't follow an async method to its end"))),
+        }))
+    }
     /// Read the current state. `f` must not call the same door.
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R;
     /// Keep a resource (a watcher, a socket) under `key`, dropping the one it
@@ -618,7 +695,7 @@ macro_rules! app_version {
 #[doc(hidden)]
 pub fn refused(method: &str, e: &Rejected) {
     eprintln!("[aio] {method} refused: {e}");
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
     testing::unseen(format!("{method}: {e}"));
 }
 
@@ -671,11 +748,30 @@ pub fn before_call(f: impl Fn(&Call) -> Result + Send + Sync + 'static) {
     *BEFORE.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
 
-pub(crate) fn ask_before(call: &Call) -> Result {
-    let Some(f) = BEFORE.read().unwrap_or_else(|e| e.into_inner()).clone() else { return Ok(()) };
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(call))).unwrap_or_else(|_| {
-        Err(Rejected::new(format!("{}.{}: refused: the before_call hook panicked", call.cell, call.method)))
-    })
+type Rewrite = std::sync::Arc<dyn Fn(&Call) -> Result<Option<Value>> + Send + Sync>;
+
+static REWRITE: std::sync::RwLock<Option<Rewrite>> = std::sync::RwLock::new(None);
+
+/// [`before_call`] that may also change the call (aio's `beforeReduce`
+/// returning another action): `Ok(Some(args))` runs it with those
+/// arguments instead (a default filled in, a value normalized), `Ok(None)`
+/// as it came, `Err` refuses it. The log holds what ran, so replay never
+/// asks again. It runs after `before_call`, under the same rules.
+pub fn rewrite_call(f: impl Fn(&Call) -> Result<Option<Value>> + Send + Sync + 'static) {
+    *REWRITE.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+}
+
+/// The app's gates on `call`: refused, or the arguments it runs with
+/// (`None`: as it came).
+pub(crate) fn ask_before(call: &Call) -> Result<Option<Value>> {
+    let panicked =
+        |hook: &str| Rejected::new(format!("{}.{}: refused: the {hook} hook panicked", call.cell, call.method));
+    if let Some(f) = BEFORE.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(call)))
+            .unwrap_or_else(|_| Err(panicked("before_call")))?;
+    }
+    let Some(f) = REWRITE.read().unwrap_or_else(|e| e.into_inner()).clone() else { return Ok(None) };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(call))).unwrap_or_else(|_| Err(panicked("rewrite_call")))
 }
 
 pub(crate) type Started = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
@@ -696,6 +792,37 @@ pub(crate) fn effect_started(cell: &str, key: &str) {
     for f in hooks {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(cell, key))).is_err() {
             eprintln!("[aio] an on_effect hook panicked on {cell} `{key}`; the others still hear");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type Acted = std::sync::Arc<dyn Fn(&str, &Event, &Value) + Send + Sync>;
+
+#[cfg(not(target_arch = "wasm32"))]
+static ON_ACTION: std::sync::RwLock<Vec<Acted>> = std::sync::RwLock::new(Vec::new());
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Hear every committed call (aio's `onAction`), observe-only: its cell, its
+/// event (method, arguments, who made it, when) and the cell's state after
+/// it, as JSON. Hooks compose (the app's and each plugin's), each guarded:
+/// one that panics is logged, never takes the cell or the other hooks down.
+/// Never call a cell from it; react with [`Handle::listens_to`].
+pub fn on_action(f: impl Fn(&str, &Event, &Value) + Send + Sync + 'static) {
+    ON_ACTION.write().unwrap_or_else(|e| e.into_inner()).push(std::sync::Arc::new(f));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// The `on_action` hooks, none when nobody listens (the state isn't copied then).
+pub(crate) fn action_hooks() -> Vec<Acted> {
+    ON_ACTION.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn acted(hooks: &[Acted], cell: &str, ev: &Event, state: &Value) {
+    for f in hooks {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(cell, ev, state))).is_err() {
+            eprintln!("[aio] an on_action hook panicked on {cell}.{}; the others still hear", ev.method);
         }
     }
 }
@@ -772,6 +899,10 @@ pub fn shutdown(budget: std::time::Duration) -> Vec<String> {
     let drained = rt().block_on(async { futures_util::future::join_all(fs.iter().map(|f| f(stores))).await });
     cut.extend(drained.into_iter().flat_map(|d| d.aborted));
     cut.extend(run_hooks("on_stop", stop, left()));
+    // Its doors: nothing is served past here.
+    ipc::unlink_all();
+    // Last: a program the app started and never ended would outlive it.
+    process::reap();
     cut
 }
 
@@ -801,13 +932,27 @@ pub fn ret<R: Serialize>(r: Result<R>) -> Result<Value> {
 }
 
 /// An async method's effect hands its awaited result to the next step; a
-/// refused step changes nothing and ends the method there. `ttl`: this is a
-/// `#[ttl]` method's last step, so its committing answers the call for that long.
+/// refused step changes nothing and ends the method there, said to its
+/// caller ([`Answer`]).
 #[doc(hidden)]
-pub fn step<T: Cell>(h: &Handle<T>, method: &str, args: Result<Value>, ttl: Option<i64>) {
-    match args.and_then(|a| h.call(method, a)) {
-        Ok(_) => ttl.into_iter().for_each(|ms| h.answered(ms)),
-        Err(e) => eprintln!("[aio] {}: {method} refused: {e}", T::ID),
+pub fn step<T: Cell>(h: &Handle<T>, method: &str, args: Result<Value>, reply: Option<Reply>) {
+    if let Err(e) = args.and_then(|a| h.resume(method, a, reply.clone())) {
+        eprintln!("[aio] {}: {method} refused: {e}", T::ID);
+        if let Some(r) = reply {
+            r.send(Err(e));
+        }
+    }
+}
+
+/// An awaited `io.await?` failed: the method ends there, as if its step
+/// refused (nothing more commits), said to its caller and counted as the
+/// cell's failure.
+#[doc(hidden)]
+pub fn fail<T: Cell>(h: &Handle<T>, method: &str, e: Rejected, reply: Option<Reply>) {
+    eprintln!("[aio] {}: {method} refused: {e}", T::ID);
+    h.failed(&format!("{method}: {e}"));
+    if let Some(r) = reply {
+        r.send(Err(e));
     }
 }
 
@@ -820,6 +965,14 @@ pub fn allowed(method: &str, rule: &str, f: impl FnOnce() -> bool) -> Result {
         Ok(false) => Err(Rejected::denied(method, &format!("is refused by {rule}"))),
         Err(_) => Err(Rejected::denied(method, &format!("is refused: {rule} panicked"))),
     }
+}
+
+/// A synced copy's state from the view the server sent: its `#[server]` fields absent.
+#[cfg(any(feature = "server", target_arch = "wasm32"))]
+pub(crate) fn copy_of<T: CellData>(view: Value) -> serde_json::Result<T> {
+    let mut t: T = serde_json::from_value(view)?;
+    t.conceal();
+    Ok(t)
 }
 
 #[doc(hidden)]

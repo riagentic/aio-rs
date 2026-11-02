@@ -81,7 +81,7 @@ assert_eq!(h.state().items, [Task { id: 1, text: "milk".into(), done: true }]);
 ```
 
 - In an app the launcher opens the cell (`aio::Source::for_app`); every
-  view showing it re-renders on each commit.
+  hole showing it follows each commit.
 - A shared cell (`#[cell(persist, shared)]`) is the same list live on
   every synced window ([sync](../state/sync.md)).
 
@@ -90,12 +90,12 @@ assert_eq!(h.state().items, [Task { id: 1, text: "milk".into(), done: true }]);
 ## 2. View state the server never sees
 
 A filter, a sort order, an open tab: per window, never saved, never
-synced. That is Dioxus state, not a cell: `use_signal` in a component, or
-a `GlobalSignal` shared by the views of one window.
+synced. That is view state, not a cell: `signal` in a component, or
+a `Global` shared by the views of one window.
 
 ```rust,no_run
 use aio::act;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "tasks")]
 pub struct Tasks {
@@ -118,19 +118,19 @@ impl Tasks {
 aio::client!(Tasks, tasks);
 
 /// This window's filter: not in the cell, so not saved or sent anywhere.
-static OPEN_ONLY: GlobalSignal<bool> = Signal::global(|| false);
+static OPEN_ONLY: Global<bool> = Global::new(|| false);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
     let items = part(|t| &t.items);
-    let shown = items.iter().filter(|(_, done)| !OPEN_ONLY() || !done);
+    let shown = move || items.get().into_iter().filter(|(_, done)| !OPEN_ONLY.get() || !done);
     rsx! {
         button { "data-t": "add", onclick: move |_| _ = act!(add("tea".into())), "Add" }
         button { "data-t": "finish", onclick: move |_| _ = act!(finish(0)), "Finish first" }
-        label { input { r#type: "checkbox", "data-t": "open", checked: OPEN_ONLY(),
+        label { input { r#type: "checkbox", "data-t": "open", checked: OPEN_ONLY.get(),
             onchange: move |e| *OPEN_ONLY.write() = e.checked() } "Open only" }
-        ul { "data-t": "list", for (i, (text, _)) in shown.enumerate() { li { key: "{i}", "{text}" } } }
+        ul { "data-t": "list", for (i, (text, _)) in shown().enumerate() { li { key: "{i}", "{text}" } } }
     }
 }
 
@@ -141,7 +141,7 @@ ui.click("add");
 ui.click("finish");
 ui.check("open");
 assert_eq!(ui.text("list"), "tea");
-assert_eq!(HANDLE.peek().state().items.len(), 2, "the cell has both; the filter is the view's");
+assert_eq!(HANDLE.read_untracked().state().items.len(), 2, "the cell has both; the filter is the view's");
 # }
 ```
 
@@ -161,7 +161,7 @@ values only when the check finds nothing, and shows every error.
 ```rust,no_run
 use aio::act;
 use aio::kit::{Field, Input, Problems, use_form};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "members")]
 pub struct Members {
@@ -193,7 +193,7 @@ fn check(s: &Signup) -> Problems {
 }
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
     let f = use_form(Signup::default, check);
     rsx! {
@@ -216,10 +216,10 @@ fn App() -> Element {
 let mut ui = aio::testing::TestUi::new(App);
 ui.click("join");
 assert!(ui.text("form").contains("Two letters at least"), "the error shows on a submit");
-assert!(HANDLE.peek().state().names.is_empty(), "nothing was called");
+assert!(HANDLE.read_untracked().state().names.is_empty(), "nothing was called");
 ui.type_text("name", "Ada");
 ui.click("join");
-assert_eq!(HANDLE.peek().state().names, ["Ada"]);
+assert_eq!(HANDLE.read_untracked().state().names, ["Ada"]);
 # }
 ```
 
@@ -531,7 +531,7 @@ assert_eq!(h.state().sent, 3);
 
 - A schedule a call sets (and so can stop): `cx.every("digest", 300_000,
   "send", ())`, `cx.cancel("digest")`. At a wall-clock time:
-  `#[cron("0 9 * * 1")]` (local time).
+  `#[cron("0 9 * * 1")]` (UTC, as aio; `[app] tz = "local"` for local time).
 - `ax schedules <app>` lists what is armed.
 - Never a thread with a sleep loop: replay and tests can't see it.
 
@@ -593,7 +593,7 @@ use aio::CellData;
 pub struct Vault {
     pub label: String,
     #[server]
-    pub api_key: String, // saved, never sent
+    pub api_key: Hidden<String>, // saved, never sent
 }
 
 #[methods]
@@ -606,7 +606,7 @@ impl Vault {
     /// Not `#[client]`: only the app's own code may set it.
     #[redact]
     pub fn set_key(&mut self, key: String) {
-        self.api_key = key;
+        *self.api_key = key;
     }
 }
 
@@ -619,12 +619,16 @@ ana.rename("billing".into()).unwrap();
 assert!(ana.set_key("mine".into()).is_err(), "not callable from the network");
 let seen = h.state().project(&Caller { by: By::User("ana".into()), role: None });
 assert!(seen.get("api_key").is_none(), "never sent");
-assert_eq!(h.state().api_key, "sk-test");
+assert_eq!(*h.state().api_key, "sk-test");
 # }
 ```
 
 - A shared field named like a credential (`api_key`, `token`,
   `password`…) without `#[server]` fails the build.
+- A `#[server]` field of a shared cell is an `aio::Hidden<T>`: it reads
+  as its value in the app; on a synced copy, which never has it, a read
+  panics naming the field (aio throws), so a method that touches it is
+  `#[client(predict = false)]`.
 - A `#[client]` method's answer goes back to the caller: never return a
   secret from one.
 
@@ -694,18 +698,18 @@ Render all three, so a signed-in app never flashes its sign-in form while
 the answer is on its way.
 
 ```rust,no_run
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 /// `None`: still asking; `Some(None)`: signed out; `Some(Some((id, role)))`.
 #[component]
-fn Account(who: Option<Option<(String, String)>>) -> Element {
+fn Account(who: Option<Option<(String, String)>>) -> View {
     rsx! {
         div { "data-t": "account",
-            match who {
+            {match who.clone() {
                 None => rsx! { aio::kit::Spinner {} },
                 Some(None) => rsx! { a { href: "/signin", "Sign in" } },
                 Some(Some((id, _role))) => rsx! { "Signed in as {id}" },
-            }
+            }}
         }
     }
 }
@@ -910,21 +914,21 @@ under the root's `GlobalKeys`. It stays quiet while typing in a field.
 
 ```rust,no_run
 use aio::kit::{GlobalKeys, use_global_key};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
-static PALETTE: GlobalSignal<bool> = Signal::global(|| false);
+static PALETTE: Global<bool> = Global::new(|| false);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     rsx! { GlobalKeys { Palette {} } }
 }
 
 #[component]
-fn Palette() -> Element {
+fn Palette() -> View {
     use_global_key("mod+k", |_| *PALETTE.write() = true); // Ctrl+K, ⌘K on macOS
     use_global_key("esc", |_| *PALETTE.write() = false);
     rsx! {
-        p { "data-t": "palette", if PALETTE() { "open" } else { "closed" } }
+        p { "data-t": "palette", if PALETTE.get() { "open" } else { "closed" } }
         input { "data-t": "search" }
     }
 }
@@ -949,12 +953,12 @@ assert_eq!(ui.text("palette"), "closed");
 A camera, a socket, a file handle. `aio::held::Held` opens one per key,
 shares it between holders and closes it when the last one lets go;
 `use_held` holds it for a view, re-opening when the key changes. Never
-open it in the render or in `use_drop`'s pair by hand.
+open it in a view's body or in `on_cleanup`'s pair by hand.
 
 ```rust,no_run
 use aio::held::{Held, State};
 use aio::kit::use_held;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::sync::OnceLock;
 
 /// Stands in for a device: opening takes a moment, closing is said.
@@ -969,21 +973,24 @@ fn cameras() -> &'static Held<String, String> {
 }
 
 #[component]
-fn App() -> Element {
-    let mut on = use_signal(|| true);
+fn App() -> View {
+    let on = signal(|| true);
     rsx! {
         button { "data-t": "toggle", onclick: move |_| on.toggle(), "Toggle" }
-        if on() { Preview { name: "front" } }
+        if on.get() { Preview { name: "front" } }
     }
 }
 
 #[component]
-fn Preview(name: String) -> Element {
-    let text = match use_held(cameras(), Some(name)) {
-        Some(State::Open(cam)) => cam.to_string(),
-        Some(State::Failed(why)) => format!("failed: {why}"),
-        _ => "opening".into(),
-    };
+fn Preview(name: String) -> View {
+    let held = use_held(cameras(), Some(name));
+    let text = memo(move || {
+        held.with(|h| match h {
+            Some(State::Open(cam)) => cam.to_string(),
+            Some(State::Failed(why)) => format!("failed: {why}"),
+            _ => "opening".into(),
+        })
+    });
     rsx! { p { "data-t": "preview", "{text}" } }
 }
 
@@ -1006,17 +1013,17 @@ assert_eq!(cameras().len(), 0, "closed with its last holder");
 ## 19. Keep one broken panel from taking the page
 
 A component that fails with no boundary above it takes its whole tree.
-Dioxus's `ErrorBoundary` catches a child's render error and shows a
-fallback in its place; the rest of the page goes on.
+`ErrorBoundary` catches a child's render error and shows its `fallback`
+in its place; the rest of the page goes on.
 
 ```rust,no_run
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Dashboard() -> Element {
+fn Dashboard() -> View {
     rsx! {
         ErrorBoundary {
-            handle_error: |_: ErrorContext| rsx! { p { "data-t": "fallback", "This panel failed." } },
+            fallback: |_: String| rsx! { p { "data-t": "fallback", "This panel failed." } },
             Chart { data: "1,2,x".to_string() }
         }
         p { "data-t": "rest", "The rest works" }
@@ -1024,7 +1031,7 @@ fn Dashboard() -> Element {
 }
 
 #[component]
-fn Chart(data: String) -> Element {
+fn Chart(data: String) -> View {
     let points: Vec<i32> = data.split(',').map(str::parse).collect::<Result<_, _>>()?; // a render error
     rsx! { p { "{points.len()} points" } }
 }
@@ -1172,72 +1179,58 @@ assert_eq!(s.items, ["https://example.org/feed/1"], "the last good data stays");
 
 ## 22. A subprocess with a timeout and a stop button
 
-Run a tool, keep what it wrote even when it is cut short. The effect
-watches the child off the async threads, kills it at the deadline or when
-the cell says stop, and hands back the output so far.
+Run a tool, keep what it wrote even when it is cut short. `aio::process`
+runs it in a process group of its own, hands each line back as it comes,
+kills the whole tree at the deadline, and a stop aborts the effect, which
+kills the tree with it.
 
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cell]
 pub struct Tool {
     pub running: bool,
-    pub stop: bool,
-    pub output: String,
+    pub output: Vec<String>,
     pub ended: String,
-}
-
-/// Runs `cmd`, killed after `limit` or once `stop()` says so; the output so far either way.
-fn run(cmd: &str, args: &[&str], limit: Duration, stop: impl Fn() -> bool) -> (String, String) {
-    let mut child = match Command::new(cmd).args(args).stdout(Stdio::piped()).spawn() {
-        Ok(c) => c,
-        Err(e) => return (String::new(), format!("could not start: {e}")),
-    };
-    let t0 = Instant::now();
-    let ended = loop {
-        match child.try_wait() {
-            Ok(Some(code)) => break format!("exited: {code}"),
-            Err(e) => break format!("lost: {e}"),
-            Ok(None) if stop() => break "stopped".into(),
-            Ok(None) if t0.elapsed() > limit => break "timed out".into(),
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-        }
-    };
-    _ = child.kill();
-    _ = child.wait();
-    let mut out = String::new();
-    _ = child.stdout.take().map(|mut s| s.read_to_string(&mut out));
-    (out, ended)
 }
 
 #[methods]
 impl Tool {
     pub fn launch(&mut self, cx: &Cx, limit_ms: u64) -> Result {
         ensure!(!self.running, "already running");
-        (self.running, self.stop) = (true, false);
+        (self.running, self.output) = (true, vec![]);
         cx.run(Effect::new("tool", move |h: Handle<Tool>| async move {
-            let watch = h.clone();
-            let (out, ended) = tokio::task::spawn_blocking(move || {
-                // `exec`: the shell becomes the long command, so a kill ends it.
-                run("sh", &["-c", "echo first; exec sleep 5"], Duration::from_millis(limit_ms), || watch.state().stop)
-            })
-            .await
-            .unwrap_or_default();
-            _ = h.finished(out, ended);
+            let lines = h.clone();
+            let ran = aio::process::Command::new("sh")
+                .args(["-c", "echo first; sleep 5 & wait"])
+                // Each line as it comes: a stop keeps what it wrote.
+                .on_line(move |l, _| _ = lines.line(l.to_string()))
+                .run(Some(Duration::from_millis(limit_ms)))
+                .await;
+            let ended = match ran {
+                Ok(out) if out.timed_out => "timed out".into(),
+                Ok(out) => format!("exited: {}", out.status),
+                Err(e) => format!("could not start: {e}"),
+            };
+            _ = h.finished(ended);
         }));
         Ok(())
     }
 
-    pub fn stop(&mut self) {
-        self.stop = true;
+    pub fn line(&mut self, l: String) {
+        self.output.push(l);
     }
 
-    pub fn finished(&mut self, output: String, ended: String) {
-        (self.running, self.output, self.ended) = (false, output, ended);
+    /// The effect is dropped at its next await, and the program's tree with it.
+    pub fn stop(&mut self, cx: &Cx) {
+        cx.abort("tool");
+        (self.running, self.ended) = (false, "stopped".into());
+    }
+
+    pub fn finished(&mut self, ended: String) {
+        (self.running, self.ended) = (false, ended);
     }
 }
 
@@ -1247,16 +1240,14 @@ let mut t = TestCells::new();
 let h = t.cell::<Tool>();
 h.launch(300).unwrap();
 t.settle();
-assert_eq!((h.state().output.as_str(), h.state().ended.as_str()), ("first\n", "timed out"));
+assert_eq!((h.state().output.clone(), h.state().ended.as_str()), (vec!["first".to_string()], "timed out"));
 # }
 ```
 
-- The stop button calls `stop()`: the watcher sees it within 20 ms.
-- A kill ends the child, not processes it started: `exec`, or a process
-  group, keeps them one.
-- Gap: aio passes an abort signal to `Deno.Command`; aio-rs has no
-  subprocess helper (and no async process API in its runtime), so the
-  wait loop is yours, as above.
+- The tool's own children (`sleep` here) die with it: the kill is the
+  group's.
+- A tool that never ends needs no timeout of its own: the stop is the
+  effect's abort.
 
 ## Where to go next
 

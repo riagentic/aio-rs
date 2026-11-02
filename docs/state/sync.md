@@ -96,7 +96,7 @@ mode = "client-server"
 [server]
 listen = "0.0.0.0:8100"
 tls = true          # this machine's own root; `ax trust` says how browsers trust it
-pairing = true      # `ax pin` + `ax pair` hand the key to a device
+pairing = true      # `ax pair` hands the key to a device
 discover = true     # answers `ax discover` on the LAN
 ```
 
@@ -322,7 +322,7 @@ pub struct Payroll {
     pub names: Vec<String>,
     pub salaries: Vec<u32>,
     #[server]
-    pub bank_token: String, // saved, never sent
+    pub bank_token: Hidden<String>, // saved, never sent
 }
 
 fn by_role(p: &Payroll, who: &Caller) -> Payroll {
@@ -337,7 +337,7 @@ impl Payroll {}
 
 # fn main() {
 use aio::CellData;
-let p = Payroll { names: vec!["Ada".into()], salaries: vec![10], bank_token: "t".into() };
+let p = Payroll { names: vec!["Ada".into()], salaries: vec![10], bank_token: Hidden::new("t".into()) };
 let staff = p.project(&Caller { by: By::User("bo".into()), role: None });
 assert_eq!(staff["salaries"], serde_json::json!([]));
 assert!(staff.get("bank_token").is_none(), "#[server] fields never leave");
@@ -431,6 +431,19 @@ rt.block_on(async {
   with `.status`, `.header`, `.cookie`. `.max_body(bytes)`,
   `.streamed()`, `.public()` (a webhook with its own signature check).
   The app's routes never take `/ws` or `/__aio…`.
+- **A streamed answer**: `Reply::stream(content_type, parts)` sends each
+  item of a `Stream` as it comes (server-sent events, NDJSON, a long
+  download); never compressed, cached or held by a proxy, and dropped
+  when the client leaves.
+- **A binary side channel**: `Route::socket("/stream", f)` upgrades to a
+  WebSocket once `f` accepts the request ([transports](../clients/transports.md#binary-data)).
+- **More cells on one server, one socket**: `Http::cell(handle)` serves
+  another `#[cell(shared)]` cell on the same `/ws`, key and port. A
+  client's copies of every cell share one socket, as aio's page does: each
+  copy is a link of its own on it (its hello, user, rules, view, pace),
+  numbered in the socket's frames (`<link>:<message>`,
+  [transports](../clients/transports.md#one-socket-for-every-cell)). An aio
+  page (feature `compat`) sees every shared cell in its `state`.
 - **Files**: `[server.dirs]` `"/media" = "media"` serves a folder of
   `data/files` behind the key, `[server.public_dirs]` without it (only
   what a page shown before sign-in needs).
@@ -438,21 +451,23 @@ rt.block_on(async {
   `calls_per_sec` (200) and `bytes_per_sec` (8 MB) per link, bursts up to
   twice that. A refused client gets 503 with the reason, a too-big
   message a close naming the limit, a fast sender is read more slowly:
-  nothing is dropped.
+  nothing is dropped. `sync_interval_ms` (50) paces what a link is sent
+  (a person's call goes at once) and `full_state_percent` (50) sends the
+  whole view for a bigger patch ([patches](../persistence/offline.md#what-travels-patches)).
 
 ## Pairing and discovery
 
 A device gets a served app's key without anyone typing it:
 
 ```sh
-ax pin board                       # on the server's machine: an 8-digit code (3 minutes, once)
+ax pair board                      # on the server's machine: an 8-digit code (3 minutes, once)
 ax pair board 192.168.1.20:8100 12345678   # on the device
 ax discover                        # the aio-rs apps on this LAN that answer
 ```
 
 - The default code is a PAKE (CPace bound to the TLS certificate the
   device sees): the code never crosses the network and a relay learns
-  nothing. `ax pin --plain` makes aio's plain 6-digit PIN, sent to
+  nothing. `ax pair <app> --plain` makes aio's plain 6-digit PIN, sent to
   `POST /__aio/pair`.
 - 8 wrong guesses from one address (one /64 for IPv6) lock that address
   out; 20 wrong in all burn the code. Needs `[server] pairing = true`.
@@ -503,8 +518,13 @@ session instead and the user is the session's ([accounts](../auth/README.md)).
   no key: the OS admits only this user), as user `shop` (this app's id),
   and calls it as a client would: `describe`, `call` by name, typed with
   `cell::<Ledger>()`, and its blobs (`blobs()`). What it lets a client do
-  is all a peer may. An app on another machine is a paired server: a
-  `Remote` of an `aio::sync::Link { addr, token, root }`.
+  is all a peer may. `Http::resolve_peer(|app| ..)` (aio's `resolvePeer`)
+  says who a peer app is here: the `Caller` (user and role) its calls,
+  views and server functions get, or `None` for no one in particular.
+  `Http::door_links(true)` (aio's `localConnectHooks`) makes `on_link`
+  hear the door's links too (`from` is `door`). An app on another
+  machine is a paired server: a `Remote` of an `aio::sync::Link { addr,
+  token, root }`.
 - **Tools on this machine**: `aio::sync::Live` and `Link::door(app, cell)`
   are what `ax state`, `ax call` and `ax clients` use; `ax clients <app>
   [cell]` lists the links open to a cell (user, wire `aio-rs`, `tool` or
@@ -527,7 +547,9 @@ by itself: `n += 1` from two offline clients counts twice, a set's
 decides on the state it really runs on. There are no merge strategies to
 pick: write the intent as a method. Prose is the one value that needs
 help: [offline and merging](../persistence/offline.md) has it, with what a
-patch on the wire holds.
+patch on the wire holds. A copy hears where a server change met its
+waiting call (`on_conflict`) and may show a field merged while it waits
+(`merge`, [conflicts](../persistence/offline.md#conflicts-and-fields-shown-merged)).
 
 ## Common mistakes
 
@@ -553,11 +575,15 @@ What aio has and aio-rs does not, or does differently:
 
 - **JSON only.** One JSON message per WebSocket frame; there is no binary
   wire for state or calls. Bytes go through
-  [blobs](../persistence/sql.md#blobs-files-and-big-data) or a route.
-- **A smaller offline queue.** aio queues up to 1000 calls in a page's
-  memory and drops the oldest past that; aio-rs keeps 500 and refuses
-  new calls when full, unless `[client] retention` is set. It can keep
-  them on disk (`connect_saved`), which aio's page queue can't.
+  [blobs](../persistence/sql.md#blobs-files-and-big-data), a route or a
+  side channel (`Route::socket`).
+- **A link per cell on the socket.** aio's page has one subscription over
+  every cell; an aio-rs client has one link per cell, all on one socket,
+  each counted against `[server.limits] clients`. Time travel and aio's
+  CRDT ops (`op`, `sync-req`) from an aio page reach the app's own cell.
+- **A full offline queue refuses the call.** Both keep 500 waiting calls
+  (aio's `pendingCap`) and let ones older than `retention` go; past that,
+  aio drops the new op and aio-rs refuses the call, said to the caller.
 - **Typed calls return the prediction.** aio's `await cell.method()` in a
   page resolves with the server's answer; aio-rs's typed call returns at
   once with the copy's own, and `call_confirmed` is the server's answer.

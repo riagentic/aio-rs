@@ -17,7 +17,7 @@ runtime folder). `TestUi` needs the `kit` feature, which an app made by
 ```rust,no_run
 use aio::act;
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "todo")]
 pub struct Todo {
@@ -36,15 +36,15 @@ impl Todo {
 aio::client!(Todo, todo);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
     let items = part(|t| &t.items);
-    let mut draft = use_signal(String::new);
+    let draft = signal(String::new);
     rsx! {
         form {
             onsubmit: move |e| {
                 e.prevent_default();
-                if act!(add(draft())).is_some() {
+                if act!(add(draft.get())).is_some() {
                     draft.set(String::new());
                 }
             },
@@ -52,11 +52,11 @@ fn App() -> Element {
             button { r#type: "submit", "Add" }
         }
         ul { "data-t": "list",
-            for item in items.iter() {
-                li { "{item}" }
+            for (i, item) in items.get().into_iter().enumerate() {
+                li { key: "{i}", "{item}" }
             }
         }
-        p { "data-t": "count", "{items.len()} to do" }
+        p { "data-t": "count", {format!("{} to do", items.with(Vec::len))} }
     }
 }
 
@@ -70,7 +70,7 @@ assert_eq!(ui.value("WhatToDoInput"), "", "the field was cleared");
 ui.set_value("WhatToDoInput", "call Bo");
 ui.press("WhatToDoInput", "Enter"); // Enter in a form's field submits it
 assert_eq!(ui.text("list/CallBoItem"), "call Bo"); // a list item is named by its text
-assert_eq!(HANDLE.peek().state().items.len(), 2, "the cell, not only the page");
+assert_eq!(HANDLE.read_untracked().state().items.len(), 2, "the cell, not only the page");
 
 // An empty add is refused: take the refusal, or it fails the test at its end.
 ui.click("AddButton");
@@ -102,7 +102,7 @@ assert_eq!(ui.failures(), ["add: say what to do"]);
 | `.before(\|\| ..)` | runs in the app's root scope before its first render: a seed, a route, a global; repeatable |
 | `.network(&["api.example.org"])` | hosts the page may reach besides this machine (`"*"`: any) |
 
-Each mount is a fresh app instance: its `GlobalSignal`s, its `client!`
+Each mount is a fresh app instance: its `Global`s, its `client!`
 source and its context start over, so tests share nothing through them.
 Each mount also gets its own sandbox (see [the sandbox](README.md#every-test-runs-in-a-sandbox)).
 Every mount runs a contrast audit and prints, never fails, the text a
@@ -250,19 +250,19 @@ A component alone, with its props, driven by keys and its form:
 
 ```rust,no_run
 use aio::testing::{TestUi, fails};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn SignIn(remember: bool) -> Element {
-    let mut sent = use_signal(|| false);
-    let mut name = use_signal(String::new);
+fn SignIn(remember: bool) -> View {
+    let sent = signal(|| false);
+    let name = signal(String::new);
     rsx! {
         form { onsubmit: move |e| { e.prevent_default(); sent.set(true) },
             label { "Name" input { required: true, value: "{name}", oninput: move |e| name.set(e.value()) } }
             label { "Remember me" input { r#type: "checkbox", checked: remember } }
             button { r#type: "submit", "Sign in" }
         }
-        if sent() { p { "data-t": "hello", "Hello {name}" } }
+        if sent.get() { p { "data-t": "hello", "Hello {name}" } }
     }
 }
 
@@ -299,9 +299,12 @@ assert_eq!(ui.text("hello"), "Hello Ada");
 | `info(t)` | its tag, role and accessible name |
 | `present(t)`, `absent(t)`, `has_handle(t)`, `count(css)` | see [Showing means showing](#showing-means-showing) |
 | `surface()` | what a person can see and use, nested, one line each |
-| `html()` | the page's HTML without Dioxus's ids, then what the app put on `<body>` (a tooltip, a portal) |
+| `html()` | the page's HTML without air's anchor comments, then what the app put on `<body>` (a tooltip, a portal) |
 | `contrast()` | text under WCAG AA on its background (4.5:1, 3:1 large), as `<tag> "text" 2.10:1, needs 4.5:1` |
-| `read(&GLOBAL)` | a `GlobalSignal`'s value in the app's root scope |
+| `a11y()` | aio's run-time accessibility rules (`dev-a11y.ts`), as `<tag data-t="t">: why`: an `<img>` without `alt`, a click with no keyboard path (the page knows the handlers), a field with no label, a `<button>` without `type`, an `<a>` with a click and no `href`, a positive `tabindex`, `aria-hidden` on what takes focus, `aria-disabled` with a click that still runs |
+| `surface_tree()` | the surface as a tree of components (aio's `UISurfaceNode`): each one's name, key, path (`app/List/Row[42]`), the elements it drew itself and its text |
+| `components()` | the mounted components: name, key, body runs (`renders`) and the updates its holes made |
+| `read(&GLOBAL)` | a `Global`'s value in the app's root scope |
 
 A `surface()` line is `role "name" [handle] state`, indented by depth:
 
@@ -328,15 +331,47 @@ The views run when the test acts or waits, never behind its back.
 | `until_within(d, what, \|\| ..)` | the same with your own patience |
 | `expect_cell(&door, what, \|s\| ..)` | until a cell's state holds; the failure prints it (5 s) |
 | `wait(d)` | lets `d` of real time pass for the app's timers (an interval, a toast's), then settles |
+| `advance(d)` | moves the views' clock `d` on: their timers due by then fire, each at its moment, then settles; from then on their clock is virtual (`wait` is `advance`) |
 
 - Each wait fails with what it waited for, the screen as `surface()`
   shows it, and a trace file.
 - `settle()` never gives up silently: a view and a page that keep
   answering each other fail (`the views and their page never settle`).
-- Time in a `TestUi` is real: there is no virtual clock under the page.
-  Test schedules and timers of the cell with
-  [`TestCells::advance`](cells.md#time-and-schedules-advance), and keep
-  the view's own timers short.
+- Time in a `TestUi` is real until `advance(d)`: then the views' clock
+  (their sleeps, intervals, debounces, `use_live`'s wait) moves only by
+  `advance`, so a 10 s timeout is tested at once. The page's own timers (a
+  CSS transition, a page script's `setTimeout`) keep real time; test the
+  cell's schedules with
+  [`TestCells::advance`](cells.md#time-and-schedules-advance).
+
+Every mount says each new `a11y()` finding once on stderr, as aio's dev
+mode warns once; assert on `a11y()` to fail a test on them.
+
+## Components
+
+The page knows each component's first and last node, so a path
+can name one: `comp=Row[42]` (by its `key:`), `comp=Row` (the one `Row`
+showing), `comp=List/comp=Row[42]/DeleteButton` (inside one). The same
+names in two rows stop clashing:
+
+```rust,no_run
+# use aio::ui::prelude::*;
+# fn app() -> View { rsx! {} }
+# fn main() {
+let mut ui = aio::testing::TestUi::new(app);
+let row = ui.find("Todo", Some("2")); // "comp=Todo[2]"; fails listing them if none or several
+ui.within(&row, |ui| ui.click("DoneButton"));
+assert!(ui.checked("comp=Todo[2]/css=input"));
+assert!(ui.absent("comp=Empty"), "a component that drew nothing doesn't show");
+# }
+```
+
+`within(t, f)` takes every path in `f` inside `t` (an element or a
+component); `count(css)` stays page-wide. `components()` counts what a
+change cost: a component's body runs once (`renders` 1, again only after
+a wait or a router's new match), and each of its holes that wrote the
+page again is one of its `updates`, so "the cursor's reader updated 5
+times, the rows' reader not at all" is an assertion.
 
 ## Seeded state and the cell beside the page
 
@@ -347,7 +382,7 @@ the same source:
 ```rust,no_run
 use aio::act;
 use aio::testing::{Mount, TestUi, seeded_source};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use serde_json::json;
 
 #[aio::cell(id = "inbox")]
@@ -365,15 +400,15 @@ impl Inbox {
 
 aio::client!(Inbox, inbox);
 
-static SHOW_ALL: GlobalSignal<bool> = Signal::global(|| false);
+static SHOW_ALL: Global<bool> = Global::new(|| false);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let n = *part(|s| &s.unread);
+    let n = part(|s| &s.unread);
     rsx! {
         p { "data-t": "badge", "{n} unread" }
-        button { disabled: n == 0, onclick: move |_| _ = act!(read_all()), "Mark all read" }
+        button { disabled: n.get() == 0, onclick: move |_| _ = act!(read_all()), "Mark all read" }
         button { onclick: move |_| *SHOW_ALL.write() = true, "Show all" }
     }
 }
@@ -383,7 +418,7 @@ fn App() -> Element {
 let mut ui = Mount::default().before(|| *HANDLE.write() = seeded_source(json!({"unread": 3}))).app(App);
 assert_eq!(ui.text("badge"), "3 unread");
 ui.click("MarkAllReadButton");
-ui.expect_cell(&*HANDLE.peek(), "all read", |s| s.unread == 0);
+ui.expect_cell(&*HANDLE.read_untracked(), "all read", |s| s.unread == 0);
 assert!(ui.disabled("MarkAllReadButton"));
 
 ui.click("ShowAllButton");
@@ -399,7 +434,7 @@ assert_eq!(ui.text("badge"), "1 unread");
 - `seeded_source::<C>(json)` merges the seed into the default state, as
   [`TestCells::seeded`](cells.md#seeded-state) does: a key the state lacks
   fails.
-- `expect_cell` takes any door: the source (`&*HANDLE.peek()`), a
+- `expect_cell` takes any door: the source (`&*HANDLE.read_untracked()`), a
   `Handle`, a `Remote`.
 - `ui.run(f)` runs `f` where the app's globals live, then settles.
 
@@ -425,6 +460,14 @@ Let a host in with `Mount::default().network(&["api.example.org"])`, or
 better, put a [cassette](cassettes.md) in front of the call so the test
 needs no network at all.
 
+The page's own requests to a host (a picture, a video: what the window's
+policy lets a page reach) are answered by the test with
+`Mount::default().fetch("cdn.example.org", |asked| Answered::new(200,
+"image/svg+xml", SVG))` (aio's `testUI({ fetch })`): from before the
+first render, each one is handed to the closure (`asked.method`, `url`,
+`body`) and gets its status, `Content-Type` and body, never reaching the
+network (the DevTools protocol's `Fetch` domain, in the page's engine).
+
 ## A served cell under the page
 
 `TestUi::new(App)` runs the cell in-process. To test the view against the
@@ -434,7 +477,7 @@ real wire, put a copy from a `TestServer` in `HANDLE`:
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{Mount, TestServer};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::time::Duration;
 
 #[cell(shared, id = "votes")]
@@ -457,9 +500,9 @@ impl Votes {
 aio::client!(Votes, votes);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let yes = *part(|v| &v.yes);
+    let yes = part(|v| &v.yes);
     rsx! {
         p { "data-t": "yes", "{yes}" }
         button { onclick: move |_| _ = act!(vote()), "Vote" }
@@ -478,7 +521,7 @@ assert_eq!(ui.text("yes"), "1", "predicted: shown at once");
 ui.until("the server has it", || server.state().yes == 1); // a round trip later
 
 ui.click("ResetButton"); // not a #[client] method: the server refuses it
-ui.until("the refusal came back", || HANDLE.peek().pending(None) == 0);
+ui.until("the refusal came back", || HANDLE.read_untracked().pending(None) == 0);
 let refused = ui.failures();
 assert!(refused[0].starts_with("reset: "), "{refused:?}");
 # }
@@ -496,23 +539,23 @@ assert!(refused[0].starts_with("reset: "), "{refused:?}");
 
 | Call | Answers |
 |---|---|
-| `components()` | the mounted components as a tree (`MountedComponent { name, renders, children }`): how often each rendered |
+| `components()` | the mounted components as a tree (`MountedComponent { name, key, renders, updates, children }`): how often each body ran and each one's holes wrote the page |
 | `wire_bytes()` | bytes the views sent the page so far: a step's cost on the wire |
 | `shot()` | a PNG of the page once its CSS transitions and animations ended (5 s at most) |
 | `contrast()` | the text that fails WCAG AA, see [Reading](#reading) |
 
 ```rust,no_run
 use aio::testing::{Mount, TestUi};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Row(n: u32) -> Element {
+fn Row(n: u32) -> View {
     rsx! { li { "row {n}" } }
 }
 
 #[component]
-fn List() -> Element {
-    let mut sel = use_signal(|| 0u32);
+fn List() -> View {
+    let mut sel = signal(|| 0u32);
     rsx! {
         p { "data-t": "sel", "{sel}" }
         button { onclick: move |_| sel += 1, "Next" }
@@ -539,9 +582,10 @@ assert!(shot.starts_with(b"\x89PNG"), "a PNG to compare with a saved one");
 - Compare shots across runs with `.no_scrollbars()` and a fixed `.size`:
   scrollbars differ by OS. `ax shot <app> --check base.png` does the same
   check on a running app.
-- A render loop (a view that writes state it reads, rendering again and
-  again with nothing from the page or the test in between) fails the
-  test: `still rendering after … passes: a view writes state it reads`.
+- An effect loop (an effect that writes a signal it reads, running again
+  and again with nothing from the page or the test in between) fails the
+  test: `effects still re-running after 1000 rounds: an effect writes a
+  signal it reads`.
 
 ## When a test fails
 
@@ -632,14 +676,13 @@ the process: drive its page over the DevTools protocol.
 |---|---|
 | happy-dom, no layout | a real engine: `rect`, `style`, `shot` and scrolling measure for real |
 | `ui.App.SaveButton.click()` (a proxy) | `ui.click("SaveButton")`: names are strings, checked when the test runs |
-| `am testgen` typed clients | none: `ui.names()` and `ax surface <app> --names` list the names |
-| `ui.advance(ms)`: a virtual clock under the page | none: `TestUi` time is real; schedules are tested with `TestCells::advance` |
+| `am testgen` typed clients | `ax testgen <app>`: a Rust name table, a renamed element a compile error ([ax](../clients/ax.md#ax-testgen)) |
 | `testUI(App, { user })` | `TestServer::ui_source(user, latency)`: a real signed-in copy |
 | `testPageFetch` (the page's HTTP and cookies) | `TestServer::page()`: the HTTP side, cookies kept |
 | `wire: { strict: true }`, the JSON-loss table | none needed: arguments are Rust types the wire encodes; `ui_source` crosses the real wire |
-| `ui.find("TodoRow", key)` by list key | a `data-t` per row (`row-{id}`), `list/MilkItem`, or `css=li:nth-child(2)` |
+| `ui.find("TodoRow", key)` returns a handle with the row's names | `ui.find("TodoRow", Some(key))` returns its path for `within` or a path's start (air) |
 | `serverImport` stubs | a trait the effect calls, with a test implementation; or a [cassette](cassettes.md) |
-| `smoke()` boot smoke | `ax build --smoke` |
+| `smoke()` boot smoke | `aio::testing::smoke(bundle)` in a test (`ax smoke` underneath), `ax build --smoke` |
 | `uiRects` from a measured client | `rect(t)` in the test; `ax surface <app> --rects` |
 | `--video-scheme` | `Mount::dark()` |
 

@@ -18,8 +18,35 @@ fn reach(addr: &str) -> io::Result<(String, Option<std::fs::File>)> {
             let dir = std::fs::File::open(dir)?;
             Ok((format!("/proc/self/fd/{}/{}", dir.as_raw_fd(), name.to_string_lossy()), Some(dir)))
         }
-        _ => Ok((addr.into(), None)),
+        _ => fits(addr).map(|()| (addr.into(), None)),
     }
+}
+
+/// The bytes of a Unix socket's path, its NUL included: 108 on Linux, 104 on
+/// macOS and the BSDs (`sockaddr_un.sun_path`).
+pub const SUN_PATH: usize = if cfg!(target_os = "linux") { 108 } else { 104 };
+
+/// Can `addr` be bound or connected as it is spelled (Electron's Node takes
+/// it so)? A Windows pipe always can; a socket path past [`SUN_PATH`] is
+/// refused at once, in words, not as the kernel's EINVAL.
+pub fn fits(addr: &str) -> io::Result<()> {
+    match too_long(addr, if cfg!(windows) { usize::MAX } else { SUN_PATH }) {
+        Some(m) => Err(io::Error::new(io::ErrorKind::InvalidInput, m)),
+        None => Ok(()),
+    }
+}
+
+/// What is wrong with a socket path `addr` where paths take `limit` bytes with
+/// their NUL: nothing, or what to do. Pure.
+pub fn too_long(addr: &str, limit: usize) -> Option<String> {
+    (addr.len() >= limit).then(|| {
+        format!(
+            "the socket path {addr} is {} bytes; a Unix socket path here takes at most {} ({limit} with its NUL). \
+             Fix: a shorter XDG_RUNTIME_DIR or TMPDIR, or a shorter app id",
+            addr.len(),
+            limit - 1
+        )
+    })
 }
 
 /// A connection, either end.
@@ -55,7 +82,9 @@ impl Listener {
     pub fn bind(addr: &str) -> io::Result<Self> {
         _ = std::fs::remove_file(addr);
         let (at, _dir) = reach(addr)?;
-        Ok(Self { addr: addr.into(), inner: tokio::net::UnixListener::bind(at)? })
+        let l = Self { addr: addr.into(), inner: tokio::net::UnixListener::bind(at)? };
+        bound().push(addr.into());
+        Ok(l)
     }
 
     /// Listen at `addr` (inside a tokio runtime). A pipe someone else
@@ -157,6 +186,28 @@ impl Only {
     pub fn disarm(&self, pid: u32) {
         self.0.send_if_modified(|a| a.take_if(|(p, _)| *p == pid).is_some());
     }
+
+    /// The window's gate, one per process: every door that serves the
+    /// window (aio-shell's wire and control lines, the routes' `http` door)
+    /// asks this one, which aio-shell arms, so no two doors can disagree
+    /// about who the window is (aio's one `localPeerGate`).
+    pub fn window() -> Self {
+        static W: std::sync::OnceLock<Only> = std::sync::OnceLock::new();
+        W.get_or_init(Self::default).clone()
+    }
+}
+
+static WINDOW_HTTP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Where the app serves its routes to its window (`aio://app/<path>`), if it
+/// opened that door: aio-shell hands it to the window (`--aio-http`).
+pub fn window_http() -> Option<&'static str> {
+    WINDOW_HTTP.get().map(String::as_str)
+}
+
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn set_window_http(addr: String) {
+    _ = WINDOW_HTTP.set(addr);
 }
 
 /// Why a door armed with `armed` (pid, start) refuses the peer `pid`, or
@@ -177,7 +228,28 @@ pub fn refusal(pid: Option<u32>, armed: Option<&Process>, started: impl Fn(u32) 
 impl Drop for Listener {
     fn drop(&mut self) {
         #[cfg(unix)]
-        let _ = std::fs::remove_file(&self.addr);
+        {
+            bound().retain(|a| *a != self.addr);
+            _ = std::fs::remove_file(&self.addr);
+        }
+    }
+}
+
+/// The socket files of this process's listeners still open.
+#[cfg(unix)]
+fn bound() -> std::sync::MutexGuard<'static, Vec<String>> {
+    static B: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    B.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Remove the socket file of every listener still open: a door served on
+/// the runtime is never dropped (the process ends with it running), so a
+/// clean stop ([`crate::shutdown`]) unlinks them. A Windows pipe goes with
+/// its process.
+pub fn unlink_all() {
+    #[cfg(unix)]
+    for a in std::mem::take(&mut *bound()) {
+        _ = std::fs::remove_file(a);
     }
 }
 
@@ -367,6 +439,25 @@ mod tests {
         assert!(connect(&a).await.is_err(), "the door went with its listener");
     }
 
+    #[test]
+    fn a_socket_path_past_the_limit_is_told_in_words() {
+        let at = |n: usize| format!("/{}", "x".repeat(n - 1));
+        for limit in [108, 104] {
+            assert_eq!(too_long(&at(limit - 1), limit), None, "{limit}: the longest that fits");
+            let m = too_long(&at(limit), limit).unwrap();
+            assert!(m.contains(&at(limit)) && m.contains(&format!("is {limit} bytes")), "{m}");
+            assert!(m.contains(&format!("at most {} ({limit} with its NUL)", limit - 1)), "{m}");
+            assert!(m.contains("XDG_RUNTIME_DIR or TMPDIR") && m.contains("app id"), "{m}");
+        }
+        assert_eq!(SUN_PATH, if cfg!(target_os = "linux") { 108 } else { 104 });
+        #[cfg(unix)]
+        {
+            assert!(fits(&at(SUN_PATH - 1)).is_ok());
+            let e = fits(&at(SUN_PATH)).unwrap_err();
+            assert!(e.kind() == io::ErrorKind::InvalidInput && e.to_string().contains("Fix:"), "{e}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_door_in_a_folder_past_the_socket_path_limit_works() {
@@ -452,9 +543,10 @@ mod tests {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, LocalFree};
         use windows_sys::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo,
+            SDDL_REVISION_1, SE_KERNEL_OBJECT,
         };
-        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, ImpersonateAnonymousToken, RevertToSelf};
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, EqualSid, ImpersonateAnonymousToken, RevertToSelf};
         use windows_sys::Win32::System::Threading::GetCurrentThread;
         let a = addr(Path::new("x"), &format!("acl{}", std::process::id()));
         let l = Listener::bind(&a).unwrap();
@@ -490,10 +582,28 @@ mod tests {
             LocalFree(sd);
             t
         };
-        let me = win::user_sid().unwrap();
         // One allow entry, for this user, nothing inherited.
-        assert!(sddl.starts_with("D:P(A;;") && sddl.ends_with(&format!(";;;{me})")), "{sddl}");
+        assert!(sddl.starts_with("D:P(A;;") && sddl.ends_with(')'), "{sddl}");
         assert_eq!(sddl.matches('(').count(), 1, "{sddl}");
+        // Its trustee is this user. The text may name a well-known account by
+        // its alias (`LA` for the built-in Administrator), so the SIDs are compared.
+        let sid = |s: &str| {
+            let w: Vec<u16> = s.encode_utf16().chain([0]).collect();
+            let mut p = std::ptr::null_mut();
+            // SAFETY: a NUL-terminated SID string; the SID is freed by the caller.
+            assert_ne!(unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut p) }, 0, "{s}");
+            p
+        };
+        let trustee = sid(sddl[..sddl.len() - 1].rsplit(';').next().unwrap());
+        let me = sid(&win::user_sid().unwrap());
+        // SAFETY: two valid SIDs from ConvertStringSidToSidW, each freed once.
+        let same = unsafe {
+            let same = EqualSid(trustee, me) != 0;
+            LocalFree(trustee);
+            LocalFree(me);
+            same
+        };
+        assert!(same, "{sddl}");
         assert!(Listener::bind(&a).is_err(), "nobody else may hold the app's door");
         // Another identity (anonymous, on its own thread) is denied.
         let other = std::thread::spawn({

@@ -55,14 +55,20 @@ async fn until(what: &str, f: impl Fn() -> bool) {
 
 /// GET `path` from `addr` with the key; the body.
 async fn get(addr: &str, path: &str) -> String {
+    get_as(addr, "127.0.0.1", path).await.1
+}
+
+/// GET `path` from `addr` with the key, as `host`: the status line and the body.
+async fn get_as(addr: &str, host: &str, path: &str) -> (String, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     let req =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret\r\nConnection: close\r\n\r\n");
+        format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer secret\r\nConnection: close\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).await.unwrap();
-    out.split_once("\r\n\r\n").unwrap().1.to_string()
+    let (head, body) = out.split_once("\r\n\r\n").unwrap();
+    (head.lines().next().unwrap().to_string(), body.to_string())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -71,9 +77,16 @@ async fn a_plugins_cell_routes_functions_and_hooks_are_live_and_the_app_wins() {
     let links: Arc<Mutex<Vec<String>>> = Arc::default();
     let (e1, e2, e3) = (effects.clone(), effects.clone(), effects.clone());
     let (l1, l2) = (links.clone(), links.clone());
+    let actions: Arc<Mutex<Vec<String>>> = Arc::default();
+    let a1 = actions.clone();
     let audit = Handle::<Audit>::memory();
     let files = Plugin::new("files")
         .cell(audit.clone(), &[])
+        // aio's plugin `onAction`: every committed call, with the state after it.
+        .on_action(move |c, e, s| a1.lock().unwrap().push(format!("{c}.{} {s}", e.method)))
+        .on_action(|_, _, _| panic!("an action hook exploded"))
+        // aio's plugin `allowedOrigins`: merged with `[server] hosts`.
+        .allowed_origins(&["https://Files.Example.com:8443/app", "cdn.example.com"])
         .route(Route::get("/files/:name", text("PLUGIN files")))
         .route(Route::get("/same", text("PLUGIN same")))
         .route(Route::get("/*", text("PLUGIN catch-all")))
@@ -86,7 +99,15 @@ async fn a_plugins_cell_routes_functions_and_hooks_are_live_and_the_app_wins() {
             l1.lock().unwrap().push(format!("files {}", p.online));
             panic!("a link hook exploded");
         });
-    let stats = Plugin::new("stats").on_effect(move |c, k| e2.lock().unwrap().push(format!("stats {c} {k}")));
+    let started: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (s1, s2) = (started.clone(), started.clone());
+    let stats = Plugin::new("stats")
+        .on_effect(move |c, k| e2.lock().unwrap().push(format!("stats {c} {k}")))
+        // aio's plugin `onStart`: once the app's cells are live, after the app's own.
+        .on_start(move |c| {
+            s1.lock().unwrap().push(format!("stats sees {}", c.ids().join(",")));
+            Ok(())
+        });
     aio::on_effect(move |c, k| e3.lock().unwrap().push(format!("app {c} {k}")));
     let todo = Handle::<Todo>::memory();
     let app = Http::default()
@@ -94,21 +115,42 @@ async fn a_plugins_cell_routes_functions_and_hooks_are_live_and_the_app_wins() {
         .route(Route::get("/same", text("APP same")))
         .server_fn(WHO, Access::Open, |_, ()| async { Ok("app".to_string()) })
         .on_link(move |p: &Presence| l2.lock().unwrap().push(format!("app {}", p.online)));
-    let (cells, http) = compose(Cells::default().with(todo.clone(), &[]), app, vec![files, stats]).unwrap();
+    let app_cells = Cells::default().with(todo.clone(), &[]).on_start(move |_| {
+        s2.lock().unwrap().push("app".into());
+        Ok(())
+    });
+    let (cells, http) = compose(app_cells, app, vec![files, stats]).unwrap();
     let cells = cells.start().unwrap();
+    assert_eq!(*started.lock().unwrap(), ["app", "stats sees todo,audit"]);
     assert_eq!(cells.ids(), ["todo", "audit"], "the plugin's cell beside the app's");
     audit.record().unwrap();
     assert_eq!(audit.state().seen, 1);
+    assert!(
+        actions.lock().unwrap().contains(&r#"audit.record {"seen":1}"#.to_string()),
+        "{:?}",
+        actions.lock().unwrap()
+    );
 
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    let opts = aio::sync::Options { token: "secret".into(), http, ..Default::default() };
+    let opts = aio::sync::Options {
+        token: "secret".into(),
+        http,
+        hosts: vec!["app.example.com".into()],
+        ..Default::default()
+    };
     tokio::spawn(aio::sync::serve_with(todo.clone(), l, opts));
     until("served", || std::net::TcpStream::connect(&addr).is_ok()).await;
     // The app's routes match first; what it leaves is the plugin's.
     assert_eq!(get(&addr, "/files/a.txt").await, "APP files a.txt");
     assert_eq!(get(&addr, "/same").await, "APP same");
     assert_eq!(get(&addr, "/elsewhere").await, "PLUGIN catch-all");
+    // The app's hosts and the plugin's are let in; any other name is refused.
+    for host in ["app.example.com", "files.example.com", "cdn.example.com:443"] {
+        assert_eq!(get_as(&addr, host, "/same").await.1, "APP same", "{host}");
+    }
+    let (status, _) = get_as(&addr, "evil.example.com", "/same").await;
+    assert!(status.contains(" 421 ") || status.contains(" 403 "), "{status}");
     let r = Remote::<Todo>::connect(&addr, "secret", "ann").await.unwrap();
     assert_eq!(r.run(WHO, ()).await, Ok("app".to_string()), "the app's function of a name");
     assert_eq!(r.run(ONLY, ()).await, Ok("plugin only".to_string()));

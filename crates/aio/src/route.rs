@@ -1,7 +1,7 @@
 //! In-app navigation (aio's `air/router-core.ts`, `air/router.ts`,
 //! `air/back-button.ts`): routes, params, a history the app owns, links and
-//! Back. Plain functions; the Dioxus glue is a macro over the app's own
-//! Dioxus ([`router!`](crate::router)), like `client!`.
+//! Back. Plain functions; the view glue is a macro over the app's own
+//! views ([`router!`](crate::router)), like `client!`.
 //!
 //! The history lives in Rust, not in the page's `location`: the desktop page
 //! is `aio://app/index.html` and Android's an asset, so aio's route base (the
@@ -320,6 +320,65 @@ pub fn of_link(url: &str) -> String {
     if rest.starts_with('/') { rest.to_string() } else { format!("/{rest}") }
 }
 
+/// Where the app starts: in a browser the page's address (a reload or a
+/// shared link lands where it was; the server answers every route with the
+/// app), elsewhere the launch's `--route` ([`start`]).
+pub fn start_place() -> String {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(l) = web_sys::window().map(|w| w.location()) {
+        return [l.pathname(), l.search(), l.hash()].map(Result::unwrap_or_default).concat();
+    }
+    start(std::env::args())
+}
+
+/// In a browser, the address bar shows `here` (a new entry, or `replace`
+/// the current one; none when it already shows it), so the browser's Back
+/// and a reload follow the app. Nothing elsewhere: the desktop's and
+/// Android's pages have no address bar.
+pub fn mirror(here: &Loc, replace: bool) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(w) = web_sys::window() {
+        let (url, h) = (here.to_string(), w.history());
+        let shown = w.location().href().ok().and_then(|u| Some(u.split_once("://")?.1.split_once('/')?.1.to_string()));
+        let Ok(h) = h else { return };
+        let _ = if replace || shown.is_some_and(|s| format!("/{s}") == url) {
+            h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url))
+        } else {
+            h.push_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url))
+        };
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (here, replace);
+}
+
+/// History one step back, if it can: in a browser through the page's own
+/// history (its `popstate` moves `h`, so the browser's Forward still
+/// leads where the app was), elsewhere `h.go(-1)`.
+pub fn step_back(h: &mut History) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(Ok(page)) = web_sys::window().map(|w| w.history()) {
+        return h.can_go(-1) && page.back().is_ok();
+    }
+    h.go(-1)
+}
+
+/// The places the browser's own Back and Forward lead to (`popstate`):
+/// none but in a browser.
+pub fn pops() -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(target_arch = "wasm32")]
+    if let Some(w) = web_sys::window() {
+        use wasm_bindgen::JsCast;
+        let on = wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || _ = tx.send(start_place()));
+        _ = w.add_event_listener_with_callback("popstate", on.as_ref().unchecked_ref());
+        // The page's for its life (one router per page).
+        on.forget();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    drop(tx);
+    rx
+}
+
 /// How many places Back can go through (Chromium keeps 50 too).
 pub const HISTORY_MAX: usize = 50;
 
@@ -374,6 +433,27 @@ impl History {
                 true
             }
             None => false,
+        }
+    }
+
+    /// The page's own history moved to `place` (the browser's Back or
+    /// Forward, a `popstate`): the step it took when it is the place one
+    /// step back or on, else `place` in place of here. False if it leaves
+    /// the app or is where the app already is: nothing changes.
+    pub fn sync(&mut self, place: &str) -> bool {
+        let Some(loc) = Loc::parse(place) else { return false };
+        if loc == *self.here() {
+            return false;
+        }
+        match [-1, 1]
+            .into_iter()
+            .find(|&d| self.at.checked_add_signed(d).and_then(|i| self.entries.get(i)) == Some(&loc))
+        {
+            Some(d) => self.go(d),
+            None => {
+                self.entries[self.at] = loc;
+                true
+            }
         }
     }
 
@@ -454,7 +534,7 @@ impl Backs {
 /// `User { id: u32 } = "/users/:id" => "User {id}"`.
 ///
 /// `parse` takes the first variant, in written order, whose pattern matches
-/// and whose params parse (Dioxus renders one page, where aio rendered every
+/// and whose params parse (one page shows, where aio rendered every
 /// matching `<Route>`).
 #[macro_export]
 macro_rules! routes {
@@ -503,8 +583,9 @@ macro_rules! routes {
     };
 }
 
-/// The router for Dioxus views (feature `kit`): `router!()` makes `NAV` (the window's
-/// [`History`], from the launch's `--route` ([`start`]), else `/`),
+/// The router for the views: `router!()` makes `NAV` (the window's
+/// [`History`], from the launch's `--route` ([`start`]) or, in a browser,
+/// the page's address ([`start_place`]), else `/`),
 /// `here()` (the current place; reading it subscribes the view), `go(to)`,
 /// `redirect(to)` (no Back step), `back()` (the [`Backs`] handlers, then
 /// history), `use_back(f)` (a handler for the component's life), `Link`,
@@ -514,170 +595,180 @@ macro_rules! routes {
 #[macro_export]
 macro_rules! router {
     () => {
-        pub static NAV: $crate::dioxus::prelude::GlobalSignal<$crate::route::History> =
-            $crate::dioxus::prelude::GlobalSignal::with_name(
-                || $crate::route::History::new(&$crate::route::start(::std::env::args())),
-                concat!(module_path!(), "::NAV"),
-            );
+        pub static NAV: $crate::ui::Global<$crate::route::History> = $crate::ui::Global::named(
+            || $crate::route::History::new(&$crate::route::start_place()),
+            concat!(module_path!(), "::NAV"),
+        );
 
         /// The window's Back handlers (`use_back`).
-        pub static BACKS: $crate::dioxus::prelude::GlobalSignal<$crate::route::Backs> =
-            $crate::dioxus::prelude::GlobalSignal::with_name(Default::default, concat!(module_path!(), "::BACKS"));
+        pub static BACKS: $crate::ui::Global<$crate::route::Backs> =
+            $crate::ui::Global::named(Default::default, concat!(module_path!(), "::BACKS"));
 
         /// Where the app is. The first read also wires the host's Back
         /// (Android's button, a mouse's back key) to [`back`], and the links
         /// the app is opened with (`aio::ui::links`) to [`go`].
         pub fn here() -> $crate::route::Loc {
-            use $crate::dioxus::prelude::try_consume_context;
-            if try_consume_context::<$crate::route::HostBack>().is_none() {
-                $crate::dioxus::core::provide_root_context($crate::route::HostBack);
-                $crate::dioxus::core::spawn_forever(async {
+            if $crate::ui::try_context::<$crate::route::HostBack>().is_none() {
+                $crate::ui::provide_root($crate::route::HostBack);
+                $crate::ui::spawn_forever(async {
                     let mut asks = $crate::ui::back_presses();
                     while let Some(ask) = asks.recv().await {
                         _ = ask.send(back());
                     }
                 });
                 // A link the app is opened with (Android): it goes there.
-                $crate::dioxus::core::spawn_forever(async {
+                $crate::ui::spawn_forever(async {
                     let mut links = $crate::ui::links();
                     while let Some(url) = links.recv().await {
                         go(&$crate::route::of_link(&url));
                     }
                 });
+                // The browser's Back and Forward (a web build): history follows.
+                $crate::ui::spawn_forever(async {
+                    let mut pops = $crate::route::pops();
+                    while let Some(place) = pops.recv().await {
+                        NAV.update(|n| n.sync(&place));
+                    }
+                });
             }
-            NAV.read().here().clone()
+            NAV.with(|n| n.here().clone())
         }
 
         /// Go to `to` (resolved from here); false if it leaves the app.
         pub fn go(to: &str) -> bool {
-            NAV.write().push(to)
+            NAV.update(|n| n.push(to) && { $crate::route::mirror(n.here(), false); true })
         }
 
         /// Go to `to` without a Back step.
         pub fn redirect(to: &str) -> bool {
-            NAV.write().replace(to)
+            NAV.update(|n| n.replace(to) && { $crate::route::mirror(n.here(), true); true })
         }
 
         /// Back: a handler takes it, or history goes one step; false at the
         /// first place (the shell's default then: leave the app).
         pub fn back() -> bool {
             // A copy: a handler may add or remove handlers.
-            let backs = BACKS.peek().clone();
-            backs.press() || NAV.write().go(-1)
+            let backs = BACKS.get_untracked();
+            backs.press() || NAV.update($crate::route::step_back)
         }
 
         /// `f` handles Back while this component lives (see `Backs::add`).
         pub fn use_back(f: impl FnMut() -> bool + 'static) {
-            let id = $crate::dioxus::prelude::use_hook(move || BACKS.write().add(f));
-            $crate::dioxus::prelude::use_drop(move || BACKS.write().remove(id));
+            let id = $crate::ui::once(move || BACKS.update(|b| b.add(f)));
+            $crate::ui::on_cleanup(move || BACKS.update(|b| b.remove(id)));
         }
 
-        /// Where a `Route` is in the tree, and what its `Outlet` shows.
+        pub use __router::*;
+
+        /// The router's components: `rsx!`'s names in scope whatever the
+        /// module that says `router!()` imports.
         #[doc(hidden)]
-        #[derive(Clone)]
-        pub struct RouteAt($crate::route::Nest, Option<$crate::dioxus::prelude::Element>);
+        pub mod __router {
+            use super::{go, here, redirect};
+            use $crate::ui::prelude::*;
 
-        /// A route in a tree of them: `element` where the place matches
-        /// `path`, joined to the enclosing routes' (`settings` inside `/dash`
-        /// is `/dash/settings`). With routes inside, it is a layout: it
-        /// matches a prefix, and its element shows the matching inner one at
-        /// its `Outlet` (no element: they show in its place). `index`: the
-        /// enclosing route's own place. Every matching route shows (as in aio);
-        /// a typed `routes!` enum picks one page.
-        #[$crate::dioxus::prelude::component]
-        pub fn Route(
-            #[props(default)] path: String,
-            #[props(default)] index: bool,
-            element: Option<$crate::dioxus::prelude::Element>,
-            children: $crate::dioxus::prelude::Element,
-        ) -> $crate::dioxus::prelude::Element {
-            use $crate::dioxus::core::{consume_context_from_scope, parent_scope};
-            use $crate::dioxus::prelude::{provide_context, rsx};
-            let at = here();
-            // From above: this scope holds its own since its first render.
-            let up = parent_scope().and_then(consume_context_from_scope::<RouteAt>).map(|r| r.0).unwrap_or_default();
-            // No children is Dioxus's placeholder: one dynamic root, empty.
-            let layout = children.as_ref().is_ok_and(|c| {
-                use $crate::dioxus::core::{DynamicNode, TemplateNode};
-                c.template.roots.iter().any(|r| !matches!(r, TemplateNode::Dynamic { .. }))
-                    || c.dynamic_nodes.iter().any(|n| !matches!(n, DynamicNode::Placeholder(_)))
-            });
-            let Some(nest) = up.child(&path, index, layout, &at.path) else { return rsx! {} };
-            provide_context(RouteAt(nest, layout.then(|| children.clone())));
-            match element {
-                Some(e) => e,
-                None if layout => children,
-                None => rsx! {},
+            /// Where a `Route` is in the tree, and what its `Outlet` shows.
+            #[doc(hidden)]
+            #[derive(Clone)]
+            pub struct RouteAt($crate::route::Nest, Option<View>);
+
+            /// A route in a tree of them: `element` where the place matches
+            /// `path`, joined to the enclosing routes' (`settings` inside `/dash`
+            /// is `/dash/settings`). With routes inside, it is a layout: it
+            /// matches a prefix, and its element shows the matching inner one at
+            /// its `Outlet` (no element: they show in its place). `index`: the
+            /// enclosing route's own place. Every matching route shows (as in aio);
+            /// a typed `routes!` enum picks one page.
+            #[component]
+            pub fn Route(
+                #[props(default)] path: String,
+                #[props(default)] index: bool,
+                element: Option<View>,
+                children: View,
+            ) -> View {
+                here();
+                // From above: this view holds its own since its first render.
+                let up = $crate::ui::parent_context::<RouteAt>().map(|r| r.0).unwrap_or_default();
+                let layout = !$crate::ui::is_empty(&children);
+                // Its match follows the place, and its view only a new match
+                // (on air its body runs again then; a query alone runs nothing).
+                let nest = $crate::ui::follow(move || {
+                    super::NAV.with(|n| up.child(&path, index, layout, &n.here().path))
+                });
+                let Some(nest) = nest else { return rsx! {} };
+                $crate::ui::provide_now(RouteAt(nest, layout.then(|| children.clone())));
+                match element {
+                    Some(e) => e,
+                    None if layout => children,
+                    None => rsx! {},
+                }
             }
-        }
 
-        /// Where a layout's element shows its matching inner route (nothing
-        /// outside a layout).
-        #[$crate::dioxus::prelude::component]
-        pub fn Outlet() -> $crate::dioxus::prelude::Element {
-            here();
-            $crate::dioxus::prelude::try_consume_context::<RouteAt>()
-                .and_then(|r| r.1)
-                .unwrap_or_else(|| $crate::dioxus::prelude::rsx! {})
-        }
-
-        /// The params of the enclosing routes (`:id` of `/users/:id` in its
-        /// inner ones too); empty outside a `Route`.
-        pub fn params() -> $crate::route::Params {
-            $crate::dioxus::prelude::try_consume_context::<RouteAt>().map(|r| r.0.params).unwrap_or_default()
-        }
-
-        /// Goes to `to` once shown, in place of here (aio's default; a pushed
-        /// one would send Back straight here again).
-        #[$crate::dioxus::prelude::component]
-        pub fn Redirect(to: String) -> $crate::dioxus::prelude::Element {
-            $crate::dioxus::prelude::use_hook(move || $crate::dioxus::prelude::spawn(async move { _ = redirect(&to) }));
-            $crate::dioxus::prelude::rsx! {}
-        }
-
-        /// An `<a>` that goes to `to` in the app, with `active_class` (and
-        /// `aria-current="page"`) on the current place's link. A link out of
-        /// the app opens in the system browser. The author's `onclick` runs
-        /// first; `prevent_default()` there keeps it from navigating.
-        #[$crate::dioxus::prelude::component]
-        pub fn Link(
-            to: String,
-            #[props(default)] exact: bool,
-            #[props(default)] replace: bool,
-            #[props(default)] class: String,
-            #[props(default = "active".to_string())] active_class: String,
-            onclick: Option<$crate::dioxus::prelude::EventHandler<$crate::dioxus::prelude::MouseEvent>>,
-            #[props(extends = GlobalAttributes)] attributes: Vec<$crate::dioxus::prelude::Attribute>,
-            children: $crate::dioxus::prelude::Element,
-        ) -> $crate::dioxus::prelude::Element {
-            use $crate::dioxus::prelude::{MouseEvent, dioxus_elements, rsx};
-            let own = onclick;
-            let at = here();
-            if $crate::route::resolve(&to, &at).is_none() {
-                return rsx! {
-                    a { href: "{to}", target: "_blank", rel: "noopener noreferrer", class, ..attributes, {children} }
-                };
+            /// Where a layout's element shows its matching inner route (nothing
+            /// outside a layout).
+            #[component]
+            pub fn Outlet() -> View {
+                here();
+                try_context::<RouteAt>().and_then(|r| r.1).unwrap_or_else(|| rsx! {})
             }
-            let on = $crate::route::is_active(&to, &at, exact);
-            let class = $crate::ui::cx(&[(&class, !class.is_empty()), (&active_class, on)]);
-            rsx! {
-                a {
-                    href: "{to}",
-                    class,
-                    "aria-current": if on { "page" },
-                    onclick: move |e: MouseEvent| {
-                        if let Some(f) = own {
-                            f.call(e.clone());
-                        }
-                        let routed = e.default_action_enabled();
-                        e.prevent_default();
-                        if !routed {
-                            return;
-                        }
-                        if replace { redirect(&to) } else { go(&to) };
-                    },
-                    ..attributes,
-                    {children}
+
+            /// The params of the enclosing routes (`:id` of `/users/:id` in its
+            /// inner ones too); empty outside a `Route`.
+            pub fn params() -> $crate::route::Params {
+                try_context::<RouteAt>().map(|r| r.0.params).unwrap_or_default()
+            }
+
+            /// Goes to `to` once shown, in place of here (aio's default; a pushed
+            /// one would send Back straight here again).
+            #[component]
+            pub fn Redirect(to: String) -> View {
+                once(move || spawn(async move { _ = redirect(&to) }));
+                rsx! {}
+            }
+
+            /// An `<a>` that goes to `to` in the app, with `active_class` (and
+            /// `aria-current="page"`) on the current place's link. A link out of
+            /// the app opens in the system browser. The author's `onclick` runs
+            /// first; `prevent_default()` there keeps it from navigating.
+            #[component]
+            pub fn Link(
+                to: String,
+                #[props(default)] exact: bool,
+                #[props(default)] replace: bool,
+                #[props(default)] class: String,
+                #[props(default = "active".to_string())] active_class: String,
+                onclick: Option<EventHandler<MouseEvent>>,
+                #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
+                children: View,
+            ) -> View {
+                let own = onclick;
+                if $crate::route::resolve(&to, &here()).is_none() {
+                    return rsx! {
+                        a { href: "{to}", target: "_blank", rel: "noopener noreferrer", class, ..attributes, {children} }
+                    };
+                }
+                // Read where they are drawn: on air these holes alone follow the place.
+                let on = move |to: &str| super::NAV.with(|n| $crate::route::is_active(to, n.here(), exact));
+                let go_to = to.clone();
+                rsx! {
+                    a {
+                        href: "{to}",
+                        class: $crate::ui::cx(&[(&class, !class.is_empty()), (&active_class, on(&to))]),
+                        "aria-current": on(&to).then_some("page"),
+                        onclick: move |e: MouseEvent| {
+                            if let Some(f) = &own {
+                                f.call(e.clone());
+                            }
+                            let routed = e.default_action_enabled();
+                            e.prevent_default();
+                            if !routed {
+                                return;
+                            }
+                            if replace { redirect(&go_to) } else { go(&go_to) };
+                        },
+                        ..attributes,
+                        {children}
+                    }
                 }
             }
         }
@@ -833,6 +924,19 @@ mod tests {
         assert!(h.go(-1) && h.here().path == "/users/8");
         // A deep link that leaves the app starts at the root.
         assert_eq!(History::new("https://x.org/").here().path, "/");
+    }
+
+    #[test]
+    fn the_pages_own_back_and_forward_step_the_history() {
+        let mut h = History::new("/a");
+        h.push("/b");
+        h.push("/c");
+        assert!(h.sync("/b") && h.here().path == "/b" && h.can_go(1), "the browser's Back: one step back");
+        assert!(h.sync("/c") && h.here().path == "/c", "its Forward");
+        assert!(!h.sync("/c"), "where it is: nothing");
+        assert!(!h.sync("https://example.com/"), "out of the app: nothing");
+        assert!(h.sync("/z?q=1") && h.here().to_string() == "/z?q=1" && h.len() == 3, "elsewhere: in place of here");
+        assert!(step_back(&mut h) && h.here().path == "/b", "Back off a browser: history's");
     }
 
     #[test]

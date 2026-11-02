@@ -1,10 +1,11 @@
 //! The ready sign-in form, driven like a person against a real app.
+#![cfg(feature = "kit")]
 use aio::auth::client::{Client, Signed};
 use aio::auth::{Auth, Policy};
 use aio::kit::SignIn;
 use aio::prelude::*;
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -53,7 +54,7 @@ fn app(signup: bool) -> Arc<Auth> {
     serve(Policy { signup, ..Default::default() }, false).0
 }
 
-fn form() -> Element {
+fn form() -> View {
     let client = Client::new(AT.with_borrow(Clone::clone), None);
     rsx! { SignIn { client, on_signed: move |s| SIGNED.set(Some(s)) } }
 }

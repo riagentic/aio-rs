@@ -1,8 +1,9 @@
 //! What the app moves on its links, per cell (aio's `am cost`): each state
 //! and patch sent (bytes, and a patch's bytes by the top key it changes),
 //! the full resends, and how long its methods take (mean, p95). It reports,
-//! it doesn't advise. Rates are per second actually watched (from the
-//! first thing seen), never per a window asked for.
+//! it doesn't advise. Rates are per second actually watched: from the
+//! first thing seen, or over the newest window asked for (`ax cost
+//! --window 5m`, at most [`KEPT`]: a meter a second is kept that long).
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Mutex;
@@ -10,6 +11,9 @@ use std::time::Duration;
 
 /// The method times kept per cell for the p95.
 const TIMES: usize = 512;
+
+/// How far back a window may reach, ms.
+pub const KEPT: i64 = 3_600_000;
 
 /// One cell's meter.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -24,6 +28,8 @@ pub struct Meter {
     pub keys: BTreeMap<String, (u64, u64)>,
     /// The newest method times, µs.
     pub times: VecDeque<u64>,
+    /// The newest [`KEPT`], a meter a second (its own `recent` empty).
+    pub recent: VecDeque<Meter>,
 }
 
 impl Meter {
@@ -33,8 +39,25 @@ impl Meter {
         }
     }
 
+    /// The meter of the second `now` is in, the ones older than [`KEPT`] gone.
+    fn second(&mut self, now: i64) -> &mut Meter {
+        let at = now - now.rem_euclid(1000);
+        while self.recent.front().is_some_and(|m| m.since <= now - KEPT) {
+            self.recent.pop_front();
+        }
+        if self.recent.back().is_none_or(|m| m.since != at) {
+            self.recent.push_back(Meter { since: at, ..Default::default() });
+        }
+        self.recent.back_mut().expect("just pushed")
+    }
+
     /// Message `msg` (a `state` or `patch`) went out as `bytes` (pure).
     pub fn sent(&mut self, msg: &Value, bytes: usize, now: i64) {
+        self.second(now).count(msg, bytes, now);
+        self.count(msg, bytes, now);
+    }
+
+    fn count(&mut self, msg: &Value, bytes: usize, now: i64) {
         self.start(now);
         self.pushes += 1;
         self.bytes += bytes as u64;
@@ -55,11 +78,34 @@ impl Meter {
 
     /// A method took `took` (pure).
     pub fn ran(&mut self, took: Duration, now: i64) {
+        self.second(now).time(took, now);
+        self.time(took, now);
+    }
+
+    fn time(&mut self, took: Duration, now: i64) {
         self.start(now);
         if self.times.len() == TIMES {
             self.times.pop_front();
         }
         self.times.push_back(took.as_micros() as u64);
+    }
+
+    /// The meter over the newest `window` ms at `now` (at most [`KEPT`];
+    /// less when it saw nothing before), as [`Meter::report`] (pure).
+    pub fn report_window(&self, now: i64, window: i64) -> Value {
+        let from = now - window.min(KEPT);
+        let mut m = Meter { since: self.since.max(from), ..Default::default() };
+        for s in self.recent.iter().filter(|s| s.since + 1000 > from) {
+            (m.pushes, m.bytes, m.full) = (m.pushes + s.pushes, m.bytes + s.bytes, m.full + s.full);
+            for (k, (n, b)) in &s.keys {
+                let e = m.keys.entry(k.clone()).or_default();
+                (e.0, e.1) = (e.0 + n, e.1 + b);
+            }
+            m.times.extend(&s.times);
+        }
+        let skip = m.times.len().saturating_sub(TIMES);
+        m.times.drain(..skip);
+        m.report(now)
     }
 
     /// The meter at `now`, as `ax cost` shows it (pure).
@@ -103,10 +149,17 @@ pub(crate) fn ran(cell: &'static str, took: Duration) {
     meters().entry(cell).or_default().ran(took, crate::store::now_ms());
 }
 
-/// Cell `cell`'s meter now (an empty one: nothing seen yet).
-pub fn report(cell: &str) -> Value {
+/// Cell `cell`'s meter now (an empty one: nothing seen yet), over the
+/// newest `window` ms when asked.
+pub fn report(cell: &str, window: Option<i64>) -> Value {
     let now = crate::store::now_ms();
-    meters().get(cell).cloned().unwrap_or(Meter { since: now, ..Default::default() }).report(now)
+    let m = meters();
+    let empty = Meter { since: now, ..Default::default() };
+    let m = m.get(cell).unwrap_or(&empty);
+    match window {
+        Some(w) => m.report_window(now, w),
+        None => m.report(now),
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +187,28 @@ mod tests {
         let keys: Vec<&str> = r["keys"].as_array().unwrap().iter().map(|k| k["key"].as_str().unwrap()).collect();
         assert_eq!(keys, ["notes", "count", "(the whole state)"], "largest first");
         assert_eq!(r["keys"][0]["bytes"].as_u64(), Some(patch["ops"][0].to_string().len() as u64));
+    }
+
+    #[test]
+    fn a_window_is_the_newest_seconds_only() {
+        let mut m = Meter::default();
+        m.sent(&json!({ "t": "state" }), 1000, 10_000);
+        m.ran(Duration::from_millis(50), 10_000);
+        let patch = json!({ "t": "patch", "ops": [{ "op": "set", "path": ["count"], "value": 2 }] });
+        m.sent(&patch, 100, 70_500);
+        m.sent(&patch, 100, 71_200);
+        m.ran(Duration::from_millis(2), 71_200);
+        let w = m.report_window(80_000, 60_000);
+        assert_eq!(w["windowS"], 60.0, "the window asked for, since the app saw things before it");
+        assert_eq!((w["pushes"].as_u64(), w["bytes"].as_u64(), w["fullResends"].as_u64()), (Some(2), Some(200), Some(0)));
+        assert_eq!((w["calls"].as_u64(), w["p95Ms"].as_f64()), (Some(1), Some(2.0)));
+        assert_eq!(w["keys"][0]["key"], "count");
+        assert_eq!(m.report(80_000)["pushes"], 3, "the whole meter still counts all");
+        // Less was watched than the window asks for: the rate is per second watched.
+        assert_eq!(m.report_window(12_000, 60_000)["windowS"], 2.0);
+        // An hour back at most; older seconds go.
+        m.sent(&patch, 100, 10_000 + KEPT + 1);
+        assert!(m.recent.iter().all(|s| s.since > 10_000), "{:?}", m.recent.iter().map(|s| s.since).collect::<Vec<_>>());
     }
 
     #[test]

@@ -373,7 +373,7 @@ mod upgrade {
     }
 
     #[test]
-    fn migrates_with_a_backup_and_refuses_newer_data() {
+    fn migrates_with_a_backup_and_an_older_build_boots_on_newer_data() {
         let (_d, p) = super::tmp();
         use v1::NotesCalls as _;
         let old = Handle::<v1::Notes>::open(&p).unwrap();
@@ -401,10 +401,18 @@ mod upgrade {
             assert_eq!(s.state_at(2).unwrap().lines, ["a", "b"]);
             assert!(s.state_at(1).unwrap_err().0.contains("before the upgrade"));
         });
-        // An older build refuses newer data and leaves it as it was: the stored version only goes up.
-        let before = super::bytes(&p);
-        assert!(Store::<v1::Notes>::open(&p).err().unwrap().0.contains("newer build"));
-        assert_eq!(super::bytes(&p), before);
+        // An older build boots on newer data (aio's downgrade): its writes keep
+        // what it doesn't declare, and the stored version only goes up.
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["t"])).unwrap();
+        drop(old);
+        // Rolled forward (new -> old -> new): it boots as aio does, keeping
+        // its own fields and dropping the old build's `text`.
+        let h = Handle::<Notes>::open(&p).unwrap();
+        assert_eq!(h.state().lines, ["a", "b", "c"]);
+        h.push("d".into()).unwrap();
+        drop(h);
+        assert_eq!(Handle::<Notes>::open(&p).unwrap().state().lines, ["a", "b", "c", "d"]);
     }
 
     #[test]
@@ -613,8 +621,12 @@ fn a_damaged_store_is_set_aside_and_the_good_copy_boots() {
         *x = 0xAB;
     }
     std::fs::write(&p, &b).unwrap();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    aio::on_recovered(move |cell, r| into.lock().unwrap().push((cell.to_string(), r.from)));
     let h = Handle::<Todo>::open(&p).unwrap();
     let r = h.store(|s| s.recovered().cloned()).unwrap();
+    assert!(heard.lock().unwrap().contains(&("todo".to_string(), r.from)), "aio's onCheckpointRestore heard it");
     let titles: Vec<String> = h.state().items.values().map(|i| i.title.clone()).collect();
     assert_eq!(titles, ["in the good copy"]);
     // Kept, not deleted.
@@ -878,8 +890,8 @@ fn a_child_stops_when_its_parent_goes() {
     // `stop`: a graceful ask first; a child that dies on it is reaped at once.
     let mut c = std::process::Command::new("sleep").arg("30").spawn().unwrap();
     let t = std::time::Instant::now();
-    aio::lifecycle::stop(&mut c, std::time::Duration::from_secs(5));
-    assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    aio::lifecycle::stop(&mut c, std::time::Duration::from_secs(30));
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "reaped at once, not at the grace's end");
 }
 
 #[cfg(unix)]
@@ -1195,7 +1207,7 @@ mod redact {
         let (_d, p) = tmp();
         let h = Handle::<Vault>::open(&p).unwrap();
         let e = h.unlock("Correct horse".into()).unwrap_err();
-        assert!(e.why.contains("vault.unlock is #[redact] and can't change the #[transient] field `open`"), "{e}");
+        assert!(e.why.contains("vault.unlock is #[redact] and can't change what isn't saved"), "{e}");
         assert!(h.store(|s| s.events().unwrap()).is_empty() && !h.state().open, "refused whole");
         h.open().unwrap();
         h.unlock("Correct horse".into()).unwrap();

@@ -2,9 +2,9 @@
 //! fold, primitives are coloured by type, a folded container shows its
 //! count. One set of open paths drives it; a node with thousands of
 //! children shows its first [`CAP`] (a huge node would freeze the page).
-use super::app::View;
+use super::app::ViewState;
 use aio::serde_json::Value;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::rc::Rc;
 
 /// Children shown per node.
@@ -26,65 +26,66 @@ fn step(k: &str) -> String {
 }
 
 /// A primitive, coloured by its type (strings cut at 120).
-fn primitive(v: &Value) -> Element {
-    match v {
-        Value::Null => rsx! { span { class: "dim", "null" } },
+fn primitive(v: &Value) -> View {
+    let (class, text) = match v {
+        Value::Null => ("dim", "null".to_string()),
         Value::String(s) if s.chars().count() > 120 => {
-            let cut: String = s.chars().take(120).collect();
-            rsx! { span { class: "green", "\"{cut}…\"" } }
+            ("green", format!("\"{}…\"", s.chars().take(120).collect::<String>()))
         }
-        Value::String(s) => rsx! { span { class: "green", "\"{s}\"" } },
-        Value::Number(n) => rsx! { span { class: "blue", "{n}" } },
-        Value::Bool(b) => rsx! { span { class: "purple", "{b}" } },
-        o => rsx! { span { class: "text2", "{o}" } },
-    }
+        Value::String(s) => ("green", format!("\"{s}\"")),
+        Value::Number(n) => ("blue", n.to_string()),
+        Value::Bool(b) => ("purple", b.to_string()),
+        o => ("text2", o.to_string()),
+    };
+    rsx! { span { class, "{text}" } }
 }
 
 #[component]
-fn Node(root: Shared, ptr: String, k: String, path: String, depth: usize) -> Element {
-    let mut view = use_context::<View>();
+fn Node(root: Shared, ptr: String, k: String, path: String, depth: usize) -> View {
+    let view = context::<ViewState>();
     let Some(v) = root.0.pointer(&ptr) else { return rsx! {} };
     let pad = format!("padding-left:{}px", depth * 14);
     if !(v.is_object() || v.is_array()) {
+        let value = primitive(v);
         return rsx! {
             div { class: "jrow", style: "{pad}",
                 span { class: "text2", "{k}" }
                 span { class: "dim", ": " }
-                {primitive(v)}
+                {value}
             }
         };
     }
-    let all = super::manager::entries(v);
-    let (n, hidden) = (all.len(), all.len().saturating_sub(CAP));
-    let open = view.tree_open.read().contains(&path);
+    let keys: Vec<String> = super::manager::entries(v).into_iter().map(|(k, _)| k).collect();
+    let (n, hidden) = (keys.len(), keys.len().saturating_sub(CAP));
     let (l, r) = if v.is_array() { ("[", "]") } else { ("{", "}") };
     let p = path.clone();
-    let mut toggle = move || {
-        view.tree_open.with_mut(|s| {
+    let open = memo(move || view.tree_open.with(|s| s.contains(&p)));
+    let p = path.clone();
+    let toggle = callback(move |()| {
+        view.tree_open.update(|s| {
             if !s.remove(&p) {
                 s.insert(p.clone());
             }
         })
-    };
-    let mut t2 = toggle.clone();
+    });
     rsx! {
         div {
             div { class: "jrow", style: "{pad};cursor:pointer", role: "button", tabindex: "0",
                 "aria-expanded": "{open}",
-                onclick: move |_| toggle(),
-                onkeydown: move |e| if super::app::pressed(&e) { t2() },
-                span { class: "dim", style: "width:12px;display:inline-block", if open { "▾" } else { "▸" } }
+                onclick: move |_| toggle.call(()),
+                onkeydown: move |e| if super::app::pressed(&e) { toggle.call(()) },
+                span { class: "dim", style: "width:12px;display:inline-block", if open.get() { "▾" } else { "▸" } }
                 span { class: "text2", "{k}" }
-                span { class: "dim", if open { ": {l}" } else { ": {l} {n} {r}" } }
+                span { class: "dim", if open.get() { ": {l}" } else { ": {l} {n} {r}" } }
             }
-            if open {
-                for (ck , _) in all.into_iter().take(CAP) {
+            if open.get() {
+                for ck in keys.iter().take(CAP).cloned() {
                     Node {
                         key: "{ck}",
                         root: root.clone(),
                         ptr: format!("{ptr}{}", step(&ck)),
                         path: format!("{path}\u{0}{ck}"),
-                        k: ck,
+                        k: ck.clone(),
                         depth: depth + 1,
                     }
                 }
@@ -99,15 +100,15 @@ fn Node(root: Shared, ptr: String, k: String, path: String, depth: usize) -> Ele
 
 /// `data`'s fields as a tree, its open paths under `prefix`.
 #[component]
-pub fn JsonTree(data: Shared, prefix: String) -> Element {
+pub fn JsonTree(data: Shared, prefix: String) -> View {
     if !(data.0.is_object() || data.0.is_array()) {
         return rsx! { div { class: "small dim", "no state" } };
     }
     let keys: Vec<String> = super::manager::entries(&data.0).into_iter().map(|(k, _)| k).collect();
     rsx! {
         div { style: "overflow-x:auto", "data-t": "tree",
-            for k in keys {
-                Node { key: "{k}", root: data.clone(), ptr: step(&k), path: format!("{prefix}\u{0}{k}"), k, depth: 0 }
+            for k in keys.clone() {
+                Node { key: "{k}", root: data.clone(), ptr: step(&k), path: format!("{prefix}\u{0}{k}"), k: k.clone(), depth: 0 }
             }
         }
     }

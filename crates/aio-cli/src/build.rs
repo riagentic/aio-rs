@@ -47,18 +47,20 @@ pub fn app_of(pkg: &Pkg) -> Result<(App, aio::config::Config), String> {
 }
 
 /// The menu entry, written by `install.sh` with the installed binary's path.
-/// `StartupWMClass` is the app id: the window class aio gives it.
+/// `StartupWMClass` is the app id: the window class aio gives it. `%U`:
+/// the files and links "Open with" hands it, as its arguments.
 pub fn desktop_entry(app: &App, exec: &str) -> String {
     let icon = if app.icon.is_some() { format!("Icon={}\n", app.id) } else { String::new() };
     format!(
-        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\"\n{icon}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
+        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\" %U\n{icon}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
         app.name.replace('\n', " "),
         app.id
     )
 }
 
-/// `install.sh`: for this user only, into the XDG dirs. The binary goes in
-/// `aio-rt/install/<id>/versions/<version>/` with `current` pointing at it
+/// `install.sh`: for this user only, into the XDG dirs. The bundle goes
+/// whole in `aio-rt/install/<id>/versions/<version>/` (as an update stages
+/// one, so the first update can be a patch from it) with `current` pointing at it
 /// (how updates swap versions), `~/.local/bin/<id>` through `current`,
 /// and `installed.json` saying what and from where (`bundle`: its name).
 /// `menu`: and in the app menu, with its icon (a CLI is not). POSIX `sh`:
@@ -88,8 +90,9 @@ pub fn install_sh(app: &App, bundle: &str, menu: bool) -> String {
          bin=\"${{XDG_BIN_HOME:-$HOME/.local/bin}}\"\ndata=\"${{XDG_DATA_HOME:-$HOME/.local/share}}\"\n\
          home=\"$data/aio-rt/install/{id}\"\n\
          mkdir -p \"$bin\" \"$home/versions/{v}\"\n\
-         install -m 0755 \"$here/{id}\" \"$home/versions/{v}/{id}\"\n\
-         if [ -d \"$here/electron\" ]; then rm -rf \"$home/versions/{v}/electron\"; cp -R \"$here/electron\" \"$home/versions/{v}/electron\"; fi\n\
+         to=$(cd \"$home/versions/{v}\" && pwd)\n\
+         if [ \"$here\" != \"$to\" ]; then rm -rf \"$to\"; mkdir -p \"$to\"; cp -R \"$here/.\" \"$to/\"; fi\n\
+         chmod 0755 \"$to/{id}\"\n\
          rm -f \"$home/pending.json\" \"$home/first-boot\" \"$home/update-failed\"\n\
          ln -sfn \"versions/{v}\" \"$home/current\"\n\
          ln -sfn \"$home/current/{id}\" \"$bin/{id}\"\n\
@@ -123,13 +126,17 @@ pub fn uninstall_sh(app: &App) -> String {
 /// A desktop app's budget in MB: core + `kit`, the shared runtime not
 /// counted (an app with heavy batteries declares its own: `[build] budget_mb`).
 pub const BUDGET_MB: u64 = 10;
-/// A server's (no window, no `kit`).
-pub const SERVER_BUDGET_MB: u64 = 6;
+/// A server's (no window, no `kit`): the service template measured 6.03 MB
+/// on Linux (2026-11-02), plus the size gate's 5% headroom (scripts/dx-metrics
+/// `STEADY`), 6.33 MB, to the next whole MB.
+pub const SERVER_BUDGET_MB: u64 = 7;
 
-/// The budget `cfg` builds within: its own, else its mode's.
-pub fn budget_of(cfg: &aio::config::Config) -> u64 {
+/// The budget `cfg` builds within for `os`: its own, else its mode's, half
+/// again on Windows, whose build of the same code is about a third bigger
+/// (the service template: 7.1 MB against 5.3 on Linux).
+pub fn budget_of(cfg: &aio::config::Config, os: &str) -> u64 {
     let default = if cfg.app.mode == aio::config::Mode::Server { SERVER_BUDGET_MB } else { BUDGET_MB };
-    cfg.build.budget_mb.unwrap_or(default)
+    cfg.build.budget_mb.unwrap_or(if os == "windows" { default * 3 / 2 } else { default })
 }
 
 /// Why a binary of `bytes` is refused, if it is over `budget_mb`.
@@ -283,6 +290,24 @@ pub fn missing_targets<'a>(targets: &[&'a str]) -> Vec<&'a str> {
     targets.iter().copied().filter(|t| !have.lines().any(|l| l.trim() == *t)).collect()
 }
 
+/// `AIORT_ASSETS` for a build of the app in `dir` (or below its
+/// `aio.toml`): its `[build] assets`' files, sizes and times, hashed.
+/// `aio::config!()` reads it, so cargo builds the app again when a file
+/// comes, goes or changes (it can't watch a folder itself).
+pub fn assets_stamp(dir: &Path) -> String {
+    let Some(file) = aio_config::config::find(dir) else { return String::new() };
+    let cfg = std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|t| aio::config::Config::parse(&t));
+    let at = file.parent().unwrap_or(Path::new("."));
+    let files = cfg.and_then(|c| aio::config::asset_files(at, &c.build.assets)).unwrap_or_default();
+    let mut h = aio::sha256::Sha256::new();
+    for (url, p) in &files {
+        let m = std::fs::metadata(p).ok();
+        let at = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        h.update(format!("{url}\t{}\t{}\n", m.map_or(0, |m| m.len()), at.map_or(0, |d| d.as_nanos())));
+    }
+    aio::sha256::hex(&h.finalize())
+}
+
 /// The cargo for a build for `cross` (None: this machine): refused before it
 /// runs when the platform can't be built here (`platform::blocker`), else
 /// told its target and linker.
@@ -388,7 +413,10 @@ pub fn no_home_paths(bin: &[u8], at: &Path) -> Result<(), String> {
 }
 
 /// The release binary `name` of package `pkg`, built for `cross` (None:
-/// this machine); `link`: an object its link takes too (the exe's icon).
+/// this machine); `link`: an object its link takes too (the exe's icon);
+/// `splash`: the app has a `[build.splash]`, drawn by the OS before
+/// Electron starts (aio-rs-shell's `native-splash`).
+#[allow(clippy::too_many_arguments)]
 pub fn release_binary(
     meta: &serde_json::Value,
     pkg: &str,
@@ -397,10 +425,18 @@ pub fn release_binary(
     link: Option<&Path>,
     channel: Option<&str>,
     version: &str,
+    splash: bool,
 ) -> Result<PathBuf, String> {
     let root = Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?);
     let mut cargo = cargo_for("the release build", &["rustc", "--release", "-p", pkg, "--bin", name], cross)?;
     remap(&mut cargo, root);
+    let dir = meta["packages"].as_array().into_iter().flatten().find(|p| p["name"] == pkg);
+    if let Some(dir) = dir.and_then(|p| Path::new(p["manifest_path"].as_str()?).parent().map(Path::to_path_buf)) {
+        cargo.env("AIORT_ASSETS", assets_stamp(&dir));
+    }
+    if let Some(f) = splash.then(|| native_splash(meta, pkg)).flatten() {
+        cargo.args(["--features", &f]);
+    }
     cargo.arg("--").args(link_args_here(cross.unwrap_or(crate::platform::host()?).triple));
     if let Some(obj) = link {
         cargo.arg(format!("-Clink-arg={}", obj.display()));
@@ -423,17 +459,32 @@ pub fn release_binary(
     Ok(bin)
 }
 
+/// `<the shell's name in pkg>/native-splash`, or none: `pkg` does not
+/// depend on aio-rs-shell.
+pub fn native_splash(meta: &serde_json::Value, pkg: &str) -> Option<String> {
+    let deps = meta["packages"].as_array()?.iter().find(|p| p["name"] == pkg)?["dependencies"].as_array()?;
+    let shell = deps.iter().find(|d| d["name"] == "aio-rs-shell")?;
+    Some(format!("{}/native-splash", shell["rename"].as_str().unwrap_or("aio-rs-shell")))
+}
+
 /// The name the monogram draws: the app's, else its id.
 pub fn label(app: &App) -> &str {
     if app.name.is_empty() { &app.id } else { &app.name }
 }
 
-/// The icon of an app that has none: its monogram (`icon`), 256 px, in the
-/// target dir.
-fn default_icon(target: &Path, app: &App) -> Result<PathBuf, String> {
+/// The icon of an app that has none, in the target dir: its monogram
+/// (`aio::icon`) in the app's hue as a 512 px PNG and an SVG beside it (aio's
+/// `writeDefaultIcon`), and for a Mac an `.icns` drawn at each slot's size.
+fn default_icon(target: &Path, app: &App, hue: u16, mac: bool) -> Result<PathBuf, String> {
     let p = target.join("aio").join(format!("{}-icon.png", app.id));
-    std::fs::create_dir_all(p.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
-    std::fs::write(&p, crate::icon::icon_png(label(app), &app.id, 256)).map_err(|e| e.to_string())?;
+    let e = |e: std::io::Error| e.to_string();
+    std::fs::create_dir_all(p.parent().ok_or("bad path")?).map_err(e)?;
+    std::fs::write(&p, aio_config::icon::icon_png(label(app), hue, 512)).map_err(e)?;
+    std::fs::write(p.with_extension("svg"), aio_config::icon::svg(label(app), hue, 512)).map_err(e)?;
+    match mac {
+        true => std::fs::write(p.with_extension("icns"), crate::icon::icon_icns(label(app), hue)).map_err(e)?,
+        false => _ = std::fs::remove_file(p.with_extension("icns")),
+    }
     Ok(p)
 }
 
@@ -474,7 +525,7 @@ pub fn sizes_of(name: &str) -> Result<String, String> {
     let bytes = std::fs::metadata(&b.binary).map_err(|e| format!("{}: {e}", b.binary.display()))?.len();
     let meta = crate::dev::metadata()?;
     let pkg = crate::dev::locate(&meta, name)?;
-    let budget = budget_of(&b.cfg);
+    let budget = budget_of(&b.cfg, b.platform.os);
     Ok(format!(
         "{name}: {:.2} MB of its {budget} MB budget\n{}",
         bytes as f64 / 1e6,
@@ -528,11 +579,18 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
     let (os, cross) = (p.os, (p != host).then_some(p));
     let windows = os == "windows";
     let target = Path::new(meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?);
-    // The exe wears the app's icon (its own, else its monogram drawn per size).
+    let dir = app_dir(&pkg)?;
+    for hint in crate::icon::hints(&dir) {
+        eprintln!("ax build: {hint}");
+    }
+    // The exe wears the app's icon: its own `assets/icon.ico` as it is, else its
+    // `icon.png` scaled, else its monogram drawn per size.
+    let read = |p: &Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let exe_icon = match (windows, &app.icon) {
         (false, _) => None,
-        (true, Some(p)) => Some(crate::icon::ico_from_png(&std::fs::read(p).map_err(|e| e.to_string())?)?),
-        (true, None) => Some(crate::icon::icon_ico(label(&app), &app.id)),
+        (true, _) if dir.join("assets/icon.ico").is_file() => Some(read(&dir.join("assets/icon.ico"))?),
+        (true, Some(p)) => Some(crate::icon::ico_from_png(&read(p)?)?),
+        (true, None) => Some(crate::icon::icon_ico(label(&app), cfg.hue())),
     };
     let exe_icon = exe_icon
         .map(|ico| {
@@ -541,13 +599,14 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
         })
         .transpose()?;
     if app.icon.is_none() {
-        app.icon = Some(default_icon(target, &app)?);
+        app.icon = Some(default_icon(target, &app, cfg.hue(), os == "macos")?);
     }
     eprintln!("ax build: {} {} for {} (release)…", app.name, app.version, p.name);
     if let Some(did) = crate::css::step(&cfg, &app_dir(&pkg)?)? {
         eprintln!("ax build: {did}");
     }
-    let binary = release_binary(&meta, &pkg.name, name, cross, exe_icon.as_deref(), channel, &app.version)?;
+    let splash = cfg.build.splash.is_some();
+    let binary = release_binary(&meta, &pkg.name, name, cross, exe_icon.as_deref(), channel, &app.version, splash)?;
     let bytes = std::fs::metadata(&binary).map_err(|e| format!("{}: {e}", binary.display()))?.len();
     if cfg.app.version.is_some()
         && !crate::version::carried(&std::fs::read(&binary).map_err(|e| e.to_string())?, &app.version)
@@ -558,7 +617,7 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
             app.name, app.version
         ));
     }
-    if let Some(why) = over_budget(bytes, budget_of(&cfg)) {
+    if let Some(why) = over_budget(bytes, budget_of(&cfg, p.os)) {
         let sizes = sizes(&meta, &pkg.name, name, cross).unwrap_or_else(|e| format!("(no size report: {e})"));
         return Err(format!("{}: {why}\n{sizes}", app.name));
     }
@@ -653,6 +712,13 @@ fn cli(b: &Built) -> Result<(String, Vec<PathBuf>), String> {
         std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
         how = format!("{how}\n{install}");
         files.push(p);
+        if b.platform.os == "linux" {
+            let (file, text, install) = crate::service::system(&b.app, &name);
+            let p = dist.join(file);
+            std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+            how = format!("{how}\n{install}");
+            files.push(p);
+        }
     }
     Ok((format!("{} ({:.1} MB)\n{how}", out.display(), size(&out)), files))
 }
@@ -680,10 +746,28 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
         aio::config::Mode::Server | aio::config::Mode::Cli => crate::fleet::Kind::Cli,
         _ => crate::fleet::Kind::Desktop,
     };
-    let plan = crate::fleet::across(
+    let mut plan = crate::fleet::across(
         crate::fleet::plan(name, &cfg.build.targets, select, fallback)?,
         &crate::platform::resolve(&names, host)?,
     );
+    // `all` (aio's --all-platforms): what this machine can't build is said
+    // with why and left out, never a failure, and never quietly.
+    let mut skipped = vec![];
+    if names.iter().any(|n| n.trim() == "all") {
+        let missing = missing_targets(&crate::platform::ALL.map(|p| p.triple));
+        let has_target = |t: &str| !missing.contains(&t);
+        plan.retain(|t| {
+            let Some(p) = t.platform else { return true };
+            let why = crate::platform::blocker(p, host, &has_target, &on_path)
+                .filter(|_| !remote_mac(name, &meta, t).is_ok_and(|m| m.is_some()));
+            let keep = why.is_none();
+            skipped.extend(why.map(|w| format!("skipped {}: {w}", t.shown())));
+            keep
+        });
+        for s in &skipped {
+            eprintln!("ax build: {s}");
+        }
+    }
     let (apps, waits): (Vec<App>, Vec<crate::smoke::Wait>) = plan
         .iter()
         .map(|t| app_of(&crate::dev::locate(&meta, &t.bin)?).map(|(a, c)| (a, crate::smoke::Wait::of(&c.app.mode))))
@@ -698,10 +782,9 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
     for t in &plan {
         let r = target(name, &meta, t, &mut made, smoke);
         let application_id = match t.kind {
-            #[cfg(unix)]
             Kind::Android => {
                 let (a, c) = app_of(&crate::dev::locate(&meta, &t.bin)?)?;
-                Some(crate::android::application_id_of(&a.id, &c.build.android))
+                Some(crate::android::application_id_of(&a.id, c.app.port_of.as_deref(), &c.build.android))
             }
             _ => None,
         };
@@ -725,6 +808,7 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
         }
     }
     record(&meta, name, &records);
+    out.extend(skipped);
     if !failed.is_empty() {
         out.push(format!("{} of {} targets failed:\n{}", failed.len(), plan.len(), failed.join("\n")));
         return Err(out.join("\n"));
@@ -750,9 +834,10 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
         match (here.is_empty(), on_mac) {
             (true, true) => return Ok(out.join("\n")),
             (true, false) => {
-                return Err("--smoke starts a Linux bundle, .deb or AppImage, or a macOS server's or CLI's \
-                            bundle, of this machine: build one there; a Windows bundle on Windows \
-                            (AIO_WINDOWS_SSH names one)"
+                return Err("--smoke starts a Linux bundle, .deb or AppImage, or a macOS app's zip or a \
+                            server's or CLI's bundle, of this machine: build one there (a macOS one \
+                            on its Mac: [build.macos] host or AIO_MACOS_SSH); a Windows bundle on \
+                            Windows (AIO_WINDOWS_SSH names one)"
                     .into());
             }
             _ => {}
@@ -781,6 +866,15 @@ pub fn run(name: &str, select: Option<&str>, platforms: Option<&str>, smoke: boo
 
 /// Write `dist/<id>.manifest.json` for this build of `name`, saying what
 /// the last one tells about it.
+/// The manifest `ax build <name>` wrote at `since` or later (`ax build --json`).
+pub fn manifest_of(name: &str, since: std::time::SystemTime) -> Option<serde_json::Value> {
+    let meta = crate::dev::metadata().ok()?;
+    let app = app_of(&crate::dev::locate(&meta, name).ok()?).ok()?.0;
+    let file = crate::manifest::path(&Path::new(meta["workspace_root"].as_str()?).join("dist"), &app.id);
+    std::fs::metadata(&file).and_then(|m| m.modified()).ok().filter(|t| *t >= since)?;
+    serde_json::from_slice(&std::fs::read(file).ok()?).ok()
+}
+
 fn record(meta: &serde_json::Value, name: &str, targets: &[crate::manifest::Target]) {
     let wrote = (|| -> Result<(), String> {
         let pkg = crate::dev::locate(meta, name)?;
@@ -838,11 +932,9 @@ fn target(
     }
     let p = match t.kind {
         Kind::Android => {
-            #[cfg(unix)]
-            return android(&t.bin);
-            #[cfg(not(unix))]
-            return Err("android is built on Linux (the NDK's Linux toolchain)".into());
+            return android(&t.bin, crate::android::Ask::RELEASE);
         }
+        Kind::Web => return crate::web::build(&t.bin, false).map(|(said, out)| (said, vec![out])),
         Kind::Windows => t.platform.unwrap_or(windows()),
         Kind::Deb | Kind::AppImage if host.os != "linux" => {
             return Err(format!("{} is a Linux package: build it on Linux", t.kind.name()));
@@ -886,9 +978,9 @@ fn size(p: &Path) -> f64 {
     std::fs::metadata(p).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0)
 }
 
-/// `--android`: the APKs, one per CPU type.
-#[cfg(unix)]
-pub(crate) fn android(name: &str) -> Result<(String, Vec<PathBuf>), String> {
+/// `--android`: the APKs `ask` names (each CPU type, `--debug`: debug
+/// APKs, a dev copy); how to install them, and the files.
+pub(crate) fn android(name: &str, ask: crate::android::Ask) -> Result<(String, Vec<PathBuf>), String> {
     let meta = crate::dev::metadata()?;
     let pkg = crate::dev::locate(&meta, name)?;
     let (app, cfg) = app_of(&pkg)?;
@@ -905,14 +997,18 @@ pub(crate) fn android(name: &str) -> Result<(String, Vec<PathBuf>), String> {
         .ok_or_else(|| format!("{}: no lib target (src/lib.rs calling aio_shell::android_app!)", pkg.name))?;
     let target = meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?;
     let root = meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?;
-    eprintln!("ax build: {} {} for Android (release)…", app.name, app.version);
+    let debug = ask.debug;
+    let flavour = if debug { "debug" } else { "release" };
+    eprintln!("ax build: {} {} for Android ({flavour})…", app.name, app.version);
     if let Some(did) = crate::css::step(&cfg, &app_dir(&pkg)?)? {
         eprintln!("ax build: {did}");
     }
     let dist = Path::new(root).join("dist");
-    let apks = crate::android::build(&app, &cfg, &app_dir(&pkg)?, &pkg.name, &lib, Path::new(target), &dist)?;
+    let lib = crate::android::Lib { pkg: &pkg.name, lib: &lib, target_dir: Path::new(target) };
+    let apks = crate::android::build(&app, &cfg, &app_dir(&pkg)?, &lib, &dist, ask)?;
     let how = |p: &Path| match p.extension().and_then(|e| e.to_str()) {
         Some("aab") => "upload it to Play".to_string(),
+        _ if debug => format!("ax install {name} --android --apk {}", p.display()),
         _ => format!("ax install {name} --android"),
     };
     let lines: Vec<String> = apks.iter().map(|p| format!("{} ({:.1} MB): {}", p.display(), size(p), how(p))).collect();
@@ -954,6 +1050,20 @@ fn package(kind: Kind, _: &Built) -> Result<(String, Vec<PathBuf>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An app with a `[build.splash]` gets the shell's `native-splash`, by
+    /// whatever name it gave the shell; one without the shell, nothing.
+    #[test]
+    fn a_splash_turns_on_the_shells_native_splash() {
+        let meta = serde_json::json!({ "packages": [
+            { "name": "notes-app", "dependencies": [{ "name": "aio-rs-shell", "rename": "aio-shell" }] },
+            { "name": "plain", "dependencies": [{ "name": "aio-rs-shell", "rename": null }] },
+            { "name": "cli", "dependencies": [{ "name": "aio-rs" }] },
+        ]});
+        assert_eq!(native_splash(&meta, "notes-app").as_deref(), Some("aio-shell/native-splash"));
+        assert_eq!(native_splash(&meta, "plain").as_deref(), Some("aio-rs-shell/native-splash"));
+        assert_eq!(native_splash(&meta, "cli"), None);
+    }
 
     #[test]
     fn each_platform_bundles_electrons_build_for_it_and_says_what_went_short() {
@@ -1007,7 +1117,7 @@ mod tests {
     #[test]
     fn the_menu_entry_names_the_window_class() {
         let e = desktop_entry(&notes(true), "/h/.local/bin/notes");
-        assert!(e.contains("Exec=\"/h/.local/bin/notes\"\n") && e.contains("StartupWMClass=notes\n"), "{e}");
+        assert!(e.contains("Exec=\"/h/.local/bin/notes\" %U\n") && e.contains("StartupWMClass=notes\n"), "{e}");
         assert!(e.contains("Icon=notes\n"));
         assert!(!desktop_entry(&notes(false), "x").contains("Icon="));
         let arm = crate::platform::of("linux", "aarch64").unwrap();
@@ -1074,10 +1184,13 @@ mod tests {
         assert_eq!(over_budget(25_000_001, 25).as_deref(), Some("25.0 MB is over the 25 MB budget"));
         let toml =
             |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"relay\"\nname = \"Relay\"\n{t}")).unwrap();
-        assert_eq!(budget_of(&toml("")), BUDGET_MB);
+        assert_eq!(budget_of(&toml(""), "linux"), BUDGET_MB);
         let server = "mode = \"server\"\n[server]\nlisten = \"127.0.0.1:8080\"\n";
-        assert_eq!(budget_of(&toml(server)), SERVER_BUDGET_MB, "a server: 6 MB");
-        assert_eq!(budget_of(&toml(&format!("{server}[build]\nbudget_mb = 8\n"))), 8, "unless it says");
+        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 7 MB");
+        assert_eq!(budget_of(&toml(server), "windows"), 10, "half again on Windows");
+        assert_eq!(budget_of(&toml(""), "windows"), 15);
+        let own = toml(&format!("{server}[build]\nbudget_mb = 8\n"));
+        assert_eq!((budget_of(&own, "linux"), budget_of(&own, "windows")), (8, 8), "unless it says");
     }
 
     #[cfg(target_os = "linux")]
@@ -1116,6 +1229,13 @@ mod tests {
         assert_eq!(std::fs::read_link(&bin).unwrap(), install.join("current/notes"));
         assert_eq!(Command::new(&bin).output().unwrap().stdout, b"hi\n");
         assert!(install.join("versions/1.2.0/electron/locales/en-US.pak").exists());
+        // The bundle whole, as an update stages one: what the first update patches.
+        assert!(
+            install.join("versions/1.2.0/notes.png").exists() && install.join("versions/1.2.0/install.sh").exists()
+        );
+        // Run again from that copy, it keeps it.
+        run(&install.join("versions/1.2.0"), "install.sh", &[]);
+        assert_eq!(Command::new(&bin).output().unwrap().stdout, b"hi\n");
         let rec: aio::serde_json::Value =
             aio::serde_json::from_slice(&std::fs::read(install.join("installed.json")).unwrap()).unwrap();
         assert_eq!(

@@ -76,7 +76,8 @@ dirty (a dirty build is never a release).
 | `appimage` | one portable Linux file (`--appimage`) | Linux |
 | `dmg` | a macOS disk image to drag into Applications | a Mac (or one over ssh) |
 | `cli` | a headless binary on `PATH`, no menu entry; a server's also gets its supervisor file | each of `platforms` |
-| `android` | signed APKs, one per CPU, and an `.aab` when asked (`--android`) | Linux |
+| `android` | signed APKs, one per CPU, and an `.aab` when asked (`--android`) | Linux, macOS, Windows |
+| `web` | the installable web app in `dist/<id>-web/` (`--web` alone) | anywhere with the `wasm32` target |
 
 Nothing declared: `desktop`, or `cli` for a `server` or `cli` app.
 
@@ -98,12 +99,19 @@ runtime = "shared"
 chromium_extras = "keep"
 css = "tailwindcss -i src/app.css -o assets/style.css"
 
+[build.assets]
+"/media" = "media"
+
 [build.splash]
 image = "assets/splash@2x.png"
 text = "{title}"
 min_ms = 400
 max_ms = 15000
 background = ["#f6f7f9", "#14161a"]
+font = "sans-serif"
+font_size = 14
+bold = false
+fade_ms = 200
 
 [build.macos]
 bundle_id = "org.example.notes"
@@ -117,6 +125,8 @@ aab = true
 schemes = ["notes"]
 camera = false
 color_scheme = "system"
+universal = false
+strict = false
 ```
 
 | Key | Default | Means |
@@ -129,14 +139,19 @@ color_scheme = "system"
 | `chromium_extras` | `keep` | a bundled runtime's software Vulkan and DirectX shader compilers; `strip` drops them (smaller, draws worse where no GPU driver works) |
 | `css` | none | a CSS toolchain run before every build and on every change in `ax dev`: a command split on spaces, or an argv list; never through a shell |
 | `[build.splash]` | none | [the splash](#the-splash) |
+| `[build.assets]` | none | folders beside `aio.toml` built into the app by URL prefix, answered at the same path in the window, the app's server, the web build and the APK ([build](README.md#build-ax-build)) |
 | `[build.macos]` | | [macOS](#macos) |
 | `[build.android]` | | [Android](#android) |
 
 The app's name, version and icon come from `[app]` and the app's folder:
 `[app] name` is the window title, the menu entry and the bundle's name;
 `[app] id` is the binary, the package name and the data's home;
-`assets/icon.png` beside `aio.toml` is the icon everywhere (none: a
-monogram of the name, drawn at each size). Versions:
+`assets/icon.png` beside `aio.toml` (a square PNG, 512 px or more) is the
+icon of every package and, built in by `aio::config!()`, of the running
+window; `assets/icon.ico` is the Windows exe's as it is. None: a
+monogram of the name in the app's hue, drawn at each size, 512 px plus an
+SVG for Linux. `ax build` says when an icon can't be used: not square,
+an `icon.svg` (not read), an `icon.png` outside `assets/`. Versions:
 [build](README.md#versions).
 
 ### One repo, several apps
@@ -268,7 +283,7 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 |---|---|---|
 | `notes-1.4.7-linux-x64.tar.gz` | `tar -xzf`, then `./install.sh`: for this user, no root | `uninstall.sh` (keeps the data; `--data` removes it too) |
 | `notes_1.4.7_amd64.deb` (`--deb`) | `sudo apt install ./notes_1.4.7_amd64.deb` | `sudo apt remove notes` |
-| `notes-1.4.7-x86_64.AppImage` (`--appimage`) | run it as is | delete it |
+| `notes-1.4.7-x86_64.AppImage` (`--appimage`) | run it as is, or `ax install notes --appimage` | delete it, or `ax remove notes` |
 
 - `install.sh` puts the binary in
   `$XDG_DATA_HOME/aio-rt/install/<id>/versions/<version>/` with `current`
@@ -284,6 +299,13 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 - An AppImage carries the pinned AppImage runtime (checked by its
   SHA-256) and the app; the Electron runtime is still shared. An app run
   from one updates by replacing the file (`ax release --appimage`).
+- `ax install <app> --appimage` (aio's installer): the AppImage copied to
+  `$XDG_DATA_HOME/aio-rt/install/<id>-appimage/<id>.AppImage` (where its
+  updates go), its icon, and a menu entry whose `Exec` makes a private
+  `TMPDIR` (`$XDG_CACHE_HOME/aio-rt/<id>/tmp`, mode 0700) before the
+  AppImage runs: the AppImage runtime unpacks into `TMPDIR` before any of
+  the app can run, and `/tmp` is shared. `ax installed` lists it as
+  `<id> (AppImage)`, `ax remove` takes it away.
 - None of them carries the runtime unless `runtime = "bundled"`.
 - Chromium's sandbox: where unprivileged user namespaces are restricted
   (Ubuntu 23.10+, some containers), the window starts with `--no-sandbox`
@@ -317,7 +339,8 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 | `notes-1.4.7-macos-arm64.zip` | unzip, drag `Notes.app` to Applications |
 | `notes-1.4.7-macos-arm64.dmg` (kind `dmg`) | open, drag `Notes.app` onto the Applications link |
 
-- The `.app` holds the binary, its icon (`assets/icon.png` as `.icns`),
+- The `.app` holds the binary, its icon (an `.icns` made in Rust with every
+  slot from 16 to 1024 px: `assets/icon.png` scaled, or the monogram drawn),
   `Info.plist` with `[build.macos] bundle_id` (else `aio.rt.<id>`; it is
   the app's identity, never change it) and macOS 11 as the minimum. It is
   signed ad hoc (Apple silicon runs nothing unsigned), not with a
@@ -344,6 +367,10 @@ text = "{title}"                 # under the image; {title} is the app's name
 min_ms = 400                     # once shown, at least this long
 max_ms = 15000                   # no window by then: it goes anyway
 background = ["#f6f7f9", "#14161a"]  # light, dark; unset: the app's own colours
+font = "serif"                   # Android: the text's font family; unset: the system's
+font_size = 16                   # Android: points; unset: 14
+bold = true                      # Android: the text in bold
+fade_ms = 300                    # Android: its fade out; unset: 200
 ```
 
 Shown from the app's start until its window has loaded, on the desktop,
@@ -375,26 +402,41 @@ reserved `https://app.invalid`.
 
 ### What it needs, what it makes
 
-- On Linux: the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, else
-  `~/Android/Sdk`) with an NDK and build-tools, a JDK 17 or 21
-  (`JAVA_HOME` when its folder is named `…-17…` or `…-21…`, else one in
-  `/usr/lib/jvm`), Gradle 8.9 or newer, and the
-  Rust targets `aarch64-linux-android` and `x86_64-linux-android`.
-  `ax setup --check` names what is missing.
-- `ax build notes --android`: `dist/<id>-<version>-android-arm64-v8a.apk`
-  and `…-android-x86_64.apk`, each zipaligned, signed and within the 10 MB
-  budget; with `aab = true` also `dist/<id>-<version>-android.aab` for
-  Play. minSdk 29 (Android 10, the oldest whose WebView still gets
-  updates), targetSdk 35.
-- The version code grows with the version: `1.4.7` is 1004007. A
-  prerelease shares its release's code, so never ship both to the same
-  users.
+- On Linux, macOS or Windows: the Android SDK (`ANDROID_HOME`,
+  `ANDROID_SDK_ROOT`, each the SDK or its parent, else the OS's default:
+  `~/Android/Sdk`, `~/Library/Android/sdk`, `%LOCALAPPDATA%\Android\Sdk`)
+  with an NDK and build-tools; a JDK 17 to 23 (each candidate's `javac`
+  asked its version, so a JRE is never taken: `JAVA_HOME` when it fits,
+  else the newest up to 21 in the OS's JDK folders, Android Studio's own
+  included); any Gradle 8.9 or newer (9 too) on `PATH` or in
+  `~/.gradle`, which only writes the wrapper: the build runs Gradle 8.14.3,
+  pinned; and the Rust targets `aarch64-linux-android`,
+  `armv7-linux-androideabi` and `x86_64-linux-android`. `ax setup --check`
+  names what is missing.
+- `ax build notes --android`: `dist/<id>-<version>-android-arm64-v8a.apk`,
+  `…-armeabi-v7a.apk` (32-bit ARM, as aio ships it) and `…-x86_64.apk`,
+  each zipaligned, signed and within the 10 MB budget; with
+  `universal = true` also `…-android-universal.apk` (every CPU in one file,
+  to share; `ax install` takes it when there is none for the phone's CPU);
+  with `aab = true` also `dist/<id>-<version>-android.aab` for Play.
+  minSdk 29 (Android 10, the oldest whose WebView still gets updates, as
+  aio), targetSdk 35.
+- `ax build notes --android --debug`: debug APKs instead
+  (`…-android-<abi>-debug.apk`), debuggable and signed with Android's debug
+  key: the page shows in `chrome://inspect`. Install one with
+  `ax install notes --android --apk <file>`.
+- The version code is aio's: `major·10⁸ + minor·10⁶ + patch`, so `1.4.7`
+  is 104000007 and a port's APK installs over the aio APK of the same
+  version number (aio's third number is its build count). Out of range
+  (major over 20, minor over 99, patch over 999999) is refused, never
+  wrapped. A prerelease shares its release's code, so never ship both to
+  the same users.
 
 ### Identity and signing
 
 ```toml
 [build.android]
-application_id = "org.example.notes"  # its permanent identity; unset: aio.rt.<id>
+application_id = "org.example.notes"  # its permanent identity; unset: aio.rt.<id> (a port: aio's)
 keystore = "keys/release.jks"         # relative: the app's folder; unset: aio's key for the app
 key_alias = "notes"
 ```
@@ -404,7 +446,8 @@ key_alias = "notes"
   users have it.
 - No keystore named: a key is made on first use in
   `~/.config/aio-rt/keys/<id>.android.p12`. Keep it (back it up): a lost
-  key means users must uninstall to get the next version.
+  key means users must uninstall to get the next version. A port signs
+  with aio's key instead (below).
 - The password is never in `aio.toml`: the build reads
   `AIO_ANDROID_KEYSTORE_PASSWORD` (and `AIO_ANDROID_KEY_PASSWORD` when
   the key has its own). In CI, `AIO_ANDROID_KEYSTORE` and
@@ -424,6 +467,65 @@ assert!(bad("[app]\nid = \"notes\"\n\n[build.android]\napplication_id = \"notes\
 # }
 ```
 
+### Over aio's APK: a port's upgrade
+
+A port (`[app] port_of = "notes"`, [migration](../migration/README.md))
+installs over the aio APK of that app, its data with it:
+
+- Its application id is aio's, `app.aio.<port_of without non-[a-z0-9]>`
+  (a declared `application_id` wins: give the aio app's own when it had
+  one, or when its APK's name was not its id).
+- Its version code is aio's formula (above): give it a version above
+  the aio build's (`1.2.346` over aio's `1.2.345`).
+- No keystore named: it signs with this machine's Android debug key
+  (`~/.android/debug.keystore`; `ANDROID_USER_HOME`, or `$XDG_CONFIG_HOME/.android` when Gradle put it there), the key
+  aio's default build signs with; the build says so. An aio release that
+  was signed with your keystore: name the same one (`keystore`, or
+  `AIO_ANDROID_KEYSTORE`).
+- At its first start the aio APK's state (`filesDir/aio-store`, key
+  `aio:<port_of>`) becomes the port's store in aio's layout, which its
+  cells start from as from aio's desktop `state.db`; once (only while the
+  port has no store), and aio's files are left as they were.
+
+### The dev loop
+
+```sh
+ax dev notes --android                 # the attached emulator (before a phone), else AIO_AVD booted
+ax dev notes --android --device R58N…  # that one (or ANDROID_SERIAL)
+ax dev notes --android --native        # the app itself, rebuilt on each save
+```
+
+- An app with a web build (`ax create`'s has one) runs as its dev page, as
+  aio's `dev:android`: a thin dev APK (no library: Gradle only, no NDK)
+  is built once and installed once beside the real app
+  (`<application id>.dev`, "Notes (dev)"); `ax dev --web` serves the page
+  on this machine, `adb reverse` brings it to the device's
+  `http://127.0.0.1:<port>`, and each edit rebuilds it there and reloads
+  it on the device. The page is the web build's: its cells run in the
+  page, not in a native library. Ctrl-C removes ax's reverse (only its
+  own); one a killed session left is removed at the next start.
+- `--native`, or an app without a web build: the app's own library as a
+  debug dev copy beside the real app (`.dev`), built for that device's
+  CPU only, installed and started again on every save.
+- No device attached: `AIO_AVD` (else the first AVD) is booted, on
+  console port `AIO_AVD_PORT` when set, without a window where there is no
+  display, and waited for (up to 180 s); it is left running for the next
+  run.
+- The app's log, its page's console and a crash reach the terminal as
+  `[device] …` (`adb logcat -s aio AndroidRuntime chromium`), a page
+  error with its file and line.
+
+### The emulator lane
+
+```sh
+ax test notes --android                # AIO_AVD booted when none is attached
+ax test notes --android --device emulator-5556
+```
+
+The app's release APK for the device's CPU is built, installed and
+started; the lane passes once the window is ready within 60 s and the app
+still runs 3 s later, and fails with the device's own lines on a crash.
+
 ### How it behaves on a phone
 
 | Concern | What aio-rs does |
@@ -434,8 +536,9 @@ assert!(bad("[app]\nid = \"notes\"\n\n[build.android]\napplication_id = \"notes\
 | Deep links | `schemes = ["notes"]`: a `notes://…` link opens the app (one copy, `singleTask`) and reaches it (`aio::ui::links`; a `router!` goes there). Lower case; none of the system's (`https`, `content`, `file`…) |
 | The camera | `camera = true` declares it (optional hardware: it still installs without one); the window must allow `"media"`; Android asks once. Only `getUserMedia({ video: true })` alone: anything else asked with it is denied |
 | `<input type="file">` | the system's picker; the app gets exactly what the user picks, no permission |
-| A download the page starts | never saved behind the app's back: logged; the app saves files (`aio_shell::page::save`) |
-| System bars, cutouts, keyboard | edge to edge, the page padded clear of them |
+| A download the page starts | a link on the network goes to Android's DownloadManager (into Downloads, with its notification); a `data:` one is saved where the user picks; a `blob:` one is logged (the page has no network to read it: the app saves files, `aio_shell::page::save`) |
+| The phone's images | `aio::ui::local_file_url(path)` (images only, as on the desktop) |
+| System bars, cutouts, keyboard | edge to edge, the page padded clear of them (Android 10 too) |
 | Light and dark | `color_scheme = "system"` (the phone's), `"light"` or `"dark"` |
 | The page's console | in the device's log (`adb logcat -s aio`) |
 | Networking | the app's Rust does it (sync, outbound HTTPS), not the WebView: no mixed-content rule applies to a `ws://` server on the LAN |
@@ -450,9 +553,11 @@ ax install notes --android --emulator # an emulator may be the device
 ax install notes --android --apk dist/notes-1.4.7-android-arm64-v8a.apk
 ```
 
-A phone needs USB debugging on (`adb devices` lists it). An APK older
-than the sources is refused (it would put the last build on the phone and
-say done). `ax release notes --android` publishes the APKs for updates
+A phone needs USB debugging on (`adb devices` lists it); `--device`, else
+adb's own `ANDROID_SERIAL`, names one of several. The APK is the app's
+own exactly (`<id>-<version>-android-<abi>.apk`: `notes` never takes
+`notes-pro`'s). An APK older than the sources is refused (it would put the
+last build on the phone and say done). `ax release notes --android` publishes the APKs for updates
 ([release](release.md)).
 
 ### Native Android code: `android/`
@@ -463,7 +568,12 @@ path for path: a file there replaces the template's whole, or adds one
 (`{{APPLICATION_ID}}`, `{{NAME}}`, `{{VERSION}}`…). The build says which
 files it took, and records what it replaced in `.aio/android-overlay.json`
 (commit it): when a newer aio-rs changes a template file you replaced, the
-build warns until your copy changes too.
+build warns until your copy changes too. An own `MainActivity.java` is
+checked for what the template's does (the insets frame and its Android 10
+path, the renderer-loss recovery, the splash), each loss named. A
+`{{TOKEN}}` no placeholder fills is named too (a typo, or another aio's
+key). With `[build.android] strict = true` a drift or a loss fails the
+build instead.
 
 ## Web
 
@@ -482,7 +592,9 @@ pub fn web() {
   binds it with `wasm-bindgen` (the version the lock names; `ax setup`
   fetches it) and writes `dist/<id>-web/`: the page, a web manifest, the
   Apple Home Screen tags, icons, an offline service worker, and the
-  wasm's size raw and gzipped. Put it on any HTTPS host, or serve it from
+  wasm's size raw and gzipped; with `[build.splash]`, iOS's launch images
+  (one per iPhone and iPad screen, the splash on its background), with
+  `[build.assets]`, those files at their paths. Put it on any HTTPS host, or serve it from
   the app's own server (`aio::http::Http::shell(dir)`).
 - `--web --dev`: a debug build whose page shows its errors on it.
 - The service worker precaches every file of the build (code checked
@@ -492,7 +604,8 @@ pub fn web() {
   new `sw.js`: the browser installs it.
 - Installing needs a square icon of at least 144 px: a smaller or
   non-square `assets/icon.png` is said, and the generated one used.
-- The page's policy allows no inline script and no `eval`; `[app] lang`
+- The page's policy allows no inline script and no `eval` (WebAssembly
+  compiles: `'wasm-unsafe-eval'`); `[app] lang`
   and `dir` are its `<html lang>` and `dir`.
 - The cells run in the page: `aio::Handle::saved(id)` is a cell of the
   page, kept in the browser's `localStorage` (per origin: scheme, host and
@@ -537,7 +650,8 @@ Ok(aio::lifecycle::exit_code())
   turns TLS on ([security](../auth/README.md#tls-and-the-network)).
 - Build it as `cli` (the default for a server): a `.tar.gz` whose
   `install.sh` puts it on `PATH` (a `.zip` on Windows), and beside it a
-  supervisor file, with the line that installs it:
+  supervisor file, with the line that installs it (on Linux also a
+  system unit, `<bundle>.system.service`, that starts at boot):
 
 | OS | File | Install it |
 |---|---|---|
@@ -553,8 +667,13 @@ Ok(aio::lifecycle::exit_code())
   machine is written in them.
 - `ax start`, `ax stop`, `ax status`, `ax health`, `ax logs` drive it like
   any app; `ax surface <app> --headless` shows its views without a window.
-- A system-wide service (another user, a root unit, a container) is the
-  operator's to write; the binary needs nothing but its flags and
+- The system unit (aio's `build-service`) starts at boot with no login
+  and no linger: the binary in `/usr/local/bin/<id>`, run as a user of its
+  own that systemd makes (`DynamicUser`), its data in `/var/lib/<id>`
+  (`StateDirectory`), `AIO_SUPERVISED`, `AIO_STOP_STAYS_DOWN` and
+  `Restart=always` as the user unit. It updates with its package (a
+  system install is not the app's to swap). Another user, a container:
+  the operator's to write; the binary needs nothing but its flags and
   `AIORT_DATA`.
 
 ## CLI
@@ -611,8 +730,11 @@ The same `aio.toml` is built into every target; what a target can't use
 ## Limits
 
 - No iOS target.
+- A macOS bundle is built on a Mac (or one over ssh, `[build.macos]
+  host`): a macOS binary links Apple's frameworks, whose SDK only a Mac
+  may carry; aio's Deno binary cross-compiled to an unsigned `.app` on any host.
 - macOS and Windows bundles are not OS-signed or notarized yet.
-- Android is built on Linux only (the NDK's Linux toolchain).
+- Android: no client connect page on the phone yet (pair from the desktop, `ax pair`).
 - No Flatpak, Snap, RPM, MSI or Microsoft Store package.
 - No one-file "standalone binary with its own browser UI" beyond
   `ui = "browser"` (which needs the app's server).

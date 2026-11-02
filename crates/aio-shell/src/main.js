@@ -5,6 +5,7 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, nativeTheme, net: enet, protocol, screen, session, shell, webContents } = require('electron')
 const net = require('node:net')
 const path = require('node:path')
+const fs = require('node:fs')
 const { pathToFileURL } = require('node:url')
 
 const arg = (k) => (process.argv.find((a) => a.startsWith(`--aio-${k}=`)) || '').slice(k.length + 7)
@@ -29,39 +30,76 @@ const G = require(path.join(dir, 'guest.js'))
 const SPLASH = require(path.join(dir, 'splash.json'))
 let splash = null
 let splashAt = 0
+let splashEnded = false
 function openSplash() {
   if (!SPLASH) return
   const [light, dark] = SPLASH.bg
   splash = new BrowserWindow({
-    width: SPLASH.width, height: SPLASH.height, center: true, show: false, frame: false,
+    width: SPLASH.width, height: SPLASH.height, ...splashPlace(SPLASH.width, SPLASH.height), show: false, frame: false,
+    hasShadow: !!SPLASH.windowShadow,
     resizable: false, movable: false, minimizable: false, maximizable: false, fullscreenable: false,
-    skipTaskbar: true, title: arg('title'), backgroundColor: nativeTheme.shouldUseDarkColors ? dark : light,
+    skipTaskbar: true, title: arg('title'),
+    // A rounded or bordered splash ([build.splash] radius, border): clear around its box.
+    transparent: !!SPLASH.clear, backgroundColor: SPLASH.clear ? '#00000000' : nativeTheme.shouldUseDarkColors ? dark : light,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
   })
   splash.webContents.on('will-navigate', (e) => e.preventDefault())
-  splash.once('ready-to-show', () => {
-    if (!splash) return
+  const up = () => {
+    if (!splash || splash.isDestroyed() || splashAt || splashEnded) return
     splashAt = Date.now()
     splash.show()
     console.error(`[aio-shell] splash: up ${Math.round(process.uptime() * 1000)} ms after the runtime started`)
-  })
+  }
+  splash.once('ready-to-show', up)
+  // A hidden window may never paint on a loaded machine (no 'ready-to-show'):
+  // up a second after its page loaded, on its background colour if need be.
+  splash.webContents.once('did-finish-load', () => setTimeout(up, 1000))
   splash.loadFile(path.join(dir, 'splash.html'))
   setTimeout(() => endSplash(), SPLASH.max)
+}
+// Where the splash opens ([build.splash] position, presplash.rs `origin`):
+// centred on the app's window as last placed (SPLASH.target), on the
+// primary display, or on the one under the pointer; kept 64 px inside it.
+function splashPlace(w, h) {
+  const t = SPLASH.target && { x: SPLASH.target[0], y: SPLASH.target[1], width: SPLASH.target[2], height: SPLASH.target[3] }
+  const d = SPLASH.mode === 'pointer' ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+    : SPLASH.mode === 'window' && t ? screen.getDisplayMatching(t) : screen.getPrimaryDisplay()
+  const a = d.workArea
+  const r = SPLASH.mode === 'window' && t ? t : a
+  const fit = (v, lo, n, span) => Math.max(lo, Math.min(v, lo + Math.max(0, span - n)))
+  const mx = Math.min(64, Math.floor(a.width / 8)), my = Math.min(64, Math.floor(a.height / 8))
+  return {
+    x: fit(Math.round(r.x + r.width / 2 - w / 2), a.x + mx, w, a.width - 2 * mx),
+    y: fit(Math.round(r.y + r.height / 2 - h / 2), a.y + my, h, a.height - 2 * my),
+  }
 }
 // The window may show: once the splash has been up its minimum. `then`
 // shows it; the splash goes with it (or at its cap, then).
 function endSplash(then) {
   const go = () => {
+    splashEnded = true
     if (then) then()
     if (!splash || splash.isDestroyed()) return (splash = null)
     if (splashAt) console.error(`[aio-shell] splash: gone after ${Date.now() - splashAt} ms${then ? ', the window shown' : ' (its cap)'}`)
     splashAt = 0
     // The last window closing would end the app before its own opened:
-    // hidden until the window shows.
-    if (BrowserWindow.getAllWindows().length > 1) {
-      splash.destroy()
-      splash = null
-    } else splash.hide()
+    // hidden until the window shows. Faded out first ([build.splash]
+    // fade_ms; where the OS fades windows: Windows, macOS).
+    const s = splash
+    const away = () => {
+      if (s.isDestroyed()) return
+      if (BrowserWindow.getAllWindows().length > 1) {
+        s.destroy()
+        if (splash === s) splash = null
+      } else s.hide()
+    }
+    const steps = Math.round((SPLASH.fade || 0) / 16)
+    if (steps < 2 || !s.isVisible()) return away()
+    let i = 0
+    const t = setInterval(() => {
+      if (s.isDestroyed() || ++i >= steps) { clearInterval(t); return away() }
+      s.setOpacity(1 - i / steps)
+    }, 16)
   }
   const left = splash && splashAt ? SPLASH.min - (Date.now() - splashAt) : 0
   if (left > 0) setTimeout(go, left)
@@ -74,7 +112,19 @@ app.on('before-quit', () => { quitting = true })
 // to refuse; the person's own close keeps the page's beforeunload say:
 // told once (aio), or asked Leave / Stay (Window { confirm_unload }).
 let leaving = false
-const leave = () => { leaving = true; app.quit() }
+// A quit asked while a vetoed close is still settling (the page's
+// window.close(), then the app stopping) loses its own close of that
+// window, and Electron, quitting already, asks no more: closed again
+// until the windows are gone.
+const leave = () => {
+  leaving = true
+  app.quit()
+  const again = setInterval(() => {
+    const open = BrowserWindow.getAllWindows()
+    if (!open.length) return clearInterval(again)
+    for (const x of open) x.close()
+  }, 250)
+}
 let vetoSaid = false
 app.on('web-contents-created', (_e, wc) => wc.on('will-prevent-unload', (e) => {
   const act = G.unload(leaving, SHELL.confirmUnload)
@@ -93,7 +143,90 @@ app.on('web-contents-created', (_e, wc) => wc.on('will-prevent-unload', (e) => {
   }
 }))
 
-protocol.registerSchemesAsPrivileged([{ scheme: 'aio', privileges: { standard: true, secure: true } }])
+// fetch() and streamed bodies too: the page's requests to the app's routes
+// (aio://app/<path>) reach Chromium as they arrive, never held here whole.
+protocol.registerSchemesAsPrivileged([{ scheme: 'aio', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }])
+
+// The app's routes, over its private socket (Unix socket or named pipe; the
+// app answers this process only): no TCP port. aio's socketFetch
+// (electron-shared.ts tmplSocketFetch), as it is: at most 6 connections, as
+// Chromium per host; a small or error body read here, so a body nobody reads
+// (an <img>'s 404) never holds a connection; everything else streamed, and a
+// dropped stream closes its connection; no first byte in AIO_SOCKET_TIMEOUT_MS
+// (30 s) is a 504, a dead socket a 502, both in words.
+const HTTP_SOCK = arg('http')
+const MAX_SOCKETS = 6
+const SMALL_BODY = 64 * 1024
+const REQ_TIMEOUT_MS = ((s) => /^[0-9]+$/.test(s) && Number(s) > 0 ? Number(s) : 30000)(String(process.env.AIO_SOCKET_TIMEOUT_MS || '').trim())
+let agent = null
+function socketFetch(reqPath, method, headers, body) {
+  const http = require('node:http')
+  const { Readable } = require('node:stream')
+  agent = agent || new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS })
+  const where = `socket (${HTTP_SOCK})`
+  return new Promise((resolveRaw) => {
+    let settled = false
+    let deadline
+    const resolve = (r) => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      resolveRaw(r)
+    }
+    const r = http.request({ socketPath: HTTP_SOCK, agent, path: reqPath, method, headers }, (res) => {
+      const h = {}
+      for (const [k, v] of Object.entries(res.headers)) h[k] = Array.isArray(v) ? v.join(', ') : v
+      const status = res.statusCode || 200
+      // A body-less status carries no stream: Response() throws.
+      if (status === 204 || status === 304 || method === 'HEAD') { res.resume(); resolve(new Response(null, { status, headers: h })); return }
+      const len = Number(res.headers['content-length'])
+      if ((Number.isFinite(len) && len <= SMALL_BODY) || status >= 400) {
+        const chunks = []
+        let got = 0
+        let capped = false
+        res.on('data', (c) => {
+          got += c.length
+          chunks.push(c)
+          // An error body of no said length: its first page, the rest dropped.
+          if (got > SMALL_BODY) { capped = true; res.destroy() }
+        })
+        // A said length that did not all arrive is a truncated answer, never a short 200.
+        const done = () => {
+          if (!capped && Number.isFinite(len) && got < len) {
+            resolve(new Response(`aio: the app closed the connection after ${got} of ${len} bytes of ${reqPath}: the response is truncated`, { status: 502, headers: { 'Content-Type': 'text/plain' } }))
+            return
+          }
+          resolve(new Response(Buffer.concat(chunks), { status, headers: h }))
+        }
+        res.on('end', done)
+        res.on('close', done)
+        res.on('error', done)
+        return
+      }
+      resolve(new Response(new ReadableStream({
+        start(c) {
+          res.on('data', (chunk) => {
+            try { c.enqueue(new Uint8Array(chunk)) } catch (_) { res.destroy(); return }
+            if (c.desiredSize !== null && c.desiredSize <= 0) res.pause()
+          })
+          res.on('end', () => { try { c.close() } catch (_) {} })
+          res.on('error', (e) => { try { c.error(e) } catch (_) {} })
+        },
+        pull() { res.resume() },
+        cancel() { res.destroy() },
+      }), { status, headers: h }))
+    })
+    r.on('error', (e) => resolve(new Response(`aio: cannot reach the app over its ${where}: ${e.message}`, { status: 502, headers: { 'Content-Type': 'text/plain' } })))
+    deadline = setTimeout(() => {
+      const msg = `aio: no answer from the app for ${method} ${reqPath} after ${REQ_TIMEOUT_MS} ms over its ${where}. The request was dropped so the window keeps working; if this route is that slow to its first byte, raise AIO_SOCKET_TIMEOUT_MS.`
+      try { console.error(`[aio-shell] ${msg}`) } catch (_) {}
+      resolve(new Response(msg, { status: 504, headers: { 'Content-Type': 'text/plain' } }))
+      try { r.destroy(new Error(`aio: request timed out after ${REQ_TIMEOUT_MS} ms`)) } catch (_) {}
+    }, REQ_TIMEOUT_MS)
+    if (body) Readable.fromWeb(body).pipe(r)
+    else r.end()
+  })
+}
 
 // Frames from the app socket, split by their 4-byte big-endian length.
 function frames(onFrame) {
@@ -174,6 +307,21 @@ app.whenReady().then(() => {
       const p = path.resolve(decodeURIComponent(u.pathname.slice('/file'.length)))
       if (IMAGE.test(p)) return enet.fetch(pathToFileURL(p).toString())
     }
+    // The app's built-in files ([build] assets), at their own paths.
+    const assets = path.join(dir, 'assets')
+    let own = null
+    try { own = path.resolve(assets, '.' + decodeURIComponent(u.pathname)) } catch (_) {}
+    if (u.host === 'app' && own && own.startsWith(assets + path.sep) && fs.existsSync(own) && fs.statSync(own).isFile()) {
+      return enet.fetch(pathToFileURL(own).toString())
+    }
+    // Anything else is the app's: its routes, its dirs, its blobs, path and
+    // query as they are, streamed both ways. No socket: nothing is there.
+    if (u.host === 'app' && HTTP_SOCK) {
+      const headers = {}
+      req.headers.forEach((v, k) => { headers[k] = v })
+      const body = req.method === 'GET' || req.method === 'HEAD' ? null : req.body
+      return socketFetch(u.pathname + u.search, req.method, headers, body)
+    }
     return new Response('', { status: 404 })
   })
   // The app's control line. Rust → here: "focus", "print", "quit", where to
@@ -210,10 +358,20 @@ app.whenReady().then(() => {
       if (m.t === 'cdp') devtools(m)
       if (m.t === 'cdp-end') undevtools()
       if (m.t === 'child') child(m)
+      if (m.t === 'clear-partition') clearPartition(m)
     }
-    if (l === 'focus') forward()
+    if (l === 'focus' || l === 'show') forward()
+    // The window's verbs (aio_shell::page): close is the title bar's own,
+    // so close-to-tray hides and the bounds are saved, whoever asked.
+    if (w && !w.isDestroyed()) {
+      if (l === 'minimize') w.minimize()
+      if (l === 'maximize') w.isMaximized() ? w.unmaximize() : w.maximize()
+      if (l === 'close') w.close()
+      if (l === 'hide') w.hide()
+    }
+    // CSS backgrounds and colours printed too (aio's printBackground).
     if (l === 'print' && w && !w.isDestroyed()) {
-      w.webContents.print({}, (ok, why) => { if (!ok && why !== 'Print job canceled') console.error(`[aio-shell] print: ${why}`) })
+      w.webContents.print({ silent: false, printBackground: true }, (ok, why) => { if (!ok && why !== 'Print job canceled') console.error(`[aio-shell] print: ${why}`) })
     }
     // The app is shutting down (a signal): close like the user did, past
     // the page's veto.
@@ -336,6 +494,19 @@ app.whenReady().then(() => {
     }
   }
 
+  // A guest's session wiped (aio_shell::clear_partition, aio's
+  // __aioShell.clearPartition: an app that locks drops what its guests
+  // stored): storage, cache and HTTP auth. Never the app's own session,
+  // by whatever spelling. Answered {"t":"done"}, with the reason it was not.
+  function clearPartition(m) {
+    const answer = (r) => tell({ t: 'done', id: m.id, ...r })
+    const name = m.partition
+    if (typeof name !== 'string' || !name) return answer({ error: "pass the partition's name (a <Browser>'s, or a child window's)" })
+    const ses = session.fromPartition(name)
+    if (ses === session.defaultSession) return answer({ error: `${JSON.stringify(name)} is the app's own session, not a partition: clearing it would sign the app itself out` })
+    Promise.all([ses.clearStorageData(), ses.clearCache(), ses.clearAuthCache()]).then(() => answer({}), (e) => answer({ error: e.message }))
+  }
+
   // The window's DevTools protocol for `aio surface`, `trigger`, `shot`
   // and `eval` (inspect.rs): run in this process, no port opened. Attached
   // on the first call, let go when the last asker leaves ({"t":"cdp-end"}).
@@ -369,6 +540,11 @@ app.whenReady().then(() => {
     w.show()
     w.focus()
   }
+  // macOS: opening the running app again (its Dock icon, Finder, `open`)
+  // only activates it; a window hidden to the tray or minimized comes back.
+  app.on('activate', forward)
+  // The page's own window.close() (preload.js): the close path above.
+  ipcMain.on('aio:close', (e) => { if (w && !w.isDestroyed() && e.sender === w.webContents) w.close() })
 
   // Notifications from the main process: no permission to ask, the app's
   // icon, and a click that works while the window is hidden. Each is held
@@ -534,10 +710,20 @@ app.whenReady().then(() => {
     const later = () => { clearTimeout(timer); timer = setTimeout(report, 400) }
     for (const ev of ['resize', 'move', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) w.on(ev, later)
     w.on('close', report)
-    // shown once painted, 5 s cap.
-    const show = () => endSplash(() => { if (!w.isDestroyed() && !w.isVisible()) w.show() })
-    w.once('ready-to-show', show)
-    setTimeout(show, 5000)
+    // shown once painted, at most SHELL.showCapMs later (Window { show_cap_ms }); 0: at once.
+    // Rust learns it is on screen: the OS's splash (presplash.rs) goes after its minimum.
+    const show = () => endSplash(() => {
+      if (w.isDestroyed() || w.isVisible()) return
+      w.show()
+      tell({ t: 'window', state: 'shown', normal: w.getNormalBounds() })
+    })
+    let painted = false
+    w.once('ready-to-show', () => { painted = true; show() })
+    if (!SHELL.showCapMs) show()
+    else setTimeout(() => {
+      if (!painted) console.error(`[aio-shell] the page did not paint within ${SHELL.showCapMs} ms: the window is shown anyway (Window { show_cap_ms })`)
+      show()
+    }, SHELL.showCapMs)
     w.webContents.on('did-finish-load', () => {
       loaded = true
       for (const f of early.splice(0)) w.webContents.send('aio:wire', f)
@@ -599,16 +785,15 @@ app.whenReady().then(() => {
     w.webContents.on('will-navigate', (e) => e.preventDefault())
     w.webContents.on('did-fail-load', (_e, code, desc, url) => console.error(`[aio-shell] load failed ${code} ${desc} ${url}`))
     w.webContents.on('preload-error', (_e, p, err) => console.error(`[aio-shell] preload ${p} failed: ${err && err.stack || err}`.replace(/\n/g, '\\n')))
-    // Page warnings and errors go to the app's log as its own WARN and
-    // ERROR lines, with the file they came from: 8 KB each, at most 100 a
-    // second (one line says how many were dropped). The log tells the
-    // runtime's own errors from the app's by both (aio::log::runtime_noise).
+    // The page's console goes to the app's log at its own level (log and
+    // info as INFO; debug in a dev build only), with the file it came from:
+    // 8 KB each, at most 100 a second (one line says how many were
+    // dropped). The log tells the runtime's own errors from the app's by
+    // both (aio::log::runtime_noise).
     let second = 0
     let count = 0
     w.webContents.on('console-message', (e) => {
-      // The page's info is dropped, but the render probe's (a recovery).
-      const quiet = e.level === 'info' || e.level === 'debug'
-      if (quiet && !String(e.message).startsWith('[vitals] ')) return
+      if (e.level === 'debug' && !dev) return
       const now = Math.floor(Date.now() / 1000)
       if (now !== second) {
         if (count > 100) console.error(`WARN  [page] ${count - 100} more messages dropped (over 100 a second)`)
@@ -616,7 +801,7 @@ app.whenReady().then(() => {
         count = 0
       }
       if (++count > 100) return
-      const word = e.level === 'error' ? 'ERROR' : quiet ? 'INFO ' : 'WARN '
+      const word = { error: 'ERROR', warning: 'WARN ', debug: 'DEBUG' }[e.level] || 'INFO '
       // file:line as written: no page script is bundled, so it needs no source map.
       const line = Number.isInteger(e.lineNumber) && e.lineNumber > 0 ? `:${e.lineNumber}` : ''
       const src = e.sourceId ? ` src=${String(e.sourceId).slice(0, 512).replace(/\s/g, '%20')}${line}` : ''

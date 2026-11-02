@@ -40,7 +40,7 @@ impl Reports {
         self.hourly += 1;
     }
 
-    /// Mondays at 9:00, this machine's local time.
+    /// Mondays at 9:00 UTC (local time with `[app] tz = "local"`).
     #[cron("0 9 * * mon")]
     pub fn weekly(&mut self, cx: &Cx) {
         let _ = cx.now(); // a declared method may take `cx`
@@ -146,9 +146,54 @@ assert!(h.broken().is_err());
   scheduled call refused when it fires (or one a new build renamed) is
   said in the log and a report, and the schedule is still moved on (or
   removed), so it never fires in a loop.
-- Schedules belong to a cell: they call only that cell. To reach another
-  cell, have the scheduled method's cell [listen](composition.md) or call
-  it from an effect.
+- `cx.on::<Other>()` has the same `after`, `every`, `at` and `cron` for a
+  method of another cell (aio's `schedule.after(id, ms,
+  other.method.action())`): the schedule is this cell's (its key, its
+  `cancel`, saved with this call), and when it fires the other cell's
+  method is called by `By::Schedule(key)`. A method `Other` doesn't have
+  refuses the call that sets it. It reaches the cells the app started
+  together (`Cells::start`, or one `TestCells`); a refusal there is that
+  cell's failure, a cell the app doesn't hold is this one's.
+
+```rust
+use aio::prelude::*;
+use aio::testing::TestCells;
+
+#[cell]
+pub struct Editor {
+    pub text: String,
+}
+
+#[cell]
+pub struct Drafts {
+    pub saved: Vec<String>,
+}
+
+#[methods]
+impl Editor {
+    /// Saved 3 s after the last keystroke, by the drafts cell.
+    pub fn typed(&mut self, cx: &Cx, text: String) -> Result {
+        self.text = text.clone();
+        cx.on::<Drafts>().after("autosave", 3_000, "save", (text,))
+    }
+}
+
+#[methods]
+impl Drafts {
+    pub fn save(&mut self, text: String) {
+        self.saved.push(text);
+    }
+}
+
+# fn main() {
+let mut t = TestCells::new();
+let (e, d) = (t.cell::<Editor>(), t.cell::<Drafts>());
+e.typed("hel".into()).unwrap();
+e.typed("hello".into()).unwrap();
+t.advance(3_000);
+assert_eq!(d.state().saved, ["hello"]);
+# }
+```
 
 ### Keys
 
@@ -229,8 +274,10 @@ and pass that count as the attempt.
 
 ### Cron lines
 
-Five fields: minute, hour, day of month, month, day of week, in this
-machine's local time.
+Five fields: minute, hour, day of month, month, day of week, in UTC as
+aio's were, so a ported app's jobs fire when they did: `0 9 * * *` is
+09:00 UTC. For this machine's local time (and its daylight-saving
+changes) set `[app] tz = "local"` in `aio.toml`.
 
 | Field | Values | Names |
 |---|---|---|
@@ -386,7 +433,7 @@ skip all of that.
 
 | What | Where | Why |
 |---|---|---|
-| a frame-by-frame animation, a canvas, a game loop | the view: `aio::kit::use_frame`, a `use_signal` | frame work is rendering, not state |
+| a frame-by-frame animation, a canvas, a game loop | the view: `aio::kit::use_frame`, a `signal` | frame work is rendering, not state |
 | a cadence only this window needs (a clock, a beat) | the view: `aio::kit::use_interval` | a schedule runs in the app's process, for everyone |
 | a cursor, a scroll, a selection | a cell method with `#[coalesce]` | shown at once, written once per run ([coalesced writes](../persistence/README.md#coalesced-writes)) |
 | shared state that changes often (a price ticker) | a `shared` cell, fed by one effect | each commit that changes what a viewer sees is one patch to them |
@@ -396,14 +443,14 @@ skip all of that.
   times a second pays that copy every time: split the hot part into a
   small cell of its own, or use `aio::imbl`'s persistent collections
   (feature `imbl`), whose copy is O(1).
-- Views re-render at most once per `aio::ui::BACKGROUND` (150 ms) for
+- Views update at most once per `aio::ui::BACKGROUND` (150 ms) for
   commits from effects, schedules and other threads; a call from the
-  view renders at once ([performance](../performance.md)).
-- Pushes to a client follow commits: a client slower than the commits
-  gets one patch for several. There is no push-rate setting (aio's
-  `syncIntervalMs`); to send less, call less (one effect that commits
-  once per batch) or make the viewer's view smaller
-  ([visibility](visibility.md)).
+  view shows at once ([performance](../performance.md)).
+- Pushes to a client are paced: a schedule's or an effect's commits
+  reach a link at most once per `[server.limits] sync_interval_ms` (50
+  ms, aio's `syncIntervalMs`), folded into one patch; a person's call
+  goes at once. To send less, call less (one effect that commits once
+  per batch) or make the viewer's view smaller ([visibility](visibility.md)).
 - Keep a tick out of the timeline, reports and the debug log with
   `#[cell(diagnostics = false)]`; its events are still kept.
 - aio-rs says when it sees trouble. Over 30 pushes a second, 500 KB in

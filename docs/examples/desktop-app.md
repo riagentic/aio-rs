@@ -225,7 +225,7 @@ assert!(h.state().problem.as_deref().unwrap().starts_with("couldn't import"));
 use aio::act;
 use aio::kit::{GlobalKeys, Menu, MenuItem, ToastHost, Tone, toast, use_global_key};
 use aio_shell::page::{Pick, Save};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::client!(Notes, notes);
 aio::router!();
@@ -267,11 +267,11 @@ async fn ask_import() {
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live(); // once, in the root
     updates::use_live();
     aio_shell::desktop::use_asks(go); // tray clicks: their `run`, then their route
-    use_hook(|| {
+    once(|| {
         // A later launch (`notes todo.md` while it runs) hands its files here.
         let mut later = aio_shell::launches();
         spawn(async move {
@@ -297,17 +297,17 @@ pub fn App() -> Element {
 }
 
 #[component]
-fn Sidebar() -> Element {
+fn Sidebar() -> View {
     use_global_key("mod+n", |_| new_note()); // under GlobalKeys: bindings fire there
     let search = part(|n| &n.search);
-    let shown = notes().shown(); // derived: computed once per notes and search
+    let shown = memo(|| notes().shown()); // derived: computed once per notes and search
     rsx! {
         nav {
             button { "data-t": "new", onclick: |_| new_note(), "New note" }
             input { "data-t": "search", r#type: "search", placeholder: "Search", value: "{search}",
                 oninput: move |e| _ = act!(find(e.value())) }
-            for (id, title) in shown.iter() {
-                Link { key: "{id}", to: Page::Note { id: *id }.href(), "{title}" }
+            for (id, title) in shown.get().to_vec() {
+                Link { key: "{id}", to: Page::Note { id }.href(), "{title}" }
             }
             Link { to: Page::Settings.href(), "Settings" }
         }
@@ -315,41 +315,49 @@ fn Sidebar() -> Element {
 }
 
 #[component]
-fn Body() -> Element {
-    match Page::parse(&here().path) {
-        Some(Page::Note { id }) => rsx! { Editor { id } },
-        Some(Page::Settings) => rsx! { p { "data-t": "settings", "Settings go here." } },
-        _ => rsx! { p { "data-t": "empty", "Pick a note, or make one (Ctrl+N)." } },
+fn Body() -> View {
+    // The page follows the place; a new page swaps what is drawn.
+    let page = memo(|| Page::parse(&here().path));
+    rsx! {
+        {match page.get() {
+            Some(Page::Note { id }) => rsx! { Editor { id } },
+            Some(Page::Settings) => rsx! { p { "data-t": "settings", "Settings go here." } },
+            _ => rsx! { p { "data-t": "empty", "Pick a note, or make one (Ctrl+N)." } },
+        }}
     }
 }
 
 #[component]
-fn Editor(id: Uuid) -> Element {
+fn Editor(id: Uuid) -> View {
     let all = part(|n| &n.notes);
-    let Some(note) = all.iter().find(|n| n.id == id).cloned() else {
-        return rsx! { p { "data-t": "gone", "This note is gone." } };
-    };
-    let title = note.title.clone();
+    // The note as it is now (None once it is deleted), its title and body.
+    let note = memo(move || all.with(|ns| ns.iter().find(|n| n.id == id).cloned()));
+    let title = memo(move || note.with(|n| n.as_ref().map(|n| n.title.clone()).unwrap_or_default()));
+    let body = memo(move || note.with(|n| n.as_ref().map(|n| n.body.clone()).unwrap_or_default()));
     rsx! {
-        header {
-            input { "data-t": "title", value: "{note.title}", oninput: move |e| _ = act!(rename(id, e.value())) }
-            Menu { label: "Note", trigger: rsx! { "⋯" },
-                items: vec![
-                    MenuItem::new("export", "Export…"),
-                    MenuItem::new("import", "Import…"),
-                    MenuItem::new("delete", "Delete"),
-                ],
-                onselect: move |what: String| match what.as_str() {
-                    "export" => _ = spawn(ask_export(id, title.clone())),
-                    "import" => _ = spawn(ask_import()),
-                    _ => {
-                        _ = act!(delete(id));
-                        redirect("/");
-                    }
-                },
+        if note.with(Option::is_none) {
+            p { "data-t": "gone", "This note is gone." }
+        } else {
+            header {
+                input { "data-t": "title", value: "{title}", oninput: move |e| _ = act!(rename(id, e.value())) }
+                Menu { label: "Note", trigger: rsx! { "⋯" },
+                    items: vec![
+                        MenuItem::new("export", "Export…"),
+                        MenuItem::new("import", "Import…"),
+                        MenuItem::new("delete", "Delete"),
+                    ],
+                    onselect: move |what: String| match what.as_str() {
+                        "export" => _ = spawn(ask_export(id, title.get())),
+                        "import" => _ = spawn(ask_import()),
+                        _ => {
+                            _ = act!(delete(id));
+                            redirect("/");
+                        }
+                    },
+                }
             }
+            textarea { "data-t": "body", value: "{body}", oninput: move |e| _ = act!(edit(id, e.value())) }
         }
-        textarea { "data-t": "body", value: "{note.body}", oninput: move |e| _ = act!(edit(id, e.value())) }
     }
 }
 
@@ -357,21 +365,26 @@ fn Editor(id: Uuid) -> Element {
 pub mod updates {
     use aio::act;
     use aio::update::{Phase, Updates, UpdatesCalls};
-    use dioxus::prelude::*;
+    use aio::ui::prelude::*;
 
     aio::client!(Updates, updates);
 
     #[component]
-    pub fn Banner() -> Element {
-        let phase = *part(|u| &u.phase);
-        let offer = part(|u| &u.available).as_ref().cloned();
-        let (Phase::Available, Some(o)) = (phase, offer) else { return rsx! {} };
+    pub fn Banner() -> View {
+        let (phase, offer) = (part(|u| &u.phase), part(|u| &u.available));
+        // The offer while there is one to make.
+        let open = memo(move || match (phase.get(), offer.get()) {
+            (Phase::Available, Some(o)) => Some(o),
+            _ => None,
+        });
         rsx! {
-            div { role: "status", "data-t": "update",
-                "Version {o.version} is ready. {o.notes} "
-                button { onclick: |_| _ = act!(apply()), "Restart to update" }
-                button { onclick: |_| _ = act!(dismiss()), "Not now" }
-            }
+            {open.get().map(|o| rsx! {
+                div { role: "status", "data-t": "update",
+                    "Version {o.version} is ready. {o.notes} "
+                    button { r#type: "button", onclick: |_| _ = act!(apply()), "Restart to update" }
+                    button { r#type: "button", onclick: |_| _ = act!(dismiss()), "Not now" }
+                }
+            })}
         }
     }
 }
@@ -381,7 +394,7 @@ let mut ui = aio::testing::TestUi::new(App);
 ui.click("new");
 ui.type_text("body", "milk");
 ui.press("body", "ctrl+n");
-assert_eq!(HANDLE.peek().state().notes.len(), 2);
+assert_eq!(HANDLE.read_untracked().state().notes.len(), 2);
 # }
 ```
 
@@ -414,12 +427,12 @@ The template's launcher, with the tray and the `updates` cell's source:
 # pub struct Notes { pub n: u32 }
 # #[aio::methods]
 # impl Notes {}
-# use dioxus::prelude::*;
+# use aio::ui::prelude::*;
 # aio::client!(Notes, notes);
 # #[component]
-# pub fn App() -> Element { rsx! {} }
+# pub fn App() -> View { rsx! {} }
 # pub fn new_note() {}
-# pub mod updates { use dioxus::prelude::*; aio::client!(aio::update::Updates, updates); }
+# pub mod updates { use aio::ui::prelude::*; aio::client!(aio::update::Updates, updates); }
 use aio_shell::Start;
 use aio_shell::desktop::{Item, Tray};
 

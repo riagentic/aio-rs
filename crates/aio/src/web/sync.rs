@@ -28,6 +28,7 @@ fn lock<X>(m: &Mutex<X>) -> MutexGuard<'_, X> {
 
 type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
 type Refusal = Arc<dyn Fn(&str, &Rejected) + Send + Sync>;
+type OnConflict = Arc<dyn Fn(&[crate::merge::Conflict]) + Send + Sync>;
 
 struct Copy<T> {
     seq: u64,
@@ -38,6 +39,10 @@ struct Copy<T> {
     shown: Arc<T>,
     /// Who it calls as: the server names it on the first state.
     user: String,
+    /// The server's view (and state) the oldest waiting call was made on.
+    base: Option<(Value, Arc<T>)>,
+    /// Fields shown merged ([`Remote::merge`]).
+    merges: Vec<(String, crate::merge::Merge)>,
 }
 
 /// `method` on `st` as the server runs it: its machine, then the method,
@@ -51,17 +56,48 @@ fn apply<T: Cell>(st: &mut T, cx: &Cx, method: &str, args: Value) -> Result<Valu
 
 impl<T: Cell> Copy<T> {
     /// The confirmed copy + the calls still waiting (one that no longer
-    /// applies is skipped; the server will refuse it).
+    /// applies is skipped; the server will refuse it), the fields of
+    /// [`Remote::merge`] both changed shown merged.
     fn reshow(&mut self) {
+        match self.pending.is_empty() {
+            true => self.base = None,
+            false => _ = self.base.get_or_insert_with(|| (self.view.clone(), self.confirmed.clone())),
+        }
+        let st = self.replayed(&self.confirmed);
+        self.shown = Arc::new(match &self.base {
+            Some((view, base)) if !self.merges.is_empty() => {
+                match (serde_json::to_value(self.replayed(base)), serde_json::to_value(&st)) {
+                    (Ok(local), Ok(mut shown)) => {
+                        crate::merge::show(&self.merges, view, &local, &self.view, &mut shown);
+                        crate::copy_of::<T>(shown).unwrap_or(st)
+                    }
+                    _ => st,
+                }
+            }
+            _ => st,
+        });
+    }
+
+    /// The calls still waiting, replayed on `from`.
+    fn replayed(&self, from: &T) -> T {
         let by = By::User(self.user.clone());
-        let mut st = (*self.confirmed).clone();
+        let mut st = from.clone();
         for q in self.pending.iter().filter(|q| !q.waits) {
             let mut next = st.clone();
             if apply(&mut next, &Cx::replay(q.at, q.inputs.clone(), &by), &q.method, q.args.clone()).is_ok() {
                 st = next;
             }
         }
-        self.shown = Arc::new(st);
+        st
+    }
+
+    /// Before a server view comes: what to check it against for conflicts
+    /// (its view, what it shows), unless no call waits or `own` is one of them.
+    fn before(&self, own: &Value) -> Option<(Value, Value)> {
+        if self.pending.is_empty() || self.pending.iter().any(|q| own.as_str() == Some(q.op.as_str())) {
+            return None;
+        }
+        Some((self.view.clone(), serde_json::to_value(&*self.shown).ok()?))
     }
 
     fn doc(&self) -> Doc {
@@ -72,6 +108,7 @@ impl<T: Cell> Copy<T> {
             seq: self.seq,
             view: self.view.clone(),
             pending: self.pending.clone(),
+            sched: Vec::new(),
         }
     }
 }
@@ -88,7 +125,10 @@ struct Inner<T: Cell> {
     unsaved: AtomicBool,
     listeners: Mutex<Vec<Listener<T>>>,
     refusals: Mutex<Vec<Refusal>>,
+    conflicts: Mutex<Vec<OnConflict>>,
     owned: Mutex<std::collections::HashMap<String, Box<dyn std::any::Any + Send>>>,
+    /// Async methods' callers waiting for their end (`end` frames), by call.
+    ends: Mutex<std::collections::HashMap<String, crate::Reply>>,
 }
 
 /// A synced copy of a server's cell in the page. Reads and calls are local
@@ -110,19 +150,161 @@ enum Heard {
     Closed,
 }
 
-/// One link to the server: the socket and what it hears, closed when dropped.
-struct Link {
+/// The page's socket to one server, shared by its copies of every cell
+/// ([`crate::mux`]: aio's page has one socket too); an older server that
+/// doesn't say yes (`aio-mux`) carries one link.
+struct Page {
     ws: web_sys::WebSocket,
-    rx: UnboundedReceiver<Heard>,
+    url: String,
+    /// Open, and whether the server said yes.
+    open: std::cell::Cell<Option<bool>>,
+    /// Closed.
+    gone: std::cell::Cell<bool>,
+    chans: std::cell::RefCell<std::collections::HashMap<u32, UnboundedSender<Heard>>>,
+    next: std::cell::Cell<u32>,
     _cbs: [Closure<dyn FnMut(JsValue)>; 3],
 }
 
-impl Drop for Link {
+thread_local! {
+    /// Each server's socket while a copy uses it.
+    static PAGES: std::cell::RefCell<std::collections::HashMap<String, std::rc::Weak<Page>>> = Default::default();
+}
+
+impl Page {
+    /// The socket to `url` the page's copies share, or (`shared: false`) one
+    /// of this link's own.
+    fn get(url: &str, shared: bool) -> std::result::Result<std::rc::Rc<Self>, Failed> {
+        let live = |p: &std::rc::Rc<Page>| !p.gone.get();
+        if let Some(p) =
+            PAGES.with_borrow(|m| m.get(url).and_then(std::rc::Weak::upgrade)).filter(live).filter(|_| shared)
+        {
+            return Ok(p);
+        }
+        let ws = web_sys::WebSocket::new_with_str(url, crate::mux::PROTOCOL)
+            .map_err(|e| Failed::Offline(format!("{e:?}")))?;
+        let page = std::rc::Rc::new_cyclic(|weak: &std::rc::Weak<Page>| {
+            let on = |f: fn(&Page, JsValue)| {
+                let weak = weak.clone();
+                Closure::<dyn FnMut(JsValue)>::new(move |e| {
+                    if let Some(p) = weak.upgrade() {
+                        f(&p, e)
+                    }
+                })
+            };
+            let cbs = [on(Page::opened), on(Page::heard), on(Page::closed)];
+            ws.set_onopen(Some(cbs[0].as_ref().unchecked_ref()));
+            ws.set_onmessage(Some(cbs[1].as_ref().unchecked_ref()));
+            ws.set_onclose(Some(cbs[2].as_ref().unchecked_ref()));
+            Self {
+                ws,
+                url: url.into(),
+                open: Default::default(),
+                gone: Default::default(),
+                chans: Default::default(),
+                next: std::cell::Cell::new(1),
+                _cbs: cbs,
+            }
+        });
+        if shared {
+            PAGES.with_borrow_mut(|m| m.insert(url.into(), std::rc::Rc::downgrade(&page)));
+        }
+        Ok(page)
+    }
+
+    fn opened(&self, _: JsValue) {
+        let mux = self.ws.protocol() == crate::mux::PROTOCOL;
+        self.open.set(Some(mux));
+        if !mux {
+            self.unpool();
+        }
+        self.chans.borrow().values().for_each(|c| _ = c.send(Heard::Open));
+    }
+
+    fn heard(&self, e: JsValue) {
+        let Some(t) = e.dyn_into::<web_sys::MessageEvent>().ok().and_then(|m| m.data().as_string()) else {
+            return self.closed(JsValue::NULL);
+        };
+        if self.open.get() != Some(true) {
+            // One link: the frame is its own.
+            return self.chans.borrow().values().for_each(|c| _ = c.send(Heard::Text(t.clone())));
+        }
+        use crate::mux::{Frame, decode, encode};
+        let Some((id, f)) = decode(&t) else { return self.closed(JsValue::NULL) };
+        let chan = self.chans.borrow().get(&id).cloned();
+        match (f, chan) {
+            (Frame::Text(m), Some(c)) => _ = c.send(Heard::Text(m.into())),
+            // The server's pings to each link, answered as a socket answers them.
+            (Frame::Ping(p), Some(_)) => _ = self.ws.send_with_str(&encode(id, &Frame::Pong(p))),
+            (Frame::Ping(_), None) => _ = self.ws.send_with_str(&encode(id, &Frame::Close(1000, ""))),
+            (Frame::Close(..), Some(c)) => {
+                self.chans.borrow_mut().remove(&id);
+                _ = c.send(Heard::Closed);
+            }
+            _ => {}
+        }
+    }
+
+    fn closed(&self, _: JsValue) {
+        self.gone.set(true);
+        self.unpool();
+        self.chans.borrow_mut().drain().for_each(|(_, c)| _ = c.send(Heard::Closed));
+    }
+
+    fn unpool(&self) {
+        PAGES.with_borrow_mut(|m| {
+            if m.get(&self.url).is_some_and(|w| std::ptr::eq(w.as_ptr(), self)) {
+                m.remove(&self.url);
+            }
+        });
+    }
+}
+
+impl Drop for Page {
     fn drop(&mut self) {
         self.ws.set_onopen(None);
         self.ws.set_onmessage(None);
         self.ws.set_onclose(None);
         _ = self.ws.close();
+    }
+}
+
+/// One link to the server: its channel of the page's socket and what it
+/// hears, closed when dropped.
+struct Link {
+    page: std::rc::Rc<Page>,
+    id: u32,
+    rx: UnboundedReceiver<Heard>,
+}
+
+impl Link {
+    fn new(page: std::rc::Rc<Page>) -> Self {
+        let (tx, rx) = unbounded_channel();
+        let id = page.next.get();
+        page.next.set(id + 1);
+        if page.open.get().is_some() {
+            _ = tx.send(Heard::Open);
+        }
+        page.chans.borrow_mut().insert(id, tx);
+        Self { page, id, rx }
+    }
+
+    /// Send `m` on its channel; `false`: the socket is gone.
+    fn send(&self, m: &str) -> bool {
+        let m = match self.page.open.get() {
+            Some(true) => crate::mux::encode(self.id, &crate::mux::Frame::Text(m)),
+            _ => m.into(),
+        };
+        self.page.ws.send_with_str(&m).is_ok()
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        let open = self.page.chans.borrow_mut().remove(&self.id).is_some();
+        // The server ends its session; the last link's socket just closes.
+        if open && self.page.open.get() == Some(true) && std::rc::Rc::strong_count(&self.page) > 1 {
+            _ = self.page.ws.send_with_str(&crate::mux::encode(self.id, &crate::mux::Frame::Close(1000, "")));
+        }
     }
 }
 
@@ -138,29 +320,22 @@ enum Failed {
 
 impl Link {
     async fn open(url: &str, hello: &Value) -> std::result::Result<(Self, Value), Failed> {
-        let ws = web_sys::WebSocket::new(url).map_err(|e| Failed::Offline(format!("{e:?}")))?;
-        let (tx, rx) = unbounded_channel();
-        let on = |f: fn(JsValue) -> Heard| {
-            let tx = tx.clone();
-            Closure::<dyn FnMut(JsValue)>::new(move |e| _ = tx.send(f(e)))
-        };
-        let cbs = [
-            on(|_| Heard::Open),
-            on(|e| match e.dyn_into::<web_sys::MessageEvent>().ok().and_then(|m| m.data().as_string()) {
-                Some(t) => Heard::Text(t),
-                None => Heard::Closed,
-            }),
-            on(|_| Heard::Closed),
-        ];
-        ws.set_onopen(Some(cbs[0].as_ref().unchecked_ref()));
-        ws.set_onmessage(Some(cbs[1].as_ref().unchecked_ref()));
-        ws.set_onclose(Some(cbs[2].as_ref().unchecked_ref()));
-        let mut l = Self { ws, rx, _cbs: cbs };
+        let mut l = Self::new(Page::get(url, true)?);
         match l.rx.recv().await {
             Some(Heard::Open) => {}
             _ => return Err(Failed::Offline("the socket closed".into())),
         }
-        l.ws.send_with_str(&hello.to_string()).map_err(|e| Failed::Offline(format!("{e:?}")))?;
+        // An older server: a socket of its own for each link past the first.
+        if l.page.open.get() != Some(true) && l.id > 1 {
+            l = Self::new(Page::get(url, false)?);
+            match l.rx.recv().await {
+                Some(Heard::Open) => {}
+                _ => return Err(Failed::Offline("the socket closed".into())),
+            }
+        }
+        if !l.send(&hello.to_string()) {
+            return Err(Failed::Offline("the socket closed".into()));
+        }
         let first = match l.rx.recv().await {
             Some(Heard::Text(t)) => serde_json::from_str::<Value>(&t).map_err(|e| Failed::Offline(e.to_string()))?,
             _ => return Err(Failed::Offline("the socket closed".into())),
@@ -212,8 +387,9 @@ impl<T: Cell> Remote<T> {
             (None, Some(s)) => (s.seq, s.view, s.user, s.pending),
             (None, None) => unreachable!("offline without a saved copy returned above"),
         };
-        let st: Arc<T> = Arc::new(serde_json::from_value(view.clone()).map_err(std::io::Error::other)?);
-        let mut copy = Copy { seq, view, confirmed: st.clone(), pending, shown: st, user };
+        let st: Arc<T> = Arc::new(crate::copy_of(view.clone()).map_err(std::io::Error::other)?);
+        let mut copy =
+            Copy { seq, view, confirmed: st.clone(), pending, shown: st, user, base: None, merges: Vec::new() };
         copy.reshow();
         let connected = first.is_some();
         let inner = Arc::new(Inner {
@@ -226,7 +402,9 @@ impl<T: Cell> Remote<T> {
             unsaved: AtomicBool::new(false),
             listeners: Mutex::default(),
             refusals: Mutex::default(),
+            conflicts: Mutex::default(),
             owned: Mutex::default(),
+            ends: Mutex::default(),
         });
         let r = Self { inner };
         r.mirror_twins();
@@ -277,19 +455,24 @@ impl<T: Cell> Remote<T> {
             *lock(&self.inner.last_sync) = Some(super::now_ms());
         }
         match m["t"].as_str() {
-            Some("state") => match serde_json::from_value::<T>(m["state"].clone()) {
-                Ok(st) => self.update(|c| {
-                    c.seq = m["seq"].as_u64().unwrap_or(0);
-                    c.view = m["state"].clone();
-                    c.confirmed = Arc::new(st);
-                }),
+            Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
+                Ok(st) => {
+                    let before = lock(&self.inner.copy).before(&m["op"]);
+                    let met = self.met(before, &m["state"]);
+                    self.update(|c| {
+                        c.seq = m["seq"].as_u64().unwrap_or(0);
+                        c.view = m["state"].clone();
+                        c.confirmed = Arc::new(st);
+                    });
+                    self.conflicted(&met);
+                }
                 Err(e) => say(&format!("sync {}: bad state: {e}", T::ID)),
             },
             Some("patch") => {
                 let (prev, seq) = (m["prev"].as_u64().unwrap_or(0), m["seq"].as_u64().unwrap_or(0));
-                let (mine, view) = {
+                let (mine, view, before) = {
                     let c = lock(&self.inner.copy);
-                    (c.seq, c.view.clone())
+                    (c.seq, c.view.clone(), c.before(&m["op"]))
                 };
                 if seq <= mine {
                     return;
@@ -298,13 +481,17 @@ impl<T: Cell> Remote<T> {
                     return self.send(json!({ "t": "resync" })); // a gap: never guess
                 }
                 let st = patched(&view, &m)
-                    .and_then(|v| serde_json::from_value::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
+                    .and_then(|v| crate::copy_of::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
                 match st {
-                    Ok((view, st)) => self.update(|c| {
-                        c.seq = seq;
-                        c.view = view;
-                        c.confirmed = Arc::new(st);
-                    }),
+                    Ok((view, st)) => {
+                        let met = self.met(before, &view);
+                        self.update(|c| {
+                            c.seq = seq;
+                            c.view = view;
+                            c.confirmed = Arc::new(st);
+                        });
+                        self.conflicted(&met);
+                    }
                     Err(e) => {
                         say(&format!("sync {}: patch to {seq} doesn't fit ({e}): resync", T::ID));
                         self.send(json!({ "t": "resync" }));
@@ -322,11 +509,26 @@ impl<T: Cell> Remote<T> {
                     }
                 }
                 self.update(|c| c.pending.retain(|q| q.op != op));
-                if let (Some(e), Some(method)) = (m.get("err").and_then(Value::as_str), method) {
+                if let Some(e) = m.get("err").and_then(Value::as_str) {
                     let e = Rejected { why: e.into(), code: crate::Code::of(&m["code"]) };
-                    say(&format!("sync {}: the server refused {method}: {e}", T::ID));
-                    let fs = lock(&self.inner.refusals).clone();
-                    fs.iter().for_each(|f| f(&method, &e));
+                    if let Some(end) = lock(&self.inner.ends).remove(&op) {
+                        end.send(Err(e.clone()));
+                    }
+                    if let Some(method) = method {
+                        say(&format!("sync {}: the server refused {method}: {e}", T::ID));
+                        let fs = lock(&self.inner.refusals).clone();
+                        fs.iter().for_each(|f| f(&method, &e));
+                    }
+                }
+            }
+            // An async method's end, after its reply.
+            Some("end") => {
+                let r = match m.get("err").and_then(Value::as_str) {
+                    Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
+                    None => Ok(m["ok"].clone()),
+                };
+                if let Some(end) = m["op"].as_str().and_then(|op| lock(&self.inner.ends).remove(op)) {
+                    end.send(r);
                 }
             }
             Some("tell") => match serde_json::from_value::<crate::tell::Tell>(m["d"].clone()) {
@@ -428,6 +630,33 @@ impl<T: Cell> Remote<T> {
     pub fn on_refused(&self, f: impl Fn(&str, &Rejected) + Send + Sync + 'static) {
         lock(&self.inner.refusals).push(Arc::new(f));
     }
+
+    /// As a native copy's [`crate::sync::Remote::on_conflict`].
+    pub fn on_conflict(&self, f: impl Fn(&[crate::merge::Conflict]) + Send + Sync + 'static) {
+        lock(&self.inner.conflicts).push(Arc::new(f));
+    }
+
+    /// As a native copy's [`crate::sync::Remote::merge`].
+    pub fn merge(&self, field: &str, how: crate::merge::Merge) {
+        self.update(|c| {
+            c.merges.retain(|(f, _)| f != field);
+            c.merges.push((field.into(), how));
+        });
+    }
+
+    /// Where the server's view `now` met the copy's waiting calls.
+    fn met(&self, before: Option<(Value, Value)>, now: &Value) -> Vec<crate::merge::Conflict> {
+        let merges = lock(&self.inner.copy).merges.clone();
+        before.map_or_else(Vec::new, |(base, local)| crate::merge::conflicts(&base, now, &local, &merges))
+    }
+
+    fn conflicted(&self, met: &[crate::merge::Conflict]) {
+        if met.is_empty() {
+            return;
+        }
+        let fs = lock(&self.inner.conflicts).clone();
+        fs.iter().for_each(|f| f(met));
+    }
 }
 
 /// `view` with patch message `m` applied; an error when its ops don't fit or
@@ -501,7 +730,7 @@ async fn pump<T: Cell>(r: Remote<T>, mut link: Link) {
                 Some(Heard::Closed) | None => break,
             },
             Some(m) = out.recv() => {
-                if link.ws.send_with_str(&m).is_err() {
+                if !link.send(&m) {
                     break;
                 }
             }
@@ -513,8 +742,9 @@ async fn pump<T: Cell>(r: Remote<T>, mut link: Link) {
 }
 
 impl<T: Cell> Remote<T> {
-    /// Make the call on the copy and send it. In a full queue it is refused.
-    fn predict(&self, method: &str, args: Value) -> Result<Value> {
+    /// Make the call on the copy and send it (an async method's caller waits
+    /// at `end` for its end). In a full queue it is refused.
+    fn predict(&self, method: &str, args: Value, end: Option<crate::Reply>) -> Result<Value> {
         let (out, q) = {
             let c = lock(&self.inner.copy);
             crate::ensure!(c.pending.len() < PENDING_MAX, "blocked: {PENDING_MAX} calls wait for the server");
@@ -531,6 +761,9 @@ impl<T: Cell> Remote<T> {
                 Queued { op: op.to_string(), method: method.into(), args, inputs: cx.into_asks().inputs, at, waits };
             (out, q)
         };
+        if let Some(end) = end {
+            lock(&self.inner.ends).insert(q.op.clone(), end);
+        }
         self.update(|c| c.pending.push(q.clone()));
         self.send(q.msg());
         Ok(out)
@@ -540,7 +773,17 @@ impl<T: Cell> Remote<T> {
 impl<T: Cell> Door<T> for Remote<T> {
     /// Predicted: applied to the copy at once and sent; works offline (queued).
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.predict(method, args)
+        self.predict(method, args, None)
+    }
+
+    /// Predicted like `call`; an async method's end comes from the server.
+    fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        if T::async_mode(method).is_none() {
+            return self.call(method, args).map(|v| crate::Answer::ready(Ok(v)));
+        }
+        let (end, answer) = crate::Reply::new(method);
+        self.predict(method, args, Some(end))?;
+        Ok(answer)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {

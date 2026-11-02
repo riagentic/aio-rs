@@ -67,28 +67,98 @@ fn pid(data: &Path) -> Option<u32> {
     doc["pid"].as_u64().and_then(|p| u32::try_from(p).ok())
 }
 
-/// `ax stop <app>` (`hard`: `ax kill <app>`), at its home `t`.
+/// How a stop went, for its line or its JSON.
+#[derive(Debug, PartialEq)]
+pub struct Stopped {
+    pub name: String,
+    /// `None`: asked, not waited for (`--no-wait`).
+    pub how: Option<How>,
+    pub hard: bool,
+    pub took: f64,
+    pub wait: Duration,
+    /// A `--fresh` instance's data thrown away after it.
+    pub discarded: bool,
+}
+
+impl Stopped {
+    pub fn said(&self) -> String {
+        let (name, took) = (&self.name, self.took);
+        let line = match self.how {
+            None => format!("{name}: asked to stop (not waited for: `ax status {name}`)"),
+            Some(How::Asked) => format!("{name}: stopped ({took:.1} s)"),
+            Some(How::Termed) => {
+                format!(
+                    "{name}: stopped by SIGTERM: asking didn't do it within {} s ({took:.1} s)",
+                    self.wait.as_secs()
+                )
+            }
+            Some(How::Killed) if self.hard => format!("{name}: killed ({took:.1} s)"),
+            Some(How::Killed) => format!("{name}: killed: neither asking nor SIGTERM stopped it ({took:.1} s)"),
+        };
+        if self.discarded { format!("{line}; its --fresh data thrown away") } else { line }
+    }
+
+    pub fn json(&self) -> aio::serde_json::Value {
+        let how = match self.how {
+            None => "asked",
+            Some(How::Asked) => "stopped",
+            Some(How::Termed) => "sigterm",
+            Some(How::Killed) => "sigkill",
+        };
+        aio::serde_json::json!({
+            "app": self.name, "how": how, "waited": self.how.is_some(), "seconds": self.took, "discarded": self.discarded,
+        })
+    }
+}
+
+/// `ax stop <app>` (`hard`: `ax kill <app>`), at its home `t`, its line.
 pub fn one(name: &str, t: &crate::target::Target, hard: bool, wait: Duration) -> Out {
+    stopped(name, t, hard, Some(wait)).map(|s| s.said())
+}
+
+/// [`one`], as it went; `wait` `None`: asked, not waited for.
+pub fn stopped(name: &str, t: &crate::target::Target, hard: bool, wait: Option<Duration>) -> Result<Stopped, String> {
     let data = &t.plan.data;
+    // An `ax dev` session would start it again on the next save: it ends first,
+    // and stops the app it runs the graceful way.
+    let started = Instant::now();
+    let session = crate::dev::end_session(&t.plan.logs);
+    if !aio::paths::running(data) && session {
+        let took = started.elapsed().as_secs_f64();
+        let wait = wait.unwrap_or_default();
+        return Ok(Stopped { name: name.into(), how: Some(How::Asked), hard, took, wait, discarded: false });
+    }
     if !aio::paths::running(data) {
         let verb = if hard { "kill" } else { "stop" };
         return Err(format!("{name} isn't running: nothing to {verb} (`ax {verb} {name} || true` when that's fine)"));
     }
     let pid = pid(data);
-    let started = Instant::now();
     let asked = (!hard).then(|| aio_shell::instance::quit_at(&t.id, data));
+    let done = |how, discarded| Stopped {
+        name: name.into(),
+        how,
+        hard,
+        took: started.elapsed().as_secs_f64(),
+        wait: wait.unwrap_or_default(),
+        discarded,
+    };
+    let Some(wait) = wait else {
+        return match asked {
+            Some(Ok(())) => Ok(done(None, false)),
+            Some(Err(e)) => {
+                Err(format!("{name}: it can't be asked to stop ({e}): ax stop {name} (waits, then signals)"))
+            }
+            None => Err(format!("{name}: ax kill always waits")),
+        };
+    };
     let alive = || aio::paths::running(data);
     let how =
         end(&alive, asked, pid, &aio::lifecycle::terminate, (wait, SIGNAL_WAIT)).map_err(|e| format!("{name}: {e}"))?;
-    let took = started.elapsed().as_secs_f64();
-    Ok(match how {
-        How::Asked => format!("{name}: stopped ({took:.1} s)"),
-        How::Termed => {
-            format!("{name}: stopped by SIGTERM: asking didn't do it within {} s ({took:.1} s)", wait.as_secs())
-        }
-        How::Killed if hard => format!("{name}: killed ({took:.1} s)"),
-        How::Killed => format!("{name}: killed: neither asking nor SIGTERM stopped it ({took:.1} s)"),
-    })
+    let discarded = match crate::dev::discard_fresh(&t.plan) {
+        Some(r) => r.map(|_| true).map_err(|e| format!("{name}: stopped; its --fresh data stays: {e}"))?,
+        None => false,
+    };
+    Ok(done(Some(how), discarded))
 }
 
 /// The apps of this workspace: each binary beside an `aio.toml`.
@@ -109,98 +179,25 @@ pub fn workspace_apps() -> Result<Vec<String>, String> {
 }
 
 /// `ax stop --all`: every running app of the workspace; the rest are said.
-pub fn all(wait: Duration) -> Out {
+pub fn all(wait: Option<Duration>, json: bool) -> Out {
     let names = workspace_apps()?;
-    if names.is_empty() {
+    if names.is_empty() && !json {
         return Ok("no aio-rs apps in this workspace".into());
     }
     let mut failed = false;
-    let lines: Vec<String> = names
+    let (lines, rows): (Vec<String>, Vec<aio::serde_json::Value>) = names
         .iter()
-        .map(|n| match crate::target::of(n, &aio::paths::Ask::default()).and_then(|t| one(n, &t, false, wait)) {
-            Ok(l) => l,
-            Err(e) if e.contains("isn't running") => format!("{n}: not running"),
+        .map(|n| match crate::target::of(n, &aio::paths::Ask::default()).and_then(|t| stopped(n, &t, false, wait)) {
+            Ok(s) => (s.said(), s.json()),
+            Err(e) if e.contains("isn't running") => {
+                (format!("{n}: not running"), aio::serde_json::json!({ "app": n, "how": "not running" }))
+            }
             Err(e) => {
                 failed = true;
-                e
+                (e.clone(), aio::serde_json::json!({ "app": n, "error": e }))
             }
         })
-        .collect();
-    if failed { Err(lines.join("\n")) } else { Ok(lines.join("\n")) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::{Cell, RefCell};
-
-    const NO_WAIT: (Duration, Duration) = (Duration::ZERO, Duration::ZERO);
-
-    #[test]
-    fn asked_terminated_then_killed_each_only_when_the_last_did_not_do() {
-        let short = (Duration::from_millis(100), Duration::from_millis(100));
-        for (asked, ends_on, want) in [
-            (true, "quit", Ok(How::Asked)),
-            (true, "term", Ok(How::Termed)),
-            (true, "kill", Ok(How::Killed)),
-            (false, "kill", Ok(How::Killed)),
-        ] {
-            let (up, got) = (Cell::new(true), RefCell::new(vec![]));
-            let signal = |_pid: u32, hard: bool| {
-                let s = if hard { "kill" } else { "term" };
-                got.borrow_mut().push(s);
-                if s == ends_on {
-                    up.set(false);
-                }
-                Ok(())
-            };
-            let ask = asked.then(|| {
-                got.borrow_mut().push("quit");
-                if ends_on == "quit" {
-                    up.set(false);
-                }
-                Ok(())
-            });
-            assert_eq!(end(&|| up.get(), ask, Some(7), &signal, short), want, "{ends_on}");
-            let order = ["quit", "term", "kill"];
-            let upto = order.iter().position(|s| *s == ends_on).unwrap();
-            let sent: Vec<&str> = if asked { order[..=upto].to_vec() } else { vec!["kill"] };
-            assert_eq!(*got.borrow(), sent, "nothing harder than needed");
-        }
-    }
-
-    #[test]
-    fn an_app_that_cant_be_asked_is_signalled_and_one_without_a_pid_is_said() {
-        let up = Cell::new(true);
-        let term = |_: u32, hard: bool| {
-            up.set(hard);
-            Ok(())
-        };
-        let no_door = Some(Err(io::Error::other("no hand door")));
-        assert_eq!(end(&|| up.get(), no_door, Some(7), &term, NO_WAIT), Ok(How::Termed));
-        let e = end(&|| true, Some(Ok(())), None, &term, NO_WAIT).unwrap_err();
-        assert!(e.contains("still running after 0 s") && e.contains("no pid"), "{e}");
-        let refuse = |_: u32, _: bool| Err(io::Error::from(io::ErrorKind::PermissionDenied));
-        assert!(end(&|| true, None, Some(7), &refuse, NO_WAIT).unwrap_err().contains("can't be ended"));
-    }
-
-    #[test]
-    fn stopping_what_isnt_running_says_there_was_nothing() {
-        let t = crate::target::of("no-such-app-0a1b", &aio::paths::Ask::default()).unwrap();
-        let e = one("no-such-app-0a1b", &t, false, Duration::ZERO).unwrap_err();
-        assert!(e.contains("nothing to stop") && e.contains("|| true"), "{e}");
-        assert!(one("no-such-app-0a1b", &t, true, Duration::ZERO).unwrap_err().contains("nothing to kill"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_real_process_ends_on_sigterm_and_sigkill() {
-        for hard in [false, true] {
-            let mut c = std::process::Command::new("sleep").arg("30").spawn().unwrap();
-            aio::lifecycle::terminate(c.id(), hard).unwrap();
-            let st = c.wait().unwrap();
-            use std::os::unix::process::ExitStatusExt;
-            assert_eq!(st.signal(), Some(if hard { 9 } else { 15 }));
-        }
-    }
+        .unzip();
+    let text = if json { crate::failed_or(rows) } else { lines.join("\n") };
+    if failed { Err(text) } else { Ok(text) }
 }

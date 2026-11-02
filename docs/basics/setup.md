@@ -22,16 +22,16 @@ the package that has it.
 Pick one. Both put `ax` in `$CARGO_HOME/bin` (`~/.cargo/bin`), which
 rustup already put on `PATH`.
 
-**Prebuilt** (seconds, no clone): Linux x86_64 (on macOS, 0.1.0 has no
-prebuilt `ax` yet: use the source install below, and the installer says
-so):
+**Prebuilt** (seconds, no clone): Linux x86_64, and macOS arm64 and
+x86_64 (0.1.0's installer has none for macOS: use the source install
+below for it):
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.1.0/install.sh | sh
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.2.0/install.sh | sh
 ```
 
 Windows x86_64: download `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.1.0), then
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.2.0), then
 `powershell -ExecutionPolicy Bypass -File install.ps1`.
 
 Each archive's SHA-256 is pinned in the installer and checked before
@@ -43,24 +43,54 @@ takes them instead of downloading. Then it runs `ax setup`.
 **From source** (minutes):
 
 ```sh
-git clone https://github.com/riagentic/aio-rs
+git clone --branch v0.2.0 https://github.com/riagentic/aio-rs
 cargo install --locked --path aio-rs/crates/aio-cli
 ```
 
+At the release tag: an `ax` built from `main` writes `main`'s templates
+but pins its release tag, so its apps don't build until made on that
+checkout (`ax create <name> --aio <checkout>`, which `ax create` says).
+
 The package is `aio-rs-cli`, its binary `ax`.
+
+### Upgrading ax
+
+```sh
+ax upgrade                    # to aio-rs's newest release
+ax upgrade 0.2.0              # to that release (again, if it is this one)
+ax upgrade --aio ../aio-rs    # ax built from a checkout (plain ax upgrade returns)
+```
+
+`ax upgrade` takes the release's install script, checks its SHA-256
+against the release's `SHA256SUMS`, and runs it: the script checks the
+archive's own SHA-256 before anything is unpacked. An app keeps its own
+aio-rs until `ax pin` moves it (below).
 
 ### Where an app gets aio-rs from
 
-An app `ax create` makes depends on an aio-rs source tree by path (aio-rs
-is not on crates.io). An `ax` built from a checkout uses that checkout.
-A prebuilt `ax` was built elsewhere, so it needs one named once per app:
+aio-rs is not on crates.io: an app `ax create` makes takes it from git,
+at this `ax`'s release tag, in both of its `Cargo.toml` files:
 
-```sh
-git clone https://github.com/riagentic/aio-rs
-ax create notes --aio aio-rs
+```toml
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.2.0", features = ["kit"] }
 ```
 
-Without `--aio`, a prebuilt `ax create` refuses and says this.
+`Cargo.lock` pins the commit. A clone builds on any machine, with or
+without an aio-rs checkout, and nothing of the machine the app was made on
+is in it. To pick or change the version (aio's `am pin`):
+
+```sh
+ax create notes --aio-version 0.2.0   # another release (main: the branch; latest: the newest)
+ax pin                                # in the app: what Cargo.toml asks for, what Cargo.lock built, the releases
+ax pin 0.2.0                          # every one moved to that release, Cargo.lock with it
+ax pin ../aio-rs                      # to a checkout, co-developing aio-rs
+```
+
+`ax pin <dir>` (and `ax create --aio <dir>`) names the checkout relative to the app (`../aio-rs/crates`),
+never by its absolute path; the app and the checkout must share a folder
+below the root. A clone that holds such a path and has no checkout beside
+it: `ax pin <version>` moves it back to a release. A move cargo can't
+resolve (no such tag, no network) changes nothing.
 
 ## 3. ax setup
 
@@ -86,13 +116,12 @@ code is 1 until every needed one is there.
 
 | | Linux | macOS | Windows | What for | ax setup |
 |---|---|---|---|---|---|
-| dx 0.7.10 | fetched | fetched | fetched | `ax dev`'s hot-patching (a small crate's edit in under a second; without it: a rebuild on change) | fetches it (SHA-256 pinned in ax) |
 | git | package | Command Line Tools | `winget install Git.Git` | build numbers `M.m.<commits>` and releases (without it: `M.m.0-nogit`, no release) | checks |
 | ffmpeg | package | `brew install ffmpeg` | `winget install Gyan.FFmpeg` | `ax test --video`, `ax shot --video` | checks |
-| Xephyr or Xvfb | package | – | – | an agent's windows off the person's screen | checks |
+| Xephyr or Xvfb | package | – | – | an agent's windows off the person's screen; on Linux with no desktop (a server, CI), Xvfb is the only way a window opens | checks |
 | wasm-bindgen 0.2.129 | fetched | fetched | fetched (x86_64) | `ax dev --web`, `ax build --web` | fetches it (SHA-256 pinned in ax) |
-| aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
-| Android SDK, NDK, JDK | yes | yes | – | `ax build --android`, `ax dev --android` | the build says what is missing |
+| aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
+| Android SDK, NDK, JDK 17-23, Gradle 8.9+ | yes | yes | yes | `ax build --android`, `ax dev --android` | the build says what is missing |
 | `x86_64-w64-mingw32-gcc` + its rustup target | yes | yes | – | `ax build --windows` (cross-built) | `ax build --windows` names the package |
 | `dpkg-deb`, `mksquashfs` | yes | – | – | `ax build --deb`, `--appimage` | the build says what is missing |
 
@@ -104,7 +133,7 @@ Every app `ax create` makes pins aio-rs's Rust in its
 - Node, npm or Deno: nothing of aio-rs runs on them.
 - A system Chromium for UI tests: they draw in the pinned Electron.
 - OpenSSL or pkg-config: TLS is rustls.
-- `cargo install dioxus-cli`: `ax setup` fetches the pinned dx.
+- Any tool for hot-patching: `ax dev` builds and applies the patches itself.
 - curl for AppImages: aio-rs fetches the AppImage runtime itself (SHA-256 checked).
 
 ## 4. Typing the commands on each OS
@@ -145,12 +174,12 @@ with aio's apps, [desktop](../clients/desktop.md#one-store-with-aio)). `~` is
 | the window's browser profile | `<app home>/data/electron/profile/` | the same | the same |
 | a private instance (`--instance n`) | `<tool home>/instances/<n>/<id>/` | the same | the same |
 | the shared Electron runtime (aio's store, shared with aio's apps) | `~/.local/share/aio/electron/<version>-<os>-<arch>/` (`$XDG_DATA_HOME`) | `~/Library/Application Support/aio/electron/…` | `%LOCALAPPDATA%\aio\electron\…` |
-| dx, wasm-bindgen (fetched) | `<tool home>/tools/` | the same | the same |
+| wasm-bindgen (fetched) | `<tool home>/tools/` | the same | the same |
 | ax's one build folder | `<tool home>/target/` (`CARGO_TARGET_DIR` wins) | the same | the same |
 | this machine's TLS root (`ax trust`) | `<tool home>/tls/` | the same | the same |
 | release signing keys (`ax keygen`) | `~/.config/aio-rt/keys/` (`$XDG_CONFIG_HOME`) | the same | the same |
 | an app installed from its bundle | `<tool home>/install/<id>/`, `~/.local/bin/<id>`, a menu entry | `/Applications/<Name>.app` (the app offers the move) | `%LOCALAPPDATA%\Programs\<id>\`, a Start menu entry, Settings › Apps |
-| the app's sockets (`ax` talks to it here) | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/`, else the temp dir | the temp dir | named pipes `\\.\pipe\aio-rt-<id>-<hash>-…` |
+| the app's sockets (`ax` talks to it here) | `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash>/`, else the temp dir; `/tmp/aio-rt-<uid>/…` when that is too long | the temp dir; `/tmp/aio-rt-<uid>/…` when that is too long | named pipes `\\.\pipe\aio-rt-<id>-<hash>-…` |
 
 - `ax data <app>` prints an app's folders and what to back up; `ax doctor
   <app>` says who chose them (a flag, a variable, the default).
@@ -252,6 +281,7 @@ line that installs it (`ax build` prints it):
 | OS | File | Installs with |
 |---|---|---|
 | Linux | `<bundle>.service`, a systemd user unit | `cp` it to `~/.config/systemd/user/<id>.service`, `systemctl --user daemon-reload`, `systemctl --user enable --now <id>` (`loginctl enable-linger`: it runs without a login too) |
+| Linux | `<bundle>.system.service`, a systemd system unit (starts at boot, as a user systemd makes, data in `/var/lib/<id>`) | `sudo install -m 0755 <bundle>/<id> /usr/local/bin/<id>`, `sudo cp` it to `/etc/systemd/system/<id>.service`, `sudo systemctl daemon-reload`, `sudo systemctl enable --now <id>` |
 | macOS | `<bundle>.plist`, a launchd agent | `cp` it to `~/Library/LaunchAgents/app.aio.<id>.plist`, then `launchctl bootstrap gui/<uid> <that file>` |
 | Windows | `<bundle>.ps1`, a Task Scheduler script | `powershell -ExecutionPolicy Bypass -File .\<bundle>.ps1 -Install`, as an administrator (`-Uninstall` removes the task) |
 
@@ -280,11 +310,14 @@ autostart `.desktop` entry); aio-rs adds no "start at login" switch.
 
 ### ax itself
 
-1. Delete `ax` (`ax.exe`) from `$CARGO_HOME/bin`.
-2. Delete what ax fetched: `electron/` and `tools/` in the tool home
-   ([where things are](#where-things-are)); the build folder `target/`
-   there can go too (ax builds it again).
-3. The rest of the tool home is your apps' data and installs.
+```sh
+ax uninstall            # ax out of $CARGO_HOME/bin
+ax uninstall --tools    # also tools/ and the build folder target/ in the tool home
+```
+
+Your apps, their data and installs stay (the rest of the tool home,
+[where things are](#where-things-are)). The shared Electron runtime is aio's
+store, shared with aio's apps: `ax prune` says what of it may go.
 
 ### An app
 
@@ -322,10 +355,10 @@ autostart `.desktop` entry); aio-rs adds no "start at login" switch.
 ## Checked on
 
 - Linux x86_64 (Ubuntu 24.04): the prebuilt install, then `ax setup`
-  into an empty home: 62 s, runtime and dx included.
+  into an empty home: 62 s, runtime included (0.1, which fetched dx too).
 - Windows 11 (no Rust, no compilers): `install.ps1` installed the
   prebuilt `ax` and refused a wrong pin; `ax setup` fetched the runtime
-  and dx (56 s) and named Rust and the Build Tools as missing; the
+  (56 s in 0.1, dx included) and named Rust and the Build Tools as missing; the
   uninstall above left nothing. The workspace tests, UI tests included,
   pass there.
 - macOS 14 x86_64: `ax setup --check` and the workspace tests, UI tests

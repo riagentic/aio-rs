@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <code>0.1.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
+  <code>0.2.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -18,8 +18,12 @@
 
 ---
 
-**aio-rs is early ALPHA.** 0.1.0 is its first release; until 1.0.0 a
+**aio-rs is early ALPHA.** 0.2.0 is its second release; until 1.0.0 a
 minor version may break things ([versions](docs/basics/versioning.md)).
+
+**Read first: [when to use aio-rs, and when not](docs/basics/when.md).**
+Yes for an app with a window and state; no for SEO pages, a CDN or the
+edge. Pin a release tag; experimental parts are marked there.
 
 ### aio or aio-rs?
 
@@ -37,26 +41,28 @@ at a time: [aio and aio-rs compared](docs/aio-vs-aio-rs.md),
 ## ⚡ Start
 
 You need Rust ([rustup](https://rustup.rs)) and a C toolchain; per OS:
-[setup](docs/basics/setup.md). Apps build on an aio-rs source checkout
-(the crates are not on crates.io yet), so the simplest path is from
-source, on Linux, Windows or macOS:
+[setup](docs/basics/setup.md). From source, on Linux, Windows or macOS,
+at the release tag (an app takes aio-rs from git at its `ax`'s release, so
+no checkout is needed afterwards):
 
 ```sh
-git clone https://github.com/riagentic/aio-rs
-cargo install --locked --path aio-rs/crates/aio-cli   # ax, bound to this checkout
+git clone --branch v0.2.0 https://github.com/riagentic/aio-rs
+cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.2.0
 ax setup                                             # checks the machine, fetches the runtime
 ```
 
-Or a prebuilt `ax` for Linux x86_64 (Windows x86_64: `install.ps1` from
-the [release](https://github.com/riagentic/aio-rs/releases/tag/v0.1.0)),
-each archive's SHA-256 pinned in the installer:
+Or a prebuilt `ax` for Linux x86_64 and macOS arm64 and x86_64 (Windows
+x86_64: `install.ps1` from the
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.2.0)), each
+archive's SHA-256 pinned in the installer:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.1.0/install.sh | sh   # then runs ax setup
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.2.0/install.sh | sh   # then runs ax setup
 ```
 
-A prebuilt `ax` still creates apps on a checkout: clone aio-rs once and
-pass it, `ax create notes --aio aio-rs`.
+An `ax` built from `main` writes `main`'s templates but pins its release
+tag: build on the tag as above, or make the app on that checkout
+(`ax create notes --aio <checkout>`).
 
 Then:
 
@@ -110,9 +116,9 @@ A view reads the fields it shows and calls methods with `act!`:
 aio::client!(Counter, counter);
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
-    let n = *part(|c| &c.count);
+    let n = part(|c| &c.count);
     rsx! {
         main {
             h1 { "data-t": "count", "{n}" }
@@ -122,7 +128,9 @@ pub fn App() -> Element {
 }
 ```
 
-`part(|c| &c.count)` re-renders the view only when that field changes.
+`part(|c| &c.count)` is a handle on that field: the view reading it
+re-renders only when it changes. Views are written against `aio::ui`
+(`use aio::ui::prelude::*`), which names no renderer.
 `count` is saved to SQLite, comes back on restart, and is checked by the
 compiler everywhere it is used: a misspelt field is a build error.
 
@@ -152,7 +160,7 @@ The running app is drivable too: `ax surface` prints what is on screen,
 | | |
 |---|---|
 | 💾 **Data** | SQLite with an event log · replay and time travel · migrations · coalesced writes · backups · SQL tables and blobs · offline queue |
-| 🎨 **UI** | Dioxus views with field-level reads · the kit: controls, keys, windowed lists, forms, dialogs, toasts · themes, live CSS · routing · islands |
+| 🎨 **UI** | `aio::ui` views with field-level reads · the kit: controls, keys, windowed lists, forms, dialogs, toasts · themes, live CSS · routing · islands |
 | 🔐 **Auth** | the app's key · accounts, roles, sessions · TOTP · OIDC · PAKE pairing · TLS on every exposed launch |
 | 🧪 **Testing** | `TestCells` (virtual time, seeded fuzzing) · `TestUi` (the real views, headless) · `TestServer` · cassettes · `ax lint` |
 | 🚚 **Ship** | desktop (Linux, Windows, macOS) · web (wasm, PWA) · Android · service · CLI · signed delta updates, gated on the data, rolled back on a failed start |
@@ -172,11 +180,14 @@ plain Rust: [why aio-rs](docs/basics/why.md).
   Linux (fmt, dependency and docs checks, clippy for every feature set,
   wasm, Windows and Android, the whole test suite, a measured template
   app) and the Windows lane on a real Windows machine; the Mac runs the
-  workspace tests and smoke-tests the template app; the template's APK
-  is started on an emulator. Not gated: a physical Android device and
+  workspace tests and smoke-tests the template app; the Android gate
+  (`scripts/android-gate`) starts a sample APK on an emulator and upgrades
+  it with its data kept; GitHub CI installs a sample app on Linux, macOS
+  and Windows, updates it through a signed patch and rolls a broken
+  update back (`scripts/update-proof`). The README's numbers rerun with
+  `scripts/numbers`. Not gated: a physical Android device and
   OS-signing of bundles (SmartScreen and Gatekeeper warn on first start).
-- 🚧 **Not there yet.** No prebuilt `ax` for macOS (build from source),
-  no iOS, crates not on crates.io (apps build on a checkout), no
+- 🚧 **Not there yet.** No iOS, crates not on crates.io (apps build on a checkout), no
   hot-patching in the web build or on Android. A Rust edit recompiles its
   crate: keep a big app in several crates
   ([what an edit costs](docs/build/README.md#what-an-edit-costs)).

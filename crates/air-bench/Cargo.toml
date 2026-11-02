@@ -1,0 +1,12 @@
+[package]
+name = "air-bench"
+description = "air spike measurements: generated 50-view apps, the held-arrow harness"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+aio = { workspace = true, features = ["kit"] }
+air = { workspace = true }

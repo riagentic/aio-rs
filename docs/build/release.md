@@ -294,6 +294,13 @@ is not blocked: there is nothing to read.
    never offers that release again, and files an `update:failed` report.
    Some version always runs.
 
+On macOS, Windows and from an AppImage the helper is the new version's
+own binary (the old one is in the place being replaced). The old app
+exits only once the helper said it is up; a new binary that dies as it
+starts (a crash before `aio_shell::start`, a missing library) is not
+installed: the old version runs on, that release is never offered again
+(`update failed: 1.5.0 could not be installed (…), so 1.4.11 runs on`).
+
 When the first boot is claimed the install is final: `installed.json`
 names the version, and versions past `keep` are removed (never the
 running one or the one before it). A swap that couldn't be made (a file
@@ -325,6 +332,12 @@ and when it goes wrong: `[aio] update failed: 1.5.0 did not start, so
 1.4.11 runs again; the data from before it is back`. The helper's own
 lines are in `logs/update.log`. `ax update <app>` shows the versions
 installed and the update state.
+
+aio-rs proves this path on every pull request, on Linux, macOS and
+Windows: `scripts/update-proof` installs a sample service from its bundle,
+updates it through a signed patch, then releases a build that dies as it
+starts and checks that the version before comes back with its data
+([ci](ci.md#aio-rss-own-proof-scripts)).
 
 ## Services and tools
 
@@ -415,7 +428,8 @@ assert_eq!(h.state().dismissed.as_deref(), Some("1.5.0"));
 | `checked_at` | when the last check answered (ms) |
 | `error` | the last failure, verbatim |
 | `failed` | an install that failed: (version, why), said again while it is offered |
-| `backup` | the data's backup the update to this version took |
+| `backup` | the data's backup the update to this version took (a fresh start's: the store it set aside) |
+| `retired` | where a fresh start to this version set the data aside (`archive/<id>-<version>-<time>`), for the app to say on its first start (aio's `freshStartNotice`) |
 | `dismissed`, `pinned` | the release said no to, the channel chosen: the only saved fields |
 
 - `aio::update::can_apply(veto)`: asked before every install; `Err(why)`
@@ -456,7 +470,7 @@ only when the APK is signed with the same key
   installs `ax` from the commit its `Cargo.lock` pins. One `ax create`
   made (a path to a local checkout, which a runner doesn't have) gets
   aio-rs checked out beside it in `aio-rs/`, at the release tag of the
-  `ax` that wrote the workflow (`v0.1.0`; the repository variables
+  `ax` that wrote the workflow (`v0.2.0`; the repository variables
   `AIO_REPO` and `AIO_REF` name another), its `Cargo.toml` paths pointed
   there, and `ax` installed from it. Nothing to change in the app.
 - One job then puts every file on the tag's GitHub release, files before

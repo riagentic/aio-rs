@@ -7,7 +7,7 @@
 //!   post-await reads, mixed method styles), imports and the client/server
 //!   split are resolved by rustc (import graph, browser imports, legacy
 //!   paths, Node APIs, `any`), cells reach each other only through typed
-//!   handles (inter-cell reads), Dioxus signals are handles (stale tuples,
+//!   handles (inter-cell reads), aio::ui signals are handles (stale tuples,
 //!   memo/projection), `Effect` is `#[must_use]` (a dropped effect warns,
 //!   an error under `-D warnings`);
 //! - **clippy**, run here with aio's lints: unused imports, deprecated
@@ -23,6 +23,11 @@
 //! Exit: 0 clean (warnings and hints don't fail), 1 errors, 2 bad usage.
 mod layout;
 mod rust;
+
+/// aio-rs 0.1's renderer, by its crates' prefix: what `ax lint` refuses in
+/// an app and the template and web build tests find in none.
+#[cfg(test)]
+pub const RENDERER_0_1: &str = "dioxus";
 mod secrets;
 
 use std::collections::{BTreeMap, HashMap};
@@ -150,6 +155,8 @@ pub fn lint(dir: &Path) -> Report {
     walk(dir, &mut paths);
     let (mut facts, mut report) = (rust::Facts::default(), Report::default());
     let mut texts: HashMap<String, String> = HashMap::new();
+    // The first test line naming aio::testing, and whether a manifest gives the tests its feature.
+    let (mut kit_used, mut manifests): (Option<(String, usize)>, Vec<String>) = (None, Vec::new());
     for path in paths {
         let rel = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
         let name = rel.rsplit('/').next().unwrap_or_default().to_string();
@@ -177,9 +184,16 @@ pub fn lint(dir: &Path) -> Report {
         report.files += 1;
         layout::check(&rel, &text, &mut facts.issues);
         if ext == "rs" {
+            if kit_used.is_none() && (is_test_path(&rel) || text.contains("#[cfg(test)]")) {
+                kit_used = text.lines().position(|l| l.contains("aio::testing")).map(|i| (rel.clone(), i + 1));
+            }
             rust::file(&rel, &text, is_test_path(&rel), &mut facts);
         } else if !is_test_path(&rel) {
             secrets::text(&rel, &text, &mut facts.issues);
+            if name == "Cargo.toml" {
+                manifests.push(text.clone());
+                rust::manifest(&rel, &text, &mut facts.issues);
+            }
             if name == "aio.toml" {
                 match aio::config::Config::parse(&text) {
                     Ok(c) => report.passed.push(format!("{rel}: app {}", c.app.id)),
@@ -188,6 +202,18 @@ pub fn lint(dir: &Path) -> Report {
             }
         }
         texts.insert(rel, text);
+    }
+    if let (Some((rel, line)), false) = (&kit_used, gives_testing(&manifests)) {
+        facts.issues.push(
+            Issue::new(
+                Severity::Error,
+                "testing",
+                "the tests use aio::testing, which is aio-rs's `testing` feature: no manifest gives it them".into(),
+                rel,
+                *line,
+            )
+            .fix("in Cargo.toml: [dev-dependencies] aio = { package = \"aio-rs\", <its source>, features = [\"testing\"] }"),
+        );
     }
     across(&mut facts, &mut report);
     // One place for every `aio-ok`.
@@ -201,6 +227,67 @@ pub fn lint(dir: &Path) -> Report {
     report.cells = facts.cells.len();
     report.tests = facts.tests;
     report
+}
+
+/// The aio checks of each saved `.rs` file alone (`ax dev`, after each
+/// burst of saves; aio's lint while editing): its errors and warnings as
+/// lines, paths relative to `root`. A file mid-edit that doesn't parse is
+/// the compiler's to say.
+pub fn changed(files: &[PathBuf], root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in files.iter().filter(|p| p.extension().is_some_and(|e| e == "rs")) {
+        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        if is_test_path(&rel) || text.len() as u64 > MAX {
+            continue;
+        }
+        let mut facts = rust::Facts::default();
+        rust::file(&rel, &text, false, &mut facts);
+        let lines: Vec<&str> = text.lines().collect();
+        for i in facts.issues.iter().filter(|i| i.severity != Severity::Hint && i.area != "scan") {
+            if i.line.is_some_and(|l| suppressed(&lines, l - 1, i.area)) {
+                continue;
+            }
+            let at = i.line.map_or(String::new(), |l| format!(":{l}"));
+            out.push(format!("{} {rel}{at} [{}] {}", i.severity.name(), i.area, i.message));
+        }
+    }
+    out
+}
+
+/// Do these manifests give their tests aio-rs's test kit: a dependency or
+/// dev-dependency on aio-rs with the `testing` feature, its own or through
+/// `[workspace.dependencies]` (a member's `workspace = true` adds its
+/// features to the workspace's)? Pure; a manifest that doesn't parse gives
+/// nothing.
+pub fn gives_testing<S: AsRef<str>>(manifests: &[S]) -> bool {
+    let tables: Vec<toml::Table> = manifests.iter().filter_map(|m| m.as_ref().parse().ok()).collect();
+    let testing = |v: &toml::Value| {
+        v.get("features").and_then(|f| f.as_array()).is_some_and(|f| f.iter().any(|f| f.as_str() == Some("testing")))
+    };
+    let aio = |k: &str, v: &toml::Value| v.get("package").map_or(k == "aio-rs", |p| p.as_str() == Some("aio-rs"));
+    let workspace: Vec<(&String, &toml::Value)> = tables
+        .iter()
+        .filter_map(|t| t.get("workspace")?.get("dependencies")?.as_table())
+        .flatten()
+        .filter(|(k, v)| aio(k, v))
+        .collect();
+    workspace.iter().any(|(_, v)| testing(v))
+        || tables.iter().flat_map(deps).any(|(k, v)| {
+            let inherits = v.get("workspace").and_then(|w| w.as_bool()) == Some(true);
+            testing(v) && if inherits { workspace.iter().any(|(w, _)| *w == k) } else { aio(k, v) }
+        })
+}
+
+/// A manifest's dependencies and dev-dependencies: its own, and each
+/// `[target.'cfg(…)'.…]`'s. Pure.
+fn deps(t: &toml::Table) -> impl Iterator<Item = (&String, &toml::Value)> {
+    let targets = t.get("target").and_then(|t| t.as_table()).into_iter().flat_map(|t| t.values());
+    std::iter::once(t)
+        .chain(targets.filter_map(|t| t.as_table()))
+        .flat_map(|t| ["dependencies", "dev-dependencies"].map(|s| t.get(s).and_then(|d| d.as_table())))
+        .flatten()
+        .flatten()
 }
 
 /// The checks that need every file: duplicate cell ids, untested cells.
@@ -395,9 +482,11 @@ pub fn project_root(dir: &Path) -> PathBuf {
     dir.into()
 }
 
-const FLAGS: [&str; 7] = ["--json", "--no-hints", "--quiet-hints", "--no-clippy", "--safe-fix", "--fix", "--help"];
+const FLAGS: [&str; 8] =
+    ["--json", "--no-hints", "--quiet-hints", "--no-clippy", "--safe-fix", "--fix", "--tests", "--help"];
 
-const USAGE: &str = "ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-clippy] [--safe-fix] [--fix]
+const USAGE: &str =
+    "ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-clippy] [--safe-fix] [--fix] [--from version] [--tests]
 
   dir          the project (the nearest Cargo.toml at or above it; default: here)
   --json       one JSON document on stdout (hints always in)
@@ -406,12 +495,40 @@ const USAGE: &str = "ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-cli
   --safe-fix   apply clippy's machine-applicable fixes first, then lint what is left
   --fix        move an app of the older layout to today's (ax create's) first: no launcher build.rs,
                no aio-rs build-dependency, no testing/video features; then lint
+  --from v     only what aio-rs changed after v (0.1.0) that the app still uses: the
+               migrate findings (aio's am migrate); exit 1 when there is any
+  --tests      only the test shapes a newer aio-rs turns red (TestUi's), in order; exit 0
 
 Exit: 0 no errors (warnings and hints don't fail), 1 errors, 2 bad usage.
 Silence one finding with a reason: // aio-ok: <why>, or // aio-ok(<area>): <why>.";
 
+/// The migrate findings of rules newer than `from` (pure): every rule today
+/// moves an app to the layout of [`layout::SINCE`].
+pub fn migrate_from(issues: Vec<Issue>, from: &str) -> Result<Vec<Issue>, String> {
+    let v = |s: &str| aio::update::parse_version(s).map(|(core, _)| core);
+    let from = v(from).ok_or(format!("--from {from}: an aio-rs version (0.1.0)"))?;
+    let newer = v(layout::SINCE).is_some_and(|since| since > from);
+    Ok(issues.into_iter().filter(|i| i.area == "migrate" && newer).collect())
+}
+
+/// A finding about a test's shape (TestUi's), which a newer aio-rs turns red.
+pub fn test_shape(i: &Issue) -> bool {
+    i.area == "migrate" && i.message.contains("TestUi")
+}
+
 pub fn main(args: &[String]) -> ExitCode {
-    let (flags, pos): (Vec<&str>, Vec<&str>) = args.iter().map(String::as_str).partition(|a| a.starts_with('-'));
+    // `--from v` (or `--from=v`) takes a value; the rest are switches or the dir.
+    let mut from = None;
+    let mut rest: Vec<&str> = vec![];
+    let mut it = args.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        match a.strip_prefix("--from") {
+            Some("") => from = Some(it.next().unwrap_or_default()),
+            Some(v) if v.starts_with('=') => from = Some(&v[1..]),
+            _ => rest.push(a),
+        }
+    }
+    let (flags, pos): (Vec<&str>, Vec<&str>) = rest.into_iter().partition(|a| a.starts_with('-'));
     let unknown: Vec<&&str> = flags.iter().filter(|f| !FLAGS.contains(f) && **f != "-h").collect();
     if !unknown.is_empty() || pos.len() > 1 {
         let what = unknown
@@ -454,7 +571,9 @@ pub fn main(args: &[String]) -> ExitCode {
             }
         }
     }
-    let clippy_on = !has("--no-clippy") && dir.join("Cargo.toml").is_file();
+    // A migration's question is aio-rs's changes alone: no clippy.
+    let only_migrate = from.is_some() || has("--tests");
+    let clippy_on = !has("--no-clippy") && !only_migrate && dir.join("Cargo.toml").is_file();
     if has("--safe-fix") && clippy_on {
         say("ax lint: applying clippy's safe fixes");
         if let Err(e) = clippy(&dir, true) {
@@ -476,6 +595,23 @@ pub fn main(args: &[String]) -> ExitCode {
                 line: None,
                 fix: Some("cargo clippy --all-targets says why".into()),
             }),
+        }
+    }
+    if let Some(v) = from {
+        match migrate_from(std::mem::take(&mut report.issues), v) {
+            // What the app still uses of what changed: CI fails on it.
+            Ok(i) => report.issues = i.into_iter().map(|i| Issue { severity: Severity::Error, ..i }).collect(),
+            Err(e) => {
+                eprintln!("ax lint: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if has("--tests") {
+        report.issues.retain(test_shape);
+        // A prediction, in the order they fail: never a failing exit.
+        for i in &mut report.issues {
+            i.severity = Severity::Warn;
         }
     }
     report.issues.sort_by(|a, b| (a.severity, &a.file, a.line).cmp(&(b.severity, &b.file, b.line)));

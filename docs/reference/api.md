@@ -75,7 +75,7 @@ assert_eq!(h.state().n, 2); // the refused call changed nothing
 | `aio::Derived`, `Cache`, `Reads`, `Ver`, `Watching` | derived values, memoized on the fields they read |
 | `aio::machine`, `machine!` | a cell's state machine: states and the methods that move between them |
 | `aio::merge` | merging concurrent offline edits (`text3`, tokens) |
-| `aio::before_call`, `aio::on_effect` | hooks on every call and every effect (aio's `beforeReduce`, `onAction`, `onEffect`) |
+| `aio::before_call`, `aio::rewrite_call`, `aio::on_action`, `aio::on_effect` | hooks on every call, every committed call and every effect (aio's `beforeReduce`, `onAction`, `onEffect`) |
 | `aio::visible` | the rows a caller may see |
 | `aio::keys!` | an enum of names usable as keys, CSS classes and handles |
 
@@ -85,7 +85,7 @@ assert_eq!(h.state().n, 2); // the refused call changed nothing
 |---|---|
 | `aio::effect` (`Effect`, `Mode`, `retry`) | I/O a method asks for; its result comes back as a call. `Mode::Queue`, `Newest`, `First` decide a second run with the same key |
 | `aio::Backoff`, `aio::Plan`, `aio::Inputs` | retries and their spacing |
-| `aio::cron` | cron expressions, local time |
+| `aio::cron` | cron expressions, in UTC or local time (`[app] tz`) |
 | `aio::time` | `sleep`, `sleep_until`, `timeout`, `Instant` for async methods and effects |
 | `aio::tell` | telling people: a toast, a notification, the app icon's badge |
 | `aio::held` | a resource held open per key (camera, socket) while anyone uses it |
@@ -127,7 +127,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::head` | the page's title and meta tags |
 | `aio::colors`, `aio::kit::theme` | the colours from one hue, the `--aio-*` tokens |
 | `aio::page` | the page the views are drawn in (with `kit` or `web`) |
-| `aio::dioxus` | the Dioxus aio-rs uses, re-exported |
+| `aio::ui::prelude` | the view API (with `kit`): `rsx!`, `#[component]`, `View`, `Signal`, `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`, `provide`/`context`, `callback`, `task`, `spawn`, `resource`, `Global`, `ErrorBoundary`, `Suspense`, `eval`, the event types, `Key`, `Modifiers` ([views](../ui/views.md)) |
 | `aio::web` | the app in the browser's own page (feature `web`, `ax build --web`) |
 
 ## Sync, server and HTTP (feature `server`)
@@ -195,7 +195,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `persist`, `visible`, `access`, `sync` | `#[cell(persist)]`, `#[cell(visible = f)]`, `#[client(role = …)]` and `#[server]` fields, `#[cell(shared)]` |
 | `version`, `onMigrate` | `#[cell(version = n, migrate = f)]` |
 | `useAio`, `useProjection` | `client!`'s `part` |
-| `useLocal` | Dioxus `use_signal` |
+| `useLocal` | `aio::ui::signal` |
 | `useTimeTravel` | `kit::TimeTravelPanel`, `Handle::travel` |
 | `useRoute`, `navigate`, `<Route>`, `<Link>`, `<Redirect>` | `routes!`, `router!` |
 | `useHead` | `aio::head` |
@@ -220,4 +220,4 @@ Gaps, aio items with no aio-rs equivalent:
   `ax lint`, `ax status` and `aio::paths` cover the uses.
 - `findChromium`, `freePort`: none; `TestUi` brings its own runtime and
   ports.
-- A non-Dioxus view layer: none; views are Dioxus.
+- Another view layer: none; views are `aio::ui` (`rsx!`).

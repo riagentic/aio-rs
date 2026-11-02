@@ -114,6 +114,10 @@ rt.block_on(async {
 | `.server_fn(F, access, run)` | a server function | `Http::server_fn` |
 | `.on_link(f)` | hears each client link open and close (`aio::http::Presence`) | `Http::on_link` |
 | `.on_effect(f)` | hears every effect as it starts (`cell`, `key`) | `aio::on_effect` |
+| `.on_action(f)` | hears every committed call (`cell`, the event, the cell's state after it as JSON; aio's plugin `onAction`) | `aio::on_action` |
+| `.allowed_origins(&["app.example.com"])` | hosts (or origins) the app may also be reached as, added to `[server] hosts` (aio's plugin `allowedOrigins`) | `[server] hosts` |
+| `.on_start(f)` | runs once the cells are live, after the app's own (aio's plugin `onStart`) | `Cells::on_start` |
+| `.on_stopping(f)`, `.on_stop(f)` | run at the app's stop: first, and last (aio's plugin `onStop`) | `aio::on_stopping`, `aio::on_stop` |
 
 `aio::plugin::compose(cells, http, plugins)` checks the plugins, then adds
 them: their cells beside the app's, their routes and server functions

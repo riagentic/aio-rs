@@ -147,6 +147,32 @@ fn an_aio_file_opens_in_aio_rs_and_stays_readable_by_aio() {
     assert_eq!((tally.state().n, tally.events().unwrap().len()), (11, 2));
 }
 
+/// aio's `tally` counts `inbox.post`s by `listensTo` (one reduce, one
+/// save): ported, the reaction and its call land in aio's one `state`
+/// document in the same commit, before either is on disk, and aio reads it.
+#[test]
+fn a_reaction_lands_in_aio_s_file_in_its_call_s_commit() {
+    let (_d, home) = fixture();
+    let h = Home::open(&home, APP, None).unwrap();
+    let db = h.state_db();
+    let (tally, inbox) = (Handle::<Tally>::open_aio(&db, APP).unwrap(), Handle::<Inbox>::open_aio(&db, APP).unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (s, file) = (seen.clone(), db.clone());
+    tally.listens_to(&inbox, "post", move |t, _| {
+        *s.lock().unwrap() = Some(kv(&file)["state"].clone());
+        t.on_add()
+    });
+    inbox.post("p30".into()).unwrap();
+    let before = seen.lock().unwrap().take().unwrap();
+    assert_eq!((&before["tally"]["n"], before["inbox"]["posts"].as_array().unwrap().len()), (&json!(10), 5), "not yet");
+    let after = kv(&db)["state"].clone();
+    assert_eq!(after["tally"], json!({ "n": 11, "__aio_status": "active" }));
+    assert_eq!(after["inbox"]["posts"][5], json!("p30"));
+    drop((tally, inbox));
+    let tally = Store::<Tally>::open_aio(&db, APP).unwrap();
+    assert_eq!(tally.state().n, 11);
+}
+
 #[test]
 fn a_ported_app_boots_on_its_aio_home_and_data() {
     let (_d, home) = fixture();
@@ -270,7 +296,10 @@ fn files_aio_would_refuse_are_refused_and_kept() {
     let cases: [(&[(&str, Value)], &str); 4] = [
         (&[("app:__schema", json!(2))], "newer aio"),
         (&[("state", json!([1]))], "not an object of cells"),
-        (&[("state", json!({ "inbox": {} })), ("app:__versions", json!({ "inbox": 2 }))], "newer build"),
+        (
+            &[("state", json!({ "inbox": { "posts": "one" } })), ("app:__versions", json!({ "inbox": 2 }))],
+            "newer build (v2 > v1) doesn't fit this build",
+        ),
         (&[("state", json!({}))], "a table `log`"),
     ];
     for (i, (rows, why)) in cases.into_iter().enumerate() {
@@ -305,9 +334,99 @@ fn the_home_is_claimed_and_checked_as_aio_does() {
     std::fs::write(&meta, json!({ "appId": APP, "profile": "dev" }).to_string()).unwrap();
     assert!(Home::open(&home, APP, None).unwrap_err().to_string().contains("profile"));
     drop(Home::open(&home, APP, Some("dev")).unwrap());
-    // An aio journal not yet folded: only aio can replay it.
+    // An aio journal not yet folded is the store's to replay, not the claim's to refuse.
     std::fs::write(home.join("data/journal"), b"{}\n").unwrap();
-    assert!(Home::open(&home, APP, Some("dev")).unwrap_err().to_string().contains("start the aio app once"));
+    drop(Home::open(&home, APP, Some("dev")).unwrap());
+}
+
+/// A copy of aio's `v1.0.9-crashed-streaming` home: killed after its save
+/// at journal entry 10, two `inbox:post` calls in the journal past it.
+fn crashed() -> (tempfile::TempDir, PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    let data = d.path().join("home/data");
+    std::fs::create_dir_all(&data).unwrap();
+    for (f, b) in [
+        ("state.db", &include_bytes!("fixtures/aio-1.0.9-crashed-streaming/state.db")[..]),
+        ("meta.json", include_bytes!("fixtures/aio-1.0.9-crashed-streaming/meta.json")),
+        ("journal", include_bytes!("fixtures/aio-1.0.9-crashed-streaming/journal")),
+        ("journal.base", include_bytes!("fixtures/aio-1.0.9-crashed-streaming/journal.base")),
+    ] {
+        std::fs::write(data.join(f), b).unwrap();
+    }
+    (d, data.join("state.db"))
+}
+
+const WM: &str = "sync-listener-journal-probe:__journal_wm";
+
+#[test]
+fn an_aio_journal_past_its_save_is_replayed_once_and_aio_finds_it_folded() {
+    let (_d, db) = crashed();
+    let posts = |s: &Store<Inbox>| s.state().posts.clone();
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(posts(&s).len(), 12);
+    assert_eq!(posts(&s)[10..], ["p54", "p59"], "the two calls the kill left in the journal");
+    drop(s);
+    // aio's next boot: the snapshot holds them, the watermark says so (nothing replayed twice).
+    assert_eq!(kv(&db)[WM], json!(12));
+    let cells = aio_reads(&db, APP);
+    assert_eq!(cells["inbox"]["posts"].as_array().unwrap().len(), 12);
+    assert_eq!(cells["tally"], json!({ "n": 21, "__aio_status": "active" }), "other cells as aio left them");
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(posts(&s).len(), 12, "aio-rs's own next boot replays nothing again");
+    assert_eq!(s.events().unwrap().iter().filter(|e| e.method == "post").count(), 2);
+}
+
+#[test]
+fn a_journal_of_another_cells_calls_is_left_to_aio() {
+    let (_d, db) = crashed();
+    let s = Store::<Tally>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().n, 21);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(10), "the watermark is the inbox's to move");
+}
+
+#[test]
+fn a_journal_aio_rs_cant_replay_refuses_the_boot_and_keeps_the_file() {
+    let line = |l: &str| format!("{l}\n");
+    for (tail, why) in [
+        (line(r#"{"seq":11,"type":"aio:__timeTravel","payload":{},"ts":1}"#), "carries state"),
+        (line(r#"{"seq":11,"type":"inbox:__setPosts","payload":{},"ts":1}"#), "carries state"),
+        (line(r#"{"seq":11,"type":"custom","payload":{},"ts":1}"#), "no call aio-rs can replay"),
+        (
+            line(r#"{"seq":11,"type":"inbox:post","payload":{"args":["a"]},"ts":1}"#)
+                + &line(r#"{"seq":12,"type":"tally:onAdd","payload":{"args":[]},"ts":1}"#),
+            "and of another cell (tally:onAdd)",
+        ),
+    ] {
+        let (_d, db) = crashed();
+        std::fs::write(db.with_file_name("journal"), tail).unwrap();
+        let before = dump(&db);
+        let e = Store::<Inbox>::open_aio(&db, APP).err().unwrap().0;
+        assert!(e.contains(why) && e.contains("start the aio app once"), "{e}");
+        assert_eq!(dump(&db), before);
+    }
+    // The store put back to before what the journal dropped: a gap only aio may judge.
+    let (_d, db) = crashed();
+    std::fs::write(db.with_file_name("journal.base"), r#"{"wm":11,"cells":{}}"#).unwrap();
+    assert!(Store::<Inbox>::open_aio(&db, APP).err().unwrap().0.contains("put back to an older copy"));
+}
+
+#[test]
+fn torn_withheld_and_bookkeeping_lines_are_skipped_as_aio_skips_them() {
+    let (_d, db) = crashed();
+    let lines = [
+        r#"{"seq":9,"type":"inbox:post","payload":{"args":["old"]},"ts":1}"#,
+        r#"{"seq":11,"type":"__aioBatch","entries":[{"seq":11,"type":"inbox:post","payload":{"args":["a"]},"ts":1}]}"#,
+        r#"{"seq":12,"type":"inbox:post","payload":"[redacted]","redacted":true,"ts":1}"#,
+        r#"{"seq":13,"type":"__aioSyncApplied","ts":1}"#,
+        r#"{"seq":14,"type":"inbox:po"#,
+    ];
+    std::fs::write(db.with_file_name("journal"), lines.join("\n")).unwrap();
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().posts.last().map(String::as_str), Some("a"), "the batch's call, not the one before the save");
+    assert_eq!(s.state().posts.len(), 11);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(13), "past every entry it read");
 }
 
 /// What aio reads of the file at `p` for app `app` (`stored-state.ts`): an
@@ -1054,14 +1173,28 @@ fn a_cell_of_many_slices_writes_them_all_or_none() {
 }
 
 #[test]
-fn a_slice_from_a_newer_aio_is_refused_and_the_file_kept() {
+fn a_slice_from_a_newer_aio_boots_and_keeps_its_fields_one_that_doesnt_fit_is_refused() {
     let (_d, p) = purse_file(true);
     let c = rusqlite::Connection::open(&p).unwrap();
     c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'w:__versions'", [json!({ "network": 3 }).to_string()]).unwrap();
+    c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'state\x1fnetwork'", [json!({ "rpc": "r", "later": 1 }).to_string()])
+        .unwrap();
+    drop(c);
+    let mut w = Store::<Purse>::open_aio(&p, "w").unwrap();
+    assert_eq!(w.state().network.rpc, "r");
+    w.call(&By::Test, "theme", json!(["calm"])).unwrap();
+    drop(w);
+    let rows = kv(&p);
+    assert_eq!(rows["state\x1fnetwork"], json!({ "rpc": "r", "later": 1 }), "the newer build's field kept");
+    assert_eq!(rows["w:__versions"]["network"], json!(3), "its stamp never lowered");
+    let (_d, p) = purse_file(true);
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'w:__versions'", [json!({ "network": 3 }).to_string()]).unwrap();
+    c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'state\x1fnetwork'", [json!({ "rpc": [1] }).to_string()]).unwrap();
     drop(c);
     let before = kv(&p);
     let e = Store::<Purse>::open_aio(&p, "w").err().unwrap().0;
-    assert!(e.contains("network: aio data from a newer build (v3 > v2)"), "{e}");
+    assert!(e.contains("network: aio data from a newer build (v3 > v2) doesn't fit"), "{e}");
     assert_eq!(kv(&p), before);
     assert!(table(&p, "sqlite_master").iter().all(|t| !t.contains("\"log\"")), "no aio-rs table made");
 }
@@ -1195,6 +1328,75 @@ fn a_retired_cell_is_gone_from_the_file_in_either_layout() {
     assert!(e.contains("selfish: it retires cell settings, which it still reads"), "{e}");
 }
 
+/// A port whose bridge-era build kept a slice under its own id (`state\x1fpurse3`)
+/// before it read aio's cells by field: it retires that slice, its history kept.
+#[cell(persist, id = "purse3", retire = ["purse3"])]
+pub struct Purse3 {
+    #[aio_cell]
+    settings: Settings,
+    #[aio_cell]
+    network: Net,
+    locked: bool,
+}
+
+#[methods]
+impl Purse3 {
+    pub fn lock(&mut self) {
+        self.locked = true;
+    }
+}
+
+/// A one-slice cell reads aio's slice of its own id: it can't retire it.
+#[cell(persist, id = "settings", retire = ["settings"])]
+pub struct SelfRetired {
+    dark: bool,
+}
+
+#[methods]
+impl SelfRetired {}
+
+#[test]
+fn a_cell_of_aio_cells_retires_aios_slice_of_its_own_id_and_keeps_its_history() {
+    for multi in [false, true] {
+        let (_d, p) = purse_file(multi);
+        let mut w = Store::<Purse3>::open_aio(&p, "w").unwrap();
+        w.call(&By::Test, "lock", Value::Null).unwrap();
+        drop(w);
+        // An older build's slice of its own id, and its stamp.
+        let c = rusqlite::Connection::open(&p).unwrap();
+        let bridge = json!({ "seen": "BRIDGE-ERA-SLICE" });
+        match multi {
+            true => {
+                _ = c.execute("INSERT INTO aio_kv (k, v) VALUES ('state\x1fpurse3', ?1)", [bridge.to_string()]).unwrap()
+            }
+            false => {
+                let doc: String = c.query_row("SELECT v FROM aio_kv WHERE k = 'state'", [], |r| r.get(0)).unwrap();
+                let mut doc: Value = serde_json::from_str(&doc).unwrap();
+                doc["purse3"] = bridge;
+                c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'state'", [doc.to_string()]).unwrap();
+            }
+        }
+        let mut versions = kv(&p)["w:__versions"].clone();
+        versions["purse3"] = json!(1);
+        c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'w:__versions'", [versions.to_string()]).unwrap();
+        drop(c);
+        assert!(aio_reads(&p, "w").contains_key("purse3"));
+
+        let w = Store::<Purse3>::open_aio(&p, "w").unwrap();
+        assert!(w.state().locked, "its own history stays");
+        assert!(w.events().unwrap().iter().any(|e| e.method == "lock"));
+        drop(w);
+        let after = aio_reads(&p, "w");
+        assert!(!after.contains_key("purse3"), "multi = {multi}");
+        assert!(after.contains_key("settings") && after.contains_key("c00"));
+        assert!(kv(&p)["w:__versions"].get("purse3").is_none());
+        assert!(!holds(&bytes(&p), "BRIDGE-ERA-SLICE"), "zeroed");
+    }
+    let (_d, p) = purse_file(false);
+    let e = Store::<SelfRetired>::open_aio(&p, "w").err().unwrap().0;
+    assert!(e.contains("settings: it retires cell settings, which it still reads"), "{e}");
+}
+
 /// aio's `counts`: ids handed out, and the next one.
 #[cell(persist, id = "counts")]
 #[serde(rename_all = "camelCase")]
@@ -1280,4 +1482,125 @@ fn what_aio_changed_is_settled_by_on_aio_and_checked_by_the_invariants() {
     db.execute("DELETE FROM snap WHERE cell = 'ledger'", []).unwrap();
     drop(db);
     assert_eq!(Store::<Ledger>::open_aio(&p, "w").unwrap().state().settled, 2);
+}
+
+#[test]
+fn aio_apks_state_comes_in_once_on_the_ports_first_android_start() {
+    // aio android-template MainActivity.kt `AioNativeStore.fileFor`: Java's
+    // String.hashCode, in hex; aio's standalone runtime keys `aio:<appId>`.
+    let d = tempfile::tempdir().unwrap();
+    let files = d.path();
+    let file = aio::compat::data::android_store_file(&files.join("aio-store"), "aio:notes");
+    assert_eq!(file.file_name().unwrap(), "aio_notes.22588ace.json", "as the APK names it (checked with Java)");
+    let odd = aio::compat::data::android_store_file(Path::new("s"), &format!("aio:{}/é", "x".repeat(70)));
+    let name = odd.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with(&format!("aio_{}", "x".repeat(60))) && name.split('.').next().unwrap().len() == 64);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, r#"{"tally":{"n":4,"__aio_status":"active"},"__versions":{"tally":0}}"#).unwrap();
+    let store = files.join("data/state.db");
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    assert!(aio::compat::data::import_android(files, "notes", &store).unwrap());
+    assert_eq!(aio_reads(&store, "notes")["tally"]["n"], 4);
+    let mut s = Store::<Tally>::open_aio(&store, "notes").unwrap();
+    assert_eq!(s.state().n, 4, "the cell starts from aio's state");
+    s.call(&By::Test, "on_add", Value::Null).unwrap();
+    drop(s);
+    // Once: the port's own store from then on; aio's file kept as it was.
+    assert!(!aio::compat::data::import_android(files, "notes", &store).unwrap());
+    assert_eq!(Store::<Tally>::open_aio(&store, "notes").unwrap().state().n, 5);
+    assert!(std::fs::read_to_string(&file).unwrap().contains("\"n\":4"));
+    // Nothing of aio's: nothing made.
+    let none = d.path().join("none");
+    assert!(!aio::compat::data::import_android(&none, "notes", &none.join("state.db")).unwrap());
+    // Not aio's document: refused, never dropped or half made.
+    std::fs::write(&file, "[1]").unwrap();
+    let other = files.join("data/other.db");
+    let e = aio::compat::data::import_android(files, "notes", &other).unwrap_err();
+    assert!(e.to_string().contains("not an object of cells"), "{e}");
+    assert!(!other.exists() && !other.with_extension("importing").exists());
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Task {
+    id: i64,
+    title: String,
+    done: bool,
+    tags: Vec<String>,
+    meta: Option<BTreeMap<String, Value>>,
+}
+
+/// Typed columns (aio's `table({ id: pk(), … })`), a bool, a list and a nested value among them.
+const TASKS: &[aio::columns::Col] = &[
+    aio::columns::pk("id"),
+    aio::columns::text("title"),
+    aio::columns::boolean("done").default_int(0),
+    aio::columns::json("tags"),
+    aio::columns::json("meta").nullable(),
+];
+
+#[cell(persist, id = "board")]
+pub struct Board {
+    #[table("tasks", columns = TASKS)]
+    tasks: Vec<Task>,
+}
+
+#[methods]
+impl Board {
+    pub fn add(&mut self, id: i64, title: String, tags: Vec<String>, meta: Option<BTreeMap<String, Value>>) {
+        self.tasks.push(Task { id, title, done: false, tags, meta });
+    }
+    pub fn finish(&mut self, id: i64) {
+        self.tasks.iter_mut().filter(|t| t.id == id).for_each(|t| t.done = true);
+    }
+}
+
+#[test]
+fn typed_columns_hold_bools_lists_and_nested_values_both_ways() {
+    let meta = json!({ "due": { "day": 3 }, "who": ["ana"] });
+    for aio_file in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("state.db");
+        let open = || if aio_file { Store::<Board>::open_aio(&p, APP) } else { Store::<Board>::open(&p) };
+        let mut s = open().unwrap();
+        let ddl: String = rusqlite::Connection::open(&p)
+            .unwrap()
+            .query_row("SELECT sql FROM sqlite_master WHERE name = 'tasks'", [], |r| r.get(0))
+            .unwrap();
+        assert!(ddl.contains(r#""done" BOOLEAN NOT NULL DEFAULT 0, "tags" JSON NOT NULL, "meta" JSON)"#), "{ddl}");
+        s.call(&By::Test, "add", json!([1, "plan", ["a", "b"], meta])).unwrap();
+        s.call(&By::Test, "add", json!([2, "[not a list]", [], null])).unwrap();
+        s.call(&By::Test, "finish", json!([1])).unwrap();
+        assert_eq!(
+            table(&p, "tasks"),
+            [
+                r#"Integer(1)|Text("plan")|Integer(1)|Text("[\"a\",\"b\"]")|Text("{\"due\":{\"day\":3},\"who\":[\"ana\"]}")"#,
+                r#"Integer(2)|Text("[not a list]")|Integer(0)|Text("[]")|Null"#,
+            ],
+            "0/1 and JSON text, as aio (and any SQL tool) can read them"
+        );
+        let want = s.state().tasks.clone();
+        drop(s);
+        // Back as they were, from the rows: the app's own SQL changes them too.
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute(r#"UPDATE tasks SET done = 0, tags = '["x"]' WHERE id = 1"#, []).unwrap();
+        drop(c);
+        let s = open().unwrap();
+        assert_eq!(s.state().tasks[1], want[1]);
+        assert_eq!((s.state().tasks[0].done, s.state().tasks[0].tags.clone()), (false, vec!["x".to_string()]));
+        assert_eq!(s.state().tasks[0].meta.as_ref().map(|m| json!(m)), Some(meta.clone()));
+    }
+}
+
+#[test]
+fn a_bool_or_a_list_in_a_plain_column_is_refused_naming_the_column_kind() {
+    let (_d, p) = bound_file(true);
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch(
+        "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, done INTEGER, tags TEXT, meta TEXT)",
+    )
+    .unwrap();
+    drop(c);
+    let mut s = Store::<Board>::open_aio(&p, APP).unwrap();
+    let e = s.call(&By::Test, "add", json!([1, "plan", [], null])).unwrap_err().why;
+    assert!(e.contains("done = false") && e.contains("a bool needs a BOOLEAN column"), "{e}");
 }

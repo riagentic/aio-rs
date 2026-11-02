@@ -257,6 +257,17 @@ async fn aio_toml_serves_dirs_from_the_files_tier_and_public_ones_without_the_ke
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn built_in_assets_are_served_at_their_paths_to_anyone() {
+    static FILES: &[(&str, &[u8])] = &[("/media/a%20b.svg", b"<svg/>"), ("/media/song.mp3", b"la")];
+    let addr = serve(Handle::memory(), Http::default().assets(FILES)).await;
+    let (status, headers, body) = fetch(&addr, "GET", "/media/song.mp3", &[], "").await;
+    assert_eq!((status, body.as_str()), (200, "la"), "they ship with the app: no key");
+    assert!(headers.contains("content-type: audio/mpeg"), "{headers}");
+    assert_eq!(fetch(&addr, "GET", "/media/a%20b.svg", &[], "").await.2, "<svg/>");
+    assert_eq!(fetch(&addr, "GET", "/media/other.mp3", &[], "").await.0, 401, "only what is built in");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_open_app_needs_no_key_but_minting_a_pin_still_does() {
     let opts = |open| aio::sync::Options {
         token: "secret".into(),
@@ -559,7 +570,7 @@ async fn a_streamed_route_pipes_its_body_into_blobs_as_it_arrives() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn health_and_metrics_answer_a_monitor_without_the_key() {
+async fn health_and_metrics_answer_this_machine_and_the_network_only_with_a_credential() {
     let addr = serve(Handle::memory(), Http::default()).await;
     let (s, head, body) = fetch(&addr, "GET", "/__aio/health", &[], "").await;
     assert_eq!((s, header(&head, "cache-control")), (200, Some("no-store")));
@@ -567,12 +578,79 @@ async fn health_and_metrics_answer_a_monitor_without_the_key() {
     assert_eq!(v["appId"], "hooks");
     assert_eq!(v["pid"], std::process::id());
     assert!(["healthy", "degraded"].contains(&v["status"].as_str().unwrap()), "{v}");
+    assert!(v.get("exe").is_none() && v.get("cwd").is_none(), "where it runs is the file's only: {v}");
     let (s, head, body) = fetch(&addr, "GET", "/__aio/metrics", &[], "").await;
     assert_eq!((s, header(&head, "content-type")), (200, Some("text/plain; version=0.0.4")));
     for m in ["# TYPE aio_up gauge", "aio_uptime_seconds ", "aio_memory_rss_bytes ", "aio_clients_connected "] {
         assert!(body.contains(m), "{m} in {body}");
     }
     assert_eq!(fetch(&addr, "HEAD", "/__aio/health", &[], "").await.0, 200);
+    // Fail closed: a request a proxy relayed is from the network, and the
+    // network shows the key (or, with users, a user's token).
+    const RELAYED: (&str, &str) = ("X-Forwarded-For", "10.0.0.2");
+    // aio's vitals: every layer, the likely cause, the thresholds.
+    let (s, _, body) = fetch(&addr, "GET", "/__aio/vitals", &[], "").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(s, 200);
+    assert!(v["loop"]["status"].is_string() && v["render"]["status"].is_string(), "{v}");
+    assert_eq!(v["thresholds"]["loop"]["frozen"], aio::vitals::Vitals::default().event_loop.frozen);
+    for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
+        assert_eq!(fetch(&addr, "GET", path, &[RELAYED], "").await.0, 401, "{path}");
+        assert_eq!(fetch(&addr, "GET", path, &[RELAYED, ("Authorization", "Bearer wrong")], "").await.0, 401);
+        assert_eq!(fetch(&addr, "GET", path, &[RELAYED, KEY], "").await.0, 200, "{path}");
+    }
+    let users =
+        Http::default().users(aio::auth::Users::map([("tok-of-mon-0123456789".into(), ("mon".into(), "ops".into()))]));
+    let addr = serve(Handle::memory(), users).await;
+    let tok = ("Authorization", "Bearer tok-of-mon-0123456789");
+    // With users, never anonymous, even here (aio's per-user rule).
+    assert_eq!(fetch(&addr, "GET", "/__aio/health", &[], "").await.0, 401);
+    assert_eq!(fetch(&addr, "GET", "/__aio/health", &[RELAYED], "").await.0, 401);
+    assert_eq!(fetch(&addr, "GET", "/__aio/health", &[RELAYED, tok], "").await.0, 200);
+    // `[server] open` says so on purpose: then anyone may look.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let open = l.local_addr().unwrap().to_string();
+    tokio::spawn(aio::sync::serve_with(
+        Handle::<Hooks>::memory(),
+        l,
+        aio::sync::Options { open: true, ..Default::default() },
+    ));
+    assert_eq!(fetch(&open, "GET", "/__aio/metrics", &[RELAYED], "").await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_snapshot_endpoint_exports_and_loads_the_whole_state_as_aios() {
+    let h = Handle::<Hooks>::memory();
+    h.call("pay", serde_json::json!(["a1", 5])).unwrap();
+    let addr = serve(h.clone(), Http::default()).await;
+    // Without the key: refused; with it, this machine's tool gets every cell.
+    assert_eq!(fetch(&addr, "GET", "/__aio/snapshot", &[], "").await.0, 401);
+    let (s, head, body) = fetch(&addr, "GET", "/__aio/snapshot", &[KEY], "").await;
+    assert_eq!((s, header(&head, "cache-control")), (200, Some("no-store")));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({ "hooks": { "paid": { "a1": 5 } } })
+    );
+    let post = |body: &'static str, path: &'static str, x: bool| {
+        let addr = addr.clone();
+        async move {
+            let headers: Vec<(&str, &str)> = if x { vec![KEY, JSON, ("X-AIO", "1")] } else { vec![KEY, JSON] };
+            fetch(&addr, "POST", path, &headers, body).await
+        }
+    };
+    assert_eq!(post(r#"{"hooks":{"paid":{}}}"#, "/__aio/snapshot", false).await.0, 403, "aio's CSRF header");
+    let (s, _, why) = post(r#"{"hooks":42}"#, "/__aio/snapshot", true).await;
+    assert!(s == 400 && why.contains(r#"cell "hooks" must be an object"#), "{s} {why}");
+    let (s, _, why) = post(r#"{"other":{}}"#, "/__aio/snapshot", true).await;
+    assert!(s == 400 && why.contains("whose state would be DESTROYED") && why.contains(r#""other""#), "{why}");
+    assert_eq!(post("{nope", "/__aio/snapshot", true).await.2, "Invalid JSON");
+    assert_eq!(h.state().paid.len(), 1, "nothing refused changed anything");
+    assert_eq!(post(r#"{"hooks":{"paid":{"b2":7}}}"#, "/__aio/snapshot", true).await.0, 200);
+    assert_eq!(h.state().paid, BTreeMap::from([("b2".into(), 7)]));
+    // Forced: a missing cell starts from its defaults, an unknown one is dropped.
+    assert_eq!(post(r#"{"other":{}}"#, "/__aio/snapshot?force=1", true).await.0, 200);
+    assert!(h.state().paid.is_empty());
+    assert_eq!(h.store(|s| s.events().unwrap()).last().unwrap().method, "$rewind", "a new event, the old state kept");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -774,4 +852,98 @@ async fn blobs_are_served_with_ranges_and_cached_for_good_behind_the_key() {
     // Not served unless the app asks.
     let plain = serve(Handle::memory(), Http::default()).await;
     assert_eq!(fetch(&plain, "GET", &url, &[KEY], "").await.0, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_route_streams_its_answer_part_by_part() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(Some(rx)));
+    let http = Http::default().route(Route::get("/events", move |_| {
+        let rx = rx.lock().unwrap().take();
+        async move {
+            let Some(rx) = rx else { return Reply::text("taken").status(409) };
+            let parts = futures_util::stream::unfold(rx, |mut rx| async move { Some((rx.recv().await?, rx)) });
+            Reply::stream("text/event-stream", parts)
+        }
+    }));
+    let addr = serve(Handle::<Hooks>::memory(), http).await;
+    let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let req = "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n";
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut got = Vec::new();
+    // Each part arrives while the answer is still open.
+    for (i, n) in [1, 2].into_iter().enumerate() {
+        tx.send(format!("data: {n}\n\n")).unwrap();
+        while !String::from_utf8_lossy(&got).contains(&format!("data: {n}\n\n")) {
+            let mut buf = [0; 1024];
+            let k = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf)).await.unwrap().unwrap();
+            assert!(k > 0, "closed before part {i}");
+            got.extend_from_slice(&buf[..k]);
+        }
+    }
+    let head = String::from_utf8_lossy(&got).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("content-type: text/event-stream"), "{head}");
+    assert!(head.contains("cache-control: no-cache") && head.contains("transfer-encoding: chunked"), "{head}");
+    assert!(!head.contains("content-encoding"), "never compressed: {head}");
+    // Its end ends the answer.
+    drop(tx);
+    let mut rest = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut rest)).await.unwrap().unwrap();
+    assert!(rest.ends_with(b"0\r\n\r\n"), "{:?}", String::from_utf8_lossy(&rest));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_socket_route_carries_binary_frames_per_kind() {
+    use aio::http::side::{Seen, Seqs, decode, encode};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<(u8, Seen)>>> = Default::default();
+    let log = seen.clone();
+    let http = Http::default().route(Route::socket("/stream", move |req| {
+        let log = log.clone();
+        async move {
+            // Decided before the upgrade: an unknown session never gets a socket.
+            if req.query("sid") != Some("s1") {
+                return Err(Reply::text("unknown session").status(403));
+            }
+            Ok(move |mut f: aio::http::side::Frames| async move {
+                while let Some(fr) = f.recv().await {
+                    log.lock().unwrap().push((fr.kind, fr.seen));
+                    f.send(fr.kind, &fr.body, true).unwrap();
+                }
+            })
+        }
+    }));
+    let addr = serve(Handle::<Hooks>::memory(), http).await;
+    let req = |sid: &str| {
+        let mut r = format!("ws://{addr}/stream?sid={sid}").into_client_request().unwrap();
+        r.headers_mut().insert("authorization", "Bearer secret".parse().unwrap());
+        r
+    };
+    let e = tokio_tungstenite::connect_async(req("nope")).await.unwrap_err();
+    assert!(e.to_string().contains("403"), "{e}");
+    let (status, _, _) = fetch(&addr, "GET", "/stream?sid=s1", &[KEY], "").await;
+    assert_eq!(status, 426, "not an upgrade");
+    let mut no_key = format!("ws://{addr}/stream?sid=s1").into_client_request().unwrap();
+    no_key.headers_mut().remove("authorization");
+    assert!(tokio_tungstenite::connect_async(no_key).await.unwrap_err().to_string().contains("401"));
+    let (mut w, _) = tokio_tungstenite::connect_async(req("s1")).await.unwrap();
+    let mut out = Seqs::default();
+    // Two kinds interleaved, then one frame of kind 2 lost on the way.
+    for (kind, body) in [(1u8, &b"a"[..]), (2, b"b"), (1, b"c"), (2, b"d")] {
+        w.send(Message::binary(encode(kind, out.next(kind), body))).await.unwrap();
+    }
+    out.next(2);
+    w.send(Message::binary(encode(2, out.next(2), b"f"))).await.unwrap();
+    let mut back = Seqs::default();
+    for want in ["a", "b", "c", "d", "f"] {
+        let Message::Binary(b) = w.next().await.unwrap().unwrap() else { panic!("binary") };
+        let (kind, seq, body) = decode(&b).unwrap();
+        assert_eq!((body, back.accept(kind, seq)), (want.as_bytes(), Seen::Next), "the server numbers its own");
+    }
+    let s = seen.lock().unwrap().clone();
+    assert_eq!(s[..4].iter().map(|x| x.1).collect::<Vec<_>>(), [Seen::Next; 4], "interleaved kinds are no gap");
+    assert_eq!(s[4], (2, Seen::Gap(1)));
 }

@@ -85,6 +85,8 @@ Two effects with the same key, the second asked for while the first runs:
 | `Newest` | cancels the first | search as you type |
 | `First` | is skipped; its caller may `h.done(key).await` and read what the first left | a refresh already running |
 
+(An async method takes these as `#[mode(newest)]` / `#[mode(first)]`, below.)
+
 `.per(&args)` keys the effect by its arguments too (`aio::effect::key`),
 so `scan("/a")` and `scan("/b")` neither cancel, skip nor wait for each
 other.
@@ -92,16 +94,21 @@ other.
 ### Heavy work, retries and timeouts
 
 - Effects run on aio-rs's background runtime (`aio::rt()`), never on the
-  UI thread. CPU-heavy work (aio's `worker: true`, `blocking()`) goes in
-  `tokio::task::spawn_blocking` inside the effect, and its result comes
-  back as a call like any other: no cell needs its own thread.
+  UI thread. CPU-heavy work (aio's `blocking(id, fn)`) is
+  `aio::effect::blocking(key, |cancel| ..).await` inside the effect: a
+  worker thread, with a `Cancel` it checks between chunks, set by
+  `aio::effect::cancel_blocking(key)` (aio's `blocking.cancel(id)`) and
+  when the effect awaiting it ends early (`cx.abort`, a timeout, the app
+  stopping). Its result comes back as a call like any other: no cell
+  needs its own thread.
 - `aio::effect::retry(retries, timeout, || io())` runs `io` again up to
   `retries` more times while it fails, each try cut off after `timeout`
   (aio's `call({ timeoutMs, retries })`).
-- Each await of an async method may take at most
-  `aio::effect::CALL_CEILING` (30 s): one that never settles is cut off,
-  logged and reported, and its later steps never run. `#[long]` lifts the
-  ceiling for a method that legitimately waits (a long download).
+- Each await of an async method may take at most the call ceiling, 30 s
+  unless `[perf] call_ceiling` (ms) says otherwise (aio's
+  `effectTimeoutMs`): one that never settles is cut off, logged and
+  reported, its later steps never run, and its caller is told. `#[long]`
+  lifts the ceiling for a method that legitimately waits (a long download).
 
 ## What happens to an effect
 
@@ -161,7 +168,7 @@ log.
 | `h.busy(key)` | an effect with this key runs or waits |
 | `h.done(key).await` | until none does |
 | `h.pending(Some(method))`, `h.pending(None)` | how many run or wait (an async method's, or all) |
-| `h.on_pending(f)` | `f` when that may have changed: a spinner re-renders |
+| `h.on_pending(f)` | `f` when that may have changed: a spinner updates |
 | `aio::on_effect(\|cell, key\| ..)` | hear every effect as it starts (aio's `onEffect`): metrics, traces |
 
 Each poll of an effect (the time it holds a runtime thread between two
@@ -172,10 +179,11 @@ written to `logs/perf.log` and the app log with the fix (most often:
 
 ## Async methods
 
-A `pub async fn` is written in one piece, as aio's async methods are. aio-rs
-splits it at each top-level `let x: T = io.await;`: the code before the
-first await is the method, each await becomes an effect, and the code
-after it a step method (`m.1`, `m.2`…) that the effect calls with `x`.
+A `pub async fn` is written in one piece, as aio's async methods are, and
+its caller awaits its end, as aio's `await cell.method()` does. aio-rs
+splits it at each await: the code before the first await is the method,
+each await becomes an effect, and the code after it a step method (`m.1`,
+`m.2`…, numbered in source order) that the effect calls with the result.
 Each part is one atomic call and the log holds every awaited result.
 
 ```rust
@@ -208,28 +216,139 @@ impl Shop {
 # fn main() {
 let mut t = TestCells::new();
 let h = t.cell::<Shop>();
-h.buy("tea".into(), 1000).unwrap();
+let mut end = h.buy("tea".into(), 1000).unwrap(); // its first part committed
 t.settle();
 assert_eq!((h.state().total, h.state().status.as_str()), (300, "done"));
+assert_eq!(end.now(), Some(Ok(())), "and its caller has the end");
 # }
 ```
 
+- The typed call (`h.buy(..)`) returns `Result<aio::Answer<R>>`: `Err`
+  when the first part refused; the `Answer`, awaited, is the value the
+  method's last part returned, or the refusal that ended it after an await
+  (a step's `ensure!`, an awaited `?`, its await cut off at the call
+  ceiling, aborted or superseded). Drop it to fire and forget: the call
+  runs either way. `Answer::now()` reads it without awaiting (a sync test
+  after `t.settle()`). A synced copy's `Answer` is the server's end, as
+  is `call_confirmed`'s; an aio page's `action` is acked on the end.
+- An await stands where a statement does, at any depth of `if`,
+  `if let`, `match`, `loop`, `while` and blocks, with `break` and
+  `continue`: `let x: T = io.await;`, `let x: T = io.await?;` (an `Err`
+  ends the method there, said to its caller), `x = io.await;`,
+  `io.await;`, `let x: T = match .. { .. => io.await, .. };`, or the
+  method's last expression (`lookup(id).await`, a `Result<R>`). An await
+  inside `for` is refused: keep the position in a typed `let` and use
+  `while`.
 - Only the arguments (owned, no references) and typed `let`s live across
-  an await. `.await` goes only in `let x: T = io.await;` at the top level
-  of the body: `T` is how `x` is saved in the log, so it is `Serialize`
-  (a `Result<String, String>`, not an error type that isn't).
-- An async method returns `aio::Result`. A refusal after an await refuses
-  that step: what the steps before committed stays.
+  an await: `T` is how a value is saved in the log, so it is `Serialize`
+  (a `Result<String, String>`, not an error type that isn't). An untyped
+  `let` used after an await, or a binding inside a branch that hides one
+  used after it, fails the build naming it.
+- An async method returns `aio::Result<R>`. A refusal after an await
+  refuses that step: what the steps before committed stays.
 - Each step after an await is called by the method's effect
   (`By::Effect("buy")`), not by the first caller: keep what the first part
-  reads of `cx.by()` or `cx.role()` in a typed `let`. A step's refusal reaches
-  no caller: it is said in the log and counts as an
+  reads of `cx.by()` or `cx.role()` in a typed `let`. A step's refusal
+  reaches its caller's `Answer`, is said in the log and counts as an
   [effect's failure](#what-happens-to-an-effect).
+- `#[mode(newest)]`: a new call supersedes the running one (its await is
+  aborted, its later steps refused, its caller told; search as you type).
+  `#[mode(first)]`: while one runs, a new call runs nothing and shares its
+  answer (aio's `concurrency: "first"`). Without one, overlapping calls'
+  awaits run in turn.
 - `#[ttl(ms)]` answers a repeated call with the same arguments within
-  `ms` of a finished one with `Ok(())`, without running it again (aio's
-  `ttl`); its effects are keyed by the arguments.
+  `ms` of a finished one with its kept answer, without running it again
+  (aio's `ttl`); its effects are keyed by the arguments.
 - `h.pending(Some("buy"))` counts the calls in flight (two overlapping
   calls are two); `h.on_pending(f)` tells when that may have changed.
+
+Awaits in a loop and a branch, and the answer:
+
+```rust
+use aio::prelude::*;
+use aio::testing::TestCells;
+
+#[cell(persist)]
+pub struct Feed {
+    pub rows: Vec<String>,
+}
+
+/// Stands in for a paged HTTP API: three pages, then none.
+async fn page(n: u32) -> std::result::Result<Vec<String>, String> {
+    Ok(if n < 3 { vec![format!("row {n}")] } else { vec![] })
+}
+
+#[methods]
+impl Feed {
+    pub async fn sync(&mut self, max: u32) -> Result<u32> {
+        let mut n: u32 = 0;
+        while n < max {
+            let rows: Vec<String> = page(n).await?;
+            if rows.is_empty() {
+                break;
+            }
+            self.rows.extend(rows);
+            n += 1;
+        }
+        Ok(n)
+    }
+}
+
+# fn main() {
+let mut t = TestCells::new();
+let h = t.cell::<Feed>();
+let mut pages = h.sync(10).unwrap();
+t.settle();
+assert_eq!(pages.now(), Some(Ok(3)));
+assert_eq!(h.state().rows, ["row 0", "row 1", "row 2"]);
+# }
+```
+
+What can't be resumed fails the build:
+
+```rust,compile_fail
+use aio::prelude::*;
+
+#[cell]
+pub struct Walk {
+    pub seen: u32,
+}
+
+async fn visit(_: u32) {}
+
+#[methods]
+impl Walk {
+    pub async fn all(&mut self) -> Result {
+        for i in 0..3u32 {
+            visit(i).await; // the iterator isn't saved: use `while`
+        }
+        Ok(())
+    }
+}
+# fn main() {}
+```
+
+```rust,compile_fail
+use aio::prelude::*;
+
+#[cell]
+pub struct Walk {
+    pub seen: u32,
+}
+
+async fn visit(_: u32) {}
+
+#[methods]
+impl Walk {
+    pub async fn one(&mut self) -> Result {
+        let at = 7u32; // untyped: it couldn't be saved with the step
+        visit(at).await;
+        self.seen = at;
+        Ok(())
+    }
+}
+# fn main() {}
+```
 
 Retrying inside the awaited future keeps the log to one result:
 
@@ -384,11 +503,12 @@ assert_eq!(h.state().runs, 1);
 | `silent` | no sound |
 | `route` | a click brings the app forward and goes there |
 
-`Tell::notify(title, body)` is the short form. `Tell::Icon { tray,
-frames, fps }` sets the window's icon (`tray: true`: the tray's): PNG
-frames, base64, looped at `fps` (at most 12 shown a second, 64 frames of
-512 KB each at most); several frames need an `fps`, and no frames put the
-app's own icon back.
+`Tell::notify(title, body)` is the short form. `Tell::Icon { window, tray,
+tooltip, fps }` (aio's `appIcon()`) sets the window's icon, the tray's and
+the tray's tooltip in one: each PNG frames, base64, looped at `fps` (at
+most 12 shown a second, 64 frames of 512 KB each at most); `None` leaves
+that one as it is, `Some(vec![])` puts the app's own icon back, several
+frames need an `fps`, and a tell that changes nothing is refused.
 
 Where it is shown:
 
@@ -398,6 +518,9 @@ Where it is shown:
   too). Every client means every user: a tell made in Ana's call is shown
   on Bo's screen as well, so keep one user's data out of `title` and
   `body`, and show it through their own state instead;
+- by a web build's page (its own cells', or its synced copies'): the
+  browser's notification, the permission asked for at the first tell
+  ([web](../clients/web.md#notifications));
 - in-process: `h.tells()` is a broadcast of every tell from now on.
 
 Where it can't be, it says so:
@@ -517,25 +640,20 @@ An effect that waits on real I/O under a real timeout belongs in a
 
 What aio has and aio-rs does not, or does differently:
 
-- **No worker pool for CPU work.** aio's `blocking(id, fn, arg)` runs a
-  self-contained function on a worker thread and `blocking.cancel(id)`
-  stops it. In aio-rs, `tokio::task::spawn_blocking` inside an effect does
-  the same work off the UI and the runtime threads, but nothing can stop
-  it once it runs: aborting the effect drops only the wait for it. Check a
-  flag between chunks if it must be stoppable.
-- **Tests see effects by key only.** aio's `testCell` hands the effect
+- **Blocking work stops when it looks.** `aio::effect::blocking`'s work
+  runs on a worker thread and stops at its next `cancel.cancelled()`
+  check, as aio's does at its next message; a thread can't be killed.
+- **Tests see effects as descriptions.** aio's `testCell` hands the effect
   objects to the test (`t.getEffects()`, `isScheduleEffect`); `TestCells`
-  lists the keys (`t.effects()`) and runs them (`t.settle()`).
-- **No notifications in a browser page.** A page built with `ax build
-  --web` shows no tell unless the app sets `aio::tell::show_with(f)`
-  itself; aio asks the browser's permission
-  (`requestNotificationPermission()`), aio-rs does not.
+  lists them by key (`t.effects()`) and as `HeldEffect`s (key, mode,
+  timeout: `t.held_effects()`), and runs them (`t.settle()`); schedules
+  are `ax schedules` and `Store::schedules`.
 - A command-line client prints no tell.
 
 ## API
 
 `cargo doc -p aio-rs --no-deps --open`: `aio::Effect`, `aio::Mode`,
-`aio::effect` (`retry`, `key`, `CALL_CEILING`), `aio::Cx` (schedules,
+`aio::effect` (`retry`, `key`, `blocking`, `cancel_blocking`, `call_ceiling`), `aio::Answer`, `aio::Cx` (schedules,
 `run`, `abort`, `tell`), `aio::Backoff`, `aio::cron`, `aio::tell` (`Tell`,
 `show_with`), `aio::on_effect`, `aio::held`, `aio::Handle` (`pending`,
 `on_pending`, `busy`, `done`, `until`, `watch`, `on_change`, `events`,

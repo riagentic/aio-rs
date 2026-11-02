@@ -11,16 +11,16 @@ ax test notes       # its tests, the UI test included
 ax build notes      # an installable app for this OS in dist/
 ```
 
-Installing `ax` itself: [setup](setup.md). A prebuilt `ax` also needs the
-aio-rs source tree the app builds on: `ax create notes --aio <checkout>`
-([where an app gets aio-rs from](setup.md#where-an-app-gets-aio-rs-from)).
+Installing `ax` itself: [setup](setup.md). The app takes aio-rs from git at
+this `ax`'s release, so a clone builds anywhere and no aio-rs checkout is
+needed ([where an app gets aio-rs from](setup.md#where-an-app-gets-aio-rs-from)).
 
 ## Before you start
 
 - Rust (rustup) and a C compiler and linker: [setup](setup.md#1-rust-and-a-c-toolchain).
 - `ax` on `PATH`: `ax version` prints its version.
 - `ax setup` once: it fetches the shared Electron runtime every window and
-  UI test uses, and dx for hot-patching. `ax setup --check` says what is
+  UI test uses. `ax setup --check` says what is
   missing without fetching; the exit code is 1 while a needed piece is.
 - Nothing else: no Node, no system browser, no OpenSSL.
 
@@ -31,7 +31,10 @@ ax create notes                      # a window app (the default template)
 ax create notes --template cli       # a command-line tool on a saved cell
 ax create board --template service   # cells served to clients, no window
 ax create notes --id notes-dev       # its id apart from its name (its data's home)
-ax create notes --aio ../aio-rs      # the aio-rs checkout it builds on
+ax create notes --aio-version 0.2.0  # another aio-rs release (main, latest)
+ax create notes --aio ../aio-rs      # an aio-rs checkout instead, named relative to the app
+ax create notes --target deb,android # its [build] targets
+ax create notes --css tailwind       # Tailwind writes its stylesheet
 ax create notes --force              # into a folder that holds files already
 ```
 
@@ -40,14 +43,22 @@ ax create notes --force              # into a folder that holds files already
 | `<name>` | the folder, the package, the binary: lowercase letters, digits and `-`, starting with a letter, not `app` or ending in `-app` | – |
 | `--template` | `app`, `cli` or `service` | `app` |
 | `--id` | `[app] id`: where its data lives; refused when an installed app has it (the two would share data) | the name |
-| `--aio` | the aio-rs checkout (`crates/aio`, `crates/aio-shell`) its `Cargo.toml` points at | the checkout this `ax` was built from |
+| `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.2.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
+| `--aio` | an aio-rs checkout (`crates/aio`, `crates/aio-shell`) instead, named relative to the app; the two share a folder below the root | – |
+| `--target` | `[build] targets`: the kinds `ax build` makes (`ax build <app> --list`); `android` a window app's | none: this OS's bundle |
+| `--css tailwind` | `[build] css` runs `tailwindcss -i src/app.css -o assets/style.css` before every build; `src/app.css` starts with the template's styles (window app) | – |
 | `--force` | write the template's files into a folder that isn't empty (only those files) | refused |
 
 - A name another app already builds in ax's shared build folder is
   refused: two apps with one binary name would overwrite each other there.
 - When an app with that id already keeps data on this machine, `ax create`
   says so: the new app opens that data.
-- It writes `Cargo.lock` too, so the first commit is a clean build.
+- It writes `Cargo.lock` too, makes a git repository with a first commit
+  (not inside another repository), so the first build is a clean release.
+- A failure part-way leaves nothing behind (with `--force`, the files it
+  wrote over are put back). `--json`: the files and the next steps.
+- Nothing of the machine it was made on is in the app (no folder of yours,
+  no checkout's absolute path): a clone builds anywhere.
 
 ### The three templates
 
@@ -70,8 +81,10 @@ notes/
 ├── app/src/lib.rs        the same window on Android (app only)
 ├── rust-toolchain.toml   aio-rs's Rust, so one build folder serves every app
 ├── .cargo/config.toml    the bundled SQLite without the extensions aio never uses
-├── .gitignore            target/, .data/, dist/
-├── AGENTS.md, CLAUDE.md  the pointer for coding agents (ax agent)
+├── .gitignore            target/, .data/, dist/, .env, release keys
+├── .gitattributes        LF line endings in every checkout
+├── README.md             run, test, build, ship; where its aio-rs comes from
+├── AGENTS.md, CLAUDE.md  for coding agents: the rules, the loop, ax agent
 └── Cargo.lock
 ```
 
@@ -127,17 +140,17 @@ assert_eq!(h.state().count, 1);
 aio::client!(Counter, counter);
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
-    let n = *part(|c| &c.count);
-    let theme = aio::kit::theme_css(aio::kit::theme::hue(env!("CARGO_PKG_NAME")));
+    let n = part(|c| &c.count);
+    let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
-        style { {aio::use_css!(false, &theme; "assets/style.css")} }
+        style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
         main {
             h1 { "data-t": "count", "{n}" }
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }
             button { class: aio::ui::btn("ghost"), onclick: move |_| _ = act!(add(-1)), "Subtract" }
-            button { class: aio::ui::btn("ghost"), disabled: n == 0, onclick: move |_| _ = act!(reset()), "Reset" }
+            button { class: aio::ui::btn("ghost"), disabled: n.get() == 0, onclick: move |_| _ = act!(reset()), "Reset" }
         }
     }
 }
@@ -145,7 +158,9 @@ pub fn App() -> Element {
 
 - `aio::client!` connects the views to the cell (it makes `SOURCE`,
   `part`, `use_live` and the rest for this cell).
-- `part(|c| &c.count)` reads one field and re-renders only when it changes.
+- `part(|c| &c.count)` is a handle on one field: a hole of `rsx!` reading
+  it (`"{n}"`, `n.get()`) runs again only when it changes (a view's body
+  runs once).
 - `act!(add(1))` calls a method from a handler.
 - `aio::use_css!` reads `assets/style.css`; under `ax dev` a saved edit
   shows at once, with no compile.
@@ -341,7 +356,7 @@ a service: [setup](setup.md#run-at-startup-or-as-a-service).
 
 | Command | What it does |
 |---|---|
-| `ax dev notes` | build, run, and hot-patch each saved edit in (dx); without dx, rebuild and restart |
+| `ax dev notes` | build, run, and bring each saved edit in live (CSS and markup at once, Rust hot-patched; on Windows a Rust edit rebuilds and restarts) |
 | `ax dev notes --fresh` | the same on new, empty data |
 | `ax dev notes --instance try` | a private copy with data of its own |
 | `ax dev notes --size 390x844` | the window at that size for this run |
@@ -350,7 +365,9 @@ a service: [setup](setup.md#run-at-startup-or-as-a-service).
 | `ax start notes` / `ax stop notes` | in the background, then closed (scripts, agents) |
 
 Run from a terminal with no person at it (an agent), the window goes on a
-nested display, never the person's screen (`--display auto`).
+nested display, never the person's screen (`--display auto`). On a Linux
+machine with no desktop (a server, CI) that display is Xvfb: install it
+(`ax setup --check` says how), or the window can't open.
 
 ## Look at it running
 
@@ -411,8 +428,8 @@ on disk, who decided each setting).
 | the build fails naming an `aio.toml` key | `aio.toml` is parsed as the app builds | fix that key ([reference](../reference/aio-toml.md)) |
 | `cc` or `link.exe` not found | no C toolchain | [setup](setup.md#1-rust-and-a-c-toolchain) |
 | the window never opens (Linux) | Electron's system libraries are missing | install what `ax setup` names |
-| `ax dev` rebuilds on every edit | no dx, or an edit dx can't patch (a new dependency, a changed type) | `ax setup` fetches dx; the rest is expected |
-| a CSS edit doesn't show | the CSS is kept in `use_hook` (made once) | `aio::use_css!` in the render |
+| `ax dev` rebuilds on every Rust edit | Windows (no hot-patching there yet), or an edit a patch can't take (a `Cargo.toml`) | expected |
+| a CSS edit doesn't show | the CSS is kept in `once` (made once) | `aio::use_css!` in a hole |
 | the app starts with no data | `[app] id` or the cell's `id` changed | change it back |
 | a second `ax dev` shows nothing new | the running app took the launch and the new one ended | stop the first, or `--instance <n>` |
 | a service won't start: the port is in use | another process has `[server] listen`'s port | stop it, or `--port <n>` for this launch |

@@ -5,6 +5,942 @@ All notable changes to aio-rs are written here. The format follows
 follow [Semantic Versioning](https://semver.org/): before 1.0.0 a minor
 version may break things.
 
+## [Unreleased]
+
+## [0.2.0] - 2026-11-02
+
+aio-rs draws its views with air, its own fine-grained renderer, and
+Dioxus is gone: a view's body runs once and its holes follow state. An
+app on 0.1 moves with the [migration guide's 0.1 → 0.2
+section](docs/migration/README.md#8-01--02-dioxus-is-gone) and
+`scripts/aio-ui-migrate`.
+
+### Breaking
+
+- **Dioxus is gone: air is aio-rs's one renderer** (air phase 5,
+  docs/design/air.md). Every Dioxus crate (dioxus, dioxus-*,
+  generational-box, subsecond) is out of the graph: the lock holds 253
+  packages, from 327; an app's whole graph (`app kit`) 76 crates, from
+  141; aio-rs-cli 146, from 211 (`deps.toml [ceilings]`). Feature `kit` is
+  air; `air` stays, a name for `kit`; `liveview` is gone. aio-rs-shell has
+  no `dioxus` feature, `ax dev` needs no dx (`ax setup` installs none),
+  and no `--dioxus` lane is left in `scripts/dx-metrics`,
+  `scripts/android-gate` or GitHub CI. No public signature names a Dioxus
+  type ([migration: 0.1 → 0.2](docs/migration/README.md#8-01--02-dioxus-is-gone),
+  a before → after table).
+- A view's body runs once; what shows state is a hole (a text, an
+  attribute, a `{child}`) that runs again when what it reads changes. A
+  value read in the body (`let s = shop();` then `"{s.stock}"`) is read
+  once: a dev build says where (`hint`). A component's prop follows its
+  caller only as a `Signal`, a `Part` or a `Prop<T>`.
+- `rsx!` refuses `if let`, `match`, `while` and `loop` nodes (a bool, a
+  `{match ..}` hole) and a `for` row without `key:` on its first node.
+- `aio-rs-hotpatch` (`aio_hotpatch::HotFn`, `JumpTable`, `apply_patch`)
+  replaces subsecond in an app's dev build: the same jump table as
+  dioxus-cli 0.7.10's, read by `ax dev`.
+- `ax components`: each component's key, how many times its body ran and
+  how many times its holes wrote (`updates`), where 0.1 gave renders and
+  their time.
+- The page scripts made for Dioxus's interpreter are gone from
+  `aio::page`: `WIRE`, `TYPING`, `SET_FOCUS`, `FILE_INPUT`.
+
+### Added
+
+- air: a file input's picked files reach the views, read whole by the
+  page: `e.files()` on its `input`/`change` and on its form's `submit`
+  (`FileData`: `name`, `size`, `content_type`, `last_modified`, `field`,
+  `read_bytes().await`, `read_string().await`, as 0.1's), in order
+  with the events after them; `TestUi::pick_files` picks them in a test.
+- `ax components --renders` on air: the last 200 renders as they happened
+  (each body run, `mount` or `signal`, and each hole rewrite, `signal`),
+  by component and key, timed, and how many in all; `air::renders()`
+  gives the same in a test. A debug build logs them (a browser's wasm
+  and a release don't).
+- **TS21: the published crates' public API is checked in**
+  (`scripts/api/<crate>.txt`, from rustdoc's JSON): `scripts/public-api
+  --check` in `./ci.sh lint` fails on a change not written there, and on
+  any item naming aio-rs 0.1's renderer.
+- **The app's routes in its window with no TCP port** (aio's `aio://app/<path>`
+  over the app socket): a standalone or client-server app whose
+  `Source::for_app_with` serves a path (routes, `[server] dirs`, blobs)
+  answers its window's `fetch`, `<img>` and streams over a private socket
+  (a Unix socket, a named pipe on Windows) that admits only the Electron
+  process aio-shell spawned; no window, no answer. The window's side is
+  aio's `socketFetch` (6 connections, small and error bodies read at once,
+  streams both ways, 504 after 30 s with no first byte,
+  `AIO_SOCKET_TIMEOUT_MS`). New: `aio::http::serve_window`,
+  `aio::ipc::Only::window`, `aio::ipc::window_http`. No new dependency
+  (axum's own server, already built for `[server] listen`).
+- **`ax dev` hot-patches Rust on Windows too** (an app on air, x86_64,
+  MSVC or MinGW): the fat binary is linked at a fixed base below 4 GiB
+  with a COFF symbol table (rust-lld for MSVC, its PDB kept), each patch
+  is a DLL linked at a fixed base the app names (`Aio.aslr`'s `base`, a
+  free span near the binary), and patched objects use the running
+  binary's writable statics and thread-locals, so state is kept as on
+  Linux. A patch that can't load there fails to load, never misresolves:
+  ax rebuilds. Measured on a Windows 11 VM: 0.34–0.44 s a patch against a
+  0.64 s rebuild that also restarts the app.
+- **The splash drawn by the OS before Electron starts, at every start**
+  (aio's splash): GTK 3 over FFI on Linux (opened at run time, no new
+  crate), Cocoa on macOS, Windows Forms on Windows (for a download; when
+  Electron is here its main process draws it, as aio's). A first start's
+  Electron download runs on it, with its bar and a ✕ that cancels it.
+  New `[build.splash]` keys: `position`, `follow_window`, `shadow`,
+  `window_shadow`, `cancel`, `progress`, `bar_style`, `bar_height`,
+  `bar_position`, `bar_radius`. `ax build` builds it in for an app with a
+  `[build.splash]` (aio-rs-shell's `native-splash` feature), so an app
+  without one carries none of it. `Window { splash_show }` may take 50 ms;
+  one that panics or takes longer leaves the build's `show`, said
+  ([desktop](docs/clients/desktop.md#the-splash)).
+- **Prebuilt `ax` for macOS** (arm64 and x86_64): the release workflow
+  (`.github/workflows/release.yml`) builds and smokes `ax` on a macOS
+  runner of each CPU beside Linux and Windows, pins every archive in
+  `install.sh` / `install.ps1`, writes `SHA256SUMS`, installs it with the
+  one-line installer on each OS, and on a tag makes a draft release; a
+  manual or pull-request run is a dry run.
+- `scripts/update-proof`, in GitHub CI on Linux, macOS and Windows: a
+  sample app installed from its bundle, updated through a signed patch,
+  then a broken update rolled back with its data read back.
+- `scripts/android-gate`, required before a release: a throwaway AVD on
+  port 5600, a sample APK started and upgraded in place with its data kept.
+- `scripts/numbers`: the README's and docs' numbers measured again, beside
+  the published ones, with the machine.
+- [When to use aio-rs, and when not](docs/basics/when.md), linked from the
+  README's top: what it is for, what not (SEO, CDN, edge), pinning the tag,
+  which parts are experimental.
+- **Sessions without accounts** (aio's `sessions: true`): `[accounts]
+  sessions = true` keeps the session store with no users and no login
+  doors; the app issues sessions (`auth::serving()`'s `issue`), and a
+  session is that user on every door (`Users::sessions`, composing with
+  `Http::users`).
+- **A user's token is re-checked on its open socket** (aio's
+  `users:`/`resolveUser` re-check): every 5 s and at once on a revoke; one
+  no longer resolved (or a panicking resolver, or a changed role) closes
+  the socket; a resolver slower than 3 s keeps the last verdict.
+- `--tls-cert`, `--tls-key` and `--no-tls` launch flags (aio's), over
+  `[server] cert`, `key` and `tls`.
+- **Vitals on the bus, as one snapshot** (aio's `onDiagnostic`, hints):
+  each layer's step is `vitals:loop`, `vitals:transport` or
+  `vitals:render` on the bus; the loop, the worst link (and whether it is
+  on loopback) and the window's paint feed one snapshot, so the
+  transport, client-main-thread, slow-call and freeze-recover hints fire.
+  `GET /__aio/vitals` and `ax vitals <app>` say every layer and the
+  likely cause (also in `health.json`).
+- Bus diagnostics carry `severity` and `tip`, and `Diagnostic::code()`
+  types them (aio's severity, fix and error object); a degraded part
+  that works again is `degraded-recovered:<part>` (`Code::Recovered`).
+- `aio::health::on_memory(|report| ..)` (aio's `onMemoryPressure`) and
+  `[memory] every` (aio's `memory.interval`).
+- `[log] per_run`: each run starts fresh log files (aio's per-run
+  `debug.log`).
+- Correlation ids: a call's log lines end with `call=<id>`, and its
+  timeline entry (`id`) and a report it causes (`call`) carry it.
+- An exposed boot prints a `share:` line (the address at this machine's
+  LAN IP and what a caller shows; the key file, never the key) and, on
+  Windows and macOS, a `firewall:` line (aio's).
+- **The mutation ledger** (aio's `check:mutations`, carried to the
+  package): `scripts/mutants` plants each break of `scripts/mutants.toml`
+  alone, in the source or in the template app's built `.deb` (its menu
+  entry, its icon, its bundled page), and needs the named test or
+  `ax smoke` red; `scripts/mutants-ledger.csv` keeps the last whole run.
+  `./ci.sh` checks the ledger, GitHub CI runs its fast breaks
+  ([proving the tests](docs/testing/proving.md)).
+- `ax lint` names tests that check nothing (no assertion, `?`, `unwrap` or
+  harness wait) and `assert_eq!(x, x)` (aio's `check:vacuous`);
+  `ax test <app> --mutants` runs `cargo mutants` over the app.
+- `aio::testing::TestIo` (aio's `testIO`): a command-line run with its
+  stdin, terminal or not, colour, stdout and stderr.
+- `TestCells::fuzz_methods` (aio's `fuzz({ skip })`): the cell's own
+  methods, arguments made from their types; `last_effects` (aio's
+  `expect.effects`), `reset(&h, seed)` (aio's `t.init`, `t.destroy`),
+  `budget::<C>(method, ms)` (aio's `perfBudget`, failing the test).
+- `aio::testing::TestApps` (aio's `testApps`), `patches(&copy)` with
+  `until` (aio's `patches`, `waitForPatch`), `call_all` (aio's
+  `dispatchAll`), `Remote::on_patch` (aio's `onPatch`).
+- `Mount::fetch(host, answer)` (aio's `testUI({ fetch })`): the page's
+  requests to a host answered by the test, never the network.
+- `aio::testing::smoke(bundle)` (aio's `smoke()`): `ax smoke` in a test.
+- `Cassette::wrap(id, f)` (aio's `tape.wrap`); `AIO_CASSETTE=rerecord`
+  records over a tape that is there, even a damaged one.
+- **air, aio-rs's own renderer, phase 1** (docs/design/air.md): crates
+  `aio-rs-air` and `aio-rs-air-macro`, and feature `air` of aio-rs, where
+  `aio::ui::prelude` and `TestUi` run on air with no Dioxus in the build
+  (50 crates, against `kit`'s 116). A view's body runs once; each hole
+  of `rsx!` follows exactly the signals it read. Views are built where
+  they are placed (their context and boundaries), components are holes
+  whose hooks keep their state if the body waits for a resource, plus
+  keyed lists, context, `ErrorBoundary`, `Suspense`, resources and tasks,
+  typed W3C-shaped event payloads that bubble through the handlers
+  (`stop_propagation` works), page scripts (`eval`), `onmounted` and
+  globals per app instance. Dioxus stays the default renderer; with
+  `kit` on too the facade is Dioxus's (the kit moves in step 2).
+  Measured again on the spike's bench (`crates/air-bench`, now in the
+  workspace): a one-line edit rebuilds in 0.54x Dioxus's time, a clean
+  build in 0.30x with 8 crates instead of 77, a held key over 10 000 rows
+  answers in 0.32x.
+- air's props, as the kit and the router need them: `#[component]` and
+  `#[derive(Props)]` make a builder, so `#[props(default)]` and
+  `#[props(default = e)]` props may be left out, an `Option<T>` prop is
+  `None` unless given and takes a `T`, a `View` prop is empty, a closure
+  given to a handler prop is typed by it, and a required prop left out is
+  a compile error naming it. `#[props(extends = GlobalAttributes)]
+  attributes: Vec<Attribute>` takes the attributes given to a component
+  (`"data-t": …`, `id`, `aria_label`, `..attributes`), and `..attributes`
+  on an element sets them after its own, so the caller's win; one that
+  reads state follows it. A prop typed `Prop<T>` follows what it is given
+  (`value: name.get()`) while the component's body still runs once; given
+  a constant it holds no state. A `View` prop takes a view or text (a
+  string, a number, a format string, a signal: text that reads state
+  follows it), an `Option<View>` `None` too. Components may be generic
+  (`List<T>`), and a handler may be async.
+- air: a `View` is built again each time it is placed (a dialog opened
+  again, a tab shown again, one view in two places), each place with its
+  own state, as a Dioxus `Element`; it no longer fails when placed twice.
+- air: roots on one thread are apart (a test's two windows): each `Root`
+  has its own page, edits (`Root::take_edits`), events, globals and
+  tasks; the "one Root per thread" limit is gone.
+- **The kit on air** (`aio::kit` with feature `air`, air phase 2a): every
+  control, as aio's AIR draws it, each body run once and its holes
+  following state; the kit, facade, ui and sign-in tests run on air in
+  CI, none ignored. On air only, so far (aio's, gap package WA1):
+  - labels and titles take any content (Field, Checkbox, Switch, Alert,
+    Modal, Confirm, ConfirmButton, EmptyState, Tab, MenuItem, Crumb,
+    Table headers; `toast_view` for a toast);
+  - forms: `form.bind(aio::field!(name))` wires an Input, Textarea or
+    Select (its value, edits and blur: a field is touched when left),
+    `set_field`, `reset_field`, `touched`, `use_field_array`, and
+    `use_on_change` / `use_on_change_now` (aio's `onChange`, with a
+    cleanup);
+  - `Defer` loads: `load`, `loading`, `error`, `loading_min_ms`;
+  - `Transition` draws no box of its own (`air::styled`: one style
+    property of its content's element), `Motion::of` writes a motion as
+    a function of its progress (aio's `TransitionFn`);
+  - scoped CSS: `aio::ui::css(rule)` is a class named by its rule's
+    hash, put in the page once; `collect_css` gives them all;
+  - an element handed out by `onmounted` runs scripts on itself
+    (`MountedData::run`, `eval`): a canvas, a video, a selection.
+- Dark mode follows the OS: `[ui] scheme = "system"` (the default) keeps
+  the sheets' dark rules as written, so the page follows
+  `prefers-color-scheme` as it changes; `"light"` and `"dark"` fix one,
+  and a `bool` given to `use_css!` stays the app's own choice. The
+  template passes `aio::ui::scheme()`; `aio::ui::use_dark()` is a
+  `Memo<bool>` for code that draws its own colours;
+  `TestUi::set_os_dark` turns a test's OS dark.
+- `[ui] neutral = "soft"` keeps the page's greys near grey (aio's
+  `"neutral": "soft"`).
+- The router on air (`router!`): `Route`, `Outlet`, `Link`, `Redirect`,
+  `params()` and Back are the same views on either renderer; on air a
+  `Route`'s body runs again only when its match changes (a query or
+  another route's place runs nothing), and a `Link`'s active class
+  follows the place in its own holes. `tests/route.rs` and
+  `tests/route_tree.rs` run on both.
+- The router in a browser (a web build): the address bar shows the place,
+  the browser's Back and Forward step the app's history
+  (`History::sync`), and a reload or a shared link opens where it points
+  (`route::start_place`); the server already answers routes with the app.
+- `TestUi` on air: `components()` is the tree of mounted components (name,
+  key in its list, body runs, and the updates its holes made: what a
+  change cost each view); `find(component, key)` and `comp=Row[42]` paths
+  name a component, `within(t, f)` takes a test's paths inside one, and
+  `surface_tree()` is the surface as a tree of components (aio's
+  `UISurfaceNode`).
+- `TestUi::advance(d)`: the views' clock moves `d` on and their timers
+  due by then fire, each at its moment (aio's `ui.advance`); from then on
+  it is virtual.
+- `TestUi::a11y()`: aio's run-time accessibility rules (`dev-a11y.ts`)
+  over the page; every mount says each new finding once.
+- air: `components()` (aio DevTools' `tree`), `follow` (a body that runs
+  again when what it read changes), `provide_now`, and
+  `Event::default_action_enabled`.
+- air's gates, each shown failing on a planted bug first: views removed
+  (or replaced by an error boundary in the same pass) leave no node,
+  effect, subscription, cleanup, handler, task, page script or page node;
+  misuse fails in release builds too (a hook outside a view's body, a
+  write while a hole or a memo computes, an effect loop, a signal used
+  after its view, two rows with one key, a missing
+  `key:` or an `if let` in `rsx!` at compile time); a renderer fault
+  planted in air fails `TestUi` in the Rust page and the Electron page.
+- **air phase 3: `ax dev`, the web build and Android on air**
+  (docs/design/air.md). For an app on air `ax dev` runs no dx: an `rsx!`
+  markup edit goes to the running window (`Aio.hot`) and its views are
+  built again with their state kept (~3 ms); a Rust edit is built by ax
+  as a thin patch against a first "fat" build (dioxus-cli 0.7.10's
+  builder, ported) and applied in the running process with `subsecond`
+  (~0.45 s on Linux and macOS, ~0.35 s on Windows), views keeping their
+  hook state by place and, on Linux x86_64 and Windows, the patched code reading the
+  running binary's statics (an atomic, a `OnceLock`); a stylesheet edit
+  needs no build. The shell draws
+  its windows on air with `default-features = false, features = ["air"]`
+  (desktop and Android: no Dioxus in the graph), and `aio::web::launch`
+  runs air in the browser. `scripts/android-gate --air` and
+  `scripts/dx-metrics --live` (the live edits on Dioxus and on air,
+  side by side) check and time them.
+- **air phase 4: the gates in CI** (docs/design/air.md). `scripts/air-ship
+  <app> [artifacts]` fails on any Dioxus crate an app ships (its
+  `cargo metadata` graph for the desktop, wasm32 and Android: crates named
+  so or from DioxusLabs' repositories) and on the word in any of its
+  packages, byte for byte (the release binary, the `.tar.gz`, the
+  AppImage's squashfs, the web build's folder, each APK member).
+  `scripts/dx-metrics` measures the template on air beside the Dioxus one:
+  `air_binary_b`, `air_targz_b`, `air_appimage_b`, `air_web_b` gated like
+  the other sizes (5% over the base measured on the same runner, or this
+  machine's best), `air_rebuild_cpu` and `air_live_css_s` /
+  `air_live_rsx_s` / `air_live_logic_s` against this machine's rows only;
+  each run first plants a Dioxus dependency in the air app and requires
+  air-ship to fail on it. `--apk`: the air template's APKs alone
+  (`air_apk_b`, the arm64 one), GitHub CI's new `air-apk` job
+  ([CI](docs/build/ci.md#airs-package-gates)).
+- **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
+  makes each async method read the state as it was when it was called
+  and commit what it wrote, ran and scheduled at its end as one event, or
+  nothing; a field another call changed meanwhile refuses it with
+  `Code::TxConflict` (`TX_CONFLICT`). `transaction(serialize)` runs them
+  one at a time, `conflict = "warn"` commits over a conflict;
+  `cx.commit()`, `cx.commit_every(ms)` and `cx.live_state::<Self>()` are
+  aio's `$commit` and `$live` ([methods](docs/state/methods.md#transactions)).
+- `cx.on::<Other>().after/every/at/cron(..)`: a schedule that calls another
+  cell's method (aio's `schedule.after(id, ms, other.method.action())`).
+- `aio::on_action(f)` (aio's `onAction`): every committed call heard;
+  `Plugin::on_action` and `Plugin::allowed_origins` (aio's plugin
+  `onAction`, `allowedOrigins`, merged with `[server] hosts`).
+- A cell of `#[aio_cell]` fields may `retire` its own id: aio's slice of
+  that name and its stamp go, its history stays.
+- `Updates::retired` (and `Ready::retired`): where a fresh start set the
+  data aside, for the new version's first start to say; its `backup` is
+  the store set aside (aio's `updates-retire.ts`).
+
+- **Async methods answer their caller** (aio's `await cell.method()`): a
+  typed call of a `pub async fn` returns `Result<aio::Answer<R>>`, whose
+  await is the value its last part returned or the refusal that ended it
+  after an await. A synced copy's `Answer` and `call_confirmed` wait for
+  the server's end, `ax call` prints it, and an aio page's action is
+  acked on completion ([effects](docs/state/effects.md#async-methods)).
+- **Awaits anywhere a statement goes** in an async method: in `if`,
+  `if let`, `match`, `loop`, `while` and blocks (with `break` and
+  `continue`), as `let x: T = io.await?`, `x = io.await`, `io.await`, a
+  `let` bound to a branch's awaited value, or the last expression. Each
+  part stays one atomic, logged call; replay does no I/O.
+- `#[mode(newest)]` and `#[mode(first)]` on async methods (aio's
+  `concurrency`): a new call supersedes the running one, or shares its
+  answer.
+- `[perf] call_ceiling` (aio's `effectTimeoutMs`); `[app] tz`.
+- `aio::effect::blocking(key, f)` with a `Cancel` token and
+  `cancel_blocking(key)` (aio's `blocking`, `blocking.cancel`).
+- `Cells::on_start`, `on_restore`, `fatal_on_start`, `get`, `view`, and
+  `AIORT_ISOLATE` (aio's `onStart`, `onRestore`, `fatalOnStart`,
+  `getFullState`, `isolate`); `Plugin::on_start`, `on_stopping`, `on_stop`.
+- `aio::rewrite_call` (aio's `beforeReduce` changing a call),
+  `aio::on_recovered` (aio's `onCheckpointRestore`),
+  `TestCells::held_effects` (aio's `t.getEffects()`).
+- `aio::ui` beside the renames: `Signal::toggle`, `key_event` (a key heard
+  elsewhere handed to the views), `Fragment`, `Component`; `ci.sh` fails on
+  `dioxus` named in the template, the kit, `ax ui`, the tests or the guide.
+- [docs/design/air.md](docs/design/air.md): air's design, the spike's
+  measurements, the facade's API and what can't match air yet.
+- **Persistence as aio's** (docs/persistence): `#[cell(persist(exclude =
+  ["feeds.*.busy"]))]` and `persist(include = [...])`, nested paths with
+  `*` (aio's `persist` filter); `[data] persist = false` and the launch
+  flag `--no-persist`; `[data] coalesce_ms` (aio's `persistDebounceMs`);
+  timed backups (`[data] backup_every`, `backup_keep`); aio's default size
+  guard (warn over 1 MB, error over 16 MB) where `[budgets] state` declares
+  none; `GET`/`POST /__aio/snapshot` in a dev build, `Handle::export_snapshot` and
+  `Handle::load_snapshot` (aio's `snapshot`, `loadSnapshot`).
+- `aio::columns`: typed table columns (`pk`, `text`, `integer`, `real`,
+  `refs`, `boolean`, `json`, `.nullable()`, `.unique()`, defaults), for
+  `#[table(…, columns = CONST)]` and `aio::columns::create`. `#[table]` rows
+  hold bools (`BOOLEAN`, 0/1), lists and nested values (`JSON` text).
+- `Blobs::stream(id, range)`: a blob's bytes as a reader (aio's `stream`).
+- A live query wakes on writes through any `Db` of its file in the process.
+- A ported app replays aio's journal past its save at boot (a crash
+  before aio's save), moving `__journal_wm` with each call.
+
+- `ax create --aio-version <v|main|latest>`, and `ax pin [app] [version]`
+  (aio's `am pin`): what the app's Cargo.toml files ask for, what its
+  Cargo.lock built, this ax's version and whether they match, aio-rs's
+  releases, drift (exit 1), how far behind; `ax pin <v>|main|latest|<checkout>`
+  moves every aio-rs dependency (workspace deps too) with `cargo update -p`
+  for the aio-rs crates only, offline from cargo's cache when needed, all
+  or nothing; `--major`, `--json` ([ax](docs/clients/ax.md#ax-pin)).
+- `ax create` makes a git repository with its first commit (not inside
+  another), a `README.md`, `.gitattributes` (`eol=lf`), a `.gitignore`
+  that keeps `.env` and release keys out; `--target a,b` writes
+  `[build] targets`, `--css tailwind` wires Tailwind; a failure leaves
+  nothing behind (`--force`: what it wrote over is put back); `--json`
+  gives the files and next steps; aio.toml no longer claims to show every
+  default, it links them.
+- `ax upgrade [version] [--aio dir]`: `ax` from aio-rs's newest (or that)
+  release by its install script, checked against `SHA256SUMS`, or built
+  from a checkout; `ax uninstall [--tools]`: `ax` (and what it fetched)
+  gone, apps and data kept ([setup](docs/basics/setup.md#upgrading-ax)).
+- `aio::process` (aio's `spawn` and `runCommand`): a program in a process
+  group of its own (a job object on Windows), its lines as they come, its
+  stdin, pause and resume, a timeout and a kill that reach the whole
+  tree, killed when its `Child` is dropped and at the app's stop (named).
+  On Windows children open no console window, and a release app adopts a
+  hidden console at start ([desktop](docs/clients/desktop.md#running-a-program-from-the-app)).
+- The window's verbs: `aio_shell::page::minimize`, `maximize`, `close`,
+  `hide`, `show`; the page's `window.close()` takes the window's close
+  path. macOS: opening the running app again brings a hidden window back.
+- `aio_shell::clear_partition(name)` wipes a guest's session (aio's
+  `clearPartition`); the app's own is refused.
+- `Window { require_sandbox, show_cap_ms, keep_server, splash_show }`
+  (aio's `requireSandbox`, `showWhenPainted`, `keepServer`, `splash.show`)
+  and the launch flag `--keep-server`.
+- `[build.splash]` look keys: `show`, `download_text`, `size`, `fit`,
+  `text_position`, `align`, `margin`, `radius`, `border`, `fade_ms`,
+  `font`, `font_size`, `bold`, `text_color`, `bar`, `track`. A first start's
+  download draws the splash's image above its bar.
+- `[build.download_window]` (aio's `electron.downloadWindow`): heading,
+  text, question, colours, Cancel.
+- `[build.windows] shortcut` (aio's `build.windows.shortcut`).
+- `[server] local_peers` (aio's `allowLocalPeers`): `false` opens no
+  local door in a release build.
+- Every window app has its icon at run time, dev and installed: `aio::config!()`
+  builds in `assets/icon.png` and `Window::of` wears it; a window with none
+  wears the app's monogram (aio's generated icon, now `aio::icon`). It is on
+  the title bar, taskbar, Alt-Tab, tray, notifications, the macOS Dock, the
+  download window and a browser tab's favicon.
+- `Config::hue()` and `aio::hue!()`: the app's one hue (`[ui] hue`, else its
+  id's) for its page, icon, splash and download window; the template's page
+  takes it.
+- `desktop::icon_state()` (aio's `iconState()`).
+- `ax build`: the default icon at 512 px plus an SVG (AppImage, deb); a macOS
+  `.icns` built in Rust with every slot from 16 to 1024 px (no `sips`);
+  `assets/icon.ico` used as is for the Windows exe; a warning for a
+  non-square `icon.png`, an `icon.svg` or an `icon.png` outside `assets/`.
+- **A port installs over the aio APK, its data with it**: the version
+  code is aio's (`major·10⁸ + minor·10⁶ + patch`; every earlier aio-rs
+  code is lower, so 0.1 APKs update too), a port (`[app] port_of`) takes
+  aio's application id (`app.aio.<id>`) and, with no keystore named, the
+  machine's Android debug key aio signs with, and at its first start the
+  aio APK's state (`filesDir/aio-store`) becomes its `state.db` once
+  (`aio::compat::data::import_android`).
+- `ax test <app> --android`: the emulator lane.
+- `ax build --android --debug` (debuggable, `chrome://inspect`);
+  `armeabi-v7a` APKs; `[build.android] universal`; builds on macOS and
+  Windows (the NDK's host folder, `.cmd`/`.bat`/`.exe` tools, the OS's SDK
+  and JDK places); a JDK 17 to 23 found by its `javac`; any Gradle 8.9+
+  (9 too) writes a wrapper pinned to 8.14.3.
+- `ax install --android` takes the app's own APK exactly (`notes` never
+  installs `notes-pro`'s) and a universal one when there is none for the
+  CPU.
+- Android: the label is escaped as aapt reads it (`\`, a leading `?`/`@`), an
+  unfilled `{{TOKEN}}` is named, an own `MainActivity.java` is checked for
+  what the template's does, and `[build.android] strict` turns an overlay
+  warning into an error.
+- Android downloads: an http(s) link goes to Downloads (DownloadManager), a
+  `data:` one where the user picks. The phone's images show
+  (`aio::ui::local_file_url`). `[build.splash]` takes `font`, `font_size`,
+  `bold`, `fade_ms`.
+
+- `ax` covers aio's `am` verbs and flags ([ax](docs/clients/ax.md#coming-from-aios-am)):
+  `--json` answers objects on every verb scripts branch on (`start`,
+  `stop`, `kill`, `errors`, `health`, `shot`, `doctor`, `expect`,
+  `backup`, `build`), a failure's object whole; `--quiet`; `ax help` the
+  everyday verbs on one screen, `--commands` all; `ax timeline` (every
+  cell's events with their diffs) and `ax record` on a stopped app or
+  another store, replayed by the app's own code; `ax record` calls as each
+  event's caller and names the app's library; `ax testgen` (a typed name
+  table for UI tests); `ax persist [--drop cell]`; `ax top [secs]`;
+  `ax control` (the verbs over loopback HTTP behind a key, aio's
+  `/__aio/trojan/*`); `ax lab --boot` (aio's Docker labs: Windows and
+  macOS VMs, an XFCE desktop, the Android emulator with the APK
+  installed; `--status`, `--reset`, `--ram`, `--cpus`, `--disk`,
+  `--os-version`, `--apk`, `--port`); `errors --since 15m|reload`;
+  `surface --component`, `--depth`, `--full`; `shot --json` and a
+  video's `recording` event with its `t0`; `snapshot load --force` (another
+  cell set refused without it); `call` `key=value` words, `--body`,
+  `--wait`; `start`/`stop --no-wait`; `stop` throws a `--fresh`
+  instance's data away; `cost --window 5m`; `discover --timeout`; `peer`
+  of a profile's remote app and `--types`; `lint --from <version>`,
+  `--tests`; `build --platforms all`; `doctor` hints (an old Electron, an
+  undecided security switch) and `--harden`; `trigger` acts on the newest
+  window.
+- The local door answers `flush` and `drop`; a network caller may ask
+  `peer` of itself (its own user and role, never a claimed one).
+- **Schedules in the web build**: a page cell's `cx.after`, `every`, `at`,
+  `cron`, `backoff` and its declared `#[every]`/`#[cron]` run on the page's
+  timer, kept with its state in the browser's storage (a reload keeps them,
+  missed ones fire once, re-armed as natively); `skip_if_running` holds.
+- **`#[ttl]` answers in the web build**: a page cell answers a repeat
+  within its ttl without running it, with the native answer cache.
+- `ax dev <app> --web --port N --expose`: a fixed port, and the LAN over
+  TLS behind a key made for the run, carried once by the printed link.
+- **Patches carry a resized array's items** (aio's narrowed Immer ops): a
+  push, a spread or a filter sends one `insert` per item put in or `del`
+  per item taken out, not the array; a sort or a rebuild still sends it
+  whole. aio pages get them as `add` and `remove`.
+- **Pacing and the full-state switch** (aio's `syncIntervalMs`,
+  `fullStateThreshold`): `[server.limits] sync_interval_ms` (50) folds a
+  link's background changes into one patch per window, a person's call
+  going at once; `full_state_percent` (50) sends the view instead of a
+  bigger patch. Both on aio pages too.
+- **Every shared cell on one server**: `Http::cell(handle)` serves another
+  cell on the same `/ws`, key and port; a link's hello names its cell.
+- **One socket for every cell** (aio's one socket per page): a process's or
+  page's copies of one server's cells share one socket, each a link of its
+  own on it (`x-aio-mux: 1`, the page's protocol `aio-mux`; frames
+  `<link>:<message>`); a server that doesn't say yes gets a socket per copy.
+  Three cells' copies: 3 connections → 1, patch latency unchanged.
+- **aio pages see every shared cell**: an aio page's `state`, `patches`,
+  `subs` and `<cell>:<method>` actions cover the cells `Http::cell` serves
+  too, each by its own rules.
+- **A whole app on one `TestServer`** (aio's `testServer({ cells })`):
+  `TestServer::cell::<C>()`, `client_of::<C>(user)`, and `converged` for a
+  copy of any served cell.
+- `Http::resolve_peer(f)` (aio's `resolvePeer`): who a peer app on this
+  machine is here, its user and role; `Http::door_links(true)` (aio's
+  `localConnectHooks`): `on_link` hears the local door's links too.
+- `Reply::stream(type, parts)`: a route's answer sent part by part
+  (server-sent events, NDJSON), never compressed or buffered.
+- **Binary side channels** (aio's binary streams): `Route::socket(path, f)`
+  upgrades once `f` accepts the request; `aio::http::side` frames
+  `[kind][seq:u24][payload]` with a counter per kind, drops a droppable
+  frame or closes (1011) on a slow receiver, and says each frame's gap.
+- `Remote::on_conflict(f)` (aio's `onConflict`): where a server change met
+  a waiting call of the copy, live and in a catch-up (`Synced::conflicts`);
+  `Remote::merge(field, Merge::Text | Counter | SetAdd(id))` (aio's
+  `sync.merge`) shows that field merged while the call waits. In the page
+  too.
+- `[build.assets]` (aio's `assets`): folders beside `aio.toml` built into
+  the app by URL prefix, answered at the same path in the window
+  (`aio://app/…`), by the app's server (`Http::assets`, public), in the web
+  build (cached offline) and in the APK; `ax build`, `ax dev` and `ax
+  start` build a file added later in.
+- `web` is a `[build] targets` kind: one `ax build` makes the web app
+  beside the other targets (aio's `build-all`).
+- A server's Linux CLI bundle gets a systemd system unit beside its user
+  unit (`<bundle>.system.service`, aio's `build-service`): it starts at
+  boot with no login or linger, as a user systemd makes, its data in
+  `/var/lib/<id>`.
+- `ax install <app> --appimage` (aio's installer): the AppImage in
+  `aio-rt/install/<id>-appimage/` and the app menu, its entry making a
+  private `TMPDIR` for the AppImage to unpack into; `ax installed` and
+  `ax remove` know it.
+- The web build makes iOS's launch images from `[build.splash]` (aio's
+  `iosLaunchImages`): a Home Screen app starts on the splash.
+- `ax dev --web`: the page's console (every level, uncaught errors,
+  refused promises) in `ax dev`'s output (aio's console forwarding).
+- A web page shows a `notify` tell as the browser's notification, asking
+  for the permission at the first one and saying once when it can't;
+  `aio::web::notify::request_permission()` for a click handler, `on_click`
+  for its route.
+- **`ax ui` as amui, on every OS**: the Tasks tab runs the project's own
+  tasks (its cargo aliases) beside the `ax` verbs, its output shown as it
+  comes; CPU, the project folder, the executable and the runtime kind on
+  macOS and Windows too (from `health.json`'s `cpuMs`, `exe`, `cwd`);
+  each linked client's health (and for how long a part is down), bytes a
+  second and in all, and the changes it fell behind on; each action's
+  method time and the refused ones with why; per cell its refused calls
+  and last action; the runtime config card from the live app
+  (`health.json`'s `config`: title, auth, mode).
+- `ax events --json` of a running app says each event's method time
+  (`ms`); `--refused` adds its refused calls of late. The local door
+  answers `took`; a client's listing (`ax clients --json`) has `sent`,
+  `behind` and its `degraded` parts.
+- **`ax dev` watches as aio does** ([dev](docs/build/dev.md#the-loop)): a
+  burst of saves settles after 100 ms of quiet, 500 ms at most; the files
+  the last build read outside the app's folders are watched too (cargo's
+  dep-info: `aio.toml`, `include_str!` files, an aio-rs checkout), in
+  `--web` as well; a deaf watcher is made again (a sentinel, three times
+  at most); the terminal names the changed files and times each build; a
+  storm of restarts (a change within 1 s of each of 5 in a row) waits 5 s
+  before each and says why; the aio checks of each saved `.rs` file are
+  said after each burst (`ax lint`'s per-file ones).
+- `ax dev --detach` (the session in the background, `logs/dev.out`),
+  `--no-watch`, `--verbose`, `--title`; `ax stop` ends a session (the app
+  stopped the graceful way), `ax status` adds `ax dev: watching` or that
+  it waits for a fix; `ax errors` groups lines under each hot-patch too.
+- `AIORT_LOG` (the log's level for one run, said in the boot report's
+  `log` row) and `AIORT_TITLE` (the window's title for one run).
+### Changed
+
+- **A held key's step no longer waits on copying the state or on the write
+  of the run before it** (the wallet's 1000 accounts: per step 6.3 → ~4.4 ms
+  of the app's time; p95 of a held ↓ 32 → 20 ms). A state slow to copy
+  (250 µs or more) is copied ahead on a thread of its own after each call,
+  so a call starts on that copy (`clone` ~0 in `perf.log`). A commit in an
+  aio file serializes only the `#[aio_cell]` slices whose field changed
+  (aio's per-cell serialization cache), not the whole state: a cursor step
+  writes its one small slice. A `#[coalesce]` run's write weighs the run
+  (its copy, the call again, the comparisons) before it takes the store,
+  so the views' calls go on meanwhile.
+
+- GitHub CI runs `./ci.sh`'s parts side by side (`./ci.sh lint|test`
+  runs one alone; no part: all): `check (lint)`, `check (test)`,
+  `mutants`, and `dx (dioxus)`, `dx (air)`, `dx (apk)`
+  (`scripts/dx-metrics --dioxus|--air|--apk`, each with its own base
+  measurement). The base's kept row is keyed by commit and runner
+  machine (`scripts/dx-metrics --machine`), so a run on a runner of the
+  same machine skips the base's build. Rust caches are saved by main's
+  runs only; main's runs are never cancelled by a newer push.
+- aio-rs-shell's Dioxus page is its default feature `dioxus` (aio-rs
+  `kit` with it); `default-features = false, features = ["air"]` is the
+  shell on air. aio-rs's Dioxus page crates are its feature `liveview`
+  (`web` is renderer-neutral). `use_css!` re-reads its sheets every 20 ms
+  in a dev build (was 100 ms), and follows them from a hole on air.
+- `ax create`'s template follows the OS's light or dark (`[ui] scheme`,
+  `use_css!(aio::ui::scheme(), …)`) instead of a fixed light page;
+  `page_css` and `use_css!` take a `Scheme` or, as before, a `bool`.
+- A server's default size budget is 7 MB (was 6): the service template
+  is 6.03 MB on Linux after 0.2's additions (sync, vitals, routes, auth,
+  updates: 50 KB, no crate more than 7 KB), and the budget is that plus the
+  size gate's 5% headroom, to the next whole MB.
+- **Fail closed**: `/__aio/health` and `/__aio/metrics` need the key, a
+  session or a user's token beyond this machine, also without accounts
+  (they answered anyone before); on loopback they stay open on an app
+  without accounts or users, and `[server] open` opens them. Every
+  endpoint and its default: [accounts](docs/auth/README.md#every-endpoint-and-what-opens-it).
+- `aio::testing::MountedComponent` has `key` and `updates`; route tests
+  and the guide read `here()` where it is drawn (a hole), which follows
+  the place on either renderer.
+- **Breaking: `aio::testing` is the `testing` feature.** The test kit is
+  a dev-dependency now, so an app's builds never compile it (the
+  template's debug build 952 → 934 MB, dx-metrics' `debug_target_mb`). Fix: one line in the
+  `Cargo.toml` holding the tests, `[dev-dependencies] aio = { package =
+  "aio-rs", <its source>, features = ["testing"] }`; `ax create` writes it,
+  and `ax lint` names tests that use `aio::testing` without it
+  ([migration](docs/migration/README.md#the-test-kit-is-a-dev-dependency-in-02)).
+  `video` brings `testing`; `ax lint --fix` no longer drops `testing`.
+- `ax smoke` fails a `.deb` whose menu entry starts a program it doesn't
+  ship or names an icon it doesn't ship, and any page script that throws
+  (`ERROR [page] Uncaught …`).
+- A cassette whose arguments don't serialize is refused naming the call
+  and why; a tape that doesn't read names `AIO_CASSETTE=rerecord`.
+- Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
+  `aio::ui::chord`, renderer-free, so `TestUi` needs no kit; `aio::kit`
+  re-exports them as before.
+- **A reaction commits with its call** (aio's `listensTo` in one reduce
+  and one save): a `listens_to` reaction runs inside its source call's
+  commit, and its own calls go into the same SQLite transaction, so a
+  crash or a refused commit leaves both or neither, and listeners and
+  views see both at once. Once some cells of a file react to each other,
+  that file's calls run one at a time (a file without reactions as before)
+  ([persistence](docs/persistence/README.md#how-the-store-works)).
+- **Breaking: `ax pin` and `ax pair` named as aio names them.** The
+  pairing code is `ax pair <app> [--plain]` (aio's `am pair`), no longer
+  `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
+  before. `ax pin` is aio's framework version (above); the unreleased
+  framework verb is gone into it ([migration](docs/migration/README.md#ax-pin-and-ax-pair-in-02)).
+- `ax ui` reads in its own process (no `ax` child and no `cargo
+  metadata` per reading), all at once, each within 5 s; it lists the
+  running apps first, finds an app by its display name, shows a refusal
+  of who asked before a transport failure, and drops a process's readings
+  once it stops or restarts. `ax errors` keeps a panic's lines together
+  (`--json`: one string).
+- **Cron schedules read UTC**, as aio's did, so a port's jobs fire when
+  they did; `[app] tz = "local"` reads this machine's local time (the
+  0.1.0 behaviour).
+- **A `#[server]` field of a shared cell is an `aio::Hidden<T>`**: a
+  synced copy never has it, and any use there panics naming the field
+  (aio throws), instead of reading a default. A method that touches it is
+  `#[client(predict = false)]`. Write `#[server] pub key: Hidden<String>`
+  and `*self.key = k`.
+- A `#[ttl]` call answered from the cache returns the kept answer, not `null`.
+- An async method returns `aio::Result<R>` for any `R`.
+- **Breaking: views import `aio::ui`, not `dioxus`.** `aio::ui::prelude`
+  is the whole view API, renderer-neutral and shaped as air (aio-rs's own
+  renderer, [design](docs/design/air.md)) provides it, so the swap to air
+  needs no app change. It runs on Dioxus 0.7 until then. An app drops its
+  `dioxus` dependency (`aio` with feature `kit` brings it) and moves as
+  below ([migration guide](docs/migration/README.md), "0.1 → 0.2"):
+
+  | 0.1 | 0.2 |
+  |---|---|
+  | `use dioxus::prelude::*;` | `use aio::ui::prelude::*;` |
+  | `-> Element` | `-> View` |
+  | `use_signal(\|\| v)` | `signal(\|\| v)` |
+  | `count()`, `s.cloned()` | `count.get()`, `s.get()` |
+  | `s.peek()` | `s.read_untracked()` (`s.get_untracked()` for a copy) |
+  | `s.with_mut(f)` | `s.update(f)` |
+  | `s.try_write()`, `s.try_peek()` (`Result`) | `s.try_write()`, `s.try_read_untracked()` (`Option`), `s.alive()` |
+  | `s.set(v)` (always re-renders) | `s.set(v)` (re-renders only on a change; `v: PartialEq`, else `*s.write() = v`) |
+  | `use_memo(f)` | `memo(f)` |
+  | `use_effect(f)` | `effect(f)` |
+  | `use_effect(use_reactive!(\|d\| ..))` | `watch(d, \|d\| ..)` |
+  | `use_hook(f)` | `once(f)` |
+  | `use_drop(f)` | `on_cleanup(f)` |
+  | `use_callback(f)` | `callback(f)` |
+  | `use_context_provider(f)` | `provide(f)` |
+  | `use_context::<T>()`, `try_use_context`, `consume_context`, `try_consume_context` | `context::<T>()`, `try_context::<T>()` |
+  | `provide_root_context(v)` | `provide_root(v)` |
+  | `use_future(f)` | `task(f)` |
+  | `use_resource(f)` | `resource(f)` |
+  | `GlobalSignal<T>`, `Signal::global(f)` | `Global<T>`, `Global::new(f)` |
+  | `GlobalMemo<T>`, `Memo::global(f)` | `GlobalMemo<T>`, `GlobalMemo::new(f)` |
+  | `document::eval(js)`, `dioxus.send(v)` / `dioxus.recv()` in the script | `eval(js)`, `aio.send(v)` / `aio.recv()` |
+  | `ErrorBoundary { handle_error: \|e: ErrorContext\| .. }` | `ErrorBoundary { fallback: \|e: String\| .. }` |
+  | `SuspenseBoundary { fallback: \|_\| .. }` | `Suspense { fallback: rsx! { .. } }` |
+  | `*part(\|c\| &c.f)` (a value) | `part(\|c\| &c.f).get()` (a handle: `.get()`, `.with(\|v\| ..)`, `"{p}"`, `.ver()`) |
+  | `Runtime::try_current().is_some()` | `in_views()` |
+  | `aio::dioxus` | gone |
+  | `TestUi::read(&GlobalSignal<T>)` | `TestUi::read(&Global<T>)` |
+
+  The template, the kit, `ax ui`, the tests and the guide use it; the kit's
+  own hooks keep their names (`use_form`, `use_global_key`, …).
+- `ax lint`: naming `dioxus` (a path, a dependency, a page script's
+  `dioxus.send`) is an error (area `renderer`); the facade's hooks
+  (`signal`, `memo`, `effect`, `watch`, `once`, …) are held to a view's top
+  level like `use_…` ones; a `for` row without `key:` is an error (air
+  requires one); an `if let` in `rsx!` warns (air refuses it).
+- **An older build boots on a newer build's data** (a rollback), as aio's
+  downgrade does: the fields it doesn't declare are kept in every write,
+  the stamp is never lowered, an aio slice is parked under
+  `__downgraded:<cell>`; only data its fields can't hold refuses the boot.
+  Rolled forward again, the newer build boots and drops the fields only
+  the older build declares, as aio's restore merge does.
+- An aio home with a journal is no longer refused at the claim: the store
+  replays it, or says why it can't.
+- **`ax create` writes nothing of the machine it ran on**: the app takes
+  aio-rs from git at this `ax`'s release tag (`Cargo.lock` pins the
+  commit), so a clone builds anywhere and a prebuilt `ax` needs no
+  checkout; `--aio <dir>` names a checkout relative to the app, refused
+  through the root. `AGENTS.md` holds the rules and the loop inline and
+  links the guide by URL, no local path
+  ([where an app gets aio-rs from](docs/basics/setup.md#where-an-app-gets-aio-rs-from)).
+- Print keeps CSS backgrounds and colours.
+- The page's console reaches the log at every level (`log`/`info` as
+  INFO, `debug` in a debug build).
+- Linux menu entries take `%U`: "Open with" hands the files to the app.
+- `AIORT_SANDBOX=1` on a host that can't sandbox now stops the app with
+  the reason, as `require_sandbox` does.
+- `Tell::Icon { window, tray, tooltip, fps }` (was `{ tray, frames, fps }`):
+  aio's `appIcon()` in one effect; `None` leaves that part as it is.
+- The hue is hashed over the slug the id makes (aio's `appHue`), so
+  `My Notes`, `my_notes` and `my-notes` are one colour.
+- `aio_shell::runtime::ensure_as` takes the icon of its windows and the
+  splash image its download window draws.
+- **`ax dev --android` installs once**: a thin dev APK beside the real app
+  (`<id>.dev`, "(dev)") shows the page `ax dev --web` serves over
+  `adb reverse`, and each edit reloads it; `--native` (or an app without a
+  web build) rebuilds a debug dev copy for the device's CPU only. An
+  emulator is booted when none is attached (`AIO_AVD`, `AIO_AVD_PORT`), a
+  ready emulator is taken before a phone, `ANDROID_SERIAL` names one, and
+  the app's log comes to the terminal (`[device]`).
+- `ax build`'s Linux bundle says the AppImage beside it (`--appimage`,
+  aio's default artifact).
+
+### Fixed
+
+- `ax setup` on Linux with Xephyr alone and no desktop says the nested
+  display is missing (Xephyr has nothing to nest in) and how to install
+  Xvfb, where it gave a ✓.
+- `ax create`'s comments: an app made on a checkout (`--aio`) says it
+  needs that checkout beside it, not that it builds anywhere from a tag;
+  the template names `ax dev`, not dx.
+- README and setup: a source install clones the release tag, whose
+  templates match the tag a new app pins.
+- `ax build --smoke` (and `ax smoke`) removes the record its start left
+  in the shared runtime's app list (`apps/*.json`), on Linux, macOS and
+  Windows, and on macOS the window bundle no other app names: a smoke
+  leaves nothing behind for `ax prune` to show.
+- **An `rsx!` hole may return a borrow of what it reads again**: `{t(&x)}`
+  or `{t(&r.name)}` (a `&str` of the hole's own clone of `x`) failed with
+  E0716 "temporary value dropped while borrowed" since holes clone their
+  names per run; the clones now live until the value is converted.
+- **On air, a handler's work is its component's** (Dioxus's scope): a task
+  an `async` click handler spawned ended when the `if` branch or `for`
+  row that drew its button was drawn again; it now ends with the
+  component. An event the page sent for an element drawn again before it
+  arrived is still dropped (AIR never runs a removed element's handler);
+  a dev build says so once per event name on the diagnostic bus
+  (`ui:stale-event`, `air::on_warn`). `TestPage::aim` makes such an event.
+- air: every `exec` of one batch runs (an island's update, a second
+  island's mount): on a page without `__aioRun` all but the first found
+  the slot the first had freed, and did nothing.
+- air: `aria-*`, `data-*` and HTML's enumerated attributes take
+  `true`/`false` as text (`aria-selected="false"`), as ARIA reads them;
+  an `Option`'s `None` writes no attribute at all.
+- air: a constant `dangerous_inner_html` is set as the `innerHTML`
+  property at mount (the page's policy sees it), not as an attribute.
+- air: a hole may take what it reads by value (`{match who { .. }}`,
+  `{note.map(..)}`): its names are cloned in per run, as a component's
+  props.
+- air: attributes given to a component that takes none say so (the
+  `GlobalAttributes` message), not "no method `__attr_const`".
+- `kit::Browser`'s `src` follows its caller's state (a `Prop`): a changed
+  `src` navigates the guest, on air as it did on Dioxus.
+- `TestUi::html` leaves out air's anchor comments.
+- A reply that sets the key cookie (a `?token=` link's page) is
+  `cache-control: no-store` with no `etag`; on air the shell's page was
+  otherwise served revalidatable (no server paint makes it `no-store`).
+- `ax dev` on Windows reloads an `rsx!` edit as markup again (~ms)
+  instead of hot-patching it (~1.5 s): the watcher named a changed file
+  with the `\\?\` prefix `canonicalize` adds, so it never matched the
+  build's snapshot; it names it as the snapshot does now. Found by
+  `dx-metrics --live` on the Windows runner (live_rsx_s 1.5 s, its line
+  "hot-patched in 1316 ms").
+- A backtrace in hot-patched code on Windows (MSVC) names its functions:
+  each patch DLL is linked with its PDB (`/DEBUG` beside `/DEBUG:SYMTAB`)
+  and std's resolver (dbghelp) is told the modules again after each
+  patch, under its own lock. Linux, macOS and MinGW name a patch's frames
+  only when it loaded before the first backtrace was resolved (std lists
+  the libraries once); the hotpatch test checks both, on each OS.
+- `scripts/dx-metrics --live` runs on Windows (it imported the Unix-only
+  `resource`): CPU and the build check through the Win32 API, `ax dev`'s
+  tree stopped with `taskkill`, edits written byte for byte; the Windows
+  CI job prints its live-edit times.
+- The splash's `text` takes aio's full set on every splash (Electron's,
+  the OS's, the web's and Android's): `{title}`, `{version}` (the app's,
+  what `--version` prints), and `{got}`, `{total}`, `{pct}` as `0`, `?`,
+  `?`; Electron's, the web's and Android's filled only `{title}`. A
+  `download_text`'s `{version}` is the app's too, as aio's, not Electron's.
+- A cell's breaker never lets a caller see it enabled past its trip: the
+  schedule thread's count could take the failure that tripped it while the
+  caller's own count found none and returned before the cell was disabled
+  (`a_trip_keeps_saved_data_through_enable_and_restart`). One count at a
+  time per cell now.
+- A synced client's call the server refused stays refused when it is sent
+  again (its answer went with a cut link): it was applied on the later
+  state its client was never told of.
+- `TestUi::html` on air leaves out air's anchors (the empty comments where
+  a hole's content goes), so a test reads the markup a person sees.
+- air: Dioxus's style attributes (`display: "flex"`, `align_items`,
+  `min_width`, …, dioxus-html's list) set their CSS property on an HTML
+  element, as on Dioxus; they were attributes the page ignored. A `style`
+  string keeps the properties set before it that it doesn't set
+  (`position: "fixed", style: "inset: 0"` is both), as on Dioxus; it
+  replaced them.
+- air: a task spawned with `spawn_forever` in an app ends with its root (a
+  test's next mount on the thread polled it, on a dead tokio runtime: a
+  panic); `follow_sheets` starts its watcher again for the next root.
+- air: a page script that returned still hands `recv` what its listeners
+  and timers send later, as on Dioxus; its return was an error to `recv`.
+- Enter in an open combobox (`role="combobox"`, `aria-expanded="true"`)
+  picks, never submits its form: aio's Enter submitted it once the pick
+  enabled the form's button (the feedback form's country sent it).
+- air: a view's `on_cleanup` reads its own signals and memos (they were
+  freed first: a panic in a destructor, the process aborted).
+- air: SVG drawn by a component, a `for` row or an `if` branch (a template
+  whose root is `circle`, `g`, `path`, …, or one made inside an `svg` of
+  the same `rsx!`) is in SVG's namespace; it was an HTML element, drawn
+  as nothing.
+- air: an `rsx!` value that is a constant or a static alone
+  (`d: CLOUD`) compiles; it was rebound as a local (a refutable pattern).
+- air's code size: an event handler costs its closure alone (its wrappers
+  were generic over it, 36% of the bench's IR): 50 views make 1.13 M lines
+  of LLVM IR, 0.31x Dioxus's (phase 1: 0.49x), a held key over 10 000
+  rows answers in 0.21x; `scripts/air-ir` in `ci.sh` fails past 25 000
+  lines a view (docs/design/air.md).
+- `ax lint`: the `testing` check no longer errs on a workspace-inherited
+  aio-rs: `[dev-dependencies] aio = { workspace = true, features = ["testing"] }`,
+  or `features = ["testing"]` on the `[workspace.dependencies]` entry, renamed
+  (`package = "aio-rs"`) or not; dotted and `[target.….dev-dependencies]`
+  tables count too.
+- A Unix socket path past the OS limit (108 bytes with the NUL on Linux, 104
+  on macOS): the app's socket dir falls back to `/tmp/aio-rt-<uid>/` when
+  `XDG_RUNTIME_DIR`/`TMPDIR` is too long, as aio's `resolveSocketPath` fell
+  back to `/tmp/aio`, and a path still too long is refused at once in words
+  (the path, its length, the limit, the fix) by the app, the shell (before
+  Electron connects) and `ax`, instead of EINVAL and no window.
+- A cell's or a synced copy's listeners (a view, `watch`) never hear an
+  older state after a newer one: a tell from another thread, or from a
+  listener itself, between reading the state and telling it, was told
+  first, and the older one after it (a watch on a copy saw `[0, 4, 0, 5]`).
+  One teller at a time now tells until nothing is left untold.
+- An app's first update after its install is made from the patch again:
+  a bundle's `install.sh` kept only the binary in `versions/<v>/`, so the
+  patch (made over the whole bundle) missed its other files and the whole
+  release was downloaded. It now installs the bundle whole, as an update
+  stages one.
+- On macOS and Windows the first update after an install is made from the
+  patch too: it starts from the installed `.app` or `Programs\<id>` when
+  no staged copy of the running version is kept, as there is none until
+  the first update staged one.
+- On macOS, Windows and from an AppImage, a new version whose binary dies
+  as it starts no longer leaves no version running: its binary is the
+  install helper, so the old app exited for a helper that never ran. The
+  old app now exits only once the helper says it is up (20 s); else it
+  runs on, and that release is never offered again.
+- `ax release` of the service template on Windows: its default size
+  budget is half again there (a server 10 MB, a desktop app 15 MB), as its
+  build is about a third bigger (7.1 MB against 5.3 on Linux).
+- `scripts/dx-metrics --check` compares like with like: every gated
+  number, sizes and crate counts too, is judged against the same machine's
+  rows only (a CI runner's debug target was failing against the
+  developer machine's best: debug info holds absolute paths). `--base
+  <rev>` measures the base commit's sizes in a checkout beside this one,
+  and GitHub CI gates against its PR's base measured on the same runner
+  (`AIO_DX_BASE`, rows kept per commit in `AIO_DX_ROWS` and cached); its
+  times are said, not gated. Accepted growth stays a committed row of the
+  same machine.
+
+- `ax smoke <app>_<version>_<arch>.deb`: a Debian package's own name is
+  read for its app id.
+- The app quitting (it stops, its socket closes) right after the page
+  vetoed a close (`window.close()` with a beforeunload handler) quits: the
+  vetoed close, still settling, took the quit's own close of that window
+  with it and the runtime stayed up; the windows left are closed again
+  until they are gone.
+- The desktop splash shows a second after its page loaded when its window
+  never paints while hidden (a loaded machine): it stayed hidden for good;
+  a splash already gone never comes back.
+- A copy (`Remote`) hears this process's diagnostic bus from before it is
+  online: a problem said just as the link came up was never relayed to the
+  server's bus.
+- `aio::testing::TestUi` counts every render however its tests share the
+  process: with one tracing listener alive, tracing-core asks only the
+  registering thread's own, so a render first met on a thread with none
+  muted it for all; a second listener is kept for good.
+- `aio::testing::TestBrowser` waits up to 120 s for a browser's DevTools
+  port (a hang guard): the first system Chrome of a Windows CI runner took
+  more than 30 s while running.
+- An app that isn't running or has no server, asked for a pairing code or
+  its profile, is told so plainly with what to type ("notes isn't running:
+  start it with `ax start notes`"; no server: the aio.toml lines that
+  give it one), not "the app isn't serving (no serving.json)".
+- `ax dev <app> --web` with any other flag ran the desktop app; it now
+  takes `--port` and `--expose` in any order and refuses other flags.
+- The desktop window's page policy lets WebAssembly compile
+  (`'wasm-unsafe-eval'`, as aio's `script-src`; still no `eval`).
+- A clean stop leaves no socket behind: a cell's door served on the
+  runtime was never dropped, so its `cell-<id>.sock` (and its folder)
+  outlived the app.
+- `ax ui` lists the clients of every cell, not the first 8; the Overview's
+  tiles wrap instead of cutting their value ("runni…").
+- A page script's `await aio.recv()` (`aio::ui::eval`) no longer hangs the
+  window when the view sends later than 50 ms after it asked, and takes a
+  falsy value (`0`, `false`): the renderer's own `recv` waited in a busy
+  loop the message could never get past.
+- `ax dev` restarts ask the app to stop over its door first (calls in
+  flight finish, effects commit; Windows too, which has no SIGTERM), dx's
+  restarts on a `Cargo.toml` change included; a build that left the binary
+  as it was no longer restarts the app.
+- `ax dev`: editor files (vim's `4913`, `#x#`, `*.tmp`, safe-write copies)
+  no longer start builds; an app inside some `target` folder is heard.
+- `ax dev --watch=<dirs>` narrowed nothing under dx: ax now rebuilds and
+  restarts for it (dx watches all of the app).
+- `ax dev` without dx: a good build after a failed one says `fixed` and
+  takes the errors off the page even when the app keeps running.
+- `ax dev`'s session and dx pid files hold pid and start time: a pid the
+  OS handed out again is no longer taken for the session, on every OS,
+  and a stray dx is stopped on Windows and macOS too.
+- `ax dev` app args with spaces reach the app intact under dx (dx splits
+  its `--args`; they go in `AIORT_DEV_ARGS`).
+- `scripts/dx-metrics`: the live-edit times no longer include the page
+  poller's start or the previous edit's patch build under load (each
+  save waits until the loop is quiet).
+- A signed (Authenticode) one-click Windows download finds its runtime:
+  the mark is looked for before the certificate table.
+- **Android: a crash at start on Android 10.** The activity's insets
+  called API-30 methods with minSdk 29; Android 10 now takes the older
+  path. A WebView too old for the page (Android 10's stock 74) says so on
+  the screen instead of a blank page.
+- **The dev page's scripts ran into each other** (`ax dev --web`,
+  and so `--android`): the splash script's `(() => …)()` called the live
+  reload's on its result, an error on every dev page.
+- `aio::testing::TestBrowser` starts one browser at a time per process
+  (started together, eight took 22 s each on an 8-core Windows, one 0.5 s)
+  and reads its DevTools port only once `DevToolsActivePort` is whole.
+- The app's scripts in the page (Dioxus queries: an island's mount and
+  unmount, a focus, a rect) run in the order the app sent them; a big one
+  could run after a small one sent later, so two `<Browser>`s could leave
+  one empty and an island swapped for another could stay the old one.
+- The test suite holds under load: timing tests wait on what they check
+  (a condition, a gate the test opens, a page-side record of each style)
+  instead of a fixed sleep or a wall-clock window; bounds on time are hang
+  guards well short of what they guard against.
+
 ## [0.1.0] - 2026-11-01
 
 The first release of aio-rs (alpha): a Rust framework for apps whose state
@@ -73,4 +1009,5 @@ a time ([migration guide](docs/migration/README.md)).
 - The prebuilt archives and app bundles are not OS-signed yet: Windows
   SmartScreen and macOS Gatekeeper warn on first start.
 
+[0.2.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.1.0

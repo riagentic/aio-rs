@@ -1,6 +1,7 @@
 //! UI helpers every app gets from aio-rs (aio: `aio/ui`, the page shell, the
-//! client). Plain functions; the cell glue is a macro over the app's own
-//! Dioxus, so this crate needs no UI dependency.
+//! client), and with feature `kit` the view API apps are written against:
+//! [`prelude`] (`use aio::ui::prelude::*;`). Its names are renderer-neutral
+//! (docs/design/air.md): an app names no renderer.
 
 /// The page side of reading and driving a page as a person meets it, by
 /// TestUi's rules (roles, names, auto names, handles, paths): `ax surface`
@@ -8,12 +9,72 @@
 /// page. `(SURFACE_JS)(op, arg)` answers `{ ok }` or `{ error }`.
 pub const SURFACE_JS: &str = include_str!("surface.js");
 
-/// Run a future for the app's life, in its root scope (Dioxus's own):
-/// `spawn` in a component ends with it, so work a dialog starts and then
-/// closes over (open a link, then its toast) dies unseen. A component's
-/// signal it outlives is gone: write that with `try_write`, or a global.
+/// Key chords (`"mod+s"`), parsed and matched: the kit's bindings and `TestUi`'s keys.
 #[cfg(feature = "kit")]
-pub use dioxus::dioxus_core::spawn_forever;
+#[doc(hidden)]
+pub mod chord;
+#[cfg(feature = "kit")]
+mod css;
+#[cfg(feature = "kit")]
+pub use css::{collect_css, css};
+#[cfg(feature = "kit")]
+mod on_air;
+#[cfg(feature = "kit")]
+pub use on_air::*;
+
+/// Everything a view file needs.
+#[cfg(feature = "kit")]
+pub mod prelude {
+    pub use super::on_air::events::*;
+    pub use super::on_air::{
+        Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler,
+        Fragment, FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props,
+        Resource, Signal, Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval,
+        geometry, in_views, key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn,
+        spawn_forever, task, try_context, watch,
+    };
+    pub use crate::{act, use_css};
+    /// `rsx!`'s paths start at `air`: an app needs no dependency of its own.
+    #[doc(hidden)]
+    pub use ::air;
+}
+
+/// The views' clock: a moment and a wait, on the page's timer in a
+/// browser, else on tokio's (a test's paused clock too).
+#[cfg(feature = "kit")]
+pub(crate) mod clock {
+    pub(crate) async fn sleep(d: std::time::Duration) {
+        #[cfg(target_arch = "wasm32")]
+        crate::web::sleep(u32::try_from(d.as_millis()).unwrap_or(u32::MAX)).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        tokio::time::sleep(d).await;
+    }
+
+    /// Tokio's: a UI test's `advance` moves it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) use tokio::time::Instant;
+
+    /// A moment, on the page's clock: a browser has no `std` one.
+    #[cfg(target_arch = "wasm32")]
+    #[derive(Clone, Copy)]
+    pub(crate) struct Instant(f64);
+
+    #[cfg(target_arch = "wasm32")]
+    impl Instant {
+        pub(crate) fn now() -> Self {
+            Self(js_sys::Date::now())
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    impl std::ops::Sub for Instant {
+        type Output = std::time::Duration;
+
+        fn sub(self, earlier: Self) -> Self::Output {
+            std::time::Duration::from_secs_f64((self.0 - earlier.0).max(0.0) / 1000.0)
+        }
+    }
+}
 
 /// A copyable day or id for props and handlers (a `String` must be cloned into
 /// every closure). Stand-in for aio-rs's `Copy` id/date handles: each distinct
@@ -150,19 +211,21 @@ pub fn numbered(bases: Vec<String>) -> Vec<String> {
 }
 
 /// The page CSS: aio's base rules (server-html-gen), the app's stylesheets
-/// unchanged, and shims. Dioxus native can't set attributes on `<html>`,
-/// so the theme lives on the app root: `:root[data-theme]` maps to it and the
+/// unchanged, and shims. The theme lives on the app root (a view sets no
+/// attribute on `<html>`): `:root[data-theme]` maps to it and the
 /// root repeats body's colours (which would read the light tokens). Tokens
 /// set on `:root` are set on that root too, so the ones made from others
 /// (`--aio-tint` from the accent) are made from the app's, not inherited
 /// ready-made. It mounts into `<main id="main">`, which aio styles as a
-/// centred page, so that box is reset to aio's full-window `#root`. The app's
-/// theme, not the OS's, decides `light-dark()` and `prefers-color-scheme`
-/// (a phone in dark mode must not darken half of a light app). Under `[ui] theme = "none"` ([`set_look`])
+/// centred page, so that box is reset to aio's full-window `#root`.
+/// `scheme` decides `light-dark()` and `prefers-color-scheme`: the OS's as
+/// it changes ([`Scheme::System`], what [`scheme`] gives by default), or
+/// the app's own choice (a `bool`: `true` dark; a phone in dark mode then
+/// never darkens half of a light app). Under `[ui] theme = "none"` ([`set_look`])
 /// even aio's base rules are left out: the app brings every rule. The last
 /// page CSS is kept for [`page_sheet`].
-pub fn page_css(sheets: &[&str], dark: bool) -> String {
-    let css = sheets_css(sheets, dark, !BARE.load(std::sync::atomic::Ordering::Relaxed));
+pub fn page_css(sheets: &[&str], scheme: impl Into<Scheme>) -> String {
+    let css = sheets_css(sheets, scheme.into(), !BARE.load(std::sync::atomic::Ordering::Relaxed));
     *PAGE.write().unwrap_or_else(|e| e.into_inner()) = css.clone();
     css
 }
@@ -197,7 +260,7 @@ thread_local! {
 }
 
 /// Waits until one of `sheets` changes on disk (a dev build; it polls every
-/// 100 ms, so a saved edit shows well within 0.2 s; a browser asks `ax dev
+/// 20 ms, a few file stats, so a saved edit shows within 0.05 s; a browser asks `ax dev
 /// --web` every 250 ms, and with no dev server stops asking). A release
 /// build never returns: its sheets are built in.
 pub async fn sheets_changed(sheets: &[Sheet]) {
@@ -207,7 +270,7 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
             || sheets.iter().map(|(p, _)| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect::<Vec<_>>();
         let was = stamp();
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             if stamp() != was {
                 return;
             }
@@ -244,6 +307,43 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
     }
 }
 
+/// On air the call sits in a hole (an effect, no hooks): one signal per set
+/// of sheets for the thread; its watcher lives as long as the app (a root
+/// mounted again, a test's next one, starts it again).
+#[doc(hidden)]
+#[cfg(feature = "kit")]
+pub fn follow_sheets(sheets: &'static [Sheet]) {
+    type Watch = (air::Signal<u64>, air::Task);
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    thread_local! {
+        static EDITS: std::cell::RefCell<std::collections::HashMap<Vec<&'static str>, Watch>> = Default::default();
+    }
+    let watch = |edits: air::Signal<u64>| {
+        air::spawn_forever(async move {
+            loop {
+                sheets_changed(sheets).await;
+                edits.update(|n| *n += 1);
+            }
+        })
+    };
+    let key = sheets.iter().map(|s| s.0).collect();
+    let edits = EDITS.with_borrow_mut(|m| {
+        let w = m.entry(key).or_insert_with(|| {
+            air::detached(|| {
+                let edits = air::Signal::new(0u64);
+                (edits, watch(edits))
+            })
+        });
+        if !w.1.alive() {
+            w.1 = watch(w.0);
+        }
+        w.0
+    });
+    let _ = edits.get();
+}
+
 /// The page's CSS from the app's stylesheet files, as [`page_css`] makes it,
 /// live while you edit: `style { {aio::use_css!(dark; "assets/style.css")} }`.
 /// `dark` (a `bool`) is the app's theme, not the OS's: `true` applies the
@@ -253,7 +353,7 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
 /// drawn only with its theme in:
 /// `aio::use_css!(dark, &aio::kit::theme_css(hue); "assets/style.css")`.
 /// Paths are from the package's folder. A dev build re-reads a saved file and
-/// redraws within 0.2 s, no compile; a release build has the files built in.
+/// redraws within 0.05 s, no compile; a release build has the files built in.
 /// Unlike CSS kept in `use_hook` (made once, so stale after an edit), it is
 /// made again on every render.
 #[macro_export]
@@ -264,18 +364,7 @@ macro_rules! use_css {
             if cfg!(debug_assertions) { concat!(env!("CARGO_MANIFEST_DIR"), "/", $path) } else { $path },
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $path)),
         )),+];
-        let mut edits = $crate::dioxus::prelude::use_signal(|| 0u64);
-        $crate::dioxus::prelude::use_hook(move || {
-            if cfg!(debug_assertions) {
-                $crate::dioxus::prelude::spawn(async move {
-                    loop {
-                        $crate::ui::sheets_changed(SHEETS).await;
-                        edits += 1;
-                    }
-                });
-            }
-        });
-        let _ = edits();
+        $crate::ui::follow_sheets(SHEETS);
         let texts = $crate::ui::sheet_texts(SHEETS);
         let files = texts.iter().map(String::as_str);
         $crate::ui::page_css(&[$(::core::convert::AsRef::<str>::as_ref($made)),*].into_iter().chain(files).collect::<Vec<&str>>(), $dark)
@@ -283,19 +372,78 @@ macro_rules! use_css {
 }
 
 /// [`page_css`] without the globals: `base` keeps aio's base rules.
-fn sheets_css(sheets: &[&str], dark: bool, base: bool) -> String {
+fn sheets_css(sheets: &[&str], scheme: Scheme, base: bool) -> String {
     let base: &[&str] = if base { &["*,*::before,*::after{box-sizing:border-box}body{margin:0}"] } else { &[] };
     let css = [base, sheets].concat().join("\n");
-    let scheme = if dark { "@media all" } else { "@media not all" };
     let css = css
         .replace(":root[data-theme", "[data-theme")
         .replace(":root{", ":root,[data-theme]{")
-        .replace(":root {", ":root,[data-theme] {")
-        .replace("@media (prefers-color-scheme: dark)", scheme)
-        .replace("@media (prefers-color-scheme:dark)", scheme);
-    light_dark(&css, dark)
-        + "\n#main{max-width:none;margin:0;padding:0;height:100%;overflow:hidden}"
+        .replace(":root {", ":root,[data-theme] {");
+    let css = match scheme {
+        // The OS's: the sheets as written, the page following `prefers-color-scheme`.
+        Scheme::System => css + "\n:root{color-scheme:light dark}",
+        fixed => {
+            let dark = fixed == Scheme::Dark;
+            let media = if dark { "@media all" } else { "@media not all" };
+            let css = css
+                .replace("@media (prefers-color-scheme: dark)", media)
+                .replace("@media (prefers-color-scheme:dark)", media);
+            light_dark(&css, dark)
+        }
+    };
+    css + "\n#main{max-width:none;margin:0;padding:0;height:100%;overflow:hidden}"
         + "\n[data-theme]{background:var(--aio-bg);color:var(--aio-text)}"
+}
+
+pub use aio_config::config::Scheme;
+
+/// The app's `[ui] scheme` (what `aio::boot::begin` took; `System` before
+/// it, and in tests): the template's `use_css!(aio::ui::scheme(), …)`.
+pub fn scheme() -> Scheme {
+    match SCHEME.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Scheme::Light,
+        2 => Scheme::Dark,
+        _ => Scheme::System,
+    }
+}
+
+/// Take the app's `[ui] scheme` for [`scheme`] (`aio::boot::begin` does it).
+pub fn set_scheme(s: Scheme) {
+    let n = match s {
+        Scheme::System => 0,
+        Scheme::Light => 1,
+        Scheme::Dark => 2,
+    };
+    SCHEME.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+static SCHEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Is the page dark now (a hook): the app's `[ui] scheme`, or under
+/// `system` the OS's `prefers-color-scheme`, followed as it changes (a
+/// canvas or a chart that draws its own colours reads it). The page's CSS
+/// follows the OS without it ([`page_css`] with [`Scheme::System`]).
+#[cfg(feature = "kit")]
+pub fn use_dark() -> Memo<bool> {
+    let fixed = scheme();
+    let os = signal(|| false);
+    once(move || {
+        if fixed == Scheme::System {
+            spawn(async move {
+                let mut page = eval(
+                    "const m = matchMedia('(prefers-color-scheme: dark)'); aio.send(m.matches);
+                     m.addEventListener('change', (e) => aio.send(e.matches)); await new Promise(() => {});",
+                );
+                while let Ok(dark) = page.recv::<bool>().await {
+                    os.set(dark);
+                }
+            });
+        }
+    });
+    memo(move || match fixed {
+        Scheme::System => os.get(),
+        s => s == Scheme::Dark,
+    })
 }
 
 /// Take the app's `[ui] theme` for [`page_css`] (`aio::boot::begin` does it).
@@ -343,10 +491,11 @@ pub fn light_dark(css: &str, dark: bool) -> String {
     out + rest
 }
 
-/// A local image as the desktop page can load it (the shell serves image
-/// files only, from `aio://app/file/<path>`; `file://` is blocked).
+/// A local image as the page can load it (the shell serves image files
+/// only, from `aio://app/file/<path>`, on Android from the page's own
+/// origin, `https://app.invalid/file/<path>`; `file://` is blocked).
 pub fn local_file_url(abs: &str) -> String {
-    let mut out = String::from("aio://app/file");
+    let mut out = String::from(if cfg!(target_os = "android") { "https://app.invalid/file" } else { "aio://app/file" });
     for b in abs.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => out.push(b as char),
@@ -475,65 +624,117 @@ impl Tab {
 }
 
 /// How often commits made off the UI thread (prices, balances, effects,
-/// schedules) re-render the views at most: aio's broadcast coalescer. A call
-/// from the views renders at once, and with it whatever came meanwhile (aio
+/// schedules) reach the views at most: aio's broadcast coalescer. A call
+/// from the views shows at once, and with it whatever came meanwhile (aio
 /// `flushAllUrgent`).
 pub const BACKGROUND: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// A part of a cell's state a view read through `client!`'s `part`: it
-/// derefs to what the reader picked, and the view re-renders only when the
-/// field it lies in changes (aio's `trackCell`). Its state is the one the
-/// views were last told of, so what it shows and its stamp agree.
+/// A part of a cell's state, from `client!`'s `part(|c| &c.field)`: a
+/// `Copy` handle (when its picker captures nothing) whose reads subscribe
+/// only to the top-level field the picker points into (aio's
+/// `trackCell`), so a hole reading it runs again when that field changes,
+/// not on every commit. Read it with `.get()`, `.with(|v| …)` or `"{part}"`; it reads
+/// the state the views were last told of.
 #[cfg(feature = "kit")]
-pub struct Part<T, R: ?Sized, F> {
-    st: std::sync::Arc<T>,
+pub struct Part<T: 'static, R: ?Sized, F> {
     f: F,
-    ver: u64,
+    parts: &'static Global<Parts<T>>,
+    whole: &'static Global<u64>,
+    cell: &'static str,
+    at: &'static std::panic::Location<'static>,
     _r: std::marker::PhantomData<fn(&T) -> &R>,
 }
 
 #[cfg(feature = "kit")]
-impl<T, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
+impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
     #[doc(hidden)]
-    pub fn new(st: std::sync::Arc<T>, f: F, ver: u64) -> Self {
-        Self { st, f, ver, _r: std::marker::PhantomData }
+    pub fn new(
+        f: F,
+        parts: &'static Global<Parts<T>>,
+        whole: &'static Global<u64>,
+        cell: &'static str,
+        at: &'static std::panic::Location<'static>,
+    ) -> Self {
+        Self { f, parts, whole, cell, at, _r: std::marker::PhantomData }
+    }
+
+    /// The state the views were told of and the field's stamp, the reader
+    /// subscribed to that field when `track` (to every commit when the
+    /// picker points outside the fields: a dev build says so).
+    fn told(&self, track: bool) -> (std::sync::Arc<T>, u64) {
+        let (st, sig) = {
+            let p = self.parts.read_untracked();
+            let st = p.shown();
+            p.find((self.f)(&st))
+        };
+        let ver = match (sig, track) {
+            (Some(s), true) => s.get(),
+            (Some(s), false) => s.get_untracked(),
+            (None, true) => {
+                if cfg!(debug_assertions) {
+                    whole_read(self.cell, self.at, true);
+                }
+                self.whole.get()
+            }
+            (None, false) => self.whole.get_untracked(),
+        };
+        (st, ver)
+    }
+
+    /// `g` of the part; subscribes.
+    pub fn with<O>(&self, g: impl FnOnce(&R) -> O) -> O {
+        g((self.f)(&self.told(true).0))
+    }
+
+    pub fn with_untracked<O>(&self, g: impl FnOnce(&R) -> O) -> O {
+        g((self.f)(&self.told(false).0))
+    }
+
+    /// The part, owned (a `str` part gives a `String`); subscribes.
+    pub fn get(&self) -> R::Owned
+    where
+        R: ToOwned,
+    {
+        self.with(R::to_owned)
+    }
+
+    pub fn get_untracked(&self) -> R::Owned
+    where
+        R: ToOwned,
+    {
+        self.with_untracked(R::to_owned)
     }
 
     /// The field's stamp: it moves exactly when the field changes, so it is
     /// a cache key for what is made of it ([`crate::Derived`],
-    /// [`crate::Cache`]; aio's array identity), never a deep compare.
+    /// [`crate::Cache`]; aio's array identity), never a deep compare. Subscribes.
     pub fn ver(&self) -> u64 {
-        self.ver
-    }
-}
-
-#[cfg(feature = "kit")]
-impl<T, R: ?Sized, F: Fn(&T) -> &R> std::ops::Deref for Part<T, R, F> {
-    type Target = R;
-
-    fn deref(&self) -> &R {
-        (self.f)(&self.st)
+        self.told(true).1
     }
 }
 
 #[cfg(feature = "kit")]
 impl<T, R: ?Sized, F: Clone> Clone for Part<T, R, F> {
     fn clone(&self) -> Self {
-        Self { st: self.st.clone(), f: self.f.clone(), ver: self.ver, _r: std::marker::PhantomData }
+        Self { f: self.f.clone(), ..*self }
     }
 }
 
 #[cfg(feature = "kit")]
-impl<T, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fmt::Display for Part<T, R, F> {
+impl<T, R: ?Sized, F: Copy> Copy for Part<T, R, F> {}
+
+#[cfg(feature = "kit")]
+impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fmt::Display for Part<T, R, F> {
+    /// Subscribes: `"{n}"` in a view follows the part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        (**self).fmt(f)
+        self.with(|v| v.fmt(f))
     }
 }
 
 #[cfg(feature = "kit")]
-impl<T, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt::Debug for Part<T, R, F> {
+impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt::Debug for Part<T, R, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        (**self).fmt(f)
+        self.with(|v| v.fmt(f))
     }
 }
 
@@ -543,24 +744,24 @@ impl<T, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt::Debug for Part<T
 #[cfg(feature = "kit")]
 pub struct Parts<T> {
     shown: std::sync::Arc<T>,
-    sigs: Vec<dioxus::prelude::Signal<u64>>,
+    sigs: Vec<Signal<u64>>,
     /// When commits off the UI thread were last told; `None`: a call from
     /// the views closed the window since, so the next one goes at once.
-    told: Option<crate::kit::Instant>,
+    told: Option<clock::Instant>,
 }
 
 #[cfg(feature = "kit")]
 impl<T: crate::CellData> Parts<T> {
     /// In the root scope (a global's constructor runs there).
     pub fn new(shown: std::sync::Arc<T>) -> Self {
-        let sigs = (0..T::FIELDS.len().max(1)).map(|_| dioxus::prelude::Signal::new(0)).collect();
+        let sigs = (0..T::FIELDS.len().max(1)).map(|_| Signal::new(0)).collect();
         Self { shown, sigs, told: None }
     }
 
     /// The state the views were told of, and the signal of the field `at`
     /// points into (`None`: not into the state itself, e.g. into a list's
     /// heap: then the reader follows the whole state).
-    pub fn find<R: ?Sized>(&self, at: &R) -> (std::sync::Arc<T>, Option<dioxus::prelude::Signal<u64>>) {
+    pub fn find<R: ?Sized>(&self, at: &R) -> (std::sync::Arc<T>, Option<Signal<u64>>) {
         let base = std::sync::Arc::as_ptr(&self.shown) as *const u8 as usize;
         let p = at as *const R as *const u8 as usize;
         let field = p
@@ -579,7 +780,7 @@ impl<T: crate::CellData> Parts<T> {
     /// since the state they were last told of (to bump), and whether any did.
     /// `urgent`: for a call from the views, which closes the background
     /// window (aio's `flushUrgent`: the next commit off the UI thread goes at once).
-    pub fn tell(&mut self, now: std::sync::Arc<T>, urgent: bool) -> (Vec<dioxus::prelude::Signal<u64>>, bool) {
+    pub fn tell(&mut self, now: std::sync::Arc<T>, urgent: bool) -> (Vec<Signal<u64>>, bool) {
         if urgent {
             self.told = None;
         }
@@ -587,7 +788,7 @@ impl<T: crate::CellData> Parts<T> {
             return (vec![], false);
         }
         if !urgent {
-            self.told = Some(crate::kit::Instant::now());
+            self.told = Some(clock::Instant::now());
         }
         let mask = match T::FIELDS.is_empty() {
             true => !0,
@@ -607,7 +808,7 @@ impl<T: crate::CellData> Parts<T> {
     /// told: [`BACKGROUND`] after such a commit last was (none since a call
     /// from the views: at once).
     pub fn wait(&self) -> std::time::Duration {
-        self.told.map_or(std::time::Duration::ZERO, |t| BACKGROUND.saturating_sub(crate::kit::Instant::now() - t))
+        self.told.map_or(std::time::Duration::ZERO, |t| BACKGROUND.saturating_sub(clock::Instant::now() - t))
     }
 }
 
@@ -624,33 +825,33 @@ pub async fn sleep(d: std::time::Duration) {
     }
     WAITING.set(WAITING.get() + 1);
     let _w = Waiting;
-    crate::kit::sleep(d).await
+    clock::sleep(d).await
 }
 
 #[cfg(feature = "kit")]
 thread_local!(static WAITING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 /// Has a view on this thread a commit still to be told of ([`sleep`])?
-#[cfg(feature = "kit")]
+#[cfg(all(feature = "kit", feature = "testing"))]
 pub(crate) fn telling() -> bool {
     WAITING.get() > 0
 }
 
-/// The client side of a cell for Dioxus views (feature `kit`): `client!(Todo, todo,
+/// The client side of a cell for views (feature `kit`): `client!(Todo, todo,
 /// todo_at)` makes `SOURCE` (set by `main`:
 /// `SOURCE.set(aio::Source::for_app(&cfg, &dirs)?)`; unset = memory, for
 /// tests; `DB`, a store's path instead, is the older way), the
-/// global `HANDLE`, `part(|p| &p.field)` (a view reads a field and
-/// re-renders only when it changes: aio's signal per cell, the way to read
-/// in a render), a `todo()` reader (the whole state: it subscribes the
-/// view to every commit), a `todo_at(|p| …)` hook (a value made of the
+/// global `HANDLE`, `part(|p| &p.field)` (a hole reads a field and runs
+/// again only when it changes: aio's signal per cell, the way to read in a
+/// view), a `todo()` reader (the whole state: a hole reading it follows
+/// every commit), a `todo_at(|p| …)` hook (a value made of the
 /// state, compared after each commit), `use_status()` (online, syncing) and
 /// `use_pending(method)` hooks, `use_time_travel()` with `time_travel(ask)`
 /// (the cell's history, for dev tools), and the `Ui` door that `act!` calls
-/// through: a view's call renders at once. Global like aio's module signals:
+/// through: a view's call shows at once. Global like aio's module signals:
 /// one per app instance (so per test). Call `use_live()` once in the root
 /// component so commits made off the UI thread (effects, schedules)
-/// re-render too, at most once per [`BACKGROUND`].
+/// show too, at most once per [`BACKGROUND`].
 #[macro_export]
 macro_rules! client {
     ($cell:ty, $read:ident $(, $at:ident)?) => {
@@ -660,14 +861,14 @@ macro_rules! client {
         /// store at `DB`; with neither (tests), a fresh memory store per app instance.
         pub static SOURCE: ::std::sync::OnceLock<$crate::Source<$cell>> = ::std::sync::OnceLock::new();
 
-        // Dioxus keys a global by its source location, and every global this
-        // macro makes has the same one: each gets a name instead (friction #29).
-        pub static HANDLE: $crate::dioxus::prelude::GlobalSignal<$crate::Source<$cell>> =
-            $crate::dioxus::prelude::GlobalSignal::with_name(
+        // Every global this macro makes is made at the same source location:
+        // each gets a name of its own (friction #29).
+        pub static HANDLE: $crate::ui::Global<$crate::Source<$cell>> =
+            $crate::ui::Global::named(
                 || match (SOURCE.get(), DB.get()) {
                     // A browser tab's own copy ([`$crate::ui::Tab`]): its
                     // user's view, never the process's; none: an empty one.
-                    _ if let Some(t) = $crate::dioxus::prelude::try_consume_context::<$crate::ui::Tab>() => t
+                    _ if let Some(t) = $crate::ui::try_context::<$crate::ui::Tab>() => t
                         .source::<$cell>()
                         .unwrap_or_else(|| $crate::Source::Local($crate::Handle::memory())),
                     (Some(s), _) => s.clone(),
@@ -681,89 +882,74 @@ macro_rules! client {
             );
 
         /// Bumped on every change of the state; reading it subscribes a view.
-        static VERSION: $crate::dioxus::prelude::GlobalSignal<u64> =
-            $crate::dioxus::prelude::GlobalSignal::with_name(|| 0, concat!(module_path!(), "::VERSION"));
+        static VERSION: $crate::ui::Global<u64> = $crate::ui::Global::named(|| 0, concat!(module_path!(), "::VERSION"));
 
         /// Bumped whenever the views are told anything (the copy's status,
         /// calls in flight): `use_status` and `use_pending` follow it.
-        static TICK: $crate::dioxus::prelude::GlobalSignal<u64> =
-            $crate::dioxus::prelude::GlobalSignal::with_name(|| 0, concat!(module_path!(), "::TICK"));
+        static TICK: $crate::ui::Global<u64> = $crate::ui::Global::named(|| 0, concat!(module_path!(), "::TICK"));
 
         /// The state the views were last told of, a signal per field.
-        static PARTS: $crate::dioxus::prelude::GlobalSignal<$crate::ui::Parts<$cell>> =
-            $crate::dioxus::prelude::GlobalSignal::with_name(
-                || $crate::ui::Parts::new(HANDLE.peek().state()),
+        static PARTS: $crate::ui::Global<$crate::ui::Parts<$cell>> =
+            $crate::ui::Global::named(
+                || $crate::ui::Parts::new(HANDLE.read_untracked().state()),
                 concat!(module_path!(), "::PARTS"),
             );
 
         /// Tell the views of the state now: the readers of each field that
-        /// changed re-render, the whole state's readers if any did.
+        /// changed run again, the whole state's readers if any did.
         fn tell(urgent: bool) {
-            let (bump, changed) = PARTS.write().tell(HANDLE.peek().state(), urgent);
-            for mut s in bump {
-                *s.write() += 1;
+            let now = HANDLE.read_untracked().state();
+            let (bump, changed) = PARTS.update(|p| p.tell(now, urgent));
+            for s in bump {
+                s.update(|n| *n += 1);
             }
             if changed {
-                *VERSION.write() += 1;
+                VERSION.update(|n| *n += 1);
             }
-            *TICK.write() += 1;
+            TICK.update(|n| *n += 1);
         }
 
-        /// A part of the state for this view, by reference (aio reading a
-        /// cell: `nav.activeIndex[p]` is `part(|w| &w.nav).active_index[p]`):
-        /// the view re-renders only when the top-level field `f` points into
-        /// changes, not on every commit. Pick the field, then index it: a
-        /// reference into a list's own heap (`&w.rows[3]`) can't name its
-        /// field, so that reader follows every commit (a dev build says so).
-        /// Not a hook: call it anywhere, as often as needed.
+        /// A part of the state for this view (aio reading a cell:
+        /// `nav.activeIndex[p]` is `part(|w| &w.nav).with(|n| n.active_index[p])`):
+        /// a handle whose reads (in a hole) run again only when the top-level
+        /// field `f` points into changes, not on every commit. Pick the
+        /// field, then index it: a reference into a list's own heap
+        /// (`&w.rows[3]`) can't name its field, so that reader follows every
+        /// commit (a dev build says so). Not a hook: call it anywhere.
         #[track_caller]
         pub fn part<R: ?Sized + 'static, F: Fn(&$cell) -> &R>(f: F) -> $crate::ui::Part<$cell, R, F> {
-            let (st, sig) = {
-                let p = PARTS.peek();
-                let st = p.shown();
-                p.find(f(&st))
-            };
-            let ver = match sig {
-                Some(s) => *s.read(),
-                None => {
-                    if cfg!(debug_assertions) {
-                        $crate::ui::whole_read(stringify!($cell), ::std::panic::Location::caller(), true);
-                    }
-                    *VERSION.read()
-                }
-            };
-            $crate::ui::Part::new(st, f, ver)
+            $crate::ui::Part::new(f, &PARTS, &VERSION, stringify!($cell), ::std::panic::Location::caller())
         }
 
-        /// The current state (views render from it, handlers call methods).
-        /// Read in a render it re-renders the view on every commit: a dev
-        /// build says so once per place (`hint`), naming the reader of parts.
+        /// The current state (handlers call methods on it). Read in a hole it
+        /// follows every commit; read in a view's body it is read once and
+        /// never follows: a dev build says so once per place (`hint`).
         #[track_caller]
         pub fn $read() -> ::std::sync::Arc<$cell> {
             if cfg!(debug_assertions) {
                 $crate::ui::whole_read(stringify!($cell), ::std::panic::Location::caller(), false);
             }
-            let _ = (VERSION.read(), PARTS.peek());
-            HANDLE.peek().state()
+            let _ = (VERSION.get(), PARTS.read_untracked());
+            HANDLE.read_untracked().state()
         }
 
         $(
         /// A part of the state for this view (AIR's path subscriptions): `f`
-        /// runs after each commit, and the view re-renders only when its
+        /// runs after each commit, and its readers run again only when its
         /// answer changed. A hook: call it at the top of a component.
-        pub fn $at<R: PartialEq + 'static>(f: impl Fn(&$cell) -> R + 'static) -> $crate::dioxus::prelude::Memo<R> {
-            $crate::dioxus::prelude::use_memo(move || f(&$read()))
+        pub fn $at<R: PartialEq + 'static>(f: impl Fn(&$cell) -> R + 'static) -> $crate::ui::Memo<R> {
+            $crate::ui::memo(move || f(&$read()))
         }
         )?
 
         /// How the copy stands (online, calls waiting, backed up; aio
-        /// `useConnected`), re-rendering the view when that changes. A hook;
+        /// `useConnected`), its readers running again when that changes. A hook;
         /// needs `use_live()`. No `ready` flag: the state is there before the
         /// first render (a synced copy starts from the server's or the saved one).
-        pub fn use_status() -> $crate::dioxus::prelude::Memo<$crate::Status> {
-            $crate::dioxus::prelude::use_memo(|| {
-                let _ = TICK.read();
-                HANDLE.peek().status()
+        pub fn use_status() -> $crate::ui::Memo<$crate::Status> {
+            $crate::ui::memo(|| {
+                let _ = TICK.get();
+                HANDLE.read_untracked().status()
             })
         }
 
@@ -771,10 +957,10 @@ macro_rules! client {
         /// button: on a synced copy, those waiting for the server (aio
         /// `cell.method.pending()`); on a local cell, its async effects
         /// running or queued. A hook; needs `use_live()`.
-        pub fn use_pending(method: Option<&'static str>) -> $crate::dioxus::prelude::Memo<usize> {
-            $crate::dioxus::prelude::use_memo(move || {
-                let _ = TICK.read();
-                HANDLE.peek().pending(method)
+        pub fn use_pending(method: Option<&'static str>) -> $crate::ui::Memo<usize> {
+            $crate::ui::memo(move || {
+                let _ = TICK.get();
+                HANDLE.read_untracked().pending(method)
             })
         }
 
@@ -783,10 +969,10 @@ macro_rules! client {
         /// is the server's). A hook; needs `use_live()`. Feeds
         /// `aio::kit::TimeTravelPanel`. A page's cells keep no history.
         #[cfg(not(target_arch = "wasm32"))]
-        pub fn use_time_travel() -> $crate::dioxus::prelude::Memo<Option<$crate::Timeline>> {
-            $crate::dioxus::prelude::use_memo(|| {
-                let _ = TICK.read();
-                HANDLE.peek().travel(None).ok()
+        pub fn use_time_travel() -> $crate::ui::Memo<Option<$crate::Timeline>> {
+            $crate::ui::memo(|| {
+                let _ = TICK.get();
+                HANDLE.read_untracked().travel(None).ok()
             })
         }
 
@@ -795,27 +981,27 @@ macro_rules! client {
         /// until `TimeAsk::Resume`.
         #[cfg(not(target_arch = "wasm32"))]
         pub fn time_travel(ask: $crate::TimeAsk) -> $crate::Result<$crate::Timeline> {
-            let r = HANDLE.peek().travel(Some(ask));
+            let r = HANDLE.read_untracked().travel(Some(ask));
             tell(true);
             r
         }
 
         pub fn use_live() {
-            let tx = $crate::dioxus::prelude::use_hook(|| {
-                let _ = PARTS.peek();
+            let tx = $crate::ui::once(|| {
+                let _ = PARTS.read_untracked();
                 let (tx, mut rx) = $crate::__tokio::sync::mpsc::unbounded_channel::<()>();
                 let (first, busy) = (tx.clone(), tx.clone());
-                HANDLE.peek().listen(move |_| _ = first.send(()));
-                HANDLE.peek().on_pending(move || _ = busy.send(()));
+                HANDLE.read_untracked().listen(move |_| _ = first.send(()));
+                HANDLE.read_untracked().on_pending(move || _ = busy.send(()));
                 // Off the UI thread's commits: at most one render per
                 // BACKGROUND (a call from the views tells them at once).
-                $crate::dioxus::prelude::spawn(async move {
+                $crate::ui::spawn(async move {
                     while rx.recv().await.is_some() {
                         while rx.try_recv().is_ok() {}
                         // The views' own calls were told at once; calls in
                         // flight (no new state) are told now.
-                        if PARTS.peek().behind(&HANDLE.peek().state()) {
-                            let wait = PARTS.peek().wait();
+                        if PARTS.read_untracked().behind(&HANDLE.read_untracked().state()) {
+                            let wait = PARTS.read_untracked().wait();
                             if !wait.is_zero() {
                                 $crate::ui::sleep(wait).await;
                             }
@@ -828,9 +1014,9 @@ macro_rules! client {
             });
             // A source put in `HANDLE` later (a test's seed mid-way) is
             // listened to as well, and every view re-reads it.
-            let seen = $crate::dioxus::prelude::use_hook(|| ::std::rc::Rc::new(::std::cell::Cell::new(false)));
-            $crate::dioxus::prelude::use_effect(move || {
-                let h = HANDLE.read().clone();
+            let seen = $crate::ui::once(|| ::std::rc::Rc::new(::std::cell::Cell::new(false)));
+            $crate::ui::effect(move || {
+                let h = HANDLE.get();
                 if seen.replace(true) {
                     let (first, busy) = (tx.clone(), tx.clone());
                     h.listen(move |_| _ = first.send(()));
@@ -847,8 +1033,8 @@ macro_rules! client {
         impl $crate::Door<$cell> for Ui {
             fn call(&self, method: &str, args: $crate::serde_json::Value) -> $crate::Result<$crate::serde_json::Value> {
                 // The state before the call is the one the views know of.
-                let _ = PARTS.peek();
-                let h = HANDLE.peek().clone();
+                let _ = PARTS.read_untracked();
+                let h = HANDLE.get_untracked();
                 let r = $crate::Door::call(&h, method, args);
                 // At once, with what came off the UI thread meanwhile (aio
                 // `flushAllUrgent`); a call that changed nothing (Down on the
@@ -857,24 +1043,32 @@ macro_rules! client {
                 r
             }
 
+            fn ask(&self, method: &str, args: $crate::serde_json::Value) -> $crate::Result<$crate::Answer> {
+                let _ = PARTS.read_untracked();
+                let h = HANDLE.get_untracked();
+                let r = $crate::Door::ask(&h, method, args);
+                tell(true);
+                r
+            }
+
             fn read<R>(&self, f: impl FnOnce(&$cell) -> R) -> R {
                 // In a render it follows every commit, as `$read()` (no
                 // hint: a flow reads through its door too).
-                let _ = VERSION.read();
-                f(&HANDLE.peek().state())
+                let _ = VERSION.get();
+                f(&HANDLE.read_untracked().state())
             }
 
             fn own(&self, key: &str, res: Option<Box<dyn ::std::any::Any + Send>>) {
-                HANDLE.peek().own(key, res)
+                HANDLE.read_untracked().own(key, res)
             }
         }
     };
 }
 
 /// A dev build's hint (`client!`'s whole-state reader): `at` read all of
-/// `cell` in a component's render, so the component re-renders on every
-/// commit (a cursor step, a price tick), whatever it shows. Said once per
-/// place; `heap`: through a `part` that points outside the state's fields.
+/// `cell` in a view's body, which runs once, so what it shows from it never
+/// changes; or (`heap`) a hole reads through a `part` that points outside
+/// the state's fields, so it runs again on every commit. Said once per place.
 #[doc(hidden)]
 #[cfg(feature = "kit")]
 pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: bool) {
@@ -885,16 +1079,22 @@ pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: 
     if SEEN.with(|s| s.borrow().contains(&key)) {
         return;
     }
-    // A component's render, not a handler or a memo (their contexts have no scope).
-    let render = dioxus::dioxus_core::ReactiveContext::current().is_some_and(|rc| rc.to_string().contains("for scope"));
-    if !render || !SEEN.with(|s| s.borrow_mut().insert(key)) {
+    // A view's body, not a hole, a handler or a memo.
+    if (!heap && !on_air::in_render()) || !SEEN.with(|s| s.borrow_mut().insert(key)) {
         return;
     }
-    let (what, instead) = match heap {
-        false => ("reads all of", "part(|c| &c.field) re-renders it only when that field changes"),
-        true => ("reads a part(…) inside a list's heap of", "pick the field (part(|c| &c.rows)), then index it"),
-    };
-    crate::info!(cat: "hint", "{at}: a render {what} {cell}, so it re-renders on every commit; {instead}");
+    match heap {
+        false => crate::info!(
+            cat: "hint",
+            "{at}: a view's body reads all of {cell} once (a body runs once), so what it shows from it never \
+             changes; read it in a hole: {{part(|c| &c.field)}} follows that field"
+        ),
+        true => crate::info!(
+            cat: "hint",
+            "{at}: a part(…) inside a list's heap of {cell} runs again on every commit; pick the field \
+             (part(|c| &c.rows)), then index it"
+        ),
+    }
 }
 
 /// Call a cell method from a view: `act!(toggle(id, day))`; a refusal is
@@ -965,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    fn the_apps_theme_not_the_oss_decides_and_tokens_are_made_on_the_app_root() {
+    fn a_fixed_scheme_rewrites_the_sheets_the_oss_keeps_them_and_tokens_are_made_on_the_app_root() {
         let kit = ":root{--accent:green;--tint:color-mix(in oklab,var(--accent) 10%,white)}\n\
                    @media (prefers-color-scheme: dark){:root{--bg:black}}";
         let app = ":root[data-theme=\"light\"]{--accent:blue}";
@@ -974,14 +1174,17 @@ mod tests {
         assert!(light.contains("@media not all{:root,[data-theme]{--bg:black}}"), "{light}");
         assert!(light.contains("[data-theme=\"light\"]{--accent:blue}"));
         assert!(page_css(&[kit], true).contains("@media all{"));
+        let os = page_css(&[kit], Scheme::System);
+        assert!(os.contains("@media (prefers-color-scheme: dark){:root,[data-theme]{--bg:black}}"), "the OS's: {os}");
+        assert!(os.contains(":root{color-scheme:light dark}"));
     }
 
     #[test]
     fn theme_none_drops_even_the_base_rules() {
         // aio server-html-gen: `theme: "none"` emits no data-aio-box-base.
         let base = "*,*::before,*::after{box-sizing:border-box}body{margin:0}";
-        assert!(sheets_css(&["a{}"], false, true).starts_with(base));
-        let bare = sheets_css(&["a{}"], false, false);
+        assert!(sheets_css(&["a{}"], Scheme::Light, true).starts_with(base));
+        let bare = sheets_css(&["a{}"], Scheme::Light, false);
         assert!(!bare.contains("box-sizing") && bare.starts_with("a{}"), "{bare}");
     }
 }

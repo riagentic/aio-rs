@@ -1,24 +1,27 @@
 [workspace]
 resolver = "3"
-members = ["crates/aio", "crates/aio-config", "crates/aio-config-macro", "crates/aio-macros", "crates/aio-shell", "crates/aio-cli"]
+members = ["crates/air", "crates/air-macro", "crates/air-bench", "crates/aio", "crates/aio-config", "crates/aio-config-macro", "crates/aio-macros", "crates/aio-shell", "crates/aio-cli", "crates/hotpatch"]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 repository = "https://github.com/riagentic/aio-rs"
 homepage = "https://github.com/riagentic/aio-rs"
 readme = "README.md"
-keywords = ["app", "event-sourcing", "dioxus", "desktop", "sync"]
+keywords = ["app", "event-sourcing", "ui", "desktop", "sync"]
 categories = ["gui", "database", "development-tools"]
 
 # The crates each other use: one version, the workspace's.
 [workspace.dependencies]
-aio = { package = "aio-rs", version = "0.1.0", path = "crates/aio", default-features = false }
-aio-config = { package = "aio-rs-config", version = "0.1.0", path = "crates/aio-config" }
-aio-config-macro = { package = "aio-rs-config-macro", version = "0.1.0", path = "crates/aio-config-macro" }
-aio-macros = { package = "aio-rs-macros", version = "0.1.0", path = "crates/aio-macros" }
-aio-shell = { package = "aio-rs-shell", version = "0.1.0", path = "crates/aio-shell" }
+aio = { package = "aio-rs", version = "0.2.0", path = "crates/aio", default-features = false }
+aio-config = { package = "aio-rs-config", version = "0.2.0", path = "crates/aio-config" }
+aio-config-macro = { package = "aio-rs-config-macro", version = "0.2.0", path = "crates/aio-config-macro" }
+aio-macros = { package = "aio-rs-macros", version = "0.2.0", path = "crates/aio-macros" }
+air = { package = "aio-rs-air", version = "0.2.0", path = "crates/air" }
+air-macro = { package = "aio-rs-air-macro", version = "0.2.0", path = "crates/air-macro" }
+aio-hotpatch = { package = "aio-rs-hotpatch", version = "0.2.0", path = "crates/hotpatch" }
+aio-shell = { package = "aio-rs-shell", version = "0.2.0", path = "crates/aio-shell" }
 
 # Small debug builds: line numbers for our crates, no debug info for the
 # ~400 libraries (they made the build dir tens of GB).

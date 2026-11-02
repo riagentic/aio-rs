@@ -68,8 +68,15 @@ pub fn mac_app(
     std::fs::write(contents.join("PkgInfo"), "APPL????").map_err(e)?;
     std::fs::copy(binary, contents.join("MacOS").join(&app.id)).map_err(e)?;
     if let Some(icon) = &app.icon {
-        let icns = contents.join("Resources/AppIcon.icns");
-        run(Command::new("/usr/bin/sips").args(["-s", "format", "icns"]).arg(icon).arg("--out").arg(icns), "sips")?;
+        // Built here, every slot from 16 to 1024 px: the monogram's drawn
+        // beside it at each size, an `icon.icns` of the app's own as it is,
+        // else its `icon.png` scaled (no `sips`, so any host can make it).
+        let icns = icon.with_extension("icns");
+        let icns = match icns.is_file() {
+            true => std::fs::read(&icns).map_err(e)?,
+            false => crate::icon::icns_from_png(&std::fs::read(icon).map_err(e)?)?,
+        };
+        std::fs::write(contents.join("Resources/AppIcon.icns"), icns).map_err(e)?;
     }
     if let Some(rt) = runtime {
         let into = contents.join("MacOS").join(aio_shell::runtime::BUNDLED).join("Electron.app");
@@ -165,7 +172,8 @@ pub fn how_to_install(app: &App, os: &str, out: &Path) -> String {
             "install: double-click {} (no admin rights needed); {file} is the same exe, for updates",
             out.with_extension("exe").file_name().unwrap_or_default().to_string_lossy()
         ),
-        _ => format!("install: tar -xzf {file}, then run its install.sh"),
+        // aio's default Linux artifact was the AppImage: say where it is.
+        _ => format!("install: tar -xzf {file}, then run its install.sh (one portable file instead: --appimage)"),
     }
 }
 
@@ -223,6 +231,9 @@ mod tests {
         let how = how_to_install(&app(false), "macos", Path::new("/d/notes-1.2.0-macos-arm64.dmg"));
         assert_eq!(how, "install: open notes-1.2.0-macos-arm64.dmg, then drag Notes & Co.app to Applications");
         assert!(how_to_install(&app(false), "macos", Path::new("/d/n.zip")).starts_with("install: unzip n.zip"));
+        // Linux: the AppImage (aio's default artifact) is named beside the bundle.
+        let how = how_to_install(&app(false), "linux", Path::new("/d/notes-1.2.0-linux-x64.tar.gz"));
+        assert!(how.starts_with("install: tar -xzf notes-1.2.0-linux-x64.tar.gz") && how.contains("--appimage"));
     }
 
     #[test]

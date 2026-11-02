@@ -83,7 +83,9 @@ rt.block_on(async {
 | `s.fetch_with(method, path, headers, body)` | a request with exactly these headers (`&[]`: a stranger) |
 | `s.page()` | a browser page: its requests carry the cookies the server set it |
 | `s.client(user)` | a real synced copy (`aio::sync::Remote`) as `user` |
-| `s.converged(&[&a, &b])` | waits until every copy is online, has nothing waiting and shows the server's state (5 s) |
+| `s.cell::<C>()` | the handle of served cell `C`: the app's own or one `Http::cell` serves beside it (panics naming the served cells) |
+| `s.client_of::<C>(user)` | a real synced copy of served cell `C`, on the one socket the test's copies share |
+| `s.converged(&[&a, &b])` | waits until every copy (of one served cell) is online, has nothing waiting and shows the server's state (5 s) |
 | `s.ui_source(user, latency)` | a copy for a `TestUi` view, with latency each way |
 
 A `Fetched` answer has `status`, `headers` (names lowercase), `body`, and
@@ -91,6 +93,65 @@ A `Fetched` answer has `status`, `headers` (names lowercase), `body`, and
 
 Assert the body as well as the status: a 200 says the server answered,
 the body says what it decided.
+
+### A whole app
+
+aio's `testServer({ cells })` boots the app with every cell; here the
+`Http` that serves the app names its other shared cells, and the test's
+copies of all of them share one socket, as the app's clients do:
+
+```rust
+use aio::http::Http;
+use aio::prelude::*;
+use aio::testing::TestServer;
+
+#[cell(shared)]
+pub struct Cart {
+    pub items: u32,
+}
+
+#[methods]
+impl Cart {
+    #[client]
+    pub fn add(&mut self) {
+        self.items += 1;
+    }
+}
+
+#[cell(shared)]
+pub struct Stock {
+    pub left: u32,
+}
+
+#[methods]
+impl Stock {
+    #[client]
+    pub fn take(&mut self) -> Result {
+        ensure!(self.left > 0, "sold out");
+        self.left -= 1;
+        Ok(())
+    }
+
+    pub fn restock(&mut self) {
+        self.left += 1;
+    }
+}
+
+# fn main() {
+let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+rt.block_on(async {
+    let stock = Handle::<Stock>::memory();
+    stock.restock().unwrap();
+    let s = TestServer::start(Handle::<Cart>::memory(), Http::default().cell(stock)).await.unwrap();
+    let (cart, left) = (s.client("ana").await.unwrap(), s.client_of::<Stock>("ana").await.unwrap());
+    cart.add().unwrap();
+    left.take().unwrap();
+    s.converged(&[&cart]).await;
+    s.converged(&[&left]).await;
+    assert_eq!((s.state().items, s.cell::<Stock>().state().left), (1, 0));
+});
+# }
+```
 
 ## Sign-in, cookies and routes
 
@@ -209,6 +270,15 @@ rt.block_on(async {
 - A copy shows what the server lets that user see: a per-user view
   ([Visibility](../state/visibility.md)) is tested by asserting on each
   client's `state()`.
+- `aio::testing::patches(&copy)` records what the copy receives from then
+  on (aio's `patches`): each `{"t":"patch","seq","prev","ops"}` delta and
+  each whole `{"t":"state"}` (a resync). `all()` is the list so far;
+  `until(|p| ..).await` waits for one (5 s, then fails naming those that
+  came). So "the field was left out of the delta" and "nothing was resent
+  whole" are assertable. `Remote::on_patch(f)` is the hook under it.
+- `aio::testing::call_all(&[&ana, &bo], "add", json!([1]))` makes the same
+  call from every copy at once (aio's `dispatchAll`), each predicted and
+  sent; then `converged`.
 
 ## `Sim`: copies under cuts, heals and lag
 
@@ -364,6 +434,13 @@ rt.block_on(async {
   running app: a second app with the same dirs is refused.
 - `Handle::open(&dirs.store)` opens that app's store; a persisted cell is
   a file of its own app, never the other's.
+- `TestApps` is the same in one harness (aio's `testApps`):
+  `world.boot::<Ledger>("service").await?` opens the cell from its own
+  dirs and serves it; `world.get::<Ledger>("service")` is its
+  `TestServer`, `world.dirs("service").logs` its logs folder,
+  `world.connect::<Ledger>("service", "desk").await?` a client of it. A
+  name not booted fails naming the booted ones; dropped, the apps stop,
+  the last booted first.
 - Logs, budgets and health are per process in aio-rs: two apps in one
   test binary share the process's log and report hooks. Test what must
   stay apart (logs, crash reports) with each app as its own process
@@ -398,9 +475,10 @@ can't cross doesn't compile.
 |---|---|
 | `testServer(config)` | `TestServer::start(handle, http)` / `start_with(handle, opts)` |
 | `testMultiClient(config, n)` | `TestServer::client(user)` per copy, `converged` |
-| `clients[i].patches`, `waitForPatch` | none: assert on each copy's `state()` |
-| `m.dispatchAll(action)` | call each copy in turn without awaiting: each is predicted at once |
-| `testApps(specs)`: N apps, per-app logs, budgets, feedback | several `TestServer`s with `AppDirs::at`; logs and reports are per process |
+| `clients[i].patches`, `onPatch`, `waitForPatch` | `aio::testing::patches(&copy)`: `all()`, `until(pred)`; `Remote::on_patch` |
+| `m.dispatchAll(action)` | `aio::testing::call_all(&[&a, &b], method, args)` |
+| `testApps(specs)`: N apps, each its own dirs, logs, port | `TestApps`: `boot::<C>(name)`, `get`, `dirs(name).logs`, `connect`; problem reports are per process |
+| `testServer(config)`: a whole app, every cell | `TestServer::start(h, Http::default().cell(b).cell(c))`; `cell::<B>()`, `client_of::<B>(user)`, `converged` |
 | `testServer({ workers: "real" })` | none needed: no worker cells |
 | boot refusal of a credential field visible to the UI | none at boot: [`ax lint`](lint.md) flags it |
 | `freePort()` | none needed: `TestServer` binds port 0 |

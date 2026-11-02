@@ -10,8 +10,8 @@ pub mod storage;
 
 #[cfg(target_arch = "wasm32")]
 mod handle;
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
-mod page;
+#[cfg(target_arch = "wasm32")]
+pub mod notify;
 #[cfg(target_arch = "wasm32")]
 mod source;
 #[cfg(target_arch = "wasm32")]
@@ -114,13 +114,12 @@ pub async fn sign_out() {
     restart();
 }
 
-/// Who this page is signed in as (aio's `useUser`), as `(id, role)`: `None`
-/// while the server is asked, then `Some(None)` signed out (or no
-/// accounts). A hook.
+/// Who this page is signed in as (aio's `useUser`), as `(id, role)`: its
+/// `get()` is `None` while the server is asked, then `Some(None)` signed out
+/// (or no accounts). A hook; read it in a hole.
 #[cfg(all(target_arch = "wasm32", feature = "kit"))]
-pub fn use_user() -> Option<Option<(String, String)>> {
-    let me = dioxus::prelude::use_resource(|| async { client().me(None).await.ok().and_then(|m| m.user) });
-    me()
+pub fn use_user() -> crate::ui::Resource<Option<(String, String)>> {
+    crate::ui::resource(|| async { client().me(None).await.ok().and_then(|m| m.user) })
 }
 
 /// The page's `localStorage` as a [`storage::Kv`]: none in a context that
@@ -158,72 +157,120 @@ impl storage::Kv for Local {
     }
 }
 
-/// Mount the app's root view into the page's `<div id="main">`: the real
-/// DOM, edited as the view changes, its events the view's. Set the cells'
-/// sources (`aio::client!`'s `SOURCE`) first. A page painted on the server
-/// (`aio_shell::web::painted`) shows its paint until the view is drawn
-/// beside it, unseen, from the page's own copies; then the view takes its
-/// place in one step, with what a person did to the paint meanwhile (its
-/// scroll, focus, typed text: [`crate::page::ADOPT`]). Not adopted in place (hydration): dioxus-web 0.7's
-/// `rehydrate` binds the view's node ids to the paint's
-/// `data-node-hydration` marks by position and never checks they match,
-/// and the page's first view may differ from the paint (its copy is the
-/// one this browser kept, or newer). A mismatch then leaves ids on the
-/// wrong nodes or on none, and the next edit throws in the interpreter;
-/// it also needs dioxus-fullstack's serialized hydration data in the page.
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
-pub fn launch(root: fn() -> dioxus_core::Element) {
-    use dioxus_core::VirtualDom;
-    // The copies are open now: what no copy syncs is said.
+/// Mount the app's root view into the page's `<div id="main">`, on air:
+/// its interpreter (`air::PAGE_JS`) runs in the page as a script of the
+/// page's own making (its policy allows `blob:`), and talks to the views
+/// in this module with no socket: each flush's edits handed to it as a
+/// view of the module's memory (no copy), its events straight to the
+/// root. Set the cells' sources (`aio::client!`'s `SOURCE`) first. The
+/// page's splash goes once the view is drawn (`aio:mounted`). No server
+/// paint on air: the page's view is the first.
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
+pub fn launch(root: fn() -> crate::ui::View) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::*;
+    // A `notify` tell is the page's notification, unless the app shows its own.
+    crate::tell::show_unless_set(notify::show);
     let open = SYNCING.with_borrow(Clone::clone);
     for (app, cells) in &open {
         warn_orphans(app, &cells.iter().map(String::as_str).collect::<Vec<_>>());
     }
-    let doc = web_sys::window().and_then(|w| w.document());
-    let main = doc.as_ref().and_then(|d| d.get_element_by_id("main"));
-    let next = match (&doc, &main) {
-        (Some(d), Some(m)) if m.has_child_nodes() => d.create_element("div").ok().filter(|n| {
-            _ = n.set_attribute("hidden", "");
-            m.after_with_node_1(n).is_ok()
-        }),
-        _ => None,
+    let Some(w) = web_sys::window() else { return };
+    // The wire the interpreter talks to: its frames to the root, here.
+    let wire = js_sys::Object::new();
+    let send = Closure::<dyn Fn(js_sys::Uint8Array)>::new(|f: js_sys::Uint8Array| {
+        let f = f.to_vec();
+        on_air::with_root(|r| _ = r.event(&f));
+        on_air::flush();
+    });
+    let listen = Closure::<dyn Fn(JsValue)>::new(|_: JsValue| {});
+    _ = js_sys::Reflect::set(&wire, &"send".into(), send.as_ref());
+    _ = js_sys::Reflect::set(&wire, &"listen".into(), listen.as_ref());
+    send.forget();
+    listen.forget();
+    _ = js_sys::Reflect::set(&w, &"__aioWire".into(), &wire);
+    // The interpreter, then the views once it has run.
+    let started = Closure::once_into_js(move || {
+        air::on_wake(on_air::woken);
+        on_air::mount(root);
+        mounted();
+    });
+    let parts = js_sys::Array::of1(&air::PAGE_JS.into());
+    let opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("text/javascript");
+    let (Some(doc), Ok(blob)) = (w.document(), web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts)) else {
+        return say("the page can't take air's interpreter");
     };
-    // The page's own document: its DOM, never `eval`.
-    let doc = || std::rc::Rc::new(page::Page) as std::rc::Rc<dyn dioxus_document::Document>;
-    /// The view, and once it is drawn, the page told (`aio:mounted`: its
-    /// splash goes, `page.js`).
-    fn drawn(app: fn() -> dioxus_core::Element) -> dioxus_core::Element {
-        dioxus_core::use_hook(|| dioxus_core::queue_effect(mounted));
-        app()
+    let (Ok(url), Ok(el)) = (web_sys::Url::create_object_url_with_blob(&blob), doc.create_element("script")) else {
+        return say("the page can't take air's interpreter");
+    };
+    _ = el.set_attribute("src", &url);
+    _ = el.add_event_listener_with_callback("load", started.unchecked_ref());
+    match doc.head() {
+        Some(h) => _ = h.append_child(&el),
+        None => say("the page has no <head> for air's interpreter"),
     }
-    let Some(next) = next else {
-        let dom = VirtualDom::new_with_props(drawn, root).with_root_context(doc());
-        return dioxus_web::launch::launch_virtual_dom(dom, dioxus_web::Config::new().rootname("main"));
-    };
-    /// The view, and once it is drawn, its place taken from the paint.
-    fn take_place(app: fn() -> dioxus_core::Element) -> dioxus_core::Element {
-        dioxus_core::use_hook(|| {
-            dioxus_core::queue_effect(|| {
-                let d = web_sys::window().and_then(|w| w.document());
-                let Some(main) = d.and_then(|d| d.get_element_by_id("main")) else { return };
-                if let Some(next) = main.next_element_sibling() {
-                    // With what was done to the paint (`page::ADOPT`, in page.js).
-                    let adopt = web_sys::window()
-                        .and_then(|w| js_sys::Reflect::get(&w, &"__aioAdopt".into()).ok())
-                        .and_then(|f| wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f).ok());
-                    if adopt.is_none_or(|f| f.call2(&wasm_bindgen::JsValue::NULL, &main, &next).is_err()) {
-                        main.remove();
-                        next.set_id("main");
-                        _ = next.remove_attribute("hidden");
-                    }
+}
+
+/// The views of the page, on air: one root, flushed after each event, and
+/// whenever a task wakes (once per turn of the page's event loop).
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
+mod on_air {
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static ROOT: RefCell<Option<air::Root>> = const { RefCell::new(None) };
+        static QUEUED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn mount(app: fn() -> crate::ui::View) {
+        let root = air::Root::new();
+        root.show(app);
+        ROOT.set(Some(root));
+        flush();
+    }
+
+    pub(super) fn with_root(f: impl FnOnce(&air::Root)) {
+        ROOT.with_borrow(|r| r.as_ref().map(f));
+    }
+
+    /// The views' work done and their edits applied by the interpreter.
+    pub(super) fn flush() {
+        air::run_tasks();
+        ROOT.with_borrow(|r| {
+            let Some(r) = r else { return };
+            let edits = r.take_edits();
+            if !edits.is_empty() {
+                // SAFETY: a view of this module's memory, read by the
+                // interpreter at once (it allocates nothing of ours meanwhile).
+                let view = unsafe { js_sys::Uint8Array::view(&edits) };
+                let apply = web_sys::window().and_then(|w| js_sys::Reflect::get(&w, &"__airApply".into()).ok());
+                let apply = apply.and_then(|f| wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f).ok());
+                match apply.map(|f| f.call1(&wasm_bindgen::JsValue::NULL, &view)) {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => super::say(&format!("air's interpreter failed: {e:?}")),
+                    None => super::say("air's interpreter is not in the page"),
                 }
-                mounted();
-            })
+            }
+            for e in r.uncaught() {
+                super::say(&format!("a view failed and no ErrorBoundary is above it: {e}"));
+            }
         });
-        app()
     }
-    let dom = VirtualDom::new_with_props(take_place, root).with_root_context(doc());
-    dioxus_web::launch::launch_virtual_dom(dom, dioxus_web::Config::new().rootelement(next));
+
+    /// A task woke: flush once the page's current work is done.
+    pub(super) fn woken() {
+        if QUEUED.replace(true) {
+            return;
+        }
+        let run = wasm_bindgen::closure::Closure::once_into_js(|| {
+            QUEUED.set(false);
+            flush();
+        });
+        if let Some(w) = web_sys::window() {
+            _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(wasm_bindgen::JsCast::unchecked_ref(&run), 0);
+        }
+    }
 }
 
 /// Say the app's view is drawn: `aio:mounted` on the document.

@@ -194,7 +194,7 @@ pub fn old_electron_store() -> PathBuf {
 
 /// The pinned runtime in the person's own store, a test sandbox or not:
 /// what the UI tests draw in (they only run it).
-#[cfg(feature = "kit")]
+#[cfg(all(feature = "kit", feature = "testing"))]
 pub(crate) fn electron_pinned() -> PathBuf {
     electron_store_in(std::env::consts::OS, &real_env).join(format!("{ELECTRON}-{}", electron_slug()))
 }
@@ -374,7 +374,9 @@ pub fn short_temp() -> PathBuf {
 
 /// A short, private dir for the app's sockets (Unix socket paths must stay
 /// under ~100 bytes, so never inside a deep data dir): `$XDG_RUNTIME_DIR/
-/// aio-rt/<id>-<hash of the data dir>`, else the temp dir. Mode 0700.
+/// aio-rt/<id>-<hash of the data dir>`, else the temp dir; when that is too
+/// long for a socket in it, `/tmp/aio-rt-<uid>/<id, 40 bytes at most>-<hash>`
+/// (aio's fallback, `resolveSocketPath`). Mode 0700.
 pub fn sockets(id: &str, data: &std::path::Path) -> io::Result<PathBuf> {
     let dir = sockets_at(id, data);
     private_dir(parent(&dir))?;
@@ -388,7 +390,28 @@ pub fn sockets_at(id: &str, data: &std::path::Path) -> PathBuf {
     // path rebuilt from its parts: `a/b` and `a\b` are one folder on Windows.
     let data: PathBuf = data.components().collect();
     let h = data.to_string_lossy().bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
-    env("XDG_RUNTIME_DIR").unwrap_or_else(std::env::temp_dir).join("aio-rt").join(format!("{id}-{h:08x}"))
+    let base = env("XDG_RUNTIME_DIR").unwrap_or_else(std::env::temp_dir);
+    #[cfg(unix)]
+    // SAFETY: getuid has no preconditions.
+    let uid = Some(unsafe { libc::getuid() });
+    #[cfg(not(unix))]
+    let uid = None; // a pipe's name has no such limit
+    socket_dir(&base, id, h, uid)
+}
+
+/// `<base>/aio-rt/<id>-<h>`, or for a Unix user (`uid`) whose base leaves no
+/// room for a 24-byte socket name (`cell-<name>.sock`) in aio's 100 bytes of
+/// path (`ipc::SUN_PATH` is 108 on Linux, 104 on macOS),
+/// `/tmp/aio-rt-<uid>/<id, 40 bytes at most>-<h>`. Pure.
+fn socket_dir(base: &std::path::Path, id: &str, h: u32, uid: Option<u32>) -> PathBuf {
+    let dir = base.join("aio-rt").join(format!("{id}-{h:08x}"));
+    match uid {
+        Some(uid) if dir.as_os_str().len() + "/".len() + 24 > 100 => {
+            let id: String = id.char_indices().take_while(|(i, c)| i + c.len_utf8() <= 40).map(|(_, c)| c).collect();
+            PathBuf::from(format!("/tmp/aio-rt-{uid}")).join(format!("{id}-{h:08x}"))
+        }
+        _ => dir,
+    }
 }
 
 fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -494,14 +517,39 @@ pub struct Ask {
     pub host: Option<String>,
     /// `--expose`: served to the network, over TLS.
     pub expose: bool,
+    /// `--no-tls` (aio's): no TLS even where the launch would turn it on
+    /// (`--expose`) or `[server] tls` asks; said loudly when exposed.
+    pub no_tls: bool,
+    /// `--tls-cert=<pem>` and `--tls-key=<pem>` (aio's): the certificate
+    /// chain and key to serve TLS with, over `[server] cert` and `key`.
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+    /// `--keep-server` (aio's): a desktop app goes on serving once its
+    /// window closes, until asked to stop (`Window { keep_server }`).
+    pub keep_server: bool,
     /// A debug build: a ported app's `[home] dev` applies ([`plan_app`]
     /// asks it in a debug build of the app).
     pub dev: bool,
+    /// `--no-persist` (aio's): this run keeps its state in memory only.
+    pub no_persist: bool,
 }
 
 /// The flags aio takes from a launch for itself, spelled once: a flag
 /// with `=` takes a value (`--home=<dir>` or `--home <dir>`).
-pub const FLAGS: [&str; 7] = ["--home=", "--profile=", "--instance=", "--takeover", "--port=", "--host=", "--expose"];
+pub const FLAGS: [&str; 12] = [
+    "--home=",
+    "--profile=",
+    "--instance=",
+    "--takeover",
+    "--port=",
+    "--host=",
+    "--expose",
+    "--keep-server",
+    "--no-persist",
+    "--no-tls",
+    "--tls-cert=",
+    "--tls-key=",
+];
 
 impl Ask {
     /// A launch's `args` without aio's own [`FLAGS`] (and their values), in
@@ -531,6 +579,9 @@ impl Ask {
             match arg.as_str() {
                 "--takeover" => a.takeover = true,
                 "--expose" => a.expose = true,
+                "--keep-server" => a.keep_server = true,
+                "--no-persist" => a.no_persist = true,
+                "--no-tls" => a.no_tls = true,
                 _ => {}
             }
             let (flag, inline) = arg.split_once('=').map_or((arg.as_str(), None), |(f, v)| (f, Some(v)));
@@ -540,6 +591,8 @@ impl Ask {
                 "--instance" => &mut a.instance,
                 "--port" => &mut a.port,
                 "--host" => &mut a.host,
+                "--tls-cert" => &mut a.tls_cert,
+                "--tls-key" => &mut a.tls_key,
                 _ => continue,
             };
             let v = match inline {
@@ -775,6 +828,35 @@ mod tests {
     }
 
     #[test]
+    fn a_base_too_long_for_sockets_falls_back_to_a_short_private_dir() {
+        let p = std::path::Path::new;
+        let short = p("/run/user/1000");
+        assert_eq!(socket_dir(short, "notes", 0xab, Some(1000)), p("/run/user/1000/aio-rt/notes-000000ab"));
+        // An agent's scratch folder as XDG_RUNTIME_DIR or TMPDIR (aio's
+        // `resolveSocketPath` fallback): every name the app binds fits.
+        let long = p("/tmp/claude-1000/a-project-folder-of-some-length/0123456789abcdef/scratchpad");
+        let dir = socket_dir(long, "notes", 0xab, Some(1000));
+        assert_eq!(dir, p("/tmp/aio-rt-1000/notes-000000ab"));
+        // A long id is cut to 40 bytes there, on a char boundary.
+        let id = format!("{}é{}", "a".repeat(39), "b".repeat(30));
+        let cut = socket_dir(long, &id, 0xab, Some(1000));
+        assert_eq!(cut, PathBuf::from(format!("/tmp/aio-rt-1000/{}-000000ab", "a".repeat(39))));
+        for d in [&dir, &cut] {
+            let longest = d.join("cell-0123456789abcd.sock");
+            assert!(longest.as_os_str().len() <= 100, "{}", longest.display());
+            for limit in [108, 104] {
+                assert_eq!(crate::ipc::too_long(&longest.to_string_lossy(), limit), None);
+            }
+        }
+        // The edge: room for exactly a 24-byte name stays.
+        let edge = p("/x").join("y".repeat(50)); // + "/aio-rt/notes-000000ab": 75 bytes
+        assert_eq!(socket_dir(&edge, "notes", 0xab, Some(1)).as_os_str().len(), 75);
+        assert!(socket_dir(&edge.join("z"), "notes", 0xab, Some(1)).starts_with("/tmp/aio-rt-1"));
+        // Windows pipes take any length.
+        assert!(socket_dir(long, "notes", 0xab, None).starts_with(long));
+    }
+
+    #[test]
     #[cfg(windows)]
     fn one_folder_spelled_with_either_separator_has_one_socket_dir() {
         let a = sockets_at("mail", std::path::Path::new(r"C:\Users\x\apps/mail/data"));
@@ -839,6 +921,11 @@ mod tests {
             "9000",
             "--host=0.0.0.0",
             "--expose",
+            "--keep-server",
+            "--no-persist",
+            "--tls-cert=c.pem",
+            "--tls-key",
+            "k.pem",
         ]))
         .unwrap();
         let want = Ask {
@@ -849,9 +936,15 @@ mod tests {
             port: Some("9000".into()),
             host: Some("0.0.0.0".into()),
             expose: true,
+            keep_server: true,
             dev: false,
+            no_persist: true,
+            no_tls: false,
+            tls_cert: Some("c.pem".into()),
+            tls_key: Some("k.pem".into()),
         };
         assert_eq!(a, want);
+        assert!(Ask::parse(&args(&["--no-tls"])).unwrap().no_tls);
         assert_eq!(Ask::parse(&args(&["--verbose", "x"])).unwrap(), Ask::default());
         assert!(Ask::parse(&args(&["--home"])).unwrap_err().contains("needs a value"));
         assert!(Ask::parse(&args(&["--profile=a", "--profile=b"])).unwrap_err().contains("twice"));
@@ -868,6 +961,7 @@ mod tests {
             "--port",
             "1",
             "--expose",
+            "--keep-server",
         ]);
         assert_eq!(Ask::app_args(&launch), ["a.md", "-v", "--homes=1"]);
         assert_eq!(Ask::app_args(&args(&["--home"])), Vec::<String>::new(), "a missing value takes nothing else");

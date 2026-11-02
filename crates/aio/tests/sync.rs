@@ -179,6 +179,39 @@ fn a_resent_call_applies_once() {
     assert_ne!(other.call_from("add", serde_json::json!(["a"]), &op).unwrap().unwrap(), first);
 }
 
+/// A count that can't go below zero: a call refused on one state and not another.
+#[cell(shared)]
+pub struct Stock {
+    pub n: u32,
+}
+
+#[methods]
+impl Stock {
+    #[client]
+    pub fn put(&mut self) {
+        self.n += 1;
+    }
+
+    #[client]
+    pub fn take(&mut self) -> Result {
+        ensure!(self.n > 0, "none left");
+        self.n -= 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_resent_call_refused_once_stays_refused() {
+    let h = Handle::<Stock>::memory().by(By::User("ana".into()));
+    let op = aio::uuid_v7().to_string();
+    assert_eq!(h.call_from("take", serde_json::Value::Null, &op).unwrap_err().why, "none left");
+    h.put().unwrap();
+    // Re-sent (its answer went with a cut link): refused as it was, never
+    // applied on the newer state its client was never told of.
+    assert_eq!(h.call_from("take", serde_json::Value::Null, &op).unwrap_err().why, "none left");
+    assert_eq!(h.state().n, 1);
+}
+
 #[test]
 fn call_ids_from_a_clock_far_ahead_or_too_old_are_refused() {
     let h = Handle::<Board>::memory();
@@ -261,17 +294,24 @@ pub struct Diary {
     /// id → (author, text)
     pub entries: BTreeMap<Uuid, (String, String)>,
     #[server]
-    pub audit: Vec<String>,
+    pub audit: Hidden<Vec<String>>,
 }
 
 #[methods]
 impl Diary {
-    #[client]
-    pub fn write(&mut self, cx: &Cx, who: String, text: String) -> Result<Uuid> {
+    /// It writes a `#[server]` field, which a copy never has: only the server runs it.
+    #[client(predict = false)]
+    pub fn write(&mut self, cx: &Cx, who: String, text: String) -> Result {
         let id = cx.id();
         self.audit.push(format!("{who} wrote"));
         self.entries.insert(id, (who, text));
-        Ok(id)
+        Ok(())
+    }
+
+    /// Predicted, it would read the audit on the copy: it fails loudly there.
+    #[client]
+    pub fn audited(&mut self) -> Result<usize> {
+        Ok(self.audit.len())
     }
 }
 
@@ -283,16 +323,25 @@ async fn each_user_sees_only_what_they_may() {
     tokio::spawn(serve(h.clone(), l, "secret".into()));
     let ana = Remote::<Diary>::connect(&addr, "secret", "ana").await.unwrap();
     let bo = Remote::<Diary>::connect(&addr, "secret", "bo").await.unwrap();
-    let a = ana.write("ana".into(), "ana's".into()).unwrap();
+    ana.write("ana".into(), "ana's".into()).unwrap();
     bo.write("bo".into(), "bo's".into()).unwrap();
     until("confirmed", || ana.pending() == 0 && bo.pending() == 0).await;
     until("ana sees hers", || ana.confirmed().entries.len() == 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(h.state().entries.len(), 2);
     assert_eq!(h.state().audit.len(), 2);
-    assert_eq!(ana.confirmed().entries.keys().collect::<Vec<_>>(), [&a]);
+    let hers: Vec<_> = h.state().entries.iter().filter(|(_, (w, _))| w == "ana").map(|(id, _)| *id).collect();
+    assert_eq!(ana.confirmed().entries.keys().copied().collect::<Vec<_>>(), hers);
     assert_eq!(bo.confirmed().entries.len(), 1);
-    assert!(ana.confirmed().audit.is_empty() && bo.confirmed().audit.is_empty(), "#[server] stays on the server");
+    assert!(
+        ana.confirmed().audit.get().is_none() && bo.confirmed().audit.get().is_none(),
+        "#[server] stays on the server"
+    );
+    let e = ana.audited().unwrap_err();
+    assert!(
+        e.why.contains("Diary.audit: a #[server] field, never sent to a synced copy"),
+        "read on a copy fails loudly: {e}"
+    );
     let p = h.state().project(&Caller { by: By::User("ana".into()), role: None });
     assert!(p.get("audit").is_none());
 }
@@ -1327,11 +1376,16 @@ async fn what_a_copys_bus_hears_reaches_its_servers_bus() {
     // once as its own, and once as the client's, relayed (and not again).
     // The other tests' copies, linked in this process too, relay it as
     // well: the first to arrive is said, the rest held (one kind).
+    // Online first: `connect` waits for that only so long (a loaded machine).
+    until_long("online", || r.online()).await;
     aio::report::problem("window:frozen", "copy stuck token=abc");
     until_long("relayed", || heard.lock().unwrap().iter().any(|(k, _)| k == "client:window:frozen")).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let heard = heard.lock().unwrap();
-    let relayed: Vec<_> = heard.iter().filter(|(k, _)| k.starts_with("client:")).collect();
+    // Only this kind: the other tests' copies relay what else their bus
+    // hears meanwhile (a refused call is `client:refused`).
+    let relayed: Vec<_> =
+        heard.iter().filter(|(k, _)| k == "client:window:frozen" || k.starts_with("client:client:")).collect();
     assert_eq!(relayed.len(), 1, "never echoed back: {heard:?}");
     assert!(
         relayed[0].1.contains(" from 127.0.0.1:") && relayed[0].1.ends_with(": copy stuck token=…"),
@@ -1417,7 +1471,7 @@ async fn concurrent_edits_merge_counters_sets_and_text() {
 pub struct Till {
     pub balance: i64,
     #[server]
-    pub ledger: Vec<i64>,
+    pub ledger: Hidden<Vec<i64>>,
 }
 
 #[methods]
@@ -1468,7 +1522,7 @@ async fn an_unpredicted_call_shows_only_what_the_server_made_of_it() {
     r.on_refused(move |m, e| s2.lock().unwrap().push(format!("{m}: {e}")));
     r.pay(4).unwrap();
     until("the server ran it", || r.pending() == 0).await;
-    assert_eq!((r.state().balance, h.state().ledger.clone()), (6, vec![10, -4]));
+    assert_eq!((r.state().balance, (*h.state().ledger).clone()), (6, vec![10, -4]));
     // The server's refusal: nothing was ever shown, and it is said.
     r.pay(100).unwrap();
     until("refused", || r.pending() == 0).await;
@@ -1490,6 +1544,47 @@ async fn a_watch_on_a_synced_copy_tells_only_changes() {
     h.add("tiny".into()).unwrap();
     until("the copy follows", || a.state().notes.len() == 3).await;
     assert_eq!(*seen.lock().unwrap(), [0, 4, 5], "a note no longer than the longest changes nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copys_listeners_never_hear_an_older_state_after_a_newer_one() {
+    use std::sync::{Arc, Mutex};
+    let (_h, addr) = server().await;
+    let a = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    // The first listener changes the copy as it is told (a tell within a
+    // tell); the second must still hear the states in the order they were.
+    let once = Mutex::new(Some(a.clone()));
+    a.listen(move |_| {
+        let b = once.lock().unwrap().take();
+        if let Some(b) = b {
+            b.add("from a listener".into()).unwrap();
+        }
+    });
+    let seen = Arc::new(Mutex::new(vec![]));
+    let s = seen.clone();
+    a.listen(move |b: &Arc<Board>| s.lock().unwrap().push(b.notes.len()));
+    a.add("first".into()).unwrap();
+    until("both shown", || seen.lock().unwrap().last() == Some(&2)).await;
+    let seen = seen.lock().unwrap();
+    assert!(seen.is_sorted(), "an older state told after a newer one: {seen:?}");
+}
+
+#[test]
+fn a_cells_listeners_never_hear_an_older_state_after_a_newer_one() {
+    use std::sync::{Arc, Mutex};
+    let h = Handle::<Board>::memory();
+    let once = Mutex::new(Some(h.clone()));
+    h.listen(move |_| {
+        let b = once.lock().unwrap().take();
+        if let Some(b) = b {
+            b.add("from a listener".into()).unwrap();
+        }
+    });
+    let seen = Arc::new(Mutex::new(vec![]));
+    let s = seen.clone();
+    h.listen(move |b: &Arc<Board>| s.lock().unwrap().push(b.notes.len()));
+    h.add("first".into()).unwrap();
+    assert_eq!(*seen.lock().unwrap(), [1, 2], "told in order, each once");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1553,7 +1648,7 @@ impl Exports {
     pub fn finish(&mut self, cx: &Cx, title: String) -> Result {
         self.done += 1;
         cx.tell(aio::tell::Tell::notify(&title, &format!("{} done", self.done)))?;
-        cx.tell(aio::tell::Tell::Icon { tray: true, frames: vec![], fps: 1 })
+        cx.tell(aio::tell::Tell::Icon { window: None, tray: Some(vec![]), tooltip: None, fps: 1 })
     }
 }
 
@@ -1583,8 +1678,231 @@ async fn what_a_server_call_tells_reaches_each_client_once() {
     assert_eq!(*to_ana.lock().unwrap(), got);
     assert_eq!(got[0], aio::tell::Tell::notify("Export", "1 done"));
     assert_eq!(got[2], aio::tell::Tell::notify("Again", "2 done"));
-    assert!(matches!(got[1], aio::tell::Tell::Icon { tray: true, .. }));
+    assert!(matches!(&got[1], aio::tell::Tell::Icon { tray: Some(f), .. } if f.is_empty()));
     // A blank card is refused where it is asked, and nothing commits.
     assert!(h.finish(" ".into()).unwrap_err().why.contains("title is empty"));
     assert_eq!(h.state().done, 2);
+}
+
+/// A raw aio-rs link to `addr`, past its first state.
+async fn raw_link(addr: &str) -> (Sock, serde_json::Value) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{addr}/ws?token=secret").into_client_request().unwrap();
+    req.headers_mut().insert("x-aio-wire", "2".parse().unwrap());
+    let (mut w, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    send(&mut w, serde_json::json!({ "t": "hello", "cell": "board", "v": 1, "user": "ana" })).await;
+    let full = recv(&mut w).await;
+    assert_eq!(full["t"], "state");
+    (w, full)
+}
+
+/// The views a link is sent within `wait`.
+async fn views(w: &mut Sock, wait: Duration) -> Vec<serde_json::Value> {
+    let mut got = Vec::new();
+    while let Ok(Some(Ok(m))) = tokio::time::timeout(wait, w.next()).await {
+        if let Message::Text(t) = m {
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            if matches!(v["t"].as_str(), Some("state" | "patch")) {
+                got.push(v);
+            }
+        }
+    }
+    got
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_changes_are_paced_and_a_persons_go_at_once() {
+    let (h, addr) = limited(aio::sync::Limits { sync_interval_ms: 200, ..Default::default() }).await;
+    let (mut w, _) = raw_link(&addr).await;
+    // A schedule's burst: the first at once, the rest folded into one patch.
+    let tick = h.by(By::Schedule("tick".into()));
+    for i in 0..20 {
+        tick.add(format!("t{i}")).unwrap();
+    }
+    let got = views(&mut w, Duration::from_millis(600)).await;
+    assert!((1..=3).contains(&got.len()), "{} views for 20 changes", got.len());
+    assert_eq!(got.last().unwrap()["seq"], h.snapshot().0);
+    // A person's changes skip the window, each one.
+    let ana = h.by(By::User("ana".into()));
+    for i in 0..5 {
+        ana.add(format!("a{i}")).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(views(&mut w, Duration::from_millis(300)).await.len(), 5);
+    // 0: every change at once.
+    let (h, addr) = limited(aio::sync::Limits { sync_interval_ms: 0, ..Default::default() }).await;
+    let (mut w, _) = raw_link(&addr).await;
+    let tick = h.by(By::Schedule("tick".into()));
+    for i in 0..10 {
+        tick.add(format!("t{i}")).unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(views(&mut w, Duration::from_millis(300)).await.len(), 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_patch_bigger_than_its_share_of_the_view_goes_as_the_view() {
+    for (percent, want) in [(1, "state"), (50, "patch")] {
+        let (h, addr) = limited(aio::sync::Limits { full_state_percent: percent, ..Default::default() }).await;
+        for i in 0..50 {
+            h.add(format!("note {i} {}", "x".repeat(200))).unwrap();
+        }
+        let (mut w, _) = raw_link(&addr).await;
+        h.by(By::User("bo".into())).add("y".repeat(300)).unwrap();
+        let got = views(&mut w, Duration::from_millis(300)).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["t"], want, "at {percent}%");
+        assert_eq!(got[0]["seq"], h.snapshot().0);
+    }
+    // A copy follows either way.
+    let (h, addr) = limited(aio::sync::Limits { full_state_percent: 0, ..Default::default() }).await;
+    let a = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    h.add("whole".into()).unwrap();
+    until("the copy follows a whole view", || *a.state() == *h.state()).await;
+}
+
+#[cell(shared)]
+pub struct Tally {
+    pub n: u64,
+}
+
+#[methods]
+impl Tally {
+    #[client]
+    pub fn bump(&mut self) -> Result<u64> {
+        self.n += 1;
+        Ok(self.n)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_shared_cell_on_one_port_and_socket_path() {
+    let (board, tally) = (Handle::<Board>::memory(), Handle::<Tally>::memory());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let http = aio::http::Http::default().cell(tally.clone());
+    let opts = aio::sync::Options { token: "secret".into(), http, ..Default::default() };
+    tokio::spawn(aio::sync::serve_with(board.clone(), l, opts));
+    let b = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    let t = Remote::<Tally>::connect(&addr, "secret", "ana").await.unwrap();
+    assert_eq!(t.bump().unwrap(), 1);
+    b.add("x".into()).unwrap();
+    until("both confirmed", || t.pending() == 0 && b.pending() == 0).await;
+    assert_eq!((tally.state().n, board.state().notes.len()), (1, 1));
+    tally.bump().unwrap();
+    until("the second cell's copy follows", || t.state().n == 2).await;
+    // The key holds for every cell; a cell nobody serves is refused.
+    assert!(Remote::<Tally>::connect(&addr, "nope", "ana").await.is_err());
+    let link = aio::sync::Link { addr: addr.clone(), token: "secret".into(), root: None };
+    let e = aio::sync::Live::connect(&link, "ghost", "ana").await.err().expect("no such cell");
+    assert!(e.to_string().contains("this server has cell board"), "{e}");
+    let mut tool = aio::sync::Live::connect(&link, "tally", "ops").await.unwrap();
+    assert_eq!(tool.view()["n"], 2);
+    assert_eq!(tool.call("bump", serde_json::json!([])).await, Ok(serde_json::json!(3)));
+}
+
+#[test]
+#[should_panic(expected = "isn't #[cell(shared)]")]
+fn a_cell_that_isnt_shared_is_never_served_beside() {
+    #[cell]
+    pub struct Mine {
+        pub n: u8,
+    }
+    #[methods]
+    impl Mine {}
+    let _ = aio::http::Http::default().cell(Handle::<Mine>::memory());
+}
+
+#[cell(shared)]
+pub struct Memo {
+    pub title: String,
+    pub n: i64,
+}
+
+#[methods]
+impl Memo {
+    #[client]
+    pub fn set_title(&mut self, t: String) -> Result {
+        self.title = t;
+        Ok(())
+    }
+
+    #[client]
+    pub fn set_n(&mut self, n: i64) -> Result {
+        self.n = n;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_change_over_a_waiting_call_is_said_and_a_merged_field_shows_both() {
+    use aio::merge::{Conflict, Merge};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let fake = tokio::spawn(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let mut w = tokio_tungstenite::accept_async(s).await.unwrap();
+        let send = |v: serde_json::Value| Message::text(v.to_string());
+        let patch = |prev: u64, path: &str, v: serde_json::Value, st: &Memo, op: Option<&serde_json::Value>| {
+            let digest = aio::patch::digest(&serde_json::to_value(st).unwrap());
+            let mut p = serde_json::json!({ "t": "patch", "prev": prev, "seq": prev + 1,
+                "ops": [{ "op": "set", "path": [path], "value": v }], "digest": digest });
+            if let Some(op) = op {
+                p["op"] = op.clone();
+            }
+            send(p)
+        };
+        next_text(&mut w).await;
+        let mut st = Memo { title: "a".into(), n: 1 };
+        w.send(send(serde_json::json!({ "t": "state", "seq": 0, "state": st }))).await.unwrap();
+        let call = next_text(&mut w).await;
+        assert_eq!(call["method"], "set_title");
+        // Someone else's title first: it meets the waiting call.
+        st.title = "theirs".into();
+        w.send(patch(0, "title", "theirs".into(), &st, None)).await.unwrap();
+        // Then the call itself lands: its own change, never a conflict.
+        st.title = "mine".into();
+        w.send(patch(1, "title", "mine".into(), &st, Some(&call["op"]))).await.unwrap();
+        w.send(send(serde_json::json!({ "t": "reply", "op": call["op"], "ok": null }))).await.unwrap();
+        // A counter both changed: shown as both changes.
+        let call = next_text(&mut w).await;
+        assert_eq!(call["method"], "set_n");
+        st.n = 3;
+        w.send(patch(2, "n", 3.into(), &st, None)).await.unwrap();
+        next_text(&mut w).await;
+    });
+    let r = Remote::<Memo>::connect(&addr, "t", "u").await.unwrap();
+    let met: std::sync::Arc<std::sync::Mutex<Vec<Conflict>>> = Default::default();
+    let m2 = met.clone();
+    r.on_conflict(move |c| m2.lock().unwrap().extend_from_slice(c));
+    r.set_title("mine".into()).unwrap();
+    until("its call answered", || r.pending() == 0).await;
+    assert_eq!(
+        *met.lock().unwrap(),
+        [Conflict { field: "title".into(), local: "mine".into(), remote: "theirs".into() }],
+        "once, for the other's change"
+    );
+    assert_eq!(r.state().title, "mine");
+    r.merge("n", Merge::Counter);
+    r.set_n(5).unwrap();
+    until("both changes shown", || r.state().n == 7).await;
+    assert_eq!((r.confirmed().n, met.lock().unwrap().len()), (3, 1), "a counter never conflicts");
+    r.set_title("bye".into()).unwrap();
+    fake.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copys_own_calls_never_conflict_with_themselves() {
+    let (h, addr) = server().await;
+    let a = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n2 = n.clone();
+    a.on_conflict(move |c| _ = n2.fetch_add(c.len(), std::sync::atomic::Ordering::SeqCst));
+    // `luck` is the server's random number, never the predicted one: its own change still.
+    for i in 0..20 {
+        a.add(format!("n{i}")).unwrap();
+    }
+    until("all confirmed", || a.pending() == 0 && a.state().notes.len() == 20).await;
+    assert_eq!(*a.state(), *h.state());
+    assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

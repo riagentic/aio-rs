@@ -6,8 +6,7 @@
 use aio::act;
 use aio::kit::{GlobalKeys, use_global_key};
 use aio::testing::TestUi;
-use dioxus::prelude::*;
-use keyboard_types::{Key, Modifiers};
+use aio::ui::prelude::*;
 use std::time::{Duration, Instant};
 
 const ROWS: usize = 1000;
@@ -45,7 +44,7 @@ struct Cost {
 fn hold(ui: &mut TestUi, keys: usize, events: &mut tokio::sync::broadcast::Receiver<(u64, aio::Event)>) -> Cost {
     let renders = |ui: &TestUi| {
         fn sum(c: &[aio::testing::MountedComponent]) -> u32 {
-            c.iter().map(|c| c.renders + sum(&c.children)).sum()
+            c.iter().map(|c| c.renders + c.updates + sum(&c.children)).sum()
         }
         sum(&ui.components())
     };
@@ -74,6 +73,19 @@ fn hold(ui: &mut TestUi, keys: usize, events: &mut tokio::sync::broadcast::Recei
         p50: took[keys / 2],
         p95: took[keys * 95 / 100],
         took: held,
+    }
+}
+
+/// The events `e` heard since it was last drained (those it fell behind on too).
+fn drained(e: &mut tokio::sync::broadcast::Receiver<(u64, aio::Event)>) -> usize {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut n = 0;
+    loop {
+        match e.try_recv() {
+            Ok(_) => n += 1,
+            Err(TryRecvError::Lagged(k)) => n += k as usize,
+            Err(_) => return n,
+        }
     }
 }
 
@@ -114,27 +126,35 @@ mod blunt {
     aio::client!(List, list);
 
     #[component]
-    fn Line(i: usize) -> Element {
-        let l = list();
-        let r = &l.rows[i];
-        rsx! { li { "aria-selected": l.cursor == i, "{r.name} {r.amount}" } }
+    fn Line(i: usize) -> View {
+        rsx! {
+            li { "aria-selected": list().cursor == i,
+                {
+                    let l = list();
+                    format!("{} {}", l.rows[i].name, l.rows[i].amount)
+                }
+            }
+        }
     }
 
     #[component]
-    fn Lines() -> Element {
+    fn Lines() -> View {
         use_global_key("ArrowDown", |_| _ = act!(down()));
-        let l = list();
-        let from = l.cursor.saturating_sub(SHOWN / 2);
+        let shown = || {
+            let l = list();
+            let from = l.cursor.saturating_sub(SHOWN / 2);
+            from..(from + SHOWN).min(l.rows.len())
+        };
         rsx! {
             ul { "data-t": "list",
-                for i in from..(from + SHOWN).min(l.rows.len()) {
+                for i in shown() {
                     Line { key: "{i}", i }
                 }
             }
         }
     }
 
-    pub fn app() -> Element {
+    pub fn app() -> View {
         use_live();
         rsx! { GlobalKeys { Lines {} } }
     }
@@ -165,25 +185,34 @@ mod fast {
     aio::client!(List, list);
 
     #[component]
-    fn Line(name: String, amount: u64, selected: bool) -> Element {
-        rsx! { li { "aria-selected": selected, "{name} {amount}" } }
+    fn Line(name: String, amount: u64, selected: Prop<bool>) -> View {
+        rsx! { li { "aria-selected": selected.get(), "{name} {amount}" } }
     }
 
     #[component]
-    fn Lines() -> Element {
+    fn Lines() -> View {
         use_global_key("ArrowDown", |_| _ = act!(down()));
-        let (rows, cursor) = (part(|l| &l.rows), *part(|l| &l.cursor));
-        let from = cursor.saturating_sub(SHOWN / 2);
+        let (rows, cursor) = (part(|l| &l.rows), part(|l| &l.cursor));
+        // The rows shown: the window moves only every few keys' worth of rows.
+        let shown = memo(move || {
+            let from = cursor.get().saturating_sub(SHOWN / 2);
+            from..(from + SHOWN).min(rows.with(Vec::len))
+        });
         rsx! {
             ul { "data-t": "list",
-                for i in from..(from + SHOWN).min(rows.len()) {
-                    Line { key: "{i}", name: rows[i].name.clone(), amount: rows[i].amount, selected: cursor == i }
+                for i in shown.get() {
+                    Line {
+                        key: "{i}",
+                        name: rows.with(|r| r[i].name.clone()),
+                        amount: rows.with(|r| r[i].amount),
+                        selected: cursor.get() == i,
+                    }
                 }
             }
         }
     }
 
-    pub fn app() -> Element {
+    pub fn app() -> View {
         use_live();
         rsx! { GlobalKeys { Lines {} } }
     }
@@ -218,9 +247,29 @@ fn a_held_key_over_a_long_list_costs_a_few_renders_and_no_write_per_step() {
     assert_eq!(ui.count("[aria-selected=true]"), 1);
     eprintln!("list speed (1000 rows, {KEYS} × ↓): blunt {before:?} → aio-rs {after:?}");
     drop(ui);
-    let (bs, fs) = (timed(300, || b.down().unwrap()), timed(300, || f.down().unwrap()));
+    // The store's share of a key: written per call, or once per window. Counted,
+    // not timed: a loaded machine slows either side at random. The held keys'
+    // run above is saved first (its last window may still be open).
+    let saved = || {
+        let last = f.store(|s| s.events()).unwrap().pop().unwrap();
+        f.store(|s| s.state_at(last.seq)).unwrap().cursor
+    };
+    let end = Instant::now() + Duration::from_secs(10);
+    while saved() != KEYS {
+        assert!(Instant::now() < end, "the held keys were never saved");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drained(&mut be);
+    drained(&mut fe);
+    let bs = timed(300, || b.down().unwrap());
+    let blunt_logged = drained(&mut be);
+    let t = Instant::now();
+    let fs = timed(300, || f.down().unwrap());
+    let (fast_logged, fast_took) = (drained(&mut fe), t.elapsed());
     eprintln!("list speed, the store's share of a key (p50, p95): blunt {bs:?} → aio-rs {fs:?}");
-    assert!(fs.1 < bs.1, "a held call writes nothing: {fs:?} vs {bs:?}");
+    assert_eq!(blunt_logged, 300, "the blunt port writes every call");
+    let windows = (fast_took.as_secs_f64() / aio::PERSIST_DEBOUNCE.as_secs_f64()).ceil() + 1.0;
+    assert!(fast_logged as f64 <= windows, "a held call writes nothing: {fast_logged} rows in {fast_took:?}");
 
     assert!(after.renders <= 4.0, "the list and the two rows the cursor left and reached: {after:?}");
     assert!(before.renders > 4.0 * after.renders, "{before:?} vs {after:?}");

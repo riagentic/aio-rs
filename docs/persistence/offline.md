@@ -80,6 +80,8 @@ rt.block_on(async {
     let saved = || std::fs::read_to_string(&copy).unwrap_or_default();
     until(|| saved().contains("milk") && saved().contains(r#""pending":[]"#)).await;
     drop(first);
+    // Its socket closes once no copy uses it (within half a second).
+    aio::time::sleep(Duration::from_secs(1)).await;
 
     // The server goes away; the app starts anyway, from the saved copy.
     server.abort();
@@ -132,8 +134,10 @@ rt.block_on(async {
 | `remote.online()` | the link is up now |
 | `remote.status()` | `aio::Status`: `online`, `pending`, `degraded` (over 80% of the queue), `conn`, `last_sync`, `rtt` |
 | `status().conn` | `Conn::Online`, `Offline`, `Syncing` (linked, calls on their way), `Blocked` (the queue is full) |
-| `on_sync(f)` | each catch-up: `Synced { events, elapsed, status }` |
+| `on_sync(f)` | each catch-up: `Synced { events, elapsed, status, conflicts }` |
 | `on_refused(f)` | `f(method, why)` for each call the server refused or the queue dropped |
+| `on_conflict(f)` | where a server change met a waiting call ([conflicts](#conflicts-and-fields-shown-merged)) |
+| `merge(field, how)` | show `field` merged while a call waits |
 
 `aio::Source` (what views read) passes the same `status()` through, so
 an "offline" badge or a "3 changes not sent" line reads one value.
@@ -264,12 +268,50 @@ assert_eq!((m.text.as_str(), m.conflict), ("Shopping lists", false));
 - The method is pure, so the merge replays the same from the log and on
   every copy's prediction.
 
+### Conflicts and fields shown merged
+
+A copy shows its waiting calls replayed on the server's state. When a
+server change (another user's) meets one of them and the two differ,
+`remote.on_conflict(f)` hears where (aio's `onConflict`): an
+`aio::merge::Conflict { field, local, remote }` per value, live and in a
+reconnect's catch-up (`Synced::conflicts` counts those). The copy's own
+call landing is never one. The server keeps what its methods make.
+
+#### Shown merged while a call waits
+
+`remote.merge("body", Merge::Text)` (aio's `sync.merge`) shows a
+top-level field both sides changed merged, not the call replayed alone:
+`Text` (both edits by `text3`; a part both changed shows the copy's, a
+conflict), `Counter` (both changes added, never a conflict), `SetAdd(id)`
+(either side's additions stay, what the copy took out goes; items the
+same by the key `id`, or whole). It is what the copy shows until the
+server answers: a method that assigns (`self.body = text`) still
+replaces the value there, so write methods that edit.
+
+```rust
+use aio::merge::{Conflict, Merge, conflicts, merged};
+use serde_json::json;
+
+# fn main() {
+let base = json!({ "title": "a", "n": 10 });
+let local = json!({ "title": "mine", "n": 15 });
+let remote = json!({ "title": "theirs", "n": 18 });
+let merges = [("n".to_string(), Merge::Counter)];
+assert_eq!(
+    conflicts(&base, &remote, &local, &merges),
+    [Conflict { field: "title".into(), local: json!("mine"), remote: json!("theirs") }],
+    "a counter never conflicts"
+);
+assert_eq!(merged(&Merge::Counter, &base["n"], &local["n"], &remote["n"]), Some(json!(23)));
+# }
+```
+
 ## What travels: patches
 
 On connect a copy gets its whole view (`state`). After each event that
 changes what this viewer may see, it gets a **patch**: the change from
-the view it was sent to the new one, a list of `set`, `del` and `append`
-ops by path. `aio::patch` is that code, pure:
+the view it was sent to the new one, a list of `set`, `del`, `insert`
+and `append` ops by path. `aio::patch` is that code, pure:
 
 ```rust
 use aio::patch::{Op, Step, apply, diff, digest};
@@ -279,10 +321,15 @@ use serde_json::json;
 let old = json!({ "items": { "a": "milk" }, "list": [1, 2], "n": 1 });
 let new = json!({ "items": { "a": "milk", "b": "eggs" }, "list": [1, 2, 3], "n": 1 });
 let ops = diff(&old, &new);
-// A map: only the new key. A list that changed length: sent whole.
+// A map: only the new key. A list that grew: only the item put in.
+let list = |i| vec![Step::Key("list".into()), Step::Index(i)];
 assert!(ops.contains(&Op::Set { path: vec![Step::Key("items".into()), Step::Key("b".into())], value: json!("eggs") }));
-assert!(ops.contains(&Op::Set { path: vec![Step::Key("list".into())], value: json!([1, 2, 3]) }));
+assert!(ops.contains(&Op::Insert { path: list(2), value: json!(3) }));
 assert_eq!(ops.len(), 2, "`n` didn't change: nothing about it is sent");
+// A filter: one `del` per item taken out (from the back).
+let rows: Vec<String> = (0..50).map(|i| format!("row {i}")).collect();
+let kept: Vec<&String> = rows.iter().filter(|r| r.as_str() != "row 7").collect();
+assert_eq!(diff(&json!({ "list": rows }), &json!({ "list": kept })), [Op::Del { path: list(7) }]);
 
 let mut copy = old.clone();
 apply(&mut copy, &ops).unwrap();
@@ -301,7 +348,7 @@ assert_eq!(diff(&a, &b), [Op::Append { path: vec![Step::Key("reply".into())], va
 | a field set | one `set` at its path |
 | a key added to or removed from a map (`BTreeMap`, `HashMap`, a struct) | one `set` or `del` for that key |
 | an item of a `Vec` changed in place, same length | ops inside that item only |
-| a `Vec` that grew or shrank (`push`, `remove`, `retain`) | the whole `Vec`, one `set` |
+| a `Vec` that grew or shrank (`push`, `insert`, `remove`, `retain`, a spread) | one `insert` per item put in or `del` per item taken out (aio's Immer `add` and `remove`); items compared from the start with the rest put in or cut off at the end, when that is smaller; the whole `Vec` (one `set`) when every way costs as much as the array (a sort, a rebuilt list) |
 | a string of 256+ characters that grew at its end | `append` of the new part (`aio::patch::APPEND_MIN`) |
 | nothing this viewer sees | nothing at all |
 
@@ -313,7 +360,18 @@ assert_eq!(diff(&a, &b), [Op::Append { path: vec![Step::Key("reply".into())], va
   filtered by `visible` ([visibility](../state/visibility.md)). A patch is
   the diff of *that* view, so a change another user can't see sends this
   viewer nothing, and a change of role sends the new view whole.
-- One link carries one cell: a copy gets only the cell it follows.
+- One link carries one cell: a copy gets only the cell it follows. A
+  server serves every shared cell on one `/ws` (`Http::cell`), and a
+  client's links (one per cell, each naming its cell in its hello) share
+  one socket.
+- **Pacing** (aio's `syncIntervalMs`, `[server.limits] sync_interval_ms`,
+  50 ms): a link gets the first change of a burst at once, then at most
+  one patch per window, the changes between folded into one. A person's
+  call (a user's or an agent's) skips the window, so typing stays
+  instant; schedules, effects and other background changes are paced.
+- **Whole view over a big patch** (aio's `fullStateThreshold`,
+  `full_state_percent`, 50): a patch over that share of the viewer's view
+  is sent as the view (`state`) instead.
 - A client that falls behind (a slow reader) is not sent every patch it
   missed: it gets one patch to the newest view. One that stops reading
   for 10 s (`aio::sync::SEND_TIMEOUT`) is dropped and gets the whole view
@@ -323,10 +381,11 @@ assert_eq!(diff(&a, &b), [Op::Append { path: vec![Step::Key("reply".into())], va
 
 ### Shaping state for the wire
 
-- **Grow a collection by key, not by position.** A `Vec` that changes
-  length is sent whole on every add. A `BTreeMap<Uuid, Item>` sends one
-  key. For a list people add to all day, a map keyed by id (sorted for
-  display in the view) is the cheap shape.
+- **Add and remove, don't rebuild.** A push, a spread with new items or
+  a filter sends only those items; a sort or a list rebuilt with every
+  item changed is sent whole. A `BTreeMap<Uuid, Item>` sends one key
+  whatever moves, and an edit in the middle of a `Vec` sends that item
+  only.
 - **Split cells by who reads them.** A ticker that changes every second
   and a catalog read once should be two cells: a copy of one gets no
   patches of the other.
@@ -368,27 +427,25 @@ since its cursor ([wire](../migration/wire.md)).
 
 ## Limits, compared with aio
 
-- **No merge strategies to declare.** aio's `strategy` per field (`lww`,
-  `counter`, `lww-per-key`, `set-add`, `set-remove`, `text`) and its
-  hybrid logical clock don't exist: methods replayed in order on the
-  server do that work ([merging](#merging-edits)). A copy can't merge
-  with another copy directly; every merge goes through a server.
-- **No peer-to-peer or server-less sync.** aio's "local-first for the
-  whole app" has no counterpart: a copy needs a server to confirm.
-- **Smaller queue, stricter when full.** 500 waiting calls (aio: 1000),
-  and a full queue refuses new calls unless `retention` is set (aio
-  drops the oldest). In return the queue survives a restart and a reload,
-  which aio's in-page queue doesn't.
-- **Lists are re-sent whole when their length changes.** aio sends
-  Immer's add and remove ops for an array; aio-rs sends the new `Vec`.
-  Use a map for a growing collection.
-- **No full-state threshold, throttle window or render backpressure.**
-  aio's `fullStateThreshold`, `syncIntervalMs` and its staleness
-  multipliers have no setting: every event sends its patch at once, a
-  slow client is sent the newest view, and a stopped one is dropped.
+- **Merging is methods replayed in order on the server**
+  ([merging](#merging-edits)), as aio's own CRDT ops go through its
+  methods. A copy may show a field merged while its call waits
+  ([shown merged](#shown-merged-while-a-call-waits): `Text`, `Counter`,
+  `SetAdd`); aio's `lww-per-key` and `set-remove` view merges and its
+  hybrid logical clock have no counterpart. Every merge goes through a
+  server, as in aio.
+- **A full queue refuses.** 500 waiting calls, as aio's `pendingCap`; a
+  full queue refuses the new call unless `retention` lets an old one go,
+  where aio drops the new op (`prune-failed`). Both keep the queue across
+  a reload (aio in the page's storage, aio-rs on disk or in the browser's).
+- **No render-staleness backpressure.** aio slows a page whose paint
+  lags (its staleness multipliers); aio-rs paces every link
+  (`sync_interval_ms`), and a slow reader is sent the newest view once it
+  reads again.
 - **No path subscriptions.** One link is one cell, so a copy gets every
   patch of that cell, not only the paths it reads.
-- Not yet: a binary wire.
+- The sync wire is JSON; binary payloads go on a side channel
+  ([transports](../clients/transports.md#binary-data)).
 
 ## Common mistakes
 

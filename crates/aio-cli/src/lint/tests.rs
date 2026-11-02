@@ -254,7 +254,7 @@ fn App() -> Element {
 }
 
 #[test]
-fn a_list_item_without_a_key_is_a_warning() {
+fn a_list_item_without_a_key_is_an_error() {
     let d = project(&[(
         "src/ui.rs",
         r#"
@@ -276,12 +276,82 @@ fn App() -> Element {
     assert_eq!(
         got,
         [
-            (5, "<li> in a for loop has no key: a removed or moved row hands its state to the next"),
-            (7, "<Row> in a for loop has no key: a removed or moved row hands its state to the next"),
+            (
+                5,
+                "<li> in a for loop has no key: a removed or moved row would hand its state to the next (air refuses it)"
+            ),
+            (
+                7,
+                "<Row> in a for loop has no key: a removed or moved row would hand its state to the next (air refuses it)"
+            ),
         ],
         "{:?}",
         r.issues
     );
+    assert!(r.issues.iter().filter(|i| i.area == "render").all(|i| i.severity == Severity::Error));
+}
+
+#[test]
+fn aio_ui_hooks_off_the_top_level_are_errors_too() {
+    let d = project(&[(
+        "src/ui.rs",
+        r#"
+fn App() -> View {
+    let a = signal(|| 0);
+    if a.get() > 1 {
+        let b = signal(|| 1);
+        effect(move || {});
+    }
+    let f = move |_| { let m = memo(|| 2); };
+    let kept = once(|| Signal::new(1));
+    let fresh = Signal::new(0);
+    for i in 0..3 { watch(i, |_| {}); }
+    rsx! {}
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let lines: Vec<_> = r.issues.iter().filter(|i| i.area == "hooks").map(|i| i.line.unwrap()).collect();
+    assert_eq!(lines, [5, 6, 8, 10, 11], "{:?}", r.issues);
+    assert!(r.issues.iter().any(|i| i.message.starts_with("`signal` in `App` runs only sometimes")));
+    assert!(r.issues.iter().any(|i| i.message.starts_with("`Signal::new` in the body of `App` makes a new signal")));
+}
+
+#[test]
+fn naming_the_renderer_behind_aio_ui_is_an_error() {
+    let d = project(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n\n[dependencies]\naio = { path = \"a\" }\ndioxus = \"0.7\"\n# dioxus = \"0.7\"\ndioxus-document = \"0.7\"\n",
+        ),
+        (
+            "src/ui.rs",
+            r#"
+use dioxus::prelude::*;
+use aio::ui::prelude::*;
+fn App() -> View {
+    let t = dioxus_document::eval("dioxus.send(1)");
+    // dioxus in a comment is prose
+    let dioxus = 1;
+    rsx! {}
+}
+"#,
+        ),
+        ("tests/ui.rs", "use dioxus::prelude::Key;\n"),
+    ]);
+    let r = lint(d.path());
+    let got: Vec<_> =
+        r.issues.iter().filter(|i| i.area == "renderer").map(|i| (i.file.clone().unwrap(), i.line.unwrap())).collect();
+    let at = |f: &str, l: usize| (f.to_string(), l);
+    let (path, script) = (at("src/ui.rs", 5), at("src/ui.rs", 5));
+    assert_eq!(
+        got,
+        [at("Cargo.toml", 6), at("Cargo.toml", 8), at("src/ui.rs", 2), path, script, at("tests/ui.rs", 1)],
+        "{:?}",
+        r.issues
+    );
+    assert!(r.issues.iter().all(|i| i.area != "renderer" || i.severity == Severity::Error));
+    assert!(r.issues.iter().any(|i| i.message.contains("its page object is `aio`")), "a page script's dioxus.send");
 }
 
 #[test]
@@ -338,10 +408,10 @@ fn Avatar(src: String) -> Element {
     assert_eq!(
         got,
         [
-            (6, "key on <Row>, not its block's first node: Dioxus ignores it (the first node keys the block)"),
-            (11, "key on <Dialog> in no list: Dioxus never remounts it when the key changes"),
-            (13, "key on <li> in no list: Dioxus never remounts it when the key changes"),
-            (20, "key on <img> in no list: Dioxus never remounts it when the key changes"),
+            (6, "key on <Row>, not its block's first node: aio::ui ignores it (the first node keys the block)"),
+            (11, "key on <Dialog> in no list: aio::ui never remounts it when the key changes"),
+            (13, "key on <li> in no list: aio::ui never remounts it when the key changes"),
+            (20, "key on <img> in no list: aio::ui never remounts it when the key changes"),
         ],
         "{:?}",
         r.issues
@@ -406,7 +476,7 @@ fn credentials_in_source_and_assets() {
         ("assets/config.json", "{\"token\": \"abcdefghij0123456789xyz\"}\n"),
         ("aio.toml", "[app]\nid = \"demo\"\nname = \"Demo\"\n"),
         ("tests/fixture.json", "{\"token\": \"abcdefghij0123456789xyz\"}\n"),
-        ("tests/it.rs", "const PASSWORD: &str = \"hunter22\";\n#[test]\nfn t() {}\n"),
+        ("tests/it.rs", "const PASSWORD: &str = \"hunter22\";\n#[test]\nfn t() { assert!(!PASSWORD.is_empty()) }\n"),
         ("assets/logo.png", "\u{0}\u{159}PNG"),
     ]);
     let r = lint(d.path());
@@ -469,7 +539,7 @@ fn build_output_dot_dirs_and_test_modules_are_not_app_code() {
         (".git/x.toml", "password = \"hunter22\""),
         (
             "src/lib.rs",
-            "#[cfg(test)]\nmod tests { #[test] fn a() {} #[aio::test] fn b() {} fn App() -> Element { rsx! { img {} } } }\n",
+            "#[cfg(test)]\nmod tests { #[test] fn a() { assert!(1 < 2) } #[aio::test] fn b() { assert!(1 < 2) } fn App() -> Element { rsx! { img {} } } }\n",
         ),
         ("src/tests.rs", "fn x() -> Element { rsx! { img {} } }"),
     ]);
@@ -593,19 +663,20 @@ fn page_css_kept_in_a_hook_is_an_error_because_edits_never_show() {
         "src/lib.rs",
         r#"
 #[component]
-pub fn App() -> Element {
-    let css = use_hook(|| aio::ui::page_css(&[CSS], false));
+pub fn App() -> View {
+    let css = once(|| aio::ui::page_css(&[CSS], false));
     let live = aio::use_css!(false; "assets/style.css");
     let fine = aio::ui::page_css(&[CSS], false);
-    let n = use_hook(|| 1);
+    let n = once(|| 1);
+    let old = use_hook(|| aio::ui::page_css(&[CSS], false));
     rsx! { style { {css} } }
 }
 "#,
     )]);
     let r = lint(d.path());
-    let stale: Vec<_> = r.issues.iter().filter(|i| i.message.contains("made in `use_hook`")).collect();
-    assert_eq!(stale.len(), 1, "{:?}", r.issues);
-    assert_eq!((stale[0].severity, stale[0].line), (Severity::Error, Some(4)));
+    let stale: Vec<_> = r.issues.iter().filter(|i| i.message.contains("made in `once`")).collect();
+    assert_eq!(stale.len(), 2, "{:?}", r.issues);
+    assert_eq!((stale[0].severity, stale[0].line, stale[1].line), (Severity::Error, Some(4), Some(8)));
     assert!(stale[0].fix.as_deref().unwrap().contains("aio::use_css!"));
 }
 
@@ -649,7 +720,7 @@ fn an_app_of_the_older_layout_is_told_and_moved_by_fix() {
     ]);
     let r = lint(d.path());
     let got: Vec<_> = found(&r).into_iter().filter(|(a, _)| *a == "migrate").map(|(_, at)| at).collect();
-    assert_eq!(got, ["Cargo.toml:9", "app/Cargo.toml:10", "app/build.rs:1", "app/src/main.rs:2"], "{:?}", r.issues);
+    assert_eq!(got, ["app/Cargo.toml:10", "app/build.rs:1", "app/src/main.rs:2"], "{:?}", r.issues);
     assert!(r.issues.iter().filter(|i| i.area == "migrate").all(|i| i.fix.as_deref() == Some("ax lint --fix")));
 
     let files = |d: &Path| {
@@ -657,14 +728,10 @@ fn an_app_of_the_older_layout_is_told_and_moved_by_fix() {
         walk(d, &mut v);
         v
     };
-    assert_eq!(layout::fix(d.path(), &files(d.path())).unwrap().len(), 4);
+    assert_eq!(layout::fix(d.path(), &files(d.path())).unwrap().len(), 3);
     let read = |p: &str| std::fs::read_to_string(d.path().join(p)).unwrap();
     assert_eq!(read("app/src/main.rs"), main.replace("aio::config!()?", "aio::config!()"));
-    assert_eq!(
-        read("Cargo.toml"),
-        "[package]\nname = \"sky\"\n\n[dependencies]\naio = { package = \"aio-rs\", path = \"../aio/crates/aio\", \
-         default-features = false, features = [\"kit\"] }\ndioxus = { version = \"=0.7.10\" }\n\n[profile.release]\nlto = true\n"
-    );
+    assert_eq!(read("Cargo.toml"), OLD_ROOT, "the tests' `testing` dev-dependency is today's layout");
     assert_eq!(
         read("app/Cargo.toml"),
         "[package]\nname = \"sky-app\"\n\n[dependencies]\napp = { package = \"sky\", path = \"..\" }\naio = { package = \
@@ -680,7 +747,7 @@ fn a_build_rs_that_does_more_than_parse_aio_toml_is_left_alone() {
     assert!(layout::old_build_rs(OLD_BUILD));
     assert!(!layout::old_build_rs("fn main() {\n    aio::config::build(\"../aio.toml\");\n    cc::Build::new();\n}\n"));
     assert!(!layout::old_build_rs("fn main() { println!(\"cargo::rerun-if-changed=x\"); }"));
-    let kept = "[dev-dependencies]\naio = { package = \"aio-rs\", path = \"a\", features = [\"testing\", \"kit\"] }\n";
+    let kept = "[dev-dependencies]\naio = { package = \"aio-rs\", path = \"a\", features = [\"video\", \"kit\"] }\n";
     assert_eq!(
         layout::migrate_manifest(kept).as_deref(),
         Some("[dev-dependencies]\naio = { package = \"aio-rs\", path = \"a\", features = [\"kit\"] }\n")
@@ -694,6 +761,22 @@ fn a_typed_newline_is_told_it_no_longer_presses_enter() {
     let r = lint(d.path());
     let got: Vec<_> = found(&r).into_iter().filter(|(a, _)| *a == "migrate").map(|(_, at)| at).collect();
     assert_eq!(got, ["tests/ui.rs:2"], "{:?}", r.issues);
+    // aio's `am migrate --tests`: the test shapes alone.
+    let shapes: Vec<&Issue> = r.issues.iter().filter(|i| test_shape(i)).collect();
+    assert_eq!(shapes.len(), 1, "{:?}", r.issues);
+}
+
+#[test]
+fn from_a_version_only_what_changed_after_it() {
+    // aio's `am migrate --from`: an app made with a release has its layout.
+    let src = "fn f() {\n    let _ = aio::retry;\n}\n";
+    let d = project(&[("Cargo.toml", "[package]\nname = \"x\"\n"), ("src/lib.rs", src)]);
+    let all = lint(d.path()).issues;
+    assert!(all.iter().any(|i| i.area == "migrate"), "{all:?}");
+    let before = migrate_from(lint(d.path()).issues, "0.0.9").unwrap();
+    assert!(!before.is_empty() && before.iter().all(|i| i.area == "migrate"), "{before:?}");
+    assert!(migrate_from(all, layout::SINCE).unwrap().is_empty(), "made with it: nothing to move");
+    assert!(migrate_from(vec![], "soon").unwrap_err().contains("an aio-rs version"));
 }
 
 #[test]
@@ -715,4 +798,132 @@ fn renamed_paths_are_told_and_moved_by_fix() {
         std::fs::read_to_string(d.path().join("src/lib.rs")).unwrap(),
         "use aio::testing::RandomCall;\nfn f() {\n    let _d = aio::deciding::start();\n    let _ = aio::effect::retry;\n    let _ = (aio::retry_later, aio::effect::retry);\n}\n"
     );
+}
+
+#[test]
+fn tests_that_check_nothing_are_named() {
+    let d = project(&[
+        (
+            "tests/notes.rs",
+            r#"
+#[test]
+fn adds() {
+    let n = Notes::default();
+    n.add("a".into());
+}
+
+#[test]
+fn compares_itself() {
+    let n = 1 + 1;
+    assert_eq!(n, n);
+}
+
+#[test]
+#[should_panic(expected = "full")]
+fn refuses() {
+    Notes::full().add("a".into());
+}
+
+#[test]
+fn checks() -> Result<(), String> {
+    let mut t = TestCells::new();
+    t.cell::<Notes>().add("a".into())?;
+    assert_eq!(t.effects(), ["Notes.save"]);
+    Ok(())
+}
+"#,
+        ),
+        (
+            "src/lib.rs",
+            r#"
+pub fn f() -> u8 { 1 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn calls_only() {
+        super::f();
+    }
+
+    #[test]
+    fn unwraps() {
+        "1".parse::<u8>().unwrap();
+    }
+}
+"#,
+        ),
+    ]);
+    let r = lint(d.path());
+    let t: Vec<_> = r
+        .issues
+        .iter()
+        .filter(|i| i.area == "testing" && i.message.contains("("))
+        .map(|i| (i.file.clone().unwrap(), i.line.unwrap(), i.message.clone()))
+        .collect();
+    assert_eq!(
+        t.iter().map(|(f, l, _)| format!("{f}:{l}")).collect::<Vec<_>>(),
+        ["src/lib.rs:7", "tests/notes.rs:3", "tests/notes.rs:11"],
+        "{t:?}"
+    );
+    assert!(t[1].2.contains("test `adds` checks nothing") && t[2].2.contains("compares `n` with itself"), "{t:?}");
+}
+
+#[test]
+fn ax_dev_lints_each_saved_file_alone() {
+    let ui = "use aio::ui::prelude::*;\nfn Ui() -> Element {\n    rsx! {\n        div { onclick: move |_| {}, \"Open\" }\n    }\n}\n";
+    let d = project(&[("src/ui.rs", ui), ("src/half.rs", "fn x( {"), ("tests/t.rs", ui), ("assets/a.css", "x")]);
+    let files: Vec<PathBuf> =
+        ["src/ui.rs", "src/half.rs", "tests/t.rs", "assets/a.css"].map(|f| d.path().join(f)).into();
+    let said = changed(&files, d.path());
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].starts_with("warn src/ui.rs:4 [a11y] <div> takes clicks but no keys"), "{said:?}");
+}
+
+#[test]
+fn tests_that_use_the_test_kit_without_its_feature_are_told_the_line() {
+    let lib = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    use aio::testing::TestCells;\n    #[test]\n    fn t() { assert!(TestCells::new().effects().is_empty()) }\n}\n";
+    let bare = "[package]\nname = \"notes\"\n[dependencies]\naio = { package = \"aio-rs\", path = \"../aio\", features = [\"kit\"] }\n";
+    let r = lint(project(&[("src/lib.rs", lib), ("Cargo.toml", bare)]).path());
+    let kit: Vec<_> = r.issues.iter().filter(|i| i.message.contains("`testing` feature")).collect();
+    assert_eq!(kit.len(), 1, "{:?}", r.issues);
+    assert_eq!((kit[0].severity, kit[0].file.as_deref(), kit[0].line), (Severity::Error, Some("src/lib.rs"), Some(4)));
+    assert!(kit[0].fix.as_deref().unwrap().contains("features = [\"testing\"]"));
+    let given = format!(
+        "{bare}[dev-dependencies]\naio = {{ package = \"aio-rs\", path = \"../aio\", features = [\"testing\"] }}\n"
+    );
+    let r = lint(project(&[("src/lib.rs", lib), ("Cargo.toml", &given)]).path());
+    assert!(!r.issues.iter().any(|i| i.message.contains("`testing` feature")), "{:?}", r.issues);
+    assert!(!gives_testing(&["[features]\ntesting = []\n"]), "its own feature list is not aio-rs's");
+}
+
+#[test]
+fn the_test_kit_given_through_the_workspace_counts() {
+    let ws = |dep: &str| format!("[workspace]\nmembers = [\"app\"]\n[workspace.dependencies]\n{dep}\n");
+    let member = |dep: &str| format!("[package]\nname = \"notes\"\n[dev-dependencies]\n{dep}\n");
+    let renamed = ws("aio = { package = \"aio-rs\", path = \"../aio\" }");
+    let plain = ws("aio-rs = { path = \"../aio\" }");
+    let inherit = |k: &str| member(&format!("{k} = {{ workspace = true, features = [\"testing\"] }}"));
+    // The member asks for it, renamed or not.
+    assert!(gives_testing(&[renamed.clone(), inherit("aio")]));
+    assert!(gives_testing(&[plain.clone(), inherit("aio-rs")]));
+    // The workspace gives it every member that inherits.
+    assert!(gives_testing(&[ws("aio = { package = \"aio-rs\", path = \"../aio\", features = [\"testing\"] }")]));
+    assert!(gives_testing(&[ws("aio-rs = { version = \"0.2\", features = [\"kit\", \"testing\"] }")]));
+    // A dotted table and a target's dev-dependencies are dependencies too.
+    assert!(gives_testing(&[
+        "[dev-dependencies.aio]\npackage = \"aio-rs\"\npath = \"../aio\"\nfeatures = [\"testing\"]\n"
+    ]));
+    assert!(gives_testing(&[format!(
+        "{renamed}[target.'cfg(unix)'.dev-dependencies]\naio = {{ workspace = true, features = [\"testing\"] }}\n"
+    )]));
+    // Not aio-rs's: another crate's `aio` key, no testing, or no such workspace dep.
+    assert!(!gives_testing(&[renamed.clone(), member("aio = { workspace = true }")]));
+    assert!(!gives_testing(&[ws("aio = { path = \"../other\", features = [\"testing\"] }"), inherit("aio")]));
+    assert!(!gives_testing(&[plain, inherit("aio")]), "`aio` is not the workspace's aio-rs");
+    assert!(!gives_testing(&[inherit("aio")]), "no workspace manifest seen");
+    // Through `ax lint`: the error goes.
+    let lib = "#[cfg(test)]\nmod tests {\n    use aio::testing::TestCells;\n}\n";
+    let r =
+        lint(project(&[("Cargo.toml", &renamed), ("app/Cargo.toml", &inherit("aio")), ("app/src/lib.rs", lib)]).path());
+    assert!(!r.issues.iter().any(|i| i.message.contains("`testing` feature")), "{:?}", r.issues);
 }

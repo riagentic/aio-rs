@@ -6,195 +6,11 @@
 //! pressed with nothing focused (`<body>`) reaches them too (the page's
 //! [`KEYS`](crate::page::KEYS)). [`use_key_claim`] takes a chord before
 //! anything else hears it (aio's window listener in capture mode).
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// The KeyboardEvent spelling of a key name: `"enter"` → `"Enter"`, `"f5"` →
-/// `"F5"`, `"esc"` → `"Escape"`. One character is left alone (`K` ≠ `k`).
-pub fn normalize_key(key: &str) -> String {
-    if key.chars().count() < 2 {
-        return key.into();
-    }
-    let low = key.to_lowercase();
-    let named = match low.as_str() {
-        "enter" | "return" => "Enter",
-        "esc" | "escape" => "Escape",
-        "space" | "spacebar" => " ",
-        "tab" => "Tab",
-        "backspace" => "Backspace",
-        "delete" | "del" => "Delete",
-        "insert" => "Insert",
-        "home" => "Home",
-        "end" => "End",
-        "pageup" => "PageUp",
-        "pagedown" => "PageDown",
-        "up" | "arrowup" => "ArrowUp",
-        "down" | "arrowdown" => "ArrowDown",
-        "left" | "arrowleft" => "ArrowLeft",
-        "right" | "arrowright" => "ArrowRight",
-        _ => match low.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
-            Some(n @ 1..=24) if !low[1..].starts_with('0') => return format!("F{n}"),
-            _ => return key.into(),
-        },
-    };
-    named.into()
-}
-
-/// A US punctuation keycap: its `code` and what Shift makes it type.
-fn us_punct(bind: &str) -> Option<(&'static str, &'static str)> {
-    Some(match bind {
-        "/" => ("Slash", "?"),
-        "=" => ("Equal", "+"),
-        "-" => ("Minus", "_"),
-        "[" => ("BracketLeft", "{"),
-        "]" => ("BracketRight", "}"),
-        "\\" => ("Backslash", "|"),
-        ";" => ("Semicolon", ":"),
-        "'" => ("Quote", "\""),
-        "," => ("Comma", "<"),
-        "." => ("Period", ">"),
-        "`" => ("Backquote", "~"),
-        _ => return None,
-    })
-}
-
-/// Does a keydown (`key`, `code`) press the keycap `bind` names? A digit is
-/// its digit-row key (Shift+1 types `!`); a letter is the key typing it, or
-/// its US position when the key typed no ASCII (macOS Alt+F types `ƒ`, a
-/// non-Latin layout); US punctuation is its position when Shift typed its
-/// twin (`?` for `/`) or Alt typed no ASCII; anything else is `key` alone.
-pub fn keycap_match(bind: &str, key: &str, code: &str, shift: bool, alt: bool) -> bool {
-    if key.to_lowercase() == bind.to_lowercase() {
-        return true;
-    }
-    let one = |s: &str| {
-        let mut cs = s.chars();
-        cs.next().filter(|_| cs.next().is_none())
-    };
-    if let Some(d) = one(bind).filter(char::is_ascii_digit) {
-        return code == format!("Digit{d}");
-    }
-    let no_ascii = key == "Dead" || key == "Unidentified" || one(key).is_some_and(|c| !c.is_ascii());
-    if let Some((at, twin)) = us_punct(bind) {
-        return code == at && ((shift && key == twin) || (alt && no_ascii));
-    }
-    one(bind).is_some_and(|c| c.is_ascii_alphabetic()) && no_ascii && code == format!("Key{}", bind.to_uppercase())
-}
-
-/// A parsed binding: the keycap, the modifiers it names, and how it matches.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Chord {
-    pub key: String,
-    pub ctrl: bool,
-    pub meta: bool,
-    pub alt: bool,
-    pub shift: bool,
-    /// Ctrl or ⌘, whichever the platform's shortcuts use.
-    pub cmd: bool,
-    /// Unnamed modifiers must be up (the default); `false`: don't care.
-    pub exact: bool,
-    /// Fires while typing in a field too.
-    pub in_fields: bool,
-    /// Fires again while its key is held (the key's auto-repeat): by
-    /// default only movement does, the arrows, PageUp/PageDown and
-    /// Backspace (aio's `REPEATABLE_KEYS`), so a held shortcut fires once.
-    pub repeats: bool,
-}
-
-/// The keys whose auto-repeat fires a binding unless it says otherwise.
-const REPEATABLE: [&str; 7] = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Backspace"];
-
-/// How a chord matched: naming the Shift state, or leaving it free.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Hit {
-    Set,
-    Free,
-}
-
-impl Chord {
-    /// `"ctrl+s"`, `"Ctrl+Shift+S"`, `"mod+k"`, `"cmd+option+esc"`, `"ctrl++"`:
-    /// modifiers (`ctrl`/`control`, `meta`/`cmd`/`command`/`super`,
-    /// `alt`/`option`, `shift`, `mod`), then one key. A word before the key
-    /// that is no modifier, or no key, is an error.
-    pub fn parse(spec: &str) -> Result<Self, String> {
-        let fail = |why: String| {
-            format!(
-                "key chord {spec:?}: {why}: write modifier+…+key with ctrl/shift/alt/meta/mod (\"ctrl+s\", \"mod+shift+k\", \"alt+f1\")"
-            )
-        };
-        let (mods, key) = match spec.strip_suffix("++") {
-            _ if spec.chars().count() == 1 => ("", spec),
-            Some(m) => (m, "+"),
-            None => spec.rsplit_once('+').unwrap_or(("", spec)),
-        };
-        if key.is_empty() {
-            return Err(fail("no key after the last +".into()));
-        }
-        let key = normalize_key(key);
-        let repeats = REPEATABLE.contains(&key.as_str());
-        let mut c = Self { key, exact: true, repeats, ..Self::default() };
-        for m in mods.split('+').filter(|_| !mods.is_empty()) {
-            match m.to_lowercase().as_str() {
-                "ctrl" | "control" => c.ctrl = true,
-                "cmd" | "command" | "meta" | "super" => c.meta = true,
-                "alt" | "option" => c.alt = true,
-                "shift" => c.shift = true,
-                "mod" => c.cmd = true,
-                _ => return Err(fail(format!("{m:?} is not a modifier"))),
-            }
-        }
-        Ok(c)
-    }
-
-    /// Unnamed modifiers don't matter.
-    pub fn loose(self) -> Self {
-        Self { exact: false, ..self }
-    }
-
-    /// Fires while typing in a field too.
-    pub fn in_fields(self) -> Self {
-        Self { in_fields: true, ..self }
-    }
-
-    /// Fires again while its key is held (`true`), or only once (`false`).
-    pub fn repeating(self, repeats: bool) -> Self {
-        Self { repeats, ..self }
-    }
-
-    /// Does a keydown fire it? `None` no.
-    pub fn hit(&self, key: &str, code: &str, mods: Modifiers) -> Option<Hit> {
-        if !keycap_match(&self.key, key, code, self.shift, self.alt) {
-            return None;
-        }
-        // Exact: an unnamed modifier must be up, except Ctrl/⌘ under `mod`
-        // and Shift on a symbol key (Shift is how "?" is typed).
-        let want = |named: bool, free: bool| match (named, self.exact && !free) {
-            (true, _) => Some(true),
-            (false, true) => Some(false),
-            (false, false) => None,
-        };
-        let symbol = {
-            let mut cs = self.key.chars();
-            cs.next()
-                .is_some_and(|c| cs.next().is_none() && c.to_lowercase().eq(c.to_uppercase()) && !c.is_ascii_digit())
-        };
-        let shift = want(self.shift, symbol);
-        let checks = [
-            (want(self.ctrl, self.cmd), Modifiers::CONTROL),
-            (want(self.meta, self.cmd), Modifiers::META),
-            (want(self.alt, false), Modifiers::ALT),
-            (shift, Modifiers::SHIFT),
-        ];
-        if checks.iter().any(|(w, m)| w.is_some_and(|w| mods.contains(*m) != w)) {
-            return None;
-        }
-        if self.cmd && !mods.intersects(Modifiers::CONTROL | Modifiers::META) {
-            return None;
-        }
-        Some(if shift.is_some() { Hit::Set } else { Hit::Free })
-    }
-}
+pub use crate::ui::chord::{Chord, Hit, keycap_match, normalize_key};
 
 thread_local! {
     /// The key a field saw on its way up to the root, this keystroke.
@@ -261,8 +77,8 @@ struct Claims {
 
 impl Claims {
     /// The page's copy of the claimed chords, and the element for them.
-    fn changed(mut self) {
-        let all = self.keys.peek().all.clone();
+    fn changed(self) {
+        let all = self.keys.read_untracked().all.clone();
         let chords: Vec<serde_json::Value> = all
             .borrow()
             .iter()
@@ -272,9 +88,9 @@ impl Claims {
                     "cmd": c.cmd, "exact": c.exact, "in_fields": c.in_fields })
             })
             .collect();
-        _ = dioxus_document::eval(&format!("window.__aioClaims = {}", serde_json::Value::from(chords)));
+        _ = eval(&format!("window.__aioClaims = {}", serde_json::Value::from(chords)));
         let any = !all.borrow().is_empty();
-        if *self.any.peek() != any {
+        if *self.any.read_untracked() != any {
             self.any.set(any);
         }
     }
@@ -336,47 +152,47 @@ pub const MOVE_MS: u32 = 100;
 /// has it, so keys reach it from the start; a key pressed while nothing
 /// has focus (on `<body>`) reaches it too (the page's [`KEYS`](crate::page::KEYS)).
 #[component]
-pub fn GlobalKeys(#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>, children: Element) -> Element {
+pub fn GlobalKeys(#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>, children: View) -> View {
     use super::window::{Listeners, WindowEvent as W};
-    let keys = use_context_provider(Keys::default);
-    let win = use_context_provider(Listeners::default);
-    let claims = use_context_provider(|| Claims { keys: Signal::new(Keys::default()), any: Signal::new(false) });
-    let tell = use_callback(move |e| win.tell(e));
+    let keys = provide(Keys::default);
+    let win = provide(Listeners::default);
+    let claims = provide(|| Claims { keys: Signal::new(Keys::default()), any: Signal::new(false) });
+    let tell = callback(move |e| win.tell(e));
     rsx! {
         div {
             class: "aio-keys",
             "data-aio-keys": "",
             tabindex: "-1",
             onmounted: move |e| async move {
-                _ = dioxus_document::eval(&PAGE_KEYS.replace("MOVE_MS", &MOVE_MS.to_string()));
+                _ = eval(&PAGE_KEYS.replace("MOVE_MS", &MOVE_MS.to_string()));
                 _ = e.set_focus(true).await
             },
             onkeydown: move |e| {
                 if !keys.fire(e.clone()) {
-                    tell(W::KeyDown(e))
+                    tell.call(W::KeyDown(e))
                 }
             },
-            onkeyup: move |e| tell(W::KeyUp(e)),
-            onmousedown: move |e| tell(W::MouseDown(e)),
-            onmouseup: move |e| tell(W::MouseUp(e)),
-            onclick: move |e| tell(W::Click(e)),
-            onwheel: move |e| tell(W::Wheel(e)),
+            onkeyup: move |e| tell.call(W::KeyUp(e)),
+            onmousedown: move |e| tell.call(W::MouseDown(e)),
+            onmouseup: move |e| tell.call(W::MouseUp(e)),
+            onclick: move |e| tell.call(W::Click(e)),
+            onwheel: move |e| tell.call(W::Wheel(e)),
             onresize: move |e: ResizeEvent| {
                 if let Ok(s) = e.get_border_box_size() {
-                    tell(W::Resize { width: s.width, height: s.height })
+                    tell.call(W::Resize { width: s.width, height: s.height })
                 }
             },
             ..attributes,
             // The page tells the pointer's moves here, MOVE_MS apart.
-            div { "data-aio-moves": "", hidden: true, onmousemove: move |e| tell(W::MouseMove(e)) }
-            if (claims.any)() {
+            div { "data-aio-moves": "", hidden: true, onmousemove: move |e| tell.call(W::MouseMove(e)) }
+            if (claims.any).get() {
                 div {
                     "data-aio-claimed": "",
                     hidden: true,
                     onkeydown: move |e| {
                         // Claimed: nothing else hears it, the root's bindings neither.
                         e.stop_propagation();
-                        let k = claims.keys.peek().clone();
+                        let k = claims.keys.read_untracked().clone();
                         k.fire(e);
                     },
                 }
@@ -398,17 +214,17 @@ pub fn use_key_claim(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) +
         ChordSpec(Ok(c)) => c,
         ChordSpec(Err(e)) => panic!("{e}"),
     };
-    let run = use_callback(f);
-    let claims = try_use_context::<Claims>().expect("use_key_claim needs a GlobalKeys around the app");
-    let keys = claims.keys.peek().clone();
-    let id = use_hook(|| {
+    let run = callback(f);
+    let claims = try_context::<Claims>().expect("use_key_claim needs a GlobalKeys around the app");
+    let keys = claims.keys.read_untracked().clone();
+    let id = once(|| {
         let id = keys.next.get();
         keys.next.set(id + 1);
         keys.all.borrow_mut().push(Binding { id, chord: chord.clone(), run });
         id
     });
     // Told once it rendered (the claims' element is the root's to render).
-    use_effect(move || claims.changed());
+    effect(move || claims.changed());
     let moved = keys.all.borrow_mut().iter_mut().find(|b| b.id == id).is_some_and(|b| {
         let moved = b.chord != chord;
         b.chord = chord;
@@ -417,8 +233,8 @@ pub fn use_key_claim(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) +
     if moved {
         claims.changed();
     }
-    use_drop(move || {
-        claims.keys.peek().all.borrow_mut().retain(|b| b.id != id);
+    on_cleanup(move || {
+        claims.keys.read_untracked().all.borrow_mut().retain(|b| b.id != id);
         claims.changed();
     });
 }
@@ -431,9 +247,9 @@ pub fn use_global_key(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) 
         ChordSpec(Ok(c)) => c,
         ChordSpec(Err(e)) => panic!("{e}"),
     };
-    let run = use_callback(f);
-    let keys = try_use_context::<Keys>().expect("use_global_key needs a GlobalKeys around the app");
-    let id = use_hook(|| {
+    let run = callback(f);
+    let keys = try_context::<Keys>().expect("use_global_key needs a GlobalKeys around the app");
+    let id = once(|| {
         let id = keys.next.get();
         keys.next.set(id + 1);
         keys.all.borrow_mut().push(Binding { id, chord: chord.clone(), run });
@@ -442,7 +258,7 @@ pub fn use_global_key(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) 
     if let Some(b) = keys.all.borrow_mut().iter_mut().find(|b| b.id == id) {
         b.chord = chord;
     }
-    use_drop(move || keys.all.borrow_mut().retain(|b| b.id != id));
+    on_cleanup(move || keys.all.borrow_mut().retain(|b| b.id != id));
 }
 
 /// A chord as [`use_global_key`] and [`use_key_claim`] take it: a `&str`

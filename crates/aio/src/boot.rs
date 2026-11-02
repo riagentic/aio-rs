@@ -35,6 +35,10 @@ pub fn rows(
         row("data", dirs.data.display().to_string(), dirs.from),
         row("logs", dirs.logs.display().to_string(), dirs.from),
         row("history", format!("{} days", cfg.history.keep.as_secs() / 86_400), "aio.toml"),
+        {
+            let (level, from) = log_level(cfg.log.level, set("AIORT_LOG").as_deref());
+            row("log", serde_json::to_value(level).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(), from)
+        },
         // Phones always save hard (`Source::for_app`): the OS may end the app.
         if cfg!(any(target_os = "android", target_os = "ios")) {
             row("durability", String::from("full"), "phone")
@@ -91,6 +95,13 @@ pub fn rows(
     r
 }
 
+/// The log's lowest level: `AIORT_LOG` (`ax dev --verbose`: `debug`) over
+/// `[log] level`, and which decided (pure). A word that is no level is not taken.
+pub fn log_level(cfg: crate::log::Level, env: Option<&str>) -> (crate::log::Level, &'static str) {
+    let asked = env.and_then(|v| serde_json::from_value(serde_json::Value::from(v.trim().to_lowercase())).ok());
+    asked.map_or((cfg, "aio.toml"), |l| (l, "AIORT_LOG"))
+}
+
 /// Who can reach `listen`, in words (the security posture).
 fn reach(listen: &str) -> &'static str {
     match listen.parse::<std::net::SocketAddr>().map(|a| a.ip()) {
@@ -144,14 +155,21 @@ pub fn no_config_file(env: &dyn Fn(&str) -> Option<String>) -> std::io::Result<(
 /// Call once, first thing after the app's lock is taken.
 pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::io::Result<()> {
     no_config_file(&|k| std::env::var(k).ok())?;
-    crate::log::configure(&cfg.log);
+    let env = std::env::var("AIORT_LOG").ok().filter(|v| !v.is_empty());
+    let (level, from) = log_level(cfg.log.level, env.as_deref());
+    crate::log::configure(&crate::config::Log { level, ..cfg.log.clone() });
     crate::log::start(&dirs.logs)?;
+    if let Some(v) = env.filter(|_| from != "AIORT_LOG") {
+        eprintln!("WARN  [aio] AIORT_LOG={v} is no level (trace, debug, info, warn, error): [log] level holds");
+    }
     crate::paths::booted(dirs);
     crate::perf::set(cfg.perf.clone());
+    crate::cron::set_local(cfg.app.tz == crate::config::Tz::Local);
     crate::vitals::set(cfg.vitals);
     crate::capabilities::set(&cfg.capabilities.network);
     crate::budgets::declare(cfg.budgets);
     crate::ui::set_look(cfg.ui.theme);
+    crate::ui::set_scheme(cfg.ui.scheme);
     crate::perf::start(&dirs.logs)?;
     crate::report::init(crate::report::About {
         id: cfg.app.id.clone(),
@@ -163,10 +181,16 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
         auto: cfg.feedback.auto,
     });
     crate::report::on_panic();
+    // air's dev-build warnings (an event whose element was drawn again) on the bus.
+    #[cfg(feature = "air")]
+    air::on_warn(|kind, msg| {
+        crate::warn!(cat: "ui", "{msg}");
+        crate::report::tell(kind, msg);
+    });
     crate::feedback::open();
     eprintln!("[aio] {} {version} starting (pid {})", cfg.app.id, std::process::id());
     say(&rows(cfg, version, dirs, &|k| std::env::var(k).ok(), &|p| p.exists()));
-    crate::health::start(&dirs.data, cfg.memory);
+    crate::health::start(&dirs.data, cfg.memory, crate::health::config_of(cfg));
     Ok(())
 }
 
@@ -180,6 +204,19 @@ mod tests {
 
     fn find<'a>(r: &'a [Row], k: &str) -> Option<&'a Row> {
         r.iter().find(|x| x.key == k)
+    }
+
+    #[test]
+    fn aiort_log_sets_the_level_for_one_run() {
+        use crate::log::Level;
+        assert_eq!(log_level(Level::Info, None), (Level::Info, "aio.toml"));
+        assert_eq!(log_level(Level::Info, Some("DEBUG")), (Level::Debug, "AIORT_LOG"));
+        assert_eq!(log_level(Level::Warn, Some("loud")), (Level::Warn, "aio.toml"), "no level: not taken");
+        let d = tempfile::tempdir().unwrap();
+        let env = |k: &str| (k == "AIORT_LOG").then(|| "trace".to_string());
+        let cfg = Config::parse("[app]\nid = \"notes\"").unwrap();
+        let r = rows(&cfg, "1.0.0", &dirs(d.path()), &env, &|_| false);
+        assert_eq!(find(&r, "log").map(|r| (r.value.as_str(), r.from)), Some(("trace", "AIORT_LOG")));
     }
 
     #[test]

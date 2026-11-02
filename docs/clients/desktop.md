@@ -2,11 +2,12 @@
 
 On Linux, Windows and macOS an aio-rs app's views are drawn by the shared
 Electron runtime. The views themselves run in the app's Rust process: a
-Dioxus `VirtualDom` per window, whose DOM edits and events travel over a
+view tree per window (air's, behind `aio::ui`), whose DOM edits and events travel over a
 private socket to a small page in Electron. The page loads from
-`aio://app/`, connects to nothing and runs no app code; Electron's main
-process opens the window, the tray, notifications and dialogs when the app
-asks.
+`aio://app/`, connects to nothing but its own origin (the app's routes,
+when it has some: [transports](transports.md#routes-in-the-window)) and
+runs no app code; Electron's main process opens the window, the tray,
+notifications and dialogs when the app asks.
 
 - **Use it** for every window app: `ax create <name>` (the `app` template)
   is one, `ax dev <app>` runs it, `ax build <app>` packages it
@@ -55,10 +56,12 @@ up to 30 s for its lock: a new build replacing an old one.
 
 ### Closing and stopping
 
-- Closing the window ends the app (`aio_shell::run` returns). There is no
-  "keep the server running" switch: an app whose server must outlive its
-  window is two apps, a `mode = "server"` service and a `mode = "client"`
-  window ([sync](../state/sync.md)).
+- Closing the window ends the app (`aio_shell::run` returns), unless
+  `Window { keep_server: true }` or the launch's `--keep-server` (aio's
+  `keepServer`) keeps it serving: its cells, its port if it has one, its
+  local door, until `ax stop`, SIGTERM or Ctrl-C. The log says where it
+  serves. A window that crashed keeps it serving too (said), unless a
+  required sandbox refused it.
 - `ax stop <app>`, SIGTERM or Ctrl-C ask the window to quit; the runtime
   gets 5 s, then it is killed. The stores then drain as on a close.
 - A parent that goes (`ax dev`, a test harness) stops the app the same
@@ -86,6 +89,11 @@ Where the window's runtime comes from, first match wins:
   shows progress and Cancel; a failure asks Retry or Quit. That window is
   drawn with what each OS always has (zenity or yad on Linux, Cocoa on
   macOS, Windows Forms on Windows, else a page in the default browser).
+  `[build.download_window]` sets its heading, text, question, colours and
+  whether it has a Cancel button; with a `[build.splash]` it draws the
+  splash's image above its bar (yad, Cocoa, Windows Forms, the page;
+  zenity draws no image), in the splash's colours, its line the splash's
+  `download_text` ([aio.toml](../reference/aio-toml.md#buildsplash)).
 - `AIORT_ELECTRON_MIRROR=<url>` replaces
   `https://github.com/electron/electron/releases/download/`.
 - `ax setup` and `ax runtime --fetch` fetch it ahead of time (CI, a
@@ -122,22 +130,56 @@ stamped complete. Its app records become aio's; its macOS windows are made
 again at the next start. An entry a running program starts from stays
 where it is until it doesn't.
 
+## The splash
+
+With a `[build.splash]` ([aio.toml](../reference/aio-toml.md#buildsplash))
+the OS draws the app's image before Electron starts, at every start (aio's
+splash): Linux with GTK 3 (opened at run time, as Electron links it; no
+link-time dependency), macOS with JavaScript for Automation over Cocoa,
+Windows with Windows Forms. It opens where the app's window will
+(`position`), above other windows, never takes the focus and has no
+taskbar or Dock entry. The app's window shows the moment it has painted,
+under the splash; the splash goes once it has been up `min_ms`, at its
+`max_ms` cap with no window, or when Electron exits.
+
+A first start's Electron download runs on it: the bar and its line
+(`download_text`) under the text, a ✕ that cancels the start (`cancel`).
+A failed download closes it and asks Retry or Quit.
+
+- `show = "first-start"`: only while Electron downloads; `"never"`: none
+  (the download window is then the plain one). `Window { splash_show:
+  Some(f) }` decides at run time (aio's `splash.show`): `f` may take 50
+  ms; one that panics or takes longer leaves the build's `show`, said.
+- On Windows, when Electron is already here, Electron's main process draws
+  it (as aio's: the Forms helper shows later than the app's window); the
+  Forms splash opens for a download only.
+- Where the OS cannot draw it (no GTK, no display) Electron draws it and a
+  download shows the download window, the reason said once in the log.
+- `ax build` builds it in for an app with a `[build.splash]` (aio-rs-shell's
+  `native-splash` feature): an app without one carries none of it, and
+  `ax dev` or a plain `cargo build` has Electron draw the splash.
+- Each start logs `[aio] splash: visible N ms after it was asked for` and
+  why it closed.
+
 ## The window's behaviour
 
 | What | How it works |
 |---|---|
 | Size and place | the first size is `Window { width, height }`; the size and place a person leaves it at are kept in `<data>/window.json` and used while the declared size is unchanged. A saved place off every screen moves onto the screen it overlaps most; a size as big as the screen opens maximized. `ax dev --size 390x844` opens one run at that size and saves nothing. |
-| First frame | the window shows once it has painted (5 s at most), on `Window { background: Some([light, dark]) }` until then; `[build.splash]` shows the app's image first ([theming](../ui/theming.md)) |
+| First frame | the window shows once it has painted, at most `Window { show_cap_ms }` later (5000 unset; `Some(0)`: at once, aio's `showWhenPainted: false`; a page that never paints is said), on `Window { background: Some([light, dark]) }` until then; `[build.splash]` shows the app's image first ([theming](../ui/theming.md)): its `show` (`always`, `first-start`, `never`) or the app's say at run time, `Window { splash_show: Some(f) }` (aio's `splash.show`) |
 | Menu | none (Electron's default menu carries DevTools and reload), except on macOS: the app menu (Hide, Quit), Edit (so Cmd+C works in a field) and Window, all system roles. An app can't add menus yet. |
 | Keys | Ctrl+R / F5 reload and Ctrl+P print belong to the window unless `Window { keys: Keys { reload, print } }` gives them to the page. A debug build adds DevTools (F12, Ctrl+Shift+I) and a clean reload. |
 | Links | the page never navigates; an `http(s)` link opened after a real click goes to the system browser. A pop-up a script opens by itself is blocked and said in the log. `AIORT_NO_OPEN=1` opens nothing (a contained run). |
 | Permissions | the page may copy text and go fullscreen, nothing else, unless `Window { permissions }` names more (`aio_shell::guest::PERMISSIONS`: `clipboard-read`, `media`, `geolocation`…). Its own `Notification` is refused: notifications come from the app. |
 | Unload | a page's `beforeunload` veto is ignored (said once in the log) unless `confirm_unload: true`, then Leave / Stay is asked |
-| Page messages | the page's `console.warn` and `console.error` land in the app's log as `[page]` lines, with the file and line (8 KB each, 100 a second); `ax logs <app> --client` shows only those |
+| Page messages | the page's console lands in the app's log as `[page]` lines at its level (`log` and `info` as INFO, `debug` in a debug build only), with the file and line (8 KB each, 100 a second); `ax logs <app> --client` shows only those |
 | Hangs and crashes | a page that stops answering marks the app's health degraded ("window") until it answers again. A crashed renderer is reloaded on a new connection; the fourth crash in a minute closes the app with a dialog, and a problem report is saved. |
 | GPU | a runtime that died because the GPU failed is remembered (`<data>/electron/gpu-failed`): the next start draws in software. `AIORT_GPU=software` or `hardware` decides by hand. |
 | Back | a mouse's back button (Windows, Linux) is the app's Back, as Android's is ([routing](../ui/routing.md)) |
 | Identity | each app is its own app to the OS: its window class and Wayland app id, its taskbar entry and, on macOS, its own Dock icon (the window runs through the app's bundle) |
+| macOS Dock | opening the running app again (its Dock icon, Finder, `open`) brings a window hidden to the tray, or minimized, back |
+| Sandbox | Chromium's sandbox, always; a Linux host that can't run it (user namespaces closed, no setuid helper) starts the runtime with `--no-sandbox`, said, unless `Window { require_sandbox: true }` (aio's `requireSandbox`) or `AIORT_SANDBOX=1`: then the app stops with the reason |
+| Menu entry | Linux: `Exec="…" %U`, so "Open with" hands the files to the app (`aio_shell::launches`) |
 
 The runtime's profile lives in the app's own data (`<data>/electron/profile`),
 never in a shared Chromium profile.
@@ -159,15 +201,33 @@ called once in the root component with the router's `go` (`router!` makes
 one): items then run where every button runs, with the cells, signals and
 router at hand.
 
+### The app's icon
+
+Every window app has its icon at run time, in a dev build and an installed
+one: `aio::config!()` builds in `assets/icon.png` beside `aio.toml` and
+`Window::of(&cfg)` wears it; a `Window` with no icon wears the app's
+monogram (its name's first letter, deep on a pastel gradient, aio's
+generated icon), drawn by the shell once and kept while its letter and hue
+stay, in the app's hue (`Config::hue`: `[ui] hue`, else its id's), the one
+its page, splash and download window share. It is on the title bar, the
+taskbar and Alt-Tab, the tray, notifications, the window bundle in the
+macOS Dock, the download window (Windows, macOS, GTK) and a browser tab's
+favicon. A first `assets/icon.png` is built in the next time the crate
+compiles (an edit, or `cargo clean -p <app>`); a changed one is noticed by
+itself.
+
 ### Changing the icon
 
 `aio_shell::desktop::icon(Icon::Window | Icon::Tray, frames, fps)` changes
 an icon from now on: one PNG, or up to `ICON_FRAMES` (64) PNG frames of at
 most `ICON_BYTES` (512 KB) each, looped by the runtime at `fps` (at most
 `ICON_FPS`, 12). No frames: the app's own icon again. A bad image is
-refused where it is passed. A cell asks the same with
-`cx.tell(Tell::Icon { tray, frames, fps })` (base64 frames), so a server's
-state can badge every window showing it.
+refused where it is passed. A cell asks for the window's, the tray's and
+the tray's tooltip in one with `cx.tell(Tell::Icon { window, tray,
+tooltip, fps })` (aio's `appIcon()`: base64 frames; `None` leaves that
+one as it is), so a server's state can badge every window showing it.
+`desktop::icon_state()` says what each shows now (aio's `iconState()`):
+`Own`, `Still` or `Animated { frames, fps }`, and the tooltip.
 
 ## Notifications
 
@@ -223,9 +283,16 @@ assert!(matches!(&seen.lock().unwrap()[0], Tell::Notify { body, .. } if body == 
 ([views](../ui/views.md#the-page)): `pick(&Pick { .. })` and
 `pick_many` (files of some types, or a folder), `save(&Save { .. })` (a
 path to write, after the dialog asked before replacing a file), `copy`,
-`print`. A dialog is owned by the window; with no window (a test) the
-desktop's own dialog tool answers. An error (no dialog tool, no desktop
-session) is an error, never a cancel.
+`print` (CSS backgrounds and colours printed too). A dialog is owned by
+the window; with no window (a test) the desktop's own dialog tool
+answers. An error (no dialog tool, no desktop session) is an error, never
+a cancel.
+
+The window's verbs (aio's `__aioWindow`): `page::minimize()`,
+`maximize()` (or back), `close()`, `hide()`, `show()`. `close` is the
+title bar's own close: a close-to-tray app hides, another stops, and the
+window's place is saved. The page's own `window.close()` takes the same
+path.
 
 ## Other sites in the app
 
@@ -233,14 +300,19 @@ Someone else's page shows in a view with `aio::kit::Browser` (needs
 `Window { web: Web { browser: true, .. } }`) or in a window of its own
 with `aio_shell::open_window(&Child { url, preload, partition, origins,
 size })` (needs `windows: true`). Both run sandboxed, in a session that is
-never the app's. See [web: embedded pages](web.md#embedded-pages).
+never the app's. `aio_shell::clear_partition("persist:name").await`
+(aio's `clearPartition`) wipes what one of those sessions stored, its
+cache and its HTTP sign-ins: an app that locks drops its guests' data. The
+app's own session is refused, by any spelling. See
+[web: embedded pages](web.md#embedded-pages).
 
 ## Running a program from the app
 
 A desktop app that drives another program (a converter, `git`, a backup
-tool) runs it in an effect: the call that asks for it commits at once,
-the program runs off the cell's thread, and its result comes back as
-another call, saved in the log like any input.
+tool) runs it with `aio::process` (aio's `spawn` and `runCommand`) in an
+effect: the call that asks for it commits at once, the program runs off
+the cell's thread, and its result comes back as another call, saved in
+the log like any input.
 
 ```rust
 use aio::prelude::*;
@@ -254,20 +326,6 @@ pub struct Jobs {
     pub error: Option<String>,
 }
 
-/// `program args`, on a blocking thread: its trimmed output, or why it failed.
-async fn run(program: String, args: Vec<String>) -> std::result::Result<String, String> {
-    let ran = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&program).args(&args).output().map_err(|e| format!("{program}: {e}"))
-    });
-    let out = ran.await.map_err(|e| e.to_string())??;
-    let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
-    if out.status.success() {
-        Ok(text(&out.stdout))
-    } else {
-        Err(format!("exited with {}: {}", out.status, text(&out.stderr)))
-    }
-}
-
 #[methods]
 impl Jobs {
     pub fn run_job(&mut self, cx: &Cx, program: String, args: Vec<String>) -> Result {
@@ -276,11 +334,16 @@ impl Jobs {
         self.error = None;
         cx.run(
             Effect::new("job", move |h: Handle<Jobs>| async move {
-                let got = run(program, args).await;
+                // Its whole tree killed after 10 minutes; what it wrote kept.
+                let ran = aio::process::Command::new(&program).args(&args).run(Some(Duration::from_secs(600))).await;
+                let got = match ran {
+                    Ok(out) if out.status.success() => Ok(out.stdout.trim().to_string()),
+                    Ok(out) => Err(format!("exited with {}: {}", out.status, out.stderr.trim())),
+                    Err(e) => Err(e.to_string()),
+                };
                 _ = h.ended(got);
             })
-            .mode(Mode::First)
-            .timeout(Duration::from_secs(600)),
+            .mode(Mode::First),
         );
         Ok(())
     }
@@ -305,25 +368,35 @@ assert!(h.state().output.as_deref().is_some_and(|o| o.starts_with("cargo")));
 # }
 ```
 
+| `aio::process` | What it does |
+|---|---|
+| `Command::new(p).args(..).cwd(..).env(k, v)` | the program, its arguments as a list (never through a shell), its folder, its environment: the app's without aio-rs's own `AIORT_*` settings |
+| `.run(timeout)` | to its end: `Output { status, stdout, stderr, timed_out }`. A timeout (on the wall clock, also in `TestCells`) kills the whole tree on time and keeps what it wrote. A program that fails is an `Output`; one that can't start is an error. |
+| `.stdin()` | a pipe to its stdin: `child.write(bytes).await`, `child.close_stdin()` (a filter like `sort` goes on from its end). Off by default: a program reading a pipe nobody writes waits forever. |
+| `.on_line(f)` | each line of its output (`\n`, `\r\n` or `\r`: a progress bar that rewrites its line) to `f(line, Stream)` as it comes, with `run` too |
+| `.spawn()` | a `Child` while it runs |
+| `child.pause()`, `resume()` | the whole tree stopped and resumed (SIGSTOP to its group; Windows: an error) |
+| `child.kill().await`, `wait().await` | the tree asked to end (SIGTERM), killed after its grace (2 s, `.grace(d)`); its exit once its output is read |
+
+- **The whole tree**: each program runs in a process group of its own (a
+  job object on Windows), so a kill reaches what it started too, never
+  only the process you can see.
+- **Dropped is killed**: a `Child` dropped (an effect aborted or timed out
+  at its next await) takes its tree with it. One still running when the
+  app stops is killed then, and the log names it.
+- **No console windows**: on Windows every program starts without a
+  console window, and a release app (no console of its own) adopts one
+  hidden console at start, so a console program started any other way
+  (`std::process`, a library) opens none either.
 - **Choosing the program**: run a path the app knows (a bundled tool, one
   the person picked with `page::pick`), never a string from the network.
-  Pass arguments as a list, never through a shell.
-- **Long jobs**: an effect's `.timeout(d)` is its limit; none means it
-  runs until the app closes. `h.busy("job")` and `h.pending(..)` are what a
-  spinner reads. A step-by-step `async fn` method is cut off after
+- **Long jobs**: `h.busy("job")` and `h.pending(..)` are what a spinner
+  reads. A step-by-step `async fn` method is cut off after
   `aio::effect::CALL_CEILING` (30 s) per await unless marked `#[long]`
   ([effects](../state/effects.md#heavy-work-retries-and-timeouts)).
-- **Talking to it**: stream its stdout line by line from the effect and
-  hand progress back as calls (`h.progress(line)`), coalesced if they are
-  many.
-- **Cleaning up**: an aborted or timed-out effect is dropped at its next
-  await, but a child it started keeps running. Keep the
-  `std::process::Child` and kill it, or use `tokio::process::Command` with
-  `kill_on_drop(true)` (tokio's `process` feature in the app's
-  `Cargo.toml`), so the program dies with the effect.
-- The program gets the app's environment; aio-rs's own settings
-  (`AIORT_*`) are worth removing (`aio::lifecycle::scrub(&mut cmd,
-  false)` does).
+- **Talking to it**: hand its lines back as calls (`h.progress(line)`)
+  from `on_line`, coalesced if they are many; a stop is `cx.abort(key)`,
+  which drops the effect and kills the tree ([cookbook](../basics/cookbook.md#22-a-subprocess-with-a-timeout-and-a-stop-button)).
 
 ## Headless hosts, VMs and containers
 
@@ -358,7 +431,12 @@ A debug build's window opens a private door for aio-rs's tools: `ax
 surface`, `ax trigger`, `ax shot`, `ax eval` and `ax components` reach it
 with no flag and no port. `ax dev <app> --cdp` (or `AIORT_CDP=<port>`)
 also opens Chrome's DevTools protocol on loopback for other tools. A
-release build opens neither: nothing outside the app can reach its page.
+release build opens neither, and reads no debug setting from the
+environment (aio's `ignoreDebugEnv`, always on): nothing outside the app can
+reach its page. Other processes of this user reach its cells through its
+local door with a client's rights (`ax state`, other apps as peers);
+`[server] local_peers = false` (aio's `allowLocalPeers` off) opens no door
+in a release build.
 
 ```sh
 ax surface notes              # what a person sees, by handle
@@ -371,7 +449,7 @@ ax clients notes              # its windows
 
 A window on another machine's cells is `[app] mode = "client"` with
 `[client] server` naming the server: the same views, over a synced copy
-([sync](../state/sync.md)). `ax pin` and `ax pair` link a device without
+([sync](../state/sync.md)). `ax pair` (a code, then the device with it) links a device without
 typing the key; `ax discover` lists the aio-rs apps on this network that
 answer.
 
@@ -380,23 +458,20 @@ answer.
 What aio's Electron client has and aio-rs doesn't yet:
 
 - No custom window chrome (aio's `ui.chrome`: frameless window, own title
-  bar): the OS title bar is always there.
-- No app menus beyond macOS's standard ones, and no context-menu API.
-- One app window per process; more windows are only child windows of
-  other sites (`open_window`).
-- No `keepServer` / `--keep-server`: split the app into a server and a
-  client, as above.
-- No helper like aio's `runCommand` with its `stdin` mode: run programs
-  with `std::process` in an effect, as shown.
-- No `requireSandbox`, `allowLocalPeers` or `ignoreDebugEnv` options:
-  `AIORT_SANDBOX=1` is the one switch; local peers reach the app only
-  through its door ([transports](transports.md)).
+  bar): the OS title bar is always there. The window's verbs are there
+  (`page::minimize` and the rest), for a title bar drawn by the app once
+  frameless windows land.
+
+aio has no app menus beyond macOS's standard ones or a context-menu API,
+and opens one app window per process, as aio-rs does.
 
 ## Common mistakes
 
-- A blocking `Command::output()` in an effect's async body: it blocks a
-  runtime thread. Wrap it in `spawn_blocking`.
-- Expecting a closed window to leave the server up: it stops the app.
+- A blocking `std::process::Command::output()` in an effect's async body:
+  it blocks a runtime thread, and a kill misses what the program started.
+  Use `aio::process`.
+- Expecting a closed window to leave the server up: it stops the app
+  unless `keep_server`.
 - Adding `--no-sandbox` or `--remote-debugging-port` to
   `AIORT_ELECTRON_ARGS`: both are refused and said; use `AIORT_SANDBOX`
   and `AIORT_CDP`.
@@ -408,7 +483,9 @@ What aio's Electron client has and aio-rs doesn't yet:
 ## API
 
 `cargo doc -p aio-rs-shell --no-deps --open`: `Window`, `start`, `run`,
-`launches`, `desktop` (`Tray`, `Item`, `Notice`, `notify`, `icon`,
-`use_asks`), `page`, `guest` (`Web`, `Keys`, `Child`, `open_window`,
+`launches`, `desktop` (`Tray`, `Item`, `Notice`, `notify`, `icon`, `icon_state`,
+`use_asks`), `page` (the dialogs, `print`, the window's verbs), `guest`
+(`Web`, `Keys`, `Child`, `open_window`, `clear_partition`,
 `PERMISSIONS`), `runtime`, `switches`. `cargo doc -p aio-rs --no-deps
---all-features --open`: `aio::tell`, `aio::effect`, `aio::lifecycle`.
+--all-features --open`: `aio::tell`, `aio::effect`, `aio::process`,
+`aio::lifecycle`.

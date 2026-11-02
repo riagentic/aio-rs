@@ -41,6 +41,14 @@ impl Relay {
         if method == COMPONENTS {
             return Err(answer(&m["id"], Ok(&components())));
         }
+        // `ax dev`'s template hot reload: the views built again, answered here.
+        if method == HOT {
+            return Err(answer(&m["id"], hot(&m["params"]).as_ref().map_err(String::as_str)));
+        }
+        // `ax dev`'s hot-patch: where this process is loaded, then a patch.
+        if method == ASLR || method == PATCH {
+            return Err(answer(&m["id"], patching(method, &m["params"]).as_ref().map_err(String::as_str)));
+        }
         self.next += 1;
         self.asks.insert(self.next, (from, m["id"].clone()));
         Ok(json!({ "t": "cdp", "id": self.next, "method": method, "params": m.get("params").unwrap_or(&json!({})) })
@@ -72,19 +80,142 @@ impl Relay {
 }
 
 /// The door's own method: the running view's component tree,
-/// `{"components": [{name, renders, ms, children}]}`, its last renders,
-/// `"renders": [{component, at, ms, trigger}]`, and `"total"` renders.
+/// `{"components": [{name, key, renders, updates, children}]}`, its last
+/// renders, `"renders": [{component, key, at, ms, trigger}]` (a dev build's),
+/// and `"total"` renders.
 pub const COMPONENTS: &str = "Aio.components";
+
+/// The door's own method: `ax dev`'s template hot reload. Its params:
+/// `{"files": [file], "templates": [{file, line, col, idx, nodes (base64),
+/// count}]}` (the files' templates edited since they were built, each by
+/// where its `rsx!` call is written; the files' others as built); the
+/// answer `{"windows": n}`, the windows told to build their views again.
+pub const HOT: &str = "Aio.hot";
+
+/// Apply a hot reload's templates (air's).
+fn hot(params: &Value) -> Result<Value, String> {
+    {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let one = |t: &Value| -> Option<air::hot::Markup> {
+            Some(air::hot::Markup {
+                file: t["file"].as_str()?.into(),
+                line: u32::try_from(t["line"].as_u64()?).ok()?,
+                col: u32::try_from(t["col"].as_u64()?).ok()?,
+                idx: u32::try_from(t["idx"].as_u64()?).ok()?,
+                nodes: b64.decode(t["nodes"].as_str()?).ok()?,
+                count: u32::try_from(t["count"].as_u64()?).ok()?,
+            })
+        };
+        let ts = params["templates"].as_array().ok_or("no templates")?;
+        let markup = ts.iter().map(one).collect::<Option<Vec<_>>>().ok_or("a template is malformed")?;
+        let files = params["files"].as_array().ok_or("no files")?;
+        let files = files
+            .iter()
+            .map(|f| f.as_str().map(String::from))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("a file is not text")?;
+        Ok(json!({ "windows": crate::views::hot(&files, markup) }))
+    }
+}
+
+/// The door's own methods for `ax dev`'s hot-patch (a dev build with
+/// aio-shell's `dev`): `Aio.aslr` answers `{"aslr": n}`, where this process
+/// is loaded (`aio_hotpatch::aslr_reference`, which a patch is linked
+/// against), and on Windows `"base"`: a free span near this binary where a
+/// patch DLL, linked at that fixed base, loads; `Aio.patch` takes `{"table": <an aio_hotpatch::JumpTable>}`, loads
+/// the patch and answers `{"applied": true}`: the code calls the new
+/// functions from then on (the views on air are built again on them).
+pub const ASLR: &str = "Aio.aslr";
+pub const PATCH: &str = "Aio.patch";
+
+fn patching(method: &str, params: &Value) -> Result<Value, String> {
+    #[cfg(all(debug_assertions, feature = "dev"))]
+    {
+        if method == ASLR {
+            #[cfg(windows)]
+            return Ok(json!({ "aslr": aio_hotpatch::aslr_reference(), "base": patch_base() }));
+            #[cfg(not(windows))]
+            return Ok(json!({ "aslr": aio_hotpatch::aslr_reference() }));
+        }
+        let table: aio_hotpatch::JumpTable =
+            aio::serde_json::from_value(params["table"].clone()).map_err(|e| format!("not a jump table: {e}"))?;
+        // SAFETY: a table `ax dev` linked against this very binary at the
+        // address it answered (`Aio.aslr`).
+        unsafe { aio_hotpatch::apply_patch(table) }.map_err(|e| format!("the patch didn't load: {e}"))?;
+        #[cfg(all(windows, target_env = "msvc"))]
+        refresh_symbols();
+        Ok(json!({ "applied": true }))
+    }
+    #[cfg(not(all(debug_assertions, feature = "dev")))]
+    {
+        _ = (method, params);
+        Err("not built for hot-patching: ax dev builds with aio-shell's dev feature".into())
+    }
+}
+
+/// Windows (MSVC): std's backtrace resolver (dbghelp) lists this process's
+/// modules once, at the first backtrace; told again after each patch, a
+/// backtrace in a patch DLL names its functions (from its PDB). Under std's
+/// own dbghelp lock (backtrace-rs's `Local\RustBacktraceMutex<pid>`). No
+/// dbghelp loaded: no backtrace yet, and the first one lists every module.
+#[cfg(all(windows, target_env = "msvc", debug_assertions, feature = "dev"))]
+fn refresh_symbols() {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::Threading::{
+        CreateMutexA, GetCurrentProcess, GetCurrentProcessId, INFINITE, ReleaseMutex, WaitForSingleObject,
+    };
+    let dll: Vec<u16> = "dbghelp.dll\0".encode_utf16().collect();
+    // SAFETY: dbghelp's own entry point, called as std calls it, under its lock.
+    unsafe {
+        let module = GetModuleHandleW(dll.as_ptr());
+        if module.is_null() {
+            return;
+        }
+        let Some(f) = GetProcAddress(module, c"SymRefreshModuleList".as_ptr().cast()) else { return };
+        let refresh: unsafe extern "system" fn(HANDLE) -> i32 = std::mem::transmute(f);
+        let name = format!("Local\\RustBacktraceMutex{:08X}\0", GetCurrentProcessId());
+        let lock = CreateMutexA(std::ptr::null(), 0, name.as_ptr());
+        if lock.is_null() {
+            return;
+        }
+        WaitForSingleObject(lock, INFINITE);
+        refresh(GetCurrentProcess());
+        ReleaseMutex(lock);
+        CloseHandle(lock);
+    }
+}
+
+/// Windows: the first 64 KiB-aligned free span of 256 MiB (ax's
+/// `PATCH_ROOM`) past this binary's `main` within 1.5 GiB of it: a patch
+/// reaches the binary's data rip-relative (±2 GiB). `None`: no such span.
+#[cfg(all(windows, debug_assertions, feature = "dev"))]
+fn patch_base() -> Option<u64> {
+    use windows_sys::Win32::System::Memory::{MEM_FREE, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    const ROOM: usize = 256 << 20;
+    let main = aio_hotpatch::aslr_reference();
+    let mut at = main;
+    while at < main + (3 << 29) {
+        // SAFETY: a query of this process's own address space into a local.
+        let mut m: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+        if unsafe { VirtualQuery(at as *const _, &mut m, size) } == 0 {
+            return None;
+        }
+        let end = m.BaseAddress as usize + m.RegionSize;
+        let start = (at.max(m.BaseAddress as usize) + 0xffff) & !0xffff;
+        if m.State == MEM_FREE && start + ROOM <= end {
+            return Some(start as u64);
+        }
+        at = end;
+    }
+    None
+}
 
 /// What the dev build keeps; nothing before the window's view runs.
 fn components() -> Value {
-    #[cfg(debug_assertions)]
-    if let Some(t) = crate::renders::TREE.get() {
-        let t = t.lock().unwrap_or_else(|e| e.into_inner());
-        let (renders, total) = t.renders();
-        return json!({ "components": t.json(), "renders": renders, "total": total });
-    }
-    json!({ "components": [], "renders": [], "total": 0 })
+    crate::views::components()
 }
 
 /// A CDP answer line for call `id` (pure).

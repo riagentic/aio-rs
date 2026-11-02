@@ -53,6 +53,32 @@ pub struct App {
     /// The page's direction, `<html dir>`. Never guessed from `lang`.
     #[serde(default)]
     pub dir: Dir,
+    /// The clock cron schedules read (`#[cron]`, `cx.cron`): `utc`, as aio's
+    /// did, so a port's jobs fire when they did; `local`: this machine's time zone.
+    #[serde(default)]
+    pub tz: Tz,
+    /// The window's own icon, `assets/icon.png` beside `aio.toml`, put in
+    /// by `aio::config!()`; empty: none (the desktop shell then draws the
+    /// monogram, `aio::icon`, in the app's hue).
+    #[serde(skip)]
+    pub icon: &'static [u8],
+}
+
+impl App {
+    /// The name the monogram draws: the app's, else its id.
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() { &self.id } else { &self.name }
+    }
+}
+
+/// `[app] tz`: the clock of cron schedules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Tz {
+    #[default]
+    Utc,
+    /// This machine's local time (its DST changes too).
+    Local,
 }
 
 /// `[app] dir`: which way the page's text runs.
@@ -95,7 +121,7 @@ impl Default for History {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
     /// `host:port` to serve synced cells on. A clash stops startup.
@@ -147,6 +173,34 @@ pub struct Server {
     /// with `[accounts]`, whose sessions are the gate then.
     #[serde(default)]
     pub open: bool,
+    /// Other processes of this user reach a release build's cells through
+    /// its local door (`ax state`, `ax call`, other apps as peers), with a
+    /// client's rights (aio's `allowLocalPeers`, which aio leaves off).
+    /// `false`: a release build opens no door; a debug build always does.
+    #[serde(default = "yes")]
+    pub local_peers: bool,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            discover: false,
+            pairing: false,
+            tls: false,
+            cert: None,
+            key: None,
+            security: Default::default(),
+            hosts: vec![],
+            strict_origin: false,
+            trust_proxy: None,
+            limits: Default::default(),
+            dirs: Default::default(),
+            public_dirs: Default::default(),
+            open: false,
+            local_peers: true,
+        }
+    }
 }
 
 /// The framework's own paths: `/ws` and `/__aio…`, never an app's.
@@ -195,11 +249,26 @@ pub struct Limits {
     pub calls_per_sec: u32,
     /// Bytes a link may send per second (bursts up to twice that).
     pub bytes_per_sec: u32,
+    /// A link is sent at most one change per this many ms (aio's
+    /// `syncIntervalMs`): the first of a burst at once, the rest folded
+    /// into one; a person's call goes at once. `0`: each change at once.
+    pub sync_interval_ms: u64,
+    /// A change whose patch is more than this percent of the whole view is
+    /// sent as the view (aio's `fullStateThreshold`, as a percent). `0`:
+    /// always the view.
+    pub full_state_percent: u32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { clients: 256, max_message: 4 << 20, calls_per_sec: 200, bytes_per_sec: 8 << 20 }
+        Self {
+            clients: 256,
+            max_message: 4 << 20,
+            calls_per_sec: 200,
+            bytes_per_sec: 8 << 20,
+            sync_interval_ms: 50,
+            full_state_percent: 50,
+        }
     }
 }
 
@@ -211,6 +280,13 @@ pub struct Accounts {
     /// user is the session's.
     #[serde(default)]
     pub on: bool,
+    /// Sessions without accounts (aio's `sessions: true`): no users, no
+    /// login doors; the app issues sessions itself (`auth::serving()`'s
+    /// `issue`, say from a server fn that checked its own credential), and
+    /// a session token is that user on every door until it expires or is
+    /// revoked. `on` includes it.
+    #[serde(default)]
+    pub sessions: bool,
     /// Anyone may make an account (`POST /__aio/auth/signup`).
     #[serde(default)]
     pub signup: bool,
@@ -237,7 +313,14 @@ fn thirty_days() -> Duration {
 
 impl Default for Accounts {
     fn default() -> Self {
-        Self { on: false, signup: false, session: thirty_days(), max_sessions: ten(), require_verified: false }
+        Self {
+            on: false,
+            sessions: false,
+            signup: false,
+            session: thirty_days(),
+            max_sessions: ten(),
+            require_verified: false,
+        }
     }
 }
 
@@ -420,6 +503,22 @@ pub struct Data {
     /// `user_version`: the store relies on them.
     #[serde(default)]
     pub pragmas: Vec<String>,
+    /// `false`: the state lives in memory only, never saved, and starts
+    /// from its defaults on every launch (aio's `persist: false`; the launch
+    /// flag `--no-persist` does it for one run).
+    #[serde(default = "yes")]
+    pub persist: bool,
+    /// How long a run of `#[coalesce]` calls is held before it goes into the
+    /// log, in ms (aio's `persistDebounceMs`): a crash loses at most this much.
+    #[serde(default = "Data::default_coalesce_ms")]
+    pub coalesce_ms: u64,
+    /// How often a running app backs its store up into `<home>/backups`
+    /// (`"1d"`, `"6h"`); `"off"` (the default): only when asked (`ax backup`).
+    #[serde(default, with = "span_or_off")]
+    pub backup_every: Option<Duration>,
+    /// Timed backups kept, the newest; older ones are removed (at least 1).
+    #[serde(default = "Data::default_backup_keep")]
+    pub backup_keep: usize,
 }
 
 /// The store's own pragmas, never an app's: `[data] pragmas` can't set them.
@@ -429,11 +528,28 @@ impl Data {
     fn default_store() -> String {
         "state.db".into()
     }
+
+    fn default_coalesce_ms() -> u64 {
+        100
+    }
+
+    fn default_backup_keep() -> usize {
+        7
+    }
 }
 
 impl Default for Data {
     fn default() -> Self {
-        Self { durability: Durability::default(), store: Self::default_store(), retire: vec![], pragmas: vec![] }
+        Self {
+            durability: Durability::default(),
+            store: Self::default_store(),
+            retire: vec![],
+            pragmas: vec![],
+            persist: true,
+            coalesce_ms: Self::default_coalesce_ms(),
+            backup_every: None,
+            backup_keep: Self::default_backup_keep(),
+        }
     }
 }
 
@@ -467,11 +583,14 @@ pub struct Log {
     pub heartbeat: u64,
     /// Methods (`notes.tick`) whose calls are not logged even at `debug`.
     pub suppress: Vec<String>,
+    /// Each run starts fresh files (aio's per-run `debug.log`): the last
+    /// run's move to `app.1.log` …, `keep` runs (or size steps) kept.
+    pub per_run: bool,
 }
 
 impl Default for Log {
     fn default() -> Self {
-        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![] }
+        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![], per_run: false }
     }
 }
 
@@ -497,6 +616,12 @@ pub struct Build {
     pub android: AndroidBuild,
     #[serde(default)]
     pub macos: MacBuild,
+    #[serde(default)]
+    pub windows: WindowsBuild,
+    /// The window a first start shows while Electron downloads, and its
+    /// Retry / Quit question (aio's `electron.downloadWindow`).
+    #[serde(default)]
+    pub download_window: DownloadWindow,
     /// Every build then starts each Linux artifact it made headless, stops
     /// it and checks its log, as `--smoke` does.
     #[serde(default)]
@@ -520,6 +645,86 @@ pub struct Build {
     /// its window has loaded, on the desktop, the web and Android.
     #[serde(default)]
     pub splash: Option<Splash>,
+    /// Folders built into the app by URL prefix (aio's `assets`): `"/media"
+    /// = "media"` (from `aio.toml`'s folder) is the app's `/media/…` in its
+    /// window, its server, its web build and its APK.
+    #[serde(default)]
+    pub assets: std::collections::BTreeMap<String, std::path::PathBuf>,
+    /// Their files, `(URL path, bytes)`, put in by `aio::config!()` (empty elsewhere).
+    #[serde(skip)]
+    pub asset_files: &'static [(&'static str, &'static [u8])],
+}
+
+/// The files of `[build] assets` under `at` (`aio.toml`'s folder): each
+/// one's URL path, percent-encoded as a browser asks for it (`/media/a%20b.png`),
+/// and its file, sorted. Dotfiles are left out (never served); a folder that
+/// isn't there is refused. Read where `aio.toml` is (the build, not the app).
+#[cfg(feature = "toml")]
+pub fn asset_files(
+    at: &std::path::Path,
+    assets: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    fn walk(dir: &std::path::Path, url: &str, out: &mut Vec<(String, std::path::PathBuf)>) -> Result<(), String> {
+        let rd = std::fs::read_dir(dir).map_err(|e| format!("[build] assets: {}: {e}", dir.display()))?;
+        for e in rd {
+            let e = e.map_err(|e| e.to_string())?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if name.contains([':', '*']) {
+                return Err(format!(
+                    "[build] assets: {}: a name with : or * can't be a URL path (rename it)",
+                    e.path().display()
+                ));
+            }
+            let (p, url) = (e.path(), format!("{url}/{}", encode(&name)));
+            match p.is_dir() {
+                true => walk(&p, &url, out)?,
+                false if p.is_file() => out.push((url, p)),
+                false => {}
+            }
+        }
+        Ok(())
+    }
+    let mut out = vec![];
+    for (prefix, dir) in assets {
+        let d = at.join(dir);
+        if !d.is_dir() {
+            return Err(format!("[build] assets {prefix:?}: {} is not a folder", d.display()));
+        }
+        walk(&d, prefix.trim_end_matches('/'), &mut out)?;
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// An asset's URL path ([`asset_files`]) as a relative file path: its
+/// segments, `%XX` decoded.
+pub fn asset_path(url: &str) -> std::path::PathBuf {
+    let decode = |s: &str| {
+        let b = s.as_bytes();
+        let (mut out, mut i) = (Vec::with_capacity(b.len()), 0);
+        while i < b.len() {
+            match (b[i] == b'%').then(|| s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())).flatten() {
+                Some(v) => (out.push(v), i += 3),
+                None => (out.push(b[i]), i += 1),
+            };
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    url.split('/').filter(|s| !s.is_empty()).map(decode).collect()
+}
+
+/// A path segment as a URL spells it: what isn't unreserved, percent-encoded.
+#[cfg(feature = "toml")]
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// `[build.splash]` (aio's `build.splash`).
@@ -529,7 +734,9 @@ pub struct Splash {
     /// A PNG, from `aio.toml`'s folder; `…@2x.png` is drawn at half its
     /// pixel size (crisp on a 2x screen). Built into the app.
     pub image: std::path::PathBuf,
-    /// Under the image; `{title}` is the app's name.
+    /// Under the image; `{title}` is the app's name, `{version}` its version
+    /// (the string `--version` prints); `{got}`, `{total}`, `{pct}` read
+    /// `0`, `?`, `?` (aio's set).
     #[serde(default)]
     pub text: Option<String>,
     /// It stays at least this many milliseconds once shown.
@@ -541,9 +748,200 @@ pub struct Splash {
     /// Behind the image, `["#light", "#dark"]`; unset: the app's own colours.
     #[serde(default)]
     pub background: Option<[String; 2]>,
+    /// When it shows: every start, only while a first start downloads
+    /// Electron, or never (a download then shows the plain download window).
+    #[serde(default)]
+    pub show: SplashShow,
+    /// The line under the bar while a first start downloads Electron in the
+    /// splash: `{title}`, `{version}` (the app's),
+    /// `{got}` and `{total}` (MB), `{pct}`. Unset: `[build.download_window] text`.
+    #[serde(default)]
+    pub download_text: Option<String>,
+    /// The window's size in px `[width, height]`; unset: the image's.
+    #[serde(default)]
+    pub size: Option<[u32; 2]>,
+    /// How the image fills `size` when its shape differs.
+    #[serde(default)]
+    pub fit: Fit,
+    /// The text in a strip below the image, or over its lower part.
+    #[serde(default)]
+    pub text_position: TextPosition,
+    #[serde(default)]
+    pub align: Align,
+    /// The text's and bar's gap to the window's edges, px; unset: 24 at the
+    /// sides, 18 at the bottom.
+    #[serde(default)]
+    pub margin: Option<u32>,
+    /// The window's corner radius, px.
+    #[serde(default)]
+    pub radius: u32,
+    /// A 1 px border in this colour; unset: none.
+    #[serde(default)]
+    pub border: Option<String>,
+    /// The text, `["#light", "#dark"]`; unset: the app's.
+    #[serde(default)]
+    pub text_color: Option<[String; 2]>,
+    /// The download bar's fill and its track, each `["#light", "#dark"]`.
+    #[serde(default)]
+    pub bar: Option<[String; 2]>,
+    #[serde(default)]
+    pub track: Option<[String; 2]>,
+    /// The text's font family (Android: `sans-serif`, `serif`, `monospace`,
+    /// `sans-serif-condensed`…); unset: the system's.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// The text's size (px on the desktop, points on Android); unset: the
+    /// target's (13 px, 14 pt).
+    #[serde(default)]
+    pub font_size: Option<u16>,
+    /// The text in bold.
+    #[serde(default)]
+    pub bold: bool,
+    /// How long it fades out, in milliseconds; unset: the target's (100 on
+    /// the desktop, 200 on Android).
+    #[serde(default)]
+    pub fade_ms: Option<u64>,
+    /// Where it opens: centred where the app's window opens, on the primary
+    /// display, or on the one under the pointer.
+    #[serde(default)]
+    pub position: SplashPosition,
+    /// `position = "window"`: once the app's window shows, the splash moves
+    /// onto where it really is.
+    #[serde(default = "yes")]
+    pub follow_window: bool,
+    /// The text's shadow; unset: the OS's (macOS and Linux on, Windows off).
+    #[serde(default)]
+    pub shadow: Option<bool>,
+    /// The window's drop shadow; unset: the OS's (macOS on).
+    #[serde(default)]
+    pub window_shadow: Option<bool>,
+    /// The ✕ that cancels a first start's download.
+    #[serde(default = "yes")]
+    pub cancel: bool,
+    /// The bar while a first start downloads Electron.
+    #[serde(default = "yes")]
+    pub progress: bool,
+    /// The bar's thickness: `solid` 6 pt, `thin` 3 pt.
+    #[serde(default)]
+    pub bar_style: BarStyle,
+    /// The bar's height in px; unset: `bar_style`'s.
+    #[serde(default)]
+    pub bar_height: Option<u32>,
+    /// Under the text (inside the margins), or along the window's bottom
+    /// edge, full width.
+    #[serde(default)]
+    pub bar_position: BarPosition,
+    /// The bar's corner radius in px; unset: half its height.
+    #[serde(default)]
+    pub bar_radius: Option<u32>,
     /// The PNG's bytes, put in by `aio::config!()` (empty elsewhere).
     #[serde(skip)]
     pub png: &'static [u8],
+}
+
+impl Default for Splash {
+    fn default() -> Self {
+        Self {
+            image: Default::default(),
+            text: None,
+            min_ms: Self::default_min(),
+            max_ms: Self::default_max(),
+            background: None,
+            show: Default::default(),
+            download_text: None,
+            size: None,
+            fit: Default::default(),
+            text_position: Default::default(),
+            align: Default::default(),
+            margin: None,
+            radius: 0,
+            border: None,
+            font: None,
+            fade_ms: None,
+            font_size: None,
+            bold: false,
+            text_color: None,
+            bar: None,
+            track: None,
+            position: Default::default(),
+            follow_window: true,
+            shadow: None,
+            window_shadow: None,
+            cancel: true,
+            progress: true,
+            bar_style: Default::default(),
+            bar_height: None,
+            bar_position: Default::default(),
+            bar_radius: None,
+            png: &[],
+        }
+    }
+}
+
+/// `[build.splash] show` (aio's `show`, and its run-time `splash.show`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplashShow {
+    #[default]
+    Always,
+    FirstStart,
+    Never,
+}
+
+/// `[build.splash] fit`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum Fit {
+    #[default]
+    Contain,
+    Cover,
+}
+
+/// `[build.splash] text_position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextPosition {
+    #[default]
+    Below,
+    Over,
+}
+
+/// `[build.splash] align`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum Align {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// `[build.splash] position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplashPosition {
+    #[default]
+    Window,
+    Primary,
+    Pointer,
+}
+
+/// `[build.splash] bar_style`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarStyle {
+    #[default]
+    Solid,
+    Thin,
+}
+
+/// `[build.splash] bar_position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarPosition {
+    #[default]
+    UnderText,
+    BottomEdge,
 }
 
 impl Splash {
@@ -613,6 +1011,15 @@ pub struct AndroidBuild {
     /// Light or dark whatever the phone's setting; unset: the phone's.
     #[serde(default)]
     pub color_scheme: ColorScheme,
+    /// Also one APK for every CPU type (`…-android-universal.apk`), for
+    /// sharing as one file; the per-CPU APKs are still made.
+    #[serde(default)]
+    pub universal: bool,
+    /// An `android/` file that replaces a template file the template has
+    /// changed since, or a `MainActivity.java` without what the template's
+    /// does, fails the build instead of warning.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// `[build.android] color_scheme`.
@@ -674,6 +1081,70 @@ pub struct MacBuild {
     /// [user@]host`, as `AIO_MACOS_SSH`, which it outranks).
     #[serde(default)]
     pub host: Option<String>,
+}
+
+/// `[build.download_window]` (aio's `electron.downloadWindow`): every key
+/// optional, the defaults aio's. The texts take `{title}` and `{version}`
+/// (Electron's); `text` also `{got}` and `{total}` (MB), `question`
+/// `{reason}`. A colour set is used in light and dark mode alike; one not
+/// set is the app's own, as the OS's mode is.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadWindow {
+    /// Unset: "Getting {title} ready".
+    #[serde(default)]
+    pub heading: Option<String>,
+    /// Unset: "Downloading Electron {version} — first start only · {got} / {total} MB".
+    #[serde(default)]
+    pub text: Option<String>,
+    /// The Retry / Quit question; unset: aio's, which names what failed
+    /// (`{reason}`) and how to fix it.
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub background: Option<String>,
+    /// The text's colour.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// The bar's fill and its track.
+    #[serde(default)]
+    pub bar: Option<String>,
+    #[serde(default)]
+    pub track: Option<String>,
+    /// The Cancel button (closing the window cancels either way).
+    #[serde(default = "yes")]
+    pub cancel: bool,
+}
+
+impl Default for DownloadWindow {
+    fn default() -> Self {
+        Self {
+            heading: None,
+            text: None,
+            question: None,
+            background: None,
+            color: None,
+            bar: None,
+            track: None,
+            cancel: true,
+        }
+    }
+}
+
+/// `[build.windows]`: how the one-click download installs the app.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsBuild {
+    /// A Start menu entry on the first install (aio's
+    /// `build.windows.shortcut`); `false`: none.
+    #[serde(default = "yes")]
+    pub shortcut: bool,
+}
+
+impl Default for WindowsBuild {
+    fn default() -> Self {
+        Self { shortcut: true }
+    }
 }
 
 impl Config {
@@ -842,14 +1313,18 @@ impl Default for Feedback {
     }
 }
 
-/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `ui.layout`);
+/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`, dark mode);
 /// `aio::kit::theme::sheet` makes its CSS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ui {
     pub theme: Look,
+    /// Light or dark: the OS's, as it changes (aio's automatic dark mode), or one fixed.
+    pub scheme: Scheme,
     /// The accent's hue in degrees, instead of the one hashed from the id.
     pub hue: Option<u16>,
+    /// The page's greys: tinted with the hue, or near grey (aio's `"neutral": "soft"`).
+    pub neutral: Neutral,
     /// With the look, the page layout: `<main>` as a centred page and the
     /// `.card`/`.row`/`.stack`/`.grid` classes. Off: only how elements look.
     pub layout: bool,
@@ -857,8 +1332,37 @@ pub struct Ui {
 
 impl Default for Ui {
     fn default() -> Self {
-        Self { theme: Look::Auto, hue: None, layout: true }
+        Self { theme: Look::Auto, scheme: Scheme::System, hue: None, neutral: Neutral::Tinted, layout: true }
     }
+}
+
+/// Light or dark (`[ui] scheme`, `aio::ui::page_css`'s choice).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    /// The OS's, following it as it changes (`prefers-color-scheme`).
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl From<bool> for Scheme {
+    /// The app's own choice: `true` dark.
+    fn from(dark: bool) -> Self {
+        if dark { Self::Dark } else { Self::Light }
+    }
+}
+
+/// The page's neutrals (its page, surfaces and borders); the accent keeps the hue either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Neutral {
+    /// Tinted with the hue.
+    #[default]
+    Tinted,
+    /// Near grey: a warm or magenta hue would tint large surfaces visibly.
+    Soft,
 }
 
 /// How much of aio's look a page takes. Every one but `None` keeps the
@@ -890,11 +1394,15 @@ pub struct Memory {
     pub critical: u8,
     /// Growth said once per this many MB (or a tenth of the machine).
     pub growth_mb: u64,
+    /// How often memory is sampled (and `health.json` written): 1 s to
+    /// 10 s (aio's `memory.interval`).
+    #[serde(with = "span")]
+    pub every: Duration,
 }
 
 impl Default for Memory {
     fn default() -> Self {
-        Self { high: 50, clear: 40, critical: 80, growth_mb: 256 }
+        Self { high: 50, clear: 40, critical: 80, growth_mb: 256, every: Duration::from_secs(10) }
     }
 }
 
@@ -941,6 +1449,12 @@ impl Lit for Duration {
 }
 
 impl Lit for &'static [u8] {
+    fn lit(&self, o: &mut String) {
+        o.push_str("&[]");
+    }
+}
+
+impl Lit for &'static [(&'static str, &'static [u8])] {
     fn lit(&self, o: &mut String) {
         o.push_str("&[]");
     }
@@ -1003,6 +1517,12 @@ pub fn find(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 impl Config {
+    /// The app's one hue (aio's `hue ?? appId`): `[ui] hue`, else its id's
+    /// (`icon::hue`). Its page, icon, splash and download window share it.
+    pub fn hue(&self) -> u16 {
+        self.ui.hue.unwrap_or_else(|| crate::icon::hue(&self.app.id))
+    }
+
     /// The config as the Rust expression that makes it (paths from `aio::`).
     pub fn rust(&self) -> String {
         let mut o = String::new();
@@ -1047,6 +1567,15 @@ impl Config {
                 return Err(format!("aio.toml: [data] pragmas can't set {name}: {why}"));
             }
         }
+        if c.data.backup_keep == 0 {
+            return Err("aio.toml: [data] backup_keep must keep at least 1 backup".into());
+        }
+        if c.data.coalesce_ms > 60_000 {
+            return Err(format!(
+                "aio.toml: [data] coalesce_ms = {} holds calls over a minute: a crash would lose them all",
+                c.data.coalesce_ms
+            ));
+        }
         if c.data.retire.contains(&c.data.store) {
             return Err(format!("aio.toml: [data] retire names the store {:?} itself", c.data.store));
         }
@@ -1070,6 +1599,12 @@ impl Config {
         if c.app.lang.as_deref().is_some_and(|l| !lang_ok(l)) {
             return Err("aio.toml: [app] lang is a language tag: letters, digits and '-' (\"en\", \"pt-BR\")".into());
         }
+        let dw = &c.build.download_window;
+        for (k, v) in [("background", &dw.background), ("color", &dw.color), ("bar", &dw.bar), ("track", &dw.track)] {
+            if v.as_deref().is_some_and(|v| !hex_color(v)) {
+                return Err(format!("aio.toml: [build.download_window] {k} is #rgb or #rrggbb"));
+            }
+        }
         if let Some(s) = &c.build.splash {
             if s.image.extension().is_none_or(|e| !e.eq_ignore_ascii_case("png"))
                 || s.image.is_absolute()
@@ -1079,10 +1614,23 @@ impl Config {
                     "aio.toml: [build.splash] image is a .png in the app's folder (\"assets/splash.png\")".into()
                 );
             }
-            if s.background.as_ref().is_some_and(|b| !b.iter().all(|c| hex_color(c))) {
-                return Err(
-                    "aio.toml: [build.splash] background is [\"#light\", \"#dark\"], each #rgb or #rrggbb".into()
-                );
+            let pairs =
+                [("background", &s.background), ("text_color", &s.text_color), ("bar", &s.bar), ("track", &s.track)];
+            for (k, v) in pairs {
+                if v.as_ref().is_some_and(|b| !b.iter().all(|c| hex_color(c))) {
+                    return Err(format!(
+                        "aio.toml: [build.splash] {k} is [\"#light\", \"#dark\"], each #rgb or #rrggbb"
+                    ));
+                }
+            }
+            if s.border.as_deref().is_some_and(|c| !hex_color(c)) {
+                return Err("aio.toml: [build.splash] border is #rgb or #rrggbb".into());
+            }
+            if s.size.is_some_and(|[w, h]| w == 0 || h == 0 || w > 4096 || h > 4096) {
+                return Err("aio.toml: [build.splash] size is [width, height], each 1 to 4096".into());
+            }
+            if s.bar_height.is_some_and(|h| h == 0 || h > 64) {
+                return Err("aio.toml: [build.splash] bar_height is px, 1 to 64".into());
             }
             if s.min_ms > s.max_ms {
                 return Err("aio.toml: [build.splash] min_ms is more than max_ms".into());
@@ -1095,11 +1643,22 @@ impl Config {
         if !(m.clear < m.high && m.high <= m.critical && m.critical <= 100) || m.growth_mb == 0 {
             return Err("aio.toml: [memory] needs clear < high <= critical <= 100, and growth_mb of 1 or more".into());
         }
+        if !(Duration::from_secs(1)..=Duration::from_secs(10)).contains(&m.every) {
+            return Err(
+                "aio.toml: [memory] every must be 1s to 10s (ax health calls a health.json older than 30 s stuck)"
+                    .into(),
+            );
+        }
         c.vitals.check()?;
         if c.log.keep == 0 || c.log.file_mb == 0 {
             return Err("aio.toml: [log] keep and file_mb must be at least 1".into());
         }
-        if c.accounts.on {
+        if !c.accounts.on && c.accounts.sessions && (c.accounts.signup || c.accounts.require_verified) {
+            return Err(
+                "aio.toml: [accounts] signup and require_verified need accounts (on = true), not sessions alone".into(),
+            );
+        }
+        if c.accounts.on || c.accounts.sessions {
             let p = c.accounts.policy();
             if !(1..=crate::auth::MAX_TTL_MS).contains(&p.ttl_ms) {
                 return Err("aio.toml: [accounts] session must be 1s to 100 years".into());
@@ -1108,8 +1667,8 @@ impl Config {
                 return Err("aio.toml: [accounts] max_sessions must be at least 1".into());
             }
         }
-        if c.server.open && c.accounts.on {
-            return Err("aio.toml: [server] open and [accounts] on both say who gets in: give one".into());
+        if c.server.open && (c.accounts.on || c.accounts.sessions) {
+            return Err("aio.toml: [server] open and [accounts] both say who gets in: give one".into());
         }
         // A name no request can carry would trust nothing, silently.
         if let Some(h) = &c.server.trust_proxy
@@ -1122,6 +1681,19 @@ impl Config {
         crate::security::headers(&c.server.security, &c.server.hosts, true).map_err(|e| format!("aio.toml: {e}"))?;
         if let Some(e) = dirs_problem(&c.server) {
             return Err(format!("aio.toml: {e}"));
+        }
+        // `[build] assets`: the same rules, in the app's folder.
+        if let Some((p, _)) = c.build.assets.iter().find(|(_, d)| d.is_absolute() || d.has_root()) {
+            return Err(format!("aio.toml: [build] assets {p:?}: a folder beside aio.toml (it is built into the app)"));
+        }
+        if let Some(e) = dirs_problem(&Server { dirs: c.build.assets.clone(), ..Server::default() }) {
+            let e = e.replace("[server.dirs]", "[build] assets").replace("[server]", "[build] assets");
+            return Err(format!("aio.toml: {}", e.replace("in the files tier or an absolute one", "beside aio.toml")));
+        }
+        if let Some(p) =
+            c.build.assets.keys().find(|p| c.server.dirs.contains_key(*p) || c.server.public_dirs.contains_key(*p))
+        {
+            return Err(format!("aio.toml: {p:?} is both in [build] assets and [server] dirs"));
         }
         // Half a pair would serve aio's own certificate instead, silently.
         match (&c.server.cert, &c.server.key) {

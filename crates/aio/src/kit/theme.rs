@@ -170,7 +170,7 @@ const LAYOUT: [(&str, &str); 2] =
 /// (`Auto` does when the app `ships_css`). `Look::None`: nothing.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn sheet(ui: &crate::config::Ui, id: &str, ships_css: bool) -> String {
-    use crate::config::Look;
+    use crate::config::{Look, Neutral};
     let css = super::CSS;
     let kit = css.find(KIT_START).expect("kit.css: the kit's controls start with the --aio-ui-* tokens");
     let look = match ui.theme {
@@ -179,7 +179,7 @@ pub fn sheet(ui: &crate::config::Ui, id: &str, ships_css: bool) -> String {
         Look::Auto => !ships_css,
         Look::Full => true,
     };
-    let mut out = tokens_css(ui.hue.unwrap_or_else(|| hue(id)), false) + "\n";
+    let mut out = tokens_css(ui.hue.unwrap_or_else(|| hue(id)), ui.neutral == Neutral::Soft) + "\n";
     if look {
         let mut part = &css[..kit];
         let mut kept = String::new();
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn the_look_follows_the_theme_mode_its_hue_and_layout() {
         // aio tests/app-theme.test.ts, standalone-theme-auto-app-css.test.ts.
-        let ui = |theme, hue, layout| Ui { theme, hue, layout };
+        let ui = |theme, hue, layout| Ui { theme, hue, layout, ..Ui::default() };
         let full = sheet(&ui(Look::Full, None, true), "kit", false);
         assert_eq!(full, super::super::theme_css(hue("kit")), "the whole theme");
         assert_eq!(sheet(&ui(Look::Auto, None, true), "kit", false), full, "auto: the look while the app has no CSS");
@@ -220,6 +220,8 @@ mod tests {
         );
         assert!(bare.contains("/* ── the three environments ") && bare.contains(".aio-btn {"));
         assert_eq!(bare.matches('{').count(), bare.matches('}').count());
+        let soft = Ui { neutral: crate::config::Neutral::Soft, ..Ui::default() };
+        assert!(sheet(&soft, "kit", false).starts_with(&tokens_css(hue("kit"), true)), "[ui] neutral = \"soft\"");
     }
 
     #[test]

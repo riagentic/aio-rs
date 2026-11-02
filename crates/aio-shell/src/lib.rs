@@ -2,9 +2,8 @@
 //! Electron runtime (as in aio) draws it. DOM edits and events travel as
 //! length-prefixed frames over a private socket (a 0700 runtime dir): no
 //! listening port, no network for the page (it loads from `aio://app`).
+use aio::ui::View;
 use bytes::Bytes;
-use dioxus_core::{Element, VirtualDom};
-use dioxus_liveview::{LiveViewError, LiveViewPool, LiveViewSocket};
 use futures_util::{SinkExt, StreamExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -15,8 +14,10 @@ pub struct Window {
     pub title: &'static str,
     pub width: u32,
     pub height: u32,
-    /// The window and taskbar icon: PNG bytes (`include_bytes!`), shown at
-    /// most 256 px a side.
+    /// The window's icon: its title bar, taskbar, Alt-Tab, Dock, tray and
+    /// notifications, and the page's favicon. PNG bytes, shown at most 256 px
+    /// a side; `Window::of` gives the app's. Unset: the app's monogram (its
+    /// title's letter in its hue, aio's generated icon).
     pub icon: Option<&'static [u8]>,
     /// The background until the page paints, `[light, dark]` by the OS theme
     ///; unset: the kit's page background.
@@ -45,14 +46,37 @@ pub struct Window {
     pub confirm_unload: bool,
     /// The window's own keys given to the page (`guest::Keys`).
     pub keys: guest::Keys,
+    /// No window rather than one without Chromium's sandbox (aio's
+    /// `requireSandbox`): on a host that can't sandbox (a Linux with user
+    /// namespaces closed and no setuid helper) the app stops, saying why,
+    /// instead of starting the runtime with `--no-sandbox`.
+    pub require_sandbox: bool,
+    /// The window waits for its page's first paint at most this long
+    /// (aio's `showWhenPainted: { capMs }`); `Some(0)`: shown at once
+    /// (`false`); unset: 5000.
+    pub show_cap_ms: Option<u32>,
+    /// The app goes on serving once its window closes (or crashes), until
+    /// asked to stop (aio's `keepServer`; `--keep-server` asks it per launch).
+    pub keep_server: bool,
+    /// The app's say over its splash at run time (aio's `splash.show`),
+    /// asked just before it would open: a setting "no splash at start" is
+    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`. It may
+    /// take 50 ms; one that panics or takes longer leaves the build's
+    /// `show`, said in the log.
+    pub splash_show: Option<fn() -> SplashShow>,
 }
 
+pub use aio::config::SplashShow;
+
 impl Window {
-    /// The window `[app]` describes: its name as the title, its `lang` and
-    /// `dir`; the rest default (`Window { width: 900, ..Window::of(&cfg) }`).
+    /// The window `[app]` describes: its name as the title, its own icon
+    /// (`assets/icon.png`, built in by `aio::config!()`; none: the shell draws
+    /// its monogram), its `lang` and `dir`; the rest default (`Window { width: 900,
+    /// ..Window::of(&cfg) }`).
     pub fn of(cfg: &aio::config::Config) -> Self {
         let lang = cfg.app.lang.clone().map(|l| &*l.leak());
-        Self { title: cfg.app.name.clone().leak(), lang, dir: cfg.app.dir, ..Self::default() }
+        let icon = Some(cfg.app.icon).filter(|i| !i.is_empty());
+        Self { title: cfg.app.name.clone().leak(), icon, lang, dir: cfg.app.dir, ..Self::default() }
     }
 }
 
@@ -69,6 +93,8 @@ mod firstpage;
 mod firstrun;
 mod fresh;
 pub mod fuses;
+#[cfg(all(target_os = "linux", any(test, feature = "native-splash")))]
+mod gtksplash;
 pub mod guest;
 #[cfg(all(test, target_os = "linux"))]
 mod guests;
@@ -84,9 +110,14 @@ pub mod os;
 pub mod page;
 pub mod pidlock;
 pub mod place;
+// The OS's splash (`native-splash`, which `ax build` turns on for an app
+// with a `[build.splash]`); without it Electron draws the splash.
+#[cfg(any(test, feature = "native-splash"))]
+mod presplash;
+#[cfg(not(any(test, feature = "native-splash")))]
+#[path = "presplash_off.rs"]
+mod presplash;
 pub mod prune;
-#[cfg(debug_assertions)]
-mod renders;
 pub mod runtime;
 pub mod splash;
 mod stderr;
@@ -94,8 +125,11 @@ pub mod swap;
 pub mod switches;
 pub mod update;
 mod urls;
+mod views;
 #[cfg(feature = "web")]
 pub mod web;
+#[cfg(test)]
+mod window_routes;
 #[cfg(windows)]
 mod winstall;
 #[cfg(target_os = "linux")]
@@ -104,7 +138,7 @@ mod xroom;
 #[cfg(doctest)]
 mod guide;
 
-pub use guest::{Child, Web, open_window};
+pub use guest::{Child, Web, clear_partition, open_window};
 pub use instance::{Launch, Start, launches, start};
 /// The page: an empty root, the DOM-edit interpreter and the page scripts
 /// (`aio::page`), under its policy (`aio::page::sealed`).
@@ -119,18 +153,33 @@ pub use aio::page::overlay;
 /// title are the window's, escaped. Its policy names each inline script
 /// (the app's own `head` too) and connects to nothing.
 pub(crate) fn page_with(win: &Window, bridge: &str) -> String {
-    page_of(win, bridge, "'none'")
+    page_html(win, bridge, "'none'", "")
 }
 
-/// [`page_with`], connecting to `connect` (a browser tab: its own server).
+/// [`page_with`] for a browser tab, connecting to `connect` (its own
+/// server), with the window's icon (else the app's monogram) as its
+/// favicon (aio's `/__aio/icon`).
+#[cfg(any(feature = "web", test))]
 pub(crate) fn page_of(win: &Window, bridge: &str, connect: &str) -> String {
+    use base64::Engine;
+    let png = win.icon.map(<[u8]>::to_vec).unwrap_or_else(|| {
+        let id = instance::APP.get().map_or("app", |(id, _)| id.as_str());
+        let hue = instance::LOOK.get().map_or_else(|| aio::colors::hue(id), |l| l.0);
+        aio_config::icon::icon_png(if win.title.is_empty() { id } else { win.title }, hue, 64)
+    });
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    let icon = format!(r#"<link rel="icon" type="image/png" href="data:image/png;base64,{b64}">"#);
+    page_html(win, bridge, connect, &icon)
+}
+
+fn page_html(win: &Window, bridge: &str, connect: &str, icon: &str) -> String {
     let html = html_open(win.lang, win.dir);
     let viewport = match win.viewport.unwrap_or("width=device-width, initial-scale=1") {
         "" => String::new(),
         v => format!(r#"<meta name="viewport" content="{}">"#, esc(v)),
     };
     let page = format!(
-        r#"<!doctype html>{html}<head><meta charset="utf-8">{viewport}<title>{}</title>{}</head><body>{}</body></html>"#,
+        r#"<!doctype html>{html}<head><meta charset="utf-8">{viewport}<title>{}</title>{icon}{}</head><body>{}</body></html>"#,
         esc(win.title),
         win.head.unwrap_or(""),
         aio::page::body(bridge)
@@ -155,16 +204,33 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
-/// One window's frames as the interpreter's socket, a held key's stale
-/// repeats left out ([`fresh`]).
-fn wire(s: aio::ipc::Stream) -> impl LiveViewSocket {
+/// One window's frames, both ways, a held key's stale repeats left out ([`fresh`]).
+fn wire(
+    s: aio::ipc::Stream,
+) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> + futures_util::Sink<Vec<u8>, Error = std::io::Error> + Unpin
+{
     let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
     fresh::Fresh::new(
         Framed::new(s, codec)
-            .map(|r| r.map(|b| b.to_vec()).map_err(|_| LiveViewError::SendingFailed))
-            .with(|v: Vec<u8>| std::future::ready(Ok::<_, std::io::Error>(Bytes::from(v))))
-            .sink_map_err(|_| LiveViewError::SendingFailed),
+            .map(|r| r.map(|b| b.to_vec()))
+            .with(|v: Vec<u8>| std::future::ready(Ok::<_, std::io::Error>(Bytes::from(v)))),
     )
+}
+
+/// The monogram's edge: the largest a window or a tray shows an icon at
+/// (as aio draws it for its window).
+const MONOGRAM_PX: u32 = 256;
+
+/// The monogram of an app with no icon (aio's generated one): `label`'s
+/// letter in `hue`, as a PNG in `dir`, drawn again only when they change.
+fn monogram(dir: &Path, label: &str, hue: u16) -> std::io::Result<std::path::PathBuf> {
+    let (png, key) = (dir.join("monogram.png"), dir.join("monogram.key"));
+    let want = format!("{label}\n{hue}\n{MONOGRAM_PX}\n{}\n", env!("CARGO_PKG_VERSION"));
+    if !png.is_file() || std::fs::read_to_string(&key).ok().as_deref() != Some(want.as_str()) {
+        std::fs::write(&png, aio_config::icon::icon_png(label, hue, MONOGRAM_PX))?;
+        std::fs::write(&key, want)?;
+    }
+    Ok(png)
 }
 
 /// Write the shell files into `dir` (mode 0700: the socket next to them is
@@ -172,6 +238,12 @@ fn wire(s: aio::ipc::Stream) -> impl LiveViewSocket {
 /// `id` names the runtime's app, so the OS sees each aio-rs app as its own
 /// (window class / Wayland app id, taskbar grouping).
 fn install(dir: &Path, id: &str, win: &Window) -> std::io::Result<()> {
+    install_with(dir, id, win, aio::ipc::window_http().is_some())
+}
+
+/// [`install`]; `routes`: the app serves routes to the window (`aio://app/<path>`,
+/// `--aio-http`), so its page may fetch from its own origin, and only it.
+fn install_with(dir: &Path, id: &str, win: &Window, routes: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -188,7 +260,33 @@ fn install(dir: &Path, id: &str, win: &Window) -> std::io::Result<()> {
     guest::install(dir, win)?;
     // No splash until `splash::install` lays one out.
     std::fs::write(dir.join("splash.json"), "null")?;
-    std::fs::write(dir.join("index.html"), page(win))
+    assets(dir, instance::ASSETS.get().copied().unwrap_or_default())?;
+    std::fs::write(dir.join("index.html"), if routes { page_html(win, "", "'self'", "") } else { page(win) })
+}
+
+/// The app's built-in files (`[build] assets`) in `dir/assets` at their
+/// URL paths, where the page's `aio://app/…` finds them (main.js); written
+/// again only when they changed (`assets.key`: their paths and hash).
+fn assets(dir: &Path, files: &[(&str, &[u8])]) -> std::io::Result<()> {
+    let (root, key) = (dir.join("assets"), dir.join("assets.key"));
+    let mut h = aio::sha256::Sha256::new();
+    for (path, bytes) in files {
+        h.update(path);
+        h.update([0]);
+        h.update(bytes);
+    }
+    let want = aio::sha256::hex(&h.finalize());
+    if root.is_dir() && std::fs::read_to_string(&key).ok().as_deref() == Some(want.as_str()) {
+        return Ok(());
+    }
+    _ = std::fs::remove_dir_all(&root);
+    for (path, bytes) in files {
+        let to = root.join(aio::config::asset_path(path));
+        std::fs::create_dir_all(to.parent().unwrap_or(&root))?;
+        std::fs::write(to, bytes)?;
+    }
+    std::fs::create_dir_all(&root)?;
+    std::fs::write(key, want)
 }
 
 /// `ax release` asks what data this build reads (`AIORT_DATA_CONTRACT`:
@@ -202,7 +300,7 @@ fn said_contract() -> Option<std::io::Result<()>> {
 
 /// Open `app` in the shared runtime; returns when the window closes.
 /// The runtime's profile and the socket live in the app's own dirs.
-pub fn run(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
+pub fn run(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
     let dev = std::env::var_os("AIORT_DEV_CLOSED").filter(|_| cfg!(debug_assertions));
     // Under `ax dev`'s dx: a dx that goes (its session killed) stops us
     // gracefully, as a parent that goes does; dx sets no watch of its own.
@@ -245,7 +343,7 @@ fn window_panicked(payload: &(dyn std::any::Any + Send)) -> String {
 /// The window ended because a stop was asked (SIGTERM, Ctrl-C), not closed.
 static STOP_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
+fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
     aio::lifecycle::harden();
     if let Some(said) = said_contract() {
         return said;
@@ -253,21 +351,17 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
     // `ax dev`: say when a hot-patch lands, so a patch that didn't is seen;
     // numbered, so the log never folds patches in a row into one line.
     #[cfg(all(debug_assertions, feature = "dev"))]
-    subsecond::register_handler(Arc::new(|| {
+    aio_hotpatch::register_handler(Arc::new(|| {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         // SAFETY: read at once, not kept across patches.
-        let fns = unsafe { subsecond::get_jump_table() }.map_or(0, |t| t.map.len());
-        eprintln!("{}", aio::log::hot_patched(n, fns))
+        let fns = unsafe { aio_hotpatch::get_jump_table() }.map_or(0, |t| t.map.len());
+        eprintln!("{}", aio::log::hot_patched(n, fns));
+        // air runs a view's body once: its views are built again on the new code.
+        views::on_air::patched();
     }));
     // A dev build says a component caught in a render loop, by name, and
     // keeps the component tree for `ax components`.
-    #[cfg(debug_assertions)]
-    {
-        let wire = renders::Tripwire::new(|l| aio::warn!(cat: "ui", "{l}"));
-        _ = renders::TREE.set(wire.tree());
-        _ = tracing::subscriber::set_global_default(wire);
-    }
     if instance::SHOWN.get() == Some(&aio::config::Shown::Browser) {
         return in_browser(dirs);
     }
@@ -278,6 +372,7 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         Some((width, height)) => Window { width, height, ..win },
         None => win,
     };
+    let win = Window { title: titled(std::env::var("AIORT_TITLE").ok(), win.title), ..win };
     let data = dirs.data.join("electron");
     let dir = dirs.cache.join("shell");
     _ = ASK_MOVE.set((win.title, dirs.data.clone()));
@@ -290,10 +385,38 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         None => colors.clone(),
     };
     // The download window opens over the app's window, as it was last placed.
-    let at = place::load(&dirs.data.join("window.json"))
-        .map(|s| (s.normal.x + s.normal.width / 2, s.normal.y + s.normal.height / 2));
+    let saved = place::load(&dirs.data.join("window.json"));
+    let at = saved.map(|s| (s.normal.x + s.normal.width / 2, s.normal.y + s.normal.height / 2));
     let back = instance::APP.get().filter(|(id, v)| update::can_go_back(id, v)).map(|(id, _)| id.clone());
-    splash::install(&dir, splashed, win.title, &splash_colors)?;
+    // `[build.splash] show`, or the app's say at run time (aio's `splash.show`).
+    let (show, by_app) =
+        splashed.map_or((aio::config::SplashShow::Never, false), |s| splash::run_time_show(win.splash_show, s.show));
+    let (at_start, in_download) = splash::shown(show);
+    let downloading = splashed.filter(|_| in_download);
+    // Drawn by the OS before Electron starts (`presplash`), when it can.
+    let os = std::env::consts::OS;
+    let native = downloading.and_then(|s| {
+        let plan = presplash::Plan {
+            splash: s,
+            title: win.title,
+            version: instance::APP.get().map_or("", |(_, v)| v.as_str()),
+            colors: &splash::look_colors(splash_colors.clone(), s),
+            target: Some(splash::target(saved.as_ref(), win.width, win.height)),
+            at_start,
+            by_app,
+            may_download: runtime::may_download(),
+        };
+        presplash::Session::start(&plan, presplash::kind(os, &|k| std::env::var(k).ok())?, os)
+    });
+    // However the start ends, the splash goes with it.
+    let _splash_ends = presplash::Ends;
+    // A first start draws the splash in the download window, with its bar,
+    // when the OS's splash cannot.
+    let dl_image = downloading.and_then(|s| Some((s.png, splash::image_box(s)?)));
+    let dl_colors = match downloading {
+        Some(s) => splash::look_colors(splash_colors.clone(), s),
+        None => firstrun::recolored(colors, firstrun::words()),
+    };
     let icon = match win.icon {
         Some(png) => match place::icon_size(png) {
             Some(size) => {
@@ -301,21 +424,32 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
                 Some((dir.join("icon.png"), size))
             }
             None => {
-                eprintln!("[aio] {}: the window icon is not a PNG; none is shown", dirs.id);
+                eprintln!("[aio] {}: the window icon is not a PNG; Electron's is shown", dirs.id);
                 None
             }
         },
-        None => None,
+        // None of its own: its monogram (aio's), so no window, taskbar
+        // entry or tray wears Electron's logo.
+        None => {
+            let label = if win.title.is_empty() { dirs.id.as_str() } else { win.title };
+            let hue = instance::LOOK.get().map_or_else(|| aio::colors::hue(&dirs.id), |l| l.0);
+            Some((monogram(&dir, label, hue)?, (MONOGRAM_PX, MONOGRAM_PX)))
+        }
     };
     let socks = aio::paths::sockets(&dirs.id, &dirs.data)?;
     let (sock, ctl_sock, hand) =
         (aio::ipc::addr(&socks, "wire"), aio::ipc::addr(&socks, "ctl"), instance::hand_addr(&dirs.id, &dirs.data)?);
+    // Electron's Node connects to these as spelled: one too long is said now,
+    // not as no window.
+    aio::ipc::fits(&sock)?;
+    aio::ipc::fits(&ctl_sock)?;
     let r = tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async {
         let mut listener = aio::ipc::Listener::bind(&sock)?;
         // The runtime's control line (Rust → Electron main): "focus".
         let mut ctl_listener = aio::ipc::Listener::bind(&ctl_sock)?;
-        // Both serve the window this spawns and no other process of the user.
-        let only = aio::ipc::Only::default();
+        // Both serve the window this spawns and no other process of the user,
+        // as the app's route door does: the one gate (`Only::window`).
+        let only = aio::ipc::Only::window();
         let ctl: Ctl = Arc::new(tokio::sync::Mutex::new(None));
         _ = CTL.set(ctl.clone());
         let (c, state, ctl_only) = (ctl.clone(), sized.is_none().then(|| dirs.data.join("window.json")), only.clone());
@@ -341,16 +475,12 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
             tokio::spawn(inspect::serve(ui, inspect::hub().clone(), ctl.clone()));
         }
         say_window_panics();
-        let (pool, wire_only) = (Arc::new(LiveViewPool::new()), only.clone());
+        let (views, wire_only) = (views::Views::new(), only.clone());
         tokio::spawn(async move {
             while let Ok(s) = listener.accept_only(&wire_only).await {
-                let pool = pool.clone();
+                let views = views.clone();
                 tokio::spawn(async move {
-                    let dom = move || {
-                        WINDOW_THREAD.set(true);
-                        VirtualDom::new(app)
-                    };
-                    if let Err(e) = pool.launch_virtualdom(wire(s), dom).await {
+                    if let Err(e) = views.launch(s, app).await {
                         eprintln!("[aio-shell] window: {e}");
                     }
                 });
@@ -360,18 +490,42 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         // What cells tell the people using the app is shown by this window.
         let here = tokio::runtime::Handle::current();
         aio::tell::show_with(move |t| desktop::show(&here, t));
+        let shown = icon.as_ref().map(|(p, _)| p.clone());
         let rt = tokio::task::spawn_blocking(move || {
             let go_back = |id: &str| update::go_back(id);
             let back = back.as_deref().map(|id| move || go_back(id));
-            runtime::ensure_as(win.title, &colors, at, back.as_ref().map(|f| f as &dyn Fn() -> std::io::Result<()>))
+            let shown = shown.as_deref();
+            runtime::ensure_as(
+                win.title,
+                &dl_colors,
+                at,
+                shown,
+                dl_image,
+                back.as_ref().map(|f| f as &dyn Fn() -> std::io::Result<()>),
+            )
         })
         .await
         .map_err(std::io::Error::other)??;
-        let sandbox = runtime::sandbox_args(&rt);
+        // Electron is here: its main process draws the start's splash unless
+        // the OS's is up (main.js reads `splash.json`).
+        let electron_draws = native.as_ref().is_none_or(|n| n.handoff());
+        let t = splash::target(saved.as_ref(), win.width, win.height);
+        let target = t.0.zip(t.1).map(|(x, y)| [x, y, t.2, t.3]);
+        let version = instance::APP.get().map_or("", |(_, v)| v.as_str());
+        splash::install(
+            &dir,
+            splashed.filter(|_| at_start && electron_draws),
+            win.title,
+            version,
+            &splash_colors,
+            target,
+        )?;
+        let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
         // a GPU that failed here once is never asked again (AIORT_GPU=hardware is).
         let gpu_failed = data.join("gpu-failed");
         let (gpu, _) = gpu_choice(gpu_failed.exists(), &|k| std::env::var(k).ok());
-        aio::boot::say(&runtime_rows(&rt, &sandbox, gpu_failed.exists(), &|k| std::env::var(k).ok()));
+        let env = |k: &str| std::env::var(k).ok();
+        aio::boot::say(&runtime_rows(&rt, &sandbox, win.require_sandbox, gpu_failed.exists(), &env));
         // macOS: the app's own window bundle, its name in the Dock.
         let exe = if cfg!(target_os = "macos") {
             let (rt, id, name) = (rt.clone(), dirs.id.clone(), win.title.to_string());
@@ -441,6 +595,8 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
                 .arg("--ozone-platform-hint=auto")
                 .arg(format!("--aio-sock={sock}"))
                 .arg(format!("--aio-ctl={ctl_sock}"))
+                // The app's routes, if it serves any (`aio://app/<path>`, no TCP).
+                .args(aio::ipc::window_http().map(|a| format!("--aio-http={a}")))
                 .arg(format!("--aio-id={}", dirs.id))
                 .arg(format!("--aio-title={}", win.title))
                 .arg(format!("--aio-width={}", win.width))
@@ -501,10 +657,29 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
         pid.into_iter().for_each(|p| only.disarm(p));
         r
     });
-    // The doors went with their listeners (and the runtime with the block).
-    _ = std::fs::remove_dir(&socks);
+    // aio's keepServer: the window is gone (closed, or crashed: said), the
+    // app serves on until asked to stop. A sandbox it requires and lacks
+    // (`require_sandbox`, `AIORT_SANDBOX=1`) stops it anyway.
+    let keep = win.keep_server || instance::KEEP_SERVER.get() == Some(&true);
+    let r = match r {
+        Err(e) if !keep || e.kind() == std::io::ErrorKind::PermissionDenied => Err(e),
+        _ if STOP_ASKED.load(std::sync::atomic::Ordering::Relaxed) || !keep => r,
+        _ => {
+            if let Err(e) = &r {
+                eprintln!("[aio] {}: the window failed: {e}", dirs.id);
+            }
+            eprintln!("{}", kept_serving(&dirs.id, std::fs::read_to_string(dirs.data.join("serving.json")).ok()));
+            instance::take_stops(&dirs.id, &dirs.data);
+            aio::rt().block_on(async {
+                aio::lifecycle::stop_asked()?.await;
+                std::io::Result::Ok(())
+            })
+        }
+    };
     // The window is gone: let the stores finish their effects.
     let aborted = aio::shutdown(QUIT_BUDGET);
+    // Its doors are unlinked by now: their folder goes too.
+    _ = std::fs::remove_dir(&socks);
     aio::health::stop();
     eprintln!(
         "[aio] {} stopped{}",
@@ -513,6 +688,16 @@ fn show(app: fn() -> Element, win: Window, dirs: &aio::paths::AppDirs) -> std::i
     );
     aio::log::finish();
     r
+}
+
+/// What a kept server says once its window is gone (pure): where it
+/// serves (its `serving.json`), and how to stop it.
+fn kept_serving(id: &str, serving: Option<String>) -> String {
+    let port = serving.and_then(|t| aio::serde_json::from_str::<aio::serde_json::Value>(&t).ok()?["port"].as_u64());
+    let at = port.map_or("its local door".to_string(), |p| format!("port {p} and its local door"));
+    format!(
+        "[aio] {id}: the window closed; the app goes on serving on {at} (keep_server) until asked to stop: ax stop {id}"
+    )
 }
 
 /// A server without a window: serve until asked to stop (SIGTERM, Ctrl-C,
@@ -531,6 +716,7 @@ pub fn serve(dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
         std::io::Result::Ok(())
     })?;
     let aborted = aio::shutdown(QUIT_BUDGET);
+    _ = std::fs::remove_dir(aio::paths::sockets_at(&dirs.id, &dirs.data));
     aio::health::stop();
     eprintln!(
         "[aio] {} stopped{}",
@@ -594,6 +780,7 @@ fn gpu_choice(failed: bool, env: &dyn Fn(&str) -> Option<String>) -> (String, &'
 fn runtime_rows(
     rt: &Path,
     sandbox: &[String],
+    require: bool,
     gpu_failed: bool,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<aio::boot::Row> {
@@ -610,6 +797,7 @@ fn runtime_rows(
             row("gpu", g, from)
         },
         match (sandbox.is_empty(), set("AIORT_SANDBOX")) {
+            (true, _) if require => row("sandbox", "strict".into(), "Window { require_sandbox }"),
             (true, Some(_)) => row("sandbox", "strict".into(), "AIORT_SANDBOX"),
             (true, None) => row("sandbox", "on".into(), "default"),
             (false, _) => row("sandbox", "off: the runtime's sandbox helper can't be used".into(), "detected"),
@@ -638,6 +826,8 @@ fn window_event(m: &aio::serde_json::Value) {
             }
             aio::health::ok("window")
         }
+        // On screen (main.js): the OS's splash may go once it has been up its minimum.
+        "shown" => presplash::ready(splash::rect_of(&m["normal"])),
         "unresponsive" => {
             aio::report::problem("window:frozen", "the window is not responding");
             aio::health::degrade("window", "not responding");
@@ -686,6 +876,12 @@ fn asked_size(v: Option<&str>) -> Option<(u32, u32)> {
     Some((w.parse().ok().filter(|n| *n > 0)?, h.parse().ok().filter(|n| *n > 0)?))
 }
 
+/// The window's title for this run: `AIORT_TITLE` (aio's `--title=`,
+/// `ax dev --title`) when set, else the app's (pure).
+fn titled(asked: Option<String>, app: &'static str) -> &'static str {
+    asked.filter(|t| !t.trim().is_empty()).map_or(app, |t| t.leak())
+}
+
 /// What the runtime says on its control line: its screens (answered with
 /// where to open), the window's bounds as they change (saved),
 /// the answers to open dialogs (`page::pick`), clicks on a notice or the
@@ -704,6 +900,9 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
                 }
             }
             Some("bounds") => {
+                if let Some(r) = splash::rect_of(&m["normal"]) {
+                    presplash::moved(r);
+                }
                 if let Some(s) = &state
                     && let Err(e) = place::save(s, &m, win.width, win.height)
                 {
@@ -711,7 +910,7 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
                 }
             }
             Some("picked") => page::picked(&m),
-            Some("opened") => guest::opened(&m),
+            Some("opened" | "done") => guest::opened(&m),
             Some("clicked" | "tray") => desktop::asks(&m, win.tray.as_ref()).into_iter().for_each(desktop::deliver),
             Some("window") => window_event(&m),
             Some("cdp" | "cdp-event") => inspect::hub().heard(&m),
@@ -737,8 +936,9 @@ pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, st
         }
         // `ax` stopping the app where there is no SIGTERM (Windows).
         if line.trim() == instance::QUIT {
-            _ = w.write_all(b"ok\n").await;
+            // Stop first: an "ok" says the stop is already under way.
             stop();
+            _ = w.write_all(b"ok\n").await;
             continue;
         }
         let Some(launch) = instance::read_launch(&line) else {
@@ -769,7 +969,7 @@ mod tests {
     }
 
     use super::*;
-    use aio::page::{DIALOG, OVERLAY, RENDER, TYPING, render_probe};
+    use aio::page::{DIALOG, OVERLAY, RENDER, render_probe};
 
     #[test]
     fn the_browser_opens_where_the_app_serves_with_its_key() {
@@ -814,9 +1014,24 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_server_says_where_it_serves_and_how_to_stop_it() {
+        // aio electronClosedPlan with keepServer: "server still running <where>".
+        let said = kept_serving("notes", Some(r#"{"port":7420,"host":"127.0.0.1"}"#.into()));
+        assert_eq!(
+            said,
+            "[aio] notes: the window closed; the app goes on serving on port 7420 and its local door (keep_server) \
+             until asked to stop: ax stop notes"
+        );
+        assert!(kept_serving("notes", None).contains("serving on its local door (keep_server)"));
+        assert!(aio::paths::Ask::parse(&["--keep-server".into()]).unwrap().keep_server);
+    }
+
+    #[test]
     fn a_dev_size_is_w_by_h() {
         assert_eq!(asked_size(Some("390x844")), Some((390, 844)));
         assert_eq!([asked_size(None), asked_size(Some("390")), asked_size(Some("0x9"))], [None, None, None]);
+        assert_eq!(titled(Some("Notes (QA)".into()), "Notes"), "Notes (QA)");
+        assert_eq!([titled(None, "Notes"), titled(Some(" ".into()), "Notes")], ["Notes", "Notes"]);
     }
 
     #[tokio::test]
@@ -903,7 +1118,7 @@ mod tests {
         assert_eq!(gpu_choice(true, &none).0, "software");
         let hw = |k: &str| (k == "AIORT_GPU").then(|| "hardware".to_string());
         assert_eq!(gpu_choice(true, &hw), ("hardware".into(), "AIORT_GPU"));
-        let rows = runtime_rows(Path::new("/rt"), &[], true, &none);
+        let rows = runtime_rows(Path::new("/rt"), &[], false, true, &none);
         assert!(rows.iter().any(|r| r.key == "gpu" && r.value == "software" && r.from.contains("failed here")));
     }
 
@@ -944,16 +1159,12 @@ mod tests {
     }
 
     #[test]
-    fn the_page_has_no_network_and_the_wire_comes_first() {
+    fn the_page_on_air_has_no_network_and_airs_interpreter() {
         let p = page(&Window { title: "t", ..Default::default() });
         assert!(p.contains("default-src 'none'"));
-        assert!(p.contains("connect-src 'none'") && !p.contains("unsafe-eval"), "{p}");
-        assert!(p.find("window.WebSocket = class").unwrap() < p.find("aio://wire").unwrap());
-        assert!(p.contains("[autofocus]") && p.contains("data-select"));
-        assert!(
-            p.find("aio://wire").unwrap() < p.find("const sent = new WeakMap()").unwrap(),
-            "typing wraps a live interpreter"
-        );
+        assert!(p.contains("connect-src 'none'") && !p.contains("'unsafe-eval'"), "{p}");
+        assert!(p.contains(air::PAGE_JS), "air's interpreter, talking to the preload's wire");
+        assert!(!p.contains("aio://wire") && !p.contains("window.WebSocket = class"), "no wire glue in the page");
         assert!(p.contains(DIALOG));
     }
 
@@ -1051,6 +1262,35 @@ mod tests {
         assert!(!page(&Window { viewport: Some(""), ..Default::default() }).contains(r#"name="viewport""#));
         let p = page(&Window { lang: Some(r#""><script>x"#), ..Default::default() });
         assert!(p.contains(r#"lang="&quot;&gt;&lt;script&gt;x""#), "a hostile value stays in its attribute");
+    }
+
+    #[test]
+    fn every_window_wears_the_apps_icon_or_its_monogram_and_a_browser_tab_too() {
+        let png: &'static [u8] = b"\x89PNG\r\n\x1a\n";
+        let mut cfg = aio::config::Config::default();
+        cfg.app.name = "Notes".into();
+        assert_eq!(Window::of(&cfg).icon, None, "none of its own: the shell draws its monogram");
+        cfg.app.icon = png;
+        assert_eq!(Window::of(&cfg).icon, Some(png));
+        // aio's /__aio/icon: a browser tab's favicon; the window's page needs none.
+        let win = Window::of(&cfg);
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let link = format!(r#"<link rel="icon" type="image/png" href="data:image/png;base64,{b64}">"#);
+        assert!(page_of(&win, "", "'self'").contains(&link));
+        assert!(!page(&win).contains("rel=\"icon\""));
+        let tab = page_of(&Window { title: "Notes", ..Default::default() }, "", "'self'");
+        assert!(
+            tab.contains(r#"<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgo"#),
+            "else its monogram"
+        );
+        // The window wears the monogram, drawn once while its letter and hue stay.
+        let d = tempfile::tempdir().unwrap();
+        let p = monogram(d.path(), "Notes", 210).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), aio_config::icon::icon_png("Notes", 210, MONOGRAM_PX));
+        std::fs::write(&p, b"kept").unwrap();
+        assert_eq!(std::fs::read(monogram(d.path(), "Notes", 210).unwrap()).unwrap(), b"kept");
+        assert_ne!(std::fs::read(monogram(d.path(), "Notes", 20).unwrap()).unwrap(), b"kept", "a new hue: drawn again");
     }
 
     #[test]
@@ -1155,34 +1395,7 @@ mod tests {
         assert_eq!(said[0], "W [vitals] render warning: an update took 25 ms to paint");
         // The runtime keeps the probe's lines, at their level.
         let js = include_str!("main.js");
-        assert!(js.contains("String(e.message).startsWith('[vitals] ')"));
-    }
-
-    /// The race on a phone, replayed in Node: keys typed ahead of their echoes stay.
-    #[test]
-    fn typing_ahead_of_the_apps_echo_keeps_every_key() {
-        let js = format!(
-            "let onInput; const applied = [];
-             globalThis.document = {{ addEventListener: (_, f) => onInput = f }};
-             globalThis.window = {{ interpreter: {{ setAttributeInner(n, f, v) {{ applied.push(v); if (f === 'value') n.value = v; }} }} }};
-             {TYPING}
-             const it = window.interpreter, el = {{ value: '' }};
-             const type = (v) => {{ el.value = v; onInput({{ target: el }}); }};
-             type('a'); type('ab'); type('abc');
-             it.setAttributeInner(el, 'value', 'a');    // a stale echo: skipped
-             it.setAttributeInner(el, 'value', 'ab');   // stale too
-             it.setAttributeInner(el, 'value', 'abc');  // caught up: nothing to do
-             it.setAttributeInner(el, 'value', '');     // the app clears it: applied
-             type('x');
-             it.setAttributeInner(el, 'value', '2.5');  // the app's own value: applied
-             it.setAttributeInner(el, 'class', 'x');    // other attributes: as ever
-             console.log(JSON.stringify([el.value, applied]));"
-        );
-        let Ok(out) = std::process::Command::new("node").args(["-e", &js]).output() else {
-            return eprintln!("skipped: no node");
-        };
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), r#"["2.5",["","2.5","x"]]"#);
+        assert!(js.contains("const word = { error: 'ERROR', warning: 'WARN ', debug: 'DEBUG' }[e.level] || 'INFO '"));
     }
 
     #[tokio::test]
@@ -1194,6 +1407,22 @@ mod tests {
         assert_eq!(&b.next().await.unwrap().unwrap()[..], b"edits");
         b.send(Bytes::from_static(b"{\"event\":1}")).await.unwrap();
         assert_eq!(a.next().await.unwrap().unwrap(), b"{\"event\":1}");
+    }
+
+    #[test]
+    fn built_in_assets_are_laid_out_at_their_paths_and_rewritten_only_when_changed() {
+        let d = tempfile::tempdir().unwrap();
+        assets(d.path(), &[("/media/a%20b.txt", b"one"), ("/media/x/y.txt", b"two")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/a b.txt")).unwrap(), b"one");
+        assert_eq!(std::fs::read(d.path().join("assets/media/x/y.txt")).unwrap(), b"two");
+        // The same files: nothing written (a file changed by hand stays).
+        std::fs::write(d.path().join("assets/media/x/y.txt"), "hand").unwrap();
+        assets(d.path(), &[("/media/a%20b.txt", b"one"), ("/media/x/y.txt", b"two")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/x/y.txt")).unwrap(), b"hand");
+        // Another build: its files only.
+        assets(d.path(), &[("/media/a%20b.txt", b"new")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/a b.txt")).unwrap(), b"new");
+        assert!(!d.path().join("assets/media/x").exists());
     }
 
     #[test]
@@ -1209,6 +1438,10 @@ mod tests {
             assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
         }
         assert!(d.join("preload.js").exists() && d.join("index.html").exists());
+        // No routes for the window: its page connects to nothing; with them, to its own origin only.
+        assert!(std::fs::read_to_string(d.join("index.html")).unwrap().contains("connect-src 'none'"));
+        install_with(&d, "my-app", &Window::default(), true).unwrap();
+        assert!(std::fs::read_to_string(d.join("index.html")).unwrap().contains("connect-src 'self';"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

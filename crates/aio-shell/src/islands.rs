@@ -1,12 +1,11 @@
 //! The kit's islands (`aio::kit::WebIsland`) in the real page: the window's
-//! own HTML, CSP and DOM-edit interpreter, in a headless Chromium, its frames
+//! own HTML, CSP and air's interpreter, in a headless Chromium, its frames
 //! carried over the DevTools protocol where the preload would carry them.
-use crate::{Window, page_with, wire};
+use crate::{Window, page_with};
 use aio::kit::{Island, WebIsland};
 use aio::serde_json::{Value, json};
+use aio::ui::prelude::*;
 use base64::Engine;
-use dioxus::prelude::*;
-use dioxus_liveview::LiveViewPool;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
@@ -114,17 +113,17 @@ struct Label {
     label: String,
 }
 
-fn app() -> Element {
-    let mut n = use_signal(|| 0i64);
-    let mut on = use_signal(|| true);
-    let mut probe = use_signal(String::new);
+fn app() -> View {
+    let n = signal(|| 0i64);
+    let on = signal(|| true);
+    let probe = signal(String::new);
     rsx! {
         button { id: "hide", onclick: move |_| on.toggle(), "hide" }
-        if on() {
+        if on.get() {
             WebIsland {
                 id: "counter",
                 island: COUNTER,
-                props: Count { n: n() },
+                props: Count { n: n.get() },
                 onevent: move |b: Bump| n += b.by,
                 loading: rsx! { i { "loading" } },
             }
@@ -132,26 +131,26 @@ fn app() -> Element {
             WebIsland {
                 id: "react",
                 island: REACT,
-                props: Label { label: format!("hi {}", n()) },
+                props: Label { label: format!("hi {}", n.get()) },
                 onevent: move |b: Bump| n += b.by,
             }
             // Actions (aio's `use=`): the view's own children inside.
             WebIsland::<Label, ()> {
                 id: "tip",
                 island: TIP,
-                props: Label { label: format!("n is {}", n()) },
+                props: Label { label: format!("n is {}", n.get()) },
                 span { id: "inside", "{n}" }
             }
             WebIsland::<Label, ()> {
                 id: "swap",
-                island: if n() == 0 { TIP } else { MARK },
+                island: if n.get() == 0 { TIP } else { MARK },
                 props: Label { label: "swap".into() },
             }
             WebIsland::<Count, Bump> { id: "boundary", island: BOUNDARY, props: Count { n: 0 } }
             WebIsland {
                 id: "sandboxed",
                 island: SANDBOXED,
-                props: Count { n: n() },
+                props: Count { n: n.get() },
                 onevent: move |v: Value| probe.set(v.to_string()),
             }
         }
@@ -254,14 +253,15 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     let (view, ours) = tokio::io::duplex(1 << 20);
-    let pool = LiveViewPool::new();
-    tokio::spawn(async move { _ = pool.launch_virtualdom(wire(Box::new(view)), || VirtualDom::new(app)).await });
+    tokio::spawn(async move { _ = crate::views::Views::new().launch(Box::new(view), app).await });
     let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
     let (mut to_view, mut from_view) = StreamExt::split::<bytes::Bytes>(Framed::new(ours, codec));
     let b64 = base64::engine::general_purpose::STANDARD;
-    // Carry frames both ways until `expr` is true.
+    // Carry frames both ways until `expr` is true (by time: a busy machine
+    // takes longer per round).
     let mut until = async |expr: &str| {
-        for _ in 0..400 {
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < by {
             while let Ok(Some(Ok(f))) = tokio::time::timeout(Duration::from_millis(5), from_view.next()).await {
                 eval(&mut ws, &mut id, &format!("__aioIn({})", json!(b64.encode(&f)))).await;
             }
@@ -272,7 +272,8 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
                 return;
             }
         }
-        panic!("never true: {expr}");
+        let page = eval(&mut ws, &mut id, "document.body.innerHTML").await;
+        panic!("never true: {expr}; the page: {page}");
     };
     let text = |box_id: &str| format!("document.getElementById('{box_id}')?.textContent");
     until(&format!("{} === 'n=0' && {} === 'n=100'", text("counter"), text("fixed"))).await;

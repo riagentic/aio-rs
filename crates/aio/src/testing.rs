@@ -20,7 +20,9 @@ pub use browser::TestBrowser;
 #[cfg(feature = "server")]
 pub use sim::Sim;
 #[cfg(feature = "kit")]
-pub use ui::{Info, Key, Modifiers, Mount, MountedComponent, TestUi};
+pub use electron::{Answered, Asked};
+#[cfg(feature = "kit")]
+pub use ui::{Info, Key, Modifiers, Mount, MountedComponent, Surface, SurfaceElement, TestUi};
 
 use crate::{By, Cell, CellData, Cells, Door, Error, Handle, Store};
 use serde::Serialize;
@@ -129,18 +131,40 @@ fn name<T>() -> &'static str {
     std::any::type_name::<T>().rsplit("::").next().unwrap_or("cell")
 }
 
+/// An effect a call asked for, not started yet (aio's `t.getEffects()`):
+/// its cell, its key (an async method's is the method, with `#[ttl]` its
+/// arguments too), how a second one with that key behaves, its timeout
+/// (an async method's await: the call ceiling, unless `#[long]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldEffect {
+    pub cell: &'static str,
+    pub key: String,
+    pub mode: crate::Mode,
+    pub timeout: Option<Duration>,
+}
+
 /// What `TestCells` needs of each cell, whatever its type.
 trait Booted {
     fn held(&self) -> Vec<String>;
+    fn held_effects(&self) -> Vec<HeldEffect>;
     fn start_held(&self) -> usize;
     fn running(&self) -> Vec<String>;
     fn fire_due(&self, now: i64);
     fn failed(&self) -> Vec<String>;
+    fn last(&self) -> (u64, Vec<String>);
 }
 
 impl<T: Cell> Booted for Handle<T> {
     fn held(&self) -> Vec<String> {
         Handle::held(self).into_iter().map(|k| format!("{}.{k}", name::<T>())).collect()
+    }
+
+    fn held_effects(&self) -> Vec<HeldEffect> {
+        let cell = name::<T>();
+        Handle::held_effects(self)
+            .into_iter()
+            .map(|(key, mode, timeout)| HeldEffect { cell, key, mode, timeout })
+            .collect()
     }
 
     fn start_held(&self) -> usize {
@@ -154,10 +178,16 @@ impl<T: Cell> Booted for Handle<T> {
     fn fire_due(&self, now: i64) {
         self.store(|s| s.fire_due_but(now, |d| self.skips(d)))
             .unwrap_or_else(|e| panic!("{}: schedules: {e}", name::<T>()));
+        self.fire_foreign();
     }
 
     fn failed(&self) -> Vec<String> {
         self.take_failed().into_iter().map(|f| format!("{}.{f}", name::<T>())).collect()
+    }
+
+    fn last(&self) -> (u64, Vec<String>) {
+        let (at, keys) = self.last_held();
+        (at, keys.into_iter().map(|k| format!("{}.{k}", name::<T>())).collect())
     }
 }
 
@@ -177,6 +207,8 @@ impl<T: Cell> Booted for Handle<T> {
 pub struct TestCells {
     rt: tokio::runtime::Runtime,
     cells: Vec<Box<dyn Booted>>,
+    /// Its cells by id, for the schedules one sets on another.
+    dir: crate::handle::Dir,
     /// The cells' clock: the wall clock at the start, then moved only by `advance`.
     clock: std::sync::Arc<std::sync::atomic::AtomicI64>,
     /// The tokio instant and the schedule clock at the start: tokio's virtual
@@ -202,6 +234,7 @@ impl TestCells {
         Self {
             rt,
             cells: vec![],
+            dir: Default::default(),
             clock,
             epoch: (start, at),
             _sandbox: crate::paths::sandbox().expect("a test sandbox"),
@@ -239,14 +272,51 @@ impl TestCells {
     /// Take the failures of the cells' schedules and effects so far
     /// (`Cell.method: why (effect `key`)`), so the test's end doesn't fail on them.
     pub fn failures(&mut self) -> Vec<String> {
-        self.cells.iter().flat_map(|c| c.failed()).collect()
+        let mut f: Vec<String> = self.cells.iter().flat_map(|c| c.failed()).collect();
+        f.extend(crate::perf::watched(false));
+        f
+    }
+
+    /// A call of `T`'s `method` slower than `ms` fails the test (aio's
+    /// `perfBudget`, for this test alone): its own time, as `[perf]` counts
+    /// it, of every call on this thread from now on. `failures` takes them.
+    #[track_caller]
+    pub fn budget<T: Cell>(&mut self, method: &str, ms: u64) {
+        assert!(
+            T::METHODS.contains(&method),
+            "budget: {} has no method `{method}` (its methods: {})",
+            name::<T>(),
+            T::METHODS.join(", ")
+        );
+        crate::perf::watch(format!("{}.{method}", T::ID), Duration::from_millis(ms));
+    }
+
+    /// The effects the last commit asked for (aio's `expect.effects`): the
+    /// newest one's, of any cell here (`Cell.key`, in order); `[]` when it
+    /// asked none. [`Self::effects`] is every one still waiting.
+    pub fn last_effects(&self) -> Vec<String> {
+        self.cells.iter().map(|c| c.last()).max_by_key(|(at, _)| *at).map(|(_, keys)| keys).unwrap_or_default()
+    }
+
+    /// Cell `h` back at its default state with `seed` merged in (aio's
+    /// `t.init(seed)`; `json!({})`: `t.destroy()`'s fresh state) mid-test:
+    /// its `#[on_stop]` runs, its waiting effects are dropped, the state is
+    /// replaced (one event, invariants checked), its `#[on_start]` runs.
+    #[track_caller]
+    pub fn reset<T: Cell>(&mut self, h: &Handle<T>, seed: Value) {
+        let st = serde_json::to_value(seeded::<T>(seed)).expect("the state serializes");
+        _ = h.live(false);
+        h.drop_held();
+        h.store(|s| s.load(&By::Test, st)).unwrap_or_else(|e| panic!("reset {}: {e}", name::<T>()));
+        _ = h.live(true);
     }
 
     fn boot<T: Cell>(&mut self, mut store: Store<T>) -> Handle<T> {
         store.set_clock(self.clock.clone());
         let h = Handle::new(store).by(By::Test);
         h.hold();
-        h.live(true);
+        _ = h.live(true);
+        h.join(&self.dir);
         self.cells.push(Box::new(h.clone()));
         h
     }
@@ -254,6 +324,11 @@ impl TestCells {
     /// The effects calls asked for that haven't started (`Cell.key`), in order.
     pub fn effects(&self) -> Vec<String> {
         self.cells.iter().flat_map(|c| c.held()).collect()
+    }
+
+    /// [`Self::effects`] as descriptions: each one's key, mode and timeout.
+    pub fn held_effects(&self) -> Vec<HeldEffect> {
+        self.cells.iter().flat_map(|c| c.held_effects()).collect()
     }
 
     /// Start the waiting effects and wait until they, and every effect they
@@ -291,12 +366,67 @@ impl TestCells {
         holds: impl Fn(&T) -> bool,
     ) -> Vec<String> {
         assert!(!calls.is_empty(), "fuzz: no calls to make");
+        self.run_fuzz(h, seed, n, holds, |rng| {
+            let (method, args) = &calls[rng.below(calls.len() as u64) as usize];
+            (method.to_string(), args(rng))
+        })
+    }
+
+    /// [`Self::fuzz`] over the cell's own methods (aio's `fuzz({ skip })`):
+    /// every one `#[methods]` lists but those in `skip` (boot-only ones,
+    /// ones that need a clock or a device), each with arguments made from
+    /// its parameter types: numbers, text, `bool`, `Option`, `Vec`, tuples,
+    /// `Uuid`. A type it doesn't know gets `null`, so the call refuses (an
+    /// answer); give such methods their arguments with `fuzz`.
+    #[track_caller]
+    pub fn fuzz_methods<T: Cell>(
+        &mut self,
+        h: &Handle<T>,
+        seed: u64,
+        n: usize,
+        skip: &[&str],
+        holds: impl Fn(&T) -> bool,
+    ) -> Vec<String> {
+        let unknown: Vec<&str> = skip.iter().copied().filter(|m| !T::METHODS.contains(m)).collect();
+        assert!(
+            unknown.is_empty(),
+            "fuzz_methods: {} has no method {} (its methods: {})",
+            name::<T>(),
+            unknown.join(", "),
+            T::METHODS.join(", ")
+        );
+        assert_eq!(T::SIGNATURES.len(), T::METHODS.len(), "fuzz_methods: {} has no #[methods] signatures", name::<T>());
+        let picks: Vec<(&str, Vec<&str>)> = T::METHODS
+            .iter()
+            .zip(T::SIGNATURES)
+            .filter(|(m, _)| !skip.contains(m))
+            .map(|(m, sig)| (*m, params(sig)))
+            .collect();
+        assert!(!picks.is_empty(), "fuzz_methods: every method was skipped ({}): nothing would be called", skip.join(", "));
+        self.run_fuzz(h, seed, n, holds, |rng| {
+            let (method, types) = &picks[rng.below(picks.len() as u64) as usize];
+            let args = match types.len() {
+                0 => Value::Null,
+                _ => Value::Array(types.iter().map(|t| arbitrary(t, rng)).collect()),
+            };
+            (method.to_string(), args)
+        })
+    }
+
+    #[track_caller]
+    fn run_fuzz<T: Cell>(
+        &mut self,
+        h: &Handle<T>,
+        seed: u64,
+        n: usize,
+        holds: impl Fn(&T) -> bool,
+        mut pick: impl FnMut(&mut Rng) -> (String, Value),
+    ) -> Vec<String> {
         let (mut rng, mut made) = (Rng(seed), vec![]);
         for _ in 0..n {
-            let (method, args) = &calls[rng.below(calls.len() as u64) as usize];
-            let args = args(&mut rng);
+            let (method, args) = pick(&mut rng);
             made.push(format!("{method}({})", dump(&args, 80)));
-            let out = Door::call(h, method, args);
+            let out = Door::call(h, &method, args);
             let fail = |why: String| -> ! {
                 panic!("fuzz seed {seed}: {why}\n  calls: {}\n  state: {}", made.join(", "), dump(&*h.state(), 2000))
             };
@@ -350,6 +480,10 @@ impl<T: Cell> Door<T> for AsClient<T> {
         self.h.call_by(&self.who, method, args, None).map(Option::unwrap_or_default)
     }
 
+    fn ask(&self, method: &str, args: Value) -> crate::Result<crate::Answer> {
+        self.h.ask_by(Some(&self.who), method, args, None).map(|(_, a)| a)
+    }
+
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         self.h.read(f)
     }
@@ -370,7 +504,9 @@ impl TestCells {
 
 /// A real app server for a test (aio's `testServer`): the cell served as the
 /// app serves it (sync, the app's routes and files) on a free loopback port
-/// with a fresh key, in a sandbox. Dropped, it stops.
+/// with a fresh key, in a sandbox. A whole app is its cell and the cells
+/// `Http::cell` serves beside it, all on its one `/ws`, key and port
+/// ([`Self::cell`], [`Self::client_of`]). Dropped, it stops.
 #[cfg(feature = "server")]
 pub struct TestServer<T: Cell> {
     /// `127.0.0.1:<port>`.
@@ -378,6 +514,7 @@ pub struct TestServer<T: Cell> {
     /// The key clients show.
     pub token: String,
     pub handle: Handle<T>,
+    beside: Vec<std::sync::Arc<dyn crate::link::Beside>>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
     _sandbox: crate::paths::Sandbox,
 }
@@ -412,8 +549,30 @@ impl<T: Cell> TestServer<T> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let (addr, token) = (l.local_addr()?.to_string(), crate::uuid_v4().simple().to_string());
         let opts = crate::sync::Options { token: token.clone(), ..opts };
+        let beside = opts.http.beside.clone();
         let task = tokio::spawn(crate::sync::serve_with(h.clone(), l, opts));
-        Ok(Self { addr, token, handle: h, task, _sandbox: sandbox })
+        Ok(Self { addr, token, handle: h, beside, task, _sandbox: sandbox })
+    }
+
+    /// The handle of served cell `U`: the app's own or one `Http::cell`
+    /// serves beside it; panics naming the served cells.
+    #[track_caller]
+    pub fn cell<U: Cell>(&self) -> Handle<U> {
+        let own: &(dyn std::any::Any + Send + Sync) = &self.handle;
+        let found = match U::ID == T::ID {
+            true => own.downcast_ref::<Handle<U>>(),
+            false => self.beside.iter().find(|c| c.id() == U::ID).and_then(|c| c.any().downcast_ref::<Handle<U>>()),
+        };
+        found.cloned().unwrap_or_else(|| {
+            let served: Vec<&str> = std::iter::once(T::ID).chain(self.beside.iter().map(|c| c.id())).collect();
+            panic!("TestServer: {} isn't served here (it serves {})", name::<U>(), served.join(", "))
+        })
+    }
+
+    /// A real synced client of served cell `U`, as `user`: its link shares
+    /// the one socket with this test's other clients of the server.
+    pub async fn client_of<U: Cell>(&self, user: &str) -> std::io::Result<crate::sync::Remote<U>> {
+        crate::sync::Remote::connect(&self.addr, &self.token, user).await
     }
 
     /// A browser page of this server (aio's `testPageFetch`): its requests
@@ -453,12 +612,14 @@ impl<T: Cell> TestServer<T> {
         crate::sync::Remote::connect(&self.addr, &self.token, user).await
     }
 
-    /// Wait until every client is online, has no call waiting and shows
-    /// the server's state; after 5 s, panics naming the ones that lag.
-    pub async fn converged(&self, clients: &[&crate::sync::Remote<T>]) {
+    /// Wait until every client (of any one served cell) is online, has no
+    /// call waiting and shows the server's state; after 5 s, panics naming
+    /// the ones that lag.
+    pub async fn converged<U: Cell>(&self, clients: &[&crate::sync::Remote<U>]) {
         let end = Instant::now() + PATIENCE;
+        let served = self.cell::<U>();
         loop {
-            let want = self.state();
+            let want = served.state();
             let lag: Vec<String> = clients
                 .iter()
                 .enumerate()
@@ -511,6 +672,127 @@ impl<T: Cell> TestServer<T> {
         let mut out = vec![];
         s.read_to_end(&mut out).await?;
         parse(&out).ok_or_else(|| std::io::Error::other("not an HTTP answer"))
+    }
+}
+
+/// Every update one synced client received, in order (aio's `patches`),
+/// from [`patches`] on: each `patch` delta and each whole `state`.
+#[cfg(feature = "server")]
+#[derive(Clone, Default)]
+pub struct Patches(std::sync::Arc<std::sync::Mutex<Vec<Value>>>);
+
+#[cfg(feature = "server")]
+impl Patches {
+    /// What came so far.
+    pub fn all(&self) -> Vec<Value> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The first update, come or to come, that `pred` takes (aio's
+    /// `waitForPatch`); after 5 s, panics naming the ones that came.
+    pub async fn until(&self, pred: impl Fn(&Value) -> bool) -> Value {
+        let end = Instant::now() + PATIENCE;
+        loop {
+            if let Some(p) = self.all().into_iter().find(|p| pred(p)) {
+                return p;
+            }
+            if Instant::now() >= end {
+                let came: Vec<String> = self.all().iter().map(|p| dump(p, 200)).collect();
+                panic!("no such update after {PATIENCE:?}; came: [{}]", came.join(", "));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+/// Record what `client` receives from now on (aio's `patches`, `onPatch`):
+/// a test can see that a field was left out of a delta, or that the whole
+/// state was sent again.
+#[cfg(feature = "server")]
+pub fn patches<T: Cell>(client: &crate::sync::Remote<T>) -> Patches {
+    let p = Patches::default();
+    let to = p.0.clone();
+    client.on_patch(move |m| to.lock().unwrap_or_else(|e| e.into_inner()).push(m.clone()));
+    p
+}
+
+/// The same call from every client at once (aio's `dispatchAll`): the race
+/// nobody can reason about from outside. Each predicted at once and sent;
+/// the answers, in client order. Wait with [`TestServer::converged`].
+#[cfg(feature = "server")]
+pub fn call_all<T: Cell>(clients: &[&crate::sync::Remote<T>], method: &str, args: Value) -> Vec<crate::Result<Value>> {
+    clients.iter().map(|c| Door::call(*c, method, args.clone())).collect()
+}
+
+/// Several apps in one test (aio's `testApps`): a service and the apps
+/// that are its clients, each with its own dirs (data, logs, cache), lock,
+/// store file, port and key, all in the test world. Dropped, they stop,
+/// the last booted first.
+#[cfg(feature = "server")]
+pub struct TestApps {
+    apps: Vec<(String, Box<dyn std::any::Any + Send>, crate::paths::AppDirs)>,
+    world: crate::paths::Sandbox,
+}
+
+#[cfg(feature = "server")]
+impl Default for TestApps {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "server")]
+impl TestApps {
+    pub fn new() -> Self {
+        Self { apps: vec![], world: crate::paths::sandbox().expect("a test sandbox") }
+    }
+
+    /// Boot app `name`: cell `T` opened from its own store and served
+    /// (needs a tokio runtime). A name booted already is refused.
+    pub async fn boot<T: Cell>(&mut self, name: &str) -> std::io::Result<&TestServer<T>> {
+        if self.apps.iter().any(|(n, ..)| n == name) {
+            return Err(std::io::Error::other(format!("TestApps: \"{name}\" is booted already")));
+        }
+        let dirs = crate::paths::AppDirs::at(&self.world.root().join(name), name)?;
+        let h = Handle::<T>::open(&dirs.store).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let server = TestServer::start(h, crate::http::Http::default()).await?;
+        self.apps.push((name.into(), Box::new(server), dirs));
+        Ok(self.get(name))
+    }
+
+    /// App `name`'s server; panics naming the booted apps, or when it
+    /// serves another cell.
+    #[track_caller]
+    pub fn get<T: Cell>(&self, app: &str) -> &TestServer<T> {
+        let (_, server, _) = self.app(app);
+        server.downcast_ref().unwrap_or_else(|| panic!("TestApps: \"{app}\" serves another cell than {}", name::<T>()))
+    }
+
+    /// App `name`'s dirs: its `logs`, `data`, `store`.
+    #[track_caller]
+    pub fn dirs(&self, name: &str) -> &crate::paths::AppDirs {
+        &self.app(name).2
+    }
+
+    /// A client of app `name`, as `user`, as another app's client is.
+    pub async fn connect<T: Cell>(&self, name: &str, user: &str) -> std::io::Result<crate::sync::Remote<T>> {
+        self.get::<T>(name).client(user).await
+    }
+
+    #[track_caller]
+    #[allow(clippy::type_complexity)]
+    fn app(&self, name: &str) -> &(String, Box<dyn std::any::Any + Send>, crate::paths::AppDirs) {
+        self.apps.iter().find(|(n, ..)| n == name).unwrap_or_else(|| {
+            let booted: Vec<&str> = self.apps.iter().map(|(n, ..)| n.as_str()).collect();
+            panic!("TestApps: no app \"{name}\"; booted: {}", booted.join(", "))
+        })
+    }
+}
+
+#[cfg(feature = "server")]
+impl Drop for TestApps {
+    fn drop(&mut self) {
+        while self.apps.pop().is_some() {}
     }
 }
 
@@ -636,6 +918,189 @@ impl<T: Cell> Drop for TestServer<T> {
     }
 }
 
+/// A whole command-line run captured (aio's `testIO`): what stdin gives
+/// (`input`; used up, it is closed, so a prompt refuses and never hangs),
+/// whether it is a terminal (`tty`, true so prompts run) and whether colour
+/// is on (`color`, false so assertions read plain text). The prompts, the
+/// styles and the progress drawing write to its stdout and stderr.
+/// ```
+/// let mut io = aio::testing::TestIo::new("ana\ny\n");
+/// let name = io.prompt.ask("name", None).unwrap();
+/// assert!(io.prompt.confirm("save?", false).unwrap());
+/// aio::cli::Progress::to(io.err(), io.prompt.tty, 2, "saving").done();
+/// assert_eq!((name.as_str(), io.stdout().as_str()), ("ana", "name: save? [y/N]: "));
+/// assert!(io.stderr().ends_with("2/2 100%\n"));
+/// ```
+pub struct TestIo {
+    pub prompt: crate::cli::Prompt<std::io::Cursor<Vec<u8>>, Captured>,
+    pub style: crate::cli::Style,
+    err: Captured,
+}
+
+/// A stream a [`TestIo`] keeps: everything written to it, shared by its clones.
+#[derive(Clone, Default)]
+pub struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Captured {
+    /// What was written, as text.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    }
+}
+
+impl TestIo {
+    /// A terminal without colour, `input` its stdin.
+    pub fn new(input: &str) -> Self {
+        let prompt = crate::cli::Prompt { input: std::io::Cursor::new(input.into()), out: Captured::default(), tty: true };
+        Self { prompt, style: crate::cli::Style { color: false }, err: Captured::default() }
+    }
+
+    /// Stdin a terminal or not (a pipe: the prompts refuse).
+    pub fn tty(mut self, on: bool) -> Self {
+        self.prompt.tty = on;
+        self
+    }
+
+    /// Colour on or off.
+    pub fn color(mut self, on: bool) -> Self {
+        self.style.color = on;
+        self
+    }
+
+    /// Stderr, for [`crate::cli::Progress::to`] and [`crate::cli::Spinner::to`].
+    pub fn err(&self) -> Box<dyn std::io::Write + Send> {
+        Box::new(self.err.clone())
+    }
+
+    /// Everything written to stdout so far.
+    pub fn stdout(&self) -> String {
+        self.prompt.out.text()
+    }
+
+    /// Everything written to stderr so far.
+    pub fn stderr(&self) -> String {
+        self.err.text()
+    }
+}
+
+/// The bundle `ax build` made (`.deb`, AppImage, `.zip`, …) started and
+/// stopped as `ax smoke` does it (aio's `smoke()`, inside a test): headless,
+/// in a throwaway sandbox, its window (or boot, or `--version`) in time, a
+/// clean stop, nothing left running, no panic in its log. Its report; a
+/// failure panics with what `ax` said. `ax` is `AIO_AX`, else the one on `PATH`.
+#[track_caller]
+pub fn smoke(bundle: &std::path::Path) -> String {
+    let ax = std::env::var_os("AIO_AX").unwrap_or_else(|| "ax".into());
+    smoke_with(std::process::Command::new(ax), bundle)
+}
+
+#[track_caller]
+fn smoke_with(mut ax: std::process::Command, bundle: &std::path::Path) -> String {
+    let out = ax
+        .arg("smoke")
+        .arg(bundle)
+        .output()
+        .unwrap_or_else(|e| panic!("smoke {}: ax doesn't start ({e}): install it, or name it in AIO_AX", bundle.display()));
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "smoke {} failed ({}):\n{said}", bundle.display(), out.status);
+    said
+}
+
+/// The parameter types of a `#[methods]` signature (`add(text: String, at:
+/// Option<u32>) -> Uuid`: `String`, `Option<u32>`), split at the top-level
+/// commas (pure).
+fn params(sig: &str) -> Vec<&str> {
+    let Some(open) = sig.find('(') else { return vec![] };
+    let mut depth = 0;
+    let mut close = sig.len();
+    for (i, c) in sig[open..].char_indices() {
+        match c {
+            '(' | '<' | '[' => depth += 1,
+            ')' | '>' | ']' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            close = open + i;
+            break;
+        }
+    }
+    split_top(&sig[open + 1..close]).into_iter().filter_map(|p| p.split_once(": ").map(|(_, t)| t)).collect()
+}
+
+/// `s` split at the commas outside brackets, each trimmed, empties dropped (pure).
+fn split_top(s: &str) -> Vec<&str> {
+    let (mut out, mut depth, mut from) = (vec![], 0i32, 0);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '<' | '[' => depth += 1,
+            ')' | '>' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(s[from..i].trim());
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(s[from..].trim());
+    out.retain(|p| !p.is_empty());
+    out
+}
+
+/// A random value of the Rust type written `ty` (as a signature has it),
+/// as JSON; `null` for a type it doesn't know (pure in `rng`).
+fn arbitrary(ty: &str, rng: &mut Rng) -> Value {
+    let ty = ty.trim().trim_start_matches("&mut").trim_start_matches('&').trim();
+    let mut pick = |vs: &[Value]| vs[rng.below(vs.len() as u64) as usize].clone();
+    if let Some(inner) = ty.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        return Value::Array(split_top(inner).into_iter().map(|t| arbitrary(t, rng)).collect());
+    }
+    if let Some(inner) = ty.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        let n = rng.below(4);
+        return Value::Array((0..n).map(|_| arbitrary(inner, rng)).collect());
+    }
+    let (path, inner) = match ty.split_once('<') {
+        Some((p, rest)) => (p, rest.strip_suffix('>')),
+        None => (ty, None),
+    };
+    use serde_json::json;
+    match (path.rsplit("::").next().unwrap_or(path), inner) {
+        ("Option", Some(t)) => {
+            if rng.below(3) == 0 {
+                Value::Null
+            } else {
+                arbitrary(t, rng)
+            }
+        }
+        ("Box" | "Arc" | "Rc", Some(t)) => arbitrary(t, rng),
+        ("Vec" | "VecDeque" | "BTreeSet" | "HashSet", Some(t)) => {
+            let n = rng.below(4);
+            Value::Array((0..n).map(|_| arbitrary(t, rng)).collect())
+        }
+        ("bool", None) => json!(rng.below(2) == 1),
+        ("u8" | "u16" | "u32" | "u64" | "u128" | "usize", None) => pick(&[json!(0), json!(1), json!(2), json!(7), json!(100), json!(255)]),
+        ("i8" | "i16" | "i32" | "i64" | "i128" | "isize", None) => pick(&[json!(0), json!(1), json!(-1), json!(7), json!(-100), json!(100)]),
+        ("f32" | "f64", None) => pick(&[json!(0.0), json!(1.5), json!(-2.25), json!(100.0)]),
+        ("String" | "str", None) => pick(&[json!(""), json!("a"), json!("Ana"), json!("two words"), json!("é ✓")]),
+        ("char", None) => pick(&[json!("a"), json!("é"), json!(" ")]),
+        ("Uuid", None) => {
+            let (a, b) = (rng.number(), rng.number());
+            json!(uuid::Uuid::from_u64_pair(a, b).to_string())
+        }
+        _ => Value::Null,
+    }
+}
+
 /// One call `fuzz` may make: the method, and how to make its arguments.
 pub type RandomCall<'a> = (&'a str, &'a dyn Fn(&mut Rng) -> Value);
 
@@ -661,7 +1126,8 @@ impl Rng {
 
 impl Drop for TestCells {
     fn drop(&mut self) {
-        let failed = self.failures();
+        let mut failed = self.failures();
+        failed.extend(crate::perf::watched(true));
         if !failed.is_empty() && !std::thread::panicking() {
             panic!("failed and never looked at (take them with `failures`): {}", failed.join("; "));
         }
@@ -774,6 +1240,43 @@ mod tests {
         keep(&mut jar, "theme=; Path=/");
         keep(&mut jar, "junk");
         assert!(jar.is_empty(), "no time left or no value clears it: {jar:?}");
+    }
+
+    #[test]
+    fn a_signature_gives_its_parameter_types() {
+        assert_eq!(params("add(text: String, at: Option<u32>) -> Uuid"), ["String", "Option<u32>"]);
+        assert_eq!(params("async load(m: HashMap<String, u32>, p: (u8, bool)) -> ()"), ["HashMap<String, u32>", "(u8, bool)"]);
+        assert!(params("tick() -> ()").is_empty());
+    }
+
+    #[test]
+    fn arguments_are_made_from_the_types() {
+        let mut rng = Rng(3);
+        let mut of = |t: &str| (0..40).map(|_| arbitrary(t, &mut rng)).collect::<Vec<_>>();
+        assert!(of("u32").iter().all(|v| v.as_u64().is_some()));
+        assert!(of("i64").iter().any(|v| v.as_i64().is_some_and(|n| n < 0)), "signed ones go below 0");
+        assert!(of("&str").iter().all(Value::is_string) && of("bool").iter().all(Value::is_boolean));
+        let opts = of("Option<String>");
+        assert!(opts.iter().any(Value::is_null) && opts.iter().any(Value::is_string));
+        assert!(of("Vec<u8>").iter().all(|v| v.as_array().is_some_and(|a| a.iter().all(|n| n.as_u64().is_some_and(|n| n < 256)))));
+        assert!(of("(u8, bool)").iter().all(|v| v[0].is_u64() && v[1].is_boolean()));
+        assert!(of("aio::Uuid").iter().all(|v| v.as_str().is_some_and(|s| s.parse::<uuid::Uuid>().is_ok())));
+        assert!(of("Order").iter().all(Value::is_null), "a type it doesn't know: null");
+        assert_eq!(arbitrary("u32", &mut Rng(9)), arbitrary("u32", &mut Rng(9)), "the same seed, the same value");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn smoke_passes_on_ax_s_ok_and_fails_with_what_it_said() {
+        let sh = |code: &str| {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", &format!("echo \"$0 $1\"; exit {code}")]);
+            c
+        };
+        let b = std::path::Path::new("notes-0.1.0-x86_64.AppImage");
+        assert_eq!(smoke_with(sh("0"), b), "smoke notes-0.1.0-x86_64.AppImage\n");
+        let e = fails(|| _ = smoke_with(sh("1"), b));
+        assert!(e.contains("smoke notes-0.1.0-x86_64.AppImage failed") && e.ends_with("smoke notes-0.1.0-x86_64.AppImage\n"), "{e}");
     }
 
     #[test]

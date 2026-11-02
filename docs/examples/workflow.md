@@ -24,7 +24,7 @@ aio-rs. Prerequisites: [cells](../state/cells.md) and
 | `Stock` | a cell | what is on hand, and what each order holds |
 | `Checkout` | a cell with a machine | the cart, the phase, the receipt or the error |
 | `pay` | an effect of `Checkout` | reserve the stock, charge the card, report back |
-| the window | Dioxus views | the cart, a Pay button, the outcome |
+| the window | `aio::ui` views | the cart, a Pay button, the outcome |
 
 The phases of a checkout, and the calls that move between them:
 
@@ -469,7 +469,7 @@ buttons are a courtesy.
 #     pub fn total(&self) -> u64 { self.lines.iter().map(|l| u64::from(l.qty) * l.cents).sum() }
 # }
 use aio::act;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 aio::client!(Checkout, checkout);
 
@@ -478,21 +478,22 @@ fn money(cents: u64) -> String {
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
     rsx! { main { Cart {} Pay {} } }
 }
 
 #[component]
-fn Cart() -> Element {
+fn Cart() -> View {
     let lines = part(|c| &c.lines);
-    let shopping = *part(|c| &c.phase) == Phase::Shopping;
+    let phase = part(|c| &c.phase);
+    let shopping = memo(move || phase.get() == Phase::Shopping);
     rsx! {
-        button { "data-t": "add-tea", disabled: !shopping, onclick: move |_| _ = act!(add("tea".into(), 1, 450)), "Add tea" }
+        button { "data-t": "add-tea", disabled: !shopping.get(), onclick: move |_| _ = act!(add("tea".into(), 1, 450)), "Add tea" }
         ul { "data-t": "lines",
-            for l in lines.iter() {
+            for l in lines.get() {
                 li { key: "{l.item}", "{l.qty} × {l.item} ",
-                    button { disabled: !shopping, onclick: { let item = l.item.clone(); move |_| _ = act!(remove(item.clone())) }, "Remove" }
+                    button { disabled: !shopping.get(), onclick: { let item = l.item.clone(); move |_| _ = act!(remove(item.clone())) }, "Remove" }
                 }
             }
         }
@@ -500,25 +501,25 @@ fn Cart() -> Element {
 }
 
 #[component]
-fn Pay() -> Element {
-    let phase = *part(|c| &c.phase);
-    let total = checkout().total(); // a derived value, cached per state
-    let why = part(|c| &c.error).as_deref().unwrap_or_default().to_string();
+fn Pay() -> View {
+    let phase = part(|c| &c.phase);
+    let total = memo(move || checkout().total()); // a derived value, cached per state
+    let why = part(|c| &c.error);
     rsx! {
-        p { "data-t": "phase", "{phase:?}" }
-        match phase {
+        p { "data-t": "phase", {format!("{:?}", phase.get())} }
+        {match phase.get() {
             Phase::Shopping => rsx! {
-                button { "data-t": "pay", class: aio::ui::btn("primary"), disabled: total == 0,
-                    onclick: move |_| _ = act!(checkout()), "Pay {money(total)}" }
+                button { "data-t": "pay", class: aio::ui::btn("primary"), disabled: total.get() == 0,
+                    onclick: move |_| _ = act!(checkout()), "Pay " {money(total.get())} }
             },
             Phase::Paying => rsx! { button { "data-t": "cancel", onclick: move |_| _ = act!(cancel()), "Cancel" } },
             Phase::Failed => rsx! {
-                p { "data-t": "error", role: "alert", "{why}" }
+                p { "data-t": "error", role: "alert", {why.get().unwrap_or_default()} }
                 button { "data-t": "retry", onclick: move |_| _ = act!(checkout()), "Try again" }
                 button { "data-t": "edit", onclick: move |_| _ = act!(edit()), "Change the cart" }
             },
             Phase::Paid => rsx! { button { "data-t": "again", onclick: move |_| _ = act!(start_over()), "New order" } },
-        }
+        }}
     }
 }
 
@@ -529,9 +530,12 @@ ui.click("pay");
 # }
 ```
 
-`checkout()` reads the whole state, so `Pay` re-renders on every commit
-of the cell; that is fine for a small view, and `part(..)` per field is
-the way when it isn't ([views](../ui/views.md)).
+A view's body runs once; what follows the cell is its holes. `phase`,
+`lines` and `why` are `part(..)` readers, so a hole reading one runs again
+only when that field changes; the branch swaps only when the phase does.
+`total` is a `memo` over `checkout()`, which reads the whole state: it runs
+on every commit of the cell, and the button's hole only when the total
+changed ([views](../ui/views.md)).
 
 ## 5. Boot
 

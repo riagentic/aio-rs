@@ -224,7 +224,7 @@ in its `logs/` folder (`ax data <app>` shows where):
 | `warning.log` | the `WARN` lines |
 | `perf.log` | each blown `[perf]` budget, with where the call's time went (`clone`, `apply`, `check`, `commit`) |
 | `start.log` | the output of an app `ax start` launched |
-| `dev.log` | dx's whole output under `ax dev` |
+| `build.log` | a failed build's errors under `ax dev` (`ax errors` reads it) |
 
 A line reads `2026-10-28T09:48:01.123Z WARN  [net] lost 3 frames peer=7`:
 the stamp, the level padded to 5, the category (`aio` for the framework,
@@ -288,16 +288,15 @@ none of it; `ax build --web --dev` gives a web build that has it.
 
 What aio has and aio-rs doesn't, with what to use instead:
 
-- **Correlation ids.** aio tags every error of one action with an 8-char
-  id. aio-rs names the call a panic happened in (`in notes.add`) and
-  logs effects with their cell and key; `ax events` has each call's
-  event number.
 - **The error box with the state.** aio prints the cell's state with an
   error. aio-rs keeps state out of log lines (a log is not a data
   channel): a problem report carries the cells as saved.
 - **One `onError` hook with an error object** (`code`, `source`,
   `context`, `original`, `stateSnapshot`). aio-rs has `on_problem(kind,
-  message)` and the bus; a call's caller gets the `Rejected`.
+  message)` and the bus, whose `Diagnostic` is the typed object
+  (`code()`, `severity`, `tip`; a report has the state); a call's caller
+  gets the `Rejected`. A call's lines carry `call=<id>` (aio's
+  correlation id: [logs](README.md#3-logs)).
 - **aio's many error codes** (`REDUCE_ERROR`, `EFFECT_ERROR`,
   `QUEUE_OVERFLOW`, `DISPATCH_*`, `PERSIST_*`, `TX_CONFLICT`, the test
   harness codes). In aio-rs a method's failure is its own `Rejected`, an

@@ -4,8 +4,8 @@
 //! tenfold count) and the loop goes on: one bad frame never freezes a view.
 //! The physics is pure, for tests without a clock.
 use super::Instant;
-use dioxus::core::Task;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
+use Task;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -58,30 +58,31 @@ pub struct SpringValue {
 impl SpringValue {
     /// Where it is now (reading subscribes the view).
     pub fn value(&self) -> f64 {
-        (self.value)()
+        (self.value).get()
     }
 
     /// Is it still moving?
     pub fn animating(&self) -> bool {
-        (self.moving)()
+        (self.moving).get()
     }
 
     /// Spring to `target`, from where it is and how fast it moves.
-    pub fn to(mut self, target: f64) {
+    pub fn to(self, target: f64) {
         self.target.set(target);
-        if *self.moving.peek() {
+        if *self.moving.read_untracked() {
             return;
         }
         self.moving.set(true);
-        let run = *self.run.peek() + 1;
+        let run = *self.run.read_untracked() + 1;
         self.run.set(run);
         spawn(async move {
             loop {
                 super::sleep(FRAME).await;
-                if *self.run.peek() != run {
+                if *self.run.read_untracked() != run {
                     return;
                 }
-                let (now, target) = ((*self.value.peek(), *self.velocity.peek()), *self.target.peek());
+                let (now, target) =
+                    ((*self.value.read_untracked(), *self.velocity.read_untracked()), *self.target.read_untracked());
                 match spring_step(self.spring, now, target, FRAME.as_secs_f64()) {
                     Some((x, v)) => {
                         self.value.set(x);
@@ -106,11 +107,11 @@ impl SpringValue {
 /// A number that springs (a hook): starts at `initial`, at rest. Its loop
 /// stops with the component (no `dispose` to forget).
 pub fn use_spring(initial: f64, spring: Spring) -> SpringValue {
-    let value = use_signal(|| initial);
-    let target = use_signal(|| initial);
-    let velocity = use_signal(|| 0.0);
-    let moving = use_signal(|| false);
-    let run = use_signal(|| 0);
+    let value = signal(|| initial);
+    let target = signal(|| initial);
+    let velocity = signal(|| 0.0);
+    let moving = signal(|| false);
+    let run = signal(|| 0);
     SpringValue { value, target, velocity, moving, run, spring }
 }
 
@@ -127,25 +128,25 @@ fn guarded(which: &str, fails: &Cell<u64>, tick: impl FnOnce()) {
     }
 }
 
-/// A loop task per component, (re)started while `active` and stopped
-/// otherwise (and with the component).
-fn use_loop(active: bool, start: impl FnOnce() -> Task) {
-    let task = use_hook(|| Rc::new(Cell::new(None::<Task>)));
-    match (active, task.get()) {
+/// A loop task per component, (re)started while `active` holds and
+/// stopped otherwise (and with the component).
+fn use_loop(active: Prop<bool>, start: impl Fn() -> Task + 'static) {
+    let task = once(|| Rc::new(Cell::new(None::<Task>)));
+    effect(move || match (active.get(), task.get()) {
         (true, None) => task.set(Some(start())),
         (false, Some(t)) => {
             t.cancel();
             task.set(None);
         }
         _ => {}
-    }
+    });
 }
 
-/// Call `tick` every `every` while `active` (aio's `useInterval`); it always
-/// sees the latest closure.
-pub fn use_interval(every: Duration, active: bool, mut tick: impl FnMut() + 'static) {
-    let tick = use_callback(move |()| tick());
-    use_loop(active, || {
+/// Call `tick` every `every` while `active` (aio's `useInterval`; a
+/// signal or a memo is followed, a `bool` is fixed).
+pub fn use_interval(every: Duration, active: impl Into<Prop<bool>>, mut tick: impl FnMut() + 'static) {
+    let tick = callback(move |()| tick());
+    use_loop(active.into(), move || {
         spawn(async move {
             let fails = Cell::new(0);
             loop {
@@ -159,9 +160,9 @@ pub fn use_interval(every: Duration, active: bool, mut tick: impl FnMut() + 'sta
 /// Call `frame(since_start, since_last)` once a frame (60 Hz) while
 /// `active` (aio's `useRaf`; the first frame's `since_last` is zero). For
 /// state that moves; a canvas drawn per frame belongs in the page.
-pub fn use_frame(active: bool, mut frame: impl FnMut(Duration, Duration) + 'static) {
-    let frame = use_callback(move |(t, dt)| frame(t, dt));
-    use_loop(active, || {
+pub fn use_frame(active: impl Into<Prop<bool>>, mut frame: impl FnMut(Duration, Duration) + 'static) {
+    let frame = callback(move |(t, dt)| frame(t, dt));
+    use_loop(active.into(), move || {
         spawn(async move {
             let (start, fails) = (Instant::now(), Cell::new(0));
             let mut last = None;

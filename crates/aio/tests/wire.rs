@@ -4,7 +4,7 @@
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{Mount, TestServer, TestUi};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::time::Duration;
 
 #[cell(shared)]
@@ -33,13 +33,12 @@ impl Shop {
 
 aio::client!(Shop, shop);
 
-fn till() -> Element {
+fn till() -> View {
     use_live();
-    let s = shop();
     let waiting = use_pending(None);
     rsx! {
-        p { "data-t": "stock", "{s.stock}" }
-        p { "data-t": "owner", "{s.owner}" }
+        p { "data-t": "stock", {shop().stock} }
+        p { "data-t": "owner", {shop().owner.clone()} }
         p { "data-t": "waiting", "{waiting}" }
         button { "data-t": "sell", onclick: |_| _ = act!(sell()), "Sell" }
         button { "data-t": "restock", onclick: |_| _ = act!(restock()), "Restock" }
@@ -80,7 +79,7 @@ fn a_click_crosses_the_wire_and_the_server_decides_who_may() {
         ui.click(t);
         let said = refused(&mut ui);
         assert!(said.len() == 1 && said[0].contains(why), "{said:?}");
-        ui.until("rolled back", || HANDLE.peek().pending(None) == 0);
+        ui.until("rolled back", || HANDLE.read_untracked().pending(None) == 0);
         assert_eq!((ui.text("stock"), ui.text("owner")), ("1".into(), String::new()), "{t}: rolled back");
     }
     assert_eq!((server.state().stock, server.state().owner.as_str()), (1, ""));
@@ -92,7 +91,7 @@ fn a_slow_link_shows_the_call_at_once_and_waits_for_the_server() {
     ui.click("sell");
     assert_eq!((ui.text("stock"), ui.text("waiting")), ("1".into(), "1".into()), "predicted, waiting");
     assert_eq!(server.state().stock, 0, "not there yet");
-    ui.until("confirmed", || HANDLE.peek().pending(None) == 0);
+    ui.until("confirmed", || HANDLE.read_untracked().pending(None) == 0);
     ui.until_text("waiting", "0");
     assert_eq!(server.state().stock, 1);
 }

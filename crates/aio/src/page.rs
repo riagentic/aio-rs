@@ -1,4 +1,4 @@
-//! The page a view is drawn in: an empty root, Dioxus's DOM-edit
+//! The page a view is drawn in: an empty root, air's DOM-edit
 //! interpreter over `window.__aioWire`, and aio's own page scripts (keys,
 //! focus, dialogs, typing, the render probe, the dev overlay). The desktop
 //! window (`aio-shell`) and the UI tests (`aio::testing::TestUi`) load the
@@ -6,8 +6,10 @@
 
 /// What `html` (a whole page) may run and load (pure): its own inline
 /// scripts, each by its SHA-256, and the scripts the page builds itself
-/// ([`RUN`]: `blob:` URLs, which only a running script can make); no
-/// `eval`, no other inline script, no `<base>`, no form leaving the page;
+/// ([`RUN`]: `blob:` URLs, which only a running script can make), and
+/// WebAssembly (`'wasm-unsafe-eval'`: wasm only, never JS, as aio's
+/// `script-src`); no `eval`, no other inline script, no `<base>`, no form
+/// leaving the page;
 /// any image source; `connect`: what it may connect to (`'none'`); the
 /// sandboxed islands' boot script ([`crate::ISLAND_SANDBOX`]) by its hash.
 /// Injected markup (`onerror=`, a `<script>` in an article) runs nothing.
@@ -21,7 +23,7 @@ pub fn policy(html: &str, connect: &str) -> String {
         })
         .collect();
     format!(
-        "default-src 'none'; script-src {hashes}blob:; style-src 'unsafe-inline'; img-src * data: blob: aio:; \
+        "default-src 'none'; script-src {hashes}blob: 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src * data: blob: aio:; \
          media-src * data: blob:; font-src data:; connect-src {connect}; base-uri 'none'; form-action 'none'"
     )
 }
@@ -52,10 +54,13 @@ fn inline_scripts(html: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// The page runs code from the app (a Dioxus query: a focus, a rect, an
+/// The page runs code from the app (a view's query: a focus, a rect, an
 /// island's script) as a script of its own making, never through `eval`:
 /// a `blob:` script, which the [`policy`] allows and injected markup can't
-/// make. It runs as a task of its own, after the frame that asked;
+/// make. It runs as a task of its own, after the frame that asked, and
+/// in the order asked (a script the page adds runs whenever it has loaded,
+/// unless it is not `async`: an island's unmount could run after the mount
+/// that replaced it);
 /// `__aioRunning` counts the ones not run yet and `__aioRan` says one ran
 /// (a test waits for them, and for the frame that shows what they did).
 pub const RUN: &str = "window.__aioRunning = 0;
@@ -65,43 +70,33 @@ window.__aioRun = (code) => {
   const s = document.createElement('script');
   window.__aioRunning++;
   const done = () => { window.__aioRunning--; window.__aioRan = true; URL.revokeObjectURL(u); s.remove(); };
+  s.async = false;
   s.src = u;
   s.onload = done;
   s.onerror = () => { done(); console.error('[aio] a script from the app did not run: the page policy refused it'); };
   document.head.appendChild(s);
 };";
 
-/// Dioxus's interpreter runs a query with `Function` (`unsafe-eval`).
-const QUERY_EVAL: &str = "Function(\"Eval\", `\"use strict\";${event.data};`)();";
 
-/// Dioxus's DOM-edit interpreter, its queries run by [`RUN`].
-fn interpreter() -> String {
-    let glue = dioxus_liveview::interpreter_glue("aio://wire");
-    assert!(glue.contains(QUERY_EVAL), "dioxus-liveview's query runner moved: see aio::page::QUERY_EVAL");
-    glue.replace(QUERY_EVAL, "window.__aioRun(`\"use strict\";${event.data};`);")
-}
 
-/// The page's `<body>` content: the root, `bridge` (a script defining
-/// `window.__aioWire` where no preload does; may be empty), the render
-/// probe, the interpreter and the page scripts, and in a dev build the
-/// overlay. Put it in a page with [`sealed`].
+
+
+
+/// The page's `<body>`: the root, `bridge`, the render probe,
+/// air's interpreter (`air::PAGE_JS`: it keeps typed text itself, and
+/// talks to `window.__aioWire` with no socket) and the page scripts that
+/// go with it.
+#[cfg(feature = "kit")]
 pub fn body(bridge: &str) -> String {
     let bridge = if bridge.is_empty() { String::new() } else { format!("<script>{bridge}</script>") };
     format!(
-        r#"<div id="main"></div>{bridge}<script>{}{RENDER}</script><script>{RUN}</script><script>{WIRE}</script>{}<script>{TYPING}</script><script>{SET_FOCUS}</script><script>{KEYS}</script><script>{REVEAL}</script><script>{WHEEL}</script><script>{FOCUS}</script><script>{DRAG}</script><script>{DIALOG}</script><script>{PREVENT}</script><script>{ENTER}</script><script>{FILE_INPUT}</script>{}"#,
+        r#"<div id="main"></div>{bridge}<script>{}{RENDER}</script><script>{RUN}</script><script>{}</script><script>{KEYS}</script><script>{REVEAL}</script><script>{WHEEL}</script><script>{FOCUS}</script><script>{DRAG}</script><script>{DIALOG}</script><script>{PREVENT}</script><script>{ENTER}</script>{}"#,
         render_probe(&crate::vitals::get()),
-        interpreter(),
+        air::PAGE_JS,
         overlay(cfg!(debug_assertions))
     )
 }
 
-/// `MountedData::set_focus` reads a yes back from the page, and Dioxus's
-/// interpreter (0.7.10) answers nothing: the focus moved, yet the view got
-/// an error. It answers yes once it is done.
-pub const SET_FOCUS: &str = "(() => {
-  const it = window.interpreter, set = it.setFocus.bind(it);
-  it.setFocus = (id, on) => (set(id, on), true);
-})();";
 
 /// The dev overlay's script tag in a dev build, else nothing (the web
 /// build's page takes it too).
@@ -110,21 +105,6 @@ pub fn overlay(dev: bool) -> String {
 }
 
 
-/// The page talks through the preload, not a socket: this stands in for the
-/// WebSocket the DOM-edit interpreter opens.
-pub const WIRE: &str = "window.WebSocket = class {
-  constructor() {
-    this.binaryType = 'arraybuffer';
-    window.__aioWire.listen((f) => {
-      const t = performance.now();
-      this.onmessage && this.onmessage({ data: f.buffer.slice(f.byteOffset, f.byteOffset + f.byteLength) });
-      window.__aioPainted(t);
-    });
-    queueMicrotask(() => this.onopen && this.onopen());
-  }
-  send(m) { window.__aioWire.send(typeof m === 'string' ? new TextEncoder().encode(m) : new Uint8Array(m)); }
-  close() {}
-};";
 
 /// The render probe (aio vitals' render meter): how long each update from
 /// the app takes to reach the screen, graded by `[vitals] render` (`T`), and
@@ -218,10 +198,13 @@ pub const REVEAL: &str = "new MutationObserver((ms) => {
 /// is still disabled is submitted as soon as the view's answer to what was
 /// typed enables it (within half a second, unless typing goes on), or at
 /// once with `data-enter-submits` on the form (its submit checks again).
+/// Enter in an open combobox (`role="combobox"`, `aria-expanded="true"`)
+/// picks from its list, the view's to do: the form is never submitted.
 pub const ENTER: &str = "document.addEventListener('keydown', (e) => {
   const t = e.target;
   if (e.key !== 'Enter' || e.defaultPrevented || e.isComposing || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
   if (!(t instanceof HTMLInputElement) || !t.form || ['button', 'submit', 'reset', 'image', 'file'].includes(t.type)) return;
+  if (t.getAttribute('role') === 'combobox' && t.getAttribute('aria-expanded') === 'true') { e.preventDefault(); return; }
   const form = t.form;
   const btn = [...form.elements].find((el) => ['submit', 'image'].includes(el.type) && (el instanceof HTMLButtonElement || el instanceof HTMLInputElement));
   if (!btn) { e.preventDefault(); form.requestSubmit(); return; }
@@ -253,61 +236,10 @@ pub const FOCUS: &str = "new MutationObserver((ms) => {
   if (el.hasAttribute('data-select') && el.select) el.select();
 }).observe(document.body, { childList: true, subtree: true });";
 
-/// The web page's first view takes the place of the server's paint
-/// (`aio::web::launch`) with what a person did to the paint meanwhile, as
-/// aio's hydration kept it by keeping the paint's nodes: the page's and each
-/// box's scroll, the focus and its selection, typed text, ticks and picks
-/// (then said to the view as its `input` / `change`, so its state agrees),
-/// open `<details>`, and where audio and video are (playing on). It goes element by element where both trees have
-/// the same tags; a part the view draws otherwise is the view's (where aio
-/// threw the whole paint away and drew the page again).
-pub const ADOPT: &str = "window.__aioAdopt = (paint, view) => {
-  const later = [], told = [];
-  let focus = null;
-  const walk = (a, b) => {
-    if (a.tagName !== b.tagName) return;
-    const [top, left] = [a.scrollTop, a.scrollLeft];
-    if (top || left) later.push(() => { b.scrollTop = top; b.scrollLeft = left; });
-    if (a instanceof HTMLDetailsElement) b.open = a.open;
-    if (a instanceof HTMLMediaElement && (a.currentTime || !a.paused)) {
-      const [at, playing] = [a.currentTime, !a.paused];
-      later.push(() => { b.currentTime = at; if (playing) b.play().catch(() => {}); });
-    }
-    if (a instanceof HTMLInputElement && (a.type === 'checkbox' || a.type === 'radio')) {
-      if (a.checked !== a.defaultChecked) { b.checked = a.checked; told.push([b, 'change']); }
-    } else if ((a instanceof HTMLInputElement && a.type !== 'file') || a instanceof HTMLTextAreaElement) {
-      if (a.value !== a.defaultValue) { b.value = a.value; told.push([b, 'input']); }
-    } else if (a instanceof HTMLSelectElement && b.options.length === a.options.length) {
-      const picked = [...a.options].map((o) => o.selected);
-      if (picked.some((s, i) => s !== a.options[i].defaultSelected)) {
-        picked.forEach((s, i) => { b.options[i].selected = s; });
-        told.push([b, 'change']);
-      }
-    }
-    if (document.activeElement === a) {
-      let range = null;
-      try { range = a.selectionStart === null ? null : [a.selectionStart, a.selectionEnd, a.selectionDirection]; } catch {}
-      focus = [b, range];
-    }
-    if (a.children.length === b.children.length) for (let i = 0; i < a.children.length; i++) walk(a.children[i], b.children[i]);
-  };
-  walk(paint, view);
-  const [x, y] = [scrollX, scrollY];
-  paint.remove();
-  view.id = 'main';
-  view.removeAttribute('hidden');
-  scrollTo(x, y);
-  for (const f of later) f();
-  if (focus) {
-    focus[0].focus({ preventScroll: true });
-    if (focus[1]) try { focus[0].setSelectionRange(...focus[1]); } catch {}
-  }
-  for (const [n, t] of told) n.dispatchEvent(new Event(t, { bubbles: true }));
-};";
 
 /// What a drag carries: a view's `ondragstart` runs after the browser has
-/// moved on, so its `set_data` never reaches the drop (and Dioxus 0.7.10's
-/// event copy ignores it). The page sets it instead, in the dragstart
+/// moved on (its handler runs in the app, after the event), so its
+/// `set_data` never reaches the drop. The page sets it instead, in the dragstart
 /// itself, from the dragged element's `data-drag` (as `text/plain`): any
 /// drop reads it, in the app, a test or another app.
 pub const DRAG: &str = "document.addEventListener('dragstart', (e) => {
@@ -315,16 +247,6 @@ pub const DRAG: &str = "document.addEventListener('dragstart', (e) => {
   if (el && e.dataTransfer) e.dataTransfer.setData('text/plain', el.getAttribute('data-drag'));
 }, true);";
 
-/// A file input opens the system's own picker (Electron's, Android's).
-/// Dioxus's interpreter (0.7.10) catches a click on one at the window for
-/// its desktop host and asks a `__file_dialog` endpoint no page here has:
-/// the click was refused and no picker ever opened. Stopped at the
-/// document, after the view's own handlers on `#main`, it never gets there;
-/// the picked files then reach the view as its `change` (the interpreter's
-/// liveview path reads them).
-pub const FILE_INPUT: &str = "document.addEventListener('click', (e) => {
-  if (e.target instanceof HTMLInputElement && e.target.type === 'file') e.stopPropagation();
-});";
 
 /// A modal dialog (`[aria-modal=true]`, the kit's `Modal`) holds the
 /// keyboard (aio's `onModalKey`): focus on the box itself moves to its first
@@ -376,31 +298,6 @@ pub const DIALOG: &str = "(() => {
   });
 })();";
 
-/// Typing is never undone. Each keystroke goes to the app, and its echo of
-/// the field's value comes back later: by then the person may have typed on,
-/// and the old echo would wipe those keys (a fast typist on a phone loses
-/// letters). So a field keeps the values it sent until the app's value
-/// matches it again; an echo of one of those is skipped. Any other value is
-/// the app's own (a clear after sending, "Max") and is applied.
-pub const TYPING: &str = "(() => {
-  const sent = new WeakMap();
-  document.addEventListener('input', (e) => {
-    const t = e.target;
-    if (typeof t.value !== 'string') return;
-    if (!sent.has(t)) sent.set(t, []);
-    sent.get(t).push(t.value);
-  }, true);
-  const it = window.interpreter, set = it.setAttributeInner.bind(it);
-  it.setAttributeInner = (node, field, value, ns) => {
-    const past = field === 'value' && !ns ? sent.get(node) : undefined;
-    if (past) {
-      if (value === node.value) return void sent.delete(node);
-      if (past.includes(value)) return;
-      sent.delete(node);
-    }
-    set(node, field, value, ns);
-  };
-})();";
 
 /// Dev builds only: the page's errors on the page (aio dev-overlay), where
 /// the person is looking. Plain DOM (the renderer may be what broke), one
@@ -459,16 +356,6 @@ pub const OVERLAY: &str = "(() => {
 mod tests {
     use super::*;
 
-    /// The interpreter still catches file inputs at the window, and the
-    /// page stops the click before it gets there (on Android, measured:
-    /// "Refused to connect to …/__file_dialog" and no picker before).
-    #[test]
-    fn a_file_input_opens_the_system_picker_not_the_desktop_hosts() {
-        let glue = interpreter();
-        assert!(glue.contains("__file_dialog") && glue.contains("window.addEventListener(\"click\""));
-        assert!(body("").contains(&format!("<script>{FILE_INPUT}</script>")));
-        assert!(FILE_INPUT.starts_with("document.addEventListener('click'") && !FILE_INPUT.contains(", true)"));
-    }
 
     #[test]
     fn the_page_runs_only_its_own_scripts_and_never_eval() {
@@ -479,7 +366,8 @@ mod tests {
         let page = sealed(&page, "'none'");
         let csp = policy(&page, "'none'");
         let scripts = csp.split("script-src ").nth(1).unwrap().split(';').next().unwrap();
-        assert!(!csp.contains("unsafe-eval") && !scripts.contains("unsafe-inline") && !scripts.contains('*'), "{csp}");
+        assert!(!csp.contains("'unsafe-eval'") && !scripts.contains("unsafe-inline") && !scripts.contains('*'), "{csp}");
+        assert!(scripts.ends_with("blob: 'wasm-unsafe-eval'"), "wasm compiles, as in aio: {scripts}");
         assert!(csp.contains("base-uri 'none'") && csp.contains("form-action 'none'") && csp.contains("connect-src 'none'"));
         // Every inline script by its hash, the one with a src by none.
         let n = inline_scripts(&page).count();
@@ -488,8 +376,8 @@ mod tests {
         // The policy comes right after the charset, before any script.
         let at = page.find("Content-Security-Policy").unwrap();
         assert!(page.find("<meta charset").unwrap() < at && at < page.find("<script").unwrap());
-        // The interpreter runs its queries as the page's own scripts, never through Function.
-        assert!(!page.contains("Function(") && page.contains("window.__aioRun(`"), "no eval in the page");
+        // air runs its queries as the page's own scripts, never through Function.
+        assert!(!page.contains("Function(") && page.contains("window.__aioRun("), "no eval in the page");
     }
 
     #[test]

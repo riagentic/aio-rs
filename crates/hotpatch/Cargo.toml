@@ -1,0 +1,25 @@
+[package]
+name = "aio-rs-hotpatch"
+description = "aio-rs's hot-patch runtime: `ax dev` loads a patch library into the running app and its hot functions call the new code"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["development-tools"]
+
+[lib]
+name = "aio_hotpatch"
+
+[dependencies]
+# The jump table, as `ax dev` writes it and the app reads it (JSON over the door).
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+# dlopen / dlsym of the patch library and of the running binary's `main`.
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = "1"

@@ -14,22 +14,25 @@ compile. Feature `kit`.
 
 ```rust,ignore
 // ax create's template (src/lib.rs), compiled by ax's own tests:
-let theme = aio::kit::theme_css(aio::kit::theme::hue(env!("CARGO_PKG_NAME")));
-style { {aio::use_css!(false, &theme; "assets/style.css")} }
+// The app's one hue (`[ui] hue`, else its id's): its icon's and splash's too.
+let theme = aio::kit::theme_css(aio::hue!());
+style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
 ```
 
-`aio::use_css!(dark, made…; "file.css", …)` makes the page's stylesheet:
+`aio::use_css!(scheme, made…; "file.css", …)` makes the page's stylesheet:
 
 - Sheets made in code go before the `;` and come first (here the kit's
   theme); files follow, paths from the package's folder.
-- A dev build re-reads a saved file and redraws within 0.2 s, no compile;
+- A dev build re-reads a saved file and redraws within 0.05 s, no compile;
   in a browser under `ax dev --web` the page asks the dev server. A
   release build has the files built in (`include_str!`) and reads none.
-- It is made on every render: never keep CSS in `use_hook` (made once,
-  stale after an edit).
-- `dark` is the app's theme, not the OS's (below).
+- Put it in a hole (`style { {aio::use_css!(..)} }`), where it follows
+  the saved files; never keep CSS in `once` (made once, stale after an
+  edit).
+- `scheme` is light or dark: `aio::ui::scheme()` (`[ui] scheme`: the
+  OS's by default), or the app's own `bool` (below).
 
-`aio::ui::page_css(&[sheets], dark)` is the same without the live
+`aio::ui::page_css(&[sheets], scheme)` is the same without the live
 reload, for CSS an app builds itself.
 
 ## One hue
@@ -53,8 +56,11 @@ assert_eq!(theme::sheet(&Ui { theme: Look::None, ..ui }, "notes", false), "", "n
 # }
 ```
 
-- `aio::kit::theme::hue(id)`: the hue of an app id (a rename recolours;
-  a new machine doesn't).
+- `aio::kit::theme::hue(id)`: the hue of an app id (aio's `appHue`: hashed
+  over the slug the id makes, so `My Notes` and `my-notes` are one colour;
+  a rename recolours, a new machine doesn't).
+- `aio::hue!()`: the app's own hue as it builds (`Config::hue`: `[ui] hue`,
+  else its id's), the one its page, icon, splash and download window share.
 - `aio::kit::theme::tokens_css(hue, soft)`: the tokens alone, light and
   dark; `soft` keeps the neutrals near grey (the accent keeps the hue).
   The inks are solved for contrast against that hue, so text stays
@@ -62,7 +68,8 @@ assert_eq!(theme::sheet(&Ui { theme: Look::None, ..ui }, "notes", false), "", "n
 - `aio::kit::theme_css(hue)`: the tokens and the kit's whole stylesheet,
   what the template passes.
 - `aio::kit::theme::sheet(&cfg.ui, &cfg.app.id, ships_css)`: what `[ui]`
-  in `aio.toml` asks for (below). Pass it instead of `theme_css` to let
+  in `aio.toml` asks for (below), `[ui] neutral = "soft"` included
+  (aio's `"neutral": "soft"`). Pass it instead of `theme_css` to let
   `aio.toml` decide.
 
 ## `[ui]` in `aio.toml`
@@ -203,14 +210,24 @@ build says so once in the log.
 
 ## Dark mode
 
-`dark` in `use_css!` decides: `true` applies the sheets'
-`@media (prefers-color-scheme: dark)` rules and the dark side of every
-`light-dark(a, b)`, `false` the light ones. The OS's setting doesn't (a
-phone in dark mode must not darken half of a light app). To offer a
-choice, keep it in a cell and pass it:
+By default the page follows the OS, as it changes (aio's automatic dark
+mode): `[ui] scheme = "system"` in `aio.toml`, what `aio::ui::scheme()`
+gives the template. The sheets stay as written, so every
+`@media (prefers-color-scheme: dark)` rule and `light-dark(a, b)` follows
+the OS with no render. `scheme = "light"` or `"dark"` fixes one. Code
+that draws its own colours (a canvas, a chart) reads
+`aio::ui::use_dark()`, a `Memo<bool>` that follows the OS too. A test
+turns the OS dark with `ui.set_os_dark(true)` (or mounts dark:
+`aio::testing::Mount::default().dark()`).
+
+A `bool` instead of the scheme is the app's own choice: `true` applies
+the sheets' dark rules and the dark side of every `light-dark(a, b)`,
+`false` the light ones, whatever the OS says (a phone in dark mode never
+darkens half of a light app). To offer a choice, keep it in a cell and
+pass it:
 
 ```rust
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "look")]
 pub struct Look {
@@ -227,13 +244,13 @@ impl Look {
 aio::client!(Look, look);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let dark = *part(|l| &l.dark);
+    let dark = part(|l| &l.dark);
     let theme = aio::kit::theme_css(aio::kit::theme::hue("notes"));
     rsx! {
-        style { {aio::ui::page_css(&[&theme, "body { font-size: 15px }"], dark)} }
-        aio::kit::Switch { checked: dark, label: "Dark", "data-t": "dark",
+        style { {aio::ui::page_css(&[&theme, "body { font-size: 15px }"], dark.get())} }
+        aio::kit::Switch { checked: dark.get(), label: "Dark", "data-t": "dark",
             onchange: move |on| _ = aio::act!(set_dark(on)) }
         p { "data-t": "text", "Notes" }
     }
@@ -269,10 +286,10 @@ said in the test's output. `TestUi::contrast()` returns the findings, to
 fail on them:
 
 ```rust
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     rsx! {
         p { style: "color: #111; background: #fff", "Readable" }
         p { style: "color: #ccc; background: #fff", "Faint" }
@@ -360,15 +377,13 @@ keys.
 
 - **Scoped classes.** aio's `css` tag makes a class from a hash of its
   rule, and `aiol` warns when two stylesheets define one class
-  differently; aio-rs has neither: prefix class names by hand.
+  differently. `aio::ui::css("color: red; &:hover { … }")` is that class
+  (FNV-1a of the rule, as aio's), its rule put in the page once per
+  window and scoped by native nesting (`@keyframes` lifted out), and
+  `aio::ui::collect_css()` gives every rule; no warning, since a class is
+  its rule's hash.
 - **The dev contrast check in a running app.** aio warns in the dev
   page's console; aio-rs audits in `TestUi` (above), not in `ax dev`.
-- **`neutral = "soft"`.** aio's key keeps the neutrals near grey across
-  the app; in aio-rs the `soft` argument of `theme::tokens_css` does it,
-  with no `[ui]` key, so an app passes its own tokens.
-- **The hue beyond the page.** aio's `hue` also colours the generated
-  icon, the splash and the download window; aio-rs's generated icon takes
-  the hue of the app's id, not `[ui] hue`.
 
 ## Common mistakes
 
@@ -377,7 +392,7 @@ keys.
 - Expecting the OS's dark mode: the app passes `dark`.
 - `!important` to beat the theme: not needed, an unlayered rule wins.
 - `[ui] theme = "none"` and the kit: the controls are then bare, by design.
-- CSS in `use_hook`: stale after an edit (above).
+- CSS in `once`: stale after an edit (above).
 - Setting `--aio-hue` in CSS and expecting new colours: the colours were
   solved from the hue in Rust; use `[ui] hue`.
 - A rebrand that sets `--aio-accent` but not `--aio-accent-ink`: links

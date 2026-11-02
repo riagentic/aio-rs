@@ -2,7 +2,7 @@
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{Key, Modifiers, Mount, TestUi, fails, seeded_source};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use serde_json::json;
 use std::cell::RefCell;
 
@@ -40,7 +40,7 @@ fn logged() -> Vec<String> {
 }
 
 #[component]
-fn Greeting(name: String, times: u32) -> Element {
+fn Greeting(name: String, times: u32) -> View {
     rsx! { p { "data-t": "hi", "Hello {name} ×{times}" } }
 }
 
@@ -51,14 +51,13 @@ fn a_component_mounts_alone_with_its_props() {
     assert_eq!(ui.html(), "<p data-t=\"hi\">Hello Ada ×2</p>");
 }
 
-fn gpus() -> Element {
+fn gpus() -> View {
     use_live();
-    let p = prefs();
     rsx! {
-        if p.gpus.is_empty() {
+        if prefs().gpus.is_empty() {
             p { "data-t": "none", "no GPU" }
         } else {
-            p { "data-t": "gpus", "{p.gpus.join(\", \")}" }
+            p { "data-t": "gpus", {prefs().gpus.join(", ")} }
         }
         button { "data-t": "dark", onclick: move |_| _ = act!(set_theme("dark".into())), "Dark" }
     }
@@ -80,7 +79,7 @@ fn a_seed_mid_test_moves_the_state_and_the_ui_follows_it() {
     ui.run(|| *HANDLE.write() = seeded_source(json!({"gpus": ["a", "b"]})));
     assert_eq!(ui.text("gpus"), "a, b");
     // Commits made off the UI on the new source re-render too.
-    let h = ui.run(|| HANDLE.peek().clone());
+    let h = ui.run(|| HANDLE.read_untracked().clone());
     std::thread::spawn(move || h.set_theme("x".into()).unwrap()).join().unwrap();
     ui.expect_cell(&Ui, "the seeded source took the call", |p| p.theme == "x" && p.gpus.len() == 2);
     ui.run(|| *HANDLE.write() = seeded_source(json!({})));
@@ -105,7 +104,7 @@ fn expect_cell_retries_then_prints_the_state() {
     assert!(why.contains("the theme is light\n  state: {\"theme\":\"dark\""), "{why}");
 }
 
-fn sized() -> Element {
+fn sized() -> View {
     rsx! {
         style { "@media (max-width: 600px) {{ .wide {{ display: none }} }} @media (prefers-color-scheme: dark) {{ .light {{ display: none }} }}" }
         p { class: "wide", "data-t": "wide", "wide" }
@@ -121,10 +120,10 @@ fn the_window_size_and_colour_scheme_are_the_tests() {
     assert!(ui.absent("wide") && ui.absent("light"));
 }
 
-fn controls() -> Element {
+fn controls() -> View {
     use_live();
     let p = prefs();
-    let mut on = use_signal(|| false);
+    let on = signal(|| false);
     rsx! {
         select { "data-t": "theme", onchange: move |e| _ = act!(set_theme(e.value())),
             option { value: "light", "Light" }
@@ -232,8 +231,8 @@ fn the_surface_lists_what_a_person_can_see_and_use() {
     }
 }
 
-fn unnamed() -> Element {
-    let mut n = use_signal(|| 0);
+fn unnamed() -> View {
+    let n = signal(|| 0);
     rsx! {
         form {
             label { "Email", input { r#type: "email" } }
@@ -281,8 +280,8 @@ fn elements_are_named_by_their_label_and_role_with_no_handle() {
     assert_eq!(ui.text("SaveButton3"), "the author's", "a handle wins over a name");
 }
 
-fn rows() -> Element {
-    let mut gone = use_signal(Vec::<u32>::new);
+fn rows() -> View {
+    let gone = signal(Vec::<u32>::new);
     rsx! {
         ul { "data-t": "list",
             for id in (1..=3).filter(|i| !gone.read().contains(i)) {
@@ -314,7 +313,7 @@ fn a_missing_name_lists_the_names_there() {
     assert!(why.contains("the handles there are: SaveButton3, n; by name: Form, EmailInput"), "{why}");
 }
 
-fn gestures() -> Element {
+fn gestures() -> View {
     rsx! {
         button { "data-t": "twice",
             onclick: move |e| log(format!("click shift={}", e.modifiers().shift())),
@@ -332,7 +331,7 @@ fn gestures() -> Element {
             ondrop: move |e| log(format!("drop {}", e.data_transfer().get_as_text().unwrap_or_default())), "Bin" }
         div { "data-t": "pad", style: "width: 200px; height: 100px",
             onpointerdown: move |e| log(format!("down {}", e.element_coordinates().x)),
-            onpointermove: move |e| if e.held_buttons().contains(dioxus::html::input_data::MouseButton::Primary) { log(format!("move {}", e.client_coordinates().x)) },
+            onpointermove: move |e| if e.held_buttons().contains(MouseButton::Primary) { log(format!("move {}", e.client_coordinates().x)) },
             onpointerup: move |_| log("up"),
             onwheel: move |e| log(format!("wheel {}", e.delta().strip_units().y)), "pad" }
         input { "data-t": "keys",
@@ -427,13 +426,13 @@ fn a_key_name_that_names_no_key_is_refused() {
 }
 
 #[component]
-fn Form(fields: u32, button: bool, required: bool) -> Element {
+fn Form(fields: u32, button: bool, required: bool) -> View {
     rsx! {
         form { "data-t": "form",
-            onsubmit: move |e| log(format!("submit {:?}", e.values().into_iter().map(|(k, v)| match v { FormValue::Text(t) => format!("{k}={t}"), _ => k }).collect::<Vec<_>>())),
+            onsubmit: move |e| log(format!("submit {:?}", e.values().into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>())),
             input { "data-t": "a", name: "a", required, onkeydown: move |e| if e.key() == Key::Escape { e.prevent_default() } }
             for i in 1..fields {
-                input { "data-t": "f{i}", name: "f{i}" }
+                input { key: "{i}", "data-t": "f{i}", name: "f{i}" }
             }
             input { r#type: "checkbox", name: "c", checked: true }
             if button {
@@ -481,7 +480,7 @@ fn a_required_blank_refuses_the_submit() {
     assert!(why.contains("the form can't be submitted: required field `a` is empty"), "{why}");
 }
 
-fn slow() -> Element {
+fn slow() -> View {
     rsx! { p { "data-t": "hello", "hello" } }
 }
 
@@ -512,11 +511,11 @@ fn a_timeout_shows_the_screen_and_leaves_a_trace() {
     assert!(!dir.exists(), "a test that passed leaves no trace");
 }
 
-fn handles() -> Element {
-    let mut field = use_signal(|| None::<std::rc::Rc<MountedData>>);
-    let mut size = use_signal(String::new);
+fn handles() -> View {
+    let field = signal(|| None::<std::rc::Rc<MountedData>>);
+    let size = signal(String::new);
     rsx! {
-        input { "data-t": "field", onmounted: move |e| field.set(Some(e.data())) }
+        input { "data-t": "field", onmounted: move |e| *field.write() = Some(e.data()) }
         div { "data-t": "box", style: "width: 120px; height: 30px",
             onmounted: move |e| async move {
                 let r = e.data().get_client_rect().await.expect("a rect");
@@ -525,7 +524,7 @@ fn handles() -> Element {
             "{size}"
         }
         button { "data-t": "go", onclick: move |_| async move {
-            if let Some(f) = field() { f.set_focus(true).await.expect("focus") }
+            if let Some(f) = field.get() { f.set_focus(true).await.expect("focus") }
         }, "Go" }
     }
 }
@@ -538,7 +537,7 @@ fn a_mounted_handle_reads_its_box_and_moves_focus() {
     assert_eq!(ui.focused().as_deref(), Some("field"));
 }
 
-fn palette() -> Element {
+fn palette() -> View {
     rsx! {
         p { style: "color: #000", "fine" }
         p { class: "faint note", style: "color: #999", "faint" }
@@ -569,9 +568,9 @@ fn text_a_person_cant_read_is_found_and_marked_skips_are_honoured() {
     assert!(Mount::default().dark().app(palette).contrast().len() == 3, "the same page, whatever the OS says");
 }
 
-fn feedback() -> Element {
-    let mut n = use_signal(|| 0);
-    use_effect(move || n.set(n() + 1));
+fn feedback() -> View {
+    let n = signal(|| 0);
+    effect(move || n.set(n.get() + 1));
     rsx! { "{n}" }
 }
 
@@ -580,21 +579,21 @@ fn a_view_that_writes_what_it_reads_is_caught() {
     let why = fails(|| {
         TestUi::new(feedback);
     });
-    assert!(why.contains("still rendering after 100 passes: a view writes state it reads (a render loop)"), "{why}");
+    assert!(why.contains("effects still re-running after 1000 rounds: an effect writes a signal it reads"), "{why}");
 }
 
 #[component]
-fn Clicks() -> Element {
-    let mut n = use_signal(|| 0);
+fn Clicks() -> View {
+    let n = signal(|| 0);
     rsx! { button { "data-t": "more", onclick: move |_| n += 1, "{n}" } }
 }
 
 #[component]
-fn Still(label: String) -> Element {
+fn Still(label: String) -> View {
     rsx! { p { "{label}" } }
 }
 
-fn panel() -> Element {
+fn panel() -> View {
     rsx! {
         Still { label: "a" }
         for i in 0..2 {
@@ -607,27 +606,24 @@ fn panel() -> Element {
 #[test]
 fn the_component_tree_says_who_rendered_how_often() {
     let mut ui = TestUi::new(panel);
-    let tree = |ui: &TestUi| {
-        let app = &ui.components()[0];
-        (app.name, app.children.iter().map(|c| (c.name, c.renders)).collect::<Vec<_>>())
-    };
-    assert_eq!(tree(&ui), ("root", vec![("Still", 1), ("Clicks", 1), ("Clicks", 1)]));
+    let tree = |ui: &TestUi| ui.components().iter().map(|c| (c.name, c.renders, c.updates)).collect::<Vec<_>>();
+    assert_eq!(tree(&ui), [("Still", 1, 0), ("Clicks", 1, 0), ("Clicks", 1, 0)]);
     ui.click("more");
     ui.click("more");
     assert_eq!(ui.text("more"), "2");
-    assert_eq!(tree(&ui).1, [("Still", 1), ("Clicks", 3), ("Clicks", 1)], "only the clicked one re-rendered");
+    assert_eq!(tree(&ui), [("Still", 1, 0), ("Clicks", 1, 2), ("Clicks", 1, 0)], "only the clicked one's hole wrote");
 }
 
-static LOCKS: GlobalSignal<u32> = Signal::global(|| 0);
+static LOCKS: Global<u32> = Global::new(|| 0);
 
-fn purse_like() -> Element {
-    let mut tip = use_signal(|| false);
+fn purse_like() -> View {
+    let tip = signal(|| false);
     rsx! {
         div { "data-t": "bar", style: "width: 300px; overflow-x: auto; white-space: nowrap; --split-a: 40%",
             span { style: "display: inline-block; width: 280px", "filler" }
             span { "data-t": "chip", style: "display: inline-block; width: 100px", onmouseenter: move |_| tip.set(true), "chip" }
         }
-        if tip() {
+        if tip.get() {
             p { "data-t": "tip", "tip" }
         }
         button { onclick: move |_| *LOCKS.write() += 1, "Lock" }
@@ -693,8 +689,8 @@ fn styles_boxes_body_level_nodes_and_shots_are_read_from_the_live_page() {
     assert_eq!((size(16), size(20)), (400, 300), "the window's size");
 }
 
-fn texts() -> Element {
-    let mut later = use_signal(|| false);
+fn texts() -> View {
+    let later = signal(|| false);
     rsx! {
         button { onclick: move |_| log("skip"), "Skip this version" }
         button { onclick: move |_| log("save"), span { "Save" } }
@@ -707,7 +703,7 @@ fn texts() -> Element {
                 later.set(true);
             });
         }, "Start" }
-        if later() {
+        if later.get() {
             p { "data-t": "done", "done" }
         }
         button { "data-t": "pick", onclick: move |_| log("picked"), "Pick" }
@@ -755,8 +751,10 @@ fn focus_shows_the_ring_the_keyboard_would() {
 #[test]
 fn a_shot_waits_for_transitions_but_not_for_an_endless_animation() {
     let mut ui = TestUi::new(texts);
-    ui.eval("document.querySelector('[data-t=fade]').style.opacity = '0', null");
+    // From before the 1 s fade starts: it starts within the eval, whose round
+    // trip (hundreds of ms on a slow runner) would otherwise eat the bound.
     let t = std::time::Instant::now();
+    ui.eval("document.querySelector('[data-t=fade]').style.opacity = '0', null");
     ui.shot();
     assert!(t.elapsed() >= std::time::Duration::from_millis(600), "the fade ran: {:?}", t.elapsed());
     assert!(t.elapsed() < std::time::Duration::from_secs(4), "the spinner held nothing: {:?}", t.elapsed());
@@ -786,9 +784,9 @@ fn the_test_world_has_an_app_home() {
     assert_eq!(aio::paths::app_dirs().unwrap().data, d.data, "the same each time");
 }
 
-fn coach() -> Element {
-    let mut got = use_signal(String::new);
-    let mut inputs = use_signal(|| 0);
+fn coach() -> View {
+    let got = signal(String::new);
+    let inputs = signal(|| 0);
     rsx! {
         ul { class: "parts",
             li { id: "part-0", "data-done": "true", "Purse" }
@@ -880,15 +878,15 @@ fn a_failure_a_test_asks_for_leaves_no_trace() {
     assert_eq!(fails(|| panic!("plain")), "plain");
 }
 
-fn side() -> Element {
-    let mut open = use_signal(|| false);
+fn side() -> View {
+    let open = signal(|| false);
     rsx! {
         div { "data-t": "side", style: "height: 100px; overflow: auto",
             for i in 0..6 {
                 button { key: "{i}", "data-t": "g{i}", style: "display: block; height: 40px", onclick: move |_| open.set(true), "Group {i}" }
             }
         }
-        if open() {
+        if open.get() {
             div { "data-t": "card", style: "height: 100px; overflow: auto",
                 p { style: "height: 300px", "terms" }
                 input { "data-t": "agree", r#type: "checkbox", aria_label: "agree", autofocus: true }

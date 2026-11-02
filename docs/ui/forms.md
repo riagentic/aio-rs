@@ -23,7 +23,7 @@ show the label, hint and error, and wire `for`, `aria-describedby`,
 
 ```rust,no_run
 use aio::kit::{Button, Field, Input, Problems, Variant, use_form};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "contacts")]
 pub struct Contacts {
@@ -66,11 +66,10 @@ fn check(c: &NewContact) -> Problems {
 }
 
 #[component]
-pub fn App() -> Element {
+pub fn App() -> View {
     use_live();
     let f = use_form(NewContact::default, check);
-    let mut refused = use_signal(|| None::<String>);
-    let v = f.values();
+    let refused = signal(|| None::<String>);
     let send = move |e: FormEvent| {
         e.prevent_default();
         // Every error shows; the values only when they pass.
@@ -86,12 +85,12 @@ pub fn App() -> Element {
     rsx! {
         form { onsubmit: send,
             Field { label: "Name", required: true, error: f.error("name"),
-                Input { "data-t": "name", value: v.name,
+                Input { "data-t": "name", value: f.values().name,
                     oninput: move |s| f.edit("name", |c| c.name = s),
                     onchange: move |_| f.touch("name") }
             }
             Field { label: "Email", required: true, hint: "We never share it", error: f.error("email"),
-                Input { "data-t": "email", r#type: "email", value: v.email,
+                Input { "data-t": "email", r#type: "email", value: f.values().email,
                     oninput: move |s| f.edit("email", |c| c.email = s),
                     onchange: move |_| f.touch("email") }
             }
@@ -100,14 +99,12 @@ pub fn App() -> Element {
                     oninput: move |s: String| f.edit("age", |c| c.age = s.parse().ok()),
                     onchange: move |_| f.touch("age") }
             }
-            if let Some(why) = refused() {
-                p { class: "aio-field__error", role: "alert", "data-t": "refused", "{why}" }
-            }
+            {refused.get().map(|why| rsx! { p { class: "aio-field__error", role: "alert", "data-t": "refused", "{why}" } })}
             Button { r#type: "submit", variant: Variant::Primary, "data-t": "save", "Save" }
             Button { disabled: !f.dirty(), onclick: move |_| f.reset(), "data-t": "clear", "Clear" }
         }
         ul { "data-t": "names",
-            for n in part(|c| &c.names).iter() {
+            for n in part(|c| &c.names).get() {
                 li { key: "{n}", "{n}" }
             }
         }
@@ -152,7 +149,7 @@ What happens, step by step:
 | Call | Gives | Does |
 |---|---|---|
 | `use_form(initial, check)` | `Form<T>` | a hook: the form, starting at `initial()`, checked by `check` (a `fn(&T) -> Problems`) |
-| `f.values()` | `T` | the values now; reading them in a render re-renders on each edit |
+| `f.values()` | `T` | the values now; a hole reading them follows each edit |
 | `f.edit(field, \|v\| ..)` | | changes the values; `field` is edited, a waiting rule's answer for it and the form's own error are dropped |
 | `f.touch(field)` | | the field was left: its error may show |
 | `f.error(field)` | `Option<String>` | the field's first problem, once it was left or a submit was tried |
@@ -169,8 +166,8 @@ What happens, step by step:
 
 ## Rules
 
-One function holds every rule. It runs on the values at each render that
-asks for an error, so keep it cheap (string checks, comparisons, a
+One function holds every rule. It runs on the values each time a hole
+that shows an error asks, so keep it cheap (string checks, comparisons, a
 regex built once).
 
 - **The first problem per field wins.** Push a field's own rules before
@@ -229,7 +226,7 @@ ask something (is this name taken?):
 
 ```rust,no_run
 use aio::kit::{Field, Input, Problems, use_async_rule, use_form};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::time::Duration;
 
 #[derive(Clone, Default, PartialEq)]
@@ -247,7 +244,7 @@ async fn taken(name: String) -> bool {
 }
 
 #[component]
-fn NewAccount() -> Element {
+fn NewAccount() -> View {
     let f = use_form(Account::default, check);
     use_async_rule(f, "name", |a| a.name.clone(), Duration::from_millis(300), |name: String| async move {
         taken(name).await.then(|| "That name is taken".to_string())
@@ -295,7 +292,7 @@ ui.until_contains("field", "That name is taken");
 | `Switch` | `checked`, `onchange` | a checkbox drawn as a switch |
 
 - **Controlled or not.** `Input` with `value: Some(..)` is controlled:
-  each render writes it, so what a person types must reach the values
+  each change of the value writes it, so what a person types must reach the values
   through `oninput`. Without `value` the input keeps what was typed,
   as aio's `defaultValue` does; read it from `oninput`.
 - **A list of rows** (aio's `useFieldArray`) is a `Vec` field: push and
@@ -303,6 +300,28 @@ ui.until_contains("field", "That name is taken");
   from, to)` (out of range moves nothing).
 - **Radio buttons** need no binding per button: `RadioGroup` keeps the
   one value, the arrow keys move it, and the group is one tab stop.
+- **Files**: a plain `input { r#type: "file" }` opens the system's
+  picker; its `onchange` (and its form's `onsubmit`) gets the picked
+  files whole, read by the page: `e.files()`, each with `name()`,
+  `size()`, `content_type()`, `field()` (its form field on a submit) and
+  `read_bytes().await` / `read_string().await`. `e.values()` names each
+  file by its file name. A file of many MB travels in the event, so send
+  big uploads through an HTTP route instead
+  ([cookbook](../basics/cookbook.md#15-an-upload-that-keeps-only-metadata-in-state)).
+
+```rust
+use aio::ui::prelude::*;
+
+#[component]
+fn Pick() -> View {
+    let names = signal(String::new);
+    rsx! {
+        input { r#type: "file", multiple: true,
+            onchange: move |e: FormEvent| names.set(e.files().iter().map(|f| f.name()).collect::<Vec<_>>().join(", ")) }
+        p { "{names}" }
+    }
+}
+```
 
 ## Submitting
 
@@ -353,10 +372,26 @@ such a form.
 | `ui.blur(t)` | leaves it (fires `change` when it changed) |
 | `ui.press(t, "Enter")` | a key in it |
 | `ui.select(t, value)`, `ui.check(t)` | a `Select`'s choice, a checkbox |
+| `ui.pick_files(t, &[(name, type, bytes)])` | files picked in file input `t` (`input` and `change`) |
 | `ui.until_contains(t, part)` | waits until an async rule's answer shows |
 
 A field left as it was found fires no `change` (the browser's rule): to
 test an error that shows on leaving, type something first.
+
+## Bound fields
+
+aio's `bind(name)` spread `value`, `onInput` and `onBlur` in one go;
+`form.bind(aio::field!(name))` does the same, and a bound input is touched
+on blur, as aio's: `Input { bind: form.bind(aio::field!(name)) }` in a
+`Field { error: form.error("name"), … }`. `aio::field!(name)` names a
+field of the values (it reads and writes `v.name`); `set_field` and
+`reset_field` change one field (aio's `field.set`, `field.reset`),
+`touched(name)` says whether it was left, `use_field_array(|| rows)` is
+aio's `useFieldArray` (`push`, `remove`, `move_item`, `set`, `reset`),
+and `use_on_change(selector, f)` is aio's `onChange` (only the selector
+is followed; `f` may return its cleanup). An input with its own two
+handlers (`oninput`, `onchange: f.touch(..)`) is touched on `change`
+(leaving a field that changed), not on blur.
 
 ## Common mistakes
 
@@ -365,7 +400,7 @@ test an error that shows on leaving, type something first.
 - A rule that names a field no input edits: it never shows, and the form
   is never valid. Use `""` for the form as a whole.
 - `Input { value }` with no `oninput`: the input is controlled, so the
-  next render puts the old text back.
+  next write of its value puts the old text back.
 - Calling the method from `oninput`: every keystroke becomes an event in
   the log. Edit the form's values; call the method on submit (or keep a
   coalesced draft, as above).
@@ -378,11 +413,6 @@ test an error that shows on leaving, type something first.
 - aio's `useForm` took a Standard Schema (Zod, Valibot, ArkType) and had
   `parsed()` for its output: aio-rs has no schema adapter. The check is a
   Rust function; parse into your own type in it.
-- aio's `bind(name)` spread `value`, `onInput` and `onBlur` in one go:
-  aio-rs writes the two handlers per input.
-- aio's form touched a field on `blur`. The kit's `Input` reports `change`
-  (leaving a field that changed), not `blur`, so a field left untouched
-  shows its error only after a submit.
 
 ## API
 

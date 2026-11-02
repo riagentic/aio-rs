@@ -1,0 +1,862 @@
+aio_config::auth::Policy.max_sessions: Option<u32>
+aio_config::auth::Policy.require_verified: bool
+aio_config::auth::Policy.signup: bool
+aio_config::auth::Policy.ttl_ms: i64
+aio_config::budgets::Budgets.broadcast_rate: Option<f64>
+aio_config::budgets::Budgets.payload: Option<u64>
+aio_config::budgets::Budgets.state: Option<u64>
+aio_config::budgets::parse_rate: fn parse_rate(s: &str, key: &str) -> Result<f64, String>
+aio_config::budgets::parse_size: fn parse_size(s: &str, key: &str) -> Result<u64, String>
+aio_config::capabilities::allows: fn allows(network: &[String], host: &str, port: Option<u16>) -> bool
+aio_config::capabilities::bad_entry: fn bad_entry(entry: &str) -> Option<String>
+aio_config::capabilities::host_port: fn host_port(target: &str) -> (String, Option<u16>)
+aio_config::config::Accounts.max_sessions: Option<u32>
+aio_config::config::Accounts.on: bool
+aio_config::config::Accounts.require_verified: bool
+aio_config::config::Accounts.session: std::time::Duration
+aio_config::config::Accounts.sessions: bool
+aio_config::config::Accounts.signup: bool
+aio_config::config::Accounts::policy: fn policy(&self) -> crate::auth::Policy
+aio_config::config::Align::Center
+aio_config::config::Align::Left
+aio_config::config::Align::Right
+aio_config::config::AndroidBuild.aab: bool
+aio_config::config::AndroidBuild.application_id: Option<String>
+aio_config::config::AndroidBuild.camera: bool
+aio_config::config::AndroidBuild.color_scheme: ColorScheme
+aio_config::config::AndroidBuild.key_alias: Option<String>
+aio_config::config::AndroidBuild.keystore: Option<String>
+aio_config::config::AndroidBuild.schemes: Vec<String>
+aio_config::config::AndroidBuild.strict: bool
+aio_config::config::AndroidBuild.universal: bool
+aio_config::config::App.dir: Dir
+aio_config::config::App.icon: &'static [u8]
+aio_config::config::App.id: String
+aio_config::config::App.lang: Option<String>
+aio_config::config::App.maintainer: Option<String>
+aio_config::config::App.mode: Mode
+aio_config::config::App.name: String
+aio_config::config::App.port_of: Option<String>
+aio_config::config::App.tz: Tz
+aio_config::config::App.ui: Shown
+aio_config::config::App.version: Option<String>
+aio_config::config::App::label: fn label(&self) -> &str
+aio_config::config::BarPosition::BottomEdge
+aio_config::config::BarPosition::UnderText
+aio_config::config::BarStyle::Solid
+aio_config::config::BarStyle::Thin
+aio_config::config::Build.android: AndroidBuild
+aio_config::config::Build.asset_files: &'static [(&'static str, &'static [u8])]
+aio_config::config::Build.assets: std::collections::BTreeMap<String, std::path::PathBuf>
+aio_config::config::Build.budget_mb: Option<u64>
+aio_config::config::Build.chromium_extras: Extras
+aio_config::config::Build.css: Option<Css>
+aio_config::config::Build.download_window: DownloadWindow
+aio_config::config::Build.macos: MacBuild
+aio_config::config::Build.platforms: Vec<String>
+aio_config::config::Build.runtime: RuntimeFrom
+aio_config::config::Build.smoke: bool
+aio_config::config::Build.splash: Option<Splash>
+aio_config::config::Build.targets: Vec<Target>
+aio_config::config::Build.windows: WindowsBuild
+aio_config::config::Capabilities.network: Vec<String>
+aio_config::config::Client.retention: Option<std::time::Duration>
+aio_config::config::Client.server: Option<String>
+aio_config::config::Client.timeouts: std::collections::BTreeMap<String, Option<std::time::Duration>>
+aio_config::config::ColorScheme::Dark
+aio_config::config::ColorScheme::Light
+aio_config::config::ColorScheme::System
+aio_config::config::Config.accounts: Accounts
+aio_config::config::Config.app: App
+aio_config::config::Config.budgets: crate::budgets::Budgets
+aio_config::config::Config.build: Build
+aio_config::config::Config.capabilities: Capabilities
+aio_config::config::Config.client: Client
+aio_config::config::Config.data: Data
+aio_config::config::Config.feedback: Feedback
+aio_config::config::Config.history: History
+aio_config::config::Config.home: Home
+aio_config::config::Config.log: Log
+aio_config::config::Config.memory: Memory
+aio_config::config::Config.perf: crate::perf::Budgets
+aio_config::config::Config.server: Server
+aio_config::config::Config.ui: Ui
+aio_config::config::Config.updates: Updates
+aio_config::config::Config.vitals: crate::vitals::Vitals
+aio_config::config::Config::check: fn check(c: Self) -> Result<Self, String>
+aio_config::config::Config::hue: fn hue(&self) -> u16
+aio_config::config::Config::mac_bundle_id: fn mac_bundle_id(&self) -> String
+aio_config::config::Config::parse: fn parse(text: &str) -> Result<Self, String>
+aio_config::config::Config::rust: fn rust(&self) -> String
+aio_config::config::Css(Vec<String>)
+aio_config::config::Data.backup_every: Option<std::time::Duration>
+aio_config::config::Data.backup_keep: usize
+aio_config::config::Data.coalesce_ms: u64
+aio_config::config::Data.durability: Durability
+aio_config::config::Data.persist: bool
+aio_config::config::Data.pragmas: Vec<String>
+aio_config::config::Data.retire: Vec<String>
+aio_config::config::Data.store: String
+aio_config::config::Dir::Auto
+aio_config::config::Dir::Ltr
+aio_config::config::Dir::Rtl
+aio_config::config::DownloadWindow.background: Option<String>
+aio_config::config::DownloadWindow.bar: Option<String>
+aio_config::config::DownloadWindow.cancel: bool
+aio_config::config::DownloadWindow.color: Option<String>
+aio_config::config::DownloadWindow.heading: Option<String>
+aio_config::config::DownloadWindow.question: Option<String>
+aio_config::config::DownloadWindow.text: Option<String>
+aio_config::config::DownloadWindow.track: Option<String>
+aio_config::config::Durability::Full
+aio_config::config::Durability::Normal
+aio_config::config::Extras::Keep
+aio_config::config::Extras::Strip
+aio_config::config::Feedback.auto: bool
+aio_config::config::Feedback.keep: usize
+aio_config::config::Feedback.timeout: std::time::Duration
+aio_config::config::Feedback.url: Option<String>
+aio_config::config::Fit::Contain
+aio_config::config::Fit::Cover
+aio_config::config::History.keep: std::time::Duration
+aio_config::config::Home.dev: Option<String>
+aio_config::config::Home.env: Option<String>
+aio_config::config::Home.portable: Option<String>
+aio_config::config::Limits.bytes_per_sec: u32
+aio_config::config::Limits.calls_per_sec: u32
+aio_config::config::Limits.clients: usize
+aio_config::config::Limits.full_state_percent: u32
+aio_config::config::Limits.max_message: usize
+aio_config::config::Limits.sync_interval_ms: u64
+aio_config::config::Lit::lit: fn lit(&self, o: &mut String)
+aio_config::config::Log.file_mb: u64
+aio_config::config::Log.heartbeat: u64
+aio_config::config::Log.keep: usize
+aio_config::config::Log.level: crate::log::Level
+aio_config::config::Log.per_run: bool
+aio_config::config::Log.suppress: Vec<String>
+aio_config::config::Look::Auto
+aio_config::config::Look::Full
+aio_config::config::Look::None
+aio_config::config::Look::Tokens
+aio_config::config::MacBuild.bundle_id: Option<String>
+aio_config::config::MacBuild.host: Option<String>
+aio_config::config::Memory.clear: u8
+aio_config::config::Memory.critical: u8
+aio_config::config::Memory.every: std::time::Duration
+aio_config::config::Memory.growth_mb: u64
+aio_config::config::Memory.high: u8
+aio_config::config::Mode::Cli
+aio_config::config::Mode::Client
+aio_config::config::Mode::ClientServer
+aio_config::config::Mode::Server
+aio_config::config::Mode::Standalone
+aio_config::config::Neutral::Soft
+aio_config::config::Neutral::Tinted
+aio_config::config::RuntimeFrom::Bundled
+aio_config::config::RuntimeFrom::Shared
+aio_config::config::Scheme::Dark
+aio_config::config::Scheme::Light
+aio_config::config::Scheme::System
+aio_config::config::Server.cert: Option<std::path::PathBuf>
+aio_config::config::Server.dirs: std::collections::BTreeMap<String, std::path::PathBuf>
+aio_config::config::Server.discover: bool
+aio_config::config::Server.hosts: Vec<String>
+aio_config::config::Server.key: Option<std::path::PathBuf>
+aio_config::config::Server.limits: Limits
+aio_config::config::Server.listen: Option<String>
+aio_config::config::Server.local_peers: bool
+aio_config::config::Server.open: bool
+aio_config::config::Server.pairing: bool
+aio_config::config::Server.public_dirs: std::collections::BTreeMap<String, std::path::PathBuf>
+aio_config::config::Server.security: crate::security::Security
+aio_config::config::Server.strict_origin: bool
+aio_config::config::Server.tls: bool
+aio_config::config::Server.trust_proxy: Option<String>
+aio_config::config::Shown::Browser
+aio_config::config::Shown::Window
+aio_config::config::Splash.align: Align
+aio_config::config::Splash.background: Option<[String; 2]>
+aio_config::config::Splash.bar: Option<[String; 2]>
+aio_config::config::Splash.bar_height: Option<u32>
+aio_config::config::Splash.bar_position: BarPosition
+aio_config::config::Splash.bar_radius: Option<u32>
+aio_config::config::Splash.bar_style: BarStyle
+aio_config::config::Splash.bold: bool
+aio_config::config::Splash.border: Option<String>
+aio_config::config::Splash.cancel: bool
+aio_config::config::Splash.download_text: Option<String>
+aio_config::config::Splash.fade_ms: Option<u64>
+aio_config::config::Splash.fit: Fit
+aio_config::config::Splash.follow_window: bool
+aio_config::config::Splash.font: Option<String>
+aio_config::config::Splash.font_size: Option<u16>
+aio_config::config::Splash.image: std::path::PathBuf
+aio_config::config::Splash.margin: Option<u32>
+aio_config::config::Splash.max_ms: u64
+aio_config::config::Splash.min_ms: u64
+aio_config::config::Splash.png: &'static [u8]
+aio_config::config::Splash.position: SplashPosition
+aio_config::config::Splash.progress: bool
+aio_config::config::Splash.radius: u32
+aio_config::config::Splash.shadow: Option<bool>
+aio_config::config::Splash.show: SplashShow
+aio_config::config::Splash.size: Option<[u32; 2]>
+aio_config::config::Splash.text: Option<String>
+aio_config::config::Splash.text_color: Option<[String; 2]>
+aio_config::config::Splash.text_position: TextPosition
+aio_config::config::Splash.track: Option<[String; 2]>
+aio_config::config::Splash.window_shadow: Option<bool>
+aio_config::config::Splash::retina: fn retina(&self) -> bool
+aio_config::config::SplashPosition::Pointer
+aio_config::config::SplashPosition::Primary
+aio_config::config::SplashPosition::Window
+aio_config::config::SplashShow::Always
+aio_config::config::SplashShow::FirstStart
+aio_config::config::SplashShow::Never
+aio_config::config::Target.bin: Option<String>
+aio_config::config::Target.kind: Option<String>
+aio_config::config::Target.name: String
+aio_config::config::TextPosition::Below
+aio_config::config::TextPosition::Over
+aio_config::config::Tz::Local
+aio_config::config::Tz::Utc
+aio_config::config::Ui.hue: Option<u16>
+aio_config::config::Ui.layout: bool
+aio_config::config::Ui.neutral: Neutral
+aio_config::config::Ui.scheme: Scheme
+aio_config::config::Ui.theme: Look
+aio_config::config::Updates.auto: bool
+aio_config::config::Updates.channel: String
+aio_config::config::Updates.every: Option<std::time::Duration>
+aio_config::config::Updates.every_by_channel: std::collections::BTreeMap<String, Option<std::time::Duration>>
+aio_config::config::Updates.keep: usize
+aio_config::config::Updates.keys: Vec<String>
+aio_config::config::Updates.prerelease: Option<bool>
+aio_config::config::Updates.url: Option<String>
+aio_config::config::Updates::every_on: fn every_on(&self, channel: &str) -> Option<Duration>
+aio_config::config::WindowsBuild.shortcut: bool
+aio_config::config::application_id_ok: fn application_id_ok(id: &str) -> bool
+aio_config::config::asset_files: fn asset_files(at: &std::path::Path, assets: &std::collections::BTreeMap<String, std::path::PathBuf>) -> Result<Vec<(String, std::path::PathBuf)>, String>
+aio_config::config::asset_path: fn asset_path(url: &str) -> std::path::PathBuf
+aio_config::config::bundle_id_ok: fn bundle_id_ok(id: &str) -> bool
+aio_config::config::find: fn find(dir: &std::path::Path) -> Option<std::path::PathBuf>
+aio_config::config::hex_color: fn hex_color(s: &str) -> bool
+aio_config::config::lang_ok: fn lang_ok(tag: &str) -> bool
+aio_config::config::parse_span: fn parse_span(s: &str) -> Result<std::time::Duration, String>
+aio_config::config::reserved: fn reserved(path: &str) -> bool
+aio_config::config::scheme_refused: fn scheme_refused(s: &str) -> Option<String>
+aio_config::config::span_text: fn span_text(d: std::time::Duration) -> String
+aio_config::db::pragma_name: fn pragma_name(stmt: &str) -> Option<String>
+aio_config::icon::hue: fn hue(name: &str) -> u16
+aio_config::icon::icon_png: fn icon_png(name: &str, hue: u16, size: u32) -> Vec<u8>
+aio_config::icon::monogram: fn monogram(name: &str) -> char
+aio_config::icon::pixels: fn pixels(name: &str, hue: u16, size: u32) -> Vec<u8>
+aio_config::icon::png: fn png(rgba: &[u8], w: u32, h: u32) -> Vec<u8>
+aio_config::icon::png_size: fn png_size(png: &[u8]) -> Option<(u32, u32)>
+aio_config::icon::slug: fn slug(s: &str) -> String
+aio_config::icon::svg: fn svg(name: &str, hue: u16, size: u32) -> String
+aio_config::log::Level::Debug
+aio_config::log::Level::Error
+aio_config::log::Level::Info
+aio_config::log::Level::Trace
+aio_config::log::Level::Warn
+aio_config::paths::id_ok: fn id_ok(id: &str) -> std::io::Result<()>
+aio_config::perf::Budgets.call_ceiling: Option<u64>
+aio_config::perf::Budgets.effect: Option<u64>
+aio_config::perf::Budgets.effects: std::collections::BTreeMap<String, u64>
+aio_config::perf::Budgets.method: Option<u64>
+aio_config::perf::Budgets.methods: std::collections::BTreeMap<String, u64>
+aio_config::perf::Budgets.storm: Storm
+aio_config::perf::Budgets::ceiling: fn ceiling(&self) -> Duration
+aio_config::perf::Budgets::effect: fn effect(&self, label: &str) -> Duration
+aio_config::perf::Budgets::method: fn method(&self, label: &str) -> Duration
+aio_config::perf::Budgets::unknown: fn unknown(&self, cell: &str, methods: &[&str]) -> Vec<String>
+aio_config::perf::Storm.breaker: bool
+aio_config::perf::Storm.rate: u32
+aio_config::perf::Storm.secs: u32
+aio_config::security::Directive::Off(bool)
+aio_config::security::Directive::Set(String)
+aio_config::security::Hsts::On(bool)
+aio_config::security::Hsts::Value(String)
+aio_config::security::Security.csp: String
+aio_config::security::Security.directives: std::collections::BTreeMap<String, Directive>
+aio_config::security::Security.frame_options: bool
+aio_config::security::Security.headers: bool
+aio_config::security::Security.hsts: Hsts
+aio_config::security::Security.nonce: bool
+aio_config::security::Security.permissions: Option<String>
+aio_config::security::Security.referrer: String
+aio_config::security::frame_ancestors: fn frame_ancestors(hosts: &[String]) -> String
+aio_config::security::headers: fn headers(s: &Security, hosts: &[String], own_cert: bool) -> Result<Vec<(&'static str, String)>, String>
+aio_config::security::host_source: fn host_source(entry: &str) -> Option<String>
+aio_config::security::policy: fn policy(s: &Security, ancestors: &str, nonce: Option<&str>) -> Result<Option<String>, String>
+aio_config::update::b64: fn b64() -> &'static base64::engine::GeneralPurpose
+aio_config::update::channel_refused: fn channel_refused(name: &str) -> Option<String>
+aio_config::update::git_remote: fn git_remote(url: &str) -> Option<&str>
+aio_config::update::github_repo: fn github_repo(s: &str) -> Option<(&str, &str)>
+aio_config::update::raw_key: fn raw_key(k: &str) -> Result<Vec<u8>, String>
+aio_config::update::ssh_key: fn ssh_key(key: &str) -> Result<String, String>
+aio_config::vitals::Status::Degraded
+aio_config::vitals::Status::Frozen
+aio_config::vitals::Status::Healthy
+aio_config::vitals::Status::Recovered
+aio_config::vitals::Status::Warning
+aio_config::vitals::Tier.degraded: u64
+aio_config::vitals::Tier.frozen: u64
+aio_config::vitals::Tier.warning: u64
+aio_config::vitals::Tier::grade: fn grade(&self, measured: u64) -> Status
+aio_config::vitals::Vitals.event_loop: Tier
+aio_config::vitals::Vitals.hints: bool
+aio_config::vitals::Vitals.queue: Tier
+aio_config::vitals::Vitals.render: Tier
+aio_config::vitals::Vitals.transport: Tier
+aio_config::vitals::Vitals::check: fn check(&self) -> Result<(), String>
+const aio_config::auth::MAX_SESSIONS: u32
+const aio_config::auth::MAX_TTL_MS: i64
+const aio_config::report::KEEP: usize
+enum aio_config::config::Align
+enum aio_config::config::BarPosition
+enum aio_config::config::BarStyle
+enum aio_config::config::ColorScheme
+enum aio_config::config::Dir
+enum aio_config::config::Durability
+enum aio_config::config::Extras
+enum aio_config::config::Fit
+enum aio_config::config::Look
+enum aio_config::config::Mode
+enum aio_config::config::Neutral
+enum aio_config::config::RuntimeFrom
+enum aio_config::config::Scheme
+enum aio_config::config::Shown
+enum aio_config::config::SplashPosition
+enum aio_config::config::SplashShow
+enum aio_config::config::TextPosition
+enum aio_config::config::Tz
+enum aio_config::log::Level
+enum aio_config::security::Directive
+enum aio_config::security::Hsts
+enum aio_config::vitals::Status
+impl Clone for Accounts
+impl Clone for Align
+impl Clone for AndroidBuild
+impl Clone for App
+impl Clone for BarPosition
+impl Clone for BarStyle
+impl Clone for Budgets
+impl Clone for Build
+impl Clone for Capabilities
+impl Clone for Client
+impl Clone for ColorScheme
+impl Clone for Config
+impl Clone for Css
+impl Clone for Data
+impl Clone for Dir
+impl Clone for Directive
+impl Clone for DownloadWindow
+impl Clone for Durability
+impl Clone for Extras
+impl Clone for Feedback
+impl Clone for Fit
+impl Clone for History
+impl Clone for Home
+impl Clone for Hsts
+impl Clone for Level
+impl Clone for Limits
+impl Clone for Log
+impl Clone for Look
+impl Clone for MacBuild
+impl Clone for Memory
+impl Clone for Mode
+impl Clone for Neutral
+impl Clone for Policy
+impl Clone for RuntimeFrom
+impl Clone for Scheme
+impl Clone for Security
+impl Clone for Server
+impl Clone for Shown
+impl Clone for Splash
+impl Clone for SplashPosition
+impl Clone for SplashShow
+impl Clone for Status
+impl Clone for Storm
+impl Clone for Target
+impl Clone for TextPosition
+impl Clone for Tier
+impl Clone for Tz
+impl Clone for Ui
+impl Clone for Updates
+impl Clone for Vitals
+impl Clone for WindowsBuild
+impl Copy for Align
+impl Copy for BarPosition
+impl Copy for BarStyle
+impl Copy for Budgets
+impl Copy for ColorScheme
+impl Copy for Dir
+impl Copy for Durability
+impl Copy for Extras
+impl Copy for Fit
+impl Copy for Level
+impl Copy for Limits
+impl Copy for Look
+impl Copy for Memory
+impl Copy for Mode
+impl Copy for Neutral
+impl Copy for RuntimeFrom
+impl Copy for Scheme
+impl Copy for Shown
+impl Copy for SplashPosition
+impl Copy for SplashShow
+impl Copy for Status
+impl Copy for Storm
+impl Copy for TextPosition
+impl Copy for Tier
+impl Copy for Tz
+impl Copy for Ui
+impl Copy for Vitals
+impl Debug for Accounts
+impl Debug for Align
+impl Debug for AndroidBuild
+impl Debug for App
+impl Debug for BarPosition
+impl Debug for BarStyle
+impl Debug for Budgets
+impl Debug for Build
+impl Debug for Capabilities
+impl Debug for Client
+impl Debug for ColorScheme
+impl Debug for Config
+impl Debug for Css
+impl Debug for Data
+impl Debug for Dir
+impl Debug for Directive
+impl Debug for DownloadWindow
+impl Debug for Durability
+impl Debug for Extras
+impl Debug for Feedback
+impl Debug for Fit
+impl Debug for History
+impl Debug for Home
+impl Debug for Hsts
+impl Debug for Level
+impl Debug for Limits
+impl Debug for Log
+impl Debug for Look
+impl Debug for MacBuild
+impl Debug for Memory
+impl Debug for Mode
+impl Debug for Neutral
+impl Debug for Policy
+impl Debug for RuntimeFrom
+impl Debug for Scheme
+impl Debug for Security
+impl Debug for Server
+impl Debug for Shown
+impl Debug for Splash
+impl Debug for SplashPosition
+impl Debug for SplashShow
+impl Debug for Status
+impl Debug for Storm
+impl Debug for Target
+impl Debug for TextPosition
+impl Debug for Tier
+impl Debug for Tz
+impl Debug for Ui
+impl Debug for Updates
+impl Debug for Vitals
+impl Debug for WindowsBuild
+impl Default for Accounts
+impl Default for Align
+impl Default for AndroidBuild
+impl Default for App
+impl Default for BarPosition
+impl Default for BarStyle
+impl Default for Budgets
+impl Default for Build
+impl Default for Capabilities
+impl Default for Client
+impl Default for ColorScheme
+impl Default for Config
+impl Default for Data
+impl Default for Dir
+impl Default for DownloadWindow
+impl Default for Durability
+impl Default for Extras
+impl Default for Feedback
+impl Default for Fit
+impl Default for History
+impl Default for Home
+impl Default for Level
+impl Default for Limits
+impl Default for Log
+impl Default for Look
+impl Default for MacBuild
+impl Default for Memory
+impl Default for Mode
+impl Default for Neutral
+impl Default for Policy
+impl Default for RuntimeFrom
+impl Default for Scheme
+impl Default for Security
+impl Default for Server
+impl Default for Shown
+impl Default for Splash
+impl Default for SplashPosition
+impl Default for SplashShow
+impl Default for Storm
+impl Default for Target
+impl Default for TextPosition
+impl Default for Tz
+impl Default for Ui
+impl Default for Updates
+impl Default for Vitals
+impl Default for WindowsBuild
+impl Eq for Accounts
+impl Eq for Align
+impl Eq for AndroidBuild
+impl Eq for App
+impl Eq for BarPosition
+impl Eq for BarStyle
+impl Eq for Budgets
+impl Eq for Build
+impl Eq for Capabilities
+impl Eq for Client
+impl Eq for ColorScheme
+impl Eq for Config
+impl Eq for Css
+impl Eq for Data
+impl Eq for Dir
+impl Eq for Directive
+impl Eq for DownloadWindow
+impl Eq for Durability
+impl Eq for Extras
+impl Eq for Feedback
+impl Eq for Fit
+impl Eq for History
+impl Eq for Home
+impl Eq for Hsts
+impl Eq for Level
+impl Eq for Limits
+impl Eq for Log
+impl Eq for Look
+impl Eq for MacBuild
+impl Eq for Memory
+impl Eq for Mode
+impl Eq for Neutral
+impl Eq for RuntimeFrom
+impl Eq for Scheme
+impl Eq for Security
+impl Eq for Server
+impl Eq for Shown
+impl Eq for Splash
+impl Eq for SplashPosition
+impl Eq for SplashShow
+impl Eq for Status
+impl Eq for Storm
+impl Eq for Target
+impl Eq for TextPosition
+impl Eq for Tier
+impl Eq for Tz
+impl Eq for Ui
+impl Eq for Updates
+impl Eq for Vitals
+impl Eq for WindowsBuild
+impl From<bool> for Scheme
+impl Lit for Accounts
+impl Lit for Align
+impl Lit for AndroidBuild
+impl Lit for App
+impl Lit for BarPosition
+impl Lit for BarStyle
+impl Lit for Budgets
+impl Lit for Build
+impl Lit for Capabilities
+impl Lit for Client
+impl Lit for ColorScheme
+impl Lit for Config
+impl Lit for Css
+impl Lit for Data
+impl Lit for Dir
+impl Lit for Directive
+impl Lit for DownloadWindow
+impl Lit for Durability
+impl Lit for Extras
+impl Lit for Feedback
+impl Lit for Fit
+impl Lit for History
+impl Lit for Home
+impl Lit for Hsts
+impl Lit for Level
+impl Lit for Limits
+impl Lit for Log
+impl Lit for Look
+impl Lit for MacBuild
+impl Lit for Memory
+impl Lit for Mode
+impl Lit for Neutral
+impl Lit for RuntimeFrom
+impl Lit for Scheme
+impl Lit for Security
+impl Lit for Server
+impl Lit for Shown
+impl Lit for Splash
+impl Lit for SplashPosition
+impl Lit for SplashShow
+impl Lit for Storm
+impl Lit for Target
+impl Lit for TextPosition
+impl Lit for Tier
+impl Lit for Tz
+impl Lit for Ui
+impl Lit for Updates
+impl Lit for Vitals
+impl Lit for WindowsBuild
+impl Ord for Level
+impl Ord for Status
+impl PartialEq for Accounts
+impl PartialEq for Align
+impl PartialEq for AndroidBuild
+impl PartialEq for App
+impl PartialEq for BarPosition
+impl PartialEq for BarStyle
+impl PartialEq for Budgets
+impl PartialEq for Build
+impl PartialEq for Capabilities
+impl PartialEq for Client
+impl PartialEq for ColorScheme
+impl PartialEq for Config
+impl PartialEq for Css
+impl PartialEq for Data
+impl PartialEq for Dir
+impl PartialEq for Directive
+impl PartialEq for DownloadWindow
+impl PartialEq for Durability
+impl PartialEq for Extras
+impl PartialEq for Feedback
+impl PartialEq for Fit
+impl PartialEq for History
+impl PartialEq for Home
+impl PartialEq for Hsts
+impl PartialEq for Level
+impl PartialEq for Limits
+impl PartialEq for Log
+impl PartialEq for Look
+impl PartialEq for MacBuild
+impl PartialEq for Memory
+impl PartialEq for Mode
+impl PartialEq for Neutral
+impl PartialEq for RuntimeFrom
+impl PartialEq for Scheme
+impl PartialEq for Security
+impl PartialEq for Server
+impl PartialEq for Shown
+impl PartialEq for Splash
+impl PartialEq for SplashPosition
+impl PartialEq for SplashShow
+impl PartialEq for Status
+impl PartialEq for Storm
+impl PartialEq for Target
+impl PartialEq for TextPosition
+impl PartialEq for Tier
+impl PartialEq for Tz
+impl PartialEq for Ui
+impl PartialEq for Updates
+impl PartialEq for Vitals
+impl PartialEq for WindowsBuild
+impl PartialOrd for Level
+impl PartialOrd for Status
+impl Serialize for Accounts
+impl Serialize for Align
+impl Serialize for AndroidBuild
+impl Serialize for App
+impl Serialize for BarPosition
+impl Serialize for BarStyle
+impl Serialize for Budgets
+impl Serialize for Build
+impl Serialize for Capabilities
+impl Serialize for Client
+impl Serialize for ColorScheme
+impl Serialize for Config
+impl Serialize for Css
+impl Serialize for Data
+impl Serialize for Dir
+impl Serialize for Directive
+impl Serialize for DownloadWindow
+impl Serialize for Durability
+impl Serialize for Extras
+impl Serialize for Feedback
+impl Serialize for Fit
+impl Serialize for History
+impl Serialize for Home
+impl Serialize for Hsts
+impl Serialize for Level
+impl Serialize for Limits
+impl Serialize for Log
+impl Serialize for Look
+impl Serialize for MacBuild
+impl Serialize for Memory
+impl Serialize for Mode
+impl Serialize for Neutral
+impl Serialize for RuntimeFrom
+impl Serialize for Scheme
+impl Serialize for Security
+impl Serialize for Server
+impl Serialize for Shown
+impl Serialize for Splash
+impl Serialize for SplashPosition
+impl Serialize for SplashShow
+impl Serialize for Storm
+impl Serialize for Target
+impl Serialize for TextPosition
+impl Serialize for Tier
+impl Serialize for Tz
+impl Serialize for Ui
+impl Serialize for Updates
+impl Serialize for Vitals
+impl Serialize for WindowsBuild
+impl StructuralPartialEq for Accounts
+impl StructuralPartialEq for Align
+impl StructuralPartialEq for AndroidBuild
+impl StructuralPartialEq for App
+impl StructuralPartialEq for BarPosition
+impl StructuralPartialEq for BarStyle
+impl StructuralPartialEq for Budgets
+impl StructuralPartialEq for Build
+impl StructuralPartialEq for Capabilities
+impl StructuralPartialEq for Client
+impl StructuralPartialEq for ColorScheme
+impl StructuralPartialEq for Config
+impl StructuralPartialEq for Css
+impl StructuralPartialEq for Data
+impl StructuralPartialEq for Dir
+impl StructuralPartialEq for Directive
+impl StructuralPartialEq for DownloadWindow
+impl StructuralPartialEq for Durability
+impl StructuralPartialEq for Extras
+impl StructuralPartialEq for Feedback
+impl StructuralPartialEq for Fit
+impl StructuralPartialEq for History
+impl StructuralPartialEq for Home
+impl StructuralPartialEq for Hsts
+impl StructuralPartialEq for Level
+impl StructuralPartialEq for Limits
+impl StructuralPartialEq for Log
+impl StructuralPartialEq for Look
+impl StructuralPartialEq for MacBuild
+impl StructuralPartialEq for Memory
+impl StructuralPartialEq for Mode
+impl StructuralPartialEq for Neutral
+impl StructuralPartialEq for RuntimeFrom
+impl StructuralPartialEq for Scheme
+impl StructuralPartialEq for Security
+impl StructuralPartialEq for Server
+impl StructuralPartialEq for Shown
+impl StructuralPartialEq for Splash
+impl StructuralPartialEq for SplashPosition
+impl StructuralPartialEq for SplashShow
+impl StructuralPartialEq for Status
+impl StructuralPartialEq for Storm
+impl StructuralPartialEq for Target
+impl StructuralPartialEq for TextPosition
+impl StructuralPartialEq for Tier
+impl StructuralPartialEq for Tz
+impl StructuralPartialEq for Ui
+impl StructuralPartialEq for Updates
+impl StructuralPartialEq for Vitals
+impl StructuralPartialEq for WindowsBuild
+impl<'de> Deserialize<'de> for Accounts
+impl<'de> Deserialize<'de> for Align
+impl<'de> Deserialize<'de> for AndroidBuild
+impl<'de> Deserialize<'de> for App
+impl<'de> Deserialize<'de> for BarPosition
+impl<'de> Deserialize<'de> for BarStyle
+impl<'de> Deserialize<'de> for Budgets
+impl<'de> Deserialize<'de> for Budgets where Budgets: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Build
+impl<'de> Deserialize<'de> for Capabilities
+impl<'de> Deserialize<'de> for Client
+impl<'de> Deserialize<'de> for ColorScheme
+impl<'de> Deserialize<'de> for Config
+impl<'de> Deserialize<'de> for Css
+impl<'de> Deserialize<'de> for Data
+impl<'de> Deserialize<'de> for Dir
+impl<'de> Deserialize<'de> for Directive
+impl<'de> Deserialize<'de> for DownloadWindow
+impl<'de> Deserialize<'de> for Durability
+impl<'de> Deserialize<'de> for Extras
+impl<'de> Deserialize<'de> for Feedback where Feedback: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Fit
+impl<'de> Deserialize<'de> for History
+impl<'de> Deserialize<'de> for Home where Home: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Hsts
+impl<'de> Deserialize<'de> for Level
+impl<'de> Deserialize<'de> for Limits where Limits: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Log where Log: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Look
+impl<'de> Deserialize<'de> for MacBuild
+impl<'de> Deserialize<'de> for Memory where Memory: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Mode
+impl<'de> Deserialize<'de> for Neutral
+impl<'de> Deserialize<'de> for RuntimeFrom
+impl<'de> Deserialize<'de> for Scheme
+impl<'de> Deserialize<'de> for Security where Security: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Server
+impl<'de> Deserialize<'de> for Shown
+impl<'de> Deserialize<'de> for Splash
+impl<'de> Deserialize<'de> for SplashPosition
+impl<'de> Deserialize<'de> for SplashShow
+impl<'de> Deserialize<'de> for Storm where Storm: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Target
+impl<'de> Deserialize<'de> for TextPosition
+impl<'de> Deserialize<'de> for Tier
+impl<'de> Deserialize<'de> for Tz
+impl<'de> Deserialize<'de> for Ui where Ui: _serde::__private229::Default
+impl<'de> Deserialize<'de> for Updates
+impl<'de> Deserialize<'de> for Vitals where Vitals: _serde::__private229::Default
+impl<'de> Deserialize<'de> for WindowsBuild
+mod aio_config
+mod aio_config::auth
+mod aio_config::budgets
+mod aio_config::capabilities
+mod aio_config::config
+mod aio_config::db
+mod aio_config::icon
+mod aio_config::log
+mod aio_config::paths
+mod aio_config::perf
+mod aio_config::report
+mod aio_config::security
+mod aio_config::update
+mod aio_config::vitals
+struct aio_config::auth::Policy
+struct aio_config::budgets::Budgets
+struct aio_config::config::Accounts
+struct aio_config::config::AndroidBuild
+struct aio_config::config::App
+struct aio_config::config::Build
+struct aio_config::config::Capabilities
+struct aio_config::config::Client
+struct aio_config::config::Config
+struct aio_config::config::Css
+struct aio_config::config::Data
+struct aio_config::config::DownloadWindow
+struct aio_config::config::Feedback
+struct aio_config::config::History
+struct aio_config::config::Home
+struct aio_config::config::Limits
+struct aio_config::config::Log
+struct aio_config::config::MacBuild
+struct aio_config::config::Memory
+struct aio_config::config::Server
+struct aio_config::config::Splash
+struct aio_config::config::Target
+struct aio_config::config::Ui
+struct aio_config::config::Updates
+struct aio_config::config::WindowsBuild
+struct aio_config::perf::Budgets
+struct aio_config::perf::Storm
+struct aio_config::security::Security
+struct aio_config::vitals::Tier
+struct aio_config::vitals::Vitals
+trait aio_config::config::Lit

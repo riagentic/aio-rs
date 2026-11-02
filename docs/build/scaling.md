@@ -262,18 +262,19 @@ app, on your machine.
 
 What is measured, in aio-rs's own repository:
 
-- `cargo test -p aio-rs --test list_speed -- --nocapture`: a held key
-  over a 1000-row list, renders, writes and wire bytes per key
+- `cargo test -p aio-rs -F kit --test list_speed -- --nocapture`: a held key
+  over a 1000-row list, renders and updates, writes and wire bytes per key
   ([performance](../performance.md#measured)).
 - `scripts/dx-metrics` (in an aio-rs checkout) measures a fresh template
   app: clean and incremental builds, the release build, binary and bundle
   sizes, boot time, the idle window's memory, and save-to-screen times
   under `ax dev`; each run is a row of `scripts/dx-trend.csv`, and
-  `--check` fails on a regression past its limit. The latest row (Linux
-  x86_64): a 0.2 to 0.6 s boot, about 81 MB private memory for the window
-  (166 MB PSS), a 5.4 MB release binary, a 3.6 MB AppImage.
-- [Comparison](../comparison.md): one small app in aio-rs, Tauri and
-  Dioxus, measured once each.
+  `--check` fails on a regression past its limit, judged against the same
+  machine's rows only (in CI: against the base commit measured on the same
+  runner). `--live` times only the save-to-screen edits, printed;
+  `--trend` prints the latest rows and today's limits.
+- [Comparison](../comparison.md): one small app in aio-rs and two other
+  Rust app stacks, measured once each.
 
 ## Not designed for
 
@@ -286,12 +287,10 @@ What is measured, in aio-rs's own repository:
 
 ## Not in aio-rs
 
-- aio's broadcast throttle (`syncIntervalMs`) and its full-state ratio
-  (`fullStateThreshold`): aio-rs pushes each commit's patch to each
-  viewer that sees it; `#[coalesce]` is the throttle.
-- aio's per-element delta for arrays of objects with `id`: aio-rs's
-  patches compare same-length arrays item by item, and a length change
-  replaces the array, so a map keyed by id patches better.
+- aio's render-staleness backpressure (a page whose paint lags is sent
+  less): aio-rs paces every link the same (`[server.limits]
+  sync_interval_ms`, aio's `syncIntervalMs`) and sends a big patch as the
+  view (`full_state_percent`, aio's `fullStateThreshold`).
 - aio's `perfCheck: "off"` switch: aio-rs's budgets are always on and
   cost a clock read per call.
 - A benchmark gate on the runtime (aio's D12 perf gate): aio-rs gates the

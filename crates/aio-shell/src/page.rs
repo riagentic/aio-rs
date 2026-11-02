@@ -7,7 +7,7 @@ use aio::serde_json::json;
 use std::io;
 
 fn run(js: &str) {
-    _ = dioxus_document::eval(js);
+    _ = aio::ui::prelude::eval(js);
 }
 
 /// The element with this id, scrolled into view (to the top, or centred).
@@ -46,7 +46,7 @@ pub fn set_scroll(selector: &str, y: f64) {
 /// units, as the page counts), if there is one.
 pub async fn caret(selector: &str) -> Option<usize> {
     let js = format!("return document.querySelector({})?.selectionStart ?? null", json!(selector));
-    dioxus_document::eval(&js).join::<Option<usize>>().await.ok().flatten()
+    aio::ui::prelude::eval(&js).join::<Option<usize>>().await.ok().flatten()
 }
 
 /// Own part of the window's `<head>` while this component lives (aio's `useHead`).
@@ -58,10 +58,37 @@ pub fn print() {
     crate::tell_runtime("print".into());
 }
 
+/// The window minimized (aio's `__aioWindow.minimize`).
+pub fn minimize() {
+    crate::tell_runtime("minimize".into());
+}
+
+/// The window maximized, or back from maximized (aio's `maximize`, a toggle).
+pub fn maximize() {
+    crate::tell_runtime("maximize".into());
+}
+
+/// The window closed as its title bar's button closes it: a close-to-tray
+/// app hides, another stops (aio's `close`). The page's own
+/// `window.close()` takes this path too.
+pub fn close() {
+    crate::tell_runtime("close".into());
+}
+
+/// The window hidden (it stays in the tray and the app runs).
+pub fn hide() {
+    crate::tell_runtime("hide".into());
+}
+
+/// The window shown: restored, to the front and focused.
+pub fn show() {
+    crate::tell_runtime("show".into());
+}
+
 /// `text` on the clipboard; false if the page was refused it.
 pub async fn copy(text: &str) -> bool {
     let js = format!("try{{await navigator.clipboard.writeText({});return true}}catch(e){{return false}}", json!(text));
-    dioxus_document::eval(&js).join::<bool>().await.unwrap_or(false)
+    aio::ui::prelude::eval(&js).join::<bool>().await.unwrap_or(false)
 }
 
 /// An open dialog's question: files (of these types) or a folder.
@@ -249,7 +276,34 @@ mod tests {
         let js = include_str!("main.js");
         let at = js.find("if (l === 'print'").expect("the runtime takes the print line");
         let then = &js[at..at + 240];
-        assert!(then.contains("w.webContents.print({}") && then.contains("why !== 'Print job canceled'"), "{then}");
+        // CSS backgrounds too (aio's printBackground).
+        assert!(then.contains("print({ silent: false, printBackground: true }"), "{then}");
+        assert!(then.contains("why !== 'Print job canceled'"), "{then}");
+    }
+
+    /// aio's window verbs: each line its verb; close is the window's own
+    /// cancellable close, also for the page's `window.close()`; macOS's
+    /// `activate` brings a hidden window back.
+    #[test]
+    fn the_window_verbs_reach_the_window_and_close_takes_the_close_path() {
+        let js = include_str!("main.js");
+        for (line, does) in [
+            ("minimize", "w.minimize()"),
+            ("maximize", "w.isMaximized() ? w.unmaximize() : w.maximize()"),
+            ("close", "w.close()"),
+            ("hide", "w.hide()"),
+        ] {
+            assert!(js.contains(&format!("if (l === '{line}') {does}")), "{line}");
+        }
+        assert!(js.contains("if (l === 'focus' || l === 'show') forward()"));
+        assert!(js.contains("app.on('activate', forward)"));
+        assert!(js.contains(
+            "ipcMain.on('aio:close', (e) => { if (w && !w.isDestroyed() && e.sender === w.webContents) w.close() })"
+        ));
+        let pre = include_str!("preload.js");
+        assert!(
+            pre.contains("window.close = () => window.__aioClose()") && pre.contains("ipcRenderer.send('aio:close')")
+        );
     }
 
     #[test]

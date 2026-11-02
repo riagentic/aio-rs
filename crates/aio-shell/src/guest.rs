@@ -100,6 +100,7 @@ pub(crate) fn shell_json(win: &Window) -> io::Result<String> {
         "allow": win.permissions,
         "confirmUnload": win.confirm_unload,
         "keys": { "reload": win.keys.reload, "print": win.keys.print },
+        "showCapMs": win.show_cap_ms.unwrap_or(5000),
     })
     .to_string())
 }
@@ -171,39 +172,66 @@ pub(crate) fn child_line(id: u64, c: &Child) -> Result<String, String> {
 /// here (the URL, the partition), or the runtime's (off, a preload it does
 /// not have, the app's session by another spelling).
 pub async fn open_window(c: &Child) -> io::Result<()> {
-    let id = {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    };
+    let id = next_id();
     let line = child_line(id, c).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    asked(id, line, "the child window was refused", "no window to open a child window from").await
+}
+
+/// Wipe what a guest's session holds (aio's `__aioShell.clearPartition`):
+/// its storage, cache and HTTP sign-ins, as an app that locks does. The
+/// partition a `Browser` or a child window was given ([`Child::partition`]);
+/// never the app's own session, which is refused.
+pub async fn clear_partition(partition: &str) -> io::Result<()> {
+    let id = next_id();
+    let line = clear_line(id, partition).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    asked(id, line, "clear_partition refused", "no window whose sessions to clear").await
+}
+
+/// The control line clearing `partition`, or why it can't be (pure).
+pub(crate) fn clear_line(id: u64, partition: &str) -> Result<String, String> {
+    match partition.trim() {
+        "" | "persist:" => Err(format!(
+            "{partition:?} is the app's own session, not a partition: pass a guest's, like \"persist:name\""
+        )),
+        _ => Ok(json!({ "t": "clear-partition", "id": id, "partition": partition }).to_string()),
+    }
+}
+
+fn next_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Send `line` and wait for the runtime's answer to `id`; its refusal said
+/// after `refused`, `none` when there is no window.
+async fn asked(id: u64, line: String, refused: &'static str, none: &'static str) -> io::Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    lock().push((id, tx));
+    lock().push((id, refused, tx));
     if !crate::send_runtime(line).await {
-        lock().retain(|(k, _)| *k != id);
-        return Err(io::Error::new(io::ErrorKind::NotConnected, "no window to open a child window from"));
+        lock().retain(|(k, ..)| *k != id);
+        return Err(io::Error::new(io::ErrorKind::NotConnected, none));
     }
     rx.await.map_err(io::Error::other)?.map_err(io::Error::other)
 }
 
-/// The child windows asked for and not answered yet, by id.
-type Opening = Vec<(u64, tokio::sync::oneshot::Sender<Result<(), String>>)>;
-static OPENING: std::sync::Mutex<Opening> = std::sync::Mutex::new(Vec::new());
+/// The asks sent and not answered yet, by id.
+type Asked = Vec<(u64, &'static str, tokio::sync::oneshot::Sender<Result<(), String>>)>;
+static ASKED: std::sync::Mutex<Asked> = std::sync::Mutex::new(Vec::new());
 
-fn lock() -> std::sync::MutexGuard<'static, Opening> {
-    OPENING.lock().unwrap_or_else(|e| e.into_inner())
+fn lock() -> std::sync::MutexGuard<'static, Asked> {
+    ASKED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The runtime's answer to [`open_window`]: `{"t":"opened","id":1}`, or
-/// with `"error":"…"`.
+/// The runtime's answer to [`open_window`] or [`clear_partition`]:
+/// `{"t":"opened","id":1}` / `{"t":"done",..}`, or with `"error":"…"`.
 pub(crate) fn opened(m: &Value) {
     let mut all = lock();
-    if let Some(i) = all.iter().position(|(k, _)| Some(*k) == m["id"].as_u64()) {
-        let tx = all.swap_remove(i).1;
-        _ = tx.send(m["error"].as_str().map_or(Ok(()), |e| Err(format!("the child window was refused: {e}"))));
+    if let Some(i) = all.iter().position(|(k, ..)| Some(*k) == m["id"].as_u64()) {
+        let (_, refused, tx) = all.swap_remove(i);
+        _ = tx.send(m["error"].as_str().map_or(Ok(()), |e| Err(format!("{refused}: {e}"))));
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,12 +323,30 @@ mod tests {
     #[tokio::test]
     async fn the_runtimes_answer_reaches_the_caller_with_its_reason() {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        lock().push((u64::MAX, tx));
+        lock().push((u64::MAX, "the child window was refused", tx));
         opened(&json!({ "t": "opened", "id": u64::MAX, "error": "child windows are off" }));
         assert_eq!(rx.await.unwrap(), Err("the child window was refused: child windows are off".into()));
         // Without a window there is nothing to open it from: said, never a hang.
         let e = open_window(&Child { url: "https://x.example".into(), ..Default::default() }).await.unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotConnected);
+        assert_eq!(clear_partition("persist:dapp").await.unwrap_err().kind(), io::ErrorKind::NotConnected);
+    }
+
+    /// aio tests/clear-partition: a guest's session is wiped whole; the
+    /// app's own, by any spelling, never (here and in the runtime).
+    #[test]
+    fn clearing_a_partition_never_reaches_the_apps_session() {
+        let v: Value = aio::serde_json::from_str(&clear_line(7, "persist:dapp").unwrap()).unwrap();
+        assert_eq!(v, json!({ "t": "clear-partition", "id": 7, "partition": "persist:dapp" }));
+        for own in ["", " ", "persist:"] {
+            assert!(clear_line(1, own).unwrap_err().contains("the app's own session"), "{own:?}");
+        }
+        let js = include_str!("main.js");
+        let at = js.find("function clearPartition(m)").unwrap();
+        let body = &js[at..at + 900];
+        assert!(body.contains("ses === session.defaultSession") && body.contains("is the app's own session"), "{body}");
+        assert!(body.contains("clearStorageData(), ses.clearCache(), ses.clearAuthCache()"));
+        assert!(js.contains("if (m.t === 'clear-partition') clearPartition(m)"));
     }
 
     /// guest.js, in Node: aio's main-process policy tests on its pure parts.

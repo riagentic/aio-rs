@@ -106,7 +106,7 @@ fn prefetch_in(root: &Path, version: &str, sha: Option<&str>, mirror: &str) -> i
     if !usable(std::env::consts::OS, &dir) {
         eprintln!("[aio] getting the Electron {version} runtime (once per machine)…");
         let colors = crate::splash::colors(aio::colors::hue("aio"), None);
-        let look = crate::firstrun::Look { colors: &colors, at: None };
+        let look = crate::firstrun::Look { colors: &colors, at: None, icon: None, image: None };
         fetch(&dir, None, "", version, sha, mirror, &look).map_err(|(e, _)| e)?;
     }
     stamp(&dir);
@@ -374,17 +374,21 @@ fn mirror() -> String {
 /// `AIORT_ELECTRON_MIRROR` replaces
 /// `https://github.com/electron/electron/releases/download/`.
 pub fn ensure(title: &str) -> io::Result<PathBuf> {
-    ensure_as(title, &crate::splash::colors(aio::colors::hue("aio"), None), None, None)
+    ensure_as(title, &crate::splash::colors(aio::colors::hue("aio"), None), None, None, None, None)
 }
 
 /// [`ensure`] for an app: its windows in its `colors` (`splash::colors`),
-/// over its window's last place `at` (its middle, in Electron's points).
-/// With `back`, the failure question also offers the version an update
-/// replaced, and `back` starts it.
+/// over its window's last place `at` (its middle, in Electron's points),
+/// wearing its `icon` (a PNG file). With `back`, the failure question also
+/// offers the version an update replaced, and `back` starts it. `splash`:
+/// the app's splash image (its PNG and size on screen) drawn by the
+/// download window, above its bar.
 pub fn ensure_as(
     title: &str,
     colors: &[[String; 4]; 2],
     at: Option<(i32, i32)>,
+    icon: Option<&Path>,
+    splash: Option<(&[u8], (u32, u32))>,
     back: Option<&dyn Fn() -> io::Result<()>>,
 ) -> io::Result<PathBuf> {
     // Referenced, so no linker drops the marks from an app's binary.
@@ -410,14 +414,24 @@ pub fn ensure_as(
     }
     eprintln!("[aio] getting the Electron {VERSION} runtime (once per machine)…");
     let ui = crate::firstrun::here(std::env::consts::OS, &|k| std::env::var(k).ok(), &crate::firstrun::on_path);
-    let look = crate::firstrun::Look { colors, at };
-    let ask = |m: &str| ui.as_ref().map_or(crate::firstrun::Answer::Quit, |b| b.ask(title, m, back.is_some(), &look));
+    let look = crate::firstrun::Look { colors, at, icon, image: splash };
+    let ask = |m: &str| {
+        // The question takes over from the splash.
+        crate::presplash::end(crate::presplash::Close::Failed);
+        ui.as_ref().map_or(crate::firstrun::Answer::Quit, |b| b.ask(title, m, back.is_some(), &look))
+    };
     let never = || Ok(());
     let sha = pinned_sha(VERSION);
     let fetched = || fetch(&dir, ui.as_ref(), title, VERSION, sha.as_deref(), &mirror(), &look);
     crate::firstrun::retrying(title, VERSION, ask, back.unwrap_or(&never), fetched)?;
     stamp(&dir);
     Ok(dir)
+}
+
+/// This start may download Electron: none was given, none is bundled, and
+/// the shared one is not here yet.
+pub(crate) fn may_download() -> bool {
+    std::env::var_os("AIORT_RUNTIME").is_none() && bundled().is_none() && !usable(std::env::consts::OS, &dir())
 }
 
 /// In a runtime: when an app last started from it, an ISO time (aio's
@@ -574,19 +588,40 @@ fn fetch(
     look: &crate::firstrun::Look,
 ) -> Result<(), (io::Error, bool)> {
     use crate::firstrun::{Shown, download_detail};
-    let mut win = ui.and_then(|b| {
-        b.progress(title, &format!("Getting {title} ready"), look)
-            .inspect_err(|e| eprintln!("[aio] runtime: no progress window ({e}): the log carries the progress"))
-            .ok()
-    });
-    let mut show = |pct: Option<u64>, detail: &str| match win.as_mut().map(|w| w.show(pct, detail)) {
-        Some(Shown::Cancelled) => false,
-        Some(Shown::Lost(why)) => {
-            eprintln!("[aio] runtime: the progress window could not be shown ({why}): the log carries the progress");
-            win = None;
-            true
+    let open = || {
+        ui.and_then(|b| {
+            b.progress(title, &crate::firstrun::heading(crate::firstrun::words(), title, version), look)
+                .inspect_err(|e| eprintln!("[aio] runtime: no progress window ({e}): the log carries the progress"))
+                .ok()
+        })
+    };
+    // The app's splash (`presplash`) is the download's screen while it is
+    // up; once it is gone, the download window takes over.
+    let mut native = crate::presplash::current().filter(|s| s.download());
+    let _done = native.clone().map(Downloaded);
+    let mut win = if native.is_some() { None } else { open() };
+    let mut show = |pct: Option<u64>, detail: &str| {
+        if let Some(s) = &native {
+            match s.progress(pct, detail) {
+                Shown::On => return true,
+                Shown::Cancelled => return false,
+                Shown::Lost(_) => {
+                    native = None;
+                    win = open();
+                }
+            }
         }
-        _ => true,
+        match win.as_mut().map(|w| w.show(pct, detail)) {
+            Some(Shown::Cancelled) => false,
+            Some(Shown::Lost(why)) => {
+                eprintln!(
+                    "[aio] runtime: the progress window could not be shown ({why}): the log carries the progress"
+                );
+                win = None;
+                true
+            }
+            _ => true,
+        }
     };
     if !show(None, &format!("Looking for Electron {version}…")) {
         return Err((io::Error::new(io::ErrorKind::Interrupted, cancelled()), true));
@@ -602,8 +637,18 @@ fn fetch(
     install_into(dir, version, &slug, sha, mirror, &mut |got, total| match total {
         _ if got == 0 && total.is_none() => show(None, &format!("Looking for Electron {version}…")),
         Some(t) if got >= t => show(None, &format!("Verifying and unpacking Electron {version}…")),
-        _ => show(total.map(|t| got * 100 / t), &download_detail(version, got, total)),
+        _ => show(total.map(|t| got * 100 / t), &download_detail(crate::firstrun::words(), title, version, got, total)),
     })
+}
+
+/// The download is over, however it ended: the splash shows the start's
+/// text again, and its cap counts from now.
+struct Downloaded(std::sync::Arc<crate::presplash::Session>);
+
+impl Drop for Downloaded {
+    fn drop(&mut self) {
+        self.0.downloaded();
+    }
 }
 
 /// Why Chromium's sandbox can't start on this Linux, or `None`.
@@ -639,10 +684,16 @@ pub fn sandbox_missing(
 }
 
 /// The flag Electron needs on this machine, said every time it is used.
-/// `AIORT_SANDBOX=1` keeps the sandbox strict (no window rather than none).
-pub fn sandbox_args(#[cfg_attr(not(unix), allow(unused))] dir: &Path) -> Vec<String> {
-    if std::env::consts::OS != "linux" || std::env::var_os("AIORT_SANDBOX").is_some_and(|v| v == "1") {
-        return vec![];
+pub fn sandbox_args(dir: &Path) -> Vec<String> {
+    sandbox_for(dir, false).unwrap_or_default()
+}
+
+/// [`sandbox_args`], or with `require` (`Window { require_sandbox }`, or
+/// `AIORT_SANDBOX=1`) the reason there will be no window: a host that
+/// can't sandbox stops the app rather than run its page unsandboxed.
+pub fn sandbox_for(#[cfg_attr(not(unix), allow(unused))] dir: &Path, require: bool) -> io::Result<Vec<String>> {
+    if std::env::consts::OS != "linux" {
+        return Ok(vec![]);
     }
     let probe = || {
         let mut cmd = std::process::Command::new("unshare");
@@ -657,14 +708,32 @@ pub fn sandbox_args(#[cfg_attr(not(unix), allow(unused))] dir: &Path) -> Vec<Str
     };
     #[cfg(not(unix))]
     let helper = None;
-    match sandbox_missing(|p| std::fs::read_to_string(p).unwrap_or_default(), probe, helper) {
-        None => vec![],
-        Some(why) => {
+    let missing = sandbox_missing(|p| std::fs::read_to_string(p).unwrap_or_default(), probe, helper);
+    let by_env = std::env::var_os("AIORT_SANDBOX").is_some_and(|v| v == "1");
+    no_sandbox(missing, require, by_env).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))
+}
+
+/// The runtime's switches for a host whose sandbox is `missing` (why it
+/// can't start), or why the app stops instead (pure).
+pub(crate) fn no_sandbox(missing: Option<String>, require: bool, by_env: bool) -> Result<Vec<String>, String> {
+    let Some(why) = missing else { return Ok(vec![]) };
+    let who = match (require, by_env) {
+        (true, _) => Some("this app requires it (Window { require_sandbox: true })"),
+        (false, true) => Some("AIORT_SANDBOX=1 requires it"),
+        _ => None,
+    };
+    match who {
+        Some(who) => Err(format!(
+            "Chromium's sandbox can't start here ({why}), and {who}: the window does not open unsandboxed. Make \
+             chrome-sandbox root-owned 4755, or allow unprivileged user namespaces"
+        )),
+        None => {
             eprintln!(
                 "[aio] runtime: {why}: starting it with --no-sandbox (the page is this app's own UI; set \
-                 AIORT_SANDBOX=1 to refuse instead, or make chrome-sandbox root-owned 4755)"
+                 AIORT_SANDBOX=1 or Window {{ require_sandbox: true }} to refuse instead, or make chrome-sandbox \
+                 root-owned 4755)"
             );
-            vec!["--no-sandbox".into()]
+            Ok(vec!["--no-sandbox".into()])
         }
     }
 }
@@ -1050,6 +1119,18 @@ mod tests {
         assert!(sandbox_missing(off, || true, Some((1000, 0o755))).is_some());
     }
 
+    /// aio's requireSandbox: a host that can't sandbox stops the app, with
+    /// the reason and the way out; elsewhere `--no-sandbox`, said.
+    #[test]
+    fn a_required_sandbox_stops_the_app_rather_than_run_without_one() {
+        let why = || Some("AppArmor restricts unprivileged user namespaces".to_string());
+        assert_eq!(no_sandbox(None, true, true), Ok(vec![]), "a host that sandboxes needs nothing");
+        assert_eq!(no_sandbox(why(), false, false), Ok(vec!["--no-sandbox".to_string()]));
+        let e = no_sandbox(why(), true, false).unwrap_err();
+        assert!(e.contains("AppArmor") && e.contains("require_sandbox: true") && e.contains("4755"), "{e}");
+        assert!(no_sandbox(why(), false, true).unwrap_err().contains("AIORT_SANDBOX=1"));
+    }
+
     #[test]
     fn the_download_reports_each_chunk_and_stops_on_a_cancel() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1097,6 +1178,7 @@ mod tests {
     }
 
     /// What is in `root`, sorted.
+    #[cfg(not(target_os = "macos"))]
     fn left(root: &Path) -> Vec<String> {
         let mut v: Vec<String> =
             std::fs::read_dir(root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();

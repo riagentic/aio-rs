@@ -2,9 +2,18 @@
 
 Tests run in-process against the real cell: the same store, methods,
 invariants, effects and views the app runs. `ax test <app> [filter]` runs
-an app's tests (`cargo test` works too); `aio::testing` comes with aio-rs,
-so an app adds no dev-dependency for it. `ax create` makes an app whose
-template already has a cell test and a UI test.
+an app's tests (`cargo test` works too). `aio::testing` is aio-rs's
+`testing` feature, which the tests get as a dev-dependency, so the app's
+own builds never compile the test kit; `ax create` writes the line, and
+makes an app whose template already has a cell test and a UI test:
+
+```toml
+[dev-dependencies]
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.1.0", features = ["testing"] }
+```
+
+Tests that use `aio::testing` without it don't build; `ax lint` names the
+first such line and the fix.
 
 | Page | Covers |
 |---|---|
@@ -13,6 +22,7 @@ template already has a cell test and a UI test.
 | [Cassettes](cassettes.md) | an effect's I/O recorded once and replayed |
 | [Servers, sync and many apps](multi-app.md) | `TestServer`, `Sim`: routes, sign-in, synced copies, cuts, several apps |
 | [Lint and proving the tests](lint.md) | `ax lint`, and tests that can go red |
+| [Proving the tests](proving.md) | the mutation ledger: breaks planted in the source and in a built `.deb`, each caught by a named test |
 | [Real machines](labs.md) | `ax build --smoke`, `ax lab`: the built app on Windows, macOS, Linux |
 
 Which harness:
@@ -29,7 +39,11 @@ Which harness:
 | `testCell` | `Handle::<C>::memory()` | one cell's methods |
 | `bootCells` + `advance` | `aio::testing::TestCells` | cells, effects, schedules on a virtual clock |
 | `t.as(user)` | `TestCells::as_client(&h, caller)` | access rules as a network caller meets them |
-| `t.fuzz` | `TestCells::fuzz` | seeded random calls against invariants |
+| `t.fuzz` | `TestCells::fuzz`, `fuzz_methods` | seeded random calls against invariants |
+| `t.init`, `expect.effects`, `perfBudget` | `TestCells::reset`, `last_effects`, `budget` | a cell reset mid-test, the last call's effects, a per-test budget |
+| `testIO` | `aio::testing::TestIo` | a command-line run: stdin, a terminal or not, colour, what was written |
+| `testApps` | `aio::testing::TestApps` | several apps, each its own dirs and server |
+| `smoke()` | `aio::testing::smoke(bundle)` | the built bundle started and stopped, in a test |
 | `testUI` | `aio::testing::TestUi` | views in the real page, headless |
 | `testServer` | `aio::testing::TestServer` | real HTTP and WebSocket on loopback |
 | `testMultiClient` | `aio::testing::Sim` | a server and synced copies under seeded cuts |
@@ -125,7 +139,7 @@ assert_eq!(rich.state().balance, 5);
 ```rust,no_run
 use aio::act;
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[aio::cell(persist, id = "counter")]
 pub struct Counter {
@@ -142,9 +156,9 @@ impl Counter {
 aio::client!(Counter, counter);
 
 #[component]
-fn App() -> Element {
+fn App() -> View {
     use_live();
-    let n = *part(|c| &c.count);
+    let n = part(|c| &c.count);
     rsx! {
         h1 { "data-t": "count", "{n}" }
         button { onclick: move |_| _ = act!(add(1)), "Add" }
@@ -155,7 +169,7 @@ fn App() -> Element {
 let mut ui = TestUi::new(App);
 ui.click("AddButton"); // named from its label and role
 assert_eq!(ui.text("count"), "1");
-assert_eq!(HANDLE.peek().state().count, 1, "the cell, not only the page");
+assert_eq!(HANDLE.read_untracked().state().count, 1, "the cell, not only the page");
 # }
 ```
 
@@ -186,7 +200,7 @@ runtime once). It drives the page as a person does:
   .app(App)`; `TestUi::with(Component, props)` mounts one component
   alone. By default a UI test refuses the real network: requests
   elsewhere are cancelled and fail the test.
-- **The cell beside the page**: `expect_cell(&HANDLE.peek(), "saved", |c|
+- **The cell beside the page**: `expect_cell(&HANDLE.read_untracked(), "saved", |c|
   ..)` waits until the cell holds; `read(&GLOBAL)` reads a global signal.
 - **When it fails**: the message shows the screen as text (`surface()`)
   and writes a trace (the steps, the page's warnings and errors) under
@@ -355,5 +369,6 @@ up but what it was asked to write.
 ## API
 
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::testing`
-(`TestCells`, `TestUi`, `Mount`, `TestServer`, `Sim`, `TestBrowser`,
-`fails`, `totp_code`), `aio::cassette`.
+(`TestCells`, `TestUi`, `Mount`, `TestServer`, `TestApps`, `Sim`,
+`TestBrowser`, `TestIo`, `patches`, `call_all`, `smoke`, `fails`,
+`totp_code`), `aio::cassette`.

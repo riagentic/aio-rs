@@ -15,7 +15,7 @@ starting point.
 | lint | `ax lint` | what types can't check (credentials in shared state, impure methods, hooks, accessibility, cell ids) plus clippy; exit 1 on errors |
 | tests | `ax test notes` | the cells' and the views' tests, UI tests headless in the real runtime |
 | build | `ax build notes --smoke` | the release bundle, started headless, stopped cleanly, its log checked |
-| size | `ax build notes --sizes` | the release binary against its budget (`[build] budget_mb`, 10 by default), and which crates take the space |
+| size | `ax build notes --sizes` | the release binary against its budget (`[build] budget_mb`, 10 by default, 15 on Windows), and which crates take the space |
 | docs | `cargo doc --no-deps` | broken links in your own API docs |
 
 - `ax test` is `cargo test` with what aio-rs's tests need: UI tests draw
@@ -50,7 +50,7 @@ two ways:
   `Cargo.lock` then pins the commit.
 - **Check aio-rs out beside the app** and point the paths there, as the
   release workflow does: `actions/checkout` with `repository:
-  riagentic/aio-rs`, `ref: v0.1.0`, `path: aio-rs`, the app's own checkout
+  riagentic/aio-rs`, `ref: v0.2.0`, `path: aio-rs`, the app's own checkout
   at `path: app`, then rewrite each `path = "…/aio"`, `"…/aio-shell"` to
   `$GITHUB_WORKSPACE/aio-rs/crates/…`.
 
@@ -167,16 +167,93 @@ ax lab notes windows --stop # what ran from it ended, the folder removed
 | Linux | the `.tar.gz`'s `install.sh`, the AppImage, the `.deb` |
 | Android | `ax install notes --android` on a real phone: it starts offline, Back, deep links, a kill and restart keep the state |
 | a served app | another machine reaches it (`--expose`), TLS and pairing, `ax health` |
-| an update | an installed copy of the previous release takes the new one, and a broken one rolls back ([release](release.md#install-and-the-way-back)) |
+| an update | an installed copy of the previous release takes the new one, and a broken one rolls back ([release](release.md#install-and-the-way-back)); aio-rs's own path is proven by `scripts/update-proof` (below), the app's is yours |
 
 Write down what you ran and saw, per OS, with the commit: a release you
 can't say was checked wasn't.
 
+## aio-rs's own proof scripts
+
+What aio-rs runs on itself before a release, in its checkout (each in a
+throwaway home under `dist/`, removed after):
+
+| Script | Proves | Where |
+|---|---|---|
+| `scripts/update-proof` | a sample service installed from its bundle (Linux `install.sh`, macOS `.app`, Windows `--install`) takes a signed release made from a patch, then a broken release fails its first boot and is rolled back, the data from before it read back | GitHub CI, Linux, macOS, Windows |
+| `scripts/android-gate` | a sample APK starts on an emulator, and an upgrade installed over it keeps its data | before each release, on a machine with the Android SDK and KVM |
+| `scripts/numbers` | the README's and docs' numbers, measured again, printed beside the published ones with the machine | any time (Linux x86_64 for the comparison) |
+
+### The Android gate
+
+A release needs `scripts/android-gate` green
+([CONTRIBUTING](../../CONTRIBUTING.md#make-a-release)). It never touches
+another emulator, a phone or the AVDs already on the machine:
+
+- It makes its own AVD in its work folder (`ANDROID_AVD_HOME`), from the
+  newest x86_64 system image in the SDK (`AIO_GATE_IMAGE` names another:
+  `system-images;android-35;google_apis;x86_64`), and boots it with no
+  window on console port 5600; every `adb` call names `-s emulator-5600`.
+  An `emulator-5600` already attached stops it.
+- `ax create gate`, with a saved cell that counts the app's starts and
+  logs `[gate] start <n>`. `ax test gate --android --device emulator-5600`
+  builds the APK for the emulator's CPU, installs it, starts it and
+  passes when the window is ready and it still runs 3 s later, with no
+  `panicked` or failed view in the app's log: start 1.
+- One commit on (a new version), the same over it (`adb install -r`, an
+  upgrade): start 2, so the data of the first install was kept.
+- After: the emulator stopped (`adb -s emulator-5600 emu kill`), the AVD
+  and work folder removed, and `modem-nv-ram-5600`, which the emulator
+  writes beside the user's AVDs, deleted.
+
+Needs the SDK's `emulator`, `platform-tools`, `cmdline-tools/latest`, an
+x86_64 system image, KVM, and what `ax build --android` needs
+([setup](../basics/setup.md)).
+
+### air's package gates
+
+An app ships air (aio-rs's own renderer, [the design](../design/air.md))
+and no other renderer, and its packages and edit loop are measured, in
+`ci.sh` and GitHub CI:
+
+- `scripts/air-ship <app> [artifacts...]` fails, naming each find, on a
+  crate of the renderer before 0.2.0 the app ships (its `cargo metadata`
+  graph of normal dependencies for the desktop, wasm32 and Android: a
+  crate by that name or from that project's repositories, the script
+  lists them) and on its name in any package byte for byte, any case:
+  the release binary, a folder (the web build), a `.tar.gz`, an AppImage
+  (its squashfs unpacked), an APK (each member). A stripped binary still
+  holds a crate's source paths and strings. `--self-test` (in `ci.sh`)
+  plants one in each kind of artifact and in a graph, and requires each
+  found.
+- `scripts/dx-metrics` builds the template, plants such a dependency in
+  a copy and requires air-ship to fail, then runs air-ship on its
+  release binary, `.tar.gz`, AppImage and web build. Its sizes
+  (`binary_b`, `targz_b`, `appimage_b`, `air_web_b`) are held 5% over the
+  base measured on the same runner (`--base`; 10 KB slack for the web
+  build, 50 KB for the rest), or over this machine's best. Build CPU
+  seconds and `live_css_s`, `live_rsx_s`, `live_logic_s` (`ax dev`'s own
+  reload and hot-patch, headless) are gated against this machine's rows
+  only, 50% over their median: on a runner with none they are printed,
+  never failing.
+- `scripts/dx-metrics --apk`: the same for the template's APKs (`ax
+  build --android`, each checked, `air_apk_b` the arm64 one). `ci.sh`
+  runs it where the NDK and Rust's three Android targets are; in GitHub
+  CI the `dx (apk)` job does (`rustup target add armv7-linux-androideabi
+  x86_64-linux-android`, the runner's SDK).
+- GitHub CI measures the template (`--air`) and the APKs (`--apk`) in a
+  `dx` job each, side by side, each against the base measured on its own
+  runner; `ci.sh` measures the whole row in one run.
+
+A base before 0.2.0, whose template was on the renderer before air, is
+measured with its template moved to air, so its row is the same app's.
+Rows before 0.2.0 keep their `air_*` columns (the template on air beside
+the one on the old renderer) as the trend's history.
+
 ## Not in aio-rs
 
 - aio's `deno task check` / `deno task test` pair and their workflow
-  template: aio-rs has `ax lint` and `ax test`, and no CI file from
-  `ax create`.
+  template: aio-rs has `ax lint` and `ax test` (neither `am create` nor
+  `ax create` writes a CI file; `ax release <app> --workflow` writes one).
 - aio's lab boots throwaway containers and VMs; `ax lab` uses machines
   you already have.
 - aio's one-command validation of the whole release matrix: the hand

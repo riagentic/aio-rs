@@ -89,16 +89,17 @@ pub fn start_js(dev: bool) -> String {
 }
 
 /// The window's page scripts (`page.js`): keys, focus, drag data and
-/// dialogs as on the desktop (`aio::page`), the paint's state handed to the
-/// first view (`ADOPT`), and in a dev build the overlay
+/// dialogs as on the desktop (`aio::page`), and in a dev build the overlay
 /// that shows the page's errors on it and the live reload ([`RELOAD`]) (pure).
 pub fn page_js(dev: bool) -> String {
-    use aio::page::{ADOPT, DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, WHEEL};
-    let js = [KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, ADOPT, aio_shell::splash::PAGE_JS].join("\n");
-    match dev {
-        true => format!("{OVERLAY}\n{js}\n{RELOAD}\n"),
-        false => js + "\n",
-    }
+    use aio::page::{DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, WHEEL};
+    // `;` after each piece: an `(() => …)()` piece followed by another
+    // would otherwise call its result
+    let pieces: &[&str] = match dev {
+        true => &[CONSOLE, OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS, RELOAD],
+        false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS],
+    };
+    pieces.iter().map(|p| format!("{};\n", p.trim_end())).collect()
 }
 
 /// The page: its language and direction (`[app] lang`, `dir`), viewport,
@@ -190,6 +191,10 @@ self.addEventListener('activate', (e) => {{\n\
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter(older).map((k) => caches.delete(k))))\n\
     .then(() => self.clients.claim()));\n\
 }});\n\
+self.addEventListener('notificationclick', (e) => {{\n\
+  e.notification.close();\n\
+  e.waitUntil(self.clients.matchAll({{ type: 'window' }}).then((cs) => (cs[0] ? cs[0].focus() : self.clients.openWindow(self.registration.scope))));\n\
+}});\n\
 const own = (u) => u.pathname === '/ws' || u.pathname.startsWith('/__aio/');\n\
 self.addEventListener('fetch', (e) => {{\n\
   const r = e.request, u = new URL(r.url);\n\
@@ -209,7 +214,7 @@ type Icon = (String, u32);
 
 /// The icons: the app's own scaled, else its generated
 /// one; and why its own can't be installed, if so.
-fn icons(app: &App, out: &Path) -> Result<(Vec<Icon>, Option<String>), String> {
+fn icons(app: &App, hue: u16, out: &Path) -> Result<(Vec<Icon>, Option<String>), String> {
     let own = app.icon.as_ref().map(std::fs::read).transpose().map_err(|e| e.to_string())?;
     let img = own
         .map(|b| image::load_from_memory_with_format(&b, image::ImageFormat::Png).map(|i| i.to_rgba8()))
@@ -221,15 +226,95 @@ fn icons(app: &App, out: &Path) -> Result<(Vec<Icon>, Option<String>), String> {
         let png = match &img {
             Some(i) => {
                 let s = image::imageops::resize(i, n, n, image::imageops::FilterType::Lanczos3);
-                crate::icon::png(s.as_raw(), n, n)
+                aio_config::icon::png(s.as_raw(), n, n)
             }
-            None => crate::icon::icon_png(&app.name, &app.id, n),
+            None => aio_config::icon::icon_png(crate::build::label(app), hue, n),
         };
         let f = format!("icon-{n}.png");
         std::fs::write(out.join(&f), png).map_err(|e| e.to_string())?;
         made.push((f, n));
     }
     Ok((made, problem))
+}
+
+/// The portrait screens iOS shows a Home Screen app's launch image on, as
+/// CSS width, height and pixel ratio (aio's `IOS_SCREENS`): iOS takes the
+/// one whose media query matches the screen exactly; any other shows the
+/// manifest's background colour.
+pub const IOS_SCREENS: [(u32, u32, u32); 21] = [
+    (320, 568, 2),
+    (375, 667, 2),
+    (414, 736, 3),
+    (375, 812, 3),
+    (414, 896, 2),
+    (414, 896, 3),
+    (390, 844, 3),
+    (428, 926, 3),
+    (393, 852, 3),
+    (430, 932, 3),
+    (402, 874, 3),
+    (440, 956, 3),
+    (768, 1024, 2),
+    (744, 1133, 2),
+    (810, 1080, 2),
+    (820, 1180, 2),
+    (834, 1112, 2),
+    (834, 1194, 2),
+    (834, 1210, 2),
+    (1024, 1366, 2),
+    (1032, 1376, 2),
+];
+
+/// `#rgb` or `#rrggbb` as RGB; black otherwise.
+fn rgb(hex: &str) -> [u8; 3] {
+    let h = hex.trim_start_matches('#');
+    let h: String = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { h.into() };
+    let at = |i: usize| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok()).unwrap_or(0);
+    [at(0), at(2), at(4)]
+}
+
+/// iOS launch images (aio's `iosLaunchImages`): per [`IOS_SCREENS`] the
+/// splash image `png` on its light background `bg`, the size the page
+/// draws it (its box `w`×`h` in CSS px, no wider than the screen), so the
+/// launch image and the page's splash are one picture. Each file's name,
+/// its `<link>` and its PNG.
+pub fn launch_images(png: &[u8], (w, h): (u32, u32), bg: &str) -> Result<Vec<(String, String, Vec<u8>)>, String> {
+    use image::{ImageEncoder, codecs::png};
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| format!("splash: {e}"))?
+        .to_rgba8();
+    let [r, g, b] = rgb(bg);
+    IOS_SCREENS
+        .iter()
+        .map(|&(cw, ch, ratio)| {
+            let (sw, sh) = (cw * ratio, ch * ratio);
+            let dw = w.min(cw) * ratio;
+            let dh = (u64::from(dw) * u64::from(h) / u64::from(w.max(1))) as u32;
+            // Contained in its box, as `object-fit` draws it by default.
+            let fit = (f64::from(dw) / f64::from(img.width())).min(f64::from(dh) / f64::from(img.height()));
+            let (iw, ih) = ((f64::from(img.width()) * fit) as u32, (f64::from(img.height()) * fit) as u32);
+            let mut screen = image::RgbaImage::from_pixel(sw, sh, image::Rgba([r, g, b, 255]));
+            let scaled = image::imageops::resize(&img, iw.max(1), ih.max(1), image::imageops::FilterType::Triangle);
+            image::imageops::overlay(
+                &mut screen,
+                &scaled,
+                i64::from((sw - iw) / 2),
+                i64::from(sh.saturating_sub(ih) / 2),
+            );
+            let rgb = image::DynamicImage::ImageRgba8(screen).to_rgb8();
+            let mut out = Vec::new();
+            png::PngEncoder::new_with_quality(&mut out, png::CompressionType::Fast, png::FilterType::Adaptive)
+                .write_image(&rgb, sw, sh, image::ExtendedColorType::Rgb8)
+                .map_err(|e| e.to_string())?;
+            let file = format!("apple-splash-{sw}x{sh}.png");
+            let link = format!(
+                "<link rel=\"apple-touch-startup-image\" media=\"screen and (device-width: {cw}px) and \
+                 (device-height: {ch}px) and (-webkit-device-pixel-ratio: {ratio}) and (orientation: portrait)\" \
+                 href=\"./{file}\">"
+            );
+            Ok((file, link, out))
+        })
+        .collect()
 }
 
 /// What a page needs beside the bundle `wasm-bindgen` made in `out`: the
@@ -244,12 +329,13 @@ pub fn pack(
     body: &str,
     dev: bool,
 ) -> Result<Vec<String>, String> {
-    let hue = cfg.ui.hue.unwrap_or_else(|| aio::kit::theme::hue(&app.id));
-    let (icons, problem) = icons(app, out)?;
+    let hue = cfg.hue();
+    let (icons, problem) = icons(app, hue, out)?;
     let made: Vec<Icon> = icons.iter().filter(|(_, n)| *n != 180).cloned().collect();
     std::fs::write(out.join("manifest.webmanifest"), manifest(&app.name, hue, &made)).map_err(|e| e.to_string())?;
-    let head = head(&app.name, hue, "icon-192.png", "icon-180.png");
-    // The splash, over the page until the app has drawn its view.
+    let mut head = head(&app.name, hue, "icon-192.png", "icon-180.png");
+    // The splash, over the page until the app has drawn its view, and as
+    // iOS's launch images (a release build: a Home Screen app starts on it).
     let splash = match &cfg.build.splash {
         Some(s) => {
             let png = dir.join(&s.image);
@@ -257,16 +343,30 @@ pub fn pack(
             std::fs::write(out.join("splash.png"), &bytes).map_err(|e| e.to_string())?;
             let s = aio::config::Splash { png: Box::leak(bytes.into_boxed_slice()), ..s.clone() };
             let bg = s.background.as_ref().map(|[l, d]| [l.as_str(), d.as_str()]);
-            aio_shell::splash::markup(&s, &app.name, &aio_shell::splash::colors(hue, bg), "./splash.png", true)
+            let colors = aio_shell::splash::colors(hue, bg);
+            if let (false, Some(b)) = (dev, aio_shell::splash::image_box(&s)) {
+                for (file, link, png) in launch_images(s.png, b, &colors[0][0])? {
+                    std::fs::write(out.join(file), png).map_err(|e| e.to_string())?;
+                    head = format!("{head}\n{link}");
+                }
+            }
+            aio_shell::splash::markup(&s, &app.name, &app.version, &colors, "./splash.png", true)
         }
         None => String::new(),
     };
+    // `[build] assets`: at their URL paths, held offline by the worker.
+    for (url, file) in aio::config::asset_files(dir, &cfg.build.assets)? {
+        let to = out.join(aio::config::asset_path(&url));
+        std::fs::create_dir_all(to.parent().unwrap_or(out)).map_err(|e| e.to_string())?;
+        std::fs::copy(&file, &to).map_err(|e| format!("{}: {e}", file.display()))?;
+    }
     let page = index_html(&app.name, &cfg.app, &head, body).replacen("<body>\n", &format!("<body>\n{splash}"), 1);
     std::fs::write(out.join("index.html"), page).map_err(|e| e.to_string())?;
     std::fs::write(out.join("page.js"), page_js(dev)).map_err(|e| e.to_string())?;
     std::fs::write(out.join("start.js"), start_js(dev)).map_err(|e| e.to_string())?;
     let mut files = site_files(out, out).map_err(|e| e.to_string())?;
-    files.retain(|(f, _)| f != "sw.js");
+    // iOS fetches its launch images itself: the worker needn't hold them.
+    files.retain(|(f, _)| f != "sw.js" && !f.starts_with("apple-splash-"));
     files.sort();
     std::fs::write(out.join("sw.js"), service_worker(&app.id, &files)).map_err(|e| e.to_string())?;
     Ok(problem.into_iter().collect())
@@ -468,18 +568,117 @@ pub const RELOAD: &str = "(() => {
   tick();
 })();";
 
+/// The dev page's console in `ax dev --web`'s log (`page.js` in a dev
+/// build, aio's console intercept): every level, uncaught errors and
+/// refused promises, each line cut at 4 KB, sent in batches to
+/// `/aio-dev/log` (at most 200 waiting: past that they are counted, and
+/// the count said). The page's own console still shows them. With no dev
+/// server (a static `--dev` build) it stops sending.
+pub const CONSOLE: &str = "(() => {
+  const MAX = 4096, CAP = 200
+  let queue = [], dropped = 0, timer = 0, off = false
+  const text = (a) => {
+    if (typeof a === 'string') return a
+    if (a instanceof Error) return a.stack || String(a)
+    try { return JSON.stringify(a) ?? String(a) } catch (_) { return String(a) }
+  }
+  const flush = () => {
+    timer = 0
+    if (off || !queue.length) return
+    if (dropped) { queue.push({ level: 'warn', msg: `[aio] ${dropped} console lines were dropped (over ${CAP} waiting)` }); dropped = 0 }
+    const body = JSON.stringify(queue)
+    queue = []
+    fetch('/aio-dev/log', { method: 'POST', body, keepalive: body.length < 60000, headers: { 'content-type': 'application/json' } })
+      .then((r) => { if (r.status === 404) off = true }, () => {})
+  }
+  const send = (level, args) => {
+    if (off) return
+    if (queue.length >= CAP) { dropped++; return }
+    queue.push({ level, msg: Array.from(args, text).join(' ').slice(0, MAX) })
+    if (!timer) timer = setTimeout(flush, 100)
+  }
+  for (const [name, level] of [['log', 'info'], ['info', 'info'], ['warn', 'warn'], ['error', 'error'], ['debug', 'debug']]) {
+    const own = console[name].bind(console)
+    console[name] = (...args) => { own(...args); send(level, args) }
+  }
+  addEventListener('error', (e) => send('error', ['[uncaught]', e.error || e.message]))
+  addEventListener('unhandledrejection', (e) => send('error', ['[unhandled rejection]', e.reason]))
+  addEventListener('pagehide', flush)
+})();";
+
+/// What the dev page's console sent (`CONSOLE`): one line per entry, its
+/// level and text, terminal escapes taken out (pure).
+pub fn page_lines(body: &[u8]) -> Vec<String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body).unwrap_or_default();
+    entries
+        .iter()
+        .map(|e| {
+            let level =
+                e["level"].as_str().filter(|l| ["error", "warn", "info", "debug"].contains(l)).unwrap_or("info");
+            let msg: String = (e["msg"].as_str().unwrap_or_default().chars().take(4096))
+                .map(|c| if c.is_control() && c != '\n' && c != '\t' { '\u{fffd}' } else { c })
+                .collect();
+            format!("[page] {level}: {msg}")
+        })
+        .collect()
+}
+
 /// Whether a change to `changed` needs a new bundle: a stylesheet's needs
 /// none (the page reads it again, `aio::use_css!`) (pure).
 pub fn rebuilds(changed: &[PathBuf]) -> bool {
     changed.iter().any(|p| p.extension().is_none_or(|e| e != "css"))
 }
 
-/// `ax dev <name> --web`: the web build (debug) served on loopback, built
-/// again on each saved change to its sources: a stylesheet shows at once
-/// (`/aio-dev/sheet`, the page asks), any other edit (`rsx!`, Rust) builds
-/// the bundle again and the open tabs reload (`/aio-dev/build`). A failed
-/// build keeps the last page. Runs until Ctrl-C.
-pub fn dev(name: &str) -> Result<String, String> {
+/// Where `ax dev --web` serves: `port` (0: a free one); `expose`: to the
+/// network (`0.0.0.0`) over TLS, behind a fresh key (aio's `--expose`),
+/// else on loopback, open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Serve {
+    pub port: u16,
+    pub expose: bool,
+}
+
+impl Serve {
+    /// The words after the app in `ax dev <app> --web …`, in any order (pure).
+    pub fn parse(words: &[&str]) -> Result<Self, String> {
+        let mut s = Self::default();
+        let mut it = words.iter();
+        while let Some(w) = it.next() {
+            match w.split_once('=').map_or((*w, None), |(f, v)| (f, Some(v))) {
+                ("--web", None) => {}
+                ("--expose", None) => s.expose = true,
+                ("--port", v) => {
+                    let v = v.or_else(|| it.next().copied()).ok_or("--port needs a number")?;
+                    s.port = v.parse().map_err(|_| format!("--port {v}: a port number, 0 to 65535 (0: a free one)"))?;
+                }
+                _ => return Err(format!("{w}: not a flag of ax dev <app> --web [--port N] [--expose]")),
+            }
+        }
+        Ok(s)
+    }
+}
+
+/// `ax dev <name> --web`: the web build (debug) served as `serve` says,
+/// built again on each saved change to its sources: a stylesheet shows at
+/// once (`/aio-dev/sheet`, the page asks), any other edit (`rsx!`, Rust)
+/// builds the bundle again and the open tabs reload (`/aio-dev/build`). A
+/// failed build keeps the last page. Runs until Ctrl-C.
+pub fn dev(name: &str, serve: Serve) -> Result<String, String> {
+    dev_then(name, serve, |_| Ok(()))
+}
+
+/// Whether app `name` has a web build ([`dev`] can serve it).
+pub fn has_web(name: &str) -> bool {
+    Site::of(name).is_ok()
+}
+
+/// [`dev`], with `ready` called on its port once it serves (`ax dev
+/// --android` opens the page on the phone then); its error ends the run.
+pub fn dev_then(
+    name: &str,
+    serve: Serve,
+    ready: impl FnOnce(u16) -> Result<(), String> + Send + 'static,
+) -> Result<String, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     let site = Site::of(name)?;
     let out = site.target.join("aio").join("web-dev").join(&site.app.id);
@@ -488,21 +687,11 @@ pub fn dev(name: &str) -> Result<String, String> {
     let built = std::sync::Arc::new(AtomicU64::new(1));
     let dirs: Vec<PathBuf> = site.pkg.dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
     let paths = crate::dev::watched(&site.pkg, Path::new(""), &crate::dev::Watching::All);
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    let mut w = notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
-        if let Ok(e) = e
-            && crate::dev::changes(&e.kind)
-        {
-            let ps: Vec<PathBuf> = e.paths.into_iter().filter(|p| crate::dev::relevant(p)).collect();
-            if !ps.is_empty() {
-                _ = tx.send(ps);
-            }
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    for p in paths.iter().filter(|p| p.exists()) {
-        notify::Watcher::watch(&mut w, p, notify::RecursiveMode::Recursive).map_err(|e| e.to_string())?;
-    }
+    let (w, rx) = crate::watch::Watch::new(&paths)?;
+    // What the wasm build read beside the app's folders (`aio.toml`, an aio-rs checkout).
+    let deps = site.target.join("wasm32-unknown-unknown").join("debug").join(format!("{}.wasm", site.lib));
+    w.add_files(crate::dev::deps_of(&deps));
+    let cwd = std::env::current_dir().unwrap_or_default();
     // The last build's errors, until a good one.
     let failed = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let (n, error) = (built.clone(), failed.clone());
@@ -511,6 +700,13 @@ pub fn dev(name: &str) -> Result<String, String> {
         .route(aio::http::Route::get("/aio-dev/build", move |_| {
             let b = serde_json::json!({ "n": n.load(Ordering::SeqCst), "error": *error.lock().unwrap() });
             async move { aio::http::Reply::json(&b).header("cache-control", "no-store") }
+        }))
+        // The page's console, in this log (`CONSOLE`).
+        .route(aio::http::Route::post("/aio-dev/log", |r| {
+            for l in page_lines(r.body()) {
+                eprintln!("ax dev: {l}");
+            }
+            async { aio::http::Reply::text("").status(204) }
         }))
         .route(aio::http::Route::get("/aio-dev/sheet", move |r| {
             let file = r.query("path").and_then(|p| Path::new(p).canonicalize().ok());
@@ -525,24 +721,53 @@ pub fn dev(name: &str) -> Result<String, String> {
                 }
             }
         }));
+    // Exposed: over TLS (aio-rs's own root, as an exposed app), behind a key
+    // made for this run, which the printed link carries once (a cookie then).
+    let tls = match serve.expose {
+        true => Some(aio::tls::server(&aio::paths::tool_home().join("tls"), &site.app.id).map_err(|e| e.to_string())?),
+        false => None,
+    };
+    let token = match serve.expose {
+        true => format!("{}{}", aio::uuid_v4().simple(), aio::uuid_v4().simple()),
+        false => String::new(),
+    };
     aio::rt().block_on(async move {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
-        eprintln!("ax dev: http://{}/ (Ctrl-C ends it)", l.local_addr().map_err(|e| e.to_string())?);
-        let opts = aio::sync::Options { open: true, http, ..Default::default() };
+        let host = if serve.expose { "0.0.0.0" } else { "127.0.0.1" };
+        let l = tokio::net::TcpListener::bind((host, serve.port))
+            .await
+            .map_err(|e| format!("{host}:{}: {e}", serve.port))?;
+        let port = l.local_addr().map_err(|e| e.to_string())?.port();
+        match serve.expose {
+            true => {
+                let at = aio::pairing::reached_at(Some(host), &aio::tls::local_addrs());
+                eprintln!(
+                    "ax dev: https://{at}:{port}/?token={token} (open to the network over TLS, behind this run's key; \
+                     the browser asks to trust aio-rs's own certificate; Ctrl-C ends it)"
+                );
+            }
+            false => eprintln!("ax dev: http://127.0.0.1:{port}/ (Ctrl-C ends it)"),
+        }
+        let opts = aio::sync::Options { open: !serve.expose, token, tls, http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(aio::Handle::<DevSite>::memory(), l, opts));
+        tokio::task::spawn_blocking(move || ready(port)).await.map_err(|e| e.to_string())??;
         tokio::task::spawn_blocking(move || {
-            while let Ok(mut changed) = rx.recv() {
+            while let Ok(first) = rx.recv() {
                 // A burst of saves is one change.
-                while let Ok(more) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
-                    changed.extend(more);
-                }
+                let changed = crate::watch::settle(&rx, first);
+                let said = crate::watch::describe(&changed, &cwd);
                 if !rebuilds(&changed) {
+                    eprintln!("ax dev: {said} changed: restyled");
                     continue;
                 }
+                eprintln!("ax dev: {said} changed — building…");
                 let started = std::time::Instant::now();
                 match site.make(&out, true) {
                     Ok(_) => {
-                        *failed.lock().unwrap() = None;
+                        w.add_files(crate::dev::deps_of(&deps));
+                        // Red to green: said; the page drops its errors as it reloads.
+                        if failed.lock().unwrap().take().is_some() {
+                            eprintln!("ax dev: fixed: the build is good again");
+                        }
                         built.fetch_add(1, Ordering::SeqCst);
                         eprintln!("ax dev: built in {} ms; the page reloads", started.elapsed().as_millis());
                     }
@@ -571,6 +796,18 @@ impl DevSite {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_web_takes_its_flags_in_any_order_and_refuses_others() {
+        let p = |w: &str| Serve::parse(&w.split(' ').collect::<Vec<_>>());
+        assert_eq!(p("--web"), Ok(Serve::default()));
+        assert_eq!(p("--port 8080 --web --expose"), Ok(Serve { port: 8080, expose: true }));
+        assert_eq!(p("--web --port=0"), Ok(Serve { port: 0, expose: false }));
+        assert!(p("--web --port").unwrap_err().contains("needs a number"));
+        assert!(p("--web --port 70000").unwrap_err().contains("0 to 65535"));
+        assert!(p("--web --fresh").unwrap_err().starts_with("--fresh: not a flag of ax dev <app> --web"));
+        assert!(p("--web --expose=yes").is_err());
+    }
 
     #[test]
     fn the_lock_names_the_bindgen_the_build_needs() {
@@ -661,6 +898,52 @@ mod tests {
         assert!(page_js(false).contains("aria-modal") && page_js(false).contains("autofocus"));
         assert!(!page_js(false).contains("__aioDiag") && page_js(true).contains("window.__aioDiag = add"));
         assert!(!page_js(false).contains("/aio-dev/build") && page_js(true).contains("/aio-dev/build"));
+        // no piece runs into the next: `})()\n(() =>` calls the first's result
+        for dev in [false, true] {
+            assert!(!page_js(dev).contains(")\n("), "{}", page_js(dev));
+        }
+    }
+
+    #[test]
+    fn ios_launch_images_draw_the_splash_on_its_background_for_each_screen() {
+        // A 40×20 red image, its box 200×100 CSS px.
+        let red = image::RgbaImage::from_pixel(40, 20, image::Rgba([255, 0, 0, 255]));
+        let png = aio_config::icon::png(red.as_raw(), 40, 20);
+        let made = launch_images(&png, (200, 100), "#08f").unwrap();
+        assert_eq!(made.len(), IOS_SCREENS.len());
+        let (file, link, bytes) = &made[0];
+        assert_eq!(file, "apple-splash-640x1136.png");
+        assert_eq!(
+            link,
+            "<link rel=\"apple-touch-startup-image\" media=\"screen and (device-width: 320px) and \
+             (device-height: 568px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)\" \
+             href=\"./apple-splash-640x1136.png\">"
+        );
+        let img = image::load_from_memory(bytes).unwrap().to_rgb8();
+        assert_eq!((img.width(), img.height()), (640, 1136));
+        assert_eq!(img.get_pixel(0, 0).0, [0, 0x88, 0xff], "the splash's background");
+        assert_eq!(img.get_pixel(320, 568).0, [255, 0, 0], "the image, in the middle");
+        // Drawn as the page draws it: 200 CSS px wide at 2x, 400 px.
+        assert_eq!(img.get_pixel(320 - 199, 568).0, [255, 0, 0]);
+        assert_eq!(img.get_pixel(320 - 201, 568).0, [0, 0x88, 0xff]);
+        // No wider than a screen narrower than its box.
+        let narrow = launch_images(&png, (500, 250), "#fff").unwrap();
+        let img = image::load_from_memory(&narrow[0].2).unwrap().to_rgb8();
+        assert_eq!(img.get_pixel(0, 568).0, [255, 0, 0], "edge to edge");
+        assert!(launch_images(b"not a png", (1, 1), "#fff").unwrap_err().starts_with("splash:"));
+    }
+
+    #[test]
+    fn the_dev_pages_console_reaches_the_log_every_level_capped_without_escapes() {
+        let js = page_js(true);
+        assert!(js.contains("fetch('/aio-dev/log'") && js.find("CAP = 200").is_some(), "{js}");
+        assert!(js.starts_with("(() => {\n  const MAX = 4096"), "first: it hears the other pieces' lines");
+        assert!(!page_js(false).contains("/aio-dev/log"), "a release page sends nothing");
+        let body = br#"[{"level":"warn","msg":"low disk"},{"level":"log","msg":"a\u001b[2Jb\nc"},{"msg":7}]"#;
+        assert_eq!(page_lines(body), ["[page] warn: low disk", "[page] info: a\u{fffd}[2Jb\nc", "[page] info: "]);
+        assert!(page_lines(b"not json").is_empty());
+        let long = serde_json::json!([{ "level": "error", "msg": "x".repeat(10_000) }]).to_string();
+        assert_eq!(page_lines(long.as_bytes())[0].len(), "[page] error: ".len() + 4096);
     }
 
     /// aio's diagnostic page: a failed build's errors (not its warnings or
@@ -740,63 +1023,6 @@ mod tests {
         // The app's own server is never cached.
         assert!(sw.contains("u.pathname === '/ws' || u.pathname.startsWith('/__aio/')"));
     }
-
-    /// What a person did to the paint before the view was drawn is done to
-    /// the view as it takes the paint's place (aio's hydration kept it by
-    /// keeping the nodes), in a real Chromium (skipped without one).
-    #[cfg(unix)]
-    #[test]
-    fn the_first_view_takes_the_paints_place_with_what_was_done_to_it() {
-        use aio::serde_json::json;
-        let tree = |id: &str| {
-            format!(
-                "<form><input id=t{id} value=a><textarea id=x{id}>b</textarea><input type=checkbox id=c{id}>\
-                 <select id=s{id}><option>1</option><option>2</option></select></form>\
-                 <div id=box{id} style='height:40px;overflow:auto'><p style='height:400px'>tall</p></div>\
-                 <details id=d{id}><summary>more</summary>in</details><audio id=a{id}></audio>"
-            )
-        };
-        // The view draws one part otherwise: there it is the view's.
-        let view = tree("v").replace("<details id=dv><summary>more</summary>in</details>", "<p id=dv>other</p>");
-        let html = format!(
-            "<div id=main>{}</div><div hidden>{view}</div><p style='height:3000px'>page</p><script>{}</script>",
-            tree("p"),
-            aio::page::ADOPT
-        );
-        let Some(page) = crate::cdp::tests::Chromium::open(&html) else { return };
-        aio::rt().block_on(async {
-            let mut s = page.session().await;
-            // Two seconds of silence, playable in both trees.
-            let audio = "var $ = (i) => document.getElementById(i);
-                 const n = 16000, b = new DataView(new ArrayBuffer(44 + n));
-                 [[0, 0x52494646], [8, 0x57415645], [12, 0x666d7420], [36, 0x64617461]].forEach(([o, v]) => b.setUint32(o, v));
-                 [[4, 36 + n], [16, 16], [24, 8000], [28, 8000], [40, n]].forEach(([o, v]) => b.setUint32(o, v, true));
-                 [[20, 1], [22, 1], [32, 1], [34, 8]].forEach(([o, v]) => b.setUint16(o, v, true));
-                 const url = URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }));
-                 const ready = (a) => new Promise((ok) => { a.onloadedmetadata = ok; a.src = url; });
-                 Promise.all([ready($('ap')), ready($('av'))]).then(() => { $('ap').currentTime = 1.25; return $('ap').duration; })";
-            assert_eq!(s.eval(audio).await.unwrap(), json!(2));
-            let did = "var $ = (i) => document.getElementById(i);
-                 $('tp').value = 'typed'; $('tp').focus(); $('tp').setSelectionRange(1, 3);
-                 $('xp').value = 'more text'; $('cp').checked = true; $('sp').selectedIndex = 1;
-                 $('boxp').scrollTop = 120; $('dp').open = true; scrollTo(0, 500);
-                 window.heard = [];
-                 for (const i of ['tv', 'xv', 'cv', 'sv']) for (const t of ['input', 'change'])
-                   $(i).addEventListener(t, () => heard.push(i + ' ' + t));
-                 __aioAdopt($('main'), document.querySelector('[hidden]'));
-                 [document.querySelectorAll('#main').length, document.querySelector('[hidden]'), $('tv').value,
-                  document.activeElement.id, $('tv').selectionStart, $('tv').selectionEnd, $('xv').value,
-                  $('cv').checked, $('sv').selectedIndex, $('boxv').scrollTop, scrollY, $('dv').tagName, heard,
-                  $('av').currentTime]";
-            let got = s.eval(did).await.unwrap();
-            let heard = json!(["tv input", "xv input", "cv change", "sv change"]);
-            assert_eq!(
-                got,
-                json!([1, null, "typed", "tv", 1, 3, "more text", true, 1, 120, 500, "P", heard, 1.25]),
-                "the paint is gone, the view shows and has what was done"
-            );
-        });
-    }
 }
 
 /// The web build in a real browser (a headless Chromium, the wasm32 target
@@ -807,10 +1033,11 @@ pub(crate) mod browser {
     use super::*;
     use aio::prelude::*;
     use aio::serde_json::{Value, json};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     include!("web/board.rs");
-    include!("web/view.rs");
 
     const KEY: &str = "a-long-random-app-key-for-tests";
 
@@ -832,8 +1059,7 @@ pub(crate) mod browser {
              [lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n\
              aio = {{ package = \"aio-rs\", path = {:?}, default-features = false, features = [\"web\", \"kit\"] }}\n\
              wasm-bindgen = \"0.2\"\nwasm-bindgen-futures = \"0.4\"\njs-sys = \"0.3\"\n\
-             web-sys = {{ version = \"0.3\", features = [\"Location\", \"Window\"] }}\n\
-             dioxus = {{ version = \"=0.7.10\", default-features = false, features = [\"macro\", \"html\", \"signals\", \"hooks\"] }}\n\n[workspace]\n",
+             web-sys = {{ version = \"0.3\", features = [\"Location\", \"Window\"] }}\n\n[workspace]\n",
             aio.display().to_string()
         );
         for (f, text) in [
@@ -859,24 +1085,40 @@ pub(crate) mod browser {
         }
         let cfg = aio::config::Config::parse(
             "[app]\nid = \"web-test\"\nname = \"Web test\"\nlang = \"cs\"\ndir = \"auto\"\n\
+             [build]\nassets = { \"/media\" = \"media\" }\n\
              [build.splash]\nimage = \"splash.png\"\ntext = \"Starting {title}\"\nmin_ms = 300",
         )
         .unwrap();
         std::fs::write(page.join("splash.png"), include_bytes!("../../aio/tests/fixtures/splash.png")).unwrap();
+        std::fs::create_dir_all(page.join("media")).unwrap();
+        std::fs::write(page.join("media/hi there.txt"), "hi").unwrap();
         assert_eq!(pack(&app, &cfg, &page, &out, "", false).unwrap(), Vec::<String>::new());
         let index = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(index.contains("<body>\n<style>#aio-splash{") && index.contains("<p>Starting Web test</p>"));
         assert!(out.join("splash.png").is_file());
+        // `[build] assets` at their paths, held offline by the worker; iOS's launch images beside.
+        assert_eq!(std::fs::read_to_string(out.join("media/hi there.txt")).unwrap(), "hi");
+        let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
+        assert!(sw.contains("./media/hi there.txt") && !sw.contains("apple-splash-"), "{sw}");
+        assert!(index.contains("apple-touch-startup-image") && out.join("apple-splash-1290x2796.png").is_file());
         Some(out)
     }
 
-    /// The network between the browser and the server: up while its task runs.
-    fn link(l: tokio::net::TcpListener, to: String) -> tokio::task::JoinHandle<()> {
+    /// The network between the browser and the server: up while its task
+    /// runs; `sockets` counts the sync sockets (`GET /ws`) it carries.
+    fn link(l: tokio::net::TcpListener, to: String, sockets: Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut links = tokio::task::JoinSet::new();
             while let Ok((mut a, _)) = l.accept().await {
-                let to = to.clone();
+                let (to, sockets) = (to.clone(), sockets.clone());
                 links.spawn(async move {
+                    let mut head = [0u8; 8];
+                    while matches!(a.peek(&mut head).await, Ok(n) if n > 0 && n < head.len()) {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    if &head == b"GET /ws?" {
+                        sockets.fetch_add(1, Ordering::SeqCst);
+                    }
                     let mut b = tokio::net::TcpStream::connect(to).await.unwrap();
                     _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
                 });
@@ -943,6 +1185,12 @@ pub(crate) mod browser {
     const REFUSED: &str = "window.refused = []; document.addEventListener('securitypolicyviolation', \
                            (e) => window.refused.push(e.violatedDirective + ' ' + e.blockedURI))";
 
+    /// The browser's notifications, granted, kept in `window.notices`
+    /// (a headless browser shows none).
+    const NOTICES: &str = "window.notices = []; window.Notification = class { static permission = 'granted'; \
+                           static requestPermission() { return Promise.resolve('granted') } \
+                           constructor(t, o) { notices.push([t, o.body, o.tag, o.icon, o.silent]) } }";
+
     /// What tab `t` shows: its items, calls waiting, link.
     const SHOWN: &str = "import('./app.js').then((m) => JSON.parse(m.shown()))";
     const APP: &str = "import('./app.js')";
@@ -960,15 +1208,16 @@ pub(crate) mod browser {
         .unwrap() else {
             return;
         };
-        let h = Handle::<Board>::memory();
+        let (h, votes) = (Handle::<Board>::memory(), Handle::<Votes>::memory());
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server = l.local_addr().unwrap().to_string();
-        let http = aio_shell::web::painted(aio::http::Http::default(), h.clone(), view, &site);
+        let http = aio::http::Http::default().shell(&site).cell(votes.clone());
         let opts = aio::sync::Options { token: KEY.into(), http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(h.clone(), l, opts));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        let up = link(l, server.clone());
+        let sockets = Arc::new(AtomicUsize::new(0));
+        let up = link(l, server.clone(), sockets.clone());
         let url = format!("http://{addr}/?token={KEY}");
         let Some(c) = Chromium::open(&url) else {
             return eprintln!("no Chromium: skipped");
@@ -981,6 +1230,7 @@ pub(crate) mod browser {
         // What the page's policy refuses, counted from now on (it reloads).
         a.call("Page.enable", json!({})).await.unwrap();
         a.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": REFUSED })).await.unwrap();
+        a.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": NOTICES })).await.unwrap();
         a.eval("location.reload()").await.ok();
         for t in [&mut a, &mut b] {
             until(t, "window.ready", json!("yes")).await;
@@ -989,13 +1239,33 @@ pub(crate) mod browser {
             // Installed: the worker serves the page from now on.
             until(t, "!!navigator.serviceWorker.controller", json!(true)).await;
         }
+        // Both synced cells on the page's one socket: a reload opens one.
+        const VOTES: &str = "import('./app.js').then((m) => JSON.parse(m.votes()))";
+        until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
+        let before = sockets.load(Ordering::SeqCst);
+        b.eval("window.stale = true; location.reload()").await.ok();
+        until(&mut b, "!window.stale && window.ready", json!("yes")).await;
+        until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
+        until(&mut b, &format!("{SHOWN}.then((s) => s.online)"), json!(true)).await;
+        assert_eq!(sockets.load(Ordering::SeqCst) - before, 1, "one socket for the board and the votes");
+        assert_eq!(b.eval(&format!("{APP}.then((m) => m.vote())")).await.unwrap(), json!(true));
+        until(&mut a, VOTES, json!({ "n": 1, "online": true })).await;
+        for _ in 0..200 {
+            if votes.state().n == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(votes.state().n, 1);
         // The page's language and direction, as aio.toml says them.
         let html = "[document.documentElement.lang, document.documentElement.dir]";
         assert_eq!(a.eval(html).await.unwrap(), json!(["cs", "auto"]));
         // Online: a call reaches the server, and both tabs show it.
         assert_eq!(a.eval("import('./app.js').then((m) => m.add('a'))").await.unwrap(), json!(true));
         served(&h, &["a"]).await;
-        until(&mut b, SHOWN, json!({ "items": ["a"], "pending": 0, "online": true })).await;
+        for t in [&mut a, &mut b] {
+            until(t, SHOWN, json!({ "items": ["a"], "pending": 0, "online": true })).await;
+        }
         // The network goes: both tabs are offline.
         up.abort();
         _ = up.await;
@@ -1026,14 +1296,20 @@ pub(crate) mod browser {
         until(&mut a, TALLY, json!({ "n": 3, "busy": true, "running": 0 })).await;
         let kept = "JSON.parse(localStorage.getItem('aio.web-test:tally')).view";
         until(&mut a, kept, json!({ "n": 3 })).await;
+        // A built-in file at its URL path.
+        let hi = "fetch('./media/hi%20there.txt').then((r) => r.text())";
+        assert_eq!(a.eval(hi).await.unwrap(), json!("hi"));
         // An async method: its effect runs on the page's timer, counted while it does.
         assert_eq!(a.eval(&format!("{APP}.then((m) => m.later())")).await.unwrap(), json!(true));
         assert_eq!(a.eval(TALLY).await.unwrap()["running"], json!(1));
         until(&mut a, TALLY, json!({ "n": 13, "busy": true, "running": 0 })).await;
+        // A tell of the page's cell: the page's own notification, the app's icon on it.
+        assert_eq!(a.eval(&format!("{APP}.then((m) => m.finish())")).await.unwrap(), json!(true));
+        until(&mut a, "window.notices", json!([["Done", "the tally", "tally", "./icon-192.png", true]])).await;
         // The network is back on its port: the call reaches the server once,
         // sent by both tabs (the server applies a call id once).
         let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        let _up = link(l, server);
+        let _up = link(l, server, sockets.clone());
         for t in [&mut a, &mut b] {
             until(t, SHOWN, json!({ "items": ["a", "b"], "pending": 0, "online": true })).await;
         }
@@ -1048,9 +1324,8 @@ pub(crate) mod browser {
         served(&h, &["a", "b", "ui"]).await;
         h.call("add", json!(["server"])).unwrap();
         until(&mut b, items, json!(["a", "b", "ui", "server"])).await;
-        // The view took the paint's place, through the page's `__aioAdopt`
-        // (what was done to the paint goes with it): one main, nothing left unseen.
-        let one = "typeof __aioAdopt === 'function' && document.querySelectorAll('#main').length === 1 && !document.querySelector('[hidden]')";
+        // One main, nothing left unseen.
+        let one = "document.querySelectorAll('#main').length === 1 && !document.querySelector('[hidden]')";
         until(&mut a, one, json!(true)).await;
         // The window's page scripts and kit in the page: the field that
         // asks for focus has it (it came after the page loaded), and an
@@ -1060,7 +1335,8 @@ pub(crate) mod browser {
         until(&mut a, "document.getElementById('island').textContent", json!("island 4")).await;
         until(&mut a, "document.getElementById('doubled').textContent", json!("8")).await;
         assert_eq!(a.eval("window.refused").await.unwrap(), json!([]));
-        // The page as the server paints it now: the view over its state, for this viewer.
+        // The page as the server serves it: the web build's, its view drawn
+        // by the page itself (no server paint on air).
         let page = {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -1071,17 +1347,59 @@ pub(crate) mod browser {
             String::from_utf8_lossy(&got).into_owned()
         };
         assert!(page.contains("cache-control: no-store"), "{page}");
-        let painted = r#"<div id="main"><ul id="items"><li>a</li><li>b</li><li>ui</li><li>server</li></ul>"#;
-        assert!(page.contains(painted) && page.contains("./start.js"), "{page}");
-        // Its head as the view asks for it, collected on the server and kept in the page.
-        assert!(page.contains("<title>4 items</title>"), "{page}");
-        assert!(page.contains(r#"<meta name="description" content="board" data-aio-head></head>"#), "{page}");
+        assert!(page.contains(r#"<div id="main"></div>"#) && page.contains("./start.js"), "{page}");
+        // Its head as the view asks for it, written into the page by the view.
         until(&mut a, "document.title", json!("4 items")).await;
         let tags = "document.querySelectorAll('meta[name=description][data-aio-head]').length";
         assert_eq!(a.eval(tags).await.unwrap(), json!(1));
         // What the worker doesn't hold goes to the server as asked.
         let asked = "fetch('./missing.txt').then((r) => r.status, (e) => 'failed: ' + e)";
         assert_eq!(b.eval(asked).await.unwrap(), json!(404));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_dev_pages_console_and_its_uncaught_errors_reach_the_dev_log() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("index.html"),
+            "<!doctype html><html><body><div id=\"main\"></div><script src=\"./page.js\"></script></body></html>",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("page.js"), page_js(true)).unwrap();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = said.clone();
+        let http =
+            aio::http::Http::default().shell(dir.path()).route(aio::http::Route::post("/aio-dev/log", move |r| {
+                heard.lock().unwrap().extend(page_lines(r.body()));
+                async { aio::http::Reply::text("").status(204) }
+            }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let opts = aio::sync::Options { open: true, http, ..Default::default() };
+        tokio::spawn(aio::sync::serve_with(Handle::<DevSite>::memory(), l, opts));
+        let Some(c) = Chromium::open(&url) else {
+            return eprintln!("no Chromium: skipped");
+        };
+        let mut t = c.tabs(&url, 1).await.remove(0);
+        until(&mut t, "location.protocol + document.readyState", json!("http:complete")).await;
+        let did = "console.log('hello', { n: 1 }); console.debug('deep'); console.warn('careful'); \
+                   Promise.reject(new Error('no answer')); setTimeout(() => { throw new Error('boom') }); true";
+        assert_eq!(t.eval(did).await.unwrap(), json!(true));
+        let want = |l: &str| said.lock().unwrap().iter().any(|s| s.starts_with(l));
+        for _ in 0..200 {
+            if want("[page] error: [uncaught] Error: boom")
+                && want("[page] error: [unhandled rejection] Error: no answer")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let got = said.lock().unwrap().clone();
+        for l in ["[page] info: hello {\"n\":1}", "[page] debug: deep", "[page] warn: careful"] {
+            assert!(got.iter().any(|s| s == l), "{l} in {got:?}");
+        }
+        assert!(want("[page] error: [uncaught] Error: boom"), "{got:?}");
+        assert!(want("[page] error: [unhandled rejection] Error: no answer"), "{got:?}");
     }
 
     /// Types `text` into the field `t` names, as a person does.
@@ -1162,5 +1480,153 @@ pub(crate) mod browser {
         t.eval("document.getElementById('out').click() || true").await.unwrap();
         until(&mut t, "window.ready", json!("unlinked")).await;
         until(&mut t, who, json!("nobody")).await;
+    }
+}
+
+/// The web build on air in a real browser (a headless Chromium, the wasm32
+/// target and the lock's wasm-bindgen; skipped without them): the page's
+/// view drawn by air's interpreter talking to the module, air alone in it.
+#[cfg(all(test, unix))]
+mod browser_air {
+    use super::browser::{Chromium, until};
+    use super::*;
+    use aio::serde_json::json;
+    use std::time::Duration;
+
+    /// The test page's site on air, built and bound into `dir/site`; `None`
+    /// (said) without the wasm32 target or the right wasm-bindgen.
+    fn site(dir: &Path) -> Option<PathBuf> {
+        let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
+        let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
+        if !sysroot.join("lib/rustlib/wasm32-unknown-unknown").is_dir() {
+            eprintln!("no wasm32 target: skipped");
+            return None;
+        }
+        let page = dir.join("page");
+        std::fs::create_dir_all(page.join("src")).unwrap();
+        let aio = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aio");
+        let manifest = format!(
+            "[package]\nname = \"airpage\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n\
+             [lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n\
+             aio = {{ package = \"aio-rs\", path = {:?}, default-features = false, features = [\"web\", \"air\"] }}\n\
+             wasm-bindgen = \"0.2\"\n\n[workspace]\n",
+            aio.display().to_string()
+        );
+        for (f, text) in [
+            ("Cargo.toml", manifest.as_str()),
+            ("Cargo.lock", include_str!("../../../Cargo.lock")),
+            ("rust-toolchain.toml", include_str!("../../../rust-toolchain.toml")),
+            ("src/lib.rs", include_str!("web/air.rs")),
+        ] {
+            std::fs::write(page.join(f), text).unwrap();
+        }
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
+        let app = App { id: "air-web-test".into(), name: "Air web test".into(), version: "1.0.0".into(), icon: None };
+        let out = dir.join("site");
+        match bind(&page, &target, ("airpage", "airpage"), &app, &out, true, false) {
+            Err(e) if e.contains("needs wasm-bindgen") => {
+                eprintln!("{e}: skipped");
+                return None;
+            }
+            r => r.unwrap(),
+        }
+        let cfg = aio::config::Config::parse("[app]\nid = \"air-web-test\"\nname = \"Air web test\"").unwrap();
+        assert_eq!(pack(&app, &cfg, &page, &out, "", true).unwrap(), Vec::<String>::new());
+        // air alone in the page's build.
+        let tree = Command::new("cargo")
+            .args(["tree", "--offline", "-e", "normal", "--prefix", "none", "--target", "wasm32-unknown-unknown"])
+            .current_dir(&page)
+            .output()
+            .unwrap();
+        let tree = String::from_utf8_lossy(&tree.stdout);
+        assert!(tree.lines().any(|l| l.starts_with("aio-rs-air ")), "air draws it: {tree}");
+        assert!(!tree.lines().any(|l| l.starts_with(crate::lint::RENDERER_0_1)), "{tree}");
+        Some(out)
+    }
+
+    /// The site's files over HTTP, by path (a static host), until dropped.
+    fn serve(site: PathBuf, l: tokio::net::TcpListener) -> tokio::task::JoinHandle<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let site = site.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/");
+                    let path = if path == "/" { "/index.html" } else { path };
+                    let file = site.join(path.trim_start_matches('/'));
+                    let (status, body) = match std::fs::read(&file) {
+                        Ok(b) if !path.contains("..") => ("200 OK", b),
+                        _ => ("404 Not Found", vec![]),
+                    };
+                    let kind = match file.extension().and_then(|e| e.to_str()) {
+                        Some("html") => "text/html",
+                        Some("js") => "text/javascript",
+                        Some("wasm") => "application/wasm",
+                        Some("png") => "image/png",
+                        _ => "application/octet-stream",
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    _ = s.write_all(head.as_bytes()).await;
+                    _ = s.write_all(&body).await;
+                });
+            }
+        })
+    }
+
+    const REFUSED: &str = "window.refused = []; document.addEventListener('securitypolicyviolation', \
+                           (e) => window.refused.push(e.violatedDirective + ' ' + e.blockedURI))";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_page_draws_its_view_on_air_and_keeps_its_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(site) = tokio::task::spawn_blocking({
+            let d = dir.path().to_path_buf();
+            move || site(&d)
+        })
+        .await
+        .unwrap() else {
+            return;
+        };
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let _server = serve(site, l);
+        let Some(c) = Chromium::open(&url) else {
+            return eprintln!("no Chromium: skipped");
+        };
+        let mut t = c.tabs(&url, 1).await.remove(0);
+        t.call("Page.enable", json!({})).await.unwrap();
+        t.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": REFUSED })).await.unwrap();
+        t.eval("location.reload()").await.ok();
+        let text = |id: &str| format!("document.querySelector('[data-t={id}]')?.textContent ?? null");
+        until(&mut t, &text("n"), json!("0")).await;
+        assert_eq!(t.eval("typeof window.__airApply").await.unwrap(), json!("function"), "air's interpreter");
+        // A click: the page's event to the module, the cell's call, its hole redrawn.
+        for _ in 0..2 {
+            t.eval("document.querySelector('[data-t=add]').click()").await.unwrap();
+        }
+        until(&mut t, &text("n"), json!("2")).await;
+        // Typing: the value follows, and what shows it.
+        let typed = "{ const i = document.querySelector('[data-t=name]'); i.value = 'hey'; \
+                     i.dispatchEvent(new Event('input', { bubbles: true })); }";
+        t.eval(typed).await.unwrap();
+        until(&mut t, &text("typed"), json!("hey")).await;
+        // A keyed list: each row its own state, kept as the rows move.
+        t.eval("document.querySelector('[data-t=b]').click()").await.unwrap();
+        until(&mut t, &text("b"), json!("b 1")).await;
+        t.eval("document.querySelector('[data-t=flip]').click()").await.unwrap();
+        let order = "[...document.querySelectorAll('li')].map((l) => l.textContent)";
+        until(&mut t, order, json!(["b 1", "a 0"])).await;
+        // The page's policy refused nothing (the interpreter is a script of the page's own making).
+        assert_eq!(t.eval("window.refused").await.unwrap(), json!([]));
+        // Reloaded: the cell as the browser kept it.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        t.eval("location.reload()").await.ok();
+        until(&mut t, &text("n"), json!("2")).await;
     }
 }

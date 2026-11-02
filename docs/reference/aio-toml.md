@@ -72,6 +72,7 @@ version = "1.4"
 ui = "window"
 lang = "en"
 dir = "ltr"
+tz = "utc"
 maintainer = "Example Team <team@example.org>"
 # port_of = "notes"         # a port of the aio app "notes": its home and state.db
 
@@ -80,6 +81,10 @@ durability = "normal"
 store = "state.db"
 retire = []
 pragmas = []
+persist = true
+coalesce_ms = 100
+backup_every = "off"
+backup_keep = 7
 
 [history]
 keep = "90d"
@@ -105,6 +110,8 @@ clients = 256
 max_message = 4194304
 calls_per_sec = 200
 bytes_per_sec = 8388608
+sync_interval_ms = 50
+full_state_percent = 50
 
 [client]
 retention = "off"
@@ -145,9 +152,11 @@ keep = 5
 file_mb = 10
 heartbeat = 3600
 suppress = []
+per_run = false
 
 [perf]
 effect = 5
+call_ceiling = 30000
 
 [perf.storm]
 rate = 200
@@ -159,6 +168,7 @@ high = 50
 clear = 40
 critical = 80
 growth_mb = 256
+every = "10s"
 
 [budgets]
 
@@ -169,6 +179,8 @@ auto = true
 
 [ui]
 theme = "auto"
+scheme = "system"
+neutral = "tinted"
 layout = true
 
 [vitals]
@@ -193,6 +205,7 @@ Who the app is and where its cells live.
 | `ui` | `window`, `browser` | `"window"` | Where a `client-server` app shows its UI: `window` (the shared runtime's) or `browser` (its own page in the system browser, running until asked to stop). |
 | `lang` | language tag | `"en"` | The page's language, `<html lang>` (screen readers, spellcheck, translation). Letters, digits and `-`: `"en"`, `"pt-BR"`. |
 | `dir` | `ltr`, `rtl`, `auto` | `"ltr"` | The page's direction, `<html dir>`. `auto` is the browser's guess from the first strong character. Never guessed from `lang`. |
+| `tz` | `utc`, `local` | `"utc"` | The clock cron schedules read (`#[cron]`, `cx.cron`): UTC as aio's, so a port's jobs fire when they did, or this machine's local time (with its daylight-saving changes). |
 | `maintainer` | `"Name <email>"` | none | Who publishes it. A Debian package needs it (`ax build --deb`); `ax create` fills it from git. |
 | `port_of` | id | none | The aio app this app is a port of (its `appId`): it runs on that app's home (its profiles, `AIO_APPS_DIR`) and `state.db`, which aio can still open after. See [migration: data](../migration/data.md). |
 
@@ -228,6 +241,10 @@ The store: one SQLite file in the app's `data/` folder
 | `store` | file name | `"state.db"` | The store's file name in `data/` (aio's `dbPath`). |
 | `retire` | file names | `[]` | Files in `data/` set aside at boot as `<name>.pre-migration` (with their `-wal` and `-shm`), never deleted: an old store the app no longer opens. |
 | `pragmas` | statements | `[]` | Extra `PRAGMA` statements run on the store after aio's own (aio's `dbPragmas`). One SQLite ignores refuses the boot. |
+| `persist` | bool | `true` | `false`: the state lives in memory only, no store is opened, every launch starts from the defaults (aio's `persist: false`; the flag `--no-persist` does it for one launch). |
+| `coalesce_ms` | ms | `100` | How long a run of `#[coalesce]` calls is held before it is written (aio's `persistDebounceMs`); `0` writes each call. At most 60000. |
+| `backup_every` | span or `"off"` | `"off"` | Timed whole backups into `<home>/backups` while the app runs ([backups](../persistence/files.md#scheduled-backups)). |
+| `backup_keep` | count | `7` | Timed backups kept, the newest (at least 1); hand-made ones are never removed. |
 
 Checked: `store` and each `retire` entry are file names (no `/`, `\`, `.`
 or `..`); `retire` can't name the store; each pragma is a `PRAGMA`
@@ -284,18 +301,19 @@ For `mode = "client-server"` and `"server"` ([sync](../state/sync.md)).
 |---|---|---|---|
 | `listen` | `host:port` | none | Where to serve (`"127.0.0.1:7420"`). Required by the two serving modes; a port in use stops the start. `--port`, `--host` and `--expose` change it per launch. |
 | `discover` | bool | `false` | Answer LAN discovery probes (UDP 8099, aio's format), so `ax discover` and clients find it. |
-| `pairing` | bool | `false` | Let new devices pair with a PIN (`ax pin`, `ax pair`). |
+| `pairing` | bool | `false` | Let new devices pair with a PIN (`ax pair`). |
 | `tls` | bool | `false` | Serve over TLS with this machine's local root (`ax trust` explains how browsers trust it). |
-| `cert`, `key` | absolute paths | none | With `tls`: the operator's own certificate chain and key (PEM) instead of the local root, e.g. one a public CA signed. |
+| `cert`, `key` | absolute paths | none | With `tls`: the operator's own certificate chain and key (PEM) instead of the local root, e.g. one a public CA signed. A launch's `--tls-cert` and `--tls-key` override them (and turn TLS on); `--no-tls` turns it off. |
 | `hosts` | strings | `[]` | Names it is reached as besides IPs, `localhost` and `.local` (a reverse proxy's, a domain); any other `Host` is refused. The same list says which origins may frame the app and open its socket (aio's `allowedOrigins`). |
 | `strict_origin` | bool | `false` | Served beyond loopback: a socket upgrade must say its `Origin`. |
 | `trust_proxy` | header name | none | Behind a reverse proxy: the header it overwrites with the client's address (`"x-forwarded-for"`); its last hop is then the client. |
 | `open` | bool | `false` | Open on purpose (aio's `key: false`): links and routes need no key, so anyone who reaches the port reads the state and calls `#[client]` methods. Said loudly at boot and by `ax doctor`. |
+| `local_peers` | bool | `true` | Other processes of this user reach a release build's cells through its local door, with a client's rights (`ax state`, `ax call`, other apps as peers: aio's `allowLocalPeers`, which aio leaves off). `false`: a release build opens no door; a debug build always does. |
 
 Checked: `cert` and `key` go together, need `tls = true` and are absolute
 (the file is built into the app: a relative path has no folder to be
 relative to); `trust_proxy` is a header name; `open` and `[accounts] on`
-are not both set (each says who gets in).
+(or `sessions`) are not both set (each says who gets in).
 
 The framework's own paths are `/ws` and `/__aio…`; an app's routes and
 dirs can't take them.
@@ -354,6 +372,8 @@ learn them on connect, check sizes before sending and pace themselves.
 | `max_message` | bytes | `4194304` (4 MB) | Largest message a client may send. |
 | `calls_per_sec` | number | `200` | Calls a link may make per second (bursts up to twice that). |
 | `bytes_per_sec` | bytes | `8388608` (8 MB) | Bytes a link may send per second (bursts up to twice that). |
+| `sync_interval_ms` | ms | `50` | A link is sent at most one change per this window (aio's `syncIntervalMs`): the first of a burst at once, the rest folded into one patch; a person's call (a user's or an agent's) goes at once. `0`: each change at once. |
+| `full_state_percent` | percent | `50` | A patch over this share of the whole view goes as the view (aio's `fullStateThreshold`, `0.5` = `50`). `0`: always the view. Patches under 256 bytes always go as patches. |
 
 ### [server.dirs], [server.public_dirs]
 
@@ -406,12 +426,14 @@ Users, roles and sessions, in `data/auth.db` ([accounts](../auth/README.md)).
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `on` | bool | `false` | The shared key no longer opens sync; a session does, and the caller is the session's user. |
+| `sessions` | bool | `false` | Sessions without accounts (aio's `sessions: true`): no users, no login doors; the app issues sessions (`auth::serving()`'s `issue`), and a session token is that user on every door. `on` includes it. |
 | `signup` | bool | `false` | Anyone may make an account. |
 | `session` | span | `"30d"` | How long a session lives unused (used past half its life, it is renewed). 1 s to 100 years. |
 | `max_sessions` | number | `10` | Live sessions per user; a new one past it ends the oldest. At least 1. |
 | `require_verified` | bool | `false` | No sign-in until the account's email is verified (the app's mail hook, `Http::mail`, or `ax auth <app> verify <id>`). |
 
-`session` and `max_sessions` are checked only with `on = true`.
+`session` and `max_sessions` are checked only with `on` or `sessions`;
+`signup` and `require_verified` need `on`.
 
 ```toml
 [accounts]
@@ -480,7 +502,7 @@ What `ax build <app>` makes ([build](../build/README.md),
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
-| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
+| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`, `web`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
 | `platforms` | list | `[]` | The OS and CPU each desktop target is built for: `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`. Empty: this machine. `--platforms a,b` per build. |
 | `budget_mb` | number | 10 (a server: 6) | The binary's size budget in MB; the build fails above it and names the crates that take the space (`ax build --sizes`). For apps with heavy libraries. |
 | `css` | command or list | none | A CSS toolchain run before every build and on every change under `ax dev`: a command line split on spaces, or an argv list. Never through a shell. |
@@ -494,6 +516,22 @@ targets = ["desktop", "deb", { name = "pro", kind = "desktop", bin = "notes-pro"
 platforms = ["linux", "windows"]
 css = ["tailwindcss", "-i", "src/app.css", "-o", "assets/style.css"]
 budget_mb = 14
+```
+
+### [build.assets]
+
+Folders built into the app by URL prefix (aio's `assets`): each file is
+answered at the same path in the window (`aio://app/media/…`), by the
+app's server (to anyone: it ships with the app, as its page does), in the
+web build (cached offline) and in the APK. A folder is beside `aio.toml`
+(relative, no `..`), a prefix is a path like `/media` (not `/`, `/ws` or
+`/__aio…`) and not also in `[server] dirs`; dotfiles are left out, and a
+file name with `:` or `*` is refused. `ax build`, `ax dev` and `ax start`
+build a file added later in; a plain `cargo build` doesn't see a new one.
+
+```toml
+[build.assets]
+"/media" = "media"   # media/song.mp3 is /media/song.mp3
 ```
 
 ### [build.android]
@@ -515,18 +553,71 @@ budget_mb = 14
 | `bundle_id` | bundle id | `aio.rt.<id>` | The app's permanent macOS identity (`CFBundleIdentifier`): two or more dot-separated segments of letters, digits and `-` (`com.example.notes`). Used as written. |
 | `host` | string | none | The Mac a build away from one runs on, over SSH (`[ssh options] [user@]host`); it outranks `AIO_MACOS_SSH`. |
 
+### [build.windows]
+
+| Key | Type | Default | What it is |
+|---|---|---|---|
+| `shortcut` | bool | `true` | The one-click download adds a Start menu entry on its first install (aio's `build.windows.shortcut`); `false`: none. |
+
+### [build.download_window]
+
+The window a first start shows while Electron downloads, and its Retry /
+Quit question (aio's `electron.downloadWindow`). Every key is optional; the
+defaults are aio's. The texts take `{title}` and `{version}` (Electron's).
+
+| Key | Type | Default | What it is |
+|---|---|---|---|
+| `heading` | string | `"Getting {title} ready"` | Its heading. |
+| `text` | string | `"Downloading Electron {version} — first start only · {got} / {total} MB"` | The line under the bar: also `{got}`, `{total}` (MB, `?` while unknown) and `{pct}`. |
+| `question` | string | aio's, naming what failed and how to fix it | The Retry / Quit question; `{reason}` is what failed. |
+| `background`, `color`, `bar`, `track` | `#rgb` / `#rrggbb` | the app's, light or dark as the OS is | Its background, text, bar fill and bar ground; one set is used in both modes. |
+| `cancel` | bool | `true` | Its Cancel button; closing the window cancels either way. |
+
+```toml
+[build.download_window]
+heading = "Setting up {title}"
+bar = "#14f195"
+```
+
 ### [build.splash]
 
 The app's image (and text) on screen from its start until its window has
-loaded, on the desktop, the web and Android (aio's `build.splash`).
+loaded, on the desktop, the web and Android (aio's `build.splash`). On the
+desktop the OS draws it before Electron starts, at every start, and a first
+start's Electron download runs on it, its bar under the text
+([desktop](../clients/desktop.md#the-splash)).
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `image` | path | required | A `.png` in the app's folder (`"assets/splash.png"`, relative, no `..`); `…@2x.png` is drawn at half its pixel size. It must exist as the app builds: it is built in. |
-| `text` | string | none | Under the image; `{title}` is the app's name. |
+| `text` | string | none | Under the image, on the desktop, the web and Android: `{title}` is the app's name, `{version}` its version (what `--version` prints); `{got}`, `{total}` and `{pct}` read `0`, `?`, `?`; any other `{word}` stays as written. |
 | `min_ms` | milliseconds | `400` | It stays at least this long once shown. |
 | `max_ms` | milliseconds | `15000` | No window by then: it goes anyway. At least `min_ms`. |
 | `background` | `["#light", "#dark"]` | the app's colours | Each `#rgb` or `#rrggbb`. |
+| `show` | `always`, `first-start`, `never` | `"always"` | When it shows: every start; only while a first start downloads Electron; never (the download window is then the plain one). `Window { splash_show }` decides at run time instead. |
+| `download_text` | string | `[build.download_window] text` | The line under the bar while the splash draws a first start's download: `{title}`, `{version}` (the app's), `{got}` and `{total}` (MB), `{pct}`. |
+| `size` | `[width, height]` | the image's | The image box in px, 1 to 4096 each. |
+| `fit` | `contain`, `cover` | `"contain"` | How the image fills `size` when its shape differs. |
+| `text_position` | `below`, `over` | `"below"` | The text in a strip under the image, or over its lower part. |
+| `align` | `left`, `center`, `right` | `"center"` | The text's alignment. |
+| `margin` | px | 24 at the sides, 18 at the bottom | The text's gap to the edges. |
+| `radius` | px | `0` | The box's corner radius (the window is clear around it). |
+| `border` | `#rgb` / `#rrggbb` | none | A 1 px border. |
+| `fade_ms` | ms | `100`; Android `200` | Its fade out (on the desktop where the OS fades windows: Windows, macOS). |
+| `font` | family | the system's | The text's font: a generic family (`serif`, `sans-serif`, `monospace`; Android also `sans-serif-condensed`…) or a font's name. |
+| `font_size`, `bold` | px (Android: points), bool | `13` (Android `14`), `false` | The text's size and weight. |
+| `text_color` | `["#light", "#dark"]` | the app's | The text's colour. |
+| `bar`, `track` | `["#light", "#dark"]` | the app's | The download bar's fill and ground, while the splash draws a first start's download. |
+| `position` | `window`, `primary`, `pointer` | `"window"` | Where it opens: centred where the app's window will open (its last place), on the primary display, or on the one under the pointer. |
+| `follow_window` | bool | `true` | With `position = "window"`: once the app's window shows, the splash moves onto where it really is. |
+| `shadow` | bool | the OS's (macOS, Linux on; Windows off) | The text's shadow. |
+| `window_shadow` | bool | the OS's (macOS on) | The window's drop shadow. |
+| `cancel` | bool | `true` | The ✕ that cancels a first start's download. |
+| `progress` | bool | `true` | The bar while a first start downloads Electron. |
+| `bar_style` | `solid`, `thin` | `"solid"` | The bar's thickness: 6 or 3 points. |
+| `bar_height` | px, 1 to 64 | `bar_style`'s | The bar's height. |
+| `bar_position` | `under-text`, `bottom-edge` | `"under-text"` | Under the text inside the margins, or along the window's bottom edge, full width. |
+| `bar_radius` | px | half its height | The bar's corner radius. |
 
 ```toml
 [build.splash]
@@ -547,6 +638,7 @@ together, whatever the app does ([debugging](../debugging/README.md)).
 | `file_mb` | number | `10` | A file rotates at this size, at least 1. |
 | `heartbeat` | seconds | `3600` | Seconds between `heartbeat` lines (uptime, calls, errors); 0: none. |
 | `suppress` | methods | `[]` | Methods (`"notes.tick"`) whose calls are not logged, even at `debug`: a method called many times a second. |
+| `per_run` | bool | `false` | Each run starts fresh files (aio's per-run `debug.log`): the last run's move to `app.1.log`…, so `keep` runs are kept (a run past `file_mb` still rotates). |
 
 ```toml
 [log]
@@ -564,6 +656,7 @@ its budget is a perf violation in the log and `ax health`.
 |---|---|---|---|
 | `method` | milliseconds | 16 (debug), 100 (release) | A method's own time. |
 | `effect` | milliseconds | `5` | One effect step. |
+| `call_ceiling` | milliseconds | `30000` | How long each await of an async method may take (aio's `effectTimeoutMs`); one that never settles is cut off, its caller told. A `#[long]` method has none. |
 | `methods` | table | `{}` | Per method, `"cell.method" = ms`: one meant to be slow while every other stays strict. A key naming no method of its cell is reported (a typo would budget nothing). |
 | `effects` | table | `{}` | Per effect, `"cell.name" = ms` (the name its key starts with). |
 
@@ -591,7 +684,7 @@ when it starts and once when it ends (aio's `dispatchStorm`).
 
 When the process's memory is a problem, in percent of the machine's
 (`ax health`, `ax heap`). Checked: `clear < high <= critical <= 100`, and
-`growth_mb` at least 1.
+`growth_mb` at least 1, `every` 1 s to 10 s.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
@@ -599,6 +692,7 @@ When the process's memory is a problem, in percent of the machine's
 | `clear` | percent | `40` | …and clear again below this one. |
 | `critical` | percent | `80` | About to swap or be killed. |
 | `growth_mb` | number | `256` | Growth said once per this many MB (or a tenth of the machine). |
+| `every` | span | `"10s"` | How often memory is sampled and `health.json` written, 1 s to 10 s (aio's `memory.interval`). Each change of level reaches `aio::health::on_memory`. |
 
 ## [budgets]
 
@@ -634,19 +728,22 @@ when it breaks. Always kept on disk first (`ax report <app>`).
 
 ## [ui]
 
-The page's default look (aio's `ui.theme`, `ui.hue`, `ui.layout`;
+The page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`, dark mode;
 [theming](../ui/theming.md)); `aio::kit::theme::sheet` makes its CSS.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `theme` | `auto`, `full`, `tokens`, `none` | `"auto"` | How much of aio's look a page takes: `auto` (the whole look until the app ships a stylesheet of its own, then only the tokens), `full` (the whole look, the app's stylesheet over it), `tokens` (only the `--aio-*` tokens), `none` (no aio CSS: the kit is bare). |
+| `scheme` | `system`, `light`, `dark` | `"system"` | Light or dark (`aio::ui::scheme()`, the template's `use_css!`): `system` follows the OS as it changes; the others fix one. |
 | `hue` | 0 to 359 | from the id | The accent's hue in degrees, instead of the one hashed from the app's id. |
+| `neutral` | `tinted`, `soft` | `"tinted"` | The page's greys (page, surfaces, borders): tinted with the hue, or near grey (`soft`, aio's `"neutral": "soft"`) for a warm or magenta hue; the accent keeps the hue. |
 | `layout` | bool | `true` | With the look, the page layout: `<main>` as a centred page and the `.card`, `.row`, `.stack`, `.grid` classes. Off: only how elements look. |
 
 ```toml
 [ui]
 theme = "full"
 hue = 210
+neutral = "soft"
 layout = false
 ```
 
@@ -681,7 +778,7 @@ field attribute, a method attribute inside `#[methods]`, a key of this
 file, a call in the app's code (the launcher, an `Http` server, a
 `Handle`), or a launch flag or variable. Some have no place because Rust
 makes them unneeded; the rest are gaps, marked **gap**. The UI half of
-aio's page (`aio/air`'s hooks and components) maps to Dioxus and the kit:
+aio's page (`aio/air`'s hooks and components) maps to `aio::ui` and the kit:
 see [views](../ui/views.md) and the tables in
 [migration](../migration/README.md#2-construct-by-construct).
 
@@ -691,7 +788,7 @@ see [views](../ui/views.md) and the tables in
 |---|---|
 | `state` | the struct's fields; `#[cell(custom_default)]` when it implements `Default` itself |
 | `methods` | `#[methods] impl Cell { pub fn m(&mut self, …) -> Result }`; types in arguments are `#[aio::data]` |
-| `scope: "client"` | a cell neither `persist` nor `shared`, in the view's module, or a Dioxus `GlobalSignal` |
+| `scope: "client"` | a cell neither `persist` nor `shared`, in the view's module, or an `aio::ui::Global` |
 | `cancelOn` | `cx.abort("key")` from the method that should cancel ([effects](../state/effects.md)) |
 | `concurrency` | per effect, `.mode(Mode::Newest / Queue / First)`; calls are always one at a time per cell |
 | `ttl` | `#[ttl(ms)]` on a `pub async fn` |
@@ -726,7 +823,7 @@ see [views](../ui/views.md) and the tables in
 | `appId` | `[app] id` |
 | `cells` | the handles the launcher opens (`aio::Source::for_app`, `Handle::open`), or one `aio::Cells` list |
 | `localFirst` | built in: synced copies predict each call and replay offline calls on the server |
-| `cellDefaults` | none: each cell says its own flags |
+| `cellDefaults` | none: each cell says its own flags (`[data] persist` for the app-wide switch) |
 | `port`, `host`, `expose` | `[server] listen`; `--port`, `--host`, `--expose` per launch |
 | `tls` | `[server] tls`, `cert`, `key` |
 | `appDir`, `profiles` | `--home`, `--profile`, `--instance`, `AIORT_DATA`; a port's `[home]`. Profiles can't be turned off (**gap**) |
@@ -734,14 +831,14 @@ see [views](../ui/views.md) and the tables in
 | `checkIntegrityOnBoot` | always: `PRAGMA quick_check` and recovery at every open |
 | `updates` | `[updates]` |
 | `feedback` | `[feedback]` |
-| `persist`, `persistKey`, `persistMode` | `#[cell(persist)]` per cell; each cell is its own row, keyed by its id |
-| `persistDebounceMs` | `#[coalesce]`: a run's calls are written once per 100 ms (`aio::PERSIST_DEBOUNCE`, fixed) |
+| `persist`, `persistKey`, `persistMode` | `#[cell(persist)]` per cell, `[data] persist = false` or `--no-persist` app-wide; each cell is its own row, keyed by its id |
+| `persistDebounceMs` | `[data] coalesce_ms` for `#[coalesce]` runs (default `aio::PERSIST_DEBOUNCE`, 100 ms) |
 | `ui` | `aio_shell::Window` in the launcher (title, size, icon, tray, head, lang, dir), `[app] lang`/`dir`, `[ui]` |
 | `baseDir`, `watch` | `ax dev` watches the app's crate; not configurable |
 | `serveDirs`, `assets` | `[server.dirs]`, `[server.public_dirs]` |
 | `client` | `[app] mode` and `[app] ui` |
-| `keepServer` | `mode = "client-server"` with `ui = "browser"` runs until asked to stop; no `--keep-server` flag for a window app (**gap**) |
-| `localConnectHooks` | none: `Http::on_link` hears client links only, never a tool on the local door (**gap**) |
+| `keepServer` | `aio_shell::Window { keep_server }`, `--keep-server` per launch |
+| `localConnectHooks` | `Http::door_links(true)`: `Http::on_link` hears the local door's links too (a peer app's copy; tools never) |
 | `transport` | fixed: the window talks over a private socket, clients over `/ws` |
 | `takeover` | `--takeover` |
 | `serverUrl` | `[client] server` |
@@ -749,7 +846,7 @@ see [views](../ui/views.md) and the tables in
 | `key` | the app's key file and `AIORT_TOKEN`; `key: false` is `[server] open` |
 | `pairing` | `[server] pairing` |
 | `resolveUser` | `aio::auth::Users::resolve(f)` |
-| `resolvePeer`, `peerTypes` | `aio::peer::Peer` calls another app on this machine as a client (`describe` lists what it may call); no hook choosing a peer's user, no contract text (**gap**) |
+| `resolvePeer`, `peerTypes` | `Http::resolve_peer(f)`: the `Caller` (user, role) a peer app on this machine is; `aio::peer::Peer` calls one (`describe` lists what it may call); the contract is a crate both apps use, not text |
 | `db` | `#[table(...)]` fields, `aio::db::Db` |
 | `perfCheck`, `perfBudget` | `[perf]` |
 | `budgets` | `[budgets]` |
@@ -765,10 +862,10 @@ see [views](../ui/views.md) and the tables in
 | `refusalsReject` | always: a refusal is the call's `Err` |
 | `journal` | always: the state and its event commit in one transaction |
 | `redactActions` | `#[redact]` on a method |
-| `childWindows`, `electron` | `aio_shell::Window { web, permissions, … }`; `AIORT_SANDBOX` |
-| `splash` | `[build.splash]` |
+| `childWindows`, `electron` | `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, … }`; `electron.downloadWindow` is `[build.download_window]`, `allowLocalPeers` `[server] local_peers`; `ignoreDebugEnv` is always on in a release build |
+| `splash` | `[build.splash]`; its `show` at run time: `Window { splash_show }` |
 | `libraryMode` | `Handle::memory()`, `Handle::open` without `aio_shell::start` (tests, embedding) |
-| `syncIntervalMs`, `fullStateThreshold` | none: when and how patches go out is aio-rs's own, not configurable (**gap**) |
+| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms`, `full_state_percent` (`0.5` is `50`) |
 | `routes` | `aio::http::Http::route(Route::get(…))` |
 | `maxConnections`, `wsLimits` | `[server.limits]` |
 | `appFlags` | not needed: aio-rs takes only its own flags (`aio::paths::FLAGS`) and passes the rest to the app |
@@ -779,7 +876,7 @@ see [views](../ui/views.md) and the tables in
 | `schedules` | `#[every]`, `#[cron]`, `cx.every`, `cx.cron`, `cx.after` |
 | `isolate` | none (**gap**); `ax test <app> <filter>` runs some tests |
 | `beforeReduce` | `aio::before_call(f)` |
-| `onAction` | `Handle::listen(f)`, `on_change` |
+| `onAction` | `aio::on_action(f)`; one cell's: `Handle::listen(f)`, `on_change` |
 | `onEffect` | `aio::on_effect(f)` |
 | `onConnect`, `onDisconnect` | `Http::on_link(f)` (a `Presence`: online, user, address) |
 | `onStart` | `#[on_start]` per cell, or code in the launcher before `aio_shell::run` |

@@ -32,6 +32,9 @@ pub(crate) enum Sock {
     Door(crate::door::Frames),
     #[cfg(feature = "server")]
     Ws(axum::extract::ws::WebSocket),
+    /// One link of a socket that carries several ([`crate::mux`]).
+    #[cfg(feature = "server")]
+    Chan(crate::mux::Chan),
 }
 
 impl Sock {
@@ -50,6 +53,8 @@ impl Sock {
                     M::Binary(_) | M::Close(_) => None,
                 }
             }
+            #[cfg(feature = "server")]
+            Self::Chan(c) => c.recv().await,
         }
     }
 
@@ -67,6 +72,8 @@ impl Sock {
                 };
                 w.send(m).await.map_err(std::io::Error::other)
             }
+            #[cfg(feature = "server")]
+            Self::Chan(c) => c.send(m).await,
         }
     }
 
@@ -90,6 +97,120 @@ pub struct Presence {
 }
 
 pub(crate) type OnLink = Arc<dyn Fn(&Presence) + Send + Sync>;
+
+/// Who another app on the door is to this one, by its id
+/// ([`crate::http::Http::resolve_peer`]); `None`: no one in particular.
+pub(crate) type Peers = Arc<dyn Fn(&str) -> Option<crate::Caller> + Send + Sync>;
+
+/// What the app hears of its links, and who a peer app is to it.
+#[derive(Clone, Default)]
+pub(crate) struct Hooks {
+    pub(crate) on_link: Option<OnLink>,
+    pub(crate) peers: Option<Peers>,
+}
+
+/// A cell served beside the app's own on `/ws` ([`crate::http::Http::cell`]):
+/// a link's hello names it.
+#[cfg(feature = "server")]
+pub(crate) trait Beside: Send + Sync {
+    fn id(&self) -> &'static str;
+    /// [`session`] on this cell, its hello read.
+    #[allow(clippy::too_many_arguments)]
+    fn session(
+        &self,
+        w: Sock,
+        limits: Limits,
+        from: String,
+        gate: Gate,
+        signed: Option<By>,
+        calls: Calls,
+        hooks: Hooks,
+        hello: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>;
+    /// The handle itself (a `Handle<U>`), for the test kit.
+    #[cfg(feature = "testing")]
+    fn any(&self) -> &(dyn std::any::Any + Send + Sync);
+    /// What `seer` sees of it, as the aio cells it is ([`crate::compat::wire`]).
+    #[cfg(feature = "compat")]
+    fn aio_cells(&self, seer: &crate::Caller) -> Value;
+    #[cfg(feature = "compat")]
+    fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)>;
+    /// Its method aio's `<cell>:<method>` calls, if one of its aio cells is `cell`.
+    #[cfg(feature = "compat")]
+    fn aio_method(&self, cell: &str, method: &str) -> Option<String>;
+    #[cfg(feature = "compat")]
+    fn is_async(&self, method: &str) -> bool;
+    /// `method` called by `by` through `gate` (blocking), followed to its end.
+    #[cfg(feature = "compat")]
+    fn ask(&self, gate: &Gate, by: &By, method: &str, args: Value) -> crate::Result<(Option<Value>, crate::Answer)>;
+    #[cfg(feature = "compat")]
+    fn closing(&self) -> bool;
+}
+
+#[cfg(feature = "server")]
+impl<U: Cell> Beside for Handle<U> {
+    fn id(&self) -> &'static str {
+        U::ID
+    }
+
+    fn session(
+        &self,
+        w: Sock,
+        limits: Limits,
+        from: String,
+        gate: Gate,
+        signed: Option<By>,
+        calls: Calls,
+        hooks: Hooks,
+        hello: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> {
+        Box::pin(session(self.clone(), w, limits, from, gate, signed, calls, hooks, Some(hello)))
+    }
+
+    #[cfg(feature = "testing")]
+    fn any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+
+    #[cfg(feature = "compat")]
+    fn aio_cells(&self, seer: &crate::Caller) -> Value {
+        crate::compat::wire::cells::<U>(&View::of(self, seer).shown)
+    }
+
+    #[cfg(feature = "compat")]
+    fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)> {
+        Handle::events(self)
+    }
+
+    #[cfg(feature = "compat")]
+    fn aio_method(&self, cell: &str, method: &str) -> Option<String> {
+        crate::compat::data::method_of::<U>(cell, method)
+    }
+
+    #[cfg(feature = "compat")]
+    fn is_async(&self, method: &str) -> bool {
+        U::async_mode(method).is_some()
+    }
+
+    #[cfg(feature = "compat")]
+    fn ask(&self, gate: &Gate, by: &By, method: &str, args: Value) -> crate::Result<(Option<Value>, crate::Answer)> {
+        gate.ask(&self.by(by.clone()), by, method, args, None)
+    }
+
+    #[cfg(feature = "compat")]
+    fn closing(&self) -> bool {
+        Handle::closing(self)
+    }
+}
+
+/// The caller `f` makes of peer app `app`; a hook that panics is said and
+/// makes no one in particular.
+fn resolve(f: &Peers, app: &str) -> Option<crate::Caller> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(app))).unwrap_or_else(|_| {
+        eprintln!("[aio] sync: the resolve_peer hook panicked for app {app}; it is no one in particular");
+        None
+    })
+}
 
 /// What runs a link's server fns ([`crate::fns`]); a build without `net`
 /// has none.
@@ -138,16 +259,16 @@ impl Pulse {
     fn pong(&mut self, rtt: Duration) {
         let ms = rtt.as_millis() as u64;
         let Some((id, who)) = &self.link else { return };
-        if let Some(c) = lock(clients()).get_mut(id) {
+        // On loopback a stall is the client's own main thread, not the network.
+        let loopback = lock(clients()).get_mut(id).is_some_and(|c| {
             c.rtt = Some(ms);
-        }
-        let step = self.track.step(crate::vitals::get().transport.grade(ms), crate::store::now_ms());
-        match step {
-            Some(crate::vitals::Status::Recovered) => {
-                crate::info!(cat: "vitals", "{}", crate::vitals::transport_says(crate::vitals::Status::Recovered, who, ms))
-            }
-            Some(s) => crate::warn!(cat: "vitals", "{}", crate::vitals::transport_says(s, who, ms)),
-            None => {}
+            c.from.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback())
+        });
+        let status = crate::vitals::get().transport.grade(ms);
+        let step = self.track.step(status, crate::store::now_ms());
+        crate::vitals::linked(*id, loopback, crate::vitals::Layer { status, measured: ms, since: self.track.since });
+        if let Some(s) = step {
+            crate::vitals::stepped("transport", s, &crate::vitals::transport_says(s, who, ms));
         }
     }
 }
@@ -203,11 +324,19 @@ pub(crate) async fn send_ax(w: &mut Sock, v: &Value) -> std::result::Result<(), 
     send_text(w, v.to_string()).await
 }
 
-/// [`send_ax`] of a state or patch, counted for cell `meter`'s cost.
-pub(crate) async fn send_view(w: &mut Sock, meter: Option<&'static str>, v: &Value) -> std::result::Result<(), String> {
+/// [`send_ax`] of a state or patch, counted for cell `meter`'s cost and
+/// its link's bytes (`meter`: the cell and the link).
+pub(crate) async fn send_view(
+    w: &mut Sock,
+    meter: Option<(&'static str, u64)>,
+    v: &Value,
+) -> std::result::Result<(), String> {
     let text = v.to_string();
-    if let Some(cell) = meter {
+    if let Some((cell, link)) = meter {
         crate::cost::sent(cell, v, text.len());
+        if let Some(c) = lock(clients()).get_mut(&link) {
+            c.sent += text.len() as u64;
+        }
     }
     send_text(w, text).await
 }
@@ -223,12 +352,14 @@ pub(crate) async fn send_text(w: &mut Sock, text: String) -> std::result::Result
 pub(crate) struct View {
     pub(crate) seq: u64,
     pub(crate) shown: Value,
+    /// The view's JSON size when last measured (0: not yet), for [`whole`].
+    pub(crate) size: usize,
 }
 
 impl View {
     pub(crate) fn of<T: Cell>(h: &Handle<T>, viewer: &crate::Caller) -> Self {
         let (seq, st) = h.snapshot();
-        Self { seq, shown: st.project(viewer) }
+        Self { seq, shown: st.project(viewer), size: 0 }
     }
 
     fn full(&self) -> Value {
@@ -237,7 +368,8 @@ impl View {
 
     /// The patch from what was sent to what the viewer sees now, with the
     /// digest of the view it makes; `None` if nothing they may see changed.
-    fn advance<T: Cell>(&mut self, h: &Handle<T>, viewer: &crate::Caller) -> Option<Value> {
+    /// A patch over `full_percent` of the view is the view instead.
+    fn advance<T: Cell>(&mut self, h: &Handle<T>, viewer: &crate::Caller, full_percent: u32) -> Option<Value> {
         let now = View::of(h, viewer);
         if now.seq <= self.seq {
             return None;
@@ -247,11 +379,85 @@ impl View {
             // Nothing visible changed: the client's patch chain stays as is.
             return None;
         }
-        let digest = patch::digest(&now.shown);
-        let msg = json!({ "t": "patch", "prev": self.seq, "seq": now.seq, "ops": ops, "digest": digest });
-        *self = now;
+        let mut size = self.size;
+        let whole = whole(&ops, full_percent, &mut size, || patch::json_len(&now.shown));
+        let msg = match whole {
+            true => now.full(),
+            false => {
+                let digest = patch::digest(&now.shown);
+                json!({ "t": "patch", "prev": self.seq, "seq": now.seq, "ops": ops, "digest": digest })
+            }
+        };
+        *self = View { size, ..now };
         Some(msg)
     }
+}
+
+/// A patch shorter than this always goes as a patch: the view isn't weighed.
+const WEIGH_FROM: usize = 256;
+
+/// Is the view cheaper to send than `ops` (aio's `fullStateThreshold`): the
+/// patch is over `percent` of the view's size. The view is measured
+/// (`view`) only when the patch may be that big: a patch under half that
+/// share of its size as last measured (`size`, kept here) is a patch.
+pub(crate) fn whole(ops: &[patch::Op], percent: u32, size: &mut usize, view: impl FnOnce() -> usize) -> bool {
+    if percent == 0 {
+        return true;
+    }
+    let (n, p) = (patch::json_len(&ops) as u128, u128::from(percent));
+    if n < WEIGH_FROM as u128 || (*size > 0 && n * 200 <= *size as u128 * p) {
+        return false;
+    }
+    *size = view();
+    n * 100 > *size as u128 * p
+}
+
+/// When a link's next change goes (aio's `syncIntervalMs`): the first of a
+/// burst at once, then at most one per `every`, the changes between folded
+/// into one patch; a change a person made (a user's or an agent's call)
+/// goes at once. A link that is slow to take its messages is sent only the
+/// newest view once it takes them again (backpressure: nothing queues).
+pub(crate) struct Paced {
+    every: Duration,
+    last: Option<tokio::time::Instant>,
+    due: Option<tokio::time::Instant>,
+}
+
+impl Paced {
+    pub(crate) fn new(ms: u64) -> Self {
+        Self { every: Duration::from_millis(ms), last: None, due: None }
+    }
+
+    /// A change came (`urgent`: a person's): send it now, or `false`: when
+    /// [`Self::due`] ends.
+    pub(crate) fn now(&mut self, urgent: bool) -> bool {
+        let now = tokio::time::Instant::now();
+        match self.last {
+            Some(last) if !urgent && now < last + self.every => {
+                self.due.get_or_insert(last + self.every);
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// The link is up to date as of now.
+    pub(crate) fn sent(&mut self) {
+        (self.last, self.due) = (Some(tokio::time::Instant::now()), None);
+    }
+
+    /// Ends when a held change is due; never, with none held.
+    pub(crate) async fn due(&self) {
+        match self.due {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Did a person make the event (their change skips the pacing window)?
+pub(crate) fn urgent(ev: &std::result::Result<(u64, crate::Event), RecvError>) -> bool {
+    matches!(ev, Ok((_, e)) if matches!(e.by, By::User(_) | By::Agent(_)))
 }
 
 /// Who may call through one link. A debug build's local door: its tools may
@@ -275,6 +481,7 @@ pub(crate) enum Gate {
 impl Gate {
     /// A call by `viewer` through this link, `op` its synced id if any.
     /// Blocking: it may read the session.
+    #[cfg_attr(not(all(feature = "compat", feature = "server")), allow(dead_code))]
     pub(crate) fn call<T: Cell>(
         &self,
         h: &Handle<T>,
@@ -297,6 +504,26 @@ impl Gate {
             }
         };
         h.call_by(&crate::Caller { by: viewer.clone(), role }, method, args, op)
+    }
+
+    /// [`Self::call`], followed to its end: an async method's answer to come.
+    pub(crate) fn ask<T: Cell>(
+        &self,
+        h: &Handle<T>,
+        viewer: &By,
+        method: &str,
+        args: Value,
+        op: Option<&str>,
+    ) -> Result<(Option<Value>, crate::Answer)> {
+        let role = match self {
+            Gate::Door => return h.ask_by(None, method, args, op),
+            Gate::Local | Gate::Key => None,
+            Gate::Known(role) => Some(role.clone()),
+            Gate::Signed(a, t) => {
+                Some(live(a, t).ok_or_else(|| Rejected::coded(crate::Code::AccessDenied, "sign in first: this session ended"))?.role)
+            }
+        };
+        h.ask_by(Some(&crate::Caller { by: viewer.clone(), role }), method, args, op)
     }
 
     /// The link's role now, for what it may see (`#[cell(visible = f)]`).
@@ -330,6 +557,17 @@ pub(crate) struct Client {
     pub(crate) since: i64,
     /// Its last ping's round trip (ms), once one came back.
     pub(crate) rtt: Option<u64>,
+    /// The bytes of the states and patches it was sent.
+    pub(crate) sent: u64,
+    /// Changes it fell behind on, and got as one newer view (its backpressure).
+    pub(crate) behind: u64,
+}
+
+impl Client {
+    /// A link opened now, nothing sent yet.
+    pub(crate) fn new(cell: &'static str, user: String, wire: &'static str, from: String) -> Self {
+        Self { cell, user, wire, from, since: crate::store::now_ms(), rtt: None, sent: 0, behind: 0 }
+    }
 }
 
 /// Every open link of this process, by id.
@@ -354,6 +592,7 @@ impl Drop for Listed {
     fn drop(&mut self) {
         lock(clients()).remove(&self.0);
         crate::health::client_gone(self.0);
+        crate::vitals::unlinked(self.0);
     }
 }
 
@@ -428,7 +667,14 @@ pub(crate) fn listing(cell: &str) -> Value {
     ids.into_iter()
         .map(|id| {
             let c = &all[id];
-            json!({ "id": id, "user": c.user, "wire": c.wire, "from": c.from, "since": c.since, "rtt": c.rtt })
+            let degraded: Vec<Value> = crate::health::client_parts(*id)
+                .into_iter()
+                .map(|(name, e)| json!({ "name": name, "failures": e.failures, "since": e.since, "lastError": e.last_error }))
+                .collect();
+            json!({
+                "id": id, "user": c.user, "wire": c.wire, "from": c.from, "since": c.since, "rtt": c.rtt,
+                "sent": c.sent, "behind": c.behind, "degraded": degraded,
+            })
         })
         .collect()
 }
@@ -484,11 +730,17 @@ pub(crate) fn live(a: &crate::auth::Auth, token: &str) -> Option<crate::auth::Se
     a.session(token).inspect_err(|e| eprintln!("[aio] sync: {e}")).ok().flatten()
 }
 
+/// A link's first message, its hello (`None`: none came in time).
+pub(crate) async fn hello(w: &mut Sock, pulse: &mut Pulse, limits: &Limits, bytes: &mut Pace) -> Option<Value> {
+    tokio::time::timeout(Duration::from_secs(15), next_ax(w, pulse, limits.max_message, bytes)).await.ok().flatten()
+}
+
 /// One aio-rs client, until it leaves. A tool (`Live`) says `tool: true`: it
 /// keeps no copy, so another cell version is fine; on the door it may
 /// also ask for the open links. `gate`: what it may call. `signed`: the user
 /// its session proved; none: the user its hello names (a shared key proves
-/// no one in particular).
+/// no one in particular), or for a peer app the caller `hooks` make of it.
+/// `said`: its hello, when the server read it to find the cell.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session<T: Cell>(
     h: Handle<T>,
@@ -497,18 +749,17 @@ pub(crate) async fn session<T: Cell>(
     from: String,
     gate: Gate,
     signed: Option<By>,
-    #[cfg_attr(not(feature = "server"), allow(unused_variables))] calls: Calls,
-    on_link: Option<OnLink>,
+    #[cfg_attr(not(feature = "server"), allow(unused_mut, unused_variables))] mut calls: Calls,
+    hooks: Hooks,
+    said: Option<Value>,
 ) -> std::result::Result<(), String> {
     let mut pulse = Pulse::new();
     let mut pace = Pace::new(limits.calls_per_sec);
     let mut bytes = Pace::new(limits.bytes_per_sec);
-    let hello =
-        tokio::time::timeout(Duration::from_secs(15), next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes))
-            .await
-            .ok()
-            .flatten()
-            .ok_or("no hello")?;
+    let hello = match said {
+        Some(v) => v,
+        None => hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?,
+    };
     if hello["t"] != "hello" || hello["cell"] != T::ID {
         _ = send_ax(&mut w, &json!({ "t": "refused", "why": format!("this server has cell {}", T::ID) })).await;
         return Err("refused a client: wrong cell".into());
@@ -517,7 +768,21 @@ pub(crate) async fn session<T: Cell>(
     // Another app on the door ([`crate::peer`]) is a client there: what the
     // key lets in (`#[client]` methods, `visible`), never the operator's.
     let peer = matches!(gate, Gate::Door | Gate::Local) && hello["peer"] == true;
-    let gate = if peer { Gate::Key } else { gate };
+    let mut gate = if peer { Gate::Key } else { gate };
+    let mut said = hello["user"].as_str().map(|u| By::User(u.into()));
+    // A peer says its app id; the app's hook says who that is here.
+    if let (true, Some(f)) = (peer, &hooks.peers) {
+        let c = resolve(f, hello["user"].as_str().unwrap_or_default());
+        gate = match c.as_ref().and_then(|c| c.role.clone()) {
+            Some(role) => Gate::Known(role),
+            None => Gate::Key,
+        };
+        said = Some(c.as_ref().map_or_else(|| By::User("peer".into()), |c| c.by.clone()));
+        #[cfg(feature = "server")]
+        {
+            calls.known = c;
+        }
+    }
     let door = matches!(gate, Gate::Door);
     let not_here = match gate {
         Gate::Local => "a release build's door serves a client's rights: the operator's tools need a debug build",
@@ -536,7 +801,6 @@ pub(crate) async fn session<T: Cell>(
         _ = send_ax(&mut w, &json!({ "t": "refused", "why": why, "skew": true })).await;
         return Err(format!("refused a client: {why}"));
     }
-    let said = hello["user"].as_str().map(|u| By::User(u.into()));
     let viewer = match signed {
         // A client that predicts as someone else would make other ids: refused.
         Some(by) if said.as_ref().is_some_and(|s| *s != by) => {
@@ -554,11 +818,11 @@ pub(crate) async fn session<T: Cell>(
     };
     let wire = if tool { "tool" } else { "aio-rs" };
     // What a client is sent counts for `ax cost`; a tool's look doesn't.
-    let meter = (!tool).then_some(T::ID);
     // A tool (`ax call`, the local door) is no client link.
-    let _heard = Heard::new(on_link.filter(|_| !tool), &user, &from);
+    let _heard = Heard::new(hooks.on_link.filter(|_| !tool), &user, &from);
     let who = format!("{user} from {from}");
-    let listed = Listed::new(Client { cell: T::ID, user, wire, from, since: crate::store::now_ms(), rtt: None });
+    let listed = Listed::new(Client::new(T::ID, user, wire, from));
+    let meter = (!tool).then_some((T::ID, listed.0));
     pulse.link = (!tool).then(|| (listed.0, who.clone()));
     // What it sees goes by its role too, read again on every account change
     // (heard before the read: no change between them is missed).
@@ -585,6 +849,7 @@ pub(crate) async fn session<T: Cell>(
     }
     .into();
     let mut pushes = crate::budgets::Pushes::default();
+    let mut paced = Paced::new(limits.sync_interval_ms);
     pushes.push(&first, crate::store::now_ms());
     send_view(&mut w, meter, &first).await?;
     let h = h.by(viewer.clone());
@@ -597,6 +862,8 @@ pub(crate) async fn session<T: Cell>(
     // What they say while running: a person is deciding (`deciding::start`).
     #[cfg_attr(not(feature = "server"), allow(unused_variables))]
     let (held_tx, mut held) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    // Async methods' ends (`end {op, ok | err}`), each after its last change.
+    let (ends_tx, mut ends) = tokio::sync::mpsc::unbounded_channel::<Value>();
     loop {
         tokio::select! {
             Some(Ok(answer)) = running.join_next(), if !running.is_empty() => {
@@ -607,6 +874,14 @@ pub(crate) async fn session<T: Cell>(
             }
             Some(p) = parts.recv() => send_ax(&mut w, &p).await?,
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
+            Some(end) = ends.recv() => {
+                while events.try_recv().is_ok() {}
+                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
+                    pushes.push(&p, crate::store::now_ms());
+                    send_view(&mut w, meter, &p).await?;
+                }
+                send_ax(&mut w, &end).await?;
+            }
             Ok(t) = tells.recv(), if !tool => send_ax(&mut w, &json!({ "t": "tell", "d": t })).await?,
             more = changed(&mut accounts) => {
                 if !more {
@@ -620,15 +895,30 @@ pub(crate) async fn session<T: Cell>(
                     send_view(&mut w, meter, &view.full()).await?;
                 }
             }
+            () = paced.due() => {
+                paced.sent();
+                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
+                    pushes.push(&p, crate::store::now_ms());
+                    send_view(&mut w, meter, &p).await?;
+                }
+            }
             ev = events.recv() => match ev {
-                // A slow client just gets the newest view.
-                Ok(_) | Err(RecvError::Lagged(_)) => {
-                    if let Some(p) = view.advance(&h, &seer) {
-                        pushes.push(&p, crate::store::now_ms());
-                        send_view(&mut w, meter, &p).await?;
+                Err(RecvError::Closed) => return Ok(()),
+                // Held for the window, or now; a slow client just gets the newest view.
+                ev => {
+                    if let Err(RecvError::Lagged(n)) = &ev
+                        && let Some(c) = lock(clients()).get_mut(&listed.0)
+                    {
+                        c.behind += *n;
+                    }
+                    if paced.now(urgent(&ev)) {
+                        paced.sent();
+                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
+                            pushes.push(&p, crate::store::now_ms());
+                            send_view(&mut w, meter, &p).await?;
+                        }
                     }
                 }
-                Err(RecvError::Closed) => return Ok(()),
             },
             msg = next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes) => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -663,21 +953,45 @@ pub(crate) async fn session<T: Cell>(
                         let (hh, g, by) = (h.clone(), gate.clone(), viewer.clone());
                         let (method, args) = (msg["method"].as_str().unwrap_or_default().to_string(), msg["args"].clone());
                         let op = msg["op"].as_str().map(String::from);
-                        let r = tokio::task::spawn_blocking(move || {
-                            g.call(&hh, &by, &method, args, op.as_deref()).map(|v| v.unwrap_or(Value::Null))
-                        })
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        // Its change first, then the reply.
+                        let is_async = T::async_mode(&method).is_some();
+                        let r = tokio::task::spawn_blocking(move || g.ask(&hh, &by, &method, args, op.as_deref()))
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        // An async method's end goes after its reply, once it comes.
+                        let r = match r {
+                            Ok((v, answer)) => {
+                                if is_async {
+                                    let (tx, op) = (ends_tx.clone(), msg["op"].clone());
+                                    tokio::spawn(async move {
+                                        let end = match answer.await {
+                                            Ok(v) => json!({ "t": "end", "op": op, "ok": v }),
+                                            Err(e) => json!({ "t": "end", "op": op, "err": e.why, "code": e.code }),
+                                        };
+                                        _ = tx.send(end);
+                                    });
+                                }
+                                Ok(v.unwrap_or(Value::Null))
+                            }
+                            Err(e) => Err(e),
+                        };
+                        // Its change first, then the reply; named, so its copy
+                        // knows this change is its own (no conflict with itself).
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer) {
+                        if let Some(mut p) = view.advance(&h, &seer, limits.full_state_percent) {
+                            if msg["op"].is_string() {
+                                p["op"] = msg["op"].clone();
+                            }
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
-                        let reply = match r {
+                        let mut reply = match r {
                             Ok(v) => json!({ "t": "reply", "op": msg["op"], "ok": v }),
                             Err(e) => json!({ "t": "reply", "op": msg["op"], "err": e.why, "code": e.code }),
                         };
+                        if is_async && reply.get("ok").is_some() {
+                            // Its answer is the `end` that follows.
+                            reply["async"] = true.into();
+                        }
                         send_ax(&mut w, &reply).await?;
                     }
                     // What is degraded on the client's side, for this app's health (aio's `cdiag`).
@@ -707,18 +1021,25 @@ pub(crate) async fn session<T: Cell>(
                         };
                         send_ax(&mut w, &reply).await?;
                     }
-                    // A loaded snapshot, the saved shape, diffs, cost, peer, fields: the operator's tools only.
-                    // What it may call is a peer's to ask too.
-                    Some(t @ ("load" | "shape" | "at" | "cost" | "peer" | "fields")) if !door && !(peer && t == "peer") => {
+                    // A loaded snapshot, the saved shape, diffs, cost, fields, writes: the operator's tools only.
+                    // What it may call is any caller's to ask, of itself (aio's `am peer <url>`).
+                    Some(t @ ("load" | "shape" | "at" | "cost" | "fields" | "flush" | "drop")) if !door => {
                         send_ax(&mut w, &json!({ "t": t, "err": not_here })).await?;
                     }
-                    Some(t @ ("load" | "shape" | "at" | "cost" | "peer" | "fields")) => {
-                        let (hh, by, ask) = (h.clone(), viewer.clone(), msg.clone());
+                    Some(t @ ("load" | "shape" | "at" | "cost" | "peer" | "fields" | "flush" | "drop")) => {
+                        let ask = match door {
+                            true => msg.clone(),
+                            false => {
+                                let me = if let By::User(u) = &seer.by { u.as_str() } else { "peer" };
+                                json!({ "t": "peer", "user": me, "role": seer.role })
+                            }
+                        };
+                        let (hh, by) = (h.clone(), viewer.clone());
                         let r = tokio::task::spawn_blocking(move || operate(&hh, &by, &ask))
                             .await
                             .map_err(|e| e.to_string())?;
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer) {
+                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
@@ -759,6 +1080,23 @@ pub(crate) fn peer<T: Cell>(st: &T, ask: &Value) -> Value {
     json!({ "cell": T::ID, "v": T::VERSION, "methods": methods })
 }
 
+/// `ax events --json`'s live readings of `h` (an operator's `took`): the
+/// time each of events `seqs` took, when it ran in this run (`ms`, by seq),
+/// and the cell's refused calls of late (`refused`: `{at, call, ms,
+/// refused}`, never their arguments).
+fn took<T: Cell>(h: &Handle<T>, ask: &Value) -> Value {
+    let seqs: Vec<u64> = ask["seqs"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+    let ms: serde_json::Map<String, Value> = h.store(|s| {
+        seqs.iter().filter_map(|q| Some((q.to_string(), (s.took(*q)?.as_secs_f64() * 1000.0).into()))).collect()
+    });
+    let mine = format!("{}.", T::ID);
+    let refused: Vec<Value> = crate::report::timeline()
+        .into_iter()
+        .filter(|e| e["refused"].is_string() && e["call"].as_str().is_some_and(|c| c.starts_with(&mine)))
+        .collect();
+    json!({ "ms": ms, "refused": refused })
+}
+
 /// What a cell saves and sends, field by field (aio's trojan `fields`): saved
 /// at all (`persist`), its `#[transient]` fields (kept, never saved) and its
 /// `#[server]` ones (saved, never sent to a client) (pure).
@@ -768,8 +1106,10 @@ pub(crate) fn fields<T: Cell>() -> Value {
 
 /// A local door's operator message `ask` on `h`, by `by`: `load` a state,
 /// the `shape` this version saves, the state right after an event (`at`, for diffs) or
-/// what the cell has sent its clients (`cost`), what a caller may call
-/// (`peer`), which fields are saved and which are sent (`fields`).
+/// what the cell has sent its clients (`cost`), how long events of this
+/// run took and its refused calls (`took`), what a caller may call
+/// (`peer`), which fields are saved and which are sent (`fields`), write
+/// what is held now (`flush`), `drop` a stored cell nothing declares.
 /// The answer, or why not.
 pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::result::Result<Value, String> {
     match ask["t"].as_str() {
@@ -778,7 +1118,18 @@ pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::resu
             h.store(|s| s.load(by, ask["state"].clone())).map_err(|e| e.why)?;
             Ok(h.snapshot().0.into())
         }
-        Some("cost") => Ok(crate::cost::report(T::ID)),
+        Some("cost") => Ok(crate::cost::report(T::ID, ask["window"].as_i64())),
+        Some("took") => Ok(took(h, ask)),
+        // `ax persist`: what is held (a coalesced run) written now.
+        Some("flush") => h.store(|s| s.flush()).map(|_| json!(h.snapshot().0)).map_err(|e| e.why),
+        // `ax persist --drop`: a stored cell no cell of this app declares.
+        Some("drop") => {
+            let cell = ask["cell"].as_str().ok_or("drop: `cell` names the stored cell")?;
+            if crate::report::own(cell) {
+                return Err(format!("{cell} is a cell of this app: only a cell no build declares is dropped"));
+            }
+            h.store(|s| s.drop_cell(cell)).map(Value::Bool).map_err(|e| e.0)
+        }
         Some("peer") => Ok(peer::<T>(&h.state(), ask)),
         Some("at") => {
             let at = ask["to"].as_u64().ok_or("at: `to` names an event (a number)")?;
@@ -786,5 +1137,25 @@ pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::resu
             serde_json::to_value(&st).map_err(|e| e.to_string())
         }
         _ => h.store(|s| s.shape()).map(|shape| json!({ "v": T::VERSION, "shape": shape })).map_err(|e| e.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_view_is_weighed_only_when_a_patch_may_be_its_share() {
+        let op = |n: usize| vec![patch::Op::Set { path: vec![], value: json!("x".repeat(n)) }];
+        let never = || -> usize { panic!("measured") };
+        let mut size = 0;
+        assert!(whole(&op(1), 0, &mut size, never), "0: always the view");
+        assert!(!whole(&op(10), 50, &mut size, never), "a small patch is a patch, unmeasured");
+        assert!(whole(&op(600), 50, &mut size, || 1000) && size == 1000, "over half of 1000");
+        assert!(!whole(&op(300), 50, &mut size, || 1000), "under half: measured, a patch");
+        size = 100_000;
+        assert!(!whole(&op(1000), 50, &mut size, never), "far under its share of the last size");
+        assert!(whole(&op(40_000), 50, &mut size, || 50_000), "the view shrank: measured again");
+        assert_eq!(size, 50_000);
     }
 }

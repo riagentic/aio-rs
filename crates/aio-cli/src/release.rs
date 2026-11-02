@@ -252,6 +252,7 @@ fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> 
                 None,
                 Some(channel),
                 &b.app.version,
+                b.cfg.build.splash.is_some(),
             )?)?
         }
     };
@@ -383,19 +384,19 @@ fn now() -> String {
     )
 }
 
-#[cfg(unix)]
 /// The CPU an APK named `<id>-<version>-android-<abi>.apk` is for, as
 /// manifests name it (`std::env::consts::ARCH` on the device).
 fn apk_arch(file: &str) -> Option<&'static str> {
     let abi = file.strip_suffix(".apk")?.rsplit_once("-android-")?.1;
-    crate::android::ABIS.iter().find(|(a, _)| *a == abi).map(|(_, t)| t.split('-').next().unwrap_or(t))
+    let target = crate::android::ABIS.iter().find(|(a, _)| *a == abi)?.1;
+    // armv7 runs as `arm` (Rust's ARCH there).
+    Some(if target.starts_with("armv7") { "arm" } else { target.split('-').next().unwrap_or(target) })
 }
 
-#[cfg(unix)]
 /// Sign each APK of `apks` as `base` for its CPU and lay both out in `out`:
 /// `android-<arch>.json` beside the APK, moved there (`keep`: copied, so
-/// `dist/` still holds it). An app bundle (`.aab`, for Play) is no update:
-/// left where it is.
+/// `dist/` still holds it). An app bundle (`.aab`, for Play) and the
+/// universal APK (one to share) are no update: left where they are.
 fn android_releases(
     out: &Path,
     apks: &[PathBuf],
@@ -407,7 +408,7 @@ fn android_releases(
     let mut files = vec![];
     for apk in apks {
         let file = apk.file_name().and_then(|f| f.to_str()).ok_or("bad APK name")?;
-        if file.ends_with(".aab") {
+        if file.ends_with(".aab") || file.ends_with("-android-universal.apk") {
             continue;
         }
         let arch = apk_arch(file).ok_or_else(|| format!("{file}: not an APK of a known CPU type"))?;
@@ -435,7 +436,6 @@ fn android_releases(
     Ok(files)
 }
 
-#[cfg(unix)]
 /// The APKs `ax build` left in `dist` for `id` at `version`, one per CPU
 /// type: refused when one is missing.
 fn apks_built(dist: &Path, id: &str, version: &str, name: &str) -> Result<Vec<PathBuf>, String> {
@@ -454,7 +454,6 @@ fn apks_built(dist: &Path, id: &str, version: &str, name: &str) -> Result<Vec<Pa
 /// app can't replace its own APK: it offers the release as one to open
 /// from where it is published, and the system installer puts it in place.
 /// `--dir`, `--data` and `--no-build` as for the desktop.
-#[cfg(unix)]
 pub fn run_android(name: &str, ask: &Ask) -> Result<String, String> {
     let meta = crate::dev::metadata()?;
     let pkg = crate::dev::locate(&meta, name)?;
@@ -484,13 +483,22 @@ pub fn run_android(name: &str, ask: &Ask) -> Result<String, String> {
             }
         },
         None => contract_of(
-            &crate::build::release_binary(&meta, &pkg.name, name, None, None, None, &app.version)
-                .map_err(|e| format!("{e}: the desktop build of {name} says which data the APK reads"))?,
+            &crate::build::release_binary(
+                &meta,
+                &pkg.name,
+                name,
+                None,
+                None,
+                None,
+                &app.version,
+                cfg.build.splash.is_some(),
+            )
+            .map_err(|e| format!("{e}: the desktop build of {name} says which data the APK reads"))?,
         )?,
     };
     let apks = match ask.no_build {
         true => apks_built(&dist, &app.id, &app.version, name)?,
-        false => crate::build::android(name)?.1,
+        false => crate::build::android(name, crate::android::Ask::RELEASE)?.1,
     };
     let base = up::Release {
         format: up::FORMAT,
@@ -557,8 +565,8 @@ fn aio_source(pkg: &aio::serde_json::Value) -> Option<(String, String)> {
 /// (`ax release`, the key from the `AIO_SIGNING_KEY` secret); then one job
 /// puts every file on the GitHub release, files before manifests, as a draft
 /// until all are there. `aio`: the git source and commit the app's aio-rs
-/// comes from (`ax` is installed from it); none, a path dependency (as `ax
-/// create` writes): aio-rs is checked out beside the app at this `ax`'s
+/// comes from (`ax` is installed from it, as `ax create` writes); none, a path dependency (`ax
+/// create --aio`): aio-rs is checked out beside the app at this `ax`'s
 /// release tag (repository variables `AIO_REPO`, `AIO_REF` name another),
 /// the app's aio-rs paths pointed there, and `ax` installed from it.
 pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>) -> String {
@@ -567,7 +575,7 @@ pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>) -
             "      - name: Install ax\n        run: cargo install --locked --git \"{src}\" --rev \"{rev}\" aio-rs-cli\n"
         ),
         None => format!(
-            r#"      # The app's aio-rs is a path dependency (`ax create`): aio-rs beside
+            r#"      # The app's aio-rs is a path dependency (`ax create --aio`): aio-rs beside
       # the app, its paths pointed there.
       - uses: actions/checkout@v4
         with:
@@ -707,7 +715,7 @@ jobs:
 }
 
 /// Perl's edit of an app's `Cargo.toml` in the workflow: each aio-rs crate's
-/// `path` (`ax create`'s checkout) to `$GITHUB_WORKSPACE/aio-rs/crates/<crate>`.
+/// `path` (`ax create --aio`'s checkout) to `$GITHUB_WORKSPACE/aio-rs/crates/<crate>`.
 const REPOINT: &str =
     r##"s#(package = "aio-rs[a-z-]*", path = ")[^"]*/(aio[a-z-]*)"#$1$ENV{GITHUB_WORKSPACE}/aio-rs/crates/$2"#"##;
 
@@ -731,7 +739,7 @@ pub fn write_workflow(name: &str, channel: Option<&str>) -> Result<String, Strin
     let from = match &source {
         Some((g, r)) => format!("ax is installed from {g} at {r}"),
         None => format!(
-            "aio-rs is a path dependency: the workflow checks out riagentic/aio-rs at v{} beside the app \
+            "aio-rs is a path dependency (ax create --aio): the workflow checks out riagentic/aio-rs at v{} beside the app \
              (repository variables AIO_REPO and AIO_REF name another)",
             env!("CARGO_PKG_VERSION")
         ),
@@ -923,7 +931,6 @@ fn sign_sums(out: &Path, key: Option<&Path>) -> Result<String, String> {
 /// The Android line (the template APK, `ax build --android`, signs with
 /// the release keystore when one is named, else with this machine's key).
 fn android_line() -> String {
-    // `android::KEYSTORE_ENV`: that module builds on Unix only.
     let (what, env) = ("Android keystore", "AIO_ANDROID_KEYSTORE");
     match set(env) {
         Some(_) => format!("  {what}: {env} (ax build --android signs with it)"),
@@ -1383,7 +1390,7 @@ mod tests {
             assert!(!w.contains("{{ os") && !w.contains("${{{{"), "no format braces left");
             assert!(w.contains("path: app\n") && w.contains("path: app/dist/"), "the app checked out in app/");
         }
-        // A path dependency (`ax create`): aio-rs at this ax's tag beside the app.
+        // A path dependency (`ax create --aio`): aio-rs at this ax's tag beside the app.
         let v = env!("CARGO_PKG_VERSION");
         for want in [
             "repository: ${{ vars.AIO_REPO || 'riagentic/aio-rs' }}".to_string(),
@@ -1397,7 +1404,7 @@ mod tests {
         assert!(!w.contains("path: aio-rs") && !w.contains("AIO_REF"), "a git dependency needs no checkout");
     }
 
-    /// The workflow's edit, run on what `ax create` writes: every aio-rs
+    /// The workflow's edit, run on what `ax create --aio` writes: every aio-rs
     /// path goes to the checkout, the app's own path stays.
     #[test]
     fn the_workflow_points_create_s_aio_paths_at_the_checkout() {
@@ -1406,9 +1413,11 @@ mod tests {
             return;
         }
         for t in ["app", "cli", "service"] {
-            for (rel, text) in
-                crate::create::files("notes", t, "/src/my aio/crates", "notes", "A <a@example.org>").unwrap()
-            {
+            for (rel, text) in {
+                let aio = crate::create::Aio::Path("../my aio/crates".into());
+                crate::create::files(&crate::create::New { template: t, aio, ..crate::create::New::of("notes") })
+                    .unwrap()
+            } {
                 if !rel.ends_with("Cargo.toml") {
                     continue;
                 }
@@ -1421,7 +1430,7 @@ mod tests {
                     .unwrap();
                 std::io::Write::write_all(&mut p.stdin.take().unwrap(), text.as_bytes()).unwrap();
                 let out = String::from_utf8(p.wait_with_output().unwrap().stdout).unwrap();
-                assert!(!out.contains("/src/my aio"), "{rel}: {out}");
+                assert!(!out.contains("my aio"), "{rel}: {out}");
                 assert!(out.contains(r#"package = "aio-rs", path = "/w/aio-rs/crates/aio""#), "{rel}: {out}");
                 if text.contains("aio-rs-shell") {
                     assert!(out.contains(r#"package = "aio-rs-shell", path = "/w/aio-rs/crates/aio-shell""#), "{out}");
@@ -1440,16 +1449,21 @@ mod tests {
         assert_eq!(aio_source(&pkg("registry+https://example.org/index".into())), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn each_apk_is_signed_for_its_cpu_and_the_play_bundle_is_left_out() {
         let d = tempfile::tempdir().unwrap();
         let (k, public) = up::keygen().unwrap();
         let (built, out) = (d.path().join("dist"), d.path().join("dist/stable"));
         std::fs::create_dir_all(&built).unwrap();
-        let names = ["notes-1.1.0-android-arm64-v8a.apk", "notes-1.1.0-android-x86_64.apk", "notes-1.1.0-android.aab"];
+        let names = [
+            "notes-1.1.0-android-arm64-v8a.apk",
+            "notes-1.1.0-android-armeabi-v7a.apk",
+            "notes-1.1.0-android-x86_64.apk",
+            "notes-1.1.0-android.aab",
+            "notes-1.1.0-android-universal.apk",
+        ];
         let apks: Vec<PathBuf> = names.iter().map(|n| built.join(n)).collect();
-        for (p, body) in apks.iter().zip(["arm", "x86", "play"]) {
+        for (p, body) in apks.iter().zip(["arm", "a32", "x86", "play", "all"]) {
             std::fs::write(p, body).unwrap();
         }
         let base = up::Release {
@@ -1469,10 +1483,15 @@ mod tests {
         };
         let files = android_releases(&out, &apks, &base, &k, false).unwrap();
         let want: Vec<PathBuf> =
-            ["android-aarch64.json", names[0], "android-x86_64.json", names[1]].iter().map(|f| out.join(f)).collect();
+            ["android-aarch64.json", names[0], "android-arm.json", names[1], "android-x86_64.json", names[2]]
+                .iter()
+                .map(|f| out.join(f))
+                .collect();
         assert_eq!(files, want);
-        assert!(apks[2].exists() && !out.join(names[2]).exists(), "the .aab stays for Play");
-        for (arch, file, body) in [("aarch64", names[0], "arm"), ("x86_64", names[1], "x86")] {
+        assert!(apks[3].exists() && !out.join(names[3]).exists(), "the .aab stays for Play");
+        assert!(apks[4].exists() && !out.join(names[4]).exists(), "the universal APK is no update");
+        for (arch, file, body) in [("aarch64", names[0], "arm"), ("arm", names[1], "a32"), ("x86_64", names[2], "x86")]
+        {
             let m: up::Manifest =
                 aio::serde_json::from_slice(&std::fs::read(out.join(format!("android-{arch}.json"))).unwrap()).unwrap();
             let expect = up::Expect { id: "notes", channel: "stable", os: "android", arch };
@@ -1487,14 +1506,14 @@ mod tests {
         assert!(android_releases(&out, &odd, &base, &k, false).unwrap_err().contains("not an APK of a known CPU type"));
         // --no-build --dir srv: the APKs ax build left in dist/, copied, dist/ as it was.
         assert!(apks_built(&built, "notes", "1.1.0", "notes").unwrap_err().contains("--targets android"));
-        let left: Vec<PathBuf> = names[..2].iter().map(|n| built.join(n)).collect();
+        let left: Vec<PathBuf> = names[..3].iter().map(|n| built.join(n)).collect();
         for p in &left {
             std::fs::write(p, "apk").unwrap();
         }
         assert_eq!(apks_built(&built, "notes", "1.1.0", "notes").unwrap(), left);
         let srv = d.path().join("srv/beta");
         let files = android_releases(&srv, &left, &base, &k, true).unwrap();
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 6);
         assert!(files.iter().all(|f| f.starts_with(&srv) && f.is_file()), "{files:?}");
         assert!(left.iter().all(|p| p.is_file()), "dist/ keeps what ax build made");
     }

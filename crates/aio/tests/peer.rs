@@ -22,6 +22,12 @@ impl Ledger {
         Ok(self.total)
     }
 
+    /// An app the ledger knows as its auditor's only.
+    #[client(role = "auditor")]
+    pub fn audit(&mut self, cx: &Cx) -> Result<String> {
+        Ok(format!("{:?}", cx.by()))
+    }
+
     /// The operator's only: never a peer's.
     pub fn reset(&mut self) -> Result {
         self.total = 0;
@@ -33,9 +39,16 @@ const COUNT: ServerFn<(u32,), String> = ServerFn::new("ledger.count");
 
 /// The app `billing` running in `root` (locked), its ledger on its door.
 fn billing(root: &std::path::Path) -> (aio::paths::AppDirs, Handle<Ledger>, tokio::task::JoinHandle<()>) {
+    billing_with(root, Http::default())
+}
+
+fn billing_with(
+    root: &std::path::Path,
+    http: Http,
+) -> (aio::paths::AppDirs, Handle<Ledger>, tokio::task::JoinHandle<()>) {
     let dirs = aio::paths::AppDirs::at(root, "billing").unwrap();
     let h = Handle::<Ledger>::memory();
-    let http = Http::default().server_fn_streamed(COUNT, Access::Open, |_, (n,), parts: Chunks| async move {
+    let http = http.server_fn_streamed(COUNT, Access::Open, |_, (n,), parts: Chunks| async move {
         for i in 0..n {
             parts.send(&i).await;
         }
@@ -66,6 +79,51 @@ async fn peers() {
     a_peer_calls_by_name_what_a_client_may_and_nothing_more().await;
     a_peer_cell_is_typed_and_its_server_functions_stream().await;
     a_peer_reads_and_puts_blobs_here_and_fetches_them_from_a_server().await;
+    a_peer_is_who_resolve_peer_says_and_door_links_are_heard().await;
+}
+
+async fn a_peer_is_who_resolve_peer_says_and_door_links_are_heard() {
+    use std::sync::{Arc, Mutex};
+    let heard: Arc<Mutex<Vec<(bool, String, String)>>> = Arc::default();
+    let log = heard.clone();
+    let http = Http::default()
+        .door_links(true)
+        .on_link(move |p: &aio::http::Presence| log.lock().unwrap().push((p.online, p.user.clone(), p.from.clone())))
+        .resolve_peer(|app| match app {
+            "shop" => Some(Caller { by: By::User("app:shop".into()), role: Some("auditor".into()) }),
+            "boom" => panic!("hook exploded"),
+            _ => None,
+        });
+    let t = tempfile::tempdir().unwrap();
+    let (dirs, _h, _door) = billing_with(t.path(), http);
+    let shop = Peer::at("billing", &dirs.data, "shop").unwrap().unwrap();
+    assert_eq!(
+        shop.call("ledger", "audit", json!([])).await,
+        Ok(json!("User(\"app:shop\")")),
+        "the user and role it maps to"
+    );
+    for other in ["mail", "boom"] {
+        let p = Peer::at("billing", &dirs.data, other).unwrap().unwrap();
+        let e = p.call("ledger", "audit", json!([])).await.unwrap_err();
+        assert!(e.why.contains("access denied"), "{other}: no one in particular: {e:?}");
+        assert_eq!(p.call("ledger", "credit", json!([1])).await, Ok(json!(1 + i64::from(other == "boom"))));
+    }
+    // A call by name is a tool, never a link; a typed copy on the door is one, heard.
+    assert!(heard.lock().unwrap().is_empty(), "{:?}", heard.lock().unwrap());
+    let ledger = shop.cell::<Ledger>().await.unwrap();
+    until("heard on the door", || heard.lock().unwrap().len() == 1).await;
+    assert_eq!(heard.lock().unwrap()[0], (true, "app:shop".into(), "door".into()));
+    drop(ledger);
+    until("gone", || heard.lock().unwrap().len() == 2).await;
+    // Off by default: the door's links aren't heard.
+    let log = Arc::new(Mutex::new(0));
+    let l2 = log.clone();
+    let t = tempfile::tempdir().unwrap();
+    let (dirs, _h, _door) = billing_with(t.path(), Http::default().on_link(move |_| *l2.lock().unwrap() += 1));
+    let copy = Peer::at("billing", &dirs.data, "shop").unwrap().unwrap().cell::<Ledger>().await.unwrap();
+    copy.credit(1).unwrap();
+    until("its call went", || copy.pending() == 0).await;
+    assert_eq!(*log.lock().unwrap(), 0);
 }
 
 async fn a_peer_calls_by_name_what_a_client_may_and_nothing_more() {

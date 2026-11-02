@@ -349,12 +349,14 @@ it lasts.
 
 ## Async methods and atomicity
 
-A `pub async fn` is split at each `let x: T = io.await;`
+A `pub async fn` is split at each await, wherever it stands
 ([effects.md](effects.md#async-methods)): the part before the first await
 is one call, and each part after an await is another call, made when the
-awaited value arrives. Each part is atomic; the method as a whole is not.
+awaited value arrives. Its caller awaits the end: `h.sell(1)?.await` is
+the value the last part returned, or the refusal that ended it. Each part is atomic; the method as a whole is not.
 Between two parts other calls may commit, and the next part sees the state
-they left (aio's live reads; aio-rs has no snapshot mode).
+they left (aio's live reads). A cell that wants the whole method atomic
+says so: [transactions](#transactions).
 
 Take what you need before the first await, so nothing else can take it
 meanwhile, and give it back if the await fails:
@@ -403,34 +405,122 @@ impl Stock {
 let mut t = TestCells::new();
 let h = t.cell::<Stock>();
 h.restock(6).unwrap();
-h.sell(1).unwrap(); // its first part committed; the charge waits
+_ = h.sell(1).unwrap(); // its first part committed; the charge waits
 assert_eq!((h.state().free, h.state().held), (5, 1));
 assert_eq!(h.sell(6).unwrap_err().why, "only 5 left", "the held one is not for sale");
-h.sell(5).unwrap(); // declined below
+_ = h.sell(5).unwrap(); // declined below
 t.settle();
 assert_eq!((h.state().free, h.state().held, h.state().sold), (5, 0, 1));
 # }
 ```
 
-- The call returns once the first part commits; the rest follows. Wait
-  for it with `h.done("sell").await` (the effects are keyed by the
-  method's name), count calls in flight with `h.pending(Some("sell"))`,
-  and in a view with `use_pending`.
+- The call returns once the first part commits, with an `aio::Answer`:
+  await it for the end. Count calls in flight with
+  `h.pending(Some("sell"))`, and in a view with `use_pending`.
 - Overlapping calls of one async method run their awaits in turn, the
-  second after the first (`Mode::Queue`); `#[ttl(ms)]` keys them by the
-  arguments instead.
+  second after the first; `#[mode(newest)]` lets a new call supersede
+  the running one, `#[mode(first)]` shares the running one's answer, and
+  `#[ttl(ms)]` keys them by the arguments.
 - A refusal in a later part refuses that part only. What earlier parts
   committed stays, so a later part must leave the state whole on its
   own (the `free += n` above).
-- Each await may take `aio::effect::CALL_CEILING` (30 s). One that takes
-  longer is cut off, said in the log and a report, and its later parts
-  never run: undo what the first part held in `restore` or with a
-  schedule. `#[long]` lifts the ceiling for a method that waits by nature.
+- Each await may take the call ceiling: 30 s, or `[perf] call_ceiling`.
+  One that takes longer is cut off, said in the log and a report, its
+  caller is told, and its later parts never run: undo what the first part
+  held in `restore` or with a schedule. `#[long]` lifts the ceiling for a
+  method that waits by nature.
 - `cx.abort("sell")` from another method (a cancel button) stops the
   waiting awaits; their later parts never run, so that method gives back
   what they held.
 - Network I/O goes in the awaited future, never in a part: a part is a
   method and does no I/O.
+
+### Transactions
+
+`#[cell(transaction)]` (aio's `transaction: true`) makes each of the
+cell's async methods one transaction:
+
+- Its parts run on the method's own copy of the state as it was when it
+  was called, with its own writes: an await never changes what it reads.
+  `cx.live_state::<Self>()` reads the state as other calls left it now
+  (aio's `s.$live`).
+- Nothing it writes is seen until its end: then everything it wrote, the
+  effects it ran, the schedules it set, commit as one event, or (a
+  refusal, an aborted or cut-off await) none of it.
+- At the end, what it wrote is put on the state as it is then: other
+  calls' writes to other fields stay. If another call changed a field it
+  wrote meanwhile, committing would overwrite that change with a value
+  computed from stale state, so the call is refused with
+  `Code::TxConflict` (aio's `TX_CONFLICT`), nothing of it kept: call it
+  again. aio-rs can't see what a method read, so a field it wrote counts
+  as read too (aio's read-modify-write rule; a blind write conflicts
+  here where aio's wouldn't). Items it only pushed onto a list's end
+  never conflict: they go onto the list as it is then.
+- `#[cell(transaction(serialize))]` (aio's `{ serialize: true }`): its
+  async methods run one at a time, each starting after the one before
+  ended, and any change meanwhile (a plain method's) is a conflict.
+  `transaction(conflict = "warn")` commits over a conflict, said in the
+  log and a report.
+- `cx.commit()` publishes what it wrote so far at the end of this part
+  (aio's `s.$commit()`: a spinner before a long await); its reads go on
+  from the state then. `cx.commit_every(ms)` at most once per `ms` (a
+  progress bar out of a loop).
+
+```rust
+use aio::prelude::*;
+use aio::testing::TestCells;
+
+#[cell(transaction)]
+pub struct Wallet {
+    pub balance: i64,
+    pub status: String,
+}
+
+/// Stands in for the network.
+async fn fetch_balance() -> i64 {
+    40
+}
+
+#[methods]
+impl Wallet {
+    pub fn transfer(&mut self, n: i64) {
+        self.balance -= n;
+    }
+
+    pub async fn refresh(&mut self) -> Result {
+        self.status = "refreshing".into();
+        let got: i64 = fetch_balance().await;
+        self.balance = got;
+        self.status = "fresh".into();
+        Ok(())
+    }
+}
+
+# fn main() {
+let mut t = TestCells::new();
+let h = t.cell::<Wallet>();
+// A transfer lands while it fetches: the refresh would overwrite it.
+let mut late = h.refresh().unwrap();
+assert_eq!(h.state().status, "", "nothing is seen before its end");
+h.transfer(5).unwrap();
+t.settle();
+assert_eq!(late.now().unwrap().unwrap_err().code(), Some(Code::TxConflict));
+assert_eq!((h.state().balance, h.state().status.as_str()), (-5, ""), "the transfer stands");
+# _ = t.failures();
+
+// Called again, it reads the state now and commits.
+let mut again = h.refresh().unwrap();
+t.settle();
+assert!(again.now().unwrap().is_ok());
+assert_eq!((h.state().balance, h.state().status.as_str()), (40, "fresh"));
+# }
+```
+
+A transaction's event keeps the state it left (without its `#[transient]`
+fields) and its call's arguments, so replay does no I/O and runs none of
+its parts. Use it where a wrong merge costs something real (a balance, a
+ledger); a hot cell with a big state keeps live reads (each commit
+compares the state as JSON).
 
 ## Work across cells
 
@@ -440,10 +530,14 @@ together (a balance and the ledger that explains it), keep them in one
 cell; that is the only all-or-nothing aio-rs offers. When the cells must
 stay apart, chain the calls and make each step undoable:
 
+- A schedule a method sets may call another cell's method:
+  `cx.on::<Other>().after(key, ms, "method", args)`
+  ([scheduling](scheduling.md#schedules-from-a-call)).
 - One cell's commit triggers the other's call with `listens_to`
   ([composition.md](composition.md#observe-react-to-another-cell)). The
-  reaction runs only after the source committed, and a refused reaction
-  never undoes the source: refuse in the source, not the reaction.
+  reaction commits in the source's transaction (both on disk or neither),
+  and a refused reaction never undoes the source: refuse in the source,
+  not the reaction.
 - An effect calls the second cell and, if it refuses, calls a
   compensating method on the first (give the reservation back).
 
@@ -466,15 +560,17 @@ stay apart, chain the calls and make each step undoable:
 
 | aio | aio-rs |
 |---|---|
-| sync and async methods on a draft (Immer) | `&mut self` on a copy; async methods split at their awaits |
+| sync and async methods on a draft (Immer) | `&mut self` on a copy; async methods split at their awaits (anywhere a statement goes) |
+| `await cell.method()`: the async method's value or throw | `h.method(..)?.await`: an `aio::Answer` of its end |
 | `throw` in a sync method discards, in an async one keeps | a refusal discards the part it is in; earlier parts of an async method stay |
 | `s.$call(other, …)` | `self.other(..)`: a plain call, inside the same event |
 | `s.$do(effect)` | `cx.run(Effect::new(..))` |
 | `args` schema | the argument types, then `ensure!` |
-| `transaction: true` / `{ serialize: true }`, `s.$commit()`, `s.$live`, `TX_CONFLICT` | not available: each part of an async method is atomic and reads the live state; take what you need before the await |
+| `transaction: true` / `{ serialize: true }` / `{ conflict: "warn" }`, `s.$commit()`, `s.$commit(ms)`, `s.$live`, `TX_CONFLICT` | `#[cell(transaction)]` / `transaction(serialize)` / `transaction(conflict = "warn")`, `cx.commit()`, `cx.commit_every(ms)`, `cx.live_state::<Self>()`, `Code::TxConflict`; a field written counts as read ([transactions](#transactions)) |
 | `cancelOn`, `s.$signal` | `cx.abort(key)`; an aborted await's later parts never run |
-| `concurrency`, `ttl` | `Mode` on an effect; `#[ttl(ms)]` |
-| `long: [...]`, `effectTimeoutMs` | `#[long]`; `aio::effect::CALL_CEILING` is fixed |
+| `concurrency: "newest" / "first" / "queue"`, `ttl` | `#[mode(newest)]` / `#[mode(first)]` / the default; `#[ttl(ms)]`; `Mode` on an effect |
+| `long: [...]`, `effectTimeoutMs` | `#[long]`; `[perf] call_ceiling` |
+| `blocking(id, fn)`, `blocking.cancel(id)` | `aio::effect::blocking(key, f)`, `cancel_blocking(key)` |
 | `cell.$pending()` | `h.pending(Some("m"))`, `use_pending` |
 | `.type`, generated actions | the method's name; `Cell::METHODS`, `Cell::SIGNATURES` |
 | a transaction across cells | not available ([above](#work-across-cells)) |

@@ -1,19 +1,32 @@
 //! `ax components <app>` (aio DevTools: `tree`, the per-component profile
 //! and `renders`): the running app's mounted components, nested, each with
-//! how many times it rendered and the time those renders took; with
-//! `--renders`, its last renders as they happened. A dev build keeps them
-//! (its render spans); its `ui` door answers `Aio.components`.
+//! its key, how many times its body ran and how many times its holes wrote
+//! (air: a body runs once, a change runs only the holes that read it); with
+//! `--renders`, its last renders as they happened, timed: each body's run
+//! (`mount`, or `signal` when a wait or a `follow` ran it again) and each
+//! hole's rewrite (`signal`).
+//! A dev build's `ui` door answers `Aio.components`.
 use crate::cdp::Session;
 use aio::serde_json::{Value, json};
 
-/// The tree, one component a line (pure): `List ×3 1.25 ms`, children
-/// indented under their parent.
+/// The tree, one component a line (pure): `Row[42] ×1 3 updates`, with
+/// `1.25 ms` where the app timed its renders, children indented under
+/// their parent.
 pub fn lines(tree: &Value) -> Vec<String> {
     fn walk(v: &Value, depth: usize, out: &mut Vec<String>) {
         for c in v.as_array().into_iter().flatten() {
-            let (name, n, ms) =
-                (c["name"].as_str().unwrap_or("?"), c["renders"].as_u64().unwrap_or(0), c["ms"].as_f64());
-            out.push(format!("{}{name} ×{n} {:.2} ms", "  ".repeat(depth), ms.unwrap_or(0.0)));
+            let mut l = format!("{}{}", "  ".repeat(depth), c["name"].as_str().unwrap_or("?"));
+            if let Some(k) = c["key"].as_str() {
+                l += &format!("[{k}]");
+            }
+            l += &format!(" ×{}", c["renders"].as_u64().unwrap_or(0));
+            if let Some(u) = c["updates"].as_u64() {
+                l += &format!(" {u} update{}", if u == 1 { "" } else { "s" });
+            }
+            if let Some(ms) = c["ms"].as_f64() {
+                l += &format!(" {ms:.2} ms");
+            }
+            out.push(l);
             walk(&c["children"], depth + 1, out);
         }
     }
@@ -23,15 +36,16 @@ pub fn lines(tree: &Value) -> Vec<String> {
 }
 
 /// The last renders, one a line, then how many in all (pure):
-/// `2026-10-29T10:00:00.000Z Row signal 0.05 ms`.
+/// `2026-10-29T10:00:00.000Z Row[42] signal 0.05 ms`.
 pub fn render_lines(renders: &Value, total: u64) -> Vec<String> {
     let mut out: Vec<String> = renders
         .as_array()
         .into_iter()
         .flatten()
         .map(|r| {
+            let key = r["key"].as_str().map(|k| format!("[{k}]")).unwrap_or_default();
             format!(
-                "{} {} {} {:.2} ms",
+                "{} {}{key} {} {:.2} ms",
                 aio::log::stamp(r["at"].as_i64().unwrap_or(0)),
                 r["component"].as_str().unwrap_or("?"),
                 r["trigger"].as_str().unwrap_or("?"),
@@ -71,8 +85,14 @@ mod tests {
         ] }]);
         assert_eq!(lines(&tree), ["root ×2 1.23 ms", "  List ×1 0.20 ms", "    Row ×1 0.50 ms", "    Row ×3 0.50 ms"]);
         assert!(lines(&json!([])).is_empty());
+        let air = json!([{ "name": "Row", "key": "42", "renders": 1, "updates": 3, "children": [
+            { "name": "Cell", "key": null, "renders": 1, "updates": 1, "children": [] }
+        ] }]);
+        assert_eq!(lines(&air), ["Row[42] ×1 3 updates", "  Cell ×1 1 update"], "air's: key and updates, no time");
         let r = json!([{ "component": "Row", "at": 0, "ms": 0.051, "trigger": "signal" }]);
         assert_eq!(render_lines(&r, 7), ["1970-01-01T00:00:00.000Z Row signal 0.05 ms", "1 of 7 renders"]);
+        let r = json!([{ "component": "Row", "key": "42", "at": 0, "ms": 0.0, "trigger": "mount" }]);
+        assert_eq!(render_lines(&r, 1)[0], "1970-01-01T00:00:00.000Z Row[42] mount 0.00 ms", "keyed, as in the tree");
     }
 
     #[tokio::test(flavor = "multi_thread")]

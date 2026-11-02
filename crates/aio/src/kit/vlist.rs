@@ -1,8 +1,8 @@
 //! A long list rendered a window at a time (aio's `useVirtualList`): only the
 //! rows the scroll position shows, and a few more each side, are elements.
 use super::join;
-use dioxus::html::geometry::PixelsVector2D;
-use dioxus::prelude::*;
+use crate::ui::prelude::*;
+use geometry::PixelsVector2D;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -19,44 +19,48 @@ pub fn window(len: usize, row: f64, height: f64, overscan: usize, top: f64) -> R
 
 /// `len` rows of `row_height` px in a `height` px box that scrolls; `row`
 /// renders the row at an index. A scroll within the rows it has drawn
-/// renders nothing (aio re-anchored its window only when it moved). Changing `scroll_to` scrolls that row to the
-/// top (aio's `scrollToIndex`).
+/// changes nothing (aio re-anchored its window only when it moved): the
+/// list of rows is keyed by index, so a scroll that moves the window adds
+/// the rows that came in and drops the ones that left, no other. Changing
+/// `scroll_to` scrolls that row to the top (aio's `scrollToIndex`).
 #[component]
 pub fn VirtualList(
-    len: usize,
+    len: Prop<usize>,
     row_height: f64,
-    height: f64,
+    height: Prop<f64>,
     #[props(default = 3)] overscan: usize,
-    scroll_to: Option<usize>,
-    row: Callback<usize, Element>,
-    #[props(default, into)] class: String,
+    scroll_to: Prop<Option<usize>>,
+    row: Callback<usize, View>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-) -> Element {
-    let mut top = use_signal(|| 0.0);
-    let mut el = use_signal(|| None::<Rc<MountedData>>);
+) -> View {
+    let top = signal(|| 0.0);
+    let el = signal(|| None::<Rc<MountedData>>);
     let h = row_height.max(1.0);
-    use_effect(use_reactive!(|scroll_to| {
-        let (Some(i), Some(el)) = (scroll_to, el.peek().clone()) else { return };
+    let at = memo(move || scroll_to.get());
+    effect(move || {
+        let (Some(i), Some(el)) = (at.get(), el.get_untracked()) else { return };
         spawn(async move { _ = el.scroll(PixelsVector2D::new(0.0, i as f64 * h), ScrollBehavior::Instant).await });
-    }));
-    let rows = window(len, h, height, overscan, top());
+    });
+    let rows = memo(move || window(len.get(), h, height.get(), overscan, top.get()));
     rsx! {
         div {
-            class: join("aio-vlist", &class),
+            class: join("aio-vlist", &class.get()),
             style: "overflow:auto;position:relative;height:{height}px",
-            onmounted: move |e| el.set(Some(e.data())),
-            // The browser tells a scroll once a frame at most; the list
-            // renders again only when that moves its window of rows.
+            onmounted: move |e| *el.write() = Some(e.data()),
+            // The browser tells a scroll once a frame at most; the rows
+            // change only when that moves their window.
             onscroll: move |e| {
                 let at = e.scroll_top();
-                if window(len, h, height, overscan, at) != window(len, h, height, overscan, *top.peek()) {
+                let (n, vh) = (len.get_untracked(), height.get_untracked());
+                if window(n, h, vh, overscan, at) != window(n, h, vh, overscan, top.get_untracked()) {
                     top.set(at);
                 }
             },
             ..attributes,
-            div { style: "position:relative;height:{len as f64 * h}px",
-                for i in rows {
-                    div { key: "{i}", style: "position:absolute;top:{i as f64 * h}px;left:0;right:0;height:{h}px",
+            div { style: "position:relative;height:{len.get() as f64 * h}px",
+                for i in rows.get() {
+                    div { key: i, style: "position:absolute;top:{i as f64 * h}px;left:0;right:0;height:{h}px",
                         {row.call(i)}
                     }
                 }

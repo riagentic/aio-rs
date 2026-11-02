@@ -11,9 +11,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How long a browser may take to open its DevTools port (a cold start on a
-/// loaded machine took more than 10 s in aio).
-const START: Duration = Duration::from_secs(30);
+/// How long a browser may take to open its DevTools port: a hang guard, not
+/// a measure. A cold start on a loaded machine took more than 10 s in aio;
+/// the first system Chrome of a Windows CI runner (its files read cold and
+/// scanned) took more than 30 s while running, one start at a time.
+const START: Duration = Duration::from_secs(120);
 
 /// A launched headless Chromium; dropped, it is killed and its profile goes.
 pub struct TestBrowser {
@@ -54,6 +56,11 @@ impl TestBrowser {
             };
         }
         cmd.envs(own_home(&profile, std::env::consts::OS, &|k| std::env::var(k).ok())?).env("TMPDIR", &profile);
+        // One cold start at a time: browsers started together slow each other
+        // far past their sum (8 at once on an 8-core Windows took 22 s each,
+        // one 0.5 s), so parallel tests queue here instead.
+        static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = STARTING.lock().unwrap_or_else(|e| e.into_inner());
         let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -65,7 +72,7 @@ impl TestBrowser {
         let end = Instant::now() + START;
         let file = b.profile.join("DevToolsActivePort");
         while Instant::now() < end {
-            if let Some(p) = std::fs::read_to_string(&file).ok().and_then(|t| t.lines().next()?.parse().ok()) {
+            if let Some(p) = std::fs::read_to_string(&file).ok().as_deref().and_then(port_of) {
                 b.port = p;
                 return Ok(b);
             }
@@ -103,6 +110,14 @@ impl Drop for TestBrowser {
             }
         }
     }
+}
+
+/// The port in a `DevToolsActivePort` file, once whole: the port, then the
+/// browser's path (a file still being written may hold part of the port).
+fn port_of(text: &str) -> Option<u16> {
+    let mut lines = text.lines();
+    let port = lines.next()?.parse().ok()?;
+    lines.next().is_some_and(|l| !l.is_empty()).then_some(port)
 }
 
 /// Where a Chromium-family browser is installed on `os`, in the order they
@@ -398,6 +413,15 @@ mod tests {
 
     /// A real one (skipped without one): its port answers, and dropped, the
     /// browser and its profile are gone.
+    #[test]
+    fn a_port_is_read_once_its_file_is_whole() {
+        assert_eq!(port_of("9222\n/devtools/browser/0a1b\n"), Some(9222));
+        assert_eq!(port_of("9222\n/devtools/browser/0a1b"), Some(9222));
+        for part in ["", "92", "9222", "9222\n", "x\n/devtools/browser/0a1b"] {
+            assert_eq!(port_of(part), None, "{part:?}");
+        }
+    }
+
     #[test]
     fn a_launched_browser_has_a_port_and_leaves_nothing() {
         let Ok(bin) = TestBrowser::find() else { return };

@@ -14,8 +14,10 @@ An app is its own Cargo workspace with two crates, made by `ax create`:
 | `assets/` | stylesheets and files the views use (window apps only) |
 | `rust-toolchain.toml` | aio-rs's Rust, so ax's shared build folder is reused across apps |
 | `.cargo/config.toml` | the build's settings: the bundled SQLite without the extensions aio never uses |
-| `.gitignore` | `target/`, `.data/`, `dist/` |
-| `AGENTS.md`, `CLAUDE.md` | the pointer for coding agents (`ax agent`) |
+| `.gitignore` | `target/`, `.data/`, `dist/`, `.env` and release keys |
+| `.gitattributes` | LF line endings in every checkout, whatever git's `core.autocrlf` |
+| `README.md` | run, test, build, ship; where its aio-rs comes from |
+| `AGENTS.md`, `CLAUDE.md` | for coding agents: the rules and the loop, then `ax agent` and the guide by URL |
 
 Tests live beside the code (`#[cfg(test)] mod tests`) or in `tests/`.
 
@@ -162,8 +164,9 @@ of aio-rs.
 
 | Feature | Adds |
 |---|---|
-| none | the core: cells, the log, replay, persistence, the local door, `aio::cli`, `aio::testing` (cells) |
-| `kit` | the UI kit, `client!`, `router!`, `TestUi` |
+| none | the core: cells, the log, replay, persistence, the local door, `aio::cli` |
+| `testing` | `aio::testing`, the test kit (`TestCells`; `TestServer` with `server`, `TestUi` with `kit`): a dev-dependency only, so the app's builds leave it out |
+| `kit` | the UI kit, `client!`, `router!` |
 | `net` | `tls` + `oidc`: everything networked |
 | `server` | sync and its server, HTTP routes, server functions, accounts' doors |
 | `tls` | the server over TLS, pairing, LAN discovery |
@@ -176,8 +179,8 @@ of aio-rs.
 | `dev` | `ax dev`'s hot-patching (never in a release; `ax dev` turns it on) |
 
 The templates: `app` uses `kit` (and `web` for its browser build),
-`service` uses `net`, `cli` none. A feature is added in the app's
-`Cargo.toml`:
+`service` uses `net`, `cli` none; each gives its tests `testing` as a
+dev-dependency. A feature is added in the app's `Cargo.toml`:
 
 ```toml
 aio = { package = "aio-rs", path = "<aio-rs checkout>/crates/aio", features = ["kit", "net"] }

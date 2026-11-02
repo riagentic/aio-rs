@@ -202,7 +202,7 @@ mode = "server"            # headless: the cell is served, no window
 [server]
 listen = "127.0.0.1:7420"  # --port, --host and --expose change it at launch
 tls = true                 # needed beyond this machine, and for pairing
-pairing = true             # `ax pin` + `ax pair` hand the key to the tool
+pairing = true             # `ax pair` hands the key to the tool
 
 [history]
 keep = "90d"
@@ -400,7 +400,7 @@ network = []               # this machine is always allowed; add the service's h
 
 ```sh
 ax start queue                              # the service, in the background
-ax pin queue                                # an 8-digit code, valid 3 minutes
+ax pair queue                               # an 8-digit code, valid 3 minutes
 ax pair queue-cli 127.0.0.1:7420 12345678   # the tool gets the key and the server's root
 queue-cli add build docs                    # queued #1
 queue-cli add --json nightly report         # {"id":2}
@@ -469,10 +469,6 @@ exits for the supervisor to start the new version.
 
 ## Limits
 
-- A server serves one shared cell (`aio::sync::serve` takes one
-  `Handle`); aio serves every cell on one socket. More cells in the same
-  service open on the same store (`Handle::open`) and are reached by
-  `ax` through their own local doors, but not by network clients.
 - `aio::cli::watch` draws the whole view again on each change; there is
   no diffing screen library (aio has none either).
 

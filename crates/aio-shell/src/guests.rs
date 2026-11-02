@@ -4,11 +4,10 @@
 //! served over the wire as `run` serves it, and the guests' pages from a
 //! local HTTP server. The page is read and driven over the shell's own
 //! DevTools line (`{"t":"cdp"}`). Skipped where the runtime is not installed.
-use crate::{Window, guest, install, runtime, wire};
+use crate::{Window, guest, install, runtime};
 use aio::kit::{Browser, Go, GuestEvent, go};
 use aio::serde_json::{Value, json};
-use dioxus::prelude::*;
-use dioxus_liveview::LiveViewPool;
+use aio::ui::prelude::*;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -27,28 +26,28 @@ ipcRenderer.on('perm', () => navigator.permissions.query({ name: 'clipboard-read
 
 static PRELOADS: [(&str, &str); 1] = [("probe.js", PROBE)];
 
-fn app() -> Element {
+fn app() -> View {
     let base = BASE.get().cloned().unwrap_or_default();
-    let mut src = use_signal(|| format!("{base}/a"));
-    let mut at = use_signal(String::new);
-    let mut on = use_signal(|| true);
-    let mut log = use_signal(Vec::<String>::new);
+    let src = signal(|| format!("{base}/a"));
+    let at = signal(String::new);
+    let on = signal(|| true);
+    let log = signal(Vec::<String>::new);
     let send = |channel: &str, args: Vec<Value>| go("b", Go::Send { channel: channel.into(), args });
     let c = format!("{base}/c");
     let b = format!("{base}/b");
     rsx! {
         button { id: "hide", onclick: move |_| on.toggle(), "hide" }
-        button { id: "follow", onclick: move |_| src.set(at()), "follow" }
+        button { id: "follow", onclick: move |_| src.set(at.get()), "follow" }
         button { id: "to-b", onclick: move |_| src.set(b.clone()), "b" }
         button { id: "ping", onclick: move |_| send("ping", vec![json!(7)]), "ping" }
         button { id: "go-c", onclick: move |_| send("go", vec![json!(c.clone())]), "c" }
         button { id: "perm", onclick: move |_| send("perm", vec![]), "perm" }
         button { id: "back", onclick: move |_| go("b", Go::Back), "back" }
         button { id: "open", onclick: move |_| send("open", vec![]), "open" }
-        if on() {
+        if on.get() {
             Browser {
                 id: "b",
-                src: src(),
+                src: src.get(),
                 keep_alive: "k",
                 partition: "persist:t",
                 preload: "probe.js",
@@ -59,7 +58,7 @@ fn app() -> Element {
                     if let GuestEvent::Navigated { url, .. } = &e {
                         at.set(url.clone());
                     }
-                    log.push(format!("{e:?}"));
+                    log.write().push(format!("{e:?}"));
                 },
             }
         }
@@ -72,7 +71,7 @@ fn app() -> Element {
             referrer: "http://ref.example/",
             style: "width:100px;height:100px",
         }
-        pre { id: "log", {log().join("\n")} }
+        pre { id: "log", {log.get().join("\n")} }
     }
 }
 
@@ -111,6 +110,10 @@ async fn serve(seen: Arc<Mutex<Vec<String>>>) -> String {
     base
 }
 
+/// How long a wait for the shell or a guest may take: a hang guard, not a
+/// measure (a guest's page on a loaded machine took past 10 s).
+const PATIENCE: Duration = Duration::from_secs(60);
+
 /// The runtime under test: its control line, its stderr.
 struct Shell {
     child: tokio::process::Child,
@@ -127,7 +130,7 @@ impl Shell {
         m["id"] = json!(self.next);
         self.ctl.write_all(format!("{m}\n").as_bytes()).await.unwrap();
         loop {
-            let v = tokio::time::timeout(Duration::from_secs(10), self.heard.recv()).await.unwrap().unwrap();
+            let v = tokio::time::timeout(PATIENCE, self.heard.recv()).await.unwrap().unwrap();
             if v["t"] == t && v["id"] == self.next {
                 return v;
             }
@@ -145,7 +148,8 @@ impl Shell {
     /// Wait until `expr` is true in the page (one that throws is not yet).
     async fn until(&mut self, expr: &str) {
         let t = format!("(() => {{ try {{ return {expr}; }} catch (e) {{ return false; }} }})()");
-        for _ in 0..200 {
+        let end = std::time::Instant::now() + PATIENCE;
+        while std::time::Instant::now() < end {
             if self.eval(&t).await == json!(true) {
                 return;
             }
@@ -191,6 +195,9 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     cmd.arg(&dir)
         .args(runtime::sandbox_args(&rt))
         .args(["--ozone-platform=headless", "--aio-title=guests", "--aio-width=800", "--aio-height=600"])
+        // GL drawn by SwiftShader, as TestUi's: with no display the default GL
+        // fails its start under load and a hidden window may never paint.
+        .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
         // A link a guest opens goes nowhere (never the person's browser).
         .arg("--aio-no-open=1")
         .arg(format!("--user-data-dir={}", d.path().join("profile").display()))
@@ -229,8 +236,7 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     });
     ctl.write_all(b"{\"t\":\"place\",\"width\":800,\"height\":600}\n").await.unwrap();
     let s = tokio::time::timeout(Duration::from_secs(20), wires.accept()).await.unwrap().unwrap();
-    let pool = Arc::new(LiveViewPool::new());
-    tokio::spawn(async move { _ = pool.launch_virtualdom(wire(s), || VirtualDom::new(app)).await });
+    tokio::spawn(async move { _ = crate::views::Views::new().launch(s, app).await });
     let mut sh = Shell { child, ctl, heard, said, next: 0 };
 
     // The guest loads its page with the declared preload, and says where it landed.
@@ -238,7 +244,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     sh.until(&format!("document.getElementById('log').textContent.includes('Navigated {{ url: \"{base}/a\"')")).await;
     // Undeclared: refused and said; no partition: the guests' own session.
     sh.until("document.querySelectorAll('webview').length === 2").await;
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if sh.said("preload REFUSED") && sh.said("persist:aio-webview") {
             break;
         }
@@ -260,7 +267,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
             "document.querySelector('#b webview').sendInputEvent({{ type: 'keyDown', keyCode: '{k}', modifiers: ['shift'] }})"
         )
     };
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         sh.eval(&key("a")).await;
         sh.eval(&key("Escape")).await;
         if sh.eval("document.getElementById('log').textContent.includes('Key(HostKey')").await == json!(true) {
@@ -322,7 +330,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     );
     let ok: Value = aio::serde_json::from_str(&ok.unwrap()).unwrap();
     assert!(sh.ask(ok.clone(), "opened").await["error"].is_null());
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if loads("/child") == 1 {
             break;
         }
@@ -334,10 +343,28 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     let own = sh.ask(json!({ "t": "child", "url": format!("{base}/x"), "partition": "persist:" }), "opened").await;
     assert!(own["error"].as_str().unwrap().contains("the app's own session"), "{own}");
 
+    // A guest's session wiped (clear_partition); the app's own refused.
+    let done = sh.ask(json!({ "t": "clear-partition", "partition": "persist:t" }), "done").await;
+    assert!(done["error"].is_null(), "{done}");
+    let own = sh.ask(json!({ "t": "clear-partition", "partition": "" }), "done").await;
+    assert!(own["error"].as_str().unwrap().contains("partition's name"), "{own}");
+
+    // The page's console at its level (log as INFO); debug only in a dev build.
+    sh.eval("console.log('probe-log'); console.debug('probe-debug'); console.warn('probe-warn'); true").await;
+    for _ in 0..100 {
+        if sh.said("probe-warn") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(sh.said("INFO  [page] probe-log") && sh.said("WARN  [page] probe-warn"));
+    assert!(!sh.said("probe-debug"), "no --aio-dev: no debug lines");
+
     // A guest's pop-up: blocked without real input in it, said; after a
     // click, an http(s) link for the system browser (none in this run).
     sh.eval("document.getElementById('open').click()").await;
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if sh.said("pop-up BLOCKED") {
             break;
         }
@@ -345,13 +372,20 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     }
     assert!(sh.said("pop-up BLOCKED from http://127.0.0.1"), "{}", sh.said.lock().unwrap().join("\n"));
     assert!(sh.said("no click or key in that page in the last 5 s"));
-    sh.eval("const w = document.querySelector('#b webview'); w.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 }); w.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 }); true").await;
-    sh.eval("document.getElementById('open').click()").await;
-    for _ in 0..100 {
-        if sh.said("not opened (AIORT_NO_OPEN") {
-            break;
+    // Clicked again until it opens: the ask to open goes through the app
+    // and its page to the guest, which on a loaded machine may take past
+    // the 5 s the click counts for.
+    let end = std::time::Instant::now() + PATIENCE;
+    'open: while std::time::Instant::now() < end {
+        sh.eval("const w = document.querySelector('#b webview'); w.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 }); w.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 }); true").await;
+        sh.eval("document.getElementById('open').click()").await;
+        let tried = std::time::Instant::now();
+        while tried.elapsed() < Duration::from_secs(6) {
+            if sh.said("not opened (AIORT_NO_OPEN") {
+                break 'open;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(sh.said("not opened (AIORT_NO_OPEN, a contained run): https://example.invalid/"));
 
@@ -359,7 +393,8 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     // (said once); the app's own quit leaves past it.
     sh.eval("window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; }); true").await;
     sh.eval("window.close(); true").await;
-    for _ in 0..100 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if sh.said("the page vetoed leaving") {
             break;
         }

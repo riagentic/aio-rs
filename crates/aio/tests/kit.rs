@@ -1,9 +1,9 @@
 //! The UI kit, driven like a person: what each control renders, says to
 //! assistive tech, and does on a click or a key.
+#![cfg(feature = "kit")]
 use aio::kit::*;
 use aio::testing::TestUi;
-use dioxus::prelude::*;
-use keyboard_types::{Key, Modifiers};
+use aio::ui::prelude::*;
 use std::cell::RefCell;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ fn said() -> Vec<String> {
     LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
 }
 
-fn styled(body: Element) -> Element {
+fn styled(body: View) -> View {
     rsx! {
         style { {aio::ui::page_css(&[&theme_css(theme::hue("kit")), ""], false)} }
         {body}
@@ -44,15 +44,15 @@ fn press(ui: &mut TestUi, t: &str, key: Key) {
     ui.press_key(key, Modifiers::empty());
 }
 
-fn buttons_and_inputs() -> Element {
-    let mut text = use_signal(String::new);
-    let mut on = use_signal(|| false);
+fn buttons_and_inputs() -> View {
+    let text = signal(String::new);
+    let on = signal(|| false);
     styled(rsx! {
         Button { variant: Variant::Primary, "data-t": "save", onclick: move |_| log("save"), "Save" }
         Button { size: Size::Sm, class: "mine", "data-t": "plain", "Plain" }
-        Input { "data-t": "name", value: text(), oninput: move |v| text.set(v), invalid: text().len() > 3 }
+        Input { "data-t": "name", value: text.get(), oninput: move |v| text.set(v), invalid: text.get().len() > 3 }
         p { "data-t": "echo", "{text}" }
-        Checkbox { "data-t": "agree", label: "Email me", checked: on(), onchange: move |c| on.set(c) }
+        Checkbox { "data-t": "agree", label: "Email me", checked: on.get(), onchange: move |c| on.set(c) }
         p { "data-t": "on", "{on}" }
         Select { "data-t": "pick", options: vec!["a".into(), Opt { value: "b".into(), label: "Bee".into(), disabled: false }], value: "b" }
         Textarea { "data-t": "bio", value: "hi", rows: 5 }
@@ -78,10 +78,22 @@ fn an_input_hands_over_its_value_and_says_when_it_is_invalid() {
     assert_eq!(ui.count("[data-t=name].aio-input--invalid[aria-invalid=true]"), 1, "painted and said");
 }
 
+/// What the one element `sel` is named by: its `aria-label`, else the text
+/// of what its `aria-labelledby` names, else its `<label>`'s.
+fn named(ui: &mut TestUi, sel: &str) -> String {
+    let js = format!(
+        "(() => {{ const e = [...document.querySelectorAll({sel:?})]; if (e.length !== 1) return `${{e.length}} matches`;
+           const l = e[0].getAttribute('aria-label'); if (l) return l;
+           const by = e[0].getAttribute('aria-labelledby'); if (by) return by.split(' ').map((id) => document.getElementById(id)?.textContent ?? '').join(' ').trim();
+           return (e[0].labels?.[0]?.textContent ?? '').trim(); }})()"
+    );
+    ui.eval(&js).as_str().unwrap_or_default().to_string()
+}
+
 #[test]
 fn a_checkbox_reports_its_state_and_is_named_by_its_label() {
     let mut ui = TestUi::new(buttons_and_inputs);
-    assert_eq!(ui.count("label.aio-checkbox-row input[type=checkbox][aria-label='Email me']"), 1);
+    assert_eq!(named(&mut ui, "label.aio-checkbox-row input[type=checkbox]"), "Email me");
     ui.click("agree");
     assert_eq!(ui.text("on"), "true");
     ui.click("agree");
@@ -96,12 +108,11 @@ fn a_select_lists_its_options_and_a_textarea_its_rows() {
     assert_eq!(ui.count("textarea[data-t=bio].aio-textarea[rows='5']"), 1);
 }
 
-fn fields() -> Element {
-    let mut email = use_signal(String::new);
-    let error = email().is_empty().then(|| "Required".to_string());
+fn fields() -> View {
+    let email = signal(String::new);
     rsx! {
-        Field { label: "Email", error, required: true, "data-t": "email-field",
-            Input { "data-t": "email", value: email(), oninput: move |v| email.set(v) }
+        Field { label: "Email", error: email.get().is_empty().then(|| "Required".to_string()), required: true, "data-t": "email-field",
+            Input { "data-t": "email", value: email.get(), oninput: move |v| email.set(v) }
         }
         Field { label: "Name", hint: "As on your card",
             Input { "data-t": "name", id: "mine" }
@@ -147,21 +158,21 @@ fn a_hint_describes_and_the_callers_own_say_wins() {
 
 #[test]
 fn no_for_onto_a_group_or_a_self_labelled_checkbox() {
-    let ui = TestUi::new(fields);
+    let mut ui = TestUi::new(fields);
     assert_eq!(ui.count("label.aio-field__label[for]"), 2, "only the two text inputs are targeted");
-    assert_eq!(ui.count("[data-t=notify][aria-label='Email me']:not([id])"), 1);
-    assert_eq!(ui.count("[data-t=size][role=group][aria-label=Size]"), 1, "the field names the group");
+    assert_eq!(named(&mut ui, "[data-t=notify]:not([id])"), "Email me");
+    assert_eq!(named(&mut ui, "[data-t=size][role=group]"), "Size", "the field names the group");
 }
 
-fn choices() -> Element {
-    let mut size = use_signal(|| "s".to_string());
-    let mut dark = use_signal(|| false);
+fn choices() -> View {
+    let size = signal(|| "s".to_string());
+    let dark = signal(|| false);
     rsx! {
         RadioGroup { label: "Size", options: vec!["s".into(), "m".into(), Opt { value: "l".into(), label: "l".into(), disabled: true }],
-            value: size(), onchange: move |v| size.set(v)
+            value: size.get(), onchange: move |v| size.set(v)
         }
         p { "data-t": "size", "{size}" }
-        Switch { "data-t": "dark", label: "Dark mode", checked: dark(), onchange: move |v| dark.set(v) }
+        Switch { "data-t": "dark", label: "Dark mode", checked: dark.get(), onchange: move |v| dark.set(v) }
         p { "data-t": "dark-on", "{dark}" }
     }
 }
@@ -178,19 +189,19 @@ fn radios_share_one_name_and_each_is_named() {
 #[test]
 fn a_switch_is_a_real_checkbox_and_reports_the_new_state() {
     let mut ui = TestUi::new(choices);
-    assert_eq!(ui.count("input[type=checkbox][role=switch][aria-label='Dark mode'].aio-switch"), 1);
+    assert_eq!(named(&mut ui, "input[type=checkbox][role=switch].aio-switch"), "Dark mode");
     ui.click("dark");
     assert_eq!(ui.text("dark-on"), "true");
 }
 
-fn tabs() -> Element {
-    let mut on = use_signal(|| true);
+fn tabs() -> View {
+    let on = signal(|| true);
     let mut tabs = vec![
         Tab::new("general settings", "General", rsx! { p { "data-t": "p1", "one" } }),
         Tab::new("b", "Beta", rsx! { p { "data-t": "p2", "two" } }).disabled(),
         Tab::new("c", "Gamma", rsx! { p { "data-t": "p3", "three" } }),
     ];
-    if !on() {
+    if !on.get() {
         tabs.remove(0);
     }
     rsx! {
@@ -234,11 +245,11 @@ fn arrows_move_home_and_end_jump_and_disabled_tabs_are_skipped() {
     assert_eq!(said(), Vec::<String>::new(), "a disabled tab can't be chosen");
 }
 
-fn mirrored() -> Element {
-    let mut rtl = use_signal(|| true);
+fn mirrored() -> View {
+    let rtl = signal(|| true);
     let three = |p: &str| ["a", "b", "c"].map(|t| Tab::new(format!("{p}{t}"), t, rsx! {})).to_vec();
     rsx! {
-        Direction { rtl: rtl(),
+        Direction { rtl: rtl.get(),
             Tabs { "data-t": "read", tabs: three(""), onchange: log }
             Tabs { "data-t": "said", rtl: false, tabs: three("x"), onchange: log }
         }
@@ -277,7 +288,7 @@ fn a_tab_that_is_gone_falls_back_to_the_first_enabled_one() {
 }
 
 // Unstyled: the menu as markup, its placement not under test.
-fn menu() -> Element {
+fn menu() -> View {
     rsx! {
         Menu { "data-t": "actions", label: "Actions", trigger: rsx! { "⋯" }, onselect: log,
             items: vec![MenuItem::new("edit", "Edit"), MenuItem::new("lock", "Lock").disabled(), MenuItem::new("delete", "Delete").danger()]
@@ -358,15 +369,15 @@ fn choosing_reports_the_id_and_a_disabled_item_does_nothing() {
     assert_eq!(ui.count("[role=menu]"), 0, "choosing closes it");
 }
 
-fn statuses() -> Element {
-    let mut shown = use_signal(|| true);
+fn statuses() -> View {
+    let shown = signal(|| true);
     styled(rsx! {
         div { "data-t": "half-row", Progress { "data-t": "half", value: 42.0, label: "Upload", show_value: true } }
         Progress { "data-t": "busy", label: "Working" }
         Progress { "data-t": "nan", value: f64::NAN, show_value: true }
         div { "data-t": "over-row", Progress { "data-t": "over", value: 150.0, show_value: true } }
         Alert { "data-t": "saved", tone: Tone::Success, title: "Saved", "All good" }
-        if shown() {
+        if shown.get() {
             Alert { "data-t": "failed", tone: Tone::Error, ondismiss: move |_| shown.set(false), "Broke" }
         }
         Tooltip { "data-t": "tip", text: "Copies the link",
@@ -444,20 +455,23 @@ struct Person {
     age: u32,
 }
 
-fn data() -> Element {
-    let mut page = use_signal(|| 1u32);
-    let mut stale = use_signal(|| 9u32);
+fn data() -> View {
+    let page = signal(|| 1u32);
+    let stale = signal(|| 9u32);
     let rows = vec![Person { name: "Ada", age: 36 }, Person { name: "Alan", age: 41 }];
     let cols = vec![
         Column::text("Name", |p: &Person| p.name.into()),
-        Column::view("Age", |p: &Person, _| rsx! { input { "data-t": "age-{p.name}", value: "{p.age}" } })
-            .align(Align::End),
+        Column::view("Age", |p: &Person, _| {
+            let (name, age) = (p.name, p.age);
+            rsx! { input { "data-t": "age-{name}", value: "{age}" } }
+        })
+        .align(Align::End),
     ];
     rsx! {
         Table { "data-t": "people", columns: cols.clone(), rows, key_of: |p: Person| p.name.to_string(), onrow: move |(p, i): (Person, usize)| log(format!("{} {i}", p.name)) }
         Table { "data-t": "nobody", columns: Vec::<Column<Person>>::new(), rows: vec![], empty: rsx! { "Nobody yet" } }
-        Pagination { "data-t": "pager", page: page(), pages: 10, onpage: move |p| page.set(p) }
-        Pagination { "data-t": "stale", page: stale(), pages: 3, onpage: move |p| stale.set(p) }
+        Pagination { "data-t": "pager", page: page.get(), pages: 10, onpage: move |p| page.set(p) }
+        Pagination { "data-t": "stale", page: stale.get(), pages: 3, onpage: move |p| stale.set(p) }
         p { "data-t": "stale-page", "{stale}" }
         Card { "data-t": "card", title: rsx! { "Title" }, footer: rsx! { "Foot" }, "Body" }
         Stack { "data-t": "stack", gap: "4px", "a" }
@@ -510,22 +524,22 @@ fn cards_stacks_spinners_and_avatars() {
     assert_eq!(ui.count("[data-t=pic] img.aio-avatar__img[alt=Ada][width='48']"), 1);
 }
 
-fn dialogs() -> Element {
-    let mut a = use_signal(|| false);
-    let mut b = use_signal(|| false);
-    let mut stuck = use_signal(|| false);
+fn dialogs() -> View {
+    let a = signal(|| false);
+    let b = signal(|| false);
+    let stuck = signal(|| false);
     // Only room around each dialog: the headless layout misplaces the kit's fixed overlay.
     rsx! {
         style { ".aio-modal-backdrop{{padding:20px}}" }
         button { "data-t": "open-a", onclick: move |_| a.set(true), "a" }
-        Modal { open: a(), title: "Settings", onclose: move |_| { log("close a"); a.set(false) },
+        Modal { open: a.get(), title: "Settings", onclose: move |_| { log("close a"); a.set(false) },
             button { "data-t": "in-a", onclick: move |_| b.set(true), "open b" }
             button { "data-t": "stuck", onclick: move |_| stuck.set(true), "stuck" }
         }
-        Modal { open: b(), title: "Sure?", "data-t": "b-backdrop", onclose: move |_| { log("close b"); b.set(false) },
+        Modal { open: b.get(), title: "Sure?", "data-t": "b-backdrop", onclose: move |_| { log("close b"); b.set(false) },
             button { "data-t": "in-b", "b" }
         }
-        Modal { open: stuck(), dismissable: false, onclose: move |_| log("close stuck"),
+        Modal { open: stuck.get(), dismissable: false, onclose: move |_| log("close stuck"),
             button { "data-t": "in-stuck", "saving" }
         }
     }
@@ -576,7 +590,7 @@ fn a_dialog_that_cannot_be_dismissed_blocks_escape() {
 }
 
 // Unstyled: the headless layout misplaces a styled dialog's footer.
-fn confirming() -> Element {
+fn confirming() -> View {
     rsx! {
         ConfirmButton { "data-t": "delete", variant: Variant::Danger, confirm: "Delete it?", onconfirm: move |_| log("deleted"), "Delete" }
     }
@@ -596,7 +610,7 @@ fn a_confirm_button_acts_only_once_confirmed() {
     assert_eq!((said(), ui.count("[role=dialog]")), (vec!["deleted".to_string()], 0));
 }
 
-fn toaster() -> Element {
+fn toaster() -> View {
     rsx! {
         ToastHost { "data-t": "toasts" }
         button { "data-t": "ok", onclick: move |_| _ = toast_for("Saved", Tone::Success, None), "ok" }
@@ -621,7 +635,7 @@ fn a_toast_shows_in_the_host_until_dismissed_or_its_time_is_up() {
     assert_eq!(ui.text("toasts"), "Failed×");
 }
 
-fn docs() -> Element {
+fn docs() -> View {
     rsx! {
         Markdown { "data-t": "md", source: "# Hi\n\nSee [site](https://e.com) and [home](/h). <script>alert(1)</script> [x](javascript:alert(1))\n\n- a\n- b" }
     }
@@ -638,7 +652,7 @@ fn markdown_renders_elements_never_live_html() {
     assert_eq!(ui.count(".aio-md ul.aio-md__list li"), 2);
 }
 
-fn viewport() -> Element {
+fn viewport() -> View {
     rsx! {
         ZoomPan { "data-t": "zp", onview: move |v: ZoomView| log(format!("{}", v.scale)),
             div { "data-t": "content", onclick: |_| log("content"), "map" }
@@ -659,7 +673,7 @@ fn the_zoom_buttons_zoom_and_a_click_still_reaches_the_content() {
     assert_eq!(said(), ["content"], "a plain click is not a drag");
 }
 
-fn camera() -> Element {
+fn camera() -> View {
     rsx! {
         ZoomPan { "data-t": "zp", style: "width: 400px; height: 300px",
             onview: move |v: ZoomView| log(format!("{:.1} {:.1} {:.3}", v.x, v.y, v.scale)),
@@ -722,46 +736,49 @@ fn cameras() -> &'static aio::held::Held<&'static str, String> {
 /// What the cameras did (they run off the view's thread).
 static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-fn camera_view() -> Element {
-    let mut key = use_signal(|| Some("front"));
-    let mut shown = use_signal(|| true);
+fn camera_view() -> View {
+    let key = signal(|| Some("front"));
+    let shown = signal(|| true);
     rsx! {
         button { "data-t": "back", onclick: move |_| key.set(Some("back")), "back" }
         button { "data-t": "off", onclick: move |_| key.set(None), "off" }
         button { "data-t": "hide", onclick: move |_| shown.set(false), "hide" }
-        if shown() {
-            Preview { cam: key() }
+        if shown.get() {
+            Preview { cam: key.get() }
         }
     }
 }
 
-#[component]
-fn Preview(cam: Option<&'static str>) -> Element {
-    let cam = use_held(cameras(), cam);
-    let text = match &cam {
+fn shown(cam: &Option<aio::held::State<String>>) -> String {
+    match cam {
         None => "none".to_string(),
         Some(aio::held::State::Open(v)) => v.to_string(),
         Some(_) => "…".to_string(),
-    };
-    rsx! { p { "data-t": "preview", "{text}" } }
+    }
+}
+
+/// On air a body runs once: the key follows its prop, the state is read in a hole.
+#[component]
+fn Preview(cam: Prop<Option<&'static str>>) -> View {
+    let cam = use_held(cameras(), cam);
+    rsx! { p { "data-t": "preview", {cam.with(shown)} } }
 }
 
 #[test]
 fn a_view_holds_one_camera_per_key_and_lets_go_on_a_change_and_at_unmount() {
+    // The cameras open and close off the view's thread: waited for, not timed.
     let mut ui = TestUi::new(camera_view);
-    ui.wait(Duration::from_millis(30));
-    assert_eq!(ui.text("preview"), "cam front");
+    ui.until_text("preview", "cam front");
     ui.click("back");
-    ui.wait(Duration::from_millis(30));
-    assert_eq!(ui.text("preview"), "cam back");
+    ui.until_text("preview", "cam back");
     ui.click("off");
-    ui.wait(Duration::from_millis(5));
-    assert_eq!(ui.text("preview"), "none");
+    ui.until_text("preview", "none");
+    ui.until("the back camera closed", || cameras().is_empty());
     assert_eq!(cameras().len(), 0, "nothing held without a key");
     ui.click("back");
-    ui.wait(Duration::from_millis(30));
+    ui.until_text("preview", "cam back");
     ui.click("hide");
-    ui.wait(Duration::from_millis(5));
+    ui.until("the camera closed with its view", || SAID.lock().unwrap().len() == 6);
     assert_eq!(
         *SAID.lock().unwrap(),
         ["open front", "close cam front", "open back", "close cam back", "open back", "close cam back"],
@@ -770,11 +787,11 @@ fn a_view_holds_one_camera_per_key_and_lets_go_on_a_change_and_at_unmount() {
     assert_eq!(cameras().len(), 0);
 }
 
-fn screens() -> Element {
-    let mut screen = use_signal(|| 2);
-    let mut dialog = use_signal(|| true);
+fn screens() -> View {
+    let mut screen = signal(|| 2);
+    let dialog = signal(|| true);
     use_back_button(move || {
-        if screen() == 0 {
+        if screen.get() == 0 {
             return false;
         }
         screen -= 1;
@@ -782,14 +799,14 @@ fn screens() -> Element {
     });
     rsx! {
         p { "data-t": "screen", "{screen}" }
-        if dialog() {
+        if dialog.get() {
             Dialog { close: move |_| dialog.set(false) }
         }
     }
 }
 
 #[component]
-fn Dialog(close: EventHandler) -> Element {
+fn Dialog(close: EventHandler) -> View {
     use_back_button(move || {
         close.call(());
         true
@@ -814,14 +831,14 @@ fn back_closes_the_dialog_first_then_goes_up_then_leaves() {
     assert!(!back(&mut ui), "at home nobody takes it: the app leaves");
 }
 
-fn window_app() -> Element {
-    let mut on = use_signal(|| true);
+fn window_app() -> View {
+    let on = signal(|| true);
     rsx! {
         GlobalKeys { style: "height: 300px",
             button { "data-t": "stop", onclick: move |e| e.stop_propagation(), "stop" }
             button { "data-t": "unmount", onclick: move |_| on.set(false), "unmount" }
             div { "data-t": "box", style: "width: 50px; height: 50px" }
-            if on() {
+            if on.get() {
                 Tracker {}
             }
         }
@@ -829,8 +846,8 @@ fn window_app() -> Element {
 }
 
 #[component]
-fn Tracker() -> Element {
-    let mut n = use_signal(|| 0);
+fn Tracker() -> View {
+    let mut n = signal(|| 0);
     use_global_key("ctrl+s", |_| log("saved"));
     use_window_event(move |e| {
         n += 1;
@@ -895,14 +912,14 @@ fn the_pointers_moves_reach_the_window_at_most_once_per_move_ms_the_last_too() {
 }
 
 #[component]
-fn Repeats() -> Element {
+fn Repeats() -> View {
     use_global_key("ctrl+s", |_| log("save"));
     use_global_key("ArrowDown", |_| log("down"));
     use_global_key(Chord::parse("ctrl+z").unwrap().repeating(true), |_| log("undo"));
     rsx! { p { "keys" } }
 }
 
-fn repeats() -> Element {
+fn repeats() -> View {
     rsx! {
         GlobalKeys { style: "height: 100px", Repeats {} }
     }
@@ -932,18 +949,26 @@ fn a_held_keys_repeats_fire_only_movement_and_bindings_that_say_so() {
     assert_eq!((n("save", &got), n("down", &got), n("undo", &got)), (1, 4, 4), "{got:?}");
 }
 
-fn forms() -> Element {
-    let mut sent = use_signal(|| 0);
-    let mut name = use_signal(String::new);
+fn forms() -> View {
+    let sent = signal(|| 0);
+    let name = signal(String::new);
+    let picked = signal(|| false);
     rsx! {
         p { "data-t": "sent", "{sent}" }
         form { onsubmit: move |e| { e.prevent_default(); sent += 1 },
             input { "data-t": "to" }
             input { "data-t": "amount" }
         }
-        form { onsubmit: move |e| { e.prevent_default(); if !name().is_empty() { sent += 10 } },
+        form { onsubmit: move |e| { e.prevent_default(); if !name.get().is_empty() { sent += 10 } },
             input { "data-t": "name", value: "{name}", oninput: move |e| name.set(e.value()) }
-            button { r#type: "submit", disabled: name().is_empty(), "Create" }
+            button { r#type: "submit", disabled: name.get().is_empty(), "Create" }
+        }
+        // Enter in an open combobox picks (the view enables Send): it never submits.
+        form { onsubmit: move |e| { e.prevent_default(); sent += 100 },
+            input { "data-t": "country", role: "combobox", aria_expanded: (!picked.get()).to_string(),
+                onkeydown: move |e: KeyboardEvent| if e.key() == Key::Enter { picked.set(true) },
+            }
+            button { r#type: "submit", disabled: !picked.get(), "Send" }
         }
     }
 }
@@ -964,22 +989,26 @@ fn enter_submits_a_form_with_no_submit_button_and_one_whose_button_the_view_is_e
     assert_eq!(ui.text("sent"), "11", "submitted once the view's answer enabled the button");
     ui.press("name", "Enter");
     assert_eq!(ui.text("sent"), "21", "an enabled button: the browser's own submit");
+    ui.press("country", "Enter");
+    ui.wait(std::time::Duration::from_millis(600));
+    assert_eq!(ui.attr("country", "aria-expanded").as_deref(), Some("false"), "Enter picked");
+    assert_eq!(ui.text("sent"), "21", "an open combobox's Enter picks, never submits");
 }
 
-fn portals() -> Element {
-    let mut open = use_signal(|| false);
-    let mut menu = use_signal(|| true);
-    let mut n = use_signal(|| 0);
+fn portals() -> View {
+    let open = signal(|| false);
+    let menu = signal(|| true);
+    let n = signal(|| 0);
     rsx! {
         PortalHost {
             div { "data-t": "clip", style: "overflow: hidden; height: 10px",
                 button { "data-t": "open", onclick: move |_| open.toggle(), "open" }
                 button { "data-t": "menu", onclick: move |_| menu.toggle(), "menu" }
-                if open() {
+                if open.get() {
                     Portal {
                         div { "data-t": "dialog",
                             button { "data-t": "inc", onclick: move |_| n += 1, "{n}" }
-                            if menu() {
+                            if menu.get() {
                                 Portal { ul { "data-t": "dropdown", "menu" } }
                             }
                             Counter {}
@@ -993,8 +1022,8 @@ fn portals() -> Element {
 }
 
 #[component]
-fn Counter() -> Element {
-    let mut c = use_signal(|| 0);
+fn Counter() -> View {
+    let c = signal(|| 0);
     rsx! { button { "data-t": "own", onclick: move |_| c += 1, "own {c}" } }
 }
 
@@ -1017,23 +1046,34 @@ fn a_portal_draws_at_the_root_keeps_its_state_and_handlers_and_leaves_nothing() 
     assert_eq!(ui.count(".aio-portals > *"), 0, "closed: nothing left behind");
 }
 
-fn fading() -> Element {
-    let mut show = use_signal(|| true);
+const FX: &str = "msg";
+
+fn fading() -> View {
+    let show = signal(|| true);
     rsx! {
         button { "data-t": "toggle", onclick: move |_| show.toggle(), "toggle" }
-        Transition { show: show(), enter: Motion::FADE, exit: Motion::FADE.ms(100), "data-t": "fx",
-            p { "data-t": "msg", "hello" }
+        Transition { show: show.get(), enter: Motion::FADE, exit: Motion::FADE.ms(100),
+            p { "data-t": "msg", style: "color: #123456", "hello" }
         }
     }
+}
+
+/// The animation `FX` plays: its name, length and direction.
+fn played(ui: &mut TestUi) -> String {
+    let js = format!(
+        "(() => {{ const s = getComputedStyle(document.querySelector('[data-t={FX}]'));
+           return `${{s.animationName}} ${{s.animationDuration}} ${{s.animationDirection}}`; }})()"
+    );
+    ui.eval(&js).as_str().unwrap_or_default().to_string()
 }
 
 #[test]
 fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
     let mut ui = TestUi::new(fading);
-    assert!(ui.attr("fx", "style").unwrap().contains("aio-fade 300ms ease 0ms 1 normal"));
+    assert_eq!(played(&mut ui), "aio-fade 0.3s normal");
     ui.click("toggle");
     assert!(ui.present("msg"), "still there while it leaves");
-    assert!(ui.attr("fx", "style").unwrap().contains("reverse"));
+    assert_eq!(played(&mut ui), "aio-fade 0.1s reverse");
     ui.wait(Duration::from_millis(150));
     assert!(ui.absent("msg"), "gone once the exit is over");
     ui.click("toggle");
@@ -1041,19 +1081,43 @@ fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
     ui.click("toggle");
     ui.wait(Duration::from_millis(150));
     assert!(ui.present("msg"), "show, hide, show: a cancelled exit removes nothing");
-    assert!(ui.attr("fx", "style").unwrap().contains("normal"));
+    assert_eq!(played(&mut ui), "aio-fade 0.3s normal");
+    {
+        let color = ui.eval("getComputedStyle(document.querySelector('[data-t=msg]')).color");
+        assert_eq!(color.as_str(), Some("rgb(18, 52, 86)"), "no box: the content's own style kept");
+        assert_eq!(ui.count(".aio-transition"), 0);
+    }
 }
 
-fn list() -> Element {
-    let mut items = use_signal(|| vec!["a", "b", "c"]);
-    let rows: Vec<(String, Element)> = items()
-        .into_iter()
-        .map(|k| (k.to_string(), rsx! { p { "data-t": "{k}", style: "height: 20px; margin: 0", "{k}" } }))
-        .collect();
+/// A motion written as a function plays the frames it gives.
+#[test]
+fn a_motion_written_as_a_function_plays_its_frames() {
+    let mut ui = TestUi::new(|| {
+        rsx! {
+            Transition { show: true, enter: Motion::of("aio-test-grow", |t| format!("opacity:{t};transform:scale({t})")).ms(5000),
+                p { "data-t": "msg", "hello" }
+            }
+        }
+    });
+    assert_eq!(played(&mut ui), "aio-test-grow 5s normal");
+    let rule = ui.eval("[...document.styleSheets].flatMap((s) => [...s.cssRules]).find((r) => r.name === 'aio-test-grow')?.cssRules.length");
+    assert_eq!(rule.as_u64(), Some(21), "sampled in 20 steps");
+}
+
+fn list() -> View {
+    let items = signal(|| vec!["a", "b", "c"]);
+    // Read in the prop, so the group follows on either renderer.
     rsx! {
         button { "data-t": "drop-b", onclick: move |_| items.set(vec!["a", "c", "d"]), "drop b" }
-        TransitionGroup { items: rows, enter: Motion::FADE, exit: Motion::FADE.ms(1000), flip: true, flip_ms: 100 }
+        TransitionGroup { items: list_rows(&items.get()), enter: Motion::FADE, exit: Motion::FADE.ms(1000), flip: true, flip_ms: 100 }
     }
+}
+
+fn list_rows(items: &[&'static str]) -> Vec<(String, View)> {
+    items
+        .iter()
+        .map(|&k| (k.to_string(), rsx! { p { "data-t": "{k}", style: "height: 20px; margin: 0", "{k}" } }))
+        .collect()
 }
 
 /// The rows' handles in drawn order.
@@ -1067,46 +1131,85 @@ fn order(ui: &TestUi) -> String {
         .collect()
 }
 
-/// Is row `t`'s style saying `what`?
-fn row_says(ui: &TestUi, t: &str, what: &str) -> bool {
-    ui.count(&format!(".aio-tgroup__row[style*='{what}'] [data-t={t}]")) == 1
-}
-
 #[test]
 fn a_group_keeps_a_leaving_row_in_its_place_until_it_is_gone_and_slides_moved_rows() {
     let mut ui = TestUi::new(list);
     ui.wait(Duration::from_millis(20));
+    // Each phase lasts a while or a frame in real time: the page notes each
+    // order its rows take and every style each row takes, as they are set,
+    // so none is missed however late the test looks on a loaded machine.
+    ui.eval(
+        "(() => { const g = document.querySelector('.aio-tgroup'), w = window.__tg = { orders: [], styles: {} };
+          const key = (row) => row.querySelector('[data-t]')?.dataset.t;
+          const note = (k, s) => { const l = (w.styles[k] ||= []); if (l[l.length - 1] !== s) l.push(s); };
+          const snap = () => {
+            const rows = [...g.children].filter((r) => r.classList.contains('aio-tgroup__row'));
+            const o = rows.map(key).join('');
+            if (w.orders[w.orders.length - 1] !== o) w.orders.push(o);
+            for (const r of rows) note(key(r), r.getAttribute('style') || '');
+          };
+          new MutationObserver((ms) => {
+            for (const m of ms) if (m.type === 'attributes' && m.target.classList.contains('aio-tgroup__row')) note(key(m.target), m.oldValue || '');
+            snap();
+          }).observe(g, { subtree: true, childList: true, attributes: true, attributeFilter: ['style'], attributeOldValue: true });
+          snap();
+        })()",
+    );
     ui.click("drop-b");
-    assert_eq!(order(&ui), "abcd", "b leaves where it was; d enters at the end");
-    assert!(row_says(&ui, "b", "reverse") && row_says(&ui, "d", "normal"));
-    // Each phase lasts a while or a frame in real time: watched for as it plays.
-    let seen = |ui: &mut TestUi, what: &str, f: &dyn Fn(&TestUi) -> bool| {
-        let end = std::time::Instant::now() + Duration::from_secs(2);
-        while !f(ui) {
-            assert!(std::time::Instant::now() < end, "never seen: {what}");
-            ui.wait(Duration::from_millis(1));
-        }
+    let orders = |ui: &mut TestUi| -> Vec<String> { serde_json::from_value(ui.eval("window.__tg.orders")).unwrap() };
+    // Row `t`'s styles in the order it took them.
+    let styles = |ui: &mut TestUi, t: &str| -> Vec<String> {
+        serde_json::from_value(ui.eval(&format!("window.__tg.styles['{t}'] || []"))).unwrap()
     };
-    seen(&mut ui, "gone once its exit is over", &|ui| order(ui) == "acd");
-    seen(&mut ui, "the rows below slide up from where they were", &|ui| {
-        row_says(ui, "c", "translate(0px,20px)") && row_says(ui, "d", "translate(0px,20px)")
-    });
-    assert!(!row_says(&ui, "a", "translate"), "a stays");
-    seen(&mut ui, "played back", &|ui| row_says(ui, "c", "transform:none;transition:transform 100ms"));
-    // (Dioxus keeps a style property the new style leaves out: `transform: none` stays.)
-    seen(&mut ui, "and landed", &|ui| !row_says(ui, "c", "translate") && !row_says(ui, "c", "transition:transform"));
+    let slid = |ss: &[String]| {
+        let from = ss.iter().position(|s| s.contains("translate(0px,20px)"));
+        let back =
+            from.and_then(|i| ss[i..].iter().position(|s| s.contains("transform:none;transition:transform 100ms")));
+        let now = ss.last().unwrap();
+        back.is_some() && !now.contains("translate") && !now.contains("transition:transform")
+    };
+    // A hang guard, not a measure: done when it is done.
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    while !(order(&ui) == "acd" && slid(&styles(&mut ui, "c")) && slid(&styles(&mut ui, "d"))) {
+        assert!(
+            std::time::Instant::now() < end,
+            "b gone once its exit is over, and the rows below slid up from where they were, played back and landed: \
+             orders {:?}, c {:?}, d {:?}",
+            orders(&mut ui),
+            styles(&mut ui, "c"),
+            styles(&mut ui, "d")
+        );
+        ui.wait(Duration::from_millis(10));
+    }
+    assert_eq!(orders(&mut ui), ["abc", "abcd", "acd"], "b leaves where it was; d enters at the end; then b is gone");
+    assert!(styles(&mut ui, "b").iter().any(|s| s.contains("reverse")), "b plays its exit");
+    assert!(styles(&mut ui, "d").iter().any(|s| s.contains("normal")), "d plays its enter");
+    assert!(styles(&mut ui, "a").iter().all(|s| !s.contains("translate")), "a stays");
 }
 
 #[component]
-fn Deferred(trigger: Trigger, t: &'static str) -> Element {
+fn Deferred(trigger: Trigger, t: &'static str) -> View {
     rsx! {
-        Defer { trigger, "data-t": "{t}", placeholder: rsx! { span { "data-t": "{t}-wait", "…" } },
-            p { "data-t": "{t}-shown", "chart" }
+        Defer { trigger, "data-t": "{t}", placeholder: rsx! { Waiting { t } },
+            Drawn { t }
         }
     }
 }
 
-fn deferred() -> Element {
+/// The placeholder and the content, each saying when it is drawn.
+#[component]
+fn Waiting(t: &'static str) -> View {
+    log(format!("{t} wait"));
+    rsx! { span { "data-t": "{t}-wait", "…" } }
+}
+
+#[component]
+fn Drawn(t: &'static str) -> View {
+    log(format!("{t} shown"));
+    rsx! { p { "data-t": "{t}-shown", "chart" } }
+}
+
+fn deferred() -> View {
     rsx! {
         Deferred { trigger: Trigger::Now, t: "now" }
         Deferred { trigger: Trigger::After(Duration::from_millis(300)), t: "timer" }
@@ -1125,12 +1228,16 @@ fn deferred_content_waits_for_its_trigger_then_stays() {
     // aio tests/defer.test.ts.
     let mut ui = TestUi::new(deferred);
     assert!(ui.present("now-shown"));
-    for t in ["timer", "hover", "tap", "seen"] {
+    for t in ["hover", "tap", "seen"] {
         assert!(ui.present(&format!("{t}-wait")) && ui.absent(&format!("{t}-shown")), "{t}: the placeholder first");
     }
+    // The timer's may be over by now on a loaded machine: told by what was drawn.
+    ui.until("the timer's content", || LOG.with(|l| l.borrow().iter().any(|s| s == "timer shown")));
+    let mut timer: Vec<String> = said().into_iter().filter(|s| s.starts_with("timer")).collect();
+    timer.dedup();
+    assert_eq!(timer, ["timer wait", "timer shown"], "timer: the placeholder first");
     ui.wait(Duration::from_millis(30));
     assert!(ui.present("idle-shown"), "idle: after the first frame");
-    ui.wait(Duration::from_millis(300));
     assert!(ui.present("timer-shown"));
     ui.hover("hover");
     assert!(ui.present("hover-shown"));
@@ -1171,7 +1278,13 @@ fn signup_check(s: &Signup) -> Problems {
     p
 }
 
-fn signup() -> Element {
+thread_local! {
+    /// Whether the name check may answer: a test holds it to see the wait
+    /// (each test, and its views, on a thread of its own).
+    static ANSWERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn signup() -> View {
     let f = use_form(Signup::default, signup_check);
     use_async_rule(
         f,
@@ -1180,14 +1293,15 @@ fn signup() -> Element {
         Duration::from_millis(300),
         |name: String| async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
+            while !ANSWERS.get() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
             (name == "taken").then(|| "That name is taken".to_string())
         },
     );
-    let v = f.values();
-    let tags = v.tags.join(",");
     rsx! {
         Field { label: "Name", error: f.error("name"), "data-t": "name-field",
-            Input { value: v.name, "data-t": "name", oninput: move |n| f.edit("name", |s| s.name = n), onchange: move |_| f.touch("name") }
+            Input { value: f.values().name, "data-t": "name", oninput: move |n| f.edit("name", |s| s.name = n), onchange: move |_| f.touch("name") }
         }
         Field { label: "Age", error: f.error("age"),
             Input { r#type: "number", "data-t": "age", oninput: move |n: String| f.edit("age", |s| s.age = n.parse().ok()) }
@@ -1198,12 +1312,10 @@ fn signup() -> Element {
         Field { label: "Confirm", error: f.error("confirm"),
             Input { r#type: "password", "data-t": "confirm", oninput: move |n| f.edit("confirm", |s| s.confirm = n) }
         }
-        p { "data-t": "tags", "{tags}" }
+        p { "data-t": "tags", {f.values().tags.join(",")} }
         button { "data-t": "add-tag", onclick: move |_| f.edit("tags", |s| s.tags.push(format!("t{}", s.tags.len()))), "add" }
         button { "data-t": "move-tag", onclick: move |_| f.edit("tags", |s| move_item(&mut s.tags, 0, 1)), "move" }
-        if let Some(e) = f.form_error() {
-            p { "data-t": "form-error", "{e}" }
-        }
+        {f.form_error().map(|e| rsx! { p { "data-t": "form-error", "{e}" } })}
         p { "data-t": "state", "{f.valid()} {f.dirty()} {f.checking(\"name\")}" }
         button { "data-t": "submit", onclick: move |_| if let Some(s) = f.submit() { log(format!("sent {} {:?}", s.name, s.age)) }, "submit" }
         button { "data-t": "reset", onclick: move |_| f.reset(), "reset" }
@@ -1259,17 +1371,22 @@ fn a_form_shows_errors_once_left_or_submitted_and_sends_only_valid_values() {
 fn a_waiting_rule_answers_the_latest_value_after_its_debounce_and_yields_to_the_fields_own() {
     // aio tests/form-async.test.ts, form-async-superseded-by-sync-error.test.ts.
     let mut ui = TestUi::new(signup);
+    ANSWERS.set(false);
     ui.type_text("name", "taken");
     ui.blur("name");
     assert!(ui.text("state").ends_with("true"), "checking");
+    ANSWERS.set(true);
     pass(&mut ui, 500);
     assert!(ui.text("name-field").contains("That name is taken"));
     ui.type_text("name", "x");
     assert!(!ui.text("name-field").contains("taken"), "an edit makes the answer stale");
     pass(&mut ui, 500);
     assert!(!ui.text("name-field").contains("taken"), "takenx is free");
+    // The answer for 'taken' held until the field is emptied: it comes late.
+    ANSWERS.set(false);
     ui.set_value("name", "taken");
     ui.set_value("name", "");
+    ANSWERS.set(true);
     pass(&mut ui, 500);
     assert!(
         ui.text("name-field").contains("Required") && !ui.text("name-field").contains("taken"),
@@ -1277,12 +1394,12 @@ fn a_waiting_rule_answers_the_latest_value_after_its_debounce_and_yields_to_the_
     );
 }
 
-fn shortcuts() -> Element {
-    let mut on = use_signal(|| true);
+fn shortcuts() -> View {
+    let on = signal(|| true);
     rsx! {
         GlobalKeys {
             Bindings {}
-            if on() {
+            if on.get() {
                 Scoped {}
             }
             button { "data-t": "btn", "focus me" }
@@ -1293,7 +1410,7 @@ fn shortcuts() -> Element {
 }
 
 #[component]
-fn Bindings() -> Element {
+fn Bindings() -> View {
     use_global_key("ctrl+s", |_| log("save"));
     use_global_key("ctrl+shift+s", |_| log("save-as"));
     use_global_key("mod+k", |_| log("palette"));
@@ -1304,7 +1421,7 @@ fn Bindings() -> Element {
 }
 
 #[component]
-fn Scoped() -> Element {
+fn Scoped() -> View {
     use_global_key("escape", |_| log("escape"));
     rsx! {}
 }
@@ -1379,10 +1496,10 @@ thread_local! {
     static CONN: RefCell<Option<Signal<aio::Conn>>> = const { RefCell::new(None) };
 }
 
-fn connection() -> Element {
-    let conn = use_signal(|| aio::Conn::Online);
+fn connection() -> View {
+    let conn = signal(|| aio::Conn::Online);
     CONN.with(|c| *c.borrow_mut() = Some(conn));
-    rsx! { ConnectionStatus { status: aio::Status { conn: conn(), ..aio::Status::LOCAL } } }
+    rsx! { ConnectionStatus { status: aio::Status { conn: conn.get(), ..aio::Status::LOCAL } } }
 }
 
 #[test]
@@ -1408,13 +1525,16 @@ fn the_connection_pill_says_reconnecting_then_connected() {
     assert!(CSS.contains(".aio-conn--success") && CSS.contains("aio-conn-out"));
 }
 
-fn springy() -> Element {
+fn springy() -> View {
     let x = use_spring(0.0, Spring::default());
-    let mut ticks = use_signal(|| 0);
-    let mut on = use_signal(|| true);
-    let mut frames = use_signal(|| 0);
-    use_interval(Duration::from_millis(5), on(), move || ticks += 1);
-    use_frame(on(), move |_, _| frames += 1);
+    let mut ticks = signal(|| 0);
+    let on = signal(|| true);
+    let mut frames = signal(|| 0);
+    // On air a hook's body runs once: `active` is the signal, followed.
+    let active = on;
+    use_interval(Duration::from_millis(5), active, move || ticks += 1);
+    use_frame(active, move |_, _| frames += 1);
+    effect(move || log(format!("{:.2}", x.value())));
     rsx! {
         p { "data-t": "x", "{x.value():.2} {x.animating()}" }
         p { "data-t": "ticks", "{ticks}" }
@@ -1429,13 +1549,15 @@ fn springy() -> Element {
 fn a_spring_moves_to_its_target_and_rests_there() {
     let mut ui = TestUi::new(springy);
     assert_eq!(ui.text("x"), "0.00 false");
+    said();
     ui.click("go");
-    let mut seen = vec![];
+    // Every value it was drawn at, however late the test looks.
+    let end = std::time::Instant::now() + Duration::from_secs(20);
     while ui.text("x") != "100.00 false" {
-        assert!(seen.len() < 500, "never at rest: {}", ui.text("x"));
-        seen.push(ui.text("x").split(' ').next().unwrap().parse::<f64>().unwrap());
+        assert!(std::time::Instant::now() < end, "never at rest: {}", ui.text("x"));
         ui.wait(Duration::from_millis(10));
     }
+    let seen: Vec<f64> = said().iter().map(|v| v.parse().unwrap()).collect();
     assert!(seen.iter().any(|&v| v > 1.0 && v < 99.0), "it moved through the way: {seen:?}");
     assert!(seen.windows(2).all(|w| w[1] >= w[0]), "toward the target only: {seen:?}");
     ui.click("jump");
@@ -1464,15 +1586,15 @@ thread_local! {
 }
 
 #[component]
-fn Ticker() -> Element {
+fn Ticker() -> View {
     use_interval(Duration::from_millis(5), true, || TICKS.with(|t| t.set(t.get() + 1)));
     rsx! { "ticking" }
 }
 
-fn mounted_ticker() -> Element {
-    let mut on = use_signal(|| true);
+fn mounted_ticker() -> View {
+    let on = signal(|| true);
     rsx! {
-        if on() { Ticker {} }
+        if on.get() { Ticker {} }
         button { "data-t": "unmount", onclick: move |_| on.set(false), "x" }
     }
 }
@@ -1499,21 +1621,27 @@ thread_local! {
 }
 
 #[component]
-fn ColorOf() -> Element {
-    RENDERS.with(|r| r.borrow_mut().push("color"));
+fn ColorOf() -> View {
     let c = use_context_select(|l: &Look| l.color);
+    effect(move || {
+        c.get();
+        RENDERS.with(|r| r.borrow_mut().push("color"))
+    });
     rsx! { p { "data-t": "color", "{c}" } }
 }
 
 #[component]
-fn SizeOf() -> Element {
-    RENDERS.with(|r| r.borrow_mut().push("size"));
+fn SizeOf() -> View {
     let s = use_context_select(|l: &Look| l.size);
+    effect(move || {
+        s.get();
+        RENDERS.with(|r| r.borrow_mut().push("size"))
+    });
     rsx! { p { "data-t": "size", "{s}" } }
 }
 
-fn looks() -> Element {
-    let mut look = use_context_provider(|| Signal::new(Look { color: "red", size: 1 }));
+fn looks() -> View {
+    let look = provide(|| Signal::new(Look { color: "red", size: 1 }));
     rsx! {
         ColorOf {}
         SizeOf {}
@@ -1522,12 +1650,12 @@ fn looks() -> Element {
 }
 
 #[test]
-fn a_context_selection_re_renders_only_when_its_part_changes() {
+fn a_context_selection_follows_only_its_part() {
     let mut ui = TestUi::new(looks);
     RENDERS.with(|r| r.borrow_mut().clear());
     ui.click("recolor");
     assert_eq!((ui.text("color"), ui.text("size")), ("blue".into(), "1".into()));
-    assert_eq!(RENDERS.with(|r| r.take()), ["color"], "the size view didn't re-render");
+    assert_eq!(RENDERS.with(|r| r.take()), ["color"], "what reads the size didn't run again");
     let ui = TestUi::new(|| rsx! { SizeOf {} });
     assert_eq!(ui.text("size"), "0", "no provider: the default");
 }
@@ -1545,10 +1673,10 @@ fn a_kit_control_on_a_page_nothing_styles_is_said() {
     assert_eq!(unstyled("", "aio-stack"), None, "a class the kit doesn't style can't lack it");
 }
 
-fn long_list() -> Element {
-    let mut to = use_signal(|| None::<usize>);
+fn long_list() -> View {
+    let to = signal(|| None::<usize>);
     rsx! {
-        VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: to(),
+        VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: to.get(),
             row: |i| rsx! { span { "data-t": "row{i}", "#{i}" } }
         }
         button { "data-t": "jump", onclick: move |_| to.set(Some(500)), "jump" }
@@ -1570,7 +1698,7 @@ fn a_virtual_list_renders_only_the_rows_its_scroll_shows() {
 
 thread_local!(static ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
 
-fn counted_list() -> Element {
+fn counted_list() -> View {
     rsx! {
         VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 3,
             row: |i| {
@@ -1611,15 +1739,15 @@ mod travel {
 
     aio::client!(Count, count);
 
-    fn app() -> Element {
+    fn app() -> View {
         use_live();
         let tl = use_time_travel();
         rsx! {
             GlobalKeys {
                 p { "data-t": "n", "{count().n}" }
-                p { "data-t": "hist", {tl().map_or("none".into(), |t| t.steps.len().to_string())} }
+                p { "data-t": "hist", {tl.get().map_or("none".into(), |t| t.steps.len().to_string())} }
                 button { "data-t": "inc", onclick: |_| _ = act!(inc()), "inc" }
-                TimeTravelPanel { timeline: tl(), onask: |a| if let Err(e) = time_travel(a) { log(e.why) } }
+                TimeTravelPanel { timeline: tl.get(), onask: |a| if let Err(e) = time_travel(a) { log(e.why) } }
             }
         }
     }
@@ -1668,7 +1796,7 @@ struct Chart {
 
 const CHART: Island = Island::js("return (el, p) => { el.textContent = p.series.join(','); };");
 
-fn island() -> Element {
+fn island() -> View {
     rsx! {
         WebIsland::<Chart, ()> {
             island: CHART,
@@ -1704,13 +1832,13 @@ struct Said {
     series: Vec<i32>,
 }
 
-fn sandboxed() -> Element {
-    let mut said = use_signal(String::new);
-    let mut n = use_signal(|| 2);
+fn sandboxed() -> View {
+    let said = signal(String::new);
+    let n = signal(|| 2);
     rsx! {
         WebIsland {
             island: PROBE,
-            props: Chart { series: vec![0; n()] },
+            props: Chart { series: vec![0; n.get()] },
             onevent: move |s: Said| said.set(format!("{:?}", s.series)),
             "data-t": "probe",
         }
@@ -1728,7 +1856,7 @@ fn a_sandboxed_island_runs_in_a_frame_of_its_own_and_still_talks_through_its_pro
     ui.until_text("said", "[0, 0, 0]");
 }
 
-fn browser() -> Element {
+fn browser() -> View {
     rsx! {
         Browser { src: "https://a.example/", class: "pane", "data-t": "web", host_keys: vec!["Escape".into()] }
     }
@@ -1744,12 +1872,12 @@ fn a_browser_is_a_box_of_the_view_that_the_page_fills_with_its_guest() {
     assert!(ui.attr("web", "data-aio-island").is_some());
 }
 
-fn coached() -> Element {
-    let mut coach = use_signal(|| false);
+fn coached() -> View {
+    let coach = signal(|| false);
     rsx! {
         GlobalKeys {
             Escapes {}
-            if coach() {
+            if coach.get() {
                 Coach {}
             }
             button { "data-t": "coach", onclick: move |_| coach.toggle(), "coach" }
@@ -1764,7 +1892,7 @@ fn coached() -> Element {
 }
 
 #[component]
-fn Escapes() -> Element {
+fn Escapes() -> View {
     use_global_key("escape", |_| log("escape"));
     use_window_event(|e| {
         if let WindowEvent::KeyDown(k) = e {
@@ -1775,7 +1903,7 @@ fn Escapes() -> Element {
 }
 
 #[component]
-fn Coach() -> Element {
+fn Coach() -> View {
     use_key_claim("enter", |e| log(format!("coach {}", e.key())));
     use_key_claim(Chord::parse("f1").unwrap().in_fields(), |_| log("hint"));
     rsx! {}
@@ -1814,4 +1942,184 @@ fn a_claimed_key_goes_to_its_claim_before_anything_hears_it() {
     ui.click("coach");
     ui.press("ok", "Enter");
     assert_eq!(said(), ["dialog Enter", "window Enter"], "the claim went with its component");
+}
+
+/// Labels and titles take any content on air (aio's `string | VNode`): a
+/// view where text would go, text that follows state, a toast with a link.
+#[test]
+fn labels_and_titles_take_any_content() {
+    let mut ui = TestUi::new(|| {
+        let n = signal(|| 1u32);
+        rsx! {
+            Field { label: rsx! { b { "data-t": "bold", "Name" } }, Input { "data-t": "name" } }
+            Checkbox { label: "{n} picked", "data-t": "box" }
+            Alert { title: rsx! { em { "data-t": "em", "Heads up" } }, "body" }
+            Tabs { tabs: vec![Tab::new("a", rsx! { i { "data-t": "tab-i", "Alpha" } }, rsx! { p { "A" } })] }
+            EmptyState { title: rsx! { span { "data-t": "empty-t", "Nothing" } } }
+            button { "data-t": "more", onclick: move |_| n += 1, "more" }
+            button { "data-t": "toast", onclick: move |_| _ = toast_view(rsx! { a { "data-t": "undo", href: "#", "Undo" } }, Tone::Info, None), "toast" }
+            ToastHost {}
+        }
+    });
+    assert_eq!(named(&mut ui, "[data-t=name]"), "Name", "a view labels the field's control");
+    assert!(ui.present("bold") && ui.present("em") && ui.present("tab-i") && ui.present("empty-t"));
+    assert_eq!(named(&mut ui, "[data-t=box]"), "1 picked");
+    ui.click("more");
+    assert_eq!(named(&mut ui, "[data-t=box]"), "2 picked", "text given a label follows state");
+    ui.click("toast");
+    assert!(ui.present("undo"), "a toast shows a view");
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct Sign {
+    name: String,
+    city: String,
+}
+
+fn sign_check(s: &Sign) -> Problems {
+    if s.name.is_empty() { vec![("name", "Required".into())] } else { vec![] }
+}
+
+/// A bound input (aio's `form.bind`): its value, edits and blur in one
+/// prop; its error shows once it was left; one field resets alone.
+#[test]
+fn a_bound_input_shows_its_error_once_left_and_one_field_resets_alone() {
+    let mut ui = TestUi::new(|| {
+        let form = use_form(|| Sign { name: String::new(), city: "Rome".into() }, sign_check);
+        rsx! {
+            Field { label: "Name", error: form.error("name"), Input { "data-t": "name", bind: form.bind(aio::field!(name)) } }
+            Input { "data-t": "city", bind: form.bind(aio::field!(city)) }
+            p { "data-t": "said", {form.values().city} }
+            p { "data-t": "touched", {form.touched("city").to_string()} }
+            button { "data-t": "reset-city", onclick: move |_| form.reset_field(aio::field!(city)), "reset" }
+        }
+    });
+    let value = |ui: &mut TestUi, t: &str| {
+        ui.eval(&format!("document.querySelector('[data-t={t}]').value")).as_str().unwrap_or_default().to_string()
+    };
+    assert_eq!(value(&mut ui, "city"), "Rome", "the field's value");
+    assert_eq!(ui.count(".aio-field__error"), 0, "not left yet: no error");
+    ui.click("name");
+    ui.click("city");
+    assert_eq!(ui.text("css=.aio-field__error"), "Required", "left: its error shows");
+    assert_eq!(ui.count("[data-t=name][aria-invalid=true]"), 1);
+    ui.type_text("city", "x");
+    assert_eq!(ui.text("said"), "Romex", "an edit writes the field");
+    ui.click("reset-city");
+    assert_eq!(
+        (ui.text("said"), value(&mut ui, "city"), ui.text("touched")),
+        ("Rome".into(), "Rome".into(), "false".into())
+    );
+    assert_eq!(ui.text("css=.aio-field__error"), "Required", "the other field keeps its state");
+}
+
+/// A list of rows (aio's `useFieldArray`): push, move, set, remove, reset;
+/// out of range changes nothing.
+#[test]
+fn a_field_array_edits_its_rows() {
+    let mut ui = TestUi::new(|| {
+        let rows = use_field_array(|| vec!["a".to_string()]);
+        let r = rows.clone();
+        rsx! {
+            p { "data-t": "rows", {rows.items().join(",")} }
+            button { "data-t": "go", onclick: move |_| {
+                r.push("b".into());
+                r.push("c".into());
+                r.move_item(0, 2);
+                r.set(0, "B".into());
+                r.remove(1);
+                r.remove(9);
+            }, "go" }
+            button { "data-t": "reset", onclick: move |_| rows.reset(), "reset" }
+        }
+    });
+    ui.click("go");
+    assert_eq!(ui.text("rows"), "B,a");
+    ui.click("reset");
+    assert_eq!(ui.text("rows"), "a");
+}
+
+/// A reaction to a change (aio's `onChange`): only the selector is
+/// followed, it waits for a change, and its cleanup runs before the next
+/// change and when the view goes.
+#[test]
+fn a_reaction_runs_on_a_change_with_the_previous_value_and_cleans_up() {
+    let mut ui = TestUi::new(|| {
+        let n = signal(|| 0u32);
+        let other = signal(|| 0u32);
+        let open = signal(|| true);
+        rsx! {
+            button { "data-t": "inc", onclick: move |_| n += 1, "inc" }
+            button { "data-t": "other", onclick: move |_| other += 1, "other" }
+            button { "data-t": "close", onclick: move |_| open.set(false), "close" }
+            if open.get() {
+                Reacts { n, other }
+            }
+        }
+    });
+    assert_eq!(said(), Vec::<String>::new(), "it waits for a change");
+    ui.click("inc");
+    assert_eq!(said(), Vec::<String>::new(), "0 / 2 is still 0: no change");
+    ui.click("inc");
+    assert_eq!(said(), ["1 after Some(0) (other 0)"]);
+    ui.click("other");
+    assert_eq!(said(), Vec::<String>::new(), "what f reads is not followed");
+    ui.click("inc");
+    ui.click("inc");
+    assert_eq!(said(), ["cleanup 1", "2 after Some(1) (other 1)"]);
+    ui.click("close");
+    assert_eq!(said(), ["cleanup 2"]);
+}
+
+#[component]
+fn Reacts(n: Signal<u32>, other: Signal<u32>) -> View {
+    use_on_change(
+        move || n.get() / 2,
+        move |v, prev| {
+            log(format!("{v} after {prev:?} (other {})", other.get()));
+            let v = *v;
+            move || log(format!("cleanup {v}"))
+        },
+    );
+    rsx! {}
+}
+
+thread_local! {
+    static GATE: RefCell<Option<tokio::sync::oneshot::Receiver<Result<u32, String>>>> = const { RefCell::new(None) };
+}
+
+/// Deferred content that loads (aio's `Defer` `load`, `loading`, `error`,
+/// `loadingMinMs`): the loading view while it runs, then what it made, or
+/// the error it said.
+#[test]
+fn deferred_content_loads_shows_its_loading_view_then_the_content_or_its_error() {
+    let app = || {
+        rsx! {
+            Defer { trigger: Trigger::Interaction, "data-t": "box",
+                placeholder: rsx! { p { "data-t": "wait", "click me" } },
+                loading: rsx! { p { "data-t": "loading", "…" } },
+                error: |e: String| rsx! { p { "data-t": "failed", "{e}" } },
+                loading_min_ms: 50,
+                load: load(|| async {
+                    let rx = GATE.with_borrow_mut(Option::take).expect("the test's gate");
+                    let n = rx.await.map_err(|e| e.to_string())??;
+                    Ok(rsx! { p { "data-t": "loaded", "{n} rows" } })
+                }),
+            }
+        }
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    GATE.set(Some(rx));
+    let mut ui = TestUi::new(app);
+    assert!(ui.present("wait") && ui.absent("loading"));
+    ui.click("box");
+    assert!(ui.present("loading"), "triggered: loading while it runs");
+    tx.send(Ok(3)).unwrap();
+    ui.until_text("loaded", "3 rows");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    GATE.set(Some(rx));
+    let mut ui = TestUi::new(app);
+    ui.click("box");
+    tx.send(Err("the disk is gone".into())).unwrap();
+    ui.until_text("failed", "the disk is gone");
 }

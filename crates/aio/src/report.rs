@@ -114,8 +114,19 @@ pub fn on_problem(hook: impl Fn(&str, &str) + Send + Sync + 'static) {
 /// Tell the [`on_problem`] hook only: a warning (a blown budget, a refused
 /// schedule), not worth a report of its own.
 pub(crate) fn tell(kind: &str, message: &str) {
-    notify(kind, message);
+    notify(kind, message, Severity::Warn);
 }
+
+/// Put `kind` on the bus at `severity` (a vitals step, a recovery): the
+/// hook and the subscribers hear it; no report is written.
+pub(crate) fn say(kind: &str, message: &str, severity: Severity) {
+    notify(kind, message, severity);
+}
+
+/// How bad a [`Diagnostic`] is (aio's bus severity): a problem is an
+/// error, a warning (a budget, a vitals step up) a warning, a recovery
+/// info.
+pub use crate::log::Level as Severity;
 
 /// What a problem's `kind` is, typed: `on_problem(|kind, _| match Code::of(kind) { … })`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +155,10 @@ pub enum Code {
     UpdateFailed,
     /// `user`: filed by the user.
     User,
+    /// `degraded-recovered:<part>`: a degraded part works again (aio's).
+    Recovered,
+    /// `vitals:<layer>`: a layer stepped up to warning or frozen, or back.
+    Vitals,
     /// Any other kind (an app's own).
     Other,
 }
@@ -163,6 +178,8 @@ impl Code {
             "window" => Self::Window,
             "update" if kind == "update:failed" => Self::UpdateFailed,
             "user" => Self::User,
+            "degraded-recovered" => Self::Recovered,
+            "vitals" => Self::Vitals,
             _ => Self::Other,
         }
     }
@@ -178,6 +195,7 @@ impl Code {
             Self::BudgetEffect => "await async I/O, or use tokio::task::spawn_blocking ([perf.effects])",
             Self::Memory => "look for state or caches that only grow",
             Self::Storm => "find what calls the method in reply to its own change (a feedback loop)",
+            Self::Vitals => "the message names the likely cause; `ax vitals <app>` shows every layer",
             _ => return None,
         })
     }
@@ -189,14 +207,14 @@ pub fn teach(what: &str, fix: &str) -> String {
     format!("{what} → fix: {fix}")
 }
 
-fn notify(kind: &str, message: &str) {
+fn notify(kind: &str, message: &str, severity: Severity) {
     thread_local!(static IN_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
     // A hook's own panic is a problem too: logged, not handed back to it.
     if IN_HOOK.replace(true) {
         return;
     }
     let hook = HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let heard = bus().publish(kind, message, now_ms());
+    let heard = bus().publish(kind, message, severity, now_ms());
     let guarded = |f: &dyn Fn()| std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).err();
     let mut panics: Vec<_> =
         hook.and_then(|h| guarded(&|| h(kind, message))).map(|p| ("on_problem hook", p)).into_iter().collect();
@@ -219,6 +237,17 @@ pub struct Diagnostic {
     /// Of this kind, how many the bus held back since the last one it let
     /// through ([`QUIET_MS`]): nothing is lost, only not said again.
     pub held: u64,
+    /// How bad it is: `Error` (a problem), `Warn`, `Info` (a recovery).
+    pub severity: Severity,
+    /// The one thing to do about it ([`Code::tip`]), when there is one.
+    pub tip: Option<&'static str>,
+}
+
+impl Diagnostic {
+    /// Its kind, typed (aio's error codes): `report::subscribe(|d| match d.code() { … })`.
+    pub fn code(&self) -> Code {
+        Code::of(&self.kind)
+    }
 }
 
 /// The same kind within this many ms is counted, not said again.
@@ -249,7 +278,7 @@ impl Bus {
     }
 
     /// Let `kind` through at `at`? Then as a diagnostic, with who hears it.
-    fn publish(&mut self, kind: &str, message: &str, at: i64) -> Option<(Diagnostic, Vec<Sub>)> {
+    fn publish(&mut self, kind: &str, message: &str, severity: Severity, at: i64) -> Option<(Diagnostic, Vec<Sub>)> {
         let held = match self.last.get_mut(kind) {
             Some((t, n)) if at - *t < QUIET_MS => {
                 *n += 1;
@@ -268,7 +297,8 @@ impl Bus {
                 0
             }
         };
-        let d = Diagnostic { at, kind: kind.into(), message: cut(message, 2000), held };
+        let tip = Code::of(kind).tip();
+        let d = Diagnostic { at, kind: kind.into(), message: cut(message, 2000), held, severity, tip };
         if self.recent.len() == RECENT {
             self.recent.pop_front();
         }
@@ -334,7 +364,8 @@ pub(crate) fn relayed(who: &str, d: &Value, now: i64, window: &mut (i64, u32)) -
 /// Put what a client heard ([`relayed`]) on this bus.
 pub(crate) fn relay(who: &str, d: &Value, window: &mut (i64, u32)) {
     if let Some((kind, message)) = relayed(who, d, now_ms(), window) {
-        notify(&kind, &message);
+        let severity = serde_json::from_value(d["severity"].clone()).unwrap_or(Severity::Warn);
+        notify(&kind, &message, severity);
     }
 }
 
@@ -342,7 +373,7 @@ pub(crate) fn relay(who: &str, d: &Value, window: &mut (i64, u32)) {
 /// message was reported this run, or [`AUTO_CAP`] were. Returns the file.
 /// The [`on_problem`] hook sees it either way.
 pub fn problem(kind: &str, message: &str) -> Option<PathBuf> {
-    notify(kind, message);
+    notify(kind, message, Severity::Error);
     let about = {
         let mut g = reporter();
         let r = g.as_mut().filter(|r| r.about.auto)?;
@@ -423,6 +454,8 @@ pub struct Context {
     pub timeline: Vec<Value>,
     pub diagnostics: Vec<Diagnostic>,
     pub contact: Option<String>,
+    /// The call it happened in ([`crate::log::call_id`]), 0: none.
+    pub call: u64,
 }
 
 type Snap = Box<dyn Fn() -> Option<Value> + Send + Sync>;
@@ -438,12 +471,17 @@ pub(crate) fn watch(id: &'static str, withheld: bool, snap: impl Fn() -> Option<
     c.push((id, withheld, Box::new(snap)));
 }
 
+/// Whether `id` is a cell of this app's own (one [`watch`]ed).
+pub(crate) fn own(id: &str) -> bool {
+    CELLS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(i, ..)| *i == id)
+}
+
 /// A call ran, in `took`: the newest [`TIMELINE`] are kept in memory
 /// ([`timeline`]) and go in reports (no arguments: they may be anything the
 /// user typed).
 pub(crate) fn called(cell: &str, method: &str, at: i64, took: std::time::Duration, refused: Option<&str>) {
     let ms = (took.as_secs_f64() * 1e6).round() / 1e3;
-    let mut e = json!({ "at": crate::log::stamp(at), "call": format!("{cell}.{method}"), "ms": ms });
+    let mut e = json!({ "at": crate::log::stamp(at), "call": format!("{cell}.{method}"), "ms": ms, "id": crate::log::call_id() });
     if let Some(r) = refused {
         e["refused"] = cut(&redact(r), 200).into();
     }
@@ -473,7 +511,7 @@ pub(crate) fn sizes() -> Vec<(&'static str, u64)> {
 impl Context {
     /// This process's, now.
     fn now() -> Self {
-        let mut x = Context { diagnostics: recent(), ..Default::default() };
+        let mut x = Context { diagnostics: recent(), call: crate::log::call_id(), ..Default::default() };
         x.timeline = timeline();
         let mut room = STATE_BYTES;
         for (id, withheld, snap) in CELLS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
@@ -531,7 +569,7 @@ pub fn build(
         .diagnostics
         .iter()
         .map(
-            |d| json!({ "at": crate::log::stamp(d.at), "kind": d.kind, "message": redact(&d.message), "held": d.held }),
+            |d| json!({ "at": crate::log::stamp(d.at), "kind": d.kind, "message": redact(&d.message), "held": d.held, "severity": d.severity }),
         )
         .collect();
     json!({
@@ -539,6 +577,7 @@ pub fn build(
         "createdAt": crate::log::stamp(at),
         "kind": kind,
         "tip": Code::of(kind).tip(),
+        "call": (x.call != 0).then_some(x.call),
         "title": title,
         "body": body,
         "contact": x.contact.as_deref().map(redact),
@@ -734,7 +773,7 @@ mod tests {
     #[test]
     fn the_bus_says_a_kind_once_per_window_and_counts_the_rest() {
         let mut b = Bus::new();
-        let kinds = |b: &mut Bus, k: &str, at| b.publish(k, "m", at).map(|(d, _)| d.held);
+        let kinds = |b: &mut Bus, k: &str, at| b.publish(k, "m", Severity::Warn, at).map(|(d, _)| d.held);
         assert_eq!(kinds(&mut b, "budget:method", 0), Some(0));
         assert_eq!(kinds(&mut b, "budget:method", 1000), None, "within the window: held");
         assert_eq!(kinds(&mut b, "budget:method", 4999), None);
@@ -742,13 +781,13 @@ mod tests {
         assert_eq!(kinds(&mut b, "budget:method", QUIET_MS), Some(2), "the next one says how many were held");
         assert_eq!(kinds(&mut b, "budget:method", 3 * QUIET_MS), Some(0), "a quiet kind carries no count");
         for i in 0..RECENT + 10 {
-            b.publish(&format!("mine:{i}"), &"x".repeat(5000), 100 * QUIET_MS);
+            b.publish(&format!("mine:{i}"), &"x".repeat(5000), Severity::Warn, 100 * QUIET_MS);
         }
         assert_eq!(b.recent.len(), RECENT, "capped");
         assert_eq!((b.recent[0].kind.as_str(), b.recent[0].message.len()), ("mine:10", 2000));
         // Stale kinds go when there are many: the map is bounded too.
         for i in 0..2000 {
-            b.publish(&format!("flood:{i}"), "m", 200 * QUIET_MS + i * 10);
+            b.publish(&format!("flood:{i}"), "m", Severity::Warn, 200 * QUIET_MS + i * 10);
         }
         assert!(b.last.len() <= 1024 + 1, "{}", b.last.len());
     }
@@ -811,7 +850,14 @@ mod tests {
         };
         x.state.insert("notes".into(), json!({ "url": "https://h/?token=abc", "n": 3 }));
         x.timeline.push(json!({ "at": "t", "call": "notes.add", "refused": "Bearer xyz" }));
-        x.diagnostics.push(Diagnostic { at: 0, kind: "storm".into(), message: "token=q".into(), held: 2 });
+        x.diagnostics.push(Diagnostic {
+            at: 0,
+            kind: "storm".into(),
+            message: "token=q".into(),
+            held: 2,
+            severity: Severity::Warn,
+            tip: Code::Storm.tip(),
+        });
         let r = build(&about, "i", 0, "user", "t", None, &[], &x);
         assert_eq!(r["state"]["notes"], json!({ "url": "https://h/?token=…", "n": 3 }), "state is masked too");
         assert_eq!(
@@ -820,7 +866,7 @@ mod tests {
         );
         assert_eq!(
             r["diagnostics"][0],
-            json!({ "at": "1970-01-01T00:00:00.000Z", "kind": "storm", "message": "token=…", "held": 2 })
+            json!({ "at": "1970-01-01T00:00:00.000Z", "kind": "storm", "message": "token=…", "held": 2, "severity": "warn" })
         );
         assert_eq!((r["contact"].as_str(), r["app"]["channel"].as_str()), (Some("ana@example.org"), Some("beta")));
         assert_eq!(r["app"]["build"], if cfg!(debug_assertions) { "debug" } else { "release" });

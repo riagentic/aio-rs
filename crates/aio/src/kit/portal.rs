@@ -4,75 +4,62 @@
 //! the component that made it. Portals show in the order they mounted, so
 //! a menu opened inside a portalled dialog is drawn over it, and never
 //! inside it. With no host, or `disabled`, the content stays in place.
-use dioxus::prelude::*;
-use std::cell::{Cell, RefCell};
+use crate::ui::prelude::*;
+use std::cell::Cell;
 use std::rc::Rc;
 
-/// The host's portals, by id in mount order, and how to redraw it.
-#[derive(Clone)]
+/// The host's portals, by id in mount order.
+#[derive(Clone, Copy)]
 struct Outlet {
-    all: Rc<RefCell<Vec<(u64, Element)>>>,
-    next: Rc<Cell<u64>>,
-    host: ScopeId,
+    all: Signal<Vec<(u64, View)>>,
 }
+
+thread_local!(static NEXT: Cell<u64> = const { Cell::new(0) });
 
 /// Where portals are drawn: put it around the app once.
 #[component]
-pub fn PortalHost(children: Element) -> Element {
-    let out = use_context_provider(|| Outlet {
-        all: Default::default(),
-        next: Default::default(),
-        host: dioxus::core::current_scope_id(),
-    });
-    let shown: Vec<(u64, Element)> = out.all.borrow().clone();
+pub fn PortalHost(children: View) -> View {
+    let out = provide(|| Outlet { all: Signal::new(vec![]) });
     rsx! {
         {children}
         div { class: "aio-portals",
-            for (id, el) in shown {
-                Fragment { key: "{id}", {el} }
+            for (id, el) in out.all.get() {
+                Fragment { key: id, {el} }
             }
         }
     }
 }
 
-/// Draw `children` in the [`PortalHost`] while this component lives.
+/// Draw `children` in the [`PortalHost`] while this component lives (and
+/// isn't `disabled`).
 #[component]
-pub fn Portal(#[props(default)] disabled: bool, children: Element) -> Element {
-    let host = try_use_context::<Outlet>();
-    let id = use_hook(|| Rc::new(Cell::new(None::<u64>)));
+pub fn Portal(#[props(default)] disabled: Prop<bool>, children: View) -> View {
+    let Some(out) = try_context::<Outlet>() else { return children };
+    let id = NEXT.with(|n| n.replace(n.get() + 1));
+    let here = memo(move || disabled.get());
+    let placed = once(|| Rc::new(Cell::new(false)));
     {
-        let (host, id) = (host.clone(), id.clone());
-        use_drop(move || {
-            if let (Some(h), Some(i)) = (host, id.get()) {
-                take(&h, i)
+        let (children, placed) = (children.clone(), placed.clone());
+        effect(move || {
+            let away = !here.get();
+            if away != placed.get() {
+                placed.set(away);
+                if away {
+                    out.all.write().push((id, children.clone()));
+                } else {
+                    out.all.write().retain(|(k, _)| *k != id);
+                }
             }
         });
     }
-    let Some(out) = host.filter(|_| !disabled) else {
-        if let (Some(h), Some(i)) = (try_consume_context::<Outlet>(), id.take()) {
-            take(&h, i);
+    on_cleanup(move || {
+        if out.all.alive() {
+            out.all.write().retain(|(k, _)| *k != id);
         }
-        return children;
-    };
-    let i = id.get().unwrap_or_else(|| {
-        let i = out.next.get();
-        out.next.set(i + 1);
-        id.set(Some(i));
-        i
     });
-    {
-        let mut all = out.all.borrow_mut();
-        match all.iter_mut().find(|(k, _)| *k == i) {
-            Some(slot) => slot.1 = children,
-            None => all.push((i, children)),
+    rsx! {
+        if here.get() {
+            {children.clone()}
         }
     }
-    dioxus::core::needs_update_any(out.host);
-    rsx! {}
-}
-
-/// Portal `id` leaves the host.
-fn take(out: &Outlet, id: u64) {
-    out.all.borrow_mut().retain(|(k, _)| *k != id);
-    dioxus::core::needs_update_any(out.host);
 }

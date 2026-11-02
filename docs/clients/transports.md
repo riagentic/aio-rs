@@ -10,6 +10,7 @@ a served app adds. A standalone desktop app opens no TCP port at all.
 |---|---|---|---|---|
 | the window's wire | the views' DOM edits and events, length-prefixed frames | a socket in the app's private socket dir | only the Electron process this app spawned (its pid and start time) | a window app, while its window is open |
 | the window's control line | focus, quit, dialogs, notifications, tray clicks, bounds; one JSON per line | the same dir | only that process | likewise |
+| the window's routes | HTTP/1.1: the app's routes, `[server] dirs` and blobs, for the page's `aio://app/<path>` | the same dir (`http`) | only that process | an app whose cell lives in it (`standalone`, `client-server`) and that serves a path |
 | later launches | a second launch's working dir and arguments | the same dir | this user | every app, from `aio_shell::start` |
 | the local door, one per cell | the sync protocol: state, patches, calls, server functions | the same dir (`cell-<id>`) | any process of this user | every app whose cell lives in it, in every build |
 | the inspector door | Chrome's DevTools protocol, one JSON per line | the same dir (`ui`) | this user | a debug build's window only |
@@ -19,7 +20,10 @@ a served app adds. A standalone desktop app opens no TCP port at all.
 
 - **The private socket dir** is `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash of the
   data dir>` (else the temp dir), mode 0700, so no other user can open a
-  socket in it. Each door is `<dir>/<name>.sock`
+  socket in it. When that base is too long for a socket in it (a Unix socket
+  path takes 107 bytes on Linux, 103 on macOS), it is
+  `/tmp/aio-rt-<uid>/<id, 40 bytes at most>-<hash>` instead, as aio fell back
+  to `/tmp/aio`. Each door is `<dir>/<name>.sock`
   (`aio::ipc::addr(dir, name)`; `aio::paths::sockets(id, data)` makes the
   dir). Two instances of one app (`--instance`) have different data dirs,
   so different doors.
@@ -32,6 +36,38 @@ a served app adds. A standalone desktop app opens no TCP port at all.
   socket. A port opens only in the serving modes (`client-server`,
   `server`), where `[server] listen` names it; `--port`, `--host` and
   `--expose` move it per launch.
+
+## Routes in the window
+
+An app's own routes (`Route`, `[server] dirs`, blobs: what
+`Source::for_app_with` is given) answer its window without a port, as
+aio's do (`aio://app/<path>` over the app's socket). The page asks
+`fetch('/api/items')`, `<img src="/media/a.png">` or `new
+EventSource('/feed')`; Electron's main process (`main.js`) takes every
+`aio://app` path that isn't the page, a `[build.assets]` file or an image
+by path, and sends it, path and query as they are, over the app's `http`
+socket (a named pipe on Windows) to `aio::http::serve_window`. The boot
+says it: `[aio] notes: 2 route(s) served to the window over its private
+socket (aio://app/<path>): no TCP port`.
+
+- **Admission is the key.** Only the Electron process aio-shell spawned is
+  answered (its pid and start time: `aio::ipc::Only::window`, the one gate
+  the wire and the control line ask too); any other process, of this user
+  or not, is dropped unanswered, and with no window started no one is
+  (fail closed). So no key is asked, as on the wire.
+- **What the window does with it** is aio's `socketFetch`: at most 6
+  connections (Chromium's per host), kept alive; a small or error body
+  read at once, so a body nobody reads (an `<img>`'s 404) never holds a
+  connection; anything else streamed both ways (`Reply::stream`, an
+  upload), and a stream the page drops closes its connection. No first
+  byte in 30 s (`AIO_SOCKET_TIMEOUT_MS`) is a 504 and a line in the log;
+  an app that can't be reached is a 502 that says so.
+- **The page may fetch its own origin, and only it**: with routes its
+  policy is `connect-src 'self'` (`aio://app`), without them `'none'`.
+- **Another process needs a port.** A webhook, an OAuth callback, a
+  browser, a peer: `[server] listen` (mode `client-server`) serves the
+  same routes on TCP, behind the key, as before. Server functions need
+  neither: they cross the wire.
 
 `ax data <app>` says where an app's files are; `ax clients <app> [cell]`
 lists its windows or the links open to a cell (user, wire, address,
@@ -136,8 +172,8 @@ one TCP port for everything network-facing:
 
 - **The key**: every path but a `Route::public` one, a public dir,
   `/__aio/pair` (the pairing code proves it), `/__aio/health` and
-  `/__aio/metrics` on an app without accounts, and (with accounts) the
-  sign-in page needs the app's key (`Authorization: Bearer`, `?token=`,
+  `/__aio/metrics` from this machine on an app without accounts or users,
+  and (with accounts) the sign-in page needs the app's key (`Authorization: Bearer`, `?token=`,
   or the cookie a `?token=` link sets), or a session. Wrong guesses from one address are slowed and then
   locked out.
 - **The gate**, before any route: the `Host` must be an IP, `localhost`,
@@ -163,6 +199,37 @@ one TCP port for everything network-facing:
 - `open = true` drops the key on purpose: anyone who reaches the port
   reads and calls. Said at boot and by `ax doctor`.
 
+### One socket for every cell
+
+aio's page carries every cell on one socket; so does an aio-rs client.
+`Http::cell(handle)` serves more `#[cell(shared)]` cells on the same
+`/ws`, and every copy (`Remote`, a page's `Remote::open`, a `Live` tool)
+of one server, key and pinned root shares one socket of the process or
+page: each copy is a link of its own on it (its hello, user, rules, view
+and pace), and one copy dropped closes its link, not the socket.
+
+- **Asked for**: wire 2 plus `x-aio-mux: 1` (a page: the WebSocket
+  protocol `aio-mux`, as it sets no header); the server answers with the
+  same header (or protocol). A server that doesn't (an older aio-rs) gets
+  a socket per copy, as before.
+- **Frames**: each text frame is `<link><kind><rest>`, `<link>` a number
+  the client gives each new link: `:` a link's message (`7:{"t":"hello",…}`),
+  `?` a ping and `.` its pong (`rest` the payload, hex), `!` a link closes
+  (`<code> <why>`). A link the server refuses (`too many clients`, another
+  cell) gets its `refused` message and its close; the socket stays.
+- **Limits**: each link past a socket's first counts as a client of
+  `[server.limits] clients`, at most 64 links on one socket; a link that
+  lets more than 8 MB (or one `max_message`) wait unread is closed; a
+  socket with no link for 15 s is closed.
+- **Who**: the socket's key or session is every link's; a session that
+  ends closes the socket and all its links. Each cell's own rules
+  (`#[client]`, roles, `visible`) still decide per link.
+- Measured on loopback (a copy of each of three cells, 300 server
+  changes): 3 connections before, 1 now; patch latency p50 44 → 47 µs,
+  p99 207 → 188 µs with `sync_interval_ms = 0` (the pacing window, 50 ms
+  by default, dominates otherwise:
+  `cargo test -p aio-rs --features net,testing --test one_socket -- --ignored --nocapture`).
+
 ### Routes or server functions
 
 | You need | Use | It costs |
@@ -170,11 +237,57 @@ one TCP port for everything network-facing:
 | your own UI asks the server for an answer | a server function (`Http::server_fn`) | nothing more: it rides the sync link, `/ws` or the door, typed at both ends |
 | a value a cell should keep | a `#[client]` method | the same link |
 | another program calls in (a webhook, an OAuth callback, `curl`) | a route (`Http::route`) | a listening port: routes are served only by `[server] listen`, never on a door |
+| events pushed to a page or a tool (SSE, NDJSON) | a route answering `Reply::stream(type, parts)` | the same port; each part goes as it is made |
 
 ## Binary data
 
-aio-rs's sync wire is JSON only; there is no binary side channel yet.
-Big or binary data travels these ways instead:
+aio-rs's sync wire is JSON only. A sustained binary stream (screen
+frames, audio, telemetry, remote input) goes on a side channel: the cell
+carries control (who, which session, start and stop), a WebSocket route
+carries the payload, never persisted, diffed or sent to every client
+(aio's binary streams).
+
+```rust
+use aio::http::side::{Frames, Seen};
+use aio::http::{Http, Reply, Route};
+
+fn http() -> Http {
+    Http::default().route(Route::socket("/stream", |req| async move {
+        // Decided before the upgrade: an unknown session never gets a socket.
+        if req.query("sid") != Some("s1") {
+            return Err(Reply::text("unknown session").status(403));
+        }
+        Ok(|mut f: Frames| async move {
+            while let Some(frame) = f.recv().await {
+                if let Seen::Gap(n) = frame.seen {
+                    eprintln!("lost {n} frames of kind {}", frame.kind);
+                }
+                // Kind 1 (video) is droppable: the next frame supersedes it.
+                if f.send(frame.kind, &frame.body, frame.kind == 1).is_err() {
+                    return; // backpressure on a frame that can't be dropped: over
+                }
+            }
+        })
+    }))
+}
+# fn main() { let _ = http(); }
+```
+
+- Frames are `[kind:u8][seq:u24 LE][payload]` (`side::encode`,
+  `side::decode`), one sequence counter per kind (`side::Seqs`), wrapping
+  at 2^24, so interleaved kinds never look like a loss.
+- `send(kind, body, droppable)`: past `side::HIGH_WATER` (4 MB) waiting
+  for a slow receiver, a droppable frame is dropped (`Ok(false)`) and any
+  other closes the stream with 1011 `backpressure`, never a silent desync.
+- `recv` gives each frame with `Seen::Next`, `Gap(n)` or `Old` against
+  the last of its kind: a gap on a droppable kind is information, on
+  another a broken stream to tear down.
+- The route is behind the key (`?token=` from a browser, or a session),
+  its frames up to `max_body`; a plain GET is 426. The side channel and
+  the sync link open and fail apart: let the cell say whether a session
+  exists.
+
+Other big or binary data travels these ways:
 
 | Need | How |
 |---|---|
@@ -189,12 +302,6 @@ Big or binary data travels these ways instead:
 
 What aio has here and aio-rs doesn't yet:
 
-- No binary side channels (aio's upgraded binary route with its framing,
-  per-kind drop or queue backpressure and gap detection). Use the table
-  above; a raw binary WebSocket route can't be declared.
-- Routes are never served over a socket: an app with routes and no
-  `[server] listen` doesn't serve them (aio serves a desktop app's routes
-  over its local socket through `aio://`).
 - No `transport` switch: `--port`, `--host` and `--expose` only move
   where a serving mode listens; they open no port on a `standalone` or
   `client` app.
@@ -213,7 +320,9 @@ What aio has here and aio-rs doesn't yet:
 - Expecting `ax call` on a release build to reach a method without
   `#[client]`: a release door gives tools only a client's rights.
 - A long socket path on macOS or Linux: the private dir is kept short on
-  purpose; don't move the data dir's sockets yourself.
+  purpose (and falls back to `/tmp/aio-rt-<uid>`); don't move the data dir's
+  sockets yourself. A path still too long is refused at once, naming it, its
+  length and the limit: shorten `XDG_RUNTIME_DIR`/`TMPDIR` or the app id.
 
 ## API
 

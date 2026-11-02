@@ -335,6 +335,7 @@ fn ws<T: Cell>(
     limits: Limits,
     fns: Arc<crate::fns::Fns>,
     on_link: Option<crate::http::OnLink>,
+    beside: Arc<Vec<Arc<dyn crate::link::Beside>>>,
 ) -> axum::routing::MethodRouter {
     use crate::http::Query;
     use axum::extract::ConnectInfo;
@@ -343,8 +344,8 @@ fn ws<T: Cell>(
     let open_links = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     axum::routing::get(
         move |ws: WebSocketUpgrade, headers: HeaderMap, ext: Extensions, Query(q): Query| {
-            let (h, creds, auth, open_links, fns, on_link) =
-                (h.clone(), creds.clone(), auth.clone(), open_links.clone(), fns.clone(), on_link.clone());
+            let (h, creds, auth, open_links, fns, on_link, beside) =
+                (h.clone(), creds.clone(), auth.clone(), open_links.clone(), fns.clone(), on_link.clone(), beside.clone());
             async move {
                 let ip = ext.get::<ConnectInfo<Peer>>().map(|c| c.0.0.ip());
                 let refuse = |shown: bool, why: &str| match ip {
@@ -352,6 +353,8 @@ fn ws<T: Cell>(
                     None => (StatusCode::UNAUTHORIZED, why.to_string()).into_response(),
                 };
                 let mut known = None;
+                // A user known by token: the socket re-checks it while open.
+                let mut recheck = None;
                 let signed = match &auth {
                     None => {
                         // A page in the browser shows its cookie, as on `/__aio/ui`.
@@ -366,7 +369,10 @@ fn ws<T: Cell>(
                         match (&creds.key, &creds.users) {
                             (None, _) => {}
                             (Some(_), Some(u)) => match shown.as_deref().and_then(|t| u.who(t)) {
-                                Some(s) => known = Some((By::User(s.user), s.role)),
+                                Some(s) => {
+                                    recheck = shown.clone().map(|t| (u.clone(), t, s.clone()));
+                                    known = Some((By::User(s.user), s.role));
+                                }
                                 None => return refuse(shown.is_some(), "wrong or missing token"),
                             },
                             (Some(key), None) if creds.open || shown.as_ref().is_some_and(|k| same(k, key)) => {}
@@ -396,6 +402,10 @@ fn ws<T: Cell>(
                 }
                 // A browser can't set a header on its socket: it says `?wire=2`.
                 let wire2 = headers.get(WIRE_HEADER).is_some_and(|v| v == "2") || q.get("wire").is_some_and(|v| v == "2");
+                // Every link of the client on this one socket (a page asks by protocol).
+                let ws = if wire2 { ws.protocols([crate::mux::PROTOCOL]) } else { ws };
+                let mux = wire2
+                    && (headers.get(crate::mux::HEADER).is_some_and(|v| v == "1") || ws.selected_protocol().is_some());
                 if !wire2 && !cfg!(feature = "compat") {
                     open_links.fetch_sub(1, Ordering::SeqCst);
                     let why = "this app speaks aio-rs's wire 2 only: send `x-aio-wire: 2` or `?wire=2` (aio clients need aio-rs's feature `compat`)";
@@ -408,7 +418,8 @@ fn ws<T: Cell>(
                     // Never the door's rights over the network.
                     _ => Gate::Key,
                 };
-                ws.max_message_size(MAX_MESSAGE)
+                let slots = open_links.clone();
+                let mut reply = ws.max_message_size(MAX_MESSAGE)
                     .on_upgrade(move |s| async move {
                         let viewer = signed.as_ref().or(known.as_ref()).map(|(by, _)| by.clone());
                         let account = auth.clone().zip(signed.as_ref().map(|(_, t)| t.clone()));
@@ -418,11 +429,26 @@ fn ws<T: Cell>(
                         });
                         let calls = crate::fns::Served { fns, account, known: caller, from: (ip, fn_headers(headers)) };
                         let run = async {
+                            if mux {
+                                let run: crate::mux::Run = Arc::new(move |w| {
+                                    let (h, beside, from, gate, viewer, calls, on_link) = (
+                                        h.clone(),
+                                        beside.clone(),
+                                        from.clone(),
+                                        gate.clone(),
+                                        viewer.clone(),
+                                        calls.clone(),
+                                        on_link.clone(),
+                                    );
+                                    Box::pin(linked(h, beside, w, limits, from, gate, viewer, calls, on_link))
+                                });
+                                return crate::mux::serve(s, run, slots, limits.clients, limits.max_message).await;
+                            }
                             #[cfg(not(feature = "compat"))]
-                            let r = session(h, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
+                            let r = linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
                             #[cfg(feature = "compat")]
                             let r = if wire2 {
-                                session(h, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
+                                linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
                             } else {
                                 let user = match &viewer {
                                     Some(By::User(u)) => u.clone(),
@@ -430,24 +456,21 @@ fn ws<T: Cell>(
                                 };
                                 let _heard = Heard::new(on_link, &user, &from);
                                 let who = format!("{user} from {from} (aio)");
-                                let listed = Listed::new(Client {
-                                    cell: T::ID,
-                                    user,
-                                    wire: "aio",
-                                    from,
-                                    since: crate::store::now_ms(),
-                                    rtt: None,
-                                });
+                                let listed = Listed::new(Client::new(T::ID, user, "aio", from));
                                 let link = (listed.0, who);
-                                crate::compat::wire::session(h, Sock::Ws(s), limits, gate, viewer, calls, link).await
+                                crate::compat::wire::session(h, &beside, Sock::Ws(s), limits, gate, viewer, calls, link).await
                             };
                             r
                         };
                         // Dropping the session closes its socket.
-                        let r = match (auth, signed) {
-                            (Some(a), Some((_, t))) => tokio::select! {
+                        let r = match (auth, signed, recheck) {
+                            (Some(a), Some((_, t)), _) => tokio::select! {
                                 r = run => r,
                                 () = ended(a, t) => Err("a session ended: its socket is closed".into()),
+                            },
+                            (_, _, Some((u, t, was))) => tokio::select! {
+                                r = run => r,
+                                () = users_ended(u, t, was) => Err("its token no longer resolves: its socket is closed".into()),
                             },
                             _ => run.await,
                         };
@@ -456,10 +479,37 @@ fn ws<T: Cell>(
                             eprintln!("[aio] sync: {e}");
                         }
                     })
-                    .into_response()
+                    .into_response();
+                if mux {
+                    reply.headers_mut().insert(crate::mux::HEADER, axum::http::HeaderValue::from_static("1"));
+                }
+                reply
             }
         },
     )
+}
+
+/// One aio-rs link on `/ws`: to the cell its hello names, `h`'s or one
+/// served beside it.
+#[allow(clippy::too_many_arguments)]
+async fn linked<T: Cell>(
+    h: Handle<T>,
+    beside: Arc<Vec<Arc<dyn crate::link::Beside>>>,
+    mut w: Sock,
+    limits: Limits,
+    from: String,
+    gate: Gate,
+    viewer: Option<By>,
+    calls: crate::fns::Served,
+    on_link: Option<crate::http::OnLink>,
+) -> std::result::Result<(), String> {
+    let hooks = crate::link::Hooks { on_link, peers: None };
+    let (mut pulse, mut bytes) = (crate::link::Pulse::new(), Pace::new(limits.bytes_per_sec));
+    let hello = crate::link::hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?;
+    match beside.iter().find(|c| c.id() != T::ID && hello["cell"] == c.id()) {
+        Some(c) => c.session(w, limits, from, gate, viewer, calls, hooks, hello).await,
+        None => session(h, w, limits, from, gate, viewer, calls, hooks, Some(hello)).await,
+    }
 }
 
 /// `/__aio/ui`: one tab of the app's UI page ([`crate::http::Http::ui`]).
@@ -483,6 +533,7 @@ fn ui_socket<T: Cell>(
             async move {
                 let ip = ext.get::<ConnectInfo<Peer>>().map_or(std::net::Ipv4Addr::LOCALHOST.into(), |c| c.0.0.ip());
                 let session = crate::auth::routes::session_token(&headers, T::ID);
+                let mut recheck = None;
                 // (user, credential): `None` is a signed-out tab.
                 let who: Option<(Option<String>, String)> = match (&auth, &creds.users, &creds.key) {
                     (Some(a), ..) => {
@@ -491,7 +542,11 @@ fn ui_socket<T: Cell>(
                         s.and_then(|(s, t)| Some((Some(s?.user), t)))
                     }
                     (None, Some(u), _) => match session.as_deref().and_then(|t| u.who(t)) {
-                        Some(s) => Some((Some(s.user), session.unwrap_or_default())),
+                        Some(s) => {
+                            let t = session.unwrap_or_default();
+                            recheck = Some((u.clone(), t.clone(), s.clone()));
+                            Some((Some(s.user), t))
+                        }
                         None => return unauthorized(&creds.guessed, ip, session.is_some(), "wrong or missing token"),
                     },
                     (None, None, Some(key)) => {
@@ -511,9 +566,10 @@ fn ui_socket<T: Cell>(
                         let user = who.and_then(|(user, _)| user);
                         let tab = tokio::spawn((ui.tab)(crate::http::Tab { user, wire }));
                         let pump = tab_pump(s, ours);
-                        match ended_with {
-                            Some((a, t)) => tokio::select! { () = pump => {}, () = ended(a, t) => {} },
-                            None => pump.await,
+                        match (ended_with, recheck) {
+                            (Some((a, t)), _) => tokio::select! { () = pump => {}, () = ended(a, t) => {} },
+                            (_, Some((u, t, was))) => tokio::select! { () = pump => {}, () = users_ended(u, t, was) => {} },
+                            _ => pump.await,
                         }
                         tab.abort();
                     })
@@ -568,7 +624,7 @@ pub async fn serve_door_with<T: Cell>(
     http: &crate::http::Http,
 ) -> std::io::Result<()> {
     let calls = crate::fns::Served { fns: Arc::new(http.fns.clone()), ..crate::link::no_calls() };
-    crate::door::serve_with(h, l, limits, calls, crate::door::OPERATOR).await
+    crate::door::serve_with(h, l, limits, calls, crate::door::OPERATOR, http.door_hooks()).await
 }
 
 /// Serve `h` at `/ws` (and pairing, the app's HTTP, over TLS, as `opts` say)
@@ -590,6 +646,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     let (Options { token, limits, hosts, http, auth, strict_origin, trust_proxy, security, open }, tls) =
         (opts, None::<std::convert::Infallible>);
     auth.iter().for_each(crate::auth::serve);
+    // `[server] hosts` and the plugins' `allowed_origins`, merged (aio's `allowedOrigins`).
+    let mut hosts = hosts;
+    http.hosts.iter().for_each(|h| if !hosts.contains(h) { hosts.push(h.clone()) });
     // Users known by token count only without accounts (sessions say who then).
     let users = http.users.clone().filter(|_| auth.is_none());
     #[cfg(feature = "tls")]
@@ -610,11 +669,12 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         if let Some(ui) = http.ui.clone() {
             app = app.route("/__aio/ui", ui_socket::<T>(ui, creds.clone(), auth.clone(), limits));
         }
-        app = app.route("/ws", ws(h, creds, auth.clone(), limits, fns, http.on_link.clone()));
+        let beside = Arc::new(http.beside.clone());
+        app = app.route("/ws", ws(h, creds, auth.clone(), limits, fns, http.on_link.clone(), beside));
     }
     #[cfg(feature = "tls")]
     if let Some(pairing) = pairing {
-        // Same-machine tools that hold the key mint PINs (`ax pin`); a
+        // Same-machine tools that hold the key mint PINs (`ax pair <app>`); a
         // request a proxy relayed is from elsewhere, whatever the socket says.
         let (minter, key, trust) = (pairing.clone(), token.clone(), Arc::new(trust_proxy.clone()));
         app = app.route(
@@ -661,18 +721,20 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             .layer(axum::extract::DefaultBodyLimit::max(4096)),
         );
     }
-    // For monitoring (aio's `/__aio/metrics`, `/__aio/health`).
-    for (path, metrics) in [("/__aio/health", false), ("/__aio/metrics", true)] {
-        let (h, auth, key, guessed) = (watched.clone(), auth.clone(), token.clone(), guessed.clone());
+    // For monitoring (aio's `/__aio/metrics`, `/__aio/health`, `/__aio/vitals`).
+    for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
+        let (h, guessed, trust) = (watched.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
+        let who = Diagnostics { auth: auth.clone(), users: users.clone(), key: token.clone(), open };
         app = app.route(
             path,
             axum::routing::get(
                 move |ConnectInfo(Peer(from)): ConnectInfo<Peer>,
                       headers: HeaderMap,
                       crate::http::Query(q): crate::http::Query| {
-                    let (h, auth, key, guessed) = (h.clone(), auth.clone(), key.clone(), guessed.clone());
+                    let (h, who, guessed, trust) = (h.clone(), who.clone(), guessed.clone(), trust.clone());
                     async move {
-                        if !diagnostics_open(auth, &key, &headers, &q).await {
+                        let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
+                        if !who.admits(here, &headers, &q, T::ID).await {
                             return unauthorized(
                                 &guessed,
                                 from.ip(),
@@ -681,16 +743,52 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                             );
                         }
                         let no_store = (axum::http::header::CACHE_CONTROL, "no-store");
-                        if metrics {
-                            let text = monitored(&h, started);
-                            ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4"), no_store], text)
-                                .into_response()
-                        } else {
-                            ([no_store], crate::http::json(health_now(&h))).into_response()
+                        match path {
+                            "/__aio/metrics" => {
+                                let text = monitored(&h, started);
+                                ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4"), no_store], text)
+                                    .into_response()
+                            }
+                            "/__aio/vitals" => {
+                                let (snap, loopback) = crate::vitals::snapshot();
+                                let doc = crate::vitals::doc(&snap, loopback, &crate::vitals::get());
+                                ([no_store], crate::http::json(doc)).into_response()
+                            }
+                            _ => ([no_store], crate::http::json(health_now(&h))).into_response(),
                         }
                     }
                 },
             ),
+        );
+    }
+    // aio's `/__aio/snapshot` (a dev build's only): the whole state out, or in.
+    if cfg!(debug_assertions) {
+        let (h, auth, key, guessed, trust) =
+            (watched.clone(), auth.clone(), token.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
+        let snap = move |ConnectInfo(Peer(from)): ConnectInfo<Peer>,
+                         method: axum::http::Method,
+                         headers: HeaderMap,
+                         crate::http::Query(q): crate::http::Query,
+                         body: axum::body::Bytes| {
+            let (h, auth, key, guessed, trust) = (h.clone(), auth.clone(), key.clone(), guessed.clone(), trust.clone());
+            async move {
+                let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
+                if !snapshot_open(auth, &key, &headers, &q, here).await {
+                    let why = "the whole state: this machine's tools with the app's key, or an admin";
+                    return unauthorized(&guessed, from.ip(), shown_key(&headers, &q).is_some(), why);
+                }
+                let (code, text) = snapshot_reply(&h, &method, headers.contains_key("x-aio"), &q, &body).await;
+                let ty = if code == 200 { "application/json" } else { "text/plain; charset=utf-8" };
+                let code = axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::BAD_REQUEST);
+                (code, [(axum::http::header::CONTENT_TYPE, ty), (axum::http::header::CACHE_CONTROL, "no-store")], text)
+                    .into_response()
+            }
+        };
+        app = app.route(
+            "/__aio/snapshot",
+            axum::routing::get(snap.clone())
+                .post(snap)
+                .layer(axum::extract::DefaultBodyLimit::max(SNAPSHOT_MAX_BODY)),
         );
     }
     #[cfg(feature = "tls")]
@@ -761,6 +859,55 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         Some(t) => axum::serve(TlsListener::new(listener, t.server)?, app).await,
         #[cfg(not(feature = "tls"))]
         Some(t) => match t {},
+    }
+}
+
+/// The largest snapshot `POST /__aio/snapshot` takes (aio's 10 MB).
+const SNAPSHOT_MAX_BODY: usize = 10_000_000;
+
+/// Who may read or replace the whole state: this machine's tools with the
+/// app's key (`here`: loopback, not relayed), or an admin's session.
+async fn snapshot_open(
+    auth: Option<Arc<crate::auth::Auth>>,
+    key: &str,
+    headers: &axum::http::HeaderMap,
+    query: &HashMap<String, String>,
+    here: bool,
+) -> bool {
+    let shown = shown_key(headers, query).unwrap_or_default();
+    if here && !key.is_empty() && same(&shown, key) {
+        return true;
+    }
+    let Some(a) = auth else { return false };
+    tokio::task::spawn_blocking(move || live(&a, &shown).is_some_and(|s| s.role == "admin")).await.unwrap_or(false)
+}
+
+/// aio's `handleSnapshot`: `GET` the snapshot; `POST` one (with `X-AIO`,
+/// aio's CSRF guard) to load it, `?force=1` past the cell-set check. The
+/// status and the answer's text.
+async fn snapshot_reply<T: Cell>(
+    h: &Handle<T>,
+    method: &axum::http::Method,
+    x_aio: bool,
+    q: &HashMap<String, String>,
+    body: &[u8],
+) -> (u16, String) {
+    match *method {
+        axum::http::Method::GET | axum::http::Method::HEAD => match h.export_snapshot() {
+            Ok(v) => (200, v.to_string()),
+            Err(e) => (500, format!("snapshot refused: {e}")),
+        },
+        axum::http::Method::POST if !x_aio => (403, "Missing X-AIO header".into()),
+        axum::http::Method::POST => {
+            let Ok(snap) = serde_json::from_slice::<Value>(body) else { return (400, "Invalid JSON".into()) };
+            let (h, force) = (h.clone(), q.get("force").is_some_and(|f| f == "1"));
+            match tokio::task::spawn_blocking(move || h.load_snapshot(&snap, force)).await {
+                Ok(Ok(())) => (200, "OK".into()),
+                Ok(Err(e)) => (400, format!("snapshot refused: {e}")),
+                Err(e) => (500, format!("snapshot refused: {e}")),
+            }
+        }
+        _ => (405, "Method Not Allowed".into()),
     }
 }
 
@@ -946,21 +1093,44 @@ fn pair_reply(
     }
 }
 
-/// Health and metrics are open on an app without accounts (a monitor's
-/// `curl`, as in aio); with accounts they describe the app, so they need the
-/// key (a bearer, or `?token=`) or a live session.
-async fn diagnostics_open(
+/// Who may read health and metrics: fail closed. They describe the app (its
+/// cells, sizes, clients, errors), so they are never anonymous on the
+/// network: the key (a bearer, or `?token=`), a live session, or a user
+/// known by token. Anonymous only on this machine (`here`: loopback, not
+/// relayed by a proxy) and only on an app without accounts or users (as
+/// aio, whose per-user apps answer them to a signed-in user only), or on
+/// one that is `[server] open` on purpose.
+#[derive(Clone)]
+struct Diagnostics {
     auth: Option<Arc<crate::auth::Auth>>,
-    key: &str,
-    headers: &axum::http::HeaderMap,
-    query: &HashMap<String, String>,
-) -> bool {
-    let Some(a) = auth else { return true };
-    let shown = shown_key(headers, query).unwrap_or_default();
-    (!key.is_empty() && same(&shown, key))
-        || tokio::task::spawn_blocking(move || live(&a, &shown).is_some()).await.unwrap_or(false)
+    users: Option<crate::auth::Users>,
+    key: Arc<String>,
+    open: bool,
 }
 
+impl Diagnostics {
+    async fn admits(&self, here: bool, headers: &axum::http::HeaderMap, query: &HashMap<String, String>, id: &str) -> bool {
+        if (self.open || here) && self.auth.is_none() && self.users.is_none() {
+            return true;
+        }
+        let shown = shown_key(headers, query).unwrap_or_default();
+        if !self.key.is_empty() && same(&shown, &self.key) {
+            return true;
+        }
+        let session = crate::auth::routes::session_token(headers, id).unwrap_or(shown);
+        match (&self.auth, &self.users) {
+            (Some(a), _) => {
+                let a = a.clone();
+                tokio::task::spawn_blocking(move || live(&a, &session).is_some()).await.unwrap_or(false)
+            }
+            (None, Some(u)) => {
+                let u = u.clone();
+                tokio::task::spawn_blocking(move || u.who(&session).is_some()).await.unwrap_or(false)
+            }
+            (None, None) => false,
+        }
+    }
+}
 
 /// Returns once the session of `token` is over: re-checked on every account
 /// change and every few seconds (expiry). The checks keep a used session alive.
@@ -978,10 +1148,44 @@ async fn ended(a: Arc<crate::auth::Auth>, token: String) {
     }
 }
 
+/// Returns once `token` no longer resolves to `was`'s user and role (aio's
+/// `users:`/`resolveUser` re-check): asked again every
+/// [`crate::auth::USERS_RECHECK`] and on every change its resolver ticks. A
+/// resolver that panics ends it (fail closed); one slower than
+/// [`crate::auth::USERS_WAIT`] keeps the last verdict, is said, and is not
+/// called again until it answers. A changed role ends it too: the client
+/// reconnects with the new one.
+async fn users_ended(u: crate::auth::Users, token: String, was: crate::auth::Session) {
+    let mut changes = u.changes();
+    let mut asked: Option<tokio::task::JoinHandle<Option<crate::auth::Session>>> = None;
+    loop {
+        match changes.as_mut() {
+            Some(c) => tokio::select! {
+                r = c.changed() => if r.is_err() { changes = None },
+                () = tokio::time::sleep(crate::auth::USERS_RECHECK) => {}
+            },
+            None => tokio::time::sleep(crate::auth::USERS_RECHECK).await,
+        }
+        let mut call = asked.take().unwrap_or_else(|| {
+            let (u, t) = (u.clone(), token.clone());
+            tokio::task::spawn_blocking(move || u.who(&t))
+        });
+        match tokio::time::timeout(crate::auth::USERS_WAIT, &mut call).await {
+            Ok(Ok(Some(s))) if s.user == was.user && s.role == was.role => {}
+            Ok(_) => return,
+            Err(_) => {
+                eprintln!("[aio] auth: the users resolver has not answered in {:?}: its socket keeps its last verdict", crate::auth::USERS_WAIT);
+                asked = Some(call);
+            }
+        }
+    }
+}
 
 type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
 type Refusal = Arc<dyn Fn(&str, &Rejected) + Send + Sync>;
 type OnSync = Arc<dyn Fn(&Synced) + Send + Sync>;
+type OnConflict = Arc<dyn Fn(&[crate::merge::Conflict]) + Send + Sync>;
+type OnPatch = Arc<dyn Fn(&Value) + Send + Sync>;
 
 /// What one catch-up did (aio's `SyncStats`): the server's whole view reached
 /// the copy, on a reconnect or after a gap.
@@ -993,6 +1197,8 @@ pub struct Synced {
     pub elapsed: Duration,
     /// How the copy stands with it.
     pub status: crate::Status,
+    /// Server changes that met a waiting call's ([`Remote::on_conflict`]).
+    pub conflicts: usize,
 }
 
 /// How the copy stands: `pending` calls waiting, the oldest made at `oldest`
@@ -1042,13 +1248,46 @@ struct Copy<T> {
     shown: Arc<T>,
     /// Who the waiting calls are by.
     by: By,
+    /// The server's view (and state) the oldest waiting call was made on.
+    base: Option<(Value, Arc<T>)>,
+    /// Fields shown merged ([`Remote::merge`]).
+    merges: Vec<(String, crate::merge::Merge)>,
 }
 
 impl<T: Cell> Copy<T> {
+    fn new(seq: u64, view: Value, st: Arc<T>, pending: Vec<Pending>, by: By) -> Self {
+        let base = (!pending.is_empty()).then(|| (view.clone(), st.clone()));
+        let mut c = Self { seq, view, confirmed: st.clone(), pending, shown: st, by, base, merges: Vec::new() };
+        c.reshow();
+        c
+    }
+
     /// What the client shows: the confirmed copy + the calls still waiting
-    /// (one that no longer applies is skipped; the server will refuse it).
+    /// (one that no longer applies is skipped; the server will refuse it),
+    /// the fields of [`Remote::merge`] both changed shown merged.
     fn reshow(&mut self) {
-        let mut st = (*self.confirmed).clone();
+        if self.pending.is_empty() {
+            self.base = None;
+        }
+        let st = self.replayed(&self.confirmed);
+        self.shown = Arc::new(match &self.base {
+            Some((view, base)) if !self.merges.is_empty() => {
+                let local = serde_json::to_value(self.replayed(base));
+                match (local, serde_json::to_value(&st)) {
+                    (Ok(local), Ok(mut shown)) => {
+                        crate::merge::show(&self.merges, view, &local, &self.view, &mut shown);
+                        crate::copy_of::<T>(shown).unwrap_or(st)
+                    }
+                    _ => st,
+                }
+            }
+            _ => st,
+        });
+    }
+
+    /// The calls still waiting, replayed on `from`.
+    fn replayed(&self, from: &T) -> T {
+        let mut st = from.clone();
         for p in self.pending.iter().filter(|p| !p.waits) {
             let cx = Cx::replay(p.at, p.inputs.clone(), &self.by);
             let mut next = st.clone();
@@ -1058,7 +1297,17 @@ impl<T: Cell> Copy<T> {
                 st = next;
             }
         }
-        self.shown = Arc::new(st);
+        st
+    }
+
+    /// Before a server view comes: what to check it against for conflicts
+    /// (its view, what it shows), unless no call waits or `own` is one of them
+    /// (the change is its own).
+    fn before(&self, own: &Value) -> Option<(Value, Value)> {
+        if self.pending.is_empty() || self.pending.iter().any(|p| own.as_str() == Some(p.op.as_str())) {
+            return None;
+        }
+        Some((self.view.clone(), serde_json::to_value(&*self.shown).ok()?))
     }
 }
 
@@ -1086,6 +1335,8 @@ struct Inner<T: Cell> {
     copy: Mutex<Copy<T>>,
     out: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
     waiting: Mutex<HashMap<String, mpsc::Sender<Result<Value>>>>,
+    /// Async methods' callers waiting for their end (`end` frames), by call.
+    ends: Mutex<HashMap<String, crate::Reply>>,
     /// Server fn calls waiting for their answer; dropped when the link drops.
     /// Each with whether a person is deciding on the server (`sfnh`).
     running: Mutex<HashMap<String, Running>>,
@@ -1103,9 +1354,12 @@ struct Inner<T: Cell> {
     /// The last ping's round trip, in ms (0: none answered on this link).
     rtt: std::sync::atomic::AtomicU64,
     listeners: Mutex<Vec<Listener<T>>>,
+    in_order: crate::handle::InOrder,
     refusals: Mutex<Vec<Refusal>>,
     tells: Mutex<Vec<crate::tell::Show>>,
     syncs: Mutex<Vec<OnSync>>,
+    conflicts: Mutex<Vec<OnConflict>>,
+    patches: Mutex<Vec<OnPatch>>,
     owned: Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>,
 }
 
@@ -1179,7 +1433,6 @@ fn cleartext_refusal(os: &str, link: &Link) -> Option<String> {
 /// The socket to `link`'s `/ws`, the key shown; `wire2`: as an aio-rs client
 /// (else the server speaks aio's protocol v3, as to an aio page).
 pub(crate) async fn dial(link: &Link, wire2: bool) -> std::io::Result<Wire> {
-    let bad = |m: String| std::io::Error::other(m);
     if is_door(&link.addr) {
         return match wire2 {
             true => Ok(Box::new(door_wire(crate::door::dial(&link.addr).await?))),
@@ -1195,27 +1448,49 @@ pub(crate) async fn dial(link: &Link, wire2: bool) -> std::io::Result<Wire> {
     if link.root.is_some() {
         return Err(crate::left_out("tls", "a link pinned to a root (wss)"));
     }
+    #[cfg(not(feature = "tls"))]
+    let connector = ();
     let scheme = if link.root.is_some() { "wss" } else { "ws" };
     if let Some(why) = cleartext_refusal(std::env::consts::OS, link) {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, why));
     }
     crate::capabilities::check("sync", &link.addr)?;
+    match wire2 {
+        // Every link to this server on one socket.
+        true => crate::mux::link(link, socket(link, true, scheme, connector)).await,
+        false => Ok(socket(link, false, scheme, connector).await?.0),
+    }
+}
+
+/// A new socket to `link`'s `/ws` (`wire2`: asking for every link on it); is
+/// it the server's yes to that.
+async fn socket(
+    link: &Link,
+    wire2: bool,
+    scheme: &str,
+    #[cfg(feature = "tls")] connector: Option<tokio_tungstenite::Connector>,
+    #[cfg(not(feature = "tls"))] _: (),
+) -> std::io::Result<(Wire, bool)> {
+    let bad = |m: String| std::io::Error::other(m);
     let stream = tokio::net::TcpStream::connect(&link.addr).await?;
     let mut req = format!("{scheme}://{}/ws", link.addr).into_client_request().map_err(|e| bad(e.to_string()))?;
     req.headers_mut()
         .insert("authorization", format!("Bearer {}", link.token).parse().map_err(|_| bad("bad token".into()))?);
     if wire2 {
         req.headers_mut().insert(WIRE_HEADER, axum::http::HeaderValue::from_static("2"));
+        req.headers_mut().insert(crate::mux::HEADER, axum::http::HeaderValue::from_static("1"));
     }
     let cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE));
     #[cfg(feature = "tls")]
     let r = tokio_tungstenite::client_async_tls_with_config(req, stream, Some(cfg), connector)
         .await
-        .map(|(w, _)| Box::new(w) as Wire);
+        .map(|(w, r)| (Box::new(w) as Wire, r));
     #[cfg(not(feature = "tls"))]
-    let r = tokio_tungstenite::client_async_with_config(req, stream, Some(cfg)).await.map(|(w, _)| Box::new(w) as Wire);
+    let r = tokio_tungstenite::client_async_with_config(req, stream, Some(cfg))
+        .await
+        .map(|(w, r)| (Box::new(w) as Wire, r));
     match r {
-        Ok(w) => Ok(w),
+        Ok((w, r)) => Ok((w, wire2 && r.headers().get(crate::mux::HEADER).is_some_and(|v| v == "1"))),
         Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == 401 => {
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "refused: wrong key"))
         }
@@ -1311,7 +1586,7 @@ impl<T: Cell> Remote<T> {
             (None, Some(s)) => (None, s.seq, s.view),
             (None, None) => unreachable!("offline without a saved copy returned above"),
         };
-        let st: Arc<T> = Arc::new(serde_json::from_value(view.clone()).map_err(std::io::Error::other)?);
+        let st: Arc<T> = Arc::new(crate::copy_of(view.clone()).map_err(std::io::Error::other)?);
         let save = file.map(|f| {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Saved>();
             tokio::spawn(async move {
@@ -1331,8 +1606,7 @@ impl<T: Cell> Remote<T> {
             tx
         });
         let connected = w.is_some();
-        let mut copy = Copy { seq, view, confirmed: st.clone(), pending, shown: st, by: By::User(user.into()) };
-        copy.reshow();
+        let copy = Copy::new(seq, view, st, pending, By::User(user.into()));
         let inner = Arc::new(Inner {
             by: By::User(user.into()),
             save,
@@ -1340,6 +1614,7 @@ impl<T: Cell> Remote<T> {
             copy: Mutex::new(copy),
             out: Mutex::new(None),
             waiting: Mutex::default(),
+            ends: Mutex::default(),
             running: Mutex::default(),
             parts: Mutex::default(),
             online: AtomicBool::new(false),
@@ -1349,9 +1624,12 @@ impl<T: Cell> Remote<T> {
             timeouts: Mutex::default(),
             rtt: Default::default(),
             listeners: Mutex::default(),
+            in_order: crate::handle::InOrder::default(),
             refusals: Mutex::default(),
             tells: Mutex::default(),
             syncs: Mutex::default(),
+            conflicts: Mutex::default(),
+            patches: Mutex::default(),
             owned: Mutex::default(),
         });
         let weak = Arc::downgrade(&inner);
@@ -1421,6 +1699,15 @@ impl<T: Cell> Remote<T> {
         for p in lock(&self.inner.copy).pending.clone() {
             _ = tx.send(p.msg());
         }
+        // What this process's bus hears, for the server's (a relayed one is
+        // not sent back): heard from before the link is said online, so a
+        // problem said once it is (a test's, the app's first) is not missed.
+        let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
+        let _sub = crate::report::subscribe(move |d| {
+            if !d.kind.starts_with("client:") {
+                _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held, "severity": d.severity }));
+            }
+        });
         *lock(&self.inner.out) = Some(tx);
         self.inner.online.store(true, Ordering::SeqCst);
         self.tell();
@@ -1435,13 +1722,6 @@ impl<T: Cell> Remote<T> {
             // send calls at the server's advertised rate.
             let mut pace = Pace::new(calls_per_sec);
             let mut told = Vec::new();
-            // What this process's bus hears, for the server's (a relayed one is not sent back).
-            let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
-            let _sub = crate::report::subscribe(move |d| {
-                if !d.kind.starts_with("client:") {
-                    _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held }));
-                }
-            });
             loop {
                 let m = tokio::select! {
                     m = rx.recv() => match m {
@@ -1520,10 +1800,16 @@ impl<T: Cell> Remote<T> {
         if matches!(m["t"].as_str(), Some("state" | "patch" | "reply")) {
             *lock(&self.inner.last_sync) = Some(crate::store::now_ms());
         }
+        if matches!(m["t"].as_str(), Some("state" | "patch")) {
+            let fs = lock(&self.inner.patches).clone();
+            fs.iter().for_each(|f| f(&m));
+        }
         match m["t"].as_str() {
-            Some("state") => match serde_json::from_value::<T>(m["state"].clone()) {
+            Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
                 Ok(st) => {
                     let mut events = 0;
+                    let before = lock(&self.inner.copy).before(&m["op"]);
+                    let met = self.met(before, &m["state"]);
                     self.update(|c| {
                         if let Some(l) = limits_from_wire(&m["limits"]) {
                             *lock(&self.inner.limits) = Some(l);
@@ -1535,7 +1821,8 @@ impl<T: Cell> Remote<T> {
                         c.confirmed = Arc::new(st);
                     });
                     let elapsed = lock(&self.inner.asked).take().map_or(Duration::ZERO, |t| t.elapsed());
-                    let synced = Synced { events, elapsed, status: self.status() };
+                    let synced = Synced { events, elapsed, status: self.status(), conflicts: met.len() };
+                    self.conflicted(&met);
                     let fs = lock(&self.inner.syncs).clone();
                     fs.iter().for_each(|f| f(&synced));
                 }
@@ -1543,9 +1830,9 @@ impl<T: Cell> Remote<T> {
             },
             Some("patch") => {
                 let (prev, seq) = (m["prev"].as_u64().unwrap_or(0), m["seq"].as_u64().unwrap_or(0));
-                let (mine, view) = {
+                let (mine, view, before) = {
                     let c = lock(&self.inner.copy);
-                    (c.seq, c.view.clone())
+                    (c.seq, c.view.clone(), c.before(&m["op"]))
                 };
                 if seq <= mine {
                     return; // already in the copy
@@ -1554,13 +1841,17 @@ impl<T: Cell> Remote<T> {
                     return self.resync(); // a gap: never guess
                 }
                 let st = patched(&view, &m)
-                    .and_then(|v| serde_json::from_value::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
+                    .and_then(|v| crate::copy_of::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
                 match st {
-                    Ok((view, st)) => self.update(|c| {
-                        c.seq = seq;
-                        c.view = view;
-                        c.confirmed = Arc::new(st);
-                    }),
+                    Ok((view, st)) => {
+                        let met = self.met(before, &view);
+                        self.update(|c| {
+                            c.seq = seq;
+                            c.view = view;
+                            c.confirmed = Arc::new(st);
+                        });
+                        self.conflicted(&met);
+                    }
                     Err(e) => {
                         eprintln!("[aio] sync {}: patch to {seq} doesn't fit ({e}): resync", T::ID);
                         self.resync();
@@ -1580,8 +1871,23 @@ impl<T: Cell> Remote<T> {
                     let fs = lock(&self.inner.refusals).clone();
                     fs.iter().for_each(|f| f(&method, e));
                 }
+                if let Err(e) = &r
+                    && let Some(end) = lock(&self.inner.ends).remove(&op)
+                {
+                    end.send(Err(e.clone()));
+                }
                 if let Some(tx) = lock(&self.inner.waiting).remove(&op) {
                     _ = tx.send(r);
+                }
+            }
+            // An async method's end, after its reply.
+            Some("end") => {
+                let r = match m.get("err").and_then(Value::as_str) {
+                    Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
+                    None => Ok(m["ok"].clone()),
+                };
+                if let Some(end) = m["op"].as_str().and_then(|op| lock(&self.inner.ends).remove(op)) {
+                    end.send(r);
                 }
             }
             Some("sfnc") => {
@@ -1620,6 +1926,22 @@ impl<T: Cell> Remote<T> {
         }
     }
 
+    /// Where the server's view `now` met the copy's waiting calls, from
+    /// what `before` held.
+    fn met(&self, before: Option<(Value, Value)>, now: &Value) -> Vec<crate::merge::Conflict> {
+        let merges = lock(&self.inner.copy).merges.clone();
+        before.map_or_else(Vec::new, |(base, local)| crate::merge::conflicts(&base, now, &local, &merges))
+    }
+
+    /// Tell [`Self::on_conflict`] of `met`, if any.
+    fn conflicted(&self, met: &[crate::merge::Conflict]) {
+        if met.is_empty() {
+            return;
+        }
+        let fs = lock(&self.inner.conflicts).clone();
+        fs.iter().for_each(|f| f(met));
+    }
+
     fn send(&self, m: Value) {
         if let Some(tx) = lock(&self.inner.out).as_ref() {
             _ = tx.send(m);
@@ -1653,9 +1975,11 @@ impl<T: Cell> Remote<T> {
 
     /// Show the listeners the state: it changed, or the link went up or down.
     fn tell(&self) {
-        let shown = self.state();
-        let ls = lock(&self.inner.listeners).clone();
-        ls.iter().for_each(|f| f(&shown));
+        self.inner.in_order.tell(|| {
+            let shown = self.state();
+            let ls = lock(&self.inner.listeners).clone();
+            ls.iter().for_each(|f| f(&shown));
+        });
     }
 
     /// What the client shows: confirmed + its calls still waiting.
@@ -1736,6 +2060,14 @@ impl<T: Cell> Remote<T> {
         lock(&self.inner.syncs).push(Arc::new(f));
     }
 
+    /// Call `f` with each update the server sends, as it arrives (aio's
+    /// `onPatch`): a `{"t":"patch","seq","prev","ops"}` delta, or a
+    /// `{"t":"state"}` whole state (the first, a resync). The state is
+    /// their sum; this is the stream, so a test can see what was sent.
+    pub fn on_patch(&self, f: impl Fn(&Value) + Send + Sync + 'static) {
+        lock(&self.inner.patches).push(Arc::new(f));
+    }
+
     /// Call `f` with the shown state after each change.
     pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
         lock(&self.inner.listeners).push(Arc::new(f));
@@ -1752,6 +2084,27 @@ impl<T: Cell> Remote<T> {
         lock(&self.inner.refusals).push(Arc::new(f));
     }
 
+    /// Hear where a server change met a call of this copy's still waiting,
+    /// the two different (aio's `sync.onConflict`): live, and in a
+    /// reconnect's catch-up (counted in [`Synced::conflicts`]). The copy then
+    /// shows its calls replayed on the server's state, the server keeps
+    /// what its methods make. Its own call's change is never one.
+    pub fn on_conflict(&self, f: impl Fn(&[crate::merge::Conflict]) + Send + Sync + 'static) {
+        lock(&self.inner.conflicts).push(Arc::new(f));
+    }
+
+    /// Show top-level `field` merged as `how` says while a waiting call of
+    /// this copy and the server both changed it (aio's `sync.merge`), not
+    /// the call replayed alone: what the copy shows until the server's
+    /// answer comes. The server keeps what its methods make: a method that
+    /// edits (`n += d`, a push, a patched text) keeps both there too.
+    pub fn merge(&self, field: &str, how: crate::merge::Merge) {
+        self.update(|c| {
+            c.merges.retain(|(f, _)| f != field);
+            c.merges.push((field.into(), how));
+        });
+    }
+
     /// Make the call on the copy and send it (after registering `waiter`
     /// for its reply, so a fast reply can't be missed). In a full queue, a
     /// call that applies makes room by dropping the oldest one past `retain`.
@@ -1760,6 +2113,7 @@ impl<T: Cell> Remote<T> {
         method: &str,
         args: Value,
         waiter: Option<mpsc::Sender<Result<Value>>>,
+        end: Option<crate::Reply>,
     ) -> Result<(String, Value)> {
         let (op, out, p, dropped) = {
             let mut c = lock(&self.inner.copy);
@@ -1797,6 +2151,9 @@ impl<T: Cell> Remote<T> {
                 );
             }
             let dropped = room.filter(|_| c.pending.len() >= PENDING_MAX).map(|w| (c.pending.remove(0), w));
+            if c.pending.is_empty() {
+                c.base = Some((c.view.clone(), c.confirmed.clone()));
+            }
             c.pending.push(p.clone());
             (p.op.clone(), out, p, dropped)
         };
@@ -1811,11 +2168,17 @@ impl<T: Cell> Remote<T> {
             if let Some(tx) = lock(&self.inner.waiting).remove(&gone.op) {
                 _ = tx.send(Err(why.clone()));
             }
+            if let Some(end) = lock(&self.inner.ends).remove(&gone.op) {
+                end.send(Err(why.clone()));
+            }
             let fs = lock(&self.inner.refusals).clone();
             fs.iter().for_each(|f| f(&gone.method, &why));
         }
         if let Some(tx) = waiter {
             lock(&self.inner.waiting).insert(op.clone(), tx);
+        }
+        if let Some(end) = end {
+            lock(&self.inner.ends).insert(op.clone(), end);
         }
         self.update(|_| {});
         self.send(p.msg());
@@ -1944,8 +2307,22 @@ impl<T: Cell> Remote<T> {
     /// task's thread without `spawn_blocking`.
     pub fn call_confirmed(&self, method: &str, args: Value) -> Result<Value> {
         let wait = lock(&self.inner.timeouts).get(method).copied().unwrap_or(Some(CALL_TIMEOUT));
+        if T::async_mode(method).is_some() {
+            // An async method's answer is its end: up to its wait for the
+            // reply, and the call ceiling for its awaits.
+            let (end, answer) = crate::Reply::new(method);
+            let (op, _) = self.predict(method, args, None, Some(end))?;
+            let r = match wait {
+                Some(w) => crate::rt().block_on(tokio::time::timeout(w + crate::effect::call_ceiling(), answer)).ok(),
+                None => Some(crate::rt().block_on(answer)),
+            };
+            return r.unwrap_or_else(|| {
+                lock(&self.inner.ends).remove(&op);
+                Err(Rejected::new(format!("{method}: no end in time (it stays queued)")))
+            });
+        }
         let (tx, rx) = mpsc::channel();
-        let (op, _) = self.predict(method, args, Some(tx))?;
+        let (op, _) = self.predict(method, args, Some(tx), None)?;
         let r = match wait {
             Some(w) => rx.recv_timeout(w).ok(),
             None => rx.recv().ok(),
@@ -1964,7 +2341,18 @@ impl<T: Cell> Door<T> for Remote<T> {
     /// `predict = false` method is only sent: it shows once the server ran it
     /// (`pending_of` counts it until then).
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.predict(method, args, None).map(|(_, out)| out)
+        self.predict(method, args, None, None).map(|(_, out)| out)
+    }
+
+    /// Predicted like `call`; an async method's end comes from the server
+    /// (a refused reply ends it at once), even across a dropped link.
+    fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        if T::async_mode(method).is_none() {
+            return self.call(method, args).map(|v| crate::Answer::ready(Ok(v)));
+        }
+        let (end, answer) = crate::Reply::new(method);
+        self.predict(method, args, None, Some(end))?;
+        Ok(answer)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
@@ -2055,10 +2443,27 @@ impl Live {
                 self.take(&m).await?;
             }
         };
-        let m = tokio::time::timeout(CALL_TIMEOUT, answer)
+        let mut m = tokio::time::timeout(CALL_TIMEOUT, answer)
             .await
             .map_err(|_| Rejected::new(format!("{method}: no answer in {CALL_TIMEOUT:?}")))?
             .map_err(gone)?;
+        // An async method: its answer is its end, after its last await.
+        if m["async"] == true {
+            let wait = crate::effect::call_ceiling() + CALL_TIMEOUT;
+            let end = async {
+                loop {
+                    let e = self.next().await?;
+                    if e["t"] == "end" {
+                        return Ok(e);
+                    }
+                    self.take(&e).await?;
+                }
+            };
+            m = tokio::time::timeout(wait, end)
+                .await
+                .map_err(|_| Rejected::new(format!("{method}: no end in {wait:?} (it may still run)")))?
+                .map_err(gone)?;
+        }
         match m.get("err").and_then(Value::as_str) {
             Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
             None => Ok(m["ok"].clone()),

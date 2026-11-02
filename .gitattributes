@@ -1,0 +1,4 @@
+# LF on every OS: embedded CSS/JS and test fixtures are compared byte for byte.
+* text=auto eol=lf
+# Python's csv module writes CRLF rows.
+scripts/dx-trend.csv -text

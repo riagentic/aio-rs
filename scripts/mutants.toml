@@ -1,0 +1,145 @@
+# The mutation ledger (scripts/mutants): the invariants a silent regression
+# would cost data, security or a shipped app, each with the line that enforces
+# it, that line broken on purpose, and the test that must then go red.
+# `in = "source"`: the break is planted in the repo's file; `test` is
+# `<package> <target> <exact test name>` (target: lib, bin:<name>, test:<name>).
+# `in = "deb"`: the break is planted in the template app's built .deb (`file`
+# is a path in the package; a program's bytes keep their length) and `ax smoke`
+# must fail, saying `expect`. `fast`: GitHub CI runs it on every push.
+# `leaves`: what the broken code makes outside the tree, removed after.
+
+[[break]]
+id = "vacuous-lint"
+what = "ax lint names a test that checks nothing"
+in = "source"
+file = "crates/aio-cli/src/lint/rust.rs"
+find = "if is_test_fn(&i.attrs) && !has(&i.attrs, \"should_panic\") && !checks(i.block.to_token_stream()) {"
+put = "if false && is_test_fn(&i.attrs) && !has(&i.attrs, \"should_panic\") && !checks(i.block.to_token_stream()) {"
+test = "aio-rs-cli bin:ax lint::tests::tests_that_check_nothing_are_named"
+fast = true
+
+[[break]]
+id = "smoke-desktop-exec"
+what = "ax smoke fails a .deb whose menu entry starts no program"
+in = "source"
+file = "crates/aio-cli/src/smoke.rs"
+find = "Some(e) if resolves(e) => {}"
+put = "Some(_) => {}"
+test = "aio-rs-cli bin:ax smoke::tests::a_package_s_desktop_entry_must_start_its_program_with_its_icon"
+fast = true
+
+[[break]]
+id = "cassette-rerecord"
+what = "AIO_CASSETTE=rerecord records over a damaged tape instead of failing on it"
+in = "source"
+file = "crates/aio/src/cassette.rs"
+find = "Some(\"rerecord\") => return Ok(Self::record(Some(path))),"
+put = "Some(\"rerecord\") => {}"
+test = "aio-rs lib cassette::tests::a_damaged_tape_is_refused_unless_rerecorded"
+fast = true
+
+[[break]]
+id = "invariants"
+what = "a call that breaks an #[invariant] is refused, never committed"
+in = "source"
+file = "crates/aio/src/store.rs"
+find = """
+        next.check().map_err(|e| self.refused_op(op, e))?;
+        let t3"""
+put = """
+        _ = next.check();
+        let t3"""
+test = "aio-rs test:core typed_calls_and_refusals"
+
+[[break]]
+id = "client-rule"
+what = "a method that is not #[client] is refused to a network caller"
+in = "source"
+file = "crates/aio-macros/src/lib.rs"
+find = "_ => Err(::aio::Rejected::denied(method, \"is not a #[client] method\")),"
+put = "_ => Ok(()),"
+test = "aio-rs test:access the_rules"
+
+[[break]]
+id = "snapshot-wipe"
+what = "a snapshot that lacks a cell is refused: loading it would destroy that cell's state"
+in = "source"
+file = "crates/aio/src/handle.rs"
+find = "if !force && (!missing.is_empty() || !unknown.is_empty()) {"
+put = "if false && (!missing.is_empty() || !unknown.is_empty()) {"
+test = "aio-rs test:http the_snapshot_endpoint_exports_and_loads_the_whole_state_as_aios"
+
+[[break]]
+id = "sandbox-guard"
+what = "a test may not touch the user's real app data"
+in = "source"
+file = "crates/aio/src/paths.rs"
+find = "if !real.as_os_str().is_empty() && p.starts_with(&real) && !p.starts_with(&tmp) {"
+put = "if false && p.starts_with(&real) && !p.starts_with(&tmp) {"
+test = "aio-rs test:sandbox a_test_runs_in_a_world_of_its_own_and_real_data_is_refused"
+# Broken, the test makes this in the home before it fails: removed after.
+leaves = "~/.aio-sandbox-probe-never-made"
+
+[[break]]
+id = "seed-typo"
+what = "a seed key the state lacks fails the test instead of pinning nothing"
+in = "source"
+file = "crates/aio/src/testing.rs"
+find = "if let Some((key, has)) = lost(&want, &got, \"\") {"
+put = "if let Some((key, has)) = None::<(String, Vec<String>)> {"
+test = "aio-rs test:testing a_seed_key_the_state_lacks_is_refused"
+
+[[break]]
+id = "unseen-failures"
+what = "an effect's failure nobody looked at fails the test"
+in = "source"
+file = "crates/aio/src/testing.rs"
+find = "if !failed.is_empty() && !std::thread::panicking() {"
+put = "if false && !std::thread::panicking() {"
+test = "aio-rs test:testing a_failure_nobody_looked_at_fails_the_test"
+
+[[break]]
+id = "test-budget"
+what = "a call over a test's own perf budget fails it"
+in = "source"
+file = "crates/aio/src/perf.rs"
+find = "if let Some(b) = budgets.get(&label).filter(|b| took > **b) {"
+put = "if let Some(b) = budgets.get(&label).filter(|_| false) {"
+test = "aio-rs test:testing a_call_over_the_test_s_budget_is_a_failure"
+
+[[break]]
+id = "fetch-stub"
+what = "a host a UI test answers never reaches the network"
+in = "source"
+file = "crates/aio/src/testing/electron.rs"
+find = "ss.iter().find(|(h, _)| *h == host).map(|(_, s)| s.clone())"
+put = "ss.iter().find(|_| false).map(|(_, s)| s.clone())"
+test = "aio-rs test:ui a_host_the_test_answers_never_reaches_the_network"
+
+[[break]]
+id = "deb-menu-entry"
+what = "a .deb whose menu entry starts a program it doesn't ship fails its smoke test"
+in = "deb"
+file = "usr/share/applications/notes.desktop"
+find = "Exec=\"/usr/bin/notes\""
+put = "Exec=\"/usr/bin/notes-gone\""
+expect = "its Exec program \"/usr/bin/notes-gone\" is not in the package"
+
+[[break]]
+id = "deb-icon"
+what = "a .deb whose menu entry names an icon it doesn't ship fails its smoke test"
+in = "deb"
+file = "usr/share/applications/notes.desktop"
+find = "Icon=notes"
+put = "Icon=notes-gone"
+expect = "no icon \"notes-gone\" in the package"
+
+[[break]]
+id = "deb-page"
+what = "a .deb whose bundled page script throws fails its smoke test"
+in = "deb"
+file = "usr/lib/notes/notes"
+find = "window.__aioRunning = 0;"
+put = "window.__aioRunning = 0)"
+expect = "[page] Uncaught SyntaxError"
+fast = true

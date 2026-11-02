@@ -50,6 +50,7 @@ there, `save()` it, commit the file; every run after needs neither.
 | `Cassette::replay(&text)` | answer from a tape's text (`include_str!` of a saved one) |
 | `Cassette::passthrough()` | every call runs, nothing is kept: the app's own build |
 | `c.call(id, &args, \|\| io())` | `io` as the mode says; `Result<R, String>` |
+| `c.wrap(id, f)` | `f` (an async fn of one argument) with each call through the tape: `let key = c.wrap("trezor.key", get_key); key((path,)).await` |
 | `c.save()` | write the tape to its path when recording (else nothing) |
 | `c.text()` | the recorded tape as JSON |
 | `c.frames()` | the calls recorded so far (`Frame`) |
@@ -60,8 +61,15 @@ there, `save()` it, commit the file; every run after needs neither.
   answer type `R` is `Serialize + DeserializeOwned`; the error type is
   anything `Display`, kept as its text.
 - Clones share one tape: hand a clone to each effect that needs it.
+- Arguments that don't serialize are refused (`cassette <id>: its
+  arguments don't serialize, and they key the tape: …`): a key that
+  can't match on replay never gets recorded.
 - `open` of a file that is there but isn't a tape fails
-  (`cassette: not a tape: …`): it never records over a broken fixture.
+  (`cassette: not a tape: … record it again with AIO_CASSETTE=rerecord`):
+  it never records over a broken fixture unasked.
+- `AIO_CASSETTE=rerecord cargo test` makes every `open` record afresh
+  over the tape that is there (the calls changed, or it is damaged);
+  `save()` writes the new one. Any other value of `AIO_CASSETTE` fails.
 
 ### Modes
 
@@ -106,7 +114,7 @@ rt.block_on(async {
 
     // A call the tape lacks fails loudly: it never reaches the real thing.
     let why = play.call::<_, Vec<String>, String, _>("feed.page", &3, || async { Ok(vec![]) }).await.unwrap_err();
-    assert_eq!(why, "cassette: no recorded call feed.page(3): record the tape again (the calls changed)");
+    assert_eq!(why, "cassette: no recorded call feed.page(3): the calls changed; record the tape again (AIO_CASSETTE=rerecord)");
 });
 # }
 ```
@@ -246,10 +254,10 @@ is a token in the repository.
 | aio | aio-rs |
 |---|---|
 | `openCassette(path, { mode })` | `open(path)`; `record`, `replay`, `passthrough` pick a mode |
-| a corrupt file is re-recorded | a corrupt file fails: fix it or delete it |
+| a corrupt file is re-recorded | a corrupt file fails, naming `AIO_CASSETTE=rerecord`, which records afresh |
 | `createCassette(mode, { initial })` | `Cassette::replay(&text)` |
-| `tape.wrap(id, fn)` | `tape.call(id, &args, \|\| fn())`: one call at a time, typed |
-| an unserializable argument falls back to `String(args)` | refused: `call` fails with the serialization error |
+| `tape.wrap(id, fn)` | `tape.wrap(id, f)`: an async fn whose calls go through the tape |
+| an unserializable argument falls back to `String(args)` (never replays) | refused: the call is named, and why its arguments don't serialize |
 | frames `ok`, `value`, `error` | `answer: {"Ok": ..}` or `{"Err": ..}` |
 
 ## Common mistakes

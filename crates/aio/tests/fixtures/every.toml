@@ -7,16 +7,22 @@ version = "1.2-beta"
 ui = "browser"
 lang = "ar"
 dir = "rtl"
+tz = "local"
 [data]
 durability = "full"
 store = "vault.db"
 retire = ["old.db"]
 pragmas = ["PRAGMA cache_size = -16000"]
+persist = false
+coalesce_ms = 250
+backup_every = "1d"
+backup_keep = 3
 [history]
 keep = "36h"
 [server]
 listen = "127.0.0.1:8080"
 discover = true
+local_peers = false
 hosts = ["example.org"]
 trust_proxy = "x-forwarded-for"
 [server.security]
@@ -48,11 +54,14 @@ css = "tailwindcss -i a.css -o b.css"
 platforms = ["linux", "macos-arm64"]
 runtime = "bundled"
 chromium_extras = "strip"
+assets = { "/built" = "media" }
 [build.android]
 application_id = "org.example.lit"
 schemes = ["lit"]
 camera = true
 color_scheme = "light"
+universal = true
+strict = true
 [build.macos]
 bundle_id = "org.example.lit"
 host = "-p 2222 me@mac"
@@ -62,11 +71,49 @@ text = "Starting {title}"
 min_ms = 600
 max_ms = 10000
 background = ["#fff", "#101418"]
+show = "first-start"
+download_text = "{title}: {got} / {total} MB"
+size = [480, 300]
+fit = "cover"
+text_position = "over"
+align = "left"
+margin = 20
+radius = 12
+border = "#ccc"
+font = "serif"
+font_size = 18
+bold = true
+fade_ms = 250
+text_color = ["#111", "#eee"]
+bar = ["#14f195", "#14f195"]
+track = ["#ddd", "#333"]
+position = "pointer"
+follow_window = false
+shadow = true
+window_shadow = false
+cancel = false
+progress = true
+bar_style = "thin"
+bar_height = 5
+bar_position = "bottom-edge"
+bar_radius = 2
+[build.windows]
+shortcut = false
+[build.download_window]
+heading = "Setting up {title}"
+text = "{got} of {total} MB"
+question = "{reason}"
+background = "#101418"
+color = "#eee"
+bar = "#14f195"
+track = "#333"
+cancel = false
 [log]
 level = "debug"
 suppress = ["lit.tick"]
 [perf]
 method = 50
+call_ceiling = 20000
 [perf.methods]
 "lit.import" = 5000
 [perf.storm]
@@ -81,7 +128,9 @@ url = "https://example.org/fb"
 timeout = "30s"
 [ui]
 theme = "full"
+scheme = "light"
 hue = 200
+neutral = "soft"
 [vitals.loop]
 degraded = 10
 warning = 20

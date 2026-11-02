@@ -201,9 +201,10 @@ fn place(cfg: &aio::config::Config, version: &str, shortcut: bool) -> io::Result
             (None, None) => Ok(()),
         };
         let carries = runtime.is_some() || beside.is_some();
-        replace(&dir, &exe, bin, carries.then_some(&unpack as Unpack))?;
+        replace(&dir, &exe, &bin, carries.then_some(&unpack as Unpack))?;
     }
-    if shortcut {
+    // `[build.windows] shortcut = false`: never one.
+    if shortcut && cfg.build.windows.shortcut {
         let lnk = self::shortcut(name, id);
         lnk.parent().map(std::fs::create_dir_all).transpose()?;
         link(&lnk, &exe, &dir, id).map_err(|e| io::Error::other(format!("the Start menu entry: {e}")))?;
@@ -227,7 +228,8 @@ fn place(cfg: &aio::config::Config, version: &str, shortcut: bool) -> io::Result
 pub fn install(cfg: &aio::config::Config, version: &str) -> io::Result<()> {
     place(cfg, version, true)?;
     let exe = installed_exe(&cfg.app.id);
-    eprintln!("[aio] {} {version} is installed: {} and the Start menu", cfg.app.name, exe.display());
+    let menu = if cfg.build.windows.shortcut { " and the Start menu" } else { "" };
+    eprintln!("[aio] {} {version} is installed: {}{menu}", cfg.app.name, exe.display());
     Command::new(&exe).spawn().map(drop)
 }
 
@@ -366,9 +368,11 @@ mod tests {
         std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
         link(&lnk, &exe, t.path(), "com.example.notes").unwrap();
         assert_eq!(read(&lnk, "System.AppUserModel.ID"), "com.example.notes");
+        // The same file however spelled: the shell writes the long path where
+        // TEMP may be a short one (`C:\Users\RUNNER~1\…`).
         assert_eq!(
-            read(&lnk, "System.Link.TargetParsingPath").to_lowercase(),
-            exe.display().to_string().to_lowercase()
+            std::fs::canonicalize(read(&lnk, "System.Link.TargetParsingPath")).unwrap(),
+            std::fs::canonicalize(&exe).unwrap()
         );
         // Written again (an upgrade), it is replaced, not refused.
         link(&lnk, &exe, t.path(), "com.example.notes2").unwrap();

@@ -12,16 +12,16 @@ which of aio's features aio-rs has. Moving an app over:
 | | aio | aio-rs |
 |---|---|---|
 | Language, runtime | TypeScript on Deno | Rust, native code |
-| Renderer | AIR (React-shaped, fine-grained signals) | Dioxus 0.7 views; the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
+| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by air (aio-rs's own, fine-grained signals: a body runs once, holes follow state, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
 | State model | cells, methods on an Immer draft, selectors | cells, methods on `&mut self` (a copy), `#[derived]`; every call an event in the store's log |
 | Data compatibility | `state.db` | the same `state.db`, both ways: a port opens aio's file as it is, and aio opens it after ([below](#data-the-same-statedb)) |
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
 | Electron store | per user, `apps/` records, `am prune` | the same store, the same rules: one copy per version for both ([below](#the-electron-store)) |
 | Targets | browser, electron, android, web, cli, server, server-app; thin clients electron-client, android-client, ios-client, cli-client | desktop (Linux, Windows, macOS), web (wasm, PWA), Android, service, CLI; a thin client is `[app] mode = "client"`; no iOS ([targets](build/targets.md)) |
-| Install | `install.sh`: installs Deno, clones aio, puts `am` on `PATH` | a prebuilt `ax` (Linux x86_64, Windows x86_64) or from source; apps build on an aio-rs checkout ([setup](basics/setup.md)) |
+| Install | `install.sh`: installs Deno, clones aio, puts `am` on `PATH` | a prebuilt `ax` (Linux x86_64, Windows x86_64, macOS arm64 and x86_64) or from source; apps build on an aio-rs checkout ([setup](basics/setup.md)) |
 | Dev loop | `am dev`: `App.tsx` patched, other edits reload the page, a cell edit restarts the app (~3 s) | `ax dev`: Rust hot-patched with the state kept, `rsx!` markup at once, CSS live; a rebuild and restart when a patch can't take it ([dev](build/dev.md)) |
 | Tests | `testCell`, `testUI` (happy-dom), `testServer`, cassettes, `deno test` | `TestCells`, `TestUi` (the real views in the runtime), `TestServer`, cassettes, `cargo test` ([testing](testing/README.md)) |
-| Maturity | beta (1.0.27-beta): the 1.x surface frozen, additions only, an API snapshot gate in CI | early alpha, first release (0.1.0); a minor version may break ([versions](basics/versioning.md)) |
+| Maturity | beta (1.0.27-beta): the 1.x surface frozen, additions only, an API snapshot gate in CI | early alpha, second release (0.2.0); a minor version may break ([versions](basics/versioning.md)) |
 
 ## App compatibility
 
@@ -38,10 +38,14 @@ talk to each other, so an app can move one piece at a time.
 - **What it reads.** aio's snapshot in `aio_kv`, in either layout (`single`:
   one `state` row; `multi`: a row per cell), each cell at its
   `<appId>:__versions` stamp. An older stamp migrates (after a backup); a
-  newer one refuses the boot and keeps the file.
+  newer one (a rollback) boots on what this build declares, keeps the
+  rest in every write and parks a copy under `__downgraded:<cell>`, as aio
+  does; one that doesn't fit refuses the boot and keeps the file. Rolled
+  forward again, it boots and drops the older build's own fields, as aio
+  does.
 - **What it writes.** On every commit, in the same transaction as its own
   log: the cell's row in aio's layout with `JSON.stringify` semantics,
-  without `#[transient]` fields, keeping unknown cells and `__*` keys, and
+  without `#[transient]` fields and `persist(exclude)` paths, keeping unknown cells and `__*` keys, and
   stamping `__schema`, `__persistKey` and `__versions`. Its own history
   goes in tables of its own (`log`, `snap`, `floor`, `sched`, `ops`),
   which aio ignores.
@@ -58,9 +62,13 @@ talk to each other, so an app can move one piece at a time.
   so aio and the port never run on the same data at once: the second one
   to start finds the home held. aio-rs keeps `meta.json`'s `appId` and
   `profile`.
+- **aio's journal.** Calls a crash left in aio's journal past its save are
+  replayed at the port's boot, as aio's next boot would, and the
+  watermark moved with them; a tail aio-rs can't replay (time-travel or
+  write-set lines, calls of cells of another store) refuses the boot:
+  start the aio app once.
 - **Not ported:** aio's `profiles: false` and the `__shapes` stamps of
-  aio's dev-mode shape check. An aio journal not yet folded into the
-  snapshot is replayed by aio only: start the aio app once.
+  aio's dev-mode shape check.
 
 ### The wire
 
@@ -98,33 +106,28 @@ records as `ax prune` keeps what an aio app does
   instances` doesn't list a running aio-rs app (`ax apps` does).
 - A desktop-only (`standalone`) aio-rs app has no port at all, as an aio
   desktop app has none.
-- aio's routes over its local socket (`aio://`): an aio-rs app serves
-  routes only with `[server] listen`.
 - Code: an aio cell or component is translated, not loaded.
 
 ## Where aio-rs is better
 
 ### Measured
 
-A large desktop app (about 74 000 lines, lists of up to 1000 rows), in
-aio and in aio-rs, measured on one machine; key-to-paint in ms (p50 /
-p95 where two), aio-rs as a release build:
+A large desktop app (about 74 000 lines, a list of 1000 rows), in aio
+and in aio-rs on one machine, both release builds pinned to the same
+cores; the median of 5 runs:
 
 | | aio | aio-rs |
 |---|---|---|
-| Hold ↓, 19 rows | 25.4 / 27.3 | **16 / 17.7** |
-| Hold ↓, 121 rows | 25.6 / 38.7 | **22.2 / 24.5** |
-| Hold ↓, 1000 rows | 32.6 / 85.5 | **20.6 / 23.6** |
-| End, 1000 rows | 167.5 | **17.1** |
-| Home, 1000 rows | 183.5 | **23.2** |
-| Tab | 29–38 | **12–22** |
-| A dialog opens | 25 | **11.5** |
-| A page opens | 47 | **18.6** |
-| Memory (PSS) | 1509 MB | **420 MB** |
-| Start to the first screen | 3.0–3.2 s | **0.54–1.1 s** |
+| Start, cold: first window | 732 ms | **149 ms** |
+| Start, cold: UI ready | 1112 ms | **468 ms** |
+| Start, warm: first window | 707 ms | **282 ms** |
+| Memory in a session (PSS, every process) | 724 MB | **430 MB** |
+| A page of 1000 rows opens | 104 ms | **72 ms** |
+| CPU per held key | 30 ms | **19–21 ms** |
+| The app's AppImage | 97 MB | **18.5 MB** |
 
-After a held key is released, aio-rs shows the last step at once: 0 ms
-of lag.
+After a held key is released, both show the last step at once: 0 ms
+of lag. Key-to-paint is still aio's: [below](#key-to-paint).
 
 ### Not in numbers
 
@@ -143,18 +146,35 @@ of lag.
 - **History.** Time travel reads the store: in a release build, over the
   whole history, after a restart; aio's is dev-only, 2000 entries in
   memory ([time travel](debugging/time-travel.md)).
-- **An offline queue that survives a restart** (`connect_saved`); aio's
-  lives in the page's memory ([sync](state/sync.md)).
 - **Real UI tests.** `TestUi` runs the real views in the real engine:
   rects, styles, screenshots and scrolling measure for real, where aio's
   happy-dom has no layout ([UI tests](testing/ui.md)).
 - **Hot-patching with the state kept** for Rust, views and methods
   alike, and a compile error shown on the window while the app keeps
-  running ([dev](build/dev.md)).
+  running ([dev](build/dev.md)). `ax dev` does it alone: a markup edit
+  shows in ~3 ms, a Rust edit in ~0.45 s.
 - **Smaller first steps on an existing machine.** One native binary per
   app (5.3 MB for the template), the window runtime shared by every app.
 
 ## Where aio is better
+
+### Key to paint
+
+The same app and runs as [above](#measured), keydown to the first frame
+that shows it, in ms (p50 / p95 where two):
+
+| Key | aio | aio-rs |
+|---|---|---|
+| Hold ↓ (60 keys, 33 ms apart) | 12.6 / 21.0 | 13.9 / 21.2 |
+| Hold ↑ | 11.8 / 19.2 | 14.3 / 21.9 |
+| End, 1000 rows | 11.9 | 17.6 |
+| Home, 1000 rows | 10.6 | 20.2 |
+| Tab | 10.6 | 14.2 |
+
+About 4 ms of an aio-rs step is the app's own deep comparisons of its
+1000-row state (its memos, the views' changed-field mask); aio gets
+those cheap from Immer's structural sharing. Cheaper unchanged-field
+compares in the store are planned after 0.2.0.
 
 ### The edit loop
 
@@ -171,7 +191,8 @@ recompiles the crate an edit is in:
 
 So a big aio-rs app is kept fast to edit by splitting it into crates
 ([what an edit costs](build/README.md#what-an-edit-costs)). The web build
-and Android have no hot-patching: each edit is a build.
+and Android have no hot-patching: each edit is a build (on Android, of the
+page only: the dev APK is installed once and reloads, as aio's `dev:android`).
 
 ### Feature gaps
 
@@ -180,100 +201,63 @@ beyond the aio-rs form.
 
 | Area | aio | aio-rs | Workaround | Page |
 |---|---|---|---|---|
-| State | `aio.run({ onStart })`, an app-wide start hook | none | `#[on_start]` on a cell | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `fatalOnStart: true` | none: a refused `#[on_start]` is reported, the boot goes on | check in `main` before `run` | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `isolate` (run only some cells) | none | open only those cells (`TestCells`) | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `app.getFullState()` in a hook | none: a hook sees its own cell | pass what it needs | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `beforeReduce` may change an action | `before_call` lets in or refuses | change it in the method | [lifecycle](state/lifecycle.md#differences-from-aio) |
-| State | `beforeReduce`/`onAction` on every call, `am where` | no module-graph answer of where code runs | the compiler and `cfg(target_arch = "wasm32")` | [architecture](basics/architecture.md#gaps-against-aio) |
-| Methods | `transaction: true`, `$commit`, `$live`, transactions across cells | none: each part of an async method is atomic | take what you need before the await | [methods](state/methods.md#differences-from-aio) |
-| Methods | `cellDefaults`, `persist: false` app-wide | none: flags per cell | `#[cell(persist)]` where wanted | [persistence](persistence/README.md#limits-compared-with-aio) |
-| Effects | `blocking.cancel(id)` stops a task | `spawn_blocking` can't be stopped | check a flag between chunks | [effects](state/effects.md#limits) |
-| Effects | `t.getEffects()`, effect objects in tests | `t.effects()` lists keys | `t.settle()` runs them | [effects](state/effects.md#limits) |
-| Effects | notifications in a browser page (`requestNotificationPermission`) | none in a web build | `aio::tell::show_with(f)` | [effects](state/effects.md#limits) |
-| Persistence | `persist: { include, exclude }` path lists | none | `#[transient]`, `save = f` | [persistence](persistence/README.md#limits-compared-with-aio) |
+| State | `am where` | no module-graph answer of where code runs | the compiler and `cfg(target_arch = "wasm32")` | [architecture](basics/architecture.md#gaps-against-aio) |
+| Methods | `transaction: true` tracks reads: a blind write never conflicts | `#[cell(transaction)]` sees no reads: a field written counts as read, so a blind write another call changed conflicts | write it in a plain method, or `transaction(conflict = "warn")` | [methods](state/methods.md#transactions) |
+| Methods | `cellDefaults` (`visible`, `ui` for every cell) | none: flags per cell | `#[cell(...)]` on each | [persistence](persistence/README.md#limits-compared-with-aio) |
+| Effects | `t.getEffects()`, effect objects in tests (`isScheduleEffect`) | `t.held_effects()`: key, mode, timeout; schedules apart | `Store::schedules` | [effects](state/effects.md#limits) |
 | Persistence | `persistMode: "single" \| "multi"` | log + snapshots per cell; aio's layout read and written as found | ➖ | [persistence](persistence/README.md#limits-compared-with-aio) |
-| Persistence | state export and import over HTTP | none | `ax snapshot save`, `ax snapshot load` | [persistence](persistence/README.md#limits-compared-with-aio) |
-| Persistence | timed backups, a WAL-checkpoint setting | none | the OS's scheduler | [files](persistence/files.md#limits-compared-with-aio) |
 | Persistence | `launch.json`, a restart with the last flags | none | pass the flags again | [files](persistence/files.md#limits-compared-with-aio) |
-| Persistence | typed schema builder (`ColumnOpts`) | `columns = "…"` in SQL, no query builder | plain SQL | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Persistence | a size guard (warn 1 MB, error 16 MB) | only against `[budgets] state` | declare `[budgets] state` | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Persistence | `bool`, lists, nested values in table rows | flat rows | numbers or strings | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Persistence | — | blob reads by range or file, no async stream | `read`, `path` | [SQL](persistence/sql.md#limits-compared-with-aio) |
-| Sync | merge strategies per field (`lww`, `counter`, `set-add`, `text`…), HLC | methods replayed in order on the server | methods; `aio::merge::text3` for prose | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | peer-to-peer, server-less sync | a copy needs a server | a server | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | Immer add/remove ops for arrays | a `Vec` re-sent whole when its length changes | a map for a growing collection | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | `fullStateThreshold`, `syncIntervalMs`, staleness multipliers | none: a patch per event | `#[coalesce]` | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
+| Persistence | a query builder (`where` objects) | plain SQL | `aio::db::Db` | [SQL](persistence/sql.md#limits-compared-with-aio) |
+| Sync | `lww-per-key` and `set-remove` view merges, HLC | methods replayed in order on the server; `Remote::merge` shows `Text`, `Counter`, `SetAdd` | a method per key | [offline](persistence/offline.md#limits-compared-with-aio) |
+| Sync | render-staleness backpressure | every link paced the same (`sync_interval_ms`) | ➖ | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
 | Sync | path subscriptions | a copy gets every patch of its cell | split cells | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | binary side channels, framing, backpressure | JSON only; no binary route | blobs or a route | [transports](clients/transports.md#gaps), [sync](state/sync.md#limits) |
-| Sync | every cell served on one socket | `aio::sync::serve` serves one `Handle` | one served cell, or one app per cell | [CLI and service](examples/cli-service.md#limits) |
-| Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
-| Auth | sessions without accounts | sessions come with `[accounts]` | `aio::auth::serving()`, `issue(user, role)` | [accounts](auth/README.md#limits) |
-| Auth | `--tls-cert`, `--tls-key`, `--no-tls` | `[server] cert`, `key`; `tls = false` | `aio.toml` | [accounts](auth/README.md#limits) |
-| Auth | a share link printed at boot | none | `ax profile`, pairing | [accounts](auth/README.md#limits) |
+| Auth | a share link carrying the key | the share line names the key file | `?token=<key>` by hand, `ax profile`, pairing | [accounts](auth/README.md#limits) |
 | Auth | `useUser()` | `Client::me`, `SignIn`'s `on_signed` | ➖ | [accounts](auth/README.md#limits) |
-| Auth | a `firewall:` line at boot | none | allow the app in the OS firewall | [setup](basics/setup.md) |
 | Views | server rendering, hydration, `collectHead` | none | `ax preview --html`; `aio::head::html` | [views](ui/views.md#gaps-against-aio), [islands](ui/islands.md#gaps) |
-| Views | code splitting, `lazy` | one binary | `Defer` defers the render | [islands](ui/islands.md#gaps) |
-| Views | other view libraries (`aio/state-core`), `h()`, React compat | Dioxus `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
+| Views | code splitting, `lazy` | one binary | `Defer` defers the render and loads (`load`, `loading`, `error`, `loading_min_ms`) | [islands](ui/islands.md#gaps) |
+| Views | other view libraries (`aio/state-core`), `h()`, React compat | `aio::ui` `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
 | Views | accessibility checked in the running page | static (`ax lint`) | `TestUi` audits | [islands](ui/islands.md#gaps) |
 | Views | Redux DevTools | none | `TimeTravelPanel`, `ax timetravel`, `ax events` | [views](ui/views.md#gaps-against-aio) |
-| Views | `watch()`, `on()`, `trackedMemo()` | none as such | `use_effect`, `use_memo` | [views](ui/views.md#gaps-against-aio) |
-| Views | a 12 ms frame deadline mid-render | one batch per tick | keep renders small | [performance](performance.md#gaps-against-aio) |
+| Views | `watch()`, `on()`, `trackedMemo()` | `watch(deps, f)` | `effect`, `memo` | [views](ui/views.md#gaps-against-aio) |
+| Views | a 12 ms frame deadline mid-render | one batch of holes per tick | keep what a change wakes small | [performance](performance.md#gaps-against-aio) |
 | Views | `Worker` script bundling | none | Rust off the thread (`spawn_blocking`) | [performance](performance.md#gaps-against-aio) |
 | Kit | `<UiStyles/>` | `theme_css`, `theme::sheet` | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Kit | `Tooltip` to the side | `Top` or `Bottom` only | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Forms | Standard Schema (Zod, Valibot, ArkType), `parsed()` | a Rust check function | parse in the check | [forms](ui/forms.md#gaps) |
-| Forms | `bind(name)` | two handlers per input | ➖ | [forms](ui/forms.md#gaps) |
-| Routing | the address bar, Back and reload follow the route (History API, SPA fallback) | history kept in the app; a web reload starts at `/` | keep the screen in a cell | [routing](ui/routing.md#gaps-against-aio) |
-| Theming | scoped `css` classes, a duplicate-class warning | none | prefix class names | [theming](ui/theming.md#gaps-against-aio) |
+| Theming | a duplicate-class warning for scoped `css` classes | `aio::ui::css(rule)`, no warning (a class is its rule's hash) | ➖ | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
-| Theming | `neutral = "soft"` key, the hue on icon, splash, download window | `theme::tokens_css(soft)`; the icon takes the id's hue | pass the app's own CSS variables | [theming](ui/theming.md#gaps-against-aio) |
-| Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
-| Desktop | custom window chrome (`ui.chrome`) | the OS title bar | ➖ | [desktop](clients/desktop.md#gaps) |
-| Desktop | app menus, a context-menu API | macOS's standard menus only | `kit::Menu`, the tray | [desktop](clients/desktop.md#gaps) |
-| Desktop | several app windows | one; child windows for other sites | ➖ | [desktop](clients/desktop.md#gaps) |
-| Desktop | `keepServer`, `--keep-server` | none | a server and a client | [desktop](clients/desktop.md#gaps) |
-| Desktop | `runCommand` with `stdin` | none | `std::process` in an effect | [desktop](clients/desktop.md#gaps) |
-| Desktop | `requireSandbox`, `allowLocalPeers`, `ignoreDebugEnv` | `AIORT_SANDBOX=1` | ➖ | [desktop](clients/desktop.md#gaps) |
-| Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |
+| Desktop | custom window chrome (`ui.chrome`) | the OS title bar; the window's verbs (`page::minimize`, `maximize`, `close`, `hide`, `show`) | ➖ | [desktop](clients/desktop.md#gaps) |
+| Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
+| Web | the page's console forwarded to the server's log, in a release too | in `ax dev --web`'s log; a release page's stays in the page | ➖ | [web](clients/web.md#gaps) |
 | Web | every `<webview>` method | `go` and events; desktop only | ➖ | [web](clients/web.md#gaps) |
-| CLI apps | `testIO()` over a whole run | none | test `parse`, `failure`, or the binary | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
 | CLI apps | `watch` hiding the cursor, one frame per tick | a frame per change | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
 | CLI apps | flag types inferred from the spec | read by name (`a.number("n")`) | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
-| Testing | `t.init(seed)`, `t.destroy()` mid-test | none | another cell on the same `TestCells` | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.randomActions(n)`, an unseeded fuzz | every fuzz seeded | ➖ | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.settle(ms)` on real timers | virtual timers | `TestServer` for real I/O | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `ui.advance(ms)` under the page | `TestUi` time is real | `TestCells::advance` | [UI](testing/ui.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `am testgen` typed clients | none | `ui.names()`, `ax surface --names` | [UI](testing/ui.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `waitForPatch`, `clients[i].patches` | none | assert on each copy's `state()` | [multi-app](testing/multi-app.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | a corrupt cassette re-recorded; unserializable args as text | refused | fix or delete it | [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `am lab windows\|macos\|linux\|android`: VMs and containers it boots, a noVNC viewer | `ax lab` over ssh to a machine you have | an emulator you run | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `deno task lab`, `deno task test:wine` | none | by hand on a fresh machine | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
+| Testing | a corrupt cassette re-recorded silently; unserializable args as text | refused unless `AIO_CASSETTE=rerecord`; args refused, naming the call | ➖ | [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without) |
+| Testing | `testServer(config)`: every cell of an app on one server | one cell per `TestServer` | several `TestServer`s, `TestApps` | [multi-app](testing/multi-app.md#what-aio-has-that-aio-rs-does-without) |
+| Testing | `deno task test:wine` | Windows bundles smoked on Windows | `./ci-windows.sh`, GitHub's Windows runner | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `aiol` perf hints, `[fixable]` marks | `TestUi::components`, `ax components` | ➖ | [lint](testing/lint.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | an API snapshot gate, an `experimental` marker | review and the CHANGELOG | ➖ | [versions](basics/versioning.md#gaps-against-aios-policy) |
-| Debugging | correlation ids, the error box with the state | the call's name; reports carry the state | `ax events` | [errors](debugging/errors.md#not-in-aio-rs) |
-| Debugging | `onError` with an error object, many error codes | `on_problem(kind, message)`, `Rejected` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
+| Debugging | the error box with the state | reports carry the state | `ax report` | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | a source-mapped `client.log`, `am logs` budgets | `[page]` lines in `app.log`; `file_mb` × `keep` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | `skipActions`, a switch turning time travel off | every event kept | `diagnostics = false`, `[log] suppress` | [time travel](debugging/time-travel.md#not-as-in-aio) |
 | Debugging | V8 heap snapshots, the health overlay | none | `ax heap`, `ax health` | [production](debugging/production.md#not-in-aio-rs) |
 | Debugging | `perfCheck: "off"`, a runtime benchmark gate | budgets always on | ➖ | [scaling](build/scaling.md#not-in-aio-rs) |
 | Debugging | reports screened by `visible`, timeline payloads | carried as saved, never arguments | `#[redact]` | [feedback](debugging/feedback.md#not-as-in-aio) |
-| Build | hot reload in a browser | no hot-patching in the web build or on Android | a build per edit | [dev](build/dev.md#limits) |
+| Build | hot-patching in a browser | `ax dev --web` rebuilds and reloads its tabs per edit, slower than a patch (on Android the dev page reloads) | ➖ | [dev](build/dev.md#limits) |
 | Build | a run-from-a-link command | none | clone, `ax start` | [dev](build/dev.md#limits) |
 | Build | ios-client (a WKWebView thin client) | no iOS | ➖ | [targets](build/targets.md#limits) |
-| Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME`, an Android emulator test lane | none | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |
-| Build | a CI file from `am create`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
+| Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME` | none (the emulator lane is `ax test --android`) | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |
+| Build | `deno task check`/`test`, one-command release matrix | `ax lint`, `ax test`; the GitHub workflow from `ax release` | ➖ | [CI](build/ci.md#not-in-aio-rs) |
 | Release | `canApply` awaited before every install, a warning with none | `can_apply` a plain function, not asked for an `auto` install | ➖ | [release](build/release.md#not-in-aio-rs) |
 | Release | a custom runtime refused beside `updates:` | replaced silently | ➖ | [release](build/release.md#not-in-aio-rs) |
-| `am` | `persist`, `persist --drop` | none | `#[cell(retire = [..])]` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | `snapshot load --force`, `dispatch` extras (`key=value`, `--body`, `--as-server`) | none | JSON arguments | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | `kill --stale`, `start --no-wait`, `errors --since=reload` | none | `--wait` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | `surface --component\|--depth\|--full`, `peer --types` | `ax surface` by path, `ax peer` signatures | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | `dispatch` plain actions, `--as-server` | none | cell methods; a debug build's door | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | `kill --stale`, `start --port` | none | the OS's lock; `[server] listen` | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 | `am` | `migrate`, `add cell\|server`, `report` collecting a new one | the compiler; by hand | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
-| `am` | the control REST API, `--quiet`; the manager UI's V8 heap and per-action readings | the local door, `--json`; `ax ui`'s aio-rs counterparts | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
+| `am` | the manager UI's V8 heap | `ax ui`'s aio-rs counterparts (per-action time and refusals as aio's) | ➖ | [ax](clients/ax.md#what-am-has-that-ax-hasnt) |
 
 ## How aio-rs deviates from aio
 
@@ -284,13 +268,15 @@ construct-by-construct tables are in the
 - **Rust types instead of TypeScript.** Arguments are typed and serde
   refuses a wrong one; ranges go in `ensure!`. A field aio left
   `undefined` is an `Option`. [migration](migration/README.md#cells-and-methods)
-- **Dioxus views instead of AIR/TSX.** `rsx!` instead of JSX; a
-  component re-renders when a signal it read changes or its props
-  differ. Read fields with `part`, pass rows as props.
+- **`aio::ui` views instead of AIR/TSX.** `rsx!` instead of JSX; where AIR
+  re-renders a component that read a changed signal, air runs its body
+  once and only what read the signal (its holes) again. Read fields with `part`, pass rows as props, what
+  must follow as a `Prop`.
   [views](ui/views.md#coming-from-aios-air-or-react)
 - **A refusal discards only its part.** In an async method each part
-  between awaits is atomic, and earlier parts stay; no transactions.
-  Take what you need before the await. [methods](state/methods.md#differences-from-aio)
+  between awaits is atomic, and earlier parts stay, unless the cell is
+  `#[cell(transaction)]` (aio's `transaction: true`): then the method
+  commits all or nothing. [methods](state/methods.md#transactions)
 - **Methods are pure.** `Date.now()`, ids and randomness come from
   `cx.now()`, `cx.id()`, `cx.rand()`; I/O goes in effects. `ax lint`
   refuses the rest. [checklist](migration/README.md#7-checklist)
@@ -299,38 +285,37 @@ construct-by-construct tables are in the
 - **Disabling keeps the state** (aio resets it). [lifecycle](state/lifecycle.md)
 - **A listener runs only for a committed call** (aio's also on a
   refusal). [composition](state/composition.md#differences-from-aio)
-- **A hidden field reads as its default on a copy** (aio throws). Publish
-  a fact field beside the secret (`has_password`); mark a method that
-  needs it `#[client(predict = false)]`. [visibility](state/visibility.md)
-- **A typed call on a copy returns the prediction**; `call_confirmed` is
-  the server's answer (aio's `await` gives the server's).
+- **A `#[server]` field of a shared cell is an `aio::Hidden<T>`**: a copy
+  never has it and any use there panics naming it (aio throws on a read);
+  a method that touches it is `#[client(predict = false)]`.
+  [visibility](state/visibility.md)
+- **A typed call of a plain method on a copy returns the prediction**;
+  `call_confirmed` is the server's answer (aio's `await` gives the
+  server's). An async method's `Answer` is the server's end.
   [sync](state/sync.md#limits)
-- **The offline queue holds 500 and refuses when full** (aio: 1000,
-  dropping the oldest) unless `[client] retention` is set; it can be kept
-  on disk. [sync](state/sync.md#limits)
-- **Merges are methods replayed on the server**, not per-field
-  strategies; a copy never merges with another copy.
-  [offline](persistence/offline.md#limits-compared-with-aio)
-- **A list is re-sent whole when its length changes**: keep a growing
-  collection in a map. [offline](persistence/offline.md#limits-compared-with-aio)
+- **A full offline queue refuses new calls** (500, as aio's `pendingCap`;
+  aio drops the new op) unless `[client] retention` lets the oldest past
+  it go; it can be kept on disk. [sync](state/sync.md#limits)
+- **Merges are methods replayed on the server** (as aio's CRDT ops run
+  through its methods); a copy may show a field merged while its call
+  waits (`Remote::merge`) and hears where a server change met it
+  (`on_conflict`). [offline](persistence/offline.md#conflicts-and-fields-shown-merged)
 - **Writes are committed before a call returns**; only `#[coalesce]`
   methods are held (aio debounces every write). Coalesce the methods a
   held key or a pointer calls. [data](migration/data.md#durability-what-each-saves-when)
-- **`#[transient]` instead of `persist: { exclude }`** path lists.
-  [persistence](persistence/README.md#limits-compared-with-aio)
 - **`aio.toml` is built in**, never read at run time: rebuild after an
   edit; per-launch settings are flags or variables. [FAQ](basics/faq.md)
-- **Forms touch a field on change**, not on blur: a field left untouched
-  shows its error after a submit. [forms](ui/forms.md#gaps)
-- **Routes live in the app**, not the browser's history: a web reload
-  starts at `/`. [routing](ui/routing.md#gaps-against-aio)
-- **`Transition` takes children and `show`**, not a conditional child,
-  and motions are CSS keyframes. [animation](ui/animation.md)
+- **A form field with its own handlers is touched on change**, not on
+  blur; a bound input (`form.bind`) is touched on blur, as aio's.
+  [forms](ui/forms.md#bound-fields)
+- **`Transition` takes children and `show`**, not a conditional child;
+  motions are CSS keyframes or a function (`Motion::of`), and it draws no
+  box of its own. [animation](ui/animation.md)
 - **Tests boot every cell's `#[on_start]`** (aio's `testCell` skipped
-  `onInit`), timers in `TestCells` are virtual, `TestUi` time is real,
+  `onInit`), timers in `TestCells` are virtual, `TestUi` time is real until `advance`,
   and an unread refusal fails the test. [testing cells](testing/cells.md#what-aio-has-that-aio-rs-does-without)
-- **A corrupt cassette fails** instead of being re-recorded.
-  [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without)
+- **A corrupt cassette fails** instead of being re-recorded, unless
+  `AIO_CASSETTE=rerecord` asks. [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without)
 - **Time travel keeps every event**: no `skipActions`.
   [time travel](debugging/time-travel.md#not-as-in-aio)
 - **Problem reports are always on** and never carry arguments.
@@ -360,30 +345,30 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Argument schemas | `args` | the Rust types + `ensure!` | 🔄 |
 | State machines | `machine:` | `aio::machine!`, `#[cell(machine = field)]` | ✅ |
 | Many cells, order | `dependsOn`, `composeCells` | `Cells::with`, `#[aio_cell]` fields | ✅ |
-| Reactions across cells | `listensTo`, `cancelOn` | `listens_to`, `cx.abort` (committed calls only) | 🔄 |
-| Transactions | `transaction: true`, across cells | ❌ (each part atomic; read before the await) | ❌ |
+| Reactions across cells | `listensTo`, `cancelOn` (in the call's reduce and save) | `listens_to` (inside the call's commit: one SQLite transaction), `cx.abort`; committed calls only, and a refused reaction never undoes its call | 🔄 |
+| Transactions | `transaction: true` / `{ serialize, conflict }`, `$commit`, `$live`, `TX_CONFLICT` | `#[cell(transaction)]` / `transaction(serialize, conflict = "warn")`, `cx.commit()`, `cx.live_state()`, `Code::TxConflict`; a written field counts as read (a method reads only its own cell) | 🔄 |
 | Lifecycle hooks | `onInit`, `onDestroy`, `onStopping`, `onStop` | `#[on_start]`, `#[on_stop]`, `aio::on_stopping`, `aio::on_stop` | ✅ |
-| App-wide start hook, `fatalOnStart`, `isolate` | yes | ❌ (`#[on_start]` per cell) | ❌ |
+| App-wide start hook, `fatalOnStart`, `isolate`, `onRestore`, `getFullState` | yes | `Cells::on_start`, `fatal_on_start`, `AIORT_ISOLATE`, `on_restore`, `view` | ✅ |
 | Disable, breaker | resets state; `circuitBreaker` | keeps state; `Cells::trip_after` | 🔄 |
-| Call hook | `beforeReduce` (may change) | `before_call` (lets in or refuses) | 🔄 |
+| Call hook | `beforeReduce` (may change) | `before_call` (lets in or refuses), `rewrite_call` (may change) | ✅ |
 | Worker cells | `worker: true` | not needed: native code, `spawn_blocking` | 🔄 |
-| View-only state | `scope: "client"` | a cell without `persist`/`shared`, or a `GlobalSignal` | ✅ |
-| Visibility | `visible`, `forUser` | `#[cell(visible = f)]`, `#[server]` fields (hidden reads as default) | 🔄 |
-| Plugins | `definePlugin` | `aio::plugin::Plugin` | ✅ |
-| Retired cells | `am persist --drop` | `#[cell(retire = [..])]` | 🔄 |
+| View-only state | `scope: "client"` | a cell without `persist`/`shared`, or a `Global` | ✅ |
+| Visibility | `visible`, `forUser`; a hidden read throws | `#[cell(visible = f)]`, `#[server]` fields as `Hidden<T>` (a read on a copy panics) | ✅ |
+| Plugins | `definePlugin` (`onAction`, `allowedOrigins`, …) | `aio::plugin::Plugin` (`on_action`, `allowed_origins`, …) | ✅ |
+| Retired cells | `am persist --drop` | `ax persist --drop`, `#[cell(retire = [..])]` | ✅ |
 
 **Methods, effects, scheduling**
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Async methods | `async` on a draft | `async fn`, split at its awaits | 🔄 |
-| Effects and modes | `$do`, `concurrency` | `cx.run(Effect::new(..))`, `Mode` | ✅ |
+| Async methods | `async` on a draft; `await cell.method()` gives its value or throw | `async fn`, split at its awaits (in branches and loops too); `h.m(..)?.await` gives its end | ✅ |
+| Effects and modes | `$do`, `concurrency` | `cx.run(Effect::new(..))`, `Mode`; `#[mode(newest \| first)]` on async methods | ✅ |
 | `ttl`, `long` | yes | `#[ttl(ms)]`, `#[long]` | ✅ |
 | Retries, timeouts | `call({ timeoutMs, retries })` | `aio::effect::retry`, `Effect::timeout`, `cx.backoff` | ✅ |
-| Schedules | `every`, `cron`, `after`, `backoff` | `#[every]`, `#[cron]`, `cx.after`, `cx.backoff` | ✅ |
+| Schedules | `every`, `cron` (UTC), `after`, `backoff`, another cell's action | `#[every]`, `#[cron]` (UTC; `[app] tz = "local"`), `cx.after`, `cx.backoff`, `cx.on::<Other>()` | ✅ |
 | Clock, ids, randomness in methods | allowed, linted | `cx.now()`, `cx.id()`, `cx.rand()` | 🔄 |
-| CPU work | `blocking(id, fn)`, `cancel` | `spawn_blocking` (not cancellable) | 🔄 |
-| Notifications | `notify()` | `cx.tell(..)`; a web build needs `show_with` | 🔄 |
+| CPU work | `blocking(id, fn)`, `cancel` | `aio::effect::blocking(key, f)`, `cancel_blocking` | ✅ |
+| Notifications | `notify()` | `cx.tell(..)`; a web page shows the browser's own, asking for the permission | ✅ |
 | Pending calls | `$pending()` | `h.pending(..)`, `use_pending` | ✅ |
 
 **Persistence**
@@ -392,20 +377,22 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | SQLite store | `state.db` | the same file | ✅ |
 | Event log, history | journal (opt-in) | every commit an event | ➕ |
-| Write debounce | every write, 100 ms | `#[coalesce]` methods only | 🔄 |
-| Excluded fields | `persist: { include, exclude }` | `#[transient]`, `save = f` | 🔄 |
+| Write debounce | every write, `persistDebounceMs` | `#[coalesce]` methods only, `[data] coalesce_ms` | 🔄 |
+| Excluded fields | `persist: { include, exclude }` | `#[cell(persist(include, exclude))]`, `#[transient]`, `save = f` | ✅ |
 | Store layout | `single` / `multi` | log + snapshots; aio's layout kept | 🔄 |
-| App-wide `persist: false`, `cellDefaults` | yes | ❌ (per cell) | ❌ |
+| App-wide `persist: false`, `--no-persist` | yes | `[data] persist = false`, `--no-persist` | ✅ |
+| Data from a newer build (rollback) | boots, parks `__downgraded:<cell>` | the same; refused only when it doesn't fit | ✅ |
+| aio's journal tail after a crash | replayed | replayed by the port | ✅ |
 | Migrations | `version`, `onMigrate` | `#[cell(version, migrate)]` | ✅ |
 | Integrity check | `checkIntegrityOnBoot` | every boot, with recovery | ✅ |
 | Backups, restore | `am backup`, `am restore` | `ax backup`, `ax restore` | ✅ |
-| Timed backups | yes | ❌ (the OS's scheduler) | ❌ |
-| State export over HTTP | snapshot endpoints | ❌ (`ax snapshot save`/`load`) | ❌ |
-| Bound tables | `db:` tables | `#[table]` (flat rows) | 🔄 |
-| Schema builder | column helpers | ❌ (`columns = "…"` SQL) | ❌ |
-| Raw SQL, live queries | `createDB`, `reactiveDB` | `aio::db::Db`, live queries | ✅ |
-| Blobs | `app.blobs` | `aio::blobs::Blobs` | ✅ |
-| Size guard | 1 MB warn, 16 MB error | ❌ (`[budgets] state`) | ❌ |
+| Timed backups | a recipe | `[data] backup_every`, `backup_keep` | ➕ |
+| State export over HTTP | `/__aio/snapshot` (dev) | `/__aio/snapshot` (dev), `Handle::export_snapshot`, `load_snapshot` | ✅ |
+| Bound tables | `db:` tables (flat rows) | `#[table]`; bools, lists, nested values in `BOOLEAN`/`JSON` columns | ➕ |
+| Schema builder | column helpers | `aio::columns` (`pk`, `text`, `refs`, …) | ✅ |
+| Raw SQL, live queries | `createDB`, `reactiveDB` | `aio::db::Db`, live queries woken by any `Db` of the file | ✅ |
+| Blobs | `app.blobs`, `stream` | `aio::blobs::Blobs`, `stream` | ✅ |
+| Size guard | 1 MB warn, 16 MB error | the same, unless `[budgets] state` | ✅ |
 | Homes, profiles, instances | `--home`, `--profile`, `--instance` | the same rules | ✅ |
 
 **Sync and offline**
@@ -415,15 +402,15 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Shared cells | `sync`, broadcast | `#[cell(shared)]` | ✅ |
 | Optimistic calls | `useOptimistic`, local-first | built in: copies predict | ✅ |
 | Access per method | `access` | `#[client(role, allow)]` | ✅ |
-| Merging | per-field CRDT strategies, HLC | ❌ (methods replayed on the server) | ❌ |
-| Server-less, peer-to-peer | yes | ❌ (a server confirms) | ❌ |
-| Offline queue | 1000, in memory, drops oldest | 500, refuses when full, on disk if asked | 🔄 |
-| Array patches | Immer ops | whole `Vec` on a length change | 🔄 |
-| Throttles | `syncIntervalMs`, `fullStateThreshold` | ❌ (a patch per event; `#[coalesce]`) | ❌ |
+| Merging | per-field view merges, `onConflict`, HLC | methods replayed on the server; `Remote::merge` (`Text`, `Counter`, `SetAdd`), `on_conflict` | 🔄 |
+| Offline queue | 500 per `sync:` cell, in the page's storage, `retention` | 500, refuses when full, `retention`, on disk if asked | ✅ |
+| Array patches | Immer `add`/`remove`, narrowed | `insert`/`del` per item, else the array | ✅ |
+| Throttles | `syncIntervalMs`, `fullStateThreshold` | `sync_interval_ms`, `full_state_percent` | ✅ |
 | Path subscriptions | yes | ❌ (split cells) | ❌ |
-| Binary wire, side channels | yes | ❌ (blobs, routes) | ❌ |
-| Server functions, routes | `serverFns`, `routes` | `aio::fns::ServerFn`, `aio::http` | ✅ |
-| One socket, every cell | yes | ❌ (`sync::serve` takes one `Handle`) | ❌ |
+| Binary side channels | a raw WebSocket route, a recipe | `Route::socket` with framing, drop or close, gap checks | ✅ |
+| Server functions, routes | `serverFns`, `routes`, streamed `Response` | `aio::fns::ServerFn`, `aio::http`, `Reply::stream` | ✅ |
+| One socket, every cell | yes | `Http::cell`: one `/ws`, port and socket for every cell, a link per cell on it; an aio page sees every shared cell | ✅ |
+| Peer identity, door hooks | `resolvePeer`, `localConnectHooks` | `Http::resolve_peer`, `Http::door_links` | ✅ |
 | Pairing, discovery, peers | PIN, CPace, UDP 8099, `x-aio-peer` | the same formats | ✅ |
 | Calling another app | `peer()`, `call` | `Peer::find`, `AioLink` | ✅ |
 | Server limits | `maxConnections`, `wsLimits` | `[server.limits]` | ✅ |
@@ -433,12 +420,14 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Accounts, roles, TOTP, OIDC | `auth`, `sessions` | `[accounts]` | ✅ |
-| Sessions without accounts | yes | ❌ (`auth::serving()`, `issue`) | ❌ |
-| TLS | `--tls-cert`/`--tls-key`, own LAN CA | `[server] cert`/`key`, a machine root for the LAN | 🔄 |
+| Sessions without accounts | `sessions: true` | `[accounts] sessions`, `auth::serving()`'s `issue` | ✅ |
+| Users tokens re-checked on open sockets | every 5 s | every 5 s, and at once on a revoke | ✅ |
+| TLS | `--tls-cert`/`--tls-key`, `--no-tls`, own LAN CA | the same flags, `[server] cert`/`key`, a machine root for the LAN | ✅ |
+| Health and metrics beyond loopback | open without a key | a credential, always (fail closed) | ➕ |
 | Security headers | yes | `[server.security]` | ✅ |
 | Origins, proxies | `allowedOrigins`, `trustProxyHeader` | `[server] hosts`, `trust_proxy` | ✅ |
 | CORS, passkeys | none | none | ✅ |
-| Share link at boot, firewall line | yes | ❌ (`ax profile`, pairing) | ❌ |
+| Share link at boot, firewall line | yes | `share:` (names the key file) and `firewall:` lines | ✅ |
 | Outbound network list | `nativeFetch` | `[capabilities] network` | ✅ |
 | Secrets in logs | `redactActions` | `#[redact]`, masked logs | ✅ |
 
@@ -446,25 +435,25 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Renderer | AIR, TSX | Dioxus, `rsx!` | 🔄 |
+| Renderer | AIR, TSX | `aio::ui`, `rsx!`, drawn by air (fine-grained, a body runs once, holes follow state) | 🔄 |
 | Field-level reads | one signal per cell | `part(\|c\| &c.field)` | 🔄 |
-| Hooks | AIR and React names | Dioxus hooks, no dependency arrays | 🔄 |
+| Hooks | AIR and React names | `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`: AIR's names, no dependency arrays | 🔄 |
 | Server rendering, hydration | yes | ❌ (`ax preview --html`) | ❌ |
-| Code splitting, `lazy` | yes | ❌ (`Defer`) | ❌ |
+| Code splitting, `lazy` | yes | ❌ (`Defer` with `load`) | ❌ |
 | Other view libraries, `h()` | `aio/state-core`, React compat | ❌ (islands) | ❌ |
 | Islands, React islands, `<Browser>` | yes | `WebIsland`, `Island::react`, `kit::Browser` | ✅ |
 | Kit components | `aio/ui` | `aio::kit`, the same names | ✅ |
 | Side tooltips | yes | ❌ (`Top`, `Bottom`) | ❌ |
 | Keys | `onGlobalKey`, `REPEATABLE_KEYS` | `use_global_key`, `Chord::repeating` | ✅ |
 | Long lists | `useVirtualList` | `kit::VirtualList` | ✅ |
-| Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check, touched on change | 🔄 |
-| Routing | History API, address bar | in-app history, typed `routes!` | 🔄 |
+| Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check; `bind`, touched on blur, `reset_field`, `use_field_array`, `use_on_change` | 🔄 |
+| Routing | History API, address bar | history in the app; in a browser the address bar, Back and a reload follow it; typed `routes!` | ✅ |
 | Head | `useHead` | `aio::head::use_head` | ✅ |
-| Theme, hue, CSS variables | `ui.theme`, `hue` | `theme_css(hue)`, `--aio-*` | ✅ |
-| Scoped CSS classes | `css` tag | ❌ (prefix by hand) | ❌ |
+| Theme, hue, CSS variables | `ui.theme`, `hue`, `neutral`, dark follows the OS | `theme_css(hue)`, `--aio-*`, `[ui] neutral`, `[ui] scheme` (the OS's by default) | ✅ |
+| Scoped CSS classes | `css` tag | `aio::ui::css` (no duplicate-class warning) | 🔄 |
 | Live CSS in dev | yes | yes, plus `[build] css` toolchains | ✅ |
-| Transitions | `TransitionFn`, shared `options` | CSS keyframes, a `Motion` each | 🔄 |
-| Runtime a11y check | dev mode | ❌ (`ax lint`, `TestUi`) | ❌ |
+| Transitions | `TransitionFn`, shared `options` | CSS keyframes or `Motion::of`, a `Motion` each, no box | 🔄 |
+| Runtime a11y check | dev mode | `TestUi::a11y()`, aio's rules, said at each mount (not in the running dev page yet) | 🔄 |
 | Window chrome, app menus, several windows | yes | ❌ (OS title bar, `kit::Menu`, child windows) | ❌ |
 | Redux DevTools | yes | ❌ (`TimeTravelPanel`) | ❌ |
 | Worker bundling | yes | ❌ (`spawn_blocking`) | ❌ |
@@ -473,17 +462,22 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Cell tests | `testCell`, `bootCells` | `TestCells` (virtual time, seeded fuzz) | ✅ |
+| Cell tests | `testCell`, `bootCells` | `TestCells` (virtual time, seeded fuzz, `fuzz_methods`, `reset`, `last_effects`, `budget`) | ✅ |
 | UI tests | `testUI` on happy-dom | `TestUi` on the real engine | ➕ |
-| Virtual clock under the page | `ui.advance` | ❌ (`TestCells::advance`) | ❌ |
-| Typed UI clients | `am testgen` | ❌ (`ax surface --names`) | ❌ |
+| Virtual clock under the page | `ui.advance` | `TestUi::advance` (the views' timers; schedules: `TestCells::advance`) | ✅ |
+| Components by name and key | `ui.find(c, key)`, `surface()` tree | `ui.find(c, key)`, `within`, `surface_tree()` | ✅ |
+| Typed UI clients | `am testgen` | `ax testgen` (a Rust name table) | ✅ |
 | Server and multi-client | `testServer`, `testMultiClient` | `TestServer`, `Sim` | ✅ |
-| Patch assertions | `waitForPatch` | ❌ (each copy's `state()`) | ❌ |
-| Cassettes | `openCassette` | `Cassette` (stricter) | 🔄 |
+| Patch assertions | `patches`, `waitForPatch`, `dispatchAll` | `testing::patches` (`all`, `until`), `call_all` | ✅ |
+| Several apps | `testApps` | `TestApps` | ✅ |
+| Cassettes | `openCassette`, `wrap` | `Cassette` (`wrap`; stricter, `AIO_CASSETTE=rerecord`) | 🔄 |
+| Page fetch stubs | `testUI({ fetch })` | `Mount::fetch(host, answer)` | ✅ |
+| Boot smoke in a test | `smoke()` | `testing::smoke(bundle)`, `ax smoke` (also a `.deb`'s menu entry, page errors) | ✅ |
+| Proving the tests | `check:mutations`, `check:vacuous` | `scripts/mutants` (source and a built `.deb`), `ax lint` (no-assertions, self-comparison) | ✅ |
 | Browser tests | `testBrowser` | `TestBrowser` | ✅ |
 | Lint | `aiol` | the compiler + `ax lint` | 🔄 |
-| Labs | VMs and containers it boots | `ax lab` over ssh | 🔄 |
-| CLI run capture | `testIO()` | ❌ (test `parse`, the binary) | ❌ |
+| Labs | VMs and containers it boots | the same images (`ax lab --boot`), or a machine over ssh | ✅ |
+| CLI run capture | `testIO()` | `testing::TestIo` | ✅ |
 | API snapshot gate | yes | ❌ (review, CHANGELOG) | ❌ |
 
 **Debugging**
@@ -492,8 +486,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Time travel | dev only, 2000 entries | the whole store, release builds too | ➕ |
 | Replay, record | `am replay`, `am record` | `ax replay`, `ax record` (writes a Rust test) | ✅ |
-| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
-| Correlation ids, error box with state | yes | ❌ (`ax events`, reports) | ❌ |
+| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `ax vitals`, `/__aio/vitals`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
+| Diagnostic bus | `onDiagnostic`, severity, fix | `report::subscribe`: `severity`, `tip`, `code()`; `vitals:<layer>`, `degraded-recovered:<part>` | ✅ |
+| Memory pressure hook | `onMemoryPressure`, `interval` | `health::on_memory`, `[memory] every` | ✅ |
+| Per-run log files | `debug.log` per run | `[log] per_run` | ✅ |
+| Correlation ids | yes | `call=<id>` on a call's lines, its timeline entry and reports | ✅ |
+| Error box with state | yes | reports carry the state | 🔄 |
 | Heap snapshots | V8 | not needed: no GC heap; `ax heap` | 🔄 |
 | Problem reports | `feedback: true` | always on, no arguments | 🔄 |
 | Manager UI | `am ui` | `ax ui` (the same tabs) | ✅ |
@@ -504,12 +502,14 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Desktop | electron | Linux, Windows, macOS on a shared runtime | ✅ |
 | Web, PWA | `web` | `ax build --web` | ✅ |
-| Android | `android` | APK, built on Linux | ✅ |
+| Android | `android` | APKs (3 CPUs, universal optional, debug), built on Linux, macOS, Windows; a port installs over aio's APK, its state with it | ✅ |
 | Service, CLI | `server`, `cli` | `mode = "server"`, `cli` | ✅ |
-| Thin clients | electron-, android-, cli-client | `mode = "client"` | ✅ |
+| Thin clients | electron-, android-, cli-client | `mode = "client"`; an Android client has no connect page on the phone yet (paired from the desktop, `ax pair`) | 🔄 |
 | iOS | ios-client | ❌ | ❌ |
-| Dev reload | patch, reload, restart (~3 s) | hot-patch, state kept | 🔄 |
-| Hot reload in web, Android | page reload | ❌ (a build per edit) | ❌ |
+| Dev reload | patch, reload, restart (~3 s) | hot-patch, state kept: `ax dev` reloads markup (3 ms) and patches Rust (~0.45 s) itself (Linux, macOS, Windows); the in-page overlay shows build errors only (no server diagnostics, live a11y or contrast yet) | 🔄 |
+| Dev watcher | 100 ms debounce, 500 ms ceiling, editor files ignored, served files watched, health sentinel, restart drain and storm guard, files named | the same (cargo's dep-info for the files a build read); an unchanged binary isn't restarted | ✅ |
+| Dev session | `am start` of a dev run, `--no-watch`, `--verbose`, `--title`, `am stop` ends it | `ax dev --detach`, `--no-watch`, `--verbose` (`AIORT_LOG`), `--title` (`AIORT_TITLE`), `ax stop` ends it, `ax status` says it waits for a fix | ✅ |
+| Hot reload in web, Android | page reload | 🔄 the dev APK reloads the page each edit (`ax dev --android`); the web build reloads its tabs | 🔄 |
 | Single instance, takeover | `singleton`, `takeover` | always one per home, `--takeover` | ✅ |
 
 **Release and updates**
@@ -527,11 +527,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | App control | `start`, `stop`, `kill`, `restart`, `status` | the same | ✅ |
 | State and history | `state`, `snapshot`, `migrations`, `replay`, `timetravel` | the same | ✅ |
-| Calls | `dispatch` | `ax call` | 🔄 |
+| Calls | `dispatch` (`k=v`, `--body`, `--wait`) | `ax call` (the same) | 🔄 |
 | Inspection | `surface`, `trigger`, `shot`, `eval`, `preview`, `sql`, `heap`, `cost` | the same | ✅ |
-| Pairing, trust | `discover`, `profile`, `pair`, `pin`, `auth`, `trust` | the same | ✅ |
+| Pairing, trust | `discover`, `profile`, `pair`, `auth`, `trust` | the same (`ax pair <app>` makes a pairing code, `ax pair <app> <host:port> <code>` pairs this device) | ✅ |
 | `where`, `check` | yes | the compiler | 🔄 |
-| `persist`, `testgen`, `add`, control REST API | yes | ❌ | ❌ |
+| `persist`, `testgen`, `timeline`, `top`, control REST API | yes | `ax persist`, `ax testgen`, `ax timeline`, `ax top`, `ax control` (loopback HTTP) | ✅ |
+| `add cell\|server` | yes | ❌ (written by hand) | ❌ |
 | `keygen`, `release`, `update`, `smoke`, `install`, `lint`, `test`, `events`, `components`, `adopt`, `import`, `runtime`, `setup` | — | yes | ➕ |
 
 **Tooling**
@@ -539,17 +540,20 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Agent brief | `am agent` | `ax agent`, `AGENTS.md`/`CLAUDE.md` in new apps | ✅ |
-| Framework version per app | `dep/aio` link, `am pin`, `am upgrade` | `Cargo.lock`: `cargo update -p aio-rs` | 🔄 |
-| Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows) or source; no prebuilt macOS | 🔄 |
+| Framework version per app | `dep/aio` link, `am pin`, `am fix` | aio-rs from git at a release tag in `Cargo.toml`, the commit in `Cargo.lock`: a clone builds as it is; `ax create --aio-version`; `ax pin` says what Cargo.toml asks for, what Cargo.lock built, this ax and the releases (drift: exit 1), `ax pin <v>\|main\|latest\|<checkout>` moves it, `--major`, `--json`; no preflight of removed APIs (`cargo check` names them) | ✅ |
+| Upgrading the CLI | `am upgrade`, `am uninstall` | `ax upgrade` (the release's checked install script, or a checkout), `ax uninstall` | ✅ |
+| Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows, macOS) or source | 🔄 |
 | API reference | `api-reference.md` | `cargo doc -p aio-rs` | ✅ |
 
 ## Plans
 
-- **0.2.0: aio-rs's own renderer, "air".** It is planned to replace
-  Dioxus with a fine-grained renderer of aio-rs's own: a cell's fields as
-  signals, direct DOM edits for what changed, and a lean macro so
-  rebuilds get faster. This is the plan, not a promised date; until
-  then the views are Dioxus, as documented.
+- **Done in 0.2.0: aio-rs's own renderer, "air", is the only one.** A
+  fine-grained renderer of aio-rs's own: a cell's fields as signals,
+  direct DOM edits for what changed, and a lean macro so rebuilds get
+  faster ([design](design/air.md)). Apps are written against `aio::ui`;
+  what a 0.1 app changes is in the migration guide's section 8, [0.1 → 0.2](migration/README.md).
+- **Next: key-to-paint at or under aio's** on large states
+  ([key to paint](#key-to-paint)).
 
 ## Moving
 

@@ -82,12 +82,19 @@ pub fn host() -> Result<&'static Platform, String> {
 pub fn resolve(names: &[&str], host: &'static Platform) -> Result<Vec<&'static Platform>, String> {
     let mut out: Vec<&'static Platform> = vec![];
     for n in names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if n == "all" {
+            for p in &ALL {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+            continue;
+        }
         let p = match n {
             "host" => host,
-            _ => ALL
-                .iter()
-                .find(|p| p.name == n)
-                .ok_or_else(|| format!("no platform `{n}` (platforms: {}, or host)", ALL.map(|p| p.name).join(", ")))?,
+            _ => ALL.iter().find(|p| p.name == n).ok_or_else(|| {
+                format!("no platform `{n}` (platforms: {}, host, or all)", ALL.map(|p| p.name).join(", "))
+            })?,
         };
         if !out.contains(&p) {
             out.push(p);
@@ -159,7 +166,10 @@ mod tests {
         );
         let e = resolve(&["linux", "solaris", "win"], host).unwrap_err();
         assert!(e.starts_with("no platform `solaris` (platforms: linux, linux-arm64, windows,"), "{e}");
-        assert!(e.ends_with("macos-arm64, or host)"), "{e}");
+        assert!(e.ends_with("macos-arm64, host, or all)"), "{e}");
+        // aio's --all-platforms: every one, once, the ones named first first.
+        assert_eq!(names(resolve(&["macos", "all"], host).unwrap()).len(), ALL.len());
+        assert_eq!(resolve(&["macos", "all"], host).unwrap()[0].name, "macos");
         assert_eq!(of("linux", "aarch64"), Some(named("linux-arm64")));
         assert_eq!(of("macos", "aarch64").map(arch_word), Some("arm64"));
         assert_eq!(of("freebsd", "x86_64"), None);

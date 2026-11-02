@@ -17,7 +17,7 @@ ported by translating it, construct by construct
 ([migration](../migration/README.md)). Which to pick, and what differs:
 [aio and aio-rs compared](../aio-vs-aio-rs.md).
 
-**Why Rust and Dioxus?** One language from the cell to the view, checked
+**Why Rust and `rsx!`?** One language from the cell to the view, checked
 by the compiler; small binaries (a server fits in a few MB); views stay
 real HTML and CSS, drawn by a browser engine.
 
@@ -82,7 +82,8 @@ instead (`[build] runtime = "bundled"`) for offline installs.
 | `ax lint` | what types can't check: impure methods, secrets, hooks, a11y | `--safe-fix` rewrites what it safely can |
 
 aio's `am fix` and `am link` (repairing a checkout's `dep/aio` link) have
-no twin: an aio-rs app points at its checkout by path in `Cargo.toml`.
+no twin: an aio-rs app takes aio-rs from git at a release tag, so a clone
+builds as it is; `ax pin <version>` moves it (aio's `am pin`).
 
 **When is aio-rs the wrong tool?**
 
@@ -109,8 +110,9 @@ in `aio::blobs::Blobs` (the cell keeps the id; served with Range), rows in
 routes ([SQL and blobs](../persistence/sql.md), [sync](../state/sync.md#server-functions-and-routes)).
 Heavy work runs in an effect and hands back a small result.
 
-**Can the views use something other than Dioxus?** Not in the app's
-window: `client!`, `part` and `act!` are Dioxus. Another client (a page of
+**Can the views use something other than `aio::ui`?** Not in the app's
+window: `client!`, `part` and `act!` are `aio::ui`'s (air underneath:
+an app doesn't name it). Another client (a page of
 your own, another program) talks to a server over `/ws` or HTTP routes
 ([wire](../migration/wire.md)); aio-rs ships no adapter for another view
 library.
@@ -150,7 +152,6 @@ bug in this page: `ax feedback` says where to send it.
 | state differs between runs, replay diverges | a `HashMap` in state (its order differs) | `BTreeMap`, or `aio::imbl::OrdMap` |
 | the app starts with no data | `[app] id` or a cell `id` was changed | ids are the data's identity: change them back |
 | `h.start()` on a `Handle` doesn't call the cell's `start` method | a `Handle`'s own methods (`start`, `state`, `call`, `listen`, `watch`…) come first | name the method apart (`begin`), or call it by name: `h.call("start", json!([]))` |
-| `` `Result` is ambiguous `` where the cell and the view share a file | `aio::prelude` and `dioxus::prelude` both name a `Result` | `use aio::Result;` beside the two globs (an explicit import wins) |
 | the state is back to its default after a restart | the cell has no `persist` | `#[cell(persist)]` |
 | a renamed field comes back empty, the old value is gone | the shape changed without `version` and `migrate` | bump `version`, give `migrate` ([persistence](../persistence/README.md#changing-the-shape)) |
 | an older build refuses to boot on the data | the data is from a newer build (a higher `version`) | run the newer build; an older one never overwrites what it can't read |
@@ -188,10 +189,11 @@ bug in this page: `ax feedback` says where to send it.
 | Symptom | Cause | Fix |
 |---|---|---|
 | a view doesn't update after a call | the method was called without `act!`/`Ui` | `act!(method(args))` |
-| a view re-renders on every keypress | it reads the whole cell (`name()`) in its render | `part(\|c\| &c.field)`; the dev build's `[hint]` names it |
-| `already borrowed` panic | a signal read in an `if let`/`match` scrutinee stays borrowed in its block | bind it first: `let v = X.peek().map(..); if let Some(v) = v { .. }` |
-| a toast after a closed dialog never shows | `spawn` ends with its component | `aio::ui::spawn_forever` |
-| a CSS edit doesn't show under `ax dev` | CSS kept in `use_hook` (made once) | `aio::use_css!` in the render |
+| a view's holes run on every keypress | they read the whole cell (`name()`) | `part(\|c\| &c.field)` |
+| a view shows a value that never changes | the state is read at the top of its body (once, as it mounts) | read it in `rsx!` (`"{n}"`, `.get()`) or a `memo`; the dev build's `[hint]` names a body that reads the whole cell |
+| `already borrowed` panic | a signal read in an `if let`/`match` scrutinee stays borrowed in its block | bind it first: `let v = X.get_untracked(); if let Some(v) = v { .. }` |
+| a toast after a closed dialog never shows | `spawn` ends with its component | `spawn_forever` (`aio::ui::prelude`) |
+| a CSS edit doesn't show under `ax dev` | CSS kept in `once` (made once) | `aio::use_css!` in a hole |
 | arrows scroll the page as well as move the cursor | `prevent_default()` comes too late in a window | `"data-aio-prevent": "ArrowUp ArrowDown"` |
 | a drop handler never sees `set_data` | the view runs after the browser's dragstart | `"data-drag": "<id>"` on the dragged element |
 | `key:` has no effect | `key` counts only on a `for` body's first node | put it there; to remount one element, a one-item `for` |

@@ -7,7 +7,7 @@ use super::proc::FileNode;
 use super::scan::{Meta, Project, Running};
 use aio::serde_json::{Value, json};
 use aio::testing::TestUi;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -89,10 +89,19 @@ fn tasks_are_ax_verbs_on_the_project_and_each_build_target_is_one() {
 
 #[test]
 fn errors_schedules_cells_and_builds_read_as_shown() {
-    let text = "start 1: 2026-11-01T10:00:00.000Z [aio] notes starting\n  2026-11-01T10:00:01.000Z WARN  [page] slow\n  2026-11-01T10:00:02.000Z ERROR [aio] boom\n";
+    // amui's structured errors: a panic's message stays with it, newest first.
+    let v = json!({ "build": null, "starts": [{ "start": 1, "lines": [
+        "2026-11-01T10:00:01.000Z WARN  [page] slow",
+        "2026-11-01T10:00:02.000Z ERROR [aio] panicked at src/lib.rs:3:5\n2026-11-01T10:00:02.000Z   index out of bounds\n2026-11-01T10:00:02.000Z   → fix: …",
+    ]}]});
+    let e = errors_of(&v);
+    assert_eq!((e.len(), e[0].head.level.as_str(), e[0].head.scope.as_str()), (2, "error", "aio"));
+    assert_eq!(e[0].more, ["index out of bounds", "→ fix: …"], "the whole panic, not its first line");
+    assert_eq!(e[1].head.msg, "slow");
+    let b = errors_of(&json!({ "build": "build failed\nerror[E0308]: mismatched types", "starts": [] }));
     assert_eq!(
-        errors_of(text),
-        ["2026-11-01T10:00:02.000Z ERROR [aio] boom", "2026-11-01T10:00:01.000Z WARN  [page] slow"]
+        (b[0].head.scope.as_str(), b[0].more.as_slice()),
+        ("build", ["error[E0308]: mismatched types".to_string()].as_slice())
     );
     assert_eq!(
         schedules_of(&json!([{ "at": "10:00", "cell": "todo", "method": "tick", "every": "60s" }])),
@@ -126,6 +135,114 @@ fn the_list_shows_the_running_apps_a_search_all_and_the_chosen_one_always() {
     assert_eq!(ids(listed(&all, "", true, None)), ["notes", "mail", "todo"]);
     assert_eq!(ids(listed(&all, "", false, Some("todo"))), ["notes", "todo"]);
     assert_eq!(ids(listed(&all, "W/APPS", false, None)), ["mail"], "by folder too");
+    // amui's search reads the name shown, not only the id.
+    let mut named = project("crm", running(2));
+    named.meta.name = "Contacts".into();
+    assert_eq!(ids(listed(&[named], "contacts", false, None)), ["crm"], "by its display name");
+}
+
+/// amui's `controlErrorOf`: a refusal of who asked says what to do, so it
+/// is the one shown; else the first failure.
+#[test]
+fn the_banner_prefers_a_refusal_to_a_transport_failure() {
+    let gone = Err("notes: connection refused".to_string());
+    let denied = Err("board: access denied: an admin's".to_string());
+    let ok = Ok("{}".to_string());
+    assert_eq!(control_error_of(&[&gone, &denied]).as_deref(), Some("board: access denied: an admin's"));
+    assert_eq!(control_error_of(&[&ok, &gone]).as_deref(), Some("notes: connection refused"));
+    assert_eq!(control_error_of(&[&ok]), None);
+}
+
+/// amui's `psStats` on every OS: where `/proc` can't tell, two of the
+/// app's own readings make its CPU.
+#[test]
+fn cpu_comes_from_two_health_readings_where_proc_cant_tell() {
+    assert_eq!(cpu_between(None, (500, 10_000)), None, "one reading is no rate");
+    assert_eq!(cpu_between(Some((500, 10_000)), (2_500, 20_000)), Some(20.0), "2 s of CPU in 10 s");
+    assert_eq!(cpu_between(Some((500, 10_000)), (500, 10_000)), None, "no newer reading");
+    assert_eq!(cpu_between(Some((900, 10_000)), (500, 20_000)), None, "another process");
+    let h = json!({ "pid": 42, "exe": "/opt/notes/notes", "cwd": "/w/notes" });
+    assert_eq!(
+        super::proc::health_paths(42, &h),
+        (Some(PathBuf::from("/opt/notes/notes")), Some(PathBuf::from("/w/notes")))
+    );
+    assert_eq!(super::proc::health_paths(43, &h), (None, None), "another pid's file says nothing of this one");
+}
+
+/// amui's clients table: per link its health (and how long a part has
+/// been down), bytes a second and in all, and its backpressure.
+#[test]
+fn a_clients_row_has_its_health_bytes_and_backpressure() {
+    let was = [json!({ "cell": "board", "id": 3, "sent": 1000 })];
+    let mut now = [
+        json!({ "cell": "board", "id": 3, "sent": 3048, "behind": 2, "rtt": 4, "user": "ana", "from": "1.2.3.4", "wire": "aio-rs",
+            "degraded": [{ "name": "t:render", "failures": 5, "since": 10_000, "lastError": "frozen" }] }),
+        json!({ "cell": "todo", "id": 3, "sent": 10, "behind": 0, "degraded": [] }),
+    ];
+    with_rates(&mut now, &was, 2.0);
+    assert_eq!((now[0]["bytesPerS"].as_f64(), now[1].get("bytesPerS")), (Some(1024.0), None), "per cell and link");
+    let (row, why) = super::metrics::client_row(&now[0], 25_000);
+    assert_eq!(&row[2..9], ["degraded (1)", "1.2.3.4", "aio-rs", "ana", "1.0 KB/s", "3.0 KB", "2 behind"]);
+    assert_eq!(why, "t:render for 15 s: frozen");
+    let (row, _) = super::metrics::client_row(&now[1], 25_000);
+    assert_eq!((row[2].as_str(), row[6].as_str(), row[8].as_str()), ("ok", "—", "0"));
+}
+
+/// amui's recent actions and per-cell health: each action's time, a
+/// refused one marked with why, and a cell's errors and last action.
+#[test]
+fn an_action_says_its_time_and_a_refused_one_why() {
+    let history = [
+        json!({ "seq": 7, "cell": "board", "method": "add", "args": ["hi"], "at": 0, "ms": 0.4251 }),
+        json!({ "cell": "board", "method": "clear", "at": 0, "ms": 0.1, "refused": "only an admin" }),
+        json!({ "seq": 8, "cell": "todo", "method": "tick", "args": [], "at": 0 }),
+    ];
+    let (what, args, ms, _) = super::metrics::action_row(&history[0]);
+    assert_eq!((what.as_str(), args.as_str(), ms.as_str()), ("board.add", "[\"hi\"]", "0.43 ms · "));
+    let (what, why, ..) = super::metrics::action_row(&history[1]);
+    assert_eq!((what.as_str(), why.as_str()), ("✗ board.clear", "only an admin"));
+    assert_eq!(super::app::cell_calls(&history, "board"), (1, Some("add".into())));
+    assert_eq!(super::app::cell_calls(&history, "todo"), (0, Some("tick".into())));
+    assert_eq!(super::app::cell_calls(&history, "none"), (0, None));
+}
+
+/// amui's 5 s bound on every read: one that hangs is a failure said, not
+/// a stuck manager; a read runs in this process, no child.
+#[test]
+fn a_read_answers_within_its_bound_or_is_a_failure() {
+    let slow = bounded(Duration::from_millis(50), "ax metrics", || {
+        std::thread::sleep(Duration::from_secs(2));
+        Ok("late".into())
+    });
+    assert_eq!(slow.unwrap_err(), "ax metrics: no answer within 0 s");
+    assert_eq!(bounded(Duration::from_secs(5), "ax x", || Ok("now".into())).unwrap(), "now");
+    assert!(bounded(Duration::from_secs(5), "ax x", || panic!("boom")).unwrap_err().contains("panicked"));
+    let apps = within(READ_WITHIN, vec!["apps".into(), "--json".into()], None).unwrap();
+    assert!(aio::serde_json::from_str::<Value>(&apps).unwrap().is_array(), "{apps}");
+}
+
+/// amui's deno tasks: a project's own tasks are its cargo aliases, the
+/// nearest first, and a task of another project is none of its.
+#[test]
+fn a_projects_own_tasks_are_its_cargo_aliases() {
+    let d = tempfile::tempdir().unwrap();
+    let (ws, app) = (d.path().join("ws"), d.path().join("ws/apps/notes"));
+    for (dir, cfg) in [
+        (&ws, "[alias]\nci = [\"test\", \"--workspace\"]\nxtask = \"run -p xtask --\"\n"),
+        (&app, "[alias]\nci = \"test -p notes\"\n"),
+    ] {
+        std::fs::create_dir_all(dir.join(".cargo")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(dir.join(".cargo/config.toml"), cfg).unwrap();
+    }
+    std::fs::create_dir_all(ws.join("apps")).unwrap();
+    std::fs::write(ws.join("apps/Cargo.toml"), "").unwrap();
+    let tasks = super::scan::aliases(&app);
+    assert_eq!(tasks, [("ci".into(), "test -p notes".into()), ("xtask".into(), "run -p xtask --".into())]);
+    let meta = Meta { tasks, ..Meta::default() };
+    assert_eq!(task_of("cargo ci", "notes", &meta), Some((true, vec!["ci".to_string()])));
+    assert_eq!(task_of("cargo nope", "notes", &meta), None);
+    assert_eq!(task_of("test", "notes", &meta), Some((false, vec!["test".into(), "notes".into()])));
 }
 
 /// amui's `FileBrowser`: open by default, folded folders hide what is in
@@ -169,13 +286,14 @@ fn fake(said: Arc<Mutex<Vec<String>>>, home: PathBuf) -> Verb {
             "cost" => ok(
                 json!({ "board": { "calls": 4, "meanMs": 0.5, "p95Ms": 1.25, "pushesPerS": 2.0, "bytesPerS": 512.0, "fullResends": 0 } }),
             ),
-            "events" => {
-                ok(json!([{ "seq": 7, "cell": "board", "method": "add", "args": ["hi"], "at": 1_793_530_826_603i64 }]))
-            }
-            "clients" => ok(
-                json!([{ "id": 3, "user": "dev", "from": "door", "wire": "tool", "rtt": 4, "since": 1_793_530_826_603i64 }]),
-            ),
-            "errors" => Ok("start 1: x\n  2026-11-01T10:00:02.000Z ERROR [aio] boom".into()),
+            "events" => ok(json!([
+                { "seq": 7, "cell": "board", "method": "add", "args": ["hi"], "at": 1_793_530_826_603i64, "ms": 0.5 },
+                { "cell": "board", "method": "clear", "at": 1_793_530_826_700i64, "ms": 0.1, "refused": "only an admin" },
+            ])),
+            "clients" => ok(json!([{ "id": 3, "user": "dev", "from": "door", "wire": "tool", "rtt": 4,
+                "since": 1_793_530_826_603i64, "sent": 2048, "behind": 0, "degraded": [] }])),
+            "errors" => ok(json!({ "build": null, "starts": [{ "start": 1, "lines": [
+                "2026-11-01T10:00:02.000Z ERROR [aio] panicked at boom\n2026-11-01T10:00:02.000Z   the reason" ] }] })),
             "schedules" => ok(json!([])),
             "components" => ok(
                 json!({ "components": [{ "name": "root", "renders": 2, "ms": 1.0, "children": [{ "name": "Board", "renders": 5, "ms": 0.75, "children": [] }] }] }),
@@ -193,8 +311,8 @@ thread_local! {
     static SETUP: std::cell::RefCell<Option<Setup>> = const { std::cell::RefCell::new(None) };
 }
 
-fn mounted() -> Element {
-    use_context_provider(|| SETUP.with_borrow(|s| s.clone().unwrap()));
+fn mounted() -> View {
+    provide(|| SETUP.with_borrow(|s| s.clone().unwrap()));
     rsx! { super::app::App {} }
 }
 
@@ -215,7 +333,8 @@ fn window(dir: &Path, dark: bool) -> (TestUi, Arc<Mutex<Vec<String>>>) {
     let data = home.join("apps/notes/data");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(home.join("apps/notes/logs")).unwrap();
-    std::fs::write(data.join("health.json"), json!({ "status": "healthy", "aio": "0.1.0", "uptimeS": 90, "memory": { "rssBytes": 48u64 << 20, "machinePct": 1, "level": "ok" }, "degraded": [], "gauges": [] }).to_string()).unwrap();
+    std::fs::write(data.join("health.json"), json!({ "status": "healthy", "aio": "0.1.0", "uptimeS": 90, "memory": { "rssBytes": 48u64 << 20, "machinePct": 1, "level": "ok" }, "degraded": [], "gauges": [],
+        "config": { "title": "Notes", "auth": "accounts", "mode": "standalone" } }).to_string()).unwrap();
     std::fs::write(
         home.join("apps/notes/logs/app.log"),
         "2026-11-01T10:00:00.000Z [aio] up\n2026-11-01T10:00:01.000Z WARN  [page] slow\n2026-11-01T10:00:02.000Z ERROR [aio] boom\n",
@@ -236,8 +355,10 @@ fn window(dir: &Path, dark: bool) -> (TestUi, Arc<Mutex<Vec<String>>>) {
     (if dark { m.dark() } else { m }.app(mounted), said)
 }
 
+/// Wait until `t` shows `has`: a hang guard, not a measure (a loaded CI
+/// runner took past 5 s for a tab's first poll and its draw).
 fn shows(ui: &mut TestUi, t: &str, has: &str) {
-    for _ in 0..500 {
+    for _ in 0..3000 {
         if ui.present(t) && ui.text(t).contains(has) {
             return;
         }
@@ -272,9 +393,12 @@ fn the_manager_lists_the_running_apps_and_shows_the_chosen_ones_overview() {
     shows(&mut ui, "tile-clients", "2");
     shows(&mut ui, "tile-uptime", "1m 30s");
     shows(&mut ui, "cellHealth", "board");
-    assert!(ui.text("cellHealth").contains("120 B · 2 links"), "{}", ui.text("cellHealth"));
+    assert!(ui.text("cellHealth").contains("120 B · 2 links · 1 err · add"), "{}", ui.text("cellHealth"));
     assert!(ui.text("project").contains("0.1.0") && ui.text("process").contains("4000000"));
-    shows(&mut ui, "errors", "boom");
+    shows(&mut ui, "errors", "panicked at boom");
+    assert!(ui.text("errors").contains("the reason"), "a panic whole: {}", ui.text("errors"));
+    let cfg = ui.text("config");
+    assert!(cfg.contains("Notes") && cfg.contains("accounts"), "from the live app: {cfg}");
     let at = Path::new("w").join("notes");
     assert!(ui.text("where").contains(&*at.to_string_lossy()), "its project, found: {}", ui.text("where"));
     assert!(said(&verbs).contains(&"peer notes --json".to_string()));
@@ -377,8 +501,15 @@ fn the_metrics_tab_shows_trends_calls_memory_clients_sizes_and_actions() {
     assert!(ui.text("chart-State").contains("samples"), "{}", ui.text("chart-State"));
     shows(&mut ui, "memory", "48.0 MB");
     shows(&mut ui, "clients", "door");
+    assert!(ui.text("clients").contains("2.0 KB") && ui.text("clients").contains("ok"), "{}", ui.text("clients"));
     shows(&mut ui, "cellSizes", "120 B");
     shows(&mut ui, "actions", "board.add");
+    assert!(ui.text("calls").contains("board.add"), "a refused call is no last action: {}", ui.text("calls"));
+    assert!(
+        ui.text("actions").contains("0.50 ms") && ui.text("actions").contains("✗ board.clear"),
+        "{}",
+        ui.text("actions")
+    );
     shows(&mut ui, "components", "Board×5 · 0.75 ms");
 }
 
@@ -405,7 +536,7 @@ fn the_logs_tab_reads_by_source_and_filters_by_level_and_text() {
 }
 
 /// amui's `runTask: cancel via signal terminates promptly`: a task runs
-/// in the app's project, its output shown, and Stop task ends it.
+/// in the app's project, its output shown as it comes, and Stop task ends it.
 #[cfg(unix)]
 #[test]
 fn a_task_runs_in_the_project_and_stop_task_ends_it() {
@@ -424,6 +555,7 @@ fn a_task_runs_in_the_project_and_stop_task_ends_it() {
     shows(&mut ui, "taskState", "exit 0");
     ui.click("task-dev");
     shows(&mut ui, "taskState", "running dev");
+    shows(&mut ui, "taskOutput", "watching");
     ui.click("stopTask");
     shows(&mut ui, "taskOutput", "[cancelled]");
 }
@@ -558,6 +690,9 @@ async fn in_a_browser_tab() {
     until(&mut t, &format!("!!{}", q("app-notes")), json!(true)).await;
     t.eval(&format!("{}.click() || true", q("app-notes"))).await.unwrap();
     until(&mut t, &text("name"), json!("notes")).await;
+    // Its detail read (the header drawn for it, not for the list's entry):
+    // a click on the header it replaces would reach no button.
+    until(&mut t, &format!("!!{0} && !{0}.textContent.includes('loading')", q("where")), json!(true)).await;
     t.eval(&format!("{}.click() || true", q("stop"))).await.unwrap();
     until(&mut t, &format!("!!{}", q("confirmOk")), json!(true)).await;
     t.eval(&format!("{}.click() || true", q("confirmOk"))).await.unwrap();

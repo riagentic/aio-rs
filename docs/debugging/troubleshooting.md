@@ -27,7 +27,7 @@ Each says what it found in words, with `--json` for scripts.
 | a call or a click takes long | [slow calls](#slow-calls) |
 | memory keeps going up | [memory](#memory) |
 | a client can't reach the server, or drops | [connections](#connections) |
-| a view renders too often | [too many renders](#too-many-renders) |
+| a view updates too often | [too many updates](#too-many-updates) |
 | a cell takes no calls any more | [a cell stopped working](#a-cell-stopped-working) |
 | nothing failed, yet something didn't happen | [silent failures](#silent-failures) |
 | `WARN [perf]` lines | [budget and storm warnings](#budget-and-storm-warnings) |
@@ -51,7 +51,7 @@ Each says what it found in words, with `--json` for scripts.
 | Cause | How you tell | Fix |
 |---|---|---|
 | no `use_live()` in the root component | calls from the view show at once, but changes from effects and schedules show only after the next click | call `use_live()` once in the root ([views](../ui/views.md)) |
-| a value read once, not in the render | it never changes after the first render | read it with `part(…)` in the render, not in `use_hook` |
+| a value read once, at the top of a view's body or in `once` | it never changes after the view mounts | read it with `part(…)` in a hole of `rsx!` (`"{n}"`, `.get()`) or a `memo` |
 | the copy is offline | `use_status()` says `Offline`, or `Blocked` (so many calls wait that new ones are refused) | it catches up on reconnect; `ax clients <server>` shows who is linked |
 | the view shows another copy than you think | `ax state <app> <cell>` differs from the window | name the copy: `<app>@<profile>`, `--instance`, the same `AIORT_DATA` |
 | a `visible` filter hides it from this user | `ax state <app> <cell> --as <user>` lacks it | that is the rule working; check the filter ([visibility](../state/visibility.md)) |
@@ -86,15 +86,15 @@ eviction and a long `Vec` of rows are the usual causes;
 | calls fail with `CONNECTION_LOST` | the link dropped mid-call | the call may have run: read the state, then retry |
 | the server's log says `transport frozen` | the client did not ping in time; on loopback, its own main thread was busy | see [a frozen window](#a-frozen-or-blank-window) |
 
-### Too many renders
+### Too many updates
 
-`ax components <app> --renders` lists the last 200 renders and how long
-each took, and a debug build says it in the log (`INFO [hint] … a render
-reads all of tasks, so it re-renders on every commit`). A component that
-renders on every commit reads the whole state
-(`tasks()`) where it needs one field: read that field with `part(|t|
-&t.field)` instead, and give rows their own component with props
-([performance](../performance.md)).
+`ax components <app>` gives each component's `updates` (its holes'
+writes of the page). A component whose holes run on every commit reads
+the whole state (`tasks()`) where it needs one field: read that field
+with `part(|t| &t.field)` instead, and give rows their own component with
+props ([performance](../performance.md)). A debug build names a view
+body that reads the whole state (`INFO [hint]`): read there, it is read
+once and never follows.
 
 ### A cell stopped working
 
@@ -133,14 +133,15 @@ Nothing went red, yet something didn't happen:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ax create` refuses: no aio-rs checkout | a prebuilt `ax` doesn't know where aio-rs's source is | `git clone https://github.com/riagentic/aio-rs`, then `ax create notes --aio aio-rs` ([setup](../basics/setup.md#where-an-app-gets-aio-rs-from)) |
+| A clone fails: no aio-rs at `../…/crates/aio` | the app was made with `--aio` (a checkout beside it) | `ax pin <version>`: aio-rs from git ([setup](../basics/setup.md#where-an-app-gets-aio-rs-from)) |
+| `ax create --aio` refuses: the app and the checkout share no folder | a path through the root would name this machine's folders | put the app and the checkout in one folder, or leave out `--aio` |
 | the build fails naming an `aio.toml` key | `aio.toml` is parsed as the app builds: a typo or a refused value | fix that key ([reference](../reference/aio-toml.md#common-mistakes)) |
 | the build fails at link time (`cc`, `link.exe` not found) | no C toolchain | [setup: Rust and a C toolchain](../basics/setup.md#1-rust-and-a-c-toolchain) |
 | the app starts with no data | `[app] id` or a cell's `id` changed | change it back: ids are where the data is |
 | a second launch shows nothing new | the app was running: a second launch hands over to the first and ends | that is by design; `--instance <n>` runs a private copy, `--takeover` asks the running one to stop and takes its place |
 | a server won't start: the port is in use | another process has `[server] listen`'s port | stop it, or `--port <n>` for this launch |
-| `ax dev` rebuilds and restarts on every edit | dx is missing, or the edit can't be patched (a new dependency, a changed type) | `ax setup` fetches dx; a rebuild for the rest is expected |
-| a CSS edit doesn't show under `ax dev` | the CSS is kept in `use_hook` (made once) | `aio::use_css!` in the render |
+| `ax dev` rebuilds and restarts on every Rust edit | Windows (no hot-patching there yet), or the edit can't be patched (a `Cargo.toml`, a patch that failed: the terminal says why) | expected |
+| a CSS edit doesn't show under `ax dev` | the CSS is kept in `once` (made once) | `aio::use_css!` in a hole |
 | `ax state` / `ax call` say the app isn't running | it runs from another home (a profile, an instance, `AIORT_DATA`) | name that copy: `notes@<profile>`, `--instance`, the same `AIORT_DATA` |
 | `ax shot`, `ax eval` can't reach the window | a release build has no dev door | run it with `ax dev`, or launch with `--cdp` (`ax start notes --cdp`) |
 | a UI test fails on a refusal at its end | `TestUi` / `TestCells` fail on refusals nobody looked at | take the expected ones with `failures()` ([testing](../testing/README.md)) |
@@ -184,8 +185,11 @@ More pitfalls, by symptom: [FAQ and pitfalls](../basics/faq.md#pitfalls).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ax build --android` fails before compiling | no Android SDK, NDK or JDK, or no `aarch64-linux-android` target | the build names what is missing; `ax setup` names the `rustup target add` line |
-| `ax install --android` finds no device | no phone attached with USB debugging, or only an emulator | attach one (`adb devices` lists it); `--device <serial>` picks one; `--emulator` allows an emulator |
+| `ax build --android` fails before compiling | no Android SDK, NDK, JDK 17-23 or Gradle 8.9+, or a missing Rust Android target | the build names what is missing; `ax setup` names the `rustup target add` line |
+| `ax install --android` finds no device | no phone attached with USB debugging, or only an emulator | attach one (`adb devices` lists it); `--device <serial>` (or `ANDROID_SERIAL`) picks one; `--emulator` allows an emulator |
+| `ax dev --android` boots no emulator | no AVD, or `AIO_AVD` names none | create one (Android Studio, `avdmanager create avd`); the error lists the AVDs there |
+| a port's APK won't install over the aio app | another key, or a lower version | sign with aio's key (the machine's `~/.android/debug.keystore`, or the aio release's keystore) and give it a version above the aio build's |
+| the app crashes at start on Android 10 | an own `android/` `MainActivity.java` calling API 30 | the build names it; re-base it on the template's (`[build.android] strict = true` refuses it) |
 | `ax install --android` refuses the APK | the newest APK is older than the sources | `--build` builds first, or `--apk <file>` names one |
 | the camera never asks | the APK doesn't declare it | `[build.android] camera = true` |
 | a `notes://` link doesn't open the app | the scheme isn't declared | `[build.android] schemes = ["notes"]` |

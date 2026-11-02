@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""The published crates' public API, one item a line, checked in (TS21):
+a change to what an app can name shows in review, and no renderer but air
+shows in it.
+
+  scripts/public-api           write scripts/api/<crate>.txt
+  scripts/public-api --check   fail when the API differs from those files,
+                               or names aio-rs 0.1's renderer
+
+From rustdoc's JSON (the pinned toolchain, RUSTC_BOOTSTRAP=1 for its
+unstable flag), every feature on: modules, items, fields, variants, trait
+items, inherent methods and trait impls (not the auto and blanket ones),
+re-exports of other crates as `use` lines. `#[doc(hidden)]` is not API.
+"""
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+OUT = ROOT / "scripts" / "api"
+# (package, its library's name in rustdoc's output).
+CRATES = [
+    ("aio-rs", "aio"),
+    ("aio-rs-air", "air"),
+    ("aio-rs-shell", "aio_shell"),
+    ("aio-rs-config", "aio_config"),
+    ("aio-rs-hotpatch", "aio_hotpatch"),
+    ("aio-rs-macros", "aio_macros"),
+    ("aio-rs-config-macro", "aio_config_macro"),
+    ("aio-rs-air-macro", "air_macro"),
+]
+# What 0.2.0 dropped: none of it may be named.
+GONE = ("dioxus", "generational_box", "subsecond")
+
+
+def doc_json(package, lib):
+    target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+    env = dict(os.environ, RUSTC_BOOTSTRAP="1")
+    subprocess.run(
+        ["cargo", "rustdoc", "-q", "--locked", "-p", package, "--lib", "--all-features", "--",
+         "-Z", "unstable-options", "--output-format", "json"],
+        cwd=ROOT, env=env, check=True,
+    )
+    return json.loads((target / "doc" / f"{lib}.json").read_text())
+
+
+def path(p):
+    return p["path"] + args(p.get("args"))
+
+
+def args(a):
+    if not a:
+        return ""
+    if "angle_bracketed" in a:
+        ab = a["angle_bracketed"]
+        parts = [garg(x) for x in ab["args"]] + [constraint(c) for c in ab["constraints"]]
+        return f"<{', '.join(parts)}>" if parts else ""
+    if "parenthesized" in a:
+        pa = a["parenthesized"]
+        out = f"({', '.join(ty(t) for t in pa['inputs'])})"
+        return out + (f" -> {ty(pa['output'])}" if pa.get("output") else "")
+    return ""
+
+
+def garg(x):
+    if "lifetime" in x:
+        return x["lifetime"]
+    if "type" in x:
+        return ty(x["type"])
+    if "const" in x:
+        return x["const"].get("expr", "_")
+    return "_"
+
+
+def constraint(c):
+    b = c["binding"]
+    if "equality" in b:
+        e = b["equality"]
+        return f"{c['name']} = {ty(e['type']) if 'type' in e else e.get('constant', {}).get('expr', '_')}"
+    return f"{c['name']}: {bounds(b['constraint'])}"
+
+
+def bounds(bs):
+    out = []
+    for b in bs:
+        if "trait_bound" in b:
+            t = b["trait_bound"]
+            m = {"maybe": "?", "maybe_const": "~const "}.get(t.get("modifier"), "")
+            hr = f"for<{', '.join(g['name'] for g in t['generic_params'])}> " if t.get("generic_params") else ""
+            out.append(f"{hr}{m}{path(t['trait'])}")
+        elif "outlives" in b:
+            out.append(b["outlives"])
+        elif "use" in b:
+            out.append(f"use<{', '.join(str(x.get('lifetime', x.get('param', x))) if isinstance(x, dict) else str(x) for x in b['use'])}>")
+    return " + ".join(out)
+
+
+def ty(t):
+    if t is None:
+        return "()"
+    k, v = next(iter(t.items()))
+    if k == "resolved_path":
+        return path(v)
+    if k == "dyn_trait":
+        parts = [path(p["trait"]) for p in v["traits"]] + ([v["lifetime"]] if v.get("lifetime") else [])
+        return "dyn " + " + ".join(parts)
+    if k == "generic":
+        return v
+    if k == "primitive":
+        return v
+    if k == "function_pointer":
+        sig = v["sig"]
+        return f"fn({', '.join(ty(a[1]) for a in sig['inputs'])}){ret(sig['output'])}"
+    if k == "tuple":
+        return f"({', '.join(ty(x) for x in v)}{',' if len(v) == 1 else ''})"
+    if k == "slice":
+        return f"[{ty(v)}]"
+    if k == "array":
+        return f"[{ty(v['type'])}; {v['len']}]"
+    if k == "pat":
+        return ty(v["type"])
+    if k == "impl_trait":
+        return "impl " + bounds(v)
+    if k == "infer":
+        return "_"
+    if k == "raw_pointer":
+        return f"*{'mut' if v['is_mutable'] else 'const'} {ty(v['type'])}"
+    if k == "borrowed_ref":
+        lt = f"{v['lifetime']} " if v.get("lifetime") else ""
+        return f"&{lt}{'mut ' if v['is_mutable'] else ''}{ty(v['type'])}"
+    if k == "qualified_path":
+        tr = f" as {path(v['trait'])}" if v.get("trait") else ""
+        return f"<{ty(v['self_type'])}{tr}>::{v['name']}"
+    return k
+
+
+def ret(o):
+    return f" -> {ty(o)}" if o is not None else ""
+
+
+def generics(g):
+    ps = []
+    for p in g["params"]:
+        k = p["kind"]
+        if "lifetime" in k:
+            ps.append(p["name"])
+        elif "type" in k:
+            if k["type"].get("is_synthetic"):
+                continue
+            b = bounds(k["type"]["bounds"])
+            ps.append(p["name"] + (f": {b}" if b else ""))
+        elif "const" in k:
+            ps.append(f"const {p['name']}: {ty(k['const']['type'])}")
+    out = f"<{', '.join(ps)}>" if ps else ""
+    ws = []
+    for w in g["where_predicates"]:
+        if "bound_predicate" in w:
+            bp = w["bound_predicate"]
+            ws.append(f"{ty(bp['type'])}: {bounds(bp['bounds'])}")
+        elif "lifetime_predicate" in w:
+            lp = w["lifetime_predicate"]
+            ws.append(f"{lp['lifetime']}: {' + '.join(lp['outlives'])}")
+        elif "eq_predicate" in w:
+            ep = w["eq_predicate"]
+            ws.append(f"{ty(ep['lhs'])} = {ty(ep['rhs']['type']) if 'type' in ep['rhs'] else '_'}")
+    return out, (f" where {', '.join(ws)}" if ws else "")
+
+
+def fn_sig(name, f):
+    h = f["header"]
+    q = "".join(w for c, w in [(h["is_const"], "const "), (h["is_async"], "async "), (h["is_unsafe"], "unsafe ")] if c)
+    g, w = generics(f["generics"])
+    ins = []
+    for n, t in f["sig"]["inputs"]:
+        ins.append(selfish(n, t) or f"{n}: {ty(t)}")
+    return f"{q}fn {name}{g}({', '.join(ins)}){ret(f['sig']['output'])}{w}"
+
+
+def selfish(n, t):
+    if n != "self":
+        return None
+    if t == {"generic": "Self"}:
+        return "self"
+    if "borrowed_ref" in t and t["borrowed_ref"]["type"] == {"generic": "Self"}:
+        r = t["borrowed_ref"]
+        return f"&{'mut ' if r['is_mutable'] else ''}self"
+    return None
+
+
+class Api:
+    def __init__(self, d):
+        self.d, self.idx, self.lines, self.seen = d, d["index"], [], set()
+
+    def item(self, i):
+        return self.idx.get(str(i))
+
+    def emit(self, line):
+        self.lines.append(line)
+
+    def walk(self, i, at):
+        it = self.item(i)
+        if it is None or it["visibility"] != "public" and at:
+            return
+        kind, v = next(iter(it["inner"].items()))
+        name = it["name"]
+        here = f"{at}::{name}" if at and name else (at or name)
+        if (i, here) in self.seen:
+            return
+        self.seen.add((i, here))
+        if kind == "module":
+            self.emit(f"mod {here}")
+            for c in v["items"]:
+                self.walk(c, here)
+        elif kind == "use":
+            self.use(v, at)
+        elif kind == "function":
+            self.emit(f"{here}: {fn_sig(name, v)}")
+        elif kind == "struct":
+            g, w = generics(v["generics"])
+            sk = v["kind"]
+            self.emit(f"struct {here}{g}{w}")
+            if isinstance(sk, dict) and "plain" in sk:
+                for f in sk["plain"]["fields"]:
+                    fi = self.item(f)
+                    if fi and fi["visibility"] == "public":
+                        self.emit(f"{here}.{fi['name']}: {ty(fi['inner']['struct_field'])}")
+            elif isinstance(sk, dict) and "tuple" in sk:
+                fs = [ty(self.item(f)["inner"]["struct_field"]) if f is not None else "_" for f in sk["tuple"]]
+                self.emit(f"{here}({', '.join(fs)})")
+            self.impls(here, v["impls"])
+        elif kind == "enum":
+            g, w = generics(v["generics"])
+            self.emit(f"enum {here}{g}{w}")
+            for var in v["variants"]:
+                vi = self.item(var)
+                vk = vi["inner"]["variant"]["kind"]
+                if isinstance(vk, dict) and "tuple" in vk:
+                    fs = [ty(self.item(f)["inner"]["struct_field"]) if f is not None else "_" for f in vk["tuple"]]
+                    self.emit(f"{here}::{vi['name']}({', '.join(fs)})")
+                elif isinstance(vk, dict) and "struct" in vk:
+                    fs = [f"{self.item(f)['name']}: {ty(self.item(f)['inner']['struct_field'])}" for f in vk["struct"]["fields"]]
+                    self.emit(f"{here}::{vi['name']} {{ {', '.join(fs)} }}")
+                else:
+                    self.emit(f"{here}::{vi['name']}")
+            self.impls(here, v["impls"])
+        elif kind == "union":
+            self.emit(f"union {here}")
+            self.impls(here, v["impls"])
+        elif kind == "trait":
+            g, w = generics(v["generics"])
+            b = bounds(v["bounds"])
+            self.emit(f"trait {here}{g}{': ' + b if b else ''}{w}")
+            for t in v["items"]:
+                self.assoc(here, self.item(t))
+        elif kind == "type_alias":
+            g, _ = generics(v["generics"])
+            self.emit(f"type {here}{g} = {ty(v['type'])}")
+        elif kind == "constant":
+            self.emit(f"const {here}: {ty(v['type'])}")
+        elif kind == "static":
+            self.emit(f"static {here}: {'mut ' if v.get('is_mutable') else ''}{ty(v['type'])}")
+        elif kind == "macro":
+            self.emit(f"macro {here}!")
+        elif kind == "proc_macro":
+            self.emit(f"proc_macro {here} ({v['kind']})")
+        else:
+            self.emit(f"{kind} {here}")
+
+    def use(self, v, at):
+        name = v["name"]
+        target = self.item(v["id"]) if v.get("id") is not None else None
+        local = target is not None and target["crate_id"] == 0
+        if v["is_glob"]:
+            if local and "module" in target["inner"]:
+                for c in target["inner"]["module"]["items"]:
+                    self.walk(c, at)
+                return
+            self.emit(f"use {at}::* = {v['source']}::*")
+            return
+        if local:
+            # Under its new name: the item as if written here.
+            saved = target["name"]
+            target["name"] = name
+            target_vis = target["visibility"]
+            target["visibility"] = "public"
+            self.walk(v["id"], at)
+            target["name"], target["visibility"] = saved, target_vis
+            return
+        self.emit(f"use {at}::{name} = {self.external(v)}")
+
+    def external(self, v):
+        s = self.d["paths"].get(str(v.get("id"))) if v.get("id") is not None else None
+        if s:
+            return "::".join(s["path"])
+        return v["source"]
+
+    def impls(self, here, ids):
+        for i in ids:
+            im = self.item(i)
+            if im is None:
+                continue
+            v = im["inner"]["impl"]
+            if v.get("is_synthetic") or v.get("blanket_impl") is not None:
+                continue
+            g, w = generics(v["generics"])
+            if v.get("trait"):
+                neg = "!" if v.get("is_negative") else ""
+                self.emit(f"impl{g} {neg}{path(v['trait'])} for {ty(v['for'])}{w}")
+                continue
+            for m in v["items"]:
+                mi = self.item(m)
+                if mi is None or mi["visibility"] != "public":
+                    continue
+                self.assoc(here, mi)
+
+    def assoc(self, here, it):
+        if it is None:
+            return
+        kind, v = next(iter(it["inner"].items()))
+        n = it["name"]
+        if kind == "function":
+            self.emit(f"{here}::{n}: {fn_sig(n, v)}")
+        elif kind == "assoc_type":
+            b = bounds(v.get("bounds", []))
+            self.emit(f"{here}::{n}: type{': ' + b if b else ''}{' = ' + ty(v['type']) if v.get('type') else ''}")
+        elif kind == "assoc_const":
+            self.emit(f"{here}::{n}: const {ty(v['type'])}")
+        else:
+            self.emit(f"{here}::{n}: {kind}")
+
+
+def api(package, lib):
+    d = doc_json(package, lib)
+    a = Api(d)
+    root = a.item(d["root"])
+    a.walk(d["root"], "")
+    # The crate's name, as an app writes it.
+    return sorted(set(a.lines)), root["name"]
+
+
+def main():
+    check = "--check" in sys.argv[1:]
+    OUT.mkdir(exist_ok=True)
+    bad = []
+    for package, lib in CRATES:
+        lines, _ = api(package, lib)
+        text = "\n".join(lines) + "\n"
+        named = [l for l in lines if any(g in l.lower() for g in GONE)]
+        if named:
+            bad.append(f"{package} names what 0.2.0 dropped:\n  " + "\n  ".join(named[:20]))
+        f = OUT / f"{package}.txt"
+        if check:
+            was = f.read_text() if f.exists() else ""
+            if was != text:
+                old, new = set(was.splitlines()), set(lines)
+                diff = [f"- {l}" for l in sorted(old - new)] + [f"+ {l}" for l in sorted(new - old)]
+                bad.append(f"{package}'s public API changed (scripts/public-api writes it):\n  " + "\n  ".join(diff[:40]))
+        else:
+            f.write_text(text)
+        print(f"public-api: {package}: {len(lines)} items")
+    if bad:
+        print("\n".join(bad), file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

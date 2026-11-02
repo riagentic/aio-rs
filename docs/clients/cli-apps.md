@@ -121,7 +121,7 @@ fn main() {
 
 - `aio::cli::args` leaves aio's own launch flags out (`--home`,
   `--profile`, `--instance`, `--port`, `--host`, `--expose`,
-  `--takeover`), so the same binary answers both and neither refuses the
+  `--takeover`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key`), so the same binary answers both and neither refuses the
   other's.
 - `aio::cli::fail(why, code, json)` ends with `error: why` on stderr (or
   `{"error"}` on stdout under `--json`) and the exit code.
@@ -252,7 +252,7 @@ printed.
 
 A tool's binary takes aio's launch flags too: `--home`, `--profile`,
 `--instance` (where its data lives), `--takeover`, `--port`, `--host`,
-`--expose` (`aio::paths::FLAGS`). `aio::cli::args` removes those (and
+`--expose`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key` (`aio::paths::FLAGS`). `aio::cli::args` removes those (and
 their values) before parsing, so the spec never lists them and a typo in
 either is refused with a did-you-mean. `aio::paths::Ask::app_args(&argv)`
 does the same for an app that parses its arguments some other way.
@@ -271,8 +271,9 @@ does the same for an app that parses its arguments some other way.
 
 ## Gaps against aio
 
-- aio's `testIO()` captures a whole run (stdout, stderr, exit as
-  `CliExit`); aio-rs tests the pure parts and the streams above, and a
+- aio's `testIO()` captures a whole run, its exit too (`CliExit`);
+  aio-rs's `aio::testing::TestIo` captures the prompts, styles and
+  progress (stdin, a terminal or not, colour, stdout and stderr), and a
   run of `args`/`fail` exits the process (test it as a binary, or test
   `parse` and `failure`).
 - aio's `watch` hides the cursor, coalesces changes of one tick into one

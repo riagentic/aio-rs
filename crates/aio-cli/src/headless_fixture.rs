@@ -15,7 +15,7 @@ fn aio_surface() {
 
 /// Cell `T`'s live copy, over the running app's local door.
 fn live<T: aio::Cell>(
-    _: &dioxus::prelude::GlobalSignal<aio::Source<T>>,
+    _: &aio::ui::Global<aio::Source<T>>,
     app: &str,
     data: &str,
     user: &str,

@@ -2,17 +2,17 @@
 //! field badged with whether it is saved (survives a restart) and whether
 //! it is sent to the window, and its JSON size beside it, as a bar against
 //! its cell's largest field. A nested value opens into a JSON tree.
-use super::app::{View, pressed};
+use super::app::{ViewState, pressed};
 use super::json_tree::{JsonTree, Shared};
 use super::manager::{CellInfo, preview, size_of};
 use aio::serde_json::Value;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::rc::Rc;
 
 /// On or off, said by more than its colour: an off badge is struck
 /// through, and named "no disk" to a reader.
 #[component]
-pub fn Badge(on: bool, label: String, title: String) -> Element {
+pub fn Badge(on: bool, label: String, title: String) -> View {
     let cls = if on { format!("badge {label} on") } else { format!("badge {label}") };
     rsx! {
         span { class: "{cls}", title: "{title}", role: "img",
@@ -24,7 +24,7 @@ pub fn Badge(on: bool, label: String, title: String) -> Element {
 
 /// A slim bar against the cell's largest field, then the size.
 #[component]
-fn SizeBar(bytes: usize, max: usize, what: String) -> Element {
+fn SizeBar(bytes: usize, max: usize, what: String) -> View {
     let pct = (bytes * 100).checked_div(max).map_or(0, |p| p.max(2));
     let text = aio::fmt::bytes(bytes as u64);
     rsx! {
@@ -48,40 +48,41 @@ fn tint(v: &Value) -> &'static str {
 }
 
 #[component]
-fn Field(cell: String, k: String, v: Shared, flags: (bool, bool), bytes: usize, max: usize) -> Element {
-    let mut view = use_context::<View>();
+fn Field(cell: String, k: String, v: Shared, flags: (bool, bool), bytes: usize, max: usize) -> View {
+    let view = context::<ViewState>();
     let obj = v.0.is_object() || v.0.is_array();
     let path = format!("{cell}.{k}");
-    let open = obj && view.state_open.read().contains(&path);
-    let (disk, ui) = flags;
     let p = path.clone();
-    let mut toggle = move || {
+    let open = memo(move || obj && view.state_open.with(|s| s.contains(&p)));
+    let (disk, ui) = flags;
+    let preview = preview(&v.0);
+    let p = path.clone();
+    let toggle = callback(move |()| {
         if obj {
-            view.state_open.with_mut(|s| {
+            view.state_open.update(|s| {
                 if !s.remove(&p) {
                     s.insert(p.clone());
                 }
             })
         }
-    };
-    let mut t2 = toggle.clone();
+    });
     rsx! {
         div { style: "border-top:1px solid var(--border)", "data-t": "field-{cell}-{k}",
             div { class: if obj { "frow obj" } else { "frow" },
-                role: if obj { "button" },
-                tabindex: if obj { "0" },
-                onclick: move |_| toggle(),
-                onkeydown: move |e| if pressed(&e) { t2() },
+                role: obj.then_some("button"),
+                tabindex: obj.then_some("0"),
+                onclick: move |_| toggle.call(()),
+                onkeydown: move |e| if pressed(&e) { toggle.call(()) },
                 span { style: "display:inline-flex;gap:3px;flex-shrink:0",
                     Badge { on: disk, label: "disk", title: if disk { "saved — survives a restart" } else { "not saved — in memory only" } }
                     Badge { on: ui, label: "ui", title: if ui { "sent to the window (synced to clients)" } else { "server only (#[server])" } }
                 }
-                span { class: "dim", style: "width:10px;flex-shrink:0", if obj { if open { "▾" } else { "▸" } } }
+                span { class: "dim", style: "width:10px;flex-shrink:0", if obj { if open.get() { "▾" } else { "▸" } } }
                 span { style: "font-weight:600", "{k}" }
-                span { class: "{tint(&v.0)} ell", style: "flex:1;min-width:0", if !open { "{preview(&v.0)}" } }
+                span { class: "{tint(&v.0)} ell", style: "flex:1;min-width:0", if !open.get() { "{preview}" } }
                 SizeBar { bytes, max, what: k.clone() }
             }
-            if open {
+            if open.get() {
                 div { style: "padding:0 10px 8px 40px",
                     JsonTree { data: v.clone(), prefix: path.clone() }
                 }
@@ -93,11 +94,26 @@ fn Field(cell: String, k: String, v: Shared, flags: (bool, bool), bytes: usize, 
 /// The merged state (amui's `StateOverview`): `state` is `ax snapshot`'s
 /// object, `cells` what each cell says of its fields.
 #[component]
-pub fn StateOverview(state: Shared, cells: Vec<CellInfo>) -> Element {
+pub fn StateOverview(state: Shared, cells: Vec<CellInfo>) -> View {
     let Some(all) = state.0.as_object() else {
         return rsx! { div { class: "small dim", "no state" } };
     };
-    let all: Vec<(String, Value)> = all.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    /// One cell's head and its fields: name, size, saved and sent flags.
+    type Fields = Vec<(String, Shared, usize, (bool, bool))>;
+    let rows: Vec<(String, Fields, usize)> = all
+        .iter()
+        .map(|(cell, st)| {
+            let info = cells.iter().find(|c| &c.name == cell).cloned().unwrap_or_default();
+            let fields: Fields = st
+                .as_object()
+                .map(|m| {
+                    m.iter().map(|(k, v)| (k.clone(), Shared(Rc::new(v.clone())), size_of(v), info.flags(k))).collect()
+                })
+                .unwrap_or_default();
+            let max = fields.iter().map(|f| f.2).max().unwrap_or(0);
+            (cell.clone(), fields, max)
+        })
+        .collect();
     rsx! {
         div { class: "col", style: "gap:12px",
             div { class: "legend",
@@ -107,30 +123,19 @@ pub fn StateOverview(state: Shared, cells: Vec<CellInfo>) -> Element {
                 Badge { on: true, label: "ui", title: "sent to clients" }
                 span { "sent to the window" }
             }
-            for (cell , st) in all {
-                {
-                    let info = cells.iter().find(|c| c.name == cell).cloned().unwrap_or_default();
-                    let fields: Vec<(String, Shared, usize)> = st
-                        .as_object()
-                        .map(|m| m.iter().map(|(k, v)| (k.clone(), Shared(Rc::new(v.clone())), size_of(v))).collect())
-                        .unwrap_or_default();
-                    let max = fields.iter().map(|f| f.2).max().unwrap_or(0);
-                    let saved = fields.iter().filter(|f| info.flags(&f.0).0).count();
-                    let sent = fields.iter().filter(|f| info.flags(&f.0).1).count();
-                    let n = fields.len();
-                    rsx! {
-                        div { key: "{cell}", class: "cellstate", "data-t": "cellState-{cell}",
-                            div { class: "cellstate-head",
-                                span { class: "mono blue", style: "font-weight:700", "{cell}" }
-                                span { class: "dim", style: "font-size:11px", "{n} fields · {saved} saved · {sent} in UI" }
-                            }
-                            if fields.is_empty() {
-                                div { class: "dim", style: "padding:8px 12px;font-size:12px", "(empty)" }
-                            }
-                            for (k , v , bytes) in fields {
-                                Field { key: "{k}", flags: info.flags(&k), cell: cell.clone(), k, v, bytes, max }
-                            }
+            for (cell , fields , max) in rows.clone() {
+                div { key: "{cell}", class: "cellstate", "data-t": "cellState-{cell}",
+                    div { class: "cellstate-head",
+                        span { class: "mono blue", style: "font-weight:700", "{cell}" }
+                        span { class: "dim", style: "font-size:11px",
+                            {format!("{} fields · {} saved · {} in UI", fields.len(), fields.iter().filter(|f| f.3.0).count(), fields.iter().filter(|f| f.3.1).count())}
                         }
+                    }
+                    if fields.is_empty() {
+                        div { class: "dim", style: "padding:8px 12px;font-size:12px", "(empty)" }
+                    }
+                    for (k , v , bytes , flags) in fields.clone() {
+                        Field { key: "{k}", flags, cell: cell.clone(), k: k.clone(), v: v.clone(), bytes, max }
                     }
                 }
             }

@@ -5,16 +5,15 @@
 //!
 //! An app's library says what it is with [`android_app!`](crate::android_app);
 //! `ax build <app> --android` makes the APKs.
-use crate::{Window, page_with, wire};
+use crate::{Window, page_with};
+use aio::ui::View;
 use base64::Engine;
-use dioxus_core::{Element, VirtualDom};
-use dioxus_liveview::LiveViewPool;
 use futures_util::{SinkExt, StreamExt};
 pub use jni;
 use jni::objects::{GlobalRef, JClass, JIntArray, JObjectArray, JString, JValue};
 use jni::sys::jstring;
 use jni::{JNIEnv, JavaVM};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// What an app's library hands the host.
@@ -23,7 +22,7 @@ pub struct App {
     pub config: fn() -> aio::config::Config,
     /// `env!("CARGO_PKG_VERSION")`.
     pub version: &'static str,
-    pub root: fn() -> Element,
+    pub root: fn() -> View,
     pub window: Window,
     /// Runs once the app's dirs are locked, before the first page: open the
     /// app's cells here (as desktop `main` does).
@@ -58,8 +57,8 @@ struct Host {
     /// class loader can't).
     class: GlobalRef,
     rt: tokio::runtime::Runtime,
-    pool: Arc<LiveViewPool>,
-    root: fn() -> Element,
+    views: crate::views::Views,
+    root: fn() -> View,
     page: String,
     /// Frames from the page now showing, to its view.
     to_view: Mutex<Option<tokio::sync::mpsc::UnboundedSender<bytes::Bytes>>>,
@@ -90,8 +89,21 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
     // SAFETY: before any thread of this library reads the environment.
     unsafe { std::env::set_var("AIORT_DATA", &files) };
     let cfg = (app.config)();
-    let dirs = aio::paths::app(&cfg.app.id).map_err(|e| e.to_string())?;
+    // A port (`[app] port_of`) runs on aio's layout in its files dir, its
+    // `[data] store`, as on the desktop.
+    let plan = aio::paths::plan_app(&cfg, &aio::paths::Ask::default()).map_err(|e| e.to_string())?;
+    // Installed over aio's APK (the same id): aio's state comes in, once,
+    // before the home is claimed (its files dir then holds aio-rs's data).
+    let imported = match cfg.app.port_of.as_deref() {
+        Some(aio_app) => aio::compat::data::import_android(std::path::Path::new(&files), aio_app, &plan.store)
+            .map_err(|e| format!("aio's state of {aio_app}: {e}"))?,
+        None => false,
+    };
+    let dirs = aio::paths::AppDirs::planned(&cfg.app.id, plan).map_err(|e| e.to_string())?;
     aio::boot::begin(&cfg, app.version, &dirs).map_err(|e| e.to_string())?;
+    if imported {
+        eprintln!("[aio] the aio APK's state is now {}", dirs.store.display());
+    }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
     {
         let _in = rt.enter();
@@ -107,7 +119,7 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
         vm: env.get_java_vm().map_err(|e| e.to_string())?,
         class: env.new_global_ref(class).map_err(|e| e.to_string())?,
         rt,
-        pool: Arc::new(LiveViewPool::new()),
+        views: crate::views::Views::new(),
         root: app.root,
         page: page_with(&app.window, BRIDGE),
         to_view: Mutex::new(None),
@@ -128,9 +140,9 @@ pub fn connect() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
     *h.to_view.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     let (view, ours) = tokio::io::duplex(1 << 20);
-    let (pool, root) = (h.pool.clone(), h.root);
+    let (views, root) = (h.views.clone(), h.root);
     h.rt.spawn(async move {
-        if let Err(e) = pool.launch_virtualdom(wire(Box::new(view)), move || VirtualDom::new(root)).await {
+        if let Err(e) = views.launch(Box::new(view), root).await {
             eprintln!("[aio-shell] window: {e}");
         }
     });

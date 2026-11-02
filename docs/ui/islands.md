@@ -1,6 +1,6 @@
 # Islands and advanced views
 
-Most views are Dioxus all the way down ([views](views.md)). This page is
+Most views are `rsx!` all the way down ([views](views.md)). This page is
 for the rest: a widget written in JavaScript (a chart, a map, an editor, a
 React component), someone else's site inside the app, content drawn
 outside its parent's box, and the patterns that sit between views and
@@ -15,7 +15,7 @@ cells (held resources, deferred content, sizes). Everything here is in
 | content drawn at the app's root (a dialog out of an `overflow: hidden` box) | `Portal` + `PortalHost` | `Portal` |
 | content later (on view, on hover, after a while) | `Defer { trigger }` | `Defer` |
 | a camera, a socket, a file handle held while a view shows | `use_held` + `aio::held::Held` | `useResource` |
-| data loaded for a view | Dioxus `use_resource` | `resource()` |
+| data loaded for a view | `aio::ui::resource` | `resource()` |
 | a reaction to a state change | `h.on_change(..)` on the cell's handle | `onChange` |
 | an element's size | `onresize` | `useDimensions` |
 | an element's DOM handle (focus, scroll, measure) | `onmounted` | `use=` directives, `ref` |
@@ -24,11 +24,11 @@ cells (held resources, deferred content, sizes). Everything here is in
 
 An island is a box of the page that the app's own JavaScript draws. The
 view owns where the box is and what goes in (props) and comes out
-(events); the script owns what is inside, and Dioxus never diffs there.
+(events); the script owns what is inside, and the views never touch it.
 
 ```rust,no_run
 use aio::kit::{Island, WebIsland};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[derive(aio::serde::Serialize, Clone, PartialEq)]
 #[serde(crate = "aio::serde")]
@@ -54,12 +54,12 @@ const COUNTER: Island = Island::js(
 );
 
 #[component]
-fn Counter() -> Element {
-    let mut n = use_signal(|| 0);
+fn Counter() -> View {
+    let mut n = signal(|| 0);
     rsx! {
         WebIsland::<Count, Bump> {
             island: COUNTER,
-            props: Count { n: n() },
+            props: Count { n: n.get() },
             onevent: move |b: Bump| n += b.by,
             loading: rsx! { span { "loading" } },
             "data-t": "counter",
@@ -171,16 +171,16 @@ in the console. More in [the browser and web views](../clients/web.md).
 
 ```rust,no_run
 use aio::kit::{Portal, PortalHost};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn App() -> Element {
-    let mut open = use_signal(|| false);
+fn App() -> View {
+    let open = signal(|| false);
     rsx! {
         PortalHost {
             div { style: "overflow: hidden; height: 40px", "data-t": "clip",
                 button { "data-t": "open", onclick: move |_| open.toggle(), "Details" }
-                if open() {
+                if open.get() {
                     Portal {
                         div { class: "sheet", "data-t": "sheet", "Drawn at the root, out of the clipping box" }
                     }
@@ -215,10 +215,10 @@ assert_eq!(ui.count(".aio-portals > [data-t=sheet]"), 1);
 
 ```rust,no_run
 use aio::kit::{Defer, Trigger};
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 #[component]
-fn Report() -> Element {
+fn Report() -> View {
     rsx! {
         Defer { trigger: Trigger::Viewport, "data-t": "chart",
             placeholder: rsx! { div { class: "aio-skel", "Chart" } },
@@ -258,7 +258,7 @@ holds one with `use_held(&pool, key)`:
 ```rust,no_run
 use aio::held::{Held, State};
 use aio::kit::use_held;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 use std::sync::OnceLock;
 
 /// Stands in for opening a device.
@@ -273,23 +273,27 @@ fn cameras() -> &'static Held<String, String> {
 }
 
 #[component]
-fn Preview(camera: Option<String>) -> Element {
-    let text = match use_held(cameras(), camera) {
-        None => "off".to_string(),
-        Some(State::Opening) => "…".to_string(),
-        Some(State::Open(c)) => c.to_string(),
-        Some(State::Failed(why)) => why,
-    };
+fn Preview(camera: Prop<Option<String>>) -> View {
+    // A `Prop`: the held key follows the parent's `cam`.
+    let held = use_held(cameras(), camera);
+    let text = memo(move || {
+        held.with(|h| match h {
+            None => "off".to_string(),
+            Some(State::Opening) => "…".to_string(),
+            Some(State::Open(c)) => c.to_string(),
+            Some(State::Failed(why)) => why.clone(),
+        })
+    });
     rsx! { p { "data-t": "preview", "{text}" } }
 }
 
 #[component]
-fn App() -> Element {
-    let mut cam = use_signal(|| Some("front".to_string()));
+fn App() -> View {
+    let cam = signal(|| Some("front".to_string()));
     rsx! {
         button { "data-t": "back", onclick: move |_| cam.set(Some("back".into())), "Back camera" }
         button { "data-t": "off", onclick: move |_| cam.set(None), "Off" }
-        Preview { camera: cam() }
+        Preview { camera: cam.get() }
     }
 }
 
@@ -316,10 +320,10 @@ ui.until_text("preview", "camera back");
 
 - **Data the app keeps** belongs in a cell, loaded by an effect or an async
   method ([effects](../state/effects.md)): a view reads it with `part(..)`.
-- **Data only this view needs** (a preview, a lookup): Dioxus
-  `use_resource(move || async move { .. })`. It re-runs when a signal it
-  reads changes; `.read()` is `None` while loading; `.restart()` runs it
-  again.
+- **Data only this view needs** (a preview, a lookup):
+  `resource(move || async move { .. })`. It re-runs when a signal it
+  reads changes; `.get()` is `None` while loading; `.restart()` runs it
+  again; `.suspend()?` shows the nearest `Suspense`'s fallback meanwhile.
 - **A reaction to a cell's change** ("when the city changes, reconnect")
   is neither a render nor a handler: `h.on_change(immediate, |s|
   s.city.clone(), |city, old| ..)` on the cell's handle keeps what the
@@ -360,8 +364,11 @@ once when a kit control renders on a page that doesn't style the kit.
   and hydration have no aio-rs counterpart: views render in the page
   (desktop, Android) or in the browser (the web build).
 - **No code splitting.** One binary holds every view; `Defer` defers the
-  render, not a download.
-- **Only Dioxus views.** aio's `aio/state-core` let Svelte, Vue or other
+  render, not a download, and loads, as aio's: `load:
+  load(|| async { … Ok(rsx! { … }) })` runs once it is triggered,
+  `loading` shows meanwhile (at least `loading_min_ms`), then what it
+  made, or `error` of what it said.
+- **Only `aio::ui` views.** aio's `aio/state-core` let Svelte, Vue or other
   frameworks drive a page; aio-rs has no such adapter. Another UI reaches
   the app over its transports instead ([transports](../clients/transports.md)),
   or sits in a view as an island.
@@ -373,14 +380,14 @@ once when a kit control renders on a page that doesn't style the kit.
 
 - An island whose library fetches from a CDN: the page's policy blocks it.
   Bundle it.
-- Rebuilding a big props value every render: a changed value calls
+- Rebuilding a big props value on every commit: a changed value calls
   `update` each time. Derive props from `part(..)` so they change only
   when the data does.
 - `Island::js` for a library fed what a stranger typed (Markdown, HTML):
   sandbox it, or use the kit's `Markdown`.
 - `Portal` without a `PortalHost`: the content stays in place, inside the
   clipping box. Put one host around the app.
-- Opening a device in `use_hook` or a handler: nothing closes it when the
+- Opening a device in `once` or a handler: nothing closes it when the
   view goes or the key changes. Use `use_held`.
 
 ## API

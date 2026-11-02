@@ -31,7 +31,7 @@ editing (this, then aio-rs's docs/README.md) · check → run → test · clean 
 3. NEVER script around ax. Assert: ax expect. Watch: ax state --watch (one
    line per change, pushed). Every verb takes --json and exits 0 ok, 1 failed,
    2 bad usage.
-4. LEARN BEFORE EDITING. aio-rs is Rust + Dioxus, not aio's TypeScript: guessed code
+4. LEARN BEFORE EDITING. aio-rs is Rust (views: aio::ui), not aio's TypeScript: guessed code
    compiles to the wrong thing or not at all. Read this, then the guide (docs/README.md
    in aio-rs: every part with examples that compile; a port from aio:
    docs/migration/README.md, keeping aio's optimizations: docs/performance.md), then
@@ -54,7 +54,7 @@ the only writes, pure, &mut self → aio::Result · effects do the I/O · views 
   them). The I/O happens around them (effects, flows) and hands results
   in as arguments.
 - A call commits before it answers: nothing is ever \"not saved yet\".
-- Views are Dioxus components that read cells; Handle::<Cell> calls methods.
+- Views are aio::ui components that read cells; Handle::<Cell> calls methods.
 - aio.toml is the one config; ax config <app> prints it as it runs.",
     },
     Section {
@@ -132,10 +132,11 @@ changed) · cargo check → ax dev <app> → tests",
   ax call/state); kit (the UI kit, client!, router!), net (sync, its server,
   TLS, pairing, sign-in), or one part: outbound, server, tls, oidc, br, imbl.
   Keep the template's set: each other set is one more build of aio.
-- No dev-dependency: aio::testing (TestUi) comes with kit. Then cargo check,
-  ax dev <app>, ax test <app>.
+- The tests get aio::testing (TestCells, TestUi with kit) from the
+  [dev-dependencies] line with features = [\"testing\"]: the app's own builds
+  leave the test kit out. Then cargo check, ax dev <app>, ax test <app>.
 - An app of the older layout (a launcher build.rs calling aio::config::build,
-  a build-dependency on aio-rs, a \"testing\" feature) still builds, warned;
+  a build-dependency on aio-rs, a \"video\" feature) still builds, warned;
   ax lint --fix moves it to this one in one step.",
     },
     Section {
@@ -151,8 +152,9 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
   version + migrate = f (old data up), restore = f (repair on boot), save = f
   (what is written), visible = f (what each viewer is sent: fn(&Self, &By)
   or fn(&Self, &Caller) for their role), machine = field, diagnostics = false.
-- Fields: #[transient] never saved; #[server] never sent. A shared field named
-  like a credential (password, api_key, token…) must be #[server]: a compile error.
+- Fields: #[transient] never saved; #[server] never sent (on a shared cell an
+  aio::Hidden<T>: a read on a copy panics). A shared field named like a
+  credential (password, api_key, token…) must be #[server]: a compile error.
   A field (or method argument) of the app's own type: #[aio::data] on that
   struct or enum (it derives serde through aio: no serde dependency).
 - Methods (#[methods] impl): &mut self, plain args → () or aio::Result<T>;
@@ -161,6 +163,9 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
   predict = false); #[derived] cached reads (#[derived(reads = [rows])]: kept
   while those fields are, aio's memoLast); #[invariant] refuses a call
   that breaks it; #[every(\"5m\")] / #[cron(\"0 9 * * 1\")] (skip_if_running);
+  pub async fn: awaits anywhere (let x: T = io.await?; in if/match/loop),
+  each part atomic and logged; h.m(..)?.await is its end (value or refusal);
+  #[mode(newest|first)];
   #[ttl(ms)] reuses an answer; #[long] lifts the await ceiling; #[redact]
   keeps args out of logs; #[coalesce] on a cursor/scroll/selection method
   (called per keypress): each call shows at once, the run is written once,
@@ -174,27 +179,41 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
     },
     Section {
         slug: "ui",
-        title: "UI: Dioxus views on cells",
+        title: "UI: aio::ui views on cells",
         deep: false,
-        min: "aio::client!(Cell, cell) → part(|c| &c.field) reads a field and re-renders only when
-it changes, act!(method(args)) calls · use_live() once at the root · data-t on what tests drive",
-        body: "- aio::client!(Todo, todo) makes SOURCE/HANDLE, part(|t| &t.items) (the view
-  re-renders only when that top-level field changes: aio's signal per cell;
-  pick the field, then index it), todo() (the whole state: every commit
-  re-renders, so handlers only), use_status(), use_pending(method), and the
+        min: "use aio::ui::prelude::*; (the whole view API) · aio::client!(Cell, cell) → part(|c| &c.field)
+a handle (.get(), \"{n}\") whose holes run again only when that field changes · a body runs
+once: state shows through holes ({x.get()}, \"{n}\") · act!(method(args)) calls · use_live()
+once at the root · data-t on what tests drive",
+        body: "- use aio::ui::prelude::*; is the whole view API: rsx!, #[component], View,
+  signal(|| v) (a Copy Signal: .get(), .set(v) tells only on a change,
+  .update(|v| ..), .read(), .write(), \"{s}\"), memo, effect, watch(deps, f),
+  once(|| ..), on_cleanup, provide/context, task/spawn, resource, Global,
+  ErrorBoundary, Suspense, eval (page scripts talk to `aio`). Call signal,
+  memo, effect, once.. at a view's top level. Name no renderer crate (ax lint
+  refuses aio-rs 0.1's): air is the renderer behind aio::ui. A body runs once;
+  a text, attribute or {child} that reads state is a hole that runs again when
+  it changes (a value read in the body is read once). Rows in a for need
+  key: on their first node; no if let / match nodes (a bool, or {match ..}).
+  A component's prop follows its caller's state only as a Signal, Part or
+  Prop<T>.
+- aio::client!(Todo, todo) makes SOURCE/HANDLE, part(|t| &t.items) (a handle:
+  .get()/.with(|v| ..); a hole reading it runs again only when that top-level
+  field changes: aio's signal per cell; pick the field, then index it), todo()
+  (the whole state: a hole reading it runs on every commit, so handlers only), use_status(), use_pending(method), and the
   Ui door: act!(add(title)) calls a method from a handler (a refusal is
-  logged and gives None); a view's call renders at once, commits from
+  logged and gives None); a view's call shows at once, commits from
   effects and schedules at most once per 150 ms. use_live() once in the root.
 - aio's caches: #[derived(reads = [..])] (memoLast), aio::Cache (keyed caches
-  on a source: Ver::of(&state) or part(..).ver()), rows as props (Dioxus
-  skips equal props, as AIR did), kit::VirtualList for long lists.
-- Views are plain Dioxus (rsx!): real HTML and CSS; aio::kit has the
+  on a source: Ver::of(&state) or part(..).ver()), rows as props (Prop<T>:
+  a row's holes run only when its own props change), kit::VirtualList for long lists.
+- Views are rsx! over real HTML and CSS; aio::kit has the
   components (Button, Field, Modal, VList…). Styles: style { {aio::use_css!(
   false, &aio::kit::theme_css(hue); \"assets/style.css\")} }: false is the
   light theme (true dark), the kit's theme comes first (the kit's classes,
   aio::ui::btn included, are unstyled without it), then the app's files; a
   saved edit shows at once under ax dev, no compile. Never keep CSS or
-  anything an edit should change in use_hook: its value is made once, so a
+  anything an edit should change in once(..): its value is made once, so a
   hot-patched edit never shows.
 - data-t=\"name\" is an element's handle for tests and agents; without one, an
   element is named from its label and role (SaveButton, EmailInput).
@@ -216,8 +235,8 @@ it changes, act!(method(args)) calls · use_live() once at the root · data-t on
   and modal dialogs inside keep theirs). The keyboard cursor's row:
   \"data-aio-reveal\": selected.then(|| i.to_string()) scrolls it into view,
   no eval per step.
-- Speed: cell() in a render re-renders that component on every commit (a
-  dev build says where, once: [hint]); read the field with part(|c| ..),
+- cell() in a view's body is read once and never follows (a dev build says
+  where, once: [hint]); read the field in a hole with part(|c| ..),
   and build row lists once per list (aio::Cache), not per cursor step.
 - Forms: Enter submits a form with no submit button (as in aio), and one whose
   button the view enables a frame later. Held keys: a binding fires once
@@ -330,7 +349,7 @@ at run time · a refusal nobody took · sleeping in a test instead of TestCells:
   expected ones with failures().
 - Waiting in real time in a cell test: TestCells::advance(ms) moves the
   schedule and the effects' clock; settle() runs effects to their end.
-- Calling a method from a view without act!/Ui: the view doesn't re-render.
+- Calling a method from a view without act!/Ui: the view isn't told.
 - A signal read in an if let / while let / match scrutinee (X.peek()…,
   X.read()) stays borrowed in its block: a write to X there panics
   (already borrowed). Bind it first: let v = X.peek().map(..); if let

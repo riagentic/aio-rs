@@ -15,9 +15,12 @@ name = "ax"
 path = "src/main.rs"
 
 [dependencies]
-aio = { workspace = true, features = ["kit", "net"] }
+# `testing`: `ax preview`, `ax surface` and `ax shot` drive pages as TestUi does.
+aio = { workspace = true, features = ["kit", "net", "testing"] }
 # `Config::parse` and `find`: aio.toml as `ax config`, `ax build` and `ax lint` read it.
-aio-config = { workspace = true, features = ["toml"] }
+aio-config = { workspace = true, features = ["toml", "png"] }
+# `ax ui`'s Tasks: a project's cargo aliases (`.cargo/config.toml`), aio-config's own toml.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 # `ax ui --browser`: the manager served to the browser's tabs (`aio_shell::web`).
 aio-shell = { workspace = true, features = ["web"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
@@ -25,25 +28,24 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 notify = "8"
 base64 = "0.23"
-# `ax build --sizes`: a binary's code symbols, by crate.
-object = { version = "0.37", default-features = false, features = ["read", "std"] }
+# `ax build --sizes`: a binary's code symbols, by crate. `write`: ax dev's
+# hot-patch stub object (`hotpatch.rs`).
+object = { version = "0.37", default-features = false, features = ["read", "std", "write"] }
+# ax dev's hot-patch: the jump table the app applies (its own type).
+aio-hotpatch = { workspace = true }
 rustc-demangle = "0.1"
 # The default app icon's PNG; an app's own icon scaled for the exe's .ico.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-crc32fast = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
-# `ax lint`: Rust and rsx! parsed as the compiler and Dioxus parse them.
+# `ax lint`: Rust parsed as the compiler parses it; rsx! with air's own parser (reload.rs).
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
-dioxus-rsx = "=0.7.10"
 tokio = { version = "1", features = ["time"] }
 # `ax shot`: the DevTools protocol of a window the app opened it for.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-# `ax ui`: the manager's view.
-dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"] }
 
 [target.'cfg(unix)'.dependencies]
 # `ax dev`: its dx ends with it (Linux), a stray one is stopped.

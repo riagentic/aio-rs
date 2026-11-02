@@ -2,10 +2,10 @@
 //! the manager reads again on demand and while following. A source
 //! (combined, the app's log, its errors, its window's lines), a level floor,
 //! a text filter, and lines coloured by level.
-use super::app::{View, pressed};
+use super::app::{ViewState, pressed};
 use super::manager::LogLine;
 use super::proc::LogSource;
-use dioxus::prelude::*;
+use aio::ui::prelude::*;
 
 /// The lowest level shown (amui's level floor).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -53,34 +53,38 @@ const LEVELS: [(Floor, &str, &str); 4] = [
     (Floor::Error, "error", "error"),
 ];
 
-/// The viewer (amui's `LogView`).
+/// The viewer (amui's `LogView`): each prop follows its caller's state.
 #[component]
 pub fn LogView(
-    logs: Option<Vec<LogLine>>,
-    loading: bool,
-    error: Option<String>,
-    source: LogSource,
-    path: Option<String>,
-    truncated: bool,
-    follow: bool,
+    logs: Prop<Option<Vec<LogLine>>>,
+    loading: Prop<bool>,
+    error: Prop<Option<String>>,
+    source: Prop<LogSource>,
+    path: Prop<Option<String>>,
+    truncated: Prop<bool>,
+    follow: Prop<bool>,
     on_reload: EventHandler<()>,
     on_source: EventHandler<LogSource>,
     on_follow: EventHandler<()>,
-) -> Element {
-    let mut view = use_context::<View>();
-    let floor = *view.log_floor.read();
-    let q = view.log_query.read().clone();
-    let all = logs.unwrap_or_default();
-    let lines = shown(&all, floor, &q);
-    let (n, total) = (lines.len(), all.len());
+) -> View {
+    let view = context::<ViewState>();
+    let l = logs.clone();
+    // The lines kept: they follow the log, the floor and the filter.
+    let lines = memo(move || {
+        l.with(|all| {
+            let all = all.as_deref().unwrap_or(&[]);
+            view.log_query.with(|q| shown(all, view.log_floor.get(), q).into_iter().cloned().collect::<Vec<LogLine>>())
+        })
+    });
+    let total = memo(move || logs.with(|l| l.as_ref().map_or(0, Vec::len)));
     let pill = |on: bool| if on { "chip pill on" } else { "chip pill" };
     rsx! {
         div { class: "col10",
             div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap",
                 div { class: "row6", style: "gap:5px",
                     for (s , label , t) in SOURCES {
-                        span { key: "{t}", class: pill(source == s), role: "button", tabindex: "0", "data-t": "src-{t}",
-                            "aria-pressed": "{source == s}",
+                        span { key: "{t}", class: pill(source.get() == s), role: "button", tabindex: "0", "data-t": "src-{t}",
+                            "aria-pressed": "{source.get() == s}",
                             onclick: move |_| on_source.call(s),
                             onkeydown: move |e| if pressed(&e) { on_source.call(s) },
                             "{label}"
@@ -89,8 +93,8 @@ pub fn LogView(
                 }
                 div { class: "row6", style: "gap:5px;margin-left:6px",
                     for (f , label , t) in LEVELS {
-                        span { key: "{t}", class: pill(floor == f), role: "button", tabindex: "0", "data-t": "lvl-{t}",
-                            "aria-pressed": "{floor == f}",
+                        span { key: "{t}", class: pill(view.log_floor.get() == f), role: "button", tabindex: "0", "data-t": "lvl-{t}",
+                            "aria-pressed": "{view.log_floor.get() == f}",
                             onclick: move |_| view.log_floor.set(f),
                             onkeydown: move |e| if pressed(&e) { view.log_floor.set(f) },
                             "{label}"
@@ -98,52 +102,51 @@ pub fn LogView(
                     }
                 }
                 input { class: "field mono", style: "padding:5px 9px;font-size:12px;min-width:120px", "aria-label": "filter",
-                    "data-t": "logFilter", placeholder: "filter…", value: "{q}",
+                    "data-t": "logFilter", placeholder: "filter…", value: view.log_query,
                     oninput: move |e| view.log_query.set(e.value()),
                 }
-                button { r#type: "button", class: "btn", "data-t": "logReload", disabled: loading, title: "Read it again",
+                button { r#type: "button", class: "btn", "data-t": "logReload", disabled: loading.get(), title: "Read it again",
                     onclick: move |_| on_reload.call(()),
-                    if loading { "…" } else { "⟳" }
+                    if loading.get() { "…" } else { "⟳" }
                 }
-                span { class: if follow { "chip pill follow on" } else { "chip pill follow" }, role: "button", tabindex: "0",
+                span { class: if follow.get() { "chip pill follow on" } else { "chip pill follow" }, role: "button", tabindex: "0",
                     "data-t": "follow", "aria-pressed": "{follow}",
                     onclick: move |_| on_follow.call(()),
                     onkeydown: move |e| if pressed(&e) { on_follow.call(()) },
-                    if follow { "● following" } else { "○ follow" }
+                    if follow.get() { "● following" } else { "○ follow" }
                 }
                 span { class: "dim", style: "margin-left:auto;font-size:11px", "data-t": "logCount",
-                    "{n}/{total} lines"
-                    if truncated { " · tail" }
+                    {format!("{}/{} lines", lines.with(Vec::len), total.get())}
+                    if truncated.get() { " · tail" }
                 }
             }
-            if let Some(p) = path {
-                div { class: "small dim", style: "font-size:10px", "data-t": "logPath", "{p}" }
+            if path.with(Option::is_some) {
+                div { class: "small dim", style: "font-size:10px", "data-t": "logPath", {path.get().unwrap_or_default()} }
             }
-            match error {
-                Some(e) => rsx! { div { class: "yellow", style: "font-size:13px;padding:8px 0", "data-t": "logError", "ⓘ {e}" } },
-                None => rsx! {
-                    div { class: "logbox", "data-t": "logLines",
-                        if lines.is_empty() {
-                            div { class: "dim", style: "padding:8px",
-                                if total > 0 { "no lines match the filter" } else { "no log lines" }
-                            }
+            if error.with(Option::is_some) {
+                div { class: "yellow", style: "font-size:13px;padding:8px 0", "data-t": "logError", {format!("ⓘ {}", error.get().unwrap_or_default())} }
+            } else {
+                div { class: "logbox", "data-t": "logLines",
+                    if lines.with(Vec::is_empty) {
+                        div { class: "dim", style: "padding:8px",
+                            if total.get() > 0 { "no lines match the filter" } else { "no log lines" }
                         }
-                        for (i , l) in lines.iter().enumerate() {
-                            div { key: "{i}", class: "line log-{l.level}",
-                                if l.level.is_empty() {
-                                    span { class: "text2", "{l.raw}" }
-                                } else {
-                                    span { class: "dim", style: "flex-shrink:0", {l.ts.get(11..).unwrap_or(&l.ts)} }
-                                    span { class: "lvl l-{l.level}", {l.level.to_uppercase()} }
-                                    if !l.scope.is_empty() {
-                                        span { class: "blue", style: "flex-shrink:0", "{l.scope}" }
-                                    }
-                                    span { class: "l-{l.level}", "{l.msg}" }
+                    }
+                    for (i , l) in lines.get().into_iter().enumerate() {
+                        div { key: "{i}", class: "line log-{l.level}",
+                            if l.level.is_empty() {
+                                span { class: "text2", "{l.raw}" }
+                            } else {
+                                span { class: "dim", style: "flex-shrink:0", {l.ts.get(11..).unwrap_or(&l.ts).to_string()} }
+                                span { class: "lvl l-{l.level}", {l.level.to_uppercase()} }
+                                if !l.scope.is_empty() {
+                                    span { class: "blue", style: "flex-shrink:0", "{l.scope}" }
                                 }
+                                span { class: "l-{l.level}", "{l.msg}" }
                             }
                         }
                     }
-                },
+                }
             }
         }
     }

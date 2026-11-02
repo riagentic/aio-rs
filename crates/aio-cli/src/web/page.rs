@@ -10,6 +10,8 @@ include!("view.rs");
 
 thread_local! {
     static COPY: std::cell::RefCell<Option<aio::sync::Remote<Board>>> = Default::default();
+    /// The votes' copy, when the server serves them.
+    static VOTES: std::cell::RefCell<Option<aio::sync::Remote<Votes>>> = Default::default();
 }
 
 fn copy() -> aio::sync::Remote<Board> {
@@ -28,6 +30,9 @@ fn start() {
                 COPY.with_borrow_mut(|c| *c = Some(r.clone()));
                 _ = SOURCE.set(aio::Source::Remote(r));
                 aio::web::launch(view);
+                if let Ok(v) = aio::sync::Remote::<Votes>::open("web-test").await {
+                    VOTES.with_borrow_mut(|c| *c = Some(v));
+                }
                 "yes".to_string()
             }
             Err(e) => e.to_string(),
@@ -56,17 +61,20 @@ fn signin() {
     });
 }
 
-fn who() -> Element {
-    match aio::web::use_user() {
-        None => rsx! { p { id: "who", "asking" } },
-        Some(None) => rsx! {
+fn who() -> View {
+    // `None` while the server is asked, then who (`None`: nobody).
+    let me = aio::web::use_user();
+    let who = memo(move || me.get());
+    rsx! {
+        if who.get().is_none() {
+            p { id: "who", "asking" }
+        } else if who.get().flatten().is_none() {
             p { id: "who", "nobody" }
             aio::kit::SignIn { client: aio::web::client(), on_signed: |_| aio::web::restart() }
-        },
-        Some(Some((id, role))) => rsx! {
-            p { id: "who", "{id} {role}" }
-            button { id: "out", onclick: |_| aio::web::sign_out(), "Sign out" }
-        },
+        } else {
+            p { id: "who", {who.get().flatten().map(|(id, role)| format!("{id} {role}")).unwrap_or_default()} }
+            button { id: "out", onclick: |_| _ = spawn(aio::web::sign_out()), "Sign out" }
+        }
     }
 }
 
@@ -82,6 +90,11 @@ thread_local! {
 #[wasm_bindgen]
 pub fn bump() -> bool {
     TALLY.with(|t| t.bump().is_ok())
+}
+
+#[wasm_bindgen]
+pub fn finish() -> bool {
+    TALLY.with(|t| t.finish().is_ok())
 }
 
 #[wasm_bindgen]
@@ -103,4 +116,18 @@ pub fn shown() -> String {
     let r = copy();
     let s = r.status();
     aio::serde_json::json!({ "items": r.state().items, "pending": s.pending, "online": s.online }).to_string()
+}
+
+/// The votes as the page's copy shows them (`null`: not served).
+#[wasm_bindgen]
+pub fn votes() -> String {
+    VOTES.with_borrow(|v| match v {
+        Some(v) => aio::serde_json::json!({ "n": v.state().n, "online": v.status().online }).to_string(),
+        None => "null".into(),
+    })
+}
+
+#[wasm_bindgen]
+pub fn vote() -> bool {
+    VOTES.with_borrow(|v| v.as_ref().is_some_and(|v| v.vote().is_ok()))
 }

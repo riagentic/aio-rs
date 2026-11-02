@@ -34,8 +34,8 @@ pub mod style;
 mod tests;
 
 use aio::serde_json::Value;
-use dioxus::prelude::*;
-pub use manager::{Verb, child};
+use aio::ui::prelude::*;
+pub use manager::{Verb, local};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -100,10 +100,10 @@ fn window() -> aio_shell::Window {
 static PREFS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// The window's root: the manager, with its choices kept.
-fn root() -> Element {
-    use_context_provider(|| Prefs(PREFS.get().cloned()));
+fn root() -> View {
+    provide(|| Prefs(PREFS.get().cloned()));
     if let Some(v) = TAB_VERB.get() {
-        use_context_provider(|| v.clone());
+        provide(|| v.clone());
     }
     rsx! { app::App {} }
 }
@@ -160,6 +160,6 @@ fn in_browser() -> Result<(), String> {
             Ok(()) => eprintln!("ax ui: {at} (Ctrl-C ends it)"),
             Err(e) => eprintln!("ax ui: open {link} in a browser ({e}); Ctrl-C ends it"),
         }
-        serve(l, key, child()).await.map_err(|e| format!("ax ui: {e}"))
+        serve(l, key, local()).await.map_err(|e| format!("ax ui: {e}"))
     })
 }

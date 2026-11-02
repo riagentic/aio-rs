@@ -23,6 +23,19 @@ pub struct Facts {
     pub open: Option<String>,
     /// When `ax dev`'s last hot-patch (or build) landed in the running app (ms).
     pub patched: Option<i64>,
+    /// The Electron its binary pins (a window app's), when it says.
+    pub runtime: Option<String>,
+    /// Its config serves beyond loopback with no Origin check
+    /// (`[server] strict_origin` undecided): what `--harden` closes.
+    pub unhardened: Vec<String>,
+}
+
+/// Is runtime `v` older than `than` (pure)? Unparsable: not said.
+pub fn older(v: &str, than: &str) -> bool {
+    match (aio::update::parse_version(v), aio::update::parse_version(than)) {
+        (Some((a, _)), Some((b, _))) => a < b,
+        _ => false,
+    }
 }
 
 /// The variables aio reads (`AIORT_TOKEN`'s value is never shown).
@@ -37,6 +50,33 @@ pub const VARS: [&str; 9] = [
     "AIO_DISCOVERY_PORT",
     "AIO_FEEDBACK_DIR",
 ];
+
+/// The opt-in security switches `toml` (an `aio.toml`) hasn't decided on
+/// that close a door open to its users (aio's `am-harden`): each said, and
+/// the text with them written (pure; `None`: nothing to write). One today:
+/// a server beyond loopback whose sockets need not say their Origin.
+pub fn harden(toml: &str) -> Option<(Vec<String>, String)> {
+    let cfg = aio::config::Config::parse(toml).ok()?;
+    let listen = cfg.server.listen.as_deref()?;
+    let host = listen.rsplit_once(':').map_or(listen, |(h, _)| h).trim_matches(['[', ']']);
+    if ["127.0.0.1", "localhost", "::1"].contains(&host) || host.starts_with("127.") {
+        return None;
+    }
+    let lines: Vec<&str> = toml.lines().collect();
+    let at = lines.iter().position(|l| l.trim() == "[server]")?;
+    let section = lines[at + 1..].iter().take_while(|l| !l.trim_start().starts_with('['));
+    if section.clone().any(|l| l.trim_start().starts_with("strict_origin")) {
+        return None;
+    }
+    let said = format!(
+        "security: it serves beyond loopback ({listen}) and takes a socket that says no Origin, which a page of \
+         another site can open: [server] strict_origin = true"
+    );
+    let mut out: Vec<&str> = lines[..=at].to_vec();
+    out.push("strict_origin = true");
+    out.extend(&lines[at + 1..]);
+    Some((vec![said], out.join("\n") + if toml.ends_with('\n') { "\n" } else { "" }))
+}
 
 /// The newest change (ms) to a file under `dirs`' sources, assets and
 /// manifests.
@@ -61,6 +101,16 @@ pub fn verdict(f: &Facts) -> (Vec<String>, Vec<String>) {
         format!("{k}={v} (environment)")
     }));
     found.extend(f.open.as_deref().map(aio::config::open_says));
+    // Hints (aio's): each names what ends it.
+    if let Some(rt) = f.runtime.as_deref().filter(|v| older(v, aio_shell::runtime::VERSION)) {
+        found.push(format!(
+            "its window runs Electron {rt}, older than the {} this aio-rs is tested with: build it with this \
+             aio-rs (ax pin {}, then build it again)",
+            aio_shell::runtime::VERSION,
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    found.extend(f.unhardened.iter().map(|h| format!("{h} (ax doctor --harden writes it)")));
     let Some(h) = &f.health else {
         said.insert(0, "not running: nothing to compare with the disk".into());
         return (found, said);
@@ -129,6 +179,29 @@ pub fn render(f: &Facts) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn hints_name_an_old_runtime_and_an_undecided_switch() {
+        assert!(older("40.1.0", "44.9.3") && !older("44.9.3", "44.9.3") && !older("x", "44.9.3"));
+        let old = Facts { runtime: Some("40.1.0".into()), ..facts(None, None) };
+        let (found, _) = verdict(&old);
+        assert!(found.iter().any(|f| f.contains("runs Electron 40.1.0, older than")), "{found:?}");
+        let now = Facts { runtime: Some(aio_shell::runtime::VERSION.into()), ..facts(None, None) };
+        assert!(verdict(&now).0.is_empty());
+        // aio's `am fix --harden`: what the app hasn't decided, written; a decision kept.
+        let open = "[app]\nid = \"notes\"\n\n[server]\nlisten = \"0.0.0.0:8443\"\ntls = true\n";
+        let (said, text) = harden(open).unwrap();
+        assert!(said[0].contains("strict_origin = true"), "{said:?}");
+        assert_eq!(
+            text,
+            "[app]\nid = \"notes\"\n\n[server]\nstrict_origin = true\nlisten = \"0.0.0.0:8443\"\ntls = true\n"
+        );
+        assert!(aio::config::Config::parse(&text).unwrap().server.strict_origin);
+        assert_eq!(harden(&text), None, "written once");
+        assert_eq!(harden(&open.replace("tls = true", "strict_origin = false")), None, "a decision either way stays");
+        assert_eq!(harden(&open.replace("0.0.0.0", "127.0.0.1")), None, "loopback: no door to close");
+        assert_eq!(harden("[app]\nid = \"notes\"\n"), None);
+    }
+
     fn facts(health: Option<serde_json::Value>, source: Option<(String, i64, Option<i64>)>) -> Facts {
         Facts {
             health,
@@ -138,6 +211,8 @@ mod tests {
             env: vec![("AIORT_TOKEN".into(), "s3cret".into()), ("AIORT_PROFILE".into(), "work".into())],
             open: None,
             patched: None,
+            runtime: None,
+            unhardened: vec![],
         }
     }
 
