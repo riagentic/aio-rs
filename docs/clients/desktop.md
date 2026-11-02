@@ -129,6 +129,37 @@ stamped complete. Its app records become aio's; its macOS windows are made
 again at the next start. An entry a running program starts from stays
 where it is until it doesn't.
 
+## The splash
+
+With a `[build.splash]` ([aio.toml](../reference/aio-toml.md#buildsplash))
+the OS draws the app's image before Electron starts, at every start (aio's
+splash): Linux with GTK 3 (opened at run time, as Electron links it; no
+link-time dependency), macOS with JavaScript for Automation over Cocoa,
+Windows with Windows Forms. It opens where the app's window will
+(`position`), above other windows, never takes the focus and has no
+taskbar or Dock entry. The app's window shows the moment it has painted,
+under the splash; the splash goes once it has been up `min_ms`, at its
+`max_ms` cap with no window, or when Electron exits.
+
+A first start's Electron download runs on it: the bar and its line
+(`download_text`) under the text, a ✕ that cancels the start (`cancel`).
+A failed download closes it and asks Retry or Quit.
+
+- `show = "first-start"`: only while Electron downloads; `"never"`: none
+  (the download window is then the plain one). `Window { splash_show:
+  Some(f) }` decides at run time (aio's `splash.show`): `f` may take 50
+  ms; one that panics or takes longer leaves the build's `show`, said.
+- On Windows, when Electron is already here, Electron's main process draws
+  it (as aio's: the Forms helper shows later than the app's window); the
+  Forms splash opens for a download only.
+- Where the OS cannot draw it (no GTK, no display) Electron draws it and a
+  download shows the download window, the reason said once in the log.
+- `ax build` builds it in for an app with a `[build.splash]` (aio-rs-shell's
+  `native-splash` feature): an app without one carries none of it, and
+  `ax dev` or a plain `cargo build` has Electron draw the splash.
+- Each start logs `[aio] splash: visible N ms after it was asked for` and
+  why it closed.
+
 ## The window's behaviour
 
 | What | How it works |
@@ -429,9 +460,6 @@ What aio's Electron client has and aio-rs doesn't yet:
   bar): the OS title bar is always there. The window's verbs are there
   (`page::minimize` and the rest); the title bar comes with the air
   renderer.
-- The splash is drawn by the OS before Electron starts only while a first
-  start downloads Electron (as aio on Windows); on other starts Electron
-  draws it, a moment after the app starts.
 
 aio has no app menus beyond macOS's standard ones or a context-menu API,
 and opens one app window per process, as aio-rs does.
