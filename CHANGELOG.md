@@ -25,6 +25,18 @@ version may break things.
   workspace): a one-line edit rebuilds in 0.54x Dioxus's time, a clean
   build in 0.30x with 8 crates instead of 77, a held key over 10 000 rows
   answers in 0.32x.
+- air's props, as the kit and the router need them: `#[component]` and
+  `#[derive(Props)]` make a builder, so `#[props(default)]` and
+  `#[props(default = e)]` props may be left out, an `Option<T>` prop is
+  `None` unless given and takes a `T`, a `View` prop is empty, a closure
+  given to a handler prop is typed by it, and a required prop left out is
+  a compile error naming it. `#[props(extends = GlobalAttributes)]
+  attributes: Vec<Attribute>` takes the attributes given to a component
+  (`"data-t": …`, `id`, `aria_label`, `..attributes`), and `..attributes`
+  on an element sets them after its own, so the caller's win; one that
+  reads state follows it. A prop typed `Prop<T>` follows what it is given
+  (`value: name.get()`) while the component's body still runs once; given
+  a constant it holds no state.
 - air's gates, each shown failing on a planted bug first: views removed
   (or replaced by an error boundary in the same pass) leave no node,
   effect, subscription, cleanup, handler, task, page script or page node;

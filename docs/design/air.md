@@ -255,8 +255,14 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   `KeyboardEvent`, `oninput` a `FormEvent`, …); an unknown `onX` is a
   compile error; `onmounted` runs once the element is drawn.
 - A component's props are evaluated once: a prop that must follow state is
-  a `Signal` or a `Part` (as in Solid and Leptos). Every prop is given
-  (no defaults yet: step 2, with the kit's optional props).
+  a `Signal`, a `Part` or typed `Prop<T>` (as in Solid and Leptos): a
+  `Prop` given an expression (`value: name.get()`) follows it, given a
+  constant it is that constant. `#[props(default)]`, `#[props(default =
+  e)]`, `Option<T>` and `View` props may be left out (an `Option` takes a
+  `T`); any other prop left out is a compile error. Unknown names given
+  to a component with `#[props(extends = GlobalAttributes)] attributes:
+  Vec<Attribute>` are attributes (`..attributes` on an element sets them,
+  after its own).
 - A body runs once, untracked; one that `?`s a resource still loading
   runs again when it is loaded, its hooks (`signal`, `memo`, `resource`,
   `once`, …) handing back what the first run made, by call order.
@@ -556,8 +562,7 @@ as on air.
 - **`mut` on a signal**: Dioxus needs `let mut n = signal(…)` for a handler
   that writes `n`; on air the handler holds its own copy, so `mut` is
   unused (a warning).
-- **Not on air yet** (step 2, with the kit): attribute spreads
-  (`..attributes`, `Attribute`), optional and default props, the router
+- **Not on air yet** (step 2, with the kit): the router
   (`router!`: `provide_now`), `TestUi::components()` (empty on air: no
   view re-renders, so nothing to count yet), and two roots on one thread
   (one window's views per thread: a test holds one `TestUi` at a time).

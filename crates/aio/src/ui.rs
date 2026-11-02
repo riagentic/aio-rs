@@ -62,11 +62,11 @@ pub mod prelude {
 pub mod prelude {
     pub use super::on_air::events::*;
     pub use super::on_air::{
-        Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler, Fragment,
-        FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Props, Resource, Signal,
-        Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval, geometry, in_views,
-        key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task,
-        try_context, watch,
+        Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler,
+        Fragment, FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props,
+        Resource, Signal, Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval,
+        geometry, in_views, key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn,
+        spawn_forever, task, try_context, watch,
     };
     pub use crate::{act, use_css};
     /// `rsx!`'s paths start at `air`: an app needs no dependency of its own.

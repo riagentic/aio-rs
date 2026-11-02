@@ -6,11 +6,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use air::{
-    Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment, FragmentProps, Global,
-    GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Props, ReadGuard, Resource, Signal, Suspense,
-    SuspenseProps, Task, View, ViewError, WriteGuard, callback, component, context, effect, geometry, in_views,
-    is_empty, key_event, memo, on_cleanup, once, parent_context, provide, provide_root, resource, rsx, signal, spawn,
-    spawn_forever, task, try_context, watch,
+    Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment, FragmentProps,
+    Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props, ReadGuard, Resource, Signal,
+    Suspense, SuspenseProps, Task, View, ViewError, WriteGuard, callback, component, context, effect, geometry,
+    in_views, is_empty, key_event, memo, on_cleanup, once, parent_context, provide, provide_root, resource, rsx,
+    signal, spawn, spawn_forever, task, try_context, watch,
 };
 
 /// The event kinds and their payloads.

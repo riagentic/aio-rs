@@ -23,8 +23,15 @@ pub fn rsx(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 /// `fn Row(name: String, on: Signal<bool>) -> View`: a props struct
-/// `RowProps { pub name, pub on }` and `fn Row(RowProps { name, on }: RowProps)`,
-/// called as `Row { name: …, on }` in `rsx!`. No arguments: a plain `fn() -> View`.
+/// `RowProps { pub name, pub on }` with its builder, and
+/// `fn Row(RowProps { name, on }: RowProps)`, called as `Row { name: …, on }`
+/// in `rsx!`. No arguments: a plain `fn() -> View`. Props as Dioxus's:
+/// `#[props(default)]` / `#[props(default = e)]` may be left out, an
+/// `Option<T>` is `None` unless given (and takes a `T`), a `View` is empty,
+/// `#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>` takes
+/// the attributes given (`"data-t": …`, `id`, `..attributes`); a [`Prop`]
+/// follows what it is given. Any other prop is required (a compile error
+/// without it).
 #[proc_macro_attribute]
 pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let toks: Vec<TokenTree> = TokenStream::from(item).into_iter().collect();
@@ -49,53 +56,327 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
         return quote!(#[allow(non_snake_case)] #head fn #name() #rest).into();
     }
     let props = format_ident!("{}Props", name);
-    let (mut fields, mut pats) = (vec![], vec![]);
-    for a in &args {
-        // `#[props(default)]` and other attributes on a prop: Dioxus's; air's props are all given.
-        let a: Vec<TokenTree> = strip_attrs(a);
-        let a = &a;
-        let colon = a.iter().position(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == ':')).unwrap_or(0);
-        let pat: TokenStream = a[..colon].iter().cloned().collect();
-        let ty: TokenStream = a[colon + 1..].iter().cloned().collect();
-        let field = a[..colon].iter().rev().find_map(|t| match t {
-            TokenTree::Ident(i) => Some(i.clone()),
-            _ => None,
-        });
-        fields.push(quote!(pub #field: #ty));
-        pats.push(pat);
-    }
+    let fields: Vec<Field> = match args.iter().map(|a| field(a)).collect::<Res<_>>() {
+        Ok(f) => f,
+        Err((span, msg)) => return quote_spanned!(span=> ::core::compile_error!(#msg);).into(),
+    };
     let vis = toks[..fn_at].iter().find(|t| is_ident(t, "pub")).map(|_| quote!(pub));
+    let decl = fields.iter().map(|f| {
+        let (docs, n, ty) = (&f.docs, &f.name, &f.ty);
+        quote!(#(#docs)* pub #n: #ty)
+    });
+    let pats = fields.iter().map(|f| &f.pat);
+    let builder = builder(vis.clone(), &props, &name.to_string(), &fields);
     quote!(
         #[derive(Clone)]
-        #vis struct #props { #(#fields),* }
+        #vis struct #props { #(#decl),* }
+        #builder
         #[allow(non_snake_case)]
         #head fn #name(#props { #(#pats),* }: #props) #rest
     )
     .into()
 }
 
-/// Props structs need nothing derived on air (`#[derive(Props)]` is
-/// kept so the facade's code builds); `#[props(…)]` is accepted.
+/// The builder of a hand-written props struct (as `#[component]` makes for
+/// its own): `#[props(…)]` on its fields as there.
 #[proc_macro_derive(Props, attributes(props))]
-pub fn props(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    proc_macro::TokenStream::new()
+pub fn props(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let toks: Vec<TokenTree> = TokenStream::from(item).into_iter().collect();
+    let at = toks.iter().position(|t| is_ident(t, "struct"));
+    let (name, body) = match at.map(|a| (toks.get(a + 1), toks.get(a + 2))) {
+        Some((Some(TokenTree::Ident(n)), Some(TokenTree::Group(g)))) if g.delimiter() == Delimiter::Brace => {
+            (n.clone(), g.stream())
+        }
+        _ => return quote!(::core::compile_error!("air: #[derive(Props)] goes on a struct with named fields (no generics)");).into(),
+    };
+    let vis = toks[..at.unwrap_or(0)].iter().find(|t| is_ident(t, "pub")).map(|_| quote!(pub));
+    let fields: Vec<Field> =
+        match split_top(&body.into_iter().collect::<Vec<_>>()).iter().map(|a| field(a)).collect::<Res<_>>() {
+            Ok(f) => f,
+            Err((span, msg)) => return quote_spanned!(span=> ::core::compile_error!(#msg);).into(),
+        };
+    builder(vis, &name, &name.to_string(), &fields).into()
 }
 
-/// `toks` without its `#[…]` attributes.
-fn strip_attrs(toks: &[TokenTree]) -> Vec<TokenTree> {
-    let mut out = vec![];
-    let mut i = 0;
-    while i < toks.len() {
-        if is_punct(toks.get(i), '#')
-            && matches!(toks.get(i + 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Bracket)
-        {
-            i += 2;
-            continue;
+/// A prop: its docs, its `#[props(…)]`, its pattern (in a component's
+/// arguments), its name and type.
+struct Field {
+    docs: Vec<TokenStream>,
+    pat: TokenStream,
+    name: Ident,
+    ty: TokenStream,
+    kind: Kind,
+    default: Option<TokenStream>,
+    extends: bool,
+}
+
+/// What a prop's type makes of it (by its type's name).
+enum Kind {
+    Plain,
+    View,
+    /// `Option<T>`: `T`.
+    Opt(TokenStream),
+    /// `Prop<T>`: `T`; `Prop<Option<T>>`: `T`, true.
+    Prop(TokenStream, bool),
+}
+
+/// `Name<inner>` of a type: `Name` (the last segment) and `inner`.
+fn ty_head(ty: &[TokenTree]) -> (Option<String>, Option<TokenStream>) {
+    let lt = ty.iter().position(|t| is_punct(Some(t), '<'));
+    let head = ty[..lt.unwrap_or(ty.len())].iter().rev().find_map(|t| match t {
+        TokenTree::Ident(i) => Some(i.to_string()),
+        _ => None,
+    });
+    let inner = lt.and_then(|l| {
+        let end = ty.iter().rposition(|t| is_punct(Some(t), '>'))?;
+        (end > l).then(|| ty[l + 1..end].iter().cloned().collect())
+    });
+    (head, inner)
+}
+
+fn is_callback(head: Option<&str>) -> bool {
+    matches!(head, Some("EventHandler" | "Callback"))
+}
+
+fn field(toks: &[TokenTree]) -> Res<Field> {
+    let (mut docs, mut default, mut extends, mut i) = (vec![], None, false, 0);
+    while is_punct(toks.get(i), '#') {
+        let Some(TokenTree::Group(g)) = toks.get(i + 1) else { break };
+        let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+        if inner.first().is_some_and(|t| is_ident(t, "props")) {
+            if let Some(TokenTree::Group(args)) = inner.get(1) {
+                for a in split_top(&args.stream().into_iter().collect::<Vec<_>>()) {
+                    match a.as_slice() {
+                        [d] if is_ident(d, "default") => default = Some(quote!(::core::default::Default::default())),
+                        [d, eq, e @ ..] if is_ident(d, "default") && is_punct(Some(eq), '=') => {
+                            default = Some(e.iter().cloned().collect())
+                        }
+                        [x, eq, ..] if is_ident(x, "extends") && is_punct(Some(eq), '=') => extends = true,
+                        _ => {}
+                    }
+                }
+            }
+        } else if inner.first().is_some_and(|t| is_ident(t, "doc")) {
+            let (h, g) = (&toks[i], &toks[i + 1]);
+            docs.push(quote!(#h #g));
         }
-        out.push(toks[i].clone());
-        i += 1;
+        i += 2;
     }
-    out
+    // A struct field's visibility.
+    if toks.get(i).is_some_and(|t| is_ident(t, "pub")) {
+        i += 1;
+        if matches!(toks.get(i), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) {
+            i += 1;
+        }
+    }
+    let rest = &toks[i..];
+    let colon = rest.iter().enumerate().position(|(k, _)| is_colon(rest, k));
+    let Some(colon) = colon else { return Err((span_of(toks, i), "air: a prop is `name: Type`".into())) };
+    let pat: TokenStream = rest[..colon].iter().cloned().collect();
+    let name = rest[..colon]
+        .iter()
+        .rev()
+        .find_map(|t| match t {
+            TokenTree::Ident(i) => Some(i.clone()),
+            _ => None,
+        })
+        .ok_or((span_of(rest, 0), "air: a prop is `name: Type`".to_string()))?;
+    let ty_toks = &rest[colon + 1..];
+    let ty: TokenStream = ty_toks.iter().cloned().collect();
+    let kind = match ty_head(ty_toks) {
+        (Some(h), Some(inner)) if h == "Option" => Kind::Opt(inner),
+        (Some(h), Some(inner)) if h == "Prop" => {
+            let it: Vec<TokenTree> = inner.clone().into_iter().collect();
+            match ty_head(&it) {
+                (Some(h), Some(inner2)) if h == "Option" => Kind::Prop(inner2, true),
+                _ => Kind::Prop(inner, false),
+            }
+        }
+        (Some(h), None) if h == "View" => Kind::View,
+        _ => Kind::Plain,
+    };
+    Ok(Field { docs, pat, name, ty, kind, default, extends })
+}
+
+/// `props`'s builder: `Option`s of its fields, one type parameter per
+/// required prop (`()` until given, then `Set`), `build` once all are.
+fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field]) -> TokenStream {
+    let b = format_ident!("{}Builder", props);
+    let required: Vec<usize> = (0..fields.len())
+        .filter(|&k| {
+            fields[k].default.is_none() && !fields[k].extends && matches!(fields[k].kind, Kind::Plain | Kind::Prop(..))
+        })
+        .collect();
+    let params: Vec<Ident> = (0..required.len()).map(|k| format_ident!("__R{}", k)).collect();
+    let names: Vec<&Ident> = fields.iter().map(|f| &f.name).collect();
+    let tys: Vec<&TokenStream> = fields.iter().map(|f| &f.ty).collect();
+    let unit = params.iter().map(|_| quote!(()));
+    let air = quote!(air);
+
+    // Setters: `n(f)` takes a closure of the value (a `Prop` keeps it),
+    // `__fn_n(v)` the value itself (a closure given to a handler prop).
+    let setter = |k: usize| -> (TokenStream, TokenStream) {
+        let f = &fields[k];
+        let (n, ty) = (&f.name, &f.ty);
+        let fname = format_ident!("__fn_{}", n.to_string().trim_start_matches("r#"));
+        let (head, _) = ty_head(&ty.clone().into_iter().collect::<Vec<_>>());
+        let (opt_cb, inner_cb) = match &f.kind {
+            Kind::Opt(i) => (true, is_callback(ty_head(&i.clone().into_iter().collect::<Vec<_>>()).0.as_deref())),
+            _ => (false, false),
+        };
+        let cb = is_callback(head.as_deref()) || inner_cb;
+        let (gens, param, val, fgen, fparam, fval) = match &f.kind {
+            Kind::Opt(i) => (
+                quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
+                quote!(f: impl ::core::ops::FnOnce() -> __X),
+                quote!(#air::__rt::IntoOpt::into_opt(#air::untrack(f))),
+                quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
+                quote!(v: __X),
+                quote!(#air::__rt::IntoOpt::into_opt(v)),
+            ),
+            Kind::Prop(i, opt) => {
+                let (tr, call) = if *opt {
+                    (quote!(#air::__rt::IntoOpt<#i, __M>), quote!(#air::__rt::IntoOpt::into_opt(f())))
+                } else {
+                    (quote!(#air::__rt::IntoValue<#i, __M>), quote!(#air::__rt::IntoValue::into_value(f())))
+                };
+                (
+                    quote!(<__X: #tr + 'static, __M>),
+                    quote!(f: impl ::core::ops::Fn() -> __X + 'static),
+                    quote!(#air::Prop::derive(::std::boxed::Box::new(move || #call))),
+                    quote!(<__X: #tr + ::core::clone::Clone + 'static, __M>),
+                    quote!(v: __X),
+                    quote!(#air::Prop::derive(::std::boxed::Box::new(move || { let f = || ::core::clone::Clone::clone(&v); #call }))),
+                )
+            }
+            Kind::Plain | Kind::View => (
+                quote!(<__X: ::core::convert::Into<#ty>>),
+                quote!(f: impl ::core::ops::FnOnce() -> __X),
+                quote!(::core::convert::Into::into(#air::untrack(f))),
+                quote!(<__X: ::core::convert::Into<#ty>>),
+                quote!(v: __X),
+                quote!(::core::convert::Into::into(v)),
+            ),
+        };
+        let (fgen, fparam, fval) = if cb {
+            let mk = quote!(#air::Callback::new(f));
+            (
+                quote!(),
+                quote!(f: impl ::core::ops::FnMut(<#ty as #air::__rt::CallbackOf>::A) -> <#ty as #air::__rt::CallbackOf>::R + 'static),
+                if opt_cb { quote!(::core::option::Option::Some(#mk)) } else { mk },
+            )
+        } else {
+            (fgen, fparam, fval)
+        };
+        let docs = &f.docs;
+        match required.iter().position(|&r| r == k) {
+            None => (
+                quote!(
+                    #(#docs)*
+                    pub fn #n #gens (mut self, #param) -> Self { self.#n = ::core::option::Option::Some(#val); self }
+                    #[doc(hidden)]
+                    pub fn #fname #fgen (mut self, #fparam) -> Self { self.#n = ::core::option::Option::Some(#fval); self }
+                ),
+                quote!(),
+            ),
+            Some(r) => {
+                let others: Vec<&Ident> = params.iter().enumerate().filter(|(j, _)| *j != r).map(|(_, p)| p).collect();
+                let before: Vec<TokenStream> =
+                    params.iter().enumerate().map(|(j, p)| if j == r { quote!(()) } else { quote!(#p) }).collect();
+                let after: Vec<TokenStream> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(j, p)| if j == r { quote!(#air::__rt::Set) } else { quote!(#p) })
+                    .collect();
+                let rest: Vec<&Ident> = names.iter().copied().filter(|m| *m != n).collect();
+                let mk = |v: &TokenStream| quote!(#b { #n: ::core::option::Option::Some(#v), #(#rest: self.#rest,)* __s: ::core::marker::PhantomData });
+                let (mv, mfv) = (mk(&val), mk(&fval));
+                (
+                    quote!(),
+                    quote!(
+                        #[allow(non_camel_case_types)]
+                        impl<#(#others),*> #b<#(#before),*> {
+                            #(#docs)*
+                            pub fn #n #gens (self, #param) -> #b<#(#after),*> { #mv }
+                            #[doc(hidden)]
+                            pub fn #fname #fgen (self, #fparam) -> #b<#(#after),*> { #mfv }
+                        }
+                    ),
+                )
+            }
+        }
+    };
+    let (mut optional, mut req_impls) = (vec![], vec![]);
+    for k in 0..fields.len() {
+        let (o, r) = setter(k);
+        optional.push(o);
+        req_impls.push(r);
+    }
+    let needs: Vec<Ident> = required
+        .iter()
+        .map(|&k| format_ident!("__{}_needs_prop_{}", shown, fields[k].name.to_string().trim_start_matches("r#")))
+        .collect();
+    let need_msgs = required
+        .iter()
+        .map(|&k| format!("`{shown}` needs its prop `{}`", fields[k].name.to_string().trim_start_matches("r#")));
+    let need_labels =
+        required.iter().map(|&k| format!("add `{}: …` here", fields[k].name.to_string().trim_start_matches("r#")));
+    let fill = fields.iter().map(|f| {
+        let n = &f.name;
+        let or = match (&f.default, &f.kind) {
+            (Some(d), Kind::Prop(..)) => quote!(#air::Prop::Const(#d)),
+            (Some(d), _) => d.clone(),
+            (None, Kind::Opt(_)) => quote!(::core::option::Option::None),
+            (None, Kind::View) => quote!(::core::result::Result::Ok(#air::Tree::empty())),
+            (None, _) if f.extends => quote!(::std::vec::Vec::new()),
+            (None, _) => quote!(::core::unreachable!()),
+        };
+        quote!(#n: match self.#n { ::core::option::Option::Some(v) => v, ::core::option::Option::None => #or })
+    });
+    let attrs = fields.iter().find(|f| f.extends).map(|f| {
+        let n = &f.name;
+        quote!(
+            #[allow(non_camel_case_types)]
+            impl<#(#params),*> #air::__rt::GlobalAttributes for #b<#(#params),*> {
+                fn __push(&mut self, a: #air::Attribute) {
+                    self.#n.get_or_insert_with(::std::vec::Vec::new).push(a)
+                }
+            }
+        )
+    });
+    quote!(
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        #vis struct #b<#(#params = ()),*> {
+            #(#names: ::core::option::Option<#tys>,)*
+            __s: ::core::marker::PhantomData<(#(#params,)*)>,
+        }
+        impl #air::__rt::Props for #props {
+            type Builder = #b<#(#unit),*>;
+            fn builder() -> Self::Builder {
+                #b { #(#names: ::core::option::Option::None,)* __s: ::core::marker::PhantomData }
+            }
+        }
+        #[allow(non_camel_case_types)]
+        impl<#(#params),*> #b<#(#params),*> {
+            #(#optional)*
+        }
+        #(#req_impls)*
+        #(
+            #[doc(hidden)]
+            #[allow(non_camel_case_types)]
+            #[diagnostic::on_unimplemented(message = #need_msgs, label = #need_labels)]
+            #vis trait #needs {}
+            impl #needs for #air::__rt::Set {}
+        )*
+        #[allow(non_camel_case_types)]
+        impl<#(#params: #needs),*> #b<#(#params),*> {
+            pub fn build(self) -> #props {
+                #props { #(#fill,)* }
+            }
+        }
+        #attrs
+    )
 }
 
 type Res<T> = Result<T, (Span, String)>;
@@ -108,12 +389,14 @@ enum Node {
     El {
         tag: String,
         attrs: Vec<(String, Val)>,
+        spreads: Vec<TokenStream>,
         children: Vec<Node>,
         key: Option<TokenStream>,
     },
     Comp {
         path: Vec<TokenTree>,
-        props: Vec<(Ident, TokenStream)>,
+        props: Vec<(PropName, TokenStream)>,
+        spreads: Vec<TokenStream>,
         children: Vec<Node>,
         key: Option<TokenStream>,
     },
@@ -127,6 +410,12 @@ enum Node {
         then: Vec<Node>,
         otherwise: Vec<Node>,
     },
+}
+
+/// A component's prop: a declared one (a name), or an attribute (`"data-t"`).
+enum PropName {
+    Field(Ident),
+    Attr(String),
 }
 
 enum Val {
@@ -244,17 +533,16 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
 
 /// An element's or component's `{ … }`: `name: value,` pairs, then children.
 fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
-    let (mut attrs, mut props, mut children, mut key, mut i) = (vec![], vec![], vec![], None, 0);
+    let (mut attrs, mut props, mut spreads, mut children, mut key, mut i) = (vec![], vec![], vec![], vec![], None, 0);
     while i < toks.len() {
         if is_punct(toks.get(i), ',') {
             i += 1;
             continue;
         }
         if is_punct(toks.get(i), '.') && is_punct(toks.get(i + 1), '.') {
-            return Err((
-                toks[i].span(),
-                "air: attribute spreads (`..attributes`) come with the kit's move to air (plan step 2)".into(),
-            ));
+            i += 2;
+            spreads.push(take_expr(toks, &mut i));
+            continue;
         }
         let named = matches!(&toks[i], TokenTree::Ident(_) | TokenTree::Literal(_)) && is_colon(toks, i + 1);
         // `class,` / a component's `name,`: the name is the value.
@@ -286,8 +574,10 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
                 _ => value,
             });
         } else if comp {
-            let TokenTree::Ident(id) = name_tok else { return Err((name_tok.span(), "air: a prop is a name".into())) };
-            props.push((id, value));
+            props.push(match name_tok {
+                TokenTree::Ident(id) => (PropName::Field(id), value),
+                _ => (PropName::Attr(name), value),
+            });
         } else {
             if let Some(ev) = name.strip_prefix("on")
                 && payload(ev).is_none()
@@ -301,10 +591,10 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
         }
     }
     if comp {
-        return Ok(Node::Comp { path, props, children, key });
+        return Ok(Node::Comp { path, props, spreads, children, key });
     }
     let tag = path[0].to_string().trim_start_matches("r#").to_string();
-    Ok(Node::El { tag, attrs, children, key })
+    Ok(Node::El { tag, attrs, spreads, children, key })
 }
 
 /// An attribute's name in the page: `aria_label` is `aria-label`, SVG's
@@ -640,7 +930,7 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
             Node::Text(_) => {}
             Node::Fmt(_, r) => out.extend(r.iter().cloned()),
             Node::Expr(e) => captures(e, out),
-            Node::El { attrs, children, key, .. } => {
+            Node::El { attrs, spreads, children, key, .. } => {
                 for (_, v) in attrs {
                     match v {
                         Val::Fmt(_, r) => out.extend(r.iter().cloned()),
@@ -648,11 +938,13 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
                         _ => {}
                     }
                 }
+                spreads.iter().for_each(|e| captures(e, out));
                 key.iter().for_each(|k| captures(k, out));
                 node_captures(children, out);
             }
-            Node::Comp { props, children, key, .. } => {
+            Node::Comp { props, spreads, children, key, .. } => {
                 props.iter().for_each(|(_, e)| captures(e, out));
+                spreads.iter().for_each(|e| captures(e, out));
                 key.iter().for_each(|k| captures(k, out));
                 node_captures(children, out);
             }
@@ -722,7 +1014,7 @@ impl Tpl {
                 self.holes
                     .push(quote!(air::__rt::text(#id, { #c ::std::boxed::Box::new(move || ::std::format!(#f)) });));
             }
-            Node::El { tag, attrs, children, .. } => {
+            Node::El { tag, attrs, spreads, children, .. } => {
                 self.bytes.push(1);
                 self.str(tag);
                 let stat: Vec<(&String, String)> = attrs
@@ -739,7 +1031,8 @@ impl Tpl {
                     self.str(v);
                 }
                 self.bytes.extend_from_slice(&(children.len() as u16).to_le_bytes());
-                let dynamic = attrs.iter().any(|(_, v)| !matches!(v, Val::Static(_) | Val::Present(_)));
+                let dynamic =
+                    !spreads.is_empty() || attrs.iter().any(|(_, v)| !matches!(v, Val::Static(_) | Val::Present(_)));
                 self.bytes.push(dynamic as u8);
                 if dynamic || root {
                     let id = self.mark();
@@ -771,6 +1064,13 @@ impl Tpl {
                         };
                         self.holes.push(hole);
                     }
+                    // After the element's own: what is handed in wins.
+                    for e in spreads {
+                        let mut r = vec![];
+                        captures(e, &mut r);
+                        let c = clones(&r);
+                        self.holes.push(quote!(air::__rt::spread(#id, { #c #e });));
+                    }
                 }
                 for c in children {
                     self.node(c, false);
@@ -783,13 +1083,12 @@ impl Tpl {
                     Node::Expr(e) => {
                         hole_fn(e, quote!(air::IntoChild::into_child), |e| quote!(air::__rt::child(#id, #e);))
                     }
-                    Node::Comp { props, children, .. } => {
+                    Node::Comp { .. } => {
                         let mut r = vec![];
-                        props.iter().for_each(|(_, e)| captures(e, &mut r));
-                        node_captures(children, &mut r);
+                        node_captures(std::slice::from_ref(n), &mut r);
                         let c = clones(&r);
                         let call = comp(n);
-                        quote!(air::__rt::comp(#id, { #c ::std::boxed::Box::new(move || { #c #call }) });)
+                        quote!(air::__rt::comp(#id, { #c ::std::boxed::Box::new(move || #call) });)
                     }
                     Node::For { pat, expr, body: rows } => {
                         let key = match rows.first() {
@@ -847,22 +1146,61 @@ fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> Tok
     call(quote!({ #c ::std::boxed::Box::new(move || #into({ #e })) }))
 }
 
-/// `Row { a: x, children… }` → `Row(RowProps { a: x.into(), children: … })`; no props: `Row()`.
+/// `Row { a: x, "data-t": t, ..more, children… }` →
+/// `Row(builder().a(move || x).__attr("data-t", move || t).__spread(more).children(move || …).build())`:
+/// every value a closure (each clones the names it reads), so a `Prop`
+/// follows it and any other prop takes its value once; a closure given
+/// as a value (a handler) goes to `__fn_a`, which types its parameters.
 fn comp(n: &Node) -> TokenStream {
-    let Node::Comp { path, props, children, .. } = n else { unreachable!() };
-    let (head, last) = path.split_at(path.len() - 1);
-    let head: TokenStream = head.iter().cloned().collect();
-    let name = &last[0];
-    if props.is_empty() && children.is_empty() {
-        return quote!(#head #name());
+    let Node::Comp { path, props, spreads, children, .. } = n else { unreachable!() };
+    let path: TokenStream = path.iter().cloned().collect();
+    let thunk = |e: &TokenStream| {
+        let mut r = vec![];
+        captures(e, &mut r);
+        let c = clones(&r);
+        quote!({ #c move || { #e } })
+    };
+    let mut calls = vec![];
+    for (k, v) in props {
+        let closure = v.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
+        calls.push(match k {
+            PropName::Field(f) if closure => {
+                let f = format_ident!("__fn_{}", f.to_string().trim_start_matches("r#"));
+                let mut r = vec![];
+                captures(v, &mut r);
+                let c = clones(&r);
+                quote!(.#f({ #c #v }))
+            }
+            PropName::Field(f) => {
+                let t = thunk(v);
+                quote!(.#f(#t))
+            }
+            PropName::Attr(a) => {
+                let a = attr_name(a);
+                let t = thunk(v);
+                quote!(.__attr(#a, #t))
+            }
+        });
     }
-    let props_ty = format_ident!("{}Props", name.to_string());
-    let fields = props.iter().map(|(k, v)| quote!(#k: ::std::convert::Into::into(#v)));
-    let kids = (!children.is_empty()).then(|| {
+    for e in spreads {
+        let mut r = vec![];
+        captures(e, &mut r);
+        let c = clones(&r);
+        calls.push(quote!(.__spread({ #c #e })));
+    }
+    if !children.is_empty() {
         let v = body(children);
-        quote!(children: #v,)
-    });
-    quote!(#head #name(#head #props_ty { #(#fields,)* #kids }))
+        let mut r = vec![];
+        node_captures(children, &mut r);
+        let c = clones(&r);
+        calls.push(quote!(.children({ #c move || #v })));
+    }
+    quote!({
+        #[allow(unused_imports)]
+        use air::__rt::{GlobalAttributes as _, GlobalAttributeNames as _};
+        let __air_c = &#path;
+        air::Component::call(__air_c, air::__rt::builder_of(__air_c) #(#calls)* .build())
+    })
 }
 
 /// The view of `nodes`: one template and its holes, built where it is
