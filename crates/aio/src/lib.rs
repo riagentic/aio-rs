@@ -455,6 +455,14 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// owns many of aio's (docs/migration/data.md). Its other fields are aio-rs's only.
     #[cfg(not(target_arch = "wasm32"))]
     const AIO_CELLS: &'static [compat::data::Slice] = &[];
+    /// The `#[aio_cell]` field `field` as JSON (`None`: not one): a commit
+    /// serializes only the slices that changed (aio's per-cell serialization cache).
+    #[doc(hidden)]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn slice_json(&self, field: &str) -> Option<serde_json::Result<Value>> {
+        let _ = field;
+        None
+    }
     /// `#[cell(retire = ["drafts", "draftsSeen"])]`: cells no build reads
     /// any more, deleted from the file at this cell's boot (their history,
     /// and in an aio file their slices and stamps), zeroed, never left behind.

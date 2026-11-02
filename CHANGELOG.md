@@ -537,6 +537,17 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- **A held key's step no longer waits on copying the state or on the write
+  of the run before it** (the wallet's 1000 accounts: per step 6.3 → ~4.4 ms
+  of the app's time; p95 of a held ↓ 32 → 20 ms). A state slow to copy
+  (250 µs or more) is copied ahead on a thread of its own after each call,
+  so a call starts on that copy (`clone` ~0 in `perf.log`). A commit in an
+  aio file serializes only the `#[aio_cell]` slices whose field changed
+  (aio's per-cell serialization cache), not the whole state: a cursor step
+  writes its one small slice. A `#[coalesce]` run's write weighs the run
+  (its copy, the call again, the comparisons) before it takes the store,
+  so the views' calls go on meanwhile.
+
 - GitHub CI runs `./ci.sh`'s parts side by side (`./ci.sh lint|test`
   runs one alone; no part: all): `check (lint)`, `check (test)`,
   `mutants`, and `dx (dioxus)`, `dx (air)`, `dx (apk)`

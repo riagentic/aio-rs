@@ -250,7 +250,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         tables.push(quote!((#i, #name, #key, #cols)));
     }
     // `#[aio_cell]`: the field is the aio cell its type is, its whole slice.
-    let mut slices = Vec::new();
+    let (mut slices, mut slice_fields) = (Vec::new(), Vec::new());
     for field in s.fields.iter_mut() {
         let Some(a) = take(&mut field.attrs, "aio_cell") else { continue };
         let (Some(i), syn::Meta::Path(_)) = (&field.ident, &a.meta) else {
@@ -264,6 +264,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         let ty = &field.ty;
         slices.push(quote!(::aio::compat::data::Slice::of::<#ty>(#name)));
+        slice_fields.push((name, i.clone()));
     }
     if !slices.is_empty() && (!f.persist || !tables.is_empty()) {
         let msg = "#[aio_cell] fields need #[cell(persist)], and their #[table]s go on the field's cell type";
@@ -303,9 +304,20 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!(const TABLES: &'static [(&'static str, &'static str, ::std::option::Option<&'static str>, ::std::option::Option<::aio::columns::Columns>)] = &[#(#tables),*];)
     });
     // aio files are a native store's: a browser build has none.
-    let slices = (!slices.is_empty()).then(
-        || quote!(#[cfg(not(target_arch = "wasm32"))] const AIO_CELLS: &'static [::aio::compat::data::Slice] = &[#(#slices),*];),
-    );
+    let (slice_names, slice_idents): (Vec<_>, Vec<_>) = slice_fields.into_iter().unzip();
+    let slices = (!slices.is_empty()).then(|| {
+        quote!(
+            #[cfg(not(target_arch = "wasm32"))]
+            const AIO_CELLS: &'static [::aio::compat::data::Slice] = &[#(#slices),*];
+            #[cfg(not(target_arch = "wasm32"))]
+            fn slice_json(&self, field: &str) -> ::std::option::Option<::aio::serde_json::Result<::aio::serde_json::Value>> {
+                match field {
+                    #(#slice_names => ::std::option::Option::Some(::aio::serde_json::to_value(&self.#slice_idents)),)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+        )
+    });
     let save = f.save.map(|p| quote!(fn save(&self) -> ::std::option::Option<Self> { Some(#p(self)) }));
     let restore = f.restore.map(|p| quote!(fn restore(self) -> Self { #p(self) }));
     let retire = &f.retire;

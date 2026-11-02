@@ -171,6 +171,62 @@ fn a_commit_serializes_the_state_once_not_again_for_the_one_before() {
     assert_eq!((s.state().tally.n, s.state().mark.0), (21, 21), "and every slice saved");
 }
 
+static ROWS_SERIALIZED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A row that counts how often it is serialized.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub struct Row(u32);
+
+impl serde::Serialize for Row {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        ROWS_SERIALIZED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.serialize(s)
+    }
+}
+
+/// aio's `rows` cell: big, and serialized only when it changed.
+#[cell(persist, id = "rows")]
+pub struct Rows {
+    all: Vec<Row>,
+}
+
+/// A port's cell: a big slice beside a small one.
+#[cell(persist, id = "port")]
+pub struct Port {
+    #[aio_cell]
+    rows: Rows,
+    #[aio_cell]
+    tally: Tally,
+}
+
+#[methods]
+impl Port {
+    pub fn fill(&mut self) {
+        self.rows.all = (0..100).map(Row).collect();
+    }
+
+    pub fn bump(&mut self) {
+        self.tally.n += 1;
+    }
+}
+
+#[test]
+fn a_commit_serializes_only_the_slices_that_changed_as_aio_did() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::<Port>::open_aio(dir.path().join("state.db"), "app").unwrap();
+    s.call(&By::Test, "fill", serde_json::Value::Null).unwrap();
+    s.call(&By::Test, "bump", serde_json::Value::Null).unwrap();
+    let before = ROWS_SERIALIZED.load(std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..20 {
+        s.call(&By::Test, "bump", serde_json::Value::Null).unwrap();
+    }
+    let n = ROWS_SERIALIZED.load(std::sync::atomic::Ordering::SeqCst) - before;
+    assert_eq!(n, 0, "{n} rows serialized for 20 commits of the small slice");
+    drop(s);
+    let s = Store::<Port>::open_aio(dir.path().join("state.db"), "app").unwrap();
+    assert_eq!((s.state().rows.all.len(), s.state().tally.n), (100, 21), "both slices saved");
+}
+
 #[test]
 fn a_held_key_is_written_once_a_debounce_window_as_aio_did() {
     let rt = tokio::runtime::Runtime::new().unwrap();
