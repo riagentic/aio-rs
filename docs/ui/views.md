@@ -280,7 +280,11 @@ assert_eq!(ui.count("li"), 0);
 | `onscroll`, `onresize` | | |
 
 - A handler may be `async` (`move |_| async move { .. }`): it runs as a
-  task of the component, dropped with it.
+  task of the component, dropped with it. A branch or a row of the component drawn
+  again stops none of it.
+- An event that reaches an element drawn again meanwhile (sent by the
+  page before the redraw) is dropped; a dev build says so once per event
+  name on the [diagnostic bus](../debugging/errors.md#hearing-problems-in-code) (`ui:stale-event`).
 - `e.stop_propagation()` keeps the event from the elements around;
   `e.prevent_default()` from the browser, but keys in a window need
   `data-aio-prevent` ([kit](kit.md#keys)).

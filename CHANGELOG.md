@@ -649,6 +649,13 @@ version may break things.
 
 ### Fixed
 
+- **On air, a handler's work is its component's** (Dioxus's scope): a task
+  an `async` click handler spawned ended when the `if` branch or `for`
+  row that drew its button was drawn again; it now ends with the
+  component. An event the page sent for an element drawn again before it
+  arrived is still dropped (AIR never runs a removed element's handler);
+  a dev build says so once per event name on the diagnostic bus
+  (`ui:stale-event`, `air::on_warn`). `TestPage::aim` makes such an event.
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled
