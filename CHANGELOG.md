@@ -319,29 +319,6 @@ version may break things.
   window.
 - The local door answers `flush` and `drop`; a network caller may ask
   `peer` of itself (its own user and role, never a claimed one).
-- `[build.assets]` (aio's `assets`): folders beside `aio.toml` built into
-  the app by URL prefix, answered at the same path in the window
-  (`aio://app/…`), by the app's server (`Http::assets`, public), in the web
-  build (cached offline) and in the APK; `ax build`, `ax dev` and `ax
-  start` build a file added later in.
-- `web` is a `[build] targets` kind: one `ax build` makes the web app
-  beside the other targets (aio's `build-all`).
-- A server's Linux CLI bundle gets a systemd system unit beside its user
-  unit (`<bundle>.system.service`, aio's `build-service`): it starts at
-  boot with no login or linger, as a user systemd makes, its data in
-  `/var/lib/<id>`.
-- `ax install <app> --appimage` (aio's installer): the AppImage in
-  `aio-rt/install/<id>-appimage/` and the app menu, its entry making a
-  private `TMPDIR` for the AppImage to unpack into; `ax installed` and
-  `ax remove` know it.
-- The web build makes iOS's launch images from `[build.splash]` (aio's
-  `iosLaunchImages`): a Home Screen app starts on the splash.
-- `ax dev --web`: the page's console (every level, uncaught errors,
-  refused promises) in `ax dev`'s output (aio's console forwarding).
-- A web page shows a `notify` tell as the browser's notification, asking
-  for the permission at the first one and saying once when it can't;
-  `aio::web::notify::request_permission()` for a click handler, `on_click`
-  for its route.
 - **Patches carry a resized array's items** (aio's narrowed Immer ops): a
   push, a spread or a filter sends one `insert` per item put in or `del`
   per item taken out, not the array; a sort or a rebuild still sends it
@@ -378,6 +355,29 @@ version may break things.
   `Remote::merge(field, Merge::Text | Counter | SetAdd(id))` (aio's
   `sync.merge`) shows that field merged while the call waits. In the page
   too.
+- `[build.assets]` (aio's `assets`): folders beside `aio.toml` built into
+  the app by URL prefix, answered at the same path in the window
+  (`aio://app/…`), by the app's server (`Http::assets`, public), in the web
+  build (cached offline) and in the APK; `ax build`, `ax dev` and `ax
+  start` build a file added later in.
+- `web` is a `[build] targets` kind: one `ax build` makes the web app
+  beside the other targets (aio's `build-all`).
+- A server's Linux CLI bundle gets a systemd system unit beside its user
+  unit (`<bundle>.system.service`, aio's `build-service`): it starts at
+  boot with no login or linger, as a user systemd makes, its data in
+  `/var/lib/<id>`.
+- `ax install <app> --appimage` (aio's installer): the AppImage in
+  `aio-rt/install/<id>-appimage/` and the app menu, its entry making a
+  private `TMPDIR` for the AppImage to unpack into; `ax installed` and
+  `ax remove` know it.
+- The web build makes iOS's launch images from `[build.splash]` (aio's
+  `iosLaunchImages`): a Home Screen app starts on the splash.
+- `ax dev --web`: the page's console (every level, uncaught errors,
+  refused promises) in `ax dev`'s output (aio's console forwarding).
+- A web page shows a `notify` tell as the browser's notification, asking
+  for the permission at the first one and saying once when it can't;
+  `aio::web::notify::request_permission()` for a click handler, `on_click`
+  for its route.
 - **`ax ui` as amui, on every OS**: the Tasks tab runs the project's own
   tasks (its cargo aliases) beside the `ax` verbs, its output shown as it
   comes; CPU, the project folder, the executable and the runtime kind on
