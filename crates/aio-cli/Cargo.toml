@@ -28,8 +28,11 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 notify = "8"
 base64 = "0.23"
-# `ax build --sizes`: a binary's code symbols, by crate.
-object = { version = "0.37", default-features = false, features = ["read", "std"] }
+# `ax build --sizes`: a binary's code symbols, by crate. `write`: ax dev's
+# hot-patch stub object (`hotpatch.rs`).
+object = { version = "0.37", default-features = false, features = ["read", "std", "write"] }
+# ax dev's hot-patch: the jump table subsecond applies in the app (its own type).
+subsecond-types = "=0.7.10"
 rustc-demangle = "0.1"
 # The default app icon's PNG; an app's own icon scaled for the exe's .ico.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
