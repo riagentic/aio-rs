@@ -484,6 +484,14 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- GitHub CI runs `./ci.sh`'s parts side by side (`./ci.sh lint|test`
+  runs one alone; no part: all): `check (lint)`, `check (test)`,
+  `mutants`, and `dx (dioxus)`, `dx (air)`, `dx (apk)`
+  (`scripts/dx-metrics --dioxus|--air|--apk`, each with its own base
+  measurement). The base's kept row is keyed by commit and runner
+  machine (`scripts/dx-metrics --machine`), so a run on a runner of the
+  same machine skips the base's build. Rust caches are saved by main's
+  runs only; main's runs are never cancelled by a newer push.
 - aio-rs-shell's Dioxus page is its default feature `dioxus` (aio-rs
   `kit` with it); `default-features = false, features = ["air"]` is the
   shell on air. aio-rs's Dioxus page crates are its feature `liveview`

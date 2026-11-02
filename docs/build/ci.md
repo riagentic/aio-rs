@@ -241,15 +241,15 @@ ships no Dioxus, and its packages and edit loop are measured, in
 - `scripts/dx-metrics --apk`: the same for the air template's APKs
   (`ax build --android`, each checked, `air_apk_b` the arm64 one).
   `ci.sh` runs it where the NDK and Rust's three Android targets are; in
-  GitHub CI the `air-apk` job does (`rustup target add
+  GitHub CI the `dx (apk)` job does (`rustup target add
   armv7-linux-androideabi x86_64-linux-android`, the runner's SDK).
+- `--dioxus` and `--air` measure one template each (the row's other
+  columns blank): GitHub CI runs `dx (dioxus)`, `dx (air)` and
+  `dx (apk)` side by side, each against the base measured on its own
+  runner; `ci.sh` measures the whole row in one run.
 
 A base before air phase 3 has no shell on air: its air sizes are said
-as not gated. What it costs on a GitHub runner: about 5 minutes more in
-the `check` job (the air template's debug build, three rebuilds, the
-live edits, its release and web builds), about 3 more once the base has
-air (its release and web builds); the `air-apk` job runs beside it, about
-5 minutes (10 with the base's APKs).
+as not gated.
 
 ## Not in aio-rs
 
