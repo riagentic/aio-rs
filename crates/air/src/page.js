@@ -147,13 +147,15 @@
       return n
     }
     const range = () => span(node(), node())
+    // `style:<property>`: a CSS property (Dioxus's style attributes), else an attribute.
+    const attr = (n, k, v) => (k.startsWith('style:') ? n.style.setProperty(k.slice(6), v) : n.setAttribute(k, v))
     const build = (marks, path, svg) => {
       const k = u8()
       let n, mark = path.length === 1
       if (k === 1 || k === 5) {
         const tag = str(), inSvg = svg || k === 5 || tag === 'svg'
         n = inSvg ? document.createElementNS(SVG, tag) : document.createElement(tag)
-        for (let a = u8(); a > 0; a--) n.setAttribute(str(), str())
+        for (let a = u8(); a > 0; a--) attr(n, str(), str())
         const children = u16()
         if (u8()) mark = true
         if (mark) marks.push(path.slice())
@@ -189,8 +191,8 @@
           break
         }
         case 3: node().nodeValue = str(); break
-        case 4: node().setAttribute(str(), str()); break
-        case 5: node().removeAttribute(str()); break
+        case 4: { const n = node(); attr(n, str(), str()); break }
+        case 5: { const n = node(), k = str(); k.startsWith('style:') ? n.style.removeProperty(k.slice(6)) : n.removeAttribute(k); break }
         case 6: { const n = node(); prop(n, str(), str()); break }
         case 7: { const n = node(); n[str()] = u8() !== 0; break }
         case 8: {

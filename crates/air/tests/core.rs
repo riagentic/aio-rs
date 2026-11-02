@@ -405,3 +405,36 @@ fn an_element_handed_out_runs_scripts_on_itself() {
     assert_eq!((p.scripts.len(), id), (mounted + 1, 0), "one script, no reply kept");
     assert!(js.contains("el.getContext('2d').fillRect(0, 0, 4, 4)") && js.starts_with("const el = aio.node("), "{js}");
 }
+
+#[component]
+fn Draft(saved: Signal<String>) -> View {
+    let text = signal(|| "typed".to_string());
+    let shown = memo(move || format!("{} chars", text.with(String::len)));
+    // A view's cleanup reads its own state (Dioxus's `use_drop`, Solid's `onCleanup`).
+    on_cleanup(move || saved.set(format!("{} ({})", text.get_untracked(), shown.get_untracked())));
+    rsx! { p { "data-t": "draft", "{text}" } }
+}
+
+#[test]
+fn a_cleanup_reads_its_views_signals_and_memos() {
+    let saved = Signal::new(String::new());
+    let open = Signal::new(true);
+    let mut p = TestPage::mount(
+        move || rsx! { button { "data-t": "close", onclick: move |_| open.set(false), "x" } if open.get() { Draft { saved } } },
+    );
+    assert_eq!(p.text("draft"), "typed");
+    p.click("close");
+    assert!(!p.present("draft"));
+    assert_eq!(saved.get_untracked(), "typed (5 chars)");
+}
+
+#[test]
+fn style_attributes_are_css_properties_in_the_rust_page_too() {
+    let wide = Signal::new(true);
+    let mut p = TestPage::mount(move || {
+        rsx! { div { "data-t": "box", display: "flex", min_width: wide.get().then_some("10px"), button { "data-t": "narrow", onclick: move |_| wide.set(false), "n" } } }
+    });
+    assert_eq!(p.attr("box", "style").as_deref(), Some("display: flex; min-width: 10px"));
+    p.click("narrow");
+    assert_eq!(p.attr("box", "style").as_deref(), Some("display: flex"));
+}

@@ -375,3 +375,27 @@ fn svg_made_by_a_component_a_row_or_a_branch_is_svgs() {
     let ns = ui.eval("[...document.querySelectorAll('[data-t=pic] *, [data-t=html] *')].map(e => e.localName + ':' + e.namespaceURI.split('/').pop()).join(' ')");
     assert_eq!(ns, "circle:svg line:svg line:svg title:svg path:svg title:xhtml");
 }
+
+#[test]
+fn style_attributes_set_css_properties_as_dioxus_did() {
+    fn app() -> View {
+        let n = signal(|| 2u32);
+        let wide = signal(|| true);
+        rsx! {
+            div { "data-t": "box", style: "color: red", display: "flex", gap: "{n}px", min_width: wide.get().then_some("10px"),
+                button { "data-t": "narrow", onclick: move |_| wide.set(false), "narrow" }
+            }
+            img { "data-t": "img", width: "3" }
+            svg { "data-t": "svg", width: "4" }
+            span { "data-t": "quoted", "display": "x" }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    let read = "[...document.querySelectorAll('[data-t=box], [data-t=img], [data-t=svg], [data-t=quoted]')].map(e => (e.getAttribute('style') || '') + '|' + (e.getAttribute('width') || '') + '|' + (e.getAttribute('display') || '')).join(' / ')";
+    assert_eq!(ui.eval(read), "color: red; display: flex; gap: 2px; min-width: 10px;|| / |3| / |4| / ||x");
+    ui.click("narrow");
+    assert_eq!(
+        ui.eval("document.querySelector('[data-t=box]').getAttribute('style')"),
+        "color: red; display: flex; gap: 2px;"
+    );
+}

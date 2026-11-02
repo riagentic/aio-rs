@@ -640,6 +640,11 @@ version may break things.
 - A synced client's call the server refused stays refused when it is sent
   again (its answer went with a cut link): it was applied on the later
   state its client was never told of.
+- air: Dioxus's style attributes (`display: "flex"`, `align_items`,
+  `min_width`, …, dioxus-html's list) set their CSS property on an HTML
+  element, as on Dioxus; they were attributes the page ignored.
+- air: a view's `on_cleanup` reads its own signals and memos (they were
+  freed first: a panic in a destructor, the process aborted).
 - air: SVG drawn by a component, a `for` row or an `if` branch (a template
   whose root is `circle`, `g`, `path`, …, or one made inside an `svg` of
   the same `rsx!`) is in SVG's namespace; it was an HTML element, drawn

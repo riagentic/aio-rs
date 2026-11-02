@@ -251,6 +251,13 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   a local closure called in a hole is a `Callback`, or cloned in by a
   `let` of the hole's own; `aio::field!(name)` names a field, not a local.
 - `onX: handler` listens for `X` (Dioxus's event names).
+- A named attribute that is one of Dioxus's style attributes (dioxus-html's
+  global attributes in its `style` namespace: `display`, `align_items`,
+  `min_width`, `gap`, …) sets that CSS property on an HTML element
+  (`style.setProperty`), in order with the element's other attributes, as
+  Dioxus did; an element's own attribute of that name stays one
+  (`img { width }`, `canvas { height }`, `input { size }`), and so do SVG's
+  and a quoted name (`"display": "x"`).
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).

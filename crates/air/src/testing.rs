@@ -186,17 +186,17 @@ impl TestPage {
                     let n = self.at(&mut r);
                     let (k, v) = (r.str(), r.str());
                     if let Kind::El(_, a) = &mut self.nodes[n].kind {
-                        match a.iter_mut().find(|(x, _)| *x == k) {
-                            Some(x) => x.1 = v,
-                            None => a.push((k, v)),
-                        }
+                        set_attr(a, k, v);
                     }
                 }
                 op::REMOVE_ATTR => {
                     let n = self.at(&mut r);
                     let k = r.str();
                     if let Kind::El(_, a) = &mut self.nodes[n].kind {
-                        a.retain(|(x, _)| *x != k);
+                        match k.strip_prefix("style:") {
+                            Some(p) => set_style(a, p, ""),
+                            None => a.retain(|(x, _)| *x != k),
+                        }
                     }
                 }
                 op::SET_PROP => {
@@ -270,17 +270,7 @@ impl TestPage {
                     let (k, v) = (r.str(), r.str());
                     let el = span.into_iter().find(|n| matches!(self.nodes[*n].kind, Kind::El(..)));
                     if let Some(Kind::El(_, a)) = el.map(|n| &mut self.nodes[n].kind) {
-                        let mut style: Vec<String> = a
-                            .iter()
-                            .find(|(x, _)| x == "style")
-                            .map(|(_, s)| s.split(';').filter(|d| !d.trim().is_empty()).map(str::to_owned).collect())
-                            .unwrap_or_default();
-                        style.retain(|d| d.split(':').next().map(str::trim) != Some(k.as_str()));
-                        if !v.is_empty() {
-                            style.push(format!("{k}: {v}"));
-                        }
-                        a.retain(|(x, _)| x != "style");
-                        a.push(("style".into(), style.join("; ")));
+                        set_style(a, &k, &v);
                     }
                 }
                 o => panic!("air: unknown edit {o}"),
@@ -448,13 +438,43 @@ impl TestPage {
     }
 }
 
+/// Attribute `k` set to `v` (`style:<property>`: that CSS property).
+fn set_attr(a: &mut Vec<(String, String)>, k: String, v: String) {
+    if let Some(p) = k.strip_prefix("style:") {
+        return set_style(a, p, &v);
+    }
+    match a.iter_mut().find(|(x, _)| *x == k) {
+        Some(x) => x.1 = v,
+        None => a.push((k, v)),
+    }
+}
+
+/// CSS property `k` of the `style` attribute set to `v` (empty: removed), as `style.setProperty`.
+fn set_style(a: &mut Vec<(String, String)>, k: &str, v: &str) {
+    let mut style: Vec<String> = a
+        .iter()
+        .find(|(x, _)| x == "style")
+        .map(|(_, s)| s.split(';').filter(|d| !d.trim().is_empty()).map(|d| d.trim().to_owned()).collect())
+        .unwrap_or_default();
+    style.retain(|d| d.split(':').next().map(str::trim) != Some(k));
+    if !v.is_empty() {
+        style.push(format!("{k}: {v}"));
+    }
+    a.retain(|(x, _)| x != "style");
+    a.push(("style".into(), style.join("; ")));
+}
+
 fn read_tnode(r: &mut Rd, t: &mut Tpl, parent: Option<usize>, left: &mut u32) -> usize {
     *left -= 1;
     let (kind, children, mark) = match r.u8() {
         // 5: the same, in SVG's namespace.
         1 | 5 => {
             let tag = r.str();
-            let attrs = (0..r.u8()).map(|_| (r.str(), r.str())).collect();
+            let mut attrs = vec![];
+            for _ in 0..r.u8() {
+                let (k, v) = (r.str(), r.str());
+                set_attr(&mut attrs, k, v);
+            }
             let children = r.u16();
             (Kind::El(tag, attrs), children, r.u8() != 0)
         }
