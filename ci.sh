@@ -24,6 +24,9 @@ cargo fmt --all --check
 # Every crate listed with its reason, no unlisted duplicate, no set above its ceiling (deps.toml).
 scripts/deps-check
 scripts/slim-metrics --check
+# The published crates' public API as checked in (scripts/api, TS21): a change
+# shows in review, and none names aio-rs 0.1's renderer.
+scripts/public-api --check
 scripts/dx-metrics --self-test
 # A packaged app ships no other renderer: each of air-ship's checks red on a planted one.
 scripts/air-ship --self-test

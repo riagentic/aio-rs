@@ -85,7 +85,7 @@ pub(crate) fn nodes(input: TokenStream) -> Result<Vec<Node>, String> {
 /// `#[props(default)]` / `#[props(default = e)]` may be left out, an
 /// `Option<T>` is `None` unless given (and takes a `T`), a `View` is empty,
 /// `#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>` takes
-/// the attributes given (`"data-t": …`, `id`, `..attributes`); a [`Prop`]
+/// the attributes given (`"data-t": …`, `id`, `..attributes`); a `Prop`
 /// follows what it is given. Any other prop is required (a compile error
 /// without it).
 #[cfg(proc_macro)]

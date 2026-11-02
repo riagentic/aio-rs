@@ -1,0 +1,556 @@
+aio_shell::Child.origins: Option<Vec<String>>
+aio_shell::Child.partition: Option<String>
+aio_shell::Child.preload: Option<String>
+aio_shell::Child.size: Option<(u32, u32)>
+aio_shell::Child.url: String
+aio_shell::Launch.args: Vec<String>
+aio_shell::Launch.cwd: std::path::PathBuf
+aio_shell::Launch::path: fn path(&self, arg: &str) -> String
+aio_shell::Start::Done
+aio_shell::Start::HandedOver
+aio_shell::Start::Run(aio::paths::AppDirs)
+aio_shell::Web.browser: bool
+aio_shell::Web.downloads: bool
+aio_shell::Web.fullscreen: bool
+aio_shell::Web.preloads: &'static [(&'static str, &'static str)]
+aio_shell::Web.windows: bool
+aio_shell::Window.background: Option<[&'static str; 2]>
+aio_shell::Window.confirm_unload: bool
+aio_shell::Window.dir: Dir
+aio_shell::Window.head: Option<&'static str>
+aio_shell::Window.height: u32
+aio_shell::Window.icon: Option<&'static [u8]>
+aio_shell::Window.keep_server: bool
+aio_shell::Window.keys: guest::Keys
+aio_shell::Window.lang: Option<&'static str>
+aio_shell::Window.permissions: &'static [&'static str]
+aio_shell::Window.require_sandbox: bool
+aio_shell::Window.show_cap_ms: Option<u32>
+aio_shell::Window.splash_show: Option<fn() -> SplashShow>
+aio_shell::Window.title: &'static str
+aio_shell::Window.tray: Option<desktop::Tray>
+aio_shell::Window.viewport: Option<&'static str>
+aio_shell::Window.web: guest::Web
+aio_shell::Window.width: u32
+aio_shell::Window::of: fn of(cfg: &aio::config::Config) -> Self
+aio_shell::clear_partition: async fn clear_partition(partition: &str) -> io::Result<()>
+aio_shell::delta::apply: fn apply(patch: &[u8], from: &std::path::Path, into: &std::path::Path) -> io::Result<()>
+aio_shell::delta::make: fn make(old: &std::path::Path, new: &std::path::Path) -> io::Result<Vec<u8>>
+aio_shell::desktop::Ask::Go(String)
+aio_shell::desktop::Ask::Run(fn())
+aio_shell::desktop::Icon::Tray
+aio_shell::desktop::Icon::Window
+aio_shell::desktop::IconState.tooltip: Option<String>
+aio_shell::desktop::IconState.tray: Showing
+aio_shell::desktop::IconState.window: Showing
+aio_shell::desktop::Item.label: &'static str
+aio_shell::desktop::Item.route: Option<&'static str>
+aio_shell::desktop::Item.run: Option<fn()>
+aio_shell::desktop::Item::SEPARATOR: const Item
+aio_shell::desktop::Item::go: const fn go(label: &'static str, route: &'static str) -> Self
+aio_shell::desktop::Item::run: const fn run(label: &'static str, run: fn()) -> Self
+aio_shell::desktop::Notice.body: String
+aio_shell::desktop::Notice.route: Option<String>
+aio_shell::desktop::Notice.silent: bool
+aio_shell::desktop::Notice.tag: Option<String>
+aio_shell::desktop::Notice.title: String
+aio_shell::desktop::Showing::Animated { frames: usize, fps: u8 }
+aio_shell::desktop::Showing::Own
+aio_shell::desktop::Showing::Still
+aio_shell::desktop::Shown::Icons(Vec<(Icon, Vec<Vec<u8>>)>, u8, Option<String>)
+aio_shell::desktop::Shown::Notice(Notice)
+aio_shell::desktop::Tray.close_to_tray: bool
+aio_shell::desktop::Tray.menu: &'static [Item]
+aio_shell::desktop::Tray.tooltip: Option<&'static str>
+aio_shell::desktop::icon: fn icon(which: Icon, frames: &[&[u8]], fps: u8) -> io::Result<()>
+aio_shell::desktop::icon_state: fn icon_state() -> IconState
+aio_shell::desktop::notify: async fn notify(n: &Notice) -> io::Result<()>
+aio_shell::desktop::show: fn show(rt: &tokio::runtime::Handle, t: &aio::tell::Tell)
+aio_shell::desktop::shown: fn shown(t: &aio::tell::Tell) -> io::Result<Shown>
+aio_shell::desktop::tooltip: fn tooltip(text: &str)
+aio_shell::desktop::use_asks: fn use_asks(go: fn(&str) -> bool)
+aio_shell::fuses::are_off: fn are_off(b: &[u8]) -> Result<bool, String>
+aio_shell::fuses::offset: fn offset(b: &[u8]) -> Result<usize, String>
+aio_shell::fuses::turn_off: fn turn_off(b: &mut [u8]) -> Result<(), String>
+aio_shell::guest::Child.origins: Option<Vec<String>>
+aio_shell::guest::Child.partition: Option<String>
+aio_shell::guest::Child.preload: Option<String>
+aio_shell::guest::Child.size: Option<(u32, u32)>
+aio_shell::guest::Child.url: String
+aio_shell::guest::Keys.print: bool
+aio_shell::guest::Keys.reload: bool
+aio_shell::guest::Web.browser: bool
+aio_shell::guest::Web.downloads: bool
+aio_shell::guest::Web.fullscreen: bool
+aio_shell::guest::Web.preloads: &'static [(&'static str, &'static str)]
+aio_shell::guest::Web.windows: bool
+aio_shell::guest::clear_partition: async fn clear_partition(partition: &str) -> io::Result<()>
+aio_shell::guest::open_window: async fn open_window(c: &Child) -> io::Result<()>
+aio_shell::guest::preload_refusal: fn preload_refusal(name: &str) -> Option<&'static str>
+aio_shell::html_open: fn html_open(lang: Option<&str>, dir: Dir) -> String
+aio_shell::instance::Launch.args: Vec<String>
+aio_shell::instance::Launch.cwd: std::path::PathBuf
+aio_shell::instance::Launch::path: fn path(&self, arg: &str) -> String
+aio_shell::instance::Start::Done
+aio_shell::instance::Start::HandedOver
+aio_shell::instance::Start::Run(aio::paths::AppDirs)
+aio_shell::instance::hand_over: fn hand_over(addr: &str, cwd: &std::path::Path, args: &[String]) -> io::Result<()>
+aio_shell::instance::launches: fn launches() -> broadcast::Receiver<Launch>
+aio_shell::instance::programs: fn programs(id: &str) -> std::path::PathBuf
+aio_shell::instance::quit: fn quit(id: &str) -> io::Result<()>
+aio_shell::instance::quit_at: fn quit_at(id: &str, data: &std::path::Path) -> io::Result<()>
+aio_shell::instance::start: fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start>
+aio_shell::launches: fn launches() -> broadcast::Receiver<Launch>
+aio_shell::macmove::Answer::Later
+aio_shell::macmove::Answer::Move
+aio_shell::macmove::Answer::Unanswered
+aio_shell::macmove::Deps.args: &'a [String]
+aio_shell::macmove::Deps.data: &'a std::path::Path
+aio_shell::macmove::Deps.facts: Facts<'a>
+aio_shell::macmove::Deps.hand_over: &'a dyn Fn(&str, &[String]) -> io::Result<()>
+aio_shell::macmove::Deps.pid: u32
+aio_shell::macmove::Deps.run: &'a dyn Fn(&str, &[String]) -> Ran
+aio_shell::macmove::Deps.title: &'a str
+aio_shell::macmove::Facts.can_write: &'a dyn Fn(&str) -> bool
+aio_shell::macmove::Facts.declined: bool
+aio_shell::macmove::Facts.env: Option<&'a str>
+aio_shell::macmove::Facts.exe: &'a str
+aio_shell::macmove::Facts.exists: &'a dyn Fn(&str) -> bool
+aio_shell::macmove::Facts.home: Option<&'a str>
+aio_shell::macmove::Facts.os: &'a str
+aio_shell::macmove::Offer.app: String
+aio_shell::macmove::Offer.dest: String
+aio_shell::macmove::Outcome::Failed
+aio_shell::macmove::Outcome::Later
+aio_shell::macmove::Outcome::Moved
+aio_shell::macmove::Outcome::None
+aio_shell::macmove::Outcome::Unanswered
+aio_shell::macmove::answer: fn answer(code: Option<i32>, stdout: &str, stderr: &str) -> Answer
+aio_shell::macmove::app_dir: fn app_dir(exe: &str) -> Option<&str>
+aio_shell::macmove::ask: fn ask(d: &Deps<'_>) -> Outcome
+aio_shell::macmove::blocker: fn blocker(app: &str, can_write: &dyn Fn(&str) -> bool) -> Option<String>
+aio_shell::macmove::can_write: fn can_write(dir: &str) -> bool
+aio_shell::macmove::dialog_args: fn dialog_args(title: &str, icon: Option<&str>, updates_here: bool) -> Vec<String>
+aio_shell::macmove::offer: fn offer(f: &Facts<'_>) -> Option<Offer>
+aio_shell::macmove::open_args: fn open_args(dest: &str, args: &[String], pid: u32) -> Vec<String>
+aio_shell::oneclick::Plan::Install { shortcut: bool }
+aio_shell::oneclick::Plan::Open
+aio_shell::oneclick::is_download: fn is_download(file: &str, id: &str) -> bool
+aio_shell::oneclick::plan: fn plan(mine: &str, installed: Option<&str>) -> Plan
+aio_shell::oneclick::shortcut_name: fn shortcut_name(name: &str, id: &str) -> String
+aio_shell::oneclick::split_runtime: fn split_runtime(file: &[u8]) -> (std::borrow::Cow<'_, [u8]>, Option<&[u8]>)
+aio_shell::oneclick::version_of: fn version_of(out: &str, id: &str) -> Option<String>
+aio_shell::oneclick::with_runtime: fn with_runtime(exe: &[u8], zip: &[u8]) -> Vec<u8>
+aio_shell::open_window: async fn open_window(c: &Child) -> io::Result<()>
+aio_shell::os::open_path: async fn open_path(path: impl AsRef<std::path::Path>) -> io::Result<()>
+aio_shell::os::open_url: async fn open_url(url: &str) -> io::Result<()>
+aio_shell::os::reveal: async fn reveal(path: impl AsRef<std::path::Path>) -> io::Result<()>
+aio_shell::page::Pick.filters: Vec<(String, Vec<String>)>
+aio_shell::page::Pick.folder: bool
+aio_shell::page::Pick.start_in: Option<String>
+aio_shell::page::Pick.title: String
+aio_shell::page::Save.filters: Vec<(String, Vec<String>)>
+aio_shell::page::Save.suggest: Option<String>
+aio_shell::page::Save.title: String
+aio_shell::page::caret: async fn caret(selector: &str) -> Option<usize>
+aio_shell::page::char_index: fn char_index(s: &str, units: usize) -> usize
+aio_shell::page::close: fn close()
+aio_shell::page::copy: async fn copy(text: &str) -> bool
+aio_shell::page::hide: fn hide()
+aio_shell::page::maximize: fn maximize()
+aio_shell::page::minimize: fn minimize()
+aio_shell::page::pick: async fn pick(p: &Pick) -> io::Result<Option<String>>
+aio_shell::page::pick_many: async fn pick_many(p: &Pick) -> io::Result<Option<Vec<String>>>
+aio_shell::page::print: fn print()
+aio_shell::page::reveal: fn reveal(selector: &str, center: bool)
+aio_shell::page::reveal_id: fn reveal_id(id: &str, center: bool)
+aio_shell::page::save: async fn save(s: &Save) -> io::Result<Option<String>>
+aio_shell::page::set_scroll: fn set_scroll(selector: &str, y: f64)
+aio_shell::page::show: fn show()
+aio_shell::pidlock::ProcId.epoch: Option<u64>
+aio_shell::pidlock::ProcId.ns: Option<u32>
+aio_shell::pidlock::ProcId.pid: u32
+aio_shell::pidlock::ProcId.token: Option<String>
+aio_shell::pidlock::keep_fresh: fn keep_fresh(p: std::path::PathBuf, ours: impl Fn() -> bool + Send + 'static) -> std::sync::mpsc::Sender<()>
+aio_shell::pidlock::lock_owner: fn lock_owner(raw: &str, id: Option<&str>) -> Option<ProcId>
+aio_shell::pidlock::own_ns: fn own_ns() -> Option<u32>
+aio_shell::pidlock::own_tail: fn own_tail() -> String
+aio_shell::pidlock::owner_alive: fn owner_alive(id: &ProcId) -> bool
+aio_shell::pidlock::release: fn release(lock: &std::path::Path) -> io::Result<()>
+aio_shell::pidlock::remove_dead_stages: fn remove_dead_stages(dir: &std::path::Path)
+aio_shell::pidlock::stage_tag: fn stage_tag() -> String
+aio_shell::pidlock::tail_of: fn tail_of(ns: Option<u32>, token: Option<&str>, epoch: Option<u64>) -> String
+aio_shell::pidlock::token_tag: fn token_tag(token: &str) -> String
+aio_shell::pidlock::touch: fn touch(p: &std::path::Path) -> io::Result<()>
+aio_shell::pidlock::try_lock: fn try_lock(lock: &std::path::Path) -> (bool, bool)
+aio_shell::pidlock::with_lock: fn with_lock<T>(lock: &std::path::Path, wait: std::time::Duration, on_wait: &mut dyn FnMut() -> bool, f: impl FnOnce(bool) -> T) -> T
+aio_shell::pidlock::with_mutex: fn with_mutex<T>(lock: &std::path::Path, f: impl FnOnce() -> T) -> io::Result<Option<T>>
+aio_shell::pidlock::with_tag: fn with_tag(pid: u32, tail: &str) -> ProcId
+aio_shell::place::Placed.maximized: bool
+aio_shell::place::Placed.rect: Rect
+aio_shell::place::Rect.height: i32
+aio_shell::place::Rect.width: i32
+aio_shell::place::Rect.x: i32
+aio_shell::place::Rect.y: i32
+aio_shell::place::Saved.declared_height: u32
+aio_shell::place::Saved.declared_width: u32
+aio_shell::place::Saved.fullscreen: bool
+aio_shell::place::Saved.maximized: bool
+aio_shell::place::Saved.normal: Rect
+aio_shell::place::answer: fn answer(screens: &aio::serde_json::Value, dw: u32, dh: u32, saved: Option<&Saved>) -> aio::serde_json::Value
+aio_shell::place::icon_size: fn icon_size(png: &[u8]) -> Option<(u32, u32)>
+aio_shell::place::load: fn load(file: &std::path::Path) -> Option<Saved>
+aio_shell::place::place: fn place(dw: u32, dh: u32, saved: Option<&Saved>, screens: &[Rect], primary: Rect) -> Placed
+aio_shell::place::png_size: fn png_size(png: &[u8]) -> Option<(u32, u32)>
+aio_shell::place::save: fn save(file: &std::path::Path, report: &aio::serde_json::Value, dw: u32, dh: u32) -> std::io::Result<()>
+aio_shell::prune::Decision.bytes: u64
+aio_shell::prune::Decision.keep: bool
+aio_shell::prune::Decision.kind: Kind
+aio_shell::prune::Decision.name: String
+aio_shell::prune::Decision.path: std::path::PathBuf
+aio_shell::prune::Decision.used: Option<std::time::SystemTime>
+aio_shell::prune::Decision.why: String
+aio_shell::prune::Kind::Record
+aio_shell::prune::Kind::Runtime
+aio_shell::prune::Kind::Window
+aio_shell::prune::Use.exe: String
+aio_shell::prune::Use.pending: bool
+aio_shell::prune::Use.slug: String
+aio_shell::prune::Use.version: String
+aio_shell::prune::Use.window: Option<String>
+aio_shell::prune::apply: fn apply(plan: &[Decision]) -> (Vec<std::path::PathBuf>, Vec<String>)
+aio_shell::prune::auto: fn auto(root: &std::path::Path, running: &str, now: std::time::SystemTime) -> Vec<std::path::PathBuf>
+aio_shell::prune::bytes: fn bytes(p: &std::path::Path) -> u64
+aio_shell::prune::in_use: fn in_use(dir: &std::path::Path) -> bool
+aio_shell::prune::iso: fn iso(t: std::time::SystemTime) -> String
+aio_shell::prune::key: fn key(exe: &str) -> String
+aio_shell::prune::last_used: fn last_used(dir: &std::path::Path) -> Option<std::time::SystemTime>
+aio_shell::prune::parse_iso: fn parse_iso(s: &str) -> Option<std::time::SystemTime>
+aio_shell::prune::plan: fn plan(root: &std::path::Path, now: std::time::SystemTime) -> io::Result<Vec<Decision>>
+aio_shell::prune::record: fn record(root: &std::path::Path, u: &Use) -> io::Result<()>
+aio_shell::prune::record_at: fn record_at(root: &std::path::Path, u: &Use, at: std::time::SystemTime) -> io::Result<()>
+aio_shell::prune::record_text: fn record_text(u: &Use, at: std::time::SystemTime) -> String
+aio_shell::prune::uses: fn uses(root: &std::path::Path) -> io::Result<Vec<(std::path::PathBuf, Option<Use>, bool)>>
+aio_shell::run: fn run(app: fn() -> aio::ui::View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()>
+aio_shell::runtime::Identity.bundle_id: &'a str
+aio_shell::runtime::Identity.icon: Option<&'a std::path::Path>
+aio_shell::runtime::Identity.id: &'a str
+aio_shell::runtime::Identity.name: &'a str
+aio_shell::runtime::Identity.version: &'a str
+aio_shell::runtime::bundle: fn bundle(into: &std::path::Path, slug: &str, cache: &std::path::Path, extras: bool) -> io::Result<Vec<String>>
+aio_shell::runtime::carries_runtime: fn carries_runtime(dir: &std::path::Path) -> bool
+aio_shell::runtime::dir: fn dir() -> std::path::PathBuf
+aio_shell::runtime::download: fn download(url: &str, to: &std::path::Path, on: &mut dyn FnMut(u64, Option<u64>) -> bool) -> io::Result<String>
+aio_shell::runtime::ensure: fn ensure(title: &str) -> io::Result<std::path::PathBuf>
+aio_shell::runtime::ensure_as: fn ensure_as(title: &str, colors: &[[String; 4]; 2], at: Option<(i32, i32)>, icon: Option<&std::path::Path>, splash: Option<(&[u8], (u32, u32))>, back: Option<&dyn Fn() -> io::Result<()>>) -> io::Result<std::path::PathBuf>
+aio_shell::runtime::exe: fn exe(dir: &std::path::Path) -> std::path::PathBuf
+aio_shell::runtime::exe_for: fn exe_for(os: &str, dir: &std::path::Path) -> std::path::PathBuf
+aio_shell::runtime::install: fn install(zip: impl Read + io::Seek, dir: &std::path::Path) -> io::Result<()>
+aio_shell::runtime::listed_sha: fn listed_sha(sums: &str, file: &str) -> Option<String>
+aio_shell::runtime::migrate: fn migrate()
+aio_shell::runtime::migrate_from: fn migrate_from(old: &std::path::Path, root: &std::path::Path, busy: &dyn Fn(&std::path::Path) -> bool)
+aio_shell::runtime::pinned_in: fn pinned_in(binary: &[u8]) -> Option<String>
+aio_shell::runtime::pinned_sha: fn pinned_sha(version: &str) -> Option<String>
+aio_shell::runtime::prefetch: fn prefetch(version: &str, sha: Option<&str>) -> io::Result<std::path::PathBuf>
+aio_shell::runtime::root: fn root() -> std::path::PathBuf
+aio_shell::runtime::sandbox_args: fn sandbox_args(dir: &std::path::Path) -> Vec<String>
+aio_shell::runtime::sandbox_for: fn sandbox_for(dir: &std::path::Path, require: bool) -> io::Result<Vec<String>>
+aio_shell::runtime::sandbox_missing: fn sandbox_missing(read: impl Fn(&str) -> String, probe: impl FnOnce() -> bool, helper: Option<(u32, u32)>) -> Option<String>
+aio_shell::runtime::set_plist: fn set_plist(plist: &str, key: &str, value: &str) -> String
+aio_shell::runtime::sha_for: fn sha_for(list: &str, slug: &str) -> Option<String>
+aio_shell::runtime::sha_in: fn sha_in(binary: &[u8], version: &str) -> Option<String>
+aio_shell::runtime::slug: fn slug() -> String
+aio_shell::runtime::trim: fn trim(os: &str, dir: &std::path::Path, extras: bool) -> io::Result<Vec<String>>
+aio_shell::runtime::usable: fn usable(os: &str, dir: &std::path::Path) -> bool
+aio_shell::runtime::window: fn window(rt: &std::path::Path, who: &Identity<'_>) -> io::Result<std::path::PathBuf>
+aio_shell::runtime::window_home: fn window_home(id: &str) -> std::path::PathBuf
+aio_shell::serve: fn serve(dirs: &aio::paths::AppDirs) -> std::io::Result<()>
+aio_shell::splash::colors: fn colors(hue: u16, bg: Option<[&str; 2]>) -> [[String; 4]; 2]
+aio_shell::splash::image_box: fn image_box(s: &aio::config::Splash) -> Option<(u32, u32)>
+aio_shell::splash::install: fn install(dir: &std::path::Path, s: Option<&aio::config::Splash>, title: &str, colors: &[[String; 4]; 2], target: Option<[i32; 4]>) -> std::io::Result<()>
+aio_shell::splash::look_colors: fn look_colors(base: [[String; 4]; 2], s: &aio::config::Splash) -> [[String; 4]; 2]
+aio_shell::splash::markup: fn markup(s: &aio::config::Splash, title: &str, colors: &[[String; 4]; 2], src: &str, over: bool) -> String
+aio_shell::splash::page: fn page(s: &aio::config::Splash, title: &str, colors: &[[String; 4]; 2]) -> String
+aio_shell::splash::plan: fn plan(s: &aio::config::Splash, colors: &[[String; 4]; 2], target: Option<[i32; 4]>) -> Option<aio::serde_json::Value>
+aio_shell::splash::shown: fn shown(show: aio::config::SplashShow) -> (bool, bool)
+aio_shell::splash::size: fn size(s: &aio::config::Splash) -> Option<(u32, u32)>
+aio_shell::splash::window_size: fn window_size(s: &aio::config::Splash) -> Option<(u32, u32)>
+aio_shell::start: fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start>
+aio_shell::swap::Plan.args: Vec<String>
+aio_shell::swap::Plan.by_supervisor: bool
+aio_shell::swap::Plan.failed: std::path::PathBuf
+aio_shell::swap::Plan.first_boot: std::path::PathBuf
+aio_shell::swap::Plan.id: String
+aio_shell::swap::Plan.launch: std::path::PathBuf
+aio_shell::swap::Plan.live: std::path::PathBuf
+aio_shell::swap::Plan.new: std::path::PathBuf
+aio_shell::swap::Plan.parent: u32
+aio_shell::swap::Plan.wait: std::time::Duration
+aio_shell::swap::aside: fn aside(live: &std::path::Path) -> std::path::PathBuf
+aio_shell::swap::command: fn command(helper: &std::path::Path, plan: &Plan) -> io::Result<std::process::Command>
+aio_shell::swap::run: fn run(plan: &Plan) -> io::Result<()>
+aio_shell::switches::cdp: fn cdp(port: Option<&str>, debug: bool) -> Result<Vec<String>, String>
+aio_shell::switches::from_env: fn from_env(raw: &str) -> (Vec<String>, Vec<(String, String)>)
+aio_shell::update::Next::Boot
+aio_shell::update::Next::Exit
+aio_shell::update::aio_build: fn aio_build(id: &str, src: &std::path::Path) -> io::Result<std::path::PathBuf>
+aio_shell::update::appimage: fn appimage() -> Option<std::path::PathBuf>
+aio_shell::update::appimage_of: fn appimage_of(appimage: Option<&str>, appdir: Option<&str>, exe: &std::path::Path) -> Option<std::path::PathBuf>
+aio_shell::update::apply_now: fn apply_now(cfg: &aio::config::Config, version: &str, data: &std::path::Path, want: &str, how: aio::update::Data, step: &dyn Fn(aio::update::Step)) -> io::Result<()>
+aio_shell::update::can_go_back: fn can_go_back(id: &str, version: &str) -> bool
+aio_shell::update::cell: fn cell() -> Option<aio::Source<aio::update::Updates>>
+aio_shell::update::check: fn check(cfg: &aio::config::Config, version: &str, data: &std::path::Path) -> io::Result<aio::update::Found>
+aio_shell::update::confirm: fn confirm(id: &str, version: &str)
+aio_shell::update::contract_of: fn contract_of(binary: &std::path::Path) -> Result<up::Contract, String>
+aio_shell::update::dir: fn dir(id: &str) -> std::path::PathBuf
+aio_shell::update::from_git: fn from_git(cfg: &aio::config::Config, (remote, r): (&str, &str), d: &std::path::Path, data: &std::path::Path, version: &str, build: &dyn Fn(&std::path::Path) -> io::Result<std::path::PathBuf>) -> io::Result<String>
+aio_shell::update::go_back: fn go_back(id: &str) -> io::Result<()>
+aio_shell::update::installed: fn installed(id: &str) -> bool
+aio_shell::update::on_start: fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::AppDirs) -> io::Result<Next>
+aio_shell::update::platform: fn platform() -> String
+aio_shell::update::said: fn said(f: &aio::update::Found) -> String
+aio_shell::update::stub: fn stub(current: &str, found: aio::update::Found) -> aio::Handle<aio::update::Updates>
+aio_shell::update::supervised_start: fn supervised_start(cfg: &aio::config::Config, version: &str) -> io::Result<bool>
+aio_shell::update::unpack_for: fn unpack_for(os: &str, bundle: &[u8], into: &std::path::Path) -> io::Result<()>
+aio_shell::update::watch: fn watch(cfg: &aio::config::Config, version: &str, data: &std::path::Path)
+aio_shell::web::page: fn page(win: &crate::Window) -> String
+aio_shell::web::tabs: fn tabs(http: aio::http::Http, app: fn() -> aio::ui::View, win: crate::Window) -> aio::http::Http
+const aio_shell::desktop::ICON_BYTES: usize
+const aio_shell::desktop::ICON_FPS: u8
+const aio_shell::desktop::ICON_FRAMES: usize
+const aio_shell::fuses::OFF: [(usize, &str); 3]
+const aio_shell::fuses::SENTINEL: &[u8]
+const aio_shell::guest::PERMISSIONS: [&str; 13]
+const aio_shell::inspect::ASLR: &str
+const aio_shell::inspect::COMPONENTS: &str
+const aio_shell::inspect::DOOR: &str
+const aio_shell::inspect::HOT: &str
+const aio_shell::inspect::PATCH: &str
+const aio_shell::instance::DEV_ARGS: &str
+const aio_shell::macmove::DECLINED: &str
+const aio_shell::macmove::ENV: &str
+const aio_shell::pidlock::HEARTBEAT: std::time::Duration
+const aio_shell::pidlock::STAGE_STALE: std::time::Duration
+const aio_shell::pidlock::STALE: std::time::Duration
+const aio_shell::place::EDGE_MARGIN: i32
+const aio_shell::place::MIN_SAVED: (i32, i32)
+const aio_shell::prune::AUTO_AGE: std::time::Duration
+const aio_shell::prune::GRACE: std::time::Duration
+const aio_shell::prune::USES_PER_APP: usize
+const aio_shell::runtime::BUNDLED: &str
+const aio_shell::runtime::CHROMIUM_EXTRAS: [&str; 7]
+const aio_shell::runtime::COMPLETE: &str
+const aio_shell::runtime::KEPT_LOCALES: [&str; 2]
+const aio_shell::runtime::KEPT_LPROJ: [&str; 2]
+const aio_shell::runtime::USED: &str
+const aio_shell::runtime::VERSION: &str
+const aio_shell::splash::PAGE_JS: &str
+const aio_shell::splash::TEXT_STRIP: u32
+const aio_shell::swap::BACK: &str
+const aio_shell::swap::BOOTS: u32
+const aio_shell::swap::FLAG: &str
+const aio_shell::swap::READY: &str
+const aio_shell::swap::SWAP_FAILED: &str
+const aio_shell::update::FIRST_BOOT: std::time::Duration
+const aio_shell::update::KEEP: usize
+const aio_shell::update::RELAUNCH: &str
+const aio_shell::update::SUPERVISED: &str
+const aio_shell::update::UNSIGNED: &str
+enum aio_shell::Start
+enum aio_shell::desktop::Ask
+enum aio_shell::desktop::Icon
+enum aio_shell::desktop::Showing
+enum aio_shell::desktop::Shown
+enum aio_shell::instance::Start
+enum aio_shell::macmove::Answer
+enum aio_shell::macmove::Outcome
+enum aio_shell::oneclick::Plan
+enum aio_shell::prune::Kind
+enum aio_shell::update::Next
+impl Clone for Answer
+impl Clone for Ask
+impl Clone for Child
+impl Clone for Decision
+impl Clone for Icon
+impl Clone for IconState
+impl Clone for Item
+impl Clone for Keys
+impl Clone for Kind
+impl Clone for Launch
+impl Clone for Notice
+impl Clone for Outcome
+impl Clone for Pick
+impl Clone for Placed
+impl Clone for Plan
+impl Clone for ProcId
+impl Clone for Rect
+impl Clone for Save
+impl Clone for Saved
+impl Clone for Showing
+impl Clone for Tray
+impl Clone for Use
+impl Clone for Web
+impl Clone for Window
+impl Copy for Answer
+impl Copy for Icon
+impl Copy for Item
+impl Copy for Keys
+impl Copy for Kind
+impl Copy for Outcome
+impl Copy for Placed
+impl Copy for Rect
+impl Copy for Saved
+impl Copy for Showing
+impl Copy for Tray
+impl Copy for Web
+impl Copy for Window
+impl Debug for Answer
+impl Debug for Ask
+impl Debug for Child
+impl Debug for Decision
+impl Debug for Icon
+impl Debug for IconState
+impl Debug for Item
+impl Debug for Keys
+impl Debug for Kind
+impl Debug for Launch
+impl Debug for Notice
+impl Debug for Offer
+impl Debug for Outcome
+impl Debug for Pick
+impl Debug for Placed
+impl Debug for Plan
+impl Debug for ProcId
+impl Debug for Rect
+impl Debug for Save
+impl Debug for Saved
+impl Debug for Showing
+impl Debug for Shown
+impl Debug for Tray
+impl Debug for Use
+impl Debug for Web
+impl Default for Child
+impl Default for IconState
+impl Default for Item
+impl Default for Keys
+impl Default for Notice
+impl Default for Pick
+impl Default for ProcId
+impl Default for Rect
+impl Default for Save
+impl Default for Saved
+impl Default for Showing
+impl Default for Tray
+impl Default for Use
+impl Default for Web
+impl Default for Window
+impl Eq for Answer
+impl Eq for Icon
+impl Eq for IconState
+impl Eq for Kind
+impl Eq for Launch
+impl Eq for Offer
+impl Eq for Outcome
+impl Eq for Placed
+impl Eq for Plan
+impl Eq for ProcId
+impl Eq for Rect
+impl Eq for Saved
+impl Eq for Showing
+impl Eq for Use
+impl PartialEq for Answer
+impl PartialEq for Child
+impl PartialEq for Icon
+impl PartialEq for IconState
+impl PartialEq for Kind
+impl PartialEq for Launch
+impl PartialEq for Notice
+impl PartialEq for Offer
+impl PartialEq for Outcome
+impl PartialEq for Pick
+impl PartialEq for Placed
+impl PartialEq for Plan
+impl PartialEq for ProcId
+impl PartialEq for Rect
+impl PartialEq for Save
+impl PartialEq for Saved
+impl PartialEq for Showing
+impl PartialEq for Shown
+impl PartialEq for Use
+impl Serialize for Plan
+impl Serialize for Rect
+impl Serialize for Saved
+impl Serialize for Use
+impl StructuralPartialEq for Answer
+impl StructuralPartialEq for Child
+impl StructuralPartialEq for Icon
+impl StructuralPartialEq for IconState
+impl StructuralPartialEq for Kind
+impl StructuralPartialEq for Launch
+impl StructuralPartialEq for Notice
+impl StructuralPartialEq for Offer
+impl StructuralPartialEq for Outcome
+impl StructuralPartialEq for Pick
+impl StructuralPartialEq for Placed
+impl StructuralPartialEq for Plan
+impl StructuralPartialEq for ProcId
+impl StructuralPartialEq for Rect
+impl StructuralPartialEq for Save
+impl StructuralPartialEq for Saved
+impl StructuralPartialEq for Showing
+impl StructuralPartialEq for Shown
+impl StructuralPartialEq for Use
+impl<'de> Deserialize<'de> for Plan
+impl<'de> Deserialize<'de> for Rect
+impl<'de> Deserialize<'de> for Saved
+impl<'de> Deserialize<'de> for Use
+mod aio_shell
+mod aio_shell::delta
+mod aio_shell::desktop
+mod aio_shell::fuses
+mod aio_shell::guest
+mod aio_shell::inspect
+mod aio_shell::instance
+mod aio_shell::macmove
+mod aio_shell::oneclick
+mod aio_shell::os
+mod aio_shell::page
+mod aio_shell::pidlock
+mod aio_shell::place
+mod aio_shell::prune
+mod aio_shell::runtime
+mod aio_shell::splash
+mod aio_shell::swap
+mod aio_shell::switches
+mod aio_shell::update
+mod aio_shell::web
+struct aio_shell::Child
+struct aio_shell::Launch
+struct aio_shell::Web
+struct aio_shell::Window
+struct aio_shell::desktop::IconState
+struct aio_shell::desktop::Item
+struct aio_shell::desktop::Notice
+struct aio_shell::desktop::Tray
+struct aio_shell::guest::Child
+struct aio_shell::guest::Keys
+struct aio_shell::guest::Web
+struct aio_shell::instance::Launch
+struct aio_shell::macmove::Deps<'a>
+struct aio_shell::macmove::Facts<'a>
+struct aio_shell::macmove::Offer
+struct aio_shell::page::Pick
+struct aio_shell::page::Save
+struct aio_shell::pidlock::ProcId
+struct aio_shell::place::Placed
+struct aio_shell::place::Rect
+struct aio_shell::place::Saved
+struct aio_shell::prune::Decision
+struct aio_shell::prune::Use
+struct aio_shell::runtime::Identity<'a>
+struct aio_shell::swap::Plan
+type aio_shell::macmove::Ran = io::Result<(Option<i32>, String, String)>
+use aio_shell::Dir = aio_config::config::Dir
+use aio_shell::SplashShow = aio_config::config::SplashShow
+use aio_shell::overlay = aio::page::overlay
+use aio_shell::page::use_head = aio::head::use_head

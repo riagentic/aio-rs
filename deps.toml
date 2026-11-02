@@ -256,27 +256,26 @@ skip = [
 ]
 
 # Most crates (normal dependencies, host target) per set in `scripts/slim-metrics`.
-# kit holds the page and TestUi (dioxus-liveview), moved from aio-rs-shell: an
-# app's whole graph (aio-rs-shell) is no bigger. `aio-rs air`: the facade and
-# TestUi on air (no Dioxus). `app kit` / `app kit,net`: a
-# template app's whole release graph (its launcher's aio-rs-shell with that set).
-# aio-rs-shell's default (`dioxus`) is the kit renderer, so it holds aio-rs kit:
-# the same graph as `app kit` (an app's is no bigger). aio-rs-cli: `object`'s
+# kit (air, the facade, the page and TestUi): an app's whole graph
+# (aio-rs-shell) is no bigger. `aio-rs air`: the same set by its pre-0.2 name.
+# `app kit` / `app kit,net`: a template app's whole release graph (its
+# launcher's aio-rs-shell with that set). aio-rs-shell's default holds aio-rs
+# kit: the same graph as `app kit` (an app's is no bigger). aio-rs-cli: `object`'s
 # writer (foldhash, hashbrown) for `ax dev`'s hot-patch stub, in place of dx.
 [ceilings]
 "aio-rs core" = 49
-"aio-rs kit" = 116
+"aio-rs kit" = 50
 "aio-rs air" = 50
 "aio-rs server" = 88
 "aio-rs tls" = 105
 "aio-rs net" = 109
-"aio-rs kit,net" = 173
+"aio-rs kit,net" = 110
 "aio-rs default" = 49
-"aio-rs web (wasm)" = 114
-"aio-rs web,kit (wasm)" = 118
-"aio-rs-shell" = 141
-"aio-rs-shell dev" = 159
-"app kit" = 141
-"app kit,net" = 183
-"aio-rs-cli" = 211
-"workspace all (dev+build)" = 236
+"aio-rs web (wasm)" = 48
+"aio-rs web,kit (wasm)" = 50
+"aio-rs-shell" = 76
+"aio-rs-shell dev" = 76
+"app kit" = 76
+"app kit,net" = 120
+"aio-rs-cli" = 146
+"workspace all (dev+build)" = 166
