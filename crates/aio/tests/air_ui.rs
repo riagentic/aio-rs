@@ -350,3 +350,71 @@ fn a_saved_stylesheet_redraws_its_hole_on_air() {
     }
     assert!(TestUi::new(template).text("page").contains("box-sizing"));
 }
+
+#[test]
+fn svg_made_by_a_component_a_row_or_a_branch_is_svgs() {
+    const DOT: &str = "M0,0h1";
+    #[component]
+    fn Dot(r: u32) -> View {
+        rsx! { circle { r: "{r}" } }
+    }
+    fn app() -> View {
+        let n = signal(|| 2u32);
+        rsx! {
+            svg { "data-t": "pic", view_box: "0 0 9 9",
+                Dot { r: 1 }
+                for i in 0..n.get() { line { key: i, x1: "{i}" } }
+                if n.get() > 1 { title { "two" } }
+                // A constant alone as a value is read where it is.
+                path { d: DOT }
+            }
+            p { "data-t": "html", title { "page" } }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    let ns = ui.eval("[...document.querySelectorAll('[data-t=pic] *, [data-t=html] *')].map(e => e.localName + ':' + e.namespaceURI.split('/').pop()).join(' ')");
+    assert_eq!(ns, "circle:svg line:svg line:svg title:svg path:svg title:xhtml");
+}
+
+#[test]
+fn style_attributes_set_css_properties() {
+    fn app() -> View {
+        let n = signal(|| 2u32);
+        let wide = signal(|| true);
+        rsx! {
+            div { "data-t": "box", style: "color: red", display: "flex", gap: "{n}px", min_width: wide.get().then_some("10px"),
+                button { "data-t": "narrow", onclick: move |_| wide.set(false), "narrow" }
+            }
+            img { "data-t": "img", width: "3" }
+            svg { "data-t": "svg", width: "4" }
+            span { "data-t": "quoted", "display": "x" }
+            // A string after the properties keeps them (the viewer's backdrop).
+            div { "data-t": "over", position: "fixed", color: "blue", style: "inset: 0; color: red; pointer-events: none" }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    assert_eq!(
+        ui.eval(
+            "(s => s.position + ' ' + s.top + ' ' + s.color)(getComputedStyle(document.querySelector('[data-t=over]')))"
+        ),
+        "fixed 0px rgb(255, 0, 0)"
+    );
+    let read = "[...document.querySelectorAll('[data-t=box], [data-t=img], [data-t=svg], [data-t=quoted]')].map(e => (e.getAttribute('style') || '') + '|' + (e.getAttribute('width') || '') + '|' + (e.getAttribute('display') || '')).join(' / ')";
+    assert_eq!(ui.eval(read), "color: red; display: flex; gap: 2px; min-width: 10px;|| / |3| / |4| / ||x");
+    ui.click("narrow");
+    assert_eq!(
+        ui.eval("document.querySelector('[data-t=box]').getAttribute('style')"),
+        "color: red; display: flex; gap: 2px;"
+    );
+}
+
+#[test]
+fn html_reads_what_the_page_shows_without_airs_anchors() {
+    fn app() -> View {
+        let who = signal(|| "Alice".to_string());
+        let shown = signal(|| true);
+        rsx! { p { "Remove " b { "{who}" } " from your address book?" if shown.get() { i { "!" } } } }
+    }
+    let ui = TestUi::new(app);
+    assert!(ui.html().contains("<p>Remove <b>Alice</b> from your address book?<i>!</i></p>"), "{}", ui.html());
+}

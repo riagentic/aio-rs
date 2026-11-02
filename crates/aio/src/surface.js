@@ -322,7 +322,7 @@
   }
   // What the app mounted, then what it put on <body> itself (a tooltip,
   // a portal; not the page's scripts or the dev overlay), without Dioxus's
-  // ids, each field as it is now (Dioxus sets values and checks as
+  // ids or air's anchors, each field as it is now (Dioxus sets values and checks as
   // properties, which HTML leaves out).
   if (op === "html") {
     const main = document.getElementById("main");
@@ -336,6 +336,10 @@
         else if (el.localName === "textarea") c.textContent = el.value;
         else if (el.type !== "password" && el.type !== "file") c.setAttribute("value", el.value);
       });
+      // air's anchors (an empty comment where a hole's content goes) are no content.
+      const anchors = document.createTreeWalker(copy, NodeFilter.SHOW_COMMENT), empty = [];
+      while (anchors.nextNode()) if (anchors.currentNode.data === "") empty.push(anchors.currentNode);
+      empty.forEach((c) => c.remove());
       return copy;
     };
     const own = (n) => n !== main && !(n.nodeType === 1 && (["script", "style", "template"].includes(n.localName) || n.hasAttribute("data-aio-dev")));

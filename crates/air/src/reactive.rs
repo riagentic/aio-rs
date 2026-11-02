@@ -215,8 +215,29 @@ fn push_frame(f: Option<Rc<Frame>>) -> PopFrame {
     PopFrame
 }
 
-/// Dispose `k` and all it owns: their cleanups run, their slots are freed.
+/// The cleanups of `k` and all it owns, taken, in the order they run.
+fn take_cleanups(k: Key) -> Vec<Box<dyn FnOnce()>> {
+    let mut out = rt(|rt| {
+        let (mut stack, mut out) = (vec![k], vec![]);
+        while let Some(k) = stack.pop() {
+            let Some(n) = rt.node_mut(k) else { continue };
+            stack.extend(n.owned.iter().copied());
+            if let Some(e) = &n.extra {
+                stack.extend(e.kept.iter().copied());
+            }
+            out.append(&mut n.cleanups);
+        }
+        out
+    });
+    out.reverse();
+    out
+}
+
+/// Dispose `k` and all it owns: their cleanups run (while what they own is
+/// still there: a cleanup reads its view's signals, as Solid's and Dioxus's
+/// do), then their slots are freed.
 pub(crate) fn dispose(k: Key) {
+    take_cleanups(k).into_iter().for_each(|f| f());
     let (cleanups, trash) = rt(|rt| {
         let mut stack = vec![k];
         let (mut cleanups, mut trash) = (vec![], vec![]);
@@ -246,8 +267,11 @@ fn reset(k: Key) {
         Some(n) => (std::mem::take(&mut n.owned), std::mem::take(&mut n.cleanups)),
         None => (vec![], vec![]),
     });
+    // Every cleanup first (what it owned is still there), then the slots go.
+    let mut run: Vec<Box<dyn FnOnce()>> = owned.iter().rev().flat_map(|o| take_cleanups(*o)).collect();
+    run.extend(cleanups.into_iter().rev());
+    run.into_iter().for_each(|f| f());
     owned.into_iter().rev().for_each(dispose);
-    cleanups.into_iter().rev().for_each(|f| f());
 }
 
 fn track(s: Key) {
