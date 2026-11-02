@@ -763,77 +763,335 @@ fn tls_block(bytes: &[u8]) -> Option<u64> {
     Some(size + (vaddr.wrapping_neg().wrapping_sub(size) & (align - 1)))
 }
 
-/// Linux x86_64: object `path` of the app's crate with its thread-local
-/// accesses made the running binary's (a copy in `dir`, if it has any).
-/// rustc builds the app's crate as an executable: its own thread-locals at
-/// fixed offsets from the thread pointer (`TPOFF32`), others' through the
-/// GOT (`GOTTPOFF`), neither of which a shared library may hold. Each is
-/// made the offset the fat binary has, as a linker relaxes initial-exec to
-/// local-exec, so the patch reads and writes the app's own thread-locals,
-/// their values kept. A thread-local the fat binary lacks: an error.
-fn relaxed_tls(path: &Path, symbols: &Symbols, dir: &Path) -> Result<Option<PathBuf>, String> {
-    use object::elf::{R_X86_64_GOTTPOFF, R_X86_64_TPOFF32, Rela64, SHT_RELA, SHT_SYMTAB};
-    use object::read::elf::{FileHeader, Rela, SectionHeader, Sym as _};
-    let fail = |e: &dyn std::fmt::Display| format!("hot-patch: {}: {e}", path.display());
-    let data = std::fs::read(path).map_err(|e| fail(&e))?;
-    let header = object::elf::FileHeader64::<object::Endianness>::parse(&*data).map_err(|e| fail(&e))?;
-    let endian = header.endian().map_err(|e| fail(&e))?;
-    let sections = header.sections(endian, &*data).map_err(|e| fail(&e))?;
-    let syms = sections.symbols(endian, &*data, SHT_SYMTAB).map_err(|e| fail(&e))?;
-    let mut out: Option<Vec<u8>> = None;
-    for rela_section in sections.iter().filter(|s| s.sh_type(endian) == SHT_RELA) {
-        let relas: &[Rela64<object::Endianness>] = rela_section.data_as_array(endian, &*data).map_err(|e| fail(&e))?;
-        let target =
-            sections.section(object::SectionIndex(rela_section.sh_info(endian) as usize)).map_err(|e| fail(&e))?;
-        let (code, table) = (target.sh_offset(endian) as usize, rela_section.sh_offset(endian) as usize);
-        for (i, r) in relas.iter().enumerate() {
-            let kind = r.r_type(endian, false);
-            if kind != R_X86_64_TPOFF32 && kind != R_X86_64_GOTTPOFF {
-                continue;
-            }
-            let sym = syms.symbol(object::SymbolIndex(r.r_sym(endian, false) as usize)).map_err(|e| fail(&e))?;
-            let name = String::from_utf8_lossy(sym.name(endian, syms.strings()).map_err(|e| fail(&e))?).into_owned();
-            let found = symbols.table.get(&name).filter(|s| s.kind == SymbolKind::Tls && !s.undefined);
-            let (Some(found), Some(block)) = (found, symbols.tls_block) else {
-                return Err(format!("hot-patch: thread-local {name} is new (the running binary has none): rebuild"));
-            };
-            let at = code + r.r_offset(endian) as usize;
-            let bytes = out.get_or_insert_with(|| data.clone());
-            if kind == R_X86_64_GOTTPOFF {
-                // `mov x@gottpoff(%rip), %reg` → `mov $off, %reg`;
-                // `add x@gottpoff(%rip), %reg` → `add $off, %reg`.
-                let (rex, op, modrm) =
-                    (bytes.get(at.wrapping_sub(3)), bytes.get(at.wrapping_sub(2)), bytes.get(at.wrapping_sub(1)));
-                let (Some(&rex), Some(&op), Some(&modrm)) = (rex, op, modrm) else {
-                    return Err(fail(&"GOTTPOFF at the start"));
-                };
-                if rex & 0xf8 != 0x48 || modrm & 0xc7 != 0x05 || (op != 0x8b && op != 0x03) {
-                    return Err(fail(&format!(
-                        "thread-local {name}: an access ax can't relax ({rex:#x} {op:#x} {modrm:#x})"
-                    )));
-                }
-                let reg = (modrm >> 3) & 7;
-                bytes[at - 3] = 0x48 | ((rex >> 2) & 1);
-                bytes[at - 2] = if op == 0x8b { 0xc7 } else { 0x81 };
-                bytes[at - 1] = 0xc0 | reg;
-            }
-            // The relocation's own value (`S + A - TP`); GOTTPOFF's addend
-            // has the `-4` of a rip-relative operand, taken back.
-            let addend = r.r_addend(endian) + if kind == R_X86_64_GOTTPOFF { 4 } else { 0 };
-            let value = i32::try_from(found.address as i64 - block as i64 + addend)
-                .map_err(|_| fail(&format!("thread-local {name}: offset out of range")))?;
-            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-            // The relocation itself: R_X86_64_NONE, its symbol kept.
-            let info = table + i * std::mem::size_of::<Rela64<object::Endianness>>() + 8;
-            let sym_bits = r.r_info(endian, false) & !0xffff_ffff;
-            bytes[info..info + 8].copy_from_slice(&sym_bits.to_le_bytes());
+/// A patched object rewritten for the patch link, when this platform can
+/// ([`rewrite_object`]); nothing to do elsewhere, the object stays as it is.
+fn maybe_rewrite(path: &Path, symbols: &Symbols, dir: &Path) -> Result<Option<PathBuf>, String> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        rewrite_object(path, symbols, dir)
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        let _ = (path, symbols, dir);
+        Ok(None)
+    }
+}
+
+/// The `.o` members of an archive (an rlib), by name and bytes.
+fn members(rlib: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let fail = |e: &dyn std::fmt::Display| format!("hot-patch: {}: {e}", rlib.display());
+    let data = std::fs::read(rlib).map_err(|e| fail(&e))?;
+    let archive = object::read::archive::ArchiveFile::parse(&*data).map_err(|e| fail(&e))?;
+    let mut out = vec![];
+    for member in archive.members() {
+        let member = member.map_err(|e| fail(&e))?;
+        let name = String::from_utf8_lossy(member.name()).replace(['/', '\\'], "_");
+        if name.ends_with(".o") {
+            out.push((name, member.data(&*data).map_err(|e| fail(&e))?.to_vec()));
         }
     }
-    let Some(bytes) = out else { return Ok(None) };
+    Ok(out)
+}
+
+/// Linux x86_64: a patched object (the app crate's, a replayed library's)
+/// rewritten so it uses the running fat binary's copy of each thread-local
+/// and static it shares, not a fresh one; a copy in `dir`, or `None` when
+/// nothing needed rewriting.
+///
+/// rustc builds these crates as an executable, so a static or thread-local
+/// is reached by a form a shared library can't hold:
+/// - thread-locals: at a fixed offset from the thread pointer (`TPOFF32`),
+///   or through the GOT (`GOTTPOFF`). Each is rewritten to the offset the
+///   fat binary gives it, as a linker relaxes initial-exec to local-exec,
+///   so the patch reads and writes the app's own thread-local. A new one
+///   (not in the fat binary): an error, for a rebuild.
+/// - statics: taken by address with `lea reg, [rip+static]` against the
+///   static's own section. A static the fat binary also has is redirected
+///   to the fat binary's copy so state is kept across a patch: the `lea`
+///   becomes `mov reg, [rip+GOT]` and the relocation a `GOTPCREL` against a
+///   new undefined global of the static's name, which the stub defines at
+///   the fat binary's aslr-adjusted address. A static only the patch has
+///   (not in the fat binary) keeps its fresh copy. Defined globals the fat
+///   binary shares are made undefined so the stub's copy wins, not a
+///   duplicate definition.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn rewrite_object(path: &Path, symbols: &Symbols, dir: &Path) -> Result<Option<PathBuf>, String> {
+    use object::elf::{
+        R_X86_64_GOTPCREL, R_X86_64_GOTPCRELX, R_X86_64_GOTTPOFF, R_X86_64_PC32, R_X86_64_REX_GOTPCRELX,
+        R_X86_64_TPOFF32, SHN_UNDEF, SHT_RELA, SHT_SYMTAB, STB_GLOBAL, STT_SECTION,
+    };
+    let fail = |e: &dyn std::fmt::Display| format!("hot-patch: {}: {e}", path.display());
+    let orig = std::fs::read(path).map_err(|e| fail(&e))?;
+    if orig.len() < 64 || orig[..4] != *b"\x7fELF" {
+        return Ok(None);
+    }
+    let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+    let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let u64_at = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let cstr = |b: &[u8], o: usize| {
+        let end = b[o..].iter().position(|&c| c == 0).map_or(b.len(), |n| o + n);
+        String::from_utf8_lossy(&b[o..end]).into_owned()
+    };
+
+    let (shoff, shentsize, shnum, shstrndx) = (
+        u64_at(&orig, 40) as usize,
+        u16_at(&orig, 58) as usize,
+        u16_at(&orig, 60) as usize,
+        u16_at(&orig, 62) as usize,
+    );
+    let sh = |k: usize| shoff + k * shentsize;
+    let sh_name = |k: usize| u32_at(&orig, sh(k)) as usize;
+    let sh_type = |k: usize| u32_at(&orig, sh(k) + 4);
+    let sh_offset = |k: usize| u64_at(&orig, sh(k) + 24) as usize;
+    let sh_size = |k: usize| u64_at(&orig, sh(k) + 32) as usize;
+    let sh_link = |k: usize| u32_at(&orig, sh(k) + 40) as usize;
+    let shstr = sh_offset(shstrndx);
+    let section_name = |k: usize| cstr(&orig, shstr + sh_name(k));
+
+    let Some(symtab) = (0..shnum).find(|&k| sh_type(k) == SHT_SYMTAB) else { return Ok(None) };
+    let strtab = sh_link(symtab);
+    let (symoff, symsize, stroff, strsize) = (sh_offset(symtab), sh_size(symtab), sh_offset(strtab), sh_size(strtab));
+    let sym_count = symsize / 24;
+    let sym = |k: usize| symoff + k * 24;
+    let sym_name = |k: usize| cstr(&orig, stroff + u32_at(&orig, sym(k)) as usize);
+    let sym_bind = |k: usize| orig[sym(k) + 4] >> 4;
+    let sym_type = |k: usize| orig[sym(k) + 4] & 0xf;
+    let sym_shndx = |k: usize| u16_at(&orig, sym(k) + 6);
+    let defined = |k: usize| sym_shndx(k) != SHN_UNDEF && sym_shndx(k) < 0xff00;
+
+    // A section symbol's static (its own `.data`/`.bss`/`.rodata` section),
+    // or a symbol's own name: the name to match against the fat binary.
+    let static_of = |section: &str| -> Option<String> {
+        for p in [".data.rel.ro.", ".data.", ".bss.", ".rodata."] {
+            if let Some(name) = section.strip_prefix(p) {
+                return Some(name.to_string());
+            }
+        }
+        None
+    };
+    let is_fat_data = |name: &str| {
+        symbols
+            .table
+            .get(name)
+            .is_some_and(|s| !s.undefined && matches!(s.kind, SymbolKind::Data | SymbolKind::Unknown))
+    };
+
+    let mut d = orig.clone();
+    let mut new_symtab = orig[symoff..symoff + symsize].to_vec();
+    let mut appended: Vec<String> = vec![];
+    let mut und_index: HashMap<String, u32> = HashMap::new();
+    let mut sym_changed = false;
+    // Make symbol `k` undefined in the new symbol table (section UND, no
+    // value or size): the stub's copy is used, not this fresh definition.
+    let make_undef = |table: &mut [u8], k: usize| {
+        let e = k * 24;
+        table[e + 6..e + 8].copy_from_slice(&0u16.to_le_bytes());
+        table[e + 8..e + 16].copy_from_slice(&0u64.to_le_bytes());
+        table[e + 16..e + 24].copy_from_slice(&0u64.to_le_bytes());
+    };
+    // Globals by name, to reuse (made undefined) rather than append a second.
+    let mut globals: HashMap<String, usize> = HashMap::new();
+    for k in 1..sym_count {
+        if sym_bind(k) == STB_GLOBAL {
+            globals.entry(sym_name(k)).or_insert(k);
+        }
+    }
+    // The fat static a relocation reaches: its own section's (a section
+    // symbol) or the symbol's own name, when the fat binary shares it.
+    let static_name = |symidx: usize| -> Option<String> {
+        let name = if sym_type(symidx) == STT_SECTION {
+            static_of(&section_name(sym_shndx(symidx) as usize))?
+        } else {
+            sym_name(symidx)
+        };
+        is_fat_data(&name).then_some(name)
+    };
+    // A `lea reg, [rip+x]` (REX.W, opcode 8d, rip-relative): a static taken
+    // by address, which must use the fat binary's copy; anything else at a
+    // relocation is a by-value read, fine from a fresh copy.
+    let is_lea = |at: usize| orig[at - 3] & 0xf8 == 0x48 && orig[at - 2] == 0x8d && orig[at - 1] & 0xc7 == 0x05;
+
+    // Classify every static the code reaches: taken by address (redirect to
+    // the fat binary) or read by value (leave its fresh, identical copy). A
+    // static reached both ways can't be done in place: a rebuild.
+    let mut by_address: HashSet<String> = HashSet::new();
+    let mut by_value: HashSet<String> = HashSet::new();
+    for relsec in (0..shnum).filter(|&k| sh_type(k) == SHT_RELA) {
+        if !section_name(sh_link_info(&orig, sh(relsec))).starts_with(".text") {
+            continue;
+        }
+        let (code, table, count) =
+            (sh_offset(sh_link_info(&orig, sh(relsec))), sh_offset(relsec), sh_size(relsec) / 24);
+        for i in 0..count {
+            let r = table + i * 24;
+            let r_info = u64_at(&orig, r + 8);
+            let (kind, symidx) = ((r_info & 0xffff_ffff) as u32, (r_info >> 32) as usize);
+            let at = code + u64_at(&orig, r) as usize;
+            if kind == R_X86_64_PC32 {
+                if let Some(name) = static_name(symidx) {
+                    if is_lea(at) { &mut by_address } else { &mut by_value }.insert(name);
+                }
+            } else if matches!(kind, R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX)
+                && defined(symidx)
+                && is_fat_data(&sym_name(symidx))
+            {
+                by_address.insert(sym_name(symidx));
+            }
+        }
+    }
+    if let Some(name) = by_address.intersection(&by_value).next() {
+        return Err(fail(&format!(
+            "static {name}: taken by address and read by value, which ax can't redirect: rebuild"
+        )));
+    }
+
+    // The index of an undefined global of `name`: an existing global (made
+    // undefined) or a freshly appended one.
+    let mut undef_global = |name: &str, new_symtab: &mut Vec<u8>, sym_changed: &mut bool| -> u32 {
+        if let Some(&i) = und_index.get(name) {
+            return i;
+        }
+        let idx = if let Some(&k) = globals.get(name) {
+            make_undef(new_symtab, k);
+            *sym_changed = true;
+            k as u32
+        } else {
+            let i = sym_count + appended.len();
+            appended.push(name.to_string());
+            i as u32
+        };
+        und_index.insert(name.to_string(), idx);
+        idx
+    };
+
+    for relsec in (0..shnum).filter(|&k| sh_type(k) == SHT_RELA) {
+        let target = sh_link_info(&orig, sh(relsec));
+        let in_text = section_name(target).starts_with(".text");
+        let (code, table, count) = (sh_offset(target), sh_offset(relsec), sh_size(relsec) / 24);
+        for i in 0..count {
+            let r = table + i * 24;
+            let (r_offset, r_info, r_addend) = (
+                u64_at(&orig, r) as usize,
+                u64_at(&orig, r + 8),
+                i64::from_le_bytes(orig[r + 16..r + 24].try_into().unwrap()),
+            );
+            let (kind, symidx) = ((r_info & 0xffff_ffff) as u32, (r_info >> 32) as usize);
+            let at = code + r_offset;
+
+            if kind == R_X86_64_TPOFF32 || kind == R_X86_64_GOTTPOFF {
+                let name = sym_name(symidx);
+                let found = symbols.table.get(&name).filter(|s| s.kind == SymbolKind::Tls && !s.undefined);
+                let (Some(found), Some(block)) = (found, symbols.tls_block) else {
+                    return Err(format!(
+                        "hot-patch: thread-local {name} is new (the running binary has none): rebuild"
+                    ));
+                };
+                if kind == R_X86_64_GOTTPOFF {
+                    // `mov x@gottpoff(%rip), %reg` → `mov $off, %reg`;
+                    // `add x@gottpoff(%rip), %reg` → `add $off, %reg`.
+                    let (rex, op, modrm) = (d[at - 3], d[at - 2], d[at - 1]);
+                    if rex & 0xf8 != 0x48 || modrm & 0xc7 != 0x05 || (op != 0x8b && op != 0x03) {
+                        return Err(fail(&format!(
+                            "thread-local {name}: an access ax can't relax ({rex:#x} {op:#x} {modrm:#x})"
+                        )));
+                    }
+                    let reg = (modrm >> 3) & 7;
+                    d[at - 3] = 0x48 | ((rex >> 2) & 1);
+                    d[at - 2] = if op == 0x8b { 0xc7 } else { 0x81 };
+                    d[at - 1] = 0xc0 | reg;
+                }
+                // The value `S + A - TP`; GOTTPOFF's addend takes back the
+                // `-4` of a rip-relative operand.
+                let addend = r_addend + if kind == R_X86_64_GOTTPOFF { 4 } else { 0 };
+                let value = i32::try_from(found.address as i64 - block as i64 + addend)
+                    .map_err(|_| fail(&format!("thread-local {name}: offset out of range")))?;
+                d[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                // The relocation becomes R_X86_64_NONE, its symbol kept.
+                d[r + 8..r + 16].copy_from_slice(&(r_info & !0xffff_ffff).to_le_bytes());
+                continue;
+            }
+
+            if !in_text {
+                continue;
+            }
+
+            // A static taken by address with `lea reg, [rip+static]` (against
+            // its own section or its symbol): redirected to the fat binary's
+            // copy through the GOT, so its state is kept across the patch.
+            if kind == R_X86_64_PC32 {
+                let Some(name) = static_name(symidx).filter(|n| by_address.contains(n)) else { continue };
+                if r_addend != -4 {
+                    return Err(fail(&format!("static {name}: taken at an offset ax can't redirect: rebuild")));
+                }
+                d[at - 2] = 0x8b; // lea → mov, loading the GOT entry
+                let idx = undef_global(&name, &mut new_symtab, &mut sym_changed);
+                d[r + 8..r + 16].copy_from_slice(&(((idx as u64) << 32) | u64::from(R_X86_64_GOTPCREL)).to_le_bytes());
+                continue;
+            }
+
+            // A static reached through the GOT, defined in this object: its
+            // reference is pointed at the fat binary's copy via the stub.
+            let got = matches!(kind, R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX);
+            if got && defined(symidx) && is_fat_data(&sym_name(symidx)) {
+                let name = sym_name(symidx);
+                // rustc may have relaxed the GOT load to a `lea`; undo that so
+                // the GOT entry (the fat address) is loaded, not computed.
+                if d[at - 2] == 0x8d {
+                    d[at - 2] = 0x8b;
+                }
+                let idx = undef_global(&name, &mut new_symtab, &mut sym_changed);
+                // GOTPCREL (not the relaxable forms): the linker must keep
+                // the load, never fold it to a `lea` of the absolute address.
+                d[r + 8..r + 16].copy_from_slice(&(((idx as u64) << 32) | u64::from(R_X86_64_GOTPCREL)).to_le_bytes());
+                continue;
+            }
+        }
+    }
+
+    let changed = sym_changed || !appended.is_empty() || d != orig;
+    if !changed {
+        return Ok(None);
+    }
+
+    // Grow the symbol and string tables for the appended undefined globals,
+    // then move both to the end so no other section's bytes shift.
+    if sym_changed || !appended.is_empty() {
+        let mut new_strtab = orig[stroff..stroff + strsize].to_vec();
+        for name in &appended {
+            let st_name = new_strtab.len() as u32;
+            new_strtab.extend_from_slice(name.as_bytes());
+            new_strtab.push(0);
+            let mut entry = [0u8; 24];
+            entry[0..4].copy_from_slice(&st_name.to_le_bytes());
+            entry[4] = STB_GLOBAL << 4; // global, STT_NOTYPE, section UND
+            new_symtab.extend_from_slice(&entry);
+        }
+        while d.len() % 8 != 0 {
+            d.push(0);
+        }
+        let new_symoff = d.len();
+        d.extend_from_slice(&new_symtab);
+        let new_stroff = d.len();
+        d.extend_from_slice(&new_strtab);
+        let set = |d: &mut [u8], k: usize, off: usize, size: usize| {
+            let h = shoff + k * shentsize;
+            d[h + 24..h + 32].copy_from_slice(&(off as u64).to_le_bytes());
+            d[h + 32..h + 40].copy_from_slice(&(size as u64).to_le_bytes());
+        };
+        set(&mut d, symtab, new_symoff, new_symtab.len());
+        set(&mut d, strtab, new_stroff, new_strtab.len());
+    }
+
     std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
     let copy = dir.join(path.file_name().unwrap_or_default());
-    std::fs::write(&copy, bytes).map_err(|e| fail(&e))?;
+    std::fs::write(&copy, &d).map_err(|e| fail(&e))?;
     Ok(Some(copy))
+}
+
+/// A relocation section's target section index (its `sh_info`).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn sh_link_info(b: &[u8], header: usize) -> usize {
+    u32::from_le_bytes(b[header + 44..header + 48].try_into().unwrap()) as usize
 }
 
 /// Patch the running fat binary with the edits to `changed` (source files
@@ -861,7 +1119,7 @@ pub fn patch(fat: &mut Fat, aslr_reference: u64, changed: &[PathBuf]) -> Result<
     let compile = started.elapsed();
     let thin = thin_link(fat, &app, &link_args, aslr_reference);
     remove_temps(&link_args, &app);
-    let _ = std::fs::remove_dir_all(fat.scope.join("tls"));
+    let _ = std::fs::remove_dir_all(fat.scope.join("rewrite"));
     let _ = std::fs::remove_file(fat.scope.join("stub.o"));
     // rustc's output, the empty object: a stale file of that name confuses
     // the dynamic loader on a later patch (dx's finding).
@@ -883,20 +1141,33 @@ fn thin_link(
     aslr_reference: u64,
 ) -> Result<(PathBuf, Duration, Duration), String> {
     let at = Instant::now();
+    let work = fat.scope.join("rewrite");
+    let _ = std::fs::remove_dir_all(&work);
     let mut objects = vec![];
     for o in link_args.iter().filter(|a| a.ends_with(".rcgu.o")).map(PathBuf::from) {
-        let relaxed = match (MACHO, std::env::consts::ARCH) {
-            (false, "x86_64") => relaxed_tls(&o, &fat.symbols, &fat.scope.join("tls"))?,
-            _ => None,
-        };
-        objects.push(relaxed.unwrap_or(o));
+        let rewritten = maybe_rewrite(&o, &fat.symbols, &work)?;
+        objects.push(rewritten.unwrap_or(o));
     }
     objects.sort();
     let wanted: HashMap<String, PathBuf> =
         fat.modified.iter().filter_map(|k| Some((fat.crates[k].lib_stem(), fat.crates[k].rlib()?))).collect();
-    // The libraries in the fat link's order.
+    // The replayed libraries in the fat link's order. Their fresh objects
+    // are rewritten too (statics redirected) where the platform can, else
+    // the whole rlib goes to the linker as the fat build's did.
     let linked = link_args.iter().filter(|a| a.ends_with(".rlib")).filter_map(|a| Path::new(a).file_stem()?.to_str());
-    objects.extend(linked.filter_map(|s| wanted.get(s).cloned()));
+    for rlib in linked.filter_map(|s| wanted.get(s)) {
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            let into = work.join("libs");
+            std::fs::create_dir_all(&into).map_err(|e| format!("hot-patch: {}: {e}", into.display()))?;
+            for (name, bytes) in members(rlib)? {
+                let o = into.join(name);
+                std::fs::write(&o, bytes).map_err(|e| format!("hot-patch: {}: {e}", o.display()))?;
+                objects.push(maybe_rewrite(&o, &fat.symbols, &into)?.unwrap_or(o));
+            }
+        } else {
+            objects.push(rlib.clone());
+        }
+    }
     let stub = fat.scope.join("stub.o");
     let bytes = stub_object(&fat.symbols, &objects, aslr_reference)?;
     std::fs::write(&stub, bytes).map_err(|e| format!("hot-patch: {}: {e}", stub.display()))?;
@@ -1132,6 +1403,16 @@ fn stub_object(symbols: &Symbols, objects: &[PathBuf], aslr_reference: u64) -> R
                 obj.add_symbol_data(id, tls, &init, size.clamp(1, 8).next_power_of_two());
             }
             kind => {
+                // The stub defines these globally (the patch references them
+                // undefined), so a binding copied from the fat binary's own
+                // symbol — a local static's is local — would place a local
+                // among globals; force global binding, keep the visibility.
+                let flags = match sym.flags {
+                    SymbolFlags::Elf { st_info, st_other } => {
+                        SymbolFlags::Elf { st_info: (object::elf::STB_GLOBAL << 4) | (st_info & 0xf), st_other }
+                    }
+                    other => other,
+                };
                 obj.add_symbol(Symbol {
                     name: bare,
                     value: at,
@@ -1141,7 +1422,7 @@ fn stub_object(symbols: &Symbols, objects: &[PathBuf], aslr_reference: u64) -> R
                     kind: if kind == SymbolKind::Unknown { SymbolKind::Data } else { kind },
                     weak: sym.weak,
                     section: SymbolSection::Absolute,
-                    flags: sym.flags,
+                    flags,
                 });
             }
         }
