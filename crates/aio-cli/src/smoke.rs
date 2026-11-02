@@ -1010,14 +1010,12 @@ while :; do sleep 0.1; done"#,
         record(&store, &at(Path::new("/opt/notes/notes"), Some(win("notes")))).unwrap();
         record(&store, &at(&t.path().join("aio-smoke-notes-70/x"), None)).unwrap();
         forget_starts(&store, &sb);
-        let left: Vec<String> = uses(&store).unwrap().into_iter().map(|(_, u, _)| u.unwrap().exe).collect();
-        let mut left = left.iter().map(|e| e.trim_start_matches(&*t.path().to_string_lossy())).collect::<Vec<_>>();
+        let mut left: Vec<PathBuf> =
+            uses(&store).unwrap().into_iter().map(|(_, u, _)| PathBuf::from(u.unwrap().exe)).collect();
         left.sort();
-        assert_eq!(
-            left,
-            ["/aio-smoke-notes-70/x", "/opt/notes/notes"],
-            "the installed app's and another sandbox's stay"
-        );
+        let mut want = vec![t.path().join("aio-smoke-notes-70/x"), PathBuf::from("/opt/notes/notes")];
+        want.sort();
+        assert_eq!(left, want, "the installed app's and another sandbox's stay");
         assert!(Path::new(&win("notes")).is_dir(), "a window another record names stays");
         assert!(!Path::new(&win("mine")).exists(), "the smoke's own window goes");
         forget_starts(&t.path().join("none"), &sb);
