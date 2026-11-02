@@ -640,6 +640,8 @@ version may break things.
 - A synced client's call the server refused stays refused when it is sent
   again (its answer went with a cut link): it was applied on the later
   state its client was never told of.
+- `TestUi::html` on air leaves out air's anchors (the empty comments where
+  a hole's content goes), so a test reads the markup a person sees.
 - air: Dioxus's style attributes (`display: "flex"`, `align_items`,
   `min_width`, …, dioxus-html's list) set their CSS property on an HTML
   element, as on Dioxus; they were attributes the page ignored.

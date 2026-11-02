@@ -399,3 +399,14 @@ fn style_attributes_set_css_properties() {
         "color: red; display: flex; gap: 2px;"
     );
 }
+
+#[test]
+fn html_reads_what_the_page_shows_without_airs_anchors() {
+    fn app() -> View {
+        let who = signal(|| "Alice".to_string());
+        let shown = signal(|| true);
+        rsx! { p { "Remove " b { "{who}" } " from your address book?" if shown.get() { i { "!" } } } }
+    }
+    let ui = TestUi::new(app);
+    assert!(ui.html().contains("<p>Remove <b>Alice</b> from your address book?<i>!</i></p>"), "{}", ui.html());
+}
