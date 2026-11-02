@@ -9,6 +9,13 @@
 //! A diff3, not a sequence CRDT: edits to different parts both survive; two
 //! edits of the same part are a conflict, the later one wins and it is said
 //! (`Merged::conflict`), never a silent loss or a mangled mix.
+//!
+//! A synced copy shows its waiting calls replayed on the server's state.
+//! Where a server change meets one of them and the two disagree, the copy
+//! says so ([`conflicts`], aio's `onConflict`). A field may be shown merged
+//! while both changed it ([`Merge`], aio's per-field view merge): what the
+//! server keeps is still what its methods make.
+use serde_json::Value;
 
 /// Sides longer than this (in tokens), or a diff table bigger than
 /// [`MAX_CELLS`], aren't diffed: the later edit wins, as a conflict.
@@ -141,9 +148,200 @@ pub fn text3(base: &str, mine: &str, theirs: &str) -> Merged {
     Merged { text: out, conflict }
 }
 
+/// How a copy shows a field its own waiting calls and the server both
+/// changed (aio's `sync.merge`), until the server's answer comes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Merge {
+    /// Prose: both edits, by [`text3`] (aio's `text`); one part both
+    /// changed shows the copy's.
+    Text,
+    /// A number: both changes added (aio's `counter`).
+    Counter,
+    /// A list kept as a set: what either side added stays, what the copy
+    /// took out goes (aio's `set-add`). Items are the same by this key of
+    /// theirs (aio's `identity`), or `None`: whole.
+    SetAdd(Option<String>),
+}
+
+/// A server change that met a change of the copy's own still waiting, the
+/// two different (aio's `onConflict`). What the copy shows next is its
+/// calls replayed on the server's value (or the field's [`Merge`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conflict {
+    /// Where: `notes.3.title`.
+    pub field: String,
+    /// What the copy showed.
+    pub local: Value,
+    /// What the server has.
+    pub remote: Value,
+}
+
+fn at<'a>(v: &'a Value, path: &[crate::patch::Step]) -> Option<&'a Value> {
+    path.iter().try_fold(v, |v, s| match s {
+        crate::patch::Step::Key(k) => v.get(k),
+        crate::patch::Step::Index(i) => v.get(i),
+    })
+}
+
+/// Where the server's change (`base` → `remote`, its views) met the copy's
+/// own (`base` → `local`, what it showed), the two different; under a
+/// field with a [`Merge`], only text both edited in one part (pure).
+pub fn conflicts(base: &Value, remote: &Value, local: &Value, merges: &[(String, Merge)]) -> Vec<Conflict> {
+    use crate::patch::{Op, Step};
+    let mut out: Vec<Conflict> = Vec::new();
+    for op in crate::patch::diff(base, remote) {
+        let path = match &op {
+            // An item put in or taken out moves the rest: the list is the value.
+            Op::Insert { path, .. } => &path[..path.len() - 1],
+            Op::Del { path } if matches!(path.last(), Some(Step::Index(_))) => &path[..path.len() - 1],
+            Op::Set { path, .. } | Op::Del { path } | Op::Append { path, .. } => &path[..],
+        };
+        let field = |p: &[Step]| {
+            p.iter()
+                .map(|s| match s {
+                    Step::Key(k) => k.clone(),
+                    Step::Index(i) => i.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let how = match path.first() {
+            Some(Step::Key(k)) => merges.iter().find(|(f, _)| f == k).map(|(_, m)| m),
+            _ => None,
+        };
+        let path = if how.is_some() { &path[..1] } else { path };
+        let (b, r, l) = (at(base, path), at(remote, path), at(local, path));
+        let met = match how {
+            Some(Merge::Text) => match (b, l, r) {
+                (Some(Value::String(b)), Some(Value::String(l)), Some(Value::String(r))) => text3(b, l, r).conflict,
+                _ => l != b && l != r,
+            },
+            Some(_) => false,
+            None => l != b && l != r,
+        };
+        let field = field(path);
+        if met && !out.iter().any(|c| c.field == field) {
+            let v = |x: Option<&Value>| x.cloned().unwrap_or(Value::Null);
+            out.push(Conflict { field, local: v(l), remote: v(r) });
+        }
+    }
+    out
+}
+
+/// `field`'s value merged as `how` says, from `base` to `local` (the copy's
+/// calls) and to `remote` (the server's); `None`: they don't fit `how`
+/// (pure).
+pub fn merged(how: &Merge, base: &Value, local: &Value, remote: &Value) -> Option<Value> {
+    match (how, base, local, remote) {
+        (Merge::Text, Value::String(b), Value::String(l), Value::String(r)) => Some(text3(b, l, r).text.into()),
+        (Merge::Counter, b, l, r) if b.is_i64() && l.is_i64() && r.is_i64() => {
+            let (b, l, r) = (b.as_i64()?, l.as_i64()?, r.as_i64()?);
+            Some(r.checked_add(l.checked_sub(b)?)?.into())
+        }
+        (Merge::Counter, b, l, r) => {
+            Some(serde_json::Number::from_f64(r.as_f64()? + l.as_f64()? - b.as_f64()?)?.into())
+        }
+        (Merge::SetAdd(key), Value::Array(b), Value::Array(l), Value::Array(r)) => {
+            let id = |x: &Value| match key {
+                Some(k) => x.get(k).cloned().unwrap_or(Value::Null),
+                None => x.clone(),
+            };
+            let has = |list: &[Value], x: &Value| list.iter().any(|y| id(y) == id(x));
+            let mut out: Vec<Value> = r.iter().filter(|x| !(has(b, x) && !has(l, x))).cloned().collect();
+            for x in l.iter().filter(|x| !has(b, x)) {
+                if !has(&out, x) {
+                    out.push(x.clone());
+                }
+            }
+            Some(Value::Array(out))
+        }
+        _ => None,
+    }
+}
+
+/// `shown` (the copy's calls replayed on the server's view) with each
+/// field of `merges` that both changed shown merged instead: `base` the
+/// server's view its oldest waiting call was made on, `local` the calls
+/// replayed on it, `remote` the server's view now (pure).
+pub fn show(merges: &[(String, Merge)], base: &Value, local: &Value, remote: &Value, shown: &mut Value) {
+    for (f, how) in merges {
+        let (Some(b), Some(l), Some(r)) = (base.get(f), local.get(f), remote.get(f)) else { continue };
+        if b != r
+            && b != l
+            && let Some(v) = merged(how, b, l, r)
+            && let Some(m) = shown.as_object_mut()
+        {
+            m.insert(f.clone(), v);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_server_change_over_a_waiting_one_is_a_conflict_only_when_they_differ() {
+        let base = json!({ "title": "a", "n": 1, "tags": ["x"], "body": "one\ntwo\n" });
+        // The server changed the title; the copy too, differently: a conflict.
+        let local = json!({ "title": "mine", "n": 1, "tags": ["x"], "body": "one\ntwo\n" });
+        let remote = json!({ "title": "theirs", "n": 2, "tags": ["x"], "body": "one\ntwo\n" });
+        assert_eq!(
+            conflicts(&base, &remote, &local, &[]),
+            [Conflict { field: "title".into(), local: json!("mine"), remote: json!("theirs") }]
+        );
+        // The same change on both sides, or only one side's: none.
+        assert!(conflicts(&base, &local, &local, &[]).is_empty());
+        assert!(conflicts(&base, &remote, &base, &[]).is_empty());
+        // An item put in moves the rest: the list is where they met.
+        let (l, r) = (json!({ "tags": ["x", "l"] }), json!({ "tags": ["x", "r"] }));
+        let c = conflicts(&json!({ "tags": ["x"] }), &r, &l, &[]);
+        assert_eq!(c.iter().map(|c| c.field.as_str()).collect::<Vec<_>>(), ["tags"]);
+        // Merged fields: a counter never conflicts; text only in one part both changed.
+        let merges = [("n".to_string(), Merge::Counter), ("body".to_string(), Merge::Text)];
+        let local = json!({ "n": 5, "body": "ONE\ntwo\n" });
+        let remote = json!({ "n": 2, "body": "one\nTWO\n" });
+        let base = json!({ "n": 1, "body": "one\ntwo\n" });
+        assert!(conflicts(&base, &remote, &local, &merges).is_empty());
+        let remote = json!({ "n": 2, "body": "uno\ntwo\n" });
+        assert_eq!(conflicts(&base, &remote, &local, &merges)[0].field, "body");
+    }
+
+    #[test]
+    fn a_field_both_changed_shows_merged() {
+        let m = |how, b, l, r| merged(&how, &b, &l, &r);
+        assert_eq!(m(Merge::Counter, json!(10), json!(15), json!(18)), Some(json!(23)));
+        assert_eq!(m(Merge::Counter, json!(1.5), json!(2), json!(1)), Some(json!(1.5)));
+        assert_eq!(m(Merge::Counter, json!(i64::MAX), json!(i64::MAX), json!(i64::MAX)), Some(json!(i64::MAX)));
+        assert_eq!(m(Merge::Counter, json!("x"), json!(1), json!(2)), None);
+        assert_eq!(
+            m(Merge::Text, json!("Frist Post"), json!("First Post"), json!("Frist Post!")),
+            Some(json!("First Post!"))
+        );
+        // Add-wins: both sides' additions; what the copy took out goes, by identity.
+        let (b, l, r) = (
+            json!([{ "id": 1 }, { "id": 2 }, { "id": 3 }]),
+            json!([{ "id": 1 }, { "id": 3, "v": "edited" }, { "id": 4 }]),
+            json!([{ "id": 1 }, { "id": 2 }, { "id": 3 }, { "id": 5 }]),
+        );
+        assert_eq!(
+            m(Merge::SetAdd(Some("id".into())), b, l, r),
+            Some(json!([{ "id": 1 }, { "id": 3 }, { "id": 5 }, { "id": 4 }]))
+        );
+        assert_eq!(m(Merge::SetAdd(None), json!([1]), json!([1, 2]), json!([3])), Some(json!([3, 2])));
+        // Shown merged only where both changed it.
+        let merges = [("n".to_string(), Merge::Counter), ("t".to_string(), Merge::Text)];
+        let mut shown = json!({ "n": 15, "t": "b" });
+        show(
+            &merges,
+            &json!({ "n": 10, "t": "a" }),
+            &json!({ "n": 15, "t": "a" }),
+            &json!({ "n": 18, "t": "b" }),
+            &mut shown,
+        );
+        assert_eq!(shown, json!({ "n": 23, "t": "b" }));
+    }
 
     fn clean(text: &str) -> Merged {
         Merged { text: text.into(), conflict: false }

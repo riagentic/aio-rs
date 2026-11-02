@@ -104,16 +104,18 @@ pub const OPERATOR: bool = cfg!(debug_assertions);
 /// tools there may also call any method, list the open links, travel in
 /// time and load a state.
 pub async fn serve<T: Cell>(h: Handle<T>, l: crate::ipc::Listener, limits: Limits) -> std::io::Result<()> {
-    serve_with(h, l, limits, crate::link::no_calls(), OPERATOR).await
+    serve_with(h, l, limits, crate::link::no_calls(), OPERATOR, Default::default()).await
 }
 
-/// [`serve`], each link running `calls`' server functions.
+/// [`serve`], each link running `calls`' server functions, heard and its
+/// peers resolved by `hooks`.
 pub(crate) async fn serve_with<T: Cell>(
     h: Handle<T>,
     mut l: crate::ipc::Listener,
     limits: Limits,
     calls: Calls,
     operator: bool,
+    hooks: crate::link::Hooks,
 ) -> std::io::Result<()> {
     let gate = if operator { Gate::Door } else { Gate::Local };
     let open = Arc::new(AtomicUsize::new(0));
@@ -122,9 +124,9 @@ pub(crate) async fn serve_with<T: Cell>(
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         };
-        let (h, calls, open, gate) = (h.clone(), calls.clone(), open.clone(), gate.clone());
+        let (h, calls, open, gate, hooks) = (h.clone(), calls.clone(), open.clone(), gate.clone(), hooks.clone());
         tokio::spawn(async move {
-            if let Err(e) = link(h, s, limits, calls, gate, &open).await {
+            if let Err(e) = link(h, s, limits, calls, gate, hooks, &open).await {
                 eprintln!("[aio] door: {e}");
             }
         });
@@ -138,6 +140,7 @@ async fn link<T: Cell>(
     limits: Limits,
     calls: Calls,
     gate: Gate,
+    hooks: crate::link::Hooks,
     open: &AtomicUsize,
 ) -> Result<(), String> {
     let v = tokio::time::timeout(Duration::from_secs(15), s.read_u8())
@@ -156,7 +159,7 @@ async fn link<T: Cell>(
         _ = send(&mut f, Msg::Close(1013, why.clone())).await;
         return Err(why);
     }
-    let r = crate::link::session(h, Sock::Door(f), limits, "door".into(), gate, None, calls, None).await;
+    let r = crate::link::session(h, Sock::Door(f), limits, "door".into(), gate, None, calls, hooks, None).await;
     open.fetch_sub(1, Ordering::SeqCst);
     r
 }
@@ -209,7 +212,7 @@ mod tests {
         let l = crate::ipc::Listener::bind(&addr).unwrap();
         let h = Handle::<Vault>::memory();
         h.store(|s| s.load(&crate::By::System, serde_json::json!({ "n": 1, "secret": "key" }))).unwrap();
-        tokio::spawn(serve_with(h, l, Limits::default(), crate::link::no_calls(), operator));
+        tokio::spawn(serve_with(h, l, Limits::default(), crate::link::no_calls(), operator, Default::default()));
         let mut s = crate::ipc::connect(&addr).await.unwrap();
         tokio::io::AsyncWriteExt::write_u8(&mut s, VERSION).await.unwrap();
         let mut f = frames(s);

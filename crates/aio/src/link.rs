@@ -91,6 +91,67 @@ pub struct Presence {
 
 pub(crate) type OnLink = Arc<dyn Fn(&Presence) + Send + Sync>;
 
+/// Who another app on the door is to this one, by its id
+/// ([`crate::http::Http::resolve_peer`]); `None`: no one in particular.
+pub(crate) type Peers = Arc<dyn Fn(&str) -> Option<crate::Caller> + Send + Sync>;
+
+/// What the app hears of its links, and who a peer app is to it.
+#[derive(Clone, Default)]
+pub(crate) struct Hooks {
+    pub(crate) on_link: Option<OnLink>,
+    pub(crate) peers: Option<Peers>,
+}
+
+/// A cell served beside the app's own on `/ws` ([`crate::http::Http::cell`]):
+/// a link's hello names it.
+#[cfg(feature = "server")]
+pub(crate) trait Beside: Send + Sync {
+    fn id(&self) -> &'static str;
+    /// [`session`] on this cell, its hello read.
+    #[allow(clippy::too_many_arguments)]
+    fn session(
+        &self,
+        w: Sock,
+        limits: Limits,
+        from: String,
+        gate: Gate,
+        signed: Option<By>,
+        calls: Calls,
+        hooks: Hooks,
+        hello: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>;
+}
+
+#[cfg(feature = "server")]
+impl<U: Cell> Beside for Handle<U> {
+    fn id(&self) -> &'static str {
+        U::ID
+    }
+
+    fn session(
+        &self,
+        w: Sock,
+        limits: Limits,
+        from: String,
+        gate: Gate,
+        signed: Option<By>,
+        calls: Calls,
+        hooks: Hooks,
+        hello: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> {
+        Box::pin(session(self.clone(), w, limits, from, gate, signed, calls, hooks, Some(hello)))
+    }
+}
+
+/// The caller `f` makes of peer app `app`; a hook that panics is said and
+/// makes no one in particular.
+fn resolve(f: &Peers, app: &str) -> Option<crate::Caller> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(app))).unwrap_or_else(|_| {
+        eprintln!("[aio] sync: the resolve_peer hook panicked for app {app}; it is no one in particular");
+        None
+    })
+}
+
 /// What runs a link's server fns ([`crate::fns`]); a build without `net`
 /// has none.
 #[cfg(feature = "server")]
@@ -231,12 +292,14 @@ pub(crate) async fn send_text(w: &mut Sock, text: String) -> std::result::Result
 pub(crate) struct View {
     pub(crate) seq: u64,
     pub(crate) shown: Value,
+    /// The view's JSON size when last measured (0: not yet), for [`whole`].
+    pub(crate) size: usize,
 }
 
 impl View {
     pub(crate) fn of<T: Cell>(h: &Handle<T>, viewer: &crate::Caller) -> Self {
         let (seq, st) = h.snapshot();
-        Self { seq, shown: st.project(viewer) }
+        Self { seq, shown: st.project(viewer), size: 0 }
     }
 
     fn full(&self) -> Value {
@@ -245,7 +308,8 @@ impl View {
 
     /// The patch from what was sent to what the viewer sees now, with the
     /// digest of the view it makes; `None` if nothing they may see changed.
-    fn advance<T: Cell>(&mut self, h: &Handle<T>, viewer: &crate::Caller) -> Option<Value> {
+    /// A patch over `full_percent` of the view is the view instead.
+    fn advance<T: Cell>(&mut self, h: &Handle<T>, viewer: &crate::Caller, full_percent: u32) -> Option<Value> {
         let now = View::of(h, viewer);
         if now.seq <= self.seq {
             return None;
@@ -255,11 +319,85 @@ impl View {
             // Nothing visible changed: the client's patch chain stays as is.
             return None;
         }
-        let digest = patch::digest(&now.shown);
-        let msg = json!({ "t": "patch", "prev": self.seq, "seq": now.seq, "ops": ops, "digest": digest });
-        *self = now;
+        let mut size = self.size;
+        let whole = whole(&ops, full_percent, &mut size, || patch::json_len(&now.shown));
+        let msg = match whole {
+            true => now.full(),
+            false => {
+                let digest = patch::digest(&now.shown);
+                json!({ "t": "patch", "prev": self.seq, "seq": now.seq, "ops": ops, "digest": digest })
+            }
+        };
+        *self = View { size, ..now };
         Some(msg)
     }
+}
+
+/// A patch shorter than this always goes as a patch: the view isn't weighed.
+const WEIGH_FROM: usize = 256;
+
+/// Is the view cheaper to send than `ops` (aio's `fullStateThreshold`): the
+/// patch is over `percent` of the view's size. The view is measured
+/// (`view`) only when the patch may be that big: a patch under half that
+/// share of its size as last measured (`size`, kept here) is a patch.
+pub(crate) fn whole(ops: &[patch::Op], percent: u32, size: &mut usize, view: impl FnOnce() -> usize) -> bool {
+    if percent == 0 {
+        return true;
+    }
+    let (n, p) = (patch::json_len(&ops) as u128, u128::from(percent));
+    if n < WEIGH_FROM as u128 || (*size > 0 && n * 200 <= *size as u128 * p) {
+        return false;
+    }
+    *size = view();
+    n * 100 > *size as u128 * p
+}
+
+/// When a link's next change goes (aio's `syncIntervalMs`): the first of a
+/// burst at once, then at most one per `every`, the changes between folded
+/// into one patch; a change a person made (a user's or an agent's call)
+/// goes at once. A link that is slow to take its messages is sent only the
+/// newest view once it takes them again (backpressure: nothing queues).
+pub(crate) struct Paced {
+    every: Duration,
+    last: Option<tokio::time::Instant>,
+    due: Option<tokio::time::Instant>,
+}
+
+impl Paced {
+    pub(crate) fn new(ms: u64) -> Self {
+        Self { every: Duration::from_millis(ms), last: None, due: None }
+    }
+
+    /// A change came (`urgent`: a person's): send it now, or `false`: when
+    /// [`Self::due`] ends.
+    pub(crate) fn now(&mut self, urgent: bool) -> bool {
+        let now = tokio::time::Instant::now();
+        match self.last {
+            Some(last) if !urgent && now < last + self.every => {
+                self.due.get_or_insert(last + self.every);
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// The link is up to date as of now.
+    pub(crate) fn sent(&mut self) {
+        (self.last, self.due) = (Some(tokio::time::Instant::now()), None);
+    }
+
+    /// Ends when a held change is due; never, with none held.
+    pub(crate) async fn due(&self) {
+        match self.due {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Did a person make the event (their change skips the pacing window)?
+pub(crate) fn urgent(ev: &std::result::Result<(u64, crate::Event), RecvError>) -> bool {
+    matches!(ev, Ok((_, e)) if matches!(e.by, By::User(_) | By::Agent(_)))
 }
 
 /// Who may call through one link. A debug build's local door: its tools may
@@ -532,11 +670,17 @@ pub(crate) fn live(a: &crate::auth::Auth, token: &str) -> Option<crate::auth::Se
     a.session(token).inspect_err(|e| eprintln!("[aio] sync: {e}")).ok().flatten()
 }
 
+/// A link's first message, its hello (`None`: none came in time).
+pub(crate) async fn hello(w: &mut Sock, pulse: &mut Pulse, limits: &Limits, bytes: &mut Pace) -> Option<Value> {
+    tokio::time::timeout(Duration::from_secs(15), next_ax(w, pulse, limits.max_message, bytes)).await.ok().flatten()
+}
+
 /// One aio-rs client, until it leaves. A tool (`Live`) says `tool: true`: it
 /// keeps no copy, so another cell version is fine; on the door it may
 /// also ask for the open links. `gate`: what it may call. `signed`: the user
 /// its session proved; none: the user its hello names (a shared key proves
-/// no one in particular).
+/// no one in particular), or for a peer app the caller `hooks` make of it.
+/// `said`: its hello, when the server read it to find the cell.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session<T: Cell>(
     h: Handle<T>,
@@ -545,18 +689,17 @@ pub(crate) async fn session<T: Cell>(
     from: String,
     gate: Gate,
     signed: Option<By>,
-    #[cfg_attr(not(feature = "server"), allow(unused_variables))] calls: Calls,
-    on_link: Option<OnLink>,
+    #[cfg_attr(not(feature = "server"), allow(unused_mut, unused_variables))] mut calls: Calls,
+    hooks: Hooks,
+    said: Option<Value>,
 ) -> std::result::Result<(), String> {
     let mut pulse = Pulse::new();
     let mut pace = Pace::new(limits.calls_per_sec);
     let mut bytes = Pace::new(limits.bytes_per_sec);
-    let hello =
-        tokio::time::timeout(Duration::from_secs(15), next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes))
-            .await
-            .ok()
-            .flatten()
-            .ok_or("no hello")?;
+    let hello = match said {
+        Some(v) => v,
+        None => hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?,
+    };
     if hello["t"] != "hello" || hello["cell"] != T::ID {
         _ = send_ax(&mut w, &json!({ "t": "refused", "why": format!("this server has cell {}", T::ID) })).await;
         return Err("refused a client: wrong cell".into());
@@ -565,7 +708,21 @@ pub(crate) async fn session<T: Cell>(
     // Another app on the door ([`crate::peer`]) is a client there: what the
     // key lets in (`#[client]` methods, `visible`), never the operator's.
     let peer = matches!(gate, Gate::Door | Gate::Local) && hello["peer"] == true;
-    let gate = if peer { Gate::Key } else { gate };
+    let mut gate = if peer { Gate::Key } else { gate };
+    let mut said = hello["user"].as_str().map(|u| By::User(u.into()));
+    // A peer says its app id; the app's hook says who that is here.
+    if let (true, Some(f)) = (peer, &hooks.peers) {
+        let c = resolve(f, hello["user"].as_str().unwrap_or_default());
+        gate = match c.as_ref().and_then(|c| c.role.clone()) {
+            Some(role) => Gate::Known(role),
+            None => Gate::Key,
+        };
+        said = Some(c.as_ref().map_or_else(|| By::User("peer".into()), |c| c.by.clone()));
+        #[cfg(feature = "server")]
+        {
+            calls.known = c;
+        }
+    }
     let door = matches!(gate, Gate::Door);
     let not_here = match gate {
         Gate::Local => "a release build's door serves a client's rights: the operator's tools need a debug build",
@@ -584,7 +741,6 @@ pub(crate) async fn session<T: Cell>(
         _ = send_ax(&mut w, &json!({ "t": "refused", "why": why, "skew": true })).await;
         return Err(format!("refused a client: {why}"));
     }
-    let said = hello["user"].as_str().map(|u| By::User(u.into()));
     let viewer = match signed {
         // A client that predicts as someone else would make other ids: refused.
         Some(by) if said.as_ref().is_some_and(|s| *s != by) => {
@@ -603,7 +759,7 @@ pub(crate) async fn session<T: Cell>(
     let wire = if tool { "tool" } else { "aio-rs" };
     // What a client is sent counts for `ax cost`; a tool's look doesn't.
     // A tool (`ax call`, the local door) is no client link.
-    let _heard = Heard::new(on_link.filter(|_| !tool), &user, &from);
+    let _heard = Heard::new(hooks.on_link.filter(|_| !tool), &user, &from);
     let who = format!("{user} from {from}");
     let listed = Listed::new(Client::new(T::ID, user, wire, from));
     let meter = (!tool).then_some((T::ID, listed.0));
@@ -633,6 +789,7 @@ pub(crate) async fn session<T: Cell>(
     }
     .into();
     let mut pushes = crate::budgets::Pushes::default();
+    let mut paced = Paced::new(limits.sync_interval_ms);
     pushes.push(&first, crate::store::now_ms());
     send_view(&mut w, meter, &first).await?;
     let h = h.by(viewer.clone());
@@ -659,7 +816,7 @@ pub(crate) async fn session<T: Cell>(
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
             Some(end) = ends.recv() => {
                 while events.try_recv().is_ok() {}
-                if let Some(p) = view.advance(&h, &seer) {
+                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                     pushes.push(&p, crate::store::now_ms());
                     send_view(&mut w, meter, &p).await?;
                 }
@@ -678,20 +835,30 @@ pub(crate) async fn session<T: Cell>(
                     send_view(&mut w, meter, &view.full()).await?;
                 }
             }
+            () = paced.due() => {
+                paced.sent();
+                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
+                    pushes.push(&p, crate::store::now_ms());
+                    send_view(&mut w, meter, &p).await?;
+                }
+            }
             ev = events.recv() => match ev {
-                // A slow client just gets the newest view.
-                Ok(_) | Err(RecvError::Lagged(_)) => {
+                Err(RecvError::Closed) => return Ok(()),
+                // Held for the window, or now; a slow client just gets the newest view.
+                ev => {
                     if let Err(RecvError::Lagged(n)) = &ev
                         && let Some(c) = lock(clients()).get_mut(&listed.0)
                     {
                         c.behind += *n;
                     }
-                    if let Some(p) = view.advance(&h, &seer) {
-                        pushes.push(&p, crate::store::now_ms());
-                        send_view(&mut w, meter, &p).await?;
+                    if paced.now(urgent(&ev)) {
+                        paced.sent();
+                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
+                            pushes.push(&p, crate::store::now_ms());
+                            send_view(&mut w, meter, &p).await?;
+                        }
                     }
                 }
-                Err(RecvError::Closed) => return Ok(()),
             },
             msg = next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes) => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -747,9 +914,13 @@ pub(crate) async fn session<T: Cell>(
                             }
                             Err(e) => Err(e),
                         };
-                        // Its change first, then the reply.
+                        // Its change first, then the reply; named, so its copy
+                        // knows this change is its own (no conflict with itself).
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer) {
+                        if let Some(mut p) = view.advance(&h, &seer, limits.full_state_percent) {
+                            if msg["op"].is_string() {
+                                p["op"] = msg["op"].clone();
+                            }
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
@@ -808,7 +979,7 @@ pub(crate) async fn session<T: Cell>(
                             .await
                             .map_err(|e| e.to_string())?;
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer) {
+                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
@@ -906,5 +1077,25 @@ pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::resu
             serde_json::to_value(&st).map_err(|e| e.to_string())
         }
         _ => h.store(|s| s.shape()).map(|shape| json!({ "v": T::VERSION, "shape": shape })).map_err(|e| e.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_view_is_weighed_only_when_a_patch_may_be_its_share() {
+        let op = |n: usize| vec![patch::Op::Set { path: vec![], value: json!("x".repeat(n)) }];
+        let never = || -> usize { panic!("measured") };
+        let mut size = 0;
+        assert!(whole(&op(1), 0, &mut size, never), "0: always the view");
+        assert!(!whole(&op(10), 50, &mut size, never), "a small patch is a patch, unmeasured");
+        assert!(whole(&op(600), 50, &mut size, || 1000) && size == 1000, "over half of 1000");
+        assert!(!whole(&op(300), 50, &mut size, || 1000), "under half: measured, a patch");
+        size = 100_000;
+        assert!(!whole(&op(1000), 50, &mut size, never), "far under its share of the last size");
+        assert!(whole(&op(40_000), 50, &mut size, || 50_000), "the view shrank: measured again");
+        assert_eq!(size, 50_000);
     }
 }

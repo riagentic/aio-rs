@@ -170,7 +170,7 @@ fn shown(all: Value, subs: &Option<Vec<String>>) -> Value {
 
 /// The cell an op of [`cells`]'s diff is in.
 fn cell_of(op: &Op) -> Option<&str> {
-    let (Op::Set { path, .. } | Op::Del { path } | Op::Append { path, .. }) = op;
+    let (Op::Set { path, .. } | Op::Del { path } | Op::Insert { path, .. } | Op::Append { path, .. }) = op;
     match path.first() {
         Some(Step::Key(k)) => Some(k),
         _ => None,
@@ -192,7 +192,9 @@ fn wire_ops(ops: &[Op]) -> Value {
             Op::Set { path: p, value } => {
                 json!({ "op": "replace", "path": path(p), "value": value })
             }
+            // At an index, both splice (Immer's array ops).
             Op::Del { path: p } => json!({ "op": "remove", "path": path(p) }),
+            Op::Insert { path: p, value } => json!({ "op": "add", "path": path(p), "value": value }),
             // Protocol v3's `append` (why aio needs v3).
             Op::Append { path: p, value } => json!({ "op": "append", "path": path(p), "value": value }),
         })
@@ -207,13 +209,19 @@ async fn catch_up<T: Cell>(
     viewer: &crate::Caller,
     subs: &Option<Vec<String>>,
     pushes: &mut crate::budgets::Pushes,
+    full_percent: u32,
 ) -> Result<(), String> {
     let now = View::of(h, viewer);
     let mut ops = crate::patch::diff(&cells::<T>(&view.shown), &cells::<T>(&now.shown));
-    *view = now;
+    *view = View { size: view.size, ..now };
     ops.retain(|op| subs.as_ref().is_none_or(|s| cell_of(op).is_some_and(|c| s.iter().any(|x| x == c))));
     if !ops.is_empty() {
-        let msg = enc("patches", wire_ops(&ops));
+        // Over aio's `fullStateThreshold` of the view: the view instead.
+        let all = || shown(cells::<T>(&view.shown), subs);
+        let msg = match crate::link::whole(&ops, full_percent, &mut view.size, || crate::patch::json_len(&all())) {
+            true => json!({ "v": 2, "t": "state", "d": all(), "s": subs }),
+            false => enc("patches", wire_ops(&ops)),
+        };
         pushes.push(&msg, crate::store::now_ms());
         send_ax(w, &msg).await?;
     }
@@ -276,6 +284,7 @@ pub async fn session<T: Cell>(
     let hello = json!({ "v": VERSION, "min": MIN, "ver": crate::BUILT_BY, "maxMessageBytes": limits.max_message, "rate": limits.calls_per_sec, "cfg": false, "appId": T::ID, "user": null });
     send_ax(&mut w, &enc("proto", hello)).await?;
     let mut pushes = crate::budgets::Pushes::default();
+    let mut paced = crate::link::Paced::new(limits.sync_interval_ms);
     send_ax(&mut w, &state(&view, &subs)).await?;
     send_ax(&mut w, &enc("boot", json!({ "id": boot_id() }))).await?;
     let h = h.by(viewer.clone());
@@ -299,7 +308,7 @@ pub async fn session<T: Cell>(
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
             Some(ack) = ends.recv() => {
                 while events.try_recv().is_ok() {}
-                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
+                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                 send_ax(&mut w, &enc("ack", ack)).await?;
             }
             // Another link's op, to a link that syncs and sees its whole cell.
@@ -321,14 +330,23 @@ pub async fn session<T: Cell>(
                     send_ax(&mut w, &state(&view, &subs)).await?;
                 }
             }
+            () = paced.due() => {
+                paced.sent();
+                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
+                if tt_sub == Some(true) && travels(&seer.role) && let Ok(tt) = travel(&h, None).await {
+                    send_ax(&mut w, &tt).await?;
+                }
+            }
             ev = events.recv() => match ev {
-                Ok(_) | Err(RecvError::Lagged(_)) => {
-                    catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
+                Err(RecvError::Closed) => return Ok(()),
+                // Held for the window (`syncIntervalMs`), or now.
+                ev => if paced.now(crate::link::urgent(&ev)) {
+                    paced.sent();
+                    catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                     if tt_sub == Some(true) && travels(&seer.role) && let Ok(tt) = travel(&h, None).await {
                         send_ax(&mut w, &tt).await?;
                     }
-                }
-                Err(RecvError::Closed) => return Ok(()),
+                },
             },
             msg = next_ax(&mut w, &mut pulse, limits.max_message, &mut bytes) => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -380,7 +398,7 @@ pub async fn session<T: Cell>(
                                 let r = travel(&h, Some(ask)).await;
                                 // Its change first, then where the cell is (as an ack).
                                 while events.try_recv().is_ok() {}
-                                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
+                                catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                                 match r {
                                     Ok(tt) => send_ax(&mut w, &tt).await?,
                                     Err(e) => eprintln!("[aio] aio page: time travel {cmd:?}: {e}"),
@@ -424,7 +442,7 @@ pub async fn session<T: Cell>(
                             super::crdt::Taken::Held(f) => Some(f),
                         };
                         while events.try_recv().is_ok() {}
-                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
+                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                         if let Some(f) = said {
                             send_ax(&mut w, &f).await?;
                         }
@@ -433,7 +451,7 @@ pub async fn session<T: Cell>(
                         passed.get_or_insert_with(|| h.aio_sync().ops.subscribe());
                         let frames = super::crdt::answer(&h, &gate, &seer, link, d).await?;
                         while events.try_recv().is_ok() {}
-                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
+                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                         for f in frames {
                             send_ax(&mut w, &f).await?;
                         }
@@ -471,7 +489,7 @@ pub async fn session<T: Cell>(
                         };
                         // Its change first, then the ack (as aio).
                         while events.try_recv().is_ok() {}
-                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes).await?;
+                        catch_up(&mut w, &mut view, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                         send_ax(&mut w, &enc("ack", ack_of(cid, r, h.closing()))).await?;
                     }
                     // "x" is reserved and ignored; other kinds aren't ours to answer.
@@ -825,6 +843,11 @@ mod tests {
             wire_ops(&ops),
             json!([{ "op": "remove", "path": ["c", "b"] }, { "op": "replace", "path": ["c", "a", 1], "value": 3 }])
         );
+        let long: Vec<i32> = (0..40).collect();
+        let mut more = long.clone();
+        more.push(40);
+        let ops = crate::patch::diff(&json!({ "c": { "a": long } }), &json!({ "c": { "a": more } }));
+        assert_eq!(wire_ops(&ops), json!([{ "op": "add", "path": ["c", "a", 40], "value": 40 }]));
     }
 
     #[test]
