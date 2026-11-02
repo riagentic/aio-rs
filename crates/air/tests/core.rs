@@ -487,3 +487,86 @@ fn a_task_spawned_forever_in_an_app_ends_with_its_root() {
     assert!(ended.get(), "the app's end ended it (a next app on the thread never polls it)");
     assert_eq!(live_tasks(), live - 1);
 }
+
+struct Ends(Rc<Cell<bool>>);
+impl Drop for Ends {
+    fn drop(&mut self) {
+        self.0.set(true)
+    }
+}
+
+thread_local! {
+    static ENDED: Rc<Cell<bool>> = Rc::default();
+    static FLIP: Cell<Option<(Signal<bool>, Signal<bool>)>> = const { Cell::new(None) };
+}
+
+#[component]
+fn Saver(redraw: Signal<bool>) -> View {
+    rsx! {
+        if redraw.get() {
+            p { "data-t": "other", "drawn again" }
+        } else {
+            for n in [1u32] {
+                button {
+                    key: "{n}",
+                    "data-t": "go",
+                    onclick: move |_| {
+                        let held = Ends(ENDED.with(Rc::clone));
+                        async move {
+                            let _held = held;
+                            std::future::pending::<()>().await
+                        }
+                    },
+                    "save"
+                }
+            }
+        }
+    }
+}
+
+fn saver_app() -> View {
+    let (shown, redraw) = (signal(|| true), signal(|| false));
+    FLIP.set(Some((shown, redraw)));
+    rsx! {
+        if shown.get() {
+            Saver { redraw }
+        }
+    }
+}
+
+#[test]
+fn a_handlers_task_is_its_components_a_redrawn_branch_or_row_cancels_none_of_it() {
+    let mut p = TestPage::mount(saver_app);
+    let (shown, redraw) = FLIP.get().unwrap();
+    let live = live_tasks();
+    p.click("go");
+    assert_eq!(live_tasks(), live + 1, "the click spawned its work");
+    p.within(|| redraw.set(true));
+    assert!(p.present("other"), "the branch and the row that drew the button are gone");
+    assert!(!ENDED.with(|e| e.get()), "and the work the click started runs on (it is the component's)");
+    assert_eq!(live_tasks(), live + 1);
+    p.within(|| shown.set(false));
+    assert!(ENDED.with(|e| e.get()), "the component's end ended it");
+    assert_eq!(live_tasks(), live);
+}
+
+#[test]
+fn an_event_for_a_redrawn_element_is_dropped_and_a_dev_build_says_so_once() {
+    static HEARD: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    air::on_warn(|k, m| HEARD.lock().unwrap().push((k.into(), m.into())));
+    let mut p = TestPage::mount(saver_app);
+    let (_, redraw) = FLIP.get().unwrap();
+    let click = || air::Raw { name: "click".into(), button: Some(0), ..air::Raw::default() };
+    let late = p.aim("go", click()).encode();
+    p.within(|| redraw.set(true));
+    assert!(!p.root().event(&late), "no handler took it: its element was drawn again");
+    assert!(!p.root().event(&late));
+    let heard = HEARD.lock().unwrap().clone();
+    if cfg!(debug_assertions) {
+        assert_eq!(heard.len(), 1, "said once per event name: {heard:?}");
+        assert_eq!(heard[0].0, "ui:stale-event");
+        assert!(heard[0].1.contains("`click`") && heard[0].1.contains("dropped"), "{}", heard[0].1);
+    } else {
+        assert!(heard.is_empty(), "a release build says nothing");
+    }
+}

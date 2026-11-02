@@ -689,6 +689,12 @@ impl Frame {
         k
     }
 
+    /// The component's own owner: it lives across its body's re-runs and
+    /// ends with it (what its handlers make and spawn).
+    pub(crate) fn owner(&self) -> Owner {
+        Owner(self.keeper())
+    }
+
     /// Its hooks' state no longer ends with its hole (a hot reload keeps
     /// it for the view built again in its place).
     pub(crate) fn detach(&self) {

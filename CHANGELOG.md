@@ -707,6 +707,13 @@ version may break things.
   in the shared runtime's app list (`apps/*.json`), on Linux, macOS and
   Windows, and on macOS the window bundle no other app names: a smoke
   leaves nothing behind for `ax prune` to show.
+- **On air, a handler's work is its component's** (Dioxus's scope): a task
+  an `async` click handler spawned ended when the `if` branch or `for`
+  row that drew its button was drawn again; it now ends with the
+  component. An event the page sent for an element drawn again before it
+  arrived is still dropped (AIR never runs a removed element's handler);
+  a dev build says so once per event name on the diagnostic bus
+  (`ui:stale-event`, `air::on_warn`). `TestPage::aim` makes such an event.
 - air: every `exec` of one batch runs (an island's update, a second
   island's mount): on a page without `__aioRun` all but the first found
   the slot the first had freed, and did nothing.

@@ -275,6 +275,7 @@ air::longest_increasing: fn longest_increasing(seq: &[isize]) -> Vec<bool>
 air::memo: fn memo<T: PartialEq + 'static>(f: impl FnMut() -> T + 'static) -> Memo<T>
 air::on_cleanup: fn on_cleanup(f: impl FnOnce() + 'static)
 air::on_wake: fn on_wake(f: impl Fn() + Send + Sync + 'static)
+air::on_warn: fn on_warn(f: impl Fn(&str, &str) + Send + Sync + 'static)
 air::once: fn once<T: Clone + 'static>(f: impl FnOnce() -> T) -> T
 air::provide: fn provide<T: Clone + 'static>(f: impl FnOnce() -> T) -> T
 air::provide_now: fn provide_now<T: Clone + 'static>(v: T) -> T
@@ -293,6 +294,7 @@ air::task: fn task<F: Future + 'static>(f: impl FnOnce() -> F + 'static)
 air::testing::TestPage.bytes: usize
 air::testing::TestPage.frames: usize
 air::testing::TestPage.scripts: Vec<(u32, String)>
+air::testing::TestPage::aim: fn aim(&self, t: &str, e: Raw) -> Raw
 air::testing::TestPage::answer: fn answer(&mut self, id: u32, kind: u8, json: &str)
 air::testing::TestPage::attr: fn attr(&self, t: &str, name: &str) -> Option<String>
 air::testing::TestPage::check: fn check(&mut self, t: &str, on: bool)
