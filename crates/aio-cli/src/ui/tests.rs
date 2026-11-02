@@ -355,8 +355,10 @@ fn window(dir: &Path, dark: bool) -> (TestUi, Arc<Mutex<Vec<String>>>) {
     (if dark { m.dark() } else { m }.app(mounted), said)
 }
 
+/// Wait until `t` shows `has`: a hang guard, not a measure (a loaded CI
+/// runner took past 5 s for a tab's first poll and its draw).
 fn shows(ui: &mut TestUi, t: &str, has: &str) {
-    for _ in 0..500 {
+    for _ in 0..3000 {
         if ui.present(t) && ui.text(t).contains(has) {
             return;
         }
