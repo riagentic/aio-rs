@@ -76,6 +76,14 @@ impl std::error::Error for PatchError {}
 static TABLE: AtomicPtr<JumpTable> = AtomicPtr::new(std::ptr::null_mut());
 static HANDLERS: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>> = Mutex::new(Vec::new());
 
+/// Is `F` a function pointer (`fn(..) -> ..`, maybe `unsafe` or `extern`),
+/// not a closure or a function item?
+fn is_fn_pointer<F>() -> bool {
+    let name = std::any::type_name::<F>();
+    size_of::<F>() == size_of::<fn()>()
+        && (name.starts_with("fn(") || name.starts_with("unsafe ") || name.starts_with("extern "))
+}
+
 /// Called after each patch is applied (the views build again on it).
 pub fn register_handler(handler: Arc<dyn Fn() + Send + Sync + 'static>) {
     HANDLERS.lock().unwrap_or_else(|e| e.into_inner()).push(handler);
@@ -141,9 +149,9 @@ impl<A, M, F: HotFunction<A, M>> HotFn<A, M, F> {
         if !cfg!(debug_assertions) {
             return self.inner.call_it(args);
         }
-        // A function pointer or item (pointer-sized or a ZST item read as
-        // its `call_it`): the table has its address.
-        if size_of::<F>() == size_of::<fn()>() {
+        // A function pointer: the table has its address. (A closure that
+        // holds one pointer is pointer-sized too: not one.)
+        if is_fn_pointer::<F>() {
             // SAFETY: `F` is pointer-sized: a function pointer (see `call_as_ptr`).
             return unsafe { self.inner.call_as_ptr(args) };
         }
@@ -332,6 +340,18 @@ mod tests {
         assert_eq!(n, 1);
         let f: fn() -> u32 = seven;
         assert_eq!(HotFn::current(f).call(()), 7);
+    }
+
+    #[test]
+    fn only_a_function_pointer_is_called_as_one() {
+        let n = 0u64;
+        let by_ref = || n + 1;
+        assert_eq!(size_of_val(&by_ref), size_of::<fn()>(), "a closure of one reference is pointer-sized");
+        fn kind<F>(_: &F) -> bool {
+            is_fn_pointer::<F>()
+        }
+        assert!(!kind(&by_ref) && !kind(&seven));
+        assert!(kind(&(seven as fn() -> u32)) && kind(&(seven as unsafe fn() -> u32)));
     }
 
     #[test]
