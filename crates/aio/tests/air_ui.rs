@@ -195,3 +195,71 @@ fn surface_and_shot_on_air_read_the_page_a_person_sees() {
     let dim = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
     assert_eq!((dim(16), dim(20)), (200, 100), "the window's size");
 }
+
+/// aio's `find(component, key)` and the surface as a tree of components:
+/// rows that draw the same names are told apart by their component and key.
+mod scopes {
+    use super::*;
+
+    #[component]
+    fn Todo(id: u32, title: String, done: Signal<Vec<u32>>) -> View {
+        rsx! {
+            li {
+                span { "{title}" }
+                button { onclick: move |_| done.update(|d| d.push(id)), "Done" }
+                input { r#type: "checkbox", checked: done.with(|d| d.contains(&id)) }
+            }
+        }
+    }
+
+    #[component]
+    fn Empty() -> View {
+        rsx! {}
+    }
+
+    fn app() -> View {
+        let done = signal(Vec::<u32>::new);
+        let todos = [(1u32, "milk"), (2, "bread")];
+        rsx! {
+            h1 { "Todos" }
+            ul { for (id, title) in todos { Todo { key: id, id, title: title.to_string(), done } } }
+            p { "data-t": "done", {format!("{:?}", done.get())} }
+            Empty {}
+        }
+    }
+
+    #[test]
+    fn a_component_is_found_by_its_key_and_a_test_acts_inside_it() {
+        let mut ui = TestUi::new(app);
+        let bread = ui.find("Todo", Some("2"));
+        assert_eq!(bread, "comp=Todo[2]");
+        assert_eq!(ui.text(&bread), "breadDone");
+        ui.within(&bread, |ui| ui.click("DoneButton"));
+        assert_eq!(ui.text("done"), "[2]", "the bread row's button, not the first one");
+        assert!(ui.checked("comp=Todo[2]/css=input") && !ui.checked("comp=Todo[1]/css=input"));
+        assert!(ui.present("comp=Todo[1]"));
+        assert!(ui.absent("comp=Empty"), "a component that drew nothing doesn't show");
+        drop(ui); // one window's views per thread
+        let e = fails(|| _ = TestUi::new(app).find("Todo", None));
+        assert!(e.contains("2 components match comp=Todo"), "{e}");
+        let e = fails(|| _ = TestUi::new(app).find("Todo", Some("9")));
+        assert!(e.contains("the components are: Todo[1], Todo[2], Empty"), "{e}");
+    }
+
+    #[test]
+    fn the_surface_tree_says_what_each_component_drew() {
+        let ui = TestUi::new(app);
+        let s = ui.surface_tree();
+        assert_eq!((s.component.as_str(), s.path.as_str()), ("app", "app"));
+        let own: Vec<_> = s.elements.iter().map(|e| (e.role.as_str(), e.name.as_str())).collect();
+        assert_eq!(own, [("heading", "TodosHeading"), ("generic", "done")], "the app's own, not its rows'");
+        let rows: Vec<_> = s.children.iter().map(|c| (c.path.as_str(), c.key.as_deref(), c.text.as_str())).collect();
+        assert_eq!(
+            rows,
+            [("app/Todo[1]", Some("1"), "milkDone"), ("app/Todo[2]", Some("2"), "breadDone"), ("app/Empty", None, "")]
+        );
+        let row = &s.children[1].elements;
+        assert_eq!(row.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["DoneButton2", "Checkbox2"]);
+        assert_eq!((row[1].checked, row[0].disabled), (Some(false), false));
+    }
+}

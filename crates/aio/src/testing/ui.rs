@@ -355,7 +355,7 @@ impl Mount {
             let view = root.owner();
             (local.spawn_local(pump(root, from_page, to_page)), view)
         };
-        Self::started(TestUi { task, local, view, to_view, from_view, video: super::video::Recorder::asked(), page, rt, hovering: false, sent: 0, _sandbox: sandbox })
+        Self::started(TestUi { task, local, view, to_view, from_view, video: super::video::Recorder::asked(), page, rt, hovering: false, sent: 0, scope: vec![], _sandbox: sandbox })
     }
 
     /// The test's page, sized and themed as asked.
@@ -418,6 +418,7 @@ impl Mount {
             rt,
             hovering: false,
             sent: 0,
+            scope: vec![],
             _sandbox: sandbox,
         };
         Self::started(ui)
@@ -551,6 +552,44 @@ pub struct MountedComponent {
     pub children: Vec<MountedComponent>,
 }
 
+/// The surface as a tree of components ([`TestUi::surface_tree`], aio's
+/// `UISurfaceNode`): what each component drew, for a person or an agent
+/// to read the screen by.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct Surface {
+    /// Its component's name; the app's own is `app`.
+    pub component: String,
+    /// Its `key:` in a list.
+    pub key: Option<String>,
+    /// From the app down: `app/List/Row[42]`.
+    pub path: String,
+    /// The elements a person can use or name that it drew itself (not a
+    /// child component's), in document order.
+    pub elements: Vec<SurfaceElement>,
+    pub children: Vec<Surface>,
+    /// Its visible text (spaces folded, cut at 200 characters).
+    pub text: String,
+}
+
+/// An element of the [`Surface`].
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct SurfaceElement {
+    /// What a test calls it: its `data-t` handle, else its auto name.
+    pub name: String,
+    pub tag: String,
+    pub role: String,
+    /// Its accessible name.
+    pub label: String,
+    pub handle: Option<String>,
+    /// Its visible text (cut at 80 characters).
+    pub text: String,
+    /// A field's value.
+    pub value: Option<String>,
+    /// A checkbox's, a radio's or a switch's state.
+    pub checked: Option<bool>,
+    pub disabled: bool,
+}
+
 /// The app in a headless window, driven as a person drives it. Each `t`
 /// names an element: its `data-t` handle, else its auto name
 /// ([`names`](Self::names): `SaveButton`), `outer/t` one inside another,
@@ -577,6 +616,8 @@ pub struct TestUi {
     hovering: bool,
     /// Bytes the views sent the page (their DOM edits and queries).
     sent: usize,
+    /// The paths [`within`](TestUi::within) runs inside, outermost first.
+    scope: Vec<String>,
     _sandbox: crate::paths::Sandbox,
 }
 
@@ -798,8 +839,47 @@ impl TestUi {
         of(air::components())
     }
 
-    /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its refusal.
-    fn js(&self, op: &str, arg: Value) -> Result<Value, String> {
+    /// The mounted components for the page's reader (`comp=` paths): each
+    /// one's name, key, first and last node, and its parent's place.
+    #[cfg(not(feature = "kit"))]
+    fn tree(&self) -> Value {
+        fn flat(c: Vec<air::Mounted>, parent: Option<usize>, out: &mut Vec<Value>) {
+            for c in c {
+                let at = out.len();
+                let (first, last) = c.nodes.unzip();
+                out.push(json!({ "name": c.name, "key": c.key, "first": first, "last": last, "parent": parent }));
+                flat(c.children, Some(at), out);
+            }
+        }
+        let mut out = vec![];
+        let _in = self.rt.enter();
+        flat(air::components(), None, &mut out);
+        out.into()
+    }
+
+    /// On Dioxus the page names no component.
+    #[cfg(feature = "kit")]
+    fn tree(&self) -> Value {
+        json!([])
+    }
+
+    /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its
+    /// refusal. A path is taken inside the [`within`](Self::within) scope.
+    fn js(&self, op: &str, mut arg: Value) -> Result<Value, String> {
+        if !self.scope.is_empty()
+            && let Some(o) = arg.as_object_mut()
+            && o.contains_key("path")
+        {
+            let inside = self.scope.join("/");
+            match o["path"].as_str() {
+                Some("window") => {}
+                Some(p) => o["path"] = format!("{inside}/{p}").into(),
+                None => o["path"] = inside.into(),
+            }
+        }
+        if op == "tree" || arg.to_string().contains("comp=") {
+            arg["tree"] = self.tree();
+        }
         let r = self.page.eval(&format!("__aioTest({}, {arg})", json!(op)));
         match r["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -1019,6 +1099,45 @@ impl TestUi {
     /// the digest a failure prints).
     pub fn surface(&self) -> String {
         self.must("surface", json!({ "path": null, "rects": false })).as_str().unwrap_or_default().into()
+    }
+
+    /// The surface as a tree of components (aio's `surface()`): each
+    /// component with its key, its path, the elements it drew and its text.
+    /// On Dioxus, the app's alone (its page names no component).
+    pub fn surface_tree(&self) -> Surface {
+        serde_json::from_value(self.must("tree", json!({}))).expect("the page's surface tree")
+    }
+
+    /// The path of component `name` (with `key`, the one of that key in its
+    /// list) on air (aio's `find(component, key)`): `comp=Row[42]`, for
+    /// [`within`](Self::within) or as a path's start
+    /// (`comp=Row[42]/DeleteButton`). Fails when none or several show,
+    /// listing the components there.
+    #[track_caller]
+    pub fn find(&self, name: &str, key: Option<&str>) -> String {
+        let t = match key {
+            Some(k) => format!("comp={name}[{k}]"),
+            None => format!("comp={name}"),
+        };
+        self.el(&t);
+        t
+    }
+
+    /// Run `f` with every path taken inside element or component `t`
+    /// (`ui.within(&ui.find("Row", Some("42")), |ui| ui.click("DeleteButton"))`):
+    /// the same names in another row reach that row's. CSS counts
+    /// (`count`) stay page-wide.
+    pub fn within<R>(&mut self, t: &str, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.el(t);
+        self.scope.push(t.to_string());
+        struct Out<'a>(&'a mut TestUi);
+        impl Drop for Out<'_> {
+            fn drop(&mut self) {
+                self.0.scope.pop();
+            }
+        }
+        let out = Out(self);
+        f(&mut *out.0)
     }
 
     /// Text a person can't read on its background (aio's contrast audit,
