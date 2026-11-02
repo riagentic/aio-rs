@@ -170,7 +170,7 @@ mod renders {
                     continue;
                 }
                 let name = n.name.rsplit("::").next().unwrap_or(n.name);
-                out.push(MountedComponent { name, renders: n.renders, children });
+                out.push(MountedComponent { name, key: None, renders: n.renders, updates: 0, children });
             }
             out
         }
@@ -536,10 +536,18 @@ const PASTE: &str = "(s) => {
 /// One mounted component ([`TestUi::components`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountedComponent {
-    /// Its name without its module (the mounted app is `root`).
+    /// Its name without its module.
     pub name: &'static str,
-    /// Times it rendered since it mounted, the first included.
+    /// Its `key:` in a list, as text (air; none on Dioxus).
+    pub key: Option<String>,
+    /// Times it rendered since it mounted, the first included. On air a
+    /// body runs once (again only after a wait or a `follow`): a state
+    /// change shows in `updates`.
     pub renders: u32,
+    /// On air: times one of its own holes wrote its part of the page again
+    /// (what a change cost it; a child component's count is the child's).
+    /// Always 0 on Dioxus, whose re-renders are `renders`.
+    pub updates: u32,
     pub children: Vec<MountedComponent>,
 }
 
@@ -770,11 +778,24 @@ impl TestUi {
         renders::tree(std::rc::Rc::as_ptr(&self.view) as *const () as usize)
     }
 
-    /// On air a body runs once and no component re-renders: no tree is
-    /// kept yet (plan step 2, with DevTools' `tree`).
+    /// The mounted components, as a tree (aio DevTools' `tree`): each one's
+    /// name, its key in a list, its body runs (`renders`) and its holes'
+    /// updates; each level in the order they were placed.
     #[cfg(not(feature = "kit"))]
     pub fn components(&self) -> Vec<MountedComponent> {
-        vec![]
+        fn of(c: Vec<air::Mounted>) -> Vec<MountedComponent> {
+            c.into_iter()
+                .map(|c| MountedComponent {
+                    name: c.name,
+                    key: c.key,
+                    renders: c.renders,
+                    updates: c.updates,
+                    children: of(c.children),
+                })
+                .collect()
+        }
+        let _in = self.rt.enter();
+        of(air::components())
     }
 
     /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its refusal.

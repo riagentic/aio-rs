@@ -97,3 +97,101 @@ fn globals_live_in_the_apps_root_and_a_test_reads_and_runs_there() {
     ui.run(|| PICKED.set(9));
     assert_eq!(ui.text("pick"), "9");
 }
+
+/// `components()` on air: each component by name and key, its body runs
+/// and its holes' updates. A view reading one field of a cell (`part`) is
+/// updated for that field only (aio's `trackCell`); no body runs again.
+mod tree {
+    use super::*;
+    use aio::testing::MountedComponent;
+
+    #[aio::cell]
+    pub struct Board {
+        pub rows: Vec<String>,
+        pub cursor: u32,
+    }
+
+    #[aio::methods]
+    impl Board {
+        pub fn down(&mut self) {
+            self.cursor += 1;
+        }
+
+        pub fn add(&mut self, row: String) {
+            self.rows.push(row);
+        }
+
+        pub fn same(&mut self) {}
+    }
+
+    aio::client!(Board, board);
+
+    #[component]
+    fn Cursor() -> View {
+        let at = part(|b| &b.cursor);
+        rsx! { span { "data-t": "cursor", "{at}" } }
+    }
+
+    #[component]
+    fn Row(name: String) -> View {
+        rsx! { li { "{name}" } }
+    }
+
+    #[component]
+    fn Rows() -> View {
+        let rows = part(|b| &b.rows);
+        rsx! { ul { "data-t": "rows", for r in rows.get() { Row { key: r.clone(), name: r } } } }
+    }
+
+    fn app() -> View {
+        rsx! { Cursor {} Rows {} }
+    }
+
+    fn get<'a>(c: &'a [MountedComponent], name: &str) -> &'a MountedComponent {
+        c.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no {name}: {c:?}"))
+    }
+
+    #[test]
+    fn components_on_air_count_body_runs_and_the_updates_a_change_cost() {
+        let mut ui = TestUi::new(app);
+        let tree = ui.components();
+        assert_eq!(tree.iter().map(|c| c.name).collect::<Vec<_>>(), ["Cursor", "Rows"]);
+        for _ in 0..5 {
+            ui.run(|| act!(down()));
+        }
+        assert_eq!(ui.text("cursor"), "5");
+        let tree = ui.components();
+        let (c, r) = (get(&tree, "Cursor"), get(&tree, "Rows"));
+        assert_eq!((c.renders, c.updates), (1, 5), "its text, once a step");
+        assert_eq!((r.renders, r.updates), (1, 0), "the rows' reader stayed");
+        ui.run(|| act!(add("one".into())));
+        ui.run(|| act!(add("two".into())));
+        let tree = ui.components();
+        let r = get(&tree, "Rows");
+        assert_eq!(r.updates, 2, "its list, once a commit");
+        let keys: Vec<_> = r.children.iter().map(|c| (c.name, c.key.as_deref(), c.renders)).collect();
+        assert_eq!(keys, [("Row", Some("one"), 1), ("Row", Some("two"), 1)], "row one kept, not made again");
+        assert_eq!(get(&tree, "Cursor").updates, 5, "the cursor's reader stayed");
+        ui.run(|| act!(same()));
+        assert_eq!(ui.components(), tree, "a call that changes nothing updates nothing");
+    }
+}
+
+#[test]
+fn surface_and_shot_on_air_read_the_page_a_person_sees() {
+    fn app() -> View {
+        rsx! {
+            main { style: "background: rgb(0, 128, 0); width: 100vw; height: 100vh",
+                h1 { "Hello" }
+                button { "data-t": "go", "Go" }
+            }
+        }
+    }
+    let ui = aio::testing::Mount::default().size(200, 100).no_scrollbars().app(app);
+    let s = ui.surface();
+    assert!(s.contains("heading \"Hello\"") && s.contains("button \"Go\" [go]"), "{s}");
+    let png = ui.shot();
+    assert_eq!(&png[1..4], b"PNG");
+    let dim = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    assert_eq!((dim(16), dim(20)), (200, 100), "the window's size");
+}
