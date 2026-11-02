@@ -340,6 +340,8 @@ def measure(tmp, root=ROOT, full=True, apk=False):
     # in its own: its path is as long, so cargo took the base's crates for
     # this checkout's, and a later build here compiled against the base's
     # aio-config. The template as a developer's.
+    if apk and not has_air(root):
+        return {}
     here = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
     cli = here if root == ROOT else root / "target"
     run(["cargo", "fetch", "--locked"], root, os.environ)
@@ -397,14 +399,21 @@ def edited_live(aio, app, env, home):
     return row
 
 
+def has_air(root):
+    """Whether checkout `root`'s shell draws on air (air phase 3 on), said when not."""
+    if "air" in tomllib.loads((root / "crates" / "aio-shell" / "Cargo.toml").read_text())["features"]:
+        return True
+    print(f"dx-metrics: {root.name}'s aio-rs-shell has no `air`: no air numbers for it", file=sys.stderr)
+    return False
+
+
 def measure_air(tmp, root, aio, env, full, apk=False):
     """The template app on air (`to_air`, in tmp/air): its packages' sizes,
     each checked for Dioxus (scripts/air-ship, shown first to catch a
     planted one), and, `full`, its edit times; `apk`: its APKs alone
     (`ax build --android`). {} where `root`'s shell has no air (a base
     before air phase 3)."""
-    if "air" not in tomllib.loads((root / "crates" / "aio-shell" / "Cargo.toml").read_text())["features"]:
-        print(f"dx-metrics: {root.name}'s aio-rs-shell has no `air`: no air numbers for it", file=sys.stderr)
+    if not has_air(root):
         return {}
     (tmp / "air").mkdir()
     # Its own build folder: ax keeps one app per binary name in one.
