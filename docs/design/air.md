@@ -800,7 +800,7 @@ app's 20 ms poll on air.
   found; dev and build dependencies not).
 - `scripts/dx-metrics` measures the template on air beside the Dioxus
   one (columns `air_*`), in its own build folder; `--apk` its APKs (the
-  `air-apk` job on GitHub CI). Each run plants `dioxus-core` in the air
+  `dx (apk)` job on GitHub CI). Each run plants `dioxus-core` in the air
   app first and requires air-ship to fail, then checks every package.
 - Sizes are held 5% (and 50 KB, the web build 10 KB) over the base built
   on the same runner, or this machine's best of the last 10 rows; the
