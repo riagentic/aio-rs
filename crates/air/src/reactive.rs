@@ -688,7 +688,7 @@ impl Frame {
     }
 
     /// The component's own owner: it lives across its body's re-runs and
-    /// ends with it (what its handlers make and spawn, as a component's scope does).
+    /// ends with it (what its handlers make and spawn).
     pub(crate) fn owner(&self) -> Owner {
         Owner(self.keeper())
     }

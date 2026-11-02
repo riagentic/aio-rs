@@ -68,7 +68,7 @@ struct Listening {
     /// The element's view: the handler goes with it.
     owner: Option<Owner>,
     /// The component that drew it: what the handler makes and spawns is
-    /// the component's, so a branch drawn again cancels none of it.
+    /// its (a scope of the component), so a branch drawn again cancels none of it.
     comp: Weak<Frame>,
 }
 
