@@ -1,8 +1,8 @@
 //! `aio::ui::prelude`, the view API apps are written against: each name
 //! does what its air shape says, on the renderer underneath today.
-#![cfg(any(feature = "kit", feature = "air"))]
+#![cfg(feature = "kit")]
 // Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
-#![cfg_attr(not(feature = "kit"), allow(unused_mut))]
+#![allow(unused_mut)]
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -71,13 +71,7 @@ fn set_tells_only_on_a_change_and_write_always_does() {
 
 // A prop that follows its caller's state: re-given on each render on
 // Dioxus, a `Prop` on air (a body runs once there).
-#[cfg(feature = "kit")]
-#[component]
-fn Shown(n: u32) -> View {
-    shown(n)
-}
 
-#[cfg(not(feature = "kit"))]
 #[component]
 fn Shown(n: Prop<u32>) -> View {
     shown(n)

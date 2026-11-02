@@ -16,6 +16,7 @@ dependencies = [
  "aio-rs-air",
  "aio-rs-config",
  "aio-rs-config-macro",
+ "aio-rs-hotpatch",
  "aio-rs-macros",
  "axum",
  "base64 0.23.1",
@@ -23,11 +24,6 @@ dependencies = [
  "bytes",
  "chrono",
  "curve25519-dalek",
- "dioxus",
- "dioxus-core",
- "dioxus-document",
- "dioxus-liveview",
- "dioxus-web",
  "flate2",
  "futures-util",
  "imbl",
@@ -42,7 +38,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
- "subsecond",
  "tempfile",
  "time",
  "tokio",
@@ -50,7 +45,6 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml",
- "tracing",
  "unicode-normalization",
  "ureq",
  "uuid",
@@ -82,10 +76,10 @@ version = "0.1.0"
 dependencies = [
  "aio-rs",
  "aio-rs-config",
+ "aio-rs-hotpatch",
  "aio-rs-shell",
  "base64 0.23.1",
  "chrono",
- "dioxus-rsx",
  "flate2",
  "futures-util",
  "image",
@@ -97,7 +91,6 @@ dependencies = [
  "rusqlite",
  "rustc-demangle",
  "serde_json",
- "subsecond-types",
  "syn 2.0.119",
  "tempfile",
  "tokio",
@@ -128,6 +121,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio-rs-hotpatch"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aio-rs-macros"
 version = "0.1.0"
 dependencies = [
@@ -143,23 +145,18 @@ dependencies = [
  "aio-rs",
  "aio-rs-air",
  "aio-rs-config",
+ "aio-rs-hotpatch",
  "base64 0.23.1",
  "bytes",
  "chrono",
- "dioxus-core",
- "dioxus-document",
- "dioxus-liveview",
- "dioxus-ssr",
  "futures-util",
  "jni",
  "libc",
  "serde",
- "subsecond",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "tracing",
  "ureq",
  "windows-sys 0.61.2",
  "zip",
@@ -216,12 +213,6 @@ name = "archery"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f"
-
-[[package]]
-name = "askama_escape"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df27b8d5ddb458c5fb1bbc1ce172d4a38c614a97d550b0ac89003897fb01de4"
 
 [[package]]
 name = "asn1-rs"
@@ -660,9 +651,6 @@ name = "dioxus-cli-config"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "322d10f47effebd85ee0662a2cb083ff920d40dd6295a4afd8cfa4f9bc2e05c6"
-dependencies = [
- "wasm-bindgen",
-]
 
 [[package]]
 name = "dioxus-config-macros"
@@ -710,35 +698,6 @@ name = "dioxus-core-types"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96007ed6cbad951dfed82d83c581aabd95bc591f351f5666d454ddbe7845b324"
-
-[[package]]
-name = "dioxus-devtools"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434cebb282b3f820a341582ebfd37dab907d5a25c3eeafd87802468afcd2a959"
-dependencies = [
- "dioxus-cli-config",
- "dioxus-core",
- "dioxus-devtools-types",
- "dioxus-signals",
- "serde",
- "serde_json",
- "subsecond",
- "thiserror 2.0.21",
- "tracing",
- "tungstenite 0.28.0",
-]
-
-[[package]]
-name = "dioxus-devtools-types"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfd6f3475e38c93be245a664a9ce11679a8f2b99832620705cf7837f42aa39ce"
-dependencies = [
- "dioxus-core",
- "serde",
- "subsecond-types",
-]
 
 [[package]]
 name = "dioxus-document"
@@ -833,14 +792,10 @@ dependencies = [
  "dioxus-core",
  "dioxus-core-types",
  "dioxus-html",
- "js-sys",
  "lazy-js-bundle",
  "rustc-hash 2.1.3",
  "sledgehammer_bindgen",
  "sledgehammer_utils",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
@@ -851,7 +806,6 @@ checksum = "8b9cfecfc0037cb85b649739acc49a09dd303d1fa1daa7af609f5796b491b71c"
 dependencies = [
  "dioxus-cli-config",
  "dioxus-core",
- "dioxus-devtools",
  "dioxus-document",
  "dioxus-history",
  "dioxus-html",
@@ -900,18 +854,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dioxus-ssr"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4544ecf908962909de403bfdf94f771b036e9e1857e371cd3279841a15a892e6"
-dependencies = [
- "askama_escape",
- "dioxus-core",
- "dioxus-core-types",
- "rustc-hash 2.1.3",
-]
-
-[[package]]
 name = "dioxus-stores"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -933,35 +875,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "dioxus-web"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "481093233d789c5ffbdde66e7970e803b01a199a7ab0c0f8ef84c65d30b7384f"
-dependencies = [
- "dioxus-cli-config",
- "dioxus-core",
- "dioxus-core-types",
- "dioxus-devtools",
- "dioxus-document",
- "dioxus-history",
- "dioxus-html",
- "dioxus-interpreter-js",
- "dioxus-signals",
- "futures-channel",
- "futures-util",
- "generational-box",
- "js-sys",
- "lazy-js-bundle",
- "rustc-hash 2.1.3",
- "send_wrapper",
- "tracing",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams",
- "web-sys",
 ]
 
 [[package]]
@@ -1100,12 +1013,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
-name = "futures-io"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
-
-[[package]]
 name = "futures-macro"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1135,11 +1042,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
- "futures-io",
  "futures-macro",
  "futures-sink",
  "futures-task",
- "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -2124,15 +2029,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
-name = "send_wrapper"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
-dependencies = [
- "futures-core",
-]
-
-[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2252,7 +2148,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49e83e178d176459c92bc129cfd0958afac3ced925471b889b3a75546cfc4133"
 dependencies = [
  "sledgehammer_bindgen_macro",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2522,7 +2417,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.29.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -2639,23 +2534,6 @@ dependencies = [
 
 [[package]]
 name = "tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand",
- "sha1",
- "thiserror 2.0.21",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
@@ -2745,12 +2623,6 @@ dependencies = [
  "httparse",
  "log",
 ]
-
-[[package]]
-name = "utf-8"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8-zero"
@@ -2882,19 +2754,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

@@ -71,6 +71,13 @@ pub(crate) fn templates(input: TokenStream) -> Result<(String, Vec<Made>), Strin
     Ok((shape?, made))
 }
 
+/// The `rsx!` call `input` as the compiler reads it, for `ax lint`. Err:
+/// it doesn't parse (the compiler says why).
+#[cfg(not(proc_macro))]
+pub(crate) fn nodes(input: TokenStream) -> Result<Vec<Node>, String> {
+    parse_nodes(&input.into_iter().collect::<Vec<_>>()).map_err(|(_, msg)| msg)
+}
+
 /// `fn Row(name: String, on: Signal<bool>) -> View`: a props struct
 /// `RowProps { pub name, pub on }` with its builder, and
 /// `fn Row(RowProps { name, on }: RowProps)`, called as `Row { name: …, on }`
@@ -551,13 +558,16 @@ fn builder(
 
 type Res<T> = Result<T, (Span, String)>;
 
-enum Node {
+pub(crate) enum Node {
     Text(String),
     /// A `"…{x}…"` text: `format!`'s literal and arguments, and the names it reads.
     Fmt(TokenStream, Vec<String>),
     Expr(TokenStream),
     El {
         tag: String,
+        /// Where its tag is written (`ax lint`'s line).
+        #[cfg_attr(proc_macro, allow(dead_code))]
+        at: Span,
         attrs: Vec<(String, Val)>,
         spreads: Vec<TokenStream>,
         children: Vec<Node>,
@@ -583,12 +593,12 @@ enum Node {
 }
 
 /// A component's prop: a declared one (a name), or an attribute (`"data-t"`).
-enum PropName {
+pub(crate) enum PropName {
     Field(Ident),
     Attr(String),
 }
 
-enum Val {
+pub(crate) enum Val {
     Static(String),
     Present(bool),
     Fmt(TokenStream, Vec<String>),
@@ -767,8 +777,8 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
     if comp {
         return Ok(Node::Comp { path, props, spreads, children, key });
     }
-    let tag = path[0].to_string().trim_start_matches("r#").to_string();
-    Ok(Node::El { tag, attrs, spreads, children, key })
+    let (tag, at) = (path[0].to_string().trim_start_matches("r#").to_string(), path[0].span());
+    Ok(Node::El { tag, at, attrs, spreads, children, key })
 }
 
 /// An attribute's name in the page: `aria_label` is `aria-label`, SVG's

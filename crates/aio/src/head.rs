@@ -128,38 +128,60 @@ pub fn html(m: &Merged) -> String {
         .collect()
 }
 
-/// Own part of the page's `<head>` while this component lives (aio
-/// `useHead`): the innermost owner's title (the window's title follows it)
-/// and the tags, merged by identity ([`Heads`]); the last owner gone gives
-/// the page its own title back. A hook: call it at the top of a component,
-/// on every render; the page is written only when the merged head changed.
-/// On the server ([`Heads`] in the root) its first paint's head is read.
-#[cfg(feature = "liveview")]
-pub fn use_head(head: Head) {
+/// What a view owns of the head: a [`Head`], or a closure making one from
+/// state (`move || Head::title(format!("{} · Shop", name.get()))`), followed.
+pub trait HeadOf: 'static {
+    fn head(&self) -> Head;
+}
+
+impl HeadOf for Head {
+    fn head(&self) -> Head {
+        self.clone()
+    }
+}
+
+impl<F: Fn() -> Head + 'static> HeadOf for F {
+    fn head(&self) -> Head {
+        self()
+    }
+}
+
+/// Own part of the page's `<head>` while this view lives (aio's `useHead`):
+/// the innermost owner's title (the window's title follows it) and the
+/// tags, merged by identity ([`Heads`]); the last owner gone gives the page
+/// its own title back. A hook (call it at a view's top level); a closure
+/// is followed, the page written only when the merged head changed.
+#[cfg(feature = "kit")]
+pub fn use_head(head: impl HeadOf) {
     use std::{cell::RefCell, rc::Rc};
     type Shared = Rc<RefCell<Heads>>;
-    let heads = dioxus_core::try_consume_context::<Shared>()
-        .unwrap_or_else(|| dioxus_core::provide_root_context(Shared::default()));
-    // The window's document, kept: at unmount there is no scope to ask.
-    let (id, doc) = dioxus_core::use_hook(|| (heads.borrow_mut().owner(), dioxus_document::document()));
-    fn write(doc: &Rc<dyn dioxus_document::Document>, hs: &Heads) {
-        // A page's own DOM, without `eval` (its policy has none).
-        #[cfg(target_arch = "wasm32")]
-        let _ = (doc, write_page(&hs.merged()));
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = doc.eval(head_js(&hs.merged()));
-    }
-    if heads.borrow_mut().set(id, head) {
-        write(&doc, &heads.borrow());
-    }
-    dioxus_core::use_drop(move || {
+    let heads = crate::ui::try_context::<Shared>().unwrap_or_else(|| air::provide_root(Shared::default()));
+    let id = crate::ui::once(|| heads.borrow_mut().owner());
+    let h = heads.clone();
+    crate::ui::effect(move || {
+        let head = head.head();
+        if h.borrow_mut().set(id, head) {
+            write(&h.borrow().merged());
+        }
+    });
+    crate::ui::on_cleanup(move || {
         heads.borrow_mut().remove(id);
-        write(&doc, &heads.borrow());
+        write(&heads.borrow().merged());
     });
 }
 
+/// `m` written to the page: through its DOM in a browser (its policy runs
+/// no code from the app), as a page script in a window.
+#[cfg(feature = "kit")]
+fn write(m: &Merged) {
+    #[cfg(target_arch = "wasm32")]
+    write_page(m);
+    #[cfg(not(target_arch = "wasm32"))]
+    air::exec(&head_js(m));
+}
+
 /// `m` written to the page as [`head_js`] writes it, through its DOM.
-#[cfg(all(target_arch = "wasm32", feature = "liveview"))]
+#[cfg(all(target_arch = "wasm32", feature = "kit"))]
 fn write_page(m: &Merged) {
     thread_local! {
         /// The page's own title while an owner sets one.
@@ -189,19 +211,10 @@ fn write_page(m: &Merged) {
     }
 }
 
-/// What a rendered view asked for in `<head>` (its first paint, on the server).
-#[cfg(feature = "liveview")]
-pub fn of(dom: &dioxus_core::VirtualDom) -> Merged {
-    use std::{cell::RefCell, rc::Rc};
-    let heads =
-        dom.in_runtime(|| dioxus_core::consume_context_from_scope::<Rc<RefCell<Heads>>>(dioxus_core::ScopeId::ROOT));
-    heads.map(|h| h.borrow().merged()).unwrap_or_default()
-}
-
 /// The script writing `m` to the page: the title (the page's own kept, and
 /// restored when no owner sets one) and aio's tags (`data-aio-head`)
 /// replaced; tags the page came with are never touched.
-#[cfg(any(feature = "liveview", test))]
+#[cfg(any(all(feature = "kit", not(target_arch = "wasm32")), test))]
 fn head_js(m: &Merged) -> String {
     let tags: Vec<_> = m.tags.iter().map(|(kind, attrs)| serde_json::json!([kind, attrs])).collect();
     format!(

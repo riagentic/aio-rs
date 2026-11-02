@@ -10,65 +10,23 @@
 pub const SURFACE_JS: &str = include_str!("surface.js");
 
 /// Key chords (`"mod+s"`), parsed and matched: the kit's bindings and `TestUi`'s keys.
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 #[doc(hidden)]
 pub mod chord;
 #[cfg(feature = "kit")]
-mod view;
-#[cfg(feature = "kit")]
-pub use view::*;
-#[cfg(all(feature = "air", not(feature = "kit")))]
 mod css;
-#[cfg(all(feature = "air", not(feature = "kit")))]
-pub use css::{collect_css, css};
-#[cfg(all(feature = "air", not(feature = "kit")))]
-mod on_air;
-#[cfg(all(feature = "air", not(feature = "kit")))]
-pub use on_air::*;
-/// What a view returns (with `kit`, [`prelude`] has the rest).
-#[cfg(all(feature = "liveview", not(any(feature = "kit", feature = "air"))))]
-pub type View = dioxus_core::Element;
-
-/// Whether the views are air's (the facade's renderer), for a host that
-/// must match it (aio-shell on air).
-#[doc(hidden)]
-pub const ON_AIR: bool = cfg!(all(feature = "air", not(feature = "kit")));
-
-#[cfg(all(feature = "air", feature = "liveview", not(feature = "kit")))]
-compile_error!(
-    "aio-rs: one renderer per build: `air` with Dioxus's page (`liveview`, aio-shell's default features); \
-     an app on air takes aio-shell with `default-features = false, features = [\"air\"]`"
-);
-
-/// Everything a view file needs: `use aio::ui::prelude::*;`. `rsx!`,
-/// `#[component]`, [`View`], state ([`Signal`], [`signal`], [`memo`],
-/// [`effect`], [`watch`], [`once`], [`on_cleanup`], [`Global`]), context
-/// ([`provide`], [`context`]), async work ([`spawn`], [`spawn_forever`],
-/// [`task`], [`resource`]), boundaries ([`ErrorBoundary`], [`Suspense`]),
-/// handlers ([`EventHandler`], [`Callback`]), the event types
-/// (`KeyboardEvent`, `MouseEvent`, `FormEvent`, …) with [`Key`](prelude::Key),
-/// [`Modifiers`](prelude::Modifiers), and the page ([`eval`]).
 #[cfg(feature = "kit")]
-pub mod prelude {
-    #[doc(hidden)]
-    pub use super::view::__rsx::*;
-    pub use super::view::{
-        Attribute, Callback, ErrorBoundary, Eval, EvalError, EventHandler, Fragment, Global, GlobalMemo, Memo, Props,
-        Resource, Signal, Suspense, Task, View, ViewError, callback, component, context, effect, eval, in_views,
-        key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task,
-        try_context, watch,
-    };
-    pub use crate::{act, use_css};
-    #[doc(no_inline)]
-    pub use dioxus::html::{
-        GlobalAttributesExtension, SvgAttributesExtension, events::*, extensions::*, geometry, global_attributes,
-        input_data::MouseButton, svg_attributes, traits::*,
-    };
-    pub use dioxus::prelude::{Code, Event, Key, Location, Modifiers};
-}
+pub use css::{collect_css, css};
+#[cfg(feature = "kit")]
+mod on_air;
+#[cfg(feature = "kit")]
+pub use on_air::*;
+
+
+
 
 /// Everything a view file needs, on air: the same names as on Dioxus.
-#[cfg(all(feature = "air", not(feature = "kit")))]
+#[cfg(feature = "kit")]
 pub mod prelude {
     pub use super::on_air::events::*;
     pub use super::on_air::{
@@ -86,7 +44,7 @@ pub mod prelude {
 
 /// The views' clock: a moment and a wait, on the page's timer in a
 /// browser, else on tokio's (a test's paused clock too).
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub(crate) mod clock {
     pub(crate) async fn sleep(d: std::time::Duration) {
         #[cfg(target_arch = "wasm32")]
@@ -352,30 +310,11 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
     }
 }
 
-/// [`use_css!`](crate::use_css)'s subscription to its sheets' edits (a dev
-/// build's): the render (Dioxus) or the hole (air) that reads them runs
-/// again when one is saved.
-#[doc(hidden)]
-#[cfg(feature = "kit")]
-pub fn follow_sheets(sheets: &'static [Sheet]) {
-    let edits = signal(|| 0u64);
-    once(move || {
-        if cfg!(debug_assertions) {
-            spawn(async move {
-                loop {
-                    sheets_changed(sheets).await;
-                    edits.update(|n| *n += 1);
-                }
-            });
-        }
-    });
-    let _ = edits.get();
-}
 
 /// On air the call sits in a hole (an effect, no hooks): one signal per set
 /// of sheets for the thread, its watcher living as long.
 #[doc(hidden)]
-#[cfg(all(feature = "air", not(feature = "kit")))]
+#[cfg(feature = "kit")]
 pub fn follow_sheets(sheets: &'static [Sheet]) {
     if !cfg!(debug_assertions) {
         return;
@@ -481,7 +420,7 @@ static SCHEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0)
 /// `system` the OS's `prefers-color-scheme`, followed as it changes (a
 /// canvas or a chart that draws its own colours reads it). The page's CSS
 /// follows the OS without it ([`page_css`] with [`Scheme::System`]).
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub fn use_dark() -> Memo<bool> {
     let fixed = scheme();
     let os = signal(|| false);
@@ -693,7 +632,7 @@ pub const BACKGROUND: std::time::Duration = std::time::Duration::from_millis(150
 /// `trackCell`), so a view re-renders when that field changes, not on every
 /// commit. Read it with `.get()`, `.with(|v| …)` or `"{part}"`; it reads
 /// the state the views were last told of.
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub struct Part<T: 'static, R: ?Sized, F> {
     f: F,
     parts: &'static Global<Parts<T>>,
@@ -703,7 +642,7 @@ pub struct Part<T: 'static, R: ?Sized, F> {
     _r: std::marker::PhantomData<fn(&T) -> &R>,
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
     #[doc(hidden)]
     pub fn new(
@@ -771,17 +710,17 @@ impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
     }
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T, R: ?Sized, F: Clone> Clone for Part<T, R, F> {
     fn clone(&self) -> Self {
         Self { f: self.f.clone(), ..*self }
     }
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T, R: ?Sized, F: Copy> Copy for Part<T, R, F> {}
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fmt::Display for Part<T, R, F> {
     /// Subscribes: `"{n}"` in a view follows the part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -789,7 +728,7 @@ impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fm
     }
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt::Debug for Part<T, R, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.with(|v| v.fmt(f))
@@ -799,7 +738,7 @@ impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt:
 /// The views' side of a cell's fields (`client!`): the state they were
 /// last told of, one signal per field (aio's signal per cell) and when.
 #[doc(hidden)]
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub struct Parts<T> {
     shown: std::sync::Arc<T>,
     sigs: Vec<Signal<u64>>,
@@ -808,7 +747,7 @@ pub struct Parts<T> {
     told: Option<clock::Instant>,
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData> Parts<T> {
     /// In the root scope (a global's constructor runs there).
     pub fn new(shown: std::sync::Arc<T>) -> Self {
@@ -873,7 +812,7 @@ impl<T: crate::CellData> Parts<T> {
 /// [`BACKGROUND`]'s wait (`client!`'s `use_live`): while it lasts, the views
 /// have a commit still to be told of, and a UI test's `settle` waits for it.
 #[doc(hidden)]
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub async fn sleep(d: std::time::Duration) {
     struct Waiting;
     impl Drop for Waiting {
@@ -886,11 +825,11 @@ pub async fn sleep(d: std::time::Duration) {
     clock::sleep(d).await
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 thread_local!(static WAITING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 /// Has a view on this thread a commit still to be told of ([`sleep`])?
-#[cfg(all(any(feature = "kit", feature = "air"), feature = "testing"))]
+#[cfg(all(feature = "kit", feature = "testing"))]
 pub(crate) fn telling() -> bool {
     WAITING.get() > 0
 }
@@ -1128,7 +1067,7 @@ macro_rules! client {
 /// commit (a cursor step, a price tick), whatever it shows. Said once per
 /// place; `heap`: through a `part` that points outside the state's fields.
 #[doc(hidden)]
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: bool) {
     thread_local! {
         static SEEN: std::cell::RefCell<std::collections::HashSet<(&'static str, u32, u32)>> = Default::default();
@@ -1138,9 +1077,6 @@ pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: 
         return;
     }
     // A component's render, not a handler or a memo (their contexts have no scope).
-    #[cfg(feature = "kit")]
-    let render = view::in_render();
-    #[cfg(not(feature = "kit"))]
     let render = on_air::in_render();
     if !render || !SEEN.with(|s| s.borrow_mut().insert(key)) {
         return;

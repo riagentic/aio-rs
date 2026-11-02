@@ -430,10 +430,10 @@ fn a_key_name_that_names_no_key_is_refused() {
 fn Form(fields: u32, button: bool, required: bool) -> View {
     rsx! {
         form { "data-t": "form",
-            onsubmit: move |e| log(format!("submit {:?}", e.values().into_iter().map(|(k, v)| match v { FormValue::Text(t) => format!("{k}={t}"), _ => k }).collect::<Vec<_>>())),
+            onsubmit: move |e| log(format!("submit {:?}", e.values().into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>())),
             input { "data-t": "a", name: "a", required, onkeydown: move |e| if e.key() == Key::Escape { e.prevent_default() } }
             for i in 1..fields {
-                input { "data-t": "f{i}", name: "f{i}" }
+                input { key: "{i}", "data-t": "f{i}", name: "f{i}" }
             }
             input { r#type: "checkbox", name: "c", checked: true }
             if button {

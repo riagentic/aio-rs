@@ -46,16 +46,8 @@ uuid = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 imbl = { version = "7", features = ["serde"], optional = true }
 
-# The UI kit (`aio::kit`): the app's own Dioxus, so the kit's components are its components.
-dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"], optional = true }
-# The kit's islands talk to the page (`kit::WebIsland`).
-dioxus-document = { version = "=0.7.10", optional = true }
-
-dioxus-core = { version = "=0.7.10", optional = true }
-# air, aio-rs's own renderer (`air`): the facade on it instead of Dioxus.
+# air, aio-rs's renderer (docs/design/air.md): the views, the kit and TestUi (`kit`).
 air = { workspace = true, optional = true }
-# The UI tests' component tree: the span Dioxus opens for each render (`aio::testing`).
-tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 
 [features]
 # The core alone: cells, the event log, replay, the local door. Each
@@ -75,27 +67,20 @@ oidc = ["server", "outbound"]
 br = ["server", "dep:brotli"]
 # Everything networked: what `default` was before the split.
 net = ["tls", "oidc"]
-# With it, `aio::testing::TestUi`: UI tests in the page the app's window shows.
-kit = ["liveview", "dep:dioxus", "dep:tracing"]
-# The facade (`aio::ui::prelude`) and `TestUi` on air, aio-rs's own renderer
-# (docs/design/air.md), with no Dioxus: plan step 1. One renderer per build:
-# with `kit` on too, Dioxus stays the facade's (the kit is Dioxus code until
-# step 2), so `--all-features` builds what ships today.
-air = ["dep:air"]
-# The app's views mounted in its own page (`aio::web::launch`, `ax build --web`),
-# on the build's renderer (`air`, or Dioxus's with `liveview`/`kit`).
+# The views (`aio::ui::prelude`), the kit (`aio::kit`), the router and,
+# with `testing`, `aio::testing::TestUi`: all on air, aio-rs's renderer.
+kit = ["dep:air"]
+# The same as `kit`: the name of air's lane before 0.2.0.
+air = ["kit"]
+# The app's views mounted in its own page (`aio::web::launch`, `ax build --web`).
 web = []
-# Dioxus's page renderer (0.1's): its DOM-edit interpreter in the window's page
-# and dioxus-web in a browser. One renderer per build: not with `air` unless
-# `kit` is on too (then Dioxus stays the facade's).
-liveview = ["dep:dioxus-web", "dep:dioxus-core", "dep:dioxus-document", "dep:dioxus-liveview"]
 # Working with aio, the Deno-based framework (`aio::compat`): aio pages and
 # tools on `/ws` (protocol v3, with `server`), `AioLink` (an aio-rs app calling
 # an aio app), aio's move of a scattered layout into its home, `#[on_aio]`.
 # A ported app's `state.db` needs none of it.
 compat = []
 # `ax dev`: cell methods hot-patched (through `aio-shell/dev`); a release has none of it.
-dev = ["dep:subsecond"]
+dev = ["dep:aio-hotpatch"]
 # `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
 imbl = ["dep:imbl"]
 # `aio::testing`, the test kit (TestCells, TestServer, TestUi with `kit`):
@@ -140,7 +125,7 @@ name = "facade"
 
 [[test]]
 name = "air_ui"
-required-features = ["air"]
+required-features = ["kit"]
 
 [[test]]
 name = "wire"
@@ -188,9 +173,8 @@ ring = "0.17"
 # The local door's frames (`door`).
 bytes = "1"
 tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
-subsecond = { version = "=0.7.10", optional = true }
-# The page views are drawn in (`aio::page`): Dioxus's DOM-edit interpreter.
-dioxus-liveview = { version = "=0.7.10", default-features = false, optional = true }
+# `ax dev`'s hot-patch of cell methods (`dev`).
+aio-hotpatch = { workspace = true, optional = true }
 
 # The browser build: the page's clock, randomness, socket and storage.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -203,9 +187,6 @@ sha2 = "0.10"
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "console", "Document", "Element", "Event", "EventTarget", "Headers", "History", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "Notification", "NotificationOptions", "NotificationPermission", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "Url", "WebSocket", "Window"] }
-# The app's views in the page (`web`): the real DOM, from Dioxus.
-# Its document is aio's (`web::page`): the page's DOM, no `eval`.
-dioxus-web = { version = "=0.7.10", default-features = false, features = ["mounted"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

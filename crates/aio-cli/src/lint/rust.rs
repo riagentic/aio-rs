@@ -2,7 +2,7 @@
 //! fields named like credentials, methods that aren't pure, hooks off the
 //! top level of a component, and rsx! markup without accessible names.
 use super::{Issue, Severity, secrets};
-use dioxus_rsx::{AttributeName, AttributeValue, BodyNode, CallBody, ElementName, HotLiteral, IfChain};
+use crate::reload::air_rsx::{Node, Val};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -226,9 +226,9 @@ impl<'ast> Visit<'ast> for Vacuous<'_> {
     }
 }
 
-/// What an app names of the renderer behind `aio::ui` (a `dioxus…` path,
-/// or a page script's `dioxus.send`): it ties the app to Dioxus, which air
-/// replaces (docs/design/air.md); `aio::ui` stays.
+/// What a 0.1 app still names of Dioxus (a `dioxus…` path, or a page
+/// script's `dioxus.send`), its renderer before air: aio-rs has none of it
+/// since 0.2.0 (docs/migration, "0.1 → 0.2").
 fn renderer(rel: &str, ts: TokenStream, out: &mut Vec<Issue>) {
     fn walk(ts: TokenStream, lines: &mut BTreeSet<(usize, bool)>) {
         let tt: Vec<TokenTree> = ts.into_iter().collect();
@@ -257,7 +257,7 @@ fn renderer(rel: &str, ts: TokenStream, out: &mut Vec<Issue>) {
     for (line, script) in lines {
         let (msg, fix) = match script {
             false => (
-                "names dioxus, the renderer behind aio::ui: the swap to air (docs/design/air.md) breaks it",
+                "names dioxus, aio-rs 0.1's renderer: 0.2 draws with air, behind aio::ui (docs/migration)",
                 "use aio::ui::prelude::*; and its names (View, signal, memo, effect, once, eval, …)",
             ),
             true => (
@@ -269,8 +269,8 @@ fn renderer(rel: &str, ts: TokenStream, out: &mut Vec<Issue>) {
     }
 }
 
-/// A manifest's dependency on a renderer crate (`dioxus`, `dioxus-…`):
-/// aio brings the one behind `aio::ui`.
+/// A manifest's dependency on a Dioxus crate (`dioxus`, `dioxus-…`): aio
+/// brings the renderer behind `aio::ui` (air).
 pub fn manifest(rel: &str, text: &str, out: &mut Vec<Issue>) {
     for (i, l) in text.lines().enumerate() {
         let l = l.trim_start();
@@ -281,7 +281,7 @@ pub fn manifest(rel: &str, text: &str, out: &mut Vec<Issue>) {
                 Issue::new(
                     Severity::Error,
                     "renderer",
-                    "depends on dioxus, the renderer behind aio::ui".into(),
+                    "depends on dioxus, aio-rs 0.1's renderer: 0.2 draws with air, behind aio::ui".into(),
                     rel,
                     i + 1,
                 )
@@ -315,7 +315,7 @@ impl Checks<'_> {
         self.f.issues.push(Issue::new(sev, area, msg, self.file, line).fix(fix));
     }
 
-    /// A view (returns `View`, or Dioxus's `Element`) or a hook (`use_…`):
+    /// A view (returns `View`, or `Element`, its 0.1 name) or a hook (`use_…`):
     /// what keeps something for it ([`HOOKS`]) runs on every render, in one order.
     fn hooks(&mut self, sig: &Signature, body: &Block) {
         let element = matches!(&sig.output, ReturnType::Type(_, t)
@@ -623,7 +623,7 @@ impl<'ast> Visit<'ast> for Impure {
 }
 
 /// What keeps something for a view in aio::ui (beside the `use_…` hooks):
-/// matched by call order, as Dioxus's hooks are.
+/// matched by call order (a body run again: `follow`, a hot reload).
 const HOOKS: &[&str] =
     &["signal", "memo", "effect", "watch", "once", "on_cleanup", "callback", "provide", "task", "resource"];
 
@@ -740,10 +740,11 @@ impl Checks<'_> {
     }
 
     fn rsx(&mut self, ts: TokenStream, roots: Nodes) {
-        let Ok(body) = syn::parse2::<CallBody>(ts) else { return };
+        // As the compiler reads it (air's own parser); one that doesn't parse is the compiler's to say.
+        let Ok(body) = crate::reload::air_rsx::nodes(ts) else { return };
         let mut found = Vec::new();
-        a11y(&body.body.roots, Within::default(), &mut found);
-        keys(&body.body.roots, roots, &mut found);
+        a11y(&body, Within::default(), &mut found);
+        keys(&body, roots, &mut found);
         found.sort_by_key(|f| f.0);
         for (line, sev, area, msg, fix) in found {
             self.push(sev, area, msg, line, fix);
@@ -756,43 +757,34 @@ type Attrs = BTreeMap<String, Option<String>>;
 type Found = Vec<(usize, Severity, &'static str, String, &'static str)>;
 
 /// An element's attributes, `aria-label` and `aria_label` alike; the value
-/// when it is a literal.
-fn attrs(el: &dioxus_rsx::Element) -> Option<Attrs> {
-    let mut out = Attrs::new();
-    for a in &el.raw_attributes {
-        let name = match &a.name {
-            AttributeName::BuiltIn(i) => i.to_string().trim_start_matches("r#").to_string(),
-            AttributeName::Custom(s) => s.value(),
-            AttributeName::Spread(_) => return None,
-        };
-        let value = match &a.value {
-            AttributeValue::AttrLiteral(HotLiteral::Fmted(s)) => s.to_static(),
-            AttributeValue::AttrLiteral(HotLiteral::Bool(b)) => Some(b.value.to_string()),
-            AttributeValue::AttrLiteral(HotLiteral::Int(i)) => Some(i.base10_digits().to_string()),
-            _ => None,
-        };
-        out.insert(name.replace('-', "_"), value);
-    }
-    el.spreads.is_empty().then_some(out)
+/// when it is a literal. None: some come from a spread (`..attributes`).
+fn attrs(attrs: &[(String, Val)], spreads: &[TokenStream]) -> Option<Attrs> {
+    let value = |v: &Val| match v {
+        Val::Static(s) => Some(s.clone()),
+        Val::Present(b) => Some(b.to_string()),
+        _ => None,
+    };
+    let out = attrs.iter().map(|(name, v)| (name.replace('-', "_"), value(v))).collect();
+    spreads.is_empty().then_some(out)
 }
 
 /// Could the children give the element a name? Anything not known (an
 /// expression, a component, a branch) counts as yes: a false alarm costs
 /// more than a missed one.
-fn speaks(nodes: &[BodyNode]) -> bool {
+fn speaks(nodes: &[Node]) -> bool {
     nodes.iter().any(|n| match n {
-        BodyNode::Text(t) => !t.input.source.value().trim().is_empty(),
-        BodyNode::Element(el) => {
-            attrs(el)
+        Node::Text(t) => !t.trim().is_empty(),
+        Node::El { attrs: a, spreads, children, .. } => {
+            attrs(a, spreads)
                 .is_none_or(|a| ["aria_label", "aria_labelledby", "title", "alt"].iter().any(|k| a.contains_key(*k)))
-                || speaks(&el.children)
+                || speaks(children)
         }
         _ => true,
     })
 }
 
 /// What `el` is missing to have an accessible name, and how to give it one.
-fn unnamed(tag: &str, a: &Attrs, children: &[BodyNode], in_label: bool) -> Option<(String, &'static str)> {
+fn unnamed(tag: &str, a: &Attrs, children: &[Node], in_label: bool) -> Option<(String, &'static str)> {
     let key = |k: &str| a.contains_key(k);
     let val = |k: &str| a.get(k).cloned().flatten();
     let named = key("aria_label") || key("aria_labelledby") || key("title");
@@ -892,20 +884,18 @@ fn misused(tag: &str, a: &Attrs, within: Within) -> Vec<(String, &'static str)> 
 }
 
 /// A list's items without a `key` (aio's missing-key tripwire): matched by
-/// place, a row removed or moved hands its state (a field's text, focus,
-/// a component's signals) to its neighbour. Duplicate keys Dioxus itself
-/// refuses (`rsx!` and debug builds).
-fn unkeyed(roots: &[BodyNode]) -> Found {
+/// place, a row removed or moved would hand its state (a field's text,
+/// focus, a component's signals) to its neighbour, so air refuses it.
+fn unkeyed(roots: &[Node]) -> Found {
     // The body's first node keys each pass: only that one takes a key.
     let missing = match roots.first() {
-        Some(BodyNode::Element(el)) if !has_key(el) => Some(el_name(&el.name)),
-        Some(BodyNode::Component(c)) if c.get_key().is_none() => Some(component_name(c)),
+        Some(n @ (Node::El { key: None, .. } | Node::Comp { key: None, .. })) => name_of(n),
         // A block's rsx! is a node inside the pass's unkeyed one: its key keys nothing.
-        Some(BodyNode::RawExpr(e)) => {
-            let msg = "a for loop over a block keys nothing (the block's rsx! sits inside an unkeyed node): a shift of the list rebuilds every row";
+        Some(Node::Expr(e)) => {
+            let msg = "a for loop over a block keys nothing (the block's rsx! sits inside an unkeyed node): air refuses it";
             return vec![(
-                e.span().start().line,
-                Severity::Warn,
+                line_of(e),
+                Severity::Error,
                 "render",
                 msg.into(),
                 "{items.iter().map(|it| { …; rsx! { div { key: \"{it.id}\", … } } })}",
@@ -915,28 +905,28 @@ fn unkeyed(roots: &[BodyNode]) -> Found {
     };
     let say = |(what, line)| {
         let msg = format!(
-            "<{what}> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)"
+            "<{what}> in a for loop has no key: a removed or moved row would hand its state to the next (air refuses it)"
         );
         (line, Severity::Error, "render", msg, "key: \"{item.id}\"")
     };
     missing.map(say).into_iter().collect()
 }
 
-fn has_key(el: &dioxus_rsx::Element) -> bool {
-    el.raw_attributes.iter().any(|a| a.name.is_likely_key())
+/// The line `ts` starts on.
+fn line_of(ts: &TokenStream) -> usize {
+    ts.clone().into_iter().next().map_or(0, |t| t.span().start().line)
 }
 
-/// An element's tag and line.
-fn el_name(name: &ElementName) -> (String, usize) {
-    match name {
-        ElementName::Ident(i) => (i.to_string(), i.span().start().line),
-        ElementName::Custom(s) => (s.value(), s.span().start().line),
+/// An element's tag or a component's name, and its line.
+fn name_of(n: &Node) -> Option<(String, usize)> {
+    match n {
+        Node::El { tag, at, .. } => Some((tag.clone(), at.start().line)),
+        Node::Comp { path, .. } => path.iter().rev().find_map(|t| match t {
+            TokenTree::Ident(i) => Some((i.to_string(), i.span().start().line)),
+            _ => None,
+        }),
+        _ => None,
     }
-}
-
-/// A component's name and line.
-fn component_name(c: &dioxus_rsx::Component) -> (String, usize) {
-    (c.name.segments.last().map_or(String::new(), |s| s.ident.to_string()), c.name.span().start().line)
 }
 
 /// What a run of nodes is, for the keys on them.
@@ -954,15 +944,13 @@ enum Nodes {
     Children,
 }
 
-/// Keys Dioxus ignores without a word at run time: one on a block's later
-/// node (the first node keys the block: "Keys are only allowed on the
-/// first node in the block"), and one on a node in no list (only a list's
-/// items are told apart by key: a changed key remounts nothing).
-fn keys(nodes: &[BodyNode], block: Nodes, out: &mut Found) {
+/// Keys air ignores: one on a block's later node (the first node keys the
+/// block), and one on a node in no list (only a list's items are told apart
+/// by key: a changed key remounts nothing).
+fn keys(nodes: &[Node], block: Nodes, out: &mut Found) {
     for (i, n) in nodes.iter().enumerate() {
         let keyed = match n {
-            BodyNode::Element(el) => has_key(el).then(|| el_name(&el.name)),
-            BodyNode::Component(c) => c.get_key().is_some().then(|| component_name(c)),
+            Node::El { key: Some(_), .. } | Node::Comp { key: Some(_), .. } => name_of(n),
             _ => None,
         };
         if let Some((what, line)) = keyed {
@@ -983,23 +971,12 @@ fn keys(nodes: &[BodyNode], block: Nodes, out: &mut Found) {
             }
         }
         match n {
-            BodyNode::Element(el) => keys(&el.children, Nodes::Children, out),
-            BodyNode::Component(c) => keys(&c.children.roots, Nodes::Branch, out),
-            BodyNode::ForLoop(f) => keys(&f.body.roots, Nodes::Loop, out),
-            BodyNode::IfChain(c) => {
-                let mut at = Some(c);
-                while let Some(c) = at {
-                    if let Expr::Let(l) = &*c.cond {
-                        let msg = "`if let` in rsx!: air (aio::ui's next renderer) refuses it".to_string();
-                        let fix = "branch on a bool (`if x.is_some()`), or a child: {x.map(|v| rsx! { … })}";
-                        out.push((l.let_token.span.start().line, Severity::Warn, "render", msg, fix));
-                    }
-                    keys(&c.then_branch.roots, Nodes::Branch, out);
-                    if let Some(e) = &c.else_branch {
-                        keys(&e.roots, Nodes::Branch, out);
-                    }
-                    at = c.else_if_branch.as_deref();
-                }
+            Node::El { children, .. } => keys(children, Nodes::Children, out),
+            Node::Comp { children, .. } => keys(children, Nodes::Branch, out),
+            Node::For { body, .. } => keys(body, Nodes::Loop, out),
+            Node::If { then, otherwise, .. } => {
+                keys(then, Nodes::Branch, out);
+                keys(otherwise, Nodes::Branch, out);
             }
             _ => {}
         }
@@ -1013,46 +990,49 @@ struct Within {
     form: bool,
 }
 
-fn a11y(nodes: &[BodyNode], within: Within, out: &mut Found) {
+fn a11y(nodes: &[Node], within: Within, out: &mut Found) {
     for n in nodes {
         match n {
-            BodyNode::Element(el) => {
-                let (tag, line) = el_name(&el.name);
-                if let Some(a) = attrs(el) {
+            Node::El { tag, at, attrs: a, spreads, children, .. } => {
+                let (tag, line) = (tag.as_str(), at.start().line);
+                if let Some(a) = attrs(a, spreads) {
                     out.extend(
-                        unnamed(&tag, &a, &el.children, within.label)
+                        unnamed(tag, &a, children, within.label)
                             .map(|(msg, fix)| (line, Severity::Error, "a11y", msg, fix)),
                     );
-                    out.extend(keyless(&tag, &a).map(|msg| {
+                    out.extend(keyless(tag, &a).map(|msg| {
                         (line, Severity::Warn, "a11y", msg, "use a button, or give it role, tabindex: 0 and onkeydown")
                     }));
                     out.extend(
-                        misused(&tag, &a, within)
+                        misused(tag, &a, within)
                             .into_iter()
                             .map(|(msg, fix)| (line, Severity::Warn, "a11y", msg, fix)),
                     );
                 }
-                if drag_set(el) {
+                if drag_set(a) {
                     let msg = format!(
-                        "<{tag}>'s ondragstart set_data never reaches the drop: the view runs after the browser's dragstart"
+                        "<{tag}>'s ondragstart sets the drag's data, which never reaches the drop: the view runs after the browser's dragstart"
                     );
                     out.push((
                         line,
                         Severity::Warn,
                         "render",
                         msg,
-                        "\"data-drag\": \"{id}\" on the element (the drop reads it as text/plain)",
+                        "\"data-drag\": \"{id}\" on the element (the drop reads it with data_transfer().get_as_text())",
                     ));
                 }
                 let within = Within { label: within.label || tag == "label", form: within.form || tag == "form" };
-                a11y(&el.children, within, out);
+                a11y(children, within, out);
             }
-            BodyNode::Component(c) => a11y(&c.children.roots, within, out),
-            BodyNode::ForLoop(f) => {
-                out.extend(unkeyed(&f.body.roots));
-                a11y(&f.body.roots, within, out)
+            Node::Comp { children, .. } => a11y(children, within, out),
+            Node::For { body, .. } => {
+                out.extend(unkeyed(body));
+                a11y(body, within, out)
             }
-            BodyNode::IfChain(c) => chain(c, within, out),
+            Node::If { then, otherwise, .. } => {
+                a11y(then, within, out);
+                a11y(otherwise, within, out);
+            }
             _ => {}
         }
     }
@@ -1060,19 +1040,6 @@ fn a11y(nodes: &[BodyNode], within: Within, out: &mut Found) {
 
 /// An `ondragstart` that sets the drag's data: lost, since a view's handler
 /// runs after the browser's dragstart is over (aio's page sets `data-drag`).
-fn drag_set(el: &dioxus_rsx::Element) -> bool {
-    el.raw_attributes.iter().any(|a| {
-        matches!(&a.name, AttributeName::BuiltIn(i) if i == "ondragstart")
-            && a.value.to_token_stream().to_string().contains("set_data")
-    })
-}
-
-fn chain(c: &IfChain, within: Within, out: &mut Found) {
-    a11y(&c.then_branch.roots, within, out);
-    if let Some(e) = &c.else_if_branch {
-        chain(e, within, out);
-    }
-    if let Some(e) = &c.else_branch {
-        a11y(&e.roots, within, out);
-    }
+fn drag_set(attrs: &[(String, Val)]) -> bool {
+    attrs.iter().any(|(name, v)| name == "ondragstart" && matches!(v, Val::Event(_, h) if h.to_string().contains("set_data")))
 }

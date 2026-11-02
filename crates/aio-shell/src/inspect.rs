@@ -93,7 +93,6 @@ pub const HOT: &str = "Aio.hot";
 
 /// Apply a hot reload's templates (air's: Dioxus has its own devtools).
 fn hot(params: &Value) -> Result<Value, String> {
-    #[cfg(all(feature = "air", not(feature = "dioxus")))]
     {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -117,17 +116,12 @@ fn hot(params: &Value) -> Result<Value, String> {
             .ok_or("a file is not text")?;
         Ok(json!({ "windows": crate::views::hot(&files, markup) }))
     }
-    #[cfg(feature = "dioxus")]
-    {
-        _ = params;
-        Err("the views are Dioxus's: its devtools reload them".into())
-    }
 }
 
 /// The door's own methods for `ax dev`'s hot-patch (a dev build with
 /// aio-shell's `dev`): `Aio.aslr` answers `{"aslr": n}`, where this process
-/// is loaded (subsecond's `aslr_reference`, which a patch is linked
-/// against); `Aio.patch` takes `{"table": <subsecond's JumpTable>}`, loads
+/// is loaded (`aio_hotpatch::aslr_reference`, which a patch is linked
+/// against); `Aio.patch` takes `{"table": <an aio_hotpatch::JumpTable>}`, loads
 /// the patch and answers `{"applied": true}`: the code calls the new
 /// functions from then on (the views on air are built again on them).
 pub const ASLR: &str = "Aio.aslr";
@@ -137,13 +131,13 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
     #[cfg(all(debug_assertions, feature = "dev"))]
     {
         if method == ASLR {
-            return Ok(json!({ "aslr": subsecond::aslr_reference() }));
+            return Ok(json!({ "aslr": aio_hotpatch::aslr_reference() }));
         }
-        let table: subsecond::JumpTable =
+        let table: aio_hotpatch::JumpTable =
             aio::serde_json::from_value(params["table"].clone()).map_err(|e| format!("not a jump table: {e}"))?;
         // SAFETY: a table `ax dev` linked against this very binary at the
-        // address it answered (`Aio.aslr`); subsecond checks the base.
-        unsafe { subsecond::apply_patch(table) }.map_err(|e| format!("the patch didn't load: {e}"))?;
+        // address it answered (`Aio.aslr`).
+        unsafe { aio_hotpatch::apply_patch(table) }.map_err(|e| format!("the patch didn't load: {e}"))?;
         Ok(json!({ "applied": true }))
     }
     #[cfg(not(all(debug_assertions, feature = "dev")))]
@@ -155,13 +149,7 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
 
 /// What the dev build keeps; nothing before the window's view runs.
 fn components() -> Value {
-    #[cfg(all(debug_assertions, feature = "dioxus"))]
-    if let Some(t) = crate::renders::TREE.get() {
-        let t = t.lock().unwrap_or_else(|e| e.into_inner());
-        let (renders, total) = t.renders();
-        return json!({ "components": t.json(), "renders": renders, "total": total });
-    }
-    json!({ "components": [], "renders": [], "total": 0 })
+    crate::views::components()
 }
 
 /// A CDP answer line for call `id` (pure).

@@ -12,8 +12,6 @@ use crate::{Cell, Door};
 use base64::Engine;
 use crate::ui::{Component, View};
 pub use crate::ui::prelude::{Key, Modifiers};
-#[cfg(feature = "kit")]
-use dioxus::dioxus_core::{ScopeId, VirtualDom};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -62,205 +60,9 @@ pub(crate) const BRIDGE: &str = r#"window.__aioWire = (() => {
   return { send: (u) => out.push(text(u)), listen: (f) => { on = f; early.splice(0).forEach(f); } };
 })();"#;
 
-/// The views' end of the wire: frames from the page in, edits out.
-#[cfg(feature = "kit")]
-struct Wire {
-    from_page: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    to_page: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-}
 
-#[cfg(feature = "kit")]
-impl futures_util::Stream for Wire {
-    type Item = Result<Vec<u8>, dioxus_liveview::LiveViewError>;
 
-    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
-        let got = self.from_page.poll_recv(cx);
-        if let std::task::Poll::Ready(Some(_)) = got {
-            // The page said something: renders from here on answer it.
-            renders::reset();
-        }
-        got.map(|f| f.map(Ok))
-    }
-}
 
-#[cfg(feature = "kit")]
-impl futures_util::Sink<Vec<u8>> for Wire {
-    type Error = dioxus_liveview::LiveViewError;
-
-    fn poll_ready(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn start_send(self: std::pin::Pin<&mut Self>, f: Vec<u8>) -> Result<(), Self::Error> {
-        self.to_page.send(f).map_err(|_| dioxus_liveview::LiveViewError::SendingFailed)
-    }
-
-    fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-}
-
-#[cfg(feature = "kit")]
-/// Who rendered, from the span Dioxus opens for each render (`render`, its
-/// component as `scope`): each view's mounted components and their renders
-/// (aio DevTools' `tree`), and the tripwire for a view that renders forever.
-mod renders {
-    use super::MountedComponent;
-    use std::cell::RefCell;
-    use std::collections::{BTreeMap, HashMap};
-    use tracing::span::{Attributes, Id, Record};
-    use tracing::{Event, Metadata, field::Field, subscriber::Interest};
-
-    /// Renders of one component with nothing from the page or the test in
-    /// between that make a render loop (aio's tripwire).
-    const LOOP: u32 = 100;
-
-    /// A component in a view: its runtime and its scope.
-    type Key = (usize, usize);
-
-    struct Node {
-        name: &'static str,
-        parent: Option<usize>,
-        renders: u32,
-    }
-
-    thread_local! {
-        static TREE: RefCell<BTreeMap<Key, Node>> = const { RefCell::new(BTreeMap::new()) };
-        static SINCE: RefCell<HashMap<Key, u32>> = RefCell::new(HashMap::new());
-        static ON: RefCell<Option<tracing::subscriber::DefaultGuard>> = const { RefCell::new(None) };
-    }
-
-    /// Listen on this thread (the views render where their test runs).
-    pub(super) fn install() {
-        ON.with_borrow_mut(|g| {
-            g.get_or_insert_with(|| {
-                // With one listener alive, tracing-core asks only the
-                // registering thread's own: a render callsite first met on a
-                // thread with none (a view off any test) is cached as of no
-                // interest for every thread, and renders go uncounted. A
-                // second one, kept for good, has it ask them all.
-                static KEPT: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
-                KEPT.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
-                tracing::subscriber::set_default(Spans)
-            });
-        });
-    }
-
-    /// The test, or the page, had its turn: the loop count starts over.
-    pub(super) fn reset() {
-        SINCE.with_borrow_mut(HashMap::clear);
-    }
-
-    /// The mounted components of view `rt`, as a tree; Dioxus's own
-    /// boundaries and the root's wrapper are no component of the app's.
-    pub(super) fn tree(rt: usize) -> Vec<MountedComponent> {
-        fn under(t: &BTreeMap<Key, Node>, rt: usize, parent: Option<usize>) -> Vec<MountedComponent> {
-            let mut out = vec![];
-            for (&(v, scope), n) in t.range((rt, 0)..=(rt, usize::MAX)) {
-                if n.parent != parent || v != rt {
-                    continue;
-                }
-                let children = under(t, rt, Some(scope));
-                if n.parent.is_none() || n.name.starts_with("dioxus_core::") {
-                    out.extend(children);
-                    continue;
-                }
-                let name = n.name.rsplit("::").next().unwrap_or(n.name);
-                out.push(MountedComponent { name, key: None, renders: n.renders, updates: 0, children });
-            }
-            out
-        }
-        TREE.with_borrow(|t| under(t, rt, None))
-    }
-
-    /// Kept in each component's own context: dropped with it, it takes the
-    /// component out of the tree.
-    #[derive(Clone)]
-    struct Alive(#[allow(dead_code)] std::rc::Rc<Gone>);
-
-    struct Gone(Key);
-
-    impl Drop for Gone {
-        fn drop(&mut self) {
-            _ = TREE.try_with(|t| t.borrow_mut().remove(&self.0));
-        }
-    }
-
-    fn is_render(m: &Metadata<'_>) -> bool {
-        m.is_span() && m.name() == "render" && m.target().starts_with("dioxus_core")
-    }
-
-    /// The `scope` field of a render span.
-    struct Scope(String);
-
-    impl tracing::field::Visit for Scope {
-        fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
-            if f.name() == "scope" {
-                self.0 = format!("{v:?}");
-            }
-        }
-    }
-
-    struct Spans;
-
-    impl tracing::Subscriber for Spans {
-        fn register_callsite(&self, m: &'static Metadata<'static>) -> Interest {
-            if is_render(m) { Interest::always() } else { Interest::never() }
-        }
-
-        fn enabled(&self, m: &Metadata<'_>) -> bool {
-            is_render(m)
-        }
-
-        fn new_span(&self, a: &Attributes<'_>) -> Id {
-            let id = Id::from_u64(1);
-            // The render runs in its component's scope, on its view's thread.
-            let Some((rt, scope)) = dioxus::dioxus_core::Runtime::try_current()
-                .and_then(|rt| rt.try_current_scope_id().map(|s| (rt, s)))
-            else {
-                return id;
-            };
-            let mut name = Scope(String::new());
-            a.record(&mut name);
-            let key = (std::rc::Rc::as_ptr(&rt) as *const () as usize, scope.0);
-            let looping = SINCE.with_borrow_mut(|s| {
-                let n = s.entry(key).or_default();
-                *n += 1;
-                *n > LOOP
-            });
-            if looping {
-                panic!("still rendering after {LOOP} passes: a view writes state it reads (a render loop)");
-            }
-            TREE.with_borrow_mut(|t| {
-                // Its nearest ancestor that rendered (a suspense boundary renders unnamed).
-                let mut up = rt.parent_scope(scope);
-                while let Some(p) = up.filter(|p| !t.contains_key(&(key.0, p.0))) {
-                    up = rt.parent_scope(p);
-                }
-                let parent = up.map(|p| p.0);
-                let n = t.entry(key).or_insert_with(|| Node { name: crate::ui::sym(&name.0), parent, renders: 0 });
-                if n.name != name.0 || n.parent != parent {
-                    *n = Node { name: crate::ui::sym(&name.0), parent, renders: 0 };
-                }
-                n.renders += 1;
-            });
-            if rt.has_context::<Alive>(scope).is_none() {
-                rt.provide_context(scope, Alive(std::rc::Rc::new(Gone(key))));
-            }
-            id
-        }
-
-        fn record(&self, _: &Id, _: &Record<'_>) {}
-        fn record_follows_from(&self, _: &Id, _: &Id) {}
-        fn event(&self, _: &Event<'_>) {}
-        fn enter(&self, _: &Id) {}
-        fn exit(&self, _: &Id) {}
-    }
-}
 
 /// How a `TestUi` mounts (aio's `testUI` options): the window size, light or
 /// dark (`prefers-color-scheme`), scrollbars or none, what runs in the
@@ -322,31 +124,19 @@ impl Mount {
         self
     }
 
-    #[cfg(feature = "kit")]
-    pub fn app(self, app: fn() -> View) -> TestUi {
-        self.mount(VirtualDom::new(app))
-    }
 
-    /// Mount one component alone, with its props (aio's `testComponent`).
-    #[cfg(feature = "kit")]
-    pub fn component<P: Clone + 'static, M: 'static>(self, c: impl Component<P, M>, props: P) -> TestUi {
-        self.mount(VirtualDom::new_with_props(c, props))
-    }
 
-    #[cfg(not(feature = "kit"))]
     pub fn app(self, app: fn() -> View) -> TestUi {
         self.mount(Box::new(app))
     }
 
     /// Mount one component alone, with its props (aio's `testComponent`).
-    #[cfg(not(feature = "kit"))]
     pub fn component<P: Clone + 'static, M: 'static>(self, c: impl Component<P, M>, props: P) -> TestUi {
         self.mount(Box::new(move || c.call(props.clone())))
     }
 
     /// Open the page, then the views on air: a root shown, and a task
     /// that carries the page's frames to it and its edits back.
-    #[cfg(not(feature = "kit"))]
     fn mount(self, app: Box<dyn Fn() -> View>) -> TestUi {
         let sandbox = crate::paths::sandbox().expect("a test sandbox");
         UNSEEN.with_borrow_mut(|u| _ = u.get_or_insert_default());
@@ -406,54 +196,12 @@ impl Mount {
         ui
     }
 
-    #[cfg(feature = "kit")]
-    fn mount(self, vdom: VirtualDom) -> TestUi {
-        // The page's events as the window's views get them (and the
-        // elements `onmounted` hands out, answered by the page).
-        static EVENTS: std::sync::Once = std::sync::Once::new();
-        EVENTS.call_once(|| drop(dioxus_liveview::LiveViewPool::new()));
-        renders::install();
-        let sandbox = crate::paths::sandbox().expect("a test sandbox");
-        UNSEEN.with_borrow_mut(|u| _ = u.get_or_insert_default());
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
-        crate::capabilities::hold_for_tests(&self.network);
-        let page = self.page();
-        let view = vdom.runtime();
-        let (to_view, from_page) = tokio::sync::mpsc::unbounded_channel();
-        let (to_page, from_view) = tokio::sync::mpsc::unbounded_channel();
-        let local = tokio::task::LocalSet::new();
-        let task = {
-            let _in = rt.enter();
-            for f in self.before {
-                view.in_scope(ScopeId::ROOT, f);
-            }
-            let run = dioxus_liveview::run(vdom, Wire { from_page, to_page });
-            local.spawn_local(async move { run.await.map_err(|e| e.to_string()) })
-        };
-        let ui = TestUi {
-            task,
-            local,
-            view,
-            to_view,
-            from_view,
-            video: super::video::Recorder::asked(),
-            page,
-            rt,
-            hovering: false,
-            sent: 0,
-            scope: vec![],
-            frozen: false,
-            _sandbox: sandbox,
-        };
-        Self::started(ui)
-    }
 }
 
 /// The views on air, on the window's wire: the page's frames to the root
 /// (its events, its scripts' replies), the tasks run when woken, each
 /// flush's edits to the page as one frame. A view's error no boundary
 /// caught fails the test.
-#[cfg(not(feature = "kit"))]
 async fn pump(
     root: air::Root,
     mut from_page: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
@@ -624,11 +372,7 @@ pub struct TestUi {
     /// The views' task (the app's views, on the window's wire).
     task: tokio::task::JoinHandle<Result<(), String>>,
     local: tokio::task::LocalSet,
-    /// The views' runtime: the app's root scope, where its globals live.
-    #[cfg(feature = "kit")]
-    view: std::rc::Rc<dioxus::dioxus_core::Runtime>,
     /// The app's root, where its globals live.
-    #[cfg(not(feature = "kit"))]
     view: air::Owner,
     to_view: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     from_view: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
@@ -699,8 +443,6 @@ impl TestUi {
 
     /// Run the views until `until` is done; a view that panicked fails the test with its panic.
     fn drive(&mut self, until: impl std::future::Future) {
-        #[cfg(feature = "kit")]
-        renders::reset();
         self.rt.block_on(self.local.run_until(until));
         if self.task.is_finished() {
             match self.rt.block_on(&mut self.task) {
@@ -816,14 +558,7 @@ impl TestUi {
         self.in_root(|| g.get_untracked())
     }
 
-    /// `f` in the app's root scope (where its globals live, and its tasks).
-    #[cfg(feature = "kit")]
-    fn in_root<R>(&self, f: impl FnOnce() -> R) -> R {
-        let _in = self.rt.enter();
-        self.view.in_scope(ScopeId::ROOT, f)
-    }
 
-    #[cfg(not(feature = "kit"))]
     fn in_root<R>(&self, f: impl FnOnce() -> R) -> R {
         let _in = self.rt.enter();
         let r = air::with_owner(self.view, || air::batch(f));
@@ -838,17 +573,10 @@ impl TestUi {
         self.sent
     }
 
-    /// The mounted components, as a tree (aio DevTools' `tree`): each one's
-    /// name and how many times it rendered (re-render tracking).
-    #[cfg(feature = "kit")]
-    pub fn components(&self) -> Vec<MountedComponent> {
-        renders::tree(std::rc::Rc::as_ptr(&self.view) as *const () as usize)
-    }
 
     /// The mounted components, as a tree (aio DevTools' `tree`): each one's
     /// name, its key in a list, its body runs (`renders`) and its holes'
     /// updates; each level in the order they were placed.
-    #[cfg(not(feature = "kit"))]
     pub fn components(&self) -> Vec<MountedComponent> {
         fn of(c: Vec<air::Mounted>) -> Vec<MountedComponent> {
             c.into_iter()
@@ -867,7 +595,6 @@ impl TestUi {
 
     /// The mounted components for the page's reader (`comp=` paths): each
     /// one's name, key, first and last node, and its parent's place.
-    #[cfg(not(feature = "kit"))]
     fn tree(&self) -> Value {
         fn flat(c: Vec<air::Mounted>, parent: Option<usize>, out: &mut Vec<Value>) {
             for c in c {
@@ -883,11 +610,6 @@ impl TestUi {
         out.into()
     }
 
-    /// On Dioxus the page names no component.
-    #[cfg(feature = "kit")]
-    fn tree(&self) -> Value {
-        json!([])
-    }
 
     /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its
     /// refusal. A path is taken inside the [`within`](Self::within) scope.

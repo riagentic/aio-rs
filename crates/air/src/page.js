@@ -66,7 +66,7 @@
       (!!e.isComposing << 5) | ((t.checked === true) << 6) | (!!e.isPrimary << 7)
     parts.push(['u8', flags], ['u8', typeof e.button === 'number' ? e.button : 255], ['u16', e.buttons || 0])
     for (const v of [e.clientX, e.clientY, e.pageX, e.pageY, e.offsetX, e.offsetY, e.screenX, e.screenY, e.deltaX, e.deltaY, e.deltaZ]) parts.push(f(v))
-    parts.push(['u8', e.deltaMode || 0], s(typeof t.value === 'string' ? t.value : ''))
+    parts.push(['u8', e.deltaMode || 0], s(e.dataTransfer ? e.dataTransfer.getData('text/plain') : typeof t.value === 'string' ? t.value : ''))
     for (const v of [sc.scrollTop, sc.scrollLeft, sc.scrollWidth, sc.scrollHeight, sc.clientWidth, sc.clientHeight]) parts.push(f(v))
     parts.push(['u32', e.pointerId || 0], s(e.pointerType), ['u16', form.length])
     for (const [k, v] of form) parts.push(s(k), s(typeof v === 'string' ? v : v.name))

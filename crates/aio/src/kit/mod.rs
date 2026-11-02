@@ -1,5 +1,6 @@
 //! The UI kit (aio's `aio/ui`): the controls every app otherwise rewrites, as
-//! Dioxus components over real elements, styled by one stylesheet ([`CSS`])
+//! air components over real elements (feature `air`; the same API as the
+//! Dioxus kit's, docs/design/air.md), styled by one stylesheet ([`CSS`])
 //! and themed by `--aio-*` tokens ([`theme_css`]). Keyboard first: each
 //! control does its WAI-ARIA keyboard pattern. Every component takes `class`
 //! (appended to its own) and any other attribute (`"data-t"`, `id`, `aria-*`),
@@ -8,9 +9,14 @@
 //! `menuScrim`, `modalBackdrop`, `confirmOk`, `confirmCancel`, `toastDismiss`,
 //! `alertDismiss`, `pagePrev`, `pageNext`, `page{n}`, `zoomIn`, `zoomOut`,
 //! `zoomFit`, `zoomStage`, and the sign-in form's `signin…` parts.
+//!
+//! On air a component's body runs once: a prop that may change is a
+//! [`Prop`](crate::ui::prelude::Prop) (`value: name.get()` follows `name`),
+//! and the parts of a control that show it are its holes.
 
 mod back;
 mod browser;
+mod change;
 mod controls;
 mod defer;
 mod form;
@@ -36,10 +42,11 @@ mod zoom;
 
 pub use back::use_back_button;
 pub use browser::{Browser, Go, GuestEvent, HostKey, go};
+pub use change::{use_on_change, use_on_change_now};
 pub use controls::*;
-pub use defer::{Defer, Trigger};
+pub use defer::{Defer, Load, Trigger, load};
 pub use form::*;
-pub use forms::{Form, Problems, move_item, use_async_rule, use_form};
+pub use forms::{Bind, FieldArray, FieldOf, Form, Problems, move_item, use_async_rule, use_field_array, use_form};
 #[cfg(not(target_arch = "wasm32"))]
 pub use held::use_held;
 pub use island::{Island, WebIsland};
@@ -110,14 +117,8 @@ fn note_unstyled(base: &str) {
     }
 }
 
-/// A boolean attribute: there, or not at all (a renderer may keep
-/// `disabled="false"`, which disables).
-fn flag(on: bool) -> Option<bool> {
-    on.then_some(true)
-}
-
 /// A stable id per component instance (for `aria-controls`, `for` and
-/// `name` pairs): made once, kept across re-renders.
+/// `name` pairs): made once.
 pub fn use_id(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -125,8 +126,8 @@ pub fn use_id(prefix: &str) -> String {
 }
 
 /// A part of a context (aio's `useContextSelector`): the provider gives a
-/// `Signal<T>` (`provide(|| Signal::new(t))`), and this view
-/// re-renders only when `f`'s answer changes, not on every change to `T`.
+/// `Signal<T>` (`provide(|| Signal::new(t))`), and what reads the memo
+/// follows only `f`'s answer, not every change to `T`.
 /// With no provider above, `f` reads `T::default()` (aio's context default).
 pub fn use_context_select<T: Default + 'static, R: PartialEq + 'static>(
     f: impl Fn(&T) -> R + 'static,

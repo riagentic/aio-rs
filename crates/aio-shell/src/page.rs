@@ -49,8 +49,8 @@ pub async fn caret(selector: &str) -> Option<usize> {
     aio::ui::prelude::eval(&js).join::<Option<usize>>().await.ok().flatten()
 }
 
+
 /// Own part of the window's `<head>` while this component lives (aio's `useHead`).
-#[cfg(feature = "dioxus")]
 pub use aio::head::use_head;
 
 /// The system print dialog for the page (the runtime opens it; Electron

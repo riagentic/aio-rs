@@ -45,19 +45,18 @@ its name or folder, left out inside it",
     v(
         "dev",
         "dev <app> [args…]",
-        "run an app; edits hot-patch in (with dx 0.7.10), else rebuild + restart;
+        "run an app; edits reach it live (CSS, rsx! markup, Rust hot-patched), state
+kept; what can't be patched rebuilds + restarts;
 args go to the app (--instance <n>: a private copy; --fresh: on new data);
 --display auto|isolated|current|:N: with no terminal (an agent) the window
 goes on a nested display, not the person's, and opens no browser tab (auto);
 --size 390x844: the window at that size for this run (its saved one untouched);
 --watch=false (--no-watch): build and run it once; --watch=src/ui,assets:
-rebuild on changes there only (dirs of the app; with dx: rebuilds, no hot-patch);
+reload, patch and rebuild on changes there only (dirs of the app);
 --detach: the session in the background (logs/dev.out; ax stop ends it);
 --verbose: the app's log at debug; --title <t>: the window's title this run;
 --cdp[=port]: its window opens the DevTools protocol on loopback (a free
 port, for other tools; ax shot, eval, surface and trigger need none);
---tui: dx's own screen in a terminal (its keys), not ax's compact lines
-(dx's whole output: logs/dev.log);
 --android [--device serial] [--native]: on the attached emulator or phone
 (ANDROID_SERIAL; none: AIO_AVD booted): its web build in a dev APK installed
 once beside the app, each edit reloading it (--native, or no web build: the
@@ -461,7 +460,7 @@ every app of this workspace",
         "setup",
         "setup [--check]",
         "what making apps needs: checks Rust and the C toolchain, fetches the
-shared runtime and dx (ax dev's hot-patching) prebuilt and checked, and
+shared runtime and wasm-bindgen (the web build's) prebuilt and checked, and
 lists the optional tools; each missing one with the command that gets it;
 exit 1 while a needed one is missing; --check: look only, fetch nothing",
     ),

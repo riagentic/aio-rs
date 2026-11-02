@@ -1,7 +1,7 @@
 //! Views re-render only for the parts they read (AIR-level updates).
-#![cfg(any(feature = "kit", feature = "air"))]
+#![cfg(feature = "kit")]
 // Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
-#![cfg_attr(not(feature = "kit"), allow(unused_mut))]
+#![allow(unused_mut)]
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{TestUi, fails};
@@ -846,7 +846,6 @@ fn the_page_follows_the_oss_light_or_dark_as_it_changes() {
 
 /// Scoped CSS on air (aio's `css`): a class per rule, its rule in the page
 /// once, nesting scoped to it.
-#[cfg(not(feature = "kit"))]
 #[test]
 fn a_scoped_rule_styles_its_class_only_and_is_put_in_the_page_once() {
     #[component]

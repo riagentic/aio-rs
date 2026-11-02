@@ -1,9 +1,9 @@
-//! `ax dev`'s hot-patching, without dx: a "fat" build of the app (every
+//! `ax dev`'s hot-patching: a "fat" build of the app (every
 //! dependency's code kept, every workspace crate's rustc call recorded),
 //! then per edit a "thin" build: the edited crates' rustc calls replayed,
 //! the app's crate linked into a small shared library whose missing symbols
 //! jump into the running fat binary, and a jump table (old address → new)
-//! for subsecond's `apply_patch` in the app.
+//! for `aio_hotpatch::apply_patch` in the app.
 //! Ported from dioxus-cli 0.7.10 (MIT/Apache-2.0): build/{link,patch,request}.rs, rustcwrapper.rs.
 //!
 //! ax takes two roles in the fat build, chosen by env var at the top of
@@ -22,7 +22,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-pub use subsecond_types::JumpTable;
+pub use aio_hotpatch::JumpTable;
 
 /// Set by [`fat_build`] on cargo: ax was run as rustc's workspace wrapper;
 /// each crate's call is recorded in this folder.
@@ -304,7 +304,7 @@ fn host() -> Result<(object::BinaryFormat, object::Architecture), String> {
 const MACHO: bool = cfg!(target_os = "macos");
 
 /// The symbol at the same place in the fat binary and each patch: `main`
-/// (subsecond's `aslr_reference`), `_main` in Mach-O's symbol table.
+/// (`aio_hotpatch::aslr_reference`), `_main` in Mach-O's symbol table.
 const MAIN: &str = if MACHO { "_main" } else { "main" };
 
 /// What to build: the app's binary, as `ax dev` builds it.
@@ -349,7 +349,7 @@ pub struct Times {
 }
 
 pub struct Patch {
-    /// For the app: subsecond's `apply_patch`.
+    /// For the app: `aio_hotpatch::apply_patch`.
     pub table: JumpTable,
     pub times: Times,
 }
@@ -1099,7 +1099,7 @@ fn sh_link_info(b: &[u8], header: usize) -> usize {
 /// of the app's workspace crates): the edited crates (and the crates built
 /// on them) and the app's own crate built again, linked into a new shared
 /// library, the symbols it misses resolved into the running binary
-/// (`aslr_reference`: subsecond's, from the app). Any file no crate builds
+/// (`aio_hotpatch::aslr_reference`, from the app). Any file no crate builds
 /// from (a manifest, a build script): an error, for a rebuild.
 pub fn patch(fat: &mut Fat, aslr_reference: u64, changed: &[PathBuf]) -> Result<Patch, String> {
     let started = Instant::now();
@@ -1445,13 +1445,13 @@ fn used(bytes: &[u8], undefined: &mut HashSet<String>, defined: &mut HashSet<Str
 }
 
 /// Old address → new, of each symbol the patch library `lib` and the fat
-/// binary share; `main` of each for subsecond to find both in memory.
+/// binary share; `main` of each for the app to find both in memory.
 fn jump_table(lib: &Path, symbols: &Symbols) -> Result<JumpTable, String> {
     let fail = |e: &dyn std::fmt::Display| format!("hot-patch: {}: {e}", lib.display());
     let bytes = std::fs::read(lib).map_err(|e| fail(&e))?;
     let obj = object::File::parse(&*bytes).map_err(|e| fail(&e))?;
     let new = obj.symbol_map();
-    let mut map = subsecond_types::AddressMap::default();
+    let mut map = aio_hotpatch::AddressMap::default();
     let mut new_base = None;
     for s in new.symbols() {
         if s.name() == MAIN {

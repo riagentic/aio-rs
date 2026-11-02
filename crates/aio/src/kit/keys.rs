@@ -169,22 +169,22 @@ pub fn GlobalKeys(#[props(extends = GlobalAttributes)] attributes: Vec<Attribute
             },
             onkeydown: move |e| {
                 if !keys.fire(e.clone()) {
-                    tell(W::KeyDown(e))
+                    tell.call(W::KeyDown(e))
                 }
             },
-            onkeyup: move |e| tell(W::KeyUp(e)),
-            onmousedown: move |e| tell(W::MouseDown(e)),
-            onmouseup: move |e| tell(W::MouseUp(e)),
-            onclick: move |e| tell(W::Click(e)),
-            onwheel: move |e| tell(W::Wheel(e)),
+            onkeyup: move |e| tell.call(W::KeyUp(e)),
+            onmousedown: move |e| tell.call(W::MouseDown(e)),
+            onmouseup: move |e| tell.call(W::MouseUp(e)),
+            onclick: move |e| tell.call(W::Click(e)),
+            onwheel: move |e| tell.call(W::Wheel(e)),
             onresize: move |e: ResizeEvent| {
                 if let Ok(s) = e.get_border_box_size() {
-                    tell(W::Resize { width: s.width, height: s.height })
+                    tell.call(W::Resize { width: s.width, height: s.height })
                 }
             },
             ..attributes,
             // The page tells the pointer's moves here, MOVE_MS apart.
-            div { "data-aio-moves": "", hidden: true, onmousemove: move |e| tell(W::MouseMove(e)) }
+            div { "data-aio-moves": "", hidden: true, onmousemove: move |e| tell.call(W::MouseMove(e)) }
             if (claims.any).get() {
                 div {
                     "data-aio-claimed": "",

@@ -1,9 +1,9 @@
 //! The UI kit, driven like a person: what each control renders, says to
 //! assistive tech, and does on a click or a key. On Dioxus (`kit`) and on
 //! air (`air`), the same tests.
-#![cfg(any(feature = "kit", feature = "air"))]
+#![cfg(feature = "kit")]
 // Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
-#![cfg_attr(all(feature = "air", not(feature = "kit")), allow(unused_mut))]
+#![cfg_attr(feature = "kit", allow(unused_mut))]
 use aio::kit::*;
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
@@ -760,16 +760,8 @@ fn shown(cam: &Option<aio::held::State<String>>) -> String {
     }
 }
 
-#[cfg(feature = "kit")]
-#[component]
-fn Preview(cam: Option<&'static str>) -> View {
-    let cam = use_held(cameras(), cam);
-    let text = shown(&cam);
-    rsx! { p { "data-t": "preview", "{text}" } }
-}
 
 /// On air a body runs once: the key follows its prop, the state is read in a hole.
-#[cfg(not(feature = "kit"))]
 #[component]
 fn Preview(cam: Prop<Option<&'static str>>) -> View {
     let cam = use_held(cameras(), cam);
@@ -1046,25 +1038,9 @@ fn a_portal_draws_at_the_root_keeps_its_state_and_handlers_and_leaves_nothing() 
     assert_eq!(ui.count(".aio-portals > *"), 0, "closed: nothing left behind");
 }
 
-/// The element that plays a transition: its box on Dioxus; on air, which
-/// draws none, its content's own element.
-#[cfg(feature = "kit")]
-const FX: &str = "fx";
-#[cfg(not(feature = "kit"))]
 const FX: &str = "msg";
 
-#[cfg(feature = "kit")]
-fn fading() -> View {
-    let show = signal(|| true);
-    rsx! {
-        button { "data-t": "toggle", onclick: move |_| show.toggle(), "toggle" }
-        Transition { show: show.get(), enter: Motion::FADE, exit: Motion::FADE.ms(100), "data-t": "fx",
-            p { "data-t": "msg", "hello" }
-        }
-    }
-}
 
-#[cfg(not(feature = "kit"))]
 fn fading() -> View {
     let show = signal(|| true);
     rsx! {
@@ -1099,7 +1075,6 @@ fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
     ui.wait(Duration::from_millis(150));
     assert!(ui.present("msg"), "show, hide, show: a cancelled exit removes nothing");
     assert_eq!(played(&mut ui), "aio-fade 0.3s normal");
-    #[cfg(not(feature = "kit"))]
     {
         let color = ui.eval("getComputedStyle(document.querySelector('[data-t=msg]')).color");
         assert_eq!(color.as_str(), Some("rgb(18, 52, 86)"), "no box: the content's own style kept");
@@ -1108,7 +1083,6 @@ fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
 }
 
 /// A motion written as a function plays the frames it gives.
-#[cfg(not(feature = "kit"))]
 #[test]
 fn a_motion_written_as_a_function_plays_its_frames() {
     let mut ui = TestUi::new(|| {
@@ -1551,9 +1525,6 @@ fn springy() -> View {
     let on = signal(|| true);
     let mut frames = signal(|| 0);
     // On air a hook's body runs once: `active` is the signal, followed.
-    #[cfg(feature = "kit")]
-    let active = on.get();
-    #[cfg(not(feature = "kit"))]
     let active = on;
     use_interval(Duration::from_millis(5), active, move || ticks += 1);
     use_frame(active, move |_, _| frames += 1);
@@ -1969,7 +1940,6 @@ fn a_claimed_key_goes_to_its_claim_before_anything_hears_it() {
 
 /// Labels and titles take any content on air (aio's `string | VNode`): a
 /// view where text would go, text that follows state, a toast with a link.
-#[cfg(not(feature = "kit"))]
 #[test]
 fn labels_and_titles_take_any_content() {
     let mut ui = TestUi::new(|| {
@@ -1994,21 +1964,18 @@ fn labels_and_titles_take_any_content() {
     assert!(ui.present("undo"), "a toast shows a view");
 }
 
-#[cfg(not(feature = "kit"))]
 #[derive(Clone, Default, PartialEq)]
 struct Sign {
     name: String,
     city: String,
 }
 
-#[cfg(not(feature = "kit"))]
 fn sign_check(s: &Sign) -> Problems {
     if s.name.is_empty() { vec![("name", "Required".into())] } else { vec![] }
 }
 
 /// A bound input (aio's `form.bind`): its value, edits and blur in one
 /// prop; its error shows once it was left; one field resets alone.
-#[cfg(not(feature = "kit"))]
 #[test]
 fn a_bound_input_shows_its_error_once_left_and_one_field_resets_alone() {
     let mut ui = TestUi::new(|| {
@@ -2042,7 +2009,6 @@ fn a_bound_input_shows_its_error_once_left_and_one_field_resets_alone() {
 
 /// A list of rows (aio's `useFieldArray`): push, move, set, remove, reset;
 /// out of range changes nothing.
-#[cfg(not(feature = "kit"))]
 #[test]
 fn a_field_array_edits_its_rows() {
     let mut ui = TestUi::new(|| {
@@ -2070,7 +2036,6 @@ fn a_field_array_edits_its_rows() {
 /// A reaction to a change (aio's `onChange`): only the selector is
 /// followed, it waits for a change, and its cleanup runs before the next
 /// change and when the view goes.
-#[cfg(not(feature = "kit"))]
 #[test]
 fn a_reaction_runs_on_a_change_with_the_previous_value_and_cleans_up() {
     let mut ui = TestUi::new(|| {
@@ -2100,7 +2065,6 @@ fn a_reaction_runs_on_a_change_with_the_previous_value_and_cleans_up() {
     assert_eq!(said(), ["cleanup 2"]);
 }
 
-#[cfg(not(feature = "kit"))]
 #[component]
 fn Reacts(n: Signal<u32>, other: Signal<u32>) -> View {
     use_on_change(
@@ -2114,7 +2078,6 @@ fn Reacts(n: Signal<u32>, other: Signal<u32>) -> View {
     rsx! {}
 }
 
-#[cfg(not(feature = "kit"))]
 thread_local! {
     static GATE: RefCell<Option<tokio::sync::oneshot::Receiver<Result<u32, String>>>> = const { RefCell::new(None) };
 }
@@ -2122,7 +2085,6 @@ thread_local! {
 /// Deferred content that loads (aio's `Defer` `load`, `loading`, `error`,
 /// `loadingMinMs`): the loading view while it runs, then what it made, or
 /// the error it said.
-#[cfg(not(feature = "kit"))]
 #[test]
 fn deferred_content_loads_shows_its_loading_view_then_the_content_or_its_error() {
     let app = || {
