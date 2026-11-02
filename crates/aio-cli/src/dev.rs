@@ -1466,8 +1466,9 @@ fn hot_patch(
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     let mut s = rt.block_on(crate::cdp::Session::door(&door))?;
     let aslr = rt.block_on(s.call(aio_shell::inspect::ASLR, serde_json::json!({})))?;
-    let aslr = aslr["aslr"].as_u64().ok_or_else(|| format!("{}: {aslr}", aio_shell::inspect::ASLR))?;
-    let p = crate::hotpatch::patch(fat, aslr, changed)?;
+    let (base, aslr) = (aslr["base"].as_u64(), aslr["aslr"].as_u64());
+    let aslr = aslr.ok_or_else(|| format!("{}: no aslr", aio_shell::inspect::ASLR))?;
+    let p = crate::hotpatch::patch(fat, aslr, base, changed)?;
     let table = serde_json::to_value(&p.table).map_err(|e| e.to_string())?;
     rt.block_on(s.call(aio_shell::inspect::PATCH, serde_json::json!({ "table": table })))?;
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;

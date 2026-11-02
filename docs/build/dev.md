@@ -72,8 +72,10 @@ reloads and patches it itself.
 A view keeps its state by its place among the mounted components (its
 name, its key, or its turn among its siblings); a view whose hooks changed
 starts afresh from the first that differs. What the page held (focus,
-scroll, a field's selection) is drawn anew. Patches are built on Linux and
-macOS; on Windows a Rust edit rebuilds and restarts.
+scroll, a field's selection) is drawn anew. Patches are built on Linux,
+macOS and Windows (x86_64; MSVC, or MinGW with its gcc on `PATH` or
+rustc's bundled one); on Windows the app runs at a fixed base without
+ASLR in `ax dev` (a system that forces ASLR gets a rebuild and restart).
 
 ### Hot-patching on Dioxus
 
@@ -361,8 +363,6 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
 - No hot-patching in the web build or on Android, on either renderer:
   each edit is a build and the page reloads, slower than a patch (on
   Android, of the page only, unless `--native`).
-- On air, no hot-patching on Windows yet: a Rust edit rebuilds and
-  restarts.
 - dx's own restarts (a change it can't hot-patch) give the app 1 s; ax's
   (a `Cargo.toml`, `ax restart`) ask it to stop first.
 - No flag that turns persistence off for a run: use `--instance` with

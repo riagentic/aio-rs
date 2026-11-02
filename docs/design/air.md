@@ -349,9 +349,15 @@ Done in phase 3 (below); `ax dev` runs no `dx` for an app on air.
   the view's place among the mounted components (name, key or turn among
   siblings) and by call order; a view whose hooks changed starts afresh
   from the first that differs. Named globals (`client!`'s) are keyed by
-  name, and on Linux x86_64 a patch's statics are bound to the running
-  binary's, so the patch's code finds the running state. Linux and macOS;
-  on Windows an edit rebuilds and restarts.
+  name, and on Linux x86_64 and Windows a patch's statics are bound to the
+  running binary's, so the patch's code finds the running state. Linux,
+  macOS and Windows (x86_64, MSVC or MinGW): on Windows the fat binary
+  sits at a fixed base below 4 GiB with a COFF symbol table, and a patch
+  is a DLL linked `/FIXED` at a free span the app names (`Aio.aslr`'s
+  `base`), so the linker resolves each reference to the binary's data
+  exactly, in any instruction; writable statics and MSVC's thread-locals
+  are pointed at the binary's (`rewrite_coff`). A DLL that can't load
+  there fails to load: ax rebuilds.
 
 ## Web (wasm) and Android
 
@@ -617,8 +623,8 @@ as on air.
 - **Hot patch**: both keep a view's local state across a patch; air
   keeps it by the view's place (a view moved to another place, or one
   whose hooks changed, starts afresh). What the page held (focus, scroll,
-  a field's selection) is drawn anew on air. No hot-patch on Windows yet
-  on air (Dioxus's dx has it).
+  a field's selection) is drawn anew on air. On Windows too (air's binds
+  the patch to the binary's statics and thread-locals, which dx's doesn't).
 - **What stays on Dioxus inside the framework** until step 5: the
   server's first paint (dropped on air: no SSR) and, for an app on
   Dioxus, the shell's liveview socket and `ax dev`'s `dx`. With feature
