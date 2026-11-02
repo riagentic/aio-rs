@@ -698,6 +698,9 @@ version may break things.
 - `kit::Browser`'s `src` follows its caller's state (a `Prop`): a changed
   `src` navigates the guest, on air as it did on Dioxus.
 - `TestUi::html` leaves out air's anchor comments.
+- A reply that sets the key cookie (a `?token=` link's page) is
+  `cache-control: no-store` with no `etag`; on air the shell's page was
+  otherwise served revalidatable (no server paint makes it `no-store`).
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled

@@ -1293,9 +1293,14 @@ pub(crate) async fn answer(
         }
         None => serve_static(&http.roots, &asked, &path).await,
     };
+    // A reply that hands out the key (a `?token=` link's) is never kept by a
+    // cache, nor revalidated from one.
     let reply = match cookie {
         Some(c) if (200..400).contains(&reply.status) => {
-            Reply { headers: [reply.headers, vec![("set-cookie".into(), c)]].concat(), ..reply }
+            let mut headers: Vec<(String, String)> =
+                reply.headers.into_iter().filter(|(k, _)| k != "etag" && k != "cache-control").collect();
+            headers.extend([("cache-control".into(), "no-store".into()), ("set-cookie".into(), c)]);
+            Reply { headers, ..reply }
         }
         _ => reply,
     };
