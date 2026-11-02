@@ -26,7 +26,7 @@ pub const TX: &str = "$tx";
 mod shared;
 mod tx;
 use shared::Db;
-pub(crate) use shared::{Loose, Member, Owner, Shared, Turn, after, join, open_joint};
+pub(crate) use shared::{After, Loose, Member, Owner, Shared, Turn, after, join, open_joint};
 pub(crate) use tx::On as TxOn;
 
 /// One committed call.

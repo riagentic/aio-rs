@@ -92,6 +92,18 @@ pub struct Moment {
     pub took: Option<Duration>,
 }
 
+/// What follows a turn's commits ([`Handle::end`]).
+#[derive(Clone, Copy)]
+enum Then {
+    Nothing,
+    /// A refused call: its failures counted.
+    Failures,
+    /// Listeners told, effects started; `wake`: the scheduler too.
+    Told { wake: bool },
+    /// The schedules fired: told, then those due on other cells called.
+    Fired,
+}
+
 /// A call's hold on its cell's file ([`Handle::turn`]), and the joint commit it opened.
 struct Turn {
     file: Result<crate::store::Turn, crate::store::Loose>,
@@ -264,7 +276,7 @@ impl<T: Cell> Handle<T> {
             }
             r
         };
-        if let Err(e) = self.end(turn, Ok(()), |h| h.after_commit(true)) {
+        if let Err(e) = self.end(turn, Then::Told { wake: true }) {
             eprintln!("[aio] {}: {e}", T::ID);
         }
         r
@@ -457,7 +469,7 @@ impl<T: Cell> Handle<T> {
         if let Some(sweep) = crate::store::TxOn::<T>::SWEEP {
             let turn = self.turn();
             let swept = sweep(&mut lock(&self.inner.store));
-            if let Err(e) = self.end(turn, Ok(()), move |h| if swept { h.after_commit(wake) } else { Box::new(|| {}) }) {
+            if let Err(e) = self.end(turn, if swept { Then::Told { wake } } else { Then::Nothing }) {
                 eprintln!("[aio] {}: {e}", T::ID);
             }
         }
@@ -481,23 +493,39 @@ impl<T: Cell> Handle<T> {
         Turn { file, owner }
     }
 
-    /// A turn's end, `out` its call's outcome: the reactions to what it
-    /// committed run now (inside the joint commit), then `then` (what
-    /// follows a commit: listeners, effects) at the joint commit's end, or
-    /// now when there is none. Ending the joint commit it opened commits
-    /// it: refused, nothing of it is kept, and that is the call's answer.
-    fn end<R>(&self, turn: Turn, out: Result<R>, then: impl FnOnce(&Self) -> Box<dyn FnOnce()> + 'static) -> Result<R> {
+    /// A turn's end: the reactions to what it committed run now (inside
+    /// the joint commit), then what follows a commit (`then`: listeners,
+    /// effects) at the joint commit's end, or now when there is none.
+    /// Ending the joint commit it opened commits it: refused, nothing of
+    /// it is kept, and that is the call's answer.
+    fn end(&self, turn: Turn, then: Then) -> Result {
         self.react();
         let me = self.clone();
-        let then = Box::new(move || then(&me));
+        let then: crate::store::After = Box::new(move || me.then(then));
         let Some(owner) = turn.owner else {
             drop(turn.file);
             crate::store::after(false, then);
-            return out;
+            return Ok(());
         };
         crate::store::after(true, then);
-        let committed = owner.end(turn.file.ok()).map_err(crate::Rejected::new);
-        out.and_then(|v| committed.map(|()| v))
+        owner.end(turn.file.ok()).map_err(crate::Rejected::new)
+    }
+
+    /// Show what follows a turn's commits now; then (what it returns) tell it.
+    fn then(&self, t: Then) -> Box<dyn FnOnce()> {
+        let h = self.clone();
+        match t {
+            Then::Nothing => Box::new(|| {}),
+            Then::Failures => Box::new(move || h.count_failures()),
+            Then::Told { wake } => self.after_commit(wake),
+            Then::Fired => {
+                let tell = self.after_commit(false);
+                Box::new(move || {
+                    tell();
+                    h.fire_foreign();
+                })
+            }
+        }
     }
 
     /// Run the reactions to its calls committed since they last ran.
@@ -747,7 +775,7 @@ impl<T: Cell> Handle<T> {
                 let Some(sweep) = crate::store::TxOn::<T>::SWEEP else { return };
                 let turn = h.turn();
                 let swept = sweep(&mut lock(&h.inner.store));
-                if let Err(e) = h.end(turn, Ok(()), move |h| if swept { h.after_commit(true) } else { Box::new(|| {}) }) {
+                if let Err(e) = h.end(turn, if swept { Then::Told { wake: true } } else { Then::Nothing }) {
                     eprintln!("[aio] {}: {e}", T::ID);
                 }
             }));
@@ -910,7 +938,8 @@ impl<T: Cell> Handle<T> {
                 Ok(Timeline { at: p.at, head: p.head, floor: p.floor, paused: self.paused(), steps })
             })
         };
-        self.end(turn, read, |_| Box::new(|| {}))
+        let committed = self.end(turn, Then::Nothing);
+        read.and_then(|t| committed.map(|()| t))
     }
 
     /// Shut down within `budget`: refuse new calls (`retry after`),
@@ -1087,14 +1116,7 @@ impl<T: Cell> Handle<T> {
             (due.into_iter().chain(idle).min(), now)
         };
         // Its own fires must not wake it again.
-        if let Err(e) = self.end(turn, Ok(()), |h| {
-            let tell = h.after_commit(false);
-            let h = h.clone();
-            Box::new(move || {
-                tell();
-                h.fire_foreign();
-            })
-        }) {
+        if let Err(e) = self.end(turn, Then::Fired) {
             eprintln!("[aio] {}: schedules: {e}", T::ID);
         }
         (next, now)
@@ -1132,19 +1154,16 @@ impl<T: Cell> Handle<T> {
 
     /// After a call: a commit tells everyone; a refusal may be a failure.
     fn settle<R>(&self, turn: Turn, out: Result<R>) -> Result<R> {
-        let ok = out.is_ok();
-        let out = self.end(turn, out, move |h| match ok {
-            true => h.after_commit(true),
-            false => {
-                let h = h.clone();
-                Box::new(move || h.count_failures())
+        let committed = self.end(turn, if out.is_ok() { Then::Told { wake: true } } else { Then::Failures });
+        match (out, committed) {
+            (Ok(v), Ok(())) => Ok(v),
+            // The joint commit refused: nothing was kept, and nobody told.
+            (Ok(_), Err(e)) => {
+                self.count_failures();
+                Err(e)
             }
-        });
-        // The joint commit refused: nothing was kept, and nobody told.
-        if ok && out.is_err() {
-            self.count_failures();
+            (Err(e), _) => Err(e),
         }
-        out
     }
 
     /// Fire saved schedules on time, until the task is dropped or aborted.
