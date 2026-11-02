@@ -24,14 +24,19 @@ type Tx = oneshot::Sender<Result<Value>>;
 #[derive(Clone)]
 pub struct Reply(Arc<Slot>);
 
-struct Slot {
+pub(crate) struct Slot {
     method: String,
     /// The caller, and any `#[mode(first)]` caller that shares its answer.
     to: Mutex<Vec<Tx>>,
+    /// Run once the call is gone (a transaction's end, [`Reply::on_drop`]).
+    gone: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
+        if let Some(f) = self.gone.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
+            f();
+        }
         let why = format!(
             "{}: ended before it answered (its await was aborted, superseded, cut off after the call ceiling, \
              or the app stopped)",
@@ -46,7 +51,26 @@ impl Drop for Slot {
 impl Reply {
     pub(crate) fn new(method: &str) -> (Self, Answer) {
         let (tx, rx) = oneshot::channel();
-        (Self(Arc::new(Slot { method: method.into(), to: Mutex::new(vec![tx]) })), Answer::waiting(rx))
+        (
+            Self(Arc::new(Slot { method: method.into(), to: Mutex::new(vec![tx]), gone: Mutex::default() })),
+            Answer::waiting(rx),
+        )
+    }
+
+    /// This call, among the calls in flight.
+    pub(crate) fn id(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
+    /// Whether this call is still in flight (anything still holds its reply).
+    pub(crate) fn watch(&self) -> Weak<Slot> {
+        Arc::downgrade(&self.0)
+    }
+
+    /// Run `f` once nothing holds this call any more (its last part ran,
+    /// or its await was aborted or cut off).
+    pub(crate) fn on_drop(&self, f: impl FnOnce() + Send + 'static) {
+        *self.0.gone.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
     }
 
     /// Send the end to whoever waits (once: later sends are dropped).

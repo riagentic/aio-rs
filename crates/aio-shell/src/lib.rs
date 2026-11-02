@@ -62,7 +62,9 @@ pub struct Window {
     pub keep_server: bool,
     /// The app's say over its splash at run time (aio's `splash.show`),
     /// asked just before it would open: a setting "no splash at start" is
-    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`.
+    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`. It may
+    /// take 50 ms; one that panics or takes longer leaves the build's
+    /// `show`, said in the log.
     pub splash_show: Option<fn() -> SplashShow>,
 }
 
@@ -93,6 +95,8 @@ mod firstpage;
 mod firstrun;
 mod fresh;
 pub mod fuses;
+#[cfg(all(target_os = "linux", any(test, feature = "native-splash")))]
+mod gtksplash;
 pub mod guest;
 #[cfg(all(test, target_os = "linux"))]
 mod guests;
@@ -108,6 +112,13 @@ pub mod os;
 pub mod page;
 pub mod pidlock;
 pub mod place;
+// The OS's splash (`native-splash`, which `ax build` turns on for an app
+// with a `[build.splash]`); without it Electron draws the splash.
+#[cfg(any(test, feature = "native-splash"))]
+mod presplash;
+#[cfg(not(any(test, feature = "native-splash")))]
+#[path = "presplash_off.rs"]
+mod presplash;
 pub mod prune;
 #[cfg(debug_assertions)]
 mod renders;
@@ -243,7 +254,33 @@ fn install(dir: &Path, id: &str, win: &Window) -> std::io::Result<()> {
     guest::install(dir, win)?;
     // No splash until `splash::install` lays one out.
     std::fs::write(dir.join("splash.json"), "null")?;
+    assets(dir, instance::ASSETS.get().copied().unwrap_or_default())?;
     std::fs::write(dir.join("index.html"), page(win))
+}
+
+/// The app's built-in files (`[build] assets`) in `dir/assets` at their
+/// URL paths, where the page's `aio://app/…` finds them (main.js); written
+/// again only when they changed (`assets.key`: their paths and hash).
+fn assets(dir: &Path, files: &[(&str, &[u8])]) -> std::io::Result<()> {
+    let (root, key) = (dir.join("assets"), dir.join("assets.key"));
+    let mut h = aio::sha256::Sha256::new();
+    for (path, bytes) in files {
+        h.update(path);
+        h.update([0]);
+        h.update(bytes);
+    }
+    let want = aio::sha256::hex(&h.finalize());
+    if root.is_dir() && std::fs::read_to_string(&key).ok().as_deref() == Some(want.as_str()) {
+        return Ok(());
+    }
+    _ = std::fs::remove_dir_all(&root);
+    for (path, bytes) in files {
+        let to = root.join(aio::config::asset_path(path));
+        std::fs::create_dir_all(to.parent().unwrap_or(&root))?;
+        std::fs::write(to, bytes)?;
+    }
+    std::fs::create_dir_all(&root)?;
+    std::fs::write(key, want)
 }
 
 /// `ax release` asks what data this build reads (`AIORT_DATA_CONTRACT`:
@@ -333,6 +370,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         Some((width, height)) => Window { width, height, ..win },
         None => win,
     };
+    let win = Window { title: titled(std::env::var("AIORT_TITLE").ok(), win.title), ..win };
     let data = dirs.data.join("electron");
     let dir = dirs.cache.join("shell");
     _ = ASK_MOVE.set((win.title, dirs.data.clone()));
@@ -345,15 +383,33 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         None => colors.clone(),
     };
     // The download window opens over the app's window, as it was last placed.
-    let at = place::load(&dirs.data.join("window.json"))
-        .map(|s| (s.normal.x + s.normal.width / 2, s.normal.y + s.normal.height / 2));
+    let saved = place::load(&dirs.data.join("window.json"));
+    let at = saved.map(|s| (s.normal.x + s.normal.width / 2, s.normal.y + s.normal.height / 2));
     let back = instance::APP.get().filter(|(id, v)| update::can_go_back(id, v)).map(|(id, _)| id.clone());
     // `[build.splash] show`, or the app's say at run time (aio's `splash.show`).
-    let (at_start, in_download) =
-        splashed.map_or((false, false), |s| splash::shown(win.splash_show.map_or(s.show, |f| f())));
-    splash::install(&dir, splashed.filter(|_| at_start), win.title, &splash_colors)?;
-    // A first start draws the splash in the download window, with its bar.
+    let (show, by_app) =
+        splashed.map_or((aio::config::SplashShow::Never, false), |s| splash::run_time_show(win.splash_show, s.show));
+    let (at_start, in_download) = splash::shown(show);
     let downloading = splashed.filter(|_| in_download);
+    // Drawn by the OS before Electron starts (`presplash`), when it can.
+    let os = std::env::consts::OS;
+    let native = downloading.and_then(|s| {
+        let plan = presplash::Plan {
+            splash: s,
+            title: win.title,
+            version: instance::APP.get().map_or("", |(_, v)| v.as_str()),
+            colors: &splash::look_colors(splash_colors.clone(), s),
+            target: Some(splash::target(saved.as_ref(), win.width, win.height)),
+            at_start,
+            by_app,
+            may_download: runtime::may_download(),
+        };
+        presplash::Session::start(&plan, presplash::kind(os, &|k| std::env::var(k).ok())?, os)
+    });
+    // However the start ends, the splash goes with it.
+    let _splash_ends = presplash::Ends;
+    // A first start draws the splash in the download window, with its bar,
+    // when the OS's splash cannot.
     let dl_image = downloading.and_then(|s| Some((s.png, splash::image_box(s)?)));
     let dl_colors = match downloading {
         Some(s) => splash::look_colors(splash_colors.clone(), s),
@@ -447,6 +503,12 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         })
         .await
         .map_err(std::io::Error::other)??;
+        // Electron is here: its main process draws the start's splash unless
+        // the OS's is up (main.js reads `splash.json`).
+        let electron_draws = native.as_ref().is_none_or(|n| n.handoff());
+        let t = splash::target(saved.as_ref(), win.width, win.height);
+        let target = t.0.zip(t.1).map(|(x, y)| [x, y, t.2, t.3]);
+        splash::install(&dir, splashed.filter(|_| at_start && electron_draws), win.title, &splash_colors, target)?;
         let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
         // a GPU that failed here once is never asked again (AIORT_GPU=hardware is).
         let gpu_failed = data.join("gpu-failed");
@@ -601,10 +663,10 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             })
         }
     };
-    // The doors went with their listeners (and the runtime with the block).
-    _ = std::fs::remove_dir(&socks);
     // The window is gone: let the stores finish their effects.
     let aborted = aio::shutdown(QUIT_BUDGET);
+    // Its doors are unlinked by now: their folder goes too.
+    _ = std::fs::remove_dir(&socks);
     aio::health::stop();
     eprintln!(
         "[aio] {} stopped{}",
@@ -641,6 +703,7 @@ pub fn serve(dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
         std::io::Result::Ok(())
     })?;
     let aborted = aio::shutdown(QUIT_BUDGET);
+    _ = std::fs::remove_dir(aio::paths::sockets_at(&dirs.id, &dirs.data));
     aio::health::stop();
     eprintln!(
         "[aio] {} stopped{}",
@@ -750,6 +813,8 @@ fn window_event(m: &aio::serde_json::Value) {
             }
             aio::health::ok("window")
         }
+        // On screen (main.js): the OS's splash may go once it has been up its minimum.
+        "shown" => presplash::ready(splash::rect_of(&m["normal"])),
         "unresponsive" => {
             aio::report::problem("window:frozen", "the window is not responding");
             aio::health::degrade("window", "not responding");
@@ -798,6 +863,12 @@ fn asked_size(v: Option<&str>) -> Option<(u32, u32)> {
     Some((w.parse().ok().filter(|n| *n > 0)?, h.parse().ok().filter(|n| *n > 0)?))
 }
 
+/// The window's title for this run: `AIORT_TITLE` (aio's `--title=`,
+/// `ax dev --title`) when set, else the app's (pure).
+fn titled(asked: Option<String>, app: &'static str) -> &'static str {
+    asked.filter(|t| !t.trim().is_empty()).map_or(app, |t| t.leak())
+}
+
 /// What the runtime says on its control line: its screens (answered with
 /// where to open), the window's bounds as they change (saved),
 /// the answers to open dialogs (`page::pick`), clicks on a notice or the
@@ -816,6 +887,9 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
                 }
             }
             Some("bounds") => {
+                if let Some(r) = splash::rect_of(&m["normal"]) {
+                    presplash::moved(r);
+                }
                 if let Some(s) = &state
                     && let Err(e) = place::save(s, &m, win.width, win.height)
                 {
@@ -943,6 +1017,8 @@ mod tests {
     fn a_dev_size_is_w_by_h() {
         assert_eq!(asked_size(Some("390x844")), Some((390, 844)));
         assert_eq!([asked_size(None), asked_size(Some("390")), asked_size(Some("0x9"))], [None, None, None]);
+        assert_eq!(titled(Some("Notes (QA)".into()), "Notes"), "Notes (QA)");
+        assert_eq!([titled(None, "Notes"), titled(Some(" ".into()), "Notes")], ["Notes", "Notes"]);
     }
 
     #[tokio::test]
@@ -1349,6 +1425,22 @@ mod tests {
         assert_eq!(&b.next().await.unwrap().unwrap()[..], b"edits");
         b.send(Bytes::from_static(b"{\"event\":1}")).await.unwrap();
         assert_eq!(a.next().await.unwrap().unwrap(), b"{\"event\":1}");
+    }
+
+    #[test]
+    fn built_in_assets_are_laid_out_at_their_paths_and_rewritten_only_when_changed() {
+        let d = tempfile::tempdir().unwrap();
+        assets(d.path(), &[("/media/a%20b.txt", b"one"), ("/media/x/y.txt", b"two")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/a b.txt")).unwrap(), b"one");
+        assert_eq!(std::fs::read(d.path().join("assets/media/x/y.txt")).unwrap(), b"two");
+        // The same files: nothing written (a file changed by hand stays).
+        std::fs::write(d.path().join("assets/media/x/y.txt"), "hand").unwrap();
+        assets(d.path(), &[("/media/a%20b.txt", b"one"), ("/media/x/y.txt", b"two")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/x/y.txt")).unwrap(), b"hand");
+        // Another build: its files only.
+        assets(d.path(), &[("/media/a%20b.txt", b"new")]).unwrap();
+        assert_eq!(std::fs::read(d.path().join("assets/media/a b.txt")).unwrap(), b"new");
+        assert!(!d.path().join("assets/media/x").exists());
     }
 
     #[test]

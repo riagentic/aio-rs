@@ -194,7 +194,7 @@ pub fn old_electron_store() -> PathBuf {
 
 /// The pinned runtime in the person's own store, a test sandbox or not:
 /// what the UI tests draw in (they only run it).
-#[cfg(feature = "kit")]
+#[cfg(all(any(feature = "kit", feature = "air"), feature = "testing"))]
 pub(crate) fn electron_pinned() -> PathBuf {
     electron_store_in(std::env::consts::OS, &real_env).join(format!("{ELECTRON}-{}", electron_slug()))
 }
@@ -494,6 +494,13 @@ pub struct Ask {
     pub host: Option<String>,
     /// `--expose`: served to the network, over TLS.
     pub expose: bool,
+    /// `--no-tls` (aio's): no TLS even where the launch would turn it on
+    /// (`--expose`) or `[server] tls` asks; said loudly when exposed.
+    pub no_tls: bool,
+    /// `--tls-cert=<pem>` and `--tls-key=<pem>` (aio's): the certificate
+    /// chain and key to serve TLS with, over `[server] cert` and `key`.
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
     /// `--keep-server` (aio's): a desktop app goes on serving once its
     /// window closes, until asked to stop (`Window { keep_server }`).
     pub keep_server: bool,
@@ -506,8 +513,20 @@ pub struct Ask {
 
 /// The flags aio takes from a launch for itself, spelled once: a flag
 /// with `=` takes a value (`--home=<dir>` or `--home <dir>`).
-pub const FLAGS: [&str; 9] =
-    ["--home=", "--profile=", "--instance=", "--takeover", "--port=", "--host=", "--expose", "--keep-server", "--no-persist"];
+pub const FLAGS: [&str; 12] = [
+    "--home=",
+    "--profile=",
+    "--instance=",
+    "--takeover",
+    "--port=",
+    "--host=",
+    "--expose",
+    "--keep-server",
+    "--no-persist",
+    "--no-tls",
+    "--tls-cert=",
+    "--tls-key=",
+];
 
 impl Ask {
     /// A launch's `args` without aio's own [`FLAGS`] (and their values), in
@@ -539,6 +558,7 @@ impl Ask {
                 "--expose" => a.expose = true,
                 "--keep-server" => a.keep_server = true,
                 "--no-persist" => a.no_persist = true,
+                "--no-tls" => a.no_tls = true,
                 _ => {}
             }
             let (flag, inline) = arg.split_once('=').map_or((arg.as_str(), None), |(f, v)| (f, Some(v)));
@@ -548,6 +568,8 @@ impl Ask {
                 "--instance" => &mut a.instance,
                 "--port" => &mut a.port,
                 "--host" => &mut a.host,
+                "--tls-cert" => &mut a.tls_cert,
+                "--tls-key" => &mut a.tls_key,
                 _ => continue,
             };
             let v = match inline {
@@ -849,6 +871,9 @@ mod tests {
             "--expose",
             "--keep-server",
             "--no-persist",
+            "--tls-cert=c.pem",
+            "--tls-key",
+            "k.pem",
         ]))
         .unwrap();
         let want = Ask {
@@ -862,8 +887,12 @@ mod tests {
             keep_server: true,
             dev: false,
             no_persist: true,
+            no_tls: false,
+            tls_cert: Some("c.pem".into()),
+            tls_key: Some("k.pem".into()),
         };
         assert_eq!(a, want);
+        assert!(Ask::parse(&args(&["--no-tls"])).unwrap().no_tls);
         assert_eq!(Ask::parse(&args(&["--verbose", "x"])).unwrap(), Ask::default());
         assert!(Ask::parse(&args(&["--home"])).unwrap_err().contains("needs a value"));
         assert!(Ask::parse(&args(&["--profile=a", "--profile=b"])).unwrap_err().contains("twice"));

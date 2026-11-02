@@ -61,6 +61,7 @@ fn supervised(cfg: &aio::config::Config) -> bool {
 /// was rolled back, the backup the one now running took.
 static ROLLED_BACK: OnceLock<String> = OnceLock::new();
 static BACKUP: OnceLock<String> = OnceLock::new();
+static RETIRED: OnceLock<String> = OnceLock::new();
 
 /// `aio-rt/install/<id>`; an app run from an AppImage keeps its updates
 /// apart, in `<id>-appimage` (the same app installed from its bundle may be
@@ -292,6 +293,9 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
         if let Some(b) = p["backup"].as_str() {
             _ = BACKUP.set(b.into());
         }
+        if let Some(a) = p["retired"].as_str() {
+            _ = RETIRED.set(a.into());
+        }
         eprintln!("[aio] first start of {version} after an update: it is kept once the window opens");
         return Ok(Next::Boot);
     }
@@ -331,7 +335,9 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
     } else {
         None
     };
-    let backup = if store.exists() {
+    let backup = if let Some(a) = &retired {
+        aside_store(a, &store, &dirs.data)
+    } else if store.exists() {
         let b = dirs
             .data
             .join("backups")
@@ -353,7 +359,18 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
     eprintln!("[aio] installing {to} (from {version})");
     // The new version starts as this one was: same arguments.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    spawn_helper(&d, id, version, &to, &args, &dirs.logs.join("update.log"), supervised(cfg))?;
+    if let Err(e) = spawn_helper(&d, id, version, &to, &args, &dirs.logs.join("update.log"), supervised(cfg)) {
+        // Nothing was swapped: this version runs on, and that release is never offered again.
+        let why = format!("{to} could not be installed ({e}), so {version} runs on");
+        eprintln!("[aio] update failed: {why}");
+        aio::report::problem("update:failed", &why);
+        _ = std::fs::remove_file(d.join("first-boot"));
+        _ = std::fs::remove_file(d.join("pending.json"));
+        _ = ROLLED_BACK.set(to.clone());
+        dismiss(&d, &to)?;
+        _ = std::fs::remove_dir_all(d.join("versions").join(&to));
+        return Ok(Next::Boot);
+    }
     Ok(Next::Exit)
 }
 
@@ -372,6 +389,12 @@ pub fn can_go_back(id: &str, version: &str) -> bool {
 /// before back and starts it, as for a version that never booted.
 pub fn go_back(id: &str) -> io::Result<()> {
     std::fs::write(dir(id).join(crate::swap::BACK), b"")
+}
+
+/// A fresh start's backup: the store it set aside in `retired` (aio's
+/// `updates-retire.ts` ⑤), when the store was in `data`.
+fn aside_store(retired: &Path, store: &Path, data: &Path) -> Option<PathBuf> {
+    Some(retired.join(store.strip_prefix(data).ok()?)).filter(|b| b.exists())
 }
 
 /// What stays in the data dir when it starts fresh: the lock, the release
@@ -532,7 +555,30 @@ fn swap_helper(
     let mut cmd = crate::swap::command(&helper, &plan)?;
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(err);
     detach(&mut cmd);
-    cmd.spawn().map(drop)
+    let ready = dir.join(crate::swap::READY);
+    _ = std::fs::remove_file(&ready);
+    helper_up(cmd.spawn()?, &ready, HELPER_UP)
+}
+
+/// How long the new version's binary has to start as the swap helper.
+const HELPER_UP: Duration = Duration::from_secs(20);
+
+/// The helper `child` said it is up (`ready`) within `wait`. The helper is
+/// the new version's binary: one that dies before (a crash at its start,
+/// a library missing) can't swap, so the old app must not exit for it.
+fn helper_up(mut child: std::process::Child, ready: &Path, wait: Duration) -> io::Result<()> {
+    let end = std::time::Instant::now() + wait;
+    while !ready.exists() {
+        if let Some(st) = child.try_wait()? {
+            return Err(io::Error::other(format!("its install helper ended at its start ({st})")));
+        }
+        if std::time::Instant::now() > end {
+            _ = child.kill();
+            return Err(io::Error::other(format!("its install helper did not start in {} s", wait.as_secs())));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 /// Linux: the swap helper ([`HELPER`]). `by_supervisor`: no helper; `current`
@@ -1362,16 +1408,31 @@ fn by_patch(at: &str, m: &Manifest, d: &Path, version: &str, bin: &str, step: &d
         let list: up::Patches = aio::serde_json::from_slice(&list?.map(|(b, _)| b).unwrap_or_default())
             .map_err(|e| io::Error::other(format!("its patch list: {e}")))?;
         let p = up::patch_for(&list, m, version).map_err(io::Error::other)?;
-        let base = d.join("versions").join(version);
-        if !base.is_dir() {
-            return Err(io::Error::other(format!("{version} is not kept here to patch from")));
-        }
+        let base = patch_base(&d.join("versions").join(version), bin)
+            .ok_or_else(|| io::Error::other(format!("{version} is not kept here to patch from")))?;
         let bytes = fetch(&format!("{at}/{}", p.file), p.size, step)?;
         if bytes.len() as u64 != p.size || aio::sha256::hex(&Sha256::digest(&bytes)) != p.sha256 {
             return Err(io::Error::other(format!("{}: not the signed patch (size or SHA-256 differ)", p.file)));
         }
         stage(d, m, bin, |into| crate::delta::apply(&bytes, &base, into))
     })())
+}
+
+/// Where the running version lies as its bundle unpacks, for a patch to
+/// start from: its staged copy (`staged`, there once it came as an update),
+/// else, on macOS and Windows, the folder holding its place (the `.app` put
+/// there by hand, `Programs\<id>` the `.exe` installed itself into, with
+/// its runtime when it carries one).
+fn patch_base(staged: &Path, bin: &str) -> Option<PathBuf> {
+    if staged.is_dir() {
+        return Some(staged.to_path_buf());
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some((live, _)) = place(bin) {
+        return live.parent().map(Path::to_path_buf);
+    }
+    _ = bin;
+    None
 }
 
 /// What a look found, for the log.
@@ -1502,6 +1563,7 @@ pub(crate) fn open(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::
         current: version.into(),
         rolled_back: ROLLED_BACK.get().cloned(),
         backup: BACKUP.get().cloned(),
+        retired: RETIRED.get().cloned(),
     })
     .map_err(|e| io::Error::other(e.why))?;
     *CELL.write().unwrap_or_else(|e| e.into_inner()) = Some(s);
@@ -1708,6 +1770,33 @@ mod tests {
         // A macOS bundle is a folder already.
         let app = d.path().join("versions/1.1.0/Notes.app");
         assert_eq!(with_runtime(pair(&live), pair(&app)), (pair(&live), pair(&app)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_old_app_exits_only_once_the_new_versions_helper_is_up() {
+        let d = tempfile::tempdir().unwrap();
+        let ready = d.path().join(crate::swap::READY);
+        let sh = |script: &str| Command::new("/bin/sh").args(["-c", script]).spawn().unwrap();
+        let up = sh(&format!("sleep 0.2; touch '{}'; sleep 1", ready.display()));
+        assert!(helper_up(up, &ready, Duration::from_secs(5)).is_ok());
+        std::fs::remove_file(&ready).unwrap();
+        // A new version that dies as it starts: the old app stays.
+        let e = helper_up(sh("exit 101"), &ready, Duration::from_secs(5)).unwrap_err();
+        assert!(e.to_string().contains("ended at its start"), "{e}");
+        let t0 = std::time::Instant::now();
+        let e = helper_up(sh("sleep 30"), &ready, Duration::from_millis(300)).unwrap_err();
+        assert!(e.to_string().contains("did not start in") && t0.elapsed() < Duration::from_secs(5), "{e}");
+    }
+
+    #[test]
+    fn a_patch_starts_from_the_staged_copy_else_from_where_the_app_is_installed() {
+        let d = tempfile::tempdir().unwrap();
+        let staged = d.path().join("versions/1.0.0");
+        // Not installed (a test binary): nothing to patch from.
+        assert_eq!(patch_base(&staged, "notes"), None);
+        std::fs::create_dir_all(&staged).unwrap();
+        assert_eq!(patch_base(&staged, "notes"), Some(staged));
     }
 
     #[test]
@@ -1973,6 +2062,9 @@ mod tests {
         assert_eq!(names(&data), ["instance.lock", "update-keys.json"]);
         assert_eq!(names(&archive), ["backups", "state.db"]);
         assert_eq!(std::fs::read_to_string(archive.join("backups/pre.db")).unwrap(), "backups/pre.db");
+        // The new version's first start is told the store set aside as its backup.
+        assert_eq!(aside_store(&archive, &data.join("state.db"), &data), Some(archive.join("state.db")));
+        assert_eq!(aside_store(&archive, &t.path().join("elsewhere.db"), &data), None);
         // The new version wrote its own; going back keeps that aside.
         std::fs::write(data.join("state.db"), "new").unwrap();
         retire(&data, &t.path().join("archive/failed"), &keep).unwrap();

@@ -5,6 +5,7 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, nativeTheme, net: enet, protocol, screen, session, shell, webContents } = require('electron')
 const net = require('node:net')
 const path = require('node:path')
+const fs = require('node:fs')
 const { pathToFileURL } = require('node:url')
 
 const arg = (k) => (process.argv.find((a) => a.startsWith(`--aio-${k}=`)) || '').slice(k.length + 7)
@@ -29,11 +30,13 @@ const G = require(path.join(dir, 'guest.js'))
 const SPLASH = require(path.join(dir, 'splash.json'))
 let splash = null
 let splashAt = 0
+let splashEnded = false
 function openSplash() {
   if (!SPLASH) return
   const [light, dark] = SPLASH.bg
   splash = new BrowserWindow({
-    width: SPLASH.width, height: SPLASH.height, center: true, show: false, frame: false,
+    width: SPLASH.width, height: SPLASH.height, ...splashPlace(SPLASH.width, SPLASH.height), show: false, frame: false,
+    hasShadow: !!SPLASH.windowShadow,
     resizable: false, movable: false, minimizable: false, maximizable: false, fullscreenable: false,
     skipTaskbar: true, title: arg('title'),
     // A rounded or bordered splash ([build.splash] radius, border): clear around its box.
@@ -41,19 +44,40 @@ function openSplash() {
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
   })
   splash.webContents.on('will-navigate', (e) => e.preventDefault())
-  splash.once('ready-to-show', () => {
-    if (!splash) return
+  const up = () => {
+    if (!splash || splash.isDestroyed() || splashAt || splashEnded) return
     splashAt = Date.now()
     splash.show()
     console.error(`[aio-shell] splash: up ${Math.round(process.uptime() * 1000)} ms after the runtime started`)
-  })
+  }
+  splash.once('ready-to-show', up)
+  // A hidden window may never paint on a loaded machine (no 'ready-to-show'):
+  // up a second after its page loaded, on its background colour if need be.
+  splash.webContents.once('did-finish-load', () => setTimeout(up, 1000))
   splash.loadFile(path.join(dir, 'splash.html'))
   setTimeout(() => endSplash(), SPLASH.max)
+}
+// Where the splash opens ([build.splash] position, presplash.rs `origin`):
+// centred on the app's window as last placed (SPLASH.target), on the
+// primary display, or on the one under the pointer; kept 64 px inside it.
+function splashPlace(w, h) {
+  const t = SPLASH.target && { x: SPLASH.target[0], y: SPLASH.target[1], width: SPLASH.target[2], height: SPLASH.target[3] }
+  const d = SPLASH.mode === 'pointer' ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+    : SPLASH.mode === 'window' && t ? screen.getDisplayMatching(t) : screen.getPrimaryDisplay()
+  const a = d.workArea
+  const r = SPLASH.mode === 'window' && t ? t : a
+  const fit = (v, lo, n, span) => Math.max(lo, Math.min(v, lo + Math.max(0, span - n)))
+  const mx = Math.min(64, Math.floor(a.width / 8)), my = Math.min(64, Math.floor(a.height / 8))
+  return {
+    x: fit(Math.round(r.x + r.width / 2 - w / 2), a.x + mx, w, a.width - 2 * mx),
+    y: fit(Math.round(r.y + r.height / 2 - h / 2), a.y + my, h, a.height - 2 * my),
+  }
 }
 // The window may show: once the splash has been up its minimum. `then`
 // shows it; the splash goes with it (or at its cap, then).
 function endSplash(then) {
   const go = () => {
+    splashEnded = true
     if (then) then()
     if (!splash || splash.isDestroyed()) return (splash = null)
     if (splashAt) console.error(`[aio-shell] splash: gone after ${Date.now() - splashAt} ms${then ? ', the window shown' : ' (its cap)'}`)
@@ -88,7 +112,19 @@ app.on('before-quit', () => { quitting = true })
 // to refuse; the person's own close keeps the page's beforeunload say:
 // told once (aio), or asked Leave / Stay (Window { confirm_unload }).
 let leaving = false
-const leave = () => { leaving = true; app.quit() }
+// A quit asked while a vetoed close is still settling (the page's
+// window.close(), then the app stopping) loses its own close of that
+// window, and Electron, quitting already, asks no more: closed again
+// until the windows are gone.
+const leave = () => {
+  leaving = true
+  app.quit()
+  const again = setInterval(() => {
+    const open = BrowserWindow.getAllWindows()
+    if (!open.length) return clearInterval(again)
+    for (const x of open) x.close()
+  }, 250)
+}
 let vetoSaid = false
 app.on('web-contents-created', (_e, wc) => wc.on('will-prevent-unload', (e) => {
   const act = G.unload(leaving, SHELL.confirmUnload)
@@ -187,6 +223,13 @@ app.whenReady().then(() => {
     if (u.host === 'app' && u.pathname.startsWith('/file/')) {
       const p = path.resolve(decodeURIComponent(u.pathname.slice('/file'.length)))
       if (IMAGE.test(p)) return enet.fetch(pathToFileURL(p).toString())
+    }
+    // The app's built-in files ([build] assets), at their own paths.
+    const assets = path.join(dir, 'assets')
+    let own = null
+    try { own = path.resolve(assets, '.' + decodeURIComponent(u.pathname)) } catch (_) {}
+    if (u.host === 'app' && own && own.startsWith(assets + path.sep) && fs.existsSync(own) && fs.statSync(own).isFile()) {
+      return enet.fetch(pathToFileURL(own).toString())
     }
     return new Response('', { status: 404 })
   })
@@ -577,7 +620,12 @@ app.whenReady().then(() => {
     for (const ev of ['resize', 'move', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) w.on(ev, later)
     w.on('close', report)
     // shown once painted, at most SHELL.showCapMs later (Window { show_cap_ms }); 0: at once.
-    const show = () => endSplash(() => { if (!w.isDestroyed() && !w.isVisible()) w.show() })
+    // Rust learns it is on screen: the OS's splash (presplash.rs) goes after its minimum.
+    const show = () => endSplash(() => {
+      if (w.isDestroyed() || w.isVisible()) return
+      w.show()
+      tell({ t: 'window', state: 'shown', normal: w.getNormalBounds() })
+    })
     let painted = false
     w.once('ready-to-show', () => { painted = true; show() })
     if (!SHELL.showCapMs) show()

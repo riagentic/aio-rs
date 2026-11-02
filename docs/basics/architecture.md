@@ -44,9 +44,10 @@ methods, effects, views and the log.
 3. `Ok`: the event (method, arguments, caller, time, the ids and random
    numbers used) and the new state commit in one SQLite transaction
    (coalesced for `#[coalesce]` methods, [persistence](../persistence/README.md)).
+   `listens_to` reactions run inside that commit: their calls commit in
+   the same transaction.
 4. After the commit: views whose fields changed re-render, synced copies
-   get a patch, effects the call asked for start, listeners and
-   `listens_to` reactions run.
+   get a patch, effects the call asked for start, listeners run.
 5. An effect's result comes back as a call, so it goes through 1-4 too.
 
 ## Where each part of the code runs
@@ -129,9 +130,9 @@ The items of `aio`, grouped (the full list: [API map](../reference/api.md)):
 | another app on this machine | `aio::peer::Peer` | [sync](../state/sync.md#other-apps-other-machines) |
 | an aio app | `aio::compat` (feature `compat`) | [wire](../migration/wire.md) |
 
-There is no hook on every call (aio's `beforeReduce`, `onAction`): a rule
-is an invariant or an access rule on the cell, and an observer is a
-listener or `h.events()`.
+A rule on every call (aio's `beforeReduce`) is `aio::before_call` (or an
+invariant, an access rule on the cell); an observer of every call (aio's
+`onAction`) is `aio::on_action`, of one cell a listener or `h.events()`.
 
 ## The shapes an app takes
 
@@ -288,7 +289,6 @@ over to the first).
 - No `am where`: aio answers which context a file runs in from its module
   graph. In aio-rs the answer is the table above, and the compiler
   enforces the one boundary that matters (`cfg(target_arch = "wasm32")`).
-- No `beforeReduce` / `onAction` hook on every call (see extension points).
 - No module-boundary gate inside `aio-rs`: the crate split and Cargo
   features are the boundaries.
 

@@ -12,6 +12,8 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "aio-rs"
 version = "0.1.0"
 dependencies = [
+ "aio-rs",
+ "aio-rs-air",
  "aio-rs-config",
  "aio-rs-config-macro",
  "aio-rs-macros",
@@ -59,6 +61,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio-rs-air"
+version = "0.1.0"
+dependencies = [
+ "aio-rs-air-macro",
+ "keyboard-types",
+]
+
+[[package]]
+name = "aio-rs-air-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "aio-rs-cli"
 version = "0.1.0"
 dependencies = [
@@ -83,6 +101,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "toml",
  "zip",
 ]
 
@@ -143,6 +162,21 @@ dependencies = [
  "windows-sys 0.61.2",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "air-bench"
+version = "0.1.0"
+dependencies = [
+ "aio-rs",
+ "aio-rs-air",
+ "bytes",
+ "dioxus",
+ "dioxus-core",
+ "dioxus-liveview",
+ "futures-util",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

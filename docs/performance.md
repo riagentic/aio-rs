@@ -516,7 +516,7 @@ assert_eq!(renders(&tree, "Label"), 1, "a field it doesn't read never renders it
 
 ## Measured
 
-- `cargo test -p aio-rs --test list_speed -- --nocapture`: a held ↓ over
+- `cargo test -p aio-rs -F kit --test list_speed -- --nocapture`: a held ↓ over
   1000 rows (30 drawn), a view of the whole state against the list
   above (debug build; in an aio-rs checkout):
 

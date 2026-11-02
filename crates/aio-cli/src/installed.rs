@@ -1,5 +1,6 @@
 //! `ax installed` and `ax remove <app> [--data]` (aio: `am installed`,
-//! `am remove`): the apps a bundle's `install.sh` put on this machine, and
+//! `am remove`): the apps a bundle's `install.sh` (or `ax install
+//! --appimage`, [`from_appimage`]) put on this machine, and
 //! taking one away again: the program, its versions, menu entry and icon,
 //! and its data only when asked (`--data`), never while it runs.
 use std::path::{Path, PathBuf};
@@ -55,19 +56,24 @@ pub fn list(p: &Places, json: bool) -> String {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     ids.sort();
-    let rows = ids.iter().map(|id| {
-        let r = record(&p.install.join(id));
+    // An AppImage's dir is `<id>-appimage`: shown as `<id> (AppImage)`.
+    let rows = ids.iter().map(|dir| {
+        let r = record(&p.install.join(dir));
+        let image = dir.strip_suffix("-appimage").filter(|id| r["id"] == *id);
+        let id = image.unwrap_or(dir);
         let running = aio::paths::running(&p.apps.join(id).join("data"));
-        (id, r, running)
+        (id.to_string(), image.is_some(), r, running)
     });
     if json {
-        let rows = rows.map(|(id, r, running)| {
-            serde_json::json!({ "id": id, "version": r["version"], "installedAt": r["installedAt"], "updatedAt": r["updatedAt"], "source": r["source"], "running": running })
+        let rows = rows.map(|(id, image, r, running)| {
+            let kind = if image { "appimage" } else { "bundle" };
+            serde_json::json!({ "id": id, "kind": kind, "version": r["version"], "installedAt": r["installedAt"], "updatedAt": r["updatedAt"], "source": r["source"], "running": running })
         });
         return serde_json::Value::Array(rows.collect()).to_string();
     }
     let lines: Vec<String> = rows
-        .map(|(id, r, running)| {
+        .map(|(id, image, r, running)| {
+            let id = if image { format!("{id} (AppImage)") } else { id };
             format!(
                 "{id:<20} {:<12} {}{}",
                 r["version"].as_str().unwrap_or("?"),
@@ -87,7 +93,8 @@ pub fn remove(p: &Places, id: &str, data: bool) -> Result<String, String> {
         return Err(format!("{id} is running: ax stop {id} first"));
     }
     let installed = p.install.join(id);
-    if !installed.join("installed.json").is_file() {
+    let image = p.install.join(format!("{id}-appimage"));
+    if !installed.join("installed.json").is_file() && !image.join("installed.json").is_file() {
         return Err(format!("{id} is not installed from a bundle (no {})", installed.join("installed.json").display()));
     }
     let gone = |f: &Path| match std::fs::remove_file(f) {
@@ -106,6 +113,7 @@ pub fn remove(p: &Places, id: &str, data: bool) -> Result<String, String> {
     gone(&p.share.join("applications").join(format!("{id}.desktop")))?;
     gone(&p.share.join("icons/hicolor/256x256/apps").join(format!("{id}.png")))?;
     tree(&installed)?;
+    tree(&image)?;
     if !data {
         return Ok(format!(
             "{id} is removed. Its data is kept in {} (ax remove {id} --data removes it)",
@@ -138,6 +146,66 @@ pub fn from_bundle(bundle: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<St
         .and_then(|_| run(std::process::Command::new("sh").arg(aside.join(dir).join("install.sh")), "install.sh"));
     _ = std::fs::remove_dir_all(&aside);
     done
+}
+
+/// The menu entry of an AppImage installed at `file` (aio's run.sh): its
+/// `Exec` sets a private `TMPDIR`, `unpack` (made 0700), before the
+/// AppImage runs, as the AppImage runtime unpacks into `TMPDIR` before
+/// anything of the app can, and `/tmp` is shared. A path the entry can't
+/// spell plainly (a quote, `$`, `%`, a backslash) is refused.
+#[cfg(unix)]
+pub fn appimage_entry(app: &crate::build::App, file: &Path, unpack: &Path) -> Result<String, String> {
+    let plain = |p: &Path| match p.to_str() {
+        Some(s) if !s.contains(['\'', '"', '\\', '$', '`', '%', '\n']) => Ok(s.to_string()),
+        _ => Err(format!("{}: a menu entry can't name this path (a quote, $, % or \\ in it)", p.display())),
+    };
+    let (file, unpack) = (plain(file)?, plain(unpack)?);
+    let script =
+        format!("D=\"{unpack}\"; mkdir -p \"$D\"; chmod 700 \"$D\" 2>/dev/null; TMPDIR=\"$D\" exec \"{file}\" \"$@\"");
+    // As the Desktop Entry spec quotes an argument (`"`, `` ` ``, `$`, `\`
+    // escaped), then escapes the value's backslashes (aio's single quotes
+    // are outside the spec: desktop-file-validate refuses them).
+    let quoted: String =
+        script.chars().flat_map(|c| ['\\'].into_iter().filter(move |_| "\"`$\\".contains(c)).chain([c])).collect();
+    let exec = format!("Exec=sh -c \"{}\" _ %U", quoted.replace('\\', "\\\\"));
+    Ok(crate::build::desktop_entry(app, "\0").replace("Exec=\"\0\" %U", &exec))
+}
+
+/// `ax install <app> --appimage` (aio: `am run`'s install): the AppImage
+/// `image` just built, copied whole to `aio-rt/install/<id>-appimage/`
+/// (where its updates go: an update replaces that file), with its icon and
+/// its menu entry ([`appimage_entry`]: unpacked in `<cache>/<id>/tmp`).
+#[cfg(unix)]
+pub fn from_appimage(p: &Places, app: &crate::build::App, image: &Path) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+    fn e(f: &Path) -> impl FnOnce(std::io::Error) -> String + '_ {
+        move |e| format!("{}: {e}", f.display())
+    }
+    let dir = p.install.join(format!("{}-appimage", app.id));
+    let file = dir.join(format!("{}.AppImage", app.id));
+    let entry = appimage_entry(app, &file, &p.cache.join(&app.id).join("tmp"))?;
+    std::fs::create_dir_all(&dir).map_err(e(&dir))?;
+    let part = file.with_extension("AppImage.part");
+    std::fs::copy(image, &part).map_err(e(&part))?;
+    std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).map_err(e(&part))?;
+    std::fs::rename(&part, &file).map_err(e(&file))?;
+    let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let source = image.file_name().unwrap_or_default().to_string_lossy();
+    let rec =
+        serde_json::json!({ "id": app.id, "version": app.version, "source": source, "installedAt": at.to_string() });
+    std::fs::write(dir.join("installed.json"), format!("{rec}\n")).map_err(e(&dir))?;
+    if let Some(icon) = &app.icon {
+        let icons = p.share.join("icons/hicolor/256x256/apps");
+        std::fs::create_dir_all(&icons).map_err(e(&icons))?;
+        std::fs::copy(icon, icons.join(format!("{}.png", app.id))).map_err(e(icon))?;
+    }
+    let apps = p.share.join("applications");
+    std::fs::create_dir_all(&apps).map_err(e(&apps))?;
+    let desktop = apps.join(format!("{}.desktop", app.id));
+    std::fs::write(&desktop, entry).map_err(e(&desktop))?;
+    // Some desktops show a new entry only after this (or the next login).
+    _ = std::process::Command::new("update-desktop-database").arg(&apps).output();
+    Ok(format!("{} {} is installed: {}, and in the app menu", app.name, app.version, file.display()))
 }
 
 /// A new private dir to unpack into.
@@ -211,6 +279,66 @@ mod tests {
         let mine = format!("aio-install-{}-", std::process::id());
         assert!(!left.into_iter().any(|e| e.file_name().to_string_lossy().starts_with(&mine)), "nothing left aside");
         assert!(from_bundle(&t.path().join("notes.zip"), &env).unwrap_err().contains("not a Linux bundle"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_appimages_menu_entry_unpacks_it_in_a_private_tmpdir_as_aios_did() {
+        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: None };
+        let e = appimage_entry(&app, Path::new("/h/i/notes.AppImage"), Path::new("/h/c/notes/tmp")).unwrap();
+        let exec = r#"Exec=sh -c "D=\\"/h/c/notes/tmp\\"; mkdir -p \\"\\$D\\"; chmod 700 \\"\\$D\\" 2>/dev/null; TMPDIR=\\"\\$D\\" exec \\"/h/i/notes.AppImage\\" \\"\\$@\\"" _ %U"#;
+        assert!(e.lines().any(|l| l == exec), "{e}");
+        assert!(e.contains("StartupWMClass=notes\n") && e.starts_with("[Desktop Entry]\n"), "{e}");
+        for bad in ["/h/it's", "/h/$x", "/h/50%", "/h/a\\b", "/h/\"q\""] {
+            assert!(appimage_entry(&app, Path::new(bad), Path::new("/t")).is_err(), "{bad}");
+            assert!(appimage_entry(&app, Path::new("/f"), Path::new(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_appimage_installs_in_the_menu_runs_in_its_tmpdir_and_is_removed() {
+        let t = tempfile::tempdir().unwrap();
+        let p = places(t.path());
+        let icon = t.path().join("icon.png");
+        std::fs::write(&icon, b"png").unwrap();
+        let app =
+            crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: Some(icon) };
+        // The AppImage: here a script saying where it would unpack, and its arguments.
+        let image = t.path().join("notes-1.2.0-x86_64.AppImage");
+        std::fs::write(&image, "#!/bin/sh\necho \"$TMPDIR|$*\"\n").unwrap();
+        let said = from_appimage(&p, &app, &image).unwrap();
+        let file = p.install.join("notes-appimage/notes.AppImage");
+        assert!(said.contains("Notes 1.2.0 is installed") && said.contains(&file.display().to_string()), "{said}");
+        let rec = record(&p.install.join("notes-appimage"));
+        assert_eq!((rec["id"].as_str(), rec["source"].as_str()), (Some("notes"), Some("notes-1.2.0-x86_64.AppImage")));
+        assert!(p.share.join("icons/hicolor/256x256/apps/notes.png").is_file());
+        // The menu's Exec, run as a launcher does (%U: the files handed to it).
+        let entry = std::fs::read_to_string(p.share.join("applications/notes.desktop")).unwrap();
+        // Valid to the spec, where its checker is here.
+        let desktop = p.share.join("applications/notes.desktop");
+        if let Ok(o) = std::process::Command::new("desktop-file-validate").arg(&desktop).output() {
+            assert!(o.status.success() && o.stdout.is_empty(), "{}", String::from_utf8_lossy(&o.stdout));
+        }
+        // The value's escapes undone (`\\\\` is `\\`), then quoted as the spec's (and sh's) double quotes are.
+        let exec = entry
+            .lines()
+            .find_map(|l| l.strip_prefix("Exec="))
+            .unwrap()
+            .replace("\\\\", "\\")
+            .replace("%U", "'a b.txt'");
+        let out = std::process::Command::new("sh").arg("-c").arg(&exec).env("TMPDIR", "/tmp").output().unwrap();
+        let tmp = p.cache.join("notes/tmp");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{}|a b.txt\n", tmp.display()));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777, 0o700, "private");
+        // Listed by its id, and removed with its entry and icon.
+        assert!(list(&p, false).starts_with("notes (AppImage)     1.2.0"), "{}", list(&p, false));
+        let rows: serde_json::Value = serde_json::from_str(&list(&p, true)).unwrap();
+        assert_eq!((rows[0]["id"].as_str(), rows[0]["kind"].as_str()), (Some("notes"), Some("appimage")));
+        assert!(remove(&p, "notes", false).unwrap().contains("is removed"));
+        assert!(!file.exists() && !p.share.join("applications/notes.desktop").exists());
+        assert!(!p.share.join("icons/hicolor/256x256/apps/notes.png").exists());
     }
 
     #[test]

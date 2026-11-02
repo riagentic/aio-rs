@@ -24,11 +24,35 @@ What happens to a saved file:
 | a `Cargo.toml` (a new dependency, a feature) | full rebuild, the app restarted | rebuild + restart |
 | a change a patch can't take (a changed type layout, a new `static`) | dx says so; full rebuild + restart | rebuild + restart |
 
-A rebuild that succeeds restarts the app: its cells come back from their
-log, the views start again. A build that fails leaves the running app as
+A burst of saves is one change: it settles after 100 ms of quiet, and
+after 500 ms at most however busy the writer is (a formatter, a
+`git checkout`). The terminal names the files that changed and times the
+build. An editor's own files are no change: vim's `4913` probe and swap
+files, emacs' `#x#`, `x~`, `*.tmp`, JetBrains' safe-write copies, hidden
+files. After each burst the aio checks of each saved `.rs` file (keys,
+accessible names, hooks: `ax lint`'s per-file ones) are said, warnings
+and errors only.
+
+Without dx, ax watches the app's `src`, `assets` and `Cargo.toml`, and
+every file the last build read outside them (cargo's dep-info beside the
+binary): `aio.toml`, `include_str!` files, the sources of an aio-rs
+checkout the app depends on by path. `--web` does the same for the wasm
+build. A watcher that went deaf (no event for 60 s, a sentinel touched
+every 30 s) is made again, three times at most, and says so.
+
+A rebuild that succeeds restarts the app: first it is asked to stop over
+its door (calls in flight finish, effects commit, on every OS), then its
+cells come back from their log, the views start again. A build that
+changed nothing (the same binary) keeps the app running. A change that
+comes within 1 s of each of 5 restarts in a row is a loop (a formatter,
+a generator, another watcher), not a person: each next rebuild waits 5 s
+and the terminal names the files. A build that fails leaves the running app as
 it was and shows the compiler's errors on its page (an overlay, until a
 good build or patch lands), in the terminal and in `logs/build.log`
-(`ax errors notes` prints it). An error ax knows the fix for gets a hint
+(`ax errors notes` prints it). The next good build says `fixed` and takes
+the errors off the page, restart or not. `ax errors notes` groups lines
+under each start and each hot-patch (new code), and `--since reload`
+reads from the newest of them. An error ax knows the fix for gets a hint
 under it: a type a cell keeps that isn't serializable is told to wear
 `#[aio::data]`.
 
@@ -45,10 +69,17 @@ and falls back to rebuilds:
 ### The session
 
 - One `ax dev` per app. A dx an earlier session left running (its
-  terminal closed) is stopped first, by its recorded pid, never by name.
-- Closing the app's window ends the session.
+  terminal closed) is stopped first, by its recorded pid and start time
+  (on every OS: a pid the OS handed out again is no match), never by name.
+- Closing the app's window ends the session; so does `ax stop notes`
+  (the app stopped the graceful way, dx with it).
+- `ax dev notes --detach`: the session in the background (aio's
+  `am start` of a dev run), its output in the app's `logs/dev.out`; `ax
+  status notes` adds `ax dev: watching`, or that the last build failed and
+  it waits for a fix.
 - `ax restart notes` while a session runs asks it for a full rebuild and
-  a fresh start, with the same flags on the same display.
+  a fresh start, with the same flags on the same display; the app is
+  asked to stop over its door first (dx alone would give it 1 s).
 - dx's own output goes to `logs/dev.log`; the terminal gets ax's compact
   lines (`--tui`: dx's screen and keys instead).
 - All builds (`ax dev`, `ax test`, `ax lint`, `ax build`) share one build
@@ -85,8 +116,11 @@ real data.
 | `--display isolated` | always a nested display (Xephyr, else Xvfb); refused when neither is installed |
 | `--display current` | the caller's display, as is (`AIORT_DISPLAY=current` too) |
 | `--display :N` | a display you run yourself |
-| `--watch=false` | build and run once, rebuild on nothing |
-| `--watch=src/ui,assets` | rebuild on changes under those folders of the app only |
+| `--watch=false`, `--no-watch` | build and run once, rebuild on nothing |
+| `--watch=src/ui,assets` | rebuild on changes under those folders of the app only (with dx too: then ax rebuilds and restarts instead of hot-patching, since dx watches all of the app) |
+| `--detach` | the session in the background, output in `logs/dev.out`; `ax stop` ends it |
+| `--verbose` | the app's log at `debug` (`AIORT_LOG=debug`; the boot report's `log` row says so) |
+| `--title "Notes (QA)"`, `--title=…` | the window's title for this run (`AIORT_TITLE`) |
 | `--cdp[=port]` | the window opens the DevTools protocol on loopback (a free port unless given) |
 | `--tui` | dx's own screen in the terminal |
 | `--web [--port N] [--expose]` | the web build instead ([below](#the-web-build-while-you-work)) |
@@ -94,7 +128,10 @@ real data.
 
 Words after the app go to the app (`ax dev notes -- --route /users/7`);
 ax's own flags above are taken out first. `--display`, `--fresh`,
-`--size` and `--tui` never reach the app.
+`--size`, `--tui`, `--verbose`, `--title` and `--detach` never reach the
+app. Args with spaces reach it intact under dx too (dx splits its own
+`--args` on spaces: ax hands those to the debug build in
+`AIORT_DEV_ARGS`, which runs again with them).
 
 A contained run (a nested display) opens nothing in the person's browser
 (`AIORT_NO_OPEN`), gets software WebGL and a private D-Bus, so no
@@ -182,7 +219,8 @@ assert!(aio::config::listen(&server, &Ask { expose: true, host: Some("::1".into(
 Everything else that varies per launch is a variable, never a config file
 read at run time: `AIORT_DATA` (one folder for all of the app's files),
 `AIORT_TOKEN` (a served app's key), `AIORT_UPDATE_CHANNEL`, `AIORT_GPU`
-(`software` when a GPU driver draws wrong). The boot line in `logs/app.log`
+(`software` when a GPU driver draws wrong), `AIORT_LOG` (the log's level
+for this run: `trace` … `error`), `AIORT_TITLE` (the window's title). The boot line in `logs/app.log`
 says each setting and who decided it; `ax doctor notes` prints them.
 
 ## Which code goes where
@@ -302,8 +340,8 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
 - No hot-patching in the web build or on Android: each edit is a build
   and the page reloads, slower than a patch (on Android, of the page only,
   unless `--native`).
-- No verbose-everything switch: raise `[log] level` to `debug` or
-  `trace` ([debugging](../debugging/README.md#3-logs)).
+- dx's own restarts (a change it can't hot-patch) give the app 1 s; ax's
+  (a `Cargo.toml`, `ax restart`) ask it to stop first.
 - No flag that turns persistence off for a run: use `--instance` with
   `--fresh`, or `AIORT_DATA` pointing at a throwaway folder.
 - No run-from-a-link command: clone, then `ax start` or `ax install`.

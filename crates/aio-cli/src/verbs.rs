@@ -50,8 +50,10 @@ args go to the app (--instance <n>: a private copy; --fresh: on new data);
 --display auto|isolated|current|:N: with no terminal (an agent) the window
 goes on a nested display, not the person's, and opens no browser tab (auto);
 --size 390x844: the window at that size for this run (its saved one untouched);
---watch=false: build and run it once; --watch=src/ui,assets: rebuild
-on changes there only (dirs of the app);
+--watch=false (--no-watch): build and run it once; --watch=src/ui,assets:
+rebuild on changes there only (dirs of the app; with dx: rebuilds, no hot-patch);
+--detach: the session in the background (logs/dev.out; ax stop ends it);
+--verbose: the app's log at debug; --title <t>: the window's title this run;
 --cdp[=port]: its window opens the DevTools protocol on loopback (a free
 port, for other tools; ax shot, eval, surface and trigger need none);
 --tui: dx's own screen in a terminal (its keys), not ax's compact lines
@@ -138,9 +140,10 @@ its APK installed once booted, --apk: which); --status, --stop, --reset
     ),
     v(
         "install",
-        "install <app> [--android] [--build] [--emulator] [--device serial] [--apk file] [--no-launch]",
+        "install <app> [--appimage] [--android] [--build] [--emulator] [--device serial] [--apk file] [--no-launch]",
         "build this OS's bundle from source and install it for this user (Linux: its
-install.sh run, nothing left aside; macOS, Windows: how to); --android:
+install.sh run, nothing left aside; macOS, Windows: how to); --appimage
+(Linux): the AppImage, in the app menu, unpacked in a private TMPDIR; --android:
 the newest APK for the attached phone's CPU onto it, then
 start it; refuses an APK older than the sources (--build: build first);
 --emulator: an emulator may be the device; --device (else ANDROID_SERIAL): that one",
@@ -153,12 +156,14 @@ a11y, cell ids, plus clippy (exit 1: errors; `ax lint --help`)",
     ),
     v(
         "test",
-        "test <app> [filter] [--video out] [--pace ms] [--android] [--device serial]",
+        "test <app> [filter] [--video out] [--pace ms] [--android] [--device serial] [--mutants]",
         "the app's tests (cargo test); --video records each UI test, no test
 changed: out a folder (a video per test) or one .mp4/.webm, a frame per
 step, each --pace ms (800) on screen; --android: the emulator lane instead (its
 APK for the device built, installed, started: passed once its window is ready
-and it still runs; AIO_AVD booted when none is attached, or --device)",
+and it still runs; AIO_AVD booted when none is attached, or --device);
+--mutants: cargo mutants over the app's packages (each function broken in
+turn: the ones no test noticed are listed; `cargo install cargo-mutants`)",
     ),
     v("apps", "apps", "the aio-rs apps and private instances on this machine, and which run"),
     v(
@@ -175,9 +180,11 @@ key made for the run, until Ctrl-C)",
     v("config", "config <app>", "the app's aio.toml as its build bakes it in, defaults in"),
     v(
         "events",
-        "events <app> [cell] [--last N] [--diff] [--from file]",
+        "events <app> [cell] [--last N] [--diff] [--refused] [--from file]",
         "the newest events (default 20), oldest first; --diff: each with the
-changes it made (one cell); --from: of another store or backup file",
+changes it made (one cell); --from: of another store or backup file;
+--json of a running app: each with the time its method took (`ms`, this
+run's), --refused: its refused calls of late too",
     ),
     v(
         "timeline",
@@ -417,6 +424,7 @@ bytes (--keys: all of them); --window 5m: over the newest 5 minutes
 newest start or hot patch",
     ),
     v("health", "health <app>", "healthy, or why not (exit 1: degraded, stuck or not running)"),
+    v("vitals", "vitals <app>", "each layer's grade (loop, queue, transport, render) and the likely cause"),
     v(
         "status",
         "status <app> [app…]",
@@ -975,7 +983,9 @@ mod tests {
         assert!(all.lines().any(|l| l.starts_with("  ax data <app>") && l.ends_with("and what to back up")));
         let one = said("events --help");
         assert!(
-            one.starts_with("ax events <app> [cell] [--last N] [--diff] [--from file]\n\n  the newest events"),
+            one.starts_with(
+                "ax events <app> [cell] [--last N] [--diff] [--refused] [--from file]\n\n  the newest events"
+            ),
             "{one}"
         );
         assert!(one.contains("events takes --last"), "{one}");

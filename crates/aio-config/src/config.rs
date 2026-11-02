@@ -265,6 +265,13 @@ pub struct Accounts {
     /// user is the session's.
     #[serde(default)]
     pub on: bool,
+    /// Sessions without accounts (aio's `sessions: true`): no users, no
+    /// login doors; the app issues sessions itself (`auth::serving()`'s
+    /// `issue`, say from a server fn that checked its own credential), and
+    /// a session token is that user on every door until it expires or is
+    /// revoked. `on` includes it.
+    #[serde(default)]
+    pub sessions: bool,
     /// Anyone may make an account (`POST /__aio/auth/signup`).
     #[serde(default)]
     pub signup: bool,
@@ -291,7 +298,14 @@ fn thirty_days() -> Duration {
 
 impl Default for Accounts {
     fn default() -> Self {
-        Self { on: false, signup: false, session: thirty_days(), max_sessions: ten(), require_verified: false }
+        Self {
+            on: false,
+            sessions: false,
+            signup: false,
+            session: thirty_days(),
+            max_sessions: ten(),
+            require_verified: false,
+        }
     }
 }
 
@@ -554,11 +568,14 @@ pub struct Log {
     pub heartbeat: u64,
     /// Methods (`notes.tick`) whose calls are not logged even at `debug`.
     pub suppress: Vec<String>,
+    /// Each run starts fresh files (aio's per-run `debug.log`): the last
+    /// run's move to `app.1.log` …, `keep` runs (or size steps) kept.
+    pub per_run: bool,
 }
 
 impl Default for Log {
     fn default() -> Self {
-        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![] }
+        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![], per_run: false }
     }
 }
 
@@ -613,6 +630,86 @@ pub struct Build {
     /// its window has loaded, on the desktop, the web and Android.
     #[serde(default)]
     pub splash: Option<Splash>,
+    /// Folders built into the app by URL prefix (aio's `assets`): `"/media"
+    /// = "media"` (from `aio.toml`'s folder) is the app's `/media/…` in its
+    /// window, its server, its web build and its APK.
+    #[serde(default)]
+    pub assets: std::collections::BTreeMap<String, std::path::PathBuf>,
+    /// Their files, `(URL path, bytes)`, put in by `aio::config!()` (empty elsewhere).
+    #[serde(skip)]
+    pub asset_files: &'static [(&'static str, &'static [u8])],
+}
+
+/// The files of `[build] assets` under `at` (`aio.toml`'s folder): each
+/// one's URL path, percent-encoded as a browser asks for it (`/media/a%20b.png`),
+/// and its file, sorted. Dotfiles are left out (never served); a folder that
+/// isn't there is refused. Read where `aio.toml` is (the build, not the app).
+#[cfg(feature = "toml")]
+pub fn asset_files(
+    at: &std::path::Path,
+    assets: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    fn walk(dir: &std::path::Path, url: &str, out: &mut Vec<(String, std::path::PathBuf)>) -> Result<(), String> {
+        let rd = std::fs::read_dir(dir).map_err(|e| format!("[build] assets: {}: {e}", dir.display()))?;
+        for e in rd {
+            let e = e.map_err(|e| e.to_string())?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if name.contains([':', '*']) {
+                return Err(format!(
+                    "[build] assets: {}: a name with : or * can't be a URL path (rename it)",
+                    e.path().display()
+                ));
+            }
+            let (p, url) = (e.path(), format!("{url}/{}", encode(&name)));
+            match p.is_dir() {
+                true => walk(&p, &url, out)?,
+                false if p.is_file() => out.push((url, p)),
+                false => {}
+            }
+        }
+        Ok(())
+    }
+    let mut out = vec![];
+    for (prefix, dir) in assets {
+        let d = at.join(dir);
+        if !d.is_dir() {
+            return Err(format!("[build] assets {prefix:?}: {} is not a folder", d.display()));
+        }
+        walk(&d, prefix.trim_end_matches('/'), &mut out)?;
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// An asset's URL path ([`asset_files`]) as a relative file path: its
+/// segments, `%XX` decoded.
+pub fn asset_path(url: &str) -> std::path::PathBuf {
+    let decode = |s: &str| {
+        let b = s.as_bytes();
+        let (mut out, mut i) = (Vec::with_capacity(b.len()), 0);
+        while i < b.len() {
+            match (b[i] == b'%').then(|| s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())).flatten() {
+                Some(v) => (out.push(v), i += 3),
+                None => (out.push(b[i]), i += 1),
+            };
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    url.split('/').filter(|s| !s.is_empty()).map(decode).collect()
+}
+
+/// A path segment as a URL spells it: what isn't unreserved, percent-encoded.
+#[cfg(feature = "toml")]
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// `[build.splash]` (aio's `build.splash`).
@@ -687,6 +784,39 @@ pub struct Splash {
     /// the desktop, 200 on Android).
     #[serde(default)]
     pub fade_ms: Option<u64>,
+    /// Where it opens: centred where the app's window opens, on the primary
+    /// display, or on the one under the pointer.
+    #[serde(default)]
+    pub position: SplashPosition,
+    /// `position = "window"`: once the app's window shows, the splash moves
+    /// onto where it really is.
+    #[serde(default = "yes")]
+    pub follow_window: bool,
+    /// The text's shadow; unset: the OS's (macOS and Linux on, Windows off).
+    #[serde(default)]
+    pub shadow: Option<bool>,
+    /// The window's drop shadow; unset: the OS's (macOS on).
+    #[serde(default)]
+    pub window_shadow: Option<bool>,
+    /// The ✕ that cancels a first start's download.
+    #[serde(default = "yes")]
+    pub cancel: bool,
+    /// The bar while a first start downloads Electron.
+    #[serde(default = "yes")]
+    pub progress: bool,
+    /// The bar's thickness: `solid` 6 pt, `thin` 3 pt.
+    #[serde(default)]
+    pub bar_style: BarStyle,
+    /// The bar's height in px; unset: `bar_style`'s.
+    #[serde(default)]
+    pub bar_height: Option<u32>,
+    /// Under the text (inside the margins), or along the window's bottom
+    /// edge, full width.
+    #[serde(default)]
+    pub bar_position: BarPosition,
+    /// The bar's corner radius in px; unset: half its height.
+    #[serde(default)]
+    pub bar_radius: Option<u32>,
     /// The PNG's bytes, put in by `aio::config!()` (empty elsewhere).
     #[serde(skip)]
     pub png: &'static [u8],
@@ -716,6 +846,16 @@ impl Default for Splash {
             text_color: None,
             bar: None,
             track: None,
+            position: Default::default(),
+            follow_window: true,
+            shadow: None,
+            window_shadow: None,
+            cancel: true,
+            progress: true,
+            bar_style: Default::default(),
+            bar_height: None,
+            bar_position: Default::default(),
+            bar_radius: None,
             png: &[],
         }
     }
@@ -757,6 +897,34 @@ pub enum Align {
     #[default]
     Center,
     Right,
+}
+
+/// `[build.splash] position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplashPosition {
+    #[default]
+    Window,
+    Primary,
+    Pointer,
+}
+
+/// `[build.splash] bar_style`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarStyle {
+    #[default]
+    Solid,
+    Thin,
+}
+
+/// `[build.splash] bar_position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarPosition {
+    #[default]
+    UnderText,
+    BottomEdge,
 }
 
 impl Splash {
@@ -1176,11 +1344,15 @@ pub struct Memory {
     pub critical: u8,
     /// Growth said once per this many MB (or a tenth of the machine).
     pub growth_mb: u64,
+    /// How often memory is sampled (and `health.json` written): 1 s to
+    /// 10 s (aio's `memory.interval`).
+    #[serde(with = "span")]
+    pub every: Duration,
 }
 
 impl Default for Memory {
     fn default() -> Self {
-        Self { high: 50, clear: 40, critical: 80, growth_mb: 256 }
+        Self { high: 50, clear: 40, critical: 80, growth_mb: 256, every: Duration::from_secs(10) }
     }
 }
 
@@ -1227,6 +1399,12 @@ impl Lit for Duration {
 }
 
 impl Lit for &'static [u8] {
+    fn lit(&self, o: &mut String) {
+        o.push_str("&[]");
+    }
+}
+
+impl Lit for &'static [(&'static str, &'static [u8])] {
     fn lit(&self, o: &mut String) {
         o.push_str("&[]");
     }
@@ -1401,6 +1579,9 @@ impl Config {
             if s.size.is_some_and(|[w, h]| w == 0 || h == 0 || w > 4096 || h > 4096) {
                 return Err("aio.toml: [build.splash] size is [width, height], each 1 to 4096".into());
             }
+            if s.bar_height.is_some_and(|h| h == 0 || h > 64) {
+                return Err("aio.toml: [build.splash] bar_height is px, 1 to 64".into());
+            }
             if s.min_ms > s.max_ms {
                 return Err("aio.toml: [build.splash] min_ms is more than max_ms".into());
             }
@@ -1412,11 +1593,22 @@ impl Config {
         if !(m.clear < m.high && m.high <= m.critical && m.critical <= 100) || m.growth_mb == 0 {
             return Err("aio.toml: [memory] needs clear < high <= critical <= 100, and growth_mb of 1 or more".into());
         }
+        if !(Duration::from_secs(1)..=Duration::from_secs(10)).contains(&m.every) {
+            return Err(
+                "aio.toml: [memory] every must be 1s to 10s (ax health calls a health.json older than 30 s stuck)"
+                    .into(),
+            );
+        }
         c.vitals.check()?;
         if c.log.keep == 0 || c.log.file_mb == 0 {
             return Err("aio.toml: [log] keep and file_mb must be at least 1".into());
         }
-        if c.accounts.on {
+        if !c.accounts.on && c.accounts.sessions && (c.accounts.signup || c.accounts.require_verified) {
+            return Err(
+                "aio.toml: [accounts] signup and require_verified need accounts (on = true), not sessions alone".into(),
+            );
+        }
+        if c.accounts.on || c.accounts.sessions {
             let p = c.accounts.policy();
             if !(1..=crate::auth::MAX_TTL_MS).contains(&p.ttl_ms) {
                 return Err("aio.toml: [accounts] session must be 1s to 100 years".into());
@@ -1425,8 +1617,8 @@ impl Config {
                 return Err("aio.toml: [accounts] max_sessions must be at least 1".into());
             }
         }
-        if c.server.open && c.accounts.on {
-            return Err("aio.toml: [server] open and [accounts] on both say who gets in: give one".into());
+        if c.server.open && (c.accounts.on || c.accounts.sessions) {
+            return Err("aio.toml: [server] open and [accounts] both say who gets in: give one".into());
         }
         // A name no request can carry would trust nothing, silently.
         if let Some(h) = &c.server.trust_proxy
@@ -1439,6 +1631,19 @@ impl Config {
         crate::security::headers(&c.server.security, &c.server.hosts, true).map_err(|e| format!("aio.toml: {e}"))?;
         if let Some(e) = dirs_problem(&c.server) {
             return Err(format!("aio.toml: {e}"));
+        }
+        // `[build] assets`: the same rules, in the app's folder.
+        if let Some((p, _)) = c.build.assets.iter().find(|(_, d)| d.is_absolute() || d.has_root()) {
+            return Err(format!("aio.toml: [build] assets {p:?}: a folder beside aio.toml (it is built into the app)"));
+        }
+        if let Some(e) = dirs_problem(&Server { dirs: c.build.assets.clone(), ..Server::default() }) {
+            let e = e.replace("[server.dirs]", "[build] assets").replace("[server]", "[build] assets");
+            return Err(format!("aio.toml: {}", e.replace("in the files tier or an absolute one", "beside aio.toml")));
+        }
+        if let Some(p) =
+            c.build.assets.keys().find(|p| c.server.dirs.contains_key(*p) || c.server.public_dirs.contains_key(*p))
+        {
+            return Err(format!("aio.toml: {p:?} is both in [build] assets and [server] dirs"));
         }
         // Half a pair would serve aio's own certificate instead, silently.
         match (&c.server.cert, &c.server.key) {

@@ -31,6 +31,32 @@ pub const RETRY_AFTER_MS: u64 = 2000;
 /// on the screen from before it.
 pub(crate) static TELLING: AtomicUsize = AtomicUsize::new(0);
 
+/// Listeners told one teller at a time, and it tells until nothing is left
+/// untold: a tell meanwhile (another thread's, or a listener's own) is left
+/// to it, so they never hear an older state after a newer one.
+#[derive(Default)]
+pub(crate) struct InOrder {
+    teller: Mutex<()>,
+    untold: AtomicBool,
+}
+
+impl InOrder {
+    /// `tell`: read the newest state and tell it.
+    pub(crate) fn tell(&self, tell: impl Fn()) {
+        self.untold.store(true, Ordering::SeqCst);
+        while self.untold.load(Ordering::SeqCst) {
+            let _teller = match self.teller.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            };
+            while self.untold.swap(false, Ordering::SeqCst) {
+                tell();
+            }
+        }
+    }
+}
+
 /// One commit counted in [`TELLING`] until it is dropped (a listener's panic too).
 struct Telling;
 
@@ -89,11 +115,36 @@ pub struct Moment {
     pub took: Option<Duration>,
 }
 
+use crate::store::{Hold as Turn, Then};
+
+/// A commit shown ([`Handle::after_commit`]), its listeners still to be told.
+struct Shown {
+    telling: Telling,
+    started: bool,
+    done: Vec<crate::Event>,
+    changed: bool,
+    acting: Vec<crate::Acted>,
+    wake: bool,
+}
+
+/// Calls a cell by name, as a schedule of another cell fires it.
+type Reach = Arc<dyn Fn(&By, &str, Value) -> Result<Value> + Send + Sync>;
+
+/// The cells of one app (or one `TestCells`) by id: where a schedule set on
+/// another cell ([`crate::Cx::on`]) is called.
+#[derive(Clone, Default)]
+pub(crate) struct Dir(Arc<Mutex<HashMap<&'static str, Reach>>>);
+
 struct Inner<T: Cell> {
     store: Mutex<Store<T>>,
+    /// Its store's file: its turn at it is taken before the store's lock.
+    file: crate::store::Shared,
+    /// The app's other cells, once it joined them ([`Handle::join`]).
+    dir: Mutex<Option<Dir>>,
     /// The last committed state and its event, readable while a call runs.
     shown: Mutex<(u64, Arc<T>)>,
     listeners: Mutex<Vec<Listener<T>>>,
+    in_order: InOrder,
     /// Other cells' reactions to its committed calls ([`Handle::listens_to`]).
     reactions: Mutex<Vec<Reaction>>,
     watchers: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
@@ -116,6 +167,9 @@ struct Inner<T: Cell> {
     tells: tokio::sync::broadcast::Sender<crate::tell::Tell>,
     /// Set by a test (`aio::testing`): effects wait here until it starts them.
     held: Mutex<Option<Vec<Effect<T>>>>,
+    /// Held, the keys of the effects its last commit asked for, stamped
+    /// in commit order across cells (`TestCells::last_effects`).
+    last_held: Mutex<(u64, Vec<String>)>,
     /// A test's ledger: its schedules' and effects' failures, until it takes them.
     failed: Mutex<Vec<String>>,
     /// Disabled (`Cells::disable`): calls refused, schedules paused.
@@ -147,6 +201,40 @@ pub struct Handle<T: Cell> {
     by: By,
 }
 
+impl<T: Cell> crate::store::Member for Inner<T> {
+    fn end(&self, joint: u64, kept: bool) {
+        lock(&self.store).joint_end(joint, kept);
+    }
+
+    fn react(&self) {
+        let rs = lock(&self.reactions).clone();
+        if rs.is_empty() {
+            return;
+        }
+        let done = lock(&self.store).unreacted();
+        done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
+    }
+
+    fn show(self: Arc<Self>, t: Then) -> Box<dyn FnOnce()> {
+        let h = Handle { inner: self, by: By::System };
+        let shown = match t {
+            Then::Told { wake } => Some(h.after_commit(wake)),
+            Then::Fired => Some(h.after_commit(false)),
+            Then::Nothing | Then::Failures => None,
+        };
+        Box::new(move || {
+            if let Some(s) = shown {
+                h.tell_committed(s);
+            }
+            match t {
+                Then::Failures => h.count_failures(),
+                Then::Fired => h.fire_foreign(),
+                Then::Nothing | Then::Told { .. } => {}
+            }
+        })
+    }
+}
+
 impl<T: Cell> Clone for Handle<T> {
     fn clone(&self) -> Self {
         Self { inner: self.inner.clone(), by: self.by.clone() }
@@ -163,8 +251,11 @@ impl<T: Cell> Handle<T> {
     pub fn new(store: Store<T>) -> Self {
         let inner = Inner {
             shown: Mutex::new((store.seq(), store.shared())),
+            file: store.file(),
             store: Mutex::new(store),
+            dir: Mutex::default(),
             listeners: Mutex::default(),
+            in_order: InOrder::default(),
             reactions: Mutex::default(),
             watchers: Mutex::default(),
             owned: Mutex::default(),
@@ -178,6 +269,7 @@ impl<T: Cell> Handle<T> {
             events: tokio::sync::broadcast::channel(1024).0,
             tells: tokio::sync::broadcast::channel(64).0,
             held: Mutex::default(),
+            last_held: Mutex::default(),
             failed: Mutex::default(),
             off: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -221,6 +313,7 @@ impl<T: Cell> Handle<T> {
     /// Run `f` with the store (history, time travel). `f` must not use this handle.
     /// A state it changes (a rewind) forgets the `#[ttl]` answers.
     pub fn store<R>(&self, f: impl FnOnce(&mut Store<T>) -> R) -> R {
+        let turn = self.turn();
         let r = {
             let mut s = lock(&self.inner.store);
             let before = s.shared();
@@ -234,7 +327,9 @@ impl<T: Cell> Handle<T> {
             }
             r
         };
-        self.after_commit(true);
+        if let Err(e) = self.end(turn, Then::Told { wake: true }) {
+            eprintln!("[aio] {}: {e}", T::ID);
+        }
         r
     }
 
@@ -279,12 +374,16 @@ impl<T: Cell> Handle<T> {
         w
     }
 
-    /// Run `f` on this cell after each committed call of `method` on
-    /// `source` (aio's `listensTo`: `source` never knows who listens). It
-    /// gets the call's event (its arguments, who made it); its own calls
-    /// are made by the same caller. A refusal is said in the log and a
-    /// report, and never undoes the source's call. A `method` `source`
-    /// doesn't have panics here, as the app wires its cells (a typo would
+    /// Run `f` on this cell after each call of `method` on `source` (aio's
+    /// `listensTo`: `source` never knows who listens), inside that call's
+    /// commit: what its own calls write commits in the same SQLite
+    /// transaction as the call it reacts to (both on disk, or neither),
+    /// before anyone is told of either. It gets the call's event (its
+    /// arguments, who made it); its own calls are made by the same caller.
+    /// A refusal (or a panic) is said in the log and a report, and never
+    /// undoes the source's call. It runs while the source's file is held,
+    /// so it calls methods and never waits. A `method` `source` doesn't
+    /// have panics here, as the app wires its cells (a typo would
     /// otherwise never fire).
     pub fn listens_to<S: Cell, R>(
         &self,
@@ -304,12 +403,18 @@ impl<T: Cell> Handle<T> {
             if e.method != method {
                 return;
             }
-            if let Err(err) = f(&me.by(e.by.clone()), e) {
-                let msg = format!("{}: its reaction to {}.{method} refused: {err}", T::ID, S::ID);
-                eprintln!("[aio] {msg}");
-                crate::report::problem("reaction", &msg);
-            }
+            let why = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&me.by(e.by.clone()), e))) {
+                Ok(Ok(_)) => return,
+                Ok(Err(err)) => format!("refused: {err}"),
+                Err(p) => format!("panicked: {}", crate::report::panic_text(&*p)),
+            };
+            let msg = format!("{}: its reaction to {}.{method} {why}", T::ID, S::ID);
+            eprintln!("[aio] {msg}");
+            crate::report::problem("reaction", &msg);
         };
+        source.inner.file.react();
+        self.inner.file.react();
+        lock(&source.inner.store).listened();
         lock(&source.inner.reactions).push(Arc::new(react));
     }
 
@@ -330,12 +435,16 @@ impl<T: Cell> Handle<T> {
         lock(&self.inner.owned).contains_key(key)
     }
 
-    /// Tell the listeners, start the effects the commits asked for, and
-    /// let the scheduler see changed schedules.
-    fn after_commit(&self, wake: bool) {
+    /// Show the commits' state, send their events and start the effects
+    /// they asked for; then ([`Self::tell_committed`]) tell the listeners
+    /// and let the scheduler see changed schedules. A joint commit shows
+    /// every cell in it before it tells any, so each listener sees all of it.
+    fn after_commit(&self, wake: bool) -> Shown {
         // Before the state is shown: from then until its listeners are told.
         let telling = Telling::new();
-        let (started, done, changed) = {
+        // In the file's turn: never a joint commit's state before it commits.
+        let hold = self.inner.file.call();
+        let (started, done, changed, acting) = {
             // Another thread's commit may take these first: whoever takes
             // them sends and starts them before the next taker, so events
             // and queued effects keep commit order.
@@ -347,18 +456,23 @@ impl<T: Cell> Handle<T> {
                 *shown = (s.seq(), s.shared());
                 (s.take_effects(), s.take_committed(), changed)
             };
-            let reacting = !lock(&self.inner.reactions).is_empty();
+            let acting = crate::action_hooks();
             let done: Vec<crate::Event> =
-                if reacting { events.iter().map(|(_, e)| e.clone()).collect() } else { vec![] };
+                if acting.is_empty() { vec![] } else { events.iter().map(|(_, e)| e.clone()).collect() };
+            let committed = !events.is_empty();
             for e in events {
                 // No subscribers is fine: nobody syncs this cell.
                 _ = self.inner.events.send(e);
             }
             let started = !effects.is_empty();
+            let mut asked = vec![];
             for e in effects {
                 match e.downcast::<Effect<T>>() {
                     Ok(e) => match lock(&self.inner.held).as_mut() {
-                        Some(held) => held.push(*e),
+                        Some(held) => {
+                            asked.push(e.key.clone());
+                            held.push(*e)
+                        }
                         None => self.spawn(*e),
                     },
                     Err(e) => match e.downcast::<Abort>() {
@@ -373,18 +487,31 @@ impl<T: Cell> Handle<T> {
                     },
                 }
             }
-            (started, done, changed)
+            if committed && lock(&self.inner.held).is_some() {
+                static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                *lock(&self.inner.last_held) = (STAMP.fetch_add(1, Ordering::Relaxed) + 1, asked);
+            }
+            (started, done, changed, acting)
         };
+        drop(hold);
+        Shown { telling, started, done, changed, acting, wake }
+    }
+
+    fn tell_committed(&self, s: Shown) {
+        let Shown { telling, started, done, changed, acting, wake } = s;
         // A call that changed nothing (a cursor already at the end) tells nobody.
         if changed {
-            let st = self.state();
-            let ls = lock(&self.inner.listeners).clone();
-            ls.iter().for_each(|f| f(&st));
+            self.inner.in_order.tell(|| {
+                let st = self.state();
+                let ls = lock(&self.inner.listeners).clone();
+                ls.iter().for_each(|f| f(&st));
+            });
         }
         drop(telling);
-        // After the order lock: a reaction may call back into this cell.
-        let rs = lock(&self.inner.reactions).clone();
-        done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
+        if !acting.is_empty() && !done.is_empty() {
+            let st = serde_json::to_value(&*self.state()).unwrap_or_default();
+            done.iter().for_each(|e| crate::acted(&acting, T::ID, e, &st));
+        }
         if started {
             tell(&self.inner);
         }
@@ -392,6 +519,26 @@ impl<T: Cell> Handle<T> {
             self.inner.wake.notify_one();
         }
         self.count_failures();
+        // A transaction its aborts ended: the next serialized call's turn.
+        if let Some(sweep) = crate::store::TxOn::<T>::SWEEP {
+            let turn = self.turn();
+            let swept = sweep(&mut lock(&self.inner.store));
+            if let Err(e) = self.end(turn, if swept { Then::Told { wake } } else { Then::Nothing }) {
+                eprintln!("[aio] {}: {e}", T::ID);
+            }
+        }
+    }
+
+    /// Its hold on its file for a call ([`crate::store::hold`]).
+    fn turn(&self) -> Turn {
+        // Not held while it waits for the turn: a joint commit's reactions take it.
+        let reacts = !lock(&self.inner.reactions).is_empty();
+        crate::store::hold(&self.inner.file, reacts, self.inner.clone())
+    }
+
+    /// A call's end ([`crate::store::release`]).
+    fn end(&self, turn: Turn, then: Then) -> Result {
+        crate::store::release(turn, self.inner.clone(), then).map_err(crate::Rejected::new)
     }
 
     /// Count the failures the store saw; the breaker's trip disables the
@@ -455,6 +602,7 @@ impl<T: Cell> Handle<T> {
             return Ok(());
         }
         if on && !T::SCHEDULES.is_empty() {
+            let _hold = self.inner.file.call();
             if let Err(e) = lock(&self.inner.store).declare() {
                 eprintln!("[aio] {e}");
                 crate::report::problem("schedule", &e.0);
@@ -484,6 +632,7 @@ impl<T: Cell> Handle<T> {
 
     /// The last committed call's method and time (ms since the epoch).
     pub(crate) fn last_call(&self) -> Option<(String, i64)> {
+        let _hold = self.inner.file.call();
         lock(&self.inner.store).last_call()
     }
 
@@ -576,6 +725,9 @@ impl<T: Cell> Handle<T> {
         let (reply, answer) = match mode {
             Some(_) => {
                 let (r, a) = crate::answer::Reply::new(method);
+                if let Some(gone) = Gone::<T>::ON {
+                    gone(self, &r);
+                }
                 (Some(r), Some(a))
             }
             None => (None, None),
@@ -585,6 +737,7 @@ impl<T: Cell> Handle<T> {
         {
             return Ok((Some(Value::Null), shared));
         }
+        let turn = self.turn();
         let out = {
             let mut s = lock(&self.inner.store);
             match who.map_or(Ok(()), |w| s.state().allow(w, method, &args)) {
@@ -592,7 +745,7 @@ impl<T: Cell> Handle<T> {
                 Err(e) => Err(e),
             }
         };
-        self.settle(&out);
+        let out = self.settle(turn, out);
         match (out, reply, answer) {
             (Err(e), reply, _) => {
                 reply.inspect(|r| r.send(Err(e.clone())));
@@ -607,6 +760,28 @@ impl<T: Cell> Handle<T> {
         }
     }
 
+    /// Once nothing holds a transaction's call (its await aborted or cut
+    /// off), it is dropped with what it wrote, and the next serialized call
+    /// starts: off this thread, as the task's end may come inside this
+    /// cell's own commit. Off a runtime (an effect a test held, dropped by
+    /// an abort), the commit that dropped it does that ([`Self::after_commit`]).
+    fn on_gone(&self, r: &crate::answer::Reply) {
+        let me = Arc::downgrade(&self.inner);
+        r.on_drop(move || {
+            let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+            drop(rt.spawn_blocking(move || {
+                let Some(inner) = me.upgrade() else { return };
+                let h = Handle { inner, by: By::System };
+                let Some(sweep) = crate::store::TxOn::<T>::SWEEP else { return };
+                let turn = h.turn();
+                let swept = sweep(&mut lock(&h.inner.store));
+                if let Err(e) = h.end(turn, if swept { Then::Told { wake: true } } else { Then::Nothing }) {
+                    eprintln!("[aio] {}: {e}", T::ID);
+                }
+            }));
+        });
+    }
+
     /// An async method's step `method` (`m.1`), run by its effect for the
     /// call whose end goes to `reply`: refused once a newer call of a
     /// `#[mode(newest)]` method came.
@@ -618,9 +793,9 @@ impl<T: Cell> Handle<T> {
         {
             crate::reject!("{}.{base}: superseded by a newer call (#[mode(newest)])", T::ID);
         }
+        let turn = self.turn();
         let out = lock(&self.inner.store).call_as(&self.by, None, method, args, None, reply);
-        self.settle(&out);
-        out.map(Option::unwrap_or_default)
+        self.settle(turn, out).map(Option::unwrap_or_default)
     }
 
     /// An async method's await refused (`io.await?`): a failure of the cell, as a refused step is.
@@ -654,21 +829,39 @@ impl<T: Cell> Handle<T> {
         }
     }
 
+    #[cfg(feature = "testing")]
     /// Keep effects from now on, unstarted, until `start_held`.
     pub(crate) fn hold(&self) {
         lock(&self.inner.held).get_or_insert_default();
     }
 
+    #[cfg(feature = "testing")]
     /// The keys of the effects held, in the order they were asked for.
     pub(crate) fn held(&self) -> Vec<String> {
         lock(&self.inner.held).iter().flatten().map(|e| e.key.clone()).collect()
     }
 
+    #[cfg(feature = "testing")]
     /// The effects held, each as its key, mode and timeout.
     pub(crate) fn held_effects(&self) -> Vec<(String, Mode, Option<Duration>)> {
         lock(&self.inner.held).iter().flatten().map(|e| (e.key.clone(), e.mode, e.timeout)).collect()
     }
 
+    #[cfg(feature = "testing")]
+    /// The keys its last commit asked for while held, with the commit's stamp.
+    pub(crate) fn last_held(&self) -> (u64, Vec<String>) {
+        lock(&self.inner.last_held).clone()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Drop the held effects unstarted (a test resets the cell).
+    pub(crate) fn drop_held(&self) {
+        if let Some(h) = lock(&self.inner.held).as_mut() {
+            h.clear();
+        }
+    }
+
+    #[cfg(feature = "testing")]
     /// Start the held effects (inside a tokio runtime); how many.
     pub(crate) fn start_held(&self) -> usize {
         let es = lock(&self.inner.held).as_mut().map(std::mem::take).unwrap_or_default();
@@ -677,11 +870,13 @@ impl<T: Cell> Handle<T> {
         n
     }
 
+    #[cfg(feature = "testing")]
     /// The failures of its schedules and effects since the last take.
     pub(crate) fn take_failed(&self) -> Vec<String> {
         std::mem::take(&mut *lock(&self.inner.failed))
     }
 
+    #[cfg(feature = "testing")]
     /// The keys of the effects running now.
     pub(crate) fn running(&self) -> Vec<String> {
         let mut r: Vec<String> = lock(&self.inner.running)
@@ -746,18 +941,25 @@ impl<T: Cell> Handle<T> {
         }
         // Read only: not through `store`, which tells the listeners (a view
         // reading this on every commit would loop). A held run is flushed
-        // unseen: its state is the one already shown.
-        let mut s = lock(&self.inner.store);
-        if let Err(e) = s.flush() {
-            eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
-        }
-        let bad = |e: Error| crate::Rejected::new(e.0);
-        let (p, newest) = (s.position().map_err(bad)?, s.newest(TIMELINE_STEPS).map_err(bad)?);
-        let steps = newest
-            .into_iter()
-            .map(|e| Moment { took: s.took(e.seq), seq: e.seq, method: e.method, at: e.at })
-            .collect();
-        Ok(Timeline { at: p.at, head: p.head, floor: p.floor, paused: self.paused(), steps })
+        // unseen: its state is the one already shown (its reactions run).
+        let turn = self.turn();
+        let read = {
+            let mut s = lock(&self.inner.store);
+            if let Err(e) = s.flush() {
+                eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
+            }
+            let bad = |e: Error| crate::Rejected::new(e.0);
+            (s.position().map_err(bad)).and_then(|p| {
+                let newest = s.newest(TIMELINE_STEPS).map_err(bad)?;
+                let steps = newest
+                    .into_iter()
+                    .map(|e| Moment { took: s.took(e.seq), seq: e.seq, method: e.method, at: e.at })
+                    .collect();
+                Ok(Timeline { at: p.at, head: p.head, floor: p.floor, paused: self.paused(), steps })
+            })
+        };
+        let committed = self.end(turn, Then::Nothing);
+        read.and_then(|t| committed.map(|()| t))
     }
 
     /// Shut down within `budget`: refuse new calls (`retry after`),
@@ -792,6 +994,7 @@ impl<T: Cell> Handle<T> {
     /// The event the synced call `op` made (see `Store::op_seq`).
     #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
     pub(crate) fn op_seq(&self, op: &str) -> Option<u64> {
+        let _hold = self.inner.file.call();
         lock(&self.inner.store).op_seq(op)
     }
 
@@ -917,12 +1120,13 @@ impl<T: Cell> Handle<T> {
     /// Fire the schedules due now (none while disabled or paused): when the
     /// next one is due, and now.
     pub(crate) fn fire(&self) -> (Option<i64>, i64) {
+        if !self.enabled() || self.paused() {
+            return (None, lock(&self.inner.store).now());
+        }
+        let turn = self.turn();
         let (next, now) = {
             let mut s = lock(&self.inner.store);
             let now = s.now();
-            if !self.enabled() || self.paused() {
-                return (None, now);
-            }
             if let Err(e) = s.fire_due_but(now, |d| self.skips(d)) {
                 eprintln!("[aio] {}: schedules: {e}", T::ID);
             }
@@ -932,15 +1136,53 @@ impl<T: Cell> Handle<T> {
             (due.into_iter().chain(idle).min(), now)
         };
         // Its own fires must not wake it again.
-        self.after_commit(false);
+        if let Err(e) = self.end(turn, Then::Fired) {
+            eprintln!("[aio] {}: schedules: {e}", T::ID);
+        }
         (next, now)
     }
 
+    /// Join the app's cells in `dir`: reached there by the schedules other
+    /// cells set on it, and reaching them with its own.
+    pub(crate) fn join(&self, dir: &Dir) {
+        let me = Arc::downgrade(&self.inner);
+        let reach: Reach = Arc::new(move |by, method, args| {
+            let inner = me.upgrade().ok_or_else(|| crate::Rejected::new(format!("{} is gone", T::ID)))?;
+            Handle { inner, by: by.clone() }.call(method, args)
+        });
+        lock(&dir.0).insert(T::ID, reach);
+        *lock(&self.inner.dir) = Some(dir.clone());
+    }
+
+    /// Call the methods its schedules on other cells came due for, each
+    /// by its schedule: refused, it is that cell's failure, as its own
+    /// schedule's would be; on a cell the app doesn't hold, this cell's.
+    pub(crate) fn fire_foreign(&self) {
+        let due = lock(&self.inner.store).take_foreign();
+        if due.is_empty() {
+            return;
+        }
+        let dir = lock(&self.inner.dir).clone();
+        let failed = fire_on(T::ID, dir.as_ref(), due);
+        if !failed.is_empty() {
+            let mut s = lock(&self.inner.store);
+            failed.iter().for_each(|(by, why)| s.failed(by, why));
+            drop(s);
+            self.count_failures();
+        }
+    }
+
     /// After a call: a commit tells everyone; a refusal may be a failure.
-    fn settle<R>(&self, out: &Result<R>) {
-        match out {
-            Ok(_) => self.after_commit(true),
-            Err(_) => self.count_failures(),
+    fn settle<R>(&self, turn: Turn, out: Result<R>) -> Result<R> {
+        let committed = self.end(turn, if out.is_ok() { Then::Told { wake: true } } else { Then::Failures });
+        match (out, committed) {
+            (Ok(v), Ok(())) => Ok(v),
+            // The joint commit refused: nothing was kept, and nobody told.
+            (Ok(_), Err(e)) => {
+                self.count_failures();
+                Err(e)
+            }
+            (Err(e), _) => Err(e),
         }
     }
 
@@ -969,6 +1211,39 @@ impl<T: Cell> Handle<T> {
             }
         })
     }
+}
+
+/// Call each of `cell`'s schedules due on another cell there; those on a
+/// cell `dir` doesn't hold, as `cell`'s failures.
+fn fire_on(cell: &str, dir: Option<&Dir>, due: Vec<crate::Due>) -> Vec<(By, String)> {
+    let mut failed = vec![];
+    for d in due {
+        let (other, method) = d.method.split_once(':').expect("cell:method");
+        let by = By::Schedule(d.key.clone());
+        match dir.and_then(|dir| lock(&dir.0).get(other).cloned()) {
+            Some(f) => {
+                if let Err(e) = f(&by, method, d.args) {
+                    eprintln!("[aio] {cell}: schedule `{}` ({other}.{method}) refused: {e}", d.key);
+                }
+            }
+            None => {
+                let why = format!("{other}.{method}: {other} is not one of the app's cells");
+                eprintln!("[aio] {cell}: schedule `{}`: {why}", d.key);
+                failed.push((by, why));
+            }
+        }
+    }
+    failed
+}
+
+/// [`Handle::on_gone`], made only for a `#[cell(transaction)]` cell.
+struct Gone<T>(std::marker::PhantomData<T>);
+
+impl<T: Cell> Gone<T> {
+    const ON: Option<fn(&Handle<T>, &crate::answer::Reply)> = match T::TRANSACTION {
+        Some(_) => Some(Handle::<T>::on_gone),
+        None => None,
+    };
 }
 
 /// Held by an effect's task and dropped when it ends, however it ends (a

@@ -70,38 +70,7 @@ pub fn theme_css(hue: u16) -> String {
     theme::tokens_css(hue, false) + "\n" + CSS
 }
 
-/// Wait `d`: on the page's timer in a browser, else on tokio's (a test's
-/// paused clock too).
-pub(crate) async fn sleep(d: std::time::Duration) {
-    #[cfg(target_arch = "wasm32")]
-    crate::web::sleep(u32::try_from(d.as_millis()).unwrap_or(u32::MAX)).await;
-    #[cfg(not(target_arch = "wasm32"))]
-    tokio::time::sleep(d).await;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use std::time::Instant;
-
-/// A moment, on the page's clock: a browser has no `std` one.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Copy)]
-pub(crate) struct Instant(f64);
-
-#[cfg(target_arch = "wasm32")]
-impl Instant {
-    pub(crate) fn now() -> Self {
-        Self(js_sys::Date::now())
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl std::ops::Sub for Instant {
-    type Output = std::time::Duration;
-
-    fn sub(self, earlier: Self) -> Self::Output {
-        std::time::Duration::from_secs_f64((self.0 - earlier.0).max(0.0) / 1000.0)
-    }
-}
+pub(crate) use crate::ui::clock::{Instant, sleep};
 
 /// The kit's class, then the caller's.
 fn join(base: &str, extra: &str) -> String {

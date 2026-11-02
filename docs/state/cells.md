@@ -90,7 +90,8 @@ door (Handle, synced copy, TestUi, ax call, /ws)
   ├─ the state machine moves (or refuses)
   ├─ the method runs on the copy: Err or panic refuses, the copy is dropped
   ├─ every #[invariant] runs on the copy: one Err refuses
-  ├─ commit: one event in the log (or held, for a coalesced method)
+  ├─ commit: one event in the log (or held, for a coalesced method),
+  │  with the calls of its listens_to reactions in the same transaction
   │
   └─ after the commit: listeners, watchers, views re-render,
      synced clients get a patch, effects and schedules start

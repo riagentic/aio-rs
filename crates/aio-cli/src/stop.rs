@@ -119,12 +119,20 @@ pub fn one(name: &str, t: &crate::target::Target, hard: bool, wait: Duration) ->
 /// [`one`], as it went; `wait` `None`: asked, not waited for.
 pub fn stopped(name: &str, t: &crate::target::Target, hard: bool, wait: Option<Duration>) -> Result<Stopped, String> {
     let data = &t.plan.data;
+    // An `ax dev` session would start it again on the next save: it ends first,
+    // and stops the app it runs the graceful way.
+    let started = Instant::now();
+    let session = crate::dev::end_session(&t.plan.logs);
+    if !aio::paths::running(data) && session {
+        let took = started.elapsed().as_secs_f64();
+        let wait = wait.unwrap_or_default();
+        return Ok(Stopped { name: name.into(), how: Some(How::Asked), hard, took, wait, discarded: false });
+    }
     if !aio::paths::running(data) {
         let verb = if hard { "kill" } else { "stop" };
         return Err(format!("{name} isn't running: nothing to {verb} (`ax {verb} {name} || true` when that's fine)"));
     }
     let pid = pid(data);
-    let started = Instant::now();
     let asked = (!hard).then(|| aio_shell::instance::quit_at(&t.id, data));
     let done = |how, discarded| Stopped {
         name: name.into(),

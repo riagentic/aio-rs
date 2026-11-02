@@ -614,6 +614,8 @@ pub struct Http {
     pub(crate) oidc: Option<Arc<crate::auth::oidc::Provider>>,
     pub(crate) ui: Option<Ui>,
     paint: Option<OnPaint>,
+    /// Hosts the plugins add to `[server] hosts` ([`crate::plugin::Plugin::allowed_origins`]).
+    pub(crate) hosts: Vec<String>,
 }
 
 impl Default for Http {
@@ -631,6 +633,7 @@ impl Default for Http {
             oidc: None,
             ui: None,
             paint: None,
+            hosts: Vec::new(),
         }
     }
 }
@@ -728,6 +731,7 @@ impl Http {
     pub(crate) fn under(mut self, p: Http) -> Self {
         self.plugin_routes.extend(p.routes);
         self.fns.under(p.fns);
+        p.hosts.into_iter().for_each(|h| if !self.hosts.contains(&h) { self.hosts.push(h) });
         self.on_link = match (self.on_link.take(), p.on_link) {
             (Some(own), Some(theirs)) => Some(Arc::new(move |l: &Presence| {
                 for f in [&theirs, &own] {
@@ -794,6 +798,19 @@ impl Http {
     /// what a page shown before sign-in needs.
     pub fn public_dir(self, prefix: &str, dir: impl Into<PathBuf>) -> Self {
         self.root(prefix, dir.into(), true)
+    }
+
+    /// The files built into the app (`[build] assets`, aio's `assets`:
+    /// `Build::asset_files`), each at its URL path, to anyone: they ship
+    /// with the app, as its page does.
+    pub fn assets(self, files: &'static [(&'static str, &'static [u8])]) -> Self {
+        files.iter().fold(self, |h, &(path, bytes)| {
+            let name = path.rsplit('/').next().unwrap_or_default();
+            let ty = served_type(name, bytes);
+            // Routes match the path as decoded.
+            let at: String = path.split('/').map(decode).collect::<Vec<_>>().join("/");
+            h.route(Route::get(&at, move |_| std::future::ready(Reply::of(&ty, bytes.to_vec()))).public())
+        })
     }
 
     /// The dirs `aio.toml` serves (`[server] dirs`, `public_dirs`), a

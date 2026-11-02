@@ -18,6 +18,16 @@ const RESTORE: &str = "$restore";
 /// (`Cell::REDACTED`). No method's own arguments are an object (always a
 /// tuple or null), so none can pose as one.
 pub const REDACTED: &str = "$redacted";
+/// A transaction's logged arguments (`#[cell(transaction)]`): `{TX: <the
+/// state it left>, "args": <its call's arguments>}`, replayed as that state
+/// (without its `#[transient]` fields), as a `#[redact]` call's is.
+pub const TX: &str = "$tx";
+
+mod shared;
+mod tx;
+use shared::Db;
+pub(crate) use shared::{Hold, Member, Shared, Then, hold, release};
+pub(crate) use tx::On as TxOn;
 
 /// One committed call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -145,12 +155,20 @@ impl From<rusqlite::Error> for Error {
 pub struct Store<T: Cell> {
     state: Arc<T>,
     seq: u64,
-    db: Connection,
+    /// Its connection, and its file's shared one.
+    db: Db,
     unsnapped: u32,
     effects: Vec<Box<dyn std::any::Any + Send>>,
+    /// Schedules due on another cell (`cx.on::<O>()`), fired by the handle.
+    foreign: Vec<Due>,
     /// Events committed since the runtime last took them, each with the
     /// cell's event before it (for synced copies to spot a gap).
     committed: Vec<(u64, Event)>,
+    /// Events committed that the cells listening to it have not reacted
+    /// to yet; `None`: nobody listens.
+    to_react: Option<Vec<Event>>,
+    /// The joint commit it last wrote in, and the store as it was before.
+    mark: Option<(u64, Mark<T>)>,
     /// The file and its identity at open: a commit checks it is still there
     /// (D5: on Unix a deleted file takes writes silently, then they're lost).
     file: Option<(std::path::PathBuf, FileId)>,
@@ -186,17 +204,33 @@ pub struct Store<T: Cell> {
     /// stamped with that version (never lowered: rolling forward again
     /// migrates nothing twice).
     ahead: Option<(u32, Value)>,
+    /// `#[cell(transaction)]`: its async calls in flight.
+    txs: tx::Txs<T>,
 }
 
 /// A run of coalesced calls by one caller: each call (the last one is the
 /// run's one event when it alone ends where the run did), the state before
 /// the run, and when the run began.
+#[derive(Clone)]
 struct Held<T> {
     by: By,
     /// Each call's method, arguments and time, in order.
     calls: Vec<(String, Value, i64)>,
     base: Arc<T>,
     since: std::time::Instant,
+}
+
+/// A store as a joint commit found it ([`Store::mark`]).
+pub(crate) struct Mark<T> {
+    state: Arc<T>,
+    seq: u64,
+    unsnapped: u32,
+    effects: usize,
+    foreign: usize,
+    committed: usize,
+    to_react: usize,
+    held: Option<Held<T>>,
+    journal_wm: Option<i64>,
 }
 
 /// The most calls a run holds: a longer one is flushed and starts again.
@@ -378,6 +412,38 @@ fn file_id(path: &Path) -> Option<FileId> {
     }
 }
 
+/// A savepoint: a transaction of its own, or, inside a joint commit
+/// ([`open_joint`]), a part of it. Dropped before `commit`, it is undone.
+struct Atomic<'a>(&'a Connection, bool);
+
+impl<'a> Atomic<'a> {
+    fn new(db: &'a Connection) -> rusqlite::Result<Self> {
+        db.execute_batch("SAVEPOINT aio")?;
+        Ok(Self(db, false))
+    }
+
+    fn commit(mut self) -> rusqlite::Result<()> {
+        self.0.execute_batch("RELEASE aio")?;
+        self.1 = true;
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for Atomic<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.0
+    }
+}
+
+impl Drop for Atomic<'_> {
+    fn drop(&mut self) {
+        if !self.1 {
+            _ = self.0.execute_batch("ROLLBACK TO aio; RELEASE aio");
+        }
+    }
+}
+
 /// A saved schedule.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Due {
@@ -466,7 +532,7 @@ fn ours(db: &Connection, aio_file: bool) -> Result<i64, Error> {
 /// A file opened for a cell: set aside first if damaged, and aio's slice
 /// of it (its state and version).
 struct Opened {
-    db: Connection,
+    db: Db,
     recovered: Option<Recovered>,
     aio_kv: Option<crate::compat::data::Kv>,
     seed: Option<(Value, u32)>,
@@ -497,7 +563,8 @@ fn open(
         Ok(()) => None,
         Err(why) => Some(recover(path, why)?),
     };
-    let db = Connection::open(path)?;
+    let file = Db::open(path)?;
+    let db = file.conn();
     let aio_kv = app.map(|a| crate::compat::data::Kv::find(&db, a)).transpose().map_err(Error)?;
     // Its declared `db:` tables (aio-rs's own file: once it is set up, `bind`),
     // on a file known as aio's: a new one gets aio's `aio_kv` first, and one
@@ -528,7 +595,8 @@ fn open(
             db.execute("VACUUM INTO ?1", [&bak])?;
         }
     }
-    Ok(Opened { db, recovered, aio_kv, seed })
+    drop(db);
+    Ok(Opened { db: file, recovered, aio_kv, seed })
 }
 
 /// Bound tables `(cell, binding)` made or brought to their declared shape
@@ -588,28 +656,32 @@ fn newest(db: &Connection, path: &Path, id: &str, version: u32, aio_file: bool) 
 /// one transaction: their history here and, in an aio file, their slices and
 /// stamps. Zeroed, not only unlinked (`secure_delete`, the WAL emptied), so
 /// a secret one held is gone from the file; never a cell still read here.
+/// A cell of `#[aio_cell]` fields may retire its own id: aio's slice of that
+/// name (an earlier build's, before it read aio's cells by field) and its
+/// stamp go, its own history here stays.
 fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
     if T::RETIRED.is_empty() {
         return Ok(());
     }
-    if let Some(c) = T::RETIRED.iter().find(|c| **c == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == **c)) {
+    let reads = |c: &str| (c == T::ID && T::AIO_CELLS.is_empty()) || T::AIO_CELLS.iter().any(|s| s.cell == c);
+    if let Some(c) = T::RETIRED.iter().find(|c| reads(c)) {
         return Err(Error(format!("{}: it retires cell {c}, which it still reads", T::ID)));
     }
-    erase(db, kv, T::RETIRED).map(|_| ())
+    erase(db, kv, T::RETIRED, T::ID).map(|_| ())
 }
 
 /// The history of `cells` gone from the file (and, in an aio file, their
-/// slices and stamps), zeroed; whether there was any.
-fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str]) -> Result<bool, Error> {
+/// slices and stamps), zeroed; whether there was any. `own`'s history is kept.
+fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &str) -> Result<bool, Error> {
     let secure: i64 = db.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
     db.execute_batch("PRAGMA secure_delete = ON")?;
-    let tx = db.unchecked_transaction()?;
+    let tx = Atomic::new(db)?;
     let mut gone = match kv {
         Some(kv) => kv.retire(&tx, cells).map_err(Error)?,
         None => false,
     };
     for t in TABLES {
-        for c in cells {
+        for c in cells.iter().filter(|c| **c != own) {
             gone |= tx.execute(&format!("DELETE FROM {t} WHERE cell = ?1"), [c])? > 0;
         }
     }
@@ -968,7 +1040,8 @@ fn redacted<T: Cell>(method: &str, before: &T, after: &T) -> Result<Option<Value
 
 /// The state a `#[redact]` event's args keep (see [`REDACTED`]).
 fn made(args: &Value) -> Option<&Value> {
-    args.as_object()?.get(REDACTED)
+    let a = args.as_object()?;
+    a.get(REDACTED).or_else(|| a.get(TX))
 }
 
 /// A `#[redact]` event replayed: the state it left, with the `#[transient]`
@@ -1041,15 +1114,19 @@ impl<T: Cell> Store<T> {
         if let Err(e) = machine_ok::<T>() {
             panic!("{e}");
         }
-        let db = Connection::open_in_memory().expect("in-memory SQLite");
-        init(&db, false).expect("in-memory schema");
+        let db = Db::memory().expect("in-memory SQLite");
+        init(&db.conn(), false).expect("in-memory schema");
         let mut s = Self {
             state: Arc::new(state),
             seq: 0,
             db,
             unsnapped: 0,
             effects: vec![],
+            foreign: vec![],
+            txs: Default::default(),
             committed: vec![],
+            to_react: None,
+            mark: None,
             file: None,
             recovered: None,
             panics: vec![],
@@ -1068,6 +1145,7 @@ impl<T: Cell> Store<T> {
         s
     }
 
+    #[cfg(feature = "testing")]
     /// A memory store booted from data saved by version `v` of the cell,
     /// as `open` boots it: refused when it doesn't fit (D9, D10), else
     /// migrated and restored (`#[transient]` fields back to their defaults,
@@ -1102,8 +1180,9 @@ impl<T: Cell> Store<T> {
         if let Some(r) = &recovered {
             told_recovered(T::ID, r);
         }
+        let c = db.conn();
         // aio's journal past its save, read (or refused) before anything is written.
-        let tail = aio_kv.as_ref().map(|kv| journal_tail::<T>(&db, kv, path)).transpose()?.unwrap_or_default();
+        let tail = aio_kv.as_ref().map(|kv| journal_tail::<T>(&c, kv, path)).transpose()?.unwrap_or_default();
         // aio's data that doesn't fit refuses the boot before anything is written.
         let whole = aio_kv.is_some() && T::AIO_CELLS.is_empty();
         let seed = match aio_kv.is_some() {
@@ -1112,10 +1191,10 @@ impl<T: Cell> Store<T> {
                 .transpose()?,
             false => seed.map(|(raw, v)| (None, raw, v)),
         };
-        let (base, last) = newest(&db, path, T::ID, T::VERSION, aio_kv.is_some())?;
-        retire::<T>(&db, aio_kv.as_ref())?;
+        let (base, last) = newest(&c, path, T::ID, T::VERSION, aio_kv.is_some())?;
+        retire::<T>(&c, aio_kv.as_ref())?;
         let seed = match (&aio_kv, T::TABLES.is_empty()) {
-            (None, false) => bind(&db, T::ID, T::VERSION, T::TABLES)?.map(|(raw, v)| (None, raw, v)),
+            (None, false) => bind(&c, T::ID, T::VERSION, T::TABLES)?.map(|(raw, v)| (None, raw, v)),
             _ => seed,
         };
         let (from, mut st, migrated) = match &base {
@@ -1131,7 +1210,8 @@ impl<T: Cell> Store<T> {
             (v, serde_json::from_str(&text).unwrap_or(Value::Null))
         });
         let last = last.max(from);
-        replay(&db, &mut st, from, last, true)?;
+        replay(&c, &mut st, from, last, true)?;
+        drop(c);
         let back = restored(&st)?;
         let file = file_id(path).map(|id| (path.to_path_buf(), id));
         let mut s = Self {
@@ -1140,7 +1220,11 @@ impl<T: Cell> Store<T> {
             db,
             unsnapped: 0,
             effects: vec![],
+            foreign: vec![],
+            txs: Default::default(),
             committed: vec![],
+            to_react: None,
+            mark: None,
             file,
             recovered,
             panics: vec![],
@@ -1171,7 +1255,8 @@ impl<T: Cell> Store<T> {
                 Some(v) => v,
                 None => json(&*s.state)?,
             };
-            let tx = s.db.unchecked_transaction()?;
+            let c = s.db.conn();
+            let tx = Atomic::new(&c)?;
             crate::compat::data::write_bound(&tx, T::ID, &mut st, None, T::TABLES).map_err(Error)?;
             tx.commit()?;
         }
@@ -1212,7 +1297,7 @@ impl<T: Cell> Store<T> {
                 .map_err(|e| Error(format!("{}: restore: {e}", T::ID)))?;
         }
         s.replay_journal(tail)?;
-        refresh_good(&s.db, path)?;
+        refresh_good(&s.db.conn(), path)?;
         Ok(s)
     }
 
@@ -1252,9 +1337,11 @@ impl<T: Cell> Store<T> {
         self.effects.truncate(effects);
         // Entries past the last call (skipped ones): the watermark alone.
         self.journal_wm = None;
-        if kv.journal_wm(&self.db).map_err(Error)? < last {
-            kv.set_journal_wm(&self.db, last).map_err(Error)?;
+        let c = self.db.conn();
+        if kv.journal_wm(&c).map_err(Error)? < last {
+            kv.set_journal_wm(&c, last).map_err(Error)?;
         }
+        drop(c);
         let calls = tail.iter().filter(|j| matches!(j, crate::compat::data::Journaled::Call { .. })).count();
         eprintln!("[aio] {}: replayed {calls} calls of aio's journal (up to entry {last})", T::ID);
         Ok(())
@@ -1265,6 +1352,7 @@ impl<T: Cell> Store<T> {
         self.clock.as_ref().map_or_else(now_ms, |c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    #[cfg(feature = "testing")]
     /// Run on `clock` instead of the wall clock (tests that move time).
     pub(crate) fn set_clock(&mut self, clock: std::sync::Arc<std::sync::atomic::AtomicI64>) {
         self.clock = Some(clock);
@@ -1289,6 +1377,7 @@ impl<T: Cell> Store<T> {
     #[cfg(all(feature = "compat", feature = "server"))]
     pub(crate) fn op_seq(&self, op: &str) -> Option<u64> {
         self.db
+            .conn()
             .query_row("SELECT seq FROM ops WHERE cell = ?1 AND op = ?2", params![T::ID, op], |r| r.get::<_, i64>(0))
             .ok()
             .map(|s| s as u64)
@@ -1322,11 +1411,16 @@ impl<T: Cell> Store<T> {
         let now = self.now();
         let Some(op) = op else {
             let cx = Cx::live(now, by).with_role(role).with_reply(reply);
-            return self.apply_and_commit(by, method, args, cx, None, None).map(Some);
+            let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
+            if let Some(sweep) = tx::On::<T>::SWEEP {
+                sweep(self);
+            }
+            return out;
         };
         let op = crate::cx::Op::check(op, now).map_err(Rejected::new)?;
         let seen: bool = self
             .db
+            .conn()
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM ops WHERE cell = ?1 AND op = ?2)",
                 params![T::ID, op.to_string()],
@@ -1337,7 +1431,11 @@ impl<T: Cell> Store<T> {
             return Ok(None);
         }
         let cx = Cx::synced(now, T::ID, by, &op).with_role(role).with_reply(reply);
-        self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some)
+        let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
+        if let Some(sweep) = tx::On::<T>::SWEEP {
+            sweep(self);
+        }
+        out
     }
 
     /// A failure of the cell not made by a call (an async method's awaited `?`).
@@ -1353,6 +1451,18 @@ impl<T: Cell> Store<T> {
     /// A refusal of a person's call is an answer; one of the cell's own
     /// schedules or effects, or a panic, is a failure (`Cells` health).
     fn apply_and_commit(
+        &mut self,
+        by: &By,
+        method: &str,
+        args: Value,
+        cx: Cx,
+        fired: Option<&Due>,
+        op: Option<&str>,
+    ) -> Result<Value> {
+        crate::log::in_call(|| self.apply_and_commit_in_call(by, method, args, cx, fired, op))
+    }
+
+    fn apply_and_commit_in_call(
         &mut self,
         by: &By,
         method: &str,
@@ -1399,6 +1509,13 @@ impl<T: Cell> Store<T> {
         if self.panics.len() >= PANICS_MAX {
             crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", T::ID);
         }
+        let base = method.split_once('.').map_or(method, |(m, _)| m);
+        if let (Some(call), Some(cfg), Some(_)) = (tx::On::<T>::CALL, T::TRANSACTION, T::async_mode(base))
+            && let Some(reply) = cx.reply()
+        {
+            return call(self, cfg, by, method, args, cx, reply, op);
+        }
+        let cx = cx.with_live(self.state.clone());
         let t0 = std::time::Instant::now();
         let mut next = (*self.state).clone();
         let t1 = std::time::Instant::now();
@@ -1469,6 +1586,10 @@ impl<T: Cell> Store<T> {
     /// in the other; `down` after `down`). A run that came back to where it
     /// began logs nothing. Refused (storage), the run stays held.
     pub fn flush(&mut self) -> Result {
+        if self.held.is_none() {
+            return Ok(());
+        }
+        self.joining().map_err(|e| Rejected::new(format!("storage: {e}")))?;
         let Some(h) = self.held.take() else { return Ok(()) };
         let now = std::mem::replace(&mut self.state, h.base.clone());
         if *now == *h.base {
@@ -1538,6 +1659,7 @@ impl<T: Cell> Store<T> {
         // call that set it, not found when it fires.
         for p in &asks.plans {
             if let Plan::Set { key, method: m, .. } = p
+                && !m.contains(':')
                 && !T::METHODS.contains(&m.as_str())
             {
                 crate::reject!("schedule `{key}`: {} has no method `{m}` (its methods: {})", T::ID, T::METHODS.join(", "));
@@ -1579,6 +1701,7 @@ impl<T: Cell> Store<T> {
         // under us: our state no longer follows it, so stop instead of forking.
         let newer: bool = self
             .db
+            .conn()
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2)",
                 params![T::ID, self.seq as i64],
@@ -1593,7 +1716,9 @@ impl<T: Cell> Store<T> {
             );
             crate::reject!("storage: something else wrote to this app's data; restart the app to see it");
         }
-        let tx = self.db.unchecked_transaction().map_err(db)?;
+        self.joining().map_err(db)?;
+        let c = self.db.conn();
+        let tx = Atomic::new(&c).map_err(db)?;
         let mut logged_seqs = Vec::with_capacity(earlier.len());
         let calls = earlier.iter().map(|(m, a, t)| (m.as_str(), a, *t, "{}")).chain([(method, args, at, &*inputs_text)]);
         for (m, a, t, inputs) in calls {
@@ -1640,9 +1765,13 @@ impl<T: Cell> Store<T> {
             .map_err(db)?;
         }
         tx.commit().map_err(db)?;
+        drop(c);
         self.journal_wm = None;
         for ((m, a, t), s) in earlier.iter().zip(logged_seqs) {
             let ev = Event { seq: s, method: m.clone(), args: a.clone(), inputs: Default::default(), by: by.clone(), at: *t, v: T::VERSION };
+            if let Some(r) = &mut self.to_react {
+                r.push(ev.clone());
+            }
             self.committed.push((self.seq, ev));
             self.seq = s;
         }
@@ -1655,6 +1784,9 @@ impl<T: Cell> Store<T> {
             at,
             v: T::VERSION,
         };
+        if let Some(r) = &mut self.to_react {
+            r.push(ev.clone());
+        }
         self.committed.push((self.seq, ev));
         self.seq = seq;
         // A dev build at `debug` says what each call changed, key by key.
@@ -1691,6 +1823,73 @@ impl<T: Cell> Store<T> {
         std::mem::take(&mut self.committed)
     }
 
+    /// Other cells listen to it: from now on its events wait for their reactions.
+    pub(crate) fn listened(&mut self) {
+        self.to_react.get_or_insert_default();
+    }
+
+    /// Events committed since the cells listening to it last reacted.
+    pub(crate) fn unreacted(&mut self) -> Vec<Event> {
+        self.to_react.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Its file's connection, shared with the other cells kept in it.
+    pub(crate) fn file(&self) -> Shared {
+        self.db.file().clone()
+    }
+
+    /// Before a write: in a joint commit, the store as it was before its
+    /// first write there is kept, to put back should the commit be refused.
+    fn joining(&mut self) -> rusqlite::Result<()> {
+        if let Some(id) = self.db.begin()?
+            && self.mark.as_ref().is_none_or(|m| m.0 != id)
+        {
+            self.mark = Some((id, self.marked()));
+        }
+        Ok(())
+    }
+
+    /// A joint commit it wrote in ended: `kept`, or refused and put back.
+    pub(crate) fn joint_end(&mut self, joint: u64, kept: bool) {
+        if let Some((_, m)) = self.mark.take_if(|m| m.0 == joint)
+            && !kept
+        {
+            self.undo(m);
+        }
+    }
+
+    fn marked(&self) -> Mark<T> {
+        Mark {
+            state: self.state.clone(),
+            seq: self.seq,
+            unsnapped: self.unsnapped,
+            effects: self.effects.len(),
+            foreign: self.foreign.len(),
+            committed: self.committed.len(),
+            to_react: self.to_react.as_ref().map_or(0, Vec::len),
+            held: self.held.clone(),
+            journal_wm: self.journal_wm,
+        }
+    }
+
+    /// Back to `m`: a joint commit its calls went into was refused, so
+    /// none of them are on disk.
+    fn undo(&mut self, m: Mark<T>) {
+        self.state = m.state;
+        self.seq = m.seq;
+        self.unsnapped = m.unsnapped;
+        self.effects.truncate(m.effects);
+        self.foreign.truncate(m.foreign);
+        self.committed.truncate(m.committed);
+        if let Some(r) = &mut self.to_react {
+            r.truncate(m.to_react);
+        }
+        self.took.retain(|(s, _)| *s <= m.seq);
+        self.held = m.held;
+        self.journal_wm = m.journal_wm;
+        self.saved = None;
+    }
+
     /// Failures since the last take (see `apply_and_commit`).
     pub(crate) fn take_failures(&mut self) -> Vec<(By, String)> {
         std::mem::take(&mut self.failures)
@@ -1699,12 +1898,18 @@ impl<T: Cell> Store<T> {
     /// The last committed event's method and time (ms since the epoch).
     pub(crate) fn last_call(&self) -> Option<(String, i64)> {
         self.db
+            .conn()
             .query_row("SELECT method, at FROM log WHERE cell = ?1 ORDER BY seq DESC LIMIT 1", [T::ID], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .optional()
             .ok()
             .flatten()
+    }
+
+    /// The schedules due on other cells since the last take.
+    pub(crate) fn take_foreign(&mut self) -> Vec<Due> {
+        std::mem::take(&mut self.foreign)
     }
 
     /// Effects asked for by committed calls, to be started by the runtime.
@@ -1714,8 +1919,8 @@ impl<T: Cell> Store<T> {
 
     /// Every saved schedule, soonest first.
     pub fn schedules(&self) -> Result<Vec<Due>, Error> {
-        let mut q = self
-            .db
+        let c = self.db.conn();
+        let mut q = c
             .prepare("SELECT key, due, every, method, args, cron FROM sched WHERE cell = ?1 ORDER BY due, key")?;
         let rows = q.query_map([T::ID], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, String>(4)?, r.get(5)?))
@@ -1741,13 +1946,19 @@ impl<T: Cell> Store<T> {
         let due: Vec<Due> = self.schedules()?.into_iter().filter(|d| d.due <= now).collect();
         for d in &due {
             if skip(d) {
-                rearm::<T>(&self.db, d, now)?;
+                rearm::<T>(&self.db.conn(), d, now)?;
+                continue;
+            }
+            // Another cell's method (`cell:method`): its handle calls it.
+            if d.method.contains(':') {
+                rearm::<T>(&self.db.conn(), d, now)?;
+                self.foreign.push(d.clone());
                 continue;
             }
             let by = By::Schedule(d.key.clone());
             if let Err(e) = self.run(&by, &d.method, d.args.clone(), now, Some(d)) {
                 eprintln!("[aio] {}: schedule `{}` ({}) refused: {e}", T::ID, d.key, d.method);
-                rearm::<T>(&self.db, d, now)?;
+                rearm::<T>(&self.db.conn(), d, now)?;
             }
         }
         Ok(due.len())
@@ -1758,7 +1969,8 @@ impl<T: Cell> Store<T> {
     /// one starts over from now, and an `@` one no longer declared goes.
     pub(crate) fn declare(&mut self) -> Result<(), Error> {
         let (now, have) = (self.now(), self.schedules()?);
-        let tx = self.db.unchecked_transaction()?;
+        let c = self.db.conn();
+        let tx = Atomic::new(&c)?;
         for d in &have {
             if d.key.strip_prefix('@').is_some_and(|m| !T::SCHEDULES.iter().any(|s| s.method == m)) {
                 tx.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2", params![T::ID, d.key])?;
@@ -1797,24 +2009,18 @@ impl<T: Cell> Store<T> {
             crate::config::Durability::Normal => "NORMAL",
             crate::config::Durability::Full => "FULL",
         };
-        Ok(self.db.execute_batch(&format!("PRAGMA synchronous = {mode}"))?)
+        self.db.pragmas(&[format!("PRAGMA synchronous = {mode}")]).map_err(Error)
     }
 
     /// Set the app's own pragmas (`[data] pragmas`) on the store's file;
     /// one SQLite ignores is refused, never left looking set.
     pub fn set_pragmas(&mut self, ps: &[String]) -> Result<(), Error> {
-        for p in ps {
-            self.db.execute_batch(p).map_err(|e| Error(format!("[data] pragmas {p:?}: {e}")))?;
-            if let Some(why) = crate::db::not_taken(&self.db, p) {
-                return Err(Error(format!("[data] pragmas {why}")));
-            }
-        }
-        Ok(())
+        self.db.pragmas(ps).map_err(Error)
     }
 
     /// How hard commits are saved, as SQLite says (not a remembered setting).
     pub fn durability(&self) -> Result<crate::config::Durability, Error> {
-        let n: i64 = self.db.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+        let n: i64 = self.db.conn().query_row("PRAGMA synchronous", [], |r| r.get(0))?;
         Ok(if n >= 2 { crate::config::Durability::Full } else { crate::config::Durability::Normal })
     }
 
@@ -1833,7 +2039,7 @@ impl<T: Cell> Store<T> {
                 (*v, mine.to_string())
             }
         };
-        self.db.execute(
+        self.db.conn().execute(
             "INSERT OR REPLACE INTO snap (cell, seq, v, state) VALUES (?1, ?2, ?3, ?4)",
             params![T::ID, self.seq as i64, v, text],
         )?;
@@ -1848,8 +2054,9 @@ impl<T: Cell> Store<T> {
 
     /// The newest `n` events, oldest first.
     pub fn newest(&self, n: usize) -> Result<Vec<Event>, Error> {
+        let c = self.db.conn();
         let mut q =
-            self.db.prepare("SELECT seq, method, args, inputs, by, at, v FROM (SELECT * FROM log WHERE cell = ?1 ORDER BY seq DESC LIMIT ?2) ORDER BY seq")?;
+            c.prepare("SELECT seq, method, args, inputs, by, at, v FROM (SELECT * FROM log WHERE cell = ?1 ORDER BY seq DESC LIMIT ?2) ORDER BY seq")?;
         let rows = q.query_map(params![T::ID, i64::try_from(n).unwrap_or(-1)], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1879,7 +2086,7 @@ impl<T: Cell> Store<T> {
 
     fn floor(&self) -> Result<u64, Error> {
         let f: Option<i64> =
-            self.db.query_row("SELECT seq FROM floor WHERE cell = ?1", [T::ID], |r| r.get(0)).optional()?;
+            self.db.conn().query_row("SELECT seq FROM floor WHERE cell = ?1", [T::ID], |r| r.get(0)).optional()?;
         Ok(f.unwrap_or(0) as u64)
     }
 
@@ -1890,7 +2097,7 @@ impl<T: Cell> Store<T> {
         if cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell) {
             return Err(Error(format!("{}: it reads {cell}: a declared cell is never dropped", T::ID)));
         }
-        erase(&self.db, self.aio_kv.as_ref(), &[cell])
+        erase(&self.db.conn(), self.aio_kv.as_ref(), &[cell], "")
     }
 
     /// The state right after event `seq` (0: the start).
@@ -1904,6 +2111,7 @@ impl<T: Cell> Store<T> {
         }
         let base: Option<(i64, u32, String)> = self
             .db
+            .conn()
             .query_row(
                 "SELECT seq, v, state FROM snap WHERE cell = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT 1",
                 params![T::ID, seq as i64],
@@ -1919,12 +2127,12 @@ impl<T: Cell> Store<T> {
             }
             None => (0, T::default()),
         };
-        replay(&self.db, &mut st, from, seq, false)?;
+        replay(&self.db.conn(), &mut st, from, seq, false)?;
         Ok(st)
     }
 
     fn has_events(&self, from: u64, to: u64) -> Result<bool, Error> {
-        Ok(self.db.query_row(
+        Ok(self.db.conn().query_row(
             "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2 AND seq <= ?3)",
             params![T::ID, from as i64, to as i64],
             |r| r.get(0),
@@ -1939,7 +2147,8 @@ impl<T: Cell> Store<T> {
 
     /// The cell's log as time travel reads it ([`Steps`]).
     fn steps(&self) -> Result<Vec<(u64, Option<u64>)>, Error> {
-        let mut q = self.db.prepare("SELECT seq, method, args FROM log WHERE cell = ?1 ORDER BY seq")?;
+        let c = self.db.conn();
+        let mut q = c.prepare("SELECT seq, method, args FROM log WHERE cell = ?1 ORDER BY seq")?;
         let rows =
             q.query_map([T::ID], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         rows.map(|r| {
@@ -2025,7 +2234,7 @@ impl<T: Cell> Store<T> {
     pub fn fold_before(&mut self, before: i64) -> Result<usize, Error> {
         self.flush().map_err(|e| Error(e.why))?;
         let cut: Option<i64> =
-            self.db.query_row("SELECT MAX(seq) FROM log WHERE cell = ?1 AND at < ?2", params![T::ID, before], |r| {
+            self.db.conn().query_row("SELECT MAX(seq) FROM log WHERE cell = ?1 AND at < ?2", params![T::ID, before], |r| {
                 r.get(0)
             })?;
         let Some(cut) = cut else { return Ok(0) };
@@ -2035,7 +2244,7 @@ impl<T: Cell> Store<T> {
         let cut = match text {
             Some(_) => cut,
             None => {
-                let snap: Option<i64> = self.db.query_row(
+                let snap: Option<i64> = self.db.conn().query_row(
                     "SELECT MAX(seq) FROM snap WHERE cell = ?1 AND seq <= ?2",
                     params![T::ID, cut],
                     |r| r.get(0),
@@ -2046,7 +2255,8 @@ impl<T: Cell> Store<T> {
                 }
             }
         };
-        let tx = Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let c = self.db.conn();
+        let tx = Atomic::new(&c)?;
         if let Some(text) = text {
             tx.execute(
                 "INSERT OR REPLACE INTO snap (cell, seq, v, state) VALUES (?1, ?2, ?3, ?4)",

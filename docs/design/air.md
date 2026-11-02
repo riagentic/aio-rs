@@ -1,9 +1,13 @@
 # air: aio-rs's own renderer (0.2.0 spike)
 
-Status: the spike is on branch `air` (from v0.1.0; its crates, tests and
-`bench.sh` live there). It decides the design with numbers; Dioxus stays
-the renderer until air passes the gates below. Step 0, the facade apps are
-written against (`aio::ui::prelude`), is on main: see
+Status: step 1 is on main: air's core (`crates/air`, `crates/air-macro`),
+its gates 1–3, and the facade and `TestUi` on it behind aio-rs's feature
+`air` ([Phase 1](#phase-1-what-it-delivered)). Dioxus stays the default
+renderer until step 5; with `kit` on too the facade is Dioxus's (the kit is
+Dioxus code until step 2), so `--all-features` builds what ships today.
+The spike (branch `air`, from v0.1.0) decided the design with numbers;
+its bench (`crates/air-bench`, `bench.sh`) is on main too. Step 0, the
+facade apps are written against (`aio::ui::prelude`): see
 [The app surface](#the-app-surface-aioui).
 
 ## Verdict
@@ -48,7 +52,10 @@ renderer, AIR, for the same reasons. air is the aio-rs port of that move.
 
 ## What air is
 
-- **A view runs once.** It clones its templates and wires its holes.
+- **A view runs once.** Its body makes its state and returns a tree; the
+  tree is built where it is placed (under that place's owner, so its
+  context and its error boundary are the place's), cloning its templates
+  and wiring its holes.
 - **A hole is an effect.** A text, an attribute, a child, a branch or a
   list subscribes to exactly the signals it read and writes its own DOM
   node when one changes. No re-run, no VDOM, no diff (only a hole's last
@@ -64,10 +71,13 @@ renderer, AIR, for the same reasons. air is the aio-rs port of that move.
   `window.__aioWire` preload; only the page's interpreter changes (Dioxus's
   glue → `air::PAGE_JS`, 5.7 KB unminified).
 
-Prototype (branch `air`): `crates/air` (runtime 1.2 k lines, Rust test page 0.4 k, `page.js` 0.14 k), `crates/air-macro` (`rsx!`,
-`#[component]`, 0.8 k lines, deps: proc-macro2 + quote, already in the
-graph), `aio::ui_air` + `air_client!` (feature `air`), measurements in
-`crates/air-bench` (`bench.sh`).
+Code: `crates/air` (aio-rs-air: reactive core, DOM holes, events, tasks,
+the Rust test page, `page.js`), `crates/air-macro` (aio-rs-air-macro:
+`rsx!`, `#[component]`, `#[derive(Props)]`; deps proc-macro2 + quote,
+already in the graph), `aio::ui` on air (feature `air`:
+`crates/aio/src/ui/on_air.rs`), measurements in `crates/air-bench`
+(`bench.sh`). air's one dependency is `keyboard-types` (the W3C key
+tables Dioxus uses too).
 
 ### What's copied from aio's AIR
 
@@ -86,8 +96,8 @@ only path, decided at compile time. Copied as is:
 | flush: queued effects deduped, owners first, a re-run guard | `signal.ts:451` `_flushSubscribers`, its 1000-round guard :418 |
 | an effect's re-run disposes what its last run made | `_effectCollectStart` `signal.ts:1068` (as an owner tree) |
 | `on_cleanup` | `air/renderer-lifecycle.ts:116` |
-| keyed list: the longest increasing run of old places stays, the rest move; a duplicate key made fresh | `air/vdom-diff-children.ts:296` `_longestIncreasing`, :321 `diffKeyed` |
-| one listener per event type on the document, innermost handler wins | `air/vdom-events.ts:97` `_ensureDelegation` |
+| keyed list: the longest increasing run of old places stays, the rest move | `air/vdom-diff-children.ts:296` `_longestIncreasing`, :321 `diffKeyed` |
+| one listener per event type on the document | `air/vdom-events.ts:97` `_ensureDelegation` |
 | a handled `submit` never navigates | `vdom-events.ts` (the SPA default) |
 | `show(cond, then, else)` | `air/show.ts:9` `Show` |
 | `memo` | `signal.ts:971` `computed` |
@@ -100,6 +110,13 @@ the renderer in Rust and ships DOM edits, as today).
 
 New in air (from Solid): `selector` (`createSelector`): a cursor over 1000
 rows re-runs two holes, not 1000.
+
+Not AIR's, on purpose: an event goes to Rust with every node on its path
+that listens for it, innermost first, and the handlers run in that order
+until one calls `stop_propagation` (AIR's innermost handler alone wins;
+the views were written against Dioxus's bubbling). Two rows of a list
+with one key fail in every build (aio's tripwire), where AIR made the
+second fresh.
 
 ## API (real code, from the prototype's tests)
 
@@ -146,11 +163,11 @@ fn list() -> View {
         all.with(|r| r.iter().filter(|r| r.name.contains(f.as_str())).cloned().collect::<Vec<_>>())
     });
     rsx! {
-        input { value: filter.get(), oninput: move |e: Event| filter.set(e.value) }
+        input { value: filter.get(), oninput: move |e: FormEvent| filter.set(e.value()) }
         div { tabindex: "0",
-            onkeydown: move |e: Event| match e.key() {
-                "ArrowDown" => cursor += 1,
-                "r" => all.update(|r| r.reverse()),
+            onkeydown: move |e: KeyboardEvent| match e.key() {
+                Key::ArrowDown => cursor += 1,
+                Key::Character(c) if c == "r" => all.update(|r| r.reverse()),
                 _ => {}
             },
             ul {
@@ -175,8 +192,8 @@ fn form() -> View {
     let sent = Signal::new(Vec::<String>::new());
     rsx! {
         form { onsubmit: move |_| sent.update(|s| s.push(name.get_untracked())),
-            input { value: name, oninput: move |e: Event| name.set(e.value) }
-            input { r#type: "checkbox", checked: agreed.get(), onchange: move |e: Event| agreed.set(e.checked) }
+            input { value: name, oninput: move |e| name.set(e.value()) }
+            input { r#type: "checkbox", checked: agreed.get(), onchange: move |e| agreed.set(e.checked()) }
             p { if name.with(|n| n.is_empty()) { "Who are you?" } else { "Hello, {name}!" } }
             button { disabled: !agreed.get(), "Send" }
             ul { for (i, s) in sent.get().into_iter().enumerate() { li { key: i, "{s}" } } }
@@ -211,11 +228,12 @@ rsx! {
 }
 ```
 
-`#[component]` makes `CardProps { pub title, pub count, pub children }`
-and `fn Card(CardProps { .. }: CardProps)`; `Card { … }` in `rsx!` is
-`Card(CardProps { title: "Cart".into(), … })`. Toggling `open` ten times
-leaves no signal, effect, owner or page node behind (`live_nodes`, the
-test page's `named`: the leak gate's first test).
+`#[component]` makes `#[derive(Clone)] CardProps { pub title, pub count,
+pub children }` and `fn Card(CardProps { .. }: CardProps)`; `Card { … }`
+in `rsx!` is a component hole running `Card(CardProps { title: "Cart".into(),
+… })` once, untracked. `children` is a `View` built inside `Card`'s
+template, under `Card`: it sees `Card`'s context. Toggling `open` leaves
+nothing behind (`air::live()`, the test page's `named`: gate 1).
 
 ### The rules `rsx!` follows
 
@@ -233,26 +251,40 @@ test page's `named`: the leak gate's first test).
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).
   `if let` is refused: make a bool, or use a `{child}` hole of an `Option<View>`.
+- `onX` handlers are typed by Dioxus's event table (`onkeydown` gets a
+  `KeyboardEvent`, `oninput` a `FormEvent`, …); an unknown `onX` is a
+  compile error; `onmounted` runs once the element is drawn.
 - A component's props are evaluated once: a prop that must follow state is
-  a `Signal` or a `Part` (as in Solid and Leptos).
+  a `Signal`, a `Part` or typed `Prop<T>` (as in Solid and Leptos): a
+  `Prop` given an expression (`value: name.get()`) follows it, given a
+  constant it is that constant. `#[props(default)]`, `#[props(default =
+  e)]`, `Option<T>` and `View` props may be left out (an `Option` takes a
+  `T`); any other prop left out is a compile error. Unknown names given
+  to a component with `#[props(extends = GlobalAttributes)] attributes:
+  Vec<Attribute>` are attributes (`..attributes` on an element sets them,
+  after its own).
+- A body runs once, untracked; one that `?`s a resource still loading
+  runs again when it is loaded, its hooks (`signal`, `memo`, `resource`,
+  `once`, …) handing back what the first run made, by call order.
+- A `View` is placed once: placing the same one twice fails.
 - A view is a range of siblings, first to last; a template starting with a
   hole gets an empty comment as its start, so a hole's content at a root
   moves and goes with its view.
 
 ## How cells bind
 
-`air_client!(Cell, read)` (`crates/aio/src/ui_air.rs`) keeps, per UI
-thread, the state the views were last told of and one `air::Signal<u64>`
-per top-level field (`CellData::FIELDS`). `part(f)` finds the field `f`
-points into by offset (as `client!` does today) and returns
-`Part { f, field }`, `Copy`. Reading it in a hole tracks that field's
-signal. After a call through the views' door (`act!`), `tell()` diffs the
-new `Arc<State>` with `changed_fields` and bumps the changed fields'
-signals in one batch: exactly the holes that read them re-run. Commits
-made off the UI thread (effects, sync) wake the host loop through the
-cell's listener, which calls `tell()` (0.1.0's `BACKGROUND` coalescing
-moves there). There is no second store: view-local state is a plain
-`air::Signal`, everything kept is a cell.
+`client!(Cell, read)` is the same macro on both renderers: it is written
+against the facade's names. It keeps, per app instance (globals), the
+state the views were last told of and one `Signal<u64>` per top-level
+field (`CellData::FIELDS`, `aio::ui::Parts`). `part(f)` finds the field
+`f` points into by offset and returns a `Part`. Reading it in a hole
+tracks that field's signal. After a call through the views' door
+(`act!`), `tell()` diffs the new `Arc<State>` with `changed_fields` and
+bumps the changed fields' signals: exactly the holes that read them
+re-run. Commits made off the UI thread (effects, sync) reach the views
+through `use_live`'s task, at most once per `BACKGROUND`. There is no
+second store: view-local state is a plain `Signal`, everything kept is a
+cell.
 
 ## The wire
 
@@ -271,11 +303,20 @@ side; node 0 is `#main`.
 | 9 / 10 | INSERT / APPEND | anchor or parent, first, last (a view: a sibling range) |
 | 11 | REMOVE | first, last (its named nodes forgotten) |
 | 12 | TEXT | id, str (a new text node, for a `{child}` that is text) |
+| 13 | PARK | first, last (moved off the page, still named: a `Suspense`'s hidden side) |
+| 14 | EVAL | script id, code (run as a script of the page's own making, `aio::page::RUN`) |
+| 15 | EVAL_SEND | script id, JSON (its `await aio.recv()`) |
 
 A template is sent once per page, cloned with `cloneNode` (which keeps
-empty text holes). Page → Rust: `u32 id, u8+name, u16+key, u32+value,
-u8 flags (shift ctrl alt meta checked)`; the innermost node listening for
-the event type gets it.
+empty text holes). A `value` property set by the views is skipped while
+it is an older echo of what the person typed (aio's typing rule, in
+`page.js`). Page → Rust, one frame each, its first byte its kind:
+`1` an event (`air::Raw`: the listening ids on its path, innermost
+first; its name, key, code, location, modifier and state flags, mouse
+button and buttons, client/page/offset/screen points, wheel deltas and
+mode, the target's value and scroll box, pointer id and type, a
+submitted form's fields), `2` a script's reply (id, kind: a value, its
+return or its failure, JSON).
 
 ## Hot reload and hot patch
 
@@ -338,6 +379,40 @@ a keyed loop; a branch), the same in Dioxus 0.7.10 and air, each a lib
 | (d) held ↓, 10 000 rows, p50 (3 runs) | 5.2 / 5.2 / 5.3 ms | 1.0 / 1.0 / 2.5 ms | 0.19 |
 | (e) hot patch | not measured (needs `dx`'s patch build wired to air) | remount: 1.4 ms (1000 rows) | — |
 
+### Again on phase 1's air (4-core pin)
+
+`bench.sh` run again on this branch's air (views built where placed,
+component holes, typed events), the same machine pinned to 4 of its 32
+threads (`taskset -c 0-3`, `CARGO_BUILD_JOBS=4`) with other sessions'
+load on those cores (load average 13 over the run), so timings are
+looser than above; 3 runs each, ratios of the medians.
+
+| measure | Dioxus 0.7.10 | air (phase 1) | air / Dioxus | spike's ratio |
+|---|---|---|---|---|
+| (a) `cargo expand`, 1 view / 50 views | 385 KB / 18.9 MB | 89 KB / 4.4 MB | 0.23 | 0.17 |
+| (a) crate metadata, 50 views | 6.18 MB | 1.94 MB | 0.31 | 0.28 |
+| (a) LLVM IR lines (debug), 50 views | 3.65 M | 1.78 M | 0.49 | 0.32 |
+| (a) debug binary, 50 views | 53.2 MB | 28.0 MB | 0.53 | 0.35 |
+| (b) one-line edit → `cargo build`, 3 runs | 3.2 / 2.4 / 2.6 s | 1.4 / 1.4 / 1.3 s | 0.54 | 0.49 |
+| (b) one-line edit → `cargo check`, runs 2–3 | 1.5 / 1.7 s | 0.6 / 0.5 s | 0.34 | 0.39 |
+| (c) clean build, 3 runs | 33.8 / 30.8 / 32.7 s | 10.4 / 9.7 / 9.0 s | 0.30 | 0.37 |
+| (c) crates compiled / in the graph | 77 / 78 | 8 / 8 | — | — |
+| (d) held ↓, 1000 rows, p50 (3 runs) | 1.3 / 1.4 / 2.2 ms | 1.1 / 1.4 / 1.2 ms | 0.86 | 0.54 |
+| (d) the same, p95 | 2.3 / 2.6 / 5.0 ms | 2.8 / 3.7 / 2.2 ms | — | 0.6 |
+| (d) held ↓, 10 000 rows, p50 (3 runs) | 5.9 / 5.6 / 5.1 ms | 1.4 / 2.1 / 1.8 ms | 0.32 | 0.19 |
+| (d) bytes to the page per key | 66 | 48 | 0.73 | 0.73 |
+| (e) remount (first mount), 1000 / 10 000 rows | — | 1.6–3.4 / 13.7–25.6 ms | — | — |
+
+Phase 1 gave back part of the spike's lead in code size: each view now
+clones its captured names into a tree built later, and each component is
+a hole whose closure builds its props (both needed for views built where
+placed and for bodies that run again after a suspend). It stays at half
+of Dioxus's IR and a third of its build times; the held key keeps its
+shape (flat in the rows, 48 B), the p50 at 1000 rows within the load's
+noise of Dioxus's here. Making the expansion smaller again (one shared
+clone list per template, props without a second clone) is step 2 work,
+measured by this table.
+
 The first prototype (generic holes), for the record: 50 views made
 13.4 M lines of LLVM IR and a 168 MB debug binary; a one-line edit took
 21.6 s (1 run).
@@ -359,6 +434,76 @@ of air at 10 000 rows met other load on the machine (p50 2.5 ms, against
 
 Caveat for (a)–(c): generated views, not a real app. By the per-view
 ratio, the 74 000-line app's 60 MB expansion would be about 10 MB.
+
+## Phase 1: what it delivered
+
+Feature `air` of aio-rs (`air` alone: 50 crates in the graph, no
+`dioxus`, against `kit`'s 116; `ci.sh` fails on a planted `dioxus` there):
+
+- **Core** (`crates/air`): signals, memos, effects (first run once the
+  view is drawn), `watch`, `once`, `on_cleanup`, `batch`, `untrack`,
+  `selector`; owners with context (`provide`, `provide_root`, `context`,
+  `try_context`); callbacks (`Callback`, `EventHandler`, `callback`);
+  `Global`, `GlobalMemo` per app instance; tasks (`spawn`, `spawn_forever`,
+  `task`) on an executor of the thread's own, woken by the host;
+  `resource` (`get`, `pending`, `restart`, `suspend`); `ErrorBoundary`,
+  `Suspense`, `Fragment`; keyed lists; typed, bubbling events;
+  `onmounted`; page scripts (`eval`); `Root` (one per thread) and
+  `air::live()` (what is alive: the leak gate's measure).
+- **The facade on air** (`crates/aio/src/ui/on_air.rs`): the
+  `aio::ui::prelude` names, `eval` typed with serde; `client!`, `act!`
+  and `use_css!` unchanged (they are written against the facade).
+- **`TestUi` on air**: the Electron page with air's interpreter
+  (`aio::page::body` on air), a task carrying the page's frames to the
+  root and its edits back; and the Rust page (`air::testing::TestPage`)
+  for air's own tests.
+- **Gates 1–3**, each shown failing first (below).
+
+Tests on air (Linux, `cargo test`): `aio-rs-air` 42 (lib 9, core 12,
+gates 10, fault 3, views 5, doc 3); aio-rs on air: `air_ui` 5 of 5,
+`facade` 7 of 10, `ui` 15 of 22, the lib's page, ui and testing tests 26
+of 26. Not passing on air, by design (each `ignore`d on air with its
+reason): the facade's and `ui`'s tests that count body re-runs or read
+state in a body (a snapshot on air: 3 + 7). Not built on air: `kit.rs`
+(67: `aio::kit` is Dioxus code until step 2). Since phase 2b the router
+and every `TestUi` feature run on air too ([Phase 2b](#phase-2b-the-router-and-testui-on-air)).
+
+Left for step 1: portals and `Defer` (kit components today: step 2 moves
+them), `ax test` of the template app on air (the template is the kit's),
+optional props. Left after it: the kit (step 2), `ax dev`'s hot reload
+and the web and Android pages (step 3), the CI gates on the packaged app
+(step 4).
+
+## Phase 2b: the router and TestUi on air
+
+- **The tree of mounted components** (`air::components()`, aio DevTools'
+  `tree`, `crates/air/src/tree.rs`): each component an `rsx!` places, by
+  name and key (its `Display`, else its `Debug`), with its body runs and
+  its updates (a re-run of one of its own holes: what a change cost it).
+  A hole knows its component from where it was made (a thread-local
+  current component, set while a component's view is built and while a
+  hole runs), so a count is an increment and a lookup by index; the tree
+  is walked only when asked. A component's entry ends with its hole; a
+  static component's hole is kept (it read nothing) so it stays in the
+  tree.
+- **`follow`**: in a body, reads that run the body again when they change
+  (AIR's re-render, opt in), its hooks handing back what they made and
+  its props built again. The facade's `follow(f)` is a memo on air (the
+  body runs again only for a new value) and `f()` on Dioxus. The
+  router's `Route` follows its match: a new place that keeps the match (a
+  query, another route's place) runs nothing; a new param makes its
+  element anew, so a body's `params()` is current. `provide_now` gives
+  context per run. A `Link`'s active class and `aria-current` are holes.
+- **`TestUi`**: `components()` from that tree; the page's interpreter
+  names its nodes for the page's readers (`window.__airNode`), so a path
+  can name a component by its first and last node (`comp=Row[42]`),
+  `find(component, key)` returns that path, `within(t, f)` scopes a
+  test's paths, and `surface_tree()` gives aio's `UISurfaceNode` shape
+  (each component's elements and text). `advance(d)` pauses the views'
+  tokio clock and sleeps `d` on it: a paused clock jumps to the next timer
+  when the views idle, so each timer fires at its moment. `a11y()` runs
+  aio's `dev-a11y.ts` rules on the page (the handler rules from the
+  page's listener table).
 
 ## The app surface: `aio::ui`
 
@@ -432,37 +577,54 @@ as on air.
   hands new props. `watch(deps, f)` is the facade's bridge for effects that
   follow values a view made from props (0.1's `use_effect(use_reactive!(…))`);
   on air a prop that must follow state is a `Signal` or a `Part`.
-- **Events keep Dioxus's typed payloads.** `rsx!`'s handlers are typed by the
-  renderer's element tables, so a facade event type would wrap every
-  handler. The kinds and methods above are W3C-shaped (`Key` is
-  `keyboard-types`' enum): air provides the same names and methods, so the
-  spike's `Event { value, checked }` with a `&str` key is dropped for them.
-- **`MountedData`'s methods** (`set_focus`, `scroll`, `get_client_rect`
-  through `onmounted`) stay the renderer's until air's element handles and
-  page calls land (step 1, "refs and page calls"); the kit's uses are behind
-  its own components.
+- **Events**: air has its own payload types with Dioxus's names and
+  methods (`KeyboardEvent`, `e.key()` a `keyboard-types` `Key`,
+  `e.modifiers()`, `e.value()`, `e.client_coordinates()`, …), so handler
+  code is the same; `prevent_default()` can't reach the page in time on
+  either (the page keeps keys with `data-aio-prevent`; a handled `submit`
+  and a handled link click never navigate). Not decoded yet: files, a
+  drag's data, touch lists (step 2, with the kit's file inputs).
+- **`MountedData`** on air: `set_focus`, `scroll_to`, `get_client_rect`,
+  as page calls on the element (`eval` with `aio.node(id)`).
 - **`key:` and `if let`**: air makes a row without `key:` and `if let` in
-  `rsx!` compile errors. On Dioxus `ax lint` makes the missing key an error
-  and warns on `if let`.
+  `rsx!` compile errors, and two rows with one key a failure in every
+  build. On Dioxus `ax lint` makes the missing key an error and warns on
+  `if let`.
+- **`mut` on a signal**: Dioxus needs `let mut n = signal(…)` for a handler
+  that writes `n`; on air the handler holds its own copy, so `mut` is
+  unused (a warning).
+- **Not on air yet**: two roots on one thread (one window's views per
+  thread: a test holds one `TestUi` at a time).
 - **Hot patch**: Dioxus keeps a view's local state across a patch; air
   remounts (cells keep theirs).
-- **What stays on Dioxus inside the framework** until step 5: the page's
-  interpreter (`aio::page`), `TestUi`'s VirtualDom, `web::launch`, the
-  server's first paint, the shell's liveview socket and `ax dev`'s `dx`.
+- **What stays on Dioxus inside the framework** until step 5: the kit,
+  `web::launch`, the server's first paint, the shell's liveview socket and
+  `ax dev`'s `dx`. With feature `air`, the page (`aio::page::body`) and
+  `TestUi` are air's.
 
 ## Gates before Dioxus goes (each failing first)
 
-1. **No subscription leaks**: a component removed, or replaced by an error
-   boundary in the same pass, leaves no signal, effect, owner, handler or
-   page node (`live_nodes`, handler count, page `named`). Prototype: the
-   toggle test; still to write: the error-boundary case.
-2. **Misuse fails in release too**: air has no hook order to break, so the
-   equivalent misuses fail loudly in every build: a signal read after its
-   owner ended panics (`expect`, not `debug_assert`), an effect loop trips
-   the round guard, a `for` without `key:` and `if let` are compile errors.
-3. **TestUi catches a planted break**: `TestUi` on air (the Rust page, and
-   the Electron page as today) fails a test when a hole is unbound or a
-   row is lost.
+1. **No subscription leaks** (green, `crates/air/tests/gates.rs`): a
+   component removed, or replaced by an error boundary in the same pass,
+   leaves no node, effect, subscription, cleanup, handler, task or page
+   script (`air::live()`) and no named page node; a dropped root leaves
+   nothing at all. Shown red first by three planted leaks (rows that
+   outlive their list, handlers never removed, hooks' state that outlives
+   its view).
+2. **Misuse fails in release too** (green, the same file, run with
+   `--release` by `ci.sh`): a hook outside a view's body (or in a
+   handler), a write while a hole or a memo computes, an effect loop (the
+   round guard, 1000 rounds as AIR's), a signal used after its view, a
+   view placed twice, hooks in another order on a re-run, two rows with one
+   key, two roots on a thread; a `for` without `key:` and `if let` are
+   compile errors (`compile_fail` doc tests). Shown red first by making
+   the write check and the round guard debug-only and running `--release`
+   (the write went through; the loop never ended).
+3. **TestUi catches a planted break** (green): feature `fault` of air
+   plants an unbound text hole or a lost list row; the same test that
+   passes on the sound renderer fails, in the Rust page
+   (`crates/air/tests/fault.rs`) and in `TestUi`'s Electron page
+   (`crates/aio/tests/air_ui.rs`).
 4. **No Dioxus in the package**: a CI check that the packaged binary's
    dependency graph (`cargo tree -e normal` of the release target) and its
    symbols contain no `dioxus`.
@@ -498,7 +660,7 @@ on the dev branch as the fallback until step 5.
 | # | step | what | done when | estimate |
 |---|---|---|---|---|
 | 0 | facade (done) | `aio::ui::prelude` on Dioxus; template, docs, kit, `ax ui`, `TestUi`, `aio_shell::run`, `web::launch` take the facade's names; the template's `dioxus` dependency gone | no `dioxus` in the template, the kit, `ax ui`, the tests or the guide (`ci.sh`, `ax lint`); 0.1.0 apps move with the migration guide's table | 1 week |
-| 1 | air core | from the spike: holes, lists (live row ranges), branches, context over owners, error boundary, refs and page calls (`onmounted`), portals, `Defer`; `TestUi` on the Rust page and the Electron page; gates 1–3 written failing, then green | `cargo test -p air`, the gate tests, `ax test` of the template app on air | 2–3 weeks |
+| 1 | air core (done but portals, `Defer`, the template app) | from the spike: holes, lists (live row ranges), branches, context over owners, error boundary, refs and page calls (`onmounted`), portals, `Defer`; `TestUi` on the Rust page and the Electron page; gates 1–3 written failing, then green | `cargo test -p aio-rs-air`, the gate tests, `ax test` of the template app on air | 2–3 weeks |
 | 2 | the kit on air | the 22 kit modules behind the facade, on air (dev branch: the facade's renderer chosen by a dev-branch feature, never in a release) | the kit's tests and docs examples on air | 3–4 weeks |
 | 3 | tooling | `ax dev`: template hot reload (`air-rsx`), subsecond remount; web (wasm, in-process `page.js`); Android page body | `ax dev` edit loops, `ax build --web`, an APK smoke | 2–3 weeks |
 | 4 | gates in CI | no Dioxus in the packaged graph or binary; size and build/edit numbers of the packaged app by a script in the repo | CI fails on a planted Dioxus dependency | 3 days |

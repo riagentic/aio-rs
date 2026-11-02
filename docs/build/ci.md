@@ -15,7 +15,7 @@ starting point.
 | lint | `ax lint` | what types can't check (credentials in shared state, impure methods, hooks, accessibility, cell ids) plus clippy; exit 1 on errors |
 | tests | `ax test notes` | the cells' and the views' tests, UI tests headless in the real runtime |
 | build | `ax build notes --smoke` | the release bundle, started headless, stopped cleanly, its log checked |
-| size | `ax build notes --sizes` | the release binary against its budget (`[build] budget_mb`, 10 by default), and which crates take the space |
+| size | `ax build notes --sizes` | the release binary against its budget (`[build] budget_mb`, 10 by default, 15 on Windows), and which crates take the space |
 | docs | `cargo doc --no-deps` | broken links in your own API docs |
 
 - `ax test` is `cargo test` with what aio-rs's tests need: UI tests draw
@@ -167,10 +167,46 @@ ax lab notes windows --stop # what ran from it ended, the folder removed
 | Linux | the `.tar.gz`'s `install.sh`, the AppImage, the `.deb` |
 | Android | `ax install notes --android` on a real phone: it starts offline, Back, deep links, a kill and restart keep the state |
 | a served app | another machine reaches it (`--expose`), TLS and pairing, `ax health` |
-| an update | an installed copy of the previous release takes the new one, and a broken one rolls back ([release](release.md#install-and-the-way-back)) |
+| an update | an installed copy of the previous release takes the new one, and a broken one rolls back ([release](release.md#install-and-the-way-back)); aio-rs's own path is proven by `scripts/update-proof` (below), the app's is yours |
 
 Write down what you ran and saw, per OS, with the commit: a release you
 can't say was checked wasn't.
+
+## aio-rs's own proof scripts
+
+What aio-rs runs on itself before a release, in its checkout (each in a
+throwaway home under `dist/`, removed after):
+
+| Script | Proves | Where |
+|---|---|---|
+| `scripts/update-proof` | a sample service installed from its bundle (Linux `install.sh`, macOS `.app`, Windows `--install`) takes a signed release made from a patch, then a broken release fails its first boot and is rolled back, the data from before it read back | GitHub CI, Linux, macOS, Windows |
+| `scripts/android-gate` | a sample APK starts on an emulator, and an upgrade installed over it keeps its data | before each release, on a machine with the Android SDK and KVM |
+| `scripts/numbers` | the README's and docs' numbers, measured again, printed beside the published ones with the machine | any time (Linux x86_64 for the comparison) |
+
+### The Android gate
+
+A release needs `scripts/android-gate` green
+([CONTRIBUTING](../../CONTRIBUTING.md#make-a-release)). It never touches
+another emulator, a phone or the AVDs already on the machine:
+
+- It makes its own AVD in its work folder (`ANDROID_AVD_HOME`), from the
+  newest x86_64 system image in the SDK (`AIO_GATE_IMAGE` names another:
+  `system-images;android-35;google_apis;x86_64`), and boots it with no
+  window on console port 5600; every `adb` call names `-s emulator-5600`.
+  An `emulator-5600` already attached stops it.
+- `ax create gate`, with a saved cell that counts the app's starts and
+  logs `[gate] start <n>`. `ax test gate --android --device emulator-5600`
+  builds the APK for the emulator's CPU, installs it, starts it and
+  passes when the window is ready and it still runs 3 s later: start 1.
+- One commit on (a new version), the same over it (`adb install -r`, an
+  upgrade): start 2, so the data of the first install was kept.
+- After: the emulator stopped (`adb -s emulator-5600 emu kill`), the AVD
+  and work folder removed, and `modem-nv-ram-5600`, which the emulator
+  writes beside the user's AVDs, deleted.
+
+Needs the SDK's `emulator`, `platform-tools`, `cmdline-tools/latest`, an
+x86_64 system image, KVM, and what `ax build --android` needs
+([setup](../basics/setup.md)).
 
 ## Not in aio-rs
 

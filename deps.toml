@@ -121,7 +121,7 @@ allow = [
     { crate = "jni-sys-macros", reason = "aio-rs-shell/core via jni" },
     { crate = "jobserver", reason = "aio-rs/core via ring" },
     { crate = "js-sys", reason = "aio-rs/core (wasm): the page's JS values" },
-    { crate = "keyboard-types", reason = "aio-rs-shell/core via dioxus-document" },
+    { crate = "keyboard-types", reason = "aio-rs-air/core: the W3C key tables (Key, Code, Modifiers), the same as Dioxus's" },
     { crate = "konst", reason = "aio-rs-shell/core via dioxus-core" },
     { crate = "konst_macro_rules", reason = "aio-rs-shell/core via dioxus-core" },
     { crate = "kqueue", reason = "aio-rs-cli/core via notify" },
@@ -167,9 +167,9 @@ allow = [
     { crate = "png", reason = "aio-rs-cli/core via image" },
     { crate = "powerfmt", reason = "aio-rs/tls via time" },
     { crate = "ppv-lite86", reason = "aio-rs-shell/core via dioxus-liveview" },
-    { crate = "proc-macro2", reason = "aio-rs-macros, aio-rs-config-macro, aio-rs-cli: token streams" },
+    { crate = "proc-macro2", reason = "aio-rs-macros, aio-rs-config-macro, aio-rs-air-macro, aio-rs-cli: token streams" },
     { crate = "proc-macro2-diagnostics", reason = "aio-rs-shell/core via dioxus-document" },
-    { crate = "quote", reason = "aio-rs-macros, aio-rs-config-macro, aio-rs-cli: generated code" },
+    { crate = "quote", reason = "aio-rs-macros, aio-rs-config-macro, aio-rs-air-macro, aio-rs-cli: generated code" },
     { crate = "r-efi", reason = "aio-rs/core via uuid" },
     { crate = "rand", reason = "aio-rs-shell/core via dioxus-liveview" },
     { crate = "rand_chacha", reason = "aio-rs-shell/core via dioxus-liveview" },
@@ -230,7 +230,7 @@ allow = [
     { crate = "tokio-stream", reason = "aio-rs-shell/core via dioxus-liveview" },
     { crate = "tokio-tungstenite", reason = "aio-rs/net: sync's WebSocket client; aio-rs-cli: ax shot (CDP)" },
     { crate = "tokio-util", reason = "aio-rs/core: the local door's frames (aio::door), the shell's pipes" },
-    { crate = "toml", reason = "aio-rs-config/toml: aio.toml parsed by aio::config!() as the app builds, and by aio's tools" },
+    { crate = "toml", reason = "aio-rs-config/toml: aio.toml parsed by aio::config!() as the app builds, and by aio's tools (ax ui: a project's cargo aliases)" },
     { crate = "toml_datetime", reason = "aio-rs-config/toml via toml" },
     { crate = "toml_parser", reason = "aio-rs-config/toml via toml" },
     { crate = "toml_writer", reason = "aio-rs-config/toml via toml" },
@@ -330,11 +330,13 @@ skip = [
 
 # Most crates (normal dependencies, host target) per set in `scripts/slim-metrics`.
 # kit holds the page and TestUi (dioxus-liveview), moved from aio-rs-shell: an
-# app's whole graph (aio-rs-shell) is no bigger. `app kit` / `app kit,net`: a
+# app's whole graph (aio-rs-shell) is no bigger. `aio-rs air`: the facade and
+# TestUi on air (no Dioxus). `app kit` / `app kit,net`: a
 # template app's whole release graph (its launcher's aio-rs-shell with that set).
 [ceilings]
 "aio-rs core" = 49
 "aio-rs kit" = 116
+"aio-rs air" = 50
 "aio-rs server" = 88
 "aio-rs tls" = 105
 "aio-rs net" = 109

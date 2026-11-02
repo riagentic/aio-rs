@@ -102,7 +102,7 @@ fn main() -> std::io::Result<std::process::ExitCode> {
 
 /// The build's own settings: the bundled SQLite without the extensions aio
 /// never uses (full-text search, R-tree, extension loading…), 330 KB off
-/// each binary, so a server fits its 6 MB budget.
+/// each binary, so a server fits its 7 MB budget.
 const CARGO_CONFIG: &str = "# Cargo's settings for this app's builds.
 [env]
 # SQLite as aio uses it: no FTS3/FTS5, R-tree, dbstat, STAT4, soundex,
@@ -524,8 +524,8 @@ pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
     if let Some(t) = n.targets.iter().find(|t| !kinds.contains(t)) {
         return Err(format!("--target {t}: one of {}", kinds.join(", ")));
     }
-    if !ui && n.targets.contains(&"android") {
-        return Err(format!("--target android: a window app's (--template app), not a {template}'s"));
+    if let Some(t) = n.targets.iter().find(|t| !ui && ["android", "web"].contains(t)) {
+        return Err(format!("--target {t}: a window app's (--template app), not a {template}'s"));
     }
     if !ui && n.tailwind {
         return Err(format!("--css tailwind: a window app's (--template app), not a {template}'s"));
@@ -565,6 +565,10 @@ publish.workspace = true
 # the commit. `ax pin` says which; `ax pin <version>` moves it.
 [dependencies]
 aio = {{ package = "aio-rs", {aio}{feats} }}
+
+# `aio::testing` for the tests alone: the app's own builds leave it out.
+[dev-dependencies]
+aio = {{ package = "aio-rs", {aio}, features = ["testing"] }}
 {deps}
 [profile.release]
 lto = true

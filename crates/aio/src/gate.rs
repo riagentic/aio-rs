@@ -127,7 +127,7 @@ pub fn proxy_warning(peer: IpAddr, headers: &HeaderMap, trust: Option<&str>) -> 
 }
 
 /// `host[:port]` → host (an IPv6 literal keeps its brackets).
-fn name_of(h: &str) -> &str {
+pub(crate) fn name_of(h: &str) -> &str {
     match h.rfind(']') {
         Some(end) if h.starts_with('[') => &h[..=end],
         _ => h.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(h, |(n, _)| n),

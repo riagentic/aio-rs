@@ -65,6 +65,8 @@ pub(crate) static SHOWN: std::sync::OnceLock<aio::config::Shown> = std::sync::On
 /// Its hue (`[ui] hue`, else its id's) and its splash: what is drawn
 /// outside its page (`splash`, `firstrun`).
 pub(crate) static LOOK: std::sync::OnceLock<(u16, Option<aio::config::Splash>)> = std::sync::OnceLock::new();
+/// The app's built-in files (`[build] assets`): its page reads them at their URL paths.
+pub(crate) static ASSETS: std::sync::OnceLock<&'static [(&'static str, &'static [u8])]> = std::sync::OnceLock::new();
 /// `--keep-server`, as this launch asked it.
 pub(crate) static KEEP_SERVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -100,6 +102,24 @@ pub(crate) fn take_stops(id: &str, data: &Path) {
     }
 }
 
+/// The app's args `ax dev` gives a debug build as JSON, when dx's own
+/// `--args` can't carry them (it splits them on spaces).
+pub const DEV_ARGS: &str = "AIORT_DEV_ARGS";
+
+/// Run this binary again with `args` (Unix: in its place, the same process).
+#[cfg(debug_assertions)]
+fn run_with(args: Vec<String>) -> io::Result<Start> {
+    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    cmd.args(args).env_remove(DEV_ARGS);
+    #[cfg(unix)]
+    return Err(std::os::unix::process::CommandExt::exec(&mut cmd));
+    #[cfg(not(unix))]
+    {
+        let _watch = aio::lifecycle::watched(&mut cmd)?;
+        std::process::exit(cmd.status()?.code().unwrap_or(1))
+    }
+}
+
 /// Take the app's lock and boot it (`aio::boot`: log, reports, health, the
 /// boot report), or hand `args` to the instance holding it. `version`: the
 /// app's, `env!("CARGO_PKG_VERSION")`.
@@ -107,6 +127,10 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
     // Windows: before anything starts a console program (the installer's
     // `reg`, a dialog's PowerShell, the app's own), so none opens a window.
     aio::process::hide_console();
+    #[cfg(debug_assertions)]
+    if let Some(args) = std::env::var(DEV_ARGS).ok().and_then(|a| serde_json::from_str::<Vec<String>>(&a).ok()) {
+        return run_with(args);
+    }
     let id = cfg.app.id.as_str();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // A staged new version, run as the update swap helper (macOS, Windows).
@@ -167,6 +191,7 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
             _ = BUNDLE_ID.set(cfg.mac_bundle_id());
             _ = SHOWN.set(cfg.app.ui);
             _ = LOOK.set((cfg.hue(), cfg.build.splash.clone()));
+            _ = ASSETS.set(cfg.build.asset_files);
             _ = crate::firstrun::WORDS.set(crate::firstrun::words_of(cfg));
             if let crate::update::Next::Exit = crate::update::on_start(cfg, version, &d)? {
                 aio::health::stop();

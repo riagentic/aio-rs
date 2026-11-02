@@ -315,10 +315,17 @@ impl<T: Cell> Source<T> {
         let decided = crate::config::listen(&cfg.server, &ask).map_err(std::io::Error::other)?;
         let listen = decided.addr.as_str();
         #[cfg(feature = "tls")]
-        let tls = match (decided.tls, &cfg.server.cert, &cfg.server.key) {
+        let tls = {
+            let flag = |p: &Option<String>| p.as_deref().map(std::path::absolute).transpose();
+            let (cert, key) = match (flag(&ask.tls_cert)?, flag(&ask.tls_key)?) {
+                (Some(c), Some(k)) => (Some(c), Some(k)),
+                _ => (cfg.server.cert.clone(), cfg.server.key.clone()),
+            };
+            match (decided.tls, &cert, &key) {
             (false, ..) => None,
             (true, Some(cert), Some(key)) => Some(crate::tls::own(cert, key)?),
-            (true, ..) => Some(crate::tls::server(&crate::paths::tool_home().join("tls"), T::ID)?),
+                (true, ..) => Some(crate::tls::server(&crate::paths::tool_home().join("tls"), T::ID)?),
+            }
         };
         #[cfg(not(feature = "tls"))]
         for (asked, what) in [
@@ -330,6 +337,14 @@ impl<T: Cell> Source<T> {
                 return Err(crate::left_out("tls", what));
             }
         }
+        let mut http = http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files);
+        let auth_db = || crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy()).map_err(std::io::Error::other);
+        // Sessions without accounts: a session is a user known by its token.
+        if cfg.accounts.sessions && !cfg.accounts.on {
+            let a = std::sync::Arc::new(auth_db()?);
+            crate::auth::serve(&a);
+            http.users = Some(crate::auth::Users::sessions(a, http.users.take()));
+        }
         let opts = crate::sync::Options {
             limits: cfg.server.limits,
             token: crate::config::token(&dirs.data)?,
@@ -338,12 +353,9 @@ impl<T: Cell> Source<T> {
             #[cfg(feature = "tls")]
             tls,
             hosts: cfg.server.hosts.clone(),
-            http: http.configured(&cfg.server, &dirs.files()),
+            http,
             auth: match cfg.accounts.on {
-                true => Some(std::sync::Arc::new(
-                    crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy())
-                        .map_err(std::io::Error::other)?,
-                )),
+                true => Some(std::sync::Arc::new(auth_db()?)),
                 false => None,
             },
             strict_origin: cfg.server.strict_origin,
@@ -351,6 +363,7 @@ impl<T: Cell> Source<T> {
             security: cfg.server.security.clone(),
             open: cfg.server.open,
         };
+        let opts_users = opts.http.users.is_some();
         let host = listen.rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']']).to_string());
         #[cfg(feature = "tls")]
         let tls = opts.tls.is_some();
@@ -366,6 +379,22 @@ impl<T: Cell> Source<T> {
         eprintln!("[aio] {}", crate::config::listen_says(&bound, T::ID));
         if cfg.server.open {
             eprintln!("[aio] WARN {}", crate::config::open_says(T::ID));
+        }
+        if bound.exposed {
+            let gate = match () {
+                _ if cfg.accounts.on => crate::config::Gate::Accounts,
+                _ if cfg.accounts.sessions => crate::config::Gate::Sessions,
+                _ if opts_users => crate::config::Gate::Users,
+                _ if cfg.server.open => crate::config::Gate::Open,
+                _ => crate::config::Gate::Key,
+            };
+            let lan = crate::config::lan_ipv4();
+            for line in crate::config::share_says(&bound, lan, gate, &dirs.data.join("sync.token"), cfg.server.pairing) {
+                eprintln!("[aio] {line}");
+            }
+        }
+        if let Some(line) = crate::config::firewall_says(std::env::consts::OS, bound.exposed) {
+            eprintln!("[aio] {line}");
         }
         #[cfg(feature = "tls")]
         if cfg.server.discover {

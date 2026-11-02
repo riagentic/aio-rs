@@ -96,8 +96,12 @@ Without `[build] targets` it makes this OS's bundle,
 | `dmg` | a macOS disk image (on a Mac) |
 | `cli` | a headless binary on `PATH`, no menu entry (a CLI or a server; a server also gets its supervisor file) |
 | `android` | signed APKs, one per CPU (`--android`) |
+| `web` | the installable web app (PWA) in `dist/<id>-web/` (`--web` alone) |
 
-`--web` makes the installable web app instead, in `dist/<id>-web/`.
+`--web` makes the web app alone; as a target (`targets = ["desktop",
+"web"]`) one `ax build` makes it beside the others (aio's `build-all`).
+A Linux bundle says the AppImage beside it: `--appimage` is aio's default
+artifact, one portable file.
 
 ```toml
 [app]
@@ -117,6 +121,9 @@ chromium_extras = "keep"   # or "strip" (a bundled runtime without the GPU extra
 [build.splash]
 image = "assets/splash@2x.png"
 text = "{title}"
+
+[build.assets]
+"/media" = "media"         # media/song.mp3 is the app's /media/song.mp3
 ```
 
 - `targets`: kinds, or `{ name, kind, bin }` to build two of a kind or
@@ -126,7 +133,7 @@ text = "{title}"
   `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`
   (`--platforms` for one run). A macOS bundle is made on a Mac:
   `[build.macos] host` (or `AIO_MACOS_SSH`) names one over ssh.
-- `budget_mb`: the desktop binary's size budget (default 10); a build
+- `budget_mb`: the desktop binary's size budget (default 10, 15 on Windows); a build
   above it fails and names the crates that take the space. Size with
   `--sizes`, not a plain `cargo build --release` (it lacks ax's link
   flags and is bigger).
@@ -137,7 +144,17 @@ text = "{title}"
   fetched at its first start) or `bundled`.
 - `[build.splash]`: the app's image (and text) from its start until its
   window has loaded, on the desktop, the web and Android; `min_ms`,
-  `max_ms`, `background = ["#light", "#dark"]`.
+  `max_ms`, `background = ["#light", "#dark"]`. A web build also makes
+  iOS's launch images from it (`apple-splash-<w>x<h>.png`, one per
+  iPhone and iPad screen), so a Home Screen app starts on the same picture.
+- `assets` (aio's `assets`): folders beside `aio.toml` built into the app
+  by URL prefix. The window (`aio://app/media/…`), the app's server
+  (public, as its page is), the web build (cached offline) and the APK
+  answer each file at the same path; dotfiles are left out, a name with
+  `:` or `*` is refused. A file added later is built in at the next `ax
+  build`, `ax dev` or `ax start` (they tell cargo; a plain `cargo build`
+  doesn't see a new file). `[server] dirs` serves folders at run time
+  instead, behind the key.
 
 ### What lands in `dist/`
 
@@ -147,9 +164,9 @@ text = "{title}"
 | `<id>-<version>-macos-<arch>.zip`, `.dmg` | `desktop` / `dmg` on a Mac: the `.app` |
 | `<id>-<version>-windows-<arch>.exe`, `.zip` | `desktop` on Windows or `windows`: the one-click download, and the exe alone for updates |
 | `<pkg>_<version>_<arch>.deb`, `<id>-<version>-<arch>.AppImage` | `deb`, `appimage` |
-| `<id>-<version>-<os>-<arch>-cli.*` and a `.service` / `.plist` / `.ps1` | `cli` (a server's supervisor file beside it) |
+| `<id>-<version>-<os>-<arch>-cli.*` and a `.service` / `.plist` / `.ps1` | `cli` (a server's supervisor file beside it; on Linux also `.system.service`, a system unit that starts at boot) |
 | `<id>-<version>-android-<abi>.apk`, `<id>-<version>-android.aab` | `android` |
-| `<id>-web/` | `--web` |
+| `<id>-web/` | `--web`, `web` |
 | `<id>.manifest.json` | every build: what was built, from which commit, each target's files |
 
 `<arch>` is `x64` or `arm64` (the AppImage and the `.deb` use their own
@@ -165,7 +182,7 @@ tree under `dist/<channel>/` ([release](release.md)).
 - The release binary says the version the build gave it: a launcher that
   passes `env!("CARGO_PKG_VERSION")` instead of `aio::app_version!()` to
   `aio_shell::start` is refused (its updates would never match).
-- It is within its budget (`budget_mb`; 10 MB, a server 6 MB), else it
+- It is within its budget (`budget_mb`; 10 MB, a server 7 MB, each half again on Windows), else it
   isn't packed and the crates that take the space are listed.
 - It holds no path of the build machine's home (a shipped binary never
   names who built it).

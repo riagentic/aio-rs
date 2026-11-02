@@ -16,6 +16,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 
 ## 1. Get started
 
+- [When to use aio-rs, and when not](basics/when.md): read first. Window and state yes; SEO, CDN, edge no; pin the tag; what is experimental.
 - [Why aio-rs, not plain Rust](basics/why.md): what it gives over a UI crate, SQLite and sync by hand, and when not to use it.
 - [Install and set up](basics/setup.md): what each OS needs, installing `ax` prebuilt or from source, `ax setup`, uninstalling.
 - [Quickstart](basics/quickstart.md): from nothing to a running, tested, packaged app; what the template is made of.
@@ -62,6 +63,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [Cassettes](testing/cassettes.md): recording and replaying I/O.
 - [Servers, sync and many apps](testing/multi-app.md): `TestServer`, sync simulation, tests close to production.
 - [Lint and proving the tests](testing/lint.md): `ax lint`, what it catches, tests that test something.
+- [Proving the tests](testing/proving.md): the mutation ledger, breaks in the source and in a built `.deb`.
 - [Real machines](testing/labs.md): `ax lab`: the app on a real Windows, macOS or Linux desktop.
 
 **Debugging**
@@ -229,7 +231,7 @@ Where each page of aio's documentation is covered here.
 | `testing/multi-app.md` | [Servers, sync and many apps](testing/multi-app.md) |
 | `testing/onboarding-lab.md` | [Real machines](testing/labs.md) |
 | `testing/prod-parity.md` | [Servers, sync and many apps](testing/multi-app.md) |
-| `testing/proving-the-tests.md` | [Lint and proving the tests](testing/lint.md) |
+| `testing/proving-the-tests.md` | [Proving the tests](testing/proving.md), [Lint](testing/lint.md) |
 | `testing/ui-testing.md` | [Testing views](testing/ui.md) |
 | `testing/vm-labs.md` | [Real machines](testing/labs.md) |
 | `ui/README.md` | [Views](ui/views.md) |

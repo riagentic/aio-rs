@@ -115,8 +115,12 @@ pub struct Ready {
     pub current: String,
     /// A release that failed its first start here: never offered again.
     pub rolled_back: Option<String>,
-    /// The data's backup the update to this version took.
+    /// The data's backup the update to this version took (a fresh start's:
+    /// the store it set aside).
     pub backup: Option<String>,
+    /// Where a fresh start to this version set the data aside (aio's
+    /// `retireData` archive, `<home>/archive/<id>-<version>-<time>`).
+    pub retired: Option<String>,
 }
 
 /// A stand-in runtime for tests (aio's stub `installUpdatesRuntime`): every
@@ -186,6 +190,9 @@ pub struct Updates {
     /// The data's backup the update to this version took.
     #[transient]
     pub backup: Option<String>,
+    /// Where this version's fresh start set the data aside ([`Ready::retired`]).
+    #[transient]
+    pub retired: Option<String>,
     /// The install that failed: (version, why), said again while offered.
     #[transient]
     pub failed: Option<(String, String)>,
@@ -247,7 +254,7 @@ impl Updates {
     /// The runtime is set up.
     pub fn ready(&mut self, r: Ready) {
         self.on = true;
-        (self.channel, self.current, self.backup) = (r.channel, r.current, r.backup);
+        (self.channel, self.current, self.backup, self.retired) = (r.channel, r.current, r.backup, r.retired);
         if let Some(v) = r.rolled_back {
             if self.available.as_ref().is_some_and(|o| o.version == v) {
                 self.available = None;
@@ -442,6 +449,7 @@ mod tests {
             current: "1.0.0".into(),
             rolled_back: rolled_back.map(String::from),
             backup: None,
+            retired: None,
         }
     }
 
@@ -466,6 +474,12 @@ mod tests {
         let s = h.state();
         assert_eq!((s.on, s.channel.as_str(), s.current.as_str(), s.phase), (true, "beta", "1.0.0", Phase::Idle));
         assert_eq!(s.backup.as_deref(), Some("/data/backups/pre-1.0.0.db"), "the update's backup is seen");
+        // A fresh start's first start: where the data went, and its store there as the backup.
+        let aside = "/home/archive/notes-1.0.0-x";
+        let fresh = Ready { retired: Some(aside.into()), backup: Some(format!("{aside}/state.db")), ..on("beta", None) };
+        h.ready(fresh).unwrap();
+        assert_eq!(h.state().retired.as_deref(), Some(aside));
+        assert_eq!(h.state().backup, Some(format!("{aside}/state.db")));
     }
 
     #[tokio::test(flavor = "multi_thread")]

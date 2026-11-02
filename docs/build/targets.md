@@ -77,6 +77,7 @@ dirty (a dirty build is never a release).
 | `dmg` | a macOS disk image to drag into Applications | a Mac (or one over ssh) |
 | `cli` | a headless binary on `PATH`, no menu entry; a server's also gets its supervisor file | each of `platforms` |
 | `android` | signed APKs, one per CPU, and an `.aab` when asked (`--android`) | Linux, macOS, Windows |
+| `web` | the installable web app in `dist/<id>-web/` (`--web` alone) | anywhere with the `wasm32` target |
 
 Nothing declared: `desktop`, or `cli` for a `server` or `cli` app.
 
@@ -97,6 +98,9 @@ smoke = true
 runtime = "shared"
 chromium_extras = "keep"
 css = "tailwindcss -i src/app.css -o assets/style.css"
+
+[build.assets]
+"/media" = "media"
 
 [build.splash]
 image = "assets/splash@2x.png"
@@ -135,6 +139,7 @@ strict = false
 | `chromium_extras` | `keep` | a bundled runtime's software Vulkan and DirectX shader compilers; `strip` drops them (smaller, draws worse where no GPU driver works) |
 | `css` | none | a CSS toolchain run before every build and on every change in `ax dev`: a command split on spaces, or an argv list; never through a shell |
 | `[build.splash]` | none | [the splash](#the-splash) |
+| `[build.assets]` | none | folders beside `aio.toml` built into the app by URL prefix, answered at the same path in the window, the app's server, the web build and the APK ([build](README.md#build-ax-build)) |
 | `[build.macos]` | | [macOS](#macos) |
 | `[build.android]` | | [Android](#android) |
 
@@ -278,7 +283,7 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 |---|---|---|
 | `notes-1.4.7-linux-x64.tar.gz` | `tar -xzf`, then `./install.sh`: for this user, no root | `uninstall.sh` (keeps the data; `--data` removes it too) |
 | `notes_1.4.7_amd64.deb` (`--deb`) | `sudo apt install ./notes_1.4.7_amd64.deb` | `sudo apt remove notes` |
-| `notes-1.4.7-x86_64.AppImage` (`--appimage`) | run it as is | delete it |
+| `notes-1.4.7-x86_64.AppImage` (`--appimage`) | run it as is, or `ax install notes --appimage` | delete it, or `ax remove notes` |
 
 - `install.sh` puts the binary in
   `$XDG_DATA_HOME/aio-rt/install/<id>/versions/<version>/` with `current`
@@ -294,6 +299,13 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 - An AppImage carries the pinned AppImage runtime (checked by its
   SHA-256) and the app; the Electron runtime is still shared. An app run
   from one updates by replacing the file (`ax release --appimage`).
+- `ax install <app> --appimage` (aio's installer): the AppImage copied to
+  `$XDG_DATA_HOME/aio-rt/install/<id>-appimage/<id>.AppImage` (where its
+  updates go), its icon, and a menu entry whose `Exec` makes a private
+  `TMPDIR` (`$XDG_CACHE_HOME/aio-rt/<id>/tmp`, mode 0700) before the
+  AppImage runs: the AppImage runtime unpacks into `TMPDIR` before any of
+  the app can run, and `/tmp` is shared. `ax installed` lists it as
+  `<id> (AppImage)`, `ax remove` takes it away.
 - None of them carries the runtime unless `runtime = "bundled"`.
 - Chromium's sandbox: where unprivileged user namespaces are restricted
   (Ubuntu 23.10+, some containers), the window starts with `--no-sandbox`
@@ -580,7 +592,9 @@ pub fn web() {
   binds it with `wasm-bindgen` (the version the lock names; `ax setup`
   fetches it) and writes `dist/<id>-web/`: the page, a web manifest, the
   Apple Home Screen tags, icons, an offline service worker, and the
-  wasm's size raw and gzipped. Put it on any HTTPS host, or serve it from
+  wasm's size raw and gzipped; with `[build.splash]`, iOS's launch images
+  (one per iPhone and iPad screen, the splash on its background), with
+  `[build.assets]`, those files at their paths. Put it on any HTTPS host, or serve it from
   the app's own server (`aio::http::Http::shell(dir)`).
 - `--web --dev`: a debug build whose page shows its errors on it.
 - The service worker precaches every file of the build (code checked
@@ -636,7 +650,8 @@ Ok(aio::lifecycle::exit_code())
   turns TLS on ([security](../auth/README.md#tls-and-the-network)).
 - Build it as `cli` (the default for a server): a `.tar.gz` whose
   `install.sh` puts it on `PATH` (a `.zip` on Windows), and beside it a
-  supervisor file, with the line that installs it:
+  supervisor file, with the line that installs it (on Linux also a
+  system unit, `<bundle>.system.service`, that starts at boot):
 
 | OS | File | Install it |
 |---|---|---|
@@ -652,8 +667,13 @@ Ok(aio::lifecycle::exit_code())
   machine is written in them.
 - `ax start`, `ax stop`, `ax status`, `ax health`, `ax logs` drive it like
   any app; `ax surface <app> --headless` shows its views without a window.
-- A system-wide service (another user, a root unit, a container) is the
-  operator's to write; the binary needs nothing but its flags and
+- The system unit (aio's `build-service`) starts at boot with no login
+  and no linger: the binary in `/usr/local/bin/<id>`, run as a user of its
+  own that systemd makes (`DynamicUser`), its data in `/var/lib/<id>`
+  (`StateDirectory`), `AIO_SUPERVISED`, `AIO_STOP_STAYS_DOWN` and
+  `Restart=always` as the user unit. It updates with its package (a
+  system install is not the app's to swap). Another user, a container:
+  the operator's to write; the binary needs nothing but its flags and
   `AIORT_DATA`.
 
 ## CLI
@@ -710,6 +730,9 @@ The same `aio.toml` is built into every target; what a target can't use
 ## Limits
 
 - No iOS target.
+- A macOS bundle is built on a Mac (or one over ssh, `[build.macos]
+  host`): a macOS binary links Apple's frameworks, whose SDK only a Mac
+  may carry; aio's Deno binary cross-compiled to an unsigned `.app` on any host.
 - macOS and Windows bundles are not OS-signed or notarized yet.
 - Android: no client connect page on the phone yet (pair from the desktop, `ax pair`).
 - No Flatpak, Snap, RPM, MSI or Microsoft Store package.

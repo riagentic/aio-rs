@@ -147,6 +147,32 @@ fn an_aio_file_opens_in_aio_rs_and_stays_readable_by_aio() {
     assert_eq!((tally.state().n, tally.events().unwrap().len()), (11, 2));
 }
 
+/// aio's `tally` counts `inbox.post`s by `listensTo` (one reduce, one
+/// save): ported, the reaction and its call land in aio's one `state`
+/// document in the same commit, before either is on disk, and aio reads it.
+#[test]
+fn a_reaction_lands_in_aio_s_file_in_its_call_s_commit() {
+    let (_d, home) = fixture();
+    let h = Home::open(&home, APP, None).unwrap();
+    let db = h.state_db();
+    let (tally, inbox) = (Handle::<Tally>::open_aio(&db, APP).unwrap(), Handle::<Inbox>::open_aio(&db, APP).unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (s, file) = (seen.clone(), db.clone());
+    tally.listens_to(&inbox, "post", move |t, _| {
+        *s.lock().unwrap() = Some(kv(&file)["state"].clone());
+        t.on_add()
+    });
+    inbox.post("p30".into()).unwrap();
+    let before = seen.lock().unwrap().take().unwrap();
+    assert_eq!((&before["tally"]["n"], before["inbox"]["posts"].as_array().unwrap().len()), (&json!(10), 5), "not yet");
+    let after = kv(&db)["state"].clone();
+    assert_eq!(after["tally"], json!({ "n": 11, "__aio_status": "active" }));
+    assert_eq!(after["inbox"]["posts"][5], json!("p30"));
+    drop((tally, inbox));
+    let tally = Store::<Tally>::open_aio(&db, APP).unwrap();
+    assert_eq!(tally.state().n, 11);
+}
+
 #[test]
 fn a_ported_app_boots_on_its_aio_home_and_data() {
     let (_d, home) = fixture();
@@ -1300,6 +1326,75 @@ fn a_retired_cell_is_gone_from_the_file_in_either_layout() {
     let (_d, p) = purse_file(false);
     let e = Store::<Selfish>::open_aio(&p, "w").err().unwrap().0;
     assert!(e.contains("selfish: it retires cell settings, which it still reads"), "{e}");
+}
+
+/// A port whose bridge-era build kept a slice under its own id (`state\x1fpurse3`)
+/// before it read aio's cells by field: it retires that slice, its history kept.
+#[cell(persist, id = "purse3", retire = ["purse3"])]
+pub struct Purse3 {
+    #[aio_cell]
+    settings: Settings,
+    #[aio_cell]
+    network: Net,
+    locked: bool,
+}
+
+#[methods]
+impl Purse3 {
+    pub fn lock(&mut self) {
+        self.locked = true;
+    }
+}
+
+/// A one-slice cell reads aio's slice of its own id: it can't retire it.
+#[cell(persist, id = "settings", retire = ["settings"])]
+pub struct SelfRetired {
+    dark: bool,
+}
+
+#[methods]
+impl SelfRetired {}
+
+#[test]
+fn a_cell_of_aio_cells_retires_aios_slice_of_its_own_id_and_keeps_its_history() {
+    for multi in [false, true] {
+        let (_d, p) = purse_file(multi);
+        let mut w = Store::<Purse3>::open_aio(&p, "w").unwrap();
+        w.call(&By::Test, "lock", Value::Null).unwrap();
+        drop(w);
+        // An older build's slice of its own id, and its stamp.
+        let c = rusqlite::Connection::open(&p).unwrap();
+        let bridge = json!({ "seen": "BRIDGE-ERA-SLICE" });
+        match multi {
+            true => {
+                _ = c.execute("INSERT INTO aio_kv (k, v) VALUES ('state\x1fpurse3', ?1)", [bridge.to_string()]).unwrap()
+            }
+            false => {
+                let doc: String = c.query_row("SELECT v FROM aio_kv WHERE k = 'state'", [], |r| r.get(0)).unwrap();
+                let mut doc: Value = serde_json::from_str(&doc).unwrap();
+                doc["purse3"] = bridge;
+                c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'state'", [doc.to_string()]).unwrap();
+            }
+        }
+        let mut versions = kv(&p)["w:__versions"].clone();
+        versions["purse3"] = json!(1);
+        c.execute("UPDATE aio_kv SET v = ?1 WHERE k = 'w:__versions'", [versions.to_string()]).unwrap();
+        drop(c);
+        assert!(aio_reads(&p, "w").contains_key("purse3"));
+
+        let w = Store::<Purse3>::open_aio(&p, "w").unwrap();
+        assert!(w.state().locked, "its own history stays");
+        assert!(w.events().unwrap().iter().any(|e| e.method == "lock"));
+        drop(w);
+        let after = aio_reads(&p, "w");
+        assert!(!after.contains_key("purse3"), "multi = {multi}");
+        assert!(after.contains_key("settings") && after.contains_key("c00"));
+        assert!(kv(&p)["w:__versions"].get("purse3").is_none());
+        assert!(!holds(&bytes(&p), "BRIDGE-ERA-SLICE"), "zeroed");
+    }
+    let (_d, p) = purse_file(false);
+    let e = Store::<SelfRetired>::open_aio(&p, "w").err().unwrap().0;
+    assert!(e.contains("settings: it retires cell settings, which it still reads"), "{e}");
 }
 
 /// aio's `counts`: ids handed out, and the next one.

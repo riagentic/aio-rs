@@ -3,7 +3,7 @@
 //! the recorded ones, so a replayed event computes the same state.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{any::Any, cell::RefCell};
+use std::{any::Any, cell::RefCell, sync::Arc};
 use uuid::Uuid;
 
 /// Who caused an event.
@@ -147,6 +147,11 @@ pub(crate) struct Asks {
     pub plans: Vec<Plan>,
     /// The caller's id for this call, kept so a re-sent call applies once.
     pub op: Option<String>,
+    /// An async method's part: its continuation's place in `effects`, if it
+    /// awaits; whether it ended; a transaction's publish asked for ([`Cx::commit`]).
+    pub then: Option<usize>,
+    pub ended: bool,
+    pub publish: Option<i64>,
 }
 
 pub struct Cx {
@@ -162,6 +167,15 @@ pub struct Cx {
     plans: RefCell<Vec<Plan>>,
     /// Where this async call's end goes ([`crate::Answer`]).
     reply: Option<crate::answer::Reply>,
+    /// An async method's part: where its continuation is in `effects`, and
+    /// whether it ended (returned its answer).
+    then: std::cell::Cell<Option<usize>>,
+    ended: std::cell::Cell<bool>,
+    /// A transaction's part asked to publish what it wrote so far, at most
+    /// once per this many ms (`commit`, `commit_every`).
+    publish: std::cell::Cell<Option<i64>>,
+    /// The cell's committed state now, when a transaction's part runs on its own copy.
+    live: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl Cx {
@@ -176,7 +190,47 @@ impl Cx {
             effects: RefCell::default(),
             plans: RefCell::default(),
             reply: None,
+            then: Default::default(),
+            ended: Default::default(),
+            publish: Default::default(),
+            live: None,
         }
+    }
+
+    /// A transaction's part: `live` is the cell's committed state now.
+    pub(crate) fn with_live(self, live: Arc<dyn Any + Send + Sync>) -> Self {
+        Self { live: Some(live), ..self }
+    }
+
+    /// The cell's committed state now (aio's `s.$live`). In a
+    /// `#[cell(transaction)]` cell's async method, `self` is the state as
+    /// it was when the method was called, with its own writes; this is what
+    /// other calls committed since. Elsewhere it is the state before this
+    /// call. What is written goes to `self`, never here.
+    pub fn live_state<T: crate::Cell>(&self) -> Option<Arc<T>> {
+        self.live.clone()?.downcast().ok()
+    }
+
+    /// In a `#[cell(transaction)]` cell's async method: publish what it
+    /// wrote so far at the end of this part, as one commit (aio's
+    /// `s.$commit()`, a spinner before a long await); its reads go on from
+    /// the state then. Elsewhere every part commits anyway.
+    pub fn commit(&self) {
+        self.publish.set(Some(0));
+    }
+
+    /// [`Self::commit`], at most once per `ms` (aio's `s.$commit(ms)`, a
+    /// progress bar out of a loop): the first always publishes.
+    pub fn commit_every(&self, ms: i64) {
+        self.publish.set(Some(ms.max(0)));
+    }
+
+    /// An async method's part goes on after `effect` (its await).
+    #[doc(hidden)]
+    pub fn then<T: crate::Cell>(&self, effect: crate::Effect<T>) {
+        let mut es = self.effects.borrow_mut();
+        self.then.set(Some(es.len()));
+        es.push(Box::new(effect));
     }
 
     /// A call whose end goes to `reply` (an async method's caller waits).
@@ -193,6 +247,7 @@ impl Cx {
     /// An async method ended with `v`: sent to its caller once the call
     /// commits, and kept for its `#[ttl]`.
     pub(crate) fn answer(&self, value: Value, ttl: Option<(String, i64)>) {
+        self.ended.set(true);
         let reply = self.reply();
         if self.replay.is_none() && (reply.is_some() || ttl.is_some()) {
             self.effects.borrow_mut().push(Box::new(crate::answer::Answered { reply, value, ttl }));
@@ -228,6 +283,9 @@ impl Cx {
             effects: self.effects.into_inner(),
             plans: self.plans.into_inner(),
             op: None,
+            then: self.then.get(),
+            ended: self.ended.get(),
+            publish: self.publish.get(),
         }
     }
 
@@ -291,6 +349,15 @@ impl Cx {
         self.after(key, b.ms(attempt), method, args)
     }
 
+    /// Schedules of this cell that call a method of cell `O` (aio's
+    /// `schedule.after(id, ms, other.method.action())`): kept and cancelled
+    /// by key with this cell's own, fired on `O` by the app's cells
+    /// ([`crate::Cells::start`], `TestCells`). A `method` `O` doesn't have
+    /// refuses here.
+    pub fn on<O: crate::Cell>(&self) -> On<'_> {
+        On { cx: self, cell: O::ID, methods: O::METHODS }
+    }
+
     pub fn cancel(&self, key: &str) {
         self.plans.borrow_mut().push(Plan::Cancel(key.into()));
     }
@@ -352,6 +419,45 @@ impl Cx {
             .unwrap_or_else(|| crate::uuid_v4().as_u64_pair().0);
         u.rands.push(n);
         n
+    }
+}
+
+/// Schedules on another cell ([`Cx::on`]).
+pub struct On<'a> {
+    cx: &'a Cx,
+    cell: &'static str,
+    methods: &'static [&'static str],
+}
+
+impl On<'_> {
+    fn method(&self, key: &str, method: &str) -> crate::Result<String> {
+        crate::ensure!(
+            self.methods.contains(&method),
+            "schedule `{key}`: {} has no method `{method}` (its methods: {})",
+            self.cell,
+            self.methods.join(", ")
+        );
+        Ok(format!("{}:{method}", self.cell))
+    }
+
+    /// [`Cx::after`] on the other cell.
+    pub fn after(&self, key: &str, ms: i64, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.after(key, ms, &self.method(key, method)?, args)
+    }
+
+    /// [`Cx::every`] on the other cell.
+    pub fn every(&self, key: &str, ms: i64, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.every(key, ms, &self.method(key, method)?, args)
+    }
+
+    /// [`Cx::at`] on the other cell.
+    pub fn at(&self, key: &str, at: i64, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.at(key, at, &self.method(key, method)?, args)
+    }
+
+    /// [`Cx::cron`] on the other cell.
+    pub fn cron(&self, key: &str, expr: &str, method: &str, args: impl Serialize) -> crate::Result {
+        self.cx.cron(key, expr, &self.method(key, method)?, args)
     }
 }
 
