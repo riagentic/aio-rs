@@ -1488,7 +1488,8 @@ mod tests {
     fn dep_info_lists_each_dependency_once_in_the_crate_folder() {
         let d = "/t/deps/app-1.d: src/main.rs src/a\\ b.rs\n\nsrc/main.rs:\nsrc/a\\ b.rs:\n# env-dep:X=1\n";
         let deps = dep_info(d, Path::new("/w"));
-        assert_eq!(deps, [PathBuf::from("/w/src/main.rs"), PathBuf::from("/w/src/a b.rs")]);
+        // Absolute as the OS makes it (a drive on Windows).
+        assert_eq!(deps, ["/w/src/main.rs", "/w/src/a b.rs"].map(|p| canonical(Path::new(p))));
     }
 
     fn call(args: &[&str]) -> Rustc {
