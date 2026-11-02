@@ -127,7 +127,8 @@ fn hot(params: &Value) -> Result<Value, String> {
 /// The door's own methods for `ax dev`'s hot-patch (a dev build with
 /// aio-shell's `dev`): `Aio.aslr` answers `{"aslr": n}`, where this process
 /// is loaded (subsecond's `aslr_reference`, which a patch is linked
-/// against); `Aio.patch` takes `{"table": <subsecond's JumpTable>}`, loads
+/// against), and on Windows `"base"`: a free span near this binary where a
+/// patch DLL, linked at that fixed base, loads; `Aio.patch` takes `{"table": <subsecond's JumpTable>}`, loads
 /// the patch and answers `{"applied": true}`: the code calls the new
 /// functions from then on (the views on air are built again on them).
 pub const ASLR: &str = "Aio.aslr";
@@ -137,6 +138,9 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
     #[cfg(all(debug_assertions, feature = "dev"))]
     {
         if method == ASLR {
+            #[cfg(windows)]
+            return Ok(json!({ "aslr": subsecond::aslr_reference(), "base": patch_base() }));
+            #[cfg(not(windows))]
             return Ok(json!({ "aslr": subsecond::aslr_reference() }));
         }
         let table: subsecond::JumpTable =
@@ -151,6 +155,32 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
         _ = (method, params);
         Err("not built for hot-patching: ax dev builds with aio-shell's dev feature".into())
     }
+}
+
+/// Windows: the first 64 KiB-aligned free span of 256 MiB (ax's
+/// `PATCH_ROOM`) past this binary's `main` within 1.5 GiB of it: a patch
+/// reaches the binary's data rip-relative (±2 GiB). `None`: no such span.
+#[cfg(all(windows, debug_assertions, feature = "dev"))]
+fn patch_base() -> Option<u64> {
+    use windows_sys::Win32::System::Memory::{MEM_FREE, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    const ROOM: usize = 256 << 20;
+    let main = subsecond::aslr_reference();
+    let mut at = main;
+    while at < main + (3 << 29) {
+        // SAFETY: a query of this process's own address space into a local.
+        let mut m: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+        if unsafe { VirtualQuery(at as *const _, &mut m, size) } == 0 {
+            return None;
+        }
+        let end = m.BaseAddress as usize + m.RegionSize;
+        let start = (at.max(m.BaseAddress as usize) + 0xffff) & !0xffff;
+        if m.State == MEM_FREE && start + ROOM <= end {
+            return Some(start as u64);
+        }
+        at = end;
+    }
+    None
 }
 
 /// What the dev build keeps; nothing before the window's view runs.

@@ -9,6 +9,15 @@ version may break things.
 
 ### Added
 
+- **`ax dev` hot-patches Rust on Windows too** (an app on air, x86_64,
+  MSVC or MinGW): the fat binary is linked at a fixed base below 4 GiB
+  with a COFF symbol table (rust-lld for MSVC, its PDB kept), each patch
+  is a DLL linked at a fixed base the app names (`Aio.aslr`'s `base`, a
+  free span near the binary), and patched objects use the running
+  binary's writable statics and thread-locals, so state is kept as on
+  Linux. A patch that can't load there fails to load, never misresolves:
+  ax rebuilds. Measured on a Windows 11 VM: 0.34–0.44 s a patch against a
+  0.64 s rebuild that also restarts the app.
 - **The splash drawn by the OS before Electron starts, at every start**
   (aio's splash): GTK 3 over FFI on Linux (opened at run time, no new
   crate), Cocoa on macOS, Windows Forms on Windows (for a download; when
@@ -195,8 +204,8 @@ version may break things.
   built again with their state kept (~3 ms); a Rust edit is built by ax
   as a thin patch against a first "fat" build (dioxus-cli 0.7.10's
   builder, ported) and applied in the running process with `subsecond`
-  (~0.45 s on Linux and macOS; Windows rebuilds), views keeping their
-  hook state by place and, on Linux x86_64, the patched code reading the
+  (~0.45 s on Linux and macOS, ~0.35 s on Windows), views keeping their
+  hook state by place and, on Linux x86_64 and Windows, the patched code reading the
   running binary's statics (an atomic, a `OnceLock`); a stylesheet edit
   needs no build. The shell draws
   its windows on air with `default-features = false, features = ["air"]`
@@ -484,6 +493,14 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- GitHub CI runs `./ci.sh`'s parts side by side (`./ci.sh lint|test`
+  runs one alone; no part: all): `check (lint)`, `check (test)`,
+  `mutants`, and `dx (dioxus)`, `dx (air)`, `dx (apk)`
+  (`scripts/dx-metrics --dioxus|--air|--apk`, each with its own base
+  measurement). The base's kept row is keyed by commit and runner
+  machine (`scripts/dx-metrics --machine`), so a run on a runner of the
+  same machine skips the base's build. Rust caches are saved by main's
+  runs only; main's runs are never cancelled by a newer push.
 - aio-rs-shell's Dioxus page is its default feature `dioxus` (aio-rs
   `kit` with it); `default-features = false, features = ["air"]` is the
   shell on air. aio-rs's Dioxus page crates are its feature `liveview`
