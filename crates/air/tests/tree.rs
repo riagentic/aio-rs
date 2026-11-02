@@ -88,6 +88,10 @@ fn the_render_log_says_each_render_as_it_happened() {
             .collect()
     };
     let (log, total) = p.within(renders);
+    if !cfg!(debug_assertions) {
+        assert_eq!((log, total), (vec![], 0), "a release logs nothing");
+        return;
+    }
     assert_eq!(
         said(&log),
         ["Row[1] mount", "Row[2] mount", "Static mount", "List mount"],
