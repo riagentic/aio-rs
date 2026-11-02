@@ -1,12 +1,11 @@
 //! ax dev's own hot-patching (`src/hotpatch.rs`), end to end: a fixture
-//! workspace (a library and an app on subsecond) built fat, run, and
+//! workspace (a library and an app on aio-rs-hotpatch) built fat, run, and
 //! patched three times while it runs: twice in the app's crate, once in
 //! the library; the app prints the new values without a restart. On Linux
 //! x86_64 the patched code sees the running binary's thread-locals and
 //! statics (an `AtomicU32` and a `OnceLock` set before the patch), while a
 //! static the patch adds is its own; a static the patch adds is its own on
-//! every platform. On macOS a patch has its own thread-locals and statics,
-//! as with dx.
+//! every platform. On macOS a patch has its own thread-locals and statics.
 #![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 #[allow(dead_code)]
@@ -44,25 +43,25 @@ fn stats() -> String {
 }
 
 fn main() {
-    println!("aslr {}", subsecond::aslr_reference());
+    println!("aslr {}", aio_hotpatch::aslr_reference());
     let mut line = String::new();
     loop {
         TICKS.set(TICKS.get() + 1);
         fixture_lib::SEEN.set(fixture_lib::SEEN.get() + 1);
         HITS.fetch_add(1, Ordering::Relaxed);
         let _ = NAME.set("app".to_string());
-        let app = subsecond::HotFn::current(value).call(());
-        let lib = subsecond::HotFn::current(fixture_lib::value).call(());
-        let ticks = subsecond::HotFn::current(ticks).call(());
-        let stats = subsecond::HotFn::current(stats).call(());
+        let app = aio_hotpatch::HotFn::current(value).call(());
+        let lib = aio_hotpatch::HotFn::current(fixture_lib::value).call(());
+        let ticks = aio_hotpatch::HotFn::current(ticks).call(());
+        let stats = aio_hotpatch::HotFn::current(stats).call(());
         println!("value {app} {lib} {ticks} {stats}");
         line.clear();
         if std::io::stdin().read_line(&mut line).unwrap() == 0 {
             break;
         }
         let table = std::fs::read_to_string(line.trim()).unwrap();
-        let table: subsecond::JumpTable = serde_json::from_str(&table).unwrap();
-        unsafe { subsecond::apply_patch(table).unwrap() };
+        let table: aio_hotpatch::JumpTable = serde_json::from_str(&table).unwrap();
+        unsafe { aio_hotpatch::apply_patch(table).unwrap() };
     }
 }
 "#;
@@ -77,10 +76,14 @@ fn write(path: &Path, text: &str) {
 /// The fixture workspace in `dir`, its versions locked as aio's.
 fn fixture(dir: &Path) {
     write(&dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\", \"lib\"]\nresolver = \"2\"\n");
+    let hotpatch = concat!(env!("CARGO_MANIFEST_DIR"), "/../hotpatch");
     write(
         &dir.join("app/Cargo.toml"),
-        "[package]\nname = \"fixture-app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n\
-         fixture-lib = { path = \"../lib\" }\nsubsecond = \"=0.7.10\"\nserde_json = \"1\"\n",
+        &format!(
+            "[package]\nname = \"fixture-app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n\
+             fixture-lib = {{ path = \"../lib\" }}\nserde_json = \"1\"\n\
+             aio-hotpatch = {{ package = \"aio-rs-hotpatch\", path = {hotpatch:?} }}\n"
+        ),
     );
     write(&dir.join("app/src/main.rs"), APP);
     write(&dir.join("lib/Cargo.toml"), "[package]\nname = \"fixture-lib\"\nversion = \"0.1.0\"\nedition = \"2024\"\n");

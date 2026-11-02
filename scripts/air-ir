@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 
-# 1.13 M lines for 50 views when set (22.5 k a view), Dioxus 0.7: 73 k.
+# 1.13 M lines for 50 views when set (22.5 k a view); 0.1.0's renderer: 73 k.
 LIMIT = 25_000
 
 work = sys.argv[1] if len(sys.argv) > 1 else sys.exit(__doc__)

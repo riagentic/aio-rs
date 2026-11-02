@@ -1,4 +1,4 @@
-//! `hold dx|air [keys] [gap ms] [rows]`: the held-key harness
+//! `hold air [keys] [gap ms] [rows]`: the held-key harness
 //! (`crates/air-bench/src/hold_unix.rs`); its page talks over a Unix socket.
 #[cfg(unix)]
 include!("../hold_unix.rs");
