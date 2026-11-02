@@ -543,7 +543,7 @@ fn a_handlers_task_is_its_components_a_redrawn_branch_or_row_cancels_none_of_it(
     assert_eq!(live_tasks(), live + 1, "the click spawned its work");
     p.within(|| redraw.set(true));
     assert!(p.present("other"), "the branch and the row that drew the button are gone");
-    assert!(!ENDED.with(|e| e.get()), "and the work the click started runs on (Dioxus: the component's scope)");
+    assert!(!ENDED.with(|e| e.get()), "and the work the click started runs on (the component's scope)");
     assert_eq!(live_tasks(), live + 1);
     p.within(|| shown.set(false));
     assert!(ENDED.with(|e| e.get()), "the component's end ended it");

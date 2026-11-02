@@ -68,7 +68,7 @@ struct Listening {
     /// The element's view: the handler goes with it.
     owner: Option<Owner>,
     /// The component that drew it: what the handler makes and spawns is
-    /// its (Dioxus's scope), so a branch drawn again cancels none of it.
+    /// the component's, so a branch drawn again cancels none of it.
     comp: Weak<Frame>,
 }
 
