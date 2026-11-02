@@ -102,7 +102,7 @@ fn main() -> std::io::Result<std::process::ExitCode> {
 
 /// The build's own settings: the bundled SQLite without the extensions aio
 /// never uses (full-text search, R-tree, extension loading…), 330 KB off
-/// each binary, so a server fits its 6 MB budget.
+/// each binary, so a server fits its 7 MB budget.
 const CARGO_CONFIG: &str = "# Cargo's settings for this app's builds.
 [env]
 # SQLite as aio uses it: no FTS3/FTS5, R-tree, dbstat, STAT4, soundex,

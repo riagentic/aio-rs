@@ -9,6 +9,22 @@ version may break things.
 
 ### Added
 
+- **Prebuilt `ax` for macOS** (arm64 and x86_64): the release workflow
+  (`.github/workflows/release.yml`) builds and smokes `ax` on a macOS
+  runner of each CPU beside Linux and Windows, pins every archive in
+  `install.sh` / `install.ps1`, writes `SHA256SUMS`, installs it with the
+  one-line installer on each OS, and on a tag makes a draft release; a
+  manual or pull-request run is a dry run.
+- `scripts/update-proof`, in GitHub CI on Linux, macOS and Windows: a
+  sample app installed from its bundle, updated through a signed patch,
+  then a broken update rolled back with its data read back.
+- `scripts/android-gate`, required before a release: a throwaway AVD on
+  port 5600, a sample APK started and upgraded in place with its data kept.
+- `scripts/numbers`: the README's and docs' numbers measured again, beside
+  the published ones, with the machine.
+- [When to use aio-rs, and when not](docs/basics/when.md), linked from the
+  README's top: what it is for, what not (SEO, CDN, edge), pinning the tag,
+  which parts are experimental.
 - **Sessions without accounts** (aio's `sessions: true`): `[accounts]
   sessions = true` keeps the session store with no users and no login
   doors; the app issues sessions (`auth::serving()`'s `issue`), and a
@@ -321,6 +337,10 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- A server's default size budget is 7 MB (was 6): the service template
+  is 6.03 MB on Linux after 0.2's additions (sync, vitals, routes, auth,
+  updates: 50 KB, no crate more than 7 KB), and the budget is that plus the
+  size gate's 5% headroom, to the next whole MB.
 - **Fail closed**: `/__aio/health` and `/__aio/metrics` need the key, a
   session or a user's token beyond this machine, also without accounts
   (they answered anyone before); on loopback they stay open on an app
@@ -453,6 +473,23 @@ version may break things.
   listener itself, between reading the state and telling it, was told
   first, and the older one after it (a watch on a copy saw `[0, 4, 0, 5]`).
   One teller at a time now tells until nothing is left untold.
+- An app's first update after its install is made from the patch again:
+  a bundle's `install.sh` kept only the binary in `versions/<v>/`, so the
+  patch (made over the whole bundle) missed its other files and the whole
+  release was downloaded. It now installs the bundle whole, as an update
+  stages one.
+- On macOS and Windows the first update after an install is made from the
+  patch too: it starts from the installed `.app` or `Programs\<id>` when
+  no staged copy of the running version is kept, as there is none until
+  the first update staged one.
+- On macOS, Windows and from an AppImage, a new version whose binary dies
+  as it starts no longer leaves no version running: its binary is the
+  install helper, so the old app exited for a helper that never ran. The
+  old app now exits only once the helper says it is up (20 s); else it
+  runs on, and that release is never offered again.
+- `ax release` of the service template on Windows: its default size
+  budget is half again there (a server 10 MB, a desktop app 15 MB), as its
+  build is about a third bigger (7.1 MB against 5.3 on Linux).
 - `scripts/dx-metrics --check` compares like with like: every gated
   number, sizes and crate counts too, is judged against the same machine's
   rows only (a CI runner's debug target was failing against the
