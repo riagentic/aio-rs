@@ -9,11 +9,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-
-
-
-
-
 /// `bytes` as the executable `to` (written aside, then moved in place).
 fn write_exe(bytes: &[u8], to: &Path) -> Result<(), String> {
     let tmp = to.with_extension("partial");
@@ -25,7 +20,6 @@ fn write_exe(bytes: &[u8], to: &Path) -> Result<(), String> {
     }
     std::fs::rename(&tmp, to).map_err(|e| format!("{}: {e}", to.display()))
 }
-
 
 /// The file of tar archive `tar` whose path ends in `/name` (pure; a
 /// plain ustar, as wasm-bindgen's release archives are).
@@ -76,7 +70,6 @@ pub fn fetch_tool(
     _ = std::fs::remove_file(&tmp);
     r
 }
-
 
 /// The wasm-bindgen aio's lock and aio-rs pin (`=` in its Cargo.toml), so
 /// every app's lock has it too: the web build's CLI must be the same version.
@@ -415,7 +408,6 @@ pub fn run(check: bool) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn each_missing_need_says_the_command_that_gets_it_per_os() {

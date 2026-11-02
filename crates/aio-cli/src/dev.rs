@@ -10,7 +10,6 @@ use std::process::{Child, Command};
 use std::sync::mpsc;
 use std::time::Duration;
 
-
 /// The profile of every debug build aio runs (`ax dev`, `ax test`,
 /// `ax lint`): one copy of the app's libraries in
 /// `<target>/<host>/desktop-dev`.
@@ -250,11 +249,6 @@ pub fn here(meta: &serde_json::Value, cwd: &Path) -> Result<String, String> {
     }
 }
 
-
-
-
-
-
 /// A port nothing listens on now.
 pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_or(18731, |a| a.port())
@@ -373,13 +367,6 @@ fn on_page(window: Option<&(String, aio::paths::Plan)>, js: &str) -> Result<Stri
     let door = crate::cdp::door(id, p).ok_or("it isn't running")?;
     crate::eval::run(&crate::cdp::Reach::Door(door), 0, js)
 }
-
-
-
-
-
-
-
 
 /// A signal on every saved change to the app's sources and assets.
 /// What `ax dev` watches for changes (aio's `--watch=false`, `watch: [..]`).
@@ -614,8 +601,6 @@ impl Drop for Session {
 pub fn ask_restart(logs: &Path) -> std::io::Result<()> {
     std::fs::write(logs.join(RESTART), b"")
 }
-
-
 
 /// Stop the app the graceful way (asked over its door, then its watch let
 /// go and signalled) and wait for it.
@@ -1122,7 +1107,6 @@ fn hot_patch(
     ))
 }
 
-
 /// Send markup `edits` to the running app's window (`Aio.hot`): what to say.
 fn reload_markup(
     window: Option<&(String, aio::paths::Plan)>,
@@ -1256,7 +1240,6 @@ mod tests {
         assert_eq!(got, serde_json::json!(["build failed", errors, true]));
     }
 
-
     #[test]
     fn an_error_whose_fix_is_aios_says_it() {
         let e = "error[E0277]: the trait bound `Note: aio::serde::Serialize` is not satisfied\n  --> src/lib.rs:9:5\n";
@@ -1264,8 +1247,6 @@ mod tests {
         assert!(said.starts_with(e.trim_end()) && said.contains("= ax: ") && said.contains("#[aio::data]"), "{said}");
         assert_eq!(with_hints("error[E0425]: cannot find value `x`\n"), "error[E0425]: cannot find value `x`\n");
     }
-
-
 
     #[test]
     fn only_real_changes_restart() {
@@ -1430,7 +1411,6 @@ mod tests {
         assert_eq!(discard_fresh(&plan("default")), None);
     }
 
-
     #[test]
     fn a_debug_build_is_dxs_and_its_binary_is_the_one_cargo_wrote() {
         let l = layout().join(" ");
@@ -1507,7 +1487,6 @@ mod tests {
         assert_eq!(take_watch(&s(&["--no-watch", "a.md"])), Ok((s(&["a.md"]), Watching::Off)));
         assert_eq!(take_watch(&s(&["--", "--no-watch"])).unwrap().1, Watching::All, "the app's own word");
     }
-
 
     #[test]
     fn a_pid_file_names_its_process_only_while_that_one_runs() {

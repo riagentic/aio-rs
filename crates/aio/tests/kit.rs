@@ -760,7 +760,6 @@ fn shown(cam: &Option<aio::held::State<String>>) -> String {
     }
 }
 
-
 /// On air a body runs once: the key follows its prop, the state is read in a hole.
 #[component]
 fn Preview(cam: Prop<Option<&'static str>>) -> View {
@@ -1039,7 +1038,6 @@ fn a_portal_draws_at_the_root_keeps_its_state_and_handlers_and_leaves_nothing() 
 }
 
 const FX: &str = "msg";
-
 
 fn fading() -> View {
     let show = signal(|| true);

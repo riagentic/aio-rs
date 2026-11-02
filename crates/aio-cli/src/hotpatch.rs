@@ -15,6 +15,7 @@
 //!
 //! Linux (ELF, x86_64 and aarch64) and macOS (Mach-O, arm64 and x86_64).
 //! Windows (PE, symbols in PDB files) is not ported: [`fat_build`] says so.
+pub use aio_hotpatch::JumpTable;
 use object::write::{MachOBuildVersion, SectionId, StandardSection, Symbol, SymbolId, SymbolSection};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolFlags, SymbolKind, SymbolScope};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -22,7 +23,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-pub use aio_hotpatch::JumpTable;
 
 /// Set by [`fat_build`] on cargo: ax was run as rustc's workspace wrapper;
 /// each crate's call is recorded in this folder.

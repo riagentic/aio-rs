@@ -24,7 +24,6 @@ impl<S: Stream> Fresh<S> {
 // Nothing in it is pinned in place: the queue only holds finished frames.
 impl<S: Stream + Unpin> Unpin for Fresh<S> {}
 
-
 /// The key and element of a repeated keydown frame, if `f` is one (air's
 /// frames: `air::Raw`).
 fn repeat(f: &[u8]) -> Option<String> {
@@ -87,7 +86,6 @@ impl<S: Stream + Sink<I> + Unpin, I> Sink<I> for Fresh<S> {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
-
 
     fn key(name: &str, key: &str, repeat: bool) -> Result<Vec<u8>, ()> {
         let raw = air::Raw { ids: vec![3], name: name.into(), key: key.into(), repeat, ..air::Raw::default() };

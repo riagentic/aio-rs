@@ -278,11 +278,11 @@ fn App() -> Element {
         [
             (
                 5,
-                "<li> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)"
+                "<li> in a for loop has no key: a removed or moved row would hand its state to the next (air refuses it)"
             ),
             (
                 7,
-                "<Row> in a for loop has no key: a removed or moved row hands its state to the next (air, aio::ui's next renderer, requires one)"
+                "<Row> in a for loop has no key: a removed or moved row would hand its state to the next (air refuses it)"
             ),
         ],
         "{:?}",
@@ -315,26 +315,6 @@ fn App() -> View {
     assert_eq!(lines, [5, 6, 8, 10, 11], "{:?}", r.issues);
     assert!(r.issues.iter().any(|i| i.message.starts_with("`signal` in `App` runs only sometimes")));
     assert!(r.issues.iter().any(|i| i.message.starts_with("`Signal::new` in the body of `App` makes a new signal")));
-}
-
-#[test]
-fn an_if_let_in_rsx_is_a_warning() {
-    let d = project(&[(
-        "src/ui.rs",
-        r#"
-fn App() -> View {
-    rsx! {
-        if let Some(n) = pick.get() { p { "{n}" } }
-        if pick.get().is_some() { p { "some" } } else if let Some(m) = other() { p { "{m}" } }
-        {pick.get().map(|n| rsx! { p { "{n}" } })}
-    }
-}
-"#,
-    )]);
-    let r = lint(d.path());
-    let got: Vec<_> =
-        r.issues.iter().filter(|i| i.message.contains("`if let`")).map(|i| (i.severity, i.line.unwrap())).collect();
-    assert_eq!(got, [(Severity::Warn, 4), (Severity::Warn, 5)], "{:?}", r.issues);
 }
 
 #[test]

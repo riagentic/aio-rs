@@ -36,7 +36,8 @@ impl Views {
 /// `ax components`): each one's name, key, body runs (`renders`), its own
 /// holes' rewrites (`updates`) and its children, as of the last flush.
 pub(crate) fn components() -> aio::serde_json::Value {
-    let all: Vec<_> = on_air::TREES.lock().unwrap_or_else(|e| e.into_inner()).iter().flat_map(|t| t.1.clone()).collect();
+    let all: Vec<_> =
+        on_air::TREES.lock().unwrap_or_else(|e| e.into_inner()).iter().flat_map(|t| t.1.clone()).collect();
     let total: u64 = all.iter().map(on_air::runs).sum();
     aio::serde_json::json!({ "components": all, "renders": [], "total": total })
 }

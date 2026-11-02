@@ -202,7 +202,6 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
-
 /// One window's frames, both ways, a held key's stale repeats left out ([`fresh`]).
 fn wire(
     s: aio::ipc::Stream,
@@ -1139,7 +1138,6 @@ mod tests {
         electron.read_exact(&mut b).await.unwrap();
         assert_eq!(&b, b"focus\n");
     }
-
 
     #[test]
     fn the_page_on_air_has_no_network_and_airs_interpreter() {

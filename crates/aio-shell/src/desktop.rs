@@ -450,5 +450,4 @@ mod tests {
         let t = Tray { menu: &BOTH, ..Default::default() };
         assert_eq!(said(asks(&json!({ "t": "tray", "i": 0 }), Some(&t))), ["run pause", "go /b"]);
     }
-
 }

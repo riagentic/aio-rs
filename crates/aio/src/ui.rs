@@ -22,9 +22,6 @@ mod on_air;
 #[cfg(feature = "kit")]
 pub use on_air::*;
 
-
-
-
 /// Everything a view file needs, on air: the same names as on Dioxus.
 #[cfg(feature = "kit")]
 pub mod prelude {
@@ -309,7 +306,6 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
         std::future::pending::<()>().await
     }
 }
-
 
 /// On air the call sits in a hole (an effect, no hooks): one signal per set
 /// of sheets for the thread, its watcher living as long.

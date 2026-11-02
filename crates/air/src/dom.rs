@@ -485,7 +485,9 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
 /// `name` of node `id` set to `v` now (no hole).
 pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
     dom(|d| match (v, is_prop(name)) {
-        (AttrValue::Bool(b), _) if is_text_bool(name) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" }),
+        (AttrValue::Bool(b), _) if is_text_bool(name) => {
+            _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" })
+        }
         (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
         (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
         (AttrValue::Bool(b), true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),

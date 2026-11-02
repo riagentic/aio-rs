@@ -892,7 +892,8 @@ fn unkeyed(roots: &[Node]) -> Found {
         Some(n @ (Node::El { key: None, .. } | Node::Comp { key: None, .. })) => name_of(n),
         // A block's rsx! is a node inside the pass's unkeyed one: its key keys nothing.
         Some(Node::Expr(e)) => {
-            let msg = "a for loop over a block keys nothing (the block's rsx! sits inside an unkeyed node): air refuses it";
+            let msg =
+                "a for loop over a block keys nothing (the block's rsx! sits inside an unkeyed node): air refuses it";
             return vec![(
                 line_of(e),
                 Severity::Error,
@@ -1004,9 +1005,7 @@ fn a11y(nodes: &[Node], within: Within, out: &mut Found) {
                         (line, Severity::Warn, "a11y", msg, "use a button, or give it role, tabindex: 0 and onkeydown")
                     }));
                     out.extend(
-                        misused(tag, &a, within)
-                            .into_iter()
-                            .map(|(msg, fix)| (line, Severity::Warn, "a11y", msg, fix)),
+                        misused(tag, &a, within).into_iter().map(|(msg, fix)| (line, Severity::Warn, "a11y", msg, fix)),
                     );
                 }
                 if drag_set(a) {
@@ -1041,5 +1040,7 @@ fn a11y(nodes: &[Node], within: Within, out: &mut Found) {
 /// An `ondragstart` that sets the drag's data: lost, since a view's handler
 /// runs after the browser's dragstart is over (aio's page sets `data-drag`).
 fn drag_set(attrs: &[(String, Val)]) -> bool {
-    attrs.iter().any(|(name, v)| name == "ondragstart" && matches!(v, Val::Event(_, h) if h.to_string().contains("set_data")))
+    attrs
+        .iter()
+        .any(|(name, v)| name == "ondragstart" && matches!(v, Val::Event(_, h) if h.to_string().contains("set_data")))
 }

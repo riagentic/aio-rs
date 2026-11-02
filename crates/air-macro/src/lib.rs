@@ -1256,6 +1256,7 @@ impl Tpl {
                 let stat: Vec<(&String, String)> = attrs
                     .iter()
                     .filter_map(|(k, v)| match v {
+                        Val::Static(_) if k == "innerHTML" => None,
                         Val::Static(s) => Some((k, s.clone())),
                         Val::Present(b) if text_bool(k) => Some((k, b.to_string())),
                         Val::Present(true) => Some((k, String::new())),
@@ -1268,13 +1269,18 @@ impl Tpl {
                     self.str(v);
                 }
                 self.bytes.extend_from_slice(&(children.len() as u16).to_le_bytes());
-                let dynamic =
-                    !spreads.is_empty() || attrs.iter().any(|(_, v)| !matches!(v, Val::Static(_) | Val::Present(_)));
+                // `innerHTML` is a property set at mount, as the page's guard sees it, not
+                // a template attribute.
+                let dynamic = !spreads.is_empty()
+                    || attrs.iter().any(|(k, v)| k == "innerHTML" || !matches!(v, Val::Static(_) | Val::Present(_)));
                 self.bytes.push(dynamic as u8);
                 if dynamic || root {
                     let id = self.mark();
                     for (k, v) in attrs {
                         let hole = match v {
+                            Val::Static(s) if k == "innerHTML" => {
+                                quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(|| air::IntoAttr::into_attr(#s)));)
+                            }
                             Val::Fmt(f, r) => {
                                 let c = clones(r);
                                 quote!(air::__rt::attr(#id, #k, { #c ::std::boxed::Box::new(move || air::IntoAttr::into_attr(::std::format!(#f))) });)
@@ -1499,7 +1505,9 @@ fn is_closure(v: &TokenStream) -> bool {
 /// air's `is_text_bool`: `true`/`false` is text for `aria-*`, `data-*` and
 /// HTML's enumerated attributes, presence for the rest.
 fn text_bool(name: &str) -> bool {
-    name.starts_with("aria-") || name.starts_with("data-") || matches!(name, "draggable" | "contenteditable" | "spellcheck")
+    name.starts_with("aria-")
+        || name.starts_with("data-")
+        || matches!(name, "draggable" | "contenteditable" | "spellcheck")
 }
 
 /// Is `v` a constant: a literal (`"a"`, `3`, `-1.5`, `true`) or an enum's

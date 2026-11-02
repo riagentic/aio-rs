@@ -62,7 +62,8 @@ fn an_aria_bool_is_text_and_a_flag_is_presence() {
         }
     }
     let mut p = TestPage::mount(app);
-    let attrs = |p: &TestPage| ["aria-selected", "aria-busy", "data-open", "aria-controls", "hidden"].map(|a| p.attr("row", a));
+    let attrs =
+        |p: &TestPage| ["aria-selected", "aria-busy", "data-open", "aria-controls", "hidden"].map(|a| p.attr("row", a));
     let s = |v: &str| Some(v.to_string());
     assert_eq!(attrs(&p), [s("false"), s("true"), s("false"), None, None], "an Option's None is no attribute");
     p.click("row");

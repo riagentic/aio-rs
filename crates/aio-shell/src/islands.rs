@@ -114,7 +114,7 @@ struct Label {
 }
 
 fn app() -> View {
-    let mut n = signal(|| 0i64);
+    let n = signal(|| 0i64);
     let on = signal(|| true);
     let probe = signal(String::new);
     rsx! {
@@ -272,7 +272,8 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
                 return;
             }
         }
-        panic!("never true: {expr}");
+        let page = eval(&mut ws, &mut id, "document.body.innerHTML").await;
+        panic!("never true: {expr}; the page: {page}");
     };
     let text = |box_id: &str| format!("document.getElementById('{box_id}')?.textContent");
     until(&format!("{} === 'n=0' && {} === 'n=100'", text("counter"), text("fixed"))).await;

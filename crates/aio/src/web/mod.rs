@@ -122,7 +122,6 @@ pub fn use_user() -> crate::ui::Resource<Option<(String, String)>> {
     crate::ui::resource(|| async { client().me(None).await.ok().and_then(|m| m.user) })
 }
 
-
 /// The page's `localStorage` as a [`storage::Kv`]: none in a context that
 /// has it switched off (then copies live in memory only).
 #[cfg(target_arch = "wasm32")]
@@ -157,7 +156,6 @@ impl storage::Kv for Local {
         (0..s.length().unwrap_or(0)).filter_map(|i| s.key(i).ok().flatten()).collect()
     }
 }
-
 
 /// Mount the app's root view into the page's `<div id="main">`, on air:
 /// its interpreter (`air::PAGE_JS`) runs in the page as a script of the

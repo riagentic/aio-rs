@@ -1023,7 +1023,6 @@ mod tests {
         // The app's own server is never cached.
         assert!(sw.contains("u.pathname === '/ws' || u.pathname.startsWith('/__aio/')"));
     }
-
 }
 
 /// The web build in a real browser (a headless Chromium, the wasm32 target
@@ -1039,7 +1038,6 @@ pub(crate) mod browser {
     use std::time::Duration;
 
     include!("web/board.rs");
-    include!("web/view.rs");
 
     const KEY: &str = "a-long-random-app-key-for-tests";
 

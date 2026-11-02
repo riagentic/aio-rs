@@ -114,7 +114,11 @@ pub unsafe fn apply_patch(mut table: JumpTable) -> Result<(), PatchError> {
     let main = unsafe { os::open_main(&table.lib) }.map_err(PatchError::Dlopen)?;
     let old = aslr_reference().wrapping_sub(table.aslr_reference as usize);
     let new = main.wrapping_sub(table.new_base_address as usize);
-    table.map = table.map.iter().map(|(k, v)| ((*k as usize).wrapping_add(old) as u64, (*v as usize).wrapping_add(new) as u64)).collect();
+    table.map = table
+        .map
+        .iter()
+        .map(|(k, v)| ((*k as usize).wrapping_add(old) as u64, (*v as usize).wrapping_add(new) as u64))
+        .collect();
     commit(table);
     Ok(())
 }
@@ -317,7 +321,14 @@ mod tests {
     fn with_no_patch_a_hot_call_is_the_functions_own() {
         assert_eq!(HotFn::current(seven).call(()), 7);
         let mut n = 0;
-        assert_eq!(HotFn::current(|a: u32, b: u32| { n += 1; a + b }).call((2, 3)), 5);
+        assert_eq!(
+            HotFn::current(|a: u32, b: u32| {
+                n += 1;
+                a + b
+            })
+            .call((2, 3)),
+            5
+        );
         assert_eq!(n, 1);
         let f: fn() -> u32 = seven;
         assert_eq!(HotFn::current(f).call(()), 7);
@@ -325,7 +336,13 @@ mod tests {
 
     #[test]
     fn a_library_that_does_not_load_is_said_and_nothing_changes() {
-        let t = JumpTable { lib: "/nonexistent/patch.so".into(), map: AddressMap::default(), aslr_reference: 0, new_base_address: 0, ifunc_count: 0 };
+        let t = JumpTable {
+            lib: "/nonexistent/patch.so".into(),
+            map: AddressMap::default(),
+            aslr_reference: 0,
+            new_base_address: 0,
+            ifunc_count: 0,
+        };
         let e = unsafe { apply_patch(t) }.unwrap_err();
         assert!(e.to_string().contains("nonexistent"), "{e}");
         assert!(unsafe { get_jump_table() }.is_none());
