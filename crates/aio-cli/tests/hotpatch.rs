@@ -5,7 +5,8 @@
 //! x86_64 and Windows the patched code sees the running binary's
 //! thread-locals and statics (an `AtomicU32` and a `OnceLock` set before
 //! the patch), while a static the patch adds is its own; a static the patch
-//! adds is its own on every platform. On macOS a patch has its own
+//! adds is its own on every platform; a backtrace taken in patched code
+//! names its function, as one in the fat binary does. On macOS a patch has its own
 //! thread-locals and statics, as with dx. Then the same edit rebuilt, the
 //! path without hot-patching, for its time.
 #![cfg(any(
@@ -46,6 +47,17 @@ fn ticks() -> u32 {
 // Likewise the app's statics: the running counter and the name set once.
 fn stats() -> String {
     format!("{} {}", HITS.load(Ordering::Relaxed), NAME.get().map(|s| s.as_str()).unwrap_or("?"))
+}
+
+// A backtrace taken here (resolved as a panic's is) names this function:
+// once patched to take one, `TRACE`; 0 when it doesn't; 1 before.
+const TRACE: u32 = 0;
+fn named() -> u32 {
+    if TRACE == 0 {
+        return 1;
+    }
+    let bt = std::backtrace::Backtrace::force_capture().to_string();
+    if bt.lines().any(|l| l.trim_end().ends_with(": fixture_app::named")) { TRACE } else { eprintln!("{bt}"); 0 }
 }
 
 // Windows: where the next patch DLL can load (as aio-shell's `Aio.aslr`
@@ -92,7 +104,8 @@ fn main() {
         let lib = subsecond::HotFn::current(fixture_lib::value).call(());
         let ticks = subsecond::HotFn::current(ticks).call(());
         let stats = subsecond::HotFn::current(stats).call(());
-        println!("value {app} {lib} {ticks} {stats}");
+        let named = subsecond::HotFn::current(named).call(());
+        println!("value {app} {lib} {ticks} {stats} {named}");
         println!("base {}", base());
         line.clear();
         if std::io::stdin().read_line(&mut line).unwrap() == 0 {
@@ -189,7 +202,7 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     // Before any patch the app itself runs: the real values on every
     // platform (one loop: TICKS 1 + 100*SEEN 1 = 101, HITS 1, NAME set).
     // Only a patched function's view then depends on the platform.
-    assert_eq!(next(), "value 1 10 101 1 app");
+    assert_eq!(next(), "value 1 10 101 1 app 1");
     let mut base = free(next());
 
     let main_rs = ws.join("app/src/main.rs");
@@ -199,9 +212,13 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     let new_static = "    static NEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(20);\n    \
                       NEW.load(std::sync::atomic::Ordering::Relaxed)\n";
     let steps = [
-        (&main_rs, "    1\n", "    2\n", format!("value 2 10 {} {}", ticks(2), stats(2))),
-        (&main_rs, "    2\n", "    3\n", format!("value 3 10 {} {}", ticks(3), stats(3))),
-        (&lib_rs, "    10\n", new_static, format!("value 3 20 {} {}", ticks(4), stats(4))),
+        (&main_rs, "    1\n", "    2\n", format!("value 2 10 {} {} 1", ticks(2), stats(2))),
+        (&main_rs, "    2\n", "    3\n", format!("value 3 10 {} {} 1", ticks(3), stats(3))),
+        (&lib_rs, "    10\n", new_static, format!("value 3 20 {} {} 1", ticks(4), stats(4))),
+        // A backtrace in patched code names its function: the first one
+        // resolved, and one after a later patch.
+        (&main_rs, "TRACE: u32 = 0", "TRACE: u32 = 2", format!("value 3 20 {} {} 2", ticks(5), stats(5))),
+        (&main_rs, "TRACE: u32 = 2", "TRACE: u32 = 3", format!("value 3 20 {} {} 3", ticks(6), stats(6))),
     ];
     for (i, (file, from, to, want)) in steps.into_iter().enumerate() {
         edit(file, from, to);
