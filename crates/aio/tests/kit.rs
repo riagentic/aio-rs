@@ -1063,15 +1063,18 @@ fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
 
 fn list() -> View {
     let items = signal(|| vec!["a", "b", "c"]);
-    let rows: Vec<(String, View)> = items
-        .get()
-        .into_iter()
-        .map(|k| (k.to_string(), rsx! { p { "data-t": "{k}", style: "height: 20px; margin: 0", "{k}" } }))
-        .collect();
+    // Read in the prop, so the group follows on either renderer.
     rsx! {
         button { "data-t": "drop-b", onclick: move |_| items.set(vec!["a", "c", "d"]), "drop b" }
-        TransitionGroup { items: rows, enter: Motion::FADE, exit: Motion::FADE.ms(1000), flip: true, flip_ms: 100 }
+        TransitionGroup { items: list_rows(&items.get()), enter: Motion::FADE, exit: Motion::FADE.ms(1000), flip: true, flip_ms: 100 }
     }
+}
+
+fn list_rows(items: &[&'static str]) -> Vec<(String, View)> {
+    items
+        .iter()
+        .map(|&k| (k.to_string(), rsx! { p { "data-t": "{k}", style: "height: 20px; margin: 0", "{k}" } }))
+        .collect()
 }
 
 /// The rows' handles in drawn order.

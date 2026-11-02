@@ -152,6 +152,13 @@ pub fn TransitionGroup(
     let slide = signal(HashMap::<String, ((f64, f64), bool)>::new);
     // Leaving rows whose exit is over, and a tick to take them out.
     let gone = signal(HashSet::<String>::new);
+    // The group's timers live as long as it, not as one run of the effect
+    // (a change while a row leaves must not cancel its exit).
+    let me = ::air::current_owner();
+    let later = move |f: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>| match me {
+        Some(o) => _ = ::air::with_owner(o, || spawn(f)),
+        None => _ = spawn(f),
+    };
     {
         let (views, handles, at) = (views.clone(), handles.clone(), at.clone());
         effect(move || {
@@ -170,10 +177,10 @@ pub fn TransitionGroup(
                     && let Some(m) = exit
                 {
                     let k = k.clone();
-                    spawn(async move {
+                    later(Box::pin(async move {
                         super::sleep(m.total()).await;
                         gone.update(|g| _ = g.insert(k));
-                    });
+                    }));
                 }
             }
             {
@@ -189,7 +196,7 @@ pub fn TransitionGroup(
             }
             if flip && now != before && !before.is_empty() {
                 let (handles, at) = (handles.clone(), at.clone());
-                spawn(async move {
+                later(Box::pin(async move {
                     // Once this change is laid out: where each row is now.
                     super::sleep(super::FRAME).await;
                     let hs: Vec<_> = handles.borrow().iter().map(|(k, m)| (k.clone(), m.clone())).collect();
@@ -210,7 +217,7 @@ pub fn TransitionGroup(
                     slide.set(d.into_iter().map(|(k, v)| (k, (v, true))).collect());
                     super::sleep(Duration::from_millis(flip_ms.into())).await;
                     slide.set(HashMap::new());
-                });
+                }));
             }
             drawn.set(now);
         });

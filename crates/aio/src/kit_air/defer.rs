@@ -48,27 +48,29 @@ pub fn Defer(
             });
         }
     });
-    if on.get() {
-        return children;
-    }
     let fire = move |when: Trigger| {
         if when == trigger {
             on.set(true)
         }
     };
+    let class = join("aio-defer", &class);
     rsx! {
-        div {
-            class: join("aio-defer", &class),
-            onvisible: move |e| {
-                if e.is_intersecting().unwrap_or(false) {
-                    fire(Trigger::Viewport)
-                }
-            },
-            onmousemove: move |_| fire(Trigger::Hover),
-            onclick: move |_| fire(Trigger::Interaction),
-            onkeydown: move |_| fire(Trigger::Interaction),
-            ..attributes,
-            {placeholder}
+        if on.get() {
+            {children}
+        } else {
+            div {
+                class,
+                onvisible: move |e| {
+                    if e.is_intersecting().unwrap_or(false) {
+                        fire(Trigger::Viewport)
+                    }
+                },
+                onmousemove: move |_| fire(Trigger::Hover),
+                onclick: move |_| fire(Trigger::Interaction),
+                onkeydown: move |_| fire(Trigger::Interaction),
+                ..attributes,
+                {placeholder}
+            }
         }
     }
 }
