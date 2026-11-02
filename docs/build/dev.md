@@ -43,6 +43,12 @@ name, its key, or its turn among its siblings); a view whose hooks changed
 starts afresh from the first that differs. What the page held (focus,
 scroll, a field's selection) is drawn anew.
 
+A backtrace (a panic's) names the functions of patched code: with MSVC
+each patch carries its PDB and the resolver learns of it; on Linux, macOS
+and MinGW std's resolver lists the loaded libraries at its first
+backtrace, so a patch loaded after that shows as `<unknown>` frames until
+a restart.
+
 A rebuild that succeeds restarts the app: first it is asked to stop over
 its door (calls in flight finish, effects commit, on every OS), then its
 cells come back from their log, the views start again. A build that

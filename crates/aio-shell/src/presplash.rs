@@ -616,9 +616,9 @@ pub(crate) struct Plan<'a> {
     pub(crate) may_download: bool,
 }
 
-/// The start's text: `{title}` and `{version}` filled.
+/// The start's text, filled as [`crate::splash::text`] fills it.
 fn start_text(t: Option<&str>, title: &str, version: &str) -> String {
-    t.map_or(String::new(), |t| t.replace("{title}", title).replace("{version}", version))
+    t.map_or(String::new(), |t| crate::splash::text(t, title, version))
 }
 
 impl Session {
@@ -1696,7 +1696,7 @@ mod tests {
         assert_eq!(kind("macos", &|k| (k == "AIORT_DIALOG").then(|| "none".into())), None);
         assert_eq!(line(Some(140), "a\tb\nc"), "100\ta b c");
         assert_eq!(line(None, "x"), "-1\tx");
-        assert_eq!(start_text(Some("{title} {version}"), "Notes", "1.2.0"), "Notes 1.2.0");
+        assert_eq!(start_text(Some("{title} {version} {pct}"), "Notes", "1.2.0"), "Notes 1.2.0 ?");
         assert_eq!(
             crate::splash::rect_of(&aio::serde_json::json!({"x": 1, "y": 2.4, "width": 3, "height": 4})),
             Some([1, 2, 3, 4])

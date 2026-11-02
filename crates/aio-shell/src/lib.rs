@@ -511,7 +511,15 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         let electron_draws = native.as_ref().is_none_or(|n| n.handoff());
         let t = splash::target(saved.as_ref(), win.width, win.height);
         let target = t.0.zip(t.1).map(|(x, y)| [x, y, t.2, t.3]);
-        splash::install(&dir, splashed.filter(|_| at_start && electron_draws), win.title, &splash_colors, target)?;
+        let version = instance::APP.get().map_or("", |(_, v)| v.as_str());
+        splash::install(
+            &dir,
+            splashed.filter(|_| at_start && electron_draws),
+            win.title,
+            version,
+            &splash_colors,
+            target,
+        )?;
         let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
         // a GPU that failed here once is never asked again (AIORT_GPU=hardware is).
         let gpu_failed = data.join("gpu-failed");

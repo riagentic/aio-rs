@@ -1783,16 +1783,27 @@ impl Fat {
 /// Windows: the patch link's args but its inputs and output: a DLL at
 /// `base` with no relocations (the loader can't move it: it fails to load
 /// rather than resolve the binary's data wrongly), every section kept, its
-/// COFF symbol table written, `main` exported (the stub's `.drectve`), its
+/// COFF symbol table written (MSVC: and its PDB beside it, which the
+/// backtrace resolver reads), `main` exported (the stub's `.drectve`), its
 /// entry the stub's (no C runtime of its own), the app link's library
 /// search paths and system libraries (pure).
 fn coff_thin_link_args(link_args: &[String], msvc: bool, base: u64) -> Vec<String> {
     let mut out: Vec<String> = match msvc {
-        true => ["/DLL", "/NOLOGO", "/MACHINE:X64", "/FIXED", "/OPT:NOREF", "/OPT:NOICF", "/DEBUG:SYMTAB", "/NOIMPLIB"]
-            .map(String::from)
-            .into_iter()
-            .chain([format!("/ENTRY:{PATCH_ENTRY}"), format!("/BASE:{base:#x}")])
-            .collect(),
+        true => [
+            "/DLL",
+            "/NOLOGO",
+            "/MACHINE:X64",
+            "/FIXED",
+            "/OPT:NOREF",
+            "/OPT:NOICF",
+            "/DEBUG",
+            "/DEBUG:SYMTAB",
+            "/NOIMPLIB",
+        ]
+        .map(String::from)
+        .into_iter()
+        .chain([format!("/ENTRY:{PATCH_ENTRY}"), format!("/BASE:{base:#x}")])
+        .collect(),
         false => {
             ["-shared", "-nostartfiles", "-nodefaultlibs", "-Wl,--disable-dynamicbase", "-Wl,--disable-reloc-section"]
                 .map(String::from)
@@ -2192,9 +2203,15 @@ mod tests {
         ]
         .map(String::from);
         let thin = coff_thin_link_args(&msvc, true, 0x7ff6_1000_0000);
-        for kept in
-            ["/DLL", "/FIXED", "/BASE:0x7ff610000000", "/ENTRY:aio_patch_entry", "/DEBUG:SYMTAB", "kernel32.lib"]
-        {
+        for kept in [
+            "/DLL",
+            "/FIXED",
+            "/BASE:0x7ff610000000",
+            "/ENTRY:aio_patch_entry",
+            "/DEBUG",
+            "/DEBUG:SYMTAB",
+            "kernel32.lib",
+        ] {
             assert!(thin.contains(&kept.to_string()), "{kept}: {thin:?}");
         }
         assert!(thin.iter().any(|a| a.starts_with("/LIBPATH:")), "{thin:?}");

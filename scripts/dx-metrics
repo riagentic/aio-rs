@@ -83,13 +83,19 @@ import json
 import os
 import pathlib
 import re
-import resource
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
+
+WINDOWS = os.name == "nt"
+if WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+else:
+    import resource
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TREND = ROOT / "scripts" / "dx-trend.csv"
@@ -148,20 +154,35 @@ EDITS = {
 
 
 def run(cmd, cwd, env):
-    """`cmd`'s output, wall seconds and CPU seconds (it and its children)."""
-    t, before = time.monotonic(), resource.getrusage(resource.RUSAGE_CHILDREN)
-    out = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+    """`cmd`'s output, wall seconds and CPU seconds (it and its children;
+    None on Windows, which has no count of them)."""
+    t, before = time.monotonic(), children_cpu()
+    out = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if out.returncode:
         sys.exit(f"{' '.join(map(str, cmd))}:\n{out.stdout[-3000:]}{out.stderr[-3000:]}")
-    after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    cpu = after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
-    return out.stdout + out.stderr, time.monotonic() - t, cpu
+    return out.stdout + out.stderr, time.monotonic() - t, None if WINDOWS else children_cpu() - before
+
+
+def children_cpu():
+    if WINDOWS:
+        return None
+    r = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return r.ru_utime + r.ru_stime
+
+
+def memory_gib():
+    if WINDOWS:
+        kb = ctypes.c_ulonglong()
+        ctypes.windll.kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb))
+        return kb.value // 2**20
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2**30
 
 
 def machine():
     info = pathlib.Path("/proc/cpuinfo").read_text() if pathlib.Path("/proc/cpuinfo").exists() else ""
-    model = next((l.split(":", 1)[1].strip() for l in info.splitlines() if l.startswith("model name")), "")
-    mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2**30
+    model = next((l.split(":", 1)[1].strip() for l in info.splitlines() if l.startswith("model name")),
+                 os.environ.get("PROCESSOR_IDENTIFIER", ""))
+    mem = memory_gib()
     # The smoke draws on Xvfb when there is one, else headless: 20% more window memory on Xvfb.
     display = "|xvfb" if shutil.which("Xvfb") else ""
     return hashlib.sha256(f"{model}|{os.cpu_count()}|{mem}{display}".encode()).hexdigest()[:8]
@@ -193,10 +214,51 @@ def host():
     return next(l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("host: "))
 
 
+def win_cpu(pid):
+    """Windows: process `pid`'s CPU time, in 100 ns (OSError: gone)."""
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenProcess.restype = wintypes.HANDLE
+    h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        raise OSError(ctypes.get_last_error(), "OpenProcess")
+    try:
+        t = [wintypes.FILETIME() for _ in range(4)]
+        if not k.GetProcessTimes(wintypes.HANDLE(h), *map(ctypes.byref, t)):
+            raise OSError(ctypes.get_last_error(), "GetProcessTimes")
+        return sum(f.dwHighDateTime << 32 | f.dwLowDateTime for f in t[2:])  # kernel, user
+    finally:
+        k.CloseHandle(wintypes.HANDLE(h))
+
+
+def win_procs():
+    """Windows: {pid: (name without .exe, parent pid)} of every process."""
+    class Entry(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+                    ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+                    ("parent", wintypes.DWORD), ("prio", wintypes.LONG), ("flags", wintypes.DWORD),
+                    ("exe", ctypes.c_wchar * 260)]
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = k.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+    procs, e = {}, Entry()
+    e.size = ctypes.sizeof(Entry)
+    try:
+        more = k.Process32FirstW(wintypes.HANDLE(snap), ctypes.byref(e))
+        while more:
+            name = e.exe[:-4] if e.exe.lower().endswith(".exe") else e.exe
+            procs[e.pid] = (name, e.parent)
+            more = k.Process32NextW(wintypes.HANDLE(snap), ctypes.byref(e))
+    finally:
+        k.CloseHandle(wintypes.HANDLE(snap))
+    return procs
+
+
 def idle(pid):
-    """Whether process `pid` used no CPU over the next 50 ms (Linux; elsewhere, yes)."""
+    """Whether process `pid` used no CPU over the next 50 ms (Linux and
+    Windows; elsewhere, yes)."""
     stat = pathlib.Path(f"/proc/{pid}/stat")
-    cpu = lambda: sum(map(int, stat.read_text().rsplit(")", 1)[1].split()[11:13]))  # noqa: E731 utime, stime
+    cpu = (lambda: win_cpu(pid)) if WINDOWS else (  # noqa: E731 utime, stime
+        lambda: sum(map(int, stat.read_text().rsplit(")", 1)[1].split()[11:13])))
     try:
         before = cpu()
         time.sleep(0.05)
@@ -207,8 +269,8 @@ def idle(pid):
 
 def building(root):
     """Whether a build runs under process `root`: a cargo, rustc or linker
-    among its descendants (Linux; elsewhere, no)."""
-    procs = {}
+    among its descendants (Linux and Windows; elsewhere, no)."""
+    procs = win_procs() if WINDOWS else {}
     for stat in pathlib.Path("/proc").glob("[0-9]*/stat"):
         try:
             t = stat.read_text()
@@ -219,7 +281,7 @@ def building(root):
     while more:
         kids = {p for p, (_, parent) in procs.items() if parent in tree} - tree
         tree, more = tree | kids, bool(kids)
-    tools = ("cargo", "rustc", "cc", "ld", "ld.lld", "rust-lld", "mold")
+    tools = ("cargo", "rustc", "cc", "ld", "ld.lld", "rust-lld", "mold", "link", "lld-link", "gcc")
     return any(procs[p][0] in tools for p in tree if p in procs)
 
 
@@ -235,7 +297,7 @@ def live(aio, app, env, home):
     with log.open("w") as out:
         dev = subprocess.Popen([aio, "dev", NAME, "--display", "current", "--home", home], cwd=app, env=env,
                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-    said = lambda: log.read_text(errors="replace")  # noqa: E731
+    said = lambda: log.read_text(encoding="utf-8", errors="replace")  # noqa: E731
     fail = lambda why: sys.exit(f"ax dev: {why}:\n{said()[-3000:]}")  # noqa: E731
     try:
         end = time.monotonic() + 300
@@ -256,7 +318,7 @@ def live(aio, app, env, home):
         row = {}
         for col, (path, old, new, shows) in EDITS.items():
             f = app / path
-            text = f.read_text()
+            text = f.read_bytes().decode()
             if old and old not in text:
                 fail(f"the template has no {old} in {path} to edit")
             # The save waits until the page's poller runs: the poller says so
@@ -275,17 +337,25 @@ def live(aio, app, env, home):
                 if waiter.poll() is not None or time.monotonic() > end:
                     fail("the page's poller didn't start")
                 time.sleep(0.02)
-            saved = time.time()
-            f.write_text(text.replace(old, new, 1) if old else text + new)
+            before, saved = len(said()), time.time()
+            f.write_bytes((text.replace(old, new, 1) if old else text + new).encode())
             try:
                 shown, _ = waiter.communicate(timeout=60)
                 row[col] = json.loads(shown) / 1000 - saved
+                # How it came: ax dev's lines of this edit (a reload, a patch, a rebuild).
+                for line in said()[before:].splitlines():
+                    if line.startswith("ax dev:"):
+                        print(f"{col}: {line}", file=sys.stderr)
             except (subprocess.TimeoutExpired, ValueError):
                 waiter.kill()
                 fail(f"{path}: the edit didn't show in 60 s")
         return row
     finally:
-        dev.terminate()
+        # Windows: no SIGTERM for `ax dev` to stop its app on; its tree goes.
+        if WINDOWS:
+            subprocess.run(["taskkill", "/PID", str(dev.pid), "/T", "/F"], capture_output=True)
+        else:
+            dev.terminate()
         dev.wait(timeout=30)
         logs.cleanup()
 
@@ -331,7 +401,7 @@ def live_only(tmp):
     env = {k: v for k, v in os.environ.items() if k not in ("CARGO_INCREMENTAL", "DISPLAY", "WAYLAND_DISPLAY")}
     env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
     env["CARGO_TARGET_DIR"] = str(tmp / "target")
-    aio = here / "debug" / "ax"
+    aio = here / "debug" / ("ax.exe" if WINDOWS else "ax")
     app = template(aio, ROOT, tmp, env)
     run(debug_build(), app, env)
     return rounded(live(aio, app, env, tmp / "home"))
@@ -413,10 +483,10 @@ def rebuild(app, env):
 
 def edited_live(aio, app, env, home):
     """`live`, its edits taken back afterwards."""
-    sources = {p: (app / p).read_text() for p in {e[0] for e in EDITS.values()}}
+    sources = {p: (app / p).read_bytes() for p in {e[0] for e in EDITS.values()}}
     row = live(aio, app, env, home)
     for p, t in sources.items():
-        (app / p).write_text(t)
+        (app / p).write_bytes(t)
     return row
 
 
