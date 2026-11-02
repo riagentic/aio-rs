@@ -335,6 +335,9 @@ skip = [
 # app's whole graph (aio-rs-shell) is no bigger. `aio-rs air`: the facade and
 # TestUi on air (no Dioxus). `app kit` / `app kit,net`: a
 # template app's whole release graph (its launcher's aio-rs-shell with that set).
+# aio-rs-shell's default (`dioxus`) is the kit renderer, so it holds aio-rs kit:
+# the same graph as `app kit` (an app's is no bigger). aio-rs-cli: `object`'s
+# writer (foldhash, hashbrown) for `ax dev`'s hot-patch stub, in place of dx.
 [ceilings]
 "aio-rs core" = 49
 "aio-rs kit" = 116
@@ -346,9 +349,9 @@ skip = [
 "aio-rs default" = 49
 "aio-rs web (wasm)" = 114
 "aio-rs web,kit (wasm)" = 118
-"aio-rs-shell" = 137
-"aio-rs-shell dev" = 155
+"aio-rs-shell" = 141
+"aio-rs-shell dev" = 159
 "app kit" = 141
 "app kit,net" = 183
-"aio-rs-cli" = 209
-"workspace all (dev+build)" = 234
+"aio-rs-cli" = 211
+"workspace all (dev+build)" = 236
