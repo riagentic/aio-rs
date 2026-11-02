@@ -489,6 +489,11 @@ version may break things.
 
 ### Fixed
 
+- air's code size: an event handler costs its closure alone (its wrappers
+  were generic over it, 36% of the bench's IR): 50 views make 1.13 M lines
+  of LLVM IR, 0.31x Dioxus's (phase 1: 0.49x), a held key over 10 000
+  rows answers in 0.21x; `scripts/air-ir` in `ci.sh` fails past 25 000
+  lines a view (docs/design/air.md).
 - `scripts/dx-metrics --check` compares like with like: every gated
   number, sizes and crate counts too, is judged against the same machine's
   rows only (a CI runner's debug target was failing against the

@@ -24,7 +24,8 @@ Adjustments the spike forced or found:
 - **Holes take boxed closures, never generics.** The first prototype's
   generic holes made 3.7x Dioxus's LLVM IR, a 168 MB debug binary and a
   21.6 s rebuild; boxed: 0.32x the IR, 18 MB, 1.1 s. A rule for all of
-  air's runtime API, kept by a CI check (LLVM IR lines per view).
+  air's runtime API and handlers too, kept by `scripts/air-ir` in
+  `ci.sh` (LLVM IR lines per view of the bench's 50 views, limit 25 000).
 - **Views need live ranges** where a row's root is a hole (a component
   whose root is a `for`): the spike's range is fixed at build.
 - **`rsx!`'s clone heuristic** (which names a hole reads, so it can
@@ -416,9 +417,8 @@ a hole whose closure builds its props (both needed for views built where
 placed and for bodies that run again after a suspend). It stays at half
 of Dioxus's IR and a third of its build times; the held key keeps its
 shape (flat in the rows, 48 B), the p50 at 1000 rows within the load's
-noise of Dioxus's here. Making the expansion smaller again (one shared
-clone list per template, props without a second clone) is step 2 work,
-measured by this table.
+noise of Dioxus's here. Phase 2a found the IR's cause and took it back
+(below: 0.31x).
 
 The first prototype (generic holes), for the record: 50 views made
 13.4 M lines of LLVM IR and a 168 MB debug binary; a one-line edit took
@@ -680,6 +680,42 @@ as on air.
   fixed), `use_dark()`, `[ui] neutral`.
 - Gap rows VW2–VW15 (aio-rs-internal's gaps-0.2 list) are done on air;
   VW5 (`Intl`) and VW16 (Standard Schema) are not air's.
+
+### Measured on phase 2a's air
+
+The 0.49x IR of phase 1 was the handler: its wrappers were generic over
+the closure, so each `onclick` made its own `Rc<RefCell<…>>`, drop glue
+and shims, 36% of the 50-view crate's IR. `rsx!` boxes the closure and
+the wrappers are generic over the payload alone: 1.81 M lines to 1.13 M,
+under the spike's 0.32x. `scripts/air-ir` keeps it.
+
+`bench.sh` again, on this branch: the same machine pinned to 12 of its
+32 threads (`taskset -c 0-11`, `CARGO_BUILD_JOBS=6`) with other
+sessions' load (load average 16–20 over the run); 3 runs each, ratios of
+the medians.
+
+| measure | Dioxus 0.7.10 | air (phase 2a) | air / Dioxus | phase 1 | spike |
+|---|---|---|---|---|---|
+| (a) `cargo expand`, 1 view / 50 views | 385 KB / 18.9 MB | 96 KB / 4.76 MB | 0.25 | 0.23 | 0.17 |
+| (a) crate metadata, 50 views | 6.18 MB | 2.68 MB | 0.43 | 0.31 | 0.28 |
+| (a) LLVM IR lines (debug), 50 views | 3.65 M | 1.13 M | 0.31 | 0.49 | 0.32 |
+| (a) debug binary, 50 views | 53.2 MB | 17.3 MB | 0.32 | 0.53 | 0.35 |
+| (b) one-line edit → `cargo build`, 3 runs | 2.5 / 2.5 / 2.4 s | 1.2 / 1.1 / 1.1 s | 0.44 | 0.54 | 0.49 |
+| (b) one-line edit → `cargo check`, runs 2–3 | 1.4 / 1.4 s | 0.9 / 0.7 s | 0.57 | 0.34 | 0.39 |
+| (c) clean build, 3 runs | 25.0 / 23.7 / 23.8 s | 7.3 / 7.3 / 7.0 s | 0.31 | 0.30 | 0.37 |
+| (c) crates compiled / in the graph | 77 / 78 | 8 / 8 | — | — | — |
+| (d) held ↓, 1000 rows, p50 (3 runs) | 1.3 / 1.3 / 1.6 ms | 0.8 / 0.7 / 0.7 ms | 0.54 | 0.86 | 0.54 |
+| (d) the same, p95 | 1.8 / 1.9 / 2.5 ms | 1.2 / 1.2 / 1.3 ms | 0.63 | — | 0.6 |
+| (d) held ↓, 10 000 rows, p50 (3 runs) | 5.3 / 5.3 / 5.8 ms | 1.1 / 1.1 / 1.0 ms | 0.21 | 0.32 | 0.19 |
+| (d) bytes to the page per key | 66 | 48 | 0.73 | 0.73 | 0.73 |
+| (e) first mount, 1000 / 10 000 rows | — | 1.4–2.0 / 11.1–15.4 ms | — | 1.6–3.4 / 13.7–25.6 | 1.4 / 8.3 |
+
+The metadata grew with the props traits the kit needs (a view prop takes
+a view, a text or a thunk: `IntoView`, `IntoViewValue`), still 0.43x;
+`cargo check`'s 0.7–0.9 s is within this load's noise of phase 1's
+0.5–0.6 s. The first mount: of 1.4–2.0 ms at 1000 rows, 0.6–0.7 ms fills
+the aio cell; at 10 000 rows the fill is 1.6–1.7 ms, the rest about 1 µs a
+row for the views (the spike drew fixed rows without a cell).
 
 ## Plan for 0.2.0
 
