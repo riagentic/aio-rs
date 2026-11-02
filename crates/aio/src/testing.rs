@@ -504,7 +504,9 @@ impl TestCells {
 
 /// A real app server for a test (aio's `testServer`): the cell served as the
 /// app serves it (sync, the app's routes and files) on a free loopback port
-/// with a fresh key, in a sandbox. Dropped, it stops.
+/// with a fresh key, in a sandbox. A whole app is its cell and the cells
+/// `Http::cell` serves beside it, all on its one `/ws`, key and port
+/// ([`Self::cell`], [`Self::client_of`]). Dropped, it stops.
 #[cfg(feature = "server")]
 pub struct TestServer<T: Cell> {
     /// `127.0.0.1:<port>`.
@@ -512,6 +514,7 @@ pub struct TestServer<T: Cell> {
     /// The key clients show.
     pub token: String,
     pub handle: Handle<T>,
+    beside: Vec<std::sync::Arc<dyn crate::link::Beside>>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
     _sandbox: crate::paths::Sandbox,
 }
@@ -546,8 +549,30 @@ impl<T: Cell> TestServer<T> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let (addr, token) = (l.local_addr()?.to_string(), crate::uuid_v4().simple().to_string());
         let opts = crate::sync::Options { token: token.clone(), ..opts };
+        let beside = opts.http.beside.clone();
         let task = tokio::spawn(crate::sync::serve_with(h.clone(), l, opts));
-        Ok(Self { addr, token, handle: h, task, _sandbox: sandbox })
+        Ok(Self { addr, token, handle: h, beside, task, _sandbox: sandbox })
+    }
+
+    /// The handle of served cell `U`: the app's own or one `Http::cell`
+    /// serves beside it; panics naming the served cells.
+    #[track_caller]
+    pub fn cell<U: Cell>(&self) -> Handle<U> {
+        let own: &(dyn std::any::Any + Send + Sync) = &self.handle;
+        let found = match U::ID == T::ID {
+            true => own.downcast_ref::<Handle<U>>(),
+            false => self.beside.iter().find(|c| c.id() == U::ID).and_then(|c| c.any().downcast_ref::<Handle<U>>()),
+        };
+        found.cloned().unwrap_or_else(|| {
+            let served: Vec<&str> = std::iter::once(T::ID).chain(self.beside.iter().map(|c| c.id())).collect();
+            panic!("TestServer: {} isn't served here (it serves {})", name::<U>(), served.join(", "))
+        })
+    }
+
+    /// A real synced client of served cell `U`, as `user`: its link shares
+    /// the one socket with this test's other clients of the server.
+    pub async fn client_of<U: Cell>(&self, user: &str) -> std::io::Result<crate::sync::Remote<U>> {
+        crate::sync::Remote::connect(&self.addr, &self.token, user).await
     }
 
     /// A browser page of this server (aio's `testPageFetch`): its requests
@@ -587,12 +612,14 @@ impl<T: Cell> TestServer<T> {
         crate::sync::Remote::connect(&self.addr, &self.token, user).await
     }
 
-    /// Wait until every client is online, has no call waiting and shows
-    /// the server's state; after 5 s, panics naming the ones that lag.
-    pub async fn converged(&self, clients: &[&crate::sync::Remote<T>]) {
+    /// Wait until every client (of any one served cell) is online, has no
+    /// call waiting and shows the server's state; after 5 s, panics naming
+    /// the ones that lag.
+    pub async fn converged<U: Cell>(&self, clients: &[&crate::sync::Remote<U>]) {
         let end = Instant::now() + PATIENCE;
+        let served = self.cell::<U>();
         loop {
-            let want = self.state();
+            let want = served.state();
             let lag: Vec<String> = clients
                 .iter()
                 .enumerate()

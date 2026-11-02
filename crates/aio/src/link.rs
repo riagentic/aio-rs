@@ -127,6 +127,24 @@ pub(crate) trait Beside: Send + Sync {
         hooks: Hooks,
         hello: Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>;
+    /// The handle itself (a `Handle<U>`), for the test kit.
+    #[cfg(feature = "testing")]
+    fn any(&self) -> &(dyn std::any::Any + Send + Sync);
+    /// What `seer` sees of it, as the aio cells it is ([`crate::compat::wire`]).
+    #[cfg(feature = "compat")]
+    fn aio_cells(&self, seer: &crate::Caller) -> Value;
+    #[cfg(feature = "compat")]
+    fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)>;
+    /// Its method aio's `<cell>:<method>` calls, if one of its aio cells is `cell`.
+    #[cfg(feature = "compat")]
+    fn aio_method(&self, cell: &str, method: &str) -> Option<String>;
+    #[cfg(feature = "compat")]
+    fn is_async(&self, method: &str) -> bool;
+    /// `method` called by `by` through `gate` (blocking), followed to its end.
+    #[cfg(feature = "compat")]
+    fn ask(&self, gate: &Gate, by: &By, method: &str, args: Value) -> crate::Result<(Option<Value>, crate::Answer)>;
+    #[cfg(feature = "compat")]
+    fn closing(&self) -> bool;
 }
 
 #[cfg(feature = "server")]
@@ -147,6 +165,41 @@ impl<U: Cell> Beside for Handle<U> {
         hello: Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> {
         Box::pin(session(self.clone(), w, limits, from, gate, signed, calls, hooks, Some(hello)))
+    }
+
+    #[cfg(feature = "testing")]
+    fn any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+
+    #[cfg(feature = "compat")]
+    fn aio_cells(&self, seer: &crate::Caller) -> Value {
+        crate::compat::wire::cells::<U>(&View::of(self, seer).shown)
+    }
+
+    #[cfg(feature = "compat")]
+    fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)> {
+        Handle::events(self)
+    }
+
+    #[cfg(feature = "compat")]
+    fn aio_method(&self, cell: &str, method: &str) -> Option<String> {
+        crate::compat::data::method_of::<U>(cell, method)
+    }
+
+    #[cfg(feature = "compat")]
+    fn is_async(&self, method: &str) -> bool {
+        U::async_mode(method).is_some()
+    }
+
+    #[cfg(feature = "compat")]
+    fn ask(&self, gate: &Gate, by: &By, method: &str, args: Value) -> crate::Result<(Option<Value>, crate::Answer)> {
+        gate.ask(&self.by(by.clone()), by, method, args, None)
+    }
+
+    #[cfg(feature = "compat")]
+    fn closing(&self) -> bool {
+        Handle::closing(self)
     }
 }
 

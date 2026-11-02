@@ -458,7 +458,7 @@ fn ws<T: Cell>(
                                 let who = format!("{user} from {from} (aio)");
                                 let listed = Listed::new(Client::new(T::ID, user, "aio", from));
                                 let link = (listed.0, who);
-                                crate::compat::wire::session(h, Sock::Ws(s), limits, gate, viewer, calls, link).await
+                                crate::compat::wire::session(h, &beside, Sock::Ws(s), limits, gate, viewer, calls, link).await
                             };
                             r
                         };
