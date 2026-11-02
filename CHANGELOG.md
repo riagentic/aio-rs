@@ -649,6 +649,12 @@ version may break things.
 
 ### Fixed
 
+- `ax dev` on Windows reloads an `rsx!` edit as markup again (~ms)
+  instead of hot-patching it (~1.5 s): the watcher named a changed file
+  with the `\\?\` prefix `canonicalize` adds, so it never matched the
+  build's snapshot; it names it as the snapshot does now. Found by
+  `dx-metrics --live` on the Windows runner (live_rsx_s 1.5 s, its line
+  "hot-patched in 1316 ms").
 - A backtrace in hot-patched code on Windows (MSVC) names its functions:
   each patch DLL is linked with its PDB (`/DEBUG` beside `/DEBUG:SYMTAB`)
   and std's resolver (dbghelp) is told the modules again after each
