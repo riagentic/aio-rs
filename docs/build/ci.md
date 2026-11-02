@@ -243,10 +243,9 @@ ships no Dioxus, and its packages and edit loop are measured, in
   `ci.sh` runs it where the NDK and Rust's three Android targets are; in
   GitHub CI the `dx (apk)` job does (`rustup target add
   armv7-linux-androideabi x86_64-linux-android`, the runner's SDK).
-- `--dioxus` and `--air` measure one template each (the row's other
-  columns blank): GitHub CI runs `dx (dioxus)`, `dx (air)` and
-  `dx (apk)` side by side, each against the base measured on its own
-  runner; `ci.sh` measures the whole row in one run.
+- GitHub CI measures each template, and the APKs, in a `dx` job of its
+  own, side by side, each against the base measured on its own runner;
+  `ci.sh` measures the whole row in one run.
 
 A base before air phase 3 has no shell on air: its air sizes are said
 as not gated.
