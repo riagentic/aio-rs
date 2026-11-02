@@ -1151,6 +1151,10 @@ impl<T: Cell> Handle<T> {
         if !self.enabled() || self.paused() {
             return (None, lock(&self.inner.store).now());
         }
+        // A held run due is weighed first, off the store's lock: the views'
+        // calls (a held key's steps) never wait for that.
+        let due = lock(&self.inner.store).due();
+        let weighed = due.map(crate::store::Run::weigh);
         let turn = self.turn();
         let (next, now) = {
             let mut s = lock(&self.inner.store);
@@ -1159,7 +1163,7 @@ impl<T: Cell> Handle<T> {
                 eprintln!("[aio] {}: schedules: {e}", T::ID);
             }
             // A held run's idle time is a wake-up too.
-            let idle = s.flush_idle().map(|d| now + d.as_millis() as i64 + 1);
+            let idle = s.flush_idle(weighed).map(|d| now + d.as_millis() as i64 + 1);
             let due = s.schedules().ok().and_then(|d| d.first().map(|d| d.due));
             (due.into_iter().chain(idle).min(), now)
         };
