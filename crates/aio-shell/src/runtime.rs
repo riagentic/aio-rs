@@ -415,13 +415,23 @@ pub fn ensure_as(
     eprintln!("[aio] getting the Electron {VERSION} runtime (once per machine)…");
     let ui = crate::firstrun::here(std::env::consts::OS, &|k| std::env::var(k).ok(), &crate::firstrun::on_path);
     let look = crate::firstrun::Look { colors, at, icon, image: splash };
-    let ask = |m: &str| ui.as_ref().map_or(crate::firstrun::Answer::Quit, |b| b.ask(title, m, back.is_some(), &look));
+    let ask = |m: &str| {
+        // The question takes over from the splash.
+        crate::presplash::end(crate::presplash::Close::Failed);
+        ui.as_ref().map_or(crate::firstrun::Answer::Quit, |b| b.ask(title, m, back.is_some(), &look))
+    };
     let never = || Ok(());
     let sha = pinned_sha(VERSION);
     let fetched = || fetch(&dir, ui.as_ref(), title, VERSION, sha.as_deref(), &mirror(), &look);
     crate::firstrun::retrying(title, VERSION, ask, back.unwrap_or(&never), fetched)?;
     stamp(&dir);
     Ok(dir)
+}
+
+/// This start may download Electron: none was given, none is bundled, and
+/// the shared one is not here yet.
+pub(crate) fn may_download() -> bool {
+    std::env::var_os("AIORT_RUNTIME").is_none() && bundled().is_none() && !usable(std::env::consts::OS, &dir())
 }
 
 /// In a runtime: when an app last started from it, an ISO time (aio's
@@ -578,19 +588,40 @@ fn fetch(
     look: &crate::firstrun::Look,
 ) -> Result<(), (io::Error, bool)> {
     use crate::firstrun::{Shown, download_detail};
-    let mut win = ui.and_then(|b| {
-        b.progress(title, &crate::firstrun::heading(crate::firstrun::words(), title, version), look)
-            .inspect_err(|e| eprintln!("[aio] runtime: no progress window ({e}): the log carries the progress"))
-            .ok()
-    });
-    let mut show = |pct: Option<u64>, detail: &str| match win.as_mut().map(|w| w.show(pct, detail)) {
-        Some(Shown::Cancelled) => false,
-        Some(Shown::Lost(why)) => {
-            eprintln!("[aio] runtime: the progress window could not be shown ({why}): the log carries the progress");
-            win = None;
-            true
+    let open = || {
+        ui.and_then(|b| {
+            b.progress(title, &crate::firstrun::heading(crate::firstrun::words(), title, version), look)
+                .inspect_err(|e| eprintln!("[aio] runtime: no progress window ({e}): the log carries the progress"))
+                .ok()
+        })
+    };
+    // The app's splash (`presplash`) is the download's screen while it is
+    // up; once it is gone, the download window takes over.
+    let mut native = crate::presplash::current().filter(|s| s.download());
+    let _done = native.clone().map(Downloaded);
+    let mut win = if native.is_some() { None } else { open() };
+    let mut show = |pct: Option<u64>, detail: &str| {
+        if let Some(s) = &native {
+            match s.progress(pct, detail) {
+                Shown::On => return true,
+                Shown::Cancelled => return false,
+                Shown::Lost(_) => {
+                    native = None;
+                    win = open();
+                }
+            }
         }
-        _ => true,
+        match win.as_mut().map(|w| w.show(pct, detail)) {
+            Some(Shown::Cancelled) => false,
+            Some(Shown::Lost(why)) => {
+                eprintln!(
+                    "[aio] runtime: the progress window could not be shown ({why}): the log carries the progress"
+                );
+                win = None;
+                true
+            }
+            _ => true,
+        }
     };
     if !show(None, &format!("Looking for Electron {version}…")) {
         return Err((io::Error::new(io::ErrorKind::Interrupted, cancelled()), true));
@@ -608,6 +639,16 @@ fn fetch(
         Some(t) if got >= t => show(None, &format!("Verifying and unpacking Electron {version}…")),
         _ => show(total.map(|t| got * 100 / t), &download_detail(crate::firstrun::words(), title, version, got, total)),
     })
+}
+
+/// The download is over, however it ended: the splash shows the start's
+/// text again, and its cap counts from now.
+struct Downloaded(std::sync::Arc<crate::presplash::Session>);
+
+impl Drop for Downloaded {
+    fn drop(&mut self) {
+        self.0.downloaded();
+    }
 }
 
 /// Why Chromium's sandbox can't start on this Linux, or `None`.

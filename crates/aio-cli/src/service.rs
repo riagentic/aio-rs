@@ -1,5 +1,6 @@
 //! A server's supervisor file, beside its CLI bundle: a systemd user unit
-//! (Linux), a launchd agent (macOS) or a Task Scheduler script (Windows).
+//! (Linux; and a system unit, [`system`], that starts at boot), a launchd
+//! agent (macOS) or a Task Scheduler script (Windows).
 //! Each starts the installed binary again when it exits, after 5 s, but
 //! for a stop: it sets `AIO_SUPERVISED=1` (`aio_shell::update::SUPERVISED`),
 //! so an update exits (0) for the supervisor to start the new version,
@@ -44,6 +45,49 @@ pub fn file(app: &App, os: &str, bundle: &str) -> Option<(String, String, String
         ),
         _ => return None,
     })
+}
+
+/// Linux's system unit beside the user unit (aio's `build-service`): it
+/// starts at boot, no login and no linger, as a user systemd makes for it
+/// (`DynamicUser`, nothing of the build machine), its data in
+/// `/var/lib/<id>`; the binary in `/usr/local/bin` (it updates with its
+/// package: a system install is not the user's to swap). Its file name,
+/// text and how to install it.
+pub fn system(app: &App, bundle: &str) -> (String, String, String) {
+    let title = one_line(label(app)).replace('%', "%%");
+    let id = &app.id;
+    let unit = format!(
+        "[Unit]
+Description={title} (aio-rs)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/{id}
+# Any exit starts it again (an update exits 0), but a stop's 143;
+# `systemctl stop {id}` holds too.
+Restart=always
+RestartPreventExitStatus=143
+SuccessExitStatus=143
+RestartSec=5
+# A system user of its own, made by systemd; its data in /var/lib/{id}.
+DynamicUser=yes
+StateDirectory={id}
+Environment=HOME=%S/{id}
+Environment=AIO_SUPERVISED=1
+Environment=AIO_STOP_STAYS_DOWN=1
+
+[Install]
+WantedBy=multi-user.target
+"
+    );
+    let how = format!(
+        "system service (starts at boot): tar -xzf {bundle}.tar.gz && sudo install -m 0755 {bundle}/{id} \
+         /usr/local/bin/{id} && sudo cp {bundle}.system.service /etc/systemd/system/{id}.service && sudo \
+         systemctl daemon-reload && sudo systemctl enable --now {id}"
+    );
+    (format!("{bundle}.system.service"), unit, how)
 }
 
 /// The title on one line: a newline would start a new directive.
@@ -255,6 +299,34 @@ mod tests {
         assert!(unit.lines().filter(|l| !l.starts_with('#')).all(|l| !l.contains('#')), "comments on their own lines");
         assert!(how.contains("cp relay-1.2.0-linux-x64-cli.service ~/.config/systemd/user/relay.service"), "{how}");
         assert!(how.contains("systemctl --user enable --now relay"), "{how}");
+    }
+
+    #[test]
+    fn the_system_unit_starts_at_boot_as_a_user_of_its_own_from_usr_local() {
+        let (name, unit, how) = system(&app("Relay"), "relay-1.2.0-linux-x64-cli");
+        assert_eq!(name, "relay-1.2.0-linux-x64-cli.system.service");
+        for line in [
+            "Description=Relay (aio-rs)",
+            "After=network-online.target",
+            "ExecStart=/usr/local/bin/relay",
+            "Restart=always",
+            "RestartPreventExitStatus=143",
+            "SuccessExitStatus=143",
+            "DynamicUser=yes",
+            "StateDirectory=relay",
+            "Environment=HOME=%S/relay",
+            "Environment=AIO_SUPERVISED=1",
+            "Environment=AIO_STOP_STAYS_DOWN=1",
+            "WantedBy=multi-user.target",
+        ] {
+            assert!(unit.lines().any(|l| l == line), "{line} in\n{unit}");
+        }
+        assert!(!unit.lines().any(|l| l.starts_with("User=")), "nothing of the build machine");
+        assert!(unit.lines().filter(|l| !l.starts_with('#')).all(|l| !l.contains('#')), "comments on their own lines");
+        assert!(how.contains("sudo cp relay-1.2.0-linux-x64-cli.system.service /etc/systemd/system/relay.service"));
+        assert!(how.contains("/usr/local/bin/relay") && how.contains("sudo systemctl enable --now relay"), "{how}");
+        let (_, evil, _) = system(&app("50%\nUser=root"), "b");
+        assert!(evil.contains("Description=50%% User=root") && !evil.lines().any(|l| l == "User=root"), "{evil}");
     }
 
     #[test]

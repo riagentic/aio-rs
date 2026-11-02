@@ -126,8 +126,10 @@ pub fn uninstall_sh(app: &App) -> String {
 /// A desktop app's budget in MB: core + `kit`, the shared runtime not
 /// counted (an app with heavy batteries declares its own: `[build] budget_mb`).
 pub const BUDGET_MB: u64 = 10;
-/// A server's (no window, no `kit`).
-pub const SERVER_BUDGET_MB: u64 = 6;
+/// A server's (no window, no `kit`): the service template measured 6.03 MB
+/// on Linux (2026-11-02), plus the size gate's 5% headroom (scripts/dx-metrics
+/// `STEADY`), 6.33 MB, to the next whole MB.
+pub const SERVER_BUDGET_MB: u64 = 7;
 
 /// The budget `cfg` builds within for `os`: its own, else its mode's, half
 /// again on Windows, whose build of the same code is about a third bigger
@@ -288,6 +290,24 @@ pub fn missing_targets<'a>(targets: &[&'a str]) -> Vec<&'a str> {
     targets.iter().copied().filter(|t| !have.lines().any(|l| l.trim() == *t)).collect()
 }
 
+/// `AIORT_ASSETS` for a build of the app in `dir` (or below its
+/// `aio.toml`): its `[build] assets`' files, sizes and times, hashed.
+/// `aio::config!()` reads it, so cargo builds the app again when a file
+/// comes, goes or changes (it can't watch a folder itself).
+pub fn assets_stamp(dir: &Path) -> String {
+    let Some(file) = aio_config::config::find(dir) else { return String::new() };
+    let cfg = std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|t| aio::config::Config::parse(&t));
+    let at = file.parent().unwrap_or(Path::new("."));
+    let files = cfg.and_then(|c| aio::config::asset_files(at, &c.build.assets)).unwrap_or_default();
+    let mut h = aio::sha256::Sha256::new();
+    for (url, p) in &files {
+        let m = std::fs::metadata(p).ok();
+        let at = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        h.update(format!("{url}\t{}\t{}\n", m.map_or(0, |m| m.len()), at.map_or(0, |d| d.as_nanos())));
+    }
+    aio::sha256::hex(&h.finalize())
+}
+
 /// The cargo for a build for `cross` (None: this machine): refused before it
 /// runs when the platform can't be built here (`platform::blocker`), else
 /// told its target and linker.
@@ -393,7 +413,10 @@ pub fn no_home_paths(bin: &[u8], at: &Path) -> Result<(), String> {
 }
 
 /// The release binary `name` of package `pkg`, built for `cross` (None:
-/// this machine); `link`: an object its link takes too (the exe's icon).
+/// this machine); `link`: an object its link takes too (the exe's icon);
+/// `splash`: the app has a `[build.splash]`, drawn by the OS before
+/// Electron starts (aio-rs-shell's `native-splash`).
+#[allow(clippy::too_many_arguments)]
 pub fn release_binary(
     meta: &serde_json::Value,
     pkg: &str,
@@ -402,10 +425,18 @@ pub fn release_binary(
     link: Option<&Path>,
     channel: Option<&str>,
     version: &str,
+    splash: bool,
 ) -> Result<PathBuf, String> {
     let root = Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?);
     let mut cargo = cargo_for("the release build", &["rustc", "--release", "-p", pkg, "--bin", name], cross)?;
     remap(&mut cargo, root);
+    let dir = meta["packages"].as_array().into_iter().flatten().find(|p| p["name"] == pkg);
+    if let Some(dir) = dir.and_then(|p| Path::new(p["manifest_path"].as_str()?).parent().map(Path::to_path_buf)) {
+        cargo.env("AIORT_ASSETS", assets_stamp(&dir));
+    }
+    if let Some(f) = splash.then(|| native_splash(meta, pkg)).flatten() {
+        cargo.args(["--features", &f]);
+    }
     cargo.arg("--").args(link_args_here(cross.unwrap_or(crate::platform::host()?).triple));
     if let Some(obj) = link {
         cargo.arg(format!("-Clink-arg={}", obj.display()));
@@ -426,6 +457,14 @@ pub fn release_binary(
     let bin = crate::bundle::binary(Path::new(target), cross.map(|p| p.triple), name, os);
     no_home_paths(&std::fs::read(&bin).map_err(|e| format!("{}: {e}", bin.display()))?, &bin)?;
     Ok(bin)
+}
+
+/// `<the shell's name in pkg>/native-splash`, or none: `pkg` does not
+/// depend on aio-rs-shell.
+pub fn native_splash(meta: &serde_json::Value, pkg: &str) -> Option<String> {
+    let deps = meta["packages"].as_array()?.iter().find(|p| p["name"] == pkg)?["dependencies"].as_array()?;
+    let shell = deps.iter().find(|d| d["name"] == "aio-rs-shell")?;
+    Some(format!("{}/native-splash", shell["rename"].as_str().unwrap_or("aio-rs-shell")))
 }
 
 /// The name the monogram draws: the app's, else its id.
@@ -566,7 +605,8 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
     if let Some(did) = crate::css::step(&cfg, &app_dir(&pkg)?)? {
         eprintln!("ax build: {did}");
     }
-    let binary = release_binary(&meta, &pkg.name, name, cross, exe_icon.as_deref(), channel, &app.version)?;
+    let splash = cfg.build.splash.is_some();
+    let binary = release_binary(&meta, &pkg.name, name, cross, exe_icon.as_deref(), channel, &app.version, splash)?;
     let bytes = std::fs::metadata(&binary).map_err(|e| format!("{}: {e}", binary.display()))?.len();
     if cfg.app.version.is_some()
         && !crate::version::carried(&std::fs::read(&binary).map_err(|e| e.to_string())?, &app.version)
@@ -672,6 +712,13 @@ fn cli(b: &Built) -> Result<(String, Vec<PathBuf>), String> {
         std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
         how = format!("{how}\n{install}");
         files.push(p);
+        if b.platform.os == "linux" {
+            let (file, text, install) = crate::service::system(&b.app, &name);
+            let p = dist.join(file);
+            std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+            how = format!("{how}\n{install}");
+            files.push(p);
+        }
     }
     Ok((format!("{} ({:.1} MB)\n{how}", out.display(), size(&out)), files))
 }
@@ -886,6 +933,7 @@ fn target(
         Kind::Android => {
             return android(&t.bin, crate::android::Ask::RELEASE);
         }
+        Kind::Web => return crate::web::build(&t.bin, false).map(|(said, out)| (said, vec![out])),
         Kind::Windows => t.platform.unwrap_or(windows()),
         Kind::Deb | Kind::AppImage if host.os != "linux" => {
             return Err(format!("{} is a Linux package: build it on Linux", t.kind.name()));
@@ -1001,6 +1049,20 @@ fn package(kind: Kind, _: &Built) -> Result<(String, Vec<PathBuf>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An app with a `[build.splash]` gets the shell's `native-splash`, by
+    /// whatever name it gave the shell; one without the shell, nothing.
+    #[test]
+    fn a_splash_turns_on_the_shells_native_splash() {
+        let meta = serde_json::json!({ "packages": [
+            { "name": "notes-app", "dependencies": [{ "name": "aio-rs-shell", "rename": "aio-shell" }] },
+            { "name": "plain", "dependencies": [{ "name": "aio-rs-shell", "rename": null }] },
+            { "name": "cli", "dependencies": [{ "name": "aio-rs" }] },
+        ]});
+        assert_eq!(native_splash(&meta, "notes-app").as_deref(), Some("aio-shell/native-splash"));
+        assert_eq!(native_splash(&meta, "plain").as_deref(), Some("aio-rs-shell/native-splash"));
+        assert_eq!(native_splash(&meta, "cli"), None);
+    }
 
     #[test]
     fn each_platform_bundles_electrons_build_for_it_and_says_what_went_short() {
@@ -1123,8 +1185,8 @@ mod tests {
             |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"relay\"\nname = \"Relay\"\n{t}")).unwrap();
         assert_eq!(budget_of(&toml(""), "linux"), BUDGET_MB);
         let server = "mode = \"server\"\n[server]\nlisten = \"127.0.0.1:8080\"\n";
-        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 6 MB");
-        assert_eq!(budget_of(&toml(server), "windows"), 9, "half again on Windows");
+        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 7 MB");
+        assert_eq!(budget_of(&toml(server), "windows"), 10, "half again on Windows");
         assert_eq!(budget_of(&toml(""), "windows"), 15);
         let own = toml(&format!("{server}[build]\nbudget_mb = 8\n"));
         assert_eq!((budget_of(&own, "linux"), budget_of(&own, "windows")), (8, 8), "unless it says");

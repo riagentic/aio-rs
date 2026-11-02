@@ -147,6 +147,32 @@ fn an_aio_file_opens_in_aio_rs_and_stays_readable_by_aio() {
     assert_eq!((tally.state().n, tally.events().unwrap().len()), (11, 2));
 }
 
+/// aio's `tally` counts `inbox.post`s by `listensTo` (one reduce, one
+/// save): ported, the reaction and its call land in aio's one `state`
+/// document in the same commit, before either is on disk, and aio reads it.
+#[test]
+fn a_reaction_lands_in_aio_s_file_in_its_call_s_commit() {
+    let (_d, home) = fixture();
+    let h = Home::open(&home, APP, None).unwrap();
+    let db = h.state_db();
+    let (tally, inbox) = (Handle::<Tally>::open_aio(&db, APP).unwrap(), Handle::<Inbox>::open_aio(&db, APP).unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (s, file) = (seen.clone(), db.clone());
+    tally.listens_to(&inbox, "post", move |t, _| {
+        *s.lock().unwrap() = Some(kv(&file)["state"].clone());
+        t.on_add()
+    });
+    inbox.post("p30".into()).unwrap();
+    let before = seen.lock().unwrap().take().unwrap();
+    assert_eq!((&before["tally"]["n"], before["inbox"]["posts"].as_array().unwrap().len()), (&json!(10), 5), "not yet");
+    let after = kv(&db)["state"].clone();
+    assert_eq!(after["tally"], json!({ "n": 11, "__aio_status": "active" }));
+    assert_eq!(after["inbox"]["posts"][5], json!("p30"));
+    drop((tally, inbox));
+    let tally = Store::<Tally>::open_aio(&db, APP).unwrap();
+    assert_eq!(tally.state().n, 11);
+}
+
 #[test]
 fn a_ported_app_boots_on_its_aio_home_and_data() {
     let (_d, home) = fixture();
