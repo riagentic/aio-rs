@@ -78,6 +78,8 @@ struct Node {
     owned: Vec<Key>,
     cleanups: Vec<Box<dyn FnOnce()>>,
     extra: Option<Box<Extra>>,
+    /// The root (window) it belongs to: where what it draws goes.
+    root: u32,
 }
 
 /// AIR's guard (`signal.ts:418`): this many flush rounds in a row is a loop.
@@ -99,11 +101,13 @@ struct Rt {
     /// The bodies running now, innermost last; `None`: code that is no
     /// body (a hole, a memo, an effect) runs inside one.
     frames: Vec<Option<Rc<Frame>>>,
+    /// The root the running code draws in.
+    root: u32,
 }
 
 enum Later {
     Effect(Key),
-    Call(Box<dyn FnOnce()>),
+    Call(u32, Box<dyn FnOnce()>),
 }
 
 thread_local!(static RT: RefCell<Rt> = RefCell::default());
@@ -127,6 +131,7 @@ impl Rt {
         n.seq = self.seq;
         n.live = true;
         n.parent = self.owner;
+        n.root = self.owner.and_then(|o| self.node(o)).map_or(self.root, |o| o.root);
         let idx = match self.free.pop() {
             Some(i) => {
                 n.ver = self.nodes[i as usize].ver.wrapping_add(1);
@@ -152,21 +157,48 @@ impl Rt {
     }
 }
 
-/// Restores the observer and the owner when dropped (a panic unwinding too).
-struct Restore(Option<Key>, Option<Key>);
+/// Restores the observer, the owner and the root when dropped (a panic unwinding too).
+struct Restore(Option<Key>, Option<Key>, u32);
 
 impl Drop for Restore {
     fn drop(&mut self) {
-        rt(|rt| (rt.observer, rt.owner) = (self.0, self.1));
+        rt(|rt| (rt.observer, rt.owner, rt.root) = (self.0, self.1, self.2));
     }
 }
 
+/// Run as `owner` (in its root), reads followed by `observer`.
 fn enter(observer: Option<Key>, owner: Option<Key>) -> Restore {
     rt(|rt| {
-        let was = Restore(rt.observer, rt.owner);
+        let was = Restore(rt.observer, rt.owner, rt.root);
+        if let Some(n) = owner.and_then(|o| rt.node(o)) {
+            rt.root = n.root;
+        }
         (rt.observer, rt.owner) = (observer, owner);
         was
     })
+}
+
+/// The root the running code draws in (0 until one is made).
+pub(crate) fn current_root() -> u32 {
+    RT.with_borrow(|rt| rt.root)
+}
+
+/// `root` is the current root from now on (outside any other).
+pub(crate) fn set_root(root: u32) {
+    rt(|rt| rt.root = root);
+}
+
+/// `f` with `root` as the current root (making a root's own owner).
+pub(crate) fn in_root<R>(root: u32, f: impl FnOnce() -> R) -> R {
+    let was = rt(|rt| std::mem::replace(&mut rt.root, root));
+    struct Back(u32);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            rt(|rt| rt.root = self.0);
+        }
+    }
+    let _b = Back(was);
+    f()
 }
 
 /// Pops a frame (a body, or the barrier of code that is no body) when dropped.
@@ -301,7 +333,7 @@ fn drain() {
                     run_effect(e);
                     drop_if_idle(e);
                 }
-                Later::Call(f) => f(),
+                Later::Call(root, f) => in_root(root, f),
             }
         }
     }
@@ -423,7 +455,7 @@ pub(crate) fn render_comp(f: impl FnMut() + 'static) {
 /// `f` once the view being built is drawn (its edits out, before the
 /// page applies them): `onmounted`, a hook's first effect run.
 pub(crate) fn later(f: impl FnOnce() + 'static) {
-    rt(|rt| rt.later.push(Later::Call(Box::new(f))));
+    rt(|rt| rt.later.push(Later::Call(rt.root, Box::new(f))));
     flush_if_idle();
 }
 
@@ -629,8 +661,10 @@ impl Rt {
         let was = self.owner.take();
         let k = self.alloc(Node::default());
         self.owner = was;
+        let root = self.node(parent).map_or(self.root, |p| p.root);
         if let Some(n) = self.node_mut(k) {
             n.parent = Some(parent);
+            n.root = root;
         }
         k
     }
@@ -1197,6 +1231,13 @@ impl<A: 'static, R: 'static> Callback<A, R> {
         let f = f.downcast_ref::<CallFn<A, R>>().expect("air: a callback of another type");
         let mut f = f.try_borrow_mut().expect("air: a callback called from inside itself");
         batch(|| f(a))
+    }
+}
+
+impl<A: 'static, R: Default + 'static> Default for Callback<A, R> {
+    /// One that does nothing (answers `R::default()`): a handler prop left out.
+    fn default() -> Self {
+        Self::new(|_| R::default())
     }
 }
 

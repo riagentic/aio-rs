@@ -12,7 +12,7 @@ which of aio's features aio-rs has. Moving an app over:
 | | aio | aio-rs |
 |---|---|---|
 | Language, runtime | TypeScript on Deno | Rust, native code |
-| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade, the router and `TestUi`, not the kit yet, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
+| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade, the kit, the router and `TestUi`, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
 | State model | cells, methods on an Immer draft, selectors | cells, methods on `&mut self` (a copy), `#[derived]`; every call an event in the store's log |
 | Data compatibility | `state.db` | the same `state.db`, both ways: a port opens aio's file as it is, and aio opens it after ([below](#data-the-same-statedb)) |
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
@@ -204,7 +204,7 @@ beyond the aio-rs form.
 | Auth | a share link carrying the key | the share line names the key file | `?token=<key>` by hand, `ax profile`, pairing | [accounts](auth/README.md#limits) |
 | Auth | `useUser()` | `Client::me`, `SignIn`'s `on_signed` | ➖ | [accounts](auth/README.md#limits) |
 | Views | server rendering, hydration, `collectHead` | none | `ax preview --html`; `aio::head::html` | [views](ui/views.md#gaps-against-aio), [islands](ui/islands.md#gaps) |
-| Views | code splitting, `lazy` | one binary | `Defer` defers the render | [islands](ui/islands.md#gaps) |
+| Views | code splitting, `lazy` | one binary | `Defer` defers the render; on air it loads (`load`, `loading`, `error`, `loading_min_ms`) | [islands](ui/islands.md#gaps) |
 | Views | other view libraries (`aio/state-core`), `h()`, React compat | `aio::ui` `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
 | Views | accessibility checked in the running page | static (`ax lint`) | `TestUi` audits | [islands](ui/islands.md#gaps) |
 | Views | Redux DevTools | none | `TimeTravelPanel`, `ax timetravel`, `ax events` | [views](ui/views.md#gaps-against-aio) |
@@ -214,11 +214,10 @@ beyond the aio-rs form.
 | Kit | `<UiStyles/>` | `theme_css`, `theme::sheet` | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Kit | `Tooltip` to the side | `Top` or `Bottom` only | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Forms | Standard Schema (Zod, Valibot, ArkType), `parsed()` | a Rust check function | parse in the check | [forms](ui/forms.md#gaps) |
-| Forms | `bind(name)` | two handlers per input | ➖ | [forms](ui/forms.md#gaps) |
-| Theming | scoped `css` classes, a duplicate-class warning | none | prefix class names | [theming](ui/theming.md#gaps-against-aio) |
+| Forms | `bind(name)` | two handlers per input; on air `form.bind(aio::field!(name))` | the `air` feature | [forms](ui/forms.md#gaps) |
+| Theming | scoped `css` classes, a duplicate-class warning | on air `aio::ui::css(rule)`, no warning (a class is its rule's hash) | prefix class names, or the `air` feature | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
-| Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
-| Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name | write keyframes | [animation](ui/animation.md#gaps) |
+| Animation | a `TransitionFn` (`css(t)`) | CSS `@keyframes` by name; on air `Motion::of(name, css)` | write keyframes, or the `air` feature | [animation](ui/animation.md#gaps) |
 | Desktop | custom window chrome (`ui.chrome`) | the OS title bar; the window's verbs (`page::minimize`, `maximize`, `close`, `hide`, `show`) | the title bar on air | [desktop](clients/desktop.md#gaps) |
 | Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
 | Web | the page's console forwarded to the server's log, in a release too | in `ax dev --web`'s log; a release page's stays in the page | ➖ | [web](clients/web.md#gaps) |
@@ -296,9 +295,11 @@ construct-by-construct tables are in the
 - **`aio.toml` is built in**, never read at run time: rebuild after an
   edit; per-launch settings are flags or variables. [FAQ](basics/faq.md)
 - **Forms touch a field on change**, not on blur: a field left untouched
-  shows its error after a submit. [forms](ui/forms.md#gaps)
+  shows its error after a submit (on air a bound input, `form.bind`, is
+  touched on blur). [forms](ui/forms.md#gaps)
 - **`Transition` takes children and `show`**, not a conditional child,
-  and motions are CSS keyframes. [animation](ui/animation.md)
+  and motions are CSS keyframes (on air also a function, `Motion::of`,
+  and no box of its own). [animation](ui/animation.md)
 - **Tests boot every cell's `#[on_start]`** (aio's `testCell` skipped
   `onInit`), timers in `TestCells` are virtual, `TestUi` time is real until `advance`,
   and an unread refusal fails the test. [testing cells](testing/cells.md#what-aio-has-that-aio-rs-does-without)
@@ -423,24 +424,24 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath; air, feature `air`, for the facade, the router and `TestUi`) | 🔄 |
+| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath; air, feature `air`, for the facade, the kit, the router and `TestUi`) | 🔄 |
 | Field-level reads | one signal per cell | `part(\|c\| &c.field)` | 🔄 |
 | Hooks | AIR and React names | `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`: AIR's names, no dependency arrays | 🔄 |
 | Server rendering, hydration | yes | ❌ (`ax preview --html`) | ❌ |
-| Code splitting, `lazy` | yes | ❌ (`Defer`) | ❌ |
+| Code splitting, `lazy` | yes | ❌ (`Defer`; on air with `load`) | ❌ |
 | Other view libraries, `h()` | `aio/state-core`, React compat | ❌ (islands) | ❌ |
 | Islands, React islands, `<Browser>` | yes | `WebIsland`, `Island::react`, `kit::Browser` | ✅ |
 | Kit components | `aio/ui` | `aio::kit`, the same names | ✅ |
 | Side tooltips | yes | ❌ (`Top`, `Bottom`) | ❌ |
 | Keys | `onGlobalKey`, `REPEATABLE_KEYS` | `use_global_key`, `Chord::repeating` | ✅ |
 | Long lists | `useVirtualList` | `kit::VirtualList` | ✅ |
-| Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check, touched on change | 🔄 |
+| Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check, touched on change; on air `bind`, touched on blur, `reset_field`, `use_field_array`, `use_on_change` | 🔄 |
 | Routing | History API, address bar | history in the app; in a browser the address bar, Back and a reload follow it; typed `routes!` | ✅ |
 | Head | `useHead` | `aio::head::use_head` | ✅ |
-| Theme, hue, CSS variables | `ui.theme`, `hue` | `theme_css(hue)`, `--aio-*` | ✅ |
-| Scoped CSS classes | `css` tag | ❌ (prefix by hand) | ❌ |
+| Theme, hue, CSS variables | `ui.theme`, `hue`, `neutral`, dark follows the OS | `theme_css(hue)`, `--aio-*`, `[ui] neutral`, `[ui] scheme` (the OS's by default) | ✅ |
+| Scoped CSS classes | `css` tag | on air `aio::ui::css` (prefix by hand on Dioxus) | 🔄 |
 | Live CSS in dev | yes | yes, plus `[build] css` toolchains | ✅ |
-| Transitions | `TransitionFn`, shared `options` | CSS keyframes, a `Motion` each | 🔄 |
+| Transitions | `TransitionFn`, shared `options` | CSS keyframes, a `Motion` each; on air `Motion::of`, no box | 🔄 |
 | Runtime a11y check | dev mode | `TestUi::a11y()`, aio's rules, said at each mount (not in the running dev page yet) | 🔄 |
 | Window chrome, app menus, several windows | yes | ❌ (OS title bar, `kit::Menu`, child windows) | ❌ |
 | Redux DevTools | yes | ❌ (`TimeTravelPanel`) | ❌ |

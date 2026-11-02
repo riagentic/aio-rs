@@ -69,12 +69,12 @@ mod tree;
 pub use air_macro::{Props, component, rsx};
 pub use dom::{
     AttrValue, Child, ErrorBoundary, ErrorBoundaryProps, Eval, Fragment, FragmentProps, IntoAttr, IntoChild,
-    IntoHandler, MountedData, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, is_empty, longest_increasing,
-    take_edits,
+    IntoHandler, MountedData, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, exec, is_empty,
+    longest_increasing, styled, take_edits, text_view,
 };
 pub use event::*;
 pub use global::{Global, GlobalMemo};
-pub use props::{Attribute, IntoOpt, IntoValue, Prop, Props};
+pub use props::{Attribute, IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, Prop, Props};
 pub use reactive::{
     Callback, EventHandler, Memo, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback, context,
     current_owner, detached, effect, follow, in_body, in_views, memo, on_cleanup, once, parent_context, provide,
@@ -151,11 +151,13 @@ pub mod __rt {
         Range, Template, attr, child, comp, each, handler, handler_fn, mounted, mounted_fn, on, show, text, tpl, view,
     };
     pub use crate::event::{
-        DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ScrollData, WheelData,
+        DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ResizeData, ScrollData, VisibleData,
+        WheelData,
     };
     pub use crate::props::{
-        ByMemo, ByOpt, ByProp, BySignal, ByVal, CallbackOf, GlobalAttributeNames, GlobalAttributes, IntoOpt, IntoValue,
-        NoPropsBuilder, Props, Set, builder_of, spread,
+        ByMemo, ByOpt, ByProp, BySignal, ByText, ByVal, ByView, CallbackOf, GlobalAttributeNames, GlobalAttributes,
+        IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, NoPropsBuilder, Props, Set,
+        builder_of, spread,
     };
     pub use crate::tree::{KeyByDebug, KeyByDisplay, KeyByNone, KeyOf};
 }

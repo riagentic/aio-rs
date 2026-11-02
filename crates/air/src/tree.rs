@@ -13,6 +13,8 @@ use std::cell::{Cell, RefCell};
 pub(crate) struct Id(u32, u32);
 
 struct Comp {
+    /// The root (window) it is in.
+    root: u32,
     name: &'static str,
     key: Option<String>,
     parent: Option<Id>,
@@ -48,7 +50,8 @@ pub(crate) fn mount(name: &'static str, key: Option<String>) -> Id {
     let parent = CURRENT.get();
     TREE.with_borrow_mut(|t| {
         t.seq += 1;
-        let c = Comp { name, key, parent, seq: t.seq, renders: 0, updates: 0, nodes: None };
+        let root = crate::reactive::current_root();
+        let c = Comp { root, name, key, parent, seq: t.seq, renders: 0, updates: 0, nodes: None };
         match t.free.pop() {
             Some(i) => {
                 let slot = &mut t.slots[i as usize];
@@ -129,12 +132,17 @@ pub struct Mounted {
     pub children: Vec<Mounted>,
 }
 
-/// The components mounted on this thread, as a tree, each level in the
+/// The components mounted in the current root (window), as a tree, each level in the
 /// order they were placed.
 pub fn components() -> Vec<Mounted> {
+    let root = crate::reactive::current_root();
     TREE.with_borrow(|t| {
-        let mut all: Vec<(Id, &Comp)> =
-            t.slots.iter().enumerate().filter_map(|(i, (g, c))| Some((Id(i as u32, *g), c.as_ref()?))).collect();
+        let mut all: Vec<(Id, &Comp)> = t
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (g, c))| Some((Id(i as u32, *g), c.as_ref().filter(|c| c.root == root)?)))
+            .collect();
         all.sort_by_key(|(_, c)| c.seq);
         fn under(all: &[(Id, &Comp)], parent: Option<Id>) -> Vec<Mounted> {
             all.iter()
