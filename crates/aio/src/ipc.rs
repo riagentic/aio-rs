@@ -186,6 +186,28 @@ impl Only {
     pub fn disarm(&self, pid: u32) {
         self.0.send_if_modified(|a| a.take_if(|(p, _)| *p == pid).is_some());
     }
+
+    /// The window's gate, one per process: every door that serves the
+    /// window (aio-shell's wire and control lines, the routes' `http` door)
+    /// asks this one, which aio-shell arms, so no two doors can disagree
+    /// about who the window is (aio's one `localPeerGate`).
+    pub fn window() -> Self {
+        static W: std::sync::OnceLock<Only> = std::sync::OnceLock::new();
+        W.get_or_init(Self::default).clone()
+    }
+}
+
+static WINDOW_HTTP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Where the app serves its routes to its window (`aio://app/<path>`), if it
+/// opened that door: aio-shell hands it to the window (`--aio-http`).
+pub fn window_http() -> Option<&'static str> {
+    WINDOW_HTTP.get().map(String::as_str)
+}
+
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn set_window_http(addr: String) {
+    _ = WINDOW_HTTP.set(addr);
 }
 
 /// Why a door armed with `armed` (pid, start) refuses the peer `pid`, or
