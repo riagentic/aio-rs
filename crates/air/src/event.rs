@@ -684,7 +684,7 @@ pub struct FormData {
     files: Vec<FileData>,
 }
 
-/// A picked file, its contents read by the page (Dioxus's `FileData`).
+/// A picked file, its contents read by the page (0.1's `FileData`, the same methods).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FileData {
     pub(crate) field: String,
@@ -892,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn picked_files_travel_whole_and_read_as_dioxus_reads_them() {
+    fn picked_files_travel_whole_and_read_as_0_1_read_them() {
         let f = |field: &str, name: &str, t: &str, b: &[u8]| FileData {
             field: field.into(),
             name: name.into(),
