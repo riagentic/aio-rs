@@ -6,7 +6,7 @@
 // `data-t` handle or auto name, clicked at a point of their box with the
 // mouse, typed into with the keyboard; what the page does then (focus,
 // submit, scroll, observers) is the browser's own.
-use super::electron::Page;
+use super::electron::{Answered, Asked, Page};
 use super::{PATIENCE, TRACES, UNSEEN, dump, failing_on_purpose, wire_refusals};
 use crate::{Cell, Door};
 use base64::Engine;
@@ -272,11 +272,12 @@ pub struct Mount {
     scrollbars: bool,
     before: Vec<Box<dyn FnOnce()>>,
     network: Vec<String>,
+    stubs: Vec<(String, super::electron::Stub)>,
 }
 
 impl Default for Mount {
     fn default() -> Self {
-        Self { size: VIEWPORT, dark: false, scrollbars: true, before: vec![], network: vec![] }
+        Self { size: VIEWPORT, dark: false, scrollbars: true, before: vec![], network: vec![], stubs: vec![] }
     }
 }
 
@@ -308,6 +309,16 @@ impl Mount {
     /// allowed ([`crate::capabilities`]).
     pub fn network(mut self, hosts: &[&str]) -> Self {
         self.network.extend(hosts.iter().map(|h| h.to_string()));
+        self
+    }
+
+    /// Answer the page's requests to `host` with `answer` (aio's `testUI({
+    /// fetch })`): from before the first render, each request the page
+    /// makes there (a picture, a video: what the window's policy lets a
+    /// page reach) is handed to it, and never reaches the network.
+    /// `Mount::fetch("cdn.example.org", |a| Answered::new(200, "image/svg+xml", SVG))`
+    pub fn fetch(mut self, host: &str, answer: impl Fn(&Asked) -> Answered + Send + Sync + 'static) -> Self {
+        self.stubs.push((host.into(), std::sync::Arc::new(answer)));
         self
     }
 
@@ -360,7 +371,10 @@ impl Mount {
 
     /// The test's page, sized and themed as asked.
     fn page(&self) -> Page {
-        let page = Page::open(self.size.0, self.size.1, &self.network);
+        // An answered host is reached (the network rule lets it by), never the network.
+        let reach: Vec<String> = self.network.iter().cloned().chain(self.stubs.iter().map(|(h, _)| h.clone())).collect();
+        let page = Page::open(self.size.0, self.size.1, &reach);
+        page.answer(self.stubs.clone());
         page.cmd("Emulation.setDeviceMetricsOverride", metrics(self.size));
         // A window on no screen has no focus of its own: the page behaves as
         // the focused window a person types into (`:focus`, Tab, focus events).

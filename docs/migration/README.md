@@ -312,10 +312,10 @@ Rename it (`begin`) when porting.
 | `testPageFetch` | `TestServer::page()` |
 | `totpCode` | `aio::testing::totp_code` |
 | `uiNames`, `uiRects`, `generateUITypes`, `testGen` | `ax surface <app> --names`, `--rects`; names are checked when a test runs (no generated types) |
-| `smoke`, `testApps` | `ax build <app> --smoke`, `ax smoke` |
+| `smoke`, `testApps` | `aio::testing::smoke(bundle)`, `ax smoke`; `aio::testing::TestApps` |
 | `crashWorker` | none (no worker cells) |
 | `freePort` | bind `127.0.0.1:0` |
-| `deno test` | `ax test <app>` (`cargo test`) |
+| `deno test` | `ax test <app>` (`cargo test`); the tests get `aio::testing` from `[dev-dependencies] aio = { …, features = ["testing"] }` |
 
 ### Build, release, CLI
 
@@ -793,6 +793,23 @@ a view reads state where it shows it (`"{n}"`, `.get()` in `rsx!` or a
 `memo`), a prop that must follow state is a `Signal`, `Memo` or part
 handle, no `if let` inside `rsx!` (`{opt.map(|x| rsx! { .. })}`), and
 `once` is the only one-time setup ([views](../ui/views.md#ready-for-air)).
+
+### The test kit is a dev-dependency in 0.2
+
+`aio::testing` is aio-rs's `testing` feature now, so an app's `cargo
+build` and `ax dev` never compile the test kit (a smaller, faster debug
+build). An app made before 0.2 adds one line to the `Cargo.toml` that
+holds its tests (its root package), with the source its `[dependencies]`
+line has:
+
+```toml
+[dev-dependencies]
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.1.0", features = ["testing"] }
+```
+
+Its tests need no change. Without the line they fail to build
+(`could not find testing in aio`), and `ax lint` names the line to add.
+`ax test --video` needs nothing more (`video` brings `testing`).
 
 ### `ax pin` and `ax pair` in 0.2
 
