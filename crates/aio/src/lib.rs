@@ -51,7 +51,7 @@ native! {
     pub mod log;
     #[cfg(feature = "tls")]
     pub mod pairing;
-    #[cfg(any(feature = "liveview", feature = "air"))]
+    #[cfg(feature = "kit")]
     pub mod page;
     pub mod paths;
     #[cfg(feature = "server")]
@@ -100,10 +100,6 @@ pub mod fmt;
 mod guide;
 pub mod head;
 #[cfg(feature = "kit")]
-pub mod kit;
-/// The kit on air (feature `air` without `kit`): the same names.
-#[cfg(all(feature = "air", not(feature = "kit")))]
-#[path = "kit_air/mod.rs"]
 pub mod kit;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/log.rs"]

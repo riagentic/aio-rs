@@ -32,7 +32,7 @@ fn Notice() -> View {
     let show = signal(|| true);
     rsx! {
         button { "data-t": "toggle", onclick: move |_| show.toggle(), "Toggle" }
-        Transition { show: show.get(), enter: Motion::FADE, exit: Motion::FADE.ms(100), "data-t": "fx",
+        Transition { show: show.get(), enter: Motion::FADE, exit: Motion::FADE.ms(100),
             p { "data-t": "msg", "Saved" }
         }
     }
@@ -41,7 +41,7 @@ fn Notice() -> View {
 # fn main() {
 use std::time::Duration;
 let mut ui = aio::testing::TestUi::new(Notice);
-assert!(ui.attr("fx", "style").unwrap().contains("aio-fade 300ms ease 0ms 1 normal"));
+assert!(ui.attr("msg", "style").unwrap().contains("aio-fade"), "its first element plays it");
 ui.click("toggle");
 assert!(ui.present("msg"), "kept while its exit plays");
 ui.wait(Duration::from_millis(150));
@@ -51,13 +51,13 @@ assert!(ui.absent("msg"), "gone once it is over");
 
 | Prop | Type | Does |
 |---|---|---|
-| `show` | `bool` | whether the content is there |
+| `show` | `Prop<bool>` | whether the content is there (an expression follows: `show: open.get()`) |
 | `enter` | `Option<Motion>` | played as it arrives (none: it appears at once) |
 | `exit` | `Option<Motion>` | played backwards as it leaves; the content stays until it is over (none: it goes at once) |
-| `class`, any attribute | | on the box the content sits in (`div.aio-transition`) |
 
-- The content is wrapped in a `div` of its own; style that box with
-  `class` when the layout needs it (`display: contents` won't animate).
+- No box of its own: the content's first element plays the animation
+  (its `animation` style set, the rest of its style kept), so give the
+  content one element at its root.
 - Show, hide, show again quickly: the leave is cancelled and nothing is
   removed.
 - Unlike aio, the content is given as children with `show`, not as a
@@ -110,13 +110,13 @@ use aio::ui::prelude::*;
 #[component]
 fn Queue() -> View {
     let items = signal(|| vec!["milk", "eggs", "bread"]);
-    let rows: Vec<(String, View)> = items.get()
-        .into_iter()
-        .map(|k| (k.to_string(), rsx! { p { "data-t": "{k}", "{k}" } }))
-        .collect();
+    // `items` is a `Prop`: given an expression, it follows what that reads.
+    let rows = move || -> Vec<(String, View)> {
+        items.get().into_iter().map(|k| (k.to_string(), rsx! { p { "data-t": "{k}", "{k}" } })).collect()
+    };
     rsx! {
         button { "data-t": "drop", onclick: move |_| items.set(vec!["milk", "bread", "tea"]), "Drop eggs" }
-        TransitionGroup { items: rows, enter: Motion::FADE, exit: Motion::FADE.ms(200), flip: true, flip_ms: 150 }
+        TransitionGroup { items: rows(), enter: Motion::FADE, exit: Motion::FADE.ms(200), flip: true, flip_ms: 150 }
     }
 }
 
@@ -132,7 +132,7 @@ assert!(ui.absent("eggs") && ui.present("tea"));
 
 | Prop | Default | Does |
 |---|---|---|
-| `items` | | the rows, `Vec<(key, View)>`, in order; the key says which row is which |
+| `items` | | the rows, `Prop<Vec<(key, View)>>`, in order; the key says which row is which |
 | `enter`, `exit` | none | as `Transition`'s, per row |
 | `flip` | `false` | rows that moved slide from where they were |
 | `flip_ms` | 300 | how long that slide takes |
@@ -176,7 +176,7 @@ ui.until_text("x", "240 false");
 
 | Call | Does |
 |---|---|
-| `x.value()` | where it is now; reading it in a render re-renders each frame it moves |
+| `x.value()` | where it is now; a hole reading it runs again each frame it moves |
 | `x.animating()` | still moving |
 | `x.to(target)` | spring there, from where it is and as fast as it moves now |
 | `x.set(value)` | be there now, at rest |
@@ -247,18 +247,17 @@ in a cell).
   row leaving and the others changing. Key by id.
 - A keyframe set written from shown to hidden: aio-rs plays `from` as the
   hidden state. Write `from { opacity: 0 }`, not `to { opacity: 0 }`.
-- Reading `x.value()` high in the tree: everything below re-renders each
-  frame. Read it in the small component that draws the moving element.
+- Reading `x.value()` in a view's body: read once, it never moves. Read
+  it in a hole (`style: "opacity: {x.value()}"`), as close to the moving
+  element as it can be.
 
 ## Gaps
 
 - aio's transitions took a `TransitionFn` (a `css(t)` function of
-  progress); aio-rs on Dioxus takes CSS `@keyframes` by name: write the
-  keyframes in the app's CSS. On air `Motion::of("grow", |t|
-  format!("opacity:{t};transform:scale({t})"))` is that function, sampled
-  into `@keyframes grow` (20 steps, as aio's) and put in the page once,
-  and `Transition` draws no box of its own: its content's first element
-  plays the animation, its own style kept.
+  progress); aio-rs takes CSS `@keyframes` by name, or `Motion::of("grow",
+  |t| format!("opacity:{t};transform:scale({t})"))`, that function
+  sampled into `@keyframes grow` (20 steps, as aio's) and put in the page
+  once.
 - aio's `options` prop on `Transition` and `TransitionGroup` set one
   duration, delay and easing for both; in aio-rs each `Motion` carries its
   own.

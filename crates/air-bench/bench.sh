@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The air spike's measurements (docs/design/air.md), Dioxus 0.7 vs air, on
-# the same machine, 3 runs where timing: macro expansion and metadata, an
-# incremental rebuild after a one-line view edit, a clean build, a held ↓
-# over a 1000-row list in the Electron runtime.
+# air's measurements (docs/design/air.md), 3 runs where timing: macro
+# expansion and metadata, an incremental rebuild after a one-line view edit,
+# a clean build, a held ↓ over a 1000-row list in the Electron runtime.
+# (The spike's 0.1 renderer columns in docs/design/air.md are its record.)
 #
 #   crates/air-bench/bench.sh <work dir> <target dir>
 #
@@ -29,7 +29,7 @@ check() { (cd "$work/$1" && CARGO_TARGET_DIR="$target/$1" cargo check -q --offli
 
 echo "## (a) expansion, metadata, LLVM IR (bytes / lines)"
 echo "crate | expanded B | rmeta B | llvm-ir lines | bin B"
-for c in dx-1 dx-50 air-1 air-50; do
+for c in air-1 air-50; do
   build "$c"
   exp=$(cd "$work/$c" && CARGO_TARGET_DIR="$target/$c" RUSTC_BOOTSTRAP=1 cargo rustc -q --lib --offline -- -Zunpretty=expanded | wc -c)
   rmeta=$(stat -c %s "$target/$c"/debug/deps/libviews-*.rmeta | sort -n | tail -1)
@@ -41,7 +41,7 @@ for c in dx-1 dx-50 air-1 air-50; do
 done
 
 echo "## (b) one-line view edit, then build (s; the lib and the binary)"
-for c in dx-50 air-50; do
+for c in air-50; do
   f="$work/$c/src/views/v25.rs"
   build "$c"
   t=()
@@ -58,7 +58,7 @@ for c in dx-50 air-50; do
 done
 
 echo "## (c) clean build (s), crates compiled, crates in the graph"
-for c in dx-50 air-50; do
+for c in air-50; do
   t=()
   for i in $(seq $runs); do
     rm -rf "${target:?}/$c"
@@ -72,9 +72,7 @@ done
 
 echo "## (d) held ↓, keydown -> DOM applied, release, Electron headless"
 for rows in 1000 10000; do
-  for r in dx air; do
-    for i in $(seq $runs); do
-      "${CARGO_TARGET_DIR:-$repo/target}/release/hold" "$r" 200 40 "$rows" 2>/dev/null | tail -1
-    done
+  for i in $(seq $runs); do
+    "${CARGO_TARGET_DIR:-$repo/target}/release/hold" air 200 40 "$rows" 2>/dev/null | tail -1
   done
 done

@@ -23,6 +23,11 @@
 //! Exit: 0 clean (warnings and hints don't fail), 1 errors, 2 bad usage.
 mod layout;
 mod rust;
+
+/// aio-rs 0.1's renderer, by its crates' prefix: what `ax lint` refuses in
+/// an app and the template and web build tests find in none.
+#[cfg(test)]
+pub const RENDERER_0_1: &str = "dioxus";
 mod secrets;
 
 use std::collections::{BTreeMap, HashMap};

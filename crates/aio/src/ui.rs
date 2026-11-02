@@ -10,65 +10,20 @@
 pub const SURFACE_JS: &str = include_str!("surface.js");
 
 /// Key chords (`"mod+s"`), parsed and matched: the kit's bindings and `TestUi`'s keys.
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 #[doc(hidden)]
 pub mod chord;
 #[cfg(feature = "kit")]
-mod view;
-#[cfg(feature = "kit")]
-pub use view::*;
-#[cfg(all(feature = "air", not(feature = "kit")))]
 mod css;
-#[cfg(all(feature = "air", not(feature = "kit")))]
-pub use css::{collect_css, css};
-#[cfg(all(feature = "air", not(feature = "kit")))]
-mod on_air;
-#[cfg(all(feature = "air", not(feature = "kit")))]
-pub use on_air::*;
-/// What a view returns (with `kit`, [`prelude`] has the rest).
-#[cfg(all(feature = "liveview", not(any(feature = "kit", feature = "air"))))]
-pub type View = dioxus_core::Element;
-
-/// Whether the views are air's (the facade's renderer), for a host that
-/// must match it (aio-shell on air).
-#[doc(hidden)]
-pub const ON_AIR: bool = cfg!(all(feature = "air", not(feature = "kit")));
-
-#[cfg(all(feature = "air", feature = "liveview", not(feature = "kit")))]
-compile_error!(
-    "aio-rs: one renderer per build: `air` with Dioxus's page (`liveview`, aio-shell's default features); \
-     an app on air takes aio-shell with `default-features = false, features = [\"air\"]`"
-);
-
-/// Everything a view file needs: `use aio::ui::prelude::*;`. `rsx!`,
-/// `#[component]`, [`View`], state ([`Signal`], [`signal`], [`memo`],
-/// [`effect`], [`watch`], [`once`], [`on_cleanup`], [`Global`]), context
-/// ([`provide`], [`context`]), async work ([`spawn`], [`spawn_forever`],
-/// [`task`], [`resource`]), boundaries ([`ErrorBoundary`], [`Suspense`]),
-/// handlers ([`EventHandler`], [`Callback`]), the event types
-/// (`KeyboardEvent`, `MouseEvent`, `FormEvent`, …) with [`Key`](prelude::Key),
-/// [`Modifiers`](prelude::Modifiers), and the page ([`eval`]).
 #[cfg(feature = "kit")]
-pub mod prelude {
-    #[doc(hidden)]
-    pub use super::view::__rsx::*;
-    pub use super::view::{
-        Attribute, Callback, ErrorBoundary, Eval, EvalError, EventHandler, Fragment, Global, GlobalMemo, Memo, Props,
-        Resource, Signal, Suspense, Task, View, ViewError, callback, component, context, effect, eval, in_views,
-        key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task,
-        try_context, watch,
-    };
-    pub use crate::{act, use_css};
-    #[doc(no_inline)]
-    pub use dioxus::html::{
-        GlobalAttributesExtension, SvgAttributesExtension, events::*, extensions::*, geometry, global_attributes,
-        input_data::MouseButton, svg_attributes, traits::*,
-    };
-    pub use dioxus::prelude::{Code, Event, Key, Location, Modifiers};
-}
+pub use css::{collect_css, css};
+#[cfg(feature = "kit")]
+mod on_air;
+#[cfg(feature = "kit")]
+pub use on_air::*;
 
-/// Everything a view file needs, on air: the same names as on Dioxus.
-#[cfg(all(feature = "air", not(feature = "kit")))]
+/// Everything a view file needs.
+#[cfg(feature = "kit")]
 pub mod prelude {
     pub use super::on_air::events::*;
     pub use super::on_air::{
@@ -86,7 +41,7 @@ pub mod prelude {
 
 /// The views' clock: a moment and a wait, on the page's timer in a
 /// browser, else on tokio's (a test's paused clock too).
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub(crate) mod clock {
     pub(crate) async fn sleep(d: std::time::Duration) {
         #[cfg(target_arch = "wasm32")]
@@ -256,8 +211,8 @@ pub fn numbered(bases: Vec<String>) -> Vec<String> {
 }
 
 /// The page CSS: aio's base rules (server-html-gen), the app's stylesheets
-/// unchanged, and shims. Dioxus native can't set attributes on `<html>`,
-/// so the theme lives on the app root: `:root[data-theme]` maps to it and the
+/// unchanged, and shims. The theme lives on the app root (a view sets no
+/// attribute on `<html>`): `:root[data-theme]` maps to it and the
 /// root repeats body's colours (which would read the light tokens). Tokens
 /// set on `:root` are set on that root too, so the ones made from others
 /// (`--aio-tint` from the accent) are made from the app's, not inherited
@@ -352,31 +307,11 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
     }
 }
 
-/// [`use_css!`](crate::use_css)'s subscription to its sheets' edits (a dev
-/// build's): the render (Dioxus) or the hole (air) that reads them runs
-/// again when one is saved.
-#[doc(hidden)]
-#[cfg(feature = "kit")]
-pub fn follow_sheets(sheets: &'static [Sheet]) {
-    let edits = signal(|| 0u64);
-    once(move || {
-        if cfg!(debug_assertions) {
-            spawn(async move {
-                loop {
-                    sheets_changed(sheets).await;
-                    edits.update(|n| *n += 1);
-                }
-            });
-        }
-    });
-    let _ = edits.get();
-}
-
 /// On air the call sits in a hole (an effect, no hooks): one signal per set
 /// of sheets for the thread; its watcher lives as long as the app (a root
 /// mounted again, a test's next one, starts it again).
 #[doc(hidden)]
-#[cfg(all(feature = "air", not(feature = "kit")))]
+#[cfg(feature = "kit")]
 pub fn follow_sheets(sheets: &'static [Sheet]) {
     type Watch = (air::Signal<u64>, air::Task);
     if !cfg!(debug_assertions) {
@@ -488,7 +423,7 @@ static SCHEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0)
 /// `system` the OS's `prefers-color-scheme`, followed as it changes (a
 /// canvas or a chart that draws its own colours reads it). The page's CSS
 /// follows the OS without it ([`page_css`] with [`Scheme::System`]).
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub fn use_dark() -> Memo<bool> {
     let fixed = scheme();
     let os = signal(|| false);
@@ -689,18 +624,18 @@ impl Tab {
 }
 
 /// How often commits made off the UI thread (prices, balances, effects,
-/// schedules) re-render the views at most: aio's broadcast coalescer. A call
-/// from the views renders at once, and with it whatever came meanwhile (aio
+/// schedules) reach the views at most: aio's broadcast coalescer. A call
+/// from the views shows at once, and with it whatever came meanwhile (aio
 /// `flushAllUrgent`).
 pub const BACKGROUND: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// A part of a cell's state, from `client!`'s `part(|c| &c.field)`: a
 /// `Copy` handle (when its picker captures nothing) whose reads subscribe
 /// only to the top-level field the picker points into (aio's
-/// `trackCell`), so a view re-renders when that field changes, not on every
-/// commit. Read it with `.get()`, `.with(|v| …)` or `"{part}"`; it reads
+/// `trackCell`), so a hole reading it runs again when that field changes,
+/// not on every commit. Read it with `.get()`, `.with(|v| …)` or `"{part}"`; it reads
 /// the state the views were last told of.
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub struct Part<T: 'static, R: ?Sized, F> {
     f: F,
     parts: &'static Global<Parts<T>>,
@@ -710,7 +645,7 @@ pub struct Part<T: 'static, R: ?Sized, F> {
     _r: std::marker::PhantomData<fn(&T) -> &R>,
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
     #[doc(hidden)]
     pub fn new(
@@ -778,17 +713,17 @@ impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
     }
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T, R: ?Sized, F: Clone> Clone for Part<T, R, F> {
     fn clone(&self) -> Self {
         Self { f: self.f.clone(), ..*self }
     }
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T, R: ?Sized, F: Copy> Copy for Part<T, R, F> {}
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fmt::Display for Part<T, R, F> {
     /// Subscribes: `"{n}"` in a view follows the part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -796,7 +731,7 @@ impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fm
     }
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt::Debug for Part<T, R, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.with(|v| v.fmt(f))
@@ -806,7 +741,7 @@ impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt:
 /// The views' side of a cell's fields (`client!`): the state they were
 /// last told of, one signal per field (aio's signal per cell) and when.
 #[doc(hidden)]
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub struct Parts<T> {
     shown: std::sync::Arc<T>,
     sigs: Vec<Signal<u64>>,
@@ -815,7 +750,7 @@ pub struct Parts<T> {
     told: Option<clock::Instant>,
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 impl<T: crate::CellData> Parts<T> {
     /// In the root scope (a global's constructor runs there).
     pub fn new(shown: std::sync::Arc<T>) -> Self {
@@ -880,7 +815,7 @@ impl<T: crate::CellData> Parts<T> {
 /// [`BACKGROUND`]'s wait (`client!`'s `use_live`): while it lasts, the views
 /// have a commit still to be told of, and a UI test's `settle` waits for it.
 #[doc(hidden)]
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub async fn sleep(d: std::time::Duration) {
     struct Waiting;
     impl Drop for Waiting {
@@ -893,30 +828,30 @@ pub async fn sleep(d: std::time::Duration) {
     clock::sleep(d).await
 }
 
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 thread_local!(static WAITING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 /// Has a view on this thread a commit still to be told of ([`sleep`])?
-#[cfg(all(any(feature = "kit", feature = "air"), feature = "testing"))]
+#[cfg(all(feature = "kit", feature = "testing"))]
 pub(crate) fn telling() -> bool {
     WAITING.get() > 0
 }
 
-/// The client side of a cell for Dioxus views (feature `kit`): `client!(Todo, todo,
+/// The client side of a cell for views (feature `kit`): `client!(Todo, todo,
 /// todo_at)` makes `SOURCE` (set by `main`:
 /// `SOURCE.set(aio::Source::for_app(&cfg, &dirs)?)`; unset = memory, for
 /// tests; `DB`, a store's path instead, is the older way), the
-/// global `HANDLE`, `part(|p| &p.field)` (a view reads a field and
-/// re-renders only when it changes: aio's signal per cell, the way to read
-/// in a render), a `todo()` reader (the whole state: it subscribes the
-/// view to every commit), a `todo_at(|p| …)` hook (a value made of the
+/// global `HANDLE`, `part(|p| &p.field)` (a hole reads a field and runs
+/// again only when it changes: aio's signal per cell, the way to read in a
+/// view), a `todo()` reader (the whole state: a hole reading it follows
+/// every commit), a `todo_at(|p| …)` hook (a value made of the
 /// state, compared after each commit), `use_status()` (online, syncing) and
 /// `use_pending(method)` hooks, `use_time_travel()` with `time_travel(ask)`
 /// (the cell's history, for dev tools), and the `Ui` door that `act!` calls
-/// through: a view's call renders at once. Global like aio's module signals:
+/// through: a view's call shows at once. Global like aio's module signals:
 /// one per app instance (so per test). Call `use_live()` once in the root
 /// component so commits made off the UI thread (effects, schedules)
-/// re-render too, at most once per [`BACKGROUND`].
+/// show too, at most once per [`BACKGROUND`].
 #[macro_export]
 macro_rules! client {
     ($cell:ty, $read:ident $(, $at:ident)?) => {
@@ -926,8 +861,8 @@ macro_rules! client {
         /// store at `DB`; with neither (tests), a fresh memory store per app instance.
         pub static SOURCE: ::std::sync::OnceLock<$crate::Source<$cell>> = ::std::sync::OnceLock::new();
 
-        // Dioxus keys a global by its source location, and every global this
-        // macro makes has the same one: each gets a name instead (friction #29).
+        // Every global this macro makes is made at the same source location:
+        // each gets a name of its own (friction #29).
         pub static HANDLE: $crate::ui::Global<$crate::Source<$cell>> =
             $crate::ui::Global::named(
                 || match (SOURCE.get(), DB.get()) {
@@ -961,7 +896,7 @@ macro_rules! client {
             );
 
         /// Tell the views of the state now: the readers of each field that
-        /// changed re-render, the whole state's readers if any did.
+        /// changed run again, the whole state's readers if any did.
         fn tell(urgent: bool) {
             let now = HANDLE.read_untracked().state();
             let (bump, changed) = PARTS.update(|p| p.tell(now, urgent));
@@ -976,7 +911,7 @@ macro_rules! client {
 
         /// A part of the state for this view (aio reading a cell:
         /// `nav.activeIndex[p]` is `part(|w| &w.nav).with(|n| n.active_index[p])`):
-        /// a handle whose reads re-render the view only when the top-level
+        /// a handle whose reads (in a hole) run again only when the top-level
         /// field `f` points into changes, not on every commit. Pick the
         /// field, then index it: a reference into a list's own heap
         /// (`&w.rows[3]`) can't name its field, so that reader follows every
@@ -986,9 +921,9 @@ macro_rules! client {
             $crate::ui::Part::new(f, &PARTS, &VERSION, stringify!($cell), ::std::panic::Location::caller())
         }
 
-        /// The current state (views render from it, handlers call methods).
-        /// Read in a render it re-renders the view on every commit: a dev
-        /// build says so once per place (`hint`), naming the reader of parts.
+        /// The current state (handlers call methods on it). Read in a hole it
+        /// follows every commit; read in a view's body it is read once and
+        /// never follows: a dev build says so once per place (`hint`).
         #[track_caller]
         pub fn $read() -> ::std::sync::Arc<$cell> {
             if cfg!(debug_assertions) {
@@ -1000,7 +935,7 @@ macro_rules! client {
 
         $(
         /// A part of the state for this view (AIR's path subscriptions): `f`
-        /// runs after each commit, and the view re-renders only when its
+        /// runs after each commit, and its readers run again only when its
         /// answer changed. A hook: call it at the top of a component.
         pub fn $at<R: PartialEq + 'static>(f: impl Fn(&$cell) -> R + 'static) -> $crate::ui::Memo<R> {
             $crate::ui::memo(move || f(&$read()))
@@ -1008,7 +943,7 @@ macro_rules! client {
         )?
 
         /// How the copy stands (online, calls waiting, backed up; aio
-        /// `useConnected`), re-rendering the view when that changes. A hook;
+        /// `useConnected`), its readers running again when that changes. A hook;
         /// needs `use_live()`. No `ready` flag: the state is there before the
         /// first render (a synced copy starts from the server's or the saved one).
         pub fn use_status() -> $crate::ui::Memo<$crate::Status> {
@@ -1131,11 +1066,11 @@ macro_rules! client {
 }
 
 /// A dev build's hint (`client!`'s whole-state reader): `at` read all of
-/// `cell` in a component's render, so the component re-renders on every
-/// commit (a cursor step, a price tick), whatever it shows. Said once per
-/// place; `heap`: through a `part` that points outside the state's fields.
+/// `cell` in a view's body, which runs once, so what it shows from it never
+/// changes; or (`heap`) a hole reads through a `part` that points outside
+/// the state's fields, so it runs again on every commit. Said once per place.
 #[doc(hidden)]
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(feature = "kit")]
 pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: bool) {
     thread_local! {
         static SEEN: std::cell::RefCell<std::collections::HashSet<(&'static str, u32, u32)>> = Default::default();
@@ -1144,19 +1079,22 @@ pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: 
     if SEEN.with(|s| s.borrow().contains(&key)) {
         return;
     }
-    // A component's render, not a handler or a memo (their contexts have no scope).
-    #[cfg(feature = "kit")]
-    let render = view::in_render();
-    #[cfg(not(feature = "kit"))]
-    let render = on_air::in_render();
-    if !render || !SEEN.with(|s| s.borrow_mut().insert(key)) {
+    // A view's body, not a hole, a handler or a memo.
+    if (!heap && !on_air::in_render()) || !SEEN.with(|s| s.borrow_mut().insert(key)) {
         return;
     }
-    let (what, instead) = match heap {
-        false => ("reads all of", "part(|c| &c.field) re-renders it only when that field changes"),
-        true => ("reads a part(…) inside a list's heap of", "pick the field (part(|c| &c.rows)), then index it"),
-    };
-    crate::info!(cat: "hint", "{at}: a render {what} {cell}, so it re-renders on every commit; {instead}");
+    match heap {
+        false => crate::info!(
+            cat: "hint",
+            "{at}: a view's body reads all of {cell} once (a body runs once), so what it shows from it never \
+             changes; read it in a hole: {{part(|c| &c.field)}} follows that field"
+        ),
+        true => crate::info!(
+            cat: "hint",
+            "{at}: a part(…) inside a list's heap of {cell} runs again on every commit; pick the field \
+             (part(|c| &c.rows)), then index it"
+        ),
+    }
 }
 
 /// Call a cell method from a view: `act!(toggle(id, day))`; a refusal is

@@ -165,12 +165,12 @@ pub(crate) mod tests {
     #[allow(non_snake_case)]
     pub fn Books() -> View {
         use_live();
-        let s = shelf();
+        let books = part(|s| &s.books);
         rsx! {
-            h1 { "{s.books.len()} books" }
+            h1 { {format!("{} books", books.with(Vec::len))} }
             ul {
-                for b in s.books.iter() {
-                    li { button { "{b}" } }
+                for (i, b) in books.get().into_iter().enumerate() {
+                    li { key: "{i}", button { "{b}" } }
                 }
             }
         }

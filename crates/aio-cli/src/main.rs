@@ -1804,7 +1804,7 @@ fn main() -> ExitCode {
     if let Some(code) = hotpatch::hook() {
         return code;
     }
-    // Every cargo and dx ax runs builds into one folder per machine.
+    // Every cargo ax runs builds into one folder per machine.
     // SAFETY: before any thread is started.
     unsafe { std::env::set_var("CARGO_TARGET_DIR", dev::shared_target()) };
     let args: Vec<String> = std::env::args().skip(1).collect();

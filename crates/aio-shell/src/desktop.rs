@@ -450,38 +450,4 @@ mod tests {
         let t = Tray { menu: &BOTH, ..Default::default() };
         assert_eq!(said(asks(&json!({ "t": "tray", "i": 0 }), Some(&t))), ["run pause", "go /b"]);
     }
-
-    #[cfg(feature = "dioxus")]
-    #[tokio::test]
-    async fn the_root_takes_the_asks_in_its_scope() {
-        use std::sync::Mutex;
-        static WENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-        static RAN: AtomicUsize = AtomicUsize::new(0);
-        fn go(r: &str) -> bool {
-            // In the view's scope: what the router's `go` needs.
-            assert!(dioxus_core::Runtime::current().try_current_scope_id().is_some());
-            WENT.lock().unwrap().push(r.into());
-            true
-        }
-        fn ran() {
-            RAN.fetch_add(1, Relaxed);
-        }
-        fn root() -> dioxus_core::Element {
-            use_asks(go);
-            dioxus_core::VNode::empty()
-        }
-        let mut dom = dioxus_core::VirtualDom::new(root);
-        dom.rebuild_in_place();
-        deliver(Ask::Go("/root-test".into()));
-        deliver(Ask::Run(ran));
-        let done = || WENT.lock().unwrap().contains(&"/root-test".to_string()) && RAN.load(Relaxed) > 0;
-        for _ in 0..100 {
-            if done() {
-                break;
-            }
-            _ = tokio::time::timeout(std::time::Duration::from_millis(50), dom.wait_for_work()).await;
-        }
-        assert!(done(), "the route went through go and the item ran");
-    }
 }

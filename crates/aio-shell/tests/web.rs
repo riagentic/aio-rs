@@ -18,7 +18,7 @@ static VIEWS: AtomicU32 = AtomicU32::new(0);
 /// (a query the page runs), and markup a sanitizer missed.
 fn app() -> View {
     let view = once(|| VIEWS.fetch_add(1, Ordering::SeqCst) + 1);
-    let mut n = signal(|| 0);
+    let n = signal(|| 0);
     rsx! {
         p { id: "view", "{view}" }
         p { id: "n", "{n}" }

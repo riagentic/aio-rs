@@ -1,11 +1,7 @@
-// `hold dx|air [keys] [gap ms] [rows]`: the same 1000-row cell list, drawn by
-// Dioxus liveview (aio-rs 0.1.0's way: `client!`, rows by props) or by
-// air, in the pinned Electron runtime (`AIORT_RUNTIME`) headless, over the
-// shell's wire. Holds ↓ and prints keydown → DOM-applied (p50, p95, max)
-// and the bytes sent to the page per key.
-use aio::act;
-use aio::ui::prelude::*;
-use futures_util::{SinkExt, StreamExt};
+// `hold air [keys] [gap ms] [rows]`: a 1000-row cell list drawn by air, in
+// the pinned Electron runtime (`AIORT_RUNTIME`) headless, over the shell's
+// wire. Holds ↓ and prints keydown → DOM-applied (p50, p95, max) and the
+// bytes sent to the page per key.
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 
@@ -38,35 +34,6 @@ impl List {
 
     pub fn down(&mut self) {
         self.cursor = (self.cursor + 1).min(self.rows.len().saturating_sub(1) as u32);
-    }
-}
-
-mod dx {
-    use super::*;
-
-    aio::client!(List, list);
-
-    #[component]
-    fn Line(name: String, amount: u64, selected: bool) -> View {
-        rsx! { li { "aria-selected": selected, "{name} {amount}" } }
-    }
-
-    pub fn app() -> View {
-        use_live();
-        once(|| _ = act!(fill(rows())));
-        let rows = part(|l| &l.rows);
-        let cursor = part(|l| &l.cursor).get();
-        rsx! {
-            div { "data-t": "keys", tabindex: "0",
-                onkeydown: move |e: KeyboardEvent| if e.key() == Key::ArrowDown { _ = act!(down()) },
-                ul {
-                    // Borrowed, as 0.1.0 iterated a part: no copy of the rows per render.
-                    {rows.with(|rs| rs.iter().map(|r| rsx! {
-                        Line { key: "{r.id}", name: r.name.clone(), amount: r.amount, selected: r.id == cursor }
-                    }).collect::<Vec<_>>()).into_iter()}
-                }
-            }
-        }
     }
 }
 
@@ -112,9 +79,8 @@ mod on_air {
     }
 }
 
-fn page(dx: bool) -> String {
-    let body =
-        if dx { aio::page::body("") } else { format!(r#"<div id="main"></div><script>{}</script>"#, air::PAGE_JS) };
+fn page() -> String {
+    let body = format!(r#"<div id="main"></div><script>{}</script>"#, air::PAGE_JS);
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>hold</title></head><body>{body}</body></html>"#
     );
@@ -149,32 +115,12 @@ fn serve_air(mut s: std::os::unix::net::UnixStream) {
     }
 }
 
-/// Dioxus's: the shell's `wire` (aio-shell lib.rs), less the stale-repeat filter.
-fn serve_dx(s: std::os::unix::net::UnixStream) {
-    use dioxus_liveview::{LiveViewError, LiveViewPool};
-    use tokio_util::codec::{Framed, LengthDelimitedCodec};
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
-    rt.block_on(async move {
-        s.set_nonblocking(true).expect("nonblocking");
-        let s = tokio::net::UnixStream::from_std(s).expect("tokio socket");
-        let ws = Framed::new(s, LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec())
-            .map(|r| r.map(|b| b.to_vec()).map_err(|_| LiveViewError::SendingFailed))
-            .with(|v: Vec<u8>| std::future::ready(Ok::<_, std::io::Error>(bytes::Bytes::from(v))))
-            .sink_map_err(|_| LiveViewError::SendingFailed);
-        _ = LiveViewPool::new().launch_virtualdom(ws, || dioxus_core::VirtualDom::new(dx::app)).await;
-    });
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dx = match args.get(1).map(String::as_str) {
-        Some("dx") => true,
-        Some("air") => false,
-        _ => {
-            eprintln!("usage: hold dx|air [keys] [gap ms] [rows]");
-            std::process::exit(2);
-        }
-    };
+    if args.get(1).map(String::as_str) != Some("air") {
+        eprintln!("usage: hold air [keys] [gap ms] [rows]");
+        std::process::exit(2);
+    }
     let keys = args.get(2).map_or("200", String::as_str);
     let gap = args.get(3).map_or("40", String::as_str);
     _ = ROWS.set(args.get(4).and_then(|r| r.parse().ok()).unwrap_or(1000));
@@ -187,7 +133,7 @@ fn main() {
     ] {
         std::fs::write(dir.join(f), s).expect("harness file");
     }
-    let html = page(dx);
+    let html = page();
     eprintln!("page: {} B", html.len());
     std::fs::write(dir.join("page.html"), html).expect("page");
     let sock = dir.join("s.sock");
@@ -212,7 +158,7 @@ fn main() {
         .spawn()
         .expect("electron");
     let (s, _) = listener.accept().expect("the page's connection");
-    std::thread::spawn(move || if dx { serve_dx(s) } else { serve_air(s) });
+    std::thread::spawn(move || serve_air(s));
     let out = std::io::BufReader::new(child.stdout.take().expect("stdout"));
     let line = out.lines().map_while(Result::ok).find(|l| l.starts_with(r#"{"bench""#));
     _ = child.wait();
@@ -221,10 +167,10 @@ fn main() {
         eprintln!("no result from the harness");
         std::process::exit(1);
     };
-    report(dx, &line);
+    report(&line);
 }
 
-fn report(dx: bool, line: &str) {
+fn report(line: &str) {
     let v: aio::serde_json::Value = aio::serde_json::from_str(line).expect("result");
     let mut lat: Vec<f64> = v["lat"].as_array().unwrap().iter().filter_map(|x| x.as_f64()).collect();
     let missed = v["keys"].as_u64().unwrap() as usize - lat.len();
@@ -232,8 +178,7 @@ fn report(dx: bool, line: &str) {
     let bytes: Vec<u64> = v["bytes"].as_array().unwrap().iter().filter_map(|x| x.as_u64()).collect();
     let q = |p: f64| lat[((lat.len() - 1) as f64 * p) as usize];
     println!(
-        "{}: rows {} selected {} keys {} (no frame: {missed}) keydown->applied p50 {:.2} ms p95 {:.2} ms max {:.2} ms, {:.0} B/key",
-        if dx { "dioxus" } else { "air" },
+        "air: rows {} selected {} keys {} (no frame: {missed}) keydown->applied p50 {:.2} ms p95 {:.2} ms max {:.2} ms, {:.0} B/key",
         v["nodes"],
         v["selected"],
         v["keys"],

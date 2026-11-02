@@ -3,7 +3,8 @@
 //! hint, error and `required` to the control inside it by context: the label
 //! targets the control (`for`), the control is named, described by the hint or
 //! error, `aria-invalid` and `aria-required`. A caller's own attribute wins.
-use super::{flag, join, keys::field_key, use_id};
+//! Every prop that may change is a [`Prop`]: the control follows it.
+use super::{join, keys::field_key, use_id};
 use crate::ui::prelude::*;
 
 /// What a button is for.
@@ -37,28 +38,32 @@ impl Size {
     }
 }
 
+/// A kit button's classes.
+pub(super) fn btn_class(variant: Variant, size: Size, class: &str) -> String {
+    join(&format!("aio-btn aio-btn--{} aio-btn--{}", variant.key(), size.key()), class)
+}
+
 /// A button: `type="button"` unless said, so it never submits a form by accident.
 #[component]
 pub fn Button(
-    #[props(default)] variant: Variant,
-    #[props(default)] size: Size,
-    #[props(default = String::from("button"), into)] r#type: String,
-    #[props(default)] disabled: bool,
-    #[props(default, into)] class: String,
+    #[props(default)] variant: Prop<Variant>,
+    #[props(default)] size: Prop<Size>,
+    #[props(default = String::from("button"), into)] r#type: Prop<String>,
+    #[props(default)] disabled: Prop<bool>,
+    #[props(default, into)] class: Prop<String>,
     onclick: Option<EventHandler<MouseEvent>>,
     /// Its element, to focus it later.
     onmounted: Option<EventHandler<MountedEvent>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
-    let cls = join(&format!("aio-btn aio-btn--{} aio-btn--{}", variant.key(), size.key()), &class);
     let tip = use_tip();
     rsx! {
         button {
             r#type,
-            class: cls,
+            class: btn_class(variant.get(), size.get(), &class.get()),
             "aria-describedby": tip,
-            disabled: flag(disabled),
+            disabled,
             onclick: move |e| if let Some(f) = onclick { f.call(e) },
             onmounted: move |e| if let Some(f) = onmounted { f.call(e) },
             ..attributes,
@@ -67,11 +72,10 @@ pub fn Button(
     }
 }
 
-/// What a `Field` tells the control inside it: signals, so a control that
-/// didn't re-render (same props) still follows a new error.
+/// What a `Field` tells the control inside it.
 #[derive(Clone, Copy)]
 struct FieldCx {
-    said: Signal<Said>,
+    said: Memo<Said>,
     /// Whether a control took the label's `for` (the first one does).
     claimed: Signal<bool>,
 }
@@ -79,21 +83,47 @@ struct FieldCx {
 #[derive(Clone, Default, PartialEq)]
 struct Said {
     base: String,
-    label: Option<String>,
+    labelled: bool,
     /// The id of the hint or error that describes the control.
     described: Option<String>,
     error: bool,
     required: bool,
 }
 
-/// The attributes a control takes from its field.
-#[derive(Default)]
+/// What a control takes from the field around it (read in its holes:
+/// each follows the field).
+#[derive(Clone, Default)]
 pub(super) struct Wiring {
+    /// The control's id, if it took the label's `for`.
     pub id: Option<String>,
-    pub label: Option<String>,
-    pub described: Option<String>,
-    pub invalid: Option<&'static str>,
-    pub required: Option<&'static str>,
+    cx: Option<FieldCx>,
+    tip: Option<String>,
+    group: bool,
+}
+
+impl Wiring {
+    /// The hint's or error's id and the tooltip's, if any.
+    pub fn described(&self) -> Option<String> {
+        let own = self.cx.and_then(|f| f.said.with(|s| s.described.clone()));
+        match (own, self.tip.clone()) {
+            (Some(a), Some(b)) => Some(format!("{a} {b}")),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The field's label's id, for a group (a group is named by its field).
+    pub fn labelledby(&self) -> Option<String> {
+        self.cx.filter(|_| self.group).and_then(|f| f.said.with(|s| s.labelled.then(|| format!("{}-label", s.base))))
+    }
+
+    /// The field has an error.
+    pub fn invalid(&self) -> bool {
+        !self.group && self.cx.is_some_and(|f| f.said.with(|s| s.error))
+    }
+
+    pub fn required(&self) -> Option<&'static str> {
+        (!self.group && self.cx.is_some_and(|f| f.said.with(|s| s.required))).then_some("true")
+    }
 }
 
 /// The bubble id of the tooltip around a control, if any.
@@ -109,106 +139,124 @@ pub(super) fn use_field(named: bool, group: bool) -> Wiring {
     let cx = try_context::<FieldCx>();
     let mine = once(|| {
         cx.is_some_and(|f| {
-            let free = !named && !group && f.said.read_untracked().label.is_some() && !*f.claimed.read_untracked();
+            let free = !named && !group && f.said.with_untracked(|s| s.labelled) && !f.claimed.get_untracked();
             if free {
                 f.claimed.set(true);
             }
             free
         })
     });
-    let Some(f) = cx else { return Wiring { described: tip, ..Wiring::default() } };
-    let s = f.said.read();
-    let described = match (s.described.clone(), tip) {
-        (Some(a), Some(b)) => Some(format!("{a} {b}")),
-        (a, b) => a.or(b),
-    };
-    Wiring {
-        id: mine.then(|| format!("{}-control", s.base)),
-        label: if group { s.label.clone() } else { None },
-        described,
-        invalid: (s.error && !group).then_some("true"),
-        required: (s.required && !group).then_some("true"),
-    }
+    let id = cx.filter(|_| mine).map(|f| f.said.with_untracked(|s| format!("{}-control", s.base)));
+    Wiring { id, cx, tip, group }
 }
 
-/// A label, an optional hint, and an error that turns the field invalid.
+/// A label (text or any view), an optional hint, and an error that turns
+/// the field invalid.
 #[component]
 pub fn Field(
-    #[props(into)] label: Option<String>,
-    #[props(into)] hint: Option<String>,
-    #[props(into)] error: Option<String>,
-    #[props(default)] required: bool,
-    #[props(default, into)] class: String,
+    label: Option<View>,
+    #[props(into)] hint: Prop<Option<String>>,
+    #[props(into)] error: Prop<Option<String>>,
+    #[props(default)] required: Prop<bool>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
     let base = use_id("field");
-    let label = label.map(|l| l.trim().to_owned()).filter(|l| !l.is_empty());
-    let error = error.filter(|e| !e.is_empty());
-    let described = match (&error, &hint) {
-        (Some(_), _) => Some(format!("{base}-error")),
-        (None, Some(_)) => Some(format!("{base}-hint")),
-        _ => None,
+    let labelled = label.is_some();
+    let error = {
+        let error = error.clone();
+        memo(move || error.get().filter(|e| !e.is_empty()))
     };
-    let now = Said { base: base.clone(), label: label.clone(), described, error: error.is_some(), required };
-    let cx = provide(|| FieldCx { said: Signal::new(now.clone()), claimed: Signal::new(false) });
-    let said = cx.said;
-    if *said.read_untracked() != now {
-        said.set(now);
-    }
-    let target = (cx.claimed).get().then(|| format!("{base}-control"));
+    let said = {
+        let (base, hint, required) = (base.clone(), hint.clone(), required);
+        memo(move || Said {
+            base: base.clone(),
+            labelled,
+            described: match (error.with(Option::is_some), hint.with(Option::is_some)) {
+                (true, _) => Some(format!("{base}-error")),
+                (false, true) => Some(format!("{base}-hint")),
+                _ => None,
+            },
+            error: error.with(Option::is_some),
+            required: required.get(),
+        })
+    };
+    let cx = provide(|| FieldCx { said, claimed: Signal::new(false) });
+    let claimed = cx.claimed;
     rsx! {
-        div { class: join("aio-field", &class), ..attributes,
-            if let Some(l) = &label {
-                label { class: "aio-field__label", r#for: target,
-                    "{l}"
-                    if required {
+        div { class: join("aio-field", &class.get()), ..attributes,
+            if labelled {
+                label { class: "aio-field__label", id: "{base}-label", r#for: claimed.get().then(|| format!("{base}-control")),
+                    {label.clone()}
+                    if required.get() {
                         span { class: "aio-field__req", " *" }
                     }
                 }
             }
             {children}
-            if let Some(e) = &error {
-                div { class: "aio-field__error", id: "{base}-error", "{e}" }
-            } else if let Some(h) = &hint {
-                div { class: "aio-field__hint", id: "{base}-hint", "{h}" }
+            if error.with(Option::is_some) {
+                div { class: "aio-field__error", id: "{base}-error", {error.get()} }
+            } else if hint.with(Option::is_some) {
+                div { class: "aio-field__hint", id: "{base}-hint", {hint.get()} }
             }
         }
     }
 }
 
-/// A one-line text input; `oninput` and `onchange` get the value.
+/// An input's classes.
+fn input_class(base: &str, invalid: bool, class: &str) -> String {
+    join(&format!("{base}{}", if invalid { " aio-input--invalid" } else { "" }), class)
+}
+
+/// A one-line text input; `oninput` and `onchange` get the value. Only a
+/// controlled input (`value` given) has its value set by the view.
 #[component]
 pub fn Input(
-    #[props(into)] value: Option<String>,
-    #[props(default = String::from("text"), into)] r#type: String,
-    #[props(into)] placeholder: Option<String>,
-    #[props(default)] disabled: bool,
-    #[props(default)] invalid: bool,
-    #[props(default, into)] class: String,
+    #[props(into)] value: Prop<Option<String>>,
+    /// Wired to a form's field ([`Form::bind`](super::Form::bind)): its
+    /// value, edits and blur; its error marks the input invalid.
+    bind: Option<super::Bind>,
+    #[props(default = String::from("text"), into)] r#type: Prop<String>,
+    #[props(into)] placeholder: Prop<Option<String>>,
+    #[props(default)] disabled: Prop<bool>,
+    #[props(default)] invalid: Prop<bool>,
+    #[props(default, into)] class: Prop<String>,
     oninput: Option<EventHandler<String>>,
     onchange: Option<EventHandler<String>>,
     onkeydown: Option<EventHandler<KeyboardEvent>>,
     #[props(extends = GlobalAttributes)] mut attributes: Vec<Attribute>,
 ) -> View {
     let w = use_field(false, false);
-    let invalid = invalid || w.invalid.is_some();
-    // Only a controlled input has a value attribute: Dioxus rewrites `value`
-    // on each render, and an absent one clears what was typed.
-    if let Some(v) = value {
-        attributes.push(Attribute::new("value", v, None, true));
+    if let Some(b) = bind.clone() {
+        attributes.insert(0, Attribute::live("value", move || b.value()));
+    } else if value.is_live() || value.with_untracked(Option::is_some) {
+        attributes.insert(0, Attribute::live("value", move || value.get().unwrap_or_default()));
     }
+    let bad = {
+        let (w, bind) = (w.clone(), bind.clone());
+        memo(move || invalid.get() || w.invalid() || bind.as_ref().is_some_and(super::Bind::invalid))
+    };
+    let (typed, left) = (bind.clone(), bind);
     rsx! {
         input {
             r#type,
-            class: join(&format!("aio-input{}", if invalid { " aio-input--invalid" } else { "" }), &class),
+            class: input_class("aio-input", bad.get(), &class.get()),
             placeholder,
-            disabled: flag(disabled),
-            id: w.id,
-            "aria-describedby": w.described,
-            "aria-invalid": invalid.then_some("true"),
-            "aria-required": w.required,
-            oninput: move |e| if let Some(f) = oninput { f.call(e.value()) },
+            disabled,
+            id: w.id.clone(),
+            "aria-describedby": w.described(),
+            "aria-invalid": bad.get().then_some("true"),
+            "aria-required": w.required(),
+            oninput: move |e| {
+                if let Some(b) = &typed {
+                    b.input(e.value());
+                }
+                if let Some(f) = oninput {
+                    f.call(e.value())
+                }
+            },
+            onblur: move |_| if let Some(b) = &left { b.blur() },
             onchange: move |e| if let Some(f) = onchange { f.call(e.value()) },
             onkeydown: move |e| {
                 field_key(&e);
@@ -224,30 +272,44 @@ pub fn Input(
 /// A multi-line text input; `oninput` gets the value.
 #[component]
 pub fn Textarea(
-    #[props(default, into)] value: String,
-    #[props(into)] placeholder: Option<String>,
-    #[props(default = 3)] rows: u32,
-    #[props(default)] disabled: bool,
-    #[props(default)] invalid: bool,
-    #[props(default, into)] class: String,
+    #[props(default, into)] value: Prop<String>,
+    /// Wired to a form's field, as [`Input`]'s.
+    bind: Option<super::Bind>,
+    #[props(into)] placeholder: Prop<Option<String>>,
+    #[props(default = 3)] rows: Prop<u32>,
+    #[props(default)] disabled: Prop<bool>,
+    #[props(default)] invalid: Prop<bool>,
+    #[props(default, into)] class: Prop<String>,
     oninput: Option<EventHandler<String>>,
     onkeydown: Option<EventHandler<KeyboardEvent>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     let w = use_field(false, false);
-    let invalid = invalid || w.invalid.is_some();
+    let bad = {
+        let (w, bind) = (w.clone(), bind.clone());
+        memo(move || invalid.get() || w.invalid() || bind.as_ref().is_some_and(super::Bind::invalid))
+    };
+    let (shown, typed, left) = (bind.clone(), bind.clone(), bind);
     rsx! {
         textarea {
-            class: join(&format!("aio-input aio-textarea{}", if invalid { " aio-input--invalid" } else { "" }), &class),
-            value,
+            class: input_class("aio-input aio-textarea", bad.get(), &class.get()),
+            value: match &shown { Some(b) => b.value(), None => value.get() },
             placeholder,
-            rows: "{rows}",
-            disabled: flag(disabled),
-            id: w.id,
-            "aria-describedby": w.described,
-            "aria-invalid": invalid.then_some("true"),
-            "aria-required": w.required,
-            oninput: move |e| if let Some(f) = oninput { f.call(e.value()) },
+            rows,
+            disabled,
+            id: w.id.clone(),
+            "aria-describedby": w.described(),
+            "aria-invalid": bad.get().then_some("true"),
+            "aria-required": w.required(),
+            oninput: move |e| {
+                if let Some(b) = &typed {
+                    b.input(e.value());
+                }
+                if let Some(f) = oninput {
+                    f.call(e.value())
+                }
+            },
+            onblur: move |_| if let Some(b) = &left { b.blur() },
             onkeydown: move |e| {
                 field_key(&e);
                 if let Some(f) = onkeydown {
@@ -277,71 +339,92 @@ impl<S: Into<String>> From<S> for Opt {
 /// A dropdown; `onchange` gets the chosen value.
 #[component]
 pub fn Select(
-    #[props(into)] options: Vec<Opt>,
-    #[props(default, into)] value: String,
-    #[props(default)] disabled: bool,
-    #[props(default)] invalid: bool,
-    #[props(default, into)] class: String,
+    #[props(into)] options: Prop<Vec<Opt>>,
+    #[props(default, into)] value: Prop<String>,
+    /// Wired to a form's field, as [`Input`]'s.
+    bind: Option<super::Bind>,
+    #[props(default)] disabled: Prop<bool>,
+    #[props(default)] invalid: Prop<bool>,
+    #[props(default, into)] class: Prop<String>,
     onchange: Option<EventHandler<String>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     let w = use_field(false, false);
-    let invalid = invalid || w.invalid.is_some();
+    let bad = {
+        let (w, bind) = (w.clone(), bind.clone());
+        memo(move || invalid.get() || w.invalid() || bind.as_ref().is_some_and(super::Bind::invalid))
+    };
+    let chosen = {
+        let bind = bind.clone();
+        memo(move || match &bind {
+            Some(b) => b.value(),
+            None => value.get(),
+        })
+    };
+    let (picked, left) = (bind.clone(), bind);
     rsx! {
         select {
-            class: join(&format!("aio-input aio-select{}", if invalid { " aio-input--invalid" } else { "" }), &class),
-            value: "{value}",
-            disabled: flag(disabled),
-            id: w.id,
-            "aria-describedby": w.described,
-            "aria-invalid": invalid.then_some("true"),
-            "aria-required": w.required,
-            onchange: move |e| if let Some(f) = onchange { f.call(e.value()) },
+            class: input_class("aio-input aio-select", bad.get(), &class.get()),
+            disabled,
+            id: w.id.clone(),
+            "aria-describedby": w.described(),
+            "aria-invalid": bad.get().then_some("true"),
+            "aria-required": w.required(),
+            onchange: move |e| {
+                if let Some(b) = &picked {
+                    b.input(e.value());
+                }
+                if let Some(f) = onchange {
+                    f.call(e.value())
+                }
+            },
+            onblur: move |_| if let Some(b) = &left { b.blur() },
             onkeydown: move |e| field_key(&e),
             ..attributes,
-            for o in options {
-                option { key: "{o.value}", value: "{o.value}", disabled: flag(o.disabled), selected: flag(o.value == value), "{o.label}" }
+            for o in options.get() {
+                option { key: "{o.value}", value: "{o.value}", disabled: o.disabled, selected: o.value == chosen.get(), "{o.label}" }
             }
         }
     }
 }
 
-/// A checkbox, with an optional label beside it; `onchange` gets the new state.
+/// A checkbox, with an optional label (text or any view) beside it;
+/// `onchange` gets the new state.
 #[component]
 pub fn Checkbox(
-    #[props(default)] checked: bool,
-    #[props(default)] disabled: bool,
-    #[props(into)] label: Option<String>,
-    #[props(default, into)] class: String,
+    #[props(default)] checked: Prop<bool>,
+    #[props(default)] disabled: Prop<bool>,
+    label: Option<View>,
+    #[props(default, into)] class: Prop<String>,
     onchange: Option<EventHandler<bool>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let w = use_field(label.is_some(), false);
-    let own = label.as_deref().map(str::trim).filter(|l| !l.is_empty()).map(String::from);
-    let box_cls = if label.is_none() { join("aio-checkbox", &class) } else { "aio-checkbox".into() };
+    let labelled = label.is_some();
+    let w = use_field(labelled, false);
+    let named = use_id("checkbox");
     let input = rsx! {
         input {
             r#type: "checkbox",
-            class: box_cls,
+            class: if labelled { "aio-checkbox".into() } else { join("aio-checkbox", &class.get()) },
             checked,
-            disabled: flag(disabled),
-            id: w.id,
-            "aria-label": own,
-            "aria-describedby": w.described,
-            "aria-invalid": w.invalid,
-            "aria-required": w.required,
+            disabled,
+            id: w.id.clone(),
+            "aria-labelledby": labelled.then(|| format!("{named}-label")),
+            "aria-describedby": w.described(),
+            "aria-invalid": w.invalid().then_some("true"),
+            "aria-required": w.required(),
             oninput: move |e| if let Some(f) = onchange { f.call(e.checked()) },
             ..attributes,
         }
     };
-    match label {
-        None => input,
-        Some(l) => rsx! {
-            label { class: join("aio-checkbox-row", &class),
-                {input}
-                span { "{l}" }
-            }
-        },
+    if !labelled {
+        return input;
+    }
+    rsx! {
+        label { class: join("aio-checkbox-row", &class.get()),
+            {input}
+            span { id: "{named}-label", {label} }
+        }
     }
 }
 

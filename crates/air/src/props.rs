@@ -42,6 +42,13 @@ pub fn builder_of<P: Props, M, C: crate::Component<P, M>>(_: &C) -> P::Builder {
     P::builder()
 }
 
+/// The builder `b`, for a component given attributes: one that takes
+/// none is refused here, with [`GlobalAttributes`]'s message.
+#[doc(hidden)]
+pub fn with_attributes<B: GlobalAttributes>(b: B) -> B {
+    b
+}
+
 #[doc(hidden)]
 pub struct ByVal;
 #[doc(hidden)]

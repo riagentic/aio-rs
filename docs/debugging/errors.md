@@ -224,7 +224,7 @@ in its `logs/` folder (`ax data <app>` shows where):
 | `warning.log` | the `WARN` lines |
 | `perf.log` | each blown `[perf]` budget, with where the call's time went (`clone`, `apply`, `check`, `commit`) |
 | `start.log` | the output of an app `ax start` launched |
-| `dev.log` | dx's whole output under `ax dev` |
+| `build.log` | a failed build's errors under `ax dev` (`ax errors` reads it) |
 
 A line reads `2026-10-28T09:48:01.123Z WARN  [net] lost 3 frames peer=7`:
 the stamp, the level padded to 5, the category (`aio` for the framework,

@@ -39,6 +39,10 @@ The gates, in order:
   and a reason.
 - `scripts/slim-metrics --check`: each feature set's crate count stays
   under its ceiling (`deps.toml [ceilings]`).
+- `scripts/public-api --check`: the published crates' public API is the one
+  checked in (`scripts/api/<crate>.txt`, from rustdoc's JSON), and none of
+  it names aio-rs 0.1's renderer. A change to the API: run
+  `scripts/public-api` and commit what it wrote.
 - `scripts/docs-check`: the guide holds together (below).
 - `scripts/mutants --check`: the mutation ledger (`scripts/mutants.toml`)
   holds together. `scripts/mutants` plants each break, in the source or in
@@ -69,9 +73,8 @@ The Windows tests run on a real Windows when one is named:
 GitHub (`.github/workflows/ci.yml`) runs `./ci.sh` on Ubuntu after
 `ax setup` (with `ffmpeg` for the test videos), its parts side by side:
 `./ci.sh lint` and `./ci.sh test` (each part runs alone so; no part: all
-of them), its dx part as `scripts/dx-metrics --dioxus`, `--air` and
-`--apk`, each against the base measured on its own runner; the ledger's
-fast breaks (`scripts/mutants --fast`), the workspace clippy and tests on
+of them), its dx part as `scripts/dx-metrics --air` and `--apk`, each
+against the base measured on its own runner; the ledger's fast breaks (`scripts/mutants --fast`), the workspace clippy and tests on
 Windows and macOS with the Electron runtime (`ax runtime --fetch`), and
 `cargo audit` (accepted advisories in `.cargo/audit.toml`). Rust caches
 are saved by main's runs only; a PR's newer push cancels its older run,

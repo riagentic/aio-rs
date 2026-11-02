@@ -12,7 +12,7 @@ methods, effects, views and the log.
  │  views (aio::ui) ──act!──▶ cells: state + methods ◀── effects, schedules (aio::rt) │
  │     ▲        part()          │       ▲                                            │
  │     │                        │       └── doors: Handle, local door (ax, peers),   │
- │     │ re-render              ▼           /ws for synced copies (mode server)      │
+ │     │ holes update           ▼           /ws for synced copies (mode server)      │
  │     │               the store: state.db (snapshots + the event log, SQLite)       │
  │     │                                                                             │
  └─────┼─────────────────────────────────────────────────────────────────────────────┘
@@ -28,7 +28,7 @@ methods, effects, views and the log.
   process. Nothing else writes a cell; everything else calls a method
   through a door.
 - **The page only draws.** On the desktop, the view tree lives in Rust
-  (Dioxus's liveview today, behind `aio::ui`), and the shared Electron runtime renders it from DOM
+  (air's, behind `aio::ui`), and the shared Electron runtime renders it from DOM
   edits sent over a private socket (a 0700 folder, loaded from
   `aio://app`). The page has no Node, no network and no key.
 - **A synced copy is a cell too.** A window in `client` mode, a browser
@@ -46,7 +46,7 @@ methods, effects, views and the log.
    (coalesced for `#[coalesce]` methods, [persistence](../persistence/README.md)).
    `listens_to` reactions run inside that commit: their calls commit in
    the same transaction.
-4. After the commit: views whose fields changed re-render, synced copies
+4. After the commit: the views' holes that read a changed field run again, synced copies
    get a patch, effects the call asked for start, listeners run.
 5. An effect's result comes back as a call, so it goes through 1-4 too.
 

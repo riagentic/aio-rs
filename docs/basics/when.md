@@ -31,7 +31,7 @@ purpose.
 | State redrawn every frame (a game, a 3D scene) | views redraw on a change of state, not per frame | a game engine, wgpu |
 | iOS | no iOS client yet | aio (the TypeScript line) has one |
 | A frozen API today | 0.x: a minor version may break ([versions](versioning.md)) | aio 1.x, or pin aio-rs (below) |
-| A small download with the system webview | desktop windows draw in one shared Electron runtime ([why](why.md#when-not-to-use-aio-rs)) | Tauri, Dioxus desktop |
+| A small download with the system webview | desktop windows draw in one shared Electron runtime ([why](why.md#when-not-to-use-aio-rs)) | Tauri, or another system-webview stack ([comparison](../comparison.md)) |
 
 ## Pin the version
 

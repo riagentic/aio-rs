@@ -1,40 +1,13 @@
-//! A window's views on the build's one renderer, over the window's wire
-//! (the desktop runtime's socket, Android's port): Dioxus's liveview
-//! (feature `dioxus`, the default) or air (feature `air` alone, no Dioxus
-//! in the build). One call per page connected: its views until it goes.
+//! A window's views, drawn by air over the window's wire (the desktop
+//! runtime's socket, Android's port, a browser tab's WebSocket). One call
+//! per page connected: its views until it goes.
 use aio::ui::View;
-
-#[cfg(not(any(feature = "dioxus", feature = "air")))]
-compile_error!("aio-rs-shell: no renderer: its default features (`dioxus`), or `air` with `default-features = false`");
-
-/// The windows' views of this process.
-#[cfg(feature = "dioxus")]
-#[derive(Clone)]
-pub(crate) struct Views(std::sync::Arc<dioxus_liveview::LiveViewPool>);
-
-#[cfg(feature = "dioxus")]
-impl Views {
-    pub fn new() -> Self {
-        Self(std::sync::Arc::new(dioxus_liveview::LiveViewPool::new()))
-    }
-
-    /// `app`'s views for the page on `s`, until it goes.
-    pub async fn launch(&self, s: aio::ipc::Stream, app: fn() -> View) -> Result<(), String> {
-        let dom = move || {
-            crate::WINDOW_THREAD.set(true);
-            dioxus_core::VirtualDom::new(app)
-        };
-        self.0.launch_virtualdom(crate::wire(s), dom).await.map_err(|e| e.to_string())
-    }
-}
 
 /// The windows' views of this process: each page's on a thread of its own
 /// (air keeps one root per thread), its tasks on that thread's runtime.
-#[cfg(all(feature = "air", not(feature = "dioxus")))]
 #[derive(Clone)]
 pub(crate) struct Views;
 
-#[cfg(all(feature = "air", not(feature = "dioxus")))]
 impl Views {
     pub fn new() -> Self {
         Self
@@ -59,20 +32,26 @@ impl Views {
     }
 }
 
-#[cfg(all(feature = "air", not(feature = "dioxus")))]
-const _: () = assert!(aio::ui::ON_AIR, "aio-rs-shell on air needs the views on air: aio-rs without `kit`");
+/// A dev build's mounted components of every open window (`Aio.components`,
+/// `ax components`): each one's name, key, body runs (`renders`), its own
+/// holes' rewrites (`updates`) and its children, as of the last flush.
+pub(crate) fn components() -> aio::serde_json::Value {
+    let all: Vec<_> =
+        on_air::TREES.lock().unwrap_or_else(|e| e.into_inner()).iter().flat_map(|t| t.1.clone()).collect();
+    let total: u64 = all.iter().map(on_air::runs).sum();
+    aio::serde_json::json!({ "components": all, "renders": [], "total": total })
+}
 
 /// `ax dev`'s hot reload (the door's `Aio.hot`): `markup` for the
 /// templates of `files`, then every window's views built again in place,
 /// their state kept. How many windows were told.
-#[cfg(all(feature = "air", not(feature = "dioxus")))]
 pub(crate) fn hot(files: &[String], markup: Vec<air::hot::Markup>) -> usize {
     air::hot::set_markup(files, markup);
     on_air::rebuild()
 }
 
-#[cfg(all(feature = "air", not(feature = "dioxus")))]
 pub(crate) mod on_air {
+    use aio::serde_json::Value;
     use aio::ui::View;
     use futures_util::{SinkExt, StreamExt};
     use std::sync::Mutex;
@@ -80,6 +59,38 @@ pub(crate) mod on_air {
 
     /// Each open window's way to be told to build its views again.
     static WINDOWS: Mutex<Vec<UnboundedSender<()>>> = Mutex::new(Vec::new());
+
+    /// A dev build's component trees, one per open window (its thread's id).
+    pub(super) static TREES: Mutex<Vec<(std::thread::ThreadId, Vec<Value>)>> = Mutex::new(Vec::new());
+
+    /// One component and its children as `Aio.components` says them (pure).
+    fn json(c: air::Mounted) -> Value {
+        let children: Vec<Value> = c.children.into_iter().map(json).collect();
+        aio::serde_json::json!({ "name": c.name, "key": c.key, "renders": c.renders, "updates": c.updates, "children": children })
+    }
+
+    /// A tree's body runs and hole rewrites, all of it.
+    pub(super) fn runs(v: &Value) -> u64 {
+        let own = v["renders"].as_u64().unwrap_or(0) + v["updates"].as_u64().unwrap_or(0);
+        own + v["children"].as_array().map_or(0, |c| c.iter().map(runs).sum())
+    }
+
+    /// This window's tree, kept for the door (a dev build's), or dropped as it goes.
+    fn keep_tree(tree: Option<Vec<Value>>) {
+        let me = std::thread::current().id();
+        let mut t = TREES.lock().unwrap_or_else(|e| e.into_inner());
+        t.retain(|(id, _)| *id != me);
+        t.extend(tree.map(|tree| (me, tree)));
+    }
+
+    /// Drops this window's tree when its pump ends, however it ends.
+    struct Kept;
+
+    impl Drop for Kept {
+        fn drop(&mut self) {
+            keep_tree(None);
+        }
+    }
 
     /// Tell every open window to build its views again; how many there are.
     pub fn rebuild() -> usize {
@@ -92,7 +103,7 @@ pub(crate) mod on_air {
     /// (`ax dev`'s hot-patch, a dev build's).
     fn current(app: fn() -> View) -> View {
         #[cfg(all(debug_assertions, feature = "dev"))]
-        return subsecond::HotFn::current(app).call(());
+        return aio_hotpatch::HotFn::current(app).call(());
         #[cfg(not(all(debug_assertions, feature = "dev")))]
         app()
     }
@@ -118,10 +129,14 @@ pub(crate) mod on_air {
         WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
         let root = air::Root::new();
         root.show(move || current(app));
+        let _kept = Kept;
         loop {
             air::run_tasks();
             let edits = root.take_edits();
             if !edits.is_empty() {
+                if cfg!(debug_assertions) {
+                    keep_tree(Some(root.within(air::components).into_iter().map(json).collect()));
+                }
                 to_page.send(edits).await.map_err(|_| "the page is gone".to_string())?;
             }
             for e in root.uncaught() {
@@ -139,7 +154,7 @@ pub(crate) mod on_air {
     }
 }
 
-#[cfg(all(test, feature = "air", not(feature = "dioxus")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use futures_util::StreamExt;
@@ -206,7 +221,9 @@ mod tests {
         let mut relay = crate::inspect::Relay::default();
         let me = relay.join();
         let answer = relay.ask(me, &ask.to_string()).unwrap_err();
-        assert_eq!(answer, r#"{"id":7,"result":{"windows":1}}"#, "answered at once, one window told");
+        // At once; this window among those told (the tests beside it in this process hold theirs).
+        let told: aio::serde_json::Value = aio::serde_json::from_str(&answer).unwrap();
+        assert!(told["id"] == 7 && told["result"]["windows"].as_u64() >= Some(1), "{answer}");
         let next =
             tokio::time::timeout(std::time::Duration::from_secs(10), page.next()).await.unwrap().unwrap().unwrap();
         assert!(said(&next).contains("Plus") && !said(&next).contains("Add"), "redrawn with the new markup");

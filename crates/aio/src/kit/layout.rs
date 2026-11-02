@@ -1,6 +1,6 @@
 //! Surfaces, layout and data (aio's `Card`, `Stack`, `Row`, `Spinner`, `Avatar`,
 //! `Pagination`, `Table`).
-use super::{flag, join};
+use super::join;
 use crate::ui::prelude::*;
 
 /// A bordered surface with an optional title and footer.
@@ -8,18 +8,18 @@ use crate::ui::prelude::*;
 pub fn Card(
     title: Option<View>,
     footer: Option<View>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
     rsx! {
-        div { class: join("aio-card", &class), ..attributes,
-            if let Some(t) = title {
-                div { class: "aio-card__title", {t} }
+        div { class: join("aio-card", &class.get()), ..attributes,
+            if title.is_some() {
+                div { class: "aio-card__title", {title.clone()} }
             }
             div { class: "aio-card__body", {children} }
-            if let Some(f) = footer {
-                div { class: "aio-card__footer", {f} }
+            if footer.is_some() {
+                div { class: "aio-card__footer", {footer.clone()} }
             }
         }
     }
@@ -35,40 +35,40 @@ fn flex(row: bool, gap: &str, align: &str) -> String {
 /// Children in a column, `gap` apart (any CSS length; 12px by default).
 #[component]
 pub fn Stack(
-    #[props(default = String::from("12px"), into)] gap: String,
-    #[props(default, into)] align: String,
-    #[props(default, into)] class: String,
+    #[props(default = String::from("12px"), into)] gap: Prop<String>,
+    #[props(default, into)] align: Prop<String>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
     rsx! {
-        div { class: join("aio-stack", &class), style: flex(false, &gap, &align), ..attributes, {children} }
+        div { class: join("aio-stack", &class.get()), style: flex(false, &gap.get(), &align.get()), ..attributes, {children} }
     }
 }
 
 /// Children in a row that wraps, `gap` apart.
 #[component]
 pub fn Row(
-    #[props(default = String::from("12px"), into)] gap: String,
-    #[props(default, into)] align: String,
-    #[props(default, into)] class: String,
+    #[props(default = String::from("12px"), into)] gap: Prop<String>,
+    #[props(default, into)] align: Prop<String>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
     rsx! {
-        div { class: join("aio-stack", &class), style: flex(true, &gap, &align), ..attributes, {children} }
+        div { class: join("aio-stack", &class.get()), style: flex(true, &gap.get(), &align.get()), ..attributes, {children} }
     }
 }
 
 /// A loading spinner, announced as `label`.
 #[component]
 pub fn Spinner(
-    #[props(default = String::from("Loading"), into)] label: String,
-    #[props(default, into)] class: String,
+    #[props(default = String::from("Loading"), into)] label: Prop<String>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     rsx! {
-        span { class: join("aio-spinner", &class), role: "status", "aria-label": label, ..attributes }
+        span { class: join("aio-spinner", &class.get()), role: "status", "aria-label": label, ..attributes }
     }
 }
 
@@ -94,29 +94,36 @@ pub fn avatar_hue(name: &str) -> u16 {
 /// A round avatar: the image at `src`, or initials on a colour from the name.
 #[component]
 pub fn Avatar(
-    #[props(into)] name: String,
-    #[props(into)] src: Option<String>,
-    #[props(default = 32)] size: u32,
+    #[props(into)] name: Prop<String>,
+    #[props(into)] src: Prop<Option<String>>,
+    #[props(default = 32)] size: Prop<u32>,
     /// Any CSS colour instead of the one from the name.
     #[props(into)]
-    color: Option<String>,
-    #[props(default, into)] class: String,
+    color: Prop<Option<String>>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let bg = color.unwrap_or_else(|| format!("hsl({}, 55%, 45%)", avatar_hue(&name)));
-    let font = (f64::from(size) * 0.4).round();
+    let style = {
+        let name = name.clone();
+        memo(move || {
+            let size = size.get();
+            let bg = color.get().unwrap_or_else(|| format!("hsl({}, 55%, 45%)", avatar_hue(&name.get())));
+            let font = (f64::from(size) * 0.4).round();
+            format!("width:{size}px;height:{size}px;font-size:{font}px;background:{bg}")
+        })
+    };
     rsx! {
         span {
-            class: join("aio-avatar", &class),
-            style: "width:{size}px;height:{size}px;font-size:{font}px;background:{bg}",
+            class: join("aio-avatar", &class.get()),
+            style,
             role: "img",
             "aria-label": "{name}",
             title: "{name}",
             ..attributes,
-            if let Some(src) = src {
-                img { class: "aio-avatar__img", src, alt: "{name}", width: "{size}", height: "{size}" }
+            if src.with(Option::is_some) {
+                img { class: "aio-avatar__img", src: src.get(), alt: "{name}", width: size, height: size }
             } else {
-                {initials(&name)}
+                {initials(&name.get())}
             }
         }
     }
@@ -138,40 +145,41 @@ pub fn page_window(page: u32, pages: u32, win: u32) -> Vec<u32> {
 #[component]
 pub fn Pagination(
     /// The current page, from 1.
-    page: u32,
-    pages: u32,
+    page: Prop<u32>,
+    pages: Prop<u32>,
     onpage: EventHandler<u32>,
-    #[props(default = 5)] window: u32,
-    #[props(default = String::from("Pagination"), into)] label: String,
-    #[props(default, into)] class: String,
+    #[props(default = 5)] window: Prop<u32>,
+    #[props(default = String::from("Pagination"), into)] label: Prop<String>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let clamp = |p: u32| p.clamp(1, pages.max(1));
-    let (prev, next) = (clamp(page.saturating_sub(1)), clamp(page + 1));
+    let clamp = move |p: u32| p.clamp(1, pages.get().max(1));
+    let prev = memo(move || clamp(page.get().saturating_sub(1)));
+    let next = memo(move || clamp(page.get() + 1));
     let go = move |p: u32| {
-        if p != page {
+        if p != page.get_untracked() {
             onpage.call(p)
         }
     };
     rsx! {
-        nav { class: join("aio-page", &class), "aria-label": label, ..attributes,
-            button { r#type: "button", class: "aio-page__btn", disabled: flag(prev == page), "aria-label": "Previous page", "data-t": "pagePrev",
-                onclick: move |_| go(prev), "‹"
+        nav { class: join("aio-page", &class.get()), "aria-label": label, ..attributes,
+            button { r#type: "button", class: "aio-page__btn", disabled: prev.get() == page.get(), "aria-label": "Previous page", "data-t": "pagePrev",
+                onclick: move |_| go(prev.get_untracked()), "‹"
             }
-            for p in page_window(clamp(page), pages, window) {
+            for p in page_window(clamp(page.get()), pages.get(), window.get()) {
                 button {
                     key: "{p}",
                     r#type: "button",
-                    class: if p == page { "aio-page__btn aio-page__btn--current" } else { "aio-page__btn" },
+                    class: if p == page.get() { "aio-page__btn aio-page__btn--current" } else { "aio-page__btn" },
                     "aria-label": "Page {p}",
                     "data-t": "page{p}",
-                    "aria-current": (p == page).then_some("page"),
+                    "aria-current": (p == page.get()).then_some("page"),
                     onclick: move |_| go(p),
                     "{p}"
                 }
             }
-            button { r#type: "button", class: "aio-page__btn", disabled: flag(next == page), "aria-label": "Next page", "data-t": "pageNext",
-                onclick: move |_| go(next), "›"
+            button { r#type: "button", class: "aio-page__btn", disabled: next.get() == page.get(), "aria-label": "Next page", "data-t": "pageNext",
+                onclick: move |_| go(next.get_untracked()), "›"
             }
         }
     }
@@ -189,7 +197,8 @@ pub enum Align {
 /// One column of a [`Table`]: its header and how a row shows in it.
 #[derive(Clone, PartialEq)]
 pub struct Column<R: 'static> {
-    pub header: String,
+    /// Text or any view.
+    pub header: View,
     pub cell: Callback<(R, usize), View>,
     pub align: Align,
     /// Any CSS width.
@@ -198,13 +207,21 @@ pub struct Column<R: 'static> {
 
 impl<R: 'static> Column<R> {
     /// A column of text.
-    pub fn text(header: impl Into<String>, f: impl Fn(&R) -> String + 'static) -> Self {
-        Self::view(header, move |r, _| rsx! { {f(r)} })
+    pub fn text<M>(header: impl ::air::IntoViewValue<M>, f: impl Fn(&R) -> String + 'static) -> Self {
+        Self::view(header, move |r, _| {
+            let s = f(r);
+            rsx! { {s} }
+        })
     }
 
     /// A column of anything (`f` gets the row and its index).
-    pub fn view(header: impl Into<String>, f: impl Fn(&R, usize) -> View + 'static) -> Self {
-        Self { header: header.into(), cell: Callback::new(move |(r, i)| f(&r, i)), align: Align::Start, width: None }
+    pub fn view<M>(header: impl ::air::IntoViewValue<M>, f: impl Fn(&R, usize) -> View + 'static) -> Self {
+        Self {
+            header: header.into_view_value(),
+            cell: Callback::new(move |(r, i)| f(&r, i)),
+            align: Align::Start,
+            width: None,
+        }
     }
 
     pub fn align(self, align: Align) -> Self {
@@ -233,71 +250,82 @@ fn press(e: &KeyboardEvent) -> bool {
 #[component]
 pub fn Table<R: Clone + PartialEq + 'static>(
     columns: Vec<Column<R>>,
-    rows: Vec<R>,
+    #[props(into)] rows: Prop<Vec<R>>,
     /// A stable key per row (the index by default).
     key_of: Option<Callback<R, String>>,
     /// Shown when there are no rows.
     #[props(default = rsx! { "No rows" })]
     empty: View,
     onrow: Option<EventHandler<(R, usize)>>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     let span = columns.len().max(1);
+    let keyed = memo(move || {
+        rows.get()
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| (key_of.map_or_else(|| i.to_string(), |k| k.call(r.clone())), i, r))
+            .collect::<Vec<_>>()
+    });
+    let cols: Vec<(usize, Column<R>)> = columns.into_iter().enumerate().collect();
+    let heads = cols.clone();
+    let cells = callback(move |(row, i): (R, usize)| {
+        rsx! {
+            for (k, c) in cols.clone() {
+                td {
+                    key: k,
+                    class: "aio-td",
+                    style: c.style(),
+                    // Enter or Space on a control in a cell is the control's, not the row's.
+                    onkeydown: move |e| if onrow.is_some() && press(&e) { e.stop_propagation() },
+                    {c.cell.call((row.clone(), i))}
+                }
+            }
+        }
+    });
     rsx! {
-        table { class: join("aio-table", &class), ..attributes,
+        table { class: join("aio-table", &class.get()), ..attributes,
             thead {
                 tr {
-                    for c in columns.iter() {
-                        th { class: "aio-th", style: c.style(), "{c.header}" }
+                    for (k, c) in heads {
+                        th { key: k, class: "aio-th", style: c.style(), {c.header.clone()} }
                     }
                 }
             }
             tbody {
-                if rows.is_empty() {
+                if keyed.with(Vec::is_empty) {
                     tr {
-                        td { class: "aio-td aio-table__empty", colspan: "{span}", {empty} }
+                        td { class: "aio-td aio-table__empty", colspan: "{span}", {empty.clone()} }
                     }
                 }
-                for (i, row) in rows.into_iter().enumerate() {
-                    {
-                        let key = key_of.map_or(i.to_string(), |k| k.call(row.clone()));
-                        let cells = rsx! {
-                            for c in columns.iter() {
-                                td {
-                                    class: "aio-td",
-                                    style: c.style(),
-                                    // Enter or Space on a control in a cell is the control's, not the row's.
-                                    onkeydown: move |e| if onrow.is_some() && press(&e) { e.stop_propagation() },
-                                    {c.cell.call((row.clone(), i))}
+                if onrow.is_none() {
+                    for (key, i, row) in keyed.get() {
+                        tr { key: "{key}", "data-t": "row-{key}", class: "aio-tr", {cells.call((row.clone(), i))} }
+                    }
+                } else {
+                    for (key, i, row) in keyed.get() {
+                        tr {
+                            key: "{key}",
+                            "data-t": "row-{key}",
+                            class: "aio-tr aio-tr--click",
+                            tabindex: "0",
+                            onclick: {
+                                let r = row.clone();
+                                move |e| {
+                                    e.stop_propagation();
+                                    if let Some(f) = onrow { f.call((r.clone(), i)) }
                                 }
-                            }
-                        };
-                        match onrow {
-                            None => rsx! {
-                                tr { key: "{key}", "data-t": "row-{key}", class: "aio-tr", {cells} }
                             },
-                            Some(f) => {
-                                let (r1, r2) = (row.clone(), row.clone());
-                                rsx! {
-                                    tr {
-                                        key: "{key}",
-                                        "data-t": "row-{key}",
-                                        class: "aio-tr aio-tr--click",
-                                        tabindex: "0",
-                                        onclick: move |e| {
-                                            e.stop_propagation();
-                                            f.call((r1.clone(), i))
-                                        },
-                                        onkeydown: move |e: KeyboardEvent| if press(&e) {
-                                            e.prevent_default();
-                                            e.stop_propagation();
-                                            f.call((r2.clone(), i));
-                                        },
-                                        {cells}
-                                    }
+                            onkeydown: {
+                                let r = row.clone();
+                                move |e: KeyboardEvent| if press(&e) {
+                                    e.prevent_default();
+                                    e.stop_propagation();
+                                    if let Some(f) = onrow { f.call((r.clone(), i)) }
                                 }
-                            }
+                            },
+                            {cells.call((row.clone(), i))}
                         }
                     }
                 }

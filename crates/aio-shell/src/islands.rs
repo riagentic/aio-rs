@@ -1,13 +1,11 @@
 //! The kit's islands (`aio::kit::WebIsland`) in the real page: the window's
-//! own HTML, CSP and DOM-edit interpreter, in a headless Chromium, its frames
+//! own HTML, CSP and air's interpreter, in a headless Chromium, its frames
 //! carried over the DevTools protocol where the preload would carry them.
-use crate::{Window, page_with, wire};
+use crate::{Window, page_with};
 use aio::kit::{Island, WebIsland};
 use aio::serde_json::{Value, json};
 use aio::ui::prelude::*;
 use base64::Engine;
-use dioxus_core::VirtualDom;
-use dioxus_liveview::LiveViewPool;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
@@ -116,7 +114,7 @@ struct Label {
 }
 
 fn app() -> View {
-    let mut n = signal(|| 0i64);
+    let n = signal(|| 0i64);
     let on = signal(|| true);
     let probe = signal(String::new);
     rsx! {
@@ -255,8 +253,7 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     let (view, ours) = tokio::io::duplex(1 << 20);
-    let pool = LiveViewPool::new();
-    tokio::spawn(async move { _ = pool.launch_virtualdom(wire(Box::new(view)), || VirtualDom::new(app)).await });
+    tokio::spawn(async move { _ = crate::views::Views::new().launch(Box::new(view), app).await });
     let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
     let (mut to_view, mut from_view) = StreamExt::split::<bytes::Bytes>(Framed::new(ours, codec));
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -275,7 +272,8 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
                 return;
             }
         }
-        panic!("never true: {expr}");
+        let page = eval(&mut ws, &mut id, "document.body.innerHTML").await;
+        panic!("never true: {expr}; the page: {page}");
     };
     let text = |box_id: &str| format!("document.getElementById('{box_id}')?.textContent");
     until(&format!("{} === 'n=0' && {} === 'n=100'", text("counter"), text("fixed"))).await;

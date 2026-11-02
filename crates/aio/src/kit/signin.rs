@@ -6,7 +6,7 @@
 //! refusal in words a person can act on. A wrong second-factor code spends
 //! the step: back to the password.
 use super::{Alert, Button, Field, Input, Tone, Variant, join};
-use crate::auth::client::{AuthError, Client, Login, Me, Signed, Signup};
+use crate::auth::client::{AuthError, Client, Login, Signed, Signup};
 use crate::ui::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,7 +87,7 @@ pub fn SignIn(
         let c = c.clone();
         async move { asked(async move { c.me(None).await }).await.ok() }
     });
-    let me = offers.get().flatten().unwrap_or(Me::default());
+    let me = memo(move || offers.get().flatten().unwrap_or_default());
     let submit = move |e: FormEvent| {
         e.prevent_default();
         if busy.get() {
@@ -162,74 +162,78 @@ pub fn SignIn(
         error.set(None);
         notice.set(None);
     };
-    let (m, step) = (mode.get(), pending.get().is_some());
-    let heading = title.clone().unwrap_or_else(|| {
-        match (step, m) {
-            (true, _) => "Two-factor code",
-            (false, Mode::Login) => "Sign in",
-            (false, Mode::Signup) => "Create account",
-            (false, Mode::Forgot) => "Reset password",
-            (false, Mode::Reset) => "Set a new password",
-        }
-        .into()
+    let step = memo(move || pending.with(Option::is_some));
+    let heading = memo(move || {
+        title.clone().unwrap_or_else(|| {
+            match (step.get(), mode.get()) {
+                (true, _) => "Two-factor code",
+                (false, Mode::Login) => "Sign in",
+                (false, Mode::Signup) => "Create account",
+                (false, Mode::Forgot) => "Reset password",
+                (false, Mode::Reset) => "Set a new password",
+            }
+            .into()
+        })
     });
-    let action = match (step, m) {
+    let action = memo(move || match (step.get(), mode.get()) {
         (true, _) => "Verify",
         (false, Mode::Login) => "Sign in",
         (false, Mode::Signup) => "Create account",
         (false, Mode::Forgot) => "Email me a reset token",
         (false, Mode::Reset) => "Set password",
-    };
-    let new = m == Mode::Signup;
+    });
+    let m = memo(move || mode.get());
+    let new = memo(move || m.get() == Mode::Signup);
+    let class = join("aio-signin", &class);
     rsx! {
-        form { class: join("aio-signin", &class), onsubmit: submit, ..attributes,
+        form { class, onsubmit: submit, ..attributes,
             h2 { class: "aio-signin__title", "{heading}" }
-            if step {
+            if step.get() {
                 Field { label: "Code",
                     Input { value: code.get(), "name": "code", "inputmode": "numeric", "autocomplete": "one-time-code", placeholder: "6-digit code", "data-t": "signinCode", oninput: move |v| code.set(v) }
                 }
             } else {
-                if m != Mode::Reset {
+                if m.get() != Mode::Reset {
                     Field { label: "User id",
                         Input { value: id.get(), "name": "id", "autocomplete": "username", "data-t": "signinId", oninput: move |v| id.set(v) }
                     }
                 }
-                if new && email {
+                if new.get() && email {
                     Field { label: "Email",
                         Input { value: mail.get(), r#type: "email", "name": "email", "autocomplete": "email", "data-t": "signinEmail", oninput: move |v| mail.set(v) }
                     }
                 }
-                if m == Mode::Reset {
+                if m.get() == Mode::Reset {
                     Field { label: "Reset token",
                         Input { value: token.get(), "name": "token", placeholder: "from the email", "data-t": "signinToken", oninput: move |v| token.set(v) }
                     }
                 }
-                if m != Mode::Forgot {
-                    Field { label: if m == Mode::Reset { "New password" } else { "Password" },
-                        Input { value: password.get(), r#type: "password", "name": "password", "autocomplete": if matches!(m, Mode::Login) { "current-password" } else { "new-password" }, "data-t": "signinPassword", oninput: move |v| password.set(v) }
+                if m.get() != Mode::Forgot {
+                    Field { label: if m.get() == Mode::Reset { "New password" } else { "Password" },
+                        Input { value: password.get(), r#type: "password", "name": "password", "autocomplete": if m.get() == Mode::Login { "current-password" } else { "new-password" }, "data-t": "signinPassword", oninput: move |v| password.set(v) }
                     }
                 }
             }
-            if let Some(e) = error.get() {
-                Alert { tone: Tone::Error, "data-t": "signinError", "{e}" }
+            if error.with(Option::is_some) {
+                Alert { tone: Tone::Error, "data-t": "signinError", {error.get().unwrap_or_default()} }
             }
-            if let Some(n) = notice.get() {
-                Alert { tone: Tone::Success, "data-t": "signinNotice", "{n}" }
+            if notice.with(Option::is_some) {
+                Alert { tone: Tone::Success, "data-t": "signinNotice", {notice.get().unwrap_or_default()} }
             }
             Button { variant: Variant::Primary, r#type: "submit", disabled: busy.get(), "data-t": "signinSubmit", "{action}" }
-            if !step {
-                if signup && me.signup && matches!(m, Mode::Login | Mode::Signup) {
-                    Button { variant: Variant::Ghost, "data-t": "signinToggle", onclick: move |_| to(if new { Mode::Login } else { Mode::Signup }),
-                        if new { "Have an account? Sign in" } else { "New here? Create an account" }
+            if !step.get() {
+                if signup && me.with(|me| me.signup) && matches!(m.get(), Mode::Login | Mode::Signup) {
+                    Button { variant: Variant::Ghost, "data-t": "signinToggle", onclick: move |_| to(if new.get() { Mode::Login } else { Mode::Signup }),
+                        {if new.get() { "Have an account? Sign in" } else { "New here? Create an account" }}
                     }
                 }
-                if forgot && me.mail && m == Mode::Login {
+                if forgot && me.with(|me| me.mail) && m.get() == Mode::Login {
                     Button { variant: Variant::Ghost, "data-t": "signinForgot", onclick: move |_| to(Mode::Forgot), "Forgot password?" }
                 }
-                if m == Mode::Forgot {
+                if m.get() == Mode::Forgot {
                     Button { variant: Variant::Ghost, "data-t": "signinHaveToken", onclick: move |_| to(Mode::Reset), "I already have a token" }
                 }
-                if matches!(m, Mode::Forgot | Mode::Reset) {
+                if matches!(m.get(), Mode::Forgot | Mode::Reset) {
                     Button { variant: Variant::Ghost, "data-t": "signinBack", onclick: move |_| to(Mode::Login), "Back to sign in" }
                 }
             }

@@ -299,11 +299,11 @@ assert_eq!(ui.text("hello"), "Hello Ada");
 | `info(t)` | its tag, role and accessible name |
 | `present(t)`, `absent(t)`, `has_handle(t)`, `count(css)` | see [Showing means showing](#showing-means-showing) |
 | `surface()` | what a person can see and use, nested, one line each |
-| `html()` | the page's HTML without Dioxus's ids, then what the app put on `<body>` (a tooltip, a portal) |
+| `html()` | the page's HTML without air's anchor comments, then what the app put on `<body>` (a tooltip, a portal) |
 | `contrast()` | text under WCAG AA on its background (4.5:1, 3:1 large), as `<tag> "text" 2.10:1, needs 4.5:1` |
-| `a11y()` | aio's run-time accessibility rules (`dev-a11y.ts`), as `<tag data-t="t">: why`: an `<img>` without `alt`, a click with no keyboard path (air: the page knows the handlers), a field with no label, a `<button>` without `type`, an `<a>` with a click and no `href`, a positive `tabindex`, `aria-hidden` on what takes focus, `aria-disabled` with a click that still runs |
+| `a11y()` | aio's run-time accessibility rules (`dev-a11y.ts`), as `<tag data-t="t">: why`: an `<img>` without `alt`, a click with no keyboard path (the page knows the handlers), a field with no label, a `<button>` without `type`, an `<a>` with a click and no `href`, a positive `tabindex`, `aria-hidden` on what takes focus, `aria-disabled` with a click that still runs |
 | `surface_tree()` | the surface as a tree of components (aio's `UISurfaceNode`): each one's name, key, path (`app/List/Row[42]`), the elements it drew itself and its text |
-| `components()` | the mounted components: name, key, body runs (`renders`) and, on air, the updates its holes made |
+| `components()` | the mounted components: name, key, body runs (`renders`) and the updates its holes made |
 | `read(&GLOBAL)` | a `Global`'s value in the app's root scope |
 
 A `surface()` line is `role "name" [handle] state`, indented by depth:
@@ -347,9 +347,9 @@ The views run when the test acts or waits, never behind its back.
 Every mount says each new `a11y()` finding once on stderr, as aio's dev
 mode warns once; assert on `a11y()` to fail a test on them.
 
-## Components (air)
+## Components
 
-On air the page knows each component's first and last node, so a path
+The page knows each component's first and last node, so a path
 can name one: `comp=Row[42]` (by its `key:`), `comp=Row` (the one `Row`
 showing), `comp=List/comp=Row[42]/DeleteButton` (inside one). The same
 names in two rows stop clashing:
@@ -371,9 +371,7 @@ component); `count(css)` stays page-wide. `components()` counts what a
 change cost: a component's body runs once (`renders` 1, again only after
 a wait or a router's new match), and each of its holes that wrote the
 page again is one of its `updates`, so "the cursor's reader updated 5
-times, the rows' reader not at all" is an assertion. On Dioxus the page
-names no component: `comp=` paths fail saying so, `updates` is 0 and
-`renders` counts re-renders.
+times, the rows' reader not at all" is an assertion.
 
 ## Seeded state and the cell beside the page
 
@@ -407,10 +405,10 @@ static SHOW_ALL: Global<bool> = Global::new(|| false);
 #[component]
 fn App() -> View {
     use_live();
-    let n = part(|s| &s.unread).get();
+    let n = part(|s| &s.unread);
     rsx! {
         p { "data-t": "badge", "{n} unread" }
-        button { disabled: n == 0, onclick: move |_| _ = act!(read_all()), "Mark all read" }
+        button { disabled: n.get() == 0, onclick: move |_| _ = act!(read_all()), "Mark all read" }
         button { onclick: move |_| *SHOW_ALL.write() = true, "Show all" }
     }
 }
@@ -504,7 +502,7 @@ aio::client!(Votes, votes);
 #[component]
 fn App() -> View {
     use_live();
-    let yes = part(|v| &v.yes).get();
+    let yes = part(|v| &v.yes);
     rsx! {
         p { "data-t": "yes", "{yes}" }
         button { onclick: move |_| _ = act!(vote()), "Vote" }
@@ -541,7 +539,7 @@ assert!(refused[0].starts_with("reset: "), "{refused:?}");
 
 | Call | Answers |
 |---|---|
-| `components()` | the mounted components as a tree (`MountedComponent { name, renders, children }`): how often each rendered |
+| `components()` | the mounted components as a tree (`MountedComponent { name, key, renders, updates, children }`): how often each body ran and each one's holes wrote the page |
 | `wire_bytes()` | bytes the views sent the page so far: a step's cost on the wire |
 | `shot()` | a PNG of the page once its CSS transitions and animations ended (5 s at most) |
 | `contrast()` | the text that fails WCAG AA, see [Reading](#reading) |
@@ -584,9 +582,10 @@ assert!(shot.starts_with(b"\x89PNG"), "a PNG to compare with a saved one");
 - Compare shots across runs with `.no_scrollbars()` and a fixed `.size`:
   scrollbars differ by OS. `ax shot <app> --check base.png` does the same
   check on a running app.
-- A render loop (a view that writes state it reads, rendering again and
-  again with nothing from the page or the test in between) fails the
-  test: `still rendering after … passes: a view writes state it reads`.
+- An effect loop (an effect that writes a signal it reads, running again
+  and again with nothing from the page or the test in between) fails the
+  test: `effects still re-running after 1000 rounds: an effect writes a
+  signal it reads`.
 
 ## When a test fails
 

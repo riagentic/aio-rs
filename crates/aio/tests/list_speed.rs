@@ -44,7 +44,7 @@ struct Cost {
 fn hold(ui: &mut TestUi, keys: usize, events: &mut tokio::sync::broadcast::Receiver<(u64, aio::Event)>) -> Cost {
     let renders = |ui: &TestUi| {
         fn sum(c: &[aio::testing::MountedComponent]) -> u32 {
-            c.iter().map(|c| c.renders + sum(&c.children)).sum()
+            c.iter().map(|c| c.renders + c.updates + sum(&c.children)).sum()
         }
         sum(&ui.components())
     };
@@ -127,19 +127,27 @@ mod blunt {
 
     #[component]
     fn Line(i: usize) -> View {
-        let l = list();
-        let r = &l.rows[i];
-        rsx! { li { "aria-selected": l.cursor == i, "{r.name} {r.amount}" } }
+        rsx! {
+            li { "aria-selected": list().cursor == i,
+                {
+                    let l = list();
+                    format!("{} {}", l.rows[i].name, l.rows[i].amount)
+                }
+            }
+        }
     }
 
     #[component]
     fn Lines() -> View {
         use_global_key("ArrowDown", |_| _ = act!(down()));
-        let l = list();
-        let from = l.cursor.saturating_sub(SHOWN / 2);
+        let shown = || {
+            let l = list();
+            let from = l.cursor.saturating_sub(SHOWN / 2);
+            from..(from + SHOWN).min(l.rows.len())
+        };
         rsx! {
             ul { "data-t": "list",
-                for i in from..(from + SHOWN).min(l.rows.len()) {
+                for i in shown() {
                     Line { key: "{i}", i }
                 }
             }
@@ -177,24 +185,31 @@ mod fast {
     aio::client!(List, list);
 
     #[component]
-    fn Line(name: String, amount: u64, selected: bool) -> View {
-        rsx! { li { "aria-selected": selected, "{name} {amount}" } }
+    fn Line(name: String, amount: u64, selected: Prop<bool>) -> View {
+        rsx! { li { "aria-selected": selected.get(), "{name} {amount}" } }
     }
 
     #[component]
     fn Lines() -> View {
         use_global_key("ArrowDown", |_| _ = act!(down()));
-        let (rows, cursor) = (part(|l| &l.rows), part(|l| &l.cursor).get());
-        let from = cursor.saturating_sub(SHOWN / 2);
-        rows.with(|rows| {
-            rsx! {
-                ul { "data-t": "list",
-                    for i in from..(from + SHOWN).min(rows.len()) {
-                        Line { key: "{i}", name: rows[i].name.clone(), amount: rows[i].amount, selected: cursor == i }
+        let (rows, cursor) = (part(|l| &l.rows), part(|l| &l.cursor));
+        // The rows shown: the window moves only every few keys' worth of rows.
+        let shown = memo(move || {
+            let from = cursor.get().saturating_sub(SHOWN / 2);
+            from..(from + SHOWN).min(rows.with(Vec::len))
+        });
+        rsx! {
+            ul { "data-t": "list",
+                for i in shown.get() {
+                    Line {
+                        key: "{i}",
+                        name: rows.with(|r| r[i].name.clone()),
+                        amount: rows.with(|r| r[i].amount),
+                        selected: cursor.get() == i,
                     }
                 }
             }
-        })
+        }
     }
 
     pub fn app() -> View {

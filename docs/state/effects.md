@@ -168,7 +168,7 @@ log.
 | `h.busy(key)` | an effect with this key runs or waits |
 | `h.done(key).await` | until none does |
 | `h.pending(Some(method))`, `h.pending(None)` | how many run or wait (an async method's, or all) |
-| `h.on_pending(f)` | `f` when that may have changed: a spinner re-renders |
+| `h.on_pending(f)` | `f` when that may have changed: a spinner updates |
 | `aio::on_effect(\|cell, key\| ..)` | hear every effect as it starts (aio's `onEffect`): metrics, traces |
 
 Each poll of an effect (the time it holds a runtime thread between two

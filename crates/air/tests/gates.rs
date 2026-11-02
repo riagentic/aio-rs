@@ -1,4 +1,4 @@
-//! The gates before Dioxus goes (docs/design/air.md), in the Rust page.
+//! air's gates (docs/design/air.md), in the Rust page.
 //! Gate 1: views removed, or replaced by an error boundary in the same
 //! pass, leave nothing behind (signal, effect, subscription, owner,
 //! handler, task, page script, page node). Gate 2: misuse fails loudly in

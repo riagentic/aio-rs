@@ -1,5 +1,5 @@
-//! air's `rsx!` and `#[component]`. Dioxus's syntax, a different output
-//! (its paths start at `air`: the crate, or the name `aio::ui::prelude`
+//! air's `rsx!` and `#[component]`: elements as `tag { attr: v, children }`,
+//! its output (its paths start at `air`: the crate, or the name `aio::ui::prelude`
 //! brings in, so an app needs no `air` dependency of its own):
 //! one static template per element tree (its markup pre-encoded as a byte
 //! string: one token, whatever its size) and one call per dynamic hole.
@@ -18,7 +18,7 @@ use quote::{ToTokens, format_ident, quote, quote_spanned};
 use std::cell::RefCell;
 
 /// Elements, text, `{expr}`, components, `for … in … { … }` (keyed rows:
-/// `key:` on the row), `if … { … } else { … }`, as Dioxus's `rsx!`. A
+/// `key:` on the row), `if … { … } else { … }`. A
 /// literal is static; a `"{x}"` string and every other expression is a
 /// hole that follows what it reads (the names it uses are cloned in).
 #[cfg(proc_macro)]
@@ -139,14 +139,21 @@ pub(crate) fn templates(input: TokenStream) -> Result<(String, Vec<Made>), Strin
     Ok((shape?, made))
 }
 
+/// The `rsx!` call `input` as the compiler reads it, for `ax lint`. Err:
+/// it doesn't parse (the compiler says why).
+#[cfg(not(proc_macro))]
+pub(crate) fn nodes(input: TokenStream) -> Result<Vec<Node>, String> {
+    parse_nodes(&input.into_iter().collect::<Vec<_>>()).map_err(|(_, msg)| msg)
+}
+
 /// `fn Row(name: String, on: Signal<bool>) -> View`: a props struct
 /// `RowProps { pub name, pub on }` with its builder, and
 /// `fn Row(RowProps { name, on }: RowProps)`, called as `Row { name: …, on }`
-/// in `rsx!`. No arguments: a plain `fn() -> View`. Props as Dioxus's:
+/// in `rsx!`. No arguments: a plain `fn() -> View`. Props:
 /// `#[props(default)]` / `#[props(default = e)]` may be left out, an
 /// `Option<T>` is `None` unless given (and takes a `T`), a `View` is empty,
 /// `#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>` takes
-/// the attributes given (`"data-t": …`, `id`, `..attributes`); a [`Prop`]
+/// the attributes given (`"data-t": …`, `id`, `..attributes`); a `Prop`
 /// follows what it is given. Any other prop is required (a compile error
 /// without it).
 #[cfg(proc_macro)]
@@ -619,13 +626,16 @@ fn builder(
 
 type Res<T> = Result<T, (Span, String)>;
 
-enum Node {
+pub(crate) enum Node {
     Text(String),
     /// A `"…{x}…"` text: `format!`'s literal and arguments, and the names it reads.
     Fmt(TokenStream, Vec<String>),
     Expr(TokenStream),
     El {
         tag: String,
+        /// Where its tag is written (`ax lint`'s line).
+        #[cfg_attr(proc_macro, allow(dead_code))]
+        at: Span,
         attrs: Vec<(String, Val)>,
         spreads: Vec<TokenStream>,
         children: Vec<Node>,
@@ -651,12 +661,12 @@ enum Node {
 }
 
 /// A component's prop: a declared one (a name), or an attribute (`"data-t"`).
-enum PropName {
+pub(crate) enum PropName {
     Field(Ident),
     Attr(String),
 }
 
-enum Val {
+pub(crate) enum Val {
     Static(String),
     Present(bool),
     Fmt(TokenStream, Vec<String>),
@@ -752,6 +762,14 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         }
         return Ok(Node::If { cond, then: parse_nodes(&then)?, otherwise });
     }
+    if is_ident(t, "match") || is_ident(t, "while") || is_ident(t, "loop") {
+        return Err((
+            t.span(),
+            format!(
+                "air: `{t}` in rsx!: use a {{child}} hole (`{{match x {{ A => rsx! {{ .. }}, _ => rsx! {{}} }}}}`), an `if`, or a `for`"
+            ),
+        ));
+    }
     if let TokenTree::Ident(_) = t {
         let start = *i;
         let (path, inner) = until_block(toks, i)?;
@@ -841,13 +859,13 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
     if comp {
         return Ok(Node::Comp { path, props, spreads, children, key });
     }
-    let tag = path[0].to_string().trim_start_matches("r#").to_string();
-    Ok(Node::El { tag, attrs, spreads, children, key })
+    let (tag, at) = (path[0].to_string().trim_start_matches("r#").to_string(), path[0].span());
+    Ok(Node::El { tag, at, attrs, spreads, children, key })
 }
 
-/// Dioxus's style attributes (dioxus-html 0.7's global attributes in its
-/// `style` namespace): on an HTML element, `align_items: "center"` sets
-/// that CSS property, as Dioxus did, sorted by name.
+/// The style attributes (the HTML global attributes' `style` namespace, as
+/// aio-rs 0.1's views took them): on an HTML element, `align_items:
+/// "center"` sets that CSS property; sorted by name.
 const STYLE_ATTRS: &[(&str, &str)] = &[
     ("align_content", "align-content"),
     ("align_items", "align-items"),
@@ -1259,7 +1277,7 @@ const STYLE_ATTRS: &[(&str, &str)] = &[
 ];
 
 /// An HTML element's own attributes that share a style attribute's name
-/// (dioxus-html 0.7's elements): `img { width }` is the attribute, `div { width }` the CSS property.
+/// (the HTML elements'): `img { width }` is the attribute, `div { width }` the CSS property.
 const OWN_ATTRS: &[(&str, &[&str])] = &[
     ("canvas", &["height", "width"]),
     ("embed", &["height", "width"]),
@@ -1274,8 +1292,8 @@ const OWN_ATTRS: &[(&str, &[&str])] = &[
 ];
 
 /// The CSS property a named attribute of HTML element `tag` sets, if it is
-/// one of Dioxus's style attributes (`align_items` → `align-items`): set
-/// with `style.setProperty`, as Dioxus did; a quoted name never is.
+/// one of the style attributes (`align_items` → `align-items`): set
+/// with `style.setProperty`; a quoted name never is.
 fn style_attr(tag: &str, name: &str) -> Option<&'static str> {
     if tag == "svg" || SVG_ONLY.contains(&tag) || OWN_ATTRS.iter().any(|(t, a)| *t == tag && a.contains(&name)) {
         return None;
@@ -1320,7 +1338,7 @@ fn attr_name(name: &str) -> String {
 }
 
 /// The DOM event an `on…` attribute listens for, and the payload its
-/// handler gets (as Dioxus's event tables type them).
+/// handler gets (`onkeydown` a `KeyboardEvent`, `oninput` a `FormEvent`, …).
 fn payload(ev: &str) -> Option<(String, &'static str)> {
     let p = match ev {
         "keydown" | "keyup" | "keypress" => "KeyboardData",
@@ -1761,7 +1779,9 @@ impl Tpl {
                 let stat: Vec<(&String, String)> = attrs
                     .iter()
                     .filter_map(|(k, v)| match v {
+                        Val::Static(_) if k == "innerHTML" => None,
                         Val::Static(s) => Some((k, s.clone())),
+                        Val::Present(b) if text_bool(k) => Some((k, b.to_string())),
                         Val::Present(true) => Some((k, String::new())),
                         _ => None,
                     })
@@ -1772,13 +1792,18 @@ impl Tpl {
                     self.str(v);
                 }
                 self.bytes.extend_from_slice(&(children.len() as u16).to_le_bytes());
-                let dynamic =
-                    !spreads.is_empty() || attrs.iter().any(|(_, v)| !matches!(v, Val::Static(_) | Val::Present(_)));
+                // `innerHTML` is a property set at mount, as the page's guard sees it, not
+                // a template attribute.
+                let dynamic = !spreads.is_empty()
+                    || attrs.iter().any(|(k, v)| k == "innerHTML" || !matches!(v, Val::Static(_) | Val::Present(_)));
                 self.bytes.push(dynamic as u8);
                 if dynamic || root {
                     let id = self.mark();
                     for (k, v) in attrs {
                         let hole = match v {
+                            Val::Static(s) if k == "innerHTML" => {
+                                quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(|| air::IntoAttr::into_attr(#s)));)
+                            }
                             Val::Fmt(f, r) => {
                                 let c = clones(r);
                                 quote!(air::__rt::attr(#id, #k, { #c ::std::boxed::Box::new(move || air::IntoAttr::into_attr(::std::format!(#f))) });)
@@ -1892,8 +1917,10 @@ impl Tpl {
     }
 }
 
-/// A hole's closure: a single name is cloned per run (its type decides
-/// whether it follows anything: a signal does), anything else runs as written.
+/// A hole's closure: the names it reads are cloned in, and again per run
+/// (as a component's props), so `{match who { .. }}` or `{note.map(..)}` may
+/// take them by value; a single name's type decides whether it follows
+/// anything (a signal does).
 fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> TokenStream) -> TokenStream {
     let v: Vec<TokenTree> = e.clone().into_iter().collect();
     // A constant or a static (`CLOUD`, `ACCENT`): read where it is, no local to clone.
@@ -1910,7 +1937,7 @@ fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> Tok
     let mut r = vec![];
     captures(e, &mut r);
     let c = clones(&r);
-    call(quote!({ #c ::std::boxed::Box::new(move || #into({ #e })) }))
+    call(quote!({ #c ::std::boxed::Box::new(move || #into({ #c #e })) }))
 }
 
 /// `Row { a: x, "data-t": t, ..more, children… }` →
@@ -1986,11 +2013,16 @@ fn comp(n: &Node) -> TokenStream {
         let c = clones(&r);
         calls.push(quote!(.children({ #c move || #v })));
     }
+    let builder = match props.iter().any(|(k, _)| matches!(k, PropName::Attr(_))) || !spreads.is_empty() {
+        // Given attributes: a component that takes none says so.
+        true => quote!(air::__rt::with_attributes(air::__rt::builder_of(__air_c))),
+        false => quote!(air::__rt::builder_of(__air_c)),
+    };
     quote!({
         #[allow(unused_imports)]
         use air::__rt::{GlobalAttributes as _, GlobalAttributeNames as _};
         let __air_c = &#path;
-        air::Component::call(__air_c, air::__rt::builder_of(__air_c) #(#calls)* .build())
+        air::Component::call(__air_c, #builder #(#calls)* .build())
     })
 }
 
@@ -2007,6 +2039,14 @@ fn is_closure(v: &TokenStream) -> bool {
     }
     let at = usize::from(t.first().is_some_and(|t| is_ident(t, "move")));
     is_punct(t.get(at), '|')
+}
+
+/// air's `is_text_bool`: `true`/`false` is text for `aria-*`, `data-*` and
+/// HTML's enumerated attributes, presence for the rest.
+fn text_bool(name: &str) -> bool {
+    name.starts_with("aria-")
+        || name.starts_with("data-")
+        || matches!(name, "draggable" | "contenteditable" | "spellcheck")
 }
 
 /// Is `v` a constant: a literal (`"a"`, `3`, `-1.5`, `true`) or an enum's

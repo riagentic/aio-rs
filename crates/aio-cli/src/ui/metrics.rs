@@ -142,6 +142,9 @@ pub fn component_rows(tree: &Value) -> Vec<(usize, String, u64, f64)> {
     out
 }
 
+/// A client row's cell: its column, its text, its tint.
+type Cell = (usize, String, &'static str);
+
 /// The panel (amui's `MetricsPanel`), all from props.
 #[component]
 pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
@@ -174,9 +177,13 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
         .as_ref()
         .and_then(|h| h.iter().rev().find(|e| !e["refused"].is_string()))
         .map(|e| format!("{}.{}", e["cell"].as_str().unwrap_or("?"), e["method"].as_str().unwrap_or("?")));
-    let mem = &health["memory"];
+    let mem = health["memory"].clone();
     let rss = mem["rssBytes"].as_u64();
     let level = mem["level"].as_str().unwrap_or("—").to_string();
+    let machine = mem["machinePct"].as_u64().unwrap_or(0);
+    let machine_color = gauge_color(mem["machinePct"].as_f64().unwrap_or(0.0));
+    let last = last.unwrap_or("—".into());
+    let degraded_text = if degraded.is_empty() { "none".to_string() } else { degraded.join(", ") };
     let state = diag.state_bytes();
     let mut sizes: Vec<(String, u64)> = diag
         .metrics
@@ -186,9 +193,40 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
         .unwrap_or_default();
     sizes.sort_by_key(|s| std::cmp::Reverse(s.1));
     let max_cell = sizes.first().map_or(0, |s| s.1);
+    let sizes: Vec<(String, u64, f64)> = sizes
+        .into_iter()
+        .map(|(n, b)| (n, b, if max_cell > 0 { b as f64 / max_cell as f64 * 100.0 } else { 0.0 }))
+        .collect();
     let clients = diag.clients.clone().unwrap_or_default();
+    // Each client's cells, with how each is tinted, and why it is degraded.
+    let client_rows: Vec<(Vec<Cell>, String)> = clients
+        .iter()
+        .map(|c| {
+            let (row, why) = client_row(c, diag.at);
+            let row = row
+                .into_iter()
+                .enumerate()
+                .map(|(j, cell)| {
+                    let class = match j {
+                        1 => "blue",
+                        2 if cell.starts_with("degraded") => "red",
+                        2 if cell == "ok" => "green",
+                        8 if cell.ends_with("behind") => "yellow",
+                        10 => "dim",
+                        _ => "",
+                    };
+                    (j, cell, class)
+                })
+                .collect();
+            (row, why)
+        })
+        .collect();
     let history: Vec<Value> = diag.history.clone().unwrap_or_default().into_iter().rev().collect();
+    let actions: Vec<(String, String, String, String)> = history.iter().map(action_row).collect();
     let comps = diag.components.as_ref().map(component_rows);
+    let (no_comps, empty_comps) = (comps.is_none(), comps.as_ref().is_some_and(Vec::is_empty));
+    let comps = comps.unwrap_or_default();
+    let has_cost = diag.cost.is_some();
     let bytes = |n: f64| aio::fmt::bytes(n as u64);
     rsx! {
         div { class: "col",
@@ -201,8 +239,8 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
             }
             div { class: "wrap",
                 Card { title: "calls", t: "calls",
-                    if diag.cost.is_some() {
-                        for (name , cur , cap) in gauges {
+                    if has_cost {
+                        for (name , cur , cap) in gauges.clone() {
                             Gauge { key: "{name}", name: name.clone(), current: cur, capacity: cap, unit: "" }
                         }
                         Stat { k: "calls", v: format!("{calls:.0}") }
@@ -211,10 +249,10 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                         Stat { k: "pushes", v: format!("{:.1} /s", pushes.unwrap_or(0.0)) }
                         Stat { k: "sent", v: format!("{}/s", bytes(bytes_s)) }
                         Stat { k: "full resends", v: format!("{full:.0}"), color: if full > 0.0 { "var(--yellow)" } else { "" } }
-                        Stat { k: "last action", v: last.unwrap_or("—".into()), color: "var(--blue)" }
+                        Stat { k: "last action", v: last.clone(), color: "var(--blue)" }
                         Stat {
                             k: "degraded",
-                            v: if degraded.is_empty() { "none".to_string() } else { degraded.join(", ") },
+                            v: degraded_text.clone(),
                             color: if degraded.is_empty() { "var(--green)" } else { "var(--red)" },
                         }
                     } else {
@@ -226,8 +264,8 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                         Stat { k: "rss", v: super::style::bytes(rss) }
                         Stat {
                             k: "of the machine",
-                            v: format!("{}%", mem["machinePct"].as_u64().unwrap_or(0)),
-                            color: gauge_color(mem["machinePct"].as_f64().unwrap_or(0.0)),
+                            v: format!("{machine}%"),
+                            color: machine_color,
                         }
                         Stat {
                             k: "level",
@@ -254,18 +292,10 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                                 }
                             }
                             tbody {
-                                for (i , (row , why)) in clients.iter().map(|c| client_row(c, diag.at)).enumerate() {
+                                for (i , (row , why)) in client_rows.clone().into_iter().enumerate() {
                                     tr { key: "{i}",
-                                        for (j , cell) in row.into_iter().enumerate() {
-                                            td { key: "{j}",
-                                                class: match j {
-                                                    1 => "blue",
-                                                    2 if cell.starts_with("degraded") => "red",
-                                                    2 if cell == "ok" => "green",
-                                                    8 if cell.ends_with("behind") => "yellow",
-                                                    10 => "dim",
-                                                    _ => "",
-                                                },
+                                        for (j , cell , class) in row.clone() {
+                                            td { key: "{j}", class,
                                                 title: if j == 2 { why.clone() } else { String::new() },
                                                 "{cell}"
                                             }
@@ -282,7 +312,7 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                     if sizes.is_empty() {
                         div { class: "dim", style: "font-size:12px", "no data" }
                     }
-                    for (name , b , pct) in sizes.into_iter().map(|(n, b)| (n, b, if max_cell > 0 { b as f64 / max_cell as f64 * 100.0 } else { 0.0 })) {
+                    for (name , b , pct) in sizes.clone() {
                         div { key: "{name}", class: "mb6",
                             div { class: "small", style: "display:flex;justify-content:space-between;margin-bottom:2px",
                                 span { class: "blue", "{name}" }
@@ -299,7 +329,7 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                         div { class: "dim", style: "font-size:12px", "no actions recorded yet" }
                     } else {
                         div { style: "max-height:260px;overflow-y:auto",
-                            for (i , (what , args , ms , at)) in history.iter().map(action_row).enumerate() {
+                            for (i , (what , args , ms , at)) in actions.clone().into_iter().enumerate() {
                                 div { key: "{i}", class: "act-row",
                                     span { class: if what.starts_with('✗') { "red ell" } else { "text2 ell" }, title: "{args}", "{what}" }
                                     span { class: "dim", style: "flex-shrink:0", "{ms}{at}" }
@@ -309,14 +339,14 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                     }
                 }
             }
-            Card { title: format!("window components ({})", comps.as_ref().map_or(0, Vec::len)), t: "components",
-                if comps.is_none() {
+            Card { title: format!("window components ({})", comps.len()), t: "components",
+                if no_comps {
                     div { class: "dim", style: "font-size:12px", "no readings: a dev build keeps them (`ax components`)" }
-                } else if comps.as_ref().is_some_and(Vec::is_empty) {
+                } else if empty_comps {
                     div { class: "dim", style: "font-size:12px", "no window mounted" }
                 } else {
                     div { style: "max-height:260px;overflow-y:auto",
-                        for (i , (depth , name , renders , ms)) in comps.unwrap_or_default().into_iter().enumerate() {
+                        for (i , (depth , name , renders , ms)) in comps.clone().into_iter().enumerate() {
                             div { key: "{i}", class: "act-row",
                                 span { class: "blue ell", style: "padding-left:{depth * 14}px", "{name}" }
                                 span { class: "text2", style: "flex-shrink:0", "×{renders} · {ms:.2} ms" }

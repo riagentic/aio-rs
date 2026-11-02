@@ -234,7 +234,7 @@ fn take_cleanups(k: Key) -> Vec<Box<dyn FnOnce()>> {
 }
 
 /// Dispose `k` and all it owns: their cleanups run (while what they own is
-/// still there: a cleanup reads its view's signals, as Solid's and Dioxus's
+/// still there: a cleanup reads its view's signals, as Solid's
 /// do), then their slots are freed.
 pub(crate) fn dispose(k: Key) {
     take_cleanups(k).into_iter().for_each(|f| f());

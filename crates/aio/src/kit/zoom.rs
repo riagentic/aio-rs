@@ -64,7 +64,7 @@ pub fn ZoomPan(
     /// The ＋ / － / fit buttons.
     #[props(default = true)]
     controls: bool,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
@@ -96,11 +96,10 @@ pub fn ZoomPan(
         let s = view.read_untracked().scale;
         set(fit_view((inner.0 / s, inner.1 / s), outer, 16.0, range));
     };
-    let v = view.get();
-    let dragging = press.get().is_some_and(|p| p.dragged);
+    let dragging = memo(move || press.with(|p| p.is_some_and(|p| p.dragged)));
     rsx! {
         div {
-            class: join("aio-zoompan", &class),
+            class: join("aio-zoompan", &class.get()),
             onmounted: move |e| *boxed.write() = Some(e.data()),
             onwheel: move |e: WheelEvent| {
                 e.prevent_default();
@@ -139,11 +138,11 @@ pub fn ZoomPan(
             div {
                 class: "aio-zoompan__stage",
                 "data-t": "zoomStage",
-                style: "transform:translate({v.x}px,{v.y}px) scale({v.scale})",
+                style: view.with(|v| format!("transform:translate({}px,{}px) scale({})", v.x, v.y, v.scale)),
                 onmounted: move |e| *stage.write() = Some(e.data()),
                 {children}
             }
-            if dragging {
+            if dragging.get() {
                 // Pointer capture: every move and the release land here (and bubble up), wherever
                 // the pointer is, so the click that ends the drag isn't the content's.
                 div { class: "aio-zoompan__capture" }

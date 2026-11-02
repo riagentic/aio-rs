@@ -4,7 +4,7 @@
 //! pattern (tabs arrow between, a menu opens on ArrowDown and closes on
 //! Escape back to its trigger, a tooltip closes on Escape).
 use super::form::{Opt, use_field};
-use super::{flag, join, use_id};
+use super::{join, use_id};
 use crate::ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -13,15 +13,15 @@ use std::rc::Rc;
 /// arrow keys, roving focus and "one of N" for free.
 #[component]
 pub fn RadioGroup(
-    #[props(into)] options: Vec<Opt>,
-    #[props(default, into)] value: String,
+    #[props(into)] options: Prop<Vec<Opt>>,
+    #[props(default, into)] value: Prop<String>,
     /// The group's name; required unless a `Field` around it names it.
     #[props(into)]
-    label: Option<String>,
+    label: Prop<Option<String>>,
     #[props(into)] name: Option<String>,
-    #[props(default)] disabled: bool,
+    #[props(default)] disabled: Prop<bool>,
     onchange: Option<EventHandler<String>>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     let own = use_id("radio");
@@ -29,20 +29,21 @@ pub fn RadioGroup(
     let w = use_field(false, true);
     rsx! {
         div {
-            class: join("aio-radios", &class),
+            class: join("aio-radios", &class.get()),
             role: "group",
-            "aria-label": label.or(w.label),
-            "aria-describedby": w.described,
+            "aria-label": label.get(),
+            "aria-labelledby": w.labelledby(),
+            "aria-describedby": w.described(),
             ..attributes,
-            for o in options {
-                label { key: "{o.value}", class: "aio-radio-row", "data-disabled": (disabled || o.disabled).then_some(""),
+            for o in options.get() {
+                label { key: "{o.value}", class: "aio-radio-row", "data-disabled": (disabled.get() || o.disabled).then_some(""),
                     input {
                         r#type: "radio",
                         class: "aio-radio",
                         name: "{name}",
                         value: "{o.value}",
-                        checked: o.value == value,
-                        disabled: flag(disabled || o.disabled),
+                        checked: o.value == value.get(),
+                        disabled: disabled.get() || o.disabled,
                         "aria-label": "{o.label}",
                         oninput: {
                             let v = o.value.clone();
@@ -60,54 +61,57 @@ pub fn RadioGroup(
 /// toggles it, a reader says on/off). `onchange` gets the new state.
 #[component]
 pub fn Switch(
-    #[props(default)] checked: bool,
-    #[props(default)] disabled: bool,
-    #[props(into)] label: Option<String>,
+    #[props(default)] checked: Prop<bool>,
+    #[props(default)] disabled: Prop<bool>,
+    /// Beside it: text or any view.
+    label: Option<View>,
     onchange: Option<EventHandler<bool>>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let w = use_field(label.is_some(), false);
-    let own = label.as_deref().map(str::trim).filter(|l| !l.is_empty()).map(String::from);
+    let labelled = label.is_some();
+    let w = use_field(labelled, false);
+    let named = use_id("switch");
     let input = rsx! {
         input {
             r#type: "checkbox",
             role: "switch",
-            class: if label.is_none() { join("aio-switch", &class) } else { "aio-switch".into() },
+            class: if labelled { "aio-switch".into() } else { join("aio-switch", &class.get()) },
             checked,
-            disabled: flag(disabled),
-            id: w.id,
-            "aria-label": own,
-            "aria-describedby": w.described,
-            "aria-invalid": w.invalid,
+            disabled,
+            id: w.id.clone(),
+            "aria-labelledby": labelled.then(|| format!("{named}-label")),
+            "aria-describedby": w.described(),
+            "aria-invalid": w.invalid().then_some("true"),
             oninput: move |e| if let Some(f) = onchange { f.call(e.checked()) },
             ..attributes,
         }
     };
-    match label {
-        None => input,
-        Some(l) => rsx! {
-            label { class: join("aio-switch-row", &class),
-                {input}
-                span { "{l}" }
-            }
-        },
+    if !labelled {
+        return input;
+    }
+    rsx! {
+        label { class: join("aio-switch-row", &class.get()),
+            {input}
+            span { id: "{named}-label", {label} }
+        }
     }
 }
 
 /// One tab of [`Tabs`]: its id (what `value` and `onchange` speak), its
-/// label, and its panel (rendered only while active).
+/// label, and its panel (built while active).
 #[derive(Clone, PartialEq)]
 pub struct Tab {
     pub id: String,
-    pub label: String,
+    /// Text or any view.
+    pub label: View,
     pub disabled: bool,
     pub panel: View,
 }
 
 impl Tab {
-    pub fn new(id: impl Into<String>, label: impl Into<String>, panel: View) -> Self {
-        Self { id: id.into(), label: label.into(), disabled: false, panel }
+    pub fn new<M>(id: impl Into<String>, label: impl ::air::IntoViewValue<M>, panel: View) -> Self {
+        Self { id: id.into(), label: label.into_view_value(), disabled: false, panel }
     }
 
     pub fn disabled(self) -> Self {
@@ -135,18 +139,18 @@ fn dom_id(id: &str) -> String {
 /// Which way the controls inside run: right to left reads mirrored
 /// (`<Direction rtl>` sets it).
 #[derive(Clone, Copy)]
-struct Rtl(Signal<bool>);
+struct Rtl(Memo<bool>);
 
 /// A part of the page whose text runs right to left (`rtl`) or left to
 /// right: a `dir` box with no layout of its own (`display: contents`), and
 /// the kit controls inside follow it (aio read the closest `[dir]`). An app in
 /// a right-to-left language wraps its root in one.
 #[component]
-pub fn Direction(rtl: bool, children: View) -> View {
-    let Rtl(now) = provide(|| Rtl(Signal::new(rtl)));
-    watch(rtl, move |rtl| now.set(rtl));
+pub fn Direction(rtl: Prop<bool>, children: View) -> View {
+    let now = memo(move || rtl.get());
+    provide(|| Rtl(now));
     rsx! {
-        div { dir: if rtl { "rtl" } else { "ltr" }, style: "display:contents", {children} }
+        div { dir: if now.get() { "rtl" } else { "ltr" }, style: "display:contents", {children} }
     }
 }
 
@@ -157,29 +161,40 @@ pub fn Direction(rtl: bool, children: View) -> View {
 /// starting at the first enabled tab (also when the chosen one is gone).
 #[component]
 pub fn Tabs(
-    tabs: Vec<Tab>,
-    #[props(into)] value: Option<String>,
-    #[props(into)] label: Option<String>,
-    rtl: Option<bool>,
+    #[props(into)] tabs: Prop<Vec<Tab>>,
+    #[props(into)] value: Prop<Option<String>>,
+    #[props(into)] label: Prop<Option<String>>,
+    rtl: Prop<Option<bool>>,
     onchange: Option<EventHandler<String>>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     let base = use_id("tabs");
     let around = try_context::<Rtl>();
-    let rtl = rtl.unwrap_or_else(|| around.is_some_and(|Rtl(r)| r.get()));
-    let first = tabs.iter().find(|t| !t.disabled).or(tabs.first()).map(|t| t.id.clone()).unwrap_or_default();
-    let inner = signal(|| value.clone().unwrap_or(first.clone()));
+    let rtl = memo(move || rtl.get().unwrap_or_else(|| around.is_some_and(|Rtl(r)| r.get())));
+    let first = {
+        let tabs = tabs.clone();
+        memo(move || {
+            tabs.with(|t| t.iter().find(|t| !t.disabled).or(t.first()).map(|t| t.id.clone()).unwrap_or_default())
+        })
+    };
+    let inner = signal(|| value.get_untracked().unwrap_or(first.get_untracked()));
     let els = signal(HashMap::<String, Rc<MountedData>>::new);
-    let active = value.clone().unwrap_or_else(|| {
-        let i = inner.get();
-        if tabs.iter().any(|t| t.id == i) { i } else { first.clone() }
-    });
-    let shown = tabs.iter().find(|t| t.id == active);
-    let stop = shown.map_or(first.clone(), |t| t.id.clone());
-    let disabled: Vec<bool> = tabs.iter().map(|t| t.disabled).collect();
-    let ids: Vec<String> = tabs.iter().map(|t| t.id.clone()).collect();
-    let controlled = value.is_some();
+    let controlled = value.is_live() || value.with_untracked(Option::is_some);
+    let active = {
+        let (tabs, value) = (tabs.clone(), value.clone());
+        memo(move || {
+            value.get().unwrap_or_else(|| {
+                let i = inner.get();
+                if tabs.with(|t| t.iter().any(|t| t.id == i)) { i } else { first.get() }
+            })
+        })
+    };
+    let shown = {
+        let tabs = tabs.clone();
+        memo(move || tabs.with(|t| t.iter().find(|t| t.id == active.get()).cloned()))
+    };
+    let stop = memo(move || shown.with(|s| s.as_ref().map(|t| t.id.clone())).unwrap_or_else(|| first.get()));
     let select = move |id: String| {
         if !controlled {
             inner.set(id.clone());
@@ -188,54 +203,55 @@ pub fn Tabs(
             f.call(id)
         }
     };
-    let named_by = shown.map(|t| format!("{base}-tab-{}", dom_id(&t.id)));
-    let panel = shown.map(|t| t.panel.clone());
+    let rows = {
+        let tabs = tabs.clone();
+        memo(move || tabs.with(|t| t.iter().map(|t| (t.id.clone(), t.label.clone(), t.disabled)).collect::<Vec<_>>()))
+    };
     rsx! {
-        div { class: join("aio-tabs", &class), ..attributes,
+        div { class: join("aio-tabs", &class.get()), ..attributes,
             div { class: "aio-tablist", role: "tablist", "aria-label": label,
-                for (i, t) in tabs.iter().enumerate() {
+                for (i, (id, name, off)) in rows.get().into_iter().enumerate() {
                     button {
-                        key: "{t.id}",
-                        "data-t": "{t.id}",
+                        key: "{id}",
+                        "data-t": "{id}",
                         r#type: "button",
-                        id: "{base}-tab-{dom_id(&t.id)}",
-                        class: if t.id == active { "aio-tab aio-tab--active" } else { "aio-tab" },
+                        id: "{base}-tab-{dom_id(&id)}",
+                        class: if active.get() == id { "aio-tab aio-tab--active" } else { "aio-tab" },
                         role: "tab",
-                        "aria-selected": if t.id == active { "true" } else { "false" },
+                        "aria-selected": if active.get() == id { "true" } else { "false" },
                         "aria-controls": "{base}-panel",
-                        tabindex: if t.id == stop { "0" } else { "-1" },
-                        disabled: flag(t.disabled),
+                        tabindex: if stop.get() == id { "0" } else { "-1" },
+                        disabled: off,
                         onmounted: {
-                            let id = t.id.clone();
+                            let id = id.clone();
                             move |e: MountedEvent| _ = els.write().insert(id.clone(), e.data())
                         },
                         onclick: {
-                            let (id, off) = (t.id.clone(), t.disabled);
+                            let id = id.clone();
                             move |_| if !off { select(id.clone()) }
                         },
-                        onkeydown: {
-                            let (disabled, ids) = (disabled.clone(), ids.clone());
-                            move |e: KeyboardEvent| {
-                                let (fwd, back) = if rtl { (Key::ArrowLeft, Key::ArrowRight) } else { (Key::ArrowRight, Key::ArrowLeft) };
-                                let k = e.key();
-                                let (from, delta) = match k {
-                                    _ if k == fwd || k == Key::ArrowDown => (i as isize, 1),
-                                    _ if k == back || k == Key::ArrowUp => (i as isize, -1),
-                                    Key::Home => (-1, 1),
-                                    Key::End => (ids.len() as isize, -1),
-                                    _ => return,
-                                };
-                                e.prevent_default();
-                                if let Some(to) = tab_step(&disabled, from, delta) {
-                                    select(ids[to].clone());
-                                    // Roving focus: the next arrow must start from the new tab.
-                                    if let Some(el) = els.read_untracked().get(&ids[to]).cloned() {
-                                        spawn(async move { _ = el.set_focus(true).await });
-                                    }
+                        onkeydown: move |e: KeyboardEvent| {
+                            let (fwd, back) = if rtl.get_untracked() { (Key::ArrowLeft, Key::ArrowRight) } else { (Key::ArrowRight, Key::ArrowLeft) };
+                            let k = e.key();
+                            let all = rows.get_untracked();
+                            let (from, delta) = match k {
+                                _ if k == fwd || k == Key::ArrowDown => (i as isize, 1),
+                                _ if k == back || k == Key::ArrowUp => (i as isize, -1),
+                                Key::Home => (-1, 1),
+                                Key::End => (all.len() as isize, -1),
+                                _ => return,
+                            };
+                            e.prevent_default();
+                            let disabled: Vec<bool> = all.iter().map(|r| r.2).collect();
+                            if let Some(to) = tab_step(&disabled, from, delta) {
+                                select(all[to].0.clone());
+                                // Roving focus: the next arrow must start from the new tab.
+                                if let Some(el) = els.read_untracked().get(&all[to].0).cloned() {
+                                    spawn(async move { _ = el.set_focus(true).await });
                                 }
                             }
                         },
-                        "{t.label}"
+                        {name}
                     }
                 }
             }
@@ -243,11 +259,9 @@ pub fn Tabs(
                 class: "aio-tabpanel",
                 role: "tabpanel",
                 id: "{base}-panel",
-                "aria-labelledby": named_by,
+                "aria-labelledby": shown.with(|s| s.as_ref().map(|t| format!("{base}-tab-{}", dom_id(&t.id)))),
                 tabindex: "0",
-                if let Some(p) = panel {
-                    {p}
-                }
+                {shown.get().map(|t| t.panel)}
             }
         }
     }
@@ -264,31 +278,34 @@ pub fn progress_pct(value: Option<f64>, max: f64) -> Option<u32> {
 /// the indeterminate bar, never a blank page.
 #[component]
 pub fn Progress(
-    value: Option<f64>,
-    #[props(default = 100.0)] max: f64,
-    #[props(into)] label: Option<String>,
+    value: Prop<Option<f64>>,
+    #[props(default = 100.0)] max: Prop<f64>,
+    #[props(into)] label: Prop<Option<String>>,
     #[props(default)] show_value: bool,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let value = value.filter(|v| v.is_finite());
+    let value = memo(move || value.get().filter(|v| v.is_finite()));
     let bar = rsx! {
         progress {
-            class: join("aio-progress", &class),
-            value: value.map(|v| v.to_string()),
-            max: "{max}",
+            class: join("aio-progress", &class.get()),
+            value: value.get().map(|v| v.to_string()),
+            max: max.get(),
             "aria-label": label,
             ..attributes,
         }
     };
-    match progress_pct(value, max).filter(|_| show_value) {
-        None => bar,
-        Some(p) => rsx! {
-            span { class: "aio-progress-row",
-                {bar}
-                span { class: "aio-progress__value", "{p}%" }
+    if !show_value {
+        return bar;
+    }
+    let pct = memo(move || progress_pct(value.get(), max.get()));
+    rsx! {
+        span { class: "aio-progress-row",
+            {bar}
+            if pct.with(Option::is_some) {
+                span { class: "aio-progress__value", "{pct.get().unwrap_or(0)}%" }
             }
-        },
+        }
     }
 }
 
@@ -312,26 +329,29 @@ impl Tone {
 /// the rest are notes. The dismiss button is there only with `ondismiss`.
 #[component]
 pub fn Alert(
-    #[props(default)] tone: Tone,
-    #[props(into)] title: Option<String>,
+    #[props(default)] tone: Prop<Tone>,
+    /// Text or any view.
+    title: Option<View>,
     ondismiss: Option<EventHandler<()>>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
+    let dismiss = ondismiss.is_some();
     rsx! {
         div {
-            class: join(&format!("aio-alert aio-alert--{}", tone.key()), &class),
-            role: if tone == Tone::Error { "alert" } else { "note" },
+            class: join(&format!("aio-alert aio-alert--{}", tone.get().key()), &class.get()),
+            role: if tone.get() == Tone::Error { "alert" } else { "note" },
             ..attributes,
             div { class: "aio-alert__body",
-                if let Some(t) = title {
-                    strong { class: "aio-alert__title", "{t}" }
+                if title.is_some() {
+                    strong { class: "aio-alert__title", {title.clone()} }
                 }
                 div { {children} }
             }
-            if let Some(f) = ondismiss {
-                button { r#type: "button", class: "aio-alert__x", "aria-label": "Dismiss", "data-t": "alertDismiss", onclick: move |_| f.call(()), "×" }
+            if dismiss {
+                button { r#type: "button", class: "aio-alert__x", "aria-label": "Dismiss", "data-t": "alertDismiss",
+                    onclick: move |_| if let Some(f) = ondismiss { f.call(()) }, "×" }
             }
         }
     }
@@ -351,23 +371,33 @@ pub fn conn_note(conn: crate::Conn, lost: bool) -> Option<(&'static str, Tone)> 
 
 /// The page's connection pill (aio's built-in status overlay): "Reconnecting…"
 /// while the link is down, then "Connected" for two seconds. Put it once in
-/// the root: `ConnectionStatus { status: use_status()() }`.
+/// the root: `ConnectionStatus { status: use_status().get() }`.
 #[component]
 pub fn ConnectionStatus(
-    status: crate::Status,
-    #[props(default, into)] class: String,
+    status: Prop<crate::Status>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let lost = once(|| Rc::new(std::cell::Cell::new(false)));
-    lost.set(lost.get() || matches!(status.conn, crate::Conn::Offline | crate::Conn::Blocked));
-    let Some((text, tone)) = conn_note(status.conn, lost.get()) else { return rsx! {} };
+    let lost = signal(|| false);
+    let note = memo(move || {
+        let conn = status.get().conn;
+        let was = lost.get_untracked() || matches!(conn, crate::Conn::Offline | crate::Conn::Blocked);
+        conn_note(conn, was).map(|(t, tone)| (t, tone, was))
+    });
+    effect(move || {
+        if note.with(|n| n.is_some_and(|n| n.2)) {
+            lost.set(true);
+        }
+    });
     rsx! {
-        div {
-            class: join(&format!("aio-conn aio-conn--{}", tone.key()), &class),
-            role: "status",
-            "data-t": "connStatus",
-            ..attributes,
-            "{text}"
+        if note.with(Option::is_some) {
+            div {
+                class: join(&format!("aio-conn aio-conn--{}", note.get().map_or("info", |n| n.1.key())), &class.get()),
+                role: "status",
+                "data-t": "connStatus",
+                ..attributes.clone(),
+                {note.get().map(|n| n.0)}
+            }
         }
     }
 }
@@ -389,13 +419,13 @@ pub(super) struct Tip(pub String);
 /// back when the pointer or focus comes again. It describes the control a
 /// screen reader is on, never its wrapper: a kit control inside takes the
 /// bubble's id itself; a plain element takes `bubble_id` (yours, from
-/// [`use_id`], kept from the first render) as its `aria-describedby`.
+/// [`use_id`]) as its `aria-describedby`.
 #[component]
 pub fn Tooltip(
-    #[props(into)] text: String,
-    #[props(default)] placement: Placement,
+    #[props(into)] text: Prop<String>,
+    #[props(default)] placement: Prop<Placement>,
     #[props(into)] bubble_id: Option<String>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
     children: View,
 ) -> View {
@@ -403,10 +433,9 @@ pub fn Tooltip(
     let id = bubble_id.unwrap_or(own);
     provide(|| Tip(id.clone()));
     let hidden = signal(|| false);
-    let side = if placement == Placement::Top { "top" } else { "bottom" };
     rsx! {
         span {
-            class: join(&format!("aio-tip aio-tip--{side}"), &class),
+            class: join(&format!("aio-tip aio-tip--{}", if placement.get() == Placement::Top { "top" } else { "bottom" }), &class.get()),
             "data-hidden": hidden.get().then_some(""),
             onkeydown: move |e| if e.key() == Key::Escape { hidden.set(true) },
             onfocusout: move |_| hidden.set(false),
@@ -422,14 +451,15 @@ pub fn Tooltip(
 #[derive(Clone, Debug, PartialEq)]
 pub struct MenuItem {
     pub id: String,
-    pub label: String,
+    /// Text or any view.
+    pub label: View,
     pub disabled: bool,
     pub danger: bool,
 }
 
 impl MenuItem {
-    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { id: id.into(), label: label.into(), disabled: false, danger: false }
+    pub fn new<M>(id: impl Into<String>, label: impl ::air::IntoViewValue<M>) -> Self {
+        Self { id: id.into(), label: label.into_view_value(), disabled: false, danger: false }
     }
 
     pub fn disabled(self) -> Self {
@@ -453,12 +483,12 @@ fn menu_step(items: &[MenuItem], i: isize, dir: isize) -> Option<usize> {
 #[component]
 pub fn Menu(
     trigger: View,
-    items: Vec<MenuItem>,
+    #[props(into)] items: Prop<Vec<MenuItem>>,
     /// The trigger's name when it isn't text.
     #[props(into)]
-    label: Option<String>,
+    label: Prop<Option<String>>,
     onselect: Option<EventHandler<String>>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     let id = use_id("menu");
@@ -471,22 +501,19 @@ pub fn Menu(
             spawn(async move { _ = el.set_focus(true).await });
         }
     };
-    let n = items.len();
+    let list = memo(move || items.get());
     // Focus item `i` walking `dir`, opening the menu first if need be.
-    let go = {
-        let items = items.clone();
-        callback(move |(i, dir): (isize, isize)| {
-            let to = menu_step(&items, i, dir);
-            if *open.read_untracked() {
-                focus(to.and_then(|k| els.read_untracked().get(k).cloned().flatten()));
-            } else {
-                want.set(to);
-                open.set(true);
-            }
-        })
-    };
+    let go = callback(move |(i, dir): (isize, isize)| {
+        let to = list.with_untracked(|items| menu_step(items, i, dir));
+        if open.get_untracked() {
+            focus(to.and_then(|k| els.read_untracked().get(k).cloned().flatten()));
+        } else {
+            want.set(to);
+            open.set(true);
+        }
+    });
     let close = move |refocus: bool| {
-        if open.get() {
+        if open.get_untracked() {
             open.set(false);
             if refocus {
                 focus(button.read_untracked().clone());
@@ -495,10 +522,10 @@ pub fn Menu(
     };
     rsx! {
         div {
-            class: join("aio-menu", &class),
+            class: join("aio-menu", &class.get()),
             onkeydown: move |e| match e.key() {
                 // Only an open menu takes Escape: a dialog around it gets the next one.
-                Key::Escape if open.get() => {
+                Key::Escape if open.get_untracked() => {
                     e.prevent_default();
                     e.stop_propagation();
                     close(true);
@@ -514,25 +541,25 @@ pub fn Menu(
                 "aria-haspopup": "menu",
                 "aria-expanded": if open.get() { "true" } else { "false" },
                 "aria-controls": open.get().then(|| id.clone()),
-                "aria-label": label.clone(),
+                "aria-label": label.get(),
                 onmounted: move |e| *button.write() = Some(e.data()),
-                onclick: move |_| if open.get() { close(true) } else { go((0, 1)) },
+                onclick: move |_| if open.get_untracked() { close(true) } else { go.call((0, 1)) },
                 onkeydown: move |e| match e.key() {
                     Key::ArrowDown => {
                         e.prevent_default();
-                        go((0, 1));
+                        go.call((0, 1));
                     }
                     Key::ArrowUp => {
                         e.prevent_default();
-                        go((n as isize - 1, -1));
+                        go.call((list.with_untracked(Vec::len) as isize - 1, -1));
                     }
                     _ => {}
                 },
                 {trigger}
             }
             if open.get() {
-                div { class: "aio-menu__list", role: "menu", id: "{id}", "aria-label": label.clone(),
-                    for (i, it) in items.iter().enumerate() {
+                div { class: "aio-menu__list", role: "menu", id: "{id}", "aria-label": label.get(),
+                    for (i, it) in list.get().into_iter().enumerate() {
                         button {
                             key: "{it.id}",
                             "data-t": "{it.id}",
@@ -540,12 +567,16 @@ pub fn Menu(
                             role: "menuitem",
                             class: if it.danger { "aio-menu__item aio-menu__item--danger" } else { "aio-menu__item" },
                             tabindex: "-1",
-                            disabled: flag(it.disabled),
+                            disabled: it.disabled,
                             onmounted: move |e: MountedEvent| {
+                                let n = list.with_untracked(Vec::len);
                                 let mut v = els.write();
                                 v.resize(n, None);
-                                v[i] = Some(e.data());
-                                if *want.read_untracked() == Some(i) {
+                                if i < n {
+                                    v[i] = Some(e.data());
+                                }
+                                drop(v);
+                                if want.get_untracked() == Some(i) {
                                     want.set(None);
                                     focus(Some(e.data()));
                                 }
@@ -558,17 +589,18 @@ pub fn Menu(
                                 }
                             },
                             onkeydown: move |e: KeyboardEvent| {
+                                let n = list.with_untracked(Vec::len) as isize;
                                 let (to, dir) = match e.key() {
                                     Key::ArrowDown => (i as isize + 1, 1),
                                     Key::ArrowUp => (i as isize - 1, -1),
                                     Key::Home => (0, 1),
-                                    Key::End => (n as isize - 1, -1),
+                                    Key::End => (n - 1, -1),
                                     _ => return,
                                 };
                                 e.prevent_default();
-                                go((to, dir));
+                                go.call((to, dir));
                             },
-                            "{it.label}"
+                            {it.label.clone()}
                         }
                     }
                 }
@@ -582,14 +614,15 @@ pub fn Menu(
 /// One step of a [`Breadcrumb`]: a link (`href` or `onclick`), or plain text.
 #[derive(Clone, PartialEq)]
 pub struct Crumb {
-    pub label: String,
+    /// Text or any view.
+    pub label: View,
     pub href: Option<String>,
     pub onclick: Option<EventHandler<()>>,
 }
 
 impl Crumb {
-    pub fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into(), href: None, onclick: None }
+    pub fn new<M>(label: impl ::air::IntoViewValue<M>) -> Self {
+        Self { label: label.into_view_value(), href: None, onclick: None }
     }
 
     pub fn href(self, href: impl Into<String>) -> Self {
@@ -605,24 +638,28 @@ impl Crumb {
 /// (`aria-current="page"`), never a link to itself.
 #[component]
 pub fn Breadcrumb(
-    items: Vec<Crumb>,
-    #[props(default = String::from("/"), into)] separator: String,
-    #[props(default = String::from("Breadcrumb"), into)] label: String,
-    #[props(default, into)] class: String,
+    #[props(into)] items: Prop<Vec<Crumb>>,
+    #[props(default = String::from("/"), into)] separator: Prop<String>,
+    #[props(default = String::from("Breadcrumb"), into)] label: Prop<String>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let last = items.len().saturating_sub(1);
+    let all = memo(move || {
+        let v = items.get();
+        let last = v.len().saturating_sub(1);
+        v.into_iter().enumerate().map(|(i, c)| (i, i == last, c)).collect::<Vec<_>>()
+    });
     rsx! {
-        nav { class: join("aio-crumbs", &class), "aria-label": label, ..attributes,
+        nav { class: join("aio-crumbs", &class.get()), "aria-label": label, ..attributes,
             ol { class: "aio-crumbs__list",
-                for (i, c) in items.into_iter().enumerate() {
+                for (i, last, c) in all.get() {
                     li { key: "{i}", class: "aio-crumbs__item",
-                        if i == last || (c.href.is_none() && c.onclick.is_none()) {
-                            span { "aria-current": (i == last).then_some("page"), "{c.label}" }
+                        if last || (c.href.is_none() && c.onclick.is_none()) {
+                            span { "aria-current": last.then_some("page"), {c.label.clone()} }
                         } else {
-                            a { href: c.href, onclick: move |_| if let Some(f) = c.onclick { f.call(()) }, "{c.label}" }
+                            a { href: c.href.clone(), onclick: move |_| if let Some(f) = c.onclick { f.call(()) }, {c.label.clone()} }
                         }
-                        if i != last {
+                        if !last {
                             span { class: "aio-crumbs__sep", "aria-hidden": "true", "{separator}" }
                         }
                     }
@@ -636,28 +673,30 @@ pub fn Breadcrumb(
 /// the region instead). `width`/`height` are CSS lengths.
 #[component]
 pub fn Skeleton(
-    #[props(into)] width: Option<String>,
-    #[props(into)] height: Option<String>,
-    #[props(default)] circle: bool,
-    #[props(default = 1)] lines: u32,
-    #[props(default, into)] class: String,
+    #[props(into)] width: Prop<Option<String>>,
+    #[props(into)] height: Prop<Option<String>>,
+    #[props(default)] circle: Prop<bool>,
+    #[props(default = 1)] lines: Prop<u32>,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let cls = join(if circle { "aio-skel aio-skel--circle" } else { "aio-skel" }, &class);
-    let style = [width.map(|w| format!("width:{w}")), height.map(|h| format!("height:{h}"))]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(";");
-    if lines <= 1 {
+    let cls = memo(move || join(if circle.get() { "aio-skel aio-skel--circle" } else { "aio-skel" }, &class.get()));
+    let style = memo(move || {
+        [width.get().map(|w| format!("width:{w}")), height.get().map(|h| format!("height:{h}"))]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(";")
+    });
+    if lines.get_untracked() <= 1 && !lines.is_live() {
         return rsx! {
             span { class: cls, "aria-hidden": "true", style, ..attributes }
         };
     }
     rsx! {
         span { class: "aio-skel-stack", "aria-hidden": "true", ..attributes,
-            for i in 0..lines {
-                span { key: "{i}", class: cls.clone(), style: style.clone() }
+            for i in 0..lines.get().max(1) {
+                span { key: "{i}", class: cls, style }
             }
         }
     }
@@ -666,26 +705,27 @@ pub fn Skeleton(
 /// What an empty list shows: what happened, and what to do about it.
 #[component]
 pub fn EmptyState(
-    #[props(into)] title: String,
+    /// Text or any view.
+    title: View,
     /// A glyph; decorative.
     #[props(into)]
-    icon: Option<String>,
-    #[props(into)] description: Option<String>,
+    icon: Prop<Option<String>>,
+    description: Option<View>,
     action: Option<View>,
-    #[props(default, into)] class: String,
+    #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
     rsx! {
-        div { class: join("aio-empty", &class), ..attributes,
-            if let Some(i) = icon {
-                div { class: "aio-empty__icon", "aria-hidden": "true", "{i}" }
+        div { class: join("aio-empty", &class.get()), ..attributes,
+            if icon.with(Option::is_some) {
+                div { class: "aio-empty__icon", "aria-hidden": "true", {icon.get()} }
             }
-            p { class: "aio-empty__title", "{title}" }
-            if let Some(d) = description {
-                p { class: "aio-empty__desc", "{d}" }
+            p { class: "aio-empty__title", {title} }
+            if description.is_some() {
+                p { class: "aio-empty__desc", {description.clone()} }
             }
-            if let Some(a) = action {
-                div { class: "aio-empty__action", {a} }
+            if action.is_some() {
+                div { class: "aio-empty__action", {action.clone()} }
             }
         }
     }

@@ -12,14 +12,27 @@ use std::time::Duration;
 
 /// An animation: a `@keyframes` name (the kit's `aio-fade`, `aio-slide`,
 /// `aio-scale`, or the app's own, written from the hidden state to the
-/// shown one), how long, after what delay, with what easing.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// shown one), how long, after what delay, with what easing. Or a
+/// function of the progress ([`Motion::of`], aio's `TransitionFn`).
+#[derive(Clone, Copy, Debug)]
 pub struct Motion {
     pub keyframes: &'static str,
     pub ms: u32,
     pub delay_ms: u32,
     pub easing: &'static str,
+    /// The declarations at progress `t` (0: hidden, 1: shown), sampled into `keyframes`.
+    pub css: Option<fn(f64) -> String>,
 }
+
+impl PartialEq for Motion {
+    /// The same animation: its name stands for its frames.
+    fn eq(&self, o: &Self) -> bool {
+        (self.keyframes, self.ms, self.delay_ms, self.easing) == (o.keyframes, o.ms, o.delay_ms, o.easing)
+    }
+}
+
+/// How many steps a [`Motion::of`] is sampled in (aio's `KEYFRAME_STEPS`).
+const STEPS: u32 = 20;
 
 impl Motion {
     /// Opacity 0 ↔ 1 (aio's `fade`; 300 ms, as all three).
@@ -30,7 +43,38 @@ impl Motion {
     pub const SCALE: Self = Self::new("aio-scale");
 
     pub const fn new(keyframes: &'static str) -> Self {
-        Self { keyframes, ms: 300, delay_ms: 0, easing: "ease" }
+        Self { keyframes, ms: 300, delay_ms: 0, easing: "ease", css: None }
+    }
+
+    /// A motion written as a function (aio's `TransitionFn` `css(t)`):
+    /// `css(t)` is the style at progress `t`, 0 hidden to 1 shown
+    /// (`|t| format!("opacity:{t};transform:scale({t})")`). `name` names
+    /// its `@keyframes`: one name, one function.
+    pub const fn of(name: &'static str, css: fn(f64) -> String) -> Self {
+        Self { css: Some(css), ..Self::new(name) }
+    }
+
+    /// The `@keyframes` rule a [`Motion::of`] plays (none for a named one).
+    pub fn rule(&self) -> Option<String> {
+        let css = self.css?;
+        let frames: String = (0..=STEPS)
+            .map(|i| {
+                let t = f64::from(i) / f64::from(STEPS);
+                format!("{:.1}%{{{}}}", t * 100.0, css(t))
+            })
+            .collect();
+        Some(format!("@keyframes {}{{{frames}}}", self.keyframes))
+    }
+
+    /// Put its rule in the page, once (a named motion's is the app's or the kit's).
+    fn install(&self) {
+        let Some(rule) = self.rule() else { return };
+        let id = serde_json::to_string(&format!("aio-motion-{}", self.keyframes)).unwrap_or_default();
+        let rule = serde_json::to_string(&rule).unwrap_or_default();
+        ::air::exec(&format!(
+            "if(!document.getElementById({id})){{const s=document.createElement('style');s.id={id};\
+             s.textContent={rule};document.head.append(s)}}"
+        ));
     }
 
     pub const fn ms(self, ms: u32) -> Self {
@@ -42,57 +86,59 @@ impl Motion {
         Duration::from_millis((self.ms + self.delay_ms).into())
     }
 
-    /// The `animation` declarations entering (`out`: leaving, backwards).
+    /// The `animation` declaration entering (`out`: leaving, backwards).
     pub fn css(&self, out: bool) -> String {
+        format!("animation:{}", self.animation(out))
+    }
+
+    /// The `animation` value entering (`out`: leaving, backwards).
+    pub fn animation(&self, out: bool) -> String {
         let dir = if out { "reverse" } else { "normal" };
-        let Self { keyframes, ms, delay_ms, easing } = self;
-        format!("animation:{keyframes} {ms}ms {easing} {delay_ms}ms 1 {dir} both")
+        let Self { keyframes, ms, delay_ms, easing, .. } = self;
+        format!("{keyframes} {ms}ms {easing} {delay_ms}ms 1 {dir} both")
     }
 }
 
 /// Content that animates as `show` changes (aio's `Transition`): with no
-/// `exit`, it goes at once. It sits in a box of its own (`class`, attributes).
+/// `exit`, it goes at once. No box of its own: its content's first element
+/// plays the animation (its own style kept).
 #[component]
-pub fn Transition(
-    show: bool,
-    enter: Option<Motion>,
-    exit: Option<Motion>,
-    #[props(default, into)] class: String,
-    #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: View,
-) -> View {
-    // (shown last render, leaving since run, runs so far): a show again cancels a leave's end.
-    let state = once(|| Rc::new(Cell::new((show, None::<u64>, 0u64))));
-    let mut tick = signal(|| 0u64);
-    _ = tick.get();
-    let (was, mut leaving, mut runs) = state.get();
-    if was
-        && !show
-        && let Some(m) = exit
-    {
-        runs += 1;
-        leaving = Some(runs);
-        let (state, run) = (state.clone(), runs);
+pub fn Transition(show: Prop<bool>, enter: Option<Motion>, exit: Option<Motion>, children: View) -> View {
+    once(|| enter.iter().chain(&exit).for_each(Motion::install));
+    let on = signal(|| show.get_untracked());
+    let leaving = signal(|| false);
+    // A show again cancels a leave's end.
+    let runs = once(|| Rc::new(Cell::new(0u64)));
+    let was = once(|| Rc::new(Cell::new(show.get_untracked())));
+    effect(move || {
+        let now = show.get();
+        if now == was.replace(now) {
+            return;
+        }
+        runs.set(runs.get() + 1);
+        if now {
+            leaving.set(false);
+            on.set(true);
+            return;
+        }
+        let Some(m) = exit else { return on.set(false) };
+        leaving.set(true);
+        let (runs, run) = (runs.clone(), runs.get());
         spawn(async move {
             super::sleep(m.total()).await;
-            let (w, l, r) = state.get();
-            if l == Some(run) {
-                state.set((w, None, r));
-                tick += 1;
+            if runs.get() == run {
+                leaving.set(false);
+                on.set(false);
             }
         });
-    }
-    if show {
-        leaving = None;
-    }
-    state.set((show, leaving, runs));
-    let out = leaving.is_some();
-    if !show && !out {
-        return rsx! {};
-    }
-    let style = if out { exit.map(|m| m.css(true)) } else { enter.map(|m| m.css(false)) };
+    });
+    let content = ::air::styled(children, "animation", move || {
+        if leaving.get() { exit.map(|m| m.animation(true)) } else { enter.map(|m| m.animation(false)) }
+    });
     rsx! {
-        div { class: join("aio-transition", &class), style, ..attributes, {children} }
+        if on.get() {
+            {content.clone()}
+        }
     }
 }
 
@@ -125,111 +171,116 @@ pub fn moved<K: Eq + std::hash::Hash + Clone>(
         .collect()
 }
 
-/// One row's box and handle.
-type Rows = Rc<RefCell<HashMap<String, (View, Option<Rc<MountedData>>)>>>;
-
 /// A keyed list whose rows animate as they come and go (aio
 /// `TransitionGroup`); with `flip`, rows that moved slide from where they
 /// were over `flip_ms`. Each row sits in a box of its own (`row_class`).
 #[component]
 pub fn TransitionGroup(
-    items: Vec<(String, View)>,
+    #[props(into)] items: Prop<Vec<(String, View)>>,
     enter: Option<Motion>,
     exit: Option<Motion>,
     #[props(default)] flip: bool,
     #[props(default = 300)] flip_ms: u32,
-    #[props(default, into)] class: String,
-    #[props(default, into)] row_class: String,
+    #[props(default, into)] class: Prop<String>,
+    #[props(default, into)] row_class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let drawn = once(|| Rc::new(RefCell::new(Vec::<(String, bool)>::new())));
-    // Leaving rows whose exit is over.
-    let gone = once(|| Rc::new(RefCell::new(HashSet::<String>::new())));
-    let rows: Rows = once(Rows::default);
+    once(|| enter.iter().chain(&exit).for_each(Motion::install));
+    // The rows drawn (key, leaving), each row's view and handle.
+    let drawn = signal(Vec::<(String, bool)>::new);
+    let views = once(|| Rc::new(RefCell::new(HashMap::<String, View>::new())));
+    let handles = once(|| Rc::new(RefCell::new(HashMap::<String, Rc<MountedData>>::new())));
     // Where each row was last laid out, and the slide each one is making now.
     let at = once(|| Rc::new(RefCell::new(HashMap::<String, (f64, f64)>::new())));
     let slide = signal(HashMap::<String, ((f64, f64), bool)>::new);
-    let mut tick = signal(|| 0u64);
-    _ = tick.get();
-    let keys: Vec<String> = items.iter().map(|(k, _)| k.clone()).collect();
-    let before = drawn.borrow().clone();
-    let mut now = merge_rows(&before, &keys);
+    // Leaving rows whose exit is over, and a tick to take them out.
+    let gone = signal(HashSet::<String>::new);
+    // The group's timers live as long as it, not as one run of the effect
+    // (a change while a row leaves must not cancel its exit).
+    let me = ::air::current_owner();
+    let later = move |f: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>| match me {
+        Some(o) => _ = ::air::with_owner(o, || spawn(f)),
+        None => _ = spawn(f),
+    };
     {
-        let mut g = gone.borrow_mut();
-        // With no exit, a leaving row goes at once.
-        now.retain(|(k, out)| !out || (exit.is_some() && !g.contains(k)));
-        g.clear();
-    }
-    for (k, out) in &now {
-        let was_out = before.iter().find(|(b, _)| b == k).map(|(_, o)| *o);
-        if *out
-            && was_out != Some(true)
-            && let Some(m) = exit
-        {
-            let (k, gone) = (k.clone(), gone.clone());
-            spawn(async move {
-                super::sleep(m.total()).await;
-                gone.borrow_mut().insert(k);
-                tick += 1;
-            });
-        }
-    }
-    {
-        let mut rs = rows.borrow_mut();
-        for (k, el) in items {
-            match rs.get_mut(&k) {
-                Some(r) => r.0 = el,
-                None => _ = rs.insert(k, (el, None)),
-            }
-        }
-        rs.retain(|k, _| now.iter().any(|(n, _)| n == k));
-    }
-    if flip && now != before && !before.is_empty() {
-        let (rows, at) = (rows.clone(), at.clone());
-        spawn(async move {
-            // Once this render is laid out: where each row is now.
-            super::sleep(super::FRAME).await;
-            let handles: Vec<_> =
-                rows.borrow().iter().filter_map(|(k, (_, m))| Some((k.clone(), m.clone()?))).collect();
-            let mut here = HashMap::new();
-            for (k, m) in handles {
-                if let Ok(r) = m.get_client_rect().await {
-                    here.insert(k, (r.origin.x, r.origin.y));
+        let (views, handles, at) = (views.clone(), handles.clone(), at.clone());
+        effect(move || {
+            let next = items.get();
+            gone.with(|_| ());
+            let keys: Vec<String> = next.iter().map(|(k, _)| k.clone()).collect();
+            let before = drawn.get_untracked();
+            let mut now = merge_rows(&before, &keys);
+            let done = gone.get_untracked();
+            // With no exit, a leaving row goes at once.
+            now.retain(|(k, out)| !out || (exit.is_some() && !done.contains(k)));
+            for (k, out) in &now {
+                let was_out = before.iter().find(|(b, _)| b == k).map(|(_, o)| *o);
+                if *out
+                    && was_out != Some(true)
+                    && let Some(m) = exit
+                {
+                    let k = k.clone();
+                    later(Box::pin(async move {
+                        super::sleep(m.total()).await;
+                        gone.update(|g| _ = g.insert(k));
+                    }));
                 }
             }
-            let d = moved(&at.borrow(), &here);
-            *at.borrow_mut() = here;
-            if d.is_empty() {
-                return;
+            {
+                let mut vs = views.borrow_mut();
+                for (k, v) in next {
+                    vs.insert(k, v);
+                }
+                vs.retain(|k, _| now.iter().any(|(n, _)| n == k));
+                handles.borrow_mut().retain(|k, _| now.iter().any(|(n, _)| n == k));
             }
-            // Invert at once, then play back to where they are.
-            slide.set(d.iter().map(|(k, v)| (k.clone(), (*v, false))).collect());
-            super::sleep(super::FRAME).await;
-            slide.set(d.into_iter().map(|(k, v)| (k, (v, true))).collect());
-            super::sleep(Duration::from_millis(flip_ms.into())).await;
-            slide.set(HashMap::new());
+            if done.iter().any(|k| !now.iter().any(|(n, _)| n == k)) {
+                gone.update(|g| g.retain(|k| now.iter().any(|(n, _)| n == k)));
+            }
+            if flip && now != before && !before.is_empty() {
+                let (handles, at) = (handles.clone(), at.clone());
+                later(Box::pin(async move {
+                    // Once this change is laid out: where each row is now.
+                    super::sleep(super::FRAME).await;
+                    let hs: Vec<_> = handles.borrow().iter().map(|(k, m)| (k.clone(), m.clone())).collect();
+                    let mut here = HashMap::new();
+                    for (k, m) in hs {
+                        if let Ok(r) = m.get_client_rect().await {
+                            here.insert(k, (r.origin.x, r.origin.y));
+                        }
+                    }
+                    let d = moved(&at.borrow(), &here);
+                    *at.borrow_mut() = here;
+                    if d.is_empty() {
+                        return;
+                    }
+                    // Invert at once, then play back to where they are.
+                    slide.set(d.iter().map(|(k, v)| (k.clone(), (*v, false))).collect());
+                    super::sleep(super::FRAME).await;
+                    slide.set(d.into_iter().map(|(k, v)| (k, (v, true))).collect());
+                    super::sleep(Duration::from_millis(flip_ms.into())).await;
+                    slide.set(HashMap::new());
+                }));
+            }
+            drawn.set(now);
         });
     }
-    *drawn.borrow_mut() = now.clone();
-    let shown: Vec<(String, bool, View)> = {
-        let rs = rows.borrow();
-        now.iter().filter_map(|(k, out)| Some((k.clone(), *out, rs.get(k)?.0.clone()))).collect()
-    };
-    let slides = slide.get();
+    let keys = memo(move || drawn.with(|d| d.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()));
     rsx! {
-        div { class: join("aio-tgroup", &class), ..attributes,
-            for (k, out, el) in shown {
+        div { class: join("aio-tgroup", &class.get()), ..attributes,
+            for k in keys.get() {
                 div {
                     key: "{k}",
-                    class: join("aio-tgroup__row", &row_class),
-                    style: row_style(if out { exit.map(|m| m.css(true)) } else { enter.map(|m| m.css(false)) }, slides.get(&k), flip_ms),
+                    class: join("aio-tgroup__row", &row_class.get()),
+                    style: {
+                        let out = drawn.with(|d| d.iter().any(|(r, o)| *r == k && *o));
+                        row_style(if out { exit.map(|m| m.css(true)) } else { enter.map(|m| m.css(false)) }, slide.with(|s| s.get(&k).copied()).as_ref(), flip_ms)
+                    },
                     onmounted: {
-                        let (rows, at, k) = (rows.clone(), at.clone(), k.clone());
+                        let (handles, at, k) = (handles.clone(), at.clone(), k.clone());
                         move |e: MountedEvent| {
                             let m = e.data();
-                            if let Some(r) = rows.borrow_mut().get_mut(&k) {
-                                r.1 = Some(m.clone());
-                            }
+                            handles.borrow_mut().insert(k.clone(), m.clone());
                             let (at, k) = (at.clone(), k.clone());
                             async move {
                                 if let Ok(r) = m.get_client_rect().await {
@@ -238,7 +289,7 @@ pub fn TransitionGroup(
                             }
                         }
                     },
-                    {el}
+                    {views.borrow().get(&k).cloned()}
                 }
             }
         }
@@ -295,6 +346,14 @@ mod tests {
         assert_eq!(m.css(false), "animation:aio-fade 200ms ease 50ms 1 normal both");
         assert_eq!(m.css(true), "animation:aio-fade 200ms ease 50ms 1 reverse both");
         assert_eq!(m.total(), Duration::from_millis(250));
+        let grow = Motion::of("grow", |t| format!("opacity:{t}"));
+        let rule = grow.rule().unwrap();
+        assert!(rule.starts_with("@keyframes grow{0.0%{opacity:0}5.0%{opacity:0.05}"), "{rule}");
+        assert!(rule.ends_with("100.0%{opacity:1}}"), "{rule}");
+        assert_eq!(
+            (Motion::FADE.rule(), grow, grow.css(false)),
+            (None, Motion::of("grow", |_| String::new()), "animation:grow 300ms ease 0ms 1 normal both".into())
+        );
         assert_eq!(
             row_style(None, Some(&((0.0, -40.0), false)), 300),
             "transform:translate(0px,-40px);transition:none"
