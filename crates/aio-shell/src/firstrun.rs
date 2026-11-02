@@ -54,7 +54,7 @@ pub(crate) struct Look<'a> {
 }
 
 /// `#rgb` as `#rrggbb` (the helpers read six digits).
-fn hex6(c: &str) -> String {
+pub(crate) fn hex6(c: &str) -> String {
     match c.strip_prefix('#') {
         Some(h) if h.len() == 3 => h.chars().fold("#".into(), |s, x| format!("{s}{x}{x}")),
         _ => c.into(),
@@ -465,7 +465,7 @@ impl Drop for Progress {
 }
 
 /// A fresh dir for one helper's files.
-fn helper_dir() -> io::Result<PathBuf> {
+pub(crate) fn helper_dir() -> io::Result<PathBuf> {
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("aio-dialog-{}-{at}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
@@ -488,7 +488,7 @@ fn osascript(script: &Path) -> Command {
 
 /// PowerShell, running the script `$env:AIO_PS_SCRIPT` names: read as a
 /// script block, so the execution policy treats it as a typed command.
-fn powershell(script: &Path) -> Command {
+pub(crate) fn powershell(script: &Path) -> Command {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let mut cmd = quiet(Command::new(Path::new(&root).join("System32/WindowsPowerShell/v1.0/powershell.exe")));
     cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden"])

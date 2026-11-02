@@ -375,14 +375,20 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     }
     assert!(sh.said("pop-up BLOCKED from http://127.0.0.1"), "{}", sh.said.lock().unwrap().join("\n"));
     assert!(sh.said("no click or key in that page in the last 5 s"));
-    sh.eval("const w = document.querySelector('#b webview'); w.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 }); w.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 }); true").await;
-    sh.eval("document.getElementById('open').click()").await;
+    // Clicked again until it opens: the ask to open goes through the app
+    // and its page to the guest, which on a loaded machine may take past
+    // the 5 s the click counts for.
     let end = std::time::Instant::now() + PATIENCE;
-    while std::time::Instant::now() < end {
-        if sh.said("not opened (AIORT_NO_OPEN") {
-            break;
+    'open: while std::time::Instant::now() < end {
+        sh.eval("const w = document.querySelector('#b webview'); w.sendInputEvent({ type: 'mouseDown', x: 5, y: 5, button: 'left', clickCount: 1 }); w.sendInputEvent({ type: 'mouseUp', x: 5, y: 5, button: 'left', clickCount: 1 }); true").await;
+        sh.eval("document.getElementById('open').click()").await;
+        let tried = std::time::Instant::now();
+        while tried.elapsed() < Duration::from_secs(6) {
+            if sh.said("not opened (AIORT_NO_OPEN") {
+                break 'open;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(sh.said("not opened (AIORT_NO_OPEN, a contained run): https://example.invalid/"));
 

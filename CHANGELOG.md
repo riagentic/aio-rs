@@ -9,6 +9,18 @@ version may break things.
 
 ### Added
 
+- **The splash drawn by the OS before Electron starts, at every start**
+  (aio's splash): GTK 3 over FFI on Linux (opened at run time, no new
+  crate), Cocoa on macOS, Windows Forms on Windows (for a download; when
+  Electron is here its main process draws it, as aio's). A first start's
+  Electron download runs on it, with its bar and a ✕ that cancels it.
+  New `[build.splash]` keys: `position`, `follow_window`, `shadow`,
+  `window_shadow`, `cancel`, `progress`, `bar_style`, `bar_height`,
+  `bar_position`, `bar_radius`. `ax build` builds it in for an app with a
+  `[build.splash]` (aio-rs-shell's `native-splash` feature), so an app
+  without one carries none of it. `Window { splash_show }` may take 50 ms;
+  one that panics or takes longer leaves the build's `show`, said
+  ([desktop](docs/clients/desktop.md#the-splash)).
 - **Prebuilt `ax` for macOS** (arm64 and x86_64): the release workflow
   (`.github/workflows/release.yml`) builds and smokes `ax` on a macOS
   runner of each CPU beside Linux and Windows, pins every archive in
@@ -475,6 +487,11 @@ version may break things.
 
 ### Fixed
 
+- A cell's or a synced copy's listeners (a view, `watch`) never hear an
+  older state after a newer one: a tell from another thread, or from a
+  listener itself, between reading the state and telling it, was told
+  first, and the older one after it (a watch on a copy saw `[0, 4, 0, 5]`).
+  One teller at a time now tells until nothing is left untold.
 - An app's first update after its install is made from the patch again:
   a bundle's `install.sh` kept only the binary in `versions/<v>/`, so the
   patch (made over the whole bundle) missed its other files and the whole

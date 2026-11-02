@@ -395,7 +395,10 @@ pub fn no_home_paths(bin: &[u8], at: &Path) -> Result<(), String> {
 }
 
 /// The release binary `name` of package `pkg`, built for `cross` (None:
-/// this machine); `link`: an object its link takes too (the exe's icon).
+/// this machine); `link`: an object its link takes too (the exe's icon);
+/// `splash`: the app has a `[build.splash]`, drawn by the OS before
+/// Electron starts (aio-rs-shell's `native-splash`).
+#[allow(clippy::too_many_arguments)]
 pub fn release_binary(
     meta: &serde_json::Value,
     pkg: &str,
@@ -404,10 +407,14 @@ pub fn release_binary(
     link: Option<&Path>,
     channel: Option<&str>,
     version: &str,
+    splash: bool,
 ) -> Result<PathBuf, String> {
     let root = Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?);
     let mut cargo = cargo_for("the release build", &["rustc", "--release", "-p", pkg, "--bin", name], cross)?;
     remap(&mut cargo, root);
+    if let Some(f) = splash.then(|| native_splash(meta, pkg)).flatten() {
+        cargo.args(["--features", &f]);
+    }
     cargo.arg("--").args(link_args_here(cross.unwrap_or(crate::platform::host()?).triple));
     if let Some(obj) = link {
         cargo.arg(format!("-Clink-arg={}", obj.display()));
@@ -428,6 +435,14 @@ pub fn release_binary(
     let bin = crate::bundle::binary(Path::new(target), cross.map(|p| p.triple), name, os);
     no_home_paths(&std::fs::read(&bin).map_err(|e| format!("{}: {e}", bin.display()))?, &bin)?;
     Ok(bin)
+}
+
+/// `<the shell's name in pkg>/native-splash`, or none: `pkg` does not
+/// depend on aio-rs-shell.
+pub fn native_splash(meta: &serde_json::Value, pkg: &str) -> Option<String> {
+    let deps = meta["packages"].as_array()?.iter().find(|p| p["name"] == pkg)?["dependencies"].as_array()?;
+    let shell = deps.iter().find(|d| d["name"] == "aio-rs-shell")?;
+    Some(format!("{}/native-splash", shell["rename"].as_str().unwrap_or("aio-rs-shell")))
 }
 
 /// The name the monogram draws: the app's, else its id.
@@ -568,7 +583,8 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
     if let Some(did) = crate::css::step(&cfg, &app_dir(&pkg)?)? {
         eprintln!("ax build: {did}");
     }
-    let binary = release_binary(&meta, &pkg.name, name, cross, exe_icon.as_deref(), channel, &app.version)?;
+    let splash = cfg.build.splash.is_some();
+    let binary = release_binary(&meta, &pkg.name, name, cross, exe_icon.as_deref(), channel, &app.version, splash)?;
     let bytes = std::fs::metadata(&binary).map_err(|e| format!("{}: {e}", binary.display()))?.len();
     if cfg.app.version.is_some()
         && !crate::version::carried(&std::fs::read(&binary).map_err(|e| e.to_string())?, &app.version)
@@ -1003,6 +1019,20 @@ fn package(kind: Kind, _: &Built) -> Result<(String, Vec<PathBuf>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An app with a `[build.splash]` gets the shell's `native-splash`, by
+    /// whatever name it gave the shell; one without the shell, nothing.
+    #[test]
+    fn a_splash_turns_on_the_shells_native_splash() {
+        let meta = serde_json::json!({ "packages": [
+            { "name": "notes-app", "dependencies": [{ "name": "aio-rs-shell", "rename": "aio-shell" }] },
+            { "name": "plain", "dependencies": [{ "name": "aio-rs-shell", "rename": null }] },
+            { "name": "cli", "dependencies": [{ "name": "aio-rs" }] },
+        ]});
+        assert_eq!(native_splash(&meta, "notes-app").as_deref(), Some("aio-shell/native-splash"));
+        assert_eq!(native_splash(&meta, "plain").as_deref(), Some("aio-rs-shell/native-splash"));
+        assert_eq!(native_splash(&meta, "cli"), None);
+    }
 
     #[test]
     fn each_platform_bundles_electrons_build_for_it_and_says_what_went_short() {

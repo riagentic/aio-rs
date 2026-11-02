@@ -34,7 +34,8 @@ function openSplash() {
   if (!SPLASH) return
   const [light, dark] = SPLASH.bg
   splash = new BrowserWindow({
-    width: SPLASH.width, height: SPLASH.height, center: true, show: false, frame: false,
+    width: SPLASH.width, height: SPLASH.height, ...splashPlace(SPLASH.width, SPLASH.height), show: false, frame: false,
+    hasShadow: !!SPLASH.windowShadow,
     resizable: false, movable: false, minimizable: false, maximizable: false, fullscreenable: false,
     skipTaskbar: true, title: arg('title'),
     // A rounded or bordered splash ([build.splash] radius, border): clear around its box.
@@ -54,6 +55,22 @@ function openSplash() {
   splash.webContents.once('did-finish-load', () => setTimeout(up, 1000))
   splash.loadFile(path.join(dir, 'splash.html'))
   setTimeout(() => endSplash(), SPLASH.max)
+}
+// Where the splash opens ([build.splash] position, presplash.rs `origin`):
+// centred on the app's window as last placed (SPLASH.target), on the
+// primary display, or on the one under the pointer; kept 64 px inside it.
+function splashPlace(w, h) {
+  const t = SPLASH.target && { x: SPLASH.target[0], y: SPLASH.target[1], width: SPLASH.target[2], height: SPLASH.target[3] }
+  const d = SPLASH.mode === 'pointer' ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+    : SPLASH.mode === 'window' && t ? screen.getDisplayMatching(t) : screen.getPrimaryDisplay()
+  const a = d.workArea
+  const r = SPLASH.mode === 'window' && t ? t : a
+  const fit = (v, lo, n, span) => Math.max(lo, Math.min(v, lo + Math.max(0, span - n)))
+  const mx = Math.min(64, Math.floor(a.width / 8)), my = Math.min(64, Math.floor(a.height / 8))
+  return {
+    x: fit(Math.round(r.x + r.width / 2 - w / 2), a.x + mx, w, a.width - 2 * mx),
+    y: fit(Math.round(r.y + r.height / 2 - h / 2), a.y + my, h, a.height - 2 * my),
+  }
 }
 // The window may show: once the splash has been up its minimum. `then`
 // shows it; the splash goes with it (or at its cap, then).
@@ -595,7 +612,12 @@ app.whenReady().then(() => {
     for (const ev of ['resize', 'move', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) w.on(ev, later)
     w.on('close', report)
     // shown once painted, at most SHELL.showCapMs later (Window { show_cap_ms }); 0: at once.
-    const show = () => endSplash(() => { if (!w.isDestroyed() && !w.isVisible()) w.show() })
+    // Rust learns it is on screen: the OS's splash (presplash.rs) goes after its minimum.
+    const show = () => endSplash(() => {
+      if (w.isDestroyed() || w.isVisible()) return
+      w.show()
+      tell({ t: 'window', state: 'shown', normal: w.getNormalBounds() })
+    })
     let painted = false
     w.once('ready-to-show', () => { painted = true; show() })
     if (!SHELL.showCapMs) show()

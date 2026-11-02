@@ -704,6 +704,39 @@ pub struct Splash {
     /// the desktop, 200 on Android).
     #[serde(default)]
     pub fade_ms: Option<u64>,
+    /// Where it opens: centred where the app's window opens, on the primary
+    /// display, or on the one under the pointer.
+    #[serde(default)]
+    pub position: SplashPosition,
+    /// `position = "window"`: once the app's window shows, the splash moves
+    /// onto where it really is.
+    #[serde(default = "yes")]
+    pub follow_window: bool,
+    /// The text's shadow; unset: the OS's (macOS and Linux on, Windows off).
+    #[serde(default)]
+    pub shadow: Option<bool>,
+    /// The window's drop shadow; unset: the OS's (macOS on).
+    #[serde(default)]
+    pub window_shadow: Option<bool>,
+    /// The ✕ that cancels a first start's download.
+    #[serde(default = "yes")]
+    pub cancel: bool,
+    /// The bar while a first start downloads Electron.
+    #[serde(default = "yes")]
+    pub progress: bool,
+    /// The bar's thickness: `solid` 6 pt, `thin` 3 pt.
+    #[serde(default)]
+    pub bar_style: BarStyle,
+    /// The bar's height in px; unset: `bar_style`'s.
+    #[serde(default)]
+    pub bar_height: Option<u32>,
+    /// Under the text (inside the margins), or along the window's bottom
+    /// edge, full width.
+    #[serde(default)]
+    pub bar_position: BarPosition,
+    /// The bar's corner radius in px; unset: half its height.
+    #[serde(default)]
+    pub bar_radius: Option<u32>,
     /// The PNG's bytes, put in by `aio::config!()` (empty elsewhere).
     #[serde(skip)]
     pub png: &'static [u8],
@@ -733,6 +766,16 @@ impl Default for Splash {
             text_color: None,
             bar: None,
             track: None,
+            position: Default::default(),
+            follow_window: true,
+            shadow: None,
+            window_shadow: None,
+            cancel: true,
+            progress: true,
+            bar_style: Default::default(),
+            bar_height: None,
+            bar_position: Default::default(),
+            bar_radius: None,
             png: &[],
         }
     }
@@ -774,6 +817,34 @@ pub enum Align {
     #[default]
     Center,
     Right,
+}
+
+/// `[build.splash] position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplashPosition {
+    #[default]
+    Window,
+    Primary,
+    Pointer,
+}
+
+/// `[build.splash] bar_style`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarStyle {
+    #[default]
+    Solid,
+    Thin,
+}
+
+/// `[build.splash] bar_position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarPosition {
+    #[default]
+    UnderText,
+    BottomEdge,
 }
 
 impl Splash {
@@ -1421,6 +1492,9 @@ impl Config {
             }
             if s.size.is_some_and(|[w, h]| w == 0 || h == 0 || w > 4096 || h > 4096) {
                 return Err("aio.toml: [build.splash] size is [width, height], each 1 to 4096".into());
+            }
+            if s.bar_height.is_some_and(|h| h == 0 || h > 64) {
+                return Err("aio.toml: [build.splash] bar_height is px, 1 to 64".into());
             }
             if s.min_ms > s.max_ms {
                 return Err("aio.toml: [build.splash] min_ms is more than max_ms".into());
