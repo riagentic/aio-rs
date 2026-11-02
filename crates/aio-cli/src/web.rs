@@ -1503,7 +1503,8 @@ mod browser_air {
             .output()
             .unwrap();
         let tree = String::from_utf8_lossy(&tree.stdout);
-        assert!(!tree.contains("aio-rs-air") || !tree.lines().any(|l| l.starts_with("dioxus")), "{tree}");
+        assert!(tree.lines().any(|l| l.starts_with("aio-rs-air ")), "air draws it: {tree}");
+        assert!(!tree.lines().any(|l| l.starts_with("dioxus")), "{tree}");
         Some(out)
     }
 
