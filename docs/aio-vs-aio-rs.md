@@ -495,7 +495,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Service, CLI | `server`, `cli` | `mode = "server"`, `cli` | ✅ |
 | Thin clients | electron-, android-, cli-client | `mode = "client"`; an Android client has no connect page on the phone yet (paired from the desktop, `ax pair`) | 🔄 |
 | iOS | ios-client | ❌ | ❌ |
-| Dev reload | patch, reload, restart (~3 s) | hot-patch, state kept; on air `ax dev` reloads markup (3 ms) and patches Rust (~0.45 s) itself, no dx (Linux, macOS); the in-page overlay shows build errors only (server diagnostics, live a11y and contrast wait for air) | 🔄 |
+| Dev reload | patch, reload, restart (~3 s) | hot-patch, state kept; on air `ax dev` reloads markup (3 ms) and patches Rust (~0.45 s) itself, no dx (Linux, macOS, Windows); the in-page overlay shows build errors only (server diagnostics, live a11y and contrast wait for air) | 🔄 |
 | Dev watcher | 100 ms debounce, 500 ms ceiling, editor files ignored, served files watched, health sentinel, restart drain and storm guard, files named | the same (cargo's dep-info for the files a build read); an unchanged binary isn't restarted | ✅ |
 | Dev session | `am start` of a dev run, `--no-watch`, `--verbose`, `--title`, `am stop` ends it | `ax dev --detach`, `--no-watch`, `--verbose` (`AIORT_LOG`), `--title` (`AIORT_TITLE`), `ax stop` ends it, `ax status` says it waits for a fix | ✅ |
 | Hot reload in web, Android | page reload | 🔄 the dev APK reloads the page each edit (`ax dev --android`); the web build reloads its tabs | 🔄 |
