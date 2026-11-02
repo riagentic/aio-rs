@@ -22,9 +22,9 @@ the package that has it.
 Pick one. Both put `ax` in `$CARGO_HOME/bin` (`~/.cargo/bin`), which
 rustup already put on `PATH`.
 
-**Prebuilt** (seconds, no clone): Linux x86_64 (on macOS, 0.1.0 has no
-prebuilt `ax` yet: use the source install below, and the installer says
-so):
+**Prebuilt** (seconds, no clone): Linux x86_64, and macOS arm64 and
+x86_64 from the release after 0.1.0 (on 0.1.0's, the installer says there
+is none on macOS: use the source install below):
 
 ```sh
 curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.1.0/install.sh | sh
