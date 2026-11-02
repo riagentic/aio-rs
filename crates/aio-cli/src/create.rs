@@ -565,6 +565,10 @@ publish.workspace = true
 # the commit. `ax pin` says which; `ax pin <version>` moves it.
 [dependencies]
 aio = {{ package = "aio-rs", {aio}{feats} }}
+
+# `aio::testing` for the tests alone: the app's own builds leave it out.
+[dev-dependencies]
+aio = {{ package = "aio-rs", {aio}, features = ["testing"] }}
 {deps}
 [profile.release]
 lto = true

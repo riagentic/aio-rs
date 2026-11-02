@@ -234,16 +234,14 @@ beyond the aio-rs form.
 | Desktop | `appIcon()` images by app URL (`"/icons/busy.png"`) | PNG bytes or `data:` URLs | `include_bytes!` the image | [desktop](clients/desktop.md#changing-the-icon) |
 | Web | the page's console forwarded to the server's log | stays in the page | ➖ | [web](clients/web.md#gaps) |
 | Web | every `<webview>` method | `go` and events; desktop only | ➖ | [web](clients/web.md#gaps) |
-| CLI apps | `testIO()` over a whole run | none | test `parse`, `failure`, or the binary | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
 | CLI apps | `watch` hiding the cursor, one frame per tick | a frame per change | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
 | CLI apps | flag types inferred from the spec | read by name (`a.number("n")`) | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
-| Testing | `t.init(seed)`, `t.destroy()` mid-test | none | another cell on the same `TestCells` | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.randomActions(n)`, an unseeded fuzz | every fuzz seeded | ➖ | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.settle(ms)` on real timers | virtual timers | `TestServer` for real I/O | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `ui.advance(ms)` under the page | `TestUi` time is real | `TestCells::advance` | [UI](testing/ui.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `waitForPatch`, `clients[i].patches` | none | assert on each copy's `state()` | [multi-app](testing/multi-app.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | a corrupt cassette re-recorded; unserializable args as text | refused | fix or delete it | [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `deno task lab`, `deno task test:wine` | none | by hand on a fresh machine | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
+| Testing | a corrupt cassette re-recorded silently; unserializable args as text | refused unless `AIO_CASSETTE=rerecord`; args refused, naming the call | ➖ | [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without) |
+| Testing | `testServer(config)`: every cell of an app on one server | one cell per `TestServer` | several `TestServer`s, `TestApps` | [multi-app](testing/multi-app.md#what-aio-has-that-aio-rs-does-without) |
+| Testing | `deno task test:wine` | Windows bundles smoked on Windows | `./ci-windows.sh`, GitHub's Windows runner | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `aiol` perf hints, `[fixable]` marks | `TestUi::components`, `ax components` | ➖ | [lint](testing/lint.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | an API snapshot gate, an `experimental` marker | review and the CHANGELOG | ➖ | [versions](basics/versioning.md#gaps-against-aios-policy) |
 | Debugging | correlation ids, the error box with the state | the call's name; reports carry the state | `ax events` | [errors](debugging/errors.md#not-in-aio-rs) |
@@ -320,8 +318,8 @@ construct-by-construct tables are in the
 - **Tests boot every cell's `#[on_start]`** (aio's `testCell` skipped
   `onInit`), timers in `TestCells` are virtual, `TestUi` time is real,
   and an unread refusal fails the test. [testing cells](testing/cells.md#what-aio-has-that-aio-rs-does-without)
-- **A corrupt cassette fails** instead of being re-recorded.
-  [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without)
+- **A corrupt cassette fails** instead of being re-recorded, unless
+  `AIO_CASSETTE=rerecord` asks. [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without)
 - **Time travel keeps every event**: no `skipActions`.
   [time travel](debugging/time-travel.md#not-as-in-aio)
 - **Problem reports are always on** and never carry arguments.
@@ -466,17 +464,21 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Cell tests | `testCell`, `bootCells` | `TestCells` (virtual time, seeded fuzz) | ✅ |
+| Cell tests | `testCell`, `bootCells` | `TestCells` (virtual time, seeded fuzz, `fuzz_methods`, `reset`, `last_effects`, `budget`) | ✅ |
 | UI tests | `testUI` on happy-dom | `TestUi` on the real engine | ➕ |
 | Virtual clock under the page | `ui.advance` | ❌ (`TestCells::advance`) | ❌ |
 | Typed UI clients | `am testgen` | `ax testgen` (a Rust name table) | ✅ |
 | Server and multi-client | `testServer`, `testMultiClient` | `TestServer`, `Sim` | ✅ |
-| Patch assertions | `waitForPatch` | ❌ (each copy's `state()`) | ❌ |
-| Cassettes | `openCassette` | `Cassette` (stricter) | 🔄 |
+| Patch assertions | `patches`, `waitForPatch`, `dispatchAll` | `testing::patches` (`all`, `until`), `call_all` | ✅ |
+| Several apps | `testApps` | `TestApps` | ✅ |
+| Cassettes | `openCassette`, `wrap` | `Cassette` (`wrap`; stricter, `AIO_CASSETTE=rerecord`) | 🔄 |
+| Page fetch stubs | `testUI({ fetch })` | `Mount::fetch(host, answer)` | ✅ |
+| Boot smoke in a test | `smoke()` | `testing::smoke(bundle)`, `ax smoke` (also a `.deb`'s menu entry, page errors) | ✅ |
+| Proving the tests | `check:mutations`, `check:vacuous` | `scripts/mutants` (source and a built `.deb`), `ax lint` (no-assertions, self-comparison) | ✅ |
 | Browser tests | `testBrowser` | `TestBrowser` | ✅ |
 | Lint | `aiol` | the compiler + `ax lint` | 🔄 |
 | Labs | VMs and containers it boots | the same images (`ax lab --boot`), or a machine over ssh | ✅ |
-| CLI run capture | `testIO()` | ❌ (test `parse`, the binary) | ❌ |
+| CLI run capture | `testIO()` | `testing::TestIo` | ✅ |
 | API snapshot gate | yes | ❌ (review, CHANGELOG) | ❌ |
 
 **Debugging**

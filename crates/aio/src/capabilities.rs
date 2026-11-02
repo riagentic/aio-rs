@@ -21,7 +21,7 @@ pub fn set(network: &[String]) {
 
 /// A UI test's hold (`TestUi`): this machine and `hosts`, besides the hosts
 /// the test binary's other mounts (or an app it booted) allowed.
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(all(any(feature = "kit", feature = "air"), feature = "testing"))]
 pub(crate) fn hold_for_tests(hosts: &[String]) {
     NETWORK.write().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().extend(hosts.iter().cloned());
 }
