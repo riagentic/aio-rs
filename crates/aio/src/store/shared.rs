@@ -36,8 +36,11 @@ struct Inner {
     loose: AtomicUsize,
 }
 
-/// The files open in this process: one connection each.
-static OPEN: Mutex<Vec<(PathBuf, Option<FileId>, Weak<Inner>)>> = Mutex::new(Vec::new());
+/// A file open in this process: its path, identity and shared connection.
+type Open = (PathBuf, Option<FileId>, Weak<Inner>);
+
+/// The files open in this process: one shared connection each.
+static OPEN: Mutex<Vec<Open>> = Mutex::new(Vec::new());
 
 /// Numbers each joint commit, so a store marks itself once per joint commit.
 static JOINTS: AtomicU64 = AtomicU64::new(1);
