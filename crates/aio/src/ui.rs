@@ -18,6 +18,10 @@ mod view;
 #[cfg(feature = "kit")]
 pub use view::*;
 #[cfg(all(feature = "air", not(feature = "kit")))]
+mod css;
+#[cfg(all(feature = "air", not(feature = "kit")))]
+pub use css::{collect_css, css};
+#[cfg(all(feature = "air", not(feature = "kit")))]
 mod on_air;
 #[cfg(all(feature = "air", not(feature = "kit")))]
 pub use on_air::*;

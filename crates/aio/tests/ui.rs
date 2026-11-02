@@ -801,3 +801,32 @@ fn the_page_follows_the_oss_light_or_dark_as_it_changes() {
     let mut ui = aio::testing::Mount::default().dark().app(schemed);
     ui.until_text("dark", "true");
 }
+
+/// Scoped CSS on air (aio's `css`): a class per rule, its rule in the page
+/// once, nesting scoped to it.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn a_scoped_rule_styles_its_class_only_and_is_put_in_the_page_once() {
+    #[component]
+    fn Tag() -> View {
+        let c = aio::ui::css("color: rgb(1, 2, 3); & b { color: rgb(4, 5, 6) }");
+        rsx! { p { class: "{c}", "data-t": "tag", "x" b { "data-t": "inner", "y" } } }
+    }
+    let mut ui = TestUi::new(|| {
+        rsx! {
+            Tag {}
+            Tag {}
+            p { "data-t": "plain", "z" }
+        }
+    });
+    assert_eq!(ui.style("css=[data-t=tag]:first-child", "color"), "rgb(1, 2, 3)");
+    assert_eq!(
+        ui.style("css=[data-t=tag]:first-child [data-t=inner]", "color"),
+        "rgb(4, 5, 6)",
+        "a nested rule, scoped"
+    );
+    assert_ne!(ui.style("plain", "color"), "rgb(1, 2, 3)", "only its class");
+    let rules = ui.eval("document.querySelector('style[data-aio-css]').sheet.cssRules.length");
+    assert_eq!(rules.as_u64(), Some(1), "two uses, one rule");
+    assert!(ui.run(aio::ui::collect_css).starts_with(".aio-"));
+}
