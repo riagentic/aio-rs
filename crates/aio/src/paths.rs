@@ -194,7 +194,7 @@ pub fn old_electron_store() -> PathBuf {
 
 /// The pinned runtime in the person's own store, a test sandbox or not:
 /// what the UI tests draw in (they only run it).
-#[cfg(any(feature = "kit", feature = "air"))]
+#[cfg(all(any(feature = "kit", feature = "air"), feature = "testing"))]
 pub(crate) fn electron_pinned() -> PathBuf {
     electron_store_in(std::env::consts::OS, &real_env).join(format!("{ELECTRON}-{}", electron_slug()))
 }

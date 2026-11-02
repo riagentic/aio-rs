@@ -1,0 +1,15 @@
+id,in,caught_by,result,seconds,commit,date
+vacuous-lint,source,aio-rs-cli bin:ax lint::tests::tests_that_check_nothing_are_named,killed,10,1b085cb,2026-11-02
+smoke-desktop-exec,source,aio-rs-cli bin:ax smoke::tests::a_package_s_desktop_entry_must_start_its_program_with_its_icon,killed,6,1b085cb,2026-11-02
+cassette-rerecord,source,aio-rs lib cassette::tests::a_damaged_tape_is_refused_unless_rerecorded,killed,3,1b085cb,2026-11-02
+invariants,source,aio-rs test:core typed_calls_and_refusals,killed,6,1b085cb,2026-11-02
+client-rule,source,aio-rs test:access the_rules,killed,8,1b085cb,2026-11-02
+snapshot-wipe,source,aio-rs test:http the_snapshot_endpoint_exports_and_loads_the_whole_state_as_aios,killed,7,1b085cb,2026-11-02
+sandbox-guard,source,aio-rs test:sandbox a_test_runs_in_a_world_of_its_own_and_real_data_is_refused,killed,4,1b085cb,2026-11-02
+seed-typo,source,aio-rs test:testing a_seed_key_the_state_lacks_is_refused,killed,9,1b085cb,2026-11-02
+unseen-failures,source,aio-rs test:testing a_failure_nobody_looked_at_fails_the_test,killed,7,1b085cb,2026-11-02
+test-budget,source,aio-rs test:testing a_call_over_the_test_s_budget_is_a_failure,killed,6,1b085cb,2026-11-02
+fetch-stub,source,aio-rs test:ui a_host_the_test_answers_never_reaches_the_network,killed,6,1b085cb,2026-11-02
+deb-menu-entry,deb,ax smoke,killed,77,1b085cb,2026-11-02
+deb-icon,deb,ax smoke,killed,9,1b085cb,2026-11-02
+deb-page,deb,ax smoke,killed,9,1b085cb,2026-11-02
