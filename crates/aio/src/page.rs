@@ -263,10 +263,13 @@ pub const REVEAL: &str = "new MutationObserver((ms) => {
 /// is still disabled is submitted as soon as the view's answer to what was
 /// typed enables it (within half a second, unless typing goes on), or at
 /// once with `data-enter-submits` on the form (its submit checks again).
+/// Enter in an open combobox (`role="combobox"`, `aria-expanded="true"`)
+/// picks from its list, the view's to do: the form is never submitted.
 pub const ENTER: &str = "document.addEventListener('keydown', (e) => {
   const t = e.target;
   if (e.key !== 'Enter' || e.defaultPrevented || e.isComposing || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
   if (!(t instanceof HTMLInputElement) || !t.form || ['button', 'submit', 'reset', 'image', 'file'].includes(t.type)) return;
+  if (t.getAttribute('role') === 'combobox' && t.getAttribute('aria-expanded') === 'true') { e.preventDefault(); return; }
   const form = t.form;
   const btn = [...form.elements].find((el) => ['submit', 'image'].includes(el.type) && (el instanceof HTMLButtonElement || el instanceof HTMLInputElement));
   if (!btn) { e.preventDefault(); form.requestSubmit(); return; }

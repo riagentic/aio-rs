@@ -147,13 +147,23 @@
       return n
     }
     const range = () => span(node(), node())
+    // `style:<property>`: a CSS property (rsx!'s style attributes), else an
+    // attribute. A `style` string keeps the properties it doesn't set:
+    // `position: "fixed", style: "inset: 0"` is both.
+    const attr = (n, k, v) => {
+      if (k.startsWith('style:')) return n.style.setProperty(k.slice(6), v)
+      if (k !== 'style') return n.setAttribute(k, v)
+      const s = n.style, had = [...s].map((p) => [p, s.getPropertyValue(p), s.getPropertyPriority(p)])
+      n.setAttribute(k, v)
+      for (const [p, x, pr] of had) if (!s.getPropertyValue(p)) s.setProperty(p, x, pr)
+    }
     const build = (marks, path, svg) => {
       const k = u8()
       let n, mark = path.length === 1
-      if (k === 1) {
-        const tag = str(), inSvg = svg || tag === 'svg'
+      if (k === 1 || k === 5) {
+        const tag = str(), inSvg = svg || k === 5 || tag === 'svg'
         n = inSvg ? document.createElementNS(SVG, tag) : document.createElement(tag)
-        for (let a = u8(); a > 0; a--) n.setAttribute(str(), str())
+        for (let a = u8(); a > 0; a--) attr(n, str(), str())
         const children = u16()
         if (u8()) mark = true
         if (mark) marks.push(path.slice())
@@ -189,8 +199,8 @@
           break
         }
         case 3: node().nodeValue = str(); break
-        case 4: node().setAttribute(str(), str()); break
-        case 5: node().removeAttribute(str()); break
+        case 4: { const n = node(); attr(n, str(), str()); break }
+        case 5: { const n = node(), k = str(); k.startsWith('style:') ? n.style.removeProperty(k.slice(6)) : n.removeAttribute(k); break }
         case 6: { const n = node(); prop(n, str(), str()); break }
         case 7: { const n = node(); n[str()] = u8() !== 0; break }
         case 8: {
