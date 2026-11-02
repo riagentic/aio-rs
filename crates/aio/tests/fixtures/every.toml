@@ -86,6 +86,16 @@ fade_ms = 250
 text_color = ["#111", "#eee"]
 bar = ["#14f195", "#14f195"]
 track = ["#ddd", "#333"]
+position = "pointer"
+follow_window = false
+shadow = true
+window_shadow = false
+cancel = false
+progress = true
+bar_style = "thin"
+bar_height = 5
+bar_position = "bottom-edge"
+bar_radius = 2
 [build.windows]
 shortcut = false
 [build.download_window]

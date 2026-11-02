@@ -9,6 +9,18 @@ version may break things.
 
 ### Added
 
+- **The splash drawn by the OS before Electron starts, at every start**
+  (aio's splash): GTK 3 over FFI on Linux (opened at run time, no new
+  crate), Cocoa on macOS, Windows Forms on Windows (for a download; when
+  Electron is here its main process draws it, as aio's). A first start's
+  Electron download runs on it, with its bar and a ✕ that cancels it.
+  New `[build.splash]` keys: `position`, `follow_window`, `shadow`,
+  `window_shadow`, `cancel`, `progress`, `bar_style`, `bar_height`,
+  `bar_position`, `bar_radius`. `ax build` builds it in for an app with a
+  `[build.splash]` (aio-rs-shell's `native-splash` feature), so an app
+  without one carries none of it. `Window { splash_show }` may take 50 ms;
+  one that panics or takes longer leaves the build's `show`, said
+  ([desktop](docs/clients/desktop.md#the-splash)).
 - **Prebuilt `ax` for macOS** (arm64 and x86_64): the release workflow
   (`.github/workflows/release.yml`) builds and smokes `ax` on a macOS
   runner of each CPU beside Linux and Windows, pins every archive in

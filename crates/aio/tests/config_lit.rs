@@ -22,6 +22,8 @@ fn the_built_literal_is_the_parsed_config() {
     assert!(bad("image = \"s.png\"\nbackground = [\"#fff\", \"red\"]").contains("#rgb or #rrggbb"));
     assert!(bad("image = \"s.png\"\nmin_ms = 2000\nmax_ms = 1000").contains("min_ms is more than max_ms"));
     let plain = Config::parse("[app]\nid = \"lit\"").unwrap();
+    assert!(bad("image = \"s.png\"\nbar_height = 0").contains("bar_height is px"));
+    assert!(bad("image = \"s.png\"\nposition = \"left\"").contains("unknown variant"));
     assert!(plain.rust().starts_with("aio::config::Config{app: aio::config::App{id: "), "{}", plain.rust());
 }
 

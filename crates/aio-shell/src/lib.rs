@@ -62,7 +62,9 @@ pub struct Window {
     pub keep_server: bool,
     /// The app's say over its splash at run time (aio's `splash.show`),
     /// asked just before it would open: a setting "no splash at start" is
-    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`.
+    /// `|| SplashShow::FirstStart`. Unset: `[build.splash] show`. It may
+    /// take 50 ms; one that panics or takes longer leaves the build's
+    /// `show`, said in the log.
     pub splash_show: Option<fn() -> SplashShow>,
 }
 
@@ -93,6 +95,8 @@ mod firstpage;
 mod firstrun;
 mod fresh;
 pub mod fuses;
+#[cfg(all(target_os = "linux", any(test, feature = "native-splash")))]
+mod gtksplash;
 pub mod guest;
 #[cfg(all(test, target_os = "linux"))]
 mod guests;
@@ -108,6 +112,13 @@ pub mod os;
 pub mod page;
 pub mod pidlock;
 pub mod place;
+// The OS's splash (`native-splash`, which `ax build` turns on for an app
+// with a `[build.splash]`); without it Electron draws the splash.
+#[cfg(any(test, feature = "native-splash"))]
+mod presplash;
+#[cfg(not(any(test, feature = "native-splash")))]
+#[path = "presplash_off.rs"]
+mod presplash;
 pub mod prune;
 #[cfg(debug_assertions)]
 mod renders;
@@ -346,15 +357,33 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         None => colors.clone(),
     };
     // The download window opens over the app's window, as it was last placed.
-    let at = place::load(&dirs.data.join("window.json"))
-        .map(|s| (s.normal.x + s.normal.width / 2, s.normal.y + s.normal.height / 2));
+    let saved = place::load(&dirs.data.join("window.json"));
+    let at = saved.map(|s| (s.normal.x + s.normal.width / 2, s.normal.y + s.normal.height / 2));
     let back = instance::APP.get().filter(|(id, v)| update::can_go_back(id, v)).map(|(id, _)| id.clone());
     // `[build.splash] show`, or the app's say at run time (aio's `splash.show`).
-    let (at_start, in_download) =
-        splashed.map_or((false, false), |s| splash::shown(win.splash_show.map_or(s.show, |f| f())));
-    splash::install(&dir, splashed.filter(|_| at_start), win.title, &splash_colors)?;
-    // A first start draws the splash in the download window, with its bar.
+    let (show, by_app) =
+        splashed.map_or((aio::config::SplashShow::Never, false), |s| splash::run_time_show(win.splash_show, s.show));
+    let (at_start, in_download) = splash::shown(show);
     let downloading = splashed.filter(|_| in_download);
+    // Drawn by the OS before Electron starts (`presplash`), when it can.
+    let os = std::env::consts::OS;
+    let native = downloading.and_then(|s| {
+        let plan = presplash::Plan {
+            splash: s,
+            title: win.title,
+            version: instance::APP.get().map_or("", |(_, v)| v.as_str()),
+            colors: &splash::look_colors(splash_colors.clone(), s),
+            target: Some(splash::target(saved.as_ref(), win.width, win.height)),
+            at_start,
+            by_app,
+            may_download: runtime::may_download(),
+        };
+        presplash::Session::start(&plan, presplash::kind(os, &|k| std::env::var(k).ok())?, os)
+    });
+    // However the start ends, the splash goes with it.
+    let _splash_ends = presplash::Ends;
+    // A first start draws the splash in the download window, with its bar,
+    // when the OS's splash cannot.
     let dl_image = downloading.and_then(|s| Some((s.png, splash::image_box(s)?)));
     let dl_colors = match downloading {
         Some(s) => splash::look_colors(splash_colors.clone(), s),
@@ -448,6 +477,12 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         })
         .await
         .map_err(std::io::Error::other)??;
+        // Electron is here: its main process draws the start's splash unless
+        // the OS's is up (main.js reads `splash.json`).
+        let electron_draws = native.as_ref().is_none_or(|n| n.handoff());
+        let t = splash::target(saved.as_ref(), win.width, win.height);
+        let target = t.0.zip(t.1).map(|(x, y)| [x, y, t.2, t.3]);
+        splash::install(&dir, splashed.filter(|_| at_start && electron_draws), win.title, &splash_colors, target)?;
         let sandbox = runtime::sandbox_for(&rt, win.require_sandbox)?;
         // a GPU that failed here once is never asked again (AIORT_GPU=hardware is).
         let gpu_failed = data.join("gpu-failed");
@@ -752,6 +787,8 @@ fn window_event(m: &aio::serde_json::Value) {
             }
             aio::health::ok("window")
         }
+        // On screen (main.js): the OS's splash may go once it has been up its minimum.
+        "shown" => presplash::ready(splash::rect_of(&m["normal"])),
         "unresponsive" => {
             aio::report::problem("window:frozen", "the window is not responding");
             aio::health::degrade("window", "not responding");
@@ -824,6 +861,9 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
                 }
             }
             Some("bounds") => {
+                if let Some(r) = splash::rect_of(&m["normal"]) {
+                    presplash::moved(r);
+                }
                 if let Some(s) = &state
                     && let Err(e) = place::save(s, &m, win.width, win.height)
                 {
