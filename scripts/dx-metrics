@@ -407,6 +407,8 @@ def measure_air(tmp, root, aio, env, full, apk=False):
         print(f"dx-metrics: {root.name}'s aio-rs-shell has no `air`: no air numbers for it", file=sys.stderr)
         return {}
     (tmp / "air").mkdir()
+    # Its own build folder: ax keeps one app per binary name in one.
+    env = env | {"CARGO_TARGET_DIR": str(tmp / "air" / "target")}
     run([aio, "create", NAME, "--aio", root], tmp / "air", env)
     app = tmp / "air" / NAME
     shutil.copy(root / "Cargo.lock", app / "Cargo.lock")
@@ -424,7 +426,7 @@ def measure_air(tmp, root, aio, env, full, apk=False):
             row |= {f"air_{k}": v for k, v in edited_live(aio, app, env, tmp / "air" / "home").items()}
         run([aio, "build", NAME, "--appimage"], app, env)
         run([aio, "build", NAME, "--web"], app, env)
-        made = [tmp / "target" / "release" / NAME, dist / f"{NAME}-web"]
+        made = [tmp / "air" / "target" / "release" / NAME, dist / f"{NAME}-web"]
         made += [f for f in dist.iterdir() if f.name.endswith((".tar.gz", ".AppImage"))]
         row["air_binary_b"] = made[0].stat().st_size
         row["air_web_b"] = sum(f.stat().st_size for f in made[1].rglob("*") if f.is_file())
