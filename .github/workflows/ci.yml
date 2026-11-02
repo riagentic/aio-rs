@@ -78,6 +78,13 @@ jobs:
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- runtime --fetch
       - run: cargo test --workspace --all-features --locked --no-fail-fast
+      # ax dev's hot-patch, its times: on Windows with MSVC (the runner's
+      # Rust) and with MinGW (the runner's), each against a rebuild.
+      - run: cargo test -p aio-rs-cli --test hotpatch --locked -- --nocapture
+      - if: runner.os == 'Windows'
+        run: cargo test -p aio-rs-cli --test hotpatch --locked -- --nocapture
+        env:
+          AIO_HOTPATCH_TARGET: x86_64-pc-windows-gnu
       # air (docs/design/air.md): the facade and TestUi on it, its gates in release.
       - run: cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --test route --test route_tree --locked --no-fail-fast
       - run: cargo test -p aio-rs-air --release --all-features --locked

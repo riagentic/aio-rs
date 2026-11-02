@@ -2,12 +2,17 @@
 //! workspace (a library and an app on subsecond) built fat, run, and
 //! patched three times while it runs: twice in the app's crate, once in
 //! the library; the app prints the new values without a restart. On Linux
-//! x86_64 the patched code sees the running binary's thread-locals and
-//! statics (an `AtomicU32` and a `OnceLock` set before the patch), while a
-//! static the patch adds is its own; a static the patch adds is its own on
-//! every platform. On macOS a patch has its own thread-locals and statics,
-//! as with dx.
-#![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
+//! x86_64 and Windows the patched code sees the running binary's
+//! thread-locals and statics (an `AtomicU32` and a `OnceLock` set before
+//! the patch), while a static the patch adds is its own; a static the patch
+//! adds is its own on every platform. On macOS a patch has its own
+//! thread-locals and statics, as with dx. Then the same edit rebuilt, the
+//! path without hot-patching, for its time.
+#![cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    target_os = "macos",
+    all(windows, target_arch = "x86_64")
+))]
 
 #[allow(dead_code)]
 #[path = "../src/hotpatch.rs"]
@@ -43,6 +48,38 @@ fn stats() -> String {
     format!("{} {}", HITS.load(Ordering::Relaxed), NAME.get().map(|s| s.as_str()).unwrap_or("?"))
 }
 
+// Windows: where the next patch DLL can load (as aio-shell's `Aio.aslr`
+// answers before each patch): a free 256 MiB span past `main`, within
+// 1.5 GiB of it; each patch loaded takes one.
+#[cfg(windows)]
+fn base() -> usize {
+    #[repr(C)]
+    struct Mbi { base: usize, allocation: usize, protect0: u32, partition: u16, size: usize, state: u32, protect: u32, kind: u32 }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn VirtualQuery(at: usize, out: *mut Mbi, len: usize) -> usize;
+    }
+    let main = subsecond::aslr_reference();
+    let mut at = main;
+    while at < main + (3 << 29) {
+        let mut m: Mbi = unsafe { std::mem::zeroed() };
+        if unsafe { VirtualQuery(at, &mut m, std::mem::size_of::<Mbi>()) } == 0 {
+            break;
+        }
+        let start = (at.max(m.base) + 0xffff) & !0xffff;
+        if m.state == 0x10000 && start + (256 << 20) <= m.base + m.size {
+            return start;
+        }
+        at = m.base + m.size;
+    }
+    0
+}
+
+#[cfg(not(windows))]
+fn base() -> usize {
+    0
+}
+
 fn main() {
     println!("aslr {}", subsecond::aslr_reference());
     let mut line = String::new();
@@ -56,6 +93,7 @@ fn main() {
         let ticks = subsecond::HotFn::current(ticks).call(());
         let stats = subsecond::HotFn::current(stats).call(());
         println!("value {app} {lib} {ticks} {stats}");
+        println!("base {}", base());
         line.clear();
         if std::io::stdin().read_line(&mut line).unwrap() == 0 {
             break;
@@ -88,7 +126,12 @@ fn fixture(dir: &Path) {
     std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"), dir.join("Cargo.lock")).unwrap();
 }
 
+/// The fixture's target: rustc's host, or `AIO_HOTPATCH_TARGET` (CI's
+/// windows-gnu lane on an MSVC host).
 fn host() -> String {
+    if let Ok(t) = std::env::var("AIO_HOTPATCH_TARGET") {
+        return t;
+    }
     let out = Command::new("rustc").arg("-vV").output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.lines().find_map(|l| l.strip_prefix("host: ")).unwrap().to_string()
@@ -134,17 +177,20 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     let mut stdin = app.stdin.take().unwrap();
     let mut lines = BufReader::new(app.stdout.take().unwrap()).lines();
     let mut next = || lines.next().unwrap().unwrap();
-    // On Linux x86_64 a patch keeps the running thread-locals and statics;
-    // elsewhere (macOS) a patch gets its own, so patched reads start fresh.
-    let live = cfg!(target_os = "linux");
+    // On Linux x86_64 and Windows a patch keeps the running thread-locals
+    // and statics; on macOS a patch gets its own, so patched reads start fresh.
+    let live = !cfg!(target_os = "macos");
     let ticks = |n: u32| if live { 101 * n } else { 0 };
     let stats = |hits: u32| if live { format!("{hits} app") } else { "0 ?".to_string() };
 
     let aslr: u64 = next().strip_prefix("aslr ").unwrap().parse().unwrap();
+    // After each loop the app names where the next patch can load (Windows).
+    let free = |line: String| cfg!(windows).then(|| line.strip_prefix("base ").unwrap().parse::<u64>().unwrap());
     // Before any patch the app itself runs: the real values on every
     // platform (one loop: TICKS 1 + 100*SEEN 1 = 101, HITS 1, NAME set).
     // Only a patched function's view then depends on the platform.
     assert_eq!(next(), "value 1 10 101 1 app");
+    let mut base = free(next());
 
     let main_rs = ws.join("app/src/main.rs");
     let lib_rs = ws.join("lib/src/lib.rs");
@@ -159,7 +205,7 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     ];
     for (i, (file, from, to, want)) in steps.into_iter().enumerate() {
         edit(file, from, to);
-        let patch = hotpatch::patch(&mut fat, aslr, std::slice::from_ref(file)).unwrap();
+        let patch = hotpatch::patch(&mut fat, aslr, base, std::slice::from_ref(file)).unwrap();
         let t = patch.times;
         eprintln!(
             "patch {}: compile {:?}, stub {:?}, link {:?}, total {:?}",
@@ -173,6 +219,7 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
         std::fs::write(&table, serde_json::to_string(&patch.table).unwrap()).unwrap();
         writeln!(stdin, "{}", table.display()).unwrap();
         assert_eq!(next(), want, "after patch {}", i + 1);
+        base = free(next());
     }
     drop(stdin);
     assert!(app.wait().unwrap().success());
@@ -192,6 +239,20 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     assert!(temps.is_empty(), "{temps:?}");
 
     // A file no crate builds from (here the manifest): a rebuild's.
-    let err = hotpatch::patch(&mut fat, aslr, &[ws.join("app/Cargo.toml")]).err().unwrap();
+    let err = hotpatch::patch(&mut fat, aslr, base, &[ws.join("app/Cargo.toml")]).err().unwrap();
     assert!(err.contains("no crate of the app builds from"), "{err}");
+
+    // The path without hot-patching, for its time: the same kind of edit
+    // rebuilt as `ax dev` rebuilds (then it restarts the app).
+    edit(&main_rs, "    3\n", "    4\n");
+    let t = std::time::Instant::now();
+    let built = Command::new("cargo")
+        .args(["build", "-p", "fixture-app"])
+        .args(&req.cargo_args)
+        .current_dir(&req.dir)
+        .envs(req.envs.iter().cloned())
+        .status()
+        .unwrap();
+    assert!(built.success());
+    eprintln!("rebuild: {:?}", t.elapsed());
 }
