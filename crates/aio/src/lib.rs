@@ -49,8 +49,6 @@ native! {
     pub mod lifecycle;
     mod link;
     pub mod log;
-    #[cfg(feature = "server")]
-    mod mux;
     #[cfg(feature = "tls")]
     pub mod pairing;
     #[cfg(any(feature = "kit", feature = "web", feature = "air"))]
@@ -89,6 +87,8 @@ pub mod colors;
 pub mod columns;
 pub mod compat;
 mod hidden;
+#[cfg(any(feature = "server", feature = "web"))]
+mod mux;
 pub use hidden::Hidden;
 pub mod cron;
 mod cx;

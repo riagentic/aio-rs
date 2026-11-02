@@ -280,14 +280,24 @@ async fn the_channels_on_the_wire() {
             break;
         }
     }
-    // A channel number not above the last is a link gone: ignored. Closed: its end said.
-    w.send(text(format!("2:{}", hello("alpha")))).await.unwrap();
+    // Closed: its end said; a late frame of it opens nothing.
     w.send(text("1!1000 ".into())).await.unwrap();
     assert_eq!(next(&mut w).await, "1!1000 ");
+    w.send(text(format!("1:{}", hello("alpha")))).await.unwrap();
     // A cell nobody serves: refused on its channel, then closed.
     w.send(text(format!("4:{}", hello("ghost")))).await.unwrap();
     assert!(next(&mut w).await.starts_with("4:{\"t\":\"refused\""));
     assert!(next(&mut w).await.starts_with("4!1011 "));
+    // Hellos in any order: a lower number after a higher one opens too.
+    w.send(text(format!("6:{}", hello("alpha")))).await.unwrap();
+    w.send(text(format!("5:{}", hello("beta")))).await.unwrap();
+    let mut opened = vec![next(&mut w).await, next(&mut w).await];
+    opened.sort();
+    assert!(opened[0].starts_with("5:{"), "{opened:?}");
+    assert!(
+        opened[0].contains("\"t\":\"state\"") && opened[1].starts_with("6:") && opened[1].contains("\"t\":\"state\""),
+        "{opened:?}"
+    );
     // Not a channel's frame: the socket is closed.
     w.send(text("hello".into())).await.unwrap();
     let end = tokio::time::timeout(Duration::from_secs(5), async {

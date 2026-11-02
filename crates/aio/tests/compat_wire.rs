@@ -404,14 +404,14 @@ async fn an_aio_page_sees_and_calls_every_shared_cell() {
     // Its change first, then the ack.
     send(&mut w, json!({ "t": "action", "d": { "type": "tally:bump", "payload": { "args": [] }, "cid": "1" } })).await;
     let p = recv(&mut w).await;
-    assert_eq!((&p["t"], &p["d"]), (&json!("patches"), &json!([{ "op": "replace", "path": ["tally", "n"], "value": 1 }])));
+    assert_eq!(
+        (&p["t"], &p["d"]),
+        (&json!("patches"), &json!([{ "op": "replace", "path": ["tally", "n"], "value": 1 }]))
+    );
     let ack = recv_kind(&mut w, "ack").await;
     assert_eq!((&ack["ok"], &ack["value"]), (&json!(true), &json!(1)));
     tally.bump().unwrap();
-    assert_eq!(
-        recv_kind(&mut w, "patches").await,
-        json!([{ "op": "replace", "path": ["tally", "n"], "value": 2 }])
-    );
+    assert_eq!(recv_kind(&mut w, "patches").await, json!([{ "op": "replace", "path": ["tally", "n"], "value": 2 }]));
     // Its own rules: a method no client may call is refused.
     let refused = act(&mut w, "tally:wipe", json!([]), "2").await;
     assert_eq!(refused["ok"], false, "{refused}");

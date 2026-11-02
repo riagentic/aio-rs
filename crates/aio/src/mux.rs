@@ -15,10 +15,12 @@
 //! protocol). A server that doesn't is an older aio-rs: a socket per cell.
 
 /// The header a client asks with and the server answers with.
+#[cfg(feature = "server")]
 pub(crate) const HEADER: &str = "x-aio-mux";
 /// The WebSocket protocol a page asks with (a browser sets no header).
 pub(crate) const PROTOCOL: &str = "aio-mux";
 /// Links one socket carries at most.
+#[cfg(feature = "server")]
 pub(crate) const MAX_CHANS: usize = 64;
 
 /// One frame of a channel.
@@ -33,10 +35,12 @@ pub(crate) enum Frame<'a> {
 /// `f` on channel `chan`, as sent (pure).
 pub(crate) fn encode(chan: u32, f: &Frame) -> String {
     use std::fmt::Write;
-    let hex = |p: &[u8]| p.iter().fold(String::with_capacity(p.len() * 2), |mut s, b| {
-        _ = write!(s, "{b:02x}");
-        s
-    });
+    let hex = |p: &[u8]| {
+        p.iter().fold(String::with_capacity(p.len() * 2), |mut s, b| {
+            _ = write!(s, "{b:02x}");
+            s
+        })
+    };
     match f {
         Frame::Text(t) => format!("{chan}:{t}"),
         Frame::Ping(p) => format!("{chan}?{}", hex(p)),
@@ -51,7 +55,8 @@ pub(crate) fn decode(t: &str) -> Option<(u32, Frame<'_>)> {
     let chan = t[..at].parse().ok()?;
     let rest = &t[at + 1..];
     let unhex = |s: &str| -> Option<Vec<u8>> {
-        (s.len() % 2 == 0)
+        s.len()
+            .is_multiple_of(2)
             .then(|| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect())?
     };
     let f = match t.as_bytes()[at] {
@@ -90,6 +95,8 @@ mod net {
 
     /// A socket with no link for this long is closed.
     const IDLE: Duration = Duration::from_secs(15);
+    /// The ended links a socket remembers.
+    const ENDED: usize = 1024;
 
     /// One side's queue of a channel's frames not yet read: never blocks the
     /// socket (one slow link must not hold the others); a link that lets
@@ -181,7 +188,15 @@ mod net {
         let out: Out = Arc::new(tokio::sync::Mutex::new(sink));
         let mut chans: HashMap<u32, Inbox<Msg>> = HashMap::new();
         let mut tasks = tokio::task::JoinSet::new();
-        let (mut newest, mut held) = (None::<u32>, 1usize);
+        // Links ended lately: their late frames open nothing (a client
+        // numbers its links afresh, but their hellos may come in any order).
+        let (mut ended, mut held) = (std::collections::BTreeSet::<u32>::new(), 1usize);
+        fn end(ended: &mut std::collections::BTreeSet<u32>, id: u32) {
+            ended.insert(id);
+            if ended.len() > ENDED {
+                ended.pop_first();
+            }
+        }
         let mut quiet = tokio::time::Instant::now();
         let r = loop {
             let idle = tasks.is_empty().then_some(quiet + IDLE);
@@ -200,12 +215,12 @@ mod net {
                         Frame::Text(body) => match chans.get(&id) {
                             Some(inbox) => if !inbox.put(Msg::Text(body.into()), body.len()) {
                                 chans.remove(&id);
+                                end(&mut ended, id);
                                 _ = put(&out, closed("sent more than it reads")).await;
                             },
                             // A link gone: its late frames.
-                            None if newest.is_some_and(|n| id <= n) => {}
+                            None if ended.contains(&id) => {}
                             None => {
-                                newest = Some(id);
                                 // Past its first link, each takes a client's slot.
                                 let full = match tasks.len() {
                                     n if n >= MAX_CHANS => Some(MAX_CHANS),
@@ -220,6 +235,7 @@ mod net {
                                     }
                                 };
                                 if let Some(limit) = full {
+                                    end(&mut ended, id);
                                     let why = format!("too many clients (the limit is {limit}): try again later");
                                     let said = serde_json::json!({ "t": "refused", "why": why, "retryAfterMs": 5000 });
                                     _ = put(&out, encode(id, &Frame::Text(&said.to_string()))).await;
@@ -243,12 +259,16 @@ mod net {
                             inbox.put(Msg::Pong(p), 0);
                         },
                         // Its session sees the end.
-                        Frame::Close(..) => _ = chans.remove(&id),
+                        Frame::Close(..) => {
+                            chans.remove(&id);
+                            end(&mut ended, id);
+                        }
                     }
                 }
                 Some(done) = tasks.join_next() => {
                     let Ok((id, r)) = done else { continue };
                     chans.remove(&id);
+                    end(&mut ended, id);
                     if tasks.is_empty() {
                         quiet = tokio::time::Instant::now();
                     }
@@ -471,5 +491,35 @@ mod net {
         let c = Conn::start(w);
         *at = Arc::downgrade(&c);
         Ok(c.open())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Frame, decode, encode};
+
+    #[test]
+    fn frames_say_their_channel_and_kind_both_ways() {
+        let all = [
+            (7, Frame::Text(r#"{"t":"hello","x":"1?2.3!4:5"}"#), r#"7:{"t":"hello","x":"1?2.3!4:5"}"#),
+            (12, Frame::Text(""), "12:"),
+            (1, Frame::Ping(vec![0, 255, 16]), "1?00ff10"),
+            (1, Frame::Ping(vec![]), "1?"),
+            (4294967295, Frame::Pong(vec![171]), "4294967295.ab"),
+            (3, Frame::Close(1011, "it ended: why"), "3!1011 it ended: why"),
+            (3, Frame::Close(1000, ""), "3!1000 "),
+        ];
+        for (chan, f, text) in all {
+            assert_eq!(encode(chan, &f), text);
+            assert_eq!(decode(text), Some((chan, f)), "{text}");
+        }
+        assert_eq!(decode("5!1000"), Some((5, Frame::Close(1000, ""))), "no reason");
+    }
+
+    #[test]
+    fn what_isnt_a_frame_is_none() {
+        for t in ["", ":x", "{\"t\":1}", "1", "1x", "1?0", "1?zz", "1!", "1!code why", "4294967296:x", "-1:x"] {
+            assert_eq!(decode(t), None, "{t}");
+        }
     }
 }

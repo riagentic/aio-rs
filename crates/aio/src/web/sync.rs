@@ -149,19 +149,161 @@ enum Heard {
     Closed,
 }
 
-/// One link to the server: the socket and what it hears, closed when dropped.
-struct Link {
+/// The page's socket to one server, shared by its copies of every cell
+/// ([`crate::mux`]: aio's page has one socket too); an older server that
+/// doesn't say yes (`aio-mux`) carries one link.
+struct Page {
     ws: web_sys::WebSocket,
-    rx: UnboundedReceiver<Heard>,
+    url: String,
+    /// Open, and whether the server said yes.
+    open: std::cell::Cell<Option<bool>>,
+    /// Closed.
+    gone: std::cell::Cell<bool>,
+    chans: std::cell::RefCell<std::collections::HashMap<u32, UnboundedSender<Heard>>>,
+    next: std::cell::Cell<u32>,
     _cbs: [Closure<dyn FnMut(JsValue)>; 3],
 }
 
-impl Drop for Link {
+thread_local! {
+    /// Each server's socket while a copy uses it.
+    static PAGES: std::cell::RefCell<std::collections::HashMap<String, std::rc::Weak<Page>>> = Default::default();
+}
+
+impl Page {
+    /// The socket to `url` the page's copies share, or (`shared: false`) one
+    /// of this link's own.
+    fn get(url: &str, shared: bool) -> std::result::Result<std::rc::Rc<Self>, Failed> {
+        let live = |p: &std::rc::Rc<Page>| !p.gone.get();
+        if let Some(p) =
+            PAGES.with_borrow(|m| m.get(url).and_then(std::rc::Weak::upgrade)).filter(live).filter(|_| shared)
+        {
+            return Ok(p);
+        }
+        let ws = web_sys::WebSocket::new_with_str(url, crate::mux::PROTOCOL)
+            .map_err(|e| Failed::Offline(format!("{e:?}")))?;
+        let page = std::rc::Rc::new_cyclic(|weak: &std::rc::Weak<Page>| {
+            let on = |f: fn(&Page, JsValue)| {
+                let weak = weak.clone();
+                Closure::<dyn FnMut(JsValue)>::new(move |e| {
+                    if let Some(p) = weak.upgrade() {
+                        f(&p, e)
+                    }
+                })
+            };
+            let cbs = [on(Page::opened), on(Page::heard), on(Page::closed)];
+            ws.set_onopen(Some(cbs[0].as_ref().unchecked_ref()));
+            ws.set_onmessage(Some(cbs[1].as_ref().unchecked_ref()));
+            ws.set_onclose(Some(cbs[2].as_ref().unchecked_ref()));
+            Self {
+                ws,
+                url: url.into(),
+                open: Default::default(),
+                gone: Default::default(),
+                chans: Default::default(),
+                next: std::cell::Cell::new(1),
+                _cbs: cbs,
+            }
+        });
+        if shared {
+            PAGES.with_borrow_mut(|m| m.insert(url.into(), std::rc::Rc::downgrade(&page)));
+        }
+        Ok(page)
+    }
+
+    fn opened(&self, _: JsValue) {
+        let mux = self.ws.protocol() == crate::mux::PROTOCOL;
+        self.open.set(Some(mux));
+        if !mux {
+            self.unpool();
+        }
+        self.chans.borrow().values().for_each(|c| _ = c.send(Heard::Open));
+    }
+
+    fn heard(&self, e: JsValue) {
+        let Some(t) = e.dyn_into::<web_sys::MessageEvent>().ok().and_then(|m| m.data().as_string()) else {
+            return self.closed(JsValue::NULL);
+        };
+        if self.open.get() != Some(true) {
+            // One link: the frame is its own.
+            return self.chans.borrow().values().for_each(|c| _ = c.send(Heard::Text(t.clone())));
+        }
+        use crate::mux::{Frame, decode, encode};
+        let Some((id, f)) = decode(&t) else { return self.closed(JsValue::NULL) };
+        let chan = self.chans.borrow().get(&id).cloned();
+        match (f, chan) {
+            (Frame::Text(m), Some(c)) => _ = c.send(Heard::Text(m.into())),
+            // The server's pings to each link, answered as a socket answers them.
+            (Frame::Ping(p), Some(_)) => _ = self.ws.send_with_str(&encode(id, &Frame::Pong(p))),
+            (Frame::Ping(_), None) => _ = self.ws.send_with_str(&encode(id, &Frame::Close(1000, ""))),
+            (Frame::Close(..), Some(c)) => {
+                self.chans.borrow_mut().remove(&id);
+                _ = c.send(Heard::Closed);
+            }
+            _ => {}
+        }
+    }
+
+    fn closed(&self, _: JsValue) {
+        self.gone.set(true);
+        self.unpool();
+        self.chans.borrow_mut().drain().for_each(|(_, c)| _ = c.send(Heard::Closed));
+    }
+
+    fn unpool(&self) {
+        PAGES.with_borrow_mut(|m| {
+            if m.get(&self.url).is_some_and(|w| std::ptr::eq(w.as_ptr(), self)) {
+                m.remove(&self.url);
+            }
+        });
+    }
+}
+
+impl Drop for Page {
     fn drop(&mut self) {
         self.ws.set_onopen(None);
         self.ws.set_onmessage(None);
         self.ws.set_onclose(None);
         _ = self.ws.close();
+    }
+}
+
+/// One link to the server: its channel of the page's socket and what it
+/// hears, closed when dropped.
+struct Link {
+    page: std::rc::Rc<Page>,
+    id: u32,
+    rx: UnboundedReceiver<Heard>,
+}
+
+impl Link {
+    fn new(page: std::rc::Rc<Page>) -> Self {
+        let (tx, rx) = unbounded_channel();
+        let id = page.next.get();
+        page.next.set(id + 1);
+        if page.open.get().is_some() {
+            _ = tx.send(Heard::Open);
+        }
+        page.chans.borrow_mut().insert(id, tx);
+        Self { page, id, rx }
+    }
+
+    /// Send `m` on its channel; `false`: the socket is gone.
+    fn send(&self, m: &str) -> bool {
+        let m = match self.page.open.get() {
+            Some(true) => crate::mux::encode(self.id, &crate::mux::Frame::Text(m)),
+            _ => m.into(),
+        };
+        self.page.ws.send_with_str(&m).is_ok()
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        let open = self.page.chans.borrow_mut().remove(&self.id).is_some();
+        // The server ends its session; the last link's socket just closes.
+        if open && self.page.open.get() == Some(true) && std::rc::Rc::strong_count(&self.page) > 1 {
+            _ = self.page.ws.send_with_str(&crate::mux::encode(self.id, &crate::mux::Frame::Close(1000, "")));
+        }
     }
 }
 
@@ -177,29 +319,22 @@ enum Failed {
 
 impl Link {
     async fn open(url: &str, hello: &Value) -> std::result::Result<(Self, Value), Failed> {
-        let ws = web_sys::WebSocket::new(url).map_err(|e| Failed::Offline(format!("{e:?}")))?;
-        let (tx, rx) = unbounded_channel();
-        let on = |f: fn(JsValue) -> Heard| {
-            let tx = tx.clone();
-            Closure::<dyn FnMut(JsValue)>::new(move |e| _ = tx.send(f(e)))
-        };
-        let cbs = [
-            on(|_| Heard::Open),
-            on(|e| match e.dyn_into::<web_sys::MessageEvent>().ok().and_then(|m| m.data().as_string()) {
-                Some(t) => Heard::Text(t),
-                None => Heard::Closed,
-            }),
-            on(|_| Heard::Closed),
-        ];
-        ws.set_onopen(Some(cbs[0].as_ref().unchecked_ref()));
-        ws.set_onmessage(Some(cbs[1].as_ref().unchecked_ref()));
-        ws.set_onclose(Some(cbs[2].as_ref().unchecked_ref()));
-        let mut l = Self { ws, rx, _cbs: cbs };
+        let mut l = Self::new(Page::get(url, true)?);
         match l.rx.recv().await {
             Some(Heard::Open) => {}
             _ => return Err(Failed::Offline("the socket closed".into())),
         }
-        l.ws.send_with_str(&hello.to_string()).map_err(|e| Failed::Offline(format!("{e:?}")))?;
+        // An older server: a socket of its own for each link past the first.
+        if l.page.open.get() != Some(true) && l.id > 1 {
+            l = Self::new(Page::get(url, false)?);
+            match l.rx.recv().await {
+                Some(Heard::Open) => {}
+                _ => return Err(Failed::Offline("the socket closed".into())),
+            }
+        }
+        if !l.send(&hello.to_string()) {
+            return Err(Failed::Offline("the socket closed".into()));
+        }
         let first = match l.rx.recv().await {
             Some(Heard::Text(t)) => serde_json::from_str::<Value>(&t).map_err(|e| Failed::Offline(e.to_string()))?,
             _ => return Err(Failed::Offline("the socket closed".into())),
@@ -594,7 +729,7 @@ async fn pump<T: Cell>(r: Remote<T>, mut link: Link) {
                 Some(Heard::Closed) | None => break,
             },
             Some(m) = out.recv() => {
-                if link.ws.send_with_str(&m).is_err() {
+                if !link.send(&m) {
                     break;
                 }
             }

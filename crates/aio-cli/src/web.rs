@@ -1024,6 +1024,8 @@ pub(crate) mod browser {
     use super::*;
     use aio::prelude::*;
     use aio::serde_json::{Value, json};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     include!("web/board.rs");
@@ -1094,13 +1096,21 @@ pub(crate) mod browser {
         Some(out)
     }
 
-    /// The network between the browser and the server: up while its task runs.
-    fn link(l: tokio::net::TcpListener, to: String) -> tokio::task::JoinHandle<()> {
+    /// The network between the browser and the server: up while its task
+    /// runs; `sockets` counts the sync sockets (`GET /ws`) it carries.
+    fn link(l: tokio::net::TcpListener, to: String, sockets: Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut links = tokio::task::JoinSet::new();
             while let Ok((mut a, _)) = l.accept().await {
-                let to = to.clone();
+                let (to, sockets) = (to.clone(), sockets.clone());
                 links.spawn(async move {
+                    let mut head = [0u8; 8];
+                    while matches!(a.peek(&mut head).await, Ok(n) if n > 0 && n < head.len()) {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    if &head == b"GET /ws?" {
+                        sockets.fetch_add(1, Ordering::SeqCst);
+                    }
                     let mut b = tokio::net::TcpStream::connect(to).await.unwrap();
                     _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
                 });
@@ -1190,15 +1200,16 @@ pub(crate) mod browser {
         .unwrap() else {
             return;
         };
-        let h = Handle::<Board>::memory();
+        let (h, votes) = (Handle::<Board>::memory(), Handle::<Votes>::memory());
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server = l.local_addr().unwrap().to_string();
-        let http = aio_shell::web::painted(aio::http::Http::default(), h.clone(), view, &site);
+        let http = aio_shell::web::painted(aio::http::Http::default(), h.clone(), view, &site).cell(votes.clone());
         let opts = aio::sync::Options { token: KEY.into(), http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(h.clone(), l, opts));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        let up = link(l, server.clone());
+        let sockets = Arc::new(AtomicUsize::new(0));
+        let up = link(l, server.clone(), sockets.clone());
         let url = format!("http://{addr}/?token={KEY}");
         let Some(c) = Chromium::open(&url) else {
             return eprintln!("no Chromium: skipped");
@@ -1220,13 +1231,33 @@ pub(crate) mod browser {
             // Installed: the worker serves the page from now on.
             until(t, "!!navigator.serviceWorker.controller", json!(true)).await;
         }
+        // Both synced cells on the page's one socket: a reload opens one.
+        const VOTES: &str = "import('./app.js').then((m) => JSON.parse(m.votes()))";
+        until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
+        let before = sockets.load(Ordering::SeqCst);
+        b.eval("window.stale = true; location.reload()").await.ok();
+        until(&mut b, "!window.stale && window.ready", json!("yes")).await;
+        until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
+        until(&mut b, &format!("{SHOWN}.then((s) => s.online)"), json!(true)).await;
+        assert_eq!(sockets.load(Ordering::SeqCst) - before, 1, "one socket for the board and the votes");
+        assert_eq!(b.eval(&format!("{APP}.then((m) => m.vote())")).await.unwrap(), json!(true));
+        until(&mut a, VOTES, json!({ "n": 1, "online": true })).await;
+        for _ in 0..200 {
+            if votes.state().n == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(votes.state().n, 1);
         // The page's language and direction, as aio.toml says them.
         let html = "[document.documentElement.lang, document.documentElement.dir]";
         assert_eq!(a.eval(html).await.unwrap(), json!(["cs", "auto"]));
         // Online: a call reaches the server, and both tabs show it.
         assert_eq!(a.eval("import('./app.js').then((m) => m.add('a'))").await.unwrap(), json!(true));
         served(&h, &["a"]).await;
-        until(&mut b, SHOWN, json!({ "items": ["a"], "pending": 0, "online": true })).await;
+        for t in [&mut a, &mut b] {
+            until(t, SHOWN, json!({ "items": ["a"], "pending": 0, "online": true })).await;
+        }
         // The network goes: both tabs are offline.
         up.abort();
         _ = up.await;
@@ -1270,7 +1301,7 @@ pub(crate) mod browser {
         // The network is back on its port: the call reaches the server once,
         // sent by both tabs (the server applies a call id once).
         let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        let _up = link(l, server);
+        let _up = link(l, server, sockets.clone());
         for t in [&mut a, &mut b] {
             until(t, SHOWN, json!({ "items": ["a", "b"], "pending": 0, "online": true })).await;
         }
