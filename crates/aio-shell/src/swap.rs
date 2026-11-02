@@ -24,6 +24,9 @@ pub const SWAP_FAILED: &str = "swap-failed";
 /// Beside `first_boot`: the new version gave its first boot up (the user
 /// asked for the version before it, `firstrun`), so it is not started again.
 pub const BACK: &str = "first-boot.back";
+/// Beside `first_boot`: the helper (the new version's binary) is up, so the
+/// old app may exit. One that never says so leaves the old app running.
+pub const READY: &str = "swap.ready";
 
 /// What the helper does (its one other argument, as JSON).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -142,6 +145,7 @@ fn start(p: &Path, args: &[String]) -> io::Result<std::process::Child> {
 
 /// Do the swap. Its own log lines go to stderr (the update log).
 pub fn run(plan: &Plan) -> io::Result<()> {
+    std::fs::write(plan.first_boot.with_file_name(READY), b"")?;
     let start = || match plan.by_supervisor {
         true => Ok(None),
         false => start(&plan.launch, &plan.args).map(Some),
