@@ -486,16 +486,40 @@ pub fn handler<T: FromRaw>(f: impl IntoHandler<T>) -> Handler {
     Rc::new(RefCell::new(move |r: &Raw, flow: &Rc<Flow>| f(Event::with_flow(T::from_raw(r), flow.clone()))))
 }
 
-/// [`handler`] of a closure (its parameter typed by this bound).
+/// What a handler closure returns: nothing, or work to run (`async move
+/// { … }`: spawned under the element's view, so it ends with it).
 #[doc(hidden)]
-pub fn handler_fn<T: FromRaw>(f: impl FnMut(Event<T>) + 'static) -> Handler {
-    handler(f)
+pub trait HandlerReturn<M> {
+    fn run(self);
 }
 
-/// An `onmounted` closure, typed.
 #[doc(hidden)]
-pub fn mounted_fn(f: impl FnMut(Event<MountedData>) + 'static) -> impl FnMut(Event<MountedData>) + 'static {
-    f
+pub struct Plain;
+#[doc(hidden)]
+pub struct Async;
+
+impl HandlerReturn<Plain> for () {
+    fn run(self) {}
+}
+
+impl<F: std::future::Future<Output = ()> + 'static> HandlerReturn<Async> for F {
+    fn run(self) {
+        _ = crate::task::spawn(self);
+    }
+}
+
+/// [`handler`] of a closure (its parameter typed by this bound); it may be `async`.
+#[doc(hidden)]
+pub fn handler_fn<T: FromRaw, M, R: HandlerReturn<M>>(mut f: impl FnMut(Event<T>) -> R + 'static) -> Handler {
+    handler(move |e| f(e).run())
+}
+
+/// An `onmounted` closure, typed; it may be `async`.
+#[doc(hidden)]
+pub fn mounted_fn<M, R: HandlerReturn<M>>(
+    mut f: impl FnMut(Event<MountedData>) -> R + 'static,
+) -> impl FnMut(Event<MountedData>) + 'static {
+    move |e| f(e).run()
 }
 
 /// An `onmounted` handler: it runs once the element is drawn.

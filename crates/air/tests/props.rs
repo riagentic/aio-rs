@@ -156,3 +156,25 @@ fn a_prop_without_a_closure_is_built_as_written() {
     let props = <BadgeProps as Props>::builder().text(|| "x").size(|| 7u8).build();
     assert_eq!((props.text.as_str(), props.size, props.title), ("x", 7, None));
 }
+
+#[component]
+fn List<T: Clone + PartialEq + std::fmt::Display + 'static>(
+    items: Prop<Vec<T>>,
+    #[props(default)] lead: String,
+) -> View {
+    rsx! { ul { "data-t": "list", for (i, x) in items.get().into_iter().enumerate() { li { key: "{i}", "{lead}{x}" } } } }
+}
+
+#[test]
+fn a_generic_component_takes_its_props_type_from_them() {
+    let mut p = TestPage::mount(|| {
+        let n = signal(|| vec![1u8, 2]);
+        rsx! {
+            List { items: n.get(), lead: "#" }
+            button { "data-t": "more", onclick: move |_| n.write().push(3), "more" }
+        }
+    });
+    assert_eq!(p.texts("list"), ["#1", "#2"]);
+    p.click("more");
+    assert_eq!(p.texts("list"), ["#1", "#2", "#3"]);
+}

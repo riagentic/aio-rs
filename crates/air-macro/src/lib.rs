@@ -38,22 +38,27 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
     let Some(fn_at) = toks.iter().position(|t| is_ident(t, "fn")) else {
         return quote!(::core::compile_error!("air: #[component] goes on a fn")).into();
     };
-    let (name, args) = match (toks.get(fn_at + 1), toks.get(fn_at + 2)) {
-        (Some(TokenTree::Ident(n)), Some(TokenTree::Group(g))) if g.delimiter() == Delimiter::Parenthesis => {
-            (n.clone(), g.stream())
-        }
-        _ => {
-            return quote!(::core::compile_error!(
-                "air: #[component] goes on a plain `fn Name(props…) -> View` (no generics)"
-            ))
-            .into();
-        }
+    let Some(TokenTree::Ident(name)) = toks.get(fn_at + 1).cloned() else {
+        return quote!(::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`")).into();
+    };
+    // `<R: Clone + 'static>`: the props are generic as the fn is.
+    let (generics, mut at) = (generic_params(&toks, fn_at + 2), fn_at + 2);
+    if let Some((_, end)) = &generics {
+        at = *end;
+    }
+    let args = match toks.get(at) {
+        Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => g.stream(),
+        _ => return quote!(::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`")).into(),
+    };
+    let (gp, gn) = match &generics {
+        Some((params, _)) => split_generics(params),
+        None => (quote!(), quote!()),
     };
     let head: TokenStream = toks[..fn_at].iter().cloned().collect();
-    let rest: TokenStream = toks[fn_at + 3..].iter().cloned().collect();
+    let rest: TokenStream = toks[at + 1..].iter().cloned().collect();
     let args: Vec<Vec<TokenTree>> = split_top(&args.into_iter().collect::<Vec<_>>());
     if args.is_empty() {
-        return quote!(#[allow(non_snake_case)] #head fn #name() #rest).into();
+        return quote!(#[allow(non_snake_case)] #head fn #name<#gp>() #rest).into();
     }
     let props = format_ident!("{}Props", name);
     let fields: Vec<Field> = match args.iter().map(|a| field(a)).collect::<Res<_>>() {
@@ -66,13 +71,13 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
         quote!(#(#docs)* pub #n: #ty)
     });
     let pats = fields.iter().map(|f| &f.pat);
-    let builder = builder(vis.clone(), &props, &name.to_string(), &fields);
+    let builder = builder(vis.clone(), &props, &name.to_string(), &fields, &gp, &gn);
     quote!(
         #[derive(Clone)]
-        #vis struct #props { #(#decl),* }
+        #vis struct #props<#gp> { #(#decl),* }
         #builder
         #[allow(non_snake_case)]
-        #head fn #name(#props { #(#pats),* }: #props) #rest
+        #head fn #name<#gp>(#props { #(#pats),* }: #props<#gn>) #rest
     )
     .into()
 }
@@ -95,7 +100,45 @@ pub fn props(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             Ok(f) => f,
             Err((span, msg)) => return quote_spanned!(span=> ::core::compile_error!(#msg);).into(),
         };
-    builder(vis, &name, &name.to_string(), &fields).into()
+    builder(vis, &name, &name.to_string(), &fields, &quote!(), &quote!()).into()
+}
+
+/// `<…>` at `at` (a fn's generics): its tokens, and where it ends.
+fn generic_params(toks: &[TokenTree], at: usize) -> Option<(Vec<TokenTree>, usize)> {
+    if !is_punct(toks.get(at), '<') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (k, t) in toks.iter().enumerate().skip(at) {
+        match t {
+            TokenTree::Punct(p) if p.as_char() == '<' => depth += 1,
+            TokenTree::Punct(p) if p.as_char() == '>' && !is_punct(toks.get(k - 1), '-') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((toks[at + 1..k].to_vec(), k + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Generic parameters with their bounds, and their names (each with a trailing comma).
+fn split_generics(params: &[TokenTree]) -> (TokenStream, TokenStream) {
+    let (mut gp, mut gn) = (quote!(), quote!());
+    for p in split_top(params) {
+        let decl: TokenStream = p.iter().cloned().collect();
+        let name: TokenStream = match p.as_slice() {
+            [TokenTree::Punct(q), TokenTree::Ident(l), ..] if q.as_char() == '\'' => quote!(#q #l),
+            [t, ..] if is_ident(t, "const") => p.get(1).cloned().into_iter().collect(),
+            [t, ..] => t.clone().into(),
+            [] => continue,
+        };
+        gp.extend(quote!(#decl,));
+        gn.extend(quote!(#name,));
+    }
+    (gp, gn)
 }
 
 /// A prop: its docs, its `#[props(…)]`, its pattern (in a component's
@@ -200,7 +243,14 @@ fn field(toks: &[TokenTree]) -> Res<Field> {
 
 /// `props`'s builder: `Option`s of its fields, one type parameter per
 /// required prop (`()` until given, then `Set`), `build` once all are.
-fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field]) -> TokenStream {
+fn builder(
+    vis: Option<TokenStream>,
+    props: &Ident,
+    shown: &str,
+    fields: &[Field],
+    gp: &TokenStream,
+    gn: &TokenStream,
+) -> TokenStream {
     let b = format_ident!("{}Builder", props);
     let required: Vec<usize> = (0..fields.len())
         .filter(|&k| {
@@ -295,11 +345,11 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
                     quote!(),
                     quote!(
                         #[allow(non_camel_case_types)]
-                        impl<#(#others),*> #b<#(#before),*> {
+                        impl<#gp #(#others),*> #b<#gn #(#before),*> {
                             #(#docs)*
-                            pub fn #n #gens (self, #param) -> #b<#(#after),*> { #mv }
+                            pub fn #n #gens (self, #param) -> #b<#gn #(#after),*> { #mv }
                             #[doc(hidden)]
-                            pub fn #fname #fgen (self, #fparam) -> #b<#(#after),*> { #mfv }
+                            pub fn #fname #fgen (self, #fparam) -> #b<#gn #(#after),*> { #mfv }
                         }
                     ),
                 )
@@ -337,7 +387,7 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
         let n = &f.name;
         quote!(
             #[allow(non_camel_case_types)]
-            impl<#(#params),*> #air::__rt::GlobalAttributes for #b<#(#params),*> {
+            impl<#gp #(#params),*> #air::__rt::GlobalAttributes for #b<#gn #(#params),*> {
                 fn __push(&mut self, a: #air::Attribute) {
                     self.#n.get_or_insert_with(::std::vec::Vec::new).push(a)
                 }
@@ -347,18 +397,18 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
     quote!(
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
-        #vis struct #b<#(#params = ()),*> {
+        #vis struct #b<#gp #(#params = ()),*> {
             #(#names: ::core::option::Option<#tys>,)*
             __s: ::core::marker::PhantomData<(#(#params,)*)>,
         }
-        impl #air::__rt::Props for #props {
-            type Builder = #b<#(#unit),*>;
+        impl<#gp> #air::__rt::Props for #props<#gn> {
+            type Builder = #b<#gn #(#unit),*>;
             fn builder() -> Self::Builder {
                 #b { #(#names: ::core::option::Option::None,)* __s: ::core::marker::PhantomData }
             }
         }
         #[allow(non_camel_case_types)]
-        impl<#(#params),*> #b<#(#params),*> {
+        impl<#gp #(#params),*> #b<#gn #(#params),*> {
             #(#optional)*
         }
         #(#req_impls)*
@@ -370,8 +420,8 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
             impl #needs for #air::__rt::Set {}
         )*
         #[allow(non_camel_case_types)]
-        impl<#(#params: #needs),*> #b<#(#params),*> {
-            pub fn build(self) -> #props {
+        impl<#gp #(#params: #needs),*> #b<#gn #(#params),*> {
+            pub fn build(self) -> #props<#gn> {
                 #props { #(#fill,)* }
             }
         }
@@ -1056,8 +1106,12 @@ impl Tpl {
                                     let data = Ident::new(data, Span::call_site());
                                     // A closure gets its parameter's type from a direct bound.
                                     let closure = e.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
-                                    let h = if closure { quote!(handler_fn) } else { quote!(handler) };
-                                    quote!(air::__rt::on(#id, #dom, { #c air::__rt::#h::<air::__rt::#data>(#e) });)
+                                    let h = if closure {
+                                        quote!(handler_fn::<air::__rt::#data, _, _>)
+                                    } else {
+                                        quote!(handler::<air::__rt::#data>)
+                                    };
+                                    quote!(air::__rt::on(#id, #dom, { #c air::__rt::#h(#e) });)
                                 }
                             }
                             _ => continue,
