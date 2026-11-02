@@ -255,8 +255,14 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   `KeyboardEvent`, `oninput` a `FormEvent`, …); an unknown `onX` is a
   compile error; `onmounted` runs once the element is drawn.
 - A component's props are evaluated once: a prop that must follow state is
-  a `Signal` or a `Part` (as in Solid and Leptos). Every prop is given
-  (no defaults yet: step 2, with the kit's optional props).
+  a `Signal`, a `Part` or typed `Prop<T>` (as in Solid and Leptos): a
+  `Prop` given an expression (`value: name.get()`) follows it, given a
+  constant it is that constant. `#[props(default)]`, `#[props(default =
+  e)]`, `Option<T>` and `View` props may be left out (an `Option` takes a
+  `T`); any other prop left out is a compile error. Unknown names given
+  to a component with `#[props(extends = GlobalAttributes)] attributes:
+  Vec<Attribute>` are attributes (`..attributes` on an element sets them,
+  after its own).
 - A body runs once, untracked; one that `?`s a resource still loading
   runs again when it is loaded, its hooks (`signal`, `memo`, `resource`,
   `once`, …) handing back what the first run made, by call order.
@@ -459,14 +465,45 @@ gates 10, fault 3, views 5, doc 3); aio-rs on air: `air_ui` 5 of 5,
 of 26. Not passing on air, by design (each `ignore`d on air with its
 reason): the facade's and `ui`'s tests that count body re-runs or read
 state in a body (a snapshot on air: 3 + 7). Not built on air: `kit.rs`
-(67: `aio::kit` is Dioxus code until step 2), `route.rs` and
-`route_tree.rs` (5: `router!` uses Dioxus's per-render context).
+(67: `aio::kit` is Dioxus code until step 2). Since phase 2b the router
+and every `TestUi` feature run on air too ([Phase 2b](#phase-2b-the-router-and-testui-on-air)).
 
 Left for step 1: portals and `Defer` (kit components today: step 2 moves
 them), `ax test` of the template app on air (the template is the kit's),
 optional props. Left after it: the kit (step 2), `ax dev`'s hot reload
 and the web and Android pages (step 3), the CI gates on the packaged app
 (step 4).
+
+## Phase 2b: the router and TestUi on air
+
+- **The tree of mounted components** (`air::components()`, aio DevTools'
+  `tree`, `crates/air/src/tree.rs`): each component an `rsx!` places, by
+  name and key (its `Display`, else its `Debug`), with its body runs and
+  its updates (a re-run of one of its own holes: what a change cost it).
+  A hole knows its component from where it was made (a thread-local
+  current component, set while a component's view is built and while a
+  hole runs), so a count is an increment and a lookup by index; the tree
+  is walked only when asked. A component's entry ends with its hole; a
+  static component's hole is kept (it read nothing) so it stays in the
+  tree.
+- **`follow`**: in a body, reads that run the body again when they change
+  (AIR's re-render, opt in), its hooks handing back what they made and
+  its props built again. The facade's `follow(f)` is a memo on air (the
+  body runs again only for a new value) and `f()` on Dioxus. The
+  router's `Route` follows its match: a new place that keeps the match (a
+  query, another route's place) runs nothing; a new param makes its
+  element anew, so a body's `params()` is current. `provide_now` gives
+  context per run. A `Link`'s active class and `aria-current` are holes.
+- **`TestUi`**: `components()` from that tree; the page's interpreter
+  names its nodes for the page's readers (`window.__airNode`), so a path
+  can name a component by its first and last node (`comp=Row[42]`),
+  `find(component, key)` returns that path, `within(t, f)` scopes a
+  test's paths, and `surface_tree()` gives aio's `UISurfaceNode` shape
+  (each component's elements and text). `advance(d)` pauses the views'
+  tokio clock and sleeps `d` on it: a paused clock jumps to the next timer
+  when the views idle, so each timer fires at its moment. `a11y()` runs
+  aio's `dev-a11y.ts` rules on the page (the handler rules from the
+  page's listener table).
 
 ## The app surface: `aio::ui`
 
@@ -556,11 +593,8 @@ as on air.
 - **`mut` on a signal**: Dioxus needs `let mut n = signal(…)` for a handler
   that writes `n`; on air the handler holds its own copy, so `mut` is
   unused (a warning).
-- **Not on air yet** (step 2, with the kit): attribute spreads
-  (`..attributes`, `Attribute`), optional and default props, the router
-  (`router!`: `provide_now`), `TestUi::components()` (empty on air: no
-  view re-renders, so nothing to count yet), and two roots on one thread
-  (one window's views per thread: a test holds one `TestUi` at a time).
+- **Not on air yet**: two roots on one thread (one window's views per
+  thread: a test holds one `TestUi` at a time).
 - **Hot patch**: Dioxus keeps a view's local state across a patch; air
   remounts (cells keep theirs).
 - **What stays on Dioxus inside the framework** until step 5: the kit,

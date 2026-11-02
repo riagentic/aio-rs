@@ -2,7 +2,7 @@
 
 Routes name the places of an app (`/`, `/users/7`, `/settings`) so a
 view can show one, a link can lead to one, Back can return from one and
-the app can open at one. Feature `kit`.
+the app can open at one. Feature `kit` or `air`: the same views on either renderer.
 
 - **Use routes** when the app has pages a person moves between, links
   into it (a notification's click, a deep link), or Back to honour (a
@@ -10,9 +10,13 @@ the app can open at one. Feature `kit`.
 - **Not needed** for a single screen with dialogs: a signal or a cell
   field is simpler.
 
-The history lives in Rust, one per window, not in the page's address:
-the desktop page is the app's own file and Android's is an asset, so one
-spelling works on every target: a route is the path the app wrote.
+The history lives in Rust, one per window: the desktop page is the
+app's own file and Android's is an asset, so one spelling works on every
+target: a route is the path the app wrote. In a browser (a web build) the
+page's address follows it too: the address bar shows the place, the
+browser's Back and Forward step the app's history, and a reload or a
+shared link opens where it points (the server answers every route-shaped
+path with the app: the SPA fallback).
 
 ## Typed pages: `routes!`
 
@@ -75,17 +79,19 @@ aio::routes! {
 
 #[component]
 fn App() -> View {
-    let page = Page::parse(&here().path); // reading here() subscribes the view
     rsx! {
         nav {
             Link { to: "/", exact: true, "data-t": "home", "Home" }
             Link { to: Page::User { id: 7 }.href(), "data-t": "user", "User 7" }
             Link { to: "https://example.com/", "Help" } // leaves the app: the system browser
         }
-        match page {
-            Some(Page::Home) => rsx! { p { "data-t": "page", "home" } },
-            Some(Page::User { id }) => rsx! { p { "data-t": "page", "user {id}" } Sheet {} },
-            None => rsx! { p { "data-t": "page", "not found" } },
+        // Read where it is drawn: this hole follows the place.
+        {
+            match Page::parse(&here().path) {
+                Some(Page::Home) => rsx! { p { "data-t": "page", "home" } },
+                Some(Page::User { id }) => rsx! { p { "data-t": "page", "user {id}" } Sheet {} },
+                None => rsx! { p { "data-t": "page", "not found" } },
+            }
         }
     }
 }
@@ -95,7 +101,7 @@ fn App() -> View {
 fn Sheet() -> View {
     let open = signal(|| true);
     use_back(move || {
-        let was = *open.read_untracked();
+        let was = open.get_untracked();
         open.set(false);
         was // true: Back is handled here
     });
@@ -114,13 +120,18 @@ assert_eq!(ui.text("page"), "home");
 
 | Item | Does |
 |---|---|
-| `here()` | the current place (`aio::route::Loc`: `path`, `query`, `hash`, `.query("key")`); reading it subscribes the view |
+| `here()` | the current place (`aio::route::Loc`: `path`, `query`, `hash`, `.query("key")`); read in a hole (`{ .. }`, an attribute), it follows the place; on air a body's read is a snapshot |
 | `go(to)` | goes there (resolved from here); false if it leaves the app |
 | `redirect(to)` | goes there without a Back step |
 | `back()` | the newest `use_back` handler, then history; false at the first place |
 | `use_back(f)` | `f` takes Back while the component lives; return true if it handled it |
 | `Link { to, exact, replace, class, active_class }` | an `<a>` that routes in the app; the current place's link gets `active_class` (`active`) and `aria-current="page"`; a link out of the app opens in the system browser; the author's `onclick` runs first, and its `prevent_default()` keeps the place |
 | `NAV` | the window's `aio::route::History` (50 places, as Chromium keeps) |
+
+A `Route` runs again only when its match changes (on air its body runs
+again then and its element is made anew; a query, a fragment or another
+route's place runs nothing). A view that reads `params()` in its body
+gets the new ones that way.
 
 ## The place, its query and history
 
@@ -167,7 +178,8 @@ assert_eq!(of_link("myapp://users/7?tab=a"), "/users/7?tab=a");
 | `param::<T>(&params, name)` | a param parsed, `None` if absent or bad |
 | `fill(pattern, &[(name, value)])` | a pattern written back, values encoded |
 | `is_active(to, here, exact)` | what `Link` marks active |
-| `History` | `new(start)`, `here()`, `push`, `replace`, `go(delta)`, `can_go(delta)`, `len()`; at most `HISTORY_MAX` (50) places |
+| `History` | `new(start)`, `here()`, `push`, `replace`, `go(delta)`, `can_go(delta)`, `sync(place)` (the browser's Back or Forward moved to `place`), `len()`; at most `HISTORY_MAX` (50) places |
+| `start_place()`, `mirror(here, replace)`, `pops()`, `step_back(h)` | the router's browser side: the page's address at the start, the address bar following the place, the browser's Back and Forward, Back through the page's history; no-ops off a browser |
 | `start(args)` | the launch's `--route`, else `/` |
 | `of_link(url)` | the place a `myapp://…` link leads to |
 
@@ -292,12 +304,9 @@ sheet), then step history; at the first place the host does its default
 
 ## Gaps against aio
 
-- **The browser's address bar.** aio's router is the browser's History
-  API: in a browser the address bar, the browser's Back button and a
-  reload follow the route, and its server answers any path with the app
-  (the SPA fallback). aio-rs keeps the history in the app on every
-  target, so in a web build a reload starts at `/`; keep a screen that
-  must survive a reload in a cell.
+- **A route base.** aio's router undoes the app's base path (an app
+  served under `/assets`); an aio-rs web build is served at its site's
+  root.
 - **Typed `useRoute(pattern)`.** aio types the param names of a literal
   pattern; aio-rs's `routes!` types the values as well (`id: u32`), and
   `match_path` / `params()` give strings by name.
