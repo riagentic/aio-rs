@@ -24,6 +24,11 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
   live_css_s       `ax dev`, headless: a stylesheet line saved → on the page
   live_rsx_s       an `rsx!` text saved → on the page
   live_logic_s     a line of Rust in the view saved → on the page (hot-patch)
+  air_*            the same template on air (aio-rs's own renderer, to_air):
+                   air_rebuild_s/_cpu, air_live_css_s/_rsx_s/_logic_s, and
+                   its packages: air_binary_b, air_targz_b, air_appimage_b,
+                   air_web_b (`ax build --web`'s folder), air_apk_b (the
+                   arm64 APK, `--apk`); none may hold Dioxus (scripts/air-ship)
 
   scripts/dx-metrics            measure, print, append the row
   scripts/dx-metrics --check    also fail on a regression past its limit
@@ -32,6 +37,8 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
                                 base's row of this machine is reused
   scripts/dx-metrics --trend [n]  the last n rows (12) and today's limits
   scripts/dx-metrics --self-test  the gate's rules, on made-up rows
+  scripts/dx-metrics --apk      the air template's APKs only (`ax build
+                                --android`; with --check and --base too)
   scripts/dx-metrics --live     the live edits only, on Dioxus (dx) and on
                                 air (`ax dev`'s own reload and hot-patch),
                                 one after the other here: printed, no row
@@ -81,7 +88,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TREND = ROOT / "scripts" / "dx-trend.csv"
 COLUMNS = ["date", "commit", "machine", "crates", "clean_debug_s", "clean_debug_cpu", "rebuild_s", "rebuild_cpu",
            "release_s", "release_cpu", "binary_b", "targz_b", "appimage_b", "boot_s", "window_mb", "window_pss_mb",
-           "core_crates", "kit_crates", "debug_target_mb", "live_css_s", "live_rsx_s", "live_logic_s", "window_dirty_mb"]
+           "core_crates", "kit_crates", "debug_target_mb", "live_css_s", "live_rsx_s", "live_logic_s", "window_dirty_mb",
+           "air_rebuild_s", "air_rebuild_cpu", "air_binary_b", "air_targz_b", "air_appimage_b", "air_web_b", "air_apk_b",
+           "air_live_css_s", "air_live_rsx_s", "air_live_logic_s"]
 # Over the rolling best or median, by this much.
 MEDIAN = lambda v: sorted(v)[len(v) // 2]  # noqa: E731
 STEADY, MEMORY, NOISY = (min, 1.05), (MEDIAN, 1.15), (MEDIAN, 1.5)
@@ -108,6 +117,15 @@ GATED = {
     "live_css_s": (NOISY, 0.25, LIVE),
     "live_rsx_s": (NOISY, 0.25, LIVE),
     "live_logic_s": (NOISY, 0.5, LIVE),
+    "air_rebuild_cpu": (NOISY, 0.5, REBUILD + ", on air (to_air)"),
+    "air_binary_b": (STEADY, 50_000, SIZES + ", on air"),
+    "air_targz_b": (STEADY, 50_000, SIZES + ", on air; tar tvzf dist/<app>*.tar.gz"),
+    "air_appimage_b": (STEADY, 50_000, SIZES + ", on air; <app>.AppImage --appimage-extract"),
+    "air_web_b": (STEADY, 10_000, "`ax build <app> --web`, on air: du -b dist/<app>-web/*"),
+    "air_apk_b": (STEADY, 50_000, "`ax build <app> --android`, on air: unzip -lv dist/<app>-*-arm64-v8a.apk"),
+    "air_live_css_s": (NOISY, 0.25, LIVE + ", on air"),
+    "air_live_rsx_s": (NOISY, 0.25, LIVE + ", on air"),
+    "air_live_logic_s": (NOISY, 0.5, LIVE + ", on air"),
 }
 # A crate count is held to its deps.toml `[ceilings]` set too.
 CEILING = {"crates": "app kit", "core_crates": "aio-rs core", "kit_crates": "aio-rs kit"}
@@ -116,7 +134,9 @@ WINDOW = 10
 SHORT = {"crates": "app", "core_crates": "core", "kit_crates": "kit", "clean_debug_cpu": "clean", "rebuild_cpu": "rebuild",
          "release_cpu": "release", "debug_target_mb": "disk", "binary_b": "binary", "targz_b": "tar.gz",
          "appimage_b": "AppImage", "boot_s": "boot", "window_dirty_mb": "window", "live_css_s": "css", "live_rsx_s": "rsx",
-         "live_logic_s": "logic"}
+         "live_logic_s": "logic", "air_rebuild_cpu": "a.rebuild", "air_binary_b": "a.binary",
+         "air_targz_b": "a.tar.gz", "air_appimage_b": "a.AppImage", "air_web_b": "a.web", "air_apk_b": "a.apk",
+         "air_live_css_s": "a.css", "air_live_rsx_s": "a.rsx", "air_live_logic_s": "a.logic"}
 NAME = "dxapp"
 # The live edits: (file, text before, after, the page once it shows). None: appended.
 COUNT = "document.querySelector('[data-t=count]')"
@@ -312,13 +332,16 @@ def du_mb(path):
     return int(subprocess.run(["du", "-sk", path], capture_output=True, text=True).stdout.split()[0]) // 1024
 
 
-def measure(tmp, root=ROOT, full=True):
+def measure(tmp, root=ROOT, full=True, apk=False):
     """A row for the checkout `root` (`tmp` in its target/); not `full`: its
-    sizes only (no rebuilds, live edits or smoke)."""
+    sizes only (no rebuilds, live edits or smoke); `apk`: the air template's
+    APKs alone."""
     # aio-rs itself as ci.sh built it (its env, its target folder); a base's
     # in its own: its path is as long, so cargo took the base's crates for
     # this checkout's, and a later build here compiled against the base's
     # aio-config. The template as a developer's.
+    if apk and not has_air(root):
+        return {}
     here = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
     cli = here if root == ROOT else root / "target"
     run(["cargo", "fetch", "--locked"], root, os.environ)
@@ -327,40 +350,119 @@ def measure(tmp, root=ROOT, full=True):
     env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
     aio = cli / "debug" / "ax"
     env["CARGO_TARGET_DIR"] = str(tmp / "target")
+    if apk:
+        return measure_air(tmp, root, aio, env, full, apk)
     run([aio, "create", NAME, "--aio", root], tmp, env)
     app = tmp / NAME
     shutil.copy(root / "Cargo.lock", app / "Cargo.lock")
-    # `ax dev`'s layout (its debug profile, the host target): its dx build reuses this one.
-    build = ["cargo", "build", "--offline", "-p", f"{NAME}-app", "--profile", "desktop-dev", "--target", host()]
+    build = debug_build()
     row = crates(root)
     _, row["clean_debug_s"], row["clean_debug_cpu"] = run(build, app, env)
     row["debug_target_mb"] = du_mb(tmp / "target")
     if not full:
         run([aio, "build", NAME, "--appimage"], app, env)
-        return rounded(sizes(row, tmp, app))
-    lib = app / "src" / "lib.rs"
-    text = lib.read_text()
-    edits = []
-    for n in range(3):
-        lib.write_text(text.replace('"Add"', f'"Add {n}"', 1))
-        edits.append(run(build, app, env)[1:])
-    row["rebuild_s"], row["rebuild_cpu"] = min(edits)
-    lib.write_text(text)
-    sources = {p: (app / p).read_text() for p in {e[0] for e in EDITS.values()}}
-    row |= live(aio, app, env, tmp / "home")
-    for p, t in sources.items():
-        (app / p).write_text(t)
+        return rounded(sizes(row, tmp, app) | measure_air(tmp, root, aio, env, full))
+    row["rebuild_s"], row["rebuild_cpu"] = rebuild(app, env)
+    row |= edited_live(aio, app, env, tmp / "home")
     said, row["release_s"], row["release_cpu"] = run([aio, "build", NAME, "--appimage", "--smoke"], app, env)
     sizes(row, tmp, app)
     boot = re.search(r"window ready in ([\d.]+) s", said)
     mem = re.search(r"memory: (\d+) MB private, (\d+) MB PSS.*?, (\d+) MB written", said)
     row["boot_s"] = float(boot[1]) if boot else ""
     row["window_mb"], row["window_pss_mb"], row["window_dirty_mb"] = (int(mem[1]), int(mem[2]), int(mem[3])) if mem else ("", "", "")
-    return rounded(row)
+    return rounded(row | measure_air(tmp, root, aio, env, full))
+
+
+def debug_build():
+    """`ax dev`'s layout (its debug profile, the host target): its dx build reuses this one."""
+    return ["cargo", "build", "--offline", "-p", f"{NAME}-app", "--profile", "desktop-dev", "--target", host()]
+
+
+def rebuild(app, env):
+    """One line of the built app changed, its debug rebuild: (wall, CPU) seconds, best of 3."""
+    lib = app / "src" / "lib.rs"
+    text = lib.read_text()
+    edits = []
+    for n in range(3):
+        lib.write_text(text.replace('"Add"', f'"Add {n}"', 1))
+        edits.append(run(debug_build(), app, env)[1:])
+    lib.write_text(text)
+    return min(edits)
+
+
+def edited_live(aio, app, env, home):
+    """`live`, its edits taken back afterwards."""
+    sources = {p: (app / p).read_text() for p in {e[0] for e in EDITS.values()}}
+    row = live(aio, app, env, home)
+    for p, t in sources.items():
+        (app / p).write_text(t)
+    return row
+
+
+def has_air(root):
+    """Whether checkout `root`'s shell draws on air (air phase 3 on), said when not."""
+    if "air" in tomllib.loads((root / "crates" / "aio-shell" / "Cargo.toml").read_text())["features"]:
+        return True
+    print(f"dx-metrics: {root.name}'s aio-rs-shell has no `air`: no air numbers for it", file=sys.stderr)
+    return False
+
+
+def measure_air(tmp, root, aio, env, full, apk=False):
+    """The template app on air (`to_air`, in tmp/air): its packages' sizes,
+    each checked for Dioxus (scripts/air-ship, shown first to catch a
+    planted one), and, `full`, its edit times; `apk`: its APKs alone
+    (`ax build --android`). {} where `root`'s shell has no air (a base
+    before air phase 3)."""
+    if not has_air(root):
+        return {}
+    (tmp / "air").mkdir()
+    # Its own build folder: ax keeps one app per binary name in one.
+    env = env | {"CARGO_TARGET_DIR": str(tmp / "air" / "target")}
+    run([aio, "create", NAME, "--aio", root], tmp / "air", env)
+    app = tmp / "air" / NAME
+    shutil.copy(root / "Cargo.lock", app / "Cargo.lock")
+    to_air(app)
+    dist, row = app / "dist", {}
+    if apk:
+        # The app's signing key made in the run's folder, not the developer's.
+        run([aio, "build", NAME, "--android"], app, env | {"XDG_CONFIG_HOME": str(tmp / "config")})
+        made = sorted(dist.glob("*.apk"))
+        row["air_apk_b"] = next(f.stat().st_size for f in made if f.name.endswith("-arm64-v8a.apk"))
+    else:
+        if full:
+            run(debug_build(), app, env)
+            row["air_rebuild_s"], row["air_rebuild_cpu"] = rebuild(app, env)
+            row |= {f"air_{k}": v for k, v in edited_live(aio, app, env, tmp / "air" / "home").items()}
+        run([aio, "build", NAME, "--appimage"], app, env)
+        run([aio, "build", NAME, "--web"], app, env)
+        made = [tmp / "air" / "target" / "release" / NAME, dist / f"{NAME}-web"]
+        made += [f for f in dist.iterdir() if f.name.endswith((".tar.gz", ".AppImage"))]
+        row["air_binary_b"] = made[0].stat().st_size
+        row["air_web_b"] = sum(f.stat().st_size for f in made[1].rglob("*") if f.is_file())
+        row["air_targz_b"], row["air_appimage_b"] = (next(f.stat().st_size for f in made[2:] if f.name.endswith(e))
+                                                     for e in (".tar.gz", ".AppImage"))
+    if root == ROOT:
+        ship_check(app, made)
+    return row
+
+
+def ship_check(app, made):
+    """scripts/air-ship on the app and what it packaged, after it fails on
+    the same app with a Dioxus dependency planted."""
+    gate = [sys.executable, str(ROOT / "scripts" / "air-ship"), str(app)]
+    manifest, lock = app / "Cargo.toml", app / "Cargo.lock"
+    was = manifest.read_text(), lock.read_text()
+    manifest.write_text(was[0].replace("[dependencies]\n", '[dependencies]\ndioxus-core = "0.7"\n', 1))
+    planted = subprocess.run(gate, capture_output=True, text=True)
+    manifest.write_text(was[0])
+    lock.write_text(was[1])
+    if planted.returncode == 0 or "dioxus-core" not in planted.stderr:
+        sys.exit(f"dx-metrics: scripts/air-ship missed a planted dioxus-core:\n{planted.stdout}{planted.stderr[-3000:]}")
+    print(run(gate + [str(f) for f in made], ROOT, os.environ)[0].strip())
 
 
 def rounded(row):
-    return {k: round(v, 3 if k.startswith("live_") else 1) if isinstance(v, float) else v for k, v in row.items()}
+    return {k: round(v, 3 if "live_" in k else 1) if isinstance(v, float) else v for k, v in row.items()}
 
 
 def sizes(row, tmp, app):
@@ -391,8 +493,8 @@ def save(row, rows):
 
 
 def num(v):
-    """`v` as a row has it: whole from 1000 up, else to two decimals (pure)."""
-    return f"{v:.0f}" if v >= 1000 else f"{v:.2f}".rstrip("0").rstrip(".")
+    """`v` as a row has it: whole from 1000 up, else to two decimals (three under 0.1) (pure)."""
+    return f"{v:.0f}" if v >= 1000 else f"{v:.{2 if v >= 0.1 else 3}f}".rstrip("0").rstrip(".")
 
 
 def limits(machine_key, rows, ceilings, base=None, added=()):
@@ -493,6 +595,21 @@ def self_test():
     assert head({"clean_debug_cpu": "900"}) == "", "no times of this machine: not gated"
     assert head({"debug_target_mb": "1000"}, [ci | {"commit": "a1", "debug_target_mb": "1000"}]) == "", "growth committed here"
     assert head({"debug_target_mb": "1000"}, [dev[0] | {"debug_target_mb": "1000"}]), "growth committed elsewhere: no"
+    # air's packages: against the base like the rest; a base before air has none to hold them to.
+    ci_air = ci | {"air_binary_b": "5344872", "air_web_b": "400000", "air_apk_b": "2548421"}
+    on_air = lambda over: (regressions(base | {"machine": "ci"} | over, dev, None, ci_air) or [""])[0]  # noqa: E731
+    assert on_air({"air_binary_b": "5400000", "air_web_b": "405000"}) == "", "+1% air sizes pass"
+    assert on_air({"air_binary_b": "5650000"}).startswith("air_binary_b"), "+5.7% air binary fails"
+    assert on_air({"air_web_b": "431000"}).startswith("air_web_b"), "+7.8% web bundle fails"
+    assert on_air({"air_apk_b": "2700000"}).startswith("air_apk_b"), "+6% APK fails"
+    assert head({"air_binary_b": "9000000"}) == "", "a base without air: not gated"
+    assert on_air({"air_live_logic_s": "9", "air_rebuild_cpu": "50"}) == "", "air's edit times: this machine's rows only"
+    assert first({"air_live_rsx_s": "0.004"}) == "" and first({"machine": "m", "air_live_rsx_s": "9"}) == ""
+    mine = rows + [base | {"commit": f"a{i}", "air_live_rsx_s": "0.005", "air_rebuild_cpu": "1.2"} for i in range(3)]
+    timed = lambda over: (regressions(base | over, mine) or [""])[0]  # noqa: E731
+    assert timed({"air_live_rsx_s": "0.2"}) == "", "an rsx! reload within its 0.25 s slack passes"
+    assert timed({"air_live_rsx_s": "0.3"}).startswith("air_live_rsx_s"), "past its slack fails, on this machine"
+    assert timed({"air_rebuild_cpu": "2.5"}).startswith("air_rebuild_cpu"), "x2 an air rebuild fails"
     old = [{"date": "d", "commit": "c", "machine": "m", "crates": "141"}]
     assert added(old, [old[0] | {"core_crates": "49"}, old[0] | {"crates": "142"}]) == [old[0] | {"crates": "142"}], \
         "rows this change commits, a column added since not counting"
@@ -525,9 +642,9 @@ def keep(cache, sha, row):
         w.writerow(row)
 
 
-def measure_base(sha):
-    """Commit `sha`'s sizes, built in a checkout beside this one whose path
-    is as long (debug info holds the paths)."""
+def measure_base(sha, apk):
+    """Commit `sha`'s sizes (`apk`: its air APKs'), built in a checkout
+    beside this one whose path is as long (debug info holds the paths)."""
     here = ROOT.with_name(ROOT.name[:-1] + ("-" if ROOT.name.endswith("_") else "_"))
     if here.exists():
         sys.exit(f"dx-metrics: {here} is in the way of the base's checkout")
@@ -535,7 +652,7 @@ def measure_base(sha):
     try:
         (here / "target").mkdir()
         with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=here / "target") as tmp:
-            return measure(pathlib.Path(tmp), here, full=False)
+            return measure(pathlib.Path(tmp), here, full=False, apk=apk)
     finally:
         git("worktree", "remove", "--force", str(here))
 
@@ -571,36 +688,40 @@ def main():
         for col in EDITS:
             print(f"{col:16} " + " ".join(f"{rows[r].get(col, ''):>8}" for r in ("dioxus", "air")))
         return
-    check = "--check" in args
+    check, apk = "--check" in args, "--apk" in args
+    # An APK run's rows kept apart: a base's row of one kind says nothing of the other's.
+    kind = "-apk" if apk else ""
     rev, cache = (args[args.index(f) + 1] if f in args else None for f in ("--base", "--rows"))
     cache = cache and pathlib.Path(cache).expanduser()
     rows, here, today = history(), machine(), datetime.date.today().isoformat()
     base, new = None, ()
     if rev:
         sha = git("rev-parse", "--verify", f"{rev}^{{commit}}").strip()
-        base = next((r for r in cached(cache, sha) if r["machine"] == here), None)
+        base = next((r for r in cached(cache, sha + kind) if r["machine"] == here), None)
         if base:
             print(f"dx-metrics: the base {sha[:8]}: this machine's row kept in {cache}")
         else:
             t = time.monotonic()
-            base = measure_base(sha) | {"date": today, "commit": sha[:8], "machine": here}
-            keep(cache, sha, base)
+            base = measure_base(sha, apk) | {"date": today, "commit": sha[:8], "machine": here}
+            keep(cache, sha + kind, base)
             print(f"dx-metrics: the base {sha[:8]} measured here in {time.monotonic() - t:.0f} s")
         new = added(at(sha), rows)
     # Beside the checkout (its target/): `ax create --aio` names the checkout
     # relative to the app, never through the root.
     (ROOT / "target").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=ROOT / "target") as tmp:
-        row = measure(pathlib.Path(tmp))
+        row = measure(pathlib.Path(tmp), apk=apk)
     row |= {"date": today, "commit": commit(), "machine": here}
-    keep(cache, git("rev-parse", "HEAD").strip(), row)
+    keep(cache, git("rev-parse", "HEAD").strip() + kind, row)
     for col in COLUMNS:
-        print(f"{col:16} {row.get(col, '')}")
+        if col in row:
+            print(f"{col:16} {row[col]}")
     save(row, rows)
     caps = tomllib.loads((ROOT / "deps.toml").read_text())["ceilings"]
     free = [c for c in GATED if row.get(c) not in ("", None) and c not in limits(here, rows, caps, base, new)]
     if free:
-        print(f"dx-metrics: not gated, no rows of this machine ({here}) yet: {', '.join(free)}", file=sys.stderr)
+        print(f"dx-metrics: not gated, no rows of this machine ({here}) or the base without them: {', '.join(free)}",
+              file=sys.stderr)
     bad = regressions(row, rows, caps, base, new)
     if bad:
         print("dx-metrics: past the limit (scripts/dx-trend.csv has the row):\n  " + "\n  ".join(bad), file=sys.stderr)

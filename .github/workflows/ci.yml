@@ -53,6 +53,31 @@ jobs:
       # Known breaks planted one at a time, in the source and in a built .deb:
       # each one's test must go red (docs/testing/proving.md).
       - run: scripts/mutants --fast
+  # The template on air as APKs (`ax build --android`, the runner's SDK and
+  # NDK): no Dioxus in them, their size against the base measured on this
+  # runner (scripts/dx-metrics --apk), beside the check job.
+  air-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - run: rustup toolchain install && rustup target add armv7-linux-androideabi x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - id: dx
+        run: echo "base=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+      - id: dxrows
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/aio-dx-rows
+          key: aio-dx-apk-rows-${{ steps.dx.outputs.base }}
+      - run: scripts/dx-metrics --check --apk --base "${{ steps.dx.outputs.base }}" --rows ~/.cache/aio-dx-rows
+      - if: always() && (github.event_name == 'push' || steps.dxrows.outputs.cache-hit != 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/aio-dx-rows
+          key: aio-dx-apk-rows-${{ github.event_name == 'push' && github.sha || steps.dx.outputs.base }}
   # The same tests on each desktop OS (fmt and lint are the same everywhere).
   test:
     strategy:
