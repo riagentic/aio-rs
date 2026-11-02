@@ -289,12 +289,10 @@ What is measured, in aio-rs's own repository:
 
 ## Not in aio-rs
 
-- aio's broadcast throttle (`syncIntervalMs`) and its full-state ratio
-  (`fullStateThreshold`): aio-rs pushes each commit's patch to each
-  viewer that sees it; `#[coalesce]` is the throttle.
-- aio's per-element delta for arrays of objects with `id`: aio-rs's
-  patches compare same-length arrays item by item, and a length change
-  replaces the array, so a map keyed by id patches better.
+- aio's render-staleness backpressure (a page whose paint lags is sent
+  less): aio-rs paces every link the same (`[server.limits]
+  sync_interval_ms`, aio's `syncIntervalMs`) and sends a big patch as the
+  view (`full_state_percent`, aio's `fullStateThreshold`).
 - aio's `perfCheck: "off"` switch: aio-rs's budgets are always on and
   cost a clock read per call.
 - A benchmark gate on the runtime (aio's D12 perf gate): aio-rs gates the

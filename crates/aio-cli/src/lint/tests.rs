@@ -913,5 +913,37 @@ fn tests_that_use_the_test_kit_without_its_feature_are_told_the_line() {
     );
     let r = lint(project(&[("src/lib.rs", lib), ("Cargo.toml", &given)]).path());
     assert!(!r.issues.iter().any(|i| i.message.contains("`testing` feature")), "{:?}", r.issues);
-    assert!(!gives_testing("[features]\ntesting = []\n"), "its own feature list is not aio-rs's");
+    assert!(!gives_testing(&["[features]\ntesting = []\n"]), "its own feature list is not aio-rs's");
+}
+
+#[test]
+fn the_test_kit_given_through_the_workspace_counts() {
+    let ws = |dep: &str| format!("[workspace]\nmembers = [\"app\"]\n[workspace.dependencies]\n{dep}\n");
+    let member = |dep: &str| format!("[package]\nname = \"notes\"\n[dev-dependencies]\n{dep}\n");
+    let renamed = ws("aio = { package = \"aio-rs\", path = \"../aio\" }");
+    let plain = ws("aio-rs = { path = \"../aio\" }");
+    let inherit = |k: &str| member(&format!("{k} = {{ workspace = true, features = [\"testing\"] }}"));
+    // The member asks for it, renamed or not.
+    assert!(gives_testing(&[renamed.clone(), inherit("aio")]));
+    assert!(gives_testing(&[plain.clone(), inherit("aio-rs")]));
+    // The workspace gives it every member that inherits.
+    assert!(gives_testing(&[ws("aio = { package = \"aio-rs\", path = \"../aio\", features = [\"testing\"] }")]));
+    assert!(gives_testing(&[ws("aio-rs = { version = \"0.2\", features = [\"kit\", \"testing\"] }")]));
+    // A dotted table and a target's dev-dependencies are dependencies too.
+    assert!(gives_testing(&[
+        "[dev-dependencies.aio]\npackage = \"aio-rs\"\npath = \"../aio\"\nfeatures = [\"testing\"]\n"
+    ]));
+    assert!(gives_testing(&[format!(
+        "{renamed}[target.'cfg(unix)'.dev-dependencies]\naio = {{ workspace = true, features = [\"testing\"] }}\n"
+    )]));
+    // Not aio-rs's: another crate's `aio` key, no testing, or no such workspace dep.
+    assert!(!gives_testing(&[renamed.clone(), member("aio = { workspace = true }")]));
+    assert!(!gives_testing(&[ws("aio = { path = \"../other\", features = [\"testing\"] }"), inherit("aio")]));
+    assert!(!gives_testing(&[plain, inherit("aio")]), "`aio` is not the workspace's aio-rs");
+    assert!(!gives_testing(&[inherit("aio")]), "no workspace manifest seen");
+    // Through `ax lint`: the error goes.
+    let lib = "#[cfg(test)]\nmod tests {\n    use aio::testing::TestCells;\n}\n";
+    let r =
+        lint(project(&[("Cargo.toml", &renamed), ("app/Cargo.toml", &inherit("aio")), ("app/src/lib.rs", lib)]).path());
+    assert!(!r.issues.iter().any(|i| i.message.contains("`testing` feature")), "{:?}", r.issues);
 }
