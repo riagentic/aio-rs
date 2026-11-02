@@ -189,6 +189,19 @@ version may break things.
   after its view, two rows with one key, a missing
   `key:` or an `if let` in `rsx!` at compile time); a renderer fault
   planted in air fails `TestUi` in the Rust page and the Electron page.
+- **air phase 3: `ax dev`, the web build and Android on air**
+  (docs/design/air.md). For an app on air `ax dev` runs no dx: an `rsx!`
+  markup edit goes to the running window (`Aio.hot`) and its views are
+  built again with their state kept (~3 ms); a Rust edit is built by ax
+  as a thin patch against a first "fat" build (dioxus-cli 0.7.10's
+  builder, ported) and applied in the running process with `subsecond`
+  (~0.45 s on Linux and macOS; Windows rebuilds), views keeping their
+  hook state by place; a stylesheet edit needs no build. The shell draws
+  its windows on air with `default-features = false, features = ["air"]`
+  (desktop and Android: no Dioxus in the graph), and `aio::web::launch`
+  runs air in the browser. `scripts/android-gate --air` and
+  `scripts/dx-metrics --live` (the live edits on Dioxus and on air,
+  side by side) check and time them.
 - **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
   makes each async method read the state as it was when it was called
   and commit what it wrote, ran and scheduled at its end as one event, or
@@ -410,6 +423,11 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- aio-rs-shell's Dioxus page is its default feature `dioxus` (aio-rs
+  `kit` with it); `default-features = false, features = ["air"]` is the
+  shell on air. aio-rs's Dioxus page crates are its feature `liveview`
+  (`web` is renderer-neutral). `use_css!` re-reads its sheets every 20 ms
+  in a dev build (was 100 ms), and follows them from a hole on air.
 - `ax create`'s template follows the OS's light or dark (`[ui] scheme`,
   `use_css!(aio::ui::scheme(), …)`) instead of a fixed light page;
   `page_css` and `use_css!` take a `Scheme` or, as before, a `bool`.

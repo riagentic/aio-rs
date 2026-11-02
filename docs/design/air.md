@@ -328,30 +328,36 @@ return or its failure, JSON).
 
 ## Hot reload and hot patch
 
+Done in phase 3 (below); `ax dev` runs no `dx` for an app on air.
+
 - **Templates are data.** A literal-only edit (text, class, a static
-  attribute, static structure) changes only a template's bytes. Plan:
-  air-macro's parser becomes a library (`air-rsx`) that `ax dev` runs on
-  the saved file; if the holes are the same, the new bytes go to the app
-  over the dev door, keyed by `file:line:col`, `tpl()` takes the override,
-  and the views are remounted. Nothing compiles.
-- **Rust edits: subsecond.** The standalone `subsecond` crate already
-  patches cell methods in 0.1.0 (`aio/src/store.rs:783` `HotFn`), built by
-  `dx` as today. A view is not re-run after a patch (it runs once), so on
-  `subsecond::register_handler` air disposes the root and mounts
-  `HotFn::current(app)` again: cells keep their state, view-local signals
-  start again (Dioxus keeps hook state across a patch; that is lost).
-  The remount costs a first mount: 1.4 ms for the 1000-row list, 8.3 ms for 10 000 rows (release, the
-  cell's fill included; `hold`'s `air mount` line).
-- Not measured in the spike (e): building a patch needs `dx`'s linker
-  interception, which `ax dev` drives for Dioxus's crates today; wiring it
-  to air is plan step 4.
+  attribute, static structure) changes only a template's bytes. `ax dev`
+  compiles air-macro's parser in (`crates/aio-cli/src/reload.rs`), reads
+  each `rsx!` call of the saved file against the source the app was built
+  from, and when the code outside the calls and every call's holes are
+  the same, sends the edited templates over the `ui` door (`Aio.hot`),
+  keyed by the call's `file:line:col` and the template's index.
+  `tpl()` takes the override (dev builds only), and the root builds its
+  views again with their state kept. Nothing compiles.
+- **Rust edits: a jump-table patch.** `ax dev` builds the app once "fat"
+  (`aio-shell/dev`, every symbol kept) and each edit as a thin patch
+  (`crates/aio-cli/src/hotpatch.rs`, a port of dioxus-cli 0.7.10's
+  builder: rustc for the edited crate, a stub of the running binary's
+  symbols at its ASLR base, the link). The app applies it with
+  `subsecond` (`Aio.aslr`, `Aio.patch`), then its root builds its views
+  again. Hooks (`signal`, `memo`, `once`, …) hand back what they made, by
+  the view's place among the mounted components (name, key or turn among
+  siblings) and by call order; a view whose hooks changed starts afresh
+  from the first that differs. Named globals (`client!`'s) are keyed by
+  name, so the patch's code finds the running state. Linux and macOS;
+  on Windows an edit rebuilds and restarts.
 
 ## Web (wasm) and Android
 
 - **Web**: air has no dependency and no threads; `page.js` takes a frame
   as a `Uint8Array`, so the wasm build calls `__airApply` with a view of
-  its own memory per flush (no copy, no socket) and events call a wasm
-  export instead of `__aioWire.send`. One interpreter for both. The web
+  its own memory per flush (no copy, no socket) and events reach it
+  through `__aioWire.send`, a wasm closure. One interpreter for both. The web
   build's server-rendered first paint (`aio-shell/web`, `dioxus-ssr`) is
   dropped (out of scope: SSR).
 - **Android**: unchanged in shape: the Rust runtime in the app process,
@@ -607,12 +613,17 @@ as on air.
   `reset_field`, `use_field_array`, `use_on_change`, `Defer`'s `load`,
   `Transition` without a box, `Motion::of`, `aio::ui::css`. The kit on
   Dioxus keeps 0.1's text labels and boxes until step 5 removes it.
-- **Hot patch**: Dioxus keeps a view's local state across a patch; air
-  remounts (cells keep theirs).
-- **What stays on Dioxus inside the framework** until step 5: the kit,
-  `web::launch`, the server's first paint, the shell's liveview socket and
-  `ax dev`'s `dx`. With feature `air`, the page (`aio::page::body`) and
-  `TestUi` are air's.
+- **Hot patch**: both keep a view's local state across a patch; air
+  keeps it by the view's place (a view moved to another place, or one
+  whose hooks changed, starts afresh). What the page held (focus, scroll,
+  a field's selection) is drawn anew on air. No hot-patch on Windows yet
+  on air (Dioxus's dx has it).
+- **What stays on Dioxus inside the framework** until step 5: the
+  server's first paint (dropped on air: no SSR) and, for an app on
+  Dioxus, the shell's liveview socket and `ax dev`'s `dx`. With feature
+  `air`, the page (`aio::page::body`), `TestUi`, the kit, the router,
+  `web::launch`, the shell's windows (desktop and Android) and `ax dev`'s
+  reload and patch are air's.
 
 ## Gates before Dioxus goes (each failing first)
 
@@ -656,10 +667,10 @@ as on air.
 
 | covered by Dioxus | air's replacement | effort |
 |---|---|---|
-| `rsx!` template hot reload (dx devtools) | `air-rsx` parser in `ax dev`, template override by location, remount | 1 week |
-| subsecond hot-patch of views | `register_handler` → remount `HotFn::current(app)`; `dx` still builds the patch | 3 days |
-| web target (`dioxus-web`) | `page.js` in-process, `__airApply` on wasm memory, events to a wasm export | 1 week |
-| Android | the same page body over the existing bridge | 2 days |
+| `rsx!` template hot reload (dx devtools) | done (phase 3): air-macro's parser in `ax dev`, template override by location, views built again with their state | 1 week |
+| subsecond hot-patch of views | done (phase 3): `ax dev` builds the patch itself (dx's builder ported), `subsecond` applies it, views built again with their state | 3 days |
+| web target (`dioxus-web`) | done (phase 3): `page.js` in the page, `__airApply` on a view of wasm memory, events through `__aioWire` | 1 week |
+| Android | done (phase 3): the shell's window on air over the existing bridge | 2 days |
 | the kit (22 modules, 5.4 k lines) | port to the facade's names, then to air: slots as `View`, handlers as `FnMut`, `onmounted` as page calls | 3–4 weeks |
 | `TestUi` (1.4 k lines on the VirtualDom) | the Rust page (prototype) + the Electron page (`page.js` instead of Dioxus's glue), same queries | 1–2 weeks |
 | liveview interpreter, events, focus, file inputs | `page.js` + aio's page scripts re-pointed (focus, typing, keys, file inputs patch Dioxus's interpreter today) | 1 week |
@@ -717,6 +728,51 @@ a view, a text or a thunk: `IntoView`, `IntoViewValue`), still 0.43x;
 the aio cell; at 10 000 rows the fill is 1.6–1.7 ms, the rest about 1 µs a
 row for the views (the spike drew fixed rows without a cell).
 
+## Phase 3: `ax dev`, the web build and Android on air
+
+- **Template hot reload** (`crates/aio-cli/src/reload.rs`,
+  `air::hot`): above. `rsx!` stamps each template with its call's place
+  (`proc_macro::Span::call_site()`, `file`, line, column) and its
+  pre-order index; a release build keeps no file name and takes no markup.
+  The markup goes out at the first save event; a file still being written
+  reads as code and waits for the burst to settle.
+- **Hot patch** (`crates/aio-cli/src/hotpatch.rs`): above. `ax dev`
+  builds the fat binary with `aio-shell/dev`, so the Dioxus path's `dx`
+  is not needed for an app on air (`ax dev` tells them apart by the
+  launcher's `aio-rs-shell` features).
+- **The shell on air**: `aio-shell` with `default-features = false,
+  features = ["air"]` draws its windows with air (`views.rs`: a window
+  thread runs its root and pumps the page's frames), on desktop and in the
+  Android APK; `ci.sh` builds and tests that lane and fails on a Dioxus
+  crate in its graph.
+- **Web**: `aio::web::launch` on air loads `page.js` as a blob script,
+  defines `__aioWire` for its events and hands each flush to
+  `__airApply` as a view of wasm memory. The web build's test
+  (`ax`'s `browser_air`) clicks, types, flips a keyed list and reloads a
+  persisted cell in headless Chromium, with no Dioxus in the page's graph.
+- **Android**: `scripts/android-gate --air`, on a throwaway AVD:
+  the template on air starts, upgrades in place and keeps its data.
+- **Live CSS**: `use_css!` subscribes from a hole (no hooks there) and
+  polls its sheets every 20 ms; `ax dev` builds nothing for a stylesheet.
+
+### Measured (`scripts/dx-metrics --live`)
+
+Save to screen, the template app under `ax dev` with a headless window,
+the same machine (Ryzen 9 9950X, Linux x86_64, `taskset -c 0-11`, other
+work beside it), two runs each, Dioxus with dx 0.7.10:
+
+| edit | Dioxus (dx) | air (`ax dev`) |
+|---|---|---|
+| `live_css_s`: a stylesheet line | 0.009, 0.017 s | 0.022, 0.024 s |
+| `live_rsx_s`: an `rsx!` text | 0.421, 0.166 s | 0.003, 0.004 s |
+| `live_logic_s`: a Rust line in the view (hot-patch) | 0.545, 0.525 s | 0.453, 0.453 s |
+
+The trend's Dioxus rows on that machine: css 0.019–0.088 s, rsx
+0.005–1.062 s, logic 0.418–2.257 s. A patch's own time on air: rustc
+~250 ms, stub ~15 ms, link ~22 ms; the rest is the settle (100 ms quiet)
+and the redraw. The CSS edit is dx's own asset push on Dioxus and the
+app's 20 ms poll on air.
+
 ## Plan for 0.2.0
 
 In this order; each step ends green before the next starts. Dioxus stays
@@ -727,7 +783,7 @@ on the dev branch as the fallback until step 5.
 | 0 | facade (done) | `aio::ui::prelude` on Dioxus; template, docs, kit, `ax ui`, `TestUi`, `aio_shell::run`, `web::launch` take the facade's names; the template's `dioxus` dependency gone | no `dioxus` in the template, the kit, `ax ui`, the tests or the guide (`ci.sh`, `ax lint`); 0.1.0 apps move with the migration guide's table | 1 week |
 | 1 | air core (done but portals, `Defer`, the template app) | from the spike: holes, lists (live row ranges), branches, context over owners, error boundary, refs and page calls (`onmounted`), portals, `Defer`; `TestUi` on the Rust page and the Electron page; gates 1–3 written failing, then green | `cargo test -p aio-rs-air`, the gate tests, `ax test` of the template app on air | 2–3 weeks |
 | 2 | the kit on air (2a done: the kit, theming, forms; 2b: the router) | the 22 kit modules behind the facade, on air (dev branch: the facade's renderer chosen by a dev-branch feature, never in a release) | the kit's tests and docs examples on air | 3–4 weeks |
-| 3 | tooling | `ax dev`: template hot reload (`air-rsx`), subsecond remount; web (wasm, in-process `page.js`); Android page body | `ax dev` edit loops, `ax build --web`, an APK smoke | 2–3 weeks |
+| 3 | tooling (done) | `ax dev`: template hot reload (`air-rsx`), subsecond remount; web (wasm, in-process `page.js`); Android page body | `ax dev` edit loops, `ax build --web`, an APK smoke | 2–3 weeks |
 | 4 | gates in CI | no Dioxus in the packaged graph or binary; size and build/edit numbers of the packaged app by a script in the repo | CI fails on a planted Dioxus dependency | 3 days |
 | 5 | delete Dioxus | out of the default graph and `deps.toml`; one real app rebuilt and smoked on Linux, Windows, macOS | the smoke on three OSes; the numbers in `docs/performance.md` | 1 week |
 
