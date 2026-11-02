@@ -649,6 +649,11 @@ version may break things.
 
 ### Fixed
 
+- The splash's `text` takes aio's full set on every splash (Electron's,
+  the OS's, the web's and Android's): `{title}`, `{version}` (the app's,
+  what `--version` prints), and `{got}`, `{total}`, `{pct}` as `0`, `?`,
+  `?`; Electron's, the web's and Android's filled only `{title}`. A
+  `download_text`'s `{version}` is the app's too, as aio's, not Electron's.
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled

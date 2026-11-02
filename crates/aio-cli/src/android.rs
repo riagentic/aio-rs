@@ -260,7 +260,7 @@ fn system_theme(scheme: ColorScheme) -> &'static str {
 
 /// An APK's splash files (`[build.splash]`, aio's `_splashFiles`): its image and
 /// what the activity reads of it (`assets/aio-splash.png`, `.json`: its
-/// minimum and cap, its text with `{title}` filled, its colours by mode and
+/// minimum and cap, its text filled (`aio_shell::splash::text`), its colours by mode and
 /// the mode `scheme` fixes), and the theme whose window background is the
 /// splash's, per mode where the mode follows the phone: the starting
 /// window is already its colour.
@@ -268,6 +268,7 @@ pub fn splash_files(
     s: &Splash,
     png: &[u8],
     title: &str,
+    version: &str,
     colors: &[[String; 4]; 2],
     scheme: ColorScheme,
 ) -> Vec<(String, Vec<u8>)> {
@@ -280,7 +281,7 @@ pub fn splash_files(
         "min": s.min_ms,
         "max": s.max_ms,
         "scale": if s.retina() { 2 } else { 1 },
-        "text": s.text.as_ref().map(|t| t.replace("{title}", title)),
+        "text": s.text.as_deref().map(|t| aio_shell::splash::text(t, title, version)),
         "font": s.font,
         "size": s.font_size.unwrap_or(14),
         "bold": s.bold,
@@ -856,7 +857,7 @@ fn parts(app: &App, full: &aio::config::Config, app_dir: &Path) -> Result<(Vec<u
             let hue = full.hue();
             let bg = s.background.as_ref().map(|[l, d]| [l.as_str(), d.as_str()]);
             let colors = aio_shell::splash::colors(hue, bg);
-            splash_files(s, &png, crate::build::label(app), &colors, cfg.color_scheme)
+            splash_files(s, &png, crate::build::label(app), &app.version, &colors, cfg.color_scheme)
         }
         None => vec![],
     };
@@ -1289,7 +1290,7 @@ mod tests {
         let app = App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None };
         let s = Splash {
             image: "assets/splash@2x.png".into(),
-            text: Some("Starting {title}".into()),
+            text: Some("Starting {title} {version}".into()),
             min_ms: 700,
             max_ms: 9000,
             background: None,
@@ -1304,11 +1305,11 @@ mod tests {
             ["#fff", "#111", "#00f", "#ccc"].map(String::from),
             ["#0e1015", "#eceef3", "#00f", "#333"].map(String::from),
         ];
-        let files = splash_files(&s, b"PNG", "Notes", &colors, ColorScheme::System);
+        let files = splash_files(&s, b"PNG", "Notes", "1.0.0", &colors, ColorScheme::System);
         let get =
             |p: &str| files.iter().find(|(f, _)| f.ends_with(p)).map(|(_, b)| String::from_utf8_lossy(b).into_owned());
         let json: aio::serde_json::Value = aio::serde_json::from_str(&get("aio-splash.json").unwrap()).unwrap();
-        assert_eq!(json["text"], "Starting Notes");
+        assert_eq!(json["text"], "Starting Notes 1.0.0", "{{version}}: the app's");
         assert_eq!(
             (json["min"].as_u64(), json["max"].as_u64(), json["scale"].as_u64()),
             (Some(700), Some(9000), Some(2))
@@ -1324,7 +1325,7 @@ mod tests {
         assert!(
             get("aio_splash_theme.xml").unwrap().contains("parent=\"@android:style/Theme.DeviceDefault.DayNight\"")
         );
-        let dark = splash_files(&s, b"PNG", "Notes", &colors, ColorScheme::Dark);
+        let dark = splash_files(&s, b"PNG", "Notes", "1.0.0", &colors, ColorScheme::Dark);
         assert!(!dark.iter().any(|(f, _)| f.contains("values-night")) && dark.iter().any(|(_, b)| b == b"PNG"));
         let all = project(&app, None, &AndroidBuild::default(), b"png", &files, &[], Apk::App).unwrap();
         let manifest = all.iter().find(|(p, _)| p.ends_with("AndroidManifest.xml")).unwrap();
@@ -1682,7 +1683,7 @@ mod tests {
         };
         let colors =
             [["#fff", "#111", "#00f", "#ccc"].map(String::from), ["#000", "#eee", "#00f", "#333"].map(String::from)];
-        let files = splash_files(&s, b"PNG", "Notes", &colors, ColorScheme::System);
+        let files = splash_files(&s, b"PNG", "Notes", "1.0.0", &colors, ColorScheme::System);
         let json: aio::serde_json::Value =
             aio::serde_json::from_slice(&files.iter().find(|(p, _)| p.ends_with(".json")).unwrap().1).unwrap();
         assert_eq!(
@@ -1693,6 +1694,7 @@ mod tests {
             &Splash { font: None, font_size: None, bold: false, fade_ms: None, ..s },
             b"PNG",
             "N",
+            "1.0.0",
             &colors,
             ColorScheme::System,
         );

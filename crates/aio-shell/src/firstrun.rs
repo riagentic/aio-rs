@@ -177,12 +177,13 @@ pub(crate) fn words() -> &'static aio::config::DownloadWindow {
 
 /// The download window's words for app `cfg` (pure): its
 /// `[build.download_window]`, the line under the bar the splash's
-/// `download_text` when the splash draws the download.
-pub(crate) fn words_of(cfg: &aio::config::Config) -> aio::config::DownloadWindow {
+/// `download_text` when the splash draws the download, its `{version}`
+/// the app's (aio's `splashWithVersion`; the window's own is Electron's).
+pub(crate) fn words_of(cfg: &aio::config::Config, version: &str) -> aio::config::DownloadWindow {
     let mut w = cfg.build.download_window.clone();
     let splash = cfg.build.splash.as_ref().filter(|s| s.show != aio::config::SplashShow::Never);
-    if let Some(t) = splash.and_then(|s| s.download_text.clone()) {
-        w.text = Some(t);
+    if let Some(t) = splash.and_then(|s| s.download_text.as_deref()) {
+        w.text = Some(t.replace("{version}", version));
     }
     w
 }
@@ -1223,9 +1224,15 @@ mod tests {
     fn the_splash_s_download_text_is_the_download_window_s() {
         let parse = |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"n\"\n{t}")).unwrap();
         let own = "[build.splash]\nimage = \"s.png\"\ndownload_text = \"{pct}%\"";
-        assert_eq!(words_of(&parse(own)).text.as_deref(), Some("{pct}%"));
+        assert_eq!(words_of(&parse(own), "2.0.0").text.as_deref(), Some("{pct}%"));
+        let v = "[build.splash]\nimage = \"s.png\"\ndownload_text = \"{title} {version}\"";
+        assert_eq!(words_of(&parse(v), "2.0.0").text.as_deref(), Some("{title} 2.0.0"), "the app's version");
         let never = format!("{own}\nshow = \"never\"\n[build.download_window]\ntext = \"t\"");
-        assert_eq!(words_of(&parse(&never)).text.as_deref(), Some("t"), "no splash in the download: the window's own");
+        assert_eq!(
+            words_of(&parse(&never), "2.0.0").text.as_deref(),
+            Some("t"),
+            "no splash in the download: the window's own"
+        );
         let w = aio::config::DownloadWindow { text: Some("{pct}% of {total} MB".into()), ..Default::default() };
         assert_eq!(download_detail(&w, "N", "1", 25_000_000, Some(100_000_000)), "25% of 100 MB");
     }

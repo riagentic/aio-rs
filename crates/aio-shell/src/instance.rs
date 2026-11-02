@@ -192,7 +192,7 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
             _ = SHOWN.set(cfg.app.ui);
             _ = LOOK.set((cfg.hue(), cfg.build.splash.clone()));
             _ = ASSETS.set(cfg.build.asset_files);
-            _ = crate::firstrun::WORDS.set(crate::firstrun::words_of(cfg));
+            _ = crate::firstrun::WORDS.set(crate::firstrun::words_of(cfg, version));
             if let crate::update::Next::Exit = crate::update::on_start(cfg, version, &d)? {
                 aio::health::stop();
                 aio::log::finish();
