@@ -25,6 +25,8 @@ cargo fmt --all --check
 scripts/deps-check
 scripts/slim-metrics --check
 scripts/dx-metrics --self-test
+# An app on air ships no Dioxus: each of air-ship's checks red on a planted one.
+scripts/air-ship --self-test
 # The guide (docs/): links resolve, each page with Rust is a doctest (run by
 # the workspace tests below), the verb list is whole, the wording public.
 scripts/docs-check
@@ -129,9 +131,23 @@ fi
 # its limit fails, naming both (scripts/dx-metrics --trend). Only this
 # machine's rows count; where it has none (GitHub CI), AIO_DX_BASE names the
 # commit whose sizes are measured here too, AIO_DX_ROWS a folder keeping rows.
+# The same template on air too: its packages (release binary, .tar.gz,
+# AppImage, web build) hold no Dioxus (scripts/air-ship, shown failing on a
+# planted dependency first), their sizes and its edit times gated alike.
+apk_skip=""
 if on dx; then
 scripts/dx-metrics --check ${AIO_DX_BASE:+--base "$AIO_DX_BASE"} ${AIO_DX_ROWS:+--rows "$AIO_DX_ROWS"}
+# Its APKs where ax builds them here (the NDK, Rust's three Android targets);
+# GitHub CI's air-apk job runs this alone.
+if [ -n "$ndk" ] && [ "$(rustup target list --installed | grep -c -x -e aarch64-linux-android -e armv7-linux-androideabi -e x86_64-linux-android)" = 3 ]; then
+  scripts/dx-metrics --check --apk ${AIO_DX_BASE:+--base "$AIO_DX_BASE"} ${AIO_DX_ROWS:+--rows "$AIO_DX_ROWS"}
+else
+  apk_skip="ci: the air template's APKs SKIPPED: no NDK or no Rust Android targets (rustup target add armv7-linux-androideabi x86_64-linux-android)"
+  echo "$apk_skip" >&2
 fi
-if [ -n "$web_skip" ]; then
-  echo "$web_skip" >&2
 fi
+for skip in "$web_skip" "$apk_skip"; do
+  if [ -n "$skip" ]; then
+    echo "$skip" >&2
+  fi
+done
