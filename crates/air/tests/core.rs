@@ -437,4 +437,34 @@ fn style_attributes_are_css_properties_in_the_rust_page_too() {
     assert_eq!(p.attr("box", "style").as_deref(), Some("display: flex; min-width: 10px"));
     p.click("narrow");
     assert_eq!(p.attr("box", "style").as_deref(), Some("display: flex"));
+    // A string after the properties keeps the ones it doesn't set, as the page does.
+    let p = TestPage::mount(
+        || rsx! { div { "data-t": "over", position: "fixed", color: "blue", style: "inset: 0; color: red" } },
+    );
+    assert_eq!(p.attr("over", "style").as_deref(), Some("inset: 0; color: red; position: fixed"));
+}
+
+#[test]
+fn a_task_spawned_forever_in_an_app_ends_with_its_root() {
+    struct Ends(Rc<Cell<bool>>);
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            self.0.set(true)
+        }
+    }
+    let ended = Rc::new(Cell::new(false));
+    let e = ended.clone();
+    let page = TestPage::mount(move || {
+        let held = Ends(e.clone());
+        spawn_forever(async move {
+            let _held = held;
+            std::future::pending::<()>().await
+        });
+        rsx! { p { "app" } }
+    });
+    let live = live_tasks();
+    assert!(!ended.get(), "it runs while the app does");
+    drop(page);
+    assert!(ended.get(), "the app's end ended it (a next app on the thread never polls it)");
+    assert_eq!(live_tasks(), live - 1);
 }

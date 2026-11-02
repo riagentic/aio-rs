@@ -147,8 +147,16 @@
       return n
     }
     const range = () => span(node(), node())
-    // `style:<property>`: a CSS property (rsx!'s style attributes), else an attribute.
-    const attr = (n, k, v) => (k.startsWith('style:') ? n.style.setProperty(k.slice(6), v) : n.setAttribute(k, v))
+    // `style:<property>`: a CSS property (rsx!'s style attributes), else an
+    // attribute. A `style` string keeps the properties it doesn't set, as
+    // Dioxus did: `position: "fixed", style: "inset: 0"` is both.
+    const attr = (n, k, v) => {
+      if (k.startsWith('style:')) return n.style.setProperty(k.slice(6), v)
+      if (k !== 'style') return n.setAttribute(k, v)
+      const s = n.style, had = [...s].map((p) => [p, s.getPropertyValue(p), s.getPropertyPriority(p)])
+      n.setAttribute(k, v)
+      for (const [p, x, pr] of had) if (!s.getPropertyValue(p)) s.setProperty(p, x, pr)
+    }
     const build = (marks, path, svg) => {
       const k = u8()
       let n, mark = path.length === 1

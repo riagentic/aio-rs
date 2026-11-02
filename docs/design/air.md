@@ -257,7 +257,8 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   (`style.setProperty`), in order with the element's other attributes, as
   Dioxus did; an element's own attribute of that name stays one
   (`img { width }`, `canvas { height }`, `input { size }`), and so do SVG's
-  and a quoted name (`"display": "x"`).
+  and a quoted name (`"display": "x"`). A `style` string keeps the
+  properties set before it that it doesn't set, as Dioxus did.
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).
@@ -466,7 +467,8 @@ Feature `air` of aio-rs (`air` alone: 50 crates in the graph, no
   `selector`; owners with context (`provide`, `provide_root`, `context`,
   `try_context`); callbacks (`Callback`, `EventHandler`, `callback`);
   `Global`, `GlobalMemo` per app instance; tasks (`spawn`, `spawn_forever`,
-  `task`) on an executor of the thread's own, woken by the host;
+  `task`) on an executor of the thread's own, woken by the host (a
+  `spawn_forever` task ends with its app's root, as its globals do);
   `resource` (`get`, `pending`, `restart`, `suspend`); `ErrorBoundary`,
   `Suspense`, `Fragment`; keyed lists; typed, bubbling events;
   `onmounted`; page scripts (`eval`); `Root` (one per thread) and

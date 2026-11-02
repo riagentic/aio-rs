@@ -644,7 +644,13 @@ version may break things.
   a hole's content goes), so a test reads the markup a person sees.
 - air: Dioxus's style attributes (`display: "flex"`, `align_items`,
   `min_width`, …, dioxus-html's list) set their CSS property on an HTML
-  element, as on Dioxus; they were attributes the page ignored.
+  element, as on Dioxus; they were attributes the page ignored. A `style`
+  string keeps the properties set before it that it doesn't set
+  (`position: "fixed", style: "inset: 0"` is both), as on Dioxus; it
+  replaced them.
+- air: a task spawned with `spawn_forever` in an app ends with its root (a
+  test's next mount on the thread polled it, on a dead tokio runtime: a
+  panic); `follow_sheets` starts its watcher again for the next root.
 - air: a view's `on_cleanup` reads its own signals and memos (they were
   freed first: a panic in a destructor, the process aborted).
 - air: SVG drawn by a component, a `for` row or an `if` branch (a template

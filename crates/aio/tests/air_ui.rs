@@ -388,9 +388,17 @@ fn style_attributes_set_css_properties() {
             img { "data-t": "img", width: "3" }
             svg { "data-t": "svg", width: "4" }
             span { "data-t": "quoted", "display": "x" }
+            // A string after the properties keeps them (the viewer's backdrop).
+            div { "data-t": "over", position: "fixed", color: "blue", style: "inset: 0; color: red; pointer-events: none" }
         }
     }
     let mut ui = TestUi::new(app);
+    assert_eq!(
+        ui.eval(
+            "(s => s.position + ' ' + s.top + ' ' + s.color)(getComputedStyle(document.querySelector('[data-t=over]')))"
+        ),
+        "fixed 0px rgb(255, 0, 0)"
+    );
     let read = "[...document.querySelectorAll('[data-t=box], [data-t=img], [data-t=svg], [data-t=quoted]')].map(e => (e.getAttribute('style') || '') + '|' + (e.getAttribute('width') || '') + '|' + (e.getAttribute('display') || '')).join(' / ')";
     assert_eq!(ui.eval(read), "color: red; display: flex; gap: 2px; min-width: 10px;|| / |3| / |4| / ||x");
     ui.click("narrow");

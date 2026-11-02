@@ -3,7 +3,9 @@
 //! a future loads). No threads, no dependency: the host runs the ready
 //! tasks ([`run_tasks`]) when it is woken ([`on_wake`]); a task's timers
 //! are the host's (tokio's, under aio-rs), polled in its context.
-use crate::reactive::{Kind, Owner, Signal, cleanup, current_owner, effect_of, hook, untrack, with_owner};
+use crate::reactive::{
+    Kind, Owner, Signal, cleanup, current_owner, current_root, effect_of, hook, untrack, with_owner,
+};
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
@@ -16,6 +18,8 @@ struct Slot {
     ver: u32,
     fut: Option<Fut>,
     owner: Option<Owner>,
+    /// The root current when it was made: an ownerless task ends with it.
+    root: u32,
     /// Being polled (its future is out of the slot).
     polling: bool,
     /// Cancelled while polled: dropped when it comes back.
@@ -91,8 +95,9 @@ fn cancel(idx: u32, ver: u32) {
 }
 
 fn add(fut: Fut, owner: Option<Owner>) -> Task {
+    let root = current_root();
     let (idx, ver, shared) = EXEC.with_borrow_mut(|x| {
-        let slot = |ver| Slot { ver, fut: Some(fut), owner, polling: false, cancelled: false };
+        let slot = |ver| Slot { ver, fut: Some(fut), owner, root, polling: false, cancelled: false };
         let idx = match x.free.pop() {
             Some(i) => {
                 let v = x.slots[i as usize].ver;
@@ -122,7 +127,8 @@ pub fn spawn(fut: impl Future<Output = ()> + 'static) -> Task {
     t
 }
 
-/// Run `fut` until it ends, whatever view ends first.
+/// Run `fut` until it ends, whatever view ends first: it ends with its
+/// app (the root current when it was spawned), or the thread outside any.
 pub fn spawn_forever(fut: impl Future<Output = ()> + 'static) -> Task {
     add(Box::pin(fut), None)
 }
@@ -206,6 +212,18 @@ fn poll(idx: u32, ver: u32, shared: &Arc<Shared>, inline: bool) -> bool {
     };
     back.fut = Some(fut);
     true
+}
+
+/// A root ends: so do the ownerless tasks spawned in it (the views' end
+/// cancelled the others), as their app is gone.
+pub(crate) fn end_root(root: u32) {
+    let gone: Vec<(u32, u32)> = EXEC.with_borrow(|x| {
+        let live = |s: &Slot| s.owner.is_none() && s.root == root && (s.fut.is_some() || s.polling);
+        x.slots.iter().zip(0..).filter(|(s, _)| live(s)).map(|(s, i)| (i, s.ver)).collect()
+    });
+    for (idx, ver) in gone {
+        cancel(idx, ver)
+    }
 }
 
 /// Tasks not ended on this thread (a leak shows here).

@@ -1342,6 +1342,7 @@ impl Drop for Root {
             self.owner.dispose();
             dom(|d| d.root = None);
         });
+        crate::task::end_root(self.id);
     }
 }
 

@@ -443,19 +443,30 @@ fn set_attr(a: &mut Vec<(String, String)>, k: String, v: String) {
     if let Some(p) = k.strip_prefix("style:") {
         return set_style(a, p, &v);
     }
+    // A `style` string keeps the properties it doesn't set (as the page does).
+    let v = match a.iter().find(|(x, _)| k == "style" && *x == "style") {
+        Some((_, old)) => {
+            let set: Vec<&str> = decls(&v).filter_map(|d| d.split(':').next()).map(str::trim).collect();
+            let kept = decls(old).filter(|d| !set.contains(&d.split(':').next().unwrap_or("").trim()));
+            decls(&v).chain(kept).collect::<Vec<_>>().join("; ")
+        }
+        None => v,
+    };
     match a.iter_mut().find(|(x, _)| *x == k) {
         Some(x) => x.1 = v,
         None => a.push((k, v)),
     }
 }
 
+/// A `style` string's declarations (`k: v`), trimmed.
+fn decls(s: &str) -> impl Iterator<Item = &str> {
+    s.split(';').map(str::trim).filter(|d| !d.is_empty())
+}
+
 /// CSS property `k` of the `style` attribute set to `v` (empty: removed), as `style.setProperty`.
 fn set_style(a: &mut Vec<(String, String)>, k: &str, v: &str) {
-    let mut style: Vec<String> = a
-        .iter()
-        .find(|(x, _)| x == "style")
-        .map(|(_, s)| s.split(';').filter(|d| !d.trim().is_empty()).map(|d| d.trim().to_owned()).collect())
-        .unwrap_or_default();
+    let mut style: Vec<String> =
+        a.iter().find(|(x, _)| x == "style").map(|(_, s)| decls(s).map(str::to_owned).collect()).unwrap_or_default();
     style.retain(|d| d.split(':').next().map(str::trim) != Some(k));
     if !v.is_empty() {
         style.push(format!("{k}: {v}"));
