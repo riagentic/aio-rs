@@ -687,6 +687,25 @@ pub fn child(at: u32, f: Box<dyn Fn() -> Child>) {
     });
 }
 
+/// Text as a view: `f()` in one text node, re-written when what it reads
+/// changes (a label prop given a string or a format string).
+pub fn text_view(f: impl Fn() -> String + 'static) -> View {
+    let f: Rc<dyn Fn() -> String> = Rc::new(f);
+    Ok(Tree::new(move || {
+        let (s, live) = crate::reactive::reads(|| f());
+        let id = dom(|d| {
+            let id = d.alloc(1);
+            d.op(op::TEXT).u32(id).str(&s);
+            id
+        });
+        if live {
+            let f = f.clone();
+            text(id, Box::new(move || f()));
+        }
+        Range(Some((id, id)))
+    }))
+}
+
 /// `view` with one style property of its first element (`"animation"`)
 /// following `f()` (`None`: none): a component that animates or places
 /// what it is given without a box of its own (aio's `Transition`).

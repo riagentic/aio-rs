@@ -29,7 +29,8 @@ fn top_close() -> Option<Option<EventHandler<()>>> {
 pub fn Modal(
     open: Prop<bool>,
     onclose: Option<EventHandler<()>>,
-    #[props(into)] title: Prop<Option<String>>,
+    /// Text or any view; it names the dialog.
+    title: Option<View>,
     footer: Option<View>,
     #[props(default = true)] dismissable: Prop<bool>,
     #[props(default, into)] class: Prop<String>,
@@ -86,7 +87,7 @@ pub fn Modal(
                     class: "aio-modal",
                     role: "dialog",
                     "aria-modal": "true",
-                    "aria-labelledby": title.with(Option::is_some).then(|| format!("{id}-title")),
+                    "aria-labelledby": title.is_some().then(|| format!("{id}-title")),
                     tabindex: "-1",
                     onmounted: move |e| async move {
                         *dialog.write() = Some(e.data());
@@ -94,8 +95,8 @@ pub fn Modal(
                     },
                     // A click in the dialog is not a click on the backdrop.
                     onclick: |e| e.stop_propagation(),
-                    if title.with(Option::is_some) {
-                        div { class: "aio-modal__title", id: "{id}-title", {title.get()} }
+                    if title.is_some() {
+                        div { class: "aio-modal__title", id: "{id}-title", {title.clone()} }
                     }
                     div { class: "aio-modal__body", {children.clone()} }
                     if footer.is_some() {
@@ -115,10 +116,11 @@ pub fn Confirm(
     open: Prop<bool>,
     onconfirm: EventHandler<()>,
     oncancel: EventHandler<()>,
-    #[props(into)] title: Prop<Option<String>>,
-    #[props(into)] message: Prop<Option<String>>,
-    #[props(default = String::from("Confirm"), into)] confirm_label: Prop<String>,
-    #[props(default = String::from("Cancel"), into)] cancel_label: Prop<String>,
+    /// Text or any view, as are the message and the labels.
+    title: Option<View>,
+    message: Option<View>,
+    #[props(default = ::air::text_view(|| "Confirm".into()))] confirm_label: View,
+    #[props(default = ::air::text_view(|| "Cancel".into()))] cancel_label: View,
     /// The confirm button is destructive.
     #[props(default)]
     danger: Prop<bool>,
@@ -127,16 +129,16 @@ pub fn Confirm(
     rsx! {
         Modal { open, onclose: oncancel, title, class,
             footer: rsx! {
-                Button { variant: Variant::Ghost, "data-t": "confirmCancel", onclick: move |_| oncancel.call(()), "{cancel_label}" }
+                Button { variant: Variant::Ghost, "data-t": "confirmCancel", onclick: move |_| oncancel.call(()), {cancel_label} }
                 Button {
                     variant: if danger.get() { Variant::Danger } else { Variant::Primary },
                     "data-t": "confirmOk",
                     onclick: move |_| onconfirm.call(()),
-                    "{confirm_label}"
+                    {confirm_label}
                 }
             },
-            if message.with(Option::is_some) {
-                div { class: "aio-confirm__msg", {message.get()} }
+            if message.is_some() {
+                div { class: "aio-confirm__msg", {message.clone()} }
             }
         }
     }
@@ -148,11 +150,12 @@ pub fn Confirm(
 /// too. Focus returns to the button when the dialog closes.
 #[component]
 pub fn ConfirmButton(
-    #[props(into)] confirm: Prop<String>,
+    /// What it asks: text or any view, as are the title and the labels.
+    confirm: View,
     onconfirm: EventHandler<()>,
-    #[props(into)] confirm_title: Prop<Option<String>>,
-    #[props(default = String::from("Confirm"), into)] confirm_label: Prop<String>,
-    #[props(default = String::from("Cancel"), into)] cancel_label: Prop<String>,
+    confirm_title: Option<View>,
+    #[props(default = ::air::text_view(|| "Confirm".into()))] confirm_label: View,
+    #[props(default = ::air::text_view(|| "Cancel".into()))] cancel_label: View,
     #[props(default)] variant: Prop<Variant>,
     #[props(default)] size: Prop<Size>,
     #[props(default)] disabled: Prop<bool>,
@@ -181,7 +184,7 @@ pub fn ConfirmButton(
         Confirm {
             open: open.get(),
             title: confirm_title,
-            message: confirm.get(),
+            message: confirm,
             confirm_label,
             cancel_label,
             danger: variant.get() == Variant::Danger,
@@ -198,7 +201,9 @@ pub fn ConfirmButton(
 #[derive(Clone, Debug, PartialEq)]
 struct Notice {
     id: u64,
-    message: String,
+    message: View,
+    /// Its text, when it is text.
+    text: Option<String>,
     tone: Tone,
 }
 
@@ -235,7 +240,7 @@ impl Toast {
 
 /// The notices showing now, oldest first (for tests and agents).
 pub fn toasts() -> Vec<String> {
-    TOASTS.read().iter().map(|n| n.message.clone()).collect()
+    TOASTS.read().iter().map(|n| n.text.clone().unwrap_or_default()).collect()
 }
 
 /// Show a notice in the [`ToastHost`] for 4 seconds. Call it on the UI thread
@@ -246,8 +251,20 @@ pub fn toast(message: impl Into<String>, tone: Tone) -> Toast {
 
 /// Show a notice for `stay` (`None`: until dismissed).
 pub fn toast_for(message: impl Into<String>, tone: Tone, stay: Option<Duration>) -> Toast {
+    let text: String = message.into();
+    let view = rsx! { "{text}" };
+    show(view, Some(text), tone, stay)
+}
+
+/// Show any view as a notice for `stay` (`None`: until dismissed): a link,
+/// a bold word, an icon.
+pub fn toast_view(message: View, tone: Tone, stay: Option<Duration>) -> Toast {
+    show(message, None, tone, stay)
+}
+
+fn show(message: View, text: Option<String>, tone: Tone, stay: Option<Duration>) -> Toast {
     let id = NEXT.with(|n| n.replace(n.get() + 1));
-    TOASTS.write().push(Notice { id, message: message.into(), tone });
+    TOASTS.write().push(Notice { id, message, text, tone });
     if let Some(d) = stay {
         let task = spawn_forever(async move {
             super::sleep(d).await;
@@ -269,7 +286,7 @@ pub fn ToastHost(
         div { class: join("aio-toasts", &class.get()), role: "status", "aria-live": "polite", ..attributes,
             for n in TOASTS.get() {
                 div { key: "{n.id}", class: "aio-toast aio-toast--{n.tone.key()}", role: (n.tone == Tone::Error).then_some("alert"),
-                    span { class: "aio-toast__msg", "{n.message}" }
+                    span { class: "aio-toast__msg", {n.message.clone()} }
                     button { r#type: "button", class: "aio-toast__x", "aria-label": "Dismiss", "data-t": "toastDismiss", onclick: move |_| Toast(n.id).dismiss(), "×" }
                 }
             }

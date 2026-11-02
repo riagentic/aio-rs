@@ -69,11 +69,11 @@ pub use air_macro::{Props, component, rsx};
 pub use dom::{
     AttrValue, Child, ErrorBoundary, ErrorBoundaryProps, Eval, Fragment, FragmentProps, IntoAttr, IntoChild,
     IntoHandler, MountedData, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, exec, is_empty,
-    longest_increasing, styled, take_edits,
+    longest_increasing, styled, take_edits, text_view,
 };
 pub use event::*;
 pub use global::{Global, GlobalMemo};
-pub use props::{Attribute, IntoOpt, IntoValue, Prop, Props};
+pub use props::{Attribute, IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, Prop, Props};
 pub use reactive::{
     Callback, EventHandler, Memo, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback, context,
     current_owner, detached, effect, in_body, in_views, memo, on_cleanup, once, parent_context, provide, provide_root,
@@ -153,7 +153,8 @@ pub mod __rt {
         WheelData,
     };
     pub use crate::props::{
-        ByMemo, ByOpt, ByProp, BySignal, ByVal, CallbackOf, GlobalAttributeNames, GlobalAttributes, IntoOpt, IntoValue,
-        NoPropsBuilder, Props, Set, builder_of, spread,
+        ByMemo, ByOpt, ByProp, BySignal, ByText, ByVal, ByView, CallbackOf, GlobalAttributeNames, GlobalAttributes,
+        IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, NoPropsBuilder, Props, Set,
+        builder_of, spread,
     };
 }

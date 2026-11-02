@@ -81,10 +81,22 @@ fn an_input_hands_over_its_value_and_says_when_it_is_invalid() {
     assert_eq!(ui.count("[data-t=name].aio-input--invalid[aria-invalid=true]"), 1, "painted and said");
 }
 
+/// What the one element `sel` is named by: its `aria-label`, else the text
+/// of what its `aria-labelledby` names, else its `<label>`'s.
+fn named(ui: &mut TestUi, sel: &str) -> String {
+    let js = format!(
+        "(() => {{ const e = [...document.querySelectorAll({sel:?})]; if (e.length !== 1) return `${{e.length}} matches`;
+           const l = e[0].getAttribute('aria-label'); if (l) return l;
+           const by = e[0].getAttribute('aria-labelledby'); if (by) return by.split(' ').map((id) => document.getElementById(id)?.textContent ?? '').join(' ').trim();
+           return (e[0].labels?.[0]?.textContent ?? '').trim(); }})()"
+    );
+    ui.eval(&js).as_str().unwrap_or_default().to_string()
+}
+
 #[test]
 fn a_checkbox_reports_its_state_and_is_named_by_its_label() {
     let mut ui = TestUi::new(buttons_and_inputs);
-    assert_eq!(ui.count("label.aio-checkbox-row input[type=checkbox][aria-label='Email me']"), 1);
+    assert_eq!(named(&mut ui, "label.aio-checkbox-row input[type=checkbox]"), "Email me");
     ui.click("agree");
     assert_eq!(ui.text("on"), "true");
     ui.click("agree");
@@ -149,10 +161,10 @@ fn a_hint_describes_and_the_callers_own_say_wins() {
 
 #[test]
 fn no_for_onto_a_group_or_a_self_labelled_checkbox() {
-    let ui = TestUi::new(fields);
+    let mut ui = TestUi::new(fields);
     assert_eq!(ui.count("label.aio-field__label[for]"), 2, "only the two text inputs are targeted");
-    assert_eq!(ui.count("[data-t=notify][aria-label='Email me']:not([id])"), 1);
-    assert_eq!(ui.count("[data-t=size][role=group][aria-label=Size]"), 1, "the field names the group");
+    assert_eq!(named(&mut ui, "[data-t=notify]:not([id])"), "Email me");
+    assert_eq!(named(&mut ui, "[data-t=size][role=group]"), "Size", "the field names the group");
 }
 
 fn choices() -> View {
@@ -180,7 +192,7 @@ fn radios_share_one_name_and_each_is_named() {
 #[test]
 fn a_switch_is_a_real_checkbox_and_reports_the_new_state() {
     let mut ui = TestUi::new(choices);
-    assert_eq!(ui.count("input[type=checkbox][role=switch][aria-label='Dark mode'].aio-switch"), 1);
+    assert_eq!(named(&mut ui, "input[type=checkbox][role=switch].aio-switch"), "Dark mode");
     ui.click("dark");
     assert_eq!(ui.text("dark-on"), "true");
 }
@@ -1953,4 +1965,31 @@ fn a_claimed_key_goes_to_its_claim_before_anything_hears_it() {
     ui.click("coach");
     ui.press("ok", "Enter");
     assert_eq!(said(), ["dialog Enter", "window Enter"], "the claim went with its component");
+}
+
+/// Labels and titles take any content on air (aio's `string | VNode`): a
+/// view where text would go, text that follows state, a toast with a link.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn labels_and_titles_take_any_content() {
+    let mut ui = TestUi::new(|| {
+        let n = signal(|| 1u32);
+        rsx! {
+            Field { label: rsx! { b { "data-t": "bold", "Name" } }, Input { "data-t": "name" } }
+            Checkbox { label: "{n} picked", "data-t": "box" }
+            Alert { title: rsx! { em { "data-t": "em", "Heads up" } }, "body" }
+            Tabs { tabs: vec![Tab::new("a", rsx! { i { "data-t": "tab-i", "Alpha" } }, rsx! { p { "A" } })] }
+            EmptyState { title: rsx! { span { "data-t": "empty-t", "Nothing" } } }
+            button { "data-t": "more", onclick: move |_| n += 1, "more" }
+            button { "data-t": "toast", onclick: move |_| _ = toast_view(rsx! { a { "data-t": "undo", href: "#", "Undo" } }, Tone::Info, None), "toast" }
+            ToastHost {}
+        }
+    });
+    assert_eq!(named(&mut ui, "[data-t=name]"), "Name", "a view labels the field's control");
+    assert!(ui.present("bold") && ui.present("em") && ui.present("tab-i") && ui.present("empty-t"));
+    assert_eq!(named(&mut ui, "[data-t=box]"), "1 picked");
+    ui.click("more");
+    assert_eq!(named(&mut ui, "[data-t=box]"), "2 picked", "text given a label follows state");
+    ui.click("toast");
+    assert!(ui.present("undo"), "a toast shows a view");
 }

@@ -197,7 +197,8 @@ pub enum Align {
 /// One column of a [`Table`]: its header and how a row shows in it.
 #[derive(Clone, PartialEq)]
 pub struct Column<R: 'static> {
-    pub header: String,
+    /// Text or any view.
+    pub header: View,
     pub cell: Callback<(R, usize), View>,
     pub align: Align,
     /// Any CSS width.
@@ -206,7 +207,7 @@ pub struct Column<R: 'static> {
 
 impl<R: 'static> Column<R> {
     /// A column of text.
-    pub fn text(header: impl Into<String>, f: impl Fn(&R) -> String + 'static) -> Self {
+    pub fn text<M>(header: impl ::air::IntoViewValue<M>, f: impl Fn(&R) -> String + 'static) -> Self {
         Self::view(header, move |r, _| {
             let s = f(r);
             rsx! { {s} }
@@ -214,8 +215,13 @@ impl<R: 'static> Column<R> {
     }
 
     /// A column of anything (`f` gets the row and its index).
-    pub fn view(header: impl Into<String>, f: impl Fn(&R, usize) -> View + 'static) -> Self {
-        Self { header: header.into(), cell: Callback::new(move |(r, i)| f(&r, i)), align: Align::Start, width: None }
+    pub fn view<M>(header: impl ::air::IntoViewValue<M>, f: impl Fn(&R, usize) -> View + 'static) -> Self {
+        Self {
+            header: header.into_view_value(),
+            cell: Callback::new(move |(r, i)| f(&r, i)),
+            align: Align::Start,
+            width: None,
+        }
     }
 
     pub fn align(self, align: Align) -> Self {
@@ -283,7 +289,7 @@ pub fn Table<R: Clone + PartialEq + 'static>(
             thead {
                 tr {
                     for (k, c) in heads {
-                        th { key: k, class: "aio-th", style: c.style(), "{c.header}" }
+                        th { key: k, class: "aio-th", style: c.style(), {c.header.clone()} }
                     }
                 }
             }

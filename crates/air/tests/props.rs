@@ -178,3 +178,33 @@ fn a_generic_component_takes_its_props_type_from_them() {
     p.click("more");
     assert_eq!(p.texts("list"), ["#1", "#2", "#3"]);
 }
+
+#[component]
+fn Labelled(label: View, title: Option<View>, children: View) -> View {
+    rsx! {
+        section {
+            h3 { "data-t": "label", {label} }
+            if title.is_some() {
+                p { "data-t": "title", {title.clone()} }
+            }
+            {children}
+        }
+    }
+}
+
+#[test]
+fn a_view_prop_takes_a_view_or_text_and_text_that_reads_state_follows_it() {
+    let mut p = TestPage::mount(|| {
+        let n = signal(|| 1u32);
+        rsx! {
+            div { "data-t": "a", Labelled { label: rsx! { b { "Bold" } }, title: "Plain" } }
+            div { "data-t": "b", Labelled { label: "{n} items", title: n } }
+            div { "data-t": "c", Labelled { label: 7, title: None } }
+            button { "data-t": "inc", onclick: move |_| n += 1, "inc" }
+        }
+    });
+    let all = |p: &TestPage| ["a", "b", "c"].map(|t| p.text(t));
+    assert_eq!(all(&p), ["BoldPlain", "1 items1", "7"], "a view, text, a number; None: no title");
+    p.click("inc");
+    assert_eq!(all(&p), ["BoldPlain", "2 items2", "7"], "a format string and a signal given as text follow");
+}

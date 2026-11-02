@@ -111,6 +111,85 @@ impl<T: Clone + 'static> IntoValue<T, ByProp> for Prop<T> {
     }
 }
 
+#[doc(hidden)]
+pub struct ByView;
+#[doc(hidden)]
+pub struct ByText;
+
+/// What a view prop (`label: View`) takes, as the closure `rsx!` makes of
+/// it: a view (`rsx! { b { "Name" } }`), or text (a string, a number, a
+/// format string), followed when it reads state.
+pub trait IntoView<M> {
+    fn into_view(self) -> crate::View;
+}
+impl<F: FnOnce() -> crate::View> IntoView<ByView> for F {
+    fn into_view(self) -> crate::View {
+        crate::untrack(self)
+    }
+}
+impl<F: Fn() -> X + 'static, X: std::fmt::Display> IntoView<ByText> for F {
+    fn into_view(self) -> crate::View {
+        crate::text_view(move || self().to_string())
+    }
+}
+
+/// What an optional view prop (`title: Option<View>`) takes: what a view
+/// prop does, or an `Option<View>` (`None`: none).
+pub trait IntoOptView<M> {
+    fn into_opt_view(self) -> Option<crate::View>;
+}
+impl<F: FnOnce() -> crate::View> IntoOptView<ByView> for F {
+    fn into_opt_view(self) -> Option<crate::View> {
+        Some(crate::untrack(self))
+    }
+}
+impl<F: Fn() -> X + 'static, X: std::fmt::Display> IntoOptView<ByText> for F {
+    fn into_opt_view(self) -> Option<crate::View> {
+        Some(crate::text_view(move || self().to_string()))
+    }
+}
+impl<F: FnOnce() -> Option<crate::View>> IntoOptView<ByOpt> for F {
+    fn into_opt_view(self) -> Option<crate::View> {
+        crate::untrack(self)
+    }
+}
+
+/// What a view prop takes as a value (a constant `rsx!` hands over as it is).
+pub trait IntoViewValue<M> {
+    fn into_view_value(self) -> crate::View;
+}
+impl IntoViewValue<ByView> for crate::View {
+    fn into_view_value(self) -> crate::View {
+        self
+    }
+}
+impl<X: std::fmt::Display> IntoViewValue<ByText> for X {
+    fn into_view_value(self) -> crate::View {
+        let s = self.to_string();
+        crate::text_view(move || s.clone())
+    }
+}
+
+/// What an optional view prop takes as a value.
+pub trait IntoOptViewValue<M> {
+    fn into_opt_view_value(self) -> Option<crate::View>;
+}
+impl IntoOptViewValue<ByView> for crate::View {
+    fn into_opt_view_value(self) -> Option<crate::View> {
+        Some(self)
+    }
+}
+impl<X: std::fmt::Display> IntoOptViewValue<ByText> for X {
+    fn into_opt_view_value(self) -> Option<crate::View> {
+        Some(self.into_view_value())
+    }
+}
+impl IntoOptViewValue<ByOpt> for Option<crate::View> {
+    fn into_opt_view_value(self) -> Option<crate::View> {
+        self
+    }
+}
+
 /// A handler prop's argument and answer, for typing a closure given to it.
 #[doc(hidden)]
 pub trait CallbackOf {

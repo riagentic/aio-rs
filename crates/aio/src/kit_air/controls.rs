@@ -31,7 +31,8 @@ pub fn RadioGroup(
         div {
             class: join("aio-radios", &class.get()),
             role: "group",
-            "aria-label": label.get().or(w.label()),
+            "aria-label": label.get(),
+            "aria-labelledby": w.labelledby(),
             "aria-describedby": w.described(),
             ..attributes,
             for o in options.get() {
@@ -62,17 +63,15 @@ pub fn RadioGroup(
 pub fn Switch(
     #[props(default)] checked: Prop<bool>,
     #[props(default)] disabled: Prop<bool>,
-    #[props(into)] label: Prop<Option<String>>,
+    /// Beside it: text or any view.
+    label: Option<View>,
     onchange: Option<EventHandler<bool>>,
     #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let labelled = label.with_untracked(Option::is_some);
+    let labelled = label.is_some();
     let w = use_field(labelled, false);
-    let own = {
-        let label = label.clone();
-        memo(move || label.get().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()))
-    };
+    let named = use_id("switch");
     let input = rsx! {
         input {
             r#type: "checkbox",
@@ -81,7 +80,7 @@ pub fn Switch(
             checked,
             disabled,
             id: w.id.clone(),
-            "aria-label": own,
+            "aria-labelledby": labelled.then(|| format!("{named}-label")),
             "aria-describedby": w.described(),
             "aria-invalid": w.invalid().then_some("true"),
             oninput: move |e| if let Some(f) = onchange { f.call(e.checked()) },
@@ -94,7 +93,7 @@ pub fn Switch(
     rsx! {
         label { class: join("aio-switch-row", &class.get()),
             {input}
-            span { {label.get()} }
+            span { id: "{named}-label", {label} }
         }
     }
 }
@@ -104,14 +103,15 @@ pub fn Switch(
 #[derive(Clone, PartialEq)]
 pub struct Tab {
     pub id: String,
-    pub label: String,
+    /// Text or any view.
+    pub label: View,
     pub disabled: bool,
     pub panel: View,
 }
 
 impl Tab {
-    pub fn new(id: impl Into<String>, label: impl Into<String>, panel: View) -> Self {
-        Self { id: id.into(), label: label.into(), disabled: false, panel }
+    pub fn new<M>(id: impl Into<String>, label: impl ::air::IntoViewValue<M>, panel: View) -> Self {
+        Self { id: id.into(), label: label.into_view_value(), disabled: false, panel }
     }
 
     pub fn disabled(self) -> Self {
@@ -251,7 +251,7 @@ pub fn Tabs(
                                 }
                             }
                         },
-                        "{name}"
+                        {name}
                     }
                 }
             }
@@ -330,7 +330,8 @@ impl Tone {
 #[component]
 pub fn Alert(
     #[props(default)] tone: Prop<Tone>,
-    #[props(into)] title: Prop<Option<String>>,
+    /// Text or any view.
+    title: Option<View>,
     ondismiss: Option<EventHandler<()>>,
     #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
@@ -343,8 +344,8 @@ pub fn Alert(
             role: if tone.get() == Tone::Error { "alert" } else { "note" },
             ..attributes,
             div { class: "aio-alert__body",
-                if title.with(Option::is_some) {
-                    strong { class: "aio-alert__title", {title.get()} }
+                if title.is_some() {
+                    strong { class: "aio-alert__title", {title.clone()} }
                 }
                 div { {children} }
             }
@@ -450,14 +451,15 @@ pub fn Tooltip(
 #[derive(Clone, Debug, PartialEq)]
 pub struct MenuItem {
     pub id: String,
-    pub label: String,
+    /// Text or any view.
+    pub label: View,
     pub disabled: bool,
     pub danger: bool,
 }
 
 impl MenuItem {
-    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { id: id.into(), label: label.into(), disabled: false, danger: false }
+    pub fn new<M>(id: impl Into<String>, label: impl ::air::IntoViewValue<M>) -> Self {
+        Self { id: id.into(), label: label.into_view_value(), disabled: false, danger: false }
     }
 
     pub fn disabled(self) -> Self {
@@ -598,7 +600,7 @@ pub fn Menu(
                                 e.prevent_default();
                                 go.call((to, dir));
                             },
-                            "{it.label}"
+                            {it.label.clone()}
                         }
                     }
                 }
@@ -612,14 +614,15 @@ pub fn Menu(
 /// One step of a [`Breadcrumb`]: a link (`href` or `onclick`), or plain text.
 #[derive(Clone, PartialEq)]
 pub struct Crumb {
-    pub label: String,
+    /// Text or any view.
+    pub label: View,
     pub href: Option<String>,
     pub onclick: Option<EventHandler<()>>,
 }
 
 impl Crumb {
-    pub fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into(), href: None, onclick: None }
+    pub fn new<M>(label: impl ::air::IntoViewValue<M>) -> Self {
+        Self { label: label.into_view_value(), href: None, onclick: None }
     }
 
     pub fn href(self, href: impl Into<String>) -> Self {
@@ -652,9 +655,9 @@ pub fn Breadcrumb(
                 for (i, last, c) in all.get() {
                     li { key: "{i}", class: "aio-crumbs__item",
                         if last || (c.href.is_none() && c.onclick.is_none()) {
-                            span { "aria-current": last.then_some("page"), "{c.label}" }
+                            span { "aria-current": last.then_some("page"), {c.label.clone()} }
                         } else {
-                            a { href: c.href.clone(), onclick: move |_| if let Some(f) = c.onclick { f.call(()) }, "{c.label}" }
+                            a { href: c.href.clone(), onclick: move |_| if let Some(f) = c.onclick { f.call(()) }, {c.label.clone()} }
                         }
                         if !last {
                             span { class: "aio-crumbs__sep", "aria-hidden": "true", "{separator}" }
@@ -702,11 +705,12 @@ pub fn Skeleton(
 /// What an empty list shows: what happened, and what to do about it.
 #[component]
 pub fn EmptyState(
-    #[props(into)] title: Prop<String>,
+    /// Text or any view.
+    title: View,
     /// A glyph; decorative.
     #[props(into)]
     icon: Prop<Option<String>>,
-    #[props(into)] description: Prop<Option<String>>,
+    description: Option<View>,
     action: Option<View>,
     #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
@@ -716,9 +720,9 @@ pub fn EmptyState(
             if icon.with(Option::is_some) {
                 div { class: "aio-empty__icon", "aria-hidden": "true", {icon.get()} }
             }
-            p { class: "aio-empty__title", "{title}" }
-            if description.with(Option::is_some) {
-                p { class: "aio-empty__desc", {description.get()} }
+            p { class: "aio-empty__title", {title} }
+            if description.is_some() {
+                p { class: "aio-empty__desc", {description.clone()} }
             }
             if action.is_some() {
                 div { class: "aio-empty__action", {action.clone()} }

@@ -83,7 +83,7 @@ struct FieldCx {
 #[derive(Clone, Default, PartialEq)]
 struct Said {
     base: String,
-    label: Option<String>,
+    labelled: bool,
     /// The id of the hint or error that describes the control.
     described: Option<String>,
     error: bool,
@@ -111,9 +111,9 @@ impl Wiring {
         }
     }
 
-    /// The field's label, for a group (a group is named by its field).
-    pub fn label(&self) -> Option<String> {
-        self.cx.filter(|_| self.group).and_then(|f| f.said.with(|s| s.label.clone()))
+    /// The field's label's id, for a group (a group is named by its field).
+    pub fn labelledby(&self) -> Option<String> {
+        self.cx.filter(|_| self.group).and_then(|f| f.said.with(|s| s.labelled.then(|| format!("{}-label", s.base))))
     }
 
     /// The field has an error.
@@ -139,7 +139,7 @@ pub(super) fn use_field(named: bool, group: bool) -> Wiring {
     let cx = try_context::<FieldCx>();
     let mine = once(|| {
         cx.is_some_and(|f| {
-            let free = !named && !group && f.said.with_untracked(|s| s.label.is_some()) && !f.claimed.get_untracked();
+            let free = !named && !group && f.said.with_untracked(|s| s.labelled) && !f.claimed.get_untracked();
             if free {
                 f.claimed.set(true);
             }
@@ -150,10 +150,11 @@ pub(super) fn use_field(named: bool, group: bool) -> Wiring {
     Wiring { id, cx, tip, group }
 }
 
-/// A label, an optional hint, and an error that turns the field invalid.
+/// A label (text or any view), an optional hint, and an error that turns
+/// the field invalid.
 #[component]
 pub fn Field(
-    #[props(into)] label: Prop<Option<String>>,
+    label: Option<View>,
     #[props(into)] hint: Prop<Option<String>>,
     #[props(into)] error: Prop<Option<String>>,
     #[props(default)] required: Prop<bool>,
@@ -162,10 +163,7 @@ pub fn Field(
     children: View,
 ) -> View {
     let base = use_id("field");
-    let label = {
-        let label = label.clone();
-        memo(move || label.get().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()))
-    };
+    let labelled = label.is_some();
     let error = {
         let error = error.clone();
         memo(move || error.get().filter(|e| !e.is_empty()))
@@ -174,7 +172,7 @@ pub fn Field(
         let (base, hint, required) = (base.clone(), hint.clone(), required);
         memo(move || Said {
             base: base.clone(),
-            label: label.get(),
+            labelled,
             described: match (error.with(Option::is_some), hint.with(Option::is_some)) {
                 (true, _) => Some(format!("{base}-error")),
                 (false, true) => Some(format!("{base}-hint")),
@@ -188,9 +186,9 @@ pub fn Field(
     let claimed = cx.claimed;
     rsx! {
         div { class: join("aio-field", &class.get()), ..attributes,
-            if label.with(Option::is_some) {
-                label { class: "aio-field__label", r#for: claimed.get().then(|| format!("{base}-control")),
-                    {label.get()}
+            if labelled {
+                label { class: "aio-field__label", id: "{base}-label", r#for: claimed.get().then(|| format!("{base}-control")),
+                    {label.clone()}
                     if required.get() {
                         span { class: "aio-field__req", " *" }
                     }
@@ -347,22 +345,20 @@ pub fn Select(
     }
 }
 
-/// A checkbox, with an optional label beside it; `onchange` gets the new state.
+/// A checkbox, with an optional label (text or any view) beside it;
+/// `onchange` gets the new state.
 #[component]
 pub fn Checkbox(
     #[props(default)] checked: Prop<bool>,
     #[props(default)] disabled: Prop<bool>,
-    #[props(into)] label: Prop<Option<String>>,
+    label: Option<View>,
     #[props(default, into)] class: Prop<String>,
     onchange: Option<EventHandler<bool>>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let labelled = label.with_untracked(Option::is_some);
+    let labelled = label.is_some();
     let w = use_field(labelled, false);
-    let own = {
-        let label = label.clone();
-        memo(move || label.get().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()))
-    };
+    let named = use_id("checkbox");
     let input = rsx! {
         input {
             r#type: "checkbox",
@@ -370,7 +366,7 @@ pub fn Checkbox(
             checked,
             disabled,
             id: w.id.clone(),
-            "aria-label": own,
+            "aria-labelledby": labelled.then(|| format!("{named}-label")),
             "aria-describedby": w.described(),
             "aria-invalid": w.invalid().then_some("true"),
             "aria-required": w.required(),
@@ -384,7 +380,7 @@ pub fn Checkbox(
     rsx! {
         label { class: join("aio-checkbox-row", &class.get()),
             {input}
-            span { {label.get()} }
+            span { id: "{named}-label", {label} }
         }
     }
 }

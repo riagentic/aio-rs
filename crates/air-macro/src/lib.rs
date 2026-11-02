@@ -159,6 +159,8 @@ enum Kind {
     View,
     /// `Option<T>`: `T`.
     Opt(TokenStream),
+    /// `Option<View>`.
+    OptView,
     /// `Prop<T>`: `T`; `Prop<Option<T>>`: `T`, true.
     Prop(TokenStream, bool),
 }
@@ -227,7 +229,10 @@ fn field(toks: &[TokenTree]) -> Res<Field> {
     let ty_toks = &rest[colon + 1..];
     let ty: TokenStream = ty_toks.iter().cloned().collect();
     let kind = match ty_head(ty_toks) {
-        (Some(h), Some(inner)) if h == "Option" => Kind::Opt(inner),
+        (Some(h), Some(inner)) if h == "Option" => match ty_head(&inner.clone().into_iter().collect::<Vec<_>>()) {
+            (Some(i), None) if i == "View" => Kind::OptView,
+            _ => Kind::Opt(inner),
+        },
         (Some(h), Some(inner)) if h == "Prop" => {
             let it: Vec<TokenTree> = inner.clone().into_iter().collect();
             match ty_head(&it) {
@@ -327,7 +332,24 @@ fn builder(
                     quote!(#air::Prop::Const({ let f = || v; #call })),
                 )
             }
-            Kind::Plain | Kind::View => (
+            // A view or text: the closure itself, so text that reads state follows it.
+            Kind::View => (
+                quote!(<__F: #air::__rt::IntoView<__M>, __M>),
+                quote!(f: __F),
+                quote!(#air::__rt::IntoView::into_view(f)),
+                quote!(<__X: #air::__rt::IntoViewValue<__M>, __M>),
+                quote!(v: __X),
+                quote!(#air::__rt::IntoViewValue::into_view_value(v)),
+            ),
+            Kind::OptView => (
+                quote!(<__F: #air::__rt::IntoOptView<__M>, __M>),
+                quote!(f: __F),
+                quote!(#air::__rt::IntoOptView::into_opt_view(f)),
+                quote!(<__X: #air::__rt::IntoOptViewValue<__M>, __M>),
+                quote!(v: __X),
+                quote!(#air::__rt::IntoOptViewValue::into_opt_view_value(v)),
+            ),
+            Kind::Plain => (
                 quote!(<__X: ::core::convert::Into<#ty>>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
                 quote!(::core::convert::Into::into(#air::untrack(f))),
@@ -352,7 +374,13 @@ fn builder(
             Kind::Opt(i) => (i.clone(), quote!(::core::option::Option::Some(v))),
             Kind::Prop(i, false) => (i.clone(), quote!(#air::Prop::Const(v))),
             Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::Const(::core::option::Option::Some(v)))),
+            Kind::OptView => (quote!(#air::View), quote!(::core::option::Option::Some(v))),
             Kind::Plain | Kind::View => (ty.clone(), quote!(v)),
+        };
+        // A view prop takes text as a value too (`label: 7`).
+        let (vgen, vparam, vval) = match &f.kind {
+            Kind::View | Kind::OptView if !exact => (fgen.clone(), fparam.clone(), fval.clone()),
+            _ => (quote!(), quote!(v: #vty), vval),
         };
         let docs = &f.docs;
         match required.iter().position(|&r| r == k) {
@@ -363,7 +391,7 @@ fn builder(
                     #[doc(hidden)]
                     pub fn #fname #fgen (mut self, #fparam) -> Self { self.#n = ::core::option::Option::Some(#fval); self }
                     #[doc(hidden)]
-                    pub fn #vname(mut self, v: #vty) -> Self { self.#n = ::core::option::Option::Some(#vval); self }
+                    pub fn #vname #vgen (mut self, #vparam) -> Self { self.#n = ::core::option::Option::Some(#vval); self }
                 ),
                 quote!(),
             ),
@@ -389,7 +417,7 @@ fn builder(
                             #[doc(hidden)]
                             pub fn #fname #fgen (self, #fparam) -> #b<#gn #(#after),*> { #mfv }
                             #[doc(hidden)]
-                            pub fn #vname(self, v: #vty) -> #b<#gn #(#after),*> { #mvv }
+                            pub fn #vname #vgen (self, #vparam) -> #b<#gn #(#after),*> { #mvv }
                         }
                     ),
                 )
@@ -416,7 +444,7 @@ fn builder(
         let or = match (&f.default, &f.kind) {
             (Some(d), Kind::Prop(..)) => quote!(#air::Prop::Const(#d)),
             (Some(d), _) => d.clone(),
-            (None, Kind::Opt(_)) => quote!(::core::option::Option::None),
+            (None, Kind::Opt(_) | Kind::OptView) => quote!(::core::option::Option::None),
             (None, Kind::Prop(_, true)) => quote!(#air::Prop::Const(::core::option::Option::None)),
             (None, Kind::View) => quote!(::core::result::Result::Ok(#air::Tree::empty())),
             (None, _) if f.extends => quote!(::std::vec::Vec::new()),
