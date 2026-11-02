@@ -360,17 +360,19 @@ fn SideList() -> View {
     }
 }
 
-/// The running state, as a chip (amui's `StatusChip`).
+/// The running state, as a chip (amui's `StatusChip`): `status` read in
+/// its hole.
 #[component]
-fn StatusChip(running: bool, status: Option<String>) -> View {
+fn StatusChip(running: bool, status: Prop<Option<String>>) -> View {
     let (cls, bg, line) = if running {
         ("green", "var(--green-bg)", "var(--green-line)")
     } else {
         ("dim", "var(--dim-bg)", "var(--border)")
     };
-    let word = if running { status.unwrap_or("running".into()) } else { "stopped".into() };
     rsx! {
-        span { class: "chip {cls}", style: "background:{bg};border-color:{line}", "data-t": "status", "● {word}" }
+        span { class: "chip {cls}", style: "background:{bg};border-color:{line}", "data-t": "status",
+            {if running { format!("● {}", status.get().unwrap_or("running".into())) } else { "● stopped".into() }}
+        }
     }
 }
 
@@ -398,14 +400,40 @@ fn ConfirmBar(id: String) -> View {
     }
 }
 
+/// What decides the header's shape: the app, ax ui itself or not, running,
+/// and which chips show. Anything else (its name, status, folder, build)
+/// is a hole, so a detail read in place never replaces its buttons (a
+/// click on one in flight would reach none).
+#[derive(Clone, PartialEq)]
+struct Shape {
+    id: String,
+    own: bool,
+    running: bool,
+    build: bool,
+    instance: bool,
+}
+
 /// The chosen app's header (amui's `Header`): name, state, build, folder,
 /// when last read, its actions, and the tabs.
 #[component]
 fn Header() -> View {
     let m = context::<Manager>();
     let view = context::<ViewState>();
-    let Some(d) = follow(move || m.detail.with(|d| d.as_ref().map(stable))) else { return rsx! {} };
-    let place = d.path.as_ref().or(d.home.as_ref()).map(|p| p.display().to_string()).unwrap_or_default();
+    let shape = move |d: &Detail| Shape {
+        id: d.id.clone(),
+        own: d.own,
+        running: d.running,
+        build: d.build.is_some(),
+        instance: d.instance.is_some(),
+    };
+    let Some(d) = follow(move || m.detail.with(|d| d.as_ref().map(shape))) else { return rsx! {} };
+    // A field of the detail now, following it.
+    let of = move |f: fn(&Detail) -> String| memo(move || m.detail.with(|d| d.as_ref().map(f).unwrap_or_default()));
+    let name = of(|d| d.meta.name.clone());
+    let place = of(|d| d.path.as_ref().or(d.home.as_ref()).map(|p| p.display().to_string()).unwrap_or_default());
+    let build = of(|d| d.build.unwrap_or_default().to_string());
+    let instance = of(|d| d.instance.clone().unwrap_or_default());
+    let status = memo(move || m.detail.with(|d| d.as_ref().and_then(|d| d.status.clone())));
     let running = d.running;
     let when = memo(move || {
         if m.detail_loading.get() {
@@ -418,20 +446,17 @@ fn Header() -> View {
     });
     let ask = move |act: Act, msg: String, id: String| view.pending.set(Some(Pending { id, msg, act }));
     let (id1, id2, id3, id4) = (d.id.clone(), d.id.clone(), d.id.clone(), d.id.clone());
-    let (n1, n2) = (d.name.clone(), d.name.clone());
-    let build = d.build.unwrap_or_default();
-    let instance = d.instance.clone().unwrap_or_default();
     rsx! {
         div { class: "head",
             div { class: "head-top",
                 div { style: "min-width:0",
                     div { class: "title",
-                        b { "data-t": "name", "{d.meta.name}" }
-                        StatusChip { running: d.running, status: d.status.clone() }
-                        if d.build.is_some() {
-                            span { class: if build == "release" { "chip yellow" } else { "chip blue" }, "data-t": "build", "{build}" }
+                        b { "data-t": "name", "{name}" }
+                        StatusChip { running: d.running, status: status.get() }
+                        if d.build {
+                            span { class: if build.get() == "release" { "chip yellow" } else { "chip blue" }, "data-t": "build", "{build}" }
                         }
-                        if d.instance.is_some() {
+                        if d.instance {
                             span { class: "chip dim", "data-t": "instance", "instance {instance}" }
                         }
                     }
@@ -446,11 +471,11 @@ fn Header() -> View {
                         }
                     } else if d.running {
                         button { r#type: "button", class: "btn ghost act", "data-t": "restart",
-                            onclick: move |_| ask(Act::Restart, format!("Restart {n1}?"), id2.clone()),
+                            onclick: move |_| ask(Act::Restart, format!("Restart {}?", name.get_untracked()), id2.clone()),
                             "↻ Restart"
                         }
                         button { r#type: "button", class: "btn ghost no", "data-t": "stop",
-                            onclick: move |_| ask(Act::Stop, format!("Stop {n2}?"), id3.clone()),
+                            onclick: move |_| ask(Act::Stop, format!("Stop {}?", name.get_untracked()), id3.clone()),
                             "■ Stop"
                         }
                     } else {
