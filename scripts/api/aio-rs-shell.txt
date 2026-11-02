@@ -267,13 +267,14 @@ aio_shell::runtime::window_home: fn window_home(id: &str) -> std::path::PathBuf
 aio_shell::serve: fn serve(dirs: &aio::paths::AppDirs) -> std::io::Result<()>
 aio_shell::splash::colors: fn colors(hue: u16, bg: Option<[&str; 2]>) -> [[String; 4]; 2]
 aio_shell::splash::image_box: fn image_box(s: &aio::config::Splash) -> Option<(u32, u32)>
-aio_shell::splash::install: fn install(dir: &std::path::Path, s: Option<&aio::config::Splash>, title: &str, colors: &[[String; 4]; 2], target: Option<[i32; 4]>) -> std::io::Result<()>
+aio_shell::splash::install: fn install(dir: &std::path::Path, s: Option<&aio::config::Splash>, title: &str, version: &str, colors: &[[String; 4]; 2], target: Option<[i32; 4]>) -> std::io::Result<()>
 aio_shell::splash::look_colors: fn look_colors(base: [[String; 4]; 2], s: &aio::config::Splash) -> [[String; 4]; 2]
-aio_shell::splash::markup: fn markup(s: &aio::config::Splash, title: &str, colors: &[[String; 4]; 2], src: &str, over: bool) -> String
-aio_shell::splash::page: fn page(s: &aio::config::Splash, title: &str, colors: &[[String; 4]; 2]) -> String
+aio_shell::splash::markup: fn markup(s: &aio::config::Splash, title: &str, version: &str, colors: &[[String; 4]; 2], src: &str, over: bool) -> String
+aio_shell::splash::page: fn page(s: &aio::config::Splash, title: &str, version: &str, colors: &[[String; 4]; 2]) -> String
 aio_shell::splash::plan: fn plan(s: &aio::config::Splash, colors: &[[String; 4]; 2], target: Option<[i32; 4]>) -> Option<aio::serde_json::Value>
 aio_shell::splash::shown: fn shown(show: aio::config::SplashShow) -> (bool, bool)
 aio_shell::splash::size: fn size(s: &aio::config::Splash) -> Option<(u32, u32)>
+aio_shell::splash::text: fn text(t: &str, title: &str, version: &str) -> String
 aio_shell::splash::window_size: fn window_size(s: &aio::config::Splash) -> Option<(u32, u32)>
 aio_shell::start: fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start>
 aio_shell::swap::Plan.args: Vec<String>
