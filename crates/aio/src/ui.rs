@@ -9,13 +9,26 @@
 /// page. `(SURFACE_JS)(op, arg)` answers `{ ok }` or `{ error }`.
 pub const SURFACE_JS: &str = include_str!("surface.js");
 
+/// Key chords (`"mod+s"`), parsed and matched: the kit's bindings and `TestUi`'s keys.
+#[cfg(any(feature = "kit", feature = "air"))]
+#[doc(hidden)]
+pub mod chord;
 #[cfg(feature = "kit")]
 mod view;
 #[cfg(feature = "kit")]
 pub use view::*;
+#[cfg(all(feature = "air", not(feature = "kit")))]
+mod on_air;
+#[cfg(all(feature = "air", not(feature = "kit")))]
+pub use on_air::*;
 /// What a view returns (with `kit`, [`prelude`] has the rest).
-#[cfg(all(feature = "web", not(feature = "kit")))]
+#[cfg(all(feature = "web", not(any(feature = "kit", feature = "air"))))]
 pub type View = dioxus_core::Element;
+
+#[cfg(all(feature = "air", feature = "web", not(feature = "kit")))]
+compile_error!(
+    "aio-rs: the web build on air (`air` with `web`) comes with plan step 3 (docs/design/air.md); add `kit` for Dioxus's"
+);
 
 /// Everything a view file needs: `use aio::ui::prelude::*;`. `rsx!`,
 /// `#[component]`, [`View`], state ([`Signal`], [`signal`], [`memo`],
@@ -42,6 +55,59 @@ pub mod prelude {
         input_data::MouseButton, svg_attributes, traits::*,
     };
     pub use dioxus::prelude::{Code, Event, Key, Location, Modifiers};
+}
+
+/// Everything a view file needs, on air: the same names as on Dioxus.
+#[cfg(all(feature = "air", not(feature = "kit")))]
+pub mod prelude {
+    pub use super::on_air::events::*;
+    pub use super::on_air::{
+        Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler, Fragment,
+        FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Props, Resource, Signal,
+        Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval, geometry, in_views,
+        key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task,
+        try_context, watch,
+    };
+    pub use crate::{act, use_css};
+    /// `rsx!`'s paths start at `air`: an app needs no dependency of its own.
+    #[doc(hidden)]
+    pub use ::air;
+}
+
+/// The views' clock: a moment and a wait, on the page's timer in a
+/// browser, else on tokio's (a test's paused clock too).
+#[cfg(any(feature = "kit", feature = "air"))]
+pub(crate) mod clock {
+    pub(crate) async fn sleep(d: std::time::Duration) {
+        #[cfg(target_arch = "wasm32")]
+        crate::web::sleep(u32::try_from(d.as_millis()).unwrap_or(u32::MAX)).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        tokio::time::sleep(d).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) use std::time::Instant;
+
+    /// A moment, on the page's clock: a browser has no `std` one.
+    #[cfg(target_arch = "wasm32")]
+    #[derive(Clone, Copy)]
+    pub(crate) struct Instant(f64);
+
+    #[cfg(target_arch = "wasm32")]
+    impl Instant {
+        pub(crate) fn now() -> Self {
+            Self(js_sys::Date::now())
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    impl std::ops::Sub for Instant {
+        type Output = std::time::Duration;
+
+        fn sub(self, earlier: Self) -> Self::Output {
+            std::time::Duration::from_secs_f64((self.0 - earlier.0).max(0.0) / 1000.0)
+        }
+    }
 }
 
 /// A copyable day or id for props and handlers (a `String` must be cloned into
@@ -516,7 +582,7 @@ pub const BACKGROUND: std::time::Duration = std::time::Duration::from_millis(150
 /// `trackCell`), so a view re-renders when that field changes, not on every
 /// commit. Read it with `.get()`, `.with(|v| …)` or `"{part}"`; it reads
 /// the state the views were last told of.
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 pub struct Part<T: 'static, R: ?Sized, F> {
     f: F,
     parts: &'static Global<Parts<T>>,
@@ -526,7 +592,7 @@ pub struct Part<T: 'static, R: ?Sized, F> {
     _r: std::marker::PhantomData<fn(&T) -> &R>,
 }
 
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
     #[doc(hidden)]
     pub fn new(
@@ -594,17 +660,17 @@ impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
     }
 }
 
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 impl<T, R: ?Sized, F: Clone> Clone for Part<T, R, F> {
     fn clone(&self) -> Self {
         Self { f: self.f.clone(), ..*self }
     }
 }
 
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 impl<T, R: ?Sized, F: Copy> Copy for Part<T, R, F> {}
 
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fmt::Display for Part<T, R, F> {
     /// Subscribes: `"{n}"` in a view follows the part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -612,7 +678,7 @@ impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> std::fm
     }
 }
 
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt::Debug for Part<T, R, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.with(|v| v.fmt(f))
@@ -622,16 +688,16 @@ impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> std::fmt:
 /// The views' side of a cell's fields (`client!`): the state they were
 /// last told of, one signal per field (aio's signal per cell) and when.
 #[doc(hidden)]
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 pub struct Parts<T> {
     shown: std::sync::Arc<T>,
     sigs: Vec<Signal<u64>>,
     /// When commits off the UI thread were last told; `None`: a call from
     /// the views closed the window since, so the next one goes at once.
-    told: Option<crate::kit::Instant>,
+    told: Option<clock::Instant>,
 }
 
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 impl<T: crate::CellData> Parts<T> {
     /// In the root scope (a global's constructor runs there).
     pub fn new(shown: std::sync::Arc<T>) -> Self {
@@ -669,7 +735,7 @@ impl<T: crate::CellData> Parts<T> {
             return (vec![], false);
         }
         if !urgent {
-            self.told = Some(crate::kit::Instant::now());
+            self.told = Some(clock::Instant::now());
         }
         let mask = match T::FIELDS.is_empty() {
             true => !0,
@@ -689,14 +755,14 @@ impl<T: crate::CellData> Parts<T> {
     /// told: [`BACKGROUND`] after such a commit last was (none since a call
     /// from the views: at once).
     pub fn wait(&self) -> std::time::Duration {
-        self.told.map_or(std::time::Duration::ZERO, |t| BACKGROUND.saturating_sub(crate::kit::Instant::now() - t))
+        self.told.map_or(std::time::Duration::ZERO, |t| BACKGROUND.saturating_sub(clock::Instant::now() - t))
     }
 }
 
 /// [`BACKGROUND`]'s wait (`client!`'s `use_live`): while it lasts, the views
 /// have a commit still to be told of, and a UI test's `settle` waits for it.
 #[doc(hidden)]
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 pub async fn sleep(d: std::time::Duration) {
     struct Waiting;
     impl Drop for Waiting {
@@ -706,14 +772,14 @@ pub async fn sleep(d: std::time::Duration) {
     }
     WAITING.set(WAITING.get() + 1);
     let _w = Waiting;
-    crate::kit::sleep(d).await
+    clock::sleep(d).await
 }
 
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 thread_local!(static WAITING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 /// Has a view on this thread a commit still to be told of ([`sleep`])?
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 pub(crate) fn telling() -> bool {
     WAITING.get() > 0
 }
@@ -951,7 +1017,7 @@ macro_rules! client {
 /// commit (a cursor step, a price tick), whatever it shows. Said once per
 /// place; `heap`: through a `part` that points outside the state's fields.
 #[doc(hidden)]
-#[cfg(feature = "kit")]
+#[cfg(any(feature = "kit", feature = "air"))]
 pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: bool) {
     thread_local! {
         static SEEN: std::cell::RefCell<std::collections::HashSet<(&'static str, u32, u32)>> = Default::default();
@@ -961,7 +1027,10 @@ pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: 
         return;
     }
     // A component's render, not a handler or a memo (their contexts have no scope).
+    #[cfg(feature = "kit")]
     let render = view::in_render();
+    #[cfg(not(feature = "kit"))]
+    let render = on_air::in_render();
     if !render || !SEEN.with(|s| s.borrow_mut().insert(key)) {
         return;
     }
