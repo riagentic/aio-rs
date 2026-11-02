@@ -460,11 +460,12 @@ mod net {
     }
 
     type Key = (String, String, Option<String>);
+    /// A server's socket while a link uses it; held while one is dialed.
+    type Slot = Arc<tokio::sync::Mutex<Weak<Conn>>>;
 
     /// Each server's socket, while a link uses it; one dial at a time per server.
-    fn pool() -> &'static Mutex<HashMap<Key, Arc<tokio::sync::Mutex<Weak<Conn>>>>> {
-        static POOL: std::sync::OnceLock<Mutex<HashMap<Key, Arc<tokio::sync::Mutex<Weak<Conn>>>>>> =
-            std::sync::OnceLock::new();
+    fn pool() -> &'static Mutex<HashMap<Key, Slot>> {
+        static POOL: std::sync::OnceLock<Mutex<HashMap<Key, Slot>>> = std::sync::OnceLock::new();
         POOL.get_or_init(Mutex::default)
     }
 

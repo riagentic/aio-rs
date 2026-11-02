@@ -87,7 +87,7 @@ pub mod colors;
 pub mod columns;
 pub mod compat;
 mod hidden;
-#[cfg(any(feature = "server", feature = "web"))]
+#[cfg(any(feature = "server", all(feature = "web", target_arch = "wasm32")))]
 mod mux;
 pub use hidden::Hidden;
 pub mod cron;
