@@ -783,13 +783,26 @@ impl Tpl {
                     Node::Expr(e) => {
                         hole_fn(e, quote!(air::IntoChild::into_child), |e| quote!(air::__rt::child(#id, #e);))
                     }
-                    Node::Comp { props, children, .. } => {
+                    Node::Comp { path, props, children, key } => {
                         let mut r = vec![];
                         props.iter().for_each(|(_, e)| captures(e, &mut r));
                         node_captures(children, &mut r);
                         let c = clones(&r);
                         let call = comp(n);
-                        quote!(air::__rt::comp(#id, { #c ::std::boxed::Box::new(move || { #c #call }) });)
+                        // Its name and key, for the tree of mounted components.
+                        let name = path.iter().rev().find_map(|t| match t {
+                            TokenTree::Ident(i) => Some(i.to_string()),
+                            _ => None,
+                        });
+                        let key = match key {
+                            Some(k) => quote!({
+                                #[allow(unused_imports)]
+                                use air::__rt::{KeyByDebug as _, KeyByDisplay as _, KeyByNone as _};
+                                (&&air::__rt::KeyOf(&(#k))).key_text()
+                            }),
+                            None => quote!(::core::option::Option::None),
+                        };
+                        quote!(air::__rt::comp(#id, #name, #key, { #c ::std::boxed::Box::new(move || { #c #call }) });)
                     }
                     Node::For { pat, expr, body: rows } => {
                         let key = match rows.first() {

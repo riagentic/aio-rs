@@ -17,7 +17,7 @@
 use crate::event::{EVAL, EVENT, Event, Flow, FromRaw, R, Raw};
 use crate::reactive::{
     Callback, Frame, Owner, Signal, batch, body, child_scope, cleanup, current_owner, detached, memo_now, provide_on,
-    render, scope, try_context, untrack, with_owner,
+    render, render_comp, scope, try_context, untrack, with_owner,
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -631,15 +631,26 @@ pub fn child(at: u32, f: Box<dyn Fn() -> Child>) {
 /// A component in a template: `f()` (its body, run once, untracked, with
 /// its hooks kept) and its view before anchor `at`. A body that waits for
 /// a resource runs again once it is loaded, its hooks' state kept.
+/// `name` and `key` place it in the tree of mounted components.
 #[doc(hidden)]
-pub fn comp(at: u32, f: Box<dyn Fn() -> View>) {
+pub fn comp(at: u32, name: &'static str, key: Option<String>, f: Box<dyn Fn() -> View>) {
+    comp_as(at, Some(crate::tree::mount(name, key)), f)
+}
+
+fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Fn() -> View>) {
     let mut frame: Option<Rc<Frame>> = None;
     let mut shown = Range::default();
-    render(move || {
+    // Its entry ends with its hole.
+    let mounted = id.map(crate::tree::Entry);
+    render_comp(move || {
+        let _in = crate::tree::enter(mounted.as_ref().map(|m| m.0));
         dom(|d| d.remove(std::mem::take(&mut shown)));
         let fr = frame.get_or_insert_with(Frame::new).clone();
         let v = body(&fr, &f);
         shown = place(v);
+        if let Some(m) = &mounted {
+            crate::tree::rendered(m.0, shown.0);
+        }
         dom(|d| d.insert(at, shown));
     });
 }
@@ -1060,7 +1071,7 @@ impl Root {
             if let Some((a, b)) = r.0 {
                 dom(|d| _ = d.op(op::APPEND).u32(0).u32(a).u32(b));
             }
-            comp(at, Box::new(app));
+            comp_as(at, None, Box::new(app));
         });
     }
 
