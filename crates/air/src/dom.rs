@@ -372,14 +372,17 @@ pub fn text(id: u32, f: Box<dyn Fn() -> String>) {
     });
 }
 
-/// What an attribute hole holds: a value, or presence (`false`: none).
+/// What an attribute hole holds: a value, presence (`false`: none, but
+/// `"false"` on `aria-*`/`data-*`), or none at all (an `Option`'s `None`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum AttrValue {
     Str(Cow<'static, str>),
     Bool(bool),
+    None,
 }
 
-/// What an attribute takes: a string, a number, a `bool` (present or not),
+/// What an attribute takes: a string, a number, a `bool` (present or not;
+/// `"true"`/`"false"` on `aria-*` and `data-*`),
 /// an `Option` (none: not there), a `Signal` (followed).
 pub trait IntoAttr {
     fn into_attr(self) -> AttrValue;
@@ -412,7 +415,7 @@ impl IntoAttr for bool {
 }
 impl<T: IntoAttr> IntoAttr for Option<T> {
     fn into_attr(self) -> AttrValue {
-        self.map_or(AttrValue::Bool(false), T::into_attr)
+        self.map_or(AttrValue::None, T::into_attr)
     }
 }
 impl<T: IntoAttr + Clone + 'static> IntoAttr for Signal<T> {
@@ -466,6 +469,8 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
         let same = match (&last, &v) {
             (Some(AttrValue::Str(a)), AttrValue::Str(b)) => a == b,
             (Some(AttrValue::Bool(a)), AttrValue::Bool(b)) => a == b,
+            (Some(AttrValue::None), AttrValue::None) => true,
+            (None, AttrValue::None) => !is_flag_prop(name),
             (None, AttrValue::Bool(false)) => !is_flag_prop(name) && !is_text_bool(name),
             _ => false,
         };
@@ -479,17 +484,15 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
 
 /// `name` of node `id` set to `v` now (no hole).
 pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
-    if let (AttrValue::Bool(b), true) = (v, is_text_bool(name)) {
-        return dom(|d| _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" }));
-    }
     dom(|d| match (v, is_prop(name)) {
+        (AttrValue::Bool(b), _) if is_text_bool(name) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" }),
         (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
         (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
         (AttrValue::Bool(b), true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
+        (AttrValue::None, true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(0),
         (AttrValue::Bool(true), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(""),
-        (AttrValue::Bool(false), true) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
         (AttrValue::Bool(true), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(""),
-        (AttrValue::Bool(false), false) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
+        (AttrValue::Bool(false) | AttrValue::None, _) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
     });
 }
 

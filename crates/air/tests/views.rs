@@ -43,21 +43,30 @@ fn a_counter_counts_and_resets() {
 }
 
 /// `aria-*` and `data-*` bools are text (`"true"`, `"false"`), as ARIA reads
-/// them; `disabled` and the other HTML flags are presence.
+/// them; `hidden` and the other HTML flags are presence; `None` is none.
 #[test]
 fn an_aria_bool_is_text_and_a_flag_is_presence() {
     fn app() -> View {
         let on = Signal::new(false);
         rsx! {
-            li { "data-t": "row", "aria-selected": on.get(), "aria-busy": true, "data-open": false, hidden: on.get(), onclick: move |_| on.set(true), "Row" }
+            li {
+                "data-t": "row",
+                "aria-selected": on.get(),
+                "aria-busy": true,
+                "data-open": false,
+                "aria-controls": on.get().then_some("menu"),
+                hidden: on.get(),
+                onclick: move |_| on.set(true),
+                "Row"
+            }
         }
     }
     let mut p = TestPage::mount(app);
-    let attrs = |p: &TestPage| ["aria-selected", "aria-busy", "data-open", "hidden"].map(|a| p.attr("row", a));
+    let attrs = |p: &TestPage| ["aria-selected", "aria-busy", "data-open", "aria-controls", "hidden"].map(|a| p.attr("row", a));
     let s = |v: &str| Some(v.to_string());
-    assert_eq!(attrs(&p), [s("false"), s("true"), s("false"), None]);
+    assert_eq!(attrs(&p), [s("false"), s("true"), s("false"), None, None], "an Option's None is no attribute");
     p.click("row");
-    assert_eq!(attrs(&p), [s("true"), s("true"), s("false"), s("")]);
+    assert_eq!(attrs(&p), [s("true"), s("true"), s("false"), s("menu"), s("")]);
 }
 
 /// 1000 rows, a filter, a cursor: the list keyed by id.
