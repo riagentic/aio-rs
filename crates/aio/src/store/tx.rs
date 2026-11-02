@@ -84,9 +84,10 @@ fn dotted(path: &[crate::patch::Step]) -> String {
 
 fn path_of(op: &crate::patch::Op) -> &[crate::patch::Step] {
     match op {
-        crate::patch::Op::Set { path, .. } | crate::patch::Op::Del { path } | crate::patch::Op::Append { path, .. } => {
-            path
-        }
+        crate::patch::Op::Set { path, .. }
+        | crate::patch::Op::Del { path }
+        | crate::patch::Op::Insert { path, .. }
+        | crate::patch::Op::Append { path, .. } => path,
     }
 }
 
@@ -238,8 +239,8 @@ impl<T: Cell> Store<T> {
             false => {
                 let (base, work, mut now) = (crate::json(&*tx.base)?, crate::json(&tx.work)?, crate::json(&*live)?);
                 let (pushes, mine): (Vec<_>, Vec<_>) =
-                    crate::patch::diff(&base, &work).into_iter().partition(|m| pushed(&base, m).is_some());
-                let theirs = crate::patch::diff(&base, &now);
+                    crate::patch::diff_whole(&base, &work).into_iter().partition(|m| pushed(&base, m).is_some());
+                let theirs = crate::patch::diff_whole(&base, &now);
                 let clash = match cfg.serialize {
                     true => theirs.first().filter(|_| !mine.is_empty() || !pushes.is_empty()),
                     false => theirs.iter().find(|t| mine.iter().any(|m| overlaps(path_of(m), path_of(t)))),
