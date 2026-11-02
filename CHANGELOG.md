@@ -39,6 +39,54 @@ version may break things.
 - An exposed boot prints a `share:` line (the address at this machine's
   LAN IP and what a caller shows; the key file, never the key) and, on
   Windows and macOS, a `firewall:` line (aio's).
+- **The mutation ledger** (aio's `check:mutations`, carried to the
+  package): `scripts/mutants` plants each break of `scripts/mutants.toml`
+  alone, in the source or in the template app's built `.deb` (its menu
+  entry, its icon, its bundled page), and needs the named test or
+  `ax smoke` red; `scripts/mutants-ledger.csv` keeps the last whole run.
+  `./ci.sh` checks the ledger, GitHub CI runs its fast breaks
+  ([proving the tests](docs/testing/proving.md)).
+- `ax lint` names tests that check nothing (no assertion, `?`, `unwrap` or
+  harness wait) and `assert_eq!(x, x)` (aio's `check:vacuous`);
+  `ax test <app> --mutants` runs `cargo mutants` over the app.
+- `aio::testing::TestIo` (aio's `testIO`): a command-line run with its
+  stdin, terminal or not, colour, stdout and stderr.
+- `TestCells::fuzz_methods` (aio's `fuzz({ skip })`): the cell's own
+  methods, arguments made from their types; `last_effects` (aio's
+  `expect.effects`), `reset(&h, seed)` (aio's `t.init`, `t.destroy`),
+  `budget::<C>(method, ms)` (aio's `perfBudget`, failing the test).
+- `aio::testing::TestApps` (aio's `testApps`), `patches(&copy)` with
+  `until` (aio's `patches`, `waitForPatch`), `call_all` (aio's
+  `dispatchAll`), `Remote::on_patch` (aio's `onPatch`).
+- `Mount::fetch(host, answer)` (aio's `testUI({ fetch })`): the page's
+  requests to a host answered by the test, never the network.
+- `aio::testing::smoke(bundle)` (aio's `smoke()`): `ax smoke` in a test.
+- `Cassette::wrap(id, f)` (aio's `tape.wrap`); `AIO_CASSETTE=rerecord`
+  records over a tape that is there, even a damaged one.
+- **air, aio-rs's own renderer, phase 1** (docs/design/air.md): crates
+  `aio-rs-air` and `aio-rs-air-macro`, and feature `air` of aio-rs, where
+  `aio::ui::prelude` and `TestUi` run on air with no Dioxus in the build
+  (50 crates, against `kit`'s 116). A view's body runs once; each hole
+  of `rsx!` follows exactly the signals it read. Views are built where
+  they are placed (their context and boundaries), components are holes
+  whose hooks keep their state if the body waits for a resource, plus
+  keyed lists, context, `ErrorBoundary`, `Suspense`, resources and tasks,
+  typed W3C-shaped event payloads that bubble through the handlers
+  (`stop_propagation` works), page scripts (`eval`), `onmounted` and
+  globals per app instance. Dioxus stays the default renderer; with
+  `kit` on too the facade is Dioxus's (the kit moves in step 2).
+  Measured again on the spike's bench (`crates/air-bench`, now in the
+  workspace): a one-line edit rebuilds in 0.54x Dioxus's time, a clean
+  build in 0.30x with 8 crates instead of 77, a held key over 10 000 rows
+  answers in 0.32x.
+- air's gates, each shown failing on a planted bug first: views removed
+  (or replaced by an error boundary in the same pass) leave no node,
+  effect, subscription, cleanup, handler, task, page script or page node;
+  misuse fails in release builds too (a hook outside a view's body, a
+  write while a hole or a memo computes, an effect loop, a signal used
+  after its view, a view placed twice, two rows with one key, a missing
+  `key:` or an `if let` in `rsx!` at compile time); a renderer fault
+  planted in air fails `TestUi` in the Rust page and the Electron page.
 - **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
   makes each async method read the state as it was when it was called
   and commit what it wrote, ran and scheduled at its end as one event, or
@@ -242,6 +290,22 @@ version may break things.
   (they answered anyone before); on loopback they stay open on an app
   without accounts or users, and `[server] open` opens them. Every
   endpoint and its default: [accounts](docs/auth/README.md#every-endpoint-and-what-opens-it).
+- **Breaking: `aio::testing` is the `testing` feature.** The test kit is
+  a dev-dependency now, so an app's builds never compile it (the
+  template's debug build 952 → 934 MB, dx-metrics' `debug_target_mb`). Fix: one line in the
+  `Cargo.toml` holding the tests, `[dev-dependencies] aio = { package =
+  "aio-rs", <its source>, features = ["testing"] }`; `ax create` writes it,
+  and `ax lint` names tests that use `aio::testing` without it
+  ([migration](docs/migration/README.md#the-test-kit-is-a-dev-dependency-in-02)).
+  `video` brings `testing`; `ax lint --fix` no longer drops `testing`.
+- `ax smoke` fails a `.deb` whose menu entry starts a program it doesn't
+  ship or names an icon it doesn't ship, and any page script that throws
+  (`ERROR [page] Uncaught …`).
+- A cassette whose arguments don't serialize is refused naming the call
+  and why; a tape that doesn't read names `AIO_CASSETTE=rerecord`.
+- Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
+  `aio::ui::chord`, renderer-free, so `TestUi` needs no kit; `aio::kit`
+  re-exports them as before.
 - **Breaking: `ax pin` and `ax pair` named as aio names them.** The
   pairing code is `ax pair <app> [--plain]` (aio's `am pair`), no longer
   `ax pin <app>`; `ax pair <app> <host:port> <code>` pairs a device as
@@ -345,6 +409,8 @@ version may break things.
 
 ### Fixed
 
+- `ax smoke <app>_<version>_<arch>.deb`: a Debian package's own name is
+  read for its app id.
 - The app quitting (it stops, its socket closes) right after the page
   vetoed a close (`window.close()` with a beforeunload handler) quits: the
   vetoed close, still settling, took the quit's own close of that window

@@ -1135,6 +1135,7 @@ async fn users_ended(u: crate::auth::Users, token: String, was: crate::auth::Ses
 type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
 type Refusal = Arc<dyn Fn(&str, &Rejected) + Send + Sync>;
 type OnSync = Arc<dyn Fn(&Synced) + Send + Sync>;
+type OnPatch = Arc<dyn Fn(&Value) + Send + Sync>;
 
 /// What one catch-up did (aio's `SyncStats`): the server's whole view reached
 /// the copy, on a reconnect or after a gap.
@@ -1261,6 +1262,7 @@ struct Inner<T: Cell> {
     refusals: Mutex<Vec<Refusal>>,
     tells: Mutex<Vec<crate::tell::Show>>,
     syncs: Mutex<Vec<OnSync>>,
+    patches: Mutex<Vec<OnPatch>>,
     owned: Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>,
 }
 
@@ -1508,6 +1510,7 @@ impl<T: Cell> Remote<T> {
             refusals: Mutex::default(),
             tells: Mutex::default(),
             syncs: Mutex::default(),
+            patches: Mutex::default(),
             owned: Mutex::default(),
         });
         let weak = Arc::downgrade(&inner);
@@ -1677,6 +1680,10 @@ impl<T: Cell> Remote<T> {
     fn take(&self, m: Value) {
         if matches!(m["t"].as_str(), Some("state" | "patch" | "reply")) {
             *lock(&self.inner.last_sync) = Some(crate::store::now_ms());
+        }
+        if matches!(m["t"].as_str(), Some("state" | "patch")) {
+            let fs = lock(&self.inner.patches).clone();
+            fs.iter().for_each(|f| f(&m));
         }
         match m["t"].as_str() {
             Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
@@ -1907,6 +1914,14 @@ impl<T: Cell> Remote<T> {
     /// (on a reconnect, or after a gap).
     pub fn on_sync(&self, f: impl Fn(&Synced) + Send + Sync + 'static) {
         lock(&self.inner.syncs).push(Arc::new(f));
+    }
+
+    /// Call `f` with each update the server sends, as it arrives (aio's
+    /// `onPatch`): a `{"t":"patch","seq","prev","ops"}` delta, or a
+    /// `{"t":"state"}` whole state (the first, a resync). The state is
+    /// their sum; this is the stream, so a test can see what was sent.
+    pub fn on_patch(&self, f: impl Fn(&Value) + Send + Sync + 'static) {
+        lock(&self.inner.patches).push(Arc::new(f));
     }
 
     /// Call `f` with the shown state after each change.

@@ -6,12 +6,13 @@
 // `data-t` handle or auto name, clicked at a point of their box with the
 // mouse, typed into with the keyboard; what the page does then (focus,
 // submit, scroll, observers) is the browser's own.
-use super::electron::Page;
+use super::electron::{Answered, Asked, Page};
 use super::{PATIENCE, TRACES, UNSEEN, dump, failing_on_purpose, wire_refusals};
 use crate::{Cell, Door};
 use base64::Engine;
 use crate::ui::{Component, View};
 pub use crate::ui::prelude::{Key, Modifiers};
+#[cfg(feature = "kit")]
 use dioxus::dioxus_core::{ScopeId, VirtualDom};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -62,11 +63,13 @@ pub(crate) const BRIDGE: &str = r#"window.__aioWire = (() => {
 })();"#;
 
 /// The views' end of the wire: frames from the page in, edits out.
+#[cfg(feature = "kit")]
 struct Wire {
     from_page: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     to_page: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 }
 
+#[cfg(feature = "kit")]
 impl futures_util::Stream for Wire {
     type Item = Result<Vec<u8>, dioxus_liveview::LiveViewError>;
 
@@ -80,6 +83,7 @@ impl futures_util::Stream for Wire {
     }
 }
 
+#[cfg(feature = "kit")]
 impl futures_util::Sink<Vec<u8>> for Wire {
     type Error = dioxus_liveview::LiveViewError;
 
@@ -100,6 +104,7 @@ impl futures_util::Sink<Vec<u8>> for Wire {
     }
 }
 
+#[cfg(feature = "kit")]
 /// Who rendered, from the span Dioxus opens for each render (`render`, its
 /// component as `scope`): each view's mounted components and their renders
 /// (aio DevTools' `tree`), and the tripwire for a view that renders forever.
@@ -267,11 +272,12 @@ pub struct Mount {
     scrollbars: bool,
     before: Vec<Box<dyn FnOnce()>>,
     network: Vec<String>,
+    stubs: Vec<(String, super::electron::Stub)>,
 }
 
 impl Default for Mount {
     fn default() -> Self {
-        Self { size: VIEWPORT, dark: false, scrollbars: true, before: vec![], network: vec![] }
+        Self { size: VIEWPORT, dark: false, scrollbars: true, before: vec![], network: vec![], stubs: vec![] }
     }
 }
 
@@ -306,15 +312,92 @@ impl Mount {
         self
     }
 
+    /// Answer the page's requests to `host` with `answer` (aio's `testUI({
+    /// fetch })`): from before the first render, each request the page
+    /// makes there (a picture, a video: what the window's policy lets a
+    /// page reach) is handed to it, and never reaches the network.
+    /// `Mount::fetch("cdn.example.org", |a| Answered::new(200, "image/svg+xml", SVG))`
+    pub fn fetch(mut self, host: &str, answer: impl Fn(&Asked) -> Answered + Send + Sync + 'static) -> Self {
+        self.stubs.push((host.into(), std::sync::Arc::new(answer)));
+        self
+    }
+
+    #[cfg(feature = "kit")]
     pub fn app(self, app: fn() -> View) -> TestUi {
         self.mount(VirtualDom::new(app))
     }
 
     /// Mount one component alone, with its props (aio's `testComponent`).
+    #[cfg(feature = "kit")]
     pub fn component<P: Clone + 'static, M: 'static>(self, c: impl Component<P, M>, props: P) -> TestUi {
         self.mount(VirtualDom::new_with_props(c, props))
     }
 
+    #[cfg(not(feature = "kit"))]
+    pub fn app(self, app: fn() -> View) -> TestUi {
+        self.mount(Box::new(app))
+    }
+
+    /// Mount one component alone, with its props (aio's `testComponent`).
+    #[cfg(not(feature = "kit"))]
+    pub fn component<P: Clone + 'static, M: 'static>(self, c: impl Component<P, M>, props: P) -> TestUi {
+        self.mount(Box::new(move || c.call(props.clone())))
+    }
+
+    /// Open the page, then the views on air: a root shown, and a task
+    /// that carries the page's frames to it and its edits back.
+    #[cfg(not(feature = "kit"))]
+    fn mount(self, app: Box<dyn Fn() -> View>) -> TestUi {
+        let sandbox = crate::paths::sandbox().expect("a test sandbox");
+        UNSEEN.with_borrow_mut(|u| _ = u.get_or_insert_default());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        crate::capabilities::hold_for_tests(&self.network);
+        let page = self.page();
+        let (to_view, from_page) = tokio::sync::mpsc::unbounded_channel();
+        let (to_page, from_view) = tokio::sync::mpsc::unbounded_channel();
+        let local = tokio::task::LocalSet::new();
+        let (task, view) = {
+            let _in = rt.enter();
+            let root = air::Root::new();
+            for f in self.before {
+                root.within(f);
+            }
+            root.show(app);
+            let view = root.owner();
+            (local.spawn_local(pump(root, from_page, to_page)), view)
+        };
+        Self::started(TestUi { task, local, view, to_view, from_view, video: super::video::Recorder::asked(), page, rt, hovering: false, sent: 0, _sandbox: sandbox })
+    }
+
+    /// The test's page, sized and themed as asked.
+    fn page(&self) -> Page {
+        // An answered host is reached (the network rule lets it by), never the network.
+        let reach: Vec<String> = self.network.iter().cloned().chain(self.stubs.iter().map(|(h, _)| h.clone())).collect();
+        let page = Page::open(self.size.0, self.size.1, &reach);
+        page.answer(self.stubs.clone());
+        page.cmd("Emulation.setDeviceMetricsOverride", metrics(self.size));
+        // A window on no screen has no focus of its own: the page behaves as
+        // the focused window a person types into (`:focus`, Tab, focus events).
+        page.cmd("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }));
+        let scheme = if self.dark { "dark" } else { "light" };
+        page.cmd("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }));
+        if !self.scrollbars {
+            page.cmd("Emulation.setScrollbarsHidden", json!({ "hidden": true }));
+        }
+        page
+    }
+
+    /// The first settle, and the mount's audit.
+    fn started(mut ui: TestUi) -> TestUi {
+        ui.settle();
+        // Every mount is audited, as aio did: said, not failed (assert on `contrast()` for that).
+        for f in ui.contrast() {
+            eprintln!("aio: text a person can't read: {f}");
+        }
+        ui
+    }
+
+    #[cfg(feature = "kit")]
     fn mount(self, vdom: VirtualDom) -> TestUi {
         // The page's events as the window's views get them (and the
         // elements `onmounted` hands out, answered by the page).
@@ -325,16 +408,7 @@ impl Mount {
         UNSEEN.with_borrow_mut(|u| _ = u.get_or_insert_default());
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
         crate::capabilities::hold_for_tests(&self.network);
-        let page = Page::open(self.size.0, self.size.1, &self.network);
-        page.cmd("Emulation.setDeviceMetricsOverride", metrics(self.size));
-        // A window on no screen has no focus of its own: the page behaves as
-        // the focused window a person types into (`:focus`, Tab, focus events).
-        page.cmd("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }));
-        let scheme = if self.dark { "dark" } else { "light" };
-        page.cmd("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }));
-        if !self.scrollbars {
-            page.cmd("Emulation.setScrollbarsHidden", json!({ "hidden": true }));
-        }
+        let page = self.page();
         let view = vdom.runtime();
         let (to_view, from_page) = tokio::sync::mpsc::unbounded_channel();
         let (to_page, from_view) = tokio::sync::mpsc::unbounded_channel();
@@ -344,9 +418,10 @@ impl Mount {
             for f in self.before {
                 view.in_scope(ScopeId::ROOT, f);
             }
-            local.spawn_local(dioxus_liveview::run(vdom, Wire { from_page, to_page }))
+            let run = dioxus_liveview::run(vdom, Wire { from_page, to_page });
+            local.spawn_local(async move { run.await.map_err(|e| e.to_string()) })
         };
-        let mut ui = TestUi {
+        let ui = TestUi {
             task,
             local,
             view,
@@ -359,12 +434,38 @@ impl Mount {
             sent: 0,
             _sandbox: sandbox,
         };
-        ui.settle();
-        // Every mount is audited, as aio did: said, not failed (assert on `contrast()` for that).
-        for f in ui.contrast() {
-            eprintln!("aio: text a person can't read: {f}");
+        Self::started(ui)
+    }
+}
+
+/// The views on air, on the window's wire: the page's frames to the root
+/// (its events, its scripts' replies), the tasks run when woken, each
+/// flush's edits to the page as one frame. A view's error no boundary
+/// caught fails the test.
+#[cfg(not(feature = "kit"))]
+async fn pump(
+    root: air::Root,
+    mut from_page: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    to_page: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+) -> Result<(), String> {
+    let woke = std::sync::Arc::new(tokio::sync::Notify::new());
+    let w = woke.clone();
+    air::on_wake(move || w.notify_one());
+    loop {
+        air::run_tasks();
+        let edits = air::take_edits();
+        if !edits.is_empty() {
+            to_page.send(edits).map_err(|_| "the page is gone".to_string())?;
         }
-        ui
+        let uncaught = root.uncaught();
+        assert!(uncaught.is_empty(), "a view failed and no ErrorBoundary is above it: {}", uncaught.join("; "));
+        tokio::select! {
+            f = from_page.recv() => match f {
+                Some(f) => _ = root.event(&f),
+                None => return Ok(()),
+            },
+            _ = woke.notified() => {}
+        }
     }
 }
 
@@ -463,11 +564,15 @@ pub struct MountedComponent {
 /// `css=#cmd-0` / `css=.parts li:nth-child(2)` the one a CSS selector
 /// matches (two showing that text, or matching, fail, saying so).
 pub struct TestUi {
-    /// The views' task (the app's VirtualDom, on the window's wire).
-    task: tokio::task::JoinHandle<Result<(), dioxus_liveview::LiveViewError>>,
+    /// The views' task (the app's views, on the window's wire).
+    task: tokio::task::JoinHandle<Result<(), String>>,
     local: tokio::task::LocalSet,
     /// The views' runtime: the app's root scope, where its globals live.
+    #[cfg(feature = "kit")]
     view: std::rc::Rc<dioxus::dioxus_core::Runtime>,
+    /// The app's root, where its globals live.
+    #[cfg(not(feature = "kit"))]
+    view: air::Owner,
     to_view: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     from_view: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     /// Its steps as a video, when `AIO_TEST_VIDEO` asks.
@@ -533,6 +638,7 @@ impl TestUi {
 
     /// Run the views until `until` is done; a view that panicked fails the test with its panic.
     fn drive(&mut self, until: impl std::future::Future) {
+        #[cfg(feature = "kit")]
         renders::reset();
         self.rt.block_on(self.local.run_until(until));
         if self.task.is_finished() {
@@ -650,9 +756,19 @@ impl TestUi {
     }
 
     /// `f` in the app's root scope (where its globals live, and its tasks).
+    #[cfg(feature = "kit")]
     fn in_root<R>(&self, f: impl FnOnce() -> R) -> R {
         let _in = self.rt.enter();
         self.view.in_scope(ScopeId::ROOT, f)
+    }
+
+    #[cfg(not(feature = "kit"))]
+    fn in_root<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _in = self.rt.enter();
+        let r = air::with_owner(self.view, || air::batch(f));
+        // What it drew goes out with the views' next turn.
+        _ = self.to_view.send(vec![]);
+        r
     }
 
     /// Bytes the views have sent the page so far (their DOM edits and
@@ -663,8 +779,16 @@ impl TestUi {
 
     /// The mounted components, as a tree (aio DevTools' `tree`): each one's
     /// name and how many times it rendered (re-render tracking).
+    #[cfg(feature = "kit")]
     pub fn components(&self) -> Vec<MountedComponent> {
         renders::tree(std::rc::Rc::as_ptr(&self.view) as *const () as usize)
+    }
+
+    /// On air a body runs once and no component re-renders: no tree is
+    /// kept yet (plan step 2, with DevTools' `tree`).
+    #[cfg(not(feature = "kit"))]
+    pub fn components(&self) -> Vec<MountedComponent> {
+        vec![]
     }
 
     /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its refusal.
@@ -1101,7 +1225,7 @@ impl TestUi {
         if spec.chars().count() < 2 || !spec.contains('+') {
             return (spec.into(), Modifiers::empty());
         }
-        let c = crate::kit::Chord::parse(spec).unwrap_or_else(|e| panic!("{e}"));
+        let c = crate::ui::chord::Chord::parse(spec).unwrap_or_else(|e| panic!("{e}"));
         let cmd = if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL };
         let named = [(c.ctrl, Modifiers::CONTROL), (c.meta, Modifiers::META), (c.alt, Modifiers::ALT)];
         let mods = named

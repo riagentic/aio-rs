@@ -1086,6 +1086,7 @@ impl<T: Cell> Store<T> {
         s
     }
 
+    #[cfg(feature = "testing")]
     /// A memory store booted from data saved by version `v` of the cell,
     /// as `open` boots it: refused when it doesn't fit (D9, D10), else
     /// migrated and restored (`#[transient]` fields back to their defaults,
@@ -1285,6 +1286,7 @@ impl<T: Cell> Store<T> {
         self.clock.as_ref().map_or_else(now_ms, |c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    #[cfg(feature = "testing")]
     /// Run on `clock` instead of the wall clock (tests that move time).
     pub(crate) fn set_clock(&mut self, clock: std::sync::Arc<std::sync::atomic::AtomicI64>) {
         self.clock = Some(clock);

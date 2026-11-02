@@ -209,6 +209,15 @@ rt.block_on(async {
 - A copy shows what the server lets that user see: a per-user view
   ([Visibility](../state/visibility.md)) is tested by asserting on each
   client's `state()`.
+- `aio::testing::patches(&copy)` records what the copy receives from then
+  on (aio's `patches`): each `{"t":"patch","seq","prev","ops"}` delta and
+  each whole `{"t":"state"}` (a resync). `all()` is the list so far;
+  `until(|p| ..).await` waits for one (5 s, then fails naming those that
+  came). So "the field was left out of the delta" and "nothing was resent
+  whole" are assertable. `Remote::on_patch(f)` is the hook under it.
+- `aio::testing::call_all(&[&ana, &bo], "add", json!([1]))` makes the same
+  call from every copy at once (aio's `dispatchAll`), each predicted and
+  sent; then `converged`.
 
 ## `Sim`: copies under cuts, heals and lag
 
@@ -364,6 +373,13 @@ rt.block_on(async {
   running app: a second app with the same dirs is refused.
 - `Handle::open(&dirs.store)` opens that app's store; a persisted cell is
   a file of its own app, never the other's.
+- `TestApps` is the same in one harness (aio's `testApps`):
+  `world.boot::<Ledger>("service").await?` opens the cell from its own
+  dirs and serves it; `world.get::<Ledger>("service")` is its
+  `TestServer`, `world.dirs("service").logs` its logs folder,
+  `world.connect::<Ledger>("service", "desk").await?` a client of it. A
+  name not booted fails naming the booted ones; dropped, the apps stop,
+  the last booted first.
 - Logs, budgets and health are per process in aio-rs: two apps in one
   test binary share the process's log and report hooks. Test what must
   stay apart (logs, crash reports) with each app as its own process
@@ -398,9 +414,10 @@ can't cross doesn't compile.
 |---|---|
 | `testServer(config)` | `TestServer::start(handle, http)` / `start_with(handle, opts)` |
 | `testMultiClient(config, n)` | `TestServer::client(user)` per copy, `converged` |
-| `clients[i].patches`, `waitForPatch` | none: assert on each copy's `state()` |
-| `m.dispatchAll(action)` | call each copy in turn without awaiting: each is predicted at once |
-| `testApps(specs)`: N apps, per-app logs, budgets, feedback | several `TestServer`s with `AppDirs::at`; logs and reports are per process |
+| `clients[i].patches`, `onPatch`, `waitForPatch` | `aio::testing::patches(&copy)`: `all()`, `until(pred)`; `Remote::on_patch` |
+| `m.dispatchAll(action)` | `aio::testing::call_all(&[&a, &b], method, args)` |
+| `testApps(specs)`: N apps, each its own dirs, logs, port | `TestApps`: `boot::<C>(name)`, `get`, `dirs(name).logs`, `connect`; problem reports are per process |
+| `testServer(config)`: a whole app, every cell | one cell per `TestServer` until one socket carries every cell (the sync work, SY3) |
 | `testServer({ workers: "real" })` | none needed: no worker cells |
 | boot refusal of a credential field visible to the UI | none at boot: [`ax lint`](lint.md) flags it |
 | `freePort()` | none needed: `TestServer` binds port 0 |

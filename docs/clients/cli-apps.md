@@ -271,8 +271,9 @@ does the same for an app that parses its arguments some other way.
 
 ## Gaps against aio
 
-- aio's `testIO()` captures a whole run (stdout, stderr, exit as
-  `CliExit`); aio-rs tests the pure parts and the streams above, and a
+- aio's `testIO()` captures a whole run, its exit too (`CliExit`);
+  aio-rs's `aio::testing::TestIo` captures the prompts, styles and
+  progress (stdin, a terminal or not, colour, stdout and stderr), and a
   run of `args`/`fail` exits the process (test it as a binary, or test
   `parse` and `failure`).
 - aio's `watch` hides the cursor, coalesces changes of one tick into one
