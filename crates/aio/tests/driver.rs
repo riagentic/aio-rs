@@ -232,7 +232,7 @@ fn the_surface_lists_what_a_person_can_see_and_use() {
 }
 
 fn unnamed() -> View {
-    let mut n = signal(|| 0);
+    let n = signal(|| 0);
     rsx! {
         form {
             label { "Email", input { r#type: "email" } }
@@ -584,7 +584,7 @@ fn a_view_that_writes_what_it_reads_is_caught() {
 
 #[component]
 fn Clicks() -> View {
-    let mut n = signal(|| 0);
+    let n = signal(|| 0);
     rsx! { button { "data-t": "more", onclick: move |_| n += 1, "{n}" } }
 }
 
@@ -786,7 +786,7 @@ fn the_test_world_has_an_app_home() {
 
 fn coach() -> View {
     let got = signal(String::new);
-    let mut inputs = signal(|| 0);
+    let inputs = signal(|| 0);
     rsx! {
         ul { class: "parts",
             li { id: "part-0", "data-done": "true", "Purse" }

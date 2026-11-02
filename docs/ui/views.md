@@ -1,10 +1,12 @@
 # Views
 
 Views are `rsx!` components written against `aio::ui`
-(`use aio::ui::prelude::*;`): real HTML and CSS. `aio::ui` names no
-renderer: Dioxus 0.7 draws the views today, and air, aio-rs's own
-renderer, takes its place without an app change
-([air](../design/air.md)). The same views are drawn by the shared Electron runtime on the
+(`use aio::ui::prelude::*;`): real HTML and CSS, drawn by air, aio-rs's
+own fine-grained renderer ([air](../design/air.md)). A component's body
+runs once, as it mounts; what follows state is its holes (every text,
+attribute, child, `if` and `for` of its `rsx!` that isn't a literal),
+each writing only its own part of the page when what it read changes.
+The same views are drawn by the shared Electron runtime on the
 desktop, by the system WebView on Android and by the browser for
 `ax build --web` ([targets](../build/targets.md)). A cell holds the state;
 a view reads it and calls its methods. Views need aio-rs's feature `kit`
@@ -47,7 +49,7 @@ aio::client!(Tasks, tasks);
 
 #[component]
 pub fn App() -> View {
-    use_live(); // once, in the root: commits from effects re-render too
+    use_live(); // once, in the root: commits from effects reach the views too
     rsx! {
         main { Draft {} List {} }
     }
@@ -55,7 +57,7 @@ pub fn App() -> View {
 
 #[component]
 fn Draft() -> View {
-    let draft = part(|t| &t.draft); // a handle: re-renders only when `draft` changes
+    let draft = part(|t| &t.draft); // a handle: a hole reading it follows `draft` only
     rsx! {
         form { onsubmit: move |e| { e.prevent_default(); _ = act!(add()); },
             input { "data-t": "draft", value: "{draft}",
@@ -77,7 +79,7 @@ fn List() -> View {
     }
 }
 
-/// A row by props: skipped while its props are equal.
+/// A row by props: kept by its key while the list around it changes.
 #[component]
 fn Item(text: String) -> View {
     rsx! { li { "{text}" } }
@@ -107,14 +109,14 @@ aio_shell::run(app::App, aio_shell::Window { width: 900, height: 640, ..aio_shel
 ```text
 aio.toml ─ aio::config!() ─ main.rs: SOURCE.set(Source::for_app(..)) ─ aio_shell::run(App, ..)
                                               │
-  a person clicks ─ handler ─ act!(add()) ─ the cell's method ─ commit ─ the views that read
-                                                                   │     a changed field re-render
+  a person clicks ─ handler ─ act!(add()) ─ the cell's method ─ commit ─ the holes that read
+                                                                   │     a changed field run again
                                      effects, schedules, sync ─────┘     (at most every 150 ms)
 ```
 
 - A **cell** owns the state and its rules; its methods are the only way
   to change it, and every change is an event in its log.
-- A **view** reads the state (`part(..).get()`, `name()`), shows it, and turns what
+- A **view** reads the state in its holes (`part(..)`, `name()`), shows it, and turns what
   a person does into calls (`act!`).
 - The **window** (the shared Electron runtime, Android's WebView, a
   browser tab) shows the page the views make; nothing in a view depends
@@ -130,32 +132,33 @@ per test):
 | Item | What it is |
 |---|---|
 | `SOURCE` | where the cell lives (`aio::Source::for_app(&cfg, &dirs)`: this process's store, or a synced copy of a server's) |
-| `part(\|c\| &c.field)` | a handle on one top-level field (`.get()`, `.with(\|v\| ..)`, `"{p}"`, `.ver()`); a view reading it re-renders only when it changes |
-| `name()` | the whole state (`Arc<Cell>`); in a render it re-renders on every commit |
-| `use_live()` | in the root, once: commits from effects, schedules and sync re-render too |
+| `part(\|c\| &c.field)` | a handle on one top-level field (`.get()`, `.with(\|v\| ..)`, `"{p}"`, `.ver()`); a hole reading it runs again only when it changes |
+| `name()` | the whole state (`Arc<Cell>`); a hole reading it runs again on every commit; the body reads it once |
+| `use_live()` | in the root, once: commits from effects, schedules and sync reach the views too |
 | `use_status()` | how the copy stands: `online`, `pending`, `degraded`, `conn`, `last_sync`, `rtt` |
 | `use_pending(Some("method"))` | calls of that method in flight (`None`: all), for a spinner |
 | `use_time_travel()`, `time_travel(ask)` | the cell's history and steps through it (`kit::TimeTravelPanel`) |
 | `act!(method(args))` | calls a method from a handler |
 
 `aio::client!(Cell, name, name_at)` also makes `name_at(|c| value)`: a
-[`memo`](#local-state-and-hooks) of a value made from the state, re-rendering
-when that value changes.
+[`memo`](#local-state-and-hooks) of a value made from the state, its
+readers told when that value changes.
 
 ## Reading and calling
 
 - `part(|c| &c.field)` is a handle on one top-level field; reading it
-  (`.get()`, `.with(|v| ..)`, `"{p}"`) subscribes the view to that field
-  only. Pick the field, then index it (`part(|c| &c.rows).with(|r| r[i].clone())`,
+  in a hole or a `memo` (`.get()`, `.with(|v| ..)`, `"{p}"`) follows that
+  field only. Read in the body (`let n = part(..).get();` before `rsx!`)
+  it is read once, as the view mounts, and never follows. Pick the field, then index it (`part(|c| &c.rows).with(|r| r[i].clone())`,
   not `part(|c| &c.rows[i])`). `.ver()` is the field's stamp, for caches
   ([performance](../performance.md#1-read-fields)).
 - `name()` reads the whole state. Use it in handlers, which don't
-  subscribe; a dev build names, once, each render that reads it (`[hint]`
-  in the log).
+  follow anything; a dev build names, once, each view body that reads it
+  (`[hint]` in the log).
 - `act!(method(args))` calls the method; a refusal is logged and gives
-  `None`, an answer `Some(value)`. A view's call renders at once; commits
-  from effects, schedules and other threads render at most once per
-  `aio::ui::BACKGROUND` (150 ms).
+  `None`, an answer `Some(value)`. A view's call shows at once; commits
+  from effects, schedules and other threads reach the views at most once
+  per `aio::ui::BACKGROUND` (150 ms).
 - A refusal is the cell's last word, not the view's message: check the
   input in the view first (as `Draft` disables its button), so a person
   never meets a refusal they can't read.
@@ -163,9 +166,11 @@ when that value changes.
 ## Components, props and children
 
 A component is a function returning `View`; `#[component]` turns its
-arguments into props. A component whose props are equal (`PartialEq`)
-doesn't render again, so rows that take their data by props stay put
-when the list around them changes.
+arguments into props. Its body runs once, and so are its props
+evaluated, unless a prop is a `Prop<T>` (or a `Signal`, a `Part`): given
+an expression (`value: name.get()`), a `Prop` follows it; given a
+constant, it is that constant. Rows that take their data by props and
+a key stay put when the list around them changes.
 
 ```rust
 use aio::ui::prelude::*;
@@ -183,7 +188,7 @@ fn Panel(title: String, #[props(default)] note: Option<String>, children: View) 
     rsx! {
         section { class: "card",
             h2 { "{title}" }
-            {note.map(|n| rsx! { p { class: "muted", "data-t": "note", "{n}" } })}
+            {note.clone().map(|n| rsx! { p { class: "muted", "data-t": "note", "{n}" } })}
             {children}
         }
     }
@@ -195,16 +200,16 @@ fn Contacts() -> View {
         vec![Contact { id: 1, name: "Ada".into(), fav: true }, Contact { id: 2, name: "Linus".into(), fav: false }]
     });
     let field = signal(|| None::<std::rc::Rc<MountedData>>);
-    let none = people.read().is_empty();
+    let none = memo(move || people.with(Vec::is_empty));
     rsx! {
         Panel { title: "Contacts", note: "people you know",
             ul {
-                for c in people.read().iter() {
+                for c in people.get() {
                     // key: what keeps a row's element (and its state) with its data
                     li { key: "{c.id}", class: aio::ui::cx(&[("row", true), ("fav", c.fav)]), "{c.name}" }
                 }
             }
-            if none {
+            if none.get() {
                 p { "data-t": "empty", "No one yet" }
             }
             // A ref: the element, once mounted, for what only it can do.
@@ -218,7 +223,7 @@ fn Contacts() -> View {
                 "Find"
             }
             // `false` leaves a boolean attribute out.
-            button { "data-t": "clear", disabled: none, onclick: move |_| people.write().clear(), "Clear" }
+            button { "data-t": "clear", disabled: none.get(), onclick: move |_| people.write().clear(), "Clear" }
             svg { "data-t": "dot", width: "8", height: "8", circle { cx: "4", cy: "4", r: "4" } }
         }
     }
@@ -243,6 +248,7 @@ assert_eq!(ui.count("li"), 0);
 | `#[props(default)] n: u32` | may be left out: `Default` |
 | `#[props(default = 3)] rows: u32` | may be left out: that value |
 | `#[props(into)] label: String` | takes `&str` too |
+| `value: Prop<String>` | follows the expression given (`value: name.get()`); `.get()` reads it in a hole |
 | `note: Option<String>` | may be left out (`None`); `note: "x"` gives `Some` |
 | `children: View` | what the caller writes inside |
 | `onpick: EventHandler<String>` | a handler the caller passes; `onpick.call(v)` |
@@ -252,15 +258,16 @@ assert_eq!(ui.count("li"), 0);
 
 | Want | Write |
 |---|---|
-| text with values | `"{name} ({count})"` (format args; `{x:?}` too) |
+| text with values | `"{name} ({count})"` (format args; `{x:?}` too): a hole, following what it reads |
+| a value that follows state | any expression in a text, attribute or `{child}`: `{n.get() * 2}`, `disabled: !ok.get()` |
 | an attribute | `class: "row"`, `"data-t": "x"`, `"aria-label": "Close"` |
 | a value that may be absent | `title: tip` where `tip: Option<String>`: `None` leaves it out |
 | classes by condition | `class: aio::ui::cx(&[("row", true), ("on", on)])` |
 | inline style | `style: "width: {w}px"`, or one property: `width: "{w}px"` |
-| a condition | `if on { X {} } else { Y {} }` |
+| a condition | `if on.get() { X {} } else { Y {} }`: swaps only when it flips |
 | a value that may be absent | `{note.map(\|n\| rsx! { p { "{n}" } })}` (no `if let` in `rsx!`: air refuses it) |
-| a match | `match page { A => rsx! { .. }, B => rsx! { .. } }` |
-| a list | `for x in xs { li { key: "{x.id}", .. } }` (`key:` on every row: `ax lint` refuses a row without one) |
+| a match | a hole: `{match page.get() { A => rsx! { .. }, B => rsx! { .. } }}` |
+| a list | `for x in xs.get() { li { key: "{x.id}", .. } }` (`key:` on every row's first node: `rsx!` refuses a row without one; items are `Clone + PartialEq`) |
 | several roots | a component may return them side by side: `rsx! { A {} B {} }` |
 | an element made elsewhere | `{elem}` where `elem: View` |
 | trusted HTML | `div { dangerous_inner_html: "{html}" }`: never with text a person typed; the kit's `Markdown` is safe |
@@ -308,7 +315,7 @@ fn Counter() -> View {
     let mut n = signal(|| 1);
     let double = memo(move || n.get() * 2); // follows `n`
     let log = signal(Vec::<i32>::new);
-    // Runs after a render that changed what it reads.
+    // Runs once the view is drawn, again when what it reads changes.
     effect(move || log.write().push(double.get()));
     rsx! {
         button { "data-t": "inc", onclick: move |_| n += 1, "{n}" }
@@ -333,19 +340,19 @@ assert_eq!(ui.read(&THEME), "dark");
 | `signal(\|\| v)` | a `Copy` value of this component; `n.get()` reads (a copy), `n.with(\|v\| ..)` and `n.read()` borrow, `n.set(v)` (readers told only if it differs), `n.update(\|v\| ..)`, `n.write()`, `n += 1`, `n.toggle()`, `"{n}"` | `useLocal`, `useSignal` |
 | `static S: Global<T> = Global::new(\|\| v)` | one value for the whole app (per app instance), the same methods | module-level `signal()` |
 | `.get_untracked()`, `.with_untracked(..)`, `.read_untracked()` | reads without following | `.peek()`, `untrack` |
-| `memo(move \|\| ..)` | a derived value, re-made when what it reads changes; equal answers don't re-render | `computed()`, `useMemo` |
-| `effect(move \|\| ..)` | runs after the render, again when what it reads changes | `effect()`, `useEffect` |
+| `memo(move \|\| ..)` | a derived value, re-made when what it reads changes; equal answers wake no reader | `computed()`, `useMemo` |
+| `effect(move \|\| ..)` | runs once the view is drawn, again when what it reads changes | `effect()`, `useEffect` |
 | `resource(move \|\| async move { .. })` | an async value, re-run when what it reads changes; `.get()` is `None` until ready, `.suspend()?` waits under a `Suspense` | `useResource` |
-| `watch(deps, move \|deps\| ..)` | runs after the render, again when `deps` (values the view made, e.g. of its props) differ | `on()`, `watch()` |
+| `watch(deps, move \|deps\| ..)` | runs once the view is drawn, again when `deps` (values the view made, e.g. of its props) differ | `on()`, `watch()` |
 | `callback(move \|x\| ..)` | a handler made once, for a prop | `useCallback` |
 | `task(move \|\| async move { .. })` | work for the view's life: started at mount, stopped at unmount | `onMount` + a loop |
-| `once(\|\| ..)` | made once, at the first render (mount) | `onMount`, `useRef` |
+| `once(\|\| ..)` | made once, as the view mounts | `onMount`, `useRef` |
 | `on_cleanup(\|\| ..)` | runs as the component goes (unmount) | `onCleanup`, `onUnmount` |
 | `spawn(async move { .. })` | a task of the component, dropped with it (in a handler; in the body, `task`) | |
 | `spawn_forever(async move { .. })` | a task of the app, outliving the view that started it | |
 | `provide(\|\| v)`, `context::<T>()`, `try_context::<T>()` | a value for every component inside | `createContext`, `useContext` |
 | `eval(js)` | a script in the page: `aio.send(v)` hands a value to the view (`.recv().await`), `return v` ends it (`.join().await`) | |
-| `aio::kit::use_context_select(\|t: &T\| ..)` | a part of a context, re-rendering only when it changes | `useContextSelector` |
+| `aio::kit::use_context_select(\|t: &T\| ..)` | a part of a context, followed only when it changes | `useContextSelector` |
 | `aio::kit::use_id("tab")` | a stable, unique id for `aria-controls`, `for` | `useId` |
 | `aio::kit::use_held(&pool, key)` | a held resource for this view, let go when the key changes or the view goes | `useResource` (a held one) |
 | `aio::kit::use_frame(active, \|since_start, since_last\| ..)` | runs once a frame while `active` | `useRaf` |
@@ -357,13 +364,13 @@ assert_eq!(ui.read(&THEME), "dark");
 
 | Moment | Write |
 |---|---|
-| first render (mount) | `once(\|\| ..)`: runs once, its value kept |
-| after each render that changed what it read | `effect(move \|\| ..)` |
+| mount | the component's body (once); `once(\|\| ..)`: runs once, its value kept |
+| when what it read changed | `effect(move \|\| ..)` |
 | the element is in the page | `onmounted: move \|e\| ..` on it |
-| a render | the component's body: keep it free of side effects |
+| a change | the holes that read it: keep them free of side effects |
 | unmount | `on_cleanup(\|\| ..)`; tasks from `spawn` and async handlers stop by themselves |
 
-Children render before their parents' effects run, so a parent's
+Children are drawn before their parents' effects run, so a parent's
 `effect` sees its children mounted. Everything a component started
 with `spawn`, `task`, `use_frame`, `use_interval` or a hook of the kit stops with
 it: there is nothing to clean up by hand.
@@ -379,18 +386,22 @@ use aio::ui::prelude::*;
 
 #[component]
 fn Amount(text: String) -> View {
-    let n: u32 = text.parse()?; // a parse error fails this render
+    let n: u32 = text.parse()?; // a parse error fails this view
     rsx! { p { "data-t": "amount", "{n}" } }
 }
 
 #[component]
 fn App() -> View {
-    let text = signal(|| "12".to_string());
+    let broken = signal(|| false);
     rsx! {
-        button { "data-t": "break", onclick: move |_| text.set("twelve".into()), "Break" }
+        button { "data-t": "break", r#type: "button", onclick: move |_| broken.set(true), "Break" }
         ErrorBoundary {
             fallback: |_: String| rsx! { p { "data-t": "oops", "Can't show that amount" } },
-            Amount { text: text.get() }
+            if broken.get() {
+                Amount { text: "twelve" }
+            } else {
+                Amount { text: "12" }
+            }
         }
     }
 }
@@ -405,7 +416,7 @@ assert!(ui.present("oops"));
 
 A view waiting for a [`resource`](#local-state-and-hooks) (`res.suspend()?`)
 shows the nearest `Suspense { fallback: rsx! { .. }, .. }`'s fallback until
-it loads. A panic in a render is a bug, not an error: a debug build stops on it,
+it loads. A panic in a view is a bug, not an error: a debug build stops on it,
 and `TestUi` fails the test with the component named. An error in a
 handler isn't caught by a boundary: a refused call through `act!` is
 logged and gives `None`.
@@ -447,10 +458,10 @@ fn App() -> View {
     use_live();
     let status = use_status();
     let busy = use_pending(Some("save"));
-    let saved = part(|d| &d.saved).get();
+    let saved = part(|d| &d.saved);
     rsx! {
         aio::kit::ConnectionStatus { status: status.get() }
-        button { "data-t": "save", disabled: busy.get() > 0, onclick: move |_| _ = act!(save()),
+        button { "data-t": "save", r#type: "button", disabled: busy.get() > 0, onclick: move |_| _ = act!(save()),
             if busy.get() > 0 { "Saving…" } else { "Save" }
         }
         p { "data-t": "saved", "{saved}" }
@@ -470,8 +481,8 @@ assert_eq!(ui.text("save"), "Save");
 | aio (AIR) | aio-rs (`aio::ui`) |
 |---|---|
 | `<li class="row" data-t="x">{name}</li>` | `li { class: "row", "data-t": "x", "{name}" }` |
-| `{items.map(i => <Row key={i.id} />)}` | `for i in items.iter() { Row { key: "{i.id}" } }` |
-| `{cond && <X />}` | `if cond { X {} }` |
+| `{items.map(i => <Row key={i.id} />)}` | `for i in items.get() { Row { key: "{i.id}" } }` |
+| `{cond && <X />}` | `if cond.get() { X {} }` |
 | `onClick={() => ..}` | `onclick: move \|_\| ..` |
 | `signal(0)` at module level | `static N: Global<i32> = Global::new(\|\| 0);` |
 | `useLocal(0)` in a component | `let n = signal(\|\| 0);` |
@@ -479,14 +490,14 @@ assert_eq!(ui.text("save"), "Save");
 | `effect(() => …)` | `effect(move \|\| …)` |
 | `onMount` / `onCleanup` | `once(..)` / `on_cleanup(..)` |
 | `useRef()` on an element | `onmounted: move \|e\| *el.write() = Some(e.data())` |
-| `batch(..)` | nothing: a handler's writes render once |
+| `batch(..)` | nothing: a handler's writes reach the page in one flush |
 | `untrack(..)` / `.peek()` | `.get_untracked()`, `.read_untracked()` |
 | `<Show when>` / `<For each>` | `if` / `for` inside `rsx!` |
 | `ErrorBoundary` | `ErrorBoundary { fallback: \|e: String\| rsx! { .. }, children }` |
 | `<Suspense>` | `Suspense { fallback: rsx! { .. }, children }` |
 | `afterRender(() => el.scrollIntoView())` | `"data-aio-reveal"` on the element, or `onmounted` |
 | `useAio()` (all state) | `name()`, or better `part(..)` per field |
-| `cell.field` read in a render | `part(\|c\| &c.field)` |
+| `cell.field` read in a component | `part(\|c\| &c.field)`, read in a hole |
 | `cell.method(x)` from a handler | `act!(method(x))` |
 | `useConnected()` | `use_status()` |
 | `cell.method.pending()` | `use_pending(Some("method"))` |
@@ -496,10 +507,12 @@ assert_eq!(ui.text("save"), "Save");
 
 What changes in the way of thinking:
 
-- **What re-renders.** AIR re-renders the components that read a signal;
-  today's renderer re-renders a component when a signal it read changes
-  or its props aren't equal, and its children only when their props
-  changed. Rows by props, parts by field: [performance](../performance.md).
+- **What runs again.** AIR re-renders the components that read a
+  signal; air runs a component's body once, and what read a changed
+  signal runs again: a hole (a text, an attribute, a child, an `if`, a
+  `for`), a `memo` or an `effect`, never the body.
+  State read once at the top of the body is a snapshot; props follow only
+  as `Prop<T>`. Rows by props, parts by field: [performance](../performance.md).
 - **No dependency arrays.** Memos and effects follow what they read, as
   AIR's do; React's `[deps]` have no counterpart.
 - **Types.** Props, routes, a cell's fields and its methods' arguments
@@ -580,43 +593,36 @@ Routes are [routing](routing.md); styles and dark mode are
 
 ## Common mistakes
 
+- State read at the top of the body (`let n = part(..).get();`, `let s =
+  name();`, then `"{n}"`): read once, as the view mounts, it never
+  follows. Read it where it is shown (`"{n}"` with `let n = part(..)`,
+  `{name().x}`, `n.get()` inside `rsx!`) or in a `memo`.
+- A prop that must follow state given as a plain value (`text: String`
+  passed `text.get()`): props are evaluated once. Type it `Prop<T>`, or
+  pass a `Signal` or a `part` handle.
 - A `signal`, `memo`, `effect`, `once` or `use_…` behind an `if`, in a loop
-  or after an early `return`: they are matched by call order, so the next
-  render reads another one's value. Call them at the top, unconditionally
+  or after an early `return`: they are matched by call order (a hot
+  reload and a body run again after a `Suspense` find them by it), so
+  another one's value comes back. Call them at the top, unconditionally
   (`ax lint` refuses it).
-- Side effects in the body of a component (a call, a write to a signal
-  it reads): the body is a render and runs again; write in a handler or
-  an `effect`.
 - A signal read in a handler expecting the view to follow it: handlers
-  don't subscribe; read it in the render.
-- Reading `name()` in a render: it works, and re-renders the view on every
+  don't subscribe; read it in a hole.
+- Reading `name()` in a hole: it works, and runs the hole again on every
   commit of the cell. Read `part(..)` per field.
 - `part(|c| &c.rows[i])`: a reference into a list can't name its field, so
-  the view follows every commit. Pick the field, then index it.
+  the hole follows every commit. Pick the field, then index it.
 - Forgetting `use_live()` in the root: views then miss commits that don't
   come from them (effects, sync, schedules).
 - CSS or anything an edit should change kept in `once`: it is made
-  once, so a hot-patched edit doesn't show. Make it in the render.
+  once, so a hot-patched edit doesn't show. Make it in a hole.
 - `e.prevent_default()` on keys in a window comes too late: put
   `data-aio-prevent` on the element ([kit](kit.md#keys)).
-- A `for` loop whose body is a block keys each row inside an unkeyed
-  wrapper: put `key:` on the element the loop yields (`ax lint` warns).
-- Naming the renderer (a `use` of its crate, a dependency on it): it is
-  behind `aio::ui`, and `ax lint` refuses it.
-
-## Ready for air
-
-air runs a view once and updates only what read a changed signal
-([air](../design/air.md)). A view written this way needs no change when it
-lands:
-
-- Read state where it is shown: `"{n}"`, `n.get()` inside `rsx!`, or in a
-  `memo`; a value read once at the top of the body is a snapshot under air.
-- A prop that must follow state is a `Signal`, `Memo` or a `part` handle,
-  not a value read from one: air evaluates props once.
-- Every `for` row has `key:`; no `if let` inside `rsx!`.
-- `once(|| ..)` is the one-time setup, `effect`/`watch` the work that
-  follows state.
+- A `for` row without `key:` on its first node, or `if let` / `match`
+  as a node: `rsx!` refuses them. Make a bool for `if`, and put a `match`
+  in a `{child}` hole.
+- A 0.1 app's renderer left in (its paths, its dependency, a page
+  script's `send`): `ax lint` refuses them, and the migration guide's
+  section 8, [0.1 → 0.2](../migration/README.md), has the names.
 
 ## API
 

@@ -20,7 +20,7 @@ needed ([where an app gets aio-rs from](setup.md#where-an-app-gets-aio-rs-from))
 - Rust (rustup) and a C compiler and linker: [setup](setup.md#1-rust-and-a-c-toolchain).
 - `ax` on `PATH`: `ax version` prints its version.
 - `ax setup` once: it fetches the shared Electron runtime every window and
-  UI test uses, and dx for hot-patching. `ax setup --check` says what is
+  UI test uses. `ax setup --check` says what is
   missing without fetching; the exit code is 1 while a needed piece is.
 - Nothing else: no Node, no system browser, no OpenSSL.
 
@@ -158,8 +158,9 @@ pub fn App() -> View {
 
 - `aio::client!` connects the views to the cell (it makes `SOURCE`,
   `part`, `use_live` and the rest for this cell).
-- `part(|c| &c.count)` is a handle on one field: the view reading it
-  (`"{n}"`, `n.get()`) re-renders only when it changes.
+- `part(|c| &c.count)` is a handle on one field: a hole of `rsx!` reading
+  it (`"{n}"`, `n.get()`) runs again only when it changes (a view's body
+  runs once).
 - `act!(add(1))` calls a method from a handler.
 - `aio::use_css!` reads `assets/style.css`; under `ax dev` a saved edit
   shows at once, with no compile.
@@ -355,7 +356,7 @@ a service: [setup](setup.md#run-at-startup-or-as-a-service).
 
 | Command | What it does |
 |---|---|
-| `ax dev notes` | build, run, and hot-patch each saved edit in (dx); without dx, rebuild and restart |
+| `ax dev notes` | build, run, and bring each saved edit in live (CSS and markup at once, Rust hot-patched; on Windows a Rust edit rebuilds and restarts) |
 | `ax dev notes --fresh` | the same on new, empty data |
 | `ax dev notes --instance try` | a private copy with data of its own |
 | `ax dev notes --size 390x844` | the window at that size for this run |
@@ -425,8 +426,8 @@ on disk, who decided each setting).
 | the build fails naming an `aio.toml` key | `aio.toml` is parsed as the app builds | fix that key ([reference](../reference/aio-toml.md)) |
 | `cc` or `link.exe` not found | no C toolchain | [setup](setup.md#1-rust-and-a-c-toolchain) |
 | the window never opens (Linux) | Electron's system libraries are missing | install what `ax setup` names |
-| `ax dev` rebuilds on every edit | no dx, or an edit dx can't patch (a new dependency, a changed type) | `ax setup` fetches dx; the rest is expected |
-| a CSS edit doesn't show | the CSS is kept in `once` (made once) | `aio::use_css!` in the render |
+| `ax dev` rebuilds on every Rust edit | Windows (no hot-patching there yet), or an edit a patch can't take (a `Cargo.toml`) | expected |
+| a CSS edit doesn't show | the CSS is kept in `once` (made once) | `aio::use_css!` in a hole |
 | the app starts with no data | `[app] id` or the cell's `id` changed | change it back |
 | a second `ax dev` shows nothing new | the running app took the launch and the new one ended | stop the first, or `--instance <n>` |
 | a service won't start: the port is in use | another process has `[server] listen`'s port | stop it, or `--port <n>` for this launch |

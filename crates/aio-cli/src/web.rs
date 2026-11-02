@@ -1485,7 +1485,7 @@ pub(crate) mod browser {
 
 /// The web build on air in a real browser (a headless Chromium, the wasm32
 /// target and the lock's wasm-bindgen; skipped without them): the page's
-/// view drawn by air's interpreter talking to the module, no Dioxus in it.
+/// view drawn by air's interpreter talking to the module, air alone in it.
 #[cfg(all(test, unix))]
 mod browser_air {
     use super::browser::{Chromium, until};
@@ -1532,7 +1532,7 @@ mod browser_air {
         }
         let cfg = aio::config::Config::parse("[app]\nid = \"air-web-test\"\nname = \"Air web test\"").unwrap();
         assert_eq!(pack(&app, &cfg, &page, &out, "", true).unwrap(), Vec::<String>::new());
-        // No Dioxus in the page's build.
+        // air alone in the page's build.
         let tree = Command::new("cargo")
             .args(["tree", "--offline", "-e", "normal", "--prefix", "none", "--target", "wasm32-unknown-unknown"])
             .current_dir(&page)
@@ -1540,7 +1540,7 @@ mod browser_air {
             .unwrap();
         let tree = String::from_utf8_lossy(&tree.stdout);
         assert!(tree.lines().any(|l| l.starts_with("aio-rs-air ")), "air draws it: {tree}");
-        assert!(!tree.lines().any(|l| l.starts_with("dioxus")), "{tree}");
+        assert!(!tree.lines().any(|l| l.starts_with(crate::lint::RENDERER_0_1)), "{tree}");
         Some(out)
     }
 

@@ -316,7 +316,8 @@ impl Checks<'_> {
     }
 
     /// A view (returns `View`, or `Element`, its 0.1 name) or a hook (`use_…`):
-    /// what keeps something for it ([`HOOKS`]) runs on every render, in one order.
+    /// what keeps something for it ([`HOOKS`]) runs each time its body runs
+    /// (again once a resource it `?`s loads, after a hot reload), in one order.
     fn hooks(&mut self, sig: &Signature, body: &Block) {
         let element = matches!(&sig.output, ReturnType::Type(_, t)
             if matches!(&**t, syn::Type::Path(p) if last_is(&p.path, "View") || last_is(&p.path, "Element")));
@@ -329,16 +330,16 @@ impl Checks<'_> {
             self.push(
                 Severity::Error,
                 "hooks",
-                format!("`{hook}` in `{}` runs only sometimes (in a branch, a loop or a closure, or after an early `return` or `?`): hooks are matched by call order, so a render that skips one hands the next hook its state", sig.ident),
+                format!("`{hook}` in `{}` runs only sometimes (in a branch, a loop or a closure, or after an early `return` or `?`): hooks are matched by call order, so a run of the body that skips one hands the next hook its state", sig.ident),
                 line,
-                "call it at the top of the function, every render, before any early `return` or `?`, and branch on its value",
+                "call it at the top of the function, on every run, before any early `return` or `?`, and branch on its value",
             );
         }
         for (made, line) in h.fresh {
             self.push(
                 Severity::Error,
                 "hooks",
-                format!("`{made}` in the body of `{}` makes a new signal every render: its value is lost on the next one, and each copy is kept until the component goes", sig.ident),
+                format!("`{made}` in the body of `{}` makes a new signal each time its body runs (again once a resource it `?`s loads, after a hot reload): its value is lost then, and each copy is kept until the component goes", sig.ident),
                 line,
                 "make it once: `signal(|| ..)` (or `once(|| Signal::new(..))`)",
             );
@@ -638,7 +639,7 @@ struct Hooks {
     exits: bool,
     found: Vec<(String, usize)>,
     /// `Signal::new(..)` in the body (not in a hook's closure): a new signal
-    /// every render.
+    /// each run of the body.
     fresh: Vec<(String, usize)>,
 }
 

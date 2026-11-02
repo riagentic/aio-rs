@@ -91,7 +91,7 @@ pub const COMPONENTS: &str = "Aio.components";
 /// answer `{"windows": n}`, the windows told to build their views again.
 pub const HOT: &str = "Aio.hot";
 
-/// Apply a hot reload's templates (air's: Dioxus has its own devtools).
+/// Apply a hot reload's templates (air's).
 fn hot(params: &Value) -> Result<Value, String> {
     {
         use base64::Engine;

@@ -161,8 +161,8 @@ methods later or on a cadence, and survive restarts.
 ## Views
 
 Components (`aio::ui`, `rsx!`) read a cell's fields (`part(|c| &c.field)`) and call its
-methods (`act!(method(args))`). A view re-renders when a field it reads
-changes. [Views](../ui/views.md).
+methods (`act!(method(args))`). A view's body runs once; each hole of its
+`rsx!` that reads a field runs again when that field changes. [Views](../ui/views.md).
 
 ## Where code runs
 
@@ -248,8 +248,8 @@ A cursor, a slider or a stream changes state at a high cadence. One
 event per change is right for history but costly on disk:
 `#[coalesce]` on the method (or `#[cell(coalesce)]`) shows each change at
 once and writes a run of them within 100 ms. A view reads only the
-fields it shows (`part`), so a fast field re-renders only its own
-views. Decide this before the shape of the cell:
+fields it shows (`part`), so a fast field runs only the holes that show
+it. Decide this before the shape of the cell:
 [performance](../performance.md).
 
 ## The crates

@@ -265,7 +265,7 @@ impl<T> Event<T> {
         self.flow.prevented.get()
     }
 
-    /// Not [`prevent_default`](Self::prevent_default)ed (Dioxus's name).
+    /// Not [`prevent_default`](Self::prevent_default)ed (aio-rs 0.1's name).
     pub fn default_action_enabled(&self) -> bool {
         !self.default_prevented()
     }

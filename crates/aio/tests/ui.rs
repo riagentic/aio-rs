@@ -1,7 +1,5 @@
 //! Views re-render only for the parts they read (AIR-level updates).
 #![cfg(feature = "kit")]
-// Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
-#![allow(unused_mut)]
 use aio::act;
 use aio::prelude::*;
 use aio::testing::{TestUi, fails};
@@ -36,9 +34,9 @@ impl Pair {
 
 aio::client!(Pair, pair, pair_at);
 
-/// What a hole shows, its runs counted: a hole runs when its view renders
-/// on Dioxus, and when what it reads changes on air, so counting it holds
-/// both to AIR's rule (what didn't read a change doesn't re-run).
+/// What a hole shows, its runs counted: a hole runs when what it reads
+/// changes, so counting it holds air to AIR's rule (what didn't read a
+/// change doesn't re-run).
 fn seen<T>(runs: &AtomicUsize, v: T) -> T {
     runs.fetch_add(1, SeqCst);
     v
@@ -463,7 +461,7 @@ fn duplicated() -> View {
 }
 
 /// aio's duplicate-key tripwire: a debug build refuses keyed siblings that
-/// share a key (Dioxus's own check), once the list changes.
+/// share a key, once the list changes.
 #[cfg(debug_assertions)]
 #[test]
 fn siblings_with_one_key_are_refused() {
@@ -614,7 +612,7 @@ static HEARD: AtomicUsize = AtomicUsize::new(0);
 /// Two buttons whose box keeps Tab and ArrowDown, one outside it, and a
 /// list whose cursor row is revealed by the page.
 fn keyed() -> View {
-    let mut at = signal(|| 0usize);
+    let at = signal(|| 0usize);
     rsx! {
         div { "data-aio-prevent": "Tab ArrowDown",
             onkeydown: move |e| {

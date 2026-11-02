@@ -1,5 +1,5 @@
-//! air's `rsx!` and `#[component]`. Dioxus's syntax, a different output
-//! (its paths start at `air`: the crate, or the name `aio::ui::prelude`
+//! air's `rsx!` and `#[component]`: elements as `tag { attr: v, children }`,
+//! its output (its paths start at `air`: the crate, or the name `aio::ui::prelude`
 //! brings in, so an app needs no `air` dependency of its own):
 //! one static template per element tree (its markup pre-encoded as a byte
 //! string: one token, whatever its size) and one call per dynamic hole.
@@ -18,7 +18,7 @@ use quote::{ToTokens, format_ident, quote, quote_spanned};
 use std::cell::RefCell;
 
 /// Elements, text, `{expr}`, components, `for … in … { … }` (keyed rows:
-/// `key:` on the row), `if … { … } else { … }`, as Dioxus's `rsx!`. A
+/// `key:` on the row), `if … { … } else { … }`. A
 /// literal is static; a `"{x}"` string and every other expression is a
 /// hole that follows what it reads (the names it uses are cloned in).
 #[cfg(proc_macro)]
@@ -81,7 +81,7 @@ pub(crate) fn nodes(input: TokenStream) -> Result<Vec<Node>, String> {
 /// `fn Row(name: String, on: Signal<bool>) -> View`: a props struct
 /// `RowProps { pub name, pub on }` with its builder, and
 /// `fn Row(RowProps { name, on }: RowProps)`, called as `Row { name: …, on }`
-/// in `rsx!`. No arguments: a plain `fn() -> View`. Props as Dioxus's:
+/// in `rsx!`. No arguments: a plain `fn() -> View`. Props:
 /// `#[props(default)]` / `#[props(default = e)]` may be left out, an
 /// `Option<T>` is `None` unless given (and takes a `T`), a `View` is empty,
 /// `#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>` takes
@@ -694,6 +694,14 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         }
         return Ok(Node::If { cond, then: parse_nodes(&then)?, otherwise });
     }
+    if is_ident(t, "match") || is_ident(t, "while") || is_ident(t, "loop") {
+        return Err((
+            t.span(),
+            format!(
+                "air: `{t}` in rsx!: use a {{child}} hole (`{{match x {{ A => rsx! {{ .. }}, _ => rsx! {{}} }}}}`), an `if`, or a `for`"
+            ),
+        ));
+    }
     if let TokenTree::Ident(_) = t {
         let start = *i;
         let (path, inner) = until_block(toks, i)?;
@@ -818,7 +826,7 @@ fn attr_name(name: &str) -> String {
 }
 
 /// The DOM event an `on…` attribute listens for, and the payload its
-/// handler gets (as Dioxus's event tables type them).
+/// handler gets (`onkeydown` a `KeyboardEvent`, `oninput` a `FormEvent`, …).
 fn payload(ev: &str) -> Option<(String, &'static str)> {
     let p = match ev {
         "keydown" | "keyup" | "keypress" => "KeyboardData",
@@ -1391,8 +1399,10 @@ impl Tpl {
     }
 }
 
-/// A hole's closure: a single name is cloned per run (its type decides
-/// whether it follows anything: a signal does), anything else runs as written.
+/// A hole's closure: the names it reads are cloned in, and again per run
+/// (as a component's props), so `{match who { .. }}` or `{note.map(..)}` may
+/// take them by value; a single name's type decides whether it follows
+/// anything (a signal does).
 fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> TokenStream) -> TokenStream {
     let v: Vec<TokenTree> = e.clone().into_iter().collect();
     if let [TokenTree::Ident(i)] = v.as_slice() {
@@ -1403,7 +1413,7 @@ fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> Tok
     let mut r = vec![];
     captures(e, &mut r);
     let c = clones(&r);
-    call(quote!({ #c ::std::boxed::Box::new(move || #into({ #e })) }))
+    call(quote!({ #c ::std::boxed::Box::new(move || #into({ #c #e })) }))
 }
 
 /// `Row { a: x, "data-t": t, ..more, children… }` →
@@ -1479,11 +1489,16 @@ fn comp(n: &Node) -> TokenStream {
         let c = clones(&r);
         calls.push(quote!(.children({ #c move || #v })));
     }
+    let builder = match props.iter().any(|(k, _)| matches!(k, PropName::Attr(_))) || !spreads.is_empty() {
+        // Given attributes: a component that takes none says so.
+        true => quote!(air::__rt::with_attributes(air::__rt::builder_of(__air_c))),
+        false => quote!(air::__rt::builder_of(__air_c)),
+    };
     quote!({
         #[allow(unused_imports)]
         use air::__rt::{GlobalAttributes as _, GlobalAttributeNames as _};
         let __air_c = &#path;
-        air::Component::call(__air_c, air::__rt::builder_of(__air_c) #(#calls)* .build())
+        air::Component::call(__air_c, #builder #(#calls)* .build())
     })
 }
 

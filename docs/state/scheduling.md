@@ -443,9 +443,9 @@ skip all of that.
   times a second pays that copy every time: split the hot part into a
   small cell of its own, or use `aio::imbl`'s persistent collections
   (feature `imbl`), whose copy is O(1).
-- Views re-render at most once per `aio::ui::BACKGROUND` (150 ms) for
+- Views update at most once per `aio::ui::BACKGROUND` (150 ms) for
   commits from effects, schedules and other threads; a call from the
-  view renders at once ([performance](../performance.md)).
+  view shows at once ([performance](../performance.md)).
 - Pushes to a client are paced: a schedule's or an effect's commits
   reach a link at most once per `[server.limits] sync_interval_ms` (50
   ms, aio's `syncIntervalMs`), folded into one patch; a person's call

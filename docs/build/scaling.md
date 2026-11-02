@@ -262,8 +262,8 @@ app, on your machine.
 
 What is measured, in aio-rs's own repository:
 
-- `cargo test -p aio-rs --test list_speed -- --nocapture`: a held key
-  over a 1000-row list, renders, writes and wire bytes per key
+- `cargo test -p aio-rs -F kit --test list_speed -- --nocapture`: a held key
+  over a 1000-row list, renders and updates, writes and wire bytes per key
   ([performance](../performance.md#measured)).
 - `scripts/dx-metrics` (in an aio-rs checkout) measures a fresh template
   app: clean and incremental builds, the release build, binary and bundle
@@ -271,12 +271,10 @@ What is measured, in aio-rs's own repository:
   under `ax dev`; each run is a row of `scripts/dx-trend.csv`, and
   `--check` fails on a regression past its limit, judged against the same
   machine's rows only (in CI: against the base commit measured on the same
-  runner). `--live` times only the save-to-screen edits, on Dioxus and
-  on air one after the other, printed side by side. The latest row (Linux
-  x86_64): a 0.2 to 0.6 s boot, about 81 MB private memory for the window
-  (166 MB PSS), a 5.4 MB release binary, a 3.6 MB AppImage.
-- [Comparison](../comparison.md): one small app in aio-rs, Tauri and
-  Dioxus, measured once each.
+  runner). `--live` times only the save-to-screen edits, printed;
+  `--trend` prints the latest rows and today's limits.
+- [Comparison](../comparison.md): one small app in aio-rs and two other
+  Rust app stacks, measured once each.
 
 ## Not designed for
 

@@ -1,9 +1,6 @@
 //! The UI kit, driven like a person: what each control renders, says to
-//! assistive tech, and does on a click or a key. On Dioxus (`kit`) and on
-//! air (`air`), the same tests.
+//! assistive tech, and does on a click or a key.
 #![cfg(feature = "kit")]
-// Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
-#![cfg_attr(feature = "kit", allow(unused_mut))]
 use aio::kit::*;
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
@@ -953,7 +950,7 @@ fn a_held_keys_repeats_fire_only_movement_and_bindings_that_say_so() {
 }
 
 fn forms() -> View {
-    let mut sent = signal(|| 0);
+    let sent = signal(|| 0);
     let name = signal(String::new);
     rsx! {
         p { "data-t": "sent", "{sent}" }
@@ -989,7 +986,7 @@ fn enter_submits_a_form_with_no_submit_button_and_one_whose_button_the_view_is_e
 fn portals() -> View {
     let open = signal(|| false);
     let menu = signal(|| true);
-    let mut n = signal(|| 0);
+    let n = signal(|| 0);
     rsx! {
         PortalHost {
             div { "data-t": "clip", style: "overflow: hidden; height: 10px",
@@ -1014,7 +1011,7 @@ fn portals() -> View {
 
 #[component]
 fn Counter() -> View {
-    let mut c = signal(|| 0);
+    let c = signal(|| 0);
     rsx! { button { "data-t": "own", onclick: move |_| c += 1, "own {c}" } }
 }
 
@@ -1156,7 +1153,6 @@ fn a_group_keeps_a_leaving_row_in_its_place_until_it_is_gone_and_slides_moved_ro
         let from = ss.iter().position(|s| s.contains("translate(0px,20px)"));
         let back =
             from.and_then(|i| ss[i..].iter().position(|s| s.contains("transform:none;transition:transform 100ms")));
-        // (Dioxus keeps a style property the new style leaves out: `transform: none` stays.)
         let now = ss.last().unwrap();
         back.is_some() && !now.contains("translate") && !now.contains("transition:transform")
     };
@@ -1826,7 +1822,7 @@ struct Said {
 
 fn sandboxed() -> View {
     let said = signal(String::new);
-    let mut n = signal(|| 2);
+    let n = signal(|| 2);
     rsx! {
         WebIsland {
             island: PROBE,

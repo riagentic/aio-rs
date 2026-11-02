@@ -2,7 +2,7 @@
 
 On Linux, Windows and macOS an aio-rs app's views are drawn by the shared
 Electron runtime. The views themselves run in the app's Rust process: a
-view tree per window (Dioxus's `VirtualDom` today, behind `aio::ui`), whose DOM edits and events travel over a
+view tree per window (air's, behind `aio::ui`), whose DOM edits and events travel over a
 private socket to a small page in Electron. The page loads from
 `aio://app/`, connects to nothing and runs no app code; Electron's main
 process opens the window, the tray, notifications and dialogs when the app
@@ -458,8 +458,8 @@ What aio's Electron client has and aio-rs doesn't yet:
 
 - No custom window chrome (aio's `ui.chrome`: frameless window, own title
   bar): the OS title bar is always there. The window's verbs are there
-  (`page::minimize` and the rest); the title bar comes with the air
-  renderer.
+  (`page::minimize` and the rest), for a title bar drawn by the app once
+  frameless windows land.
 
 aio has no app menus beyond macOS's standard ones or a context-menu API,
 and opens one app window per process, as aio-rs does.

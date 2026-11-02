@@ -70,6 +70,26 @@ fn an_aria_bool_is_text_and_a_flag_is_presence() {
     assert_eq!(attrs(&p), [s("true"), s("true"), s("false"), s("menu"), s("")]);
 }
 
+/// A hole may take what it reads by value (`match who`, `note.map(..)`):
+/// its names are cloned in per run.
+#[test]
+fn a_hole_takes_its_names_by_value() {
+    fn app() -> View {
+        let n = Signal::new(0i64);
+        let who = String::from("ada");
+        let note: Option<String> = Some("n".into());
+        rsx! {
+            button { "data-t": "add", onclick: move |_| n += 1, "+" }
+            p { "data-t": "a", {match who { w if n.get() > 0 => format!("{w}!"), w => w }} }
+            p { "data-t": "b", {note.map(|s| format!("{s}{}", n.get())).unwrap_or_default()} }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!((p.text("a"), p.text("b")), ("ada".to_string(), "n0".to_string()));
+    p.click("add");
+    assert_eq!((p.text("a"), p.text("b")), ("ada!".to_string(), "n1".to_string()));
+}
+
 /// 1000 rows, a filter, a cursor: the list keyed by id.
 fn list() -> View {
     let all = Signal::new(rows(1000));

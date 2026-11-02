@@ -277,7 +277,7 @@ aio::client!(Metrics, metrics);
 
 #[component]
 pub fn App() -> View {
-    use_live(); // once, in the root: effects, schedules and other screens re-render it
+    use_live(); // once, in the root: commits from effects, schedules and other screens reach it
     let theme = aio::kit::theme_css(aio::kit::theme::hue("dash"));
     rsx! {
         style { {aio::ui::page_css(&[theme.as_str()], false)} }
@@ -288,25 +288,24 @@ pub fn App() -> View {
 
 #[component]
 fn Cards() -> View {
-    let load = part(|m| &m.load).get();
-    let mem = part(|m| &m.mem_mb).get();
-    let requests = part(|m| &m.requests).get();
+    let (load, mem, requests) = (part(|m| &m.load), part(|m| &m.mem_mb), part(|m| &m.requests));
     rsx! {
         section { class: "cards",
-            Card { label: "Load", value: format!("{load:.2}") }
+            // `value` is a `Prop`: each card follows its own field.
+            Card { label: "Load", value: format!("{:.2}", load.get()) }
             Card { label: "Memory", value: format!("{mem} MB") }
-            Card { label: "Requests", value: requests.to_string() }
+            Card { label: "Requests", value: requests.get().to_string() }
         }
         button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(record_request()), "Count a request" }
     }
 }
 
 #[component]
-fn Card(label: &'static str, value: String) -> View {
+fn Card(label: &'static str, value: Prop<String>) -> View {
     rsx! {
         div { class: "card", "data-t": "{label}",
             small { "{label}" }
-            strong { "{value}" }
+            strong { {value.get()} }
         }
     }
 }
@@ -321,15 +320,16 @@ fn points(loads: &[f64], peak: f64, (w, h): (f64, f64)) -> String {
 #[component]
 fn Chart() -> View {
     let history = part(|m| &m.history);
-    if history.with(Vec::is_empty) {
-        return rsx! { p { "data-t": "no-history", "No history for this account." } };
-    }
-    let loads: Vec<f64> = history.with(|h| h.iter().map(|s| s.load).collect());
-    let line = points(&loads, metrics().peak(), (300.0, 60.0));
+    let loads = memo(move || history.with(|h| h.iter().map(|s| s.load).collect::<Vec<f64>>()));
     rsx! {
-        svg { "data-t": "chart", view_box: "0 0 300 60", width: "100%", height: "120", role: "img",
-            "aria-label": "Load over the last {loads.len()} samples",
-            polyline { points: "{line}", fill: "none", stroke: "currentColor", stroke_width: "2" }
+        if loads.with(Vec::is_empty) {
+            p { "data-t": "no-history", "No history for this account." }
+        } else {
+            svg { "data-t": "chart", view_box: "0 0 300 60", width: "100%", height: "120", role: "img",
+                "aria-label": "Load over the last {loads.with(Vec::len)} samples",
+                polyline { points: {loads.with(|l| points(l, metrics().peak(), (300.0, 60.0)))},
+                    fill: "none", stroke: "currentColor", stroke_width: "2" }
+            }
         }
     }
 }
@@ -341,12 +341,12 @@ assert_eq!(ui.text("Requests"), "Requests1");
 # }
 ```
 
-- `part(|m| &m.load)` re-renders a view only when that field changes:
-  a new sample re-renders the cards and the chart, a counted request
-  only the cards.
+- A hole reading `part(|m| &m.load)` runs again only when that field
+  changes: a new sample updates the cards and the chart, a counted
+  request only its card.
 - `metrics()` reads the whole state; it is used here only for the
-  derived `peak()`, inside the view that re-renders on `history`
-  anyway.
+  derived `peak()`, in the chart's hole, which runs on every commit of
+  the cell (a sample changes `history` anyway).
 - A viewer has no history, so `Chart` shows its note: the projection,
   not the view, decides what a person may see.
 - `ConnectionStatus` shows "offline" or "syncing" when the screen's
@@ -440,7 +440,7 @@ ax build dash                       # the installable app
 - Tokens in `aio.toml` or the source: they are built into the binary.
   Read them from the environment or a file in `data/`.
 - `use_live()` missing in the root: the cards miss the schedule's
-  samples until something else re-renders them.
+  samples until a call from the window brings them.
 
 ## API
 

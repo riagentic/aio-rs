@@ -1,5 +1,5 @@
 // The page of the web build's test on air: the page's own cell, its view
-// drawn by air in the browser (no Dioxus in the build), driven from the
+// drawn by air in the browser, driven from the
 // test through its DOM.
 use aio::ui::prelude::*;
 use wasm_bindgen::prelude::*;

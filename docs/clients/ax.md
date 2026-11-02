@@ -167,7 +167,7 @@ back to its store when it isn't running.
 
 ### The build folder
 
-Every `cargo` and `dx` that `ax` runs builds into one folder per machine:
+Every `cargo` that `ax` runs builds into one folder per machine:
 `CARGO_TARGET_DIR` when it is set, else `target/` in the tool home. An
 app's libraries are built once for every app, and no build output lands
 in a repo.
@@ -182,9 +182,8 @@ ax setup [--check]
 
 What making apps needs. Checks Rust and the C toolchain it links with;
 fetches prebuilt, SHA-256 checked, the shared Electron runtime (then
-starts it once, so a missing system library is named), `dx` (the Dioxus
-CLI `ax dev` hot-patches with) and the wasm-bindgen the web build binds
-with; checks the Rust targets Android and the web build need; lists the
+starts it once, so a missing system library is named) and the
+wasm-bindgen the web build binds with; checks the Rust targets Android and the web build need; lists the
 optional tools. Each missing one is said with the command that gets it.
 
 | Flag | Does |
@@ -289,11 +288,11 @@ pinned to aio-rs v0.1.0  (resolved from "0.1")
 ax dev <app> [args…]
 ```
 
-Runs the app in your terminal while you edit. With dx (`ax setup` fetches
-it) an edit to a function hot-patches into the running app, its state
-kept; an edit it can't patch (a new type, a changed struct) rebuilds and
-restarts. Without dx every edit rebuilds and restarts. A failed build
-leaves the last good one running; `ax errors` shows why.
+Runs the app in your terminal while you edit. A saved stylesheet and
+`rsx!` markup show at once; a Rust edit is hot-patched into the running
+app by ax itself (Linux, macOS), its state kept; an edit it can't patch
+(a `Cargo.toml`) rebuilds and restarts, as does a Rust edit on Windows.
+A failed build leaves the last good one running; `ax errors` shows why.
 
 The words after the app go to the app, except these, which `ax dev` reads:
 
@@ -305,24 +304,23 @@ The words after the app go to the app, except these, which `ax dev` reads:
 | `--display isolated`, `current`, `:N` | always nested; always your desktop; that X display |
 | `--size 390x844` | the window at that size for this run (its saved size untouched) |
 | `--watch=false`, `--no-watch` | build and run it once, no watching |
-| `--watch=src/ui,assets` | rebuild on changes in those folders of the app only (with dx: rebuilds, no hot-patch) |
+| `--watch=src/ui,assets` | reload, patch and rebuild on changes in those folders of the app only |
 | `--detach` | the session in the background, its output in `logs/dev.out`; `ax stop` ends it |
 | `--verbose` | the app's log at `debug` (`AIORT_LOG`) |
 | `--title <t>` | the window's title for this run (`AIORT_TITLE`) |
 | `--cdp[=port]` | the window opens the DevTools protocol on loopback (a free port without one), for other tools |
-| `--tui` | dx's own screen and keys instead of `ax`'s compact lines |
 | `--android [--device serial] [--native]` | on the attached emulator or phone (`ANDROID_SERIAL`; none: `AIO_AVD` booted): its web build in a dev APK installed once beside the app, each edit reloading it (`--native`, or no web build: the app itself for that CPU, again on every save); its log in the terminal |
 | `--web [--port N] [--expose]` | its web build (debug) served on loopback (`--port`: that port; `--expose`: the network over TLS, behind a key the printed link carries), its tabs live: a saved stylesheet shows at once, another edit builds anew and reloads |
 
 ```sh
-ax dev notes                              # the window, hot-patched
+ax dev notes                              # the window, edits live
 ax dev notes --instance a1 --fresh        # a throwaway copy on new data
 ax dev notes --size 390x844               # a phone-sized window
 ax dev notes --web                        # in the browser instead
 ax dev notes -- --verbose                 # an arg for the app itself
 ```
 
-dx's whole output is in the app's `logs/dev.log`. `ax shot`, `ax eval`,
+A failed build's errors are in the app's `logs/build.log`. `ax shot`, `ax eval`,
 `ax surface` and `ax trigger` reach a dev build without `--cdp`.
 [Develop](../build/README.md#develop-ax-dev).
 
@@ -1196,14 +1194,16 @@ ax eval notes 'document.querySelectorAll("li").length'
 ### `ax components`
 
 ```text
-ax components <app> [--renders] [--wait-client ms]
+ax components <app> [--wait-client ms]
 ```
 
-The running app's mounted components, nested, each with how many times it
-rendered and the time those renders took. `--renders`: its last 200
-renders as they happened; `--json`: all of it. A dev build only (it keeps
-the render spans). To find the component that renders too often
-([performance](../performance.md)).
+The running app's mounted components, nested, each with its key, how many
+times its body ran (`renders`: once, as it mounted, unless a router's new
+match or a hot reload ran it again) and how many times its own holes
+wrote the page again (`updates`: what changes cost it); `--json`: all of
+it. A dev build only. To find the component a change costs too much
+([performance](../performance.md)). No time per component, and
+`--renders` (the last renders as they happened) gives nothing yet.
 
 ### `ax preview`
 
@@ -1231,8 +1231,8 @@ ax preview notes ui::Card 'title: "Inbox".into(), count: 0'
 - `ax trigger … type` on a filled field appends: `setValue` replaces.
 - Right after `ax start` or a reload the window may not be ready yet: add
   `--wait-client 5000`.
-- `ax components` on a release build: it keeps no render spans. Use a dev
-  build.
+- `ax components` on a release build: it keeps no component tree. Use a
+  dev build.
 
 ## Build and ship
 

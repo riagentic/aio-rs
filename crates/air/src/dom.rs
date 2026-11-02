@@ -354,7 +354,7 @@ fn slot() -> (Range, u32) {
 
 // The holes take boxed closures, never generics: a hole costs its own
 // closure and nothing else (generic holes copied these bodies into every
-// call site: 4x the LLVM IR of Dioxus, measured, `docs/design/air.md`).
+// call site: 4x the LLVM IR, measured, `docs/design/air.md`).
 
 /// A text hole: node `id` shows `f()`, re-written when it changes.
 #[doc(hidden)]

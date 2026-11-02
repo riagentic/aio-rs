@@ -15,7 +15,7 @@ afterwards. aio's pages, `am` and other aio tools keep talking to the port
 its cells, its methods, its components, *and every optimization it has*:
 ts becomes rs, tsx becomes rsx, construct by construct, using the tables
 below. A port that re-implements the app "the simple way" (views reading
-the whole state, a commit per keypress, rows rebuilt per render) works,
+the whole state, a commit per keypress, rows rebuilt per change) works,
 and is many times slower than the aio app it replaces.
 
 1. [Project and boot](#1-project-and-boot)
@@ -25,7 +25,7 @@ and is many times slower than the aio app it replaces.
 5. [Data: the same state.db](#5-data-the-same-statedb)
 6. [The wire: aio pages, tools and apps](#6-the-wire-aio-pages-tools-and-apps)
 7. [Checklist](#7-checklist)
-8. [0.1 → 0.2: aio::ui instead of dioxus](#8-01--02-aioui-instead-of-dioxus)
+8. [0.1 → 0.2: Dioxus is gone](#8-01--02-dioxus-is-gone)
 
 ## 1. Project and boot
 
@@ -192,9 +192,9 @@ Rename it (`begin`) when porting.
 | `function Row(props) { return <li>..</li> }` | `#[component] fn Row(name: String) -> View { rsx! { li { .. } } }` |
 | `<li class="row" data-t="x">{name}</li>` | `li { class: "row", "data-t": "x", "{name}" }` |
 | `{items.map(i => <Row key={i.id} .. />)}` | `for i in items.get() { Row { key: "{i.id}", .. } }` (`key:` required) |
-| `{cond && <X />}`, `cond ? <A/> : <B/>` | `if cond { X {} }`, `if cond { A {} } else { B {} }` |
+| `{cond && <X />}`, `cond ? <A/> : <B/>` | `if cond.get() { X {} }`, `if cond.get() { A {} } else { B {} }` |
 | `onClick={() => ..}` | `onclick: move \|_\| ..` |
-| reading `todo.items` in a render | `part(\|t\| &t.items)`, a handle: `.get()`, `.with(\|v\| ..)`, `"{p}"` (after `aio::client!(Todo, todo)`) |
+| reading `todo.items` in a render | `part(\|t\| &t.items)`, a handle read in a hole of `rsx!`: `.get()`, `.with(\|v\| ..)`, `"{p}"` (after `aio::client!(Todo, todo)`); unlike AIR, the body runs once |
 | calling `todo.add(x)` from a handler | `act!(add(x))` |
 | reading the whole cell | `todo()`: in handlers only |
 | `signal(v)` at module level | `static S: Global<T> = Global::new(\|\| v);` |
@@ -203,8 +203,8 @@ Rename it (`begin`) when porting.
 | `effect(..)` | `effect(..)` |
 | `onMount`, `onCleanup`, `onUnmount` | `once`, `on_cleanup` |
 | `afterRender(() => el.scrollIntoView(..))` | `"data-aio-reveal"` on the row, or `onmounted` + `MountedData::scroll_to` |
-| `memo(Component)` | nothing: components with `PartialEq` props skip equal renders |
-| `batch(..)` | nothing: a handler's writes render once |
+| `memo(Component)` | nothing: a body runs once; a prop that follows is a `Prop<T>` |
+| `batch(..)` | nothing: a handler's writes reach the page in one flush |
 | `useVirtualList` | `aio::kit::VirtualList`, `aio::kit::window` |
 | `useForm`, `useFieldArray` | `aio::kit::use_form`, `move_item` |
 | `useRoute`, `navigate`, `<Route>`, `<Outlet>`, `<Link>` | `aio::routes!`, `aio::router!()`: `here()`, `go`, `Route`, `Outlet`, `Link` ([routing](../ui/routing.md)) |
@@ -524,13 +524,14 @@ assert_eq!(h.state().shown().len(), 1);
 # }
 ```
 
-The view. `contacts.activeIndex` read in a render becomes
-`part(|c| &c.active_index)`; `contacts.shown()` becomes the same selector
-body behind an `aio::Cache` keyed on the stamps of the two fields it reads,
-so the rows are built once per change of `people` or `filter`, never per
-cursor step; the row takes its data by props; `afterRender` +
-`scrollIntoView` becomes `data-aio-reveal`; the arrows are kept from the
-browser with `data-aio-prevent`.
+The view. Its body runs once, and what follows the cell is its holes and
+memos (aio's AIR re-rendered the component instead). `contacts.activeIndex` read in a render
+becomes `part(|c| &c.active_index)`; `contacts.shown()` becomes the same
+selector body in a `memo` over the two fields it reads, so the rows are
+built once per change of `people` or `filter`, never per cursor step; the
+row takes its data by props and the cursor as a `Prop<bool>`;
+`afterRender` + `scrollIntoView` becomes `data-aio-reveal`; the arrows are
+kept from the browser with `data-aio-prevent`.
 
 ```rust,no_run
 # use aio::prelude::*;
@@ -562,16 +563,14 @@ aio::client!(Contacts, contacts);
 
 const SHOWN: usize = 40;
 
-/// The filtered rows per (people, filter) stamp: aio's createSelector.
-static ROWS: aio::Cache<(u64, u64), (), Arc<Vec<Person>>> = aio::Cache::new();
-
-/// aio's `Row`: its data by props, so an unchanged row doesn't render.
+/// aio's `Row`: its data by props, kept by its key;
+/// `active` follows the cursor (a `Prop`), so a step re-runs two holes.
 #[component]
-fn Row(name: String, email: String, active: bool, at: usize) -> View {
+fn Row(name: String, email: String, active: Prop<bool>, at: usize) -> View {
     rsx! {
         li {
-            "data-cursor": active.then_some(""),
-            "data-aio-reveal": active.then(|| at.to_string()),
+            "data-cursor": active.get().then_some(""),
+            "data-aio-reveal": active.get().then(|| at.to_string()),
             "{name} "
             span { class: "email", "{email}" }
         }
@@ -580,18 +579,22 @@ fn Row(name: String, email: String, active: bool, at: usize) -> View {
 
 #[component]
 pub fn ContactList() -> View {
-    // Re-renders when people, filter or the cursor change; nothing else.
+    // The body runs once; the memos and holes follow people, filter and the cursor.
     let (people, filter) = (part(|c| &c.people), part(|c| &c.filter));
-    let rows = ROWS.get((people.ver(), filter.ver()), (), || Arc::new(people.with(|p| filter.with(|f| matching(p, f)))));
-    let active = part(|c| &c.active_index).get().min(rows.len().saturating_sub(1));
-    let len = rows.len();
-    use_global_key("ArrowDown", move |_| _ = act!(move_down(len)));
+    // aio's createSelector: built again per change of people or filter, never per cursor step.
+    let rows = memo(move || Arc::new(people.with(|p| filter.with(|f| matching(p, f)))));
+    let index = part(|c| &c.active_index);
+    let active = memo(move || index.get().min(rows.with(|r| r.len()).saturating_sub(1)));
+    use_global_key("ArrowDown", move |_| _ = act!(move_down(rows.with(|r| r.len()))));
     use_global_key("ArrowUp", |_| _ = act!(move_up()));
-    let from = active.saturating_sub(SHOWN / 2);
+    let shown = memo(move || {
+        let from = active.get().saturating_sub(SHOWN / 2);
+        rows.with(|r| r.iter().cloned().enumerate().skip(from).take(SHOWN).collect::<Vec<_>>())
+    });
     rsx! {
         ul { "data-t": "contacts", "data-aio-prevent": "ArrowUp ArrowDown",
-            for (i, p) in rows.iter().enumerate().skip(from).take(SHOWN) {
-                Row { key: "{p.id}", name: p.name.clone(), email: p.email.clone(), active: i == active, at: i }
+            for (i, p) in shown.get() {
+                Row { key: "{p.id}", name: p.name.clone(), email: p.email.clone(), active: active.get() == i, at: i }
             }
         }
     }
@@ -622,7 +625,7 @@ the details.
 
 | aio | What it gave | aio-rs |
 |---|---|---|
-| one signal per cell (`trackCell`): a read subscribes to that cell | a cursor step re-renders only its readers | `part(\|c\| &c.field)`; split fast fields from slow ones |
+| one signal per cell (`trackCell`): a read subscribes to that cell | a cursor step runs only its readers | `part(\|c\| &c.field)`; split fast fields from slow ones |
 | `persistDebounceMs` (100 ms) | no fsync per keystroke | `#[coalesce]`, `#[cell(coalesce)]` |
 | Immer patches on the wire | a step costs bytes | built in: views get DOM edits for what changed |
 | the broadcast coalescer (~150 ms), `flushAllUrgent` | background churn batched; a keystroke never waits | built in: `aio::ui::BACKGROUND` |
@@ -630,13 +633,13 @@ the details.
 | caches on an array's identity (`groupBy`, indexes, a per-frame panel cache) | indexes built once per change | `aio::Cache` keyed on `Ver::of(&state)` or `part(..).ver()` |
 | reading a cell's arrays without copying | no copy per read | `Arc` state; big fields as `Arc<…>` or `aio::imbl` |
 | shallow-equal props, `memo` | unchanged rows skip | `#[component]` props (`PartialEq`) |
-| renders batched per microtask | many writes, one render | built in (`aio::ui`) |
+| renders batched per microtask | many writes, one paint | built in (`aio::ui`) |
 | event delegation | few listeners | built in (`aio::ui`) |
 | windowed lists, stable keys | bounded DOM | `kit::VirtualList`, or a window by hand with `key:` |
 | `scrollIntoView({ block: "nearest", behavior: "auto" })` only when the cursor moved | no smooth scrolls piling up | `data-aio-reveal` |
-| scroll re-anchoring per frame | at most one window change per frame | built in: `VirtualList` renders only when its window moves |
+| scroll re-anchoring per frame | at most one window change per frame | built in: `VirtualList` redraws only when its window moves |
 | selection drawn by CSS attributes, `transition: none` on rows | a step changes two attributes | the same CSS, `"data-cursor": active` |
-| cursor clamped in the view | no write when a list shrinks | `.min(len - 1)` in the render |
+| cursor clamped in the view | no write when a list shrinks | `.min(len - 1)` in a `memo` |
 | `REPEATABLE_KEYS` | held keys can't re-fire actions | built in; `Chord::repeating` |
 | mousemove throttled | idle timers cost nothing | built in: `kit::MOVE_MS` |
 | measure only on resize, publish after two equal reads | no measuring loops | the same logic, in `onresize` / `onmounted` handlers |
@@ -727,8 +730,8 @@ Details: [wire](wire.md).
 - [ ] Every selector is `#[derived]`; every memoized one (`createSelector`,
       `memoLast`, an identity cache) is `#[derived(reads = [..])]` or an
       `aio::Cache`.
-- [ ] No render reads the whole cell (`name()`): each reads its fields with
-      `part`. The dev build's `[hint]` lines are gone.
+- [ ] No view reads the whole cell (`name()`): each reads its fields with
+      `part`, in its holes. The dev build's `[hint]` lines are gone.
 - [ ] Rows take their data as props; long lists draw a window with stable
       keys; the cursor is a CSS attribute with `data-aio-reveal`.
 - [ ] Keys: `use_global_key` under `GlobalKeys`, `data-aio-prevent` where
@@ -740,23 +743,39 @@ Details: [wire](wire.md).
       memory, start time. The port is not done while it is slower.
 - [ ] `ax lint` clean; `ax build <app> --smoke` passes.
 
-## 8. 0.1 → 0.2: aio::ui instead of dioxus
+## 8. 0.1 → 0.2: Dioxus is gone
 
-aio-rs 0.2 gives the views one renderer-neutral API, `aio::ui::prelude`,
-in the shape air (aio-rs's own renderer, [design](../design/air.md)) has,
-so the later swap from Dioxus to air is a framework change, not an app
-migration. An app names `aio::ui` only: `ax lint` refuses a `dioxus` path,
-a `dioxus` dependency, a page script's `dioxus.send`, and a `for` row
-without `key:`. Most of the move is mechanical; the compiler finds every
-place left. `scripts/aio-ui-migrate <app dir>` (in aio-rs; a clean git
-tree) does the mechanical part: the renames below, then `cargo check`
-again and again, fixing each `count()`, `.cloned()`, `.peek()` and
-uncomparable `.set(v)` where the compiler points; it lists what is left
-for a person (a `try_write` match, a `*part(..)` value).
+aio-rs 0.1 drew the views with Dioxus 0.7; 0.2 draws them with air,
+aio-rs's own fine-grained renderer ([design](../design/air.md)), and
+Dioxus is deleted: no Dioxus crate is in aio-rs's graph, no feature
+brings one back, and `ax dev` needs no `dx`. The views' API is
+`aio::ui::prelude`, in air's shape. An app names `aio::ui` only: `ax
+lint` refuses a `dioxus` path, a `dioxus` dependency, a page script's
+`dioxus.send`, and a `for` row without `key:`. Most of the move is
+mechanical, and the compiler finds every place left.
+`scripts/aio-ui-migrate <app dir>` (in aio-rs; a clean git tree) does the
+mechanical part: the renames below, then `cargo check` again and again,
+fixing each `count()`, `.cloned()`, `.peek()` and uncomparable `.set(v)`
+where the compiler points; it lists what is left for a person (a
+`try_write` match, a `*part(..)` value). What it can't do is the one
+change of meaning below: **a body runs once**.
+
+### Cargo and tools
+
+| 0.1 | 0.2 |
+|---|---|
+| `dioxus = { version = "=0.7.10", .. }` in `Cargo.toml` | gone: `aio = { .., features = ["kit"] }` brings the views (air) |
+| aio-rs feature `kit` (Dioxus), `air` (air, opt-in), `liveview` | `kit` is air; `air` is a name for `kit` (an app on air before 0.2 builds as it is); `liveview` is gone |
+| `aio-shell` with its default `dioxus` feature, or `default-features = false, features = ["air"]` | `aio-shell` with no feature: the views are air's (`features = ["air"]` still builds) |
+| `aio-shell/web` (Dioxus's tabs) | `aio-shell/web`: the same tabs, on air |
+| `dx` 0.7.10 (`ax setup` fetched it), `dx serve --hot-patch` | `ax dev`: CSS and `rsx!` markup live, Rust hot-patched by ax itself (Linux, macOS) |
+| dx's own screen under `ax dev`, `logs/dev.log` (dx's output) | gone: ax's own lines in the terminal, a failed build in `logs/build.log` |
+| `subsecond::HotFn::current(f).call(args)` | `aio_hotpatch::HotFn::current(f).call(args)` (crate `aio-rs-hotpatch`, through `aio-shell/dev`) |
+
+### Names
 
 | 0.1 (dioxus) | 0.2 (`aio::ui`) |
 |---|---|
-| `dioxus = { version = "=0.7.10", .. }` in `Cargo.toml` | gone: `aio = { .., features = ["kit"] }` brings the views |
 | `use dioxus::prelude::*;` | `use aio::ui::prelude::*;` |
 | `-> Element` | `-> View` |
 | `use_signal(\|\| v)` | `signal(\|\| v)` (a `Copy` `Signal`: no `let mut` but for `+=`) |
@@ -775,7 +794,9 @@ for a person (a `try_write` match, a `*part(..)` value).
 | `use_context::<T>()`, `try_use_context::<T>()`, `consume_context::<T>()` | `context::<T>()`, `try_context::<T>()` |
 | `provide_root_context(v)` | `provide_root(v)` |
 | `use_future(f)` | `task(f)` |
+| `spawn(fut)` | `spawn(fut)` (a task of the component), `spawn_forever(fut)` (of the app) |
 | `use_resource(f)` (`r()`, `r.read()`) | `resource(f)` (`r.get()`, `r.with(..)`, `r.suspend()?`) |
+| `ReadOnlySignal<T>` prop | `Prop<T>`: given an expression it follows it, given a constant it is that |
 | `GlobalSignal<T>`, `Signal::global(f)` | `Global<T>`, `Global::new(f)` |
 | `GlobalMemo<T>`, `Memo::global(f)` | `GlobalMemo<T>`, `GlobalMemo::new(f)` |
 | `Runtime::try_current().is_some()` | `in_views()` |
@@ -786,13 +807,32 @@ for a person (a `try_write` match, a `*part(..)` value).
 | `*part(\|c\| &c.f)`, `part(..).len()`, `part(..)[i]` | `part(\|c\| &c.f).get()`, `part(..).with(\|v\| v.len())`, `part(..).with(\|v\| v[i].clone())` |
 | `name_at(..)()`, `use_status()()`, `use_pending(..)()` | `.get()` on the `Memo` they give |
 | `TestUi::read(&GLOBAL)` of a `GlobalSignal` | the same, of a `Global` |
-| `for x in xs { li { .. } }` | `for x in xs { li { key: "{x.id}", .. } }` |
+| `TestUi::components()`: `renders` per re-render | `renders` (the body's runs: 1) and `updates` (its holes' writes) |
 
-What `aio::ui` already shapes for air, though Dioxus doesn't need it yet:
-a view reads state where it shows it (`"{n}"`, `.get()` in `rsx!` or a
-`memo`), a prop that must follow state is a `Signal`, `Memo` or part
-handle, no `if let` inside `rsx!` (`{opt.map(|x| rsx! { .. })}`), and
-`once` is the only one-time setup ([views](../ui/views.md#ready-for-air)).
+### A body runs once
+
+Dioxus ran a component again whenever a signal it read changed; air runs
+its body once, as it mounts, and what follows state is its holes: every
+text, attribute, child, `if` and `for` of its `rsx!` that isn't a
+literal, each an effect that writes only its own part of the page.
+
+| 0.1 (re-rendered) | 0.2 (holes) |
+|---|---|
+| `let n = part(\|c\| &c.n).get(); rsx! { "{n}" }` | `let n = part(\|c\| &c.n); rsx! { "{n}" }`, or `{part(..).get()}` in `rsx!` |
+| `let s = shop(); rsx! { "{s.stock}" }` | `rsx! { {shop().stock} }` (better: `part(\|s\| &s.stock)`) |
+| `let ok = !draft.get().is_empty(); .. disabled: !ok` | `let ok = memo(move \|\| !draft.with(String::is_empty)); .. disabled: !ok.get()` |
+| a prop `text: String` given `text.get()` (re-rendered with the parent) | `text: Prop<String>` (follows `text.get()`), or a `Signal` / `part` handle |
+| `if let Some(x) = opt { .. }` in `rsx!` | refused: `{opt.map(\|x\| rsx! { .. })}`, or a bool for `if` |
+| `match page { A => rsx! { .. }, .. }` as a node | a hole: `{match page.get() { A => rsx! { .. }, .. }}` |
+| `for x in xs { li { .. } }` | `for x in xs.get() { li { key: "{x.id}", .. } }`: `key:` on the row's first node, items `Clone + PartialEq` |
+| `items.iter().map(\|i\| rsx! { .. })` | `for i in items.get() { Row { key: "{i.id}", .. } }` |
+| a `Transition { class, .. }` box (`div.aio-transition`) | no box: its content's first element plays the animation |
+
+A state read at the top of the body still compiles: it shows the value
+as the view mounted and never changes. Read state where it is shown
+(`"{n}"`, `.get()` inside `rsx!`) or in a `memo`; keep `once` for
+one-time setup and `effect` / `watch` for work that follows state
+([views](../ui/views.md#common-mistakes)).
 
 ### The test kit is a dev-dependency in 0.2
 

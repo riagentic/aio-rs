@@ -300,11 +300,12 @@ the window's DevTools protocol as for ax shot",
     v(
         "components",
         "components <app> [--renders] [--wait-client ms]",
-        "the running app's mounted components, nested, each with how many
-times it rendered and the time those renders took (aio DevTools' tree
-and profile); --renders: its last 200 renders as they happened (aio
-DevTools' render events); --json: all of it as JSON. A dev build's, through
-its own door",
+        "the running app's mounted components, nested, each with its key,
+how many times its body ran and how many times its holes wrote (aio
+DevTools' tree and profile; a body runs once, a change runs only the holes
+that read it); --renders: its last 200 renders as they happened, where the
+app keeps them (aio DevTools' render events); --json: all of it as JSON. A
+dev build's, through its own door",
     ),
     v(
         "surface",

@@ -1,4 +1,4 @@
-//! The page a view is drawn in: an empty root, Dioxus's DOM-edit
+//! The page a view is drawn in: an empty root, air's DOM-edit
 //! interpreter over `window.__aioWire`, and aio's own page scripts (keys,
 //! focus, dialogs, typing, the render probe, the dev overlay). The desktop
 //! window (`aio-shell`) and the UI tests (`aio::testing::TestUi`) load the
@@ -54,7 +54,7 @@ fn inline_scripts(html: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// The page runs code from the app (a Dioxus query: a focus, a rect, an
+/// The page runs code from the app (a view's query: a focus, a rect, an
 /// island's script) as a script of its own making, never through `eval`:
 /// a `blob:` script, which the [`policy`] allows and injected markup can't
 /// make. It runs as a task of its own, after the frame that asked, and
@@ -82,10 +82,10 @@ window.__aioRun = (code) => {
 
 
 
-/// The page's `<body>` on air: the root, `bridge`, the render probe,
+/// The page's `<body>`: the root, `bridge`, the render probe,
 /// air's interpreter (`air::PAGE_JS`: it keeps typed text itself, and
 /// talks to `window.__aioWire` with no socket) and the page scripts that
-/// need no renderer's internals.
+/// go with it.
 #[cfg(feature = "kit")]
 pub fn body(bridge: &str) -> String {
     let bridge = if bridge.is_empty() { String::new() } else { format!("<script>{bridge}</script>") };
@@ -97,13 +97,6 @@ pub fn body(bridge: &str) -> String {
     )
 }
 
-/// `MountedData::set_focus` reads a yes back from the page, and Dioxus's
-/// interpreter (0.7.10) answers nothing: the focus moved, yet the view got
-/// an error. It answers yes once it is done.
-pub const SET_FOCUS: &str = "(() => {
-  const it = window.interpreter, set = it.setFocus.bind(it);
-  it.setFocus = (id, on) => (set(id, on), true);
-})();";
 
 /// The dev overlay's script tag in a dev build, else nothing (the web
 /// build's page takes it too).
@@ -112,21 +105,6 @@ pub fn overlay(dev: bool) -> String {
 }
 
 
-/// The page talks through the preload, not a socket: this stands in for the
-/// WebSocket the DOM-edit interpreter opens.
-pub const WIRE: &str = "window.WebSocket = class {
-  constructor() {
-    this.binaryType = 'arraybuffer';
-    window.__aioWire.listen((f) => {
-      const t = performance.now();
-      this.onmessage && this.onmessage({ data: f.buffer.slice(f.byteOffset, f.byteOffset + f.byteLength) });
-      window.__aioPainted(t);
-    });
-    queueMicrotask(() => this.onopen && this.onopen());
-  }
-  send(m) { window.__aioWire.send(typeof m === 'string' ? new TextEncoder().encode(m) : new Uint8Array(m)); }
-  close() {}
-};";
 
 /// The render probe (aio vitals' render meter): how long each update from
 /// the app takes to reach the screen, graded by `[vitals] render` (`T`), and
@@ -257,8 +235,8 @@ pub const FOCUS: &str = "new MutationObserver((ms) => {
 
 
 /// What a drag carries: a view's `ondragstart` runs after the browser has
-/// moved on, so its `set_data` never reaches the drop (and Dioxus 0.7.10's
-/// event copy ignores it). The page sets it instead, in the dragstart
+/// moved on (its handler runs in the app, after the event), so its
+/// `set_data` never reaches the drop. The page sets it instead, in the dragstart
 /// itself, from the dragged element's `data-drag` (as `text/plain`): any
 /// drop reads it, in the app, a test or another app.
 pub const DRAG: &str = "document.addEventListener('dragstart', (e) => {
@@ -266,16 +244,6 @@ pub const DRAG: &str = "document.addEventListener('dragstart', (e) => {
   if (el && e.dataTransfer) e.dataTransfer.setData('text/plain', el.getAttribute('data-drag'));
 }, true);";
 
-/// A file input opens the system's own picker (Electron's, Android's).
-/// Dioxus's interpreter (0.7.10) catches a click on one at the window for
-/// its desktop host and asks a `__file_dialog` endpoint no page here has:
-/// the click was refused and no picker ever opened. Stopped at the
-/// document, after the view's own handlers on `#main`, it never gets there;
-/// the picked files then reach the view as its `change` (the interpreter's
-/// liveview path reads them).
-pub const FILE_INPUT: &str = "document.addEventListener('click', (e) => {
-  if (e.target instanceof HTMLInputElement && e.target.type === 'file') e.stopPropagation();
-});";
 
 /// A modal dialog (`[aria-modal=true]`, the kit's `Modal`) holds the
 /// keyboard (aio's `onModalKey`): focus on the box itself moves to its first
@@ -327,31 +295,6 @@ pub const DIALOG: &str = "(() => {
   });
 })();";
 
-/// Typing is never undone. Each keystroke goes to the app, and its echo of
-/// the field's value comes back later: by then the person may have typed on,
-/// and the old echo would wipe those keys (a fast typist on a phone loses
-/// letters). So a field keeps the values it sent until the app's value
-/// matches it again; an echo of one of those is skipped. Any other value is
-/// the app's own (a clear after sending, "Max") and is applied.
-pub const TYPING: &str = "(() => {
-  const sent = new WeakMap();
-  document.addEventListener('input', (e) => {
-    const t = e.target;
-    if (typeof t.value !== 'string') return;
-    if (!sent.has(t)) sent.set(t, []);
-    sent.get(t).push(t.value);
-  }, true);
-  const it = window.interpreter, set = it.setAttributeInner.bind(it);
-  it.setAttributeInner = (node, field, value, ns) => {
-    const past = field === 'value' && !ns ? sent.get(node) : undefined;
-    if (past) {
-      if (value === node.value) return void sent.delete(node);
-      if (past.includes(value)) return;
-      sent.delete(node);
-    }
-    set(node, field, value, ns);
-  };
-})();";
 
 /// Dev builds only: the page's errors on the page (aio dev-overlay), where
 /// the person is looking. Plain DOM (the renderer may be what broke), one
@@ -430,7 +373,7 @@ mod tests {
         // The policy comes right after the charset, before any script.
         let at = page.find("Content-Security-Policy").unwrap();
         assert!(page.find("<meta charset").unwrap() < at && at < page.find("<script").unwrap());
-        // The interpreter runs its queries as the page's own scripts, never through Function.
+        // air runs its queries as the page's own scripts, never through Function.
         assert!(!page.contains("Function(") && page.contains("window.__aioRun("), "no eval in the page");
     }
 

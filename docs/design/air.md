@@ -1,14 +1,13 @@
-# air: aio-rs's own renderer (0.2.0 spike)
+# air: aio-rs's own renderer (0.2.0)
 
-Status: step 1 is on main: air's core (`crates/air`, `crates/air-macro`),
-its gates 1–3, and the facade and `TestUi` on it behind aio-rs's feature
-`air` ([Phase 1](#phase-1-what-it-delivered)). Dioxus stays the default
-renderer until step 5; with `kit` on too the facade is Dioxus's (the kit is
-Dioxus code until step 2), so `--all-features` builds what ships today.
-The spike (branch `air`, from v0.1.0) decided the design with numbers;
-its bench (`crates/air-bench`, `bench.sh`) is on main too. Step 0, the
-facade apps are written against (`aio::ui::prelude`): see
-[The app surface](#the-app-surface-aioui).
+Status: phase 5 is done: air is aio-rs's one renderer from 0.2.0, and
+Dioxus is deleted ([Phase 5](#phase-5-dioxus-deleted)). The sections
+below keep the record of how it got there: the spike (branch `air`,
+from v0.1.0) decided the design with numbers, and its bench
+(`crates/air-bench`, `bench.sh`) is on main. What apps are written
+against (`aio::ui::prelude`): [The app surface](#the-app-surface-aioui);
+how a 0.1 app moves: the migration guide's
+[0.1 → 0.2](../migration/README.md#8-01--02-dioxus-is-gone).
 
 ## Verdict
 
@@ -244,18 +243,19 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   read changes. The local names it uses are cloned in first (a heuristic
   over tokens: fields, methods, paths, calls, types, closure params, `let`
   and match patterns are not names to clone), so a `String` used by two
-  holes needs no `.clone()`. A bare name is cloned per run; its type
-  decides whether it follows anything (a `Signal` or `Part` does, a
+  holes needs no `.clone()`. In a `{child}` or attribute they are cloned
+  again per run, so the hole may take them by value (`{match who { .. }}`,
+  `{note.map(..)}`); a name's type decides whether it follows anything (a `Signal` or `Part` does, a
   `String` doesn't). A name called (`f(x)`) is a function's, never
   cloned in (cloning a generic fn item fixed its type for every hole), so
   a local closure called in a hole is a `Callback`, or cloned in by a
   `let` of the hole's own; `aio::field!(name)` names a field, not a local.
-- `onX: handler` listens for `X` (Dioxus's event names).
+- `onX: handler` listens for the DOM's `X` event.
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).
   `if let` is refused: make a bool, or use a `{child}` hole of an `Option<View>`.
-- `onX` handlers are typed by Dioxus's event table (`onkeydown` gets a
+- `onX` handlers are typed by their event (`onkeydown` gets a
   `KeyboardEvent`, `oninput` a `FormEvent`, …); an unknown `onX` is a
   compile error; `onmounted` runs once the element is drawn.
 - A component's props are evaluated once: a prop that must follow state is
@@ -825,10 +825,44 @@ beside it), Dioxus and air built one after the other:
 Most of the release binary is aio-rs's runtime and the shell, the same
 on both: air's renderer saves 0.47 MB of it.
 
+## Phase 5: Dioxus deleted
+
+- One renderer: aio-rs's `kit` feature is air (`air` stays as a name
+  for it, so an app on air before 0.2.0 builds as it is), `liveview` is
+  gone, and `aio-shell` has no renderer feature (its `dioxus` default
+  is gone; `air` still builds). Every Dioxus code path in `aio`,
+  `aio-shell`, `aio-cli` (`ax`), `TestUi`, the kit, the router and the
+  template is removed, and no public signature names a Dioxus type.
+- The graph: `Cargo.lock` went from 327 packages to 253, none of them
+  Dioxus's (`dioxus*`, or from DioxusLabs' repositories: `generational-box`,
+  `warnings`, `subsecond`, …). `ci.sh` fails on a Dioxus crate anywhere in
+  the workspace's graph (`cargo tree`, every target, feature and kind) and
+  on the word in any file but the record (the CHANGELOG, the migration
+  guide, these notes) and the tools that refuse or find it (`ax lint`,
+  `scripts/air-ship`, `dx-metrics`' planted dependency, the 0.1 migration
+  script).
+- Hot-patching: `aio-rs-hotpatch` (`crates/hotpatch`) is the running
+  app's side, a port of `subsecond` 0.7.10's runtime (the jump table in
+  the shape ax's patch builder writes, `HotFn::current(f).call(args)`, the
+  handler that builds the views again); `ax dev` builds the patches itself
+  (phase 3) and needs no `dx`, and `ax setup` fetches none.
+- CI: the `dx (dioxus)` job and `dx-metrics`' Dioxus lane are gone;
+  `dx-metrics` measures the template (on air) in the columns that
+  measured the Dioxus template, and a base before 0.2.0 is measured with
+  its template moved to air (`to_air`), so its row is the same app's.
+  The `air_*` columns stay in the trend as the history of phases 3-4.
+- Tests: the workspace's tests, the guide's doctests and `TestUi` run on
+  air alone; the tests that counted a body's re-runs count its holes'
+  `updates`.
+- Left for after 0.2.0, said where they show: no hot-patch on Windows
+  (a Rust edit rebuilds and restarts), `ax components` has no time per
+  component and no `--renders` log, a file input's files aren't in a
+  form's data yet.
+
 ## Plan for 0.2.0
 
-In this order; each step ends green before the next starts. Dioxus stays
-on the dev branch as the fallback until step 5.
+In this order; each step ends green before the next starts. Dioxus stayed
+on the dev branch as the fallback until step 5, which deleted it.
 
 | # | step | what | done when | estimate |
 |---|---|---|---|---|
@@ -837,7 +871,7 @@ on the dev branch as the fallback until step 5.
 | 2 | the kit on air (2a done: the kit, theming, forms; 2b: the router) | the 22 kit modules behind the facade, on air (dev branch: the facade's renderer chosen by a dev-branch feature, never in a release) | the kit's tests and docs examples on air | 3–4 weeks |
 | 3 | tooling (done) | `ax dev`: template hot reload (`air-rsx`), subsecond remount; web (wasm, in-process `page.js`); Android page body | `ax dev` edit loops, `ax build --web`, an APK smoke | 2–3 weeks |
 | 4 | gates in CI (done) | no Dioxus in the packaged graph or binary; size and build/edit numbers of the packaged app by a script in the repo | CI fails on a planted Dioxus dependency | 3 days |
-| 5 | delete Dioxus | out of the default graph and `deps.toml`; one real app rebuilt and smoked on Linux, Windows, macOS | the smoke on three OSes; the numbers in `docs/performance.md` | 1 week |
+| 5 | delete Dioxus (done) | out of the graph and `deps.toml`; the template smoked on Linux, Windows, macOS | the smoke on three OSes; the numbers in `docs/performance.md` | 1 week |
 
 About 10–13 weeks of work. How apps migrate: step 0 is the one API change
 (docs/migration, "0.1 → 0.2": `use aio::ui::prelude::*`, the facade's

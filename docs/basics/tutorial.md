@@ -394,7 +394,8 @@ assert!(!h.state().importing);
 
 Views are `aio::ui` components (`use aio::ui::prelude::*`). `aio::client!`
 connects them to the cell; `part(|c| &c.field)` is a handle on one field,
-re-rendering the view only when it changes;
+and a hole of `rsx!` reading it (`"{draft}"`, `disabled: ..`) runs again
+only when it changes (a view's body runs once);
 `act!(method(args))` calls a method from a handler:
 
 ```rust,no_run
@@ -462,7 +463,7 @@ fn NewTask() -> View {
 #[component]
 fn Tasks() -> View {
     let tasks = part(|t| &t.tasks);
-    let left = tasks.with(|ts| ts.iter().filter(|t| !t.done).count());
+    let left = memo(move || tasks.with(|ts| ts.iter().filter(|t| !t.done).count()));
     rsx! {
         ul { "data-t": "tasks",
             for t in tasks.get() {
@@ -493,9 +494,10 @@ assert_eq!(ui.text("left"), "1 left");
   page, headless: no screen needed.
 - The draft lives in the cell, so it survives a restart; view-only state
   (an open menu) goes in a view's `signal`.
-- A view that reads the whole state (`todo()`) in its render re-renders
-  on every commit; the dev build names it. Read fields with `part`: a
-  handle (`.get()`, `.with(|v| ..)`, `"{p}"`) that follows its field only.
+- State read at the top of a view's body is read once, as it mounts; the
+  dev build names a body that reads the whole state (`todo()`). Read
+  fields with `part`, in the holes that show them: a handle (`.get()`,
+  `.with(|v| ..)`, `"{p}"`) that follows its field only.
 
 More: [views](../ui/views.md), [the kit](../ui/kit.md) (inputs, lists,
 dialogs, keys).
@@ -503,7 +505,7 @@ dialogs, keys).
 ## 8. Run, inspect, ship
 
 ```sh
-ax dev todo                     # the window; edits hot-patch in
+ax dev todo                     # the window; edits reach it live
 ax state todo todo              # from another terminal: the live state
 ax call todo todo type_draft '"tea"'
 ax call todo todo add
@@ -524,8 +526,9 @@ the running cell back; `ax backup todo` copies its data while it runs.
   synced copy. Put it behind an await or in an effect.
 - Changing `id = "todo"` after the app ran: the app starts on an empty
   list, the old data still under the old id. Change it back.
-- Reading the whole state (`todo()`) in a view's render: it re-renders on
-  every commit. Read the fields it shows with `part`.
+- Reading the whole state (`todo()`) in a view's body: read once, it never
+  follows; in a hole it follows every commit. Read the fields it shows
+  with `part`.
 - One cell for everything: a cell is the unit of saving, syncing and
   history. Split by what changes together (the list, its statistics, the
   settings).

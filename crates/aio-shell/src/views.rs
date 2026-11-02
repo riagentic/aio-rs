@@ -221,7 +221,9 @@ mod tests {
         let mut relay = crate::inspect::Relay::default();
         let me = relay.join();
         let answer = relay.ask(me, &ask.to_string()).unwrap_err();
-        assert_eq!(answer, r#"{"id":7,"result":{"windows":1}}"#, "answered at once, one window told");
+        // At once; this window among those told (the tests beside it in this process hold theirs).
+        let told: aio::serde_json::Value = aio::serde_json::from_str(&answer).unwrap();
+        assert!(told["id"] == 7 && told["result"]["windows"].as_u64() >= Some(1), "{answer}");
         let next =
             tokio::time::timeout(std::time::Duration::from_secs(10), page.next()).await.unwrap().unwrap().unwrap();
         assert!(said(&next).contains("Plus") && !said(&next).contains("Add"), "redrawn with the new markup");

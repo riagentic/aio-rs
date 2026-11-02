@@ -20,7 +20,7 @@ a test. It is not a feature for the app's users (see
   `Resume` lets calls in again.
 - The state put back is what was **saved** of it, as a boot brings it
   back: `#[transient]` fields at their default, `save` applied, `restore`
-  run. A rewind is a commit like any other: views re-render, synced
+  run. A rewind is a commit like any other: views update, synced
   copies get it, it is saved.
 - Where a cell stands is a `Timeline`: `at` (the event its state is right
   after, a rewind followed to its target), `head` (its newest call, not

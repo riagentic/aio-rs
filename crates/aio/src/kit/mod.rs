@@ -1,6 +1,5 @@
 //! The UI kit (aio's `aio/ui`): the controls every app otherwise rewrites, as
-//! air components over real elements (feature `air`; the same API as the
-//! Dioxus kit's, docs/design/air.md), styled by one stylesheet ([`CSS`])
+//! air components over real elements (feature `kit`), styled by one stylesheet ([`CSS`])
 //! and themed by `--aio-*` tokens ([`theme_css`]). Keyboard first: each
 //! control does its WAI-ARIA keyboard pattern. Every component takes `class`
 //! (appended to its own) and any other attribute (`"data-t"`, `id`, `aria-*`),

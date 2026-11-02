@@ -197,15 +197,13 @@ another emulator, a phone or the AVDs already on the machine:
 - `ax create gate`, with a saved cell that counts the app's starts and
   logs `[gate] start <n>`. `ax test gate --android --device emulator-5600`
   builds the APK for the emulator's CPU, installs it, starts it and
-  passes when the window is ready and it still runs 3 s later: start 1.
+  passes when the window is ready and it still runs 3 s later, with no
+  `panicked` or failed view in the app's log: start 1.
 - One commit on (a new version), the same over it (`adb install -r`, an
   upgrade): start 2, so the data of the first install was kept.
 - After: the emulator stopped (`adb -s emulator-5600 emu kill`), the AVD
   and work folder removed, and `modem-nv-ram-5600`, which the emulator
   writes beside the user's AVDs, deleted.
-- `--air`: the same with the template on air (aio-rs `air`, the shell
-  with `default-features = false, features = ["air"]`): no Dioxus in its
-  graph, and no `panicked` or failed view in the app's log.
 
 Needs the SDK's `emulator`, `platform-tools`, `cmdline-tools/latest`, an
 x86_64 system image, KVM, and what `ax build --android` needs
@@ -213,42 +211,43 @@ x86_64 system image, KVM, and what `ax build --android` needs
 
 ### air's package gates
 
-An app on air (aio-rs's own renderer, [the design](../design/air.md))
-ships no Dioxus, and its packages and edit loop are measured, in
+An app ships air (aio-rs's own renderer, [the design](../design/air.md))
+and no other renderer, and its packages and edit loop are measured, in
 `ci.sh` and GitHub CI:
 
 - `scripts/air-ship <app> [artifacts...]` fails, naming each find, on a
-  Dioxus crate the app ships (its `cargo metadata` graph of normal
-  dependencies for the desktop, wasm32 and Android: a crate by that name
-  or from DioxusLabs' repositories, such as `generational-box`) and on the
-  word in any package byte for byte, any case: the release binary, a
-  folder (the web build), a `.tar.gz`, an AppImage (its squashfs
-  unpacked), an APK (each member). A stripped binary still holds a
-  crate's source paths and strings. `--self-test` (in `ci.sh`) plants
-  one in each kind of artifact and in a graph, and requires each found.
-- `scripts/dx-metrics` builds the template a second time on air (aio-rs
-  `air`, the shell with `default-features = false, features = ["air"]`),
-  plants a Dioxus dependency in it and requires air-ship to fail, then
-  runs air-ship on its release binary, `.tar.gz`, AppImage and web
-  build. Its row adds `air_binary_b`, `air_targz_b`, `air_appimage_b`,
-  `air_web_b`: held 5% over the base measured on the same runner
-  (`--base`, as the other sizes; 10 KB slack for the web build, 50 KB
-  for the rest), or over this machine's best. `air_rebuild_cpu` (one line
-  changed, debug rebuild) and `air_live_css_s`, `air_live_rsx_s`,
-  `air_live_logic_s` (`ax dev`'s own reload and hot-patch, headless) are
-  gated against this machine's rows only, 50% over their median: on a
-  runner with none they are printed, never failing.
-- `scripts/dx-metrics --apk`: the same for the air template's APKs
-  (`ax build --android`, each checked, `air_apk_b` the arm64 one).
-  `ci.sh` runs it where the NDK and Rust's three Android targets are; in
-  GitHub CI the `dx (apk)` job does (`rustup target add
-  armv7-linux-androideabi x86_64-linux-android`, the runner's SDK).
-- GitHub CI measures each template, and the APKs, in a `dx` job of its
-  own, side by side, each against the base measured on its own runner;
-  `ci.sh` measures the whole row in one run.
+  crate of the renderer before 0.2.0 the app ships (its `cargo metadata`
+  graph of normal dependencies for the desktop, wasm32 and Android: a
+  crate by that name or from that project's repositories, the script
+  lists them) and on its name in any package byte for byte, any case:
+  the release binary, a folder (the web build), a `.tar.gz`, an AppImage
+  (its squashfs unpacked), an APK (each member). A stripped binary still
+  holds a crate's source paths and strings. `--self-test` (in `ci.sh`)
+  plants one in each kind of artifact and in a graph, and requires each
+  found.
+- `scripts/dx-metrics` builds the template, plants such a dependency in
+  a copy and requires air-ship to fail, then runs air-ship on its
+  release binary, `.tar.gz`, AppImage and web build. Its sizes
+  (`binary_b`, `targz_b`, `appimage_b`, `air_web_b`) are held 5% over the
+  base measured on the same runner (`--base`; 10 KB slack for the web
+  build, 50 KB for the rest), or over this machine's best. Build CPU
+  seconds and `live_css_s`, `live_rsx_s`, `live_logic_s` (`ax dev`'s own
+  reload and hot-patch, headless) are gated against this machine's rows
+  only, 50% over their median: on a runner with none they are printed,
+  never failing.
+- `scripts/dx-metrics --apk`: the same for the template's APKs (`ax
+  build --android`, each checked, `air_apk_b` the arm64 one). `ci.sh`
+  runs it where the NDK and Rust's three Android targets are; in GitHub
+  CI the `dx (apk)` job does (`rustup target add armv7-linux-androideabi
+  x86_64-linux-android`, the runner's SDK).
+- GitHub CI measures the template (`--air`) and the APKs (`--apk`) in a
+  `dx` job each, side by side, each against the base measured on its own
+  runner; `ci.sh` measures the whole row in one run.
 
-A base before air phase 3 has no shell on air: its air sizes are said
-as not gated.
+A base before 0.2.0, whose template was on the renderer before air, is
+measured with its template moved to air, so its row is the same app's.
+Rows before 0.2.0 keep their `air_*` columns (the template on air beside
+the one on the old renderer) as the trend's history.
 
 ## Not in aio-rs
 

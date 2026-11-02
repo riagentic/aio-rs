@@ -950,7 +950,7 @@ mod tests {
     }
 
     use super::*;
-    use aio::page::{DIALOG, OVERLAY, RENDER, TYPING, render_probe};
+    use aio::page::{DIALOG, OVERLAY, RENDER, render_probe};
 
     #[test]
     fn the_browser_opens_where_the_app_serves_with_its_key() {
@@ -1145,7 +1145,7 @@ mod tests {
         assert!(p.contains("default-src 'none'"));
         assert!(p.contains("connect-src 'none'") && !p.contains("'unsafe-eval'"), "{p}");
         assert!(p.contains(air::PAGE_JS), "air's interpreter, talking to the preload's wire");
-        assert!(!p.contains("aio://wire") && !p.contains("window.WebSocket = class"), "no Dioxus glue");
+        assert!(!p.contains("aio://wire") && !p.contains("window.WebSocket = class"), "no wire glue in the page");
         assert!(p.contains(DIALOG));
     }
 
@@ -1377,33 +1377,6 @@ mod tests {
         // The runtime keeps the probe's lines, at their level.
         let js = include_str!("main.js");
         assert!(js.contains("const word = { error: 'ERROR', warning: 'WARN ', debug: 'DEBUG' }[e.level] || 'INFO '"));
-    }
-
-    /// The race on a phone, replayed in Node: keys typed ahead of their echoes stay.
-    #[test]
-    fn typing_ahead_of_the_apps_echo_keeps_every_key() {
-        let js = format!(
-            "let onInput; const applied = [];
-             globalThis.document = {{ addEventListener: (_, f) => onInput = f }};
-             globalThis.window = {{ interpreter: {{ setAttributeInner(n, f, v) {{ applied.push(v); if (f === 'value') n.value = v; }} }} }};
-             {TYPING}
-             const it = window.interpreter, el = {{ value: '' }};
-             const type = (v) => {{ el.value = v; onInput({{ target: el }}); }};
-             type('a'); type('ab'); type('abc');
-             it.setAttributeInner(el, 'value', 'a');    // a stale echo: skipped
-             it.setAttributeInner(el, 'value', 'ab');   // stale too
-             it.setAttributeInner(el, 'value', 'abc');  // caught up: nothing to do
-             it.setAttributeInner(el, 'value', '');     // the app clears it: applied
-             type('x');
-             it.setAttributeInner(el, 'value', '2.5');  // the app's own value: applied
-             it.setAttributeInner(el, 'class', 'x');    // other attributes: as ever
-             console.log(JSON.stringify([el.value, applied]));"
-        );
-        let Ok(out) = std::process::Command::new("node").args(["-e", &js]).output() else {
-            return eprintln!("skipped: no node");
-        };
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), r#"["2.5",["","2.5","x"]]"#);
     }
 
     #[tokio::test]

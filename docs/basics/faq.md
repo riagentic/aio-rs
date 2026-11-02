@@ -111,8 +111,8 @@ routes ([SQL and blobs](../persistence/sql.md), [sync](../state/sync.md#server-f
 Heavy work runs in an effect and hands back a small result.
 
 **Can the views use something other than `aio::ui`?** Not in the app's
-window: `client!`, `part` and `act!` are `aio::ui`'s (Dioxus underneath
-today, air in its place later: an app names neither). Another client (a page of
+window: `client!`, `part` and `act!` are `aio::ui`'s (air underneath:
+an app doesn't name it). Another client (a page of
 your own, another program) talks to a server over `/ws` or HTTP routes
 ([wire](../migration/wire.md)); aio-rs ships no adapter for another view
 library.
@@ -189,10 +189,11 @@ bug in this page: `ax feedback` says where to send it.
 | Symptom | Cause | Fix |
 |---|---|---|
 | a view doesn't update after a call | the method was called without `act!`/`Ui` | `act!(method(args))` |
-| a view re-renders on every keypress | it reads the whole cell (`name()`) in its render | `part(\|c\| &c.field)`; the dev build's `[hint]` names it |
+| a view's holes run on every keypress | they read the whole cell (`name()`) | `part(\|c\| &c.field)` |
+| a view shows a value that never changes | the state is read at the top of its body (once, as it mounts) | read it in `rsx!` (`"{n}"`, `.get()`) or a `memo`; the dev build's `[hint]` names a body that reads the whole cell |
 | `already borrowed` panic | a signal read in an `if let`/`match` scrutinee stays borrowed in its block | bind it first: `let v = X.get_untracked(); if let Some(v) = v { .. }` |
 | a toast after a closed dialog never shows | `spawn` ends with its component | `spawn_forever` (`aio::ui::prelude`) |
-| a CSS edit doesn't show under `ax dev` | CSS kept in `once` (made once) | `aio::use_css!` in the render |
+| a CSS edit doesn't show under `ax dev` | CSS kept in `once` (made once) | `aio::use_css!` in a hole |
 | arrows scroll the page as well as move the cursor | `prevent_default()` comes too late in a window | `"data-aio-prevent": "ArrowUp ArrowDown"` |
 | a drop handler never sees `set_data` | the view runs after the browser's dragstart | `"data-drag": "<id>"` on the dragged element |
 | `key:` has no effect | `key` counts only on a `for` body's first node | put it there; to remount one element, a one-item `for` |

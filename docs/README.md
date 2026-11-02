@@ -107,7 +107,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [API map](reference/api.md): the public modules and items of each crate, with links into cargo doc.
 - API docs: `cargo doc -p aio-rs --no-deps --open` (the core, `use aio::…`); `-p aio-rs-shell` for the desktop host.
 - [aio-rs for coding agents](agents.md): `ax agent` and its rules.
-- [aio-rs next to Tauri and Dioxus](comparison.md): one app built in each, measured.
+- [aio-rs next to other Rust app stacks](comparison.md): one app built in each, measured.
 - [CHANGELOG](../CHANGELOG.md): what each version ships, and its known limits.
 
 ## 4. Coming from aio
@@ -150,7 +150,7 @@ Where each page of aio's documentation is covered here.
 | `basics/migration.md` | [Migrating from aio to aio-rs](migration/README.md) |
 | `basics/pitfalls.md` | [FAQ and pitfalls](basics/faq.md) |
 | `basics/plugins.md` | [Plugins and other apps](state/plugins.md) |
-| `basics/positioning.md` | [aio-rs next to Tauri and Dioxus](comparison.md) |
+| `basics/positioning.md` | [aio-rs next to other Rust app stacks](comparison.md) |
 | `basics/project-structure.md` | [Project layout, `aio.toml` and features](basics/project.md) |
 | `basics/quickstart.md` | [Quickstart](basics/quickstart.md) |
 | `basics/semver-policy.md` | [Versions and stability](basics/versioning.md) |

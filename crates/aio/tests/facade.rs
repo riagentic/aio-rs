@@ -1,8 +1,6 @@
 //! `aio::ui::prelude`, the view API apps are written against: each name
 //! does what its air shape says, on the renderer underneath today.
 #![cfg(feature = "kit")]
-// Dioxus needs `mut` on a signal a handler writes; on air the handler holds its own copy.
-#![allow(unused_mut)]
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -42,8 +40,8 @@ fn each_global_is_its_own_state_and_a_global_memo_follows_them() {
 }
 
 fn counted() -> View {
-    let mut n = signal(|| 1);
-    // Told: a reader re-runs (a render on Dioxus, this effect on both).
+    let n = signal(|| 1);
+    // Told: a reader re-runs (this effect).
     effect(move || {
         let _ = n.get();
         RENDERS.set(RENDERS.get() + 1);
@@ -69,8 +67,7 @@ fn set_tells_only_on_a_change_and_write_always_does() {
     assert_eq!((RENDERS.get(), ui.text("n")), (at + 3, "1".into()), "a write guard always tells");
 }
 
-// A prop that follows its caller's state: re-given on each render on
-// Dioxus, a `Prop` on air (a body runs once there).
+// A prop that follows its caller's state: a `Prop` (a body runs once).
 
 #[component]
 fn Shown(n: Prop<u32>) -> View {
@@ -92,7 +89,7 @@ fn shown<N: std::fmt::Display + Clone + PartialEq + 'static>(n: N) -> View {
 }
 
 fn lifetime() -> View {
-    let mut n = signal(|| 1u32);
+    let n = signal(|| 1u32);
     let open = signal(|| true);
     rsx! {
         button { "data-t": "more", onclick: move |_| n += 1, "more" }
