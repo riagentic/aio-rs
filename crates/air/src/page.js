@@ -150,8 +150,8 @@
     const build = (marks, path, svg) => {
       const k = u8()
       let n, mark = path.length === 1
-      if (k === 1) {
-        const tag = str(), inSvg = svg || tag === 'svg'
+      if (k === 1 || k === 5) {
+        const tag = str(), inSvg = svg || k === 5 || tag === 'svg'
         n = inSvg ? document.createElementNS(SVG, tag) : document.createElement(tag)
         for (let a = u8(); a > 0; a--) n.setAttribute(str(), str())
         const children = u16()

@@ -58,6 +58,74 @@ struct Hot {
 
 thread_local!(static HOT: RefCell<Hot> = RefCell::default());
 
+// Inside an `<svg>` of the call being expanded: a template made there (a
+// row, a branch) puts its root elements in SVG's namespace.
+thread_local!(static IN_SVG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
+/// Elements only SVG has: a template rooted at one (a component's `circle`,
+/// a row's `g`) is SVG's wherever it goes. Shared names (`a`, `title`,
+/// `style`, `script`) are SVG's only inside an `svg` of the same `rsx!`.
+const SVG_ONLY: &[&str] = &[
+    "animate",
+    "animateMotion",
+    "animateTransform",
+    "circle",
+    "clipPath",
+    "defs",
+    "desc",
+    "ellipse",
+    "feBlend",
+    "feColorMatrix",
+    "feComponentTransfer",
+    "feComposite",
+    "feConvolveMatrix",
+    "feDiffuseLighting",
+    "feDisplacementMap",
+    "feDistantLight",
+    "feDropShadow",
+    "feFlood",
+    "feFuncA",
+    "feFuncB",
+    "feFuncG",
+    "feFuncR",
+    "feGaussianBlur",
+    "feImage",
+    "feMerge",
+    "feMergeNode",
+    "feMorphology",
+    "feOffset",
+    "fePointLight",
+    "feSpecularLighting",
+    "feSpotLight",
+    "feTile",
+    "feTurbulence",
+    "filter",
+    "foreignObject",
+    "g",
+    "image",
+    "line",
+    "linearGradient",
+    "marker",
+    "mask",
+    "metadata",
+    "mpath",
+    "path",
+    "pattern",
+    "polygon",
+    "polyline",
+    "radialGradient",
+    "rect",
+    "set",
+    "stop",
+    "switch",
+    "symbol",
+    "text",
+    "textPath",
+    "tspan",
+    "use",
+    "view",
+];
+
 /// The `rsx!` call `input` read for a hot reload: its shape (the
 /// expansion with its templates' markup left out: two calls of one shape
 /// differ in markup alone, so the running code fits the new markup) and
@@ -1241,7 +1309,10 @@ impl Tpl {
                     .push(quote!(air::__rt::text(#id, { #c ::std::boxed::Box::new(move || ::std::format!(#f)) });));
             }
             Node::El { tag, attrs, spreads, children, .. } => {
-                self.bytes.push(1);
+                let outer = IN_SVG.get();
+                // 5: an element in SVG's namespace though its template has no `svg` above it.
+                let svg_root = root && tag != "svg" && (outer || SVG_ONLY.contains(&tag.as_str()));
+                self.bytes.push(if svg_root { 5 } else { 1 });
                 self.str(tag);
                 let stat: Vec<(&String, String)> = attrs
                     .iter()
@@ -1302,9 +1373,12 @@ impl Tpl {
                         self.holes.push(quote!(air::__rt::spread(#id, { #c #e });));
                     }
                 }
+                let svg = (outer || svg_root || tag == "svg") && tag != "foreignObject";
+                IN_SVG.set(svg);
                 for c in children {
                     self.node(c, false);
                 }
+                IN_SVG.set(outer);
             }
             n => {
                 self.bytes.push(4);
@@ -1378,6 +1452,12 @@ impl Tpl {
 /// whether it follows anything: a signal does), anything else runs as written.
 fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> TokenStream) -> TokenStream {
     let v: Vec<TokenTree> = e.clone().into_iter().collect();
+    // A constant or a static (`CLOUD`, `ACCENT`): read where it is, no local to clone.
+    if let [TokenTree::Ident(i)] = v.as_slice()
+        && i.to_string().starts_with(|c: char| c.is_uppercase())
+    {
+        return call(quote!(::std::boxed::Box::new(move || #into(::std::clone::Clone::clone(&#i)))));
+    }
     if let [TokenTree::Ident(i)] = v.as_slice() {
         return call(
             quote!({ let #i = ::std::clone::Clone::clone(&#i); ::std::boxed::Box::new(move || #into(::std::clone::Clone::clone(&#i))) }),

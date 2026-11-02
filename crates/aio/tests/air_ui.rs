@@ -350,3 +350,28 @@ fn a_saved_stylesheet_redraws_its_hole_on_air() {
     }
     assert!(TestUi::new(template).text("page").contains("box-sizing"));
 }
+
+#[test]
+fn svg_made_by_a_component_a_row_or_a_branch_is_svgs() {
+    const DOT: &str = "M0,0h1";
+    #[component]
+    fn Dot(r: u32) -> View {
+        rsx! { circle { r: "{r}" } }
+    }
+    fn app() -> View {
+        let n = signal(|| 2u32);
+        rsx! {
+            svg { "data-t": "pic", view_box: "0 0 9 9",
+                Dot { r: 1 }
+                for i in 0..n.get() { line { key: i, x1: "{i}" } }
+                if n.get() > 1 { title { "two" } }
+                // A constant alone as a value is read where it is.
+                path { d: DOT }
+            }
+            p { "data-t": "html", title { "page" } }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    let ns = ui.eval("[...document.querySelectorAll('[data-t=pic] *, [data-t=html] *')].map(e => e.localName + ':' + e.namespaceURI.split('/').pop()).join(' ')");
+    assert_eq!(ns, "circle:svg line:svg line:svg title:svg path:svg title:xhtml");
+}

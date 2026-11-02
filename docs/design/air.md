@@ -302,7 +302,7 @@ side; node 0 is `#main`.
 
 | op | name | body |
 |---|---|---|
-| 1 | DEFINE | tpl, roots, count, nodes (pre-order: `1 tag nattrs (k v)* children:u16 mark:u8` element, `2 str` text, `3` text hole, `4` anchor) |
+| 1 | DEFINE | tpl, roots, count, nodes (pre-order: `1 tag nattrs (k v)* children:u16 mark:u8` element, `5 …` the same in SVG's namespace (a root made inside an `svg`, or an SVG-only tag such as a component's `circle`), `2 str` text, `3` text hole, `4` anchor) |
 | 2 | CLONE | tpl, base: the marked nodes (roots, holes, elements with holes) get `base..` in pre-order |
 | 3 | SET_TEXT | id, str |
 | 4 / 5 | SET_ATTR / REMOVE_ATTR | id, name (, value) |

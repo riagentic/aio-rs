@@ -640,6 +640,12 @@ version may break things.
 - A synced client's call the server refused stays refused when it is sent
   again (its answer went with a cut link): it was applied on the later
   state its client was never told of.
+- air: SVG drawn by a component, a `for` row or an `if` branch (a template
+  whose root is `circle`, `g`, `path`, …, or one made inside an `svg` of
+  the same `rsx!`) is in SVG's namespace; it was an HTML element, drawn
+  as nothing.
+- air: an `rsx!` value that is a constant or a static alone
+  (`d: CLOUD`) compiles; it was rebound as a local (a refutable pattern).
 - air's code size: an event handler costs its closure alone (its wrappers
   were generic over it, 36% of the bench's IR): 50 views make 1.13 M lines
   of LLVM IR, 0.31x Dioxus's (phase 1: 0.49x), a held key over 10 000

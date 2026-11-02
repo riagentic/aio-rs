@@ -451,7 +451,8 @@ impl TestPage {
 fn read_tnode(r: &mut Rd, t: &mut Tpl, parent: Option<usize>, left: &mut u32) -> usize {
     *left -= 1;
     let (kind, children, mark) = match r.u8() {
-        1 => {
+        // 5: the same, in SVG's namespace.
+        1 | 5 => {
             let tag = r.str();
             let attrs = (0..r.u8()).map(|_| (r.str(), r.str())).collect();
             let children = r.u16();
