@@ -253,8 +253,12 @@ in a cell).
 ## Gaps
 
 - aio's transitions took a `TransitionFn` (a `css(t)` function of
-  progress); aio-rs takes CSS `@keyframes` by name. Write the keyframes in
-  the app's CSS.
+  progress); aio-rs on Dioxus takes CSS `@keyframes` by name: write the
+  keyframes in the app's CSS. On air `Motion::of("grow", |t|
+  format!("opacity:{t};transform:scale({t})"))` is that function, sampled
+  into `@keyframes grow` (20 steps, as aio's) and put in the page once,
+  and `Transition` draws no box of its own: its content's first element
+  plays the animation, its own style kept.
 - aio's `options` prop on `Transition` and `TransitionGroup` set one
   duration, delay and easing for both; in aio-rs each `Motion` carries its
   own.

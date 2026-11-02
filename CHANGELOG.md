@@ -60,10 +60,45 @@ version may break things.
   on an element sets them after its own, so the caller's win; one that
   reads state follows it. A prop typed `Prop<T>` follows what it is given
   (`value: name.get()`) while the component's body still runs once; given
-  a constant it holds no state.
+  a constant it holds no state. A `View` prop takes a view or text (a
+  string, a number, a format string, a signal: text that reads state
+  follows it), an `Option<View>` `None` too. Components may be generic
+  (`List<T>`), and a handler may be async.
 - air: a `View` is built again each time it is placed (a dialog opened
   again, a tab shown again, one view in two places), each place with its
   own state, as a Dioxus `Element`; it no longer fails when placed twice.
+- air: roots on one thread are apart (a test's two windows): each `Root`
+  has its own page, edits (`Root::take_edits`), events, globals and
+  tasks; the "one Root per thread" limit is gone.
+- **The kit on air** (`aio::kit` with feature `air`, air phase 2a): every
+  control, as aio's AIR draws it, each body run once and its holes
+  following state; the kit, facade, ui and sign-in tests run on air in
+  CI, none ignored. On air only, so far (aio's, gap package WA1):
+  - labels and titles take any content (Field, Checkbox, Switch, Alert,
+    Modal, Confirm, ConfirmButton, EmptyState, Tab, MenuItem, Crumb,
+    Table headers; `toast_view` for a toast);
+  - forms: `form.bind(aio::field!(name))` wires an Input, Textarea or
+    Select (its value, edits and blur: a field is touched when left),
+    `set_field`, `reset_field`, `touched`, `use_field_array`, and
+    `use_on_change` / `use_on_change_now` (aio's `onChange`, with a
+    cleanup);
+  - `Defer` loads: `load`, `loading`, `error`, `loading_min_ms`;
+  - `Transition` draws no box of its own (`air::styled`: one style
+    property of its content's element), `Motion::of` writes a motion as
+    a function of its progress (aio's `TransitionFn`);
+  - scoped CSS: `aio::ui::css(rule)` is a class named by its rule's
+    hash, put in the page once; `collect_css` gives them all;
+  - an element handed out by `onmounted` runs scripts on itself
+    (`MountedData::run`, `eval`): a canvas, a video, a selection.
+- Dark mode follows the OS: `[ui] scheme = "system"` (the default) keeps
+  the sheets' dark rules as written, so the page follows
+  `prefers-color-scheme` as it changes; `"light"` and `"dark"` fix one,
+  and a `bool` given to `use_css!` stays the app's own choice. The
+  template passes `aio::ui::scheme()`; `aio::ui::use_dark()` is a
+  `Memo<bool>` for code that draws its own colours;
+  `TestUi::set_os_dark` turns a test's OS dark.
+- `[ui] neutral = "soft"` keeps the page's greys near grey (aio's
+  `"neutral": "soft"`).
 - air's gates, each shown failing on a planted bug first: views removed
   (or replaced by an error boundary in the same pass) leave no node,
   effect, subscription, cleanup, handler, task, page script or page node;
@@ -270,6 +305,9 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- `ax create`'s template follows the OS's light or dark (`[ui] scheme`,
+  `use_css!(aio::ui::scheme(), …)`) instead of a fixed light page;
+  `page_css` and `use_css!` take a `Scheme` or, as before, a `bool`.
 - **Breaking: `aio::testing` is the `testing` feature.** The test kit is
   a dev-dependency now, so an app's builds never compile it (the
   template's debug build 952 → 934 MB, dx-metrics' `debug_target_mb`). Fix: one line in the

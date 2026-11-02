@@ -67,7 +67,8 @@ assert_eq!(theme::sheet(&Ui { theme: Look::None, ..ui }, "notes", false), "", "n
 - `aio::kit::theme_css(hue)`: the tokens and the kit's whole stylesheet,
   what the template passes.
 - `aio::kit::theme::sheet(&cfg.ui, &cfg.app.id, ships_css)`: what `[ui]`
-  in `aio.toml` asks for (below). Pass it instead of `theme_css` to let
+  in `aio.toml` asks for (below), `[ui] neutral = "soft"` included
+  (aio's `"neutral": "soft"`). Pass it instead of `theme_css` to let
   `aio.toml` decide.
 
 ## `[ui]` in `aio.toml`
@@ -375,12 +376,13 @@ keys.
 
 - **Scoped classes.** aio's `css` tag makes a class from a hash of its
   rule, and `aiol` warns when two stylesheets define one class
-  differently; aio-rs has neither: prefix class names by hand.
+  differently. On air `aio::ui::css("color: red; &:hover { … }")` is
+  that class (FNV-1a of the rule, as aio's), its rule put in the page once
+  per window and scoped by native nesting (`@keyframes` lifted out), and
+  `aio::ui::collect_css()` gives every rule; no warning, since a class is
+  its rule's hash. On Dioxus: prefix class names by hand.
 - **The dev contrast check in a running app.** aio warns in the dev
   page's console; aio-rs audits in `TestUi` (above), not in `ax dev`.
-- **`neutral = "soft"`.** aio's key keeps the neutrals near grey across
-  the app; in aio-rs the `soft` argument of `theme::tokens_css` does it,
-  with no `[ui]` key, so an app passes its own tokens.
 
 ## Common mistakes
 

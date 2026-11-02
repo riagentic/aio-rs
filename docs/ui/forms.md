@@ -377,10 +377,30 @@ test an error that shows on leaving, type something first.
   `parsed()` for its output: aio-rs has no schema adapter. The check is a
   Rust function; parse into your own type in it.
 - aio's `bind(name)` spread `value`, `onInput` and `onBlur` in one go:
-  aio-rs writes the two handlers per input.
-- aio's form touched a field on `blur`. The kit's `Input` reports `change`
-  (leaving a field that changed), not `blur`, so a field left untouched
-  shows its error only after a submit.
+  aio-rs on Dioxus writes the two handlers per input. On air (feature
+  `air`, the 0.2 renderer) `bind` is there, and a bound input is touched
+  on blur, as aio's:
+
+  ```rust,ignore
+  let form = use_form(|| Signup::default(), check);
+  rsx! {
+      Field { label: "Name", error: form.error("name"),
+          Input { bind: form.bind(aio::field!(name)) }
+      }
+      button { onclick: move |_| form.reset_field(aio::field!(name)), "Clear" }
+  }
+  ```
+
+  `aio::field!(name)` names a field of the values (it reads and writes
+  `v.name`); `set_field` and `reset_field` change one field (aio's
+  `field.set`, `field.reset`), `touched(name)` says whether it was left,
+  `use_field_array(|| rows)` is aio's `useFieldArray` (`push`, `remove`,
+  `move_item`, `set`, `reset`), and `use_on_change(selector, f)` is aio's
+  `onChange` (only the selector is followed; `f` may return its cleanup).
+- aio's form touched a field on `blur`. On Dioxus the kit's `Input`
+  reports `change` (leaving a field that changed), not `blur`, so a field
+  left untouched shows its error only after a submit; on air a bound
+  input is touched on blur.
 
 ## API
 

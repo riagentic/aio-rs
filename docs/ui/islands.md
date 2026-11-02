@@ -360,7 +360,10 @@ once when a kit control renders on a page that doesn't style the kit.
   and hydration have no aio-rs counterpart: views render in the page
   (desktop, Android) or in the browser (the web build).
 - **No code splitting.** One binary holds every view; `Defer` defers the
-  render, not a download.
+  render, not a download. On air `Defer` also loads, as aio's: `load:
+  load(|| async { … Ok(rsx! { … }) })` runs once it is triggered,
+  `loading` shows meanwhile (at least `loading_min_ms`), then what it
+  made, or `error` of what it said.
 - **Only `aio::ui` views.** aio's `aio/state-core` let Svelte, Vue or other
   frameworks drive a page; aio-rs has no such adapter. Another UI reaches
   the app over its transports instead ([transports](../clients/transports.md)),
