@@ -164,8 +164,9 @@ pub struct Store<T: Cell> {
     /// Events committed since the runtime last took them, each with the
     /// cell's event before it (for synced copies to spot a gap).
     committed: Vec<(u64, Event)>,
-    /// How many of `committed` the cells listening to it reacted to.
-    reacted: usize,
+    /// Events committed that the cells listening to it have not reacted
+    /// to yet; `None`: nobody listens.
+    to_react: Option<Vec<Event>>,
     /// The joint commit it last wrote in, and the store as it was before.
     mark: Option<(u64, Mark<T>)>,
     /// The file and its identity at open: a commit checks it is still there
@@ -227,7 +228,7 @@ pub(crate) struct Mark<T> {
     effects: usize,
     foreign: usize,
     committed: usize,
-    reacted: usize,
+    to_react: usize,
     held: Option<Held<T>>,
     journal_wm: Option<i64>,
 }
@@ -1124,7 +1125,7 @@ impl<T: Cell> Store<T> {
             foreign: vec![],
             txs: Default::default(),
             committed: vec![],
-            reacted: 0,
+            to_react: None,
             mark: None,
             file: None,
             recovered: None,
@@ -1221,7 +1222,7 @@ impl<T: Cell> Store<T> {
             foreign: vec![],
             txs: Default::default(),
             committed: vec![],
-            reacted: 0,
+            to_react: None,
             mark: None,
             file,
             recovered,
@@ -1754,6 +1755,9 @@ impl<T: Cell> Store<T> {
         self.journal_wm = None;
         for ((m, a, t), s) in earlier.iter().zip(logged_seqs) {
             let ev = Event { seq: s, method: m.clone(), args: a.clone(), inputs: Default::default(), by: by.clone(), at: *t, v: T::VERSION };
+            if let Some(r) = &mut self.to_react {
+                r.push(ev.clone());
+            }
             self.committed.push((self.seq, ev));
             self.seq = s;
         }
@@ -1766,6 +1770,9 @@ impl<T: Cell> Store<T> {
             at,
             v: T::VERSION,
         };
+        if let Some(r) = &mut self.to_react {
+            r.push(ev.clone());
+        }
         self.committed.push((self.seq, ev));
         self.seq = seq;
         // A dev build at `debug` says what each call changed, key by key.
@@ -1799,15 +1806,17 @@ impl<T: Cell> Store<T> {
 
     /// Events committed since the last take, each with the event before it.
     pub(crate) fn take_committed(&mut self) -> Vec<(u64, Event)> {
-        self.reacted = 0;
         std::mem::take(&mut self.committed)
+    }
+
+    /// Other cells listen to it: from now on its events wait for their reactions.
+    pub(crate) fn listened(&mut self) {
+        self.to_react.get_or_insert_default();
     }
 
     /// Events committed since the cells listening to it last reacted.
     pub(crate) fn unreacted(&mut self) -> Vec<Event> {
-        let new = self.committed[self.reacted..].iter().map(|(_, e)| e.clone()).collect();
-        self.reacted = self.committed.len();
-        new
+        self.to_react.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Its file's connection, shared with the other cells kept in it.
@@ -1843,7 +1852,7 @@ impl<T: Cell> Store<T> {
             effects: self.effects.len(),
             foreign: self.foreign.len(),
             committed: self.committed.len(),
-            reacted: self.reacted,
+            to_react: self.to_react.as_ref().map_or(0, Vec::len),
             held: self.held.clone(),
             journal_wm: self.journal_wm,
         }
@@ -1858,7 +1867,9 @@ impl<T: Cell> Store<T> {
         self.effects.truncate(m.effects);
         self.foreign.truncate(m.foreign);
         self.committed.truncate(m.committed);
-        self.reacted = m.reacted.min(self.committed.len());
+        if let Some(r) = &mut self.to_react {
+            r.truncate(m.to_react);
+        }
         self.took.retain(|(s, _)| *s <= m.seq);
         self.held = m.held;
         self.journal_wm = m.journal_wm;

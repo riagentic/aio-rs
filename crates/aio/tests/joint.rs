@@ -153,8 +153,9 @@ fn a_kill_mid_commit_leaves_both_calls_or_neither() {
             assert_eq!(o, s, "round {round}: {o} orders, {s} takes on disk");
             if aio_file {
                 let db = rusqlite::Connection::open_with_flags(&f, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-                let doc: String = db.query_row("SELECT v FROM aio_kv WHERE k = 'state'", [], |r| r.get(0)).unwrap();
-                let doc: serde_json::Value = serde_json::from_str(&doc).unwrap();
+                // Killed before its first commit: nothing of either.
+                let doc = db.query_row("SELECT v FROM aio_kv WHERE k = 'state'", [], |r| r.get::<_, String>(0));
+                let doc: serde_json::Value = doc.map_or(serde_json::Value::Null, |d| serde_json::from_str(&d).unwrap());
                 assert_eq!(doc["orders"]["placed"], doc["stock"]["taken"], "round {round}: aio's snapshot");
             }
         }

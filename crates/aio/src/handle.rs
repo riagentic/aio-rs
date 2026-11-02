@@ -351,6 +351,7 @@ impl<T: Cell> Handle<T> {
         };
         source.inner.file.react();
         self.inner.file.react();
+        lock(&source.inner.store).listened();
         lock(&source.inner.reactions).push(Arc::new(react));
     }
 
@@ -378,6 +379,8 @@ impl<T: Cell> Handle<T> {
     fn after_commit(&self, wake: bool) -> Box<dyn FnOnce()> {
         // Before the state is shown: from then until its listeners are told.
         let telling = Telling::new();
+        // In the file's turn: never a joint commit's state before it commits.
+        let hold = self.inner.file.call();
         let (started, done, changed, acting) = {
             // Another thread's commit may take these first: whoever takes
             // them sends and starts them before the next taker, so events
@@ -418,6 +421,7 @@ impl<T: Cell> Handle<T> {
             }
             (started, done, changed, acting)
         };
+        drop(hold);
         let me = self.clone();
         Box::new(move || me.tell_committed(telling, started, done, changed, acting, wake))
     }
