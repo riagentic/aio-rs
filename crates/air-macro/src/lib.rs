@@ -1937,7 +1937,8 @@ fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> Tok
     let mut r = vec![];
     captures(e, &mut r);
     let c = clones(&r);
-    call(quote!({ #c ::std::boxed::Box::new(move || #into({ #c #e })) }))
+    // The per-run clones outlive `into`: `{t(&x)}` may borrow them.
+    call(quote!({ #c ::std::boxed::Box::new(move || { #c #into({ #e }) }) }))
 }
 
 /// `Row { a: x, "data-t": t, ..more, children… }` →
