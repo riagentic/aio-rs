@@ -58,8 +58,9 @@ pub fn desktop_entry(app: &App, exec: &str) -> String {
     )
 }
 
-/// `install.sh`: for this user only, into the XDG dirs. The binary goes in
-/// `aio-rt/install/<id>/versions/<version>/` with `current` pointing at it
+/// `install.sh`: for this user only, into the XDG dirs. The bundle goes
+/// whole in `aio-rt/install/<id>/versions/<version>/` (as an update stages
+/// one, so the first update can be a patch from it) with `current` pointing at it
 /// (how updates swap versions), `~/.local/bin/<id>` through `current`,
 /// and `installed.json` saying what and from where (`bundle`: its name).
 /// `menu`: and in the app menu, with its icon (a CLI is not). POSIX `sh`:
@@ -89,8 +90,9 @@ pub fn install_sh(app: &App, bundle: &str, menu: bool) -> String {
          bin=\"${{XDG_BIN_HOME:-$HOME/.local/bin}}\"\ndata=\"${{XDG_DATA_HOME:-$HOME/.local/share}}\"\n\
          home=\"$data/aio-rt/install/{id}\"\n\
          mkdir -p \"$bin\" \"$home/versions/{v}\"\n\
-         install -m 0755 \"$here/{id}\" \"$home/versions/{v}/{id}\"\n\
-         if [ -d \"$here/electron\" ]; then rm -rf \"$home/versions/{v}/electron\"; cp -R \"$here/electron\" \"$home/versions/{v}/electron\"; fi\n\
+         to=$(cd \"$home/versions/{v}\" && pwd)\n\
+         if [ \"$here\" != \"$to\" ]; then rm -rf \"$to\"; mkdir -p \"$to\"; cp -R \"$here/.\" \"$to/\"; fi\n\
+         chmod 0755 \"$to/{id}\"\n\
          rm -f \"$home/pending.json\" \"$home/first-boot\" \"$home/update-failed\"\n\
          ln -sfn \"versions/{v}\" \"$home/current\"\n\
          ln -sfn \"$home/current/{id}\" \"$bin/{id}\"\n\
@@ -124,13 +126,17 @@ pub fn uninstall_sh(app: &App) -> String {
 /// A desktop app's budget in MB: core + `kit`, the shared runtime not
 /// counted (an app with heavy batteries declares its own: `[build] budget_mb`).
 pub const BUDGET_MB: u64 = 10;
-/// A server's (no window, no `kit`).
-pub const SERVER_BUDGET_MB: u64 = 6;
+/// A server's (no window, no `kit`): the service template measured 6.03 MB
+/// on Linux (2026-11-02), plus the size gate's 5% headroom (scripts/dx-metrics
+/// `STEADY`), 6.33 MB, to the next whole MB.
+pub const SERVER_BUDGET_MB: u64 = 7;
 
-/// The budget `cfg` builds within: its own, else its mode's.
-pub fn budget_of(cfg: &aio::config::Config) -> u64 {
+/// The budget `cfg` builds within for `os`: its own, else its mode's, half
+/// again on Windows, whose build of the same code is about a third bigger
+/// (the service template: 7.1 MB against 5.3 on Linux).
+pub fn budget_of(cfg: &aio::config::Config, os: &str) -> u64 {
     let default = if cfg.app.mode == aio::config::Mode::Server { SERVER_BUDGET_MB } else { BUDGET_MB };
-    cfg.build.budget_mb.unwrap_or(default)
+    cfg.build.budget_mb.unwrap_or(if os == "windows" { default * 3 / 2 } else { default })
 }
 
 /// Why a binary of `bytes` is refused, if it is over `budget_mb`.
@@ -482,7 +488,7 @@ pub fn sizes_of(name: &str) -> Result<String, String> {
     let bytes = std::fs::metadata(&b.binary).map_err(|e| format!("{}: {e}", b.binary.display()))?.len();
     let meta = crate::dev::metadata()?;
     let pkg = crate::dev::locate(&meta, name)?;
-    let budget = budget_of(&b.cfg);
+    let budget = budget_of(&b.cfg, b.platform.os);
     Ok(format!(
         "{name}: {:.2} MB of its {budget} MB budget\n{}",
         bytes as f64 / 1e6,
@@ -573,7 +579,7 @@ fn compile(name: &str, p: Option<&'static Platform>, channel: Option<&str>) -> R
             app.name, app.version
         ));
     }
-    if let Some(why) = over_budget(bytes, budget_of(&cfg)) {
+    if let Some(why) = over_budget(bytes, budget_of(&cfg, p.os)) {
         let sizes = sizes(&meta, &pkg.name, name, cross).unwrap_or_else(|e| format!("(no size report: {e})"));
         return Err(format!("{}: {why}\n{sizes}", app.name));
     }
@@ -1117,10 +1123,13 @@ mod tests {
         assert_eq!(over_budget(25_000_001, 25).as_deref(), Some("25.0 MB is over the 25 MB budget"));
         let toml =
             |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"relay\"\nname = \"Relay\"\n{t}")).unwrap();
-        assert_eq!(budget_of(&toml("")), BUDGET_MB);
+        assert_eq!(budget_of(&toml(""), "linux"), BUDGET_MB);
         let server = "mode = \"server\"\n[server]\nlisten = \"127.0.0.1:8080\"\n";
-        assert_eq!(budget_of(&toml(server)), SERVER_BUDGET_MB, "a server: 6 MB");
-        assert_eq!(budget_of(&toml(&format!("{server}[build]\nbudget_mb = 8\n"))), 8, "unless it says");
+        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 7 MB");
+        assert_eq!(budget_of(&toml(server), "windows"), 10, "half again on Windows");
+        assert_eq!(budget_of(&toml(""), "windows"), 15);
+        let own = toml(&format!("{server}[build]\nbudget_mb = 8\n"));
+        assert_eq!((budget_of(&own, "linux"), budget_of(&own, "windows")), (8, 8), "unless it says");
     }
 
     #[cfg(target_os = "linux")]
@@ -1159,6 +1168,13 @@ mod tests {
         assert_eq!(std::fs::read_link(&bin).unwrap(), install.join("current/notes"));
         assert_eq!(Command::new(&bin).output().unwrap().stdout, b"hi\n");
         assert!(install.join("versions/1.2.0/electron/locales/en-US.pak").exists());
+        // The bundle whole, as an update stages one: what the first update patches.
+        assert!(
+            install.join("versions/1.2.0/notes.png").exists() && install.join("versions/1.2.0/install.sh").exists()
+        );
+        // Run again from that copy, it keeps it.
+        run(&install.join("versions/1.2.0"), "install.sh", &[]);
+        assert_eq!(Command::new(&bin).output().unwrap().stdout, b"hi\n");
         let rec: aio::serde_json::Value =
             aio::serde_json::from_slice(&std::fs::read(install.join("installed.json")).unwrap()).unwrap();
         assert_eq!(

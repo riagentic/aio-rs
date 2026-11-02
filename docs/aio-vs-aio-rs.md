@@ -18,7 +18,7 @@ which of aio's features aio-rs has. Moving an app over:
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
 | Electron store | per user, `apps/` records, `am prune` | the same store, the same rules: one copy per version for both ([below](#the-electron-store)) |
 | Targets | browser, electron, android, web, cli, server, server-app; thin clients electron-client, android-client, ios-client, cli-client | desktop (Linux, Windows, macOS), web (wasm, PWA), Android, service, CLI; a thin client is `[app] mode = "client"`; no iOS ([targets](build/targets.md)) |
-| Install | `install.sh`: installs Deno, clones aio, puts `am` on `PATH` | a prebuilt `ax` (Linux x86_64, Windows x86_64) or from source; apps build on an aio-rs checkout ([setup](basics/setup.md)) |
+| Install | `install.sh`: installs Deno, clones aio, puts `am` on `PATH` | a prebuilt `ax` (Linux x86_64, Windows x86_64; macOS arm64 and x86_64 from the next release) or from source; apps build on an aio-rs checkout ([setup](basics/setup.md)) |
 | Dev loop | `am dev`: `App.tsx` patched, other edits reload the page, a cell edit restarts the app (~3 s) | `ax dev`: Rust hot-patched with the state kept, `rsx!` markup at once, CSS live; a rebuild and restart when a patch can't take it ([dev](build/dev.md)) |
 | Tests | `testCell`, `testUI` (happy-dom), `testServer`, cassettes, `deno test` | `TestCells`, `TestUi` (the real views in the runtime), `TestServer`, cassettes, `cargo test` ([testing](testing/README.md)) |
 | Maturity | beta (1.0.27-beta): the 1.x surface frozen, additions only, an API snapshot gate in CI | early alpha, first release (0.1.0); a minor version may break ([versions](basics/versioning.md)) |
@@ -539,7 +539,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Agent brief | `am agent` | `ax agent`, `AGENTS.md`/`CLAUDE.md` in new apps | ✅ |
 | Framework version per app | `dep/aio` link, `am pin`, `am fix` | aio-rs from git at a release tag in `Cargo.toml`, the commit in `Cargo.lock`: a clone builds as it is; `ax create --aio-version`; `ax pin` says what Cargo.toml asks for, what Cargo.lock built, this ax and the releases (drift: exit 1), `ax pin <v>\|main\|latest\|<checkout>` moves it, `--major`, `--json`; no preflight of removed APIs (`cargo check` names them) | ✅ |
 | Upgrading the CLI | `am upgrade`, `am uninstall` | `ax upgrade` (the release's checked install script, or a checkout), `ax uninstall` | ✅ |
-| Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows) or source; no prebuilt macOS | 🔄 |
+| Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows; macOS from the next release) or source | 🔄 |
 | API reference | `api-reference.md` | `cargo doc -p aio-rs` | ✅ |
 
 ## Plans
