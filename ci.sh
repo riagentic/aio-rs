@@ -106,6 +106,8 @@ if [ -n "$ndk" ]; then
   bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
   CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
     cargo clippy -p aio-rs -p aio-rs-shell --locked --target aarch64-linux-android -- -D warnings
+  CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
+    cargo clippy -p aio-rs-shell --no-default-features --features air --locked --target aarch64-linux-android -- -D warnings
 fi
 # The DX trend: a template app built, edited live under `ax dev` and
 # smoke-run, its row added to scripts/dx-trend.csv (commit it); a number past

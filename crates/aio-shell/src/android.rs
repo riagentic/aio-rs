@@ -13,7 +13,7 @@ pub use jni;
 use jni::objects::{GlobalRef, JClass, JIntArray, JObjectArray, JString, JValue};
 use jni::sys::jstring;
 use jni::{JNIEnv, JavaVM};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// What an app's library hands the host.
