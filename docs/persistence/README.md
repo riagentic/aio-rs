@@ -205,6 +205,18 @@ only after that commit does the new state replace the old and the caller
 get its answer. A storage error refuses the call (`storage: …`) and the
 state stays as it was.
 
+**A call and its reactions** (`listens_to`, aio's `listensTo`) commit in
+one SQLite transaction: the reactions run inside the call's commit, their
+own calls' events and rows go into the same transaction, and only once it
+committed are any of them shown or told. A crash (`kill -9`) leaves both
+on disk or neither; a refused commit keeps neither and puts every cell in
+it back. aio does the same: one reduce runs a call and its listeners, one
+transaction saves every cell (aio's `server/persistence.ts`). A joint
+commit writes through a connection the cells of its file share; once some
+of them react to each other, that file's cells take calls one at a time
+(as aio's one reduce does), while a file without reactions keeps taking
+them side by side, each cell on its own connection.
+
 **Snapshots.** Every 256 events, and at a boot that replayed any, the
 cell's saved state is written to `snap`. A failed snapshot only costs
 time: the next boot replays more of the log.
