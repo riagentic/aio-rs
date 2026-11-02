@@ -1100,6 +1100,18 @@ impl MountedData {
         async move { e.join_json().await }
     }
 
+    /// Run `js` on the element (`el` in it) and forget it: a canvas's
+    /// drawing, a video's play, a selection. One call is one script, so a
+    /// frame's drawing is one call (`const c = el.getContext('2d'); c.fillRect(…); …`).
+    pub fn run(&self, js: &str) {
+        exec(&format!("const el = aio.node({}); if (el) {{ {js} }}", self.id));
+    }
+
+    /// A script on the element (`el`) that talks back ([`Eval`]: `aio.send`, `return`).
+    pub fn eval(&self, js: &str) -> Eval {
+        eval(&format!("const el = aio.node({}); if (!el) throw new Error('gone'); {js}", self.id))
+    }
+
     /// Focus it (or take the focus away).
     pub fn set_focus(&self, on: bool) -> impl std::future::Future<Output = Result<(), String>> + use<> {
         let f = self.call(if on { "n.focus(); return true;" } else { "n.blur(); return true;" });

@@ -388,3 +388,20 @@ fn a_styled_view_sets_one_property_of_its_first_element_and_keeps_its_own() {
     p.click("on");
     assert_eq!(p.attr("in", "style").as_deref(), Some("color: red"));
 }
+
+#[test]
+fn an_element_handed_out_runs_scripts_on_itself() {
+    fn app() -> View {
+        let el = signal(|| None::<Rc<MountedData>>);
+        rsx! {
+            canvas { "data-t": "c", onmounted: move |e: MountedEvent| el.set(Some(e.data())) }
+            button { "data-t": "draw", onclick: move |_| if let Some(c) = el.get() { c.run("el.getContext('2d').fillRect(0, 0, 4, 4)") }, "draw" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let mounted = p.scripts.len();
+    p.click("draw");
+    let (id, js) = p.scripts.last().cloned().unwrap();
+    assert_eq!((p.scripts.len(), id), (mounted + 1, 0), "one script, no reply kept");
+    assert!(js.contains("el.getContext('2d').fillRect(0, 0, 4, 4)") && js.starts_with("const el = aio.node("), "{js}");
+}
