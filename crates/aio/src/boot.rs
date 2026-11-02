@@ -181,6 +181,12 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
         auto: cfg.feedback.auto,
     });
     crate::report::on_panic();
+    // air's dev-build warnings (an event whose element was drawn again) on the bus.
+    #[cfg(feature = "air")]
+    air::on_warn(|kind, msg| {
+        crate::warn!(cat: "ui", "{msg}");
+        crate::report::tell(kind, msg);
+    });
     crate::feedback::open();
     eprintln!("[aio] {} {version} starting (pid {})", cfg.app.id, std::process::id());
     say(&rows(cfg, version, dirs, &|k| std::env::var(k).ok(), &|p| p.exists()));
