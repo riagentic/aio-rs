@@ -499,7 +499,13 @@ impl<T: 'static> IntoHandler<T, Plain> for Option<Callback<Event<T>>> {
 /// A handler for [`on`], typed by its event's payload (the macro names it).
 #[doc(hidden)]
 pub fn handler<T: FromRaw, M>(f: impl IntoHandler<T, M>) -> Handler {
-    let mut f = f.into_handler();
+    boxed(f.into_handler())
+}
+
+// A handler costs its closure and nothing else: what wraps it is generic
+// over the payload alone, so every handler of one event shares it (a
+// wrapper generic over the closure made 36% of a view crate's LLVM IR).
+fn boxed<T: FromRaw>(mut f: Box<dyn FnMut(Event<T>)>) -> Handler {
     Rc::new(RefCell::new(move |r: &Raw, flow: &Rc<Flow>| f(Event::with_flow(T::from_raw(r), flow.clone()))))
 }
 
@@ -525,10 +531,11 @@ impl<F: std::future::Future<Output = ()> + 'static> HandlerReturn<Async> for F {
     }
 }
 
-/// [`handler`] of a closure (its parameter typed by this bound); it may be `async`.
+/// [`handler`] of a closure (`rsx!` boxes it, and this type gives its
+/// parameter's); it may be `async`.
 #[doc(hidden)]
-pub fn handler_fn<T: FromRaw, M, R: HandlerReturn<M>>(mut f: impl FnMut(Event<T>) -> R + 'static) -> Handler {
-    handler::<T, (Plain, ())>(move |e| f(e).run())
+pub fn handler_fn<T: FromRaw, M, R: HandlerReturn<M> + 'static>(mut f: Box<dyn FnMut(Event<T>) -> R>) -> Handler {
+    boxed::<T>(Box::new(move |e| f(e).run()))
 }
 
 /// An `onmounted` closure, typed; it may be `async`.

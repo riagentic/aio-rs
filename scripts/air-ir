@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""air's code-size rule, kept: LLVM IR lines per view of the bench's
+50-view crate (crates/air-bench, `gen`), debug build. A hole or a handler
+wrapper generic over its closure shows up here first (the handler wrapper
+was 36% of the crate's IR, docs/design/air.md).
+
+  scripts/air-ir <work dir>     build it, print the lines per view, fail past LIMIT
+"""
+import glob
+import os
+import subprocess
+import sys
+
+# 1.13 M lines for 50 views when set (22.5 k a view), Dioxus 0.7: 73 k.
+LIMIT = 25_000
+
+work = sys.argv[1] if len(sys.argv) > 1 else sys.exit(__doc__)
+repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+subprocess.run(["cargo", "run", "-q", "--release", "-p", "air-bench", "--bin", "gen", "--locked", "--", work, repo],
+               check=True, cwd=repo)
+crate = os.path.join(work, "air-50")
+target = os.path.join(work, "target")
+env = dict(os.environ, CARGO_TARGET_DIR=target)
+for f in glob.glob(os.path.join(target, "debug", "deps", "views-*.ll")):
+    os.remove(f)
+subprocess.run(["cargo", "rustc", "-q", "--lib", "--", "--emit=llvm-ir"], check=True, cwd=crate, env=env)
+lines = sum(sum(1 for _ in open(f)) for f in glob.glob(os.path.join(target, "debug", "deps", "views-*.ll")))
+per = lines // 50
+print(f"air-ir: {lines} lines of LLVM IR, {per} a view (limit {LIMIT})")
+if per > LIMIT:
+    sys.exit(f"air-ir: {per} lines a view is past {LIMIT}: a generic in a hole or a handler? (docs/design/air.md)")

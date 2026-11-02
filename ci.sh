@@ -63,6 +63,10 @@ if cargo tree --locked -p aio-rs --no-default-features --features air -e normal 
 fi
 cargo test -p aio-rs --no-default-features --features air,net --test air_ui --test facade --test ui --test kit --test signin --locked
 cargo test -p aio-rs-air --release --all-features --locked
+# air's code-size rule: LLVM IR lines per view of the bench's 50 views.
+air_ir=$(mktemp -d)
+scripts/air-ir "$air_ir"
+rm -rf "$air_ir"
 # The browser build (`ax build --web`): aio's core in the page, no SQLite, no ring.
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
 # With the kit: its controls and the sign-in form in the page.

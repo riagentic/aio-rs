@@ -1232,11 +1232,11 @@ impl Tpl {
                                     // A closure gets its parameter's type from a direct bound.
                                     let closure = is_closure(e);
                                     let h = if closure {
-                                        quote!(handler_fn::<air::__rt::#data, _, _>)
+                                        quote!(air::__rt::handler_fn::<air::__rt::#data, _, _>(::std::boxed::Box::new(#e)))
                                     } else {
-                                        quote!(handler::<air::__rt::#data, _>)
+                                        quote!(air::__rt::handler::<air::__rt::#data, _>(#e))
                                     };
-                                    quote!(air::__rt::on(#id, #dom, { #c air::__rt::#h(#e) });)
+                                    quote!(air::__rt::on(#id, #dom, { #c #h });)
                                 }
                             }
                             _ => continue,
