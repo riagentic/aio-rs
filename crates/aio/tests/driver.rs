@@ -755,8 +755,10 @@ fn focus_shows_the_ring_the_keyboard_would() {
 #[test]
 fn a_shot_waits_for_transitions_but_not_for_an_endless_animation() {
     let mut ui = TestUi::new(texts);
-    ui.eval("document.querySelector('[data-t=fade]').style.opacity = '0', null");
+    // From before the 1 s fade starts: it starts within the eval, whose round
+    // trip (hundreds of ms on a slow runner) would otherwise eat the bound.
     let t = std::time::Instant::now();
+    ui.eval("document.querySelector('[data-t=fade]').style.opacity = '0', null");
     ui.shot();
     assert!(t.elapsed() >= std::time::Duration::from_millis(600), "the fade ran: {:?}", t.elapsed());
     assert!(t.elapsed() < std::time::Duration::from_secs(4), "the spinner held nothing: {:?}", t.elapsed());
