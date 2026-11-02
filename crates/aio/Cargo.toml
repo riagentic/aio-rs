@@ -86,13 +86,16 @@ compat = []
 dev = ["dep:subsecond"]
 # `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
 imbl = ["dep:imbl"]
-# Kept so older manifests resolve: `aio::testing` needs no feature (the
-# UI half comes with `kit`), so a test build is the app's own build of aio.
+# `aio::testing`, the test kit (TestCells, TestServer, TestUi with `kit`):
+# an app's tests get it as a dev-dependency (`features = ["testing"]`, as
+# `ax create` writes it), so its own builds never compile it.
 testing = []
-# Kept likewise: `AIO_TEST_VIDEO=<dir>` records each UI test (`ax test --video`).
-video = []
+# `AIO_TEST_VIDEO=<dir>` records each UI test (`ax test --video`).
+video = ["testing"]
 
 [dev-dependencies]
+# Its own tests use the test kit, as an app's do.
+aio = { workspace = true, features = ["testing"] }
 aio-config = { workspace = true, features = ["toml"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

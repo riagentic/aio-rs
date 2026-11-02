@@ -17,7 +17,8 @@ for effects, schedules, several cells, saved data and access rules.
 | random calls against the invariants | `TestCells::fuzz` |
 
 Run them with `ax test <app> [filter]` or `cargo test`. `aio::testing`
-ships with aio-rs: an app adds no dev-dependency for it. Each test gets a
+comes from the `[dev-dependencies]` line with `features = ["testing"]`
+([testing](README.md)). Each test gets a
 throwaway world (see [the sandbox](README.md#every-test-runs-in-a-sandbox)).
 
 ## One cell: `Handle::memory()`

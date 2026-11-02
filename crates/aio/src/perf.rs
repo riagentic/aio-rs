@@ -264,11 +264,13 @@ pub(crate) fn method(cell: &'static str, method: &str, p: Phases) {
 type Watched = (HashMap<String, Duration>, Vec<String>);
 thread_local!(static WATCHED: std::cell::RefCell<Option<Watched>> = const { std::cell::RefCell::new(None) });
 
+#[cfg(feature = "testing")]
 /// Hold `label`'s calls on this thread to `budget` (a failure, not a log line).
 pub(crate) fn watch(label: String, budget: Duration) {
     WATCHED.with_borrow_mut(|w| _ = w.get_or_insert_default().0.insert(label, budget));
 }
 
+#[cfg(feature = "testing")]
 /// The calls over a watched budget since the last take; `stop`: watch no more.
 pub(crate) fn watched(stop: bool) -> Vec<String> {
     WATCHED.with_borrow_mut(|w| {

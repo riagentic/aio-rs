@@ -2,9 +2,18 @@
 
 Tests run in-process against the real cell: the same store, methods,
 invariants, effects and views the app runs. `ax test <app> [filter]` runs
-an app's tests (`cargo test` works too); `aio::testing` comes with aio-rs,
-so an app adds no dev-dependency for it. `ax create` makes an app whose
-template already has a cell test and a UI test.
+an app's tests (`cargo test` works too). `aio::testing` is aio-rs's
+`testing` feature, which the tests get as a dev-dependency, so the app's
+own builds never compile the test kit; `ax create` writes the line, and
+makes an app whose template already has a cell test and a UI test:
+
+```toml
+[dev-dependencies]
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.1.0", features = ["testing"] }
+```
+
+Tests that use `aio::testing` without it don't build; `ax lint` names the
+first such line and the fix.
 
 | Page | Covers |
 |---|---|

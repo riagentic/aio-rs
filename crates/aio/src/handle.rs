@@ -717,26 +717,31 @@ impl<T: Cell> Handle<T> {
         }
     }
 
+    #[cfg(feature = "testing")]
     /// Keep effects from now on, unstarted, until `start_held`.
     pub(crate) fn hold(&self) {
         lock(&self.inner.held).get_or_insert_default();
     }
 
+    #[cfg(feature = "testing")]
     /// The keys of the effects held, in the order they were asked for.
     pub(crate) fn held(&self) -> Vec<String> {
         lock(&self.inner.held).iter().flatten().map(|e| e.key.clone()).collect()
     }
 
+    #[cfg(feature = "testing")]
     /// The effects held, each as its key, mode and timeout.
     pub(crate) fn held_effects(&self) -> Vec<(String, Mode, Option<Duration>)> {
         lock(&self.inner.held).iter().flatten().map(|e| (e.key.clone(), e.mode, e.timeout)).collect()
     }
 
+    #[cfg(feature = "testing")]
     /// The keys its last commit asked for while held, with the commit's stamp.
     pub(crate) fn last_held(&self) -> (u64, Vec<String>) {
         lock(&self.inner.last_held).clone()
     }
 
+    #[cfg(feature = "testing")]
     /// Drop the held effects unstarted (a test resets the cell).
     pub(crate) fn drop_held(&self) {
         if let Some(h) = lock(&self.inner.held).as_mut() {
@@ -744,6 +749,7 @@ impl<T: Cell> Handle<T> {
         }
     }
 
+    #[cfg(feature = "testing")]
     /// Start the held effects (inside a tokio runtime); how many.
     pub(crate) fn start_held(&self) -> usize {
         let es = lock(&self.inner.held).as_mut().map(std::mem::take).unwrap_or_default();
@@ -752,11 +758,13 @@ impl<T: Cell> Handle<T> {
         n
     }
 
+    #[cfg(feature = "testing")]
     /// The failures of its schedules and effects since the last take.
     pub(crate) fn take_failed(&self) -> Vec<String> {
         std::mem::take(&mut *lock(&self.inner.failed))
     }
 
+    #[cfg(feature = "testing")]
     /// The keys of the effects running now.
     pub(crate) fn running(&self) -> Vec<String> {
         let mut r: Vec<String> = lock(&self.inner.running)

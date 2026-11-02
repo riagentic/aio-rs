@@ -231,6 +231,14 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- **Breaking: `aio::testing` is the `testing` feature.** The test kit is
+  a dev-dependency now, so an app's builds never compile it (the
+  template's debug build 952 → 934 MB, dx-metrics' `debug_target_mb`). Fix: one line in the
+  `Cargo.toml` holding the tests, `[dev-dependencies] aio = { package =
+  "aio-rs", <its source>, features = ["testing"] }`; `ax create` writes it,
+  and `ax lint` names tests that use `aio::testing` without it
+  ([migration](docs/migration/README.md#the-test-kit-is-a-dev-dependency-in-02)).
+  `video` brings `testing`; `ax lint --fix` no longer drops `testing`.
 - `ax smoke` fails a `.deb` whose menu entry starts a program it doesn't
   ship or names an icon it doesn't ship, and any page script that throws
   (`ERROR [page] Uncaught …`).

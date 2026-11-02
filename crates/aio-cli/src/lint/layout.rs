@@ -2,7 +2,7 @@
 //! names what is left of its old layout and `ax lint --fix` moves it to
 //! today's (`ax create`'s): no launcher `build.rs` (`aio::config!()` reads
 //! `aio.toml` itself), no build-dependency on aio-rs (one host build of aio,
-//! SQLite, ring and tokio less), no `testing`/`video` features (empty now),
+//! SQLite, ring and tokio less), no `video` feature (`testing` brings it),
 //! `aio::config!()` without `?` (it is the config, checked as it built),
 //! and the paths aio renamed before its freeze ([`RENAMED`]).
 //! Line edits, so a manifest keeps its comments and order.
@@ -29,7 +29,7 @@ fn on_aio(line: &str) -> bool {
     line.contains("package = \"aio-rs\"") || line.trim_start().starts_with("aio-rs ")
 }
 
-const OLD_FEATURES: [&str; 2] = ["\"testing\"", "\"video\""];
+const OLD_FEATURES: [&str; 1] = ["\"video\""];
 
 /// `aio::config!()` as it was: a `Result` (it read `AIORT_CONFIG`).
 const OLD_CONFIG: &str = "aio::config!()?";
@@ -120,7 +120,8 @@ pub fn check(rel: &str, text: &str, out: &mut Vec<Issue>) {
             let msg = "a build-dependency on aio-rs builds it a second time, for the host; nothing needs it now".into();
             out.push(Issue::new(Severity::Warn, "migrate", msg, rel, i + 1).fix(FIX));
         } else if let Some(f) = OLD_FEATURES.iter().find(|f| line.contains(**f)) {
-            let msg = format!("aio-rs's {f} feature is empty now: TestUi and video come with `kit`");
+            let msg =
+                format!("aio-rs's {f} feature is the test kit's own now: `testing` brings it (`ax test --video`)");
             out.push(Issue::new(Severity::Warn, "migrate", msg, rel, i + 1).fix(FIX));
         }
     }
@@ -220,7 +221,7 @@ pub fn fix(dir: &std::path::Path, files: &[std::path::PathBuf]) -> Result<Vec<St
             && let Some(new) = std::fs::read_to_string(path).ok().as_deref().and_then(migrate_manifest)
         {
             std::fs::write(path, new).map_err(err)?;
-            did.push(format!("{rel}: dropped the aio-rs build-dependency and the empty testing/video features"));
+            did.push(format!("{rel}: dropped the aio-rs build-dependency and the video feature"));
         } else if name.ends_with(".rs")
             && let Ok(t) = std::fs::read_to_string(path)
         {

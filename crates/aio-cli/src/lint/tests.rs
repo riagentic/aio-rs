@@ -740,7 +740,7 @@ fn an_app_of_the_older_layout_is_told_and_moved_by_fix() {
     ]);
     let r = lint(d.path());
     let got: Vec<_> = found(&r).into_iter().filter(|(a, _)| *a == "migrate").map(|(_, at)| at).collect();
-    assert_eq!(got, ["Cargo.toml:9", "app/Cargo.toml:10", "app/build.rs:1", "app/src/main.rs:2"], "{:?}", r.issues);
+    assert_eq!(got, ["app/Cargo.toml:10", "app/build.rs:1", "app/src/main.rs:2"], "{:?}", r.issues);
     assert!(r.issues.iter().filter(|i| i.area == "migrate").all(|i| i.fix.as_deref() == Some("ax lint --fix")));
 
     let files = |d: &Path| {
@@ -748,14 +748,10 @@ fn an_app_of_the_older_layout_is_told_and_moved_by_fix() {
         walk(d, &mut v);
         v
     };
-    assert_eq!(layout::fix(d.path(), &files(d.path())).unwrap().len(), 4);
+    assert_eq!(layout::fix(d.path(), &files(d.path())).unwrap().len(), 3);
     let read = |p: &str| std::fs::read_to_string(d.path().join(p)).unwrap();
     assert_eq!(read("app/src/main.rs"), main.replace("aio::config!()?", "aio::config!()"));
-    assert_eq!(
-        read("Cargo.toml"),
-        "[package]\nname = \"sky\"\n\n[dependencies]\naio = { package = \"aio-rs\", path = \"../aio/crates/aio\", \
-         default-features = false, features = [\"kit\"] }\ndioxus = { version = \"=0.7.10\" }\n\n[profile.release]\nlto = true\n"
-    );
+    assert_eq!(read("Cargo.toml"), OLD_ROOT, "the tests' `testing` dev-dependency is today's layout");
     assert_eq!(
         read("app/Cargo.toml"),
         "[package]\nname = \"sky-app\"\n\n[dependencies]\napp = { package = \"sky\", path = \"..\" }\naio = { package = \
@@ -771,7 +767,7 @@ fn a_build_rs_that_does_more_than_parse_aio_toml_is_left_alone() {
     assert!(layout::old_build_rs(OLD_BUILD));
     assert!(!layout::old_build_rs("fn main() {\n    aio::config::build(\"../aio.toml\");\n    cc::Build::new();\n}\n"));
     assert!(!layout::old_build_rs("fn main() { println!(\"cargo::rerun-if-changed=x\"); }"));
-    let kept = "[dev-dependencies]\naio = { package = \"aio-rs\", path = \"a\", features = [\"testing\", \"kit\"] }\n";
+    let kept = "[dev-dependencies]\naio = { package = \"aio-rs\", path = \"a\", features = [\"video\", \"kit\"] }\n";
     assert_eq!(
         layout::migrate_manifest(kept).as_deref(),
         Some("[dev-dependencies]\naio = { package = \"aio-rs\", path = \"a\", features = [\"kit\"] }\n")
@@ -901,4 +897,21 @@ fn ax_dev_lints_each_saved_file_alone() {
     let said = changed(&files, d.path());
     assert_eq!(said.len(), 1, "{said:?}");
     assert!(said[0].starts_with("warn src/ui.rs:4 [a11y] <div> takes clicks but no keys"), "{said:?}");
+}
+
+#[test]
+fn tests_that_use_the_test_kit_without_its_feature_are_told_the_line() {
+    let lib = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    use aio::testing::TestCells;\n    #[test]\n    fn t() { assert!(TestCells::new().effects().is_empty()) }\n}\n";
+    let bare = "[package]\nname = \"notes\"\n[dependencies]\naio = { package = \"aio-rs\", path = \"../aio\", features = [\"kit\"] }\n";
+    let r = lint(project(&[("src/lib.rs", lib), ("Cargo.toml", bare)]).path());
+    let kit: Vec<_> = r.issues.iter().filter(|i| i.message.contains("`testing` feature")).collect();
+    assert_eq!(kit.len(), 1, "{:?}", r.issues);
+    assert_eq!((kit[0].severity, kit[0].file.as_deref(), kit[0].line), (Severity::Error, Some("src/lib.rs"), Some(4)));
+    assert!(kit[0].fix.as_deref().unwrap().contains("features = [\"testing\"]"));
+    let given = format!(
+        "{bare}[dev-dependencies]\naio = {{ package = \"aio-rs\", path = \"../aio\", features = [\"testing\"] }}\n"
+    );
+    let r = lint(project(&[("src/lib.rs", lib), ("Cargo.toml", &given)]).path());
+    assert!(!r.issues.iter().any(|i| i.message.contains("`testing` feature")), "{:?}", r.issues);
+    assert!(!gives_testing("[features]\ntesting = []\n"), "its own feature list is not aio-rs's");
 }

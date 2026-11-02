@@ -713,7 +713,7 @@ pub async fn sleep(d: std::time::Duration) {
 thread_local!(static WAITING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 /// Has a view on this thread a commit still to be told of ([`sleep`])?
-#[cfg(feature = "kit")]
+#[cfg(all(feature = "kit", feature = "testing"))]
 pub(crate) fn telling() -> bool {
     WAITING.get() > 0
 }
