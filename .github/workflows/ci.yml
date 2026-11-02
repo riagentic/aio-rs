@@ -61,6 +61,7 @@ jobs:
   # A real install of a sample app updated through the signed delta path,
   # then a broken update rolled back with its data (scripts/update-proof).
   update-proof:
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

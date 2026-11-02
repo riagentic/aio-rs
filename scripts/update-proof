@@ -91,7 +91,8 @@ class Proof:
 
     def run(self, *cmd, cwd=None, check=True):
         p = subprocess.run(
-            [str(c) for c in cmd], cwd=cwd or self.app, env=self.env, capture_output=True, text=True, errors="replace"
+            [str(c) for c in cmd], cwd=cwd or self.app, env=self.env, capture_output=True, text=True, errors="replace",
+            timeout=1800,
         )
         if check and p.returncode != 0:
             fail(f"{' '.join(map(str, cmd))} exited {p.returncode}:\n{p.stdout[-3000:]}{p.stderr[-3000:]}")
@@ -142,7 +143,12 @@ class Proof:
         to.mkdir()
         if WIN:
             shutil.unpack_archive(b, to)
-            self.run(next(to.rglob(f"{APP}.exe")), "--install", cwd=to)
+            # `--install` starts the installed app too (holding no pipe of ours); this run starts its own.
+            log = open(self.work / "install.log", "w")
+            subprocess.run([str(next(to.rglob(f"{APP}.exe"))), "--install"], cwd=to, env=self.env, stdin=subprocess.DEVNULL,
+                           stdout=log, stderr=subprocess.STDOUT, timeout=120, check=True)
+            self.wait("the app --install started", lambda: self.logged(f"{APP} listens on"), 60)
+            self.ax("stop", APP)
             self.installed_exe = Path(self.env["LOCALAPPDATA"]) / "Programs" / APP / f"{APP}.exe"
         elif MAC:
             self.run("ditto", "-x", "-k", b, to, cwd=to)
