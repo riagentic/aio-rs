@@ -379,19 +379,8 @@ test an error that shows on leaving, type something first.
 - aio's `bind(name)` spread `value`, `onInput` and `onBlur` in one go:
   aio-rs on Dioxus writes the two handlers per input. On air (feature
   `air`, the 0.2 renderer) `bind` is there, and a bound input is touched
-  on blur, as aio's:
-
-  ```rust,ignore
-  let form = use_form(|| Signup::default(), check);
-  rsx! {
-      Field { label: "Name", error: form.error("name"),
-          Input { bind: form.bind(aio::field!(name)) }
-      }
-      button { onclick: move |_| form.reset_field(aio::field!(name)), "Clear" }
-  }
-  ```
-
-  `aio::field!(name)` names a field of the values (it reads and writes
+  on blur, as aio's: `Input { bind: form.bind(aio::field!(name)) }` in a
+  `Field { error: form.error("name"), … }`. `aio::field!(name)` names a field of the values (it reads and writes
   `v.name`); `set_field` and `reset_field` change one field (aio's
   `field.set`, `field.reset`), `touched(name)` says whether it was left,
   `use_field_array(|| rows)` is aio's `useFieldArray` (`push`, `remove`,
