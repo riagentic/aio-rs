@@ -1,9 +1,12 @@
 //! ax dev's own hot-patching (`src/hotpatch.rs`), end to end: a fixture
 //! workspace (a library and an app on subsecond) built fat, run, and
 //! patched three times while it runs: twice in the app's crate, once in
-//! the library; the app prints the new values without a restart, and the
-//! patched code sees the thread-locals the running binary counted (Linux
-//! x86_64; on macOS a patch has its own, new, as with dx).
+//! the library; the app prints the new values without a restart. On Linux
+//! x86_64 the patched code sees the running binary's thread-locals and
+//! statics (an `AtomicU32` and a `OnceLock` set before the patch), while a
+//! static the patch adds is its own; a static the patch adds is its own on
+//! every platform. On macOS a patch has its own thread-locals and statics,
+//! as with dx.
 #![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 #[allow(dead_code)]
@@ -15,10 +18,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const APP: &str = r#"use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 thread_local! {
     static TICKS: Cell<u32> = const { Cell::new(0) };
 }
+
+static HITS: AtomicU32 = AtomicU32::new(0);
+static NAME: OnceLock<String> = OnceLock::new();
 
 fn value() -> u32 {
     1
@@ -30,16 +38,24 @@ fn ticks() -> u32 {
     TICKS.get() + 100 * fixture_lib::SEEN.get()
 }
 
+// Likewise the app's statics: the running counter and the name set once.
+fn stats() -> String {
+    format!("{} {}", HITS.load(Ordering::Relaxed), NAME.get().map(|s| s.as_str()).unwrap_or("?"))
+}
+
 fn main() {
     println!("aslr {}", subsecond::aslr_reference());
     let mut line = String::new();
     loop {
         TICKS.set(TICKS.get() + 1);
         fixture_lib::SEEN.set(fixture_lib::SEEN.get() + 1);
+        HITS.fetch_add(1, Ordering::Relaxed);
+        let _ = NAME.set("app".to_string());
         let app = subsecond::HotFn::current(value).call(());
         let lib = subsecond::HotFn::current(fixture_lib::value).call(());
         let ticks = subsecond::HotFn::current(ticks).call(());
-        println!("value {app} {lib} {ticks}");
+        let stats = subsecond::HotFn::current(stats).call(());
+        println!("value {app} {lib} {ticks} {stats}");
         line.clear();
         if std::io::stdin().read_line(&mut line).unwrap() == 0 {
             break;
@@ -118,17 +134,28 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     let mut stdin = app.stdin.take().unwrap();
     let mut lines = BufReader::new(app.stdout.take().unwrap()).lines();
     let mut next = || lines.next().unwrap().unwrap();
+    // On Linux x86_64 a patch keeps the running thread-locals and statics;
+    // elsewhere (macOS) a patch gets its own, so patched reads start fresh.
+    let live = cfg!(target_os = "linux");
+    let ticks = |n: u32| if live { 101 * n } else { 0 };
+    let stats = |hits: u32| if live { format!("{hits} app") } else { "0 ?".to_string() };
+
     let aslr: u64 = next().strip_prefix("aslr ").unwrap().parse().unwrap();
-    assert_eq!(next(), "value 1 10 101");
+    // Before any patch the app itself runs: the real values on every
+    // platform (one loop: TICKS 1 + 100*SEEN 1 = 101, HITS 1, NAME set).
+    // Only a patched function's view then depends on the platform.
+    assert_eq!(next(), "value 1 10 101 1 app");
 
     let main_rs = ws.join("app/src/main.rs");
     let lib_rs = ws.join("lib/src/lib.rs");
-    // What the patched `ticks` reads after `n` turns of the loop.
-    let ticks = |n: u32| if cfg!(target_os = "linux") { 101 * n } else { 0 };
+    // The patched lib `value` uses a static the patch adds (not in the fat
+    // binary): its own, on every platform, so the result is 20.
+    let new_static = "    static NEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(20);\n    \
+                      NEW.load(std::sync::atomic::Ordering::Relaxed)\n";
     let steps = [
-        (&main_rs, "    1\n", "    2\n", format!("value 2 10 {}", ticks(2))),
-        (&main_rs, "    2\n", "    3\n", format!("value 3 10 {}", ticks(3))),
-        (&lib_rs, "    10\n", "    20\n", format!("value 3 20 {}", ticks(4))),
+        (&main_rs, "    1\n", "    2\n", format!("value 2 10 {} {}", ticks(2), stats(2))),
+        (&main_rs, "    2\n", "    3\n", format!("value 3 10 {} {}", ticks(3), stats(3))),
+        (&lib_rs, "    10\n", new_static, format!("value 3 20 {} {}", ticks(4), stats(4))),
     ];
     for (i, (file, from, to, want)) in steps.into_iter().enumerate() {
         edit(file, from, to);
