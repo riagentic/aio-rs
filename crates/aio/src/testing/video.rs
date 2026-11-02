@@ -98,9 +98,9 @@ mod tests {
     fn swatch() -> crate::ui::View {
         use crate::ui::prelude::*;
         let blue = signal(|| false);
-        let bg = if blue.get() { "rgb(0,0,255)" } else { "rgb(255,0,0)" };
+        // Read in the attribute, not the body: a body runs once on air.
         rsx! {
-            div { style: "margin:0;width:200px;height:100px;background:{bg}" }
+            div { style: format!("margin:0;width:200px;height:100px;background:{}", if blue.get() { "rgb(0,0,255)" } else { "rgb(255,0,0)" }) }
             button { "data-t": "flip", onclick: move |_| blue.set(true), "Flip" }
         }
     }
