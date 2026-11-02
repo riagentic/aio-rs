@@ -864,6 +864,17 @@ impl Http {
         self
     }
 
+    /// Does it answer any path (a route, a dir, blobs)? Server functions go
+    /// over the wire, not HTTP.
+    pub(crate) fn serves(&self) -> bool {
+        !self.routes.is_empty() || !self.plugin_routes.is_empty() || !self.roots.is_empty() || self.blobs.is_some()
+    }
+
+    /// The routes the app and its plugins declare.
+    pub(crate) fn route_count(&self) -> usize {
+        self.routes.len() + self.plugin_routes.len()
+    }
+
     pub fn route(mut self, r: Route) -> Self {
         self.routes.push(r);
         self
@@ -1126,6 +1137,61 @@ pub(crate) struct Key {
     pub(crate) ancestors: String,
     /// `[server] open`: no key is asked (with accounts, sessions still are).
     pub(crate) open: bool,
+}
+
+/// Serve `http`'s routes and files to the app's window alone (aio's
+/// zero-port routes, `aio://app/<path>`): HTTP/1.1 over the private socket
+/// `l`, each connection let in only by the window's gate
+/// ([`crate::ipc::Only::window`]), so nothing listens on TCP and no other
+/// process, of this user or not, is answered (unarmed: no one). Being let
+/// in is the key, as on the window's wire. Until `l` fails.
+pub async fn serve_window(http: Http, l: crate::ipc::Listener) -> std::io::Result<()> {
+    let page = crate::security::Page::new(&Default::default(), &[], false).map_err(std::io::Error::other)?;
+    let key = Arc::new(Key {
+        token: Arc::default(),
+        cookie: String::new(),
+        secure: false,
+        trust: None,
+        auth: None,
+        session_cookie: String::new(),
+        page: Arc::new(page),
+        guessed: Default::default(),
+        users: None,
+        ancestors: String::new(),
+        open: true,
+    });
+    // The window has its own page: no browser shell for an unknown path.
+    let http = Arc::new(Http { ui: None, ..http });
+    let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+        let (http, key) = (http.clone(), key.clone());
+        async move { answer(&http, &key, req, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)).await }
+    });
+    axum::serve(Window(l, crate::ipc::Only::window()), app).await
+}
+
+/// The window's door as axum's listener: the window's connections only.
+struct Window(crate::ipc::Listener, crate::ipc::Only);
+
+impl axum::serve::Listener for Window {
+    type Io = crate::ipc::Stream;
+    type Addr = ();
+
+    async fn accept(&mut self) -> (Self::Io, ()) {
+        loop {
+            match self.0.accept_only(&self.1).await {
+                Ok(s) => return (s, ()),
+                // Out of descriptors, say: said, and tried again (as axum's own).
+                Err(e) => {
+                    eprintln!("[aio] the window's route door: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Whether the request shows the key, and the cookie to set when it showed

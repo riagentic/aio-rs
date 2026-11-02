@@ -143,7 +143,90 @@ app.on('web-contents-created', (_e, wc) => wc.on('will-prevent-unload', (e) => {
   }
 }))
 
-protocol.registerSchemesAsPrivileged([{ scheme: 'aio', privileges: { standard: true, secure: true } }])
+// fetch() and streamed bodies too: the page's requests to the app's routes
+// (aio://app/<path>) reach Chromium as they arrive, never held here whole.
+protocol.registerSchemesAsPrivileged([{ scheme: 'aio', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }])
+
+// The app's routes, over its private socket (Unix socket or named pipe; the
+// app answers this process only): no TCP port. aio's socketFetch
+// (electron-shared.ts tmplSocketFetch), as it is: at most 6 connections, as
+// Chromium per host; a small or error body read here, so a body nobody reads
+// (an <img>'s 404) never holds a connection; everything else streamed, and a
+// dropped stream closes its connection; no first byte in AIO_SOCKET_TIMEOUT_MS
+// (30 s) is a 504, a dead socket a 502, both in words.
+const HTTP_SOCK = arg('http')
+const MAX_SOCKETS = 6
+const SMALL_BODY = 64 * 1024
+const REQ_TIMEOUT_MS = ((s) => /^[0-9]+$/.test(s) && Number(s) > 0 ? Number(s) : 30000)(String(process.env.AIO_SOCKET_TIMEOUT_MS || '').trim())
+let agent = null
+function socketFetch(reqPath, method, headers, body) {
+  const http = require('node:http')
+  const { Readable } = require('node:stream')
+  agent = agent || new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS })
+  const where = `socket (${HTTP_SOCK})`
+  return new Promise((resolveRaw) => {
+    let settled = false
+    let deadline
+    const resolve = (r) => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      resolveRaw(r)
+    }
+    const r = http.request({ socketPath: HTTP_SOCK, agent, path: reqPath, method, headers }, (res) => {
+      const h = {}
+      for (const [k, v] of Object.entries(res.headers)) h[k] = Array.isArray(v) ? v.join(', ') : v
+      const status = res.statusCode || 200
+      // A body-less status carries no stream: Response() throws.
+      if (status === 204 || status === 304 || method === 'HEAD') { res.resume(); resolve(new Response(null, { status, headers: h })); return }
+      const len = Number(res.headers['content-length'])
+      if ((Number.isFinite(len) && len <= SMALL_BODY) || status >= 400) {
+        const chunks = []
+        let got = 0
+        let capped = false
+        res.on('data', (c) => {
+          got += c.length
+          chunks.push(c)
+          // An error body of no said length: its first page, the rest dropped.
+          if (got > SMALL_BODY) { capped = true; res.destroy() }
+        })
+        // A said length that did not all arrive is a truncated answer, never a short 200.
+        const done = () => {
+          if (!capped && Number.isFinite(len) && got < len) {
+            resolve(new Response(`aio: the app closed the connection after ${got} of ${len} bytes of ${reqPath}: the response is truncated`, { status: 502, headers: { 'Content-Type': 'text/plain' } }))
+            return
+          }
+          resolve(new Response(Buffer.concat(chunks), { status, headers: h }))
+        }
+        res.on('end', done)
+        res.on('close', done)
+        res.on('error', done)
+        return
+      }
+      resolve(new Response(new ReadableStream({
+        start(c) {
+          res.on('data', (chunk) => {
+            try { c.enqueue(new Uint8Array(chunk)) } catch (_) { res.destroy(); return }
+            if (c.desiredSize !== null && c.desiredSize <= 0) res.pause()
+          })
+          res.on('end', () => { try { c.close() } catch (_) {} })
+          res.on('error', (e) => { try { c.error(e) } catch (_) {} })
+        },
+        pull() { res.resume() },
+        cancel() { res.destroy() },
+      }), { status, headers: h }))
+    })
+    r.on('error', (e) => resolve(new Response(`aio: cannot reach the app over its ${where}: ${e.message}`, { status: 502, headers: { 'Content-Type': 'text/plain' } })))
+    deadline = setTimeout(() => {
+      const msg = `aio: no answer from the app for ${method} ${reqPath} after ${REQ_TIMEOUT_MS} ms over its ${where}. The request was dropped so the window keeps working; if this route is that slow to its first byte, raise AIO_SOCKET_TIMEOUT_MS.`
+      try { console.error(`[aio-shell] ${msg}`) } catch (_) {}
+      resolve(new Response(msg, { status: 504, headers: { 'Content-Type': 'text/plain' } }))
+      try { r.destroy(new Error(`aio: request timed out after ${REQ_TIMEOUT_MS} ms`)) } catch (_) {}
+    }, REQ_TIMEOUT_MS)
+    if (body) Readable.fromWeb(body).pipe(r)
+    else r.end()
+  })
+}
 
 // Frames from the app socket, split by their 4-byte big-endian length.
 function frames(onFrame) {
@@ -230,6 +313,14 @@ app.whenReady().then(() => {
     try { own = path.resolve(assets, '.' + decodeURIComponent(u.pathname)) } catch (_) {}
     if (u.host === 'app' && own && own.startsWith(assets + path.sep) && fs.existsSync(own) && fs.statSync(own).isFile()) {
       return enet.fetch(pathToFileURL(own).toString())
+    }
+    // Anything else is the app's: its routes, its dirs, its blobs, path and
+    // query as they are, streamed both ways. No socket: nothing is there.
+    if (u.host === 'app' && HTTP_SOCK) {
+      const headers = {}
+      req.headers.forEach((v, k) => { headers[k] = v })
+      const body = req.method === 'GET' || req.method === 'HEAD' ? null : req.body
+      return socketFetch(u.pathname + u.search, req.method, headers, body)
     }
     return new Response('', { status: 404 })
   })

@@ -66,8 +66,8 @@ tempfile = "3"
 # The update tests read aio.toml text (`Config::parse`).
 aio-config = { workspace = true, features = ["toml"] }
 # The kit's islands, tested in the real page (`islands.rs`; the kit is
-# the renderer's: `dioxus` turns on Dioxus's).
-aio = { workspace = true, features = ["testing"] }
+# the renderer's: `dioxus` turns on Dioxus's); the window's routes (`window_routes.rs`).
+aio = { workspace = true, features = ["testing", "server"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 
 [[test]]

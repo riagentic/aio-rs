@@ -106,8 +106,6 @@ records as `ax prune` keeps what an aio app does
   instances` doesn't list a running aio-rs app (`ax apps` does).
 - A desktop-only (`standalone`) aio-rs app has no port at all, as an aio
   desktop app has none.
-- aio's routes over its local socket (`aio://`): an aio-rs app serves
-  routes only with `[server] listen`.
 - Code: an aio cell or component is translated, not loaded.
 
 ## Where aio-rs is better
@@ -198,7 +196,6 @@ beyond the aio-rs form.
 | Sync | `lww-per-key` and `set-remove` view merges, HLC | methods replayed in order on the server; `Remote::merge` shows `Text`, `Counter`, `SetAdd` | a method per key | [offline](persistence/offline.md#limits-compared-with-aio) |
 | Sync | render-staleness backpressure | every link paced the same (`sync_interval_ms`) | ➖ | [offline](persistence/offline.md#limits-compared-with-aio), [scaling](build/scaling.md#not-in-aio-rs) |
 | Sync | path subscriptions | a copy gets every patch of its cell | split cells | [offline](persistence/offline.md#limits-compared-with-aio) |
-| Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
 | Auth | a share link carrying the key | the share line names the key file | `?token=<key>` by hand, `ax profile`, pairing | [accounts](auth/README.md#limits) |

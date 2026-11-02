@@ -4,9 +4,10 @@ On Linux, Windows and macOS an aio-rs app's views are drawn by the shared
 Electron runtime. The views themselves run in the app's Rust process: a
 view tree per window (Dioxus's `VirtualDom` today, behind `aio::ui`), whose DOM edits and events travel over a
 private socket to a small page in Electron. The page loads from
-`aio://app/`, connects to nothing and runs no app code; Electron's main
-process opens the window, the tray, notifications and dialogs when the app
-asks.
+`aio://app/`, connects to nothing but its own origin (the app's routes,
+when it has some: [transports](transports.md#routes-in-the-window)) and
+runs no app code; Electron's main process opens the window, the tray,
+notifications and dialogs when the app asks.
 
 - **Use it** for every window app: `ax create <name>` (the `app` template)
   is one, `ax dev <app>` runs it, `ax build <app>` packages it
