@@ -40,7 +40,9 @@ its report, or a failure with what `ax` said (`ax` from `AIO_AX`, else
 `PATH`).
 
 The sandbox, the display and everything started go away again, pass or
-fail. `[build] smoke = true` in `aio.toml` smokes every build. A Windows
+fail, with what its start wrote outside the sandbox: its record in the
+shared runtime's app list (`apps/*.json`, what `ax prune` reads), a
+macOS window bundle no other app names, and Windows' door folder. `[build] smoke = true` in `aio.toml` smokes every build. A Windows
 bundle is smoked on Windows: this machine, or the one `AIO_WINDOWS_SSH`
 names (`[ssh options] [user@]host`, nothing to install there). A macOS
 bundle is smoked on the Mac that built it, where its window shows on the

@@ -702,6 +702,10 @@ version may break things.
 
 ### Fixed
 
+- `ax build --smoke` (and `ax smoke`) removes the record its start left
+  in the shared runtime's app list (`apps/*.json`), on Linux, macOS and
+  Windows, and on macOS the window bundle no other app names: a smoke
+  leaves nothing behind for `ax prune` to show.
 - air: every `exec` of one batch runs (an island's update, a second
   island's mount): on a page without `__aioRun` all but the first found
   the slot the first had freed, and did nothing.

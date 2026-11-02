@@ -1286,7 +1286,8 @@ ax smoke <artifact>
 Starts a window app's Linux bundle, `.deb` or AppImage headless as a person
 would, then stops it: its boot time, its window's memory (PSS of the app and
 its runtime), a clean stop, nothing left running. What `ax build --smoke`
-runs on each bundle.
+runs on each bundle; a macOS app's `.zip` on a Mac, a Windows bundle on
+Windows (this one, or the one `AIO_WINDOWS_SSH` names).
 
 ### `ax install`
 

@@ -97,7 +97,8 @@ other edit builds anew and the tabs reload",
         "smoke <artifact>",
         "start a window app's Linux bundle, .deb or AppImage headless as a user would,
 then stop it: its boot time, its window's memory (PSS of the app and its
-runtime), a clean stop, nothing left running (as ax build --smoke does)",
+runtime), a clean stop, nothing left running (as ax build --smoke does);
+a macOS app's zip on a Mac, a Windows bundle on Windows (AIO_WINDOWS_SSH)",
     ),
     v(
         "build",
