@@ -197,11 +197,10 @@ impl Only {
     }
 }
 
-/// Where this app serves its routes to its window (`aio://app/…`), once that
-/// door is open: aio-shell hands it to the window (`--aio-http`).
 static WINDOW_HTTP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// The window's HTTP door ([`WINDOW_HTTP`]), if this app opened one.
+/// Where the app serves its routes to its window (`aio://app/<path>`), if it
+/// opened that door: aio-shell hands it to the window (`--aio-http`).
 pub fn window_http() -> Option<&'static str> {
     WINDOW_HTTP.get().map(String::as_str)
 }
