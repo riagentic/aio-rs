@@ -1065,7 +1065,9 @@ impl Eval {
         })
     }
 
-    /// The next JSON value the script sent (`aio.send(v)`); an error once it ended.
+    /// The next JSON value the script sent (`aio.send(v)`); an error once it
+    /// failed or its view ended. A script that returned may still send (its
+    /// listeners, its timers), so its return ends no `recv`, as on Dioxus.
     pub fn recv_json(&self) -> impl std::future::Future<Output = Result<String, String>> + use<> {
         let id = self.id;
         std::future::poll_fn(move |cx| {
@@ -1076,12 +1078,8 @@ impl Eval {
                 if let Some(v) = e.inbox.pop_front() {
                     return std::task::Poll::Ready(Ok(v));
                 }
-                if let Some(done) = &e.done {
-                    let why = match done {
-                        Ok(_) => "the script ended".to_string(),
-                        Err(e) => e.clone(),
-                    };
-                    return std::task::Poll::Ready(Err(why));
+                if let Some(Err(why)) = &e.done {
+                    return std::task::Poll::Ready(Err(why.clone()));
                 }
                 e.waker = Some(cx.waker().clone());
                 std::task::Poll::Pending

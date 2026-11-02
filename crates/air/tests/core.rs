@@ -252,6 +252,25 @@ fn a_page_script_gets_values_and_its_return_comes_back() {
     assert_eq!(GOT.take().as_deref(), Some(r#"Ok("42") Ok("\"done\"")"#));
 }
 
+#[test]
+fn a_page_script_that_returned_still_sends_what_its_timers_send() {
+    thread_local!(static GOT: RefCell<Option<String>> = const { RefCell::new(None) });
+    fn app() -> View {
+        task(|| async {
+            let e = eval("setTimeout(() => aio.send(1), 10);");
+            let v = e.recv_json().await;
+            GOT.set(Some(format!("{v:?}")));
+        });
+        rsx! { p { "page" } }
+    }
+    let mut p = TestPage::mount(app);
+    let id = p.scripts[0].0;
+    p.answer(id, 1, "null");
+    assert_eq!(GOT.take(), None, "its return is no value: recv waits on");
+    p.answer(id, 0, "1");
+    assert_eq!(GOT.take().as_deref(), Some(r#"Ok("1")"#));
+}
+
 static LEFT: Global<u32> = Global::new(|| 0);
 static RIGHT: Global<u32> = Global::new(|| 10);
 static SUM: GlobalMemo<u32> = GlobalMemo::new(|| LEFT.get() + RIGHT.get());

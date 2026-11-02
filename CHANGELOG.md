@@ -651,6 +651,11 @@ version may break things.
 - air: a task spawned with `spawn_forever` in an app ends with its root (a
   test's next mount on the thread polled it, on a dead tokio runtime: a
   panic); `follow_sheets` starts its watcher again for the next root.
+- air: a page script that returned still hands `recv` what its listeners
+  and timers send later, as on Dioxus; its return was an error to `recv`.
+- Enter in an open combobox (`role="combobox"`, `aria-expanded="true"`)
+  picks, never submits its form: aio's Enter submitted it once the pick
+  enabled the form's button (the feedback form's country sent it).
 - air: a view's `on_cleanup` reads its own signals and memos (they were
   freed first: a panic in a destructor, the process aborted).
 - air: SVG drawn by a component, a `for` row or an `if` branch (a template
