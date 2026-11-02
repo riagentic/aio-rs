@@ -38,22 +38,27 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
     let Some(fn_at) = toks.iter().position(|t| is_ident(t, "fn")) else {
         return quote!(::core::compile_error!("air: #[component] goes on a fn")).into();
     };
-    let (name, args) = match (toks.get(fn_at + 1), toks.get(fn_at + 2)) {
-        (Some(TokenTree::Ident(n)), Some(TokenTree::Group(g))) if g.delimiter() == Delimiter::Parenthesis => {
-            (n.clone(), g.stream())
-        }
-        _ => {
-            return quote!(::core::compile_error!(
-                "air: #[component] goes on a plain `fn Name(props…) -> View` (no generics)"
-            ))
-            .into();
-        }
+    let Some(TokenTree::Ident(name)) = toks.get(fn_at + 1).cloned() else {
+        return quote!(::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`")).into();
+    };
+    // `<R: Clone + 'static>`: the props are generic as the fn is.
+    let (generics, mut at) = (generic_params(&toks, fn_at + 2), fn_at + 2);
+    if let Some((_, end)) = &generics {
+        at = *end;
+    }
+    let args = match toks.get(at) {
+        Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => g.stream(),
+        _ => return quote!(::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`")).into(),
+    };
+    let (gp, gn) = match &generics {
+        Some((params, _)) => split_generics(params),
+        None => (quote!(), quote!()),
     };
     let head: TokenStream = toks[..fn_at].iter().cloned().collect();
-    let rest: TokenStream = toks[fn_at + 3..].iter().cloned().collect();
+    let rest: TokenStream = toks[at + 1..].iter().cloned().collect();
     let args: Vec<Vec<TokenTree>> = split_top(&args.into_iter().collect::<Vec<_>>());
     if args.is_empty() {
-        return quote!(#[allow(non_snake_case)] #head fn #name() #rest).into();
+        return quote!(#[allow(non_snake_case)] #head fn #name<#gp>() #rest).into();
     }
     let props = format_ident!("{}Props", name);
     let fields: Vec<Field> = match args.iter().map(|a| field(a)).collect::<Res<_>>() {
@@ -66,13 +71,13 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
         quote!(#(#docs)* pub #n: #ty)
     });
     let pats = fields.iter().map(|f| &f.pat);
-    let builder = builder(vis.clone(), &props, &name.to_string(), &fields);
+    let builder = builder(vis.clone(), &props, &name.to_string(), &fields, &gp, &gn);
     quote!(
         #[derive(Clone)]
-        #vis struct #props { #(#decl),* }
+        #vis struct #props<#gp> { #(#decl),* }
         #builder
         #[allow(non_snake_case)]
-        #head fn #name(#props { #(#pats),* }: #props) #rest
+        #head fn #name<#gp>(#props { #(#pats),* }: #props<#gn>) #rest
     )
     .into()
 }
@@ -95,7 +100,45 @@ pub fn props(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             Ok(f) => f,
             Err((span, msg)) => return quote_spanned!(span=> ::core::compile_error!(#msg);).into(),
         };
-    builder(vis, &name, &name.to_string(), &fields).into()
+    builder(vis, &name, &name.to_string(), &fields, &quote!(), &quote!()).into()
+}
+
+/// `<…>` at `at` (a fn's generics): its tokens, and where it ends.
+fn generic_params(toks: &[TokenTree], at: usize) -> Option<(Vec<TokenTree>, usize)> {
+    if !is_punct(toks.get(at), '<') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (k, t) in toks.iter().enumerate().skip(at) {
+        match t {
+            TokenTree::Punct(p) if p.as_char() == '<' => depth += 1,
+            TokenTree::Punct(p) if p.as_char() == '>' && !is_punct(toks.get(k - 1), '-') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((toks[at + 1..k].to_vec(), k + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Generic parameters with their bounds, and their names (each with a trailing comma).
+fn split_generics(params: &[TokenTree]) -> (TokenStream, TokenStream) {
+    let (mut gp, mut gn) = (quote!(), quote!());
+    for p in split_top(params) {
+        let decl: TokenStream = p.iter().cloned().collect();
+        let name: TokenStream = match p.as_slice() {
+            [TokenTree::Punct(q), TokenTree::Ident(l), ..] if q.as_char() == '\'' => quote!(#q #l),
+            [t, ..] if is_ident(t, "const") => p.get(1).cloned().into_iter().collect(),
+            [t, ..] => t.clone().into(),
+            [] => continue,
+        };
+        gp.extend(quote!(#decl,));
+        gn.extend(quote!(#name,));
+    }
+    (gp, gn)
 }
 
 /// A prop: its docs, its `#[props(…)]`, its pattern (in a component's
@@ -116,6 +159,8 @@ enum Kind {
     View,
     /// `Option<T>`: `T`.
     Opt(TokenStream),
+    /// `Option<View>`.
+    OptView,
     /// `Prop<T>`: `T`; `Prop<Option<T>>`: `T`, true.
     Prop(TokenStream, bool),
 }
@@ -184,7 +229,10 @@ fn field(toks: &[TokenTree]) -> Res<Field> {
     let ty_toks = &rest[colon + 1..];
     let ty: TokenStream = ty_toks.iter().cloned().collect();
     let kind = match ty_head(ty_toks) {
-        (Some(h), Some(inner)) if h == "Option" => Kind::Opt(inner),
+        (Some(h), Some(inner)) if h == "Option" => match ty_head(&inner.clone().into_iter().collect::<Vec<_>>()) {
+            (Some(i), None) if i == "View" => Kind::OptView,
+            _ => Kind::Opt(inner),
+        },
         (Some(h), Some(inner)) if h == "Prop" => {
             let it: Vec<TokenTree> = inner.clone().into_iter().collect();
             match ty_head(&it) {
@@ -200,11 +248,20 @@ fn field(toks: &[TokenTree]) -> Res<Field> {
 
 /// `props`'s builder: `Option`s of its fields, one type parameter per
 /// required prop (`()` until given, then `Set`), `build` once all are.
-fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field]) -> TokenStream {
+fn builder(
+    vis: Option<TokenStream>,
+    props: &Ident,
+    shown: &str,
+    fields: &[Field],
+    gp: &TokenStream,
+    gn: &TokenStream,
+) -> TokenStream {
     let b = format_ident!("{}Builder", props);
     let required: Vec<usize> = (0..fields.len())
         .filter(|&k| {
-            fields[k].default.is_none() && !fields[k].extends && matches!(fields[k].kind, Kind::Plain | Kind::Prop(..))
+            fields[k].default.is_none()
+                && !fields[k].extends
+                && matches!(fields[k].kind, Kind::Plain | Kind::Prop(_, false))
         })
         .collect();
     let params: Vec<Ident> = (0..required.len()).map(|k| format_ident!("__R{}", k)).collect();
@@ -212,6 +269,8 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
     let tys: Vec<&TokenStream> = fields.iter().map(|f| &f.ty).collect();
     let unit = params.iter().map(|_| quote!(()));
     let air = quote!(air);
+    let mut generic_names = vec![];
+    idents_in(&gn.clone().into_iter().collect::<Vec<_>>(), &mut generic_names);
 
     // Setters: `n(f)` takes a closure of the value (a `Prop` keeps it),
     // `__fn_n(v)` the value itself (a closure given to a handler prop).
@@ -225,7 +284,31 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
             _ => (false, false),
         };
         let cb = is_callback(head.as_deref()) || inner_cb;
+        // A type of the component's own parameters (`Vec<R>`): taken as it is,
+        // so the value names the parameter.
+        let mut used = vec![];
+        idents_in(&ty.clone().into_iter().collect::<Vec<_>>(), &mut used);
+        let exact = used.iter().any(|u| generic_names.contains(u));
         let (gens, param, val, fgen, fparam, fval) = match &f.kind {
+            Kind::Prop(i, opt) if exact => {
+                let t = if *opt { quote!(::core::option::Option<#i>) } else { quote!(#i) };
+                (
+                    quote!(),
+                    quote!(f: impl ::core::ops::Fn() -> #t + 'static),
+                    quote!(#air::Prop::derive(::std::boxed::Box::new(f))),
+                    quote!(),
+                    quote!(v: #t),
+                    quote!(#air::Prop::Const(v)),
+                )
+            }
+            _ if exact => (
+                quote!(),
+                quote!(f: impl ::core::ops::FnOnce() -> #ty),
+                quote!(#air::untrack(f)),
+                quote!(),
+                quote!(v: #ty),
+                quote!(v),
+            ),
             Kind::Opt(i) => (
                 quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
@@ -244,12 +327,29 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
                     quote!(<__X: #tr + 'static, __M>),
                     quote!(f: impl ::core::ops::Fn() -> __X + 'static),
                     quote!(#air::Prop::derive(::std::boxed::Box::new(move || #call))),
-                    quote!(<__X: #tr + ::core::clone::Clone + 'static, __M>),
+                    quote!(<__X: #tr, __M>),
                     quote!(v: __X),
-                    quote!(#air::Prop::derive(::std::boxed::Box::new(move || { let f = || ::core::clone::Clone::clone(&v); #call }))),
+                    quote!(#air::Prop::Const({ let f = || v; #call })),
                 )
             }
-            Kind::Plain | Kind::View => (
+            // A view or text: the closure itself, so text that reads state follows it.
+            Kind::View => (
+                quote!(<__F: #air::__rt::IntoView<__M>, __M>),
+                quote!(f: __F),
+                quote!(#air::__rt::IntoView::into_view(f)),
+                quote!(<__X: #air::__rt::IntoViewValue<__M>, __M>),
+                quote!(v: __X),
+                quote!(#air::__rt::IntoViewValue::into_view_value(v)),
+            ),
+            Kind::OptView => (
+                quote!(<__F: #air::__rt::IntoOptView<__M>, __M>),
+                quote!(f: __F),
+                quote!(#air::__rt::IntoOptView::into_opt_view(f)),
+                quote!(<__X: #air::__rt::IntoOptViewValue<__M>, __M>),
+                quote!(v: __X),
+                quote!(#air::__rt::IntoOptViewValue::into_opt_view_value(v)),
+            ),
+            Kind::Plain => (
                 quote!(<__X: ::core::convert::Into<#ty>>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
                 quote!(::core::convert::Into::into(#air::untrack(f))),
@@ -268,6 +368,20 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
         } else {
             (fgen, fparam, fval)
         };
+        // `__val_n(v)`: a literal number, `true`, `Variant::A`: the type is the prop's.
+        let vname = format_ident!("__val_{}", n.to_string().trim_start_matches("r#"));
+        let (vty, vval) = match &f.kind {
+            Kind::Opt(i) => (i.clone(), quote!(::core::option::Option::Some(v))),
+            Kind::Prop(i, false) => (i.clone(), quote!(#air::Prop::Const(v))),
+            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::Const(::core::option::Option::Some(v)))),
+            Kind::OptView => (quote!(#air::View), quote!(::core::option::Option::Some(v))),
+            Kind::Plain | Kind::View => (ty.clone(), quote!(v)),
+        };
+        // A view prop takes text as a value too (`label: 7`).
+        let (vgen, vparam, vval) = match &f.kind {
+            Kind::View | Kind::OptView if !exact => (fgen.clone(), fparam.clone(), fval.clone()),
+            _ => (quote!(), quote!(v: #vty), vval),
+        };
         let docs = &f.docs;
         match required.iter().position(|&r| r == k) {
             None => (
@@ -276,6 +390,8 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
                     pub fn #n #gens (mut self, #param) -> Self { self.#n = ::core::option::Option::Some(#val); self }
                     #[doc(hidden)]
                     pub fn #fname #fgen (mut self, #fparam) -> Self { self.#n = ::core::option::Option::Some(#fval); self }
+                    #[doc(hidden)]
+                    pub fn #vname #vgen (mut self, #vparam) -> Self { self.#n = ::core::option::Option::Some(#vval); self }
                 ),
                 quote!(),
             ),
@@ -290,16 +406,18 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
                     .collect();
                 let rest: Vec<&Ident> = names.iter().copied().filter(|m| *m != n).collect();
                 let mk = |v: &TokenStream| quote!(#b { #n: ::core::option::Option::Some(#v), #(#rest: self.#rest,)* __s: ::core::marker::PhantomData });
-                let (mv, mfv) = (mk(&val), mk(&fval));
+                let (mv, mfv, mvv) = (mk(&val), mk(&fval), mk(&vval));
                 (
                     quote!(),
                     quote!(
                         #[allow(non_camel_case_types)]
-                        impl<#(#others),*> #b<#(#before),*> {
+                        impl<#gp #(#others),*> #b<#gn #(#before),*> {
                             #(#docs)*
-                            pub fn #n #gens (self, #param) -> #b<#(#after),*> { #mv }
+                            pub fn #n #gens (self, #param) -> #b<#gn #(#after),*> { #mv }
                             #[doc(hidden)]
-                            pub fn #fname #fgen (self, #fparam) -> #b<#(#after),*> { #mfv }
+                            pub fn #fname #fgen (self, #fparam) -> #b<#gn #(#after),*> { #mfv }
+                            #[doc(hidden)]
+                            pub fn #vname #vgen (self, #vparam) -> #b<#gn #(#after),*> { #mvv }
                         }
                     ),
                 )
@@ -326,7 +444,8 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
         let or = match (&f.default, &f.kind) {
             (Some(d), Kind::Prop(..)) => quote!(#air::Prop::Const(#d)),
             (Some(d), _) => d.clone(),
-            (None, Kind::Opt(_)) => quote!(::core::option::Option::None),
+            (None, Kind::Opt(_) | Kind::OptView) => quote!(::core::option::Option::None),
+            (None, Kind::Prop(_, true)) => quote!(#air::Prop::Const(::core::option::Option::None)),
             (None, Kind::View) => quote!(::core::result::Result::Ok(#air::Tree::empty())),
             (None, _) if f.extends => quote!(::std::vec::Vec::new()),
             (None, _) => quote!(::core::unreachable!()),
@@ -337,7 +456,7 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
         let n = &f.name;
         quote!(
             #[allow(non_camel_case_types)]
-            impl<#(#params),*> #air::__rt::GlobalAttributes for #b<#(#params),*> {
+            impl<#gp #(#params),*> #air::__rt::GlobalAttributes for #b<#gn #(#params),*> {
                 fn __push(&mut self, a: #air::Attribute) {
                     self.#n.get_or_insert_with(::std::vec::Vec::new).push(a)
                 }
@@ -347,18 +466,18 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
     quote!(
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
-        #vis struct #b<#(#params = ()),*> {
+        #vis struct #b<#gp #(#params = ()),*> {
             #(#names: ::core::option::Option<#tys>,)*
             __s: ::core::marker::PhantomData<(#(#params,)*)>,
         }
-        impl #air::__rt::Props for #props {
-            type Builder = #b<#(#unit),*>;
+        impl<#gp> #air::__rt::Props for #props<#gn> {
+            type Builder = #b<#gn #(#unit),*>;
             fn builder() -> Self::Builder {
                 #b { #(#names: ::core::option::Option::None,)* __s: ::core::marker::PhantomData }
             }
         }
         #[allow(non_camel_case_types)]
-        impl<#(#params),*> #b<#(#params),*> {
+        impl<#gp #(#params),*> #b<#gn #(#params),*> {
             #(#optional)*
         }
         #(#req_impls)*
@@ -370,8 +489,8 @@ fn builder(vis: Option<TokenStream>, props: &Ident, shown: &str, fields: &[Field
             impl #needs for #air::__rt::Set {}
         )*
         #[allow(non_camel_case_types)]
-        impl<#(#params: #needs),*> #b<#(#params),*> {
-            pub fn build(self) -> #props {
+        impl<#gp #(#params: #needs),*> #b<#gn #(#params),*> {
+            pub fn build(self) -> #props<#gn> {
                 #props { #(#fill,)* }
             }
         }
@@ -523,7 +642,11 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
             _ => None,
         });
         let comp = path.len() > 1 || last.as_ref().is_some_and(|s| s.starts_with(|c: char| c.is_uppercase()));
-        if path.is_empty() || path.iter().any(|t| !matches!(t, TokenTree::Ident(_) | TokenTree::Punct(_))) {
+        // A component's turbofish (`WebIsland::<Chart, ()>`) may hold any type.
+        let turbofish = path.iter().any(|t| is_punct(Some(t), '<'));
+        if path.is_empty()
+            || (!turbofish && path.iter().any(|t| !matches!(t, TokenTree::Ident(_) | TokenTree::Punct(_))))
+        {
             return Err((span_of(toks, start), "air: expected an element or a component".into()));
         }
         return element(path, &inner, comp);
@@ -645,6 +768,8 @@ fn payload(ev: &str) -> Option<(String, &'static str)> {
         | "pointerleave" | "pointercancel" | "gotpointercapture" | "lostpointercapture" | "touchstart" | "touchend"
         | "touchmove" | "touchcancel" => "PointerData",
         "wheel" => "WheelData",
+        "resize" => "ResizeData",
+        "visible" => "VisibleData",
         "input" | "change" | "submit" | "reset" | "invalid" => "FormData",
         "scroll" | "scrollend" => "ScrollData",
         "mounted" => "",
@@ -654,7 +779,7 @@ fn payload(ev: &str) -> Option<(String, &'static str)> {
         | "load" | "error" | "abort" | "canplay" | "canplaythrough" | "durationchange" | "emptied" | "encrypted"
         | "ended" | "loadeddata" | "loadedmetadata" | "loadstart" | "pause" | "play" | "playing" | "progress"
         | "ratechange" | "seeked" | "seeking" | "stalled" | "suspend" | "timeupdate" | "volumechange" | "waiting"
-        | "select" | "selectstart" | "selectionchange" | "resize" | "visible" | "cancel" | "close" => "PlainData",
+        | "select" | "selectstart" | "selectionchange" | "cancel" | "close" => "PlainData",
         _ => return None,
     };
     let dom = if ev == "doubleclick" { "dblclick" } else { ev };
@@ -819,8 +944,8 @@ const PRIMITIVES: &[&str] = &[
 /// patterns left out), so a hole's `move` closure can take clones.
 fn captures(ts: &TokenStream, out: &mut Vec<String>) {
     let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
-    let mut bound = vec![];
-    scan(&toks, out, &mut bound);
+    let (mut bound, mut lets) = (vec![], vec![]);
+    scan(&toks, out, &mut bound, &mut lets);
     out.retain(|n| !bound.contains(n));
 }
 
@@ -834,7 +959,11 @@ fn idents_in(toks: &[TokenTree], into: &mut Vec<String>) {
     }
 }
 
-fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
+/// `bound`: closure parameters and match patterns (never a capture);
+/// `lets`: names a `let` bound, from the end of its statement on (its
+/// right side may read an outer name of the same name).
+fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>, lets: &mut Vec<String>) {
+    let mut pending: Vec<String> = vec![];
     // Match arms: what comes before each `=>` is a pattern.
     let arrows = toks.windows(2).any(|w| is_punct(Some(&w[0]), '=') && is_punct(Some(&w[1]), '>'));
     let mut i = 0;
@@ -848,6 +977,16 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                 continue;
             }
             TokenTree::Punct(p) if arrows && p.as_char() == ',' => pat_start = i + 1,
+            // `a || b`: no closure.
+            TokenTree::Punct(p)
+                if p.as_char() == '|'
+                    && is_punct(toks.get(i + 1), '|')
+                    && !matches!(prev, None | Some(TokenTree::Punct(_)))
+                    && !prev.is_some_and(|t| is_ident(t, "move")) =>
+            {
+                i += 2;
+                continue;
+            }
             TokenTree::Punct(p)
                 if p.as_char() == '|'
                     && (prev.is_none()
@@ -859,12 +998,25 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                     continue;
                 }
                 let end = (i + 1..toks.len()).find(|k| is_punct(toks.get(*k), '|')).unwrap_or(toks.len());
+                if end == toks.len() {
+                    // No closing `|`: not a closure's parameters.
+                    i += 1;
+                    continue;
+                }
                 idents_in(&toks[i + 1..end], bound);
                 i = end + 1;
                 continue;
             }
             TokenTree::Ident(id) if id == "let" => {
                 let end = (i + 1..toks.len()).find(|k| is_punct(toks.get(*k), '=')).unwrap_or(toks.len());
+                // `if let` / `while let`: the pattern binds for the block that follows.
+                let cond = prev.is_some_and(|t| is_ident(t, "if") || is_ident(t, "while")) || is_punct(prev, '&');
+                idents_in(&toks[i + 1..end], if cond { &mut *bound } else { &mut pending });
+                i = end;
+                continue;
+            }
+            TokenTree::Ident(id) if id == "for" => {
+                let end = (i + 1..toks.len()).find(|k| is_ident(&toks[*k], "in")).unwrap_or(toks.len());
                 idents_in(&toks[i + 1..end], bound);
                 i = end;
                 continue;
@@ -881,9 +1033,19 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                     || (is_punct(prev, ':') && i >= 2 && is_punct(toks.get(i - 2), ':'))
                     || (is_punct(next, ':') && is_punct(toks.get(i + 2), ':'))
                     || is_colon(toks, i + 1)
+                    // A call: a function (a local closure called in a hole is
+                    // cloned in by a `let` of the hole's own, or is a `Callback`).
                     || matches!(next, Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis);
-                if is_punct(next, '!') {
+                if is_punct(next, '!')
+                    && !KEYWORDS.contains(&s.as_str())
+                    && matches!(toks.get(i + 2), Some(TokenTree::Group(_)))
+                {
                     // A macro: the `{name}`s of its format string, then its arguments.
+                    // `field!(name)` (aio's form field) names a struct field: no capture.
+                    if s == "field" {
+                        i += 3;
+                        continue;
+                    }
                     if let Some(TokenTree::Group(g)) = toks.get(i + 2) {
                         let inner: Vec<TokenTree> = g.stream().into_iter().collect();
                         // A view inside: the names its nodes read, not its tags.
@@ -891,7 +1053,7 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                             if let Ok(nodes) = parse_nodes(&inner) {
                                 let mut r = vec![];
                                 node_captures(&nodes, &mut r);
-                                out.extend(r.into_iter().filter(|n| !bound.contains(n)));
+                                out.extend(r.into_iter().filter(|n| !bound.contains(n) && !lets.contains(n)));
                             }
                             i += 3;
                             continue;
@@ -902,16 +1064,17 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
                         {
                             out.extend(r);
                         }
-                        scan(&inner, out, bound);
+                        scan(&inner, out, bound, lets);
                     }
                     i += 3;
                     continue;
                 }
-                if !skip && !out.contains(&s) {
+                if !skip && !out.contains(&s) && !lets.contains(&s) {
                     out.push(s);
                 }
             }
-            TokenTree::Group(g) => scan(&g.stream().into_iter().collect::<Vec<_>>(), out, bound),
+            TokenTree::Group(g) => scan(&g.stream().into_iter().collect::<Vec<_>>(), out, bound, lets),
+            TokenTree::Punct(p) if p.as_char() == ';' => lets.append(&mut pending),
             _ => {}
         }
         i += 1;
@@ -920,7 +1083,10 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>) {
 
 /// `{ let a = a.clone(); … }` for the names a hole reads.
 fn clones(names: &[String]) -> TokenStream {
-    let n = names.iter().map(|n| Ident::new(n, Span::call_site()));
+    let n = names.iter().map(|n| match n.strip_prefix("r#") {
+        Some(raw) => Ident::new_raw(raw, Span::call_site()),
+        None => Ident::new(n, Span::call_site()),
+    });
     quote!(#(#[allow(unused_mut)] let mut #n = ::std::clone::Clone::clone(&#n);)*)
 }
 
@@ -943,7 +1109,16 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
                 node_captures(children, out);
             }
             Node::Comp { props, spreads, children, key, .. } => {
-                props.iter().for_each(|(_, e)| captures(e, out));
+                for (_, e) in props {
+                    match e.clone().into_iter().collect::<Vec<_>>().as_slice() {
+                        [TokenTree::Literal(l)] => {
+                            if let Some(Node::Fmt(_, r)) = lit_str(l).map(|s| text(&s, l.span())) {
+                                out.extend(r)
+                            }
+                        }
+                        _ => captures(e, out),
+                    }
+                }
                 spreads.iter().for_each(|e| captures(e, out));
                 key.iter().for_each(|k| captures(k, out));
                 node_captures(children, out);
@@ -1055,9 +1230,13 @@ impl Tpl {
                                 } else {
                                     let data = Ident::new(data, Span::call_site());
                                     // A closure gets its parameter's type from a direct bound.
-                                    let closure = e.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
-                                    let h = if closure { quote!(handler_fn) } else { quote!(handler) };
-                                    quote!(air::__rt::on(#id, #dom, { #c air::__rt::#h::<air::__rt::#data>(#e) });)
+                                    let closure = is_closure(e);
+                                    let h = if closure {
+                                        quote!(air::__rt::handler_fn::<air::__rt::#data, _, _>(::std::boxed::Box::new(#e)))
+                                    } else {
+                                        quote!(air::__rt::handler::<air::__rt::#data, _>(#e))
+                                    };
+                                    quote!(air::__rt::on(#id, #dom, { #c #h });)
                                 }
                             }
                             _ => continue,
@@ -1123,7 +1302,7 @@ impl Tpl {
                         let (ce, ck, cr) = (clones(&ce), clones(&ck), clones(&cr));
                         let view = body(rows);
                         quote!(#[allow(unused_variables)] air::__rt::each(#id,
-                            { #ce move || ::std::iter::IntoIterator::into_iter(#expr).collect::<::std::vec::Vec<_>>() },
+                            { #ce move || { #ce ::std::iter::IntoIterator::into_iter(#expr).collect::<::std::vec::Vec<_>>() } },
                             { #ck move |#pat: &_| (#key).to_owned() },
                             { #cr move |#pat| #view });)
                     }
@@ -1167,16 +1346,40 @@ fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> Tok
 fn comp(n: &Node) -> TokenStream {
     let Node::Comp { path, props, spreads, children, .. } = n else { unreachable!() };
     let path: TokenStream = path.iter().cloned().collect();
+    // Cloned in, and again per call: a `Prop` calls it again, so it never
+    // moves what it captured.
     let thunk = |e: &TokenStream| {
         let mut r = vec![];
         captures(e, &mut r);
         let c = clones(&r);
-        quote!({ #c move || { #e } })
+        quote!({ #c move || { #c #e } })
     };
     let mut calls = vec![];
     for (k, v) in props {
-        let closure = v.clone().into_iter().take(2).any(|t| is_punct(Some(&t), '|'));
+        // `"row-{key}"`: formatted, as in an attribute.
+        let formatted = match v.clone().into_iter().collect::<Vec<_>>().as_slice() {
+            [TokenTree::Literal(l)] => match lit_str(l).map(|s| text(&s, l.span())) {
+                Some(Node::Fmt(f, _)) => Some(quote!(::std::format!(#f))),
+                _ => None,
+            },
+            _ => None,
+        };
+        let v = formatted.as_ref().unwrap_or(v);
+        let closure = is_closure(v);
         calls.push(match k {
+            // A constant needs no closure (and a `Prop` of it holds no state).
+            // A literal string converts (`"a"` to a `String`); any other
+            // constant is the prop's own type (`5` a `u32`).
+            PropName::Field(f) if constant(v) => {
+                let text = matches!(v.clone().into_iter().next(), Some(TokenTree::Literal(l)) if lit_str(&l).is_some());
+                let f =
+                    format_ident!("__{}_{}", if text { "fn" } else { "val" }, f.to_string().trim_start_matches("r#"));
+                quote!(.#f(#v))
+            }
+            PropName::Attr(a) if constant(v) => {
+                let a = attr_name(a);
+                quote!(.__attr_const(#a, #v))
+            }
             PropName::Field(f) if closure => {
                 let f = format_ident!("__fn_{}", f.to_string().trim_start_matches("r#"));
                 let mut r = vec![];
@@ -1214,6 +1417,41 @@ fn comp(n: &Node) -> TokenStream {
         let __air_c = &#path;
         air::Component::call(__air_c, air::__rt::builder_of(__air_c) #(#calls)* .build())
     })
+}
+
+/// Is `v` a closure (`move |e| …`), or a block ending in one
+/// (`{ let id = id.clone(); move |_| … }`)? Its parameters are typed then.
+fn is_closure(v: &TokenStream) -> bool {
+    let t: Vec<TokenTree> = v.clone().into_iter().collect();
+    if let [TokenTree::Group(g)] = t.as_slice()
+        && g.delimiter() == Delimiter::Brace
+    {
+        let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+        let tail = inner.iter().rposition(|t| is_punct(Some(t), ';')).map_or(0, |k| k + 1);
+        return is_closure(&inner[tail..].iter().cloned().collect());
+    }
+    let at = usize::from(t.first().is_some_and(|t| is_ident(t, "move")));
+    is_punct(t.get(at), '|')
+}
+
+/// Is `v` a constant: a literal (`"a"`, `3`, `-1.5`, `true`) or an enum's
+/// variant (`Variant::Primary`)?
+fn constant(v: &TokenStream) -> bool {
+    let t: Vec<TokenTree> = v.clone().into_iter().collect();
+    match t.as_slice() {
+        [TokenTree::Literal(_)] => true,
+        [TokenTree::Punct(p), TokenTree::Literal(_)] => p.as_char() == '-',
+        [t] => is_ident(t, "true") || is_ident(t, "false"),
+        [.., TokenTree::Ident(last)] if t.len() >= 4 => {
+            last.to_string().starts_with(|c: char| c.is_uppercase())
+                && t.iter().enumerate().all(|(k, x)| match x {
+                    TokenTree::Ident(_) => true,
+                    TokenTree::Punct(p) => p.as_char() == ':' && (k % 3 != 0),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
 }
 
 /// The view of `nodes`: one template and its holes, built where it is
@@ -1257,4 +1495,44 @@ fn body(nodes: &[Node]) -> TokenStream {
             air::__rt::view(&#tn, #b)
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(src: &str) -> Vec<String> {
+        let mut out = vec![];
+        captures(&src.parse().unwrap(), &mut out);
+        out
+    }
+
+    #[test]
+    fn a_hole_clones_the_names_it_reads() {
+        assert_eq!(names("last || (c.href.is_none() && c.onclick.is_none())"), ["last", "c"], "`||` is no closure");
+        assert_eq!(names("move |e| { if !keys.fire(e.clone()) { tell.call(W::KeyDown(e)) } }"), ["keys", "tell"]);
+        assert_eq!(names("|x| x + y"), ["y"]);
+        assert_eq!(names("|| a"), ["a"]);
+        assert_eq!(names("move |_| start(x)"), ["x"], "a call is a function's");
+        assert_eq!(names("{ let start = start.clone(); move |_| start() }"), ["start"], "a closure, cloned in");
+        assert_eq!(names("{ let (h, k) = (h.clone(), k.clone()); move |e| f(h, k, e, z) }"), ["h", "k", "z"]);
+        assert_eq!(names("{ let n = 1; n + m }"), ["m"], "a let's own name, after it");
+        assert_eq!(names("move |_| if let Some(f) = on { f.call(v) }"), ["on", "v"]);
+        assert_eq!(names("for x in xs { g(x) }"), ["xs"]);
+        assert_eq!(names("if a && let Some(t) = top() { t.go() }"), ["a"], "a let chain");
+        assert_eq!(names("form.bind(aio::field!(name))"), ["form"], "field!(name) names a field");
+        assert_eq!(
+            names("async { let n = get().await; rsx! { p { \"{n} {m}\" } } }"),
+            ["m"],
+            "a let read by a view inside"
+        );
+    }
+
+    #[test]
+    fn a_block_ending_in_a_closure_is_a_closure() {
+        assert!(is_closure(&"move |e| f(e)".parse().unwrap()));
+        assert!(is_closure(&"{ let r = row.clone(); move |e| f(r, e) }".parse().unwrap()));
+        assert!(!is_closure(&"{ handler }".parse().unwrap()));
+        assert!(!is_closure(&"a || b".parse().unwrap()));
+    }
 }

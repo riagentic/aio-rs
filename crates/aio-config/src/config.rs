@@ -249,11 +249,26 @@ pub struct Limits {
     pub calls_per_sec: u32,
     /// Bytes a link may send per second (bursts up to twice that).
     pub bytes_per_sec: u32,
+    /// A link is sent at most one change per this many ms (aio's
+    /// `syncIntervalMs`): the first of a burst at once, the rest folded
+    /// into one; a person's call goes at once. `0`: each change at once.
+    pub sync_interval_ms: u64,
+    /// A change whose patch is more than this percent of the whole view is
+    /// sent as the view (aio's `fullStateThreshold`, as a percent). `0`:
+    /// always the view.
+    pub full_state_percent: u32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { clients: 256, max_message: 4 << 20, calls_per_sec: 200, bytes_per_sec: 8 << 20 }
+        Self {
+            clients: 256,
+            max_message: 4 << 20,
+            calls_per_sec: 200,
+            bytes_per_sec: 8 << 20,
+            sync_interval_ms: 50,
+            full_state_percent: 50,
+        }
     }
 }
 
@@ -1296,14 +1311,18 @@ impl Default for Feedback {
     }
 }
 
-/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `ui.layout`);
+/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`, dark mode);
 /// `aio::kit::theme::sheet` makes its CSS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ui {
     pub theme: Look,
+    /// Light or dark: the OS's, as it changes (aio's automatic dark mode), or one fixed.
+    pub scheme: Scheme,
     /// The accent's hue in degrees, instead of the one hashed from the id.
     pub hue: Option<u16>,
+    /// The page's greys: tinted with the hue, or near grey (aio's `"neutral": "soft"`).
+    pub neutral: Neutral,
     /// With the look, the page layout: `<main>` as a centred page and the
     /// `.card`/`.row`/`.stack`/`.grid` classes. Off: only how elements look.
     pub layout: bool,
@@ -1311,8 +1330,37 @@ pub struct Ui {
 
 impl Default for Ui {
     fn default() -> Self {
-        Self { theme: Look::Auto, hue: None, layout: true }
+        Self { theme: Look::Auto, scheme: Scheme::System, hue: None, neutral: Neutral::Tinted, layout: true }
     }
+}
+
+/// Light or dark (`[ui] scheme`, `aio::ui::page_css`'s choice).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Scheme {
+    /// The OS's, following it as it changes (`prefers-color-scheme`).
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl From<bool> for Scheme {
+    /// The app's own choice: `true` dark.
+    fn from(dark: bool) -> Self {
+        if dark { Self::Dark } else { Self::Light }
+    }
+}
+
+/// The page's neutrals (its page, surfaces and borders); the accent keeps the hue either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Neutral {
+    /// Tinted with the hue.
+    #[default]
+    Tinted,
+    /// Near grey: a warm or magenta hue would tint large surfaces visibly.
+    Soft,
 }
 
 /// How much of aio's look a page takes. Every one but `None` keeps the

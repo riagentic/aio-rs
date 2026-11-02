@@ -110,6 +110,8 @@ clients = 256
 max_message = 4194304
 calls_per_sec = 200
 bytes_per_sec = 8388608
+sync_interval_ms = 50
+full_state_percent = 50
 
 [client]
 retention = "off"
@@ -177,6 +179,8 @@ auto = true
 
 [ui]
 theme = "auto"
+scheme = "system"
+neutral = "tinted"
 layout = true
 
 [vitals]
@@ -368,6 +372,8 @@ learn them on connect, check sizes before sending and pace themselves.
 | `max_message` | bytes | `4194304` (4 MB) | Largest message a client may send. |
 | `calls_per_sec` | number | `200` | Calls a link may make per second (bursts up to twice that). |
 | `bytes_per_sec` | bytes | `8388608` (8 MB) | Bytes a link may send per second (bursts up to twice that). |
+| `sync_interval_ms` | ms | `50` | A link is sent at most one change per this window (aio's `syncIntervalMs`): the first of a burst at once, the rest folded into one patch; a person's call (a user's or an agent's) goes at once. `0`: each change at once. |
+| `full_state_percent` | percent | `50` | A patch over this share of the whole view goes as the view (aio's `fullStateThreshold`, `0.5` = `50`). `0`: always the view. Patches under 256 bytes always go as patches. |
 
 ### [server.dirs], [server.public_dirs]
 
@@ -722,19 +728,22 @@ when it breaks. Always kept on disk first (`ax report <app>`).
 
 ## [ui]
 
-The page's default look (aio's `ui.theme`, `ui.hue`, `ui.layout`;
+The page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`, dark mode;
 [theming](../ui/theming.md)); `aio::kit::theme::sheet` makes its CSS.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `theme` | `auto`, `full`, `tokens`, `none` | `"auto"` | How much of aio's look a page takes: `auto` (the whole look until the app ships a stylesheet of its own, then only the tokens), `full` (the whole look, the app's stylesheet over it), `tokens` (only the `--aio-*` tokens), `none` (no aio CSS: the kit is bare). |
+| `scheme` | `system`, `light`, `dark` | `"system"` | Light or dark (`aio::ui::scheme()`, the template's `use_css!`): `system` follows the OS as it changes; the others fix one. |
 | `hue` | 0 to 359 | from the id | The accent's hue in degrees, instead of the one hashed from the app's id. |
+| `neutral` | `tinted`, `soft` | `"tinted"` | The page's greys (page, surfaces, borders): tinted with the hue, or near grey (`soft`, aio's `"neutral": "soft"`) for a warm or magenta hue; the accent keeps the hue. |
 | `layout` | bool | `true` | With the look, the page layout: `<main>` as a centred page and the `.card`, `.row`, `.stack`, `.grid` classes. Off: only how elements look. |
 
 ```toml
 [ui]
 theme = "full"
 hue = 210
+neutral = "soft"
 layout = false
 ```
 
@@ -829,7 +838,7 @@ see [views](../ui/views.md) and the tables in
 | `serveDirs`, `assets` | `[server.dirs]`, `[server.public_dirs]` |
 | `client` | `[app] mode` and `[app] ui` |
 | `keepServer` | `aio_shell::Window { keep_server }`, `--keep-server` per launch |
-| `localConnectHooks` | none: `Http::on_link` hears client links only, never a tool on the local door (**gap**) |
+| `localConnectHooks` | `Http::door_links(true)`: `Http::on_link` hears the local door's links too (a peer app's copy; tools never) |
 | `transport` | fixed: the window talks over a private socket, clients over `/ws` |
 | `takeover` | `--takeover` |
 | `serverUrl` | `[client] server` |
@@ -837,7 +846,7 @@ see [views](../ui/views.md) and the tables in
 | `key` | the app's key file and `AIORT_TOKEN`; `key: false` is `[server] open` |
 | `pairing` | `[server] pairing` |
 | `resolveUser` | `aio::auth::Users::resolve(f)` |
-| `resolvePeer`, `peerTypes` | `aio::peer::Peer` calls another app on this machine as a client (`describe` lists what it may call); no hook choosing a peer's user, no contract text (**gap**) |
+| `resolvePeer`, `peerTypes` | `Http::resolve_peer(f)`: the `Caller` (user, role) a peer app on this machine is; `aio::peer::Peer` calls one (`describe` lists what it may call); the contract is a crate both apps use, not text |
 | `db` | `#[table(...)]` fields, `aio::db::Db` |
 | `perfCheck`, `perfBudget` | `[perf]` |
 | `budgets` | `[budgets]` |
@@ -856,7 +865,7 @@ see [views](../ui/views.md) and the tables in
 | `childWindows`, `electron` | `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, … }`; `electron.downloadWindow` is `[build.download_window]`, `allowLocalPeers` `[server] local_peers`; `ignoreDebugEnv` is always on in a release build |
 | `splash` | `[build.splash]`; its `show` at run time: `Window { splash_show }` |
 | `libraryMode` | `Handle::memory()`, `Handle::open` without `aio_shell::start` (tests, embedding) |
-| `syncIntervalMs`, `fullStateThreshold` | none: when and how patches go out is aio-rs's own, not configurable (**gap**) |
+| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms`, `full_state_percent` (`0.5` is `50`) |
 | `routes` | `aio::http::Http::route(Route::get(…))` |
 | `maxConnections`, `wsLimits` | `[server.limits]` |
 | `appFlags` | not needed: aio-rs takes only its own flags (`aio::paths::FLAGS`) and passes the rest to the app |

@@ -464,7 +464,7 @@ async fn pump(
     air::on_wake(move || w.notify_one());
     loop {
         air::run_tasks();
-        let edits = air::take_edits();
+        let edits = root.take_edits();
         if !edits.is_empty() {
             to_page.send(edits).map_err(|_| "the page is gone".to_string())?;
         }
@@ -862,7 +862,7 @@ impl TestUi {
                 .collect()
         }
         let _in = self.rt.enter();
-        of(air::components())
+        of(air::with_owner(self.view, air::components))
     }
 
     /// The mounted components for the page's reader (`comp=` paths): each
@@ -879,7 +879,7 @@ impl TestUi {
         }
         let mut out = vec![];
         let _in = self.rt.enter();
-        flat(air::components(), None, &mut out);
+        flat(air::with_owner(self.view, air::components), None, &mut out);
         out.into()
     }
 
@@ -1093,6 +1093,14 @@ impl TestUi {
     /// An attribute's value (`aria-pressed`, `href`, …); `None`: not set.
     pub fn attr(&self, t: &str, name: &str) -> Option<String> {
         self.must("attr", json!({ "path": t, "name": name })).as_str().map(String::from)
+    }
+
+    /// The OS turns dark (or light) while the app runs: the page's
+    /// `prefers-color-scheme` changes, as on a phone at dusk.
+    pub fn set_os_dark(&mut self, dark: bool) {
+        let scheme = if dark { "dark" } else { "light" };
+        self.page.cmd("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }));
+        self.settle();
     }
 
     /// A CSS property's computed value (`color`, a custom one: `--split-a`), trimmed.

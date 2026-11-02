@@ -129,7 +129,6 @@ name = "route_tree"
 
 [[test]]
 name = "kit"
-required-features = ["kit"]
 
 [[test]]
 name = "facade"
@@ -144,7 +143,7 @@ required-features = ["kit", "net"]
 
 [[test]]
 name = "signin"
-required-features = ["kit", "net"]
+required-features = ["net"]
 
 [[test]]
 name = "sync"

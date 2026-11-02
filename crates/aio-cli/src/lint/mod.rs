@@ -151,7 +151,7 @@ pub fn lint(dir: &Path) -> Report {
     let (mut facts, mut report) = (rust::Facts::default(), Report::default());
     let mut texts: HashMap<String, String> = HashMap::new();
     // The first test line naming aio::testing, and whether a manifest gives the tests its feature.
-    let (mut kit_used, mut kit_given): (Option<(String, usize)>, bool) = (None, false);
+    let (mut kit_used, mut manifests): (Option<(String, usize)>, Vec<String>) = (None, Vec::new());
     for path in paths {
         let rel = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
         let name = rel.rsplit('/').next().unwrap_or_default().to_string();
@@ -186,7 +186,7 @@ pub fn lint(dir: &Path) -> Report {
         } else if !is_test_path(&rel) {
             secrets::text(&rel, &text, &mut facts.issues);
             if name == "Cargo.toml" {
-                kit_given |= gives_testing(&text);
+                manifests.push(text.clone());
                 rust::manifest(&rel, &text, &mut facts.issues);
             }
             if name == "aio.toml" {
@@ -198,7 +198,7 @@ pub fn lint(dir: &Path) -> Report {
         }
         texts.insert(rel, text);
     }
-    if let (Some((rel, line)), false) = (&kit_used, kit_given) {
+    if let (Some((rel, line)), false) = (&kit_used, gives_testing(&manifests)) {
         facts.issues.push(
             Issue::new(
                 Severity::Error,
@@ -250,19 +250,39 @@ pub fn changed(files: &[PathBuf], root: &Path) -> Vec<String> {
     out
 }
 
-/// Does this manifest give its tests aio-rs's test kit (a dev-dependency,
-/// or a dependency, on aio-rs with the `testing` feature)? Pure.
-pub fn gives_testing(manifest: &str) -> bool {
-    let mut section = "";
-    manifest.lines().any(|l| {
-        let t = l.trim();
-        if t.starts_with('[') {
-            section = t;
-        }
-        let dep = section.ends_with("dependencies]") || section.starts_with("[dependencies.aio");
-        let aio = t.contains("package = \"aio-rs\"") || t.starts_with("aio-rs ") || t.starts_with("aio-rs=");
-        dep && aio && t.contains("\"testing\"")
-    })
+/// Do these manifests give their tests aio-rs's test kit: a dependency or
+/// dev-dependency on aio-rs with the `testing` feature, its own or through
+/// `[workspace.dependencies]` (a member's `workspace = true` adds its
+/// features to the workspace's)? Pure; a manifest that doesn't parse gives
+/// nothing.
+pub fn gives_testing<S: AsRef<str>>(manifests: &[S]) -> bool {
+    let tables: Vec<toml::Table> = manifests.iter().filter_map(|m| m.as_ref().parse().ok()).collect();
+    let testing = |v: &toml::Value| {
+        v.get("features").and_then(|f| f.as_array()).is_some_and(|f| f.iter().any(|f| f.as_str() == Some("testing")))
+    };
+    let aio = |k: &str, v: &toml::Value| v.get("package").map_or(k == "aio-rs", |p| p.as_str() == Some("aio-rs"));
+    let workspace: Vec<(&String, &toml::Value)> = tables
+        .iter()
+        .filter_map(|t| t.get("workspace")?.get("dependencies")?.as_table())
+        .flatten()
+        .filter(|(k, v)| aio(k, v))
+        .collect();
+    workspace.iter().any(|(_, v)| testing(v))
+        || tables.iter().flat_map(deps).any(|(k, v)| {
+            let inherits = v.get("workspace").and_then(|w| w.as_bool()) == Some(true);
+            testing(v) && if inherits { workspace.iter().any(|(w, _)| *w == k) } else { aio(k, v) }
+        })
+}
+
+/// A manifest's dependencies and dev-dependencies: its own, and each
+/// `[target.'cfg(…)'.…]`'s. Pure.
+fn deps(t: &toml::Table) -> impl Iterator<Item = (&String, &toml::Value)> {
+    let targets = t.get("target").and_then(|t| t.as_table()).into_iter().flat_map(|t| t.values());
+    std::iter::once(t)
+        .chain(targets.filter_map(|t| t.as_table()))
+        .flat_map(|t| ["dependencies", "dev-dependencies"].map(|s| t.get(s).and_then(|d| d.as_table())))
+        .flatten()
+        .flatten()
 }
 
 /// The checks that need every file: duplicate cell ids, untested cells.

@@ -176,7 +176,7 @@ name has no [auto name](ui.md#auto-names) either.
 | Area | Finding | Level |
 |---|---|---|
 | `testing` | a cell no test names (its type isn't mentioned in any test) | hint |
-| `testing` | tests that use `aio::testing` with no manifest giving them aio-rs's `testing` feature | error |
+| `testing` | tests that use `aio::testing` with no manifest giving them aio-rs's `testing` feature (its own dependency, or `workspace = true` on a `[workspace.dependencies]` aio-rs, renamed or not) | error |
 | `testing` | a `#[test]` that checks nothing: no assertion, `?`, `unwrap`/`expect` or harness wait in it (`no-assertions`; `#[should_panic]` is a check) | warn |
 | `testing` | `assert_eq!(x, x)`, `assert_ne!(x, x)`: a thing compared with itself (`self-comparison`) | warn |
 | `config` | an `aio.toml` that doesn't parse or check | error |

@@ -24,7 +24,8 @@ Adjustments the spike forced or found:
 - **Holes take boxed closures, never generics.** The first prototype's
   generic holes made 3.7x Dioxus's LLVM IR, a 168 MB debug binary and a
   21.6 s rebuild; boxed: 0.32x the IR, 18 MB, 1.1 s. A rule for all of
-  air's runtime API, kept by a CI check (LLVM IR lines per view).
+  air's runtime API and handlers too, kept by `scripts/air-ir` in
+  `ci.sh` (LLVM IR lines per view of the bench's 50 views, limit 25 000).
 - **Views need live ranges** where a row's root is a hole (a component
   whose root is a `for`): the spike's range is fixed at build.
 - **`rsx!`'s clone heuristic** (which names a hole reads, so it can
@@ -245,7 +246,10 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   and match patterns are not names to clone), so a `String` used by two
   holes needs no `.clone()`. A bare name is cloned per run; its type
   decides whether it follows anything (a `Signal` or `Part` does, a
-  `String` doesn't).
+  `String` doesn't). A name called (`f(x)`) is a function's, never
+  cloned in (cloning a generic fn item fixed its type for every hole), so
+  a local closure called in a hole is a `Callback`, or cloned in by a
+  `let` of the hole's own; `aio::field!(name)` names a field, not a local.
 - `onX: handler` listens for `X` (Dioxus's event names).
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
@@ -259,14 +263,18 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   `Prop` given an expression (`value: name.get()`) follows it, given a
   constant it is that constant. `#[props(default)]`, `#[props(default =
   e)]`, `Option<T>` and `View` props may be left out (an `Option` takes a
-  `T`); any other prop left out is a compile error. Unknown names given
+  `T`); any other prop left out is a compile error. A `View` prop takes a
+  view or text (a string, a number, a format string, a signal), and text
+  that reads state follows it (`air::text_view`). Unknown names given
   to a component with `#[props(extends = GlobalAttributes)] attributes:
   Vec<Attribute>` are attributes (`..attributes` on an element sets them,
   after its own).
 - A body runs once, untracked; one that `?`s a resource still loading
   runs again when it is loaded, its hooks (`signal`, `memo`, `resource`,
   `once`, …) handing back what the first run made, by call order.
-- A `View` is placed once: placing the same one twice fails.
+- A `View` is built where it is placed, and again each time it is placed
+  (a dialog opened again, a tab shown again, one view in two places): each
+  place gets its own build and state, as a Dioxus `Element` rendered again.
 - A view is a range of siblings, first to last; a template starting with a
   hole gets an empty comment as its start, so a hole's content at a root
   moves and goes with its view.
@@ -409,9 +417,8 @@ a hole whose closure builds its props (both needed for views built where
 placed and for bodies that run again after a suspend). It stays at half
 of Dioxus's IR and a third of its build times; the held key keeps its
 shape (flat in the rows, 48 B), the p50 at 1000 rows within the load's
-noise of Dioxus's here. Making the expansion smaller again (one shared
-clone list per template, props without a second clone) is step 2 work,
-measured by this table.
+noise of Dioxus's here. Phase 2a found the IR's cause and took it back
+(below: 0.31x).
 
 The first prototype (generic holes), for the record: 50 views made
 13.4 M lines of LLVM IR and a 168 MB debug binary; a one-line edit took
@@ -576,7 +583,8 @@ as on air.
 - **Props are evaluated once on air.** On Dioxus a parent's re-render
   hands new props. `watch(deps, f)` is the facade's bridge for effects that
   follow values a view made from props (0.1's `use_effect(use_reactive!(…))`);
-  on air a prop that must follow state is a `Signal` or a `Part`.
+  on air a prop that must follow state is a `Signal`, a `Part` or a
+  `Prop<T>` (the kit's props are `Prop`s: `value: name.get()` follows).
 - **Events**: air has its own payload types with Dioxus's names and
   methods (`KeyboardEvent`, `e.key()` a `keyboard-types` `Key`,
   `e.modifiers()`, `e.value()`, `e.client_coordinates()`, …), so handler
@@ -584,8 +592,10 @@ as on air.
   either (the page keeps keys with `data-aio-prevent`; a handled `submit`
   and a handled link click never navigate). Not decoded yet: files, a
   drag's data, touch lists (step 2, with the kit's file inputs).
-- **`MountedData`** on air: `set_focus`, `scroll_to`, `get_client_rect`,
-  as page calls on the element (`eval` with `aio.node(id)`).
+- **`MountedData`** on air: `set_focus`, `scroll_to`, `scroll`,
+  `get_client_rect`, and `run` / `eval` (a script with the element as
+  `el`: a canvas, a video, a selection), as page calls on the element
+  (`eval` with `aio.node(id)`).
 - **`key:` and `if let`**: air makes a row without `key:` and `if let` in
   `rsx!` compile errors, and two rows with one key a failure in every
   build. On Dioxus `ax lint` makes the missing key an error and warns on
@@ -593,8 +603,10 @@ as on air.
 - **`mut` on a signal**: Dioxus needs `let mut n = signal(…)` for a handler
   that writes `n`; on air the handler holds its own copy, so `mut` is
   unused (a warning).
-- **Not on air yet**: two roots on one thread (one window's views per
-  thread: a test holds one `TestUi` at a time).
+- **On air only** (phase 2a, aio's): labels as views, `form.bind`,
+  `reset_field`, `use_field_array`, `use_on_change`, `Defer`'s `load`,
+  `Transition` without a box, `Motion::of`, `aio::ui::css`. The kit on
+  Dioxus keeps 0.1's text labels and boxes until step 5 removes it.
 - **Hot patch**: Dioxus keeps a view's local state across a patch; air
   remounts (cells keep theirs).
 - **What stays on Dioxus inside the framework** until step 5: the kit,
@@ -615,8 +627,8 @@ as on air.
    `--release` by `ci.sh`): a hook outside a view's body (or in a
    handler), a write while a hole or a memo computes, an effect loop (the
    round guard, 1000 rounds as AIR's), a signal used after its view, a
-   view placed twice, hooks in another order on a re-run, two rows with one
-   key, two roots on a thread; a `for` without `key:` and `if let` are
+   hooks in another order on a re-run, two rows with one
+   key; a `for` without `key:` and `if let` are
    compile errors (`compile_fail` doc tests). Shown red first by making
    the write check and the round guard debug-only and running `--release`
    (the write went through; the loop never ended).
@@ -652,6 +664,59 @@ as on air.
 | `TestUi` (1.4 k lines on the VirtualDom) | the Rust page (prototype) + the Electron page (`page.js` instead of Dioxus's glue), same queries | 1–2 weeks |
 | liveview interpreter, events, focus, file inputs | `page.js` + aio's page scripts re-pointed (focus, typing, keys, file inputs patch Dioxus's interpreter today) | 1 week |
 
+## Phase 2a: the kit on air
+
+- Every kit module runs on air (`crates/aio/src/kit_air`, the kit's
+  `#[path]` twin while Dioxus is the default): a body runs once, so each
+  value the kit read in its body is a `memo` or a hole, and each prop that
+  follows its caller is a `Prop`. The kit, facade, ui and sign-in tests
+  run on air in CI (`ci.sh`'s air lane), none ignored: the tests that
+  counted body re-runs count a hole's runs, which holds both renderers to
+  AIR's rule (what didn't read a change doesn't re-run).
+- Roots on one thread are apart: each node records its root, effects,
+  tasks, handlers and deferred calls run in it, and each `Root` has its
+  own page state, edits and globals (`Root::take_edits`).
+- Theming: `[ui] scheme` (the OS's light or dark as it changes, or one
+  fixed), `use_dark()`, `[ui] neutral`.
+- Gap rows VW2–VW15 (aio-rs-internal's gaps-0.2 list) are done on air;
+  VW5 (`Intl`) and VW16 (Standard Schema) are not air's.
+
+### Measured on phase 2a's air
+
+The 0.49x IR of phase 1 was the handler: its wrappers were generic over
+the closure, so each `onclick` made its own `Rc<RefCell<…>>`, drop glue
+and shims, 36% of the 50-view crate's IR. `rsx!` boxes the closure and
+the wrappers are generic over the payload alone: 1.81 M lines to 1.13 M,
+under the spike's 0.32x. `scripts/air-ir` keeps it.
+
+`bench.sh` again, on this branch: the same machine pinned to 12 of its
+32 threads (`taskset -c 0-11`, `CARGO_BUILD_JOBS=6`) with other
+sessions' load (load average 16–20 over the run); 3 runs each, ratios of
+the medians.
+
+| measure | Dioxus 0.7.10 | air (phase 2a) | air / Dioxus | phase 1 | spike |
+|---|---|---|---|---|---|
+| (a) `cargo expand`, 1 view / 50 views | 385 KB / 18.9 MB | 96 KB / 4.76 MB | 0.25 | 0.23 | 0.17 |
+| (a) crate metadata, 50 views | 6.18 MB | 2.68 MB | 0.43 | 0.31 | 0.28 |
+| (a) LLVM IR lines (debug), 50 views | 3.65 M | 1.13 M | 0.31 | 0.49 | 0.32 |
+| (a) debug binary, 50 views | 53.2 MB | 17.3 MB | 0.32 | 0.53 | 0.35 |
+| (b) one-line edit → `cargo build`, 3 runs | 2.5 / 2.5 / 2.4 s | 1.2 / 1.1 / 1.1 s | 0.44 | 0.54 | 0.49 |
+| (b) one-line edit → `cargo check`, runs 2–3 | 1.4 / 1.4 s | 0.9 / 0.7 s | 0.57 | 0.34 | 0.39 |
+| (c) clean build, 3 runs | 25.0 / 23.7 / 23.8 s | 7.3 / 7.3 / 7.0 s | 0.31 | 0.30 | 0.37 |
+| (c) crates compiled / in the graph | 77 / 78 | 8 / 8 | — | — | — |
+| (d) held ↓, 1000 rows, p50 (3 runs) | 1.3 / 1.3 / 1.6 ms | 0.8 / 0.7 / 0.7 ms | 0.54 | 0.86 | 0.54 |
+| (d) the same, p95 | 1.8 / 1.9 / 2.5 ms | 1.2 / 1.2 / 1.3 ms | 0.63 | — | 0.6 |
+| (d) held ↓, 10 000 rows, p50 (3 runs) | 5.3 / 5.3 / 5.8 ms | 1.1 / 1.1 / 1.0 ms | 0.21 | 0.32 | 0.19 |
+| (d) bytes to the page per key | 66 | 48 | 0.73 | 0.73 | 0.73 |
+| (e) first mount, 1000 / 10 000 rows | — | 1.4–2.0 / 11.1–15.4 ms | — | 1.6–3.4 / 13.7–25.6 | 1.4 / 8.3 |
+
+The metadata grew with the props traits the kit needs (a view prop takes
+a view, a text or a thunk: `IntoView`, `IntoViewValue`), still 0.43x;
+`cargo check`'s 0.7–0.9 s is within this load's noise of phase 1's
+0.5–0.6 s. The first mount: of 1.4–2.0 ms at 1000 rows, 0.6–0.7 ms fills
+the aio cell; at 10 000 rows the fill is 1.6–1.7 ms, the rest about 1 µs a
+row for the views (the spike drew fixed rows without a cell).
+
 ## Plan for 0.2.0
 
 In this order; each step ends green before the next starts. Dioxus stays
@@ -661,7 +726,7 @@ on the dev branch as the fallback until step 5.
 |---|---|---|---|---|
 | 0 | facade (done) | `aio::ui::prelude` on Dioxus; template, docs, kit, `ax ui`, `TestUi`, `aio_shell::run`, `web::launch` take the facade's names; the template's `dioxus` dependency gone | no `dioxus` in the template, the kit, `ax ui`, the tests or the guide (`ci.sh`, `ax lint`); 0.1.0 apps move with the migration guide's table | 1 week |
 | 1 | air core (done but portals, `Defer`, the template app) | from the spike: holes, lists (live row ranges), branches, context over owners, error boundary, refs and page calls (`onmounted`), portals, `Defer`; `TestUi` on the Rust page and the Electron page; gates 1–3 written failing, then green | `cargo test -p aio-rs-air`, the gate tests, `ax test` of the template app on air | 2–3 weeks |
-| 2 | the kit on air | the 22 kit modules behind the facade, on air (dev branch: the facade's renderer chosen by a dev-branch feature, never in a release) | the kit's tests and docs examples on air | 3–4 weeks |
+| 2 | the kit on air (2a done: the kit, theming, forms; 2b: the router) | the 22 kit modules behind the facade, on air (dev branch: the facade's renderer chosen by a dev-branch feature, never in a release) | the kit's tests and docs examples on air | 3–4 weeks |
 | 3 | tooling | `ax dev`: template hot reload (`air-rsx`), subsecond remount; web (wasm, in-process `page.js`); Android page body | `ax dev` edit loops, `ax build --web`, an APK smoke | 2–3 weeks |
 | 4 | gates in CI | no Dioxus in the packaged graph or binary; size and build/edit numbers of the packaged app by a script in the repo | CI fails on a planted Dioxus dependency | 3 days |
 | 5 | delete Dioxus | out of the default graph and `deps.toml`; one real app rebuilt and smoked on Linux, Windows, macOS | the smoke on three OSes; the numbers in `docs/performance.md` | 1 week |

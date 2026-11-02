@@ -277,6 +277,22 @@ fn each_global_is_its_own_state_per_app_instance_and_a_global_memo_follows_them(
 }
 
 #[test]
+fn two_roots_on_one_thread_are_apart() {
+    let mut a = TestPage::mount(two_globals);
+    let mut b = TestPage::mount(two_globals);
+    a.click("left");
+    a.click("left");
+    b.click("left");
+    assert_eq!((a.text("left"), a.text("sum")), ("2".into(), "12".into()), "a's globals, a's page");
+    assert_eq!((b.text("left"), b.text("sum")), ("1".into(), "11".into()), "b's own");
+    drop(a);
+    b.click("left");
+    assert_eq!(b.text("left"), "2", "b lives on when a ends");
+    drop(b);
+    assert_eq!(air::live(), air::Live::default(), "nothing left");
+}
+
+#[test]
 fn a_component_whose_root_is_a_list_moves_whole_as_a_keyed_row() {
     #[component]
     fn Pair(n: u32) -> View {
@@ -321,4 +337,71 @@ fn a_callback_prop_is_called_by_the_child_and_writes_the_parents_state() {
     let mut p = TestPage::mount(app);
     p.click("pick");
     assert_eq!(p.text("picked"), "7");
+}
+
+#[test]
+fn a_view_placed_twice_or_shown_again_is_built_again_each_with_its_own_state() {
+    fn app() -> View {
+        let open = signal(|| true);
+        let v = rsx! { Counter { start: 1 } };
+        let again = v.clone();
+        rsx! {
+            div { "data-t": "a", {v.clone()} }
+            div { "data-t": "b", {again} }
+            button { "data-t": "toggle", onclick: move |_| open.toggle(), "toggle" }
+            if open.get() { section { "data-t": "c", {v.clone()} } }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let all = |p: &TestPage| [p.text("a"), p.text("b"), p.text("c")];
+    assert_eq!(all(&p), ["+1", "+1", "+1"], "three places, three builds");
+    p.click("inc");
+    assert_eq!(all(&p), ["+2", "+1", "+1"], "each its own state");
+    p.click("toggle");
+    assert!(!p.present("c"));
+    p.click("toggle");
+    assert_eq!(all(&p), ["+2", "+1", "+1"], "shown again: built again");
+}
+
+#[test]
+fn a_styled_view_sets_one_property_of_its_first_element_and_keeps_its_own() {
+    #[component]
+    fn Inner() -> View {
+        rsx! { p { "data-t": "in", style: "color: red", "in" } }
+    }
+    fn app() -> View {
+        let on = signal(|| false);
+        let shown = styled(rsx! { Inner {} }, "opacity", move || on.get().then(|| "0.5".to_string()));
+        rsx! {
+            button { "data-t": "on", onclick: move |_| on.toggle(), "on" }
+            {shown}
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!(p.attr("in", "style").as_deref(), Some("color: red"), "None: no property");
+    p.click("on");
+    assert_eq!(
+        p.attr("in", "style").as_deref(),
+        Some("color: red; opacity: 0.5"),
+        "a component's element, its own style kept"
+    );
+    p.click("on");
+    assert_eq!(p.attr("in", "style").as_deref(), Some("color: red"));
+}
+
+#[test]
+fn an_element_handed_out_runs_scripts_on_itself() {
+    fn app() -> View {
+        let el = signal(|| None::<Rc<MountedData>>);
+        rsx! {
+            canvas { "data-t": "c", onmounted: move |e: MountedEvent| el.set(Some(e.data())) }
+            button { "data-t": "draw", onclick: move |_| if let Some(c) = el.get() { c.run("el.getContext('2d').fillRect(0, 0, 4, 4)") }, "draw" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let mounted = p.scripts.len();
+    p.click("draw");
+    let (id, js) = p.scripts.last().cloned().unwrap();
+    assert_eq!((p.scripts.len(), id), (mounted + 1, 0), "one script, no reply kept");
+    assert!(js.contains("el.getContext('2d').fillRect(0, 0, 4, 4)") && js.starts_with("const el = aio.node("), "{js}");
 }

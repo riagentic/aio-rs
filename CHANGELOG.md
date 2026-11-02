@@ -118,7 +118,45 @@ version may break things.
   on an element sets them after its own, so the caller's win; one that
   reads state follows it. A prop typed `Prop<T>` follows what it is given
   (`value: name.get()`) while the component's body still runs once; given
-  a constant it holds no state.
+  a constant it holds no state. A `View` prop takes a view or text (a
+  string, a number, a format string, a signal: text that reads state
+  follows it), an `Option<View>` `None` too. Components may be generic
+  (`List<T>`), and a handler may be async.
+- air: a `View` is built again each time it is placed (a dialog opened
+  again, a tab shown again, one view in two places), each place with its
+  own state, as a Dioxus `Element`; it no longer fails when placed twice.
+- air: roots on one thread are apart (a test's two windows): each `Root`
+  has its own page, edits (`Root::take_edits`), events, globals and
+  tasks; the "one Root per thread" limit is gone.
+- **The kit on air** (`aio::kit` with feature `air`, air phase 2a): every
+  control, as aio's AIR draws it, each body run once and its holes
+  following state; the kit, facade, ui and sign-in tests run on air in
+  CI, none ignored. On air only, so far (aio's, gap package WA1):
+  - labels and titles take any content (Field, Checkbox, Switch, Alert,
+    Modal, Confirm, ConfirmButton, EmptyState, Tab, MenuItem, Crumb,
+    Table headers; `toast_view` for a toast);
+  - forms: `form.bind(aio::field!(name))` wires an Input, Textarea or
+    Select (its value, edits and blur: a field is touched when left),
+    `set_field`, `reset_field`, `touched`, `use_field_array`, and
+    `use_on_change` / `use_on_change_now` (aio's `onChange`, with a
+    cleanup);
+  - `Defer` loads: `load`, `loading`, `error`, `loading_min_ms`;
+  - `Transition` draws no box of its own (`air::styled`: one style
+    property of its content's element), `Motion::of` writes a motion as
+    a function of its progress (aio's `TransitionFn`);
+  - scoped CSS: `aio::ui::css(rule)` is a class named by its rule's
+    hash, put in the page once; `collect_css` gives them all;
+  - an element handed out by `onmounted` runs scripts on itself
+    (`MountedData::run`, `eval`): a canvas, a video, a selection.
+- Dark mode follows the OS: `[ui] scheme = "system"` (the default) keeps
+  the sheets' dark rules as written, so the page follows
+  `prefers-color-scheme` as it changes; `"light"` and `"dark"` fix one,
+  and a `bool` given to `use_css!` stays the app's own choice. The
+  template passes `aio::ui::scheme()`; `aio::ui::use_dark()` is a
+  `Memo<bool>` for code that draws its own colours;
+  `TestUi::set_os_dark` turns a test's OS dark.
+- `[ui] neutral = "soft"` keeps the page's greys near grey (aio's
+  `"neutral": "soft"`).
 - The router on air (`router!`): `Route`, `Outlet`, `Link`, `Redirect`,
   `params()` and Back are the same views on either renderer; on air a
   `Route`'s body runs again only when its match changes (a query or
@@ -148,7 +186,7 @@ version may break things.
   effect, subscription, cleanup, handler, task, page script or page node;
   misuse fails in release builds too (a hook outside a view's body, a
   write while a hole or a memo computes, an effect loop, a signal used
-  after its view, a view placed twice, two rows with one key, a missing
+  after its view, two rows with one key, a missing
   `key:` or an `if let` in `rsx!` at compile time); a renderer fault
   planted in air fails `TestUi` in the Rust page and the Electron page.
 - **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
@@ -327,6 +365,31 @@ version may break things.
   within its ttl without running it, with the native answer cache.
 - `ax dev <app> --web --port N --expose`: a fixed port, and the LAN over
   TLS behind a key made for the run, carried once by the printed link.
+- **Patches carry a resized array's items** (aio's narrowed Immer ops): a
+  push, a spread or a filter sends one `insert` per item put in or `del`
+  per item taken out, not the array; a sort or a rebuild still sends it
+  whole. aio pages get them as `add` and `remove`.
+- **Pacing and the full-state switch** (aio's `syncIntervalMs`,
+  `fullStateThreshold`): `[server.limits] sync_interval_ms` (50) folds a
+  link's background changes into one patch per window, a person's call
+  going at once; `full_state_percent` (50) sends the view instead of a
+  bigger patch. Both on aio pages too.
+- **Every shared cell on one server**: `Http::cell(handle)` serves another
+  cell on the same `/ws`, key and port; a link's hello names its cell.
+- `Http::resolve_peer(f)` (aio's `resolvePeer`): who a peer app on this
+  machine is here, its user and role; `Http::door_links(true)` (aio's
+  `localConnectHooks`): `on_link` hears the local door's links too.
+- `Reply::stream(type, parts)`: a route's answer sent part by part
+  (server-sent events, NDJSON), never compressed or buffered.
+- **Binary side channels** (aio's binary streams): `Route::socket(path, f)`
+  upgrades once `f` accepts the request; `aio::http::side` frames
+  `[kind][seq:u24][payload]` with a counter per kind, drops a droppable
+  frame or closes (1011) on a slow receiver, and says each frame's gap.
+- `Remote::on_conflict(f)` (aio's `onConflict`): where a server change met
+  a waiting call of the copy, live and in a catch-up (`Synced::conflicts`);
+  `Remote::merge(field, Merge::Text | Counter | SetAdd(id))` (aio's
+  `sync.merge`) shows that field merged while the call waits. In the page
+  too.
 - `[build.assets]` (aio's `assets`): folders beside `aio.toml` built into
   the app by URL prefix, answered at the same path in the window
   (`aio://app/…`), by the app's server (`Http::assets`, public), in the web
@@ -380,6 +443,9 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- `ax create`'s template follows the OS's light or dark (`[ui] scheme`,
+  `use_css!(aio::ui::scheme(), …)`) instead of a fixed light page;
+  `page_css` and `use_css!` take a `Scheme` or, as before, a `bool`.
 - A server's default size budget is 7 MB (was 6): the service template
   is 6.03 MB on Linux after 0.2's additions (sync, vitals, routes, auth,
   updates: 50 KB, no crate more than 7 KB), and the budget is that plus the
@@ -520,6 +586,22 @@ version may break things.
 
 ### Fixed
 
+- air's code size: an event handler costs its closure alone (its wrappers
+  were generic over it, 36% of the bench's IR): 50 views make 1.13 M lines
+  of LLVM IR, 0.31x Dioxus's (phase 1: 0.49x), a held key over 10 000
+  rows answers in 0.21x; `scripts/air-ir` in `ci.sh` fails past 25 000
+  lines a view (docs/design/air.md).
+- `ax lint`: the `testing` check no longer errs on a workspace-inherited
+  aio-rs: `[dev-dependencies] aio = { workspace = true, features = ["testing"] }`,
+  or `features = ["testing"]` on the `[workspace.dependencies]` entry, renamed
+  (`package = "aio-rs"`) or not; dotted and `[target.….dev-dependencies]`
+  tables count too.
+- A Unix socket path past the OS limit (108 bytes with the NUL on Linux, 104
+  on macOS): the app's socket dir falls back to `/tmp/aio-rt-<uid>/` when
+  `XDG_RUNTIME_DIR`/`TMPDIR` is too long, as aio's `resolveSocketPath` fell
+  back to `/tmp/aio`, and a path still too long is refused at once in words
+  (the path, its length, the limit, the fix) by the app, the shell (before
+  Electron connects) and `ax`, instead of EINVAL and no window.
 - A cell's or a synced copy's listeners (a view, `watch`) never hear an
   older state after a newer one: a tell from another thread, or from a
   listener itself, between reading the state and telling it, was told

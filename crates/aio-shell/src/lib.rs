@@ -437,6 +437,10 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
     let socks = aio::paths::sockets(&dirs.id, &dirs.data)?;
     let (sock, ctl_sock, hand) =
         (aio::ipc::addr(&socks, "wire"), aio::ipc::addr(&socks, "ctl"), instance::hand_addr(&dirs.id, &dirs.data)?);
+    // Electron's Node connects to these as spelled: one too long is said now,
+    // not as no window.
+    aio::ipc::fits(&sock)?;
+    aio::ipc::fits(&ctl_sock)?;
     let r = tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async {
         let mut listener = aio::ipc::Listener::bind(&sock)?;
         // The runtime's control line (Rust → Electron main): "focus".

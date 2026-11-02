@@ -35,9 +35,10 @@ pub fn App() -> View {
     // The app's one hue (`[ui] hue`, else its id's): its icon's and splash's too.
     let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
-        // `false`: the light theme (`true`: dark). First the kit's theme (what
+        // Light or dark as `[ui] scheme` says (the OS's, as it changes, by
+        // default; `false`/`true` fix one). First the kit's theme (what
         // `aio::ui::btn` and the kit's components are drawn with), then yours.
-        style { {aio::use_css!(false, &theme; "assets/style.css")} }
+        style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
         main {
             h1 { "data-t": "count", "{n}" }
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }
