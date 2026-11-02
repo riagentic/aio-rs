@@ -16,8 +16,8 @@
 //! applies them and sends events back ([`Root::event`]).
 use crate::event::{EVAL, EVENT, Event, Flow, FromRaw, R, Raw};
 use crate::reactive::{
-    Callback, Frame, Owner, Signal, batch, body, child_scope, cleanup, current_owner, detached, memo_now, provide_on,
-    render, scope, try_context, untrack, with_owner,
+    Callback, Frame, Owner, Signal, batch, body, child_scope, cleanup, current_owner, current_root, detached, in_root,
+    memo_now, provide_on, render, scope, set_root, try_context, untrack, with_owner,
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -85,7 +85,11 @@ struct Dom {
     uncaught: Vec<String>,
 }
 
-thread_local!(static DOM: RefCell<Dom> = RefCell::default());
+thread_local! {
+    /// Each root's page (0: code run outside any root).
+    static DOMS: RefCell<HashMap<u32, Dom>> = RefCell::default();
+    static NEXT_ROOT: Cell<u32> = const { Cell::new(1) };
+}
 
 impl Dom {
     fn op(&mut self, code: u8) -> &mut Self {
@@ -123,11 +127,14 @@ impl Dom {
     }
 }
 
+/// The current root's page.
 fn dom<R>(f: impl FnOnce(&mut Dom) -> R) -> R {
-    DOM.with_borrow_mut(f)
+    let at = current_root();
+    DOMS.with_borrow_mut(|ds| f(ds.entry(at).or_default()))
 }
 
-/// The edits made since the last call, for the page (one frame).
+/// The edits made since the last call for the current root's page (the
+/// last made, outside one; [`Root::take_edits`] with more than one).
 pub fn take_edits() -> Vec<u8> {
     dom(|d| std::mem::take(&mut d.out))
 }
@@ -418,7 +425,13 @@ num_attr!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, char);
 
 /// The attributes the page sets as properties (what a control shows now).
 fn is_prop(name: &str) -> bool {
-    matches!(name, "value" | "checked" | "selected" | "indeterminate" | "innerHTML")
+    matches!(name, "value" | "innerHTML") || is_flag_prop(name)
+}
+
+/// The properties that are on or off: `false` sets them off (a value's
+/// `false`, an `Option`'s `None`, removes it).
+fn is_flag_prop(name: &str) -> bool {
+    matches!(name, "checked" | "selected" | "indeterminate")
 }
 
 /// An attribute hole: `name` of node `id` is `f()`.
@@ -430,7 +443,7 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
         let same = match (&last, &v) {
             (Some(AttrValue::Str(a)), AttrValue::Str(b)) => a == b,
             (Some(AttrValue::Bool(a)), AttrValue::Bool(b)) => a == b,
-            (None, AttrValue::Bool(false)) => !is_prop(name),
+            (None, AttrValue::Bool(false)) => !is_flag_prop(name),
             _ => false,
         };
         if same {
@@ -446,7 +459,9 @@ pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
     dom(|d| match (v, is_prop(name)) {
         (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
         (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
-        (AttrValue::Bool(b), true) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
+        (AttrValue::Bool(b), true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
+        (AttrValue::Bool(true), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(""),
+        (AttrValue::Bool(false), true) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
         (AttrValue::Bool(true), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(""),
         (AttrValue::Bool(false), false) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
     });
@@ -1087,27 +1102,38 @@ impl MountedData {
 
 /// A window's views: mounted into the page's root (node 0). One per thread.
 pub struct Root {
+    id: u32,
     owner: Owner,
     range: Rc<Cell<Range>>,
 }
 
 impl Root {
-    /// A root with nothing in it yet ([`show`](Self::show)); its globals
-    /// and context are fresh. Panics if one is mounted on this thread.
+    /// A root with nothing in it yet ([`show`](Self::show)): a page (a
+    /// window) of its own, its globals and context fresh. Roots on one
+    /// thread are apart: each one's views, edits, events and globals are
+    /// its own. The new root is the current one outside any root.
     pub fn new() -> Self {
-        if dom(|d| d.root.is_some_and(|r| r.alive())) {
-            panic!("air: one Root per thread: drop the last one first");
-        }
-        dom(|d| *d = Dom { next: 1, ..Dom::default() });
-        let ((), owner) = detached(|| scope(|| ()));
-        let caught = Catch(Rc::new(|e: String| {
-            eprintln!("air: a view failed and no ErrorBoundary is above it: {e}");
-            dom(|d| d.uncaught.push(e));
-        }));
-        provide_on(owner, caught);
-        dom(|d| d.root = Some(owner));
-        crate::global::reset();
-        Self { owner, range: Rc::default() }
+        let id = NEXT_ROOT.replace(NEXT_ROOT.get() + 1);
+        // Pages of roots dropped and taken are forgotten.
+        DOMS.with_borrow_mut(|ds| ds.retain(|&k, d| k == 0 || d.root.is_some()));
+        set_root(id);
+        let owner = in_root(id, || {
+            dom(|d| *d = Dom { next: 1, ..Dom::default() });
+            let ((), owner) = detached(|| scope(|| ()));
+            let caught = Catch(Rc::new(|e: String| {
+                eprintln!("air: a view failed and no ErrorBoundary is above it: {e}");
+                dom(|d| d.uncaught.push(e));
+            }));
+            provide_on(owner, caught);
+            dom(|d| d.root = Some(owner));
+            owner
+        });
+        Self { id, owner, range: Rc::default() }
+    }
+
+    /// The edits this root made since the last call, for its page (one frame).
+    pub fn take_edits(&self) -> Vec<u8> {
+        in_root(self.id, take_edits)
     }
 
     /// Build `app` once (its body runs once, its holes follow); its edits wait in [`take_edits`].
@@ -1132,7 +1158,7 @@ impl Root {
 
     /// `f` in the root's scope (where the app's globals and context live), in a batch.
     pub fn within<R>(&self, f: impl FnOnce() -> R) -> R {
-        with_owner(self.owner, || batch(f))
+        in_root(self.id, || with_owner(self.owner, || batch(f)))
     }
 
     pub fn owner(&self) -> Owner {
@@ -1143,6 +1169,10 @@ impl Root {
     /// in one batch) or a script's reply. False if nothing took it (the
     /// nodes are gone, or the frame is malformed).
     pub fn event(&self, frame: &[u8]) -> bool {
+        in_root(self.id, || self.event_in(frame))
+    }
+
+    fn event_in(&self, frame: &[u8]) -> bool {
         match frame.first() {
             Some(&EVAL) => return eval_reply(frame),
             Some(&EVENT) => {}
@@ -1175,7 +1205,7 @@ impl Root {
 
     /// The errors no boundary caught (each also said on stderr), taken.
     pub fn uncaught(&self) -> Vec<String> {
-        dom(|d| std::mem::take(&mut d.uncaught))
+        in_root(self.id, || dom(|d| std::mem::take(&mut d.uncaught)))
     }
 }
 
@@ -1187,11 +1217,13 @@ impl Default for Root {
 
 impl Drop for Root {
     fn drop(&mut self) {
-        let r = self.range.get();
-        dom(|d| d.remove(r));
-        crate::global::reset();
-        self.owner.dispose();
-        dom(|d| d.root = None);
+        in_root(self.id, || {
+            let r = self.range.get();
+            dom(|d| d.remove(r));
+            crate::global::reset();
+            self.owner.dispose();
+            dom(|d| d.root = None);
+        });
     }
 }
 
@@ -1202,7 +1234,9 @@ pub(crate) fn root_owner() -> Option<Owner> {
 
 /// Handlers and scripts alive on this thread's page.
 pub(crate) fn live_dom() -> (usize, usize) {
-    dom(|d| (d.handlers.values().map(Vec::len).sum(), d.evals.len()))
+    DOMS.with_borrow(|ds| {
+        ds.values().fold((0, 0), |(h, e), d| (h + d.handlers.values().map(Vec::len).sum::<usize>(), e + d.evals.len()))
+    })
 }
 
 /// Planted renderer faults, for the gates that prove a broken render fails a test.

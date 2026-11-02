@@ -4,7 +4,7 @@
 //! (`text`, `attr`, `html`) is what the window would show. Each step runs
 //! the ready tasks and applies what they drew; a view's error that no
 //! boundary caught fails the step.
-use crate::dom::{Root, View, op, take_edits};
+use crate::dom::{Root, View, op};
 use crate::event::Raw;
 use std::collections::HashMap;
 
@@ -108,7 +108,7 @@ impl TestPage {
     pub fn flush(&mut self) {
         loop {
             crate::run_tasks();
-            let b = take_edits();
+            let b = self.root.take_edits();
             if b.is_empty() {
                 break;
             }

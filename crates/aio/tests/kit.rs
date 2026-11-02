@@ -101,9 +101,8 @@ fn a_select_lists_its_options_and_a_textarea_its_rows() {
 
 fn fields() -> View {
     let email = signal(String::new);
-    let error = email.get().is_empty().then(|| "Required".to_string());
     rsx! {
-        Field { label: "Email", error, required: true, "data-t": "email-field",
+        Field { label: "Email", error: email.get().is_empty().then(|| "Required".to_string()), required: true, "data-t": "email-field",
             Input { "data-t": "email", value: email.get(), oninput: move |v| email.set(v) }
         }
         Field { label: "Name", hint: "As on your card",
@@ -741,15 +740,28 @@ fn camera_view() -> View {
     }
 }
 
-#[component]
-fn Preview(cam: Option<&'static str>) -> View {
-    let cam = use_held(cameras(), cam);
-    let text = match &cam {
+fn shown(cam: &Option<aio::held::State<String>>) -> String {
+    match cam {
         None => "none".to_string(),
         Some(aio::held::State::Open(v)) => v.to_string(),
         Some(_) => "…".to_string(),
-    };
+    }
+}
+
+#[cfg(feature = "kit")]
+#[component]
+fn Preview(cam: Option<&'static str>) -> View {
+    let cam = use_held(cameras(), cam);
+    let text = shown(&cam);
     rsx! { p { "data-t": "preview", "{text}" } }
+}
+
+/// On air a body runs once: the key follows its prop, the state is read in a hole.
+#[cfg(not(feature = "kit"))]
+#[component]
+fn Preview(cam: Prop<Option<&'static str>>) -> View {
+    let cam = use_held(cameras(), cam);
+    rsx! { p { "data-t": "preview", {cam.with(shown)} } }
 }
 
 #[test]
@@ -1242,11 +1254,9 @@ fn signup() -> View {
             (name == "taken").then(|| "That name is taken".to_string())
         },
     );
-    let v = f.values();
-    let tags = v.tags.join(",");
     rsx! {
         Field { label: "Name", error: f.error("name"), "data-t": "name-field",
-            Input { value: v.name, "data-t": "name", oninput: move |n| f.edit("name", |s| s.name = n), onchange: move |_| f.touch("name") }
+            Input { value: f.values().name, "data-t": "name", oninput: move |n| f.edit("name", |s| s.name = n), onchange: move |_| f.touch("name") }
         }
         Field { label: "Age", error: f.error("age"),
             Input { r#type: "number", "data-t": "age", oninput: move |n: String| f.edit("age", |s| s.age = n.parse().ok()) }
@@ -1257,7 +1267,7 @@ fn signup() -> View {
         Field { label: "Confirm", error: f.error("confirm"),
             Input { r#type: "password", "data-t": "confirm", oninput: move |n| f.edit("confirm", |s| s.confirm = n) }
         }
-        p { "data-t": "tags", "{tags}" }
+        p { "data-t": "tags", {f.values().tags.join(",")} }
         button { "data-t": "add-tag", onclick: move |_| f.edit("tags", |s| s.tags.push(format!("t{}", s.tags.len()))), "add" }
         button { "data-t": "move-tag", onclick: move |_| f.edit("tags", |s| move_item(&mut s.tags, 0, 1)), "move" }
         {f.form_error().map(|e| rsx! { p { "data-t": "form-error", "{e}" } })}
@@ -1475,9 +1485,14 @@ fn springy() -> View {
     let mut ticks = signal(|| 0);
     let on = signal(|| true);
     let mut frames = signal(|| 0);
-    use_interval(Duration::from_millis(5), on.get(), move || ticks += 1);
-    use_frame(on.get(), move |_, _| frames += 1);
-    log(format!("{:.2}", x.value()));
+    // On air a hook's body runs once: `active` is the signal, followed.
+    #[cfg(feature = "kit")]
+    let active = on.get();
+    #[cfg(not(feature = "kit"))]
+    let active = on;
+    use_interval(Duration::from_millis(5), active, move || ticks += 1);
+    use_frame(active, move |_, _| frames += 1);
+    effect(move || log(format!("{:.2}", x.value())));
     rsx! {
         p { "data-t": "x", "{x.value():.2} {x.animating()}" }
         p { "data-t": "ticks", "{ticks}" }
@@ -1565,15 +1580,21 @@ thread_local! {
 
 #[component]
 fn ColorOf() -> View {
-    RENDERS.with(|r| r.borrow_mut().push("color"));
     let c = use_context_select(|l: &Look| l.color);
+    effect(move || {
+        c.get();
+        RENDERS.with(|r| r.borrow_mut().push("color"))
+    });
     rsx! { p { "data-t": "color", "{c}" } }
 }
 
 #[component]
 fn SizeOf() -> View {
-    RENDERS.with(|r| r.borrow_mut().push("size"));
     let s = use_context_select(|l: &Look| l.size);
+    effect(move || {
+        s.get();
+        RENDERS.with(|r| r.borrow_mut().push("size"))
+    });
     rsx! { p { "data-t": "size", "{s}" } }
 }
 
@@ -1587,12 +1608,12 @@ fn looks() -> View {
 }
 
 #[test]
-fn a_context_selection_re_renders_only_when_its_part_changes() {
+fn a_context_selection_follows_only_its_part() {
     let mut ui = TestUi::new(looks);
     RENDERS.with(|r| r.borrow_mut().clear());
     ui.click("recolor");
     assert_eq!((ui.text("color"), ui.text("size")), ("blue".into(), "1".into()));
-    assert_eq!(RENDERS.with(|r| r.take()), ["color"], "the size view didn't re-render");
+    assert_eq!(RENDERS.with(|r| r.take()), ["color"], "what reads the size didn't run again");
     let ui = TestUi::new(|| rsx! { SizeOf {} });
     assert_eq!(ui.text("size"), "0", "no provider: the default");
 }

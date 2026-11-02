@@ -439,7 +439,7 @@ async fn pump(
     air::on_wake(move || w.notify_one());
     loop {
         air::run_tasks();
-        let edits = air::take_edits();
+        let edits = root.take_edits();
         if !edits.is_empty() {
             to_page.send(edits).map_err(|_| "the page is gone".to_string())?;
         }

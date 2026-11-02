@@ -232,13 +232,6 @@ fn gate_2_hooks_called_in_another_order_on_a_rerun_fail() {
 }
 
 #[test]
-fn gate_2_one_root_per_thread() {
-    let _a = Root::mount(|| rsx! { p {} });
-    let e = says(|| _ = Root::new());
-    assert!(e.contains("one Root per thread"), "{e}");
-}
-
-#[test]
 fn gate_2_two_rows_with_one_key_fail() {
     fn app() -> View {
         let rows = signal(|| vec![1, 2]);

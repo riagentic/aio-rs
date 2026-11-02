@@ -277,6 +277,22 @@ fn each_global_is_its_own_state_per_app_instance_and_a_global_memo_follows_them(
 }
 
 #[test]
+fn two_roots_on_one_thread_are_apart() {
+    let mut a = TestPage::mount(two_globals);
+    let mut b = TestPage::mount(two_globals);
+    a.click("left");
+    a.click("left");
+    b.click("left");
+    assert_eq!((a.text("left"), a.text("sum")), ("2".into(), "12".into()), "a's globals, a's page");
+    assert_eq!((b.text("left"), b.text("sum")), ("1".into(), "11".into()), "b's own");
+    drop(a);
+    b.click("left");
+    assert_eq!(b.text("left"), "2", "b lives on when a ends");
+    drop(b);
+    assert_eq!(air::live(), air::Live::default(), "nothing left");
+}
+
+#[test]
 fn a_component_whose_root_is_a_list_moves_whole_as_a_keyed_row() {
     #[component]
     fn Pair(n: u32) -> View {

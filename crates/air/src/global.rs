@@ -1,21 +1,29 @@
 //! App-wide state in a `static`, one per app instance (per mounted
 //! [`Root`](crate::Root), so per test): made on first use, under the root
 //! (its context is the root's), ended with it.
-use crate::reactive::{Memo, ReadGuard, Signal, WriteGuard, detached, memo_now, with_owner};
+use crate::reactive::{Memo, ReadGuard, Signal, WriteGuard, current_root, detached, memo_now, with_owner};
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-thread_local!(static GLOBALS: RefCell<HashMap<usize, Rc<dyn Any>>> = RefCell::default());
+/// Each root's globals (by root, then by the static's address).
+type Globals = HashMap<(u32, usize), Rc<dyn Any>>;
 
-/// A new app instance: every global is made again on its next use.
+thread_local!(static GLOBALS: RefCell<Globals> = RefCell::default());
+
+/// The current root's app instance ends: its globals are made again on their next use.
 pub(crate) fn reset() {
-    let old = GLOBALS.take();
+    let root = current_root();
+    let old: Vec<_> = GLOBALS.with_borrow_mut(|g| {
+        let gone: Vec<_> = g.keys().filter(|k| k.0 == root).copied().collect();
+        gone.into_iter().filter_map(|k| g.remove(&k)).collect()
+    });
     drop(old);
 }
 
 fn get_or<T: Clone + 'static>(at: usize, make: impl FnOnce() -> T) -> T {
+    let at = (current_root(), at);
     if let Some(v) = GLOBALS.with_borrow(|g| g.get(&at).cloned()) {
         return v.downcast_ref::<T>().cloned().expect("air: a global of another type");
     }

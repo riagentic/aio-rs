@@ -1076,7 +1076,16 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
                 node_captures(children, out);
             }
             Node::Comp { props, spreads, children, key, .. } => {
-                props.iter().for_each(|(_, e)| captures(e, out));
+                for (_, e) in props {
+                    match e.clone().into_iter().collect::<Vec<_>>().as_slice() {
+                        [TokenTree::Literal(l)] => {
+                            if let Some(Node::Fmt(_, r)) = lit_str(l).map(|s| text(&s, l.span())) {
+                                out.extend(r)
+                            }
+                        }
+                        _ => captures(e, out),
+                    }
+                }
                 spreads.iter().for_each(|e| captures(e, out));
                 key.iter().for_each(|k| captures(k, out));
                 node_captures(children, out);
@@ -1301,6 +1310,15 @@ fn comp(n: &Node) -> TokenStream {
     };
     let mut calls = vec![];
     for (k, v) in props {
+        // `"row-{key}"`: formatted, as in an attribute.
+        let formatted = match v.clone().into_iter().collect::<Vec<_>>().as_slice() {
+            [TokenTree::Literal(l)] => match lit_str(l).map(|s| text(&s, l.span())) {
+                Some(Node::Fmt(f, _)) => Some(quote!(::std::format!(#f))),
+                _ => None,
+            },
+            _ => None,
+        };
+        let v = formatted.as_ref().unwrap_or(v);
         let closure = is_closure(v);
         calls.push(match k {
             // A constant needs no closure (and a `Prop` of it holds no state).
