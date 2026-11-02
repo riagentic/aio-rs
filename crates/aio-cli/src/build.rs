@@ -126,8 +126,10 @@ pub fn uninstall_sh(app: &App) -> String {
 /// A desktop app's budget in MB: core + `kit`, the shared runtime not
 /// counted (an app with heavy batteries declares its own: `[build] budget_mb`).
 pub const BUDGET_MB: u64 = 10;
-/// A server's (no window, no `kit`).
-pub const SERVER_BUDGET_MB: u64 = 6;
+/// A server's (no window, no `kit`): the service template measured 6.03 MB
+/// on Linux (2026-11-02), plus the size gate's 5% headroom (scripts/dx-metrics
+/// `STEADY`), 6.33 MB, to the next whole MB.
+pub const SERVER_BUDGET_MB: u64 = 7;
 
 /// The budget `cfg` builds within for `os`: its own, else its mode's, half
 /// again on Windows, whose build of the same code is about a third bigger
@@ -1123,8 +1125,8 @@ mod tests {
             |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"relay\"\nname = \"Relay\"\n{t}")).unwrap();
         assert_eq!(budget_of(&toml(""), "linux"), BUDGET_MB);
         let server = "mode = \"server\"\n[server]\nlisten = \"127.0.0.1:8080\"\n";
-        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 6 MB");
-        assert_eq!(budget_of(&toml(server), "windows"), 9, "half again on Windows");
+        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 7 MB");
+        assert_eq!(budget_of(&toml(server), "windows"), 10, "half again on Windows");
         assert_eq!(budget_of(&toml(""), "windows"), 15);
         let own = toml(&format!("{server}[build]\nbudget_mb = 8\n"));
         assert_eq!((budget_of(&own, "linux"), budget_of(&own, "windows")), (8, 8), "unless it says");

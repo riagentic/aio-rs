@@ -165,7 +165,7 @@ tree under `dist/<channel>/` ([release](release.md)).
 - The release binary says the version the build gave it: a launcher that
   passes `env!("CARGO_PKG_VERSION")` instead of `aio::app_version!()` to
   `aio_shell::start` is refused (its updates would never match).
-- It is within its budget (`budget_mb`; 10 MB, a server 6 MB, each half again on Windows), else it
+- It is within its budget (`budget_mb`; 10 MB, a server 7 MB, each half again on Windows), else it
   isn't packed and the crates that take the space are listed.
 - It holds no path of the build machine's home (a shipped binary never
   names who built it).

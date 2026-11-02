@@ -337,6 +337,10 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- A server's default size budget is 7 MB (was 6): the service template
+  is 6.03 MB on Linux after 0.2's additions (sync, vitals, routes, auth,
+  updates: 50 KB, no crate more than 7 KB), and the budget is that plus the
+  size gate's 5% headroom, to the next whole MB.
 - **Fail closed**: `/__aio/health` and `/__aio/metrics` need the key, a
   session or a user's token beyond this machine, also without accounts
   (they answered anyone before); on loopback they stay open on an app
@@ -479,7 +483,7 @@ version may break things.
   old app now exits only once the helper says it is up (20 s); else it
   runs on, and that release is never offered again.
 - `ax release` of the service template on Windows: its default size
-  budget is half again there (a server 9 MB, a desktop app 15 MB), as its
+  budget is half again there (a server 10 MB, a desktop app 15 MB), as its
   build is about a third bigger (7.1 MB against 5.3 on Linux).
 - `scripts/dx-metrics --check` compares like with like: every gated
   number, sizes and crate counts too, is judged against the same machine's
