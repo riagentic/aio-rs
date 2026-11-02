@@ -2,8 +2,9 @@
 //! workspace (a library and an app on subsecond) built fat, run, and
 //! patched three times while it runs: twice in the app's crate, once in
 //! the library; the app prints the new values without a restart, and the
-//! patched code sees the thread-locals the running binary counted.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+//! patched code sees the thread-locals the running binary counted (Linux
+//! x86_64; on macOS a patch has its own, new, as with dx).
+#![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 #[allow(dead_code)]
 #[path = "../src/hotpatch.rs"]
@@ -122,10 +123,12 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
 
     let main_rs = ws.join("app/src/main.rs");
     let lib_rs = ws.join("lib/src/lib.rs");
+    // What the patched `ticks` reads after `n` turns of the loop.
+    let ticks = |n: u32| if cfg!(target_os = "linux") { 101 * n } else { 0 };
     let steps = [
-        (&main_rs, "    1\n", "    2\n", "value 2 10 202"),
-        (&main_rs, "    2\n", "    3\n", "value 3 10 303"),
-        (&lib_rs, "    10\n", "    20\n", "value 3 20 404"),
+        (&main_rs, "    1\n", "    2\n", format!("value 2 10 {}", ticks(2))),
+        (&main_rs, "    2\n", "    3\n", format!("value 3 10 {}", ticks(3))),
+        (&lib_rs, "    10\n", "    20\n", format!("value 3 20 {}", ticks(4))),
     ];
     for (i, (file, from, to, want)) in steps.into_iter().enumerate() {
         edit(file, from, to);
@@ -147,13 +150,17 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     drop(stdin);
     assert!(app.wait().unwrap().success());
 
-    // rustc's temporary objects, bitcode and folders (`-Csave-temps`) are gone once linked.
+    // The app crate's temporary bitcode, objects (macOS keeps those: its
+    // debug info) and rustc's folders (`-Csave-temps`) are gone once linked.
     let deps = fat.exe.with_file_name("deps");
     let temps: Vec<_> = std::fs::read_dir(&deps)
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.contains(".rcgu.") || (n.starts_with("rmeta") && n.len() == 11))
+        .filter(|n| {
+            let app = n.starts_with("fixture_app-") && n.contains(".rcgu.");
+            (app && !(cfg!(target_os = "macos") && n.ends_with(".rcgu.o"))) || (n.starts_with("rmeta") && n.len() == 11)
+        })
         .collect();
     assert!(temps.is_empty(), "{temps:?}");
 

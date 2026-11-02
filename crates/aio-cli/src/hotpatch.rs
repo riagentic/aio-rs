@@ -654,9 +654,10 @@ fn extracted(rlib: &Path, dir: &Path) -> Result<(Vec<PathBuf>, bool), String> {
 }
 
 /// What rustc left for the link (`-Csave-temps`): the app crate's objects
-/// and bitcode, and rustc's own temporary folder.
+/// (not on macOS, whose debug info stays in them, as rustc leaves every
+/// crate's), its bitcode, and rustc's own temporary folders.
 fn remove_temps(link_args: &[String], app: &Rustc) {
-    for a in link_args.iter().filter(|a| a.ends_with(".rcgu.o")) {
+    for a in link_args.iter().filter(|a| !MACHO && a.ends_with(".rcgu.o")) {
         let _ = std::fs::remove_file(a);
     }
     let prefix = format!("{}{}.", app.name(), app.codegen("extra-filename").unwrap_or_default());
