@@ -22,12 +22,15 @@ bytes = "1"
 serde = { version = "1", features = ["derive"] }
 # The store's ISO times, as aio writes them (`toISOString`).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-dioxus-core = "=0.7.10"
-dioxus-document = "=0.7.10"
-dioxus-liveview = { version = "=0.7.10", default-features = false, features = ["multi-thread"] }
+# Dioxus's renderer (`dioxus`, the default until air is the only one).
+dioxus-core = { version = "=0.7.10", optional = true }
+dioxus-document = { version = "=0.7.10", optional = true }
+dioxus-liveview = { version = "=0.7.10", default-features = false, features = ["multi-thread"], optional = true }
 # The first paint of a web build's page, rendered on the server (`web::painted`).
 dioxus-ssr = { version = "=0.7.10", optional = true }
 subsecond = { version = "=0.7.10", optional = true }
+# air, aio-rs's own renderer (`air`): its frames read for a held key's repeats.
+air = { workspace = true, optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Unpacks the runtime's archive: inflate only (the CLI writes archives).
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -37,14 +40,22 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "macros", "fs", "io-util", "sync", "signal", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 # Dioxus names each render in a span: the dev build's burst tripwire counts them.
-tracing = "0.1"
+tracing = { version = "0.1", optional = true }
 
 [features]
-# The app's UI in browsers, served by its own server (`web`).
-web = ["aio/br", "dep:dioxus-ssr"]
+default = ["dioxus"]
+# The views drawn by Dioxus 0.7 (liveview), as in 0.1, the kit on it.
+dioxus = ["aio/kit", "dep:dioxus-core", "dep:dioxus-document", "dep:dioxus-liveview", "dep:tracing"]
+# The views drawn by air, aio-rs's own renderer (docs/design/air.md), with no
+# Dioxus: `default-features = false, features = ["air"]`. One renderer per
+# build: with `dioxus` on too, Dioxus draws.
+air = ["aio/air", "dep:air"]
+# The app's UI in browsers, served by its own server (`web`): Dioxus's tabs
+# and first paint (an app on air serves its wasm build with `aio::http`).
+web = ["dioxus", "aio/br", "dep:dioxus-ssr"]
 # `ax dev` (it passes `--features aio-shell/dev`): rsx! reloaded live, Rust hot-patched.
 # A release build leaves both out.
-dev = ["dioxus-liveview/devtools", "dep:subsecond", "aio/dev"]
+dev = ["dioxus-liveview?/devtools", "dep:subsecond", "aio/dev"]
 # The splash drawn by the OS before Electron starts (`presplash`): `ax build`
 # turns it on for an app with a `[build.splash]`, so an app without one (and
 # `ax dev`) carries none of it; Electron draws the splash there.
@@ -54,8 +65,9 @@ native-splash = []
 tempfile = "3"
 # The update tests read aio.toml text (`Config::parse`).
 aio-config = { workspace = true, features = ["toml"] }
-# The kit's islands, tested in the real page (`islands.rs`).
-aio = { workspace = true, features = ["kit", "testing"] }
+# The kit's islands, tested in the real page (`islands.rs`; the kit is
+# the renderer's: `dioxus` turns on Dioxus's).
+aio = { workspace = true, features = ["testing"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 
 [[test]]

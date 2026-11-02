@@ -25,6 +25,7 @@ impl<S: Stream> Fresh<S> {
 impl<S: Stream + Unpin> Unpin for Fresh<S> {}
 
 /// The key and element of a repeated keydown frame, if `f` is one.
+#[cfg(feature = "dioxus")]
 fn repeat(f: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(f).ok()?;
     if !text.contains("\"repeat\":true") || !text.contains("keydown") {
@@ -33,6 +34,14 @@ fn repeat(f: &[u8]) -> Option<String> {
     let v: aio::serde_json::Value = aio::serde_json::from_str(text).ok()?;
     let p = v.get("params")?;
     (p["name"] == "keydown" && p["data"]["repeat"] == true).then(|| format!("{}|{}", p["data"]["key"], p["element"]))
+}
+
+/// The key and element of a repeated keydown frame, if `f` is one (air's
+/// frames: `air::Raw`).
+#[cfg(all(feature = "air", not(feature = "dioxus")))]
+fn repeat(f: &[u8]) -> Option<String> {
+    let r = air::Raw::decode(f).filter(|r| r.name == "keydown" && r.repeat)?;
+    Some(format!("{}|{}", r.key, r.ids.first()?))
 }
 
 impl<S, E> Stream for Fresh<S>
@@ -91,11 +100,18 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
 
+    #[cfg(feature = "dioxus")]
     fn key(name: &str, key: &str, repeat: bool) -> Result<Vec<u8>, ()> {
         let data = aio::serde_json::json!({ "key": key, "repeat": repeat });
         let ev =
             aio::serde_json::json!({ "method": "user_event", "params": { "name": name, "element": 3, "data": data } });
         Ok(ev.to_string().into_bytes())
+    }
+
+    #[cfg(all(feature = "air", not(feature = "dioxus")))]
+    fn key(name: &str, key: &str, repeat: bool) -> Result<Vec<u8>, ()> {
+        let raw = air::Raw { ids: vec![3], name: name.into(), key: key.into(), repeat, ..air::Raw::default() };
+        Ok(raw.encode())
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use aio::serde_json::json;
 use std::io;
 
 fn run(js: &str) {
-    _ = dioxus_document::eval(js);
+    _ = aio::ui::prelude::eval(js);
 }
 
 /// The element with this id, scrolled into view (to the top, or centred).
@@ -46,10 +46,11 @@ pub fn set_scroll(selector: &str, y: f64) {
 /// units, as the page counts), if there is one.
 pub async fn caret(selector: &str) -> Option<usize> {
     let js = format!("return document.querySelector({})?.selectionStart ?? null", json!(selector));
-    dioxus_document::eval(&js).join::<Option<usize>>().await.ok().flatten()
+    aio::ui::prelude::eval(&js).join::<Option<usize>>().await.ok().flatten()
 }
 
 /// Own part of the window's `<head>` while this component lives (aio's `useHead`).
+#[cfg(feature = "dioxus")]
 pub use aio::head::use_head;
 
 /// The system print dialog for the page (the runtime opens it; Electron
@@ -88,7 +89,7 @@ pub fn show() {
 /// `text` on the clipboard; false if the page was refused it.
 pub async fn copy(text: &str) -> bool {
     let js = format!("try{{await navigator.clipboard.writeText({});return true}}catch(e){{return false}}", json!(text));
-    dioxus_document::eval(&js).join::<bool>().await.unwrap_or(false)
+    aio::ui::prelude::eval(&js).join::<bool>().await.unwrap_or(false)
 }
 
 /// An open dialog's question: files (of these types) or a folder.

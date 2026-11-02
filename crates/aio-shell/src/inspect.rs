@@ -78,7 +78,7 @@ pub const COMPONENTS: &str = "Aio.components";
 
 /// What the dev build keeps; nothing before the window's view runs.
 fn components() -> Value {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "dioxus"))]
     if let Some(t) = crate::renders::TREE.get() {
         let t = t.lock().unwrap_or_else(|e| e.into_inner());
         let (renders, total) = t.renders();

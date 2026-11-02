@@ -12,7 +12,7 @@ pub mod storage;
 mod handle;
 #[cfg(target_arch = "wasm32")]
 pub mod notify;
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[cfg(all(target_arch = "wasm32", feature = "liveview"))]
 mod page;
 #[cfg(target_arch = "wasm32")]
 mod source;
@@ -173,7 +173,7 @@ impl storage::Kv for Local {
 /// one this browser kept, or newer). A mismatch then leaves ids on the
 /// wrong nodes or on none, and the next edit throws in the interpreter;
 /// it also needs dioxus-fullstack's serialized hydration data in the page.
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "liveview"))]
 pub fn launch(root: fn() -> crate::ui::View) {
     use dioxus_core::VirtualDom;
     // A `notify` tell is the page's notification, unless the app shows its own.

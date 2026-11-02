@@ -76,14 +76,19 @@ br = ["server", "dep:brotli"]
 # Everything networked: what `default` was before the split.
 net = ["tls", "oidc"]
 # With it, `aio::testing::TestUi`: UI tests in the page the app's window shows.
-kit = ["dep:dioxus", "dep:dioxus-document", "dep:dioxus-liveview", "dep:tracing"]
+kit = ["liveview", "dep:dioxus", "dep:tracing"]
 # The facade (`aio::ui::prelude`) and `TestUi` on air, aio-rs's own renderer
 # (docs/design/air.md), with no Dioxus: plan step 1. One renderer per build:
 # with `kit` on too, Dioxus stays the facade's (the kit is Dioxus code until
 # step 2), so `--all-features` builds what ships today.
 air = ["dep:air"]
-# The app's views mounted in its own page (`aio::web::launch`, `ax build --web`).
-web = ["dep:dioxus-web", "dep:dioxus-core", "dep:dioxus-document", "dep:dioxus-liveview"]
+# The app's views mounted in its own page (`aio::web::launch`, `ax build --web`),
+# on the build's renderer (`air`, or Dioxus's with `liveview`/`kit`).
+web = []
+# Dioxus's page renderer (0.1's): its DOM-edit interpreter in the window's page
+# and dioxus-web in a browser. One renderer per build: not with `air` unless
+# `kit` is on too (then Dioxus stays the facade's).
+liveview = ["dep:dioxus-web", "dep:dioxus-core", "dep:dioxus-document", "dep:dioxus-liveview"]
 # Working with aio, the Deno-based framework (`aio::compat`): aio pages and
 # tools on `/ws` (protocol v3, with `server`), `AioLink` (an aio-rs app calling
 # an aio app), aio's move of a scattered layout into its home, `#[on_aio]`.

@@ -140,6 +140,7 @@ name = "aio-rs-shell"
 version = "0.1.0"
 dependencies = [
  "aio-rs",
+ "aio-rs-air",
  "aio-rs-config",
  "base64 0.23.1",
  "bytes",

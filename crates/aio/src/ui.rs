@@ -26,12 +26,18 @@ mod on_air;
 #[cfg(all(feature = "air", not(feature = "kit")))]
 pub use on_air::*;
 /// What a view returns (with `kit`, [`prelude`] has the rest).
-#[cfg(all(feature = "web", not(any(feature = "kit", feature = "air"))))]
+#[cfg(all(feature = "liveview", not(any(feature = "kit", feature = "air"))))]
 pub type View = dioxus_core::Element;
 
-#[cfg(all(feature = "air", feature = "web", not(feature = "kit")))]
+/// Whether the views are air's (the facade's renderer), for a host that
+/// must match it (aio-shell on air).
+#[doc(hidden)]
+pub const ON_AIR: bool = cfg!(all(feature = "air", not(feature = "kit")));
+
+#[cfg(all(feature = "air", feature = "liveview", not(feature = "kit")))]
 compile_error!(
-    "aio-rs: the web build on air (`air` with `web`) comes with plan step 3 (docs/design/air.md); add `kit` for Dioxus's"
+    "aio-rs: one renderer per build: `air` with Dioxus's page (`liveview`, aio-shell's default features); \
+     an app on air takes aio-shell with `default-features = false, features = [\"air\"]`"
 );
 
 /// Everything a view file needs: `use aio::ui::prelude::*;`. `rsx!`,
