@@ -36,6 +36,8 @@ pub struct Template {
     pub marks: u32,
     pub first: u32,
     pub last: u32,
+    /// Where it is written (a hot reload's key; empty in a release build).
+    pub at: crate::hot::At,
 }
 
 pub(crate) mod op {
@@ -76,8 +78,8 @@ struct EvalState {
 struct Dom {
     out: Vec<u8>,
     next: u32,
-    /// Template address → its id in the page.
-    defined: HashMap<usize, u32>,
+    /// Template address and its markup's edit (0: as built) → its id in the page.
+    defined: HashMap<(usize, u64), u32>,
     handlers: HashMap<u32, Vec<Listening>>,
     evals: HashMap<u32, EvalState>,
     next_eval: u32,
@@ -306,15 +308,18 @@ fn place(v: View) -> Range {
 /// itself is sent once per page.
 #[doc(hidden)]
 pub fn tpl(t: &'static Template) -> u32 {
+    // Markup `ax dev` sent for it (a hot reload): defined anew in the page.
+    let hot = crate::hot::markup_of(t);
     dom(|d| {
-        let at = t as *const Template as usize;
+        let at = (t as *const Template as usize, hot.as_ref().map_or(0, |o| o.generation));
         let id = match d.defined.get(&at) {
             Some(id) => *id,
             None => {
                 let id = d.defined.len() as u32;
                 d.defined.insert(at, id);
-                d.op(op::DEFINE).u32(id).u32(t.roots).u32(t.count);
-                d.out.extend_from_slice(t.nodes);
+                let (nodes, count) = hot.as_ref().map_or((t.nodes, t.count), |o| (&o.nodes[..], o.count));
+                d.op(op::DEFINE).u32(id).u32(t.roots).u32(count);
+                d.out.extend_from_slice(nodes);
                 id
             }
         };
@@ -332,7 +337,15 @@ pub fn view(t: &'static Template, base: u32) -> Range {
 
 /// Two empty comments: a range whose content goes before its second (an
 /// anchor), for views made of one hole.
-static SLOT: Template = Template { nodes: &[4, 4], count: 2, roots: 2, marks: 2, first: 0, last: 1 };
+static SLOT: Template = Template {
+    nodes: &[4, 4],
+    count: 2,
+    roots: 2,
+    marks: 2,
+    first: 0,
+    last: 1,
+    at: crate::hot::At { file: "", line: 0, col: 0, idx: 0 },
+};
 
 fn slot() -> (Range, u32) {
     let b = tpl(&SLOT);
@@ -753,7 +766,14 @@ fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Fn() -> View>) {
     render_comp(move || {
         let _in = crate::tree::enter(mounted.as_ref().map(|m| m.0));
         dom(|d| d.remove(std::mem::take(&mut shown)));
-        let fr = frame.get_or_insert_with(Frame::new).clone();
+        let fr = frame
+            .get_or_insert_with(|| {
+                let place = crate::hot::keeping().then(|| crate::tree::place(id));
+                let fr = place.and_then(|p| crate::hot::adopt(&p)).unwrap_or_else(Frame::new);
+                crate::tree::set_frame(id, &fr);
+                fr
+            })
+            .clone();
         let v = body(&fr, &f);
         shown = place(v);
         if let Some(m) = &mounted {
@@ -1178,6 +1198,9 @@ pub struct Root {
     id: u32,
     owner: Owner,
     range: Rc<Cell<Range>>,
+    /// What it shows, and the owner of its views (built again by [`Root::hot`]).
+    app: RefCell<Option<Rc<dyn Fn() -> View>>>,
+    shown: Rc<Cell<Option<Owner>>>,
 }
 
 impl Root {
@@ -1201,7 +1224,7 @@ impl Root {
             dom(|d| d.root = Some(owner));
             owner
         });
-        Self { id, owner, range: Rc::default() }
+        Self { id, owner, range: Rc::default(), app: RefCell::default(), shown: Rc::default() }
     }
 
     /// The edits this root made since the last call, for its page (one frame).
@@ -1218,14 +1241,36 @@ impl Root {
 
     /// Put `app` in the page.
     pub fn show(&self, app: impl Fn() -> View + 'static) {
-        let range = self.range.clone();
+        let app: Rc<dyn Fn() -> View> = Rc::new(app);
+        *self.app.borrow_mut() = Some(app.clone());
+        let (range, shown) = (self.range.clone(), self.shown.clone());
         self.within(move || {
-            let (r, at) = slot();
-            range.set(r);
-            if let Some((a, b)) = r.0 {
-                dom(|d| _ = d.op(op::APPEND).u32(0).u32(a).u32(b));
+            let ((), owner) = scope(|| {
+                let (r, at) = slot();
+                range.set(r);
+                if let Some((a, b)) = r.0 {
+                    dom(|d| _ = d.op(op::APPEND).u32(0).u32(a).u32(b));
+                }
+                comp_as(at, None, Box::new(move || app()));
+            });
+            shown.set(Some(owner));
+        });
+    }
+
+    /// Build the views again in place, each one's hooks handing back what
+    /// they made (by its place among the mounted components): after a hot
+    /// reload's markup ([`hot::set_markup`](crate::hot::set_markup)) or a
+    /// patch of the code (the app's body runs it). Their page is drawn anew.
+    pub fn hot(&self) {
+        let Some(app) = self.app.borrow().clone() else { return };
+        in_root(self.id, || {
+            crate::hot::keep(crate::tree::frames(self.id));
+            dom(|d| d.remove(self.range.take()));
+            if let Some(o) = self.shown.take() {
+                o.dispose();
             }
-            comp_as(at, None, Box::new(app));
+            self.show(move || app());
+            crate::hot::end_kept();
         });
     }
 

@@ -6,7 +6,10 @@
 //! re-render). Counts cost an increment, as in aio; the tree is walked only
 //! when asked. The page's ids of each one's first and last node let a test
 //! find what a component drew (`TestUi::find`).
+use crate::reactive::Frame;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::{Rc, Weak};
 
 /// A component instance's slot: its index and the generation of that index.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,6 +25,8 @@ struct Comp {
     renders: u32,
     updates: u32,
     nodes: Option<(u32, u32)>,
+    /// What its hooks keep (a hot reload hands it to the view built in its place).
+    frame: Weak<Frame>,
 }
 
 #[derive(Default)]
@@ -29,6 +34,8 @@ struct Tree {
     slots: Vec<(u32, Option<Comp>)>,
     free: Vec<u32>,
     seq: u64,
+    /// Each root's own view's frame (the app's body), by root.
+    roots: HashMap<u32, Weak<Frame>>,
 }
 
 thread_local! {
@@ -51,7 +58,7 @@ pub(crate) fn mount(name: &'static str, key: Option<String>) -> Id {
     TREE.with_borrow_mut(|t| {
         t.seq += 1;
         let root = crate::reactive::current_root();
-        let c = Comp { root, name, key, parent, seq: t.seq, renders: 0, updates: 0, nodes: None };
+        let c = Comp { root, name, key, parent, seq: t.seq, renders: 0, updates: 0, nodes: None, frame: Weak::new() };
         match t.free.pop() {
             Some(i) => {
                 let slot = &mut t.slots[i as usize];
@@ -113,6 +120,68 @@ pub(crate) fn rendered(id: Id, nodes: Option<(u32, u32)>) {
 /// One of its holes wrote the page again.
 pub(crate) fn updated(id: Option<Id>) {
     with(id, |c| c.updates += 1);
+}
+
+/// The frame of component `id` (none: the current root's own view).
+pub(crate) fn set_frame(id: Option<Id>, f: &Rc<Frame>) {
+    let w = Rc::downgrade(f);
+    match id {
+        Some(_) => _ = with(id, |c| c.frame = w),
+        None => TREE.with_borrow_mut(|t| _ = t.roots.insert(crate::reactive::current_root(), w)),
+    }
+}
+
+/// Where component `id` is among the mounted ones (pure but for the tree):
+/// each ancestor's name with its key, or its turn among its parent's
+/// unkeyed children of that name; the root's own view is "".
+pub(crate) fn place(id: Option<Id>) -> String {
+    TREE.with_borrow(|t| place_in(t, id))
+}
+
+fn place_in(t: &Tree, mut id: Option<Id>) -> String {
+    let get = |id: Id| match t.slots.get(id.0 as usize) {
+        Some((v, Some(c))) if *v == id.1 => Some(c),
+        _ => None,
+    };
+    let mut parts = vec![];
+    while let Some(c) = id.and_then(get) {
+        let part = match &c.key {
+            Some(k) => format!("{}[{k}]", c.name),
+            None => {
+                let turn = t
+                    .slots
+                    .iter()
+                    .filter_map(|(_, s)| s.as_ref())
+                    .filter(|s| s.root == c.root && s.parent == c.parent && s.name == c.name && s.key.is_none())
+                    .filter(|s| s.seq < c.seq)
+                    .count();
+                format!("{}#{turn}", c.name)
+            }
+        };
+        parts.push(part);
+        id = c.parent;
+    }
+    parts.reverse();
+    parts.join("/")
+}
+
+/// The frames of root `root`'s mounted views by place (its own view's at "").
+pub(crate) fn frames(root: u32) -> HashMap<String, Rc<Frame>> {
+    TREE.with_borrow(|t| {
+        let mut out: HashMap<String, Rc<Frame>> = t
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (g, c))| {
+                let c = c.as_ref().filter(|c| c.root == root)?;
+                Some((place_in(t, Some(Id(i as u32, *g))), c.frame.upgrade()?))
+            })
+            .collect();
+        if let Some(f) = t.roots.get(&root).and_then(Weak::upgrade) {
+            out.insert(String::new(), f);
+        }
+        out
+    })
 }
 
 /// One mounted component ([`components`]).
