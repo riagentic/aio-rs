@@ -142,8 +142,23 @@ pub struct Session {
 /// that resolves is that user with that role on every door (sockets,
 /// routes, files, server fns); the shared key then opens none of them, so
 /// every caller is someone.
+///
+/// An open socket's token goes back through the resolver every
+/// [`USERS_RECHECK`] (aio's 5 s): one it no longer resolves to the same user
+/// and role, or a resolver that panics, closes the socket (fail closed).
 #[derive(Clone)]
-pub struct Users(Arc<Resolve>);
+pub struct Users {
+    resolve: Arc<Resolve>,
+    /// Ticks when a token may have died (a revoked session): sockets re-check at once.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    changes: Option<tokio::sync::watch::Receiver<u64>>,
+}
+
+/// How often an open socket's [`Users`] token is resolved again…
+pub const USERS_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+/// …and how long a slow resolver is waited for: past it the socket keeps its
+/// last verdict, and the call is not made again until it answers.
+pub const USERS_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Token → (user, role).
 type Resolve = dyn Fn(&str) -> Option<(String, String)> + Send + Sync;
@@ -169,7 +184,30 @@ impl Users {
     /// The app's own resolver, token → (user, role); one that panics
     /// resolves no one.
     pub fn resolve(f: impl Fn(&str) -> Option<(String, String)> + Send + Sync + 'static) -> Self {
-        Self(Arc::new(f))
+        Self { resolve: Arc::new(f), changes: None }
+    }
+
+    /// Sessions without accounts (aio's `sessions: true`, aio.toml
+    /// `[accounts] sessions`): a token `auth` issued ([`Auth::issue`]) is its
+    /// session's user and role while it lives; any other is asked of `then`
+    /// (sessions first, as aio). A revoked session's sockets close at once.
+    pub fn sessions(auth: Arc<Auth>, then: Option<Users>) -> Self {
+        let changes = Some(auth.changes());
+        let resolve = move |t: &str| match auth.session(t) {
+            Ok(Some(s)) => Some((s.user, s.role)),
+            Ok(None) => then.as_ref().and_then(|u| u.who(t)).map(|s| (s.user, s.role)),
+            Err(e) => {
+                eprintln!("[aio] sync: {e}");
+                None
+            }
+        };
+        Self { resolve: Arc::new(resolve), changes }
+    }
+
+    /// Ticks when a token may have died; `None`: only the timer re-checks.
+    #[cfg(feature = "server")]
+    pub(crate) fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.changes.clone()
     }
 
     /// Who `token` is, as a session that does not end.
@@ -177,7 +215,7 @@ impl Users {
         if token.is_empty() {
             return None;
         }
-        let (user, role) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.0)(token))).ok()??;
+        let (user, role) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.resolve)(token))).ok()??;
         Some(Session { user, role, expires_at: i64::MAX })
     }
 }
@@ -194,8 +232,9 @@ static SERVING: Mutex<Option<std::sync::Weak<Auth>>> = Mutex::new(None);
 
 /// The accounts the running server signs its clients in with (aio
 /// `serverAuth()`), for a server fn or route that manages them (an admin
-/// screen); `None` with accounts off, before the server opens them and once
-/// it has stopped.
+/// screen) or, with `[accounts] sessions` alone, issues its sessions
+/// (`issue`); `None` with neither, before the server opens them and once it
+/// has stopped.
 pub fn serving() -> Option<Arc<Auth>> {
     SERVING.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(std::sync::Weak::upgrade)
 }

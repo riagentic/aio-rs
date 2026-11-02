@@ -12,7 +12,7 @@ which of aio's features aio-rs has. Moving an app over:
 | | aio | aio-rs |
 |---|---|---|
 | Language, runtime | TypeScript on Deno | Rust, native code |
-| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade and `TestUi`, not the kit yet, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
+| Renderer | AIR (React-shaped, fine-grained signals) | `aio::ui` views (`rsx!`), drawn by Dioxus 0.7 until air (aio-rs's own, fine-grained: feature `air` draws the facade, the router and `TestUi`, not the kit yet, [air](design/air.md)); the window is a shared, pinned Electron runtime (desktop), the system WebView (Android), wasm in a browser |
 | State model | cells, methods on an Immer draft, selectors | cells, methods on `&mut self` (a copy), `#[derived]`; every call an event in the store's log |
 | Data compatibility | `state.db` | the same `state.db`, both ways: a port opens aio's file as it is, and aio opens it after ([below](#data-the-same-statedb)) |
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
@@ -207,11 +207,8 @@ beyond the aio-rs form.
 | Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
-| Auth | sessions without accounts | sessions come with `[accounts]` | `aio::auth::serving()`, `issue(user, role)` | [accounts](auth/README.md#limits) |
-| Auth | `--tls-cert`, `--tls-key`, `--no-tls` | `[server] cert`, `key`; `tls = false` | `aio.toml` | [accounts](auth/README.md#limits) |
-| Auth | a share link printed at boot | none | `ax profile`, pairing | [accounts](auth/README.md#limits) |
+| Auth | a share link carrying the key | the share line names the key file | `?token=<key>` by hand, `ax profile`, pairing | [accounts](auth/README.md#limits) |
 | Auth | `useUser()` | `Client::me`, `SignIn`'s `on_signed` | ➖ | [accounts](auth/README.md#limits) |
-| Auth | a `firewall:` line at boot | none | allow the app in the OS firewall | [setup](basics/setup.md) |
 | Views | server rendering, hydration, `collectHead` | none | `ax preview --html`; `aio::head::html` | [views](ui/views.md#gaps-against-aio), [islands](ui/islands.md#gaps) |
 | Views | code splitting, `lazy` | one binary | `Defer` defers the render | [islands](ui/islands.md#gaps) |
 | Views | other view libraries (`aio/state-core`), `h()`, React compat | `aio::ui` `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
@@ -224,7 +221,6 @@ beyond the aio-rs form.
 | Kit | `Tooltip` to the side | `Top` or `Bottom` only | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Forms | Standard Schema (Zod, Valibot, ArkType), `parsed()` | a Rust check function | parse in the check | [forms](ui/forms.md#gaps) |
 | Forms | `bind(name)` | two handlers per input | ➖ | [forms](ui/forms.md#gaps) |
-| Routing | the address bar, Back and reload follow the route (History API, SPA fallback) | history kept in the app; a web reload starts at `/` | keep the screen in a cell | [routing](ui/routing.md#gaps-against-aio) |
 | Theming | scoped `css` classes, a duplicate-class warning | none | prefix class names | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
@@ -239,14 +235,12 @@ beyond the aio-rs form.
 | CLI apps | flag types inferred from the spec | read by name (`a.number("n")`) | ➖ | [CLI apps](clients/cli-apps.md#gaps-against-aio) |
 | Testing | `t.randomActions(n)`, an unseeded fuzz | every fuzz seeded | ➖ | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.settle(ms)` on real timers | virtual timers | `TestServer` for real I/O | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `ui.advance(ms)` under the page | `TestUi` time is real | `TestCells::advance` | [UI](testing/ui.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | a corrupt cassette re-recorded silently; unserializable args as text | refused unless `AIO_CASSETTE=rerecord`; args refused, naming the call | ➖ | [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `testServer(config)`: every cell of an app on one server | one cell per `TestServer` | several `TestServer`s, `TestApps` | [multi-app](testing/multi-app.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `deno task test:wine` | Windows bundles smoked on Windows | `./ci-windows.sh`, GitHub's Windows runner | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `aiol` perf hints, `[fixable]` marks | `TestUi::components`, `ax components` | ➖ | [lint](testing/lint.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | an API snapshot gate, an `experimental` marker | review and the CHANGELOG | ➖ | [versions](basics/versioning.md#gaps-against-aios-policy) |
-| Debugging | correlation ids, the error box with the state | the call's name; reports carry the state | `ax events` | [errors](debugging/errors.md#not-in-aio-rs) |
-| Debugging | `onError` with an error object, many error codes | `on_problem(kind, message)`, `Rejected` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
+| Debugging | the error box with the state | reports carry the state | `ax report` | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | a source-mapped `client.log`, `am logs` budgets | `[page]` lines in `app.log`; `file_mb` × `keep` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | `skipActions`, a switch turning time travel off | every event kept | `diagnostics = false`, `[log] suppress` | [time travel](debugging/time-travel.md#not-as-in-aio) |
 | Debugging | V8 heap snapshots, the health overlay | none | `ax heap`, `ax health` | [production](debugging/production.md#not-in-aio-rs) |
@@ -312,12 +306,10 @@ construct-by-construct tables are in the
   edit; per-launch settings are flags or variables. [FAQ](basics/faq.md)
 - **Forms touch a field on change**, not on blur: a field left untouched
   shows its error after a submit. [forms](ui/forms.md#gaps)
-- **Routes live in the app**, not the browser's history: a web reload
-  starts at `/`. [routing](ui/routing.md#gaps-against-aio)
 - **`Transition` takes children and `show`**, not a conditional child,
   and motions are CSS keyframes. [animation](ui/animation.md)
 - **Tests boot every cell's `#[on_start]`** (aio's `testCell` skipped
-  `onInit`), timers in `TestCells` are virtual, `TestUi` time is real,
+  `onInit`), timers in `TestCells` are virtual, `TestUi` time is real until `advance`,
   and an unread refusal fails the test. [testing cells](testing/cells.md#what-aio-has-that-aio-rs-does-without)
 - **A corrupt cassette fails** instead of being re-recorded, unless
   `AIO_CASSETTE=rerecord` asks. [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without)
@@ -425,12 +417,14 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Accounts, roles, TOTP, OIDC | `auth`, `sessions` | `[accounts]` | ✅ |
-| Sessions without accounts | yes | ❌ (`auth::serving()`, `issue`) | ❌ |
-| TLS | `--tls-cert`/`--tls-key`, own LAN CA | `[server] cert`/`key`, a machine root for the LAN | 🔄 |
+| Sessions without accounts | `sessions: true` | `[accounts] sessions`, `auth::serving()`'s `issue` | ✅ |
+| Users tokens re-checked on open sockets | every 5 s | every 5 s, and at once on a revoke | ✅ |
+| TLS | `--tls-cert`/`--tls-key`, `--no-tls`, own LAN CA | the same flags, `[server] cert`/`key`, a machine root for the LAN | ✅ |
+| Health and metrics beyond loopback | open without a key | a credential, always (fail closed) | ➕ |
 | Security headers | yes | `[server.security]` | ✅ |
 | Origins, proxies | `allowedOrigins`, `trustProxyHeader` | `[server] hosts`, `trust_proxy` | ✅ |
 | CORS, passkeys | none | none | ✅ |
-| Share link at boot, firewall line | yes | ❌ (`ax profile`, pairing) | ❌ |
+| Share link at boot, firewall line | yes | `share:` (names the key file) and `firewall:` lines | ✅ |
 | Outbound network list | `nativeFetch` | `[capabilities] network` | ✅ |
 | Secrets in logs | `redactActions` | `#[redact]`, masked logs | ✅ |
 
@@ -438,7 +432,7 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
-| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath; air, feature `air`, for the facade and `TestUi`) | 🔄 |
+| Renderer | AIR, TSX | `aio::ui`, `rsx!` (Dioxus underneath; air, feature `air`, for the facade, the router and `TestUi`) | 🔄 |
 | Field-level reads | one signal per cell | `part(\|c\| &c.field)` | 🔄 |
 | Hooks | AIR and React names | `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`: AIR's names, no dependency arrays | 🔄 |
 | Server rendering, hydration | yes | ❌ (`ax preview --html`) | ❌ |
@@ -450,13 +444,13 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Keys | `onGlobalKey`, `REPEATABLE_KEYS` | `use_global_key`, `Chord::repeating` | ✅ |
 | Long lists | `useVirtualList` | `kit::VirtualList` | ✅ |
 | Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check, touched on change | 🔄 |
-| Routing | History API, address bar | in-app history, typed `routes!` | 🔄 |
+| Routing | History API, address bar | history in the app; in a browser the address bar, Back and a reload follow it; typed `routes!` | ✅ |
 | Head | `useHead` | `aio::head::use_head` | ✅ |
 | Theme, hue, CSS variables | `ui.theme`, `hue` | `theme_css(hue)`, `--aio-*` | ✅ |
 | Scoped CSS classes | `css` tag | ❌ (prefix by hand) | ❌ |
 | Live CSS in dev | yes | yes, plus `[build] css` toolchains | ✅ |
 | Transitions | `TransitionFn`, shared `options` | CSS keyframes, a `Motion` each | 🔄 |
-| Runtime a11y check | dev mode | ❌ (`ax lint`, `TestUi`) | ❌ |
+| Runtime a11y check | dev mode | `TestUi::a11y()`, aio's rules, said at each mount (not in the running dev page yet) | 🔄 |
 | Window chrome, app menus, several windows | yes | ❌ (OS title bar, `kit::Menu`, child windows) | ❌ |
 | Redux DevTools | yes | ❌ (`TimeTravelPanel`) | ❌ |
 | Worker bundling | yes | ❌ (`spawn_blocking`) | ❌ |
@@ -467,7 +461,8 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Cell tests | `testCell`, `bootCells` | `TestCells` (virtual time, seeded fuzz, `fuzz_methods`, `reset`, `last_effects`, `budget`) | ✅ |
 | UI tests | `testUI` on happy-dom | `TestUi` on the real engine | ➕ |
-| Virtual clock under the page | `ui.advance` | ❌ (`TestCells::advance`) | ❌ |
+| Virtual clock under the page | `ui.advance` | `TestUi::advance` (the views' timers; schedules: `TestCells::advance`) | ✅ |
+| Components by name and key | `ui.find(c, key)`, `surface()` tree | `ui.find(c, key)`, `within`, `surface_tree()` (air) | ✅ |
 | Typed UI clients | `am testgen` | `ax testgen` (a Rust name table) | ✅ |
 | Server and multi-client | `testServer`, `testMultiClient` | `TestServer`, `Sim` | ✅ |
 | Patch assertions | `patches`, `waitForPatch`, `dispatchAll` | `testing::patches` (`all`, `until`), `call_all` | ✅ |
@@ -488,8 +483,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Time travel | dev only, 2000 entries | the whole store, release builds too | ➕ |
 | Replay, record | `am replay`, `am record` | `ax replay`, `ax record` (writes a Rust test) | ✅ |
-| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
-| Correlation ids, error box with state | yes | ❌ (`ax events`, reports) | ❌ |
+| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `ax vitals`, `/__aio/vitals`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
+| Diagnostic bus | `onDiagnostic`, severity, fix | `report::subscribe`: `severity`, `tip`, `code()`; `vitals:<layer>`, `degraded-recovered:<part>` | ✅ |
+| Memory pressure hook | `onMemoryPressure`, `interval` | `health::on_memory`, `[memory] every` | ✅ |
+| Per-run log files | `debug.log` per run | `[log] per_run` | ✅ |
+| Correlation ids | yes | `call=<id>` on a call's lines, its timeline entry and reports | ✅ |
+| Error box with state | yes | reports carry the state | 🔄 |
 | Heap snapshots | V8 | not needed: no GC heap; `ax heap` | 🔄 |
 | Problem reports | `feedback: true` | always on, no arguments | 🔄 |
 | Manager UI | `am ui` | `ax ui` (the same tabs) | ✅ |

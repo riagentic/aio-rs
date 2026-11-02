@@ -2,6 +2,7 @@
 //! redirects, and a page's title (aio tests/router-navlink-outlet,
 //! air-router-path-matching). Its own process: the host's Back in
 //! tests/route.rs is one per process, asked of every live router.
+#![cfg(any(feature = "kit", feature = "air"))]
 use aio::testing::TestUi;
 use aio::ui::prelude::*;
 
@@ -61,20 +62,25 @@ fn at(path: &'static str) -> TestUi {
 #[test]
 fn nested_routes_show_the_matching_inner_one_at_the_layouts_outlet() {
     // aio tests/router-navlink-outlet.test.ts, air-router-path-matching.test.ts.
+    // One window's views per thread at a time (air): each dropped before the next.
     let ui = at("/dash/settings");
     assert_eq!((ui.text("dash"), ui.text("page")), ("dashsettings".into(), "settings".into()));
     assert_eq!(ui.text("bare"), "", "an outlet outside a route shows nothing");
     assert!(ui.absent("root"), "a page matches the whole path, not a prefix");
+    drop(ui);
     for path in ["/dash", "/dash/"] {
         assert_eq!(at(path).text("page"), "dash index", "{path}: the index at the layout's own place");
     }
     let ui = at("/users/42");
     assert_eq!((ui.text("page"), ui.text("who")), ("overview".into(), r#"{"id": "42"}"#.into()), "under a param");
+    drop(ui);
     let ui = at("/users/42/posts/9");
     assert_eq!(ui.text("who"), r#"{"id": "42", "post": "9"}"#, "the enclosing params joined");
+    drop(ui);
     assert_eq!(at("/a/b").text("page"), "a/b", "no element: the inner routes in its place");
     let ui = at("/");
     assert!(ui.present("root") && ui.absent("page"));
+    drop(ui);
     assert!(at("/dash/nope").absent("page"), "a layout with no matching inner route");
 }
 
@@ -90,4 +96,21 @@ fn a_route_follows_navigation_and_a_redirect_leaves_no_back_step() {
     assert_eq!(ui.text("page"), "settings");
     ui.run(back);
     assert!(ui.present("root"), "the redirect replaced /old");
+}
+
+/// On air a route's body runs again only when its match changes: a query
+/// or another route's place runs nothing; a new param makes its view anew.
+#[cfg(all(feature = "air", not(feature = "kit")))]
+#[test]
+fn on_air_a_route_runs_again_only_for_a_new_match() {
+    fn routes(c: &[aio::testing::MountedComponent]) -> u32 {
+        c.iter().map(|c| if c.name == "Route" { c.renders } else { 0 } + routes(&c.children)).sum()
+    }
+    let mut ui = at("/users/4");
+    let before = routes(&ui.components());
+    ui.run(|| go("/users/4?tab=1#top"));
+    assert_eq!(routes(&ui.components()), before, "a query and a fragment: no route ran");
+    ui.run(|| go("/users/5"));
+    assert_eq!(ui.text("who"), r#"{"id": "5"}"#);
+    assert!(routes(&ui.components()) > before, "a new param: its route ran again");
 }
