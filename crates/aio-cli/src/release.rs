@@ -252,6 +252,7 @@ fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> 
                 None,
                 Some(channel),
                 &b.app.version,
+                b.cfg.build.splash.is_some(),
             )?)?
         }
     };
@@ -482,8 +483,17 @@ pub fn run_android(name: &str, ask: &Ask) -> Result<String, String> {
             }
         },
         None => contract_of(
-            &crate::build::release_binary(&meta, &pkg.name, name, None, None, None, &app.version)
-                .map_err(|e| format!("{e}: the desktop build of {name} says which data the APK reads"))?,
+            &crate::build::release_binary(
+                &meta,
+                &pkg.name,
+                name,
+                None,
+                None,
+                None,
+                &app.version,
+                cfg.build.splash.is_some(),
+            )
+            .map_err(|e| format!("{e}: the desktop build of {name} says which data the APK reads"))?,
         )?,
     };
     let apks = match ask.no_build {

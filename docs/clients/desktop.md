@@ -154,7 +154,9 @@ A failed download closes it and asks Retry or Quit.
   Forms splash opens for a download only.
 - Where the OS cannot draw it (no GTK, no display) Electron draws it and a
   download shows the download window, the reason said once in the log.
-- A debug build (`ax dev`) leaves the OS's splash out: Electron draws it.
+- `ax build` builds it in for an app with a `[build.splash]` (aio-rs-shell's
+  `native-splash` feature): an app without one carries none of it, and
+  `ax dev` or a plain `cargo build` has Electron draw the splash.
 - Each start logs `[aio] splash: visible N ms after it was asked for` and
   why it closed.
 

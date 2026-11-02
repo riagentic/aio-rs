@@ -16,7 +16,9 @@ version may break things.
   Electron download runs on it, with its bar and a ✕ that cancels it.
   New `[build.splash]` keys: `position`, `follow_window`, `shadow`,
   `window_shadow`, `cancel`, `progress`, `bar_style`, `bar_height`,
-  `bar_position`, `bar_radius`. `Window { splash_show }` may take 50 ms;
+  `bar_position`, `bar_radius`. `ax build` builds it in for an app with a
+  `[build.splash]` (aio-rs-shell's `native-splash` feature), so an app
+  without one carries none of it. `Window { splash_show }` may take 50 ms;
   one that panics or takes longer leaves the build's `show`, said
   ([desktop](docs/clients/desktop.md#the-splash)).
 - **air, aio-rs's own renderer, phase 1** (docs/design/air.md): crates

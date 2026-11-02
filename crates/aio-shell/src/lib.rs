@@ -95,7 +95,7 @@ mod firstpage;
 mod firstrun;
 mod fresh;
 pub mod fuses;
-#[cfg(all(target_os = "linux", any(test, not(debug_assertions))))]
+#[cfg(all(target_os = "linux", any(test, feature = "native-splash")))]
 mod gtksplash;
 pub mod guest;
 #[cfg(all(test, target_os = "linux"))]
@@ -112,11 +112,11 @@ pub mod os;
 pub mod page;
 pub mod pidlock;
 pub mod place;
-// The OS's splash: a release's and the tests'; a debug build (`ax dev`) has
-// Electron draw it, so the template's debug build stays lean (dx-metrics).
-#[cfg(any(test, not(debug_assertions)))]
+// The OS's splash (`native-splash`, which `ax build` turns on for an app
+// with a `[build.splash]`); without it Electron draws the splash.
+#[cfg(any(test, feature = "native-splash"))]
 mod presplash;
-#[cfg(all(debug_assertions, not(test)))]
+#[cfg(not(any(test, feature = "native-splash")))]
 #[path = "presplash_off.rs"]
 mod presplash;
 pub mod prune;

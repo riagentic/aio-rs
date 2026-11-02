@@ -1,7 +1,7 @@
-//! A debug build's stand-in for [`presplash`](presplash.rs): `ax dev`'s
-//! builds leave the OS's splash out (it is a release's, and the tests'),
-//! so the template's debug build stays lean; Electron's main process draws
-//! the splash there (main.js), and a download shows the download window.
+//! The stand-in for [`presplash`](presplash.rs) without the `native-splash`
+//! feature (an app with no `[build.splash]`, `ax dev`): it carries none of
+//! the OS's splash; Electron's main process draws the splash (main.js), and
+//! a download shows the download window.
 use std::sync::Arc;
 
 /// What draws the splash: nothing here.

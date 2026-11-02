@@ -45,6 +45,10 @@ web = ["aio/br", "dep:dioxus-ssr"]
 # `ax dev` (it passes `--features aio-shell/dev`): rsx! reloaded live, Rust hot-patched.
 # A release build leaves both out.
 dev = ["dioxus-liveview/devtools", "dep:subsecond", "aio/dev"]
+# The splash drawn by the OS before Electron starts (`presplash`): `ax build`
+# turns it on for an app with a `[build.splash]`, so an app without one (and
+# `ax dev`) carries none of it; Electron draws the splash there.
+native-splash = []
 
 [dev-dependencies]
 tempfile = "3"
