@@ -470,7 +470,7 @@ only when the APK is signed with the same key
   installs `ax` from the commit its `Cargo.lock` pins. One `ax create`
   made (a path to a local checkout, which a runner doesn't have) gets
   aio-rs checked out beside it in `aio-rs/`, at the release tag of the
-  `ax` that wrote the workflow (`v0.1.0`; the repository variables
+  `ax` that wrote the workflow (`v0.2.0`; the repository variables
   `AIO_REPO` and `AIO_REF` name another), its `Cargo.toml` paths pointed
   there, and `ax` installed from it. Nothing to change in the app.
 - One job then puts every file on the tag's GitHub release, files before

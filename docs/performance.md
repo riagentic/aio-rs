@@ -587,6 +587,11 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
   worker bundling. Heavy work in aio-rs runs in Rust, off the cell's
   thread (`spawn_blocking`); a web build's own worker script is the
   app's to ship as a file.
+- Key-to-paint over a large state is still aio's (End over 1000 rows:
+  aio 11.9 ms, aio-rs 17.6 ms; [measured](aio-vs-aio-rs.md#key-to-paint)):
+  each step compares the whole state deeply where aio's Immer shares
+  what is unchanged. Keep big fields behind `part` and memos keyed by
+  field.
 - aio's renderer yields at a 12 ms frame deadline mid-render; air runs
   the holes a change woke in one batch per tick, so keep what a change
   wakes small (parts, windows, rows by props).

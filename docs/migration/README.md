@@ -768,7 +768,7 @@ change of meaning below: **a body runs once**.
 | aio-rs feature `kit` (Dioxus), `air` (air, opt-in), `liveview` | `kit` is air; `air` is a name for `kit` (an app on air before 0.2 builds as it is); `liveview` is gone |
 | `aio-shell` with its default `dioxus` feature, or `default-features = false, features = ["air"]` | `aio-shell` with no feature: the views are air's (`features = ["air"]` still builds) |
 | `aio-shell/web` (Dioxus's tabs) | `aio-shell/web`: the same tabs, on air |
-| `dx` 0.7.10 (`ax setup` fetched it), `dx serve --hot-patch` | `ax dev`: CSS and `rsx!` markup live, Rust hot-patched by ax itself (Linux, macOS) |
+| `dx` 0.7.10 (`ax setup` fetched it), `dx serve --hot-patch` | `ax dev`: CSS and `rsx!` markup live, Rust hot-patched by ax itself (Linux, macOS, Windows) |
 | dx's own screen under `ax dev`, `logs/dev.log` (dx's output) | gone: ax's own lines in the terminal, a failed build in `logs/build.log` |
 | `subsecond::HotFn::current(f).call(args)` | `aio_hotpatch::HotFn::current(f).call(args)` (crate `aio-rs-hotpatch`, through `aio-shell/dev`) |
 
@@ -834,6 +834,11 @@ as the view mounted and never changes. Read state where it is shown
 one-time setup and `effect` / `watch` for work that follows state
 ([views](../ui/views.md#common-mistakes)).
 
+Two shapes Dioxus took that air doesn't yet: an attribute given a
+function's borrowed result (`title: t(&x)`; a formatted string works:
+`title: "{t(&x)}"`), and a hole that borrows from a temporary it made
+(`{t(&sig.get())}`, error E0716).
+
 ### The test kit is a dev-dependency in 0.2
 
 `aio::testing` is aio-rs's `testing` feature now, so an app's `cargo
@@ -844,7 +849,7 @@ line has:
 
 ```toml
 [dev-dependencies]
-aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.1.0", features = ["testing"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.2.0", features = ["testing"] }
 ```
 
 Its tests need no change. Without the line they fail to build

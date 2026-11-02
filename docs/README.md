@@ -4,7 +4,7 @@ aio-rs is a Rust framework for apps whose state is cells with an event
 log: every change is saved, replayable, inspectable and synced; one
 codebase runs as a desktop window, in a browser, on Android, as a server
 or as a command-line tool. Its command is `ax`. This is the guide for
-aio-rs 0.1.0 (alpha). Every Rust example in it compiles and runs as a
+aio-rs 0.2.0 (alpha). Every Rust example in it compiles and runs as a
 test of aio-rs, and every `ax` command shown exists with those flags.
 Pages marked are being written.
 

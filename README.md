@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <code>0.1.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
+  <code>0.2.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -18,7 +18,7 @@
 
 ---
 
-**aio-rs is early ALPHA.** 0.1.0 is its first release; until 1.0.0 a
+**aio-rs is early ALPHA.** 0.2.0 is its second release; until 1.0.0 a
 minor version may break things ([versions](docs/basics/versioning.md)).
 
 **Read first: [when to use aio-rs, and when not](docs/basics/when.md).**
@@ -51,13 +51,13 @@ cargo install --locked --path aio-rs/crates/aio-cli   # ax, bound to this checko
 ax setup                                             # checks the machine, fetches the runtime
 ```
 
-Or a prebuilt `ax` for Linux x86_64 (Windows x86_64: `install.ps1` from
-the [release](https://github.com/riagentic/aio-rs/releases/tag/v0.1.0);
-macOS arm64 and x86_64 from the next release on), each archive's SHA-256
-pinned in the installer:
+Or a prebuilt `ax` for Linux x86_64 and macOS arm64 and x86_64 (Windows
+x86_64: `install.ps1` from the
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.2.0)), each
+archive's SHA-256 pinned in the installer:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.1.0/install.sh | sh   # then runs ax setup
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.2.0/install.sh | sh   # then runs ax setup
 ```
 
 A prebuilt `ax` still creates apps on a checkout: clone aio-rs once and

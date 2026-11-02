@@ -3,7 +3,7 @@
 Any aio-rs app could be written with plain Rust: a UI crate, SQLite, a
 sync layer and a packager, glued by hand. This page says what aio-rs
 gives over that, and when plain Rust (or something else) is the better
-choice. Every line is a feature of aio-rs 0.1.0 with the page that shows it.
+choice. Every line is a feature of aio-rs 0.2.0 with the page that shows it.
 
 ## What you'd write yourself, what aio-rs gives
 
@@ -40,7 +40,7 @@ app builds, so a typo in it is one too.
 
 ## When not to use aio-rs
 
-- **It is alpha.** 0.1.0 is the first release; until 1.0.0 a minor
+- **It is alpha.** 0.2.0 is the second release; until 1.0.0 a minor
   version may break things ([versions](versioning.md)).
 - **Not on crates.io yet.** Apps build on an aio-rs source checkout; a
   prebuilt `ax` needs `ax create --aio <checkout>` ([setup](setup.md)).
@@ -55,7 +55,7 @@ app builds, so a typo in it is one too.
   takes 15 s to ~60 s. Splitting a big app into crates brings a page edit
   to ~1.9 s ([what an edit costs](../build/README.md#what-an-edit-costs)).
   No hot-patching in the web build or on Android.
-- **No iOS.** A prebuilt `ax` for macOS comes with the next release (0.1.0: build it from source).
+- **No iOS.**
 - **Not OS-signed yet.** Windows SmartScreen and macOS Gatekeeper warn on
   first start of the prebuilt archives and app bundles.
 - **`aio::ui` views only** in the app's window; another view library comes

@@ -7,6 +7,14 @@ version may break things.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
+aio-rs draws its views with air, its own fine-grained renderer, and
+Dioxus is gone: a view's body runs once and its holes follow state. An
+app on 0.1 moves with the [migration guide's 0.1 → 0.2
+section](docs/migration/README.md#8-01--02-dioxus-is-gone) and
+`scripts/aio-ui-migrate`.
+
 ### Breaking
 
 - **Dioxus is gone: air is aio-rs's one renderer** (air phase 5,
@@ -993,4 +1001,5 @@ a time ([migration guide](docs/migration/README.md)).
 - The prebuilt archives and app bundles are not OS-signed yet: Windows
   SmartScreen and macOS Gatekeeper warn on first start.
 
+[0.2.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.1.0

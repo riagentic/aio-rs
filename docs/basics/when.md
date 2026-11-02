@@ -39,9 +39,9 @@ Never build on aio-rs's `main`: build on a release tag, and move on
 purpose.
 
 ```sh
-ax create notes --aio-version 0.1.0   # the app depends on the tag v0.1.0
+ax create notes --aio-version 0.2.0   # the app depends on the tag v0.2.0
 ax pin notes                          # says which aio-rs the app uses
-ax pin notes 0.2.0                    # moves it, read the CHANGELOG first
+ax pin notes 0.3.0                    # moves it, read the CHANGELOG first
 ```
 
 `Cargo.lock` pins the commit; commit it. Read the

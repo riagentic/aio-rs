@@ -23,15 +23,15 @@ Pick one. Both put `ax` in `$CARGO_HOME/bin` (`~/.cargo/bin`), which
 rustup already put on `PATH`.
 
 **Prebuilt** (seconds, no clone): Linux x86_64, and macOS arm64 and
-x86_64 from the release after 0.1.0 (on 0.1.0's, the installer says there
-is none on macOS: use the source install below):
+x86_64 (0.1.0's installer has none for macOS: use the source install
+below for it):
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.1.0/install.sh | sh
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.2.0/install.sh | sh
 ```
 
 Windows x86_64: download `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.1.0), then
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.2.0), then
 `powershell -ExecutionPolicy Bypass -File install.ps1`.
 
 Each archive's SHA-256 is pinned in the installer and checked before
@@ -68,7 +68,7 @@ aio-rs is not on crates.io: an app `ax create` makes takes it from git,
 at this `ax`'s release tag, in both of its `Cargo.toml` files:
 
 ```toml
-aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.1.0", features = ["kit"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.2.0", features = ["kit"] }
 ```
 
 `Cargo.lock` pins the commit. A clone builds on any machine, with or

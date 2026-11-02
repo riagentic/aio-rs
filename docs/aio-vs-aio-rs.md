@@ -18,10 +18,10 @@ which of aio's features aio-rs has. Moving an app over:
 | Wire compatibility | protocol 3 on `/ws`, NDJSON on a local socket | its own wire 2; with feature `compat` also aio's protocol 3 on `/ws`; pairing, discovery, peers and blobs in aio's formats always ([below](#the-wire)) |
 | Electron store | per user, `apps/` records, `am prune` | the same store, the same rules: one copy per version for both ([below](#the-electron-store)) |
 | Targets | browser, electron, android, web, cli, server, server-app; thin clients electron-client, android-client, ios-client, cli-client | desktop (Linux, Windows, macOS), web (wasm, PWA), Android, service, CLI; a thin client is `[app] mode = "client"`; no iOS ([targets](build/targets.md)) |
-| Install | `install.sh`: installs Deno, clones aio, puts `am` on `PATH` | a prebuilt `ax` (Linux x86_64, Windows x86_64; macOS arm64 and x86_64 from the next release) or from source; apps build on an aio-rs checkout ([setup](basics/setup.md)) |
+| Install | `install.sh`: installs Deno, clones aio, puts `am` on `PATH` | a prebuilt `ax` (Linux x86_64, Windows x86_64, macOS arm64 and x86_64) or from source; apps build on an aio-rs checkout ([setup](basics/setup.md)) |
 | Dev loop | `am dev`: `App.tsx` patched, other edits reload the page, a cell edit restarts the app (~3 s) | `ax dev`: Rust hot-patched with the state kept, `rsx!` markup at once, CSS live; a rebuild and restart when a patch can't take it ([dev](build/dev.md)) |
 | Tests | `testCell`, `testUI` (happy-dom), `testServer`, cassettes, `deno test` | `TestCells`, `TestUi` (the real views in the runtime), `TestServer`, cassettes, `cargo test` ([testing](testing/README.md)) |
-| Maturity | beta (1.0.27-beta): the 1.x surface frozen, additions only, an API snapshot gate in CI | early alpha, first release (0.1.0); a minor version may break ([versions](basics/versioning.md)) |
+| Maturity | beta (1.0.27-beta): the 1.x surface frozen, additions only, an API snapshot gate in CI | early alpha, second release (0.2.0); a minor version may break ([versions](basics/versioning.md)) |
 
 ## App compatibility
 
@@ -112,25 +112,22 @@ records as `ax prune` keeps what an aio app does
 
 ### Measured
 
-A large desktop app (about 74 000 lines, lists of up to 1000 rows), in
-aio and in aio-rs, measured on one machine; key-to-paint in ms (p50 /
-p95 where two), aio-rs as a release build:
+A large desktop app (about 74 000 lines, a list of 1000 rows), in aio
+and in aio-rs on one machine, both release builds pinned to the same
+cores; the median of 5 runs:
 
 | | aio | aio-rs |
 |---|---|---|
-| Hold ↓, 19 rows | 25.4 / 27.3 | **16 / 17.7** |
-| Hold ↓, 121 rows | 25.6 / 38.7 | **22.2 / 24.5** |
-| Hold ↓, 1000 rows | 32.6 / 85.5 | **20.6 / 23.6** |
-| End, 1000 rows | 167.5 | **17.1** |
-| Home, 1000 rows | 183.5 | **23.2** |
-| Tab | 29–38 | **12–22** |
-| A dialog opens | 25 | **11.5** |
-| A page opens | 47 | **18.6** |
-| Memory (PSS) | 1509 MB | **420 MB** |
-| Start to the first screen | 3.0–3.2 s | **0.54–1.1 s** |
+| Start, cold: first window | 732 ms | **149 ms** |
+| Start, cold: UI ready | 1112 ms | **468 ms** |
+| Start, warm: first window | 707 ms | **282 ms** |
+| Memory in a session (PSS, every process) | 724 MB | **430 MB** |
+| A page of 1000 rows opens | 104 ms | **72 ms** |
+| CPU per held key | 30 ms | **19–21 ms** |
+| The app's AppImage | 97 MB | **18.5 MB** |
 
-After a held key is released, aio-rs shows the last step at once: 0 ms
-of lag.
+After a held key is released, both show the last step at once: 0 ms
+of lag. Key-to-paint is still aio's: [below](#key-to-paint).
 
 ### Not in numbers
 
@@ -160,6 +157,24 @@ of lag.
   app (5.3 MB for the template), the window runtime shared by every app.
 
 ## Where aio is better
+
+### Key to paint
+
+The same app and runs as [above](#measured), keydown to the first frame
+that shows it, in ms (p50 / p95 where two):
+
+| Key | aio | aio-rs |
+|---|---|---|
+| Hold ↓ (60 keys, 33 ms apart) | 12.6 / 21.0 | 13.9 / 21.2 |
+| Hold ↑ | 11.8 / 19.2 | 14.3 / 21.9 |
+| End, 1000 rows | 11.9 | 17.6 |
+| Home, 1000 rows | 10.6 | 20.2 |
+| Tab | 10.6 | 14.2 |
+
+About 4 ms of an aio-rs step is the app's own deep comparisons of its
+1000-row state (its memos, the views' changed-field mask); aio gets
+those cheap from Immer's structural sharing. Cheaper unchanged-field
+compares in the store are planned after 0.2.0.
 
 ### The edit loop
 
@@ -527,16 +542,18 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Agent brief | `am agent` | `ax agent`, `AGENTS.md`/`CLAUDE.md` in new apps | ✅ |
 | Framework version per app | `dep/aio` link, `am pin`, `am fix` | aio-rs from git at a release tag in `Cargo.toml`, the commit in `Cargo.lock`: a clone builds as it is; `ax create --aio-version`; `ax pin` says what Cargo.toml asks for, what Cargo.lock built, this ax and the releases (drift: exit 1), `ax pin <v>\|main\|latest\|<checkout>` moves it, `--major`, `--json`; no preflight of removed APIs (`cargo check` names them) | ✅ |
 | Upgrading the CLI | `am upgrade`, `am uninstall` | `ax upgrade` (the release's checked install script, or a checkout), `ax uninstall` | ✅ |
-| Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows; macOS from the next release) or source | 🔄 |
+| Install | `install.sh` (Deno + a clone) | prebuilt `ax` (Linux, Windows, macOS) or source | 🔄 |
 | API reference | `api-reference.md` | `cargo doc -p aio-rs` | ✅ |
 
 ## Plans
 
-- **0.2.0: aio-rs's own renderer, "air", is the only one.** A
+- **Done in 0.2.0: aio-rs's own renderer, "air", is the only one.** A
   fine-grained renderer of aio-rs's own: a cell's fields as signals,
   direct DOM edits for what changed, and a lean macro so rebuilds get
   faster ([design](design/air.md)). Apps are written against `aio::ui`;
-  what a 0.1 app changes is in the migration guide's section 8, [0.1 → 0.2](migration/README.md).
+  what a 0.1 app changes is in the migration guide's section 8, [0.1 → 0.2](migration/README.md#8-01--02-dioxus-is-gone).
+- **Next: key-to-paint at or under aio's** on large states
+  ([key to paint](#key-to-paint)).
 
 ## Moving
 
