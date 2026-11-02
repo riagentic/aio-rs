@@ -377,7 +377,7 @@ fn svg_made_by_a_component_a_row_or_a_branch_is_svgs() {
 }
 
 #[test]
-fn style_attributes_set_css_properties_as_dioxus_did() {
+fn style_attributes_set_css_properties() {
     fn app() -> View {
         let n = signal(|| 2u32);
         let wide = signal(|| true);
