@@ -45,7 +45,7 @@ version may break things.
   effect, subscription, cleanup, handler, task, page script or page node;
   misuse fails in release builds too (a hook outside a view's body, a
   write while a hole or a memo computes, an effect loop, a signal used
-  after its view, a view placed twice, two rows with one key, a missing
+  after its view, two rows with one key, a missing
   `key:` or an `if let` in `rsx!` at compile time); a renderer fault
   planted in air fails `TestUi` in the Rust page and the Electron page.
 - **Transactions** (aio's `transaction: true`): `#[cell(transaction)]`
