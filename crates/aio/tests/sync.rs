@@ -179,6 +179,39 @@ fn a_resent_call_applies_once() {
     assert_ne!(other.call_from("add", serde_json::json!(["a"]), &op).unwrap().unwrap(), first);
 }
 
+/// A count that can't go below zero: a call refused on one state and not another.
+#[cell(shared)]
+pub struct Stock {
+    pub n: u32,
+}
+
+#[methods]
+impl Stock {
+    #[client]
+    pub fn put(&mut self) {
+        self.n += 1;
+    }
+
+    #[client]
+    pub fn take(&mut self) -> Result {
+        ensure!(self.n > 0, "none left");
+        self.n -= 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_resent_call_refused_once_stays_refused() {
+    let h = Handle::<Stock>::memory().by(By::User("ana".into()));
+    let op = aio::uuid_v7().to_string();
+    assert_eq!(h.call_from("take", serde_json::Value::Null, &op).unwrap_err().why, "none left");
+    h.put().unwrap();
+    // Re-sent (its answer went with a cut link): refused as it was, never
+    // applied on the newer state its client was never told of.
+    assert_eq!(h.call_from("take", serde_json::Value::Null, &op).unwrap_err().why, "none left");
+    assert_eq!(h.state().n, 1);
+}
+
 #[test]
 fn call_ids_from_a_clock_far_ahead_or_too_old_are_refused() {
     let h = Handle::<Board>::memory();

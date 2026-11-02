@@ -31,6 +31,20 @@ pub const RETRY_AFTER_MS: u64 = 2000;
 /// on the screen from before it.
 pub(crate) static TELLING: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    /// The cells whose failures this thread counts now.
+    static COUNTING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// This thread counts a cell's failures until it is dropped (a panic too).
+struct Counting(usize);
+
+impl Drop for Counting {
+    fn drop(&mut self) {
+        COUNTING.with_borrow_mut(|c| c.retain(|&x| x != self.0));
+    }
+}
+
 /// One commit counted in [`TELLING`] until it is dropped (a listener's panic too).
 struct Telling;
 
@@ -142,6 +156,8 @@ struct Inner<T: Cell> {
     live: AtomicBool,
     /// Its failures, and when they disable it.
     tally: Mutex<crate::cells::Tally>,
+    /// Held while its failures are counted and the breaker trips ([`Handle::count_failures`]).
+    counting: Mutex<()>,
     /// `#[ttl]` calls answered, by effect key: when, for how long, and the answer.
     answered: Mutex<HashMap<String, Answered>>,
     /// The `#[mode(first)]` and `#[mode(newest)]` calls in flight.
@@ -201,6 +217,7 @@ impl<T: Cell> Handle<T> {
             paused: AtomicBool::new(false),
             live: AtomicBool::new(false),
             tally: Mutex::default(),
+            counting: Mutex::default(),
             answered: Mutex::default(),
             inflight: Default::default(),
             #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
@@ -434,7 +451,18 @@ impl<T: Cell> Handle<T> {
 
     /// Count the failures the store saw; the breaker's trip disables the
     /// cell (its state kept), said in the log, health and a report.
+    ///
+    /// One count at a time per cell: a count that finds the failures taken
+    /// (the schedule thread's, after its fire) returns only once the one
+    /// that took them tripped the breaker, so a caller never sees the cell
+    /// enabled past its trip. A count within the trip (its `#[on_stop]`) goes on.
     fn count_failures(&self) {
+        let me = Arc::as_ptr(&self.inner) as usize;
+        let _one = (!COUNTING.with_borrow(|c| c.contains(&me))).then(|| {
+            let g = lock(&self.inner.counting);
+            COUNTING.with_borrow_mut(|c| c.push(me));
+            (g, Counting(me))
+        });
         let fs = lock(&self.inner.store).take_failures();
         let Some((_, last)) = fs.last() else { return };
         if lock(&self.inner.held).is_some() {

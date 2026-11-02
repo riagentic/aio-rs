@@ -197,7 +197,14 @@ pub struct Store<T: Cell> {
     ahead: Option<(u32, Value)>,
     /// `#[cell(transaction)]`: its async calls in flight.
     txs: tx::Txs<T>,
+    /// Synced clients' calls their method or the invariants refused, by
+    /// `op`, newest last ([`REFUSED_OPS`]): a re-send is refused the same,
+    /// never applied on a later state.
+    refused: (std::collections::HashMap<String, Rejected>, std::collections::VecDeque<String>),
 }
+
+/// The refused calls a store remembers (`Store::refused`).
+const REFUSED_OPS: usize = 4_096;
 
 /// A run of coalesced calls by one caller: each call (the last one is the
 /// run's one event when it alone ends where the run did), the state before
@@ -1067,6 +1074,7 @@ impl<T: Cell> Store<T> {
             effects: vec![],
             foreign: vec![],
             txs: Default::default(),
+            refused: Default::default(),
             committed: vec![],
             file: None,
             recovered: None,
@@ -1161,6 +1169,7 @@ impl<T: Cell> Store<T> {
             effects: vec![],
             foreign: vec![],
             txs: Default::default(),
+            refused: Default::default(),
             committed: vec![],
             file,
             recovered,
@@ -1362,6 +1371,9 @@ impl<T: Cell> Store<T> {
         if seen {
             return Ok(None);
         }
+        if let Some(e) = self.refused.0.get(&op.to_string()) {
+            return Err(e.clone());
+        }
         let cx = Cx::synced(now, T::ID, by, &op).with_role(role).with_reply(reply);
         let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
         if let Some(sweep) = tx::On::<T>::SWEEP {
@@ -1461,11 +1473,11 @@ impl<T: Cell> Store<T> {
                 eprintln!("[aio] {}.{method} panicked: {why} ({} within a minute)", T::ID, self.panics.len());
                 crate::reject!("{}.{method} panicked: {why}", T::ID);
             }
-            Err(Applied::Refused(e)) => return Err(e),
+            Err(Applied::Refused(e)) => return Err(self.refused_op(op, e)),
             Ok(out) => out,
         };
         let t2 = std::time::Instant::now();
-        next.check()?;
+        next.check().map_err(|e| self.refused_op(op, e))?;
         let t3 = std::time::Instant::now();
         let mut asks = cx.into_asks();
         asks.op = op.map(String::from);
@@ -1488,6 +1500,21 @@ impl<T: Cell> Store<T> {
         crate::perf::method(T::ID, method, p);
         self.effects.extend(asks.effects);
         Ok(out)
+    }
+
+    /// Remember a synced client's call (`op`) refused as `e`.
+    fn refused_op(&mut self, op: Option<&str>, e: Rejected) -> Rejected {
+        if let Some(op) = op {
+            let (by_op, order) = &mut self.refused;
+            if order.len() == REFUSED_OPS
+                && let Some(old) = order.pop_front()
+            {
+                by_op.remove(&old);
+            }
+            by_op.insert(op.into(), e.clone());
+            order.push_back(op.into());
+        }
+        e
     }
 
     /// A coalesced call: its state is shown at once, its event waits (see
