@@ -25,7 +25,7 @@ cargo fmt --all --check
 scripts/deps-check
 scripts/slim-metrics --check
 scripts/dx-metrics --self-test
-# An app on air ships no Dioxus: each of air-ship's checks red on a planted one.
+# A packaged app ships no other renderer: each of air-ship's checks red on a planted one.
 scripts/air-ship --self-test
 # The guide (docs/): links resolve, each page with Rust is a doctest (run by
 # the workspace tests below), the verb list is whole, the wording public.
@@ -33,19 +33,19 @@ scripts/docs-check
 # The mutation ledger holds together: each break's line found once, its test there
 # (scripts/mutants runs the breaks; GitHub CI runs the fast ones).
 scripts/mutants --check
-# Apps are written against aio::ui, never the renderer behind it (air
-# replaces it: docs/design/air.md): the template, the kit, `ax ui`, the views
-# ax writes, the tests and the guide name no `dioxus` (ax lint holds apps to it).
-if grep -rn dioxus README.md docs crates/aio/src/kit crates/aio/tests crates/aio-shell/tests \
-  crates/aio-cli/src/create crates/aio-cli/src/ui crates/aio-cli/src/web crates/aio-cli/src/surface.rs \
-  crates/aio-cli/src/preview.rs crates/aio-cli/src/preview_fixture.rs crates/aio-cli/src/headless.rs \
-  crates/aio-cli/src/headless_fixture.rs crates/aio-cli/tests | grep -v '^docs/design/\|^docs/migration/'; then
-  echo "ci: the lines above name dioxus: use aio::ui (the migration guide has the names)" >&2
+# air is aio-rs's one renderer since 0.2.0: no crate of the workspace's
+# graph (every target, feature and kind) is Dioxus's, and no file names it
+# but the record (CHANGELOG, the migration guide, the design notes), the
+# tools that refuse or find it (ax lint, air-ship, dx-metrics' planted
+# dependency, the 0.1 migration script) and license attributions.
+if cargo tree --locked --workspace --all-features --target all -e all --prefix none | grep -i dioxus; then
+  echo "ci: the crates above are Dioxus's" >&2
   exit 1
 fi
-# A release build has no live-reload tools: only `ax dev` adds them (`aio-shell/dev`).
-if cargo tree --locked -p aio-rs-shell -e normal --prefix none | grep -q '^dioxus-devtools '; then
-  echo "ci: aio-rs-shell without \`dev\` pulls dioxus-devtools" >&2
+if git grep -n -I -i dioxus -- . ':!CHANGELOG.md' ':!docs/migration' ':!docs/design' ':!docs/comparison.md' \
+  ':!crates/aio-cli/src/lint' ':!scripts/air-ship' ':!scripts/dx-metrics' ':!scripts/aio-ui-migrate' ':!ci.sh' \
+  | grep -v 'Ported from'; then
+  echo "ci: the lines above name Dioxus: aio::ui is air's (the migration guide has the names)" >&2
   exit 1
 fi
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -56,39 +56,24 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-
 if cargo hack --version >/dev/null 2>&1; then
   cargo hack clippy -p aio-rs --lib --each-feature --locked -- -D warnings
 else
-  for f in "" outbound server tls oidc br net kit air imbl web liveview dev testing video compat; do
+  for f in "" outbound server tls oidc br net kit air imbl web dev testing video compat; do
     cargo clippy -p aio-rs --lib --no-default-features --features "$f" --locked -- -D warnings
   done
 fi
-# The shell needs a renderer: each feature with each one (Dioxus's, air).
-for f in dioxus air web dioxus,dev air,dev; do
+# The shell: each feature alone and with `dev`.
+for f in "" web dev web,dev; do
   cargo clippy -p aio-rs-shell --lib --no-default-features --features "$f" --locked -- -D warnings
 done
 # Working with aio over the network: aio pages and tools on `/ws`, `AioLink`.
 cargo clippy -p aio-rs --lib --no-default-features --features compat,net --locked -- -D warnings
-# air, aio-rs's own renderer (docs/design/air.md): the facade and TestUi on
-# it with no Dioxus in the build, the shell on air (the window's views,
-# Android's), with no Dioxus in either graph.
-cargo clippy -p aio-rs --lib --test air_ui --test facade --test ui --test kit --test signin --test route --test route_tree --no-default-features --features air,net --locked -- -D warnings
-if cargo tree --locked -p aio-rs --no-default-features --features air -e normal --prefix none | grep -q '^dioxus'; then
-  echo "ci: aio-rs with \`air\` alone pulls dioxus" >&2
-  exit 1
-fi
-cargo clippy -p aio-rs-shell --all-targets --no-default-features --features air,dev --locked -- -D warnings
-if cargo tree --locked -p aio-rs-shell --no-default-features --features air,dev -e normal --prefix none | grep -q '^dioxus'; then
-  echo "ci: aio-rs-shell with \`air\` pulls dioxus" >&2
-  exit 1
-fi
 # air's code-size rule: LLVM IR lines per view of the bench's 50 views.
 air_ir=$(mktemp -d)
 scripts/air-ir "$air_ir"
 rm -rf "$air_ir"
 # The browser build (`ax build --web`): aio's core in the page, no SQLite, no ring.
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
-# With the kit: its controls and the sign-in form in the page.
+# With the kit: its views drawn by air's interpreter, its controls and the sign-in form in the page.
 cargo clippy -p aio-rs --lib --no-default-features --features web,kit --locked --target wasm32-unknown-unknown -- -D warnings
-# On air: its views drawn in the page by air's interpreter, no Dioxus.
-cargo clippy -p aio-rs --lib --no-default-features --features web,air --locked --target wasm32-unknown-unknown -- -D warnings
 # Windows: the same lint (its tests: below, and GitHub CI's Windows job).
 cargo clippy --workspace --all-targets --all-features --locked --target x86_64-pc-windows-gnu -- -D warnings
 # Android: the host and runtime lint clean for phones (with the NDK).
@@ -96,19 +81,13 @@ if [ -n "$ndk" ]; then
   bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
   CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
     cargo clippy -p aio-rs -p aio-rs-shell --locked --target aarch64-linux-android -- -D warnings
-  CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
-    cargo clippy -p aio-rs-shell --no-default-features --features air --locked --target aarch64-linux-android -- -D warnings
 fi
 fi
 if on test; then
 # Without `compat` a socket that doesn't say wire 2 is refused (the rest runs with every feature, below).
 cargo test -p aio-rs --no-default-features --features net --test sync --test http --test compat_data --locked
-# air: the facade and TestUi on it with no Dioxus in the build, and its
-# gates (no leaks, misuse failing, planted faults failing a test) in a
+# air's gates (no leaks, misuse failing, planted faults failing a test) in a
 # release build too.
-cargo test -p aio-rs --no-default-features --features air,net --test air_ui --test facade --test ui --test kit --test signin --test route --test route_tree --locked
-# The shell on air: the window's views, Android's.
-cargo test -p aio-rs-shell --no-default-features --features air,dev --locked
 cargo test -p aio-rs-air --release --all-features --locked
 # The web build's browser test binds with the lock's wasm-bindgen, on PATH or
 # aio's own (`ax setup` fetches it); without it the test skips, said here and last.
@@ -131,9 +110,8 @@ fi
 # its limit fails, naming both (scripts/dx-metrics --trend). Only this
 # machine's rows count; where it has none (GitHub CI), AIO_DX_BASE names the
 # commit whose sizes are measured here too, AIO_DX_ROWS a folder keeping rows.
-# The same template on air too: its packages (release binary, .tar.gz,
-# AppImage, web build) hold no Dioxus (scripts/air-ship, shown failing on a
-# planted dependency first), their sizes and its edit times gated alike.
+# Its packages (release binary, .tar.gz, AppImage, web build) hold no other
+# renderer (scripts/air-ship, shown failing on a planted dependency first).
 apk_skip=""
 if on dx; then
 scripts/dx-metrics --check ${AIO_DX_BASE:+--base "$AIO_DX_BASE"} ${AIO_DX_ROWS:+--rows "$AIO_DX_ROWS"}
@@ -142,7 +120,7 @@ scripts/dx-metrics --check ${AIO_DX_BASE:+--base "$AIO_DX_BASE"} ${AIO_DX_ROWS:+
 if [ -n "$ndk" ] && [ "$(rustup target list --installed | grep -c -x -e aarch64-linux-android -e armv7-linux-androideabi -e x86_64-linux-android)" = 3 ]; then
   scripts/dx-metrics --check --apk ${AIO_DX_BASE:+--base "$AIO_DX_BASE"} ${AIO_DX_ROWS:+--rows "$AIO_DX_ROWS"}
 else
-  apk_skip="ci: the air template's APKs SKIPPED: no NDK or no Rust Android targets (rustup target add armv7-linux-androideabi x86_64-linux-android)"
+  apk_skip="ci: the template's APKs SKIPPED: no NDK or no Rust Android targets (rustup target add armv7-linux-androideabi x86_64-linux-android)"
   echo "$apk_skip" >&2
 fi
 fi

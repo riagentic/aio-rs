@@ -33,7 +33,7 @@ jobs:
           key: ${{ matrix.part }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # What `ax setup` fetches (the Electron runtime the UI tests draw in,
-      # dx, the lock's wasm-bindgen), kept per pinned version.
+      # the lock's wasm-bindgen), kept per pinned version.
       - id: pins
         run: echo "key=$(sh scripts/ci-pins)" >> "$GITHUB_OUTPUT"
       - id: tools
@@ -70,9 +70,9 @@ jobs:
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- setup
       - run: scripts/mutants --fast
-  # ./ci.sh's dx part (scripts/dx-metrics), its three parts side by side: the
-  # template on Dioxus, on air, and on air as APKs (`ax build --android`, the
-  # runner's SDK and NDK). Each measures the commit before (a PR's merge:
+  # ./ci.sh's dx part (scripts/dx-metrics), its two parts side by side: the
+  # template (its builds, packages, web build and live edits) and its APKs
+  # (`ax build --android`, the runner's SDK and NDK). Each measures the commit before (a PR's merge:
   # main's head) on its own runner too and holds the sizes to it; that row
   # is kept per commit and machine (`--machine`), so a later run on a runner
   # of the same machine skips the base's build: main's runs keep theirs for
@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [dioxus, air, apk]
+        part: [air, apk]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -152,8 +152,7 @@ jobs:
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- runtime --fetch
       - run: cargo test --workspace --all-features --locked --no-fail-fast
-      # air (docs/design/air.md): the facade and TestUi on it, its gates in release.
-      - run: cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --test route --test route_tree --locked --no-fail-fast
+      # air's gates (docs/design/air.md) in a release build too.
       - run: cargo test -p aio-rs-air --release --all-features --locked
   # A real install of a sample app updated through the signed delta path,
   # then a broken update rolled back with its data (scripts/update-proof).
