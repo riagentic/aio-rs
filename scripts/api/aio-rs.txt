@@ -2138,6 +2138,7 @@ aio::testing::TestUi::key_up: fn key_up(&mut self, t: &str, key: &str, mods: Mod
 aio::testing::TestUi::names: fn names(&self) -> Vec<String>
 aio::testing::TestUi::new: fn new(app: fn() -> View) -> Self
 aio::testing::TestUi::paste: fn paste(&mut self, t: &str, text: &str)
+aio::testing::TestUi::pick_files: fn pick_files(&mut self, t: &str, files: &[(&str, &str, &[u8])])
 aio::testing::TestUi::present: fn present(&self, t: &str) -> bool
 aio::testing::TestUi::press: fn press(&mut self, t: &str, key: &str)
 aio::testing::TestUi::press_key: fn press_key(&mut self, key: Key, mods: Modifiers)
@@ -4144,6 +4145,7 @@ use aio::ui::events::DataTransfer = air::event::DataTransfer
 use aio::ui::events::DragData = air::event::DragData
 use aio::ui::events::DragEvent = air::event::DragEvent
 use aio::ui::events::Event = air::event::Event
+use aio::ui::events::FileData = air::event::FileData
 use aio::ui::events::FocusData = air::event::FocusData
 use aio::ui::events::FocusEvent = air::event::FocusEvent
 use aio::ui::events::FormData = air::event::FormData
@@ -4193,6 +4195,7 @@ use aio::ui::prelude::ErrorBoundary = air::dom::ErrorBoundary
 use aio::ui::prelude::ErrorBoundaryProps = air::dom::ErrorBoundaryProps
 use aio::ui::prelude::Event = air::event::Event
 use aio::ui::prelude::EventHandler = air::reactive::EventHandler
+use aio::ui::prelude::FileData = air::event::FileData
 use aio::ui::prelude::FocusData = air::event::FocusData
 use aio::ui::prelude::FocusEvent = air::event::FocusEvent
 use aio::ui::prelude::FormData = air::event::FormData
