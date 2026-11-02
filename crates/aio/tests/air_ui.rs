@@ -288,3 +288,36 @@ fn advance_moves_the_views_clock_and_fires_their_timers_in_order() {
     assert_eq!(ui.text("log"), "tick 1, tick 2, tick 3, 10 s", "in their order");
     assert!(t.elapsed() < std::time::Duration::from_secs(5), "virtual: {:?}", t.elapsed());
 }
+
+#[test]
+fn a11y_says_what_fails_a_keyboard_or_a_screen_reader() {
+    fn app() -> View {
+        rsx! {
+            div { "data-t": "card", onclick: move |_| {}, "Open" }
+            div { "data-t": "row", role: "option", onclick: move |_| {}, "Item" }
+            button { r#type: "button", onclick: move |_| {}, "Fine" }
+            button { "data-t": "bare", "Submit?" }
+            input { "data-t": "who" }
+            label { "Name" input { r#type: "text" } }
+            img { "data-t": "pic", src: "data:," }
+            a { "data-t": "fake", onclick: move |_| {}, "Go" }
+            span { "data-t": "skip", tabindex: "3", "x" }
+            button { r#type: "button", "data-t": "ghost", "aria-hidden": "true", "Hidden" }
+        }
+    }
+    let ui = TestUi::new(app);
+    let got = ui.a11y();
+    let has = |t: &str, why: &str| got.iter().any(|f| f.starts_with(&format!("<{t}\">: ")) && f.contains(why));
+    for (t, why) in [
+        ("div data-t=\"card", "no keyboard one"),
+        ("button data-t=\"bare", "no type"),
+        ("input data-t=\"who", "no label"),
+        ("img data-t=\"pic", "missing \"alt\""),
+        ("a data-t=\"fake", "no href"),
+        ("span data-t=\"skip", "tabindex 3"),
+        ("button data-t=\"ghost", "aria-hidden but focusable"),
+    ] {
+        assert!(has(t, why), "{t}: {why} in {got:#?}");
+    }
+    assert_eq!(got.len(), 7, "an option's keyboard is its list's; a labelled field, a typed button pass: {got:#?}");
+}

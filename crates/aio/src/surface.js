@@ -385,6 +385,42 @@
     }
     return { ok: out };
   }
+  // aio's run-time accessibility rules (`air/dev-a11y.ts`) over the showing
+  // elements: each a mistake that renders fine and fails a keyboard, a
+  // screen reader or a zoomed page. A handler is known on air (the page's
+  // listeners); on Dioxus the handler rules are skipped.
+  if (op === "a11y") {
+    const ITEM = ["option", "row", "gridcell", "treeitem", "tab", "menuitem", "menuitemcheckbox", "menuitemradio"];
+    const OWNER = ["listbox", "grid", "treegrid", "tree", "tablist", "menu", "menubar"];
+    const DISMISS = ["dialog", "alertdialog", "alert", "status"];
+    const NATIVE = ["button", "a", "input", "select", "textarea", "summary", "label", "option"];
+    const out = [];
+    const main = document.getElementById("main");
+    for (const el of [...under(main || top), ...Array.from(document.body.children).filter((n) => n !== main).flatMap((n) => [n, ...under(n)])]) {
+      if (["script", "style", "template"].includes(el.localName) || el.closest("[data-aio-dev]") || hidden(el)) continue;
+      const tag = el.localName, a = (k) => el.getAttribute(k), on = el.__airOn || new Set();
+      const t = a("data-t"), place = t !== null ? `<${tag} data-t="${t}">` : `<${tag}>${el.textContent.trim() ? " " + debug(cutText(words(el.textContent), 30)) : ""}`;
+      const say = (m) => out.push(`${place}: ${m}`);
+      const role = a("role") || "";
+      const clicks = on.has("click"), keys = on.has("keydown") || on.has("keyup") || on.has("keypress");
+      const elsewhere = ITEM.includes(role) || DISMISS.includes(role) || (OWNER.includes(role) && a("aria-activedescendant") !== null);
+      if (tag === "img" && a("alt") === null) say('missing "alt": alt="" for a decorative image, else what it shows');
+      if (clicks && !keys && !["presentation", "none"].includes(role) && !elsewhere && !NATIVE.includes(tag)) {
+        say("a click handler but no keyboard one: add onkeydown (or use a <button>)");
+      }
+      if (["input", "textarea", "select"].includes(tag) && a("aria-label") === null && a("aria-labelledby") === null && a("id") === null && !el.closest("label")) {
+        say("no label: wrap it in a <label>, or give it an id (for <label for>), aria-label or aria-labelledby");
+      }
+      if (tag === "button" && a("type") === null) say('no type: in a <form> it submits it; write type: "button" for one that doesn\'t');
+      if (tag === "a" && clicks && a("href") === null) say("a click handler and no href: not focusable, not announced; use a <button>, or give it an href");
+      const ti = Number(a("tabindex"));
+      if (a("tabindex") !== null && Number.isFinite(ti) && ti > 0) say(`tabindex ${ti}: a positive one re-orders the whole page's Tab order; use 0 or -1`);
+      const focusable = ["button", "a", "input", "select", "textarea", "summary"].includes(tag) || (a("tabindex") !== null && ti >= 0);
+      if (a("aria-hidden") === "true" && focusable) say("aria-hidden but focusable: a keyboard lands where a screen reader says nothing; add tabindex -1 or inert");
+      if (a("aria-disabled") === "true" && clicks && !el.hasAttribute("disabled")) say("aria-disabled but its click still runs: add disabled, or return early in the handler");
+    }
+    return { ok: [...new Set(out)] };
+  }
   // Reading needs no showing element: what is there, and its state.
   if (["el", "attr", "style", "rect"].includes(op)) {
     const el = find(arg.path);

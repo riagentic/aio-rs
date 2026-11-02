@@ -380,6 +380,15 @@ impl Mount {
         for f in ui.contrast() {
             eprintln!("aio: text a person can't read: {f}");
         }
+        // Once per distinct finding in the test binary, as aio's dev mode warns once.
+        static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
+        let mut said = SAID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for f in ui.a11y() {
+            if !said.contains(&f) {
+                eprintln!("aio: accessibility: {f}");
+                said.push(f);
+            }
+        }
         ui
     }
 
@@ -1127,6 +1136,17 @@ impl TestUi {
     /// the digest a failure prints).
     pub fn surface(&self) -> String {
         self.must("surface", json!({ "path": null, "rects": false })).as_str().unwrap_or_default().into()
+    }
+
+    /// aio's run-time accessibility rules (`dev-a11y.ts`) over what shows,
+    /// one line each, as `<tag data-t="t">: why`: an image with no `alt`, a
+    /// click with no keyboard path (on air, which knows the handlers), a
+    /// field with no label, a `<button>` with no `type`, an `<a>` with a
+    /// click and no `href`, a positive `tabindex`, `aria-hidden` on what
+    /// takes focus, `aria-disabled` with a click that still runs. Every
+    /// mount says each new one once (as aio's dev mode); assert on it to fail.
+    pub fn a11y(&self) -> Vec<String> {
+        strings(&self.must("a11y", json!({})))
     }
 
     /// The surface as a tree of components (aio's `surface()`): each
