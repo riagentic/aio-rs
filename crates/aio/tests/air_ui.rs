@@ -263,3 +263,28 @@ mod scopes {
         assert_eq!((row[1].checked, row[0].disabled), (Some(false), false));
     }
 }
+
+#[test]
+fn advance_moves_the_views_clock_and_fires_their_timers_in_order() {
+    fn app() -> View {
+        let log = signal(Vec::<String>::new);
+        task(move || async move {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            log.update(|l| l.push("10 s".into()));
+        });
+        task(move || async move {
+            for i in 1..=3 {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                log.update(|l| l.push(format!("tick {i}")));
+            }
+        });
+        rsx! { p { "data-t": "log", {log.get().join(", ")} } }
+    }
+    let mut ui = TestUi::new(app);
+    let t = std::time::Instant::now();
+    ui.advance(std::time::Duration::from_secs(5));
+    assert_eq!(ui.text("log"), "tick 1");
+    ui.advance(std::time::Duration::from_secs(5));
+    assert_eq!(ui.text("log"), "tick 1, tick 2, tick 3, 10 s", "in their order");
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "virtual: {:?}", t.elapsed());
+}

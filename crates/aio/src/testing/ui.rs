@@ -355,7 +355,7 @@ impl Mount {
             let view = root.owner();
             (local.spawn_local(pump(root, from_page, to_page)), view)
         };
-        Self::started(TestUi { task, local, view, to_view, from_view, video: super::video::Recorder::asked(), page, rt, hovering: false, sent: 0, scope: vec![], _sandbox: sandbox })
+        Self::started(TestUi { task, local, view, to_view, from_view, video: super::video::Recorder::asked(), page, rt, hovering: false, sent: 0, scope: vec![], frozen: false, _sandbox: sandbox })
     }
 
     /// The test's page, sized and themed as asked.
@@ -419,6 +419,7 @@ impl Mount {
             hovering: false,
             sent: 0,
             scope: vec![],
+            frozen: false,
             _sandbox: sandbox,
         };
         Self::started(ui)
@@ -618,6 +619,8 @@ pub struct TestUi {
     sent: usize,
     /// The paths [`within`](TestUi::within) runs inside, outermost first.
     scope: Vec<String>,
+    /// The views' clock moves only by [`advance`](TestUi::advance) (and `wait`).
+    frozen: bool,
     _sandbox: crate::paths::Sandbox,
 }
 
@@ -916,13 +919,38 @@ impl TestUi {
     }
 
     /// Let `d` of real time pass for the app's timers (intervals, springs,
-    /// a toast's), then settle.
+    /// a toast's), then settle; after an [`advance`](Self::advance), `d` of
+    /// the views' virtual time.
     pub fn wait(&mut self, d: Duration) {
+        if self.frozen {
+            return self.advance(d);
+        }
         let end = Instant::now() + d;
         // In slices: the render-loop tripwire counts within one.
         while let Some(left) = end.checked_duration_since(Instant::now()).filter(|l| !l.is_zero()) {
             self.pause(left.min(Duration::from_millis(10)));
         }
+        self.settle();
+    }
+
+    /// Move the views' clock `d` on (aio's `advance`): every timer of
+    /// theirs due by then fires, in its order (a debounce, an interval, a
+    /// toast's dismiss, `use_live`'s wait), then settle; a 10 s timeout is
+    /// tested at once. From the first call on the views' clock is virtual:
+    /// it stands still but for `advance`, and `wait(d)` is `advance(d)`. The
+    /// page's own timers (a CSS transition, a page script's `setTimeout`)
+    /// and the cells' schedules keep real time (schedules: `TestCells::advance`).
+    pub fn advance(&mut self, d: Duration) {
+        let step = {
+            let _in = self.rt.enter();
+            if !std::mem::replace(&mut self.frozen, true) {
+                tokio::time::pause();
+            }
+            // A paused clock jumps to the next timer whenever the views
+            // idle: each fires at its moment, and what it starts counts from there.
+            tokio::time::sleep(d)
+        };
+        self.drive(step);
         self.settle();
     }
 
