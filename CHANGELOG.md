@@ -468,6 +468,11 @@ version may break things.
 
 ### Fixed
 
+- A cell's or a synced copy's listeners (a view, `watch`) never hear an
+  older state after a newer one: a tell from another thread, or from a
+  listener itself, between reading the state and telling it, was told
+  first, and the older one after it (a watch on a copy saw `[0, 4, 0, 5]`).
+  One teller at a time now tells until nothing is left untold.
 - An app's first update after its install is made from the patch again:
   a bundle's `install.sh` kept only the binary in `versions/<v>/`, so the
   patch (made over the whole bundle) missed its other files and the whole
