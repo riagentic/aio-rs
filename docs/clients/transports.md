@@ -19,7 +19,10 @@ a served app adds. A standalone desktop app opens no TCP port at all.
 
 - **The private socket dir** is `$XDG_RUNTIME_DIR/aio-rt/<id>-<hash of the
   data dir>` (else the temp dir), mode 0700, so no other user can open a
-  socket in it. Each door is `<dir>/<name>.sock`
+  socket in it. When that base is too long for a socket in it (a Unix socket
+  path takes 107 bytes on Linux, 103 on macOS), it is
+  `/tmp/aio-rt-<uid>/<id, 40 bytes at most>-<hash>` instead, as aio fell back
+  to `/tmp/aio`. Each door is `<dir>/<name>.sock`
   (`aio::ipc::addr(dir, name)`; `aio::paths::sockets(id, data)` makes the
   dir). Two instances of one app (`--instance`) have different data dirs,
   so different doors.
@@ -287,7 +290,9 @@ What aio has here and aio-rs doesn't yet:
 - Expecting `ax call` on a release build to reach a method without
   `#[client]`: a release door gives tools only a client's rights.
 - A long socket path on macOS or Linux: the private dir is kept short on
-  purpose; don't move the data dir's sockets yourself.
+  purpose (and falls back to `/tmp/aio-rt-<uid>`); don't move the data dir's
+  sockets yourself. A path still too long is refused at once, naming it, its
+  length and the limit: shorten `XDG_RUNTIME_DIR`/`TMPDIR` or the app id.
 
 ## API
 
