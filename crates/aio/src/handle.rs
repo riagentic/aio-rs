@@ -31,6 +31,32 @@ pub const RETRY_AFTER_MS: u64 = 2000;
 /// on the screen from before it.
 pub(crate) static TELLING: AtomicUsize = AtomicUsize::new(0);
 
+/// Listeners told one teller at a time, and it tells until nothing is left
+/// untold: a tell meanwhile (another thread's, or a listener's own) is left
+/// to it, so they never hear an older state after a newer one.
+#[derive(Default)]
+pub(crate) struct InOrder {
+    teller: Mutex<()>,
+    untold: AtomicBool,
+}
+
+impl InOrder {
+    /// `tell`: read the newest state and tell it.
+    pub(crate) fn tell(&self, tell: impl Fn()) {
+        self.untold.store(true, Ordering::SeqCst);
+        while self.untold.load(Ordering::SeqCst) {
+            let _teller = match self.teller.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            };
+            while self.untold.swap(false, Ordering::SeqCst) {
+                tell();
+            }
+        }
+    }
+}
+
 /// One commit counted in [`TELLING`] until it is dropped (a listener's panic too).
 struct Telling;
 
@@ -107,6 +133,7 @@ struct Inner<T: Cell> {
     /// The last committed state and its event, readable while a call runs.
     shown: Mutex<(u64, Arc<T>)>,
     listeners: Mutex<Vec<Listener<T>>>,
+    in_order: InOrder,
     /// Other cells' reactions to its committed calls ([`Handle::listens_to`]).
     reactions: Mutex<Vec<Reaction>>,
     watchers: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
@@ -179,6 +206,7 @@ impl<T: Cell> Handle<T> {
             store: Mutex::new(store),
             dir: Mutex::default(),
             listeners: Mutex::default(),
+            in_order: InOrder::default(),
             reactions: Mutex::default(),
             watchers: Mutex::default(),
             owned: Mutex::default(),
@@ -392,9 +420,11 @@ impl<T: Cell> Handle<T> {
         };
         // A call that changed nothing (a cursor already at the end) tells nobody.
         if changed {
-            let st = self.state();
-            let ls = lock(&self.inner.listeners).clone();
-            ls.iter().for_each(|f| f(&st));
+            self.inner.in_order.tell(|| {
+                let st = self.state();
+                let ls = lock(&self.inner.listeners).clone();
+                ls.iter().for_each(|f| f(&st));
+            });
         }
         drop(telling);
         // After the order lock: a reaction may call back into this cell.

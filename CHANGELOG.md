@@ -337,6 +337,11 @@ version may break things.
 
 ### Fixed
 
+- A cell's or a synced copy's listeners (a view, `watch`) never hear an
+  older state after a newer one: a tell from another thread, or from a
+  listener itself, between reading the state and telling it, was told
+  first, and the older one after it (a watch on a copy saw `[0, 4, 0, 5]`).
+  One teller at a time now tells until nothing is left untold.
 - The app quitting (it stops, its socket closes) right after the page
   vetoed a close (`window.close()` with a beforeunload handler) quits: the
   vetoed close, still settling, took the quit's own close of that window

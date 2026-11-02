@@ -1180,6 +1180,7 @@ struct Inner<T: Cell> {
     /// The last ping's round trip, in ms (0: none answered on this link).
     rtt: std::sync::atomic::AtomicU64,
     listeners: Mutex<Vec<Listener<T>>>,
+    in_order: crate::handle::InOrder,
     refusals: Mutex<Vec<Refusal>>,
     tells: Mutex<Vec<crate::tell::Show>>,
     syncs: Mutex<Vec<OnSync>>,
@@ -1427,6 +1428,7 @@ impl<T: Cell> Remote<T> {
             timeouts: Mutex::default(),
             rtt: Default::default(),
             listeners: Mutex::default(),
+            in_order: crate::handle::InOrder::default(),
             refusals: Mutex::default(),
             tells: Mutex::default(),
             syncs: Mutex::default(),
@@ -1748,9 +1750,11 @@ impl<T: Cell> Remote<T> {
 
     /// Show the listeners the state: it changed, or the link went up or down.
     fn tell(&self) {
-        let shown = self.state();
-        let ls = lock(&self.inner.listeners).clone();
-        ls.iter().for_each(|f| f(&shown));
+        self.inner.in_order.tell(|| {
+            let shown = self.state();
+            let ls = lock(&self.inner.listeners).clone();
+            ls.iter().for_each(|f| f(&shown));
+        });
     }
 
     /// What the client shows: confirmed + its calls still waiting.
