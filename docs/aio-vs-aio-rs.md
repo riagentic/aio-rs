@@ -207,11 +207,8 @@ beyond the aio-rs form.
 | Sync | routes over the local socket (`aio://`) | routes only with `[server] listen` | listen | [transports](clients/transports.md#gaps) |
 | Sync | a `transport` switch | none | ➖ | [transports](clients/transports.md#gaps) |
 | Sync | `allowLocalPeers` opt-out | a release build's door serves this user's processes | ➖ | [transports](clients/transports.md#gaps) |
-| Auth | sessions without accounts | sessions come with `[accounts]` | `aio::auth::serving()`, `issue(user, role)` | [accounts](auth/README.md#limits) |
-| Auth | `--tls-cert`, `--tls-key`, `--no-tls` | `[server] cert`, `key`; `tls = false` | `aio.toml` | [accounts](auth/README.md#limits) |
-| Auth | a share link printed at boot | none | `ax profile`, pairing | [accounts](auth/README.md#limits) |
+| Auth | a share link carrying the key | the share line names the key file | `?token=<key>` by hand, `ax profile`, pairing | [accounts](auth/README.md#limits) |
 | Auth | `useUser()` | `Client::me`, `SignIn`'s `on_signed` | ➖ | [accounts](auth/README.md#limits) |
-| Auth | a `firewall:` line at boot | none | allow the app in the OS firewall | [setup](basics/setup.md) |
 | Views | server rendering, hydration, `collectHead` | none | `ax preview --html`; `aio::head::html` | [views](ui/views.md#gaps-against-aio), [islands](ui/islands.md#gaps) |
 | Views | code splitting, `lazy` | one binary | `Defer` defers the render | [islands](ui/islands.md#gaps) |
 | Views | other view libraries (`aio/state-core`), `h()`, React compat | `aio::ui` `rsx!` only | an island, or a client over the wire | [islands](ui/islands.md#gaps), [views](ui/views.md#gaps-against-aio) |
@@ -243,8 +240,7 @@ beyond the aio-rs form.
 | Testing | `deno task test:wine` | Windows bundles smoked on Windows | `./ci-windows.sh`, GitHub's Windows runner | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `aiol` perf hints, `[fixable]` marks | `TestUi::components`, `ax components` | ➖ | [lint](testing/lint.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | an API snapshot gate, an `experimental` marker | review and the CHANGELOG | ➖ | [versions](basics/versioning.md#gaps-against-aios-policy) |
-| Debugging | correlation ids, the error box with the state | the call's name; reports carry the state | `ax events` | [errors](debugging/errors.md#not-in-aio-rs) |
-| Debugging | `onError` with an error object, many error codes | `on_problem(kind, message)`, `Rejected` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
+| Debugging | the error box with the state | reports carry the state | `ax report` | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | a source-mapped `client.log`, `am logs` budgets | `[page]` lines in `app.log`; `file_mb` × `keep` | ➖ | [errors](debugging/errors.md#not-in-aio-rs) |
 | Debugging | `skipActions`, a switch turning time travel off | every event kept | `diagnostics = false`, `[log] suppress` | [time travel](debugging/time-travel.md#not-as-in-aio) |
 | Debugging | V8 heap snapshots, the health overlay | none | `ax heap`, `ax health` | [production](debugging/production.md#not-in-aio-rs) |
@@ -421,12 +417,14 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Feature | aio | aio-rs | Status |
 |---|---|---|---|
 | Accounts, roles, TOTP, OIDC | `auth`, `sessions` | `[accounts]` | ✅ |
-| Sessions without accounts | yes | ❌ (`auth::serving()`, `issue`) | ❌ |
-| TLS | `--tls-cert`/`--tls-key`, own LAN CA | `[server] cert`/`key`, a machine root for the LAN | 🔄 |
+| Sessions without accounts | `sessions: true` | `[accounts] sessions`, `auth::serving()`'s `issue` | ✅ |
+| Users tokens re-checked on open sockets | every 5 s | every 5 s, and at once on a revoke | ✅ |
+| TLS | `--tls-cert`/`--tls-key`, `--no-tls`, own LAN CA | the same flags, `[server] cert`/`key`, a machine root for the LAN | ✅ |
+| Health and metrics beyond loopback | open without a key | a credential, always (fail closed) | ➕ |
 | Security headers | yes | `[server.security]` | ✅ |
 | Origins, proxies | `allowedOrigins`, `trustProxyHeader` | `[server] hosts`, `trust_proxy` | ✅ |
 | CORS, passkeys | none | none | ✅ |
-| Share link at boot, firewall line | yes | ❌ (`ax profile`, pairing) | ❌ |
+| Share link at boot, firewall line | yes | `share:` (names the key file) and `firewall:` lines | ✅ |
 | Outbound network list | `nativeFetch` | `[capabilities] network` | ✅ |
 | Secrets in logs | `redactActions` | `#[redact]`, masked logs | ✅ |
 
@@ -485,8 +483,12 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Time travel | dev only, 2000 entries | the whole store, release builds too | ➕ |
 | Replay, record | `am replay`, `am record` | `ax replay`, `ax record` (writes a Rust test) | ✅ |
-| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
-| Correlation ids, error box with state | yes | ❌ (`ax events`, reports) | ❌ |
+| Logs, errors, health, vitals, budgets | yes | `ax logs`, `ax errors`, `ax health`, `ax vitals`, `/__aio/vitals`, `[vitals]`, `[perf]`, `[budgets]` | ✅ |
+| Diagnostic bus | `onDiagnostic`, severity, fix | `report::subscribe`: `severity`, `tip`, `code()`; `vitals:<layer>`, `degraded-recovered:<part>` | ✅ |
+| Memory pressure hook | `onMemoryPressure`, `interval` | `health::on_memory`, `[memory] every` | ✅ |
+| Per-run log files | `debug.log` per run | `[log] per_run` | ✅ |
+| Correlation ids | yes | `call=<id>` on a call's lines, its timeline entry and reports | ✅ |
+| Error box with state | yes | reports carry the state | 🔄 |
 | Heap snapshots | V8 | not needed: no GC heap; `ax heap` | 🔄 |
 | Problem reports | `feedback: true` | always on, no arguments | 🔄 |
 | Manager UI | `am ui` | `ax ui` (the same tabs) | ✅ |

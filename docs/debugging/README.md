@@ -99,7 +99,12 @@ aio::warn!(cat: "net", peer = 7, "lost {n} frames"); // WARN  [net] lost 3 frame
 ```
 
 A line below `[log] level` costs one load and formats nothing; the same
-line repeated is written once with a count; credentials are masked.
+line repeated is written once with a count; credentials are masked. A
+line said during a method call ends with `call=<id>`, a number per call
+this run (aio's correlation id): the `debug` line of the call itself, its
+`[diff]`, the app's own lines from the method, its timeline entry
+(`id`) and a report it causes (`call`) share it, so the lines ending
+in `call=42` are what one call did.
 
 ```toml
 [app]
@@ -111,6 +116,7 @@ keep = 5                    # files kept per log
 file_mb = 10                # a file rotates at this size
 heartbeat = 3600            # seconds between heartbeat lines (uptime, calls, errors); 0: none
 suppress = ["notes.tick"]   # methods whose calls are never logged, even at debug
+per_run = false             # true: each run starts fresh files (app.1.log is the last run)
 ```
 
 `ax logs <app> [word] [--level warn] [--tag net] [--since 15m]
@@ -193,13 +199,20 @@ More: [feedback](feedback.md), [production](production.md), every kind in
   happens, also warnings that are not reports; `aio::report::Code::of(kind)`
   types it (`panic`, `tripped`, `refused`, `effect:timeout`,
   `budget:method`, `storm`, `degraded:<part>`, `memory:high`,
-  `window:crashed`, `update:failed`, `user`) and `tip()` says what to do.
-  Never call a cell from it: hand the work off.
+  `window:crashed`, `update:failed`, `user`, `degraded-recovered:<part>`,
+  `vitals:<layer>`) and `tip()` says what to do. Never call a cell from
+  it: hand the work off.
+- `aio::report::subscribe(|d| ..)` hears the same as a typed event (aio's
+  `onDiagnostic`): `d.kind`, `d.message`, `d.severity` (`Error` for a
+  problem, `Warn` for a warning or a vitals step up, `Info` for a
+  recovery), `d.tip`, `d.code()`, `d.held` (repeats held back);
+  `aio::report::recent()` keeps the newest 200.
 - `data/health.json` says each part's state every 10 s; `ax health <app>`
   reads it and fails for a degraded, stuck or stopped app. A served app
-  answers `GET /__aio/health` and `GET /__aio/metrics` (Prometheus): to
-  anyone who reaches it without `[accounts]`, to the key or a session
-  with them ([production](production.md#health)).
+  answers `GET /__aio/health`, `GET /__aio/metrics` (Prometheus) and `GET
+  /__aio/vitals`: to this machine's tools without the key on an app
+  without accounts or users, else to the key, a session or a user's
+  token ([production](production.md#health)).
 - Best-effort work of the app's own: `aio::health::part("thumbnails")
   .guard(result)` counts successes and failures; after 5 in a row the
   part is degraded (said once, reported, said again when it recovers).
