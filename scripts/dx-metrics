@@ -484,8 +484,8 @@ def save(row, rows):
 
 
 def num(v):
-    """`v` as a row has it: whole from 1000 up, else to two decimals (pure)."""
-    return f"{v:.0f}" if v >= 1000 else f"{v:.2f}".rstrip("0").rstrip(".")
+    """`v` as a row has it: whole from 1000 up, else to two decimals (three under 0.1) (pure)."""
+    return f"{v:.0f}" if v >= 1000 else f"{v:.{2 if v >= 0.1 else 3}f}".rstrip("0").rstrip(".")
 
 
 def limits(machine_key, rows, ceilings, base=None, added=()):

@@ -649,12 +649,16 @@ as on air.
    passes on the sound renderer fails, in the Rust page
    (`crates/air/tests/fault.rs`) and in `TestUi`'s Electron page
    (`crates/aio/tests/air_ui.rs`).
-4. **No Dioxus in the package**: a CI check that the packaged binary's
-   dependency graph (`cargo tree -e normal` of the release target) and its
-   symbols contain no `dioxus`.
-5. **Measured on the packaged app**: size, clean build and edit→rebuild
-   of one real app on AppImage / exe / APK, by a script in the repo
-   (this spike's `bench.sh` is the generated-app half).
+4. **No Dioxus in the package** (green, `scripts/air-ship`, phase 4):
+   the template on air's shipped graph (`cargo metadata`, desktop, wasm32,
+   Android) and its release binary, `.tar.gz`, AppImage, web build and
+   APKs, byte for byte. Shown red first, on every `dx-metrics` run: a
+   `dioxus-core` dependency planted in the air app must fail it.
+5. **Measured on the packaged app** (green, `scripts/dx-metrics`, phase
+   4): the template on air's package sizes and edit loop, gated against
+   the base on the same runner (sizes) or this machine's rows (times).
+   The template, not a real app, and Linux packages only so far (the
+   Windows exe and macOS bundle wait for phase 5's three-OS smoke).
 
 ## Release rule and scope
 
@@ -776,6 +780,51 @@ the running binary's (Linux x86_64: an `AtomicU32` or a `OnceLock` keeps
 its value across a patch). The CSS edit is dx's own asset push on Dioxus and the
 app's 20 ms poll on air.
 
+## Phase 4: the gates in CI
+
+- `scripts/air-ship <app> [artifacts]`: no Dioxus crate in what the app
+  ships (its `cargo metadata` graph of normal dependencies for the
+  desktop, wasm32 and Android: named `dioxus*` or from DioxusLabs'
+  repositories, so `generational-box`, `warnings`, `subsecond` too) and
+  no `dioxus` in any package, byte for byte: a stripped release binary
+  keeps the crates' source paths and strings (a Dioxus build:
+  `dioxus-liveview-0.7.10/src/lib.rs`, `data-dioxus-id`,
+  `__dioxusGetWsUrl`). `--self-test` plants one in a binary, a folder, a
+  `.tar.gz`, an AppImage, an APK and a graph (a target-only dependency
+  found; dev and build dependencies not).
+- `scripts/dx-metrics` measures the template on air beside the Dioxus
+  one (columns `air_*`), in its own build folder; `--apk` its APKs (the
+  `air-apk` job on GitHub CI). Each run plants `dioxus-core` in the air
+  app first and requires air-ship to fail, then checks every package.
+- Sizes are held 5% (and 50 KB, the web build 10 KB) over the base built
+  on the same runner, or this machine's best of the last 10 rows; the
+  rebuild and the live edits 50% over this machine's median (and their
+  slack), not gated where it has no rows (a fresh CI runner). A base
+  before phase 3 has no shell on air: its air sizes are said, not gated.
+- Shown red on planted breaks (this machine, one row before): 400 KB
+  kept in the air shell → `air_binary_b` 5.74 MB past its 5.61 MB (the
+  pattern compressed away in the `.tar.gz` and AppImage); a 1 s sleep
+  before `ax dev` sends the markup → `air_live_rsx_s` 1.006 s past its
+  0.25 s.
+
+### Measured (`scripts/dx-metrics`, the template)
+
+One run, the same machine as phase 3's (`taskset -c 0-11`, other work
+beside it), Dioxus and air built one after the other:
+
+| | Dioxus | air | air / Dioxus |
+|---|---|---|---|
+| release binary | 5.82 MB | 5.35 MB | 0.92 |
+| `.tar.gz` | 3.00 MB | 2.79 MB | 0.93 |
+| AppImage | 3.76 MB | 3.58 MB | 0.95 |
+| web build (folder) | — | 419 KB (wasm 362 KB, 146 KB gzipped) | — |
+| APK, arm64 | — | 2.55 MB | — |
+| one-line edit → debug rebuild | 0.5 s, 0.7 CPU s | 0.4 s, 0.7 CPU s | — |
+| live CSS / `rsx!` / Rust | 0.016 / 0.091 / 0.378 s | 0.018 / 0.003 / 0.528 s | — |
+
+Most of the release binary is aio-rs's runtime and the shell, the same
+on both: air's renderer saves 0.47 MB of it.
+
 ## Plan for 0.2.0
 
 In this order; each step ends green before the next starts. Dioxus stays
@@ -787,7 +836,7 @@ on the dev branch as the fallback until step 5.
 | 1 | air core (done but portals, `Defer`, the template app) | from the spike: holes, lists (live row ranges), branches, context over owners, error boundary, refs and page calls (`onmounted`), portals, `Defer`; `TestUi` on the Rust page and the Electron page; gates 1–3 written failing, then green | `cargo test -p aio-rs-air`, the gate tests, `ax test` of the template app on air | 2–3 weeks |
 | 2 | the kit on air (2a done: the kit, theming, forms; 2b: the router) | the 22 kit modules behind the facade, on air (dev branch: the facade's renderer chosen by a dev-branch feature, never in a release) | the kit's tests and docs examples on air | 3–4 weeks |
 | 3 | tooling (done) | `ax dev`: template hot reload (`air-rsx`), subsecond remount; web (wasm, in-process `page.js`); Android page body | `ax dev` edit loops, `ax build --web`, an APK smoke | 2–3 weeks |
-| 4 | gates in CI | no Dioxus in the packaged graph or binary; size and build/edit numbers of the packaged app by a script in the repo | CI fails on a planted Dioxus dependency | 3 days |
+| 4 | gates in CI (done) | no Dioxus in the packaged graph or binary; size and build/edit numbers of the packaged app by a script in the repo | CI fails on a planted Dioxus dependency | 3 days |
 | 5 | delete Dioxus | out of the default graph and `deps.toml`; one real app rebuilt and smoked on Linux, Windows, macOS | the smoke on three OSes; the numbers in `docs/performance.md` | 1 week |
 
 About 10–13 weeks of work. How apps migrate: step 0 is the one API change
