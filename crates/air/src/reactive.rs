@@ -378,6 +378,24 @@ pub(crate) fn effect_of(kind: Kind, f: impl FnMut() + 'static) -> Key {
     e
 }
 
+/// `f()`, and whether it read a signal (a probe: nothing stays subscribed;
+/// what `f` makes is the current owner's).
+pub(crate) fn reads<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    let (k, owner) = rt(|rt| {
+        let owner = rt.owner.take();
+        let k = rt.alloc(Node { kind: Kind::Memo, ..Node::default() });
+        rt.owner = owner;
+        (k, owner)
+    });
+    let r = {
+        let _r = enter(Some(k), owner);
+        f()
+    };
+    let read = RT.with_borrow(|rt| rt.node(k).is_some_and(|n| !n.deps.is_empty()));
+    dispose(k);
+    (r, read)
+}
+
 /// A hole: `f` now and whenever what it read changes; it may not write.
 /// What it builds belongs to the component current now; each re-run is
 /// one of that component's updates.

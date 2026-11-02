@@ -38,9 +38,29 @@
 //!     rsx! { if let Some(n) = n { p { "{n}" } } }
 //! }
 //! ```
+//! A required prop left out is a compile error, naming it:
+//!
+//! ```compile_fail
+//! use air::{View, component, rsx};
+//! #[component]
+//! fn Hello(name: String) -> View { rsx! { p { "{name}" } } }
+//! fn app() -> View { rsx! { Hello {} } }
+//! ```
+//!
+//! and so is an attribute given to a component that takes none:
+//!
+//! ```compile_fail
+//! use air::{View, component, rsx};
+//! #[component]
+//! fn Hello(name: String) -> View { rsx! { p { "{name}" } } }
+//! fn app() -> View { rsx! { Hello { name: "x", "data-t": "h" } } }
+//! ```
+extern crate self as air;
+
 mod dom;
 mod event;
 mod global;
+mod props;
 mod reactive;
 mod task;
 pub mod testing;
@@ -54,6 +74,7 @@ pub use dom::{
 };
 pub use event::*;
 pub use global::{Global, GlobalMemo};
+pub use props::{Attribute, IntoOpt, IntoValue, Prop, Props};
 pub use reactive::{
     Callback, EventHandler, Memo, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback, context,
     current_owner, detached, effect, follow, in_body, in_views, memo, on_cleanup, once, parent_context, provide,
@@ -133,4 +154,8 @@ pub mod __rt {
         DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ScrollData, WheelData,
     };
     pub use crate::tree::{KeyByDebug, KeyByDisplay, KeyByNone, KeyOf};
+    pub use crate::props::{
+        ByMemo, ByOpt, ByProp, BySignal, ByVal, CallbackOf, GlobalAttributeNames, GlobalAttributes, IntoOpt, IntoValue,
+        NoPropsBuilder, Props, Set, builder_of, spread,
+    };
 }

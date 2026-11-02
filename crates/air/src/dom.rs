@@ -340,6 +340,7 @@ pub fn text(id: u32, f: Box<dyn Fn() -> String>) {
 }
 
 /// What an attribute hole holds: a value, or presence (`false`: none).
+#[derive(Clone, Debug, PartialEq)]
 pub enum AttrValue {
     Str(Cow<'static, str>),
     Bool(bool),
@@ -423,14 +424,19 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
         if same {
             return;
         }
-        dom(|d| match (&v, is_prop(name)) {
-            (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
-            (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
-            (AttrValue::Bool(b), true) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
-            (AttrValue::Bool(true), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(""),
-            (AttrValue::Bool(false), false) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
-        });
+        set_attr_now(id, name, &v);
         last = Some(v);
+    });
+}
+
+/// `name` of node `id` set to `v` now (no hole).
+pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
+    dom(|d| match (v, is_prop(name)) {
+        (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
+        (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
+        (AttrValue::Bool(b), true) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
+        (AttrValue::Bool(true), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(""),
+        (AttrValue::Bool(false), false) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
     });
 }
 
@@ -796,6 +802,7 @@ pub fn longest_increasing(seq: &[isize]) -> Vec<bool> {
 // ------------------------------------------------------------- boundaries
 
 /// The props of [`ErrorBoundary`].
+#[derive(air::Props)]
 pub struct ErrorBoundaryProps {
     pub fallback: Callback<String, View>,
     pub children: View,
@@ -824,6 +831,7 @@ pub fn ErrorBoundary(p: ErrorBoundaryProps) -> View {
 }
 
 /// The props of [`Suspense`].
+#[derive(air::Props)]
 pub struct SuspenseProps {
     pub fallback: View,
     pub children: View,
@@ -885,6 +893,7 @@ pub fn Suspense(p: SuspenseProps) -> View {
 }
 
 /// The props of [`Fragment`].
+#[derive(air::Props)]
 pub struct FragmentProps {
     pub children: View,
 }
