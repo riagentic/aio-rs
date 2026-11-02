@@ -2113,3 +2113,45 @@ fn Reacts(n: Signal<u32>, other: Signal<u32>) -> View {
     );
     rsx! {}
 }
+
+#[cfg(not(feature = "kit"))]
+thread_local! {
+    static GATE: RefCell<Option<tokio::sync::oneshot::Receiver<Result<u32, String>>>> = const { RefCell::new(None) };
+}
+
+/// Deferred content that loads (aio's `Defer` `load`, `loading`, `error`,
+/// `loadingMinMs`): the loading view while it runs, then what it made, or
+/// the error it said.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn deferred_content_loads_shows_its_loading_view_then_the_content_or_its_error() {
+    let app = || {
+        rsx! {
+            Defer { trigger: Trigger::Interaction, "data-t": "box",
+                placeholder: rsx! { p { "data-t": "wait", "click me" } },
+                loading: rsx! { p { "data-t": "loading", "…" } },
+                error: |e: String| rsx! { p { "data-t": "failed", "{e}" } },
+                loading_min_ms: 50,
+                load: load(|| async {
+                    let rx = GATE.with_borrow_mut(Option::take).expect("the test's gate");
+                    let n = rx.await.map_err(|e| e.to_string())??;
+                    Ok(rsx! { p { "data-t": "loaded", "{n} rows" } })
+                }),
+            }
+        }
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    GATE.set(Some(rx));
+    let mut ui = TestUi::new(app);
+    assert!(ui.present("wait") && ui.absent("loading"));
+    ui.click("box");
+    assert!(ui.present("loading"), "triggered: loading while it runs");
+    tx.send(Ok(3)).unwrap();
+    ui.until_text("loaded", "3 rows");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    GATE.set(Some(rx));
+    let mut ui = TestUi::new(app);
+    ui.click("box");
+    tx.send(Err("the disk is gone".into())).unwrap();
+    ui.until_text("failed", "the disk is gone");
+}

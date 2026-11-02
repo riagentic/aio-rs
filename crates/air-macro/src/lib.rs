@@ -1053,7 +1053,7 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>, lets
                             if let Ok(nodes) = parse_nodes(&inner) {
                                 let mut r = vec![];
                                 node_captures(&nodes, &mut r);
-                                out.extend(r.into_iter().filter(|n| !bound.contains(n)));
+                                out.extend(r.into_iter().filter(|n| !bound.contains(n) && !lets.contains(n)));
                             }
                             i += 3;
                             continue;
@@ -1508,6 +1508,11 @@ mod tests {
         assert_eq!(names("for x in xs { g(x) }"), ["xs"]);
         assert_eq!(names("if a && let Some(t) = top() { t.go() }"), ["a"], "a let chain");
         assert_eq!(names("form.bind(aio::field!(name))"), ["form"], "field!(name) names a field");
+        assert_eq!(
+            names("async { let n = get().await; rsx! { p { \"{n} {m}\" } } }"),
+            ["m"],
+            "a let read by a view inside"
+        );
     }
 
     #[test]
