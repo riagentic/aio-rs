@@ -175,6 +175,7 @@ auto = true
 
 [ui]
 theme = "auto"
+neutral = "tinted"
 layout = true
 
 [vitals]
@@ -687,19 +688,21 @@ when it breaks. Always kept on disk first (`ax report <app>`).
 
 ## [ui]
 
-The page's default look (aio's `ui.theme`, `ui.hue`, `ui.layout`;
+The page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`;
 [theming](../ui/theming.md)); `aio::kit::theme::sheet` makes its CSS.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `theme` | `auto`, `full`, `tokens`, `none` | `"auto"` | How much of aio's look a page takes: `auto` (the whole look until the app ships a stylesheet of its own, then only the tokens), `full` (the whole look, the app's stylesheet over it), `tokens` (only the `--aio-*` tokens), `none` (no aio CSS: the kit is bare). |
 | `hue` | 0 to 359 | from the id | The accent's hue in degrees, instead of the one hashed from the app's id. |
+| `neutral` | `tinted`, `soft` | `"tinted"` | The page's greys (page, surfaces, borders): tinted with the hue, or near grey (`soft`, aio's `"neutral": "soft"`) for a warm or magenta hue; the accent keeps the hue. |
 | `layout` | bool | `true` | With the look, the page layout: `<main>` as a centred page and the `.card`, `.row`, `.stack`, `.grid` classes. Off: only how elements look. |
 
 ```toml
 [ui]
 theme = "full"
 hue = 210
+neutral = "soft"
 layout = false
 ```
 

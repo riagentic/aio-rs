@@ -286,9 +286,11 @@ mod tests {
     #[test]
     fn the_look_its_hue_and_layout_are_config() {
         let c = Config::parse("[app]\nid = \"t\"").unwrap();
-        assert_eq!(c.ui, Ui { theme: Look::Auto, hue: None, layout: true });
-        let c = Config::parse("[app]\nid = \"t\"\n[ui]\ntheme = \"full\"\nhue = 210\nlayout = false").unwrap();
-        assert_eq!(c.ui, Ui { theme: Look::Full, hue: Some(210), layout: false });
+        assert_eq!(c.ui, Ui { theme: Look::Auto, hue: None, neutral: Neutral::Tinted, layout: true });
+        let c = Config::parse("[app]\nid = \"t\"\n[ui]\ntheme = \"full\"\nhue = 210\nneutral = \"soft\"\nlayout = false")
+            .unwrap();
+        assert_eq!(c.ui, Ui { theme: Look::Full, hue: Some(210), neutral: Neutral::Soft, layout: false });
+        assert!(Config::parse("[app]\nid = \"t\"\n[ui]\nneutral = \"grey\"").is_err());
         for t in ["tokens", "none"] {
             assert!(Config::parse(&format!("[app]\nid = \"t\"\n[ui]\ntheme = \"{t}\"")).is_ok());
         }

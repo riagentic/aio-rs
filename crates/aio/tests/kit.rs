@@ -1034,6 +1034,14 @@ fn a_portal_draws_at_the_root_keeps_its_state_and_handlers_and_leaves_nothing() 
     assert_eq!(ui.count(".aio-portals > *"), 0, "closed: nothing left behind");
 }
 
+/// The element that plays a transition: its box on Dioxus; on air, which
+/// draws none, its content's own element.
+#[cfg(feature = "kit")]
+const FX: &str = "fx";
+#[cfg(not(feature = "kit"))]
+const FX: &str = "msg";
+
+#[cfg(feature = "kit")]
 fn fading() -> View {
     let show = signal(|| true);
     rsx! {
@@ -1044,13 +1052,33 @@ fn fading() -> View {
     }
 }
 
+#[cfg(not(feature = "kit"))]
+fn fading() -> View {
+    let show = signal(|| true);
+    rsx! {
+        button { "data-t": "toggle", onclick: move |_| show.toggle(), "toggle" }
+        Transition { show: show.get(), enter: Motion::FADE, exit: Motion::FADE.ms(100),
+            p { "data-t": "msg", style: "color: #123456", "hello" }
+        }
+    }
+}
+
+/// The animation `FX` plays: its name, length and direction.
+fn played(ui: &mut TestUi) -> String {
+    let js = format!(
+        "(() => {{ const s = getComputedStyle(document.querySelector('[data-t={FX}]'));
+           return `${{s.animationName}} ${{s.animationDuration}} ${{s.animationDirection}}`; }})()"
+    );
+    ui.eval(&js).as_str().unwrap_or_default().to_string()
+}
+
 #[test]
 fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
     let mut ui = TestUi::new(fading);
-    assert!(ui.attr("fx", "style").unwrap().contains("aio-fade 300ms ease 0ms 1 normal"));
+    assert_eq!(played(&mut ui), "aio-fade 0.3s normal");
     ui.click("toggle");
     assert!(ui.present("msg"), "still there while it leaves");
-    assert!(ui.attr("fx", "style").unwrap().contains("reverse"));
+    assert_eq!(played(&mut ui), "aio-fade 0.1s reverse");
     ui.wait(Duration::from_millis(150));
     assert!(ui.absent("msg"), "gone once the exit is over");
     ui.click("toggle");
@@ -1058,7 +1086,29 @@ fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
     ui.click("toggle");
     ui.wait(Duration::from_millis(150));
     assert!(ui.present("msg"), "show, hide, show: a cancelled exit removes nothing");
-    assert!(ui.attr("fx", "style").unwrap().contains("normal"));
+    assert_eq!(played(&mut ui), "aio-fade 0.3s normal");
+    #[cfg(not(feature = "kit"))]
+    {
+        let color = ui.eval("getComputedStyle(document.querySelector('[data-t=msg]')).color");
+        assert_eq!(color.as_str(), Some("rgb(18, 52, 86)"), "no box: the content's own style kept");
+        assert_eq!(ui.count(".aio-transition"), 0);
+    }
+}
+
+/// A motion written as a function plays the frames it gives.
+#[cfg(not(feature = "kit"))]
+#[test]
+fn a_motion_written_as_a_function_plays_its_frames() {
+    let mut ui = TestUi::new(|| {
+        rsx! {
+            Transition { show: true, enter: Motion::of("aio-test-grow", |t| format!("opacity:{t};transform:scale({t})")).ms(5000),
+                p { "data-t": "msg", "hello" }
+            }
+        }
+    });
+    assert_eq!(played(&mut ui), "aio-test-grow 5s normal");
+    let rule = ui.eval("[...document.styleSheets].flatMap((s) => [...s.cssRules]).find((r) => r.name === 'aio-test-grow')?.cssRules.length");
+    assert_eq!(rule.as_u64(), Some(21), "sampled in 20 steps");
 }
 
 fn list() -> View {

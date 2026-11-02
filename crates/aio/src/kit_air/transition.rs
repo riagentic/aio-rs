@@ -12,14 +12,27 @@ use std::time::Duration;
 
 /// An animation: a `@keyframes` name (the kit's `aio-fade`, `aio-slide`,
 /// `aio-scale`, or the app's own, written from the hidden state to the
-/// shown one), how long, after what delay, with what easing.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// shown one), how long, after what delay, with what easing. Or a
+/// function of the progress ([`Motion::of`], aio's `TransitionFn`).
+#[derive(Clone, Copy, Debug)]
 pub struct Motion {
     pub keyframes: &'static str,
     pub ms: u32,
     pub delay_ms: u32,
     pub easing: &'static str,
+    /// The declarations at progress `t` (0: hidden, 1: shown), sampled into `keyframes`.
+    pub css: Option<fn(f64) -> String>,
 }
+
+impl PartialEq for Motion {
+    /// The same animation: its name stands for its frames.
+    fn eq(&self, o: &Self) -> bool {
+        (self.keyframes, self.ms, self.delay_ms, self.easing) == (o.keyframes, o.ms, o.delay_ms, o.easing)
+    }
+}
+
+/// How many steps a [`Motion::of`] is sampled in (aio's `KEYFRAME_STEPS`).
+const STEPS: u32 = 20;
 
 impl Motion {
     /// Opacity 0 ↔ 1 (aio's `fade`; 300 ms, as all three).
@@ -30,7 +43,38 @@ impl Motion {
     pub const SCALE: Self = Self::new("aio-scale");
 
     pub const fn new(keyframes: &'static str) -> Self {
-        Self { keyframes, ms: 300, delay_ms: 0, easing: "ease" }
+        Self { keyframes, ms: 300, delay_ms: 0, easing: "ease", css: None }
+    }
+
+    /// A motion written as a function (aio's `TransitionFn` `css(t)`):
+    /// `css(t)` is the style at progress `t`, 0 hidden to 1 shown
+    /// (`|t| format!("opacity:{t};transform:scale({t})")`). `name` names
+    /// its `@keyframes`: one name, one function.
+    pub const fn of(name: &'static str, css: fn(f64) -> String) -> Self {
+        Self { css: Some(css), ..Self::new(name) }
+    }
+
+    /// The `@keyframes` rule a [`Motion::of`] plays (none for a named one).
+    pub fn rule(&self) -> Option<String> {
+        let css = self.css?;
+        let frames: String = (0..=STEPS)
+            .map(|i| {
+                let t = f64::from(i) / f64::from(STEPS);
+                format!("{:.1}%{{{}}}", t * 100.0, css(t))
+            })
+            .collect();
+        Some(format!("@keyframes {}{{{frames}}}", self.keyframes))
+    }
+
+    /// Put its rule in the page, once (a named motion's is the app's or the kit's).
+    fn install(&self) {
+        let Some(rule) = self.rule() else { return };
+        let id = serde_json::to_string(&format!("aio-motion-{}", self.keyframes)).unwrap_or_default();
+        let rule = serde_json::to_string(&rule).unwrap_or_default();
+        ::air::exec(&format!(
+            "if(!document.getElementById({id})){{const s=document.createElement('style');s.id={id};\
+             s.textContent={rule};document.head.append(s)}}"
+        ));
     }
 
     pub const fn ms(self, ms: u32) -> Self {
@@ -42,25 +86,25 @@ impl Motion {
         Duration::from_millis((self.ms + self.delay_ms).into())
     }
 
-    /// The `animation` declarations entering (`out`: leaving, backwards).
+    /// The `animation` declaration entering (`out`: leaving, backwards).
     pub fn css(&self, out: bool) -> String {
+        format!("animation:{}", self.animation(out))
+    }
+
+    /// The `animation` value entering (`out`: leaving, backwards).
+    pub fn animation(&self, out: bool) -> String {
         let dir = if out { "reverse" } else { "normal" };
-        let Self { keyframes, ms, delay_ms, easing } = self;
-        format!("animation:{keyframes} {ms}ms {easing} {delay_ms}ms 1 {dir} both")
+        let Self { keyframes, ms, delay_ms, easing, .. } = self;
+        format!("{keyframes} {ms}ms {easing} {delay_ms}ms 1 {dir} both")
     }
 }
 
 /// Content that animates as `show` changes (aio's `Transition`): with no
-/// `exit`, it goes at once. It sits in a box of its own (`class`, attributes).
+/// `exit`, it goes at once. No box of its own: its content's first element
+/// plays the animation (its own style kept).
 #[component]
-pub fn Transition(
-    show: Prop<bool>,
-    enter: Option<Motion>,
-    exit: Option<Motion>,
-    #[props(default, into)] class: Prop<String>,
-    #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
-    children: View,
-) -> View {
+pub fn Transition(show: Prop<bool>, enter: Option<Motion>, exit: Option<Motion>, children: View) -> View {
+    once(|| enter.iter().chain(&exit).for_each(Motion::install));
     let on = signal(|| show.get_untracked());
     let leaving = signal(|| false);
     // A show again cancels a leave's end.
@@ -88,14 +132,12 @@ pub fn Transition(
             }
         });
     });
+    let content = ::air::styled(children, "animation", move || {
+        if leaving.get() { exit.map(|m| m.animation(true)) } else { enter.map(|m| m.animation(false)) }
+    });
     rsx! {
         if on.get() {
-            div {
-                class: join("aio-transition", &class.get()),
-                style: if leaving.get() { exit.map(|m| m.css(true)) } else { enter.map(|m| m.css(false)) },
-                ..attributes.clone(),
-                {children.clone()}
-            }
+            {content.clone()}
         }
     }
 }
@@ -143,6 +185,7 @@ pub fn TransitionGroup(
     #[props(default, into)] row_class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
+    once(|| enter.iter().chain(&exit).for_each(Motion::install));
     // The rows drawn (key, leaving), each row's view and handle.
     let drawn = signal(Vec::<(String, bool)>::new);
     let views = once(|| Rc::new(RefCell::new(HashMap::<String, View>::new())));
@@ -303,6 +346,14 @@ mod tests {
         assert_eq!(m.css(false), "animation:aio-fade 200ms ease 50ms 1 normal both");
         assert_eq!(m.css(true), "animation:aio-fade 200ms ease 50ms 1 reverse both");
         assert_eq!(m.total(), Duration::from_millis(250));
+        let grow = Motion::of("grow", |t| format!("opacity:{t}"));
+        let rule = grow.rule().unwrap();
+        assert!(rule.starts_with("@keyframes grow{0.0%{opacity:0}5.0%{opacity:0.05}"), "{rule}");
+        assert!(rule.ends_with("100.0%{opacity:1}}"), "{rule}");
+        assert_eq!(
+            (Motion::FADE.rule(), grow, grow.css(false)),
+            (None, Motion::of("grow", |_| String::new()), "animation:grow 300ms ease 0ms 1 normal both".into())
+        );
         assert_eq!(
             row_style(None, Some(&((0.0, -40.0), false)), 300),
             "transform:translate(0px,-40px);transition:none"

@@ -69,7 +69,7 @@ pub use air_macro::{Props, component, rsx};
 pub use dom::{
     AttrValue, Child, ErrorBoundary, ErrorBoundaryProps, Eval, Fragment, FragmentProps, IntoAttr, IntoChild,
     IntoHandler, MountedData, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, exec, is_empty,
-    longest_increasing, take_edits,
+    longest_increasing, styled, take_edits,
 };
 pub use event::*;
 pub use global::{Global, GlobalMemo};

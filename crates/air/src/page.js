@@ -216,6 +216,11 @@
         case 13: { const frag = document.createDocumentFragment(); frag.append(...range()); break }
         case 14: { const id = u32(); run(id, str()); break }
         case 15: { const id = u32(), m = str(), to = evals.get(id); if (to) to(JSON.parse(m)); break }
+        case 16: {
+          const list = range(), k = str(), v = str(), e = list.find((n) => n.nodeType === 1)
+          if (e) e.style.setProperty(k, v)
+          break
+        }
         default: throw new Error('air: unknown edit at ' + (p - 1))
       }
     }

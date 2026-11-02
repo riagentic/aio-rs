@@ -54,6 +54,7 @@ pub(crate) mod op {
     pub const PARK: u8 = 13;
     pub const EVAL: u8 = 14;
     pub const EVAL_SEND: u8 = 15;
+    pub const STYLE: u8 = 16;
 }
 
 /// An event hole's handler: the page's event, and its flow (stop, prevent).
@@ -684,6 +685,29 @@ pub fn child(at: u32, f: Box<dyn Fn() -> Child>) {
             }
         };
     });
+}
+
+/// `view` with one style property of its first element (`"animation"`)
+/// following `f()` (`None`: none): a component that animates or places
+/// what it is given without a box of its own (aio's `Transition`).
+pub fn styled(view: View, property: &'static str, f: impl Fn() -> Option<String> + 'static) -> View {
+    let tree = view?;
+    let f = Rc::new(f);
+    Ok(Tree::new(move || {
+        let r = tree.build();
+        if let Some((a, b)) = r.0 {
+            let f = f.clone();
+            let mut last: Option<Option<String>> = None;
+            render(move || {
+                let v = f();
+                if last.as_ref() != Some(&v) {
+                    dom(|d| _ = d.op(op::STYLE).u32(a).u32(b).str(property).str(v.as_deref().unwrap_or("")));
+                    last = Some(v);
+                }
+            });
+        }
+        r
+    }))
 }
 
 /// A component in a template: `f()` (its body, run once, untracked, with

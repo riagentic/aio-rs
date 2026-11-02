@@ -1128,7 +1128,7 @@ impl Default for Feedback {
     }
 }
 
-/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `ui.layout`);
+/// `[ui]`: the page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`);
 /// `aio::kit::theme::sheet` makes its CSS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(default, deny_unknown_fields)]
@@ -1136,6 +1136,8 @@ pub struct Ui {
     pub theme: Look,
     /// The accent's hue in degrees, instead of the one hashed from the id.
     pub hue: Option<u16>,
+    /// The page's greys: tinted with the hue, or near grey (aio's `"neutral": "soft"`).
+    pub neutral: Neutral,
     /// With the look, the page layout: `<main>` as a centred page and the
     /// `.card`/`.row`/`.stack`/`.grid` classes. Off: only how elements look.
     pub layout: bool,
@@ -1143,8 +1145,19 @@ pub struct Ui {
 
 impl Default for Ui {
     fn default() -> Self {
-        Self { theme: Look::Auto, hue: None, layout: true }
+        Self { theme: Look::Auto, hue: None, neutral: Neutral::Tinted, layout: true }
     }
+}
+
+/// The page's neutrals (its page, surfaces and borders); the accent keeps the hue either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Neutral {
+    /// Tinted with the hue.
+    #[default]
+    Tinted,
+    /// Near grey: a warm or magenta hue would tint large surfaces visibly.
+    Soft,
 }
 
 /// How much of aio's look a page takes. Every one but `None` keeps the

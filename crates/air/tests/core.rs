@@ -362,3 +362,29 @@ fn a_view_placed_twice_or_shown_again_is_built_again_each_with_its_own_state() {
     p.click("toggle");
     assert_eq!(all(&p), ["+2", "+1", "+1"], "shown again: built again");
 }
+
+#[test]
+fn a_styled_view_sets_one_property_of_its_first_element_and_keeps_its_own() {
+    #[component]
+    fn Inner() -> View {
+        rsx! { p { "data-t": "in", style: "color: red", "in" } }
+    }
+    fn app() -> View {
+        let on = signal(|| false);
+        let shown = styled(rsx! { Inner {} }, "opacity", move || on.get().then(|| "0.5".to_string()));
+        rsx! {
+            button { "data-t": "on", onclick: move |_| on.toggle(), "on" }
+            {shown}
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!(p.attr("in", "style").as_deref(), Some("color: red"), "None: no property");
+    p.click("on");
+    assert_eq!(
+        p.attr("in", "style").as_deref(),
+        Some("color: red; opacity: 0.5"),
+        "a component's element, its own style kept"
+    );
+    p.click("on");
+    assert_eq!(p.attr("in", "style").as_deref(), Some("color: red"));
+}

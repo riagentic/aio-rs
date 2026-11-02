@@ -265,6 +265,24 @@ impl TestPage {
                     r.u32();
                     r.str();
                 }
+                op::STYLE => {
+                    let span = self.span(&mut r);
+                    let (k, v) = (r.str(), r.str());
+                    let el = span.into_iter().find(|n| matches!(self.nodes[*n].kind, Kind::El(..)));
+                    if let Some(Kind::El(_, a)) = el.map(|n| &mut self.nodes[n].kind) {
+                        let mut style: Vec<String> = a
+                            .iter()
+                            .find(|(x, _)| x == "style")
+                            .map(|(_, s)| s.split(';').filter(|d| !d.trim().is_empty()).map(str::to_owned).collect())
+                            .unwrap_or_default();
+                        style.retain(|d| d.split(':').next().map(str::trim) != Some(k.as_str()));
+                        if !v.is_empty() {
+                            style.push(format!("{k}: {v}"));
+                        }
+                        a.retain(|(x, _)| x != "style");
+                        a.push(("style".into(), style.join("; ")));
+                    }
+                }
                 o => panic!("air: unknown edit {o}"),
             }
         }

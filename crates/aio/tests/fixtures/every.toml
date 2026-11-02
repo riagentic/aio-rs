@@ -118,6 +118,7 @@ timeout = "30s"
 [ui]
 theme = "full"
 hue = 200
+neutral = "soft"
 [vitals.loop]
 degraded = 10
 warning = 20
