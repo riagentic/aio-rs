@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 xvfb ffmpeg
       - run: rustup toolchain install && rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -29,7 +31,25 @@ jobs:
           key: aio-tools-${{ runner.os }}-${{ steps.pins.outputs.key }}
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- setup
+      # dx-metrics' sizes against the commit before (a PR's merge: main's
+      # head) measured on this runner (scripts/dx-metrics), its row kept per
+      # commit: main's runs keep theirs for the PRs on top.
+      - id: dx
+        run: echo "base=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+      - id: dxrows
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/aio-dx-rows
+          key: aio-dx-rows-${{ steps.dx.outputs.base }}
       - run: ./ci.sh
+        env:
+          AIO_DX_BASE: ${{ steps.dx.outputs.base }}
+          AIO_DX_ROWS: ~/.cache/aio-dx-rows
+      - if: always() && (github.event_name == 'push' || steps.dxrows.outputs.cache-hit != 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/aio-dx-rows
+          key: aio-dx-rows-${{ github.event_name == 'push' && github.sha || steps.dx.outputs.base }}
   # The same tests on each desktop OS (fmt and lint are the same everywhere).
   test:
     strategy:

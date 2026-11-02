@@ -337,6 +337,16 @@ version may break things.
 
 ### Fixed
 
+- `scripts/dx-metrics --check` compares like with like: every gated
+  number, sizes and crate counts too, is judged against the same machine's
+  rows only (a CI runner's debug target was failing against the
+  developer machine's best: debug info holds absolute paths). `--base
+  <rev>` measures the base commit's sizes in a checkout beside this one,
+  and GitHub CI gates against its PR's base measured on the same runner
+  (`AIO_DX_BASE`, rows kept per commit in `AIO_DX_ROWS` and cached); its
+  times are said, not gated. Accepted growth stays a committed row of the
+  same machine.
+
 - The app quitting (it stops, its socket closes) right after the page
   vetoed a close (`window.close()` with a beforeunload handler) quits: the
   vetoed close, still settling, took the quit's own close of that window

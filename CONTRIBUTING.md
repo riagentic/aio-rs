@@ -51,7 +51,11 @@ The gates, in order:
   `ax dev` and smoke-run; its row (build times, sizes, memory) is appended
   to `scripts/dx-trend.csv` (commit it). A number past its limit fails,
   naming both. `scripts/dx-metrics --trend` shows the last rows and the
-  limits.
+  limits. Only the same machine's rows count. GitHub CI has none: its
+  sizes and crate counts are held to the PR's base (main's head) measured
+  on the same runner in the same job (or kept from main's run on a runner
+  of the same machine id); its times are said, not gated. Growth meant: a
+  committed row of that machine (the failing run prints it).
 
 The Windows tests run on a real Windows when one is named:
 `AIO_CI_WINDOWS="user@host [ssh options]" ./ci.sh` (or

@@ -27,6 +27,9 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
 
   scripts/dx-metrics            measure, print, append the row
   scripts/dx-metrics --check    also fail on a regression past its limit
+      --base <rev>              sizes against <rev>'s, measured here too
+      --rows <dir>              rows kept per commit (<dir>/<sha>.csv): a
+                                base's row of this machine is reused
   scripts/dx-metrics --trend [n]  the last n rows (12) and today's limits
   scripts/dx-metrics --self-test  the gate's rules, on made-up rows
 
@@ -36,8 +39,18 @@ of the last 10 rows; the window's memory written 15% over its rolling median
 (its private memory drops ~40 MB while another app runs on the same runtime:
 said, not gated); CPU seconds, boot and live-edit times (a shared
 machine moved them 30% between two runs of one commit) 50% over their rolling
-median. Each limit is at least an absolute slack over its mark, and times and
-memory are judged against the same machine's rows only. Builds are judged by
+median. Each limit is at least an absolute slack over its mark.
+
+A measurement is only ever judged against rows of the same machine: debug
+info holds absolute paths and the toolchain and system differ, so another
+machine's numbers say nothing (main's debug target: 941-943 MB on one
+machine, 951-952 on a CI runner). Where the trend has no rows of this machine (GitHub CI),
+`--base <rev>` measures <rev> (a PR merge's first parent: main's head) in a
+checkout beside this one, its path as long, and each size and crate count
+is held to 5% (and its slack) over that; times and memory, measured once
+there, are said, not gated. Growth meant stays explicit: a row this change
+commits to scripts/dx-trend.csv, of this machine (a failing `--base` run
+prints it), raises that limit to its own. Builds are judged by
 CPU seconds: other work beside them stretches wall time more (kept for the
 trend). A row names its machine only by a short hash (cpu model, cores,
 memory, and Xvfb when the smoke draws on one). The template builds as `ax dev` builds it (cargo's defaults,
@@ -72,25 +85,26 @@ STEADY, MEMORY, NOISY = (min, 1.05), (MEDIAN, 1.15), (MEDIAN, 1.5)
 REBUILD = "the template's build: `cargo build --timings` in an `ax create` app (target/cargo-timings)"
 SIZES = "`ax build <app> --sizes` (bytes per crate)"
 LIVE = "`ax dev <app>`: logs/dev.log (dx's lines, each patch's time)"
-# Gated: (against what, the slack it must pass too, the same machine's rows only, how to see what grew).
+# Gated: (against what, the slack it must pass too, how to see what grew), always
+# against the same machine's rows only.
 GATED = {
-    "crates": (STEADY, 0, False, "scripts/slim-metrics; why a crate: cargo tree -e normal -p aio-rs-shell -F aio/kit -i <crate>"),
-    "core_crates": (STEADY, 0, False, "scripts/slim-metrics; cargo tree -e normal -p aio-rs --no-default-features -i <crate>"),
-    "kit_crates": (STEADY, 0, False, "scripts/slim-metrics; cargo tree -e normal -p aio-rs --no-default-features -F kit -i <crate>"),
-    "clean_debug_cpu": (NOISY, 5, True, REBUILD),
-    "rebuild_cpu": (NOISY, 0.5, True, REBUILD),
-    "release_cpu": (NOISY, 10, True, "`cargo build --release --timings` in an `ax create` app"),
-    "debug_target_mb": (STEADY, 20, False, "du -sk <target>/*/desktop-dev/deps/* | sort -n | tail"),
-    "binary_b": (STEADY, 50_000, False, SIZES),
-    "targz_b": (STEADY, 50_000, False, SIZES + "; tar tvzf dist/<app>*.tar.gz"),
-    "appimage_b": (STEADY, 50_000, False, SIZES + "; <app>.AppImage --appimage-extract"),
-    "boot_s": (NOISY, 0.5, True, "`ax build <app> --smoke` (boot and memory lines)"),
+    "crates": (STEADY, 0, "scripts/slim-metrics; why a crate: cargo tree -e normal -p aio-rs-shell -F aio/kit -i <crate>"),
+    "core_crates": (STEADY, 0, "scripts/slim-metrics; cargo tree -e normal -p aio-rs --no-default-features -i <crate>"),
+    "kit_crates": (STEADY, 0, "scripts/slim-metrics; cargo tree -e normal -p aio-rs --no-default-features -F kit -i <crate>"),
+    "clean_debug_cpu": (NOISY, 5, REBUILD),
+    "rebuild_cpu": (NOISY, 0.5, REBUILD),
+    "release_cpu": (NOISY, 10, "`cargo build --release --timings` in an `ax create` app"),
+    "debug_target_mb": (STEADY, 20, "du -sk <target>/*/desktop-dev/deps/* | sort -n | tail"),
+    "binary_b": (STEADY, 50_000, SIZES),
+    "targz_b": (STEADY, 50_000, SIZES + "; tar tvzf dist/<app>*.tar.gz"),
+    "appimage_b": (STEADY, 50_000, SIZES + "; <app>.AppImage --appimage-extract"),
+    "boot_s": (NOISY, 0.5, "`ax build <app> --smoke` (boot and memory lines)"),
     # Not window_mb: its runtime's file pages count as private only while no
     # other app runs on that runtime (82 against 126 MB, one build).
-    "window_dirty_mb": (MEMORY, 5, True, "`ax build <app> --smoke` (boot and memory lines)"),
-    "live_css_s": (NOISY, 0.25, True, LIVE),
-    "live_rsx_s": (NOISY, 0.25, True, LIVE),
-    "live_logic_s": (NOISY, 0.5, True, LIVE),
+    "window_dirty_mb": (MEMORY, 5, "`ax build <app> --smoke` (boot and memory lines)"),
+    "live_css_s": (NOISY, 0.25, LIVE),
+    "live_rsx_s": (NOISY, 0.25, LIVE),
+    "live_logic_s": (NOISY, 0.5, LIVE),
 }
 # A crate count is held to its deps.toml `[ceilings]` set too.
 CEILING = {"crates": "app kit", "core_crates": "aio-rs core", "kit_crates": "aio-rs kit"}
@@ -138,15 +152,17 @@ def commit():
     return head.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
 
 
-def slim():
+def slim(root=ROOT):
+    """scripts/slim-metrics, counting in the checkout `root`."""
     loader = importlib.machinery.SourceFileLoader("slim", str(ROOT / "scripts/slim-metrics"))
     mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("slim", loader))
     loader.exec_module(mod)
+    mod.ROOT = root
     return mod
 
 
-def crates():
-    s = slim()
+def crates(root):
+    s = slim(root)
     sets = dict(s.SETS)
     return {col: len(s.crates(sets[name])) for col, name in CEILING.items()}
 
@@ -257,21 +273,29 @@ def du_mb(path):
     return int(subprocess.run(["du", "-sk", path], capture_output=True, text=True).stdout.split()[0]) // 1024
 
 
-def measure(tmp):
-    # aio-rs itself as ci.sh built it (its env); the template as a developer's.
-    run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], ROOT, os.environ)
+def measure(tmp, root=ROOT, full=True):
+    """A row for the checkout `root` (`tmp` in its target/); not `full`: its
+    sizes only (no rebuilds, live edits or smoke)."""
+    # aio-rs itself as ci.sh built it (its env, its target folder: a base's
+    # `ax` shares its build); the template as a developer's.
+    cli = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    run(["cargo", "fetch", "--locked"], root, os.environ)
+    run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], root, os.environ | {"CARGO_TARGET_DIR": str(cli)})
     env = {k: v for k, v in os.environ.items() if k not in ("CARGO_INCREMENTAL", "DISPLAY", "WAYLAND_DISPLAY")}
     env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
-    aio = pathlib.Path(env.get("CARGO_TARGET_DIR") or ROOT / "target") / "debug" / "ax"
+    aio = cli / "debug" / "ax"
     env["CARGO_TARGET_DIR"] = str(tmp / "target")
-    run([aio, "create", NAME, "--aio", ROOT], tmp, env)
+    run([aio, "create", NAME, "--aio", root], tmp, env)
     app = tmp / NAME
-    shutil.copy(ROOT / "Cargo.lock", app / "Cargo.lock")
+    shutil.copy(root / "Cargo.lock", app / "Cargo.lock")
     # `ax dev`'s layout (its debug profile, the host target): its dx build reuses this one.
     build = ["cargo", "build", "--offline", "-p", f"{NAME}-app", "--profile", "desktop-dev", "--target", host()]
-    row = crates()
+    row = crates(root)
     _, row["clean_debug_s"], row["clean_debug_cpu"] = run(build, app, env)
     row["debug_target_mb"] = du_mb(tmp / "target")
+    if not full:
+        run([aio, "build", NAME, "--appimage"], app, env)
+        return rounded(sizes(row, tmp, app))
     lib = app / "src" / "lib.rs"
     text = lib.read_text()
     edits = []
@@ -285,14 +309,23 @@ def measure(tmp):
     for p, t in sources.items():
         (app / p).write_text(t)
     said, row["release_s"], row["release_cpu"] = run([aio, "build", NAME, "--appimage", "--smoke"], app, env)
-    row["binary_b"] = (tmp / "target" / "release" / NAME).stat().st_size
-    for col, end in (("targz_b", ".tar.gz"), ("appimage_b", ".AppImage")):
-        row[col] = next(f.stat().st_size for f in (app / "dist").iterdir() if f.name.endswith(end))
+    sizes(row, tmp, app)
     boot = re.search(r"window ready in ([\d.]+) s", said)
     mem = re.search(r"memory: (\d+) MB private, (\d+) MB PSS.*?, (\d+) MB written", said)
     row["boot_s"] = float(boot[1]) if boot else ""
     row["window_mb"], row["window_pss_mb"], row["window_dirty_mb"] = (int(mem[1]), int(mem[2]), int(mem[3])) if mem else ("", "", "")
+    return rounded(row)
+
+
+def rounded(row):
     return {k: round(v, 3 if k.startswith("live_") else 1) if isinstance(v, float) else v for k, v in row.items()}
+
+
+def sizes(row, tmp, app):
+    row["binary_b"] = (tmp / "target" / "release" / NAME).stat().st_size
+    for col, end in (("targz_b", ".tar.gz"), ("appimage_b", ".AppImage")):
+        row[col] = next(f.stat().st_size for f in (app / "dist").iterdir() if f.name.endswith(end))
+    return row
 
 
 def history():
@@ -320,35 +353,44 @@ def num(v):
     return f"{v:.0f}" if v >= 1000 else f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def limits(machine_key, rows, ceilings):
+def limits(machine_key, rows, ceilings, base=None, added=()):
     """Each gated metric's limit for a new row of `machine_key` (pure):
-    (limit, how it is set, the commit of the row it comes from)."""
+    (limit, how it is set, the commit of the row it comes from). Only
+    `machine_key`'s rows count. With a `base` row (measured on this machine
+    by `--base`), a size's limit is the base's, or a row this change commits
+    (`added`) when that is higher: growth accepted on this machine."""
     out = {}
-    for col, ((mark, margin), slack, same, _) in GATED.items():
-        past = [r for r in rows if r.get(col) and (not same or r["machine"] == machine_key)][-WINDOW:]
+    for col, ((mark, margin), slack, _) in GATED.items():
+        past = [r for r in rows if r.get(col) and r["machine"] == machine_key][-WINDOW:]
+        if base is not None and mark is min:
+            past = [r for r in [base, *added] if r.get(col) and r["machine"] == machine_key]
+            mark = max
         if past:
             was = mark([float(r[col]) for r in past])
             src = next(r["commit"] for r in reversed(past) if float(r[col]) == was)
-            how = f"{'best' if mark is min else 'median'} {num(was)} of the last {len(past)} rows {margin - 1:+.0%}"
-            out[col] = (max(was * margin, was + slack), how, src)
+            if mark is max:
+                how = f"{'the base' if src == base['commit'] else 'the row this change commits'} {num(was)}"
+            else:
+                how = f"{'best' if mark is min else 'median'} {num(was)} of the last {len(past)} rows"
+            out[col] = (max(was * margin, was + slack), f"{how} {margin - 1:+.0%}", src)
         cap = ceilings.get(CEILING.get(col))
         if cap is not None and (col not in out or cap < out[col][0]):
             out[col] = (cap, f"deps.toml [ceilings] \"{CEILING[col]}\"", out.get(col, (0, 0, None))[2])
     return out
 
 
-def regressions(row, rows, ceilings=None):
+def regressions(row, rows, ceilings=None, base=None, added=()):
     """Each gated metric of `row` past its limit, said with its limit and
     where to look (pure)."""
     out = []
-    for col, (limit, how, src) in limits(row["machine"], rows, ceilings or {}).items():
+    for col, (limit, how, src) in limits(row["machine"], rows, ceilings or {}, base, added).items():
         if row.get(col) in ("", None) or float(row[col]) <= limit:
             continue
         c = (src or "").removesuffix("-dirty")
         changes = f"git diff {c} -- Cargo.lock" if col in CEILING else f"git log --oneline {c}.."
         since = f"; since {c}: {changes}" if c else ""
         out.append(f"{col} {row[col]} is over its limit {num(limit)} ({how})\n"
-                   f"    what grew: {GATED[col][3]}{since}; scripts/dx-metrics --trend")
+                   f"    what grew: {GATED[col][2]}{since}; scripts/dx-metrics --trend")
     return out
 
 
@@ -397,7 +439,78 @@ def self_test():
     said = first({"core_crates": "50"}, {"aio-rs core": 49})
     assert "deps.toml [ceilings] \"aio-rs core\"" in said, said
     assert first({"core_crates": "48"}, {"aio-rs core": 49}) == "", "fewer pass"
+    assert first({"machine": "other", "debug_target_mb": "2000"}) == "", "sizes too: the same machine's rows only"
+    # --base: sizes against the base, measured on this machine; times only against this machine's rows.
+    dev = [base | {"machine": "dev", "commit": "d1", "debug_target_mb": "905"}]
+    ci = {"machine": "ci", "commit": "b0", "crates": "141", "binary_b": "5310528", "debug_target_mb": "950"}
+    head = lambda over, new=(): (regressions(base | {"machine": "ci"} | over, dev, None, ci, new) or [""])[0]  # noqa: E731
+    assert head({"debug_target_mb": "952"}) == "", "the base's 950 counts, not another machine's 905"
+    said = head({"debug_target_mb": "1000"})
+    assert said.startswith("debug_target_mb 1000 is over its limit 997.5 (the base 950 +5%)"), said
+    assert "since b0: git log --oneline b0.." in said, said
+    assert head({"clean_debug_cpu": "900"}) == "", "no times of this machine: not gated"
+    assert head({"debug_target_mb": "1000"}, [ci | {"commit": "a1", "debug_target_mb": "1000"}]) == "", "growth committed here"
+    assert head({"debug_target_mb": "1000"}, [dev[0] | {"debug_target_mb": "1000"}]), "growth committed elsewhere: no"
+    old = [{"date": "d", "commit": "c", "machine": "m", "crates": "141"}]
+    assert added(old, [old[0] | {"core_crates": "49"}, old[0] | {"crates": "142"}]) == [old[0] | {"crates": "142"}], \
+        "rows this change commits, a column added since not counting"
     print("dx-metrics: the gate's rules hold")
+
+
+def git(*args):
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+
+
+def cached(cache, sha):
+    """The rows `--rows` kept for commit `sha`."""
+    f = cache / f"{sha}.csv" if cache else None
+    if not f or not f.exists():
+        return []
+    with f.open(newline="") as rows:
+        return list(csv.DictReader(rows))
+
+
+def keep(cache, sha, row):
+    if not cache:
+        return
+    cache.mkdir(parents=True, exist_ok=True)
+    f = cache / f"{sha}.csv"
+    new = not f.exists()
+    with f.open("a", newline="") as out:
+        w = csv.DictWriter(out, COLUMNS, extrasaction="ignore")
+        if new:
+            w.writeheader()
+        w.writerow(row)
+
+
+def measure_base(sha):
+    """Commit `sha`'s sizes, built in a checkout beside this one whose path
+    is as long (debug info holds the paths)."""
+    here = ROOT.with_name(ROOT.name[:-1] + ("-" if ROOT.name.endswith("_") else "_"))
+    if here.exists():
+        sys.exit(f"dx-metrics: {here} is in the way of the base's checkout")
+    git("worktree", "add", "--detach", "-q", str(here), sha)
+    try:
+        (here / "target").mkdir()
+        with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=here / "target") as tmp:
+            return measure(pathlib.Path(tmp), here, full=False)
+    finally:
+        git("worktree", "remove", "--force", str(here))
+
+
+def at(sha):
+    """Commit `sha`'s trend rows."""
+    old = subprocess.run(["git", "show", f"{sha}:scripts/dx-trend.csv"], cwd=ROOT, capture_output=True, text=True)
+    return list(csv.DictReader(old.stdout.splitlines())) if old.returncode == 0 else []
+
+
+def added(was, rows):
+    """The rows of `rows` not in `was` (the base's trend), by the columns
+    `was` has (pure): the ones this change commits."""
+    cols = list(was[0]) if was else COLUMNS
+    key = lambda r: tuple(r.get(c) or "" for c in cols)  # noqa: E731
+    seen = {key(r) for r in was}
+    return [r for r in rows if key(r) not in seen]
 
 
 def main():
@@ -408,20 +521,41 @@ def main():
         rest = args[args.index("--trend") + 1:]
         return trend(int(rest[0]) if rest and rest[0].isdigit() else 12)
     check = "--check" in args
-    rows = history()
+    rev, cache = (args[args.index(f) + 1] if f in args else None for f in ("--base", "--rows"))
+    cache = cache and pathlib.Path(cache).expanduser()
+    rows, here, today = history(), machine(), datetime.date.today().isoformat()
+    base, new = None, ()
+    if rev:
+        sha = git("rev-parse", "--verify", f"{rev}^{{commit}}").strip()
+        base = next((r for r in cached(cache, sha) if r["machine"] == here), None)
+        if base:
+            print(f"dx-metrics: the base {sha[:8]}: this machine's row kept in {cache}")
+        else:
+            t = time.monotonic()
+            base = measure_base(sha) | {"date": today, "commit": sha[:8], "machine": here}
+            keep(cache, sha, base)
+            print(f"dx-metrics: the base {sha[:8]} measured here in {time.monotonic() - t:.0f} s")
+        new = added(at(sha), rows)
     # Beside the checkout (its target/): `ax create --aio` names the checkout
     # relative to the app, never through the root.
     (ROOT / "target").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=ROOT / "target") as tmp:
         row = measure(pathlib.Path(tmp))
-    row |= {"date": datetime.date.today().isoformat(), "commit": commit(), "machine": machine()}
+    row |= {"date": today, "commit": commit(), "machine": here}
+    keep(cache, git("rev-parse", "HEAD").strip(), row)
     for col in COLUMNS:
         print(f"{col:16} {row.get(col, '')}")
     save(row, rows)
     caps = tomllib.loads((ROOT / "deps.toml").read_text())["ceilings"]
-    bad = regressions(row, rows, caps)
+    free = [c for c in GATED if row.get(c) not in ("", None) and c not in limits(here, rows, caps, base, new)]
+    if free:
+        print(f"dx-metrics: not gated, no rows of this machine ({here}) yet: {', '.join(free)}", file=sys.stderr)
+    bad = regressions(row, rows, caps, base, new)
     if bad:
         print("dx-metrics: past the limit (scripts/dx-trend.csv has the row):\n  " + "\n  ".join(bad), file=sys.stderr)
+        if base:
+            print("growth meant: commit this row to scripts/dx-trend.csv (this machine's, so this gate takes it):\n"
+                  + ",".join(str(row.get(c, "")) for c in COLUMNS), file=sys.stderr)
         if check:
             sys.exit(1)
 
