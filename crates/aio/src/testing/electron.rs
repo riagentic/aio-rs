@@ -20,6 +20,33 @@ const WAIT: Duration = Duration::from_secs(30);
 const TAIL: usize = 20;
 
 type Answer = Result<Value, String>;
+
+/// What a page asked of a host a test answers ([`super::ui::Mount::fetch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asked {
+    pub method: String,
+    pub url: String,
+    /// A POST's or PUT's body; empty for none.
+    pub body: String,
+}
+
+/// A test's answer to one of those requests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answered {
+    pub status: u16,
+    /// Its `Content-Type`.
+    pub kind: String,
+    pub body: Vec<u8>,
+}
+
+impl Answered {
+    pub fn new(status: u16, kind: &str, body: impl Into<Vec<u8>>) -> Self {
+        Self { status, kind: kind.into(), body: body.into() }
+    }
+}
+
+/// A test's answers to the page's requests to one host.
+pub(crate) type Stub = Arc<dyn Fn(&Asked) -> Answered + Send + Sync>;
 /// Shared by the caller and the reader thread, per call or page id.
 type ById<T> = Arc<Mutex<HashMap<u64, T>>>;
 
@@ -30,6 +57,8 @@ pub(crate) struct Browser {
     console: ById<Vec<String>>,
     /// Each page's requests to the network, refused, not taken yet.
     refused: ById<Vec<String>>,
+    /// Each page's answered hosts, with their answers.
+    stubs: ById<Vec<(String, Stub)>>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     next: AtomicU64,
     _child: Arc<Mutex<std::process::Child>>,
@@ -161,8 +190,10 @@ fn start(page: String) -> Result<Browser, String> {
     });
     let asks: ById<mpsc::Sender<Answer>> = Default::default();
     let (console, refused): (ById<Vec<String>>, ById<Vec<String>>) = Default::default();
+    let stubs: ById<Vec<(String, Stub)>> = Default::default();
     let (ready, up) = mpsc::channel();
     let (a, c, t, gone, r) = (asks.clone(), console.clone(), tail.clone(), child.clone(), refused.clone());
+    let st = stubs.clone();
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
             let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
@@ -180,6 +211,14 @@ fn start(page: String) -> Result<Browser, String> {
                 lock(&c).entry(p).or_default().push(s.to_string());
             } else if let (Some(p), Some(u)) = (m["page"].as_u64(), m["refused"].as_str()) {
                 lock(&r).entry(p).or_default().push(u.to_string());
+            } else if let Some(p) = m["page"].as_u64().filter(|_| m["paused"].is_object()) {
+                let stub = lock(&st).get(&p).and_then(|ss| {
+                    let host = host_of(m["paused"]["request"]["url"].as_str().unwrap_or_default());
+                    ss.iter().find(|(h, _)| *h == host).map(|(_, s)| s.clone())
+                });
+                // Off this thread: the answer is a call, and this thread reads its reply.
+                let paused = m["paused"].clone();
+                std::thread::spawn(move || answer(p, &paused, stub));
             }
         }
         // It went: every call waiting fails, saying how and what it said last.
@@ -205,10 +244,52 @@ fn start(page: String) -> Result<Browser, String> {
         asks,
         console,
         refused,
+        stubs,
         stderr: tail,
         next: AtomicU64::new(0),
         _child: child,
     })
+}
+
+/// The host of `url` (`https://api.example.org:8443/x`: `api.example.org`; pure).
+pub(crate) fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let auth = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+    if auth.starts_with('[') { auth.split_inclusive(']').next().unwrap_or(auth) } else { auth.split(':').next().unwrap_or(auth) }
+}
+
+/// The `Fetch.fulfillRequest` of a paused request with the stub's answer
+/// (pure), readable from any origin (the test page is `aio://app`).
+fn fulfil(request: &str, a: &Answered) -> Value {
+    use base64::Engine;
+    json!({
+        "requestId": request,
+        "responseCode": a.status,
+        "responseHeaders": [
+            { "name": "content-type", "value": a.kind },
+            { "name": "access-control-allow-origin", "value": "*" },
+        ],
+        "body": base64::engine::general_purpose::STANDARD.encode(&a.body),
+    })
+}
+
+/// Answer page `page`'s paused request with `stub`; with none, let it go on.
+fn answer(page: u64, paused: &Value, stub: Option<Stub>) {
+    let request = paused["requestId"].as_str().unwrap_or_default();
+    let (method, params) = match stub {
+        Some(stub) => {
+            let r = &paused["request"];
+            let asked = Asked {
+                method: r["method"].as_str().unwrap_or("GET").into(),
+                url: r["url"].as_str().unwrap_or_default().into(),
+                body: r["postData"].as_str().unwrap_or_default().into(),
+            };
+            ("Fetch.fulfillRequest", fulfil(request, &stub(&asked)))
+        }
+        None => ("Fetch.continueRequest", json!({ "requestId": request })),
+    };
+    _ = browser().call(json!({ "page": page, "method": method, "params": params }));
 }
 
 impl Browser {
@@ -279,6 +360,17 @@ impl Page {
         lock(&self.browser.console).get(&self.id).cloned().unwrap_or_default()
     }
 
+    /// Answer the page's requests to each of `stubs`' hosts with its stub,
+    /// from now on.
+    pub(crate) fn answer(&self, stubs: Vec<(String, Stub)>) {
+        if stubs.is_empty() {
+            return;
+        }
+        let patterns: Vec<Value> = stubs.iter().map(|(h, _)| json!({ "urlPattern": format!("*://{h}/*") })).collect();
+        lock(&self.browser.stubs).insert(self.id, stubs);
+        self.cmd("Fetch.enable", json!({ "patterns": patterns }));
+    }
+
     /// Take the page's requests the network rule refused so far.
     pub(crate) fn refused(&self) -> Vec<String> {
         lock(&self.browser.refused).remove(&self.id).unwrap_or_default()
@@ -290,6 +382,7 @@ impl Drop for Page {
         _ = self.browser.call(json!({ "close": self.id }));
         lock(&self.browser.console).remove(&self.id);
         lock(&self.browser.refused).remove(&self.id);
+        lock(&self.browser.stubs).remove(&self.id);
     }
 }
 
@@ -321,6 +414,25 @@ mod tests {
         // On Linux it writes its cache there at once: HOME was taken.
         let wrote = |h: &std::path::PathBuf| if cfg!(target_os = "linux") { h.join(".cache").is_dir() } else { h.is_dir() };
         assert!(cfg!(target_os = "macos") || homes.iter().any(wrote), "{homes:?}");
+    }
+
+    #[test]
+    fn a_request_s_host_is_read_from_its_url() {
+        assert_eq!(host_of("https://api.example.org:8443/v1?x=1"), "api.example.org");
+        assert_eq!(host_of("http://user:pw@cdn.example.org/a"), "cdn.example.org");
+        assert_eq!(host_of("https://[::1]:9/x"), "[::1]");
+        assert_eq!(host_of("wss://example.org#a"), "example.org");
+    }
+
+    #[test]
+    fn a_stub_s_answer_is_sent_as_given() {
+        use base64::Engine;
+        let f = fulfil("r1", &Answered::new(201, "image/png", [0x89, b'P']));
+        assert_eq!((f["requestId"].as_str(), f["responseCode"].as_u64()), (Some("r1"), Some(201)));
+        assert_eq!(f["responseHeaders"][0]["value"], "image/png");
+        assert_eq!(f["responseHeaders"][1]["value"], "*", "readable from the aio:// test page");
+        let body = base64::engine::general_purpose::STANDARD.decode(f["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body, [0x89, b'P']);
     }
 
     #[test]

@@ -17,6 +17,7 @@ three).
 | a small team with logins | `[accounts] on = true`, `ax auth <app> create` |
 | sign-in with an identity provider | `[accounts]` and `Http::oidc` (feature `oidc`) |
 | a service whose callers are machines | `Http::users(Users::map(..))`: a token per caller |
+| sessions your own login issues, no accounts | `[accounts] sessions = true`, `auth::serving()`'s `issue` |
 | a public site | a reverse proxy in front: `[server] hosts`, `trust_proxy`, your own certificate |
 
 ## Who can reach the app
@@ -30,6 +31,8 @@ A served app (`[app] mode = "client-server"` or `"server"`) listens where
 | `--port 8100` | that port, on `listen`'s host | as `[server] tls` |
 | `--host 192.168.1.20` | that interface only (a LAN card, a VPN address) | on, unless it is loopback |
 | `--expose` | `0.0.0.0` (every interface) | on |
+| `--tls-cert=<pem> --tls-key=<pem>` | as above | on, with that chain and key (over `[server] cert`, `key`) |
+| `--no-tls` | as above | off, whatever else says on; exposed, the boot warns |
 
 - A launch that opens the app to the network (`--expose`, a host not on
   loopback) turns TLS on, so the key never crosses a LAN in the clear.
@@ -41,12 +44,28 @@ A served app (`[app] mode = "client-server"` or `"server"`) listens where
   `team listens on 127.0.0.1:8100 (this machine only; [server] listen)`,
   `team is open to the network on 0.0.0.0:8100 over TLS, behind its key
   (--expose)`.
+- An exposed boot prints where to share it and what to show (aio's
+  `share:` line): `share: https://192.168.1.5:8443/ — with the app's
+  key, …; key file: <data>/sync.token`. A wildcard bind is shown at this
+  machine's LAN address. The key itself is never printed (the log masks
+  any `token=`): its file is named, and with `[server] pairing`, `ax pair`
+  for a code. With users, sessions or accounts the line says what each
+  caller shows instead.
+- On Windows and macOS an exposed boot also prints a `firewall:` line:
+  the OS may ask whether the app can be reached, and a dismissed question
+  leaves it working here and unreachable elsewhere. aio-rs opens no rule.
+- `--tls-cert` and `--tls-key` go together, and not with `--no-tls`;
+  a relative path is the launch directory's.
 - A port in use stops the boot at once, naming the address.
 - A service gets these flags in its supervisor file's command line; `ax
   start <app> -- --expose` passes them to a background launch.
 
 Even on loopback the key is asked for: a page in a browser on the same
 machine can reach `127.0.0.1`, and so can every other user's process.
+The one exception is health and metrics on an app without accounts or
+users: this machine's monitor reads them without the key (a page on
+another origin can't read the answer). Every endpoint and what opens it:
+[endpoints](#every-endpoint-and-what-opens-it).
 
 ## The key
 
@@ -251,6 +270,34 @@ trust_proxy`, or every client shares the proxy's budgets
 - With accounts, the app's page itself (the shell) is served without a
   key, so the sign-in form can load; everything behind it needs a
   session.
+
+### Sessions without accounts
+
+`[accounts] sessions = true` (aio's `sessions: true`) keeps the session
+store of `auth.db` without accounts: no users table to fill, no login
+doors (`/__aio/auth/*` is not served). The app issues sessions itself,
+say from a server function that checked its own credential:
+`aio::auth::serving()` is the store, `issue(user, role)` mints a token,
+`revoke`, `revoke_user` and `refresh` end or renew one, `ax auth <app>
+revoke <user>` too.
+
+- A session is a user known by its token ([below](#users-the-app-resolves-itself)):
+  that user and role on every door; the key opens none of them. Shown
+  as `Authorization: Bearer`, the cookie `aio_session_<app id>`, or on a
+  socket `?token=` (the web client's link).
+- It lives `session` unused, sliding, at most `max_sessions` per user,
+  as with accounts. A revoked or expired session closes its sockets at
+  once (revocation) or within 5 seconds (expiry).
+- The app's own `Http::users` compose: a session is tried first, then
+  its tokens.
+- `signup` and `require_verified` need accounts: with sessions alone
+  they are an error; so is `[server] open`.
+
+```toml
+[accounts]
+sessions = true
+session = "7d"
+```
 
 ### TOTP
 
@@ -495,6 +542,13 @@ let _ = http();
   (one that panics resolves no one). An empty token resolves no one.
 - Keep the tokens out of the source: the environment or a file in
   `data/`.
+- An open socket's token is resolved again every 5 seconds (aio's
+  re-check; at once when a session behind it is revoked). One that no
+  longer resolves to the same user and role, or a resolver that panics,
+  closes the socket (fail closed); the client's reconnect gets what a
+  new handshake would. A resolver slower than 3 seconds keeps the
+  socket on its last verdict, is said in the log, and is not called
+  again until it answers.
 
 ### Operator console: `ax auth`
 
@@ -639,6 +693,36 @@ hosts = ["team.example.org"]
 [server.public_dirs]
 "/.well-known" = "acme"
 ```
+
+## Every endpoint and what opens it
+
+Fail closed: nothing a served app answers is open to the network without
+a credential unless the app says so (`Route::public`, `[server.public_dirs]`,
+`[server] open`). "Credential" is the key, or with accounts a session,
+or with users (or sessions alone) a user's token; the key opens nothing
+in the per-user modes. "Here" is loopback, not relayed by a proxy.
+
+| Endpoint | Served when | 0.1 default | Now |
+|---|---|---|---|
+| `/ws` (sync, server fns) | `#[cell(shared)]` | credential | credential; a user's token re-checked every 5 s |
+| `/__aio/ui` (UI tabs) | `Http::ui` | credential | credential; re-checked the same |
+| `/__aio/health`, `/__aio/metrics` | always | **anyone, from anywhere** (without accounts) | credential; here without one only without accounts or users |
+| `/__aio/snapshot` | debug builds | here with the key, or an admin's session | the same |
+| `/__aio/pin` (mint a code) | `[server] pairing` | here with the key | the same |
+| `/__aio/pair` | `[server] pairing` | anyone with a live code, budgeted | the same |
+| `/__aio/pin-proof` | TLS | anyone: proves the caller holds the key, budgeted | the same |
+| `/__aio/auth/*` (login doors) | `[accounts] on` | anyone, budgeted; signup off | the same; not served with sessions alone |
+| `/__aio/blobs/<id>` | `Http::blobs` | credential | the same |
+| the app's routes | `Http::route` | credential; `Route::public` opens one | the same |
+| the shell, `[server.dirs]` | `Http::shell`, `[server.dirs]` | credential; with accounts the shell is public (sign-in page) | the same |
+| `[server.public_dirs]` | listed | anyone (on purpose) | the same |
+| the UI page | `Http::ui` | credential; public with accounts | the same |
+| `[server] open = true` | on purpose | everything above but `/__aio/pin` and the snapshot, said loudly | the same |
+| the local door (a socket or pipe) | always (release: `[server] local_peers`) | this OS user only | the same |
+| LAN discovery, UDP 8099 | `[server] discover` | answers probes with the name and port | the same |
+| `ax ui --browser`, `ax control` | asked | `127.0.0.1`, a key made for the run | the same |
+| `ax dev --web`'s site | asked | `127.0.0.1` only, no key (dev) | the same |
+| a window's DevTools port | debug build, `--cdp` | `127.0.0.1` only | the same |
 
 ## Hosts, origins and forged requests
 
@@ -822,20 +906,21 @@ What it does not:
 
 What aio has that aio-rs does not, or does differently:
 
-- **No sessions without accounts** (aio's `sessions: true`): sessions
-  come with `[accounts]`. An app with its own login flow mints them with
-  `aio::auth::serving()` and `issue(user, role)`.
-- **No TLS flags at launch** (aio's `--tls-cert`, `--tls-key`,
-  `--no-tls`): the certificate is `[server] cert` and `key`, and a launch
-  that exposes the app always serves TLS; plain HTTP to the network takes
-  `[server] listen` with `tls = false`.
+- **Sessions alone take `?token=` on a socket only**: a browser page
+  load needs the session as a bearer or the `aio_session_<app id>` cookie
+  (an app route may set it), where aio also read the page's `?token=`.
 - **No CORS answers**: no `Access-Control-Allow-*` headers are sent, so a
   page on another origin can't read the app's routes with `fetch`; it may
   open the socket when its host is in `[server] hosts`. aio's
   `allowedOrigins` entries with a scheme and port are, in aio-rs, host
   names (`[server] hosts`).
-- **No share link printed** at boot: `ax profile` or pairing hands the
-  key out; a browser link is `https://host:port/?token=<key>` by hand.
+- **The share line names the key file, not the key** (aio printed the
+  link with the key, masked only in the log file): a browser link is
+  `https://host:port/?token=<key>` by hand, or `ax profile`, or pairing.
+- **A user's token whose role changed closes its socket** (aio sent the
+  open socket its new view): the reconnect has the new role.
+- **Health and metrics need a credential beyond this machine**, also
+  without accounts (aio answered them to anyone on an app without a key).
 - **No `useUser()` hook**: `Client::me` answers who is signed in, and
   `SignIn`'s `on_signed` hands the session to the app.
 - **Lockout and budgets are fixed** (5 tries, 15 minutes; the per-address

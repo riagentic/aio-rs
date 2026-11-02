@@ -695,3 +695,93 @@ async fn behind_a_trusted_proxy_sign_in_budgets_are_the_clients() {
     let b = [("X-Forwarded-For", "198.51.100.2")];
     assert_eq!(raw(&addr, "POST", "/__aio/auth/login", &b, wrong).await.0, 401);
 }
+
+async fn served(http: aio::http::Http) -> (Handle<Board>, String) {
+    let h = Handle::<Board>::memory();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(serve_with(h.clone(), l, Options { token: "secret".into(), http, ..Default::default() }));
+    (h, addr)
+}
+
+/// aio's `users:`/`resolveUser` re-check: an open socket's token is asked
+/// again every 5 s, and one no longer resolved (revoked, a resolver that
+/// panics, a changed role) closes it, for good.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_token_is_rechecked_on_its_open_socket() {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0: ann is a user; 1: her token is revoked; 2: the resolver panics; 3: ann is an admin now.
+    let mode = Arc::new(AtomicU8::new(0));
+    let m = mode.clone();
+    let users = aio::auth::Users::resolve(move |t| match (t, m.load(Ordering::SeqCst)) {
+        ("tok-ann-0123456789abcdef", 2) => panic!("resolver bug"),
+        ("tok-ann-0123456789abcdef", 0) => Some(("ann".into(), "user".into())),
+        ("tok-ann-0123456789abcdef", 3) => Some(("ann".into(), "admin".into())),
+        ("tok-bob-0123456789abcdef", _) => Some(("bob".into(), "user".into())),
+        _ => None,
+    });
+    let (h, addr) = served(aio::http::Http::default().users(users)).await;
+    let gone = |r: &Remote<Board>| {
+        let r = r.clone();
+        async move {
+            for _ in 0..1_000 {
+                if !r.online() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+    };
+    let bob = Remote::<Board>::connect(&addr, "tok-bob-0123456789abcdef", "bob").await.unwrap();
+    for (end, what) in [(1, "revoked"), (2, "a panicking resolver")] {
+        mode.store(0, Ordering::SeqCst);
+        let ann = Remote::<Board>::connect(&addr, "tok-ann-0123456789abcdef", "ann").await.unwrap();
+        ann.add("hi".into()).unwrap();
+        until("ann's call is in", || h.state().last == Some(By::User("ann".into()))).await;
+        mode.store(end, Ordering::SeqCst);
+        assert!(gone(&ann).await, "{what}: the socket closes within the re-check");
+        assert!(bob.online(), "{what}: only that token's socket");
+    }
+    // A changed role: the socket closes, and the client's reconnect calls with the new one.
+    mode.store(0, Ordering::SeqCst);
+    let ann = Remote::<Board>::connect(&addr, "tok-ann-0123456789abcdef", "ann").await.unwrap();
+    ann.add("hi".into()).unwrap();
+    until("ann's call is in", || h.state().role.as_deref() == Some("user")).await;
+    mode.store(3, Ordering::SeqCst);
+    for _ in 0..100 {
+        if h.state().role.as_deref() == Some("admin") {
+            break;
+        }
+        ann.add("again".into()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(h.state().role.as_deref(), Some("admin"), "the new role, not the one it opened with");
+}
+
+/// Sessions without accounts (aio's `sessions: true`): the app issues a
+/// session, which is its user on the socket; no login doors are served; a
+/// revoked session's socket closes at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_without_accounts() {
+    let auth = Arc::new(Auth::memory(Policy::default()).unwrap());
+    let known = aio::auth::Users::map([("svc-0123456789abcdef0123".into(), ("svc".into(), "service".into()))]);
+    let users = aio::auth::Users::sessions(auth.clone(), Some(known));
+    let (h, addr) = served(aio::http::Http::default().users(users)).await;
+    let t = auth.issue("carol", "user").unwrap();
+    let carol = Remote::<Board>::connect(&addr, &t, "carol").await.unwrap();
+    carol.add("hi".into()).unwrap();
+    until("carol's call is in", || h.state().last == Some(By::User("carol".into()))).await;
+    assert_eq!(h.state().role.as_deref(), Some("user"));
+    // The app's own users compose, after the sessions.
+    let svc = Remote::<Board>::connect(&addr, "svc-0123456789abcdef0123", "svc").await.unwrap();
+    // No accounts: no login doors, and the key opens nothing.
+    assert_eq!(post(&addr, "login", None, json!({ "id": "carol", "password": PW })).await.0, 404);
+    let e = Remote::<Board>::connect(&addr, "secret", "x").await.err().unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(auth.revoke(&t).unwrap());
+    until("closed on revoke", || !carol.online()).await;
+    assert!(svc.online());
+    let e = Remote::<Board>::connect(&addr, &t, "carol").await.err().unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+}

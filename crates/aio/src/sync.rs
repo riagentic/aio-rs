@@ -352,6 +352,8 @@ fn ws<T: Cell>(
                     None => (StatusCode::UNAUTHORIZED, why.to_string()).into_response(),
                 };
                 let mut known = None;
+                // A user known by token: the socket re-checks it while open.
+                let mut recheck = None;
                 let signed = match &auth {
                     None => {
                         // A page in the browser shows its cookie, as on `/__aio/ui`.
@@ -366,7 +368,10 @@ fn ws<T: Cell>(
                         match (&creds.key, &creds.users) {
                             (None, _) => {}
                             (Some(_), Some(u)) => match shown.as_deref().and_then(|t| u.who(t)) {
-                                Some(s) => known = Some((By::User(s.user), s.role)),
+                                Some(s) => {
+                                    recheck = shown.clone().map(|t| (u.clone(), t, s.clone()));
+                                    known = Some((By::User(s.user), s.role));
+                                }
                                 None => return refuse(shown.is_some(), "wrong or missing token"),
                             },
                             (Some(key), None) if creds.open || shown.as_ref().is_some_and(|k| same(k, key)) => {}
@@ -437,10 +442,14 @@ fn ws<T: Cell>(
                             r
                         };
                         // Dropping the session closes its socket.
-                        let r = match (auth, signed) {
-                            (Some(a), Some((_, t))) => tokio::select! {
+                        let r = match (auth, signed, recheck) {
+                            (Some(a), Some((_, t)), _) => tokio::select! {
                                 r = run => r,
                                 () = ended(a, t) => Err("a session ended: its socket is closed".into()),
+                            },
+                            (_, _, Some((u, t, was))) => tokio::select! {
+                                r = run => r,
+                                () = users_ended(u, t, was) => Err("its token no longer resolves: its socket is closed".into()),
                             },
                             _ => run.await,
                         };
@@ -476,6 +485,7 @@ fn ui_socket<T: Cell>(
             async move {
                 let ip = ext.get::<ConnectInfo<Peer>>().map_or(std::net::Ipv4Addr::LOCALHOST.into(), |c| c.0.0.ip());
                 let session = crate::auth::routes::session_token(&headers, T::ID);
+                let mut recheck = None;
                 // (user, credential): `None` is a signed-out tab.
                 let who: Option<(Option<String>, String)> = match (&auth, &creds.users, &creds.key) {
                     (Some(a), ..) => {
@@ -484,7 +494,11 @@ fn ui_socket<T: Cell>(
                         s.and_then(|(s, t)| Some((Some(s?.user), t)))
                     }
                     (None, Some(u), _) => match session.as_deref().and_then(|t| u.who(t)) {
-                        Some(s) => Some((Some(s.user), session.unwrap_or_default())),
+                        Some(s) => {
+                            let t = session.unwrap_or_default();
+                            recheck = Some((u.clone(), t.clone(), s.clone()));
+                            Some((Some(s.user), t))
+                        }
                         None => return unauthorized(&creds.guessed, ip, session.is_some(), "wrong or missing token"),
                     },
                     (None, None, Some(key)) => {
@@ -504,9 +518,10 @@ fn ui_socket<T: Cell>(
                         let user = who.and_then(|(user, _)| user);
                         let tab = tokio::spawn((ui.tab)(crate::http::Tab { user, wire }));
                         let pump = tab_pump(s, ours);
-                        match ended_with {
-                            Some((a, t)) => tokio::select! { () = pump => {}, () = ended(a, t) => {} },
-                            None => pump.await,
+                        match (ended_with, recheck) {
+                            (Some((a, t)), _) => tokio::select! { () = pump => {}, () = ended(a, t) => {} },
+                            (_, Some((u, t, was))) => tokio::select! { () = pump => {}, () = users_ended(u, t, was) => {} },
+                            _ => pump.await,
                         }
                         tab.abort();
                     })
@@ -657,18 +672,20 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             .layer(axum::extract::DefaultBodyLimit::max(4096)),
         );
     }
-    // For monitoring (aio's `/__aio/metrics`, `/__aio/health`).
-    for (path, metrics) in [("/__aio/health", false), ("/__aio/metrics", true)] {
-        let (h, auth, key, guessed) = (watched.clone(), auth.clone(), token.clone(), guessed.clone());
+    // For monitoring (aio's `/__aio/metrics`, `/__aio/health`, `/__aio/vitals`).
+    for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
+        let (h, guessed, trust) = (watched.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
+        let who = Diagnostics { auth: auth.clone(), users: users.clone(), key: token.clone(), open };
         app = app.route(
             path,
             axum::routing::get(
                 move |ConnectInfo(Peer(from)): ConnectInfo<Peer>,
                       headers: HeaderMap,
                       crate::http::Query(q): crate::http::Query| {
-                    let (h, auth, key, guessed) = (h.clone(), auth.clone(), key.clone(), guessed.clone());
+                    let (h, who, guessed, trust) = (h.clone(), who.clone(), guessed.clone(), trust.clone());
                     async move {
-                        if !diagnostics_open(auth, &key, &headers, &q).await {
+                        let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
+                        if !who.admits(here, &headers, &q, T::ID).await {
                             return unauthorized(
                                 &guessed,
                                 from.ip(),
@@ -677,12 +694,18 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                             );
                         }
                         let no_store = (axum::http::header::CACHE_CONTROL, "no-store");
-                        if metrics {
-                            let text = monitored(&h, started);
-                            ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4"), no_store], text)
-                                .into_response()
-                        } else {
-                            ([no_store], crate::http::json(health_now(&h))).into_response()
+                        match path {
+                            "/__aio/metrics" => {
+                                let text = monitored(&h, started);
+                                ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4"), no_store], text)
+                                    .into_response()
+                            }
+                            "/__aio/vitals" => {
+                                let (snap, loopback) = crate::vitals::snapshot();
+                                let doc = crate::vitals::doc(&snap, loopback, &crate::vitals::get());
+                                ([no_store], crate::http::json(doc)).into_response()
+                            }
+                            _ => ([no_store], crate::http::json(health_now(&h))).into_response(),
                         }
                     }
                 },
@@ -1021,21 +1044,44 @@ fn pair_reply(
     }
 }
 
-/// Health and metrics are open on an app without accounts (a monitor's
-/// `curl`, as in aio); with accounts they describe the app, so they need the
-/// key (a bearer, or `?token=`) or a live session.
-async fn diagnostics_open(
+/// Who may read health and metrics: fail closed. They describe the app (its
+/// cells, sizes, clients, errors), so they are never anonymous on the
+/// network: the key (a bearer, or `?token=`), a live session, or a user
+/// known by token. Anonymous only on this machine (`here`: loopback, not
+/// relayed by a proxy) and only on an app without accounts or users (as
+/// aio, whose per-user apps answer them to a signed-in user only), or on
+/// one that is `[server] open` on purpose.
+#[derive(Clone)]
+struct Diagnostics {
     auth: Option<Arc<crate::auth::Auth>>,
-    key: &str,
-    headers: &axum::http::HeaderMap,
-    query: &HashMap<String, String>,
-) -> bool {
-    let Some(a) = auth else { return true };
-    let shown = shown_key(headers, query).unwrap_or_default();
-    (!key.is_empty() && same(&shown, key))
-        || tokio::task::spawn_blocking(move || live(&a, &shown).is_some()).await.unwrap_or(false)
+    users: Option<crate::auth::Users>,
+    key: Arc<String>,
+    open: bool,
 }
 
+impl Diagnostics {
+    async fn admits(&self, here: bool, headers: &axum::http::HeaderMap, query: &HashMap<String, String>, id: &str) -> bool {
+        if (self.open || here) && self.auth.is_none() && self.users.is_none() {
+            return true;
+        }
+        let shown = shown_key(headers, query).unwrap_or_default();
+        if !self.key.is_empty() && same(&shown, &self.key) {
+            return true;
+        }
+        let session = crate::auth::routes::session_token(headers, id).unwrap_or(shown);
+        match (&self.auth, &self.users) {
+            (Some(a), _) => {
+                let a = a.clone();
+                tokio::task::spawn_blocking(move || live(&a, &session).is_some()).await.unwrap_or(false)
+            }
+            (None, Some(u)) => {
+                let u = u.clone();
+                tokio::task::spawn_blocking(move || u.who(&session).is_some()).await.unwrap_or(false)
+            }
+            (None, None) => false,
+        }
+    }
+}
 
 /// Returns once the session of `token` is over: re-checked on every account
 /// change and every few seconds (expiry). The checks keep a used session alive.
@@ -1053,10 +1099,43 @@ async fn ended(a: Arc<crate::auth::Auth>, token: String) {
     }
 }
 
+/// Returns once `token` no longer resolves to `was`'s user and role (aio's
+/// `users:`/`resolveUser` re-check): asked again every
+/// [`crate::auth::USERS_RECHECK`] and on every change its resolver ticks. A
+/// resolver that panics ends it (fail closed); one slower than
+/// [`crate::auth::USERS_WAIT`] keeps the last verdict, is said, and is not
+/// called again until it answers. A changed role ends it too: the client
+/// reconnects with the new one.
+async fn users_ended(u: crate::auth::Users, token: String, was: crate::auth::Session) {
+    let mut changes = u.changes();
+    let mut asked: Option<tokio::task::JoinHandle<Option<crate::auth::Session>>> = None;
+    loop {
+        match changes.as_mut() {
+            Some(c) => tokio::select! {
+                r = c.changed() => if r.is_err() { changes = None },
+                () = tokio::time::sleep(crate::auth::USERS_RECHECK) => {}
+            },
+            None => tokio::time::sleep(crate::auth::USERS_RECHECK).await,
+        }
+        let mut call = asked.take().unwrap_or_else(|| {
+            let (u, t) = (u.clone(), token.clone());
+            tokio::task::spawn_blocking(move || u.who(&t))
+        });
+        match tokio::time::timeout(crate::auth::USERS_WAIT, &mut call).await {
+            Ok(Ok(Some(s))) if s.user == was.user && s.role == was.role => {}
+            Ok(_) => return,
+            Err(_) => {
+                eprintln!("[aio] auth: the users resolver has not answered in {:?}: its socket keeps its last verdict", crate::auth::USERS_WAIT);
+                asked = Some(call);
+            }
+        }
+    }
+}
 
 type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
 type Refusal = Arc<dyn Fn(&str, &Rejected) + Send + Sync>;
 type OnSync = Arc<dyn Fn(&Synced) + Send + Sync>;
+type OnPatch = Arc<dyn Fn(&Value) + Send + Sync>;
 
 /// What one catch-up did (aio's `SyncStats`): the server's whole view reached
 /// the copy, on a reconnect or after a gap.
@@ -1184,6 +1263,7 @@ struct Inner<T: Cell> {
     refusals: Mutex<Vec<Refusal>>,
     tells: Mutex<Vec<crate::tell::Show>>,
     syncs: Mutex<Vec<OnSync>>,
+    patches: Mutex<Vec<OnPatch>>,
     owned: Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>,
 }
 
@@ -1432,6 +1512,7 @@ impl<T: Cell> Remote<T> {
             refusals: Mutex::default(),
             tells: Mutex::default(),
             syncs: Mutex::default(),
+            patches: Mutex::default(),
             owned: Mutex::default(),
         });
         let weak = Arc::downgrade(&inner);
@@ -1507,7 +1588,7 @@ impl<T: Cell> Remote<T> {
         let (heard_tx, mut bus) = tokio::sync::mpsc::unbounded_channel();
         let _sub = crate::report::subscribe(move |d| {
             if !d.kind.starts_with("client:") {
-                _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held }));
+                _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held, "severity": d.severity }));
             }
         });
         *lock(&self.inner.out) = Some(tx);
@@ -1601,6 +1682,10 @@ impl<T: Cell> Remote<T> {
     fn take(&self, m: Value) {
         if matches!(m["t"].as_str(), Some("state" | "patch" | "reply")) {
             *lock(&self.inner.last_sync) = Some(crate::store::now_ms());
+        }
+        if matches!(m["t"].as_str(), Some("state" | "patch")) {
+            let fs = lock(&self.inner.patches).clone();
+            fs.iter().for_each(|f| f(&m));
         }
         match m["t"].as_str() {
             Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
@@ -1833,6 +1918,14 @@ impl<T: Cell> Remote<T> {
     /// (on a reconnect, or after a gap).
     pub fn on_sync(&self, f: impl Fn(&Synced) + Send + Sync + 'static) {
         lock(&self.inner.syncs).push(Arc::new(f));
+    }
+
+    /// Call `f` with each update the server sends, as it arrives (aio's
+    /// `onPatch`): a `{"t":"patch","seq","prev","ops"}` delta, or a
+    /// `{"t":"state"}` whole state (the first, a resync). The state is
+    /// their sum; this is the stream, so a test can see what was sent.
+    pub fn on_patch(&self, f: impl Fn(&Value) + Send + Sync + 'static) {
+        lock(&self.inner.patches).push(Arc::new(f));
     }
 
     /// Call `f` with the shown state after each change.

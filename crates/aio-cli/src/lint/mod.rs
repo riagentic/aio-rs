@@ -150,6 +150,8 @@ pub fn lint(dir: &Path) -> Report {
     walk(dir, &mut paths);
     let (mut facts, mut report) = (rust::Facts::default(), Report::default());
     let mut texts: HashMap<String, String> = HashMap::new();
+    // The first test line naming aio::testing, and whether a manifest gives the tests its feature.
+    let (mut kit_used, mut kit_given): (Option<(String, usize)>, bool) = (None, false);
     for path in paths {
         let rel = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
         let name = rel.rsplit('/').next().unwrap_or_default().to_string();
@@ -177,10 +179,14 @@ pub fn lint(dir: &Path) -> Report {
         report.files += 1;
         layout::check(&rel, &text, &mut facts.issues);
         if ext == "rs" {
+            if kit_used.is_none() && (is_test_path(&rel) || text.contains("#[cfg(test)]")) {
+                kit_used = text.lines().position(|l| l.contains("aio::testing")).map(|i| (rel.clone(), i + 1));
+            }
             rust::file(&rel, &text, is_test_path(&rel), &mut facts);
         } else if !is_test_path(&rel) {
             secrets::text(&rel, &text, &mut facts.issues);
             if name == "Cargo.toml" {
+                kit_given |= gives_testing(&text);
                 rust::manifest(&rel, &text, &mut facts.issues);
             }
             if name == "aio.toml" {
@@ -191,6 +197,18 @@ pub fn lint(dir: &Path) -> Report {
             }
         }
         texts.insert(rel, text);
+    }
+    if let (Some((rel, line)), false) = (&kit_used, kit_given) {
+        facts.issues.push(
+            Issue::new(
+                Severity::Error,
+                "testing",
+                "the tests use aio::testing, which is aio-rs's `testing` feature: no manifest gives it them".into(),
+                rel,
+                *line,
+            )
+            .fix("in Cargo.toml: [dev-dependencies] aio = { package = \"aio-rs\", <its source>, features = [\"testing\"] }"),
+        );
     }
     across(&mut facts, &mut report);
     // One place for every `aio-ok`.
@@ -230,6 +248,21 @@ pub fn changed(files: &[PathBuf], root: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// Does this manifest give its tests aio-rs's test kit (a dev-dependency,
+/// or a dependency, on aio-rs with the `testing` feature)? Pure.
+pub fn gives_testing(manifest: &str) -> bool {
+    let mut section = "";
+    manifest.lines().any(|l| {
+        let t = l.trim();
+        if t.starts_with('[') {
+            section = t;
+        }
+        let dep = section.ends_with("dependencies]") || section.starts_with("[dependencies.aio");
+        let aio = t.contains("package = \"aio-rs\"") || t.starts_with("aio-rs ") || t.starts_with("aio-rs=");
+        dep && aio && t.contains("\"testing\"")
+    })
 }
 
 /// The checks that need every file: duplicate cell ids, untested cells.

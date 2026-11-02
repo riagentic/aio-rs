@@ -67,6 +67,12 @@ pub fn listen(s: &Server, ask: &crate::paths::Ask) -> Result<Listen, String> {
     if ask.expose && ask.host.is_some() {
         return Err("--expose and --host both say where to listen: give one".into());
     }
+    if ask.tls_cert.is_some() != ask.tls_key.is_some() {
+        return Err("--tls-cert and --tls-key go together: pass both (the chain and its key, PEM files)".into());
+    }
+    if ask.no_tls && ask.tls_cert.is_some() {
+        return Err("--no-tls and --tls-cert both say how to serve: give one".into());
+    }
     let host = match (&ask.host, ask.expose) {
         (Some(h), _) => h.trim_matches(['[', ']']).to_string(),
         (None, true) => "0.0.0.0".into(),
@@ -84,7 +90,7 @@ pub fn listen(s: &Server, ask: &crate::paths::Ask) -> Result<Listen, String> {
     };
     let port = ask.port.as_deref().unwrap_or(port);
     let addr = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
-    Ok(Listen { addr, exposed, tls: s.tls || (asked && exposed), from })
+    Ok(Listen { addr, exposed, tls: !ask.no_tls && (s.tls || (asked && exposed) || ask.tls_cert.is_some()), from })
 }
 
 /// What to say of `l` at boot: how open it is, and a warning when the
@@ -98,6 +104,85 @@ pub fn listen_says(l: &Listen, id: &str) -> String {
              in the clear. Set [server] tls = true, or serve it behind a TLS proxy (trust_proxy)",
             l.addr, l.from
         ),
+    }
+}
+
+/// Who gets into a served app, for its boot's share line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// The app's key (`data/sync.token`, or `AIORT_TOKEN`).
+    Key,
+    /// Users known by token (`Http::users`).
+    Users,
+    /// Sessions the app issues (`[accounts] sessions`).
+    Sessions,
+    /// Accounts (`[accounts] on`).
+    Accounts,
+    /// `[server] open`.
+    Open,
+}
+
+/// This machine's LAN IPv4, where a wildcard bind is reached: the address
+/// the OS would route a packet off this machine from (none is sent).
+pub fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    let s = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    // TEST-NET-1 (RFC 5737): a UDP connect only picks the route.
+    s.connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match s.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
+}
+
+/// The share lines of an exposed boot (aio's `share:` and key-file lines;
+/// pure): the address another device opens (a wildcard bind as `lan`, else
+/// said to substitute it) and what it must show. The key itself is never
+/// printed (logs mask it anyway): its file is named, and with `pairing`,
+/// `ax pair` for a code.
+pub fn share_says(l: &Listen, lan: Option<std::net::Ipv4Addr>, gate: Gate, key_file: &std::path::Path, pairing: bool) -> Vec<String> {
+    let (host, port) = l.addr.rsplit_once(':').unwrap_or((l.addr.as_str(), "0"));
+    let wildcard = matches!(host, "0.0.0.0" | "[::]");
+    let (host, note) = match (wildcard, lan) {
+        (true, Some(ip)) => (ip.to_string(), ""),
+        (true, None) => (host.to_string(), " (substitute this machine's LAN address)"),
+        (false, _) => (host.to_string(), ""),
+    };
+    let url = format!("{}://{host}:{port}/", if l.tls { "https" } else { "http" });
+    let who = match gate {
+        Gate::Key => format!(
+            "with the app's key, sent as Authorization: Bearer (or once as ?token=, which sets a cookie); key file: {} (owner-only, or AIORT_TOKEN)",
+            key_file.display()
+        ),
+        Gate::Users => "each user with their own token (Authorization: Bearer, or ?token=)".into(),
+        Gate::Sessions => "with a session the app issued (Authorization: Bearer, or ?token=)".into(),
+        Gate::Accounts => "users sign in there (POST /__aio/auth/login)".into(),
+        Gate::Open => "OPEN: anyone who reaches it, with no key".into(),
+    };
+    let mut out = vec![format!("share: {url}{note} — {who}")];
+    if pairing && gate == Gate::Key {
+        out.push("pair a device: `ax pair <app>` makes a code it enters once".into());
+    }
+    out
+}
+
+/// The boot line about the OS firewall on an exposed app (aio's
+/// `firewall:`; pure): Windows and macOS may ask the person at the screen
+/// whether the app may be reached, and an unanswered question leaves it
+/// healthy here and unreachable elsewhere. aio-rs opens no rule. Linux
+/// asks nothing: no line.
+pub fn firewall_says(os: &str, exposed: bool) -> Option<&'static str> {
+    match (os, exposed) {
+        ("windows", true) => Some(
+            "firewall: Windows may ask whether this program can be reached from your networks — allow it. \
+             Dismissed or denied (or with nobody at the screen), a block rule is kept: the app works on this \
+             machine and looks unreachable from every other one. Fix it under \"Allow an app through Windows Firewall\"",
+        ),
+        ("macos", true) => Some(
+            "firewall: if the macOS firewall is on, it asks whether to accept incoming connections — allow it. \
+             Denied or dismissed, the app works on this Mac and looks unreachable from every other machine. Fix \
+             it under System Settings → Network → Firewall → Options",
+        ),
+        _ => None,
     }
 }
 
@@ -464,6 +549,31 @@ mod tests {
         assert!(listen_says(&listen(&s(None, false), &ask(&[])).unwrap(), "notes").contains("this machine only"));
         assert!(l(&s(None, false), &["--port=http"]).unwrap_err().contains("a port number"));
         assert!(l(&s(None, false), &["--expose", "--host=203.0.113.4"]).unwrap_err().contains("give one"));
+        // aio's TLS flags: `--no-tls` wins over the launch and [server] tls; a cert pair turns it on.
+        assert_eq!(l(&s(None, false), &["--expose", "--no-tls"]), o("0.0.0.0:0", true, false, "--expose"));
+        assert!(!l(&s(None, true), &["--no-tls"]).unwrap().2);
+        assert!(l(&s(None, false), &["--tls-cert=c.pem", "--tls-key=k.pem"]).unwrap().2);
+        assert!(l(&s(None, false), &["--tls-cert=c.pem"]).unwrap_err().contains("go together"));
+        assert!(l(&s(None, false), &["--no-tls", "--tls-cert=c", "--tls-key=k"]).unwrap_err().contains("give one"));
+    }
+
+    #[test]
+    fn an_exposed_boot_says_where_to_share_it_and_the_firewall() {
+        let at = |addr: &str, tls: bool| Listen { addr: addr.into(), exposed: true, tls, from: "--expose" };
+        let key = std::path::Path::new("/d/sync.token");
+        let lan = Some(std::net::Ipv4Addr::new(192, 168, 1, 5));
+        let say = share_says(&at("0.0.0.0:8443", true), lan, Gate::Key, key, true);
+        assert!(say[0].starts_with("share: https://192.168.1.5:8443/ — with the app's key"), "{say:?}");
+        assert!(say[0].contains("/d/sync.token") && say[1].contains("ax pair <app>"), "{say:?}");
+        let say = share_says(&at("0.0.0.0:80", false), None, Gate::Accounts, key, true);
+        assert_eq!(say.len(), 1, "a code pairs with the key only");
+        assert!(say[0].starts_with("share: http://0.0.0.0:80/ (substitute this machine's LAN address) — users sign in"));
+        let say = share_says(&at("10.0.0.9:1", true), lan, Gate::Sessions, key, false);
+        assert!(say[0].starts_with("share: https://10.0.0.9:1/ — with a session the app issued"), "{say:?}");
+        assert!(share_says(&at("0.0.0.0:1", true), lan, Gate::Open, key, false)[0].contains("OPEN"));
+        assert!(firewall_says("windows", true).unwrap().contains("Allow an app through Windows Firewall"));
+        assert!(firewall_says("macos", true).unwrap().starts_with("firewall: if the macOS firewall is on"));
+        assert_eq!((firewall_says("linux", true), firewall_says("windows", false)), (None, None));
     }
 
     #[test]
@@ -543,6 +653,14 @@ mod tests {
         assert!(Config::parse(&format!("{base}[accounts]\non = true\nsession = \"0s\"")).is_err());
         assert!(Config::parse(&format!("{base}[accounts]\non = true\nmax_sessions = 0")).is_err());
         assert!(Config::parse(&format!("{base}[accounts]\nuser = \"x\"")).is_err());
+        // Sessions without accounts: bounded the same; no doors, so no signup.
+        let s = Config::parse(&format!("{base}[accounts]\nsessions = true\nsession = \"1h\"")).unwrap();
+        assert!(s.accounts.sessions && !s.accounts.on && s.accounts.policy().ttl_ms == 3_600_000);
+        assert!(Config::parse(&format!("{base}[accounts]\nsessions = true\nsession = \"0s\"")).is_err());
+        let e = Config::parse(&format!("{base}[accounts]\nsessions = true\nsignup = true")).unwrap_err();
+        assert!(e.contains("need accounts (on = true)"), "{e}");
+        let e = Config::parse(&format!("{base}[accounts]\nsessions = true\n[server]\nopen = true")).unwrap_err();
+        assert!(e.contains("give one"), "{e}");
     }
 
     #[test]

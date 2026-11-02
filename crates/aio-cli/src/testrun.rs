@@ -50,6 +50,32 @@ pub fn args(pkgs: &[String], aio: &str, filter: Option<&str>, video: bool) -> Ve
     a
 }
 
+/// `cargo mutants`' arguments for the app's packages (pure).
+pub fn mutants_args(pkgs: &[String]) -> Vec<String> {
+    let mut a: Vec<String> = vec!["mutants".into()];
+    for p in pkgs {
+        a.extend(["--package".into(), p.clone()]);
+    }
+    a
+}
+
+/// Break each of app `name`'s functions in turn (`cargo mutants`): the
+/// ones its tests didn't notice fail the run.
+pub fn mutants(name: &str) -> Result<String, String> {
+    let meta = crate::dev::metadata()?;
+    let pkg = crate::dev::locate(&meta, name)?;
+    let all = packages(&meta, &pkg.dirs);
+    let have = Command::new("cargo").args(["mutants", "--version"]).output().is_ok_and(|o| o.status.success());
+    if !have {
+        return Err("--mutants runs cargo mutants, which isn't installed: cargo install cargo-mutants".into());
+    }
+    let ok = Command::new("cargo").args(mutants_args(&all)).status().map_err(|e| format!("cargo mutants: {e}"))?;
+    match ok.success() {
+        true => Ok(format!("{name}: every mutant was caught")),
+        false => Err(format!("{name}: cargo mutants found breaks no test noticed (mutants.out/missed.txt)")),
+    }
+}
+
 /// Run app `name`'s tests, a video of each UI test into `video`.
 pub fn run(name: &str, filter: Option<&str>, video: Option<&str>, pace: Option<&str>) -> Result<String, String> {
     if let Some(p) = pace
@@ -105,6 +131,7 @@ mod tests {
         assert_eq!(aio_dep(&json!({ "dependencies": [] })), None);
         let todo = ["todo-app".to_string(), "todo".into()];
         assert_eq!(args(&todo[1..], "aio", None, false), ["test", "-p", "todo"]);
+        assert_eq!(mutants_args(&todo), ["mutants", "--package", "todo-app", "--package", "todo"]);
         assert_eq!(
             args(&todo, "aio", Some("adds"), true),
             ["test", "-p", "todo-app", "-p", "todo", "--features", "aio/video", "adds"]
