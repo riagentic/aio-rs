@@ -168,7 +168,7 @@ async fn a_tab_shows_the_view_runs_its_queries_and_nothing_injected() {
         assert_eq!(status, 200, "a deep link is the page too");
         assert!(head.contains("set-cookie: aio_key_desk=") && head.contains("frame-ancestors 'self'"), "{head}");
         assert!(body.contains("/__aio/ui") && body.contains("connect-src 'self'"), "{body}");
-        assert!(!body.contains("unsafe-eval") && !body.contains("script-src 'unsafe-inline'"), "{body}");
+        assert!(!body.contains("'unsafe-eval'") && !body.contains("script-src 'unsafe-inline'"), "{body}");
         let Some(c) = Chromium::open("about:blank") else {
             return eprintln!("no Chromium: skipped");
         };

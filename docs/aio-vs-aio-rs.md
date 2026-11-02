@@ -236,7 +236,7 @@ beyond the aio-rs form.
 | Debugging | V8 heap snapshots, the health overlay | none | `ax heap`, `ax health` | [production](debugging/production.md#not-in-aio-rs) |
 | Debugging | `perfCheck: "off"`, a runtime benchmark gate | budgets always on | ➖ | [scaling](build/scaling.md#not-in-aio-rs) |
 | Debugging | reports screened by `visible`, timeline payloads | carried as saved, never arguments | `#[redact]` | [feedback](debugging/feedback.md#not-as-in-aio) |
-| Build | hot reload in a browser | no hot-patching in the web build (a build per edit; on Android the dev page reloads) | a build per edit | [dev](build/dev.md#limits) |
+| Build | hot-patching in a browser | `ax dev --web` rebuilds and reloads its tabs per edit, slower than a patch (on Android the dev page reloads) | ➖ | [dev](build/dev.md#limits) |
 | Build | a run-from-a-link command | none | clone, `ax start` | [dev](build/dev.md#limits) |
 | Build | ios-client (a WKWebView thin client) | no iOS | ➖ | [targets](build/targets.md#limits) |
 | Build | `AIO_BUILD_VERSION`, `AIO_SOCKET_TIMEOUT_MS`, `AIO_VIDEO_SCHEME` | none (the emulator lane is `ax test --android`) | `[app] version` and git | [environment](reference/environment.md#aio-variables-aio-rs-doesnt-read) |

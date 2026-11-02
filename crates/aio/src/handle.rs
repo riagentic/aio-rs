@@ -73,9 +73,6 @@ impl Drop for Telling {
     }
 }
 
-/// How many `#[ttl]` answers one cell keeps (aio's bound).
-const ANSWERED_MAX: usize = 5000;
-
 /// What a shutdown left undone.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Drained {
@@ -183,8 +180,8 @@ struct Inner<T: Cell> {
     live: AtomicBool,
     /// Its failures, and when they disable it.
     tally: Mutex<crate::cells::Tally>,
-    /// `#[ttl]` calls answered, by effect key: when, for how long, and the answer.
-    answered: Mutex<HashMap<String, Answered>>,
+    /// `#[ttl]` calls answered.
+    answered: Mutex<crate::answer::Cache>,
     /// The `#[mode(first)]` and `#[mode(newest)]` calls in flight.
     inflight: crate::answer::Inflight,
     /// aio pages' CRDT sync of this cell (`compat::crdt`): its clock, the ops
@@ -693,9 +690,7 @@ impl<T: Cell> Handle<T> {
         }
         let Some((key, ms)) = a.ttl else { return };
         let now = lock(&self.inner.store).now();
-        let mut m = lock(&self.inner.answered);
-        m.insert(key, (now, ms, a.value));
-        sweep(&mut m, now, ANSWERED_MAX);
+        lock(&self.inner.answered).keep(key, now, ms, a.value);
     }
 
     /// This call's answer, when one within its ttl has it: it needn't run again.
@@ -703,9 +698,8 @@ impl<T: Cell> Handle<T> {
         if lock(&self.inner.answered).is_empty() {
             return None;
         }
-        let key = crate::effect::key(method, args).ok()?;
         let now = lock(&self.inner.store).now();
-        lock(&self.inner.answered).get(&key).filter(|&&(at, ms, _)| fresh(at, ms, now)).map(|a| a.2.clone())
+        lock(&self.inner.answered).get(method, args, now)
     }
 
     /// Run a call (by the network caller `who`, with a synced client's
@@ -1283,27 +1277,6 @@ fn tell<T: Cell>(inner: &Inner<T>) {
     ws.iter().for_each(|f| f());
 }
 
-/// Is an answer from `at` still good at `now`? One from the clock's future
-/// (the clock stepped back) is not: it would stay good for the step, not `ms`.
-fn fresh(at: i64, ms: i64, now: i64) -> bool {
-    (0..ms).contains(&(now - at))
-}
-
-/// A `#[ttl]` answer: when, for how long (ms), and its value.
-type Answered = (i64, i64, Value);
-
-/// Over `max`, drop the stale answers, then the oldest.
-fn sweep(a: &mut HashMap<String, Answered>, now: i64, max: usize) {
-    if a.len() <= max {
-        return;
-    }
-    a.retain(|_, (at, ms, _)| fresh(*at, *ms, now));
-    let mut old: Vec<(i64, String)> = a.iter().map(|(k, (at, _, _))| (*at, k.clone())).collect();
-    old.sort();
-    let over = old.len().saturating_sub(max);
-    old.into_iter().take(over).for_each(|(_, k)| _ = a.remove(&k));
-}
-
 /// How long the scheduler sleeps: until the next due time on the wall
 /// clock, but never over a minute, so a clock step or a machine's sleep is
 /// noticed within a minute (the timer itself counts monotonic time).
@@ -1410,27 +1383,5 @@ mod tests {
         assert_eq!(super::wait_ms(Some(30 * 86_400_000), 0), 60_000, "a far slot is re-checked");
         assert_eq!(super::wait_ms(Some(500), 0), 500);
         assert_eq!(super::wait_ms(Some(-5), 0), 0, "overdue: now");
-    }
-
-    #[test]
-    fn an_answer_is_fresh_for_its_ttl_and_not_from_the_future() {
-        assert!(super::fresh(1000, 500, 1000));
-        assert!(super::fresh(1000, 500, 1499));
-        assert!(!super::fresh(1000, 500, 1500), "expired");
-        assert!(!super::fresh(1000, 500, 999), "the clock stepped back");
-    }
-
-    #[test]
-    fn answers_are_bounded_stale_ones_first_then_the_oldest() {
-        let mut a: std::collections::HashMap<String, super::Answered> =
-            [("stale", (0, 10)), ("old", (90, 1000)), ("mid", (95, 1000)), ("new", (99, 1000))]
-                .map(|(k, (at, ms))| (k.to_string(), (at, ms, serde_json::Value::Null)))
-                .into();
-        super::sweep(&mut a, 100, 4);
-        assert_eq!(a.len(), 4, "within the bound: kept");
-        super::sweep(&mut a, 100, 2);
-        let mut left: Vec<&str> = a.keys().map(|k| k.as_str()).collect();
-        left.sort();
-        assert_eq!(left, ["mid", "new"]);
     }
 }

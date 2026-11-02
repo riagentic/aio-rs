@@ -108,6 +108,7 @@ impl<T: Cell> Copy<T> {
             seq: self.seq,
             view: self.view.clone(),
             pending: self.pending.clone(),
+            sched: Vec::new(),
         }
     }
 }
