@@ -701,6 +701,10 @@ struct Symbols {
     /// Mach-O: each `<name>$tlv$init`'s offset and size in that image (its
     /// symbols carry no size).
     tls_sizes: HashMap<String, (u64, u64)>,
+    /// ELF: how far below the thread pointer its thread-local block starts
+    /// (x86_64's variant II layout): a thread-local's offset from the thread
+    /// pointer is its symbol's value less this.
+    tls_block: Option<u64>,
 }
 
 impl Symbols {
@@ -743,8 +747,92 @@ impl Symbols {
         let ends: Vec<u64> = inits.iter().skip(1).map(|(at, _)| *at).chain([size]).collect();
         let tls_sizes =
             inits.into_iter().zip(ends).map(|((at, name), end)| (name, (at, end.saturating_sub(at)))).collect();
-        Ok(Symbols { table, tls_data, tls_sizes })
+        Ok(Symbols { table, tls_data, tls_sizes, tls_block: tls_block(&bytes) })
     }
+}
+
+/// An ELF executable's thread-local block below the thread pointer (its
+/// `PT_TLS` segment, aligned as the linker places it), if it has one.
+fn tls_block(bytes: &[u8]) -> Option<u64> {
+    use object::read::elf::{FileHeader, ProgramHeader};
+    let header = object::elf::FileHeader64::<object::Endianness>::parse(bytes).ok()?;
+    let endian = header.endian().ok()?;
+    let tls = header.program_headers(endian, bytes).ok()?.iter().find(|p| p.p_type(endian) == object::elf::PT_TLS)?;
+    let (size, vaddr, align) = (tls.p_memsz(endian), tls.p_vaddr(endian), tls.p_align(endian).max(1));
+    Some(size + (vaddr.wrapping_neg().wrapping_sub(size) & (align - 1)))
+}
+
+/// Linux x86_64: object `path` of the app's crate with its thread-local
+/// accesses made the running binary's (a copy in `dir`, if it has any).
+/// rustc builds the app's crate as an executable: its own thread-locals at
+/// fixed offsets from the thread pointer (`TPOFF32`), others' through the
+/// GOT (`GOTTPOFF`), neither of which a shared library may hold. Each is
+/// made the offset the fat binary has, as a linker relaxes initial-exec to
+/// local-exec, so the patch reads and writes the app's own thread-locals,
+/// their values kept. A thread-local the fat binary lacks: an error.
+fn relaxed_tls(path: &Path, symbols: &Symbols, dir: &Path) -> Result<Option<PathBuf>, String> {
+    use object::elf::{R_X86_64_GOTTPOFF, R_X86_64_TPOFF32, Rela64, SHT_RELA, SHT_SYMTAB};
+    use object::read::elf::{FileHeader, Rela, SectionHeader, Sym as _};
+    let fail = |e: &dyn std::fmt::Display| format!("hot-patch: {}: {e}", path.display());
+    let data = std::fs::read(path).map_err(|e| fail(&e))?;
+    let header = object::elf::FileHeader64::<object::Endianness>::parse(&*data).map_err(|e| fail(&e))?;
+    let endian = header.endian().map_err(|e| fail(&e))?;
+    let sections = header.sections(endian, &*data).map_err(|e| fail(&e))?;
+    let syms = sections.symbols(endian, &*data, SHT_SYMTAB).map_err(|e| fail(&e))?;
+    let mut out: Option<Vec<u8>> = None;
+    for rela_section in sections.iter().filter(|s| s.sh_type(endian) == SHT_RELA) {
+        let relas: &[Rela64<object::Endianness>] = rela_section.data_as_array(endian, &*data).map_err(|e| fail(&e))?;
+        let target =
+            sections.section(object::SectionIndex(rela_section.sh_info(endian) as usize)).map_err(|e| fail(&e))?;
+        let (code, table) = (target.sh_offset(endian) as usize, rela_section.sh_offset(endian) as usize);
+        for (i, r) in relas.iter().enumerate() {
+            let kind = r.r_type(endian, false);
+            if kind != R_X86_64_TPOFF32 && kind != R_X86_64_GOTTPOFF {
+                continue;
+            }
+            let sym = syms.symbol(object::SymbolIndex(r.r_sym(endian, false) as usize)).map_err(|e| fail(&e))?;
+            let name = String::from_utf8_lossy(sym.name(endian, syms.strings()).map_err(|e| fail(&e))?).into_owned();
+            let found = symbols.table.get(&name).filter(|s| s.kind == SymbolKind::Tls && !s.undefined);
+            let (Some(found), Some(block)) = (found, symbols.tls_block) else {
+                return Err(format!("hot-patch: thread-local {name} is new (the running binary has none): rebuild"));
+            };
+            let at = code + r.r_offset(endian) as usize;
+            let bytes = out.get_or_insert_with(|| data.clone());
+            if kind == R_X86_64_GOTTPOFF {
+                // `mov x@gottpoff(%rip), %reg` → `mov $off, %reg`;
+                // `add x@gottpoff(%rip), %reg` → `add $off, %reg`.
+                let (rex, op, modrm) =
+                    (bytes.get(at.wrapping_sub(3)), bytes.get(at.wrapping_sub(2)), bytes.get(at.wrapping_sub(1)));
+                let (Some(&rex), Some(&op), Some(&modrm)) = (rex, op, modrm) else {
+                    return Err(fail(&"GOTTPOFF at the start"));
+                };
+                if rex & 0xf8 != 0x48 || modrm & 0xc7 != 0x05 || (op != 0x8b && op != 0x03) {
+                    return Err(fail(&format!(
+                        "thread-local {name}: an access ax can't relax ({rex:#x} {op:#x} {modrm:#x})"
+                    )));
+                }
+                let reg = (modrm >> 3) & 7;
+                bytes[at - 3] = 0x48 | ((rex >> 2) & 1);
+                bytes[at - 2] = if op == 0x8b { 0xc7 } else { 0x81 };
+                bytes[at - 1] = 0xc0 | reg;
+            }
+            // The relocation's own value (`S + A - TP`); GOTTPOFF's addend
+            // has the `-4` of a rip-relative operand, taken back.
+            let addend = r.r_addend(endian) + if kind == R_X86_64_GOTTPOFF { 4 } else { 0 };
+            let value = i32::try_from(found.address as i64 - block as i64 + addend)
+                .map_err(|_| fail(&format!("thread-local {name}: offset out of range")))?;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            // The relocation itself: R_X86_64_NONE, its symbol kept.
+            let info = table + i * std::mem::size_of::<Rela64<object::Endianness>>() + 8;
+            let sym_bits = r.r_info(endian, false) & !0xffff_ffff;
+            bytes[info..info + 8].copy_from_slice(&sym_bits.to_le_bytes());
+        }
+    }
+    let Some(bytes) = out else { return Ok(None) };
+    std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
+    let copy = dir.join(path.file_name().unwrap_or_default());
+    std::fs::write(&copy, bytes).map_err(|e| fail(&e))?;
+    Ok(Some(copy))
 }
 
 /// Patch the running fat binary with the edits to `changed` (source files
@@ -764,12 +852,44 @@ pub fn patch(fat: &mut Fat, aslr_reference: u64, changed: &[PathBuf]) -> Result<
     let link_file = fat.scope.join("thin-link.json");
     let _ = std::fs::remove_file(&link_file);
     let app = fat.crates[&format!("{}.bin", fat.tip)].clone();
-    app.replay(Some(&link_file))?;
+    if let Err(e) = app.replay(Some(&link_file)) {
+        remove_temps(&[], &app);
+        return Err(e);
+    }
     let link_args = read_link_args(&link_file)?;
     let compile = started.elapsed();
+    let thin = thin_link(fat, &app, &link_args, aslr_reference);
+    remove_temps(&link_args, &app);
+    let _ = std::fs::remove_dir_all(fat.scope.join("tls"));
+    let _ = std::fs::remove_file(fat.scope.join("stub.o"));
+    // rustc's output, the empty object: a stale file of that name confuses
+    // the dynamic loader on a later patch (dx's finding).
+    if let Some(o) = link_args.iter().position(|a| a == "-o").and_then(|i| link_args.get(i + 1)) {
+        let _ = std::fs::remove_file(o);
+    }
+    let (lib, stub, link) = thin?;
+    let table = jump_table(&lib, &fat.symbols)?;
+    Ok(Patch { table, times: Times { compile, stub, link, total: started.elapsed() } })
+}
 
+/// The patch library from the app crate's new objects (and the libraries
+/// replayed since the fat build) and a stub for what they miss: its path,
+/// and the stub's and the link's times.
+fn thin_link(
+    fat: &mut Fat,
+    app: &Rustc,
+    link_args: &[String],
+    aslr_reference: u64,
+) -> Result<(PathBuf, Duration, Duration), String> {
     let at = Instant::now();
-    let mut objects: Vec<PathBuf> = link_args.iter().filter(|a| a.ends_with(".rcgu.o")).map(PathBuf::from).collect();
+    let mut objects = vec![];
+    for o in link_args.iter().filter(|a| a.ends_with(".rcgu.o")).map(PathBuf::from) {
+        let relaxed = match (MACHO, std::env::consts::ARCH) {
+            (false, "x86_64") => relaxed_tls(&o, &fat.symbols, &fat.scope.join("tls"))?,
+            _ => None,
+        };
+        objects.push(relaxed.unwrap_or(o));
+    }
     objects.sort();
     let wanted: HashMap<String, PathBuf> =
         fat.modified.iter().filter_map(|k| Some((fat.crates[k].lib_stem(), fat.crates[k].rlib()?))).collect();
@@ -791,7 +911,7 @@ pub fn patch(fat: &mut Fat, aslr_reference: u64, changed: &[PathBuf]) -> Result<
         .args(&objects)
         .arg(&stub)
         .args(dylibs)
-        .args(thin_link_args(&link_args))
+        .args(thin_link_args(link_args))
         .arg("-o")
         .arg(&lib)
         .current_dir(&app.cwd)
@@ -799,13 +919,6 @@ pub fn patch(fat: &mut Fat, aslr_reference: u64, changed: &[PathBuf]) -> Result<
         .envs(app.envs.iter().cloned())
         .output()
         .map_err(|e| format!("hot-patch: can't run {}: {e}", fat.linker))?;
-    remove_temps(&link_args, &app);
-    let _ = std::fs::remove_file(&stub);
-    // rustc's output, the empty object: a stale file of that name confuses
-    // the dynamic loader on a later patch (dx's finding).
-    if let Some(o) = link_args.iter().position(|a| a == "-o").and_then(|i| link_args.get(i + 1)) {
-        let _ = std::fs::remove_file(o);
-    }
     if !out.status.success() {
         return Err(format!(
             "hot-patch: the patch link failed:\n{}{}",
@@ -813,9 +926,7 @@ pub fn patch(fat: &mut Fat, aslr_reference: u64, changed: &[PathBuf]) -> Result<
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let link = at.elapsed();
-    let table = jump_table(&lib, &fat.symbols)?;
-    Ok(Patch { table, times: Times { compile, stub: stub_time, link, total: started.elapsed() } })
+    Ok((lib, stub_time, at.elapsed()))
 }
 
 impl Fat {

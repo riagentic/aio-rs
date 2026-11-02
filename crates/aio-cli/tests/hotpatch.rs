@@ -1,7 +1,8 @@
 //! ax dev's own hot-patching (`src/hotpatch.rs`), end to end: a fixture
 //! workspace (a library and an app on subsecond) built fat, run, and
 //! patched three times while it runs: twice in the app's crate, once in
-//! the library; the app prints the new values without a restart.
+//! the library; the app prints the new values without a restart, and the
+//! patched code sees the thread-locals the running binary counted.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 #[allow(dead_code)]
@@ -12,17 +13,32 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const APP: &str = r#"fn value() -> u32 {
+const APP: &str = r#"use std::cell::Cell;
+
+thread_local! {
+    static TICKS: Cell<u32> = const { Cell::new(0) };
+}
+
+fn value() -> u32 {
     1
+}
+
+// Read by each patch's own copy of this function: the app's thread-locals
+// (this crate's and the library's), as the running binary counted them.
+fn ticks() -> u32 {
+    TICKS.get() + 100 * fixture_lib::SEEN.get()
 }
 
 fn main() {
     println!("aslr {}", subsecond::aslr_reference());
     let mut line = String::new();
     loop {
+        TICKS.set(TICKS.get() + 1);
+        fixture_lib::SEEN.set(fixture_lib::SEEN.get() + 1);
         let app = subsecond::HotFn::current(value).call(());
         let lib = subsecond::HotFn::current(fixture_lib::value).call(());
-        println!("value {app} {lib}");
+        let ticks = subsecond::HotFn::current(ticks).call(());
+        println!("value {app} {lib} {ticks}");
         line.clear();
         if std::io::stdin().read_line(&mut line).unwrap() == 0 {
             break;
@@ -34,7 +50,7 @@ fn main() {
 }
 "#;
 
-const LIB: &str = "pub fn value() -> u32 {\n    10\n}\n";
+const LIB: &str = "thread_local! {\n    pub static SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };\n}\n\npub fn value() -> u32 {\n    10\n}\n";
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -102,18 +118,18 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     let mut lines = BufReader::new(app.stdout.take().unwrap()).lines();
     let mut next = || lines.next().unwrap().unwrap();
     let aslr: u64 = next().strip_prefix("aslr ").unwrap().parse().unwrap();
-    assert_eq!(next(), "value 1 10");
+    assert_eq!(next(), "value 1 10 101");
 
     let main_rs = ws.join("app/src/main.rs");
     let lib_rs = ws.join("lib/src/lib.rs");
     let steps = [
-        (&main_rs, "    1\n", "    2\n", "value 2 10"),
-        (&main_rs, "    2\n", "    3\n", "value 3 10"),
-        (&lib_rs, "    10\n", "    20\n", "value 3 20"),
+        (&main_rs, "    1\n", "    2\n", "value 2 10 202"),
+        (&main_rs, "    2\n", "    3\n", "value 3 10 303"),
+        (&lib_rs, "    10\n", "    20\n", "value 3 20 404"),
     ];
     for (i, (file, from, to, want)) in steps.into_iter().enumerate() {
         edit(file, from, to);
-        let patch = hotpatch::patch(&mut fat, aslr, &[file.clone()]).unwrap();
+        let patch = hotpatch::patch(&mut fat, aslr, std::slice::from_ref(file)).unwrap();
         let t = patch.times;
         eprintln!(
             "patch {}: compile {:?}, stub {:?}, link {:?}, total {:?}",
