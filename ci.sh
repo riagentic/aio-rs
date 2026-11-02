@@ -36,13 +36,13 @@ if cargo tree --locked -p aio-rs-shell -e normal --prefix none | grep -q '^dioxu
 fi
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 # The API docs agents read (`cargo doc -p aio-rs`): every link resolves.
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-rs-config -p aio-rs-macros -p aio-rs-config-macro \
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-rs-config -p aio-rs-macros -p aio-rs-config-macro -p aio-rs-air \
   --all-features --locked
 # Each feature alone stays clean (none: the core a standalone app builds).
 if cargo hack --version >/dev/null 2>&1; then
   cargo hack clippy -p aio-rs -p aio-rs-shell --lib --each-feature --locked -- -D warnings
 else
-  for f in "" outbound server tls oidc br net kit imbl web dev testing video compat; do
+  for f in "" outbound server tls oidc br net kit air imbl web dev testing video compat; do
     cargo clippy -p aio-rs --lib --no-default-features --features "$f" --locked -- -D warnings
   done
   for f in "" web dev; do
@@ -53,6 +53,16 @@ fi
 cargo clippy -p aio-rs --lib --no-default-features --features compat,net --locked -- -D warnings
 # Without `compat` a socket that doesn't say wire 2 is refused (the rest runs with every feature, below).
 cargo test -p aio-rs --no-default-features --features net --test sync --test http --test compat_data --locked
+# air, aio-rs's own renderer (docs/design/air.md): the facade and TestUi on
+# it with no Dioxus in the build, and its gates (no leaks, misuse failing,
+# planted faults failing a test) in a release build too.
+cargo clippy -p aio-rs --lib --test air_ui --test facade --test ui --no-default-features --features air --locked -- -D warnings
+if cargo tree --locked -p aio-rs --no-default-features --features air -e normal --prefix none | grep -q '^dioxus'; then
+  echo "ci: aio-rs with \`air\` alone pulls dioxus" >&2
+  exit 1
+fi
+cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --locked
+cargo test -p aio-rs-air --release --all-features --locked
 # The browser build (`ax build --web`): aio's core in the page, no SQLite, no ring.
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
 # With the kit: its controls and the sign-in form in the page.
