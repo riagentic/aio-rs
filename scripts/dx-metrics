@@ -37,8 +37,13 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
                                 base's row of this machine is reused
   scripts/dx-metrics --trend [n]  the last n rows (12) and today's limits
   scripts/dx-metrics --self-test  the gate's rules, on made-up rows
+  scripts/dx-metrics --machine  this machine's short hash, as its rows name
+                                it (GitHub CI keys the kept rows by it)
   scripts/dx-metrics --apk      the air template's APKs only (`ax build
                                 --android`; with --check and --base too)
+  scripts/dx-metrics --dioxus   the template on Dioxus only, --air on air
+                                only (the rest of the row blank; both make
+                                the whole row: GitHub CI runs them side by side)
   scripts/dx-metrics --live     the live edits only, on Dioxus (dx) and on
                                 air (`ax dev`'s own reload and hot-patch),
                                 one after the other here: printed, no row
@@ -332,15 +337,16 @@ def du_mb(path):
     return int(subprocess.run(["du", "-sk", path], capture_output=True, text=True).stdout.split()[0]) // 1024
 
 
-def measure(tmp, root=ROOT, full=True, apk=False):
+def measure(tmp, root=ROOT, full=True, part=None):
     """A row for the checkout `root` (`tmp` in its target/); not `full`: its
-    sizes only (no rebuilds, live edits or smoke); `apk`: the air template's
-    APKs alone."""
+    sizes only (no rebuilds, live edits or smoke); `part` "dioxus" or "air":
+    the template on that renderer alone, "apk": the air template's APKs
+    alone."""
     # aio-rs itself as ci.sh built it (its env, its target folder); a base's
     # in its own: its path is as long, so cargo took the base's crates for
     # this checkout's, and a later build here compiled against the base's
     # aio-config. The template as a developer's.
-    if apk and not has_air(root):
+    if part in ("air", "apk") and not has_air(root):
         return {}
     here = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
     cli = here if root == ROOT else root / "target"
@@ -350,8 +356,8 @@ def measure(tmp, root=ROOT, full=True, apk=False):
     env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
     aio = cli / "debug" / "ax"
     env["CARGO_TARGET_DIR"] = str(tmp / "target")
-    if apk:
-        return measure_air(tmp, root, aio, env, full, apk)
+    if part in ("air", "apk"):
+        return rounded(measure_air(tmp, root, aio, env, full, part == "apk"))
     run([aio, "create", NAME, "--aio", root], tmp, env)
     app = tmp / NAME
     shutil.copy(root / "Cargo.lock", app / "Cargo.lock")
@@ -361,7 +367,7 @@ def measure(tmp, root=ROOT, full=True, apk=False):
     row["debug_target_mb"] = du_mb(tmp / "target")
     if not full:
         run([aio, "build", NAME, "--appimage"], app, env)
-        return rounded(sizes(row, tmp, app) | measure_air(tmp, root, aio, env, full))
+        return rounded(sizes(row, tmp, app) | (measure_air(tmp, root, aio, env, full) if part is None else {}))
     row["rebuild_s"], row["rebuild_cpu"] = rebuild(app, env)
     row |= edited_live(aio, app, env, tmp / "home")
     said, row["release_s"], row["release_cpu"] = run([aio, "build", NAME, "--appimage", "--smoke"], app, env)
@@ -370,7 +376,7 @@ def measure(tmp, root=ROOT, full=True, apk=False):
     mem = re.search(r"memory: (\d+) MB private, (\d+) MB PSS.*?, (\d+) MB written", said)
     row["boot_s"] = float(boot[1]) if boot else ""
     row["window_mb"], row["window_pss_mb"], row["window_dirty_mb"] = (int(mem[1]), int(mem[2]), int(mem[3])) if mem else ("", "", "")
-    return rounded(row | measure_air(tmp, root, aio, env, full))
+    return rounded(row | (measure_air(tmp, root, aio, env, full) if part is None else {}))
 
 
 def debug_build():
@@ -642,8 +648,8 @@ def keep(cache, sha, row):
         w.writerow(row)
 
 
-def measure_base(sha, apk):
-    """Commit `sha`'s sizes (`apk`: its air APKs'), built in a checkout
+def measure_base(sha, part):
+    """Commit `sha`'s sizes (`part`'s, as `measure`'s), built in a checkout
     beside this one whose path is as long (debug info holds the paths)."""
     here = ROOT.with_name(ROOT.name[:-1] + ("-" if ROOT.name.endswith("_") else "_"))
     if here.exists():
@@ -652,7 +658,7 @@ def measure_base(sha, apk):
     try:
         (here / "target").mkdir()
         with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=here / "target") as tmp:
-            return measure(pathlib.Path(tmp), here, full=False, apk=apk)
+            return measure(pathlib.Path(tmp), here, full=False, part=part)
     finally:
         git("worktree", "remove", "--force", str(here))
 
@@ -676,6 +682,8 @@ def main():
     args = sys.argv[1:]
     if "--self-test" in args:
         return self_test()
+    if "--machine" in args:
+        return print(machine())
     if "--trend" in args:
         rest = args[args.index("--trend") + 1:]
         return trend(int(rest[0]) if rest and rest[0].isdigit() else 12)
@@ -688,9 +696,10 @@ def main():
         for col in EDITS:
             print(f"{col:16} " + " ".join(f"{rows[r].get(col, ''):>8}" for r in ("dioxus", "air")))
         return
-    check, apk = "--check" in args, "--apk" in args
-    # An APK run's rows kept apart: a base's row of one kind says nothing of the other's.
-    kind = "-apk" if apk else ""
+    check = "--check" in args
+    part = next((p for p in ("apk", "air", "dioxus") if f"--{p}" in args), None)
+    # A part's rows kept apart: a base's row of one part says nothing of another's.
+    kind = f"-{part}" if part else ""
     rev, cache = (args[args.index(f) + 1] if f in args else None for f in ("--base", "--rows"))
     cache = cache and pathlib.Path(cache).expanduser()
     rows, here, today = history(), machine(), datetime.date.today().isoformat()
@@ -702,7 +711,7 @@ def main():
             print(f"dx-metrics: the base {sha[:8]}: this machine's row kept in {cache}")
         else:
             t = time.monotonic()
-            base = measure_base(sha, apk) | {"date": today, "commit": sha[:8], "machine": here}
+            base = measure_base(sha, part) | {"date": today, "commit": sha[:8], "machine": here}
             keep(cache, sha + kind, base)
             print(f"dx-metrics: the base {sha[:8]} measured here in {time.monotonic() - t:.0f} s")
         new = added(at(sha), rows)
@@ -710,7 +719,7 @@ def main():
     # relative to the app, never through the root.
     (ROOT / "target").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=ROOT / "target") as tmp:
-        row = measure(pathlib.Path(tmp), apk=apk)
+        row = measure(pathlib.Path(tmp), part=part)
     row |= {"date": today, "commit": commit(), "machine": here}
     keep(cache, git("rev-parse", "HEAD").strip() + kind, row)
     for col in COLUMNS:

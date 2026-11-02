@@ -67,10 +67,15 @@ The Windows tests run on a real Windows when one is named:
 `./ci-windows.sh user@host`; the machine needs only OpenSSH).
 
 GitHub (`.github/workflows/ci.yml`) runs `./ci.sh` on Ubuntu after
-`ax setup` (with `ffmpeg` for the test videos) and then the ledger's fast
-breaks (`scripts/mutants --fast`), the workspace clippy and
-tests on Windows and macOS with the Electron runtime (`ax runtime --fetch`),
-and `cargo audit` (accepted advisories in `.cargo/audit.toml`).
+`ax setup` (with `ffmpeg` for the test videos), its parts side by side:
+`./ci.sh lint` and `./ci.sh test` (each part runs alone so; no part: all
+of them), its dx part as `scripts/dx-metrics --dioxus`, `--air` and
+`--apk`, each against the base measured on its own runner; the ledger's
+fast breaks (`scripts/mutants --fast`), the workspace clippy and tests on
+Windows and macOS with the Electron runtime (`ax runtime --fetch`), and
+`cargo audit` (accepted advisories in `.cargo/audit.toml`). Rust caches
+are saved by main's runs only; a PR's newer push cancels its older run,
+main's runs always finish.
 
 ## The guide (`docs/`)
 
