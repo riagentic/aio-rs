@@ -147,7 +147,7 @@
       return n
     }
     const range = () => span(node(), node())
-    // `style:<property>`: a CSS property (Dioxus's style attributes), else an attribute.
+    // `style:<property>`: a CSS property (rsx!'s style attributes), else an attribute.
     const attr = (n, k, v) => (k.startsWith('style:') ? n.style.setProperty(k.slice(6), v) : n.setAttribute(k, v))
     const build = (marks, path, svg) => {
       const k = u8()
