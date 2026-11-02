@@ -136,8 +136,8 @@ one TCP port for everything network-facing:
 
 - **The key**: every path but a `Route::public` one, a public dir,
   `/__aio/pair` (the pairing code proves it), `/__aio/health` and
-  `/__aio/metrics` on an app without accounts, and (with accounts) the
-  sign-in page needs the app's key (`Authorization: Bearer`, `?token=`,
+  `/__aio/metrics` from this machine on an app without accounts or users,
+  and (with accounts) the sign-in page needs the app's key (`Authorization: Bearer`, `?token=`,
   or the cookie a `?token=` link sets), or a session. Wrong guesses from one address are slowed and then
   locked out.
 - **The gate**, before any route: the `Host` must be an IP, `localhost`,

@@ -199,16 +199,16 @@ impl Pulse {
     fn pong(&mut self, rtt: Duration) {
         let ms = rtt.as_millis() as u64;
         let Some((id, who)) = &self.link else { return };
-        if let Some(c) = lock(clients()).get_mut(id) {
+        // On loopback a stall is the client's own main thread, not the network.
+        let loopback = lock(clients()).get_mut(id).is_some_and(|c| {
             c.rtt = Some(ms);
-        }
-        let step = self.track.step(crate::vitals::get().transport.grade(ms), crate::store::now_ms());
-        match step {
-            Some(crate::vitals::Status::Recovered) => {
-                crate::info!(cat: "vitals", "{}", crate::vitals::transport_says(crate::vitals::Status::Recovered, who, ms))
-            }
-            Some(s) => crate::warn!(cat: "vitals", "{}", crate::vitals::transport_says(s, who, ms)),
-            None => {}
+            c.from.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback())
+        });
+        let status = crate::vitals::get().transport.grade(ms);
+        let step = self.track.step(status, crate::store::now_ms());
+        crate::vitals::linked(*id, loopback, crate::vitals::Layer { status, measured: ms, since: self.track.since });
+        if let Some(s) = step {
+            crate::vitals::stepped("transport", s, &crate::vitals::transport_says(s, who, ms));
         }
     }
 }
@@ -532,6 +532,7 @@ impl Drop for Listed {
     fn drop(&mut self) {
         lock(clients()).remove(&self.0);
         crate::health::client_gone(self.0);
+        crate::vitals::unlinked(self.0);
     }
 }
 

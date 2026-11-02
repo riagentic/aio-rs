@@ -559,7 +559,7 @@ async fn a_streamed_route_pipes_its_body_into_blobs_as_it_arrives() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn health_and_metrics_answer_a_monitor_without_the_key() {
+async fn health_and_metrics_answer_this_machine_and_the_network_only_with_a_credential() {
     let addr = serve(Handle::memory(), Http::default()).await;
     let (s, head, body) = fetch(&addr, "GET", "/__aio/health", &[], "").await;
     assert_eq!((s, header(&head, "cache-control")), (200, Some("no-store")));
@@ -567,12 +567,44 @@ async fn health_and_metrics_answer_a_monitor_without_the_key() {
     assert_eq!(v["appId"], "hooks");
     assert_eq!(v["pid"], std::process::id());
     assert!(["healthy", "degraded"].contains(&v["status"].as_str().unwrap()), "{v}");
+    assert!(v.get("exe").is_none() && v.get("cwd").is_none(), "where it runs is the file's only: {v}");
     let (s, head, body) = fetch(&addr, "GET", "/__aio/metrics", &[], "").await;
     assert_eq!((s, header(&head, "content-type")), (200, Some("text/plain; version=0.0.4")));
     for m in ["# TYPE aio_up gauge", "aio_uptime_seconds ", "aio_memory_rss_bytes ", "aio_clients_connected "] {
         assert!(body.contains(m), "{m} in {body}");
     }
     assert_eq!(fetch(&addr, "HEAD", "/__aio/health", &[], "").await.0, 200);
+    // Fail closed: a request a proxy relayed is from the network, and the
+    // network shows the key (or, with users, a user's token).
+    const RELAYED: (&str, &str) = ("X-Forwarded-For", "10.0.0.2");
+    // aio's vitals: every layer, the likely cause, the thresholds.
+    let (s, _, body) = fetch(&addr, "GET", "/__aio/vitals", &[], "").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(s, 200);
+    assert!(v["loop"]["status"].is_string() && v["render"]["status"].is_string(), "{v}");
+    assert_eq!(v["thresholds"]["loop"]["frozen"], aio::vitals::Vitals::default().event_loop.frozen);
+    for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
+        assert_eq!(fetch(&addr, "GET", path, &[RELAYED], "").await.0, 401, "{path}");
+        assert_eq!(fetch(&addr, "GET", path, &[RELAYED, ("Authorization", "Bearer wrong")], "").await.0, 401);
+        assert_eq!(fetch(&addr, "GET", path, &[RELAYED, KEY], "").await.0, 200, "{path}");
+    }
+    let users =
+        Http::default().users(aio::auth::Users::map([("tok-of-mon-0123456789".into(), ("mon".into(), "ops".into()))]));
+    let addr = serve(Handle::memory(), users).await;
+    let tok = ("Authorization", "Bearer tok-of-mon-0123456789");
+    // With users, never anonymous, even here (aio's per-user rule).
+    assert_eq!(fetch(&addr, "GET", "/__aio/health", &[], "").await.0, 401);
+    assert_eq!(fetch(&addr, "GET", "/__aio/health", &[RELAYED], "").await.0, 401);
+    assert_eq!(fetch(&addr, "GET", "/__aio/health", &[RELAYED, tok], "").await.0, 200);
+    // `[server] open` says so on purpose: then anyone may look.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let open = l.local_addr().unwrap().to_string();
+    tokio::spawn(aio::sync::serve_with(
+        Handle::<Hooks>::memory(),
+        l,
+        aio::sync::Options { open: true, ..Default::default() },
+    ));
+    assert_eq!(fetch(&open, "GET", "/__aio/metrics", &[RELAYED], "").await.0, 200);
 }
 
 #[tokio::test(flavor = "multi_thread")]

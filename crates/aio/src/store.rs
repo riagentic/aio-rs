@@ -1391,6 +1391,18 @@ impl<T: Cell> Store<T> {
         fired: Option<&Due>,
         op: Option<&str>,
     ) -> Result<Value> {
+        crate::log::in_call(|| self.apply_and_commit_in_call(by, method, args, cx, fired, op))
+    }
+
+    fn apply_and_commit_in_call(
+        &mut self,
+        by: &By,
+        method: &str,
+        args: Value,
+        cx: Cx,
+        fired: Option<&Due>,
+        op: Option<&str>,
+    ) -> Result<Value> {
         let (panics, t) = (self.panics.last().copied(), std::time::Instant::now());
         let out = self.apply_and_commit_once(by, method, args, cx, fired, op);
         let took = t.elapsed();

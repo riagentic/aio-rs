@@ -43,8 +43,10 @@
     return { tag: el.localName, role, name: words(name) };
   };
   // Why a person can't see it (`display: none` on it or around it, the
-  // `hidden` attribute is one; `visibility`), or null.
+  // `hidden` attribute is one; `visibility`), or null. A component shows
+  // when one of its elements does.
   const hidden = (el) => {
+    if (el.scope) return el.els.some((e) => !hidden(e)) ? null : "none of what it drew shows";
     for (let e = el; e; e = e.parentElement) {
       if (getComputedStyle(e).display === "none") return e === el ? "display: none" : `display: none on an enclosing <${e.localName}>`;
     }
@@ -111,7 +113,43 @@
     if (!root) return [];
     try { return Array.from(root.querySelectorAll(t.slice(at + CSS_.length))); } catch { return []; }
   };
+  // air's components (`arg.tree`, from `TestUi`: each one's name, key, the
+  // page's ids of its first and last node, its parent's place in the list)
+  // as scopes a path names: `comp=Row[42]` (by key), `comp=Row` (the one
+  // Row there), `comp=List/comp=Row[42]/DeleteButton` (inside one).
+  const COMP = "comp=";
+  const tree = arg.tree || [];
+  const span = (c) => {
+    if (c.first == null || !window.__airNode) return [];
+    const a = window.__airNode(c.first), b = window.__airNode(c.last), out = [];
+    for (let n = a; n && b; n = n.nextSibling) { out.push(n); if (n === b) return out; }
+    return [];
+  };
+  const scope = (nodes) => {
+    const els = nodes.filter((n) => n.nodeType === 1);
+    if (els.length === 1 && nodes.every((n) => n === els[0] || n.nodeType === 8 || !n.data.trim())) return els[0];
+    return {
+      scope: true, els, localName: "", getAttribute: () => null, hasAttribute: () => false, matches: () => false,
+      contains: (el) => nodes.some((n) => n === el || n.contains(el)),
+      querySelectorAll: (sel) => els.flatMap((e) => [...(e.matches(sel) ? [e] : []), ...e.querySelectorAll(sel)]),
+      get textContent() { return nodes.map((n) => n.textContent).join(""); },
+      get innerText() { return nodes.map((n) => n.nodeType === 1 ? n.innerText : n.nodeType === 3 ? n.data : "").join(""); },
+    };
+  };
+  const label = (c) => c.key == null ? c.name : `${c.name}[${c.key}]`;
+  const comps = (seg, root) => {
+    const m = /^comp=([^[\]]+)(?:\[(.*)\])?$/.exec(seg);
+    if (!m) return [];
+    return tree.filter((c) => c.name === m[1] && (m[2] === undefined || c.key === m[2])).map(span)
+      .filter((ns) => ns.length && (root === top || ns.some((n) => root.contains(n)))).map(scope);
+  };
   const find = (t) => {
+    const cutAt = t.lastIndexOf("/"), last = t.slice(cutAt + 1);
+    if (last.startsWith(COMP) && !t.startsWith(TEXT) && !(t.startsWith(CSS_) || cssAt(t) > 0)) {
+      const root = cutAt >= 0 ? find(t.slice(0, cutAt)) : top;
+      const hits = root ? comps(last, root) : [];
+      return hits.length === 1 ? hits[0] : null;
+    }
     if (t.startsWith(TEXT)) {
       const hits = byText(t.slice(TEXT.length));
       return hits.length === 1 ? hits[0] : null;
@@ -140,6 +178,15 @@
   const names = () => named(top).map(([n]) => n);
   const missing = (t) => {
     const there = `the handles there are: ${handles().join(", ")}; by name: ${names().join(", ")}`;
+    const seg = t.slice(t.lastIndexOf("/") + 1);
+    if (seg.startsWith(COMP) && !t.startsWith(TEXT) && cssAt(t) === 0 && !t.startsWith(CSS_)) {
+      if (!window.__airNode) return { error: `${t}: components are named in the page on air only` };
+      const cut = t.lastIndexOf("/"), root = cut >= 0 ? find(t.slice(0, cut)) : top;
+      if (!root) return missing(t.slice(0, cut));
+      const n = comps(seg, root).length;
+      const all = [...new Set(tree.map(label))].join(", ") || "none";
+      return { error: n ? `${n} components match ${t}: name one by its key (comp=Name[key])` : `no component ${seg.slice(COMP.length)} there; the components are: ${all}` };
+    }
     if (t.startsWith(CSS_) || cssAt(t) > 0) {
       const sel = t.slice(cssAt(t) + CSS_.length);
       try { document.querySelector(sel); } catch { return { error: `${JSON.stringify(sel)} is no CSS selector (in ${t})` }; }
@@ -230,6 +277,38 @@
     }
     return { ok: surface(root, arg.rects, !!arg.path, depth, full) };
   }
+  // The surface as a tree of components (aio's `UISurfaceNode`): each with
+  // its key, its path, the elements it drew itself (not a child
+  // component's) and its text; the app's own at the top.
+  if (op === "tree") {
+    const nameOf = new Map(named(top).map(([n, el]) => [el, n]));
+    const spans = tree.map(span);
+    const depth = tree.map((c) => { let d = 0; for (let p = c.parent; p != null; p = tree[p].parent) d++; return d; });
+    const nodes = tree.map((c, i) => ({ component: c.name, key: c.key, path: "", elements: [], children: [], text: "", i }));
+    const app = { component: "app", key: null, path: "app", elements: [], children: [], text: words(document.getElementById("main")?.innerText ?? "") };
+    nodes.forEach((n, i) => {
+      const up = tree[i].parent == null ? app : nodes[tree[i].parent];
+      up.children.push(n);
+      n.text = cutText(words(scope(spans[i]).innerText ?? ""), 200);
+    });
+    const pathOf = (n, at) => { n.path = `${at}/${label(tree[n.i])}`; n.children.forEach((c) => pathOf(c, n.path)); };
+    app.children.forEach((c) => pathOf(c, "app"));
+    for (const el of under(document.getElementById("main") || top)) {
+      if (hidden(el)) continue;
+      const i = info(el), t = el.getAttribute("data-t");
+      if (t === null && i.role === "generic") continue;
+      let at = -1;
+      spans.forEach((ns, k) => { if (ns.some((n) => n === el || n.contains(el)) && (at < 0 || depth[k] > depth[at])) at = k; });
+      const field = i.role === "textbox" || i.role === "combobox";
+      (at < 0 ? app : nodes[at]).elements.push({
+        name: t ?? nameOf.get(el) ?? "", tag: i.tag, role: i.role, label: i.name, handle: t,
+        text: cutText(words(el.innerText ?? ""), 80), value: field ? el.value ?? "" : null,
+        checked: checkable(el) ? isChecked(el) : null, disabled: disabled(el),
+      });
+    }
+    const out = (n) => ({ component: n.component, key: n.key, path: n.path, elements: n.elements, children: n.children.map(out), text: n.text });
+    return { ok: out(app) };
+  }
   if (op === "names" && arg.path) {
     const root = find(arg.path);
     return root ? { ok: named(root).map(([n]) => n) } : missing(arg.path);
@@ -305,6 +384,42 @@
       });
     }
     return { ok: out };
+  }
+  // aio's run-time accessibility rules (`air/dev-a11y.ts`) over the showing
+  // elements: each a mistake that renders fine and fails a keyboard, a
+  // screen reader or a zoomed page. A handler is known on air (the page's
+  // listeners); on Dioxus the handler rules are skipped.
+  if (op === "a11y") {
+    const ITEM = ["option", "row", "gridcell", "treeitem", "tab", "menuitem", "menuitemcheckbox", "menuitemradio"];
+    const OWNER = ["listbox", "grid", "treegrid", "tree", "tablist", "menu", "menubar"];
+    const DISMISS = ["dialog", "alertdialog", "alert", "status"];
+    const NATIVE = ["button", "a", "input", "select", "textarea", "summary", "label", "option"];
+    const out = [];
+    const main = document.getElementById("main");
+    for (const el of [...under(main || top), ...Array.from(document.body.children).filter((n) => n !== main).flatMap((n) => [n, ...under(n)])]) {
+      if (["script", "style", "template"].includes(el.localName) || el.closest("[data-aio-dev]") || hidden(el)) continue;
+      const tag = el.localName, a = (k) => el.getAttribute(k), on = el.__airOn || new Set();
+      const t = a("data-t"), place = t !== null ? `<${tag} data-t="${t}">` : `<${tag}>${el.textContent.trim() ? " " + debug(cutText(words(el.textContent), 30)) : ""}`;
+      const say = (m) => out.push(`${place}: ${m}`);
+      const role = a("role") || "";
+      const clicks = on.has("click"), keys = on.has("keydown") || on.has("keyup") || on.has("keypress");
+      const elsewhere = ITEM.includes(role) || DISMISS.includes(role) || (OWNER.includes(role) && a("aria-activedescendant") !== null);
+      if (tag === "img" && a("alt") === null) say('missing "alt": alt="" for a decorative image, else what it shows');
+      if (clicks && !keys && !["presentation", "none"].includes(role) && !elsewhere && !NATIVE.includes(tag)) {
+        say("a click handler but no keyboard one: add onkeydown (or use a <button>)");
+      }
+      if (["input", "textarea", "select"].includes(tag) && a("aria-label") === null && a("aria-labelledby") === null && a("id") === null && !el.closest("label")) {
+        say("no label: wrap it in a <label>, or give it an id (for <label for>), aria-label or aria-labelledby");
+      }
+      if (tag === "button" && a("type") === null) say('no type: in a <form> it submits it; write type: "button" for one that doesn\'t');
+      if (tag === "a" && clicks && a("href") === null) say("a click handler and no href: not focusable, not announced; use a <button>, or give it an href");
+      const ti = Number(a("tabindex"));
+      if (a("tabindex") !== null && Number.isFinite(ti) && ti > 0) say(`tabindex ${ti}: a positive one re-orders the whole page's Tab order; use 0 or -1`);
+      const focusable = ["button", "a", "input", "select", "textarea", "summary"].includes(tag) || (a("tabindex") !== null && ti >= 0);
+      if (a("aria-hidden") === "true" && focusable) say("aria-hidden but focusable: a keyboard lands where a screen reader says nothing; add tabindex -1 or inert");
+      if (a("aria-disabled") === "true" && clicks && !el.hasAttribute("disabled")) say("aria-disabled but its click still runs: add disabled, or return early in the handler");
+    }
+    return { ok: [...new Set(out)] };
   }
   // Reading needs no showing element: what is there, and its state.
   if (["el", "attr", "style", "rect"].includes(op)) {

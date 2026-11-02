@@ -80,6 +80,16 @@ pub fn render(level: Level, cat: &str, msg: &str, data: &[(&str, &dyn Display)])
 /// a failed write never panics the caller, and neither does a sink.
 #[doc(hidden)]
 pub fn emit(level: Level, module: &str, cat: Option<&str>, msg: std::fmt::Arguments, data: &[(&str, &dyn Display)]) {
+    // A line said during a call carries its id ([`call_id`]).
+    let id = call_id();
+    let with;
+    let data = match id {
+        0 => data,
+        _ => {
+            with = [data, &[("call", &id as &dyn Display)]].concat();
+            &with[..]
+        }
+    };
     let line = render(level, cat.unwrap_or(tag(module)), &text(&msg), data);
     if CAPTURE.with_borrow_mut(|c| c.as_mut().map(|c| c.push(line.clone()))).is_some() {
         return;
@@ -201,6 +211,14 @@ impl Rotating {
         Ok(Self { dir: dir.into(), stem, file, size, max, keep: KEEP })
     }
 
+    /// A run of its own: what an earlier run wrote moves to `<stem>.1.log`.
+    pub fn fresh(mut self) -> io::Result<Self> {
+        if self.size > 0 {
+            self.rotate()?;
+        }
+        Ok(self)
+    }
+
     /// Keep `keep` files (at least the live one) instead of `KEEP`.
     pub fn keeping(self, keep: usize) -> Self {
         Self { keep: keep.max(1), ..self }
@@ -295,6 +313,15 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
         // No credential reaches a log: a token in a URL, a pairing code.
         let line = crate::report::redact(&line);
         let line = runtime_noise(&line).unwrap_or(line);
+        // The window's render probe, into vitals (off this thread: what it
+        // says goes to stderr, which this thread drains); ten a second at most.
+        static HEARD: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        if let Some((status, ms)) = crate::vitals::render_step(&line)
+            && now_ms() - HEARD.load(Relaxed) >= 100
+        {
+            HEARD.store(now_ms(), Relaxed);
+            _ = std::thread::Builder::new().name("aio-vitals".into()).spawn(move || crate::vitals::render_heard(status, ms));
+        }
         tally.count(&line);
         ERRORS.store(tally.errors, Relaxed);
         repeats.next(line).iter().for_each(|l| out(l));
@@ -346,6 +373,7 @@ impl Sinks {
     fn open(dir: &Path) -> io::Result<Self> {
         let cfg = settings();
         let app = Rotating::named(dir, "app", cfg.file_mb << 20)?.keeping(cfg.keep);
+        let app = if cfg.per_run { app.fresh()? } else { app };
         Ok(Self { dir: dir.into(), cfg, app, split: vec![], last: None })
     }
 
@@ -356,6 +384,7 @@ impl Sinks {
         let Some(stem) = to else { return Ok(()) };
         if !self.split.iter().any(|(s, _)| *s == stem) {
             let r = Rotating::named(&self.dir, stem, self.cfg.file_mb << 20)?.keeping(self.cfg.keep);
+            let r = if self.cfg.per_run { r.fresh()? } else { r };
             self.split.push((stem, r));
         }
         self.split.iter_mut().find(|(s, _)| *s == stem).map_or(Ok(()), |(_, r)| r.line(at, line))
@@ -386,6 +415,29 @@ static RUN: AtomicU64 = AtomicU64::new(0);
 /// Method calls this run.
 pub fn calls() -> u64 {
     CALLS.load(Relaxed)
+}
+
+thread_local!(static CALL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
+
+/// The id of the call running on this thread, 0 outside one (aio's
+/// correlation id): a number per call this run, as `call=<id>` on every
+/// line the call logs, in the timeline's entry and in a report it causes.
+pub fn call_id() -> u64 {
+    CALL.get()
+}
+
+/// Run `f` as a new call: its id is [`call_id`] until it returns.
+pub(crate) fn in_call<R>(f: impl FnOnce() -> R) -> R {
+    // Restored on the way out, a panic's too.
+    struct Was(u64);
+    impl Drop for Was {
+        fn drop(&mut self) {
+            CALL.set(self.0);
+        }
+    }
+    let _was = Was(CALL.replace(NEXT_CALL.fetch_add(1, Relaxed)));
+    f()
 }
 
 /// A call ran: counted, and at `debug` one line, unless `[log] suppress`
@@ -643,6 +695,23 @@ mod tests {
         // Windows deletes no dir with a file open in it.
         drop(r);
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn per_run_each_run_starts_a_fresh_file_and_keeps_the_last_ones() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        for run in 0..4 {
+            let mut r = Rotating::open(d, 1 << 20).unwrap().keeping(3).fresh().unwrap();
+            r.line(0, &format!("run {run}")).unwrap();
+        }
+        let read = |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default();
+        assert!(read("app.log").ends_with("run 3\n") && read("app.1.log").ends_with("run 2\n"));
+        assert!(read("app.2.log").ends_with("run 1\n") && !d.join("app.3.log").exists(), "keep 3");
+        // An empty file is not a run: nothing moves.
+        drop(Rotating::named(d, "warning", 1 << 20).unwrap().fresh().unwrap());
+        drop(Rotating::named(d, "warning", 1 << 20).unwrap().fresh().unwrap());
+        assert!(!d.join("warning.1.log").exists());
     }
 
     #[test]

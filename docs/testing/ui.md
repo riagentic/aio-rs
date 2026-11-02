@@ -301,6 +301,9 @@ assert_eq!(ui.text("hello"), "Hello Ada");
 | `surface()` | what a person can see and use, nested, one line each |
 | `html()` | the page's HTML without Dioxus's ids, then what the app put on `<body>` (a tooltip, a portal) |
 | `contrast()` | text under WCAG AA on its background (4.5:1, 3:1 large), as `<tag> "text" 2.10:1, needs 4.5:1` |
+| `a11y()` | aio's run-time accessibility rules (`dev-a11y.ts`), as `<tag data-t="t">: why`: an `<img>` without `alt`, a click with no keyboard path (air: the page knows the handlers), a field with no label, a `<button>` without `type`, an `<a>` with a click and no `href`, a positive `tabindex`, `aria-hidden` on what takes focus, `aria-disabled` with a click that still runs |
+| `surface_tree()` | the surface as a tree of components (aio's `UISurfaceNode`): each one's name, key, path (`app/List/Row[42]`), the elements it drew itself and its text |
+| `components()` | the mounted components: name, key, body runs (`renders`) and, on air, the updates its holes made |
 | `read(&GLOBAL)` | a `Global`'s value in the app's root scope |
 
 A `surface()` line is `role "name" [handle] state`, indented by depth:
@@ -328,15 +331,49 @@ The views run when the test acts or waits, never behind its back.
 | `until_within(d, what, \|\| ..)` | the same with your own patience |
 | `expect_cell(&door, what, \|s\| ..)` | until a cell's state holds; the failure prints it (5 s) |
 | `wait(d)` | lets `d` of real time pass for the app's timers (an interval, a toast's), then settles |
+| `advance(d)` | moves the views' clock `d` on: their timers due by then fire, each at its moment, then settles; from then on their clock is virtual (`wait` is `advance`) |
 
 - Each wait fails with what it waited for, the screen as `surface()`
   shows it, and a trace file.
 - `settle()` never gives up silently: a view and a page that keep
   answering each other fail (`the views and their page never settle`).
-- Time in a `TestUi` is real: there is no virtual clock under the page.
-  Test schedules and timers of the cell with
-  [`TestCells::advance`](cells.md#time-and-schedules-advance), and keep
-  the view's own timers short.
+- Time in a `TestUi` is real until `advance(d)`: then the views' clock
+  (their sleeps, intervals, debounces, `use_live`'s wait) moves only by
+  `advance`, so a 10 s timeout is tested at once. The page's own timers (a
+  CSS transition, a page script's `setTimeout`) keep real time; test the
+  cell's schedules with
+  [`TestCells::advance`](cells.md#time-and-schedules-advance).
+
+Every mount says each new `a11y()` finding once on stderr, as aio's dev
+mode warns once; assert on `a11y()` to fail a test on them.
+
+## Components (air)
+
+On air the page knows each component's first and last node, so a path
+can name one: `comp=Row[42]` (by its `key:`), `comp=Row` (the one `Row`
+showing), `comp=List/comp=Row[42]/DeleteButton` (inside one). The same
+names in two rows stop clashing:
+
+```rust,no_run
+# use aio::ui::prelude::*;
+# fn app() -> View { rsx! {} }
+# fn main() {
+let mut ui = aio::testing::TestUi::new(app);
+let row = ui.find("Todo", Some("2")); // "comp=Todo[2]"; fails listing them if none or several
+ui.within(&row, |ui| ui.click("DoneButton"));
+assert!(ui.checked("comp=Todo[2]/css=input"));
+assert!(ui.absent("comp=Empty"), "a component that drew nothing doesn't show");
+# }
+```
+
+`within(t, f)` takes every path in `f` inside `t` (an element or a
+component); `count(css)` stays page-wide. `components()` counts what a
+change cost: a component's body runs once (`renders` 1, again only after
+a wait or a router's new match), and each of its holes that wrote the
+page again is one of its `updates`, so "the cursor's reader updated 5
+times, the rows' reader not at all" is an assertion. On Dioxus the page
+names no component: `comp=` paths fail saying so, `updates` is 0 and
+`renders` counts re-renders.
 
 ## Seeded state and the cell beside the page
 
@@ -641,11 +678,10 @@ the process: drive its page over the DevTools protocol.
 | happy-dom, no layout | a real engine: `rect`, `style`, `shot` and scrolling measure for real |
 | `ui.App.SaveButton.click()` (a proxy) | `ui.click("SaveButton")`: names are strings, checked when the test runs |
 | `am testgen` typed clients | `ax testgen <app>`: a Rust name table, a renamed element a compile error ([ax](../clients/ax.md#ax-testgen)) |
-| `ui.advance(ms)`: a virtual clock under the page | none yet (air): `TestUi` time is real; schedules are tested with `TestCells::advance` |
 | `testUI(App, { user })` | `TestServer::ui_source(user, latency)`: a real signed-in copy |
 | `testPageFetch` (the page's HTTP and cookies) | `TestServer::page()`: the HTTP side, cookies kept |
 | `wire: { strict: true }`, the JSON-loss table | none needed: arguments are Rust types the wire encodes; `ui_source` crosses the real wire |
-| `ui.find("TodoRow", key)` by list key | a `data-t` per row (`row-{id}`), `list/MilkItem`, or `css=li:nth-child(2)` |
+| `ui.find("TodoRow", key)` returns a handle with the row's names | `ui.find("TodoRow", Some(key))` returns its path for `within` or a path's start (air) |
 | `serverImport` stubs | a trait the effect calls, with a test implementation; or a [cassette](cassettes.md) |
 | `smoke()` boot smoke | `aio::testing::smoke(bundle)` in a test (`ax smoke` underneath), `ax build --smoke` |
 | `uiRects` from a measured client | `rect(t)` in the test; `ax surface <app> --rects` |

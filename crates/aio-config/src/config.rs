@@ -280,6 +280,13 @@ pub struct Accounts {
     /// user is the session's.
     #[serde(default)]
     pub on: bool,
+    /// Sessions without accounts (aio's `sessions: true`): no users, no
+    /// login doors; the app issues sessions itself (`auth::serving()`'s
+    /// `issue`, say from a server fn that checked its own credential), and
+    /// a session token is that user on every door until it expires or is
+    /// revoked. `on` includes it.
+    #[serde(default)]
+    pub sessions: bool,
     /// Anyone may make an account (`POST /__aio/auth/signup`).
     #[serde(default)]
     pub signup: bool,
@@ -306,7 +313,14 @@ fn thirty_days() -> Duration {
 
 impl Default for Accounts {
     fn default() -> Self {
-        Self { on: false, signup: false, session: thirty_days(), max_sessions: ten(), require_verified: false }
+        Self {
+            on: false,
+            sessions: false,
+            signup: false,
+            session: thirty_days(),
+            max_sessions: ten(),
+            require_verified: false,
+        }
     }
 }
 
@@ -569,11 +583,14 @@ pub struct Log {
     pub heartbeat: u64,
     /// Methods (`notes.tick`) whose calls are not logged even at `debug`.
     pub suppress: Vec<String>,
+    /// Each run starts fresh files (aio's per-run `debug.log`): the last
+    /// run's move to `app.1.log` …, `keep` runs (or size steps) kept.
+    pub per_run: bool,
 }
 
 impl Default for Log {
     fn default() -> Self {
-        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![] }
+        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![], per_run: false }
     }
 }
 
@@ -1191,11 +1208,15 @@ pub struct Memory {
     pub critical: u8,
     /// Growth said once per this many MB (or a tenth of the machine).
     pub growth_mb: u64,
+    /// How often memory is sampled (and `health.json` written): 1 s to
+    /// 10 s (aio's `memory.interval`).
+    #[serde(with = "span")]
+    pub every: Duration,
 }
 
 impl Default for Memory {
     fn default() -> Self {
-        Self { high: 50, clear: 40, critical: 80, growth_mb: 256 }
+        Self { high: 50, clear: 40, critical: 80, growth_mb: 256, every: Duration::from_secs(10) }
     }
 }
 
@@ -1427,11 +1448,22 @@ impl Config {
         if !(m.clear < m.high && m.high <= m.critical && m.critical <= 100) || m.growth_mb == 0 {
             return Err("aio.toml: [memory] needs clear < high <= critical <= 100, and growth_mb of 1 or more".into());
         }
+        if !(Duration::from_secs(1)..=Duration::from_secs(10)).contains(&m.every) {
+            return Err(
+                "aio.toml: [memory] every must be 1s to 10s (ax health calls a health.json older than 30 s stuck)"
+                    .into(),
+            );
+        }
         c.vitals.check()?;
         if c.log.keep == 0 || c.log.file_mb == 0 {
             return Err("aio.toml: [log] keep and file_mb must be at least 1".into());
         }
-        if c.accounts.on {
+        if !c.accounts.on && c.accounts.sessions && (c.accounts.signup || c.accounts.require_verified) {
+            return Err(
+                "aio.toml: [accounts] signup and require_verified need accounts (on = true), not sessions alone".into(),
+            );
+        }
+        if c.accounts.on || c.accounts.sessions {
             let p = c.accounts.policy();
             if !(1..=crate::auth::MAX_TTL_MS).contains(&p.ttl_ms) {
                 return Err("aio.toml: [accounts] session must be 1s to 100 years".into());
@@ -1440,8 +1472,8 @@ impl Config {
                 return Err("aio.toml: [accounts] max_sessions must be at least 1".into());
             }
         }
-        if c.server.open && c.accounts.on {
-            return Err("aio.toml: [server] open and [accounts] on both say who gets in: give one".into());
+        if c.server.open && (c.accounts.on || c.accounts.sessions) {
+            return Err("aio.toml: [server] open and [accounts] both say who gets in: give one".into());
         }
         // A name no request can carry would trust nothing, silently.
         if let Some(h) = &c.server.trust_proxy

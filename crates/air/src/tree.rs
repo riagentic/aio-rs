@@ -1,0 +1,192 @@
+//! The mounted components (aio DevTools' `tree`, `devtools-tree.ts`; aio-rs's
+//! `TestUi::components()`): each component an `rsx!` places, by name and
+//! key, with what drew it: how many times its body ran (`renders`: once, or
+//! again after a wait or a [`follow`](crate::follow)) and how many times one
+//! of its holes wrote its part of the page again (`updates`: air's
+//! re-render). Counts cost an increment, as in aio; the tree is walked only
+//! when asked. The page's ids of each one's first and last node let a test
+//! find what a component drew (`TestUi::find`).
+use std::cell::{Cell, RefCell};
+
+/// A component instance's slot: its index and the generation of that index.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Id(u32, u32);
+
+struct Comp {
+    name: &'static str,
+    key: Option<String>,
+    parent: Option<Id>,
+    seq: u64,
+    renders: u32,
+    updates: u32,
+    nodes: Option<(u32, u32)>,
+}
+
+#[derive(Default)]
+struct Tree {
+    slots: Vec<(u32, Option<Comp>)>,
+    free: Vec<u32>,
+    seq: u64,
+}
+
+thread_local! {
+    static TREE: RefCell<Tree> = RefCell::default();
+    /// The component whose view is being built or updated now.
+    static CURRENT: Cell<Option<Id>> = const { Cell::new(None) };
+}
+
+fn with<R>(id: Option<Id>, f: impl FnOnce(&mut Comp) -> R) -> Option<R> {
+    let Id(i, g) = id?;
+    TREE.with_borrow_mut(|t| match t.slots.get_mut(i as usize) {
+        Some((v, Some(c))) if *v == g => Some(f(c)),
+        _ => None,
+    })
+}
+
+/// A component placed now, under the one whose view is being built.
+pub(crate) fn mount(name: &'static str, key: Option<String>) -> Id {
+    let parent = CURRENT.get();
+    TREE.with_borrow_mut(|t| {
+        t.seq += 1;
+        let c = Comp { name, key, parent, seq: t.seq, renders: 0, updates: 0, nodes: None };
+        match t.free.pop() {
+            Some(i) => {
+                let slot = &mut t.slots[i as usize];
+                slot.0 = slot.0.wrapping_add(1);
+                slot.1 = Some(c);
+                Id(i, slot.0)
+            }
+            None => {
+                t.slots.push((0, Some(c)));
+                Id(t.slots.len() as u32 - 1, 0)
+            }
+        }
+    })
+}
+
+/// Ends the component's entry when its hole ends (kept by the hole).
+pub(crate) struct Entry(pub(crate) Id);
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        let Id(i, g) = self.0;
+        _ = TREE.try_with(|t| {
+            let mut t = t.borrow_mut();
+            if let Some(slot) = t.slots.get_mut(i as usize).filter(|s| s.0 == g && s.1.is_some()) {
+                slot.1 = None;
+                t.free.push(i);
+            }
+        });
+    }
+}
+
+/// The component whose view is built or updated now.
+pub(crate) fn current() -> Option<Id> {
+    CURRENT.get()
+}
+
+/// Restores the component that was current when dropped.
+pub(crate) struct Enter(Option<Id>);
+
+impl Drop for Enter {
+    fn drop(&mut self) {
+        CURRENT.set(self.0);
+    }
+}
+
+/// `id` is current until the guard drops: what is built now is its.
+pub(crate) fn enter(id: Option<Id>) -> Enter {
+    Enter(CURRENT.replace(id))
+}
+
+/// Its body ran; its view is the page's nodes `first..=last`.
+pub(crate) fn rendered(id: Id, nodes: Option<(u32, u32)>) {
+    with(Some(id), |c| {
+        c.renders += 1;
+        c.nodes = nodes;
+    });
+}
+
+/// One of its holes wrote the page again.
+pub(crate) fn updated(id: Option<Id>) {
+    with(id, |c| c.updates += 1);
+}
+
+/// One mounted component ([`components`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mounted {
+    /// Its function's name (`TodoRow`).
+    pub name: &'static str,
+    /// Its `key:` in a list, as text.
+    pub key: Option<String>,
+    /// Times its body ran: once, and again after a wait or a `follow`.
+    pub renders: u32,
+    /// Times one of its own holes (not a child component's) wrote its part
+    /// of the page again: what a state change cost it.
+    pub updates: u32,
+    /// The page's ids of the first and last node it drew (none: nothing).
+    pub nodes: Option<(u32, u32)>,
+    pub children: Vec<Mounted>,
+}
+
+/// The components mounted on this thread, as a tree, each level in the
+/// order they were placed.
+pub fn components() -> Vec<Mounted> {
+    TREE.with_borrow(|t| {
+        let mut all: Vec<(Id, &Comp)> =
+            t.slots.iter().enumerate().filter_map(|(i, (g, c))| Some((Id(i as u32, *g), c.as_ref()?))).collect();
+        all.sort_by_key(|(_, c)| c.seq);
+        fn under(all: &[(Id, &Comp)], parent: Option<Id>) -> Vec<Mounted> {
+            all.iter()
+                .filter(|(_, c)| c.parent == parent)
+                .map(|(id, c)| Mounted {
+                    name: c.name,
+                    key: c.key.clone(),
+                    renders: c.renders,
+                    updates: c.updates,
+                    nodes: c.nodes,
+                    children: under(all, Some(*id)),
+                })
+                .collect()
+        }
+        under(&all, None)
+    })
+}
+
+/// A list key as text: by `Display` where it has one, else `Debug`, else
+/// none (`(&&KeyOf(&k)).key_text()`: method lookup tries `&KeyOf` first).
+#[doc(hidden)]
+pub struct KeyOf<'a, T: ?Sized>(pub &'a T);
+
+#[doc(hidden)]
+pub trait KeyByDisplay {
+    fn key_text(&self) -> Option<String>;
+}
+
+impl<T: std::fmt::Display + ?Sized> KeyByDisplay for &KeyOf<'_, T> {
+    fn key_text(&self) -> Option<String> {
+        Some(self.0.to_string())
+    }
+}
+
+#[doc(hidden)]
+pub trait KeyByDebug {
+    fn key_text(&self) -> Option<String>;
+}
+
+impl<T: std::fmt::Debug + ?Sized> KeyByDebug for &&KeyOf<'_, T> {
+    fn key_text(&self) -> Option<String> {
+        Some(format!("{:?}", self.0))
+    }
+}
+
+#[doc(hidden)]
+pub trait KeyByNone {
+    fn key_text(&self) -> Option<String>;
+}
+
+impl<T: ?Sized> KeyByNone for KeyOf<'_, T> {
+    fn key_text(&self) -> Option<String> {
+        None
+    }
+}
