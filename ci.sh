@@ -79,6 +79,8 @@ rm -rf "$air_ir"
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
 # With the kit: its controls and the sign-in form in the page.
 cargo clippy -p aio-rs --lib --no-default-features --features web,kit --locked --target wasm32-unknown-unknown -- -D warnings
+# On air: its views drawn in the page by air's interpreter, no Dioxus.
+cargo clippy -p aio-rs --lib --no-default-features --features web,air --locked --target wasm32-unknown-unknown -- -D warnings
 # The web build's browser test binds with the lock's wasm-bindgen, on PATH or
 # aio's own (`ax setup` fetches it); without it the test skips, said here and last.
 wb=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q}' Cargo.lock)
