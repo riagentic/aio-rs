@@ -245,10 +245,11 @@ ships no Dioxus, and its packages and edit loop are measured, in
   armv7-linux-androideabi x86_64-linux-android`, the runner's SDK).
 
 A base before air phase 3 has no shell on air: its air sizes are said
-as not gated. What it costs: about 6 minutes more in the `check` job on
-a GitHub runner (the air template's debug build, three rebuilds, the
-live edits, its release and web builds, and the base's release and web
-builds), the `air-apk` job about 20 minutes beside it.
+as not gated. What it costs on a GitHub runner: about 5 minutes more in
+the `check` job (the air template's debug build, three rebuilds, the
+live edits, its release and web builds), about 3 more once the base has
+air (its release and web builds); the `air-apk` job runs beside it, about
+5 minutes (10 with the base's APKs).
 
 ## Not in aio-rs
 
