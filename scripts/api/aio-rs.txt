@@ -965,6 +965,7 @@ aio::http::match_route: fn match_route(pattern: &str, path: &str) -> Option<Para
 aio::http::painted: fn painted(page: &str, p: &Paint) -> String
 aio::http::parse_cookies: fn parse_cookies(headers: &axum::http::HeaderMap) -> std::collections::HashMap<String, String>
 aio::http::serve_file: async fn serve_file(req: &super::Req, path: impl AsRef<std::path::Path>, content_type: Option<&str>) -> super::Reply
+aio::http::serve_window: async fn serve_window(http: Http, l: crate::ipc::Listener) -> std::io::Result<()>
 aio::http::set_cookie: fn set_cookie(name: &str, value: &str, o: &CookieOpts) -> Option<String>
 aio::http::side::Closed(String)
 aio::http::side::Frame.body: Vec<u8>
@@ -990,6 +991,7 @@ aio::ipc::Listener::bind: fn bind(addr: &str) -> io::Result<Self>
 aio::ipc::Only(_)
 aio::ipc::Only::arm: fn arm(&self, pid: u32)
 aio::ipc::Only::disarm: fn disarm(&self, pid: u32)
+aio::ipc::Only::window: fn window() -> Self
 aio::ipc::addr: fn addr(dir: &std::path::Path, name: &str) -> String
 aio::ipc::connect: async fn connect(addr: &str) -> io::Result<Stream>
 aio::ipc::connect_blocking: fn connect_blocking(addr: &str) -> io::Result<Blocking>
@@ -997,6 +999,7 @@ aio::ipc::fits: fn fits(addr: &str) -> io::Result<()>
 aio::ipc::refusal: fn refusal(pid: Option<u32>, armed: Option<&Process>, started: impl Fn(u32) -> Option<String>) -> Option<String>
 aio::ipc::too_long: fn too_long(addr: &str, limit: usize) -> Option<String>
 aio::ipc::unlink_all: fn unlink_all()
+aio::ipc::window_http: fn window_http() -> Option<&'static str>
 aio::kit::Alert: fn Alert(_: AlertProps) -> View
 aio::kit::AlertProps.attributes: Vec<Attribute>
 aio::kit::AlertProps.children: View
