@@ -1234,7 +1234,7 @@ impl TestUi {
         judged.collect()
     }
 
-    /// The page's HTML, without Dioxus's ids: what the app mounted, then
+    /// The page's HTML, without Dioxus's ids or air's anchors: what the app mounted, then
     /// what it put on `<body>` itself (a tooltip, a portal).
     pub fn html(&self) -> String {
         self.must("html", json!({})).as_str().unwrap_or_default().into()
