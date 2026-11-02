@@ -437,9 +437,13 @@ rt.block_on(async {
   when the client leaves.
 - **A binary side channel**: `Route::socket("/stream", f)` upgrades to a
   WebSocket once `f` accepts the request ([transports](../clients/transports.md#binary-data)).
-- **More cells on one server**: `Http::cell(handle)` serves another
-  `#[cell(shared)]` cell on the same `/ws`, key and port; a copy's hello
-  names its cell (aio serves every cell on one socket).
+- **More cells on one server, one socket**: `Http::cell(handle)` serves
+  another `#[cell(shared)]` cell on the same `/ws`, key and port. A
+  client's copies of every cell share one socket, as aio's page does: each
+  copy is a link of its own on it (its hello, user, rules, view, pace),
+  numbered in the socket's frames (`<link>:<message>`,
+  [transports](../clients/transports.md#one-socket-for-every-cell)). An aio
+  page (feature `compat`) sees every shared cell in its `state`.
 - **Files**: `[server.dirs]` `"/media" = "media"` serves a folder of
   `data/files` behind the key, `[server.public_dirs]` without it (only
   what a page shown before sign-in needs).
@@ -573,10 +577,10 @@ What aio has and aio-rs does not, or does differently:
   wire for state or calls. Bytes go through
   [blobs](../persistence/sql.md#blobs-files-and-big-data), a route or a
   side channel (`Route::socket`).
-- **One socket per cell.** A copy links to one cell; a server serves
-  every cell on one `/ws` and port (`Http::cell`), but a client of three
-  cells opens three sockets where aio's page opens one. An aio page (feature
-  `compat`) sees the app's own cell only.
+- **A link per cell on the socket.** aio's page has one subscription over
+  every cell; an aio-rs client has one link per cell, all on one socket,
+  each counted against `[server.limits] clients`. Time travel and aio's
+  CRDT ops (`op`, `sync-req`) from an aio page reach the app's own cell.
 - **A full offline queue refuses the call.** Both keep 500 waiting calls
   (aio's `pendingCap`) and let ones older than `retention` go; past that,
   aio drops the new op and aio-rs refuses the call, said to the caller.
