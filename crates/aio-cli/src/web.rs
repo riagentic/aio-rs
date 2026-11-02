@@ -351,7 +351,7 @@ pub fn pack(
                     head = format!("{head}\n{link}");
                 }
             }
-            aio_shell::splash::markup(&s, &app.name, &colors, "./splash.png", true)
+            aio_shell::splash::markup(&s, &app.name, &app.version, &colors, "./splash.png", true)
         }
         None => String::new(),
     };

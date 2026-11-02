@@ -159,6 +159,9 @@ jobs:
         run: cargo test -p aio-rs-cli --test hotpatch --locked -- --nocapture
         env:
           AIO_HOTPATCH_TARGET: x86_64-pc-windows-gnu
+      # ax dev's live edits on Windows, their times (printed, no row).
+      - if: runner.os == 'Windows'
+        run: python scripts/dx-metrics --live
       # air (docs/design/air.md): the facade and TestUi on it, its gates in release.
       - run: cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --test route --test route_tree --locked --no-fail-fast
       - run: cargo test -p aio-rs-air --release --all-features --locked

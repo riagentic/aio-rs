@@ -148,12 +148,47 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
         // SAFETY: a table `ax dev` linked against this very binary at the
         // address it answered (`Aio.aslr`); subsecond checks the base.
         unsafe { subsecond::apply_patch(table) }.map_err(|e| format!("the patch didn't load: {e}"))?;
+        #[cfg(all(windows, target_env = "msvc"))]
+        refresh_symbols();
         Ok(json!({ "applied": true }))
     }
     #[cfg(not(all(debug_assertions, feature = "dev")))]
     {
         _ = (method, params);
         Err("not built for hot-patching: ax dev builds with aio-shell's dev feature".into())
+    }
+}
+
+/// Windows (MSVC): std's backtrace resolver (dbghelp) lists this process's
+/// modules once, at the first backtrace; told again after each patch, a
+/// backtrace in a patch DLL names its functions (from its PDB). Under std's
+/// own dbghelp lock (backtrace-rs's `Local\RustBacktraceMutex<pid>`). No
+/// dbghelp loaded: no backtrace yet, and the first one lists every module.
+#[cfg(all(windows, target_env = "msvc", debug_assertions, feature = "dev"))]
+fn refresh_symbols() {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::Threading::{
+        CreateMutexA, GetCurrentProcess, GetCurrentProcessId, INFINITE, ReleaseMutex, WaitForSingleObject,
+    };
+    let dll: Vec<u16> = "dbghelp.dll\0".encode_utf16().collect();
+    // SAFETY: dbghelp's own entry point, called as std calls it, under its lock.
+    unsafe {
+        let module = GetModuleHandleW(dll.as_ptr());
+        if module.is_null() {
+            return;
+        }
+        let Some(f) = GetProcAddress(module, c"SymRefreshModuleList".as_ptr().cast()) else { return };
+        let refresh: unsafe extern "system" fn(HANDLE) -> i32 = std::mem::transmute(f);
+        let name = format!("Local\\RustBacktraceMutex{:08X}\0", GetCurrentProcessId());
+        let lock = CreateMutexA(std::ptr::null(), 0, name.as_ptr());
+        if lock.is_null() {
+            return;
+        }
+        WaitForSingleObject(lock, INFINITE);
+        refresh(GetCurrentProcess());
+        ReleaseMutex(lock);
+        CloseHandle(lock);
     }
 }
 

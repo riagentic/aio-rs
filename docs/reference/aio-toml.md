@@ -590,12 +590,12 @@ start's Electron download runs on it, its bar under the text
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `image` | path | required | A `.png` in the app's folder (`"assets/splash.png"`, relative, no `..`); `…@2x.png` is drawn at half its pixel size. It must exist as the app builds: it is built in. |
-| `text` | string | none | Under the image; `{title}` is the app's name. |
+| `text` | string | none | Under the image, on the desktop, the web and Android: `{title}` is the app's name, `{version}` its version (what `--version` prints); `{got}`, `{total}` and `{pct}` read `0`, `?`, `?`; any other `{word}` stays as written. |
 | `min_ms` | milliseconds | `400` | It stays at least this long once shown. |
 | `max_ms` | milliseconds | `15000` | No window by then: it goes anyway. At least `min_ms`. |
 | `background` | `["#light", "#dark"]` | the app's colours | Each `#rgb` or `#rrggbb`. |
 | `show` | `always`, `first-start`, `never` | `"always"` | When it shows: every start; only while a first start downloads Electron; never (the download window is then the plain one). `Window { splash_show }` decides at run time instead. |
-| `download_text` | string | `[build.download_window] text` | The line under the bar while the splash draws a first start's download: `{title}`, `{version}`, `{got}` and `{total}` (MB), `{pct}`. |
+| `download_text` | string | `[build.download_window] text` | The line under the bar while the splash draws a first start's download: `{title}`, `{version}` (the app's), `{got}` and `{total}` (MB), `{pct}`. |
 | `size` | `[width, height]` | the image's | The image box in px, 1 to 4096 each. |
 | `fit` | `contain`, `cover` | `"contain"` | How the image fills `size` when its shape differs. |
 | `text_position` | `below`, `over` | `"below"` | The text in a strip under the image, or over its lower part. |

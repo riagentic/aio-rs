@@ -660,6 +660,27 @@ version may break things.
 
 ### Fixed
 
+- `ax dev` on Windows reloads an `rsx!` edit as markup again (~ms)
+  instead of hot-patching it (~1.5 s): the watcher named a changed file
+  with the `\\?\` prefix `canonicalize` adds, so it never matched the
+  build's snapshot; it names it as the snapshot does now. Found by
+  `dx-metrics --live` on the Windows runner (live_rsx_s 1.5 s, its line
+  "hot-patched in 1316 ms").
+- A backtrace in hot-patched code on Windows (MSVC) names its functions:
+  each patch DLL is linked with its PDB (`/DEBUG` beside `/DEBUG:SYMTAB`)
+  and std's resolver (dbghelp) is told the modules again after each
+  patch, under its own lock. Linux, macOS and MinGW name a patch's frames
+  only when it loaded before the first backtrace was resolved (std lists
+  the libraries once); the hotpatch test checks both, on each OS.
+- `scripts/dx-metrics --live` runs on Windows (it imported the Unix-only
+  `resource`): CPU and the build check through the Win32 API, `ax dev`'s
+  tree stopped with `taskkill`, edits written byte for byte; the Windows
+  CI job prints its live-edit times.
+- The splash's `text` takes aio's full set on every splash (Electron's,
+  the OS's, the web's and Android's): `{title}`, `{version}` (the app's,
+  what `--version` prints), and `{got}`, `{total}`, `{pct}` as `0`, `?`,
+  `?`; Electron's, the web's and Android's filled only `{title}`. A
+  `download_text`'s `{version}` is the app's too, as aio's, not Electron's.
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled
