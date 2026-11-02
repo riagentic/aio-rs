@@ -196,7 +196,9 @@ version may break things.
   as a thin patch against a first "fat" build (dioxus-cli 0.7.10's
   builder, ported) and applied in the running process with `subsecond`
   (~0.45 s on Linux and macOS; Windows rebuilds), views keeping their
-  hook state by place; a stylesheet edit needs no build. The shell draws
+  hook state by place and, on Linux x86_64, the patched code reading the
+  running binary's statics (an atomic, a `OnceLock`); a stylesheet edit
+  needs no build. The shell draws
   its windows on air with `default-features = false, features = ["air"]`
   (desktop and Android: no Dioxus in the graph), and `aio::web::launch`
   runs air in the browser. `scripts/android-gate --air` and

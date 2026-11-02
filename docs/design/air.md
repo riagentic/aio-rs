@@ -349,7 +349,8 @@ Done in phase 3 (below); `ax dev` runs no `dx` for an app on air.
   the view's place among the mounted components (name, key or turn among
   siblings) and by call order; a view whose hooks changed starts afresh
   from the first that differs. Named globals (`client!`'s) are keyed by
-  name, so the patch's code finds the running state. Linux and macOS;
+  name, and on Linux x86_64 a patch's statics are bound to the running
+  binary's, so the patch's code finds the running state. Linux and macOS;
   on Windows an edit rebuilds and restarts.
 
 ## Web (wasm) and Android
@@ -759,18 +760,20 @@ row for the views (the spike drew fixed rows without a cell).
 
 Save to screen, the template app under `ax dev` with a headless window,
 the same machine (Ryzen 9 9950X, Linux x86_64, `taskset -c 0-11`, other
-work beside it), two runs each, Dioxus with dx 0.7.10:
+work beside it), three runs each, Dioxus with dx 0.7.10:
 
 | edit | Dioxus (dx) | air (`ax dev`) |
 |---|---|---|
-| `live_css_s`: a stylesheet line | 0.009, 0.017 s | 0.022, 0.024 s |
-| `live_rsx_s`: an `rsx!` text | 0.421, 0.166 s | 0.003, 0.004 s |
-| `live_logic_s`: a Rust line in the view (hot-patch) | 0.545, 0.525 s | 0.453, 0.453 s |
+| `live_css_s`: a stylesheet line | 0.009, 0.017, 0.013 s | 0.022, 0.024, 0.009 s |
+| `live_rsx_s`: an `rsx!` text | 0.421, 0.166, 0.111 s | 0.003, 0.004, 0.007 s |
+| `live_logic_s`: a Rust line in the view (hot-patch) | 0.545, 0.525, 0.793 s | 0.453, 0.453, 0.449 s |
 
 The trend's Dioxus rows on that machine: css 0.019–0.088 s, rsx
 0.005–1.062 s, logic 0.418–2.257 s. A patch's own time on air: rustc
 ~250 ms, stub ~15 ms, link ~22 ms; the rest is the settle (100 ms quiet)
-and the redraw. The CSS edit is dx's own asset push on Dioxus and the
+and the redraw. The third run is with the patch's statics bound to
+the running binary's (Linux x86_64: an `AtomicU32` or a `OnceLock` keeps
+its value across a patch). The CSS edit is dx's own asset push on Dioxus and the
 app's 20 ms poll on air.
 
 ## Plan for 0.2.0
