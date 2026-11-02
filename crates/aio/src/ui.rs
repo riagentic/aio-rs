@@ -62,11 +62,11 @@ pub mod prelude {
 pub mod prelude {
     pub use super::on_air::events::*;
     pub use super::on_air::{
-        Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler, Fragment,
-        FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Props, Resource, Signal,
-        Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval, geometry, in_views,
-        key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn, spawn_forever, task,
-        try_context, watch,
+        Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler,
+        Fragment, FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props,
+        Resource, Signal, Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval,
+        geometry, in_views, key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn,
+        spawn_forever, task, try_context, watch,
     };
     pub use crate::{act, use_css};
     /// `rsx!`'s paths start at `air`: an app needs no dependency of its own.
@@ -85,8 +85,9 @@ pub(crate) mod clock {
         tokio::time::sleep(d).await;
     }
 
+    /// Tokio's: a UI test's `advance` moves it.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) use std::time::Instant;
+    pub(crate) use tokio::time::Instant;
 
     /// A moment, on the page's clock: a browser has no `std` one.
     #[cfg(target_arch = "wasm32")]

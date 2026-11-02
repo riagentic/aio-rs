@@ -526,7 +526,7 @@ async fn a_served_app_says_its_metrics_and_health() {
     let doc: serde_json::Value = serde_json::from_str(&h.body).unwrap();
     assert_eq!((doc["cell"]["id"].as_str(), doc["cell"]["enabled"].as_bool()), (Some("stall"), Some(true)));
     assert!(doc["status"].is_string() && doc["memory"]["level"].is_string());
-    // Without accounts, a monitor needs no key (aio); with them, see tests/auth.rs.
+    // This machine's monitor needs no key; over the network it does (tests/http.rs).
     for path in ["/__aio/metrics", "/__aio/health"] {
         assert_eq!(s.fetch_with("GET", path, &[], "").await.unwrap().status, 200, "{path}");
     }
