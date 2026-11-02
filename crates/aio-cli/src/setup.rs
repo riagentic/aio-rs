@@ -260,8 +260,9 @@ fn optional(what: &str, why: &'static str, ran: Option<String>, fix: &str) -> Ne
     need(what, why, false, found)
 }
 
-/// The optional tools for `os`, `ran` running each with its version flag.
-pub fn optionals(os: &str, ran: &dyn Fn(&str, &str) -> Option<String>) -> Vec<Need> {
+/// The optional tools for `os`, `ran` running each with its version flag,
+/// on a machine with (or without) a desktop to nest windows in.
+pub fn optionals(os: &str, desktop: bool, ran: &dyn Fn(&str, &str) -> Option<String>) -> Vec<Need> {
     let pkg = |name: &str| match os {
         "macos" => format!("brew install {name}"),
         "windows" => format!("winget install {}", if name == "git" { "Git.Git" } else { "Gyan.FFmpeg" }),
@@ -282,6 +283,8 @@ pub fn optionals(os: &str, ran: &dyn Fn(&str, &str) -> Option<String>) -> Vec<Ne
                    xorg-x11-server-Xephyr (Fedora)";
         let used = match (xephyr, xvfb) {
             (true, true) => Some("Xephyr on a desktop (a window holding the app's), else Xvfb (headless)"),
+            // Xephyr nests in a desktop: with none here it holds no window.
+            (true, false) if !desktop => None,
             (true, false) => Some("Xephyr, on a desktop only: with no DISPLAY nothing nests (Xvfb does)"),
             (false, true) => Some("Xvfb (headless, seen by no one)"),
             (false, false) => None,
@@ -401,7 +404,7 @@ pub fn run(check: bool) -> Result<String, String> {
         false,
         bindgen.map(|p| format!("at {}", p.display())),
     ));
-    needs.extend(optionals(os, &|p, a| ran(p, &[a])));
+    needs.extend(optionals(os, crate::display::desktop(), &|p, a| ran(p, &[a])));
     report(os, arch, &needs)
 }
 
@@ -449,14 +452,18 @@ mod tests {
         assert!(e.contains("  ✗ b, for y: install: z") && e.ends_with("then run ax setup again"), "{e}");
         // Optional tools: found or each with its own fix; Linux adds a nested display.
         let none = |_: &str, _: &str| None;
-        let mac = optionals("macos", &none);
+        let mac = optionals("macos", true, &none);
         assert_eq!(mac.iter().map(|n| n.what.as_str()).collect::<Vec<_>>(), ["git", "ffmpeg"]);
         assert!(mac.iter().all(|n| !n.required && n.found.as_ref().unwrap_err().contains("brew install")));
-        let linux = optionals("linux", &|p, _| (p == "Xvfb").then(|| "Xvfb".into()));
+        let linux = optionals("linux", false, &|p, _| (p == "Xvfb").then(|| "Xvfb".into()));
         assert_eq!(linux[2].found, Ok("Xvfb (headless, seen by no one)".into()), "Xvfb is enough");
-        let xephyr = optionals("linux", &|p, _| (p == "Xephyr").then(|| "Xephyr".into()));
-        assert!(xephyr[2].found.as_ref().unwrap().contains("with no DISPLAY nothing nests"), "which one is used");
-        assert!(optionals("windows", &none)[0].found.as_ref().unwrap_err().contains("winget install Git.Git"));
+        let xephyr = |desktop| optionals("linux", desktop, &|p, _| (p == "Xephyr").then(|| "Xephyr".into()));
+        assert!(xephyr(true)[2].found.as_ref().unwrap().contains("with no DISPLAY nothing nests"), "which one is used");
+        assert!(
+            xephyr(false)[2].found.as_ref().unwrap_err().contains("apt install xvfb"),
+            "no desktop: Xephyr holds nothing"
+        );
+        assert!(optionals("windows", false, &none)[0].found.as_ref().unwrap_err().contains("winget install Git.Git"));
     }
 
     #[test]

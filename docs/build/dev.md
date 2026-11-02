@@ -122,7 +122,7 @@ real data.
 | `--instance <n>` | a private copy with its own data, lock and socket |
 | `--fresh` | with `--instance`: that copy on new, empty data |
 | `--size 390x844` | the window at that size for this run; its saved size and place untouched |
-| `--display auto` | the default: a person at a terminal gets their own desktop; a caller with no terminal (an agent, a script) a nested display |
+| `--display auto` | the default: a person at a terminal gets their own desktop; a caller with no terminal (an agent, a script) a nested display; with no desktop at all, Xvfb (none installed: the window can't open, said first) |
 | `--display isolated` | always a nested display (Xephyr, else Xvfb); refused when neither is installed |
 | `--display current` | the caller's display, as is (`AIORT_DISPLAY=current` too) |
 | `--display :N` | a display you run yourself |

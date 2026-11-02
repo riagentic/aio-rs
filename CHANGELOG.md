@@ -722,6 +722,14 @@ section](docs/migration/README.md#8-01--02-dioxus-is-gone) and
 
 ### Fixed
 
+- `ax setup` on Linux with Xephyr alone and no desktop says the nested
+  display is missing (Xephyr has nothing to nest in) and how to install
+  Xvfb, where it gave a ✓.
+- `ax create`'s comments: an app made on a checkout (`--aio`) says it
+  needs that checkout beside it, not that it builds anywhere from a tag;
+  the template names `ax dev`, not dx.
+- README and setup: a source install clones the release tag, whose
+  templates match the tag a new app pins.
 - `ax build --smoke` (and `ax smoke`) removes the record its start left
   in the shared runtime's app list (`apps/*.json`), on Linux, macOS and
   Windows, and on macOS the window bundle no other app names: a smoke

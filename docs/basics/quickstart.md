@@ -365,7 +365,9 @@ a service: [setup](setup.md#run-at-startup-or-as-a-service).
 | `ax start notes` / `ax stop notes` | in the background, then closed (scripts, agents) |
 
 Run from a terminal with no person at it (an agent), the window goes on a
-nested display, never the person's screen (`--display auto`).
+nested display, never the person's screen (`--display auto`). On a Linux
+machine with no desktop (a server, CI) that display is Xvfb: install it
+(`ax setup --check` says how), or the window can't open.
 
 ## Look at it running
 

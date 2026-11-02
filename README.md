@@ -41,13 +41,13 @@ at a time: [aio and aio-rs compared](docs/aio-vs-aio-rs.md),
 ## ⚡ Start
 
 You need Rust ([rustup](https://rustup.rs)) and a C toolchain; per OS:
-[setup](docs/basics/setup.md). Apps build on an aio-rs source checkout
-(the crates are not on crates.io yet), so the simplest path is from
-source, on Linux, Windows or macOS:
+[setup](docs/basics/setup.md). From source, on Linux, Windows or macOS,
+at the release tag (an app takes aio-rs from git at its `ax`'s release, so
+no checkout is needed afterwards):
 
 ```sh
-git clone https://github.com/riagentic/aio-rs
-cargo install --locked --path aio-rs/crates/aio-cli   # ax, bound to this checkout
+git clone --branch v0.2.0 https://github.com/riagentic/aio-rs
+cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.2.0
 ax setup                                             # checks the machine, fetches the runtime
 ```
 
@@ -60,8 +60,9 @@ archive's SHA-256 pinned in the installer:
 curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.2.0/install.sh | sh   # then runs ax setup
 ```
 
-A prebuilt `ax` still creates apps on a checkout: clone aio-rs once and
-pass it, `ax create notes --aio aio-rs`.
+An `ax` built from `main` writes `main`'s templates but pins its release
+tag: build on the tag as above, or make the app on that checkout
+(`ax create notes --aio <checkout>`).
 
 Then:
 

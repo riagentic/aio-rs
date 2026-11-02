@@ -43,9 +43,13 @@ takes them instead of downloading. Then it runs `ax setup`.
 **From source** (minutes):
 
 ```sh
-git clone https://github.com/riagentic/aio-rs
+git clone --branch v0.2.0 https://github.com/riagentic/aio-rs
 cargo install --locked --path aio-rs/crates/aio-cli
 ```
+
+At the release tag: an `ax` built from `main` writes `main`'s templates
+but pins its release tag, so its apps don't build until made on that
+checkout (`ax create <name> --aio <checkout>`, which `ax create` says).
 
 The package is `aio-rs-cli`, its binary `ax`.
 
@@ -114,7 +118,7 @@ code is 1 until every needed one is there.
 |---|---|---|---|---|---|
 | git | package | Command Line Tools | `winget install Git.Git` | build numbers `M.m.<commits>` and releases (without it: `M.m.0-nogit`, no release) | checks |
 | ffmpeg | package | `brew install ffmpeg` | `winget install Gyan.FFmpeg` | `ax test --video`, `ax shot --video` | checks |
-| Xephyr or Xvfb | package | – | – | an agent's windows off the person's screen | checks |
+| Xephyr or Xvfb | package | – | – | an agent's windows off the person's screen; on Linux with no desktop (a server, CI), Xvfb is the only way a window opens | checks |
 | wasm-bindgen 0.2.129 | fetched | fetched | fetched (x86_64) | `ax dev --web`, `ax build --web` | fetches it (SHA-256 pinned in ax) |
 | aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
 | Android SDK, NDK, JDK 17-23, Gradle 8.9+ | yes | yes | yes | `ax build --android`, `ax dev --android` | the build says what is missing |

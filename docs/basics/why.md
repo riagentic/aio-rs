@@ -42,8 +42,8 @@ app builds, so a typo in it is one too.
 
 - **It is alpha.** 0.2.0 is the second release; until 1.0.0 a minor
   version may break things ([versions](versioning.md)).
-- **Not on crates.io yet.** Apps build on an aio-rs source checkout; a
-  prebuilt `ax` needs `ax create --aio <checkout>` ([setup](setup.md)).
+- **Not on crates.io yet.** An app takes aio-rs from git at a release
+  tag ([setup](setup.md#where-an-app-gets-aio-rs-from)).
 - **Electron draws desktop windows.** One pinned runtime (284 MB unpacked)
   is fetched once per machine and shared by every aio-rs app, or bundled
   into a release (`[build] runtime = "bundled"`). An idle window costs

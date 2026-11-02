@@ -561,8 +561,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
-# aio-rs from git at a release tag: a clone builds anywhere, Cargo.lock pins
-# the commit. `ax pin` says which; `ax pin <version>` moves it.
+{from}
 [dependencies]
 aio = {{ package = "aio-rs", {aio}{feats} }}
 
@@ -583,16 +582,24 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# Every debug build, aio's and dx's: one copy of the libraries (ax dev, test, lint).
+# Every debug build ax makes: one copy of the libraries (ax dev, test, lint).
 [profile.desktop-dev]
 inherits = "dev"
 strip = false
 "#,
-        deps = if ui { web } else { String::new() }
+        deps = if ui { web } else { String::new() },
+        from = match n.aio {
+            Aio::Path(_) =>
+                "# aio-rs from a checkout beside the app (co-developing it): a clone builds\n\
+                             # only with that checkout beside it. `ax pin <version>` moves it to a release.",
+            _ =>
+                "# aio-rs from git: a clone builds anywhere, Cargo.lock pins the commit.\n\
+                  # `ax pin` says which; `ax pin <version>` moves it.",
+        }
     );
     let launcher = format!(
         r#"# The launcher alone: the app is the `{name}` library, so `ax dev` can
-# hot-patch all of it (dx recompiles library packages, not a binary's own).
+# hot-patch all of it (a patch recompiles library packages, not a binary's own).
 [package]
 name = "{name}-app"
 version = "0.1.0"
@@ -897,7 +904,7 @@ mod tests {
             assert!(!get("app/Cargo.toml").contains("[build-dependencies]"), "no host build of aio");
             assert!(
                 get("Cargo.toml").contains("[profile.desktop-dev]\ninherits = \"dev\"\nstrip = false\n"),
-                "dx's profile"
+                "ax dev's profile"
             );
             assert_eq!(get("CLAUDE.md"), "@AGENTS.md\n", "aio: every template's CLAUDE.md imports AGENTS.md");
             let docs = format!("https://github.com/riagentic/aio-rs/blob/{tag}/docs");
