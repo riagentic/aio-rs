@@ -305,7 +305,7 @@ thread_local! {
 }
 
 /// Waits until one of `sheets` changes on disk (a dev build; it polls every
-/// 100 ms, so a saved edit shows well within 0.2 s; a browser asks `ax dev
+/// 20 ms, a few file stats, so a saved edit shows within 0.05 s; a browser asks `ax dev
 /// --web` every 250 ms, and with no dev server stops asking). A release
 /// build never returns: its sheets are built in.
 pub async fn sheets_changed(sheets: &[Sheet]) {
@@ -315,7 +315,7 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
             || sheets.iter().map(|(p, _)| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect::<Vec<_>>();
         let was = stamp();
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             if stamp() != was {
                 return;
             }
@@ -352,6 +352,56 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
     }
 }
 
+/// [`use_css!`](crate::use_css)'s subscription to its sheets' edits (a dev
+/// build's): the render (Dioxus) or the hole (air) that reads them runs
+/// again when one is saved.
+#[doc(hidden)]
+#[cfg(feature = "kit")]
+pub fn follow_sheets(sheets: &'static [Sheet]) {
+    let edits = signal(|| 0u64);
+    once(move || {
+        if cfg!(debug_assertions) {
+            spawn(async move {
+                loop {
+                    sheets_changed(sheets).await;
+                    edits.update(|n| *n += 1);
+                }
+            });
+        }
+    });
+    let _ = edits.get();
+}
+
+/// On air the call sits in a hole (an effect, no hooks): one signal per set
+/// of sheets for the thread, its watcher living as long.
+#[doc(hidden)]
+#[cfg(all(feature = "air", not(feature = "kit")))]
+pub fn follow_sheets(sheets: &'static [Sheet]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    thread_local! {
+        static EDITS: std::cell::RefCell<std::collections::HashMap<Vec<&'static str>, air::Signal<u64>>> =
+            Default::default();
+    }
+    let key = sheets.iter().map(|s| s.0).collect();
+    let edits = EDITS.with_borrow_mut(|m| {
+        *m.entry(key).or_insert_with(|| {
+            air::detached(|| {
+                let edits = air::Signal::new(0u64);
+                air::spawn_forever(async move {
+                    loop {
+                        sheets_changed(sheets).await;
+                        edits.update(|n| *n += 1);
+                    }
+                });
+                edits
+            })
+        })
+    });
+    let _ = edits.get();
+}
+
 /// The page's CSS from the app's stylesheet files, as [`page_css`] makes it,
 /// live while you edit: `style { {aio::use_css!(dark; "assets/style.css")} }`.
 /// `dark` (a `bool`) is the app's theme, not the OS's: `true` applies the
@@ -361,7 +411,7 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
 /// drawn only with its theme in:
 /// `aio::use_css!(dark, &aio::kit::theme_css(hue); "assets/style.css")`.
 /// Paths are from the package's folder. A dev build re-reads a saved file and
-/// redraws within 0.2 s, no compile; a release build has the files built in.
+/// redraws within 0.05 s, no compile; a release build has the files built in.
 /// Unlike CSS kept in `use_hook` (made once, so stale after an edit), it is
 /// made again on every render.
 #[macro_export]
@@ -372,18 +422,7 @@ macro_rules! use_css {
             if cfg!(debug_assertions) { concat!(env!("CARGO_MANIFEST_DIR"), "/", $path) } else { $path },
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $path)),
         )),+];
-        let edits = $crate::ui::signal(|| 0u64);
-        $crate::ui::once(move || {
-            if cfg!(debug_assertions) {
-                $crate::ui::spawn(async move {
-                    loop {
-                        $crate::ui::sheets_changed(SHEETS).await;
-                        edits.update(|n| *n += 1);
-                    }
-                });
-            }
-        });
-        let _ = edits.get();
+        $crate::ui::follow_sheets(SHEETS);
         let texts = $crate::ui::sheet_texts(SHEETS);
         let files = texts.iter().map(String::as_str);
         $crate::ui::page_css(&[$(::core::convert::AsRef::<str>::as_ref($made)),*].into_iter().chain(files).collect::<Vec<&str>>(), $dark)

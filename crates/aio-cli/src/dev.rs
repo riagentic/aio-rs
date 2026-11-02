@@ -642,6 +642,12 @@ pub fn deps_of(artifact: &Path) -> Vec<PathBuf> {
     crate::watch::dep_info(&text, &crate::watch::not_the_apps(target))
 }
 
+/// Whether `changed` is stylesheets alone (pure): a debug build's
+/// `use_css!` reads them from disk as they are saved.
+fn sheets_only(changed: &[PathBuf]) -> bool {
+    !changed.is_empty() && changed.iter().all(|p| p.extension().is_some_and(|x| x == "css"))
+}
+
 /// The bytes of `bin`, hashed: a build that changed nothing leaves them as they were.
 fn digest(bin: &Path) -> Option<u64> {
     use std::hash::Hasher;
@@ -1252,8 +1258,8 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             eprintln!("ax dev: dx is {}, ax needs {DIOXUS} to hot-patch; rebuilding on change instead", v.trim())
         }
         None if air => eprintln!(
-            "ax dev: {name} on air: an rsx! markup edit (text, a static attribute or element) shows at once, \
-             its state kept; other edits rebuild"
+            "ax dev: {name} on air: a stylesheet or an rsx! markup edit shows at once, a Rust edit is \
+             hot-patched, state kept; a Cargo.toml edit rebuilds"
         ),
         None => eprintln!(
             "ax dev: no dx; rebuilding on change instead (for edits in under a second: ax setup fetches it, \
@@ -1287,6 +1293,15 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         // Wait for a change, then for the burst of saves to settle; or for `ax restart`, `ax stop`.
         let restart = match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(first) => {
+                // Markup alone (on air) goes to the window at once, before the
+                // burst settles: a file still being written reads as code, and
+                // waits for it like any other change.
+                let up = app.as_mut().is_some_and(|(c, _)| c.try_wait().ok().flatten().is_none());
+                let early = built
+                    .as_ref()
+                    .filter(|_| up && !red)
+                    .and_then(|b| b.edits(&first, &workspace))
+                    .and_then(|e| reload_markup(window.as_ref(), &e).ok().map(|said| (e, said)));
                 let changed = crate::watch::settle(&rx, first);
                 let said = crate::watch::describe(&changed, &cwd);
                 if let Some(wait) = storm.wait(launched.elapsed()) {
@@ -1299,11 +1314,22 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                     crate::watch::settle(&rx, vec![]);
                 }
                 lint_said(&changed, &cwd);
-                // Markup alone (on air): to the running window, no build.
+                css(&pkg, &rx);
                 let up = app.as_mut().is_some_and(|(c, _)| c.try_wait().ok().flatten().is_none());
+                // Stylesheets alone (on air): `use_css!` reads them live, nothing to build.
+                if air && up && sheets_only(&changed) {
+                    eprintln!("ax dev: {said} changed");
+                    eprintln!("ax dev: the window reads it live: nothing to build");
+                    continue;
+                }
+                // Markup alone (on air): to the running window, no build.
                 let edits = built.as_ref().filter(|_| up && !red).and_then(|b| b.edits(&changed, &workspace));
                 if let Some(edits) = edits {
                     eprintln!("ax dev: {said} changed");
+                    if let Some((_, said)) = early.as_ref().filter(|(e, _)| *e == edits) {
+                        eprintln!("{said}");
+                        continue;
+                    }
                     match reload_markup(window.as_ref(), &edits) {
                         Ok(said) => {
                             eprintln!("{said}");
@@ -1339,7 +1365,9 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        css(&pkg, &rx);
+        if restart {
+            css(&pkg, &rx);
+        }
         let started = std::time::Instant::now();
         let snapshot = air.then(|| crate::reload::Built::snapshot(&pkg.dirs));
         let Some(bin) = dev_build(&pkg, name, logs.as_deref(), &mut fat, &mut patching) else {
@@ -1972,6 +2000,9 @@ mod tests {
     fn a_manifest_change_and_an_unchanged_binary_are_told() {
         assert!(manifest(&[PathBuf::from("/w/src/lib.rs"), PathBuf::from("/w/Cargo.toml")]));
         assert!(!manifest(&[PathBuf::from("/w/src/lib.rs")]));
+        assert!(sheets_only(&[PathBuf::from("/w/assets/style.css"), PathBuf::from("/w/assets/kit.css")]));
+        assert!(!sheets_only(&[PathBuf::from("/w/assets/style.css"), PathBuf::from("/w/src/lib.rs")]));
+        assert!(!sheets_only(&[]));
         let d = tempfile::tempdir().unwrap();
         let (a, b) = (d.path().join("a"), d.path().join("b"));
         std::fs::write(&a, vec![7u8; 3 << 20]).unwrap();

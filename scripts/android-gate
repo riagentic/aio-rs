@@ -202,15 +202,11 @@ class Gate:
 
     def to_air(self):
         """The template on air: aio-rs with `air` for `kit`, the shell with
-        `air` alone, and its stylesheet made in the view's body (a hook, not
-        in a hole)."""
+        `air` alone; its code as it is."""
         edits = [
             (self.app / "Cargo.toml", 'features = ["kit"] }', 'features = ["air"] }'),
             (self.app / "app" / "Cargo.toml", 'aio-shell = { package = "aio-rs-shell", ',
              'aio-shell = { package = "aio-rs-shell", default-features = false, features = ["air"], '),
-            (self.app / "src" / "lib.rs", "    rsx! {\n",
-             '    let css = aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css");\n    rsx! {\n'),
-            (self.app / "src" / "lib.rs", '{aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")}', "{css}"),
         ]
         for f, old, new in edits:
             text = f.read_text()

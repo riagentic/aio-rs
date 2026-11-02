@@ -23,7 +23,7 @@ style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
 
 - Sheets made in code go before the `;` and come first (here the kit's
   theme); files follow, paths from the package's folder.
-- A dev build re-reads a saved file and redraws within 0.2 s, no compile;
+- A dev build re-reads a saved file and redraws within 0.05 s, no compile;
   in a browser under `ax dev --web` the page asks the dev server. A
   release build has the files built in (`include_str!`) and reads none.
 - It is made on every render: never keep CSS in `once` (made once,
