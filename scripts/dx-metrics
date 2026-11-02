@@ -276,9 +276,12 @@ def du_mb(path):
 def measure(tmp, root=ROOT, full=True):
     """A row for the checkout `root` (`tmp` in its target/); not `full`: its
     sizes only (no rebuilds, live edits or smoke)."""
-    # aio-rs itself as ci.sh built it (its env, its target folder: a base's
-    # `ax` shares its build); the template as a developer's.
-    cli = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    # aio-rs itself as ci.sh built it (its env, its target folder); a base's
+    # in its own: its path is as long, so cargo took the base's crates for
+    # this checkout's, and a later build here compiled against the base's
+    # aio-config. The template as a developer's.
+    here = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    cli = here if root == ROOT else root / "target"
     run(["cargo", "fetch", "--locked"], root, os.environ)
     run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], root, os.environ | {"CARGO_TARGET_DIR": str(cli)})
     env = {k: v for k, v in os.environ.items() if k not in ("CARGO_INCREMENTAL", "DISPLAY", "WAYLAND_DISPLAY")}
