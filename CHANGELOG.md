@@ -7,7 +7,41 @@ version may break things.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Dioxus is gone: air is aio-rs's one renderer** (air phase 5,
+  docs/design/air.md). Every Dioxus crate (dioxus, dioxus-*,
+  generational-box, subsecond) is out of the graph: the lock holds 253
+  packages, from 327; an app's whole graph (`app kit`) 76 crates, from
+  141; aio-rs-cli 146, from 211 (`deps.toml [ceilings]`). Feature `kit` is
+  air; `air` stays, a name for `kit`; `liveview` is gone. aio-rs-shell has
+  no `dioxus` feature, `ax dev` needs no dx (`ax setup` installs none),
+  and no `--dioxus` lane is left in `scripts/dx-metrics`,
+  `scripts/android-gate` or GitHub CI. No public signature names a Dioxus
+  type ([migration: 0.1 → 0.2](docs/migration/README.md#8-01--02-dioxus-is-gone),
+  a before → after table).
+- A view's body runs once; what shows state is a hole (a text, an
+  attribute, a `{child}`) that runs again when what it reads changes. A
+  value read in the body (`let s = shop();` then `"{s.stock}"`) is read
+  once: a dev build says where (`hint`). A component's prop follows its
+  caller only as a `Signal`, a `Part` or a `Prop<T>`.
+- `rsx!` refuses `if let`, `match`, `while` and `loop` nodes (a bool, a
+  `{match ..}` hole) and a `for` row without `key:` on its first node.
+- `aio-rs-hotpatch` (`aio_hotpatch::HotFn`, `JumpTable`, `apply_patch`)
+  replaces subsecond in an app's dev build: the same jump table as
+  dioxus-cli 0.7.10's, read by `ax dev`.
+- `ax components`: each component's key, how many times its body ran and
+  how many times its holes wrote (`updates`), where 0.1 gave renders and
+  their time.
+- The page scripts made for Dioxus's interpreter are gone from
+  `aio::page`: `WIRE`, `TYPING`, `SET_FOCUS`, `FILE_INPUT`.
+
 ### Added
+
+- **TS21: the published crates' public API is checked in**
+  (`scripts/api/<crate>.txt`, from rustdoc's JSON): `scripts/public-api
+  --check` in `./ci.sh lint` fails on a change not written there, and on
+  any item naming aio-rs 0.1's renderer.
 
 - **The splash drawn by the OS before Electron starts, at every start**
   (aio's splash): GTK 3 over FFI on Linux (opened at run time, no new
@@ -640,6 +674,22 @@ version may break things.
 
 ### Fixed
 
+- air: every `exec` of one batch runs (an island's update, a second
+  island's mount): on a page without `__aioRun` all but the first found
+  the slot the first had freed, and did nothing.
+- air: `aria-*`, `data-*` and HTML's enumerated attributes take
+  `true`/`false` as text (`aria-selected="false"`), as ARIA reads them;
+  an `Option`'s `None` writes no attribute at all.
+- air: a constant `dangerous_inner_html` is set as the `innerHTML`
+  property at mount (the page's policy sees it), not as an attribute.
+- air: a hole may take what it reads by value (`{match who { .. }}`,
+  `{note.map(..)}`): its names are cloned in per run, as a component's
+  props.
+- air: attributes given to a component that takes none say so (the
+  `GlobalAttributes` message), not "no method `__attr_const`".
+- `kit::Browser`'s `src` follows its caller's state (a `Prop`): a changed
+  `src` navigates the guest, on air as it did on Dioxus.
+- `TestUi::html` leaves out air's anchor comments.
 - A cell's breaker never lets a caller see it enabled past its trip: the
   schedule thread's count could take the failure that tripped it while the
   caller's own count found none and returned before the cell was disabled
