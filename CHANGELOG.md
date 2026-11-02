@@ -617,6 +617,14 @@ version may break things.
 
 ### Fixed
 
+- A cell's breaker never lets a caller see it enabled past its trip: the
+  schedule thread's count could take the failure that tripped it while the
+  caller's own count found none and returned before the cell was disabled
+  (`a_trip_keeps_saved_data_through_enable_and_restart`). One count at a
+  time per cell now.
+- A synced client's call the server refused stays refused when it is sent
+  again (its answer went with a cut link): it was applied on the later
+  state its client was never told of.
 - air's code size: an event handler costs its closure alone (its wrappers
   were generic over it, 36% of the bench's IR): 50 views make 1.13 M lines
   of LLVM IR, 0.31x Dioxus's (phase 1: 0.49x), a held key over 10 000
