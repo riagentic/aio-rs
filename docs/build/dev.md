@@ -68,8 +68,9 @@ needed. It needs:
   `dev` feature (`aio-shell/dev`), the part that takes patches in
   (`aio-rs-hotpatch`). A release build never has it.
 - A debug build: patches go into the `desktop-dev` profile's binary.
-- Linux or macOS: on Windows the fat build is refused and the session
-  rebuilds and restarts on a Rust edit (it says so once).
+- Linux, macOS or Windows (x86_64; MSVC, or MinGW with its gcc on `PATH`
+  or rustc's bundled one). On Windows the app runs at a fixed base without
+  ASLR in `ax dev`; a system that forces ASLR gets a rebuild and restart.
 
 ### The session
 
@@ -338,7 +339,6 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
 - No hot-patching in the web build or on Android: each edit is a build
   and the page reloads, slower than a patch (on Android, of the page
   only, unless `--native`).
-- No hot-patching on Windows yet: a Rust edit rebuilds and restarts.
 - No flag that turns persistence off for a run: use `--instance` with
   `--fresh`, or `AIORT_DATA` pointing at a throwaway folder.
 - No run-from-a-link command: clone, then `ax start` or `ax install`.
