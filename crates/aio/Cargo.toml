@@ -93,13 +93,16 @@ compat = []
 dev = ["dep:subsecond"]
 # `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
 imbl = ["dep:imbl"]
-# Kept so older manifests resolve: `aio::testing` needs no feature (the
-# UI half comes with `kit`), so a test build is the app's own build of aio.
+# `aio::testing`, the test kit (TestCells, TestServer, TestUi with `kit`):
+# an app's tests get it as a dev-dependency (`features = ["testing"]`, as
+# `ax create` writes it), so its own builds never compile it.
 testing = []
-# Kept likewise: `AIO_TEST_VIDEO=<dir>` records each UI test (`ax test --video`).
-video = []
+# `AIO_TEST_VIDEO=<dir>` records each UI test (`ax test --video`).
+video = ["testing"]
 
 [dev-dependencies]
+# Its own tests use the test kit, as an app's do.
+aio = { workspace = true, features = ["testing"] }
 aio-config = { workspace = true, features = ["toml"] }
 # The planted renderer faults of the UI gate (`tests/air_ui.rs`).
 air = { workspace = true, features = ["fault"] }
@@ -120,11 +123,9 @@ name = "ui"
 
 [[test]]
 name = "route"
-required-features = ["kit"]
 
 [[test]]
 name = "route_tree"
-required-features = ["kit"]
 
 [[test]]
 name = "kit"
@@ -193,7 +194,7 @@ sha2 = "0.10"
 # build --web` binds with (aio-cli `setup::WASM_BINDGEN`, fetched prebuilt).
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["console", "Document", "Element", "Event", "EventTarget", "Headers", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "WebSocket", "Window"] }
+web-sys = { version = "0.3", features = ["console", "Document", "Element", "Event", "EventTarget", "Headers", "History", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "WebSocket", "Window"] }
 # The app's views in the page (`web`): the real DOM, from Dioxus.
 # Its document is aio's (`web::page`): the page's DOM, no `eval`.
 dioxus-web = { version = "=0.7.10", default-features = false, features = ["mounted"], optional = true }

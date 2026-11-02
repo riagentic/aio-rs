@@ -9,6 +9,60 @@ version may break things.
 
 ### Added
 
+- **Sessions without accounts** (aio's `sessions: true`): `[accounts]
+  sessions = true` keeps the session store with no users and no login
+  doors; the app issues sessions (`auth::serving()`'s `issue`), and a
+  session is that user on every door (`Users::sessions`, composing with
+  `Http::users`).
+- **A user's token is re-checked on its open socket** (aio's
+  `users:`/`resolveUser` re-check): every 5 s and at once on a revoke; one
+  no longer resolved (or a panicking resolver, or a changed role) closes
+  the socket; a resolver slower than 3 s keeps the last verdict.
+- `--tls-cert`, `--tls-key` and `--no-tls` launch flags (aio's), over
+  `[server] cert`, `key` and `tls`.
+- **Vitals on the bus, as one snapshot** (aio's `onDiagnostic`, hints):
+  each layer's step is `vitals:loop`, `vitals:transport` or
+  `vitals:render` on the bus; the loop, the worst link (and whether it is
+  on loopback) and the window's paint feed one snapshot, so the
+  transport, client-main-thread, slow-call and freeze-recover hints fire.
+  `GET /__aio/vitals` and `ax vitals <app>` say every layer and the
+  likely cause (also in `health.json`).
+- Bus diagnostics carry `severity` and `tip`, and `Diagnostic::code()`
+  types them (aio's severity, fix and error object); a degraded part
+  that works again is `degraded-recovered:<part>` (`Code::Recovered`).
+- `aio::health::on_memory(|report| ..)` (aio's `onMemoryPressure`) and
+  `[memory] every` (aio's `memory.interval`).
+- `[log] per_run`: each run starts fresh log files (aio's per-run
+  `debug.log`).
+- Correlation ids: a call's log lines end with `call=<id>`, and its
+  timeline entry (`id`) and a report it causes (`call`) carry it.
+- An exposed boot prints a `share:` line (the address at this machine's
+  LAN IP and what a caller shows; the key file, never the key) and, on
+  Windows and macOS, a `firewall:` line (aio's).
+- **The mutation ledger** (aio's `check:mutations`, carried to the
+  package): `scripts/mutants` plants each break of `scripts/mutants.toml`
+  alone, in the source or in the template app's built `.deb` (its menu
+  entry, its icon, its bundled page), and needs the named test or
+  `ax smoke` red; `scripts/mutants-ledger.csv` keeps the last whole run.
+  `./ci.sh` checks the ledger, GitHub CI runs its fast breaks
+  ([proving the tests](docs/testing/proving.md)).
+- `ax lint` names tests that check nothing (no assertion, `?`, `unwrap` or
+  harness wait) and `assert_eq!(x, x)` (aio's `check:vacuous`);
+  `ax test <app> --mutants` runs `cargo mutants` over the app.
+- `aio::testing::TestIo` (aio's `testIO`): a command-line run with its
+  stdin, terminal or not, colour, stdout and stderr.
+- `TestCells::fuzz_methods` (aio's `fuzz({ skip })`): the cell's own
+  methods, arguments made from their types; `last_effects` (aio's
+  `expect.effects`), `reset(&h, seed)` (aio's `t.init`, `t.destroy`),
+  `budget::<C>(method, ms)` (aio's `perfBudget`, failing the test).
+- `aio::testing::TestApps` (aio's `testApps`), `patches(&copy)` with
+  `until` (aio's `patches`, `waitForPatch`), `call_all` (aio's
+  `dispatchAll`), `Remote::on_patch` (aio's `onPatch`).
+- `Mount::fetch(host, answer)` (aio's `testUI({ fetch })`): the page's
+  requests to a host answered by the test, never the network.
+- `aio::testing::smoke(bundle)` (aio's `smoke()`): `ax smoke` in a test.
+- `Cassette::wrap(id, f)` (aio's `tape.wrap`); `AIO_CASSETTE=rerecord`
+  records over a tape that is there, even a damaged one.
 - **air, aio-rs's own renderer, phase 1** (docs/design/air.md): crates
   `aio-rs-air` and `aio-rs-air-macro`, and feature `air` of aio-rs, where
   `aio::ui::prelude` and `TestUi` run on air with no Dioxus in the build
@@ -25,6 +79,42 @@ version may break things.
   workspace): a one-line edit rebuilds in 0.54x Dioxus's time, a clean
   build in 0.30x with 8 crates instead of 77, a held key over 10 000 rows
   answers in 0.32x.
+- air's props, as the kit and the router need them: `#[component]` and
+  `#[derive(Props)]` make a builder, so `#[props(default)]` and
+  `#[props(default = e)]` props may be left out, an `Option<T>` prop is
+  `None` unless given and takes a `T`, a `View` prop is empty, a closure
+  given to a handler prop is typed by it, and a required prop left out is
+  a compile error naming it. `#[props(extends = GlobalAttributes)]
+  attributes: Vec<Attribute>` takes the attributes given to a component
+  (`"data-t": …`, `id`, `aria_label`, `..attributes`), and `..attributes`
+  on an element sets them after its own, so the caller's win; one that
+  reads state follows it. A prop typed `Prop<T>` follows what it is given
+  (`value: name.get()`) while the component's body still runs once; given
+  a constant it holds no state.
+- The router on air (`router!`): `Route`, `Outlet`, `Link`, `Redirect`,
+  `params()` and Back are the same views on either renderer; on air a
+  `Route`'s body runs again only when its match changes (a query or
+  another route's place runs nothing), and a `Link`'s active class
+  follows the place in its own holes. `tests/route.rs` and
+  `tests/route_tree.rs` run on both.
+- The router in a browser (a web build): the address bar shows the place,
+  the browser's Back and Forward step the app's history
+  (`History::sync`), and a reload or a shared link opens where it points
+  (`route::start_place`); the server already answers routes with the app.
+- `TestUi` on air: `components()` is the tree of mounted components (name,
+  key in its list, body runs, and the updates its holes made: what a
+  change cost each view); `find(component, key)` and `comp=Row[42]` paths
+  name a component, `within(t, f)` takes a test's paths inside one, and
+  `surface_tree()` is the surface as a tree of components (aio's
+  `UISurfaceNode`).
+- `TestUi::advance(d)`: the views' clock moves `d` on and their timers
+  due by then fire, each at its moment (aio's `ui.advance`); from then on
+  it is virtual.
+- `TestUi::a11y()`: aio's run-time accessibility rules (`dev-a11y.ts`)
+  over the page; every mount says each new finding once.
+- air: `components()` (aio DevTools' `tree`), `follow` (a body that runs
+  again when what it read changes), `provide_now`, and
+  `Event::default_action_enabled`.
 - air's gates, each shown failing on a planted bug first: views removed
   (or replaced by an error boundary in the same pass) leave no node,
   effect, subscription, cleanup, handler, task, page script or page node;
@@ -231,6 +321,27 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- **Fail closed**: `/__aio/health` and `/__aio/metrics` need the key, a
+  session or a user's token beyond this machine, also without accounts
+  (they answered anyone before); on loopback they stay open on an app
+  without accounts or users, and `[server] open` opens them. Every
+  endpoint and its default: [accounts](docs/auth/README.md#every-endpoint-and-what-opens-it).
+- `aio::testing::MountedComponent` has `key` and `updates`; route tests
+  and the guide read `here()` where it is drawn (a hole), which follows
+  the place on either renderer.
+- **Breaking: `aio::testing` is the `testing` feature.** The test kit is
+  a dev-dependency now, so an app's builds never compile it (the
+  template's debug build 952 → 934 MB, dx-metrics' `debug_target_mb`). Fix: one line in the
+  `Cargo.toml` holding the tests, `[dev-dependencies] aio = { package =
+  "aio-rs", <its source>, features = ["testing"] }`; `ax create` writes it,
+  and `ax lint` names tests that use `aio::testing` without it
+  ([migration](docs/migration/README.md#the-test-kit-is-a-dev-dependency-in-02)).
+  `video` brings `testing`; `ax lint --fix` no longer drops `testing`.
+- `ax smoke` fails a `.deb` whose menu entry starts a program it doesn't
+  ship or names an icon it doesn't ship, and any page script that throws
+  (`ERROR [page] Uncaught …`).
+- A cassette whose arguments don't serialize is refused naming the call
+  and why; a tape that doesn't read names `AIO_CASSETTE=rerecord`.
 - Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
   `aio::ui::chord`, renderer-free, so `TestUi` needs no kit; `aio::kit`
   re-exports them as before.
@@ -344,6 +455,8 @@ version may break things.
 
 ### Fixed
 
+- `ax smoke <app>_<version>_<arch>.deb`: a Debian package's own name is
+  read for its app id.
 - The app quitting (it stops, its socket closes) right after the page
   vetoed a close (`window.close()` with a beforeunload handler) quits: the
   vetoed close, still settling, took the quit's own close of that window

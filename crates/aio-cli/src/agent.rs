@@ -132,10 +132,11 @@ changed) · cargo check → ax dev <app> → tests",
   ax call/state); kit (the UI kit, client!, router!), net (sync, its server,
   TLS, pairing, sign-in), or one part: outbound, server, tls, oidc, br, imbl.
   Keep the template's set: each other set is one more build of aio.
-- No dev-dependency: aio::testing (TestUi) comes with kit. Then cargo check,
-  ax dev <app>, ax test <app>.
+- The tests get aio::testing (TestCells, TestUi with kit) from the
+  [dev-dependencies] line with features = [\"testing\"]: the app's own builds
+  leave the test kit out. Then cargo check, ax dev <app>, ax test <app>.
 - An app of the older layout (a launcher build.rs calling aio::config::build,
-  a build-dependency on aio-rs, a \"testing\" feature) still builds, warned;
+  a build-dependency on aio-rs, a \"video\" feature) still builds, warned;
   ax lint --fix moves it to this one in one step.",
     },
     Section {

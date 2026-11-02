@@ -3,7 +3,11 @@
 //! recording, the real call runs and its answer is kept; replaying, the kept
 //! answer comes back and nothing runs, so a test needs no device or server.
 //! A call is keyed by its id and its arguments (JSON); repeats replay in the
-//! order they were recorded.
+//! order they were recorded. [`Cassette::wrap`] makes an async fn one that
+//! goes through the tape (aio's `tape.wrap(id, fn)`). `AIO_CASSETTE=rerecord`
+//! makes [`Cassette::open`] record afresh over a tape that is there, even an
+//! unreadable one (aio re-recorded a corrupt tape silently; here a tape that
+//! doesn't read is refused unless asked).
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -68,10 +72,24 @@ impl Cassette {
     }
 
     /// The tape at `path` replayed, or recorded there when there is none
-    /// yet: record once, replay from then on.
+    /// yet: record once, replay from then on. With `AIO_CASSETTE=rerecord`,
+    /// recorded afresh whatever is there (the calls changed, or the tape is
+    /// damaged); a tape that doesn't read is refused otherwise.
     pub fn open(path: PathBuf) -> Result<Self, String> {
+        Self::open_as(path, std::env::var("AIO_CASSETTE").ok().as_deref())
+    }
+
+    /// [`Self::open`] with `AIO_CASSETTE` as given.
+    fn open_as(path: PathBuf, env: Option<&str>) -> Result<Self, String> {
+        match env {
+            Some("rerecord") => return Ok(Self::record(Some(path))),
+            None | Some("") => {}
+            Some(v) => return Err(format!("AIO_CASSETTE={v}: the one value is `rerecord`")),
+        }
         match std::fs::read_to_string(&path) {
-            Ok(text) => Self::replay(&text),
+            Ok(text) => Self::replay(&text).map_err(|e| {
+                format!("{e} ({}): record it again with AIO_CASSETTE=rerecord", path.display())
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::record(Some(path))),
             Err(e) => Err(format!("cassette {}: {e}", path.display())),
         }
@@ -87,7 +105,8 @@ impl Cassette {
 
     /// `run`, as this cassette says: called and kept, answered from the
     /// tape, or just called. An error (the real one, or a recorded one) is
-    /// its text.
+    /// its text. Arguments that don't serialize are refused (they key the
+    /// tape), naming the call and why.
     pub async fn call<A, R, E, F>(&self, id: &str, args: &A, run: impl FnOnce() -> F) -> Result<R, String>
     where
         A: Serialize,
@@ -95,12 +114,40 @@ impl Cassette {
         E: std::fmt::Display,
         F: std::future::Future<Output = Result<R, E>>,
     {
-        let key = (id.to_string(), serde_json::to_string(args).map_err(|e| format!("cassette {id}: {e}"))?);
+        self.keyed(id, key_of(id, args)?, run).await
+    }
+
+    /// `f` with every call of it going through this tape as `id` (aio's
+    /// `tape.wrap(id, fn)`): `let key = tape.wrap("trezor.key", get_key);
+    /// key((path,)).await`. Its argument is what keys the call.
+    pub fn wrap<A, R, E>(&self, id: &str, f: impl AsyncFn(A) -> Result<R, E>) -> impl AsyncFn(A) -> Result<R, String>
+    where
+        A: Serialize,
+        R: Serialize + DeserializeOwned,
+        E: std::fmt::Display,
+    {
+        let (tape, id) = (self.clone(), id.to_string());
+        async move |args: A| {
+            let key = key_of(&id, &args)?;
+            tape.keyed(&id, key, || f(args)).await
+        }
+    }
+
+    async fn keyed<R, E, F>(&self, id: &str, args: String, run: impl FnOnce() -> F) -> Result<R, String>
+    where
+        R: Serialize + DeserializeOwned,
+        E: std::fmt::Display,
+        F: std::future::Future<Output = Result<R, E>>,
+    {
+        let key = (id.to_string(), args);
         match self.mode {
             Mode::Passthrough => run().await.map_err(|e| e.to_string()),
             Mode::Replay => {
                 let frame = self.tape().queued.get_mut(&key).and_then(VecDeque::pop_front).ok_or_else(|| {
-                    format!("cassette: no recorded call {id}({}): record the tape again (the calls changed)", key.1)
+                    format!(
+                        "cassette: no recorded call {id}({}): the calls changed; record the tape again (AIO_CASSETTE=rerecord)",
+                        key.1
+                    )
                 })?;
                 let v = frame.answer?;
                 serde_json::from_value(v).map_err(|e| format!("cassette {id}: the recorded answer doesn't fit: {e}"))
@@ -138,6 +185,12 @@ impl Cassette {
             _ => Ok(()),
         }
     }
+}
+
+/// A call's arguments as the tape keys them (JSON); unserializable ones refused.
+fn key_of(id: &str, args: &impl Serialize) -> Result<String, String> {
+    serde_json::to_string(args)
+        .map_err(|e| format!("cassette {id}: its arguments don't serialize, and they key the tape: {e}"))
 }
 
 #[cfg(test)]
@@ -190,8 +243,47 @@ mod tests {
         let calls = AtomicU32::new(0);
         block(device(&rec, "m/1", &calls)).unwrap();
         rec.save().unwrap();
-        let play = Cassette::open(p).unwrap();
+        let play = Cassette::open(p.clone()).unwrap();
         assert_eq!(play.mode(), Mode::Replay);
         assert_eq!(block(device(&play, "m/1", &AtomicU32::new(0))), Ok("xpub-m/1-1".into()));
+        assert_eq!(Cassette::open_as(p.clone(), Some("rerecord")).unwrap().mode(), Mode::Record, "asked: afresh");
+        assert!(Cassette::open_as(p, Some("yes")).is_err_and(|e| e.contains("`rerecord`")));
+    }
+
+    #[test]
+    fn a_damaged_tape_is_refused_unless_rerecorded() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("session.json");
+        std::fs::write(&p, "[{\"id\": trunc").unwrap();
+        let Err(e) = Cassette::open_as(p.clone(), None) else { panic!("a damaged tape replayed") };
+        assert!(e.contains("not a tape") && e.contains("AIO_CASSETTE=rerecord"), "{e}");
+        let rec = Cassette::open_as(p.clone(), Some("rerecord")).unwrap();
+        block(device(&rec, "m/2", &AtomicU32::new(0))).unwrap();
+        rec.save().unwrap();
+        assert_eq!(Cassette::open_as(p, None).unwrap().mode(), Mode::Replay, "the new tape reads");
+    }
+
+    #[test]
+    fn a_wrapped_fn_records_and_replays() {
+        let calls = AtomicU32::new(0);
+        let real = async |(n,): (u32,)| -> Result<u32, String> {
+            calls.fetch_add(1, SeqCst);
+            Ok(n * 2)
+        };
+        let rec = Cassette::record(None);
+        let twice = rec.wrap("math.double", real);
+        assert_eq!(block(twice((21,))), Ok(42));
+        let play = Cassette::replay(&rec.text()).unwrap();
+        let replayed = play.wrap("math.double", async |_: (u32,)| -> Result<u32, String> { panic!("ran on replay") });
+        assert_eq!(block(replayed((21,))), Ok(42));
+        assert_eq!(calls.load(SeqCst), 1, "only the recording ran it");
+        assert!(block(replayed((21,))).unwrap_err().contains("AIO_CASSETTE=rerecord"), "one recorded call, one replay");
+    }
+
+    #[test]
+    fn unserializable_arguments_are_refused_naming_the_call() {
+        let bad: HashMap<(u8, u8), u8> = [((1, 2), 3)].into();
+        let e = block(Cassette::record(None).call("grid.cell", &bad, || async { Ok::<u8, String>(0) })).unwrap_err();
+        assert!(e.starts_with("cassette grid.cell: its arguments don't serialize"), "{e}");
     }
 }

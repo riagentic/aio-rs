@@ -15,7 +15,8 @@ name = "ax"
 path = "src/main.rs"
 
 [dependencies]
-aio = { workspace = true, features = ["kit", "net"] }
+# `testing`: `ax preview`, `ax surface` and `ax shot` drive pages as TestUi does.
+aio = { workspace = true, features = ["kit", "net", "testing"] }
 # `Config::parse` and `find`: aio.toml as `ax config`, `ax build` and `ax lint` read it.
 aio-config = { workspace = true, features = ["toml", "png"] }
 # `ax ui`'s Tasks: a project's cargo aliases (`.cargo/config.toml`), aio-config's own toml.

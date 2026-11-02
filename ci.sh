@@ -16,6 +16,9 @@ scripts/dx-metrics --self-test
 # The guide (docs/): links resolve, each page with Rust is a doctest (run by
 # the workspace tests below), the verb list is whole, the wording public.
 scripts/docs-check
+# The mutation ledger holds together: each break's line found once, its test there
+# (scripts/mutants runs the breaks; GitHub CI runs the fast ones).
+scripts/mutants --check
 # Apps are written against aio::ui, never the renderer behind it (air
 # replaces it: docs/design/air.md): the template, the kit, `ax ui`, the views
 # ax writes, the tests and the guide name no `dioxus` (ax lint holds apps to it).
@@ -53,12 +56,12 @@ cargo test -p aio-rs --no-default-features --features net --test sync --test htt
 # air, aio-rs's own renderer (docs/design/air.md): the facade and TestUi on
 # it with no Dioxus in the build, and its gates (no leaks, misuse failing,
 # planted faults failing a test) in a release build too.
-cargo clippy -p aio-rs --lib --test air_ui --test facade --test ui --no-default-features --features air --locked -- -D warnings
+cargo clippy -p aio-rs --lib --test air_ui --test facade --test ui --test route --test route_tree --no-default-features --features air --locked -- -D warnings
 if cargo tree --locked -p aio-rs --no-default-features --features air -e normal --prefix none | grep -q '^dioxus'; then
   echo "ci: aio-rs with \`air\` alone pulls dioxus" >&2
   exit 1
 fi
-cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --locked
+cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --test route --test route_tree --locked
 cargo test -p aio-rs-air --release --all-features --locked
 # The browser build (`ax build --web`): aio's core in the page, no SQLite, no ring.
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
