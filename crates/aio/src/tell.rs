@@ -69,6 +69,15 @@ pub fn show_with(f: impl Fn(&Tell) + Send + Sync + 'static) {
     *SHOW.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
 }
 
+/// [`show_with`], unless this process has its way already.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub(crate) fn show_unless_set(f: impl Fn(&Tell) + Send + Sync + 'static) {
+    let mut s = SHOW.write().unwrap_or_else(|e| e.into_inner());
+    if s.is_none() {
+        *s = Some(Arc::new(f));
+    }
+}
+
 /// Show `t` here; `false` with no way to.
 pub fn show(t: &Tell) -> bool {
     let f = SHOW.read().unwrap_or_else(|e| e.into_inner()).clone();

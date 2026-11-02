@@ -1291,7 +1291,7 @@ runs on each bundle.
 ### `ax install`
 
 ```text
-ax install <app> [--android] [--build] [--emulator] [--device serial] [--apk file] [--no-launch]
+ax install <app> [--appimage] [--android] [--build] [--emulator] [--device serial] [--apk file] [--no-launch]
 ```
 
 Builds this OS's bundle from source and installs it for this user (Linux:
@@ -1300,6 +1300,7 @@ Windows: says how).
 
 | Flag | Does |
 |---|---|
+| `--appimage` | Linux: the AppImage, built now, in `aio-rt/install/<id>-appimage/` and the app menu; its entry unpacks it in a private `TMPDIR` (aio's installer) |
 | `--android` | the newest APK for the attached phone's CPU onto it, then starts it |
 | `--build` | build the APK first (it refuses one older than the sources) |
 | `--apk file` | that APK |

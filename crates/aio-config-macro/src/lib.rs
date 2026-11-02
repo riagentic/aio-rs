@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 pub fn config(input: TokenStream) -> TokenStream {
     let made = asked(input).and_then(|asked| {
         let dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
-        let Read { file, config, splash, icon } = read(&dir, asked.as_deref()).map_err(error)?;
+        let Read { file, config, splash, icon, assets } = read(&dir, asked.as_deref()).map_err(error)?;
         let value: proc_macro2::TokenStream = config.rust().parse().map_err(error)?;
         let file = file.to_string_lossy().into_owned();
         // The splash's PNG and the icon are built in: the binary carries them, not their paths.
@@ -29,12 +29,23 @@ pub fn config(input: TokenStream) -> TokenStream {
             let p = p.to_string_lossy().into_owned();
             quote::quote!(c.app.icon = include_bytes!(#p);)
         });
+        // `[build] assets`: each file built in at its URL path. A file added
+        // later is built in once ax builds again (`AIORT_ASSETS` changes).
+        let assets = (!assets.is_empty()).then(|| {
+            let (urls, files): (Vec<_>, Vec<_>) =
+                assets.into_iter().map(|(u, p)| (u, p.to_string_lossy().into_owned())).unzip();
+            quote::quote!(
+                const _: Option<&str> = option_env!("AIORT_ASSETS");
+                c.build.asset_files = &[#((#urls, include_bytes!(#files) as &[u8])),*];
+            )
+        });
         Ok(quote::quote!({
             const _: &str = include_str!(#file);
             #[allow(unused_mut)]
             let mut c = #value;
             #splash
             #icon
+            #assets
             c
         }))
     });
@@ -83,6 +94,8 @@ struct Read {
     /// The window's icon, `assets/icon.png` (none: a CLI, a server, or the
     /// monogram the shell draws).
     icon: Option<PathBuf>,
+    /// `[build] assets`' files: URL path, file.
+    assets: Vec<(String, PathBuf)>,
 }
 
 /// The config file for a crate in `dir` (`asked`: from there), parsed and
@@ -122,7 +135,8 @@ fn read(dir: &Path, asked: Option<&str>) -> Result<Read, String> {
         }
         _ => None,
     };
-    Ok(Read { file, config: c, splash, icon })
+    let assets = aio_config::config::asset_files(&at, &c.build.assets).map_err(|e| format!("{shown}: {e}"))?;
+    Ok(Read { file, config: c, splash, icon, assets })
 }
 
 #[cfg(test)]

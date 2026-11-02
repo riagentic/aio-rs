@@ -868,6 +868,19 @@ fn parts(app: &App, full: &aio::config::Config, app_dir: &Path) -> Result<(Vec<u
     Ok((icon, splash, overlay))
 }
 
+/// `[build] assets` in the APK (`assets/aio-assets/<URL path>`), which the
+/// activity serves at their URL paths on the page's origin.
+fn asset_files(full: &aio::config::Config, app_dir: &Path) -> Result<Files, String> {
+    aio::config::asset_files(app_dir, &full.build.assets)?
+        .into_iter()
+        .map(|(url, file)| {
+            let rel = aio::config::asset_path(&url).to_string_lossy().replace('\\', "/");
+            let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            Ok((format!("app/src/main/assets/aio-assets/{rel}"), bytes))
+        })
+        .collect()
+}
+
 /// Write `files` under `proj` (made afresh) with the SDK's place, warning
 /// of each placeholder left unfilled.
 fn write_project(proj: &Path, files: &[(String, Vec<u8>)], sdk: &Path) -> Result<(), String> {
@@ -926,7 +939,9 @@ pub fn build(
     let bin = ndk.join("toolchains/llvm/prebuilt").join(prebuilt(os)).join("bin");
     let proj = dist.join(format!(".{}-android", app.id));
     let made = (|| {
-        write_project(&proj, &project(app, port_of, cfg, &icon, &splash, &overlay, ask.kind)?, &sdk)?;
+        let mut files = project(app, port_of, cfg, &icon, &splash, &overlay, ask.kind)?;
+        files.extend(asset_files(full, app_dir)?);
+        write_project(&proj, &files, &sdk)?;
         for (abi, target) in ask.abis {
             eprintln!("ax build: {} for {abi}…", app.name);
             let clang = bin.join(clang(target, os));
@@ -1696,6 +1711,19 @@ mod tests {
                 && splash.contains("optLong(\"fade\", 200)")
         );
         assert!(method(java, "private void dropSplash(").contains("setDuration(splashFade)"));
+    }
+
+    #[test]
+    fn built_in_assets_go_in_the_apk_where_the_activity_serves_them() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("media/x")).unwrap();
+        std::fs::write(d.path().join("media/x/a b.png"), "png").unwrap();
+        let full =
+            aio::config::Config::parse("[app]\nid = \"t\"\n[build]\nassets = { \"/media\" = \"media\" }").unwrap();
+        let files = asset_files(&full, d.path()).unwrap();
+        assert_eq!(files, [("app/src/main/assets/aio-assets/media/x/a b.png".to_string(), b"png".to_vec())]);
+        let serve = method(TEMPLATE[6].1, "public android.webkit.WebResourceResponse shouldInterceptRequest(");
+        assert!(serve.contains("getAssets().open(\"aio-assets\" + path)") && serve.contains("path.contains(\"..\")"));
     }
 
     #[test]

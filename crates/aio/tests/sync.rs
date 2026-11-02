@@ -1349,7 +1349,10 @@ async fn what_a_copys_bus_hears_reaches_its_servers_bus() {
     until_long("relayed", || heard.lock().unwrap().iter().any(|(k, _)| k == "client:window:frozen")).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let heard = heard.lock().unwrap();
-    let relayed: Vec<_> = heard.iter().filter(|(k, _)| k.starts_with("client:")).collect();
+    // Only this kind: the other tests' copies relay what else their bus
+    // hears meanwhile (a refused call is `client:refused`).
+    let relayed: Vec<_> =
+        heard.iter().filter(|(k, _)| k == "client:window:frozen" || k.starts_with("client:client:")).collect();
     assert_eq!(relayed.len(), 1, "never echoed back: {heard:?}");
     assert!(
         relayed[0].1.contains(" from 127.0.0.1:") && relayed[0].1.ends_with(": copy stuck token=…"),
@@ -1508,6 +1511,47 @@ async fn a_watch_on_a_synced_copy_tells_only_changes() {
     h.add("tiny".into()).unwrap();
     until("the copy follows", || a.state().notes.len() == 3).await;
     assert_eq!(*seen.lock().unwrap(), [0, 4, 5], "a note no longer than the longest changes nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copys_listeners_never_hear_an_older_state_after_a_newer_one() {
+    use std::sync::{Arc, Mutex};
+    let (_h, addr) = server().await;
+    let a = Remote::<Board>::connect(&addr, "secret", "ana").await.unwrap();
+    // The first listener changes the copy as it is told (a tell within a
+    // tell); the second must still hear the states in the order they were.
+    let once = Mutex::new(Some(a.clone()));
+    a.listen(move |_| {
+        let b = once.lock().unwrap().take();
+        if let Some(b) = b {
+            b.add("from a listener".into()).unwrap();
+        }
+    });
+    let seen = Arc::new(Mutex::new(vec![]));
+    let s = seen.clone();
+    a.listen(move |b: &Arc<Board>| s.lock().unwrap().push(b.notes.len()));
+    a.add("first".into()).unwrap();
+    until("both shown", || seen.lock().unwrap().last() == Some(&2)).await;
+    let seen = seen.lock().unwrap();
+    assert!(seen.is_sorted(), "an older state told after a newer one: {seen:?}");
+}
+
+#[test]
+fn a_cells_listeners_never_hear_an_older_state_after_a_newer_one() {
+    use std::sync::{Arc, Mutex};
+    let h = Handle::<Board>::memory();
+    let once = Mutex::new(Some(h.clone()));
+    h.listen(move |_| {
+        let b = once.lock().unwrap().take();
+        if let Some(b) = b {
+            b.add("from a listener".into()).unwrap();
+        }
+    });
+    let seen = Arc::new(Mutex::new(vec![]));
+    let s = seen.clone();
+    h.listen(move |b: &Arc<Board>| s.lock().unwrap().push(b.notes.len()));
+    h.add("first".into()).unwrap();
+    assert_eq!(*seen.lock().unwrap(), [1, 2], "told in order, each once");
 }
 
 #[tokio::test(flavor = "multi_thread")]

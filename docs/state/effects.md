@@ -518,6 +518,9 @@ Where it is shown:
   too). Every client means every user: a tell made in Ana's call is shown
   on Bo's screen as well, so keep one user's data out of `title` and
   `body`, and show it through their own state instead;
+- by a web build's page (its own cells', or its synced copies'): the
+  browser's notification, the permission asked for at the first tell
+  ([web](../clients/web.md#notifications));
 - in-process: `h.tells()` is a broadcast of every tell from now on.
 
 Where it can't be, it says so:
@@ -645,10 +648,6 @@ What aio has and aio-rs does not, or does differently:
   lists them by key (`t.effects()`) and as `HeldEffect`s (key, mode,
   timeout: `t.held_effects()`), and runs them (`t.settle()`); schedules
   are `ax schedules` and `Store::schedules`.
-- **No notifications in a browser page.** A page built with `ax build
-  --web` shows no tell unless the app sets `aio::tell::show_with(f)`
-  itself; aio asks the browser's permission
-  (`requestNotificationPermission()`), aio-rs does not.
 - A command-line client prints no tell.
 
 ## API

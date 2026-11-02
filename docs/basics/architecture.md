@@ -44,9 +44,10 @@ methods, effects, views and the log.
 3. `Ok`: the event (method, arguments, caller, time, the ids and random
    numbers used) and the new state commit in one SQLite transaction
    (coalesced for `#[coalesce]` methods, [persistence](../persistence/README.md)).
+   `listens_to` reactions run inside that commit: their calls commit in
+   the same transaction.
 4. After the commit: views whose fields changed re-render, synced copies
-   get a patch, effects the call asked for start, listeners and
-   `listens_to` reactions run.
+   get a patch, effects the call asked for start, listeners run.
 5. An effect's result comes back as a call, so it goes through 1-4 too.
 
 ## Where each part of the code runs

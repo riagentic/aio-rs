@@ -500,7 +500,7 @@ What `ax build <app>` makes ([build](../build/README.md),
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
-| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
+| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`, `web`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
 | `platforms` | list | `[]` | The OS and CPU each desktop target is built for: `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`. Empty: this machine. `--platforms a,b` per build. |
 | `budget_mb` | number | 10 (a server: 6) | The binary's size budget in MB; the build fails above it and names the crates that take the space (`ax build --sizes`). For apps with heavy libraries. |
 | `css` | command or list | none | A CSS toolchain run before every build and on every change under `ax dev`: a command line split on spaces, or an argv list. Never through a shell. |
@@ -514,6 +514,22 @@ targets = ["desktop", "deb", { name = "pro", kind = "desktop", bin = "notes-pro"
 platforms = ["linux", "windows"]
 css = ["tailwindcss", "-i", "src/app.css", "-o", "assets/style.css"]
 budget_mb = 14
+```
+
+### [build.assets]
+
+Folders built into the app by URL prefix (aio's `assets`): each file is
+answered at the same path in the window (`aio://app/media/…`), by the
+app's server (to anyone: it ships with the app, as its page does), in the
+web build (cached offline) and in the APK. A folder is beside `aio.toml`
+(relative, no `..`), a prefix is a path like `/media` (not `/`, `/ws` or
+`/__aio…`) and not also in `[server] dirs`; dotfiles are left out, and a
+file name with `:` or `*` is refused. `ax build`, `ax dev` and `ax start`
+build a file added later in; a plain `cargo build` doesn't see a new one.
+
+```toml
+[build.assets]
+"/media" = "media"   # media/song.mp3 is /media/song.mp3
 ```
 
 ### [build.android]
@@ -564,7 +580,10 @@ bar = "#14f195"
 ### [build.splash]
 
 The app's image (and text) on screen from its start until its window has
-loaded, on the desktop, the web and Android (aio's `build.splash`).
+loaded, on the desktop, the web and Android (aio's `build.splash`). On the
+desktop the OS draws it before Electron starts, at every start, and a first
+start's Electron download runs on it, its bar under the text
+([desktop](../clients/desktop.md#the-splash)).
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
@@ -587,6 +606,16 @@ loaded, on the desktop, the web and Android (aio's `build.splash`).
 | `font_size`, `bold` | px (Android: points), bool | `13` (Android `14`), `false` | The text's size and weight. |
 | `text_color` | `["#light", "#dark"]` | the app's | The text's colour. |
 | `bar`, `track` | `["#light", "#dark"]` | the app's | The download bar's fill and ground, while the splash draws a first start's download. |
+| `position` | `window`, `primary`, `pointer` | `"window"` | Where it opens: centred where the app's window will open (its last place), on the primary display, or on the one under the pointer. |
+| `follow_window` | bool | `true` | With `position = "window"`: once the app's window shows, the splash moves onto where it really is. |
+| `shadow` | bool | the OS's (macOS, Linux on; Windows off) | The text's shadow. |
+| `window_shadow` | bool | the OS's (macOS on) | The window's drop shadow. |
+| `cancel` | bool | `true` | The ✕ that cancels a first start's download. |
+| `progress` | bool | `true` | The bar while a first start downloads Electron. |
+| `bar_style` | `solid`, `thin` | `"solid"` | The bar's thickness: 6 or 3 points. |
+| `bar_height` | px, 1 to 64 | `bar_style`'s | The bar's height. |
+| `bar_position` | `under-text`, `bottom-edge` | `"under-text"` | Under the text inside the margins, or along the window's bottom edge, full width. |
+| `bar_radius` | px | half its height | The bar's corner radius. |
 
 ```toml
 [build.splash]

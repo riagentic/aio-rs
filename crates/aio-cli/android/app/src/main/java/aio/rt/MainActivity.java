@@ -124,7 +124,19 @@ public final class MainActivity extends Activity {
             public android.webkit.WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
                 Uri u = r.getUrl();
                 String path = u.getPath();
-                if (!"app.invalid".equals(u.getHost()) || path == null || !path.startsWith("/file/")) return null;
+                if (!"app.invalid".equals(u.getHost()) || path == null) return null;
+                // The app's built-in files ([build] assets), at their own paths.
+                if (!path.startsWith("/file/")) {
+                    if (path.contains("..")) return null;
+                    try {
+                        String ext = MimeTypeMap.getFileExtensionFromUrl(path);
+                        String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase(java.util.Locale.ROOT));
+                        return new android.webkit.WebResourceResponse(mime == null ? "application/octet-stream" : mime,
+                                null, getAssets().open("aio-assets" + path));
+                    } catch (java.io.IOException e) {
+                        return null;
+                    }
+                }
                 java.io.File f = new java.io.File(path.substring("/file".length()));
                 String ext = MimeTypeMap.getFileExtensionFromUrl(f.getName());
                 try {

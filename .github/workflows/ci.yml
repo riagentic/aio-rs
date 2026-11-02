@@ -81,6 +81,23 @@ jobs:
       # air (docs/design/air.md): the facade and TestUi on it, its gates in release.
       - run: cargo test -p aio-rs --no-default-features --features air --test air_ui --test facade --test ui --test route --test route_tree --locked --no-fail-fast
       - run: cargo test -p aio-rs-air --release --all-features --locked
+  # A real install of a sample app updated through the signed delta path,
+  # then a broken update rolled back with its data (scripts/update-proof).
+  update-proof:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os != 'Windows'
+        run: python3 scripts/update-proof
+      - if: runner.os == 'Windows'
+        run: python scripts/update-proof
   audit:
     runs-on: ubuntu-24.04
     steps:
