@@ -251,6 +251,13 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   a local closure called in a hole is a `Callback`, or cloned in by a
   `let` of the hole's own; `aio::field!(name)` names a field, not a local.
 - `onX: handler` listens for the DOM's `X` event.
+- A named attribute that is a CSS property's name (the HTML global attributes'
+  `style` namespace: `display`, `align_items`,
+  `min_width`, `gap`, …) sets that CSS property on an HTML element
+  (`style.setProperty`), in order with the element's other attributes; an element's own attribute of that name stays one
+  (`img { width }`, `canvas { height }`, `input { size }`), and so do SVG's
+  and a quoted name (`"display": "x"`). A `style` string keeps the
+  properties set before it that it doesn't set.
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).
@@ -302,7 +309,7 @@ side; node 0 is `#main`.
 
 | op | name | body |
 |---|---|---|
-| 1 | DEFINE | tpl, roots, count, nodes (pre-order: `1 tag nattrs (k v)* children:u16 mark:u8` element, `2 str` text, `3` text hole, `4` anchor) |
+| 1 | DEFINE | tpl, roots, count, nodes (pre-order: `1 tag nattrs (k v)* children:u16 mark:u8` element, `5 …` the same in SVG's namespace (a root made inside an `svg`, or an SVG-only tag such as a component's `circle`), `2 str` text, `3` text hole, `4` anchor) |
 | 2 | CLONE | tpl, base: the marked nodes (roots, holes, elements with holes) get `base..` in pre-order |
 | 3 | SET_TEXT | id, str |
 | 4 / 5 | SET_ATTR / REMOVE_ATTR | id, name (, value) |
@@ -465,7 +472,8 @@ Feature `air` of aio-rs (`air` alone: 50 crates in the graph, no
   `selector`; owners with context (`provide`, `provide_root`, `context`,
   `try_context`); callbacks (`Callback`, `EventHandler`, `callback`);
   `Global`, `GlobalMemo` per app instance; tasks (`spawn`, `spawn_forever`,
-  `task`) on an executor of the thread's own, woken by the host;
+  `task`) on an executor of the thread's own, woken by the host (a
+  `spawn_forever` task ends with its app's root, as its globals do);
   `resource` (`get`, `pending`, `restart`, `suspend`); `ErrorBoundary`,
   `Suspense`, `Fragment`; keyed lists; typed, bubbling events;
   `onmounted`; page scripts (`eval`); `Root` (one per thread) and

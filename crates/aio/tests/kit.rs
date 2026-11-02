@@ -952,6 +952,7 @@ fn a_held_keys_repeats_fire_only_movement_and_bindings_that_say_so() {
 fn forms() -> View {
     let sent = signal(|| 0);
     let name = signal(String::new);
+    let picked = signal(|| false);
     rsx! {
         p { "data-t": "sent", "{sent}" }
         form { onsubmit: move |e| { e.prevent_default(); sent += 1 },
@@ -961,6 +962,13 @@ fn forms() -> View {
         form { onsubmit: move |e| { e.prevent_default(); if !name.get().is_empty() { sent += 10 } },
             input { "data-t": "name", value: "{name}", oninput: move |e| name.set(e.value()) }
             button { r#type: "submit", disabled: name.get().is_empty(), "Create" }
+        }
+        // Enter in an open combobox picks (the view enables Send): it never submits.
+        form { onsubmit: move |e| { e.prevent_default(); sent += 100 },
+            input { "data-t": "country", role: "combobox", aria_expanded: (!picked.get()).to_string(),
+                onkeydown: move |e: KeyboardEvent| if e.key() == Key::Enter { picked.set(true) },
+            }
+            button { r#type: "submit", disabled: !picked.get(), "Send" }
         }
     }
 }
@@ -981,6 +989,10 @@ fn enter_submits_a_form_with_no_submit_button_and_one_whose_button_the_view_is_e
     assert_eq!(ui.text("sent"), "11", "submitted once the view's answer enabled the button");
     ui.press("name", "Enter");
     assert_eq!(ui.text("sent"), "21", "an enabled button: the browser's own submit");
+    ui.press("country", "Enter");
+    ui.wait(std::time::Duration::from_millis(600));
+    assert_eq!(ui.attr("country", "aria-expanded").as_deref(), Some("false"), "Enter picked");
+    assert_eq!(ui.text("sent"), "21", "an open combobox's Enter picks, never submits");
 }
 
 fn portals() -> View {

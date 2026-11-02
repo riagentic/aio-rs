@@ -38,7 +38,7 @@ pub mod events {
 /// Why a page script's value didn't come.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalError {
-    /// The script ended, failed, or its view did.
+    /// The script failed, or its view ended.
     Finished(String),
     /// A value that isn't the type asked for.
     Serialization(String),

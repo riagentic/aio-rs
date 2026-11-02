@@ -308,31 +308,38 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
 }
 
 /// On air the call sits in a hole (an effect, no hooks): one signal per set
-/// of sheets for the thread, its watcher living as long.
+/// of sheets for the thread; its watcher lives as long as the app (a root
+/// mounted again, a test's next one, starts it again).
 #[doc(hidden)]
 #[cfg(feature = "kit")]
 pub fn follow_sheets(sheets: &'static [Sheet]) {
+    type Watch = (air::Signal<u64>, air::Task);
     if !cfg!(debug_assertions) {
         return;
     }
     thread_local! {
-        static EDITS: std::cell::RefCell<std::collections::HashMap<Vec<&'static str>, air::Signal<u64>>> =
-            Default::default();
+        static EDITS: std::cell::RefCell<std::collections::HashMap<Vec<&'static str>, Watch>> = Default::default();
     }
+    let watch = |edits: air::Signal<u64>| {
+        air::spawn_forever(async move {
+            loop {
+                sheets_changed(sheets).await;
+                edits.update(|n| *n += 1);
+            }
+        })
+    };
     let key = sheets.iter().map(|s| s.0).collect();
     let edits = EDITS.with_borrow_mut(|m| {
-        *m.entry(key).or_insert_with(|| {
+        let w = m.entry(key).or_insert_with(|| {
             air::detached(|| {
                 let edits = air::Signal::new(0u64);
-                air::spawn_forever(async move {
-                    loop {
-                        sheets_changed(sheets).await;
-                        edits.update(|n| *n += 1);
-                    }
-                });
-                edits
+                (edits, watch(edits))
             })
-        })
+        });
+        if !w.1.alive() {
+            w.1 = watch(w.0);
+        }
+        w.0
     });
     let _ = edits.get();
 }

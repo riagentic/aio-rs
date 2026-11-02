@@ -336,9 +336,10 @@
         else if (el.localName === "textarea") c.textContent = el.value;
         else if (el.type !== "password" && el.type !== "file") c.setAttribute("value", el.value);
       });
-      const marks = document.createTreeWalker(copy, NodeFilter.SHOW_COMMENT), gone = [];
-      while (marks.nextNode()) gone.push(marks.currentNode);
-      gone.forEach((c) => c.remove());
+      // air's anchors (an empty comment where a hole's content goes) are no content.
+      const anchors = document.createTreeWalker(copy, NodeFilter.SHOW_COMMENT), empty = [];
+      while (anchors.nextNode()) if (anchors.currentNode.data === "") empty.push(anchors.currentNode);
+      empty.forEach((c) => c.remove());
       return copy;
     };
     const own = (n) => n !== main && !(n.nodeType === 1 && (["script", "style", "template"].includes(n.localName) || n.hasAttribute("data-aio-dev")));

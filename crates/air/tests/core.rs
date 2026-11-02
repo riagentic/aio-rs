@@ -252,6 +252,25 @@ fn a_page_script_gets_values_and_its_return_comes_back() {
     assert_eq!(GOT.take().as_deref(), Some(r#"Ok("42") Ok("\"done\"")"#));
 }
 
+#[test]
+fn a_page_script_that_returned_still_sends_what_its_timers_send() {
+    thread_local!(static GOT: RefCell<Option<String>> = const { RefCell::new(None) });
+    fn app() -> View {
+        task(|| async {
+            let e = eval("setTimeout(() => aio.send(1), 10);");
+            let v = e.recv_json().await;
+            GOT.set(Some(format!("{v:?}")));
+        });
+        rsx! { p { "page" } }
+    }
+    let mut p = TestPage::mount(app);
+    let id = p.scripts[0].0;
+    p.answer(id, 1, "null");
+    assert_eq!(GOT.take(), None, "its return is no value: recv waits on");
+    p.answer(id, 0, "1");
+    assert_eq!(GOT.take().as_deref(), Some(r#"Ok("1")"#));
+}
+
 static LEFT: Global<u32> = Global::new(|| 0);
 static RIGHT: Global<u32> = Global::new(|| 10);
 static SUM: GlobalMemo<u32> = GlobalMemo::new(|| LEFT.get() + RIGHT.get());
@@ -404,4 +423,67 @@ fn an_element_handed_out_runs_scripts_on_itself() {
     let (id, js) = p.scripts.last().cloned().unwrap();
     assert_eq!((p.scripts.len(), id), (mounted + 1, 0), "one script, no reply kept");
     assert!(js.contains("el.getContext('2d').fillRect(0, 0, 4, 4)") && js.starts_with("const el = aio.node("), "{js}");
+}
+
+#[component]
+fn Draft(saved: Signal<String>) -> View {
+    let text = signal(|| "typed".to_string());
+    let shown = memo(move || format!("{} chars", text.with(String::len)));
+    // A view's cleanup reads its own state (Solid's `onCleanup`).
+    on_cleanup(move || saved.set(format!("{} ({})", text.get_untracked(), shown.get_untracked())));
+    rsx! { p { "data-t": "draft", "{text}" } }
+}
+
+#[test]
+fn a_cleanup_reads_its_views_signals_and_memos() {
+    let saved = Signal::new(String::new());
+    let open = Signal::new(true);
+    let mut p = TestPage::mount(
+        move || rsx! { button { "data-t": "close", onclick: move |_| open.set(false), "x" } if open.get() { Draft { saved } } },
+    );
+    assert_eq!(p.text("draft"), "typed");
+    p.click("close");
+    assert!(!p.present("draft"));
+    assert_eq!(saved.get_untracked(), "typed (5 chars)");
+}
+
+#[test]
+fn style_attributes_are_css_properties_in_the_rust_page_too() {
+    let wide = Signal::new(true);
+    let mut p = TestPage::mount(move || {
+        rsx! { div { "data-t": "box", display: "flex", min_width: wide.get().then_some("10px"), button { "data-t": "narrow", onclick: move |_| wide.set(false), "n" } } }
+    });
+    assert_eq!(p.attr("box", "style").as_deref(), Some("display: flex; min-width: 10px"));
+    p.click("narrow");
+    assert_eq!(p.attr("box", "style").as_deref(), Some("display: flex"));
+    // A string after the properties keeps the ones it doesn't set, as the page does.
+    let p = TestPage::mount(
+        || rsx! { div { "data-t": "over", position: "fixed", color: "blue", style: "inset: 0; color: red" } },
+    );
+    assert_eq!(p.attr("over", "style").as_deref(), Some("inset: 0; color: red; position: fixed"));
+}
+
+#[test]
+fn a_task_spawned_forever_in_an_app_ends_with_its_root() {
+    struct Ends(Rc<Cell<bool>>);
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            self.0.set(true)
+        }
+    }
+    let ended = Rc::new(Cell::new(false));
+    let e = ended.clone();
+    let page = TestPage::mount(move || {
+        let held = Ends(e.clone());
+        spawn_forever(async move {
+            let _held = held;
+            std::future::pending::<()>().await
+        });
+        rsx! { p { "app" } }
+    });
+    let live = live_tasks();
+    assert!(!ended.get(), "it runs while the app does");
+    drop(page);
+    assert!(ended.get(), "the app's end ended it (a next app on the thread never polls it)");
+    assert_eq!(live_tasks(), live - 1);
 }
