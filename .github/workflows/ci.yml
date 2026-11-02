@@ -31,7 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.part }}
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'gap-cispeed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # What `ax setup` fetches (the Electron runtime the UI tests draw in,
       # dx, the lock's wasm-bindgen), kept per pinned version.
       - id: pins
@@ -57,7 +57,7 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'gap-cispeed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - id: pins
         run: echo "key=$(sh scripts/ci-pins)" >> "$GITHUB_OUTPUT"
       - id: tools
@@ -97,7 +97,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.part }}
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'gap-cispeed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - id: pins
         run: echo "key=$(sh scripts/ci-pins)" >> "$GITHUB_OUTPUT"
       - id: tools
@@ -137,7 +137,7 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'gap-cispeed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - id: pins
         shell: bash
         run: echo "key=$(sh scripts/ci-pins)" >> "$GITHUB_OUTPUT"
@@ -169,7 +169,7 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'gap-cispeed' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: runner.os != 'Windows'
         run: python3 scripts/update-proof
       - if: runner.os == 'Windows'
