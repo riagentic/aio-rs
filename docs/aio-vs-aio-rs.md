@@ -224,7 +224,6 @@ beyond the aio-rs form.
 | Kit | `Tooltip` to the side | `Top` or `Bottom` only | ➖ | [kit](ui/kit.md#gaps-against-aio) |
 | Forms | Standard Schema (Zod, Valibot, ArkType), `parsed()` | a Rust check function | parse in the check | [forms](ui/forms.md#gaps) |
 | Forms | `bind(name)` | two handlers per input | ➖ | [forms](ui/forms.md#gaps) |
-| Routing | the address bar, Back and reload follow the route (History API, SPA fallback) | history kept in the app; a web reload starts at `/` | keep the screen in a cell | [routing](ui/routing.md#gaps-against-aio) |
 | Theming | scoped `css` classes, a duplicate-class warning | none | prefix class names | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | the contrast check in the running dev page | in `TestUi` | a `TestUi` audit | [theming](ui/theming.md#gaps-against-aio) |
 | Theming | `neutral = "soft"` key | `theme::tokens_css(soft)`, no `[ui]` key | pass `soft` to `tokens_css` | [theming](ui/theming.md#gaps-against-aio) |
@@ -241,7 +240,6 @@ beyond the aio-rs form.
 | Testing | `t.init(seed)`, `t.destroy()` mid-test | none | another cell on the same `TestCells` | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.randomActions(n)`, an unseeded fuzz | every fuzz seeded | ➖ | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `t.settle(ms)` on real timers | virtual timers | `TestServer` for real I/O | [cells](testing/cells.md#what-aio-has-that-aio-rs-does-without) |
-| Testing | `ui.advance(ms)` under the page | `TestUi` time is real | `TestCells::advance` | [UI](testing/ui.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `waitForPatch`, `clients[i].patches` | none | assert on each copy's `state()` | [multi-app](testing/multi-app.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | a corrupt cassette re-recorded; unserializable args as text | refused | fix or delete it | [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without) |
 | Testing | `deno task lab`, `deno task test:wine` | none | by hand on a fresh machine | [labs](testing/labs.md#what-aio-has-that-aio-rs-does-without) |
@@ -314,12 +312,10 @@ construct-by-construct tables are in the
   edit; per-launch settings are flags or variables. [FAQ](basics/faq.md)
 - **Forms touch a field on change**, not on blur: a field left untouched
   shows its error after a submit. [forms](ui/forms.md#gaps)
-- **Routes live in the app**, not the browser's history: a web reload
-  starts at `/`. [routing](ui/routing.md#gaps-against-aio)
 - **`Transition` takes children and `show`**, not a conditional child,
   and motions are CSS keyframes. [animation](ui/animation.md)
 - **Tests boot every cell's `#[on_start]`** (aio's `testCell` skipped
-  `onInit`), timers in `TestCells` are virtual, `TestUi` time is real,
+  `onInit`), timers in `TestCells` are virtual, `TestUi` time is real until `advance`,
   and an unread refusal fails the test. [testing cells](testing/cells.md#what-aio-has-that-aio-rs-does-without)
 - **A corrupt cassette fails** instead of being re-recorded.
   [cassettes](testing/cassettes.md#what-aio-has-that-aio-rs-does-without)
@@ -452,13 +448,13 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 | Keys | `onGlobalKey`, `REPEATABLE_KEYS` | `use_global_key`, `Chord::repeating` | ✅ |
 | Long lists | `useVirtualList` | `kit::VirtualList` | ✅ |
 | Forms | `useForm` + Standard Schema, touched on blur | `use_form` + a Rust check, touched on change | 🔄 |
-| Routing | History API, address bar | in-app history, typed `routes!` | 🔄 |
+| Routing | History API, address bar | history in the app; in a browser the address bar, Back and a reload follow it; typed `routes!` | ✅ |
 | Head | `useHead` | `aio::head::use_head` | ✅ |
 | Theme, hue, CSS variables | `ui.theme`, `hue` | `theme_css(hue)`, `--aio-*` | ✅ |
 | Scoped CSS classes | `css` tag | ❌ (prefix by hand) | ❌ |
 | Live CSS in dev | yes | yes, plus `[build] css` toolchains | ✅ |
 | Transitions | `TransitionFn`, shared `options` | CSS keyframes, a `Motion` each | 🔄 |
-| Runtime a11y check | dev mode | ❌ (`ax lint`, `TestUi`) | ❌ |
+| Runtime a11y check | dev mode | `TestUi::a11y()`, aio's rules, said at each mount (not in the running dev page yet) | 🔄 |
 | Window chrome, app menus, several windows | yes | ❌ (OS title bar, `kit::Menu`, child windows) | ❌ |
 | Redux DevTools | yes | ❌ (`TimeTravelPanel`) | ❌ |
 | Worker bundling | yes | ❌ (`spawn_blocking`) | ❌ |
@@ -469,7 +465,8 @@ Each ❌ is a row of [feature gaps](#feature-gaps) with its page.
 |---|---|---|---|
 | Cell tests | `testCell`, `bootCells` | `TestCells` (virtual time, seeded fuzz) | ✅ |
 | UI tests | `testUI` on happy-dom | `TestUi` on the real engine | ➕ |
-| Virtual clock under the page | `ui.advance` | ❌ (`TestCells::advance`) | ❌ |
+| Virtual clock under the page | `ui.advance` | `TestUi::advance` (the views' timers; schedules: `TestCells::advance`) | ✅ |
+| Components by name and key | `ui.find(c, key)`, `surface()` tree | `ui.find(c, key)`, `within`, `surface_tree()` (air) | ✅ |
 | Typed UI clients | `am testgen` | `ax testgen` (a Rust name table) | ✅ |
 | Server and multi-client | `testServer`, `testMultiClient` | `TestServer`, `Sim` | ✅ |
 | Patch assertions | `waitForPatch` | ❌ (each copy's `state()`) | ❌ |

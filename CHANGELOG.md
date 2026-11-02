@@ -37,6 +37,30 @@ version may break things.
   reads state follows it. A prop typed `Prop<T>` follows what it is given
   (`value: name.get()`) while the component's body still runs once; given
   a constant it holds no state.
+- The router on air (`router!`): `Route`, `Outlet`, `Link`, `Redirect`,
+  `params()` and Back are the same views on either renderer; on air a
+  `Route`'s body runs again only when its match changes (a query or
+  another route's place runs nothing), and a `Link`'s active class
+  follows the place in its own holes. `tests/route.rs` and
+  `tests/route_tree.rs` run on both.
+- The router in a browser (a web build): the address bar shows the place,
+  the browser's Back and Forward step the app's history
+  (`History::sync`), and a reload or a shared link opens where it points
+  (`route::start_place`); the server already answers routes with the app.
+- `TestUi` on air: `components()` is the tree of mounted components (name,
+  key in its list, body runs, and the updates its holes made: what a
+  change cost each view); `find(component, key)` and `comp=Row[42]` paths
+  name a component, `within(t, f)` takes a test's paths inside one, and
+  `surface_tree()` is the surface as a tree of components (aio's
+  `UISurfaceNode`).
+- `TestUi::advance(d)`: the views' clock moves `d` on and their timers
+  due by then fire, each at its moment (aio's `ui.advance`); from then on
+  it is virtual.
+- `TestUi::a11y()`: aio's run-time accessibility rules (`dev-a11y.ts`)
+  over the page; every mount says each new finding once.
+- air: `components()` (aio DevTools' `tree`), `follow` (a body that runs
+  again when what it read changes), `provide_now`, and
+  `Event::default_action_enabled`.
 - air's gates, each shown failing on a planted bug first: views removed
   (or replaced by an error boundary in the same pass) leave no node,
   effect, subscription, cleanup, handler, task, page script or page node;
@@ -243,6 +267,9 @@ version may break things.
   `log` row) and `AIORT_TITLE` (the window's title for one run).
 ### Changed
 
+- `aio::testing::MountedComponent` has `key` and `updates`; route tests
+  and the guide read `here()` where it is drawn (a hole), which follows
+  the place on either renderer.
 - Key chords (`Chord`, `normalize_key`, `keycap_match`) are parsed in
   `aio::ui::chord`, renderer-free, so `TestUi` needs no kit; `aio::kit`
   re-exports them as before.

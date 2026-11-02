@@ -320,6 +320,65 @@ pub fn of_link(url: &str) -> String {
     if rest.starts_with('/') { rest.to_string() } else { format!("/{rest}") }
 }
 
+/// Where the app starts: in a browser the page's address (a reload or a
+/// shared link lands where it was; the server answers every route with the
+/// app), elsewhere the launch's `--route` ([`start`]).
+pub fn start_place() -> String {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(l) = web_sys::window().map(|w| w.location()) {
+        return [l.pathname(), l.search(), l.hash()].map(Result::unwrap_or_default).concat();
+    }
+    start(std::env::args())
+}
+
+/// In a browser, the address bar shows `here` (a new entry, or `replace`
+/// the current one; none when it already shows it), so the browser's Back
+/// and a reload follow the app. Nothing elsewhere: the desktop's and
+/// Android's pages have no address bar.
+pub fn mirror(here: &Loc, replace: bool) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(w) = web_sys::window() {
+        let (url, h) = (here.to_string(), w.history());
+        let shown = w.location().href().ok().and_then(|u| Some(u.split_once("://")?.1.split_once('/')?.1.to_string()));
+        let Ok(h) = h else { return };
+        let _ = if replace || shown.is_some_and(|s| format!("/{s}") == url) {
+            h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url))
+        } else {
+            h.push_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url))
+        };
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (here, replace);
+}
+
+/// History one step back, if it can: in a browser through the page's own
+/// history (its `popstate` moves `h`, so the browser's Forward still
+/// leads where the app was), elsewhere `h.go(-1)`.
+pub fn step_back(h: &mut History) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(Ok(page)) = web_sys::window().map(|w| w.history()) {
+        return h.can_go(-1) && page.back().is_ok();
+    }
+    h.go(-1)
+}
+
+/// The places the browser's own Back and Forward lead to (`popstate`):
+/// none but in a browser.
+pub fn pops() -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(target_arch = "wasm32")]
+    if let Some(w) = web_sys::window() {
+        use wasm_bindgen::JsCast;
+        let on = wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || _ = tx.send(start_place()));
+        _ = w.add_event_listener_with_callback("popstate", on.as_ref().unchecked_ref());
+        // The page's for its life (one router per page).
+        on.forget();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    drop(tx);
+    rx
+}
+
 /// How many places Back can go through (Chromium keeps 50 too).
 pub const HISTORY_MAX: usize = 50;
 
@@ -374,6 +433,27 @@ impl History {
                 true
             }
             None => false,
+        }
+    }
+
+    /// The page's own history moved to `place` (the browser's Back or
+    /// Forward, a `popstate`): the step it took when it is the place one
+    /// step back or on, else `place` in place of here. False if it leaves
+    /// the app or is where the app already is: nothing changes.
+    pub fn sync(&mut self, place: &str) -> bool {
+        let Some(loc) = Loc::parse(place) else { return false };
+        if loc == *self.here() {
+            return false;
+        }
+        match [-1, 1]
+            .into_iter()
+            .find(|&d| self.at.checked_add_signed(d).and_then(|i| self.entries.get(i)) == Some(&loc))
+        {
+            Some(d) => self.go(d),
+            None => {
+                self.entries[self.at] = loc;
+                true
+            }
         }
     }
 
@@ -503,8 +583,9 @@ macro_rules! routes {
     };
 }
 
-/// The router for the views (feature `kit`): `router!()` makes `NAV` (the window's
-/// [`History`], from the launch's `--route` ([`start`]), else `/`),
+/// The router for the views: `router!()` makes `NAV` (the window's
+/// [`History`], from the launch's `--route` ([`start`]) or, in a browser,
+/// the page's address ([`start_place`]), else `/`),
 /// `here()` (the current place; reading it subscribes the view), `go(to)`,
 /// `redirect(to)` (no Back step), `back()` (the [`Backs`] handlers, then
 /// history), `use_back(f)` (a handler for the component's life), `Link`,
@@ -515,7 +596,7 @@ macro_rules! routes {
 macro_rules! router {
     () => {
         pub static NAV: $crate::ui::Global<$crate::route::History> = $crate::ui::Global::named(
-            || $crate::route::History::new(&$crate::route::start(::std::env::args())),
+            || $crate::route::History::new(&$crate::route::start_place()),
             concat!(module_path!(), "::NAV"),
         );
 
@@ -542,18 +623,25 @@ macro_rules! router {
                         go(&$crate::route::of_link(&url));
                     }
                 });
+                // The browser's Back and Forward (a web build): history follows.
+                $crate::ui::spawn_forever(async {
+                    let mut pops = $crate::route::pops();
+                    while let Some(place) = pops.recv().await {
+                        NAV.update(|n| n.sync(&place));
+                    }
+                });
             }
             NAV.with(|n| n.here().clone())
         }
 
         /// Go to `to` (resolved from here); false if it leaves the app.
         pub fn go(to: &str) -> bool {
-            NAV.update(|n| n.push(to))
+            NAV.update(|n| n.push(to) && { $crate::route::mirror(n.here(), false); true })
         }
 
         /// Go to `to` without a Back step.
         pub fn redirect(to: &str) -> bool {
-            NAV.update(|n| n.replace(to))
+            NAV.update(|n| n.replace(to) && { $crate::route::mirror(n.here(), true); true })
         }
 
         /// Back: a handler takes it, or history goes one step; false at the
@@ -561,7 +649,7 @@ macro_rules! router {
         pub fn back() -> bool {
             // A copy: a handler may add or remove handlers.
             let backs = BACKS.get_untracked();
-            backs.press() || NAV.update(|n| n.go(-1))
+            backs.press() || NAV.update($crate::route::step_back)
         }
 
         /// `f` handles Back while this component lives (see `Backs::add`).
@@ -836,6 +924,19 @@ mod tests {
         assert!(h.go(-1) && h.here().path == "/users/8");
         // A deep link that leaves the app starts at the root.
         assert_eq!(History::new("https://x.org/").here().path, "/");
+    }
+
+    #[test]
+    fn the_pages_own_back_and_forward_step_the_history() {
+        let mut h = History::new("/a");
+        h.push("/b");
+        h.push("/c");
+        assert!(h.sync("/b") && h.here().path == "/b" && h.can_go(1), "the browser's Back: one step back");
+        assert!(h.sync("/c") && h.here().path == "/c", "its Forward");
+        assert!(!h.sync("/c"), "where it is: nothing");
+        assert!(!h.sync("https://example.com/"), "out of the app: nothing");
+        assert!(h.sync("/z?q=1") && h.here().to_string() == "/z?q=1" && h.len() == 3, "elsewhere: in place of here");
+        assert!(step_back(&mut h) && h.here().path == "/b", "Back off a browser: history's");
     }
 
     #[test]
