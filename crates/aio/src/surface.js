@@ -321,8 +321,8 @@
     return { ok: a && a !== document.body ? a.getAttribute("data-t") : null };
   }
   // What the app mounted, then what it put on <body> itself (a tooltip,
-  // a portal; not the page's scripts or the dev overlay), without Dioxus's
-  // ids, each field as it is now (Dioxus sets values and checks as
+  // a portal; not the page's scripts or the dev overlay), without air's
+  // anchor comments, each field as it is now (air sets values and checks as
   // properties, which HTML leaves out).
   if (op === "html") {
     const main = document.getElementById("main");
@@ -336,12 +336,15 @@
         else if (el.localName === "textarea") c.textContent = el.value;
         else if (el.type !== "password" && el.type !== "file") c.setAttribute("value", el.value);
       });
+      const marks = document.createTreeWalker(copy, NodeFilter.SHOW_COMMENT), gone = [];
+      while (marks.nextNode()) gone.push(marks.currentNode);
+      gone.forEach((c) => c.remove());
       return copy;
     };
     const own = (n) => n !== main && !(n.nodeType === 1 && (["script", "style", "template"].includes(n.localName) || n.hasAttribute("data-aio-dev")));
     const added = Array.from(document.body.childNodes).filter(own).map((n) => n.nodeType === 1 ? copied(n).outerHTML : n.nodeType === 3 ? n.data.trim() : "");
     const html = (main ? copied(main).innerHTML : "") + added.join("");
-    return { ok: html.replace(/ data-dioxus-id="[^"]*"/g, "") };
+    return { ok: html };
   }
   if (op === "present") {
     const shown = (el) => el && !hidden(el);
@@ -387,8 +390,8 @@
   }
   // aio's run-time accessibility rules (`air/dev-a11y.ts`) over the showing
   // elements: each a mistake that renders fine and fails a keyboard, a
-  // screen reader or a zoomed page. A handler is known on air (the page's
-  // listeners); on Dioxus the handler rules are skipped.
+  // screen reader or a zoomed page. A handler is known from the page's
+  // listeners.
   if (op === "a11y") {
     const ITEM = ["option", "row", "gridcell", "treeitem", "tab", "menuitem", "menuitemcheckbox", "menuitemradio"];
     const OWNER = ["listbox", "grid", "treegrid", "tree", "tablist", "menu", "menubar"];

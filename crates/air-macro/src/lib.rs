@@ -1257,6 +1257,7 @@ impl Tpl {
                     .iter()
                     .filter_map(|(k, v)| match v {
                         Val::Static(s) => Some((k, s.clone())),
+                        Val::Present(b) if text_bool(k) => Some((k, b.to_string())),
                         Val::Present(true) => Some((k, String::new())),
                         _ => None,
                     })
@@ -1493,6 +1494,12 @@ fn is_closure(v: &TokenStream) -> bool {
     }
     let at = usize::from(t.first().is_some_and(|t| is_ident(t, "move")));
     is_punct(t.get(at), '|')
+}
+
+/// air's `is_text_bool`: `true`/`false` is text for `aria-*`, `data-*` and
+/// HTML's enumerated attributes, presence for the rest.
+fn text_bool(name: &str) -> bool {
+    name.starts_with("aria-") || name.starts_with("data-") || matches!(name, "draggable" | "contenteditable" | "spellcheck")
 }
 
 /// Is `v` a constant: a literal (`"a"`, `3`, `-1.5`, `true`) or an enum's

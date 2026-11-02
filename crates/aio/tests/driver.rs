@@ -53,12 +53,11 @@ fn a_component_mounts_alone_with_its_props() {
 
 fn gpus() -> View {
     use_live();
-    let p = prefs();
     rsx! {
-        if p.gpus.is_empty() {
+        if prefs().gpus.is_empty() {
             p { "data-t": "none", "no GPU" }
         } else {
-            p { "data-t": "gpus", "{p.gpus.join(\", \")}" }
+            p { "data-t": "gpus", {prefs().gpus.join(", ")} }
         }
         button { "data-t": "dark", onclick: move |_| _ = act!(set_theme("dark".into())), "Dark" }
     }
@@ -580,7 +579,7 @@ fn a_view_that_writes_what_it_reads_is_caught() {
     let why = fails(|| {
         TestUi::new(feedback);
     });
-    assert!(why.contains("still rendering after 100 passes: a view writes state it reads (a render loop)"), "{why}");
+    assert!(why.contains("effects still re-running after 1000 rounds: an effect writes a signal it reads"), "{why}");
 }
 
 #[component]
@@ -607,15 +606,12 @@ fn panel() -> View {
 #[test]
 fn the_component_tree_says_who_rendered_how_often() {
     let mut ui = TestUi::new(panel);
-    let tree = |ui: &TestUi| {
-        let app = &ui.components()[0];
-        (app.name, app.children.iter().map(|c| (c.name, c.renders)).collect::<Vec<_>>())
-    };
-    assert_eq!(tree(&ui), ("root", vec![("Still", 1), ("Clicks", 1), ("Clicks", 1)]));
+    let tree = |ui: &TestUi| ui.components().iter().map(|c| (c.name, c.renders, c.updates)).collect::<Vec<_>>();
+    assert_eq!(tree(&ui), [("Still", 1, 0), ("Clicks", 1, 0), ("Clicks", 1, 0)]);
     ui.click("more");
     ui.click("more");
     assert_eq!(ui.text("more"), "2");
-    assert_eq!(tree(&ui).1, [("Still", 1), ("Clicks", 3), ("Clicks", 1)], "only the clicked one re-rendered");
+    assert_eq!(tree(&ui), [("Still", 1, 0), ("Clicks", 1, 2), ("Clicks", 1, 0)], "only the clicked one's hole wrote");
 }
 
 static LOCKS: Global<u32> = Global::new(|| 0);

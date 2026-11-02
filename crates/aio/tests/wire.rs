@@ -35,11 +35,10 @@ aio::client!(Shop, shop);
 
 fn till() -> View {
     use_live();
-    let s = shop();
     let waiting = use_pending(None);
     rsx! {
-        p { "data-t": "stock", "{s.stock}" }
-        p { "data-t": "owner", "{s.owner}" }
+        p { "data-t": "stock", {shop().stock} }
+        p { "data-t": "owner", {shop().owner.clone()} }
         p { "data-t": "waiting", "{waiting}" }
         button { "data-t": "sell", onclick: |_| _ = act!(sell()), "Sell" }
         button { "data-t": "restock", onclick: |_| _ = act!(restock()), "Restock" }

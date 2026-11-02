@@ -448,6 +448,15 @@ fn is_flag_prop(name: &str) -> bool {
     matches!(name, "checked" | "selected" | "indeterminate")
 }
 
+/// The attributes whose `true`/`false` is text, not presence (`aria-*`,
+/// `data-*` and HTML's enumerated ones): `aria-selected: false` writes
+/// `"false"`, where `disabled: false` removes `disabled`.
+pub(crate) fn is_text_bool(name: &str) -> bool {
+    name.starts_with("aria-")
+        || name.starts_with("data-")
+        || matches!(name, "draggable" | "contenteditable" | "spellcheck")
+}
+
 /// An attribute hole: `name` of node `id` is `f()`.
 #[doc(hidden)]
 pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
@@ -457,7 +466,7 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
         let same = match (&last, &v) {
             (Some(AttrValue::Str(a)), AttrValue::Str(b)) => a == b,
             (Some(AttrValue::Bool(a)), AttrValue::Bool(b)) => a == b,
-            (None, AttrValue::Bool(false)) => !is_flag_prop(name),
+            (None, AttrValue::Bool(false)) => !is_flag_prop(name) && !is_text_bool(name),
             _ => false,
         };
         if same {
@@ -470,6 +479,9 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
 
 /// `name` of node `id` set to `v` now (no hole).
 pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
+    if let (AttrValue::Bool(b), true) = (v, is_text_bool(name)) {
+        return dom(|d| _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" }));
+    }
     dom(|d| match (v, is_prop(name)) {
         (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
         (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),

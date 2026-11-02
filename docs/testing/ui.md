@@ -584,9 +584,10 @@ assert!(shot.starts_with(b"\x89PNG"), "a PNG to compare with a saved one");
 - Compare shots across runs with `.no_scrollbars()` and a fixed `.size`:
   scrollbars differ by OS. `ax shot <app> --check base.png` does the same
   check on a running app.
-- A render loop (a view that writes state it reads, rendering again and
-  again with nothing from the page or the test in between) fails the
-  test: `still rendering after … passes: a view writes state it reads`.
+- An effect loop (an effect that writes a signal it reads, running again
+  and again with nothing from the page or the test in between) fails the
+  test: `effects still re-running after 1000 rounds: an effect writes a
+  signal it reads`.
 
 ## When a test fails
 

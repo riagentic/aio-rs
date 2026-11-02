@@ -42,6 +42,24 @@ fn a_counter_counts_and_resets() {
     assert_eq!(p.text("count"), "0");
 }
 
+/// `aria-*` and `data-*` bools are text (`"true"`, `"false"`), as ARIA reads
+/// them; `disabled` and the other HTML flags are presence.
+#[test]
+fn an_aria_bool_is_text_and_a_flag_is_presence() {
+    fn app() -> View {
+        let on = Signal::new(false);
+        rsx! {
+            li { "data-t": "row", "aria-selected": on.get(), "aria-busy": true, "data-open": false, hidden: on.get(), onclick: move |_| on.set(true), "Row" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let attrs = |p: &TestPage| ["aria-selected", "aria-busy", "data-open", "hidden"].map(|a| p.attr("row", a));
+    let s = |v: &str| Some(v.to_string());
+    assert_eq!(attrs(&p), [s("false"), s("true"), s("false"), None]);
+    p.click("row");
+    assert_eq!(attrs(&p), [s("true"), s("true"), s("false"), s("")]);
+}
+
 /// 1000 rows, a filter, a cursor: the list keyed by id.
 fn list() -> View {
     let all = Signal::new(rows(1000));

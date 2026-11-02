@@ -311,15 +311,14 @@ const PASTE: &str = "(s) => {
 pub struct MountedComponent {
     /// Its name without its module.
     pub name: &'static str,
-    /// Its `key:` in a list, as text (air; none on Dioxus).
+    /// Its `key:` in a list, as text.
     pub key: Option<String>,
-    /// Times it rendered since it mounted, the first included. On air a
-    /// body runs once (again only after a wait or a `follow`): a state
-    /// change shows in `updates`.
+    /// Times it rendered since it mounted, the first included. A body runs
+    /// once (again only after a wait or a `follow`): a state change shows
+    /// in `updates`.
     pub renders: u32,
-    /// On air: times one of its own holes wrote its part of the page again
-    /// (what a change cost it; a child component's count is the child's).
-    /// Always 0 on Dioxus, whose re-renders are `renders`.
+    /// Times one of its own holes wrote its part of the page again (what a
+    /// change cost it; a child component's count is the child's).
     pub updates: u32,
     pub children: Vec<MountedComponent>,
 }
@@ -884,7 +883,7 @@ impl TestUi {
 
     /// aio's run-time accessibility rules (`dev-a11y.ts`) over what shows,
     /// one line each, as `<tag data-t="t">: why`: an image with no `alt`, a
-    /// click with no keyboard path (on air, which knows the handlers), a
+    /// click with no keyboard path, a
     /// field with no label, a `<button>` with no `type`, an `<a>` with a
     /// click and no `href`, a positive `tabindex`, `aria-hidden` on what
     /// takes focus, `aria-disabled` with a click that still runs. Every
@@ -895,13 +894,12 @@ impl TestUi {
 
     /// The surface as a tree of components (aio's `surface()`): each
     /// component with its key, its path, the elements it drew and its text.
-    /// On Dioxus, the app's alone (its page names no component).
     pub fn surface_tree(&self) -> Surface {
         serde_json::from_value(self.must("tree", json!({}))).expect("the page's surface tree")
     }
 
     /// The path of component `name` (with `key`, the one of that key in its
-    /// list) on air (aio's `find(component, key)`): `comp=Row[42]`, for
+    /// list) (aio's `find(component, key)`): `comp=Row[42]`, for
     /// [`within`](Self::within) or as a path's start
     /// (`comp=Row[42]/DeleteButton`). Fails when none or several show,
     /// listing the components there.
@@ -956,7 +954,7 @@ impl TestUi {
         judged.collect()
     }
 
-    /// The page's HTML, without Dioxus's ids: what the app mounted, then
+    /// The page's HTML, without air's anchor comments: what the app mounted, then
     /// what it put on `<body>` itself (a tooltip, a portal).
     pub fn html(&self) -> String {
         self.must("html", json!({})).as_str().unwrap_or_default().into()
