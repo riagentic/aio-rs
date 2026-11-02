@@ -170,7 +170,7 @@ mod renders {
                     continue;
                 }
                 let name = n.name.rsplit("::").next().unwrap_or(n.name);
-                out.push(MountedComponent { name, renders: n.renders, children });
+                out.push(MountedComponent { name, key: None, renders: n.renders, updates: 0, children });
             }
             out
         }
@@ -366,7 +366,7 @@ impl Mount {
             let view = root.owner();
             (local.spawn_local(pump(root, from_page, to_page)), view)
         };
-        Self::started(TestUi { task, local, view, to_view, from_view, video: super::video::Recorder::asked(), page, rt, hovering: false, sent: 0, _sandbox: sandbox })
+        Self::started(TestUi { task, local, view, to_view, from_view, video: super::video::Recorder::asked(), page, rt, hovering: false, sent: 0, scope: vec![], frozen: false, _sandbox: sandbox })
     }
 
     /// The test's page, sized and themed as asked.
@@ -393,6 +393,15 @@ impl Mount {
         // Every mount is audited, as aio did: said, not failed (assert on `contrast()` for that).
         for f in ui.contrast() {
             eprintln!("aio: text a person can't read: {f}");
+        }
+        // Once per distinct finding in the test binary, as aio's dev mode warns once.
+        static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
+        let mut said = SAID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for f in ui.a11y() {
+            if !said.contains(&f) {
+                eprintln!("aio: accessibility: {f}");
+                said.push(f);
+            }
         }
         ui
     }
@@ -432,6 +441,8 @@ impl Mount {
             rt,
             hovering: false,
             sent: 0,
+            scope: vec![],
+            frozen: false,
             _sandbox: sandbox,
         };
         Self::started(ui)
@@ -550,11 +561,57 @@ const PASTE: &str = "(s) => {
 /// One mounted component ([`TestUi::components`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountedComponent {
-    /// Its name without its module (the mounted app is `root`).
+    /// Its name without its module.
     pub name: &'static str,
-    /// Times it rendered since it mounted, the first included.
+    /// Its `key:` in a list, as text (air; none on Dioxus).
+    pub key: Option<String>,
+    /// Times it rendered since it mounted, the first included. On air a
+    /// body runs once (again only after a wait or a `follow`): a state
+    /// change shows in `updates`.
     pub renders: u32,
+    /// On air: times one of its own holes wrote its part of the page again
+    /// (what a change cost it; a child component's count is the child's).
+    /// Always 0 on Dioxus, whose re-renders are `renders`.
+    pub updates: u32,
     pub children: Vec<MountedComponent>,
+}
+
+/// The surface as a tree of components ([`TestUi::surface_tree`], aio's
+/// `UISurfaceNode`): what each component drew, for a person or an agent
+/// to read the screen by.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct Surface {
+    /// Its component's name; the app's own is `app`.
+    pub component: String,
+    /// Its `key:` in a list.
+    pub key: Option<String>,
+    /// From the app down: `app/List/Row[42]`.
+    pub path: String,
+    /// The elements a person can use or name that it drew itself (not a
+    /// child component's), in document order.
+    pub elements: Vec<SurfaceElement>,
+    pub children: Vec<Surface>,
+    /// Its visible text (spaces folded, cut at 200 characters).
+    pub text: String,
+}
+
+/// An element of the [`Surface`].
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct SurfaceElement {
+    /// What a test calls it: its `data-t` handle, else its auto name.
+    pub name: String,
+    pub tag: String,
+    pub role: String,
+    /// Its accessible name.
+    pub label: String,
+    pub handle: Option<String>,
+    /// Its visible text (cut at 80 characters).
+    pub text: String,
+    /// A field's value.
+    pub value: Option<String>,
+    /// A checkbox's, a radio's or a switch's state.
+    pub checked: Option<bool>,
+    pub disabled: bool,
 }
 
 /// The app in a headless window, driven as a person drives it. Each `t`
@@ -583,6 +640,10 @@ pub struct TestUi {
     hovering: bool,
     /// Bytes the views sent the page (their DOM edits and queries).
     sent: usize,
+    /// The paths [`within`](TestUi::within) runs inside, outermost first.
+    scope: Vec<String>,
+    /// The views' clock moves only by [`advance`](TestUi::advance) (and `wait`).
+    frozen: bool,
     _sandbox: crate::paths::Sandbox,
 }
 
@@ -784,15 +845,67 @@ impl TestUi {
         renders::tree(std::rc::Rc::as_ptr(&self.view) as *const () as usize)
     }
 
-    /// On air a body runs once and no component re-renders: no tree is
-    /// kept yet (plan step 2, with DevTools' `tree`).
+    /// The mounted components, as a tree (aio DevTools' `tree`): each one's
+    /// name, its key in a list, its body runs (`renders`) and its holes'
+    /// updates; each level in the order they were placed.
     #[cfg(not(feature = "kit"))]
     pub fn components(&self) -> Vec<MountedComponent> {
-        vec![]
+        fn of(c: Vec<air::Mounted>) -> Vec<MountedComponent> {
+            c.into_iter()
+                .map(|c| MountedComponent {
+                    name: c.name,
+                    key: c.key,
+                    renders: c.renders,
+                    updates: c.updates,
+                    children: of(c.children),
+                })
+                .collect()
+        }
+        let _in = self.rt.enter();
+        of(air::with_owner(self.view, air::components))
     }
 
-    /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its refusal.
-    fn js(&self, op: &str, arg: Value) -> Result<Value, String> {
+    /// The mounted components for the page's reader (`comp=` paths): each
+    /// one's name, key, first and last node, and its parent's place.
+    #[cfg(not(feature = "kit"))]
+    fn tree(&self) -> Value {
+        fn flat(c: Vec<air::Mounted>, parent: Option<usize>, out: &mut Vec<Value>) {
+            for c in c {
+                let at = out.len();
+                let (first, last) = c.nodes.unzip();
+                out.push(json!({ "name": c.name, "key": c.key, "first": first, "last": last, "parent": parent }));
+                flat(c.children, Some(at), out);
+            }
+        }
+        let mut out = vec![];
+        let _in = self.rt.enter();
+        flat(air::with_owner(self.view, air::components), None, &mut out);
+        out.into()
+    }
+
+    /// On Dioxus the page names no component.
+    #[cfg(feature = "kit")]
+    fn tree(&self) -> Value {
+        json!([])
+    }
+
+    /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its
+    /// refusal. A path is taken inside the [`within`](Self::within) scope.
+    fn js(&self, op: &str, mut arg: Value) -> Result<Value, String> {
+        if !self.scope.is_empty()
+            && let Some(o) = arg.as_object_mut()
+            && o.contains_key("path")
+        {
+            let inside = self.scope.join("/");
+            match o["path"].as_str() {
+                Some("window") => {}
+                Some(p) => o["path"] = format!("{inside}/{p}").into(),
+                None => o["path"] = inside.into(),
+            }
+        }
+        if op == "tree" || arg.to_string().contains("comp=") {
+            arg["tree"] = self.tree();
+        }
         let r = self.page.eval(&format!("__aioTest({}, {arg})", json!(op)));
         match r["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -829,13 +942,38 @@ impl TestUi {
     }
 
     /// Let `d` of real time pass for the app's timers (intervals, springs,
-    /// a toast's), then settle.
+    /// a toast's), then settle; after an [`advance`](Self::advance), `d` of
+    /// the views' virtual time.
     pub fn wait(&mut self, d: Duration) {
+        if self.frozen {
+            return self.advance(d);
+        }
         let end = Instant::now() + d;
         // In slices: the render-loop tripwire counts within one.
         while let Some(left) = end.checked_duration_since(Instant::now()).filter(|l| !l.is_zero()) {
             self.pause(left.min(Duration::from_millis(10)));
         }
+        self.settle();
+    }
+
+    /// Move the views' clock `d` on (aio's `advance`): every timer of
+    /// theirs due by then fires, in its order (a debounce, an interval, a
+    /// toast's dismiss, `use_live`'s wait), then settle; a 10 s timeout is
+    /// tested at once. From the first call on the views' clock is virtual:
+    /// it stands still but for `advance`, and `wait(d)` is `advance(d)`. The
+    /// page's own timers (a CSS transition, a page script's `setTimeout`)
+    /// and the cells' schedules keep real time (schedules: `TestCells::advance`).
+    pub fn advance(&mut self, d: Duration) {
+        let step = {
+            let _in = self.rt.enter();
+            if !std::mem::replace(&mut self.frozen, true) {
+                tokio::time::pause();
+            }
+            // A paused clock jumps to the next timer whenever the views
+            // idle: each fires at its moment, and what it starts counts from there.
+            tokio::time::sleep(d)
+        };
+        self.drive(step);
         self.settle();
     }
 
@@ -1020,6 +1158,56 @@ impl TestUi {
     /// the digest a failure prints).
     pub fn surface(&self) -> String {
         self.must("surface", json!({ "path": null, "rects": false })).as_str().unwrap_or_default().into()
+    }
+
+    /// aio's run-time accessibility rules (`dev-a11y.ts`) over what shows,
+    /// one line each, as `<tag data-t="t">: why`: an image with no `alt`, a
+    /// click with no keyboard path (on air, which knows the handlers), a
+    /// field with no label, a `<button>` with no `type`, an `<a>` with a
+    /// click and no `href`, a positive `tabindex`, `aria-hidden` on what
+    /// takes focus, `aria-disabled` with a click that still runs. Every
+    /// mount says each new one once (as aio's dev mode); assert on it to fail.
+    pub fn a11y(&self) -> Vec<String> {
+        strings(&self.must("a11y", json!({})))
+    }
+
+    /// The surface as a tree of components (aio's `surface()`): each
+    /// component with its key, its path, the elements it drew and its text.
+    /// On Dioxus, the app's alone (its page names no component).
+    pub fn surface_tree(&self) -> Surface {
+        serde_json::from_value(self.must("tree", json!({}))).expect("the page's surface tree")
+    }
+
+    /// The path of component `name` (with `key`, the one of that key in its
+    /// list) on air (aio's `find(component, key)`): `comp=Row[42]`, for
+    /// [`within`](Self::within) or as a path's start
+    /// (`comp=Row[42]/DeleteButton`). Fails when none or several show,
+    /// listing the components there.
+    #[track_caller]
+    pub fn find(&self, name: &str, key: Option<&str>) -> String {
+        let t = match key {
+            Some(k) => format!("comp={name}[{k}]"),
+            None => format!("comp={name}"),
+        };
+        self.el(&t);
+        t
+    }
+
+    /// Run `f` with every path taken inside element or component `t`
+    /// (`ui.within(&ui.find("Row", Some("42")), |ui| ui.click("DeleteButton"))`):
+    /// the same names in another row reach that row's. CSS counts
+    /// (`count`) stay page-wide.
+    pub fn within<R>(&mut self, t: &str, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.el(t);
+        self.scope.push(t.to_string());
+        struct Out<'a>(&'a mut TestUi);
+        impl Drop for Out<'_> {
+            fn drop(&mut self) {
+                self.0.scope.pop();
+            }
+        }
+        let out = Out(self);
+        f(&mut *out.0)
     }
 
     /// Text a person can't read on its background (aio's contrast audit,

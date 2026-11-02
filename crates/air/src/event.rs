@@ -265,6 +265,11 @@ impl<T> Event<T> {
         self.flow.prevented.get()
     }
 
+    /// Not [`prevent_default`](Self::prevent_default)ed (Dioxus's name).
+    pub fn default_action_enabled(&self) -> bool {
+        !self.default_prevented()
+    }
+
     /// The same event, its data mapped.
     pub fn map<U>(&self, f: impl FnOnce(&T) -> U) -> Event<U> {
         Event { data: Rc::new(f(&self.data)), flow: self.flow.clone() }

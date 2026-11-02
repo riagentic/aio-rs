@@ -89,8 +89,9 @@ pub(crate) mod clock {
         tokio::time::sleep(d).await;
     }
 
+    /// Tokio's: a UI test's `advance` moves it.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) use std::time::Instant;
+    pub(crate) use tokio::time::Instant;
 
     /// A moment, on the page's clock: a browser has no `std` one.
     #[cfg(target_arch = "wasm32")]

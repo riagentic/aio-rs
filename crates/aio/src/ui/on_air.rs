@@ -9,9 +9,20 @@ pub use air::{
     Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment, FragmentProps,
     Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props, ReadGuard, Resource, Signal,
     Suspense, SuspenseProps, Task, View, ViewError, WriteGuard, callback, component, context, effect, geometry,
-    in_views, is_empty, key_event, memo, on_cleanup, once, parent_context, provide, provide_root, resource, rsx,
-    signal, spawn, spawn_forever, task, try_context, watch,
+    in_views, is_empty, key_event, memo, on_cleanup, once, parent_context, provide, provide_now, provide_root,
+    resource, rsx, signal, spawn, spawn_forever, task, try_context, watch,
 };
+
+/// In a view's body: `f()`'s value, the body running again when it changes
+/// (its hooks kept, its view made anew): for a view whose shape follows
+/// state its body must read (the router's `Route`). On air a memo, so the
+/// body runs again only for a new value; on Dioxus every render reads it.
+/// Read state in a hole where it can be: a hole re-runs alone.
+#[doc(hidden)]
+pub fn follow<T: Clone + PartialEq + 'static>(f: impl Fn() -> T + 'static) -> T {
+    let m = air::memo(f);
+    air::follow(|| m.get())
+}
 
 /// The event kinds and their payloads.
 pub mod events {

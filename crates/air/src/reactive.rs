@@ -429,8 +429,27 @@ pub(crate) fn reads<R>(f: impl FnOnce() -> R) -> (R, bool) {
 }
 
 /// A hole: `f` now and whenever what it read changes; it may not write.
-pub(crate) fn render(f: impl FnMut() + 'static) {
-    effect_of(Kind::Render, f);
+/// What it builds belongs to the component current now; each re-run is
+/// one of that component's updates.
+pub(crate) fn render(mut f: impl FnMut() + 'static) {
+    let c = crate::tree::current();
+    let mut first = true;
+    effect_of(Kind::Render, move || {
+        let _in = crate::tree::enter(c);
+        if !std::mem::take(&mut first) {
+            crate::tree::updated(c);
+        }
+        f()
+    });
+}
+
+/// A component's hole: [`render`] without the counting (its own body
+/// runs count as its renders), kept while it lives even if it read and
+/// made nothing (a static component is still in the tree).
+pub(crate) fn render_comp(f: impl FnMut() + 'static) {
+    let e = rt(|rt| rt.alloc(Node { kind: Kind::Render, run: Some(Rc::new(RefCell::new(f))), ..Node::default() }));
+    rt(|rt| _ = rt.node_mut(e).map(|n| n.extra.get_or_insert_default()));
+    batch(|| run_effect(e));
 }
 
 /// `f` once the view being built is drawn (its edits out, before the
@@ -696,6 +715,35 @@ pub(crate) fn hook<T: Clone + 'static>(name: &str, f: impl FnOnce() -> T) -> T {
 #[doc(hidden)]
 pub fn in_body() -> bool {
     RT.with_borrow(|rt| rt.frames.last().is_some_and(Option::is_some))
+}
+
+/// In a view's body: `f()`, with what it reads followed: when that
+/// changes, the body runs again (AIR's re-render, opt in): its hooks hand
+/// back what they made, its props are built again, and its view is made
+/// anew. For a view whose shape follows state its body must read (the
+/// router's `Route`); read state in a hole where it can be (a hole re-runs
+/// alone). `f` reads; a memo keeps the re-runs to real changes.
+#[track_caller]
+pub fn follow<R>(f: impl FnOnce() -> R) -> R {
+    let hole = frame("follow").hole;
+    let was = rt(|rt| rt.observer.replace(hole));
+    struct Back(Option<Key>);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            rt(|rt| rt.observer = self.0);
+        }
+    }
+    let _b = Back(was);
+    f()
+}
+
+/// In a view's body: give the views below `v` from this run on (replacing
+/// what an earlier run gave): context that follows a body run again by
+/// [`follow`]. Not a hook: call it on every run.
+#[track_caller]
+pub fn provide_now<T: Clone + 'static>(v: T) -> T {
+    provide_on(view_owner("provide_now"), v.clone());
+    v
 }
 
 /// The owner of the view whose body runs now (its hole), for `provide`.

@@ -838,6 +838,19 @@ Healthy, or why not: exit 1 when it is degraded, stuck or not running.
 Read from the `health.json` the app writes, so it answers without reaching
 the app.
 
+### `ax vitals`
+
+```text
+ax vitals <app>
+```
+
+Each layer's grade now (aio's vitals): the loop (how late the runtime's
+tick is, the effects waiting, the newest call), the worst link's round
+trip, the window's paint, and the likely cause across them, with its fix.
+Read from the running app's `health.json` (written every 10 s), so it answers
+without reaching the app; a served app answers the same as `GET
+/__aio/vitals`. `--json`: the document.
+
 ### `ax metrics`
 
 ```text

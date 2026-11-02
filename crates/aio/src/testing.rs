@@ -22,7 +22,7 @@ pub use sim::Sim;
 #[cfg(any(feature = "kit", feature = "air"))]
 pub use electron::{Answered, Asked};
 #[cfg(any(feature = "kit", feature = "air"))]
-pub use ui::{Info, Key, Modifiers, Mount, MountedComponent, TestUi};
+pub use ui::{Info, Key, Modifiers, Mount, MountedComponent, Surface, SurfaceElement, TestUi};
 
 use crate::{By, Cell, CellData, Cells, Door, Error, Handle, Store};
 use serde::Serialize;

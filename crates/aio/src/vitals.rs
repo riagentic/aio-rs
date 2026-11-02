@@ -202,6 +202,163 @@ impl Track {
     }
 }
 
+/// Every layer as last measured, for the hints and `/__aio/vitals`: the
+/// loop (each second), the worst link's transport (each pong) and its
+/// address on loopback, the window's paint (each step its probe says).
+struct Now {
+    snap: Snapshot,
+    loopback: bool,
+    /// The link the transport layer is, by its listed id.
+    link: Option<u64>,
+    /// When the paint froze, the last 30 s.
+    freezes: std::collections::VecDeque<i64>,
+}
+
+static NOW: Mutex<Option<Now>> = Mutex::new(None);
+
+fn now<R>(f: impl FnOnce(&mut Now) -> R) -> R {
+    let mut g = NOW.lock().unwrap_or_else(|e| e.into_inner());
+    let n = g.get_or_insert_with(|| Now { snap: Snapshot::default(), loopback: false, link: None, freezes: Default::default() });
+    f(n)
+}
+
+/// Every layer now, and whether the transport's link is on loopback.
+pub fn snapshot() -> (Snapshot, bool) {
+    now(|n| (n.snap.clone(), n.loopback))
+}
+
+/// The loop as the watch measured it.
+pub(crate) fn looped(lp: &Loop) {
+    now(|n| n.snap.event_loop = lp.clone());
+}
+
+/// Link `id` (on `loopback` or not) graded `layer` at its last pong: the
+/// transport layer is the worst link's.
+pub(crate) fn linked(id: u64, loopback: bool, layer: Layer) {
+    now(|n| {
+        if n.link == Some(id) || n.link.is_none() || layer.status >= n.snap.transport.status {
+            (n.snap.transport, n.loopback, n.link) = (layer, loopback, Some(id));
+        }
+    });
+}
+
+/// Link `id` is gone: the transport layer is healthy again if it was that link's.
+pub(crate) fn unlinked(id: u64) {
+    now(|n| {
+        if n.link == Some(id) {
+            (n.snap.transport, n.link) = (Snapshot::default().transport, None);
+        }
+    });
+}
+
+/// The window's render probe stepped to `status` at `ms` (its `[vitals]
+/// render` line, heard in the log): the paint layer, with the call made
+/// last and the freezes of the last 30 s.
+pub fn rendered(status: Status, ms: u64, at: i64) -> Snapshot {
+    let last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let last_call = (!last.0.is_empty()).then(|| format!("{}.{}", last.0, last.1));
+    drop(last);
+    now(|n| {
+        n.freezes.retain(|t| at - t < 30_000);
+        if status == Status::Frozen {
+            n.freezes.push_back(at);
+        }
+        let freezes = n.freezes.len() as u32;
+        n.snap.render = Render { status, measured: ms, last_call, visible: true, freezes };
+        n.snap.clone()
+    })
+}
+
+/// The render probe's step in a log line (pure): `[page] [vitals] render
+/// frozen: an update took 3200 ms…` is `(Frozen, 3200)`.
+pub fn render_step(line: &str) -> Option<(Status, u64)> {
+    let rest = line.split_once("[page] [vitals] render ")?.1;
+    let (word, rest) = rest.split_once(':')?;
+    let status = match word {
+        "warning" => Status::Warning,
+        "frozen" => Status::Frozen,
+        "recovered" => Status::Recovered,
+        _ => return None,
+    };
+    let ms = rest.split(" ms").next()?.rsplit(' ').next()?.parse().ok()?;
+    Some((status, ms))
+}
+
+/// A layer stepped (`line` says how): said in the log with the likely
+/// cause from every layer at once (`hints`), and on the bus as
+/// `vitals:<layer>` (a warning; the way back is info).
+pub(crate) fn stepped(layer: &str, step: Status, line: &str) {
+    let t = get();
+    let (snap, loopback) = snapshot();
+    let likely = hint(&snap, &t, loopback).filter(|_| t.hints && step != Status::Recovered).map(|h| h.cause);
+    let line = match likely {
+        Some(h) if !line.contains("· likely:") => format!("{line} · likely: {h}"),
+        _ => line.to_string(),
+    };
+    let severity = match step {
+        Status::Recovered => crate::log::Level::Info,
+        _ => crate::log::Level::Warn,
+    };
+    match severity {
+        crate::log::Level::Info => crate::info!(cat: "vitals", "{line}"),
+        _ => crate::warn!(cat: "vitals", "{line}"),
+    }
+    crate::report::say(&format!("vitals:{layer}"), &line, severity);
+}
+
+/// The render probe's step, heard: the paint layer, on the bus as
+/// `vitals:render`; the page said its line, so the log gets one only when
+/// the other layers name a likely cause.
+pub(crate) fn render_heard(status: Status, ms: u64) {
+    let snap = rendered(status, ms, crate::store::now_ms());
+    let t = get();
+    let word = format!("{status:?}").to_lowercase();
+    let mut line = format!("render {word}: {ms} ms to paint");
+    let loopback = snapshot().1;
+    if let Some(h) = hint(&snap, &t, loopback).filter(|_| t.hints && status != Status::Recovered) {
+        line += &format!(" · likely: {}", h.cause);
+        crate::warn!(cat: "vitals", "{line}");
+    }
+    let severity = if status == Status::Recovered { crate::log::Level::Info } else { crate::log::Level::Warn };
+    crate::report::say("vitals:render", &line, severity);
+}
+
+/// `GET /__aio/vitals` and `ax vitals` (aio's vitals endpoint; pure): each
+/// layer's grade and measure, the likely cause now, and the thresholds.
+pub fn doc(snap: &Snapshot, loopback: bool, t: &Vitals) -> serde_json::Value {
+    use serde_json::json;
+    let word = |s: Status| format!("{s:?}").to_lowercase();
+    let layer = |l: &Layer| json!({ "status": word(l.status), "measured": l.measured, "since": l.since });
+    let tier = |t: &Tier| json!({ "degraded": t.degraded, "warning": t.warning, "frozen": t.frozen });
+    let r = &snap.render;
+    let h = hint(snap, t, loopback);
+    let mut transport = layer(&snap.transport);
+    transport["loopback"] = loopback.into();
+    json!({
+        "loop": {
+            "status": word(snap.event_loop.layer.status),
+            "lateMs": snap.event_loop.layer.measured,
+            "since": snap.event_loop.layer.since,
+            "queue": snap.event_loop.queue,
+            "lastCall": snap.event_loop.last.as_ref().map(|(c, ms)| json!({ "call": c, "ms": ms })),
+        },
+        "transport": transport,
+        "render": { "status": word(r.status), "measured": r.measured, "lastCall": r.last_call, "freezes": r.freezes },
+        "hint": h.map(|h| json!({
+            "cause": h.cause,
+            "evidence": h.evidence,
+            "fix": h.fix,
+            "severity": format!("{:?}", h.severity).to_lowercase(),
+        })),
+        "thresholds": {
+            "render": tier(&t.render),
+            "transport": tier(&t.transport),
+            "loop": tier(&t.event_loop),
+            "queue": tier(&t.queue),
+        },
+    })
+}
+
 static SET: RwLock<Option<Vitals>> = RwLock::new(None);
 static QUEUED: AtomicU64 = AtomicU64::new(0);
 /// The newest call: its cell, method and own time (ms), kept in place.
@@ -261,9 +418,10 @@ pub fn says(step: Status, lp: &Loop, t: &Vitals) -> String {
         s => format!("{s:?}").to_lowercase(),
     };
     let mut line = format!("loop {what}: {} ms late, {} effects waiting", lp.layer.measured, lp.queue);
-    let snap = Snapshot { event_loop: lp.clone(), ..Snapshot::default() };
+    let (snap, loopback) = snapshot();
+    let snap = Snapshot { event_loop: lp.clone(), ..snap };
     let slow = lp.last.as_ref().filter(|(_, ms)| *ms > t.event_loop.degraded);
-    let h = hint(&snap, t, false).map(|h| h.cause).or_else(|| slow.map(|(c, ms)| format!("the call {c} took {ms} ms")));
+    let h = hint(&snap, t, loopback).map(|h| h.cause).or_else(|| slow.map(|(c, ms)| format!("the call {c} took {ms} ms")));
     if let Some(h) = h.filter(|_| t.hints) {
         line += &format!(" · likely: {h}");
     }
@@ -382,6 +540,74 @@ mod tests {
         let hidden = Render { visible: false, ..frozen_render(None) };
         assert_eq!(hint(&Snapshot { render: hidden, ..Snapshot::default() }, &t(), false), None);
         assert_eq!(hint(&Snapshot::default(), &t(), false), None, "all healthy");
+    }
+
+    #[test]
+    fn the_render_probes_lines_are_read_back() {
+        let l = "WARN  [page] [vitals] render frozen: an update took 3200 ms to paint · likely: a large DOM update";
+        assert_eq!(render_step(l), Some((Status::Frozen, 3200)));
+        assert_eq!(
+            render_step("INFO  [page] [vitals] render recovered: an update painted in 12 ms"),
+            Some((Status::Recovered, 12))
+        );
+        assert_eq!(render_step("WARN  [page] [vitals] render warning: an update took 600 ms to paint"), Some((Status::Warning, 600)));
+        for no in ["WARN  [app] [vitals] render frozen: an update took 1 ms", "[page] [vitals] render slow: 3 ms", "x"] {
+            assert_eq!(render_step(no), None, "{no}");
+        }
+    }
+
+    #[test]
+    fn the_vitals_doc_says_each_layer_the_likely_cause_and_the_thresholds() {
+        let s = Snapshot {
+            transport: Layer { status: Status::Frozen, measured: 5000, since: Some(100) },
+            ..Snapshot::default()
+        };
+        let d = doc(&s, true, &t());
+        assert_eq!((d["loop"]["status"].as_str(), d["transport"]["measured"].as_u64()), (Some("healthy"), Some(5000)));
+        assert_eq!(d["transport"]["loopback"], true);
+        assert!(d["hint"]["cause"].as_str().unwrap().contains("its main thread was busy"), "{d}");
+        assert_eq!(d["thresholds"]["queue"]["frozen"], t().queue.frozen);
+        assert_eq!(doc(&Snapshot::default(), false, &t())["hint"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn every_layer_feeds_one_snapshot_so_the_hints_see_them_all() {
+        // The newest call was slow, then the paint froze: the call is named.
+        ran("orders", "recalc", std::time::Duration::from_millis(3100));
+        let lp = probe(0, None, &t());
+        looped(&lp);
+        let s = rendered(Status::Frozen, 3200, 1_000);
+        assert_eq!(s.render.last_call.as_deref(), Some("orders.recalc"));
+        assert!(hint(&s, &t(), false).unwrap().cause.contains("The call orders.recalc took 3100 ms"));
+        // A paint that freezes and recovers again and again is a spiral.
+        rendered(Status::Recovered, 10, 2_000);
+        rendered(Status::Frozen, 3000, 3_000);
+        let s = rendered(Status::Recovered, 10, 4_000);
+        assert_eq!(s.render.freezes, 2, "the freezes of the last 30 s");
+        assert!(hint(&s, &t(), false).unwrap().cause.starts_with("Repeated freeze-recover cycle (2 times)"));
+        assert_eq!(rendered(Status::Recovered, 10, 60_000).render.freezes, 0, "older ones drop out");
+        // The worst link is the transport; when it goes, the layer is healthy again.
+        linked(7, true, Layer { status: Status::Frozen, measured: 4000, since: Some(1) });
+        linked(8, false, Layer { status: Status::Healthy, measured: 10, since: None });
+        assert_eq!(snapshot(), (Snapshot { transport: Layer { status: Status::Frozen, measured: 4000, since: Some(1) }, ..snapshot().0 }, true));
+        unlinked(7);
+        assert_eq!(snapshot().0.transport.status, Status::Healthy);
+    }
+
+    #[test]
+    fn a_step_is_said_on_the_bus_as_vitals_layer() {
+        let heard = std::sync::Arc::new(Mutex::new(vec![]));
+        let h = heard.clone();
+        let _sub = crate::report::subscribe(move |d| {
+            if d.kind == "vitals:test-layer" {
+                h.lock().unwrap().push((d.severity, d.message.clone(), d.code()));
+            }
+        });
+        stepped("test-layer", Status::Frozen, "test-layer frozen: 9 ms");
+        let got = heard.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0, got[0].2), (crate::log::Level::Warn, crate::report::Code::Vitals));
+        assert!(got[0].1.starts_with("test-layer frozen: 9 ms"), "{got:?}");
     }
 
     #[test]

@@ -56,12 +56,12 @@ cargo test -p aio-rs --no-default-features --features net --test sync --test htt
 # air, aio-rs's own renderer (docs/design/air.md): the facade and TestUi on
 # it with no Dioxus in the build, and its gates (no leaks, misuse failing,
 # planted faults failing a test) in a release build too.
-cargo clippy -p aio-rs --lib --test air_ui --test facade --test ui --test kit --test signin --no-default-features --features air,net --locked -- -D warnings
+cargo clippy -p aio-rs --lib --test air_ui --test facade --test ui --test kit --test signin --test route --test route_tree --no-default-features --features air,net --locked -- -D warnings
 if cargo tree --locked -p aio-rs --no-default-features --features air -e normal --prefix none | grep -q '^dioxus'; then
   echo "ci: aio-rs with \`air\` alone pulls dioxus" >&2
   exit 1
 fi
-cargo test -p aio-rs --no-default-features --features air,net --test air_ui --test facade --test ui --test kit --test signin --locked
+cargo test -p aio-rs --no-default-features --features air,net --test air_ui --test facade --test ui --test kit --test signin --test route --test route_tree --locked
 cargo test -p aio-rs-air --release --all-features --locked
 # air's code-size rule: LLVM IR lines per view of the bench's 50 views.
 air_ir=$(mktemp -d)
@@ -97,8 +97,10 @@ if [ -n "$ndk" ]; then
 fi
 # The DX trend: a template app built, edited live under `ax dev` and
 # smoke-run, its row added to scripts/dx-trend.csv (commit it); a number past
-# its limit fails, naming both (scripts/dx-metrics --trend).
-scripts/dx-metrics --check
+# its limit fails, naming both (scripts/dx-metrics --trend). Only this
+# machine's rows count; where it has none (GitHub CI), AIO_DX_BASE names the
+# commit whose sizes are measured here too, AIO_DX_ROWS a folder keeping rows.
+scripts/dx-metrics --check ${AIO_DX_BASE:+--base "$AIO_DX_BASE"} ${AIO_DX_ROWS:+--rows "$AIO_DX_ROWS"}
 if [ -n "$web_skip" ]; then
   echo "$web_skip" >&2
 fi

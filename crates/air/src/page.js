@@ -227,5 +227,7 @@
     if (window.__aioPainted) window.__aioPainted(t0)
   }
   window.__airApply = apply
+  // A named node, for the page's readers (a component's first and last node).
+  window.__airNode = (id) => nodes.get(id)
   window.__aioWire.listen(apply)
 })()
