@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""The Android release gate: a sample app's APK started on a throwaway
+emulator, then upgraded in place with its data kept. A release needs it
+green (CONTRIBUTING.md, "Make a release").
+
+  scripts/android-gate          run it; exits 1 on a miss
+  scripts/android-gate --keep   leave the work folder (the AVD stops either way)
+
+1. An AVD made for this run only (ANDROID_AVD_HOME in the work folder, the
+   newest x86_64 system image in the SDK, or AIO_GATE_IMAGE), booted with no
+   window on console port 5600: always `emulator-5600`, never another
+   emulator or a phone.
+2. `ax create gate` (the window template), which counts its starts in a
+   saved cell and logs `[gate] start <n>`.
+3. Release 1: `ax test gate --android` builds its APK for the emulator's
+   CPU, installs and starts it, and passes when its window is ready and it
+   still runs 3 s later. Its log says start 1.
+4. Release 2 (one commit on): the same, installed over 1 (`adb install -r`,
+   an upgrade). Its log says start 2: the data of 1 was kept.
+5. The emulator is stopped, the AVD and the work folder removed, and the
+   emulator's `modem-nv-ram-5600` file beside the user's AVDs too.
+
+Needs the Android SDK (emulator, platform-tools, cmdline-tools, an x86_64
+system image), KVM, the NDK and JDK `ax build --android` uses.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+PORT = "5600"
+SERIAL = f"emulator-{PORT}"
+APP = "gate"
+
+LIB = '''
+/// The Android gate's proof (scripts/android-gate): the app's starts,
+/// kept in its data, so an upgrade that lost the data starts at 1 again.
+#[aio::cell(persist, id = "starts")]
+pub struct Starts {
+    pub n: u64,
+}
+
+#[aio::methods]
+impl Starts {
+    pub fn one(&mut self) {
+        self.n += 1;
+    }
+}
+
+/// Count this start and log it: `[gate] start <n>`.
+pub fn count_start(cfg: &aio::config::Config, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
+    use aio::Door;
+    let starts = aio::Source::<Starts>::for_app(cfg, dirs)?;
+    starts.one().map_err(|e| std::io::Error::other(e.why))?;
+    eprintln!("[gate] start {}", starts.read(|s| s.n));
+    // Held for the app's life, as its other cells are.
+    std::mem::forget(starts);
+    Ok(())
+}
+'''
+
+
+def say(what):
+    print(f"android-gate: {what}", flush=True)
+
+
+def fail(what):
+    raise SystemExit(f"android-gate: FAILED: {what}")
+
+
+def sdk():
+    for k in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        if os.environ.get(k) and Path(os.environ[k], "platform-tools").is_dir():
+            return Path(os.environ[k])
+    for p in (Path.home() / "Android" / "Sdk", Path.home() / "Library" / "Android" / "sdk"):
+        if (p / "platform-tools").is_dir():
+            return p
+    fail("no Android SDK: set ANDROID_HOME")
+
+
+def image(root):
+    if os.environ.get("AIO_GATE_IMAGE"):
+        return os.environ["AIO_GATE_IMAGE"]
+    found = sorted(
+        (int(m[1]), f"system-images;{p.parent.parent.name};{p.parent.name};x86_64")
+        for p in (root / "system-images").glob("android-*/*/x86_64")
+        if (m := re.match(r"android-(\d+)$", p.parent.parent.name))
+    )
+    if not found:
+        fail(f"no x86_64 system image in {root / 'system-images'}: sdkmanager 'system-images;android-35;google_apis;x86_64'")
+    return found[-1][1]
+
+
+class Gate:
+    def __init__(self, work):
+        self.work, self.root = work, sdk()
+        self.adb = self.root / "platform-tools" / "adb"
+        self.avd_home = work / "avd"
+        self.avd_home.mkdir()
+        self.emulator = None
+        real = Path.home()
+        # The emulator's own home in the work folder (its console token, its
+        # modem file), holding links to the adb key of the adb server already
+        # running (ANDROID_USER_HOME, else ~/.android): the emulator puts it in
+        # the new AVD on its first boot, so adb is let in. Linked, never copied.
+        emu_home = work / ".android"
+        emu_home.mkdir()
+        keys = Path(os.environ.get("ANDROID_USER_HOME", real / ".android"))
+        for f in ("adbkey", "adbkey.pub"):
+            if (keys / f).exists():
+                (emu_home / f).symlink_to(keys / f)
+        self.emu_env = dict(os.environ, ANDROID_AVD_HOME=str(self.avd_home), ANDROID_HOME=str(self.root),
+                            ANDROID_EMULATOR_HOME=str(emu_home), ANDROID_USER_HOME=str(emu_home), HOME=str(work))
+        home = work / "home"
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("AIORT_", "XDG_"))}
+        env.update(
+            HOME=str(home),
+            XDG_DATA_HOME=str(home / ".local" / "share"),
+            XDG_CONFIG_HOME=str(home / ".config"),
+            XDG_CACHE_HOME=str(home / ".cache"),
+            AIORT_DATA=str(work / "aiort"),
+            TMPDIR=str(work / "tmp"),
+            ANDROID_HOME=str(self.root),
+            ANDROID_SERIAL=SERIAL,
+            ANDROID_USER_HOME=str(work / ".android"),
+            CARGO_HOME=os.environ.get("CARGO_HOME", str(real / ".cargo")),
+            RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(real / ".rustup")),
+            GRADLE_USER_HOME=os.environ.get("GRADLE_USER_HOME", str(real / ".gradle")),
+            CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")),
+            GIT_AUTHOR_NAME="gate",
+            GIT_AUTHOR_EMAIL="gate@example.org",
+            GIT_COMMITTER_NAME="gate",
+            GIT_COMMITTER_EMAIL="gate@example.org",
+        )
+        home.mkdir()
+        Path(env["TMPDIR"]).mkdir()
+        self.env = env
+        self.app = work / APP
+
+    def run(self, *cmd, cwd=None, env=None, check=True):
+        p = subprocess.run(
+            [str(c) for c in cmd], cwd=cwd or self.work, env=env or self.env, capture_output=True, text=True,
+            errors="replace",
+        )
+        if check and p.returncode != 0:
+            fail(f"{' '.join(map(str, cmd))} exited {p.returncode}:\n{p.stdout[-3000:]}{p.stderr[-3000:]}")
+        return p.stdout + p.stderr
+
+    def sh(self, *args, check=True):
+        return self.run(self.adb, "-s", SERIAL, *args, check=check)
+
+    def boot(self):
+        attached = self.run(self.adb, "devices", check=False)
+        if re.search(rf"^{SERIAL}\s", attached, re.M):
+            fail(f"{SERIAL} is attached already: the gate boots its own")
+        img = image(self.root)
+        avdmanager = self.root / "cmdline-tools" / "latest" / "bin" / "avdmanager"
+        p = subprocess.run(
+            [str(avdmanager), "create", "avd", "-n", "aio-gate", "-k", img, "--force"],
+            env=self.emu_env, input="no\n", capture_output=True, text=True,
+        )
+        if p.returncode != 0:
+            fail(f"avdmanager: {p.stdout}{p.stderr}")
+        say(f"booting a throwaway AVD ({img}) as {SERIAL}")
+        log = open(self.work / "emulator.log", "w")
+        self.emulator = subprocess.Popen(
+            [str(self.root / "emulator" / "emulator"), "-avd", "aio-gate", "-port", PORT, "-no-window",
+             "-no-snapshot", "-no-boot-anim", "-no-audio", "-gpu", "swiftshader_indirect"],
+            env=self.emu_env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        )
+        end = time.time() + 300
+        while time.time() < end:
+            if self.emulator.poll() is not None:
+                fail(f"the emulator ended ({self.emulator.returncode}): {(self.work / 'emulator.log').read_text()[-2000:]}")
+            if self.sh("shell", "getprop", "sys.boot_completed", check=False).strip() == "1":
+                say(f"{SERIAL} booted")
+                return
+            time.sleep(3)
+        fail("the emulator did not boot in 300 s")
+
+    def make_app(self):
+        self.run(self.exe, "create", APP, "--aio", ROOT)
+        lib = self.app / "src" / "lib.rs"
+        lib.write_text(lib.read_text() + LIB)
+        android = self.app / "app" / "src" / "lib.rs"
+        text = android.read_text()
+        hook = "        _ = app::SOURCE.set(aio::Source::for_app(cfg, dirs)?);\n"
+        if hook not in text:
+            fail(f"{android}: the template's setup changed; update the gate")
+        android.write_text(text.replace(hook, hook + "        app::count_start(cfg, dirs)?;\n"))
+        self.run("git", "init", "-q", cwd=self.app)
+        self.commit("one")
+
+    def commit(self, what):
+        self.run("git", "add", "-A", cwd=self.app)
+        self.run("git", "commit", "-q", "--allow-empty", "-m", what, cwd=self.app)
+
+    def release(self, n):
+        out = self.run(self.exe, "test", APP, "--android", "--device", SERIAL, cwd=self.app)
+        said = re.search(r"window ready in \d+ ms, still running 3 s later", out)
+        if not said:
+            fail(f"release {n}: {out[-2000:]}")
+        log = self.sh("logcat", "-d", "-s", "aio:V")
+        starts = re.findall(r"\[gate\] start (\d+)", log)
+        if starts[-1:] != [str(n)]:
+            fail(f"release {n}: the app's starts are {starts}, want {n} last:\n{log[-2000:]}")
+        version = re.search(r"versionName=(\S+)", self.sh("shell", "dumpsys", "package", f"aio.rt.{APP}"))
+        say(f"release {n} ({version[1] if version else '?'}): {said[0]}; [gate] start {n}")
+        return version[1] if version else None
+
+    def stop(self):
+        if self.emulator and self.emulator.poll() is None:
+            # The console's token is in the emulator's home.
+            self.run(self.adb, "-s", SERIAL, "emu", "kill", env=self.emu_env, check=False)
+            try:
+                self.emulator.wait(60)
+            except subprocess.TimeoutExpired:
+                self.emulator.kill()
+                self.emulator.wait()
+        # An emulator that took the user's home anyway writes this beside their AVDs.
+        for home in {Path.home() / ".android", Path(os.environ.get("ANDROID_EMULATOR_HOME", Path.home() / ".android"))}:
+            (home / f"modem-nv-ram-{PORT}").unlink(missing_ok=True)
+
+
+def main():
+    keep = "--keep" in sys.argv[1:]
+    (ROOT / "dist").mkdir(exist_ok=True)
+    # Under dist/: the app must share a folder with this checkout.
+    work = Path(tempfile.mkdtemp(prefix="android-gate-", dir=ROOT / "dist"))
+    g = Gate(work)
+    try:
+        say("building ax from this checkout")
+        g.run("cargo", "build", "--locked", "-q", "-p", "aio-rs-cli", cwd=ROOT)
+        g.exe = Path(g.env["CARGO_TARGET_DIR"]) / "debug" / ("ax.exe" if os.name == "nt" else "ax")
+        g.boot()
+        g.make_app()
+        v1 = g.release(1)
+        g.commit("two")
+        v2 = g.release(2)
+        if v1 and v2 and v1 == v2:
+            fail(f"release 2 is the same version as 1 ({v1}): no upgrade was made")
+        say(f"PASS: {v1} started, upgraded to {v2} in place, its data kept")
+    finally:
+        g.stop()
+        if keep:
+            say(f"kept {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

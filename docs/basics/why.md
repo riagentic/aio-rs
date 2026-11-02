@@ -55,7 +55,7 @@ app builds, so a typo in it is one too.
   takes 15 s to ~60 s. Splitting a big app into crates brings a page edit
   to ~1.9 s ([what an edit costs](../build/README.md#what-an-edit-costs)).
   No hot-patching in the web build or on Android.
-- **No iOS.** And no prebuilt `ax` for macOS (build it from source).
+- **No iOS.** A prebuilt `ax` for macOS comes with the next release (0.1.0: build it from source).
 - **Not OS-signed yet.** Windows SmartScreen and macOS Gatekeeper warn on
   first start of the prebuilt archives and app bundles.
 - **`aio::ui` views only** in the app's window; another view library comes

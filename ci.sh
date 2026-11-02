@@ -93,8 +93,10 @@ if [ -n "$ndk" ]; then
 fi
 # The DX trend: a template app built, edited live under `ax dev` and
 # smoke-run, its row added to scripts/dx-trend.csv (commit it); a number past
-# its limit fails, naming both (scripts/dx-metrics --trend).
-scripts/dx-metrics --check
+# its limit fails, naming both (scripts/dx-metrics --trend). Only this
+# machine's rows count; where it has none (GitHub CI), AIO_DX_BASE names the
+# commit whose sizes are measured here too, AIO_DX_ROWS a folder keeping rows.
+scripts/dx-metrics --check ${AIO_DX_BASE:+--base "$AIO_DX_BASE"} ${AIO_DX_ROWS:+--rows "$AIO_DX_ROWS"}
 if [ -n "$web_skip" ]; then
   echo "$web_skip" >&2
 fi

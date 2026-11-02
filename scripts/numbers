@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""The headline numbers of README.md and the docs, measured again on this
+machine and printed beside what the docs say, with the machine they ran on.
+
+  scripts/numbers           everything (about 5 minutes, Linux x86_64)
+  scripts/numbers --quick   the list-speed table only (a minute)
+
+What is measured, and where the docs give it:
+
+- docs/comparison.md, aio-rs's column: a fresh template app's crates,
+  clean and one-line debug builds, release build, binary and packages,
+  idle window memory, live CSS / markup / Rust edits. Measured as
+  scripts/dx-metrics measures them (that script's `measure`, in a
+  temporary folder; nothing is written to scripts/dx-trend.csv).
+- docs/performance.md "Measured": a held key over a 1000-row list,
+  `cargo test -p aio-rs -F kit --test list_speed -- --nocapture` (it draws in
+  the Electron runtime `ax setup` fetches).
+
+Expect the shape, not the decimals: the docs' numbers are one run on one
+machine with other work beside it. Compare against aio, Tauri or Dioxus
+on the same machine as docs/comparison.md describes; their builds are not
+part of this checkout.
+"""
+import importlib.machinery
+import importlib.util
+import os
+import pathlib
+import platform
+import subprocess
+import sys
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# docs/comparison.md's aio-rs column, as (dx-metrics column, label, published, unit, scale).
+PUBLISHED = [
+    ("crates", "crates (the app's, unique)", "157", "", 1),
+    ("clean_debug_s", "clean debug build", "15.9", "s", 1),
+    ("clean_debug_cpu", "  its CPU", "82", "CPU-s", 1),
+    ("rebuild_s", "one-line rebuild (debug)", "0.6", "s", 1),
+    ("live_css_s", "live CSS edit, save to visible", "0.09", "s", 1),
+    ("live_rsx_s", "live markup edit", "0.03", "s", 1),
+    ("live_logic_s", "live Rust logic edit (hot-patch)", "0.5", "s", 1),
+    ("debug_target_mb", "debug target dir", "894", "MB", 1),
+    ("release_s", "release build, bundles and smoke", "65", "s", 1),
+    ("binary_b", "release binary", "5.3", "MB", 1e-6),
+    ("targz_b", ".tar.gz", "2.8", "MB", 1e-6),
+    ("appimage_b", "AppImage", "3.5", "MB", 1e-6),
+    ("boot_s", "start to window ready", "", "s", 1),
+    ("window_mb", "idle window, private", "81", "MB", 1),
+    ("window_pss_mb", "idle window, PSS", "167", "MB", 1),
+]
+# docs/performance.md's list-speed table: (label, whole state, parts).
+LIST = [("components rendered", "8.25", "1.5"), ("writes to the file", "1.0", "0.2"),
+        ("wire bytes to the page", "155", "155"), ("the store's share (p50 / p95)", "53 / 141 µs", "39 / 46 µs")]
+
+
+def out(cmd, **kw):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kw).stdout.strip()
+    except OSError:
+        return ""
+
+
+def machine():
+    cpu = platform.processor() or platform.machine()
+    info = pathlib.Path("/proc/cpuinfo")
+    if info.exists():
+        cpu = next((l.split(":", 1)[1].strip() for l in info.read_text().splitlines() if l.startswith("model name")), cpu)
+    elif sys.platform == "darwin":
+        cpu = out(["sysctl", "-n", "machdep.cpu.brand_string"]) or cpu
+    try:
+        mem = f"{os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / 2**30:.0f} GB"
+    except (ValueError, OSError, AttributeError):
+        mem = "?"
+    load = " ".join(f"{x:.1f}" for x in os.getloadavg()) if hasattr(os, "getloadavg") else "?"
+    return [
+        ("os", f"{platform.system()} {platform.release()} {platform.machine()}"),
+        ("cpu", f"{cpu}, {os.cpu_count()} threads"),
+        ("memory", mem),
+        ("load (1/5/15 min)", load),
+        ("rustc", out(["rustc", "-V"], cwd=ROOT)),
+        ("aio-rs", out(["git", "describe", "--always", "--dirty", "--tags"], cwd=ROOT)),
+    ]
+
+
+def list_speed():
+    p = subprocess.run(["cargo", "test", "--locked", "-q", "-p", "aio-rs", "-F", "kit", "--test", "list_speed", "--", "--nocapture"],
+                       cwd=ROOT, capture_output=True, text=True)
+    if p.returncode:
+        sys.exit(f"numbers: list_speed failed:\n{p.stdout[-3000:]}{p.stderr[-3000:]}")
+    lines = [l for l in (p.stdout + p.stderr).splitlines() if l.startswith("list speed")]
+    print("\ndocs/performance.md, a held key over 1000 rows (published: whole state → parts):")
+    for label, whole, parts in LIST:
+        print(f"  {label:32} {whole} → {parts}")
+    print("measured here:")
+    for l in lines:
+        print(f"  {l}")
+
+
+def comparison():
+    loader = importlib.machinery.SourceFileLoader("dx_metrics", str(ROOT / "scripts" / "dx-metrics"))
+    spec = importlib.util.spec_from_loader("dx_metrics", loader)
+    dx = importlib.util.module_from_spec(spec)
+    loader.exec_module(dx)
+    (ROOT / "target").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="aio-numbers-", dir=ROOT / "target") as tmp:
+        row = dx.measure(pathlib.Path(tmp))
+    print("\ndocs/comparison.md, aio-rs's column:")
+    print(f"  {'':34} {'published':>10} {'here':>10}")
+    for col, label, published, unit, scale in PUBLISHED:
+        got = row.get(col, "")
+        try:
+            got = f"{float(got) * scale:.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            pass
+        print(f"  {label:34} {published or '-':>10} {got or '-':>10} {unit}")
+
+
+def main():
+    print("numbers: on this machine")
+    for k, v in machine():
+        print(f"  {k:18} {v}")
+    list_speed()
+    if "--quick" not in sys.argv[1:]:
+        if not sys.platform.startswith("linux"):
+            sys.exit("numbers: the comparison is measured on Linux (its smoke reads /proc); --quick runs the rest")
+        comparison()
+
+
+if __name__ == "__main__":
+    main()
