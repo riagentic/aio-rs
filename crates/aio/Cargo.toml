@@ -156,6 +156,10 @@ name = "door"
 required-features = ["net"]
 
 [[test]]
+name = "window_routes"
+required-features = ["net"]
+
+[[test]]
 name = "auth"
 required-features = ["net"]
 

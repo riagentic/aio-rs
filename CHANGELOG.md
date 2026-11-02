@@ -42,6 +42,17 @@ version may break things.
   (`scripts/api/<crate>.txt`, from rustdoc's JSON): `scripts/public-api
   --check` in `./ci.sh lint` fails on a change not written there, and on
   any item naming aio-rs 0.1's renderer.
+- **The app's routes in its window with no TCP port** (aio's `aio://app/<path>`
+  over the app socket): a standalone or client-server app whose
+  `Source::for_app_with` serves a path (routes, `[server] dirs`, blobs)
+  answers its window's `fetch`, `<img>` and streams over a private socket
+  (a Unix socket, a named pipe on Windows) that admits only the Electron
+  process aio-shell spawned; no window, no answer. The window's side is
+  aio's `socketFetch` (6 connections, small and error bodies read at once,
+  streams both ways, 504 after 30 s with no first byte,
+  `AIO_SOCKET_TIMEOUT_MS`). New: `aio::http::serve_window`,
+  `aio::ipc::Only::window`, `aio::ipc::window_http`. No new dependency
+  (axum's own server, already built for `[server] listen`).
 - **`ax dev` hot-patches Rust on Windows too** (an app on air, x86_64,
   MSVC or MinGW): the fat binary is linked at a fixed base below 4 GiB
   with a COFF symbol table (rust-lld for MSVC, its PDB kept), each patch
