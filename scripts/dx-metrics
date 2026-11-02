@@ -32,6 +32,8 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
                                 base's row of this machine is reused
   scripts/dx-metrics --trend [n]  the last n rows (12) and today's limits
   scripts/dx-metrics --self-test  the gate's rules, on made-up rows
+  scripts/dx-metrics --machine  this machine's short hash, as its rows name
+                                it (GitHub CI keys the kept rows by it)
   scripts/dx-metrics --live     the live edits only, on Dioxus (dx) and on
                                 air (`ax dev`'s own reload and hot-patch),
                                 one after the other here: printed, no row
@@ -559,6 +561,8 @@ def main():
     args = sys.argv[1:]
     if "--self-test" in args:
         return self_test()
+    if "--machine" in args:
+        return print(machine())
     if "--trend" in args:
         rest = args[args.index("--trend") + 1:]
         return trend(int(rest[0]) if rest and rest[0].isdigit() else 12)
