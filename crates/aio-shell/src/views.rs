@@ -39,11 +39,11 @@ impl Views {
 /// and how many they rendered in all (`total`).
 pub(crate) fn components() -> aio::serde_json::Value {
     let t = on_air::TREES.lock().unwrap_or_else(|e| e.into_inner());
-    let all: Vec<_> = t.iter().flat_map(|t| t.1.clone()).collect();
-    let mut renders: Vec<_> = t.iter().flat_map(|t| t.2.clone()).collect();
+    let all: Vec<_> = t.iter().flat_map(|w| w.tree.clone()).collect();
+    let mut renders: Vec<_> = t.iter().flat_map(|w| w.renders.clone()).collect();
     renders.sort_by_key(|r| r["at"].as_u64());
     let cut = renders.len().saturating_sub(air::RENDERS_KEPT);
-    let total: u64 = t.iter().map(|t| t.3).sum();
+    let total: u64 = t.iter().map(|w| w.total).sum();
     aio::serde_json::json!({ "components": all, "renders": &renders[cut..], "total": total })
 }
 
@@ -67,7 +67,15 @@ pub(crate) mod on_air {
 
     /// What a dev build keeps of each open window (by its thread's id): its
     /// component tree, its last renders and how many it rendered in all.
-    pub(super) static TREES: Mutex<Vec<(std::thread::ThreadId, Vec<Value>, Vec<Value>, u64)>> = Mutex::new(Vec::new());
+    pub(super) static TREES: Mutex<Vec<Shown>> = Mutex::new(Vec::new());
+
+    /// One open window's.
+    pub(super) struct Shown {
+        thread: std::thread::ThreadId,
+        pub tree: Vec<Value>,
+        pub renders: Vec<Value>,
+        pub total: u64,
+    }
 
     /// One component and its children as `Aio.components` says them (pure).
     fn json(c: air::Mounted) -> Value {
@@ -83,10 +91,10 @@ pub(crate) mod on_air {
 
     /// This window's tree and renders, kept for the door (a dev build's), or dropped as it goes.
     fn keep_tree(kept: Option<(Vec<Value>, Vec<Value>, u64)>) {
-        let me = std::thread::current().id();
+        let thread = std::thread::current().id();
         let mut t = TREES.lock().unwrap_or_else(|e| e.into_inner());
-        t.retain(|k| k.0 != me);
-        t.extend(kept.map(|(tree, renders, total)| (me, tree, renders, total)));
+        t.retain(|w| w.thread != thread);
+        t.extend(kept.map(|(tree, renders, total)| Shown { thread, tree, renders, total }));
     }
 
     /// Drops this window's tree when its pump ends, however it ends.
