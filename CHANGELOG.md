@@ -448,6 +448,16 @@ version may break things.
 
 ### Fixed
 
+- `scripts/dx-metrics --check` compares like with like: every gated
+  number, sizes and crate counts too, is judged against the same machine's
+  rows only (a CI runner's debug target was failing against the
+  developer machine's best: debug info holds absolute paths). `--base
+  <rev>` measures the base commit's sizes in a checkout beside this one,
+  and GitHub CI gates against its PR's base measured on the same runner
+  (`AIO_DX_BASE`, rows kept per commit in `AIO_DX_ROWS` and cached); its
+  times are said, not gated. Accepted growth stays a committed row of the
+  same machine.
+
 - `ax smoke <app>_<version>_<arch>.deb`: a Debian package's own name is
   read for its app id.
 - The app quitting (it stops, its socket closes) right after the page
