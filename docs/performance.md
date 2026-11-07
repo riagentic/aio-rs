@@ -16,6 +16,8 @@ slower with every field the app adds.
    `data-aio-reveal`, held-key repeats, throttled pointer moves.
 6. **Keep methods short**, heavy work off the cell's thread, and let the
    budgets (`[perf]`, `[budgets]`, `[vitals]`) say when they aren't.
+7. **Share big fields**: `aio::Big<…>`, so a step compares and copies
+   only what it wrote.
 
 ## What a view follows
 
@@ -344,6 +346,76 @@ assert_eq!(h.state().top, [9, 7, 4]);
 200 ms holds one of the runtime's threads for 200 ms (and `[perf] effect`
 says so). Only `spawn_blocking` moves it to a thread of its own.
 
+## 7. Share big fields: `aio::Big`
+
+A call works on a copy of the state, and after it the state is compared
+with the one before: the held run's write, the views (which fields
+changed), and every memo of your own that compares fields. A plain
+`Vec` of 1000 rows is copied and compared item by item on each step,
+though a cursor step never touched it. `aio::Big<T>` holds the field
+behind a shared pointer (aio's Immer drafts: what a call didn't touch is
+the same object before and after): the copy shares it, and two states
+that share it are equal at once.
+
+```rust
+use aio::Big;
+use aio::prelude::*;
+
+#[cell]
+pub struct Ledger {
+    pub rows: Big<Vec<String>>,
+    pub cursor: usize,
+}
+
+#[methods]
+impl Ledger {
+    pub fn add(&mut self, row: String) {
+        self.rows.push(row); // a write: copied first while another state shares it
+    }
+
+    pub fn down(&mut self) {
+        self.cursor += 1; // the rows stay shared: nothing to copy or compare
+    }
+}
+
+# fn main() {
+let h = Handle::<Ledger>::memory();
+h.add("rent".into()).unwrap();
+let before = h.state();
+h.down().unwrap();
+assert!(Big::ptr_eq(&before.rows, &h.state().rows));
+# }
+```
+
+- It reads and writes as its value (`self.rows.len()`, `self.rows.push(r)`,
+  `*self.rows = v`); a whole new value is `v.into()`. It is saved, sent
+  and shown as its value, and a `#[aio_cell]` field may be one.
+- A write copies it once while an older state still shares it, so write
+  only what changed: `if self.rows[i] != r { self.rows[i] = r }`. A
+  method that rewrites a field with equal content each call (a cache
+  refreshed by habit) makes a new copy every step.
+- Wrap what is big (lists, maps, a slice of hundreds of items); a number
+  or a short string is cheaper as it is.
+- Only plain data: never a value that changes behind `&` (`Cell`,
+  `RefCell`, `Mutex`, an atomic, or a type holding one). A write through
+  it reaches every state that shares the value, the ones before the
+  call too, and two that share it stay equal by pointer: nothing is seen
+  to change. Write through the field itself (`self.rows.push(r)`), which
+  copies first. Rust can't refuse such a `T` (an `Arc`'s contents may hold
+  one), so this is the rule to keep.
+- A dev build names the field to wrap: a field whose comparison after a
+  call takes 0.5 ms or more (`aio::big::SLOW_COMPARE`; not in a browser
+  page) is said once, as
+  ``[hint] field `rows` of cell `ledger` took 2.1 ms to compare: make it
+  `aio::Big<…>` ``. A plain `Vec` or map can't be compared by pointer
+  without it: a call's copy of the state copies it, so the two never
+  share.
+- Measured on a port of a real wallet (1000 accounts): wrapping its 30
+  big fields took each step's comparisons from 4-9 ms to 0.03 ms, and
+  a Tab's work in the app from 8-16 ms to 1.6 ms (with a memo keyed on
+  its accounts: `aio::Cache<(Big<Accounts>, u32), ..>`)
+  ([key to paint](aio-vs-aio-rs.md#key-to-paint)).
+
 ## Time budgets: `[perf]`
 
 Every method call and every effect step is timed against a budget. A
@@ -386,7 +458,7 @@ method notes.add 43ms > 16ms (clone=0.1ms apply=42.6ms check=0.2ms commit=0.4ms)
 
 | Phase | Is | If it dominates |
 |---|---|---|
-| `clone` | copying the state the method changes (a state slow to copy, 250 µs or more, is copied ahead on a thread of its own after each call, so the next one starts at once: ~0 here) | big fields: hold them as `Arc<…>` or `aio::imbl` collections; they are also compared after each commit (the views' re-render, a `#[coalesce]` run's write) |
+| `clone` | copying the state the method changes (a state slow to copy, 250 µs or more, is copied ahead on a thread of its own after each call, so the next one starts at once: ~0 here) | big fields: hold them as [`aio::Big`](#7-share-big-fields-aiobig); they are also compared after each commit (the views' re-render, a `#[coalesce]` run's write) |
 | `apply` | the method's body | move the work to an effect (above) |
 | `check` | the cell's invariants | an invariant that walks a big list on every call |
 | `commit` | writing the event (and now and then a snapshot) | not counted against the budget: it is the disk's and `[data] durability`'s |
@@ -557,11 +629,19 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
 
   One run, a loaded machine: the counts are exact, the times noisy.
 
+- Start: the template's release binary, headless
+  (`AIORT_ELECTRON_ARGS=--ozone-platform=headless`), 7 starts on one
+  machine: the window ready in 0.12–0.20 s (median 0.14 s). The app's own
+  work before it starts Electron (its config, dirs and lock, the boot
+  report, the runtime found) takes 7 ms; the rest is Electron's. The
+  app's process holds 9 MB (RSS) with its window up.
+
 - `ax heap <app>` shows memory per cell (`--watch`: every 2 s);
   `ax metrics <app>` each cell's size.
-- Big state: keep large fields as `Arc<…>` or `aio::imbl` collections
-  (feature `imbl`), so a call's copy of the state shares what didn't
-  change; [big data](persistence/sql.md) belongs in `#[table]` fields.
+- Big state: keep large fields as [`aio::Big`](#7-share-big-fields-aiobig)
+  (or `aio::imbl` collections, feature `imbl`), so a call's copy of the
+  state shares what didn't change; [big data](persistence/sql.md)
+  belongs in `#[table]` fields.
 
 ## Common mistakes
 
@@ -585,16 +665,23 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
 - aio bundles browser `Worker` scripts written as
   `new Worker(new URL("./w.ts", import.meta.url))`; aio-rs has no
   worker bundling. Heavy work in aio-rs runs in Rust, off the cell's
-  thread (`spawn_blocking`); a web build's own worker script is the
-  app's to ship as a file.
-- Key-to-paint over a large state is still aio's (End over 1000 rows:
-  aio 11.9 ms, aio-rs 17.6 ms; [measured](aio-vs-aio-rs.md#key-to-paint)):
-  each step compares the whole state deeply where aio's Immer shares
-  what is unchanged. Keep big fields behind `part` and memos keyed by
-  field.
+  thread (`spawn_blocking`), with the cell's own types and no message
+  copy across a boundary; a web build's own worker script is the app's to
+  ship as a file.
+- By a frame's stamp, aio is still ahead on Home and Tab over 1000
+  rows (Home: aio 9.1 ms, aio-rs 13.4 ms); by when the frame ran,
+  aio-rs is ahead on every key ([measured](aio-vs-aio-rs.md#key-to-paint)).
+  An aio-rs key crosses from the page to the app and back (~1.2 ms)
+  before a frame can show it; aio's work starts in the page.
 - aio's renderer yields at a 12 ms frame deadline mid-render; air runs
-  the holes a change woke in one batch per tick, so keep what a change
-  wakes small (parts, windows, rows by props).
+  the holes a change woke in one batch per tick, by design: one change
+  waking 10 000 holes (one signal read by 10 000 rows' text, a release
+  build, `air::testing::TestPage`) runs them in 0.8 ms (1.3 ms the
+  slowest of 7), 1.0 to 2.3 ms with the edits applied, so a 12 ms
+  deadline would never be reached and a yield would only split one frame's
+  edits over two. What takes long in a page is drawing them, which a yield
+  in the holes does not shorten; keep what a change wakes small (parts,
+  windows, rows by props).
 - `ax components` has no time per component in the tree (aio DevTools'
   `lastRenderMs`): the time is per render, in `--renders`.
 - aio's `blocking.cancel(id)` stops a running task; `spawn_blocking`

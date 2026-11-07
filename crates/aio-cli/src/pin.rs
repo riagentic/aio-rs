@@ -3,7 +3,7 @@
 //! ```text
 //! ax pin                  what the app's Cargo.toml files ask for, what its
 //!                         Cargo.lock built, this ax, and the releases
-//! ax pin 0.2.0            every aio-rs dependency to that release, Cargo.lock with it
+//! ax pin 0.3.0            every aio-rs dependency to that release, Cargo.lock with it
 //! ax pin main             follow the branch tip (a moving target)
 //! ax pin latest           the newest release in the app's major (--major: any)
 //! ax pin ../aio-rs        an aio-rs checkout on this machine (local development)
@@ -763,7 +763,7 @@ version = "0.1.0"
         assert!(said.ends_with("commit Cargo.toml and Cargo.lock so a clone builds against the same version"));
         let app = std::fs::read_to_string(root.join("app/Cargo.toml")).unwrap();
         assert!(
-            app.contains(r#"package = "aio-rs-shell", git = "https://github.com/riagentic/aio-rs", tag = "v9.9.9" }"#),
+            app.contains(r#"package = "aio-rs-shell", git = "https://github.com/riagentic/aio-rs", tag = "v9.9.9", default-features = false }"#),
             "{app}"
         );
         assert_eq!(info(&root, || Err("x".into())).unwrap().pinned(), Some(&Src::Tag("v9.9.9".into())));

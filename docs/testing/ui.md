@@ -345,7 +345,10 @@ The views run when the test acts or waits, never behind its back.
   [`TestCells::advance`](cells.md#time-and-schedules-advance).
 
 Every mount says each new `a11y()` finding once on stderr, as aio's dev
-mode warns once; assert on `a11y()` to fail a test on them.
+mode warns once; assert on `a11y()` to fail a test on them. A dev build
+(`ax dev`) runs the same audits on the running page, a second after it
+changes, each finding once in the log (`accessibility: …`, `text a person
+can't read: …`).
 
 ## Components
 

@@ -87,6 +87,7 @@ own keyframes for something gentler.
 | `easing` | `"ease"` | any CSS timing function (`Motion { easing: "ease-out", ..m }`) |
 | `m.css(out)` | | the `animation` declaration it writes (`out`: reversed) |
 | `m.total()` | | `ms + delay_ms`, how long until it is over |
+| `.ticking(f)` | | `f(t, u)` (a `fn`, `u = 1 - t`) each frame while it plays, entering 0 → 1, leaving 1 → 0, the last call at the end exactly (aio's `TransitionFn` `tick`): a counter, a typed-out text |
 
 ```rust
 use aio::kit::Motion;
@@ -257,7 +258,10 @@ in a cell).
   progress); aio-rs takes CSS `@keyframes` by name, or `Motion::of("grow",
   |t| format!("opacity:{t};transform:scale({t})"))`, that function
   sampled into `@keyframes grow` (20 steps, as aio's) and put in the page
-  once.
+  once; `u` is `1 - t`, and `.ticking(f)` is aio's `tick(t, u)`. aio's
+  function was given the element to measure it; in aio-rs a transform's
+  percentages are of the element's own box (`translateY(100%)` is its
+  height), so the keyframes need no measuring and stay one rule per name.
 - aio's `options` prop on `Transition` and `TransitionGroup` set one
   duration, delay and easing for both; in aio-rs each `Motion` carries its
   own.

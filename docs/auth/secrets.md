@@ -85,8 +85,9 @@ assert!(!log.contains("correct horse"), "the passphrase is in no event");
 ## `#[redact]`
 
 `#[redact]` on a `pub fn (&mut self, …)` method keeps its arguments out
-of the log (aio's `redactActions`). For a method that must take a
-secret, and keeps only what it derives from it:
+of the log (aio's `redactActions`); `#[cell(redact)]` does it for every
+method of the cell (aio's `redactActions: ["vault:*"]`). For a method
+that must take a secret, and keeps only what it derives from it:
 
 ```rust
 use aio::prelude::*;

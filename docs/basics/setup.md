@@ -23,15 +23,14 @@ Pick one. Both put `ax` in `$CARGO_HOME/bin` (`~/.cargo/bin`), which
 rustup already put on `PATH`.
 
 **Prebuilt** (seconds, no clone): Linux x86_64, and macOS arm64 and
-x86_64 (0.1.0's installer has none for macOS: use the source install
-below for it):
+x86_64:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.2.0/install.sh | sh
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.3.0/install.sh | sh
 ```
 
 Windows x86_64: download `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.2.0), then
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.3.0), then
 `powershell -ExecutionPolicy Bypass -File install.ps1`.
 
 Each archive's SHA-256 is pinned in the installer and checked before
@@ -43,7 +42,7 @@ takes them instead of downloading. Then it runs `ax setup`.
 **From source** (minutes):
 
 ```sh
-git clone --branch v0.2.0 https://github.com/riagentic/aio-rs
+git clone --branch v0.3.0 https://github.com/riagentic/aio-rs
 cargo install --locked --path aio-rs/crates/aio-cli
 ```
 
@@ -57,7 +56,7 @@ The package is `aio-rs-cli`, its binary `ax`.
 
 ```sh
 ax upgrade                    # to aio-rs's newest release
-ax upgrade 0.2.0              # to that release (again, if it is this one)
+ax upgrade 0.3.0              # to that release (again, if it is this one)
 ax upgrade --aio ../aio-rs    # ax built from a checkout (plain ax upgrade returns)
 ```
 
@@ -72,7 +71,7 @@ aio-rs is not on crates.io: an app `ax create` makes takes it from git,
 at this `ax`'s release tag, in both of its `Cargo.toml` files:
 
 ```toml
-aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.2.0", features = ["kit"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.3.0", features = ["kit"] }
 ```
 
 `Cargo.lock` pins the commit. A clone builds on any machine, with or
@@ -80,9 +79,9 @@ without an aio-rs checkout, and nothing of the machine the app was made on
 is in it. To pick or change the version (aio's `am pin`):
 
 ```sh
-ax create notes --aio-version 0.2.0   # another release (main: the branch; latest: the newest)
+ax create notes --aio-version 0.3.0   # another release (main: the branch; latest: the newest)
 ax pin                                # in the app: what Cargo.toml asks for, what Cargo.lock built, the releases
-ax pin 0.2.0                          # every one moved to that release, Cargo.lock with it
+ax pin 0.3.0                          # every one moved to that release, Cargo.lock with it
 ax pin ../aio-rs                      # to a checkout, co-developing aio-rs
 ```
 
@@ -102,6 +101,16 @@ ax setup --json     # the same, for scripts and agents
 
 Each missing piece is one line with the command that gets it; the exit
 code is 1 until every needed one is there.
+
+At a terminal (the installers end with `ax setup`), it then builds
+aio-rs and its dependencies for `ax dev` in the background (`ax setup
+--warm`, about 25 s on a fresh machine; its log is named on the
+terminal), so an app's first start compiles only the app's own crates
+(~1.7 s). An `ax dev` started while that runs waits on cargo's lock and
+then builds only its own crates: nothing is built twice. `--check`, a
+run with no terminal (CI, scripts, agents) and `AIORT_NO_WARM=1` leave it
+out; `ax setup --warm` does it in the foreground. Before it ends, a first
+start is Rust's compile time: ~25 s.
 
 ### Needed
 
@@ -175,7 +184,7 @@ with aio's apps, [desktop](../clients/desktop.md#one-store-with-aio)). `~` is
 | a private instance (`--instance n`) | `<tool home>/instances/<n>/<id>/` | the same | the same |
 | the shared Electron runtime (aio's store, shared with aio's apps) | `~/.local/share/aio/electron/<version>-<os>-<arch>/` (`$XDG_DATA_HOME`) | `~/Library/Application Support/aio/electron/…` | `%LOCALAPPDATA%\aio\electron\…` |
 | wasm-bindgen (fetched) | `<tool home>/tools/` | the same | the same |
-| ax's one build folder | `<tool home>/target/` (`CARGO_TARGET_DIR` wins) | the same | the same |
+| ax's one build folder | `~/.cache/aio-rt/target/<toolchain>/` (`$XDG_CACHE_HOME`; `AIORT_TARGET_DIR`, then `CARGO_TARGET_DIR` win) | `~/Library/Caches/aio-rt/target/…` | `%LOCALAPPDATA%\aio-rt\cache\target\…` |
 | this machine's TLS root (`ax trust`) | `<tool home>/tls/` | the same | the same |
 | release signing keys (`ax keygen`) | `~/.config/aio-rt/keys/` (`$XDG_CONFIG_HOME`) | the same | the same |
 | an app installed from its bundle | `<tool home>/install/<id>/`, `~/.local/bin/<id>`, a menu entry | `/Applications/<Name>.app` (the app offers the move) | `%LOCALAPPDATA%\Programs\<id>\`, a Start menu entry, Settings › Apps |
@@ -262,15 +271,18 @@ service) nobody is asked, and Windows blocks.
 New-NetFirewallRule -DisplayName 'notes' -Direction Inbound -Action Allow -Profile Private -Program "$env:LOCALAPPDATA\Programs\notes\notes.exe"
 ```
 
-aio-rs opens no firewall rule and, unlike aio, prints no `firewall:` line
-at boot naming what the OS may ask: a gap.
+aio-rs opens no firewall rule. As aio, a server that listens beyond
+loopback on Windows or macOS prints a `firewall:` line at boot naming
+what the OS may ask.
 
 **macOS: Local Network.** macOS 15 and later asks, per app, before it may
 reach other devices on the LAN: a window or a terminal that connects to an
 aio-rs server on the LAN, `ax discover`, pairing. Denied, the connection
 fails as if the server were down while the internet still works. Allow it
 under System Settings → Privacy & Security → Local Network. aio-rs names
-this permission nowhere when a connection fails: a gap.
+the permission when a discovery probe could not be sent (`ax discover`,
+a client's connect page); for a plain connection it adds no such hint,
+as aio.
 
 ## Run at startup, or as a service
 
@@ -312,7 +324,7 @@ autostart `.desktop` entry); aio-rs adds no "start at login" switch.
 
 ```sh
 ax uninstall            # ax out of $CARGO_HOME/bin
-ax uninstall --tools    # also tools/ and the build folder target/ in the tool home
+ax uninstall --tools    # also tools/ and the shared build folders (aio's cache home, and ax 0.2's in the tool home)
 ```
 
 Your apps, their data and installs stay (the rest of the tool home,
@@ -344,7 +356,7 @@ store, shared with aio's apps: `ax prune` says what of it may go.
   Linux before you ship (the workflow `ax release --workflow` writes
   builds on Linux, so a case mistake fails there, [release](../build/release.md)).
 - **Path length.** aio-rs does nothing about Windows' 260-character path
-  limit. The shared build folder under `%LOCALAPPDATA%\aio-rt\target`
+  limit. The shared build folder under `%LOCALAPPDATA%\aio-rt\cache\target`
   keeps build paths short; for a deep checkout, `git config --global
   core.longpaths true`.
 - **Line endings.** `ax create` writes no `.gitattributes` (aio's `am
@@ -362,7 +374,8 @@ store, shared with aio's apps: `ax prune` says what of it may go.
   uninstall above left nothing. The workspace tests, UI tests included,
   pass there.
 - macOS 14 x86_64: `ax setup --check` and the workspace tests, UI tests
-  included, pass. Not checked yet: Apple silicon.
+  included, pass. Apple silicon: GitHub CI runs the workspace tests and
+  the signed update proof on it (`macos-15`).
 
 Problems on one OS: [troubleshooting](../debugging/troubleshooting.md).
 Next: [quickstart](quickstart.md).

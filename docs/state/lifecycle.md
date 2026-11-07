@@ -292,8 +292,11 @@ a method while it is called in a storm.
 3. `aio::on_stop(f)` hooks, once every store is closed: let go of what the
    app holds (a device, a lock). A cell call from here is refused: there is
    no store left to save it.
+4. Every synced copy's last save (`Remote::connect_saved`) written to
+   its file: a call made offline just before is kept. One not written by
+   the deadline is named.
 
-Stores and `on_stop` each get at least 500 ms, whatever `on_stopping`
+Stores, `on_stop` and the saves each get at least 500 ms, whatever `on_stopping`
 used. A hook that panics is logged and the stop goes on; one still
 running at its deadline is left behind and named. `shutdown` returns what
 was cut. The app's launcher calls it for you, with a 5 s budget, once the
@@ -400,7 +403,7 @@ view).
 | `fatalOnStart: true` | `Cells::fatal_on_start()` |
 | `dependsOn` | `Cells::with(h, &[ids])` |
 | `isolate` (run only some cells) | `AIORT_ISOLATE=a,b` |
-| `onCheckpointRestore` | `aio::on_recovered(|cell, recovered| ..)` (a store back from a damaged file) |
+| `onCheckpointRestore` | `#[cell(recovered = f)]` returns the state to boot on; `aio::on_recovered(|cell, recovered| ..)` hears it (a store back from a damaged file) |
 | `app.cells.disable` resets the state | `Cells::disable` keeps it |
 | `circuitBreaker` | `Cells::trip_after` |
 | `GET /__aio/health` | `ax health`, `Cells::health()` |

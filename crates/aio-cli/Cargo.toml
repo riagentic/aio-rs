@@ -53,5 +53,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# The tests stand in for a running app under `ax dev`: its operator door
+# (`ax call`, `ax travel`, metrics) is ax dev's tooling, aio's `dev`.
+aio = { workspace = true, features = ["kit", "net", "testing", "dev"] }
 # A web build's pages painted by its server (`aio_shell::web::painted`).
 aio-shell = { workspace = true, features = ["web"] }

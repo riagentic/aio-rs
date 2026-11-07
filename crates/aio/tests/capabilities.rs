@@ -31,6 +31,19 @@ fn redirecting(to: &'static str) -> String {
     addr
 }
 
+/// A server the person picks (the connect page, a pairing, `--server-url`,
+/// `[client] server`) is reached without a `network` entry: that host and
+/// port, nothing else.
+#[test]
+fn a_picked_server_is_reached_and_nothing_beside_it() {
+    aio::capabilities::set(&["api.example.org".into()]);
+    assert!(aio::capabilities::check("sync", "198.51.100.9:8443").is_err());
+    aio::capabilities::grant("198.51.100.9:8443");
+    assert!(aio::capabilities::check("sync", "wss://198.51.100.9:8443/ws").is_ok());
+    assert!(aio::capabilities::check("sync", "198.51.100.9:22").is_err(), "its port alone");
+    assert!(aio::capabilities::check("sync", "198.51.100.10:8443").is_err());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_host_outside_the_list_is_refused_before_a_byte_is_sent() {
     aio::capabilities::set(&["api.example.org".into()]);

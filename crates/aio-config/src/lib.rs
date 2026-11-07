@@ -57,11 +57,24 @@ pub mod auth {
         /// No sign-in until the account's email is verified (a mailed token,
         /// or the operator's `ax auth verify`); sign-up then needs an email.
         pub require_verified: bool,
+        /// Users may turn on a second factor (TOTP). Off: enrollment is
+        /// refused (`totp_disabled`); a factor already on stays on.
+        pub totp: bool,
+        /// A sign-in sets the HttpOnly session cookie. Off: the session is
+        /// the answer's `token` alone, sent as a bearer.
+        pub cookie: bool,
     }
 
     impl Default for Policy {
         fn default() -> Self {
-            Self { ttl_ms: 30 * 86_400_000, max_sessions: Some(MAX_SESSIONS), signup: false, require_verified: false }
+            Self {
+                ttl_ms: 30 * 86_400_000,
+                max_sessions: Some(MAX_SESSIONS),
+                signup: false,
+                require_verified: false,
+                totp: true,
+                cookie: true,
+            }
         }
     }
 }

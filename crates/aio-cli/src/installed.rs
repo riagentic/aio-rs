@@ -22,8 +22,8 @@ impl Places {
     pub fn of(env: aio::paths::Env, tool: &Path, cache: PathBuf) -> Self {
         let home = env("HOME").or_else(|| env("USERPROFILE")).unwrap_or_default();
         Places {
-            install: tool.join("install"),
-            apps: tool.join("apps"),
+            install: env("AIORT_INSTALL_ROOT").unwrap_or_else(|| tool.join("install")),
+            apps: env("AIORT_APPS_DIR").unwrap_or_else(|| tool.join("apps")),
             cache,
             bin: env("XDG_BIN_HOME").unwrap_or_else(|| home.join(".local/bin")),
             share: env("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")),
@@ -220,6 +220,18 @@ fn aside_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_apps_data_follows_aiort_apps_dir() {
+        let tool = Path::new("/u/share/aio-rt");
+        let none = Places::of(&|_| None, tool, PathBuf::from("/c"));
+        assert_eq!(none.apps, Path::new("/u/share/aio-rt/apps"));
+        let set = Places::of(&|k| (k == "AIORT_APPS_DIR").then(|| "/srv/apps".into()), tool, PathBuf::from("/c"));
+        assert_eq!(set.apps, Path::new("/srv/apps"), "ax remove --data deletes the data where it is");
+        assert_eq!(none.install, Path::new("/u/share/aio-rt/install"));
+        let root = Places::of(&|k| (k == "AIORT_INSTALL_ROOT").then(|| "/opt/apps".into()), tool, PathBuf::from("/c"));
+        assert_eq!(root.install, Path::new("/opt/apps"), "ax installed and remove look there");
+    }
 
     fn places(root: &Path) -> Places {
         Places {

@@ -142,8 +142,15 @@ event 40, makes the same calls, and asserts the state they left. Change
 the assertion to what the state should have been, see it fail, then fix
 the code until it passes ([debugging](README.md#6-reproduce-fix-prove)).
 `--type` names the cell's Rust type when it isn't `<crate>::<Cell>`.
+Without the cell (`ax record notes tests/bug.rs 40..44`) the test boots
+every cell those events touched and makes their calls in the log's order.
 
 ## In the window
+
+A dev build (`ax dev`) mounts the panel beside every app: Ctrl+. shows
+it, with no code in the app, for each cell a `client!` makes (each
+`use_live()` lists its cell), side by side. To place it yourself, or in a
+release build, mount `TimeTravelPanel`: the dev one then stays out.
 
 `aio::kit::TimeTravelPanel` is aio's dev panel: hidden until Ctrl+.
 (needs `aio::kit::GlobalKeys` around the app), it shows where the cell is,
@@ -277,12 +284,12 @@ methods are pure (randomness from the seed in the state, time from
 - aio's time travel is dev-only and a ring of 2000 entries (128 MB) in
   memory. aio-rs's reads the store, so it works in a release build, on
   the whole history, after a restart.
-- aio's `diagnostics.dev.timeTravel: false` turns it off; aio-rs has no
-  switch: only the OS user (the local door) or an `admin` on the aio panel
-  can travel.
-- aio's `skipActions` keeps a method out of the history. aio-rs keeps
-  every event (it is the store); `diagnostics = false` and `[log]
-  suppress` only quiet what is shown.
+- aio's `diagnostics.dev.timeTravel: false` is `[history] travel =
+  false`: every step is refused. Either way only the OS user (the local
+  door) or an `admin` on the aio panel can travel.
+- aio's `skipActions` is `#[skip_travel]` on a method: undo, redo and the
+  timeline pass over its events. They stay in the log (it is the store),
+  so replay and `ax events` still have them.
 
 ## API
 

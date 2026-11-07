@@ -4,6 +4,9 @@ aio::Backoff.factor: f64
 aio::Backoff.max: i64
 aio::Backoff::from: fn from(base: i64) -> Self
 aio::Backoff::ms: fn ms(self, attempt: u32) -> i64
+aio::Big(_)
+aio::Big::new: fn new(value: T) -> Self
+aio::Big::ptr_eq: fn ptr_eq(a: &Self, b: &Self) -> bool
 aio::By::Agent(String)
 aio::By::Effect(String)
 aio::By::Schedule(String)
@@ -31,8 +34,10 @@ aio::Cell::ON_STOP: const Option<&'static str>
 aio::Cell::REDACTED: const &'static [&'static str]
 aio::Cell::SCHEDULES: const &'static [Declared]
 aio::Cell::SIGNATURES: const &'static [&'static str]
+aio::Cell::SKIP_IF_RUNNING: const &'static [&'static str]
 aio::Cell::TTL: const &'static [&'static str]
 aio::Cell::UNPREDICTED: const &'static [&'static str]
+aio::Cell::UNTRAVELED: const &'static [&'static str]
 aio::Cell::allow: fn allow(&self, who: &Caller, method: &str, args: &Value) -> Result
 aio::Cell::apply: fn apply(&mut self, cx: &Cx, method: &str, args: Value) -> Result<Value>
 aio::Cell::async_mode: fn async_mode(method: &str) -> Option<crate::Mode>
@@ -45,7 +50,10 @@ aio::CellData::FIELDS: const &'static [Field]
 aio::CellData::ID: const &'static str
 aio::CellData::PERSIST: const bool
 aio::CellData::PERSIST_INCLUDE: const &'static [&'static str]
+aio::CellData::REDACT: const bool
 aio::CellData::RETIRED: const &'static [&'static str]
+aio::CellData::SAVED: const bool
+aio::CellData::SCREENED: const bool
 aio::CellData::SERVER: const &'static [&'static str]
 aio::CellData::SHARED: const bool
 aio::CellData::TABLES: const &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)]
@@ -58,6 +66,7 @@ aio::CellData::machine_ends: fn machine_ends() -> Vec<String>
 aio::CellData::machine_errors: fn machine_errors(methods: &[&str]) -> Vec<String>
 aio::CellData::migrate: fn migrate(old: Value, from: u32) -> std::result::Result<Self, String>
 aio::CellData::project: fn project(&self, viewer: &Caller) -> Value
+aio::CellData::recovered: fn recovered(self, r: &Recovered) -> Self
 aio::CellData::restore: fn restore(self) -> Self
 aio::CellData::save: fn save(&self) -> Option<Self>
 aio::CellHealth.enabled: bool
@@ -83,8 +92,16 @@ aio::Cells::with: fn with<T: Cell>(self, h: Handle<T>, after: &[&'static str]) -
 aio::Code::AccessDenied
 aio::Code::ActionRefused
 aio::Code::ConnectionLost
+aio::Code::DispatchAborted
+aio::Code::DispatchClosed
+aio::Code::DispatchLoop
+aio::Code::InitError
+aio::Code::Other(String)
+aio::Code::PersistError
+aio::Code::QueueOverflow
+aio::Code::ReduceError
 aio::Code::TxConflict
-aio::Code::as_str: fn as_str(self) -> &'static str
+aio::Code::as_str: fn as_str(&self) -> &str
 aio::Code::of: fn of(v: &Value) -> Option<Self>
 aio::Conn::Blocked
 aio::Conn::Offline
@@ -105,6 +122,7 @@ aio::Cx::id: fn id(&self) -> Uuid
 aio::Cx::live_state: fn live_state<T: crate::Cell>(&self) -> Option<Arc<T>>
 aio::Cx::now: fn now(&self) -> i64
 aio::Cx::on: fn on<O: crate::Cell>(&self) -> On<'_>
+aio::Cx::part: fn part(&self, piece: impl Serialize) -> crate::Result<bool>
 aio::Cx::rand: fn rand(&self) -> u64
 aio::Cx::role: fn role(&self) -> Option<&str>
 aio::Cx::run: fn run<T: crate::Cell>(&self, effect: crate::Effect<T>)
@@ -146,6 +164,7 @@ aio::Field::holding: fn holding(fields: &[Field], offset: usize) -> Option<usize
 aio::Handle::busy: fn busy(&self, key: &str) -> bool
 aio::Handle::by: fn by(&self, by: By) -> Self
 aio::Handle::call_from: fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>>
+aio::Handle::checkpoint: fn checkpoint(&self) -> crate::Result
 aio::Handle::closing: fn closing(&self) -> bool
 aio::Handle::done: async fn done(&self, key: &str)
 aio::Handle::enabled: fn enabled(&self) -> bool
@@ -176,6 +195,7 @@ aio::Handle::watch: fn watch<R: PartialEq + Send + 'static>(&self, f: impl Fn(&T
 aio::Hidden::get: fn get(&self) -> Option<&T>
 aio::Hidden::into_inner: fn into_inner(self) -> Option<T>
 aio::Hidden::new: fn new(value: T) -> Self
+aio::Hidden::withheld: fn withheld() -> Self
 aio::Inputs.ids: Vec<uuid::Uuid>
 aio::Inputs.rands: Vec<u64>
 aio::Inputs.role: Option<String>
@@ -238,6 +258,7 @@ aio::Status.rtt: Option<std::time::Duration>
 aio::Status::LOCAL: const Self
 aio::Store::call: fn call(&mut self, by: &By, method: &str, args: Value) -> Result<Value>
 aio::Store::call_from: fn call_from(&mut self, by: &By, method: &str, args: Value, op: &str) -> Result<Option<Value>>
+aio::Store::checkpoint: fn checkpoint(&mut self) -> Result
 aio::Store::drop_cell: fn drop_cell(&self, cell: &str) -> Result<bool, Error>
 aio::Store::durability: fn durability(&self) -> Result<crate::config::Durability, Error>
 aio::Store::events: fn events(&self) -> Result<Vec<Event>, Error>
@@ -252,6 +273,7 @@ aio::Store::newest: fn newest(&self, n: usize) -> Result<Vec<Event>, Error>
 aio::Store::open: fn open(path: impl AsRef<Path>) -> Result<Self, Error>
 aio::Store::open_aio: fn open_aio(path: impl AsRef<Path>, app: &str) -> Result<Self, Error>
 aio::Store::position: fn position(&self) -> Result<Position, Error>
+aio::Store::quarantined: fn quarantined(&self) -> Option<&str>
 aio::Store::recovered: fn recovered(&self) -> Option<&Recovered>
 aio::Store::rewind: fn rewind(&mut self, by: &By, seq: u64) -> Result
 aio::Store::schedules: fn schedules(&self) -> Result<Vec<Due>, Error>
@@ -265,6 +287,7 @@ aio::Store::state: fn state(&self) -> &T
 aio::Store::state_at: fn state_at(&self, seq: u64) -> Result<T, Error>
 aio::Store::took: fn took(&self, seq: u64) -> Option<std::time::Duration>
 aio::Store::travel: fn travel(&mut self, by: &By, t: Travel) -> Result<u64>
+aio::Store::travel_steps: fn travel_steps(&self, n: usize) -> Result<Vec<Event>, Error>
 aio::Store::with: fn with(state: T) -> Self
 aio::TimeAsk::Goto(u64)
 aio::TimeAsk::Pause
@@ -312,6 +335,9 @@ aio::auth::Auth::unlock: fn unlock(&self, id: &str) -> Result<bool>
 aio::auth::Auth::user: fn user(&self, id: &str) -> Result<Option<User>>
 aio::auth::Auth::users: fn users(&self) -> Result<Vec<User>>
 aio::auth::Auth::verify: fn verify(&self, id: &str, password: &str) -> Result<User>
+aio::auth::Known.extra: serde_json::Map<String, serde_json::Value>
+aio::auth::Known.role: String
+aio::auth::Known.user: String
 aio::auth::Login::Signed { token: String, user: User }
 aio::auth::Login::Totp { pending: String }
 aio::auth::Mail.subject: String
@@ -330,6 +356,7 @@ aio::auth::Refusal::TotpOn
 aio::auth::Refusal::UserExists
 aio::auth::Refusal::code: fn code(&self) -> &str
 aio::auth::Session.expires_at: i64
+aio::auth::Session.extra: serde_json::Map<String, serde_json::Value>
 aio::auth::Session.role: String
 aio::auth::Session.user: String
 aio::auth::User.created_at: i64
@@ -340,6 +367,7 @@ aio::auth::User.totp: bool
 aio::auth::User.verified: bool
 aio::auth::Users::map: fn map(tokens: impl IntoIterator<Item = (String, (String, String))>) -> Self
 aio::auth::Users::resolve: fn resolve(f: impl Fn(&str) -> Option<(String, String)> + Send + Sync + 'static) -> Self
+aio::auth::Users::resolve_with: fn resolve_with<F, Fut>(f: F) -> Self where F: Fn(String) -> Fut + Send + Sync + 'static, Fut: Future<Output = Option<Known>> + Send + 'static
 aio::auth::Users::sessions: fn sessions(auth: Arc<Auth>, then: Option<Users>) -> Self
 aio::auth::Users::who: fn who(&self, token: &str) -> Option<Session>
 aio::auth::budget::Budgets.fails: Meter
@@ -367,6 +395,8 @@ aio::auth::client::Client::password: async fn password(&self, token: &str, old: 
 aio::auth::client::Client::request_reset: async fn request_reset(&self, id: &str) -> Result<(), AuthError>
 aio::auth::client::Client::reset: async fn reset(&self, token: &str, password: &str) -> Result<(), AuthError>
 aio::auth::client::Client::signup: async fn signup(&self, id: &str, password: &str, email: Option<&str>) -> Result<Signup, AuthError>
+aio::auth::client::Client::sso: fn sso(&self) -> std::io::Result<Sso>
+aio::auth::client::Client::sso_done: async fn sso_done(&self, s: Sso) -> Result<Signed, AuthError>
 aio::auth::client::Client::totp: async fn totp(&self, pending: &str, code: &str) -> Result<Signed, AuthError>
 aio::auth::client::Client::totp_disable: async fn totp_disable(&self, token: &str, password: &str) -> Result<(), AuthError>
 aio::auth::client::Client::totp_enable: async fn totp_enable(&self, token: &str, code: &str, password: &str) -> Result<(), AuthError>
@@ -378,6 +408,7 @@ aio::auth::client::Client::via: fn via(via: Via) -> Self
 aio::auth::client::Login::Signed(Signed)
 aio::auth::client::Login::Totp { pending: String }
 aio::auth::client::Me.mail: bool
+aio::auth::client::Me.oidc: bool
 aio::auth::client::Me.signup: bool
 aio::auth::client::Me.totp: bool
 aio::auth::client::Me.user: Option<(String, String)>
@@ -386,6 +417,7 @@ aio::auth::client::Signed.token: String
 aio::auth::client::Signed.user: String
 aio::auth::client::Signup::Signed(Signed)
 aio::auth::client::Signup::Verify { sent: bool }
+aio::auth::client::Sso.url: String
 aio::auth::client::text: fn text(code: &str, status: u16) -> String
 aio::auth::generated_password: fn generated_password() -> String
 aio::auth::normalize: fn normalize(id: &str) -> String
@@ -419,6 +451,9 @@ aio::backup::restore: fn restore(id: &str, file: &std::path::Path, store: &std::
 aio::backup::timed: fn timed(id: &str, store: &std::path::Path, dir: &std::path::Path, every: std::time::Duration, keep: usize)
 aio::backup::timed_once: fn timed_once(id: &str, store: &std::path::Path, dir: &std::path::Path, keep: usize) -> io::Result<std::path::PathBuf>
 aio::before_call: fn before_call(f: impl Fn(&Call<'_>) -> Result + Send + Sync + 'static)
+aio::big::Big(_)
+aio::big::Big::new: fn new(value: T) -> Self
+aio::big::Big::ptr_eq: fn ptr_eq(a: &Self, b: &Self) -> bool
 aio::blobs::Blob.id: String
 aio::blobs::Blob.name: Option<String>
 aio::blobs::Blob.size: u64
@@ -442,6 +477,7 @@ aio::boot::log_level: fn log_level(cfg: crate::log::Level, env: Option<&str>) ->
 aio::boot::no_config_file: fn no_config_file(env: &dyn Fn(&str) -> Option<String>) -> std::io::Result<()>
 aio::boot::rows: fn rows(cfg: &crate::config::Config, version: &str, dirs: &crate::paths::AppDirs, env: &dyn Fn(&str) -> Option<String>, exists: &dyn Fn(&std::path::Path) -> bool) -> Vec<Row>
 aio::boot::say: fn say(rows: &[Row])
+aio::boot::up_rows: fn up_rows(cells: &std::collections::BTreeMap<String, u32>, served: Option<&(usize, Vec<String>)>) -> Vec<Row>
 aio::budgets::Breach.detail: String
 aio::budgets::Breach.limit: f64
 aio::budgets::Breach.worst: f64
@@ -450,6 +486,7 @@ aio::budgets::guard: fn guard(cell: &str, n: u64) -> Option<(crate::log::Level, 
 aio::budgets::report: fn report() -> serde_json::Value
 aio::capabilities::agent: fn agent(what: &'static str, config: ureq::config::Config) -> ureq::Agent
 aio::capabilities::check: fn check(what: &str, target: &str) -> std::io::Result<()>
+aio::capabilities::grant: fn grant(target: &str)
 aio::capabilities::held: fn held(network: Option<&[String]>, what: &str, target: &str) -> std::io::Result<()>
 aio::capabilities::refused: fn refused(what: &str, host: &str) -> String
 aio::capabilities::set: fn set(network: &[String])
@@ -539,7 +576,7 @@ aio::cli::frame: fn frame(tty: bool, text: &str) -> String
 aio::cli::near: fn near<'a>(bad: &str, pool: impl Iterator<Item = &'a str>) -> Option<&'a str>
 aio::cli::parse: fn parse<S: AsRef<str>>(spec: &Spec, argv: &[S]) -> Result<Args, Stop>
 aio::cli::table: fn table<S: AsRef<str>>(columns: &[Column<'_>], rows: &[Vec<S>], style: Style) -> String
-aio::cli::watch: fn watch<T, F>(now: &T, listen: impl FnOnce(Box<dyn Fn(&std::sync::Arc<T>) + Send + Sync>), render: F) where T: 'static, F: Fn(&T) -> String + Send + Sync + 'static
+aio::cli::watch: fn watch<T, F>(now: &T, listen: impl FnOnce(Box<dyn Fn(&std::sync::Arc<T>) + Send + Sync>), render: F) where T: Send + Sync + 'static, F: Fn(&T) -> String + Send + Sync + 'static
 aio::cli::width: fn width(s: &str) -> usize
 aio::colors::identity: fn identity(hue: u16) -> [[String; 4]; 2]
 aio::columns::Col.default: Option<Fill>
@@ -622,12 +659,29 @@ aio::config::Listen.tls: bool
 aio::config::build: fn build(path: &str)
 aio::config::firewall_says: fn firewall_says(os: &str, exposed: bool) -> Option<&'static str>
 aio::config::lan_ipv4: fn lan_ipv4() -> Option<std::net::Ipv4Addr>
-aio::config::listen: fn listen(s: &Server, ask: &crate::paths::Ask) -> Result<Listen, String>
+aio::config::listen: fn listen(s: &Server, ask: &crate::paths::Ask, env: crate::paths::Env<'_>) -> Result<Listen, String>
 aio::config::listen_says: fn listen_says(l: &Listen, id: &str) -> String
 aio::config::open_says: fn open_says(id: &str) -> String
 aio::config::share_says: fn share_says(l: &Listen, lan: Option<std::net::Ipv4Addr>, gate: Gate, key_file: &std::path::Path, pairing: bool) -> Vec<String>
 aio::config::token: fn token(data: &std::path::Path) -> std::io::Result<String>
 aio::config::weak_token: fn weak_token(t: &str) -> bool
+aio::connect::Near.addr: String
+aio::connect::Near.auth: bool
+aio::connect::Near.title: Option<String>
+aio::connect::Server.addr: String
+aio::connect::Server.root: Option<String>
+aio::connect::Server.title: Option<String>
+aio::connect::Server.token: Option<String>
+aio::connect::active: fn active() -> bool
+aio::connect::again: fn again(data: &std::path::Path, s: &Server) -> std::io::Result<()>
+aio::connect::ask: fn ask(why: impl Into<String>)
+aio::connect::forget: fn forget(data: &std::path::Path, addr: &str) -> std::io::Result<()>
+aio::connect::lan: async fn lan(app: &str, wait: std::time::Duration) -> std::io::Result<Vec<Near>>
+aio::connect::open_at: fn open_at(data: &std::path::Path, addr: &str) -> std::io::Result<()>
+aio::connect::page: fn page() -> tokio::sync::watch::Receiver<Option<String>>
+aio::connect::pair: async fn pair(data: &std::path::Path, app: &str, addr: &str, code: &str) -> std::io::Result<bool>
+aio::connect::recent: fn recent(data: &std::path::Path) -> Vec<Server>
+aio::connect::remember: fn remember(data: &std::path::Path, s: Server) -> std::io::Result<()>
 aio::cost::Meter.bytes: u64
 aio::cost::Meter.full: u64
 aio::cost::Meter.keys: std::collections::BTreeMap<String, (u64, u64)>
@@ -689,6 +743,7 @@ aio::db::Live::tables: fn tables(&self) -> &Tables
 aio::db::Opts.guard: bool
 aio::db::Opts.pragmas: Vec<String>
 aio::db::Opts.readers: usize
+aio::db::Opts.readonly: bool
 aio::db::Opts.timeout: Option<std::time::Duration>
 aio::db::Rows.columns: Vec<String>
 aio::db::Rows.rows: Vec<Vec<Sql>>
@@ -708,8 +763,9 @@ aio::discovery::Found.title: Option<String>
 aio::discovery::Found.tls: bool
 aio::discovery::port: fn port() -> u16
 aio::discovery::probe: async fn probe(targets: &[std::net::SocketAddr], wait: std::time::Duration) -> std::io::Result<Vec<Found>>
-aio::discovery::probe_lan: async fn probe_lan(port: u16) -> std::io::Result<Vec<Found>>
+aio::discovery::probe_lan: async fn probe_lan(port: u16, wait: std::time::Duration) -> std::io::Result<Vec<Found>>
 aio::discovery::respond: async fn respond(port: u16, apps: Vec<Found>) -> std::io::Result<()>
+aio::discovery::targets: fn targets(port: u16, interfaces: &[(std::net::Ipv4Addr, std::net::Ipv4Addr)]) -> Vec<std::net::SocketAddr>
 aio::door::at: fn at(app: &str, data: &std::path::Path, cell: &str) -> std::io::Result<String>
 aio::door::is_door: fn is_door(addr: &str) -> bool
 aio::door::serve: async fn serve<T: Cell>(h: crate::Handle<T>, l: crate::ipc::Listener, limits: Limits) -> std::io::Result<()>
@@ -727,6 +783,7 @@ aio::effect::call_ceiling: fn call_ceiling() -> std::time::Duration
 aio::effect::cancel_blocking: fn cancel_blocking(key: &str) -> usize
 aio::effect::key: fn key(name: &str, args: &impl serde::Serialize) -> crate::Result<String>
 aio::effect::retry: async fn retry<R, E: std::fmt::Display, F: Future<Output = Result<R, E>>>(retries: u32, timeout: Option<std::time::Duration>, f: impl FnMut() -> F) -> crate::Result<R>
+aio::error_summary: fn error_summary(e: &Rejected) -> String
 aio::feedback::Feedback.enabled: bool
 aio::feedback::Feedback.error: Option<String>
 aio::feedback::Feedback.last: Option<Saved>
@@ -780,6 +837,7 @@ aio::fns::ServerFn::name: fn name(&self) -> &'static str
 aio::fns::ServerFn::new: const fn new(name: &'static str) -> Self
 aio::fns::ServerFn::timeout: const fn timeout(self, t: Duration) -> Self
 aio::gate::client: fn client(peer: std::net::IpAddr, headers: &axum::http::HeaderMap, trust: Option<&str>) -> std::net::IpAddr
+aio::gate::machine_name: fn machine_name() -> Option<String>
 aio::gate::navigation: fn navigation(headers: &axum::http::HeaderMap) -> bool
 aio::gate::proxied_https: fn proxied_https(headers: &axum::http::HeaderMap, trust: Option<&str>) -> bool
 aio::gate::proxy_warning: fn proxy_warning(peer: std::net::IpAddr, headers: &axum::http::HeaderMap, trust: Option<&str>) -> Option<String>
@@ -818,6 +876,8 @@ aio::health::MemoryReport.cells: Vec<(String, u64)>
 aio::health::MemoryReport.level: Memory
 aio::health::MemoryReport.rss: u64
 aio::health::MemoryReport.total: u64
+aio::health::MemoryReport.trend: Trend
+aio::health::Metrics.broadcast: (u64, u64)
 aio::health::Metrics.calls: u64
 aio::health::Metrics.cell: (String, bool, usize)
 aio::health::Metrics.clients: usize
@@ -839,7 +899,11 @@ aio::health::Reading.name: String
 aio::health::Reading.unit: Unit
 aio::health::Reading.value: Option<u64>
 aio::health::Sampler::sample: fn sample(&mut self, rss: u64, total: u64) -> Memory
+aio::health::Sampler::trend: fn trend(&self) -> Trend
 aio::health::Sampler::with: fn with(limits: crate::config::Memory) -> Self
+aio::health::Trend::Falling
+aio::health::Trend::Rising
+aio::health::Trend::Stable
 aio::health::Unit::Bytes
 aio::health::Unit::Count
 aio::health::biggest: fn biggest(gauges: &[Reading], n: usize) -> String
@@ -855,6 +919,7 @@ aio::health::doc: fn doc(about: &crate::report::About, (started, now): (i64, i64
 aio::health::fail: fn fail(name: &str, error: &str)
 aio::health::gauge: fn gauge(name: &str, unit: Unit, read: impl Fn() -> u64 + Send + Sync + 'static)
 aio::health::gauges: fn gauges() -> Vec<Reading>
+aio::health::hook_hears: fn hook_hears(now: Memory, said: Memory) -> bool
 aio::health::judge: fn judge(doc: &serde_json::Value, now: i64, alive: bool) -> Result<String, String>
 aio::health::maintenance: fn maintenance(id: &str, op: &str) -> serde_json::Value
 aio::health::memory: fn memory() -> Option<(u64, u64)>
@@ -927,6 +992,7 @@ aio::http::Reply::text: fn text(body: impl Into<String>) -> Self
 aio::http::Req::body: fn body(&self) -> &[u8]
 aio::http::Req::body_reader: fn body_reader(&self) -> Option<BodyReader>
 aio::http::Req::cookie: fn cookie(&self, name: &str) -> Option<&str>
+aio::http::Req::extra: fn extra(&self, key: &str) -> Option<&serde_json::Value>
 aio::http::Req::header: fn header(&self, name: &str) -> Option<&str>
 aio::http::Req::ip: fn ip(&self) -> IpAddr
 aio::http::Req::json: fn json<T: serde::de::DeserializeOwned>(&self) -> crate::Result<T>
@@ -1027,7 +1093,7 @@ aio::kit::BreadcrumbProps.attributes: Vec<Attribute>
 aio::kit::BreadcrumbProps.class: Prop<String>
 aio::kit::BreadcrumbProps.items: Prop<Vec<Crumb>>
 aio::kit::BreadcrumbProps.label: Prop<String>
-aio::kit::BreadcrumbProps.separator: Prop<String>
+aio::kit::BreadcrumbProps.separator: Option<View>
 aio::kit::Browser: fn Browser(_: BrowserProps) -> View
 aio::kit::Button: fn Button(_: ButtonProps) -> View
 aio::kit::ButtonProps.attributes: Vec<Attribute>
@@ -1047,6 +1113,7 @@ aio::kit::CardProps.footer: Option<View>
 aio::kit::CardProps.title: Option<View>
 aio::kit::Checkbox: fn Checkbox(_: CheckboxProps) -> View
 aio::kit::CheckboxProps.attributes: Vec<Attribute>
+aio::kit::CheckboxProps.bind: Option<super::Bind>
 aio::kit::CheckboxProps.checked: Prop<bool>
 aio::kit::CheckboxProps.class: Prop<String>
 aio::kit::CheckboxProps.disabled: Prop<bool>
@@ -1083,6 +1150,7 @@ aio::kit::ConfirmProps.oncancel: EventHandler<()>
 aio::kit::ConfirmProps.onconfirm: EventHandler<()>
 aio::kit::ConfirmProps.open: Prop<bool>
 aio::kit::ConfirmProps.title: Option<View>
+aio::kit::ConnectPage: fn ConnectPage(_: ConnectPageProps) -> View
 aio::kit::ConnectionStatus: fn ConnectionStatus(_: ConnectionStatusProps) -> View
 aio::kit::ConnectionStatusProps.attributes: Vec<Attribute>
 aio::kit::ConnectionStatusProps.class: Prop<String>
@@ -1102,7 +1170,7 @@ aio::kit::EmptyStateProps.action: Option<View>
 aio::kit::EmptyStateProps.attributes: Vec<Attribute>
 aio::kit::EmptyStateProps.class: Prop<String>
 aio::kit::EmptyStateProps.description: Option<View>
-aio::kit::EmptyStateProps.icon: Prop<Option<String>>
+aio::kit::EmptyStateProps.icon: Option<View>
 aio::kit::EmptyStateProps.title: View
 aio::kit::Field: fn Field(_: FieldProps) -> View
 aio::kit::FieldArray::items: fn items(&self) -> Vec<V>
@@ -1118,10 +1186,12 @@ aio::kit::FieldProps.attributes: Vec<Attribute>
 aio::kit::FieldProps.children: View
 aio::kit::FieldProps.class: Prop<String>
 aio::kit::FieldProps.error: Prop<Option<String>>
-aio::kit::FieldProps.hint: Prop<Option<String>>
+aio::kit::FieldProps.hint: Option<View>
 aio::kit::FieldProps.label: Option<View>
 aio::kit::FieldProps.required: Prop<bool>
 aio::kit::Form::bind: fn bind(self, f: FieldOf<T, String>) -> Bind
+aio::kit::Form::bind_check: fn bind_check(self, f: FieldOf<T, bool>) -> Bind
+aio::kit::Form::bind_parsed: fn bind_parsed<V: std::str::FromStr + std::fmt::Display + 'static>(self, f: FieldOf<T, V>) -> Bind
 aio::kit::Form::checking: fn checking(&self, field: &'static str) -> bool
 aio::kit::Form::dirty: fn dirty(&self) -> bool
 aio::kit::Form::edit: fn edit(self, field: &'static str, f: impl FnOnce(&mut T))
@@ -1138,15 +1208,19 @@ aio::kit::Form::valid: fn valid(&self) -> bool
 aio::kit::Form::values: fn values(&self) -> T
 aio::kit::GlobalKeys: fn GlobalKeys(_: GlobalKeysProps) -> View
 aio::kit::Go::Back
+aio::kit::Go::Css(String)
+aio::kit::Go::DevTools
 aio::kit::Go::Forward
 aio::kit::Go::Reload
 aio::kit::Go::Send { channel: String, args: Vec<serde_json::Value> }
 aio::kit::Go::Stop
+aio::kit::Go::Zoom(f64)
 aio::kit::GuestEvent::Focus
 aio::kit::GuestEvent::Gone { reason: String }
 aio::kit::GuestEvent::Key(HostKey)
 aio::kit::GuestEvent::Message { channel: String, args: Vec<serde_json::Value> }
 aio::kit::GuestEvent::Navigated { url: String, back: bool, forward: bool }
+aio::kit::GuestEvent::PreloadRefused { preload: String, reason: String }
 aio::kit::GuestEvent::Responsive
 aio::kit::GuestEvent::Title { title: String }
 aio::kit::GuestEvent::Unresponsive
@@ -1202,6 +1276,7 @@ aio::kit::Motion.delay_ms: u32
 aio::kit::Motion.easing: &'static str
 aio::kit::Motion.keyframes: &'static str
 aio::kit::Motion.ms: u32
+aio::kit::Motion.tick: Option<fn(f64, f64)>
 aio::kit::Motion::FADE: const Self
 aio::kit::Motion::SCALE: const Self
 aio::kit::Motion::SLIDE: const Self
@@ -1211,10 +1286,13 @@ aio::kit::Motion::ms: const fn ms(self, ms: u32) -> Self
 aio::kit::Motion::new: const fn new(keyframes: &'static str) -> Self
 aio::kit::Motion::of: const fn of(name: &'static str, css: fn(f64) -> String) -> Self
 aio::kit::Motion::rule: fn rule(&self) -> Option<String>
+aio::kit::Motion::ticking: const fn ticking(self, tick: fn(f64, f64)) -> Self
 aio::kit::Motion::total: fn total(&self) -> Duration
 aio::kit::Opt.disabled: bool
 aio::kit::Opt.label: String
 aio::kit::Opt.value: String
+aio::kit::Opt.view: Option<View>
+aio::kit::Opt::view: fn view(self, v: View) -> Self
 aio::kit::Pagination: fn Pagination(_: PaginationProps) -> View
 aio::kit::PaginationProps.attributes: Vec<Attribute>
 aio::kit::PaginationProps.class: Prop<String>
@@ -1224,6 +1302,8 @@ aio::kit::PaginationProps.page: Prop<u32>
 aio::kit::PaginationProps.pages: Prop<u32>
 aio::kit::PaginationProps.window: Prop<u32>
 aio::kit::Placement::Bottom
+aio::kit::Placement::Left
+aio::kit::Placement::Right
 aio::kit::Placement::Top
 aio::kit::Portal: fn Portal(_: PortalProps) -> View
 aio::kit::PortalHost: fn PortalHost(_: PortalHostProps) -> View
@@ -1236,6 +1316,7 @@ aio::kit::ProgressProps.show_value: bool
 aio::kit::ProgressProps.value: Prop<Option<f64>>
 aio::kit::RadioGroup: fn RadioGroup(_: RadioGroupProps) -> View
 aio::kit::RadioGroupProps.attributes: Vec<Attribute>
+aio::kit::RadioGroupProps.bind: Option<super::Bind>
 aio::kit::RadioGroupProps.class: Prop<String>
 aio::kit::RadioGroupProps.disabled: Prop<bool>
 aio::kit::RadioGroupProps.label: Prop<Option<String>>
@@ -1290,6 +1371,7 @@ aio::kit::StackProps.class: Prop<String>
 aio::kit::StackProps.gap: Prop<String>
 aio::kit::Switch: fn Switch(_: SwitchProps) -> View
 aio::kit::SwitchProps.attributes: Vec<Attribute>
+aio::kit::SwitchProps.bind: Option<super::Bind>
 aio::kit::SwitchProps.checked: Prop<bool>
 aio::kit::SwitchProps.class: Prop<String>
 aio::kit::SwitchProps.disabled: Prop<bool>
@@ -1328,7 +1410,6 @@ aio::kit::TextareaProps.onkeydown: Option<EventHandler<KeyboardEvent>>
 aio::kit::TextareaProps.placeholder: Prop<Option<String>>
 aio::kit::TextareaProps.rows: Prop<u32>
 aio::kit::TextareaProps.value: Prop<String>
-aio::kit::TimeTravelPanel: fn TimeTravelPanel(_: TimeTravelPanelProps) -> View
 aio::kit::Toast(_)
 aio::kit::Toast::dismiss: fn dismiss(self)
 aio::kit::ToastHost: fn ToastHost(_: ToastHostProps) -> View
@@ -1404,6 +1485,7 @@ aio::kit::move_item: fn move_item<V>(rows: &mut Vec<V>, from: usize, to: usize)
 aio::kit::moved: fn moved<K: Eq + std::hash::Hash + Clone>(before: &std::collections::HashMap<K, (f64, f64)>, now: &std::collections::HashMap<K, (f64, f64)>) -> std::collections::HashMap<K, (f64, f64)>
 aio::kit::page_window: fn page_window(page: u32, pages: u32, win: u32) -> Vec<u32>
 aio::kit::progress_pct: fn progress_pct(value: Option<f64>, max: f64) -> Option<u32>
+aio::kit::run_js: async fn run_js(id: &str, js: &str) -> Option<serde_json::Value>
 aio::kit::spring_step: fn spring_step(s: Spring, (x, v): (f64, f64), target: f64, dt: f64) -> Option<(f64, f64)>
 aio::kit::tab_step: fn tab_step(disabled: &[bool], from: isize, delta: isize) -> Option<usize>
 aio::kit::theme::sheet: fn sheet(ui: &crate::config::Ui, id: &str, ships_css: bool) -> String
@@ -1416,6 +1498,7 @@ aio::kit::toasts: fn toasts() -> Vec<String>
 aio::kit::unstyled: fn unstyled(page: &str, cls: &str) -> Option<String>
 aio::kit::use_async_rule: fn use_async_rule<T, V, F>(form: Form<T>, field: &'static str, part: fn(&T) -> V, debounce: std::time::Duration, rule: impl Fn(V) -> F + 'static) where T: Clone + PartialEq + 'static, V: Clone + PartialEq + 'static, F: Future<Output = Option<String>> + 'static
 aio::kit::use_back_button: fn use_back_button(f: impl FnMut() -> bool + 'static)
+aio::kit::use_connect_page: fn use_connect_page() -> Signal<Option<String>>
 aio::kit::use_context_select: fn use_context_select<T: Default + 'static, R: PartialEq + 'static>(f: impl Fn(&T) -> R + 'static) -> crate::ui::Memo<R>
 aio::kit::use_field_array: fn use_field_array<V: Clone + PartialEq + 'static>(initial: impl FnOnce() -> Vec<V>) -> FieldArray<V>
 aio::kit::use_form: fn use_form<T: Clone + PartialEq + 'static>(initial: impl FnOnce() -> T, check: fn(&T) -> Problems) -> Form<T>
@@ -1429,6 +1512,7 @@ aio::kit::use_on_change: fn use_on_change<T, C>(selector: impl Fn() -> T + 'stat
 aio::kit::use_on_change_now: fn use_on_change_now<T, C>(selector: impl Fn() -> T + 'static, f: impl FnMut(&T, Option<&T>) -> C + 'static) where T: Clone + PartialEq + 'static, C: Cleanup
 aio::kit::use_spring: fn use_spring(initial: f64, spring: Spring) -> SpringValue
 aio::kit::use_window_event: fn use_window_event(f: impl FnMut(WindowEvent) + 'static)
+aio::kit::use_window_listener: fn use_window_listener(kind: &str, f: impl FnMut(serde_json::Value) + 'static)
 aio::kit::window: fn window(len: usize, row: f64, height: f64, overscan: usize, top: f64) -> std::ops::Range<usize>
 aio::kit::zoom_at: fn zoom_at(view: ZoomView, factor: f64, (px, py): (f64, f64), (min, max): (f64, f64)) -> ZoomView
 aio::lifecycle::alive: fn alive(pid: u32) -> bool
@@ -1443,6 +1527,7 @@ aio::lifecycle::started: fn started(pid: u32) -> Option<String>
 aio::lifecycle::stop: fn stop(child: &mut std::process::Child, budget: std::time::Duration)
 aio::lifecycle::stop_asked: fn stop_asked() -> io::Result<impl Future<Output = ()>>
 aio::lifecycle::stop_code: fn stop_code(stays_down: bool, restart: bool) -> u8
+aio::lifecycle::stopping: fn stopping() -> bool
 aio::lifecycle::terminate: fn terminate(pid: u32, hard: bool) -> io::Result<()>
 aio::lifecycle::wait_gone: fn wait_gone(pid: u32, budget: std::time::Duration)
 aio::lifecycle::watch_parent: fn watch_parent()
@@ -1480,7 +1565,9 @@ aio::merge::Conflict.field: String
 aio::merge::Conflict.local: serde_json::Value
 aio::merge::Conflict.remote: serde_json::Value
 aio::merge::Merge::Counter
+aio::merge::Merge::Keys
 aio::merge::Merge::SetAdd(Option<String>)
+aio::merge::Merge::SetRemove(Option<String>)
 aio::merge::Merge::Text
 aio::merge::Merged.conflict: bool
 aio::merge::Merged.text: String
@@ -1530,9 +1617,11 @@ aio::pairing::local_profile: fn local_profile(data: &std::path::Path, name: &str
 aio::pairing::mint: async fn mint(data: &std::path::Path, plain: bool) -> std::io::Result<String>
 aio::pairing::pair: async fn pair(addr: &str, pin: &str) -> std::io::Result<Profile>
 aio::pairing::pairing: fn pairing() -> std::sync::Arc<Pairing>
+aio::pairing::pin_holds: async fn pin_holds(link: &crate::sync::Link) -> std::io::Result<bool>
 aio::pairing::pin_proof_for: fn pin_proof_for(key: &str, nonce: &str, cert: &str) -> String
 aio::pairing::pin_proof_tag: fn pin_proof_tag(key: &str, nonce: &str) -> String
 aio::pairing::reached_at: fn reached_at(host: Option<&str>, lan: &[std::net::IpAddr]) -> String
+aio::pairing::reprove: async fn reprove(addr: &str, key: &str) -> std::io::Result<String>
 aio::pairing::save: fn save(data: &std::path::Path, addr: &str, p: &Profile) -> std::io::Result<()>
 aio::pairing::saved: fn saved(data: &std::path::Path) -> Option<crate::sync::Link>
 aio::pairing::served_cert: fn served_cert(leaf_der: &[u8], root_pem: &str) -> String
@@ -1557,8 +1646,13 @@ aio::paths::AppDirs.store: std::path::PathBuf
 aio::paths::AppDirs::at: fn at(root: &std::path::Path, id: &str) -> io::Result<Self>
 aio::paths::AppDirs::files: fn files(&self) -> PathBuf
 aio::paths::AppDirs::planned: fn planned(id: &str, p: Plan) -> io::Result<Self>
+aio::paths::Ask.cdp: Option<String>
+aio::paths::Ask.channel: Option<String>
+aio::paths::Ask.client: Option<String>
+aio::paths::Ask.connect: bool
 aio::paths::Ask.dev: bool
 aio::paths::Ask.expose: bool
+aio::paths::Ask.height: Option<String>
 aio::paths::Ask.home: Option<String>
 aio::paths::Ask.host: Option<String>
 aio::paths::Ask.instance: Option<String>
@@ -1567,9 +1661,12 @@ aio::paths::Ask.no_persist: bool
 aio::paths::Ask.no_tls: bool
 aio::paths::Ask.port: Option<String>
 aio::paths::Ask.profile: Option<String>
+aio::paths::Ask.server_url: Option<String>
+aio::paths::Ask.strict_pin: bool
 aio::paths::Ask.takeover: bool
 aio::paths::Ask.tls_cert: Option<String>
 aio::paths::Ask.tls_key: Option<String>
+aio::paths::Ask.width: Option<String>
 aio::paths::Ask::app_args: fn app_args(args: &[String]) -> Vec<String>
 aio::paths::Ask::parse: fn parse(args: &[String]) -> Result<Self, String>
 aio::paths::Plan.asked: bool
@@ -1592,9 +1689,11 @@ aio::paths::electron_store_in: fn electron_store_in(os: &str, env: Env<'_>) -> s
 aio::paths::held_open: fn held_open(e: &io::Error) -> bool
 aio::paths::in_sandbox: fn in_sandbox() -> bool
 aio::paths::locate: fn locate(id: &str) -> io::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)>
+aio::paths::misspelled: fn misspelled(args: &[String], declared: &[String]) -> Option<String>
 aio::paths::old_electron_store: fn old_electron_store() -> std::path::PathBuf
 aio::paths::plan: fn plan(id: &str, port_of: Option<(&str, &crate::config::Home)>, ask: &Ask, env: Env<'_>) -> Result<Plan, String>
 aio::paths::plan_app: fn plan_app(cfg: &crate::config::Config, ask: &Ask) -> io::Result<Plan>
+aio::paths::plan_in: fn plan_in(id: &str, port_of: Option<&str>, rules: &crate::config::Home, ask: &Ask, env: Env<'_>) -> Result<Plan, String>
 aio::paths::private_dir: fn private_dir(d: &std::path::Path) -> io::Result<()>
 aio::paths::rename_over: fn rename_over(from: &std::path::Path, to: &std::path::Path) -> io::Result<()>
 aio::paths::running: fn running(data: &std::path::Path) -> bool
@@ -1658,8 +1757,10 @@ aio::prelude::Cell::ON_STOP: const Option<&'static str>
 aio::prelude::Cell::REDACTED: const &'static [&'static str]
 aio::prelude::Cell::SCHEDULES: const &'static [Declared]
 aio::prelude::Cell::SIGNATURES: const &'static [&'static str]
+aio::prelude::Cell::SKIP_IF_RUNNING: const &'static [&'static str]
 aio::prelude::Cell::TTL: const &'static [&'static str]
 aio::prelude::Cell::UNPREDICTED: const &'static [&'static str]
+aio::prelude::Cell::UNTRAVELED: const &'static [&'static str]
 aio::prelude::Cell::allow: fn allow(&self, who: &Caller, method: &str, args: &Value) -> Result
 aio::prelude::Cell::apply: fn apply(&mut self, cx: &Cx, method: &str, args: Value) -> Result<Value>
 aio::prelude::Cell::async_mode: fn async_mode(method: &str) -> Option<crate::Mode>
@@ -1672,7 +1773,10 @@ aio::prelude::CellData::FIELDS: const &'static [Field]
 aio::prelude::CellData::ID: const &'static str
 aio::prelude::CellData::PERSIST: const bool
 aio::prelude::CellData::PERSIST_INCLUDE: const &'static [&'static str]
+aio::prelude::CellData::REDACT: const bool
 aio::prelude::CellData::RETIRED: const &'static [&'static str]
+aio::prelude::CellData::SAVED: const bool
+aio::prelude::CellData::SCREENED: const bool
 aio::prelude::CellData::SERVER: const &'static [&'static str]
 aio::prelude::CellData::SHARED: const bool
 aio::prelude::CellData::TABLES: const &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)]
@@ -1685,13 +1789,22 @@ aio::prelude::CellData::machine_ends: fn machine_ends() -> Vec<String>
 aio::prelude::CellData::machine_errors: fn machine_errors(methods: &[&str]) -> Vec<String>
 aio::prelude::CellData::migrate: fn migrate(old: Value, from: u32) -> std::result::Result<Self, String>
 aio::prelude::CellData::project: fn project(&self, viewer: &Caller) -> Value
+aio::prelude::CellData::recovered: fn recovered(self, r: &Recovered) -> Self
 aio::prelude::CellData::restore: fn restore(self) -> Self
 aio::prelude::CellData::save: fn save(&self) -> Option<Self>
 aio::prelude::Code::AccessDenied
 aio::prelude::Code::ActionRefused
 aio::prelude::Code::ConnectionLost
+aio::prelude::Code::DispatchAborted
+aio::prelude::Code::DispatchClosed
+aio::prelude::Code::DispatchLoop
+aio::prelude::Code::InitError
+aio::prelude::Code::Other(String)
+aio::prelude::Code::PersistError
+aio::prelude::Code::QueueOverflow
+aio::prelude::Code::ReduceError
 aio::prelude::Code::TxConflict
-aio::prelude::Code::as_str: fn as_str(self) -> &'static str
+aio::prelude::Code::as_str: fn as_str(&self) -> &str
 aio::prelude::Code::of: fn of(v: &Value) -> Option<Self>
 aio::prelude::Cx::abort: fn abort(&self, key: &str)
 aio::prelude::Cx::after: fn after(&self, key: &str, ms: i64, method: &str, args: impl Serialize) -> crate::Result
@@ -1707,6 +1820,7 @@ aio::prelude::Cx::id: fn id(&self) -> Uuid
 aio::prelude::Cx::live_state: fn live_state<T: crate::Cell>(&self) -> Option<Arc<T>>
 aio::prelude::Cx::now: fn now(&self) -> i64
 aio::prelude::Cx::on: fn on<O: crate::Cell>(&self) -> On<'_>
+aio::prelude::Cx::part: fn part(&self, piece: impl Serialize) -> crate::Result<bool>
 aio::prelude::Cx::rand: fn rand(&self) -> u64
 aio::prelude::Cx::role: fn role(&self) -> Option<&str>
 aio::prelude::Cx::run: fn run<T: crate::Cell>(&self, effect: crate::Effect<T>)
@@ -1722,6 +1836,7 @@ aio::prelude::Effect::timeout: fn timeout(self, d: Duration) -> Self
 aio::prelude::Handle::busy: fn busy(&self, key: &str) -> bool
 aio::prelude::Handle::by: fn by(&self, by: By) -> Self
 aio::prelude::Handle::call_from: fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>>
+aio::prelude::Handle::checkpoint: fn checkpoint(&self) -> crate::Result
 aio::prelude::Handle::closing: fn closing(&self) -> bool
 aio::prelude::Handle::done: async fn done(&self, key: &str)
 aio::prelude::Handle::enabled: fn enabled(&self) -> bool
@@ -1752,6 +1867,7 @@ aio::prelude::Handle::watch: fn watch<R: PartialEq + Send + 'static>(&self, f: i
 aio::prelude::Hidden::get: fn get(&self) -> Option<&T>
 aio::prelude::Hidden::into_inner: fn into_inner(self) -> Option<T>
 aio::prelude::Hidden::new: fn new(value: T) -> Self
+aio::prelude::Hidden::withheld: fn withheld() -> Self
 aio::prelude::Mode::First
 aio::prelude::Mode::Newest
 aio::prelude::Mode::Queue
@@ -1765,6 +1881,7 @@ aio::prelude::Rejected::new: fn new(why: impl Into<String>) -> Self
 aio::prelude::Rejected::unknown: fn unknown(method: &str) -> Self
 aio::prelude::Store::call: fn call(&mut self, by: &By, method: &str, args: Value) -> Result<Value>
 aio::prelude::Store::call_from: fn call_from(&mut self, by: &By, method: &str, args: Value, op: &str) -> Result<Option<Value>>
+aio::prelude::Store::checkpoint: fn checkpoint(&mut self) -> Result
 aio::prelude::Store::drop_cell: fn drop_cell(&self, cell: &str) -> Result<bool, Error>
 aio::prelude::Store::durability: fn durability(&self) -> Result<crate::config::Durability, Error>
 aio::prelude::Store::events: fn events(&self) -> Result<Vec<Event>, Error>
@@ -1779,6 +1896,7 @@ aio::prelude::Store::newest: fn newest(&self, n: usize) -> Result<Vec<Event>, Er
 aio::prelude::Store::open: fn open(path: impl AsRef<Path>) -> Result<Self, Error>
 aio::prelude::Store::open_aio: fn open_aio(path: impl AsRef<Path>, app: &str) -> Result<Self, Error>
 aio::prelude::Store::position: fn position(&self) -> Result<Position, Error>
+aio::prelude::Store::quarantined: fn quarantined(&self) -> Option<&str>
 aio::prelude::Store::recovered: fn recovered(&self) -> Option<&Recovered>
 aio::prelude::Store::rewind: fn rewind(&mut self, by: &By, seq: u64) -> Result
 aio::prelude::Store::schedules: fn schedules(&self) -> Result<Vec<Due>, Error>
@@ -1792,6 +1910,7 @@ aio::prelude::Store::state: fn state(&self) -> &T
 aio::prelude::Store::state_at: fn state_at(&self, seq: u64) -> Result<T, Error>
 aio::prelude::Store::took: fn took(&self, seq: u64) -> Option<std::time::Duration>
 aio::prelude::Store::travel: fn travel(&mut self, by: &By, t: Travel) -> Result<u64>
+aio::prelude::Store::travel_steps: fn travel_steps(&self, n: usize) -> Result<Vec<Event>, Error>
 aio::prelude::Store::with: fn with(state: T) -> Self
 aio::process::Child::close_stdin: fn close_stdin(&mut self)
 aio::process::Child::id: fn id(&self) -> u32
@@ -1850,9 +1969,12 @@ aio::report::Context.state: serde_json::Map<String, serde_json::Value>
 aio::report::Context.timeline: Vec<serde_json::Value>
 aio::report::Context.withheld: Vec<String>
 aio::report::Diagnostic.at: i64
+aio::report::Diagnostic.call: Option<u64>
+aio::report::Diagnostic.cell: Option<String>
 aio::report::Diagnostic.held: u64
 aio::report::Diagnostic.kind: String
 aio::report::Diagnostic.message: String
+aio::report::Diagnostic.numbers: Vec<(&'static str, i64)>
 aio::report::Diagnostic.severity: Severity
 aio::report::Diagnostic.tip: Option<&'static str>
 aio::report::Diagnostic::code: fn code(&self) -> Code
@@ -1896,6 +2018,7 @@ aio::route::Loc::query: fn query(&self, key: &str) -> Option<String>
 aio::route::Nest.params: Params
 aio::route::Nest.pattern: String
 aio::route::Nest::child: fn child(&self, path: &str, index: bool, layout: bool, at: &str) -> Option<Nest>
+aio::route::base_of: fn base_of(path: &str) -> String
 aio::route::decode: fn decode(s: &str) -> String
 aio::route::fill: fn fill(pattern: &str, params: &[(&str, String)]) -> String
 aio::route::is_active: fn is_active(to: &str, here: &Loc, exact: bool) -> bool
@@ -1910,6 +2033,7 @@ aio::route::resolve: fn resolve(to: &str, from: &Loc) -> Option<Loc>
 aio::route::start: fn start(args: impl IntoIterator<Item = String>) -> String
 aio::route::start_place: fn start_place() -> String
 aio::route::step_back: fn step_back(h: &mut History) -> bool
+aio::route::unbased: fn unbased(base: &str, address: &str) -> String
 aio::rt: fn rt() -> &'static tokio::runtime::Runtime
 aio::security::Page.headers: Vec<(&'static str, String)>
 aio::security::Page::new: fn new(s: &Security, hosts: &[String], own_cert: bool) -> Result<Self, String>
@@ -1937,11 +2061,13 @@ aio::sync::Live::seq: fn seq(&self) -> u64
 aio::sync::Live::travel: async fn travel(&mut self, cmd: &str, to: Option<u64>) -> Result<Value>
 aio::sync::Live::version: fn version(&self) -> u64
 aio::sync::Live::view: fn view(&self) -> &Value
+aio::sync::Options.app: String
 aio::sync::Options.auth: Option<std::sync::Arc<crate::auth::Auth>>
 aio::sync::Options.hosts: Vec<String>
 aio::sync::Options.http: crate::http::Http
 aio::sync::Options.limits: Limits
 aio::sync::Options.open: bool
+aio::sync::Options.page_log: bool
 aio::sync::Options.pairing: Option<std::sync::Arc<crate::pairing::Pairing>>
 aio::sync::Options.security: crate::security::Security
 aio::sync::Options.strict_origin: bool
@@ -1951,6 +2077,7 @@ aio::sync::Options.trust_proxy: Option<String>
 aio::sync::Remote::call_confirmed: fn call_confirmed(&self, method: &str, args: Value) -> Result<Value>
 aio::sync::Remote::confirmed: fn confirmed(&self) -> Arc<T>
 aio::sync::Remote::connect: async fn connect(addr: &str, token: &str, user: &str) -> std::io::Result<Self>
+aio::sync::Remote::connect_later: async fn connect_later(link: Option<Link>, user: &str, file: &std::path::Path) -> std::io::Result<(Self, Option<std::io::Error>)>
 aio::sync::Remote::connect_saved: async fn connect_saved(link: Link, user: &str, file: &std::path::Path) -> std::io::Result<Self>
 aio::sync::Remote::connect_to: async fn connect_to(link: Link, user: &str) -> std::io::Result<Self>
 aio::sync::Remote::listen: fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static)
@@ -1960,17 +2087,22 @@ aio::sync::Remote::on_patch: fn on_patch(&self, f: impl Fn(&Value) + Send + Sync
 aio::sync::Remote::on_refused: fn on_refused(&self, f: impl Fn(&str, &Rejected) + Send + Sync + 'static)
 aio::sync::Remote::on_sync: fn on_sync(&self, f: impl Fn(&Synced) + Send + Sync + 'static)
 aio::sync::Remote::on_tell: fn on_tell(&self, f: impl Fn(&crate::tell::Tell) + Send + Sync + 'static)
+aio::sync::Remote::on_unreached: fn on_unreached(&self, f: impl Fn(&std::io::Error) + Send + Sync + 'static)
 aio::sync::Remote::online: fn online(&self) -> bool
 aio::sync::Remote::pending: fn pending(&self) -> usize
 aio::sync::Remote::pending_of: fn pending_of(&self, method: &str) -> usize
+aio::sync::Remote::relink: fn relink(&self, link: Link)
 aio::sync::Remote::retain: fn retain(&self, keep: Option<Duration>)
 aio::sync::Remote::rtt: fn rtt(&self) -> Option<Duration>
 aio::sync::Remote::run: async fn run<A: serde::Serialize, R: serde::de::DeserializeOwned>(&self, f: crate::fns::ServerFn<A, R>, args: A) -> Result<R>
 aio::sync::Remote::run_streamed: async fn run_streamed<A: serde::Serialize, R: serde::de::DeserializeOwned, C: serde::de::DeserializeOwned>(&self, f: crate::fns::ServerFn<A, R>, args: A, on_part: impl FnMut(C)) -> Result<R>
 aio::sync::Remote::seq: fn seq(&self) -> u64
+aio::sync::Remote::signed_out: fn signed_out(&self) -> bool
 aio::sync::Remote::state: fn state(&self) -> Arc<T>
 aio::sync::Remote::status: fn status(&self) -> crate::Status
+aio::sync::Remote::stream: fn stream<C: serde::de::DeserializeOwned>(&self, method: &str, args: Value, on_part: impl FnMut(C) + Send + 'static) -> Result<crate::Answer>
 aio::sync::Remote::timeout: fn timeout(&self, method: &str, wait: Option<Duration>)
+aio::sync::Remote::token_with: fn token_with(&self, f: impl Fn() -> String + Send + Sync + 'static)
 aio::sync::Serving.host: Option<String>
 aio::sync::Serving.port: u16
 aio::sync::Serving.tls: bool
@@ -1987,6 +2119,7 @@ aio::sync::serve_with: async fn serve_with<T: Cell>(h: crate::Handle<T>, listene
 aio::tell::Tell::Icon { window: Option<Vec<String>>, tray: Option<Vec<String>>, tooltip: Option<String>, fps: u8 }
 aio::tell::Tell::Notify { title: String, body: String, tag: Option<String>, silent: bool, route: Option<String> }
 aio::tell::Tell::check: fn check(&self) -> crate::Result
+aio::tell::Tell::line: fn line(&self) -> String
 aio::tell::Tell::notify: fn notify(title: &str, body: &str) -> Self
 aio::tell::show: fn show(t: &Tell) -> bool
 aio::tell::show_with: fn show_with(f: impl Fn(&Tell) + Send + Sync + 'static)
@@ -2079,6 +2212,7 @@ aio::testing::TestIo.style: crate::cli::Style
 aio::testing::TestIo::color: fn color(self, on: bool) -> Self
 aio::testing::TestIo::err: fn err(&self) -> Box<dyn std::io::Write + Send>
 aio::testing::TestIo::new: fn new(input: &str) -> Self
+aio::testing::TestIo::run: fn run(&mut self, argv: &[&str], main: impl FnOnce(&mut Self)) -> i32
 aio::testing::TestIo::stderr: fn stderr(&self) -> String
 aio::testing::TestIo::stdout: fn stdout(&self) -> String
 aio::testing::TestIo::tty: fn tty(self, on: bool) -> Self
@@ -2178,6 +2312,7 @@ aio::testing::dump: fn dump(state: &impl Serialize, max: usize) -> String
 aio::testing::expect: fn expect<T: Cell>(door: &impl Door<T>, what: &str, f: impl FnOnce(&T) -> bool)
 aio::testing::fails: fn fails(f: impl FnOnce()) -> String
 aio::testing::patches: fn patches<T: Cell>(client: &crate::sync::Remote<T>) -> Patches
+aio::testing::quarantine: fn quarantine(on: bool)
 aio::testing::seeded: fn seeded<T: CellData>(seed: serde_json::Value) -> T
 aio::testing::seeded_source: fn seeded_source<T: Cell>(seed: serde_json::Value) -> crate::Source<T>
 aio::testing::smoke: fn smoke(bundle: &std::path::Path) -> String
@@ -2187,6 +2322,7 @@ aio::tls::Tls.own: bool
 aio::tls::Tls.root_pem: String
 aio::tls::Tls.server: std::sync::Arc<rustls::ServerConfig>
 aio::tls::client: fn client(root_pem: &str) -> io::Result<std::sync::Arc<rustls::ClientConfig>>
+aio::tls::interfaces: fn interfaces() -> Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)>
 aio::tls::local_addrs: fn local_addrs() -> Vec<std::net::IpAddr>
 aio::tls::own: fn own(cert: &std::path::Path, key: &std::path::Path) -> io::Result<Tls>
 aio::tls::permitted: fn permitted(ip: std::net::IpAddr) -> bool
@@ -2224,6 +2360,7 @@ aio::ui::links: fn links() -> tokio::sync::mpsc::UnboundedReceiver<String>
 aio::ui::local_file_url: fn local_file_url(abs: &str) -> String
 aio::ui::new_id: fn new_id() -> String
 aio::ui::numbered: fn numbered(bases: Vec<String>) -> Vec<String>
+aio::ui::on_change: fn on_change<T: Clone + PartialEq + 'static>(read: impl FnMut() -> T + 'static, f: impl FnMut(&T, &T) + 'static)
 aio::ui::open_link: fn open_link(url: &str)
 aio::ui::page_css: fn page_css(sheets: &[&str], scheme: impl Into<Scheme>) -> String
 aio::ui::page_sheet: fn page_sheet() -> String
@@ -2234,6 +2371,7 @@ aio::ui::prelude::Eval::send: fn send(&self, v: impl Serialize) -> Result<(), Ev
 aio::ui::prelude::EvalError::Finished(String)
 aio::ui::prelude::EvalError::Serialization(String)
 aio::ui::prelude::eval: fn eval(js: &str) -> Eval
+aio::ui::prelude::on_change: fn on_change<T: Clone + PartialEq + 'static>(read: impl FnMut() -> T + 'static, f: impl FnMut(&T, &T) + 'static)
 aio::ui::scheme: fn scheme() -> Scheme
 aio::ui::set_look: fn set_look(look: crate::config::Look)
 aio::ui::set_scheme: fn set_scheme(s: Scheme)
@@ -2260,7 +2398,9 @@ aio::update::Manifest.key: String
 aio::update::Manifest.release: Release
 aio::update::Manifest.signature: String
 aio::update::Offer.key: String
+aio::update::Offer.migrates: bool
 aio::update::Offer.notes: String
+aio::update::Offer.reason: String
 aio::update::Offer.released_at: String
 aio::update::Offer.size: u64
 aio::update::Offer.staged: bool
@@ -2284,6 +2424,8 @@ aio::update::Phase::Error
 aio::update::Phase::Idle
 aio::update::Phase::Installing
 aio::update::Phase::Restarting
+aio::update::ProgressOf::App
+aio::update::ProgressOf::Runtime
 aio::update::Ready.backup: Option<String>
 aio::update::Ready.channel: String
 aio::update::Ready.current: String
@@ -2291,10 +2433,12 @@ aio::update::Ready.retired: Option<String>
 aio::update::Ready.rolled_back: Option<String>
 aio::update::Release.arch: String
 aio::update::Release.channel: String
+aio::update::Release.commit: Option<String>
 aio::update::Release.data: Contract
 aio::update::Release.file: String
 aio::update::Release.format: u32
 aio::update::Release.id: String
+aio::update::Release.min_from: Option<String>
 aio::update::Release.notes: String
 aio::update::Release.os: String
 aio::update::Release.released_at: String
@@ -2308,6 +2452,7 @@ aio::update::Runtime::apply: fn apply(&self, version: &str, data: Data, step: &d
 aio::update::Runtime::check: fn check(&self) -> std::result::Result<Found, String>
 aio::update::Step::Downloaded(u8)
 aio::update::Step::Installing
+aio::update::Step::Runtime(u8)
 aio::update::Stub(Found)
 aio::update::Updates.available: Option<Offer>
 aio::update::Updates.backup: Option<String>
@@ -2322,6 +2467,7 @@ aio::update::Updates.on: bool
 aio::update::Updates.phase: Phase
 aio::update::Updates.pinned: Option<String>
 aio::update::Updates.progress: u8
+aio::update::Updates.progress_of: Option<ProgressOf>
 aio::update::Updates.retired: Option<String>
 aio::update::Updates::applied: fn applied(&mut self, r: std::result::Result<(), String>)
 aio::update::Updates::apply: fn apply(&mut self, cx: &Cx) -> Result
@@ -2332,6 +2478,7 @@ aio::update::Updates::dismiss: fn dismiss(&mut self)
 aio::update::Updates::installing: fn installing(&mut self)
 aio::update::Updates::progress: fn progress(&mut self, percent: u8)
 aio::update::Updates::ready: fn ready(&mut self, r: Ready)
+aio::update::Updates::runtime_progress: fn runtime_progress(&mut self, percent: u8)
 aio::update::Updates::set_channel: fn set_channel(&mut self, channel: String) -> Result
 aio::update::Updates::start_fresh: fn start_fresh(&mut self, cx: &Cx) -> Result
 aio::update::Updates::undismiss: fn undismiss(&mut self)
@@ -2344,28 +2491,34 @@ aio::update::UpdatesCalls::dismiss: fn dismiss(&self) -> ::aio::Result<()>
 aio::update::UpdatesCalls::installing: fn installing(&self) -> ::aio::Result<()>
 aio::update::UpdatesCalls::progress: fn progress(&self, percent: u8) -> ::aio::Result<()>
 aio::update::UpdatesCalls::ready: fn ready(&self, r: Ready) -> ::aio::Result<()>
+aio::update::UpdatesCalls::runtime_progress: fn runtime_progress(&self, percent: u8) -> ::aio::Result<()>
 aio::update::UpdatesCalls::set_channel: fn set_channel(&self, channel: String) -> ::aio::Result<()>
 aio::update::UpdatesCalls::start_fresh: fn start_fresh(&self) -> ::aio::Result<()>
 aio::update::UpdatesCalls::undismiss: fn undismiss(&self) -> ::aio::Result<()>
 aio::update::allowed_signers: fn allowed_signers(keys: &[String]) -> Result<String, String>
+aio::update::below_min_from: fn below_min_from(r: &Release, current: &str) -> Option<String>
 aio::update::blockers: fn blockers(contract: &Contract, local: &Contract) -> Vec<String>
 aio::update::can_apply: fn can_apply(veto: Veto)
 aio::update::channel: fn channel<'a>(env: Option<&'a str>, pinned: Option<&'a str>, stamp: Option<&'a str>, config: &'a str) -> &'a str
 aio::update::check: fn check(m: &Manifest, trusted: &[String], expect: &Expect<'_>) -> Result<Vec<String>, String>
+aio::update::check_served: fn check_served(bytes: &[u8], trusted: &[String], expect: &Expect<'_>) -> Result<(Manifest, Vec<String>), String>
 aio::update::compare: fn compare(a: &str, b: &str) -> Option<std::cmp::Ordering>
 aio::update::contract: fn contract() -> Contract
 aio::update::follow: fn follow(trusted: &[String], roster: &Roster) -> Result<Vec<String>, String>
 aio::update::follows_prereleases: fn follows_prereleases(prerelease: Option<bool>, current: &str, channel: &str) -> bool
 aio::update::git_ref_commit: fn git_ref_commit(ls_remote: &str, name: &str) -> Result<String, String>
 aio::update::install: fn install(rt: std::sync::Arc<dyn Runtime>)
+aio::update::installed: fn installed() -> bool
 aio::update::keygen: fn keygen() -> Result<(Vec<u8>, String), String>
 aio::update::local_data: fn local_data(store: &std::path::Path) -> Result<Option<Contract>, String>
+aio::update::migrates: fn migrates(contract: &Contract, local: Option<&Contract>) -> bool
 aio::update::newer: fn newer(release: &str, current: &str, prereleases: bool) -> bool
 aio::update::parse_version: fn parse_version(v: &str) -> Option<(Vec<u64>, Option<String>)>
 aio::update::patch_for: fn patch_for<'a>(p: &'a Patches, m: &Manifest, installed: &str) -> Result<&'a Patch, String>
 aio::update::public_key: fn public_key(pkcs8: &[u8]) -> Result<String, String>
 aio::update::release_dir: fn release_dir(url: &str, channel: &str) -> String
 aio::update::roster: fn roster(keys: &[String], signers: &[Vec<u8>]) -> Result<Roster, String>
+aio::update::share: fn share(h: Handle<Updates>)
 aio::update::sign: fn sign(release: Release, pkcs8: &[u8]) -> Result<Manifest, String>
 aio::update::sign_patches: fn sign_patches(m: &Manifest, patches: Vec<Patch>, pkcs8: &[u8]) -> Result<Patches, String>
 aio::update::sign_with: fn sign_with(pkcs8: &[u8], msg: &[u8]) -> Result<String, String>
@@ -2385,6 +2538,12 @@ aio::vitals::Hint.severity: Severity
 aio::vitals::Layer.measured: u64
 aio::vitals::Layer.since: Option<i64>
 aio::vitals::Layer.status: Status
+aio::vitals::Link.cell: String
+aio::vitals::Link.gap: u64
+aio::vitals::Link.id: u64
+aio::vitals::Link.last_bytes: u64
+aio::vitals::Link.total_bytes: u64
+aio::vitals::Loop.drained: u64
 aio::vitals::Loop.last: Option<(String, u64)>
 aio::vitals::Loop.layer: Layer
 aio::vitals::Loop.queue: u64
@@ -2409,6 +2568,7 @@ aio::vitals::probe: fn probe(late: u64, since: Option<i64>, t: &Vitals) -> Loop
 aio::vitals::render_step: fn render_step(line: &str) -> Option<(Status, u64)>
 aio::vitals::rendered: fn rendered(status: Status, ms: u64, at: i64) -> Snapshot
 aio::vitals::says: fn says(step: Status, lp: &Loop, t: &Vitals) -> String
+aio::vitals::served: fn served(links: &[Link], cells: &[(&str, usize, bool)], t: &Vitals) -> serde_json::Value
 aio::vitals::set: fn set(v: Vitals)
 aio::vitals::severity: fn severity(probes: u32, measured: bool, agree: bool) -> Severity
 aio::vitals::snapshot: fn snapshot() -> (Snapshot, bool)
@@ -2438,6 +2598,7 @@ aio::web::storage::Queued.op: String
 aio::web::storage::Queued.waits: bool
 aio::web::storage::Queued::msg: fn msg(&self) -> Value
 aio::web::storage::adopt: fn adopt(mine: &[Queued], theirs: &Doc, user: &str, done: &std::collections::HashSet<String>) -> Vec<Queued>
+aio::web::storage::current: fn current(kv: &impl Kv, key: &str, d: Doc, cell: &str, v: u32, say: impl Fn(&str)) -> Option<Doc>
 aio::web::storage::declare: fn declare(have: &mut Vec<Due>, declared: &[crate::Declared], now: i64) -> Result<(), String>
 aio::web::storage::key: fn key(app: &str, cell: &str) -> String
 aio::web::storage::load: fn load(kv: &impl Kv, key: &str, say: impl Fn(&str)) -> Option<Doc>
@@ -2468,13 +2629,16 @@ const aio::auth::budget::MAILS: (usize, i64)
 const aio::auth::budget::SIGNUPS: (usize, i64)
 const aio::auth::budget::WORK: (usize, i64)
 const aio::auth::client::SESSION_HEADER: &str
+const aio::auth::client::SSO_WAIT: std::time::Duration
 const aio::auth::password::ITERATIONS: u32
 const aio::auth::totp::STEP_MS: i64
+const aio::big::SLOW_COMPARE: std::time::Duration
 const aio::blobs::URL_PREFIX: &str
 const aio::budgets::STATE_ERROR: u64
 const aio::budgets::STATE_WARN: u64
 const aio::cli::ERROR: i32
 const aio::cli::OK: i32
+const aio::cli::TICK: std::time::Duration
 const aio::cli::USAGE: i32
 const aio::cost::KEPT: i64
 const aio::cpace::SUITE: &str
@@ -2508,12 +2672,14 @@ const aio::page::DIALOG: &str
 const aio::page::DRAG: &str
 const aio::page::ENTER: &str
 const aio::page::FOCUS: &str
+const aio::page::ID_AUDIT: &str
 const aio::page::KEYS: &str
 const aio::page::OVERLAY: &str
 const aio::page::PREVENT: &str
 const aio::page::RENDER: &str
 const aio::page::REVEAL: &str
 const aio::page::RUN: &str
+const aio::page::TRAVEL_KEY: &str
 const aio::page::WEB: &str
 const aio::page::WHEEL: &str
 const aio::pairing::OFFER_TTL: std::time::Duration
@@ -2523,8 +2689,9 @@ const aio::pairing::TOTAL: u32
 const aio::patch::APPEND_MIN: usize
 const aio::paths::BACKOFF_MS: [u64; 10]
 const aio::paths::ELECTRON: &str
-const aio::paths::FLAGS: [&str; 12]
+const aio::paths::FLAGS: [&str; 20]
 const aio::paths::HELD_COOLDOWN: std::time::Duration
+const aio::paths::HOST_FLAGS: [&str; 5]
 const aio::perf::QUIET: std::time::Duration
 const aio::report::AUTO_CAP: usize
 const aio::report::LOG_LINES: usize
@@ -2536,6 +2703,7 @@ const aio::report::TIMELINE: usize
 const aio::route::HISTORY_MAX: usize
 const aio::sync::CALL_TIMEOUT: std::time::Duration
 const aio::sync::DEAD: std::time::Duration
+const aio::sync::PAGE_LINES_PER_SEC: u32
 const aio::sync::PENDING_MAX: usize
 const aio::sync::PING: std::time::Duration
 const aio::sync::SEND_TIMEOUT: std::time::Duration
@@ -2567,6 +2735,7 @@ enum aio::effect::Mode
 enum aio::feedback::Status
 enum aio::fns::Access
 enum aio::health::Memory
+enum aio::health::Trend
 enum aio::health::Unit
 enum aio::held::State<T>
 enum aio::http::SameSite
@@ -2599,6 +2768,7 @@ enum aio::ui::prelude::EvalError
 enum aio::update::Data
 enum aio::update::Found
 enum aio::update::Phase
+enum aio::update::ProgressOf
 enum aio::update::Step
 enum aio::vitals::Severity
 impl Cell for Feedback
@@ -2691,6 +2861,7 @@ impl Clone for InputProps
 impl Clone for Inputs
 impl Clone for Island
 impl Clone for Kind
+impl Clone for Known
 impl Clone for Layer
 impl Clone for Layout
 impl Clone for Link
@@ -2717,6 +2888,7 @@ impl Clone for Moment
 impl Clone for Motion
 impl Clone for MountedComponent
 impl Clone for Move
+impl Clone for Near
 impl Clone for Nest
 impl Clone for Offer
 impl Clone for Oidc
@@ -2740,6 +2912,7 @@ impl Clone for Plan
 impl Clone for Position
 impl Clone for Presence
 impl Clone for Profile
+impl Clone for ProgressOf
 impl Clone for ProgressProps
 impl Clone for Queued
 impl Clone for RadioGroupProps
@@ -2763,6 +2936,7 @@ impl Clone for Saved
 impl Clone for Seen
 impl Clone for SelectProps
 impl Clone for Seqs
+impl Clone for Server
 impl Clone for Session
 impl Clone for Severity
 impl Clone for Sha256
@@ -2800,6 +2974,7 @@ impl Clone for TooltipProps
 impl Clone for Track
 impl Clone for Transaction
 impl Clone for Travel
+impl Clone for Trend
 impl Clone for Trigger
 impl Clone for Unit
 impl Clone for Updates
@@ -2833,6 +3008,7 @@ impl Copy for Phase
 impl Copy for Phases
 impl Copy for Placement
 impl Copy for Position
+impl Copy for ProgressOf
 impl Copy for SameSite
 impl Copy for Seen
 impl Copy for Severity
@@ -2850,6 +3026,7 @@ impl Copy for Toast
 impl Copy for Tone
 impl Copy for Transaction
 impl Copy for Travel
+impl Copy for Trend
 impl Copy for Trigger
 impl Copy for Unit
 impl Copy for Variant
@@ -2920,6 +3097,7 @@ impl Debug for Inline
 impl Debug for Inputs
 impl Debug for Island
 impl Debug for Kind
+impl Debug for Known
 impl Debug for Layer
 impl Debug for Layout
 impl Debug for Link
@@ -2942,6 +3120,7 @@ impl Debug for Moment
 impl Debug for Motion
 impl Debug for MountedComponent
 impl Debug for Move
+impl Debug for Near
 impl Debug for Nest
 impl Debug for Offer
 impl Debug for Op
@@ -2963,6 +3142,7 @@ impl Debug for Plan
 impl Debug for Position
 impl Debug for Presence
 impl Debug for Profile
+impl Debug for ProgressOf
 impl Debug for Queued
 impl Debug for Reading
 impl Debug for Ready
@@ -2983,6 +3163,7 @@ impl Debug for Sampler
 impl Debug for Saved
 impl Debug for Seen
 impl Debug for Seqs
+impl Debug for Server
 impl Debug for Serving
 impl Debug for Session
 impl Debug for Severity
@@ -2993,6 +3174,7 @@ impl Debug for Slice
 impl Debug for Snapshot
 impl Debug for Spec
 impl Debug for Spring
+impl Debug for Sso
 impl Debug for Status
 impl Debug for Step
 impl Debug for Stop
@@ -3010,6 +3192,7 @@ impl Debug for Tone
 impl Debug for Track
 impl Debug for Transaction
 impl Debug for Travel
+impl Debug for Trend
 impl Debug for Trigger
 impl Debug for Unit
 impl Debug for Updates
@@ -3047,6 +3230,7 @@ impl Default for Heads
 impl Default for HostKey
 impl Default for Http
 impl Default for Inputs
+impl Default for Known
 impl Default for Loc
 impl Default for Me
 impl Default for Merged
@@ -3072,6 +3256,7 @@ impl Default for Rows
 impl Default for Sampler
 impl Default for Saved
 impl Default for Seqs
+impl Default for Server
 impl Default for Sha256
 impl Default for Size
 impl Default for Snapshot
@@ -3142,6 +3327,8 @@ impl Eq for Info
 impl Eq for Inputs
 impl Eq for Island
 impl Eq for Kind
+impl Eq for Known
+impl Eq for Link
 impl Eq for Listen
 impl Eq for Loc
 impl Eq for Login
@@ -3154,6 +3341,7 @@ impl Eq for Merged
 impl Eq for Mode
 impl Eq for MountedComponent
 impl Eq for Move
+impl Eq for Near
 impl Eq for Offer
 impl Eq for Outcome
 impl Eq for Paint
@@ -3167,6 +3355,7 @@ impl Eq for Placement
 impl Eq for Plan
 impl Eq for Position
 impl Eq for Presence
+impl Eq for ProgressOf
 impl Eq for Reading
 impl Eq for Ready
 impl Eq for Refusal
@@ -3180,6 +3369,7 @@ impl Eq for Row
 impl Eq for SameSite
 impl Eq for Saved
 impl Eq for Seen
+impl Eq for Server
 impl Eq for Session
 impl Eq for Severity
 impl Eq for Signed
@@ -3197,6 +3387,7 @@ impl Eq for Toast
 impl Eq for Tone
 impl Eq for Transaction
 impl Eq for Travel
+impl Eq for Trend
 impl Eq for Unit
 impl Eq for User
 impl Eq for Variant
@@ -3275,7 +3466,9 @@ impl PartialEq for Inline
 impl PartialEq for Inputs
 impl PartialEq for Island
 impl PartialEq for Kind
+impl PartialEq for Known
 impl PartialEq for Layer
+impl PartialEq for Link
 impl PartialEq for Listen
 impl PartialEq for Load
 impl PartialEq for Loc
@@ -3296,6 +3489,7 @@ impl PartialEq for Moment
 impl PartialEq for Motion
 impl PartialEq for MountedComponent
 impl PartialEq for Move
+impl PartialEq for Near
 impl PartialEq for Nest
 impl PartialEq for Offer
 impl PartialEq for Op
@@ -3313,6 +3507,7 @@ impl PartialEq for Plan
 impl PartialEq for Position
 impl PartialEq for Presence
 impl PartialEq for Profile
+impl PartialEq for ProgressOf
 impl PartialEq for Queued
 impl PartialEq for Reading
 impl PartialEq for Ready
@@ -3330,6 +3525,7 @@ impl PartialEq for Rows
 impl PartialEq for SameSite
 impl PartialEq for Saved
 impl PartialEq for Seen
+impl PartialEq for Server
 impl PartialEq for Serving
 impl PartialEq for Session
 impl PartialEq for Severity
@@ -3356,6 +3552,7 @@ impl PartialEq for Tone
 impl PartialEq for Track
 impl PartialEq for Transaction
 impl PartialEq for Travel
+impl PartialEq for Trend
 impl PartialEq for Trigger
 impl PartialEq for Unit
 impl PartialEq for Updates
@@ -3415,12 +3612,14 @@ impl Serialize for Patch
 impl Serialize for PatchList
 impl Serialize for Patches
 impl Serialize for Phase
+impl Serialize for ProgressOf
 impl Serialize for Queued
 impl Serialize for Reading
 impl Serialize for Ready
 impl Serialize for Release
 impl Serialize for Roster
 impl Serialize for Saved
+impl Serialize for Server
 impl Serialize for Serving
 impl Serialize for Session
 impl Serialize for Status
@@ -3487,7 +3686,9 @@ impl StructuralPartialEq for Inline
 impl StructuralPartialEq for Inputs
 impl StructuralPartialEq for Island
 impl StructuralPartialEq for Kind
+impl StructuralPartialEq for Known
 impl StructuralPartialEq for Layer
+impl StructuralPartialEq for Link
 impl StructuralPartialEq for Listen
 impl StructuralPartialEq for Loc
 impl StructuralPartialEq for Login
@@ -3506,6 +3707,7 @@ impl StructuralPartialEq for Mode
 impl StructuralPartialEq for Moment
 impl StructuralPartialEq for MountedComponent
 impl StructuralPartialEq for Move
+impl StructuralPartialEq for Near
 impl StructuralPartialEq for Nest
 impl StructuralPartialEq for Offer
 impl StructuralPartialEq for Op
@@ -3523,6 +3725,7 @@ impl StructuralPartialEq for Plan
 impl StructuralPartialEq for Position
 impl StructuralPartialEq for Presence
 impl StructuralPartialEq for Profile
+impl StructuralPartialEq for ProgressOf
 impl StructuralPartialEq for Queued
 impl StructuralPartialEq for Reading
 impl StructuralPartialEq for Ready
@@ -3540,6 +3743,7 @@ impl StructuralPartialEq for Rows
 impl StructuralPartialEq for SameSite
 impl StructuralPartialEq for Saved
 impl StructuralPartialEq for Seen
+impl StructuralPartialEq for Server
 impl StructuralPartialEq for Serving
 impl StructuralPartialEq for Session
 impl StructuralPartialEq for Severity
@@ -3566,6 +3770,7 @@ impl StructuralPartialEq for Tone
 impl StructuralPartialEq for Track
 impl StructuralPartialEq for Transaction
 impl StructuralPartialEq for Travel
+impl StructuralPartialEq for Trend
 impl StructuralPartialEq for Trigger
 impl StructuralPartialEq for Unit
 impl StructuralPartialEq for Updates
@@ -3586,7 +3791,8 @@ impl<'a> Debug for Expect<'a>
 impl<'a> Eq for Expect<'a>
 impl<'a> PartialEq for Expect<'a>
 impl<'a> StructuralPartialEq for Expect<'a>
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Hidden<T>
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Big<T>
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Hidden<T>
 impl<'de> Deserialize<'de> for Blob
 impl<'de> Deserialize<'de> for Blocked
 impl<'de> Deserialize<'de> for By
@@ -3609,11 +3815,13 @@ impl<'de> Deserialize<'de> for PatchList
 impl<'de> Deserialize<'de> for Patches
 impl<'de> Deserialize<'de> for Phase
 impl<'de> Deserialize<'de> for Profile
+impl<'de> Deserialize<'de> for ProgressOf
 impl<'de> Deserialize<'de> for Queued
 impl<'de> Deserialize<'de> for Ready
 impl<'de> Deserialize<'de> for Release
 impl<'de> Deserialize<'de> for Roster
 impl<'de> Deserialize<'de> for Saved
+impl<'de> Deserialize<'de> for Server
 impl<'de> Deserialize<'de> for Serving
 impl<'de> Deserialize<'de> for Status
 impl<'de> Deserialize<'de> for Step
@@ -3643,6 +3851,7 @@ impl<T: $crate::clone::Clone> Clone for Hidden<T>
 impl<T: $crate::cmp::Eq> Eq for Hidden<T>
 impl<T: $crate::cmp::PartialEq> PartialEq for Hidden<T>
 impl<T: $crate::cmp::PartialEq> StructuralPartialEq for Hidden<T>
+impl<T: $crate::default::Default> Default for Big<T>
 impl<T: $crate::fmt::Debug> Debug for State<T>
 impl<T: Cell> Clone for Handle<T>
 impl<T: Cell> Clone for Remote<T>
@@ -3653,16 +3862,24 @@ impl<T: Cell> Door<T> for Remote<T>
 impl<T: Cell> Door<T> for Source<T>
 impl<T: Cell> Drop for Store<T>
 impl<T: Cell> Drop for TestServer<T>
+impl<T: Clone> DerefMut for Big<T>
 impl<T: Default> Default for Hidden<T>
+impl<T: Eq> Eq for Big<T>
+impl<T: PartialEq> PartialEq for Big<T>
+impl<T: Serialize> Serialize for Big<T>
 impl<T: Serialize> Serialize for Hidden<T>
 impl<T: crate::CellData, R: ?Sized + std::fmt::Debug, F: Fn(&T) -> &R> Debug for Part<T, R, F>
 impl<T: crate::CellData, R: ?Sized + std::fmt::Display, F: Fn(&T) -> &R> Display for Part<T, R, F>
+impl<T: std::fmt::Debug> Debug for Big<T>
+impl<T> Clone for Big<T>
 impl<T> Clone for Form<T>
 impl<T> Clone for State<T>
 impl<T> Copy for Form<T>
 impl<T> Debug for Hidden<T>
+impl<T> Deref for Big<T>
 impl<T> Deref for Hidden<T>
 impl<T> DerefMut for Hidden<T>
+impl<T> From<T> for Big<T>
 impl<T> From<T> for Hidden<T>
 impl<T> PartialEq for Reads<T>
 impl<T> PartialEq for Ver<T>
@@ -3700,6 +3917,7 @@ mod aio::auth::oidc
 mod aio::auth::password
 mod aio::auth::totp
 mod aio::backup
+mod aio::big
 mod aio::blobs
 mod aio::boot
 mod aio::budgets
@@ -3712,6 +3930,7 @@ mod aio::compat
 mod aio::compat::data
 mod aio::compat::scatter
 mod aio::config
+mod aio::connect
 mod aio::cost
 mod aio::cpace
 mod aio::cron
@@ -3767,6 +3986,7 @@ mod aio::web
 mod aio::web::storage
 struct aio::Answer<R>
 struct aio::Backoff
+struct aio::Big<T>
 struct aio::Cache<S, K, R>
 struct aio::Call<'a>
 struct aio::Caller
@@ -3797,6 +4017,7 @@ struct aio::Transaction
 struct aio::Ver<T>
 struct aio::Watching
 struct aio::auth::Auth
+struct aio::auth::Known
 struct aio::auth::Mail
 struct aio::auth::Session
 struct aio::auth::User
@@ -3808,7 +4029,9 @@ struct aio::auth::client::AuthError
 struct aio::auth::client::Client
 struct aio::auth::client::Me
 struct aio::auth::client::Signed
+struct aio::auth::client::Sso
 struct aio::auth::oidc::Oidc
+struct aio::big::Big<T>
 struct aio::blobs::Blob
 struct aio::blobs::Blobs
 struct aio::boot::Row
@@ -3830,6 +4053,8 @@ struct aio::compat::data::Slice
 struct aio::compat::scatter::Layout
 struct aio::compat::scatter::Move
 struct aio::config::Listen
+struct aio::connect::Near
+struct aio::connect::Server
 struct aio::cost::Meter
 struct aio::cpace::Keys
 struct aio::cpace::Offer
@@ -4013,6 +4238,7 @@ struct aio::update::Stub
 struct aio::update::Updates
 struct aio::vitals::Hint
 struct aio::vitals::Layer
+struct aio::vitals::Link
 struct aio::vitals::Loop
 struct aio::vitals::Render
 struct aio::vitals::Snapshot
@@ -4077,7 +4303,9 @@ use aio::hue = aio_config_macro::hue
 use aio::icon = aio_config::icon
 use aio::imbl = imbl
 use aio::kit::Chord = keys::Chord
+use aio::kit::DevTimeTravel = travel::DevTimeTravel
 use aio::kit::Hit = keys::Hit
+use aio::kit::TimeTravelPanel = travel::TimeTravelPanel
 use aio::kit::keycap_match = keys::keycap_match
 use aio::kit::normalize_key = keys::normalize_key
 use aio::kit::theme::hue = aio_config::icon::hue
@@ -4109,6 +4337,7 @@ use aio::ui::Attribute = air::props::Attribute
 use aio::ui::Callback = air::reactive::Callback
 use aio::ui::Code = keyboard_types::code::Code
 use aio::ui::Component = air::Component
+use aio::ui::Effect = air::reactive::Effect
 use aio::ui::ErrorBoundary = air::dom::ErrorBoundary
 use aio::ui::ErrorBoundaryProps = air::dom::ErrorBoundaryProps
 use aio::ui::EventHandler = air::reactive::EventHandler
@@ -4126,6 +4355,7 @@ use aio::ui::Props = air::props::Props
 use aio::ui::Props = air_macro::Props
 use aio::ui::ReadGuard = air::reactive::ReadGuard
 use aio::ui::Resource = air::task::Resource
+use aio::ui::Retry = air::dom::Retry
 use aio::ui::Scheme = aio_config::config::Scheme
 use aio::ui::Signal = air::reactive::Signal
 use aio::ui::Suspense = air::dom::Suspense
@@ -4138,6 +4368,7 @@ use aio::ui::callback = air::reactive::callback
 use aio::ui::component = air_macro::component
 use aio::ui::context = air::reactive::context
 use aio::ui::effect = air::reactive::effect
+use aio::ui::effect_quiet = air::reactive::effect_quiet
 use aio::ui::events::AnimationEvent = air::event::AnimationEvent
 use aio::ui::events::ClipboardEvent = air::event::ClipboardEvent
 use aio::ui::events::CompositionEvent = air::event::CompositionEvent
@@ -4191,6 +4422,7 @@ use aio::ui::prelude::CompositionEvent = air::event::CompositionEvent
 use aio::ui::prelude::DataTransfer = air::event::DataTransfer
 use aio::ui::prelude::DragData = air::event::DragData
 use aio::ui::prelude::DragEvent = air::event::DragEvent
+use aio::ui::prelude::Effect = air::reactive::Effect
 use aio::ui::prelude::ErrorBoundary = air::dom::ErrorBoundary
 use aio::ui::prelude::ErrorBoundaryProps = air::dom::ErrorBoundaryProps
 use aio::ui::prelude::Event = air::event::Event
@@ -4226,6 +4458,7 @@ use aio::ui::prelude::Props = air_macro::Props
 use aio::ui::prelude::ResizeData = air::event::ResizeData
 use aio::ui::prelude::ResizeEvent = air::event::ResizeEvent
 use aio::ui::prelude::Resource = air::task::Resource
+use aio::ui::prelude::Retry = air::dom::Retry
 use aio::ui::prelude::ScrollBehavior = air::event::ScrollBehavior
 use aio::ui::prelude::ScrollData = air::event::ScrollData
 use aio::ui::prelude::ScrollEvent = air::event::ScrollEvent
@@ -4247,6 +4480,7 @@ use aio::ui::prelude::callback = air::reactive::callback
 use aio::ui::prelude::component = air_macro::component
 use aio::ui::prelude::context = air::reactive::context
 use aio::ui::prelude::effect = air::reactive::effect
+use aio::ui::prelude::effect_quiet = air::reactive::effect_quiet
 use aio::ui::prelude::geometry = air::event::geometry
 use aio::ui::prelude::in_views = air::reactive::in_views
 use aio::ui::prelude::key_event = air::event::key_event
@@ -4256,23 +4490,27 @@ use aio::ui::prelude::once = air::reactive::once
 use aio::ui::prelude::provide = air::reactive::provide
 use aio::ui::prelude::provide_root = air::reactive::provide_root
 use aio::ui::prelude::resource = air::task::resource
+use aio::ui::prelude::retry = air::dom::retry
 use aio::ui::prelude::rsx = air_macro::rsx
 use aio::ui::prelude::signal = air::reactive::signal
 use aio::ui::prelude::spawn = air::task::spawn
 use aio::ui::prelude::spawn_forever = air::task::spawn_forever
 use aio::ui::prelude::task = air::task::task
 use aio::ui::prelude::try_context = air::reactive::try_context
+use aio::ui::prelude::untrack = air::reactive::untrack
 use aio::ui::prelude::watch = air::reactive::watch
 use aio::ui::provide = air::reactive::provide
 use aio::ui::provide_now = air::reactive::provide_now
 use aio::ui::provide_root = air::reactive::provide_root
 use aio::ui::resource = air::task::resource
+use aio::ui::retry = air::dom::retry
 use aio::ui::rsx = air_macro::rsx
 use aio::ui::signal = air::reactive::signal
 use aio::ui::spawn = air::task::spawn
 use aio::ui::spawn_forever = air::task::spawn_forever
 use aio::ui::task = air::task::task
 use aio::ui::try_context = air::reactive::try_context
+use aio::ui::untrack = air::reactive::untrack
 use aio::ui::watch = air::reactive::watch
 use aio::update::channel_refused = aio_config::update::channel_refused
 use aio::update::git_remote = aio_config::update::git_remote

@@ -77,9 +77,10 @@ pub fn clear_markup() {
     *MARKUP.write().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// The markup sent for `t`, if any (a dev build's: a release has none).
+/// The markup sent for `t`, if any (`ax dev`'s, air's `dev` feature: until
+/// markup is sent, none; without the feature, never).
 pub(crate) fn markup_of(t: &Template) -> Option<Arc<Override>> {
-    if !cfg!(debug_assertions) || !ON.load(Ordering::Acquire) {
+    if !cfg!(feature = "dev") || !ON.load(Ordering::Acquire) {
         return None;
     }
     let m = MARKUP.read().unwrap_or_else(|e| e.into_inner());

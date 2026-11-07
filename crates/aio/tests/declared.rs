@@ -132,3 +132,51 @@ fn a_tick_is_skipped_while_the_last_one_still_runs() {
         h.shutdown(Duration::from_secs(1)).await;
     });
 }
+
+#[cell]
+pub struct Syncer {
+    pub begun: u32,
+}
+
+/// A sync that takes 400 ms: ten ticks of 20 ms come meanwhile.
+async fn slow() -> u32 {
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    1
+}
+
+#[methods]
+impl Syncer {
+    /// aio's `schedule.every(.., { skipIfRunning: true })`, set by a call.
+    pub fn arm(&mut self, cx: &Cx) -> Result {
+        cx.every("sync", 20, "sync", ())
+    }
+
+    #[skip_if_running]
+    pub async fn sync(&mut self) -> Result {
+        self.begun += 1;
+        let _: u32 = slow().await;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_schedule_a_call_set_skips_its_ticks_while_its_method_runs() {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let h = Handle::<Syncer>::memory();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let s = heard.clone();
+    let _bus = aio::report::subscribe(move |d| {
+        if d.kind == "schedule:skipping" {
+            s.lock().unwrap().push(d.message.clone());
+        }
+    });
+    rt.block_on(async {
+        drop(h.start());
+        h.arm().unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(h.state().begun, 1, "the ticks while it runs are skipped");
+        h.shutdown(Duration::from_secs(1)).await;
+    });
+    let said = heard.lock().unwrap().clone();
+    assert!(said.iter().any(|m| m.contains("schedule `sync` skipped 10 ticks in a row")), "{said:?}");
+}

@@ -303,6 +303,12 @@ impl Req {
     pub fn role(&self) -> Option<&str> {
         self.session.as_ref().map(|s| s.role.as_str())
     }
+
+    /// What else the app's resolver knows of the caller ([`crate::auth::Known::extra`]):
+    /// `r.extra("tenant")`.
+    pub fn extra(&self, key: &str) -> Option<&serde_json::Value> {
+        self.session.as_ref()?.extra.get(key)
+    }
 }
 
 /// A streamed body ([`Req::body_reader`]): a blocking [`std::io::Read`].
@@ -786,6 +792,11 @@ impl Http {
         self
     }
 
+    /// Whether it serves a cell `id` beside the app's own.
+    pub(crate) fn serves_cell(&self, id: &str) -> bool {
+        self.beside.iter().any(|c| c.id() == id)
+    }
+
     /// What the local door hears and resolves.
     pub(crate) fn door_hooks(&self) -> crate::link::Hooks {
         let on_link = self.on_link.clone().filter(|_| self.door_links);
@@ -830,9 +841,11 @@ impl Http {
         self
     }
 
-    /// Without accounts: the users the app knows by their token (aio
-    /// `users` / `resolveUser`). Then every link, route, file and server fn
-    /// needs one, and sees its user and role; the shared key opens none.
+    /// The users the app knows by their token (aio `users` /
+    /// `resolveUser`). Without accounts every link, route, file and server
+    /// fn then needs one, and sees its user and role; the shared key opens
+    /// none. With accounts they are service keys beside the sessions (a
+    /// `Bearer` a webhook sender shows), asked when a token is no session.
     pub fn users(mut self, users: crate::auth::Users) -> Self {
         self.users = Some(users);
         self
@@ -1272,7 +1285,7 @@ pub(crate) async fn answer(
         None => blob.is_none() && (public_file() || (ui_page.is_some() && key.auth.is_some())),
     };
     let (ok, cookie) = match () {
-        _ if key.users.is_some() => (false, None),
+        _ if key.users.is_some() && key.auth.is_none() => (false, None),
         _ if key.open && key.auth.is_none() => (true, None),
         _ => keyed(key, &head.headers, &query),
     };
@@ -1280,11 +1293,16 @@ pub(crate) async fn answer(
         .or_else(|| parse_cookies(&head.headers).remove(&key.session_cookie).filter(|t| !t.is_empty()));
     let shown_session = shown.is_some();
     let session = match (&key.auth, &key.users, shown) {
-        (Some(a), _, Some(t)) if !ok || public => {
-            let a = a.clone();
-            tokio::task::spawn_blocking(move || crate::link::live(&a, &t)).await.ok().flatten()
+        // A session, else a service's key beside the accounts.
+        (Some(a), u, Some(t)) if !ok || public => {
+            let (a, u) = (a.clone(), u.clone());
+            let who = move || crate::link::live(&a, &t).or_else(|| u?.who(&t));
+            tokio::task::spawn_blocking(who).await.ok().flatten()
         }
-        (None, Some(u), Some(t)) => u.who(&t),
+        (None, Some(u), Some(t)) => {
+            let u = u.clone();
+            tokio::task::spawn_blocking(move || u.who(&t)).await.ok().flatten()
+        }
         _ => None,
     };
     if !ok && !public && session.is_none() {

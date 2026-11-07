@@ -24,6 +24,16 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
   live_css_s       `ax dev`, headless: a stylesheet line saved → on the page
   live_rsx_s       an `rsx!` text saved → on the page
   live_logic_s     a line of Rust in the view saved → on the page (hot-patch)
+  live_tempsave_s  an rsx! text saved as `sed -i` and safe-write editors save
+                   (a temporary copy renamed over the file) → on the page,
+                   with no rebuild and no restart
+  live_error_s     a syntax error saved → its errors on the page's overlay,
+                   said once, the app running on (no build, no restart)
+  live_fixed_s     the fix saved → the overlay clear, the edit on the page
+  live_shape_s     a field added to the cell → ax dev restarts the app (a
+                   reason said, the session alive) → its window ready again
+  dev_restart_s    ax dev again with nothing changed → window ready (the
+                   last fat binary run as it is: no build, no link)
   air_web_b        `ax build --web`'s folder (bytes)
   air_apk_b        the arm64 APK (`--apk`, `ax build --android`)
   air_*            the rest: before 0.2.0, the template on air beside the one
@@ -74,6 +84,7 @@ temporary folder removed afterwards. A base before 0.2.0, whose template
 was on the renderer before air, is measured with its template on air
 (`to_air`), so its row is the same app's.
 """
+import contextlib
 import csv
 import datetime
 import hashlib
@@ -103,7 +114,8 @@ COLUMNS = ["date", "commit", "machine", "crates", "clean_debug_s", "clean_debug_
            "release_s", "release_cpu", "binary_b", "targz_b", "appimage_b", "boot_s", "window_mb", "window_pss_mb",
            "core_crates", "kit_crates", "debug_target_mb", "live_css_s", "live_rsx_s", "live_logic_s", "window_dirty_mb",
            "air_rebuild_s", "air_rebuild_cpu", "air_binary_b", "air_targz_b", "air_appimage_b", "air_web_b", "air_apk_b",
-           "air_live_css_s", "air_live_rsx_s", "air_live_logic_s"]
+           "air_live_css_s", "air_live_rsx_s", "air_live_logic_s", "live_tempsave_s", "live_error_s", "live_fixed_s",
+           "live_shape_s", "dev_restart_s"]
 # Over the rolling best or median, by this much.
 MEDIAN = lambda v: sorted(v)[len(v) // 2]  # noqa: E731
 STEADY, MEMORY, NOISY = (min, 1.05), (MEDIAN, 1.15), (MEDIAN, 1.5)
@@ -119,7 +131,7 @@ GATED = {
     "clean_debug_cpu": (NOISY, 5, REBUILD),
     "rebuild_cpu": (NOISY, 0.5, REBUILD),
     "release_cpu": (NOISY, 10, "`cargo build --release --timings` in an `ax create` app"),
-    "debug_target_mb": (STEADY, 20, "du -sk <target>/*/desktop-dev/deps/* | sort -n | tail"),
+    "debug_target_mb": (STEADY, 20, "du -sk <target>/desktop-dev/deps/* | sort -n | tail"),
     "binary_b": (STEADY, 50_000, SIZES),
     "targz_b": (STEADY, 50_000, SIZES + "; tar tvzf dist/<app>*.tar.gz"),
     "appimage_b": (STEADY, 50_000, SIZES + "; <app>.AppImage --appimage-extract"),
@@ -130,6 +142,11 @@ GATED = {
     "live_css_s": (NOISY, 0.25, LIVE),
     "live_rsx_s": (NOISY, 0.25, LIVE),
     "live_logic_s": (NOISY, 0.5, LIVE),
+    "live_tempsave_s": (NOISY, 0.25, LIVE),
+    "live_error_s": (NOISY, 0.5, LIVE),
+    "live_fixed_s": (NOISY, 0.5, LIVE),
+    "live_shape_s": (NOISY, 2, LIVE),
+    "dev_restart_s": (NOISY, 0.5, LIVE),
     "air_web_b": (STEADY, 10_000, "`ax build <app> --web`: du -b dist/<app>-web/*"),
     "air_apk_b": (STEADY, 50_000, "`ax build <app> --android`: unzip -lv dist/<app>-*-arm64-v8a.apk"),
 }
@@ -140,7 +157,8 @@ WINDOW = 10
 SHORT = {"crates": "app", "core_crates": "core", "kit_crates": "kit", "clean_debug_cpu": "clean", "rebuild_cpu": "rebuild",
          "release_cpu": "release", "debug_target_mb": "disk", "binary_b": "binary", "targz_b": "tar.gz",
          "appimage_b": "AppImage", "boot_s": "boot", "window_dirty_mb": "window", "live_css_s": "css", "live_rsx_s": "rsx",
-         "live_logic_s": "logic", "air_web_b": "web", "air_apk_b": "apk"}
+         "live_logic_s": "logic", "air_web_b": "web", "air_apk_b": "apk", "live_tempsave_s": "tmpsave",
+         "live_error_s": "error", "live_fixed_s": "fixed", "live_shape_s": "shape", "dev_restart_s": "restart"}
 NAME = "dxapp"
 # The live edits: (file, text before, after, the page once it shows). None: appended.
 COUNT = "document.querySelector('[data-t=count]')"
@@ -151,6 +169,23 @@ EDITS = {
     "live_logic_s": ("src/lib.rs", 'h1 { "data-t": "count", "{n}" }', 'h1 { "data-t": "count", {(n.get() + 100).to_string()} }',
                      f"{COUNT}.textContent == '100'"),
 }
+
+# The failure paths, after `EDITS` (each on the file as the one before left
+# it): (column, file, text before, after, how it is saved, the page once it
+# shows, what ax dev must say of it, what it must not). "rename": a
+# temporary copy renamed over the file. A `shows` of None: the app restarts,
+# timed to its next "window ready".
+OVERLAY = "[...(document.querySelector('[data-aio-dev=overlay]')?.shadowRoot?.querySelectorAll('div') ?? [])].some(d => d.textContent.startsWith('build failed'))"
+FAILS = [
+    ("live_tempsave_s", "src/lib.rs", '"Add one"', '"Add two"', "rename",
+     "document.querySelector('button').textContent == 'Add two'", (), ("building", "restarting")),
+    ("live_error_s", "src/lib.rs", '"Subtract" }', '"Subtract" ', "write", OVERLAY,
+     ("doesn't compile",), ("building", "restarting")),
+    ("live_fixed_s", "src/lib.rs", '"Subtract" ', '"Subtract" }', "write",
+     f"!({OVERLAY}) && document.querySelector('button').textContent == 'Add two'", ("fixed",), ("restarting",)),
+    ("live_shape_s", "src/lib.rs", "pub count: i64,", "pub count: i64,\n    pub seen: u32,", "write", None,
+     ("changed shape", "restarting"), ()),
+]
 
 
 def run(cmd, cwd, env):
@@ -207,11 +242,6 @@ def crates(root):
     s = slim(root)
     sets = dict(s.SETS)
     return {col: len(s.crates(sets[name])) for col, name in CEILING.items()}
-
-
-def host():
-    out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True).stdout
-    return next(l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("host: "))
 
 
 def win_cpu(pid):
@@ -349,14 +379,76 @@ def live(aio, app, env, home):
             except (subprocess.TimeoutExpired, ValueError):
                 waiter.kill()
                 fail(f"{path}: the edit didn't show in 60 s")
+        for col, path, old, new, how, shows, must, never in FAILS:
+            f = app / path
+            text = f.read_bytes().decode()
+            if old not in text:
+                fail(f"{col}: no {old!r} in {path} to edit")
+            edited = text.replace(old, new, 1).encode()
+            waiter = None
+            if shows:
+                armed = f"[dx-metrics] armed {col}"
+                waiter = page(f"new Promise(r => {{ const t = setInterval(() => {{ try {{ if ({shows}) "
+                              f"{{ clearInterval(t); r(Date.now()); }} }} catch (_) {{}} }}, 5); console.warn('{armed}'); }})")
+                while armed not in said() or building(dev.pid) or not idle(waiter.pid):
+                    if waiter.poll() is not None or time.monotonic() > end:
+                        fail(f"{col}: the page's poller didn't start")
+                    time.sleep(0.02)
+            before, saved = len(said()), time.time()
+            if how == "rename":
+                tmp = f.with_name(f".{f.name}.dx-{os.getpid()}")
+                tmp.write_bytes(edited)
+                os.replace(tmp, f)
+            else:
+                f.write_bytes(edited)
+            if waiter:
+                try:
+                    shown, _ = waiter.communicate(timeout=60)
+                    row[col] = json.loads(shown) / 1000 - saved
+                except (subprocess.TimeoutExpired, ValueError):
+                    waiter.kill()
+                    fail(f"{col}: it didn't show on the page in 60 s")
+            else:
+                while "[aio] window ready" not in said()[before:]:
+                    if dev.poll() is not None:
+                        fail(f"{col}: the session ended")
+                    if time.monotonic() > end:
+                        fail(f"{col}: no window again")
+                    time.sleep(0.01)
+                row[col] = time.time() - saved
+            time.sleep(0.3)
+            lines = [l for l in said()[before:].splitlines() if l.startswith("ax dev:")]
+            for line in lines:
+                print(f"{col}: {line}", file=sys.stderr)
+            if dev.poll() is not None:
+                fail(f"{col}: the session ended")
+            for m in must:
+                if not any(m in l for l in lines):
+                    fail(f"{col}: ax dev didn't say {m!r}")
+            for m in never:
+                if any(m in l for l in lines):
+                    fail(f"{col}: ax dev said {m!r} (it mustn't)")
+            # A compile error said once, not once per build tried.
+            errors = [l for l in said()[before:].splitlines() if l.startswith("error")]
+            if col == "live_error_s" and len(errors) != len(set(errors)):
+                fail(f"{col}: its errors said more than once")
+        # ax dev again, nothing changed: the last fat binary, run as it is.
+        stop_dev(dev)
+        before = len(said())
+        with log.open("a") as out:
+            started = time.time()
+            dev = subprocess.Popen([aio, "dev", NAME, "--display", "current", "--home", home], cwd=app, env=env,
+                                   stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+        while "[aio] window ready" not in said()[before:]:
+            if dev.poll() is not None or time.monotonic() > end + 60:
+                fail("dev_restart_s: no window")
+            time.sleep(0.01)
+        row["dev_restart_s"] = time.time() - started
+        if "the last fat binary" not in said()[before:]:
+            fail("dev_restart_s: nothing changed, yet it built")
         return row
     finally:
-        # Windows: no SIGTERM for `ax dev` to stop its app on; its tree goes.
-        if WINDOWS:
-            subprocess.run(["taskkill", "/PID", str(dev.pid), "/T", "/F"], capture_output=True)
-        else:
-            dev.terminate()
-        dev.wait(timeout=30)
+        stop_dev(dev)
         # Windows: a process of its tree may hold the log open a moment longer.
         for _ in range(50):
             try:
@@ -366,6 +458,35 @@ def live(aio, app, env, home):
                 time.sleep(0.2)
         else:
             print(f"dx-metrics: {logs.name} is still in use: left behind", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def scratch():
+    """A folder in the checkout's target/, removed afterwards: again for a
+    while, as a runtime that is still closing writes its last files."""
+    tmp = tempfile.mkdtemp(prefix="aio-dx-", dir=ROOT / "target")
+    try:
+        yield tmp
+    finally:
+        for _ in range(50):
+            shutil.rmtree(tmp, ignore_errors=True)
+            if not os.path.exists(tmp):
+                break
+            time.sleep(0.2)
+        else:
+            print(f"dx-metrics: {tmp} is still in use: left behind", file=sys.stderr)
+
+
+def stop_dev(dev):
+    """`ax dev` and its app stopped."""
+    if dev.poll() is not None:
+        return
+    # Windows: no SIGTERM for `ax dev` to stop its app on; its tree goes.
+    if WINDOWS:
+        subprocess.run(["taskkill", "/PID", str(dev.pid), "/T", "/F"], capture_output=True)
+    else:
+        dev.terminate()
+    dev.wait(timeout=30)
 
 
 def to_air(app):
@@ -473,8 +594,8 @@ def measure(tmp, root=ROOT, full=True, part=None):
 
 
 def debug_build():
-    """`ax dev`'s layout (its debug profile, the host target): its build reuses this one."""
-    return ["cargo", "build", "--offline", "-p", f"{NAME}-app", "--profile", "desktop-dev", "--target", host()]
+    """`ax dev`'s layout (its debug profile): its build reuses this one."""
+    return ["cargo", "build", "--offline", "-p", f"{NAME}-app", "--profile", "desktop-dev"]
 
 
 def rebuild(app, env):
@@ -491,7 +612,7 @@ def rebuild(app, env):
 
 def edited_live(aio, app, env, home):
     """`live`, its edits taken back afterwards."""
-    sources = {p: (app / p).read_bytes() for p in {e[0] for e in EDITS.values()}}
+    sources = {p: (app / p).read_bytes() for p in {e[0] for e in EDITS.values()} | {f[1] for f in FAILS}}
     row = live(aio, app, env, home)
     for p, t in sources.items():
         (app / p).write_bytes(t)
@@ -733,10 +854,10 @@ def main():
         return trend(int(rest[0]) if rest and rest[0].isdigit() else 12)
     if "--live" in args:
         (ROOT / "target").mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=ROOT / "target") as tmp:
+        with scratch() as tmp:
             row = live_only(pathlib.Path(tmp))
         print(f"live edits, machine {machine()}, commit {commit()}:")
-        for col in EDITS:
+        for col in [*EDITS, *(f[0] for f in FAILS), "dev_restart_s"]:
             print(f"{col:16} {row.get(col, ''):>8}")
         return
     check = "--check" in args
@@ -761,7 +882,7 @@ def main():
     # Beside the checkout (its target/): `ax create --aio` names the checkout
     # relative to the app, never through the root.
     (ROOT / "target").mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="aio-dx-", dir=ROOT / "target") as tmp:
+    with scratch() as tmp:
         row = measure(pathlib.Path(tmp), part=part)
     row |= {"date": today, "commit": commit(), "machine": here}
     keep(cache, git("rev-parse", "HEAD").strip() + kind, row)

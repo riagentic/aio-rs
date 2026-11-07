@@ -32,6 +32,33 @@ impl Vault {
     }
 }
 
+/// aio's `redactActions: ["keys:*"]`: every method of the cell.
+#[cell(persist, redact)]
+pub struct Keys {
+    pub count: u32,
+}
+
+#[methods]
+impl Keys {
+    pub fn add(&mut self, seed: String) {
+        self.count += u32::from(!seed.is_empty());
+    }
+}
+
+#[test]
+fn a_redacted_cell_keeps_no_arguments_of_any_method() {
+    assert!(Keys::redacts("add") && Keys::redacts("anything"));
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("keys.db");
+    {
+        let mut s = aio::Store::<Keys>::open(&path).unwrap();
+        s.call(&By::System, "add", serde_json::json!(["correct horse battery"])).unwrap();
+        assert_eq!(s.events().unwrap()[0].args, serde_json::json!({ aio::REDACTED: { "count": 1 } }));
+    }
+    assert!(!every_file_holds(d.path(), "correct horse"), "not in the database, its journal or its WAL");
+    assert_eq!(aio::Store::<Keys>::open(&path).unwrap().state().count, 1, "it still replays");
+}
+
 async fn measure(p: String) -> usize {
     p.len()
 }

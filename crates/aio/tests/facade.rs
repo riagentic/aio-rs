@@ -111,6 +111,30 @@ fn once_is_made_once_watch_follows_its_deps_and_on_cleanup_ends_it() {
     assert_eq!(said(), ["gone"]);
 }
 
+fn changes() -> View {
+    let (n, other) = (signal(|| 1u32), signal(|| 0u32));
+    on_change(move || n.get() / 2, move |next, prev| log(format!("{prev} -> {next} ({})", other.get())));
+    rsx! {
+        button { "data-t": "n", onclick: move |_| n += 1, "n" }
+        button { "data-t": "other", onclick: move |_| other += 1, "other" }
+    }
+}
+
+#[test]
+fn on_change_hears_a_new_value_with_the_old_and_follows_only_what_it_reads() {
+    // aio's watch(source, (next, prev)): not at the start, not for an equal value.
+    let mut ui = TestUi::new(changes);
+    assert!(said().is_empty());
+    ui.click("n");
+    assert_eq!(said(), ["0 -> 1 (0)"]);
+    ui.click("n");
+    assert!(said().is_empty(), "3 / 2 is still 1");
+    ui.click("other");
+    assert!(said().is_empty(), "the callback's own reads are not followed");
+    ui.click("n");
+    assert_eq!(said(), ["1 -> 2 (1)"]);
+}
+
 #[derive(Clone, PartialEq)]
 struct Theme(&'static str);
 

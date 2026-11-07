@@ -253,7 +253,8 @@ data the content loads itself.
 
 A camera, a socket or a file handle has a close that matters, and a key
 that says which one is held. `aio::held::Held` is a pool of them; a view
-holds one with `use_held(&pool, key)`:
+holds one with `use_held(&pool, key)`, on the desktop, Android and in a
+browser page (a web build: the page's own timer and tasks):
 
 ```rust,no_run
 use aio::held::{Held, State};
@@ -367,14 +368,13 @@ once when a kit control renders on a page that doesn't style the kit.
   render, not a download, and loads, as aio's: `load:
   load(|| async { … Ok(rsx! { … }) })` runs once it is triggered,
   `loading` shows meanwhile (at least `loading_min_ms`), then what it
-  made, or `error` of what it said.
+  made, or `error` of what it said. By design: one binary has no chunk
+  to fail loading offline or half-way through an update.
 - **Only `aio::ui` views.** aio's `aio/state-core` let Svelte, Vue or other
   frameworks drive a page; aio-rs has no such adapter. Another UI reaches
   the app over its transports instead ([transports](../clients/transports.md)),
-  or sits in a view as an island.
-- **Accessibility checks are static.** `ax lint` reads the source; nothing
-  checks the rendered page at run time as aio's dev mode did (a
-  `role` computed at run time is not checked).
+  or sits in a view as an island. One renderer keeps events, focus, the
+  audits and `TestUi` paths the same on every page.
 
 ## Common mistakes
 

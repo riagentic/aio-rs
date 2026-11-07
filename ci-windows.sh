@@ -26,8 +26,11 @@ if ! checked; then
     exit 1
   }
 fi
+# Not the hot-patch test: it builds a fixture with cargo from this checkout,
+# which isn't there; GitHub CI's Windows job runs it natively (MSVC and GNU).
 cargo test --workspace --all-features --locked --target x86_64-pc-windows-gnu --no-run --message-format=json \
-  | grep '"profile":{[^}]*"test":true' | grep -o '"executable":"[^"]*"' | cut -d'"' -f4 | sort -u >"$out/win-tests"
+  | grep '"profile":{[^}]*"test":true' | grep -o '"executable":"[^"]*"' | cut -d'"' -f4 \
+  | grep -v '/hotpatch-[0-9a-f]*\.exe$' | sort -u >"$out/win-tests"
 ssh "$@" "$host" "Remove-Item -Recurse -Force -ErrorAction Ignore $dir; New-Item -ItemType Directory $dir | Out-Null"
 # shellcheck disable=SC2046
 scp -q "$@" $(cat "$out/win-tests") "$out/electron/$zip" "$host:$dir/"

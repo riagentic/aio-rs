@@ -17,11 +17,20 @@ impl Tally {
     }
 }
 
+/// The app's own store at `db`, opened as an app opens it.
+fn local(db: &std::path::Path) -> Handle<Tally> {
+    match Source::<Tally>::open(db).unwrap() {
+        Source::Local(h) => h,
+        #[cfg(feature = "server")]
+        Source::Remote(_) => unreachable!("a store is local"),
+    }
+}
+
 #[test]
 fn stopping_runs_while_methods_commit_stop_runs_after_and_a_hung_hook_is_left_behind() {
     let t = tempfile::tempdir().unwrap();
     let db = t.path().join("state.db");
-    let Source::Local(h) = Source::<Tally>::open(&db).unwrap() else { unreachable!() };
+    let h = local(&db);
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let (log, hs) = (seen.clone(), h.clone());
     aio::on_stopping(move || {
@@ -50,7 +59,7 @@ fn stopping_runs_while_methods_commit_stop_runs_after_and_a_hung_hook_is_left_be
     // (A Windows pipe goes with its process.)
     assert!(cfg!(windows) || !std::path::Path::new(&door).exists(), "a clean stop leaves no socket behind");
     drop(h);
-    let Source::Local(again) = Source::<Tally>::open(&db).unwrap() else { unreachable!() };
+    let again = local(&db);
     assert_eq!(again.state().n, 1, "on_stopping's write was saved");
     assert!(aio::shutdown(Duration::from_secs(5)).is_empty(), "the hooks ran once");
     // A hook that never returns can't hold the stop.
@@ -58,4 +67,27 @@ fn stopping_runs_while_methods_commit_stop_runs_after_and_a_hung_hook_is_left_be
     let at = Instant::now();
     assert_eq!(aio::shutdown(Duration::from_secs(1)), ["on_stop"]);
     assert!(at.elapsed() < Duration::from_secs(20), "given up at its budget: {:?}", at.elapsed());
+}
+
+#[test]
+fn a_paused_cell_and_a_panic_refuse_with_aios_codes() {
+    #[aio::cell]
+    pub struct Probe {
+        pub n: u32,
+    }
+    #[aio::methods]
+    impl Probe {
+        pub fn bug(&mut self) {
+            panic!("a bug");
+        }
+        pub fn ok(&mut self) {
+            self.n += 1;
+        }
+    }
+    let h = aio::Handle::<Probe>::memory();
+    assert_eq!(h.bug().unwrap_err().code(), Some(aio::Code::ReduceError));
+    h.pause(true);
+    let e = h.ok().unwrap_err();
+    assert_eq!(e.code(), Some(aio::Code::DispatchClosed), "{e}");
+    assert!(aio::error_summary(&e).starts_with("DISPATCH_CLOSED: "), "{}", aio::error_summary(&e));
 }

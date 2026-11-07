@@ -30,12 +30,12 @@
 //! }
 //! ```
 //!
-//! and `if let` is refused (make a bool, or a `{child}` of an `Option`):
+//! and so is a `while` or `loop` (a view says what shows: a `for` over the items):
 //!
 //! ```compile_fail
 //! use air::{View, rsx};
-//! fn maybe(n: Option<u32>) -> View {
-//!     rsx! { if let Some(n) = n { p { "{n}" } } }
+//! fn count(mut n: u32) -> View {
+//!     rsx! { while n > 0 { p { "{n}" } } }
 //! }
 //! ```
 //! A required prop left out is a compile error, naming it:
@@ -70,16 +70,17 @@ mod tree;
 pub use air_macro::{Props, component, rsx};
 pub use dom::{
     AttrValue, Child, ErrorBoundary, ErrorBoundaryProps, Eval, Fragment, FragmentProps, IntoAttr, IntoChild,
-    IntoHandler, MountedData, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, exec, is_empty,
-    longest_increasing, styled, take_edits, text_view,
+    IntoHandler, MountedData, Retry, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, exec, is_empty,
+    longest_increasing, retry, styled, take_edits, text_view,
 };
 pub use event::*;
 pub use global::{Global, GlobalMemo};
 pub use props::{Attribute, IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, Prop, Props};
 pub use reactive::{
-    Callback, EventHandler, Memo, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback, context,
-    current_owner, detached, effect, follow, in_body, in_views, memo, on_cleanup, once, parent_context, provide,
-    provide_now, provide_root, scope, selector, signal, try_context, untrack, watch, with_owner,
+    Callback, Effect, EventHandler, Memo, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback, context,
+    current_owner, detached, drop_left, effect, effect_quiet, follow, in_body, in_views, memo, on_cleanup, once,
+    parent_context, provide, provide_now, provide_root, scope, selector, signal, try_context, untrack, watch,
+    with_owner,
 };
 pub use task::{Resource, Task, live_tasks, on_wake, resource, run_tasks, spawn, spawn_forever, task};
 pub use tree::{Mounted, RENDERS_KEPT, Render, components, renders};
@@ -165,8 +166,12 @@ pub const PAGE_JS: &str = include_str!("page.js");
 /// What `rsx!` expands to calls; not for apps.
 #[doc(hidden)]
 pub mod __rt {
+    /// air's `dev` feature (`ax dev`'s builds: markup sent live, renders
+    /// logged), as the app's expanded templates see it.
+    pub const DEV: bool = cfg!(feature = "dev");
     pub use crate::dom::{
-        Range, Template, attr, child, comp, each, handler, handler_fn, mounted, mounted_fn, on, show, text, tpl, view,
+        AttrSlot, Range, Template, attr, branch, child, comp, each, handler, handler_fn, mounted, mounted_fn, on, show,
+        text, tpl, view,
     };
     pub use crate::event::{
         DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ResizeData, ScrollData, VisibleData,

@@ -161,7 +161,7 @@ pub struct Range(Option<(u32, u32)>);
 /// is placed (a dialog opened again, a tab shown again, a view placed in
 /// two places: each place gets its own build and state). Cloning shares it.
 #[derive(Clone, Default)]
-pub struct Tree(Option<Rc<dyn Fn() -> Range>>);
+pub struct Tree(Option<Rc<dyn Hole<Range>>>);
 
 impl Tree {
     #[doc(hidden)]
@@ -175,7 +175,7 @@ impl Tree {
     }
 
     fn build(&self) -> Range {
-        self.0.as_ref().map_or_else(Range::default, |f| f())
+        self.0.as_ref().map_or_else(Range::default, |f| f.run())
     }
 
     /// Is it nothing (`rsx! {}`, no children given)?
@@ -366,12 +366,25 @@ fn slot() -> (Range, u32) {
 // closure and nothing else (generic holes copied these bodies into every
 // call site: 4x the LLVM IR, measured, `docs/design/air.md`).
 
+/// A hole's closure: `Fn() -> R` behind one vtable entry (a `dyn Fn`'s
+/// vtable also holds `FnMut`'s and `FnOnce`'s shims, made per closure).
+#[doc(hidden)]
+pub trait Hole<R> {
+    fn run(&self) -> R;
+}
+
+impl<R, F: Fn() -> R> Hole<R> for F {
+    fn run(&self) -> R {
+        self()
+    }
+}
+
 /// A text hole: node `id` shows `f()`, re-written when it changes.
 #[doc(hidden)]
-pub fn text(id: u32, f: Box<dyn Fn() -> String>) {
+pub fn text(id: u32, f: Box<dyn Hole<String>>) {
     let mut last: Option<String> = None;
     render(move || {
-        let s = f();
+        let s = f.run();
         if fault::unbound() && last.is_some() {
             return;
         }
@@ -384,65 +397,71 @@ pub fn text(id: u32, f: Box<dyn Fn() -> String>) {
 
 /// What an attribute hole holds: a value, presence (`false`: none, but
 /// `"false"` on `aria-*`/`data-*`), or none at all (an `Option`'s `None`).
+/// `'a`: a value may borrow what the hole read (`title: t(&x)`).
 #[derive(Clone, Debug, PartialEq)]
-pub enum AttrValue {
-    Str(Cow<'static, str>),
+pub enum AttrValue<'a> {
+    Str(Cow<'a, str>),
     Bool(bool),
     None,
 }
 
-/// What an attribute takes: a string, a number, a `bool` (present or not;
-/// `"true"`/`"false"` on `aria-*` and `data-*`),
+/// What an attribute takes: a string (`&str`, `String`, `Cow`), a number,
+/// a `bool` (present or not; `"true"`/`"false"` on `aria-*` and `data-*`),
 /// an `Option` (none: not there), a `Signal` (followed).
-pub trait IntoAttr {
-    fn into_attr(self) -> AttrValue;
+pub trait IntoAttr<'a> {
+    fn into_attr(self) -> AttrValue<'a>;
 }
 
-impl IntoAttr for &'static str {
-    fn into_attr(self) -> AttrValue {
+impl<'a> IntoAttr<'a> for &'a str {
+    fn into_attr(self) -> AttrValue<'a> {
         AttrValue::Str(Cow::Borrowed(self))
     }
 }
-impl IntoAttr for String {
-    fn into_attr(self) -> AttrValue {
+impl<'a> IntoAttr<'a> for String {
+    fn into_attr(self) -> AttrValue<'a> {
         AttrValue::Str(Cow::Owned(self))
     }
 }
-impl IntoAttr for &String {
-    fn into_attr(self) -> AttrValue {
-        AttrValue::Str(Cow::Owned(self.clone()))
+impl<'a> IntoAttr<'a> for &'a String {
+    fn into_attr(self) -> AttrValue<'a> {
+        AttrValue::Str(Cow::Borrowed(self))
     }
 }
-impl IntoAttr for Rc<str> {
-    fn into_attr(self) -> AttrValue {
+impl<'a> IntoAttr<'a> for Cow<'a, str> {
+    fn into_attr(self) -> AttrValue<'a> {
+        AttrValue::Str(self)
+    }
+}
+impl<'a> IntoAttr<'a> for Rc<str> {
+    fn into_attr(self) -> AttrValue<'a> {
         AttrValue::Str(Cow::Owned(self.to_string()))
     }
 }
-impl IntoAttr for bool {
-    fn into_attr(self) -> AttrValue {
+impl<'a> IntoAttr<'a> for bool {
+    fn into_attr(self) -> AttrValue<'a> {
         AttrValue::Bool(self)
     }
 }
-impl<T: IntoAttr> IntoAttr for Option<T> {
-    fn into_attr(self) -> AttrValue {
+impl<'a, T: IntoAttr<'a>> IntoAttr<'a> for Option<T> {
+    fn into_attr(self) -> AttrValue<'a> {
         self.map_or(AttrValue::None, T::into_attr)
     }
 }
-impl<T: IntoAttr + Clone + 'static> IntoAttr for Signal<T> {
+impl<'a, T: IntoAttr<'static> + Clone + 'static> IntoAttr<'a> for Signal<T> {
     /// Tracked: the hole follows the signal.
-    fn into_attr(self) -> AttrValue {
+    fn into_attr(self) -> AttrValue<'a> {
         self.get().into_attr()
     }
 }
-impl<T: IntoAttr + Clone + 'static> IntoAttr for crate::Memo<T> {
-    fn into_attr(self) -> AttrValue {
+impl<'a, T: IntoAttr<'static> + Clone + 'static> IntoAttr<'a> for crate::Memo<T> {
+    fn into_attr(self) -> AttrValue<'a> {
         self.get().into_attr()
     }
 }
 macro_rules! num_attr {
     ($($t:ty),*) => {$(
-        impl IntoAttr for $t {
-            fn into_attr(self) -> AttrValue {
+        impl<'a> IntoAttr<'a> for $t {
+            fn into_attr(self) -> AttrValue<'a> {
                 AttrValue::Str(Cow::Owned(self.to_string()))
             }
         }
@@ -470,13 +489,33 @@ pub(crate) fn is_text_bool(name: &str) -> bool {
         || matches!(name, "draggable" | "contenteditable" | "spellcheck")
 }
 
-/// An attribute hole: `name` of node `id` is `f()`.
+/// An attribute hole's closure: it hands its value to the slot, so the
+/// value may borrow what the closure read.
 #[doc(hidden)]
-pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
-    let mut last: Option<AttrValue> = None;
-    render(move || {
-        let v = f();
-        let same = match (&last, &v) {
+pub trait AttrHole {
+    fn run(&self, to: &mut AttrSlot);
+}
+
+impl<F: Fn(&mut AttrSlot)> AttrHole for F {
+    fn run(&self, to: &mut AttrSlot) {
+        self(to)
+    }
+}
+
+/// An attribute hole's node, name and last value.
+#[doc(hidden)]
+pub struct AttrSlot {
+    id: u32,
+    name: &'static str,
+    last: Option<AttrValue<'static>>,
+}
+
+impl AttrSlot {
+    /// The attribute is `v` now: written if it changed, kept (owned) to
+    /// compare with the next.
+    pub fn set(&mut self, v: AttrValue<'_>) {
+        let name = self.name;
+        let same = match (&self.last, &v) {
             (Some(AttrValue::Str(a)), AttrValue::Str(b)) => a == b,
             (Some(AttrValue::Bool(a)), AttrValue::Bool(b)) => a == b,
             (Some(AttrValue::None), AttrValue::None) => true,
@@ -487,13 +526,30 @@ pub fn attr(id: u32, name: &'static str, f: Box<dyn Fn() -> AttrValue>) {
         if same {
             return;
         }
-        set_attr_now(id, name, &v);
-        last = Some(v);
-    });
+        set_attr_now(self.id, name, &v);
+        self.last = Some(match (self.last.take(), v) {
+            // A borrowed string goes into the last one's buffer.
+            (Some(AttrValue::Str(Cow::Owned(mut s))), AttrValue::Str(Cow::Borrowed(b))) => {
+                s.clear();
+                s.push_str(b);
+                AttrValue::Str(Cow::Owned(s))
+            }
+            (_, AttrValue::Str(s)) => AttrValue::Str(Cow::Owned(s.into_owned())),
+            (_, AttrValue::Bool(b)) => AttrValue::Bool(b),
+            (_, AttrValue::None) => AttrValue::None,
+        });
+    }
+}
+
+/// An attribute hole: `name` of node `id` is what `f` hands its slot.
+#[doc(hidden)]
+pub fn attr(id: u32, name: &'static str, f: Box<dyn AttrHole>) {
+    let mut slot = AttrSlot { id, name, last: None };
+    render(move || f.run(&mut slot));
 }
 
 /// `name` of node `id` set to `v` now (no hole).
-pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue) {
+pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue<'_>) {
     dom(|d| match (v, is_prop(name)) {
         (AttrValue::Bool(b), _) if is_text_bool(name) => {
             _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" })
@@ -704,10 +760,10 @@ enum Shown {
 /// A child hole: what `f()` gives goes before anchor `at`; a text is
 /// re-written in place, views are replaced (what made them is disposed).
 #[doc(hidden)]
-pub fn child(at: u32, f: Box<dyn Fn() -> Child>) {
+pub fn child(at: u32, f: Box<dyn Hole<Child>>) {
     let mut shown = Shown::Views(vec![]);
     render(move || {
-        let c = f();
+        let c = f.run();
         if let (Shown::Text(id, last), Child::Text(s)) = (&mut shown, &c) {
             if last != s {
                 dom(|d| _ = d.op(op::SET_TEXT).u32(*id).str(s));
@@ -782,11 +838,11 @@ pub fn styled(view: View, property: &'static str, f: impl Fn() -> Option<String>
 /// a resource runs again once it is loaded, its hooks' state kept.
 /// `name` and `key` place it in the tree of mounted components.
 #[doc(hidden)]
-pub fn comp(at: u32, name: &'static str, key: Option<String>, f: Box<dyn Fn() -> View>) {
+pub fn comp(at: u32, name: &'static str, key: Option<String>, f: Box<dyn Hole<View>>) {
     comp_as(at, Some(crate::tree::mount(name, key)), f)
 }
 
-fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Fn() -> View>) {
+fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Hole<View>>) {
     let mut frame: Option<Rc<Frame>> = None;
     let mut shown = Range::default();
     // Its entry ends with its hole.
@@ -803,7 +859,7 @@ fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Fn() -> View>) {
             })
             .clone();
         let t0 = crate::tree::start();
-        let v = body(&fr, &f);
+        let v = body(&fr, || f.run());
         shown = place(v);
         if let Some(m) = &mounted {
             crate::tree::rendered(m.0, shown.0, t0);
@@ -814,14 +870,42 @@ fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Fn() -> View>) {
 
 /// `then()` or `otherwise()` before anchor `at`, swapped only when `cond()` flips.
 #[doc(hidden)]
-pub fn show(at: u32, cond: Box<dyn Fn() -> bool>, then: Box<dyn Fn() -> View>, otherwise: Box<dyn Fn() -> View>) {
-    let c = memo_now(cond);
-    child(at, Box::new(move || Child::Views(vec![if c.get() { untrack(&then) } else { untrack(&otherwise) }])));
+pub fn show(at: u32, cond: Box<dyn Hole<bool>>, then: Box<dyn Hole<View>>, otherwise: Box<dyn Hole<View>>) {
+    let c = memo_now(move || cond.run());
+    child(
+        at,
+        Box::new(move || {
+            Child::Views(vec![if c.get() { untrack(|| then.run()) } else { untrack(|| otherwise.run()) }])
+        }),
+    );
 }
 
-struct Row<I, K> {
-    key: K,
-    item: I,
+/// A branch hole (`if let`, `match` in `rsx!`): `f()` gives the matching
+/// arm's key and view. The view before anchor `at` is made again only when
+/// the key changes, and on every change for key `u32::MAX` (an arm that
+/// binds names).
+#[doc(hidden)]
+pub fn branch(at: u32, f: Box<dyn Hole<(u32, View)>>) {
+    let next: Rc<RefCell<Option<View>>> = Rc::default();
+    let n = next.clone();
+    let mut runs = 0u32;
+    let key = memo_now(move || {
+        let (k, v) = f.run();
+        *n.borrow_mut() = Some(v);
+        runs = runs.wrapping_add(1);
+        (k, if k == u32::MAX { runs } else { 0 })
+    });
+    child(
+        at,
+        Box::new(move || {
+            key.with(|_| ());
+            Child::Views(next.borrow_mut().take().into_iter().collect())
+        }),
+    );
+}
+
+/// A row in the page: what made it and where it is.
+struct Placed {
     owner: Owner,
     view: Range,
 }
@@ -841,7 +925,7 @@ pub fn each<I, K>(
     I: PartialEq + Clone + 'static,
     K: Hash + Eq + Clone + 'static,
 {
-    // The closures' signatures from here; the list's work once per item type.
+    // The closures' signatures from here; the keys' work once per item type.
     each_dyn(at, Box::new(items), Box::new(key), Box::new(row))
 }
 
@@ -852,19 +936,16 @@ where
     K: Hash + Eq + Clone + 'static,
 {
     let outer = current_owner();
-    let rows: Rc<RefCell<Vec<Row<I, K>>>> = Rc::default();
-    // The list's owner ending ends its rows (they are its, not a run's).
-    let r = rows.clone();
-    cleanup(move || r.borrow_mut().drain(..).for_each(|r| r.owner.dispose()));
+    let placed = placed_rows();
+    // Row `i`'s key and item, as `placed[i]`.
+    let mut rows: Vec<(K, I)> = vec![];
     render(move || {
         let next = items();
         untrack(|| {
-            let mut rows = rows.borrow_mut();
-            let mut old: Vec<Option<Row<I, K>>> = std::mem::take(&mut *rows).into_iter().map(Some).collect();
-            let mut by_key: HashMap<K, usize> =
-                old.iter().flatten().enumerate().map(|(i, r)| (r.key.clone(), i)).collect();
+            let mut by_key: HashMap<K, usize> = rows.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect();
             let mut src = Vec::with_capacity(next.len());
             let mut seen = std::collections::HashSet::with_capacity(next.len());
+            let old = std::mem::take(&mut rows);
             for (at, item) in next.into_iter().enumerate() {
                 let k = key(&item);
                 if !seen.insert(k.clone()) {
@@ -874,31 +955,48 @@ where
                         std::any::type_name::<K>()
                     );
                 }
-                let kept = by_key.remove(&k).filter(|i| old[*i].as_ref().is_some_and(|r| r.item == item));
-                match kept {
-                    Some(i) => {
-                        rows.push(old[i].take().expect("a row kept once"));
-                        src.push(i as isize);
-                    }
-                    None => {
-                        // The list's, not this run's: a re-run keeps it, the list's end ends it.
-                        let make = || child_scope(|| place(row(item.clone())));
-                        let (view, owner) = match outer {
-                            Some(o) => with_owner(o, make),
-                            None => detached(make),
-                        };
-                        rows.push(Row { key: k, item, owner, view });
-                        src.push(-1);
-                    }
-                }
+                let kept = by_key.remove(&k).filter(|i| old[*i].1 == item);
+                src.push(kept.map_or(-1, |i| i as isize));
+                rows.push((k, item));
             }
-            dom(|d| old.iter().flatten().for_each(|r| d.remove(r.view)));
-            old.into_iter().flatten().for_each(|r| r.owner.dispose());
-            let views: Vec<Range> = rows.iter().map(|r| r.view).collect();
-            drop(rows);
-            put(at, &src, &views);
+            reconcile(at, outer, &mut placed.borrow_mut(), &src, &|i| row(rows[i].1.clone()));
         });
     });
+}
+
+/// A list's rows in the page; the list's owner ending ends them (they
+/// are its, not a run's).
+fn placed_rows() -> Rc<RefCell<Vec<Placed>>> {
+    let placed: Rc<RefCell<Vec<Placed>>> = Rc::default();
+    let p = placed.clone();
+    cleanup(move || p.borrow_mut().drain(..).for_each(|r| r.owner.dispose()));
+    placed
+}
+
+/// A list's rows in their new order (not generic: one copy for all
+/// lists): `src[i]`, row `i`'s old place (`-1`: new, made by `make(i)`);
+/// the old rows not kept are removed and ended.
+fn reconcile(at: u32, outer: Option<Owner>, placed: &mut Vec<Placed>, src: &[isize], make: &dyn Fn(usize) -> View) {
+    let mut old: Vec<Option<Placed>> = std::mem::take(placed).into_iter().map(Some).collect();
+    for (i, s) in src.iter().enumerate() {
+        let p = match usize::try_from(*s) {
+            Ok(s) => old[s].take().expect("a row kept once"),
+            Err(_) => {
+                // The list's, not this run's: a re-run keeps it, the list's end ends it.
+                let mk = || child_scope(|| place(make(i)));
+                let (view, owner) = match outer {
+                    Some(o) => with_owner(o, mk),
+                    None => detached(mk),
+                };
+                Placed { owner, view }
+            }
+        };
+        placed.push(p);
+    }
+    dom(|d| old.iter().flatten().for_each(|r| d.remove(r.view)));
+    old.into_iter().flatten().for_each(|r| r.owner.dispose_soon());
+    let views: Vec<Range> = placed.iter().map(|r| r.view).collect();
+    put(at, src, &views);
 }
 
 /// Put rows in their new order before `at` (not generic: one copy for all
@@ -960,12 +1058,14 @@ pub struct ErrorBoundaryProps {
 }
 
 /// Its children, or `fallback(error)` once one of them throws (`?` in a
-/// view's body): what the children made is ended in the same pass.
+/// view's body): what the children made is ended in the same pass. The
+/// fallback may [`retry`]: the children are made anew.
 #[allow(non_snake_case)]
 pub fn ErrorBoundary(p: ErrorBoundaryProps) -> View {
     let error = Signal::new(None::<String>);
     let owner = current_owner().expect("air: a boundary is made in a view");
     provide_on(owner, Catch(Rc::new(move |e| error.set_quiet(Some(e)))));
+    provide_on(owner, Retry(error));
     let ErrorBoundaryProps { fallback, children } = p;
     Ok(Tree::new(move || {
         let (range, at) = slot();
@@ -979,6 +1079,24 @@ pub fn ErrorBoundary(p: ErrorBoundaryProps) -> View {
         );
         range
     }))
+}
+
+/// The nearest [`ErrorBoundary`]'s way back to its children ([`retry`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Retry(Signal<Option<String>>);
+
+impl Retry {
+    /// The boundary's children made anew (aio's boundary `reset`); one
+    /// that throws again shows the fallback again.
+    pub fn retry(self) {
+        self.0.set(None);
+    }
+}
+
+/// The [`Retry`] of the [`ErrorBoundary`] this view is in (call it in
+/// the fallback's body, keep it for a handler).
+pub fn retry() -> Retry {
+    crate::reactive::try_context::<Retry>().expect("air: retry() outside an ErrorBoundary")
 }
 
 /// The props of [`Suspense`].
@@ -1318,6 +1436,7 @@ impl Root {
     }
 
     fn event_in(&self, frame: &[u8]) -> bool {
+        crate::reactive::drop_left();
         match frame.first() {
             Some(&EVAL) => return eval_reply(frame),
             Some(&EVENT) => {}
@@ -1345,7 +1464,7 @@ impl Root {
                 }
             }
         });
-        if !took && cfg!(debug_assertions) {
+        if !took && cfg!(feature = "dev") {
             stale(&raw.name, &raw.ids);
         }
         took

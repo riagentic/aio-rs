@@ -194,7 +194,9 @@ fn columns(rows: &[(String, String)]) -> Vec<String> {
     rows.iter().map(|(l, r)| format!("  {l:<w$}  {r}").trim_end().to_string()).collect()
 }
 
-/// A parsed command line, read by the spec's names.
+/// A parsed command line, read by the spec's names, each flag as its kind
+/// (aio inferred the types from the spec): a name the spec hasn't, or a
+/// flag read as another kind (`number` of a text flag), panics naming it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Args {
     /// The sub-command (when the spec has commands).
@@ -205,32 +207,44 @@ pub struct Args {
     pub json: bool,
     values: BTreeMap<String, Vec<String>>,
     pos: BTreeMap<String, String>,
+    kinds: BTreeMap<String, Kind>,
+    positional: Vec<String>,
 }
 
 impl Args {
     /// A switch is on.
     pub fn on(&self, name: &str) -> bool {
-        self.values.contains_key(name)
+        self.read(name, Kind::Switch).is_some()
     }
 
     /// A text flag's value (the last one given), or its default.
     pub fn text(&self, name: &str) -> Option<&str> {
-        self.values.get(name).and_then(|v| v.last()).map(String::as_str)
+        self.read(name, Kind::Text).and_then(|v| v.last()).map(String::as_str)
     }
 
     /// A number flag's value, or its default.
     pub fn number(&self, name: &str) -> Option<f64> {
-        self.text(name).and_then(|v| v.trim().parse().ok())
+        self.read(name, Kind::Number).and_then(|v| v.last()).and_then(|v| v.trim().parse().ok())
     }
 
     /// A list flag's values (its default when none was given).
     pub fn list(&self, name: &str) -> &[String] {
-        self.values.get(name).map_or(&[], Vec::as_slice)
+        self.read(name, Kind::List).map_or(&[], Vec::as_slice)
     }
 
     /// A named positional.
     pub fn pos(&self, name: &str) -> Option<&str> {
+        assert!(self.positional.iter().any(|p| p == name), "Args::pos({name:?}): the spec has no such positional");
         self.pos.get(name).map(String::as_str)
+    }
+
+    /// Flag `name`'s values, held to the spec's kind.
+    fn read(&self, name: &str, kind: Kind) -> Option<&Vec<String>> {
+        match self.kinds.get(name) {
+            Some(k) if *k == kind => self.values.get(name),
+            Some(k) => panic!("--{name} is a {k:?} flag, read as {kind:?}"),
+            None => panic!("--{name}: the spec has no such flag"),
+        }
     }
 }
 
@@ -350,20 +364,55 @@ pub fn parse<S: AsRef<str>>(spec: &Spec, argv: &[S]) -> Result<Args, Stop> {
     if let (Some(w), None) = (rest.first(), &spec.rest) {
         return Err(refuse(format!("unexpected argument: {w}")));
     }
-    Ok(Args { command, rest, json, values, pos })
+    let kinds = spec.flags.iter().map(|f| (f.name.clone(), f.kind)).collect();
+    Ok(Args { command, rest, json, values, pos, kinds, positional: spec.positional.clone() })
+}
+
+/// A run [`crate::testing::TestIo::run`] holds on this thread: its
+/// arguments, where it prints, and its end, a [`Exit`] unwind instead of
+/// the process's.
+pub(crate) struct Held {
+    pub(crate) argv: Vec<String>,
+    pub(crate) out: Box<dyn std::io::Write>,
+    pub(crate) err: Box<dyn std::io::Write>,
+}
+
+thread_local! {
+    pub(crate) static HELD: std::cell::RefCell<Option<Held>> = const { std::cell::RefCell::new(None) };
+}
+
+/// How a held run ended: its exit code.
+#[cfg_attr(not(feature = "testing"), expect(dead_code, reason = "read by testing::TestIo::run"))]
+pub(crate) struct Exit(pub(crate) i32);
+
+/// `line` to stdout (`out`) or stderr, then the process ends with `code`;
+/// in a held run, its streams and its end.
+fn end(out: bool, line: &str, code: i32) -> ! {
+    let held = HELD.with_borrow_mut(|h| {
+        h.as_mut().map(|h| {
+            let to = if out { &mut h.out } else { &mut h.err };
+            _ = writeln!(to, "{line}");
+        })
+    });
+    if held.is_some() {
+        std::panic::resume_unwind(Box::new(Exit(code)));
+    }
+    match out {
+        true => println!("{line}"),
+        false => eprintln!("{line}"),
+    }
+    std::process::exit(code)
 }
 
 /// The process's arguments parsed against `spec` (aio's own launch flags,
 /// `--home` and the like, left out): `--help`/`--version` print and exit
 /// 0, a wrong invocation is refused with [`USAGE`].
 pub fn args(spec: &Spec) -> Args {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let argv = HELD.with_borrow(|h| h.as_ref().map(|h| h.argv.clone()));
+    let argv: Vec<String> = argv.unwrap_or_else(|| std::env::args().skip(1).collect());
     match parse(spec, &crate::paths::Ask::app_args(&argv)) {
         Ok(a) => a,
-        Err(Stop::Say(text)) => {
-            println!("{text}");
-            std::process::exit(OK)
-        }
+        Err(Stop::Say(text)) => end(true, &text, OK),
         Err(Stop::Refused { why, json }) => fail(&why, USAGE, json),
     }
 }
@@ -378,11 +427,8 @@ pub fn failure(why: &str, json: bool) -> (bool, String) {
 
 /// Say `why` and end the process with `code` ([`ERROR`] unless above 0).
 pub fn fail(why: &str, code: i32, json: bool) -> ! {
-    match failure(why, json) {
-        (true, line) => println!("{line}"),
-        (false, line) => eprintln!("{line}"),
-    }
-    std::process::exit(if code > 0 { code } else { ERROR })
+    let (out, line) = failure(why, json);
+    end(out, &line, if code > 0 { code } else { ERROR })
 }
 
 /// Edit distance, for the did-you-mean.
@@ -807,21 +853,121 @@ pub fn frame(tty: bool, text: &str) -> String {
     if tty { format!("\x1b[2J\x1b[H{text}\n") } else { format!("{text}\n") }
 }
 
-/// A live view on stdout: `render(now)` at once, then again after each
-/// change `listen` reports (`Handle::listen`, a client's `Remote::listen`):
-/// `aio::cli::watch(&h.state(), |f| h.listen(f), render)`.
+/// How long a live view gathers changes into one frame.
+pub const TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// A live view on stdout: `render(now)` at once, then one frame per
+/// [`TICK`] with changes (the last state of the tick) that `listen` reports
+/// (`Handle::listen`, a client's `Remote::listen`):
+/// `aio::cli::watch(&h.state(), |f| h.listen(f), render)`. On a terminal
+/// the cursor is hidden while it draws, and shown again when the process
+/// ends, Ctrl+C too.
 pub fn watch<T, F>(now: &T, listen: impl FnOnce(Box<dyn Fn(&Arc<T>) + Send + Sync>), render: F)
 where
-    T: 'static,
+    T: Send + Sync + 'static,
     F: Fn(&T) -> String + Send + Sync + 'static,
 {
     let tty = std::io::stdout().is_terminal();
-    let show = move |text: String| {
+    let show = move |text: &str| {
         let mut out = std::io::stdout().lock();
-        _ = out.write_all(frame(tty, &text).as_bytes()).and_then(|_| out.flush());
+        _ = out.write_all(text.as_bytes()).and_then(|_| out.flush());
     };
-    show(render(now));
-    listen(Box::new(move |s| show(render(s))));
+    if tty {
+        cursor::hide();
+    }
+    show(&frame(tty, &render(now)));
+    let (tx, rx) = std::sync::mpsc::channel::<Arc<T>>();
+    std::thread::spawn(move || ticks(&rx, |s| show(&frame(tty, &render(s)))));
+    let tx = Mutex::new(tx);
+    listen(Box::new(move |s| _ = tx.lock().unwrap_or_else(|e| e.into_inner()).send(s.clone())));
+}
+
+/// Each change `rx` hears, and those of the [`TICK`] after it, drawn as one
+/// frame: the last.
+fn ticks<T>(rx: &std::sync::mpsc::Receiver<Arc<T>>, draw: impl Fn(&T)) {
+    while let Ok(first) = rx.recv() {
+        std::thread::sleep(TICK);
+        draw(&rx.try_iter().last().unwrap_or(first));
+    }
+}
+
+/// The terminal's cursor, hidden for a live view and shown again however
+/// the process ends: its exit, Ctrl+C or SIGTERM (an app's own handler
+/// still runs after).
+mod cursor {
+    const SHOW: &[u8] = b"\x1b[?25h";
+
+    pub fn hide() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(on_end);
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        _ = out.write_all(b"\x1b[?25l").and_then(|_| out.flush());
+    }
+
+    #[cfg(unix)]
+    fn on_end() {
+        use std::sync::OnceLock;
+        // The handlers there before (an app's, tokio's): run after ours.
+        static OLD: [OnceLock<libc::sigaction>; 2] = [OnceLock::new(), OnceLock::new()];
+        extern "C" fn show() {
+            // write(2) only: what a signal handler may call.
+            unsafe { libc::write(1, SHOW.as_ptr().cast(), SHOW.len()) };
+        }
+        extern "C" fn on_signal(sig: libc::c_int, info: *mut libc::siginfo_t, cx: *mut libc::c_void) {
+            show();
+            let Some(old) = OLD[usize::from(sig == libc::SIGTERM)].get() else { return };
+            unsafe {
+                match old.sa_sigaction {
+                    libc::SIG_DFL => {
+                        libc::signal(sig, libc::SIG_DFL);
+                        libc::raise(sig);
+                    }
+                    libc::SIG_IGN => {}
+                    f if old.sa_flags & libc::SA_SIGINFO != 0 => {
+                        let f: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) = std::mem::transmute(f);
+                        f(sig, info, cx)
+                    }
+                    f => std::mem::transmute::<libc::sighandler_t, extern "C" fn(libc::c_int)>(f)(sig),
+                }
+            }
+        }
+        unsafe {
+            libc::atexit(show);
+            for (i, sig) in [libc::SIGINT, libc::SIGTERM].into_iter().enumerate() {
+                let mut new: libc::sigaction = std::mem::zeroed();
+                new.sa_sigaction = on_signal as extern "C" fn(_, _, _) as libc::sighandler_t;
+                new.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+                let mut old: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(sig, &new, &mut old) == 0 {
+                    if old.sa_sigaction == libc::SIG_IGN {
+                        libc::sigaction(sig, &old, std::ptr::null_mut()); // ignored stays ignored
+                    }
+                    _ = OLD[i].set(old);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn on_end() {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        extern "C" fn show() {
+            use std::io::Write;
+            _ = std::io::stdout().write_all(SHOW).and_then(|_| std::io::stdout().flush());
+        }
+        unsafe extern "system" fn on_ctrl(_: u32) -> windows_sys::core::BOOL {
+            show();
+            0 // and on to the next handler: the app's, else the default end
+        }
+        unsafe extern "C" {
+            fn atexit(f: extern "C" fn()) -> i32;
+        }
+        unsafe {
+            atexit(show);
+            SetConsoleCtrlHandler(Some(on_ctrl), 1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -867,6 +1013,74 @@ mod tests {
         let tags = Spec::new("t").flag(Flag::list("tag").default("all"));
         assert_eq!(parse(&tags, &[] as &[&str]).unwrap().list("tag"), ["all"]);
         assert_eq!(parse(&tags, &["--tag=a"]).unwrap().list("tag"), ["a"], "a given value replaces the default");
+    }
+
+    #[test]
+    fn a_live_view_draws_one_frame_per_tick_the_last_state() {
+        // aio's watch: the changes of one tick, one frame.
+        let (tx, rx) = std::sync::mpsc::channel();
+        for n in 1..=50 {
+            tx.send(Arc::new(n)).unwrap();
+        }
+        drop(tx);
+        let drawn = Mutex::new(vec![]);
+        ticks(&rx, |n: &i32| drawn.lock().unwrap().push(*n));
+        assert_eq!(*drawn.lock().unwrap(), [50]);
+    }
+
+    /// A child test process: hides the cursor, then ends as `AIO_TEST_CURSOR` says.
+    #[cfg(unix)]
+    #[test]
+    fn cursor_child() {
+        let Ok(how) = std::env::var("AIO_TEST_CURSOR") else { return };
+        cursor::hide();
+        if how == "int" {
+            unsafe { libc::raise(libc::SIGINT) };
+        }
+        std::process::exit(3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hidden_cursor_is_shown_again_however_the_process_ends() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        // SIGINT as the child starts with it, whatever this test inherited
+        // (nohup, a background job): an ignored one stays ignored.
+        for (how, disposition, code, sig) in [
+            ("exit", libc::SIG_DFL, Some(3), None),
+            ("int", libc::SIG_DFL, None, Some(libc::SIGINT)),
+            ("int", libc::SIG_IGN, Some(3), None),
+        ] {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", "cli::tests::cursor_child", "--nocapture", "--test-threads=1"]).env("AIO_TEST_CURSOR", how);
+            // SAFETY: only signal(), async-signal-safe, between fork and exec.
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::signal(libc::SIGINT, disposition);
+                    Ok(())
+                });
+            }
+            let out = cmd.output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            let (hid, shown) = (text.find("\x1b[?25l"), text.rfind("\x1b[?25h"));
+            assert!(hid.is_some() && shown > hid, "{how}: {text:?}");
+            assert_eq!((out.status.code(), out.status.signal()), (code, sig), "{how}: ends as it would");
+        }
+    }
+
+    #[test]
+    fn a_flag_is_read_as_the_kind_the_spec_gives_it() {
+        // aio inferred `a.flags.n: number` from the spec; a misread is caught at once.
+        let a = parse(&todo(), &["list", "-n", "3"]).unwrap();
+        let panics = |f: fn(&Args)| {
+            let a = a.clone();
+            std::panic::catch_unwind(move || f(&a)).unwrap_err().downcast::<String>().map(|s| *s).unwrap_or_default()
+        };
+        assert_eq!(panics(|a| _ = a.text("n")), "--n is a Number flag, read as Text");
+        assert_eq!(panics(|a| _ = a.on("url")), "--url is a Text flag, read as Switch");
+        assert_eq!(panics(|a| _ = a.number("count")), "--count: the spec has no such flag");
+        assert_eq!(panics(|a| _ = a.pos("idd")), "Args::pos(\"idd\"): the spec has no such positional");
+        assert_eq!((a.number("n"), a.on("json"), a.pos("id")), (Some(3.0), false, None));
     }
 
     #[test]

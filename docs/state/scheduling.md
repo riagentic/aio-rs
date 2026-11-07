@@ -70,6 +70,11 @@ assert_eq!(h.state().hourly, 2, "missed slots fire once, not five times");
   the effect the last tick started, keyed by the method's name, still
   runs. That is what a `pub async fn` scheduled this way starts, so a slow
   sync never overlaps itself.
+- `#[skip_if_running]` on a `pub async fn` does the same for every
+  schedule of it, whoever set it (`cx.every("sync", 5_000, "sync", ())`
+  in a call: aio's `skipIfRunning` option). Ten ticks skipped in a row
+  are said once (`schedule:skipping`): the method runs longer than its
+  interval.
 - The method is a `pub fn(&mut self)`, with `cx: &Cx` allowed, and no
   other arguments; anything else is a build error that says so.
 - Declared schedules are armed each time the cell goes live: at start, and

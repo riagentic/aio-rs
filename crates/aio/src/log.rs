@@ -278,6 +278,7 @@ pub fn start(logs: &Path) -> io::Result<()> {
     let copier =
         std::thread::Builder::new().name("aio-log".into()).spawn(move || copy(pipe, Some(term), paint, log))?;
     *tee() = Some((copier, back));
+    finish_at_exit();
     heartbeat();
     Ok(())
 }
@@ -300,9 +301,12 @@ fn tee() -> std::sync::MutexGuard<'static, Option<(std::thread::JoinHandle<()>, 
 fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
     let (mut repeats, mut tally) = (Repeats::default(), Tally::default());
     ERRORS.store(0, Relaxed);
+    let mut brief = BriefBoot { on: std::env::var("AIORT_BOOT").is_ok_and(|v| v == "brief"), rows: vec![] };
     let mut out = |line: &str| {
         if let Some(t) = term.as_mut() {
-            _ = writeln!(t, "{}", if paint { painted(line) } else { line.into() });
+            for l in brief.next(line) {
+                _ = writeln!(t, "{}", if paint { painted(&l) } else { l.as_str().into() });
+            }
         }
         #[cfg(target_os = "android")]
         logcat(line);
@@ -327,6 +331,62 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
         repeats.next(line).iter().for_each(|l| out(l));
     }
     repeats.end().iter().chain(&tally.said()).for_each(|l| out(l));
+    if let Some(t) = term.as_mut() {
+        for l in brief.flush() {
+            _ = writeln!(t, "{l}");
+        }
+    }
+}
+
+/// `ax dev`'s terminal (`AIORT_BOOT=brief`): the boot report, a dozen rows
+/// at each start, said in one line there (the log keeps every row).
+#[derive(Default)]
+struct BriefBoot {
+    on: bool,
+    rows: Vec<String>,
+}
+
+impl BriefBoot {
+    /// What the terminal shows for `line` (pure).
+    fn next(&mut self, line: &str) -> Vec<String> {
+        if !self.on {
+            return vec![line.into()];
+        }
+        if let Some(row) = line.strip_prefix("[aio] boot ") {
+            self.rows.push(row.into());
+            return vec![];
+        }
+        let mut out = self.flush();
+        out.push(line.into());
+        out
+    }
+
+    /// The rows so far in one line: the mode, and each one set for this run
+    /// (by the environment or a flag, not aio.toml or a default) (pure).
+    fn flush(&mut self) -> Vec<String> {
+        if self.rows.is_empty() {
+            return vec![];
+        }
+        let rows = std::mem::take(&mut self.rows);
+        let split = |r: &String| {
+            let (key, rest) = r.split_once(' ').unwrap_or((r, ""));
+            let rest = rest.trim();
+            let (value, from) = rest.rsplit_once(" (").map_or((rest, ""), |(v, f)| (v, f.strip_suffix(')').unwrap_or(f)));
+            (key.to_string(), value.to_string(), from.to_string())
+        };
+        let mut said: Vec<String> = vec![];
+        for (key, value, from) in rows.iter().map(split) {
+            // Set for this run (an environment variable, a flag), or open to others: said.
+            let set = from.starts_with("AIORT_") || from.starts_with("--");
+            let open = value.contains("OPEN") || value.contains("open to the network");
+            if key == "mode" || set || open {
+                said.push(if key == "mode" { value } else { format!("{key} {value} ({from})") });
+            }
+        }
+        let n = rows.len();
+        said.push(format!("{n} settings in the log (ax dev --verbose shows each)"));
+        vec![format!("[aio] boot: {}", said.join(", "))]
+    }
 }
 
 /// A page error the runtime (Electron) throws itself, not the app, told by
@@ -417,26 +477,31 @@ pub fn calls() -> u64 {
     CALLS.load(Relaxed)
 }
 
-thread_local!(static CALL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+thread_local!(static CALL: std::cell::Cell<(u64, &'static str)> = const { std::cell::Cell::new((0, "")) });
 static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
 
 /// The id of the call running on this thread, 0 outside one (aio's
 /// correlation id): a number per call this run, as `call=<id>` on every
 /// line the call logs, in the timeline's entry and in a report it causes.
 pub fn call_id() -> u64 {
-    CALL.get()
+    CALL.get().0
 }
 
-/// Run `f` as a new call: its id is [`call_id`] until it returns.
-pub(crate) fn in_call<R>(f: impl FnOnce() -> R) -> R {
+/// The cell whose call runs on this thread, if one does.
+pub(crate) fn call_cell() -> Option<&'static str> {
+    Some(CALL.get().1).filter(|c| !c.is_empty())
+}
+
+/// Run `f` as a new call of `cell`: its id is [`call_id`] until it returns.
+pub(crate) fn in_call<R>(cell: &'static str, f: impl FnOnce() -> R) -> R {
     // Restored on the way out, a panic's too.
-    struct Was(u64);
+    struct Was((u64, &'static str));
     impl Drop for Was {
         fn drop(&mut self) {
             CALL.set(self.0);
         }
     }
-    let _was = Was(CALL.replace(NEXT_CALL.fetch_add(1, Relaxed)));
+    let _was = Was(CALL.replace((NEXT_CALL.fetch_add(1, Relaxed), cell)));
     f()
 }
 
@@ -624,6 +689,7 @@ pub fn start(logs: &Path) -> io::Result<()> {
         copy(pipe, t, paint, log)
     })?;
     *tee() = Some((copier, (term_at, w)));
+    finish_at_exit();
     heartbeat();
     Ok(())
 }
@@ -641,10 +707,48 @@ impl Write for Term {
     }
 }
 
+/// [`finish`] at the process's exit too: an app whose `main` returns an
+/// error (Rust prints `Error: …` after `main`) or calls `exit` never
+/// reaches it, and its last line (why it ended) would be lost. Waits for
+/// the copier a second at most: a child still holding the pipe never
+/// keeps the exit waiting. (Windows: `std::process::exit` ends the process
+/// at once, its threads first; only a return from `main` gets here.)
+#[cfg(any(unix, windows))]
+fn finish_at_exit() {
+    #[cfg(windows)]
+    unsafe extern "C" {
+        fn atexit(f: extern "C" fn()) -> std::ffi::c_int;
+    }
+    #[cfg(windows)]
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlDllShutdownInProgress() -> u8;
+    }
+    #[cfg(unix)]
+    use libc::atexit;
+    extern "C" fn at_exit() {
+        // SAFETY: a plain query. True once the process is ending its threads
+        // (`ExitProcess`): the copier is gone, nothing to wait for.
+        #[cfg(windows)]
+        if unsafe { RtlDllShutdownInProgress() } != 0 {
+            return;
+        }
+        finish_by(Some(std::time::Duration::from_secs(1)));
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: registers a plain function; `finish` is safe at any time.
+    ONCE.call_once(|| _ = unsafe { atexit(at_exit) });
+}
+
 /// Write out every line still on its way to the log, then send stderr
 /// straight to the terminal again. Call it last before exiting: a stop or
 /// crash reason is the last line, and must not be lost.
 pub fn finish() {
+    finish_by(None);
+}
+
+/// [`finish`], waiting for the copier `wait` at most (else until it ends).
+fn finish_by(wait: Option<std::time::Duration>) {
     let Some((copier, back)) = tee().take() else { return };
     RUN.fetch_add(1, Relaxed);
     // SAFETY: fd 2 becomes the terminal again, which closes this process's
@@ -664,11 +768,45 @@ pub fn finish() {
         );
         drop(back.1);
     }
-    _ = copier.join();
+    let Some(wait) = wait else {
+        _ = copier.join();
+        return;
+    };
+    let end = std::time::Instant::now() + wait;
+    while !copier.is_finished() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if copier.is_finished() {
+        _ = copier.join();
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ax_devs_terminal_has_the_boot_report_in_one_line() {
+        let mut b = super::BriefBoot { on: true, rows: vec![] };
+        for l in [
+            "[aio] boot app        notes (aio.toml)",
+            "[aio] boot mode       standalone (aio.toml)",
+            "[aio] boot config     aio.toml built into the app (aio::config!())",
+            "[aio] boot log        debug (AIORT_LOG)",
+            "[aio] boot gpu        hardware (default)",
+        ] {
+            assert!(b.next(l).is_empty(), "{l}");
+        }
+        assert_eq!(
+            b.next("[aio] window ready"),
+            [
+                "[aio] boot: standalone, log debug (AIORT_LOG), 5 settings in the log (ax dev --verbose shows each)",
+                "[aio] window ready"
+            ]
+        );
+        assert!(b.flush().is_empty());
+        let mut off = super::BriefBoot::default();
+        assert_eq!(off.next("[aio] boot app notes (aio.toml)"), ["[aio] boot app notes (aio.toml)"]);
+    }
+
     use super::*;
 
     #[test]

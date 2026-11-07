@@ -90,16 +90,21 @@ pub fn start_js(dev: bool) -> String {
 
 /// The window's page scripts (`page.js`): keys, focus, drag data and
 /// dialogs as on the desktop (`aio::page`), and in a dev build the overlay
-/// that shows the page's errors on it and the live reload ([`RELOAD`]) (pure).
-pub fn page_js(dev: bool) -> String {
+/// that shows the page's errors on it and the live reload ([`RELOAD`]);
+/// the console sent on ([`CONSOLE`]) where something takes it (`logged`:
+/// a dev build, or an app with a server and `[server] page_log`) (pure).
+pub fn page_js(dev: bool, logged: bool) -> String {
     use aio::page::{DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, WHEEL};
     // `;` after each piece: an `(() => …)()` piece followed by another
     // would otherwise call its result
     let pieces: &[&str] = match dev {
-        true => &[CONSOLE, OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS, RELOAD],
+        true => &[OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS, RELOAD],
         false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS],
     };
-    pieces.iter().map(|p| format!("{};\n", p.trim_end())).collect()
+    // The console to `ax dev`'s log, or in a release to the app server's (`[server] page_log`).
+    let console = CONSOLE.replace("ENDPOINT", if dev { "/aio-dev/log" } else { "/__aio/log" });
+    let console = logged.then_some(console.as_str());
+    console.into_iter().chain(pieces.iter().copied()).map(|p| format!("{};\n", p.trim_end())).collect()
 }
 
 /// The page: its language and direction (`[app] lang`, `dir`), viewport,
@@ -362,7 +367,9 @@ pub fn pack(
     }
     let page = index_html(&app.name, &cfg.app, &head, body).replacen("<body>\n", &format!("<body>\n{splash}"), 1);
     std::fs::write(out.join("index.html"), page).map_err(|e| e.to_string())?;
-    std::fs::write(out.join("page.js"), page_js(dev)).map_err(|e| e.to_string())?;
+    // A standalone app has no server to take its console: none is sent.
+    let logged = dev || (cfg.app.mode != aio::config::Mode::Standalone && cfg.server.page_log);
+    std::fs::write(out.join("page.js"), page_js(dev, logged)).map_err(|e| e.to_string())?;
     std::fs::write(out.join("start.js"), start_js(dev)).map_err(|e| e.to_string())?;
     let mut files = site_files(out, out).map_err(|e| e.to_string())?;
     // iOS fetches its launch images itself: the worker needn't hold them.
@@ -425,16 +432,10 @@ pub fn bind(
         crate::build::remap(&mut cargo, root);
     }
     // Cargo's errors are said here and kept for the dev page (`ax dev --web`).
-    let o = cargo
-        .current_dir(root)
-        .env("AIORT_APP_ID", &app.id)
-        .env("AIORT_APP_VERSION", &app.version)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| e.to_string())?;
-    let said = String::from_utf8_lossy(&o.stderr);
-    eprint!("{said}");
+    // As it comes (it was silent until the end: 25 s of nothing on a first build).
+    cargo.current_dir(root).env("AIORT_APP_ID", &app.id).env("AIORT_APP_VERSION", &app.version);
+    let o = crate::hotpatch::cargo_out::run(&mut cargo, false, &Default::default()).map_err(|e| e.to_string())?;
+    let said = o.said;
     if !o.status.success() {
         let why = "the web build failed (rustup target add wasm32-unknown-unknown, if it is missing)";
         return Err(match fatal(&said) {
@@ -455,7 +456,19 @@ pub fn bind(
     if !ok.success() {
         return Err(format!("wasm-bindgen could not bind {}", wasm.display()));
     }
+    // A release's glue without its indentation and comment lines: ~20% less to fetch.
+    let glue = out.join(format!("{BUNDLE}.js"));
+    if let Some(js) = std::fs::read_to_string(&glue).ok().filter(|_| !dev).and_then(|js| trimmed(&js)) {
+        std::fs::write(&glue, js).map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+/// `js` through [`aio::shrink::js`]; None: it keeps its text as written.
+fn trimmed(js: &str) -> Option<String> {
+    let mut out = vec![0; aio::shrink::js(js.as_bytes(), &mut [])?];
+    aio::shrink::js(js.as_bytes(), &mut out)?;
+    String::from_utf8(out).ok()
 }
 
 /// An app's web build: its package, its cdylib lib, and where cargo builds.
@@ -533,7 +546,7 @@ pub fn build(name: &str, dev: bool) -> Result<(String, PathBuf), String> {
     let site = Site::of(name)?;
     let profile = if dev { "dev" } else { "release" };
     eprintln!("ax build: {} {} for the web ({profile})…", site.app.name, site.app.version);
-    let out = site.root.join("dist").join(format!("{}-web", site.app.id));
+    let out = crate::build::dist(&site.root, &site.cfg).join(format!("{}-web", site.app.id));
     let said = site.make(&out, dev)?;
     let (raw, gz) = wasm_size(&out).map_err(|e| e.to_string())?;
     let size = format!("wasm: {} KB, {} KB gzipped", raw / 1000, gz / 1000);
@@ -568,12 +581,13 @@ pub const RELOAD: &str = "(() => {
   tick();
 })();";
 
-/// The dev page's console in `ax dev --web`'s log (`page.js` in a dev
-/// build, aio's console intercept): every level, uncaught errors and
-/// refused promises, each line cut at 4 KB, sent in batches to
-/// `/aio-dev/log` (at most 200 waiting: past that they are counted, and
-/// the count said). The page's own console still shows them. With no dev
-/// server (a static `--dev` build) it stops sending.
+/// The page's console in a log (`page.js`, aio's console intercept):
+/// every level, uncaught errors and refused promises, each line cut at
+/// 4 KB, sent in batches to `ENDPOINT`: `ax dev --web`'s `/aio-dev/log` in
+/// a dev build, the app server's `/__aio/log` in a release (at most 200
+/// waiting: past that they are counted, and the count said). The page's own
+/// console still shows them. Where nothing takes them (a static host, a
+/// server with `[server] page_log = false`: a 404) it stops sending.
 pub const CONSOLE: &str = "(() => {
   const MAX = 4096, CAP = 200
   let queue = [], dropped = 0, timer = 0, off = false
@@ -588,7 +602,7 @@ pub const CONSOLE: &str = "(() => {
     if (dropped) { queue.push({ level: 'warn', msg: `[aio] ${dropped} console lines were dropped (over ${CAP} waiting)` }); dropped = 0 }
     const body = JSON.stringify(queue)
     queue = []
-    fetch('/aio-dev/log', { method: 'POST', body, keepalive: body.length < 60000, headers: { 'content-type': 'application/json' } })
+    fetch('ENDPOINT', { method: 'POST', body, keepalive: body.length < 60000, headers: { 'content-type': 'application/json' } })
       .then((r) => { if (r.status === 404) off = true }, () => {})
   }
   const send = (level, args) => {
@@ -798,6 +812,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_release_glue_loses_indentation_and_comment_lines() {
+        let glue =
+            "/**\n * The app.\n */\nexport function web() {\n    // Cast intrinsic for `x`.\n    wasm.web();\n}\n";
+        assert_eq!(trimmed(glue).unwrap(), "/**\n* The app.\n*/\nexport function web() {\nwasm.web();\n}\n");
+        assert_eq!(trimmed("const s = `a\n  b`;\n"), None, "a template literal over lines stays as it is");
+    }
+
+    #[test]
     fn dev_web_takes_its_flags_in_any_order_and_refuses_others() {
         let p = |w: &str| Serve::parse(&w.split(' ').collect::<Vec<_>>());
         assert_eq!(p("--web"), Ok(Serve::default()));
@@ -895,12 +917,12 @@ mod tests {
         assert!(p.contains(r#"<html lang="ar" dir="rtl">"#), "{p}");
         assert!(index_html("t", &app("dir = \"auto\""), "", "").contains(r#"<html lang="en" dir="auto">"#));
         // The window's page scripts; a dev build's shows its errors on the page, a release's doesn't.
-        assert!(page_js(false).contains("aria-modal") && page_js(false).contains("autofocus"));
-        assert!(!page_js(false).contains("__aioDiag") && page_js(true).contains("window.__aioDiag = add"));
-        assert!(!page_js(false).contains("/aio-dev/build") && page_js(true).contains("/aio-dev/build"));
+        assert!(page_js(false, true).contains("aria-modal") && page_js(false, true).contains("autofocus"));
+        assert!(!page_js(false, true).contains("__aioDiag") && page_js(true, true).contains("window.__aioDiag = add"));
+        assert!(!page_js(false, true).contains("/aio-dev/build") && page_js(true, true).contains("/aio-dev/build"));
         // no piece runs into the next: `})()\n(() =>` calls the first's result
         for dev in [false, true] {
-            assert!(!page_js(dev).contains(")\n("), "{}", page_js(dev));
+            assert!(!page_js(dev, true).contains(")\n("), "{}", page_js(dev, true));
         }
     }
 
@@ -935,10 +957,15 @@ mod tests {
 
     #[test]
     fn the_dev_pages_console_reaches_the_log_every_level_capped_without_escapes() {
-        let js = page_js(true);
+        let js = page_js(true, true);
         assert!(js.contains("fetch('/aio-dev/log'") && js.find("CAP = 200").is_some(), "{js}");
         assert!(js.starts_with("(() => {\n  const MAX = 4096"), "first: it hears the other pieces' lines");
-        assert!(!page_js(false).contains("/aio-dev/log"), "a release page sends nothing");
+        let release = page_js(false, true);
+        assert!(
+            !release.contains("/aio-dev/log") && release.contains("fetch('/__aio/log'"),
+            "a release page: to its server"
+        );
+        assert!(!page_js(false, false).contains("/__aio/log"), "a standalone app's page: no server, nothing sent");
         let body = br#"[{"level":"warn","msg":"low disk"},{"level":"log","msg":"a\u001b[2Jb\nc"},{"msg":7}]"#;
         assert_eq!(page_lines(body), ["[page] warn: low disk", "[page] info: a\u{fffd}[2Jb\nc", "[page] info: "]);
         assert!(page_lines(b"not json").is_empty());
@@ -968,6 +995,7 @@ mod tests {
              globalThis.fetch = () => Promise.resolve({{ ok: true, json: () => answers.shift() }});
              const el = (tag) => ({{ tag, kids: [], style: {{}}, attrs: {{}}, textContent: '',
                setAttribute(k, v) {{ this.attrs[k] = v; }},
+               attachShadow() {{ return this; }},
                appendChild(c) {{ this.kids.push(c); }} }});
              globalThis.document = {{ body: el('body'), createElement: el }};
              {}\n{RELOAD}
@@ -1041,13 +1069,20 @@ pub(crate) mod browser {
 
     const KEY: &str = "a-long-random-app-key-for-tests";
 
+    /// A test that can't run here says why and ends; where these tests
+    /// must run (`AIO_CI_WEB` set: CI, the tools fetched) it fails instead.
+    pub(crate) fn skipped(why: &str) {
+        assert!(std::env::var_os("AIO_CI_WEB").is_none(), "{why}: AIO_CI_WEB is set, so this test must run");
+        eprintln!("{why}: skipped");
+    }
+
     /// The test page's site, built and bound into `dir/site`; `None` (said)
     /// without the wasm32 target or the right wasm-bindgen.
     fn site(dir: &Path) -> Option<PathBuf> {
         let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
         let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
         if !sysroot.join("lib/rustlib/wasm32-unknown-unknown").is_dir() {
-            eprintln!("no wasm32 target: skipped");
+            skipped("no wasm32 target");
             return None;
         }
         let page = dir.join("page");
@@ -1078,7 +1113,7 @@ pub(crate) mod browser {
         let out = dir.join("site");
         match bind(&page, &target, ("webpage", "webpage"), &app, &out, false, false) {
             Err(e) if e.contains("needs wasm-bindgen") => {
-                eprintln!("{e}: skipped");
+                skipped(&e);
                 return None;
             }
             r => r.unwrap(),
@@ -1220,7 +1255,7 @@ pub(crate) mod browser {
         let up = link(l, server.clone(), sockets.clone());
         let url = format!("http://{addr}/?token={KEY}");
         let Some(c) = Chromium::open(&url) else {
-            return eprintln!("no Chromium: skipped");
+            return skipped("no Chromium");
         };
         let mut a = c.tabs(&url, 1).await.remove(0);
         // Its twin: another tab of the app in the same browser.
@@ -1365,7 +1400,7 @@ pub(crate) mod browser {
             "<!doctype html><html><body><div id=\"main\"></div><script src=\"./page.js\"></script></body></html>",
         )
         .unwrap();
-        std::fs::write(dir.path().join("page.js"), page_js(true)).unwrap();
+        std::fs::write(dir.path().join("page.js"), page_js(true, true)).unwrap();
         let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let heard = said.clone();
         let http =
@@ -1378,7 +1413,7 @@ pub(crate) mod browser {
         let opts = aio::sync::Options { open: true, http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(Handle::<DevSite>::memory(), l, opts));
         let Some(c) = Chromium::open(&url) else {
-            return eprintln!("no Chromium: skipped");
+            return skipped("no Chromium");
         };
         let mut t = c.tabs(&url, 1).await.remove(0);
         until(&mut t, "location.protocol + document.readyState", json!("http:complete")).await;
@@ -1433,7 +1468,7 @@ pub(crate) mod browser {
         tokio::spawn(aio::sync::serve_with(h.clone(), l, opts));
         let url = format!("http://{addr}/signin");
         let Some(c) = Chromium::open(&url) else {
-            return eprintln!("no Chromium: skipped");
+            return skipped("no Chromium");
         };
         let mut t = c.tabs(&url, 1).await.remove(0);
         // Signed out: the page loads (it is the sign-in), its copy can't
@@ -1488,7 +1523,7 @@ pub(crate) mod browser {
 /// view drawn by air's interpreter talking to the module, air alone in it.
 #[cfg(all(test, unix))]
 mod browser_air {
-    use super::browser::{Chromium, until};
+    use super::browser::{Chromium, skipped, until};
     use super::*;
     use aio::serde_json::json;
     use std::time::Duration;
@@ -1499,7 +1534,7 @@ mod browser_air {
         let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
         let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
         if !sysroot.join("lib/rustlib/wasm32-unknown-unknown").is_dir() {
-            eprintln!("no wasm32 target: skipped");
+            skipped("no wasm32 target");
             return None;
         }
         let page = dir.join("page");
@@ -1525,7 +1560,7 @@ mod browser_air {
         let out = dir.join("site");
         match bind(&page, &target, ("airpage", "airpage"), &app, &out, true, false) {
             Err(e) if e.contains("needs wasm-bindgen") => {
-                eprintln!("{e}: skipped");
+                skipped(&e);
                 return None;
             }
             r => r.unwrap(),
@@ -1597,7 +1632,7 @@ mod browser_air {
         let url = format!("http://{}/", l.local_addr().unwrap());
         let _server = serve(site, l);
         let Some(c) = Chromium::open(&url) else {
-            return eprintln!("no Chromium: skipped");
+            return skipped("no Chromium");
         };
         let mut t = c.tabs(&url, 1).await.remove(0);
         t.call("Page.enable", json!({})).await.unwrap();

@@ -117,7 +117,9 @@ fn main() -> std::io::Result<()> {
   mistake is a compile error, and the binary holds no TOML parser.
 - `aio_shell::start` claims the app's home (a second launch hands over to
   the first and ends there), starts its log, health and problem reports.
-- `aio::Source::for_app` opens the first cell as `[app] mode` says; more
+- `aio::Source::for_app` opens the first cell as `[app] mode` says (a
+  window's client never fails for want of a server: its window shows the
+  connect page); more
   cells open on the same store with `Handle::open` (a port of an aio app:
   `open_aio`, [data](../migration/data.md)).
 - A server: `aio::Source::for_server(&cfg, &dirs)` then
@@ -183,12 +185,19 @@ The templates: `app` uses `kit` (and `web` for its browser build),
 dev-dependency. A feature is added in the app's `Cargo.toml`:
 
 ```toml
-aio = { package = "aio-rs", path = "<aio-rs checkout>/crates/aio", features = ["kit", "net"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.3.0", features = ["kit", "net"] }
 ```
 
-`aio-rs-shell` has two features of its own: `dev` (what `ax dev` builds
+`aio-rs-shell` has two features an app names: `dev` (what `ax dev` builds
 with: live `rsx!` reloads, Rust hot-patched) and `web` (`aio_shell::web`:
 the app's page served to browsers, its first paint rendered per viewer).
+ax turns on two more from `aio.toml`: `updates` (the updater and the
+`updates` cell, ~0.5 MB) in every build of an app with an `[updates] url`,
+and `native-splash` in `ax build` for an app with a `[build.splash]`.
+`ax create` writes the shell with `default-features = false`, so an app
+without a feed carries no updater. `updates` is on by default for an app
+that keeps the shell's defaults; one that brings its own update runtime
+(`aio::update::install`) and turned them off names it.
 
 ## Common mistakes
 

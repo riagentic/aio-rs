@@ -381,6 +381,8 @@ async fn the_operator_moves_loads_pauses_and_shapes_on_the_door_alone() {
     let c = t.ask(json!({ "t": "cost" })).await.unwrap();
     assert_eq!((c["fullResends"].as_u64(), c["keys"][0]["key"].as_str()), (Some(1), Some("n")));
     assert!(c["calls"].as_u64().unwrap() >= 4, "its methods are timed: {c}");
+    // The manager's cell health: enabled, and its effect backlog.
+    assert_eq!((c["enabled"].as_bool(), c["effects"].as_u64()), (Some(true), Some(0)));
 }
 
 /// Only `a_tool_asks_what_a_caller_may_call_and_its_signatures` serves it.

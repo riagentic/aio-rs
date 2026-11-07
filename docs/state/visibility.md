@@ -109,16 +109,24 @@ token` (`apiKey`, `api_key`, `AuthToken` alike). A name with `pub` or
 `public` in it, or ending in a word about the value rather than the
 value (`api_key_id`, `password_len`, `secret_key_name`... `id`, `len`,
 `name`, `count`, `kind`, `version` and the like), is not. The fix is
-`#[server]`, or a rename if it truly isn't a credential.
+`#[server]`.
 
-Limits, compared with aio:
+Looser names (`secret`, `seed`, `key`, `token`, `enc`, `priv`) are a
+warning instead (aio's two tiers): the build says the field may be a
+secret every client gets. `#[public]` on a field says it is meant to be
+sent (aio's `publicFields`): neither tier flags it.
 
-- aio also warns on looser names (`secret`, `seed`, `key`...); aio-rs
-  checks only the unambiguous ones, and only on a `shared` cell without
-  `visible`. Once a cell has `visible`, keeping secrets out of it is up
-  to the function (and `#[server]`).
-- aio's `publicFields` opt-out has no counterpart: a public field that
-  trips the check is renamed (`public_key`, `pub_key`).
+```rust
+#[aio::cell(shared)]
+pub struct Game {
+    #[public]
+    pub seed: u64, // the round's public seed, shown to every player
+}
+```
+
+Limits, compared with aio: the check runs only on a `shared` cell
+without `visible`; once a cell has `visible`, keeping secrets out of it
+is up to the function (and `#[server]`).
 
 ## Per-user and per-role views
 
@@ -218,6 +226,32 @@ throws when client code reads a field its view hides. `Hidden::get`
 (`None` on a copy) is for code that runs on both sides. A `#[server]`
 field of a shared cell of another type fails the build.
 
+A field `visible` hides from some viewers only can fail as loudly: make it
+a `Hidden<T>` (not `#[server]`) and have the view give
+`Hidden::withheld()` to those who may not see it. On their copy any read
+panics, naming the field and the view, as aio throws; a plain field
+would read as a default that looks real. `.get()` is `None` there.
+
+```rust,no_run
+use aio::prelude::*;
+
+fn by_role(s: &Staff, viewer: &Caller) -> Staff {
+    match viewer.role.as_deref() {
+        Some("admin") => s.clone(),
+        _ => Staff { salary: Hidden::withheld(), ..s.clone() },
+    }
+}
+
+#[cell(shared, visible = by_role)]
+pub struct Staff {
+    pub name: String,
+    pub salary: Hidden<u32>,
+}
+# #[methods]
+# impl Staff {}
+# fn main() {}
+```
+
 ```rust
 use aio::prelude::*;
 use aio::sync::{Remote, serve};
@@ -290,7 +324,8 @@ rt.block_on(async {
   is refused at once with the field's name: mark it
   `#[client(predict = false)]` so the copy waits for the server instead
   ([sync](sync.md)). A field `visible` leaves out (a row, a column of a
-  row) is not there to read: that view is all the copy knows.
+  row) is not there to read: that view is all the copy knows; a
+  `Hidden<T>` field it hides panics when read there, as above.
 - Effects and schedules a predicted call asks for are dropped on the copy:
   the server runs them once.
 

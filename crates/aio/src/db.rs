@@ -48,11 +48,15 @@ pub struct Opts {
     /// D4 for this file: checked at open, a damaged one is set aside (never
     /// deleted) and its good copy, made daily at open, takes its place.
     pub guard: bool,
+    /// Open the file read-only (aio's `createDB({ readonly })`): it must
+    /// exist, and every write is refused by SQLite (a tool, a second
+    /// process reading what the app writes). Not with `guard`.
+    pub readonly: bool,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Self { readers: 0, pragmas: vec![], timeout: Some(TIMEOUT), guard: false }
+        Self { readers: 0, pragmas: vec![], timeout: Some(TIMEOUT), guard: false, readonly: false }
     }
 }
 
@@ -385,7 +389,10 @@ impl Db {
         let path = path.as_ref().to_path_buf();
         let memory = path.as_os_str() == ":memory:";
         let mut recovered = None;
-        if !memory {
+        if opts.readonly && (opts.guard || memory) {
+            return Err(Error("db: a read-only open takes an existing file and no guard".into()));
+        }
+        if !memory && !opts.readonly {
             std::fs::create_dir_all(crate::paths::parent(&path)).map_err(|e| Error(format!("db: {e}")))?;
             if opts.guard {
                 crate::store::sweep(&path);
@@ -410,7 +417,7 @@ impl Db {
             }
             Ok(c)
         };
-        let c = connect(false)?;
+        let c = connect(opts.readonly)?;
         if opts.guard && !memory {
             crate::store::refresh_good(&c, &path)?;
         }
@@ -506,17 +513,30 @@ impl Db {
     }
 
     /// A consistent copy of the live database in `to` (SQLite `VACUUM
-    /// INTO`, compacted), flushed to disk; an existing `to` is refused.
+    /// INTO`, compacted), as aio's `snapshot`: made beside `to`, checked
+    /// (`quick_check` on the copy), flushed, then renamed over it. `to`
+    /// always holds the last good copy, so one path on a timer is a
+    /// rolling snapshot; a copy that fails its check is deleted, `to` kept.
     pub async fn snapshot(&self, to: impl AsRef<Path>) -> Result<(), Error> {
         let to = to.as_ref().to_path_buf();
-        if to.exists() {
-            return Err(Error(format!("db: {} exists; a snapshot never overwrites", to.display())));
-        }
+        let tmp = to.with_file_name(format!(".{}.tmp", to.file_name().map_or("db".into(), |n| n.to_string_lossy())));
         let run = self.writer.run(self.timeout, move |c| {
-            c.execute("VACUUM INTO ?1", [to.to_string_lossy()]).map_err(said)?;
-            crate::paths::sync_file(&to)
+            let fail = |e: String| Error(format!("db: snapshot {}: {e}", to.display()));
+            _ = std::fs::remove_file(&tmp);
+            c.execute("VACUUM INTO ?1", [tmp.to_string_lossy()]).map_err(said)?;
+            let checked = Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .and_then(|copy| copy.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)));
+            match checked {
+                Ok(ok) if ok == "ok" => {}
+                found => {
+                    _ = std::fs::remove_file(&tmp);
+                    return Err(fail(format!("the copy failed its check ({found:?}); the last snapshot is kept")));
+                }
+            }
+            crate::paths::sync_file(&tmp)
+                .and_then(|()| std::fs::rename(&tmp, &to))
                 .and_then(|()| crate::paths::sync_dir(crate::paths::parent(&to)))
-                .map_err(|e| Error(format!("db: snapshot {}: {e}", to.display())))
+                .map_err(|e| fail(e.to_string()))
         });
         run.await.map(|(r, _)| r)
     }

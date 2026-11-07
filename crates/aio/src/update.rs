@@ -18,8 +18,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 mod cell;
+#[cfg(feature = "server")]
+pub(crate) use cell::beside;
 pub use cell::{
-    Blocked, Data, Found, Offer, Phase, Ready, Runtime, Step, Stub, Updates, UpdatesCalls, Veto, can_apply, install,
+    Blocked, Data, Found, Offer, Phase, ProgressOf, Ready, Runtime, Step, Stub, Updates, UpdatesCalls, Veto, can_apply,
+    install, installed, share,
 };
 
 /// The manifest format this build reads.
@@ -28,7 +31,6 @@ pub const FORMAT: u32 = 1;
 /// What a build can read: the store layout and each cell's data version.
 /// Any older version of a cell migrates (`CellData::migrate`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Contract {
     pub schema: u32,
     /// Cell id → its data version.
@@ -37,7 +39,7 @@ pub struct Contract {
 
 /// A release: everything in it is signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct Release {
     pub format: u32,
     pub id: String,
@@ -53,11 +55,17 @@ pub struct Release {
     pub notes: String,
     pub data: Contract,
     pub roster: Option<Roster>,
+    /// The oldest version it installs over (`ax release --min-from`): an
+    /// older install is told to install that one first ([`below_min_from`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_from: Option<String>,
+    /// The commit it was built from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// The keys to trust from this release on, signed by keys trusted already.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Roster {
     pub keys: Vec<String>,
     /// `[key, signature of keys]` pairs: one is enough if its key is trusted.
@@ -66,7 +74,6 @@ pub struct Roster {
 
 /// A release and its signature, as the manifest file holds them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub release: Release,
     /// The signing key (`ed25519:<base64>`) and its signature.
@@ -149,7 +156,57 @@ pub struct Expect<'a> {
 /// Check a manifest against the trusted keys: the release, and the keys to
 /// trust from now on (the roster's, if it carries one).
 pub fn check(m: &Manifest, trusted: &[String], expect: &Expect) -> Result<Vec<String>, String> {
-    let r = &m.release;
+    verified(&m.release, (&m.key, &m.signature), &signed_bytes(&m.release), trusted, expect)
+}
+
+/// A manifest as a host serves it (`<os>-<arch>.json`), checked as
+/// [`check`] does, its signature over the release exactly as it was signed:
+/// a field this build doesn't know (a newer `ax release`'s) is signed too,
+/// so it is read past, never trusted unsigned. The manifest, and the keys
+/// to trust from now on.
+pub fn check_served(bytes: &[u8], trusted: &[String], expect: &Expect) -> Result<(Manifest, Vec<String>), String> {
+    #[derive(Deserialize)]
+    struct Served<'a> {
+        #[serde(borrow)]
+        release: &'a serde_json::value::RawValue,
+        key: String,
+        signature: String,
+    }
+    let s: Served = serde_json::from_slice(bytes).map_err(|e| format!("not a manifest: {e}"))?;
+    // The signed bytes first: nothing of the release is read unverified.
+    if !verify(&s.key, &compact(s.release.get()), &s.signature) {
+        return Err("its signature is wrong".into());
+    }
+    let release: Release = serde_json::from_str(s.release.get()).map_err(|e| format!("not a release: {e}"))?;
+    let next = verified(&release, (&s.key, &s.signature), &compact(s.release.get()), trusted, expect)?;
+    Ok((Manifest { release, key: s.key, signature: s.signature }, next))
+}
+
+/// JSON text without the whitespace between its tokens: the bytes a
+/// signer's `serde_json::to_vec` made, from its pretty-printed copy (pure).
+fn compact(json: &str) -> Vec<u8> {
+    let (mut out, mut quoted, mut escaped) = (Vec::with_capacity(json.len()), false, false);
+    for b in json.bytes() {
+        match (quoted, escaped, b) {
+            (true, true, _) => escaped = false,
+            (true, false, b'\\') => escaped = true,
+            (_, false, b'"') => quoted = !quoted,
+            (false, _, b' ' | b'\n' | b'\r' | b'\t') => continue,
+            _ => {}
+        }
+        out.push(b);
+    }
+    out
+}
+
+/// [`check`] of release `r`, its (key, signature) over `signed`.
+fn verified(
+    r: &Release,
+    (key, signature): (&str, &str),
+    signed: &[u8],
+    trusted: &[String],
+    expect: &Expect,
+) -> Result<Vec<String>, String> {
     if r.format != FORMAT {
         return Err(format!("manifest format {} (this build reads {FORMAT})", r.format));
     }
@@ -166,14 +223,17 @@ pub fn check(m: &Manifest, trusted: &[String], expect: &Expect) -> Result<Vec<St
     if !safe_name(&r.version) || !safe_name(&r.file) {
         return Err("its version or file name is not a plain name".into());
     }
+    if let Some(min) = r.min_from.as_deref().filter(|m| parse_version(m).is_none()) {
+        return Err(format!("its minFrom {min:?} is not a version"));
+    }
     let next = match &r.roster {
         Some(roster) => follow(trusted, roster)?,
         None => trusted.to_vec(),
     };
-    if !next.contains(&m.key) {
+    if !next.iter().any(|k| k == key) {
         return Err("it is signed by a key this app doesn't trust".into());
     }
-    if !verify(&m.key, &signed_bytes(r), &m.signature) {
+    if !verify(key, signed, signature) {
         return Err("its signature is wrong".into());
     }
     Ok(next)
@@ -355,8 +415,8 @@ pub fn allowed_signers(keys: &[String]) -> Result<String, String> {
 /// The channel `ax release --channel` built this binary for, if any.
 pub const STAMPED_CHANNEL: Option<&str> = option_env!("AIORT_CHANNEL");
 
-/// The channel an app follows, most specific first: `AIORT_UPDATE_CHANNEL`
-/// (this run), the user's choice (`set_channel`, this install), the build's
+/// The channel an app follows, most specific first: `--channel` or
+/// `AIORT_UPDATE_CHANNEL` (this run), the user's choice (`set_channel`, this install), the build's
 /// stamp (what this binary is: a beta build never updates itself into
 /// stable), then `aio.toml`.
 pub fn channel<'a>(env: Option<&'a str>, pinned: Option<&'a str>, stamp: Option<&'a str>, config: &'a str) -> &'a str {
@@ -384,7 +444,7 @@ pub fn local_data(store: &Path) -> Result<Option<Contract>, String> {
     }
     let db = rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| e.to_string())?;
-    let schema: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let schema = crate::store::schema(&db).map_err(|e| e.to_string())? as u32;
     let mut q = db
         .prepare("SELECT cell, MAX(v) FROM (SELECT cell, v FROM snap UNION ALL SELECT cell, v FROM log) GROUP BY cell")
         .map_err(|e| e.to_string())?;
@@ -413,6 +473,25 @@ pub fn blockers(contract: &Contract, local: &Contract) -> Vec<String> {
         }
     }
     why
+}
+
+/// Does a build with `contract` migrate `local` data (a cell it reads at a
+/// newer version than the data's)? `None` local data: nothing to migrate.
+pub fn migrates(contract: &Contract, local: Option<&Contract>) -> bool {
+    local.is_some_and(|l| l.cells.iter().any(|(cell, have)| contract.cells.get(cell).is_some_and(|reads| reads > have)))
+}
+
+/// Why `r` may not be installed over `current`: it is below the release's
+/// `min_from` (or either can't be ordered). None: it may.
+pub fn below_min_from(r: &Release, current: &str) -> Option<String> {
+    let min = r.min_from.as_deref()?;
+    match compare(current, min) {
+        Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater) => None,
+        _ => Some(format!(
+            "{} installs only over {min} or newer, and this is {current}: install {min} first, then update again",
+            r.version
+        )),
+    }
 }
 
 /// The cells this process opened, with their versions: its contract.
@@ -448,6 +527,8 @@ mod tests {
             notes: "".into(),
             data: Contract::default(),
             roster: None,
+            min_from: None,
+            commit: None,
         }
     }
 
@@ -499,6 +580,8 @@ mod tests {
             |r: &mut Release| r.sha256 = "cd".repeat(32),
             |r: &mut Release| r.notes = "hi".into(),
             |r: &mut Release| r.size = 11,
+            |r: &mut Release| r.min_from = Some("1.0.0".into()),
+            |r: &mut Release| r.commit = Some("9f3ac2b1".into()),
         ] {
             let mut t = m.clone();
             change(&mut t.release);
@@ -612,6 +695,109 @@ mod tests {
     }
 
     #[test]
+    fn min_from_and_commit_are_signed_and_an_older_install_is_told_to_step_through() {
+        let (k, public) = keygen().unwrap();
+        let r = Release { min_from: Some("1.2.0".into()), commit: Some("9f3ac2b1".into()), ..release("2.0.0") };
+        let m = sign(r.clone(), &k).unwrap();
+        assert!(check(&m, std::slice::from_ref(&public), &EXPECT).is_ok());
+        // Stripping minFrom off a signed release breaks its signature.
+        let mut stripped = m.clone();
+        stripped.release.min_from = None;
+        assert_eq!(check(&stripped, std::slice::from_ref(&public), &EXPECT), Err("its signature is wrong".into()));
+        let bad = sign(Release { min_from: Some("soon".into()), ..release("2.0.0") }, &k).unwrap();
+        assert_eq!(check(&bad, std::slice::from_ref(&public), &EXPECT), Err("its minFrom \"soon\" is not a version".into()));
+        assert_eq!(
+            below_min_from(&r, "1.1.9").as_deref(),
+            Some("2.0.0 installs only over 1.2.0 or newer, and this is 1.1.9: install 1.2.0 first, then update again")
+        );
+        assert_eq!((below_min_from(&r, "1.2.0"), below_min_from(&r, "1.3.0")), (None, None));
+        assert!(below_min_from(&r, "unknown").is_some(), "a version that can't be ordered is never let through");
+        assert_eq!(below_min_from(&release("2.0.0"), "0.1.0"), None);
+        // A release without them signs the bytes it always did: older apps read it.
+        let plain = String::from_utf8(signed_bytes(&release("2.0.0"))).unwrap();
+        assert!(!plain.contains("minFrom") && !plain.contains("commit"), "{plain}");
+    }
+
+    /// aio-rs 0.2.0's manifest, as its installs read it (tag v0.2.0,
+    /// crates/aio/src/update.rs): any field it doesn't know refuses the release.
+    mod v02 {
+        use serde::{Deserialize, Serialize};
+        use std::collections::BTreeMap;
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct Contract {
+            pub schema: u32,
+            pub cells: BTreeMap<String, u32>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        pub struct Release {
+            pub format: u32,
+            pub id: String,
+            pub version: String,
+            pub channel: String,
+            pub os: String,
+            pub arch: String,
+            pub file: String,
+            pub sha256: String,
+            pub size: u64,
+            pub released_at: String,
+            pub notes: String,
+            pub data: Contract,
+            pub roster: Option<Roster>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct Roster {
+            pub keys: Vec<String>,
+            pub signatures: Vec<[String; 2]>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct Manifest {
+            pub release: Release,
+            pub key: String,
+            pub signature: String,
+        }
+    }
+
+    #[test]
+    fn a_plain_release_is_read_by_aio_rs_0_2_and_a_newer_field_by_this_one() {
+        let (k, public) = keygen().unwrap();
+        let trusted = std::slice::from_ref(&public);
+        // As `ax release` writes it: pretty, no minFrom, no commit.
+        let served = serde_json::to_string_pretty(&sign(release("1.1.0"), &k).unwrap()).unwrap();
+        let old: v02::Manifest = serde_json::from_str(&served).expect("aio-rs 0.2 parses it");
+        assert!(verify(&old.key, &serde_json::to_vec(&old.release).unwrap(), &old.signature), "and checks its signature");
+        assert!(check_served(served.as_bytes(), trusted, &EXPECT).is_ok());
+        // A field a later ax signs in: read past, the signature over it all.
+        let mut later: serde_json::Value = serde_json::from_str(&served).unwrap();
+        later["release"]["mirror"] = "https://m.example/notes".into();
+        later["release"]["data"]["layout"] = 2.into();
+        later["signature"] = sign_with(&k, &serde_json::to_vec(&later["release"]).unwrap()).unwrap().into();
+        let later = serde_json::to_string_pretty(&later).unwrap();
+        let (m, _) = check_served(later.as_bytes(), trusted, &EXPECT).unwrap();
+        assert_eq!(m.release.version, "1.1.0");
+        // Unsigned, it is no field: one added after signing breaks it.
+        let mut forged: serde_json::Value = serde_json::from_str(&served).unwrap();
+        forged["release"]["mirror"] = "https://evil.example".into();
+        let forged = serde_json::to_vec(&forged).unwrap();
+        assert_eq!(check_served(&forged, trusted, &EXPECT).unwrap_err(), "its signature is wrong");
+        // A typed check of what it read can't vouch for the dropped field: refused too.
+        assert_eq!(check(&m, trusted, &EXPECT).unwrap_err(), "its signature is wrong");
+        // Verified before it is read: a release that isn't one, unsigned, is a wrong signature.
+        let mut odd: serde_json::Value = serde_json::from_str(&served).unwrap();
+        odd["release"]["size"] = "big".into();
+        assert_eq!(check_served(&serde_json::to_vec(&odd).unwrap(), trusted, &EXPECT).unwrap_err(), "its signature is wrong");
+        // Whitespace inside a string is the release's own.
+        assert_eq!(compact("{ \"a\" : \"x y\\\" z\" ,\n \"b\": [1, 2] }"), b"{\"a\":\"x y\\\" z\",\"b\":[1,2]}");
+    }
+
+    #[test]
     fn a_release_that_cant_read_the_data_here_is_blocked() {
         let c = |schema, cells: &[(&str, u32)]| Contract {
             schema,
@@ -622,6 +808,9 @@ mod tests {
         assert!(blockers(&c(1, &[("notes", 4)]), &local).is_empty(), "a newer version migrates");
         assert_eq!(blockers(&c(1, &[("notes", 2)]), &local), vec!["notes: the data is v3, the release reads up to v2"]);
         assert_eq!(blockers(&c(0, &[("notes", 3)]), &local).len(), 1);
+        assert!(migrates(&c(1, &[("notes", 4)]), Some(&local)));
+        assert!(!migrates(&c(1, &[("notes", 3), ("new", 1)]), Some(&local)), "a new cell has nothing to migrate");
+        assert!(!migrates(&c(1, &[("notes", 4)]), None), "no data here");
     }
 
     #[test]

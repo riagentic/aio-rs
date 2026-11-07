@@ -140,6 +140,33 @@ fn files_hash(dirs: &[PathBuf]) -> String {
 /// so what a build writes (`Cargo.lock`, `dist/`) never renames its later
 /// targets or its manifest.
 pub fn of(v: Option<&str>, package: &str, dirs: &[PathBuf]) -> Result<String, String> {
+    chosen(ASKED.get().map(String::as_str), v, package, dirs)
+}
+
+/// The version `asked` (`--app-version`), else the one `v` derives.
+fn chosen(asked: Option<&str>, v: Option<&str>, package: &str, dirs: &[PathBuf]) -> Result<String, String> {
+    asked.map_or_else(|| derived(v, package, dirs), |a| Ok(a.to_string()))
+}
+
+/// `--app-version`: the version every build of this run says, as written.
+static ASKED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Build (and release) as version `v` (`--app-version`), over `[app]
+/// version` and git: a full `M.m.p`, a stage allowed.
+pub fn ask(v: &str) -> Result<(), String> {
+    let v = pinned(v)?;
+    ASKED.set(v.clone()).map_err(|_| format!("--app-version {v}: given twice"))
+}
+
+/// `v` if it is a full version (pure).
+pub fn pinned(v: &str) -> Result<String, String> {
+    match declared(v) {
+        Ok(Declared { pinned: Some(_), .. }) => Ok(v.trim().to_string()),
+        _ => Err(format!("--app-version {v}: a full version as it is released: 1.2.3, 1.2.3-beta")),
+    }
+}
+
+fn derived(v: Option<&str>, package: &str, dirs: &[PathBuf]) -> Result<String, String> {
     static RESOLVED: std::sync::Mutex<Vec<(Vec<PathBuf>, String)>> = std::sync::Mutex::new(Vec::new());
     let Some(v) = v else { return Ok(package.to_string()) };
     let d = declared(v)?;
@@ -174,6 +201,18 @@ mod tests {
 
     fn v(d: &str, t: &Tree) -> String {
         resolve(&declared(d).unwrap(), t)
+    }
+
+    #[test]
+    fn an_asked_version_is_a_full_one() {
+        assert_eq!(pinned(" 1.2.3 ").unwrap(), "1.2.3");
+        assert_eq!(pinned("2.0.0-rc").unwrap(), "2.0.0-rc");
+        for bad in ["1.2", "1.2.3-dirty", "v1.2.3", ""] {
+            assert!(pinned(bad).unwrap_err().contains("--app-version"), "{bad}");
+        }
+        assert_eq!(chosen(Some("1.4.7"), Some("1.2"), "0.1.0", &[]).unwrap(), "1.4.7", "over [app] version and git");
+        assert_eq!(chosen(Some("1.4.7"), None, "0.1.0", &[]).unwrap(), "1.4.7", "over the package's");
+        assert_eq!(chosen(None, None, "0.1.0", &[]).unwrap(), "0.1.0");
     }
 
     #[test]

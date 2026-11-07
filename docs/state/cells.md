@@ -214,6 +214,7 @@ Arguments, results, refusals and `cx` in full: [methods](methods.md).
 | `#[cell(...)]` | What it does |
 |---|---|
 | `persist` | saved, one event per call; needed for `#[transient]`, `#[table]`, `save`, `restore`, `retire` and a web page's storage ([persistence](../persistence/README.md)) |
+| `redact` | every method is `#[redact]`: no call's arguments are kept (aio's `redactActions: ["cell:*"]`) ([secrets](../auth/secrets.md)) |
 | `coalesce` | every plain method shows its state at once and is written within `aio::PERSIST_DEBOUNCE` (100 ms) ([performance](../performance.md)) |
 | `shared` | synced to clients ([sync.md](sync.md)) |
 | `id = "name"` | the cell's name (default: the struct's name in snake_case) |
@@ -247,10 +248,11 @@ or the pairs `api_key`, `private_key`, `secret_key`, `access_token`,
 | `#[invariant]` | `fn(&self) -> Result`, checked after every call; a broken one refuses the call |
 | `#[client]`, `#[client(role = "admin", allow = f, predict = false)]` | the network may call it ([sync.md](sync.md)) |
 | `#[coalesce]` | this method's calls are written as one run (a cursor) |
+| `#[skip_travel]` | time travel steps over its events and its timeline leaves them out (aio's `skipActions`: a tick, a hover); they stay in the log |
 | `#[redact]` | its arguments are never kept (a passphrase); its event keeps the state instead |
 | `#[every("5m")]`, `#[cron("0 9 * * 1")]` | a schedule ([scheduling](scheduling.md)) |
 | `#[ttl(ms)]` | an async method's answer reused for the same arguments |
-| `#[long]` | lifts the await ceiling of an async method |
+| `#[long]`, `#[long(ms)]` | lifts the await ceiling of an async method, or gives it its own |
 | `#[on_start]`, `#[on_stop]` | called as the cell goes live and as it stops ([lifecycle](#lifecycle)) |
 | `#[on_aio]` | in a ported app, run at boot on what aio changed in the file (feature `compat`, [data](../migration/data.md)) |
 

@@ -206,7 +206,7 @@ pub fn run(app: &str, os: &str, stop: bool) -> Result<String, String> {
     if stop {
         return ran(remote(&h, os, &stop_script(os, &id)));
     }
-    crate::build::run(app, None, Some(p.name), false)?;
+    crate::build::run(app, None, Some(p.name), crate::smoke::Smoke::Off)?;
     let (_, bundle) = crate::build::built(app, Some(p))?;
     let file = bundle.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     ran(remote(&h, os, &prepare_script(os, &id)))?;

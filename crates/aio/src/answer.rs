@@ -30,7 +30,24 @@ pub(crate) struct Slot {
     to: Mutex<Vec<Tx>>,
     /// Run once the call is gone (a transaction's end, [`Reply::on_drop`]).
     gone: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Where its pieces go, when its caller asked for them ([`Parts`]).
+    parts: Mutex<Option<Parts>>,
 }
+
+/// Where an async method's pieces go (`cx.part`): frames of call `op` on
+/// its caller's link, at most [`PARTS_WAITING`] waiting there.
+#[derive(Clone, Debug)]
+pub(crate) struct Parts {
+    pub(crate) tx: tokio::sync::mpsc::Sender<Value>,
+    pub(crate) op: Value,
+}
+
+/// How many pieces may wait for a slow caller: past it a piece is dropped
+/// (`cx.part` is `false`), never queued without bound; the answer never is.
+pub(crate) const PARTS_WAITING: usize = 64;
+
+/// The biggest piece `cx.part` sends (aio's 1 MiB).
+pub(crate) const PART_MAX: usize = 1 << 20;
 
 impl Drop for Slot {
     fn drop(&mut self) {
@@ -43,7 +60,7 @@ impl Drop for Slot {
             self.method
         );
         for tx in std::mem::take(&mut *self.to.lock().unwrap_or_else(|e| e.into_inner())) {
-            _ = tx.send(Err(Rejected::new(why.clone())));
+            _ = tx.send(Err(Rejected::coded(crate::Code::DispatchAborted, why.clone())));
         }
     }
 }
@@ -52,7 +69,12 @@ impl Reply {
     pub(crate) fn new(method: &str) -> (Self, Answer) {
         let (tx, rx) = oneshot::channel();
         (
-            Self(Arc::new(Slot { method: method.into(), to: Mutex::new(vec![tx]), gone: Mutex::default() })),
+            Self(Arc::new(Slot {
+                method: method.into(),
+                to: Mutex::new(vec![tx]),
+                gone: Mutex::default(),
+                parts: Mutex::default(),
+            })),
             Answer::waiting(rx),
         )
     }
@@ -71,6 +93,17 @@ impl Reply {
     /// or its await was aborted or cut off).
     pub(crate) fn on_drop(&self, f: impl FnOnce() + Send + 'static) {
         *self.0.gone.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
+    }
+
+    /// Its pieces go to `parts` (its caller streams it).
+    pub(crate) fn stream_to(&self, parts: Parts) {
+        *self.0.parts.lock().unwrap_or_else(|e| e.into_inner()) = Some(parts);
+    }
+
+    /// Send `piece` to the caller that streams this call: whether it went.
+    pub(crate) fn part(&self, piece: Value) -> bool {
+        let parts = self.0.parts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        parts.is_some_and(|p| p.tx.try_send(serde_json::json!({ "t": "part", "op": p.op, "c": piece })).is_ok())
     }
 
     /// Send the end to whoever waits (once: later sends are dropped).
@@ -131,12 +164,37 @@ impl Inflight {
     }
 }
 
-/// The effect key a call of async `method` with `args` runs under.
-pub(crate) fn key_of<T: crate::Cell>(method: &str, args: &Value) -> String {
-    match T::TTL.contains(&method) {
-        true => crate::effect::key(method, args).unwrap_or_else(|_| method.into()),
+/// The effect key a call of async `method` with `args` runs under: its
+/// arguments too for a `#[ttl]` or `#[mode(first)]` method (a second call
+/// joins only one with the same arguments, as aio's `"first"`).
+pub(crate) fn key_of<T: crate::Cell>(method: &str, args: &Value, who: Option<&crate::Caller>) -> String {
+    match T::TTL.contains(&method) || T::async_mode(method) == Some(crate::Mode::First) {
+        true => joined(method, args, who).unwrap_or_else(|_| method.into()),
         false => method.into(),
     }
+}
+
+/// The key of a call joined or answered by its arguments: the method and
+/// its arguments, and a network caller's own, so an answer one caller may
+/// see is never handed to another.
+fn joined(method: &str, args: &Value, who: Option<&crate::Caller>) -> Result<String> {
+    let key = crate::effect::key(method, args)?;
+    Ok(match who {
+        Some(w) => format!("{key}@{:?}/{:?}", w.by, w.role),
+        None => key,
+    })
+}
+
+/// [`key_of`] in a method, by its `cx`.
+#[doc(hidden)]
+pub fn call_key(cx: &Cx, method: &str, args: &Value) -> Result<String> {
+    joined(method, args, cx.caller())
+}
+
+/// Does `cx.abort(name)` stop the effect keyed `key`: its own, or a call
+/// of async method `name` keyed by its arguments (`name:[..]`)?
+pub(crate) fn aborts<T: crate::Cell>(name: &str, key: &str) -> bool {
+    key == name || (T::async_mode(name).is_some() && key.strip_prefix(name).is_some_and(|r| r.starts_with(':')))
 }
 
 /// Asked by a call whose method ended: its answer is sent once the call
@@ -182,8 +240,8 @@ impl Cache {
 
     /// The answer to a call of `method` with `args` still good at `now`: it
     /// needn't run again.
-    pub(crate) fn get(&self, method: &str, args: &Value, now: i64) -> Option<Value> {
-        let key = crate::effect::key(method, args).ok()?;
+    pub(crate) fn get(&self, method: &str, args: &Value, who: Option<&crate::Caller>, now: i64) -> Option<Value> {
+        let key = joined(method, args, who).ok()?;
         self.0.get(&key).filter(|&&(at, ms, _)| fresh(at, ms, now)).map(|a| a.2.clone())
     }
 }
@@ -328,9 +386,9 @@ mod tests {
         let mut c = Cache::default();
         let key = crate::effect::key("price", &json!(["ABC"])).unwrap();
         c.keep(key, 1000, 500, json!(42));
-        assert_eq!(c.get("price", &json!(["ABC"]), 1200), Some(json!(42)));
-        assert_eq!(c.get("price", &json!(["XYZ"]), 1200), None, "other arguments: another call");
-        assert_eq!(c.get("price", &json!(["ABC"]), 1500), None, "expired");
+        assert_eq!(c.get("price", &json!(["ABC"]), None, 1200), Some(json!(42)));
+        assert_eq!(c.get("price", &json!(["XYZ"]), None, 1200), None, "other arguments: another call");
+        assert_eq!(c.get("price", &json!(["ABC"]), None, 1500), None, "expired");
     }
 
     #[test]

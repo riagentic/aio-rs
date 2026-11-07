@@ -157,8 +157,8 @@ pub(crate) struct Asks {
 pub struct Cx {
     at: i64,
     by: By,
-    /// The network caller's role now (accounts on), as the gate proved it.
-    role: Option<String>,
+    /// The network caller, and their role now (accounts on), as the gate proved it.
+    who: Option<crate::Caller>,
     replay: Option<Inputs>,
     /// A synced call's ids come from its call id (`derive_ids`), not chance.
     derive: Option<Derive>,
@@ -183,7 +183,7 @@ impl Cx {
         Self {
             at,
             by: by.clone(),
-            role: None,
+            who: None,
             replay: None,
             derive: None,
             used: RefCell::default(),
@@ -244,6 +244,22 @@ impl Cx {
         self.reply.clone().filter(|_| self.replay.is_none())
     }
 
+    /// Send `piece` to this call's caller now, before its answer (aio's
+    /// `emitChunk`: chat tokens, progress): `Ok(true)` when it streams the
+    /// call ([`crate::sync::Remote::stream`]) and keeps up; `Ok(false)` for
+    /// any other caller (a plain call, the app's own UI, a schedule, a
+    /// `#[mode(first)]` join, a `#[ttl]` answer) or a piece dropped for a
+    /// slow one. A piece over 1 MiB is refused, for every caller.
+    pub fn part(&self, piece: impl Serialize) -> crate::Result<bool> {
+        let v = serde_json::to_value(piece).map_err(|e| crate::Rejected::new(format!("a piece isn't JSON: {e}")))?;
+        let n = v.to_string().len();
+        crate::ensure!(
+            n <= crate::answer::PART_MAX,
+            "a piece of {n} bytes: one is at most 1 MiB (bytes go through blobs)"
+        );
+        Ok(self.reply().is_some_and(|r| r.part(v)))
+    }
+
     /// An async method ended with `v`: sent to its caller once the call
     /// commits, and kept for its `#[ttl]`.
     pub(crate) fn answer(&self, value: Value, ttl: Option<(String, i64)>) {
@@ -267,14 +283,20 @@ impl Cx {
         Self { replay: Some(inputs), ..Self::live(at, by) }
     }
 
-    /// The call made by a network caller with this role.
-    pub(crate) fn with_role(self, role: Option<&str>) -> Self {
-        Self { role: role.map(Into::into), ..self }
+    /// The call made by this network caller.
+    pub(crate) fn with_who(self, who: Option<&crate::Caller>) -> Self {
+        Self { who: who.cloned(), ..self }
+    }
+
+    /// The network caller, unrecorded: for [`crate::before_call`] and the
+    /// `#[ttl]` answers kept per caller, never the method.
+    pub(crate) fn caller(&self) -> Option<&crate::Caller> {
+        self.who.as_ref()
     }
 
     /// The role, unrecorded: for [`crate::before_call`], never the method.
     pub(crate) fn caller_role(&self) -> Option<&str> {
-        self.role.as_deref()
+        self.who.as_ref()?.role.as_deref()
     }
 
     pub(crate) fn into_asks(self) -> Asks {
@@ -297,8 +319,23 @@ impl Cx {
     /// Tell the people using the app `t` after this call commits (aio
     /// `notify()`, `appIcon()`): shown by this cell's window and every synced
     /// client's ([`crate::tell`]). A blank notification is refused here.
+    /// A notification goes to every connected user: raised in a user's call
+    /// (one person's news), it is said once per app, as aio does.
     pub fn tell(&self, t: crate::tell::Tell) -> crate::Result {
         t.check()?;
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if matches!(t, crate::tell::Tell::Notify { .. })
+            && let By::User(u) = self.by()
+            && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let msg = format!(
+                "a notification raised in {u}'s call is shown to every connected user, not only {u}: keep one \
+                 user's data out of its title and body (show it through their own state instead)"
+            );
+            eprintln!("[aio] WARN {msg}");
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::report::say("tell:every-user", &msg, crate::report::Severity::Warn);
+        }
         self.effects.borrow_mut().push(Box::new(t));
         Ok(())
     }
@@ -387,7 +424,7 @@ impl Cx {
     /// says; `None` for the app's own calls, a key holder and the door.
     /// Saved with the event once read, so replay sees the same role.
     pub fn role(&self) -> Option<&str> {
-        let role = self.replay.as_ref().map_or(self.role.as_deref(), |r| r.role.as_deref());
+        let role = self.replay.as_ref().map_or(self.caller_role(), |r| r.role.as_deref());
         self.used.borrow_mut().role = role.map(Into::into);
         role
     }

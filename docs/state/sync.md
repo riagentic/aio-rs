@@ -100,8 +100,9 @@ pairing = true      # `ax pair` hands the key to a device
 discover = true     # answers `ax discover` on the LAN
 ```
 
-A window in `client` mode names its server in `[client] server` (and
-that host in `[capabilities] network`).
+A window in `client` mode names its server in `[client] server`, or the
+person picks one on its connect page; either is reached with no
+`[capabilities] network` entry.
 
 ## What crosses the wire
 
@@ -473,7 +474,11 @@ ax discover                        # the aio-rs apps on this LAN that answer
   out; 20 wrong in all burn the code. Needs `[server] pairing = true`.
 - Discovery is aio's UDP format on port 8099: nothing is announced on a
   timer, only private and loopback senders get answers, at most 5 a
-  second each. Needs `[server] discover = true`.
+  second each. Needs `[server] discover = true`. A probe goes to every
+  network this machine is on (the limited broadcast and each interface's
+  own); each answer carries the answering machine's addresses, so one
+  machine heard twice is listed once. A probe nobody could be sent is an
+  error, never an empty list.
 - `ax profile <app> --out file` writes the app's client profile (host,
   port, root, key: a credential, written 0600); `ax import <app> <file>`
   links a device with it, as `pair` does. On a phone a key never crosses
@@ -501,8 +506,9 @@ ax discover                        # the aio-rs apps on this LAN that answer
 
 | Key | Default | |
 |---|---|---|
-| `server` | none | `host:port` of the server; a paired link (`ax pair`) wins over it |
+| `server` | none | `host:port` of the server; a kept link (`ax pair`, the connect page) wins over it, `--server-url` over both |
 | `retention` | `"off"` | how long a waiting call is kept once the queue is full (`"7d"`) |
+| `strict_pin` | `false` | a paired server whose certificate changed is refused until paired again, never re-pinned by proof ([desktop](../clients/desktop.md#a-certificate-that-changed)) |
 | `[client.timeouts]` | 15 s | per method, `"board.add" = "60s"` or `"off"`: how long `call_confirmed` waits |
 
 The key a client shows is the app's: `AIORT_TOKEN`, else

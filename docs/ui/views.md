@@ -260,13 +260,14 @@ assert_eq!(ui.count("li"), 0);
 |---|---|
 | text with values | `"{name} ({count})"` (format args; `{x:?}` too): a hole, following what it reads |
 | a value that follows state | any expression in a text, attribute or `{child}`: `{n.get() * 2}`, `disabled: !ok.get()` |
-| an attribute | `class: "row"`, `"data-t": "x"`, `"aria-label": "Close"` |
+| an attribute | `class: "row"`, `"data-t": "x"`, `"aria-label": "Close"`; any string (`String`, `&str`, `Cow`), number or `bool`: `title: t(&name.get())` |
 | a value that may be absent | `title: tip` where `tip: Option<String>`: `None` leaves it out |
 | classes by condition | `class: aio::ui::cx(&[("row", true), ("on", on)])` |
 | inline style | `style: "width: {w}px"`, or one property: `width: "{w}px"` |
 | a condition | `if on.get() { X {} } else { Y {} }`: swaps only when it flips |
-| a value that may be absent | `{note.map(\|n\| rsx! { p { "{n}" } })}` (no `if let` in `rsx!`: air refuses it) |
-| a match | a hole: `{match page.get() { A => rsx! { .. }, B => rsx! { .. } }}` |
+| a value that may be absent | `if let Some(n) = note.get() { p { "{n}" } }`: made again when what it binds changes |
+| a match | `match page.get() { Page::A => { A {} } Page::B(id) if id > 9 => p { "{id}" }, _ => {} }`: an arm's view is kept until another arm matches (one that binds names: until they change) |
+| a repeat | `for`, never `while` or `loop` (refused): a view says what shows, not how long to repeat |
 | a list | `for x in xs.get() { li { key: "{x.id}", .. } }` (`key:` on every row's first node: `rsx!` refuses a row without one; items are `Clone + PartialEq`) |
 | several roots | a component may return them side by side: `rsx! { A {} B {} }` |
 | an element made elsewhere | `{elem}` where `elem: View` |
@@ -343,11 +344,13 @@ assert_eq!(ui.read(&THEME), "dark");
 |---|---|---|
 | `signal(\|\| v)` | a `Copy` value of this component; `n.get()` reads (a copy), `n.with(\|v\| ..)` and `n.read()` borrow, `n.set(v)` (readers told only if it differs), `n.update(\|v\| ..)`, `n.write()`, `n += 1`, `n.toggle()`, `"{n}"` | `useLocal`, `useSignal` |
 | `static S: Global<T> = Global::new(\|\| v)` | one value for the whole app (per app instance), the same methods | module-level `signal()` |
-| `.get_untracked()`, `.with_untracked(..)`, `.read_untracked()` | reads without following | `.peek()`, `untrack` |
+| `.get_untracked()`, `.with_untracked(..)`, `.read_untracked()`, `untrack(\|\| ..)` | reads without following | `.peek()`, `untrack` |
 | `memo(move \|\| ..)` | a derived value, re-made when what it reads changes; equal answers wake no reader | `computed()`, `useMemo` |
-| `effect(move \|\| ..)` | runs once the view is drawn, again when what it reads changes | `effect()`, `useEffect` |
-| `resource(move \|\| async move { .. })` | an async value, re-run when what it reads changes; `.get()` is `None` until ready, `.suspend()?` waits under a `Suspense` | `useResource` |
-| `watch(deps, move \|deps\| ..)` | runs once the view is drawn, again when `deps` (values the view made, e.g. of its props) differ | `on()`, `watch()` |
+| `effect(move \|\| ..)` | runs once the view is drawn, again when what it reads changes, its own writes too; returns an `Effect`, `e.dispose()` stops it | `effect(fn, { rerunOnSelfWrite: true })`, `useEffect` |
+| `effect_quiet(move \|\| ..)` | `effect`, but a signal it read and then wrote itself doesn't run it again, so `log.update(\|l\| l.push(x.get()))` can't loop | `effect()` |
+| `resource(move \|\| async move { .. })` | an async value, re-run when what it reads changes; `.get()` is `None` until ready, `.suspend()?` waits under a `Suspense`; `.restart()`, `.mutate(v)` shows `v` at once (the next load replaces it), `.dispose()` loads no more | `useResource`, `resource()` |
+| `watch(deps, move \|deps\| ..)` | runs once the view is drawn, again when `deps` (values the view made, e.g. of its props) differ | |
+| `on_change(move \|\| .., \|next, prev\| ..)` | runs when the first closure's value changes (not at the start), with the old one; only what it reads is followed, the second runs untracked | `watch(source, fn)`, `effect(on(..))` |
 | `callback(move \|x\| ..)` | a handler made once, for a prop | `useCallback` |
 | `task(move \|\| async move { .. })` | work for the view's life: started at mount, stopped at unmount | `onMount` + a loop |
 | `once(\|\| ..)` | made once, as the view mounts | `onMount`, `useRef` |
@@ -362,6 +365,7 @@ assert_eq!(ui.read(&THEME), "dark");
 | `aio::kit::use_frame(active, \|since_start, since_last\| ..)` | runs once a frame while `active` | `useRaf` |
 | `aio::kit::use_interval(every, active, \|\| ..)` | a timer while `active` | `useInterval` |
 | `aio::kit::use_window_event(\|e\| ..)` | the window's pointer, wheel, key and resize events (inside `GlobalKeys`) | `onWindowEvent` |
+| `aio::kit::use_window_listener(kind, \|e\| ..)` | any event type the window hears, each one, as JSON | `onWindowEvent(type)` |
 | `aio::kit::use_back_button(\|\| ..)` | takes Back while the view lives ([routing](routing.md#back)) | `onBackButton` |
 
 ### Lifecycle
@@ -415,6 +419,37 @@ let mut ui = aio::testing::TestUi::new(App);
 assert_eq!(ui.text("amount"), "12");
 ui.click("break");
 assert!(ui.present("oops"));
+# }
+```
+
+The fallback may try again (aio's boundary reset): `retry()` in its body
+gives the boundary's `Retry`, and `r.retry()` makes the children anew;
+one that fails again shows the fallback again.
+
+```rust
+use aio::ui::prelude::*;
+
+#[component]
+fn Retrying() -> View {
+    rsx! {
+        ErrorBoundary {
+            fallback: |e: String| {
+                let r = retry();
+                rsx! { button { "data-t": "again", onclick: move |_| r.retry(), "Try again ({e})" } }
+            },
+            Amount { text: "twelve" }
+        }
+    }
+}
+# #[component]
+# fn Amount(text: String) -> View {
+#     let n: u32 = text.parse()?;
+#     rsx! { p { "{n}" } }
+# }
+# fn main() {
+let mut ui = aio::testing::TestUi::new(Retrying);
+ui.click("again");
+assert!(ui.present("again"), "still failing: the fallback again");
 # }
 ```
 
@@ -528,16 +563,22 @@ What changes in the way of thinking:
 - **Server rendering.** aio renders a page to HTML on the server
   (`renderToString`, `renderToStream`) and hydrates it; aio-rs's views
   run where the window is (the page, or the app process over its wire),
-  so there is no HTML-first page to crawl.
+  so there is no HTML-first page to crawl. By design: a desktop or
+  Android page is local and draws its first frame from memory, and no
+  hydration means no mismatch between two renders; a public page's HTML
+  for crawlers and previews is `ax preview --html` and `aio::head::html`.
 - **Redux DevTools.** aio sends its actions to the browser extension;
   aio-rs has `use_time_travel()` with `kit::TimeTravelPanel`,
-  `ax timetravel` and `ax events` instead.
+  `ax timetravel` and `ax events` instead: no browser extension, every
+  target, release builds too, and the whole store rather than 2000 entries.
 - **`useOptimistic`.** None: a synced copy already shows a call at once
   and rolls a refusal back.
-- **`on()`, `trackedMemo()`.** No separate forms: `effect` reading the
-  value, `watch(deps, f)`, or `memo`.
+- **`trackedMemo()`.** aio's cache of derived values by key, shared by
+  components: a `memo` per component, or a `GlobalMemo` per value, each
+  following what it reads.
 - **`h()` without JSX, the React compat layer.** `rsx!` only; React
-  components come in as islands.
+  components come in as islands. One renderer keeps events, focus, the
+  audits and `TestUi` paths the same on every page.
 
 ## The page
 
@@ -569,7 +610,7 @@ rest are fields:
 | `viewport` | the `<meta name="viewport">`; `Some("")`: none |
 | `tray` | a tray icon and its menu (`aio_shell::desktop::Tray`); its clicks reach the views through `desktop::use_asks` |
 | `head` | the app's own `<head>` markup, after aio's policy, which it can only tighten |
-| `web` | other sites inside the app: `browser` (the kit's `Browser`), `windows` (child windows), `preloads`, `fullscreen`, `downloads` |
+| `web` | other sites inside the app: `browser` (the kit's `Browser`), `windows` (child windows), `preloads`, `fullscreen`, `downloads`, `unsandboxed_windows` |
 | `permissions` | what the page may also hold (`"clipboard-read"`…) |
 | `confirm_unload` | a page's `beforeunload` asks Leave / Stay |
 | `keys` | the window's own keys (reload, print) given to the page |
@@ -577,6 +618,7 @@ rest are fields:
 | `show_cap_ms` | the longest wait for the page's first paint (5000 unset); `Some(0)` shows it at once |
 | `keep_server` | the app serves on once the window closes, until asked to stop (aio's `keepServer`; `--keep-server` per launch) |
 | `splash_show` | the app's say over `[build.splash]` at run time: `Always`, `FirstStart` or `Never` (aio's `splash.show`) |
+| `devtools` | a build outside `ax dev` has DevTools too: F12, Ctrl+Shift+I and the launch's `--cdp=<port>`; off, an `ax dev` build's only |
 
 - Notifications: `cx.tell(aio::tell::Tell::notify(..))` from a method
   ([effects](../state/effects.md)), or `aio_shell::desktop::notify(&Notice
@@ -621,9 +663,7 @@ Routes are [routing](routing.md); styles and dark mode are
   once, so a hot-patched edit doesn't show. Make it in a hole.
 - `e.prevent_default()` on keys in a window comes too late: put
   `data-aio-prevent` on the element ([kit](kit.md#keys)).
-- A `for` row without `key:` on its first node, or `if let` / `match`
-  as a node: `rsx!` refuses them. Make a bool for `if`, and put a `match`
-  in a `{child}` hole.
+- A `for` row without `key:` on its first node: `rsx!` refuses it.
 - A 0.1 app's renderer left in (its paths, its dependency, a page
   script's `send`): `ax lint` refuses them, and the migration guide's
   section 8, [0.1 → 0.2](../migration/README.md), has the names.

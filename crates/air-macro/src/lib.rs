@@ -626,6 +626,9 @@ fn builder(
 
 type Res<T> = Result<T, (Span, String)>;
 
+/// A `match` arm in `rsx!`: its pattern, its guard, its nodes.
+pub(crate) type Arm = (TokenStream, Option<TokenStream>, Vec<Node>);
+
 pub(crate) enum Node {
     Text(String),
     /// A `"…{x}…"` text: `format!`'s literal and arguments, and the names it reads.
@@ -652,6 +655,11 @@ pub(crate) enum Node {
         pat: TokenStream,
         expr: TokenStream,
         body: Vec<Node>,
+    },
+    /// `match expr { pat if guard => { nodes } … }`: each arm its pattern, guard and nodes.
+    Match {
+        expr: TokenStream,
+        arms: Vec<Arm>,
     },
     If {
         cond: TokenStream,
@@ -744,12 +752,6 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
     }
     if is_ident(t, "if") {
         *i += 1;
-        if toks.get(*i).is_some_and(|t| is_ident(t, "let")) {
-            return Err((
-                span_of(toks, *i),
-                "air: `if let` in rsx!: make a bool (`x.is_some()`) or a {child} hole".into(),
-            ));
-        }
         let (cond, then) = until_block(toks, i)?;
         let mut otherwise = vec![];
         if toks.get(*i).is_some_and(|t| is_ident(t, "else")) {
@@ -762,12 +764,15 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         }
         return Ok(Node::If { cond, then: parse_nodes(&then)?, otherwise });
     }
-    if is_ident(t, "match") || is_ident(t, "while") || is_ident(t, "loop") {
+    if is_ident(t, "match") {
+        *i += 1;
+        let (expr, body) = until_block(toks, i)?;
+        return Ok(Node::Match { expr, arms: arms(&body)? });
+    }
+    if is_ident(t, "while") || is_ident(t, "loop") {
         return Err((
             t.span(),
-            format!(
-                "air: `{t}` in rsx!: use a {{child}} hole (`{{match x {{ A => rsx! {{ .. }}, _ => rsx! {{}} }}}}`), an `if`, or a `for`"
-            ),
+            format!("air: `{t}` in rsx!: a view says what shows, not how long to repeat: a `for` over the items"),
         ));
     }
     if let TokenTree::Ident(_) = t {
@@ -789,6 +794,39 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         return element(path, &inner, comp);
     }
     Err((t.span(), "air: unexpected in rsx!".into()))
+}
+
+/// A `match`'s arms: `pat [if guard] => { nodes }` or `=> node`, `,` between.
+fn arms(toks: &[TokenTree]) -> Res<Vec<Arm>> {
+    let (mut out, mut i) = (vec![], 0);
+    while i < toks.len() {
+        let start = i;
+        while i < toks.len() && !(is_punct(toks.get(i), '=') && is_punct(toks.get(i + 1), '>')) {
+            i += 1;
+        }
+        if i == toks.len() {
+            return Err((span_of(toks, start), "air: a `match` arm in rsx! is `pattern => { nodes }`".into()));
+        }
+        let head = &toks[start..i];
+        let (pat, guard) = match head.iter().position(|t| is_ident(t, "if")) {
+            Some(g) => (head[..g].iter().cloned().collect(), Some(head[g + 1..].iter().cloned().collect())),
+            None => (head.iter().cloned().collect(), None),
+        };
+        i += 2;
+        let nodes = match toks.get(i) {
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
+                i += 1;
+                parse_nodes(&g.stream().into_iter().collect::<Vec<_>>())?
+            }
+            Some(_) => vec![parse_node(toks, &mut i)?],
+            None => return Err((span_of(toks, start), "air: a `match` arm in rsx! is `pattern => { nodes }`".into())),
+        };
+        if is_punct(toks.get(i), ',') {
+            i += 1;
+        }
+        out.push((pat, guard, nodes));
+    }
+    Ok(out)
 }
 
 /// An element's or component's `{ … }`: `name: value,` pairs, then children.
@@ -1540,6 +1578,35 @@ fn idents_in(toks: &[TokenTree], into: &mut Vec<String>) {
     }
 }
 
+/// The names pattern `toks` binds: an identifier where a pattern binds
+/// (`x`, `ref mut x`, `x @ 1..=3`, `Point { x, .. }`, `Point { x: y }`'s
+/// `y`, `(a, b)`), never a path's segment (`crate::Tab::A`), a struct
+/// pattern's field name, a tuple struct's or a macro's name, a keyword or
+/// a constant (uppercase).
+fn pat_bindings(toks: &[TokenTree], into: &mut Vec<String>) {
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            TokenTree::Group(g) => pat_bindings(&g.stream().into_iter().collect::<Vec<_>>(), into),
+            TokenTree::Ident(id) => {
+                let (s, next) = (id.to_string(), toks.get(i + 1));
+                let binds = s.starts_with(|c: char| c.is_lowercase() || c == '_')
+                    && s != "_"
+                    && s != "box"
+                    && !KEYWORDS.contains(&s.as_str())
+                    // A path's segment (`a::`, `::a`) or a field's name (`x: …`).
+                    && !is_punct(next, ':')
+                    && !(i >= 2 && is_punct(toks.get(i - 1), ':') && is_punct(toks.get(i - 2), ':'))
+                    && !is_punct(next, '!')
+                    && !matches!(next, Some(TokenTree::Group(_)));
+                if binds {
+                    into.push(s);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// `bound`: closure parameters and match patterns (never a capture);
 /// `lets`: names a `let` bound, from the end of its statement on (its
 /// right side may read an outer name of the same name).
@@ -1714,8 +1781,20 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
             }
             Node::If { cond, then, otherwise } => {
                 captures(cond, out);
-                node_captures(then, out);
+                let (mut inner, bound) = (vec![], let_bound(cond));
+                node_captures(then, &mut inner);
+                out.extend(inner.into_iter().filter(|n| !bound.contains(n)));
                 node_captures(otherwise, out);
+            }
+            Node::Match { expr, arms } => {
+                captures(expr, out);
+                for (pat, guard, nodes) in arms {
+                    let (mut inner, mut bound) = (vec![], vec![]);
+                    pat_bindings(&pat.clone().into_iter().collect::<Vec<_>>(), &mut bound);
+                    guard.iter().for_each(|g| captures(g, &mut inner));
+                    node_captures(nodes, &mut inner);
+                    out.extend(inner.into_iter().filter(|n| !bound.contains(n)));
+                }
             }
         }
     }
@@ -1727,9 +1806,27 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
     });
 }
 
+/// An arm's key for `branch`: its index, or `u32::MAX` (made again on every
+/// change) when its pattern binds a name. `bound`: what it binds ([`pat_bindings`]).
+fn arm_key(k: u32, bound: &[String]) -> TokenStream {
+    let k = if bound.is_empty() { k } else { u32::MAX };
+    quote!(#k)
+}
+
+/// The names an `if`'s `let`s bind (`if let Some(x) = a && let Ok(y) = b`: `x`, `y`).
+fn let_bound(cond: &TokenStream) -> Vec<String> {
+    let toks: Vec<TokenTree> = cond.clone().into_iter().collect();
+    let mut out = vec![];
+    for (i, _) in toks.iter().enumerate().filter(|(_, t)| is_ident(t, "let")) {
+        let end = (i + 1..toks.len()).find(|k| is_punct(toks.get(*k), '=')).unwrap_or(toks.len());
+        pat_bindings(&toks[i + 1..end], &mut out);
+    }
+    out
+}
+
 /// Is `n` a placeholder in its template (an anchor its content goes before)?
 fn anchored(n: &Node) -> bool {
-    matches!(n, Node::Expr(_) | Node::Comp { .. } | Node::For { .. } | Node::If { .. })
+    matches!(n, Node::Expr(_) | Node::Comp { .. } | Node::For { .. } | Node::If { .. } | Node::Match { .. })
 }
 
 struct Tpl {
@@ -1802,14 +1899,22 @@ impl Tpl {
                     for (k, v) in attrs {
                         let hole = match v {
                             Val::Static(s) if k == "innerHTML" => {
-                                quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(|| air::IntoAttr::into_attr(#s)));)
+                                let (head, set) = attr_fn();
+                                quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(#head #set(air::IntoAttr::into_attr(#s))));)
                             }
                             Val::Fmt(f, r) => {
                                 let c = clones(r);
-                                quote!(air::__rt::attr(#id, #k, { #c ::std::boxed::Box::new(move || air::IntoAttr::into_attr(::std::format!(#f))) });)
+                                let (head, set) = attr_fn();
+                                quote!(air::__rt::attr(#id, #k, { #c ::std::boxed::Box::new(#head #set(air::IntoAttr::into_attr(::std::format!(#f)))) });)
                             }
                             Val::Expr(e) => {
-                                hole_fn(e, quote!(air::IntoAttr::into_attr), |e| quote!(air::__rt::attr(#id, #k, #e);))
+                                let (head, set) = attr_fn();
+                                hole_fn(
+                                    e,
+                                    head,
+                                    |v| quote!(#set(air::IntoAttr::into_attr(#v))),
+                                    |e| quote!(air::__rt::attr(#id, #k, #e);),
+                                )
                             }
                             Val::Event(ev, e) => {
                                 let mut r = vec![];
@@ -1853,9 +1958,12 @@ impl Tpl {
                 self.bytes.push(4);
                 let id = self.mark();
                 let hole = match n {
-                    Node::Expr(e) => {
-                        hole_fn(e, quote!(air::IntoChild::into_child), |e| quote!(air::__rt::child(#id, #e);))
-                    }
+                    Node::Expr(e) => hole_fn(
+                        e,
+                        quote!(move ||),
+                        |v| quote!(air::IntoChild::into_child(#v)),
+                        |e| quote!(air::__rt::child(#id, #e);),
+                    ),
                     Node::Comp { path, key, .. } => {
                         let mut r = vec![];
                         node_captures(std::slice::from_ref(n), &mut r);
@@ -1900,6 +2008,30 @@ impl Tpl {
                             { #ck move |#pat: &_| (#key).to_owned() },
                             { #cr move |#pat| #view });)
                     }
+                    // `if let` and `match`: a branch hole, its view made again when
+                    // another arm matches or what the arm binds changes.
+                    Node::If { cond, then, otherwise } if cond.clone().into_iter().any(|t| is_ident(&t, "let")) => {
+                        let mut r = vec![];
+                        node_captures(std::slice::from_ref(n), &mut r);
+                        let c = clones(&r);
+                        let (t, o) = (body(then), body(otherwise));
+                        let k = arm_key(0, &let_bound(cond));
+                        quote!(air::__rt::branch(#id, { #c ::std::boxed::Box::new(move || { #c if #cond { (#k, #t) } else { (1u32, #o) } }) });)
+                    }
+                    Node::Match { expr, arms } => {
+                        let mut r = vec![];
+                        node_captures(std::slice::from_ref(n), &mut r);
+                        let c = clones(&r);
+                        let arms = arms.iter().enumerate().map(|(k, (pat, guard, nodes))| {
+                            let mut bound = vec![];
+                            pat_bindings(&pat.clone().into_iter().collect::<Vec<_>>(), &mut bound);
+                            let k = arm_key(k as u32, &bound);
+                            let guard = guard.as_ref().map(|g| quote!(if #g));
+                            let view = body(nodes);
+                            quote!(#pat #guard => (#k, #view),)
+                        });
+                        quote!(air::__rt::branch(#id, { #c ::std::boxed::Box::new(move || { #c match #expr { #(#arms)* } }) });)
+                    }
                     Node::If { cond, then, otherwise } => {
                         let (mut a, mut b, mut c) = (vec![], vec![], vec![]);
                         captures(cond, &mut a);
@@ -1917,28 +2049,43 @@ impl Tpl {
     }
 }
 
-/// A hole's closure: the names it reads are cloned in, and again per run
-/// (as a component's props), so `{match who { .. }}` or `{note.map(..)}` may
-/// take them by value; a single name's type decides whether it follows
-/// anything (a signal does).
-fn hole_fn(e: &TokenStream, into: TokenStream, call: impl Fn(TokenStream) -> TokenStream) -> TokenStream {
+/// An attribute hole's closure head and what hands it its value: the
+/// value goes to the hole's slot, so it may borrow what the closure read.
+fn attr_fn() -> (TokenStream, TokenStream) {
+    let s = Ident::new("__air_s", Span::mixed_site());
+    (quote!(move |#s: &mut air::__rt::AttrSlot|), quote!(#s.set))
+}
+
+/// A hole's closure (`head`, then `into` of the value): the names it reads
+/// are cloned in, and again per run (as a component's props), so `{match
+/// who { .. }}` or `{note.map(..)}` may take them by value; a single name's
+/// type decides whether it follows anything (a signal does).
+fn hole_fn(
+    e: &TokenStream,
+    head: TokenStream,
+    into: impl Fn(TokenStream) -> TokenStream,
+    call: impl Fn(TokenStream) -> TokenStream,
+) -> TokenStream {
     let v: Vec<TokenTree> = e.clone().into_iter().collect();
     // A constant or a static (`CLOUD`, `ACCENT`): read where it is, no local to clone.
     if let [TokenTree::Ident(i)] = v.as_slice()
         && i.to_string().starts_with(|c: char| c.is_uppercase())
     {
-        return call(quote!(::std::boxed::Box::new(move || #into(::std::clone::Clone::clone(&#i)))));
+        let v = into(quote!(::std::clone::Clone::clone(&#i)));
+        return call(quote!(::std::boxed::Box::new(#head #v)));
     }
     if let [TokenTree::Ident(i)] = v.as_slice() {
-        return call(
-            quote!({ let #i = ::std::clone::Clone::clone(&#i); ::std::boxed::Box::new(move || #into(::std::clone::Clone::clone(&#i))) }),
-        );
+        let v = into(quote!(::std::clone::Clone::clone(&#i)));
+        return call(quote!({ let #i = ::std::clone::Clone::clone(&#i); ::std::boxed::Box::new(#head #v) }));
     }
     let mut r = vec![];
     captures(e, &mut r);
     let c = clones(&r);
-    // The per-run clones outlive `into`: `{t(&x)}` may borrow them.
-    call(quote!({ #c ::std::boxed::Box::new(move || { #c #into({ #e }) }) }))
+    // The per-run clones outlive `into`: `{t(&x)}` may borrow them. A lone
+    // expression is `into`'s argument, so what it makes lives as long
+    // (`{t(&sig.get())}`); a block's tail drops its temporaries at its end.
+    let v = into(if v.iter().any(|t| is_punct(Some(t), ';')) { quote!({ #e }) } else { e.clone() });
+    call(quote!({ #c ::std::boxed::Box::new(#head { #c #v }) }))
 }
 
 /// `Row { a: x, "data-t": t, ..more, children… }` →
@@ -2113,7 +2260,7 @@ fn body(nodes: &[Node]) -> TokenStream {
         }
         None => {
             let (file, line, col) = h.at.clone().unwrap_or_default();
-            let at = quote!(air::__rt::At { file: if cfg!(debug_assertions) { #file } else { "" }, line: #line, col: #col, idx: #idx });
+            let at = quote!(air::__rt::At { file: if air::__rt::DEV { #file } else { "" }, line: #line, col: #col, idx: #idx });
             (Literal::byte_string(&bytes).into_token_stream(), count.into_token_stream(), at)
         }
     });
@@ -2161,6 +2308,23 @@ mod tests {
             ["m"],
             "a let read by a view inside"
         );
+    }
+
+    #[test]
+    fn a_pattern_binds_only_where_a_name_binds() {
+        let bound = |src: &str| {
+            let mut out = vec![];
+            pat_bindings(&src.parse::<TokenStream>().unwrap().into_iter().collect::<Vec<_>>(), &mut out);
+            out
+        };
+        assert_eq!(bound("Some(x)"), ["x"]);
+        assert_eq!(bound("n @ 1..=3"), ["n"]);
+        assert_eq!(bound("Point { x, y: ref mut z, .. }"), ["x", "z"], "a field's name binds only as shorthand");
+        assert_eq!(bound("(a, _, box b)"), ["a", "b"]);
+        let none: [&str; 0] = [];
+        assert_eq!(bound("crate::Tab::A"), none, "a path's segments");
+        assert_eq!(bound("self::tabs::Tab::B(_) | super::Tab::C { .. }"), none);
+        assert_eq!(bound("(Mode::Edit, true) | None | MAX"), none, "variants, keywords, constants");
     }
 
     #[test]

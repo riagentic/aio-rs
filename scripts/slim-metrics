@@ -4,7 +4,8 @@ versions, the target folder's size and how many aio-rs builds it holds.
 
   scripts/slim-metrics           print the table
   scripts/slim-metrics --check   also fail when a set is above its ceiling
-                                 in deps.toml `[ceilings]`
+                                 in deps.toml `[ceilings]`, or an app's graph
+                                 lacks a feature of `[kept-features]`
 
 Counts are distinct `name version` pairs of normal dependencies (the shipped
 graph, host target unless the set names one), the package itself excluded.
@@ -58,6 +59,13 @@ def crates(args):
     return pkgs - roots
 
 
+def features(crate, args):
+    """The features `crate` is built with in the set `args`."""
+    out = cargo("tree", "--locked", "-e", "normal", *args, "-i", crate, "--depth", "0", "--prefix", "none",
+                "--format", "{p} {f}")
+    return set(out.split()[-1].split(",")) if out.strip() else set()
+
+
 def duplicates():
     out = cargo("tree", "--locked", "--workspace", "--all-features", "-e", "normal,build", "-d",
                 "--depth", "0", "--prefix", "none", "--format", "{p}")
@@ -74,7 +82,8 @@ def du(path):
 
 def main():
     check = "--check" in sys.argv[1:]
-    ceilings = tomllib.loads((ROOT / "deps.toml").read_text()).get("ceilings", {})
+    deps = tomllib.loads((ROOT / "deps.toml").read_text())
+    ceilings = deps.get("ceilings", {})
     # A set naming a feature the package doesn't have (yet) is skipped.
     have = {"aio-rs": features_of("aio"), "aio-rs-shell": features_of("aio-shell")}
     failed = []
@@ -88,13 +97,19 @@ def main():
         over = cap is not None and n > cap
         failed += [f"{name}: {n} crates, ceiling {cap}"] if over else []
         print(f"{name:34} {n:>6}  {cap if cap is not None else '-'}{'  OVER' if over else ''}")
+    app = dict(SETS)["app kit"]
+    for kept, why in deps.get("kept-features", {}).items():
+        crate, feature = kept.split("/")
+        on = feature in features(crate, app)
+        failed += [] if on else [f"app kit: {kept} is off ({why})"]
+        print(f"kept {kept:28} {'on' if on else 'OFF'}")
     dups = duplicates()
     print(f"\nduplicate versions ({len(dups)}): {', '.join(dups) or 'none'}")
     t = target_dir()
     rlibs = sorted(t.rglob("libaio-*.rlib")) if t.exists() else []
     print(f"target {t.name}: {du(t) / 1e6:.0f} MB, libaio rlibs: {len(rlibs)}")
     if check and failed:
-        sys.exit("over the ceiling:\n  " + "\n  ".join(failed))
+        sys.exit("slim-metrics:\n  " + "\n  ".join(failed))
 
 
 if __name__ == "__main__":

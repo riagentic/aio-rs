@@ -71,7 +71,7 @@ thing to do about it.
 | act as a user | `ax call <app> <cell> <method> [args] [--as user]` |
 | step through its history | `ax timetravel <app> <cell> [undo\|redo\|goto N\|pause\|resume]` |
 | replay a log into it | `ax replay <app> [range] [--from file]` |
-| a test from what it just did | `ax record <app> <cell> <file> [range]` |
+| a test from what it just did | `ax record <app> [cell] <file.rs> [range]` |
 | what problems did it report? | `ax report <app> [id]` |
 | what may a caller call? | `ax peer <app> [--as user] [--role r]` |
 | is it the code on disk? who set each setting? | `ax doctor <app>` |

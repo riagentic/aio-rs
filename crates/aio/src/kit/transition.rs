@@ -22,6 +22,9 @@ pub struct Motion {
     pub easing: &'static str,
     /// The declarations at progress `t` (0: hidden, 1: shown), sampled into `keyframes`.
     pub css: Option<fn(f64) -> String>,
+    /// Called each frame while it plays with `(t, u)`, `u = 1 - t` (aio's
+    /// `TransitionFn` `tick`): what CSS can't do (a typed-out text, a counter).
+    pub tick: Option<fn(f64, f64)>,
 }
 
 impl PartialEq for Motion {
@@ -43,7 +46,7 @@ impl Motion {
     pub const SCALE: Self = Self::new("aio-scale");
 
     pub const fn new(keyframes: &'static str) -> Self {
-        Self { keyframes, ms: 300, delay_ms: 0, easing: "ease", css: None }
+        Self { keyframes, ms: 300, delay_ms: 0, easing: "ease", css: None, tick: None }
     }
 
     /// A motion written as a function (aio's `TransitionFn` `css(t)`):
@@ -79,6 +82,28 @@ impl Motion {
 
     pub const fn ms(self, ms: u32) -> Self {
         Self { ms, ..self }
+    }
+
+    /// `tick(t, u)` each frame while it plays, entering 0 → 1, leaving 1 → 0
+    /// (the last call at the end exactly).
+    pub const fn ticking(self, tick: fn(f64, f64)) -> Self {
+        Self { tick: Some(tick), ..self }
+    }
+
+    /// Run its `tick` over its time, toward `shown`, while `run` is the latest.
+    async fn ticks(self, shown: bool, runs: Rc<Cell<u64>>, run: u64) {
+        let Some(tick) = self.tick else { return };
+        super::sleep(Duration::from_millis(self.delay_ms.into())).await;
+        let (start, ms) = (super::Instant::now(), f64::from(self.ms.max(1)));
+        while runs.get() == run {
+            let p = ((super::Instant::now() - start).as_secs_f64() * 1000.0 / ms).min(1.0);
+            let t = if shown { p } else { 1.0 - p };
+            tick(t, 1.0 - t);
+            if p >= 1.0 {
+                return;
+            }
+            super::sleep(Duration::from_millis(16)).await;
+        }
     }
 
     /// How long until it is over.
@@ -119,10 +144,14 @@ pub fn Transition(show: Prop<bool>, enter: Option<Motion>, exit: Option<Motion>,
         if now {
             leaving.set(false);
             on.set(true);
+            if let Some(m) = enter {
+                spawn(m.ticks(true, runs.clone(), runs.get()));
+            }
             return;
         }
         let Some(m) = exit else { return on.set(false) };
         leaving.set(true);
+        spawn(m.ticks(false, runs.clone(), runs.get()));
         let (runs, run) = (runs.clone(), runs.get());
         spawn(async move {
             super::sleep(m.total()).await;

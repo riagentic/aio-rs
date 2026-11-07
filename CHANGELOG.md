@@ -7,6 +7,853 @@ version may break things.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-07
+
+aio-rs 0.3.0 is the dev loop, parity with aio and speed. `ax dev` from a
+save to the window on the template app (one Linux machine,
+`scripts/dx-metrics --live`): a stylesheet in 0.02 s, markup in 0.004 s,
+a Rust edit hot-patched in ~0.3 s with the state kept (aio's `am dev`
+0.41 and 0.84 s on the same machine), a changed type rebuilt and
+restarted in 2.1 s, a start with nothing changed in 0.5 s, the start
+after a session in 0.35 s, an app's first start after `ax setup` in
+1.7 s (was 24 s). Much of aio that 0.2 lacked is here: the thin client's
+connect page on desktop and Android, single sign-on, the dev time-travel
+panel, `ax record`, the todo and canvas templates, `ax release
+--min-from`, AppImage delta updates, a themed window frame, aio's error
+codes and secret tiers, and aio's `aio.toml` keys and launch flags. Big
+state is fast: `aio::Big<T>` shares a big cell field between states until
+it is written (a held key on the wallet port 14.9 → 11.8 ms p50, aio
+59.7), and key to paint (End over 1000 rows) is 13.5 / 19.6 ms, aio's
+13.5 / 20.4. An app on 0.2 moves with the [migration guide's 0.2 → 0.3
+section](docs/migration/README.md#9-02--03).
+
+### Breaking
+
+- **New fields** in public structs: a struct literal without `..` names
+  them ([migration](docs/migration/README.md#new-fields-and-variants)).
+  aio: `update::Release` (`min_from`, `commit`), `update::Offer`
+  (`reason`, `migrates`), `update::Updates` (`progress_of`),
+  `vitals::Loop` (`drained`), `health::Metrics` (`broadcast`),
+  `health::MemoryReport` (`trend`), `report::Diagnostic` (`cell`, `call`,
+  `numbers`), `db::Opts` (`readonly`), `sync::Options` (`app`,
+  `page_log`), `auth::Session` (`extra`), `auth::client::Me` (`oidc`),
+  `paths::Ask` (`cdp`, `channel`, `client`, `connect`, `height`,
+  `server_url`, `strict_pin`, `width`), `kit::Motion` (`tick`),
+  `kit::Opt` (`view`), `kit::CheckboxProps`, `SwitchProps`,
+  `RadioGroupProps` (`bind`). aio-shell: `Window` (`chrome`, `devtools`),
+  `guest::Child` (`permissions`, `unsandboxed`), `guest::Web`
+  (`unsandboxed_windows`). aio-config: `auth::Policy` (`totp`, `cookie`),
+  `Config` (`dev`), `App` (`flags`, `profiles`), `Accounts` (`totp`,
+  `cookie`), `Build` (`out`), `Client` (`strict_pin`), `Data`
+  (`only_persist`, `snapshot_every`), `History` (`travel`), `Home`
+  (`dir`), `Log` (`dir`), `Server` (`page_log`), `Target` (`platforms`,
+  `title`, `ui`), `Updates` (`sign_commit`).
+- **New enum variants**: a `match` without `_` names them
+  ([migration](docs/migration/README.md#new-fields-and-variants)):
+  `aio::update::Step::Runtime`, `aio::merge::Merge::Keys` and
+  `SetRemove`, `aio::kit::GuestEvent::PreloadRefused`, `aio::kit::Go::Css`,
+  `Zoom` and `DevTools`, `aio::kit::Placement::Left` and `Right`.
+- **Changed signatures**
+  ([migration](docs/migration/README.md#changed-signatures)):
+  `aio::discovery::probe_lan(port, wait)` takes the wait;
+  `aio::config::listen(s, ask, env)` takes the environment it reads
+  (`AIORT_PORT`); `aio_shell::runtime::prefetch(version, sha, step)` takes
+  a progress callback (`&|_| {}`); `aio_shell::switches::cdp(typed, env,
+  debug, devtools)` takes the launch's `--cdp` and the app's `Window {
+  devtools }`; `aio::cli::watch` needs `T: Send + Sync`;
+  `aio::paths::FLAGS` is `[&str; 20]`, naming `--channel`, `--width`,
+  `--height`, `--cdp`, `--server-url`, `--connect`, `--strict-pin` and
+  `--client` too.
+- `aio::Code` is no longer `Copy` (`Code::Other(name)` keeps a code this
+  build doesn't know) and `Code::as_str` takes `&self`: a `code` used
+  twice is `code.clone()` or matched by reference
+  ([migration](docs/migration/README.md#changed-signatures)).
+- `air::AttrValue<'a>` and `air::IntoAttr<'a>` take a lifetime, so an
+  attribute's value may borrow. An app's own `impl IntoAttr for T` is now
+  `impl IntoAttr<'_> for T` returning `AttrValue<'_>`; `Attribute::new`,
+  `live`, `derive`, `value` and a component's attributes take
+  `IntoAttr<'static>` / `AttrValue<'static>`
+  ([migration](docs/migration/README.md#changed-signatures)).
+- `effect` returns its `Effect`: a closure that must return `()` writes
+  `_ = effect(..)` ([migration](docs/migration/README.md#changed-signatures)).
+- `Field { hint }`, `Breadcrumb { separator }` and `EmptyState { icon }`
+  are view props (`Option<View>`; text in `rsx!` still works)
+  ([migration](docs/migration/README.md#changed-signatures)).
+- `Hidden<T>` deserializes for a `T: DeserializeOwned` (it reads the
+  withheld marker first), so a `Hidden<&str>` no longer deserializes
+  ([migration](docs/migration/README.md#changed-signatures)).
+- `aio::cli::Args` reads each flag as the kind its spec gives it: a name
+  the spec hasn't, or a read of another kind, panics naming it (was
+  `None`) ([migration](docs/migration/README.md#behavior)).
+- `aio::health::on_memory` hears every sample while memory is high or
+  critical, not only each change of level
+  ([migration](docs/migration/README.md#behavior)).
+- `[updates] every`: the `dev` channel looks at least every minute and
+  `test` every 5 minutes, unless `every_by_channel` names them (as aio)
+  ([migration](docs/migration/README.md#behavior)).
+- With accounts on, `Http::users` are service keys beside them: a
+  `Bearer` that is no session is asked of them on sockets, routes and
+  files (aio's `users` next to `auth: true`); before, they were ignored
+  ([migration](docs/migration/README.md#behavior)).
+- **`ax dev` builds (and `ax test`'s) run the app as its release build
+  does**: no debug assertions, no overflow checks, so every
+  `cfg!(debug_assertions)` reads as in release. What `ax dev` adds is tooling behind the `dev` features
+  (aio, aio-shell, and a new air `dev`), inert until it is used. That
+  tooling (the operator door `ax call`, `ax ui` and `ax timetravel` use,
+  `AIORT_CDP`, `AIORT_WINDOW_SIZE`, the page's dev mode) is no longer in
+  a plain debug build (`cargo run`)
+  ([migration](docs/migration/README.md#builds-and-ax)).
+- `ax start` builds the app as the release build runs: none of `ax
+  dev`'s tooling (no operator door, no DevTools port, the process
+  hardened); `--cdp` asks for that tooling
+  ([migration](docs/migration/README.md#builds-and-ax)).
+- `ax dev`, `ax test` and `ax lint` build for this machine without
+  `--target`, in one shared build folder per machine and toolchain: the
+  dev binary is `<target>/desktop-dev/<app>`, where it was
+  `<target>/<triple>/desktop-dev/<app>`
+  ([migration](docs/migration/README.md#builds-and-ax)).
+- The connect page's address with no code (and a LAN server that needs
+  no code, `aio::connect::open_at`) connects with no key: the app's own
+  key never goes to a server nothing verified. A keyed server is paired
+  with (a code), or named with its key (`--server-url` with
+  `AIORT_TOKEN`, `[client] server`).
+- A dev build is now any build with aio's `dev` feature too (`ax dev`'s
+  and `ax test`'s, which have no debug assertions): there a log that no
+  longer replays refuses the boot (quarantine only in a release), a
+  method's panic shows the state it ran on, slow field compares are
+  said, `[perf] method` defaults to 16 ms, and a problem report says
+  `"build": "dev"` (`debug` and `release` as before).
+
+### Added
+
+- `ax dev` shows a splash window while the first build runs (150 ms after
+  it starts): cargo's own count of what it builds and the crates it is
+  on, a failed build's errors until a fix is saved, an app that didn't
+  start, then the app's window in its place. It is ax's own window on the
+  shared runtime, never part of the app; a start with nothing to compile
+  shows none; `AIORT_NO_SPLASH=1` leaves it out.
+- `ax dev <app> --warm` builds only what `ax dev` starts from; `ax setup
+  --warm` does it once for the machine on a scratch app; `ax create` at a
+  terminal warms the new app in the background, so its first `ax dev` is
+  a start (`--no-warm` or `AIORT_NO_WARM=1`: not).
+- Prebuilt libraries for the first build (a prototype): with
+  `AIORT_PREBUILT_URL` (an `https://` server) and `AIORT_PREBUILT_KEY`, the
+  registry and git libraries of an empty build folder are fetched, checked
+  against a signed `SHA256SUMS` and moved in; any failure builds them
+  here. `ax dev <app> --warm --pack <dir>` writes them.
+- `AIORT_TARGET_DIR`: ax's build folder, winning over `CARGO_TARGET_DIR`.
+- `ax prune` names ax 0.2's build folder (unused now) and removes it with
+  `--yes`.
+- `scripts/parity`: proof that `ax dev`'s build, `ax test` and a release
+  build run the app the same; `scripts/dx-metrics --live` also times a
+  temporary-copy save, a compile error, its fix, a changed type and a
+  start with nothing changed.
+- An `ax dev` window's overlay shows the app's own problems and warnings
+  from the diagnostic bus (`app: <kind>`, with its tip) beside the page's
+  errors.
+- Every dev build's window has the time-travel panel on Ctrl+. (aio's
+  in every dev app): each `client!` cell's history, Undo, Redo, Pause,
+  with no code in the app (`aio::kit::DevTimeTravel`); an app mounting
+  its own `TimeTravelPanel` keeps only its own. Proven in a real
+  headless Electron window: Chromium's own Ctrl+. shows it, Undo steps
+  the cell back.
+- A dev build audits the running page as `TestUi` does (aio's dev mode):
+  aio's accessibility rules and the WCAG AA contrast check, a second after
+  the page changes, each finding said once in the log.
+- A dev page warns, once each, of an `#id` its stylesheets style that no
+  element has, naming `#main` where the app is mounted (aio's selector
+  audit).
+- A dev build names a cell field slow to compare: one whose comparison
+  after a call takes 0.5 ms or more (`aio::big::SLOW_COMPARE`) is said
+  once, ``[hint] field `rows` of cell `ledger` took 2.1 ms to compare:
+  make it `aio::Big<…>` ``. Not in a browser page, which has no such
+  clock.
+- A method that panics says, in a debug build, the state it ran on with
+  its log line (aio's error box): as saved, tokens masked, at most 2000
+  characters; a cell with `#[redact]` methods keeps it to itself.
+- **`aio::Big<T>`: a big cell field shared between states until written**
+  (aio's Immer structural sharing). A call's copy of the state shares it,
+  and two states that share it are equal without a look, so a step that
+  didn't write it costs no copy and no comparison: not in the held run's
+  write, the views' changed-field mask, nor an app's own `==`. It reads
+  and writes as its value, is saved and sent as it, and may be a
+  `#[aio_cell]` field. On the wallet port (1000 accounts) a step's
+  comparisons went from 4-9 ms to 0.03 ms, a held key's p50 from
+  14.9 to 11.8 ms (aio 59.7 in the same runs), its CPU per key from 19.7
+  to 11.9 ms
+  ([performance: share big fields](docs/performance.md#7-share-big-fields-aiobig)).
+- `ax build --quick`: release builds without LTO, in 16 codegen units,
+  for trying, never shipping: the template's `ax build` after a one-line
+  change 2.2 s, from 27 s (its binary 7.4 MB, from 5.4). Every target's
+  cargo takes the same profile overrides; `--sizes` and a Mac over ssh
+  refuse it.
+- `ax create --template todo|canvas` (aio's): a saved todo list (add,
+  tick, remove, a window-only filter, clear done) and a canvas world
+  (`step`, the pure function that moves it, tested; one script draws each
+  frame), each with cell and window tests.
+- `ax record <app> <file.rs> [range]`: a test of the whole app (aio's `am
+  record`), every cell the range touched booted on its state before,
+  their calls made in the log's order, each state after asserted.
+- `ax ui` cell health says whether each cell is enabled or tripped and its
+  effects running or queued; Metrics shows the effect backlog (amui's).
+  `ax cost --json` carries both per cell (`enabled`, `effects`).
+- `ax build --smoke` / `ax smoke` check the window's page as aio's smoke
+  does: every file it names or loaded and every `[build.assets]` file
+  answers 200, every declared guest preload attaches in a sandboxed guest
+  (a real attach, not only present), and any `REFUSED` line fails it.
+- `ax build --smoke` lists every artifact it didn't start, with why
+  (`not smoke-tested: notes-1.0.0-windows-x64.zip: built for windows`);
+  `--smoke-strict` fails the build on any of them.
+- `ax build` and `ax release --app-version v`: built and released as that
+  version (`1.2.3`), over `[app] version` and git (aio's `--version`).
+- `[build] out` and `ax build`/`ax release --out dir` (aio's `build.out`,
+  `--out`): where builds go, and where `ax release`, `ax install` and
+  `ax lab` look; every place reads it through one helper.
+- A labelled `[build] targets` entry takes its own `platforms`, `title`
+  and `ui` (aio's `build.targets.<label>`), and `entry` as aio's spelling
+  of `bin`; title and ui are stamped into that target's build.
+- `[dev] watch` (aio's `watch: [..]`): the folders `ax dev` watches,
+  when no `--watch` says otherwise.
+- `ax lab <app> <os> --dist dir`: that folder at `/shared`; `--tunnel`: no
+  port published, the viewer forwarded through `docker exec` by `ax` until
+  Ctrl-C (aio's `am lab --dist`, `--tunnel`).
+- `ax peer --types -`: the Rust consts on stdout (aio's bare `--types`).
+- `ax help --all`: every verb, as `--commands` (aio's spelling).
+- `ax release --key file`: signed by that key file (its
+  `<name>.previous.key` beside it signs the key roster too), aio's
+  `publish --key`.
+- `ax release --commit` (or `[updates] sign_commit = true`) signs in the
+  commit the build was made from.
+- `ax release --min-from <v>`: the release installs only over `v` or
+  newer. `minFrom` is signed; an older install finds the release
+  `blocked` (`2.0.0 installs only over 1.4.10 or newer, and this is
+  1.3.2: install 1.4.10 first, then update again`), and nothing gets past
+  it, `apply_anyway` and `start_fresh` included. A `minFrom` that isn't a
+  version refuses the release.
+- Update manifests read forward: an install checks the signature over
+  the release exactly as it was signed, then reads past a field it doesn't
+  know (`aio::update::check_served`), so a later `ax release`'s fields
+  never strand it; one added unsigned still refuses the release. A plain
+  `ax release` writes the manifest aio-rs 0.2's installs read; only
+  `--min-from` and `--commit` (`[updates] sign_commit = true`) add fields,
+  and those need installs on aio-rs 0.3 or newer.
+- AppImage delta updates: `ax release --appimage --patch-from <v>` makes
+  a one-file patch (zstd against the image), listed as
+  `<os>-<arch>.appimage.patches.json`; an app run from an AppImage patches
+  its staged copy, else the image it runs from. Before, a patch list for
+  an AppImage was written under the bundle's name, where no AppImage
+  install looked.
+- Updates from a folder: `[updates] url = "file:///mnt/releases/notes"`
+  (a share, a USB stick), checked as a host is.
+- The `updates` cell's offer says why it is offered (`reason`) and
+  whether it moves the data to a newer cell version (`migrates`);
+  `progress_of` says which download `progress` measures, the release's
+  (`App`) or the Electron runtime it needs (`Runtime`, from 0 again).
+- The `updates` cell syncs to the app's clients, served beside its own
+  cells (aio syncs it to every client): server paths (`backup`, `retired`)
+  stay on the server, any client checks and dismisses, and installing or
+  switching channel is an admin's (`role = "admin"`).
+  `aio::update::share` serves an app's own.
+- The launch flag `--channel=<c>`: the update channel this run follows,
+  over `AIORT_UPDATE_CHANNEL` (aio's `--channel`); `aio::paths::Ask`
+  has `channel`, and `aio::paths::FLAGS` lists it.
+- `--width=<px>` and `--height=<px>` (aio's): one launch's window size.
+- **`--client=window|browser|server-only`** decides how one run shows
+  the app, over `[app] ui` (aio's `--client`).
+- `[app] flags` (aio's `appFlags`): the app's declared launch flags; a
+  launch flag one typo from one of them or from aio's own is refused at
+  start with the one meant (`aio::paths::misspelled`), any other still
+  reaches the app.
+- `[app] profiles = false` (aio's `profiles: false`): one home only; a
+  launch naming another (`--profile`, `AIORT_PROFILE`, `AIO_PROFILE`,
+  `--home`) is refused.
+- `[home] dir` (aio's `appDir`): any app's fixed home, absolute or `~/…`,
+  under `AIORT_DATA` and `--instance`; `aio::paths::plan_in` takes the
+  app's `[home]` rules apart from its port.
+- `AIORT_PORT`: the port a serving app listens on, the variable form of
+  `--port` (aio's `AIO_PORT`); the boot report names it.
+- `AIORT_INSTALL_ROOT` (aio's `AIO_INSTALL_ROOT`): where `install.sh`
+  puts a Linux bundle; `uninstall.sh`, `ax installed`, `ax remove` follow
+  it, and the installed app's updater finds its folder by where it runs
+  from.
+- `AIORT_APPS_DIR` (aio's `AIO_APPS_DIR` for any app): one root for
+  every app's home, `<dir>/<id>`.
+- `[log] dir` (aio's `logging.dir`): the logs of the app's own home
+  elsewhere; a profile, an instance or a sandbox keeps its own `logs/`.
+- The boot report says the platform (`linux/x86_64`) and the updates in
+  one line: channel and who chose it, source, interval, auto or ask
+  first; `not configured` without `[updates] url`.
+- A second after start the boot report adds what the app opened and
+  serves: `cells` (each with its data version), `routes` and
+  `serverfns` (aio's boot listing of cells and routes).
+- `/__aio/metrics`: `aio_broadcast_bytes_total` and
+  `aio_broadcast_messages_total`, the states and patches sent to clients.
+- `/__aio/vitals` on a server: each link's liveness (`status`, `gap`,
+  `frozenFor`) and payloads (`lastPayloadBytes`, `totalBytes`), each
+  served cell's size (`cellSizes`), the cells tripped (`breakers`), and
+  the loop's `drainRate`.
+- **Structured diagnostics** (aio's `DiagEvent`, `onError` context): a
+  `report::Diagnostic` carries the `cell` and `call` it happened in and
+  the `numbers` behind it (a budget's `took_ms`, `budget_ms`); a report
+  carries them too ([errors](docs/debugging/errors.md)).
+- **aio's error codes on refusals**: `REDUCE_ERROR` (a method panicked),
+  `INIT_ERROR`, `QUEUE_OVERFLOW`, `DISPATCH_CLOSED`, `DISPATCH_ABORTED`,
+  `DISPATCH_LOOP`, `PERSIST_ERROR` beside `ACCESS_DENIED`,
+  `ACTION_REFUSED`, `CONNECTION_LOST` and `TX_CONFLICT`; a code this build
+  doesn't know is kept as `Code::Other(name)` (aio's `errorCode`), and
+  `aio::error_summary` gives one line (aio's `errorSummary`)
+  ([errors](docs/debugging/errors.md#the-codes)).
+- **A refusal's log line names its fix**
+  (`permission "midi" DENIED to the app's own page: Window { permissions:
+  &["midi"] } grants it`), and each kind of refusal stops after 32
+  different lines, saying so once, while the others go on.
+- `[data] snapshot_every`: the store's good copy made again while the app
+  runs (aio's rolling snapshot that `checkIntegrityOnBoot` restores from),
+  so a damaged store loses at most that much; each copy passes
+  `quick_check` before it replaces the last.
+- **`Db::snapshot` is aio's rolling snapshot**: the copy is made beside
+  the target, checked with `quick_check`, synced and renamed over it, so
+  one path on a timer always holds the last good copy (an existing
+  target was refused before).
+- **`aio::db::Opts::readonly`** (aio's `createDB({ readonly })`): a file
+  opened read-only; every write is refused
+  ([SQL](docs/persistence/sql.md)).
+- **`[data] only_persist = true`** (aio's `cellDefaults: { persist:
+  "none" }`): only `#[cell(persist)]` cells are saved; every other cell
+  opens in memory ([aio.toml](docs/reference/aio-toml.md)).
+- **`#[cell(persist = false)]`** (aio's `persist: "none"`): the cell is
+  never saved, also opened on a file; it starts from its defaults on
+  every launch. A cell without it is saved where it is opened, as before
+  ([persistence](docs/persistence/README.md)).
+- **`#[cell(recovered = f)]`** (aio's `onCheckpointRestore` returning a
+  state): when the store came back from a damaged file, `f(state,
+  &aio::Recovered)` returns the state to boot on, logged as a `$restore`
+  event ([persistence](docs/persistence/README.md#how-the-store-works)).
+- `#[cell(redact)]` (aio's `redactActions: ["vault:*"]`): every method of
+  the cell is `#[redact]`; `aio::CellData::REDACT`.
+- **`#[cell(transaction)]` tracks reads, as aio's `transaction: true`
+  does**: `#[methods]` finds what an async method reads in its body. A
+  field it only assigns (`self.f = …`) is a blind write: it never
+  conflicts, the last write wins; with `serialize`, only a change to what
+  it read is a conflict. A method that passes `self` on or calls a method
+  of `self` counts as reading every field, as before
+  ([transactions](docs/state/methods.md#transactions)).
+- `#[long(ms)]`: an async method's own await ceiling (aio's per-method
+  timeout), beside `#[long]` (none) and `[perf] call_ceiling` (the app's).
+- **`#[skip_if_running]` on an async method** (aio's `skipIfRunning` on
+  a schedule set from a method): a tick of any schedule of it, declared or
+  set by `cx.every`/`cx.after`/`cx.cron`, is skipped while it runs; ten
+  skipped in a row are said once (`schedule:skipping`)
+  ([scheduling](docs/state/scheduling.md)).
+- `#[skip_travel]` on a method (aio's `skipActions`): time travel's undo,
+  redo and timeline pass over its events, which stay in the log.
+- `[history] travel = false` (aio's `diagnostics.dev.timeTravel: false`):
+  every time-travel step is refused.
+- An async method sends its caller pieces while it works with
+  `cx.part(x)`, and `Remote::stream(method, args, on_part)` receives them
+  in order before the end (aio's `emitChunk` and `peer().stream()`);
+  other callers get none.
+- `aio::merge::Merge::Keys` (aio's `lww-per-key`, merged key by key) and
+  `Merge::SetRemove` (aio's `set-remove`): a synced copy shows a record or
+  a removing set merged while its call waits, with a conflict only where
+  both sides changed one key or item their own way.
+- **A notification raised in a signed-in user's call is said once to
+  reach every user** (a warning on the bus, `tell:every-user`), as aio
+  does ([telling people](docs/state/effects.md#telling-people)).
+- **aio's two secret tiers on a shared cell**: a field named like a
+  secret (`seed`, `token`, `secret`, `key`…) is a build warning, beside the
+  refusal of an unambiguous credential; `#[public]` on a field says it is
+  meant to be sent (aio's `publicFields`)
+  ([visibility](docs/state/visibility.md#credentials-in-a-shared-cell)).
+- A `Hidden<T>` field that isn't `#[server]` can be hidden per viewer: a
+  `visible` view gives `Hidden::withheld()`, and a read on that viewer's
+  copy panics naming the field (aio throws on reading a field the view
+  hides), where a plain field reads as a default.
+- **The thin client's connect page, on desktop and Android** (aio's
+  thin client): a window's client (`Source::for_app` in a binary with
+  the kit, as every window app's `main` already calls it) never fails for
+  want of a server. With none named, `--connect`, one it can't reach (and
+  no copy saved) or one that refuses, the window shows the page in place
+  of the app: an address, the app's servers on the LAN, a pairing code,
+  the recent servers (`aio::kit::ConnectPage`, `aio::connect`). It goes
+  the moment a server answers. `--server-url` names the server for one
+  launch ([desktop](docs/clients/desktop.md#the-connect-page)).
+- **A paired server whose certificate changed proves it holds the key**
+  (aio's `/__aio/pin-proof`) before the key is sent, and is pinned again;
+  one that can't is refused. `[client] strict_pin` (or `--strict-pin`,
+  aio's `strictPin`) refuses it outright until paired again
+  (`aio::pairing::reprove`, `pin_holds`).
+- **Discovery asks every network this machine is on** (the limited
+  broadcast and each interface's own), lists a machine heard from two of
+  its addresses once, and a probe nobody took is an error: `ax discover`
+  says why and exits 1, naming macOS's Local Network permission there.
+- `Remote::connect_later`, `relink` and `on_unreached`: a copy that waits
+  for its server and can be pointed at another, a live link dropped for
+  the new one at once.
+- **`Remote::token_with(f)`** (aio's connection `token` as a function):
+  the token is asked for before each reconnect.
+- **A dead credential signs a synced copy out** (aio's "Signed out"):
+  `Remote::signed_out()`; the calls waiting are refused with
+  `ACCESS_DENIED` and taken off the copy, and new calls are refused until
+  a link is made again. A page asks over HTTP whether its credential
+  died, where it retried a refused socket forever
+  ([offline](docs/persistence/offline.md)).
+- **A CLI's synced client says the notifications it gets**
+  (`INFO [cli] notify: …`, aio's `connectCli`), never drops them.
+- `SignIn` offers single sign-on when the server has an identity
+  provider (`sso`, `sso_label`, part `signinSso`). A page goes to the
+  provider and back; a desktop or phone app opens the browser and gets the
+  session back on a loopback port (`Client::sso`, `Client::sso_done`,
+  `POST /__aio/auth/oidc/redeem`), bound to a verifier the app keeps. `Me`
+  has `oidc`.
+- `Users::resolve_with`: an async users resolver (aio's `resolveUser`)
+  that reads the app's state through the handles it captures and may say
+  more of the user (`Known::extra`, read by a route with `Req::extra`).
+- `[accounts] totp = false` and `cookie = false` (aio's `auth.totp`,
+  `auth.cookie`): no second-factor enrollment (`totp_disabled`), no
+  session cookie on sign-in; `aio::auth::Policy` has `totp` and `cookie`.
+- `[accounts] signup` with `require_verified` and no mail hook
+  (`Http::mail`) refuses to serve, naming why (aio's boot refusal):
+  no one who signed up could ever sign in.
+- **`ax profile <app> --link`**: a browser link carrying the app's key
+  (`https://host:port/?token=<key>`, aio's `share:` link), on demand; the
+  boot's share line names it, and the key stays out of every log
+  ([the key](docs/auth/README.md#the-key)).
+- `TestIo::run(argv, main)`: a command-line app's whole run in a test
+  (aio's `testIO()`), `args` reading `argv`, `--help`, a refusal and
+  `fail` ending the run with their exit code instead of the process.
+- `aio::cli::watch` hides the cursor on a terminal (shown again on exit,
+  Ctrl+C or SIGTERM) and draws one frame per `TICK` (16 ms), the tick's
+  last state.
+- `Window { chrome }` (aio's `ui.chrome`): `Chrome::Themed` draws no OS
+  frame and puts aio's title bar in the page (drag region, minimize,
+  maximize, close, a double click maximizes, the page's title), styled by
+  `.aio-titlebar*` and `--aio-titlebar-*`; `Chrome::None` leaves the app
+  to draw its own.
+- **DevTools in a release build, only where the app allows it**:
+  `Window { devtools: true }` gives F12, Ctrl+Shift+I and the launch's
+  `--cdp=<port>`; never from the environment.
+- **Child windows as aio's**: `Child { unsandboxed: true }`, allowed by
+  `Web { unsandboxed_windows: true }` and said in the log, else refused
+  with the reason; `Child { permissions }`, what its page may hold on its
+  own origin.
+- **A refused guest preload reaches the page**:
+  `GuestEvent::PreloadRefused { preload, reason }` and the window's
+  `aio:guest-preload-refused` event.
+- `aio::kit::run_js(id, js)` runs a script in a `Browser`'s guest and
+  answers its value (`executeJavaScript`); `Go::Css` adds a stylesheet
+  (`insertCSS`), `Go::Zoom` (`setZoomFactor`), `Go::DevTools`.
+- An icon frame of `Tell::Icon` may be the app's URL path of a
+  `[build] assets` file (`"/icons/busy.png"`, aio's `appIcon()` app URL).
+- A web build's page sends its console to the server that serves it in a
+  release too (aio's client log): `[page]` lines in the app's log, 100 a
+  second at most; `[server] page_log = false` takes none.
+- `if let` (and `else if let`, `let` chains) and `match` (guards,
+  nested) in `rsx!`, which 0.2.0 refused: the arm's view is made again
+  when another arm matches or what its pattern binds changes; an arm
+  that binds nothing keeps its view and state. `ax lint` checks a
+  `match`'s arms as branches. `while` and `loop` stay refused: a view
+  says what shows, and a `for` over the items lists it.
+- An attribute takes any string a hole makes: `title: t(&x)` (a borrow
+  of the hole's own clone), a `Cow<str>`, an `Option<&String>`. A
+  borrowed value is compared with the last one and copied only when it
+  changed.
+- `aio::ui::prelude::on_change(read, |next, prev| ..)` (aio's
+  `watch(source, fn)` and `on()`) and `untrack`.
+- `effect` returns an `Effect` (`dispose()` stops it); `effect_quiet` is
+  deaf to its own writes (aio's default `effect`; air's `effect` is aio's
+  `rerunOnSelfWrite: true`).
+- `ErrorBoundary`'s fallback may try again: `retry()` gives its `Retry`,
+  `r.retry()` makes the children anew (aio's boundary reset).
+- `Resource::mutate(v)` shows a value at once and `Resource::dispose()`
+  loads no more (aio's `resource()`).
+- `Motion::ticking(f)`: `f(t, u)` each frame while a transition plays
+  (aio's `TransitionFn` `tick`).
+- `Field`'s `hint`, `Breadcrumb`'s `separator` and `EmptyState`'s `icon`
+  take text, state or any view; `Opt::view` shows any view beside a radio
+  (aio's any-view props).
+- `Form::bind_check` binds a bool field to a `Checkbox` or `Switch`,
+  `Form::bind_parsed` a number (any `FromStr`) to an `Input`, and
+  `RadioGroup` takes `bind` (aio's `form.bind` for every field type).
+- `Portal { target }` draws in a named `PortalHost { name }` anywhere on
+  the page (aio's `Portal target`).
+- `Link { active_style }` (aio's `activeStyle`); `Link`'s `to` and `class`
+  follow state.
+- `Redirect { push: true }` keeps the redirecting place in the history
+  (aio's `replace: false`).
+- A web page under a base path (`<base href="/app/">`) routes from it:
+  the router takes the base off the address and puts it back (aio's route
+  base).
+- `Tooltip` `Placement::Left` and `Right` (aio had top and bottom only).
+- `aio::kit::use_window_listener(kind, f)`: any DOM event type the window
+  hears, each one, with no throttle (aio's `onWindowEvent(type)`).
+- `aio::held::Held` and `aio::kit::use_held` in a browser page (a web
+  build), as on the desktop (aio's `useResource` in a page).
+- **`ax release` warns** in one line when a release names its commit
+  (`--commit`, `[updates] sign_commit`) or a `minFrom`: installs on
+  aio-rs older than 0.3 can't read it; publish a plain bridge release
+  first ([releases](docs/build/release.md)).
+- `ax release --aio --target <triple>`: another target this machine
+  builds, so an arm64 Mac makes both Mac archives of a release by hand
+  (`--target x86_64-apple-darwin`).
+
+### Changed
+
+- **`ax dev` lands a Rust edit in ~0.3 s** (the template's view logic
+  0.51 → 0.27 s, a cell method 0.59 → 0.40 s, save to screen; aio's `am
+  dev` 0.41 and 0.84 s on the same machine,
+  [comparison](docs/comparison.md#the-edit-loop-next-to-aios-am-dev)). A
+  patch compiles from the first save, kept if the burst was just that
+  save as the compile read it. A library's patch goes in without
+  compiling the launcher binary (its running objects are linked in as they
+  are); the launcher is compiled after: when its objects come out as the
+  running ones nothing more is sent, else a second patch carries them.
+- **The start after an `ax dev` session launches at once** (0.35 s, was
+  1.1 s): once a patched session is quiet for 2 s, ax brings the next
+  start's fat build up to date behind it at low priority (nice 10;
+  Windows below normal), linked beside the running binary, stopped by a
+  save. A session that ends behind it, by Ctrl-C, SIGTERM, the terminal
+  or console closing too, starts `ax dev <app> --warm` in the background.
+- A start with nothing changed runs the last build as it is: no rebuild,
+  no link (1.4 s → 0.5 s to the window).
+- **`ax setup` builds aio-rs in the background** at a terminal (the
+  installers' last step): an app's first start compiles only its own
+  crates (1.7 s, was 24 s); one started meanwhile waits on cargo's lock
+  and builds nothing twice. `--check`, no terminal and `AIORT_NO_WARM=1`
+  leave it out.
+- One shared build folder per machine and toolchain, in aio's cache home
+  (`~/.cache/aio-rt/target/<toolchain>` on Linux), named by the
+  toolchain of the workspace ax runs in: aio-rs is compiled once for
+  every app; two toolchains never thrash one folder.
+- `ax dev`, `ax test` and `ax lint` build for this machine without
+  `--target`: the libraries a build script or macro shares with the app
+  (libc, serde, base64…) build once, not twice. The template's first
+  `ax dev` build 68 → 62 CPU-s, 26 → 22 s (4 jobs).
+- A changed type, static, signature or item-level macro call restarts the
+  app instead of patching it (its cells come back from their log); a new
+  function in a module, a new test or a body edit is still patched, and
+  items declared in a function's body count too.
+- A save while a build runs stops that build (cargo and every rustc it
+  started) and starts the next at once on the newer code.
+- aio's lint of a save runs beside the patch, not before it.
+- cargo's words as they come under `ax dev`, its progress bar on a
+  terminal, a warning already shown said again in one line.
+- The boot report in one line on `ax dev`'s terminal (`--verbose`: every
+  row); Chromium's D-Bus chatter is left out.
+- `ax uninstall --tools` also takes the shared build folders and ax 0.2's.
+- An `am` verb typed from habit is refused with its exact `ax` form:
+  `instances`, `watch`, `actions`, `client`, `compile`, `publish`,
+  `migrate`, `link` (each naming its verb), `check`, `where` and `add`
+  (what does their job), beside `dispatch`, `fix` and `theme`.
+- Smaller code per view: a hole's closure is behind a one-entry vtable
+  (no `FnMut`/`FnOnce` shims), `memo` is generic over its value, not
+  its closure, and a list's row work is one copy for every item type.
+  The bench's 50-view crate (`crates/air-bench`): release `.text`
+  1.41 → 1.16 MB, debug binary 17.5 → 15.2 MB, LLVM IR 1.15 M → 0.96 M
+  lines (`scripts/air-ir`'s limit 25 000 → 21 000 a view). Mounting and
+  updating 1000 rows takes as long as before.
+- air: the rows that leave a list stop at once and what they held is
+  dropped after the frame is sent (`air::drop_left`, the next event at
+  the latest), and a hole that reads nothing is run once and never
+  boxed. A jump over 1000 rows (End on the wallet port): the 60 rows'
+  mount 3.1-4.1 → 2.1-3.3 ms, the app's work for the key 4.7-8 →
+  3.9-5.5 ms; key to paint, stamped, End 13.5 / 19.6 ms (aio 13.5 /
+  20.4), Tab 13.1 → 11.6 ms (aio 9.8); `air-bench` held key p50 1.2 →
+  1.1 ms.
+- A web build (`ax build --web`) is 8% smaller: the kit's stylesheet and
+  air's interpreter are built into the wasm without comments or
+  indentation, the theme's tokens are printed without float formatting
+  (its code no longer in the page), and wasm-bindgen's script loses its
+  indentation and comment lines. The template's site 454 → 418 KB (wasm
+  408 → 378 KB; `scripts/dx-metrics`' `air_web_b` 461,818 → 425,603 B,
+  under its limit again); a screenshot of its page is the same, pixel
+  for pixel.
+- A desktop app's binary is 60 KB (1%) smaller: zstd, which reads delta
+  updates, is built small (its `thin` feature); the template's 5.42 →
+  5.36 MB, its AppImage 3.61 → 3.58 MB. `scripts/slim-metrics --check`
+  fails when the feature is off (deps.toml `[kept-features]`).
+- `aio::health::on_memory`'s `MemoryReport` says the `trend` (`Rising`,
+  `Stable`, `Falling`), as aio's `onMemoryPressure`.
+- **A client's server is reached without a `[capabilities] network`
+  entry** (aio's thin client): the one the person picks on the connect
+  page or pairs with, `--server-url`, or `[client] server`; that host and
+  port alone (`aio::capabilities::grant`). Every other host still needs
+  one, and `[client] server` no longer fails the build without it.
+- An app's own update runtime (`aio::update::install` before start) keeps
+  the `updates` cell, with or without `[updates] url`, and the built-in
+  checks stay out; aio-rs 0.2 replaced it with the built-in one.
+- A cell whose log no longer replays is quarantined in a release build
+  (aio's): it runs at its last snapshot, refuses calls with
+  `PERSIST_ERROR`, serves no synced client and keeps its log for a fixed
+  build (`Store::quarantined`); a debug build still refuses the boot.
+  `aio::testing::quarantine` sets it in a test.
+- A problem report's state is screened by `visible` as a client with the
+  key sees it (aio's screening); mid-panic a cell with `visible` is
+  withheld, since its code is not run then.
+- A `Hidden<T>` that a copy or view doesn't have serializes as
+  `{"$hidden": true}` instead of `null`, so a `Hidden<Option<T>>` keeps
+  its `None`.
+- A known user whose re-checked token says another role keeps the open
+  socket and sees the new role's view at once (aio's push); before, the
+  socket closed and reconnected.
+- `#[ttl(ms)]` answers network callers too, each from an answer kept for
+  that caller (user and role): before, a network call always ran again.
+- docs/build: release build time against binary size, per LTO setting
+  (the template's fat LTO: 27 s for a one-line change, the smallest
+  binary; without LTO: 2.1 s, 37% bigger), and how to try a release
+  build quickly without shipping it.
+- docs/aio-vs-aio-rs.md: key to paint by two clocks, the frame's stamp
+  and when it ran (aio's End: stamped 12 ms, ran 224 ms after the key).
+- DevTools refusals and docs say what decides: an `ax dev` build
+  (feature `dev`) has DevTools and reads `AIORT_CDP`; any other build (a
+  release, a plain `cargo build`) only with `Window { devtools: true }`
+  and the typed `--cdp`.
+- `aio::Big` and docs/performance.md state its rule: plain data only,
+  never one that changes behind `&` (`Cell`, `RefCell`, `Mutex`,
+  atomics), whose writes would reach the states before the call and stay
+  unseen.
+- A saved copy's calls that can't be sent are kept beside its file under
+  a name with the time (`copy.orphan-<cell>-v<n>-<ms>`, in a page
+  `<key>.orphan-v<n>`, then `-2`…), never over an earlier set.
+- A timed snapshot (`[data] snapshot_every`) runs once per store,
+  however many cells boot on it, and ends when the store's file is gone.
+- **The template app's binary is 0.74 MB smaller** (5.71 → 4.97 MB, its
+  AppImage 3.75 → 3.41 MB and `.tar.gz` 2.97 → 2.61 MB;
+  `scripts/dx-metrics`): an app carries only what it uses. The updater
+  (aio-rs-shell's `updates`) is in an app's build only when its aio.toml
+  has an `[updates] url`: `ax build`, `ax release` and `ax dev` turn it
+  on by themselves, as they do `native-splash` for a `[build.splash]`.
+  An app that brings its own update runtime (`aio::update::install`) and
+  turned the shell's default features off names `updates`
+  ([migration](docs/migration/README.md#builds-and-ax)).
+- The connect page is in a binary only with aio's `server` (a client's,
+  the only one that shows it), and `DevTimeTravel`'s registry only with
+  aio's `dev` (`ax dev`'s builds).
+- `ax build --web`: a standalone app's page sends its console nowhere
+  (it has no server to take it; it posted to whatever host served the
+  site); an app with a server and `[server] page_log` still sends it.
+- `Merge::Keys` builds its record without sorting the keys: ~13 KB less
+  code in every app (the template's web build back under its limit).
+- `ax create` that can't write `Cargo.lock` (offline, an aio-rs release
+  not there yet) says cargo's cause in one line and what to do, not
+  cargo's whole error chain.
+- `ax release --aio` no longer lists the Android keystore among its
+  signatures: `ax` has no APK.
+
+### Fixed
+
+- A compile error in a patch is said once and shown on the window; the
+  app runs on and the next save patches again (it no longer went on to
+  two full rebuilds that failed the same way).
+- A save made as a temporary copy renamed over the file (`sed -i`,
+  safe-write editors, agents' write tools) is no longer a rebuild and a
+  restart.
+- A panic in the window's views is no longer taken for the person closing
+  it: the session waits for a fix.
+- A first build that fails still opens the window, on the last good build
+  (the fat binary kept from its last link, never a half-written file), the
+  errors on it.
+- Markup saved after a save made during the first build reaches the
+  window (it was told against the code before that save).
+- Ctrl-C at `ax dev`, or its terminal closing, now stops every cargo and
+  rustc it started.
+- `ax create`'s background warm-up and an `ax dev` no longer race on the
+  same fat build (one waits for the other); on Windows the warm-up is
+  detached from the console.
+- `ax setup --warm` makes its scratch app again when another ax or
+  toolchain pin made it.
+- A global whose type a hot-patch changed starts again from its first
+  value (air with `dev`); any other build still stops on it.
+- `AIORT_NO_SPLASH=0` and `AIORT_NO_WARM=0` mean "on", as unset.
+- A hole that borrows a temporary it makes (`{t(&sig.get())}`,
+  `title: t(&sig.get())`) compiles (was E0716).
+- An app whose `main` returned an error lost that line (`Error: …`,
+  printed after `main`) from its log and terminal: the log's copier is now
+  finished at the process's exit too (C's `exit`; a second at most). `ax
+  dev` then says an app that ended by its own reason, in the terminal's
+  `ended` line and on the splash.
+- `ax dev` on macOS reads a freshly linked binary through before it
+  starts it: the system's first-start check of a new binary no longer
+  reads it from disk slowly (a 60 MB binary's first start ~0.65 s instead
+  of ~1.15 s).
+- A stop (`ax stop`, a closed window, SIGTERM, `ax dev`'s restart)
+  snapshots each persisted cell, and `ax dev` snapshots them before every
+  hot-patch (`Handle::checkpoint`): the next start no longer replays calls
+  made before an edit through the edited code (a counter came back 116
+  for 109 clicks).
+- A launch while the app's instance is stopping (`ax dev` started again
+  at once, a double-click during a quit) is no longer handed to the
+  instance that is going away and lost, nor refused: that instance
+  answers that it is ending (or its door is already gone), and the launch
+  starts as soon as it has let go of the app's lock (30 s at most, then
+  it says who holds it). It made `scripts/dx-metrics`' `dev_restart_s`
+  fail now and then: the new app exited 0 at once, its launch handed
+  over, or exited 1, "the app is running but not answering".
+- **A replayed library's code is all in its patch** on macOS and Linux
+  arm64: its rlib went to the linker whole, which takes only the members
+  something in the patch calls, so code reached otherwise (a view's
+  function, by pointer) stayed the old one; its objects are linked now,
+  as on Linux x86_64 and Windows.
+- **`ax dev` never keeps a hot patch's library as cargo's build.** A
+  patch replays a library into the build folder; a source later put back
+  with its old modification time (a `git checkout`, a copy) left cargo
+  trusting the patched code, and the next session started on it. The
+  replayed libraries' fingerprints are now dropped, so cargo builds them
+  again.
+- **A server names its app (`[app] id`) to a pairing device and on the
+  LAN**, not its cell's id: `ax pair <app>` and the connect page pair with
+  an app whose cell has another id (the template's `counter`), as aio's
+  `appId`.
+- **Calls queued offline on another version of the cell are kept**: a
+  saved copy this build can't use keeps its waiting calls beside it
+  (`<file>.orphan-<cell>-v<n>`, in a page `<key>.orphan-v<n>`) and says so
+  (`sync:orphan-queue`, aio's `sync-orphan-queue`); they were dropped
+  silently ([offline](docs/persistence/offline.md)).
+- **`Oidc::redirect_uri` is checked at boot**: one that isn't an absolute
+  `http(s)://` URL stops the boot (it reached the provider as it was),
+  and the first sign-in logs the `redirect_uri` it sends, as aio does.
+- **`#[mode(first)]` joins only a running call of the same caller with
+  the same arguments**, as aio's `"first"`: `scan("/b")` no longer gets
+  `scan("/a")`'s answer, it runs beside it. `cx.abort("scan")` still
+  stops every call of `scan`.
+- **A declared `skip_if_running` schedule of a `#[mode(first)]` method
+  skips again**: its effect is keyed by its arguments since `#[mode(first)]`
+  joins by them, and the check now finds it.
+- **An exposed app answers to this machine's own name**
+  (`http://<hostname>:<port>/` from the LAN), as aio does; it was 403
+  unless listed in `[server] hosts`. `aio::gate::machine_name()` says it.
+- **`Remote::merge` refuses a field the cell doesn't have** (a panic
+  naming its fields, aio's typo check); a misspelt one merged nothing.
+- **An aio `state.db` keeps the app's own `PRAGMA user_version`.** aio
+  leaves it to the app; aio-rs stamped its own layout there, so a file
+  the app had set to 1 failed to boot (a duplicate column), one above 2
+  was refused as newer, and the app's migrations lost their stamp. In an
+  aio file aio-rs now reads its layout from its own tables and never
+  writes `user_version`; `ax events`, `ax update` and the data gate read
+  it the same way.
+- A server's door (`ax stop`, later launches) tells a launch that comes
+  once a stop is asked that the app is ending, so it waits for the lock
+  instead of being handed to an instance about to go. New:
+  `aio::lifecycle::stopping()`.
+- Rows that left a list are dropped once their frame is out on the web
+  build and in `TestUi` and `air::testing::TestPage` too (as in a
+  window), not at the next event: a page with no events kept them.
+- A `match` or `if let` arm in `rsx!` whose pattern names a path
+  (`crate::Tab::A`, `self::…`), a struct field (`{ x: 0 }`) or a tuple
+  struct binds nothing, so its view and state are kept while it matches;
+  only a real binding (`x`, `x @ …`, `{ x }`) makes it again on each
+  change. The captures of a `match` share the rule.
+- `effect_quiet` is deaf to its own writes made under `untrack` too:
+  they no longer run it again (a loop).
+- A `Users` resolver is always asked off the server's async threads
+  (sockets, the UI socket, routes): an async resolver
+  (`Users::resolve_with`) that awaits what a `current_thread` runtime
+  drives no longer deadlocks it.
+- **Calls made offline are never lost to a refusal.** Only a refused key
+  (the server's 401) signs a synced copy out; another refusal (a server
+  of another cell picked on the connect page, a plain link a phone won't
+  use, a full server) keeps the waiting calls and stops until the copy
+  is pointed elsewhere. A signed-out saved copy keeps its waiting calls
+  beside its file (`copy.signed-out-<ms>`) and says so
+  (`sync:signed-out-queue`) instead of deleting them
+  ([offline](docs/persistence/offline.md)).
+- A streamed call dropped from a full queue or refused at a sign-out
+  lets go of its piece handler.
+- A timed snapshot no longer races a cell's boot or another snapshot on
+  the store's half-made good copy (a later recovery could restore a
+  damaged one).
+- A quarantined cell boots its snapshot repaired as any boot's
+  (`restore`, `recovered`), labelled with the snapshot's event, not the
+  log's last.
+- A staged release keeps its manifest exactly as served, so its
+  signature still holds over fields this build doesn't know.
+- A served manifest's signature is checked before its release is read.
+- A debug build logs what each call changed at `debug` level again
+  (`[diff]`), as `ax dev`'s does.
+- An update source `file://host/share` (another host) is refused, never
+  read as a path relative to where the app runs.
+- `ax dev` stops a stale build when ax was started with Ctrl-C ignored
+  (`nohup`, a background job): cargo starts with SIGINT and SIGTERM at
+  their defaults, so the stop reaches it and its rustc calls.
+- `#[methods]` refuses a cell method named `checkpoint`: a handle's own
+  `checkpoint` would hide it.
+- `TestUi`'s window is drawn at 1 CSS pixel to a device pixel on a HiDPI
+  host (a Retina Mac): shots, wheel steps and zoom are the same on every
+  machine.
+- `aio.toml`'s `[home] dir`, `[log] dir` and `[server] cert` / `key`
+  take any OS's absolute path (`/srv/notes`, `C:\notes`, `\\host\share`)
+  on every build host, as an app may be built for another OS; the app
+  refuses a `[home] dir` or `[log] dir` that isn't absolute where it
+  runs, naming the key. Before, a Linux path failed the build on Windows
+  and the other way round.
+- `[dev] watch` refuses a Windows drive or root (`C:x`, `\x`) on every
+  build host, not only on Windows.
+- `ci-windows.sh` no longer runs the hot-patch test on the remote
+  Windows: it builds a fixture with cargo from the checkout, which isn't
+  there. GitHub CI's Windows job runs it natively.
+- A saved copy (`Remote::connect_saved`) no longer loses a call made
+  offline when the process ends right after it: the last copy dropped,
+  `aio::shutdown` (a SIGTERM, a window closed) and the process's exit (a
+  return from `main`, `std::process::exit`, Windows included) write its
+  last save first, in that thread, bounded. Saves are written by one
+  writer per file, in order: a copy dropped and opened again at once
+  starts from its newest save, and a copy still closing never saves an
+  older state over the new one's. A call still never waits for the disk.
+- Each sign-out's `sync:signed-out-queue` (and each `sync:orphan-queue`)
+  reaches `report::subscribe`, even within `QUIET_MS` of another: the
+  message that says where the kept calls are is held back only as an
+  exact repeat.
+- `ax build --sizes` builds with the release build's features: an app
+  with a `[build.splash]` was sized without its splash.
+- The accessibility check no longer flags a `<button>` without `type`
+  outside a `<form>` (there it submits nothing): the template's buttons
+  no longer warn on its first `ax dev`.
+- The kit's header and footer rules matched `#root>header`, an element
+  aio never makes: they match the app's `#main` now, and the page no
+  longer warns that the stylesheet styles `#root`.
+- Chromium's tray asking a missing D-Bus for a tray host is dropped as
+  the rest of its no-bus chatter is, in that exact shape only.
+- App bundles (`.tar.gz`) and aio-rs's own archives store their files as
+  owned by 0:0, with no user or group name: the packer's account stays
+  on their machine. The `ax` in aio-rs's archives is `rwxr-xr-x`
+  whatever the packing machine's umask (a strict one left it runnable
+  by its owner only).
+- Two `ax build` runs of one app no longer pack over each other in its
+  `dist/`: the second waits for the first, and says so.
+
+### Security
+
+- Prebuilt libraries are fetched only over `https://` and only with a
+  signature key to check (`AIORT_PREBUILT_KEY`); an archive is checked
+  whole (its paths, no links, at most 1 GB a file and 8 GB in all, within
+  5 minutes) and unpacked apart before anything reaches the build folder.
+  A pack holds one build's units only, with no path of the machine that
+  made it, and leaves out every package with native build output and
+  those built on it.
+- `POST /__aio/log` (`[server] page_log`) takes lines only from who may
+  read health: anonymous on this machine alone, else the key (a bearer,
+  `?token=` or the page's key cookie) or a session. Its pace is per
+  client, and a page's line holds no escapes, colour included.
+- A paired server whose certificate changed is never asked to prove a
+  weak app key (`aio::pairing::reprove`): the client's half would let
+  whoever answers guess it offline. Pair again.
+- A pairing from the connect page that fails (or finds another app) no
+  longer leaves its address reachable past `[capabilities] network`.
+- An app's provider sign-in (`oidc/start?port=…&claim=…`) asks the
+  person in the browser first; going on needs a tag tied to that
+  browser's binder cookie, the port and the claim. A link made by
+  someone else can no longer send a session to another user's port on a
+  shared machine.
+- `--server-url …?token=<key>` warns: a command line is seen by every
+  user of the machine. The docs give the key in `AIORT_TOKEN` (or
+  `data/sync.token`) instead.
+- An unsandboxed child window (`Child { unsandboxed: true }`) no longer
+  shares the sandboxed ones' session: unset, its partition is
+  `persist:aio-child-unsandboxed`, and `persist:aio-child` is refused
+  for it.
+- A client of the `updates` cell no longer sees server paths in `error`
+  or `failed` (an install dir, a `file://` source): each word naming a
+  path is said as `…`.
 ## [0.2.0] - 2026-11-02
 
 aio-rs draws its views with air, its own fine-grained renderer, and
@@ -1009,5 +1856,6 @@ a time ([migration guide](docs/migration/README.md)).
 - The prebuilt archives and app bundles are not OS-signed yet: Windows
   SmartScreen and macOS Gatekeeper warn on first start.
 
+[0.3.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.3.0
 [0.2.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.1.0

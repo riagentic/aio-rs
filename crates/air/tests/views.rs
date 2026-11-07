@@ -1,7 +1,7 @@
 //! The spike's views in the Rust page: what the window would show, and
 //! what each step sends.
 use air::testing::TestPage;
-use air::{FormEvent, Key, KeyboardEvent, Raw, Signal, View, component, rsx, selector};
+use air::{FormEvent, Key, KeyboardEvent, Raw, Signal, View, component, rsx, selector, signal};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
@@ -252,4 +252,234 @@ fn a_hole_may_return_a_borrow_of_what_it_reads() {
     p.flush();
     assert_eq!(p.text("one"), "Ada");
     assert_eq!(p.texts("rows"), ["Bo"]);
+}
+
+#[test]
+fn an_attribute_takes_any_string_a_hole_makes() {
+    // An attribute took only a `&'static str`: a borrow of the hole's
+    // clone (`t(&label)`), a `Cow` and an `Option<&String>` were refused.
+    fn t(s: &str) -> &str {
+        s
+    }
+    fn app() -> View {
+        let label = String::from("Bo");
+        let n = Signal::new(1u32);
+        rsx! {
+            p { "data-t": "p", title: t(&label), "data-cow": std::borrow::Cow::<str>::Borrowed(t(&label)),
+                "data-opt": Some(&label), "data-n": n.get(), "data-on": n.get() > 1,
+            }
+            button { "data-t": "more", onclick: move |_| n += 1, "More" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.flush();
+    assert_eq!(p.attr("p", "title").as_deref(), Some("Bo"));
+    assert_eq!(p.attr("p", "data-cow").as_deref(), Some("Bo"));
+    assert_eq!(p.attr("p", "data-opt").as_deref(), Some("Bo"));
+    assert_eq!(p.attr("p", "data-n").as_deref(), Some("1"));
+    assert_eq!(p.attr("p", "data-on").as_deref(), Some("false"));
+    p.click("more");
+    assert_eq!(p.attr("p", "data-n").as_deref(), Some("2"));
+    assert_eq!(p.attr("p", "data-on").as_deref(), Some("true"));
+}
+
+#[test]
+fn a_hole_may_borrow_a_temporary_it_makes() {
+    // `t(&name.get())` borrows the `String` `get` returns: E0716
+    // "temporary value dropped while borrowed", as a child and an attribute.
+    fn t(s: &str) -> &str {
+        s
+    }
+    fn app() -> View {
+        let name = Signal::new(String::from("Ada"));
+        rsx! {
+            p { "data-t": "p", "aria-label": t(&name.get()), {t(&name.get())} }
+            button { "data-t": "rename", onclick: move |_| name.set("Cy".into()), "Rename" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.flush();
+    assert_eq!((p.text("p"), p.attr("p", "aria-label")), ("Ada".into(), Some("Ada".into())));
+    p.click("rename");
+    assert_eq!((p.text("p"), p.attr("p", "aria-label")), ("Cy".into(), Some("Cy".into())));
+}
+
+#[test]
+fn if_let_shows_what_its_pattern_binds() {
+    // `if let` in rsx! was refused (`{opt.map(|x| rsx! { .. })}` instead).
+    fn app() -> View {
+        let note = Signal::new(None::<String>);
+        let n = Signal::new(0u32);
+        rsx! {
+            if let Some(text) = note.get() {
+                p { "data-t": "note", "{text} ({n})" }
+            } else if let 0 = n.get() {
+                p { "data-t": "none", "none" }
+            } else {
+                p { "data-t": "none", "none yet" }
+            }
+            button { "data-t": "write", onclick: move |_| note.set(Some(format!("note {}", n.get()))), "Write" }
+            button { "data-t": "more", onclick: move |_| n += 1, "More" }
+            button { "data-t": "clear", onclick: move |_| note.set(None), "Clear" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!(p.text("none"), "none");
+    p.click("more");
+    assert_eq!(p.text("none"), "none yet");
+    p.click("write");
+    assert_eq!(p.text("note"), "note 1 (1)");
+    assert!(!p.present("none"));
+    p.click("more");
+    assert_eq!(p.text("note"), "note 1 (2)", "the branch's own holes follow");
+    p.click("write");
+    assert_eq!(p.text("note"), "note 2 (2)", "a new binding: the branch made again");
+    let live = air::live();
+    p.click("clear");
+    p.click("write");
+    assert_eq!(air::live(), live, "the old branch ended");
+    p.click("clear");
+    assert_eq!(p.text("none"), "none yet");
+}
+
+#[test]
+fn a_match_keeps_its_arm_until_another_matches() {
+    // `match` in rsx! was refused (a `{match ..}` hole instead, which made
+    // its view again on every change).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Page {
+        Home,
+        Item(u32),
+        Settings,
+    }
+    #[component]
+    fn Counter(name: String) -> View {
+        let n = signal(|| 0u32);
+        rsx! { button { "data-t": "{name}", onclick: move |_| n += 1, "{name} {n}" } }
+    }
+    fn app() -> View {
+        let page = Signal::new(Page::Home);
+        let size = Signal::new(1u32);
+        rsx! {
+            match page.get() {
+                Page::Home => { Counter { name: "home" } }
+                Page::Item(id) if id > 9 => p { "data-t": "big", "item {id}" },
+                Page::Item(id) => p { "data-t": "item", "item {id}" },
+                Page::Settings => match size.get() {
+                    1..=3 => { Counter { name: "small" } }
+                    _ => { p { "data-t": "large", "large" } }
+                }
+            }
+            button { "data-t": "item", onclick: move |_| page.set(Page::Item(3)), "3" }
+            button { "data-t": "item12", onclick: move |_| page.set(Page::Item(12)), "12" }
+            button { "data-t": "settings", onclick: move |_| page.set(Page::Settings), "S" }
+            button { "data-t": "grow", onclick: move |_| size += 1, "+" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.click("home");
+    assert_eq!(p.text("home"), "home 1");
+    p.click("item");
+    assert_eq!(p.text("item"), "item 3");
+    p.click("item12");
+    assert_eq!(p.text("big"), "item 12", "a guard picks the arm");
+    p.click("settings");
+    p.click("small");
+    p.click("grow");
+    assert_eq!(p.text("small"), "small 1", "the same arm: its view and state kept");
+    p.click("grow");
+    p.click("grow");
+    assert_eq!(p.text("large"), "large");
+    let live = air::live();
+    p.click("item");
+    p.click("settings");
+    assert_eq!(air::live(), live, "the arms left ended");
+}
+
+/// A tab, matched by its whole path in a view.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tab {
+    A,
+    B,
+}
+
+#[test]
+fn an_arm_matched_by_a_path_keeps_its_state() {
+    // `crate::Tab::A` binds nothing: its arm is kept while it matches.
+    #[component]
+    fn Counter() -> View {
+        let n = signal(|| 0u32);
+        rsx! { button { "data-t": "count", onclick: move |_| n += 1, "{n}" } }
+    }
+    fn app() -> View {
+        let (tab, size) = (Signal::new(Tab::A), Signal::new(1u32));
+        rsx! {
+            match (tab.get(), size.get() > 0) {
+                (crate::Tab::A, true) => { Counter {} }
+                (self::Tab::B, _) | (crate::Tab::A, false) => p { "data-t": "b", "b" },
+            }
+            button { "data-t": "grow", onclick: move |_| size += 1, "+" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.click("count");
+    p.click("grow");
+    assert_eq!(p.text("count"), "1", "the same arm: its state kept");
+}
+
+/// What a row of a list holds, counted when dropped.
+struct Held(std::rc::Rc<std::cell::Cell<u32>>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn rows_that_leave_a_list_stop_at_once_and_are_dropped_once_the_frame_is_out() {
+    thread_local!(static DROPPED: std::rc::Rc<std::cell::Cell<u32>> = Default::default());
+    thread_local!(static FROM: std::cell::Cell<Option<Signal<u32>>> = const { std::cell::Cell::new(None) });
+    let dropped = DROPPED.with(|d| d.clone());
+    fn app() -> View {
+        let from = Signal::new(0u32);
+        FROM.set(Some(from));
+        let tick = Signal::new(0u32);
+        rsx! {
+            div { "data-t": "keys", tabindex: "0",
+                onkeydown: move |e: KeyboardEvent| match e.key() {
+                    Key::End => from.set(100),
+                    _ => tick += 1,
+                },
+                ul { "data-t": "list",
+                    for i in from.get()..from.get() + 3 {
+                        li { key: i,
+                            {
+                                let held = DROPPED.with(|d| Held(d.clone()));
+                                air::text_view(move || {
+                                    let _held = &held;
+                                    format!("{i}:{}", tick.get())
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!(p.texts("list"), ["0:0", "1:0", "2:0"]);
+    let end = p.aim("keys", Raw { name: "keydown".into(), key: "End".into(), ..Raw::default() });
+    assert!(p.root().event(&end.encode()));
+    assert_eq!(dropped.get(), 0, "kept until the frame is out");
+    p.flush();
+    assert_eq!(p.texts("list"), ["100:0", "101:0", "102:0"]);
+    assert_eq!(dropped.get(), 3, "the three rows that left, once the frame is out");
+    p.key("keys", "a");
+    assert_eq!(p.texts("list"), ["100:1", "101:1", "102:1"], "the rows that left run no more");
+    // Rows that leave with no event (a task, a change from outside): dropped
+    // at the flush, not kept until some event comes.
+    p.within(|| FROM.get().unwrap().set(200));
+    assert_eq!(p.texts("list"), ["200:1", "201:1", "202:1"]);
+    assert_eq!(dropped.get(), 6, "no event needed");
 }

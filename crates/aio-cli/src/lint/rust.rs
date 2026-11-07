@@ -980,6 +980,7 @@ fn keys(nodes: &[Node], block: Nodes, out: &mut Found) {
                 keys(then, Nodes::Branch, out);
                 keys(otherwise, Nodes::Branch, out);
             }
+            Node::Match { arms, .. } => arms.iter().for_each(|(_, _, arm)| keys(arm, Nodes::Branch, out)),
             _ => {}
         }
     }
@@ -1033,6 +1034,7 @@ fn a11y(nodes: &[Node], within: Within, out: &mut Found) {
                 a11y(then, within, out);
                 a11y(otherwise, within, out);
             }
+            Node::Match { arms, .. } => arms.iter().for_each(|(_, _, arm)| a11y(arm, within, out)),
             _ => {}
         }
     }

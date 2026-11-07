@@ -3,7 +3,7 @@
 Any aio-rs app could be written with plain Rust: a UI crate, SQLite, a
 sync layer and a packager, glued by hand. This page says what aio-rs
 gives over that, and when plain Rust (or something else) is the better
-choice. Every line is a feature of aio-rs 0.2.0 with the page that shows it.
+choice. Every line is a feature of aio-rs 0.3.0 with the page that shows it.
 
 ## What you'd write yourself, what aio-rs gives
 
@@ -40,7 +40,7 @@ app builds, so a typo in it is one too.
 
 ## When not to use aio-rs
 
-- **It is alpha.** 0.2.0 is the second release; until 1.0.0 a minor
+- **It is alpha.** 0.3.0 is the third release; until 1.0.0 a minor
   version may break things ([versions](versioning.md)).
 - **Not on crates.io yet.** An app takes aio-rs from git at a release
   tag ([setup](setup.md#where-an-app-gets-aio-rs-from)).

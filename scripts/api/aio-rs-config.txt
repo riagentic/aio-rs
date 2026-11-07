@@ -1,6 +1,8 @@
+aio_config::auth::Policy.cookie: bool
 aio_config::auth::Policy.max_sessions: Option<u32>
 aio_config::auth::Policy.require_verified: bool
 aio_config::auth::Policy.signup: bool
+aio_config::auth::Policy.totp: bool
 aio_config::auth::Policy.ttl_ms: i64
 aio_config::budgets::Budgets.broadcast_rate: Option<f64>
 aio_config::budgets::Budgets.payload: Option<u64>
@@ -10,13 +12,16 @@ aio_config::budgets::parse_size: fn parse_size(s: &str, key: &str) -> Result<u64
 aio_config::capabilities::allows: fn allows(network: &[String], host: &str, port: Option<u16>) -> bool
 aio_config::capabilities::bad_entry: fn bad_entry(entry: &str) -> Option<String>
 aio_config::capabilities::host_port: fn host_port(target: &str) -> (String, Option<u16>)
+aio_config::config::Accounts.cookie: bool
 aio_config::config::Accounts.max_sessions: Option<u32>
 aio_config::config::Accounts.on: bool
 aio_config::config::Accounts.require_verified: bool
 aio_config::config::Accounts.session: std::time::Duration
 aio_config::config::Accounts.sessions: bool
 aio_config::config::Accounts.signup: bool
+aio_config::config::Accounts.totp: bool
 aio_config::config::Accounts::policy: fn policy(&self) -> crate::auth::Policy
+aio_config::config::Accounts::unverifiable: fn unverifiable(&self, mail: bool) -> Option<String>
 aio_config::config::Align::Center
 aio_config::config::Align::Left
 aio_config::config::Align::Right
@@ -30,6 +35,7 @@ aio_config::config::AndroidBuild.schemes: Vec<String>
 aio_config::config::AndroidBuild.strict: bool
 aio_config::config::AndroidBuild.universal: bool
 aio_config::config::App.dir: Dir
+aio_config::config::App.flags: Vec<String>
 aio_config::config::App.icon: &'static [u8]
 aio_config::config::App.id: String
 aio_config::config::App.lang: Option<String>
@@ -37,6 +43,7 @@ aio_config::config::App.maintainer: Option<String>
 aio_config::config::App.mode: Mode
 aio_config::config::App.name: String
 aio_config::config::App.port_of: Option<String>
+aio_config::config::App.profiles: bool
 aio_config::config::App.tz: Tz
 aio_config::config::App.ui: Shown
 aio_config::config::App.version: Option<String>
@@ -53,6 +60,7 @@ aio_config::config::Build.chromium_extras: Extras
 aio_config::config::Build.css: Option<Css>
 aio_config::config::Build.download_window: DownloadWindow
 aio_config::config::Build.macos: MacBuild
+aio_config::config::Build.out: Option<String>
 aio_config::config::Build.platforms: Vec<String>
 aio_config::config::Build.runtime: RuntimeFrom
 aio_config::config::Build.smoke: bool
@@ -62,6 +70,7 @@ aio_config::config::Build.windows: WindowsBuild
 aio_config::config::Capabilities.network: Vec<String>
 aio_config::config::Client.retention: Option<std::time::Duration>
 aio_config::config::Client.server: Option<String>
+aio_config::config::Client.strict_pin: bool
 aio_config::config::Client.timeouts: std::collections::BTreeMap<String, Option<std::time::Duration>>
 aio_config::config::ColorScheme::Dark
 aio_config::config::ColorScheme::Light
@@ -73,6 +82,7 @@ aio_config::config::Config.build: Build
 aio_config::config::Config.capabilities: Capabilities
 aio_config::config::Config.client: Client
 aio_config::config::Config.data: Data
+aio_config::config::Config.dev: Dev
 aio_config::config::Config.feedback: Feedback
 aio_config::config::Config.history: History
 aio_config::config::Config.home: Home
@@ -93,10 +103,13 @@ aio_config::config::Data.backup_every: Option<std::time::Duration>
 aio_config::config::Data.backup_keep: usize
 aio_config::config::Data.coalesce_ms: u64
 aio_config::config::Data.durability: Durability
+aio_config::config::Data.only_persist: bool
 aio_config::config::Data.persist: bool
 aio_config::config::Data.pragmas: Vec<String>
 aio_config::config::Data.retire: Vec<String>
+aio_config::config::Data.snapshot_every: Option<std::time::Duration>
 aio_config::config::Data.store: String
+aio_config::config::Dev.watch: Vec<String>
 aio_config::config::Dir::Auto
 aio_config::config::Dir::Ltr
 aio_config::config::Dir::Rtl
@@ -119,7 +132,9 @@ aio_config::config::Feedback.url: Option<String>
 aio_config::config::Fit::Contain
 aio_config::config::Fit::Cover
 aio_config::config::History.keep: std::time::Duration
+aio_config::config::History.travel: bool
 aio_config::config::Home.dev: Option<String>
+aio_config::config::Home.dir: Option<String>
 aio_config::config::Home.env: Option<String>
 aio_config::config::Home.portable: Option<String>
 aio_config::config::Limits.bytes_per_sec: u32
@@ -129,6 +144,7 @@ aio_config::config::Limits.full_state_percent: u32
 aio_config::config::Limits.max_message: usize
 aio_config::config::Limits.sync_interval_ms: u64
 aio_config::config::Lit::lit: fn lit(&self, o: &mut String)
+aio_config::config::Log.dir: Option<String>
 aio_config::config::Log.file_mb: u64
 aio_config::config::Log.heartbeat: u64
 aio_config::config::Log.keep: usize
@@ -167,6 +183,7 @@ aio_config::config::Server.limits: Limits
 aio_config::config::Server.listen: Option<String>
 aio_config::config::Server.local_peers: bool
 aio_config::config::Server.open: bool
+aio_config::config::Server.page_log: bool
 aio_config::config::Server.pairing: bool
 aio_config::config::Server.public_dirs: std::collections::BTreeMap<String, std::path::PathBuf>
 aio_config::config::Server.security: crate::security::Security
@@ -217,6 +234,9 @@ aio_config::config::SplashShow::Never
 aio_config::config::Target.bin: Option<String>
 aio_config::config::Target.kind: Option<String>
 aio_config::config::Target.name: String
+aio_config::config::Target.platforms: Vec<String>
+aio_config::config::Target.title: Option<String>
+aio_config::config::Target.ui: Option<Shown>
 aio_config::config::TextPosition::Below
 aio_config::config::TextPosition::Over
 aio_config::config::Tz::Local
@@ -233,6 +253,7 @@ aio_config::config::Updates.every_by_channel: std::collections::BTreeMap<String,
 aio_config::config::Updates.keep: usize
 aio_config::config::Updates.keys: Vec<String>
 aio_config::config::Updates.prerelease: Option<bool>
+aio_config::config::Updates.sign_commit: bool
 aio_config::config::Updates.url: Option<String>
 aio_config::config::Updates::every_on: fn every_on(&self, channel: &str) -> Option<Duration>
 aio_config::config::WindowsBuild.shortcut: bool
@@ -351,6 +372,7 @@ impl Clone for ColorScheme
 impl Clone for Config
 impl Clone for Css
 impl Clone for Data
+impl Clone for Dev
 impl Clone for Dir
 impl Clone for Directive
 impl Clone for DownloadWindow
@@ -429,6 +451,7 @@ impl Debug for ColorScheme
 impl Debug for Config
 impl Debug for Css
 impl Debug for Data
+impl Debug for Dev
 impl Debug for Dir
 impl Debug for Directive
 impl Debug for DownloadWindow
@@ -479,6 +502,7 @@ impl Default for Client
 impl Default for ColorScheme
 impl Default for Config
 impl Default for Data
+impl Default for Dev
 impl Default for Dir
 impl Default for DownloadWindow
 impl Default for Durability
@@ -526,6 +550,7 @@ impl Eq for ColorScheme
 impl Eq for Config
 impl Eq for Css
 impl Eq for Data
+impl Eq for Dev
 impl Eq for Dir
 impl Eq for Directive
 impl Eq for DownloadWindow
@@ -577,6 +602,7 @@ impl Lit for ColorScheme
 impl Lit for Config
 impl Lit for Css
 impl Lit for Data
+impl Lit for Dev
 impl Lit for Dir
 impl Lit for Directive
 impl Lit for DownloadWindow
@@ -628,6 +654,7 @@ impl PartialEq for ColorScheme
 impl PartialEq for Config
 impl PartialEq for Css
 impl PartialEq for Data
+impl PartialEq for Dev
 impl PartialEq for Dir
 impl PartialEq for Directive
 impl PartialEq for DownloadWindow
@@ -680,6 +707,7 @@ impl Serialize for ColorScheme
 impl Serialize for Config
 impl Serialize for Css
 impl Serialize for Data
+impl Serialize for Dev
 impl Serialize for Dir
 impl Serialize for Directive
 impl Serialize for DownloadWindow
@@ -729,6 +757,7 @@ impl StructuralPartialEq for ColorScheme
 impl StructuralPartialEq for Config
 impl StructuralPartialEq for Css
 impl StructuralPartialEq for Data
+impl StructuralPartialEq for Dev
 impl StructuralPartialEq for Dir
 impl StructuralPartialEq for Directive
 impl StructuralPartialEq for DownloadWindow
@@ -780,6 +809,7 @@ impl<'de> Deserialize<'de> for ColorScheme
 impl<'de> Deserialize<'de> for Config
 impl<'de> Deserialize<'de> for Css
 impl<'de> Deserialize<'de> for Data
+impl<'de> Deserialize<'de> for Dev where Dev: _serde::__private229::Default
 impl<'de> Deserialize<'de> for Dir
 impl<'de> Deserialize<'de> for Directive
 impl<'de> Deserialize<'de> for DownloadWindow
@@ -840,6 +870,7 @@ struct aio_config::config::Client
 struct aio_config::config::Config
 struct aio_config::config::Css
 struct aio_config::config::Data
+struct aio_config::config::Dev
 struct aio_config::config::DownloadWindow
 struct aio_config::config::Feedback
 struct aio_config::config::History

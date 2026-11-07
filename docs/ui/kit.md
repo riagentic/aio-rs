@@ -21,7 +21,7 @@ tokens: put the theme on the page first
 | Status | `Spinner`, `Progress`, `Skeleton`, `Alert`, `EmptyState`, `ConnectionStatus`, `Avatar` |
 | Lists | `VirtualList`, `window(..)`, `Transition`, `TransitionGroup` |
 | Keys | `GlobalKeys`, `use_global_key`, `use_key_claim`, `Chord` |
-| Other | `Markdown`, `ZoomPan`, `Browser` (a guest web page), `Island` / `WebIsland` (plain JS inside a view), `SignIn`, `TimeTravelPanel`, `Defer`, `use_held`, `use_spring`, `use_frame`, `use_interval`, `use_window_event`, `use_back_button` |
+| Other | `Markdown`, `ZoomPan`, `Browser` (a guest web page), `Island` / `WebIsland` (plain JS inside a view), `SignIn`, `ConnectPage`, `TimeTravelPanel`, `Defer`, `use_held`, `use_spring`, `use_frame`, `use_interval`, `use_window_event`, `use_window_listener`, `use_back_button` |
 
 The parts a person uses inside a control carry handles of their own for
 tests and agents: a tab's or menu item's id, `menuTrigger`, `menuScrim`,
@@ -72,8 +72,8 @@ fn Profile() -> View {
         Field { label: "Language",
             Select { "data-t": "lang", value: lang.get(), onchange: move |v| lang.set(v),
                 options: vec![
-                    Opt { value: "en".into(), label: "English".into(), disabled: false },
-                    Opt { value: "de".into(), label: "Deutsch".into(), disabled: false },
+                    Opt { label: "English".into(), ..Opt::from("en") },
+                    Opt { label: "Deutsch".into(), ..Opt::from("de") },
                 ],
             }
         }
@@ -103,7 +103,7 @@ assert_eq!(ui.text("out"), "1 de M true false");
 | Component | Props (besides `class` and any attribute) |
 |---|---|
 | `Button` | `variant: Variant` (`Primary`, `Secondary` default, `Ghost`, `Danger`), `size: Size` (`Sm`, `Md` default, `Lg`), `r#type` (`"button"` by default, so it never submits a form by accident; `"submit"`), `disabled`, `onclick`, `onmounted`, children |
-| `Field` | `label`, `hint`, `error` (shown, and the control marked `aria-invalid`), `required`, children: the control, which it labels and describes |
+| `Field` | `label`, `hint` (text, state as `"{n} left"`, or any view), `error` (shown, and the control marked `aria-invalid`), `required`, children: the control, which it labels and describes |
 | `Input` | `value`, `r#type` (`"text"`), `placeholder`, `disabled`, `invalid`, `oninput(String)`, `onchange(String)`, `onkeydown` |
 | `Textarea` | `value`, `placeholder`, `rows` (3), `disabled`, `invalid`, `oninput(String)`, `onkeydown` |
 | `Select` | `options: Vec<Opt>`, `value`, `disabled`, `invalid`, `onchange(String)` |
@@ -111,8 +111,9 @@ assert_eq!(ui.text("out"), "1 de M true false");
 | `Switch` | `checked`, `label`, `disabled`, `onchange(bool)`: a real checkbox with `role="switch"` (Space toggles it) |
 | `RadioGroup` | `options: Vec<Opt>`, `value`, `label` (or the `Field` around it), `name`, `disabled`, `onchange(String)`: native radios, arrows move |
 
-- `Opt { value, label, disabled }`; `Opt::from("S")` is one whose label
-  is its value.
+- `Opt { value, label, disabled, view }`; `Opt::from("S")` is one whose
+  label is its value; `.view(rsx! { .. })` shows any view beside its
+  radio instead of the label, which still names it.
 - Every control is controlled: it shows `value` / `checked` and tells its
   handler; keep the value in a signal or a cell and set it there.
 - `aio::ui::btn("primary")` and `aio::ui::input_cls(extra, invalid)` give
@@ -172,7 +173,7 @@ assert_eq!(ui.text("state"), "export 4");
 | `Tab::new(id, label, panel)` | `.disabled()`; its id is its handle |
 | `Menu` | `trigger: View`, `items: Vec<MenuItem>`, `label` (the trigger's name when it isn't text), `onselect(id)`. Enter, Space or ↓ open it on the first item (↑ on the last), arrows and Home/End move, Escape closes it and puts focus back on the trigger, Tab or a click outside closes it. Handles: `menuTrigger`, `menuScrim`, each item's id. |
 | `MenuItem::new(id, label)` | `.disabled()`, `.danger()` |
-| `Breadcrumb` | `items: Vec<Crumb>`, `separator` (`"/"`), `label` (`"Breadcrumb"`); the last crumb is the page you are on (`aria-current="page"`), never a link |
+| `Breadcrumb` | `items: Vec<Crumb>`, `separator` (text or any view; `/` unset), `label` (`"Breadcrumb"`); the last crumb is the page you are on (`aria-current="page"`), never a link |
 | `Crumb::new(label)` | `.href(url)` or `.onclick(handler)`; neither: plain text |
 | `Pagination` | `page` (from 1), `pages`, `onpage(u32)`, `window` (5 numbered pages), `label`. Targets are clamped, the button for the page shown is disabled. Handles `pagePrev`, `pageNext`, `page{n}`. |
 
@@ -239,9 +240,9 @@ assert_eq!(ui.text("opened"), "Milk");
 | `Progress` | `value: Option<f64>` (`None`, or not finite: the indeterminate bar), `max` (100), `label`, `show_value` (the percent beside it) |
 | `Skeleton` | `width`, `height` (CSS lengths), `circle`, `lines` (1); hidden from screen readers, so put `aria-busy` on the region |
 | `Alert` | `tone: Tone` (`Info` default, `Success`, `Warn`, `Error`), `title`, `ondismiss` (then a × button, `alertDismiss`), children; only `Error` interrupts (`role="alert"`) |
-| `EmptyState` | `title`, `icon` (a glyph), `description`, `action: View`: what an empty list shows, and what to do |
+| `EmptyState` | `title`, `icon` (a glyph or any view), `description`, `action: View`: what an empty list shows, and what to do |
 | `ConnectionStatus` | `status: aio::Status` (`use_status().get()`): "Reconnecting…" while the link is down, then "Connected" for two seconds; once, in the root |
-| `Tooltip` | `text`, `placement` (`Placement::Top` default, `Bottom`), `bubble_id`, children: shown on hover and on keyboard focus, closed by Escape; a kit control inside is described by it, a plain element takes `bubble_id` (from `use_id`) as its `aria-describedby` |
+| `Tooltip` | `text`, `placement` (`Placement::Top` default, `Bottom`, `Left`, `Right`), `bubble_id`, children: shown on hover and on keyboard focus, closed by Escape; a kit control inside is described by it, a plain element takes `bubble_id` (from `use_id`) as its `aria-describedby` |
 
 ## Dialogs and toasts
 
@@ -301,7 +302,7 @@ assert!(ui.absent("close"), "Escape closed the dialog");
 | `toast(text, tone)` | shows for 4 s; gives a `Toast` with `.dismiss()` |
 | `toast_for(text, tone, stay)` | `stay: Option<Duration>`; `None`: until dismissed (its ×, `toastDismiss`) |
 | `toasts()` | the messages showing, oldest first (for tests and agents) |
-| `Portal { children }` / `PortalHost` | draws its children in the host (put it around the app once) while it lives: a popover that must escape an `overflow: hidden` box ([islands](islands.md)) |
+| `Portal { children }` / `PortalHost` | draws its children in the host (put it around the app once) while it lives: a popover that must escape an `overflow: hidden` box ([islands](islands.md)); `Portal { target: "side" }` draws in the `PortalHost { name: "side" }` showing anywhere on the page (aio's `target`; none showing: in place) |
 
 Call `toast` on the UI thread (a handler, a view's task). From a method
 or an effect, tell people with `cx.tell(..)` instead
@@ -558,11 +559,13 @@ assert!(ui.present("comments"));
 | Item | Is |
 |---|---|
 | `TimeTravelPanel { timeline: use_time_travel().get(), onask: move \|a\| _ = time_travel(a) }` | the cell's history in a corner, hidden until Ctrl+.; undo, redo, pause, a step to go to (handles `timeTravel`, `ttUndo`, `ttRedo`, `ttPause`) |
+| `ConnectPage { data, app }` | a client's connect page: an address and a pairing code, the app's servers on the LAN, the recent servers, why it shows (`use_connect_page`); the desktop and Android shells show it in a client's window by themselves ([desktop](../clients/desktop.md#the-connect-page)); parts `connectWhy`, `connectAddr`, `connectCode`, `connectGo`, `connectError`, `connectLook`, `near{n}`, `recent{n}`, `forget{n}` |
 | `SignIn { client, on_signed }` (feature `server`) | a ready sign-in form: sign-up when the server allows it (`signup`), an email (`email`), the second-factor step, a forgotten password when the server sends mail (`forgot`), `title`; parts `signinId`, `signinEmail`, `signinPassword`, `signinCode`, `signinSubmit`… ([auth](../auth/README.md)) |
 | `use_id(prefix)` | a stable, unique id per component, for `aria-controls`, `for` |
 | `use_context_select(\|t: &T\| ..)` | a part of a `Signal<T>` context; follows only when it changes |
 | `use_held(&pool, key)` | a held resource (a connection, a file) for this view, let go when the key changes or the view goes |
 | `use_window_event(\|e\| ..)`, `WindowEvent` | the window's `MouseMove` (every `MOVE_MS`, 100 ms), `MouseDown`, `MouseUp`, `Click`, `Wheel`, `KeyDown`, `KeyUp`, `Resize { width, height }`; inside `GlobalKeys` |
+| `use_window_listener("visibilitychange", \|e\| ..)` | any DOM event type the window hears (`online`, `scroll`, `pointermove` unthrottled…), its plain fields (`type`, `key`, `clientX`…) as JSON, each one; removed with the component (aio's `onWindowEvent(type)`) |
 | `use_back_button(\|\| ..)` | Back while the view lives; true: taken ([routing](routing.md#back)) |
 | `Browser { src, .. }` | someone else's site in the view ([islands](islands.md)) |
 
@@ -583,7 +586,6 @@ controls aio apps wrote by hand (`Tabs`' right-to-left keys, `Defer`,
   (`theme_css`, `theme::sheet`) rather than a component.
 - **Data grids, charts, date pickers**: neither has them; mount a
   library as an [island](islands.md).
-- **A `Tooltip` to the side**: `Placement` is `Top` or `Bottom` only.
 
 ## Common mistakes
 

@@ -35,19 +35,19 @@ body{
    max-width but not a parent otherwise disagree by exactly the scrollbar, and
    a header that starts one pixel left of the page under it is the first thing
    an eye catches. */
-/* #root as well as body: aio mounts the app into the root div, so an app
+/* #main as well as body: aio mounts the app into <div id="main">, so an app
    whose top level is header/main/footer has none of them as a direct child of
    body. Matching only body> styled the shell nobody writes and skipped the
    one everybody does. */
-:where(body>header,body>footer,#root>header,#root>footer){
+:where(body>header,body>footer,#main>header,#main>footer){
   padding-block:var(--aio-s-4);
   padding-inline:max(
     var(--aio-s-4),
     calc((100% - var(--aio-page)) / 2 + var(--aio-s-4))
   );
 }
-:where(body>header,#root>header){border-bottom:1px solid var(--aio-border)}
-:where(body>footer,#root>footer){
+:where(body>header,#main>header){border-bottom:1px solid var(--aio-border)}
+:where(body>footer,#main>footer){
   border-top:1px solid var(--aio-border); color:var(--aio-muted); font-size:.9em;
 }
 
@@ -470,6 +470,9 @@ body{
 .aio-tip__bubble { left: 50%; } /* aio-ok: centring, not reading order — the translate above is physical, so its offset must be too (a logical inset flips in RTL and put the bubble a full width off its trigger) */
 .aio-tip--top .aio-tip__bubble { inset-block-end: calc(100% + .35em); }
 .aio-tip--bottom .aio-tip__bubble { inset-block-start: calc(100% + .35em); }
+.aio-tip--left .aio-tip__bubble, .aio-tip--right .aio-tip__bubble { top: 50%; transform: translateY(-50%); } /* aio-ok: centring, as above */
+.aio-tip--left .aio-tip__bubble { left: auto; right: calc(100% + .35em); } /* aio-ok: the screen's left, as asked, in either direction of text */
+.aio-tip--right .aio-tip__bubble { left: calc(100% + .35em); } /* aio-ok: the screen's right */
 .aio-tip:hover .aio-tip__bubble, .aio-tip:focus-within .aio-tip__bubble { opacity: 1; visibility: visible; }
 .aio-tip[data-hidden] .aio-tip__bubble { opacity: 0; visibility: hidden; }
 @media (prefers-reduced-motion: reduce) { .aio-tip__bubble { transition: none; } }
@@ -518,6 +521,13 @@ body{
 /* SignIn: the ready sign-in form. */
 .aio-signin { display: flex; flex-direction: column; gap: .5em; max-inline-size: 22rem; font-family: var(--aio-ui-font); }
 .aio-signin__title { margin: 0 0 .4em; font-size: 1.25rem; color: var(--aio-ui-ink); }
+/* The thin client's connect page. */
+.aio-connect { display: flex; flex-direction: column; gap: .75em; max-inline-size: 36rem; margin: 0 auto; padding: 1.5em 1em; font-family: var(--aio-ui-font); color: var(--aio-ui-ink); }
+.aio-connect h1, .aio-connect h2 { margin: .5em 0 0; }
+.aio-connect ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35em; }
+.aio-connect ul:empty { display: none; }
+.aio-connect p { margin: 0; }
+.aio-connect > .aio-btn { align-self: flex-start; }
 /* Browser: an embedded page fills its box. */
 .aio-browser { display: flex; min-block-size: 0; }
 .aio-browser > webview { flex: 1; inline-size: 100%; block-size: 100%; }

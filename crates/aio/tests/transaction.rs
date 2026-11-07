@@ -24,6 +24,10 @@ impl Wallet {
         self.balance += by;
     }
 
+    pub fn requote(&mut self, q: i64) {
+        self.quote = q;
+    }
+
     pub fn note(&mut self, s: String) {
         self.log.push(s);
     }
@@ -117,6 +121,17 @@ fn disjoint_writes_both_land() {
 }
 
 #[test]
+fn a_blind_write_never_conflicts_the_last_write_wins() {
+    let mut t = TestCells::new();
+    let h = t.cell::<Wallet>();
+    let mut a = h.price(9).unwrap(); // assigns quote, never reads it
+    h.requote(4).unwrap();
+    t.settle();
+    a.now().unwrap().unwrap();
+    assert_eq!(h.state().quote, 9, "aio's read tracking: a write from no read overwrites");
+}
+
+#[test]
 fn a_refusal_drops_what_it_wrote_and_asked_for() {
     let mut t = TestCells::new();
     let h = t.cell::<Wallet>();
@@ -160,6 +175,14 @@ impl Ledger {
         Ok(self.n)
     }
 
+    /// Reads `other`, writes `n` without reading it.
+    pub async fn tally(&mut self) -> Result {
+        let o: i64 = self.other;
+        let _: i64 = fetch(1).await;
+        self.n = o + 1;
+        Ok(())
+    }
+
     pub fn touch(&mut self) {
         self.other += 1;
     }
@@ -180,14 +203,20 @@ fn serialized_calls_run_one_at_a_time_and_lose_no_update() {
 }
 
 #[test]
-fn serialized_any_change_meanwhile_is_a_conflict() {
+fn serialized_a_change_to_anything_read_meanwhile_is_a_conflict() {
     let mut t = TestCells::new();
     let h = t.cell::<Ledger>();
-    let mut a = h.bump().unwrap();
-    h.touch().unwrap(); // a sync method isn't held off, and every read counts
+    let mut a = h.tally().unwrap();
+    h.touch().unwrap(); // a sync method isn't held off, and every read counts, not only the written
     t.settle();
     assert_eq!(a.now().unwrap().unwrap_err().code(), Some(Code::TxConflict));
     assert_eq!((h.state().n, h.state().other), (0, 1));
+    // A field it never read moving meanwhile is none of its business (aio's).
+    let mut b = h.bump().unwrap();
+    h.touch().unwrap();
+    t.settle();
+    assert_eq!(b.now().unwrap().unwrap(), 1);
+    assert_eq!((h.state().n, h.state().other), (1, 2));
     _ = t.failures();
 }
 

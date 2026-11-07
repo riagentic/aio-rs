@@ -227,6 +227,45 @@ fn a_commit_serializes_only_the_slices_that_changed_as_aio_did() {
     assert_eq!((s.state().rows.all.len(), s.state().tally.n), (100, 21), "both slices saved");
 }
 
+/// aio's `rows` cell as plain numbers (its own counter stays the other test's).
+#[cell(persist, id = "rows")]
+pub struct PlainRows {
+    all: Vec<u32>,
+}
+
+/// The big slice shared between states (`aio::Big`).
+#[cell(persist, id = "port")]
+pub struct BigPort {
+    #[aio_cell]
+    rows: aio::Big<PlainRows>,
+    #[aio_cell]
+    tally: Tally,
+}
+
+#[methods]
+impl BigPort {
+    pub fn fill(&mut self) {
+        self.rows.all = (0..100).collect();
+    }
+
+    pub fn bump(&mut self) {
+        self.tally.n += 1;
+    }
+}
+
+#[test]
+fn a_big_aio_cell_field_is_its_slice_shared_until_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::<BigPort>::open_aio(dir.path().join("state.db"), "app").unwrap();
+    s.call(&By::Test, "fill", serde_json::Value::Null).unwrap();
+    let rows = s.shared();
+    s.call(&By::Test, "bump", serde_json::Value::Null).unwrap();
+    assert!(aio::Big::ptr_eq(&rows.rows, &s.state().rows), "shared, not copied");
+    drop(s);
+    let s = Store::<BigPort>::open_aio(dir.path().join("state.db"), "app").unwrap();
+    assert_eq!((s.state().rows.all.len(), s.state().tally.n), (100, 1), "both slices saved");
+}
+
 #[test]
 fn a_held_key_is_written_once_a_debounce_window_as_aio_did() {
     let rt = tokio::runtime::Runtime::new().unwrap();

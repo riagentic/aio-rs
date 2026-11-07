@@ -432,3 +432,53 @@ async fn measure(sync_interval_ms: u64) {
         us(took[took.len() * 99 / 100])
     );
 }
+
+/// The app's `updates` cell, served to its clients (aio syncs it to every
+/// client): its paths on the server's disk never leave it, any client may
+/// check or dismiss, and only an admin installs (the app restarts).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_updates_cell_reaches_clients_without_its_paths_and_installs_only_for_an_admin() {
+    use aio::update::{Found, Offer, Ready, Stub, Updates, UpdatesCalls};
+    let offer = Offer { version: "2.0.0".into(), ..Offer::default() };
+    aio::update::install(Arc::new(Stub(Found::Offer(offer))));
+    let u = Handle::<Updates>::memory();
+    let ready = Ready {
+        channel: "stable".into(),
+        current: "1.0.0".into(),
+        backup: Some("/srv/app/backups/1".into()),
+        ..Ready::default()
+    };
+    u.ready(ready).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let (admin, user) = ("admin-0123456789abcdef0123".to_string(), "user-0123456789abcdef01234".to_string());
+    let users = aio::auth::Users::map([
+        (admin.clone(), ("root".into(), "admin".into())),
+        (user.clone(), ("ana".into(), "user".into())),
+    ]);
+    let http = aio::http::Http::default().users(users).cell(u.clone());
+    tokio::spawn(serve_with(
+        Handle::<Alpha>::memory(),
+        l,
+        Options { token: "secret".into(), http, ..Default::default() },
+    ));
+    let copy = Remote::<Updates>::connect(&addr, &user, "ana").await.unwrap();
+    until("the copy is current", || copy.state().current == "1.0.0").await;
+    assert_eq!(copy.state().backup, None, "a path on the server's disk stays there");
+    assert!(u.state().backup.is_some());
+    let link = Link { addr: addr.clone(), token: user, root: None };
+    let mut ana = Live::connect(&link, "updates", "ana").await.unwrap();
+    assert!(ana.call("check", json!([])).await.is_ok(), "any client checks");
+    until("offered", || copy.state().available.is_some()).await;
+    for m in ["apply", "apply_anyway", "start_fresh"] {
+        let e = ana.call(m, json!([])).await.unwrap_err();
+        assert!(e.why.contains("access denied"), "{m}: {e:?}");
+    }
+    let e = ana.call("set_channel", json!(["beta"])).await.unwrap_err();
+    assert!(e.why.contains("access denied"), "{e:?}");
+    let e = ana.call("checked", json!([{ "Ok": { "kind": "current", "reason": "x" } }])).await.unwrap_err();
+    assert!(e.why.contains("access denied"), "a runtime's answer is never a client's: {e:?}");
+    let mut root = Live::connect(&Link { token: admin, ..link }, "updates", "root").await.unwrap();
+    assert!(root.call("apply", json!([])).await.is_ok(), "an admin installs");
+    until("restarting", || u.state().phase == aio::update::Phase::Restarting).await;
+}

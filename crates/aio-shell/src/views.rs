@@ -114,26 +114,43 @@ pub(crate) mod on_air {
     }
 
     /// The app's view, its body through the patched code when a patch came
-    /// (`ax dev`'s hot-patch, a dev build's).
+    /// (`ax dev`'s hot-patch, a dev build's), and beside it a dev build's
+    /// time-travel panel (Ctrl+.: every `client!` cell's history).
     fn current(app: fn() -> View) -> View {
-        #[cfg(all(debug_assertions, feature = "dev"))]
-        return aio_hotpatch::HotFn::current(app).call(());
-        #[cfg(not(all(debug_assertions, feature = "dev")))]
+        #[cfg(feature = "dev")]
+        {
+            use aio::ui::prelude::*;
+            let app = aio_hotpatch::HotFn::current(app).call(());
+            rsx! { {app} aio::kit::DevTimeTravel {} }
+        }
+        #[cfg(not(feature = "dev"))]
         app()
     }
 
     /// After a patch: the markup sent before is in the code now, and the
     /// views run the new code from their root.
-    #[cfg(all(debug_assertions, feature = "dev"))]
+    #[cfg(feature = "dev")]
     pub fn patched() {
         air::hot::clear_markup();
         rebuild();
     }
 
+    /// A diagnostic as the dev overlay says it beside the page's own errors
+    /// (`__aioDiag`; pure).
+    pub(crate) fn overlay_js(d: &aio::report::Diagnostic) -> String {
+        let detail = match d.tip {
+            Some(tip) => format!("{} · {tip}", d.message),
+            None => d.message.clone(),
+        };
+        let q = |s: &str| aio::serde_json::to_string(s).unwrap_or_default();
+        format!("window.__aioDiag && window.__aioDiag({}, {})", q(&format!("app: {}", d.kind)), q(&detail))
+    }
+
     /// The page's frames to the root (its events, its scripts' replies),
     /// the views' tasks run when woken, each flush's edits to the page as
     /// one frame; a view's error no boundary caught is said. Told to (a hot
-    /// reload), its views are built again in place, their state kept.
+    /// reload), its views are built again in place, their state kept. A dev
+    /// build's page shows the app's problems and warnings in its overlay.
     pub async fn pump(s: aio::ipc::Stream, app: fn() -> View) -> Result<(), String> {
         let (mut to_page, mut from_page) = crate::wire(s).split();
         let woke = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -141,14 +158,24 @@ pub(crate) mod on_air {
         air::on_wake(move || w.notify_one());
         let (tx, mut hot) = tokio::sync::mpsc::unbounded_channel();
         WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+        let (diag_tx, mut diags) = tokio::sync::mpsc::unbounded_channel();
+        let _diag = cfg!(feature = "dev").then(|| {
+            aio::report::subscribe(move |d| {
+                if d.severity != aio::report::Severity::Info {
+                    _ = diag_tx.send(overlay_js(d));
+                }
+            })
+        });
         let root = air::Root::new();
         root.show(move || current(app));
+        #[cfg(feature = "dev")]
+        root.within(aio::ui::audit::watch_page);
         let _kept = Kept;
         loop {
             air::run_tasks();
             let edits = root.take_edits();
             if !edits.is_empty() {
-                if cfg!(debug_assertions) {
+                if cfg!(feature = "dev") {
                     let (tree, (renders, total)) = root.within(|| (air::components(), air::renders()));
                     keep_tree(Some((
                         tree.into_iter().map(json).collect(),
@@ -157,6 +184,8 @@ pub(crate) mod on_air {
                     )));
                 }
                 to_page.send(edits).await.map_err(|_| "the page is gone".to_string())?;
+                // What rows that left held is dropped while the page applies the frame.
+                air::drop_left();
             }
             for e in root.uncaught() {
                 eprintln!("[aio-shell] window: a view failed and no ErrorBoundary is above it: {e}");
@@ -168,6 +197,7 @@ pub(crate) mod on_air {
                 },
                 _ = woke.notified() => {}
                 Some(()) = hot.recv() => root.hot(),
+                Some(js) = diags.recv() => root.within(|| air::exec(&js)),
             }
         }
     }
@@ -175,6 +205,31 @@ pub(crate) mod on_air {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_s_problems_reach_the_dev_overlay_as_written() {
+        let d = aio::report::Diagnostic {
+            at: 0,
+            kind: "call:notes.add".into(),
+            message: "it said \"no\"".into(),
+            held: 0,
+            severity: aio::report::Severity::Error,
+            tip: Some("look at the method"),
+            cell: None,
+            call: None,
+            numbers: vec![],
+        };
+        assert_eq!(
+            on_air::overlay_js(&d),
+            r#"window.__aioDiag && window.__aioDiag("app: call:notes.add", "it said \"no\" · look at the method")"#
+        );
+    }
+}
+
+// `ax dev`'s tooling: markup sent live, renders logged, the overlay shown (feature `dev`).
+#[cfg(all(test, feature = "dev"))]
+mod dev_tests {
     use super::*;
     use futures_util::StreamExt;
     use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -197,6 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_doors_hot_reload_redraws_the_window_with_the_new_markup() {
+        let _turn = crate::WINDOW_TURN.lock().await;
         let (ours, page) = tokio::io::duplex(1 << 20);
         let views = Views::new();
         let window = tokio::spawn(async move {
@@ -251,6 +307,23 @@ mod tests {
         window.await.unwrap().unwrap();
     }
 
+    /// A dev build's window shows the app's problems in its page's overlay.
+    #[tokio::test]
+    async fn a_dev_window_shows_the_app_s_problems_in_its_overlay() {
+        let _turn = crate::WINDOW_TURN.lock().await;
+        let (ours, page) = tokio::io::duplex(1 << 20);
+        let window = tokio::spawn(async move { Views::new().launch(Box::new(ours), app).await });
+        let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
+        let mut page = Framed::new(page, codec);
+        page.next().await.unwrap().unwrap();
+        aio::report::problem("test:overlay", "the store is slow");
+        let next =
+            tokio::time::timeout(std::time::Duration::from_secs(10), page.next()).await.unwrap().unwrap().unwrap();
+        assert!(said(&next).contains(r#"__aioDiag("app: test:overlay", "the store is slow")"#), "{}", said(&next));
+        drop(page);
+        window.await.unwrap().unwrap();
+    }
+
     #[aio::ui::prelude::component]
     fn Logged() -> View {
         use aio::ui::prelude::*;
@@ -261,6 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_door_says_the_windows_last_renders_as_they_happened() {
+        let _turn = crate::WINDOW_TURN.lock().await;
         use aio::ui::prelude::*;
         let (ours, page) = tokio::io::duplex(1 << 20);
         let window = tokio::spawn(async move { Views::new().launch(Box::new(ours), || rsx! { Logged {} }).await });

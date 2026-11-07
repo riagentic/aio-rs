@@ -88,8 +88,8 @@ fn the_render_log_says_each_render_as_it_happened() {
             .collect()
     };
     let (log, total) = p.within(renders);
-    if !cfg!(debug_assertions) {
-        assert_eq!((log, total), (vec![], 0), "a release logs nothing");
+    if !cfg!(feature = "dev") {
+        assert_eq!((log, total), (vec![], 0), "without air's dev feature nothing is logged");
         return;
     }
     assert_eq!(

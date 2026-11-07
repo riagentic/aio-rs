@@ -157,6 +157,7 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
         0.0
     };
     let (p95, pushes) = diag.calls();
+    let backlog = diag.backlog().unwrap_or(0);
     let bytes_s: f64 = cost.values().map(|c| num(&c["bytesPerS"])).sum();
     let full: f64 = cost.values().map(|c| num(&c["fullResends"])).sum();
     let degraded: Vec<String> = health["degraded"]
@@ -249,6 +250,7 @@ pub fn MetricsPanel(diag: Diag, hist: Hist, connections: Option<u64>) -> View {
                         Stat { k: "pushes", v: format!("{:.1} /s", pushes.unwrap_or(0.0)) }
                         Stat { k: "sent", v: format!("{}/s", bytes(bytes_s)) }
                         Stat { k: "full resends", v: format!("{full:.0}"), color: if full > 0.0 { "var(--yellow)" } else { "" } }
+                        Stat { k: "effect backlog", v: backlog.to_string(), color: if backlog > 0 { "var(--yellow)" } else { "" } }
                         Stat { k: "last action", v: last.clone(), color: "var(--blue)" }
                         Stat {
                             k: "degraded",

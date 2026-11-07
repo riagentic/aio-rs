@@ -48,7 +48,7 @@ impl<T: Cell> Source<T> {
         let latest = Arc::new(std::sync::Mutex::new(h.state()));
         let l = latest.clone();
         h.listen(move |s| *l.lock().unwrap_or_else(|e| e.into_inner()) = s.clone());
-        crate::report::watch(T::ID, !T::REDACTED.is_empty(), move || {
+        crate::report::watch(T::ID, T::REDACT || !T::REDACTED.is_empty(), move || {
             crate::store::reported(&**latest.try_lock().ok()?)
         });
         let _in = crate::rt().enter();
@@ -173,7 +173,12 @@ impl<T: Cell> Source<T> {
 
     /// The source `aio.toml` asks for: the store in `dirs.data` (a ported
     /// app's is its aio `state.db`; served too in client-server mode), or a
-    /// synced copy in client mode.
+    /// synced copy in client mode. A client that draws views (built with
+    /// the kit: a window, desktop or Android) never fails for want of a
+    /// server: with none named, `--connect`, one that can't be reached (and
+    /// no copy saved) or one that refuses, the copy waits and its window
+    /// shows the connect page ([`crate::connect`]) until the person picks a
+    /// server. A client without the kit (a CLI) fails, saying how to name one.
     pub fn for_app(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self> {
         Self::boot::<true>(cfg, dirs, Http::default())
     }
@@ -205,12 +210,14 @@ impl<T: Cell> Source<T> {
         crate::lifecycle::harden();
         use crate::config::Mode;
         match cfg.app.mode {
-            Mode::Client if CLIENT => Self::client(cfg, dirs),
+            Mode::Client if CLIENT => Self::client(cfg, dirs, cfg!(feature = "kit")),
             Mode::Client => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 format!("{}: mode = \"client\" needs aio::Source::for_app, not for_server", T::ID),
             )),
             mode => {
+                crate::store::ONLY_PERSIST.store(cfg.data.only_persist, std::sync::atomic::Ordering::Relaxed);
+                crate::store::TRAVEL.store(cfg.history.travel, std::sync::atomic::Ordering::Relaxed);
                 let args: Vec<String> = std::env::args().skip(1).collect();
                 let asked = crate::paths::Ask::parse(&args).is_ok_and(|a| a.no_persist);
                 if !cfg.data.persist || asked {
@@ -256,6 +263,9 @@ impl<T: Cell> Source<T> {
                     let coalesce = std::time::Duration::from_millis(cfg.data.coalesce_ms);
                     h.store(|st| st.set_coalesce(coalesce)).map_err(|e| std::io::Error::other(e.why))?;
                 }
+                if let Some(every) = cfg.data.snapshot_every {
+                    crate::store::snapshot_every(&dirs.store, every);
+                }
                 if let Some(every) = cfg.data.backup_every {
                     let home = crate::paths::parent(&dirs.data).join("backups");
                     crate::backup::timed(&cfg.app.id, &dirs.store, &home, every, cfg.data.backup_keep);
@@ -276,32 +286,90 @@ impl<T: Cell> Source<T> {
         }
     }
 
-    /// Client mode: a paired link (`ax pair`) wins over `[client] server` +
-    /// the token.
+    /// Client mode: the launch's `--server-url`, else a kept link (`ax
+    /// pair`, the connect page), else `[client] server` + the token; its pin
+    /// checked. `window`: a client that draws views, so shows the connect page.
     #[cfg(feature = "server")]
-    fn client(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self> {
+    fn client(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, window: bool) -> std::io::Result<Self> {
         let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into());
-        #[cfg(feature = "tls")]
-        let paired = crate::pairing::saved(&dirs.data);
-        #[cfg(not(feature = "tls"))]
-        let paired = None;
-        let link = match paired {
-            Some(l) => l,
-            None => {
-                let addr = cfg.client.server.clone().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!(
-                            "{} isn't paired: run `ax pair {} <host:port> <code>` or set [client] server",
-                            T::ID,
-                            cfg.app.id
-                        ),
-                    )
-                })?;
-                crate::sync::Link { addr, token: crate::config::token(&dirs.data)?, root: None }
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let ask = crate::paths::Ask::parse(&args).map_err(std::io::Error::other)?;
+        let kept = crate::connect::saved(&dirs.data);
+        let named = match (&ask.server_url, kept, &cfg.client.server) {
+            (Some(u), kept, _) => {
+                crate::connect::key_in_argv(u).into_iter().for_each(|w| eprintln!("{w}"));
+                Some(
+                    crate::connect::url_link(u, kept.as_ref(), &crate::config::token(&dirs.data)?)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
+                )
             }
+            (None, Some(l), _) => Some(l),
+            (None, None, Some(addr)) => {
+                Some(crate::sync::Link { addr: addr.clone(), token: crate::config::token(&dirs.data)?, root: None })
+            }
+            (None, None, None) => None,
         };
-        let r = crate::rt().block_on(Remote::connect_saved(link, &user, &dirs.data.join("copy.json")))?;
+        // The server the person named: reached whatever `[capabilities] network` says.
+        named.iter().for_each(|l| crate::capabilities::grant(&l.addr));
+        #[cfg(feature = "tls")]
+        let named = match named {
+            Some(l) => Some(crate::rt().block_on(crate::connect::pinned(l, cfg.client.strict_pin || ask.strict_pin, &dirs.data))),
+            None => None,
+        };
+        #[cfg(not(feature = "tls"))]
+        let named = named.map(std::io::Result::Ok);
+        let copy = dirs.data.join("copy.json");
+        if !window {
+            let link = named.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("{} isn't paired: run `ax pair {} <host:port> <code>` or set [client] server", T::ID, cfg.app.id),
+                )
+            })??;
+            return Self::linked(cfg, crate::rt().block_on(Remote::connect_saved(link, &user, &copy))?);
+        }
+        let had_copy = copy.exists();
+        let (link, why) = match named {
+            _ if ask.connect => (None, Some("Pick the server (--connect).".to_string())),
+            None => (None, Some("This app has no server yet.".to_string())),
+            Some(Err(e)) => (None, Some(e.to_string())),
+            Some(Ok(l)) => (Some(l), None),
+        };
+        let at = link.as_ref().map(|l| l.addr.clone());
+        let (r, failed) = crate::rt().block_on(Remote::connect_later(link, &user, &copy))?;
+        // The page shows while there is nothing to show: never reached this
+        // run with no copy saved, or refused (a key, another app's server).
+        let synced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(r.online()));
+        let said = |e: &std::io::Error, at: &str| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => format!("{at} refused: {e}. Pair with it by its code."),
+            _ => format!("Can't reach {at}: {e}"),
+        };
+        let refused = |e: &std::io::Error| {
+            matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported)
+        };
+        let why = why.or_else(|| failed.filter(|e| refused(e) || !had_copy).map(|e| said(&e, at.as_deref().unwrap_or("?"))));
+        if let Some(w) = why {
+            eprintln!("[aio] {}: the connect page shows: {w}", T::ID);
+            crate::connect::ask(w);
+        }
+        let s = synced.clone();
+        r.on_sync(move |_| {
+            s.store(true, std::sync::atomic::Ordering::Relaxed);
+            crate::connect::reached();
+        });
+        r.on_unreached(move |e| {
+            if refused(e) || !synced.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::connect::ask(said(e, "the server"));
+            }
+        });
+        let to = r.clone();
+        crate::connect::wire(move |l| to.relink(l));
+        Self::linked(cfg, r)
+    }
+
+    /// The copy as `[client]` tunes it.
+    #[cfg(feature = "server")]
+    fn linked(cfg: &crate::config::Config, r: Remote<T>) -> std::io::Result<Self> {
         r.retain(cfg.client.retention);
         let mine = cfg.client.timeouts.iter().filter_map(|(k, w)| Some((k.strip_prefix(T::ID)?.strip_prefix('.')?, w)));
         mine.for_each(|(method, w)| r.timeout(method, *w));
@@ -309,7 +377,7 @@ impl<T: Cell> Source<T> {
     }
 
     #[cfg(not(feature = "server"))]
-    fn client(_: &crate::config::Config, _: &crate::paths::AppDirs) -> std::io::Result<Self> {
+    fn client(_: &crate::config::Config, _: &crate::paths::AppDirs, _: bool) -> std::io::Result<Self> {
         Err(crate::left_out("server", "client mode"))
     }
 
@@ -318,7 +386,7 @@ impl<T: Cell> Source<T> {
     fn serve_app(&self, cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: Http) -> std::io::Result<()> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let ask = crate::paths::Ask::parse(&args).map_err(std::io::Error::other)?;
-        let decided = crate::config::listen(&cfg.server, &ask).map_err(std::io::Error::other)?;
+        let decided = crate::config::listen(&cfg.server, &ask, &|k| std::env::var_os(k).map(Into::into)).map_err(std::io::Error::other)?;
         let listen = decided.addr.as_str();
         #[cfg(feature = "tls")]
         let tls = {
@@ -343,7 +411,10 @@ impl<T: Cell> Source<T> {
                 return Err(crate::left_out("tls", what));
             }
         }
-        let mut http = http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files);
+        let mut http = crate::update::beside(http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files));
+        if let Some(why) = cfg.accounts.unverifiable(http.mail.is_some()) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+        }
         let auth_db = || crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy()).map_err(std::io::Error::other);
         // Sessions without accounts: a session is a user known by its token.
         if cfg.accounts.sessions && !cfg.accounts.on {
@@ -357,6 +428,8 @@ impl<T: Cell> Source<T> {
             #[cfg(feature = "tls")]
             pairing: cfg.server.pairing.then(crate::pairing::pairing),
             #[cfg(feature = "tls")]
+            app: cfg.app.id.clone(),
+            #[cfg(feature = "tls")]
             tls,
             hosts: cfg.server.hosts.clone(),
             http,
@@ -368,6 +441,7 @@ impl<T: Cell> Source<T> {
             trust_proxy: cfg.server.trust_proxy.clone(),
             security: cfg.server.security.clone(),
             open: cfg.server.open,
+            page_log: cfg.server.page_log,
         };
         let opts_users = opts.http.users.is_some();
         let host = listen.rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']']).to_string());
@@ -405,7 +479,7 @@ impl<T: Cell> Source<T> {
         #[cfg(feature = "tls")]
         if cfg.server.discover {
             let me = crate::discovery::Found {
-                name: T::ID.into(),
+                name: cfg.app.id.clone(),
                 port,
                 title: Some(cfg.app.name.clone()),
                 needs_auth: !cfg.server.open,
@@ -533,5 +607,32 @@ impl<T: Cell> Door<T> for Source<T> {
             #[cfg(feature = "server")]
             Self::Remote(r) => r.own(key, res),
         }
+    }
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use crate::prelude::*;
+
+    #[cell]
+    pub struct Pad {
+        n: u32,
+    }
+
+    #[methods]
+    impl Pad {
+        pub fn bump(&mut self) {
+            self.n += 1;
+        }
+    }
+
+    #[test]
+    fn a_client_that_draws_no_window_fails_saying_how_to_name_its_server() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::parse("[app]\nid = \"pad\"\nmode = \"client\"").unwrap();
+        let dirs = crate::paths::AppDirs::at(d.path(), "pad").unwrap();
+        let e = crate::Source::<Pad>::client(&cfg, &dirs, false).err().unwrap();
+        assert!(e.to_string().contains("isn't paired: run `ax pair pad"), "{e}");
+        assert!(!crate::connect::active(), "no page to show");
     }
 }

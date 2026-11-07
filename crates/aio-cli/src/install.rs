@@ -419,7 +419,7 @@ pub fn android(name: &str, o: &Opts) -> Result<String, String> {
     let pkg = crate::dev::locate(&meta, name)?;
     let (app, cfg) = crate::build::app_of(&pkg)?;
     if o.build {
-        eprintln!("{}", crate::build::run(name, Some("android"), None, false)?);
+        eprintln!("{}", crate::build::run(name, Some("android"), None, crate::smoke::Smoke::Off)?);
     }
     let want = if o.emulator { Want::Any } else { Want::Phone };
     let serial = o.device.map(String::from).or_else(serial_env);
@@ -430,8 +430,7 @@ pub fn android(name: &str, o: &Opts) -> Result<String, String> {
         None => {
             let list = adb_out(&["-s", &dev.serial, "shell", "getprop", "ro.product.cpu.abilist"])?;
             let abi = abi_of(&list).ok_or_else(|| format!("{label} runs {}: ax builds no APK for it", list.trim()))?;
-            let dist =
-                Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?).join("dist");
+            let dist = crate::build::dist_of(&meta, name)?;
             let files: Vec<(String, SystemTime)> = std::fs::read_dir(&dist)
                 .into_iter()
                 .flatten()

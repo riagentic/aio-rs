@@ -16,7 +16,7 @@
 //! does this on a `v*` tag, for Linux, Windows and macOS, and publishes the
 //! files to the tag's GitHub release ([`workflow`]).
 //!
-//! `ax release --aio [--windows] [--dir d] [--url u]` makes aio-rs itself
+//! `ax release --aio [--windows] [--target t] [--dir d] [--url u]` makes aio-rs itself
 //! prebuilt ([`aio`]): an archive per platform, `SHA256SUMS`, and
 //! `install.sh` / `install.ps1` with each archive's SHA-256 pinned, which
 //! check it before anything runs and fall back to a source build by name.
@@ -37,7 +37,7 @@ pub fn keys_dir() -> PathBuf {
     config.join("aio-rt/keys")
 }
 
-fn read_key(p: &Path) -> Result<Vec<u8>, String> {
+pub fn read_key(p: &Path) -> Result<Vec<u8>, String> {
     use base64::Engine;
     let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
     base64::engine::general_purpose::STANDARD
@@ -103,18 +103,29 @@ fn contract_of(binary: &Path) -> Result<up::Contract, String> {
 
 /// The patch that makes `new` (a bundle for `os`) from `old`, unpacked in
 /// `scratch` (removed after).
-fn patch(os: &str, old: &[u8], new: &[u8], scratch: &Path) -> Result<Vec<u8>, String> {
+fn patch(
+    unpack: &dyn Fn(&[u8], &Path) -> std::io::Result<()>,
+    old: &[u8],
+    new: &[u8],
+    scratch: &Path,
+) -> Result<Vec<u8>, String> {
     let (o, n) = (scratch.join("old"), scratch.join("new"));
     let made = (|| {
         for (dir, bundle) in [(&o, old), (&n, new)] {
             std::fs::create_dir_all(dir)?;
-            aio_shell::update::unpack_for(os, bundle, dir)?;
+            unpack(bundle, dir)?;
         }
         aio_shell::delta::make(&o, &n)
     })();
     _ = std::fs::remove_dir_all(scratch);
     made.map_err(|e| e.to_string())
 }
+
+/// A bundle laid out as it is installed: a `.tar.gz` or zip unpacked, an
+/// AppImage as the one file it is.
+type Unpack<'a> = dyn Fn(&[u8], &Path) -> std::io::Result<()> + 'a;
+/// A version's bundle file name.
+type Named<'a> = dyn Fn(&str) -> String + 'a;
 
 /// The patches to `m` (bundle `new`) from each of `from` (versions whose
 /// bundles are in `out`, named as `bundle`'s), written beside it: their
@@ -125,17 +136,16 @@ fn patches(
     m: &up::Manifest,
     new: &[u8],
     from: &[&str],
-    p: &crate::platform::Platform,
-    bundle: &dyn Fn(&str) -> String,
+    (named, bundle, unpack): (&str, &Named<'_>, &Unpack<'_>),
     key: &[u8],
 ) -> Result<Vec<PathBuf>, String> {
-    let (r, os) = (&m.release, p.os);
-    let json = out.join(format!("{os}-{}.patches.json", p.arch));
+    let r = &m.release;
+    let json = out.join(format!("{named}.patches.json"));
     let (mut list, mut files) = (vec![], vec![]);
     for v in from {
         let old_file = out.join(bundle(v));
         let old = std::fs::read(&old_file).map_err(|e| format!("--patch-from {v}: {}: {e}", old_file.display()))?;
-        let bytes = patch(os, &old, new, &out.join(format!(".patch-{v}")))
+        let bytes = patch(unpack, &old, new, &out.join(format!(".patch-{v}")))
             .map_err(|e| format!("--patch-from {v}: no patch made: {e}"))?;
         if bytes.len() as u64 * 2 > r.size {
             eprintln!("ax release: the patch from {v} is {} bytes, over half the release: left out", bytes.len());
@@ -172,6 +182,10 @@ pub struct Ask<'a> {
     pub platforms: Vec<&'static crate::platform::Platform>,
     /// Versions to make patches from (`--patch-from`).
     pub patch_from: Vec<&'a str>,
+    /// The oldest version it installs over (`--min-from`).
+    pub min_from: Option<&'a str>,
+    /// Sign in the commit it was built from (`--commit`, `[updates] sign_commit`).
+    pub commit: bool,
     /// Where the channel dirs go (`--dir`); none: the app's `dist/`.
     pub dir: Option<&'a Path>,
     /// What the release reads (`--data contract.json`); none: asked of the build.
@@ -183,6 +197,8 @@ pub struct Ask<'a> {
     /// Release the Linux AppImage (`--appimage`): signed as
     /// `<os>-<arch>.appimage.json`, what an app run from one updates from.
     pub appimage: bool,
+    /// The signing key's file (`--key`); none: `<keys dir>/<id>.key`.
+    pub key: Option<&'a Path>,
     /// Signed with a key made for it alone (`--unsigned`): a local look at a
     /// release, with no key kept and no `[updates] keys`; no app takes it.
     pub unsigned: bool,
@@ -229,7 +245,7 @@ fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> 
             u.channel
         ));
     }
-    let (key, signers) = signing_keys(id, name, u, ask.unsigned)?;
+    let (key, signers) = signing_keys(id, name, u, ask)?;
     // What it reads is the same on every OS: a cross-built bundle is asked
     // through this machine's build of it.
     let data = match ask.data {
@@ -252,13 +268,20 @@ fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> 
                 None,
                 Some(channel),
                 &b.app.version,
-                b.cfg.build.splash.is_some(),
+                &crate::build::shell_features(&meta, &pkg.name, &b.cfg, true),
+                &Default::default(),
             )?)?
         }
     };
     let out = ask.dir.unwrap_or(&b.dist).join(channel);
-    let (all, manifest) =
-        lay_out(&b, (&bundle, &manifest), &out, (channel, ask.notes, data), (&key, &signers), &ask.patch_from)?;
+    let (all, manifest) = lay_out(
+        &b,
+        (&bundle, &manifest),
+        &out,
+        (channel, ask.notes, data, ask.min_from, ask.commit),
+        (&key, &signers),
+        &ask.patch_from,
+    )?;
     // Built for this release: it lives in the channel dir now.
     if !ask.no_build {
         _ = std::fs::remove_file(&bundle);
@@ -279,9 +302,6 @@ fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> 
 fn appimage_of(b: &crate::build::Built, bundle: &Path, ask: &Ask) -> Result<PathBuf, String> {
     if b.platform.os != "linux" {
         return Err(format!("--appimage: an AppImage is a Linux package, not one for {}", b.platform.name));
-    }
-    if !ask.patch_from.is_empty() {
-        return Err("--appimage: an AppImage is released whole (leave out --patch-from)".into());
     }
     if ask.no_build {
         let image = b.dist.join(format!("{}-{}-{}.AppImage", b.app.id, b.app.version, b.platform.arch));
@@ -304,10 +324,11 @@ fn lay_out(
     b: &crate::build::Built,
     (bundle, named): (&Path, &str),
     out: &Path,
-    (channel, notes, data): (&str, &str, up::Contract),
+    (channel, notes, data, min, commit): (&str, &str, up::Contract, Option<&str>, bool),
     (key, signers): (&[u8], &[Vec<u8>]),
     patch_from: &[&str],
 ) -> Result<(Vec<String>, up::Manifest), String> {
+    let min_from = min_from(min, &b.app.version)?;
     let bytes = std::fs::read(bundle).map_err(|e| format!("{}: {e}", bundle.display()))?;
     let file = bundle.file_name().and_then(|f| f.to_str()).ok_or("bad bundle name")?.to_string();
     let release = up::Release {
@@ -324,21 +345,81 @@ fn lay_out(
         notes: notes.to_string(),
         data,
         roster: Some(up::roster(&b.cfg.updates.keys, signers)?),
+        min_from,
+        commit: signed_commit(commit || b.cfg.updates.sign_commit, &b.dist, &b.app.id)?,
     };
+    if let Some(w) = unread_before_0_3(&release) {
+        eprintln!("{w}");
+    }
     let manifest = up::sign(release, key)?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     std::fs::copy(bundle, out.join(&file)).map_err(|e| format!("{}: {e}", out.join(&file).display()))?;
     let json = out.join(format!("{named}.json"));
     let text = aio::serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     aio::paths::write_atomic(&json, format!("{text}\n").as_bytes(), false).map_err(|e| e.to_string())?;
-    let name_of = |v: &str| {
-        let old = crate::build::App { id: b.app.id.clone(), name: String::new(), version: v.to_string(), icon: None };
-        crate::build::bundle_file(&old, b.platform)
+    // An AppImage is one file: its patch is a one-file tree (zstd against the image here).
+    let image = named.ends_with(".appimage");
+    let name_of = |v: &str| match image {
+        true => format!("{}-{v}-{}.AppImage", b.app.id, b.platform.arch),
+        false => {
+            let old =
+                crate::build::App { id: b.app.id.clone(), name: String::new(), version: v.to_string(), icon: None };
+            crate::build::bundle_file(&old, b.platform)
+        }
     };
-    let extra = patches(out, &manifest, &bytes, patch_from, b.platform, &name_of, key)?;
+    let unpack = |bundle: &[u8], into: &Path| match image {
+        true => aio_shell::update::unpack_appimage(&b.app.id, bundle, into),
+        false => aio_shell::update::unpack_for(b.platform.os, bundle, into),
+    };
+    let extra = patches(out, &manifest, &bytes, patch_from, (named, &name_of, &unpack), key)?;
     let mut all = vec![json.display().to_string(), out.join(&file).display().to_string()];
     all.extend(extra.iter().map(|p| p.display().to_string()));
     Ok((all, manifest))
+}
+
+/// `--min-from`, checked: a version, at most the release's own (pure).
+fn min_from(min: Option<&str>, version: &str) -> Result<Option<String>, String> {
+    let Some(m) = min else { return Ok(None) };
+    match up::compare(m, version) {
+        None => Err(format!("--min-from {m}: not a version (write it as 1.2.0)")),
+        Some(std::cmp::Ordering::Greater) => {
+            Err(format!("--min-from {m} is above this release's version {version}: no install could take it"))
+        }
+        _ => Ok(Some(m.to_string())),
+    }
+}
+
+/// A warning when release `r` names what an install on aio-rs older than
+/// 0.3 can't read (its commit, a minFrom): such an install refuses the
+/// whole manifest, so it needs a plain release to update through (pure).
+fn unread_before_0_3(r: &up::Release) -> Option<String> {
+    let named: Vec<&str> = [(r.commit.is_some(), "its commit"), (r.min_from.is_some(), "a minFrom")]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect();
+    (!named.is_empty()).then(|| {
+        format!(
+            "warning: this release names {}: an install on aio-rs older than 0.3 can't read it and never updates; \
+             publish a plain release (no --commit, --min-from or [updates] sign_commit) built on aio-rs 0.3 first, \
+             for those installs to update through",
+            named.join(" and ")
+        )
+    })
+}
+
+/// The commit app `id`'s build in `dist` was made from (its build record),
+/// when `asked`: only installs on aio-rs 0.3 or newer read a manifest that
+/// names it, so a plain release names none.
+fn signed_commit(asked: bool, dist: &Path, id: &str) -> Result<Option<String>, String> {
+    if !asked {
+        return Ok(None);
+    }
+    let rec: Option<aio::serde_json::Value> =
+        std::fs::read(crate::manifest::path(dist, id)).ok().and_then(|b| aio::serde_json::from_slice(&b).ok());
+    match rec.as_ref().and_then(|r| r["commit"].as_str()) {
+        Some(c) => Ok(Some(c.to_string())),
+        None => Err(format!("--commit: the build of {id} in {} names no commit (built outside git?)", dist.display())),
+    }
 }
 
 /// App `id`'s signing key (it must be one `u` trusts), and every key that
@@ -354,25 +435,25 @@ fn signed(unsigned: bool) -> &'static str {
 /// The key that signs `id`'s release, and every key that signs it (the
 /// previous one too, through a rotation). `unsigned`: a key made for this
 /// release alone, which no app trusts (a local look at a release).
-fn signing_keys(
-    id: &str,
-    name: &str,
-    u: &aio::config::Updates,
-    unsigned: bool,
-) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
-    if unsigned {
+fn signing_keys(id: &str, name: &str, u: &aio::config::Updates, ask: &Ask) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
+    if ask.unsigned {
         let (key, _) = up::keygen()?;
         return Ok((key.clone(), vec![key]));
     }
-    let dir = keys_dir();
-    let key = read_key(&dir.join(format!("{id}.key"))).map_err(|e| {
-        format!("{e} (ax keygen {name} makes it, in $XDG_CONFIG_HOME/aio-rt/keys; --unsigned: a local release without)")
+    // `--key <file>`: that key, its previous one beside it (`<name>.previous.key`).
+    let file = ask.key.map_or_else(|| keys_dir().join(format!("{id}.key")), Path::to_path_buf);
+    let key = read_key(&file).map_err(|e| match ask.key {
+        Some(_) => e,
+        None => format!(
+            "{e} (ax keygen {name} makes it, in $XDG_CONFIG_HOME/aio-rt/keys; --key: another file; --unsigned: a local release without)"
+        ),
     })?;
     if !u.keys.contains(&up::public_key(&key)?) {
         return Err("aio.toml's [updates] keys don't include this signing key: the app would refuse the release".into());
     }
     let mut signers = vec![key.clone()];
-    if let Ok(prev) = read_key(&dir.join(format!("{id}.previous.key"))) {
+    let stem = file.file_stem().map_or_else(Default::default, |s| s.to_string_lossy().into_owned());
+    if let Ok(prev) = read_key(&file.with_file_name(format!("{stem}.previous.key"))) {
         signers.push(prev);
     }
     Ok((key, signers))
@@ -468,9 +549,12 @@ pub fn run_android(name: &str, ask: &Ask) -> Result<String, String> {
     if ask.channel.is_some_and(|c| c != u.channel) {
         return Err(format!("an APK follows aio.toml's channel ({}): set [updates] channel there instead", u.channel));
     }
-    let (key, signers) = signing_keys(&app.id, name, u, ask.unsigned)?;
+    let (key, signers) = signing_keys(&app.id, name, u, ask)?;
     let target = Path::new(meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?);
-    let dist = Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?).join("dist");
+    let dist = crate::build::dist(
+        Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?),
+        &cfg,
+    );
     // What it reads is the same everywhere: asked through this machine's build.
     let data = match ask.data {
         Some(f) => contract_in(f)?,
@@ -491,7 +575,8 @@ pub fn run_android(name: &str, ask: &Ask) -> Result<String, String> {
                 None,
                 None,
                 &app.version,
-                cfg.build.splash.is_some(),
+                &crate::build::shell_features(&meta, &pkg.name, &cfg, true),
+                &Default::default(),
             )
             .map_err(|e| format!("{e}: the desktop build of {name} says which data the APK reads"))?,
         )?,
@@ -514,7 +599,12 @@ pub fn run_android(name: &str, ask: &Ask) -> Result<String, String> {
         notes: ask.notes.to_string(),
         data,
         roster: Some(up::roster(&u.keys, &signers)?),
+        min_from: min_from(ask.min_from, &app.version)?,
+        commit: signed_commit(ask.commit || u.sign_commit, &dist, &app.id)?,
     };
+    if let Some(w) = unread_before_0_3(&base) {
+        eprintln!("{w}");
+    }
     let out = ask.dir.unwrap_or(&dist).join(&u.channel);
     let files = android_releases(&out, &apks, &base, &key, ask.no_build)?;
     let all: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
@@ -797,8 +887,16 @@ fn pack(exe: &Path, out: &Path) -> Result<(), String> {
     let stage = out.with_extension("stage");
     _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
-    let r = std::fs::copy(exe, stage.join(&inside)).map_err(|e| e.to_string()).and_then(|_| {
-        let st = std::process::Command::new("tar").arg("-czf").arg(out).arg("-C").arg(&stage).arg(&inside).status();
+    // Runnable by anyone it is unpacked for, whatever this machine's umask made it.
+    #[cfg(unix)]
+    let copied = std::fs::copy(exe, stage.join(&inside)).and_then(|_| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(stage.join(&inside), std::fs::Permissions::from_mode(0o755))
+    });
+    #[cfg(not(unix))]
+    let copied = std::fs::copy(exe, stage.join(&inside)).map(drop);
+    let r = copied.map_err(|e| e.to_string()).and_then(|_| {
+        let st = crate::build::tar_gz(out, &stage, &inside).status();
         match st {
             Ok(s) if s.success() => Ok(()),
             _ => Err(format!("tar could not make {}", out.display())),
@@ -928,21 +1026,6 @@ fn sign_sums(out: &Path, key: Option<&Path>) -> Result<String, String> {
     Ok(format!("  {what}: signed by {}", up::public_key(&key)?))
 }
 
-/// The Android line (the template APK, `ax build --android`, signs with
-/// the release keystore when one is named, else with this machine's key).
-fn android_line() -> String {
-    let (what, env) = ("Android keystore", "AIO_ANDROID_KEYSTORE");
-    match set(env) {
-        Some(_) => format!("  {what}: {env} (ax build --android signs with it)"),
-        None => unsigned(
-            what,
-            &format!(
-                "{env}, AIO_ANDROID_KEYSTORE_PASSWORD, AIO_ANDROID_KEY_ALIAS; ax build --android signs with this machine's own key"
-            ),
-        ),
-    }
-}
-
 /// aio-rs's archives of `version` named in `names` that this run did not
 /// build (`built`): ones made on another machine (a Mac), as (triple, file) (pure).
 fn built_elsewhere(names: &[String], version: &str, built: &[String]) -> Vec<(String, String)> {
@@ -1065,8 +1148,9 @@ pub fn aio(targets: &[&str], dir: Option<&Path>, url: &str) -> Result<String, St
         }
     }
     signing.retain(|l| !l.is_empty());
+    // Both Mac builds say the same about codesign: once.
+    signing.dedup();
     signing.push(sign_sums(&out, update_key.as_deref())?);
-    signing.push(android_line());
     let list: Vec<String> = made
         .iter()
         .map(|(t, f, s)| {
@@ -1181,11 +1265,30 @@ mod tests {
     }
 
     #[test]
+    fn key_signs_with_that_file_and_its_previous_key() {
+        let d = tempfile::tempdir().unwrap();
+        keygen(d.path(), "ci", false).unwrap();
+        keygen(d.path(), "ci", true).unwrap();
+        let file = d.path().join("ci.key");
+        let ask = Ask { key: Some(&file), ..Default::default() };
+        let public = up::public_key(&read_key(&file).unwrap()).unwrap();
+        let u = aio::config::Updates { keys: vec![public], ..Default::default() };
+        let (key, signers) = signing_keys("notes", "notes", &u, &ask).unwrap();
+        assert_eq!((key, signers.len()), (read_key(&file).unwrap(), 2), "the rotated key signs the roster too");
+        let other = aio::config::Updates { keys: vec![], ..Default::default() };
+        assert!(signing_keys("notes", "notes", &other, &ask).unwrap_err().contains("don't include this signing key"));
+        let none = d.path().join("none.key");
+        let e = signing_keys("notes", "notes", &u, &Ask { key: Some(&none), ..Default::default() }).unwrap_err();
+        assert!(e.contains("none.key") && !e.contains("ax keygen"), "{e}");
+    }
+
+    #[test]
     fn an_unsigned_release_needs_no_key_and_is_trusted_by_no_app() {
         let u = aio::config::Updates { keys: vec![], ..Default::default() };
-        let (key, signers) = signing_keys("no-key-app", "no-key-app", &u, true).unwrap();
+        let unsigned = Ask { unsigned: true, ..Default::default() };
+        let (key, signers) = signing_keys("no-key-app", "no-key-app", &u, &unsigned).unwrap();
         assert_eq!(signers, std::slice::from_ref(&key));
-        let (other, _) = signing_keys("no-key-app", "no-key-app", &u, true).unwrap();
+        let (other, _) = signing_keys("no-key-app", "no-key-app", &u, &unsigned).unwrap();
         assert_ne!(key, other, "made for each release, kept nowhere");
         assert!(signed(true).contains("never to publish") && signed(false) == "signed");
     }
@@ -1234,11 +1337,14 @@ mod tests {
             notes: String::new(),
             data: up::Contract::default(),
             roster: None,
+            min_from: None,
+            commit: None,
         };
         let m = up::sign(release, &k).unwrap();
         let name = |v: &str| format!("notes-{v}-linux-x64.tar.gz");
-        let linux = crate::platform::of("linux", std::env::consts::ARCH).unwrap();
-        let files = patches(out, &m, &new, &["1.0.0", "0.9.0"], linux, &name, &k).unwrap();
+        let unpack = |b: &[u8], d: &Path| aio_shell::update::unpack_for("linux", b, d);
+        let named = format!("linux-{}", std::env::consts::ARCH);
+        let files = patches(out, &m, &new, &["1.0.0", "0.9.0"], (&named, &name, &unpack), &k).unwrap();
         let json = out.join(format!("linux-{}.patches.json", std::env::consts::ARCH));
         assert_eq!(files[0], json);
         assert_eq!(files.len(), 3, "the list and one patch per version");
@@ -1255,9 +1361,49 @@ mod tests {
         assert_eq!(std::fs::read(made.join("notes")).unwrap(), std::fs::read(want.join("notes")).unwrap());
         assert!(!out.join(".patch-1.0.0").exists(), "the scratch is gone");
         // A version whose bundle isn't here is said; none asked: no list left to upload.
-        assert!(patches(out, &m, &new, &["0.1.0"], linux, &name, &k).unwrap_err().contains("--patch-from 0.1.0"));
-        assert_eq!(patches(out, &m, &new, &[], linux, &name, &k).unwrap(), Vec::<PathBuf>::new());
+        assert!(
+            patches(out, &m, &new, &["0.1.0"], (&named, &name, &unpack), &k)
+                .unwrap_err()
+                .contains("--patch-from 0.1.0")
+        );
+        assert_eq!(patches(out, &m, &new, &[], (&named, &name, &unpack), &k).unwrap(), Vec::<PathBuf>::new());
         assert!(!json.exists());
+    }
+
+    #[test]
+    fn a_release_old_installs_cant_read_is_warned_of() {
+        let r = |commit: Option<&str>, min: Option<&str>| up::Release {
+            commit: commit.map(String::from),
+            min_from: min.map(String::from),
+            format: up::FORMAT,
+            id: "notes".into(),
+            version: "1.1.0".into(),
+            channel: "stable".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            file: "notes-1.1.0-linux-x64.tar.gz".into(),
+            sha256: String::new(),
+            size: 0,
+            released_at: String::new(),
+            notes: String::new(),
+            data: up::Contract::default(),
+            roster: None,
+        };
+        assert_eq!(unread_before_0_3(&r(None, None)), None, "a plain release: no warning");
+        let w = unread_before_0_3(&r(Some("9f3ac2b1"), Some("1.0.0"))).unwrap();
+        assert!(
+            w.starts_with("warning: this release names its commit and a minFrom: an install on aio-rs older than 0.3")
+        );
+        assert!(!w.contains('\n') && w.contains("publish a plain release"), "{w}");
+        assert!(unread_before_0_3(&r(None, Some("1.0.0"))).unwrap().contains("names a minFrom:"));
+    }
+
+    #[test]
+    fn min_from_is_a_version_at_most_the_releases_own() {
+        assert_eq!(min_from(None, "1.2.0"), Ok(None));
+        assert_eq!(min_from(Some("1.1.40"), "1.2.0"), Ok(Some("1.1.40".into())));
+        assert!(min_from(Some("soon"), "1.2.0").unwrap_err().contains("not a version"));
+        assert!(min_from(Some("1.3.0"), "1.2.0").unwrap_err().contains("above this release's version"));
     }
 
     /// aio am publish --dir, --no-build (dist/ as it is), --data.
@@ -1279,6 +1425,7 @@ mod tests {
             dist: dist.clone(),
             platform: linux,
             runtime: None,
+            look: Default::default(),
         };
         let new = bundle(&dist, "1.1.0", b"two");
         // --dir srv: the channel's dir there, an earlier release in it.
@@ -1290,11 +1437,12 @@ mod tests {
         let data = contract_in(&file).unwrap();
         assert_eq!(data.cells["notes"], 2);
         let built = dist.join("notes-1.1.0-linux-x64.tar.gz");
+        std::fs::write(crate::manifest::path(&dist, "notes"), r#"{ "commit": "9f3ac2b1" }"#).unwrap();
         let (files, m) = lay_out(
             &b,
             (&built, "linux-x86_64"),
             &out,
-            ("beta", "fixes", data.clone()),
+            ("beta", "fixes", data.clone(), Some("1.0.0"), true),
             (&k, std::slice::from_ref(&k)),
             &["1.0.0"],
         )
@@ -1311,6 +1459,7 @@ mod tests {
         assert_eq!(read, m);
         let r = &m.release;
         assert_eq!((r.channel.as_str(), r.notes.as_str(), &r.data), ("beta", "fixes", &data));
+        assert_eq!((r.min_from.as_deref(), r.commit.as_deref()), (Some("1.0.0"), Some("9f3ac2b1")), "both signed in");
         assert_eq!((r.sha256.clone(), r.size), (sha256_hex(&new), new.len() as u64));
         let expect = up::Expect { id: "notes", channel: "beta", os: "linux", arch: "x86_64" };
         assert!(up::check(&m, &b.cfg.updates.keys, &expect).is_ok(), "an app on beta takes it");
@@ -1323,7 +1472,7 @@ mod tests {
     /// aio's appimage update target: the AppImage, signed under its own name.
     #[cfg(target_os = "linux")]
     #[test]
-    fn an_appimage_is_released_whole_beside_its_own_manifest() {
+    fn an_appimage_is_released_beside_its_own_manifest_with_its_patches() {
         let d = tempfile::tempdir().unwrap();
         let (k, public) = up::keygen().unwrap();
         let mut cfg = aio::config::Config::default();
@@ -1337,27 +1486,54 @@ mod tests {
             dist: d.path().to_path_buf(),
             platform: p("linux"),
             runtime: None,
+            look: Default::default(),
         };
         let ask = |no_build, patch_from| Ask { no_build, patch_from, appimage: true, ..Ask::default() };
         let tgz = d.path().join("notes-1.1.0-linux-x64.tar.gz");
         assert!(appimage_of(&b, &tgz, &ask(true, vec![])).unwrap_err().contains("ax build notes --appimage"));
-        assert!(appimage_of(&b, &tgz, &ask(true, vec!["1.0.0"])).unwrap_err().contains("released whole"));
+        // Two images that differ by a few bytes, as two builds a commit apart.
+        let pad: Vec<u8> = (0..60_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+        let (old, mut new) = (pad.clone(), pad);
+        new[30_000..30_004].copy_from_slice(b"1.1.");
+        let srv = d.path().join("srv/stable");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::write(srv.join("notes-1.0.0-x86_64.AppImage"), &old).unwrap();
         let image = d.path().join("notes-1.1.0-x86_64.AppImage");
-        std::fs::write(&image, b"\x7fELF AppImage").unwrap();
+        std::fs::write(&image, &new).unwrap();
         assert_eq!(appimage_of(&b, &tgz, &ask(true, vec![])).unwrap(), image);
         let (files, m) = lay_out(
             &b,
             (&image, "linux-x86_64.appimage"),
             &d.path().join("srv/stable"),
-            ("stable", "", up::Contract::default()),
+            ("stable", "", up::Contract::default(), None, false),
             (&k, std::slice::from_ref(&k)),
-            &[],
+            &["1.0.0"],
         )
         .unwrap();
-        let srv = d.path().join("srv/stable");
-        let want = [srv.join("linux-x86_64.appimage.json"), srv.join("notes-1.1.0-x86_64.AppImage")];
+        let patch = srv.join("notes-1.1.0-from-1.0.0.patch");
+        let want = [
+            srv.join("linux-x86_64.appimage.json"),
+            srv.join("notes-1.1.0-x86_64.AppImage"),
+            srv.join("linux-x86_64.appimage.patches.json"),
+            patch.clone(),
+        ];
         assert_eq!(files, want.map(|p| p.display().to_string()));
+        // Its patch, signed under the name an AppImage install asks for, makes the new image from the old.
+        let list: up::Patches =
+            aio::serde_json::from_slice(&std::fs::read(srv.join("linux-x86_64.appimage.patches.json")).unwrap())
+                .unwrap();
+        let one = up::patch_for(&list, &m, "1.0.0").unwrap();
+        assert!(one.size < 2_000, "{} bytes", one.size);
+        let (here, made) = (d.path().join("here"), d.path().join("made"));
+        aio_shell::update::unpack_appimage("notes", &old, &here).unwrap();
+        aio_shell::delta::apply(&std::fs::read(&patch).unwrap(), &here, &made).unwrap();
+        assert_eq!(std::fs::read(made.join("notes.AppImage")).unwrap(), new);
         assert_eq!(m.release.file, "notes-1.1.0-x86_64.AppImage");
+        // A plain release names no commit or minFrom: an install on aio-rs 0.2 reads it.
+        assert_eq!((m.release.commit.as_ref(), m.release.min_from.as_ref()), (None, None));
+        let served = std::fs::read_to_string(srv.join("linux-x86_64.appimage.json")).unwrap();
+        assert!(!served.contains("commit") && !served.contains("minFrom"), "{served}");
+        assert!(signed_commit(true, d.path(), "notes").unwrap_err().contains("names no commit"));
         let expect = up::Expect { id: "notes", channel: "stable", os: "linux", arch: "x86_64" };
         assert!(up::check(&m, &b.cfg.updates.keys, &expect).is_ok());
         b.platform = p("windows");
@@ -1480,6 +1656,8 @@ mod tests {
             notes: String::new(),
             data: up::Contract::default(),
             roster: None,
+            min_from: None,
+            commit: None,
         };
         let files = android_releases(&out, &apks, &base, &k, false).unwrap();
         let want: Vec<PathBuf> =
@@ -1595,7 +1773,7 @@ mod tests {
         let fake = d.path().join("ax");
         std::fs::write(&fake, "#!/bin/sh\necho \"ran $*\" > \"$(dirname \"$0\")/said\"\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
         let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("macos", "aarch64") => "aarch64-apple-darwin",
             ("macos", _) => "x86_64-apple-darwin",
@@ -1604,6 +1782,9 @@ mod tests {
         };
         let name = aio_archive("9.9.9", triple);
         pack(&fake, &rel.join(&name)).unwrap();
+        let listed = std::process::Command::new("tar").arg("-tvzf").arg(rel.join(&name)).output().unwrap();
+        let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+        assert!(listed.starts_with("-rwxr-xr-x"), "ax runnable by all, not as its umask left it: {listed}");
         let sha = sha256_hex(&std::fs::read(rel.join(&name)).unwrap());
         let install = |pin: &str| {
             let (sh, _) = installers("9.9.9", "", &[(triple.into(), pin.into())]);

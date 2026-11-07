@@ -178,7 +178,7 @@ More pitfalls, by symptom: [FAQ and pitfalls](../basics/faq.md#pitfalls).
 |---|---|---|
 | builds fail: no `cc` | no Command Line Tools | `xcode-select --install` |
 | "can't be opened" / "unidentified developer" for a downloaded app | the bundle is signed ad hoc, not with a Developer ID (not notarized yet) | Control-click → Open once, or `xattr -dr com.apple.quarantine Notes.app` |
-| `ax discover` or pairing finds nothing on the LAN | macOS asks before an app uses the local network | allow it in System Settings → Privacy & Security → Local Network |
+| `ax discover` or pairing finds nothing on the LAN | macOS asks before an app uses the local network (`ax discover` says so when its probe could not be sent) | allow it in System Settings → Privacy & Security → Local Network |
 | `ax build` can't make a `.dmg` or a macOS bundle on Linux | they are made on a Mac | build on one, or set `[build.macos] host` (or `AIO_MACOS_SSH`) to a Mac over SSH |
 
 ## Android

@@ -50,7 +50,7 @@ outlive the run.
 | File | What | Secret |
 |---|---|---|
 | `state.db` (`-wal`, `-shm`) | the cells: their log, snapshots, schedules, `#[table]` rows ([persistence](README.md#how-the-store-works)); `[data] store` renames it | the log holds every call's arguments |
-| `state.db.good` | the store's daily good copy, booted from if the store is damaged | as `state.db` |
+| `state.db.good` | the store's good copy (daily, or every `[data] snapshot_every`), booted from if the store is damaged | as `state.db` |
 | `state.db.v<old>-<seq>.bak` | the store before a cell's shape version changed | as `state.db` |
 | `state.db.damaged-<ms>`, `.replaced-<ms>` | a damaged store set aside, a store a restore replaced: never deleted for you | as `state.db` |
 | `auth.db` | accounts and sessions ([accounts](../auth/README.md)) | yes |
@@ -93,10 +93,13 @@ fails to start rolls back to it ([build](../build/README.md)).
 | Ask | Where the app runs |
 |---|---|
 | `AIORT_DATA=<dir>` | `<dir>/data`, `<dir>/logs`, `<dir>/cache` (tests, throwaway runs, a portable install) |
+| `AIORT_APPS_DIR=<dir>` | every app under one root, `<dir>/<id>` (aio's `AIO_APPS_DIR`) |
 | `--home=<dir>` | that folder (its `data/`, `logs/`, `cache/`) |
 | `--profile=<name>` (or `AIORT_PROFILE`) | a second home beside the first, `<home>-<name>`; a path is taken as a folder |
 | `--instance=<name>` | a private world of its own, `aio-rt/instances/<name>/<id>` (agents, tests) |
 | `--takeover` | the same home: the running app is asked to stop, and this one takes its place |
+| `[home] dir` in `aio.toml` | the author's fixed home (aio's `appDir`): `/srv/notes/data` … |
+| `[log] dir` in `aio.toml` | the logs of the app's own home elsewhere (aio's `logging.dir`); every other copy keeps its own `logs/` |
 
 ```sh
 ax data notes --profile=work      # where the "work" profile keeps its data
@@ -104,7 +107,10 @@ ax doctor notes                   # who chose the folders, and every other setti
 ```
 
 - Precedence: `--home`, then `--profile`/`AIORT_PROFILE`, then
-  `--instance`, then `AIORT_DATA`, then the default. `--home` and
+  `--instance`, then `AIORT_DATA`, then `[home] dir`, then
+  `AIORT_APPS_DIR`, then the default.
+  `[app] profiles = false` (a kiosk, a service) refuses a launch that
+  names another home (`--home`, `--profile`, `AIORT_PROFILE`). `--home` and
   `--profile` naming two different folders is refused.
 - `--instance` takes a plain name (`agent1`), never a path.
 - A home that is a file, or a folder holding another program's files, is
@@ -114,8 +120,10 @@ ax doctor notes                   # who chose the folders, and every other setti
   flags never clash. `aio::paths::Ask::parse` reads them.
 - Holding the folders holds the app's single-instance lock: one process
   writes its store and log. A second launch of a window app hands its
-  arguments to the running one, which comes to the front. The OS lets
-  go of the lock when the process ends, so a crash leaves none stale.
+  arguments to the running one, which comes to the front; while that
+  one is stopping, the launch waits for the lock and starts after it.
+  The OS lets go of the lock when the process ends, so a crash leaves
+  none stale.
 - aio-rs apps live under `aio-rt`, never in aio's folders, so an aio app
   and its aio-rs build run side by side. A ported app
   (`[app] port_of = "<aio id>"`) is the exception: it runs on its aio
@@ -200,7 +208,6 @@ for a whole home.
 - A whole backup reads each file of `data/` into memory as it copies it:
   a `files/` folder of many gigabytes makes a backup that large and slow.
   Back very large blob stores up with your own tools.
-- No `launch.json` or `ax restart` replaying the last launch's flags.
 
 ## Common mistakes
 

@@ -380,6 +380,23 @@ pub struct Sampler {
 /// Samples in a growth window (100 s at [`EVERY`]).
 const WINDOW: usize = 10;
 
+/// Which way memory went over the last samples (aio's `trend`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trend {
+    /// Up by more than 1 % of where the window began.
+    Rising,
+    Stable,
+    /// Down by more than 1 %.
+    Falling,
+}
+
+/// Does the [`on_memory`] hook hear this sample? On each change of level,
+/// and on every sample while memory is high or critical: each is another
+/// turn to shed it (aio's `onMemoryPressure`; pure).
+pub fn hook_hears(now: Memory, said: Memory) -> bool {
+    now != said || matches!(now, Memory::High | Memory::Critical)
+}
+
 impl Sampler {
     /// A sampler with these thresholds (`[memory]`).
     pub fn with(limits: crate::config::Memory) -> Self {
@@ -414,6 +431,16 @@ impl Sampler {
             (_, true) => Memory::Growing,
             (true, _) => Memory::High,
             _ => Memory::Ok,
+        }
+    }
+
+    /// Which way the window's samples went.
+    pub fn trend(&self) -> Trend {
+        let (Some(&first), Some(&last)) = (self.window.front(), self.window.back()) else { return Trend::Stable };
+        match last.abs_diff(first) > first / 100 {
+            false => Trend::Stable,
+            true if last > first => Trend::Rising,
+            true => Trend::Falling,
         }
     }
 }
@@ -673,8 +700,8 @@ pub fn start(data: &Path, limits: crate::config::Memory, config: Value) {
         loop {
             let (rss, total) = memory().unwrap_or((0, 0));
             let m = sampler.sample(rss, total);
-            if m != said {
-                memory_changed(m, rss, total);
+            if hook_hears(m, said) {
+                memory_changed(m, rss, total, sampler.trend());
             }
             if m != said && m != Memory::Ok {
                 let mut what = format!(
@@ -723,12 +750,14 @@ pub fn start(data: &Path, limits: crate::config::Memory, config: Value) {
     }
 }
 
-/// A change of [`Memory`] level, as [`on_memory`] hears it (aio's
-/// `onMemoryPressure` report).
+/// A sample [`on_memory`] hears ([`hook_hears`]; aio's `onMemoryPressure`
+/// report).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryReport {
     /// What it is now (`Ok`: back under the thresholds).
     pub level: Memory,
+    /// Which way it went over the last samples (100 s at the default `every`).
+    pub trend: Trend,
     /// This process's resident memory and the machine's, in bytes.
     pub rss: u64,
     pub total: u64,
@@ -742,17 +771,19 @@ type MemoryHook = std::sync::Arc<dyn Fn(&MemoryReport) + Send + Sync>;
 static MEMORY_HOOK: Mutex<Option<MemoryHook>> = Mutex::new(None);
 
 /// Hear each change of the memory level (`[memory]`, sampled every
-/// `[memory] every`), back to `Ok` included: drop a cache, shed load. The
-/// log line and the `memory:<level>` problem come as before. Guarded: a
+/// `[memory] every`), back to `Ok` included, and every sample while it is
+/// `High` or `Critical`, with its [`Trend`]: drop a cache, shed load. The
+/// log line and the `memory:<level>` problem are said once per change. Guarded: a
 /// hook that panics is logged. Never call a cell from it (hand it off).
 pub fn on_memory(f: impl Fn(&MemoryReport) + Send + Sync + 'static) {
     *MEMORY_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
 
-/// The level changed to `m`: the [`on_memory`] hook hears it, guarded.
-pub(crate) fn memory_changed(level: Memory, rss: u64, total: u64) {
+/// A sample at `level`: the [`on_memory`] hook hears it, guarded.
+pub(crate) fn memory_changed(level: Memory, rss: u64, total: u64, trend: Trend) {
     let report = MemoryReport {
         level,
+        trend,
         rss,
         total,
         biggest: gauges().into_iter().filter_map(|g| Some((g.name, g.value?))).max_by_key(|g| g.1),
@@ -783,6 +814,8 @@ pub struct Metrics {
     pub clients: usize,
     /// Calls this run (every method call).
     pub calls: u64,
+    /// States and patches sent to clients this run: (bytes, messages).
+    pub broadcast: (u64, u64),
     /// The served cell: (id, enabled, failures).
     pub cell: (String, bool, usize),
     /// Healthy (`aio_up` 1) or degraded.
@@ -810,6 +843,8 @@ pub fn prometheus(m: &Metrics) -> String {
     }
     one("aio_clients_connected", "gauge", "Open sync links", &bare(m.clients as u64));
     one("aio_calls_total", "counter", "Method calls this run", &bare(m.calls));
+    one("aio_broadcast_bytes_total", "counter", "State and patch bytes sent to clients", &bare(m.broadcast.0));
+    one("aio_broadcast_messages_total", "counter", "States and patches sent to clients", &bare(m.broadcast.1));
     let cell = format!("{{cell=\"{}\"}}", esc(&m.cell.0));
     one("aio_cell_enabled", "gauge", "Cell enabled (1) or tripped (0)", &[(cell.clone(), m.cell.1.into())]);
     one("aio_cell_failures", "gauge", "Failures since the cell was last enabled", &[(cell, m.cell.2 as u64)]);
@@ -927,13 +962,30 @@ mod tests {
             h.lock().unwrap().push((r.level, r.rss, r.biggest.clone()));
             assert_ne!(r.level, Memory::Critical, "a hook bug");
         });
-        memory_changed(Memory::High, 6 * GB, 10 * GB);
-        memory_changed(Memory::Critical, 9 * GB, 10 * GB);
-        memory_changed(Memory::Ok, GB, 10 * GB);
+        memory_changed(Memory::High, 6 * GB, 10 * GB, Trend::Rising);
+        memory_changed(Memory::Critical, 9 * GB, 10 * GB, Trend::Rising);
+        memory_changed(Memory::Ok, GB, 10 * GB, Trend::Falling);
         let got = heard.lock().unwrap().clone();
         assert_eq!(got.iter().map(|g| (g.0, g.1)).collect::<Vec<_>>(), [(Memory::High, 6 * GB), (Memory::Critical, 9 * GB), (Memory::Ok, GB)]);
         assert_eq!(got[2].2, got[0].2, "the biggest gauge, if any, by name and value");
         *MEMORY_HOOK.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn the_hook_hears_every_sample_under_pressure_with_its_trend() {
+        use Memory::*;
+        assert!(hook_hears(High, Ok) && hook_hears(Ok, High), "each change");
+        assert!(hook_hears(High, High) && hook_hears(Critical, Critical), "each sample under pressure");
+        assert!(!hook_hears(Ok, Ok) && !hook_hears(Growing, Growing), "growth is said once per step");
+        let mut s = Sampler::default();
+        assert_eq!(s.trend(), Trend::Stable, "no samples yet");
+        [GB; 3].into_iter().for_each(|r| _ = s.sample(r, 10 * GB));
+        assert_eq!(s.trend(), Trend::Stable);
+        s.sample(2 * GB, 10 * GB);
+        assert_eq!(s.trend(), Trend::Rising);
+        let mut s = Sampler::default();
+        [2 * GB, GB].into_iter().for_each(|r| _ = s.sample(r, 10 * GB));
+        assert_eq!(s.trend(), Trend::Falling);
     }
 
     #[test]
@@ -1037,6 +1089,7 @@ mod tests {
             memory: Some((300, 1000)),
             clients: 2,
             calls: 40,
+            broadcast: (900, 12),
             cell: ("notes".into(), false, 3),
             up: false,
             degraded: vec![("sync".into(), 5)],
@@ -1048,6 +1101,8 @@ mod tests {
             "aio_memory_rss_bytes 300\n",
             "aio_clients_connected 2\n",
             "# TYPE aio_calls_total counter\naio_calls_total 40\n",
+            "# TYPE aio_broadcast_bytes_total counter\naio_broadcast_bytes_total 900\n",
+            "# TYPE aio_broadcast_messages_total counter\naio_broadcast_messages_total 12\n",
             "aio_cell_enabled{cell=\"notes\"} 0\n",
             "aio_cell_failures{cell=\"notes\"} 3\n",
             "# TYPE aio_up gauge\naio_up 0\n",

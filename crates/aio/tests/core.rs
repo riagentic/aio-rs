@@ -1253,3 +1253,86 @@ fn undo_steps_back_and_redo_walks_the_undos_again() {
     assert!(Position::target(&log, 4, Travel::To(3)).unwrap_err().contains("no event 3"));
     assert_eq!(Position::target(&log, 4, Travel::To(5)), Ok(5));
 }
+
+/// aio's `onCheckpointRestore` returning a state: the app decides what
+/// boots when the store came back from a damaged file.
+#[cell(persist, id = "journal", recovered = flag_loss)]
+pub struct Journal {
+    pub lines: Vec<String>,
+    /// From when the data is, said to the person.
+    pub lost_after: i64,
+}
+
+fn flag_loss(mut j: Journal, r: &aio::Recovered) -> Journal {
+    j.lost_after = r.from;
+    j
+}
+
+#[methods]
+impl Journal {
+    pub fn write(&mut self, l: String) {
+        self.lines.push(l);
+    }
+}
+
+#[test]
+fn a_cell_decides_the_state_a_recovered_store_boots_on() {
+    let (d, p) = tmp();
+    let h = Handle::<Journal>::open(&p).unwrap();
+    h.write("kept".into()).unwrap();
+    drop(h);
+    std::fs::remove_file(d.path().join("state.db.good")).unwrap();
+    drop(Handle::<Journal>::open(&p).unwrap());
+    let mut b = std::fs::read(&p).unwrap();
+    for x in &mut b[4096..] {
+        *x = 0xAB;
+    }
+    std::fs::write(&p, &b).unwrap();
+    let h = Handle::<Journal>::open(&p).unwrap();
+    let r = h.store(|s| s.recovered().cloned()).unwrap();
+    assert_eq!((h.state().lines.clone(), h.state().lost_after), (vec!["kept".to_string()], r.from));
+    let last = h.store(|s| s.events().unwrap()).last().unwrap().method.clone();
+    assert_eq!(last, "$restore", "the choice is an event of its own");
+    drop(h);
+    assert_eq!(Handle::<Journal>::open(&p).unwrap().state().lost_after, r.from, "and saved");
+}
+
+/// aio's `skipActions`: a `#[skip_travel]` method's events stay in the log,
+/// but time travel steps over them and its timeline leaves them out.
+mod skip_travel {
+    use aio::TimeAsk;
+    use aio::prelude::*;
+
+    #[cell]
+    pub struct Clock {
+        pub n: u32,
+        pub ticks: u32,
+    }
+
+    #[methods]
+    impl Clock {
+        pub fn add(&mut self, by: u32) {
+            self.n += by;
+        }
+
+        #[skip_travel]
+        pub fn tick(&mut self) {
+            self.ticks += 1;
+        }
+    }
+
+    #[test]
+    fn undo_and_the_timeline_pass_over_a_skipped_methods_events() {
+        let h = Handle::<Clock>::memory();
+        h.add(1).unwrap();
+        h.tick().unwrap();
+        h.add(2).unwrap();
+        h.tick().unwrap();
+        let t = h.travel(None).unwrap();
+        assert_eq!(t.steps.iter().map(|m| m.method.as_str()).collect::<Vec<_>>(), ["add", "add"]);
+        assert_eq!((t.at, t.head), (3, 3), "where it stands: the last step it shows");
+        h.travel(Some(TimeAsk::Undo)).unwrap();
+        assert_eq!((h.state().n, h.state().ticks), (1, 0), "back past the tick, to the first add");
+        assert_eq!(h.store(|s| s.events().unwrap()).len(), 5, "the ticks are still in the log");
+    }
+}

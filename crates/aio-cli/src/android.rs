@@ -822,6 +822,8 @@ pub struct Lib<'a> {
     pub pkg: &'a str,
     pub lib: &'a str,
     pub target_dir: &'a Path,
+    /// The shell features the app's aio.toml turns on (`build::shell_features`).
+    pub features: &'a [String],
 }
 
 /// What an app's own `MainActivity.java` (an `android/` file) lacks of the
@@ -953,6 +955,9 @@ pub fn build(
                 &["rustc", "--release", "--lib", "--crate-type", "cdylib", "-p", lib.pkg, "--target", target],
             )?;
             crate::build::remap(&mut cargo, app_dir);
+            if !lib.features.is_empty() {
+                cargo.args(["--features", &lib.features.join(",")]);
+            }
             run(
                 cargo
                     // The app's version (`aio::app_version!()`), the APK's as on desktop.

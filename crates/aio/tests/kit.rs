@@ -54,7 +54,7 @@ fn buttons_and_inputs() -> View {
         p { "data-t": "echo", "{text}" }
         Checkbox { "data-t": "agree", label: "Email me", checked: on.get(), onchange: move |c| on.set(c) }
         p { "data-t": "on", "{on}" }
-        Select { "data-t": "pick", options: vec!["a".into(), Opt { value: "b".into(), label: "Bee".into(), disabled: false }], value: "b" }
+        Select { "data-t": "pick", options: vec!["a".into(), Opt { value: "b".into(), label: "Bee".into(), disabled: false, view: None }], value: "b" }
         Textarea { "data-t": "bio", value: "hi", rows: 5 }
     })
 }
@@ -168,7 +168,7 @@ fn choices() -> View {
     let size = signal(|| "s".to_string());
     let dark = signal(|| false);
     rsx! {
-        RadioGroup { label: "Size", options: vec!["s".into(), "m".into(), Opt { value: "l".into(), label: "l".into(), disabled: true }],
+        RadioGroup { label: "Size", options: vec!["s".into(), "m".into(), Opt { value: "l".into(), label: "l".into(), disabled: true, view: None }],
             value: size.get(), onchange: move |v| size.set(v)
         }
         p { "data-t": "size", "{size}" }
@@ -431,6 +431,105 @@ fn a_tooltip_shows_on_hover_and_escape_puts_it_away() {
     assert_eq!(ui.count("[data-t=tip][data-hidden]"), 0);
     press(&mut ui, "copy", Key::Escape);
     assert_eq!(ui.count("[data-t=tip][data-hidden]"), 1);
+}
+
+#[test]
+fn hints_labels_separators_and_icons_take_any_view_or_state() {
+    // aio's Field.hint, RadioOption.label, Breadcrumb.separator, EmptyState.icon: any view.
+    let mut ui = TestUi::new(|| {
+        let n = signal(|| 1u32);
+        rsx! {
+            button { "data-t": "more", onclick: move |_| n += 1, "more" }
+            Field { label: "Name", hint: rsx! { b { "data-t": "bold-hint", "Bold" } }, Input { "data-t": "a" } }
+            Field { label: "Count", hint: "{n} left", Input { "data-t": "b" } }
+            RadioGroup { label: "Size", options: vec![Opt::from("s").view(rsx! { i { "data-t": "small", "Small" } })] }
+            Breadcrumb { "data-t": "crumbs", separator: rsx! { span { "data-t": "sep", "›" } }, items: vec![Crumb::new("A").href("/"), Crumb::new("B")] }
+            EmptyState { "data-t": "empty", icon: rsx! { svg { "data-t": "pic" } }, title: "None" }
+        }
+    });
+    assert_eq!(ui.text("bold-hint"), "Bold");
+    let hint = |ui: &mut TestUi| {
+        ui.eval("document.querySelectorAll('.aio-field__hint')[1].textContent").as_str().unwrap_or_default().to_string()
+    };
+    assert_eq!(hint(&mut ui), "1 left");
+    ui.click("more");
+    assert_eq!(hint(&mut ui), "2 left", "a hint that reads state follows it");
+    assert_eq!(ui.text("small"), "Small");
+    assert_eq!(ui.count("input[type=radio][aria-label=s]"), 1, "the label still names it");
+    assert_eq!(ui.text("sep"), "›");
+    assert_eq!(ui.count("[data-t=empty] [aria-hidden=true] svg[data-t=pic]"), 1);
+}
+
+#[test]
+fn a_window_listener_hears_any_event_type_until_it_goes() {
+    // aio's onWindowEvent(type): any DOM event, its plain fields, each one.
+    let mut ui = TestUi::new(|| {
+        let (heard, on) = (signal(Vec::<String>::new), signal(|| true));
+        rsx! {
+            button { "data-t": "off", onclick: move |_| on.set(false), "off" }
+            if on.get() {
+                Listener { heard }
+            }
+            p { "data-t": "heard", {heard.get().join(",")} }
+        }
+    });
+    ui.eval("dispatchEvent(new CustomEvent('ping', { detail: 1 })); dispatchEvent(new MouseEvent('pong', { clientX: 3 })); dispatchEvent(new MouseEvent('pong', { clientX: 4 }))");
+    let want = "ping,pong 3,pong 4";
+    for _ in 0..200 {
+        if ui.text("heard") == want {
+            break;
+        }
+        ui.eval("0");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(ui.text("heard"), want);
+    ui.click("off");
+    ui.eval("dispatchEvent(new CustomEvent('ping'))");
+    std::thread::sleep(Duration::from_millis(300));
+    ui.eval("0");
+    assert_eq!(ui.text("heard"), "ping,pong 3,pong 4", "removed with its component");
+}
+
+#[component]
+fn Listener(heard: Signal<Vec<String>>) -> View {
+    let say = move |e: serde_json::Value| {
+        let x = e["clientX"].as_f64().map_or(String::new(), |x| format!(" {x}"));
+        heard.write().push(format!("{}{x}", e["type"].as_str().unwrap_or_default()))
+    };
+    use_window_listener("ping", say);
+    use_window_listener("pong", say);
+    rsx! {}
+}
+
+#[test]
+fn a_tooltip_sits_on_the_side_it_is_placed() {
+    let mut ui = TestUi::new(|| {
+        styled(rsx! {
+            div { style: "padding: 80px 200px",
+                for (t, p) in [("top", Placement::Top), ("bottom", Placement::Bottom), ("left", Placement::Left), ("right", Placement::Right)] {
+                    Tooltip { key: "{t}", "data-t": t, text: "Tip", placement: p, button { "{t}" } }
+                }
+            }
+        })
+    });
+    let boxes = |ui: &mut TestUi, t: &str| {
+        let r = ui.eval(&format!(
+            "(() => {{ const w = document.querySelector('[data-t={t}]'), a = w.firstElementChild.getBoundingClientRect(), \
+             b = w.lastElementChild.getBoundingClientRect(); return [a.left, a.right, a.top, a.bottom, b.left, b.right, b.top, b.bottom] }})()"
+        ));
+        let n: Vec<f64> = r.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        ([n[0], n[1], n[2], n[3]], [n[4], n[5], n[6], n[7]])
+    };
+    let mid = |a: f64, b: f64| (a + b) / 2.0;
+    let (a, b) = boxes(&mut ui, "top");
+    assert!(b[3] <= a[2], "above: {a:?} {b:?}");
+    let (a, b) = boxes(&mut ui, "bottom");
+    assert!(b[2] >= a[3], "below: {a:?} {b:?}");
+    for (side, left) in [("left", true), ("right", false)] {
+        let (a, b) = boxes(&mut ui, side);
+        assert!(if left { b[1] <= a[0] } else { b[0] >= a[1] }, "{side}: {a:?} {b:?}");
+        assert!((mid(a[2], a[3]) - mid(b[2], b[3])).abs() < 1.0, "{side}: centred on the trigger's height");
+    }
 }
 
 #[test]
@@ -1028,6 +1127,31 @@ fn Counter() -> View {
 }
 
 #[test]
+fn a_portal_draws_in_the_host_its_target_names() {
+    // aio's Portal target: a place of the page's own, not only the root's end.
+    let mut ui = TestUi::new(|| {
+        let shown = signal(|| true);
+        rsx! {
+            PortalHost {
+                aside { "data-t": "side", PortalHost { name: "side" } }
+                main { "data-t": "body",
+                    button { "data-t": "toggle", onclick: move |_| shown.toggle(), "toggle" }
+                    if shown.get() {
+                        Portal { target: "side", b { "data-t": "badge", "3" } }
+                    }
+                    Portal { target: "nowhere", i { "data-t": "stays", "here" } }
+                }
+            }
+        }
+    });
+    assert_eq!(ui.count("[data-t=side] .aio-portals [data-t=badge]"), 1);
+    assert_eq!(ui.count("[data-t=body] [data-t=badge]"), 0);
+    assert_eq!(ui.count("[data-t=body] [data-t=stays]"), 1, "no such host: in place");
+    ui.click("toggle");
+    assert!(ui.absent("badge"), "gone with its component");
+}
+
+#[test]
 fn a_portal_draws_at_the_root_keeps_its_state_and_handlers_and_leaves_nothing() {
     let mut ui = TestUi::new(portals);
     assert_eq!(ui.count("[data-t=clip] [data-t=inline]"), 1, "disabled: in place");
@@ -1044,6 +1168,34 @@ fn a_portal_draws_at_the_root_keeps_its_state_and_handlers_and_leaves_nothing() 
     assert_eq!((ui.text("inc"), ui.text("own")), ("2".into(), "own 1".into()), "a re-render keeps the inner state");
     ui.click("open");
     assert_eq!(ui.count(".aio-portals > *"), 0, "closed: nothing left behind");
+}
+
+thread_local!(static PLAYED: RefCell<Vec<(f64, f64)>> = const { RefCell::new(Vec::new()) });
+
+/// aio's TransitionFn tick(t, u): each frame while it plays, ending exactly.
+#[test]
+fn a_transition_ticks_each_frame_while_it_plays() {
+    fn tick(t: f64, u: f64) {
+        PLAYED.with(|l| l.borrow_mut().push((t, u)));
+    }
+    let mut ui = TestUi::new(|| {
+        let show = signal(|| false);
+        let m = Motion::FADE.ms(120).ticking(tick);
+        rsx! {
+            button { "data-t": "toggle", onclick: move |_| show.toggle(), "toggle" }
+            Transition { show: show.get(), enter: m, exit: m, p { "hi" } }
+        }
+    });
+    ui.click("toggle");
+    ui.wait(Duration::from_millis(250));
+    let entered = PLAYED.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    assert!(entered.len() >= 3, "{entered:?}");
+    assert!(entered.windows(2).all(|w| w[0].0 <= w[1].0) && entered.iter().all(|(t, u)| (t + u - 1.0).abs() < 1e-9));
+    assert_eq!(entered.last(), Some(&(1.0, 0.0)), "entering ends at 1");
+    ui.click("toggle");
+    ui.wait(Duration::from_millis(250));
+    let left = PLAYED.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    assert_eq!(left.last(), Some(&(0.0, 1.0)), "leaving ends at 0: {left:?}");
 }
 
 const FX: &str = "msg";
@@ -1786,6 +1938,55 @@ mod travel {
         ui.press_key(Key::Character(".".into()), Modifiers::CONTROL);
         assert!(ui.absent("timeTravel"));
     }
+
+    /// An app that mounts no panel, as a dev build's window mounts it: the
+    /// panel is there all the same (aio's in every dev app, `dev`).
+    #[cfg(feature = "dev")]
+    fn bare() -> View {
+        use_live();
+        rsx! {
+            p { "data-t": "n", "{count().n}" }
+            button { r#type: "button", "data-t": "inc", onclick: |_| _ = act!(inc()), "inc" }
+        }
+    }
+
+    /// As `aio_shell`'s dev window draws: the app, then the panel beside it.
+    #[cfg(feature = "dev")]
+    fn dev_window() -> View {
+        let app = bare();
+        rsx! { {app} DevTimeTravel {} }
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_dev_window_steps_every_client_cell_with_no_panel_of_the_apps() {
+        let mut ui = TestUi::new(dev_window);
+        ui.click("inc");
+        ui.click("inc");
+        assert!(ui.absent("timeTravel"), "hidden until Ctrl+.");
+        ui.run(aio::kit::travel::toggle); // the page's Ctrl+. (page::TRAVEL_KEY)
+        assert!(ui.present("timeTravel"));
+        ui.click("ttUndo");
+        assert_eq!(ui.text("n"), "1", "undo");
+        ui.click("ttRedo");
+        assert_eq!(ui.text("n"), "2", "redo");
+        ui.click("ttPause");
+        ui.run(aio::kit::travel::toggle);
+        assert!(ui.absent("timeTravel"));
+    }
+
+    fn own_and_dev() -> View {
+        let app = app();
+        rsx! { {app} DevTimeTravel {} }
+    }
+
+    #[test]
+    fn an_apps_own_panel_keeps_the_dev_one_out() {
+        let mut ui = TestUi::new(own_and_dev);
+        ui.click("inc");
+        ui.run(aio::kit::travel::toggle);
+        assert!(ui.absent("timeTravel"), "one panel: the app's, still on its Ctrl+.");
+    }
 }
 
 #[derive(aio::serde::Serialize, Clone, PartialEq)]
@@ -2013,6 +2214,42 @@ fn a_bound_input_shows_its_error_once_left_and_one_field_resets_alone() {
     assert_eq!(ui.text("css=.aio-field__error"), "Required", "the other field keeps its state");
 }
 
+#[derive(Clone, Default, PartialEq)]
+struct Order {
+    agree: bool,
+    gift: bool,
+    count: u32,
+    size: String,
+}
+
+/// aio's `form.bind` of a boolean and a number field, and a bound radio group.
+#[test]
+fn checkboxes_switches_numbers_and_radios_bind_to_their_fields() {
+    let mut ui = TestUi::new(|| {
+        let form = use_form(|| Order { count: 2, size: "s".into(), ..Default::default() }, |_| vec![]);
+        rsx! {
+            Checkbox { "data-t": "agree", bind: form.bind_check(aio::field!(agree)) }
+            Switch { "data-t": "gift", bind: form.bind_check(aio::field!(gift)) }
+            Input { "data-t": "count", bind: form.bind_parsed(aio::field!(count)) }
+            RadioGroup { label: "Size", options: vec!["s".into(), "m".into()], bind: form.bind(aio::field!(size)) }
+            p { "data-t": "said", {let v = form.values(); format!("{} {} {} {}", v.agree, v.gift, v.count, v.size)} }
+            p { "data-t": "touched", {form.touched("agree").to_string()} }
+        }
+    });
+    assert_eq!(ui.text("said"), "false false 2 s");
+    assert_eq!(ui.count("input[type=radio][value=s]:checked"), 1, "the field's value is the checked one");
+    ui.click("agree");
+    ui.click("gift");
+    assert_eq!((ui.text("said"), ui.text("touched")), ("true true 2 s".into(), "true".into()));
+    assert!(ui.checked("agree") && ui.checked("gift"));
+    ui.type_text("count", "5");
+    assert_eq!(ui.text("said"), "true true 25 s", "an edit that parses writes the field");
+    ui.type_text("count", "x");
+    assert_eq!(ui.text("said"), "true true 25 s", "one that doesn't leaves it");
+    ui.click("css=input[type=radio][value=m]");
+    assert_eq!(ui.text("said"), "true true 25 m");
+}
+
 /// A list of rows (aio's `useFieldArray`): push, move, set, remove, reset;
 /// out of range changes nothing.
 #[test]
@@ -2122,4 +2359,50 @@ fn deferred_content_loads_shows_its_loading_view_then_the_content_or_its_error()
     ui.click("box");
     tx.send(Err("the disk is gone".into())).unwrap();
     ui.until_text("failed", "the disk is gone");
+}
+
+static CONNECT_DATA: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+fn connect_page() -> View {
+    let data = CONNECT_DATA.get().unwrap().clone();
+    styled(rsx! { ConnectPage { data, app: "board" } })
+}
+
+/// aio's thin client's connect page: an address (a bad one said), the
+/// recent servers, one forgotten.
+#[test]
+fn the_connect_page_takes_an_address_and_keeps_the_recent_servers() {
+    let d = tempfile::tempdir().unwrap();
+    let data = d.path().to_path_buf();
+    aio::connect::remember(
+        &data,
+        aio::connect::Server { addr: "192.0.2.9:8100".into(), title: Some("Board".into()), ..Default::default() },
+    )
+    .unwrap();
+    _ = CONNECT_DATA.set(data.clone());
+    let mut ui = TestUi::new(connect_page);
+    assert!(ui.text("recent0").contains("Board"), "{}", ui.text("recent0"));
+    ui.type_text("connectAddr", "nope");
+    ui.click("connectGo");
+    shows(&mut ui, |ui| ui.present("connectError"));
+    assert!(ui.text("connectError").contains("host:port"), "{}", ui.text("connectError"));
+    ui.type_text("connectAddr", ":8100");
+    ui.click("connectGo");
+    let kept = || std::fs::read_to_string(data.join("paired.json")).unwrap_or_default();
+    shows(&mut ui, |ui| ui.text("recent0").contains("nope:8100"));
+    assert!(kept().contains("nope:8100") && !kept().contains("192.0.2"), "{}", kept());
+    ui.click("forget1");
+    assert_eq!(aio::connect::recent(&data).len(), 1, "192.0.2.9 forgotten");
+    shows(&mut ui, |ui| ui.absent("recent1"));
+}
+
+/// Wait (20 s at most) until the page shows what `f` asks.
+fn shows(ui: &mut TestUi, f: impl Fn(&TestUi) -> bool) {
+    for _ in 0..800 {
+        if f(ui) {
+            return;
+        }
+        ui.wait(Duration::from_millis(25));
+    }
+    panic!("never shown:\n{}", ui.surface());
 }

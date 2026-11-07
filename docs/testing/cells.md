@@ -681,6 +681,44 @@ assert_eq!(io.stdout(), "name: save? [Y/n]: ");
 assert!(io.stderr().ends_with("3/3 100%\n"));
 let mut piped = TestIo::new("").tty(false);
 assert!(piped.prompt.ask("name", None).unwrap_err().why.contains("needs a terminal"));
+
+// A whole run, its exit too.
+let spec = aio::cli::Spec::new("todo").flag(aio::cli::Flag::number("port"));
+let mut run = TestIo::new("");
+assert_eq!(run.run(&["--prot=1"], |_| _ = aio::cli::args(&spec)), 2);
+assert!(run.stderr().contains("did you mean --port?"));
+let mut help = TestIo::new("");
+assert_eq!(help.run(&["--help"], |_| _ = aio::cli::args(&spec)), 0);
+assert!(help.stdout().contains("--port"));
+let mut failed = TestIo::new("");
+assert_eq!(failed.run(&[], |_| aio::cli::fail("no such todo", 1, true)), 1);
+assert!(failed.stdout().ends_with("{\"error\":\"no such todo\"}\n"));
+# }
+```
+
+`io.run(argv, main)` runs the binary's `main` with `argv` as its
+arguments and returns its exit code (aio's `CliExit`): `aio::cli::args`
+reads `argv`, and `--help`, a refused invocation or `fail` end the run,
+not the test, what they print kept in `stdout()`/`stderr()`. A `main`
+that returns exits 0; any other panic goes on.
+
+```rust
+use aio::cli::{args, fail, Flag, Spec};
+use aio::testing::TestIo;
+
+fn main_of(_: &mut TestIo) {
+    let a = args(&Spec::new("hi").flag(Flag::switch("loud")));
+    if !a.on("loud") {
+        fail("too quiet", 3, false);
+    }
+}
+
+# fn main() {
+let mut io = TestIo::new("");
+assert_eq!(io.run(&[], main_of), 3);
+assert!(io.stderr().contains("too quiet"));
+assert_eq!(TestIo::new("").run(&["--nope"], main_of), aio::cli::USAGE);
+assert_eq!(TestIo::new("").run(&["--loud"], main_of), 0);
 # }
 ```
 

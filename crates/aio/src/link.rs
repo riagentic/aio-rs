@@ -114,6 +114,8 @@ pub(crate) struct Hooks {
 #[cfg(feature = "server")]
 pub(crate) trait Beside: Send + Sync {
     fn id(&self) -> &'static str;
+    /// Its state's size (JSON bytes), and whether it is enabled (not tripped).
+    fn vitals(&self) -> (usize, bool);
     /// [`session`] on this cell, its hello read.
     #[allow(clippy::too_many_arguments)]
     fn session(
@@ -151,6 +153,10 @@ pub(crate) trait Beside: Send + Sync {
 impl<U: Cell> Beside for Handle<U> {
     fn id(&self) -> &'static str {
         U::ID
+    }
+
+    fn vitals(&self) -> (usize, bool) {
+        (serde_json::to_vec(&*self.state()).map_or(0, |v| v.len()), self.enabled())
     }
 
     fn session(
@@ -194,7 +200,7 @@ impl<U: Cell> Beside for Handle<U> {
 
     #[cfg(feature = "compat")]
     fn ask(&self, gate: &Gate, by: &By, method: &str, args: Value) -> crate::Result<(Option<Value>, crate::Answer)> {
-        gate.ask(&self.by(by.clone()), by, method, args, None)
+        gate.ask(&self.by(by.clone()), by, method, args, None, None)
     }
 
     #[cfg(feature = "compat")]
@@ -244,6 +250,8 @@ pub(crate) const MAX_MESSAGE: usize = 64 << 20;
 /// who it is, and the way back.
 pub(crate) struct Pulse {
     pub(crate) heard: tokio::time::Instant,
+    /// When `heard` was last put in the link's listing (at most each second).
+    listed: tokio::time::Instant,
     pinged: Option<tokio::time::Instant>,
     track: crate::vitals::Track,
     /// Its listed id and who it is, once known.
@@ -252,7 +260,21 @@ pub(crate) struct Pulse {
 
 impl Pulse {
     pub(crate) fn new() -> Self {
-        Self { heard: tokio::time::Instant::now(), pinged: None, track: Default::default(), link: None }
+        let now = tokio::time::Instant::now();
+        Self { heard: now, listed: now, pinged: None, track: Default::default(), link: None }
+    }
+
+    /// A frame came: heard now, said in the link's listing once a second.
+    fn heard(&mut self) {
+        self.heard = tokio::time::Instant::now();
+        if let Some((id, _)) = &self.link
+            && self.heard - self.listed >= Duration::from_secs(1)
+        {
+            self.listed = self.heard;
+            if let Some(c) = lock(clients()).get_mut(id) {
+                c.heard = crate::store::now_ms();
+            }
+        }
     }
 
     /// Its pong came, `rtt` after the ping.
@@ -281,7 +303,7 @@ pub(crate) async fn next_ax(w: &mut Sock, pulse: &mut Pulse, max: usize, bytes: 
     loop {
         tokio::select! {
             m = w.recv() => {
-                pulse.heard = tokio::time::Instant::now();
+                pulse.heard();
                 match m? {
                     // Too big: say so (1009 names the limit), never a silent drop.
                     Msg::Text(t) if t.len() > max => {
@@ -324,18 +346,32 @@ pub(crate) async fn send_ax(w: &mut Sock, v: &Value) -> std::result::Result<(), 
     send_text(w, v.to_string()).await
 }
 
+/// States and patches sent to clients this run: (bytes, messages).
+static BROADCAST: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// What [`send_view`] has sent this run: (bytes, messages).
+#[cfg(feature = "server")]
+pub(crate) fn broadcast() -> (u64, u64) {
+    let [b, m] = &BROADCAST;
+    (b.load(std::sync::atomic::Ordering::Relaxed), m.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// [`send_ax`] of a state or patch, counted for cell `meter`'s cost and
-/// its link's bytes (`meter`: the cell and the link).
+/// its link's bytes (`meter`: the cell and the link), and in [`broadcast`].
 pub(crate) async fn send_view(
     w: &mut Sock,
     meter: Option<(&'static str, u64)>,
     v: &Value,
 ) -> std::result::Result<(), String> {
     let text = v.to_string();
+    let [b, m] = &BROADCAST;
+    b.fetch_add(text.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    m.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some((cell, link)) = meter {
         crate::cost::sent(cell, v, text.len());
         if let Some(c) = lock(clients()).get_mut(&link) {
             c.sent += text.len() as u64;
+            c.last_sent = text.len() as u64;
         }
     }
     send_text(w, text).await
@@ -475,7 +511,48 @@ pub(crate) enum Gate {
     Key,
     Signed(Arc<crate::auth::Auth>, String),
     /// A user the app knows by token ([`crate::auth::Users`]), with this role.
-    Known(String),
+    Known(Known),
+}
+
+/// A known user's role: fixed (a peer's), or pushed live when their token's
+/// re-check says another ([`Known::live`]).
+#[derive(Clone)]
+pub(crate) struct Known {
+    role: Arc<std::sync::Mutex<String>>,
+    ticks: Option<tokio::sync::watch::Receiver<u64>>,
+}
+
+impl Known {
+    pub(crate) fn fixed(role: String) -> Self {
+        Self { role: Arc::new(std::sync::Mutex::new(role)), ticks: None }
+    }
+
+    /// The role, and how its re-check sets another.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn live(role: String) -> (Self, Push) {
+        let (tx, rx) = tokio::sync::watch::channel(0);
+        let role = Arc::new(std::sync::Mutex::new(role));
+        (Self { role: role.clone(), ticks: Some(rx) }, Push { role, tx })
+    }
+
+    fn now(&self) -> String {
+        self.role.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// Sets a [`Known`] role: its links see the new role's view at once.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct Push {
+    role: Arc<std::sync::Mutex<String>>,
+    tx: tokio::sync::watch::Sender<u64>,
+}
+
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+impl Push {
+    pub(crate) fn set(&self, role: String) {
+        *self.role.lock().unwrap_or_else(|e| e.into_inner()) = role;
+        self.tx.send_modify(|n| *n += 1);
+    }
 }
 
 impl Gate {
@@ -498,7 +575,7 @@ impl Gate {
                 };
             }
             Gate::Local | Gate::Key => None,
-            Gate::Known(role) => Some(role.clone()),
+            Gate::Known(k) => Some(k.now()),
             Gate::Signed(a, t) => {
                 Some(live(a, t).ok_or_else(|| Rejected::coded(crate::Code::AccessDenied, "sign in first: this session ended"))?.role)
             }
@@ -514,16 +591,27 @@ impl Gate {
         method: &str,
         args: Value,
         op: Option<&str>,
+        parts: Option<crate::answer::Parts>,
     ) -> Result<(Option<Value>, crate::Answer)> {
         let role = match self {
-            Gate::Door => return h.ask_by(None, method, args, op),
+            Gate::Door => return h.ask_by(None, method, args, op, parts),
             Gate::Local | Gate::Key => None,
-            Gate::Known(role) => Some(role.clone()),
+            Gate::Known(k) => Some(k.now()),
             Gate::Signed(a, t) => {
                 Some(live(a, t).ok_or_else(|| Rejected::coded(crate::Code::AccessDenied, "sign in first: this session ended"))?.role)
             }
         };
-        h.ask_by(Some(&crate::Caller { by: viewer.clone(), role }), method, args, op)
+        h.ask_by(Some(&crate::Caller { by: viewer.clone(), role }), method, args, op, parts)
+    }
+
+    /// Ticks when the role may have changed: an account change, or a known
+    /// user's re-check.
+    pub(crate) fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        match self {
+            Gate::Signed(a, _) => Some(a.changes()),
+            Gate::Known(k) => k.ticks.clone(),
+            _ => None,
+        }
     }
 
     /// The link's role now, for what it may see (`#[cell(visible = f)]`).
@@ -531,7 +619,7 @@ impl Gate {
     pub(crate) fn role(&self) -> Option<String> {
         match self {
             Gate::Door | Gate::Local | Gate::Key => None,
-            Gate::Known(role) => Some(role.clone()),
+            Gate::Known(k) => Some(k.now()),
             Gate::Signed(a, t) => live(a, t).map(|s| s.role),
         }
     }
@@ -559,6 +647,10 @@ pub(crate) struct Client {
     pub(crate) rtt: Option<u64>,
     /// The bytes of the states and patches it was sent.
     pub(crate) sent: u64,
+    /// The bytes of the last one.
+    pub(crate) last_sent: u64,
+    /// When it was last heard (ms since the epoch).
+    pub(crate) heard: i64,
     /// Changes it fell behind on, and got as one newer view (its backpressure).
     pub(crate) behind: u64,
 }
@@ -566,7 +658,8 @@ pub(crate) struct Client {
 impl Client {
     /// A link opened now, nothing sent yet.
     pub(crate) fn new(cell: &'static str, user: String, wire: &'static str, from: String) -> Self {
-        Self { cell, user, wire, from, since: crate::store::now_ms(), rtt: None, sent: 0, behind: 0 }
+        let now = crate::store::now_ms();
+        Self { cell, user, wire, from, since: now, rtt: None, sent: 0, last_sent: 0, heard: now, behind: 0 }
     }
 }
 
@@ -679,6 +772,24 @@ pub(crate) fn listing(cell: &str) -> Value {
         .collect()
 }
 
+/// Every open link, for `/__aio/vitals`.
+#[cfg(feature = "server")]
+pub(crate) fn links() -> Vec<crate::vitals::Link> {
+    let now = crate::store::now_ms();
+    let mut all: Vec<_> = lock(clients())
+        .iter()
+        .map(|(id, c)| crate::vitals::Link {
+            id: *id,
+            cell: c.cell.into(),
+            gap: (now - c.heard).max(0) as u64,
+            last_bytes: c.last_sent,
+            total_bytes: c.sent,
+        })
+        .collect();
+    all.sort_by_key(|l| l.id);
+    all
+}
+
 /// `l` as an aio hello says it.
 pub(crate) fn limits_wire(l: &Limits) -> Value {
     json!({ "maxMessage": l.max_message, "callsPerSec": l.calls_per_sec })
@@ -765,6 +876,11 @@ pub(crate) async fn session<T: Cell>(
         return Err("refused a client: wrong cell".into());
     }
     let tool = hello["tool"] == true;
+    // A quarantined cell serves no client its last snapshot as if it were
+    // current (aio's): the client keeps trying, and a fixed build answers.
+    if !tool && let Some(why) = h.store(|s| s.quarantined().map(String::from)) {
+        return Err(format!("{} is quarantined ({why}): no client is served until a fixed build starts", T::ID));
+    }
     // Another app on the door ([`crate::peer`]) is a client there: what the
     // key lets in (`#[client]` methods, `visible`), never the operator's.
     let peer = matches!(gate, Gate::Door | Gate::Local) && hello["peer"] == true;
@@ -774,7 +890,7 @@ pub(crate) async fn session<T: Cell>(
     if let (true, Some(f)) = (peer, &hooks.peers) {
         let c = resolve(f, hello["user"].as_str().unwrap_or_default());
         gate = match c.as_ref().and_then(|c| c.role.clone()) {
-            Some(role) => Gate::Known(role),
+            Some(role) => Gate::Known(Known::fixed(role)),
             None => Gate::Key,
         };
         said = Some(c.as_ref().map_or_else(|| By::User("peer".into()), |c| c.by.clone()));
@@ -826,10 +942,7 @@ pub(crate) async fn session<T: Cell>(
     pulse.link = (!tool).then(|| (listed.0, who.clone()));
     // What it sees goes by its role too, read again on every account change
     // (heard before the read: no change between them is missed).
-    let mut accounts = match &gate {
-        Gate::Signed(a, _) => Some(a.changes()),
-        _ => None,
-    };
+    let mut accounts = gate.changes();
     let role = |g: &Gate| {
         let g = g.clone();
         tokio::task::spawn_blocking(move || g.role())
@@ -858,7 +971,7 @@ pub(crate) async fn session<T: Cell>(
     let mut relayed = (0, 0);
     // Their parts, in order; a call's parts all go before its answer.
     #[cfg_attr(not(feature = "server"), allow(unused_variables))]
-    let (parts_tx, mut parts) = tokio::sync::mpsc::channel::<Value>(64);
+    let (parts_tx, mut parts) = tokio::sync::mpsc::channel::<Value>(crate::answer::PARTS_WAITING);
     // What they say while running: a person is deciding (`deciding::start`).
     #[cfg_attr(not(feature = "server"), allow(unused_variables))]
     let (held_tx, mut held) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -875,6 +988,10 @@ pub(crate) async fn session<T: Cell>(
             Some(p) = parts.recv() => send_ax(&mut w, &p).await?,
             Some(m) = held.recv() => send_ax(&mut w, &m).await?,
             Some(end) = ends.recv() => {
+                // A streamed call's pieces all go before its end.
+                while let Ok(p) = parts.try_recv() {
+                    send_ax(&mut w, &p).await?;
+                }
                 while events.try_recv().is_ok() {}
                 if let Some(p) = view.advance(&h, &seer, limits.full_state_percent) {
                     pushes.push(&p, crate::store::now_ms());
@@ -954,7 +1071,10 @@ pub(crate) async fn session<T: Cell>(
                         let (method, args) = (msg["method"].as_str().unwrap_or_default().to_string(), msg["args"].clone());
                         let op = msg["op"].as_str().map(String::from);
                         let is_async = T::async_mode(&method).is_some();
-                        let r = tokio::task::spawn_blocking(move || g.ask(&hh, &by, &method, args, op.as_deref()))
+                        // Its pieces (`cx.part`) go to this caller, when it streams the call.
+                        let parts = (is_async && msg["stream"] == true)
+                            .then(|| crate::answer::Parts { tx: parts_tx.clone(), op: msg["op"].clone() });
+                        let r = tokio::task::spawn_blocking(move || g.ask(&hh, &by, &method, args, op.as_deref(), parts))
                             .await
                             .map_err(|e| e.to_string())?;
                         // An async method's end goes after its reply, once it comes.
@@ -1106,7 +1226,8 @@ pub(crate) fn fields<T: Cell>() -> Value {
 
 /// A local door's operator message `ask` on `h`, by `by`: `load` a state,
 /// the `shape` this version saves, the state right after an event (`at`, for diffs) or
-/// what the cell has sent its clients (`cost`), how long events of this
+/// what the cell has sent its clients (`cost`, with whether it is `enabled`
+/// and its effect backlog: `effects` running or queued), how long events of this
 /// run took and its refused calls (`took`), what a caller may call
 /// (`peer`), which fields are saved and which are sent (`fields`), write
 /// what is held now (`flush`), `drop` a stored cell nothing declares.
@@ -1118,7 +1239,11 @@ pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::resu
             h.store(|s| s.load(by, ask["state"].clone())).map_err(|e| e.why)?;
             Ok(h.snapshot().0.into())
         }
-        Some("cost") => Ok(crate::cost::report(T::ID, ask["window"].as_i64())),
+        Some("cost") => {
+            let mut c = crate::cost::report(T::ID, ask["window"].as_i64());
+            (c["enabled"], c["effects"]) = (h.enabled().into(), h.pending(None).into());
+            Ok(c)
+        }
         Some("took") => Ok(took(h, ask)),
         // `ax persist`: what is held (a coalesced run) written now.
         Some("flush") => h.store(|s| s.flush()).map(|_| json!(h.snapshot().0)).map_err(|e| e.why),

@@ -167,10 +167,10 @@ pub enum Shown {
     Icons(Vec<(Icon, Vec<Vec<u8>>)>, u8, Option<String>),
 }
 
-/// `t` as this desktop shows it (pure): an icon's frames decoded.
+/// `t` as this desktop shows it: an icon's frames decoded, or read from
+/// the app's built-in files.
 pub fn shown(t: &aio::tell::Tell) -> io::Result<Shown> {
     use aio::tell::Tell;
-    use base64::Engine;
     Ok(match t {
         Tell::Notify { title, body, tag, silent, route } => Shown::Notice(Notice {
             title: title.clone(),
@@ -180,11 +180,8 @@ pub fn shown(t: &aio::tell::Tell) -> io::Result<Shown> {
             route: route.clone(),
         }),
         Tell::Icon { window, tray, tooltip, fps } => {
-            let b64 = base64::engine::general_purpose::STANDARD;
-            let decode = |frames: &Vec<String>| {
-                let frames = frames.iter().map(|f| b64.decode(f.trim_start_matches("data:image/png;base64,")));
-                frames.collect::<Result<Vec<_>, _>>().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-            };
+            let assets = crate::instance::ASSETS.get().copied().unwrap_or_default();
+            let decode = |frames: &Vec<String>| frames.iter().map(|f| frame(f, assets)).collect::<io::Result<Vec<_>>>();
             let mut icons = vec![];
             for (which, frames) in [(Icon::Window, window), (Icon::Tray, tray)] {
                 if let Some(f) = frames {
@@ -194,6 +191,23 @@ pub fn shown(t: &aio::tell::Tell) -> io::Result<Shown> {
             Shown::Icons(icons, *fps, tooltip.clone())
         }
     })
+}
+
+/// One icon frame's PNG bytes: base64, a `data:` URL, or an app URL path
+/// (`"/icons/busy.png"`) of `assets` (`[build] assets`, aio's app URL).
+fn frame(f: &str, assets: &[(&str, &[u8])]) -> io::Result<Vec<u8>> {
+    use base64::Engine;
+    let bad = |m: String| io::Error::new(io::ErrorKind::InvalidInput, m);
+    match f.strip_prefix('/') {
+        Some(_) => assets
+            .iter()
+            .find(|(p, _)| *p == f)
+            .map(|(_, b)| b.to_vec())
+            .ok_or_else(|| bad(format!("icon {f}: no such file in [build] assets"))),
+        None => base64::engine::general_purpose::STANDARD
+            .decode(f.trim_start_matches("data:image/png;base64,"))
+            .map_err(|e| bad(e.to_string())),
+    }
 }
 
 /// Show `t` here (how `run` shows what cells tell): a notice through the
@@ -350,6 +364,19 @@ mod tests {
         assert_eq!(shown(&tip).unwrap(), Shown::Icons(vec![], 1, Some("Idle".into())));
         let bad = Tell::Icon { window: Some(vec!["not base64!".into()]), tray: None, tooltip: None, fps: 1 };
         assert_eq!(shown(&bad).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn an_icon_frame_may_be_an_app_url_of_its_assets() {
+        // aio's appIcon("/icons/busy.png"): the app's own file, by its URL path.
+        let assets: &[(&str, &[u8])] = &[("/icons/busy.png", b"\x89PNG busy")];
+        assert_eq!(frame("/icons/busy.png", assets).unwrap(), b"\x89PNG busy");
+        let e = frame("/icons/gone.png", assets).unwrap_err();
+        assert_eq!(
+            (e.kind(), e.to_string()),
+            (io::ErrorKind::InvalidInput, "icon /icons/gone.png: no such file in [build] assets".into())
+        );
+        assert_eq!(frame(&base64_of(b"\x89PNG"), assets).unwrap(), b"\x89PNG");
     }
 
     #[test]

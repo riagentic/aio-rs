@@ -369,6 +369,12 @@ impl Diag {
         Some(m.values().filter_map(|c| c["bytes"].as_u64()).sum())
     }
 
+    /// The effects the cells run or queue now (aio's effect backlog).
+    pub fn backlog(&self) -> Option<u64> {
+        let c = self.cost.as_ref()?.as_object()?;
+        Some(c.values().filter_map(|v| v["effects"].as_u64()).sum())
+    }
+
     /// The slowest p95 call, and all pushes a second, of the cells.
     pub fn calls(&self) -> (Option<f64>, Option<f64>) {
         let Some(c) = self.cost.as_ref().and_then(Value::as_object) else { return (None, None) };

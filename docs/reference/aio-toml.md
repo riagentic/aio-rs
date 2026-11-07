@@ -73,6 +73,7 @@ ui = "window"
 lang = "en"
 dir = "ltr"
 tz = "utc"
+profiles = true
 maintainer = "Example Team <team@example.org>"
 # port_of = "notes"         # a port of the aio app "notes": its home and state.db
 
@@ -82,9 +83,13 @@ store = "state.db"
 retire = []
 pragmas = []
 persist = true
+only_persist = false
 coalesce_ms = 100
 backup_every = "off"
 backup_keep = 7
+
+# [home]
+# dir = "/srv/notes"        # the home itself (default: aio-rs's place)
 
 [history]
 keep = "90d"
@@ -115,6 +120,7 @@ full_state_percent = 50
 
 [client]
 retention = "off"
+strict_pin = false
 
 [accounts]
 on = false
@@ -122,6 +128,8 @@ signup = false
 session = "30d"
 max_sessions = 10
 require_verified = false
+totp = true
+cookie = true
 
 [capabilities]
 network = []
@@ -153,6 +161,7 @@ file_mb = 10
 heartbeat = 3600
 suppress = []
 per_run = false
+# dir = "/var/log/notes"    # default: <home>/logs
 
 [perf]
 effect = 5
@@ -202,10 +211,12 @@ Who the app is and where its cells live.
 | `name` | string | `""` | The name people see: the window title (`aio_shell::Window::of`), the menu entry, `{title}` in the splash. |
 | `mode` | `standalone`, `client-server`, `server`, `client`, `cli` | `"standalone"` | Where the cells live. `standalone`: in the app, nothing listens. `client-server`: in the app, served to clients, with a window. `server`: served, no window. `client`: a window on another process's cells (`[client] server`, or a pairing). `cli`: a command-line tool. See [concepts](../basics/concepts.md#where-code-runs). |
 | `version` | string | the package's | `major.minor`: builds are numbered from git, `1.4.<commit count>` (`1.4.0-nogit` without git). Or a pinned `major.minor.patch`. Either may carry a stage: `1.4-beta` builds `1.4.<n>-beta` (`-alpha` < `-beta` < `-rc` < none). Unset: `Cargo.toml`'s version, as written. |
-| `ui` | `window`, `browser` | `"window"` | Where a `client-server` app shows its UI: `window` (the shared runtime's) or `browser` (its own page in the system browser, running until asked to stop). |
+| `ui` | `window`, `browser` | `"window"` | Where a `client-server` app shows its UI: `window` (the shared runtime's) or `browser` (its own page in the system browser, running until asked to stop). A launch's `--client=window`, `browser` or `server-only` (no window, served until asked to stop) decides for one run (aio's `--client`). |
 | `lang` | language tag | `"en"` | The page's language, `<html lang>` (screen readers, spellcheck, translation). Letters, digits and `-`: `"en"`, `"pt-BR"`. |
 | `dir` | `ltr`, `rtl`, `auto` | `"ltr"` | The page's direction, `<html dir>`. `auto` is the browser's guess from the first strong character. Never guessed from `lang`. |
 | `tz` | `utc`, `local` | `"utc"` | The clock cron schedules read (`#[cron]`, `cx.cron`): UTC as aio's, so a port's jobs fire when they did, or this machine's local time (with its daylight-saving changes). |
+| `flags` | list | `[]` | the app's own launch flags, `--name` each (aio's `appFlags`). Declared, a launch flag (before a bare `--`) one typo from one of them or of aio's own (`--profile`, `--route`, ...) is refused at start: `--verbos: no such flag (did you mean --verbose?)`. A flag far from every name still reaches the app (`aio::paths::Ask::app_args`), so Electron's and the app's undeclared flags stay quiet. Empty: nothing is checked. |
+| `profiles` | bool | `true` | `false` (aio's `profiles: false`: a kiosk, a service): the app runs from one home only, and a launch naming another (`--profile`, `AIORT_PROFILE`, `AIO_PROFILE`, `--home`) is refused at start. `--instance` and `AIORT_DATA` still give a sandbox. |
 | `maintainer` | `"Name <email>"` | none | Who publishes it. A Debian package needs it (`ax build --deb`); `ax create` fills it from git. |
 | `port_of` | id | none | The aio app this app is a port of (its `appId`): it runs on that app's home (its profiles, `AIO_APPS_DIR`) and `state.db`, which aio can still open after. See [migration: data](../migration/data.md). |
 
@@ -214,8 +225,9 @@ Checked as the app builds:
 - `mode = "client-server"` and `mode = "server"` need `[server] listen`.
 - `ui = "browser"` needs `mode = "client-server"` (its server serves the
   page).
-- `mode = "client"` builds without `[client] server`: a pairing can give
-  it the server. With neither, the client refuses to start and says so.
+- `mode = "client"` builds without `[client] server`: a pairing or the
+  connect page can give it the server. With neither, a window's client
+  shows its connect page; a CLI's refuses to start and says so.
 
 ```toml
 # A server and its own window, shown in the system browser.
@@ -242,8 +254,10 @@ The store: one SQLite file in the app's `data/` folder
 | `retire` | file names | `[]` | Files in `data/` set aside at boot as `<name>.pre-migration` (with their `-wal` and `-shm`), never deleted: an old store the app no longer opens. |
 | `pragmas` | statements | `[]` | Extra `PRAGMA` statements run on the store after aio's own (aio's `dbPragmas`). One SQLite ignores refuses the boot. |
 | `persist` | bool | `true` | `false`: the state lives in memory only, no store is opened, every launch starts from the defaults (aio's `persist: false`; the flag `--no-persist` does it for one launch). |
+| `only_persist` | bool | `false` | `true`: only `#[cell(persist)]` cells are saved; every other cell opens in memory and starts from its defaults each launch (aio's `cellDefaults: { persist: "none" }`). `false`: every cell opened on the store is saved, unless `#[cell(persist = false)]`. |
 | `coalesce_ms` | ms | `100` | How long a run of `#[coalesce]` calls is held before it is written (aio's `persistDebounceMs`); `0` writes each call. At most 60000. |
 | `backup_every` | span or `"off"` | `"off"` | Timed whole backups into `<home>/backups` while the app runs ([backups](../persistence/files.md#scheduled-backups)). |
+| `snapshot_every` | span or `"off"` | `"off"` | How often the store's good copy is made again while the app runs (aio's rolling `db.snapshot` that `checkIntegrityOnBoot` restores from): a damaged store then loses at most this much. `"off"`: once a day, at boot. Each copy is checked before it replaces the last. |
 | `backup_keep` | count | `7` | Timed backups kept, the newest (at least 1); hand-made ones are never removed. |
 
 Checked: `store` and each `retire` entry are file names (no `/`, `\`, `.`
@@ -253,7 +267,8 @@ statement and sets none of `journal_mode`, `synchronous` (that is
 
 Every open also runs `PRAGMA quick_check` and, on a damaged file, sets it
 aside and puts the last good copy in its place (aio's
-`checkIntegrityOnBoot`, always on).
+`checkIntegrityOnBoot`, always on). `snapshot_every` keeps that copy
+fresh.
 
 ```toml
 [data]
@@ -264,12 +279,14 @@ retire = ["old-notes.db"]
 
 ## [home]
 
-Only for a port (`[app] port_of`): the aio app's own rules for where its
-home is, as its code resolved them. `--home`, `--profile` and `--instance`
-still win. Without `port_of`, `[home]` is refused.
+Where the app's home is, as its author fixes it. `--home`, `--profile`,
+`--instance` and `AIORT_DATA` still win. `dir` is any app's; `env`,
+`portable` and `dev` are a port's (`[app] port_of`): the aio app's own
+rules, as its code resolved them, refused without `port_of`.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
+| `dir` | absolute or `~/…` | none | The home itself (aio's `appDir`): `data/`, `logs/` and `cache/` in it, a profile beside it (`<dir>-<name>`). Over aio-rs's default place (a port's: after its own rules, over `AIO_APPS_DIR`, as aio's). The boot report says `[home] dir`. Any OS's absolute path passes the build (`/srv/notes`, `C:\notes`), as the app may be built for another; the app refuses one that isn't absolute where it runs. |
 | `env` | variable name | none | A variable naming the home (`NOTES_HOME`); it beats `AIO_APPS_DIR`. |
 | `portable` | file name | none | A folder beside the app's binary (`notes-data`): the home when it exists (a portable install). Not in a debug build. |
 | `dev` | file name | none | A debug build's home in the user's folder (`.notes-dev`), so a dev run never opens the real data. A profile counts from the plain home. |
@@ -284,11 +301,17 @@ env = "NOTES_HOME"
 dev = ".notes-dev"
 ```
 
+```toml
+[home]
+dir = "/srv/notes"
+```
+
 ## [history]
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `keep` | span | `"90d"` | How long the event log keeps every step before older steps fold into a snapshot. Replay, `ax events` and time travel reach back this far. Folded at boot and every 256 commits. |
+| `travel` | bool | `true` | Time travel may step through the history (aio's `diagnostics.dev.timeTravel`). `false` refuses every step (`ax timetravel`, the panel); the history is kept the same. |
 
 A longer `keep` costs disk (one row per committed call); a shorter one
 loses the steps `ax timetravel` and `ax replay` could show.
@@ -308,11 +331,12 @@ For `mode = "client-server"` and `"server"` ([sync](../state/sync.md)).
 | `strict_origin` | bool | `false` | Served beyond loopback: a socket upgrade must say its `Origin`. |
 | `trust_proxy` | header name | none | Behind a reverse proxy: the header it overwrites with the client's address (`"x-forwarded-for"`); its last hop is then the client. |
 | `open` | bool | `false` | Open on purpose (aio's `key: false`): links and routes need no key, so anyone who reaches the port reads the state and calls `#[client]` methods. Said loudly at boot and by `ax doctor`. |
+| `page_log` | bool | `true` | A web page's console in the app's log as `[page]` lines, a release too (aio's client log): its pages post it to `/__aio/log` (with the key or a session, unless from this machine), at most 100 lines a second for each client (the rest counted and said). `false`: nothing is taken. |
 | `local_peers` | bool | `true` | Other processes of this user reach a release build's cells through its local door, with a client's rights (`ax state`, `ax call`, other apps as peers: aio's `allowLocalPeers`, which aio leaves off). `false`: a release build opens no door; a debug build always does. |
 
 Checked: `cert` and `key` go together, need `tls = true` and are absolute
-(the file is built into the app: a relative path has no folder to be
-relative to); `trust_proxy` is a header name; `open` and `[accounts] on`
+on some OS (the file is built into the app: a relative path has no folder
+to be relative to); `trust_proxy` is a header name; `open` and `[accounts] on`
 (or `sessions`) are not both set (each says who gets in).
 
 The framework's own paths are `/ws` and `/__aio…`; an app's routes and
@@ -401,8 +425,9 @@ For `mode = "client"`, and the synced copy of a `client-server` app.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
-| `server` | `host:port` | none | The app's server. A pairing (`ax pair`, `ax import`) saved on the device wins over it. Its host must be in `[capabilities] network`. |
+| `server` | `host:port` | none | The app's server. A link the device keeps (`ax pair`, `ax import`, the connect page) wins over it, and the launch's `--server-url` over both. Reached without a `[capabilities] network` entry: naming it is the consent. |
 | `retention` | span or off | `"off"` | How long a call made offline is kept once the queue is full: then a new call drops the oldest past it, and says so. `"off"`: nothing is dropped; a full queue refuses new calls. |
+| `strict_pin` | bool | `false` | A paired server whose certificate its pinned root no longer covers is refused until paired again (aio's `strictPin`; `--strict-pin` for one launch). Unset, one that proves it holds the app's key is pinned again ([desktop](../clients/desktop.md#a-certificate-that-changed)). |
 
 ### [client.timeouts]
 
@@ -431,9 +456,15 @@ Users, roles and sessions, in `data/auth.db` ([accounts](../auth/README.md)).
 | `session` | span | `"30d"` | How long a session lives unused (used past half its life, it is renewed). 1 s to 100 years. |
 | `max_sessions` | number | `10` | Live sessions per user; a new one past it ends the oldest. At least 1. |
 | `require_verified` | bool | `false` | No sign-in until the account's email is verified (the app's mail hook, `Http::mail`, or `ax auth <app> verify <id>`). |
+| `totp` | bool | `true` | Users may turn on a second factor, TOTP (aio's `auth.totp`). `false`: enrollment is refused (`totp_disabled`); a factor already on stays on. |
+| `cookie` | bool | `true` | A sign-in sets the HttpOnly session cookie (aio's `auth.cookie`). `false`: the session is the answer's token alone, a bearer. |
 
 `session` and `max_sessions` are checked only with `on` or `sessions`;
-`signup` and `require_verified` need `on`.
+`signup` and `require_verified` need `on`. `signup` with
+`require_verified` needs the server's mail hook (`Http::mail`): without
+one no one who signs up could ever sign in, and the app refuses to serve,
+saying so (aio's boot refusal). With `signup` off, the operator verifies
+(`ax auth <app> verify <id>`).
 
 ```toml
 [accounts]
@@ -455,9 +486,14 @@ Each entry is one of: a host (`"api.example.org"`), a host and port
 not the bare domain), `"lan"` (private addresses) or `"*"` (anything).
 
 The hosts this file names must be in it, or the build fails and says
-which line to add: `[client] server`, `[feedback] url` and
-`[updates] url` (a `github:` source needs `"github.com"` and
-`"*.githubusercontent.com"`; a `git+file://` one needs nothing).
+which line to add: `[feedback] url` and `[updates] url` (a `github:`
+source needs `"github.com"` and `"*.githubusercontent.com"`; a
+`git+file://` one needs nothing).
+
+A client's server is the exception, as aio's thin client: the one the
+person picks (the connect page, a pairing, `--server-url`) or the app
+names (`[client] server`) is reached without an entry, that host and port
+alone. Every other host still needs one.
 
 ```toml
 [capabilities]
@@ -467,7 +503,8 @@ network = ["api.example.org", "*.githubusercontent.com", "github.com", "lan"]
 ## [updates]
 
 Signed updates ([release and update](../build/release.md)). Off without
-`url`.
+`url`. A `url` also turns on aio-rs-shell's `updates` in ax's builds:
+an app without one carries no updater ([project](../basics/project.md)).
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
@@ -502,8 +539,9 @@ What `ax build <app>` makes ([build](../build/README.md),
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
-| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`, `web`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
+| `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`, `web`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`), which may carry its own `platforms`, `title` and `ui` (over `[build] platforms`, `[app] name` and `ui`; `entry` is aio's spelling of `bin`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
 | `platforms` | list | `[]` | The OS and CPU each desktop target is built for: `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`. Empty: this machine. `--platforms a,b` per build. |
+| `out` | folder | `"dist"` | Where `ax build` puts what it makes and `ax release`, `ax install` and `ax lab` look (aio's `build.out`): relative to the workspace, or absolute. `--out dir` wins for one run. |
 | `budget_mb` | number | 10 (a server: 6) | The binary's size budget in MB; the build fails above it and names the crates that take the space (`ax build --sizes`). For apps with heavy libraries. |
 | `css` | command or list | none | A CSS toolchain run before every build and on every change under `ax dev`: a command line split on spaces, or an argv list. Never through a shell. |
 | `smoke` | bool | `false` | Every build then starts each Linux artifact it made headless, stops it and checks its log (as `--smoke`). |
@@ -638,6 +676,7 @@ together, whatever the app does ([debugging](../debugging/README.md)).
 | `file_mb` | number | `10` | A file rotates at this size, at least 1. |
 | `heartbeat` | seconds | `3600` | Seconds between `heartbeat` lines (uptime, calls, errors); 0: none. |
 | `suppress` | methods | `[]` | Methods (`"notes.tick"`) whose calls are not logged, even at `debug`: a method called many times a second. |
+| `dir` | absolute or `~/…` | `<home>/logs` | The log folder of the app's own home (aio's `logging.dir`). A profile, an instance, `--home` or `AIORT_DATA` keeps its own `logs/`, so two copies never share a file. `ax logs` finds it from the app's workspace. Absolute as `[home] dir`. |
 | `per_run` | bool | `false` | Each run starts fresh files (aio's per-run `debug.log`): the last run's move to `app.1.log`…, so `keep` runs are kept (a run past `file_mb` still rotates). |
 
 ```toml
@@ -656,7 +695,7 @@ its budget is a perf violation in the log and `ax health`.
 |---|---|---|---|
 | `method` | milliseconds | 16 (debug), 100 (release) | A method's own time. |
 | `effect` | milliseconds | `5` | One effect step. |
-| `call_ceiling` | milliseconds | `30000` | How long each await of an async method may take (aio's `effectTimeoutMs`); one that never settles is cut off, its caller told. A `#[long]` method has none. |
+| `call_ceiling` | milliseconds | `30000` | How long each await of an async method may take (aio's `effectTimeoutMs`); one that never settles is cut off, its caller told. A `#[long]` method has none, a `#[long(ms)]` one its own. |
 | `methods` | table | `{}` | Per method, `"cell.method" = ms`: one meant to be slow while every other stays strict. A key naming no method of its cell is reported (a typo would budget nothing). |
 | `effects` | table | `{}` | Per effect, `"cell.name" = ms` (the name its key starts with). |
 
@@ -770,6 +809,19 @@ warning = 1000
 frozen = 5000
 ```
 
+## [dev]
+
+What `ax dev` does with the app.
+
+| Key | Type | Default | What it is |
+|---|---|---|---|
+| `watch` | folders | `[]`: its sources and assets | Watch only these folders, relative to `aio.toml` (aio's `watch: [..]`): a change elsewhere neither patches nor rebuilds. `ax dev --watch=…` wins for one run. |
+
+```toml
+[dev]
+watch = ["src/ui", "assets"]
+```
+
 ## Options outside aio.toml
 
 aio's options all go through `cell({...})` and `aio.run({...})`. In
@@ -790,7 +842,7 @@ see [views](../ui/views.md) and the tables in
 | `methods` | `#[methods] impl Cell { pub fn m(&mut self, …) -> Result }`; types in arguments are `#[aio::data]` |
 | `scope: "client"` | a cell neither `persist` nor `shared`, in the view's module, or an `aio::ui::Global` |
 | `cancelOn` | `cx.abort("key")` from the method that should cancel ([effects](../state/effects.md)) |
-| `concurrency` | per effect, `.mode(Mode::Newest / Queue / First)`; calls are always one at a time per cell |
+| `concurrency` | `#[mode(newest)]`, `#[mode(first)]` on a `pub async fn` (`first` joins any running call of the method, not only one with the same arguments); per effect, `.mode(Mode::Newest / Queue / First)`; calls are always one at a time per cell |
 | `ttl` | `#[ttl(ms)]` on a `pub async fn` |
 | `long` | `#[long]` on a `pub async fn` |
 | `selectors` | `#[derived] fn f(&self) -> T`; `#[derived(reads = [a, b])]` for a memo kept while those fields stay the same |
@@ -799,11 +851,12 @@ see [views](../ui/views.md) and the tables in
 | `args` | the method's Rust types, checked as the call is decoded; finer rules with `ensure!` |
 | `persist` | `#[cell(persist)]`; `#[transient]` on a field keeps it off disk |
 | `diagnostics: false` | `#[cell(diagnostics = false)]` |
+| `skipActions` | `#[skip_travel]` on a method: time travel steps over its events |
 | `access` | `#[client]` on a method, `#[client(role = "admin")]`, `#[client(allow = f)]` |
 | `visible` | `#[cell(visible = f)]`; `#[server]` on a field keeps it off the wire |
 | `sync` | `#[cell(shared)]` |
 | `worker`, `workerRespawn` | not needed: a method never blocks (I/O is an effect); heavy work runs in an effect off the cell's lock. No per-cell OS thread (**gap**) |
-| `transaction` | nothing: every call is atomic and runs on a copy |
+| `transaction` | `#[cell(transaction)]`, `transaction(serialize, conflict = "warn")`: an async method commits all or nothing (a plain call is atomic and runs on a copy anyway) |
 | `version`, `onMigrate` | `#[cell(version = N, migrate = f)]` |
 | `onRestore` | `#[cell(restore = f)]` (`fn(Self) -> Self`, every boot) |
 | `onPersist` | `#[cell(save = f)]` (`fn(&Self) -> Self`) |
@@ -823,25 +876,26 @@ see [views](../ui/views.md) and the tables in
 | `appId` | `[app] id` |
 | `cells` | the handles the launcher opens (`aio::Source::for_app`, `Handle::open`), or one `aio::Cells` list |
 | `localFirst` | built in: synced copies predict each call and replay offline calls on the server |
-| `cellDefaults` | none: each cell says its own flags (`[data] persist` for the app-wide switch) |
+| `cellDefaults` | `persist`: `[data] only_persist = true` (aio's `persist: "none"` for every cell but `#[cell(persist)]` ones); `visible`: each cell's own `visible = f`, checked against its type |
 | `port`, `host`, `expose` | `[server] listen`; `--port`, `--host`, `--expose` per launch |
 | `tls` | `[server] tls`, `cert`, `key` |
-| `appDir`, `profiles` | `--home`, `--profile`, `--instance`, `AIORT_DATA`; a port's `[home]`. Profiles can't be turned off (**gap**) |
-| `dbPath`, `dbPragmas` | `[data] store`, `[data] pragmas` |
+| `appDir` | `[home] dir`; per launch `--home`, `--profile`, `--instance`, `AIORT_DATA` |
+| `profiles` | `[app] profiles` |
+| `dbPath`, `dbPragmas` | `[data] store` (a file name in `data/`: the store is backed up, restored and checked by updates with the rest of the home; move the whole home with `[home] dir`), `[data] pragmas`; `":memory:"` is `[data] persist = false` or `--no-persist` |
 | `checkIntegrityOnBoot` | always: `PRAGMA quick_check` and recovery at every open |
 | `updates` | `[updates]` |
 | `feedback` | `[feedback]` |
 | `persist`, `persistKey`, `persistMode` | `#[cell(persist)]` per cell, `[data] persist = false` or `--no-persist` app-wide; each cell is its own row, keyed by its id |
 | `persistDebounceMs` | `[data] coalesce_ms` for `#[coalesce]` runs (default `aio::PERSIST_DEBOUNCE`, 100 ms) |
 | `ui` | `aio_shell::Window` in the launcher (title, size, icon, tray, head, lang, dir), `[app] lang`/`dir`, `[ui]` |
-| `baseDir`, `watch` | `ax dev` watches the app's crate; not configurable |
+| `baseDir`, `watch` | `ax dev` watches the app's crate; `[dev] watch` (or `--watch=`) only some folders of it |
 | `serveDirs`, `assets` | `[server.dirs]`, `[server.public_dirs]` |
-| `client` | `[app] mode` and `[app] ui` |
+| `client` | `[app] mode` and `[app] ui`; `--client=window\|browser\|server-only` per run |
 | `keepServer` | `aio_shell::Window { keep_server }`, `--keep-server` per launch |
 | `localConnectHooks` | `Http::door_links(true)`: `Http::on_link` hears the local door's links too (a peer app's copy; tools never) |
 | `transport` | fixed: the window talks over a private socket, clients over `/ws` |
 | `takeover` | `--takeover` |
-| `serverUrl` | `[client] server` |
+| `serverUrl` | `[client] server`; `--server-url` per launch |
 | `users`, `auth`, `sessions` | `[accounts]`, `Http::users`, `Http::oidc`, `Http::mail` |
 | `key` | the app's key file and `AIORT_TOKEN`; `key: false` is `[server] open` |
 | `pairing` | `[server] pairing` |
@@ -852,7 +906,7 @@ see [views](../ui/views.md) and the tables in
 | `budgets` | `[budgets]` |
 | `renderBudget` | `[vitals.render]` |
 | `wire` | none: the wire's encoding is fixed ([wire](../migration/wire.md)) |
-| `effectTimeoutMs` | per effect, `Effect::timeout(d)`; no app-wide default (**gap**) |
+| `effectTimeoutMs` | `[perf] call_ceiling` (ms, 30000 by default), the await ceiling of async methods; `#[long]` exempts one, `#[long(ms)]` gives one its own; per effect, `Effect::timeout(d)` |
 | `freezeState` | not needed: a method gets `&mut` of a copy, the committed state is an `Arc` nobody can change |
 | `memory` | `[memory]` |
 | `circuitBreaker` | `aio::Cells::trip_after(max, window)` |
@@ -861,20 +915,20 @@ see [views](../ui/views.md) and the tables in
 | `guardDispatches` | not needed: a refused call is a `Result`, a panic in a method refuses that call |
 | `refusalsReject` | always: a refusal is the call's `Err` |
 | `journal` | always: the state and its event commit in one transaction |
-| `redactActions` | `#[redact]` on a method |
+| `redactActions` | `#[redact]` on a method; `"vault:*"`: `#[cell(redact)]` |
 | `childWindows`, `electron` | `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, … }`; `electron.downloadWindow` is `[build.download_window]`, `allowLocalPeers` `[server] local_peers`; `ignoreDebugEnv` is always on in a release build |
 | `splash` | `[build.splash]`; its `show` at run time: `Window { splash_show }` |
 | `libraryMode` | `Handle::memory()`, `Handle::open` without `aio_shell::start` (tests, embedding) |
 | `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms`, `full_state_percent` (`0.5` is `50`) |
 | `routes` | `aio::http::Http::route(Route::get(…))` |
 | `maxConnections`, `wsLimits` | `[server.limits]` |
-| `appFlags` | not needed: aio-rs takes only its own flags (`aio::paths::FLAGS`) and passes the rest to the app |
+| `appFlags` | `[app] flags`: declared names; a near-miss is refused with the one meant, the rest reach the app |
 | `allowedOrigins` | `[server] hosts` |
 | `security` | `[server.security]`; compression with `Http::compress` |
 | `plugins` | `aio::plugin::Plugin`, `aio::plugin::compose` |
 | `strictOrigin`, `trustProxyHeader` | `[server] strict_origin`, `[server] trust_proxy` |
 | `schedules` | `#[every]`, `#[cron]`, `cx.every`, `cx.cron`, `cx.after` |
-| `isolate` | none (**gap**); `ax test <app> <filter>` runs some tests |
+| `isolate` | `AIORT_ISOLATE=todo,mail`: only those cells start, the others stay disabled |
 | `beforeReduce` | `aio::before_call(f)` |
 | `onAction` | `aio::on_action(f)`; one cell's: `Handle::listen(f)`, `on_change` |
 | `onEffect` | `aio::on_effect(f)` |
@@ -884,10 +938,10 @@ see [views](../ui/views.md) and the tables in
 | `onStopping`, `onStop` | `aio::on_stopping(f)`, `aio::on_stop(f)` |
 | `onError` | `aio::report::on_problem(f)` |
 | `onRestore` | `#[cell(restore = f)]` |
-| `logging` | `[log]` |
+| `logging` | `[log]`; `logging.dir` is `[log] dir` |
 | `diagnostics` | always on; `#[cell(diagnostics = false)]` per cell |
 | `dispatchStorm` | `[perf.storm]` |
-| `onCheckpointRestore` | none: a damaged store is recovered and said in the log and a report (**gap**: no hook) |
+| `onCheckpointRestore` | `#[cell(recovered = f)]` (`fn(Self, &aio::Recovered) -> Self`): the state a store back from a damaged file boots on; `aio::on_recovered(f)` hears each one; also said in the log and a report |
 
 ## Common mistakes
 

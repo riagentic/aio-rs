@@ -19,9 +19,9 @@ views, the tools) follows from that.
      ┌──────────┼──────────────┬──────────────────┬──────────────────┐
      ▼          ▼              ▼                  ▼                  ▼
    views      synced        effects (I/O),     listeners on        the log:
-   re-render  clients       hand results       other cells         replay, time
-   their      get patches   back as calls                          travel, ax events
-   fields
+   update     clients       hand results       other cells         replay, time
+   what read  get patches   back as calls                          travel, ax events
+   the field
 ```
 
 ## Cells

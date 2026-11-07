@@ -73,6 +73,9 @@ async fn slow_methods_and_effect_steps_reach_perf_log_and_the_hook() {
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let s = seen.clone();
     aio::report::on_problem(move |kind, message| s.lock().unwrap().push(format!("{kind}: {message}")));
+    let typed = Arc::new(Mutex::new(Vec::<aio::report::Diagnostic>::new()));
+    let t = typed.clone();
+    let _bus = aio::report::subscribe(move |d| t.lock().unwrap().push(d.clone()));
     let h = Handle::<Slow>::memory();
     h.crunch(0).unwrap();
     h.crunch(20).unwrap();
@@ -87,6 +90,11 @@ async fn slow_methods_and_effect_steps_reach_perf_log_and_the_hook() {
     })
     .await;
 
+    // aio's structured event: the cell, the call's id and the numbers.
+    let over = typed.lock().unwrap().iter().find(|d| d.kind == "budget:method").cloned().unwrap();
+    assert_eq!((over.cell.as_deref(), over.call.is_some_and(|c| c > 0)), (Some("slow"), true), "{over:?}");
+    let n = |k: &str| over.numbers.iter().find(|(name, _)| *name == k).map(|(_, v)| *v).unwrap();
+    assert!(n("took_ms") >= 20 && n("budget_ms") == 5, "{over:?}");
     let seen = seen.lock().unwrap().clone();
     let has = |p: &str| seen.iter().any(|l| l.starts_with(p));
     assert!(has("budget:method: method slow.crunch "), "{seen:?}");

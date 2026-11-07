@@ -23,6 +23,15 @@ impl Job {
         Ok(())
     }
 
+    /// Its own ceiling, 2 s (aio's per-method timeout).
+    #[long(2000)]
+    pub async fn ping(&mut self) -> Result {
+        self.status = "pinging".into();
+        let n: u32 = never().await;
+        self.status = format!("pong {n}");
+        Ok(())
+    }
+
     #[long]
     pub async fn colorize(&mut self) -> Result {
         self.status = "colorizing".into();
@@ -54,6 +63,12 @@ async fn an_await_past_the_ceiling_is_cut_off_and_a_long_one_is_not() {
     h.done("hang").await;
     assert_eq!(t0.elapsed(), Duration::from_secs(1));
     aio::perf::set(aio::perf::Budgets::default());
+
+    _ = h.ping().unwrap();
+    let t0 = tokio::time::Instant::now();
+    h.done("ping").await;
+    assert_eq!(t0.elapsed(), Duration::from_secs(2), "#[long(ms)]: its own ceiling");
+    assert_eq!(h.state().status, "pinging");
 
     h.colorize().unwrap();
     tokio::time::sleep(aio::effect::CALL_CEILING * 2).await;

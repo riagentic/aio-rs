@@ -64,6 +64,30 @@ pub struct Window {
     /// take 50 ms; one that panics or takes longer leaves the build's
     /// `show`, said in the log.
     pub splash_show: Option<fn() -> SplashShow>,
+    /// How much of the window the OS draws (aio's `ui.chrome`).
+    pub chrome: Chrome,
+    /// DevTools outside `ax dev` too (a release build, a plain `cargo
+    /// build`): F12 and Ctrl+Shift+I, and the launch's `--cdp=<port>` (aio's
+    /// always-on keys and `--cdp`). Off, only `ax dev`'s builds (feature
+    /// `dev`) have them: nothing outside the app reaches its page.
+    pub devtools: bool,
+}
+
+/// How much of the window the OS draws ([`Window::chrome`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Chrome {
+    /// The OS's title bar and border.
+    #[default]
+    Standard,
+    /// No OS frame; aio's title bar in the page, styled by the app's CSS
+    /// (`.aio-titlebar`, `.aio-titlebar-title`, `.aio-titlebar-button`,
+    /// `--aio-titlebar-*`): a drag region, minimize, maximize and close,
+    /// and a double click maximizes. Its title follows `document.title`.
+    Themed,
+    /// No frame and no title bar: the app draws its own, with a drag
+    /// region (`-webkit-app-region: drag`) and [`page::minimize`],
+    /// [`page::maximize`], [`page::close`].
+    None,
 }
 
 pub use aio::config::SplashShow;
@@ -85,6 +109,7 @@ pub use aio::config::Dir;
 
 #[cfg(target_os = "android")]
 pub mod android;
+mod connect;
 pub mod delta;
 pub mod desktop;
 mod dialog;
@@ -104,6 +129,12 @@ pub mod inspect;
 pub mod instance;
 #[cfg(all(test, unix))]
 mod islands;
+
+/// The windows of this process hear one diagnostic bus and one log sink,
+/// and a hot reload rebuilds every one of them: tests that open a window
+/// (or swap the sink) take turns.
+#[cfg(test)]
+pub(crate) static WINDOW_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub mod macmove;
 pub mod oneclick;
 pub mod os;
@@ -130,6 +161,21 @@ mod views;
 pub mod web;
 #[cfg(test)]
 mod window_routes;
+
+/// Every log line of this test binary, for the tests that read them: one
+/// sink for all, so tests running at once never swap each other's out.
+#[cfg(all(test, unix))]
+pub(crate) fn test_log() -> &'static std::sync::Mutex<Vec<String>> {
+    static LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    static SINK: std::sync::Once = std::sync::Once::new();
+    SINK.call_once(|| {
+        aio::log::set_sink(Some(std::sync::Arc::new(|_, l: &str| {
+            eprintln!("{l}");
+            LINES.lock().unwrap_or_else(|e| e.into_inner()).push(l.into());
+        })));
+    });
+    &LINES
+}
 #[cfg(windows)]
 mod winstall;
 #[cfg(target_os = "linux")]
@@ -178,14 +224,43 @@ fn page_html(win: &Window, bridge: &str, connect: &str, icon: &str) -> String {
         "" => String::new(),
         v => format!(r#"<meta name="viewport" content="{}">"#, esc(v)),
     };
+    let (html, bar) = match win.chrome {
+        Chrome::Themed => (html.replacen("<html", r#"<html class="aio-themed""#, 1), TITLEBAR),
+        _ => (html, ""),
+    };
     let page = format!(
-        r#"<!doctype html>{html}<head><meta charset="utf-8">{viewport}<title>{}</title>{icon}{}</head><body>{}</body></html>"#,
+        r#"<!doctype html>{html}<head><meta charset="utf-8">{viewport}<title>{}</title>{icon}{}</head><body>{bar}{}</body></html>"#,
         esc(win.title),
         win.head.unwrap_or(""),
         aio::page::body(bridge)
     );
     aio::page::sealed(&page, connect)
 }
+
+/// The title bar of [`Chrome::Themed`] (aio's): its look on the theme's
+/// tokens, each a `--aio-titlebar-*` the app may set; its title follows
+/// the page's; its buttons ask the window (`__aioWindow`, the preload's).
+const TITLEBAR: &str = r#"<style>:root{--aio-titlebar-height:34px;--aio-titlebar-bg:var(--aio-surface-2,#f0f1f3);--aio-titlebar-fg:var(--aio-text,#1f2328);--aio-titlebar-hover:var(--aio-tint,#0000000f);--aio-titlebar-close:var(--aio-danger,#e81123);--aio-titlebar-font:var(--aio-font,system-ui,-apple-system,sans-serif)}
+@media(prefers-color-scheme:dark){:root{--aio-titlebar-bg:var(--aio-surface-2,#1b1f24);--aio-titlebar-fg:var(--aio-text,#c9d1d9);--aio-titlebar-hover:var(--aio-tint,#ffffff1f)}}
+html.aio-themed body{padding-top:var(--aio-titlebar-height)}
+.aio-titlebar{position:fixed;inset:0 0 auto 0;display:flex;align-items:center;height:var(--aio-titlebar-height);background:var(--aio-titlebar-bg);color:var(--aio-titlebar-fg);font-size:13px;font-family:var(--aio-titlebar-font);line-height:1;user-select:none;border-bottom:1px solid var(--aio-border,transparent);-webkit-app-region:drag;z-index:2147483000}
+.aio-titlebar-title{flex:1;padding:0 12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;opacity:.8}
+.aio-titlebar-controls{display:flex;height:100%;-webkit-app-region:no-drag}
+.aio-titlebar-button{width:44px;height:100%;display:grid;place-items:center;padding:0;border:0;background:none;color:inherit;cursor:pointer}
+.aio-titlebar-button:hover{background:var(--aio-titlebar-hover)}
+.aio-titlebar-button[data-act=close]:hover{background:var(--aio-titlebar-close);color:#fff}</style>
+<div class="aio-titlebar"><div class="aio-titlebar-title"></div><div class="aio-titlebar-controls">
+<button class="aio-titlebar-button" data-act="minimize" aria-label="Minimize" title="Minimize"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M0 5h10"/></svg></button>
+<button class="aio-titlebar-button" data-act="maximize" aria-label="Maximize" title="Maximize"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><rect x="0.5" y="0.5" width="9" height="9"/></svg></button>
+<button class="aio-titlebar-button" data-act="close" aria-label="Close" title="Close"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+</div></div><script>(() => {
+  const b = document.querySelector('.aio-titlebar'), t = b.firstChild
+  const title = () => { t.textContent = document.title }
+  title()
+  new MutationObserver(title).observe(document.head, { childList: true, subtree: true, characterData: true })
+  b.addEventListener('click', (e) => { const a = e.target.closest('[data-act]'); if (a) window.__aioWindow[a.dataset.act]() })
+  b.addEventListener('dblclick', (e) => { if (!e.target.closest('[data-act]')) window.__aioWindow.maximize() })
+})()</script>"#;
 
 /// The page's `<html>` tag: its language (`en` unless set) and its
 /// direction, escaped (pure; the web build's page uses it too).
@@ -301,7 +376,7 @@ fn said_contract() -> Option<std::io::Result<()>> {
 /// Open `app` in the shared runtime; returns when the window closes.
 /// The runtime's profile and the socket live in the app's own dirs.
 pub fn run(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
-    let dev = std::env::var_os("AIORT_DEV_CLOSED").filter(|_| cfg!(debug_assertions));
+    let dev = std::env::var_os("AIORT_DEV_CLOSED").filter(|_| cfg!(feature = "dev"));
     // Under `ax dev`'s dx: a dx that goes (its session killed) stops us
     // gracefully, as a parent that goes does; dx sets no watch of its own.
     #[cfg(target_os = "linux")]
@@ -313,11 +388,83 @@ pub fn run(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::i
     #[cfg(target_os = "macos")]
     macmove::close();
     // The person closed the window, so the dev session ends too; a stop
-    // asked (dx restarting the app after a rebuild, `ax stop`) is not that.
-    if let Some(f) = dev.filter(|_| shown.is_ok() && !STOP_ASKED.load(std::sync::atomic::Ordering::Relaxed)) {
+    // asked (dx restarting the app after a rebuild, `ax stop`) is not that,
+    // nor a window whose views panicked (ax dev says the panic and waits for a fix).
+    let asked = STOP_ASKED.load(std::sync::atomic::Ordering::Relaxed);
+    let panicked = VIEWS_PANICKED.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(f) = dev.filter(|_| closed_by_person(shown.is_ok(), asked, panicked)) {
         _ = std::fs::write(f, b"closed");
     }
     shown
+}
+
+/// Whether a window that ended so was closed by the person (pure): it
+/// ended well, no stop was asked, and its views hadn't panicked.
+fn closed_by_person(ended_well: bool, stop_asked: bool, views_panicked: bool) -> bool {
+    ended_well && !stop_asked && !views_panicked
+}
+
+/// The window's views panicked and no page has drawn them again since.
+static VIEWS_PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where `ax dev` reads a panic of the window's views when the app has
+/// ended (beside its dev-closed mark): tooling only, the app ends as a
+/// release build's does.
+#[cfg(feature = "dev")]
+fn dev_panicked() -> Option<std::path::PathBuf> {
+    let closed = std::path::PathBuf::from(std::env::var_os("AIORT_DEV_CLOSED")?);
+    Some(closed.with_file_name("dev-panicked"))
+}
+
+#[cfg(any(feature = "dev", test))]
+/// A panic as `ax dev` says it (pure): the message, where, then the
+/// backtrace's frames that aren't std's, the runtime's or the panic
+/// machinery's, at most `MAX_FRAMES`.
+fn panic_said(message: &str, at: Option<&str>, backtrace: &str) -> String {
+    const MAX_FRAMES: usize = 24;
+    let skip = [
+        "std::",
+        "core::",
+        "alloc::",
+        "tokio::",
+        "aio_rs_shell::",
+        "rust_begin_unwind",
+        "__rust",
+        "backtrace::",
+        "<unknown>",
+    ];
+    let mut out = message.to_string();
+    if let Some(at) = at {
+        out.push_str(&format!("\n  at {at}"));
+    }
+    let mut frames = vec![];
+    let mut lines = backtrace.lines().peekable();
+    while let Some(l) = lines.next() {
+        let f = l.trim_start();
+        let Some((_, name)) = f.split_once(": ").filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())) else {
+            continue;
+        };
+        let place = lines.peek().map(|n| n.trim_start()).filter(|n| n.starts_with("at ")).map(str::to_string);
+        if place.is_some() {
+            lines.next();
+        }
+        if skip.iter().any(|s| name.starts_with(s)) || name.contains("panicking") {
+            continue;
+        }
+        frames.push(match place {
+            Some(p) => format!("  {name}\n      {p}"),
+            None => format!("  {name}"),
+        });
+    }
+    if !frames.is_empty() {
+        let n = frames.len();
+        out.push_str("\n\nbacktrace (the app's frames):\n");
+        out.push_str(&frames.into_iter().take(MAX_FRAMES).collect::<Vec<_>>().join("\n"));
+        if n > MAX_FRAMES {
+            out.push_str(&format!("\n  … {} more", n - MAX_FRAMES));
+        }
+    }
+    out
 }
 
 thread_local!(static WINDOW_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
@@ -331,6 +478,14 @@ fn say_window_panics() {
         before(info);
         if WINDOW_THREAD.get() {
             eprintln!("{}", window_panicked(info.payload()));
+            VIEWS_PANICKED.store(true, std::sync::atomic::Ordering::Relaxed);
+            // `ax dev`: the panic, where and the app's frames, for the session to say.
+            #[cfg(feature = "dev")]
+            if let Some(f) = dev_panicked() {
+                let trace = std::backtrace::Backtrace::force_capture().to_string();
+                let at = info.location().map(|l| l.to_string());
+                _ = std::fs::write(f, panic_said(&aio::report::panic_text(info.payload()), at.as_deref(), &trace));
+            }
         }
     }));
 }
@@ -338,6 +493,15 @@ fn say_window_panics() {
 /// What is said when the window's task panicked (pure).
 fn window_panicked(payload: &(dyn std::any::Any + Send)) -> String {
     format!("[aio-shell] window panicked: {} (it no longer updates; restart the app)", aio::report::panic_text(payload))
+}
+
+/// The window is ending (a stop asked, or it closed): a later launch is
+/// told so and starts once this one is gone, never handed to it.
+static ENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this instance is ending ([`ENDING`]).
+pub(crate) fn ending() -> bool {
+    ENDING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The window ended because a stop was asked (SIGTERM, Ctrl-C), not closed.
@@ -350,7 +514,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
     }
     // `ax dev`: say when a hot-patch lands, so a patch that didn't is seen;
     // numbered, so the log never folds patches in a row into one line.
-    #[cfg(all(debug_assertions, feature = "dev"))]
+    #[cfg(feature = "dev")]
     aio_hotpatch::register_handler(Arc::new(|| {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -362,17 +526,28 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
     }));
     // A dev build says a component caught in a render loop, by name, and
     // keeps the component tree for `ax components`.
-    if instance::SHOWN.get() == Some(&aio::config::Shown::Browser) {
-        return in_browser(dirs);
+    match instance::SHOWN.get() {
+        Some(Some(aio::config::Shown::Browser)) => return in_browser(dirs),
+        Some(None) => return serve(dirs),
+        _ => {}
     }
-    // `ax dev --size WxH` (a debug build's): the window opens at that size;
-    // its saved size and place are neither used nor changed.
-    let sized = asked_size(std::env::var("AIORT_WINDOW_SIZE").ok().filter(|_| cfg!(debug_assertions)).as_deref());
+    // A client's window shows its connect page while it has no server.
+    let app = connect::root(app, dirs);
+    // `ax dev --size WxH` (tooling, aio-shell's `dev`) or the launch's
+    // `--width`/`--height` (aio's): the window opens at that size; its saved
+    // size and place are neither used nor changed.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let dev = std::env::var("AIORT_WINDOW_SIZE").ok().filter(|_| cfg!(feature = "dev"));
+    let ask = aio::paths::Ask::parse(&args).unwrap_or_default();
+    let sized = asked_size(dev.as_deref()).or_else(|| launch_size(&ask, &win));
+    let cdp = ask.cdp;
     let win = match sized {
         Some((width, height)) => Window { width, height, ..win },
         None => win,
     };
-    let win = Window { title: titled(std::env::var("AIORT_TITLE").ok(), win.title), ..win };
+    // `AIORT_TITLE` this run, else a `[build] targets` title this build was made with.
+    let asked = std::env::var("AIORT_TITLE").ok().or(option_env!("AIORT_BUILT_TITLE").map(String::from));
+    let win = Window { title: titled(asked, win.title), ..win };
     let data = dirs.data.join("electron");
     let dir = dirs.cache.join("shell");
     _ = ASK_MOVE.set((win.title, dirs.data.clone()));
@@ -466,11 +641,11 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             }
         });
         // Later launches of the app hand their arguments over here.
-        tokio::spawn(take_launches(aio::ipc::Listener::bind(&hand)?, ctl.clone(), aio::lifecycle::ask_stop));
+        tokio::spawn(take_launches(aio::ipc::Listener::bind(&hand)?, ctl.clone(), aio::lifecycle::ask_stop, ending));
         // `ax surface`, `trigger`, `shot` and `eval` reach the window here:
-        // a dev build's only (aio's control API was dev-only); a release
-        // build opens no DevTools protocol (AIORT_CDP is a debug build's).
-        if cfg!(debug_assertions) {
+        // `ax dev`'s builds only (aio-shell's `dev`: tooling; aio's control
+        // API was dev-only); elsewhere no DevTools protocol (AIORT_CDP is ignored).
+        if cfg!(feature = "dev") {
             let ui = aio::ipc::Listener::bind(&aio::ipc::addr(&socks, inspect::DOOR))?;
             tokio::spawn(inspect::serve(ui, inspect::hub().clone(), ctl.clone()));
         }
@@ -587,7 +762,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         let mut child =
             cmd.arg(&dir)
                 .args(&sandbox)
-                .args(switches::extra(&|k| std::env::var(k).ok()))
+                .args(switches::extra(&|k| std::env::var(k).ok(), cdp.as_deref(), win.devtools))
                 .arg(format!("--user-data-dir={}", data.join("profile").display()))
                 // native on Wayland when that is the session; its app_id
                 // comes from package.json's `desktopName` (Electron sets
@@ -602,10 +777,12 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 .arg(format!("--aio-width={}", win.width))
                 .arg(format!("--aio-height={}", win.height))
                 .arg(format!("--aio-gpu={gpu}"))
-                // A dev build's keys: DevTools, a clean reload (guest.js).
-                .args(cfg!(debug_assertions).then_some("--aio-dev=1"))
+                // `ax dev`'s keys (tooling): DevTools, a clean reload (guest.js).
+                .args(cfg!(feature = "dev").then_some("--aio-dev=1"))
                 // A contained run (AIORT_NO_OPEN): its links open nowhere (main.js).
                 .args(std::env::var_os("AIORT_NO_OPEN").filter(|v| !v.is_empty()).map(|_| "--aio-no-open=1"))
+                // `ax build --smoke`: the page's files and guest preloads checked (main.js).
+                .args(std::env::var_os("AIORT_SMOKE").filter(|v| v == "1").map(|_| "--aio-smoke=1"))
                 .args(win.background.map(|[l, d]| format!("--aio-bg={l}|{d}")))
                 .args(icon.iter().flat_map(|(p, (w, h))| {
                     [format!("--aio-icon={}", p.display()), format!("--aio-icon-size={w}x{h}")]
@@ -643,6 +820,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 }
             },
             _ = asked => {
+                ENDING.store(true, std::sync::atomic::Ordering::SeqCst);
                 eprintln!("[aio] {}: asked to stop", dirs.id);
                 STOP_ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
                 if let Some(c) = ctl.lock().await.as_mut() {
@@ -654,6 +832,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 Ok(())
             }
         };
+        ENDING.store(true, std::sync::atomic::Ordering::SeqCst);
         pid.into_iter().for_each(|p| only.disarm(p));
         r
     });
@@ -736,7 +915,8 @@ fn in_browser(dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
     let serving = serving.and_then(|t| aio::serde_json::from_str(&t).ok()).unwrap_or_default();
     let url = browser_url(&serving, &aio::config::token(&dirs.data)?).ok_or_else(|| {
         std::io::Error::other(
-            "[app] ui = \"browser\": the app serves nothing (open its cells with Source::for_app_with)",
+            "[app] ui = \"browser\" or --client=browser: the app serves nothing (open its cells with \
+             Source::for_app_with, in mode \"client-server\")",
         )
     })?;
     aio::rt().block_on(async {
@@ -876,6 +1056,14 @@ fn asked_size(v: Option<&str>) -> Option<(u32, u32)> {
     Some((w.parse().ok().filter(|n| *n > 0)?, h.parse().ok().filter(|n| *n > 0)?))
 }
 
+/// The launch's `--width`/`--height` over `win`'s size, when either is
+/// given as a size (pure).
+fn launch_size(ask: &aio::paths::Ask, win: &Window) -> Option<(u32, u32)> {
+    let px = |v: &Option<String>| v.as_deref().and_then(|v| v.parse().ok()).filter(|n: &u32| *n > 0);
+    let (w, h) = (px(&ask.width), px(&ask.height));
+    (w.is_some() || h.is_some()).then(|| (w.unwrap_or(win.width), h.unwrap_or(win.height)))
+}
+
 /// The window's title for this run: `AIORT_TITLE` (aio's `--title=`,
 /// `ax dev --title`) when set, else the app's (pure).
 fn titled(asked: Option<String>, app: &'static str) -> &'static str {
@@ -925,7 +1113,7 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
 /// Take later launches' hand-overs: each is delivered to the app
 /// (`instance::launches`) and brings the window forward ("focus"), if
 /// there is one; a stop asked is `stop()`.
-pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, stop: fn()) {
+pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, stop: fn(), ending: fn() -> bool) {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     while let Ok(s) = listener.accept().await {
         let (r, mut w) = tokio::io::split(s);
@@ -945,6 +1133,11 @@ pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, st
             _ = w.write_all(b"bad launch\n").await;
             continue;
         };
+        // Ending: the launch would be lost with this instance; it waits for the lock instead.
+        if ending() {
+            _ = w.write_all(format!("{}\n", instance::STOPPING).as_bytes()).await;
+            continue;
+        }
         eprintln!("[aio] handed a launch: {:?}", launch.args);
         instance::deliver(launch);
         if let Some(c) = ctl.lock().await.as_mut() {
@@ -969,6 +1162,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn only_a_window_the_person_closed_ends_the_dev_session() {
+        assert!(closed_by_person(true, false, false));
+        assert!(!closed_by_person(true, true, false), "ax dev restarting it, ax stop");
+        assert!(!closed_by_person(true, false, true), "its views panicked: ax dev waits for a fix");
+        assert!(!closed_by_person(false, false, false), "a failed start");
+    }
+
+    #[test]
+    fn a_panic_on_the_page_names_where_and_the_apps_frames() {
+        let trace = "   0: std::backtrace::Backtrace::force_capture\n             at /rustc/x/library/std/src/backtrace.rs:312:13\n   1: aio_rs_shell::say_window_panics::{{closure}}\n   2: std::panicking::rust_panic_with_hook\n   3: notes::Counter::add\n             at ./src/lib.rs:18:9\n   4: notes::App::{{closure}}\n   5: tokio::runtime::task::raw::poll\n";
+        let said = panic_said("index out of bounds", Some("src/lib.rs:18:9"), trace);
+        assert!(said.starts_with("index out of bounds\n  at src/lib.rs:18:9"), "{said}");
+        assert!(
+            said.contains("notes::Counter::add\n      at ./src/lib.rs:18:9") && said.contains("notes::App::"),
+            "{said}"
+        );
+        assert!(!said.contains("std::") && !said.contains("tokio::"), "{said}");
+        assert_eq!(panic_said("boom", None, ""), "boom", "a release build: no backtrace");
+    }
     use aio::page::{DIALOG, OVERLAY, RENDER, render_probe};
 
     #[test]
@@ -1029,6 +1243,16 @@ mod tests {
     #[test]
     fn a_dev_size_is_w_by_h() {
         assert_eq!(asked_size(Some("390x844")), Some((390, 844)));
+        // aio's --width/--height: either one, the other as declared.
+        let win = Window { width: 800, height: 600, ..Default::default() };
+        let ask = |w: Option<&str>, h: Option<&str>| aio::paths::Ask {
+            width: w.map(Into::into),
+            height: h.map(Into::into),
+            ..Default::default()
+        };
+        assert_eq!(launch_size(&ask(Some("420"), None), &win), Some((420, 600)));
+        assert_eq!(launch_size(&ask(None, Some("620")), &win), Some((800, 620)));
+        assert_eq!([launch_size(&ask(None, None), &win), launch_size(&ask(Some("x"), Some("0")), &win)], [None, None]);
         assert_eq!([asked_size(None), asked_size(Some("390")), asked_size(Some("0x9"))], [None, None, None]);
         assert_eq!(titled(Some("Notes (QA)".into()), "Notes"), "Notes (QA)");
         assert_eq!([titled(None, "Notes"), titled(Some(" ".into()), "Notes")], ["Notes", "Notes"]);
@@ -1144,7 +1368,7 @@ mod tests {
         let (to_electron, mut electron) = pair();
         let ctl: Ctl = Arc::new(tokio::sync::Mutex::new(Some(tokio::io::split(to_electron).1)));
         let mut got = instance::launches();
-        tokio::spawn(take_launches(aio::ipc::Listener::bind(&sock).unwrap(), ctl, || {}));
+        tokio::spawn(take_launches(aio::ipc::Listener::bind(&sock).unwrap(), ctl, || {}, || false));
         let (s, cwd) = (sock.clone(), d.path().to_path_buf());
         tokio::task::spawn_blocking(move || instance::hand_over(&s, &cwd, &["notes.md".into()]))
             .await
@@ -1307,12 +1531,15 @@ mod tests {
     #[test]
     fn a_dev_page_shows_its_errors_on_the_page() {
         assert!(overlay(false).is_empty(), "a release page carries no overlay");
-        assert!(page(&Window::default()).contains("data-aio-dev"), "a dev build's page does");
+        // `ax dev`'s builds (aio's feature `dev`, which decides) carry it,
+        // every other build none.
+        assert_eq!(page(&Window::default()).contains("data-aio-dev"), aio::ui::DEV);
         let js = format!(
             "const on = {{}};
              globalThis.window = {{ addEventListener: (k, f) => on[k] = f }};
              const el = (tag) => ({{ tag, kids: [], style: {{}}, attrs: {{}}, textContent: '',
                setAttribute(k, v) {{ this.attrs[k] = v; }},
+               attachShadow() {{ return this; }},
                appendChild(c) {{ this.kids.push(c); }},
                set textContent(t) {{ this._t = t; if (t === '') this.kids = []; }}, get textContent() {{ return this._t; }} }});
              globalThis.document = {{ body: el('body'), createElement: el }};

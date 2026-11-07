@@ -237,9 +237,9 @@ async fn eval(ws: &mut Ws, id: &mut u64, expr: &str) -> Value {
 /// a script loaded once per page; a `mount` that throws keeps the placeholder.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
-    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let keep = said.clone();
-    let before = aio::log::set_sink(Some(std::sync::Arc::new(move |_, l: &str| keep.lock().unwrap().push(l.into()))));
+    // The windows are the process's: real-window tests take turns.
+    let _turn = crate::WINDOW_TURN.lock().await;
+    let said = crate::test_log();
     let d = tempfile::tempdir().unwrap();
     let file = d.path().join("index.html");
     std::fs::write(&file, page_with(&Window { title: "islands", ..Default::default() }, BRIDGE)).unwrap();
@@ -322,7 +322,6 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
     until("window.__tip.off === 5").await;
     until("Object.keys(window.__aioIslands.live).length === 0 && !document.querySelector('iframe')").await;
     // Which half failed, in the app's log.
-    aio::log::set_sink(before);
     let said = said.lock().unwrap().join("\n");
     assert!(said.contains("[island] its script loaded but mount() threw: Error: no canvas"), "{said}");
     assert!(said.contains("[island] the script failed to load: Error: bad bundle"), "{said}");

@@ -34,7 +34,7 @@ aio_shell::run(app::App, aio_shell::Window { width: 900, height: 640, ..aio_shel
 | Step | What it does |
 |---|---|
 | `aio_shell::start(&cfg, version)` | reads the app's flags (`--home`, `--profile`, `--instance`, `--route`), takes the app's lock and boots it (log, reports, health). `Start::Run(dirs)`: this process runs the app. `Start::HandedOver`: the app already runs, it got this launch's arguments and came to the front, so this process exits. `Start::Done`: nothing to run (`--version` answered, an update is installing). |
-| `aio::Source::for_app(&cfg, &dirs)` | opens the cell as `[app] mode` says: this process's store, or a synced copy of `[client] server`'s |
+| `aio::Source::for_app(&cfg, &dirs)` | opens the cell as `[app] mode` says: this process's store, or a synced copy of its server's; a client with no server it can reach shows its connect page ([below](#the-thin-client-and-other-machines)) instead of failing (a CLI's client, without the kit, fails) |
 | `aio_shell::run(App, Window { .. }, &dirs)` | opens the window and returns when it closes; then the stores finish their effects (5 s at most) and the app exits |
 
 The window's fields (`Window::of(&cfg)` fills the title, `lang` and `dir`
@@ -165,12 +165,13 @@ A failed download closes it and asks Retry or Quit.
 
 | What | How it works |
 |---|---|
-| Size and place | the first size is `Window { width, height }`; the size and place a person leaves it at are kept in `<data>/window.json` and used while the declared size is unchanged. A saved place off every screen moves onto the screen it overlaps most; a size as big as the screen opens maximized. `ax dev --size 390x844` opens one run at that size and saves nothing. |
+| Title bar | the OS's, unless `Window { chrome }` (aio's `ui.chrome`) says otherwise: `Chrome::Themed` draws no OS frame and puts aio's title bar in the page (a drag region, minimize, maximize, close, a double click maximizes; its title follows `document.title`), styled by the app's CSS (`.aio-titlebar`, `.aio-titlebar-title`, `.aio-titlebar-button`, `--aio-titlebar-height`, `-bg`, `-fg`, `-hover`, `-close`, `-font`); `Chrome::None` draws no frame and no bar: the app draws its own, with `-webkit-app-region: drag` and `page::minimize`, `maximize`, `close` |
+| Size and place | the first size is `Window { width, height }`; the size and place a person leaves it at are kept in `<data>/window.json` and used while the declared size is unchanged. A saved place off every screen moves onto the screen it overlaps most; a size as big as the screen opens maximized. `ax dev --size 390x844` opens one run at that size and saves nothing; so does a launch's `--width=420`, `--height=620` (aio's, either one; the other as declared). |
 | First frame | the window shows once it has painted, at most `Window { show_cap_ms }` later (5000 unset; `Some(0)`: at once, aio's `showWhenPainted: false`; a page that never paints is said), on `Window { background: Some([light, dark]) }` until then; `[build.splash]` shows the app's image first ([theming](../ui/theming.md)): its `show` (`always`, `first-start`, `never`) or the app's say at run time, `Window { splash_show: Some(f) }` (aio's `splash.show`) |
 | Menu | none (Electron's default menu carries DevTools and reload), except on macOS: the app menu (Hide, Quit), Edit (so Cmd+C works in a field) and Window, all system roles. An app can't add menus yet. |
-| Keys | Ctrl+R / F5 reload and Ctrl+P print belong to the window unless `Window { keys: Keys { reload, print } }` gives them to the page. A debug build adds DevTools (F12, Ctrl+Shift+I) and a clean reload. |
+| Keys | Ctrl+R / Ctrl+F5 reload and Ctrl+P print belong to the window (plain F5 is the page's) unless `Window { keys: Keys { reload, print } }` gives them to the page. An `ax dev` build adds DevTools (F12, Ctrl+Shift+I) and a clean reload; another build (a release, a plain `cargo build`) has DevTools only when its app says `Window { devtools: true }` ([below](#inspecting-a-running-window)). |
 | Links | the page never navigates; an `http(s)` link opened after a real click goes to the system browser. A pop-up a script opens by itself is blocked and said in the log. `AIORT_NO_OPEN=1` opens nothing (a contained run). |
-| Permissions | the page may copy text and go fullscreen, nothing else, unless `Window { permissions }` names more (`aio_shell::guest::PERMISSIONS`: `clipboard-read`, `media`, `geolocation`…). Its own `Notification` is refused: notifications come from the app. |
+| Permissions | the page may copy text and go fullscreen, nothing else, unless `Window { permissions }` names more (`aio_shell::guest::PERMISSIONS`: `clipboard-read`, `media`, `geolocation`…). Its own `Notification` is refused: notifications come from the app. A denial is said once per permission, naming the fix: `permission "midi" DENIED to the app's own page: Window { permissions: &["midi"] } grants it`. |
 | Unload | a page's `beforeunload` veto is ignored (said once in the log) unless `confirm_unload: true`, then Leave / Stay is asked |
 | Page messages | the page's console lands in the app's log as `[page]` lines at its level (`log` and `info` as INFO, `debug` in a debug build only), with the file and line (8 KB each, 100 a second); `ax logs <app> --client` shows only those |
 | Hangs and crashes | a page that stops answering marks the app's health degraded ("window") until it answers again. A crashed renderer is reloaded on a new connection; the fourth crash in a minute closes the app with a dialog, and a problem report is saved. |
@@ -224,8 +225,10 @@ most `ICON_BYTES` (512 KB) each, looped by the runtime at `fps` (at most
 `ICON_FPS`, 12). No frames: the app's own icon again. A bad image is
 refused where it is passed. A cell asks for the window's, the tray's and
 the tray's tooltip in one with `cx.tell(Tell::Icon { window, tray,
-tooltip, fps })` (aio's `appIcon()`: base64 frames; `None` leaves that
-one as it is), so a server's state can badge every window showing it.
+tooltip, fps })` (aio's `appIcon()`: each frame base64, a `data:` URL or
+the app's URL path of a `[build] assets` file, `"/icons/busy.png"`; `None`
+leaves that one as it is), so a server's state can badge every window
+showing it.
 `desktop::icon_state()` says what each shows now (aio's `iconState()`):
 `Own`, `Still` or `Animated { frames, fps }`, and the tooltip.
 
@@ -276,6 +279,10 @@ assert!(matches!(&seen.lock().unwrap()[0], Tell::Notify { body, .. } if body == 
   notifications is said once in the log.
 - A click brings the window forward and goes to `route`
   (`use_asks`, above).
+- A synced client with no window (a CLI on a served cell, aio's
+  `connectCli`) can show no card: it says the sentence in its log,
+  `INFO [cli] notify: Export — the report is ready` (`Tell::line`). A
+  server with no window and no client says `nobody to tell`.
 
 ## Dialogs, clipboard, print
 
@@ -299,8 +306,9 @@ path.
 Someone else's page shows in a view with `aio::kit::Browser` (needs
 `Window { web: Web { browser: true, .. } }`) or in a window of its own
 with `aio_shell::open_window(&Child { url, preload, partition, origins,
-size })` (needs `windows: true`). Both run sandboxed, in a session that is
-never the app's. `aio_shell::clear_partition("persist:name").await`
+size, permissions, unsandboxed })` (needs `windows: true`). Both run
+sandboxed (a child window may ask not to, if `Web { unsandboxed_windows }`
+allows it), in a session that is never the app's. `aio_shell::clear_partition("persist:name").await`
 (aio's `clearPartition`) wipes what one of those sessions stored, its
 cache and its HTTP sign-ins: an app that locks drops its guests' data. The
 app's own session is refused, by any spelling. See
@@ -412,7 +420,7 @@ AIORT_ELECTRON_ARGS="--disable-dev-shm-usage --disable-gpu" ax dev notes
 
 | Allowed | Refused, and the way instead |
 |---|---|
-| `disable-gpu`, `disable-gpu-compositing`, `disable-software-rasterizer`, `use-gl`, `use-angle`, `enable-unsafe-swiftshader`, `ignore-gpu-blocklist`, `force-device-scale-factor`, `force-color-profile`, `disable-lcd-text`, `disable-smooth-scrolling`, `disable-dev-shm-usage`, `ozone-platform`, `ozone-platform-hint`, the three background-throttling switches, `lang`, `enable-logging`, `log-level` | `remote-debugging-port` (`AIORT_CDP=<port>`, a debug build's only), `no-sandbox` (aio-rs decides, `AIORT_SANDBOX=1` keeps it strict), `disable-web-security`, `ignore-certificate-errors`, `proxy-server`, `load-extension`, `user-data-dir`, `js-flags`, `disable-features`… |
+| `disable-gpu`, `disable-gpu-compositing`, `disable-software-rasterizer`, `use-gl`, `use-angle`, `enable-unsafe-swiftshader`, `ignore-gpu-blocklist`, `force-device-scale-factor`, `force-color-profile`, `disable-lcd-text`, `disable-smooth-scrolling`, `disable-dev-shm-usage`, `ozone-platform`, `ozone-platform-hint`, the three background-throttling switches, `lang`, `enable-logging`, `log-level` | `remote-debugging-port` (`AIORT_CDP=<port>`, an `ax dev` build's only), `no-sandbox` (aio-rs decides, `AIORT_SANDBOX=1` keeps it strict), `disable-web-security`, `ignore-certificate-errors`, `proxy-server`, `load-extension`, `user-data-dir`, `js-flags`, `disable-features`… |
 
 - A Linux kernel that forbids unprivileged user namespaces (and a
   `chrome-sandbox` that isn't setuid root) can't run Chromium's sandbox:
@@ -427,13 +435,21 @@ AIORT_ELECTRON_ARGS="--disable-dev-shm-usage --disable-gpu" ax dev notes
 
 ## Inspecting a running window
 
-A debug build's window opens a private door for aio-rs's tools: `ax
+A dev build's window (`ax dev`, or a build with the `dev` features of
+aio and aio-shell) opens a private door for aio-rs's tools: `ax
 surface`, `ax trigger`, `ax shot`, `ax eval` and `ax components` reach it
 with no flag and no port. `ax dev <app> --cdp` (or `AIORT_CDP=<port>`)
 also opens Chrome's DevTools protocol on loopback for other tools. A
 release build opens neither, and reads no debug setting from the
 environment (aio's `ignoreDebugEnv`, always on): nothing outside the app can
-reach its page. Other processes of this user reach its cells through its
+reach its page.
+
+A release whose app says `Window { devtools: true }` has DevTools on F12
+and Ctrl+Shift+I, and opens the protocol for one launch on
+`--cdp=<port>` (aio's `--cdp`, typed: a variable left over from another
+app opens nothing), with a warning that any process of the machine can
+drive the window while it is open. Without it a release refuses `--cdp`,
+naming the setting. Security first: aio had DevTools in every build. Other processes of this user reach its cells through its
 local door with a client's rights (`ax state`, other apps as peers);
 `[server] local_peers = false` (aio's `allowLocalPeers` off) opens no door
 in a release build.
@@ -447,20 +463,75 @@ ax clients notes              # its windows
 
 ## The thin client and other machines
 
-A window on another machine's cells is `[app] mode = "client"` with
-`[client] server` naming the server: the same views, over a synced copy
-([sync](../state/sync.md)). `ax pair` (a code, then the device with it) links a device without
-typing the key; `ax discover` lists the aio-rs apps on this network that
-answer.
+A window on another machine's cells is `[app] mode = "client"`: the same
+views, over a synced copy ([sync](../state/sync.md)). Its server is,
+first to last: the launch's `--server-url=<url>`, the link the client
+keeps (pairing or the connect page, `<data>/paired.json`, 0600), then
+`[client] server`.
+
+### The connect page
+
+A window's client (`Source::for_app` in a binary with the kit, the
+template's, unchanged since 0.2) never fails for want of a server. With
+none named, `--connect`, one it can't reach (and no copy saved from an
+earlier run) or one that refuses its key, the window
+shows the connect page in place of the app, desktop and Android alike
+(`aio::kit::ConnectPage`, aio's thin client):
+
+- **An address** (`192.168.1.20:8100`), with the server's **pairing code**
+  when it has a key (`ax pair <app>` on the server's machine makes one): a
+  code pairs (PAKE, the root pinned), no code connects with no key, over
+  plain sockets: to a server open on purpose (`[server] open`). The app's
+  own key never goes to a server that nothing verified.
+- **The app's servers on this network** (`[server] discover = true`), each
+  asked on every network this machine is on: a click connects, one marked
+  `needs its code` takes its address into the form for the code.
+- **Recent servers** (ten, `<data>/servers.json`, 0600: a paired one's key
+  is in it): a click connects again, with its key and pin, no code; `×`
+  forgets one.
+- **Why it shows**, at the top: no server yet, the reason it can't be
+  reached, a refusal.
+
+The server picked here is reached with no `[capabilities] network`
+entry: the person's pick is the consent, for that host and port alone
+(as aio's thin client); the app's other requests still follow the list.
+
+The page goes the moment a server answers, and the app shows in the same
+window. Another server picked while one is connected (a recent one, a
+new pairing) takes over at once: the live link drops and the copy
+follows the new server. A client offline with a copy saved shows the app, not the page:
+offline first. A client without the kit (a CLI) still fails, naming `ax pair`.
+
+```sh
+my-client --connect                                   # the page first
+my-client --server-url=192.168.1.20:8100              # this server, this run
+AIORT_TOKEN=<key> my-client --server-url=192.168.1.20:8100   # with its key
+```
+
+`--server-url` takes `host:port` or an `http(s)://` / `ws(s)://` URL whose
+`?token=` is the key (else the pairing's when it is that server, else the
+client's own: `AIORT_TOKEN`, else `data/sync.token`). A key in the URL is
+said as a warning: every user of the machine sees a command line, so give
+it in `AIORT_TOKEN` or the file. A TLS server is reached only pinned to the root its pairing
+pinned: pair with it first.
+
+### A certificate that changed
+
+A paired server is pinned to its root. One that shows a certificate the
+root doesn't cover (its machine made a new root) is asked, before anything
+else is sent, to prove it holds the app's key (aio's
+`POST /__aio/pin-proof`: an HMAC over a fresh nonce and the certificate
+it serves, so a relayed answer names the wrong one). A server that proves
+it is pinned again and connected to, said in the log; one that can't is
+refused, its key never sent, and the connect page says to pair again. A
+weak key (one `ax` warns of) is never put to that proof: whoever answers
+at the address could guess it from the client's half offline. Pair again.
+`[client] strict_pin = true` (or `--strict-pin` for one launch, aio's
+`strictPin`) refuses a changed certificate outright, until the server is
+paired again. Unlike aio's, a client never connects without its key: a
+copy without it would show nothing.
 
 ## Gaps
-
-What aio's Electron client has and aio-rs doesn't yet:
-
-- No custom window chrome (aio's `ui.chrome`: frameless window, own title
-  bar): the OS title bar is always there. The window's verbs are there
-  (`page::minimize` and the rest), for a title bar drawn by the app once
-  frameless windows land.
 
 aio has no app menus beyond macOS's standard ones or a context-menu API,
 and opens one app window per process, as aio-rs does.

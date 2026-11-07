@@ -415,7 +415,7 @@
       if (["input", "textarea", "select"].includes(tag) && a("aria-label") === null && a("aria-labelledby") === null && a("id") === null && !el.closest("label")) {
         say("no label: wrap it in a <label>, or give it an id (for <label for>), aria-label or aria-labelledby");
       }
-      if (tag === "button" && a("type") === null) say('no type: in a <form> it submits it; write type: "button" for one that doesn\'t');
+      if (tag === "button" && a("type") === null && el.closest("form")) say('no type: in a <form> it submits it; write type: "button" for one that doesn\'t');
       if (tag === "a" && clicks && a("href") === null) say("a click handler and no href: not focusable, not announced; use a <button>, or give it an href");
       const ti = Number(a("tabindex"));
       if (a("tabindex") !== null && Number.isFinite(ti) && ti > 0) say(`tabindex ${ti}: a positive one re-orders the whole page's Tab order; use 0 or -1`);

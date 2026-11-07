@@ -173,6 +173,7 @@ rt.block_on(async {
 | `pragmas` | none | pragmas over `aio::db::PRAGMAS`, by name: `"PRAGMA synchronous = FULL"` replaces only `synchronous` |
 | `timeout` | `Some(120 s)` (`aio::db::TIMEOUT`) | how long one request may run; `None`: as long as it takes |
 | `guard` | `false` | checked at open: a damaged file is set aside and its daily good copy (made at open) put in its place; `db.recovered()` says so |
+| `readonly` | `false` | the file opened read-only (aio's `createDB({ readonly })`): it must exist, every write is refused; not with `guard` |
 
 - `aio::db::PRAGMAS`: WAL, `synchronous = NORMAL`, a 64 MB cache, a 5 s
   busy timeout, foreign keys on. Each pragma is read back after it is
@@ -193,7 +194,7 @@ rt.block_on(async {
 | `batch(vec![(sql, params), …])` | the statements in one transaction: all, or none on the first error |
 | `transaction(\|tx\| …)` | a closure in one transaction on the writer: `Ok` commits, `Err` or a panic rolls back; `tx.query`, `tx.execute` inside |
 | `live(sql, params)` | a live query ([below](#live-queries)) |
-| `snapshot(to)` | a consistent compacted copy (`VACUUM INTO`), synced; an existing `to` is refused |
+| `snapshot(to)` | a consistent compacted copy (`VACUUM INTO`), made beside `to`, checked (`quick_check`), synced and renamed over it: one path on a timer is a rolling snapshot, always the last good copy |
 | `check()` | SQLite's `quick_check`: what it found, empty when sound |
 | `close()` | finishes what was asked, then lets go of the file (dropping does the same) |
 
@@ -476,8 +477,8 @@ under about a megabyte.
 
 ## Limits, compared with aio
 
-- **No query builder.** `aio::db` takes plain SQL (aio's `where`
-  objects have no counterpart).
+- **No query builder.** `aio::db` takes plain SQL, which says more than
+  aio's `where` objects did, with bound parameters.
 - **Live queries are this process's**: no cross-process invalidation, as
   in aio.
 - **A blob stream is a blocking reader** (`Blobs::stream`, `Read`):

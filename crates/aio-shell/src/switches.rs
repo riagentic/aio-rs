@@ -84,32 +84,58 @@ pub fn from_env(raw: &str) -> (Vec<String>, Vec<(String, String)>) {
     (ok, refused)
 }
 
-/// The DevTools protocol on loopback `port` (`AIORT_CDP`), or nothing: an
-/// app that didn't ask opens no port, and a release build (`debug` false)
-/// none at all (any JavaScript in its page, its user's data).
-pub fn cdp(port: Option<&str>, debug: bool) -> Result<Vec<String>, String> {
-    match port.map(str::trim).filter(|p| !p.is_empty()) {
-        None => Ok(vec![]),
-        Some(p) if !debug => {
-            Err(format!("AIORT_CDP={p}: a release build opens no DevTools protocol (use a debug build)"))
-        }
-        Some(p) => match p.parse::<u16>() {
-            Ok(n) if n > 0 => Ok(vec![format!("--remote-debugging-port={n}")]),
-            _ => Err(format!("AIORT_CDP={p}: not a port")),
-        },
+/// The DevTools protocol on loopback (any JavaScript in the page, its
+/// user's data), or nothing: the launch's `--cdp=<port>` (`typed`), else
+/// `AIORT_CDP` (`env`). An app that didn't ask opens no port. A build
+/// outside `ax dev` (`debug` false: no `dev` feature, a release build or a
+/// plain `cargo build` alike) opens one only on the typed flag and only when its
+/// app allows DevTools (`devtools`: `Window { devtools }`, aio's `--cdp`);
+/// it never reads the variable (aio's `ignoreDebugEnv`, always on): one
+/// left over from another app opens nothing here.
+pub fn cdp(typed: Option<&str>, env: Option<&str>, debug: bool, devtools: bool) -> Result<Vec<String>, String> {
+    let (p, by) = match (asked(typed), asked(env)) {
+        (Some(p), _) => (p, "--cdp"),
+        (None, Some(p)) => (p, "AIORT_CDP"),
+        (None, None) => return Ok(vec![]),
+    };
+    match p.parse::<u16>() {
+        _ if !debug && by == "AIORT_CDP" => Err(format!(
+            "AIORT_CDP={p}: a build outside ax dev reads no debug setting from its environment; --cdp=<port> asks \
+             for one launch, in an app that allows DevTools (Window {{ devtools: true }})"
+        )),
+        _ if !debug && !devtools => Err(format!(
+            "--cdp={p}: a build outside ax dev opens no DevTools protocol unless its app allows it (Window {{ devtools: \
+             true }})"
+        )),
+        Ok(n) if n > 0 => Ok(vec![format!("--remote-debugging-port={n}")]),
+        _ => Err(format!("{by}={p}: not a port")),
     }
 }
 
-/// The switches this start adds, each refusal said once.
-pub(crate) fn extra(env: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+/// A value given, trimmed; blank is none.
+fn asked(v: Option<&str>) -> Option<&str> {
+    v.map(str::trim).filter(|p| !p.is_empty())
+}
+
+/// The switches this start adds, each refusal said once: `typed` is the
+/// launch's `--cdp`, `devtools` the app's `Window { devtools }`.
+pub(crate) fn extra(env: &dyn Fn(&str) -> Option<String>, typed: Option<&str>, devtools: bool) -> Vec<String> {
     let (mut ok, refused) = from_env(&env("AIORT_ELECTRON_ARGS").unwrap_or_default());
     for (tok, why) in refused {
         eprintln!("[aio] AIORT_ELECTRON_ARGS: {tok} is not passed: {why}");
     }
-    match cdp(env("AIORT_CDP").as_deref(), cfg!(debug_assertions)) {
+    // `ax dev`'s tooling, not `debug_assertions`: ax dev builds without them
+    // (they run as the release does), and a plain debug build is no dev tool.
+    let debug = cfg!(feature = "dev");
+    match cdp(typed, env("AIORT_CDP").as_deref(), debug, devtools) {
         Ok(c) => {
             if let Some(s) = c.first() {
-                eprintln!("[aio] DevTools protocol open on 127.0.0.1 ({s}): AIORT_CDP");
+                let by = if typed.is_some() { "--cdp" } else { "AIORT_CDP" };
+                let warn = if debug { "" } else { "WARN " };
+                eprintln!(
+                    "[aio] {warn}DevTools protocol open on 127.0.0.1 ({s}): {by}; any process of this machine can \
+                     drive the window while it is open"
+                );
             }
             ok.extend(c);
         }
@@ -146,14 +172,21 @@ mod tests {
 
     #[test]
     fn devtools_open_only_when_asked() {
-        assert_eq!(cdp(None, true), Ok(vec![]));
-        assert_eq!(cdp(Some(" "), true), Ok(vec![]));
-        assert_eq!(cdp(Some("9222"), true), Ok(vec!["--remote-debugging-port=9222".to_string()]));
-        assert!(cdp(Some("0"), true).is_err() && cdp(Some("x"), true).is_err() && cdp(Some("70000"), true).is_err());
-        // A packaged (release) build never opens it.
-        assert!(cdp(Some("9222"), false).unwrap_err().contains("release build"));
-        assert_eq!(cdp(None, false), Ok(vec![]));
+        let port = Ok(vec!["--remote-debugging-port=9222".to_string()]);
+        assert_eq!(cdp(None, None, true, false), Ok(vec![]));
+        assert_eq!(cdp(None, Some(" "), true, false), Ok(vec![]));
+        assert_eq!(cdp(None, Some("9222"), true, false), port);
+        assert_eq!(cdp(Some("9222"), Some("1"), true, false), port, "the typed flag wins");
+        for bad in ["0", "x", "70000"] {
+            assert!(cdp(None, Some(bad), true, false).unwrap_err().contains("not a port"));
+        }
+        // A release build: never from the environment, the typed flag only
+        // where its app allows DevTools (aio's --cdp, never on by default).
+        assert!(cdp(None, Some("9222"), false, true).unwrap_err().contains("outside ax dev reads no debug setting"));
+        assert!(cdp(Some("9222"), None, false, false).unwrap_err().contains("Window { devtools: true }"));
+        assert_eq!(cdp(Some("9222"), None, false, true), port);
+        assert_eq!(cdp(None, None, false, true), Ok(vec![]));
         let env = |k: &str| (k == "AIORT_ELECTRON_ARGS").then(|| "--disable-gpu --inspect".to_string());
-        assert_eq!(extra(&env), ["--disable-gpu"]);
+        assert_eq!(extra(&env, None, false), ["--disable-gpu"]);
     }
 }

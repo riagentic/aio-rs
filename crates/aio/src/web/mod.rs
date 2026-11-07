@@ -195,7 +195,8 @@ pub fn launch(root: fn() -> crate::ui::View) {
         on_air::mount(root);
         mounted();
     });
-    let parts = js_sys::Array::of1(&air::PAGE_JS.into());
+    // Fetched with the page: without its indentation and comment lines.
+    let parts = js_sys::Array::of1(&crate::shrunk!(js, air::PAGE_JS).into());
     let opts = web_sys::BlobPropertyBag::new();
     opts.set_type("text/javascript");
     let (Some(doc), Ok(blob)) = (w.document(), web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts)) else {
@@ -226,6 +227,8 @@ mod on_air {
     pub(super) fn mount(app: fn() -> crate::ui::View) {
         let root = air::Root::new();
         root.show(app);
+        #[cfg(feature = "dev")]
+        root.within(crate::ui::audit::watch_page);
         ROOT.set(Some(root));
         flush();
     }
@@ -251,6 +254,9 @@ mod on_air {
                     Some(Err(e)) => super::say(&format!("air's interpreter failed: {e:?}")),
                     None => super::say("air's interpreter is not in the page"),
                 }
+                // The frame is applied: what rows that left held goes now,
+                // not at the next event (a page with none would keep it).
+                air::drop_left();
             }
             for e in r.uncaught() {
                 super::say(&format!("a view failed and no ErrorBoundary is above it: {e}"));

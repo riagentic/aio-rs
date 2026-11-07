@@ -29,22 +29,30 @@ aio-hotpatch = { workspace = true, optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Unpacks the runtime's archive: inflate only (the CLI writes archives).
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-# Delta updates: a release made from the version installed (`delta`).
-zstd = { version = "0.14", default-features = false }
+# Delta updates: a release made from the version installed (`delta`). `thin`:
+# zstd's small build, 60 KB off the app (deps.toml `[kept-features]`).
+zstd = { version = "0.14", default-features = false, features = ["thin"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "process", "macros", "fs", "io-util", "sync", "signal", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [features]
-default = []
+# `updates` on unless an app turns the defaults off, as `ax create`'s
+# templates do: ax's builds then turn it on for an `[updates] url`.
+default = ["updates"]
+# Updates (`update`): the built-in runtime that checks `[updates] url`,
+# stages and installs, and the `updates` cell (an app's own runtime,
+# `aio::update::install`, too). Without it the app never looks for one and
+# carries none of it (~0.5 MB); a new version still confirms its first boot.
+updates = []
 # Nothing more: the views are always air's (the feature an app on air named
 # before 0.2.0, `default-features = false, features = ["air"]`, still builds).
 air = []
 # The app's UI in browsers, served by its own server (`web`): `ax ui
 # --browser`'s tabs, and brotli for the web build it serves.
 web = ["aio/br"]
-# `ax dev` (it passes `--features aio-shell/dev`): Rust hot-patched (`rsx!`
-# templates reload in any debug build). A release build leaves it out.
+# `ax dev` (it passes `--features aio-shell/dev`): Rust hot-patched, `rsx!`
+# markup reloaded live. A release build leaves it out.
 dev = ["dep:aio-hotpatch", "aio/dev"]
 # The splash drawn by the OS before Electron starts (`presplash`): `ax build`
 # turns it on for an app with a `[build.splash]`, so an app without one (and

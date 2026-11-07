@@ -454,8 +454,9 @@ pub async fn mint(data: &std::path::Path, plain: bool) -> std::io::Result<String
 // server to prove it holds the key, on that certificate, before sending it:
 // client → {nonce, tag = HMAC(key, "…:c:" nonce)}, server → {proof =
 // HMAC(key, "…:s:" nonce ":" cert), cert}. Only a caller that shows the key
-// is answered, so nobody gets material to guess a weak key against. (aio-rs's
-// own clients pin the root, so a new leaf needs no proof.)
+// is answered, so nobody gets material to guess a weak key against. aio-rs's
+// clients pin the root, so a new leaf needs no proof; a new root does
+// ([`reprove`]), unless `[client] strict_pin` refuses it outright.
 
 const PROOF: &str = "aio-pin-proof-v1";
 
@@ -491,6 +492,64 @@ pub fn answer_pin_proof(body: &[u8], key: &str, cert: &str) -> Result<serde_json
     Ok(serde_json::json!({ "proof": pin_proof_for(key, nonce, cert), "cert": cert }))
 }
 
+/// The root `cert` (a [`served_cert`]) names, when `proof` shows the
+/// server holds `key` and serves `cert` with the `leaf` this client saw on
+/// the same connection (a relayed answer names another one). Pure.
+fn proven_root(key: &str, nonce: &str, proof: &str, cert: &str, leaf: &[u8]) -> Option<String> {
+    use base64::Engine;
+    const END: &str = "-----END CERTIFICATE-----";
+    let (first, root) = cert.split_once(END)?;
+    let b64: String = first.trim_start().strip_prefix("-----BEGIN CERTIFICATE-----")?.split_whitespace().collect();
+    let shown = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let ok = !leaf.is_empty() && shown == leaf && crate::sync::same(proof, &pin_proof_for(key, nonce, cert));
+    Some(root.trim_start().to_string()).filter(|r| ok && r.contains(END))
+}
+
+/// Ask the server at `addr`, whose certificate its pin no longer covers,
+/// to prove it holds `key` (aio's `/__aio/pin-proof`), before the key is
+/// sent: the HMAC only the key's holder makes over a fresh nonce and the
+/// certificate it serves. The root to pin from now on, or why not. A weak
+/// key is refused unsent: its tag would let whoever answers guess it offline.
+pub async fn reprove(addr: &str, key: &str) -> std::io::Result<String> {
+    let no = |why: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why.to_string());
+    if crate::config::weak_token(key) {
+        return Err(no("the app's key is weak, so it can't prove itself to a changed certificate"));
+    }
+    let (s, leaf, host) = connect(addr).await?;
+    if leaf.is_empty() {
+        return Err(no("the server no longer speaks TLS"));
+    }
+    let nonce: String = crate::random_bytes::<32>().iter().map(|b| format!("{b:02x}")).collect();
+    let body = serde_json::json!({ "nonce": nonce, "tag": pin_proof_tag(key, &nonce) });
+    let (status, v) = crate::http::request(s, &host, "/__aio/pin-proof", None, Some(&body)).await?;
+    let (proof, cert) = (v["proof"].as_str().unwrap_or_default(), v["cert"].as_str().unwrap_or_default());
+    match status {
+        200 => proven_root(key, &nonce, proof, cert, &leaf).ok_or_else(|| no("its proof doesn't verify")),
+        _ => Err(no(&format!("it could not prove it holds the app's key ({status})"))),
+    }
+}
+
+/// Whether `link`'s server still shows a certificate under its pinned
+/// root: `Ok(true)` yes (or no pin to check, or no answer: offline is not
+/// a changed certificate), `Ok(false)` it shows another one.
+pub async fn pin_holds(link: &crate::sync::Link) -> std::io::Result<bool> {
+    let Some(root) = &link.root else { return Ok(true) };
+    let host = link.addr.rsplit_once(':').map_or(&*link.addr, |(h, _)| h).trim_matches(['[', ']']).to_string();
+    let name = rustls::pki_types::ServerName::try_from(host).map_err(std::io::Error::other)?;
+    let wait = Duration::from_secs(5);
+    let Ok(Ok(tcp)) = tokio::time::timeout(wait, tokio::net::TcpStream::connect(&link.addr)).await else {
+        return Ok(true);
+    };
+    let tls = tokio_rustls::TlsConnector::from(crate::tls::client(root)?);
+    match tokio::time::timeout(wait, tls.connect(name, tcp)).await {
+        Ok(Err(e)) => Ok(!e
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<rustls::Error>())
+            .is_some_and(|e| matches!(e, rustls::Error::InvalidCertificate(_)))),
+        _ => Ok(true),
+    }
+}
+
 /// The certificate file a server serves, as aio does: the leaf, then its root.
 pub fn served_cert(leaf_der: &[u8], root_pem: &str) -> String {
     use base64::Engine;
@@ -502,19 +561,13 @@ pub fn served_cert(leaf_der: &[u8], root_pem: &str) -> String {
 /// Keep what pairing gave, for client mode: `data/paired.json` (0600).
 pub fn save(data: &std::path::Path, addr: &str, p: &Profile) -> std::io::Result<()> {
     let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
-    let link = serde_json::json!({ "addr": format!("{host}:{}", p.port), "token": p.key, "root": p.cert });
-    // A new pairing replaces the old one.
-    crate::paths::write_atomic(&data.join("paired.json"), link.to_string().as_bytes(), true)
+    let link = crate::sync::Link { addr: format!("{host}:{}", p.port), token: p.key.clone(), root: p.cert.clone() };
+    crate::connect::keep(data, link)
 }
 
 /// The link pairing saved in `data`, if any.
 pub fn saved(data: &std::path::Path) -> Option<crate::sync::Link> {
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(data.join("paired.json")).ok()?).ok()?;
-    Some(crate::sync::Link {
-        addr: v["addr"].as_str()?.into(),
-        token: v["token"].as_str()?.into(),
-        root: v["root"].as_str().map(String::from),
-    })
+    crate::connect::saved(data)
 }
 
 #[cfg(test)]
@@ -543,6 +596,16 @@ mod tests {
             assert_eq!(answer_pin_proof(bad.to_string().as_bytes(), &key, cert).unwrap_err().0, 400, "{bad}");
         }
         assert_eq!(answer_pin_proof(b"not json", &key, cert).unwrap_err().0, 400);
+        // The client's side: the root is taken only from a proof of the key
+        // over the leaf this connection saw.
+        let leaf = [1u8, 2, 3, 4];
+        let root = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        let served = served_cert(&leaf, root);
+        let proof = pin_proof_for(&key, &nonce, &served);
+        assert_eq!(proven_root(&key, &nonce, &proof, &served, &leaf).as_deref(), Some(root));
+        assert_eq!(proven_root(&key, &nonce, &proof, &served, &[9]), None, "a relayed answer names another leaf");
+        assert_eq!(proven_root("other", &nonce, &proof, &served, &leaf), None, "only the key's holder");
+        assert_eq!(proven_root(&key, &nonce, &pin_proof_for(&key, "n2", &served), &served, &leaf), None, "a replay");
         let pem = served_cert(&[1, 2, 3], "ROOT\n");
         assert_eq!(pem, "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\nROOT\n");
     }

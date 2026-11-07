@@ -108,7 +108,8 @@ other.
   unless `[perf] call_ceiling` (ms) says otherwise (aio's
   `effectTimeoutMs`): one that never settles is cut off, logged and
   reported, its later steps never run, and its caller is told. `#[long]`
-  lifts the ceiling for a method that legitimately waits (a long download).
+  lifts the ceiling for a method that legitimately waits (a long download);
+  `#[long(ms)]` sets that method's own.
 
 ## What happens to an effect
 
@@ -253,12 +254,17 @@ assert_eq!(end.now(), Some(Ok(())), "and its caller has the end");
   [effect's failure](#what-happens-to-an-effect).
 - `#[mode(newest)]`: a new call supersedes the running one (its await is
   aborted, its later steps refused, its caller told; search as you type).
-  `#[mode(first)]`: while one runs, a new call runs nothing and shares its
-  answer (aio's `concurrency: "first"`). Without one, overlapping calls'
+  `#[mode(first)]`: while one runs, a new call with the same arguments
+  runs nothing and shares its answer; other arguments run beside it
+  (aio's `concurrency: "first"`). `cx.abort("scan")` stops every call of
+  `scan`. Without one, overlapping calls'
   awaits run in turn.
 - `#[ttl(ms)]` answers a repeated call with the same arguments within
   `ms` of a finished one with its kept answer, without running it again
-  (aio's `ttl`); its effects are keyed by the arguments.
+  (aio's `ttl`); its effects are keyed by the arguments. A network
+  caller's answer is kept for that caller (user and role) alone, and a
+  `#[mode(first)]` call joins only that caller's: what one may see never
+  reaches another. aio keeps one answer for every caller.
 - `h.pending(Some("buy"))` counts the calls in flight (two overlapping
   calls are two); `h.on_pending(f)` tells when that may have changed.
 
@@ -398,6 +404,57 @@ assert_eq!(h.state().error.as_deref(), Some("no url"), "three tries, the last fa
 # }
 ```
 
+### Results in pieces
+
+An async method can send its caller pieces while it works (chat tokens,
+progress) and still return the whole answer at the end (aio's
+`emitChunk`): `cx.part(piece)?` sends one. A synced copy or a peer's
+`Remote` asks for them with `remote.stream(method, args, |piece| ..)`;
+each reaches the closure, typed, in order, all before the end.
+
+```rust,no_run
+use aio::prelude::*;
+
+#[cell(shared)]
+pub struct Chat {
+    pub said: Vec<String>,
+}
+
+async fn model(prompt: String) -> String {
+    format!("re: {prompt}")
+}
+
+#[methods]
+impl Chat {
+    #[client]
+    pub async fn chat(&mut self, cx: &Cx, prompt: String) -> Result<String> {
+        cx.part("thinking")?;
+        let reply: String = model(prompt).await;
+        cx.part(&reply)?;
+        self.said.push(reply.clone());
+        Ok(reply)
+    }
+}
+
+// The caller, a synced copy or a peer's `Remote`:
+# #[cfg(feature = "server")]
+async fn ask(remote: aio::sync::Remote<Chat>) -> Result<serde_json::Value> {
+    let end = remote.stream("chat", serde_json::json!(["hi"]), |token: String| println!("{token}"))?;
+    end.await
+}
+# fn main() {}
+```
+
+- `cx.part` is `true` when the piece went. Any other caller (a plain
+  call, the app's own UI, a schedule) gets none, so one method serves
+  every caller; so does a `#[mode(first)]` call that joins one already
+  running, and a `#[ttl]` answer.
+- A caller that reads too slowly loses a piece (`false`; at most 64
+  wait), never the answer. A piece is JSON of at most 1 MiB: past it
+  `cx.part` refuses, for every caller. Bytes go through blobs.
+- Pieces come from the server's run only: the copy's prediction sends
+  none. A call queued offline still streams once it reaches the server.
+
 ## Schedules
 
 A schedule is a call the cell asks for at a later time: once, again and
@@ -446,7 +503,8 @@ assert_eq!((h.state().ticks, h.state().reminders), (1, 1));
 - Declared: `#[every("5m")]`, `#[every(300_000)]`, `#[cron("0 9 * * 1")]`,
   each optionally `, skip_if_running`.
 - From a call: `cx.after`, `cx.every`, `cx.at`, `cx.cron`, `cx.backoff`
-  and `cx.cancel`, each by a key; the same key replaces.
+  and `cx.cancel`, each by a key; the same key replaces. A
+  `#[skip_if_running]` async method's ticks are skipped while it runs.
 - An effect is for I/O; a schedule only calls a method later. A schedule
   that needs I/O calls a method that starts an effect.
 
@@ -454,7 +512,10 @@ assert_eq!((h.state().ticks, h.state().reminders), (1, 1));
 
 A method that finishes something can say so on the desktop (aio's
 `notify()` and `appIcon()`). Like an effect, a tell is kept with the call
-and happens after it commits: a refused call tells nothing.
+and happens after it commits: a refused call tells nothing. A
+notification is shown to every connected user: raised in a signed-in
+user's call, it is said once (a warning, `tell:every-user`), as aio
+does. Keep one user's data out of its title and body.
 
 ```rust
 use aio::prelude::*;
@@ -643,8 +704,8 @@ What aio has and aio-rs does not, or does differently:
 - **Blocking work stops when it looks.** `aio::effect::blocking`'s work
   runs on a worker thread and stops at its next `cancel.cancelled()`
   check, as aio's does at its next message; a thread can't be killed.
-- **Tests see effects as descriptions.** aio's `testCell` hands the effect
-  objects to the test (`t.getEffects()`, `isScheduleEffect`); `TestCells`
+- **Tests see effects as descriptions**, since an effect is a closure,
+  not data. aio's `testCell` hands the effect objects to the test (`t.getEffects()`, `isScheduleEffect`); `TestCells`
   lists them by key (`t.effects()`) and as `HeldEffect`s (key, mode,
   timeout: `t.held_effects()`), and runs them (`t.settle()`); schedules
   are `ax schedules` and `Store::schedules`.

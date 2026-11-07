@@ -49,6 +49,13 @@ pub enum GuestEvent {
     /// Its page stopped answering, and came back.
     Unresponsive,
     Responsive,
+    /// The shell refused its `preload` (not one the window declared): it
+    /// loads with none (aio's `aio:guest-preload-refused`, also sent to
+    /// the page's `window` as that event).
+    PreloadRefused {
+        preload: String,
+        reason: String,
+    },
 }
 
 /// A key a guest handed back (aio's `HostKey`), with the modifiers held.
@@ -75,6 +82,12 @@ pub enum Go {
         channel: String,
         args: Vec<Value>,
     },
+    /// A stylesheet added to its page (`insertCSS`), until it navigates.
+    Css(String),
+    /// Its page drawn at this zoom (`setZoomFactor`; 1 is 100 %).
+    Zoom(f64),
+    /// Its DevTools opened, in a window of their own.
+    DevTools,
 }
 
 /// Ask the guest of the `Browser` with element id `id`; one that is not
@@ -86,13 +99,28 @@ pub fn go(id: &str, what: Go) {
         Go::Reload => "reload()".into(),
         Go::Stop => "stop()".into(),
         Go::Send { channel, args } => format!("send({}, ...{})", Value::from(channel), Value::from(args)),
+        Go::Css(css) => format!("insertCSS({})", Value::from(css)),
+        Go::Zoom(z) => format!("setZoomFactor({})", Value::from(z)),
+        Go::DevTools => "openDevTools()".into(),
     };
-    let js = format!(
+    _ = eval(&guest_js(id, &format!("try {{ w.{call} }} catch (e) {{}}")));
+}
+
+/// `js` run in the page of the guest of the `Browser` with element id `id`
+/// (`executeJavaScript`, a promise awaited): its value as JSON; `None` when
+/// that guest is not there, or the script threw.
+pub async fn run_js(id: &str, js: &str) -> Option<Value> {
+    let then = format!("try {{ return await w.executeJavaScript({}) }} catch (e) {{ return null }}", Value::from(js));
+    eval(&guest_js(id, &then)).join::<Option<Value>>().await.ok().flatten()
+}
+
+/// `then` with `w` the guest's `<webview>`, once it is attached.
+fn guest_js(id: &str, then: &str) -> String {
+    format!(
         "const b = document.getElementById({}), w = b && b.querySelector('webview'); \
-         if (w && typeof w.getWebContentsId === 'function') try {{ w.{call} }} catch (e) {{}}",
+         if (w && typeof w.getWebContentsId === 'function') {{ {then} }}",
         Value::from(id)
-    );
-    _ = eval(&js);
+    )
 }
 
 /// Why `keys` cannot be host keys, if they cannot (aio's `isHostKeyList`):
@@ -141,8 +169,16 @@ const GUEST: Island = Island::js(
     r#"const live = new Map();
     const G = window.__aioGuest;
     if (G) G.onKey((id, k) => { const f = live.get(id); if (f) f(k); });
+    // A refused preload: the page's event (aio's), and each guest that asked for it.
+    const refusals = new Set();
+    if (G && G.onRefused) G.onRefused((d) => {
+      window.dispatchEvent(new CustomEvent('aio:guest-preload-refused', { detail: d }));
+      refusals.forEach((f) => f(d));
+    });
     let said = false;
     return (el, p, emit) => {
+      const refused = (d) => { if (d.preload === p.preload) emit({ t: 'preloadrefused', preload: d.preload, reason: d.reason }); };
+      if (p.preload) refusals.add(refused);
       const wv = document.createElement('webview');
       const keys = p.keys;
       for (const [k, v] of [['partition', p.partition], ['httpreferrer', p.referrer],
@@ -188,7 +224,7 @@ const GUEST: Island = Island::js(
           if (ready) wv.loadURL(src, q.referrer ? { httpReferrer: q.referrer } : undefined).catch(() => {});
           else wv.setAttribute('src', src);
         },
-        unmount() { live.delete(gid); },
+        unmount() { live.delete(gid); refusals.delete(refused); },
       };
     };"#,
 );
@@ -316,5 +352,9 @@ mod tests {
         );
         assert_eq!(ev(json!({ "t": "gone", "reason": "crashed" })), GuestEvent::Gone { reason: "crashed".into() });
         assert_eq!(ev(json!({ "t": "focus" })), GuestEvent::Focus);
+        assert_eq!(
+            ev(json!({ "t": "preloadrefused", "preload": "nope.js", "reason": "not declared" })),
+            GuestEvent::PreloadRefused { preload: "nope.js".into(), reason: "not declared".into() }
+        );
     }
 }

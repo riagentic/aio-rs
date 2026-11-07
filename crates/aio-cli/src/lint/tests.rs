@@ -188,6 +188,27 @@ fn App() -> Element {
 }
 
 #[test]
+fn a_match_arm_is_linted_as_a_branch() {
+    let d = project(&[(
+        "src/ui.rs",
+        r#"
+fn App() -> Element {
+    rsx! {
+        match page.get() {
+            Page::Home => { img { src: "a.png" } }
+            Page::Item(id) if id > 9 => p { key: "{id}", "big" },
+            _ => { for x in xs { li { "{x}" } } }
+        }
+    }
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let found: Vec<_> = r.issues.iter().map(|i| (i.area, i.line.unwrap())).collect();
+    assert_eq!(found, [("a11y", 5), ("render", 6), ("render", 7)], "{:?}", r.issues);
+}
+
+#[test]
 fn a_click_without_keys_is_a_warning() {
     let d = project(&[(
         "src/ui.rs",

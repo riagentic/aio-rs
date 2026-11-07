@@ -96,11 +96,12 @@ pub(crate) async fn dial(addr: &str) -> std::io::Result<Frames> {
     Ok(frames(s))
 }
 
-/// Whether this build's door has the operator's rights: a debug build's only.
-pub const OPERATOR: bool = cfg!(debug_assertions);
+/// Whether this build's door has the operator's rights: `ax dev`'s build
+/// only (aio's `dev` feature).
+pub const OPERATOR: bool = cfg!(feature = "dev");
 
 /// Serve `h` to this user's tools on the local door `l` (at [`at`]), until
-/// it fails: `sync`'s protocol without a key; in a debug build ([`OPERATOR`])
+/// it fails: `sync`'s protocol without a key; in `ax dev`'s build ([`OPERATOR`])
 /// tools there may also call any method, list the open links, travel in
 /// time and load a state.
 pub async fn serve<T: Cell>(h: Handle<T>, l: crate::ipc::Listener, limits: Limits) -> std::io::Result<()> {

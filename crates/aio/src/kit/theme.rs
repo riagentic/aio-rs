@@ -8,9 +8,10 @@ pub use crate::colors::hue;
 use crate::colors::{Hsl, accent_fill, contrast, hex, luminance, rgb};
 
 /// The accent as text, readable (4.6:1) on every background in `bgs`.
-fn accent_ink(hue: f64, bgs: &[f64], dark: bool) -> String {
+fn accent_ink(hue: u16, bgs: &[f64], dark: bool) -> String {
     let mut range: Box<dyn Iterator<Item = u32>> = if dark { Box::new(48..93) } else { Box::new((8..=52).rev()) };
-    match range.find(|&l| bgs.iter().all(|&bg| contrast(luminance((hue, 0.68, f64::from(l) / 100.0)), bg) >= 4.6)) {
+    let h = f64::from(hue);
+    match range.find(|&l| bgs.iter().all(|&bg| contrast(luminance((h, 0.68, f64::from(l) / 100.0)), bg) >= 4.6)) {
         Some(l) => format!("hsl({hue} 68% {l}%)"),
         None if dark => format!("hsl({hue} 68% 92%)"),
         None => format!("hsl({hue} 68% 8%)"),
@@ -35,10 +36,14 @@ fn oklab_mix_luminance(a: Hsl, b: Hsl, p: f64) -> f64 {
         + 0.0722 * c(-0.004_196_086_3 * l - 0.703_418_614_7 * m + 1.707_614_701 * s)
 }
 
-/// A percentage to one decimal, as JS prints it (`14`, `8.5`).
+/// A percentage to one decimal, as JS prints it (`14`, `8.5`): in
+/// integers, so a page carries no float formatting.
 fn pct(x: f64) -> String {
-    let v = (x * 1000.0).round() / 10.0;
-    if v.fract() == 0.0 { format!("{v:.0}%") } else { format!("{v}%") }
+    let tenths = (x * 1000.0).round() as u64;
+    match tenths % 10 {
+        0 => format!("{}%", tenths / 10),
+        d => format!("{}.{d}%", tenths / 10),
+    }
 }
 
 /// The theme's tokens for `hue` (aio's `appThemeTokensCss`), light and dark, in
@@ -47,11 +52,11 @@ fn pct(x: f64) -> String {
 pub fn tokens_css(hue: u16, soft: bool) -> String {
     let h = f64::from(hue);
     let ns = |s: f64| if soft { s.min(0.04) } else { s };
-    let (accent, on_accent, fill) = accent_fill(h);
+    let (accent, on_accent, fill) = accent_fill(hue);
     let on_accent = if on_accent == "dark" { format!("hsl({hue} 45% 11%)") } else { on_accent.into() };
     let (surf_light, surf_dark) = ((0.0, 0.0, 1.0), (h, ns(0.12), 0.13));
     let ink_light = accent_ink(
-        h,
+        hue,
         &[
             luminance((h, ns(0.4), 0.99)),
             luminance(surf_light),
@@ -61,7 +66,7 @@ pub fn tokens_css(hue: u16, soft: bool) -> String {
         false,
     );
     let ink_dark = accent_ink(
-        h,
+        hue,
         &[
             luminance((h, ns(0.14), 0.09)),
             luminance(surf_dark),
@@ -198,6 +203,11 @@ pub fn sheet(ui: &crate::config::Ui, id: &str, ships_css: bool) -> String {
 mod tests {
     use super::*;
     use crate::config::{Look, Ui};
+
+    #[test]
+    fn a_percentage_prints_as_js_does_without_float_formatting() {
+        assert_eq!([pct(0.14), pct(0.085), pct(0.04), pct(0.0), pct(1.0)], ["14%", "8.5%", "4%", "0%", "100%"]);
+    }
 
     #[test]
     fn the_look_follows_the_theme_mode_its_hue_and_layout() {

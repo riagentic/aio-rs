@@ -8,6 +8,8 @@ ui = "browser"
 lang = "ar"
 dir = "rtl"
 tz = "local"
+profiles = false
+flags = ["--verbose"]
 [data]
 durability = "full"
 store = "vault.db"
@@ -17,12 +19,16 @@ persist = false
 coalesce_ms = 250
 backup_every = "1d"
 backup_keep = 3
+[home]
+dir = "/srv/lit"
+
 [history]
 keep = "36h"
 [server]
 listen = "127.0.0.1:8080"
 discover = true
 local_peers = false
+page_log = false
 hosts = ["example.org"]
 trust_proxy = "x-forwarded-for"
 [server.security]
@@ -36,9 +42,11 @@ clients = 9
 [client]
 retention = "7d"
 timeouts = { "lit.slow" = "60s", "lit.wait" = "off" }
+strict_pin = true
 [accounts]
 on = true
 max_sessions = 4
+totp = false
 [capabilities]
 network = ["api.example.org", "example.org"]
 [updates]
@@ -47,9 +55,11 @@ keys = ["ed25519:k"]
 every = "off"
 every_by_channel = { dev = "1m" }
 prerelease = true
+sign_commit = true
 [build]
-targets = ["deb", { name = "srv", kind = "cli", bin = "lit-server" }]
+targets = ["deb", { name = "srv", kind = "cli", entry = "lit-server", platforms = ["linux"], title = "Lit Server", ui = "browser" }]
 budget_mb = 12
+out = "out/bundles"
 css = "tailwindcss -i a.css -o b.css"
 platforms = ["linux", "macos-arm64"]
 runtime = "bundled"
@@ -111,6 +121,7 @@ cancel = false
 [log]
 level = "debug"
 suppress = ["lit.tick"]
+dir = "~/logs/lit"
 [perf]
 method = 50
 call_ceiling = 20000
@@ -135,3 +146,6 @@ neutral = "soft"
 degraded = 10
 warning = 20
 frozen = 30
+
+[dev]
+watch = ["src/ui", "assets"]

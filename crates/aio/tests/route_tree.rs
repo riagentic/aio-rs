@@ -52,6 +52,7 @@ fn tree() -> View {
         }
         Route { path: "/", element: rsx! { p { "data-t": "root", "root" } } }
         Route { path: "/old", element: rsx! { Redirect { to: "/dash/settings" } } }
+        Route { path: "/kept", element: rsx! { Redirect { to: "/dash", push: true } } }
     }
 }
 
@@ -98,6 +99,17 @@ fn a_route_follows_navigation_and_a_redirect_leaves_no_back_step() {
     assert!(ui.present("root"), "the redirect replaced /old");
 }
 
+#[test]
+fn a_pushed_redirect_keeps_its_place_in_the_history() {
+    // aio's <Redirect replace={false}>: Back comes to it, and it goes on again.
+    let mut ui = at("/");
+    ui.run(|| go("/kept"));
+    assert_eq!(ui.text("page"), "dash index");
+    ui.run(back);
+    assert_eq!(ui.text("page"), "dash index", "back at /kept, sent on");
+    assert!(ui.absent("root"));
+}
+
 /// On air a route's body runs again only when its match changes: a query
 /// or another route's place runs nothing; a new param makes its view anew.
 #[cfg(feature = "kit")]
@@ -113,4 +125,25 @@ fn on_air_a_route_runs_again_only_for_a_new_match() {
     ui.run(|| go("/users/5"));
     assert_eq!(ui.text("who"), r#"{"id": "5"}"#);
     assert!(routes(&ui.components()) > before, "a new param: its route ran again");
+}
+
+#[test]
+fn a_link_follows_its_to_and_class_and_styles_the_current_place() {
+    // aio's Link activeStyle, and a `to` and `class` that follow state.
+    fn app() -> View {
+        let to = signal(|| "/dash".to_string());
+        let class = signal(|| "a".to_string());
+        rsx! {
+            button { "data-t": "move", onclick: move |_| { to.set("/a/b".into()); class.set("b".into()) }, "move" }
+            Link { to: to, class: class, active_style: "font-weight: 700", "data-t": "link", "go" }
+        }
+    }
+    let ui = aio::testing::Mount::default().before(|| _ = NAV.write().replace("/a/b")).app(app);
+    let mut ui = ui;
+    assert_eq!(ui.attr("link", "href").as_deref(), Some("/dash"));
+    assert_eq!((ui.attr("link", "class").as_deref(), ui.attr("link", "style")), (Some("a"), None));
+    ui.click("move");
+    assert_eq!(ui.attr("link", "href").as_deref(), Some("/a/b"));
+    assert_eq!(ui.attr("link", "class").as_deref(), Some("b active"));
+    assert_eq!(ui.attr("link", "style").as_deref(), Some("font-weight: 700"));
 }

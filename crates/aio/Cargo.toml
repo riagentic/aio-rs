@@ -16,7 +16,7 @@ name = "aio"
 [dependencies]
 aio-macros = { workspace = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 # aio.toml's types and checks; never its parser (that runs in `aio::config!()`, on the build's host).
 aio-config = { workspace = true }
 # `aio::config!()`: aio.toml parsed as the app builds (the parser runs on the build's host only).
@@ -80,7 +80,7 @@ web = []
 # A ported app's `state.db` needs none of it.
 compat = []
 # `ax dev`: cell methods hot-patched (through `aio-shell/dev`); a release has none of it.
-dev = ["dep:aio-hotpatch"]
+dev = ["dep:aio-hotpatch", "air?/dev", "aio-config/dev"]
 # `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
 imbl = ["dep:imbl"]
 # `aio::testing`, the test kit (TestCells, TestServer, TestUi with `kit`):
@@ -138,6 +138,14 @@ required-features = ["net"]
 [[test]]
 name = "sync"
 required-features = ["net"]
+
+[[test]]
+name = "cli_tell"
+required-features = ["net"]
+
+[[test]]
+name = "connect"
+required-features = ["net", "kit"]
 
 [[test]]
 name = "one_socket"
@@ -225,3 +233,23 @@ required-features = ["net"]
 [[test]]
 name = "sim"
 required-features = ["net"]
+
+[[test]]
+name = "auth_serving"
+required-features = ["server"]
+
+[[test]]
+name = "fns"
+required-features = ["server"]
+
+[[test]]
+name = "testing"
+required-features = ["server"]
+
+[[test]]
+name = "big"
+required-features = ["kit"]
+
+[[test]]
+name = "list_speed"
+required-features = ["kit"]

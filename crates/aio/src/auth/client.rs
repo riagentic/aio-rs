@@ -56,6 +56,8 @@ pub struct Me {
     pub totp: bool,
     /// It sends mail: email verification and password resets work.
     pub mail: bool,
+    /// It has an identity provider: [`Client::sso`].
+    pub oidc: bool,
 }
 
 /// A door's refusal: `code` as the server says it (`invalid_credentials`),
@@ -127,6 +129,11 @@ pub fn text(code: &str, status: u16) -> String {
              Http::mail, is set.)"
         }
         "mail_failed" => "The email could not be sent. Try again later.",
+        "no_identity_provider" => "This app has no single sign-on.",
+        "code_and_verifier_required" => "The single sign-on answer is incomplete — sign in again.",
+        "sso_expired" => "That sign-in is used up or expired — sign in again.",
+        "sso_timeout" => "The sign-in in the browser took too long — sign in again.",
+        "totp_disabled" => "This app doesn't offer a second sign-in step. (Server: [accounts] totp = false.)",
         "unreachable" => "The app can't be reached. Check the connection and try again.",
         c if c.starts_with("http_") => return format!("The auth server answered {status} with no reason given."),
         c => return format!("Sign-in failed ({c})."),
@@ -187,6 +194,38 @@ impl Client {
         Self { addr: String::new(), root: None, via: Some(via) }
     }
 
+    /// Its doors are a browser tab's own ([`Self::via`]): a provider
+    /// sign-in is that tab's page, `/__aio/auth/oidc/start`.
+    #[cfg(feature = "kit")]
+    pub(crate) fn tab(&self) -> bool {
+        self.via.is_some() || cfg!(target_arch = "wasm32")
+    }
+
+    /// A sign-in with the app's identity provider, for an app outside a
+    /// browser (RFC 8252): open [`Sso::url`] in the browser, then
+    /// [`Self::sso_done`]. The provider's answer comes back to a loopback
+    /// port of this machine only, and counts only with the verifier kept here.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sso(&self) -> std::io::Result<Sso> {
+        let at = std::net::TcpListener::bind("127.0.0.1:0")?;
+        at.set_nonblocking(true)?;
+        let verifier = super::hex(&super::random::<32>());
+        let (port, claim) = (at.local_addr()?.port(), super::hashed(&verifier));
+        let scheme = if self.root.is_some() { "https" } else { "http" };
+        let url = format!("{scheme}://{}/__aio/auth/oidc/start?port={port}&claim={claim}", self.addr);
+        Ok(Sso { url, at, verifier })
+    }
+
+    /// The session of `s`, once the browser came back with the provider's
+    /// answer (at most [`SSO_WAIT`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn sso_done(&self, s: Sso) -> Result<Signed, AuthError> {
+        let gone = |code: &str| AuthError { code: code.into(), status: 0 };
+        let at = tokio::net::TcpListener::from_std(s.at).map_err(|_| gone("unreachable"))?;
+        let code = tokio::time::timeout(SSO_WAIT, landed(&at)).await.map_err(|_| gone("sso_timeout"))?;
+        signed(self.ask("oidc/redeem", None, Some(json!({ "code": code, "verifier": s.verifier }))).await?)
+    }
+
     /// The link a signed-in copy connects over, with `s` as its key.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn link(&self, s: &Signed) -> crate::sync::Link {
@@ -198,7 +237,7 @@ impl Client {
         let v = self.ask("me", token, None).await?;
         let s = |k: &str| v["user"][k].as_str().map(String::from);
         let f = |k: &str| v["features"][k].as_bool().unwrap_or(false);
-        Ok(Me { user: s("id").zip(s("role")), signup: f("signup"), totp: f("totp"), mail: f("mail") })
+        Ok(Me { user: s("id").zip(s("role")), signup: f("signup"), totp: f("totp"), mail: f("mail"), oidc: f("oidc") })
     }
 
     /// Create an account (when the app allows it), with an `email` to verify.
@@ -313,6 +352,49 @@ impl Client {
             None => Box::new(tcp),
         };
         crate::http::request(s, host, path, token, body).await
+    }
+}
+
+/// A provider sign-in under way ([`Client::sso`]).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct Sso {
+    /// The page to open in the browser.
+    pub url: String,
+    at: std::net::TcpListener,
+    verifier: String,
+}
+
+/// How long [`Client::sso_done`] waits for the browser.
+#[cfg(not(target_arch = "wasm32"))]
+pub const SSO_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The code the browser brings to the loopback (`GET /?code=`); anything
+/// else that knocks is turned away.
+#[cfg(not(target_arch = "wasm32"))]
+async fn landed(at: &tokio::net::TcpListener) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let Ok((mut c, _)) = at.accept().await else { continue };
+        let mut b = [0u8; 2048];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut b)).await.ok().and_then(Result::ok);
+        let head = String::from_utf8_lossy(&b[..n.unwrap_or(0)]).into_owned();
+        let code = head
+            .strip_prefix("GET /?code=")
+            .and_then(|r| r.split([' ', '&']).next())
+            .filter(|c| c.starts_with("aiot_") && c[5..].bytes().all(|b| b.is_ascii_hexdigit()));
+        let (status, text) = match code {
+            Some(_) => ("200 OK", "Signed in. Go back to the app; this tab can be closed."),
+            None => ("400 Bad Request", "Not a sign-in."),
+        };
+        let res = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
+            text.len()
+        );
+        _ = c.write_all(res.as_bytes()).await;
+        if let Some(code) = code {
+            return code.into();
+        }
     }
 }
 

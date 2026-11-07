@@ -63,6 +63,12 @@ assert!(out.contains("buy milk"));
 A switch named `json` turns refusals into `{"error": "…"}` on stdout, the
 stream a script reads. `--` ends the flags.
 
+Each flag is read as the kind the spec gives it: `a.text("n")` of a
+number flag, or `a.on("jsn")` the spec doesn't name, panics naming it
+(`--n is a Number flag, read as Text`), so a misread fails the first run
+instead of reading `None` for good. `Args::pos` holds to the spec's
+positionals the same way.
+
 ### How a command line is read
 
 - Spellings: `--tag=home`, `--tag home`, `-t home` (a short name takes
@@ -121,7 +127,8 @@ fn main() {
 
 - `aio::cli::args` leaves aio's own launch flags out (`--home`,
   `--profile`, `--instance`, `--port`, `--host`, `--expose`,
-  `--takeover`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key`), so the same binary answers both and neither refuses the
+  `--takeover`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key`, `--channel`, `--width`, `--height`,
+  `--cdp`, `--server-url`, `--connect`, `--strict-pin`, `--client`), so the same binary answers both and neither refuses the
   other's.
 - `aio::cli::fail(why, code, json)` ends with `error: why` on stderr (or
   `{"error"}` on stdout under `--json`) and the exit code.
@@ -178,8 +185,11 @@ a script never needs the prompt.
 - `Spinner::new(label)` (`update(label)`, `stop(last)`): the same for work
   of unknown length.
 - `aio::cli::watch(&h.state(), |f| h.listen(f), render)`: redraws
-  `render(state)` on every change of the cell (a `top`-like screen), also
-  on a synced copy (`Remote::listen`).
+  `render(state)` on the changes of the cell (a `top`-like screen), also
+  on a synced copy (`Remote::listen`): one frame per `TICK` (16 ms), the
+  tick's last state. On a terminal the cursor is hidden while it draws and
+  shown again however the process ends (its exit, Ctrl+C, SIGTERM; an
+  app's own handler still runs).
 - `Style::stdout()` colours for a terminal without `NO_COLOR`, or
   whenever `FORCE_COLOR` is set (not `0`/`false`); `Style { color }`
   paints `bold`, `dim`, `underline`, `red`, `green`, `yellow`, `blue`,
@@ -252,7 +262,8 @@ printed.
 
 A tool's binary takes aio's launch flags too: `--home`, `--profile`,
 `--instance` (where its data lives), `--takeover`, `--port`, `--host`,
-`--expose`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key` (`aio::paths::FLAGS`). `aio::cli::args` removes those (and
+`--expose`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key`, `--channel`, `--width`, `--height`,
+`--cdp`, `--server-url`, `--connect`, `--strict-pin`, `--client` (`aio::paths::FLAGS`). `aio::cli::args` removes those (and
 their values) before parsing, so the spec never lists them and a typo in
 either is refused with a did-you-mean. `aio::paths::Ask::app_args(&argv)`
 does the same for an app that parses its arguments some other way.
@@ -271,16 +282,16 @@ does the same for an app that parses its arguments some other way.
 
 ## Gaps against aio
 
-- aio's `testIO()` captures a whole run, its exit too (`CliExit`);
-  aio-rs's `aio::testing::TestIo` captures the prompts, styles and
-  progress (stdin, a terminal or not, colour, stdout and stderr), and a
-  run of `args`/`fail` exits the process (test it as a binary, or test
-  `parse` and `failure`).
-- aio's `watch` hides the cursor, coalesces changes of one tick into one
-  frame and restores the terminal on Ctrl+C; aio-rs's draws a frame on
-  each change it hears and leaves the cursor and Ctrl+C to the process.
-- aio's flag types are inferred from the spec (`a.flags.n: number`);
-  aio-rs reads by name (`a.number("n")`), `None` when absent.
+- aio's `testIO()` records the raw-mode toggles of an app's own secret
+  prompt; aio-rs's only one is `Prompt::password`, which turns the echo
+  off itself, so there is nothing of the app's to record.
+- aio's flag types are inferred from the spec at compile time
+  (`a.flags.n: number`); aio-rs reads by name and kind (`a.number("n")`),
+  and a name the spec hasn't, or a read of another kind, panics naming it
+  on the first run.
+- aio's `connectCli` client prints the notifications the server sends;
+  an aio-rs client shows them only once the app says how
+  (`aio::tell::show_with(f)`).
 
 ## Common mistakes
 

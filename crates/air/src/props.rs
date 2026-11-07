@@ -8,7 +8,7 @@
 //! every value is a closure, so a prop typed [`Prop`] (or an attribute)
 //! follows what it reads and every other prop takes its value once. A
 //! required prop left out is a compile error (`build` needs it).
-use crate::dom::{AttrValue, IntoAttr, attr, set_attr_now};
+use crate::dom::{AttrSlot, AttrValue, IntoAttr, attr, set_attr_now};
 use crate::reactive::{Callback, Memo, Signal, memo_now, reads};
 
 /// A props struct `rsx!` can build: `#[component]` and `#[derive(Props)]` make one.
@@ -322,8 +322,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Prop<T> {
     }
 }
 
-impl<T: IntoAttr + Clone> IntoAttr for Prop<T> {
-    fn into_attr(self) -> AttrValue {
+impl<'a, T: IntoAttr<'static> + Clone> IntoAttr<'a> for Prop<T> {
+    fn into_attr(self) -> AttrValue<'a> {
         self.get().into_attr()
     }
 }
@@ -349,18 +349,18 @@ pub struct Attribute {
 
 #[derive(Clone)]
 enum AttrSrc {
-    Const(AttrValue),
-    Live(std::rc::Rc<dyn Fn() -> AttrValue>),
+    Const(AttrValue<'static>),
+    Live(std::rc::Rc<dyn Fn() -> AttrValue<'static>>),
 }
 
 impl Attribute {
     /// `name` set to `v`.
-    pub fn new(name: &'static str, v: impl IntoAttr) -> Self {
+    pub fn new(name: &'static str, v: impl IntoAttr<'static>) -> Self {
         Self { name, value: AttrSrc::Const(v.into_attr()) }
     }
 
     /// `name` set to `f()`, again whenever what it read changes.
-    pub fn derive(name: &'static str, f: Box<dyn Fn() -> AttrValue>) -> Self {
+    pub fn derive(name: &'static str, f: Box<dyn Fn() -> AttrValue<'static>>) -> Self {
         let (v, live) = reads(&f);
         let value = if live { AttrSrc::Live(f.into()) } else { AttrSrc::Const(v) };
         Self { name, value }
@@ -368,12 +368,12 @@ impl Attribute {
 
     /// `name` set to `f()`, following what it reads (a control's own
     /// attribute that a caller's may replace).
-    pub fn live<X: IntoAttr>(name: &'static str, f: impl Fn() -> X + 'static) -> Self {
+    pub fn live<X: IntoAttr<'static>>(name: &'static str, f: impl Fn() -> X + 'static) -> Self {
         Self::derive(name, Box::new(move || f().into_attr()))
     }
 
     /// Its value now (untracked).
-    pub fn value(&self) -> AttrValue {
+    pub fn value(&self) -> AttrValue<'static> {
         match &self.value {
             AttrSrc::Const(v) => v.clone(),
             AttrSrc::Live(f) => crate::untrack(|| f()),
@@ -399,7 +399,7 @@ pub fn spread(id: u32, attrs: Vec<Attribute>) {
     for a in attrs {
         match a.value {
             AttrSrc::Const(v) => set_attr_now(id, a.name, &v),
-            AttrSrc::Live(f) => attr(id, a.name, Box::new(move || f())),
+            AttrSrc::Live(f) => attr(id, a.name, Box::new(move |s: &mut AttrSlot| s.set(f()))),
         }
     }
 }
@@ -415,12 +415,12 @@ pub fn spread(id: u32, attrs: Vec<Attribute>) {
 pub trait GlobalAttributes: Sized {
     fn __push(&mut self, a: Attribute);
 
-    fn __attr<X: IntoAttr, F: Fn() -> X + 'static>(mut self, name: &'static str, f: F) -> Self {
+    fn __attr<X: IntoAttr<'static>, F: Fn() -> X + 'static>(mut self, name: &'static str, f: F) -> Self {
         self.__push(Attribute::derive(name, Box::new(move || f().into_attr())));
         self
     }
 
-    fn __attr_const<X: IntoAttr>(mut self, name: &'static str, v: X) -> Self {
+    fn __attr_const<X: IntoAttr<'static>>(mut self, name: &'static str, v: X) -> Self {
         self.__push(Attribute::new(name, v));
         self
     }
@@ -437,8 +437,8 @@ macro_rules! globals {
         #[doc(hidden)]
         pub trait GlobalAttributeNames: GlobalAttributes {
             $(
-                fn $m<X: IntoAttr, F: Fn() -> X + 'static>(self, f: F) -> Self { self.__attr($n, f) }
-                fn $f<X: IntoAttr>(self, v: X) -> Self { self.__attr_const($n, v) }
+                fn $m<X: IntoAttr<'static>, F: Fn() -> X + 'static>(self, f: F) -> Self { self.__attr($n, f) }
+                fn $f<X: IntoAttr<'static>>(self, v: X) -> Self { self.__attr_const($n, v) }
             )*
         }
         impl<B: GlobalAttributes> GlobalAttributeNames for B {}

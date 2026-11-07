@@ -245,7 +245,9 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   and match patterns are not names to clone), so a `String` used by two
   holes needs no `.clone()`. In a `{child}` or attribute they are cloned
   again per run, so the hole may take them by value (`{match who { .. }}`,
-  `{note.map(..)}`); a name's type decides whether it follows anything (a `Signal` or `Part` does, a
+  `{note.map(..)}`) or borrow them (`title: t(&x)`, `{t(&sig.get())}`:
+  an attribute's value may borrow, as a `&str` or a `Cow`, and a lone
+  expression's temporaries live until its value is taken); a name's type decides whether it follows anything (a `Signal` or `Part` does, a
   `String` doesn't). A name called (`f(x)`) is a function's, never
   cloned in (cloning a generic fn item fixed its type for every hole), so
   a local closure called in a hole is a `Callback`, or cloned in by a
@@ -261,7 +263,12 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).
-  `if let` is refused: make a bool, or use a `{child}` hole of an `Option<View>`.
+  `if let` (and `else if let`, `let` chains) and `match` (guards, an arm
+  `=> { nodes }` or `=> node`) are a branch hole: a memo of the matching
+  arm (its index, or a fresh key on each change for an arm whose pattern
+  binds a name) swaps the view, so an arm that binds nothing keeps its
+  view and state. `while` and `loop` are refused: a view says what shows,
+  and a `for` over the items lists it.
 - `onX` handlers are typed by their event (`onkeydown` gets a
   `KeyboardEvent`, `oninput` a `FormEvent`, …); an unknown `onX` is a
   compile error; `onmounted` runs once the element is drawn.
@@ -619,10 +626,9 @@ as on air.
   `get_client_rect`, and `run` / `eval` (a script with the element as
   `el`: a canvas, a video, a selection), as page calls on the element
   (`eval` with `aio.node(id)`).
-- **`key:` and `if let`**: air makes a row without `key:` and `if let` in
-  `rsx!` compile errors, and two rows with one key a failure in every
-  build. On Dioxus `ax lint` makes the missing key an error and warns on
-  `if let`.
+- **`key:`**: air makes a row without `key:` in `rsx!` a compile error,
+  and two rows with one key a failure in every build. On Dioxus `ax lint`
+  made the missing key an error.
 - **`mut` on a signal**: Dioxus needs `let mut n = signal(…)` for a handler
   that writes `n`; on air the handler holds its own copy, so `mut` is
   unused (a warning).
@@ -656,7 +662,7 @@ as on air.
    handler), a write while a hole or a memo computes, an effect loop (the
    round guard, 1000 rounds as AIR's), a signal used after its view, a
    hooks in another order on a re-run, two rows with one
-   key; a `for` without `key:` and `if let` are
+   key; a `for` without `key:` and a `while` node are
    compile errors (`compile_fail` doc tests). Shown red first by making
    the write check and the round guard debug-only and running `--release`
    (the write went through; the loop never ended).
@@ -748,6 +754,21 @@ a view, a text or a thunk: `IntoView`, `IntoViewValue`), still 0.43x;
 0.5–0.6 s. The first mount: of 1.4–2.0 ms at 1000 rows, 0.6–0.7 ms fills
 the aio cell; at 10 000 rows the fill is 1.6–1.7 ms, the rest about 1 µs a
 row for the views (the spike drew fixed rows without a cell).
+
+In 0.3 a hole's closure is a `Box<dyn Hole<R>>` (one vtable entry; a
+`dyn Fn`'s vtable also holds `FnMut`'s and `FnOnce`'s shims, made for
+every closure), an attribute's closure hands its value to the hole's slot
+(so the value may borrow), `memo` boxes its closure before the generic
+work (made once per value type, not per closure), and a list's row work
+is one function for every item type. On the 50-view crate (same machine,
+rustc 1.98): release `.text` 1 408 083 → 1 155 779 B (the 2 658 `FnOnce`
+shims, 238 KB, to 225, 19 KB), debug binary 17.5 → 15.2 MB, LLVM IR
+1 151 432 → 962 899 lines (`scripts/air-ir`: 21 000 a view). The template
+app (`opt-level = "z"`, LTO): `.text` −768 B. The work did not slow down:
+1000 rows mounted in 670–688 µs (was 678–700), a cursor move over them
+468–483 ns (was 464–485), 3 runs each in one process; a held ↓ in
+Electron, p50 1.3–1.8 ms against 1.1–1.6 ms run by run alternately, is
+within the machine's load noise.
 
 ## Phase 3: `ax dev`, the web build and Android on air
 

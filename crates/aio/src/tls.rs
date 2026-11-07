@@ -184,10 +184,21 @@ pub fn client(root_pem: &str) -> io::Result<Arc<rustls::ClientConfig>> {
 
 /// This machine's IPv4 addresses (none on systems not read yet).
 pub fn local_addrs() -> Vec<IpAddr> {
+    interfaces().into_iter().map(|(a, _)| IpAddr::V4(a)).collect()
+}
+
+/// This machine's IPv4 addresses, each with its netmask (none on systems
+/// not read yet).
+pub fn interfaces() -> Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
     #[cfg(unix)]
     {
         let mut out = Vec::new();
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        // SAFETY: `a`, when not null, points to a sockaddr of the family it names.
+        let v4 = |a: *const libc::sockaddr| unsafe {
+            (!a.is_null() && i32::from((*a).sa_family) == libc::AF_INET)
+                .then(|| std::net::Ipv4Addr::from(u32::from_be((*(a as *const libc::sockaddr_in)).sin_addr.s_addr)))
+        };
         // SAFETY: getifaddrs fills `list`, walked read-only, then freed once.
         unsafe {
             if libc::getifaddrs(&mut list) != 0 {
@@ -195,10 +206,8 @@ pub fn local_addrs() -> Vec<IpAddr> {
             }
             let mut at = list;
             while !at.is_null() {
-                let a = (*at).ifa_addr;
-                if !a.is_null() && i32::from((*a).sa_family) == libc::AF_INET {
-                    let v4 = &*(a as *const libc::sockaddr_in);
-                    out.push(IpAddr::from(u32::from_be(v4.sin_addr.s_addr).to_be_bytes()));
+                if let Some(a) = v4((*at).ifa_addr) {
+                    out.push((a, v4((*at).ifa_netmask).unwrap_or(std::net::Ipv4Addr::BROADCAST)));
                 }
                 at = (*at).ifa_next;
             }

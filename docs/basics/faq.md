@@ -40,14 +40,6 @@ of methods (in effects), and keep state types serializable (`#[aio::data]`).
 **Where is the API reference?** `cargo doc -p aio-rs --no-deps` builds it
 from the code; this guide explains and links it.
 
-**When is aio-rs the wrong tool?** ([why](why.md#when-not-to-use-aio-rs)) When the state is not the point: a
-game loop or a 3D scene redrawn every frame (keep that state in the view,
-not in cells), a stateless web service behind a load balancer (aio-rs
-serves each app from one process; there is no multi-server mode), or a
-dataset far bigger than memory as one cell (a call copies the state: use
-`aio::imbl`, `#[table]` rows or plain SQL through `ax sql` and the store,
-[persistence](../persistence/README.md)). There is no iOS client yet.
-
 **Retries and timeouts?** On the effect: `Effect::new(..).timeout(d)`,
 and `cx.backoff(key, attempt, aio::Backoff::from(1000), method, args)` to
 call again later with growing delays. Both are in the log, so a replay
@@ -85,7 +77,8 @@ aio's `am fix` and `am link` (repairing a checkout's `dep/aio` link) have
 no twin: an aio-rs app takes aio-rs from git at a release tag, so a clone
 builds as it is; `ax pin <version>` moves it (aio's `am pin`).
 
-**When is aio-rs the wrong tool?**
+**When is aio-rs the wrong tool?** When the state is not the point
+([when to use it, and when not](when.md)):
 
 | If you need… | Use instead |
 |---|---|
@@ -93,6 +86,7 @@ builds as it is; `ax pin <version>` moves it (aio's `am pin`).
 | state redrawn every frame (a game, a 3D scene) | keep it in the view, or a game engine |
 | one state across many servers or regions | a distributed database; aio-rs serves each app from one process |
 | millions of stateless requests per second | a plain HTTP framework behind a load balancer |
+| a dataset far bigger than memory in one cell (a call copies the state) | `#[table]` rows, `aio::imbl`, or plain SQL on the store ([persistence](../persistence/README.md)) |
 | a native iOS app | nothing yet: aio-rs has no iOS client |
 
 aio-rs fits when the state is the product: tools, local-first apps, small
@@ -110,12 +104,12 @@ in `aio::blobs::Blobs` (the cell keeps the id; served with Range), rows in
 routes ([SQL and blobs](../persistence/sql.md), [sync](../state/sync.md#server-functions-and-routes)).
 Heavy work runs in an effect and hands back a small result.
 
-**Can the views use something other than `aio::ui`?** Not in the app's
-window: `client!`, `part` and `act!` are `aio::ui`'s (air underneath:
-an app doesn't name it). Another client (a page of
-your own, another program) talks to a server over `/ws` or HTTP routes
-([wire](../migration/wire.md)); aio-rs ships no adapter for another view
-library.
+**Can the views use something other than `aio::ui`?** The app's views
+are `aio::ui`'s (`client!`, `part`, `act!`; air underneath: an app doesn't
+name it). A JavaScript library or a React component comes in as an
+island (`WebIsland`, `Island::react`: [islands](../ui/islands.md)).
+Another client (a page of your own, another program) talks to a server
+over `/ws` or HTTP routes ([wire](../migration/wire.md)).
 
 **Why no multi-server mode?** One process per app, calls in order, is
 what makes each call atomic and replayable with no consensus. For several
@@ -154,7 +148,7 @@ bug in this page: `ax feedback` says where to send it.
 | `h.start()` on a `Handle` doesn't call the cell's `start` method | a `Handle`'s own methods (`start`, `state`, `call`, `listen`, `watch`…) come first | name the method apart (`begin`), or call it by name: `h.call("start", json!([]))` |
 | the state is back to its default after a restart | the cell has no `persist` | `#[cell(persist)]` |
 | a renamed field comes back empty, the old value is gone | the shape changed without `version` and `migrate` | bump `version`, give `migrate` ([persistence](../persistence/README.md#changing-the-shape)) |
-| an older build refuses to boot on the data | the data is from a newer build (a higher `version`) | run the newer build; an older one never overwrites what it can't read |
+| an older build refuses to boot on the data | the data is from a newer build and doesn't fit this one (a newer build's data that fits boots, its extra fields kept) | run the newer build, or give this one a version past it with a `migrate` that converts it down |
 | a method "does nothing" | it refused (`ensure!`, an invariant, the machine's state), and the caller ignored the `Err` | read the `Err`; `ax events` and `ax logs` show refusals |
 
 ### Persistence

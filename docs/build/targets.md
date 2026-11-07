@@ -173,6 +173,23 @@ pro` find the binary by its label. Two targets that would write the same
 file are refused; two apps that show the same name in the menu are
 warned about.
 
+A labelled target may also carry its own (aio's `build.targets.<label>`):
+
+| Key | Over | Does |
+|---|---|---|
+| `platforms` | `[build] platforms` | the platforms this target is built for |
+| `title` | `[app] name` | the name it is installed and shown under: menu entry, bundle, window title (stamped into its build) |
+| `ui` | `[app] ui` | `window` or `browser` (a `client-server` app's), stamped into its build |
+| `entry` | | aio's spelling of `bin` |
+
+```toml
+[build]
+targets = [
+  "desktop",
+  { name = "kiosk", kind = "deb", platforms = ["linux-arm64"], title = "Notes Kiosk" },
+]
+```
+
 ```rust
 # fn main() {
 let cfg = aio::config::Config::parse(
@@ -223,7 +240,19 @@ one sees (Xvfb, else the runtime's own headless mode; never the person's
 screen) with a private D-Bus. A window app must open its window, stop on
 SIGTERM, leave nothing running and log no panic, report or degraded part;
 a server must boot on a free port; a CLI must answer `--version` with its
-id. `ax smoke <artifact>` does one file and reports its boot time and its
+id. A window also checks itself, a second after its page loaded: every
+file the page names or loaded and every `[build.assets]` file answers
+200, and every declared guest preload (`Web { preloads }`) attaches in a
+sandboxed guest without an error. Each failure is a `REFUSED` line, and
+any `REFUSED` line fails the smoke, as in aio:
+
+```text
+  ✗ page: 2 of 3 asset URLs answer 200, 0 of 1 guest preloads attach
+    [aio-shell] smoke: asset REFUSED: aio://app/media/none.png answers 404
+    [aio-shell] smoke: guest preload REFUSED: probe.js: broken preload
+```
+
+`ax smoke <artifact>` does one file and reports its boot time and its
 window's memory.
 
 - Linux bundles, `.deb` and AppImage: on this machine.
@@ -231,6 +260,12 @@ window's memory.
   names; it is stopped through its door (`<app> --quit`).
 - A macOS `.zip`: on the Mac that built it; its window shows on that
   Mac's screen until it is asked to stop.
+
+Every other artifact of the build is listed with why, never skipped in
+silence: `not smoke-tested: notes-1.0.0-windows-x64.zip: built for
+windows`, an APK (`ax test --android` starts one), a web build, the
+one-click `.exe` or a `.dmg`. `--smoke-strict` fails the build on any of
+them: use it on the machine whose job is to prove the release.
 
 ## Desktop
 
@@ -245,7 +280,8 @@ aio_shell::run(app::App, aio_shell::Window { width: 900, height: 640, ..aio_shel
 - `aio_shell::start` takes the app's launch flags ([dev](dev.md#the-apps-own-launch-flags))
   and claims its data; a second launch hands its arguments to the running
   copy, which comes to the front. `Source::for_app` opens the cell on this
-  process's store, or a synced copy of `[client] server`'s; `aio_shell::run`
+  process's store, or a synced copy of `[client] server`'s (a client with
+  no server it can reach shows its connect page); `aio_shell::run`
   opens the window ([views](../ui/views.md#the-window)).
 - The views run in the app's Rust process; the window only draws them.
   Every crate, file, thread and the SQL store work in a view's code.
@@ -286,8 +322,8 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 | `notes-1.4.7-x86_64.AppImage` (`--appimage`) | run it as is, or `ax install notes --appimage` | delete it, or `ax remove notes` |
 
 - `install.sh` puts the binary in
-  `$XDG_DATA_HOME/aio-rt/install/<id>/versions/<version>/` with `current`
-  pointing at it (how updates swap versions), links `~/.local/bin/<id>`,
+  `$XDG_DATA_HOME/aio-rt/install/<id>/versions/<version>/` (or
+  `$AIORT_INSTALL_ROOT/<id>/…`) with `current` pointing at it (how updates swap versions), links `~/.local/bin/<id>`,
   writes the menu entry and its icon, and `installed.json` (what and from
   where; `ax installed` reads it). The menu entry's window class is the
   app id, so the taskbar groups its window under its icon.
@@ -596,6 +632,12 @@ pub fn web() {
   (one per iPhone and iPad screen, the splash on its background), with
   `[build.assets]`, those files at their paths. Put it on any HTTPS host, or serve it from
   the app's own server (`aio::http::Http::shell(dir)`).
+- What the page fetches is made small: the kit's stylesheet and air's
+  interpreter are built into the wasm without comments or indentation,
+  and wasm-bindgen's script loses its indentation and comment lines (the
+  template's site: 454 → 418 KB, drawn the same). Formatting a float
+  (`format!("{x}")` of an `f64`) adds ~10 KB of wasm: print integers
+  where you can.
 - `--web --dev`: a debug build whose page shows its errors on it.
 - The service worker precaches every file of the build (code checked
   against its digest), answers same-origin requests cache-first, gives
@@ -687,8 +729,9 @@ entry), a `.zip` on Windows.
 ## Thin clients
 
 `[app] mode = "client"` is a window with no cells of its own: it opens a
-synced copy of a server's cells (`[client] server = "host:port"`, its host
-in `[capabilities] network`, or a server paired with `ax pair`), queues
+synced copy of a server's cells (`[client] server = "host:port"`, a server
+paired with `ax pair` or picked on its connect page: reached with no
+`[capabilities] network` entry), queues
 calls while offline and catches up on reconnect
 ([sync](../state/sync.md#offline-and-reconnects)). It builds and ships
 like any desktop or Android app. A client of a server in another place
@@ -734,12 +777,13 @@ The same `aio.toml` is built into every target; what a target can't use
   host`): a macOS binary links Apple's frameworks, whose SDK only a Mac
   may carry; aio's Deno binary cross-compiled to an unsigned `.app` on any host.
 - macOS and Windows bundles are not OS-signed or notarized yet.
-- Android: no client connect page on the phone yet (pair from the desktop, `ax pair`).
+- No client connect page, on desktop or Android, yet: a client names its
+  server in `[client] server`; pair a device with `ax pair`.
 - No Flatpak, Snap, RPM, MSI or Microsoft Store package.
 - No one-file "standalone binary with its own browser UI" beyond
   `ui = "browser"` (which needs the app's server).
-- No per-target `[app]` overrides: a second app is a second binary with
-  its own `aio.toml` (`bin`).
+- A target overrides `[app]`'s title and ui only; anything else is a
+  second binary with its own `aio.toml` (`bin`).
 
 ## API
 

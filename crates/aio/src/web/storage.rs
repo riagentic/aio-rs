@@ -152,6 +152,36 @@ pub fn load(kv: &impl Kv, key: &str, say: impl Fn(&str)) -> Option<Doc> {
     }
 }
 
+/// `d` (at `key`) when it is cell `cell`'s at version `v`; else `None`,
+/// and calls still waiting in it are kept at `<key>.orphan-v<n>` (then
+/// `-2`, `-3`…) and said
+/// (aio's `sync-orphan-queue`), never dropped silently.
+pub fn current(kv: &impl Kv, key: &str, d: Doc, cell: &str, v: u32, say: impl Fn(&str)) -> Option<Doc> {
+    if d.cell == cell && d.v == v {
+        return Some(d);
+    }
+    if !d.pending.is_empty() {
+        // Never over an earlier one (the same version orphaned twice).
+        let base = format!("{key}.orphan-v{}", d.v);
+        let aside = std::iter::once(base.clone())
+            .chain((2..).map(|i| format!("{base}-{i}")))
+            .find(|k| kv.get(k).is_none())
+            .unwrap_or(base);
+        let kept = match kv.set(&aside, &serde_json::to_string(&d).unwrap_or_default()) {
+            Ok(()) => format!("kept at \"{aside}\""),
+            Err(e) => format!("not kept: {e}"),
+        };
+        say(&format!(
+            "{cell}: {} calls made offline on {} version {} never reached the server and this build can't send them \
+             (version {v}): {kept}",
+            d.pending.len(),
+            d.cell,
+            d.v
+        ));
+    }
+    None
+}
+
 /// `mine` and the calls of `theirs` that are not mine and that this tab
 /// never saw answered (`done`), oldest first (pure).
 pub fn merge(mine: &[Queued], theirs: &[Queued], done: &HashSet<String>) -> Vec<Queued> {
@@ -251,6 +281,21 @@ mod tests {
 
     fn q(op: &str, at: i64) -> Queued {
         Queued { op: op.into(), method: "add".into(), args: Value::Null, inputs: Inputs::default(), at, waits: false }
+    }
+
+    #[test]
+    fn a_queue_of_another_version_is_kept_aside_and_said() {
+        let (kv, said) = (Map::default(), RefCell::new(vec![]));
+        let say = |m: &str| said.borrow_mut().push(m.to_string());
+        assert!(current(&kv, "k", doc("u", 1, vec![q("a", 1)]), "todos", 1, say).is_some());
+        assert!(current(&kv, "k", doc("u", 1, vec![q("a", 1)]), "todos", 2, say).is_none());
+        assert!(kv.get("k.orphan-v1").unwrap().contains("\"op\":\"a\""));
+        assert!(said.borrow()[0].contains("1 calls made offline on todos version 1"), "{said:?}");
+        assert!(current(&kv, "k", doc("u", 1, vec![]), "todos", 2, say).is_none());
+        assert_eq!(said.borrow().len(), 1, "an empty queue loses nothing");
+        assert!(current(&kv, "k", doc("u", 1, vec![q("b", 2)]), "todos", 2, say).is_none());
+        assert!(kv.get("k.orphan-v1").unwrap().contains("\"op\":\"a\""), "the first set stays");
+        assert!(kv.get("k.orphan-v1-2").unwrap().contains("\"op\":\"b\""));
     }
 
     fn doc(user: &str, seq: u64, pending: Vec<Queued>) -> Doc {

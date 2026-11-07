@@ -30,7 +30,7 @@ fn env(k: &str) -> Option<PathBuf> {
 /// The other homes app `id` may run from beside `plan`'s: its profiles
 /// (`<home>-<name>`), its instances and a ported app's debug-build home
 /// (`[home] dev`), as (flag, plan).
-fn others(id: &str, port_of: Option<(&str, &aio::config::Home)>, plan: &Plan) -> Vec<(String, Plan)> {
+fn others(id: &str, port_of: Option<&str>, rules: &aio::config::Home, plan: &Plan) -> Vec<(String, Plan)> {
     let mut out = Vec::new();
     let home = plan.data.parent().unwrap_or(Path::new(""));
     let stem = home.file_name().map(|n| format!("{}-", n.to_string_lossy())).unwrap_or_default();
@@ -47,14 +47,14 @@ fn others(id: &str, port_of: Option<(&str, &aio::config::Home)>, plan: &Plan) ->
     };
     let store = plan.store.file_name().unwrap_or_default().to_owned();
     let mut try_ask = |flag: String, ask: Ask| {
-        if let Ok(p) = aio::paths::plan(id, port_of, &ask, &env)
+        if let Ok(p) = aio::paths::plan_in(id, port_of, rules, &ask, &env)
             && p.data != plan.data
             && !out.iter().any(|(_, q): &(String, Plan)| q.data == p.data)
         {
             out.push((flag, Plan { store: p.data.join(&store), ..p }));
         }
     };
-    if port_of.is_some_and(|(_, h)| h.dev.is_some()) {
+    if port_of.is_some() && rules.dev.is_some() {
         try_ask("a debug build".into(), Ask { dev: true, ..Ask::default() });
     }
     for n in names(home.parent().unwrap_or(Path::new(""))) {
@@ -63,7 +63,7 @@ fn others(id: &str, port_of: Option<(&str, &aio::config::Home)>, plan: &Plan) ->
         }
     }
     let probe = Ask { instance: Some("x".into()), ..Ask::default() };
-    if let Some(root) = aio::paths::plan(id, port_of, &probe, &env)
+    if let Some(root) = aio::paths::plan_in(id, port_of, rules, &probe, &env)
         .ok()
         .and_then(|p| Some(p.data.parent()?.parent()?.parent()?.to_path_buf()))
     {
@@ -112,12 +112,13 @@ pub fn of(word: &str, ask: &Ask) -> Result<Target, String> {
         None => (name.to_string(), None, aio::paths::plan(name, None, &ask, &env)?),
     };
     let target = |plan| Target { name: word.into(), id: id.clone(), plan, pkg };
-    if plan.from != "default" || aio::paths::running(&plan.data) {
+    if !matches!(plan.from, "default" | "[home] dir") || aio::paths::running(&plan.data) {
         return Ok(target(plan));
     }
-    let port_of = cfg.as_ref().and_then(|c| Some((c.app.port_of.as_deref()?, &c.home)));
+    let none = aio::config::Home::default();
+    let (port_of, rules) = cfg.as_ref().map_or((None, &none), |c| (c.app.port_of.as_deref(), &c.home));
     let running: Vec<(String, Plan)> =
-        others(&id, port_of, &plan).into_iter().filter(|(_, p)| aio::paths::running(&p.data)).collect();
+        others(&id, port_of, rules, &plan).into_iter().filter(|(_, p)| aio::paths::running(&p.data)).collect();
     let (plan, said) = follow(plan, running, name)?;
     if let Some(s) = said {
         eprintln!("{s}");
@@ -162,7 +163,8 @@ mod tests {
             std::fs::create_dir_all(p).unwrap();
         }
         let plan = Plan { data: home.join("data"), ..at("/") };
-        let found: Vec<String> = others("notes", None, &plan).into_iter().map(|(f, _)| f).collect();
+        let found: Vec<String> =
+            others("notes", None, &Default::default(), &plan).into_iter().map(|(f, _)| f).collect();
         assert!(found.contains(&"--profile dev".to_string()), "{found:?}");
         assert!(!found.iter().any(|f| f.contains("other")), "{found:?}");
     }

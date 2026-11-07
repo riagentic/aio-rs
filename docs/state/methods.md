@@ -156,6 +156,7 @@ wire:
 | `AccessDenied` | `ACCESS_DENIED` | a network caller its `#[client]` rule refuses ([sync.md](sync.md#who-may-call-what)) |
 | `ActionRefused` | `ACTION_REFUSED` | no such method |
 | `ConnectionLost` | `CONNECTION_LOST` | the link to the app dropped; the call may have run |
+| `TxConflict`, `ReduceError`, `DispatchClosed`, `DispatchAborted`, … | `TX_CONFLICT`, `REDUCE_ERROR`, … | the rest of aio's kinds ([errors](../debugging/errors.md#the-codes)) |
 
 Match on `code()`, never on the words.
 
@@ -419,7 +420,8 @@ assert_eq!((h.state().free, h.state().held, h.state().sold), (5, 0, 1));
   `h.pending(Some("sell"))`, and in a view with `use_pending`.
 - Overlapping calls of one async method run their awaits in turn, the
   second after the first; `#[mode(newest)]` lets a new call supersede
-  the running one, `#[mode(first)]` shares the running one's answer, and
+  the running one, `#[mode(first)]` shares the answer of a running one with the same
+  arguments, and
   `#[ttl(ms)]` keys them by the arguments.
 - A refusal in a later part refuses that part only. What earlier parts
   committed stays, so a later part must leave the state whole on its
@@ -428,7 +430,8 @@ assert_eq!((h.state().free, h.state().held, h.state().sold), (5, 0, 1));
   One that takes longer is cut off, said in the log and a report, its
   caller is told, and its later parts never run: undo what the first part
   held in `restore` or with a schedule. `#[long]` lifts the ceiling for a
-  method that waits by nature.
+  method that waits by nature; `#[long(ms)]` gives one its own (aio's
+  per-method timeout: `#[long(120000)]` for a two-minute import).
 - `cx.abort("sell")` from another method (a cancel button) stops the
   waiting awaits; their later parts never run, so that method gives back
   what they held.
@@ -452,13 +455,16 @@ cell's async methods one transaction:
   wrote meanwhile, committing would overwrite that change with a value
   computed from stale state, so the call is refused with
   `Code::TxConflict` (aio's `TX_CONFLICT`), nothing of it kept: call it
-  again. aio-rs can't see what a method read, so a field it wrote counts
-  as read too (aio's read-modify-write rule; a blind write conflicts
-  here where aio's wouldn't). Items it only pushed onto a list's end
-  never conflict: they go onto the list as it is then.
+  again. What it read is what `#[methods]` finds in its body: a field it
+  only assigns (`self.status = …`, never read in the method) is a blind
+  write, which never conflicts: the last write wins, as in aio. A method
+  that passes `self` on or calls a method of `self` may read anything,
+  so every field it wrote counts as read. Items it only pushed onto a
+  list's end never conflict: they go onto the list as it is then.
 - `#[cell(transaction(serialize))]` (aio's `{ serialize: true }`): its
   async methods run one at a time, each starting after the one before
-  ended, and any change meanwhile (a plain method's) is a conflict.
+  ended, and a change meanwhile (a plain method's) to anything it read
+  is a conflict.
   `transaction(conflict = "warn")` commits over a conflict, said in the
   log and a report.
 - `cx.commit()` publishes what it wrote so far at the end of this part
@@ -487,10 +493,11 @@ impl Wallet {
         self.balance -= n;
     }
 
+    /// Reads the balance, so a transfer meanwhile is a conflict.
     pub async fn refresh(&mut self) -> Result {
         self.status = "refreshing".into();
         let got: i64 = fetch_balance().await;
-        self.balance = got;
+        self.balance = got.max(self.balance);
         self.status = "fresh".into();
         Ok(())
     }
@@ -566,10 +573,10 @@ stay apart, chain the calls and make each step undoable:
 | `s.$call(other, …)` | `self.other(..)`: a plain call, inside the same event |
 | `s.$do(effect)` | `cx.run(Effect::new(..))` |
 | `args` schema | the argument types, then `ensure!` |
-| `transaction: true` / `{ serialize: true }` / `{ conflict: "warn" }`, `s.$commit()`, `s.$commit(ms)`, `s.$live`, `TX_CONFLICT` | `#[cell(transaction)]` / `transaction(serialize)` / `transaction(conflict = "warn")`, `cx.commit()`, `cx.commit_every(ms)`, `cx.live_state::<Self>()`, `Code::TxConflict`; a field written counts as read ([transactions](#transactions)) |
+| `transaction: true` / `{ serialize: true }` / `{ conflict: "warn" }`, `s.$commit()`, `s.$commit(ms)`, `s.$live`, `TX_CONFLICT` | `#[cell(transaction)]` / `transaction(serialize)` / `transaction(conflict = "warn")`, `cx.commit()`, `cx.commit_every(ms)`, `cx.live_state::<Self>()`, `Code::TxConflict`; reads found in the method's body ([transactions](#transactions)) |
 | `cancelOn`, `s.$signal` | `cx.abort(key)`; an aborted await's later parts never run |
 | `concurrency: "newest" / "first" / "queue"`, `ttl` | `#[mode(newest)]` / `#[mode(first)]` / the default; `#[ttl(ms)]`; `Mode` on an effect |
-| `long: [...]`, `effectTimeoutMs` | `#[long]`; `[perf] call_ceiling` |
+| `long: [...]`, `effectTimeoutMs`, a method's own timeout | `#[long]`; `[perf] call_ceiling`; `#[long(ms)]` |
 | `blocking(id, fn)`, `blocking.cancel(id)` | `aio::effect::blocking(key, f)`, `cancel_blocking(key)` |
 | `cell.$pending()` | `h.pending(Some("m"))`, `use_pending` |
 | `.type`, generated actions | the method's name; `Cell::METHODS`, `Cell::SIGNATURES` |

@@ -95,6 +95,7 @@ fn a_person_signs_in_and_a_wrong_password_is_said_in_words() {
     assert!(ui.absent("signinError"));
     // Sign-up is off on this server: no toggle.
     assert!(ui.absent("signinToggle"));
+    assert!(ui.absent("signinSso"), "no identity provider: no SSO link");
 }
 
 #[test]

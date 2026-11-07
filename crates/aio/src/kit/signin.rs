@@ -4,8 +4,11 @@
 //! over [`crate::auth::client`]. It adapts to the server (no sign-up toggle
 //! when sign-up is off, no "Forgot password?" without mail) and says each
 //! refusal in words a person can act on. A wrong second-factor code spends
-//! the step: back to the password.
-use super::{Alert, Button, Field, Input, Tone, Variant, join};
+//! the step: back to the password. With an identity provider it offers
+//! single sign-on: in a page, the page goes to the provider and back (its
+//! session is the cookie); elsewhere the browser does, and the session comes
+//! to the app ([`Client::sso`]).
+use super::{Alert, Button, Field, Input, Size, Tone, Variant, btn_class, join};
 use crate::auth::client::{AuthError, Client, Login, Signed, Signup};
 use crate::ui::prelude::*;
 
@@ -55,7 +58,7 @@ fn said(e: &AuthError) -> String {
 /// The form; `on_signed` gets the session (link with [`Client::link`]).
 /// Parts: `signinId`, `signinEmail`, `signinPassword`, `signinCode`,
 /// `signinToken`, `signinSubmit`, `signinToggle`, `signinForgot`,
-/// `signinHaveToken`, `signinBack`, `signinError`, `signinNotice`.
+/// `signinHaveToken`, `signinBack`, `signinSso`, `signinError`, `signinNotice`.
 #[component]
 pub fn SignIn(
     client: Client,
@@ -72,6 +75,12 @@ pub fn SignIn(
     /// Offer "Forgot password?" (when the server sends mail).
     #[props(default = true)]
     forgot: bool,
+    /// Offer single sign-on (when the server has an identity provider).
+    #[props(default = true)]
+    sso: bool,
+    /// The single sign-on link's words (default "Continue with SSO").
+    #[props(into)]
+    sso_label: Option<String>,
     #[props(default, into)] class: String,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
@@ -88,6 +97,33 @@ pub fn SignIn(
         async move { asked(async move { c.me(None).await }).await.ok() }
     });
     let me = memo(move || offers.get().flatten().unwrap_or_default());
+    let tab = client.tab();
+    // Outside a page: a sign-in under way in the browser, a new one once it fails.
+    let sso_at = signal(|| None::<String>);
+    #[cfg(not(target_arch = "wasm32"))]
+    if sso && !tab {
+        let c = client.clone();
+        task(move || async move {
+            let me = c.clone();
+            if !asked(async move { me.me(None).await }).await.is_ok_and(|m| m.oidc) {
+                return;
+            }
+            while let Ok(s) = c.sso() {
+                sso_at.set(Some(s.url.clone()));
+                let c = c.clone();
+                match asked(async move { c.sso_done(s).await }).await {
+                    Ok(s) => return on_signed.call(s),
+                    Err(e) => error.set(Some(said(&e))),
+                }
+            }
+        });
+    }
+    let sso_href = memo(move || match sso && me.with(|m| m.oidc) {
+        false => None,
+        true if tab => Some(page_sso()),
+        true => sso_at.get(),
+    });
+    let sso_label = sso_label.unwrap_or_else(|| "Continue with SSO".into());
     let submit = move |e: FormEvent| {
         e.prevent_default();
         if busy.get() {
@@ -221,6 +257,9 @@ pub fn SignIn(
                 Alert { tone: Tone::Success, "data-t": "signinNotice", {notice.get().unwrap_or_default()} }
             }
             Button { variant: Variant::Primary, r#type: "submit", disabled: busy.get(), "data-t": "signinSubmit", "{action}" }
+            if let Some(href) = sso_href.get().filter(|_| !step.get() && m.get() == Mode::Login) {
+                a { class: btn_class(Variant::Secondary, Size::Md, "aio-signin__sso"), href, target: if tab { "_self" } else { "_blank" }, rel: "noopener", "data-t": "signinSso", "{sso_label}" }
+            }
             if !step.get() {
                 if signup && me.with(|me| me.signup) && matches!(m.get(), Mode::Login | Mode::Signup) {
                     Button { variant: Variant::Ghost, "data-t": "signinToggle", onclick: move |_| to(if new.get() { Mode::Login } else { Mode::Signup }),
@@ -239,4 +278,14 @@ pub fn SignIn(
             }
         }
     }
+}
+
+/// A page's way to its provider, coming back to where it is.
+fn page_sso() -> String {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(l) = web_sys::window().map(|w| w.location()) {
+        let here = format!("{}{}", l.pathname().unwrap_or_default(), l.search().unwrap_or_default());
+        return format!("/__aio/auth/oidc/start?redirect={}", String::from(js_sys::encode_uri_component(&here)));
+    }
+    "/__aio/auth/oidc/start".into()
 }

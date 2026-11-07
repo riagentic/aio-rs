@@ -3,7 +3,9 @@
 //! `transform` and stacking order, while its state and handlers stay with
 //! the component that made it. Portals show in the order they mounted, so
 //! a menu opened inside a portalled dialog is drawn over it, and never
-//! inside it. With no host, or `disabled`, the content stays in place.
+//! inside it. With no host, or `disabled`, the content stays in place. A
+//! host with a `name` anywhere on the page takes the portals that name it
+//! as their `target` (aio's `Portal target`).
 use crate::ui::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -14,12 +16,21 @@ struct Outlet {
     all: Signal<Vec<(u64, View)>>,
 }
 
-thread_local!(static NEXT: Cell<u64> = const { Cell::new(0) });
+thread_local! {
+    static NEXT: Cell<u64> = const { Cell::new(0) };
+    /// The named hosts showing now.
+    static NAMED: std::cell::RefCell<Vec<(String, Outlet)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
-/// Where portals are drawn: put it around the app once.
+/// Where portals are drawn: put it around the app once; one with a `name`
+/// (a sidebar, a status bar) takes the portals whose `target` names it.
 #[component]
-pub fn PortalHost(children: View) -> View {
+pub fn PortalHost(#[props(into)] name: Option<String>, children: View) -> View {
     let out = provide(|| Outlet { all: Signal::new(vec![]) });
+    if let Some(name) = name {
+        once(|| NAMED.with_borrow_mut(|n| n.push((name.clone(), out))));
+        on_cleanup(move || NAMED.with_borrow_mut(|n| n.retain(|(k, o)| *k != name || o.all != out.all)));
+    }
     rsx! {
         {children}
         div { class: "aio-portals",
@@ -30,11 +41,12 @@ pub fn PortalHost(children: View) -> View {
     }
 }
 
-/// Draw `children` in the [`PortalHost`] while this component lives (and
-/// isn't `disabled`).
+/// Draw `children` in the [`PortalHost`] around it, or the one named
+/// `target`, while this component lives (and isn't `disabled`).
 #[component]
-pub fn Portal(#[props(default)] disabled: Prop<bool>, children: View) -> View {
-    let Some(out) = try_context::<Outlet>() else { return children };
+pub fn Portal(#[props(default)] disabled: Prop<bool>, #[props(into)] target: Option<String>, children: View) -> View {
+    let named = |t: &String| NAMED.with_borrow(|n| n.iter().rev().find(|(k, _)| k == t).map(|(_, o)| *o));
+    let Some(out) = target.as_ref().map_or_else(try_context::<Outlet>, named) else { return children };
     let id = NEXT.with(|n| n.replace(n.get() + 1));
     let here = memo(move || disabled.get());
     let placed = once(|| Rc::new(Cell::new(false)));

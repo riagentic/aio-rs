@@ -39,8 +39,10 @@ pub fn older(v: &str, than: &str) -> bool {
 }
 
 /// The variables aio reads (`AIORT_TOKEN`'s value is never shown).
-pub const VARS: [&str; 9] = [
+pub const VARS: [&str; 11] = [
     "AIORT_DATA",
+    "AIORT_APPS_DIR",
+    "AIORT_PORT",
     "AIORT_CONFIG",
     "AIORT_PROFILE",
     "AIORT_TOKEN",

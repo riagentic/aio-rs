@@ -177,7 +177,8 @@ one TCP port for everything network-facing:
   or the cookie a `?token=` link sets), or a session. Wrong guesses from one address are slowed and then
   locked out.
 - **The gate**, before any route: the `Host` must be an IP, `localhost`,
-  a `.local` name or one `[server] hosts` lists (DNS rebinding); a
+  a `.local` name, this machine's name or one `[server] hosts` lists
+  (DNS rebinding); a
   browser's `Origin` must be this host or a listed one; a `POST` body must
   be JSON (CSRF); `strict_origin = true` makes an exposed app refuse a
   socket upgrade that says no `Origin`. Behind a reverse proxy,
@@ -305,9 +306,14 @@ What aio has here and aio-rs doesn't yet:
 - No `transport` switch: `--port`, `--host` and `--expose` only move
   where a serving mode listens; they open no port on a `standalone` or
   `client` app.
-- A release build's doors serve any process of this user as a client
-  would; aio's `allowLocalPeers` opt-out has no counterpart (the window's
-  own sockets are always locked to the window).
+- A release build's door serves any process of this user as a client
+  would, unless `[server] local_peers = false` (aio's `allowLocalPeers`,
+  which aio leaves off): `ax state` and `ax call` work on a release by
+  default. By design: the window's own sockets are always locked to the
+  window this app spawned (its pid and start time), and a process of this
+  user that could use the door can read the app's key and store anyway.
+  `local_peers = false` is aio's default lockdown, and stricter: no door
+  at all (`ax stop` and `ax health` work without it).
 
 ## Common mistakes
 

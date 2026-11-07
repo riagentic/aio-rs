@@ -11,6 +11,8 @@ pub enum Noise {
     Gpu,
     /// Chromium's X11 atom cache meeting a drop type it hadn't cached.
     X11,
+    /// Chromium finding no D-Bus (a container, a bare X session): it goes on without.
+    Dbus,
 }
 
 impl Noise {
@@ -22,6 +24,7 @@ impl Noise {
             Noise::X11 => {
                 "Chromium's X11 drag-and-drop atom-cache messages (harmless: a drop type it had not cached, added on the spot)"
             }
+            Noise::Dbus => "Chromium's D-Bus connection messages (harmless: no bus here, it goes on without one)",
         }
     }
 }
@@ -42,23 +45,39 @@ pub fn noise(line: &str) -> Option<Noise> {
     }
     // `[pid:tid:date/time:ERROR:<dir/>atom_cache.cc(N)] Add <type> to kAtomsToCache`
     // (`:N]` in newer builds).
-    let x11 = (|| {
-        let (stamp, rest) = l.strip_prefix('[')?.split_once(":ERROR:")?;
-        let (file, msg) = rest.split_once("] ")?;
-        let at = file.rfind("atom_cache.cc")?;
-        let (dir, tail) = (&file[..at], &file[at + "atom_cache.cc".len()..]);
-        let line_no = tail.strip_prefix('(').and_then(|t| t.strip_suffix(')')).or(tail.strip_prefix(':'))?;
+    let x11 = chromium(l, "atom_cache.cc").and_then(|msg| {
         let ty = msg.strip_prefix("Add ")?.strip_suffix(" to kAtomsToCache")?;
-        let path = |b: u8| b.is_ascii_alphanumeric() || b"_./".contains(&b);
-        (!stamp.is_empty()
-            && stamp.bytes().all(|b| b.is_ascii_digit() || b":/.".contains(&b))
-            && (dir.is_empty() || dir.ends_with('/') && dir.bytes().all(path))
-            && digits(line_no)
-            && !ty.is_empty()
-            && !ty.contains(char::is_whitespace))
-        .then_some(())
-    })();
-    x11.map(|()| Noise::X11)
+        (!ty.is_empty() && !ty.contains(char::is_whitespace)).then_some(Noise::X11)
+    });
+    // `[pid:tid:date/time:ERROR:dbus/bus.cc(N)] Failed to connect to the bus: <why>`,
+    // and with no bus, its tray asking whether a tray host is there:
+    // `[...:ERROR:dbus/object_proxy.cc(N)] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:`
+    let dbus = || {
+        let bus =
+            chromium(l, "bus.cc").filter(|m| m.starts_with("Failed to connect to the bus: ") && !m.contains('\n'));
+        let owner = chromium(l, "object_proxy.cc").filter(|m| {
+            *m == "Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:"
+        });
+        bus.or(owner).map(|_| Noise::Dbus)
+    };
+    x11.or_else(dbus)
+}
+
+/// The message of Chromium's log line `l` from source file `name`
+/// (`[pid:tid:date/time:ERROR:<dir/>name(N)] msg`, or `name:N]`) (pure).
+fn chromium<'a>(l: &'a str, name: &str) -> Option<&'a str> {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let (stamp, rest) = l.strip_prefix('[')?.split_once(":ERROR:")?;
+    let (file, msg) = rest.split_once("] ")?;
+    let at = file.rfind(name)?;
+    let (dir, tail) = (&file[..at], &file[at + name.len()..]);
+    let line_no = tail.strip_prefix('(').and_then(|t| t.strip_suffix(')')).or(tail.strip_prefix(':'))?;
+    let path = |b: u8| b.is_ascii_alphanumeric() || b"_./".contains(&b);
+    (!stamp.is_empty()
+        && stamp.bytes().all(|b| b.is_ascii_digit() || b":/.".contains(&b))
+        && (dir.is_empty() || dir.ends_with('/') && dir.bytes().all(path))
+        && digits(line_no))
+    .then_some(msg)
 }
 
 /// Did the runtime end because its GPU can't be used (Chromium gives up
@@ -89,8 +108,10 @@ const TAIL: usize = 5;
 pub async fn forward(r: impl AsyncRead + Unpin) -> Vec<String> {
     let mut lines = tokio::io::BufReader::new(r).lines();
     let (mut said, mut tail, mut full) = (vec![], std::collections::VecDeque::new(), false);
+    // `ax dev --verbose` (the log at debug): every line, the noise too.
+    let verbose = std::env::var("AIORT_LOG").is_ok_and(|v| matches!(v.trim(), "debug" | "trace"));
     while let Ok(Some(l)) = lines.next_line().await {
-        match noise(&l) {
+        match noise(&l).filter(|_| !verbose) {
             Some(n) => {
                 if !said.contains(&n) {
                     said.push(n);
@@ -166,6 +187,26 @@ mod tests {
             "[48213:48213:1020/141502.318204:ERROR:x11_atom_cache_evil.cc(1)] Add x to kAtomsToCache",
             "Add application/vnd.portal.files to kAtomsToCache",
             "[1:ERROR:atom_cache.cc()] Add x to kAtomsToCache",
+        ] {
+            assert_eq!(noise(l), None, "{l}");
+        }
+    }
+
+    #[test]
+    fn dbus_noise_is_dropped_in_that_shape_only() {
+        for l in [
+            "[458061:1103/182641.318375:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory",
+            "[9:9:1103/1.2:ERROR:bus.cc(399)] Failed to connect to the bus: Could not parse server address",
+            "[2313755:1107/093252.776251:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        ] {
+            assert_eq!(noise(l), Some(Noise::Dbus), "{l}");
+        }
+        for l in [
+            "[458061:1103/182641.318375:ERROR:dbus/bus.cc:406] something else",
+            "[458061:1103/182641.318375:ERROR:dbus/object_proxy.cc:590] Failed to call method",
+            "[1:1103/1.2:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.AccessDenied: no",
+            "[1:1103/1.2:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.example.Thing.Do: object_path= /org/freedesktop/DBus: unknown error type: ",
+            "Failed to connect to the bus: x",
         ] {
             assert_eq!(noise(l), None, "{l}");
         }

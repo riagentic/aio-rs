@@ -623,6 +623,12 @@ async fn the_snapshot_endpoint_exports_and_loads_the_whole_state_as_aios() {
     let h = Handle::<Hooks>::memory();
     h.call("pay", serde_json::json!(["a1", 5])).unwrap();
     let addr = serve(h.clone(), Http::default()).await;
+    // `ax dev`'s tooling only (aio's `dev` feature): a build without it has
+    // no such route, the key or not.
+    if !cfg!(feature = "dev") {
+        assert_eq!(fetch(&addr, "GET", "/__aio/snapshot", &[KEY], "").await.0, 404);
+        return;
+    }
     // Without the key: refused; with it, this machine's tool gets every cell.
     assert_eq!(fetch(&addr, "GET", "/__aio/snapshot", &[], "").await.0, 401);
     let (s, head, body) = fetch(&addr, "GET", "/__aio/snapshot", &[KEY], "").await;

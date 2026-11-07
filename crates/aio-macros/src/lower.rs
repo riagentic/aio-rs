@@ -68,12 +68,23 @@ pub(crate) struct Lowered {
     pub arms: Vec<Tokens>,
 }
 
+/// How long each await of an async method may take.
+#[derive(Clone, Copy)]
+pub(crate) enum Ceiling {
+    /// The app's (`[perf] call_ceiling`).
+    App,
+    /// `#[long]`: as long as it needs.
+    None,
+    /// `#[long(ms)]`: its own.
+    Ms(u64),
+}
+
 struct Lower {
     m: Ident,
     cx: Ident,
     r: Type,
     ttl: Option<i64>,
-    long: bool,
+    long: Ceiling,
     newest: bool,
     awaits: usize,
     joins: usize,
@@ -511,7 +522,11 @@ impl Lower {
             }
         };
         let names = params.iter().map(|v| &v.name);
-        let ceiling = (!self.long).then(|| quote!(.timeout(::aio::effect::call_ceiling())));
+        let ceiling = match self.long {
+            Ceiling::App => Some(quote!(.timeout(::aio::effect::call_ceiling()))),
+            Ceiling::None => None,
+            Ceiling::Ms(ms) => Some(quote!(.timeout(::std::time::Duration::from_millis(#ms)))),
+        };
         let mode = self.newest.then(|| quote!(.mode(::aio::Mode::Newest)));
         let io = &a.io;
         Ok(quote! {
@@ -764,9 +779,16 @@ impl VisitMut for Rewrite<'_> {
 /// Lower `pub async fn m(&mut self, cx: &Cx, …) -> Result<R>` (`f`, its
 /// answer type `r`) into its first part (`m` itself, now a plain fn) and
 /// hidden steps and joins, with their `apply` arms. `#[ttl(ms)]` keys its
-/// effects by the arguments; `#[long]` lifts the call ceiling; `newest`:
+/// effects by the arguments; `long`: its call ceiling (`#[long]` lifts it); `newest`:
 /// `#[mode(newest)]`, a new call aborts the running one's await.
-pub(crate) fn lower(f: &mut ImplItemFn, r: Type, ttl: Option<i64>, long: bool, newest: bool) -> syn::Result<Lowered> {
+pub(crate) fn lower(
+    f: &mut ImplItemFn,
+    r: Type,
+    ttl: Option<i64>,
+    long: Ceiling,
+    newest: bool,
+    join: bool,
+) -> syn::Result<Lowered> {
     let m = f.sig.ident.clone();
     let (mut cx, mut scope, mut first) = (None, vec![], vec![]);
     for (i, a) in f.sig.inputs.iter().skip(1).enumerate() {
@@ -804,12 +826,13 @@ pub(crate) fn lower(f: &mut ImplItemFn, r: Type, ttl: Option<i64>, long: bool, n
     if ttl.is_some() && l.awaits == 0 {
         return err(&f.sig, "#[ttl] caches what an async method awaits: this one awaits nothing");
     }
-    let key = match ttl {
-        Some(_) => {
+    // Keyed by its arguments too: a `#[ttl]` answer, a `#[mode(first)]` join.
+    let key = match ttl.is_some() || join {
+        true => {
             let name = m.to_string();
-            quote!(let __aio_key = ::aio::effect::key(#name, &::aio::json(&(#(&#first,)*))?)?;)
+            quote!(let __aio_key = ::aio::call_key(#cx, #name, &::aio::json(&(#(&#first,)*))?)?;)
         }
-        None => {
+        false => {
             let name = m.to_string();
             quote!(let __aio_key = ::std::string::String::from(#name);)
         }

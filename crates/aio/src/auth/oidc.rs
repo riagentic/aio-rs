@@ -64,9 +64,20 @@ impl Oidc {
 
     /// The `redirect_uri` as registered with the provider, verbatim
     /// (default: this server's `/__aio/auth/oidc/callback` as the request
-    /// reached it, https behind TLS or a trusted proxy that says so).
+    /// reached it, https behind TLS or a trusted proxy that says so). It
+    /// is sent as it is, so one that isn't an absolute `http(s)://` URL
+    /// panics here, at boot, as aio refuses it, never on the provider's page.
     pub fn redirect_uri(mut self, uri: impl Into<String>) -> Self {
-        self.redirect_uri = Some(uri.into());
+        let uri = uri.into();
+        let host = uri.strip_prefix("https://").or_else(|| uri.strip_prefix("http://"));
+        if !host.is_some_and(|h| !h.is_empty() && !h.starts_with('/') && !uri.chars().any(char::is_whitespace)) {
+            panic!(
+                "Oidc::redirect_uri({uri:?}): it is sent to the provider as it is, so it must be an absolute http(s) URL, \
+                 the callback registered there (\"https://app.example.com/__aio/auth/oidc/callback\"); or leave it out to \
+                 derive it from the request"
+            );
+        }
+        self.redirect_uri = Some(uri);
         self
     }
 }
@@ -344,15 +355,76 @@ fn page(status: u16, body: &str) -> Page {
     (status, vec![], body.into())
 }
 
-/// `GET oidc/start`: the 302 to the provider, and the binder cookie.
-pub(crate) fn start(p: &Provider, auth: &super::Auth, back: Option<&str>, redirect: &str, secure: bool) -> Page {
+/// An app's sign-in (`port`, `claim` in `oidc/start`): its loopback port,
+/// and the hash of the verifier it keeps.
+fn app_of(q: &std::collections::HashMap<String, String>) -> Option<Option<(u16, String)>> {
+    match (q.get("port"), q.get("claim")) {
+        (None, None) => Some(None),
+        (Some(p), Some(c)) => {
+            let port = p.parse::<u16>().ok().filter(|p| *p != 0)?;
+            let hex = c.len() == 64 && c.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            hex.then(|| Some((port, c.clone())))
+        }
+        _ => None,
+    }
+}
+
+/// What an app's sign-in, confirmed in this browser, shows: the binder's
+/// hash over the app's port and claim (pure).
+fn confirmed_tag(binder: &str, port: u16, claim: &str) -> String {
+    super::hex(&sha256(&format!("aio-oidc-app:{binder}:{port}:{claim}")))
+}
+
+/// An app's sign-in asks the person first: a link made elsewhere would
+/// otherwise send their session to whatever listens on that port. The
+/// form carries a tag only this browser's binder cookie makes.
+fn confirm(port: u16, claim: &str, back: Option<&str>, secure: bool) -> Page {
+    let binder = nonce::<32>();
+    let esc = |v: &str| v.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+    let back = back.map_or(String::new(), |b| {
+        format!("<input type=\"hidden\" name=\"redirect\" value=\"{}\">", esc(&return_path(Some(b))))
+    });
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Sign in to an app?</title>\
+         <p>An app on this computer (port {port}) asks to sign in as you.</p>\
+         <p>Continue only if you just started signing in from that app.</p>\
+         <form method=\"get\" action=\"start\"><input type=\"hidden\" name=\"port\" value=\"{port}\">\
+         <input type=\"hidden\" name=\"claim\" value=\"{claim}\">{back}\
+         <input type=\"hidden\" name=\"go\" value=\"{}\"><button>Sign in to the app</button></form>",
+        confirmed_tag(&binder, port, claim)
+    );
+    let headers = vec![
+        ("content-type".into(), "text/html; charset=utf-8".into()),
+        ("set-cookie".into(), binder_cookie(&binder, 600, secure)),
+    ];
+    (200, headers, body)
+}
+
+/// `GET oidc/start`: the 302 to the provider, and the binder cookie; an
+/// app's sign-in only once confirmed in this browser (`binder`: its cookie).
+pub(crate) fn start(
+    p: &Provider,
+    auth: &super::Auth,
+    q: &std::collections::HashMap<String, String>,
+    binder: Option<&str>,
+    redirect: &str,
+    secure: bool,
+) -> Page {
+    let Some(app) = app_of(q) else { return page(400, "port and claim go together: a port, and 64 hex digits") };
+    let back = q.get("redirect").map(String::as_str);
+    let binder = match (&app, binder, q.get("go")) {
+        (None, ..) => nonce::<32>(),
+        (Some((port, claim)), Some(b), Some(go)) if crate::sync::same(go, &confirmed_tag(b, *port, claim)) => b.into(),
+        (Some((port, claim)), ..) => return confirm(*port, claim, back, secure),
+    };
     let now = crate::store::now_ms();
-    let (verifier, binder, n) = (nonce::<32>(), nonce::<32>(), nonce::<16>());
+    let (verifier, n) = (nonce::<32>(), nonce::<16>());
     let carried = serde_json::json!({
         "v": verifier,
         "r": return_path(back),
         "b": super::hex(&sha256(&binder)),
         "n": n,
+        "app": app,
     });
     let state = match auth.one_shot_with("oidc", "state", 10 * 60_000, Some(&carried.to_string())) {
         Ok(s) => s,
@@ -387,6 +459,8 @@ pub(crate) struct Landed {
     pub user: super::User,
     pub back: String,
     pub clear: String,
+    /// An app's sign-in: its loopback port and claim.
+    pub app: Option<(u16, String)>,
 }
 
 /// `GET oidc/callback`: the account the provider vouched for, or the page
@@ -467,12 +541,24 @@ pub(crate) fn callback(
         eprintln!("[aio] auth: oidc: {id:?} has no verified email: `ax auth <app> verify {id:?}` admits it");
         return Err(page(403, "email_unverified"));
     }
-    Ok(Landed { user, back: return_path(Some(&s("r"))), clear: binder_cookie("", 0, secure) })
+    let app = serde_json::from_value(c["app"].clone()).unwrap_or_default();
+    Ok(Landed { user, back: return_path(Some(&s("r"))), clear: binder_cookie("", 0, secure), app })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_redirect_uri_that_isnt_an_absolute_url_is_refused_at_boot() {
+        let ok = Oidc::new("https://id.example", "app").redirect_uri("https://app.example/__aio/auth/oidc/callback");
+        assert_eq!(ok.redirect_uri.as_deref(), Some("https://app.example/__aio/auth/oidc/callback"));
+        for bad in ["/__aio/auth/oidc/callback", "app.example/cb", "ftp://app.example/cb", "https://", "https:// x"] {
+            let r = std::panic::catch_unwind(|| Oidc::new("https://id.example", "app").redirect_uri(bad));
+            let why = r.err().and_then(|p| p.downcast::<String>().ok()).unwrap_or_default();
+            assert!(why.contains("must be an absolute http(s) URL"), "{bad}: {why}");
+        }
+    }
 
     #[test]
     fn a_return_path_never_leaves_the_site() {

@@ -85,10 +85,43 @@ impl<K, T> Clone for Held<K, T> {
 }
 
 fn spawn(f: impl Future<Output = ()> + Send + 'static) {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(f);
+    #[cfg(not(target_arch = "wasm32"))]
     match tokio::runtime::Handle::try_current() {
         Ok(rt) => drop(rt.spawn(f)),
         Err(_) => drop(crate::rt().spawn(f)),
     }
+}
+
+/// The page's timer, which is not `Send`, in a pool whose futures are:
+/// a page runs one thread, so it never crosses one.
+#[cfg(target_arch = "wasm32")]
+struct OneThread(std::pin::Pin<Box<dyn Future<Output = ()>>>);
+
+// SAFETY: wasm32 here has one thread; nothing is ever sent to another.
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for OneThread {}
+
+#[cfg(target_arch = "wasm32")]
+impl Future for OneThread {
+    type Output = ();
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        self.0.as_mut().poll(cx)
+    }
+}
+
+/// `f` done within `d`: false when `d` ran out first (a page has no
+/// tokio timer: its own).
+async fn within(d: Duration, f: impl Future<Output = ()>) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let late = OneThread(Box::pin(crate::web::sleep(u32::try_from(d.as_millis()).unwrap_or(u32::MAX))));
+        futures_util::pin_mut!(f, late);
+        matches!(futures_util::future::select(f, late).await, futures_util::future::Either::Left(_))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::time::timeout(d, f).await.is_ok()
 }
 
 fn ready() -> Settled {
@@ -149,7 +182,7 @@ async fn opening<K: Clone + Eq + Hash + Debug, T>(pool: Arc<Pool<K, T>>, key: K,
     let live =
         |p: &Pool<K, T>| p.slots.lock().unwrap_or_else(|e| e.into_inner()).live.get(&key).is_some_and(|s| s.id == id);
     if !before.is_empty() {
-        if tokio::time::timeout(SETTLE, join_all(before)).await.is_err() {
+        if !within(SETTLE, join_all(before).map(drop)).await {
             crate::warn!(
                 cat: "ui",
                 "held {key:?}: the close before it has not finished after {SETTLE:?}; opening anyway \

@@ -53,15 +53,22 @@ async fn tools_call_and_watch_through_the_door() {
     let first = heard(&mut s).await;
     assert_eq!((first["t"].as_str(), first["state"]["n"].as_u64()), (Some("state"), Some(0)));
 
-    // A call: its change first, then the answer.
     say(&mut s, json!({ "t": "call", "method": "bump", "args": [] })).await;
-    assert_eq!(heard(&mut s).await["t"], "patch");
-    assert_eq!(heard(&mut s).await["ok"], 1);
-    assert_eq!(h.state().n, 1);
+    if aio::door::OPERATOR {
+        // `ax dev`'s build: the operator's. A call: its change first, then the answer.
+        assert_eq!(heard(&mut s).await["t"], "patch");
+        assert_eq!(heard(&mut s).await["ok"], 1);
+        assert_eq!(h.state().n, 1);
+        say(&mut s, json!({ "t": "travel", "cmd": "where" })).await;
+        assert_eq!(heard(&mut s).await["head"], 1);
+    } else {
+        // Any other build's door serves a client's rights: no `#[client]`, no call.
+        let r = heard(&mut s).await;
+        assert_eq!((r["t"].as_str(), r["code"].as_str()), (Some("reply"), Some("ACCESS_DENIED")), "{r}");
+        assert_eq!(h.state().n, 0);
+    }
 
-    // Operator asks, and a ping is answered with its pong.
-    say(&mut s, json!({ "t": "travel", "cmd": "where" })).await;
-    assert_eq!(heard(&mut s).await["head"], 1);
+    // A ping is answered with its pong.
     put(&mut s, 1, b"hi").await;
     assert_eq!(get(&mut s).await, (2, b"hi".to_vec()));
 

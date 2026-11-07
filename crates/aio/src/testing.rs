@@ -464,6 +464,14 @@ impl TestCells {
     }
 }
 
+/// Boot as a release build does (`on`) or as a debug one does: a cell whose log
+/// no longer replays is quarantined (it runs at its last snapshot and
+/// refuses calls), or its boot refused. Its own test binary: the setting is
+/// the process's.
+pub fn quarantine(on: bool) {
+    crate::store::QUARANTINE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A cell as a network client `who` reaches it (aio's `t.as(user, …)`): every
 /// call is asked of its `#[client]` rule first, on the state it then runs
 /// on, as the app's server does; the method's `cx.by()` is `who.by`. The
@@ -481,7 +489,7 @@ impl<T: Cell> Door<T> for AsClient<T> {
     }
 
     fn ask(&self, method: &str, args: Value) -> crate::Result<crate::Answer> {
-        self.h.ask_by(Some(&self.who), method, args, None).map(|(_, a)| a)
+        self.h.ask_by(Some(&self.who), method, args, None, None).map(|(_, a)| a)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
@@ -992,6 +1000,26 @@ impl TestIo {
     pub fn stderr(&self) -> String {
         self.err.text()
     }
+
+    /// Run `main` as the binary would with `argv` (aio's `testIO()`): its
+    /// exit code, 0 when it returns. `aio::cli::args` reads `argv`, and
+    /// `args`'s `--help` or refusal and `fail` end the run with their code
+    /// instead of the process, what they print kept in `stdout`/`stderr`.
+    pub fn run(&mut self, argv: &[&str], main: impl FnOnce(&mut Self)) -> i32 {
+        use crate::cli::{Exit, HELD, Held};
+        let argv = argv.iter().map(|a| a.to_string()).collect();
+        let held = Held { argv, out: Box::new(self.prompt.out.clone()), err: Box::new(self.err.clone()) };
+        HELD.set(Some(held));
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main(self)));
+        HELD.set(None);
+        match ran {
+            Ok(()) => 0,
+            Err(p) => match p.downcast::<Exit>() {
+                Ok(e) => e.0,
+                Err(p) => std::panic::resume_unwind(p),
+            },
+        }
+    }
 }
 
 /// The bundle `ax build` made (`.deb`, AppImage, `.zip`, …) started and
@@ -1309,5 +1337,33 @@ mod tests {
         assert_eq!((k(" ", 0)["code"].clone(), k("7", 0)["code"].clone()), (json!("Space"), json!("Digit7")));
         assert_eq!(k("é", 0)["text"], "é");
         assert_eq!(cdp_key("Entr", 0), None);
+    }
+
+    #[test]
+    fn a_run_is_captured_to_its_exit() {
+        use crate::cli::{Flag, Spec, args, fail};
+        let spec = || Spec::new("hi").about("Says hi.").flag(Flag::switch("loud"));
+        let main = |io: &mut TestIo| {
+            let a = args(&spec());
+            if !a.on("loud") {
+                fail("too quiet", 3, false);
+            }
+            _ = std::io::Write::write_all(&mut io.prompt.out, b"HI\n");
+        };
+        let mut io = TestIo::new("");
+        assert_eq!(io.run(&["--loud"], main), 0);
+        assert_eq!(io.stdout(), "HI\n");
+        let mut io = TestIo::new("");
+        assert_eq!(io.run(&[], main), 3);
+        assert!(io.stderr().contains("too quiet"), "{}", io.stderr());
+        let mut io = TestIo::new("");
+        assert_eq!(io.run(&["--help"], main), crate::cli::OK);
+        assert!(io.stdout().contains("Says hi."), "{}", io.stdout());
+        let mut io = TestIo::new("");
+        assert_eq!(io.run(&["--nope"], main), crate::cli::USAGE);
+        assert!(!io.stderr().is_empty());
+        let other = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| TestIo::new("").run(&[], |_| panic!("own"))));
+        assert_eq!(other.unwrap_err().downcast_ref::<&str>(), Some(&"own"), "another panic goes on");
+        assert!(crate::cli::HELD.with_borrow(Option::is_none), "the hold ends with the run");
     }
 }

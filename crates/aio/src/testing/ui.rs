@@ -215,6 +215,8 @@ async fn pump(
         let edits = root.take_edits();
         if !edits.is_empty() {
             to_page.send(edits).map_err(|_| "the page is gone".to_string())?;
+            // What rows that left held is dropped while the page applies the frame.
+            air::drop_left();
         }
         let uncaught = root.uncaught();
         assert!(uncaught.is_empty(), "a view failed and no ErrorBoundary is above it: {}", uncaught.join("; "));
@@ -937,21 +939,7 @@ impl TestUi {
     /// backdrop with an image can't be judged and is skipped, as is a
     /// subtree marked `data-aio-contrast="skip"` (an overlay on a video).
     pub fn contrast(&self) -> Vec<String> {
-        let rgba = |v: &Value| -> Option<Rgba> {
-            let c: Vec<f32> = v.as_array()?.iter().filter_map(|n| Some(n.as_f64()? as f32)).collect();
-            Some([*c.first()?, *c.get(1)?, *c.get(2)?, *c.get(3)?])
-        };
-        let all = self.must("contrast", json!({}));
-        let judged = all.as_array().into_iter().flatten().filter_map(|e| {
-            let layers: Vec<Rgba> = e["layers"].as_array()?.iter().filter_map(rgba).collect();
-            let bg = layers.into_iter().rev().fold([1.0, 1.0, 1.0, 1.0], |under, l| over(l, under));
-            let fg = rgba(&e["fg"]).filter(|c| c[3] > 0.05)?;
-            let need = needed(e["size"].as_f64()? as f32, e["weight"].as_f64()? as f32);
-            let ratio = contrast_ratio(over(fg, bg), bg);
-            let (text, place) = (cut(e["text"].as_str()?, 30), e["place"].as_str()?);
-            (ratio < need).then(|| format!("{place} {text:?} {ratio:.2}:1, needs {need}:1"))
-        });
-        judged.collect()
+        crate::ui::audit::contrast(&self.must("contrast", json!({})))
     }
 
     /// The page's HTML, without air's anchor comments: what the app mounted, then
@@ -1365,56 +1353,9 @@ fn strings(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect()
 }
 
-/// `s` cut to `max` chars, with `…`.
-fn cut(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((at, _)) => format!("{}…", &s[..at]),
-        None => s.into(),
-    }
-}
-
-/// An sRGB colour, 0..=1 each, with alpha.
-type Rgba = [f32; 4];
-
-/// `fg` drawn over the opaque `bg`.
-fn over(fg: Rgba, bg: Rgba) -> Rgba {
-    let a = fg[3];
-    [fg[0] * a + bg[0] * (1.0 - a), fg[1] * a + bg[1] * (1.0 - a), fg[2] * a + bg[2] * (1.0 - a), 1.0]
-}
-
-/// WCAG's contrast ratio of two opaque colours (1 to 21).
-fn contrast_ratio(a: Rgba, b: Rgba) -> f32 {
-    let lum = |c: Rgba| {
-        let f = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-        0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
-    };
-    let (x, y) = (lum(a), lum(b));
-    (x.max(y) + 0.05) / (x.min(y) + 0.05)
-}
-
-/// The ratio WCAG AA asks of text this size (px) and weight: 3 for large
-/// (24 px, or 18.66 px bold), else 4.5.
-fn needed(size: f32, weight: f32) -> f32 {
-    if size >= 24.0 || (size >= 18.66 && weight >= 700.0) { 3.0 } else { 4.5 }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn contrast_is_wcags_ratio_and_large_text_needs_less() {
-        let (black, white) = ([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]);
-        assert!((contrast_ratio(black, white) - 21.0).abs() < 0.01);
-        assert!((contrast_ratio(white, white) - 1.0).abs() < 0.01);
-        let grey = 0x77 as f32 / 255.0;
-        assert!((contrast_ratio([grey, grey, grey, 1.0], white) - 4.48).abs() < 0.01, "#777 just fails AA");
-        assert_eq!(over([0.0, 0.0, 0.0, 0.5], white), [0.5, 0.5, 0.5, 1.0]);
-        assert_eq!(
-            (needed(16.0, 400.0), needed(24.0, 400.0), needed(19.0, 700.0), needed(19.0, 400.0)),
-            (4.5, 3.0, 3.0, 4.5)
-        );
-    }
 
     #[test]
     fn modifiers_are_counted_as_the_devtools_protocol_counts_them() {

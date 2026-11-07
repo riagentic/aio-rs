@@ -30,6 +30,7 @@ pub fn rows(
         row("app", &cfg.app.id, "aio.toml"),
         row("version", version, "Cargo.toml"),
         row("aio-rs", env!("CARGO_PKG_VERSION"), "built in"),
+        row("platform", format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH), "built in"),
         row("config", "aio.toml built into the app", "aio::config!()"),
         row("mode", mode(cfg.app.mode), "aio.toml"),
         row("data", dirs.data.display().to_string(), dirs.from),
@@ -49,6 +50,7 @@ pub fn rows(
     if let Some(p) = &dirs.profile {
         r.push(row("profile", p, dirs.from));
     }
+    r.push(updates(&cfg.updates, set("AIORT_UPDATE_CHANNEL").as_deref()));
     if let Some(app) = &dirs.port_of {
         r.push(row("port_of", format!("{app}'s home and {}, kept readable by aio", cfg.data.store), "aio.toml"));
     }
@@ -93,6 +95,52 @@ pub fn rows(
         }
     }
     r
+}
+
+/// What the server serves: its routes and server functions (`sync::serve_with`).
+static SERVED: std::sync::Mutex<Option<(usize, Vec<String>)>> = std::sync::Mutex::new(None);
+
+/// A server serves `routes` HTTP routes and the server functions `fns`.
+#[cfg(feature = "server")]
+pub(crate) fn serving(routes: usize, fns: Vec<String>) {
+    *SERVED.lock().unwrap_or_else(|e| e.into_inner()) = Some((routes, fns));
+}
+
+/// The rows a running app says once it is up (a second after start): the
+/// cells it opened, with their data versions, and what its server serves
+/// (aio's `cells`, `routes`, `serverfns`; pure).
+pub fn up_rows(cells: &std::collections::BTreeMap<String, u32>, served: Option<&(usize, Vec<String>)>) -> Vec<Row> {
+    let listed: Vec<String> = cells.iter().map(|(c, v)| format!("{c} v{v}")).collect();
+    let mut r = vec![row("cells", format!("{} ({})", cells.len(), listed.join(", ")), "opened")];
+    if let Some((routes, fns)) = served {
+        r.push(row("routes", routes.to_string(), "the app's server"));
+        if !fns.is_empty() {
+            r.push(row("serverfns", fns.join(", "), "the app's server"));
+        }
+    }
+    r
+}
+
+/// Where updates come from, the channel and who chose it, how often a
+/// check runs and whether an install waits for a yes (pure).
+fn updates(u: &crate::config::Updates, env: Option<&str>) -> Row {
+    let Some(url) = &u.url else { return row("updates", "not configured", "aio.toml") };
+    let stamp = crate::update::STAMPED_CHANNEL;
+    let ch = crate::update::channel(env, None, stamp, &u.channel);
+    let from = match () {
+        _ if env == Some(ch) => "AIORT_UPDATE_CHANNEL",
+        _ if stamp == Some(ch) => "the build's channel",
+        _ => "aio.toml",
+    };
+    let source = match url {
+        _ if url.starts_with("github:") => "GitHub releases",
+        _ if crate::update::git_remote(url).is_some() => "git",
+        _ if url.starts_with("file:") => "folder",
+        _ => "manifest",
+    };
+    let every = u.every_on(ch).map_or("checks only when asked".into(), |e| format!("every {}", crate::config::span_text(e)));
+    let install = if u.auto { "auto" } else { "ask first" };
+    row("updates", format!("{ch} · {source} {url} · {every} · {install}"), from)
 }
 
 /// The log's lowest level: `AIORT_LOG` (`ax dev --verbose`: `debug`) over
@@ -155,6 +203,10 @@ pub fn no_config_file(env: &dyn Fn(&str) -> Option<String>) -> std::io::Result<(
 /// Call once, first thing after the app's lock is taken.
 pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::io::Result<()> {
     no_config_file(&|k| std::env::var(k).ok())?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(why) = crate::paths::misspelled(&args, &cfg.app.flags) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+    }
     let env = std::env::var("AIORT_LOG").ok().filter(|v| !v.is_empty());
     let (level, from) = log_level(cfg.log.level, env.as_deref());
     crate::log::configure(&crate::config::Log { level, ..cfg.log.clone() });
@@ -190,6 +242,12 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
     crate::feedback::open();
     eprintln!("[aio] {} {version} starting (pid {})", cfg.app.id, std::process::id());
     say(&rows(cfg, version, dirs, &|k| std::env::var(k).ok(), &|p| p.exists()));
+    // What it opened and serves is known once it is up: said a second on.
+    _ = std::thread::Builder::new().name("aio-boot".into()).spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let served = SERVED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        say(&up_rows(&crate::update::contract().cells, served.as_ref()));
+    });
     crate::health::start(&dirs.data, cfg.memory, crate::health::config_of(cfg));
     Ok(())
 }
@@ -234,6 +292,19 @@ mod tests {
         assert_eq!(find(&r, "mode").unwrap().value, "standalone");
         assert_eq!(find(&r, "version").unwrap().value, "1.2.0");
         assert!(find(&r, "listen").is_none(), "no server: no listen row");
+        assert_eq!(find(&r, "updates").unwrap(), &row("updates", "not configured", "aio.toml"));
+        let platform = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
+        assert_eq!(find(&r, "platform").unwrap(), &row("platform", platform, "built in"));
+        let (_, key) = crate::update::keygen().unwrap();
+        let u = Config::parse(&format!(
+            "[app]\nid = \"notes\"\n[capabilities]\nnetwork = [\"x.example\"]\n[updates]\nurl = \"https://x.example/notes\"\nkeys = [\"{key}\"]\nauto = false"
+        ))
+        .unwrap();
+        let said = |env: Option<&str>| updates(&u.updates, env);
+        let stable = "stable · manifest https://x.example/notes · every 6h · ask first";
+        assert_eq!(said(None), row("updates", stable, "aio.toml"));
+        let dev = "dev · manifest https://x.example/notes · every 1m · ask first";
+        assert_eq!(said(Some("dev")), row("updates", dev, "AIORT_UPDATE_CHANNEL"));
 
         let cfg = Config::parse(
             "[app]\nid = \"notes\"\nmode = \"client-server\"\n[server]\nlisten = \"0.0.0.0:7700\"\ntls = true\n[server.dirs]\n\"/media\" = \"media\"",
@@ -248,6 +319,17 @@ mod tests {
         assert!(find(&r, "public dirs").is_none());
         assert_eq!(find(&r, "token").unwrap(), &row("token", "set", "AIORT_TOKEN"), "never the token itself");
         assert_eq!(reach("127.0.0.1:1"), "loopback only");
+    }
+
+    #[test]
+    fn once_up_the_cells_opened_and_what_the_server_serves_are_said() {
+        let cells = [("notes".to_string(), 3), ("prefs".to_string(), 1)].into();
+        let r = up_rows(&cells, None);
+        assert_eq!(r, [row("cells", "2 (notes v3, prefs v1)", "opened")], "no server: no routes row");
+        let r = up_rows(&cells, Some(&(4, vec!["billing".into(), "export".into()])));
+        assert_eq!(find(&r, "routes").unwrap().value, "4");
+        assert_eq!(find(&r, "serverfns").unwrap().value, "billing, export");
+        assert!(find(&up_rows(&cells, Some(&(0, vec![]))), "serverfns").is_none());
     }
 
     #[test]

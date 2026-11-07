@@ -210,10 +210,11 @@ impl<T: Cell> Handle<T> {
         due.sort_by_key(|d| d.due);
         for d in &due {
             storage::rearm(&mut lock(&self.inner.sched), d, now);
-            let skips = d
-                .key
-                .strip_prefix('@')
-                .is_some_and(|m| T::SCHEDULES.iter().any(|s| s.skip_if_running && s.method == m && self.busy(m)));
+            let m = d.method.as_str();
+            let flagged = T::SKIP_IF_RUNNING.contains(&m)
+                || (d.key.strip_prefix('@') == Some(m)
+                    && T::SCHEDULES.iter().any(|s| s.skip_if_running && s.method == m));
+            let skips = flagged && lock(&self.inner.running).keys().any(|k| crate::answer::aborts::<T>(m, k));
             if skips {
                 continue;
             }
@@ -231,7 +232,7 @@ impl<T: Cell> Handle<T> {
     /// a `#[ttl]` answer still good is answered without running.
     fn enter(&self, method: &str, args: Value) -> Result<(Value, crate::Answer)> {
         if !lock(&self.inner.answered).is_empty()
-            && let Some(v) = lock(&self.inner.answered).get(method, &args, super::now_ms())
+            && let Some(v) = lock(&self.inner.answered).get(method, &args, None, super::now_ms())
         {
             return Ok((v.clone(), crate::Answer::ready(Ok(v))));
         }
@@ -240,7 +241,7 @@ impl<T: Cell> Handle<T> {
             return Ok((v.clone(), crate::Answer::ready(Ok(v))));
         };
         let (reply, answer) = crate::Reply::new(method);
-        let key = crate::answer::key_of::<T>(method, &args);
+        let key = crate::answer::key_of::<T>(method, &args, None);
         if let Some(shared) = self.inner.inflight.enter(mode, key, &reply) {
             return Ok((Value::Null, shared));
         }
@@ -321,9 +322,12 @@ impl<T: Cell> Handle<T> {
     }
 
     fn abort(&self, key: &str) {
-        if let Some(rs) = lock(&self.inner.running).get(key) {
-            rs.iter().for_each(|(_, a)| a.abort());
-        }
+        let running = lock(&self.inner.running);
+        running
+            .iter()
+            .filter(|(k, _)| crate::answer::aborts::<T>(key, k))
+            .flat_map(|(_, rs)| rs)
+            .for_each(|(_, a)| a.abort());
     }
 
     /// Start `e` as its mode says: `First` skips while one runs, `Newest`

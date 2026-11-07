@@ -5,6 +5,9 @@
 //! how to allow it. An entry is a host (`api.example.org`, any port), a host
 //! and port (`10.0.0.5:8443`), `*.example.org` (its subdomains), `lan` (this
 //! network: private and link-local addresses, `.local` names) or `*` (any).
+//! A client's server the person picked ([`grant`]: the connect page, a
+//! pairing, `--server-url`, `[client] server`) is reached without one: the
+//! pick is the consent, for that host and port alone (as aio's thin client).
 //!
 //! Enforced from [`set`] on (`aio::boot` does, from `aio.toml`); a process
 //! that never sets it (aio's own tools) is not an app and is not held.
@@ -13,6 +16,8 @@
 use std::sync::RwLock;
 
 static NETWORK: RwLock<Option<Vec<String>>> = RwLock::new(None);
+/// The servers the person picked, as (host, port).
+static GRANTED: RwLock<Vec<(String, Option<u16>)>> = RwLock::new(Vec::new());
 
 /// Hold this process's outbound requests to `network` from now on.
 pub fn set(network: &[String]) {
@@ -47,9 +52,29 @@ pub fn held(network: Option<&[String]>, what: &str, target: &str) -> std::io::Re
     }
 }
 
-/// [`held`] by this process's list ([`set`]).
+/// [`held`] by this process's list ([`set`]), a [`grant`]ed server let through.
 pub fn check(what: &str, target: &str) -> std::io::Result<()> {
+    if GRANTED.read().unwrap_or_else(|e| e.into_inner()).contains(&host_port(target)) {
+        return Ok(());
+    }
     held(NETWORK.read().unwrap_or_else(|e| e.into_inner()).as_deref(), what, target)
+}
+
+/// Let this process reach `target` (`host:port`, a URL), the server a person
+/// picked for this client: that host and port alone, `network` aside.
+pub fn grant(target: &str) {
+    let mut g = GRANTED.write().unwrap_or_else(|e| e.into_inner());
+    let at = host_port(target);
+    if !g.contains(&at) {
+        g.push(at);
+    }
+}
+
+/// Take back a [`grant`]: a pick that came to nothing.
+#[cfg(feature = "tls")]
+pub(crate) fn revoke(target: &str) {
+    let at = host_port(target);
+    GRANTED.write().unwrap_or_else(|e| e.into_inner()).retain(|g| *g != at);
 }
 
 /// A `ureq` resolver that [`check`]s every host first, redirects too.

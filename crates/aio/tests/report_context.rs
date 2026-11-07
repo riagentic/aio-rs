@@ -29,6 +29,23 @@ impl Notes {
     }
 }
 
+/// What a client with the key sees: no private posts.
+fn public(b: &Board, _who: &Caller) -> Board {
+    Board { posts: b.posts.iter().filter(|p| !p.starts_with("private")).cloned().collect() }
+}
+
+#[cell(persist, visible = public)]
+pub struct Board {
+    pub posts: Vec<String>,
+}
+
+#[methods]
+impl Board {
+    pub fn post(&mut self, text: String) {
+        self.posts.push(text);
+    }
+}
+
 #[test]
 fn a_report_shows_the_cells_and_the_calls_that_led_to_it() {
     let d = tempfile::tempdir().unwrap();
@@ -36,6 +53,9 @@ fn a_report_shows_the_cells_and_the_calls_that_led_to_it() {
     aio::report::init(aio::report::About { id: "notes".into(), dir: dir.clone(), ..Default::default() });
     aio::report::on_panic();
     let s = aio::Source::<Notes>::open(&d.path().join("notes.db")).unwrap();
+    let board = aio::Source::<Board>::open(&d.path().join("board.db")).unwrap();
+    board.post("hello".into()).unwrap();
+    board.post("private: the door code".into()).unwrap();
     s.add("milk".into()).unwrap();
     s.add(String::new()).unwrap_err();
     s.type_draft("secret draft".into()).unwrap();
@@ -46,9 +66,12 @@ fn a_report_shows_the_cells_and_the_calls_that_led_to_it() {
     let crash = &all.iter().find(|(_, v)| v["kind"] == "panic").unwrap().1;
     assert_eq!(crash["state"]["notes"], serde_json::json!({ "items": ["milk"] }), "saved shape: no transient draft");
     let user: serde_json::Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+    // Screened by `visible` (aio's); mid-panic its code isn't run, so the cell is withheld.
+    assert_eq!(user["state"]["board"], serde_json::json!({ "posts": ["hello"] }));
+    assert!(crash["state"].get("board").is_none() && !crash.to_string().contains("door code"), "{crash}");
     let calls: Vec<_> = user["timeline"].as_array().unwrap().iter().map(|e| e["call"].as_str().unwrap()).collect();
-    assert_eq!(calls, ["notes.add", "notes.add", "notes.type_draft", "notes.crash"]);
-    assert_eq!(user["timeline"][1]["refused"], "empty note");
+    assert_eq!(calls, ["board.post", "board.post", "notes.add", "notes.add", "notes.type_draft", "notes.crash"]);
+    assert_eq!(user["timeline"][3]["refused"], "empty note");
     assert!(!user.to_string().contains("secret draft"), "never a call's arguments, a transient or a #[server] field");
     assert_eq!(s.state().sealed, "sealed-secret draft");
     assert_eq!(user["contact"], "ana@example.org");

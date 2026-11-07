@@ -3,6 +3,11 @@
 //! code reads a field its view hides) instead of reading a default that
 //! looks real: a predicted call that reads it is refused there, so mark that
 //! method `#[client(predict = false)]`; a view that reads it panics.
+//!
+//! A `Hidden<T>` field that isn't `#[server]` is for `visible`: the view
+//! of a viewer who may not see it holds [`Hidden::withheld`], and reading it
+//! on their copy panics the same way (aio throws on reading a field the
+//! view hides), where a plain field would read as a default that looks real.
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::{Deref, DerefMut};
 
@@ -15,11 +20,19 @@ pub struct Hidden<T> {
     value: Option<T>,
     /// Set on a copy: the field it is (`Mailbox.imap_password`).
     gone: Option<&'static str>,
+    /// Hidden by the view (`visible`), not a `#[server]` field.
+    hid: bool,
 }
 
 impl<T> Hidden<T> {
     pub fn new(value: T) -> Self {
-        Self { value: Some(value), gone: None }
+        Self { value: Some(value), gone: None, hid: false }
+    }
+
+    /// Not shown to this viewer: in a `visible` view, for a field they may
+    /// not see. On their copy any read panics, naming the field.
+    pub fn withheld() -> Self {
+        Self { value: None, gone: None, hid: true }
     }
 
     /// Its value, or `None` on a synced copy (never sent there).
@@ -35,16 +48,31 @@ impl<T> Hidden<T> {
     /// On a copy: the field `name` is not there.
     #[doc(hidden)]
     pub fn conceal(&mut self, name: &'static str) {
-        *self = Self { value: None, gone: Some(name) };
+        *self = Self { value: None, gone: Some(name), hid: false };
+    }
+
+    /// On a copy: if the view hid it, it is the field `name`.
+    #[doc(hidden)]
+    pub fn name(&mut self, name: &'static str) {
+        if self.value.is_none() {
+            self.gone = Some(name);
+        }
+        self.hid = true;
     }
 
     #[track_caller]
     fn absent(&self) -> ! {
-        panic!(
-            "{}: a #[server] field, never sent to a synced copy: read it in the app (a \
-             #[client(predict = false)] method runs there only), or publish a fact field beside it",
-            self.gone.unwrap_or("a Hidden field")
-        )
+        let field = self.gone.unwrap_or("a Hidden field");
+        match self.hid {
+            true => panic!(
+                "{field}: hidden from this viewer by the cell's `visible`: check `.get()` (None where hidden), or \
+                 show it to them"
+            ),
+            false => panic!(
+                "{field}: a #[server] field, never sent to a synced copy: read it in the app (a \
+                 #[client(predict = false)] method runs there only), or publish a fact field beside it"
+            ),
+        }
     }
 }
 
@@ -93,16 +121,32 @@ impl<T> std::fmt::Debug for Hidden<T> {
     }
 }
 
-/// Saved as its value (aio's file has the plain field); a copy's, never sent, as `null`.
+/// What a view sends for a field it hides: never a value of the field's.
+const HID: &str = "$hidden";
+
+/// Saved as its value (aio's file has the plain field); one this copy or
+/// view doesn't have as `{"$hidden": true}`.
 impl<T: Serialize> Serialize for Hidden<T> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.value.serialize(s)
+        match &self.value {
+            Some(v) => v.serialize(s),
+            None => {
+                use serde::ser::SerializeMap;
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry(HID, &true)?;
+                m.end()
+            }
+        }
     }
 }
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Hidden<T> {
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Hidden<T> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        T::deserialize(d).map(Self::new)
+        let v = serde_json::Value::deserialize(d)?;
+        if v.as_object().is_some_and(|o| o.len() == 1 && o.get(HID) == Some(&serde_json::Value::Bool(true))) {
+            return Ok(Self::withheld());
+        }
+        T::deserialize(v).map(Self::new).map_err(serde::de::Error::custom)
     }
 }
 
@@ -125,5 +169,17 @@ mod tests {
         let read = std::panic::catch_unwind(|| h.len()).unwrap_err();
         let why = read.downcast_ref::<String>().unwrap();
         assert!(why.starts_with("Keys.api_key: a #[server] field, never sent"), "{why}");
+        // Hidden by a view: sent as such, and a read on the copy says so.
+        let sent = serde_json::to_value(Hidden::<String>::withheld()).unwrap();
+        assert_eq!(sent, serde_json::json!({ "$hidden": true }));
+        let mut got: Hidden<String> = serde_json::from_value(sent).unwrap();
+        got.name("Staff.salary");
+        assert_eq!(got.get(), None);
+        let why = std::panic::catch_unwind(|| got.len()).unwrap_err().downcast_ref::<String>().unwrap().clone();
+        assert!(why.starts_with("Staff.salary: hidden from this viewer by the cell's `visible`"), "{why}");
+        // An Option inside keeps its None: no view hid it.
+        let none: Hidden<Option<u8>> =
+            serde_json::from_value(serde_json::to_value(Hidden::new(None::<u8>)).unwrap()).unwrap();
+        assert_eq!(none.get(), Some(&None));
     }
 }

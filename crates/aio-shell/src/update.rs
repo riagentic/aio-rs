@@ -65,13 +65,29 @@ static RETIRED: OnceLock<String> = OnceLock::new();
 
 /// `aio-rt/install/<id>`; an app run from an AppImage keeps its updates
 /// apart, in `<id>-appimage` (the same app installed from its bundle may be
-/// there too).
+/// there too). An install elsewhere (`AIORT_INSTALL_ROOT`) is found by
+/// where this binary runs from.
 pub fn dir(id: &str) -> PathBuf {
     let name = match appimage() {
         Some(_) => format!("{id}-appimage"),
         None => id.to_string(),
     };
-    aio::paths::tool_home().join("install").join(name)
+    let root = std::env::var_os("AIORT_INSTALL_ROOT").filter(|v| !v.is_empty()).map(PathBuf::from);
+    install_dir(std::env::current_exe().ok().as_deref(), &name, root, &aio::paths::tool_home())
+}
+
+/// App `name`'s install folder (pure): the one `exe` runs from
+/// (`<folder>/versions/<v>/`), else `<root>/<name>` (`AIORT_INSTALL_ROOT`),
+/// else `<tool>/install/<name>`.
+pub fn install_dir(exe: Option<&Path>, name: &str, root: Option<PathBuf>, tool: &Path) -> PathBuf {
+    let ran = exe.and_then(|e| e.parent()?.parent()?.parent()).filter(|d| {
+        d.file_name().is_some_and(|n| n == name) && d.join("versions").is_dir() && d.join("installed.json").is_file()
+    });
+    match (ran, root) {
+        (Some(d), _) => d.to_path_buf(),
+        (None, Some(r)) => r.join(name),
+        (None, None) => tool.join("install").join(name),
+    }
 }
 
 /// The AppImage that `exe` runs from: `appimage` (`$APPIMAGE`) when `exe`
@@ -748,8 +764,8 @@ fn now_ms() -> i64 {
 /// slow link is fine; a host that stopped is not).
 const STALL: Duration = Duration::from_secs(60);
 
-/// GET `url` (at most `cap` bytes): https, or loopback http for tests.
-/// `step` hears the percent of `cap` read, as it grows.
+/// GET `url` (at most `cap` bytes): https, a `file://` folder, or loopback
+/// http for tests. `step` hears the percent of `cap` read, as it grows.
 fn fetch(url: &str, cap: u64, step: &dyn Fn(u8)) -> io::Result<Vec<u8>> {
     Ok(get(url, cap, None, STALL, step)?.map(|(b, _)| b).unwrap_or_default())
 }
@@ -764,6 +780,18 @@ fn get(
     stall: Duration,
     step: &dyn Fn(u8),
 ) -> io::Result<Option<(Vec<u8>, Option<String>)>> {
+    if let Some(path) = file_path(url) {
+        let path = path?;
+        let mut out = vec![];
+        std::fs::File::open(&path)
+            .and_then(|f| f.take(cap + 1).read_to_end(&mut out))
+            .map_err(|e| io::Error::new(e.kind(), format!("{url}: {e}")))?;
+        if out.len() as u64 > cap {
+            return Err(io::Error::other(format!("{url}: larger than {cap} bytes")));
+        }
+        step(100);
+        return Ok(Some((out, None)));
+    }
     let mut req = aio::capabilities::agent("updates", crate::runtime::config()).get(url);
     if let Some(e) = etag {
         req = req.header("if-none-match", e);
@@ -812,6 +840,20 @@ fn get(
         return Err(io::Error::other(format!("{url}: larger than {cap} bytes")));
     }
     Ok(Some((out, tag)))
+}
+
+/// A `file://` URL's path: `file:///mnt/releases`, `file://localhost/…`,
+/// on Windows `file:///C:/releases`. Another host (`file://host/share`)
+/// is refused, never read as a path relative to where the app runs.
+fn file_path(url: &str) -> Option<io::Result<PathBuf>> {
+    let p = url.strip_prefix("file://")?;
+    let p = p.strip_prefix("localhost").filter(|r| r.starts_with('/')).unwrap_or(p);
+    if !p.starts_with('/') {
+        let why = format!("{url}: a file URL names a folder on this machine (file:///…), not on another host");
+        return Some(Err(io::Error::new(io::ErrorKind::InvalidInput, why)));
+    }
+    let drive = cfg!(windows) && p.as_bytes().get(2) == Some(&b':');
+    Some(Ok(PathBuf::from(if drive { &p[1..] } else { p })))
 }
 
 /// The manifest at `url`, asked for only if it changed since the copy kept
@@ -908,8 +950,10 @@ fn channel(cfg: &aio::config::Config) -> String {
 /// The channel at start (`aio::update::channel`), the user's `pinned` one
 /// among the choices.
 fn resolved(cfg: &aio::config::Config, pinned: Option<&str>) -> String {
-    let env = std::env::var("AIORT_UPDATE_CHANNEL").ok();
-    up::channel(env.as_deref(), pinned, up::STAMPED_CHANNEL, &cfg.updates.channel).to_string()
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let run = aio::paths::Ask::parse(&args).ok().and_then(|a| a.channel);
+    let run = run.or_else(|| std::env::var("AIORT_UPDATE_CHANNEL").ok());
+    up::channel(run.as_deref(), pinned, up::STAMPED_CHANNEL, &cfg.updates.channel).to_string()
 }
 
 fn current(reason: String) -> Found {
@@ -918,7 +962,11 @@ fn current(reason: String) -> Found {
 
 /// Look for a release once (`d`: the app's install dir): what to offer, and
 /// its manifest when there is one to download.
-fn look(cfg: &aio::config::Config, version: &str, data: &Path, d: &Path) -> io::Result<(Found, Option<Manifest>)> {
+/// A checked manifest, and the bytes it came as (staged as they are: their
+/// signature holds over fields this build doesn't know).
+type Got = (Manifest, Vec<u8>);
+
+fn look(cfg: &aio::config::Config, version: &str, data: &Path, d: &Path) -> io::Result<(Found, Option<Got>)> {
     let u = &cfg.updates;
     let Some(src) = u.url.as_deref() else { return Ok((current("updates are off".into()), None)) };
     if let Some(remote) = up::git_remote(src) {
@@ -926,12 +974,12 @@ fn look(cfg: &aio::config::Config, version: &str, data: &Path, d: &Path) -> io::
     }
     let ch = channel(cfg);
     let url = format!("{}/{}.json", up::release_dir(src, &ch), manifest_name());
-    let m: Manifest =
-        aio::serde_json::from_slice(&manifest(&url, d)?).map_err(|e| io::Error::other(format!("{url}: {e}")))?;
+    let body = manifest(&url, d)?;
     let keys_file = data.join("update-keys.json");
     let trusted: Vec<String> = read_json(&keys_file).unwrap_or_else(|| u.keys.clone());
     let expect = up::Expect { id: &cfg.app.id, channel: &ch, os: std::env::consts::OS, arch: std::env::consts::ARCH };
-    let next_keys = up::check(&m, &trusted, &expect).map_err(|e| io::Error::other(format!("release refused: {e}")))?;
+    let (m, next_keys) = up::check_served(&body, &trusted, &expect)
+        .map_err(|e| io::Error::other(format!("release refused: {e} ({url})")))?;
     let r = &m.release;
     if next_keys != trusted {
         aio::paths::write_atomic(&keys_file, aio::serde_json::to_string(&next_keys)?.as_bytes(), true)?;
@@ -945,30 +993,37 @@ fn look(cfg: &aio::config::Config, version: &str, data: &Path, d: &Path) -> io::
     if dismissed(d).contains(&r.version) {
         return Ok((current(format!("{} failed here before: not offered", r.version)), None));
     }
+    // Never installed over a version older than its minFrom: said, and refused by `download`.
+    if let Some(why) = up::below_min_from(r, version) {
+        return Ok((Found::Blocked(up::Blocked { version: r.version.clone(), blockers: vec![why] }), Some((m, body))));
+    }
     if std::env::consts::OS == "android" {
-        return Ok((Found::Blocked(apk(r, &up::release_dir(src, &ch))), Some(m)));
+        return Ok((Found::Blocked(apk(r, &up::release_dir(src, &ch))), Some((m, body))));
     }
     let staged = d.join("versions").join(&r.version).join("release.json").exists();
     if !staged {
         let v = d.join("versions");
         room(&v, r.size, std::fs::create_dir_all(&v).ok().and_then(|()| free_bytes(&v)))?;
     }
-    if !staged && let Some(local) = up::local_data(&data.join(&cfg.data.store)).map_err(io::Error::other)? {
-        let blockers = up::blockers(&r.data, &local);
+    let local = up::local_data(&data.join(&cfg.data.store)).map_err(io::Error::other)?;
+    if !staged && let Some(local) = &local {
+        let blockers = up::blockers(&r.data, local);
         if !blockers.is_empty() {
             let b = up::Blocked { version: r.version.clone(), blockers };
-            return Ok((Found::Blocked(b), Some(m)));
+            return Ok((Found::Blocked(b), Some((m, body))));
         }
     }
     let offer = Offer {
         version: r.version.clone(),
+        reason: format!("{} is newer than {version}", r.version),
         notes: r.notes.clone(),
         size: if staged { 0 } else { r.size },
         released_at: r.released_at.clone(),
         key: m.key.clone(),
         staged,
+        migrates: up::migrates(&r.data, local.as_ref()),
     };
-    Ok((Found::Offer(offer), Some(m)))
+    Ok((Found::Offer(offer), Some((m, body))))
 }
 
 /// A git source (`git+…`): its ref's commit, looked up. A new one is cloned
@@ -985,7 +1040,7 @@ fn look_git(
     d: &Path,
     remote: &str,
     build: &dyn Fn(&Path) -> io::Result<PathBuf>,
-) -> io::Result<(Found, Option<Manifest>)> {
+) -> io::Result<(Found, Option<Got>)> {
     let ch = channel(cfg);
     let listed = git(&["ls-remote", "--", remote, &ch, &format!("{ch}^{{}}")], None)?;
     let sha = up::git_ref_commit(&listed, &ch).map_err(|e| io::Error::other(format!("{remote}: {e}")))?;
@@ -1027,22 +1082,26 @@ fn look_git(
         return Ok((current(format!("{v} failed here before: not offered")), None));
     }
     let m = staged(&v).ok_or_else(|| io::Error::other(format!("{v} is not staged")))?;
-    if let Some(local) = up::local_data(&data.join(&cfg.data.store)).map_err(io::Error::other)? {
-        let blockers = up::blockers(&m.release.data, &local);
+    let raw = std::fs::read(d.join("versions").join(&v).join("release.json"))?;
+    let local = up::local_data(&data.join(&cfg.data.store)).map_err(io::Error::other)?;
+    if let Some(local) = &local {
+        let blockers = up::blockers(&m.release.data, local);
         if !blockers.is_empty() {
-            return Ok((Found::Blocked(up::Blocked { version: v, blockers }), Some(m)));
+            return Ok((Found::Blocked(up::Blocked { version: v, blockers }), Some((m, raw))));
         }
     }
     let r = &m.release;
     let offer = Offer {
+        reason: format!("{ch} is at {short}, which builds {v}, newer than {version}"),
         version: v,
         notes: r.notes.clone(),
         size: 0,
         released_at: r.released_at.clone(),
         key: m.key.clone(),
         staged: true,
+        migrates: up::migrates(&r.data, local.as_ref()),
     };
-    Ok((Found::Offer(offer), Some(m)))
+    Ok((Found::Offer(offer), Some((m, raw))))
 }
 
 /// Clone `at` (remote, ref, its commit) into `d/git-build` (removed after),
@@ -1118,10 +1177,13 @@ fn build_git(
             },
             data: contract_of(&exe).map_err(io::Error::other)?,
             roster: None,
+            min_from: None,
+            commit: Some(head.to_string()),
         };
         let m = Manifest { release, key, signature: format!("git:{head}") };
         // The probe is the staged version: moved, not unpacked again.
-        stage(d, &m, id, |into| std::fs::remove_dir(into).and_then(|()| std::fs::rename(&probe, into)))?;
+        let raw = aio::serde_json::to_vec_pretty(&m)?;
+        stage(d, &m, &raw, id, |into| std::fs::remove_dir(into).and_then(|()| std::fs::rename(&probe, into)))?;
         Ok(v)
     })();
     _ = std::fs::remove_dir_all(&work);
@@ -1333,8 +1395,12 @@ fn apk(r: &up::Release, at: &str) -> up::Blocked {
 /// Download a release, check it against its signed size and SHA-256, and
 /// stage it: made from `version` (the one running) and a patch when the
 /// release has one from it ([`crate::delta`]), else whole.
-fn download(cfg: &aio::config::Config, m: &Manifest, d: &Path, version: &str, step: &dyn Fn(u8)) -> io::Result<()> {
+fn download(cfg: &aio::config::Config, (m, raw): &Got, d: &Path, version: &str, step: &dyn Fn(Step)) -> io::Result<()> {
     let r = &m.release;
+    // No way past a minFrom: neither the data gate's buttons nor a stale offer.
+    if let Some(why) = up::below_min_from(r, version) {
+        return Err(io::Error::other(why));
+    }
     let src = cfg.updates.url.as_deref().ok_or_else(|| io::Error::other("updates are off"))?;
     // macOS: a bundle that can't replace itself where it runs is said before a byte comes.
     #[cfg(target_os = "macos")]
@@ -1345,17 +1411,18 @@ fn download(cfg: &aio::config::Config, m: &Manifest, d: &Path, version: &str, st
     }
     // The release's own channel: the one it was found on, signed.
     let at = up::release_dir(src, &r.channel);
-    match by_patch(&at, m, d, version, &cfg.app.id, step) {
+    let app = |p| step(Step::Downloaded(p));
+    match by_patch(&at, (m, raw), d, version, &cfg.app.id, &app) {
         Some(Ok(())) => eprintln!("[aio] update {}: made from {version} and a patch", r.version),
         found => {
             if let Some(Err(why)) = found {
                 eprintln!("[aio] update {}: no patch used ({why}): downloading the whole release", r.version);
             }
-            let bytes = fetch(&format!("{at}/{}", r.file), r.size, step)?;
+            let bytes = fetch(&format!("{at}/{}", r.file), r.size, &app)?;
             if bytes.len() as u64 != r.size || aio::sha256::hex(&Sha256::digest(&bytes)) != r.sha256 {
                 return Err(io::Error::other(format!("{}: not the signed bundle (size or SHA-256 differ)", r.file)));
             }
-            stage(d, m, &cfg.app.id, |into| match appimage() {
+            stage(d, m, raw, &cfg.app.id, |into| match appimage() {
                 Some(_) => put_appimage(&bytes, &into.join(format!("{}.AppImage", cfg.app.id))),
                 None => unpack_for(std::env::consts::OS, &bytes, into),
             })?;
@@ -1371,23 +1438,25 @@ fn download(cfg: &aio::config::Config, m: &Manifest, d: &Path, version: &str, st
         && let Some(rt) = std::fs::read(&exe).ok().as_deref().and_then(crate::runtime::pinned_in)
     {
         let bytes = std::fs::read(&exe).unwrap_or_default();
-        let got = crate::runtime::prefetch(&rt, crate::runtime::sha_in(&bytes, &rt).as_deref()).and_then(|_| {
-            // Named in the store by the version that needs it, so no prune
-            // takes it: an AppImage is replaced in place, so its record is
-            // the installed file's, pending its first start (aio's update).
-            let (exe, pending) = match appimage() {
-                Some(file) => (file, true),
-                None => (exe.clone(), false),
-            };
-            let used = crate::prune::Use {
-                exe: exe.to_string_lossy().into(),
-                version: rt.clone(),
-                slug: crate::runtime::slug(),
-                window: None,
-                pending,
-            };
-            crate::prune::record(&crate::runtime::root(), &used)
-        });
+        let got =
+            crate::runtime::prefetch(&rt, crate::runtime::sha_in(&bytes, &rt).as_deref(), &|p| step(Step::Runtime(p)))
+                .and_then(|_| {
+                    // Named in the store by the version that needs it, so no prune
+                    // takes it: an AppImage is replaced in place, so its record is
+                    // the installed file's, pending its first start (aio's update).
+                    let (exe, pending) = match appimage() {
+                        Some(file) => (file, true),
+                        None => (exe.clone(), false),
+                    };
+                    let used = crate::prune::Use {
+                        exe: exe.to_string_lossy().into(),
+                        version: rt.clone(),
+                        slug: crate::runtime::slug(),
+                        window: None,
+                        pending,
+                    };
+                    crate::prune::record(&crate::runtime::root(), &used)
+                });
         if let Err(e) = got {
             _ = std::fs::remove_dir_all(d.join("versions").join(&r.version));
             return Err(io::Error::other(format!("{} needs Electron {rt}, which could not be got: {e}", r.version)));
@@ -1399,7 +1468,14 @@ fn download(cfg: &aio::config::Config, m: &Manifest, d: &Path, version: &str, st
 /// Stage `m` from `version`, kept in `d`, and the release's patch from it
 /// (fetched from `at`). `None`: the release has no patches (a channel
 /// published without them installs as it always did, not a word said).
-fn by_patch(at: &str, m: &Manifest, d: &Path, version: &str, bin: &str, step: &dyn Fn(u8)) -> Option<io::Result<()>> {
+fn by_patch(
+    at: &str,
+    (m, raw): (&Manifest, &[u8]),
+    d: &Path,
+    version: &str,
+    bin: &str,
+    step: &dyn Fn(u8),
+) -> Option<io::Result<()>> {
     let list = match get(&format!("{at}/{}.patches.json", manifest_name()), 1 << 20, None, STALL, &|_| {}) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
         r => r,
@@ -1408,13 +1484,18 @@ fn by_patch(at: &str, m: &Manifest, d: &Path, version: &str, bin: &str, step: &d
         let list: up::Patches = aio::serde_json::from_slice(&list?.map(|(b, _)| b).unwrap_or_default())
             .map_err(|e| io::Error::other(format!("its patch list: {e}")))?;
         let p = up::patch_for(&list, m, version).map_err(io::Error::other)?;
-        let base = patch_base(&d.join("versions").join(version), bin)
-            .ok_or_else(|| io::Error::other(format!("{version} is not kept here to patch from")))?;
+        let base = match (patch_base(&d.join("versions").join(version), bin), appimage()) {
+            (Some(b), _) => b,
+            (None, Some(image)) => image_base(d, bin, &image)?,
+            (None, None) => return Err(io::Error::other(format!("{version} is not kept here to patch from"))),
+        };
         let bytes = fetch(&format!("{at}/{}", p.file), p.size, step)?;
         if bytes.len() as u64 != p.size || aio::sha256::hex(&Sha256::digest(&bytes)) != p.sha256 {
             return Err(io::Error::other(format!("{}: not the signed patch (size or SHA-256 differ)", p.file)));
         }
-        stage(d, m, bin, |into| crate::delta::apply(&bytes, &base, into))
+        let made = stage(d, m, raw, bin, |into| crate::delta::apply(&bytes, &base, into));
+        _ = std::fs::remove_dir_all(d.join(".patch-base"));
+        made
     })())
 }
 
@@ -1452,8 +1533,8 @@ pub fn said(f: &Found) -> String {
 pub fn check(cfg: &aio::config::Config, version: &str, data: &Path) -> io::Result<Found> {
     let d = dir(&cfg.app.id);
     match look(cfg, version, data, &d)? {
-        (Found::Offer(o), Some(m)) if cfg.updates.auto && !o.staged => {
-            download(cfg, &m, &d, version, &|_| {})?;
+        (Found::Offer(o), Some(got)) if cfg.updates.auto && !o.staged => {
+            download(cfg, &got, &d, version, &|_| {})?;
             Ok(Found::Offer(Offer { staged: true, size: 0, ..o }))
         }
         (found, _) => Ok(found),
@@ -1475,19 +1556,41 @@ pub fn apply_now(
             "this is not an installed copy of the app (a dev build?): updates install into one",
         ));
     }
-    let d = dir(&cfg.app.id);
+    prepare(cfg, version, data, &dir(&cfg.app.id), want, how, step)?;
+    step(Step::Installing);
+    // Supervised: the supervisor's restart is the relaunch.
+    if !supervised(cfg) {
+        relaunch()?;
+    }
+    eprintln!("[aio] updates: installing {want} now: the app restarts");
+    aio::lifecycle::ask_restart();
+    Ok(())
+}
+
+/// [`apply_now`]'s release `want`, staged in `d` (if it isn't yet) and
+/// marked with how its install treats the data: a blocked one only past
+/// the data gate (`how`), and never one above this version's `minFrom`.
+fn prepare(
+    cfg: &aio::config::Config,
+    version: &str,
+    data: &Path,
+    d: &Path,
+    want: &str,
+    how: Data,
+    step: &dyn Fn(Step),
+) -> io::Result<()> {
     // A git source's look stages what it builds.
     let ready = || d.join("versions").join(want).join("release.json").exists();
     if !ready() {
-        match look(cfg, version, data, &d)? {
-            (Found::Offer(o), Some(m)) if o.version == want => {
+        match look(cfg, version, data, d)? {
+            (Found::Offer(o), Some(got)) if o.version == want => {
                 if !ready() {
-                    download(cfg, &m, &d, version, &|p| step(Step::Downloaded(p)))?
+                    download(cfg, &got, d, version, step)?
                 }
             }
-            (Found::Blocked(b), Some(m)) if b.version == want && how != Data::Gated => {
+            (Found::Blocked(b), Some(got)) if b.version == want && how != Data::Gated => {
                 if !ready() {
-                    download(cfg, &m, &d, version, &|p| step(Step::Downloaded(p)))?
+                    download(cfg, &got, d, version, step)?
                 }
             }
             (found, _) => return Err(io::Error::other(format!("{want} is no longer offered: {}", said(&found)))),
@@ -1500,17 +1603,11 @@ pub fn apply_now(
         Data::AcceptLoss => std::fs::write(&mark, "accept")?,
         Data::Retire => std::fs::write(&mark, "retire")?,
     }
-    step(Step::Installing);
-    // Supervised: the supervisor's restart is the relaunch.
-    if !supervised(cfg) {
-        relaunch()?;
-    }
-    eprintln!("[aio] updates: installing {want} now: the app restarts");
-    aio::lifecycle::ask_restart();
     Ok(())
 }
 
 /// The built-in runtime behind the `updates` cell.
+#[cfg_attr(not(feature = "updates"), allow(dead_code))]
 struct Shell {
     cfg: aio::config::Config,
     version: String,
@@ -1549,14 +1646,48 @@ pub fn stub(current: &str, found: Found) -> aio::Handle<Updates> {
     h
 }
 
-/// Open the `updates` cell (`updates.db`, beside the app's data) on this
-/// runtime.
+/// The app brought its own update runtime (`aio::update::install` before
+/// start): the built-in one never checks.
+static OWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a build without `updates` says at start when the app asks for
+/// updates (pure): an `[updates] url` (`url`) or its own runtime (`own`,
+/// `aio::update::install`) that nothing here uses.
+#[cfg_attr(feature = "updates", allow(dead_code))]
+pub(crate) fn left_out(url: bool, own: bool) -> Option<&'static str> {
+    match (url, own) {
+        (true, _) => Some(
+            "[aio] updates: [updates] url is set, but this build has no updater: ax build and ax dev turn \
+             it on; a plain cargo build needs --features aio-shell/updates",
+        ),
+        (false, true) => Some(
+            "[aio] updates: aio::update::install is not used: this build has no updates cell (name \
+             aio-rs-shell's `updates` feature in app/Cargo.toml)",
+        ),
+        (false, false) => None,
+    }
+}
+
+/// Open the `updates` cell (`updates.db`, beside the app's data) on the
+/// built-in runtime, or on the app's own when it installed one.
+#[cfg_attr(not(feature = "updates"), allow(dead_code))]
 pub(crate) fn open(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::AppDirs) -> io::Result<()> {
-    if cfg.updates.url.is_none() || cell().is_some() {
+    let own = up::installed();
+    if (cfg.updates.url.is_none() && !own) || cell().is_some() {
         return Ok(());
     }
     let s = aio::Source::<Updates>::open(&dirs.data.join("updates.db")).map_err(|e| io::Error::other(e.0))?;
-    up::install(Arc::new(Shell { cfg: cfg.clone(), version: version.into(), data: dirs.data.clone() }));
+    match own {
+        true => {
+            OWN.store(true, std::sync::atomic::Ordering::Relaxed);
+            if cfg.updates.url.is_some() {
+                eprintln!(
+                    "[aio] updates: the app brings its own runtime (aio::update::install): [updates] url is not used"
+                );
+            }
+        }
+        false => up::install(Arc::new(Shell { cfg: cfg.clone(), version: version.into(), data: dirs.data.clone() })),
+    }
     let pinned = s.state().pinned.clone();
     s.ready(Ready {
         channel: resolved(cfg, pinned.as_deref()),
@@ -1566,13 +1697,19 @@ pub(crate) fn open(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::
         retired: RETIRED.get().cloned(),
     })
     .map_err(|e| io::Error::other(e.why))?;
+    // Its clients see it too, served beside the app's cells.
+    #[allow(irrefutable_let_patterns)] // a synced copy only with feature `server`
+    if let aio::Source::Local(h) = &s {
+        up::share(h.clone());
+    }
     *CELL.write().unwrap_or_else(|e| e.into_inner()) = Some(s);
     Ok(())
 }
 
-/// Put a checked release into `versions/<v>` (whole, or not at all):
-/// `fill` writes its files into the folder it is given.
-fn stage(d: &Path, m: &Manifest, bin: &str, fill: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+/// Put a checked release into `versions/<v>` (whole, or not at all), its
+/// manifest as the bytes `raw` it was checked as: `fill` writes its files
+/// into the folder it is given.
+fn stage(d: &Path, m: &Manifest, raw: &[u8], bin: &str, fill: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
     let v = &m.release.version;
     let partial = d.join("versions").join(format!(".{v}.partial"));
     _ = std::fs::remove_dir_all(&partial);
@@ -1593,7 +1730,7 @@ fn stage(d: &Path, m: &Manifest, bin: &str, fill: impl FnOnce(&Path) -> io::Resu
         if String::from_utf8_lossy(&said.stdout).trim() != want {
             return Err(io::Error::other(format!("the bundle's binary is not {want}")));
         }
-        write_json(&partial.join("release.json"), &aio::serde_json::to_value(m)?)?;
+        aio::paths::write_atomic(&partial.join("release.json"), raw, false)?;
         let target = d.join("versions").join(v);
         _ = std::fs::remove_dir_all(&target);
         std::fs::rename(&partial, &target)
@@ -1602,6 +1739,25 @@ fn stage(d: &Path, m: &Manifest, bin: &str, fill: impl FnOnce(&Path) -> io::Resu
         _ = std::fs::remove_dir_all(&partial);
     }
     made
+}
+
+/// An AppImage laid out as it is staged, `<bin>.AppImage` in `into`: what
+/// `ax release` makes an AppImage's patches between.
+pub fn unpack_appimage(bin: &str, bundle: &[u8], into: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(into)?;
+    put_appimage(bundle, &into.join(format!("{bin}.AppImage")))
+}
+
+/// The running AppImage `image` as a one-file tree a patch starts from
+/// (`<d>/.patch-base/<bin>.AppImage`, linked, else copied): an AppImage
+/// installed by hand, not by an update, has no staged copy.
+fn image_base(d: &Path, bin: &str, image: &Path) -> io::Result<PathBuf> {
+    let base = d.join(".patch-base");
+    _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base)?;
+    let to = base.join(format!("{bin}.AppImage"));
+    std::fs::hard_link(image, &to).or_else(|_| std::fs::copy(image, &to).map(drop))?;
+    Ok(base)
 }
 
 /// An AppImage release staged as `to`, ready to run.
@@ -1699,7 +1855,11 @@ fn yes(answer: &str) -> bool {
 /// Look for releases in the background, while the app runs from an
 /// installed version: soon after start, then every `[updates] every`.
 pub fn watch(cfg: &aio::config::Config, version: &str, data: &Path) {
-    if cfg.updates.url.is_none() || !installed(&cfg.app.id) || cfg.updates.every_on(&channel(cfg)).is_none() {
+    if cfg.updates.url.is_none()
+        || OWN.load(std::sync::atomic::Ordering::Relaxed)
+        || !installed(&cfg.app.id)
+        || cfg.updates.every_on(&channel(cfg)).is_none()
+    {
         return;
     }
     let (cfg, version, data) = (cfg.clone(), version.to_string(), data.to_path_buf());
@@ -1755,6 +1915,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_build_without_updates_says_when_the_app_asks_for_them() {
+        assert_eq!(left_out(false, false), None, "no feed, no runtime of its own: nothing to say");
+        assert!(left_out(true, false).unwrap().contains("[updates] url is set"));
+        assert!(left_out(true, true).unwrap().contains("[updates] url is set"), "the feed said first");
+        assert!(left_out(false, true).unwrap().contains("aio::update::install is not used"));
+    }
+
+    #[test]
+    fn a_file_url_is_a_path_on_this_machine_never_another_hosts() {
+        let at = |u: &str| file_path(u).map(|r| r.map_err(|e| e.kind()));
+        assert_eq!(at("file:///mnt/releases"), Some(Ok(PathBuf::from("/mnt/releases"))));
+        assert_eq!(at("file://localhost/mnt/releases"), Some(Ok(PathBuf::from("/mnt/releases"))));
+        for other in ["file://host/share/x", "file://localhostile/x", "file://localhost"] {
+            assert_eq!(at(other), Some(Err(io::ErrorKind::InvalidInput)), "{other}");
+        }
+        assert_eq!(at("https://example.org/r"), None);
+    }
+
+    #[test]
     fn a_windows_offline_build_swaps_its_whole_folder_with_its_runtime() {
         let d = tempfile::tempdir().unwrap();
         let (live, new) = (d.path().join("Programs/notes/notes.exe"), d.path().join("versions/1.1.0/notes.exe"));
@@ -1797,6 +1976,29 @@ mod tests {
         assert_eq!(patch_base(&staged, "notes"), None);
         std::fs::create_dir_all(&staged).unwrap();
         assert_eq!(patch_base(&staged, "notes"), Some(staged));
+    }
+
+    #[test]
+    fn the_updater_finds_its_install_where_it_runs_from() {
+        let t = tempfile::tempdir().unwrap();
+        let tool = Path::new("/u/share/aio-rt");
+        assert_eq!(install_dir(None, "notes", None, tool), tool.join("install/notes"));
+        assert_eq!(
+            install_dir(None, "notes", Some(t.path().into()), tool),
+            t.path().join("notes"),
+            "AIORT_INSTALL_ROOT"
+        );
+        // Installed under another root: found by its binary, the variable unset.
+        let home = t.path().join("opt/notes");
+        std::fs::create_dir_all(home.join("versions/1.2.0")).unwrap();
+        std::fs::write(home.join("installed.json"), "{}").unwrap();
+        let exe = home.join("versions/1.2.0/notes");
+        assert_eq!(install_dir(Some(&exe), "notes", None, tool), home);
+        // A dev build is no install.
+        assert_eq!(
+            install_dir(Some(Path::new("/w/target/debug/notes")), "notes", None, tool),
+            tool.join("install/notes")
+        );
     }
 
     #[test]
@@ -2151,6 +2353,8 @@ mod tests {
             notes: "faster".into(),
             data,
             roster: None,
+            min_from: None,
+            commit: None,
         };
         up::sign(r, pkcs8).unwrap()
     }
@@ -2181,7 +2385,8 @@ mod tests {
         let (found, got) = look(&cfg, "1.0.0", &data, &d).unwrap();
         let Found::Offer(o) = found else { panic!("{found:?}") };
         assert_eq!((o.version.as_str(), o.notes.as_str(), o.size, o.staged), ("1.1.0", "faster", 6, false));
-        assert_eq!((o.key, got), (public.clone(), Some(m.clone())));
+        assert_eq!((o.reason.as_str(), o.migrates), ("1.1.0 is newer than 1.0.0", false));
+        assert_eq!((o.key, got), (public.clone(), Some((m.clone(), aio::serde_json::to_vec(&m).unwrap()))));
         assert_eq!(look(&cfg, "1.1.0", &data, &d).unwrap().0, current("1.1.0 is current".into()));
         // A release that failed here is never offered again.
         dismiss(&d, "1.1.0").unwrap();
@@ -2212,9 +2417,39 @@ mod tests {
         let m = release(&k, "1.1.0", b"b", old);
         let (found, m) = look(&config(&serve(&m, b"b"), &public, ""), "1.0.0", t.path(), t.path()).unwrap();
         // Its manifest is kept for apply_anyway / start_fresh; `check` downloads only offers.
-        assert_eq!(m.map(|m| m.release.version).as_deref(), Some("1.1.0"));
+        assert_eq!(m.map(|(m, _)| m.release.version).as_deref(), Some("1.1.0"));
         let Found::Blocked(b) = found else { panic!("{found:?}") };
         assert_eq!(b.blockers, ["notes: the data is v3, the release reads up to v2"]);
+        // One that reads it newer migrates it, and says so.
+        let newer = up::Contract { schema: up::contract().schema, cells: [("notes".to_string(), 4)].into() };
+        let m = release(&k, "1.1.0", b"b", newer);
+        let (found, _) = look(&config(&serve(&m, b"b"), &public, ""), "1.0.0", t.path(), t.path()).unwrap();
+        assert!(matches!(&found, Found::Offer(o) if o.migrates), "{found:?}");
+    }
+
+    #[test]
+    fn a_release_above_the_install_s_min_from_is_said_and_never_installed() {
+        let (k, public) = up::keygen().unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let r = up::Release {
+            min_from: Some("1.5.0".into()),
+            ..release(&k, "2.0.0", b"b", up::Contract::default()).release
+        };
+        let m = up::sign(r, &k).unwrap();
+        let cfg = config(&serve(&m, b"b"), &public, "");
+        let (found, got) = look(&cfg, "1.0.0", t.path(), t.path()).unwrap();
+        let Found::Blocked(b) = found else { panic!("{found:?}") };
+        let why = "2.0.0 installs only over 1.5.0 or newer, and this is 1.0.0: install 1.5.0 first, then update again";
+        assert_eq!(b.blockers, [why]);
+        // Not even past the data gate (apply_anyway, start_fresh): nothing is downloaded.
+        assert_eq!(download(&cfg, &got.unwrap(), t.path(), "1.0.0", &|_| {}).unwrap_err().to_string(), why);
+        assert!(!t.path().join("versions/2.0.0").exists());
+        // As the cell's `apply_anyway` and `start_fresh` ask for it: refused the same.
+        for how in [Data::AcceptLoss, Data::Retire] {
+            let e = prepare(&cfg, "1.0.0", t.path(), t.path(), "2.0.0", how, &|_| {}).unwrap_err();
+            assert_eq!((e.to_string(), t.path().join("versions/2.0.0").exists()), (why.to_string(), false), "{how:?}");
+        }
+        assert!(matches!(look(&cfg, "1.5.0", t.path(), t.path()).unwrap().0, Found::Offer(_)));
     }
 
     #[test]
@@ -2346,12 +2581,43 @@ mod tests {
         assert!(seen.windows(2).all(|w| w[0] < w[1]) && seen.last() == Some(&100), "{seen:?}");
         // Other bytes than the signed ones are refused, and nothing is staged.
         let cfg = config(&serve(&m, &vec![8u8; 300_000]), &public, "");
-        let e = download(&cfg, &m, t.path(), "1.0.0", &|_| {}).unwrap_err();
+        let e = download(&cfg, &(m.clone(), vec![]), t.path(), "1.0.0", &|_| {}).unwrap_err();
         assert!(e.to_string().contains("not the signed bundle"), "{e}");
         assert!(!t.path().join("versions/1.1.0").exists());
         // A bigger body than signed stops at the cap.
         assert!(
             fetch(&format!("{}/stable/{}", cfg.updates.url.as_deref().unwrap(), m.release.file), 10, &|_| {}).is_err()
+        );
+    }
+
+    #[test]
+    fn a_folder_is_a_release_source() {
+        let (k, public) = up::keygen().unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("releases");
+        std::fs::create_dir_all(src.join("stable")).unwrap();
+        let m = release(&k, "1.1.0", b"bundle", up::Contract::default());
+        let json = src.join(format!("stable/{}.json", platform()));
+        std::fs::write(&json, aio::serde_json::to_vec(&m).unwrap()).unwrap();
+        std::fs::write(src.join("stable").join(&m.release.file), b"bundle").unwrap();
+        let url = format!("file://{}", src.display().to_string().replace('\\', "/"));
+        let url = if cfg!(windows) { url.replacen("file://", "file:///", 1) } else { url };
+        let cfg = config(&url, &public, "");
+        let (found, _) = look(&cfg, "1.0.0", t.path(), t.path()).unwrap();
+        assert!(matches!(&found, Found::Offer(o) if o.version == "1.1.0"), "{found:?}");
+        let bundle = format!("{url}/stable/{}", m.release.file);
+        assert_eq!(fetch(&bundle, 6, &|_| {}).unwrap(), b"bundle");
+        assert!(fetch(&bundle, 5, &|_| {}).unwrap_err().to_string().contains("larger than 5 bytes"));
+        // A forged manifest in the folder is refused as from a host.
+        let mut forged = m.clone();
+        forged.release.notes = "free gift".into();
+        std::fs::write(&json, aio::serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert!(look(&cfg, "1.0.0", t.path(), t.path()).unwrap_err().to_string().contains("signature is wrong"));
+        let gone = format!("{url}/stable/none.patches.json");
+        assert_eq!(
+            fetch(&gone, 10, &|_| {}).unwrap_err().kind(),
+            io::ErrorKind::NotFound,
+            "a patch list may be absent"
         );
     }
 
@@ -2387,9 +2653,15 @@ mod tests {
             sha256: aio::sha256::hex(&Sha256::digest(&patch)),
         };
         let list = up::sign_patches(&m, vec![entry.clone()], &k).unwrap();
+        // Served with a field a later `ax release` signed in: staged as served, it still verifies.
+        let mut served = aio::serde_json::to_value(&m).unwrap();
+        served["release"]["mirror"] = "https://m.example/notes".into();
+        served["signature"] = up::sign_with(&k, &aio::serde_json::to_vec(&served["release"]).unwrap()).unwrap().into();
+        let served = aio::serde_json::to_vec_pretty(&served).unwrap();
+        let got = (m.clone(), served.clone());
         let host_with = |list: Option<&up::Patches>, patch: &[u8]| {
             let mut files = vec![
-                (format!("/stable/{}.json", platform()), aio::serde_json::to_vec(&m).unwrap()),
+                (format!("/stable/{}.json", platform()), served.clone()),
                 (format!("/stable/{}", m.release.file), vec![1u8; 100_000]),
                 (format!("/stable/{}", entry.file), patch.to_vec()),
             ];
@@ -2399,8 +2671,18 @@ mod tests {
             config(&host(files), &public, "")
         };
         let cfg = host_with(Some(&list), &patch);
-        download(&cfg, &m, &d, "1.0.0", &|_| {}).unwrap();
+        download(&cfg, &got, &d, "1.0.0", &|_| {}).unwrap();
         let staged = d.join("versions/1.1.0");
+        let kept = std::fs::read(staged.join("release.json")).unwrap();
+        assert!(
+            up::check_served(
+                &kept,
+                std::slice::from_ref(&public),
+                &up::Expect { id: "notes", channel: "stable", os: std::env::consts::OS, arch: std::env::consts::ARCH }
+            )
+            .is_ok(),
+            "its signature holds"
+        );
         assert_eq!(std::fs::read(staged.join("notes")).unwrap(), std::fs::read(new.join("notes")).unwrap());
         assert_eq!(
             read_json::<aio::serde_json::Value>(&staged.join("release.json")).unwrap()["release"]["version"],
@@ -2410,7 +2692,7 @@ mod tests {
         // No patch from the version here, a list without one, one that isn't the signed one,
         // or an installed file changed since: the whole release, which (here) is refused.
         let whole = |cfg: &aio::config::Config, from: &str| {
-            let e = download(cfg, &m, &d, from, &|_| {}).unwrap_err().to_string();
+            let e = download(cfg, &got, &d, from, &|_| {}).unwrap_err().to_string();
             assert!(e.contains("not the signed bundle"), "{e}");
             assert!(!staged.exists());
         };
@@ -2421,10 +2703,61 @@ mod tests {
         whole(&cfg, "1.0.0");
     }
 
+    #[test]
+    fn an_appimage_installed_by_hand_is_patched_from_where_it_runs() {
+        let t = tempfile::tempdir().unwrap();
+        let (d, old, new) = (t.path().join("install"), t.path().join("old"), t.path().join("new"));
+        let image = t.path().join("Notes-x86_64.AppImage");
+        std::fs::write(&image, b"#!/bin/sh\necho notes 1.0.0\n").unwrap();
+        unpack_appimage("notes", &std::fs::read(&image).unwrap(), &old).unwrap();
+        unpack_appimage("notes", b"#!/bin/sh\necho notes 1.1.0\n", &new).unwrap();
+        let patch = crate::delta::make(&old, &new).unwrap();
+        let base = image_base(&d, "notes", &image).unwrap();
+        let into = t.path().join("staged");
+        crate::delta::apply(&patch, &base, &into).unwrap();
+        assert_eq!(std::fs::read(into.join("notes.AppImage")).unwrap(), b"#!/bin/sh\necho notes 1.1.0\n");
+        assert_eq!(std::fs::read(&image).unwrap(), b"#!/bin/sh\necho notes 1.0.0\n", "the running image untouched");
+    }
+
     /// The cell on the built-in runtime: it offers what the host has, and a
     /// dev build says why it can't install.
+    /// One update runtime and one `updates` cell per process: tests that
+    /// install one, and those whose looks read the cell's channel
+    /// (`channel`: a git source's branch), take turns.
+    static TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// The process's `updates` cell gone again, however the test ends.
+    struct NoCell;
+
+    impl Drop for NoCell {
+        fn drop(&mut self) {
+            *CELL.write().unwrap_or_else(|e| e.into_inner()) = None;
+            OWN.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_app_s_own_update_runtime_keeps_the_cell_and_the_built_in_one_stays_out() {
+        let _turn = TURN.lock().await;
+        let _gone = NoCell;
+        let t = tempfile::tempdir().unwrap();
+        let dirs = aio::paths::AppDirs::at(t.path(), "notes").unwrap();
+        up::install(Arc::new(up::Stub(Found::Offer(Offer { version: "1.1.0".into(), ..Offer::default() }))));
+        // No [updates] url: the cell is there all the same, on the app's runtime.
+        open(&aio::config::Config::parse("[app]\nid = \"notes\"").unwrap(), "1.0.0", &dirs).unwrap();
+        let Some(aio::Source::Local(h)) = cell() else { panic!("no updates cell") };
+        h.check().unwrap();
+        h.done("check").await;
+        let s = h.state();
+        assert!(matches!(&s.available, Some(o) if o.version == "1.1.0"), "{s:?}");
+        assert_eq!((s.on, s.current.as_str()), (true, "1.0.0"));
+        // The built-in checks never run beside it.
+        assert!(OWN.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn the_cell_hears_what_the_built_in_runtime_finds() {
+        let _turn = TURN.lock().await;
         // Its look stages into `install/notes` of the tool home: the test world's, never the person's.
         let _world = aio::paths::sandbox().unwrap();
         let (k, public) = up::keygen().unwrap();
@@ -2474,6 +2807,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_git_source_builds_only_what_a_built_in_key_signed() {
+        let _turn = TURN.blocking_lock();
         let t = tempfile::tempdir().unwrap();
         let (origin, data, d) = (t.path().join("origin"), t.path().join("data"), t.path().join("install"));
         for p in [&origin, &data, &d] {
@@ -2517,7 +2851,7 @@ mod tests {
         let (found, m) = look("main", "1.0.0").unwrap();
         let Found::Offer(o) = found else { panic!("{found:?}") };
         assert_eq!((o.version.as_str(), o.staged, o.size, o.key.as_str()), ("1.0.1", true, 0, trusted.as_str()));
-        assert!(m.unwrap().release.file.starts_with("git:"));
+        assert!(m.unwrap().0.release.file.starts_with("git:"));
         assert!(d.join("versions/1.0.1/notes").is_file() && !d.join("git-build").exists());
         assert!(matches!(look("main", "1.0.0").unwrap().0, Found::Offer(o) if o.version == "1.0.1"));
         assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1, "a commit is built once");
@@ -2554,6 +2888,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn from_git_stages_an_unsigned_ref_only_when_asked_by_hand() {
+        let _turn = TURN.blocking_lock();
         let t = tempfile::tempdir().unwrap();
         let (origin, data, d) = (t.path().join("origin"), t.path().join("data"), t.path().join("install"));
         for p in [&origin, &data, &d] {

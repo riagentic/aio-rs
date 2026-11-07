@@ -182,6 +182,18 @@ mod ttl {
             Ok(name)
         }
 
+        /// What a caller may see: kept per caller.
+        #[client]
+        #[ttl(1000)]
+        pub async fn mine(&mut self, cx: &Cx, id: u32) -> Result<String> {
+            let who: String = match cx.by() {
+                By::User(u) => u.clone(),
+                _ => "the app".into(),
+            };
+            let name: String = lookup(id).await;
+            Ok(format!("{name} for {who}"))
+        }
+
         #[ttl(1000)]
         pub async fn pair(&mut self, a: u32, b: u32) -> Result {
             let x: String = lookup(a).await;
@@ -216,6 +228,30 @@ mod ttl {
         t.settle();
         assert_eq!(runs(&h), 3, "expired: it runs again");
         assert_eq!(h.state().names, ["user-1", "user-2", "user-1"]);
+    }
+
+    /// aio keeps one answer for every caller; aio-rs one per network caller
+    /// (and role), so what one may see never reaches another.
+    #[cfg(feature = "server")]
+    #[test]
+    fn a_network_callers_kept_answer_is_their_own() {
+        let mut t = TestCells::new();
+        let h = t.cell::<Users>();
+        let who = |u: &str| aio::Caller { by: By::User(u.into()), role: Some("member".into()) };
+        let (ana, bob) = (t.as_client(&h, who("ana")), t.as_client(&h, who("bob")));
+        let mut first = ana.mine(1).unwrap();
+        t.settle();
+        assert_eq!(first.now(), Some(Ok("user-1 for ana".into())));
+        let mut again = ana.mine(1).unwrap();
+        assert!(t.effects().is_empty(), "ana's own kept answer");
+        assert_eq!(again.now(), Some(Ok("user-1 for ana".into())));
+        let mut other = bob.mine(1).unwrap();
+        assert_eq!(t.effects().len(), 1, "never ana's answer for bob");
+        t.settle();
+        assert_eq!(other.now(), Some(Ok("user-1 for bob".into())));
+        let mut app = h.mine(1).unwrap();
+        t.settle();
+        assert_eq!(app.now(), Some(Ok("user-1 for the app".into())));
     }
 
     #[test]
@@ -493,6 +529,18 @@ mod modes {
             let _ = find("all".into(), 30).await;
             Ok(n)
         }
+
+        /// aio's `scan("/a")` joins a running `scan("/a")`; `scan("/b")` runs beside it.
+        #[mode(first)]
+        pub async fn scan(&mut self, dir: String, ms: u64) -> Result<String> {
+            self.runs += 1;
+            let hits: String = find(dir, ms).await;
+            Ok(hits)
+        }
+
+        pub fn stop(&mut self, cx: &Cx) {
+            cx.abort("scan");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -503,6 +551,7 @@ mod modes {
         assert_eq!(fast.await, Ok("hits for ab".into()));
         let e = slow.await.unwrap_err();
         assert!(e.why.contains("ended before it answered"), "{e}");
+        assert_eq!(e.code(), Some(Code::DispatchAborted), "aio's code for it");
         assert_eq!(h.state().shown, ["hits for ab"], "the superseded call shows nothing");
     }
 
@@ -514,6 +563,23 @@ mod modes {
         assert_eq!((a.await, b.await), (Ok(1), Ok(1)), "the second caller adopts the first's answer");
         assert_eq!(h.state().runs, 1, "and ran nothing");
         assert_eq!(h.refresh().unwrap().await, Ok(2), "once it ended, a call runs again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_joins_only_a_call_with_the_same_arguments() {
+        let h = Handle::<Search>::memory();
+        let (a, a2, b) =
+            (h.scan("/a".into(), 30).unwrap(), h.scan("/a".into(), 30).unwrap(), h.scan("/b".into(), 30).unwrap());
+        assert_eq!((a.await, a2.await), (Ok("hits for /a".into()), Ok("hits for /a".into())));
+        assert_eq!(b.await, Ok("hits for /b".into()), "another argument is another call");
+        assert_eq!(h.state().runs, 2);
+        // `cx.abort("scan")` still stops every call of it.
+        let (c, d) = (h.scan("/c".into(), 5_000).unwrap(), h.scan("/d".into(), 5_000).unwrap());
+        h.stop().unwrap();
+        let t = Duration::from_secs(2);
+        assert!(
+            tokio::time::timeout(t, c).await.unwrap().is_err() && tokio::time::timeout(t, d).await.unwrap().is_err()
+        );
     }
 }
 

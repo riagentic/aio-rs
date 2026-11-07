@@ -39,7 +39,7 @@ Never build on aio-rs's `main`: build on a release tag, and move on
 purpose.
 
 ```sh
-ax create notes --aio-version 0.2.0   # the app depends on the tag v0.2.0
+ax create notes --aio-version 0.3.0   # the app depends on the tag v0.3.0
 ax pin notes                          # says which aio-rs the app uses
 ax pin notes 0.3.0                    # moves it, read the CHANGELOG first
 ```
@@ -60,7 +60,7 @@ per release; it may change more in a minor version.
 | Cells, methods, the log, persistence, `ax test` | proven |
 | Desktop windows (Linux, Windows, macOS) | proven |
 | Services and command-line tools | proven |
-| Signed updates, delta patches, the way back | proven (Linux in CI, `scripts/update-proof`) |
+| Signed updates, delta patches, the way back | proven (Linux, Windows and macOS in CI, `scripts/update-proof`) |
 | Sync between a server and its clients | proven |
 | Android | **experimental**: gated by an emulator run before each release (`scripts/android-gate`), no Play Store flow |
 | The web build (wasm, PWA) | **experimental**: no hot-patching, tested in one browser |

@@ -46,7 +46,7 @@ pub fn upgrade(to: Option<&str>, checkout: Option<&Path>) -> Result<String, Stri
             crate::create::Aio::Tag(t) => t,
             _ => {
                 return Err(format!(
-                    "ax upgrade {v}: a release (0.2.0) or latest; a branch builds from source: \
+                    "ax upgrade {v}: a release (0.3.0) or latest; a branch builds from source: \
                      cargo install --locked --git {} --branch {v} aio-rs-cli",
                     crate::create::REPO
                 ));
@@ -104,10 +104,12 @@ fn install(url: &str, script: &str, tmp: &Path) -> Result<(), String> {
 }
 
 /// `ax uninstall [--tools]`: ax out of cargo's bin folder `bin` (aio's `am
-/// uninstall`); `--tools`: also what ax fetched and built (`tools/`, and
-/// `target/` when ax's default build folder) in the tool home `home`.
-/// Apps, their data and installs stay.
-pub fn uninstall(tools: bool, home: &Path, bin: &Path) -> Result<String, String> {
+/// uninstall`); `--tools`: also what ax fetched and built: `tools/` in the
+/// tool home `home`, ax's shared build folders (`target/` in aio's cache
+/// home `cache`, unless the person named their own with `AIORT_TARGET_DIR`
+/// or `CARGO_TARGET_DIR`) and ax 0.2's (`home/target`). Apps, their data
+/// and installs stay.
+pub fn uninstall(tools: bool, home: &Path, cache: &Path, bin: &Path) -> Result<String, String> {
     let exe = exe_in(bin, "ax");
     if !exe.is_file() {
         return Err(format!("no ax in {}: one built elsewhere goes with its folder", bin.display()));
@@ -126,8 +128,10 @@ pub fn uninstall(tools: bool, home: &Path, bin: &Path) -> Result<String, String>
     }
     let mut gone = vec![exe.display().to_string()];
     if tools {
-        let own_target = std::env::var_os("CARGO_TARGET_DIR").is_none_or(|v| v.is_empty());
-        for d in [Some(home.join("tools")), own_target.then(|| home.join("target"))].into_iter().flatten() {
+        // A CARGO_TARGET_DIR the person set is AIORT_TARGET_DIR by now (`dev::keep_persons_target`).
+        let own_target = std::env::var_os(crate::dev::TARGET_DIR).is_none_or(|v| v.is_empty());
+        let dirs = [Some(home.join("tools")), own_target.then(|| cache.join("target")), Some(legacy_target(home))];
+        for d in dirs.into_iter().flatten() {
             if d.is_dir() {
                 std::fs::remove_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
                 gone.push(d.display().to_string());
@@ -139,6 +143,12 @@ pub fn uninstall(tools: bool, home: &Path, bin: &Path) -> Result<String, String>
         "removed {}\nyour apps, their data and installs stay (ax remove <app> takes one){keep}",
         gone.join(", ")
     ))
+}
+
+/// ax 0.2's shared build folder, in the tool home `home` (0.3 builds in
+/// aio's cache home): `ax prune --yes` and `ax uninstall --tools` take it.
+pub fn legacy_target(home: &Path) -> PathBuf {
+    home.join("target")
 }
 
 #[cfg(test)]
@@ -157,16 +167,19 @@ mod tests {
     #[test]
     fn uninstall_takes_ax_and_with_tools_what_it_fetched_never_the_apps() {
         let d = tempfile::tempdir().unwrap();
-        let (bin, home) = (d.path().join("bin"), d.path().join("home"));
-        assert!(uninstall(false, &home, &bin).unwrap_err().contains("no ax in"));
-        for p in [bin.clone(), home.join("tools/dx"), home.join("target"), home.join("apps/notes/data")] {
+        let (bin, home, cache) = (d.path().join("bin"), d.path().join("home"), d.path().join("cache"));
+        assert!(uninstall(false, &home, &cache, &bin).unwrap_err().contains("no ax in"));
+        let shared = cache.join("target/1.98.0/debug");
+        for p in [bin.clone(), home.join("tools/dx"), home.join("target"), shared.clone(), home.join("apps/notes/data")]
+        {
             std::fs::create_dir_all(p).unwrap();
         }
         std::fs::write(exe_in(&bin, "ax"), "").unwrap();
-        let said = uninstall(true, &home, &bin).unwrap();
+        let said = uninstall(true, &home, &cache, &bin).unwrap();
         assert!(!exe_in(&bin, "ax").exists() && !home.join("tools").exists(), "{said}");
-        let own = std::env::var_os("CARGO_TARGET_DIR").is_none_or(|v| v.is_empty());
-        assert_eq!(home.join("target").exists(), !own, "a named CARGO_TARGET_DIR is not ax's to take");
+        assert!(!home.join("target").exists(), "ax 0.2's build folder: {said}");
+        let own = std::env::var_os(crate::dev::TARGET_DIR).is_none_or(|v| v.is_empty());
+        assert_eq!(shared.exists(), !own, "a named AIORT_TARGET_DIR is not ax's to take: {said}");
         assert!(home.join("apps/notes/data").is_dir() && said.contains("your apps, their data"), "{said}");
     }
 }

@@ -296,7 +296,8 @@ fn a11y_says_what_fails_a_keyboard_or_a_screen_reader() {
             div { "data-t": "card", onclick: move |_| {}, "Open" }
             div { "data-t": "row", role: "option", onclick: move |_| {}, "Item" }
             button { r#type: "button", onclick: move |_| {}, "Fine" }
-            button { "data-t": "bare", "Submit?" }
+            form { button { "data-t": "bare", "Submit?" } }
+            button { "data-t": "loose", onclick: move |_| {}, "Outside a form" }
             input { "data-t": "who" }
             label { "Name" input { r#type: "text" } }
             img { "data-t": "pic", src: "data:," }
@@ -319,7 +320,11 @@ fn a11y_says_what_fails_a_keyboard_or_a_screen_reader() {
     ] {
         assert!(has(t, why), "{t}: {why} in {got:#?}");
     }
-    assert_eq!(got.len(), 7, "an option's keyboard is its list's; a labelled field, a typed button pass: {got:#?}");
+    assert_eq!(
+        got.len(),
+        7,
+        "an option's keyboard is its list's; a labelled field, a typed button, an untyped one outside a form pass: {got:#?}"
+    );
 }
 
 #[test]
@@ -339,7 +344,8 @@ fn a_saved_stylesheet_redraws_its_hole_on_air() {
         }
     }
     let mut ui = TestUi::new(app);
-    assert_eq!(ui.text("css"), "h1{color:red}");
+    // The sheet as built until it is edited: ax dev's live CSS is inert till then.
+    assert_eq!(ui.text("css"), "", "as built, as a release build draws it");
     std::fs::write(&file, "h1{color:blue}").unwrap();
     ui.until_text("css", "h1{color:blue}");
     std::fs::remove_dir_all(&dir).unwrap();

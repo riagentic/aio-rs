@@ -3,6 +3,7 @@
 //! pressure, not CPU, so a step does not start on a machine already out of
 //! headroom; and it never takes every core, one stays for the desktop.
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A machine's memory, in bytes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,17 +78,49 @@ pub fn ensure(step: &str) -> Result<(), String> {
 }
 
 /// `cargo <args>` as a heavy step: refused without headroom, at most
-/// [`jobs`] jobs.
+/// [`jobs`] jobs; a release built quickly after [`quick`].
 pub fn cargo(step: &str, args: &[&str]) -> Result<Command, String> {
     ensure(step)?;
     let mut c = Command::new("cargo");
-    c.args(args).arg("-j").arg(max_jobs().to_string());
+    c.args(args).arg("-j").arg(max_jobs().to_string()).envs(profile(is_quick()).iter().copied());
     Ok(c)
+}
+
+static QUICK: AtomicBool = AtomicBool::new(false);
+
+/// `ax build --quick`: every cargo this process runs builds its release
+/// without LTO, in 16 codegen units (the template's: 27 → 2 s for a
+/// one-line change, the binary ~37% bigger). For trying, never shipping.
+pub fn quick() {
+    QUICK.store(true, Ordering::Relaxed);
+}
+
+/// Whether [`quick`] was asked.
+pub fn is_quick() -> bool {
+    QUICK.load(Ordering::Relaxed)
+}
+
+/// The release profile's overrides, quick or not (pure). Cargo keeps
+/// both builds apart, so going back and forth rebuilds nothing.
+pub fn profile(quick: bool) -> &'static [(&'static str, &'static str)] {
+    match quick {
+        true => &[("CARGO_PROFILE_RELEASE_LTO", "false"), ("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")],
+        false => &[],
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quick_build_overrides_the_release_profile_and_only_then() {
+        assert_eq!(profile(false), []);
+        assert_eq!(
+            profile(true),
+            [("CARGO_PROFILE_RELEASE_LTO", "false"), ("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")]
+        );
+    }
 
     const GB: u64 = 1 << 30;
 

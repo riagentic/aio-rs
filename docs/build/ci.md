@@ -50,7 +50,7 @@ two ways:
   `Cargo.lock` then pins the commit.
 - **Check aio-rs out beside the app** and point the paths there, as the
   release workflow does: `actions/checkout` with `repository:
-  riagentic/aio-rs`, `ref: v0.2.0`, `path: aio-rs`, the app's own checkout
+  riagentic/aio-rs`, `ref: v0.3.0`, `path: aio-rs`, the app's own checkout
   at `path: app`, then rewrite each `path = "…/aio"`, `"…/aio-shell"` to
   `$GITHUB_WORKSPACE/aio-rs/crates/…`.
 

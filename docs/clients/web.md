@@ -188,8 +188,8 @@ The window must allow it: `aio_shell::Window { web: Web { browser: true,
 | `referrer` | the `Referer` its loads send (an embed that checks it refuses to play without one) |
 | `host_keys` | 1 to 16 `KeyboardEvent.key` names the guest hands back, even from its frames (`GuestEvent::Key`) |
 | `popups` | a link that opens a window goes to the system browser after a real click; without it, nothing |
-| `onevent` | `GuestEvent`: `Navigated { url, back, forward }`, `Title`, `Key(HostKey)`, `Message { channel, args }` (its preload's `ipcRenderer.sendToHost`), `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive` |
-| `id` | the element's id, for `aio::kit::go(id, Go::Back \| Forward \| Reload \| Stop \| Send { channel, args })` |
+| `onevent` | `GuestEvent`: `Navigated { url, back, forward }`, `Title`, `Key(HostKey)`, `Message { channel, args }` (its preload's `ipcRenderer.sendToHost`), `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive`, `PreloadRefused { preload, reason }` |
+| `id` | the element's id, for `aio::kit::go(id, Go::Back \| Forward \| Reload \| Stop \| Send { channel, args } \| Css(sheet) \| Zoom(f) \| DevTools)` (`Css`: `insertCSS`, until it navigates; `Zoom`: `setZoomFactor`; `DevTools`: its own DevTools window) and `aio::kit::run_js(id, js).await` (`executeJavaScript`: its value as JSON, `None` when the guest isn't there or the script threw) |
 
 ### A preload for the guest
 
@@ -203,23 +203,41 @@ the window and carried in the binary, so it is there in every build:
 | `fullscreen` | a guest may go fullscreen (a video's button); else it holds no permission at all |
 | `downloads` | a guest may save files |
 | `windows` | `open_window` may open child windows |
+| `unsandboxed_windows` | a child window that asks (`Child { unsandboxed: true }`) opens without Chromium's sandbox: its preload runs with Node (aio's `unsandboxedChildWindows`) |
 
 - A preload runs sandboxed, with context isolation and no Node:
   `require("electron")` gives it `ipcRenderer` and `contextBridge`.
   `ipcRenderer.sendToHost(channel, ...args)` reaches `onevent` as
   `Message`; `go(id, Go::Send { .. })` reaches its `ipcRenderer.on`.
 - A name the window didn't declare is refused when the guest attaches:
-  the guest loads with no preload and the log says
-  `<Browser> preload REFUSED` with the fix.
+  the guest loads with no preload, the log says
+  `<Browser> preload REFUSED` with the fix, and the page hears it: the
+  guest's `onevent` gets `GuestEvent::PreloadRefused { preload, reason }`
+  and `window` the `aio:guest-preload-refused` event (aio's), so the app
+  can show that the embedded page has no bridge.
 
 ### Child windows
 
-`aio_shell::open_window(&Child { url, preload, partition, origins, size
-}).await` opens an `http(s)` page in a window of its own (needs `Web {
-windows: true }`). Its session is `persist:aio-child` unless `partition`
-names another (never the app's); `origins` limits where it may go (unset:
-any site, never the app's scheme or a file); `size` defaults to 1100 ×
-800. Every refusal comes back as an error with its reason.
+`aio_shell::open_window(&Child { url, preload, partition, origins, size,
+permissions, unsandboxed }).await` opens an `http(s)` page in a window of
+its own (needs `Web { windows: true }`). Its session is
+`persist:aio-child` unless `partition` names another (never the app's);
+an `unsandboxed` one's is `persist:aio-child-unsandboxed`, never the
+sandboxed ones' (that name is refused for it);
+`origins` limits where it may go (unset: any site, never the app's scheme
+or a file); `size` defaults to 1100 × 800. Every refusal comes back as an
+error with its reason.
+
+- `permissions` (`guest::PERMISSIONS`' names, `vec!["media".into()]`):
+  what its page may hold on the origin it was opened on, never a frame of
+  another site in it, nor the site it navigates to. Unset: nothing. aio
+  gave a child window every permission of its own origin; aio-rs gives
+  only the ones the app names.
+- `unsandboxed: true` opens it without Chromium's sandbox (aio's
+  `sandbox: false`, the page-world injection escape hatch). It is refused,
+  with the reason, unless the window allows it (`Web {
+  unsandboxed_windows: true }`): never quietly sandboxed instead. Each
+  unsandboxed window is said in the log.
 
 ### Security
 
@@ -228,9 +246,16 @@ any site, never the app's scheme or a file); `size` defaults to 1100 ×
   with no partition, or the app's, is moved to `persist:aio-webview`, and
   the log says so once.
 - Guests hold no permission (no camera, location, notifications, devices)
-  except fullscreen and downloads when the window allows them.
-- Each blocked navigation, pop-up or permission is said once per kind and
-  origin.
+  except fullscreen and downloads when the window allows them, and a
+  child window's own `permissions`.
+- Each blocked navigation, pop-up, download or permission is said once per
+  kind and origin, never the full URL. Each kind stops after 32 different
+  lines and says so once (`further pop-up lines are not said`), the
+  other kinds go on: a page can neither flood the log nor silence it.
+- A denied permission's line names what would grant it:
+  `permission "midi" DENIED to the app's own page: Window { permissions:
+  &["midi"] } grants it`, `Web { fullscreen: true }` for a guest's
+  fullscreen, `Child { permissions }` for a child window.
 - A site the app doesn't trust at all goes in a child window with
   `origins` set, or in an island's sandboxed iframe
   ([islands](../ui/islands.md)).
@@ -242,7 +267,14 @@ as aio's client log forwarding did: every level (`console.log` is
 `info`), uncaught errors (`[uncaught]`) and refused promises (`[unhandled
 rejection]`), each line cut at 4 KB, sent in batches to the dev server's
 `/aio-dev/log`; past 200 lines waiting the rest are counted and the count
-said. The page's own console still shows them. A release page sends nothing.
+said. The page's own console still shows them. A release page sends
+them to the server that serves it (`/__aio/log`, aio's client log), into
+the app's log as `[page]` lines, at most 100 a second for each client
+(the rest counted and said), with no terminal escapes, colour included.
+They are taken from who may read health: anyone on the server's own
+machine, else a page with the key (its cookie) or a session.
+`[server] page_log = false` takes none, and a page on a static
+host stops sending at its first 404.
 
 ```text
 ax dev: [page] warn: low disk
@@ -267,15 +299,10 @@ app's service worker shows it. `aio::tell::show_with(f)` set before
 
 ## Gaps
 
-- The browser's address bar and Back don't follow the app's routes in the
-  web build ([routing](../ui/routing.md#common-mistakes)).
 - A page's copy has no time travel, history or blobs.
-- A page's console reaches a log only under `ax dev --web` (its lines in
-  `ax dev`'s output, [the dev page](#the-dev-pages-console)); a release
-  page's lines stay in its console, where aio forwarded them in a release
-  too. (The desktop window's lines do reach the app's log.)
-- `Browser` exposes `go` and the events above, not every `<webview>`
-  method (no `executeJavaScript`, `insertCSS` or DevTools of the guest).
+- `Browser` wraps the `<webview>` methods apps use (`go`, `run_js`,
+  `Css`, `Zoom`, `DevTools`); aio handed out the element itself. Anything else runs in the
+  guest through `run_js`.
 - `Browser` is Electron's `<webview>`: a desktop window's only, not a
   web build's or Android's.
 

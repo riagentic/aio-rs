@@ -262,28 +262,38 @@ app.whenReady().then(() => {
   // The page may ask for nothing (camera, location, its own notifications:
   // those come from the app, desktop.rs); only copying text and fullscreen.
   // More only when the app says (Window { permissions }: clipboard-read…).
-  const ALLOWED = new Set(['clipboard-sanitized-write', 'fullscreen', ...SHELL.allow])
-  session.defaultSession.setPermissionRequestHandler((_wc, p, cb) => cb(ALLOWED.has(p)))
-  session.defaultSession.setPermissionCheckHandler((_wc, p) => ALLOWED.has(p))
-  // Every other session is someone else's site (a <Browser>, a child
-  // window): no permission (fullscreen when the app says), no device, no
-  // download unless the app says. A refusal is said once per kind and
-  // origin, 32 at most.
-  const said = new Set()
-  const say = (key, line) => {
-    if (said.has(key) || said.size > 32) return
-    said.add(key)
-    console.error(`[aio-shell] ${line}${said.size > 32 ? ' (further refusals are not said)' : ''}`)
+  // A refusal is said once per kind and key (an origin, never a URL),
+  // each kind 32 at most (guest.js refusal), naming what would allow it.
+  const said = new Map()
+  const say = (kind, key, line) => {
+    const l = G.refusal(said, kind, key, line)
+    if (l) console.error(`[aio-shell] ${l}`)
   }
+  const ALLOWED = new Set(['clipboard-sanitized-write', 'fullscreen', ...SHELL.allow])
+  // Chromium checks these by itself on every load: not the page asking.
+  const UNASKED = new Set(['media', 'web-app-installation', 'geolocation'])
+  const own = (p, asked) => {
+    if (!ALLOWED.has(p) && asked) say('permission', `app ${p}`, G.denied(p, '', 'app', SHELL.grantable))
+    return ALLOWED.has(p)
+  }
+  session.defaultSession.setPermissionRequestHandler((_wc, p, cb) => cb(own(p, true)))
+  session.defaultSession.setPermissionCheckHandler((_wc, p) => own(p, !UNASKED.has(p)))
+  // Every other session is someone else's site (a <Browser>, a child
+  // window): no permission (fullscreen when the app says; a child window's
+  // own on its own origin, Child { permissions }), no device, no download
+  // unless the app says.
+  const grants = new Map()
   const guestOk = (p) => p === 'fullscreen' && SHELL.guestFullscreen
   const guard = (ses) => {
     if (ses === session.defaultSession) return
     ses.setPermissionRequestHandler((wc, p, cb, d) => {
       const from = G.origin((d && d.requestingUrl) || (wc && wc.getURL()) || '')
-      if (!guestOk(p)) say(`perm ${p} ${from}`, `permission "${p}" DENIED to ${from || 'an embedded page'}: a page that is not the app's gets none`)
-      cb(guestOk(p))
+      const g = wc && grants.get(wc.id)
+      const ok = guestOk(p) || G.childAllows(g, p, from)
+      if (!ok) say('permission', `${p} ${from}`, G.denied(p, from, g ? 'child' : 'guest', SHELL.grantable))
+      cb(ok)
     })
-    ses.setPermissionCheckHandler((_wc, p) => guestOk(p))
+    ses.setPermissionCheckHandler((wc, p, origin) => guestOk(p) || G.childAllows(wc && grants.get(wc.id), p, G.origin(origin || '')))
     ses.setDevicePermissionHandler(() => false)
     for (const ev of ['select-hid-device', 'select-usb-device']) ses.on(ev, (e, _d, cb) => { e.preventDefault(); cb() })
     ses.on('select-serial-port', (e, _p, _wc, cb) => { e.preventDefault(); cb('') })
@@ -291,13 +301,14 @@ app.whenReady().then(() => {
       if (SHELL.downloads) return
       e.preventDefault()
       const from = G.origin(item.getURL())
-      say(`download ${from}`, `download CANCELLED from ${from}: a page that is not the app's may not save files (Web { downloads: true } allows it)`)
+      say('download', from, `download CANCELLED from ${from}: a page that is not the app's may not save files (Web { downloads: true } allows it)`)
     })
   }
   app.on('session-created', guard)
-  // The page, and local images by absolute path (images only: the page
-  // can show them but never read other files).
+  // The page, and local images and media by absolute path (only things an
+  // element draws: the page can show them but never read other files).
   const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)$/i
+  const MEDIA = /\.(mp4|m4v|webm|ogv|ogg|oga|mp3|wav|m4a|flac|aac|opus)$/i
   protocol.handle('aio', (req) => {
     const u = new URL(req.url)
     if (u.host === 'app' && (u.pathname === '/' || u.pathname === '/index.html')) {
@@ -305,7 +316,7 @@ app.whenReady().then(() => {
     }
     if (u.host === 'app' && u.pathname.startsWith('/file/')) {
       const p = path.resolve(decodeURIComponent(u.pathname.slice('/file'.length)))
-      if (IMAGE.test(p)) return enet.fetch(pathToFileURL(p).toString())
+      if (IMAGE.test(p) || MEDIA.test(p)) return enet.fetch(pathToFileURL(p).toString())
     }
     // The app's built-in files ([build] assets), at their own paths.
     const assets = path.join(dir, 'assets')
@@ -444,7 +455,7 @@ app.whenReady().then(() => {
     wc.setWindowOpenHandler(({ url }) => {
       const r = G.popup(url, Date.now(), st)
       const from = G.origin(wc.getURL())
-      if (r.why) say(`popup ${from} ${r.why.slice(0, 16)}`, `pop-up BLOCKED from ${from}: ${r.why}`)
+      if (r.why) say('pop-up', `${from} ${r.why.slice(0, 16)}`, `pop-up BLOCKED from ${from}: ${r.why}`)
       else if (arg('no-open')) console.error(`[aio-shell] not opened (AIORT_NO_OPEN, a contained run): ${r.open}`)
       else {
         st.opened = Date.now()
@@ -456,13 +467,17 @@ app.whenReady().then(() => {
   }
 
   // A child window (aio_shell::open_window, Web { windows }): an http(s)
-  // page in a window of its own, sandboxed, in a session of its own (never
-  // the app's), with a declared preload or none; where it may go is
-  // guest.js childNav. Answered {"t":"opened"}, with the reason it was not.
+  // page in a window of its own, sandboxed (unless it asks and the app
+  // allows), in a session of its own (never the app's), with a declared
+  // preload or none, holding only the permissions it was opened with on
+  // its own origin; where it may go is guest.js childNav. Answered
+  // {"t":"opened"}, with the reason it was not.
   function child(m) {
     const answer = (r) => tell({ t: 'opened', id: m.id, ...r })
     if (!SHELL.windows) return answer({ error: 'child windows are off: set Window { web: Web { windows: true, .. } }' })
-    const part = m.partition || 'persist:aio-child'
+    const sandbox = m.sandbox !== false
+    if (!sandbox && !SHELL.unsandboxedWindows) return answer({ error: 'an unsandboxed child window needs Window { web: Web { unsandboxed_windows: true, .. } }' })
+    const part = m.partition || (sandbox ? 'persist:aio-child' : 'persist:aio-child-unsandboxed')
     if (session.fromPartition(part) === session.defaultSession) return answer({ error: `partition ${JSON.stringify(part)} is the app's own session` })
     const p = m.preload ? G.preload(G.PRELOAD + m.preload, SHELL.preloads) : null
     if (p && p.why) return answer({ error: `preload refused: ${p.why}` })
@@ -471,9 +486,13 @@ app.whenReady().then(() => {
         width: m.width || 1100,
         height: m.height || 800,
         icon,
-        webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, partition: part, preload: p ? path.join(dir, 'guest', ...p.name.split('/')) : undefined },
+        webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox, partition: part, preload: p ? path.join(dir, 'guest', ...p.name.split('/')) : undefined },
       })
       const wc = c.webContents
+      if (!sandbox) console.error(`[aio-shell] the child window on ${G.origin(m.url)} opened WITHOUT Chromium's sandbox (Child { unsandboxed: true }): its preload runs with Node`)
+      const id = wc.id
+      if ((m.permissions || []).length) grants.set(id, { origin: G.origin(m.url), perms: m.permissions })
+      wc.once('destroyed', () => grants.delete(id))
       popups(wc)
       const ok = new Set([G.origin(m.url), ...(m.origins || []).map(G.origin)])
       let landed = false
@@ -482,7 +501,7 @@ app.whenReady().then(() => {
         const why = G.childNav(e.url, m.origins, ok, landed)
         if (!why) return
         e.preventDefault()
-        say(`child nav ${G.origin(m.url)} ${G.origin(e.url)}`, `navigation BLOCKED in the child window on ${G.origin(m.url)}: ${why}`)
+        say('navigation', `${G.origin(m.url)} ${G.origin(e.url)}`, `navigation BLOCKED in the child window on ${G.origin(m.url)}: ${why}`)
       }
       wc.on('will-navigate', nav)
       wc.on('will-redirect', (e) => { if (e.isMainFrame) nav(e) })
@@ -545,6 +564,12 @@ app.whenReady().then(() => {
   app.on('activate', forward)
   // The page's own window.close() (preload.js): the close path above.
   ipcMain.on('aio:close', (e) => { if (w && !w.isDestroyed() && e.sender === w.webContents) w.close() })
+  // A frameless window's buttons (Window { chrome }): the window's verbs.
+  ipcMain.on('aio:win', (e, verb) => {
+    if (!w || w.isDestroyed() || e.sender !== w.webContents) return
+    if (verb === 'minimize') w.minimize()
+    if (verb === 'maximize') w.isMaximized() ? w.unmaximize() : w.maximize()
+  })
 
   // Notifications from the main process: no permission to ask, the app's
   // icon, and a click that works while the window is hidden. Each is held
@@ -696,6 +721,7 @@ app.whenReady().then(() => {
       icon,
       backgroundColor: nativeTheme.shouldUseDarkColors ? dark : light,
       show: false,
+      frame: SHELL.frame,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(dir, 'preload.js'), webviewTag: SHELL.browser },
     })
     if (p.maximized) w.maximize()
@@ -728,6 +754,10 @@ app.whenReady().then(() => {
       loaded = true
       for (const f of early.splice(0)) w.webContents.send('aio:wire', f)
       tell({ t: 'window', state: 'loaded' })
+      if (arg('smoke') === '1' && !smoked) {
+        smoked = true
+        setTimeout(() => smoke(w).catch((e) => console.error(`[aio-shell] smoke: check REFUSED: ${e && e.stack || e}`.replace(/\n/g, '\\n'))), 1000)
+      }
     })
     // a hang is told; a crashed renderer is told and reloaded on a new
     // connection, at most 3 times a minute (a crash loop closes the app).
@@ -752,7 +782,7 @@ app.whenReady().then(() => {
     // The window's own keys (guest.js shortcut).
     const dev = arg('dev') === '1'
     w.webContents.on('before-input-event', (e, i) => {
-      const k = G.shortcut(i, SHELL.keys, dev)
+      const k = G.shortcut(i, SHELL.keys, dev, SHELL.devtools)
       if (!k) return
       e.preventDefault()
       if (k === 'reload') reload(true)
@@ -770,13 +800,18 @@ app.whenReady().then(() => {
       const part = wp.partition || params.partition
       if (!part || session.fromPartition(part) === session.defaultSession) {
         wp.partition = 'persist:aio-webview'
-        say('guest session', `a <Browser> with no partition (or the app's own) gets the session "persist:aio-webview": in the app's session a page could read what it serves on aio://`)
+        say('session', 'guest', `a <Browser> with no partition (or the app's own) gets the session "persist:aio-webview": in the app's session a page could read what it serves on aio://`)
       }
-      const p = G.preload(params.preload || wp.preload, SHELL.preloads)
+      const want = String(params.preload || wp.preload || '')
+      const p = G.preload(want, SHELL.preloads)
       delete wp.preload
       delete params.preload
       if (p && p.name) wp.preload = path.join(dir, 'guest', ...p.name.split('/'))
-      if (p && p.why) console.error(`[aio-shell] <Browser> preload REFUSED: ${p.why}. The guest loads with no preload; declare it in Window { web: Web { preloads: &[(name, include_str!(..))], .. } }`)
+      if (p && p.why) {
+        console.error(`[aio-shell] <Browser> preload REFUSED: ${p.why}. The guest loads with no preload; declare it in Window { web: Web { preloads: &[(name, include_str!(..))], .. } }`)
+        // The page hears it too (aio's `aio:guest-preload-refused`): GuestEvent::PreloadRefused.
+        w.webContents.send('aio:guest-refused', { preload: want.startsWith(G.PRELOAD) ? want.slice(G.PRELOAD.length) : want, reason: p.why })
+      }
       Object.assign(params, { nodeintegration: false, nodeintegrationinsubframes: false, disablewebsecurity: false })
     })
     w.webContents.on('did-attach-webview', (_e, guest) => popups(guest))
@@ -811,3 +846,52 @@ app.whenReady().then(() => {
   }
 })
 app.on('window-all-closed', () => app.quit())
+
+// `ax build --smoke` (--aio-smoke=1), a second after the page loaded: every
+// file the page names or loaded and every built-in asset answers 200, and
+// every declared guest preload attaches in a guest's sandbox. Each failure
+// is a REFUSED line; one line says what passed.
+let smoked = false
+async function smoke(w) {
+  const named = await w.webContents.executeJavaScript(`[
+    ...performance.getEntriesByType('resource').map((e) => e.name),
+    ...[...document.querySelectorAll('[src], link[href]')].map((e) => e.src || e.href),
+  ]`).catch(() => [])
+  const assets = []
+  const walk = (d, rel) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(path.join(d, e.name), `${rel}/${e.name}`)
+      else assets.push(`aio://app${encodeURI(`${rel}/${e.name}`)}`)
+    }
+  }
+  try { walk(path.join(dir, 'assets'), '') } catch (_) {}
+  const bare = (u) => { try { const x = new URL(u); x.hash = ''; return x.toString() } catch (_) { return '' } }
+  const urls = [...new Set(['aio://app/', ...named.map(bare).filter((u) => u.startsWith('aio://app/')), ...assets])]
+  let ok = 0
+  for (const u of urls) {
+    const r = await w.webContents.session.fetch(u).catch((e) => ({ status: String(e) }))
+    if (r.status === 200) ok++
+    else console.error(`[aio-shell] smoke: asset REFUSED: ${u} answers ${r.status}`)
+  }
+  let attached = 0
+  for (const name of SHELL.preloads) {
+    const why = await attaches(path.join(dir, 'guest', ...name.split('/')))
+    if (why) console.error(`[aio-shell] smoke: guest preload REFUSED: ${name}: ${why}`)
+    else attached++
+  }
+  console.error(`[aio-shell] smoke: ${ok} of ${urls.length} asset URLs answer 200, ${attached} of ${SHELL.preloads.length} guest preloads attach`)
+}
+
+// Why the preload `file` does not attach to a sandboxed guest, or null.
+function attaches(file) {
+  if (!fs.existsSync(file)) return Promise.resolve('it is not in the package')
+  return new Promise((done) => {
+    const g = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, partition: 'aio-smoke-guest', preload: file } })
+    let failed = null
+    const end = (why) => { if (!g.isDestroyed()) g.destroy(); done(why) }
+    const cap = setTimeout(() => end('the guest did not load within 10 s'), 10000)
+    g.webContents.on('preload-error', (_e, _p, err) => { failed = String(err && err.message || err) })
+    g.webContents.once('did-finish-load', () => setTimeout(() => { clearTimeout(cap); end(failed) }, 300))
+    g.loadURL('data:text/html,<p>smoke</p>')
+  })
+}

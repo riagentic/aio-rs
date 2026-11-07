@@ -40,12 +40,22 @@ default.
 [aio] boot app        notes (aio.toml)
 [aio] boot version    1.4.0 (Cargo.toml)
 [aio] boot aio-rs     0.1.0 (built in)
+[aio] boot platform   linux/x86_64 (built in)
 [aio] boot mode       server (aio.toml)
 [aio] boot data       /srv/notes/data (AIORT_DATA)
 [aio] boot durability normal (aio.toml)
+[aio] boot updates    stable · manifest https://example.org/notes · every 6h · auto (aio.toml)
 [aio] boot listen     0.0.0.0:8100 — every interface: open to the network (aio.toml)
 [aio] boot tls        on (aio.toml)
 [aio] boot token      data/sync.token (file)
+```
+
+A second on, once it is up, it says what it opened and serves:
+
+```text
+[aio] boot cells      2 (notes v3, prefs v1) (opened)
+[aio] boot routes     4 (the app's server)
+[aio] boot serverfns  billing, export (the app's server)
 ```
 
 `ax doctor <app>` says the same of a running app, and whether it is the
@@ -177,6 +187,7 @@ assert!(g.iter().any(|r| r.name == "production-page.cache" && r.value == Some(3 
 | `aio_memory_rss_bytes`, `aio_memory_machine_bytes` | gauge | | the process's resident memory, the machine's |
 | `aio_clients_connected` | gauge | | open sync links |
 | `aio_calls_total` | counter | | method calls this run |
+| `aio_broadcast_bytes_total`, `aio_broadcast_messages_total` | counter | | the states and patches sent to clients this run, all cells, every link |
 | `aio_cell_enabled` | gauge | `cell` | 1 enabled, 0 tripped |
 | `aio_cell_failures` | gauge | `cell` | failures since it was last enabled |
 | `aio_degraded_parts` | gauge | | parts degraded now |
@@ -206,9 +217,11 @@ quarter of the start). Each level is said once in the log and reported
 (`memory:high`, `memory:growing`, `memory:critical`), with the biggest
 cells and gauges named; the next growth step is said again, so a leak is
 said once per step, not once per sample. `aio::health::on_memory(|r| ..)`
-hears each change of level, back to `ok` too, with a `MemoryReport` (the
-level, resident and machine bytes, the biggest gauge and cells): aio's
-`onMemoryPressure`, to drop a cache or shed load. `[memory] every`
+hears each change of level, back to `ok` too, and every sample while the
+level is `high` or `critical` (each is another turn to shed memory), with
+a `MemoryReport` (the level, its `trend` over the last 10 samples:
+`Rising`, `Stable` or `Falling`, resident and machine bytes, the biggest
+gauge and cells): aio's `onMemoryPressure`, to drop a cache or shed load. `[memory] every`
 (1 s to 10 s, default 10 s) is how often it samples.
 
 ```toml
@@ -248,7 +261,15 @@ made last and the freezes of the last 30 s). Each step is also on the
 bus as `vitals:<layer>` (`vitals:loop`, `vitals:transport`,
 `vitals:render`; a warning, the way back info: aio's `onDiagnostic`).
 `ax vitals <app>` and `GET /__aio/vitals` say every layer now and the
-likely cause, with its fix; the document is in `health.json` too.
+likely cause, with its fix; the document is in `health.json` too. The
+loop says `queue` (the effects backlog) and `drainRate` (effects that got
+their turn in the last second). A server's `/__aio/vitals` adds:
+
+| Field | Is |
+|---|---|
+| `clients` | each link: `id`, `cell`, `status` (`healthy`, or `frozen` once unheard past `[vitals] transport` frozen, with `frozenFor`), `gap` (ms since it was last heard; a ping's answer comes every 2 s), `lastPayloadBytes` and `totalBytes` of the states and patches it was sent |
+| `cellSizes` | each served cell's state, JSON bytes |
+| `breakers` | the served cells tripped (disabled) now |
 
 | Hint | Said when |
 |---|---|
@@ -286,7 +307,7 @@ observations: a slow call still commits. Each breach goes to `logs/perf.log`
 
 | Key | Default | Counts |
 |---|---|---|
-| `[perf] method` | 16 in a debug build, 100 in a release | a method's own work: the state's copy, the method, its invariants (not the disk) |
+| `[perf] method` | 16 in a dev build (debug, `ax dev`, `ax test`), 100 in a release | a method's own work: the state's copy, the method, its invariants (not the disk) |
 | `[perf] effect` | 5 | one step of an effect: the time it holds a worker thread (not the calls it makes) |
 | `[perf.methods]` `"cell.method" = ms` | | one method meant to be slow |
 | `[perf.effects]` `"cell.name" = ms` | | one effect, by the name its key starts with |
@@ -334,9 +355,10 @@ degraded part named `cell <id>` until `Cells::enable` turns it back on.
 - aio's startup linter of cell config at `aio.run()`: aio-rs checks cell
   flags when the app compiles (the macros) and `aio.toml` when it
   builds; `ax lint` adds what types can't check.
-- aio's health overlay in the page: a debug page shows its errors
-  ([errors: in the window](errors.md#in-the-window)); health is `ax
-  health`, `ax ui` and `/__aio/health`.
+- aio's health overlay in the page: aio's docs name one, but its source
+  never puts it in a page (`server-html-scripts.ts` says why). A debug
+  page here shows its errors ([errors: in the window](errors.md#in-the-window));
+  health is `ax health`, `ax ui` and `/__aio/health`.
 - aio's "uses reserved key(s)" and "already bound" errors have no
   counterpart: a cell is a Rust type, its fields are its own.
 

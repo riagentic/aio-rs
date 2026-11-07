@@ -320,13 +320,40 @@ pub fn of_link(url: &str) -> String {
     if rest.starts_with('/') { rest.to_string() } else { format!("/{rest}") }
 }
 
+/// The page's base path, from its `<base href>` (an app served under
+/// `/app/`), without the trailing `/`; empty at the site's root.
+#[cfg(target_arch = "wasm32")]
+fn page_base() -> String {
+    let base = web_sys::window().and_then(|w| w.document()).and_then(|d| d.base_uri().ok().flatten());
+    let path = base.as_deref().and_then(|u| Some(u.split_once("://")?.1.split_once('/')?.1)).unwrap_or("");
+    base_of(path)
+}
+
+/// A base path (`app/`, `/app/x.html`) as the router strips it: its folder,
+/// with a leading `/` and no trailing one (pure).
+pub fn base_of(path: &str) -> String {
+    let dir = path.rsplit_once('/').map_or("", |(d, _)| d).trim_matches('/');
+    if dir.is_empty() { String::new() } else { format!("/{dir}") }
+}
+
+/// The app's place of a page address under `base` (aio's route base): the
+/// base taken off, `/` when nothing is left (pure).
+pub fn unbased(base: &str, address: &str) -> String {
+    match address.strip_prefix(base) {
+        Some(rest) if !base.is_empty() && (rest.is_empty() || rest.starts_with(['/', '?', '#'])) => {
+            if rest.starts_with('/') { rest.into() } else { format!("/{rest}") }
+        }
+        _ => address.into(),
+    }
+}
+
 /// Where the app starts: in a browser the page's address (a reload or a
 /// shared link lands where it was; the server answers every route with the
 /// app), elsewhere the launch's `--route` ([`start`]).
 pub fn start_place() -> String {
     #[cfg(target_arch = "wasm32")]
     if let Some(l) = web_sys::window().map(|w| w.location()) {
-        return [l.pathname(), l.search(), l.hash()].map(Result::unwrap_or_default).concat();
+        return unbased(&page_base(), &[l.pathname(), l.search(), l.hash()].map(Result::unwrap_or_default).concat());
     }
     start(std::env::args())
 }
@@ -338,7 +365,7 @@ pub fn start_place() -> String {
 pub fn mirror(here: &Loc, replace: bool) {
     #[cfg(target_arch = "wasm32")]
     if let Some(w) = web_sys::window() {
-        let (url, h) = (here.to_string(), w.history());
+        let (url, h) = (format!("{}{here}", page_base()), w.history());
         let shown = w.location().href().ok().and_then(|u| Some(u.split_once("://")?.1.split_once('/')?.1.to_string()));
         let Ok(h) = h else { return };
         let _ = if replace || shown.is_some_and(|s| format!("/{s}") == url) {
@@ -719,10 +746,11 @@ macro_rules! router {
             }
 
             /// Goes to `to` once shown, in place of here (aio's default; a pushed
-            /// one would send Back straight here again).
+            /// one would send Back straight here again); `push: true` keeps
+            /// here in the history (aio's `replace: false`).
             #[component]
-            pub fn Redirect(to: String) -> View {
-                once(move || spawn(async move { _ = redirect(&to) }));
+            pub fn Redirect(to: String, #[props(default)] push: bool) -> View {
+                once(move || spawn(async move { _ = if push { go(&to) } else { redirect(&to) } }));
                 rsx! {}
             }
 
@@ -732,29 +760,36 @@ macro_rules! router {
             /// first; `prevent_default()` there keeps it from navigating.
             #[component]
             pub fn Link(
-                to: String,
+                #[props(into)] to: Prop<String>,
                 #[props(default)] exact: bool,
                 #[props(default)] replace: bool,
-                #[props(default)] class: String,
+                #[props(default, into)] class: Prop<String>,
                 #[props(default = "active".to_string())] active_class: String,
+                /// The current place's link's `style` too (aio's `activeStyle`).
+                #[props(default, into)]
+                active_style: Prop<String>,
                 onclick: Option<EventHandler<MouseEvent>>,
                 #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
                 children: View,
             ) -> View {
                 let own = onclick;
-                if $crate::route::resolve(&to, &here()).is_none() {
+                if $crate::route::resolve(&to.get_untracked(), &here()).is_none() {
                     return rsx! {
-                        a { href: "{to}", target: "_blank", rel: "noopener noreferrer", class, ..attributes, {children} }
+                        a { href: "{to}", target: "_blank", rel: "noopener noreferrer", class: "{class}", ..attributes, {children} }
                     };
                 }
-                // Read where they are drawn: on air these holes alone follow the place.
-                let on = move |to: &str| super::NAV.with(|n| $crate::route::is_active(to, n.here(), exact));
+                // Read where they are drawn: on air these holes alone follow the place and the props.
+                let on = {
+                    let to = to.clone();
+                    memo(move || super::NAV.with(|n| $crate::route::is_active(&to.get(), n.here(), exact)))
+                };
                 let go_to = to.clone();
                 rsx! {
                     a {
                         href: "{to}",
-                        class: $crate::ui::cx(&[(&class, !class.is_empty()), (&active_class, on(&to))]),
-                        "aria-current": on(&to).then_some("page"),
+                        class: { let c = class.get(); $crate::ui::cx(&[(&c, !c.is_empty()), (&active_class, on.get())]) },
+                        style: on.get().then(|| active_style.get()).filter(|s| !s.is_empty()),
+                        "aria-current": on.get().then_some("page"),
                         onclick: move |e: MouseEvent| {
                             if let Some(f) = &own {
                                 f.call(e.clone());
@@ -764,7 +799,8 @@ macro_rules! router {
                             if !routed {
                                 return;
                             }
-                            if replace { redirect(&go_to) } else { go(&go_to) };
+                            let to = go_to.get_untracked();
+                            if replace { redirect(&to) } else { go(&to) };
                         },
                         ..attributes,
                         {children}
@@ -781,6 +817,21 @@ mod tests {
 
     fn p(kv: &[(&str, &str)]) -> Option<Params> {
         Some(kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    #[test]
+    fn a_page_under_a_base_path_routes_from_it() {
+        // aio's route base: an app served under /app/ routes its own paths.
+        assert_eq!(
+            [base_of(""), base_of("index.html"), base_of("app/"), base_of("app/x/index.html")],
+            ["", "", "/app", "/app/x"]
+        );
+        assert_eq!(unbased("/app", "/app/users/7?q=1"), "/users/7?q=1");
+        assert_eq!(
+            [unbased("/app", "/app"), unbased("/app", "/app?x"), unbased("/app", "/apple")],
+            ["/", "/?x", "/apple"]
+        );
+        assert_eq!(unbased("", "/users"), "/users");
     }
 
     #[test]

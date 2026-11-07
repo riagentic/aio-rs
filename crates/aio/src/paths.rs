@@ -16,7 +16,7 @@ fn env(k: &str) -> Option<PathBuf> {
             k if k.starts_with("XDG_") => return None,
             // The caller's own sandbox (a wrapper's) is not the test's
             // world; a test's own, in a temp dir, is.
-            "AIORT_DATA" | "AIO_SHARED_ELECTRON_DIR" => {
+            "AIORT_DATA" | "AIORT_APPS_DIR" | "AIO_SHARED_ELECTRON_DIR" => {
                 return real_env(k).filter(|p| p.starts_with(std::env::temp_dir()));
             }
             _ => {}
@@ -233,7 +233,7 @@ pub fn private_dir(d: &std::path::Path) -> io::Result<()> {
     Ok(())
 }
 
-fn create(p: &std::path::Path, private: bool) -> io::Result<std::fs::File> {
+pub(crate) fn create(p: &std::path::Path, private: bool) -> io::Result<std::fs::File> {
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
@@ -488,9 +488,9 @@ pub(crate) use aio_config::paths::id_ok;
 /// Where app `id`'s (data, logs, cache) dirs are, without creating or locking.
 pub fn locate(id: &str) -> io::Result<(PathBuf, PathBuf, PathBuf)> {
     id_ok(id)?;
-    Ok(match env("AIORT_DATA") {
-        Some(root) => (root.join("data"), root.join("logs"), root.join("cache")),
-        None => {
+    Ok(match (env("AIORT_DATA"), env("AIORT_APPS_DIR").map(|a| a.join(id))) {
+        (Some(root), _) | (None, Some(root)) => (root.join("data"), root.join("logs"), root.join("cache")),
+        (None, None) => {
             let base = tool_home().join("apps").join(id);
             (base.join("data"), base.join("logs"), cache_home_in(&env).join(id))
         }
@@ -532,11 +532,33 @@ pub struct Ask {
     pub dev: bool,
     /// `--no-persist` (aio's): this run keeps its state in memory only.
     pub no_persist: bool,
+    /// `--channel=<c>` (aio's): the update channel this run follows, over
+    /// `AIORT_UPDATE_CHANNEL` and every other choice ([`crate::update::channel`]).
+    pub channel: Option<String>,
+    /// `--width=<px>` and `--height=<px>` (aio's): this run's window size,
+    /// over `Window { width, height }`; its saved size and place are
+    /// neither used nor changed.
+    pub width: Option<String>,
+    pub height: Option<String>,
+    /// `--cdp=<port>` (aio's): the window's DevTools protocol on loopback
+    /// for this launch (a release build's only where its app allows it).
+    pub cdp: Option<String>,
+    /// `--server-url=<url>` (aio's): a client's server for this launch,
+    /// over its pairing and `[client] server` (`host:port`, or a URL whose
+    /// `?token=` is the key).
+    pub server_url: Option<String>,
+    /// `--connect` (aio's): a client opens its connect page first.
+    pub connect: bool,
+    /// `--strict-pin` (aio's): `[client] strict_pin` for this launch.
+    pub strict_pin: bool,
+    /// `--client=<window|browser|server-only>` (aio's): how this run shows
+    /// the app, over `[app] ui`.
+    pub client: Option<String>,
 }
 
 /// The flags aio takes from a launch for itself, spelled once: a flag
 /// with `=` takes a value (`--home=<dir>` or `--home <dir>`).
-pub const FLAGS: [&str; 12] = [
+pub const FLAGS: [&str; 20] = [
     "--home=",
     "--profile=",
     "--instance=",
@@ -549,7 +571,41 @@ pub const FLAGS: [&str; 12] = [
     "--no-tls",
     "--tls-cert=",
     "--tls-key=",
+    "--channel=",
+    "--width=",
+    "--height=",
+    "--cdp=",
+    "--server-url=",
+    "--connect",
+    "--strict-pin",
+    "--client=",
 ];
+
+/// What the window host and the router read from a launch beside [`FLAGS`].
+pub const HOST_FLAGS: [&str; 5] = ["--route", "--quit", "--version", "--install", "--uninstall"];
+
+/// `[app] flags` (aio's `appFlags`): why a launch is refused, if one of its
+/// flags (before a bare `--`) is none of `declared`, [`FLAGS`] or
+/// [`HOST_FLAGS`] but one typo from one of them (pure). A flag far from
+/// every name goes to the app as ever; no `declared`, nothing is checked.
+pub fn misspelled(args: &[String], declared: &[String]) -> Option<String> {
+    if declared.is_empty() {
+        return None;
+    }
+    let known: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .chain(FLAGS.iter().chain(&HOST_FLAGS).map(|f| f.trim_end_matches('=')))
+        .collect();
+    args.iter().take_while(|a| *a != "--").find_map(|a| {
+        let name = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        if !name.starts_with("--") || known.contains(&name) {
+            return None;
+        }
+        let meant = crate::cli::near(name, known.iter().copied())?;
+        Some(format!("{name}: no such flag (did you mean {meant}?)"))
+    })
+}
 
 impl Ask {
     /// A launch's `args` without aio's own [`FLAGS`] (and their values), in
@@ -582,6 +638,8 @@ impl Ask {
                 "--keep-server" => a.keep_server = true,
                 "--no-persist" => a.no_persist = true,
                 "--no-tls" => a.no_tls = true,
+                "--connect" => a.connect = true,
+                "--strict-pin" => a.strict_pin = true,
                 _ => {}
             }
             let (flag, inline) = arg.split_once('=').map_or((arg.as_str(), None), |(f, v)| (f, Some(v)));
@@ -593,6 +651,12 @@ impl Ask {
                 "--host" => &mut a.host,
                 "--tls-cert" => &mut a.tls_cert,
                 "--tls-key" => &mut a.tls_key,
+                "--channel" => &mut a.channel,
+                "--width" => &mut a.width,
+                "--height" => &mut a.height,
+                "--cdp" => &mut a.cdp,
+                "--server-url" => &mut a.server_url,
+                "--client" => &mut a.client,
                 _ => continue,
             };
             let v = match inline {
@@ -635,7 +699,17 @@ pub struct Plan {
 /// or `AIORT_DATA`, a profile beside it (`<home>-<name>`), and
 /// `--instance=<n>` is `instances/<n>/<id>`.
 pub fn plan(id: &str, port_of: Option<(&str, &crate::config::Home)>, ask: &Ask, env: Env) -> Result<Plan, String> {
+    let none = crate::config::Home::default();
+    plan_in(id, port_of.map(|(a, _)| a), port_of.map_or(&none, |(_, h)| h), ask, env)
+}
+
+/// [`plan`] with the app's `[home]` rules apart from its port: `[home]
+/// dir` (aio's `appDir`) is any app's base home, under `AIORT_DATA` and
+/// `--instance`, over the default (a ported app's: after its own rules,
+/// over `AIO_APPS_DIR`).
+pub fn plan_in(id: &str, port_of: Option<&str>, rules: &crate::config::Home, ask: &Ask, env: Env) -> Result<Plan, String> {
     id_ok(id).map_err(|e| e.to_string())?;
+    let port_of = port_of.map(|a| (a, rules));
     if let Some(n) = &ask.instance
         && (n.is_empty() || n.contains(['/', '\\']) || n == "." || n == "..")
     {
@@ -649,6 +723,8 @@ pub fn plan(id: &str, port_of: Option<(&str, &crate::config::Home)>, ask: &Ask, 
         _ => (None, ""),
     };
     let user = home_in(env);
+    let fixed = rules.dir.as_deref().map(|d| here("[home] dir", d).map(|()| crate::compat::data::expand(d, &user)));
+    let fixed = fixed.transpose()?;
     let (base, from) = match (port_of, &ask.instance) {
         // A sandbox (tests, `ax build --smoke`) wins over a ported app's own
         // rules too: it must never open a person's real aio data.
@@ -667,16 +743,19 @@ pub fn plan(id: &str, port_of: Option<(&str, &crate::config::Home)>, ask: &Ask, 
                 (Some(v), _, _) => (crate::compat::data::expand(&v, &user), "[home] env"),
                 (None, Some(p), _) => (p, "[home] portable"),
                 (None, None, Some(d)) => (user.join(d), "[home] dev"),
-                (None, None, None) => match text("AIO_APPS_DIR") {
-                    Some(r) => (crate::compat::data::expand(&r, &user).join(app), "AIO_APPS_DIR"),
-                    None => (user.join(format!(".{app}")), "default"),
+                (None, None, None) => match (fixed, text("AIO_APPS_DIR")) {
+                    (Some(d), _) => (d, "[home] dir"),
+                    (None, Some(r)) => (crate::compat::data::expand(&r, &user).join(app), "AIO_APPS_DIR"),
+                    (None, None) => (user.join(format!(".{app}")), "default"),
                 },
             }
         }
         (None, Some(n)) => (tool_home_in(env).join("instances").join(n).join(id), "--instance"),
-        (None, None) => match env("AIORT_DATA") {
-            Some(root) => (root, "AIORT_DATA"),
-            None => (tool_home_in(env).join("apps").join(id), "default"),
+        (None, None) => match (env("AIORT_DATA"), fixed, env("AIORT_APPS_DIR")) {
+            (Some(root), ..) => (root, "AIORT_DATA"),
+            (None, Some(d), _) => (d, "[home] dir"),
+            (None, None, Some(apps)) => (apps.join(id), "AIORT_APPS_DIR"),
+            (None, None, None) => (tool_home_in(env).join("apps").join(id), "default"),
         },
     };
     let (home, name) = crate::compat::data::pick(&base, ask.home.as_deref(), profile.as_deref(), &user)?;
@@ -690,6 +769,7 @@ pub fn plan(id: &str, port_of: Option<(&str, &crate::config::Home)>, ask: &Ask, 
         (None, "default") => cache_home_in(env).join(id),
         _ => home.join("cache"),
     };
+
     let port_of = port_of.map(|(app, _)| (home.clone(), app.to_string()));
     let data = home.join("data");
     Ok(Plan { store: data.join("state.db"), data, logs: home.join("logs"), cache, profile: name, port_of, from, asked })
@@ -721,10 +801,49 @@ pub fn app(id: &str) -> io::Result<AppDirs> {
 /// debug build asks `dev`), its store `[data] store`; [`AppDirs::planned`]
 /// makes and locks them.
 pub fn plan_app(cfg: &crate::config::Config, ask: &Ask) -> io::Result<Plan> {
-    let ask = Ask { dev: ask.dev || cfg!(debug_assertions), ..ask.clone() };
-    let p = plan(&cfg.app.id, cfg.app.port_of.as_deref().map(|a| (a, &cfg.home)), &ask, &env)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    Ok(Plan { store: p.data.join(&cfg.data.store), ..p })
+    let ask = Ask { dev: ask.dev || cfg!(feature = "dev"), ..ask.clone() };
+    let refused = |e: String| io::Error::new(io::ErrorKind::InvalidInput, e);
+    let p = plan_in(&cfg.app.id, cfg.app.port_of.as_deref(), &cfg.home, &ask, &env).map_err(refused)?;
+    one_home(cfg.app.profiles, p.from).map_err(refused)?;
+    cfg.log.dir.as_deref().map_or(Ok(()), |d| here("[log] dir", d)).map_err(refused)?;
+    Ok(Plan { store: p.data.join(&cfg.data.store), logs: logs_of(cfg.log.dir.as_deref(), &p, &home()), ..p })
+}
+
+/// An author's folder (`[home] dir`, `[log] dir`) is absolute here or
+/// `~/…`: aio.toml takes any OS's absolute paths, as it may be built for
+/// another (pure).
+fn here(k: &str, d: &str) -> Result<(), String> {
+    if d.starts_with("~/") || std::path::Path::new(d).is_absolute() {
+        Ok(())
+    } else {
+        Err(format!("aio.toml: {k} {d:?} is not an absolute path on {}", std::env::consts::OS))
+    }
+}
+
+/// `[app] profiles = false`: a launch naming another home than the app's
+/// is refused (pure).
+fn one_home(profiles: bool, from: &str) -> Result<(), String> {
+    match (profiles, from) {
+        (false, "--home" | "--profile" | "AIORT_PROFILE" | "AIO_PROFILE") => Err(format!(
+            "{from}: this app runs from one home only ([app] profiles = false); --instance or AIORT_DATA give a sandbox"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `[log] dir` (`~/…` in `user`) for the app's own home; any other copy
+/// keeps its own `logs/`, so two never share a file (pure).
+fn logs_of(dir: Option<&str>, p: &Plan, user: &std::path::Path) -> PathBuf {
+    match (dir, p.from) {
+        (
+            Some(d),
+            "default" | "[home] dir" | "[home] env" | "[home] portable" | "[home] dev" | "AIO_APPS_DIR"
+            | "AIORT_APPS_DIR",
+        ) => {
+            crate::compat::data::expand(d, user)
+        }
+        _ => p.logs.clone(),
+    }
 }
 
 impl AppDirs {
@@ -808,6 +927,24 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_flag_one_typo_from_a_declared_one_is_refused_with_it() {
+        let declared = args(&["--verbose", "--seed"]);
+        let refused = |a: &[&str]| misspelled(&args(a), &declared);
+        assert_eq!(refused(&["--verbos"]).as_deref(), Some("--verbos: no such flag (did you mean --verbose?)"));
+        assert_eq!(refused(&["--sed=4"]).as_deref(), Some("--sed: no such flag (did you mean --seed?)"));
+        assert_eq!(refused(&["--profil=x"]).as_deref(), Some("--profil: no such flag (did you mean --profile?)"));
+        for fine in [
+            &["--verbose", "--seed=4", "--profile=w", "--route=/a", "--quit"][..],
+            &["--trace-warnings"],     // far from every name: the app's (or Electron's) own
+            &["--", "--verbos"],       // after `--`: the app's alone
+            &["verbos", "-v"],
+        ] {
+            assert_eq!(refused(fine), None, "{fine:?}");
+        }
+        assert_eq!(misspelled(&args(&["--verbos"]), &[]), None, "no [app] flags: nothing checked");
+    }
+
+    #[test]
     fn the_electron_store_is_aios_on_each_os() {
         // aio shared-runtime.ts `sharedElectronRoot`.
         let p = PathBuf::from;
@@ -834,7 +971,7 @@ mod tests {
         assert_eq!(socket_dir(short, "notes", 0xab, Some(1000)), p("/run/user/1000/aio-rt/notes-000000ab"));
         // An agent's scratch folder as XDG_RUNTIME_DIR or TMPDIR (aio's
         // `resolveSocketPath` fallback): every name the app binds fits.
-        let long = p("/tmp/claude-1000/a-project-folder-of-some-length/0123456789abcdef/scratchpad");
+        let long = p("/tmp/agent-1000/a-project-folder-of-some-length/0123456789abcdef/scratchpad");
         let dir = socket_dir(long, "notes", 0xab, Some(1000));
         assert_eq!(dir, p("/tmp/aio-rt-1000/notes-000000ab"));
         // A long id is cut to 40 bytes there, on a char boundary.
@@ -926,6 +1063,7 @@ mod tests {
             "--tls-cert=c.pem",
             "--tls-key",
             "k.pem",
+            "--channel=beta",
         ]))
         .unwrap();
         let want = Ask {
@@ -942,9 +1080,36 @@ mod tests {
             no_tls: false,
             tls_cert: Some("c.pem".into()),
             tls_key: Some("k.pem".into()),
+            channel: Some("beta".into()),
+            width: None,
+            height: None,
+            cdp: None,
+            server_url: None,
+            connect: false,
+            strict_pin: false,
+            client: None,
         };
         assert_eq!(a, want);
+        let client = Ask::parse(&args(&[
+            "--server-url=https://192.0.2.7:8100",
+            "--connect",
+            "--strict-pin",
+            "--client",
+            "browser",
+            "--cdp=9222",
+        ]))
+        .unwrap();
+        assert_eq!(
+            (client.server_url.as_deref(), client.connect, client.client.as_deref(), client.cdp.as_deref()),
+            (Some("https://192.0.2.7:8100"), true, Some("browser"), Some("9222"))
+        );
+        assert!(client.strict_pin);
+        assert_eq!(Ask::app_args(&args(&["--connect", "--client", "window", "--server-url=x", "y"])), ["y"]);
+        assert_eq!(Ask::app_args(&args(&["--channel", "beta", "x"])), ["x"], "aio's flag, not the app's");
         assert!(Ask::parse(&args(&["--no-tls"])).unwrap().no_tls);
+        let sized = Ask::parse(&args(&["--width=420", "--height", "620"])).unwrap();
+        assert_eq!((sized.width.as_deref(), sized.height.as_deref()), (Some("420"), Some("620")));
+        assert_eq!(Ask::app_args(&args(&["--width", "420", "--height=620", "x"])), ["x"]);
         assert_eq!(Ask::parse(&args(&["--verbose", "x"])).unwrap(), Ask::default());
         assert!(Ask::parse(&args(&["--home"])).unwrap_err().contains("needs a value"));
         assert!(Ask::parse(&args(&["--profile=a", "--profile=b"])).unwrap_err().contains("twice"));
@@ -1001,6 +1166,7 @@ mod tests {
             env: Some("PURSE_HOME".into()),
             portable: Some(format!("portable-{}", std::process::id())),
             dev: Some(".purse-dev".into()),
+            dir: None,
         };
         let at = |dev, a: &[&str], vars: &[(&str, &str)]| ruled(Some("purse"), &rules, dev, a, vars).unwrap();
         let home = |g: Got| (g.0, g.2, g.3);
@@ -1065,6 +1231,49 @@ mod tests {
         }
         assert!(at(port_of, &["--home=/x", "--profile=dev"], &[]).unwrap_err().contains("two different folders"));
         assert!(at(None, &["--profile=Dev"], &[]).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_authors_home_dir_logs_dir_and_one_home() {
+        let user = |k: &str| (k == "HOME").then(|| PathBuf::from("/u"));
+        let rules = crate::config::Home { dir: Some("~/notes-home".into()), ..Default::default() };
+        let at = |port_of, a: &[&str], env: Env| plan_in("notes", port_of, &rules, &Ask::parse(&args(a)).unwrap(), env);
+        let p = at(None, &[], &user).unwrap();
+        assert_eq!((p.data, p.cache, p.from), ("/u/notes-home/data".into(), "/u/notes-home/cache".into(), "[home] dir"));
+        assert_eq!(at(None, &["--profile=qa"], &user).unwrap().data, PathBuf::from("/u/notes-home-qa/data"));
+        let boxed = |k: &str| (k == "AIORT_DATA").then(|| PathBuf::from("/box")).or_else(|| user(k));
+        assert_eq!(at(None, &[], &boxed).unwrap().from, "AIORT_DATA", "a sandbox wins");
+        assert_eq!(at(None, &["--instance=a1"], &user).unwrap().from, "--instance");
+        let apps = |k: &str| (k == "AIO_APPS_DIR").then(|| PathBuf::from("/srv")).or_else(|| user(k));
+        assert_eq!(at(Some("notes-v1"), &[], &apps).unwrap().from, "[home] dir", "over AIO_APPS_DIR, as aio's appDir");
+        // AIORT_APPS_DIR: one root for every app (aio's AIO_APPS_DIR), under [home] dir.
+        let root = |k: &str| (k == "AIORT_APPS_DIR").then(|| PathBuf::from("/srv/apps")).or_else(|| user(k));
+        let none = crate::config::Home::default();
+        let p = plan_in("notes", None, &none, &Ask::default(), &root).unwrap();
+        assert_eq!((p.data, p.cache, p.from), ("/srv/apps/notes/data".into(), "/srv/apps/notes/cache".into(), "AIORT_APPS_DIR"));
+        assert_eq!(at(None, &[], &root).unwrap().from, "[home] dir");
+        // [app] profiles = false: one home.
+        assert!(one_home(false, "--profile").unwrap_err().contains("[app] profiles = false"));
+        assert!(one_home(false, "AIORT_PROFILE").is_err() && one_home(false, "--home").is_err());
+        assert!(one_home(false, "--instance").is_ok() && one_home(false, "default").is_ok() && one_home(true, "--profile").is_ok());
+        // [log] dir: the own home's logs only.
+        let own = at(None, &[], &user).unwrap();
+        assert_eq!(logs_of(Some("~/logs/notes"), &own, std::path::Path::new("/u")), PathBuf::from("/u/logs/notes"));
+        let qa = at(None, &["--profile=qa"], &user).unwrap();
+        assert_eq!(logs_of(Some("/var/log/notes"), &qa, std::path::Path::new("/u")), PathBuf::from("/u/notes-home-qa/logs"));
+        assert_eq!(logs_of(None, &own, std::path::Path::new("/u")), PathBuf::from("/u/notes-home/logs"));
+    }
+
+    #[test]
+    fn an_authors_folder_for_another_os_is_refused_where_it_runs() {
+        let (own, other) = if cfg!(windows) { (r"C:\srv\t", "/srv/t") } else { ("/srv/t", r"C:\srv\t") };
+        assert!(here("[home] dir", own).is_ok() && here("[log] dir", "~/logs").is_ok());
+        let e = here("[log] dir", other).unwrap_err();
+        assert!(e.contains("[log] dir") && e.contains("not an absolute path on"), "{e}");
+        let rules = crate::config::Home { dir: Some(other.into()), ..Default::default() };
+        let e = plan_in("notes", None, &rules, &Ask::default(), &|_| None).unwrap_err();
+        assert!(e.contains("[home] dir"), "{e}");
     }
 
     #[test]

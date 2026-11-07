@@ -53,7 +53,7 @@ impl Budgets {
 
     /// The budget of method `label` (`cell.method`).
     pub fn method(&self, label: &str) -> Duration {
-        let default = if cfg!(debug_assertions) { 16 } else { 100 };
+        let default = if cfg!(any(debug_assertions, feature = "dev")) { 16 } else { 100 };
         Duration::from_millis(self.methods.get(label).copied().or(self.method).unwrap_or(default))
     }
 

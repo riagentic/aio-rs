@@ -44,7 +44,8 @@ macro_rules! field {
 
 /// An input wired to a form's field ([`Form::bind`]): it shows the value,
 /// an edit writes it, leaving it touches the field (its error shows), and
-/// the field's error marks it invalid. `Input`, `Textarea`, `Select` take it.
+/// the field's error marks it invalid. `Input`, `Textarea`, `Select`,
+/// `RadioGroup`, `Checkbox` and `Switch` take it.
 #[derive(Clone)]
 pub struct Bind {
     pub field: &'static str,
@@ -237,6 +238,35 @@ impl<T: Clone + PartialEq + 'static> Form<T> {
             blur: Callback::new(move |()| self.touch(f.name)),
         }
     }
+
+    /// A `Checkbox` or `Switch` wired to bool field `f` (aio's `form.bind`
+    /// of a boolean): `Checkbox { bind: form.bind_check(field!(agree)) }`.
+    pub fn bind_check(self, f: FieldOf<T, bool>) -> Bind {
+        Bind {
+            field: f.name,
+            value: Rc::new(move || self.state.with(|s| (f.get)(&s.values)).to_string()),
+            invalid: Rc::new(move || self.error(f.name).is_some()),
+            input: Callback::new(move |v: String| self.set_field(f, v == "true")),
+            blur: Callback::new(move |()| self.touch(f.name)),
+        }
+    }
+
+    /// An input wired to field `f` of a type text parses into (a number:
+    /// aio's `bindInput` of a number field): it shows the value as text, and
+    /// an edit that doesn't parse (`1e`) leaves the field as it was.
+    pub fn bind_parsed<V: std::str::FromStr + std::fmt::Display + 'static>(self, f: FieldOf<T, V>) -> Bind {
+        Bind {
+            field: f.name,
+            value: Rc::new(move || self.state.with(|s| (f.get)(&s.values)).to_string()),
+            invalid: Rc::new(move || self.error(f.name).is_some()),
+            input: Callback::new(move |v: String| {
+                if let Ok(v) = v.trim().parse() {
+                    self.set_field(f, v)
+                }
+            }),
+            blur: Callback::new(move |()| self.touch(f.name)),
+        }
+    }
 }
 
 /// A form starting at `initial`, checked by `check` (a hook).
@@ -348,7 +378,7 @@ impl<V: Clone + PartialEq + 'static> FieldArray<V> {
 
     fn in_range(&self, op: &str, i: usize) -> bool {
         let n = self.items.with_untracked(Vec::len);
-        if i >= n && cfg!(debug_assertions) {
+        if i >= n && cfg!(feature = "dev") {
             crate::warn!(cat: "ui", "use_field_array: {op}({i}) is out of range: the list holds {n}; nothing changed");
         }
         i < n

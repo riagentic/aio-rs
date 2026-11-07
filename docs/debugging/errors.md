@@ -67,7 +67,7 @@ assert!(h.add("ada@example.org".into()).is_err(), "a duplicate");
 assert_eq!(h.state().emails.len(), 1, "a refused call changed nothing");
 
 let e = h.call("remove", serde_json::json!(["ada@example.org"])).unwrap_err();
-assert_eq!((e.code(), e.code().map(Code::as_str)), (Some(Code::ActionRefused), Some("ACTION_REFUSED")));
+assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRefused), Some("ACTION_REFUSED")));
 # }
 ```
 
@@ -78,12 +78,24 @@ assert_eq!((e.code(), e.code().map(Code::as_str)), (Some(Code::ActionRefused), S
 | `AccessDenied` | `ACCESS_DENIED` | a network caller may not: the method isn't `#[client]`, its rule said no, a server function's access refused, the session ended | ask the user to sign in, or hide the control for that role |
 | `ActionRefused` | `ACTION_REFUSED` | the caller is allowed, but there is no such method (a client newer or older than the app; a typo in `h.call`) | reload the page, update the client; fix the name |
 | `ConnectionLost` | `CONNECTION_LOST` | the link to the app dropped or never came up | retry when it is back; **the call may have run**: make it safe to send twice, or read the state first |
-| `None` | none | the method's own `ensure!`/`reject!`; a cell disabled or paused by time travel; the app closing (`retry after … ms`); a storm's breaker; a budget's `spend` | show `why`; it was written for people |
+| `TxConflict` | `TX_CONFLICT` | a transaction's write met another call's | call it again |
+| `ReduceError` | `REDUCE_ERROR` | the method panicked: a bug, its call changed nothing | fix the method; `ax errors` has the panic |
+| `InitError` | `INIT_ERROR` | an `#[on_start]` refused or panicked | the log and `ax errors` say why |
+| `QueueOverflow` | `QUEUE_OVERFLOW` | a synced copy's 500 calls wait for the server | wait for the link; tell the person their changes wait |
+| `DispatchClosed` | `DISPATCH_CLOSED` | the app is closing (`retry after … ms`), the cell disabled or paused by time travel | retry later |
+| `DispatchAborted` | `DISPATCH_ABORTED` | its await was aborted (`cx.abort`), superseded (`#[mode(newest)]`), cut off after the call ceiling, or the app stopped | nothing, or call again |
+| `DispatchLoop` | `DISPATCH_LOOP` | refused during a call storm (`[perf.storm]`) | find the loop that calls it |
+| `PersistError` | `PERSIST_ERROR` | the store could not write the call (disk full, another writer) | the log says why; nothing of the call stayed |
+| `Other(name)` | as sent | a code this build doesn't know (a newer server's), kept verbatim | treat as a refusal; compare with the codes you know |
+| `None` | none | the method's own `ensure!`/`reject!`; a budget's `spend` | show `why`; it was written for people |
 
 - Codes are stable: a code keeps its meaning and its wire name across
   versions, and new ones may come (`Code` is `#[non_exhaustive]`), so a
-  `match` has a `_` arm. A client that meets a code it doesn't know reads
-  `None` (`Code::of`).
+  `match` has a `_` arm. A client that meets a code it doesn't know keeps
+  it as `Code::Other(name)` (`Code::of`), as aio's `errorCode` does.
+- `aio::error_summary(&e)` is one line for a log or a CI gate (aio's
+  `errorSummary`): the code and the first sentence, at most 160
+  characters.
 - The words are not stable. Branch on `code()`, never on `why`.
 - A refusal crosses the wire as `why` and the wire name, so a synced copy,
   a `Link`, an aio client (`errorCode(err)`) and `ax call` all see the
@@ -191,8 +203,12 @@ assert!(heard.iter().any(|l| l.starts_with("degraded:errors-page-thumbs: disk fu
 - `aio::report::subscribe(f)`: as many as like, each held by the
   `Subscription` it returns (drop it to stop). Each sees a
   `Diagnostic`
-  (`at`, `kind`, `message`, `held`): the same kind is let through at most
-  once per 5 s (`QUIET_MS`), with how many were held back meanwhile.
+  (`at`, `kind`, `message`, `held`, `severity`, `tip`, `code()`; `cell`
+  and `call`, the call it happened in; `numbers`, the figures behind it,
+  as a budget's `took_ms` and `budget_ms`: aio's `DiagEvent` and
+  `onError` context): the same kind is let through at most once per 5 s
+  (`QUIET_MS`), with how many were held back meanwhile. A report carries
+  them all.
 - `aio::report::recent()`: the newest 200 diagnostics, oldest first
   (what a report carries).
 - `aio::report::timeline()`: the newest 100 calls, oldest first: when,
@@ -261,15 +277,40 @@ instruction:
 
 [Debugging: logs](README.md#3-logs) has `[log]` in full and `ax logs`.
 
+### A method that panics
+
+A method's panic refuses its call (`REDUCE_ERROR`) and leaves the state
+as it was. Its log line says the cell, the method and the panic; in a
+dev build (a debug build, `ax dev`'s or `ax test`'s) it also shows the state the call ran on (aio's error box),
+as saved, its tokens masked as in a problem report, at most 2000 characters:
+
+```text
+[aio] cart.add panicked: index out of bounds (1 within a minute)
+  the state it ran on: {"items":["milk"],"total":3}
+```
+
+A cell with `#[redact]` methods keeps its state to itself, as in a
+problem report. A release build says the panic alone.
+
 ### In the window
 
 A debug build's page shows its own errors where the person is looking:
 a small corner badge (`2 page errors`) that opens a list, one row per
 problem with a count (a per-frame failure is one row, `×2043`), at most
-20 rows. It hears uncaught errors, unhandled rejections and `ax dev`'s
-failed build (the badge clears once the build is fixed). It is plain DOM,
-so it still reports when the renderer is what broke. A release page has
-none of it; `ax build --web --dev` gives a web build that has it.
+20 rows. It hears uncaught errors, unhandled rejections, `ax dev`'s
+failed build (the badge clears once the build is fixed) and, in a `ax dev`
+window, the app's own problems and warnings from the diagnostic bus
+(`app: call:notes.add`, a degraded part, a vitals step up), each with its
+tip. It is plain DOM, so it still reports when the renderer is what
+broke. A release page has none of it; `ax build --web --dev` gives a web
+build that has it.
+
+The page's CSS is checked too: a second after the page loads, each `#id`
+its own stylesheets style that no element has is warned once in the log
+(`[aio-dev] your stylesheet styles #app, and no element has that id. The
+app is mounted in #main: …`): a height chain or a grid aimed at a root
+the app doesn't have styles nothing, in silence. A stylesheet of another
+origin is skipped.
 
 ## Forensics
 
@@ -288,21 +329,15 @@ none of it; `ax build --web --dev` gives a web build that has it.
 
 What aio has and aio-rs doesn't, with what to use instead:
 
-- **The error box with the state.** aio prints the cell's state with an
-  error. aio-rs keeps state out of log lines (a log is not a data
-  channel): a problem report carries the cells as saved.
-- **One `onError` hook with an error object** (`code`, `source`,
-  `context`, `original`, `stateSnapshot`). aio-rs has `on_problem(kind,
-  message)` and the bus, whose `Diagnostic` is the typed object
-  (`code()`, `severity`, `tip`; a report has the state); a call's caller
-  gets the `Rejected`. A call's lines carry `call=<id>` (aio's
-  correlation id: [logs](README.md#3-logs)).
-- **aio's many error codes** (`REDUCE_ERROR`, `EFFECT_ERROR`,
-  `QUEUE_OVERFLOW`, `DISPATCH_*`, `PERSIST_*`, `TX_CONFLICT`, the test
-  harness codes). In aio-rs a method's failure is its own `Rejected`, an
-  effect's is logged under its key, and the framework's few typed codes
-  are the three above plus the problem kinds; the test harnesses fail
-  with words, not codes.
+- **`onError`'s `original` and `stateSnapshot`.** The bus's
+  `Diagnostic` is the typed event (code, cell, call, numbers); the state
+  goes in a problem report, not in every event, and a panic's text and
+  place are in the message.
+- **aio's effect and hook codes** (`EFFECT_ERROR`, `EFFECT_TIMEOUT`,
+  `HOOK_ERROR`, `DESTROY_ERROR`, `MEMORY_*`, `BUDGET_*`, the test
+  harness codes): an async method's own `?` is its own `Rejected`, an
+  effect's failure, a budget or memory step is a problem kind on the bus
+  (`report::Code`), and the test harnesses fail with words.
 - **A source-mapped `client.log`.** aio-rs has no bundled JavaScript to
   map: the window's lines go into `app.log` as `[page]`, and Rust panics
   carry their file and line.

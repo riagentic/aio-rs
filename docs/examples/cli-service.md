@@ -433,7 +433,7 @@ ax logs queue --follow                    # the log as it is written
 ax stop queue
 ```
 
-`ax call` in a debug build reaches any method; a release build's local
+`ax call` in a dev build (`ax dev`) reaches any method; a release build's local
 door gets what a client gets, so `clear_finished` there needs a client
 method with a rule, or the operator's own tooling.
 

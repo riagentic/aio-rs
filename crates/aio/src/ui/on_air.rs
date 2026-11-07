@@ -6,12 +6,29 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use air::{
-    Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment, FragmentProps,
-    Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props, ReadGuard, Resource, Signal,
-    Suspense, SuspenseProps, Task, View, ViewError, WriteGuard, callback, component, context, effect, geometry,
-    in_views, is_empty, key_event, memo, on_cleanup, once, parent_context, provide, provide_now, provide_root,
-    resource, rsx, signal, spawn, spawn_forever, task, try_context, watch,
+    Attribute, Callback, Code, Component, Effect, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment,
+    FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props, ReadGuard, Resource,
+    Retry, Signal, Suspense, SuspenseProps, Task, View, ViewError, WriteGuard, callback, component, context, effect,
+    effect_quiet, geometry, in_views, is_empty, key_event, memo, on_cleanup, once, parent_context, provide,
+    provide_now, provide_root, resource, retry, rsx, signal, spawn, spawn_forever, task, try_context, untrack, watch,
 };
+
+/// Run `f(next, prev)` each time `read()`'s value changes, not at the
+/// start (a hook; aio's `watch(source, fn)` and `effect(on(..))`): only
+/// what `read` reads is followed, `f` runs untracked.
+#[track_caller]
+pub fn on_change<T: Clone + PartialEq + 'static>(
+    mut read: impl FnMut() -> T + 'static,
+    mut f: impl FnMut(&T, &T) + 'static,
+) {
+    let mut prev: Option<T> = None;
+    air::effect(move || {
+        let next = read();
+        if let Some(p) = prev.replace(next.clone()).filter(|p| *p != next) {
+            air::untrack(|| f(&next, &p));
+        }
+    });
+}
 
 /// In a view's body: `f()`'s value, the body running again when it changes
 /// (its hooks kept, its view made anew): for a view whose shape follows

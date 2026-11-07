@@ -29,6 +29,8 @@ pub enum Phase {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offer {
     pub version: String,
+    /// Why it is offered, in the words the user sees.
+    pub reason: String,
     pub notes: String,
     /// Bytes to download (0 once staged).
     pub size: u64,
@@ -38,6 +40,9 @@ pub struct Offer {
     /// Downloaded and checked already: it installs the next time the app
     /// starts, or now with `apply`.
     pub staged: bool,
+    /// It moves the data here to a newer version of a cell (a backup is
+    /// taken first): a UI may say so before the person installs it.
+    pub migrates: bool,
 }
 
 /// A newer release that can't read the data here, and why.
@@ -64,7 +69,20 @@ pub enum Found {
 pub enum Step {
     /// Percent of the download.
     Downloaded(u8),
+    /// Percent of the Electron runtime the new version needs, downloaded
+    /// after it (once per machine).
+    Runtime(u8),
     Installing,
+}
+
+/// Which download [`Updates::progress`] measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgressOf {
+    /// The release itself.
+    App,
+    /// The Electron runtime it needs: `progress` counts from 0 again.
+    Runtime,
 }
 
 /// How an install treats the data here.
@@ -147,6 +165,11 @@ pub fn install(rt: Arc<dyn Runtime>) {
     *RUNTIME.write().unwrap_or_else(|e| e.into_inner()) = Some(rt);
 }
 
+/// An update runtime is installed (the app's own, before `aio_shell` starts).
+pub fn installed() -> bool {
+    RUNTIME.read().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
 fn runtime() -> std::result::Result<Arc<dyn Runtime>, String> {
     RUNTIME.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| NOT_CONFIGURED.to_string())
 }
@@ -162,8 +185,13 @@ async fn blocking<R: Send + 'static>(
 }
 
 /// The app's updates. Only `dismissed` is saved: the rest is learned again
-/// each run.
-#[cell(persist, id = "updates")]
+/// each run. Served to the app's clients beside its own cells ([`share`]):
+/// they see it all but the paths on this machine (`backup`, `retired`, and
+/// any in `error` and `failed`), and
+/// call `check`, `dismiss` and `undismiss`; installing (`apply`,
+/// `apply_anyway`, `start_fresh`) and `set_channel` are an admin's
+/// (`role = "admin"`), as restarting the app is.
+#[cell(persist, shared, id = "updates", visible = seen)]
 pub struct Updates {
     /// A runtime is set up (`ready`).
     #[transient]
@@ -182,6 +210,9 @@ pub struct Updates {
     /// Percent of the download.
     #[transient]
     pub progress: u8,
+    /// Which download `progress` measures; `None` when none runs.
+    #[transient]
+    pub progress_of: Option<ProgressOf>,
     /// When the last check answered (ms).
     #[transient]
     pub checked_at: Option<i64>,
@@ -201,6 +232,49 @@ pub struct Updates {
     /// The channel the user chose (`set_channel`): followed from now on,
     /// unless a run says otherwise (`AIORT_UPDATE_CHANNEL`).
     pub pinned: Option<String>,
+}
+
+/// What a client is shown: never a path on the server's disk, nor one
+/// named in a failure's words.
+fn seen(u: &Updates, _: &By) -> Updates {
+    Updates {
+        backup: None,
+        retired: None,
+        error: u.error.as_deref().map(unpathed),
+        failed: u.failed.as_ref().map(|(v, why)| (v.clone(), unpathed(why))),
+        ..u.clone()
+    }
+}
+
+/// `why` with each word that names a path (or a `file:` URL) said as `…`,
+/// its closing punctuation kept (pure).
+fn unpathed(why: &str) -> String {
+    let word = |w: &str| {
+        let bare = w.trim_end_matches([':', ',', '.', ';', ')']);
+        match bare.contains(['/', '\\']) || bare.starts_with('~') {
+            true => format!("…{}", &w[bare.len()..]),
+            false => w.to_string(),
+        }
+    };
+    why.split(' ').map(word).collect::<Vec<_>>().join(" ")
+}
+
+static SHARED: RwLock<Option<Handle<Updates>>> = RwLock::new(None);
+
+/// Serve `h` to the app's clients beside its own cells, from the next server
+/// the app starts on (`aio_shell` shares the cell it opens).
+pub fn share(h: Handle<Updates>) {
+    *SHARED.write().unwrap_or_else(|e| e.into_inner()) = Some(h);
+}
+
+/// `http` serving the shared `updates` cell too, unless it serves one.
+#[cfg(feature = "server")]
+pub(crate) fn beside(http: crate::http::Http) -> crate::http::Http {
+    let h = SHARED.read().unwrap_or_else(|e| e.into_inner()).clone();
+    match h {
+        Some(h) if !http.serves_cell(<Updates as crate::CellData>::ID) => http.cell(h),
+        _ => http,
+    }
 }
 
 impl Updates {
@@ -236,6 +310,7 @@ impl Updates {
                     rt.apply(&version, data, &|s| {
                         _ = match s {
                             Step::Downloaded(p) => report.progress(p),
+                            Step::Runtime(p) => report.runtime_progress(p),
                             Step::Installing => report.installing(),
                         };
                     })
@@ -266,6 +341,7 @@ impl Updates {
 
     /// Look for a release now. A check already running is joined, never
     /// run twice.
+    #[client(predict = false)]
     pub fn check(&mut self, cx: &Cx) -> Result {
         ensure!(self.on, "{NOT_CONFIGURED}");
         ensure!(!self.busy(), "an update is being installed ({:?}): no check until it is done", self.phase);
@@ -319,18 +395,21 @@ impl Updates {
 
     /// Install the offered release now: the app stops, and the new version
     /// starts with the same arguments.
+    #[client(role = "admin", predict = false)]
     pub fn apply(&mut self, cx: &Cx) -> Result {
         self.install(cx, Data::Gated)
     }
 
     /// Install the release the data gate blocks anyway: the data is backed
     /// up, and the new version tries to read it (the backup is the way back).
+    #[client(role = "admin", predict = false)]
     pub fn apply_anyway(&mut self, cx: &Cx) -> Result {
         self.install(cx, Data::AcceptLoss)
     }
 
     /// Install the release (blocked or not) on fresh data: what is here now
     /// is moved aside whole, never deleted, and comes back if it fails.
+    #[client(role = "admin", predict = false)]
     pub fn start_fresh(&mut self, cx: &Cx) -> Result {
         self.install(cx, Data::Retire)
     }
@@ -338,18 +417,26 @@ impl Updates {
     /// The download's progress, in percent.
     pub fn progress(&mut self, percent: u8) {
         if self.phase == Phase::Downloading {
-            self.progress = percent.min(100);
+            (self.progress, self.progress_of) = (percent.min(100), Some(ProgressOf::App));
+        }
+    }
+
+    /// The runtime's download progress, in percent.
+    pub fn runtime_progress(&mut self, percent: u8) {
+        if self.phase == Phase::Downloading {
+            (self.progress, self.progress_of) = (percent.min(100), Some(ProgressOf::Runtime));
         }
     }
 
     pub fn installing(&mut self) {
         if self.busy() {
-            (self.phase, self.progress) = (Phase::Installing, 100);
+            (self.phase, self.progress, self.progress_of) = (Phase::Installing, 100, None);
         }
     }
 
     /// An install's end: the app restarts, or why it can't.
     pub fn applied(&mut self, r: std::result::Result<(), String>) {
+        self.progress_of = None;
         match r {
             Ok(()) => (self.phase, self.progress) = (Phase::Restarting, 100),
             Err(e) => {
@@ -362,6 +449,7 @@ impl Updates {
     }
 
     /// Not this release (available or blocked): a newer one is still offered.
+    #[client]
     pub fn dismiss(&mut self) {
         let Some(v) = self.available.as_ref().map(|o| &o.version).or(self.blocked.as_ref().map(|b| &b.version)) else {
             return;
@@ -372,6 +460,7 @@ impl Updates {
     }
 
     /// Offer the dismissed release again (at the next check).
+    #[client]
     pub fn undismiss(&mut self) {
         (self.dismissed, self.error) = (None, None);
     }
@@ -379,6 +468,7 @@ impl Updates {
     /// Follow `channel` from now on (the next check asks it). What the old
     /// channel offered or was told no goes: crossing channels may even move
     /// the version back, and a no on one says nothing about another.
+    #[client(role = "admin", predict = false)]
     pub fn set_channel(&mut self, channel: String) -> Result {
         if let Some(why) = crate::update::channel_refused(&channel) {
             reject!("{why}");
@@ -422,6 +512,7 @@ mod tests {
             for p in [30, 70, 100] {
                 step(Step::Downloaded(p));
             }
+            step(Step::Runtime(40));
             step(Step::Installing);
             self.fail.clone().map_or(Ok(()), Err)
         }
@@ -462,6 +553,21 @@ mod tests {
     async fn check(h: &Handle<Updates>) {
         h.check().unwrap();
         h.done("check").await;
+    }
+
+    #[test]
+    fn a_client_never_sees_a_server_path_in_a_failure() {
+        let why = "the update needs about 30 MB free in /srv/app/install/versions: free some space";
+        let u = Updates {
+            error: Some(why.into()),
+            failed: Some(("1.1.0".into(), r"can't read C:\Users\me\up.json (file:///srv/up.json), ~/x".into())),
+            backup: Some("/data/b.db".into()),
+            ..Updates::default()
+        };
+        let s = seen(&u, &By::User("eve".into()));
+        assert_eq!(s.error.as_deref(), Some("the update needs about 30 MB free in …: free some space"));
+        assert_eq!(s.failed, Some(("1.1.0".into(), "can't read … …), …".into())));
+        assert_eq!((s.backup, unpathed("offline")), (None, "offline".into()));
     }
 
     #[test]
@@ -528,7 +634,9 @@ mod tests {
         assert_eq!(*rt.applies.lock().unwrap(), [("1.1.0".into(), Data::Gated)]);
         // The steps are events: replay has every one.
         let methods: Vec<String> = h.store(|s| s.events().unwrap()).into_iter().map(|e| e.method).collect();
-        assert!(methods.ends_with(&["progress", "progress", "progress", "installing", "applied"].map(String::from)));
+        let steps = ["progress", "progress", "progress", "runtime_progress", "installing", "applied"];
+        assert!(methods.ends_with(&steps.map(String::from)), "{methods:?}");
+        assert_eq!(h.state().progress_of, None, "no download runs now");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -564,6 +672,20 @@ mod tests {
         check(&h).await;
         let s = h.state();
         assert_eq!((s.phase, s.error.as_deref()), (Phase::Available, Some("no space left")));
+    }
+
+    #[test]
+    fn progress_says_which_download_it_measures() {
+        let mut u = Updates::default();
+        u.progress(50);
+        assert_eq!(u.progress_of, None, "no install runs: nothing to measure");
+        u.phase = Phase::Downloading;
+        u.progress(100);
+        assert_eq!((u.progress, u.progress_of), (100, Some(ProgressOf::App)));
+        u.runtime_progress(10);
+        assert_eq!((u.progress, u.progress_of), (10, Some(ProgressOf::Runtime)));
+        u.installing();
+        assert_eq!((u.progress, u.progress_of), (100, None));
     }
 
     #[test]
@@ -654,5 +776,17 @@ mod tests {
         }
         let s = Handle::<Updates>::open(&f).unwrap().state();
         assert_eq!((s.dismissed.as_deref(), s.on, s.checked_at), (Some("1.1.0"), false, None));
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn a_shared_cell_is_served_beside_the_apps_once() {
+        assert!(!beside(crate::http::Http::default()).serves_cell("updates"), "none shared: none served");
+        let h = Handle::<Updates>::memory();
+        share(h.clone());
+        assert!(beside(crate::http::Http::default()).serves_cell("updates"));
+        // An app serving its own is left as it is (twice would panic).
+        assert!(beside(crate::http::Http::default().cell(h)).serves_cell("updates"));
+        *SHARED.write().unwrap() = None;
     }
 }

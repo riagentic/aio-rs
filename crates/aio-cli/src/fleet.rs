@@ -64,12 +64,23 @@ impl Kind {
 #[derive(Debug, PartialEq)]
 pub struct Planned {
     pub label: String,
+    /// Its own `platforms` (`[build] targets`), over `[build] platforms`.
+    pub platforms: Vec<String>,
+    /// Its own title and ui, stamped into its build.
+    pub look: Look,
     pub kind: Kind,
     /// The workspace binary it builds.
     pub bin: String,
     /// The OS and CPU it is for; None: its kind's (this machine's, the
     /// Windows kind's x64).
     pub platform: Option<&'static Platform>,
+}
+
+/// A target's own title and ui (`[build] targets`), over `[app]`'s.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    pub title: Option<String>,
+    pub ui: Option<aio::config::Shown>,
 }
 
 impl Planned {
@@ -89,7 +100,8 @@ pub fn plan(app: &str, declared: &[Target], select: Option<&str>, fallback: Kind
         None => declared.iter().map(|t| t.name.as_str()).collect(),
     };
     if labels.is_empty() {
-        return Ok(vec![Planned { label: fallback.name().into(), kind: fallback, bin: app.into(), platform: None }]);
+        let (label, kind, bin) = (fallback.name().into(), fallback, app.into());
+        return Ok(vec![Planned { label, kind, bin, platform: None, platforms: vec![], look: Look::default() }]);
     }
     if let Some(dup) = labels.iter().enumerate().find_map(|(i, l)| labels[..i].contains(l).then_some(l)) {
         return Err(format!("target `{dup}` is named twice"));
@@ -106,7 +118,9 @@ pub fn plan(app: &str, declared: &[Target], select: Option<&str>, fallback: Kind
                 None => format!("no target `{label}`: not in [build] targets, nor a kind ({})", kinds()),
             })?;
             let bin = t.and_then(|t| t.bin.clone()).unwrap_or_else(|| app.into());
-            Ok(Planned { label: label.into(), kind, bin, platform: None })
+            let platforms = t.map_or(vec![], |t| t.platforms.clone());
+            let look = t.map_or_else(Look::default, |t| Look { title: t.title.clone(), ui: t.ui });
+            Ok(Planned { label: label.into(), kind, bin, platform: None, platforms, look })
         })
         .collect()
 }
@@ -133,7 +147,14 @@ pub fn across(plan: Vec<Planned>, platforms: &[&'static Platform]) -> Vec<Planne
                 return vec![t];
             }
             on.into_iter()
-                .map(|p| Planned { platform: Some(p), label: t.label.clone(), bin: t.bin.clone(), ..t })
+                .map(|p| Planned {
+                    platform: Some(p),
+                    label: t.label.clone(),
+                    bin: t.bin.clone(),
+                    platforms: t.platforms.clone(),
+                    look: t.look.clone(),
+                    ..t
+                })
                 .collect()
         })
         .collect()
@@ -194,7 +215,7 @@ mod tests {
     }
 
     fn t(name: &str, kind: Option<&str>, bin: Option<&str>) -> Target {
-        Target { name: name.into(), kind: kind.map(Into::into), bin: bin.map(Into::into) }
+        Target { name: name.into(), kind: kind.map(Into::into), bin: bin.map(Into::into), ..Default::default() }
     }
 
     fn short(p: &[Planned]) -> Vec<(&str, Kind, &str)> {
@@ -237,11 +258,30 @@ mod tests {
         );
         assert!(plan("notes", &[], Some("rpm")).unwrap_err().contains("no target `rpm`"));
         assert!(plan("notes", &[], Some("deb,deb")).unwrap_err().contains("named twice"));
+        // A labelled target's own platforms, title and ui go with it.
+        let kiosk = Target {
+            platforms: vec!["linux-arm64".into()],
+            title: Some("Notes Kiosk".into()),
+            ui: Some(aio::config::Shown::Browser),
+            ..t("kiosk", Some("desktop"), None)
+        };
+        let p = plan("notes", &[kiosk], None).unwrap();
+        assert_eq!(p[0].platforms, ["linux-arm64"]);
+        assert_eq!(p[0].look, Look { title: Some("Notes Kiosk".into()), ui: Some(aio::config::Shown::Browser) });
+        let at = crate::platform::resolve(&["linux-arm64"], &crate::platform::ALL[0]).unwrap();
+        assert_eq!(across(p, &at)[0].look.title.as_deref(), Some("Notes Kiosk"), "kept per platform");
     }
 
     #[test]
     fn two_editions_clash_only_where_they_would_collide() {
-        let p = |label: &str, kind| Planned { label: label.into(), kind, bin: label.into(), platform: None };
+        let p = |label: &str, kind| Planned {
+            label: label.into(),
+            kind,
+            bin: label.into(),
+            platform: None,
+            platforms: vec![],
+            look: Look::default(),
+        };
         let (free, pro, apk) = (p("desktop", Kind::Desktop), p("pro", Kind::Desktop), p("android", Kind::Android));
         // Two apps, one shown name: a warning that names the fix.
         let w = clashes(&[(&free, ("notes", "Notes")), (&pro, ("notes-pro", "Notes"))]).unwrap();

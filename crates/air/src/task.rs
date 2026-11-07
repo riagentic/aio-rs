@@ -240,6 +240,7 @@ pub struct Resource<T> {
     value: Signal<Option<T>>,
     pending: Signal<bool>,
     again: Signal<u64>,
+    off: Signal<bool>,
 }
 
 impl<T> Clone for Resource<T> {
@@ -278,6 +279,21 @@ impl<T: 'static> Resource<T> {
         self.again.update(|n| *n += 1)
     }
 
+    /// Show `v` now, as if loaded (aio's `mutate`: an optimistic value);
+    /// the next load replaces it.
+    pub fn mutate(&self, v: T) {
+        crate::reactive::batch(|| {
+            self.value.update(|s| *s = Some(v));
+            self.pending.set_quiet(false);
+        })
+    }
+
+    /// Load no more (aio's `dispose`): a load under way is dropped, the
+    /// value stays as it is.
+    pub fn dispose(&self) {
+        self.off.set(true);
+    }
+
     /// The value, or the view stops here until it is loaded (its nearest
     /// `Suspense` shows its fallback, then the view's body runs again):
     /// `let v = res.suspend()?;`.
@@ -296,15 +312,18 @@ impl<T: 'static> Resource<T> {
 pub(crate) fn resource_now<T: 'static, F: Future<Output = T> + 'static>(
     mut f: impl FnMut() -> F + 'static,
 ) -> Resource<T> {
-    let (value, pending, again) = (Signal::new(None), Signal::new(true), Signal::new(0u64));
+    let (value, pending, again, off) = (Signal::new(None), Signal::new(true), Signal::new(0u64), Signal::new(false));
     effect_of(Kind::Effect, move || {
+        if off.get() {
+            return pending.set_quiet(false);
+        }
         again.track();
         let fut = f();
         pending.set_quiet(true);
         let load = async move {
             let v = fut.await;
             crate::reactive::batch(|| {
-                if value.alive() {
+                if value.alive() && !off.get_untracked() {
                     value.update(|s| *s = Some(v));
                     pending.set_quiet(false);
                 }
@@ -315,7 +334,7 @@ pub(crate) fn resource_now<T: 'static, F: Future<Output = T> + 'static>(
         let shared = EXEC.with_borrow(|x| x.shared.clone());
         poll(t.idx, t.ver, &shared, true);
     });
-    Resource { value, pending, again }
+    Resource { value, pending, again, off }
 }
 
 /// A value loaded by `f()`'s future (a hook).

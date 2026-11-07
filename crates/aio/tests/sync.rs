@@ -733,6 +733,7 @@ async fn copies_of_another_cell_version_are_refused() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tls_pins_the_paired_root() {
+    const KEY: &str = "a strong key of 128 random-looking bits 7Qx";
     use aio::sync::Link;
     let roots = tempfile::tempdir().unwrap();
     let tls = aio::tls::server(&roots.path().join("a"), "board").unwrap();
@@ -744,12 +745,7 @@ async fn tls_pins_the_paired_root() {
     tokio::spawn(aio::sync::serve_with(
         h.clone(),
         l,
-        aio::sync::Options {
-            token: "secret".into(),
-            pairing: Some(pairing.clone()),
-            tls: Some(tls),
-            ..Default::default()
-        },
+        aio::sync::Options { token: KEY.into(), pairing: Some(pairing.clone()), tls: Some(tls), ..Default::default() },
     ));
     // Pairing over TLS hands out the root to pin.
     let pin = pairing.new_pin();
@@ -757,27 +753,41 @@ async fn tls_pins_the_paired_root() {
     assert_eq!((profile["tls"].clone(), profile["cert"].clone()), (true.into(), root.clone().into()));
     // An aio client whose pin misses asks for proof of the key on the cert it sees.
     let nonce = "0f".repeat(16);
-    let tag = aio::pairing::pin_proof_tag("secret", &nonce);
+    let tag = aio::pairing::pin_proof_tag(KEY, &nonce);
     let (v, leaf) =
         tls_post(&addr, &root, "/__aio/pin-proof", &format!(r#"{{"nonce":"{nonce}","tag":"{tag}"}}"#)).await;
     let cert = aio::pairing::served_cert(&leaf, &root);
     assert_eq!(
         (v["cert"].as_str(), v["proof"].as_str()),
-        (Some(cert.as_str()), Some(&*aio::pairing::pin_proof_for("secret", &nonce, &cert)))
+        (Some(cert.as_str()), Some(&*aio::pairing::pin_proof_for(KEY, &nonce, &cert)))
     );
     let wrong = aio::pairing::pin_proof_tag("guess", &nonce);
     let (v, _) = tls_post(&addr, &root, "/__aio/pin-proof", &format!(r#"{{"nonce":"{nonce}","tag":"{wrong}"}}"#)).await;
     assert!(v["proof"].is_null() && v["error"].as_str().is_some_and(|e| e.contains("not this app's key")), "{v}");
     // The pinned root works; copies follow as over plain sockets.
-    let link = Link { addr: addr.clone(), token: "secret".into(), root: Some(root) };
+    let link = Link { addr: addr.clone(), token: KEY.into(), root: Some(root) };
     let a = Remote::<Board>::connect_to(link.clone(), "ana").await.unwrap();
     a.add("over tls".into()).unwrap();
     until("confirmed", || a.pending() == 0).await;
     assert_eq!(*a.state(), *h.state());
     // Another machine's root, or no TLS, can't connect.
     let other = aio::tls::server(&roots.path().join("b"), "board").unwrap().root_pem;
-    assert!(Remote::<Board>::connect_to(Link { root: Some(other), ..link }, "eve").await.is_err());
-    assert!(Remote::<Board>::connect(&addr, "secret", "eve").await.is_err());
+    let moved = Link { root: Some(other), ..link.clone() };
+    assert!(Remote::<Board>::connect_to(moved.clone(), "eve").await.is_err());
+    assert!(Remote::<Board>::connect(&addr, KEY, "eve").await.is_err());
+    // A pin the server no longer meets is seen as such (offline is not);
+    // the server re-pins only by proving it holds the key (aio's pin-proof).
+    assert!(aio::pairing::pin_holds(&link).await.unwrap());
+    assert!(!aio::pairing::pin_holds(&moved).await.unwrap());
+    let gone = Link { addr: "127.0.0.1:9".into(), ..moved.clone() };
+    assert!(aio::pairing::pin_holds(&gone).await.unwrap(), "no answer is no changed certificate");
+    assert_eq!(aio::pairing::reprove(&addr, KEY).await.unwrap(), link.root.clone().unwrap());
+    let e = aio::pairing::reprove(&addr, "guess").await.unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+    // A weak key is never proved to a server the pin no longer covers: its
+    // tag would let whoever answers there guess the key offline.
+    let e = aio::pairing::reprove(&addr, "secret").await.unwrap_err();
+    assert!(e.kind() == std::io::ErrorKind::PermissionDenied && e.to_string().contains("weak"), "{e}");
 }
 
 /// One JSON POST over TLS pinned to `root`: the answer, and the leaf the server showed.
@@ -959,7 +969,7 @@ async fn a_saved_copy_starts_offline_and_sends_its_queue_later() {
     let a = Remote::<Board>::connect_saved(link.clone(), "ana", &file).await.unwrap();
     a.add("online".into()).unwrap();
     until("confirmed", || a.pending() == 0).await;
-    until("saved", || saved(&file).contains("online") && !saved(&file).contains("\"method\"")).await;
+    until_long("saved", || saved(&file).contains("online") && !saved(&file).contains("\"method\"")).await;
     drop(a);
     // The server can't be reached: the app still starts, from the saved copy.
     r.paused.store(true, Ordering::SeqCst);
@@ -970,7 +980,7 @@ async fn a_saved_copy_starts_offline_and_sends_its_queue_later() {
     assert!(!b.online());
     assert_eq!(b.state().notes.len(), 1);
     let id = b.add("offline".into()).unwrap();
-    until("queued on disk", || saved(&file).contains("\"method\":\"add\"")).await;
+    until_long("queued on disk", || saved(&file).contains("\"method\":\"add\"")).await;
     drop(b);
     // Restarted, still offline: the queued call is still there.
     let c = Remote::<Board>::connect_saved(link, "ana", &file).await.unwrap();
@@ -982,6 +992,310 @@ async fn a_saved_copy_starts_offline_and_sends_its_queue_later() {
     until("sent", || c.pending() == 0).await;
     assert_eq!(h.state().notes[&id], "offline");
     assert_eq!(*c.state(), *h.state());
+}
+
+/// aio's `sync-orphan-queue`: calls queued on another version of the cell
+/// are kept aside and said, never dropped silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queue_this_build_cant_send_is_kept_aside_and_said() {
+    use std::sync::atomic::Ordering;
+    let (_h, addr) = server().await;
+    let r = relay(addr).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let link = aio::sync::Link { addr: r.addr.clone(), token: "secret".into(), root: None };
+    let saved = |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default();
+    let a = Remote::<Board>::connect_saved(link.clone(), "ana", &file).await.unwrap();
+    until_long("saved", || !saved(&file).is_empty()).await;
+    r.paused.store(true, Ordering::SeqCst);
+    for t in r.live.lock().unwrap().drain(..) {
+        t.abort();
+    }
+    until("offline", || !a.online()).await;
+    a.add("made on the old build".into()).unwrap();
+    until_long("queued on disk", || saved(&file).contains("\"method\":\"add\"")).await;
+    drop(a);
+    // The next build's cell is another version.
+    let text = saved(&file);
+    let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    doc["v"] = serde_json::json!(999);
+    std::fs::write(&file, doc.to_string()).unwrap();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    let _bus = aio::report::subscribe(move |d| {
+        if d.kind == "sync:orphan-queue" {
+            into.lock().unwrap().push(d.message.clone());
+        }
+    });
+    r.paused.store(false, Ordering::SeqCst);
+    let b = Remote::<Board>::connect_saved(link.clone(), "ana", &file).await.unwrap();
+    assert_eq!(b.pending(), 0);
+    let kept = asides(dir.path(), "copy.orphan-board-v999-");
+    assert_eq!(kept.len(), 1);
+    assert!(saved(&kept[0]).contains("made on the old build"), "kept, not dropped");
+    let said = heard.lock().unwrap().clone();
+    assert!(said.iter().any(|m| m.contains("1 calls made offline on board version 999")), "{said:?}");
+    // Orphaned again (a downgrade, then the same upgrade): the first set stays.
+    drop(b);
+    // b's link may still be closing: a copy opened and dropped here takes
+    // the file over, its save on disk when the drop ends, and nothing of
+    // b's lands later over the file made here.
+    drop(Remote::<Board>::connect_later(None, "ana", &file).await.unwrap());
+    let mut doc: serde_json::Value = serde_json::from_str(&saved(&kept[0])).unwrap();
+    doc["pending"][0]["args"] = serde_json::json!(["made a second time"]);
+    std::fs::write(&file, doc.to_string()).unwrap();
+    let _c = Remote::<Board>::connect_saved(link, "ana", &file).await.unwrap();
+    let kept: Vec<String> = asides(dir.path(), "copy.orphan-board-v999-").iter().map(|f| saved(f)).collect();
+    assert_eq!(kept.len(), 2, "never one over another");
+    assert!(
+        kept.iter().any(|t| t.contains("made on the old build"))
+            && kept.iter().any(|t| t.contains("made a second time"))
+    );
+}
+
+/// The files in `dir` whose name starts with `prefix`, sorted.
+fn asides(dir: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
+    let mut all: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
+        .collect();
+    all.sort();
+    all
+}
+
+/// The child of the tests below: opens the saved copy in
+/// `AIO_TEST_SAVE_FILE` offline, makes one call, and ends at once, as
+/// `AIO_TEST_SAVE_END` says: `exit` (`std::process::exit`), `return`
+/// (from `main`, the copy never dropped), `shutdown` or `term` (on
+/// SIGTERM, as an app's shell stops). Past `aio::shutdown` it is killed:
+/// nothing else may save it.
+#[test]
+fn saved_copy_child() {
+    let (Some(file), Ok(end)) = (std::env::var_os("AIO_TEST_SAVE_FILE"), std::env::var("AIO_TEST_SAVE_END")) else {
+        return;
+    };
+    let rt = aio::rt();
+    let stop = {
+        let _in = rt.enter();
+        aio::lifecycle::stop_asked().unwrap()
+    };
+    let (r, _) = rt.block_on(Remote::<Board>::connect_later(None, "ana", std::path::Path::new(&file))).unwrap();
+    r.add("made offline".into()).unwrap();
+    match end.as_str() {
+        "exit" => std::process::exit(0),
+        "return" => return std::mem::forget(r),
+        _ => {}
+    }
+    if end == "term" {
+        println!("ready");
+        rt.block_on(stop);
+    }
+    assert!(aio::shutdown(Duration::from_secs(5)).is_empty());
+    let me = std::process::id().to_string();
+    let kill = if cfg!(windows) { ["taskkill", "/F", "/PID"] } else { ["kill", "-KILL", "--"] };
+    _ = std::process::Command::new(kill[0]).args([kill[1], kill[2], me.as_str()]).status();
+    unreachable!("killed");
+}
+
+/// A call made offline, then the process ends at once as `end` says: the
+/// copy opened again has it waiting.
+async fn an_offline_call_survives(end: &str) {
+    use std::io::BufRead;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "saved_copy_child", "--nocapture", "--test-threads=1"])
+        .env("AIO_TEST_SAVE_FILE", &file)
+        .env("AIO_TEST_SAVE_END", end)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    if end == "term" {
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("ready") {
+            line.clear();
+            assert!(out.read_line(&mut line).unwrap() > 0, "the child ended early");
+        }
+        let pid = child.id().to_string();
+        assert!(std::process::Command::new("kill").args(["-TERM", pid.as_str()]).status().unwrap().success());
+    }
+    child.wait().unwrap();
+    let (c, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    assert_eq!(c.pending(), 1, "{end}: the call made offline is kept");
+    assert!(c.state().notes.values().any(|n| n == "made offline"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_call_survives_an_exit_right_after() {
+    an_offline_call_survives("exit").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_call_survives_a_return_from_main_right_after() {
+    an_offline_call_survives("return").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_call_survives_a_shutdown_right_after() {
+    an_offline_call_survives("shutdown").await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_call_survives_a_sigterm_right_after() {
+    an_offline_call_survives("term").await;
+}
+
+/// A copy dropped and its file opened again at once: the new copy starts
+/// from the dropped one's last save. One still open (its link closing)
+/// never saves over the copy opened after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_opened_again_at_once_starts_from_the_newest_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let calls =
+        |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default().matches("\"method\":\"add\"").count();
+    for n in 0..20 {
+        let (a, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+        assert_eq!(a.pending(), n, "every call made before is there");
+        a.add(format!("call {n}")).unwrap();
+        drop(a);
+        assert_eq!(calls(&file), n + 1, "on disk once dropped");
+    }
+    let (old, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    let (new, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    new.add("from the new copy".into()).unwrap();
+    old.add("late, from the old copy".into()).unwrap();
+    drop((old, new));
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("from the new copy") && calls(&file) == 21, "{text}");
+}
+
+/// Each sign-out's "kept as <path>" reaches the bus: it holds back repeats
+/// of a kind, never a message that says where kept work is.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_queue_kept_aside_at_a_sign_out_is_said_on_the_bus() {
+    let (_h, addr) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    let _bus = aio::report::subscribe(move |d| {
+        if d.kind == "sync:signed-out-queue" {
+            into.lock().unwrap().push(d.message.clone());
+        }
+    });
+    for name in ["one.json", "two.json"] {
+        let (a, _) = Remote::<Board>::connect_later(None, "ana", &dir.path().join(name)).await.unwrap();
+        a.add("made offline".into()).unwrap();
+        a.relink(aio::sync::Link { addr: addr.clone(), token: "revoked".into(), root: None });
+        until("signed out", || a.signed_out() && a.pending() == 0).await;
+    }
+    // Said right after the calls are taken off.
+    let at = dir.path().display().to_string();
+    let ours = || heard.lock().unwrap().iter().filter(|m| m.contains(&at)).count();
+    until("both said", || ours() >= 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(ours(), 2, "each once");
+}
+
+/// A refusal that isn't about the credential (another cell's server, picked
+/// on the connect page) is no sign-out: the calls made offline stay, and
+/// reach the right server once the copy is pointed at it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_that_isnt_the_key_keeps_the_calls_made_offline() {
+    let (h, addr) = server().await;
+    // Another app's server: it has another cell.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            let mut w = tokio_tungstenite::accept_async(s).await.unwrap();
+            next_text(&mut w).await;
+            let no = serde_json::json!({ "t": "refused", "why": "this server has cell todos" });
+            _ = w.send(Message::text(no.to_string())).await;
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let (a, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    let id = a.add("made offline".into()).unwrap();
+    let refused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let r2 = refused.clone();
+    a.on_unreached(move |_| r2.store(true, std::sync::atomic::Ordering::SeqCst));
+    a.relink(aio::sync::Link { addr: other, token: "secret".into(), root: None });
+    until("refused", || refused.load(std::sync::atomic::Ordering::SeqCst)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!a.signed_out());
+    assert_eq!(a.pending(), 1, "the call made offline is kept");
+    until_long("still on disk", || std::fs::read_to_string(&file).unwrap_or_default().contains("made offline")).await;
+    a.relink(aio::sync::Link { addr, token: "secret".into(), root: None });
+    until("sent to the right server", || h.state().notes.contains_key(&id)).await;
+}
+
+/// A refused key (401) signs a saved copy out: the calls made offline are
+/// not sent, and not lost either: kept beside the copy, and said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_key_keeps_the_calls_made_offline_aside() {
+    let (h, addr) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    // The hook, not the bus: the bus says a kind once per `QUIET_MS`, and
+    // other tests here sign out too. No other test here sets it.
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    aio::report::on_problem(move |kind, message| {
+        if kind == "sync:signed-out-queue" {
+            into.lock().unwrap().push(message.to_string());
+        }
+    });
+    let said = || heard.lock().unwrap().iter().any(|m| m.contains("1 calls made offline were not sent; kept as"));
+    let (a, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    a.add("made offline".into()).unwrap();
+    a.relink(aio::sync::Link { addr, token: "revoked".into(), root: None });
+    // Not sent as someone the person no longer is.
+    until("signed out, the call taken off and said", || a.signed_out() && a.pending() == 0 && said()).await;
+    let kept = asides(dir.path(), "copy.signed-out-");
+    assert_eq!(kept.len(), 1);
+    assert!(std::fs::read_to_string(&kept[0]).unwrap().contains("made offline"), "kept, not dropped");
+    assert!(h.state().notes.is_empty());
+}
+
+/// aio's token function and its dead credential: asked before each
+/// reconnect; a refused one signs the copy out (its waiting calls refused,
+/// new ones too) until a good one links it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_function_is_asked_at_each_reconnect_and_a_dead_one_signs_out() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (h, addr) = server().await;
+    let r = relay(addr).await;
+    let a = Remote::<Board>::connect(&r.addr, "secret", "ana").await.unwrap();
+    let (good, asked) = (std::sync::Arc::new(AtomicBool::new(false)), std::sync::Arc::new(AtomicUsize::new(0)));
+    let (g, n) = (good.clone(), asked.clone());
+    a.token_with(move || {
+        n.fetch_add(1, Ordering::SeqCst);
+        if g.load(Ordering::SeqCst) { "secret".into() } else { "expired".into() }
+    });
+    // The link drops while a call waits: the reconnect shows the dead token.
+    r.paused.store(true, Ordering::SeqCst);
+    for t in r.live.lock().unwrap().drain(..) {
+        t.abort();
+    }
+    until("offline", || !a.online()).await;
+    let waiting = a.add("queued".into()).unwrap();
+    r.paused.store(false, Ordering::SeqCst);
+    // Signed out first, then the waiting call refused, not kept.
+    until("signed out, the waiting call refused", || a.signed_out() && a.pending() == 0).await;
+    assert!(asked.load(Ordering::SeqCst) >= 1, "asked before the reconnect");
+    assert!(!a.state().notes.contains_key(&waiting), "and taken off the copy");
+    assert_eq!(a.add("now".into()).unwrap_err().code(), Some(Code::AccessDenied));
+    // A good token again: linked, and calls go through.
+    good.store(true, Ordering::SeqCst);
+    until("linked again", || a.online() && !a.signed_out()).await;
+    let id = a.add("after".into()).unwrap();
+    until("sent", || h.state().notes.contains_key(&id)).await;
+    assert!(!h.state().notes.contains_key(&waiting));
 }
 
 /// A relay whose live connections can be frozen: open, but nothing passes
@@ -1205,6 +1519,9 @@ async fn rebinding_cross_site_and_form_requests_are_refused() {
     // The same app's own page, and a native client (no Origin), get in.
     assert_eq!(raw(&addr, &format!("{ws}Host: {addr}\r\nOrigin: http://{addr}\r\n")).await.0, 101);
     assert_eq!(raw(&addr, &format!("{ws}Host: {addr}\r\n")).await.0, 101);
+    // This machine's own name, as a LAN browser types it (aio's).
+    let me = aio::gate::machine_name().expect("this machine has a name");
+    assert_eq!(raw(&addr, &format!("{ws}Host: {}:{}\r\n", me.to_uppercase(), &addr[10..])).await.0, 101);
     // A cross-site form posts text/plain: refused before any route.
     let form = format!(
         "POST /__aio/pair HTTP/1.1\r\nHost: {addr}\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n{{}}"
@@ -1395,6 +1712,8 @@ async fn what_a_copys_bus_hears_reaches_its_servers_bus() {
     drop(r);
 }
 
+/// [`until`] for what a loaded machine holds up for seconds: a relayed
+/// report, a saved copy on disk (each save waits for two fsyncs).
 async fn until_long(what: &str, f: impl Fn() -> bool) {
     for _ in 0..1000 {
         if f() {
@@ -1883,6 +2202,9 @@ async fn a_server_change_over_a_waiting_call_is_said_and_a_merged_field_shows_bo
         "once, for the other's change"
     );
     assert_eq!(r.state().title, "mine");
+    let typo = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.merge("nn", Merge::Counter)));
+    let why = typo.unwrap_err().downcast::<String>().unwrap();
+    assert!(why.contains("merge(\"nn\"): no such field (it has ") && why.contains("title"), "{why}");
     r.merge("n", Merge::Counter);
     r.set_n(5).unwrap();
     until("both changes shown", || r.state().n == 7).await;
@@ -1905,4 +2227,135 @@ async fn a_copys_own_calls_never_conflict_with_themselves() {
     until("all confirmed", || a.pending() == 0 && a.state().notes.len() == 20).await;
     assert_eq!(*a.state(), *h.state());
     assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// aio's `peer().stream()` and `emitChunk`: an async method sends its
+/// caller pieces while it works, all before its end; other callers get none.
+mod streamed {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[cell(shared)]
+    pub struct Chat {
+        pub said: Vec<String>,
+        /// What each `cx.part` answered, in order.
+        pub sent: Vec<bool>,
+    }
+
+    async fn model(prompt: String) -> String {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        format!("re: {prompt}")
+    }
+
+    #[methods]
+    impl Chat {
+        #[client]
+        pub async fn chat(&mut self, cx: &Cx, prompt: String) -> Result<String> {
+            let first: bool = cx.part("thinking")?;
+            let reply: String = model(prompt).await;
+            let second = cx.part(&reply)?;
+            self.sent.extend([first, second]);
+            ensure!(cx.part("x".repeat(2 << 20)).is_err(), "a piece over 1 MiB is refused");
+            self.said.push(reply.clone());
+            Ok(reply)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_async_method_streams_pieces_to_the_caller_that_asked() {
+        let h = Handle::<Chat>::memory();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(serve(h.clone(), l, "secret".into()));
+        let r = Remote::<Chat>::connect(&addr, "secret", "ann").await.unwrap();
+        let got = Arc::new(Mutex::new(Vec::<String>::new()));
+        let g = got.clone();
+        let end = r.stream("chat", serde_json::json!(["hi"]), move |p: String| g.lock().unwrap().push(p)).unwrap();
+        let said = end.await.unwrap();
+        assert_eq!(said, "re: hi");
+        assert_eq!(*got.lock().unwrap(), ["thinking", "re: hi"], "every piece, in order, before the end");
+        assert_eq!(h.state().sent, [true, true]);
+        // A plain call, and the app's own: no pieces, and `part` says so.
+        r.chat("again".into()).unwrap().await.unwrap();
+        h.chat("local".into()).unwrap().await.unwrap();
+        assert_eq!(h.state().sent, [true, true, false, false, false, false]);
+        assert!(r.stream("nope", serde_json::json!([]), |_: String| {}).is_err());
+    }
+
+    /// A streamed call that never runs (dropped from a full queue, or
+    /// refused at a sign-out) lets go of its piece handler.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_streamed_call_lets_go_of_its_handler() {
+        let h = Handle::<Chat>::memory();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(serve(h.clone(), l, "secret".into()));
+        let dir = tempfile::tempdir().unwrap();
+        let (r, _) = Remote::<Chat>::connect_later(None, "ann", &dir.path().join("copy.json")).await.unwrap();
+        r.retain(Some(Duration::ZERO));
+        let held = Arc::new(());
+        for _ in 0..=aio::sync::PENDING_MAX {
+            let h = held.clone();
+            drop(r.stream("chat", serde_json::json!(["hi"]), move |_: String| _ = &h).unwrap());
+        }
+        assert_eq!(r.pending(), aio::sync::PENDING_MAX);
+        assert_eq!(Arc::strong_count(&held), 1 + aio::sync::PENDING_MAX, "the dropped call's handler is gone");
+        r.relink(aio::sync::Link { addr, token: "revoked".into(), root: None });
+        // And so are the refused ones'.
+        until("signed out", || r.signed_out() && Arc::strong_count(&held) == 1).await;
+    }
+}
+
+/// aio throws when client code reads a field its view hides; a `Hidden<T>`
+/// field a `visible` view hides from a viewer panics there the same way,
+/// where a plain field would read as a default that looks real.
+mod hidden_by_the_view {
+    use super::*;
+
+    fn by_role(s: &Staff, viewer: &Caller) -> Staff {
+        match viewer.role.as_deref() {
+            Some("admin") => s.clone(),
+            _ => Staff { salary: Hidden::withheld(), ..s.clone() },
+        }
+    }
+
+    #[cell(shared, visible = by_role)]
+    pub struct Staff {
+        pub name: String,
+        pub salary: Hidden<u32>,
+    }
+
+    #[methods]
+    impl Staff {
+        #[client]
+        pub fn hire(&mut self, name: String) {
+            self.name = name;
+            *self.salary = 100;
+        }
+
+        #[client]
+        pub fn payroll(&mut self) -> Result<u32> {
+            Ok(*self.salary)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_field_the_view_hides_panics_when_read_on_that_copy() {
+        let h = Handle::<Staff>::memory();
+        h.hire("ann".into()).unwrap();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(serve(h.clone(), l, "secret".into()));
+        let bo = Remote::<Staff>::connect(&addr, "secret", "bo").await.unwrap();
+        until("bo's copy", || bo.confirmed().name == "ann").await;
+        assert_eq!(bo.confirmed().salary.get(), None, "not on bo's copy");
+        let read = std::panic::catch_unwind(|| *bo.confirmed().salary).unwrap_err();
+        let why = read.downcast_ref::<String>().unwrap();
+        assert!(why.starts_with("Staff.salary: hidden from this viewer by the cell's `visible`"), "{why}");
+        let e = bo.payroll().unwrap_err();
+        assert!(e.why.contains("Staff.salary: hidden from this viewer"), "a predicted read is refused: {e}");
+        let admin = Caller { by: By::User("cy".into()), role: Some("admin".into()) };
+        assert_eq!(h.state().project(&admin)["salary"], 100, "an admin's view has it");
+        assert_eq!(*h.state().salary, 100, "the app holds it");
+    }
 }

@@ -282,8 +282,10 @@ is what shows before the first paint.
 
 Every `TestUi` mount audits the page as aio's dev build did: text whose
 colour over its backdrop is under WCAG AA (4.5:1, 3:1 for large text) is
-said in the test's output. `TestUi::contrast()` returns the findings, to
-fail on them:
+said in the test's output. A dev build (`ax dev`) audits the running page
+too, a second after it changes, each finding said once in the log as a
+`ui` warning (the app's log; `ax dev`'s output under `--web`).
+`TestUi::contrast()` returns the findings, to fail on them:
 
 ```rust
 use aio::ui::prelude::*;
@@ -382,8 +384,6 @@ keys.
   window and scoped by native nesting (`@keyframes` lifted out), and
   `aio::ui::collect_css()` gives every rule; no warning, since a class is
   its rule's hash.
-- **The dev contrast check in a running app.** aio warns in the dev
-  page's console; aio-rs audits in `TestUi` (above), not in `ax dev`.
 
 ## Common mistakes
 

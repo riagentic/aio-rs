@@ -55,19 +55,50 @@ exports.childNav = (url, origins, ok, landed) => {
 }
 
 // The window's own keys (aio electron.shortcuts): Ctrl+R, Ctrl+Shift+R and
-// Ctrl+F5 reload, Ctrl+P prints, unless `keys` gives them to the page; a
-// dev build's F12 and Ctrl+Shift+I toggle DevTools, Ctrl+Shift+Delete
+// Ctrl+F5 reload, Ctrl+P prints, unless `keys` gives them to the page; F12
+// and Ctrl+Shift+I toggle DevTools in a dev build or one whose app asked
+// (`devtools`: Window { devtools }), and a dev build's Ctrl+Shift+Delete
 // clears the cache and reloads. Plain F5 stays the app's. The action, or null.
-exports.shortcut = (input, keys, dev) => {
+exports.shortcut = (input, keys, dev, devtools) => {
   if (input.type !== 'keyDown') return null
   const ctrl = input.control || input.meta
   const k = String(input.key).toLowerCase()
   if (!keys.reload && ctrl && (k === 'r' || k === 'f5')) return 'reload'
   if (!keys.print && ctrl && !input.shift && k === 'p') return 'print'
-  if (dev && (k === 'f12' || (ctrl && input.shift && k === 'i'))) return 'devtools'
+  if ((dev || devtools) && (k === 'f12' || (ctrl && input.shift && k === 'i'))) return 'devtools'
   if (dev && ctrl && input.shift && k === 'delete') return 'clear'
   return null
 }
+
+// A refusal's line, said once per kind and key (`said`: a Map of Sets): a
+// kind stops after `max` different ones and says so once, the other kinds
+// go on, so a page can neither flood the log nor talk it into silence.
+// The line to say, or null.
+exports.refusal = (said, kind, key, line, max = 32) => {
+  if (!said.has(kind)) said.set(kind, new Set())
+  const seen = said.get(kind)
+  if (seen.has(key) || seen.size > max) return null
+  seen.add(key)
+  return seen.size > max ? `further ${kind} lines are not said` : line
+}
+
+// The line for permission `p` denied to `from` (an origin, never a URL: a
+// key in it stays out of the log), naming what would grant it. `who`: the
+// app's own page, a child window on its own origin, or another page;
+// `grantable`: the names a page may be given (guest.rs PERMISSIONS).
+exports.denied = (p, from, who, grantable) => {
+  const at = `permission "${p}" DENIED to ${who === 'app' ? "the app's own page" : from || 'an embedded page'}`
+  if (p === 'notifications') return `${at}: notifications come from the app (aio_shell::desktop::notify), not a page`
+  if (!grantable.includes(p)) return `${at}: no page may hold it`
+  if (who === 'app') return `${at}: Window { permissions: &["${p}"] } grants it`
+  if (who === 'child') return `${at}: Child { permissions: vec!["${p}".into()] } grants it to the window's own origin`
+  return p === 'fullscreen' ? `${at}: Web { fullscreen: true } grants it` : `${at}: a page that is not the app's gets none`
+}
+
+// A child window's own grant (`grant`: { origin, perms }, Child {
+// permissions }): `p` asked from its own origin only, never a frame of
+// another site in it.
+exports.childAllows = (grant, p, from) => !!grant && grant.perms.includes(p) && from === grant.origin
 
 // A page's beforeunload veto: an exit the app decided leaves anyway; else
 // the person is asked Leave / Stay (`confirm`), or the page keeps its say.

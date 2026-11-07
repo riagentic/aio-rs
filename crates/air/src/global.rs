@@ -31,7 +31,18 @@ pub(crate) fn reset() {
 fn get_or<T: Clone + 'static>(at: Key, make: impl FnOnce() -> T) -> T {
     let at = (current_root(), at);
     if let Some(v) = GLOBALS.with_borrow(|g| g.get(&at).cloned()) {
-        return v.downcast_ref::<T>().cloned().expect("air: a global of another type");
+        if let Some(v) = v.downcast_ref::<T>() {
+            return v.clone();
+        }
+        // Only a hot-patch gives one name two types (`ax dev` patched code
+        // whose global's type changed): the old value can't be read as the
+        // new type, so the global starts again from its first value. Any
+        // other build has no hot-patch: two types under one name is a bug.
+        if !cfg!(feature = "dev") {
+            panic!("air: a global of another type");
+        }
+        eprintln!("[air] a global changed its type (hot-patched code): it starts again from its first value");
+        GLOBALS.with_borrow_mut(|g| g.remove(&at));
     }
     let v = match crate::dom::root_owner() {
         Some(r) => with_owner(r, make),

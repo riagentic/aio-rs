@@ -5,7 +5,7 @@
 //! local HTTP server. The page is read and driven over the shell's own
 //! DevTools line (`{"t":"cdp"}`). Skipped where the runtime is not installed.
 use crate::{Window, guest, install, runtime};
-use aio::kit::{Browser, Go, GuestEvent, go};
+use aio::kit::{Browser, Go, GuestEvent, go, run_js};
 use aio::serde_json::{Value, json};
 use aio::ui::prelude::*;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -44,6 +44,19 @@ fn app() -> View {
         button { id: "perm", onclick: move |_| send("perm", vec![]), "perm" }
         button { id: "back", onclick: move |_| go("b", Go::Back), "back" }
         button { id: "open", onclick: move |_| send("open", vec![]), "open" }
+        button { id: "css", onclick: move |_| go("b", Go::Css("body { color: rgb(1, 2, 3) }".into())), "css" }
+        button { id: "zoom", onclick: move |_| go("b", Go::Zoom(1.5)), "zoom" }
+        button { id: "devtools", onclick: move |_| go("b", Go::DevTools), "devtools" }
+        button {
+            id: "run",
+            onclick: move |_| {
+                spawn(async move {
+                    let v = run_js("b", "getComputedStyle(document.body).color").await;
+                    log.write().push(format!("ran {:?}", v));
+                });
+            },
+            "run"
+        }
         if on.get() {
             Browser {
                 id: "b",
@@ -70,8 +83,11 @@ fn app() -> View {
             preload: "nope.js",
             referrer: "http://ref.example/",
             style: "width:100px;height:100px",
+            onevent: move |e: GuestEvent| if let GuestEvent::PreloadRefused { .. } = &e { log.write().push(format!("{e:?}")) },
         }
         pre { id: "log", {log.get().join("\n")} }
+        // No alt: a dev build's audit says so.
+        img { src: "data:," }
     }
 }
 
@@ -98,7 +114,10 @@ async fn serve(seen: Arc<Mutex<Vec<String>>>) -> String {
                         seen.lock().unwrap().push(format!("{path} from {}", from.trim()));
                     }
                 }
-                let body = format!("<!doctype html><title>{path}</title><p>{path}</p>");
+                // A child window's page asks for a permission and says what it got.
+                let ask = "<script>navigator.permissions.query({ name: 'clipboard-read' }).then((s) => fetch('/perm-' + s.state))</script>";
+                let script = if path == "/permchild" { ask } else { "" };
+                let body = format!("<!doctype html><title>{path}</title><p>{path}</p>{script}");
                 let head = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -108,6 +127,66 @@ async fn serve(seen: Arc<Mutex<Vec<String>>>) -> String {
         }
     });
     base
+}
+
+/// The shell's runtime on `win`, headless, its views `app`: the shell, and
+/// the folder it lives in (kept while it runs).
+async fn open(win: &Window, app: fn() -> View) -> (Shell, tempfile::TempDir) {
+    let rt = runtime::dir();
+    let exe = runtime::exe(&rt);
+    let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
+    let dir = d.path().join("shell");
+    install(&dir, "guests", win).unwrap();
+    let (sock, ctl_sock) = (aio::ipc::addr(d.path(), "wire"), aio::ipc::addr(d.path(), "ctl"));
+    let mut wires = aio::ipc::Listener::bind(&sock).unwrap();
+    let mut ctls = aio::ipc::Listener::bind(&ctl_sock).unwrap();
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.arg(&dir)
+        .args(runtime::sandbox_args(&rt))
+        .args(["--ozone-platform=headless", "--aio-title=guests", "--aio-width=800", "--aio-height=600"])
+        // GL drawn by SwiftShader, as TestUi's: with no display the default GL
+        // fails its start under load and a hidden window may never paint.
+        .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
+        // A link a guest opens goes nowhere (never the person's browser).
+        .arg("--aio-no-open=1")
+        .arg(format!("--user-data-dir={}", d.path().join("profile").display()))
+        .arg(format!("--aio-sock={sock}"))
+        .arg(format!("--aio-ctl={ctl_sock}"))
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        // Chromium's own sockets (SingletonSocket) beside ours, as short.
+        .env("TMPDIR", d.path())
+        // No session bus: nothing (a portal, a11y) reaches the desktop.
+        .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", d.path().join("no-bus").display()))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().unwrap();
+    let said = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (said, err) = (said.clone(), child.stderr.take().unwrap());
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(err).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                said.lock().unwrap().push(l);
+            }
+        });
+    }
+    let s = tokio::time::timeout(Duration::from_secs(20), ctls.accept()).await.unwrap().unwrap();
+    let (r, mut ctl) = tokio::io::split(s);
+    let (tx, heard) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(r).lines();
+        while let Ok(Some(l)) = lines.next_line().await {
+            if let Ok(v) = aio::serde_json::from_str::<Value>(&l) {
+                _ = tx.send(v);
+            }
+        }
+    });
+    ctl.write_all(b"{\"t\":\"place\",\"width\":800,\"height\":600}\n").await.unwrap();
+    let s = tokio::time::timeout(Duration::from_secs(20), wires.accept()).await.unwrap().unwrap();
+    tokio::spawn(async move { _ = crate::views::Views::new().launch(s, app).await });
+    (Shell { child, ctl, heard, said, next: 0 }, d)
 }
 
 /// How long a wait for the shell or a guest may take: a hang guard, not a
@@ -171,12 +250,15 @@ fn count(channel: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it() {
+    // The views tests' hot reloads rebuild every window of this process,
+    // and the log's sink is the process's (islands sets its own).
+    let _turn = crate::WINDOW_TURN.lock().await;
     let rt = runtime::dir();
     let exe = runtime::exe(&rt);
     if !exe.exists() {
         return eprintln!("skipped: no Electron runtime in {}", rt.display());
     }
-    let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
+    let logged = crate::test_log();
     let seen = Arc::new(Mutex::new(Vec::new()));
     _ = BASE.set(serve(seen.clone()).await);
     let base = BASE.get().unwrap().clone();
@@ -184,64 +266,33 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
         title: "guests",
         web: guest::Web { browser: true, windows: true, preloads: &PRELOADS, ..Default::default() },
         permissions: &["clipboard-read"],
+        chrome: crate::Chrome::Themed,
         ..Default::default()
     };
-    let dir = d.path().join("shell");
-    install(&dir, "guests", &win).unwrap();
-    let (sock, ctl_sock) = (aio::ipc::addr(d.path(), "wire"), aio::ipc::addr(d.path(), "ctl"));
-    let mut wires = aio::ipc::Listener::bind(&sock).unwrap();
-    let mut ctls = aio::ipc::Listener::bind(&ctl_sock).unwrap();
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.arg(&dir)
-        .args(runtime::sandbox_args(&rt))
-        .args(["--ozone-platform=headless", "--aio-title=guests", "--aio-width=800", "--aio-height=600"])
-        // GL drawn by SwiftShader, as TestUi's: with no display the default GL
-        // fails its start under load and a hidden window may never paint.
-        .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
-        // A link a guest opens goes nowhere (never the person's browser).
-        .arg("--aio-no-open=1")
-        .arg(format!("--user-data-dir={}", d.path().join("profile").display()))
-        .arg(format!("--aio-sock={sock}"))
-        .arg(format!("--aio-ctl={ctl_sock}"))
-        .env_remove("DISPLAY")
-        .env_remove("WAYLAND_DISPLAY")
-        // Chromium's own sockets (SingletonSocket) beside ours, as short.
-        .env("TMPDIR", d.path())
-        // No session bus: nothing (a portal, a11y) reaches the desktop.
-        .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", d.path().join("no-bus").display()))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd.spawn().unwrap();
-    let said = Arc::new(Mutex::new(Vec::new()));
-    {
-        let (said, err) = (said.clone(), child.stderr.take().unwrap());
-        tokio::spawn(async move {
-            let mut lines = tokio::io::BufReader::new(err).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                said.lock().unwrap().push(l);
-            }
-        });
-    }
-    let s = tokio::time::timeout(Duration::from_secs(20), ctls.accept()).await.unwrap().unwrap();
-    let (r, mut ctl) = tokio::io::split(s);
-    let (tx, heard) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(r).lines();
-        while let Ok(Some(l)) = lines.next_line().await {
-            if let Ok(v) = aio::serde_json::from_str::<Value>(&l) {
-                _ = tx.send(v);
-            }
-        }
-    });
-    ctl.write_all(b"{\"t\":\"place\",\"width\":800,\"height\":600}\n").await.unwrap();
-    let s = tokio::time::timeout(Duration::from_secs(20), wires.accept()).await.unwrap().unwrap();
-    tokio::spawn(async move { _ = crate::views::Views::new().launch(s, app).await });
-    let mut sh = Shell { child, ctl, heard, said, next: 0 };
+    let (mut sh, _d) = open(&win, app).await;
 
     // The guest loads its page with the declared preload, and says where it landed.
     sh.until(&format!("{} === 1", count("hello"))).await;
     sh.until(&format!("document.getElementById('log').textContent.includes('Navigated {{ url: \"{base}/a\"')")).await;
+    // A dev build audits the running page, as TestUi does: said once in the log.
+    if cfg!(feature = "dev") {
+        let audited = || logged.lock().unwrap().iter().any(|l| l.contains("accessibility: <img>: missing \"alt\""));
+        let end = std::time::Instant::now() + PATIENCE;
+        while !audited() && std::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(audited(), "{:?}", logged.lock().unwrap());
+    }
+    // A themed window: aio's title bar, its title the page's, its maximize the window's.
+    sh.until("document.querySelector('.aio-titlebar-title').textContent === 'guests'").await;
+    sh.eval("document.title = 'renamed'; document.querySelector('[data-act=maximize]').click()").await;
+    sh.until("document.querySelector('.aio-titlebar-title').textContent === 'renamed'").await;
+    loop {
+        let v = tokio::time::timeout(PATIENCE, sh.heard.recv()).await.unwrap().unwrap();
+        if v["t"] == "bounds" && v["maximized"] == true {
+            break;
+        }
+    }
     // Undeclared: refused and said; no partition: the guests' own session.
     sh.until("document.querySelectorAll('webview').length === 2").await;
     let end = std::time::Instant::now() + PATIENCE;
@@ -255,6 +306,9 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
         sh.said("<Browser> preload REFUSED: \"file:///aio-guest-preload/nope.js\" is not a declared guest preload")
     );
     assert!(sh.said("gets the session \"persist:aio-webview\""));
+    // ...and the page hears it (aio's `aio:guest-preload-refused`), as the guest's event.
+    sh.until("document.getElementById('log').textContent.includes('PreloadRefused { preload: \"nope.js\", reason: ')")
+        .await;
 
     // Messages both ways: the app's to its preload, the preload's back.
     sh.eval("document.getElementById('ping').click()").await;
@@ -322,6 +376,18 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     sh.eval("document.getElementById('back').click()").await;
     sh.until(&format!("{at_c} === {}", before + 1)).await;
 
+    // The guest's own page: a stylesheet put in, a script's answer.
+    sh.eval("document.getElementById('css').click()").await;
+    // Its zoom and DevTools, as the guest's own contents report them.
+    sh.eval("document.getElementById('zoom').click(); document.getElementById('devtools').click()").await;
+    sh.until("document.querySelector('#b webview').getZoomFactor() === 1.5").await;
+    sh.until("document.querySelector('#b webview').isDevToolsOpened()").await;
+    sh.until(
+        "document.getElementById('run').click(), \
+         document.getElementById('log').textContent.includes('ran Some(String(\"rgb(1, 2, 3)\"))')",
+    )
+    .await;
+
     // A child window: opened on an http page with a declared preload, in a
     // session of its own; refused, with the reason, otherwise.
     let ok = guest::child_line(
@@ -342,6 +408,30 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     assert!(no["error"].as_str().unwrap().contains("preload refused"), "{no}");
     let own = sh.ask(json!({ "t": "child", "url": format!("{base}/x"), "partition": "persist:" }), "opened").await;
     assert!(own["error"].as_str().unwrap().contains("the app's own session"), "{own}");
+    // Unsandboxed only when the window allows it; never quietly sandboxed instead.
+    let bare = sh.ask(json!({ "t": "child", "url": format!("{base}/x"), "sandbox": false }), "opened").await;
+    assert!(bare["error"].as_str().unwrap().contains("unsandboxed_windows: true"), "{bare}");
+    // A child window holds what it was opened with, on its own origin.
+    let c = guest::Child {
+        url: format!("{base}/permchild"),
+        permissions: vec!["clipboard-read".into()],
+        partition: Some("persist:perm".into()),
+        ..Default::default()
+    };
+    let granted: Value = aio::serde_json::from_str(&guest::child_line(0, &c).unwrap()).unwrap();
+    assert!(sh.ask(granted, "opened").await["error"].is_null());
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end && loads("/perm-granted") == 0 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(loads("/perm-granted"), 1, "{:?}", seen.lock().unwrap());
+    // The app's own page asking for one it was not given: said, naming the fix.
+    assert_eq!(sh.eval("navigator.permissions.query({ name: 'midi' }).then((s) => s.state)").await, "denied");
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end && !sh.said("permission \"midi\" DENIED") {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(sh.said("permission \"midi\" DENIED to the app's own page: Window { permissions: &[\"midi\"] } grants it"));
 
     // A guest's session wiped (clear_partition); the app's own refused.
     let done = sh.ask(json!({ "t": "clear-partition", "partition": "persist:t" }), "done").await;
@@ -412,4 +502,64 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
     sh.ctl.write_all(b"quit\n").await.unwrap();
     let st = tokio::time::timeout(Duration::from_secs(10), sh.child.wait()).await.expect("quit past the veto").unwrap();
     assert!(st.success(), "{st}");
+}
+
+/// A cell for the dev window's time-travel panel.
+#[cfg(feature = "dev")]
+#[aio::cell]
+pub struct Tally {
+    pub n: u32,
+}
+
+#[cfg(feature = "dev")]
+#[aio::methods]
+impl Tally {
+    pub fn inc(&mut self) {
+        self.n += 1;
+    }
+}
+
+#[cfg(feature = "dev")]
+mod tally {
+    use super::TallyCalls;
+    use aio::ui::prelude::*;
+    aio::client!(super::Tally, tally);
+
+    /// An app with no panel of its own: a dev build's window mounts one.
+    pub fn counter() -> View {
+        use_live();
+        rsx! {
+            p { id: "n", "{tally().n}" }
+            button { r#type: "button", id: "inc", onclick: |_| _ = aio::act!(inc()), "inc" }
+        }
+    }
+}
+
+/// aio's dev panel in every dev app: Ctrl+. in the real window (Chromium's
+/// own key events, as a person's) shows the cell's history, and undo
+/// steps the cell back.
+#[cfg(feature = "dev")]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_dot_shows_the_time_travel_panel_in_a_dev_window() {
+    let _turn = crate::WINDOW_TURN.lock().await;
+    if !runtime::exe(&runtime::dir()).exists() {
+        return eprintln!("skipped: no Electron runtime");
+    }
+    let (mut sh, _d) = open(&Window { title: "travel", ..Default::default() }, tally::counter).await;
+    sh.until("document.getElementById('inc') !== null").await;
+    sh.eval("document.getElementById('inc').click(); document.getElementById('inc').click()").await;
+    sh.until("document.getElementById('n').textContent === '2'").await;
+    assert_eq!(
+        sh.eval("document.querySelector('[data-t=timeTravel]') === null").await,
+        json!(true),
+        "hidden until Ctrl+."
+    );
+    for kind in ["rawKeyDown", "keyUp"] {
+        let key = json!({ "type": kind, "key": ".", "code": "Period", "modifiers": 2, "windowsVirtualKeyCode": 190 });
+        let v = sh.ask(json!({ "t": "cdp", "method": "Input.dispatchKeyEvent", "params": key }), "cdp").await;
+        assert!(v["error"].is_null(), "{v}");
+    }
+    sh.until("document.querySelector('[data-t=timeTravel]') !== null").await;
+    sh.eval("document.querySelector('[data-t=ttUndo]').click()").await;
+    sh.until("document.getElementById('n').textContent === '1'").await;
 }

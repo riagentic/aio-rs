@@ -19,12 +19,15 @@
 //! the fat binary has a COFF symbol table (no PDB reading): see
 //! [`rewrite_coff`] for how a patch reaches the running binary's data.
 pub use aio_hotpatch::JumpTable;
+#[path = "cargo_out.rs"]
+pub mod cargo_out;
+
 use object::write::{MachOBuildVersion, SectionId, StandardSection, Symbol, SymbolId, SymbolSection};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolFlags, SymbolKind, SymbolScope};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Set by [`fat_build`] on cargo: ax was run as rustc's workspace wrapper;
@@ -129,7 +132,7 @@ impl Rustc {
 
     /// Run it again as recorded: its outputs rewritten in place. `link`:
     /// the file the app crate's link args go to.
-    fn replay(&self, link: Option<&Path>) -> Result<(), String> {
+    fn replay(&self, link: Option<&Path>) -> Result<(), Refused> {
         let mut cmd = Command::new(&self.args[0]);
         cmd.args(&self.args[1..]).current_dir(&self.cwd).env_clear().envs(self.envs.iter().cloned());
         if let Some(file) = link {
@@ -138,9 +141,8 @@ impl Rustc {
         let out = cmd.output().map_err(|e| format!("hot-patch: can't run {}: {e}", self.args[0]))?;
         match out.status.success() {
             true => Ok(()),
-            false => {
-                Err(format!("hot-patch: {} failed:\n{}", self.name(), rendered(&String::from_utf8_lossy(&out.stderr))))
-            }
+            // rustc ran and refused the code: the person's to fix, not a reason to rebuild.
+            false => Err(Refused::Code(rendered(&String::from_utf8_lossy(&out.stderr)))),
         }
     }
 }
@@ -203,14 +205,14 @@ fn wrap_rustc(dir: &Path) -> ExitCode {
 
 /// Unix: this process becomes `cmd` (returns only if it can't).
 #[cfg(unix)]
-fn become_(mut cmd: Command) -> std::io::Error {
+pub(crate) fn become_(mut cmd: Command) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     cmd.exec()
 }
 
 /// Elsewhere: `cmd` runs, and this process ends as it did.
 #[cfg(not(unix))]
-fn become_(mut cmd: Command) -> std::io::Error {
+pub(crate) fn become_(mut cmd: Command) -> std::io::Error {
     match cmd.status() {
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),
         Err(e) => e,
@@ -256,6 +258,7 @@ fn recorded_env() -> Vec<(String, String)> {
 }
 
 /// A recorded link: its args and env.
+#[derive(Clone)]
 struct Link {
     args: Vec<String>,
     envs: Vec<(String, String)>,
@@ -410,6 +413,10 @@ pub struct Request {
     pub envs: Vec<(String, String)>,
     /// This ax (`std::env::current_exe()`): the wrapper and linker.
     pub ax: PathBuf,
+    /// A newer save stops the build ([`Refused::Stale`]).
+    pub stop: cargo_out::Stop,
+    /// At low priority (a refresh behind a session): cargo, rustc, the link.
+    pub low: bool,
 }
 
 /// A fat build: the binary to run and what each patch is made from.
@@ -418,6 +425,8 @@ pub struct Fat {
     /// cargo's time, then the fat link's.
     pub build: Duration,
     pub link: Duration,
+    /// The fat binary is the last one, as it was (nothing to link).
+    pub kept: bool,
     scope: PathBuf,
     tip: String,
     /// Each workspace crate the binary is built from, by `<name>.<lib|bin|proc-macro>`.
@@ -430,6 +439,15 @@ pub struct Fat {
     /// (each patch replaces the fat binary's code, not the last patch's).
     modified: BTreeSet<String>,
     patches: u32,
+    /// The app crate's objects the running code is from, by codegen unit
+    /// ([`app_objects`]). Unknown: a patch replays the app crate first.
+    app_objects: Option<BTreeMap<String, u64>>,
+    /// The app crate's last link: a patch of libraries alone takes its args,
+    /// with the running code's app crate objects (`scope/app`: the fat
+    /// binary's, then those of each patch that had the app crate).
+    last_link: Link,
+    /// A patch of libraries alone went first: the app crate's replay is owed ([`finish`]).
+    owed: bool,
 }
 
 /// A patch's times: rustc (the edited crates, then the app's), the stub
@@ -442,6 +460,55 @@ pub struct Times {
     pub total: Duration,
 }
 
+/// Why a fat build or a patch didn't land.
+#[derive(Debug, PartialEq)]
+pub enum Refused {
+    /// The code doesn't compile: rustc's errors. The person's to fix: no
+    /// other build is tried (it would only fail again, slower).
+    Code(String),
+    /// No changed file is one the build reads: nothing to patch or build.
+    Unchanged,
+    /// A patch can't take this change (or this platform can't patch):
+    /// build again and restart.
+    Rebuild(String),
+    /// A newer save made the build stale: stopped, to start again.
+    Stale,
+}
+
+impl From<String> for Refused {
+    fn from(e: String) -> Self {
+        Refused::Rebuild(e)
+    }
+}
+
+impl From<&str> for Refused {
+    fn from(e: &str) -> Self {
+        Refused::Rebuild(e.into())
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Code(e) | Refused::Rebuild(e) => f.write_str(e.trim_end()),
+            Refused::Unchanged => f.write_str("nothing the build reads changed"),
+            Refused::Stale => f.write_str("a newer save: the build starts again"),
+        }
+    }
+}
+
+/// A changed file no crate reads that changes nothing (pure but for
+/// `exists`): one gone (an editor's or a tool's temporary copy, saved and
+/// renamed over the real file: `sed -i`'s `sedXXXXXX`, `x.rs.tmp.123`), or
+/// a new `.rs` file among the sources of a crate it has (`dirs`: a module is
+/// built from the file that names it, which changed too). A `.rs` file
+/// elsewhere is a crate's whose calls aren't recorded (a path dependency
+/// outside the workspace, such as an aio-rs checkout); any other file may be
+/// a build script's input.
+pub fn unread_is_no_change(file: &Path, dirs: &[PathBuf]) -> bool {
+    !file.exists() || file.extension().is_some_and(|x| x == "rs") && dirs.iter().any(|d| file.starts_with(d))
+}
+
 pub struct Patch {
     /// For the app: `aio_hotpatch::apply_patch`.
     pub table: JumpTable,
@@ -451,45 +518,215 @@ pub struct Patch {
 /// Build the app fat: in ax dev's layout (`req.cargo_args`), every
 /// workspace crate's rustc call recorded, then linked with every object of
 /// every dependency built here, `main` exported. The binary is cargo's.
-pub fn fat_build(req: &Request) -> Result<Fat, String> {
-    host()?;
+pub fn fat_build(req: &Request) -> Result<Fat, Refused> {
     let started = Instant::now();
+    let (c, _lock) = cargo_fat(req, false)?;
+    let build = started.elapsed();
+    let app = c.app()?;
+    let started = Instant::now();
+    // The app crate's objects, as the fat binary has them (gone after its
+    // link: kept as hashes, for the next start that keeps the binary).
+    let objects_file = c.scope.join("app-objects");
+    let app_objects = match c.kept {
+        true => std::fs::read_to_string(&objects_file).ok().map(|t| objects_from(&t)),
+        false => {
+            let objects = app_objects(&c.link.args, app);
+            keep_app_objects(&c.scope.join(FAT_APP), &c.link.args);
+            let _ = std::fs::write(&objects_file, objects_text(&objects));
+            Some(objects)
+        }
+    };
+    // The session's copy of the running code's app crate objects: a patch
+    // of libraries alone links them (none: it builds the app crate too).
+    let app_objects = app_objects.filter(|_| copy_links(&c.scope.join(FAT_APP), &c.scope.join("app")));
+    if !c.kept {
+        let _ = std::fs::remove_file(&c.stamp_file);
+        fat_link(&c.link, app, &c.linker, c.msvc, &c.exe, &c.target, false)?;
+        // Kept for the next start with nothing changed (a hard link: no copy).
+        let _ = std::fs::remove_file(&c.kept_exe);
+        let saved = std::fs::hard_link(&c.exe, &c.kept_exe).or_else(|_| std::fs::copy(&c.exe, &c.kept_exe).map(|_| ()));
+        if let (Ok(()), Some(st)) = (saved, stamp_of(&c.link_file)) {
+            let _ = std::fs::write(&c.stamp_file, st);
+        }
+    }
+    let link = started.elapsed();
+    let symbols = Symbols::of(&c.exe)?;
+    Ok(Fat {
+        exe: c.exe,
+        build,
+        link,
+        kept: c.kept,
+        scope: c.scope,
+        tip: c.tip,
+        crates: c.crates,
+        linker: c.linker,
+        msvc: c.msvc,
+        symbols,
+        modified: BTreeSet::new(),
+        patches: 0,
+        app_objects,
+        last_link: c.link,
+        owed: false,
+    })
+}
+
+/// The fat build the next start runs, brought up to date while a session
+/// runs on the last one (at low priority when `req.low`): cargo builds what
+/// the patches since changed, linked into the kept binary (`fat-exe`, put
+/// back by the next start: a start with nothing to build). The running
+/// binary, its patches and the objects they are made from stay as they are.
+/// `true`: there was something to build.
+pub fn refresh(req: &Request) -> Result<bool, Refused> {
+    let (c, _lock) = cargo_fat(req, true)?;
+    if c.kept {
+        return Ok(false);
+    }
+    let app = c.app()?;
+    let _ = std::fs::remove_file(&c.stamp_file);
+    let objects = app_objects(&c.link.args, app);
+    keep_app_objects(&c.scope.join(FAT_APP), &c.link.args);
+    let _ = std::fs::write(c.scope.join("app-objects"), objects_text(&objects));
+    // Linked apart (the running one is the session's), then in its place.
+    let fresh = c.scope.join("fresh");
+    std::fs::create_dir_all(&fresh).map_err(|e| format!("hot-patch: {}: {e}", fresh.display()))?;
+    let out = fresh.join(c.exe.file_name().unwrap_or_default());
+    set_aside(&out);
+    fat_link(&c.link, app, &c.linker, c.msvc, &out, &c.target, req.low)?;
+    set_aside(&c.kept_exe);
+    std::fs::rename(&out, &c.kept_exe).map_err(|e| format!("hot-patch: {}: {e}", c.kept_exe.display()))?;
+    if let Some(st) = stamp_of(&c.link_file) {
+        let _ = std::fs::write(&c.stamp_file, st);
+    }
+    Ok(true)
+}
+
+/// What a fat build's cargo left: the recorded calls and link, and whether
+/// the binary kept from the last fat link is still this build's.
+struct Cargoed {
+    msvc: bool,
+    target: PathBuf,
+    tip: String,
+    scope: PathBuf,
+    link_file: PathBuf,
+    stamp_file: PathBuf,
+    kept_exe: PathBuf,
+    exe: PathBuf,
+    kept: bool,
+    link: Link,
+    crates: BTreeMap<String, Rustc>,
+    linker: String,
+}
+
+impl Cargoed {
+    fn app(&self) -> Result<&Rustc, String> {
+        let tip = &self.tip;
+        self.crates.get(&format!("{tip}.bin")).ok_or_else(|| format!("hot-patch: no rustc call of {tip} recorded"))
+    }
+}
+
+/// A fat build's cargo, under the app's fat-build lock (returned, held
+/// until the link is done). `session`: one runs on the last fat build, its
+/// patches and objects kept (a refresh), and on Windows the running binary
+/// set aside for cargo's placeholder.
+fn cargo_fat(req: &Request, session: bool) -> Result<(Cargoed, std::fs::File), Refused> {
+    host()?;
     let msvc = COFF && target_triple(req)?.ends_with("-msvc");
     let meta = metadata(req)?;
     let target = PathBuf::from(meta["target_directory"].as_str().ok_or("hot-patch: cargo metadata: no target")?);
     let tip = req.bin.replace('-', "_");
-    let scope = target.join("aio").join("hotpatch").join(format!("{}-{:016x}", req.bin, scope_hash(req)));
+    let scope = scope_of(&target, req);
     let rustc_dir = scope.join("rustc");
     let link_file = scope.join("fat-link.json");
     std::fs::create_dir_all(&rustc_dir).map_err(|e| format!("hot-patch: {}: {e}", rustc_dir.display()))?;
-    remove_patches(&scope, &tip);
+    // One fat build of this app at a time (`ax create`'s warm-up in the
+    // background, an `ax dev`, its refresh): held until it is linked and kept.
+    let lock = exclusive(&scope.join("fat.lock"), &req.bin)?;
+    if !session {
+        remove_patches(&scope, &tip);
+    }
     // Libraries of the workspace whose calls aren't recorded yet (a fresh
     // build doesn't run rustc): rebuilt, and so recorded.
     let unrecorded: Vec<String> = workspace_libs(&meta, &req.package)
         .into_iter()
         .filter(|l| !rustc_dir.join(format!("{l}.lib.json")).is_file())
         .collect();
-    // The app crate is always rebuilt: its link args are the fat link's.
+    // A library not recorded yet is rebuilt (and so recorded), and the app
+    // crate with it: its link args are the fat link's.
     let previous = std::fs::read_to_string(rustc_dir.join(format!("{tip}.bin.json"))).ok();
-    if let Some(dir) = previous.as_deref().and_then(Rustc::from_json).and_then(|r| r.out_dir()) {
+    let out_dir = previous.as_deref().and_then(Rustc::from_json).and_then(|r| r.out_dir());
+    if let (Some(dir), false) = (&out_dir, unrecorded.is_empty()) {
         bust(&dir.with_file_name(".fingerprint"), &req.bin, &unrecorded);
     }
-    let _ = std::fs::remove_file(&link_file);
+    if let Some(dir) = &out_dir {
+        set_aside(&dir.with_file_name(exe_name(&req.bin)));
+    }
+    // Nothing changed since the last fat link: cargo runs no linker (and
+    // puts its own placeholder back where the binary goes), so the fat
+    // binary kept from then, for these same link args, is run as it was.
+    let (stamp_file, kept_exe) = (scope.join("fat.stamp"), scope.join("fat-exe"));
+    let before = stamp_of(&link_file);
     let mut exe = cargo(req, &rustc_dir, &link_file, msvc)?;
-    if !link_file.is_file() {
+    let relinked = link_file.is_file() && stamp_of(&link_file) != before;
+    let stamped = std::fs::read_to_string(&stamp_file).ok();
+    let kept = reusable(relinked, before.as_deref(), previous.is_some(), stamped.as_deref())
+        && put_back(&kept_exe, &exe).is_ok();
+    if !relinked && !kept {
+        // A binary cargo didn't link here (another build's, a fresh target):
+        // the app crate again, so its link is recorded.
+        let _ = std::fs::remove_file(&link_file);
         bust(&exe.with_file_name(".fingerprint"), &req.bin, &unrecorded);
         exe = cargo(req, &rustc_dir, &link_file, msvc)?;
     }
-    let fat_link_rec = read_link(&link_file)?;
-    let build = started.elapsed();
-    let crates = recorded(&rustc_dir, &tip, &fat_link_rec.args);
+    let link = read_link(&link_file)?;
+    let crates = recorded(&rustc_dir, &tip, &link.args);
     let app = crates.get(&format!("{tip}.bin")).ok_or_else(|| format!("hot-patch: no rustc call of {tip} recorded"))?;
     let linker = if msvc { rust_lld(app)? } else { linker(app, &req.ax) };
-    let started = Instant::now();
-    fat_link(&fat_link_rec, app, &linker, msvc, &exe, &target)?;
-    let link = started.elapsed();
-    let symbols = Symbols::of(&exe)?;
-    Ok(Fat { exe, build, link, scope, tip, crates, linker, msvc, symbols, modified: BTreeSet::new(), patches: 0 })
+    let c = Cargoed { msvc, target, tip, scope, link_file, stamp_file, kept_exe, exe, kept, link, crates, linker };
+    Ok((c, lock))
+}
+
+/// `cmd` (and what it starts) at low priority: nice 10; Windows' below
+/// normal, which its children inherit.
+fn lower(cmd: &mut Command) {
+    #[cfg(unix)]
+    // SAFETY: only setpriority, async-signal-safe, between fork and exec.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(cmd, || {
+            libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+            Ok(())
+        });
+    }
+    // BELOW_NORMAL_PRIORITY_CLASS.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(cmd, 0x4000);
+}
+
+/// `bin`'s file name as cargo writes it (pure).
+fn exe_name(bin: &str) -> String {
+    format!("{bin}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// Windows: `file` renamed out of the way (a running binary can be renamed,
+/// not removed or written), removed when it no longer runs; elsewhere a
+/// running binary's file is replaced as it is.
+fn set_aside(file: &Path) {
+    #[cfg(windows)]
+    {
+        let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+        let aside = file.with_file_name(format!("{}.aside-{ms}", file.file_name().unwrap_or_default().display()));
+        if std::fs::rename(file, &aside).is_ok() {
+            let _ = std::fs::remove_file(&aside);
+        }
+        // What earlier ones set aside and now runs no more.
+        let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().contains(".aside-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = file;
 }
 
 /// The target the app is built for: `--target`'s in its cargo args, else rustc's host.
@@ -565,6 +802,23 @@ fn workspace_libs(meta: &serde_json::Value, package: &str) -> Vec<String> {
     libs.filter_map(|t| t["name"].as_str().map(|n| n.replace('-', "_"))).collect()
 }
 
+/// The folder of `req`'s fat builds in build folder `target`.
+fn scope_of(target: &Path, req: &Request) -> PathBuf {
+    target.join("aio").join("hotpatch").join(format!("{}-{:016x}", req.bin, scope_hash(req)))
+}
+
+/// The last good fat binary of `req` in build folder `target`: the one
+/// kept from its last link, while that link is the one recorded (a build
+/// that failed since left it so). `None`: none, or not known to be whole.
+pub fn last_good(target: &Path, req: &Request) -> Option<PathBuf> {
+    let scope = scope_of(target, req);
+    let stamped = std::fs::read_to_string(scope.join("fat.stamp")).ok();
+    let exe = scope.join("fat-exe");
+    let recorded = scope.join("rustc").join(format!("{}.bin.json", req.bin.replace('-', "_"))).is_file();
+    let before = stamp_of(&scope.join("fat-link.json"));
+    (reusable(false, before.as_deref(), recorded, stamped.as_deref()) && exe.is_file()).then_some(exe)
+}
+
 /// Its own folder per app and build settings: a build with other features
 /// has other artifacts, and other recorded calls.
 fn scope_hash(req: &Request) -> u64 {
@@ -574,14 +828,70 @@ fn scope_hash(req: &Request) -> u64 {
     h.finish()
 }
 
-/// Earlier sessions' patch libraries of `tip`.
+/// Whether the kept fat binary is still the build (pure): cargo linked
+/// nothing new, the app crate's call is recorded, and the link args it was
+/// linked from (`before`, their stamp) are the ones its stamp names.
+fn reusable(relinked: bool, before: Option<&str>, recorded: bool, stamped: Option<&str>) -> bool {
+    !relinked && recorded && before.is_some() && stamped == before
+}
+
+/// `file` locked for this process alone, waiting (said once) while another holds it.
+fn exclusive(file: &Path, bin: &str) -> Result<std::fs::File, String> {
+    let fail = |e: std::io::Error| format!("hot-patch: {}: {e}", file.display());
+    let f = std::fs::File::create(file).map_err(fail)?;
+    match f.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            eprintln!("ax dev: another ax is building {bin} (ax create's warm-up?): waiting for it");
+            f.lock().map_err(fail)?;
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(fail(e)),
+    }
+    Ok(f)
+}
+
+/// Earlier sessions' patch libraries of `tip`, and the app crate's objects
+/// of their last one.
 fn remove_patches(scope: &Path, tip: &str) {
+    let _ = std::fs::remove_dir_all(scope.join("app"));
     let prefix = format!("lib{tip}-patch-");
     for e in std::fs::read_dir(scope).into_iter().flatten().flatten() {
         if e.file_name().to_string_lossy().starts_with(&prefix) {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// The kept fat binary `kept` back where cargo put its placeholder, `exe`
+/// (a hard link, else a copy).
+fn put_back(kept: &Path, exe: &Path) -> std::io::Result<()> {
+    if !kept.is_file() {
+        return Err(std::io::ErrorKind::NotFound.into());
+    }
+    let same = |a: &Path, b: &Path| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.ino() == y.ino() && x.dev() == y.dev())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (a, b);
+            false
+        }
+    };
+    if same(kept, exe) {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(exe);
+    std::fs::hard_link(kept, exe).or_else(|_| std::fs::copy(kept, exe).map(|_| ()))
+}
+
+/// A file's size and modification time, to tell it is the one seen before.
+fn stamp_of(file: &Path) -> Option<String> {
+    let m = std::fs::metadata(file).ok()?;
+    let t = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(format!("{} {}", m.len(), t.as_nanos()))
 }
 
 /// Make cargo rebuild binary `bin` and libraries `libs`: their fingerprints
@@ -608,10 +918,12 @@ fn mingw_on_path() -> bool {
 /// `PATH`: rustc's bundled one (`-Clink-self-contained`, as rustc itself
 /// would choose; with ax as the linker it can't tell). The binary, as cargo
 /// says it wrote it.
-fn cargo(req: &Request, rustc_dir: &Path, link_file: &Path, msvc: bool) -> Result<PathBuf, String> {
-    let mut child = Command::new("cargo")
-        .args(["rustc", "-p", &req.package, "--bin", &req.bin, "--message-format=json-render-diagnostics"])
+fn cargo(req: &Request, rustc_dir: &Path, link_file: &Path, msvc: bool) -> Result<PathBuf, Refused> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["rustc", "-p", &req.package, "--bin", &req.bin, "--message-format=json-render-diagnostics"])
         .args(&req.cargo_args)
+        // Behind a session (a refresh): its words are no one's.
+        .args(req.low.then_some("--quiet"))
         .args(["--", "-Csave-temps=true", "-Clink-dead-code"])
         .args((COFF && !msvc && !mingw_on_path()).then_some("-Clink-self-contained=yes"))
         .arg(format!("-Clinker={}", req.ax.display()))
@@ -619,37 +931,25 @@ fn cargo(req: &Request, rustc_dir: &Path, link_file: &Path, msvc: bool) -> Resul
         .envs(req.envs.iter().cloned())
         .env("RUSTC_WORKSPACE_WRAPPER", &req.ax)
         .env(RUSTC_ENV, rustc_dir)
-        .env(LINK_ENV, link_file)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("hot-patch: can't run cargo: {e}"))?;
-    let stdout = child.stdout.take().map(|mut o| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut o, &mut s);
-            s
-        })
-    });
-    // cargo's progress and the compiler's messages, as they come.
-    let mut said = String::new();
-    if let Some(err) = child.stderr.take() {
-        for line in std::io::BufRead::lines(std::io::BufReader::new(err)).map_while(Result::ok) {
-            eprintln!("{line}");
-            said.push_str(&line);
-            said.push('\n');
-        }
+        .env(LINK_ENV, link_file);
+    if req.low {
+        lower(&mut cmd);
     }
-    let messages = stdout.and_then(|t| t.join().ok()).unwrap_or_default();
-    let status = child.wait().map_err(|e| format!("hot-patch: cargo: {e}"))?;
+    // cargo's progress and the compiler's messages, as they come.
+    let ran = cargo_out::run(&mut cmd, true, &req.stop).map_err(|e| format!("hot-patch: can't run cargo: {e}"))?;
+    let (status, messages) = (ran.status, ran.stdout);
+    if ran.stopped {
+        return Err(Refused::Stale);
+    }
     if !status.success() {
-        return Err(format!("hot-patch: the build failed:\n{said}"));
+        // Said as it came (above): the code's errors, kept for the page and `ax errors`.
+        return Err(Refused::Code(ran.said));
     }
     let artifacts = messages.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
     artifacts
         .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == req.bin.as_str())
         .find_map(|m| m["executable"].as_str().map(PathBuf::from))
-        .ok_or_else(|| format!("hot-patch: cargo built no binary {}", req.bin))
+        .ok_or_else(|| Refused::Rebuild(format!("hot-patch: cargo built no binary {}", req.bin)))
 }
 
 fn read_link(file: &Path) -> Result<Link, String> {
@@ -713,7 +1013,15 @@ fn linker(app: &Rustc, ax: &Path) -> String {
 /// binary's data by COFF's 32-bit absolute symbols; Windows places a
 /// non-high-entropy binary above 4 GiB all the same) with a COFF symbol
 /// table. A system that forces ASLR moves it: the patch then says so.
-fn fat_link(link: &Link, app: &Rustc, linker: &str, msvc: bool, exe: &Path, target: &Path) -> Result<(), String> {
+fn fat_link(
+    link: &Link,
+    app: &Rustc,
+    linker: &str,
+    msvc: bool,
+    exe: &Path,
+    target: &Path,
+    low: bool,
+) -> Result<(), String> {
     let link_args = &link.args;
     let objects_dir = target.join("aio").join("hotpatch").join("objects");
     let mut objects = vec![];
@@ -769,7 +1077,11 @@ fn fat_link(link: &Link, app: &Rustc, linker: &str, msvc: bool, exe: &Path, targ
     let rsp = exe.with_extension("hotpatch-link");
     let body: Vec<String> = args.iter().map(|a| if msvc { msvc_response_arg(a) } else { response_arg(a) }).collect();
     std::fs::write(&rsp, body.join("\n")).map_err(|e| format!("hot-patch: {}: {e}", rsp.display()))?;
-    let out = Command::new(linker)
+    let mut cmd = Command::new(linker);
+    if low {
+        lower(&mut cmd);
+    }
+    let out = cmd
         .args(if msvc { &["-flavor", "link"][..] } else { &[] })
         .arg(format!("@{}", rsp.display()))
         .current_dir(&app.cwd)
@@ -1590,45 +1902,233 @@ fn sh_link_info(b: &[u8], header: usize) -> usize {
 
 /// Patch the running fat binary with the edits to `changed` (source files
 /// of the app's workspace crates): the edited crates (and the crates built
-/// on them) and the app's own crate built again, linked into a new shared
-/// library, the symbols it misses resolved into the running binary
-/// (`aio_hotpatch::aslr_reference`, from the app; Windows: `base`, where the
-/// app has [`PATCH_ROOM`] free for the DLL). Any file no crate builds from
-/// (a manifest, a build script): an error, for a rebuild.
-pub fn patch(fat: &mut Fat, aslr_reference: u64, base: Option<u64>, changed: &[PathBuf]) -> Result<Patch, String> {
-    let base = match (COFF, base) {
-        (true, None) => return Err("hot-patch: the app named no free span to load the patch at".into()),
-        (_, b) => b.unwrap_or_default(),
-    };
+/// on them) built again, linked into a new shared library, the symbols it
+/// misses resolved into the running binary (`aio_hotpatch::aslr_reference`,
+/// from the app; Windows: `base`, where the app has [`PATCH_ROOM`] free for
+/// the DLL). The app's own crate is built in it when edited (or its objects
+/// are unknown); else after, by [`finish`], once this patch is applied. Any
+/// file no crate builds from (a manifest, a build script): an error, for a
+/// rebuild.
+pub fn patch(fat: &mut Fat, aslr_reference: u64, base: Option<u64>, changed: &[PathBuf]) -> Result<Patch, Refused> {
+    let base = patch_base(base)?;
     let started = Instant::now();
-    let edited = fat.edited(changed)?;
+    let Some(edited) = fat.edited(changed)? else { return Err(Refused::Unchanged) };
     let compiled = fat.order(&fat.dependents(&edited))?;
     for key in &compiled {
         fat.crates[key].replay(None)?;
     }
-    fat.modified.extend(compiled);
-    let link_file = fat.scope.join("thin-link.json");
-    let _ = std::fs::remove_file(&link_file);
-    let app = fat.crates[&format!("{}.bin", fat.tip)].clone();
-    if let Err(e) = app.replay(Some(&link_file)) {
-        remove_temps(&[], &app);
-        return Err(e);
+    // A replayed library's rlib is the patch's now, not what cargo built:
+    // cargo builds it again next time (a source put back with its old
+    // modification time would else find the patched code fresh).
+    let libs: Vec<String> = compiled.iter().filter_map(|k| k.strip_suffix(".lib")).map(String::from).collect();
+    if let Some(dir) = fat.crates.get(&format!("{}.bin", fat.tip)).and_then(|a| a.out_dir()) {
+        bust(&dir.with_file_name(".fingerprint"), &fat.tip, &libs);
     }
-    let link = read_link(&link_file)?;
+    fat.modified.extend(compiled.iter().cloned());
+    let app = fat.crates[&format!("{}.bin", fat.tip)].clone();
+    let app_sources = app.sources();
+    let app_edited = changed.iter().any(|f| app_sources.contains(&canonical(f)));
+    if compiled.is_empty() || app_edited || fat.app_objects.is_none() {
+        return with_app(fat, &app, aslr_reference, base, started);
+    }
+    // Libraries alone: the app crate's code is the running one's as long as
+    // its objects come out the same (`finish` replays it after, off the
+    // time to the screen). Its running objects are linked again all the
+    // same: a call they make (a `HotFn`'s, a function pointer's target)
+    // reaches the patched libraries only from the patch's copy of them.
+    let mut link = fat.last_link.clone();
+    let kept: Vec<String> = std::fs::read_dir(fat.scope.join("app"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().display().to_string())
+        .filter(|p| p.ends_with(".rcgu.o"))
+        .collect();
+    link.args.retain(|a| !a.ends_with(".rcgu.o"));
+    link.args.extend(kept);
     let compile = started.elapsed();
     let thin = thin_link(fat, &app, &link, aslr_reference, base);
-    remove_temps(&link.args, &app);
-    let _ = std::fs::remove_dir_all(fat.scope.join("rewrite"));
-    let _ = std::fs::remove_file(fat.scope.join("stub.o"));
-    let _ = std::fs::remove_file(fat.scope.join("thin-link.rsp"));
+    remove_link_temps(&fat.scope);
+    let (lib, stub, link) = thin?;
+    let table = jump_table(&lib, &fat.symbols)?;
+    fat.owed = true;
+    Ok(Patch { table, times: Times { compile, stub, link, total: started.elapsed() } })
+}
+
+/// The app crate's replay a patch of libraries alone owed: `None` when its
+/// objects came out as the running ones (nothing more to send), else the
+/// patch with them.
+pub fn finish(fat: &mut Fat, aslr_reference: u64, base: Option<u64>) -> Result<Option<Patch>, Refused> {
+    if !std::mem::take(&mut fat.owed) {
+        return Ok(None);
+    }
+    let base = patch_base(base)?;
+    let started = Instant::now();
+    let app = fat.crates[&format!("{}.bin", fat.tip)].clone();
+    let link = replay_app(fat, &app)?;
+    if fat.app_objects.as_ref() == Some(&app_objects(&link.args, &app)) {
+        remove_temps(&link.args, &app);
+        if let Some(o) = output_arg(&link.args) {
+            let _ = std::fs::remove_file(o);
+        }
+        fat.last_link = link;
+        return Ok(None);
+    }
+    patch_with(fat, &app, link, aslr_reference, base, started).map(Some)
+}
+
+/// Where a patch loads: Windows needs the app's word for it.
+fn patch_base(base: Option<u64>) -> Result<u64, Refused> {
+    match (COFF, base) {
+        (true, None) => Err(Refused::Rebuild("hot-patch: the app named no free span to load the patch at".into())),
+        (_, b) => Ok(b.unwrap_or_default()),
+    }
+}
+
+/// The app crate replayed: its link, as rustc asked for it.
+fn replay_app(fat: &Fat, app: &Rustc) -> Result<Link, Refused> {
+    let link_file = fat.scope.join("thin-link.json");
+    let _ = std::fs::remove_file(&link_file);
+    if let Err(e) = app.replay(Some(&link_file)) {
+        remove_temps(&[], app);
+        return Err(e);
+    }
+    Ok(read_link(&link_file)?)
+}
+
+/// The patch of the replayed libraries and the app crate, replayed now.
+fn with_app(fat: &mut Fat, app: &Rustc, aslr_reference: u64, base: u64, started: Instant) -> Result<Patch, Refused> {
+    let link = replay_app(fat, app)?;
+    patch_with(fat, app, link, aslr_reference, base, started)
+}
+
+/// The patch of the replayed libraries and the app crate's objects `link`
+/// names; those objects are the running ones after it.
+fn patch_with(
+    fat: &mut Fat,
+    app: &Rustc,
+    link: Link,
+    aslr_reference: u64,
+    base: u64,
+    started: Instant,
+) -> Result<Patch, Refused> {
+    let compile = started.elapsed();
+    let objects = app_objects(&link.args, app);
+    let thin = thin_link(fat, app, &link, aslr_reference, base);
+    // Its objects, for a later patch of libraries alone (each patch
+    // replaces all the running code: it has this crate's latest too).
+    if thin.is_ok() {
+        keep_app_objects(&fat.scope.join("app"), &link.args);
+    }
+    remove_temps(&link.args, app);
+    remove_link_temps(&fat.scope);
     // rustc's output, the empty object: a stale file of that name confuses
     // the dynamic loader on a later patch (dx's finding).
     if let Some(o) = output_arg(&link.args) {
         let _ = std::fs::remove_file(o);
     }
-    let (lib, stub, link) = thin?;
+    let (lib, stub, link_time) = thin?;
     let table = jump_table(&lib, &fat.symbols)?;
-    Ok(Patch { table, times: Times { compile, stub, link, total: started.elapsed() } })
+    fat.app_objects = Some(objects);
+    fat.last_link = link;
+    fat.owed = false;
+    Ok(Patch { table, times: Times { compile, stub, link: link_time, total: started.elapsed() } })
+}
+
+/// The app crate's objects of the kept fat binary (`scope/<FAT_APP>`),
+/// beside its `app-objects` hashes; a session links its own copy
+/// (`scope/app`), which its patches replace.
+const FAT_APP: &str = "fat-app";
+
+/// `from`'s files linked (else copied) into `to`, in place of what it
+/// held: whether any `.rcgu.o` is there.
+fn copy_links(from: &Path, to: &Path) -> bool {
+    let _ = std::fs::remove_dir_all(to);
+    let _ = std::fs::create_dir_all(to);
+    let mut any = false;
+    for e in std::fs::read_dir(from).into_iter().flatten().flatten() {
+        let t = to.join(e.file_name());
+        let done = std::fs::hard_link(e.path(), &t).or_else(|_| std::fs::copy(e.path(), &t).map(|_| ())).is_ok();
+        any |= done && e.file_name().to_string_lossy().ends_with(".rcgu.o");
+    }
+    any
+}
+
+/// The `.rcgu.o` files among `link_args`, linked (else copied) into `dir`
+/// in place of what it held.
+fn keep_app_objects(dir: &Path, link_args: &[String]) {
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::create_dir_all(dir);
+    for o in link_args.iter().filter(|a| a.ends_with(".rcgu.o")).map(Path::new) {
+        if let Some(name) = o.file_name() {
+            let to = dir.join(name);
+            let _ = std::fs::hard_link(o, &to).or_else(|_| std::fs::copy(o, &to).map(|_| ()));
+        }
+    }
+}
+
+fn remove_link_temps(scope: &Path) {
+    let _ = std::fs::remove_dir_all(scope.join("rewrite"));
+    let _ = std::fs::remove_file(scope.join("stub.o"));
+    let _ = std::fs::remove_file(scope.join("thin-link.rsp"));
+}
+
+/// The app crate's objects among `link_args`, each by its codegen unit
+/// (`<crate><extra>.<unit>[.<session>].rcgu.o`), with its [`code_digest`]:
+/// equal maps, the same code (rustc's output is deterministic).
+fn app_objects(link_args: &[String], app: &Rustc) -> BTreeMap<String, u64> {
+    let prefix = format!("{}{}.", app.name(), app.codegen("extra-filename").unwrap_or_default());
+    let mut out = BTreeMap::new();
+    for a in link_args.iter().filter(|a| a.ends_with(".rcgu.o")) {
+        let path = app.cwd.join(a);
+        let Some(unit) = path.file_name().and_then(|n| n.to_str()?.strip_prefix(&prefix)?.split('.').next()) else {
+            continue;
+        };
+        // An object that doesn't read: a digest no other matches.
+        let digest = std::fs::read(&path).ok().and_then(|b| code_digest(&b)).unwrap_or(u64::MAX);
+        out.insert(unit.to_string(), digest);
+    }
+    out
+}
+
+/// What an object runs as, its debug info apart (a COFF object's CodeView
+/// names the object's own file, another each compile): each section's
+/// bytes and relocations, each symbol (pure).
+fn code_digest(bytes: &[u8]) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let obj = object::File::parse(bytes).ok()?;
+    let debug = |s: &object::Section| {
+        let name = s.name().unwrap_or_default();
+        name.starts_with(".debug") || name.starts_with("__debug") || s.segment_name().ok().flatten() == Some("__DWARF")
+    };
+    let skipped: HashSet<object::SectionIndex> = obj.sections().filter(|s| debug(s)).map(|s| s.index()).collect();
+    let name_of = |i| obj.symbol_by_index(i).ok().and_then(|s| s.name().ok().map(String::from));
+    let mut h = std::hash::DefaultHasher::new();
+    for s in obj.sections().filter(|s| !skipped.contains(&s.index())) {
+        (s.name().unwrap_or_default(), s.size(), s.data().unwrap_or_default()).hash(&mut h);
+        for (at, r) in s.relocations() {
+            (at, format!("{:?}", r.flags()), r.addend()).hash(&mut h);
+            match r.target() {
+                object::RelocationTarget::Symbol(i) => name_of(i).hash(&mut h),
+                object::RelocationTarget::Section(i) => i.0.hash(&mut h),
+                _ => {}
+            }
+        }
+    }
+    for s in obj.symbols().filter(|s| s.section_index().is_none_or(|i| !skipped.contains(&i))) {
+        let name = s.name().unwrap_or_default();
+        (name, format!("{:?} {:?}", s.kind(), s.scope()), s.section_index().map(|i| i.0), s.address()).hash(&mut h);
+    }
+    Some(h.finish())
+}
+
+/// [`app_objects`] as kept in a file, a unit and its hash a line (pure).
+fn objects_text(objects: &BTreeMap<String, u64>) -> String {
+    objects.iter().map(|(k, v)| format!("{k} {v}\n")).collect()
+}
+
+fn objects_from(text: &str) -> BTreeMap<String, u64> {
+    text.lines().filter_map(|l| l.split_once(' ')).filter_map(|(k, v)| Some((k.to_string(), v.parse().ok()?))).collect()
 }
 
 /// The patch library from the app crate's new objects (and the libraries
@@ -1653,21 +2153,18 @@ fn thin_link(
     objects.sort();
     let wanted: HashMap<String, PathBuf> =
         fat.modified.iter().filter_map(|k| Some((fat.crates[k].lib_stem(), fat.crates[k].rlib()?))).collect();
-    // The replayed libraries in the fat link's order. Their fresh objects
-    // are rewritten too (statics redirected) where the platform can, else
-    // the whole rlib goes to the linker as the fat build's did.
+    // The replayed libraries in the fat link's order, every object of each
+    // (a patch of libraries alone has no app crate pulling them from an
+    // archive), rewritten too (statics redirected) where the platform can.
     let linked = link_args.iter().filter(|a| a.ends_with(".rlib")).filter_map(|a| Path::new(a).file_stem()?.to_str());
     for rlib in linked.filter_map(|s| wanted.get(s)) {
-        if REWRITES {
-            let into = work.join("libs");
-            std::fs::create_dir_all(&into).map_err(|e| format!("hot-patch: {}: {e}", into.display()))?;
-            for (name, bytes) in members(rlib)? {
-                let o = into.join(name);
-                std::fs::write(&o, bytes).map_err(|e| format!("hot-patch: {}: {e}", o.display()))?;
-                objects.push(maybe_rewrite(&o, &fat.symbols, &into)?.unwrap_or(o));
-            }
-        } else {
-            objects.push(rlib.clone());
+        let into = work.join("libs");
+        std::fs::create_dir_all(&into).map_err(|e| format!("hot-patch: {}: {e}", into.display()))?;
+        for (name, bytes) in members(rlib)? {
+            let o = into.join(name);
+            std::fs::write(&o, bytes).map_err(|e| format!("hot-patch: {}: {e}", o.display()))?;
+            let rewritten = if REWRITES { maybe_rewrite(&o, &fat.symbols, &into)? } else { None };
+            objects.push(rewritten.unwrap_or(o));
         }
     }
     let stub = fat.scope.join("stub.o");
@@ -1718,24 +2215,42 @@ fn thin_link(
 impl Fat {
     /// The crates each changed file is a source of (their dep-info says),
     /// by key; the app's own crate is always built, so not among them.
-    fn edited(&self, changed: &[PathBuf]) -> Result<BTreeSet<String>, String> {
+    /// `None`: no changed file is one the build reads (a gone temporary
+    /// copy, a new `.rs` no module names yet): nothing to patch.
+    fn edited(&self, changed: &[PathBuf]) -> Result<Option<BTreeSet<String>>, Refused> {
         let sources: Vec<(&String, Vec<PathBuf>)> = self.crates.iter().map(|(k, c)| (k, c.sources())).collect();
+        // Where each crate's own modules are: the folders of its `.rs` sources.
+        let dirs: Vec<PathBuf> = sources
+            .iter()
+            .flat_map(|(_, s)| s.iter().filter(|f| f.extension().is_some_and(|x| x == "rs")))
+            .filter_map(|f| f.parent().map(Path::to_path_buf))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let mut edited = BTreeSet::new();
+        let mut read = false;
         for file in changed {
             let file = canonical(file);
             let users: Vec<&String> = sources.iter().filter(|(_, s)| s.contains(&file)).map(|(k, _)| *k).collect();
             if users.is_empty() {
-                return Err(format!("hot-patch: no crate of the app builds from {}: rebuild", file.display()));
+                if unread_is_no_change(&file, &dirs) {
+                    continue;
+                }
+                return Err(Refused::Rebuild(format!(
+                    "hot-patch: no crate of the app builds from {}: rebuild",
+                    file.display()
+                )));
             }
+            read = true;
             if let Some(m) = users.iter().find(|k| k.ends_with(".proc-macro")) {
-                return Err(format!(
+                return Err(Refused::Rebuild(format!(
                     "hot-patch: {} is a proc macro's ({m}), run at build time: rebuild",
                     file.display()
-                ));
+                )));
             }
             edited.extend(users.into_iter().filter(|k| k.ends_with(".lib")).cloned());
         }
-        Ok(edited)
+        Ok(read.then_some(edited))
     }
 
     /// `libs` and every library built on them, by key.
@@ -2117,6 +2632,118 @@ fn jump_table(lib: &Path, symbols: &Symbols) -> Result<JumpTable, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_objects_code_digest_reads_its_code_and_relocations_not_its_debug_info() {
+        use object::write::{Relocation, Symbol};
+        let object = |code: &[u8], debug: &[u8], callee: &str| {
+            let mut obj = object::write::Object::new(
+                object::BinaryFormat::Elf,
+                object::Architecture::X86_64,
+                object::Endianness::Little,
+            );
+            let text = obj.section_id(StandardSection::Text);
+            obj.append_section_data(text, code, 16);
+            let call = obj.add_symbol(Symbol {
+                name: callee.into(),
+                value: 0,
+                size: 0,
+                scope: SymbolScope::Linkage,
+                kind: SymbolKind::Text,
+                weak: false,
+                section: SymbolSection::Undefined,
+                flags: SymbolFlags::None,
+            });
+            let flags = object::RelocationFlags::Generic {
+                kind: object::RelocationKind::Relative,
+                encoding: object::RelocationEncoding::Generic,
+                size: 32,
+            };
+            obj.add_relocation(text, Relocation { offset: 1, symbol: call, addend: -4, flags }).unwrap();
+            let info = obj.add_section(vec![], b".debug_info".to_vec(), object::SectionKind::Debug);
+            obj.append_section_data(info, debug, 1);
+            code_digest(&obj.write().unwrap()).unwrap()
+        };
+        let call = [0xE8, 0, 0, 0, 0, 0xC3];
+        let one = object(&call, b"app-1a2b3c.rcgu.o", "f");
+        assert_eq!(one, object(&call, b"app-9z8y7x.rcgu.o", "f"), "another object name in its debug info");
+        assert_ne!(one, object(&[0xE8, 0, 0, 0, 0, 0x90], b"app-1a2b3c.rcgu.o", "f"), "other code");
+        assert_ne!(one, object(&call, b"app-1a2b3c.rcgu.o", "g"), "a call to another function");
+    }
+
+    #[test]
+    fn the_last_fat_binary_runs_only_when_its_link_is_the_one_now() {
+        assert!(reusable(false, Some("1 2"), true, Some("1 2")));
+        assert!(!reusable(true, Some("1 2"), true, Some("1 2")), "cargo linked again");
+        assert!(!reusable(false, Some("1 2"), true, Some("1 3")), "kept from other link args");
+        assert!(!reusable(false, Some("1 2"), true, None), "a link that never finished");
+        assert!(!reusable(false, None, true, None), "no link recorded");
+        assert!(!reusable(false, Some("1 2"), false, Some("1 2")), "the app's call not recorded");
+    }
+
+    #[test]
+    fn the_last_good_build_is_the_kept_fat_binary_of_the_recorded_link() {
+        let d = tempfile::tempdir().unwrap();
+        let req = Request {
+            dir: d.path().into(),
+            package: "app".into(),
+            bin: "my-app".into(),
+            cargo_args: vec![],
+            envs: vec![],
+            ax: "ax".into(),
+            stop: Default::default(),
+            low: false,
+        };
+        let scope = scope_of(d.path(), &req);
+        std::fs::create_dir_all(scope.join("rustc")).unwrap();
+        assert_eq!(last_good(d.path(), &req), None, "nothing built");
+        std::fs::write(scope.join("fat-link.json"), "{}").unwrap();
+        std::fs::write(scope.join("rustc/my_app.bin.json"), "{}").unwrap();
+        std::fs::write(scope.join("fat-exe"), "fat").unwrap();
+        assert_eq!(last_good(d.path(), &req), None, "a link never finished: no stamp");
+        std::fs::write(scope.join("fat.stamp"), stamp_of(&scope.join("fat-link.json")).unwrap()).unwrap();
+        assert_eq!(last_good(d.path(), &req), Some(scope.join("fat-exe")));
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(scope.join("fat-link.json"), "{\"args\":[]}").unwrap();
+        assert_eq!(last_good(d.path(), &req), None, "linked from other args since: not that binary");
+    }
+
+    #[test]
+    fn two_fat_builds_of_one_app_take_turns() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("fat.lock");
+        let held = exclusive(&file, "app").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let f = file.clone();
+        std::thread::spawn(move || {
+            let _second = exclusive(&f, "app").unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the second waits");
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5)).expect("then it builds");
+    }
+
+    #[test]
+    fn the_kept_fat_binary_goes_back_over_cargos_placeholder() {
+        let dir = std::env::temp_dir().join(format!("ax-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kept, exe) = (dir.join("fat-exe"), dir.join("app"));
+        assert!(put_back(&kept, &exe).is_err(), "none kept: nothing to put back");
+        std::fs::write(&kept, b"fat binary").unwrap();
+        std::fs::write(&exe, b"stub").unwrap();
+        let st = stamp_of(&kept);
+        put_back(&kept, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"fat binary");
+        put_back(&kept, &exe).unwrap();
+        // cargo's next placeholder replaces the file, never the kept one.
+        std::fs::remove_file(&exe).unwrap();
+        std::fs::write(&exe, b"stub").unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), b"fat binary");
+        assert_eq!(stamp_of(&kept), st);
+        assert_ne!(stamp_of(&exe), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_response_file_reads_back_as_written() {

@@ -20,7 +20,7 @@ pub enum Mode {
     Cli,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct App {
     pub id: String,
@@ -57,11 +57,42 @@ pub struct App {
     /// did, so a port's jobs fire when they did; `local`: this machine's time zone.
     #[serde(default)]
     pub tz: Tz,
+    /// `false` (aio's `profiles: false`, a kiosk or a service): one home
+    /// only; a launch naming another (`--profile`, `AIORT_PROFILE`,
+    /// `AIO_PROFILE`, `--home`) is refused. `AIORT_DATA` and `--instance`
+    /// still give a sandbox.
+    #[serde(default = "yes")]
+    pub profiles: bool,
+    /// The app's own launch flags (aio's `appFlags`), `--name` each:
+    /// declared, a launch flag one typo from one of them or of aio's own
+    /// is refused with the one meant; any other goes to the app as ever.
+    #[serde(default)]
+    pub flags: Vec<String>,
     /// The window's own icon, `assets/icon.png` beside `aio.toml`, put in
     /// by `aio::config!()`; empty: none (the desktop shell then draws the
     /// monogram, `aio::icon`, in the app's hue).
     #[serde(skip)]
     pub icon: &'static [u8],
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            mode: Mode::default(),
+            maintainer: None,
+            port_of: None,
+            version: None,
+            ui: Shown::default(),
+            lang: None,
+            dir: Dir::default(),
+            tz: Tz::default(),
+            profiles: true,
+            flags: vec![],
+            icon: &[],
+        }
+    }
 }
 
 impl App {
@@ -107,17 +138,26 @@ pub struct History {
     /// How long every step is kept before folding into a snapshot.
     #[serde(default = "History::default_keep", with = "span")]
     pub keep: Duration,
+    /// Time travel (`ax timetravel`, the panel) may step through it (aio's
+    /// `diagnostics.dev.timeTravel`). `false` refuses every step; the
+    /// history is kept all the same.
+    #[serde(default = "History::default_travel")]
+    pub travel: bool,
 }
 
 impl History {
     fn default_keep() -> Duration {
         Duration::from_secs(90 * 86_400)
     }
+
+    fn default_travel() -> bool {
+        true
+    }
 }
 
 impl Default for History {
     fn default() -> Self {
-        Self { keep: Self::default_keep() }
+        Self { keep: Self::default_keep(), travel: true }
     }
 }
 
@@ -179,6 +219,11 @@ pub struct Server {
     /// `false`: a release build opens no door; a debug build always does.
     #[serde(default = "yes")]
     pub local_peers: bool,
+    /// A web page's console in the app's log (`[page]` lines, aio's client
+    /// log forwarding, a release too): its pages post it to `/__aio/log`,
+    /// 100 lines a second at most. `false`: nothing is taken.
+    #[serde(default = "yes")]
+    pub page_log: bool,
 }
 
 impl Default for Server {
@@ -199,6 +244,7 @@ impl Default for Server {
             public_dirs: Default::default(),
             open: false,
             local_peers: true,
+            page_log: true,
         }
     }
 }
@@ -301,6 +347,14 @@ pub struct Accounts {
     /// mail hook, `Http::mail`, or the operator's `ax auth verify`).
     #[serde(default)]
     pub require_verified: bool,
+    /// Users may turn on a second factor, TOTP (aio's `auth.totp`); `false`:
+    /// enrollment is refused, a factor already on stays on.
+    #[serde(default = "yes")]
+    pub totp: bool,
+    /// A sign-in sets the HttpOnly session cookie (aio's `auth.cookie`);
+    /// `false`: the session is the answer's token alone, a bearer.
+    #[serde(default = "yes")]
+    pub cookie: bool,
 }
 
 fn ten() -> Option<u32> {
@@ -320,11 +374,25 @@ impl Default for Accounts {
             session: thirty_days(),
             max_sessions: ten(),
             require_verified: false,
+            totp: true,
+            cookie: true,
         }
     }
 }
 
 impl Accounts {
+    /// Why these accounts can't serve with `mail` (a mail hook) as it is
+    /// (aio's boot refusal): anyone may sign up but no one may sign in
+    /// unverified, and nothing sends the mail that verifies.
+    pub fn unverifiable(&self, mail: bool) -> Option<String> {
+        (self.on && self.signup && self.require_verified && !mail).then(|| {
+            "[accounts] signup and require_verified: no one who signs up could ever sign in, as nothing sends the \
+             mail that verifies; give the server a mail hook (Http::mail), or verify each account by hand with \
+             signup off (ax auth <app> verify <id>)"
+                .into()
+        })
+    }
+
     /// The policy `aio::auth` runs.
     pub fn policy(&self) -> crate::auth::Policy {
         let ttl_ms = i64::try_from(self.session.as_millis()).unwrap_or(i64::MAX);
@@ -333,6 +401,8 @@ impl Accounts {
             max_sessions: self.max_sessions,
             signup: self.signup,
             require_verified: self.require_verified,
+            totp: self.totp,
+            cookie: self.cookie,
         }
     }
 }
@@ -351,6 +421,11 @@ pub struct Client {
     /// how long a confirmed call waits for the server's answer (else 15s).
     #[serde(default, with = "spans_or_off")]
     pub timeouts: std::collections::BTreeMap<String, Option<Duration>>,
+    /// A paired server whose certificate its pin no longer covers is
+    /// refused until paired again (aio's `strictPin`); unset, one that
+    /// proves it holds the app's key is pinned again (`--strict-pin` per launch).
+    #[serde(default)]
+    pub strict_pin: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
@@ -358,8 +433,9 @@ pub struct Client {
 pub struct Capabilities {
     /// Hosts aio's outbound requests may reach besides this machine;
     /// everything else is refused ([`crate::capabilities`]). The hosts this
-    /// file names (`[updates] url`, `[feedback] url`, `[client] server`) must
-    /// be in it: a parse error says which.
+    /// file names (`[updates] url`, `[feedback] url`) must be in it: a
+    /// parse error says which. A client's server (`[client] server`, a
+    /// pairing, the connect page) is the person's pick, reached without one.
     #[serde(default)]
     pub network: Vec<String>,
 }
@@ -371,7 +447,6 @@ impl Capabilities {
             return Some(e);
         }
         let mut named: Vec<(&str, String)> = vec![];
-        named.extend(c.client.server.iter().map(|s| ("[client] server", s.clone())));
         named.extend(c.feedback.url.iter().map(|u| ("[feedback] url", u.clone())));
         match c.updates.url.as_deref() {
             Some(u) if u.starts_with("github:") => {
@@ -379,7 +454,7 @@ impl Capabilities {
                 let hosts = ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"];
                 named.extend(hosts.map(|h| ("[updates] url", h.to_string())));
             }
-            Some(u) if u.starts_with("git+file://") => {}
+            Some(u) if u.starts_with("git+file://") || u.starts_with("file://") => {}
             Some(u) => named.push(("[updates] url", crate::update::git_remote(u).unwrap_or(u).to_string())),
             None => {}
         }
@@ -397,7 +472,8 @@ impl Capabilities {
 #[serde(deny_unknown_fields)]
 pub struct Updates {
     /// Where releases are: `<url>/<channel>/<os>-<arch>.json`. https only
-    /// (a loopback `http://127.0.0.1` for tests), or `github:<owner>/<repo>`:
+    /// (a loopback `http://127.0.0.1` for tests), a folder (`file:///mnt/releases/notes`:
+    /// a share, a USB stick), or `github:<owner>/<repo>`:
     /// its GitHub releases (`aio::update::release_dir`), or a repository
     /// (`git+https://`, `git+ssh://`, `git+file://`) whose `channel` branch
     /// or tag is built here when its commit or tag is signed by one of `keys`
@@ -414,8 +490,8 @@ pub struct Updates {
     /// app asks (the `updates` cell's `check`).
     #[serde(default = "six_hours", with = "span_or_off")]
     pub every: Option<Duration>,
-    /// `every` for some channels (`{ dev = "1m", beta = "5m" }`): where you
-    /// ship into it now, a check a minute; where users are, a few a day.
+    /// `every` for some channels (`{ beta = "5m", nightly = "off" }`): where
+    /// you ship into it now, a check a minute; where users are, a few a day.
     #[serde(default, with = "spans_or_off")]
     pub every_by_channel: std::collections::BTreeMap<String, Option<Duration>>,
     /// `true`: a release is downloaded in the background and installed at
@@ -431,6 +507,10 @@ pub struct Updates {
     /// rollback needs the one before).
     #[serde(default = "three")]
     pub keep: usize,
+    /// Every release signs in the commit it was built from (as `ax release
+    /// --commit`): only installs on aio-rs 0.3 or newer read such a manifest.
+    #[serde(default)]
+    pub sign_commit: bool,
 }
 
 fn stable() -> String {
@@ -460,14 +540,22 @@ impl Default for Updates {
             auto: true,
             prerelease: None,
             keep: 3,
+            sign_commit: false,
         }
     }
 }
 
 impl Updates {
     /// How often an app on `channel` looks for a release; `None`: off.
+    /// Unless `every_by_channel` names it, `dev` looks at least every
+    /// minute and `test` every 5 minutes: where you ship into it now.
     pub fn every_on(&self, channel: &str) -> Option<Duration> {
-        self.every_by_channel.get(channel).copied().unwrap_or(self.every)
+        let most = match channel {
+            "dev" => Duration::from_secs(60),
+            "test" => Duration::from_secs(300),
+            _ => Duration::MAX,
+        };
+        self.every_by_channel.get(channel).copied().unwrap_or(self.every.map(|e| e.min(most)))
     }
 }
 
@@ -508,6 +596,12 @@ pub struct Data {
     /// flag `--no-persist` does it for one run).
     #[serde(default = "yes")]
     pub persist: bool,
+    /// `true`: only `#[cell(persist)]` cells are saved; every other cell
+    /// lives in memory and starts from its defaults each launch (aio's
+    /// `cellDefaults: { persist: "none" }`). `false` (the default): every
+    /// cell opened on the store is saved, unless `#[cell(persist = false)]`.
+    #[serde(default)]
+    pub only_persist: bool,
     /// How long a run of `#[coalesce]` calls is held before it goes into the
     /// log, in ms (aio's `persistDebounceMs`): a crash loses at most this much.
     #[serde(default = "Data::default_coalesce_ms")]
@@ -516,6 +610,12 @@ pub struct Data {
     /// (`"1d"`, `"6h"`); `"off"` (the default): only when asked (`ax backup`).
     #[serde(default, with = "span_or_off")]
     pub backup_every: Option<Duration>,
+    /// How often a running app makes its store's good copy again (aio's
+    /// rolling `db.snapshot` that `checkIntegrityOnBoot` restores from):
+    /// a damaged store comes back from it with at most this much lost.
+    /// `"off"` (the default): once a day, at boot.
+    #[serde(default, with = "span_or_off")]
+    pub snapshot_every: Option<Duration>,
     /// Timed backups kept, the newest; older ones are removed (at least 1).
     #[serde(default = "Data::default_backup_keep")]
     pub backup_keep: usize,
@@ -546,18 +646,24 @@ impl Default for Data {
             retire: vec![],
             pragmas: vec![],
             persist: true,
+            only_persist: false,
             coalesce_ms: Self::default_coalesce_ms(),
             backup_every: None,
+            snapshot_every: None,
             backup_keep: Self::default_backup_keep(),
         }
     }
 }
 
-/// `[home]`: a ported app's own home rules, as its aio code resolved them;
-/// `--home`, `--profile` and `--instance` still win.
+/// `[home]`: where the app's home is, set by its author; `--home`,
+/// `--profile` and `--instance` still win. `dir` is any app's; the others
+/// are a ported app's own rules, as its aio code resolved them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields, default)]
 pub struct Home {
+    /// The home itself, absolute or `~/…` (aio's `appDir`): `data/`,
+    /// `logs/` and `cache/` in it; a profile beside it (`<dir>-<name>`).
+    pub dir: Option<String>,
     /// A variable naming the home (`PURSE_HOME`): it beats `AIO_APPS_DIR`.
     pub env: Option<String>,
     /// A folder beside the app's binary (`purse-data`): the home when it
@@ -586,11 +692,23 @@ pub struct Log {
     /// Each run starts fresh files (aio's per-run `debug.log`): the last
     /// run's move to `app.1.log` …, `keep` runs (or size steps) kept.
     pub per_run: bool,
+    /// The log folder of the app's own home, absolute or `~/…` (aio's
+    /// `logging.dir`); a profile, an instance, `--home` or `AIORT_DATA`
+    /// keeps its own `logs/`, so two copies never share a file.
+    pub dir: Option<String>,
 }
 
 impl Default for Log {
     fn default() -> Self {
-        Self { level: crate::log::Level::Info, keep: 5, file_mb: 10, heartbeat: 3600, suppress: vec![], per_run: false }
+        Self {
+            level: crate::log::Level::Info,
+            keep: 5,
+            file_mb: 10,
+            heartbeat: 3600,
+            suppress: vec![],
+            per_run: false,
+            dir: None,
+        }
     }
 }
 
@@ -607,6 +725,11 @@ pub struct Build {
     /// which crates take the space.
     #[serde(default)]
     pub budget_mb: Option<u64>,
+    /// Where `ax build` puts what it makes, and where `ax release`,
+    /// `ax install` and `ax lab` look (aio's `build.out`): relative to the
+    /// workspace, or absolute; unset: `dist`. `--out` wins for one run.
+    #[serde(default)]
+    pub out: Option<String>,
     /// A CSS toolchain run before every build and on every change in
     /// `ax dev` (Tailwind, Sass): a command line split on spaces, or argv as
     /// a list. Never through a shell.
@@ -957,6 +1080,23 @@ impl Splash {
     }
 }
 
+/// Is `p` absolute on some OS (`/srv/x`, `C:\x`, `C:/x`, `\\server\share`)?
+/// aio.toml is checked where the app is built, maybe for another OS; the
+/// app refuses one that isn't absolute where it runs.
+fn absolute_anywhere(p: &str) -> bool {
+    p.starts_with('/') || p.starts_with(r"\\") || (drive(p) && matches!(p.as_bytes().get(2), Some(b'/' | b'\\')))
+}
+
+/// Does `p` start at a root or a drive on some OS (`/x`, `\\x`, `C:x`)?
+fn rooted_anywhere(p: &str) -> bool {
+    p.starts_with(['/', '\\']) || drive(p)
+}
+
+fn drive(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
 /// `#rgb` or `#rrggbb`.
 pub fn hex_color(s: &str) -> bool {
     s.strip_prefix('#').is_some_and(|h| matches!(h.len(), 3 | 6) && h.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -1216,8 +1356,16 @@ impl<'de> Deserialize<'de> for Css {
 pub struct Target {
     pub name: String,
     pub kind: Option<String>,
-    /// The workspace binary it builds (with its own `aio.toml`); unset: the app.
+    /// The workspace binary it builds (with its own `aio.toml`); unset: the
+    /// app. aio's `entry` names it too.
     pub bin: Option<String>,
+    /// The platforms it is built for, over `[build] platforms`.
+    pub platforms: Vec<String>,
+    /// The name it is installed and shown under (menu, bundle, window
+    /// title), over `[app] name`.
+    pub title: Option<String>,
+    /// Where it shows its UI, over `[app] ui`.
+    pub ui: Option<Shown>,
 }
 
 #[derive(Deserialize)]
@@ -1225,7 +1373,12 @@ pub struct Target {
 struct Labelled {
     name: String,
     kind: Option<String>,
+    #[serde(alias = "entry")]
     bin: Option<String>,
+    #[serde(default)]
+    platforms: Vec<String>,
+    title: Option<String>,
+    ui: Option<Shown>,
 }
 
 impl<'de> Deserialize<'de> for Target {
@@ -1234,19 +1387,19 @@ impl<'de> Deserialize<'de> for Target {
         impl<'de> serde::de::Visitor<'de> for Kind {
             type Value = Labelled;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("[build] targets: a kind or { name, kind, bin }")
+                f.write_str("[build] targets: a kind or { name, kind, bin, platforms, title, ui }")
             }
             fn visit_str<E>(self, name: &str) -> Result<Labelled, E> {
-                Ok(Labelled { name: name.into(), kind: None, bin: None })
+                Ok(Labelled { name: name.into(), kind: None, bin: None, platforms: vec![], title: None, ui: None })
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, m: A) -> Result<Labelled, A::Error> {
                 Labelled::deserialize(serde::de::value::MapAccessDeserializer::new(m))
                     .map_err(|e| serde::de::Error::custom(format!("[build] targets: {e}")))
             }
         }
-        let Labelled { name, kind, bin } = d.deserialize_any(Kind)?;
+        let Labelled { name, kind, bin, platforms, title, ui } = d.deserialize_any(Kind)?;
         let trim = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        Ok(Self { name: name.trim().to_string(), kind: trim(kind), bin: trim(bin) })
+        Ok(Self { name: name.trim().to_string(), kind: trim(kind), bin: trim(bin), platforms, title: trim(title), ui })
     }
 }
 
@@ -1286,6 +1439,18 @@ pub struct Config {
     pub ui: Ui,
     #[serde(default)]
     pub vitals: crate::vitals::Vitals,
+    #[serde(default)]
+    pub dev: Dev,
+}
+
+/// `[dev]`: what `ax dev` does with the app.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(deny_unknown_fields, default)]
+pub struct Dev {
+    /// Watch only these folders of the app, relative to `aio.toml`
+    /// (aio's `watch: [..]`); unset: its sources and assets. `--watch`
+    /// wins for one run.
+    pub watch: Vec<String>,
 }
 
 /// `[feedback]`: problem reports, filed by the user (the `feedback` cell)
@@ -1542,8 +1707,19 @@ impl Config {
         if let Some(port_of) = &c.app.port_of {
             crate::paths::id_ok(port_of).map_err(|e| format!("aio.toml: [app] port_of: {e}"))?;
         }
-        if c.app.port_of.is_none() && c.home != Home::default() {
-            return Err("aio.toml: [home] is a ported app's rules: it needs [app] port_of".into());
+        if c.app.port_of.is_none() && (Home { dir: None, ..c.home.clone() }) != Home::default() {
+            return Err(
+                "aio.toml: [home] env, portable and dev are a ported app's rules: each needs [app] port_of".into()
+            );
+        }
+        // A folder an author fixes is one the app finds from any working directory.
+        for (k, d) in [("[home] dir", &c.home.dir), ("[log] dir", &c.log.dir)] {
+            if d.as_deref().is_some_and(|d| !(d.starts_with("~/") || absolute_anywhere(d))) {
+                return Err(format!(
+                    "aio.toml: {k} {:?} is absolute or ~/… (\"/srv/notes\", \"C:\\\\notes\", \"~/notes\")",
+                    d.as_deref().unwrap_or_default()
+                ));
+            }
         }
         // File names: a store or a home never reaches out of its folder.
         let h = &c.home;
@@ -1650,6 +1826,20 @@ impl Config {
             );
         }
         c.vitals.check()?;
+        if let Some(f) = c.app.flags.iter().find(|f| !f.starts_with("--") || f.len() < 3 || f.contains(['=', ' '])) {
+            return Err(format!("aio.toml: [app] flags {f:?} is a flag's name: \"--verbose\""));
+        }
+        if let Some(t) =
+            c.build.targets.iter().find(|t| t.ui == Some(Shown::Browser) && c.app.mode != Mode::ClientServer)
+        {
+            return Err(format!(
+                "aio.toml: [build] targets {}: ui = \"browser\" needs mode \"client-server\" (its server serves the page)",
+                t.name
+            ));
+        }
+        if let Some(d) = c.dev.watch.iter().find(|d| d.is_empty() || rooted_anywhere(d) || d.contains("..")) {
+            return Err(format!("aio.toml: [dev] watch {d:?} is a folder inside the app (\"src/ui\")"));
+        }
         if c.log.keep == 0 || c.log.file_mb == 0 {
             return Err("aio.toml: [log] keep and file_mb must be at least 1".into());
         }
@@ -1702,7 +1892,7 @@ impl Config {
                 if !c.server.tls {
                     return Err("aio.toml: [server] cert and key need tls = true".into());
                 }
-                if let Some(p) = [cert, key].into_iter().find(|p| !p.is_absolute()) {
+                if let Some(p) = [cert, key].into_iter().find(|p| !p.to_str().is_some_and(absolute_anywhere)) {
                     return Err(format!(
                         "aio.toml: [server] {}: an absolute path (aio.toml is built into the app, so a relative \
                          one has no folder to be relative to)",
@@ -1727,9 +1917,10 @@ impl Config {
                 return Err("aio.toml: [updates] url github:<owner>/<repo> names no repository".into());
             }
             let git = crate::update::git_remote(url).is_some();
-            if !url.starts_with("https://") && !local && github.is_none() && !git {
-                return Err("aio.toml: [updates] url must be https://, github:<owner>/<repo> or a repository \
-                     (git+https://, git+ssh://, git+file://)"
+            let file = url.starts_with("file:///") || url.starts_with("file://localhost/");
+            if !url.starts_with("https://") && !local && !file && github.is_none() && !git {
+                return Err("aio.toml: [updates] url must be https://, file:/// (a folder), github:<owner>/<repo> or \
+                     a repository (git+https://, git+ssh://, git+file://)"
                     .into());
             }
             if let Some(e) = c.updates.keys.iter().find_map(|k| crate::update::ssh_key(k).err()).filter(|_| git) {

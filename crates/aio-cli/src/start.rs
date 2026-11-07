@@ -117,6 +117,23 @@ pub(crate) fn command(bin: &Path, args: &[String], log: &Path, display: Option<&
     Ok(cmd)
 }
 
+/// Put `cmd`'s window where `place` decided: a nested display brings its own
+/// access cookie, private bus and software GPU (`DISPLAY` alone leaves the
+/// app unable to authenticate to it); a named or fallback run is contained
+/// (nothing it opens reaches the person's browser).
+fn put_display(
+    cmd: &mut Command,
+    display: Option<&str>,
+    nested: Option<&crate::display::Nested>,
+    inherited: Option<&str>,
+) {
+    match nested {
+        Some(n) => n.onto(cmd, inherited),
+        None if display.is_some() => crate::display::contain(cmd),
+        None => {}
+    }
+}
+
 /// Where the window goes for `asked` (`--display`, else `AIORT_DISPLAY`),
 /// as `aio dev` decides it; a nested display started for it comes along,
 /// handed to the app once it is up (it ends with its last window).
@@ -184,10 +201,10 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
     let (app_args, cdp) = crate::cdp::take_flag(args)?;
     let mut cmd = command(bin, &app_args, &log, display)?;
     if let Some(n) = nested.as_mut() {
-        // Its cookie and software GPU; no private bus: handed to the app, it would outlive it.
+        // No private bus: handed to the app, it would outlive it.
         n.bus = None;
-        n.onto(&mut cmd, std::env::var("AIORT_ELECTRON_ARGS").ok().as_deref());
     }
+    put_display(&mut cmd, display, nested.as_ref(), std::env::var("AIORT_ELECTRON_ARGS").ok().as_deref());
     let cdp = crate::cdp::open(&plan.logs, cdp)?;
     if let Some(p) = cdp {
         cmd.env("AIORT_CDP", p.to_string());
@@ -291,7 +308,7 @@ pub fn home_args(ask: &aio::paths::Ask) -> Vec<String> {
 pub fn restart(
     name: &str,
     t: &crate::target::Target,
-    bin: &dyn Fn() -> Result<PathBuf, String>,
+    bin: &dyn Fn(&[String]) -> Result<PathBuf, String>,
     typed: &[String],
     wait: Duration,
 ) -> Out {
@@ -319,7 +336,7 @@ pub fn restart(
         eprintln!("{}", crate::stop::one(name, t, false, Duration::from_secs(15))?);
     }
     let asked = rec.as_ref().and_then(|r| r["display"].as_str().map(String::from));
-    run(t, &bin()?, &launch, asked.as_deref(), wait)
+    run(t, &bin(&launch)?, &launch, asked.as_deref(), wait)
 }
 
 /// How long a restart under `aio dev` waits at least: a whole build.
@@ -365,6 +382,18 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn a_start_on_a_display_it_did_not_make_is_still_contained() {
+        let log = std::env::temp_dir().join(format!("aio-start-test-{}.log", std::process::id()));
+        let mut cmd = command(Path::new("/bin/true"), &[], &log, Some(":9")).unwrap();
+        drop(std::fs::File::open(&log));
+        put_display(&mut cmd, Some(":9"), None, None);
+        assert!(
+            cmd.get_envs().any(|(k, v)| k == "AIORT_NO_OPEN" && v == Some(std::ffi::OsStr::new("1"))),
+            "a run on someone else's display opens no tab in the person's browser"
+        );
     }
 
     #[test]
@@ -464,7 +493,7 @@ mod tests {
         assert!(run(&target_of(&p), &exe, &args, Some("current"), WAIT).unwrap_err().contains("already running"));
         // Restart: stopped, then started again on the recorded flags.
         let target = crate::target::Target { name: "notes".into(), id: "notes".into(), plan: p.clone(), pkg: None };
-        let again = restart("notes", &target, &|| Ok(exe.clone()), &[], WAIT).unwrap();
+        let again = restart("notes", &target, &|_| Ok(exe.clone()), &[], WAIT).unwrap();
         assert!(again.starts_with("notes: started in"), "{again}");
         let (rec2, h2) = (record(&p.logs).unwrap(), health(&p));
         assert_ne!(rec2["pid"], rec["pid"]);
@@ -501,7 +530,7 @@ mod tests {
             }
             std::fs::write(data.join("health.json"), doc("new").to_string()).unwrap();
         });
-        let never = || -> Result<PathBuf, String> { panic!("nothing built or started by aio start") };
+        let never = |_: &[String]| -> Result<PathBuf, String> { panic!("nothing built or started by aio start") };
         let said = restart("notes", &target_of(&p), &never, &[], WAIT).unwrap();
         assert!(said.starts_with("notes: restarted by `aio dev`") && said.contains("healthy"), "{said}");
         session.join().unwrap();

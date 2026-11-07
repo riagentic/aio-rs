@@ -40,6 +40,8 @@ pub struct Loop {
     pub layer: Layer,
     /// Effects waiting their turn.
     pub queue: u64,
+    /// Effects that got their turn in the last second (aio's `drainRate`).
+    pub drained: u64,
     /// The newest call: `cell.method`, and how long it took (ms).
     pub last: Option<(String, u64)>,
 }
@@ -58,7 +60,7 @@ impl Default for Snapshot {
         Self {
             render: Render { status: Status::Healthy, measured: 0, last_call: None, visible: true, freezes: 0 },
             transport: healthy.clone(),
-            event_loop: Loop { layer: healthy, queue: 0, last: None },
+            event_loop: Loop { layer: healthy, queue: 0, drained: 0, last: None },
         }
     }
 }
@@ -340,6 +342,7 @@ pub fn doc(snap: &Snapshot, loopback: bool, t: &Vitals) -> serde_json::Value {
             "lateMs": snap.event_loop.layer.measured,
             "since": snap.event_loop.layer.since,
             "queue": snap.event_loop.queue,
+            "drainRate": snap.event_loop.drained,
             "lastCall": snap.event_loop.last.as_ref().map(|(c, ms)| json!({ "call": c, "ms": ms })),
         },
         "transport": transport,
@@ -359,8 +362,52 @@ pub fn doc(snap: &Snapshot, loopback: bool, t: &Vitals) -> serde_json::Value {
     })
 }
 
+/// A client link as the server sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub id: u64,
+    pub cell: String,
+    /// ms since it was last heard (a ping's answer comes every 2 s).
+    pub gap: u64,
+    /// The bytes of the last state or patch it was sent, and of all.
+    pub last_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// What a server adds to [`doc`] (pure): each link's liveness (`frozen`
+/// past `[vitals] transport` frozen, with `frozenFor`) and payloads
+/// (aio's `clients` and `payloadStats`), each served cell's state size
+/// (`cellSizes`), and the cells tripped (`breakers`).
+pub fn served(links: &[Link], cells: &[(&str, usize, bool)], t: &Vitals) -> serde_json::Value {
+    use serde_json::json;
+    let clients: Vec<_> = links
+        .iter()
+        .map(|l| {
+            let frozen = l.gap > t.transport.frozen;
+            let mut row = json!({
+                "id": l.id,
+                "cell": l.cell,
+                "status": if frozen { "frozen" } else { "healthy" },
+                "gap": l.gap,
+                "lastPayloadBytes": l.last_bytes,
+                "totalBytes": l.total_bytes,
+            });
+            if frozen {
+                row["frozenFor"] = l.gap.into();
+            }
+            row
+        })
+        .collect();
+    let sizes: serde_json::Map<_, _> = cells.iter().map(|(id, n, _)| (id.to_string(), (*n).into())).collect();
+    let breakers: Vec<_> = cells.iter().filter(|(_, _, on)| !on).map(|(id, ..)| *id).collect();
+    json!({ "clients": clients, "cellSizes": sizes, "breakers": breakers })
+}
+
 static SET: RwLock<Option<Vitals>> = RwLock::new(None);
 static QUEUED: AtomicU64 = AtomicU64::new(0);
+/// Effects that got their turn this run, and the count at the last [`probe`].
+static DRAINED: AtomicU64 = AtomicU64::new(0);
+static PROBED: AtomicU64 = AtomicU64::new(0);
 /// The newest call: its cell, method and own time (ms), kept in place.
 static LAST: Mutex<(&str, String, u64)> = Mutex::new(("", String::new(), 0));
 
@@ -387,6 +434,7 @@ impl Waiting {
 impl Drop for Waiting {
     fn drop(&mut self) {
         QUEUED.fetch_sub(1, Ordering::Relaxed);
+        DRAINED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -399,15 +447,18 @@ pub(crate) fn ran(cell: &'static str, method: &str, took: std::time::Duration) {
     l.2 = took.as_millis() as u64;
 }
 
-/// The server's loop and queue as they are, `late` ms behind.
+/// The server's loop and queue as they are, `late` ms behind, and the
+/// effects that got their turn since the probe before (a second ago).
 pub fn probe(late: u64, since: Option<i64>, t: &Vitals) -> Loop {
     let queue = QUEUED.load(Ordering::Relaxed);
+    let total = DRAINED.load(Ordering::Relaxed);
+    let drained = total.saturating_sub(PROBED.swap(total, Ordering::Relaxed));
     let status = t.event_loop.grade(late).max(t.queue.grade(queue));
     let last = {
         let l = LAST.lock().unwrap_or_else(|e| e.into_inner());
         (!l.0.is_empty()).then(|| (format!("{}.{}", l.0, l.1), l.2))
     };
-    Loop { layer: Layer { status, measured: late, since }, queue, last }
+    Loop { layer: Layer { status, measured: late, since }, queue, drained, last }
 }
 
 /// The log line for the loop stepping to `step` (pure): what, how much,
@@ -492,6 +543,7 @@ mod tests {
             event_loop: Loop {
                 layer: Layer { status: Status::Warning, measured: 600, since: Some(50) },
                 queue: 0,
+                drained: 0,
                 last: Some(("orders.recalc".into(), 3100)),
             },
             ..Snapshot::default()
@@ -507,6 +559,7 @@ mod tests {
             event_loop: Loop {
                 layer: Layer { status: Status::Frozen, measured: 0, since: Some(50) },
                 queue: 1500,
+                drained: 0,
                 last: Some(("market.tick".into(), 1)),
             },
             ..Snapshot::default()
@@ -632,10 +685,32 @@ mod tests {
     }
 
     #[test]
+    fn a_server_says_each_link_s_liveness_and_payloads_and_each_cell_s_size() {
+        let link = |id, gap| Link { id, cell: "notes".into(), gap, last_bytes: 40, total_bytes: 900 };
+        let v = served(&[link(1, 800), link(2, 2500)], &[("notes", 128, true), ("wallet", 4096, false)], &t());
+        assert_eq!(
+            v["clients"][0],
+            serde_json::json!({ "id": 1, "cell": "notes", "status": "healthy", "gap": 800, "lastPayloadBytes": 40, "totalBytes": 900 })
+        );
+        assert_eq!((v["clients"][1]["status"].as_str(), v["clients"][1]["frozenFor"].as_u64()), (Some("frozen"), Some(2500)));
+        assert_eq!(v["cellSizes"], serde_json::json!({ "notes": 128, "wallet": 4096 }));
+        assert_eq!(v["breakers"], serde_json::json!(["wallet"]));
+    }
+
+    #[test]
+    fn effects_that_got_their_turn_are_the_drain_rate() {
+        let before = DRAINED.load(Ordering::Relaxed);
+        drop([Waiting::new(), Waiting::new(), Waiting::new()]);
+        assert!(DRAINED.load(Ordering::Relaxed) >= before + 3);
+
+    }
+
+    #[test]
     fn the_loop_line_says_how_late_and_the_likely_cause() {
         let lp = Loop {
             layer: Layer { status: Status::Frozen, measured: 2400, since: Some(1) },
             queue: 3,
+            drained: 0,
             last: Some(("orders.recalc".into(), 2300)),
         };
         assert_eq!(

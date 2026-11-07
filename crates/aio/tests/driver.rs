@@ -862,7 +862,14 @@ fn a_shot_shows_the_hover_look_only_where_hover_put_the_pointer() {
 fn a_mount_without_scrollbars_gives_them_no_room() {
     let gutter =
         "(() => { const w = document.querySelector('[data-t=wide]'); return w.offsetHeight - w.clientHeight })()";
-    assert!(TestUi::new(coach).eval(gutter).as_f64().unwrap() > 0.0, "the window's scrollbars");
+    // The host's own bar: a classic one keeps room, an overlay one (a Mac
+    // with a trackpad) is drawn over the content and keeps none.
+    let probe = "(() => { const p = document.createElement('div'); p.style.cssText = 'width: 100px; overflow: scroll';
+        document.body.append(p); const r = p.offsetWidth - p.clientWidth; p.remove(); return r })()";
+    let mut ui = TestUi::new(coach);
+    let host = ui.eval(probe);
+    assert!(host != json!(0) || cfg!(target_os = "macos"), "only macOS has overlay scrollbars");
+    assert_eq!(ui.eval(gutter), host, "the window's scrollbars, as the host draws them");
     assert_eq!(Mount::default().no_scrollbars().app(coach).eval(gutter), json!(0), "headless Chromium's none");
 }
 

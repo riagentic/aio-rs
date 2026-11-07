@@ -64,9 +64,38 @@ impl Wait {
 /// Log lines that fail a smoke test.
 pub fn bad_lines(log: &str) -> Vec<&str> {
     // A page script that throws (the shell logs it `ERROR [page] Uncaught …`).
-    const BAD: [&str; 5] = ["panicked at", "problem report written", " is degraded", "load failed", "[page] Uncaught"];
+    // A refusal (` REFUSED`: an asset not answering, a guest preload that
+    // doesn't attach) as aio's smoke fails on one.
+    const BAD: [&str; 6] =
+        ["panicked at", "problem report written", " is degraded", "load failed", "[page] Uncaught", " REFUSED"];
     log.lines().filter(|l| BAD.iter().any(|b| l.contains(b))).collect()
 }
+
+/// What the window's own check said (`--aio-smoke=1`, main.js): every
+/// asset URL answers 200, every guest preload attaches. `(passed, row)`; no
+/// line said: failed (pure).
+pub fn page_checks(log: &str) -> (bool, String) {
+    const SAID: &str = "[aio-shell] smoke: ";
+    let line = log.lines().rev().find_map(|l| l.split_once(SAID).map(|(_, s)| s).filter(|s| s.contains(" of ")));
+    let Some(said) = line else {
+        return (
+            false,
+            format!(
+                "page: its files and guest preloads unchecked (no word from the window within {} s)",
+                PAGE.as_secs()
+            ),
+        );
+    };
+    // "X of Y asset URLs answer 200, A of B guest preloads attach": each X = Y.
+    let all = said.split(", ").all(|part| {
+        let n: Vec<&str> = part.split_whitespace().collect();
+        n.len() > 2 && n[1] == "of" && n[0] == n[2]
+    });
+    (all && !said.contains("REFUSED"), format!("page: {said}"))
+}
+
+/// How long after its window is ready the window's own check may take.
+pub const PAGE: Duration = Duration::from_secs(30);
 
 /// The first display number from 90 that `taken` says is free.
 pub fn free_display(taken: impl Fn(u32) -> bool) -> Option<u32> {
@@ -361,6 +390,10 @@ pub fn report(id: &str, wait: Wait, seen: &Seen, how: &str) -> Result<String, St
             if left.is_empty() { String::new() } else { format!(" ({left:?} left)") }
         ),
     );
+    if let (Wait::Window, Some(_)) = (wait, seen.booted) {
+        let (ok, text) = page_checks(&seen.log);
+        row(ok, text);
+    }
     let bad = bad_lines(&seen.log);
     row(bad.is_empty(), "logs no panic, problem report or degraded part".into());
     if let Some(m) = &seen.memory {
@@ -408,6 +441,33 @@ pub fn startable(os: &str, artifact: &Path, id: &str, wait: Wait) -> bool {
         }
         "windows" => is_windows_zip(artifact),
         _ => false,
+    }
+}
+
+/// How `ax build` smoke-tests what it made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Smoke {
+    Off,
+    /// `--smoke`: each artifact this machine can start; the others are
+    /// listed, each with why.
+    On,
+    /// `--smoke-strict`: an artifact not smoke-tested fails the build.
+    Strict,
+}
+
+/// Why `--smoke` doesn't start `artifact`, built for OS `built_for` on an
+/// `os` machine (pure).
+pub fn not_started(os: &str, built_for: &str, artifact: &Path) -> String {
+    let name = artifact.file_name().map_or_else(String::new, |n| n.to_string_lossy().to_lowercase());
+    match () {
+        _ if name.ends_with(".apk") || name.ends_with(".aab") => {
+            "an Android package: ax test --android starts it on an emulator".into()
+        }
+        _ if built_for != os => format!("built for {built_for}"),
+        _ if name.ends_with(".exe") => "the one-click installer installs itself: its zip is the one started".into(),
+        _ if name.ends_with(".dmg") => "a disk image is mounted, not started: its zip is".into(),
+        _ if !name.contains('.') => "a web build: ax preview --web serves it".into(),
+        _ => "not a package this machine starts".into(),
     }
 }
 
@@ -505,6 +565,8 @@ pub fn run(artifact: &Path, id: &str, wait: Wait) -> Result<String, String> {
     cmd.args(wait.args())
         .current_dir(dir.join("cwd"))
         .env("AIORT_DATA", &root)
+        // Its window checks its files and guest preloads (main.js).
+        .env("AIORT_SMOKE", "1")
         // A throwaway copy: never offered a move to Applications (macOS).
         .env(aio_shell::macmove::ENV, "never")
         .env_remove("AIORT_CONFIG")
@@ -544,7 +606,13 @@ pub fn run(artifact: &Path, id: &str, wait: Wait) -> Result<String, String> {
     let memory = match (wait, booted) {
         (Wait::Window, Some(_)) => {
             std::thread::sleep(SETTLED);
-            sb.app.as_ref().and_then(|c| memory(c.id()))
+            let m = sb.app.as_ref().and_then(|c| memory(c.id()));
+            // The window's own check of its files and guest preloads.
+            let t = Instant::now();
+            while t.elapsed() < PAGE && !read_log().contains("[aio-shell] smoke: ") {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            m
         }
         _ => None,
     };
@@ -626,6 +694,16 @@ pub fn windows_script(sandbox: &str, zip: &str, id: &str, wait: Wait) -> String 
         Wait::Boot => "$null -ne (Pid-Of)".into(),
         Wait::Answer => "$p.HasExited".into(),
     };
+    // A window's own check of its files and guest preloads, said in its log.
+    let page = match wait {
+        Wait::Window => format!(
+            "$c = [Diagnostics.Stopwatch]::StartNew()
+  while (-not $p.HasExited -and $c.Elapsed.TotalSeconds -lt {} -and -not (Select-String -LiteralPath $log -SimpleMatch {} -Quiet)) {{ Start-Sleep -Milliseconds 200 }}",
+            PAGE.as_secs(),
+            q("[aio-shell] smoke: ")
+        ),
+        _ => String::new(),
+    };
     format!(
         r#"$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -640,7 +718,7 @@ try {{
   $exe = Get-ChildItem -LiteralPath "$sb\unpack" -Recurse -Filter "$id.exe" | Select-Object -First 1 -ExpandProperty FullName
   if (-not $exe) {{ throw "no $id.exe in the bundle" }}
   New-Item -ItemType Directory -Force "$sb\root", "$sb\cwd" | Out-Null
-  $env:AIORT_DATA = "$sb\root"
+  $env:AIORT_DATA = "$sb\root"; $env:AIORT_SMOKE = '1'
   Remove-Item Env:AIORT_CONFIG, Env:AIORT_TOKEN -ErrorAction SilentlyContinue
   $start = @{{ FilePath = $exe; WorkingDirectory = "$sb\cwd"; PassThru = $true; RedirectStandardOutput = "$sb\answer"; RedirectStandardError = "$sb\stderr" }}
   $args = @({args})
@@ -653,6 +731,7 @@ try {{
     if ($p.HasExited) {{ break }}
     Start-Sleep -Milliseconds 200
   }}
+  {page}
   if ($p.HasExited) {{ "exit=$($p.ExitCode)"; "said=" + ((Get-Content -Raw -LiteralPath "$sb\answer") -replace '\s+', ' ') }}
   elseif ($t.Elapsed.TotalSeconds -lt {boot}) {{
     if ($null -eq (Pid-Of)) {{ 'stop=nopid' }} else {{
@@ -830,6 +909,40 @@ mod tests {
             "2026 ERROR [page] Uncaught SyntaxError: Unexpected token ')' src=aio://app/:1\n2026 WARN  [page] slow";
         assert_eq!(bad_lines(page), [page.lines().next().unwrap()], "a page script that throws");
         assert!(bad_lines("2026 [aio] window ready\n2026 [aio] todo stopped").is_empty());
+        let refused = "2026 ERROR [aio-shell] smoke: asset REFUSED: aio://app/logo.png answers 404";
+        assert_eq!(bad_lines(refused), [refused], "a refusal, as aio's smoke");
+        assert!(bad_lines("2026 [aio] call refused: ACTION_REFUSED").is_empty());
+    }
+
+    /// aio's smoke: every file the page names answers 200, every declared
+    /// guest preload attaches; the window says so, or the row fails.
+    #[test]
+    fn the_window_s_files_and_guest_preloads_are_checked() {
+        let said = |s: &str| format!("2026 [aio] window ready\n2026 ERROR [aio-shell] smoke: {s}\n");
+        let (ok, row) = page_checks(&said("12 of 12 asset URLs answer 200, 1 of 1 guest preloads attach"));
+        assert!(ok, "{row}");
+        assert_eq!(row, "page: 12 of 12 asset URLs answer 200, 1 of 1 guest preloads attach");
+        assert!(!page_checks(&said("11 of 12 asset URLs answer 200, 0 of 0 guest preloads attach")).0);
+        assert!(!page_checks(&said("3 of 3 asset URLs answer 200, 0 of 1 guest preloads attach")).0);
+        let (ok, row) = page_checks("2026 [aio] window ready");
+        assert!(!ok && row.contains("unchecked"), "{row}");
+        assert!(
+            page_checks(&said("asset REFUSED: aio://app/x answers 404")).1.contains("unchecked"),
+            "a refusal is no summary"
+        );
+    }
+
+    #[test]
+    fn an_artifact_not_started_says_why() {
+        let why = |os, built_for, f: &str| not_started(os, built_for, Path::new(f));
+        assert_eq!(
+            why("linux", "linux", "dist/notes-1.0.0-android-arm64-v8a.apk"),
+            "an Android package: ax test --android starts it on an emulator"
+        );
+        assert_eq!(why("linux", "windows", "dist/notes-1.0.0-windows-x64.zip"), "built for windows");
+        assert!(why("windows", "windows", "dist/notes-1.0.0-win-x64.exe").contains("installs itself"));
+        assert!(why("macos", "macos", "dist/notes-1.0.0.dmg").contains("disk image"));
+        assert!(why("linux", "linux", "dist/notes-web").contains("ax preview --web"));
     }
 
     #[test]
@@ -1029,7 +1142,8 @@ while :; do sleep 0.1; done"#,
 
     #[test]
     fn what_windows_said_is_the_same_report() {
-        let out = "boot=2400\r\nstop=900:0\r\nhealth=False\r\nleft=\r\n--log--\r\n2026 [aio] window ready\r\n";
+        let out = "boot=2400\r\nstop=900:0\r\nhealth=False\r\nleft=\r\n--log--\r\n2026 [aio] window ready\r\n\
+                   2026 [aio-shell] smoke: 4 of 4 asset URLs answer 200, 0 of 0 guest preloads attach\r\n";
         let seen = seen_of(out, Wait::Window);
         assert_eq!(
             seen,
@@ -1038,12 +1152,13 @@ while :; do sleep 0.1; done"#,
                 answer: None,
                 stop: Stop::Exited { after: Duration::from_millis(900), status: Ok(()), left: false },
                 left: vec![],
-                log: "2026 [aio] window ready\r\n".into(),
+                log: "2026 [aio] window ready\r\n2026 [aio-shell] smoke: 4 of 4 asset URLs answer 200, 0 of 0 guest preloads attach\r\n".into(),
                 memory: None,
             }
         );
         let ok = report("notes", Wait::Window, &seen, "--quit").unwrap();
         assert!(ok.contains("✓ boots: window ready in 2.4 s") && ok.contains("✓ stops on --quit in 0.9 s"), "{ok}");
+        assert!(ok.contains("✓ page: 4 of 4 asset URLs answer 200, 0 of 0 guest preloads attach"), "{ok}");
         let bad = seen_of(
             "boot=100\nstop=hung\nhealth=True\nleft=812 99\n--log--\nthread 'main' panicked at x\n",
             Wait::Window,
@@ -1055,6 +1170,7 @@ while :; do sleep 0.1; done"#,
             "✗ stops cleanly",
             "✗ leaves no process behind ([812, 99] left)",
             "✗ logs no panic",
+            "✗ page: its files and guest preloads unchecked",
             "log (newest last)",
         ] {
             assert!(e.contains(row), "{row}: {e}");
@@ -1100,7 +1216,7 @@ while :; do sleep 0.1; done"#,
             answer: None,
             stop: Stop::NotTried,
             left: vec![],
-            log: String::new(),
+            log: "[aio-shell] smoke: 1 of 1 asset URLs answer 200, 0 of 0 guest preloads attach".into(),
             memory: Some(m),
         };
         let out = report("notes", Wait::Window, &seen, "SIGTERM").unwrap();

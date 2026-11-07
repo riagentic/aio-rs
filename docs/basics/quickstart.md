@@ -30,8 +30,10 @@ needed ([where an app gets aio-rs from](setup.md#where-an-app-gets-aio-rs-from))
 ax create notes                      # a window app (the default template)
 ax create notes --template cli       # a command-line tool on a saved cell
 ax create board --template service   # cells served to clients, no window
+ax create list --template todo       # a window on a saved todo list
+ax create balls --template canvas    # a window drawing a world a pure function moves
 ax create notes --id notes-dev       # its id apart from its name (its data's home)
-ax create notes --aio-version 0.2.0  # another aio-rs release (main, latest)
+ax create notes --aio-version 0.3.0  # another aio-rs release (main, latest)
 ax create notes --aio ../aio-rs      # an aio-rs checkout instead, named relative to the app
 ax create notes --target deb,android # its [build] targets
 ax create notes --css tailwind       # Tailwind writes its stylesheet
@@ -41,9 +43,9 @@ ax create notes --force              # into a folder that holds files already
 | Option | What it does | Default |
 |---|---|---|
 | `<name>` | the folder, the package, the binary: lowercase letters, digits and `-`, starting with a letter, not `app` or ending in `-app` | – |
-| `--template` | `app`, `cli` or `service` | `app` |
+| `--template` | `app`, `todo`, `canvas`, `cli` or `service` | `app` |
 | `--id` | `[app] id`: where its data lives; refused when an installed app has it (the two would share data) | the name |
-| `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.2.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
+| `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.3.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
 | `--aio` | an aio-rs checkout (`crates/aio`, `crates/aio-shell`) instead, named relative to the app; the two share a folder below the root | – |
 | `--target` | `[build] targets`: the kinds `ax build` makes (`ax build <app> --list`); `android` a window app's | none: this OS's bundle |
 | `--css tailwind` | `[build] css` runs `tailwindcss -i src/app.css -o assets/style.css` before every build; `src/app.css` starts with the template's styles (window app) | – |
@@ -60,11 +62,13 @@ ax create notes --force              # into a folder that holds files already
 - Nothing of the machine it was made on is in the app (no folder of yours,
   no checkout's absolute path): a clone builds anywhere.
 
-### The three templates
+### The five templates
 
 | Template | `[app] mode` | Features | `src/lib.rs` holds | Runs as |
 |---|---|---|---|---|
 | `app` | `standalone` | `kit` (and `web` for its browser build) | the `Counter` cell, its window `App`, a UI test | a desktop window; `ax dev --web`, `ax build --android` for the other targets |
+| `todo` | `standalone` | `kit` | the `Todos` cell (saved), its window (add, tick, filter, clear), tests | a desktop window |
+| `canvas` | `standalone` | `kit` | the `World` cell, `step` (the pure function that moves it, tested), its window (a canvas) | a desktop window |
 | `cli` | `cli` | none | the `Notes` cell, `run` (one command on it), a test | `notes add buy milk`, `notes list`, `notes done 1` |
 | `service` | `server` | `net` | the `Board` cell (`shared`), a `#[client]` method, a test | a headless server on `[server] listen` (`127.0.0.1:7420`) |
 
@@ -422,13 +426,13 @@ on disk, who decided each setting).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ax create` refuses: no aio-rs checkout | a prebuilt `ax` doesn't know where aio-rs's source is | `ax create notes --aio <checkout>` |
+| `ax create --aio <dir>` refuses: no aio-rs checkout there | the folder holds no `crates/aio` and `crates/aio-shell` | name the checkout's root, or drop `--aio` (aio-rs from git) |
 | `ax create` refuses the name | not lowercase letters, digits and `-`, or `app` / `…-app` | `notes`, `my-notes` |
 | `ax create` refuses the id | an installed app has it | `--id notes-dev`, or `ax remove notes` first |
 | the build fails naming an `aio.toml` key | `aio.toml` is parsed as the app builds | fix that key ([reference](../reference/aio-toml.md)) |
 | `cc` or `link.exe` not found | no C toolchain | [setup](setup.md#1-rust-and-a-c-toolchain) |
 | the window never opens (Linux) | Electron's system libraries are missing | install what `ax setup` names |
-| `ax dev` rebuilds on every Rust edit | Windows (no hot-patching there yet), or an edit a patch can't take (a `Cargo.toml`) | expected |
+| `ax dev` rebuilds on every Rust edit | an edit a patch can't take (a `Cargo.toml`), or a Windows system that forces ASLR | expected |
 | a CSS edit doesn't show | the CSS is kept in `once` (made once) | `aio::use_css!` in a hole |
 | the app starts with no data | `[app] id` or the cell's `id` changed | change it back |
 | a second `ax dev` shows nothing new | the running app took the launch and the new one ended | stop the first, or `--instance <n>` |

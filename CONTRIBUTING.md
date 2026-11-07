@@ -57,6 +57,7 @@ The gates, in order:
 - `cargo test --workspace --all-features`, plus `aio-rs` without `compat`.
   The web build's browser test needs the lock's `wasm-bindgen` (`ax setup`
   fetches it); without it the test is skipped and `./ci.sh` says so.
+  GitHub CI sets `AIO_CI_WEB`: there a browser test that would skip fails.
 - `scripts/dx-metrics --check`: a template app built, edited live under
   `ax dev` and smoke-run; its row (build times, sizes, memory) is appended
   to `scripts/dx-trend.csv` (commit it). A number past its limit fails,
@@ -146,13 +147,14 @@ Set the version (below), then, on the commit to release:
    the default of `--url`).
 
 By hand instead (OS signing needs it: the workflow holds no Windows
-certificate or Apple identity): on a Mac `ax release --aio --dir <d>`,
-copy the archive into the Linux folder, then on Linux
+certificate or Apple identity): on an arm64 Mac
+`ax release --aio --target x86_64-apple-darwin --dir <d>` (both Mac archives),
+copy the two archives into the Linux folder, then on Linux
 `ax release --aio --windows --dir dist/v<version>`, check, and
 `gh release create v<version> --repo riagentic/aio-rs dist/v<version>/*`.
 
 `dist/` is git-ignored. The version is `[workspace.package] version` in
-`Cargo.toml` (every crate takes it) and the five `[workspace.dependencies]`
+`Cargo.toml` (every crate takes it) and the eight `[workspace.dependencies]`
 lines beside it. Add its entry to `CHANGELOG.md`.
 
 ### Signing

@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""ax dev's builds run the app as the release build does: the proof.
+
+The template app (`ax create`) with a fixture of tests (tests/parity.rs:
+its cell's logic at the edges, Rust's overflow and debug assertions, the
+window driven through TestUi, its page and surface as drawn), run as
+
+  dev       `ax dev`'s build: its layout (`dev::layout()`: the
+            desktop-dev profile and its overrides) with
+            aio's `dev` feature (as aio-shell's `dev` turns it on), the
+            tooling `ax dev` adds (hot-patch table, live CSS, live markup,
+            overlay, inspector) in
+  ax-test   `ax test`, as a person runs the app's tests
+  release   `cargo test --release`: the build people get
+
+Each test's outcome and every value the fixture says (`PARITY k=v`) must be
+the same in all three: a difference fails, both sides named. `--self-test`
+first shows the check failing where builds do differ: a plain `cargo test`
+(debug assertions and overflow checks on) against the release build.
+
+  scripts/parity [--self-test] [--keep]
+"""
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+NAME = "parity"
+WINDOWS = os.name == "nt"
+
+FIXTURE = r'''//! scripts/parity's fixture: what the app does, said as `PARITY k=v`
+//! lines that must read the same under `ax dev`, `ax test` and release.
+use aio::testing::TestUi;
+use parity::*;
+
+/// One value, to the file the run names (a test's output is captured).
+fn say(k: &str, v: impl std::fmt::Debug) {
+    use std::io::Write;
+    let Some(to) = std::env::var_os("AIO_PARITY_OUT") else { return };
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(to).unwrap();
+    // One write: tests running side by side never cut into each other's line.
+    f.write_all(format!("PARITY {k}={v:?}\n").as_bytes()).unwrap();
+}
+
+/// A short, stable digest of a text (FNV-1a), so a page fits on one line.
+fn digest(s: &str) -> String {
+    let h = s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("{h:016x}/{}", s.len())
+}
+
+#[test]
+fn rust_reads_as_release() {
+    say("debug_assertions", cfg!(debug_assertions));
+    let x: u8 = std::hint::black_box(255);
+    say("u8_255_plus_1", std::panic::catch_unwind(|| x + 1).ok());
+    let fired = std::panic::catch_unwind(|| debug_assert!(std::hint::black_box(false), "a debug assertion"));
+    say("debug_assert_fires", fired.is_err());
+}
+
+#[test]
+fn the_cells_logic_at_its_edges() {
+    let mut c = Counter { count: i64::MAX };
+    let added = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.add(1);
+        c.count
+    }));
+    say("count_max_plus_1", added.ok());
+    let mut c = Counter { count: 41 };
+    c.add(1);
+    say("count_41_plus_1", c.count);
+    c.reset();
+    say("count_reset", c.count);
+}
+
+#[test]
+fn the_window_as_drawn() {
+    let mut ui = TestUi::new(App);
+    say("start_html", digest(&ui.html()));
+    say("start_count", ui.text("count"));
+    say("reset_disabled", ui.disabled("ResetButton"));
+    ui.click("AddButton");
+    ui.click("AddButton");
+    ui.click("SubtractButton");
+    say("after_clicks", ui.text("count"));
+    say("after_html", digest(&ui.html()));
+    ui.click("ResetButton");
+    say("after_reset", ui.text("count"));
+    say("reset_html", digest(&ui.html()));
+}
+'''
+
+
+def layout():
+    """`ax dev`'s cargo arguments, as `dev::layout()` gives them (pure): the
+    desktop-dev profile and its overrides."""
+    profile = "desktop-dev"
+    overrides = ["strip=false", 'inherits="dev"', "debug-assertions=false", "overflow-checks=false"]
+    return [a for o in overrides for a in ("--config", f"profile.{profile}.{o}")] + [
+        "--profile", profile]
+
+
+def run(cmd, cwd, env, check=True):
+    out = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if check and out.returncode:
+        sys.exit(f"parity: {' '.join(map(str, cmd))} failed:\n{out.stdout[-4000:]}{out.stderr[-4000:]}")
+    return out
+
+
+def results(text):
+    """Each test's outcome and each `PARITY` value in `text` (pure)."""
+    tests, said = {}, {}
+    for line in text.splitlines():
+        m = re.match(r"^test (\S+) \.\.\. (ok|FAILED|ignored)", line)
+        if m:
+            tests[m.group(1)] = m.group(2)
+        m = re.match(r"^PARITY (\w+)=(.*)$", line)
+        if m:
+            said[m.group(1)] = m.group(2)
+    return tests, said
+
+
+def differences(a, b):
+    """What differs between runs `a` and `b` ((name, results) each; pure)."""
+    (an, (at, asaid)), (bn, (bt, bsaid)) = a, b
+    out = []
+    for kind, x, y in (("test", at, bt), ("value", asaid, bsaid)):
+        for k in sorted(set(x) | set(y)):
+            if x.get(k) != y.get(k):
+                out.append(f"{kind} {k}: {an} {x.get(k, '(none)')} ≠ {bn} {y.get(k, '(none)')}")
+    return out
+
+
+def self_test_pure():
+    a = ("dev", results("PARITY x=1\ntest t ... ok\n"))
+    assert differences(a, ("release", results("PARITY x=1\ntest t ... ok\n"))) == []
+    d = differences(a, ("release", results("PARITY x=2\ntest t ... FAILED\n")))
+    assert d == ["test t: dev ok ≠ release FAILED", "value x: dev 1 ≠ release 2"], d
+    assert differences(a, ("r", results("test t ... ok\n"))) == ["value x: dev 1 ≠ r (none)"]
+
+
+def main():
+    self_test = "--self-test" in sys.argv
+    keep = "--keep" in sys.argv
+    self_test_pure()
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
+    env["AIORT_NO_WARM"] = "1"
+    here = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], ROOT, env)
+    ax = here / "debug" / ("ax.exe" if WINDOWS else "ax")
+    # The app's builds in one folder kept between runs (its libraries built once).
+    env["CARGO_TARGET_DIR"] = str(pathlib.Path(os.environ.get("AIO_PARITY_TARGET") or ROOT / "target" / "parity"))
+    (ROOT / "target").mkdir(exist_ok=True)
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="aio-parity-", dir=ROOT / "target"))
+    try:
+        run([ax, "create", NAME, "--aio", ROOT, "--no-warm"], tmp, env)
+        app = tmp / NAME
+        shutil.copy(ROOT / "Cargo.lock", app / "Cargo.lock")
+        (app / "tests").mkdir(exist_ok=True)
+        (app / "tests" / "parity.rs").write_text(FIXTURE)
+        test = ["cargo", "test", "-p", NAME]
+        harness = ["--", "--test-threads=1"]
+        runs = {
+            # As ax dev's fat build: its layout; aio as aio-shell's `dev` turns it on there
+            # (the app's library, tested here, has no aio-shell of its own).
+            "dev": test + layout() + ["--features", "aio/dev"] + harness,
+            "ax-test": [ax, "test", NAME],
+            "release": test + ["--release"] + harness,
+        }
+        if self_test:
+            runs["debug"] = test + harness
+        got = {}
+        for name, cmd in runs.items():
+            said_to = tmp / f"{name}.said"
+            out = run(cmd, app, env | {"AIO_PARITY_OUT": str(said_to)}, check=False)
+            text = out.stdout + out.stderr + (said_to.read_text() if said_to.exists() else "")
+            got[name] = results(text)
+            tests, said = got[name]
+            print(f"parity: {name}: {len(tests)} tests, {len(said)} values (exit {out.returncode})")
+            if not said:
+                sys.exit(f"parity: {name} said nothing:\n{text[-4000:]}")
+        bad = []
+        if self_test:
+            d = differences(("debug", got.pop("debug")), ("release", got["release"]))
+            if not any("u8_255_plus_1" in x for x in d) or not any("debug_assertions" in x for x in d):
+                sys.exit(f"parity --self-test: a plain debug build should differ from release, and didn't: {d}")
+            print(f"parity --self-test: a plain debug build differs from release, as it should ({len(d)} differences)")
+        for name in ("dev", "ax-test"):
+            bad += differences((name, got[name]), ("release", got["release"]))
+        if bad:
+            print("parity: ax dev's build doesn't run the app as release does:", file=sys.stderr)
+            for b in bad:
+                print(f"  {b}", file=sys.stderr)
+            sys.exit(1)
+        tests, said = got["release"]
+        print(f"parity: dev, ax test and release agree: {len(tests)} tests, {len(said)} values")
+        for k, v in sorted(said.items()):
+            print(f"  {k:20} {v}")
+    finally:
+        if keep:
+            print(f"parity: kept {tmp}")
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

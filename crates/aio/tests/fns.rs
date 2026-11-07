@@ -3,12 +3,16 @@ use aio::fns::{Access, Req, ServerFn};
 use aio::http::Http;
 use aio::prelude::*;
 use aio::sync::{Options, Remote, serve_with};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::Message;
+// The aio (Deno) client's frames, with `compat`.
+#[cfg(feature = "compat")]
+use {
+    futures_util::{SinkExt, StreamExt},
+    serde_json::{Value, json},
+    tokio_tungstenite::tungstenite::Message,
+};
 
 #[cell(shared)]
 pub struct Board {
@@ -291,9 +295,11 @@ async fn users_known_by_token_are_who_they_say_everywhere_and_the_key_opens_noth
     assert_eq!(hook.who("eve").map(|s| (s.user, s.role)), Some(("eve".into(), "user".into())));
 }
 
+#[cfg(feature = "compat")]
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// The next `t` frame's `d`, skipping others.
+#[cfg(feature = "compat")]
 async fn next(w: &mut Ws, t: &str) -> Value {
     loop {
         let m = tokio::time::timeout(Duration::from_secs(5), w.next()).await.unwrap().unwrap().unwrap();

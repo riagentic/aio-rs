@@ -304,3 +304,27 @@ fn persist_false_keeps_the_state_in_memory_only() {
     assert!(bad("coalesce_ms = 120000").contains("over a minute"));
     assert!(!bad("backup_every = \"often\"").is_empty());
 }
+
+/// aio's `persist: "none"`: a cell that starts from its defaults each launch.
+#[cell(persist = false)]
+pub struct Draft {
+    pub text: String,
+}
+
+#[methods]
+impl Draft {
+    pub fn type_in(&mut self, t: String) {
+        self.text = t;
+    }
+}
+
+#[test]
+fn a_cell_with_persist_false_is_never_saved_even_on_a_file() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("state.db");
+    let h = Handle::<Draft>::open(&p).unwrap();
+    h.type_in("half a thought".into()).unwrap();
+    drop(h);
+    assert_eq!(Handle::<Draft>::open(&p).unwrap().state().text, "", "the next launch starts empty");
+    assert!(!p.exists(), "nothing written for it");
+}

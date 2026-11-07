@@ -34,13 +34,16 @@ pub(crate) fn contrast(a: f64, b: f64) -> f64 {
 
 /// The accent fill and the ink on it: the vivid colour with dark ink when it
 /// carries one, else a darker fill with white (yellows stay yellow).
-pub(crate) fn accent_fill(hue: f64) -> (String, &'static str, Hsl) {
-    let ink = luminance((hue, 0.45, 0.11));
-    if let Some(l) = (50..=64).rev().find(|&l| contrast(luminance((hue, 0.82, f64::from(l) / 100.0)), ink) >= 4.6) {
-        return (format!("hsl({hue} 82% {l}%)"), "dark", (hue, 0.82, f64::from(l) / 100.0));
+/// (`hue` an integer: its text no float formatting, which a page then
+/// leaves out: ~10 KB of wasm.)
+pub(crate) fn accent_fill(hue: u16) -> (String, &'static str, Hsl) {
+    let h = f64::from(hue);
+    let ink = luminance((h, 0.45, 0.11));
+    if let Some(l) = (50..=64).rev().find(|&l| contrast(luminance((h, 0.82, f64::from(l) / 100.0)), ink) >= 4.6) {
+        return (format!("hsl({hue} 82% {l}%)"), "dark", (h, 0.82, f64::from(l) / 100.0));
     }
-    let l = (20..=52).rev().find(|&l| contrast(luminance((hue, 0.72, f64::from(l) / 100.0)), 1.0) >= 4.6).unwrap_or(20);
-    (format!("hsl({hue} 72% {l}%)"), "#fff", (hue, 0.72, f64::from(l) / 100.0))
+    let l = (20..=52).rev().find(|&l| contrast(luminance((h, 0.72, f64::from(l) / 100.0)), 1.0) >= 4.6).unwrap_or(20);
+    (format!("hsl({hue} 72% {l}%)"), "#fff", (h, 0.72, f64::from(l) / 100.0))
 }
 
 /// The app's colours outside its page (the splash, the download window),
@@ -49,7 +52,7 @@ pub(crate) fn accent_fill(hue: f64) -> (String, &'static str, Hsl) {
 /// `--aio-accent` and `--aio-border`).
 pub fn identity(hue: u16) -> [[String; 4]; 2] {
     let h = f64::from(hue);
-    let (_, _, bar) = accent_fill(h);
+    let (_, _, bar) = accent_fill(hue);
     [
         [hex((h, 0.4, 0.99)), hex((h, 0.14, 0.12)), hex(bar), hex((h, 0.12, 0.88))],
         [hex((h, 0.14, 0.09)), hex((h, 0.1, 0.94)), hex(bar), hex((h, 0.1, 0.26))],

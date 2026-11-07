@@ -13,7 +13,12 @@ pub const TEMPLATES: &[(&str, &str)] = &[
     ("app", "a desktop window on a saved cell (a counter)"),
     ("cli", "a command-line tool on a saved cell (notes)"),
     ("service", "cells served to clients, no window (a board)"),
+    ("todo", "a desktop window on a saved list: add, tick, filter, clear"),
+    ("canvas", "a desktop window drawing a world a pure function moves"),
 ];
+
+/// The templates with a window.
+const WINDOWS: [&str; 3] = ["app", "todo", "canvas"];
 
 const APP_LIB: &str = include_str!("create/app_lib.rs");
 /// The window app's stylesheet (here too, where the template's Rust,
@@ -21,6 +26,8 @@ const APP_LIB: &str = include_str!("create/app_lib.rs");
 const STYLE_CSS: &str = include_str!("../assets/style.css");
 const CLI_LIB: &str = include_str!("create/cli_lib.rs");
 const SERVICE_LIB: &str = include_str!("create/service_lib.rs");
+const TODO_LIB: &str = include_str!("create/todo_lib.rs");
+const CANVAS_LIB: &str = include_str!("create/canvas_lib.rs");
 
 const APP_MAIN: &str = "// The launcher: the app is the library, so `ax dev` can hot-patch all of it.
 // A release build on Windows is a window app: no console opens with it.
@@ -168,7 +175,7 @@ impl Aio {
                     n[2],
                     pre.map_or(String::new(), |p| format!("-{p}"))
                 ))),
-                None => Err(format!("aio-rs version {v}: a release (0.2.0), main or latest")),
+                None => Err(format!("aio-rs version {v}: a release (0.3.0), main or latest")),
             },
         }
     }
@@ -393,11 +400,13 @@ fn readme(n: &New, ui: bool) -> String {
     let name = n.name;
     let what = match n.template {
         "app" => "a desktop window on a saved cell",
+        "todo" => "a desktop window on a saved todo list",
+        "canvas" => "a desktop window drawing a world a pure function moves",
         "cli" => "a command-line tool on a saved cell",
         _ => "a service: cells served to clients, no window",
     };
     let run = match n.template {
-        "app" => format!("ax dev {name}                 # the window; a saved edit hot-patches in"),
+        "app" | "todo" | "canvas" => format!("ax dev {name}                 # the window; a saved edit hot-patches in"),
         "cli" => format!("cargo run -q -p {name}-app -- add milk   # one command, then out (list, done <n>)"),
         _ => format!("ax dev {name}                 # served on [server] listen until stopped"),
     };
@@ -448,7 +457,8 @@ fn readme(n: &New, ui: bool) -> String {
 fn agents(n: &New, ui: bool) -> String {
     let (name, docs) = (n.name, n.aio.docs());
     let lib = match n.template {
-        "app" => "its cell and its window",
+        "app" | "todo" => "its cell and its window",
+        "canvas" => "its cell, `step` (the pure function that moves it, tested) and its window (a canvas)",
         "cli" => "its cell and its commands",
         _ => "its cell and its served methods",
     };
@@ -507,6 +517,8 @@ pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
     name_ok(id).map_err(|e| format!("--id {e}"))?;
     let (lib, main, mode, server) = match template {
         "app" => (APP_LIB, APP_MAIN, "standalone", ""),
+        "todo" => (TODO_LIB, APP_MAIN, "standalone", ""),
+        "canvas" => (CANVAS_LIB, APP_MAIN, "standalone", ""),
         "cli" => (CLI_LIB, CLI_MAIN, "cli", ""),
         "service" => (
             SERVICE_LIB,
@@ -519,16 +531,16 @@ pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
             return Err(format!("--template {t}: one of {}", all.join(", ")));
         }
     };
-    let ui = template == "app";
+    let ui = WINDOWS.contains(&template);
     let kinds: Vec<&str> = crate::fleet::Kind::ALL.iter().map(|k| k.name()).collect();
     if let Some(t) = n.targets.iter().find(|t| !kinds.contains(t)) {
         return Err(format!("--target {t}: one of {}", kinds.join(", ")));
     }
     if let Some(t) = n.targets.iter().find(|t| !ui && ["android", "web"].contains(t)) {
-        return Err(format!("--target {t}: a window app's (--template app), not a {template}'s"));
+        return Err(format!("--target {t}: a window app's (--template app, todo or canvas), not a {template}'s"));
     }
     if !ui && n.tailwind {
-        return Err(format!("--css tailwind: a window app's (--template app), not a {template}'s"));
+        return Err(format!("--css tailwind: a window app's (--template app, todo or canvas), not a {template}'s"));
     }
     let (aio, aio1, shell1) = (n.aio.source("aio", 0), n.aio.source("aio", 1), n.aio.source("aio-shell", 1));
     // The window in a browser: aio's page half and the `start` binding.
@@ -542,7 +554,7 @@ wasm-bindgen = "0.2"
     );
     // One fixed feature set per kind (each other set is one more ax build).
     let feats = match template {
-        "app" => r#", features = ["kit"]"#,
+        "app" | "todo" | "canvas" => r#", features = ["kit"]"#,
         "service" => r#", features = ["net"]"#,
         _ => "",
     };
@@ -583,9 +595,13 @@ debug = "line-tables-only"
 debug = false
 
 # Every debug build ax makes: one copy of the libraries (ax dev, test, lint).
+# Its Rust runs as the release build's (no debug assertions, no overflow
+# checks): what you try under ax dev is what people get.
 [profile.desktop-dev]
 inherits = "dev"
 strip = false
+debug-assertions = false
+overflow-checks = false
 "#,
         deps = if ui { web } else { String::new() },
         from = match n.aio {
@@ -613,7 +629,9 @@ path = "src/main.rs"
 [dependencies]
 app = {{ package = "{name}", path = ".." }}
 aio = {{ package = "aio-rs", {aio1} }}
-aio-shell = {{ package = "aio-rs-shell", {shell1} }}
+# No updater until aio.toml has an `[updates] url`: then ax's builds turn
+# on aio-rs-shell's `updates` themselves.
+aio-shell = {{ package = "aio-rs-shell", {shell1}, default-features = false }}
 "#
     );
     let mut build = vec![];
@@ -782,13 +800,25 @@ pub fn run(dir: &Path, n: &New, (target, installed): (&Path, &Path), force: bool
 /// Write the new app's `Cargo.lock` now, so its first commit holds it and
 /// that commit's build is a release, not a dirty tree; None when written,
 /// else what to do (the first build writes it then).
+/// Cargo's own words stay in: its last line, the cause (offline, a release
+/// not there yet), not its whole chain.
 pub fn lock(app: &Path) -> Option<String> {
-    let done = std::process::Command::new("cargo")
-        .args(["generate-lockfile", "--quiet"])
-        .current_dir(app)
-        .status()
-        .is_ok_and(|s| s.success());
-    (!done).then(|| "no Cargo.lock yet: the first build writes it; commit it with the app".into())
+    let o = std::process::Command::new("cargo").args(["generate-lockfile", "--quiet"]).current_dir(app).output();
+    let why = match o {
+        Ok(o) if o.status.success() => return None,
+        Ok(o) => last_line(&String::from_utf8_lossy(&o.stderr)).map(|l| format!(" (cargo: {l})")),
+        Err(e) => Some(format!(" (cargo: {e})")),
+    };
+    Some(format!(
+        "no Cargo.lock yet{}: the first build writes it; commit it with the app (an aio-rs it can't fetch: \
+         ax pin <app> <version>, or --aio <checkout>)",
+        why.unwrap_or_default()
+    ))
+}
+
+/// The last line of `text` that says anything (pure).
+fn last_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).rfind(|l| !l.is_empty())
 }
 
 /// `git init` and the first commit, so the app's builds are numbered from
@@ -861,11 +891,17 @@ pub fn this_checkout() -> Option<&'static Path> {
 #[path = "create/app_lib.rs"]
 mod app_lib;
 #[cfg(test)]
+#[path = "create/canvas_lib.rs"]
+mod canvas_lib;
+#[cfg(test)]
 #[path = "create/cli_lib.rs"]
 mod cli_lib;
 #[cfg(test)]
 #[path = "create/service_lib.rs"]
 mod service_lib;
+#[cfg(test)]
+#[path = "create/todo_lib.rs"]
+mod todo_lib;
 
 #[cfg(test)]
 mod tests {
@@ -890,7 +926,11 @@ mod tests {
             assert_eq!(cfg.app.maintainer.as_deref(), Some("A <a@example.org>"), "ax build --deb works as created");
             let git = format!(r#"git = "https://github.com/riagentic/aio-rs", tag = "{tag}""#);
             assert!(get("Cargo.toml").contains(&format!(r#"aio = {{ package = "aio-rs", {git}"#)), "a release");
-            assert!(get("app/Cargo.toml").contains(&format!(r#"aio-shell = {{ package = "aio-rs-shell", {git} }}"#)));
+            assert!(
+                get("app/Cargo.toml").contains(&format!(
+                    r#"aio-shell = {{ package = "aio-rs-shell", {git}, default-features = false }}"#
+                ))
+            );
             assert!(
                 get("app/Cargo.toml").contains("name = \"my-tool\"\npath = \"src/main.rs\""),
                 "the binary is the app's name"
@@ -903,7 +943,9 @@ mod tests {
             );
             assert!(!get("app/Cargo.toml").contains("[build-dependencies]"), "no host build of aio");
             assert!(
-                get("Cargo.toml").contains("[profile.desktop-dev]\ninherits = \"dev\"\nstrip = false\n"),
+                get("Cargo.toml").contains(
+                    "[profile.desktop-dev]\ninherits = \"dev\"\nstrip = false\ndebug-assertions = false\noverflow-checks = false\n"
+                ),
                 "ax dev's profile"
             );
             assert_eq!(get("CLAUDE.md"), "@AGENTS.md\n", "aio: every template's CLAUDE.md imports AGENTS.md");
@@ -915,7 +957,7 @@ mod tests {
             for want in ["ax agent", "ax stop my-tool", "## Rules", "## The loop", "ax expect my-tool", "AIORT_DATA"] {
                 assert!(agents.contains(want), "{want}: the rules and the loop inline\n{agents}");
             }
-            assert_eq!(agents.contains("ax surface"), *t == "app", "a window to read");
+            assert_eq!(agents.contains("ax surface"), WINDOWS.contains(t), "a window to read");
             assert!(get("README.md").starts_with("# my-tool\n") && get("README.md").contains("ax test my-tool"));
             assert!(
                 get(".gitignore").contains("/.data") && get(".gitignore").contains("\n.env\n*.key\n*.p12\n*.jks\n")
@@ -947,6 +989,17 @@ mod tests {
                 && lib.contains("root: app::App")
         );
         assert!(android("cli").is_none() && android("service").is_none(), "no window, no Android app");
+        for t in ["todo", "canvas"] {
+            let all = of("x", t);
+            assert_eq!(mode(t), Mode::Standalone, "{t}: a window");
+            assert!(
+                get(&all, "Cargo.toml").contains(r#"features = ["kit"]"#)
+                    && get(&all, "src/lib.rs").contains("launch(App)")
+            );
+            assert!(android(t).is_some() && get(&all, "assets/style.css") == STYLE_CSS, "{t}: as the app template");
+        }
+        assert!(get(&of("x", "todo"), "src/lib.rs").contains("pub fn clear_done("));
+        assert!(get(&of("x", "canvas"), "src/lib.rs").contains("pub fn step(w: &World) -> Vec<Ball>"));
         // The web: the app's library binds itself in the page (ax build --web links it as a cdylib).
         let root = files(&New { aio: Aio::Path("../a".into()), ..New::of("x") }).unwrap()[0].1.clone();
         let web = "[target.'cfg(target_arch = \"wasm32\")'.dependencies]\n\
@@ -956,7 +1009,7 @@ mod tests {
         assert!(!get(&of("x", "cli"), "Cargo.toml").contains("wasm32"), "a tool has no page");
         assert!(!get(&of("x", "cli"), "Cargo.toml").contains("kit"), "a tool has no views");
         let game = files(&New { template: "game", ..New::of("x") });
-        assert!(game.unwrap_err().contains("one of app, cli, service"));
+        assert!(game.unwrap_err().contains("one of app, cli, service, todo, canvas"));
     }
 
     #[test]
@@ -990,7 +1043,7 @@ mod tests {
         assert_eq!(Aio::version("0.2", none), Ok(Aio::Tag("v0.2.0".into())), "a tag has three numbers");
         assert_eq!(Aio::version("0.3.0-beta.1", none), Ok(Aio::Tag("v0.3.0-beta.1".into())));
         assert_eq!(Aio::version("main", none), Ok(Aio::Branch("main".into())));
-        assert!(Aio::version("newest", none).unwrap_err().contains("a release (0.2.0), main or latest"));
+        assert!(Aio::version("newest", none).unwrap_err().contains("a release (0.3.0), main or latest"));
         let ls = "a1\trefs/tags/v0.1.0\nb2\trefs/tags/v0.10.0-beta.1\nc3\trefs/tags/v0.2.0\nd4\trefs/tags/v0.2.0^{}\n\
                   e5\trefs/tags/nightly\nf6\trefs/tags/v0.9.0\n";
         assert_eq!(Aio::version("latest", || Ok(ls.into())), Ok(Aio::Tag("v0.9.0".into())), "a release, not a beta");
@@ -1082,7 +1135,7 @@ mod tests {
             .collect();
         machine.push(env!("CARGO_MANIFEST_DIR").into());
         for (i, (t, _)) in TEMPLATES.iter().enumerate() {
-            let (at, name) = (dir.join(format!("apps{i}")), ["win", "tool", "board"][i]);
+            let (at, name) = (dir.join(format!("apps{i}")), ["win", "tool", "board", "list", "balls"][i]);
             std::fs::create_dir_all(&at).unwrap();
             let local = Aio::checkout(&at.join(name), &checkout).unwrap();
             assert_eq!(local, Aio::Path("../../code/aio-rs/crates".into()));
@@ -1163,6 +1216,17 @@ mod tests {
         for bad in ["", "My", "2x", "a_b", "a.b", "x-", "app", "my-app", "../x"] {
             assert!(name_ok(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_lock_that_fails_says_cargos_cause_not_its_chain() {
+        let chain = "error: failed to get `aio-rs` as a dependency of package `notes`\n\nCaused by:\n  failed to load source\n\nCaused by:\n  revspec 'v9.9.9' not found\n\n";
+        assert_eq!(last_line(chain), Some("revspec 'v9.9.9' not found"));
+        assert_eq!(last_line(" \n\n"), None);
+        let d = tempfile::tempdir().unwrap();
+        let said = lock(d.path()).unwrap();
+        assert!(said.starts_with("no Cargo.lock yet (cargo: ") && said.contains("--aio <checkout>"), "{said}");
+        assert_eq!(said.lines().count(), 1, "one line: {said}");
     }
 
     #[test]

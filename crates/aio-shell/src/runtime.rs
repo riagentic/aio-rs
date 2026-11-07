@@ -96,18 +96,18 @@ pub fn pinned_in(binary: &[u8]) -> Option<String> {
 /// shows the progress; no window lands on anyone's screen). Returns its
 /// store entry.
 /// `sha` is the zip's pin ([`pinned_sha`], [`sha_in`]); none is refused.
-pub fn prefetch(version: &str, sha: Option<&str>) -> io::Result<PathBuf> {
+pub fn prefetch(version: &str, sha: Option<&str>, step: &dyn Fn(u8)) -> io::Result<PathBuf> {
     migrate();
-    prefetch_in(&root(), version, sha, &mirror())
+    prefetch_in(&root(), version, sha, &mirror(), step)
 }
 
-fn prefetch_in(root: &Path, version: &str, sha: Option<&str>, mirror: &str) -> io::Result<PathBuf> {
+fn prefetch_in(root: &Path, version: &str, sha: Option<&str>, mirror: &str, step: &dyn Fn(u8)) -> io::Result<PathBuf> {
     let dir = root.join(format!("{version}-{}", slug()));
     if !usable(std::env::consts::OS, &dir) {
         eprintln!("[aio] getting the Electron {version} runtime (once per machine)…");
         let colors = crate::splash::colors(aio::colors::hue("aio"), None);
         let look = crate::firstrun::Look { colors: &colors, at: None, icon: None, image: None };
-        fetch(&dir, None, "", version, sha, mirror, &look).map_err(|(e, _)| e)?;
+        fetch(&dir, None, "", version, sha, mirror, &look, step).map_err(|(e, _)| e)?;
     }
     stamp(&dir);
     Ok(dir)
@@ -422,7 +422,7 @@ pub fn ensure_as(
     };
     let never = || Ok(());
     let sha = pinned_sha(VERSION);
-    let fetched = || fetch(&dir, ui.as_ref(), title, VERSION, sha.as_deref(), &mirror(), &look);
+    let fetched = || fetch(&dir, ui.as_ref(), title, VERSION, sha.as_deref(), &mirror(), &look, &|_| {});
     crate::firstrun::retrying(title, VERSION, ask, back.unwrap_or(&never), fetched)?;
     stamp(&dir);
     Ok(dir)
@@ -577,7 +577,9 @@ fn staged(
 
 /// One go at fetching the runtime into `dir`, in a window when there is
 /// `ui`, checked against `sha` (none is refused, as aio refuses it). The
-/// error says if it was the download that failed.
+/// error says if it was the download that failed. `step` hears the
+/// download's percent.
+#[allow(clippy::too_many_arguments)]
 fn fetch(
     dir: &Path,
     ui: Option<&crate::firstrun::Backend>,
@@ -586,6 +588,7 @@ fn fetch(
     sha: Option<&str>,
     mirror: &str,
     look: &crate::firstrun::Look,
+    step: &dyn Fn(u8),
 ) -> Result<(), (io::Error, bool)> {
     use crate::firstrun::{Shown, download_detail};
     let open = || {
@@ -634,10 +637,18 @@ fn fetch(
         );
         return Err((io::Error::new(io::ErrorKind::InvalidData, why), false));
     };
-    install_into(dir, version, &slug, sha, mirror, &mut |got, total| match total {
-        _ if got == 0 && total.is_none() => show(None, &format!("Looking for Electron {version}…")),
-        Some(t) if got >= t => show(None, &format!("Verifying and unpacking Electron {version}…")),
-        _ => show(total.map(|t| got * 100 / t), &download_detail(crate::firstrun::words(), title, version, got, total)),
+    install_into(dir, version, &slug, sha, mirror, &mut |got, total| {
+        if let Some(t) = total.filter(|&t| t > 0) {
+            step((got.min(t) * 100 / t) as u8);
+        }
+        match total {
+            _ if got == 0 && total.is_none() => show(None, &format!("Looking for Electron {version}…")),
+            Some(t) if got >= t => show(None, &format!("Verifying and unpacking Electron {version}…")),
+            _ => show(
+                total.map(|t| got * 100 / t),
+                &download_detail(crate::firstrun::words(), title, version, got, total),
+            ),
+        }
     })
 }
 
@@ -1198,7 +1209,7 @@ mod tests {
         let sha = zip_sha(&mirror);
         let t = tempfile::tempdir().unwrap();
         // Another pin than the zip's: refused, nothing installed, nothing left.
-        let e = prefetch_in(t.path(), "45.0.1", Some(&"0".repeat(64)), &mirror).unwrap_err();
+        let e = prefetch_in(t.path(), "45.0.1", Some(&"0".repeat(64)), &mirror, &|_| {}).unwrap_err();
         assert!(
             e.to_string().contains("integrity check FAILED") && e.to_string().contains("NOT being unpacked"),
             "{e}"
@@ -1206,10 +1217,13 @@ mod tests {
         assert_eq!(left(t.path()), Vec::<String>::new());
         // No pin at all: refused before anything is fetched.
         let before = asked.load(std::sync::atomic::Ordering::SeqCst);
-        let e = prefetch_in(t.path(), "45.0.1", None, &mirror).unwrap_err();
+        let e = prefetch_in(t.path(), "45.0.1", None, &mirror, &|_| {}).unwrap_err();
         assert!(e.to_string().contains("carries no checksum"), "{e}");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), before);
-        let dir = prefetch_in(t.path(), "45.0.1", Some(&sha), &mirror).unwrap();
+        let seen = std::sync::Mutex::new(vec![]);
+        let dir = prefetch_in(t.path(), "45.0.1", Some(&sha), &mirror, &|p| seen.lock().unwrap().push(p)).unwrap();
+        let seen = seen.into_inner().unwrap();
+        assert!(seen.last() == Some(&100) && seen.is_sorted(), "the download's progress is heard: {seen:?}");
         let entry = format!("45.0.1-{}", slug());
         assert!(dir.ends_with(&entry) && usable(std::env::consts::OS, &dir));
         // aio's stamps, word for word; the fuses off; no lock, stage or probe left.
@@ -1219,11 +1233,11 @@ mod tests {
         assert!(crate::fuses::are_off(&std::fs::read(exe(&dir)).unwrap()).unwrap());
         assert_eq!(left(t.path()), std::slice::from_ref(&entry));
         // There already: nothing is asked.
-        assert_eq!(prefetch_in(t.path(), "45.0.1", Some(&sha), "http://127.0.0.1:1/").unwrap(), dir);
+        assert_eq!(prefetch_in(t.path(), "45.0.1", Some(&sha), "http://127.0.0.1:1/", &|_| {}).unwrap(), dir);
         // A tree with no `.aio-complete` is not a runtime (aio's half-done one).
         std::fs::remove_file(dir.join(COMPLETE)).unwrap();
         assert!(!usable(std::env::consts::OS, &dir));
-        prefetch_in(t.path(), "45.0.1", Some(&sha), &mirror).unwrap();
+        prefetch_in(t.path(), "45.0.1", Some(&sha), &mirror, &|_| {}).unwrap();
         assert!(usable(std::env::consts::OS, &dir));
     }
 

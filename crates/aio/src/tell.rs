@@ -26,7 +26,8 @@ pub enum Tell {
     },
     /// The app's icons and its tray's tooltip from now on, in one (aio's
     /// `appIcon()`): the `window`'s (and its taskbar entry's) and the
-    /// `tray`'s, each PNG frames (base64 or `data:` URLs) looped at `fps`,
+    /// `tray`'s, each PNG frames (base64, `data:` URLs, or the app's URL
+    /// paths of `[build] assets`: `"/icons/busy.png"`) looped at `fps`,
     /// at most 12; `Some([])`: the app's own again; `None`: as it is.
     /// `tooltip`: the tray's text when the pointer rests on it.
     Icon {
@@ -44,6 +45,16 @@ impl Tell {
     /// A notification with just a title and a body.
     pub fn notify(title: &str, body: &str) -> Self {
         Tell::Notify { title: title.into(), body: body.into(), tag: None, silent: false, route: None }
+    }
+
+    /// What a process with no window says instead (aio's `connectCli`): a
+    /// CLI client can show no card, so it says the sentence.
+    pub fn line(&self) -> String {
+        match self {
+            Tell::Notify { title, body, .. } if body.is_empty() => format!("notify: {title}"),
+            Tell::Notify { title, body, .. } => format!("notify: {title} — {body}"),
+            Tell::Icon { .. } => "icon: the app changed its icon (no window here shows it)".into(),
+        }
     }
 
     /// Refused where it is asked: a blank title is a card nobody can read.
@@ -116,5 +127,9 @@ mod tests {
         assert!(icon(None, 1).check().unwrap_err().why.contains("nothing to change"));
         assert!(icon(Some(vec![]), 0).check().is_ok(), "the app's own again");
         assert_eq!(serde_json::to_value(Tell::notify("a", "b")).unwrap()["kind"], "notify");
+        assert_eq!(
+            (Tell::notify("a", "b").line(), Tell::notify("a", "").line()),
+            ("notify: a — b".into(), "notify: a".into())
+        );
     }
 }

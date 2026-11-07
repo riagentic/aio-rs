@@ -6,8 +6,8 @@
 //! Apache-2.0), desktop only (Linux, macOS, Windows): the same table and
 //! the same calls, so the builder's output is unchanged.
 //!
-//! A release build (no `debug_assertions`) calls the function itself: a
-//! [`HotFn`] is then a plain call.
+//! Only a build with aio's `dev` feature (`ax dev`'s) has it; with no
+//! patch loaded, a [`HotFn`] is a plain call.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -146,9 +146,6 @@ impl<A, M, F: HotFunction<A, M>> HotFn<A, M, F> {
 
     /// Call it, through the table in force.
     pub fn call(&mut self, args: A) -> F::Return {
-        if !cfg!(debug_assertions) {
-            return self.inner.call_it(args);
-        }
         // A function pointer: the table has its address. (A closure that
         // holds one pointer is pointer-sized too: not one.)
         if is_fn_pointer::<F>() {

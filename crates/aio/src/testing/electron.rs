@@ -85,9 +85,19 @@ fn runtime() -> PathBuf {
 /// about 10 times slower: an app's suite 6 s → 73 s), frames as fast as
 /// they are drawn, not at a screen's pace (a hidden
 /// window otherwise draws about once a second; measured with 30 pages at
-/// once: 2.6 ms to a frame), and on Linux no display at all.
+/// once: 2.6 ms to a frame), at 1 CSS pixel to a device pixel on every
+/// host (a Retina Mac's window is otherwise 2×: shots, wheel steps and
+/// zoom differ), and on Linux no display at all.
 fn flags(os: &str) -> Vec<&'static str> {
-    let mut f = vec!["--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--disable-gpu-compositing", "--disable-gpu-vsync", "--disable-frame-rate-limit"];
+    let mut f = vec![
+        "--no-sandbox",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
+        "--disable-gpu-compositing",
+        "--disable-gpu-vsync",
+        "--disable-frame-rate-limit",
+        "--force-device-scale-factor=1",
+    ];
     if os == "linux" {
         f.push("--ozone-platform=headless");
     }
@@ -442,5 +452,6 @@ mod tests {
         assert!(flags("windows").contains(&"--disable-frame-rate-limit"));
         let f = flags("macos");
         assert!(f.contains(&"--use-angle=swiftshader") && f.contains(&"--disable-gpu-compositing") && !f.contains(&"--disable-gpu"));
+        assert!(f.contains(&"--force-device-scale-factor=1"), "a HiDPI host's test window is 1x too");
     }
 }

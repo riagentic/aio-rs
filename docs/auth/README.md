@@ -92,7 +92,10 @@ characters or 80 bits) is said at boot.
 - **Handing it to a client**: `ax profile <app> [--out file]` writes a
   client profile (`.aioapp`: host, port, root, key), `--out` writes it
   owner-only. A paired device gets it with an 8-digit code instead
-  ([pairing](#pairing-a-device)).
+  ([pairing](#pairing-a-device)). `ax profile <app> --link` prints a
+  browser link carrying the key (`https://host:port/?token=<key>`, aio's
+  `share:` link); the boot's share line names the key file and this
+  command, so the key stays out of every log.
 - **No key at all**: `[server] open = true` serves with none: anyone who
   reaches the port reads the state and calls `#[client]` methods. It is
   said loudly at boot and by `ax doctor`, minting a pairing code still
@@ -110,6 +113,7 @@ listen = "127.0.0.1:8100"
 ```sh
 AIORT_TOKEN="$(openssl rand -base64 24)" ./notes --expose  # a key of your own
 ax profile notes --out notes.aioapp                         # the key, for another client
+ax profile notes --link                                     # a browser link with the key
 ```
 
 ## Pairing a device
@@ -154,6 +158,8 @@ signup = false            # POST /__aio/auth/signup for anyone (default: off)
 session = "30d"           # unused this long, a session ends (used past half, renewed)
 max_sessions = 10         # per user; a new one past it ends the oldest
 require_verified = false  # no sign-in until the email is verified
+totp = true               # users may turn on a second factor
+cookie = true             # a sign-in sets the HttpOnly session cookie
 ```
 
 | `[accounts]` key | Default | Means |
@@ -163,6 +169,8 @@ require_verified = false  # no sign-in until the email is verified
 | `session` | `"30d"` | how long a session lives unused, `1s` to 100 years (`s`, `m`, `h`, `d`) |
 | `max_sessions` | `10` | live sessions per user; a new one past it ends the oldest (also at boot, for a lowered cap) |
 | `require_verified` | `false` | no sign-in until the email is verified; sign-up then needs an email |
+| `totp` | `true` | users may turn on a second factor (aio's `auth.totp`); `false`: `totp/setup` and `totp/enable` answer 403 `totp_disabled`, the sign-in form offers none, a factor already on stays on |
+| `cookie` | `true` | a sign-in sets the HttpOnly session cookie (aio's `auth.cookie`); `false`: the session is the answer's `token` alone, sent as a bearer (an OIDC sign-in still hands its session over in the cookie: its redirect has no other way) |
 
 `aio::auth::Auth` is the same thing as a library: what the server runs,
 and what a test or a tool opens on an `auth.db`:
@@ -359,7 +367,9 @@ fn http() -> Http {
   refused (`external_identity`).
 - With `require_verified`, a sign-up gets no session until the email is
   verified (`201 { verificationSent }`), and a login of an unverified
-  account is 403 `email_unverified`.
+  account is 403 `email_unverified`. With `signup` too, the server needs
+  a mail hook (`Http::mail`): without one the app refuses to serve, as no
+  one who signs up could ever sign in (aio's boot refusal).
 
 ### The login doors
 
@@ -384,7 +394,9 @@ a refusal.
 | `POST reset/request` | `{ id }` | `{ ok }`, always |
 | `POST reset` | `{ token, password }` | `{ ok }` |
 | `GET oidc/start?redirect=/path` | | 302 to the provider ([OIDC](#sign-in-with-an-identity-provider)) |
-| `GET oidc/callback` | | 302 back to the page, signed in |
+| `GET oidc/start?port=<p>&claim=<hex>` | | a page that asks to confirm, then the same for an app outside a browser ([apps](#an-app-outside-a-browser)) |
+| `GET oidc/callback` | | 302 back to the page, signed in; for an app, 302 to its loopback with a code |
+| `POST oidc/redeem` | `{ code, verifier }` | `{ user, token }`; `sso_expired` when spent, late or not this app's |
 
 | Code | Status | Means |
 |---|---|---|
@@ -503,11 +515,19 @@ rt.block_on(async {
 `aio::kit::SignIn` (feature `kit`) is a ready form over `Client`: sign
 in, create an account when the server allows it, the second-factor step,
 and "Forgot password?" when the server sends mail. It asks `GET me` and
-adapts: no sign-up toggle with sign-up off, no reset without mail. Props:
+adapts: no sign-up toggle with sign-up off, no reset without mail, a
+"Continue with SSO" link when the server has an
+[identity provider](#sign-in-with-an-identity-provider). Props:
 `client`, `on_signed` (gets the `Signed` session), `title`, `signup`,
-`email`, `forgot` (each on by default), `class`. Its parts
-(`signinId`, `signinPassword`, `signinCode`, `signinSubmit`,
-`signinError`…) are named for UI tests.
+`email`, `forgot`, `sso` (each on by default), `sso_label`, `class`. Its
+parts (`signinId`, `signinPassword`, `signinCode`, `signinSubmit`,
+`signinSso`, `signinError`…) are named for UI tests.
+
+The SSO link takes a page to the provider and back, signed in by its
+cookie, as in aio. In a desktop or phone app it opens the browser, and
+the session comes back to the app ([apps](#an-app-outside-a-browser)):
+the person signs in where their provider session and password manager
+already are, and `on_signed` gets the session.
 
 ### Users the app resolves itself
 
@@ -540,6 +560,15 @@ let _ = http();
 - `Users::map` compares every entry in constant time and says a weak
   token at boot; `Users::resolve(|token| ..)` is the app's own lookup
   (one that panics resolves no one). An empty token resolves no one.
+- `Users::resolve_with(|token| async { .. })` is aio's `resolveUser`: an
+  async lookup (a JWT against keys it fetches, a database). It reads the
+  app's state through the handles it captures, typed, where aio passed
+  the whole state. Its `Known { user, role, extra }` may say more of the
+  user: a route reads it with `r.extra("tenant")`.
+- With [accounts](#accounts) on, these are service keys beside them
+  (aio's `users` next to `auth: true`): a `Bearer` that is no session is
+  asked of them, so a webhook sender or a service signs in with its key.
+  Sessions are asked first.
 - Keep the tokens out of the source: the environment or a file in
   `data/`.
 - An open socket's token is resolved again every 5 seconds (aio's
@@ -548,7 +577,9 @@ let _ = http();
   closes the socket (fail closed); the client's reconnect gets what a
   new handshake would. A resolver slower than 3 seconds keeps the
   socket on its last verdict, is said in the log, and is not called
-  again until it answers.
+  again until it answers. The same user with another role stays on: the
+  socket sees the new role's view at once (aio's push); a UI tab's socket
+  closes, and its reconnect has the new role.
 
 ### Operator console: `ax auth`
 
@@ -645,7 +676,7 @@ network = ["login.example.org"]   # the provider: outbound requests are held to 
 | `.secret(s)` | none | a confidential client's secret; none: a public client (PKCE only) |
 | `.signup(open)` | `[accounts] signup` | may an identity with no account get one at its first sign-in |
 | `.role(f)` | `"user"` | a new account's role from its verified claims; an `Err` refuses the sign-in |
-| `.redirect_uri(uri)` | `<scheme>://<host>/__aio/auth/oidc/callback` | the callback as registered with the provider (behind a proxy) |
+| `.redirect_uri(uri)` | `<scheme>://<host>/__aio/auth/oidc/callback` | the callback as registered with the provider (behind a proxy); sent as it is, so one that isn't an absolute `http(s)://` URL stops the boot. The first sign-in logs the `redirect_uri` it sends |
 
 - Discovery's `issuer` must be the one configured; it and the provider's
   keys are kept an hour, and a token naming a key not yet seen reads them
@@ -661,7 +692,39 @@ network = ["login.example.org"]   # the provider: outbound requests are held to 
   own: no local account is adopted by a matching email, and they have no
   password. An email counts only with `email_verified: true`. Existing
   accounts keep their role; `ax auth <app> role` changes it.
-- `GET me` says `oidc: true`, so a sign-in page knows to show the button.
+- `GET me` says `oidc: true` (`Me::oidc`), so a sign-in page knows to
+  show the button.
+
+### An app outside a browser
+
+A desktop or phone app signs in with the provider through the browser,
+as RFC 8252 asks of native apps: `Client::sso()` opens a loopback port
+and keeps a random verifier; its `url` goes to `oidc/start` with the
+port and the verifier's hash. The browser first asks the person to
+confirm: "An app on this computer (port …) asks to sign in as you". Once
+they do and the provider vouches, the callback
+sends the browser to `http://127.0.0.1:<port>/?code=…`, a one-shot code
+good for two minutes. `Client::sso_done` takes it there and redeems it
+with the verifier for a session.
+
+```rust,no_run
+# #[cfg(feature = "net")]
+async fn sign_in(c: aio::auth::client::Client) -> Result<aio::auth::client::Signed, aio::auth::client::AuthError> {
+    let s = c.sso().expect("a loopback port");
+    println!("open {}", s.url); // `SignIn` opens it in the browser
+    c.sso_done(s).await // waits for the browser, at most SSO_WAIT (10 minutes)
+}
+```
+
+- The code only reaches this machine's loopback, and counts only with
+  the verifier that never left the app: a link someone else made lands
+  nowhere they can see, and a code caught by another program is useless.
+- A wrong verifier spends the code. The binder cookie and the state's
+  other proofs hold as for a page.
+- A link to `oidc/start?port=…` made by someone else only shows the
+  question: going on takes this browser's own confirmation (a tag tied to
+  its binder cookie, the port and the claim), so a session never goes to
+  another user's port on a shared machine without the person saying so.
 
 ## TLS and the network
 
@@ -722,14 +785,15 @@ in the per-user modes. "Here" is loopback, not relayed by a proxy.
 | LAN discovery, UDP 8099 | `[server] discover` | answers probes with the name and port | the same |
 | `ax ui --browser`, `ax control` | asked | `127.0.0.1`, a key made for the run | the same |
 | `ax dev --web`'s site | asked | `127.0.0.1` only, no key (dev) | the same |
-| a window's DevTools port | debug build, `--cdp` | `127.0.0.1` only | the same |
+| a window's DevTools port | an `ax dev` build, `--cdp` | `127.0.0.1` only | the same |
 
 ## Hosts, origins and forged requests
 
 Every request passes one gate before any route, file or socket:
 
 - **Host**: it must be addressed to this app: an IP literal, `localhost`,
-  a `.local` name, or a name in `[server] hosts`. Any other name is 403:
+  a `.local` name, this machine's own name (`http://desktop-7:8100/` from
+  the LAN, as in aio), or a name in `[server] hosts`. Any other name is 403:
   that is the shape of DNS rebinding (a page whose DNS flips to this
   machine would otherwise be same-origin with the app).
 - **Origin**: absent (native clients, `curl`, tools) is fine; present, it
@@ -914,15 +978,11 @@ What aio has that aio-rs does not, or does differently:
   open the socket when its host is in `[server] hosts`. aio's
   `allowedOrigins` entries with a scheme and port are, in aio-rs, host
   names (`[server] hosts`).
-- **The share line names the key file, not the key** (aio printed the
-  link with the key, masked only in the log file): a browser link is
-  `https://host:port/?token=<key>` by hand, or `ax profile`, or pairing.
-- **A user's token whose role changed closes its socket** (aio sent the
-  open socket its new view): the reconnect has the new role.
 - **Health and metrics need a credential beyond this machine**, also
   without accounts (aio answered them to anyone on an app without a key).
-- **No `useUser()` hook**: `Client::me` answers who is signed in, and
-  `SignIn`'s `on_signed` hands the session to the app.
+- **`useUser()` is a browser hook only** (`aio::web::use_user()`):
+  elsewhere `Client::me` answers who is signed in, and `SignIn`'s
+  `on_signed` hands the session to the app.
 - **Lockout and budgets are fixed** (5 tries, 15 minutes; the per-address
   table above), as in aio; there are no keys to tune them.
 - **No passkeys (WebAuthn)**, as in aio.

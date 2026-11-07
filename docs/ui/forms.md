@@ -286,7 +286,7 @@ ui.until_contains("field", "That name is taken");
 | `Input` | `value: v.name, oninput: move \|s\| f.edit("name", ..)` | `oninput` and `onchange` get the text; `r#type` is any input type |
 | `Input { r#type: "number" }` | `oninput: move \|s: String\| f.edit("age", \|v\| v.age = s.parse().ok())` | the text is parsed by you; an empty field is `None` |
 | `Textarea` | `value`, `oninput` | `rows` (default 3) |
-| `Select` | `options: vec!["a".into(), ..]`, `value`, `onchange` | an `Opt { value, label, disabled }` per choice |
+| `Select` | `options: vec!["a".into(), ..]`, `value`, `onchange` | an `Opt { value, label, disabled, view }` per choice |
 | `Checkbox` | `checked: v.agree, onchange: move \|on\| f.edit("agree", ..)` | `onchange` gets the new `bool`; `label` puts the text beside it |
 | `RadioGroup` | `options`, `value`, `onchange` | one value for the group; a `Field` around it names it |
 | `Switch` | `checked`, `onchange` | a checkbox drawn as a switch |
@@ -383,7 +383,12 @@ test an error that shows on leaving, type something first.
 aio's `bind(name)` spread `value`, `onInput` and `onBlur` in one go;
 `form.bind(aio::field!(name))` does the same, and a bound input is touched
 on blur, as aio's: `Input { bind: form.bind(aio::field!(name)) }` in a
-`Field { error: form.error("name"), … }`. `aio::field!(name)` names a
+`Field { error: form.error("name"), … }`; a `Select` or `RadioGroup`
+takes `bind` too. A bool field binds a `Checkbox` or `Switch` with
+`form.bind_check(aio::field!(agree))` (touched as it is clicked), and a
+number (any type text parses into) an `Input` with
+`form.bind_parsed(aio::field!(count))`: an edit that doesn't parse leaves
+the field as it was (aio's `bindInput`). `aio::field!(name)` names a
 field of the values (it reads and writes `v.name`); `set_field` and
 `reset_field` change one field (aio's `field.set`, `field.reset`),
 `touched(name)` says whether it was left, `use_field_array(|| rows)` is
@@ -412,7 +417,9 @@ handlers (`oninput`, `onchange: f.touch(..)`) is touched on `change`
 
 - aio's `useForm` took a Standard Schema (Zod, Valibot, ArkType) and had
   `parsed()` for its output: aio-rs has no schema adapter. The check is a
-  Rust function; parse into your own type in it.
+  Rust function; parse into your own type in it. By design: the check is
+  typed against the form's own struct and compiled, with no schema
+  library in the bundle.
 
 ## API
 

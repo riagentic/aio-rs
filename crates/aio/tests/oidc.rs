@@ -255,10 +255,22 @@ impl World {
     /// Sign in as `extra` says (on top of the usual claims for `sub`); the
     /// callback's status, head and body.
     async fn login(&self, sub: &str, back: &str, extra: Value) -> (u16, String, String) {
-        let (s, head, _) = raw(&self.app, &format!("/__aio/auth/oidc/start?redirect={back}"), None).await;
+        self.login_at(&format!("/__aio/auth/oidc/start?redirect={back}"), sub, extra).await
+    }
+
+    /// [`Self::login`] begun at `start`.
+    async fn login_at(&self, start: &str, sub: &str, extra: Value) -> (u16, String, String) {
+        let (mut s, mut head, body) = raw(&self.app, start, None).await;
+        let mut binder = header(&head, "set-cookie")[0].split(';').next().unwrap().to_string();
+        // An app's sign-in: the person confirms it in the browser first.
+        if start.contains("port=") {
+            assert_eq!(s, 200, "{head}");
+            let go = body.split("name=\"go\" value=\"").nth(1).unwrap().split('"').next().unwrap();
+            (s, head, _) = raw(&self.app, &format!("{start}&go={go}"), Some(&binder)).await;
+            binder = header(&head, "set-cookie")[0].split(';').next().unwrap().to_string();
+        }
         assert_eq!(s, 302, "{head}");
         let to = header(&head, "location")[0].to_string();
-        let binder = header(&head, "set-cookie")[0].split(';').next().unwrap().to_string();
         let q = query(&to);
         assert_eq!((q["response_type"].as_str(), q["code_challenge_method"].as_str()), ("code", "S256"));
         assert_eq!(q["redirect_uri"], format!("http://{}/__aio/auth/oidc/callback", self.app));
@@ -273,6 +285,26 @@ impl World {
         let state = percent_encoding::utf8_percent_encode(&q["state"], percent_encoding::NON_ALPHANUMERIC).to_string();
         raw(&self.app, &format!("/__aio/auth/oidc/callback?code={code}&state={state}"), Some(&binder)).await
     }
+}
+
+/// `POST` `body` to the app's door `op`: status, answer.
+async fn post(addr: &str, op: &str, body: Value) -> (u16, Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let body = body.to_string();
+    let req = format!(
+        "POST /__aio/auth/{op} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let (head, body) = out.split_once("\r\n\r\n").unwrap();
+    (head[9..12].parse().unwrap(), serde_json::from_str(body).unwrap_or_default())
+}
+
+fn sha_hex(s: &str) -> String {
+    ring::digest::digest(&ring::digest::SHA256, s.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The session a signed-in callback set.
@@ -375,4 +407,89 @@ async fn a_rotated_key_is_found_by_one_jwks_reread_and_a_wrong_issuer_is_refused
     let w = world(Policy { signup: true, ..Default::default() }, |o| o).await;
     w.idp.lock().unwrap().claims_issuer = Some("https://someone.else".into());
     assert_eq!(raw(&w.app, "/__aio/auth/oidc/start", None).await.0, 502);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_gets_its_session_at_its_loopback_and_only_with_its_verifier() {
+    let w = world(Policy { signup: true, ..Default::default() }, |o| o).await;
+    let start = |claim: &str| format!("/__aio/auth/oidc/start?port=9&claim={claim}");
+    for bad in ["/__aio/auth/oidc/start?port=9", "/__aio/auth/oidc/start?port=0&claim=x", &start("nothex")] {
+        assert_eq!(raw(&w.app, bad, None).await.0, 400, "{bad}");
+    }
+    // A link to an app's sign-in made elsewhere only asks: no trip to the
+    // provider without this browser's confirmation, its tag bound to the
+    // browser's binder, the port and the claim.
+    let (s, head, body) = raw(&w.app, &start(&sha_hex("v1")), None).await;
+    assert!(s == 200 && body.contains("port 9") && header(&head, "location").is_empty(), "{head}");
+    let binder = header(&head, "set-cookie")[0].split(';').next().unwrap().to_string();
+    let go = body.split("name=\"go\" value=\"").nth(1).unwrap().split('"').next().unwrap();
+    for (path, cookie) in [
+        (format!("{}&go={go}", start(&sha_hex("v1"))), Some("aio_oidc=someone-elses")),
+        (format!("{}&go={go}", start(&sha_hex("v1"))), None),
+        (format!("{}&go={go}", start(&sha_hex("v2"))), Some(binder.as_str())),
+    ] {
+        assert_eq!(raw(&w.app, &path, cookie).await.0, 200, "{path} {cookie:?}");
+    }
+    // The answer goes to the app's loopback port, with a code and no session cookie.
+    let (s, head, _) = w.login_at(&start(&sha_hex("v1")), "Hana", json!({})).await;
+    let to = header(&head, "location")[0].to_string();
+    assert!(s == 302 && to.starts_with("http://127.0.0.1:9/?code=aiot_"), "{head}");
+    assert_eq!(session(&head), None);
+    let code = query(&to)["code"].clone();
+    // Someone else's verifier is refused, and spends the code.
+    assert_eq!(post(&w.app, "oidc/redeem", json!({ "code": code, "verifier": "v2" })).await.0, 400);
+    let (s, v) = post(&w.app, "oidc/redeem", json!({ "code": code, "verifier": "v1" })).await;
+    assert_eq!((s, v["error"].as_str()), (400, Some("sso_expired")));
+    // The client does it all: its URL, the browser's trip, its loopback, the redeem.
+    let client = aio::auth::client::Client::new(w.app.clone(), None);
+    let sso = client.sso().unwrap();
+    let path = sso.url.split_once(w.app.as_str()).unwrap().1.to_string();
+    let done = tokio::spawn(async move { client.sso_done(sso).await });
+    let (_, head, _) = w.login_at(&path, "Hana", json!({})).await;
+    let to = header(&head, "location")[0].to_string();
+    let loopback = to.strip_prefix("http://").unwrap().split_once('/').unwrap().0.to_string();
+    assert_eq!(raw(&loopback, "/favicon.ico", None).await.0, 400, "what else knocks is turned away");
+    let (s, _, body) = raw(&loopback, to.split_once(&loopback).unwrap().1, None).await;
+    assert_eq!((s, body.as_str()), (200, "Signed in. Go back to the app; this tab can be closed."));
+    let signed = done.await.unwrap().unwrap();
+    assert_eq!(signed.user, aio::auth::oidc::account_id(&w.iss, "Hana"));
+    assert_eq!(w.auth.session(&signed.token).unwrap().unwrap().user, signed.user);
+}
+
+/// The kit's `SignIn` offers SSO when the app has a provider; a desktop
+/// app's sign-in comes back to it.
+#[cfg(feature = "kit")]
+#[test]
+fn sign_in_offers_single_sign_on_and_the_browser_brings_the_session_back() {
+    use aio::kit::SignIn;
+    use aio::ui::prelude::*;
+    thread_local! {
+        static AT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+        static WHO: std::cell::RefCell<Option<aio::auth::client::Signed>> = const { std::cell::RefCell::new(None) };
+    }
+    let w = aio::rt().block_on(world(Policy { signup: true, ..Default::default() }, |o| o));
+    AT.set(w.app.clone());
+    fn form() -> View {
+        let client = aio::auth::client::Client::new(AT.with_borrow(Clone::clone), None);
+        rsx! { SignIn { client, sso_label: "Use the company account", on_signed: move |s| WHO.set(Some(s)) } }
+    }
+    let mut ui = aio::testing::TestUi::new(form);
+    for _ in 0..500 {
+        if ui.present("signinSso") {
+            break;
+        }
+        ui.wait(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        (ui.text("signinSso").as_str(), ui.attr("signinSso", "target").as_deref()),
+        ("Use the company account", Some("_blank"))
+    );
+    let href = ui.attr("signinSso", "href").unwrap();
+    let path = href.split_once(w.app.as_str()).unwrap().1.to_string();
+    let to =
+        aio::rt().block_on(async { header(&w.login_at(&path, "Ida", json!({})).await.1, "location")[0].to_string() });
+    let loopback = to.strip_prefix("http://").unwrap().split_once('/').unwrap().0.to_string();
+    assert_eq!(aio::rt().block_on(raw(&loopback, to.split_once(&loopback).unwrap().1, None)).0, 200);
+    let id = aio::auth::oidc::account_id(&w.iss, "Ida");
+    ui.until("signed in", || WHO.with_borrow(|w| w.as_ref().map(|s| s.user.as_str()) == Some(id.as_str())));
 }

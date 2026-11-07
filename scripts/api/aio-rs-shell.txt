@@ -1,8 +1,13 @@
 aio_shell::Child.origins: Option<Vec<String>>
 aio_shell::Child.partition: Option<String>
+aio_shell::Child.permissions: Vec<String>
 aio_shell::Child.preload: Option<String>
 aio_shell::Child.size: Option<(u32, u32)>
+aio_shell::Child.unsandboxed: bool
 aio_shell::Child.url: String
+aio_shell::Chrome::None
+aio_shell::Chrome::Standard
+aio_shell::Chrome::Themed
 aio_shell::Launch.args: Vec<String>
 aio_shell::Launch.cwd: std::path::PathBuf
 aio_shell::Launch::path: fn path(&self, arg: &str) -> String
@@ -13,9 +18,12 @@ aio_shell::Web.browser: bool
 aio_shell::Web.downloads: bool
 aio_shell::Web.fullscreen: bool
 aio_shell::Web.preloads: &'static [(&'static str, &'static str)]
+aio_shell::Web.unsandboxed_windows: bool
 aio_shell::Web.windows: bool
 aio_shell::Window.background: Option<[&'static str; 2]>
+aio_shell::Window.chrome: Chrome
 aio_shell::Window.confirm_unload: bool
+aio_shell::Window.devtools: bool
 aio_shell::Window.dir: Dir
 aio_shell::Window.head: Option<&'static str>
 aio_shell::Window.height: u32
@@ -74,8 +82,10 @@ aio_shell::fuses::offset: fn offset(b: &[u8]) -> Result<usize, String>
 aio_shell::fuses::turn_off: fn turn_off(b: &mut [u8]) -> Result<(), String>
 aio_shell::guest::Child.origins: Option<Vec<String>>
 aio_shell::guest::Child.partition: Option<String>
+aio_shell::guest::Child.permissions: Vec<String>
 aio_shell::guest::Child.preload: Option<String>
 aio_shell::guest::Child.size: Option<(u32, u32)>
+aio_shell::guest::Child.unsandboxed: bool
 aio_shell::guest::Child.url: String
 aio_shell::guest::Keys.print: bool
 aio_shell::guest::Keys.reload: bool
@@ -83,6 +93,7 @@ aio_shell::guest::Web.browser: bool
 aio_shell::guest::Web.downloads: bool
 aio_shell::guest::Web.fullscreen: bool
 aio_shell::guest::Web.preloads: &'static [(&'static str, &'static str)]
+aio_shell::guest::Web.unsandboxed_windows: bool
 aio_shell::guest::Web.windows: bool
 aio_shell::guest::clear_partition: async fn clear_partition(partition: &str) -> io::Result<()>
 aio_shell::guest::open_window: async fn open_window(c: &Child) -> io::Result<()>
@@ -251,7 +262,7 @@ aio_shell::runtime::migrate: fn migrate()
 aio_shell::runtime::migrate_from: fn migrate_from(old: &std::path::Path, root: &std::path::Path, busy: &dyn Fn(&std::path::Path) -> bool)
 aio_shell::runtime::pinned_in: fn pinned_in(binary: &[u8]) -> Option<String>
 aio_shell::runtime::pinned_sha: fn pinned_sha(version: &str) -> Option<String>
-aio_shell::runtime::prefetch: fn prefetch(version: &str, sha: Option<&str>) -> io::Result<std::path::PathBuf>
+aio_shell::runtime::prefetch: fn prefetch(version: &str, sha: Option<&str>, step: &dyn Fn(u8)) -> io::Result<std::path::PathBuf>
 aio_shell::runtime::root: fn root() -> std::path::PathBuf
 aio_shell::runtime::sandbox_args: fn sandbox_args(dir: &std::path::Path) -> Vec<String>
 aio_shell::runtime::sandbox_for: fn sandbox_for(dir: &std::path::Path, require: bool) -> io::Result<Vec<String>>
@@ -290,7 +301,7 @@ aio_shell::swap::Plan.wait: std::time::Duration
 aio_shell::swap::aside: fn aside(live: &std::path::Path) -> std::path::PathBuf
 aio_shell::swap::command: fn command(helper: &std::path::Path, plan: &Plan) -> io::Result<std::process::Command>
 aio_shell::swap::run: fn run(plan: &Plan) -> io::Result<()>
-aio_shell::switches::cdp: fn cdp(port: Option<&str>, debug: bool) -> Result<Vec<String>, String>
+aio_shell::switches::cdp: fn cdp(typed: Option<&str>, env: Option<&str>, debug: bool, devtools: bool) -> Result<Vec<String>, String>
 aio_shell::switches::from_env: fn from_env(raw: &str) -> (Vec<String>, Vec<(String, String)>)
 aio_shell::update::Next::Boot
 aio_shell::update::Next::Exit
@@ -306,12 +317,14 @@ aio_shell::update::contract_of: fn contract_of(binary: &std::path::Path) -> Resu
 aio_shell::update::dir: fn dir(id: &str) -> std::path::PathBuf
 aio_shell::update::from_git: fn from_git(cfg: &aio::config::Config, (remote, r): (&str, &str), d: &std::path::Path, data: &std::path::Path, version: &str, build: &dyn Fn(&std::path::Path) -> io::Result<std::path::PathBuf>) -> io::Result<String>
 aio_shell::update::go_back: fn go_back(id: &str) -> io::Result<()>
+aio_shell::update::install_dir: fn install_dir(exe: Option<&std::path::Path>, name: &str, root: Option<std::path::PathBuf>, tool: &std::path::Path) -> std::path::PathBuf
 aio_shell::update::installed: fn installed(id: &str) -> bool
 aio_shell::update::on_start: fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::AppDirs) -> io::Result<Next>
 aio_shell::update::platform: fn platform() -> String
 aio_shell::update::said: fn said(f: &aio::update::Found) -> String
 aio_shell::update::stub: fn stub(current: &str, found: aio::update::Found) -> aio::Handle<aio::update::Updates>
 aio_shell::update::supervised_start: fn supervised_start(cfg: &aio::config::Config, version: &str) -> io::Result<bool>
+aio_shell::update::unpack_appimage: fn unpack_appimage(bin: &str, bundle: &[u8], into: &std::path::Path) -> io::Result<()>
 aio_shell::update::unpack_for: fn unpack_for(os: &str, bundle: &[u8], into: &std::path::Path) -> io::Result<()>
 aio_shell::update::watch: fn watch(cfg: &aio::config::Config, version: &str, data: &std::path::Path)
 aio_shell::web::page: fn page(win: &crate::Window) -> String
@@ -357,6 +370,7 @@ const aio_shell::update::KEEP: usize
 const aio_shell::update::RELAUNCH: &str
 const aio_shell::update::SUPERVISED: &str
 const aio_shell::update::UNSIGNED: &str
+enum aio_shell::Chrome
 enum aio_shell::Start
 enum aio_shell::desktop::Ask
 enum aio_shell::desktop::Icon
@@ -371,6 +385,7 @@ enum aio_shell::update::Next
 impl Clone for Answer
 impl Clone for Ask
 impl Clone for Child
+impl Clone for Chrome
 impl Clone for Decision
 impl Clone for Icon
 impl Clone for IconState
@@ -393,6 +408,7 @@ impl Clone for Use
 impl Clone for Web
 impl Clone for Window
 impl Copy for Answer
+impl Copy for Chrome
 impl Copy for Icon
 impl Copy for Item
 impl Copy for Keys
@@ -408,6 +424,7 @@ impl Copy for Window
 impl Debug for Answer
 impl Debug for Ask
 impl Debug for Child
+impl Debug for Chrome
 impl Debug for Decision
 impl Debug for Icon
 impl Debug for IconState
@@ -431,6 +448,7 @@ impl Debug for Tray
 impl Debug for Use
 impl Debug for Web
 impl Default for Child
+impl Default for Chrome
 impl Default for IconState
 impl Default for Item
 impl Default for Keys
@@ -446,6 +464,7 @@ impl Default for Use
 impl Default for Web
 impl Default for Window
 impl Eq for Answer
+impl Eq for Chrome
 impl Eq for Icon
 impl Eq for IconState
 impl Eq for Kind
@@ -461,6 +480,7 @@ impl Eq for Showing
 impl Eq for Use
 impl PartialEq for Answer
 impl PartialEq for Child
+impl PartialEq for Chrome
 impl PartialEq for Icon
 impl PartialEq for IconState
 impl PartialEq for Kind
@@ -484,6 +504,7 @@ impl Serialize for Saved
 impl Serialize for Use
 impl StructuralPartialEq for Answer
 impl StructuralPartialEq for Child
+impl StructuralPartialEq for Chrome
 impl StructuralPartialEq for Icon
 impl StructuralPartialEq for IconState
 impl StructuralPartialEq for Kind

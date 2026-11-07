@@ -161,6 +161,51 @@ pub enum Merge {
     /// took out goes (aio's `set-add`). Items are the same by this key of
     /// theirs (aio's `identity`), or `None`: whole.
     SetAdd(Option<String>),
+    /// A record (an object): each key from the side that changed it, the
+    /// copy's where both did, a key either side took out gone (aio's
+    /// `lww-per-key`, by key rather than one clock per record).
+    Keys,
+    /// A list kept as a set: what either side added stays, what either took
+    /// out goes, an item one side edited shows edited, the copy's where both
+    /// did (aio's `set-remove`). Items are the same by this key, or whole.
+    SetRemove(Option<String>),
+}
+
+/// `l` against `b` and `r`, one value: the side that changed it, the
+/// copy's where both did (its call lands after the server's change).
+fn three<'a>(b: Option<&Value>, l: Option<&'a Value>, r: Option<&'a Value>) -> Option<&'a Value> {
+    if l == b { r } else { l }
+}
+
+/// A set's items by identity (`key`'s value, or whole), in order.
+fn by_id<'a>(key: &Option<String>, list: &'a [Value]) -> Vec<(Value, &'a Value)> {
+    let id = |x: &Value| match key {
+        Some(k) => x.get(k).cloned().unwrap_or(Value::Null),
+        None => x.clone(),
+    };
+    list.iter().map(|x| (id(x), x)).collect()
+}
+
+fn find<'a>(list: &[(Value, &'a Value)], id: &Value) -> Option<&'a Value> {
+    list.iter().find(|(i, _)| i == id).map(|(_, x)| *x)
+}
+
+/// Did the two sides change one key or item each their own way (a
+/// [`Conflict`] under [`Merge::Keys`] or [`Merge::SetRemove`])?
+fn clash(how: &Merge, b: &Value, l: &Value, r: &Value) -> bool {
+    let differ = |b: Option<&Value>, l: Option<&Value>, r: Option<&Value>| l != b && r != b && l != r;
+    match (how, b, l, r) {
+        (Merge::Keys, Value::Object(b), Value::Object(l), Value::Object(r)) => {
+            l.keys().chain(r.keys()).any(|k| differ(b.get(k), l.get(k), r.get(k)))
+        }
+        (Merge::SetRemove(k), Value::Array(b), Value::Array(l), Value::Array(r)) => {
+            let (b, l, r) = (by_id(k, b), by_id(k, l), by_id(k, r));
+            b.iter().any(|(id, _)| differ(find(&b, id), find(&l, id), find(&r, id)))
+                || l.iter()
+                    .any(|(id, _)| find(&b, id).is_none() && find(&r, id).is_some_and(|x| Some(x) != find(&l, id)))
+        }
+        _ => false,
+    }
 }
 
 /// A server change that met a change of the copy's own still waiting, the
@@ -212,6 +257,9 @@ pub fn conflicts(base: &Value, remote: &Value, local: &Value, merges: &[(String,
         let path = if how.is_some() { &path[..1] } else { path };
         let (b, r, l) = (at(base, path), at(remote, path), at(local, path));
         let met = match how {
+            Some(m @ (Merge::Keys | Merge::SetRemove(_))) => {
+                b.zip(l).zip(r).is_some_and(|((b, l), r)| clash(m, b, l, r))
+            }
             Some(Merge::Text) => match (b, l, r) {
                 (Some(Value::String(b)), Some(Value::String(l)), Some(Value::String(r))) => text3(b, l, r).conflict,
                 _ => l != b && l != r,
@@ -254,6 +302,26 @@ pub fn merged(how: &Merge, base: &Value, local: &Value, remote: &Value) -> Optio
                 }
             }
             Some(Value::Array(out))
+        }
+        (Merge::Keys, Value::Object(b), Value::Object(l), Value::Object(r)) => {
+            // Inserted one by one: no sort of the keys (a collect sorts), less code in every app.
+            let mut out = serde_json::Map::new();
+            for k in b.keys().chain(l.keys()).chain(r.keys()) {
+                if let Some(v) = three(b.get(k), l.get(k), r.get(k)) {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+            Some(Value::Object(out))
+        }
+        (Merge::SetRemove(key), Value::Array(b), Value::Array(l), Value::Array(r)) => {
+            let (b, l, r) = (by_id(key, b), by_id(key, l), by_id(key, r));
+            // The server's order, then the copy's additions; an item in the base either side took out is gone.
+            let ids = r.iter().chain(l.iter().filter(|(id, _)| find(&r, id).is_none())).map(|(id, _)| id);
+            let kept = ids.filter_map(|id| match find(&b, id) {
+                Some(_) if find(&l, id).is_none() || find(&r, id).is_none() => None,
+                was => three(was, find(&l, id), find(&r, id)).cloned(),
+            });
+            Some(Value::Array(kept.collect()))
         }
         _ => None,
     }
@@ -306,6 +374,16 @@ mod tests {
         assert!(conflicts(&base, &remote, &local, &merges).is_empty());
         let remote = json!({ "n": 2, "body": "uno\ntwo\n" });
         assert_eq!(conflicts(&base, &remote, &local, &merges)[0].field, "body");
+        // By key and as a removing set: only a key or item both changed their own way.
+        let merges = [("k".to_string(), Merge::Keys), ("s".to_string(), Merge::SetRemove(None))];
+        let base = json!({ "k": { "a": 1, "b": 1 }, "s": [1, 2] });
+        let local = json!({ "k": { "a": 2, "b": 1 }, "s": [1, 2, 3] });
+        assert!(conflicts(&base, &json!({ "k": { "a": 1, "b": 2 }, "s": [2] }), &local, &merges).is_empty());
+        let c = conflicts(&base, &json!({ "k": { "a": 3, "b": 1 }, "s": [1, 2] }), &local, &merges);
+        assert_eq!(
+            c,
+            [Conflict { field: "k".into(), local: json!({ "a": 2, "b": 1 }), remote: json!({ "a": 3, "b": 1 }) }]
+        );
     }
 
     #[test]
@@ -330,6 +408,27 @@ mod tests {
             Some(json!([{ "id": 1 }, { "id": 3 }, { "id": 5 }, { "id": 4 }]))
         );
         assert_eq!(m(Merge::SetAdd(None), json!([1]), json!([1, 2]), json!([3])), Some(json!([3, 2])));
+        // By key: each key from the side that changed it, the copy's where both did; taken out is gone.
+        assert_eq!(
+            m(
+                Merge::Keys,
+                json!({ "a": 1, "b": 1, "c": 1, "d": 1 }),
+                json!({ "a": 2, "b": 1, "c": 5, "e": 1 }),
+                json!({ "a": 1, "b": 3, "c": 6, "d": 1, "f": 1 })
+            ),
+            Some(json!({ "a": 2, "b": 3, "c": 5, "e": 1, "f": 1 }))
+        );
+        assert_eq!(m(Merge::Keys, json!({}), json!([]), json!({})), None, "not a record");
+        // Remove-wins on either side; edits of kept items show; both sides' additions.
+        let (b, l, r) = (
+            json!([{ "id": 1 }, { "id": 2 }, { "id": 3 }, { "id": 4 }]),
+            json!([{ "id": 1, "v": "mine" }, { "id": 3 }, { "id": 4, "v": "mine" }, { "id": 6 }]),
+            json!([{ "id": 1 }, { "id": 2 }, { "id": 4, "v": "theirs" }, { "id": 5 }]),
+        );
+        assert_eq!(
+            m(Merge::SetRemove(Some("id".into())), b, l, r),
+            Some(json!([{ "id": 1, "v": "mine" }, { "id": 4, "v": "mine" }, { "id": 5 }, { "id": 6 }]))
+        );
         // Shown merged only where both changed it.
         let merges = [("n".to_string(), Merge::Counter), ("t".to_string(), Merge::Text)];
         let mut shown = json!({ "n": 15, "t": "b" });

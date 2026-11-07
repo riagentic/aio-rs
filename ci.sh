@@ -65,7 +65,7 @@ else
   done
 fi
 # The shell: each feature alone and with `dev`.
-for f in "" web dev web,dev; do
+for f in "" web dev web,dev updates; do
   cargo clippy -p aio-rs-shell --lib --no-default-features --features "$f" --locked -- -D warnings
 done
 # Working with aio over the network: aio pages and tools on `/ws`, `AioLink`.
@@ -94,7 +94,8 @@ cargo test -p aio-rs --no-default-features --features net --test sync --test htt
 # release build too.
 cargo test -p aio-rs-air --release --all-features --locked
 # The web build's browser test binds with the lock's wasm-bindgen, on PATH or
-# aio's own (`ax setup` fetches it); without it the test skips, said here and last.
+# aio's own (`ax setup` fetches it); without it the test skips, said here and
+# last. With AIO_CI_WEB set (GitHub CI) a browser test that would skip fails.
 wb=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q}' Cargo.lock)
 wb_own="${XDG_DATA_HOME:-$HOME/.local/share}/aio-rt/tools/wasm-bindgen-$wb/wasm-bindgen"
 if [ ! -x "$wb_own" ] && [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $wb" ]; then
@@ -102,6 +103,11 @@ if [ ! -x "$wb_own" ] && [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bind
   echo "$web_skip" >&2
 fi
 cargo test --workspace --all-features --locked
+# ax dev's builds run the app as release does: the template's tests and a
+# fixture (logic at its edges, overflow, the window through TestUi) say the
+# same under ax dev's build, ax test and --release; shown failing first on
+# a plain debug build, which doesn't.
+scripts/parity --self-test
 # The tests on a real Windows when one is named
 # (`AIO_CI_WINDOWS="user@host [ssh options]"`; Wine misruns threaded tests).
 if [ -n "${AIO_CI_WINDOWS:-}" ]; then

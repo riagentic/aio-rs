@@ -23,5 +23,7 @@ toml = { version = "1", default-features = false, features = ["std", "parse", "s
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"], optional = true }
 
 [features]
+# `ax dev`'s and `ax test`'s builds (aio's `dev`): a dev build's budgets.
+dev = []
 toml = ["dep:toml"]
 png = ["dep:flate2"]

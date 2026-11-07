@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <code>0.2.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
+  <code>0.3.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -18,7 +18,7 @@
 
 ---
 
-**aio-rs is early ALPHA.** 0.2.0 is its second release; until 1.0.0 a
+**aio-rs is early ALPHA.** 0.3.0 is its third release; until 1.0.0 a
 minor version may break things ([versions](docs/basics/versioning.md)).
 
 **Read first: [when to use aio-rs, and when not](docs/basics/when.md).**
@@ -46,18 +46,18 @@ at the release tag (an app takes aio-rs from git at its `ax`'s release, so
 no checkout is needed afterwards):
 
 ```sh
-git clone --branch v0.2.0 https://github.com/riagentic/aio-rs
-cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.2.0
+git clone --branch v0.3.0 https://github.com/riagentic/aio-rs
+cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.3.0
 ax setup                                             # checks the machine, fetches the runtime
 ```
 
 Or a prebuilt `ax` for Linux x86_64 and macOS arm64 and x86_64 (Windows
 x86_64: `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.2.0)), each
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.3.0)), each
 archive's SHA-256 pinned in the installer:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.2.0/install.sh | sh   # then runs ax setup
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.3.0/install.sh | sh   # then runs ax setup
 ```
 
 An `ax` built from `main` writes `main`'s templates but pins its release
@@ -128,8 +128,8 @@ pub fn App() -> View {
 }
 ```
 
-`part(|c| &c.count)` is a handle on that field: the view reading it
-re-renders only when it changes. Views are written against `aio::ui`
+`part(|c| &c.count)` is a handle on that field: the view's body runs
+once, and only the text that reads it (a hole) updates when it changes. Views are written against `aio::ui`
 (`use aio::ui::prelude::*`), which names no renderer.
 `count` is saved to SQLite, comes back on restart, and is checked by the
 compiler everywhere it is used: a misspelt field is a build error.
@@ -174,8 +174,8 @@ plain Rust: [why aio-rs](docs/basics/why.md).
 ## 🎯 Honestly
 
 - 🧊 **Early ALPHA.** A minor version may break things until 1.0.0; the
-  [changelog](CHANGELOG.md) says how to move. There is no API snapshot
-  gate yet: review and the changelog.
+  [changelog](CHANGELOG.md) says how to move. Every change to the public
+  API shows in review: `./ci.sh` checks it against a committed snapshot.
 - 📏 **What is gated, what is not.** Every release passes `./ci.sh` on
   Linux (fmt, dependency and docs checks, clippy for every feature set,
   wasm, Windows and Android, the whole test suite, a measured template
@@ -187,7 +187,7 @@ plain Rust: [why aio-rs](docs/basics/why.md).
   update back (`scripts/update-proof`). The README's numbers rerun with
   `scripts/numbers`. Not gated: a physical Android device and
   OS-signing of bundles (SmartScreen and Gatekeeper warn on first start).
-- 🚧 **Not there yet.** No iOS, crates not on crates.io (apps build on a checkout), no
+- 🚧 **Not there yet.** No iOS, crates not on crates.io (an app takes aio-rs from git), no
   hot-patching in the web build or on Android. A Rust edit recompiles its
   crate: keep a big app in several crates
   ([what an edit costs](docs/build/README.md#what-an-edit-costs)).

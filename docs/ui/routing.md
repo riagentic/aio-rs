@@ -16,7 +16,9 @@ target: a route is the path the app wrote. In a browser (a web build) the
 page's address follows it too: the address bar shows the place, the
 browser's Back and Forward step the app's history, and a reload or a
 shared link opens where it points (the server answers every route-shaped
-path with the app: the SPA fallback).
+path with the app: the SPA fallback). A page served under a base path names it
+in `<base href="/app/">` (aio's route base): the router takes it off the
+address and puts it back in the address bar, so routes stay `/users/7`.
 
 ## Typed pages: `routes!`
 
@@ -125,7 +127,7 @@ assert_eq!(ui.text("page"), "home");
 | `redirect(to)` | goes there without a Back step |
 | `back()` | the newest `use_back` handler, then history; false at the first place |
 | `use_back(f)` | `f` takes Back while the component lives; return true if it handled it |
-| `Link { to, exact, replace, class, active_class }` | an `<a>` that routes in the app; the current place's link gets `active_class` (`active`) and `aria-current="page"`; a link out of the app opens in the system browser; the author's `onclick` runs first, and its `prevent_default()` keeps the place |
+| `Link { to, exact, replace, class, active_class, active_style }` | an `<a>` that routes in the app; `to` and `class` may follow state (a signal); the current place's link gets `active_class` (`active`), `active_style` as its `style` (aio's `activeStyle`) and `aria-current="page"`; whether it leaves the app is decided by its first `to`; a link out of the app opens in the system browser; the author's `onclick` runs first, and its `prevent_default()` keeps the place |
 | `NAV` | the window's `aio::route::History` (50 places, as Chromium keeps) |
 
 A `Route` runs again only when its match changes (its body runs again
@@ -282,7 +284,8 @@ fn App() -> View {
 - Every matching `Route` shows, as aio's `<Route>` did; a typed `routes!`
   enum shows exactly one page.
 - `Redirect { to }` replaces the place once shown, so Back doesn't land on
-  it again.
+  it again; `Redirect { to, push: true }` keeps it in the history (aio's
+  `replace: false`).
 
 ## Opening at a route
 
@@ -304,12 +307,10 @@ sheet), then step history; at the first place the host does its default
 
 ## Gaps against aio
 
-- **A route base.** aio's router undoes the app's base path (an app
-  served under `/assets`); an aio-rs web build is served at its site's
-  root.
 - **Typed `useRoute(pattern)`.** aio types the param names of a literal
   pattern; aio-rs's `routes!` types the values as well (`id: u32`), and
-  `match_path` / `params()` give strings by name.
+  `match_path` / `params()` give strings by name. By design: `Page::parse(&here().path)`
+  is the typed route, its values parsed, where aio typed only names.
 - **`navigate(-1)`, `navigate(to, { replace })`.** `back()` and
   `redirect(to)`; Forward is `NAV.write().go(1)`.
 - **`NavLink`.** `Link` marks its own active state (`active_class`,
@@ -324,9 +325,6 @@ sheet), then step history; at the first place the host does its default
   host's Back and the app's links the first time it is read.
 - Pushing in a redirect: `go("/login")` from a page leaves a Back step
   that sends the person straight back; use `redirect` or `Redirect`.
-- Expecting the browser's address bar to follow: in a web build the
-  route lives in the app too, so the address bar and the browser's Back
-  button don't follow it, and a reload starts at `/`.
 - Two `routes!` variants whose patterns both match: the first written
   wins, so put `/notes/new` before `/notes/:id`.
 - A param that must be a number typed `String`: give it its type in

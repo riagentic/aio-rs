@@ -77,10 +77,11 @@ fn log(id: Option<Id>, t0: std::time::Instant, trigger: &'static str) {
     });
 }
 
-/// The time a render starts at, where renders are logged: debug builds,
-/// but in a browser's wasm (no clock there: `Instant::now` panics).
+/// The time a render starts at, where renders are logged: air's `dev`
+/// feature (`ax dev`'s inspector), but in a browser's wasm (no clock there:
+/// `Instant::now` panics).
 pub(crate) fn start() -> Option<std::time::Instant> {
-    cfg!(all(debug_assertions, not(target_arch = "wasm32"))).then(std::time::Instant::now)
+    cfg!(all(feature = "dev", not(target_arch = "wasm32"))).then(std::time::Instant::now)
 }
 
 /// Root `root` is gone: its log and its view's frame go too.
@@ -290,6 +291,8 @@ pub struct Mounted {
 /// The components mounted in the current root (window), as a tree, each level in the
 /// order they were placed.
 pub fn components() -> Vec<Mounted> {
+    // Rows that left a list keep their entry until what they held drops.
+    crate::reactive::drop_left();
     let root = crate::reactive::current_root();
     TREE.with_borrow(|t| {
         let mut all: Vec<(Id, &Comp)> = t

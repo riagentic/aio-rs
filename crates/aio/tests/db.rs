@@ -198,10 +198,19 @@ async fn a_snapshot_is_a_consistent_copy_and_check_finds_nothing_wrong() {
     db.execute("INSERT INTO n (t) VALUES ('kept')", vec![]).await.unwrap();
     let to = dir.path().join("copy.db");
     db.snapshot(&to).await.unwrap();
-    assert!(db.snapshot(&to).await.unwrap_err().0.contains("never overwrites"));
+    // aio's rolling snapshot: the same path again holds the newer copy.
+    db.execute("INSERT INTO n (t) VALUES ('later')", vec![]).await.unwrap();
+    db.snapshot(&to).await.unwrap();
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+            .count(),
+        0
+    );
     assert_eq!(db.check().await.unwrap(), Vec::<String>::new());
     let copy = Db::open(&to, Opts::default()).unwrap();
-    assert_eq!(notes(&copy).await, ["kept"]);
+    assert_eq!(notes(&copy).await, ["kept", "later"]);
     copy.close().await;
     db.close().await;
     // Closed: every thread let go of the file.
@@ -336,4 +345,18 @@ async fn a_live_query_knows_its_tables_through_views_joins_and_triggers() {
     assert_eq!(woke(&mut view).await, None);
     db.execute("INSERT INTO tag VALUES (1, 'x')", vec![]).await.unwrap();
     assert_eq!(woke(&mut view).await.unwrap().rows, [[Sql::Integer(1)]]);
+}
+
+/// aio's `createDB({ readonly })`: reads what the app wrote, writes nothing.
+#[tokio::test]
+async fn a_read_only_database_reads_and_refuses_every_write() {
+    let (dir, db) = with_notes(Opts::default()).await;
+    db.execute("INSERT INTO n (t) VALUES ('kept')", vec![]).await.unwrap();
+    let path = dir.path().join("sub/app.db");
+    let ro = Db::open(&path, Opts { readonly: true, readers: 1, ..Default::default() }).unwrap();
+    assert_eq!(notes(&ro).await, ["kept"]);
+    let e = ro.execute("INSERT INTO n (t) VALUES ('no')", vec![]).await.unwrap_err();
+    assert!(e.0.contains("readonly"), "{e}");
+    assert!(Db::open(dir.path().join("none.db"), Opts { readonly: true, ..Default::default() }).is_err());
+    assert_eq!(notes(&db).await, ["kept"]);
 }

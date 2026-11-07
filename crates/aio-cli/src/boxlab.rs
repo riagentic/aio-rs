@@ -7,8 +7,9 @@
 //! so are the container names and the disk folder, so `am lab` and `ax lab`
 //! work on one lab. Every difference is a row of [`SPECS`]; the argv is
 //! pure. Manual: no gate runs it (a first Windows run downloads ~8.5 GB).
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 type Out = Result<String, String>;
@@ -123,6 +124,8 @@ pub struct Ask<'a> {
     pub version: Option<&'a str>,
     pub port: Option<u16>,
     pub apk: Option<&'a str>,
+    /// `--tunnel`: no port published; this process forwards the viewer.
+    pub tunnel: bool,
 }
 
 /// How long a VM is given to shut its disk down cleanly.
@@ -155,7 +158,9 @@ pub fn run_argv(s: &Spec, a: &Ask, port: u16, storage: &Path, share: &Path, owne
         env("PUID", &uid.to_string());
         env("PGID", &gid.to_string());
     }
-    v.extend(["-p".into(), format!("127.0.0.1:{port}:{}", s.viewer)]);
+    if !a.tunnel {
+        v.extend(["-p".into(), format!("127.0.0.1:{port}:{}", s.viewer)]);
+    }
     if s.vm {
         v.extend(["-v".into(), format!("{}:/storage", storage.display())]);
     }
@@ -277,14 +282,22 @@ pub fn run(os: &str, what: &str, a: &Ask, dist: &Path) -> Out {
 fn boot(s: &Spec, a: &Ask, dist: &Path) -> Out {
     preflight(s)?;
     std::fs::create_dir_all(dist).map_err(|e| format!("{}: {e}", dist.display()))?;
+    // --tunnel: the viewer's port is this process's own.
+    let tunnel = match a.tunnel {
+        true => Some(TcpListener::bind(("127.0.0.1", a.port.unwrap_or(0))).map_err(|e| format!("--tunnel: {e}"))?),
+        false => None,
+    };
+    let own = tunnel.as_ref().and_then(|l| Some(l.local_addr().ok()?.port()));
     let port = match state(s) {
-        Some((true, _)) => port_of(s).ok_or("the lab runs, its viewer's port unpublished: --stop, then --boot")?,
+        Some((true, _)) => own
+            .or_else(|| port_of(s))
+            .ok_or("the lab runs, its viewer's port unpublished: --tunnel, or --stop, then --boot")?,
         Some((false, _)) => {
             docker(&["start", s.container])?;
-            port_of(s).ok_or("its viewer's port unpublished: --stop, then --boot")?
+            own.or_else(|| port_of(s)).ok_or("its viewer's port unpublished: --tunnel, or --stop, then --boot")?
         }
         None => {
-            let port = match a.port {
+            let port = match own.or(a.port) {
                 Some(p) => p,
                 None => free_port()?,
             };
@@ -299,7 +312,13 @@ fn boot(s: &Spec, a: &Ask, dist: &Path) -> Out {
         }
     };
     let viewer = format!("http://127.0.0.1:{port}/");
-    let up = wait(Duration::from_secs(120), || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+    let up = match tunnel {
+        // Through the tunnel the question is whether the viewer serves inside.
+        Some(_) => wait(Duration::from_secs(120), || {
+            docker(&["exec", s.container, "nc", "-z", "127.0.0.1", &s.viewer.to_string()]).is_ok()
+        }),
+        None => wait(Duration::from_secs(120), || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()),
+    };
     let mut said = vec![format!(
         "{}: {} (the viewer: {viewer}{})",
         s.os,
@@ -315,7 +334,55 @@ fn boot(s: &Spec, a: &Ask, dist: &Path) -> Out {
         said.push(format!("the app's dist/ is there: {}", s.share));
     }
     said.push(format!("ax lab <app> {} --stop ends it", s.os));
-    Ok(said.join("\n"))
+    match tunnel {
+        Some(l) => {
+            println!("{}\nthis process is the tunnel to the viewer: leave it running, Ctrl-C ends it", said.join("\n"));
+            forward(&l, "docker", &tunnel_argv(s));
+            Ok(String::new())
+        }
+        None => Ok(said.join("\n")),
+    }
+}
+
+/// The tunnel's far end: one `nc` in the container per connection (every
+/// lab's image has it), a stream the Docker daemon serves itself.
+pub fn tunnel_argv(s: &Spec) -> Vec<String> {
+    ["exec", "-i", s.container, "nc", "127.0.0.1"].map(String::from).into_iter().chain([s.viewer.to_string()]).collect()
+}
+
+/// Each connection to `l` piped through its own `program argv` (stdin in,
+/// stdout back), until the process is stopped.
+fn forward(l: &TcpListener, program: &str, argv: &[String]) {
+    for conn in l.incoming().flatten() {
+        let mut child = match Command::new(program)
+            .args(argv)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ax lab --tunnel: {program}: {e}");
+                continue;
+            }
+        };
+        let (Some(mut to), Some(mut from), Ok(mut back)) = (child.stdin.take(), child.stdout.take(), conn.try_clone())
+        else {
+            _ = child.kill();
+            continue;
+        };
+        std::thread::spawn(move || {
+            let mut conn = conn;
+            let up = std::thread::spawn(move || std::io::copy(&mut conn, &mut to));
+            _ = std::io::copy(&mut from, &mut back);
+            // A viewer tab closing mid-stream is normal: both ends go.
+            _ = back.shutdown(std::net::Shutdown::Both);
+            _ = child.kill();
+            _ = child.wait();
+            _ = up.join();
+        });
+    }
 }
 
 /// This user's uid and gid (linuxserver's `PUID`/`PGID`).
@@ -424,6 +491,54 @@ mod tests {
                 .unwrap_err()
                 .contains("android")
         );
+    }
+
+    #[test]
+    fn a_tunnel_publishes_nothing_and_forwards_each_connection() {
+        let tunneled = run_argv(
+            spec("windows").unwrap(),
+            &Ask { tunnel: true, ..Default::default() },
+            8100,
+            Path::new("/c"),
+            Path::new("/d"),
+            None,
+        );
+        assert!(!tunneled.iter().any(|a| a == "-p"), "{tunneled:?}");
+        assert_eq!(tunnel_argv(spec("windows").unwrap()).join(" "), "exec -i aio-lab-windows nc 127.0.0.1 8006");
+        // Each connection through its own process: this test binary, as
+        // `an_echo` (any OS).
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let argv = ["boxlab::tests::an_echo", ECHO, "--exact", "--nocapture", "--quiet"].map(String::from);
+        std::thread::spawn(move || forward(&l, &me, &argv));
+        for word in ["first", "second"] {
+            use std::io::{Read, Write};
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.write_all(word.as_bytes()).unwrap();
+            c.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut got = String::new();
+            c.read_to_string(&mut got).unwrap();
+            // The test runner's own lines come first.
+            assert_eq!(got.split_once(ECHO).map(|(_, e)| e), Some(word), "{got:?}");
+        }
+    }
+
+    /// Run with it as an argument, [`an_echo`] echoes its input.
+    const ECHO: &str = "an-echo-now";
+
+    /// An echo when run with [`ECHO`] (what the test above forwards to);
+    /// else nothing.
+    #[test]
+    fn an_echo() {
+        if std::env::args().any(|a| a == ECHO) {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            out.write_all(ECHO.as_bytes()).unwrap();
+            std::io::copy(&mut std::io::stdin(), &mut out).unwrap();
+            out.flush().unwrap();
+            std::process::exit(0);
+        }
     }
 
     #[test]

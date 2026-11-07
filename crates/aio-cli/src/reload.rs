@@ -145,6 +145,16 @@ impl Built {
         Self { files }
     }
 
+    /// The text of `f` as the build read it.
+    pub fn text(&self, f: &Path) -> Option<&str> {
+        self.files.get(f).map(|(t, _)| t.as_str())
+    }
+
+    /// Whether `f` is a file the build read.
+    pub fn has(&self, f: &Path) -> bool {
+        self.files.contains_key(f)
+    }
+
     /// The templates edited in `changed` since the build (each file's
     /// compiler name and its edits), if that is all that changed: every
     /// file a `.rs` read at the build, saved after it began.

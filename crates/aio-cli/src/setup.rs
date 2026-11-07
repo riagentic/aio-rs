@@ -361,6 +361,7 @@ pub fn run(check: bool) -> Result<String, String> {
         false => aio_shell::runtime::prefetch(
             aio_shell::runtime::VERSION,
             aio_shell::runtime::pinned_sha(aio_shell::runtime::VERSION).as_deref(),
+            &|_| {},
         )
         .map_err(|e| e.to_string()),
     };

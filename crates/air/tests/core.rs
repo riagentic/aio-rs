@@ -101,6 +101,37 @@ fn an_error_thrown_in_a_view_swaps_in_the_nearest_boundarys_fallback_in_one_pass
 }
 
 #[test]
+fn a_boundarys_fallback_retries_and_the_children_come_back() {
+    // aio's boundary reset: the children made anew; one that fails again is caught again.
+    thread_local!(static BROKEN: Cell<bool> = const { Cell::new(true) });
+    #[component]
+    fn Flaky() -> View {
+        if BROKEN.get() {
+            Err(std::io::Error::other("not yet"))?;
+        }
+        rsx! { p { "data-t": "ok", "ok" } }
+    }
+    fn app() -> View {
+        rsx! {
+            ErrorBoundary {
+                fallback: |e: String| {
+                    let r = retry();
+                    rsx! { button { "data-t": "retry", onclick: move |_| r.retry(), "{e}" } }
+                },
+                Flaky {}
+            }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!(p.text("retry"), "not yet");
+    p.click("retry");
+    assert_eq!(p.text("retry"), "not yet", "still broken: caught again");
+    BROKEN.set(false);
+    p.click("retry");
+    assert!(p.present("ok") && !p.present("retry"));
+}
+
+#[test]
 fn an_error_no_boundary_catches_fails_the_page_step() {
     let r = std::panic::catch_unwind(|| TestPage::mount(|| rsx! { Breaks {} }));
     let e = r.err().and_then(|e| e.downcast::<String>().ok()).expect("a failure");
@@ -189,6 +220,33 @@ fn a_resource_follows_what_it_read_before_its_first_await_and_restarts() {
     assert_eq!(p.text("v"), "20");
     p.click("again");
     assert_eq!((p.text("v"), LOADS.get()), ("20".into(), 3));
+}
+
+#[test]
+fn a_resource_shows_a_mutated_value_and_a_disposed_one_loads_no_more() {
+    thread_local!(static LOADS: Cell<u32> = const { Cell::new(0) });
+    fn app() -> View {
+        let q = signal(|| 1u32);
+        let r = resource(move || {
+            let q = q.get();
+            LOADS.set(LOADS.get() + 1);
+            async move { q * 10 }
+        });
+        rsx! {
+            button { "data-t": "q", onclick: move |_| q += 1, "q" }
+            button { "data-t": "set", onclick: move |_| r.mutate(99), "set" }
+            button { "data-t": "off", onclick: move |_| r.dispose(), "off" }
+            p { "data-t": "v", {r.get().map(|v| v.to_string()).unwrap_or_default()} }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.click("set");
+    assert_eq!((p.text("v"), LOADS.get()), ("99".into(), 1), "aio's mutate: shown at once, no load");
+    p.click("q");
+    assert_eq!(p.text("v"), "20", "the next load replaces it");
+    p.click("off");
+    p.click("q");
+    assert_eq!((p.text("v"), LOADS.get()), ("20".into(), 2), "disposed: no load, the value kept");
 }
 
 #[test]
@@ -293,6 +351,21 @@ fn each_global_is_its_own_state_per_app_instance_and_a_global_memo_follows_them(
     drop(p);
     let p = TestPage::mount(two_globals);
     assert_eq!(p.text("left"), "0", "a new app instance starts again");
+}
+
+/// The same named global as hot-patched code sees it after its type
+/// changed (`ax dev`, air's `dev`): made again with its first value, never a
+/// panic. Without `dev` there is no hot-patch: two types is a bug, said loudly.
+static OLD_SHAPE: Global<u32> = Global::named(|| 7, "app::NOTE");
+static NEW_SHAPE: Global<String> = Global::named(|| "fresh".into(), "app::NOTE");
+
+#[test]
+#[cfg_attr(not(feature = "dev"), should_panic(expected = "air: a global of another type"))]
+fn a_global_whose_type_a_patch_changed_starts_again() {
+    let mut p = TestPage::mount(two_globals);
+    assert_eq!(p.within(|| OLD_SHAPE.get_untracked()), 7);
+    assert_eq!(p.within(|| NEW_SHAPE.get_untracked()), "fresh");
+    assert_eq!(p.within(|| OLD_SHAPE.get_untracked()), 7, "and back, each read as its own type");
 }
 
 #[test]
@@ -562,7 +635,7 @@ fn an_event_for_a_redrawn_element_is_dropped_and_a_dev_build_says_so_once() {
     assert!(!p.root().event(&late), "no handler took it: its element was drawn again");
     assert!(!p.root().event(&late));
     let heard = HEARD.lock().unwrap().clone();
-    if cfg!(debug_assertions) {
+    if cfg!(feature = "dev") {
         assert_eq!(heard.len(), 1, "said once per event name: {heard:?}");
         assert_eq!(heard[0].0, "ui:stale-event");
         assert!(heard[0].1.contains("`click`") && heard[0].1.contains("dropped"), "{}", heard[0].1);

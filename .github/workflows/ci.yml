@@ -46,7 +46,10 @@ jobs:
           key: aio-tools-${{ runner.os }}-${{ steps.pins.outputs.key }}
       - if: matrix.part == 'test' && steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- setup
+      # The web build's browser tests run here: one that would skip fails.
       - run: ./ci.sh ${{ matrix.part }}
+        env:
+          AIO_CI_WEB: 1
   # Known breaks planted one at a time, in the source and in a built .deb:
   # each one's test must go red (docs/testing/proving.md).
   mutants:

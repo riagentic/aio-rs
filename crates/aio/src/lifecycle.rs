@@ -12,6 +12,7 @@ const ENV: &str = "AIORT_WATCH_FD";
 static STOP: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The exit of a stop that stays down under the supervisor files `aio
 /// build` writes (aio's, SIGTERM's): their restart loop ends on it.
@@ -42,6 +43,7 @@ pub fn stop_code(stays_down: bool, restart: bool) -> u8 {
 /// Ask this process to stop the graceful way, as SIGTERM does: a process
 /// waiting in [`stop_asked`] shuts down; one that isn't ends now.
 pub fn ask_stop() {
+    STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
     if LISTENING.load(std::sync::atomic::Ordering::SeqCst) {
         STOP.notify_one();
     } else {
@@ -55,6 +57,12 @@ pub fn ask_stop() {
     }
 }
 
+/// Whether this process was asked to stop ([`ask_stop`], or a signal
+/// [`stop_asked`] saw): it is ending, so takes nothing new.
+pub fn stopping() -> bool {
+    STOPPING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Resolves when this process is asked to stop: SIGTERM or SIGINT (Unix),
 /// Ctrl+C, a closed console, logoff or shutdown (Windows), or [`ask_stop`].
 /// From this call on (inside a tokio runtime), those no longer end the
@@ -66,6 +74,7 @@ pub fn stop_asked() -> io::Result<impl Future<Output = ()>> {
         let (mut term, mut int) = (signal(SignalKind::terminate())?, signal(SignalKind::interrupt())?);
         async move {
             tokio::select! { _ = term.recv() => {}, _ = int.recv() => {}, _ = STOP.notified() => {} }
+            STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     };
     #[cfg(windows)]
@@ -78,6 +87,7 @@ pub fn stop_asked() -> io::Result<impl Future<Output = ()>> {
                 _ = c.recv() => {}, _ = b.recv() => {}, _ = cl.recv() => {},
                 _ = lo.recv() => {}, _ = sh.recv() => {}, _ = STOP.notified() => {}
             }
+            STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     };
     LISTENING.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -364,9 +374,10 @@ pub fn started(pid: u32) -> Option<String> {
 /// Make this process harder to read from outside: in release builds it
 /// is not dumpable, so other processes of the same user (without
 /// `CAP_SYS_PTRACE`) can't attach to it or read its memory, and no core
-/// file holds its keys. Debug builds stay debuggable.
+/// file holds its keys. An `ax dev` build (aio's `dev` feature, tooling
+/// only) stays debuggable: a debugger, and `ax status` reading its memory.
 pub fn harden() {
-    #[cfg(all(target_os = "linux", not(debug_assertions)))]
+    #[cfg(all(target_os = "linux", not(feature = "dev")))]
     // SAFETY: a plain prctl on this process.
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);

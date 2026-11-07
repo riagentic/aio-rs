@@ -165,6 +165,8 @@ struct Inner<T: Cell> {
     owned: Mutex<HashMap<String, Box<dyn Any + Send>>>,
     /// The effects running (or queued) per key, each with its number.
     running: Mutex<HashMap<String, Vec<(u64, AbortHandle)>>>,
+    /// Ticks skipped in a row, by schedule key (`skip_if_running`).
+    skipped: Mutex<HashMap<String, u32>>,
     /// Per key, the end of the last queued effect: the next one waits for it.
     tails: Mutex<HashMap<String, oneshot::Receiver<()>>>,
     /// Held while a commit's events and effects are taken and handed on.
@@ -276,6 +278,7 @@ impl<T: Cell> Handle<T> {
             watchers: Mutex::default(),
             owned: Mutex::default(),
             running: Mutex::default(),
+            skipped: Mutex::default(),
             tails: Mutex::default(),
             order: Mutex::default(),
             ran: AtomicU64::new(0),
@@ -644,7 +647,10 @@ impl<T: Cell> Handle<T> {
             let msg = format!("{}: #[{hook}] {m} refused: {e}", T::ID);
             eprintln!("[aio] {msg}");
             crate::report::problem("hook", &msg);
-            crate::Rejected::new(msg)
+            match on {
+                true => crate::Rejected::coded(crate::Code::InitError, msg),
+                false => crate::Rejected::new(msg),
+            }
         })
     }
 
@@ -722,12 +728,12 @@ impl<T: Cell> Handle<T> {
     }
 
     /// This call's answer, when one within its ttl has it: it needn't run again.
-    fn answers(&self, method: &str, args: &Value) -> Option<Value> {
+    fn answers(&self, method: &str, args: &Value, who: Option<&crate::Caller>) -> Option<Value> {
         if lock(&self.inner.answered).is_empty() {
             return None;
         }
         let now = lock(&self.inner.store).now();
-        lock(&self.inner.answered).get(method, args, now)
+        lock(&self.inner.answered).get(method, args, who, now)
     }
 
     /// Run a call (by the network caller `who`, with a synced client's
@@ -741,11 +747,11 @@ impl<T: Cell> Handle<T> {
         method: &str,
         args: Value,
         op: Option<&str>,
+        parts: Option<crate::answer::Parts>,
     ) -> Result<(Option<Value>, crate::Answer)> {
         self.open_for_calls()?;
-        if who.is_none()
-            && op.is_none()
-            && let Some(v) = self.answers(method, &args)
+        if op.is_none()
+            && let Some(v) = self.answers(method, &args, who)
         {
             return Ok((Some(v.clone()), crate::Answer::ready(Ok(v))));
         }
@@ -753,6 +759,7 @@ impl<T: Cell> Handle<T> {
         let (reply, answer) = match mode {
             Some(_) => {
                 let (r, a) = crate::answer::Reply::new(method);
+                parts.into_iter().for_each(|p| r.stream_to(p));
                 if let Some(gone) = Gone::<T>::ON {
                     gone(self, &r);
                 }
@@ -761,7 +768,7 @@ impl<T: Cell> Handle<T> {
             None => (None, None),
         };
         if let (Some(mode), Some(r)) = (mode, &reply)
-            && let Some(shared) = self.inner.inflight.enter(mode, crate::answer::key_of::<T>(method, &args), r)
+            && let Some(shared) = self.inner.inflight.enter(mode, crate::answer::key_of::<T>(method, &args, who), r)
         {
             return Ok((Some(Value::Null), shared));
         }
@@ -769,7 +776,7 @@ impl<T: Cell> Handle<T> {
         let out = {
             let mut s = lock(&self.inner.store);
             match who.map_or(Ok(()), |w| s.state().allow(w, method, &args)) {
-                Ok(()) => s.call_as(&self.by, who.and_then(|w| w.role.as_deref()), method, args, op, reply.clone()),
+                Ok(()) => s.call_as(&self.by, who, method, args, op, reply.clone()),
                 Err(e) => Err(e),
             }
         };
@@ -819,7 +826,8 @@ impl<T: Cell> Handle<T> {
         if let (Some(crate::Mode::Newest), Some(r), By::Effect(key)) = (T::async_mode(base), &reply, &self.by)
             && !self.inner.inflight.current(key, r)
         {
-            crate::reject!("{}.{base}: superseded by a newer call (#[mode(newest)])", T::ID);
+            let why = format!("{}.{base}: superseded by a newer call (#[mode(newest)])", T::ID);
+            return Err(crate::Rejected::coded(crate::Code::DispatchAborted, why));
         }
         let turn = self.turn();
         let out = lock(&self.inner.store).call_as(&self.by, None, method, args, None, reply);
@@ -836,11 +844,10 @@ impl<T: Cell> Handle<T> {
     /// held ones (`TestCells`) unstarted.
     fn abort(&self, key: &str) {
         if let Some(held) = lock(&self.inner.held).as_mut() {
-            held.retain(|e| e.key != key);
+            held.retain(|e| !crate::answer::aborts::<T>(key, &e.key));
         }
-        if let Some(rs) = lock(&self.inner.running).get(key) {
-            rs.iter().for_each(|(_, a)| a.abort());
-        }
+        let running = lock(&self.inner.running);
+        running.iter().filter(|(k, _)| crate::answer::aborts::<T>(key, k)).flat_map(|(_, rs)| rs).for_each(|(_, a)| a.abort());
     }
 
     /// Wait until no effect with this key runs or waits. A caller whose
@@ -922,12 +929,15 @@ impl<T: Cell> Handle<T> {
     }
 
     fn open_for_calls(&self) -> Result {
+        let closed = |why: String| Err(crate::Rejected::coded(crate::Code::DispatchClosed, why));
         if self.closing() && !matches!(self.by, By::Effect(_)) {
-            crate::reject!("{}: the app is closing; retry after {RETRY_AFTER_MS} ms", T::ID);
+            return closed(format!("{}: the app is closing; retry after {RETRY_AFTER_MS} ms", T::ID));
         }
-        crate::ensure!(self.enabled(), "{} is disabled", T::ID);
+        if !self.enabled() {
+            return closed(format!("{} is disabled", T::ID));
+        }
         if self.paused() && !matches!(self.by, By::Effect(_)) {
-            crate::reject!("{}: paused by time travel (`ax timetravel resume` lets calls in again)", T::ID);
+            return closed(format!("{}: paused by time travel (`ax timetravel resume` lets calls in again)", T::ID));
         }
         Ok(())
     }
@@ -978,7 +988,7 @@ impl<T: Cell> Handle<T> {
             }
             let bad = |e: Error| crate::Rejected::new(e.0);
             (s.position().map_err(bad)).and_then(|p| {
-                let newest = s.newest(TIMELINE_STEPS).map_err(bad)?;
+                let newest = s.travel_steps(TIMELINE_STEPS).map_err(bad)?;
                 let steps = newest
                     .into_iter()
                     .map(|e| Moment { took: s.took(e.seq), seq: e.seq, method: e.method, at: e.at })
@@ -994,6 +1004,22 @@ impl<T: Cell> Handle<T> {
     /// stop the schedules, let running effects finish and commit; those
     /// still running at the deadline are aborted and named.
     pub async fn shutdown(&self, budget: Duration) -> Drained {
+        let drained = self.drain(budget).await;
+        // Last, its state snapshotted: the next start reads what the calls
+        // left, never replaying them with code changed meanwhile.
+        lock(&self.inner.store).close();
+        drained
+    }
+
+    /// The held run into the log and the state snapshotted now (`ax dev`
+    /// does it before each hot-patch): a later start replays only calls
+    /// the new code made.
+    pub fn checkpoint(&self) -> crate::Result {
+        self.store(|s| s.checkpoint())
+    }
+
+    /// [`Self::shutdown`] up to its snapshot.
+    async fn drain(&self, budget: Duration) -> Drained {
         _ = self.live(false);
         self.inner.closing.store(true, Ordering::SeqCst);
         // A held `#[coalesce]` run is saved before anything else stops.
@@ -1033,7 +1059,7 @@ impl<T: Cell> Handle<T> {
 
     /// A synced client's call (see `Store::call_from`); `Ok(None)`: a re-send, not applied again.
     pub fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
-        self.enter(None, method, args, Some(op)).map(|(v, _)| v)
+        self.enter(None, method, args, Some(op), None).map(|(v, _)| v)
     }
 
     /// A call from the network by `who`, with the synced client's `op` if
@@ -1047,18 +1073,20 @@ impl<T: Cell> Handle<T> {
         args: Value,
         op: Option<&str>,
     ) -> Result<Option<Value>> {
-        self.enter(Some(who), method, args, op).map(|(v, _)| v)
+        self.enter(Some(who), method, args, op, None).map(|(v, _)| v)
     }
 
     /// [`Self::call_by`], followed to its end: an async method's answer comes later.
+    /// `parts`: where its pieces go, when the caller streams it.
     pub(crate) fn ask_by(
         &self,
         who: Option<&crate::Caller>,
         method: &str,
         args: Value,
         op: Option<&str>,
+        parts: Option<crate::answer::Parts>,
     ) -> Result<(Option<Value>, crate::Answer)> {
-        self.enter(who, method, args, op)
+        self.enter(who, method, args, op, parts)
     }
 
     /// Committed events from now on, each with the event before it. A
@@ -1138,11 +1166,32 @@ impl<T: Cell> Handle<T> {
         lock(&self.inner.running).contains_key(key)
     }
 
-    /// Is `d` a `skip_if_running` schedule whose last tick's effect (keyed
-    /// by the method) still runs?
+    /// Is `d` a tick of a `skip_if_running` schedule (declared so, or of a
+    /// `#[skip_if_running]` method, whoever set it) whose last call still
+    /// runs? Ten skipped in a row are said once, as aio does.
     pub(crate) fn skips(&self, d: &crate::Due) -> bool {
-        let declared = d.key.strip_prefix('@');
-        declared.is_some_and(|m| T::SCHEDULES.iter().any(|s| s.skip_if_running && s.method == m && self.busy(m)))
+        let m = d.method.as_str();
+        let declared = d.key.strip_prefix('@') == Some(m) && T::SCHEDULES.iter().any(|s| s.skip_if_running && s.method == m);
+        let runs = || lock(&self.inner.running).keys().any(|k| crate::answer::aborts::<T>(m, k));
+        let skip = (declared || T::SKIP_IF_RUNNING.contains(&m)) && runs();
+        let mut skipped = lock(&self.inner.skipped);
+        match skip {
+            false => _ = skipped.remove(&d.key),
+            true => {
+                let n = skipped.entry(d.key.clone()).or_default();
+                *n += 1;
+                if *n == 10 {
+                    let msg = format!(
+                        "{}: schedule `{}` skipped 10 ticks in a row: {m} runs longer than its interval; space the ticks out or make it faster",
+                        T::ID,
+                        d.key
+                    );
+                    eprintln!("[aio] WARN {msg}");
+                    crate::report::tell("schedule:skipping", &msg);
+                }
+            }
+        }
+        skip
     }
 
     /// Fire the schedules due now (none while disabled or paused): when the
@@ -1318,11 +1367,11 @@ fn wait_ms(next: Option<i64>, now: i64) -> u64 {
 
 impl<T: Cell> Door<T> for Handle<T> {
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.enter(None, method, args, None).map(|(v, _)| v.unwrap_or_default())
+        self.enter(None, method, args, None, None).map(|(v, _)| v.unwrap_or_default())
     }
 
     fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
-        self.enter(None, method, args, None).map(|(_, a)| a)
+        self.enter(None, method, args, None, None).map(|(_, a)| a)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {

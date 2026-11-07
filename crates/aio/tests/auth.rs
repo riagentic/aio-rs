@@ -243,7 +243,7 @@ async fn a_native_client_signs_up_in_and_out_over_a_pinned_link() {
     let opts = Options { token: "secret".into(), auth: Some(auth.clone()), tls: Some(tls), ..Default::default() };
     tokio::spawn(serve_with(h.clone(), l, opts));
     let c = Client::new(&addr, Some(root));
-    assert_eq!(c.me(None).await.unwrap(), Me { user: None, signup: true, totp: true, mail: false });
+    assert_eq!(c.me(None).await.unwrap(), Me { user: None, signup: true, totp: true, mail: false, oidc: false });
     let Signup::Signed(ann) = c.signup("ann", PW, None).await.unwrap() else { panic!("signed in") };
     assert_eq!((ann.user.as_str(), ann.role.as_str()), ("ann", "user"));
     let e = c.signup("ann", PW, None).await.unwrap_err();
@@ -582,6 +582,34 @@ async fn with_accounts_a_session_opens_routes_as_its_user() {
     assert_eq!(http(&addr, "GET", "/whoami", Some(&t), json!(null)).await.0, 401);
 }
 
+/// aio's service keys beside `auth: true`: a `Bearer` the app knows by
+/// token (`Http::users`) is its user on routes and sockets, sessions first.
+#[tokio::test(flavor = "multi_thread")]
+async fn with_accounts_a_service_key_beside_them_is_its_user() {
+    use aio::http::{Http, Reply, Route};
+    let auth = Arc::new(Auth::memory(Policy::default()).unwrap());
+    auth.create("ann", PW, Some("admin")).unwrap();
+    const KEY: &str = "pay-0123456789abcdef0123";
+    let who = |r: aio::http::Req| async move { Reply::json(&json!({ "user": r.user(), "role": r.role() })) };
+    let http_ = Http::default()
+        .route(Route::get("/whoami", who))
+        .users(aio::auth::Users::map([(KEY.into(), ("payments".into(), "service".into()))]));
+    let h = Handle::<Board>::memory();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let opts = Options { token: "secret".into(), auth: Some(auth), http: http_, ..Default::default() };
+    tokio::spawn(serve_with(h.clone(), l, opts));
+    let (s, _, v) = http(&addr, "GET", "/whoami", Some(KEY), json!(null)).await;
+    assert_eq!((s, v), (200, json!({ "user": "payments", "role": "service" })));
+    assert_eq!(http(&addr, "GET", "/whoami", Some("pay-not-the-key-0123456"), json!(null)).await.0, 401);
+    let t = login(&addr, "ann").await;
+    assert_eq!(http(&addr, "GET", "/whoami", Some(&t), json!(null)).await.2["user"], "ann", "sessions still");
+    let svc = Remote::<Board>::connect(&addr, KEY, "payments").await.unwrap();
+    svc.add("paid".into()).unwrap();
+    until("the service's call is in", || h.state().last == Some(By::User("payments".into()))).await;
+    assert_eq!(h.state().role.as_deref(), Some("service"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn with_accounts_the_shell_loads_before_sign_in_and_dirs_still_need_one() {
     let t = tempfile::tempdir().unwrap();
@@ -611,6 +639,24 @@ async fn with_accounts_the_shell_loads_before_sign_in_and_dirs_still_need_one() 
 }
 
 /// One plain HTTP/1.1 request with any headers; the status, the lower-cased head and the JSON body.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_second_factor_and_no_cookie_when_the_app_says_so() {
+    let (_, _, addr) = server(Policy { totp: false, cookie: false, ..Default::default() }).await;
+    let t = login(&addr, "ann").await;
+    let (_, _, me) = http(&addr, "GET", "/__aio/auth/me", Some(&t), json!(null)).await;
+    assert_eq!(me["features"]["totp"], false, "the sign-in form offers none");
+    for op in ["totp/setup", "totp/enable"] {
+        let (s, v) = post(&addr, op, Some(&t), json!({ "password": PW, "code": "000000" })).await;
+        assert_eq!((s, v["error"].as_str()), (403, Some("totp_disabled")), "{op}");
+    }
+    // A page asking for the cookie still gets its token: there is no cookie.
+    let creds = json!({ "id": "ann", "password": PW });
+    let (s, head, v) = raw(&addr, "POST", "/__aio/auth/login", &[("x-aio-session", "cookie")], creds).await;
+    assert_eq!(s, 200);
+    assert!(!head.contains("set-cookie"), "{head}");
+    assert!(v["token"].is_string(), "{v}");
+}
+
 async fn raw(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: Value) -> (u16, String, Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -720,7 +766,15 @@ async fn a_users_token_is_rechecked_on_its_open_socket() {
         ("tok-bob-0123456789abcdef", _) => Some(("bob".into(), "user".into())),
         _ => None,
     });
-    let (h, addr) = served(aio::http::Http::default().users(users)).await;
+    // Links ann closed (each reconnect closed one before).
+    let closed = Arc::new(AtomicU8::new(0));
+    let c2 = closed.clone();
+    let on_link = move |p: &aio::http::Presence| {
+        if !p.online && p.user == "ann" {
+            c2.fetch_add(1, Ordering::SeqCst);
+        }
+    };
+    let (h, addr) = served(aio::http::Http::default().users(users).on_link(on_link)).await;
     let gone = |r: &Remote<Board>| {
         let r = r.clone();
         async move {
@@ -743,11 +797,12 @@ async fn a_users_token_is_rechecked_on_its_open_socket() {
         assert!(gone(&ann).await, "{what}: the socket closes within the re-check");
         assert!(bob.online(), "{what}: only that token's socket");
     }
-    // A changed role: the socket closes, and the client's reconnect calls with the new one.
+    // A changed role is pushed to the open socket (aio's): it stays, and calls with the new one.
     mode.store(0, Ordering::SeqCst);
     let ann = Remote::<Board>::connect(&addr, "tok-ann-0123456789abcdef", "ann").await.unwrap();
     ann.add("hi".into()).unwrap();
     until("ann's call is in", || h.state().role.as_deref() == Some("user")).await;
+    let before = closed.load(Ordering::SeqCst);
     mode.store(3, Ordering::SeqCst);
     for _ in 0..100 {
         if h.state().role.as_deref() == Some("admin") {
@@ -757,6 +812,39 @@ async fn a_users_token_is_rechecked_on_its_open_socket() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(h.state().role.as_deref(), Some("admin"), "the new role, not the one it opened with");
+    assert_eq!(closed.load(Ordering::SeqCst), before, "the socket stayed open");
+}
+
+/// aio's `resolveUser(token, state)`: an async resolver that reads the
+/// app's state (a captured handle) and says more of the user than a role.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_resolver_reads_the_state_and_says_more_of_the_user() {
+    use aio::http::{Http, Reply, Route};
+    let h = Handle::<Board>::memory();
+    let state = h.clone();
+    let users = aio::auth::Users::resolve_with(move |t| {
+        let state = state.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let open = state.state().notes.len() < 100;
+            let mut extra = serde_json::Map::new();
+            extra.insert("tenant".into(), json!("acme"));
+            (open && t == "jwt-ann-0123456789abcdef").then(|| aio::auth::Known {
+                user: "ann".into(),
+                role: "editor".into(),
+                extra,
+            })
+        }
+    });
+    let who = |r: aio::http::Req| async move { Reply::json(&json!({ "user": r.user(), "tenant": r.extra("tenant") })) };
+    let (served_h, addr) = served(Http::default().route(Route::get("/whoami", who)).users(users)).await;
+    let (s, _, v) = http(&addr, "GET", "/whoami", Some("jwt-ann-0123456789abcdef"), json!(null)).await;
+    assert_eq!((s, v), (200, json!({ "user": "ann", "tenant": "acme" })));
+    assert_eq!(http(&addr, "GET", "/whoami", Some("jwt-nobody-0123456789ab"), json!(null)).await.0, 401);
+    let ann = Remote::<Board>::connect(&addr, "jwt-ann-0123456789abcdef", "ann").await.unwrap();
+    ann.add("hi".into()).unwrap();
+    until("ann's call is in", || served_h.state().role.as_deref() == Some("editor")).await;
+    drop(h);
 }
 
 /// Sessions without accounts (aio's `sessions: true`): the app issues a
@@ -784,4 +872,42 @@ async fn sessions_without_accounts() {
     assert!(svc.online());
     let e = Remote::<Board>::connect(&addr, &t, "carol").await.err().unwrap();
     assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+/// An async resolver on a server whose runtime has one thread
+/// (`current_thread`) may await what that runtime drives (here, a lookup
+/// task of its own): asking it never blocks that thread, so no deadlock.
+#[test]
+fn an_async_resolver_on_a_current_thread_server_never_blocks_it() {
+    use aio::http::{Http, Reply, Route};
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async move {
+            type Ask = (String, tokio::sync::oneshot::Sender<bool>);
+            let (ask, mut asked) = tokio::sync::mpsc::unbounded_channel::<Ask>();
+            tokio::spawn(async move {
+                while let Some((t, back)) = asked.recv().await {
+                    _ = back.send(t == "jwt-ann-0123456789abcdef");
+                }
+            });
+            let users = aio::auth::Users::resolve_with(move |t| {
+                let ask = ask.clone();
+                async move {
+                    let (back, answer) = tokio::sync::oneshot::channel();
+                    ask.send((t, back)).ok()?;
+                    let known = aio::auth::Known { user: "ann".into(), role: "user".into(), ..Default::default() };
+                    answer.await.ok()?.then_some(known)
+                }
+            });
+            let who = |r: aio::http::Req| async move { Reply::json(&json!({ "user": r.user() })) };
+            let (_h, addr) = served(Http::default().route(Route::get("/whoami", who)).users(users)).await;
+            tx.send(addr).unwrap();
+            std::future::pending::<()>().await
+        })
+    });
+    let addr = rx.recv().unwrap();
+    let ask = http(&addr, "GET", "/whoami", Some("jwt-ann-0123456789abcdef"), json!(null));
+    let got = aio::rt().block_on(async { tokio::time::timeout(Duration::from_secs(5), ask).await });
+    assert_eq!(got.expect("answered: the server's thread was free").2, json!({ "user": "ann" }));
 }

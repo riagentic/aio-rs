@@ -20,7 +20,8 @@ wire: [wire](wire.md)). Golden files: aio's `tests/fixtures/v1.0.9-*`,
 
 ## state.db
 
-- PRAGMAs on open: WAL, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`. `user_version` and `application_id` are never used by aio.
+- PRAGMAs on open: WAL, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`. `user_version` and `application_id` are never used by aio; aio-rs 0.3 leaves them to the app too (its own layout is read from its tables). aio-rs 0.2 stamped `user_version = 2` in an aio file it adopted; 0.3 leaves that stamp, since a file can't tell it from an app's own 2: an app that keeps its own `user_version` sets it again.
+- Back to aio-rs 0.2: an update to 0.3 that never starts is rolled back, and the version before puts back the backup it took before the swap, so 0.2 opens the file as it left it. A file 0.3 adopted first and 0.2 never did (its `user_version` unstamped) is refused by 0.2 ("this aio store has a table `log`"); a build on 0.2 of an app that came to 0.3 straight from aio can't open its file: go back by hand only to a backup made before (`ax restore`).
 - `aio_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)`; values are plain `JSON.stringify` (Date → ISO string, Map/Set → `{}`, `undefined` dropped, NaN/±Infinity → `null`; BigInt refused). No wrapper.
 - Snapshot (`persistKey`, default `state`): `single` = one row `state` holding `{"<cell>": {...}}`; `multi` = one row per cell, key `state\x1f<cell>`. aio reads both and adopts the other layout.
 - In the document: `__*` keys are carried along, never restored; unknown cells are kept; a slice may hold `__aio_status`.

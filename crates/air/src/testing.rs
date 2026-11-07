@@ -115,6 +115,8 @@ impl TestPage {
             self.bytes += b.len();
             self.frames += 1;
             self.apply(&b);
+            // The frame is out: what rows that left held goes, as a host does.
+            crate::drop_left();
         }
         let uncaught = self.root.uncaught();
         assert!(uncaught.is_empty(), "a view failed and no ErrorBoundary is above it: {}", uncaught.join("; "));

@@ -59,7 +59,7 @@ owner-only (0600). The id sorts by time
 | `tip` | the one thing to do, for kinds that have one |
 | `title`, `body`, `contact` | the problem in a line (300 characters), the details (20 000), how to reach the user (200) |
 | `app` | `id`, `version`, `channel`, `build` (debug or release), `aio` (aio-rs's version), `os`, `arch`, `pid` |
-| `state` | each of the app's cells as it would be saved (`save` applied, `#[transient]` left out), at most 256 KB in all |
+| `state` | each of the app's cells as it would be saved (`save` applied, `#[transient]` left out) and as a client with the key sees it (`visible`, no `#[server]` fields), at most 256 KB in all |
 | `withheld` | cells left out of `state`, and why: `#[redact]` methods, too big, unreadable |
 | `timeline` | the newest 100 calls: when, which (`notes.add`), how long (`ms`), a refusal's reason; never the arguments |
 | `diagnostics` | the newest 200 problems and warnings off the [diagnostic bus](errors.md#hearing-problems-in-code) |
@@ -81,9 +81,13 @@ with nothing installed.
 - **Half a state.** A cell that doesn't fit the 256 KB left is left out
   whole and named: half a state misleads, none does not.
 
-A `#[server]` field is kept off the wire, not off disk: it is in the
-saved state, so in reports. Keep a secret out of saved state
-(`#[transient]`, `save`) or give its cell a `#[redact]` method
+- **What a client may not see.** `#[server]` fields, and what `visible`
+  hides from a client with the key (aio's screening). A report taken
+  mid-panic runs none of the app's code, so a cell with `visible` is
+  withheld from it.
+
+A secret is still in the saved state, on disk. Keep it out of saved
+state (`#[transient]`, `save`) or give its cell a `#[redact]` method
 ([secrets](../auth/secrets.md)).
 
 ## Reading them
@@ -193,10 +197,11 @@ the framework).
 
 - aio turns reports on with `feedback: true`; aio-rs always has them
   (`auto = false` keeps only the user's).
-- aio's reports also screen state by `visible` and `persist`: aio-rs's
-  carry the state as saved (so `#[transient]` and `save` apply) and
-  withhold whole any cell with `#[redact]` methods; a field only
-  `visible` hides is in the report.
+- A report's state is screened as in aio: as saved (`#[transient]` and
+  `save` apply), as a client with the key sees it (`visible`, `#[server]`
+  fields out), and any cell with `#[redact]` methods withheld whole. A
+  report taken mid-panic runs none of the app's code, so a cell with
+  `visible` is withheld from it.
 - aio's timeline entries carry their payloads and diffs (screened);
   aio-rs's never carry arguments.
 - aio's `am report path` prints the folder: `ax data <app>` does.

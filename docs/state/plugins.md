@@ -266,9 +266,11 @@ aio::rt().block_on(checkout(500)).unwrap();
   claim, as a key holder's is; two apps of one user trust each other as
   much as the OS does. Rules that need proof belong behind accounts on a
   server.
-- **Results in pieces.** A server function served with
-  `Http::server_fn_streamed` sends parts as it goes:
-  `ledger.run_streamed(F, args, |part| ..)` receives them, then the answer.
+- **Results in pieces.** An async method sends its caller pieces with
+  `cx.part(x)` (aio's `emitChunk`): `ledger.stream("ask", args, |piece|
+  ..)` receives them, then the answer ([effects](effects.md#results-in-pieces)).
+  A server function served with `Http::server_fn_streamed` does the same:
+  `ledger.run_streamed(F, args, |part| ..)`.
 - **Bytes.** Put a blob in the other app's store, then pass its id to a
   method: no bytes travel in a call.
 - `ax peer <app> --as <user>` shows the same table `describe` returns,

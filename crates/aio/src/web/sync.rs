@@ -129,6 +129,8 @@ struct Inner<T: Cell> {
     owned: Mutex<std::collections::HashMap<String, Box<dyn std::any::Any + Send>>>,
     /// Async methods' callers waiting for their end (`end` frames), by call.
     ends: Mutex<std::collections::HashMap<String, crate::Reply>>,
+    /// The server refused this page's credential (aio's "Signed out").
+    signed_out: AtomicBool,
 }
 
 /// A synced copy of a server's cell in the page. Reads and calls are local
@@ -308,6 +310,19 @@ impl Drop for Link {
     }
 }
 
+/// Did the server stop taking this page's credential? A browser can't read
+/// a refused socket's 401, so it asks over HTTP, as aio's tab does: no
+/// user on the session doors (an app with accounts), or the page itself
+/// refused (an app's key).
+async fn dead() -> bool {
+    match super::fetch("/__aio/auth/me", None, None).await {
+        Ok((200, me)) => me["user"].is_null(),
+        Ok((401, _)) => true,
+        Ok(_) => super::fetch("/", None, None).await.is_ok_and(|(s, _)| s == 401),
+        Err(_) => false,
+    }
+}
+
 /// Why no link was made.
 enum Failed {
     /// Not reachable now: tried again later.
@@ -367,7 +382,8 @@ impl<T: Cell> Remote<T> {
     pub async fn open_at(app: &str, url: &str) -> std::io::Result<Self> {
         let key = storage::key(app, T::ID);
         super::syncing(app, T::ID);
-        let saved = storage::load(&Local, &key, say).filter(|d| d.cell == T::ID && d.v == T::VERSION);
+        let saved =
+            storage::load(&Local, &key, say).and_then(|d| storage::current(&Local, &key, d, T::ID, T::VERSION, say));
         let hello = json!({ "t": "hello", "cell": T::ID, "v": T::VERSION });
         let first = match Link::open(url, &hello).await {
             Ok(l) => Some(l),
@@ -405,6 +421,7 @@ impl<T: Cell> Remote<T> {
             conflicts: Mutex::default(),
             owned: Mutex::default(),
             ends: Mutex::default(),
+            signed_out: AtomicBool::new(false),
         });
         let r = Self { inner };
         r.mirror_twins();
@@ -547,6 +564,31 @@ impl<T: Cell> Remote<T> {
 
     /// Change the copy, recompute what's shown, keep it in the browser,
     /// tell the listeners.
+    /// Has the server refused this page's credential? New calls are
+    /// refused; signing in again ([`super::restart`]) links it again.
+    pub fn signed_out(&self) -> bool {
+        self.inner.signed_out.load(Ordering::SeqCst)
+    }
+
+    /// Signed out: the waiting calls are refused with `ACCESS_DENIED` and
+    /// taken off the copy, and no reconnect presents the dead credential.
+    fn signed_out_now(&self) {
+        self.inner.signed_out.store(true, Ordering::SeqCst);
+        say(&format!("sync {}: signed out: the server refused this page's credential; sign in again", T::ID));
+        let gone: Vec<(String, String)> =
+            lock(&self.inner.copy).pending.iter().map(|q| (q.op.clone(), q.method.clone())).collect();
+        self.update(|c| c.pending.clear());
+        let why = Rejected::coded(crate::Code::AccessDenied, "signed out: not sent");
+        let fs = lock(&self.inner.refusals).clone();
+        for (op, method) in gone {
+            if let Some(end) = lock(&self.inner.ends).remove(&op) {
+                end.send(Err(why.clone()));
+            }
+            fs.iter().for_each(|f| f(&method, &why));
+        }
+        self.tell();
+    }
+
     fn update(&self, f: impl FnOnce(&mut Copy<T>)) {
         let doc = {
             let mut c = lock(&self.inner.copy);
@@ -686,6 +728,12 @@ async fn run<T: Cell>(weak: Weak<Inner<T>>, url: String, hello: Value, mut first
                     l
                 }
                 Err(Failed::Refused(e)) => return say(&format!("sync {}: {e}; not retrying", T::ID)),
+                // A browser can't read a refused upgrade's 401: ask over HTTP
+                // whether this page's credential died (aio's "Signed out").
+                Err(Failed::Offline(_)) if dead().await => {
+                    let Some(inner) = weak.upgrade() else { return };
+                    return Remote { inner }.signed_out_now();
+                }
                 Err(Failed::Skew(e) | Failed::Offline(e)) => {
                     if !told {
                         say(&format!("sync {}: {e}; retrying", T::ID));
@@ -747,7 +795,15 @@ impl<T: Cell> Remote<T> {
     fn predict(&self, method: &str, args: Value, end: Option<crate::Reply>) -> Result<Value> {
         let (out, q) = {
             let c = lock(&self.inner.copy);
-            crate::ensure!(c.pending.len() < PENDING_MAX, "blocked: {PENDING_MAX} calls wait for the server");
+            if self.inner.signed_out.load(Ordering::SeqCst) {
+                return Err(crate::Rejected::coded(crate::Code::AccessDenied, "signed out: sign in again to call"));
+            }
+            if !(c.pending.len() < PENDING_MAX) {
+                return Err(crate::Rejected::coded(
+                    crate::Code::QueueOverflow,
+                    format!("blocked: {PENDING_MAX} calls wait for the server"),
+                ));
+            }
             let op = crate::cx::Op::new();
             let cx = Cx::synced(super::now_ms(), T::ID, &By::User(c.user.clone()), &op);
             let waits = T::UNPREDICTED.contains(&method);

@@ -20,16 +20,20 @@ const fn v(name: &'static str, usage: &'static str, about: &'static str) -> Verb
 pub const VERBS: &[Verb] = &[
     v(
         "create",
-        "create <name> [--template t] [--id id] [--aio-version v] [--aio dir] [--target a,b] [--css tailwind] [--force]",
+        "create <name> [--template t] [--id id] [--aio-version v] [--aio dir] [--target a,b] [--css tailwind] [--force] [--no-warm]",
         "a new app in ./<name> that runs, tests and builds as it is, on any
 machine after a clone (its own workspace and git repository, aio.toml,
 README, the agent brief's pointer); --template app (a window, the
-default), cli (a command-line tool) or service (served, no window);
+default), cli (a command-line tool), service (served, no window), todo
+(a window on a saved list) or canvas (a window drawing a world a pure,
+tested function moves);
 --id: its id (its data's home; default: the name, refused when an
 installed app has it); --aio-version: its aio-rs release from git (default:
 this ax's; main, latest); --aio: an aio-rs checkout instead, named relative
 to the app; --target: its [build] targets (ax build --list); --css
-tailwind: Tailwind writes its stylesheet; a failure leaves nothing behind",
+tailwind: Tailwind writes its stylesheet; a failure leaves nothing behind;
+at a terminal it then builds the app for ax dev in the background, so the
+first ax dev is a launch (--no-warm, AIORT_NO_WARM=1: not)",
     ),
     v(
         "pin",
@@ -37,7 +41,7 @@ tailwind: Tailwind writes its stylesheet; a failure leaves nothing behind",
         "which aio-rs the app uses (aio's am pin): what its Cargo.toml files
 ask for, what its Cargo.lock built, this ax's version and whether they
 match, aio-rs's releases (exit 1: drift); version: every aio-rs
-dependency moved to that release (0.2.0), main (the branch tip), latest
+dependency moved to that release (0.3.0), main (the branch tip), latest
 (the newest in the app's major; --major: any) or an aio-rs checkout's
 folder (this machine only), Cargo.lock following; all or nothing; <app>:
 its name or folder, left out inside it",
@@ -54,6 +58,9 @@ goes on a nested display, not the person's, and opens no browser tab (auto);
 --watch=false (--no-watch): build and run it once; --watch=src/ui,assets:
 reload, patch and rebuild on changes there only (dirs of the app);
 --detach: the session in the background (logs/dev.out; ax stop ends it);
+--warm: only the build ax dev starts from (ax create runs it in the background);
+--warm --pack <dir>: instead, the prebuilt files of its libraries into
+<dir>, from a build of their own (AIORT_PREBUILT_URL);
 --verbose: the app's log at debug; --title <t>: the window's title this run;
 --cdp[=port]: its window opens the DevTools protocol on loopback (a free
 port, for other tools; ax shot, eval, surface and trigger need none);
@@ -74,12 +81,14 @@ other edit builds anew and the tabs reload",
     ),
     v(
         "release",
-        "release <app> [--channel c] [--notes t] [--windows] [--android] [--appimage] [--platforms a,b] [--patch-from versions] [--dir d] [--data file] [--no-build] [--allow-dirty] [--unsigned] [--workflow] | release [--aio] [--url u] (aio-rs itself; --windows, --dir too)",
+        "release <app> [--channel c] [--notes t] [--key file] [--app-version v] [--out dir] [--windows] [--android] [--appimage] [--platforms a,b] [--patch-from versions] [--min-from v] [--commit] [--dir d] [--data file] [--no-build] [--allow-dirty] [--unsigned] [--workflow] | release [--aio] [--url u] [--target t] (aio-rs itself; --windows, --dir too)",
         "build, sign and lay out a release in dist/<channel>/ for [updates] url, with patches from earlier ones;
 --platforms: one for each (as ax build; --windows: windows); --android: its signed APKs, offered to open on the device; --appimage: the AppImage, which an app run from one replaces itself with;
---dir: in d/<channel>/; --data: what it reads, from a contract file, not asked of the build;
+--min-from: installed only over v or newer (signed; an older install is told to install v first); --commit ([updates] sign_commit: always): the commit it was built from, signed in (--min-from and --commit need installs on aio-rs 0.3 or newer); --dir: in d/<channel>/; --data: what it reads, from a contract file, not asked of the build;
+--out: the build's folder (as ax build --out), over [build] out;
+--key: signed by that key file (its <name>.previous.key beside it too), not <keys>/<id>.key; --app-version: as that version (1.2.3), over [app] version and git;
 --no-build: the bundles ax build left in dist/; --allow-dirty: a build of uncommitted edits too; --unsigned: signed by a key made for it alone, no ax keygen needed (to look at locally; no app takes it); --workflow: the GitHub workflow that does it on a tag;
---aio (in an aio-rs checkout): aio-rs itself prebuilt for this machine (--windows: Windows too) in dist/aio-rs/v<version>/ (--dir: in d), with install.sh / install.ps1 pinning each archive's SHA-256 (archives a Mac made, put in d first, too) and SHA256SUMS of every file in it; each signature made when its keys are set, else said unsigned (CONTRIBUTING.md: AIO_WINDOWS_CERT, AIO_MACOS_SIGN_IDENTITY, AIO_RELEASE_KEY or keygen --aio); --url: where they will be downloaded from (default: the GitHub release of github.com/riagentic/aio-rs tagged v<version>)",
+--aio (in an aio-rs checkout): aio-rs itself prebuilt for this machine (--windows: Windows too; --target t: that triple too, e.g. x86_64-apple-darwin on an arm64 Mac) in dist/aio-rs/v<version>/ (--dir: in d), with install.sh / install.ps1 pinning each archive's SHA-256 (archives a Mac made, put in d first, too) and SHA256SUMS of every file in it; each signature made when its keys are set, else said unsigned (CONTRIBUTING.md: AIO_WINDOWS_CERT, AIO_MACOS_SIGN_IDENTITY, AIO_RELEASE_KEY or keygen --aio); --url: where they will be downloaded from (default: the GitHub release of github.com/riagentic/aio-rs tagged v<version>)",
     ),
     v(
         "update",
@@ -102,11 +111,13 @@ a macOS app's zip on a Mac, a Windows bundle on Windows (AIO_WINDOWS_SSH)",
     ),
     v(
         "build",
-        "build <app> [--targets a,b] [--platforms a,b] [--list] [--sizes] [--smoke] [--deb] [--appimage] [--android] [--debug] [--windows] [--web] [--dev]",
+        "build <app> [--targets a,b] [--platforms a,b] [--app-version v] [--out dir] [--list] [--sizes] [--smoke] [--smoke-strict] [--quick] [--deb] [--appimage] [--android] [--debug] [--windows] [--web] [--dev]",
         "the app's [build] targets (aio.toml), else an installable app for
 this OS: dist/<id>-<version>-<os>-<arch>.* (Linux .tar.gz, macOS
 zipped .app, Windows one-click .exe + zip; --windows: cross-built from Linux);
 --targets: some of them, or kinds; --list: the kinds and targets;
+--app-version: built as that version (1.2.3), over [app] version and git;
+--out: into that folder, over [build] out (dist);
 --platforms ([build] platforms): each desktop target for each of linux,
 linux-arm64, windows, windows-arm64, macos, macos-arm64 or host; all:
 every one, what this machine can't build said with why and left out;
@@ -117,7 +128,11 @@ crates take its space (over budget: always); size it so, not with a plain
 and AppImage headless, stop it, check its log; a macOS app's zip on
 the Mac that built it (here, or [build.macos] host / AIO_MACOS_SSH); a
 Windows bundle on Windows (AIO_WINDOWS_SSH: one over ssh), stopped with
-<app> --quit;
+<app> --quit; every other artifact listed as not smoke-tested, with why;
+--smoke-strict: --smoke, and one not smoke-tested fails the build;
+--quick: release builds without LTO, in 16 codegen units: a one-line
+change rebuilds in seconds, the binary ~37% bigger; to try, never to ship
+(--sizes and a Mac over ssh refuse it);
 --deb: a Debian package ([app] maintainer); --appimage: one portable file;
 --android: signed APKs instead (the app's lib calls android_app!; --debug:
 debug APKs, the page in chrome://inspect);
@@ -127,7 +142,7 @@ lib for wasm32, a manifest, Apple tags, icons and an offline service worker
     ),
     v(
         "lab",
-        "lab <app> <os> [--stop] [--boot] [--status] [--reset] [--ram size] [--cpus n] [--disk size] [--os-version v] [--apk file] [--port n]",
+        "lab <app> <os> [--stop] [--boot] [--status] [--reset] [--ram size] [--cpus n] [--disk size] [--os-version v] [--apk file] [--port n] [--dist dir] [--tunnel]",
         "the app on a real windows, macos, linux or android desktop, for a
 person to click around in. A machine named in AIO_LAB_WINDOWS,
 AIO_LAB_MACOS or AIO_LAB_LINUX ('[ssh options] [user@]host'): built for
@@ -138,7 +153,10 @@ a Windows or macOS VM, an XFCE desktop or the Android emulator, its
 viewer on a loopback port, the app's dist/ in it at /shared (android:
 its APK installed once booted, --apk: which); --status, --stop, --reset
 (a VM's disk too); a VM's --ram 8G --cpus 4 --disk 64G --os-version 11;
---port: the viewer's (first Windows run: ~30 min, ~8.5 GB)",
+--port: the viewer's; --dist: that folder at /shared, not the app's dist/;
+--tunnel: no port published, the viewer forwarded through docker exec by
+this process until Ctrl-C (where Docker's published ports don't reach
+this machine) (first Windows run: ~30 min, ~8.5 GB)",
     ),
     v(
         "install",
@@ -229,8 +247,9 @@ backup); what they caused (schedules, effects) the app makes again;
     ),
     v(
         "record",
-        "record <app> <cell> <file> [range] [--from file] [--type path]",
-        "a Rust test from what the app's cell did: booted on the state before
+        "record <app> [cell] <file.rs> [range] [--from file] [--type path]",
+        "a Rust test from what the app's cell did (no cell: every cell the
+range touched, their calls in the log's order): booted on the state before
 the range, its calls made again, the state they left asserted; the
 running app's, else (stopped, or --from) its store replayed by the
 app's code, built by cargo as its tests are (--type: the cell's type,
@@ -409,7 +428,8 @@ network: each method's Rust signature and what its #[client] rule says
 (cells: those, default all); app: one here, or another machine's by its
 profile (a .aioapp, ax profile's file; its cells named), asked as that
 profile's key holder; --types: written as Rust consts (a module a cell,
-a const a method), so a call by a renamed name fails to compile",
+a const a method), so a call by a renamed name fails to compile (file -:
+on stdout)",
     ),
     v(
         "cost",
@@ -463,11 +483,14 @@ every app of this workspace",
     v("report", "report <app> [id]", "the app's problem reports, newest first; one in full"),
     v(
         "setup",
-        "setup [--check]",
+        "setup [--check] [--warm] [--aio dir]",
         "what making apps needs: checks Rust and the C toolchain, fetches the
 shared runtime and wasm-bindgen (the web build's) prebuilt and checked, and
 lists the optional tools; each missing one with the command that gets it;
-exit 1 while a needed one is missing; --check: look only, fetch nothing",
+exit 1 while a needed one is missing; --check: look only, fetch nothing;
+--warm: then builds aio-rs and its dependencies as ax dev does, once for the
+machine (on --aio's checkout, else this ax's release), so a new app's first
+ax dev builds only its own crates",
     ),
     v(
         "upgrade",
@@ -522,9 +545,10 @@ it installs nothing); path: the file alone",
     ),
     v(
         "profile",
-        "profile <app> [--out file]",
+        "profile <app> [--out file] [--link]",
         "the running app's profile (.aioapp): host, port, root, key: a
-credential (--out writes it 0600); hand it to a client",
+credential (--out writes it 0600); hand it to a client. --link: a browser
+link carrying the key (?token=)",
     ),
     v("import", "import <app> <file>", "link this device to an app by its profile, as pair does"),
     v("backup", "backup <app> [file]", "copy the app's data (safe while it runs)"),
@@ -545,7 +569,7 @@ answers what ax <verb> <app> <arg> --<flag> v --json does, behind a
 key made for the run (Authorization: Bearer <key>, printed first);
 until Ctrl-C",
     ),
-    v("help", "help [verb] [--commands]", "the everyday verbs; --commands: every verb; verb: that one in full"),
+    v("help", "help [verb] [--commands] [--all]", "the everyday verbs; --commands (--all): every verb; verb: that one in full"),
     v("version", "version", "the aio-rs version of this ax"),
 ];
 
@@ -558,6 +582,17 @@ const MOVED: &[(&str, &str)] = &[
     ),
     ("prune versions", "ax has no version store to prune: an app pins aio-rs in its Cargo.lock"),
     ("theme", "ax theme adopt <app> [--force]: aio-rs's theme into the app, as its own file"),
+    ("instances", "ax apps: every app and private instance on this machine, and which run"),
+    ("watch", "ax dev <app>: it runs with each edit live (--watch=src/ui,assets: only those)"),
+    ("actions", "ax events <app> [cell]: the newest events; ax timeline <app>: each with its diff"),
+    ("client", "ax components <app>: the window's component tree (ax surface <app>: what it shows)"),
+    ("compile", "ax build <app> (--targets a,b: some of its [build] targets)"),
+    ("publish", "ax release <app> [--channel c] [--dir d] [--notes t] [--key file] [--app-version v]"),
+    ("migrate", "ax lint <app> --from <version> [--tests]: what a newer aio-rs retired that the app still uses"),
+    ("check", "cargo check: rustc checks client and server code in one pass; ax lint <app>: aio-rs's checks too"),
+    ("where", "the compiler decides: rustc resolves client and server code, cargo check names a misplaced call"),
+    ("add", "ax has no generators: a cell is a struct with #[aio::cell] (ax create <name> makes a new app)"),
+    ("link", "ax pin <app> <dir>: the app's aio-rs from that checkout (ax pin <app> <version>: a release)"),
 ];
 
 /// Other spellings of a verb: these words, then this flag, read as that
@@ -783,7 +818,7 @@ fn read_one(args: &[String], here: &dyn Fn() -> Result<String, String>) -> Resul
         return Ok(Ask::Say(verb_help(verb)));
     }
     if verb.name == "help" {
-        let every = args[1..own].iter().any(|a| a == "--commands");
+        let every = args[1..own].iter().any(|a| a == "--commands" || a == "--all");
         return match args.get(1) {
             None => Ok(Ask::Say(help())),
             Some(_) if every && own == 2 => Ok(Ask::Say(commands())),
@@ -939,6 +974,31 @@ mod tests {
     }
 
     #[test]
+    fn an_aio_verb_typed_from_habit_names_its_ax_form() {
+        // Every `am` verb ax hasn't: refused, naming the exact ax verb.
+        for (am, ax) in [
+            ("instances", "apps"),
+            ("watch", "dev"),
+            ("actions", "events"),
+            ("client", "components"),
+            ("compile", "build"),
+            ("publish", "release"),
+            ("migrate", "lint"),
+            ("check", "lint"),
+            ("add", "create"),
+            ("link", "pin"),
+            ("dispatch", "call"),
+            ("fix", "pin"),
+            ("theme", "theme adopt"),
+        ] {
+            let e = r(&format!("{am} app")).unwrap_err();
+            assert!(e.contains(&format!("ax {ax}")) && find(ax).is_some(), "{am}: {e}");
+        }
+        assert!(r("where src/x.rs").unwrap_err().contains("cargo check"));
+        assert!(r("publish app").unwrap_err().starts_with("ax release <app>"));
+    }
+
+    #[test]
     fn values_words_and_the_end_of_flags() {
         assert_eq!(run("events app --last=5"), ["events", "--last", "5", "--", "app"]);
         assert_eq!(run("events app --last 5 notes"), ["events", "--last", "5", "--", "app", "notes"]);
@@ -983,6 +1043,7 @@ mod tests {
         assert_eq!(said(""), day);
         assert_eq!(said("--help"), day);
         let all = said("help --commands");
+        assert_eq!(said("help --all"), all, "aio's spelling");
         assert!(all.contains("ax state <app> <cell> [path] [--watch] [--as user]"), "{all}");
         assert!(all.lines().any(|l| l.starts_with("  ax data <app>") && l.ends_with("and what to back up")));
         let one = said("events --help");

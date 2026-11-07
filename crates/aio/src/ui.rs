@@ -9,6 +9,10 @@
 /// page. `(SURFACE_JS)(op, arg)` answers `{ ok }` or `{ error }`.
 pub const SURFACE_JS: &str = include_str!("surface.js");
 
+// What reads its findings: `TestUi` and a dev build's page.
+#[cfg(all(feature = "kit", any(feature = "dev", feature = "testing", test)))]
+#[doc(hidden)]
+pub mod audit;
 /// Key chords (`"mod+s"`), parsed and matched: the kit's bindings and `TestUi`'s keys.
 #[cfg(feature = "kit")]
 #[doc(hidden)]
@@ -31,8 +35,9 @@ pub mod prelude {
         Fragment, FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props,
         Resource, Signal, Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval,
         geometry, in_views, key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn,
-        spawn_forever, task, try_context, watch,
+        spawn_forever, task, try_context, untrack, watch,
     };
+    pub use super::on_air::{Effect, Retry, effect_quiet, on_change, retry};
     pub use crate::{act, use_css};
     /// `rsx!`'s paths start at `air`: an app needs no dependency of its own.
     #[doc(hidden)]
@@ -216,8 +221,8 @@ pub fn numbered(bases: Vec<String>) -> Vec<String> {
 /// root repeats body's colours (which would read the light tokens). Tokens
 /// set on `:root` are set on that root too, so the ones made from others
 /// (`--aio-tint` from the accent) are made from the app's, not inherited
-/// ready-made. It mounts into `<main id="main">`, which aio styles as a
-/// centred page, so that box is reset to aio's full-window `#root`.
+/// ready-made. It mounts into `<div id="main">`, which aio styles as a
+/// centred page, so that box is reset to the full window.
 /// `scheme` decides `light-dark()` and `prefers-color-scheme`: the OS's as
 /// it changes ([`Scheme::System`], what [`scheme`] gives by default), or
 /// the app's own choice (a `bool`: `true` dark; a phone in dark mode then
@@ -233,19 +238,34 @@ pub fn page_css(sheets: &[&str], scheme: impl Into<Scheme>) -> String {
 /// A stylesheet file of the app: its path and the text it had when built.
 pub type Sheet = (&'static str, &'static str);
 
-/// What [`use_css!`](crate::use_css) styles the page with: in a release
-/// build the sheets as built; in a dev build each file as it is now on disk,
-/// so a saved edit shows without a compile (aio's live CSS), in a browser as
-/// `ax dev --web` serves it. A file that is gone keeps its built text.
+/// `ax dev`'s live CSS is in (aio's `dev` feature: tooling only). Until a
+/// sheet changes on disk it is inert: the page is styled by the sheets as
+/// built, exactly as a release build's. For `use_css!`, not apps.
+#[doc(hidden)]
+pub const LIVE_SHEETS: bool = DEV;
+
+/// aio's `dev` feature (`ax dev`'s builds): tooling only, as the app's own
+/// macros see it (an app crate's `cfg!` would ask the app's features).
+#[doc(hidden)]
+pub const DEV: bool = cfg!(feature = "dev");
+
+/// A sheet was edited on disk since the app started (`ax dev`'s live CSS).
+static EDITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What [`use_css!`](crate::use_css) styles the page with: the sheets as
+/// built. Under `ax dev`, once a file is saved, each file as it is now on
+/// disk, so the edit shows without a compile (aio's live CSS), in a browser
+/// as `ax dev --web` serves it. A file that is gone keeps its built text.
 pub fn sheet_texts(sheets: &[Sheet]) -> Vec<String> {
+    let edited = LIVE_SHEETS && EDITED.load(std::sync::atomic::Ordering::Relaxed);
     sheets
         .iter()
         .map(|(path, built)| {
-            #[cfg(all(debug_assertions, target_arch = "wasm32"))]
+            #[cfg(all(feature = "dev", target_arch = "wasm32"))]
             if let Some(t) = LIVE.with_borrow(|l| l.get(path).cloned()) {
                 return t;
             }
-            match cfg!(debug_assertions) && cfg!(not(target_arch = "wasm32")) {
+            match edited && cfg!(not(target_arch = "wasm32")) {
                 true => std::fs::read_to_string(path).unwrap_or_else(|_| built.to_string()),
                 false => built.to_string(),
             }
@@ -253,18 +273,18 @@ pub fn sheet_texts(sheets: &[Sheet]) -> Vec<String> {
         .collect()
 }
 
-#[cfg(all(debug_assertions, target_arch = "wasm32"))]
+#[cfg(all(feature = "dev", target_arch = "wasm32"))]
 thread_local! {
     /// A dev page's sheets as `ax dev --web` last served them, by path.
     static LIVE: std::cell::RefCell<std::collections::BTreeMap<&'static str, String>> = Default::default();
 }
 
-/// Waits until one of `sheets` changes on disk (a dev build; it polls every
-/// 20 ms, a few file stats, so a saved edit shows within 0.05 s; a browser asks `ax dev
-/// --web` every 250 ms, and with no dev server stops asking). A release
-/// build never returns: its sheets are built in.
+/// Waits until one of `sheets` changes on disk (`ax dev`'s live CSS; it
+/// polls every 20 ms, a few file stats, so a saved edit shows within 0.05 s;
+/// a browser asks `ax dev --web` every 250 ms, and with no dev server stops
+/// asking). Without aio's `dev` feature it never returns: the sheets are built in.
 pub async fn sheets_changed(sheets: &[Sheet]) {
-    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+    #[cfg(all(feature = "dev", not(target_arch = "wasm32")))]
     {
         let stamp =
             || sheets.iter().map(|(p, _)| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect::<Vec<_>>();
@@ -272,11 +292,12 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             if stamp() != was {
+                EDITED.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
         }
     }
-    #[cfg(all(debug_assertions, target_arch = "wasm32"))]
+    #[cfg(all(feature = "dev", target_arch = "wasm32"))]
     'asking: loop {
         crate::web::sleep(250).await;
         for (path, built) in sheets {
@@ -314,7 +335,7 @@ pub async fn sheets_changed(sheets: &[Sheet]) {
 #[cfg(feature = "kit")]
 pub fn follow_sheets(sheets: &'static [Sheet]) {
     type Watch = (air::Signal<u64>, air::Task);
-    if !cfg!(debug_assertions) {
+    if !LIVE_SHEETS {
         return;
     }
     thread_local! {
@@ -352,16 +373,16 @@ pub fn follow_sheets(sheets: &'static [Sheet]) {
 /// come first; the kit's classes (`aio::ui::btn`, the kit's components) are
 /// drawn only with its theme in:
 /// `aio::use_css!(dark, &aio::kit::theme_css(hue); "assets/style.css")`.
-/// Paths are from the package's folder. A dev build re-reads a saved file and
-/// redraws within 0.05 s, no compile; a release build has the files built in.
+/// Paths are from the package's folder. The files are built in; under
+/// `ax dev` a saved file is re-read and redrawn within 0.05 s, no compile.
 /// Unlike CSS kept in `use_hook` (made once, so stale after an edit), it is
 /// made again on every render.
 #[macro_export]
 macro_rules! use_css {
     ($dark:expr $(, $made:expr)*; $($path:literal),+ $(,)?) => {{
-        // A release build reads no file: the build machine's path stays out of it.
+        // Only `ax dev` reads a file: elsewhere the build machine's path stays out of it.
         const SHEETS: &[$crate::ui::Sheet] = &[$((
-            if cfg!(debug_assertions) { concat!(env!("CARGO_MANIFEST_DIR"), "/", $path) } else { $path },
+            if $crate::ui::LIVE_SHEETS { concat!(env!("CARGO_MANIFEST_DIR"), "/", $path) } else { $path },
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $path)),
         )),+];
         $crate::ui::follow_sheets(SHEETS);
@@ -671,7 +692,7 @@ impl<T: crate::CellData, R: ?Sized, F: Fn(&T) -> &R> Part<T, R, F> {
             (Some(s), true) => s.get(),
             (Some(s), false) => s.get_untracked(),
             (None, true) => {
-                if cfg!(debug_assertions) {
+                if cfg!(feature = "dev") {
                     whole_read(self.cell, self.at, true);
                 }
                 self.whole.get()
@@ -926,7 +947,7 @@ macro_rules! client {
         /// never follows: a dev build says so once per place (`hint`).
         #[track_caller]
         pub fn $read() -> ::std::sync::Arc<$cell> {
-            if cfg!(debug_assertions) {
+            if $crate::ui::DEV {
                 $crate::ui::whole_read(stringify!($cell), ::std::panic::Location::caller(), false);
             }
             let _ = (VERSION.get(), PARTS.read_untracked());
@@ -987,6 +1008,13 @@ macro_rules! client {
         }
 
         pub fn use_live() {
+            // A dev build's panel steps this cell too (`kit::DevTimeTravel`).
+            #[cfg(not(target_arch = "wasm32"))]
+            $crate::kit::travel::register($crate::kit::travel::Travel {
+                cell: <$cell as $crate::CellData>::ID,
+                timeline: use_time_travel,
+                ask: time_travel,
+            });
             let tx = $crate::ui::once(|| {
                 let _ = PARTS.read_untracked();
                 let (tx, mut rx) = $crate::__tokio::sync::mpsc::unbounded_channel::<()>();

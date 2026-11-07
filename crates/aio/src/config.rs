@@ -14,8 +14,8 @@ pub use aio_config::config::*;
 /// names another, from the crate's folder (tests, fixtures). The app holds
 /// no TOML parser and reads no config at run time: what varies per launch
 /// is a typed flag or variable (`--home`, `--profile`, `--instance`,
-/// `--port`, `--host`, `--expose`, `AIORT_DATA`, `AIORT_TOKEN`,
-/// `AIORT_UPDATE_CHANNEL`), each said in the boot report with who set it.
+/// `--port`, `--host`, `--expose`, `--channel`, `AIORT_DATA`, `AIORT_TOKEN`,
+/// `AIORT_PORT`, `AIORT_UPDATE_CHANNEL`), each said in the boot report with who set it.
 #[macro_export]
 macro_rules! config {
     ($($file:literal)?) => {{
@@ -55,14 +55,21 @@ pub struct Listen {
 /// `[server] listen` (else `127.0.0.1:0`); `--expose` is `0.0.0.0`. A
 /// launch that opens the app to the network (`--expose`, a host not on
 /// loopback) turns TLS on: the key never crosses a LAN in the clear.
-pub fn listen(s: &Server, ask: &crate::paths::Ask) -> Result<Listen, String> {
+pub fn listen(s: &Server, ask: &crate::paths::Ask, env: crate::paths::Env) -> Result<Listen, String> {
     let base = s.listen.as_deref().unwrap_or("127.0.0.1:0");
     let (host, port) =
         base.rsplit_once(':').ok_or_else(|| format!("[server] listen {base:?}: host:port (127.0.0.1:8080)"))?;
-    if let Some(p) = &ask.port
+    // `AIORT_PORT`: the variable form of `--port` (aio's `AIO_PORT`); the flag wins.
+    let by_env = env("AIORT_PORT").and_then(|v| v.into_os_string().into_string().ok()).filter(|v| !v.is_empty());
+    let (asked_port, port_from) = match (&ask.port, by_env) {
+        (Some(p), _) => (Some(p.clone()), "--port"),
+        (None, Some(p)) => (Some(p), "AIORT_PORT"),
+        (None, None) => (None, ""),
+    };
+    if let Some(p) = &asked_port
         && p.parse::<u16>().is_err()
     {
-        return Err(format!("--port {p}: a port number, 0 to 65535 (0: a free one)"));
+        return Err(format!("{port_from} {p}: a port number, 0 to 65535 (0: a free one)"));
     }
     if ask.expose && ask.host.is_some() {
         return Err("--expose and --host both say where to listen: give one".into());
@@ -84,11 +91,11 @@ pub fn listen(s: &Server, ask: &crate::paths::Ask) -> Result<Listen, String> {
     let from = match () {
         _ if ask.expose => "--expose",
         _ if ask.host.is_some() => "--host",
-        _ if ask.port.is_some() => "--port",
+        _ if asked_port.is_some() => port_from,
         _ if s.listen.is_some() => "[server] listen",
         _ => "default",
     };
-    let port = ask.port.as_deref().unwrap_or(port);
+    let port = asked_port.as_deref().unwrap_or(port);
     let addr = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
     Ok(Listen { addr, exposed, tls: !ask.no_tls && (s.tls || (asked && exposed) || ask.tls_cert.is_some()), from })
 }
@@ -150,7 +157,7 @@ pub fn share_says(l: &Listen, lan: Option<std::net::Ipv4Addr>, gate: Gate, key_f
     let url = format!("{}://{host}:{port}/", if l.tls { "https" } else { "http" });
     let who = match gate {
         Gate::Key => format!(
-            "with the app's key, sent as Authorization: Bearer (or once as ?token=, which sets a cookie); key file: {} (owner-only, or AIORT_TOKEN)",
+            "with the app's key, sent as Authorization: Bearer (or once as ?token=, which sets a cookie); key file: {} (owner-only, or AIORT_TOKEN); a link carrying it: `ax profile <app> --link`",
             key_file.display()
         ),
         Gate::Users => "each user with their own token (Authorization: Bearer, or ?token=)".into(),
@@ -312,12 +319,20 @@ mod tests {
         assert!(e.contains("reaches git.example: add \"git.example\""), "{e}");
         assert!(only("\"git.example\"", "git+ssh://git@git.example:2222/me/todo").is_ok());
         assert!(only("", "git+file:///srv/todo.git").is_ok(), "a folder on this machine reaches no host");
+        assert!(only("", "file:///mnt/releases/todo").is_ok(), "a folder: a share, a USB stick");
+        assert!(only("", "file:releases").unwrap_err().contains("file:///"), "a relative path is refused");
         assert!(c("keep = 1").unwrap_err().contains("at least 2"));
         assert!(c("every = \"never\"").is_err());
         let u = c("every = \"6h\"\nevery_by_channel = { dev = \"1m\", nightly = \"off\" }").unwrap().updates;
         assert_eq!(u.every_on("dev"), Some(Duration::from_secs(60)));
         assert_eq!((u.every_on("nightly"), u.every_on("stable")), (None, Some(Duration::from_secs(6 * 3600))));
         assert!(c("every_by_channel = { dev = \"soon\" }").is_err());
+        // dev and test look often unless told otherwise; off stays off.
+        let m = |n| Some(Duration::from_secs(n));
+        assert_eq!((d.every_on("dev"), d.every_on("test"), d.every_on("stable")), (m(60), m(300), m(6 * 3600)));
+        assert_eq!(c("every = \"30s\"").unwrap().updates.every_on("dev"), m(30));
+        assert_eq!(c("every = \"off\"").unwrap().updates.every_on("dev"), None);
+        assert_eq!(c("every_by_channel = { test = \"1h\" }").unwrap().updates.every_on("test"), m(3600));
         assert!(c("channel = \"../x\"").unwrap_err().contains("not a channel name"));
     }
 
@@ -466,10 +481,31 @@ mod tests {
             ("[data]\nretire = [\"state.db\"]", "the store"),
             ("[home]\nenv = \"\"", "variable name"),
             ("[home]\nhome = \"x\"", "unknown field"),
+            ("[home]\ndir = \"data\"", "absolute or ~/"),
+            ("[log]\ndir = \"./logs\"", "absolute or ~/"),
         ] {
             assert!(bad(extra).contains(why), "{extra}: {}", bad(extra));
         }
         assert!(Config::parse("[app]\nid = \"t\"\n[home]\nenv = \"X\"").unwrap_err().contains("needs [app] port_of"));
+        // Any app's: a fixed home (aio's appDir), a log folder, one home only.
+        let c = Config::parse("[app]\nid = \"t\"\nprofiles = false\n[home]\ndir = \"/srv/t\"\n[log]\ndir = \"~/logs/t\"").unwrap();
+        assert_eq!((c.home.dir.as_deref(), c.log.dir.as_deref(), c.app.profiles), (Some("/srv/t"), Some("~/logs/t"), false));
+        assert!(Config::parse("[app]\nid = \"t\"").unwrap().app.profiles, "profiles by default");
+        // Any OS's absolute paths, on every build host: the app may be built for another.
+        for d in [r"C:\\srv\\t", "C:/srv/t", r"\\\\host\\share\\t", "/srv/t"] {
+            assert!(Config::parse(&format!("[app]\nid = \"t\"\n[home]\ndir = \"{d}\"")).is_ok(), "{d}");
+        }
+        for d in ["C:srv", r"srv\\t", "~user/t"] {
+            assert!(Config::parse(&format!("[app]\nid = \"t\"\n[log]\ndir = \"{d}\"")).is_err(), "{d}");
+        }
+        for d in ["../x", "/x", r"\\x", "C:x", "C:/x"] {
+            let e = Config::parse(&format!("[app]\nid = \"t\"\n[dev]\nwatch = [\"{d}\"]")).unwrap_err();
+            assert!(e.contains("[dev] watch"), "{d}: {e}");
+        }
+        assert_eq!(Config::parse("[app]\nid = \"t\"\nflags = [\"--seed\"]").unwrap().app.flags, ["--seed"]);
+        assert!(Config::parse("[app]\nid = \"t\"\nflags = [\"seed\"]").unwrap_err().contains("[app] flags"));
+        let kiosk = "[build]\ntargets = [{ name = \"kiosk\", kind = \"desktop\", ui = \"browser\" }]";
+        assert!(Config::parse(&format!("[app]\nid = \"t\"\n{kiosk}")).unwrap_err().contains("needs mode \"client-server\""));
     }
 
     #[test]
@@ -534,7 +570,8 @@ mod tests {
         let s =
             |listen: Option<&str>, tls: bool| Server { listen: listen.map(String::from), tls, ..Default::default() };
         let ask = |a: &[&str]| crate::paths::Ask::parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
-        let l = |s: &Server, a: &[&str]| listen(s, &ask(a)).map(|l| (l.addr, l.exposed, l.tls, l.from));
+        let none = &|_: &str| None;
+        let l = |s: &Server, a: &[&str]| listen(s, &ask(a), none).map(|l| (l.addr, l.exposed, l.tls, l.from));
         let o = |a: &str, e, t, f| Ok((a.to_string(), e, t, f));
         assert_eq!(l(&s(None, false), &[]), o("127.0.0.1:0", false, false, "default"));
         assert_eq!(l(&s(Some("127.0.0.1:8080"), false), &[]), o("127.0.0.1:8080", false, false, "[server] listen"));
@@ -547,11 +584,18 @@ mod tests {
         assert_eq!(l(&s(None, false), &["--host=::1"]), o("[::1]:0", false, false, "--host"));
         assert!(!l(&s(None, false), &["--host=localhost"]).unwrap().1);
         // Exposed by the author's own config: said loudly, never changed under them.
-        let open = listen(&s(Some("0.0.0.0:8080"), false), &ask(&[])).unwrap();
+        let open = listen(&s(Some("0.0.0.0:8080"), false), &ask(&[]), none).unwrap();
         assert!((open.exposed, open.tls) == (true, false) && listen_says(&open, "notes").contains("plain HTTP"));
-        let safe = listen(&s(Some("0.0.0.0:8080"), true), &ask(&[])).unwrap();
+        let safe = listen(&s(Some("0.0.0.0:8080"), true), &ask(&[]), none).unwrap();
         assert!(listen_says(&safe, "notes").contains("over TLS, behind its key"));
-        assert!(listen_says(&listen(&s(None, false), &ask(&[])).unwrap(), "notes").contains("this machine only"));
+        assert!(listen_says(&listen(&s(None, false), &ask(&[]), none).unwrap(), "notes").contains("this machine only"));
+        // AIORT_PORT: aio's AIO_PORT, over [server] listen, under --port.
+        let port = &|k: &str| (k == "AIORT_PORT").then(|| "9100".into());
+        let by = |a: &[&str]| listen(&s(Some("127.0.0.1:8080"), false), &ask(a), port).map(|l| (l.addr, l.from));
+        assert_eq!(by(&[]), Ok(("127.0.0.1:9100".into(), "AIORT_PORT")));
+        assert_eq!(by(&["--port=9000"]), Ok(("127.0.0.1:9000".into(), "--port")));
+        let bad = &|k: &str| (k == "AIORT_PORT").then(|| "http".into());
+        assert!(listen(&s(None, false), &ask(&[]), bad).unwrap_err().starts_with("AIORT_PORT http: a port number"));
         assert!(l(&s(None, false), &["--port=http"]).unwrap_err().contains("a port number"));
         assert!(l(&s(None, false), &["--expose", "--host=203.0.113.4"]).unwrap_err().contains("give one"));
         // aio's TLS flags: `--no-tls` wins over the launch and [server] tls; a cert pair turns it on.
@@ -569,6 +613,7 @@ mod tests {
         let lan = Some(std::net::Ipv4Addr::new(192, 168, 1, 5));
         let say = share_says(&at("0.0.0.0:8443", true), lan, Gate::Key, key, true);
         assert!(say[0].starts_with("share: https://192.168.1.5:8443/ — with the app's key"), "{say:?}");
+        assert!(say[0].ends_with("a link carrying it: `ax profile <app> --link`"), "{say:?}");
         assert!(say[0].contains("/d/sync.token") && say[1].contains("ax pair <app>"), "{say:?}");
         let say = share_says(&at("0.0.0.0:80", false), None, Gate::Accounts, key, true);
         assert_eq!(say.len(), 1, "a code pairs with the key only");
@@ -600,10 +645,8 @@ mod tests {
         let gh = |n: &str| c(&format!("[capabilities]\nnetwork = {n}\n[updates]\nurl = \"github:me/t\"\n{keys}"));
         assert!(gh("[\"github.com\"]").unwrap_err().contains("add \"*.githubusercontent.com\""));
         assert!(gh("[\"github.com\", \"*.githubusercontent.com\"]").is_ok());
-        let e = c("[client]\nserver = \"10.0.0.5:8443\"").unwrap_err();
-        assert!(e.contains("[client] server reaches 10.0.0.5"), "{e}");
-        assert!(c("[capabilities]\nnetwork = [\"lan\"]\n[client]\nserver = \"10.0.0.5:8443\"").is_ok());
-        assert!(c("[client]\nserver = \"127.0.0.1:8443\"").is_ok(), "this machine always");
+        // A client's server is the person's pick: reached without an entry.
+        assert!(c("[client]\nserver = \"10.0.0.5:8443\"").is_ok());
         assert!(c("[capabilities]\nnetwork = [\"https://x.example\"]").unwrap_err().contains("is not a host"));
     }
 
@@ -636,11 +679,8 @@ mod tests {
         assert!(c("tls = true\ncert = \"/c.pem\"").unwrap_err().contains("go together"));
         assert!(c("cert = \"/c.pem\"\nkey = \"/k.pem\"").unwrap_err().contains("need tls = true"));
         assert!(c("tls = true\ncert = \"c.pem\"\nkey = \"k.pem\"").unwrap_err().contains("absolute path"));
-        #[cfg(unix)]
-        {
-            let own = c("tls = true\ncert = \"/etc/app/chain.pem\"\nkey = \"/etc/app/key.pem\"").unwrap().server;
-            assert_eq!(own.cert.as_deref(), Some(std::path::Path::new("/etc/app/chain.pem")));
-        }
+        let own = c("tls = true\ncert = \"/etc/app/chain.pem\"\nkey = \"C:/app/key.pem\"").unwrap().server;
+        assert_eq!(own.cert.as_deref(), Some(std::path::Path::new("/etc/app/chain.pem")));
     }
 
     #[test]
@@ -653,6 +693,11 @@ mod tests {
         assert_eq!((p.ttl_ms, p.max_sessions, p.signup, p.require_verified), (12 * 3_600_000, Some(3), false, false));
         let strict = Config::parse(&format!("{base}[accounts]\non = true\nrequire_verified = true")).unwrap();
         assert!(strict.accounts.policy().require_verified);
+        // Anyone may sign up, no one unverified may sign in: a mail hook verifies.
+        let open = Config::parse(&format!("{base}[accounts]\non = true\nsignup = true\nrequire_verified = true")).unwrap();
+        assert!(open.accounts.unverifiable(false).unwrap().contains("Http::mail"));
+        assert_eq!(open.accounts.unverifiable(true), None);
+        assert_eq!(strict.accounts.unverifiable(false), None, "no signup: the operator verifies");
         assert_eq!(strict.accounts.policy().max_sessions, Some(10), "bounded unless the app says");
         assert_eq!(c.accounts.policy().max_sessions, Some(10));
         assert!(Config::parse(&format!("{base}[accounts]\non = true\nsession = \"0s\"")).is_err());
@@ -689,7 +734,7 @@ mod tests {
         let got: Vec<_> = t.iter().map(|t| (t.name.as_str(), t.kind.as_deref(), t.bin.as_deref())).collect();
         assert_eq!(got, [("desktop", None, None), ("pro", Some("desktop"), Some("notes-pro")), ("deb", None, None)]);
         assert!(c(r#"[{ name = "pro", knd = "desktop" }]"#).unwrap_err().contains("unknown field"));
-        assert!(c("[1]").unwrap_err().contains("expected [build] targets: a kind or { name, kind, bin }"));
+        assert!(c("[1]").unwrap_err().contains("expected [build] targets: a kind or { name, kind, bin, platforms, title, ui }"));
     }
 
     #[test]

@@ -130,7 +130,7 @@ pub const ASLR: &str = "Aio.aslr";
 pub const PATCH: &str = "Aio.patch";
 
 fn patching(method: &str, params: &Value) -> Result<Value, String> {
-    #[cfg(all(debug_assertions, feature = "dev"))]
+    #[cfg(feature = "dev")]
     {
         if method == ASLR {
             #[cfg(windows)]
@@ -140,6 +140,12 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
         }
         let table: aio_hotpatch::JumpTable =
             aio::serde_json::from_value(params["table"].clone()).map_err(|e| format!("not a jump table: {e}"))?;
+        // The calls so far snapshotted as the old code left them: a later
+        // start must not replay them through the patched code.
+        let unsaved = aio::checkpoint_all();
+        if !unsaved.is_empty() {
+            return Err(format!("not patched, the state couldn't be saved first: {}", unsaved.join("; ")));
+        }
         // SAFETY: a table `ax dev` linked against this very binary at the
         // address it answered (`Aio.aslr`).
         unsafe { aio_hotpatch::apply_patch(table) }.map_err(|e| format!("the patch didn't load: {e}"))?;
@@ -147,7 +153,7 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
         refresh_symbols();
         Ok(json!({ "applied": true }))
     }
-    #[cfg(not(all(debug_assertions, feature = "dev")))]
+    #[cfg(not(feature = "dev"))]
     {
         _ = (method, params);
         Err("not built for hot-patching: ax dev builds with aio-shell's dev feature".into())
@@ -159,7 +165,7 @@ fn patching(method: &str, params: &Value) -> Result<Value, String> {
 /// backtrace in a patch DLL names its functions (from its PDB). Under std's
 /// own dbghelp lock (backtrace-rs's `Local\RustBacktraceMutex<pid>`). No
 /// dbghelp loaded: no backtrace yet, and the first one lists every module.
-#[cfg(all(windows, target_env = "msvc", debug_assertions, feature = "dev"))]
+#[cfg(all(windows, target_env = "msvc", feature = "dev"))]
 fn refresh_symbols() {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -190,7 +196,7 @@ fn refresh_symbols() {
 /// Windows: the first 64 KiB-aligned free span of 256 MiB (ax's
 /// `PATCH_ROOM`) past this binary's `main` within 1.5 GiB of it: a patch
 /// reaches the binary's data rip-relative (±2 GiB). `None`: no such span.
-#[cfg(all(windows, debug_assertions, feature = "dev"))]
+#[cfg(all(windows, feature = "dev"))]
 fn patch_base() -> Option<u64> {
     use windows_sys::Win32::System::Memory::{MEM_FREE, MEMORY_BASIC_INFORMATION, VirtualQuery};
     const ROOM: usize = 256 << 20;

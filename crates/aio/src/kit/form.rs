@@ -150,12 +150,12 @@ pub(super) fn use_field(named: bool, group: bool) -> Wiring {
     Wiring { id, cx, tip, group }
 }
 
-/// A label (text or any view), an optional hint, and an error that turns
+/// A label and a hint (text, state or any view), and an error that turns
 /// the field invalid.
 #[component]
 pub fn Field(
     label: Option<View>,
-    #[props(into)] hint: Prop<Option<String>>,
+    hint: Option<View>,
     #[props(into)] error: Prop<Option<String>>,
     #[props(default)] required: Prop<bool>,
     #[props(default, into)] class: Prop<String>,
@@ -169,11 +169,11 @@ pub fn Field(
         memo(move || error.get().filter(|e| !e.is_empty()))
     };
     let said = {
-        let (base, hint, required) = (base.clone(), hint.clone(), required);
+        let (base, hinted, required) = (base.clone(), hint.is_some(), required);
         memo(move || Said {
             base: base.clone(),
             labelled,
-            described: match (error.with(Option::is_some), hint.with(Option::is_some)) {
+            described: match (error.with(Option::is_some), hinted) {
                 (true, _) => Some(format!("{base}-error")),
                 (false, true) => Some(format!("{base}-hint")),
                 _ => None,
@@ -197,8 +197,8 @@ pub fn Field(
             {children}
             if error.with(Option::is_some) {
                 div { class: "aio-field__error", id: "{base}-error", {error.get()} }
-            } else if hint.with(Option::is_some) {
-                div { class: "aio-field__hint", id: "{base}-hint", {hint.get()} }
+            } else if hint.is_some() {
+                div { class: "aio-field__hint", id: "{base}-hint", {hint.clone()} }
             }
         }
     }
@@ -321,18 +321,29 @@ pub fn Textarea(
     }
 }
 
-/// One choice of a [`Select`].
+/// One choice of a [`Select`] or a [`RadioGroup`](super::RadioGroup).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Opt {
     pub value: String,
+    /// Its text: the option's, a radio's name to a screen reader.
     pub label: String,
     pub disabled: bool,
+    /// What a radio shows beside it instead of `label`: any view.
+    pub view: Option<View>,
 }
 
 impl<S: Into<String>> From<S> for Opt {
     fn from(v: S) -> Self {
         let value = v.into();
-        Self { label: value.clone(), value, disabled: false }
+        Self { label: value.clone(), value, disabled: false, view: None }
+    }
+}
+
+impl Opt {
+    /// Shown beside its radio instead of its label (aio's `RadioOption.label`
+    /// as any view); the label still names it.
+    pub fn view(self, v: View) -> Self {
+        Self { view: Some(v), ..self }
     }
 }
 
@@ -393,6 +404,8 @@ pub fn Select(
 #[component]
 pub fn Checkbox(
     #[props(default)] checked: Prop<bool>,
+    /// Wired to a form's bool field ([`Form::bind_check`](super::Form::bind_check)).
+    bind: Option<super::Bind>,
     #[props(default)] disabled: Prop<bool>,
     label: Option<View>,
     #[props(default, into)] class: Prop<String>,
@@ -402,6 +415,7 @@ pub fn Checkbox(
     let labelled = label.is_some();
     let w = use_field(labelled, false);
     let named = use_id("checkbox");
+    let (checked, onchange) = super::bound_check(bind, checked, onchange);
     let input = rsx! {
         input {
             r#type: "checkbox",
@@ -436,6 +450,6 @@ mod tests {
     fn variants_and_sizes_are_their_class_names() {
         assert_eq!((Variant::default().key(), Variant::Danger.key()), ("secondary", "danger"));
         assert_eq!((Size::default().key(), Size::Lg.key()), ("md", "lg"));
-        assert_eq!(Opt::from("a"), Opt { value: "a".into(), label: "a".into(), disabled: false });
+        assert_eq!(Opt::from("a"), Opt { value: "a".into(), label: "a".into(), disabled: false, view: None });
     }
 }

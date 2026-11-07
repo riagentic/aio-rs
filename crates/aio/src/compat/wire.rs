@@ -335,10 +335,7 @@ pub async fn session<T: Cell>(
     let viewer = signed.unwrap_or_else(|| By::User("peer".into()));
     // What it sees goes by its role too, read again on every account change
     // (heard before the read: no change between them is missed).
-    let mut accounts = match &gate {
-        crate::link::Gate::Signed(a, _) => Some(a.changes()),
-        _ => None,
-    };
+    let mut accounts = gate.changes();
     let role = |g: &crate::link::Gate| {
         let g = g.clone();
         tokio::task::spawn_blocking(move || g.role())
@@ -489,7 +486,7 @@ pub async fn session<T: Cell>(
                             }
                         },
                     },
-                    "log" if cfg!(debug_assertions) => if let Some((level, line)) = page_line(&who, d) {
+                    "log" if cfg!(feature = "dev") => if let Some((level, line)) = page_line(&who, d) {
                         crate::log::emit(level, module_path!(), Some("page"), format_args!("{line}"), &[]);
                     },
                     // The page's watchdog judges the link by this answer.
@@ -561,7 +558,7 @@ pub async fn session<T: Cell>(
                                 let args = d["payload"]["args"].clone();
                                 let args = if args.is_null() { json!([]) } else { args };
                                 let r = tokio::task::spawn_blocking(move || match other {
-                                    None => gate.ask(&hh, &by, &m, args, None),
+                                    None => gate.ask(&hh, &by, &m, args, None, None),
                                     Some(o) => o.ask(&gate, &by, &m, args),
                                 });
                                 r.await.map_err(|e| e.to_string())?

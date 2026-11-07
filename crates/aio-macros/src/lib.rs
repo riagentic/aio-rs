@@ -2,7 +2,7 @@
 //! callable by name (so the log replays) and typed for callers (`<Name>Calls`).
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, TokenStream as Tokens};
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
 mod lower;
 
 use syn::{
@@ -20,10 +20,14 @@ struct Flags {
     visible: Option<Path>,
     save: Option<Path>,
     restore: Option<Path>,
+    recovered: Option<Path>,
     retire: Vec<LitStr>,
     custom_default: bool,
     quiet: bool,
+    /// `persist = false` (aio's `persist: "none"`): never saved.
+    unsaved: bool,
     coalesce: bool,
+    redact: bool,
     machine: Option<Ident>,
     /// `persist(include = [...])`, `persist(exclude = [...])`: saved paths.
     include: Vec<LitStr>,
@@ -36,17 +40,22 @@ struct Flags {
 /// `custom_default` when the struct implements `Default` itself;
 /// `diagnostics = false` keeps its calls out of the timeline and reports;
 /// `coalesce` makes every plain method `#[coalesce]` (aio's debounced writes);
+/// `redact` makes every method `#[redact]` (aio's `redactActions: ["cell:*"]`);
 /// `machine = field` guards methods by an `aio::machine!` field;
 /// `visible = f` (`fn(&Self, &By) -> Self`, or `fn(&Self, &Caller) -> Self`
 /// for who with their role) filters what a viewer gets, and
 /// `#[server]` on a field keeps it off the wire. What is saved: `#[transient]`
 /// on a field keeps it off disk, as `persist(exclude = ["feeds.*.busy"])` does
 /// paths into it (`persist(include = ["name"])`: only those), `save = f` (`fn(&Self) -> Self`) shapes it,
-/// `restore = f` (`fn(Self) -> Self`) repairs it on every boot. In an aio file,
+/// `restore = f` (`fn(Self) -> Self`) repairs it on every boot.
+/// `recovered = f` (`fn(Self, &aio::Recovered) -> Self`) gives the state to
+/// boot on after a damaged file was set aside. In an aio file,
 /// `#[table("name")]` on a field (`#[table("name", key = "col")]` on a map)
 /// keeps it as the rows of aio's `db:` table `name`, and `#[aio_cell]` on a field
 /// whose type is a cell keeps it as that aio cell's slice. `retire = ["old"]`
 /// deletes cells no build reads any more from the file at its boot.
+/// `persist = false` (aio's `persist: "none"`) never saves the cell, also
+/// opened on a file.
 /// `transaction` makes its async methods transactions (aio's `transaction:
 /// true`): `transaction(serialize)` one at a time, `conflict = "warn"`
 /// commits over a conflict, said.
@@ -54,7 +63,16 @@ struct Flags {
 pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut f = Flags::default();
     let parser = syn::meta::parser(|m| {
-        if m.path.is_ident("persist") {
+        if m.path.is_ident("persist") && m.input.peek(syn::Token![=]) {
+            let on = m.value()?.parse::<syn::LitBool>()?;
+            if on.value {
+                return Err(syn::Error::new(
+                    on.span(),
+                    "`persist` alone saves the cell; `persist = false` never saves it",
+                ));
+            }
+            f.unsaved = true;
+        } else if m.path.is_ident("persist") {
             f.persist = true;
             if m.input.peek(syn::token::Paren) {
                 m.parse_nested_meta(|n| {
@@ -113,6 +131,8 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             f.custom_default = true;
         } else if m.path.is_ident("coalesce") {
             f.coalesce = true;
+        } else if m.path.is_ident("redact") {
+            f.redact = true;
         } else if m.path.is_ident("machine") {
             f.machine = Some(m.value()?.parse()?);
         } else if m.path.is_ident("diagnostics") {
@@ -125,6 +145,8 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             f.save = Some(m.value()?.parse()?);
         } else if m.path.is_ident("restore") {
             f.restore = Some(m.value()?.parse()?);
+        } else if m.path.is_ident("recovered") {
+            f.recovered = Some(m.value()?.parse()?);
         } else if m.path.is_ident("retire") {
             let list: syn::ExprArray = m.value()?.parse()?;
             for e in list.elems {
@@ -135,7 +157,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         } else {
             return Err(m.error(
-                "unknown cell flag: expected persist, shared, version, id, migrate, visible, save, restore, retire, machine, diagnostics, coalesce, transaction or custom_default",
+                "unknown cell flag: expected persist, shared, version, id, migrate, visible, save, restore, retire, machine, diagnostics, coalesce, redact, transaction or custom_default",
             ));
         }
         Ok(())
@@ -145,7 +167,17 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     // `#[server]` fields: kept and saved, never sent to clients.
     // `#[transient]` fields: kept in memory, never saved.
     let (mut hidden, mut transient) = (Vec::new(), Vec::new());
+    // `#[public]` fields (aio's `publicFields`): named like a secret, sent on purpose.
+    let mut public: Vec<String> = Vec::new();
+    // `Hidden<T>` fields not `#[server]`: a `visible` view may hide them from a viewer.
+    let mut viewed: Vec<String> = Vec::new();
     for field in s.fields.iter_mut() {
+        if is_hidden(&field.ty) && !field.attrs.iter().any(|a| a.path().is_ident("server")) {
+            viewed.extend(field.ident.as_ref().map(|i| i.to_string()));
+        }
+        if take(&mut field.attrs, "public").is_some() {
+            public.extend(field.ident.as_ref().map(|i| i.to_string()));
+        }
         for (flag, into) in [("server", &mut hidden), ("transient", &mut transient)] {
             if take(&mut field.attrs, flag).is_none() {
                 continue;
@@ -192,14 +224,29 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     transient.extend(f.exclude.iter().map(LitStr::value));
     // A shared cell sends every field but its #[server] ones to each client:
     // an unambiguous credential among them is refused, never sent.
+    // aio's two tiers: an unambiguous one refused, a secret-ish one warned.
+    let mut warned = vec![];
     if f.shared && f.visible.is_none() {
-        let sent = s.fields.iter().filter_map(|x| x.ident.as_ref()).filter(|i| !hidden.contains(&i.to_string()));
-        if let Some(i) = sent.into_iter().find(|i| credential(&i.to_string())) {
+        let sent: Vec<&Ident> = s
+            .fields
+            .iter()
+            .filter_map(|x| x.ident.as_ref())
+            .filter(|i| !hidden.contains(&i.to_string()) && !public.contains(&i.to_string()))
+            .collect();
+        if let Some(i) = sent.iter().find(|i| credential(&i.to_string())) {
             let msg = format!(
                 "`{i}` looks like a credential, and this cell is shared: every client would get it. \
-                 Mark it #[server] (kept and saved, never sent), or rename it if it isn't one"
+                 Mark it #[server] (kept and saved, never sent), or #[public] if it is meant to be sent"
             );
             return syn::Error::new(i.span(), msg).to_compile_error().into();
+        }
+        for i in sent.into_iter().filter(|i| secretish(&i.to_string())) {
+            let note = format!(
+                "`{i}` may be a secret, and this cell is shared: every client gets it. Mark it #[server] \
+                 (never sent), or #[public] if it is meant to be sent"
+            );
+            let w = format_ident!("__aio_maybe_secret_{}", i);
+            warned.push(quote::quote_spanned!(i.span()=> const _: () = { #[deprecated(note = #note)] #[allow(non_upper_case_globals)] const #w: () = (); #w };));
         }
     }
     // `#[table("name")]` / `#[table("name", key = "col")]`: aio's `db:` table.
@@ -263,7 +310,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             return syn::Error::new(field.span(), msg).to_compile_error().into();
         }
         let ty = &field.ty;
-        slices.push(quote!(::aio::compat::data::Slice::of::<#ty>(#name)));
+        slices.push(quote!(::aio::compat::data::Slice::of::<<#ty as ::aio::compat::data::SliceType>::Cell>(#name)));
         slice_fields.push((name, i.clone()));
     }
     if !slices.is_empty() && (!f.persist || !tables.is_empty()) {
@@ -273,7 +320,13 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !f.persist && !tables.is_empty() {
         return syn::Error::new(s.ident.span(), "#[table] needs #[cell(persist)]").to_compile_error().into();
     }
-    if !f.persist && (!transient.is_empty() || f.save.is_some() || f.restore.is_some() || !f.retire.is_empty()) {
+    if !f.persist
+        && (!transient.is_empty()
+            || f.save.is_some()
+            || f.restore.is_some()
+            || f.recovered.is_some()
+            || !f.retire.is_empty())
+    {
         let msg = "#[transient], save, restore and retire need #[cell(persist)]";
         return syn::Error::new(s.ident.span(), msg).to_compile_error().into();
     }
@@ -292,10 +345,15 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         (!transient.is_empty()).then(|| quote!(const TRANSIENT: &'static [&'static str] = &[#(#transient),*];));
     let server = (!hidden.is_empty()).then(|| quote!(const SERVER: &'static [&'static str] = &[#(#hidden),*];));
     // A copy never has its #[server] fields: reading one there fails loudly.
-    let conceal = (shared && !hidden.is_empty()).then(|| {
+    let conceal = (shared && !(hidden.is_empty() && viewed.is_empty())).then(|| {
         let (fields, labels) =
             (hidden.iter().map(|h| format_ident!("{h}")), hidden.iter().map(|h| format!("{}.{h}", s.ident)));
-        quote!(fn conceal(&mut self) { #(::aio::Hidden::conceal(&mut self.#fields, #labels);)* })
+        let (seen, seen_labels) =
+            (viewed.iter().map(|h| format_ident!("{h}")), viewed.iter().map(|h| format!("{}.{h}", s.ident)));
+        quote!(fn conceal(&mut self) {
+            #(::aio::Hidden::conceal(&mut self.#fields, #labels);)*
+            #(::aio::Hidden::name(&mut self.#seen, #seen_labels);)*
+        })
     });
     let include = &f.include;
     let include =
@@ -320,6 +378,9 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     });
     let save = f.save.map(|p| quote!(fn save(&self) -> ::std::option::Option<Self> { Some(#p(self)) }));
     let restore = f.restore.map(|p| quote!(fn restore(self) -> Self { #p(self) }));
+    let recovered = f.recovered.map(|p| {
+        quote!(#[cfg(not(target_arch = "wasm32"))] fn recovered(self, r: &::aio::Recovered) -> Self { #p(self, r) })
+    });
     let retire = &f.retire;
     let retire = (!retire.is_empty()).then(|| quote!(const RETIRED: &'static [&'static str] = &[#(#retire),*];));
     let transaction = f.transaction.map(|(serialize, warn)| {
@@ -329,6 +390,16 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
     let coalesce = f.coalesce.then(|| {
         quote!(
             const COALESCE: bool = true;
+        )
+    });
+    let unsaved = f.unsaved.then(|| {
+        quote!(
+            const SAVED: bool = false;
+        )
+    });
+    let redact = f.redact.then(|| {
+        quote!(
+            const REDACT: bool = true;
         )
     });
     let quiet = f.quiet.then(|| {
@@ -364,7 +435,9 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             Some(v) => quote!(::aio::serde_json::to_value(::aio::visible(#v, self, viewer))),
             None => quote!(::aio::serde_json::to_value(self)),
         };
+        let screened = f.visible.is_some();
         quote! {
+            const SCREENED: bool = #screened;
             fn project(&self, viewer: &::aio::Caller) -> ::aio::serde_json::Value {
                 let _ = viewer;
                 let mut v = #filtered.unwrap_or(::aio::serde_json::Value::Null);
@@ -385,12 +458,16 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             None => syn::Member::Unnamed(syn::Index::from(i)),
         })
         .collect();
-    let field_names = members.iter().map(|m| match m {
-        syn::Member::Named(id) => id.to_string(),
-        syn::Member::Unnamed(i) => i.index.to_string(),
-    });
+    let field_names: Vec<String> = members
+        .iter()
+        .map(|m| match m {
+            syn::Member::Named(id) => id.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        })
+        .collect();
     let field_tys = s.fields.iter().map(|x| &x.ty);
     let bits = (0..members.len()).map(|i| i.min(63) as u32);
+    let (lows, low): (Vec<_>, Vec<u32>) = members.iter().take(63).cloned().zip(0..).unzip();
     let fields = quote! {
         const FIELDS: &'static [::aio::Field] = &[#(::aio::Field {
             name: #field_names,
@@ -399,14 +476,18 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
         }),*];
         fn changed_fields(&self, other: &Self) -> u64 {
             let mut m = 0u64;
-            #(if self.#members != other.#members { m |= 1u64 << #bits; })*
+            #(if ::aio::big::differs(<Self as ::aio::CellData>::ID, #field_names, || self.#members != other.#members) { m |= 1u64 << #bits; })*
             m
+        }
+        fn take_fields(&mut self, from: &Self, mask: u64) {
+            #(if mask & 1u64 << #low != 0 { self.#lows = ::core::clone::Clone::clone(&from.#lows); })*
         }
     };
     quote! {
         #[derive(Clone, Debug, #default PartialEq, ::aio::serde::Serialize, ::aio::serde::Deserialize)]
         #[serde(crate = "::aio::serde", default)]
         #s
+        #(#warned)*
 
         impl ::aio::CellData for #name {
             const ID: &'static str = #id;
@@ -414,7 +495,9 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             const PERSIST: bool = #persist;
             const SHARED: bool = #shared;
             #quiet
+            #unsaved
             #coalesce
+            #redact
             #machine
             #migrate
             #project
@@ -426,6 +509,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             #slices
             #save
             #restore
+            #recovered
             #retire
             #transaction
             #fields
@@ -475,6 +559,17 @@ fn credential(name: &str) -> bool {
     let pairs = [("private", "key"), ("api", "key"), ("secret", "key"), ("access", "token"), ("auth", "token")];
     w.iter().any(|x| ["password", "passwrd", "passphrase", "mnemonic"].contains(&x.as_str()))
         || w.windows(2).any(|p| pairs.contains(&(p[0].as_str(), p[1].as_str())))
+}
+
+/// A name that may be a secret (aio's warning tier): `enc`, `secret`,
+/// `priv`, `key`, `seed`, `token`, `mnemonic`, `passphrase`, `password` among
+/// its words, with no public hint and no identifier suffix.
+fn secretish(name: &str) -> bool {
+    const ABOUT: &[&str] = &["id", "ids", "name", "count", "at", "len", "length", "kind", "type", "index", "path"];
+    let w = words(name);
+    let public = w.iter().any(|x| x == "pub" || x == "public") || w.last().is_some_and(|x| ABOUT.contains(&x.as_str()));
+    let risky = ["enc", "secret", "priv", "private", "key", "seed", "token", "mnemonic", "passphrase", "password"];
+    !public && w.iter().any(|x| risky.contains(&x.as_str()))
 }
 
 fn snake(s: &str) -> String {
@@ -586,6 +681,7 @@ const HANDLE_METHODS: &[&str] = &[
     "busy",
     "by",
     "call_from",
+    "checkpoint",
     "closing",
     "done",
     "enabled",
@@ -620,6 +716,47 @@ pub fn methods(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// The fields of `self` a method body reads (sorted, once each), or `None`
+/// when it may read any (`self` passed on, a method of `self` called). A
+/// field only assigned whole (`self.f = …`, `self.f.g = …`) is a blind
+/// write, not a read. Inside a macro (`in_macro`) every field counts as read.
+fn reads(body: Tokens, in_macro: bool) -> Option<Vec<String>> {
+    use proc_macro2::{Delimiter, TokenTree as T};
+    let t: Vec<T> = body.into_iter().collect();
+    let punct = |i: usize, c: char| matches!(t.get(i), Some(T::Punct(p)) if p.as_char() == c);
+    let mut out = vec![];
+    for (i, tt) in t.iter().enumerate() {
+        match tt {
+            T::Group(g) => {
+                let mac = i > 0 && punct(i - 1, '!') && g.delimiter() != Delimiter::None;
+                out.extend(reads(g.stream(), in_macro || mac)?);
+            }
+            T::Ident(id) if id == "self" => {
+                if punct(i + 1, ':') {
+                    continue; // `self::item`, a path
+                }
+                let Some(T::Ident(field)) = t.get(i + 2).filter(|_| punct(i + 1, '.')) else { return None };
+                let mut end = i + 3;
+                if matches!(t.get(end), Some(T::Group(g)) if g.delimiter() == Delimiter::Parenthesis) || punct(end, ':')
+                {
+                    return None; // a method of `self`
+                }
+                while punct(end, '.') && matches!(t.get(end + 1), Some(T::Ident(_))) {
+                    end += 2;
+                }
+                let blind = !in_macro && punct(end, '=') && !punct(end + 1, '=') && !punct(end + 1, '>');
+                if !blind {
+                    out.push(field.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
 fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
     let ty = imp.self_ty.clone();
     let Type::Path(tp) = &*ty else { return Err(syn::Error::new(ty.span(), "#[methods] goes on `impl Cell`")) };
@@ -629,7 +766,9 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         (vec![], vec![], vec![], vec![], vec![], vec![]);
     let (mut dsigs, mut dbodies) = (vec![], vec![]);
     let (mut steps, mut rules, mut unpredicted, mut redacted, mut said) = (vec![], vec![], vec![], vec![], vec![]);
-    let (mut schedules, mut coalesced, mut asyncs, mut ttls) = (vec![], vec![], vec![], vec![]);
+    let (mut schedules, mut coalesced, mut asyncs, mut ttls, mut reads_of) = (vec![], vec![], vec![], vec![], vec![]);
+    let mut skipping: Vec<String> = vec![];
+    let mut untraveled: Vec<String> = vec![];
     let (mut on_start, mut on_stop, mut on_aio) = (None, None, None);
     for it in &mut imp.items {
         let ImplItem::Fn(f) = it else { continue };
@@ -653,15 +792,36 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             }
             None => None,
         };
+        if take(&mut f.attrs, "skip_travel").is_some() {
+            untraveled.push(f.sig.ident.to_string());
+        }
         let client = take(&mut f.attrs, "client");
         let redact = take(&mut f.attrs, "redact");
         let coalesce = take(&mut f.attrs, "coalesce");
         let long = take(&mut f.attrs, "long");
+        if let Some(a) = take(&mut f.attrs, "skip_if_running") {
+            if f.sig.asyncness.is_none() {
+                return Err(syn::Error::new(
+                    a.span(),
+                    "#[skip_if_running] goes on a `pub async fn` method: a plain one never runs on",
+                ));
+            }
+            skipping.push(f.sig.ident.to_string());
+        }
         if let Some(a) = &long
             && f.sig.asyncness.is_none()
         {
             return Err(syn::Error::new(a.span(), "#[long] goes on a `pub async fn` method"));
         }
+        // `#[long]`: no ceiling; `#[long(ms)]`: its own (aio's per-method timeout).
+        let ceiling = match &long {
+            None => lower::Ceiling::App,
+            Some(a) if matches!(a.meta, syn::Meta::Path(_)) => lower::Ceiling::None,
+            Some(a) => match a.parse_args::<LitInt>()?.base10_parse::<u64>()? {
+                0 => return Err(syn::Error::new(a.span(), "#[long(ms)]: ms must be > 0")),
+                ms => lower::Ceiling::Ms(ms),
+            },
+        };
         let mode = match take(&mut f.attrs, "mode") {
             Some(a) if f.sig.asyncness.is_none() => {
                 return Err(syn::Error::new(a.span(), "#[mode(..)] goes on a `pub async fn` method"));
@@ -739,14 +899,19 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         // What the method answers: an async one's own type, before it is lowered.
         let ok = ok_type(&f.sig.output)?;
         if is_async {
+            let read = match reads(f.block.to_token_stream(), false) {
+                Some(fs) => quote!(::std::option::Option::Some(&[#(#fs),*])),
+                None => quote!(::std::option::Option::None),
+            };
+            reads_of.push(quote!((#mname, #read)));
             let Some(r) = ok.clone() else {
                 return Err(syn::Error::new(
                     f.sig.span(),
                     "an async method returns aio::Result<T>: a step after an await may refuse",
                 ));
             };
-            let newest = mode.to_string().contains("Newest");
-            let l = lower::lower(f, r, ttl, long.is_some(), newest)?;
+            let (newest, first) = (mode.to_string().contains("Newest"), mode.to_string().contains("First"));
+            let l = lower::lower(f, r, ttl, ceiling, newest, first)?;
             steps.extend(l.fns.into_iter().map(ImplItem::Fn));
             arms.extend(l.arms);
             asyncs.push(quote!((#mname, #mode)));
@@ -793,7 +958,7 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         let run = quote!(self.#m(#cx #(#pass),*));
         let run = if is_async {
             let ttl = match ttl {
-                Some(ms) => quote!(Some((::aio::effect::key(#mname, &::aio::json(&(#(&#vars,)*))?)?, #ms))),
+                Some(ms) => quote!(Some((::aio::call_key(cx, #mname, &::aio::json(&(#(&#vars,)*))?)?, #ms))),
                 None => quote!(::std::option::Option::None),
             };
             quote! {
@@ -907,6 +1072,9 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             const SCHEDULES: &'static [::aio::Declared] = &[#(#schedules),*];
             const ASYNC: &'static [(&'static str, ::aio::Mode)] = &[#(#asyncs),*];
             const TTL: &'static [&'static str] = &[#(#ttls),*];
+            const SKIP_IF_RUNNING: &'static [&'static str] = &[#(#skipping),*];
+            const UNTRAVELED: &'static [&'static str] = &[#(#untraveled),*];
+            const READS: &'static [(&'static str, ::std::option::Option<&'static [&'static str]>)] = &[#(#reads_of),*];
             #on_start
             #on_stop
             #on_aio
@@ -1184,8 +1352,43 @@ fn lit_arm(pat: Tokens, path: Tokens, fields: &syn::Fields) -> Tokens {
 
 #[cfg(test)]
 mod tests {
-    use super::{HANDLE_METHODS, credential, expand, span_ms, words};
+    use super::{HANDLE_METHODS, credential, expand, reads, secretish, span_ms, words};
     use syn::parse_quote;
+
+    #[test]
+    fn a_field_only_assigned_is_not_read_anything_else_is() {
+        let r = |t: proc_macro2::TokenStream| reads(t, false);
+        let some = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            r(quote::quote!({
+                self.a = 1;
+                self.b.c = x;
+            })),
+            some(&[])
+        );
+        let all = quote::quote!({
+            self.a += 1;
+            if self.b == 2 {
+                self.c[0] = 1
+            }
+            self.d.push(1);
+            self.e = self.f;
+        });
+        assert_eq!(r(all), some(&["a", "b", "c", "d", "f"]));
+        assert_eq!(
+            r(quote::quote!({
+                x = self::helper();
+                self.g >= 1
+            })),
+            some(&["g"])
+        );
+        assert_eq!(r(quote::quote!({ log!(self.a = 1) })), some(&["a"]), "a macro's tokens are reads");
+        for any in
+            [quote::quote!({ self.total() }), quote::quote!({ f(self) }), quote::quote!({ *self = S::default() })]
+        {
+            assert_eq!(r(any), None);
+        }
+    }
 
     fn refused(mut imp: syn::ItemImpl) -> String {
         expand(&mut imp).err().map(|e| e.to_string()).unwrap_or_default()
@@ -1305,6 +1508,11 @@ mod tests {
         };
         assert!(src(false).contains("call_ceiling"));
         assert!(!src(true).contains("call_ceiling"));
+        let mut own: syn::ItemImpl = parse_quote!(impl S { #[long(120000)] pub async fn m(&mut self) -> Result { let n: u32 = io().await; Ok(()) } });
+        let own = expand(&mut own).unwrap().to_string();
+        assert!(own.contains("from_millis (120000u64)") && !own.contains("call_ceiling"), "{own}");
+        let r = refused(parse_quote!(impl S { #[long(0)] pub async fn m(&mut self) -> Result { Ok(()) } }));
+        assert!(r.contains("ms must be > 0"), "{r}");
     }
 
     #[test]
@@ -1369,6 +1577,12 @@ mod tests {
             ["passwordless", "monkey", "keyboard", "token_list", "public_key", "pub_key", "api_key_id", "password_at"]
         {
             assert!(!credential(ok), "{ok}");
+        }
+        for maybe in ["enc_seed", "secret", "master_key", "token", "seed"] {
+            assert!(secretish(maybe) && !credential(maybe), "{maybe}");
+        }
+        for ok in ["seed_id", "public_key", "key_name", "count", "seeded"] {
+            assert!(!secretish(ok), "{ok}");
         }
     }
 

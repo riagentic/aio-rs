@@ -93,7 +93,7 @@ pub fn body(bridge: &str) -> String {
         r#"<div id="main"></div>{bridge}<script>{}{RENDER}</script><script>{RUN}</script><script>{}</script><script>{KEYS}</script><script>{REVEAL}</script><script>{WHEEL}</script><script>{FOCUS}</script><script>{DRAG}</script><script>{DIALOG}</script><script>{PREVENT}</script><script>{ENTER}</script>{}"#,
         render_probe(&crate::vitals::get()),
         air::PAGE_JS,
-        overlay(cfg!(debug_assertions))
+        overlay(cfg!(feature = "dev"))
     )
 }
 
@@ -101,8 +101,55 @@ pub fn body(bridge: &str) -> String {
 /// The dev overlay's script tag in a dev build, else nothing (the web
 /// build's page takes it too).
 pub fn overlay(dev: bool) -> String {
-    if dev { format!("<script>{OVERLAY}</script>") } else { String::new() }
+    match dev {
+        true => format!("<script>{OVERLAY}</script><script>{ID_AUDIT}</script><script>{TRAVEL_KEY}</script>"),
+        false => String::new(),
+    }
 }
+
+/// Dev builds only: Ctrl+. shows and hides the time-travel panel a dev
+/// build mounts beside the app (`kit::DevTimeTravel`), wherever the focus is.
+/// A person's key only: [`KEYS`]' copy of one pressed on `<body>` comes by
+/// here too, and would toggle it back.
+pub const TRAVEL_KEY: &str = "document.addEventListener('keydown', (e) => {
+  if (e.isTrusted && e.ctrlKey && !e.altKey && !e.metaKey && e.key === '.') document.querySelector('[data-aio-travel]')?.click();
+});";
+
+/// Dev builds only (aio's selector audit): once the page has settled, a
+/// warning for each `#id` the page's own stylesheets style that no element
+/// has, naming `#main`, where the app is mounted: `#app { height: 100% }`
+/// styling nothing breaks a height chain in silence. Each id once; a
+/// stylesheet the page can't read (another origin's) is skipped, and a
+/// quoted `#` (`a[href="#top"]`) is no selector. `__aioAuditIds()` runs it
+/// again and says how many it found.
+pub const ID_AUDIT: &str = "(() => {
+  const said = new Set();
+  const ids = () => {
+    const out = new Set();
+    const visit = (rules) => {
+      for (const r of rules || []) {
+        const sel = typeof r.selectorText === 'string' ? r.selectorText.replace(/\"[^\"]*\"|'[^']*'/g, '') : '';
+        for (const m of sel.matchAll(/#([A-Za-z_][\\w-]*)/g)) out.add(m[1]);
+        visit(r.cssRules);
+      }
+    };
+    for (const sheet of document.styleSheets) { try { visit(sheet.cssRules); } catch (_) {} }
+    return out;
+  };
+  window.__aioAuditIds = () => {
+    let found = 0;
+    for (const id of ids()) {
+      if (id === 'main' || said.has(id) || document.getElementById(id)) continue;
+      said.add(id);
+      found++;
+      console.warn('[aio-dev] your stylesheet styles #' + id + ', and no element has that id. The app is mounted in #main: ' +
+        'if #' + id + ' was meant as its root (a height chain, a grid, a flex box), its rules apply to nothing. ' +
+        'Style #main, or give an element id=\"' + id + '\".');
+    }
+    return found;
+  };
+  window.addEventListener('load', () => setTimeout(window.__aioAuditIds, 1000));
+})();";
 
 
 
@@ -316,8 +363,10 @@ pub const OVERLAY: &str = "(() => {
     list = css(document.createElement('div'), 'display:none;max-height:40vh;overflow:auto;background:#1b1b1f;color:#f3f3f3;border-radius:6px;padding:6px 8px;margin-bottom:4px;pointer-events:auto');
     badge = css(document.createElement('button'), 'float:right;pointer-events:auto;background:#b3261e;color:#fff;border:0;border-radius:10px;padding:2px 9px;cursor:pointer');
     badge.onclick = () => { open = !open; draw(); };
-    root.appendChild(list);
-    root.appendChild(badge);
+    // In its own shadow root: the app's queries (a button, a div) never meet it.
+    const own = root.attachShadow({ mode: 'open' });
+    own.appendChild(list);
+    own.appendChild(badge);
     document.body.appendChild(root);
   };
   const draw = () => {
@@ -378,6 +427,64 @@ mod tests {
         assert!(page.find("<meta charset").unwrap() < at && at < page.find("<script").unwrap());
         // air runs its queries as the page's own scripts, never through Function.
         assert!(!page.contains("Function(") && page.contains("window.__aioRun("), "no eval in the page");
+    }
+
+    /// aio tests/selector-audit: an `#id` styled and on no element is said
+    /// once, naming `#main`; one that is there, `#main` itself, a quoted
+    /// `#` and another origin's sheet are not. In Node.
+    #[test]
+    fn a_dev_page_says_an_id_its_css_styles_and_no_element_has() {
+        assert!(overlay(true).contains("__aioAuditIds") && overlay(false).is_empty());
+        let js = format!(
+            "const warned = [];
+             console.warn = (m) => warned.push(m);
+             globalThis.window = {{ addEventListener() {{}} }};
+             const foreign = {{ get cssRules() {{ throw new Error('cross-origin'); }} }};
+             globalThis.document = {{
+               styleSheets: [foreign, {{ cssRules: [
+                 {{ selectorText: 'html, body, #app' }},
+                 {{ cssRules: [{{ selectorText: '#main > .grid' }}, {{ selectorText: '#here' }}] }},
+                 {{ selectorText: 'a[href=\"#top\"]' }},
+               ] }}],
+               getElementById: (id) => id === 'here' ? {{}} : null,
+             }};
+             {ID_AUDIT}
+             console.log(JSON.stringify([window.__aioAuditIds(), window.__aioAuditIds(), warned]));"
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &js]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!((v[0].as_u64(), v[1].as_u64()), (Some(1), Some(0)), "said once: {v}");
+        let w = v[2][0].as_str().unwrap();
+        assert!(w.starts_with("[aio-dev] your stylesheet styles #app, and no element has that id") && w.contains("#main"), "{w}");
+    }
+
+    /// Ctrl+. clicks the dev panel's switch; another key, Ctrl+Alt+., or the
+    /// page's own copy of a key (`KEYS`), not. In Node.
+    #[test]
+    fn a_dev_page_toggles_the_time_travel_panel_on_ctrl_dot() {
+        assert!(overlay(true).contains(TRAVEL_KEY) && !overlay(false).contains("data-aio-travel"));
+        let js = format!(
+            "let clicks = 0, on;
+             globalThis.document = {{
+               addEventListener: (t, f) => {{ if (t === 'keydown') on = f; }},
+               querySelector: (s) => s === '[data-aio-travel]' ? {{ click: () => clicks++ }} : null,
+             }};
+             {TRAVEL_KEY}
+             on({{ isTrusted: true, ctrlKey: true, key: '.' }});
+             on({{ isTrusted: false, ctrlKey: true, key: '.' }});
+             on({{ isTrusted: true, ctrlKey: true, altKey: true, key: '.' }});
+             on({{ isTrusted: true, ctrlKey: false, key: '.' }});
+             on({{ isTrusted: true, ctrlKey: true, key: ',' }});
+             console.log(clicks);"
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &js]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1");
     }
 
     #[test]

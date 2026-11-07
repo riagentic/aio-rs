@@ -616,7 +616,8 @@ fn Overview() -> View {
         }
     }
     let history = diag.history.clone().unwrap_or_default();
-    // Each cell's health row: its name, degraded or not, what it says.
+    let cost = diag.cost.clone().unwrap_or_default();
+    // Each cell's health row: its name, degraded or off or not, what it says.
     let health_rows: Vec<(String, bool, String)> = names
         .iter()
         .map(|name| {
@@ -628,11 +629,13 @@ fn Overview() -> View {
             let (errs, last) = cell_calls(&history, name);
             let errs = if errs > 0 { format!(" · {errs} err") } else { String::new() };
             let last = last.map_or(String::new(), |l| format!(" · {l}"));
+            let (off, effects) = cell_live(&cost[name]);
             let said = match &bad {
                 Some(why) => format!("degraded · {why}"),
-                None => format!("ok{size}{links}{errs}{last}"),
+                None if off => format!("tripped: disabled{errs}{last}"),
+                None => format!("ok{size}{links}{effects}{errs}{last}"),
             };
-            (name.clone(), bad.is_some(), said)
+            (name.clone(), bad.is_some() || off, said)
         })
         .collect();
     let work = rt.as_ref().map(|r| r.root.display().to_string()).or(d.path.as_ref().map(|p| p.display().to_string()));
@@ -755,6 +758,16 @@ pub fn cell_calls(history: &[aio::serde_json::Value], cell: &str) -> (usize, Opt
     let last =
         mine.iter().rev().find(|e| !e["refused"].is_string()).and_then(|e| e["method"].as_str().map(String::from));
     (errs, last)
+}
+
+/// Is a cell off (tripped by its failures), and its effect backlog as its
+/// health row says it, from its `ax cost` row (pure).
+pub fn cell_live(cost: &aio::serde_json::Value) -> (bool, String) {
+    let effects = match cost["effects"].as_u64() {
+        Some(n) if n > 0 => format!(" · {n} effect{}", if n == 1 { "" } else { "s" }),
+        _ => String::new(),
+    };
+    (cost["enabled"] == false, effects)
 }
 
 /// The Cells tab (amui's `CellsTab`): each cell and its methods; a method

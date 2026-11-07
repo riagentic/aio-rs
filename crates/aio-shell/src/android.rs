@@ -109,10 +109,16 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
         let _in = rt.enter();
         (app.setup)(&cfg, &dirs).map_err(|e| e.to_string())?;
         // Its releases are offered as the APK to open (`update::apk`).
+        #[cfg(feature = "updates")]
         if let Err(e) = crate::update::open(&cfg, app.version, &dirs) {
             eprintln!("[aio] no updates cell: {e}");
         }
+        #[cfg(feature = "updates")]
         crate::update::watch(&cfg, app.version, &dirs.data);
+        #[cfg(not(feature = "updates"))]
+        if let Some(w) = crate::update::left_out(cfg.updates.url.is_some(), aio::update::installed()) {
+            eprintln!("{w}");
+        }
         aio::health::watch(rt.handle().clone());
     }
     let host = Host {
@@ -120,7 +126,7 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
         class: env.new_global_ref(class).map_err(|e| e.to_string())?,
         rt,
         views: crate::views::Views::new(),
-        root: app.root,
+        root: crate::connect::root(app.root, &dirs),
         page: page_with(&app.window, BRIDGE),
         to_view: Mutex::new(None),
         permissions: app.window.permissions,

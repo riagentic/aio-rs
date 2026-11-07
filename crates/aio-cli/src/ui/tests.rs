@@ -204,6 +204,10 @@ fn an_action_says_its_time_and_a_refused_one_why() {
     assert_eq!(super::app::cell_calls(&history, "board"), (1, Some("add".into())));
     assert_eq!(super::app::cell_calls(&history, "todo"), (0, Some("tick".into())));
     assert_eq!(super::app::cell_calls(&history, "none"), (0, None));
+    let live = |v| super::app::cell_live(&v);
+    assert_eq!(live(json!({ "enabled": false, "effects": 0 })), (true, String::new()));
+    assert_eq!(live(json!({ "enabled": true, "effects": 1 })), (false, " · 1 effect".into()));
+    assert_eq!(live(json!(null)), (false, String::new()), "an older app's row: nothing said");
 }
 
 /// amui's 5 s bound on every read: one that hangs is a failure said, not
@@ -284,7 +288,7 @@ fn fake(said: Arc<Mutex<Vec<String>>>, home: PathBuf) -> Verb {
                 json!({ "uptimeS": 90, "connections": 2, "schedules": 0, "cells": { "board": { "bytes": 120, "links": 2 } } }),
             ),
             "cost" => ok(
-                json!({ "board": { "calls": 4, "meanMs": 0.5, "p95Ms": 1.25, "pushesPerS": 2.0, "bytesPerS": 512.0, "fullResends": 0 } }),
+                json!({ "board": { "calls": 4, "meanMs": 0.5, "p95Ms": 1.25, "pushesPerS": 2.0, "bytesPerS": 512.0, "fullResends": 0, "enabled": true, "effects": 2 } }),
             ),
             "events" => ok(json!([
                 { "seq": 7, "cell": "board", "method": "add", "args": ["hi"], "at": 1_793_530_826_603i64, "ms": 0.5 },
@@ -393,7 +397,7 @@ fn the_manager_lists_the_running_apps_and_shows_the_chosen_ones_overview() {
     shows(&mut ui, "tile-clients", "2");
     shows(&mut ui, "tile-uptime", "1m 30s");
     shows(&mut ui, "cellHealth", "board");
-    assert!(ui.text("cellHealth").contains("120 B · 2 links · 1 err · add"), "{}", ui.text("cellHealth"));
+    assert!(ui.text("cellHealth").contains("120 B · 2 links · 2 effects · 1 err · add"), "{}", ui.text("cellHealth"));
     assert!(ui.text("project").contains("0.1.0") && ui.text("process").contains("4000000"));
     shows(&mut ui, "errors", "panicked at boom");
     assert!(ui.text("errors").contains("the reason"), "a panic whole: {}", ui.text("errors"));
@@ -505,6 +509,7 @@ fn the_metrics_tab_shows_trends_calls_memory_clients_sizes_and_actions() {
     shows(&mut ui, "cellSizes", "120 B");
     shows(&mut ui, "actions", "board.add");
     assert!(ui.text("calls").contains("board.add"), "a refused call is no last action: {}", ui.text("calls"));
+    assert!(ui.text("calls").contains("effect backlog2"), "the effects running or queued: {}", ui.text("calls"));
     assert!(
         ui.text("actions").contains("0.50 ms") && ui.text("actions").contains("✗ board.clear"),
         "{}",

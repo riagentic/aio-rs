@@ -4,11 +4,13 @@
 use aio::auth::{Auth, Policy};
 use aio::prelude::*;
 use aio::sync::{Link, Live, Options, Remote, serve, serve_with};
+#[cfg(feature = "compat")]
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "compat")]
 use tokio_tungstenite::tungstenite::Message;
 
 #[cell(persist, shared)]

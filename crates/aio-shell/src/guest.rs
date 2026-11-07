@@ -25,6 +25,10 @@ pub struct Web {
     pub fullscreen: bool,
     /// A guest or child window may save files (aio's `guestDownloads`).
     pub downloads: bool,
+    /// A child window may be opened without Chromium's sandbox when it
+    /// asks ([`Child::unsandboxed`], aio's `unsandboxedChildWindows`): its
+    /// preload then runs with Node. Each one is said in the log.
+    pub unsandboxed_windows: bool,
 }
 
 /// The window's own keys the page gets instead (aio's `electron.shortcuts`
@@ -98,9 +102,13 @@ pub(crate) fn shell_json(win: &Window) -> io::Result<String> {
         "guestFullscreen": win.web.fullscreen,
         "downloads": win.web.downloads,
         "allow": win.permissions,
+        "grantable": PERMISSIONS,
+        "unsandboxedWindows": win.web.unsandboxed_windows,
+        "devtools": win.devtools,
         "confirmUnload": win.confirm_unload,
         "keys": { "reload": win.keys.reload, "print": win.keys.print },
         "showCapMs": win.show_cap_ms.unwrap_or(5000),
+        "frame": win.chrome == crate::Chrome::Standard,
     })
     .to_string())
 }
@@ -132,14 +140,22 @@ pub struct Child {
     /// One of [`Web::preloads`], by name; unset: none.
     pub preload: Option<String>,
     /// Its session: `persist:name` is kept across starts, a name without
-    /// `persist:` lives in memory. Unset: `persist:aio-child`, which child
-    /// windows share. Never the app's own.
+    /// `persist:` lives in memory. Unset: `persist:aio-child`, which
+    /// sandboxed child windows share; `persist:aio-child-unsandboxed` for
+    /// an [`Self::unsandboxed`] one, which never shares theirs. Never the
+    /// app's own.
     pub partition: Option<String>,
     /// Where it may go: unset, any site (never the app's scheme or a file);
     /// set, http(s) on these origins and the one it opened on.
     pub origins: Option<Vec<String>>,
     /// Its size in px; unset: 1100 × 800.
     pub size: Option<(u32, u32)>,
+    /// What its page may hold on the origin it was opened on, never a
+    /// frame of another site in it ([`PERMISSIONS`]' names); unset: nothing.
+    pub permissions: Vec<String>,
+    /// Without Chromium's sandbox (aio's `sandbox: false`): refused unless
+    /// the window allows it ([`Web::unsandboxed_windows`]).
+    pub unsandboxed: bool,
 }
 
 /// The control line opening `c`, or why it cannot be opened.
@@ -151,8 +167,19 @@ pub(crate) fn child_line(id: u64, c: &Child) -> Result<String, String> {
     {
         return Err(format!("partition {p:?} names the app's own session: name one, like \"persist:name\""));
     }
+    // A page with Node never shares the sandboxed pages' session.
+    let partition = match (&c.partition, c.unsandboxed) {
+        (Some(p), true) if p.trim() == "persist:aio-child" => {
+            return Err(format!("partition {p:?} is the sandboxed child windows': an unsandboxed one keeps its own"));
+        }
+        (None, true) => Some("persist:aio-child-unsandboxed".to_string()),
+        (p, _) => p.clone(),
+    };
     if let Some(p) = c.preload.as_deref().filter(|p| preload_refusal(p).is_some()) {
         return Err(format!("preload {p:?}: {}", preload_refusal(p).unwrap_or_default()));
+    }
+    if let Some(p) = c.permissions.iter().find(|p| !PERMISSIONS.contains(&p.as_str())) {
+        return Err(format!("permission {p:?} is not one a page may hold: {}", PERMISSIONS.join(", ")));
     }
     let mut origins = None;
     if let Some(os) = &c.origins {
@@ -162,8 +189,8 @@ pub(crate) fn child_line(id: u64, c: &Child) -> Result<String, String> {
     }
     let (width, height) = c.size.unzip();
     Ok(json!({
-        "t": "child", "id": id, "url": url.to_string(), "preload": c.preload, "partition": c.partition,
-        "origins": origins, "width": width, "height": height,
+        "t": "child", "id": id, "url": url.to_string(), "preload": c.preload, "partition": partition,
+        "origins": origins, "width": width, "height": height, "permissions": c.permissions, "sandbox": !c.unsandboxed,
     })
     .to_string())
 }
@@ -258,7 +285,14 @@ mod tests {
         assert_eq!(v["keys"], json!({ "reload": false, "print": false }), "the shell keeps its keys");
         static PRE: [(&str, &str); 2] = [("dapp/preload.js", "1"), ("reader.js", "2")];
         let win = Window {
-            web: Web { browser: true, windows: true, preloads: &PRE, fullscreen: true, downloads: false },
+            web: Web {
+                browser: true,
+                windows: true,
+                preloads: &PRE,
+                fullscreen: true,
+                downloads: false,
+                unsandboxed_windows: true,
+            },
             permissions: &["clipboard-read"],
             confirm_unload: true,
             keys: Keys { reload: true, print: false },
@@ -268,6 +302,8 @@ mod tests {
         assert_eq!(v["preloads"], json!(["dapp/preload.js", "reader.js"]));
         assert_eq!((v["allow"].clone(), v["guestFullscreen"].clone()), (json!(["clipboard-read"]), json!(true)));
         assert_eq!(v["keys"]["reload"], true);
+        assert_eq!((v["unsandboxedWindows"].clone(), v["devtools"].clone()), (json!(true), json!(false)));
+        assert_eq!(v["grantable"], json!(PERMISSIONS), "the names a denial's line may offer");
         let err = |w: &Window| shell_json(w).unwrap_err().to_string();
         static TWICE: [(&str, &str); 2] = [("a.js", ""), ("a.js", "")];
         static CLIMB: [(&str, &str); 1] = [("../a.js", "")];
@@ -302,6 +338,13 @@ mod tests {
             (v["partition"].clone(), v["origins"].clone(), v["width"].clone()),
             (Value::Null, Value::Null, Value::Null)
         );
+        assert_eq!((v["permissions"].clone(), v["sandbox"].clone()), (json!([]), json!(true)), "nothing, sandboxed");
+        let asks = Child { permissions: vec!["media".into()], unsandboxed: true, ..c.clone() };
+        let v: Value = aio::serde_json::from_str(&child_line(7, &asks).unwrap()).unwrap();
+        assert_eq!((v["permissions"].clone(), v["sandbox"].clone()), (json!(["media"]), json!(false)));
+        assert_eq!(v["partition"], "persist:aio-child-unsandboxed", "never the sandboxed ones' session");
+        let shared = Child { partition: Some("persist:aio-child".into()), ..asks.clone() };
+        assert!(child_line(7, &shared).unwrap_err().contains("keeps its own"));
         let o = Child {
             origins: Some(vec!["https://a.example/path".into(), "http://b.example:8080".into()]),
             size: Some((640, 480)),
@@ -317,6 +360,9 @@ mod tests {
         assert!(no(Child { partition: Some("persist:".into()), ..c.clone() }).contains("app's own session"));
         assert!(no(Child { partition: Some(" ".into()), ..c.clone() }).contains("app's own session"));
         assert!(no(Child { preload: Some("../x.js".into()), ..c.clone() }).contains("`..`"));
+        assert!(
+            no(Child { permissions: vec!["notifications".into()], ..c.clone() }).contains("not one a page may hold")
+        );
         assert!(no(Child { origins: Some(vec!["*".into()]), ..c }).contains("origins must be"));
     }
 
@@ -377,7 +423,18 @@ mod tests {
                G.shortcut(k('F5', {{ control: true }}), keep, false), G.shortcut(k('F5'), keep, false), G.shortcut(k('p', {{ meta: true }}), keep, false),
                G.shortcut(k('r', {{ control: true }}), give, false), G.shortcut(k('p', {{ control: true }}), give, false),
                G.shortcut(k('F12'), keep, false), G.shortcut(k('F12'), keep, true), G.shortcut(k('I', {{ control: true, shift: true }}), keep, true),
-               G.shortcut(k('Delete', {{ control: true, shift: true }}), keep, true), G.shortcut(Object.assign(k('r', {{ control: true }}), {{ type: 'keyUp' }}), keep, false)];
+               G.shortcut(k('Delete', {{ control: true, shift: true }}), keep, true), G.shortcut(Object.assign(k('r', {{ control: true }}), {{ type: 'keyUp' }}), keep, false),
+               G.shortcut(k('F12'), keep, false, true), G.shortcut(k('Delete', {{ control: true, shift: true }}), keep, false, true)];
+             // aio electron.md: each kind of refusal stops after its max, says so once; the others go on.
+             const said = new Map(), r = (kind, key) => G.refusal(said, kind, key, `${{kind}} ${{key}}`, 2);
+             out.cap = [r('pop-up', 'a'), r('pop-up', 'a'), r('pop-up', 'b'), r('pop-up', 'c'), r('pop-up', 'd'), r('download', 'a')];
+             // A denial names what would grant it.
+             const all = ['clipboard-read', 'fullscreen'];
+             out.denied = [G.denied('clipboard-read', '', 'app', all), G.denied('notifications', '', 'app', all), G.denied('usb', 'https://a.example', 'guest', all),
+               G.denied('fullscreen', 'https://a.example', 'guest', all), G.denied('clipboard-read', 'https://a.example', 'child', all), G.denied('clipboard-read', '', 'guest', all)];
+             // A child window's grant: its own origin, only what it was given.
+             const g = {{ origin: 'https://a.example', perms: ['media'] }};
+             out.child = [G.childAllows(g, 'media', 'https://a.example'), G.childAllows(g, 'media', 'https://b.example'), G.childAllows(g, 'midi', 'https://a.example'), G.childAllows(undefined, 'media', 'https://a.example')];
              // aio electron-unload-veto.test.ts.
              out.unload = [G.unload(true, false), G.unload(false, true), G.unload(false, false)];
              console.log(JSON.stringify(out));",
@@ -402,9 +459,25 @@ mod tests {
         assert!(v["nav"][4].as_str().unwrap().contains("not one of its origins"));
         assert!(v["nav"][6].as_str().unwrap().contains("http(s) only"));
         let sc = json!([
-            "reload", "reload", "reload", null, "print", null, null, null, "devtools", "devtools", "clear", null
+            "reload", "reload", "reload", null, "print", null, null, null, "devtools", "devtools", "clear", null,
+            "devtools", null
         ]);
-        assert_eq!(v["sc"], sc, "plain F5 is the app's; DevTools only in a dev build");
+        assert_eq!(v["sc"], sc, "plain F5 is the app's; DevTools in a dev build, or a release whose app asked");
+        let cap = json!(["pop-up a", null, "pop-up b", "further pop-up lines are not said", null, "download a"]);
+        assert_eq!(v["cap"], cap);
+        let d: Vec<String> = aio::serde_json::from_value(v["denied"].clone()).unwrap();
+        assert!(
+            d[0].ends_with("DENIED to the app's own page: Window { permissions: &[\"clipboard-read\"] } grants it"),
+            "{}",
+            d[0]
+        );
+        assert!(
+            d[1].contains("notifications come from the app")
+                && d[2].ends_with("https://a.example: no page may hold it")
+        );
+        assert!(d[3].ends_with("Web { fullscreen: true } grants it") && d[4].contains("Child { permissions"));
+        assert!(d[5].contains("DENIED to an embedded page: a page that is not the app's gets none"), "{}", d[5]);
+        assert_eq!(v["child"], json!([true, false, false, false]));
         assert_eq!(v["unload"], json!(["leave", "ask", "stay"]));
     }
 }

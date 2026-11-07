@@ -7,8 +7,9 @@
 //! method wrote is put on the state as it is then, unless another call
 //! changed a path it wrote meanwhile (or, `serialize`, anything at all):
 //! then it is refused with `TX_CONFLICT` (or, `conflict = "warn"`, said and
-//! committed). aio-rs can't see what a method read, so every path it
-//! wrote counts as read (aio's read-modify-write rule, never weaker).
+//! committed). What a method read is what `#[methods]` finds in its body
+//! (`Cell::READS`): a field it only assigns is a blind write, which never
+//! conflicts (aio's read tracking); any other field it wrote counts as read.
 use super::*;
 use crate::answer::{Reply, Slot};
 use crate::cx::Asked;
@@ -37,7 +38,7 @@ pub(super) struct Tx<T> {
 /// A serialized call waiting for the one before it to end.
 pub(super) struct Parked {
     by: By,
-    role: Option<String>,
+    who: Option<crate::Caller>,
     method: String,
     args: Value,
     op: Option<String>,
@@ -155,9 +156,9 @@ impl<T: Cell> Store<T> {
         let tx = match method.split_once('.') {
             None => {
                 if cfg.serialize && self.txs.turn.is_some_and(|t| t != id) {
-                    let role = cx.caller_role().map(String::from);
+                    let who = cx.caller().cloned();
                     let (method, op) = (method.to_string(), op.map(String::from));
-                    self.txs.parked.push_back(Parked { by: by.clone(), role, method, args, op, reply });
+                    self.txs.parked.push_back(Parked { by: by.clone(), who, method, args, op, reply });
                     return Ok(Value::Null);
                 }
                 Tx {
@@ -205,8 +206,8 @@ impl<T: Cell> Store<T> {
                 let now = std::time::Instant::now();
                 self.panics.retain(|t| now.duration_since(*t) < PANIC_WINDOW);
                 self.panics.push(now);
-                eprintln!("[aio] {}.{method} panicked: {why} ({} within a minute)", T::ID, self.panics.len());
-                crate::reject!("{}.{method} panicked: {why}", T::ID);
+                eprintln!("{}", super::panicked(method, &why, self.panics.len(), &*self.state));
+                return Err(Rejected::coded(crate::Code::ReduceError, format!("{}.{method} panicked: {why}", T::ID)));
             }
             Err(Applied::Refused(e)) => return Err(e),
             Ok(out) => out,
@@ -237,12 +238,25 @@ impl<T: Cell> Store<T> {
         let next = match Arc::ptr_eq(&tx.base, &live) {
             true => tx.work.clone(),
             false => {
-                let (base, work, mut now) = (crate::json(&*tx.base)?, crate::json(&tx.work)?, crate::json(&*live)?);
+                // Fields it only assigned (blind writes) are put back as
+                // they were for the check, and its own go on after it.
+                let unread = T::blind(&tx.method);
+                let blind = unread & tx.work.changed_fields(&tx.base);
+                let unblind = |s: &T, mask| {
+                    let mut s = s.clone();
+                    s.take_fields(&tx.base, mask);
+                    s
+                };
+                let (base, work, mut now) =
+                    (crate::json(&*tx.base)?, crate::json(&unblind(&tx.work, blind))?, crate::json(&*live)?);
                 let (pushes, mine): (Vec<_>, Vec<_>) =
                     crate::patch::diff_whole(&base, &work).into_iter().partition(|m| pushed(&base, m).is_some());
-                let theirs = crate::patch::diff_whole(&base, &now);
+                let theirs = match unread {
+                    0 => crate::patch::diff_whole(&base, &now),
+                    _ => crate::patch::diff_whole(&base, &crate::json(&unblind(&live, unread))?),
+                };
                 let clash = match cfg.serialize {
-                    true => theirs.first().filter(|_| !mine.is_empty() || !pushes.is_empty()),
+                    true => theirs.first().filter(|_| !mine.is_empty() || !pushes.is_empty() || blind != 0),
                     false => theirs.iter().find(|t| mine.iter().any(|m| overlaps(path_of(m), path_of(t)))),
                 };
                 if let Some(c) = clash {
@@ -264,8 +278,10 @@ impl<T: Cell> Store<T> {
                         None => return Err(unfit(format!("{} is no longer a list", dotted(path)))),
                     }
                 }
-                serde_json::from_value(now)
-                    .map_err(|e| Rejected::new(format!("{}.{}: what it wrote no longer fits: {e}", T::ID, tx.method)))?
+                let mut next: T = serde_json::from_value(now)
+                    .map_err(|e| Rejected::new(format!("{}.{}: what it wrote no longer fits: {e}", T::ID, tx.method)))?;
+                next.take_fields(&tx.work, blind);
+                next
             }
         };
         next.check()?;
@@ -319,7 +335,7 @@ impl<T: Cell> Store<T> {
             ran = true;
             let r = p.reply.clone();
             if let Err(e) =
-                self.call_as(&p.by, p.role.as_deref(), &p.method, p.args, p.op.as_deref(), Some(p.reply))
+                self.call_as(&p.by, p.who.as_ref(), &p.method, p.args, p.op.as_deref(), Some(p.reply))
             {
                 r.send(Err(e));
             }

@@ -121,8 +121,8 @@ fn markup_sent_for_a_template_replaces_it_and_the_state_stays() {
     air::hot::set_markup(&[file!().into()], vec![edit]);
     page.root().hot();
     page.flush();
-    if !cfg!(debug_assertions) {
-        // A release build takes no markup: its templates are as built.
+    if !cfg!(feature = "dev") {
+        // Without air's `dev` feature no markup is taken: its templates are as built.
         assert_eq!(page.text("hi"), "Hello", "{}", page.html());
         air::hot::clear_markup();
         return;

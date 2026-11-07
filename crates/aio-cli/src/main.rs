@@ -37,6 +37,7 @@ mod package;
 mod pin;
 mod places;
 mod platform;
+mod prebuilt;
 mod preview;
 mod prune;
 mod record;
@@ -46,9 +47,11 @@ mod remote;
 mod replayed;
 mod service;
 mod setup;
+mod shape;
 mod shot;
 mod sizes;
 mod smoke;
+mod splash;
 mod sql;
 mod start;
 mod status;
@@ -214,7 +217,7 @@ fn open(path: &Path) -> Result<Connection, String> {
         return Err(format!("no store at {}", path.display()));
     }
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
-    let v: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let v = aio::update::local_data(path).ok().flatten().map_or(0, |c| c.schema);
     if !(1..=2).contains(&v) {
         return Err(format!("{} is not an aio-rs store (schema {v})", path.display()));
     }
@@ -511,18 +514,87 @@ fn runtime(fetch: bool) -> Out {
     }
     // Fetched with no window (a terminal shows the progress).
     if !here {
-        aio_shell::runtime::prefetch(VERSION, pinned_sha(VERSION).as_deref()).map_err(|e| e.to_string())?;
+        aio_shell::runtime::prefetch(VERSION, pinned_sha(VERSION).as_deref(), &|_| {}).map_err(|e| e.to_string())?;
     }
     aio_shell::runtime::ensure("aio-rs")
         .map(|d| format!("Electron {} at {}", aio_shell::runtime::VERSION, d.display()))
         .map_err(|e| e.to_string())
 }
 
-/// The binary `ax start` runs for `t`: built now in its workspace, else
-/// the installed one (its bin link).
-fn app_bin(t: &Target) -> Result<PathBuf, String> {
+/// The scratch app's record of the ax and pin that made it.
+const WARM_STAMP: &str = ".ax-warm";
+
+/// Whether the scratch app at `at` is one this ax made on this pin (`stamp`).
+fn scratch_current(at: &Path, stamp: &str) -> bool {
+    at.join("Cargo.toml").is_file() && std::fs::read_to_string(at.join(WARM_STAMP)).is_ok_and(|s| s == stamp)
+}
+
+/// Whether `ax setup` (the installers' last step) starts `ax setup --warm`
+/// in the background (pure): not for `--check`, else as `ax create` warms.
+fn setup_warms(check: bool, terminal: bool, env: Option<&str>) -> bool {
+    !check && dev::warms_after_create(terminal, false, env)
+}
+
+/// The build folder `ax setup --warm` builds into from `here`: the scratch
+/// app's toolchain is the template's pin.
+fn warm_target(here: &Path) -> PathBuf {
+    let rustup = std::env::var("RUSTUP_TOOLCHAIN").ok();
+    dev::shared_target_with(here, rustup.as_deref().or(Some(crate::setup::toolchain())))
+}
+
+/// `ax setup --warm`: a scratch app from the template, on this ax's aio-rs
+/// (or the checkout `aio`), built as ax dev builds it, in the shared target:
+/// every app made after builds only its own crates (a first start of
+/// seconds, not the 20 s of aio-rs and its dependencies).
+fn setup_warm(aio: Option<&Path>) -> Result<String, String> {
+    let here = std::env::current_dir().map_err(|e| e.to_string())?;
+    let target = warm_target(&here);
+    let checkout = aio.map(|a| here.join(a));
+    // On a checkout, beside it (an app names its checkout by a relative path).
+    let home = match &checkout {
+        Some(c) => c.join("target").join("aio-warm"),
+        None => target.join("aio").join("warm"),
+    };
+    let name = "aio-warm";
+    let at = home.join(name);
+    let mut new = create::New::of(name);
+    std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+    if let Some(c) = &checkout {
+        new.aio = create::Aio::checkout(&at, c)?;
+    }
+    // Made by this ax on this pin, else made again: an older one builds an
+    // aio-rs and a template no app made now has.
+    let stamp = format!("{} {} {:?}\n", env!("CARGO_PKG_VERSION"), crate::setup::toolchain(), new.aio);
+    if !scratch_current(&at, &stamp) {
+        _ = std::fs::remove_dir_all(&at);
+        create::run(&home, &new, (&target, &places().install), true)?;
+        std::fs::write(at.join(WARM_STAMP), &stamp).map_err(|e| format!("{}: {e}", at.display()))?;
+    }
+    let ax = std::env::current_exe().map_err(|e| e.to_string())?;
+    let ok = std::process::Command::new(ax)
+        .args(["dev", name, "--warm"])
+        .current_dir(&at)
+        .status()
+        .map_err(|e| e.to_string())?;
+    match ok.success() {
+        true => Ok(format!("warm: aio-rs and its dependencies built for ax dev in {}", target.display())),
+        false => Err(format!("warm: the scratch app's build failed (in {})", at.display())),
+    }
+}
+
+/// Whether `ax start`'s `args` ask for ax dev's tooling (pure): `--cdp`
+/// before a bare `--` (after it, the app's own words).
+fn asks_dev(args: &[String]) -> bool {
+    crate::cdp::take_flag(args).is_ok_and(|(_, port)| port.is_some())
+}
+
+/// The binary `ax start` runs for `t` with `args`: built now in its
+/// workspace, else the installed one (its bin link). Built as the release
+/// build runs (no operator door, no DevTools port, hardened), but with
+/// `--cdp`: asking for DevTools is asking for ax dev's tooling.
+fn app_bin(t: &Target, args: &[String]) -> Result<PathBuf, String> {
     match &t.pkg {
-        Some(pkg) => dev::build(pkg, Some(&t.plan.logs))
+        Some(pkg) => dev::build(pkg, Some(&t.plan.logs), asks_dev(args))
             .ok_or_else(|| format!("{}: the build failed (`ax errors {}`)", t.name, t.name)),
         None => {
             let bin = places().bin.join(&t.id);
@@ -770,21 +842,34 @@ fn restore(t: &Target, file: &str) -> Out {
 }
 
 fn pair(t: &Target, addr: &str, code: &str) -> Out {
-    let (app, data) = (&t.id, &t.plan.data);
-    let profile = aio::rt().block_on(aio::pairing::pair(addr, code)).map_err(|e| e.to_string())?;
-    if profile.name != *app {
-        return Err(format!("{addr} serves {}, not {app}", profile.name));
-    }
-    aio::paths::private_dir(data).map_err(|e| e.to_string())?;
-    aio::pairing::save(data, addr, &profile).map_err(|e| e.to_string())?;
+    let app = &t.id;
+    let tls = aio::rt().block_on(aio::connect::pair(&t.plan.data, app, addr, code)).map_err(|e| e.to_string())?;
     Ok(format!(
         "paired {app} with {addr}{}",
-        if profile.tls { " (TLS, root pinned)" } else { " (no TLS: use it only on a network you trust)" }
+        if tls { " (TLS, root pinned)" } else { " (no TLS: use it only on a network you trust)" }
     ))
 }
 
 /// `ax profile`: the profile, printed or written 0600 (it holds the key).
-fn profile(t: &Target, out: Option<&str>) -> Out {
+/// A browser link that carries the app's key (`ax profile --link`, aio's
+/// `share:` link; pure): the key goes once as `?token=`, which sets a cookie.
+fn share_link(p: &aio::serde_json::Value) -> String {
+    let host = p["host"].as_str().unwrap_or("127.0.0.1");
+    let host = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+    let key: String = p["key"]
+        .as_str()
+        .unwrap_or_default()
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let scheme = if p["tls"].as_bool() == Some(true) { "https" } else { "http" };
+    format!("{scheme}://{host}:{}/?token={key}", p["port"])
+}
+
+fn profile(t: &Target, out: Option<&str>, link: bool) -> Out {
     let (p, local) = aio::pairing::local_profile(&t.plan.data, &t.id).map_err(|e| unserved(t, e))?;
     if local {
         eprintln!(
@@ -792,6 +877,9 @@ fn profile(t: &Target, out: Option<&str>) -> Out {
              listen on 0.0.0.0 to hand it to another device",
             t.name
         );
+    }
+    if link {
+        return Ok(share_link(&p));
     }
     let text = aio::serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
     match out {
@@ -803,12 +891,28 @@ fn profile(t: &Target, out: Option<&str>) -> Out {
     }
 }
 
+/// `text` into file `f` (`-`: the text itself, for stdout), saying `what` it holds.
+fn write_or_say(f: &str, text: String, what: &str) -> Out {
+    if f == "-" {
+        return Ok(text);
+    }
+    std::fs::write(f, text).map_err(|e| format!("{f}: {e}"))?;
+    Ok(format!("wrote {f}: {what}"))
+}
+
 /// Run a verb as `verbs::read` gave it: the verb, its flags, `--`, its words.
 fn run(args: &[String]) -> Out {
     let cut = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let (flags, pos) = (&args[1..cut], args.get(cut + 1..).unwrap_or_default());
     let has = |f: &str| flags.iter().any(|a| a == f);
     let json = has("--json");
+    if args[0] == "build" && has("--quick") {
+        if has("--sizes") {
+            return Err("--quick is a build to try: --sizes measures the one you ship (ax build <app> --sizes)".into());
+        }
+        freeze::quick();
+        eprintln!("ax build: --quick: no LTO, 16 codegen units (a bigger, slower binary): to try, never to ship");
+    }
     let value = |f: &str| flags.iter().position(|a| a == f).and_then(|i| flags.get(i + 1)).map(String::as_str);
     let last: Option<u32> = match value("--last") {
         Some(n) => Some(n.parse().map_err(|_| "--last needs a number")?),
@@ -843,6 +947,12 @@ fn run(args: &[String]) -> Out {
     };
     // The window's DevTools protocol: `--cdp`'s port, else the app's own door.
     let reach = |t: &Target| cdp::reach(value("--cdp"), cdp::recorded(&t.plan), cdp::door(&t.id, &t.plan));
+    if let Some(v) = value("--app-version") {
+        version::ask(v)?;
+    }
+    if let Some(d) = value("--out") {
+        build::ask_out(d)?;
+    }
     match (args[0].as_str(), p.as_slice()) {
         ("dev", [name, "--android", rest @ ..]) => {
             let (mut device, mut native, mut it) = (None, false, rest.iter());
@@ -889,7 +999,10 @@ fn run(args: &[String]) -> Out {
                 tailwind: css,
                 ..create::New::of(name)
             };
-            let (target, installed) = (dev::shared_target(), places().install);
+            // The folder the new app's builds go to: its toolchain is the template's pin.
+            let rustup = std::env::var("RUSTUP_TOOLCHAIN").ok();
+            let pin = rustup.as_deref().or(Some(crate::setup::toolchain()));
+            let (target, installed) = (dev::shared_target_with(&here, pin), places().install);
             let mut made = create::run(&here, &new, (&target, &installed), has("--force"))?;
             if let (Some(dir), create::Aio::Tag(t)) = (create::this_checkout(), &new.aio) {
                 made.notes.push(format!(
@@ -900,6 +1013,19 @@ fn run(args: &[String]) -> Out {
             }
             made.notes.extend(create::lock(&made.at));
             made.notes.push(create::git_init(&made.at, maintainer.is_some()));
+            // The first `ax dev` is a launch, not a 20 s build: built now, in the background.
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr()) && !json;
+            if dev::warms_after_create(terminal, has("--no-warm"), std::env::var("AIORT_NO_WARM").ok().as_deref()) {
+                let log = target.join("aio").join(format!("warm-{}.log", made.name));
+                made.notes.push(match dev::warm_in_background(&made.at, &made.name, &log) {
+                    Ok(()) => format!(
+                        "building {} for ax dev in the background ({}), so its first start opens at once (--no-warm: not)",
+                        made.name,
+                        log.display()
+                    ),
+                    Err(e) => format!("not built ahead: {e}"),
+                });
+            }
             Ok(made.said(json))
         }
         ("pin", [w]) if pin::is_target(w) => pin::run(None, Some(w), has("--major"), json),
@@ -907,12 +1033,16 @@ fn run(args: &[String]) -> Out {
             pin::run(Some(app), rest.first().copied(), has("--major"), json)
         }
         ("upgrade", rest) if rest.len() <= 1 => upgrade::upgrade(rest.first().copied(), value("--aio").map(Path::new)),
-        ("uninstall", []) => upgrade::uninstall(has("--tools"), &aio::paths::tool_home(), &upgrade::bin()),
+        ("uninstall", []) => {
+            upgrade::uninstall(has("--tools"), &aio::paths::tool_home(), &aio::paths::cache_home(), &upgrade::bin())
+        }
         ("keygen", []) if has("--aio") => release::keygen_aio(&release::keys_dir(), has("--rotate")),
         ("keygen", [name]) => release::keygen(&release::keys_dir(), &app_id(name)?, has("--rotate")),
         ("release", []) if has("--aio") => {
-            let targets: &[&str] = if has("--windows") { &["x86_64-pc-windows-gnu"] } else { &[] };
-            release::aio(targets, value("--dir").map(Path::new), value("--url").unwrap_or(""))
+            // --target: another one this machine builds (a Mac's other CPU: x86_64-apple-darwin).
+            let targets: Vec<&str> =
+                has("--windows").then_some("x86_64-pc-windows-gnu").into_iter().chain(value("--target")).collect();
+            release::aio(&targets, value("--dir").map(Path::new), value("--url").unwrap_or(""))
         }
         ("release", [name]) if has("--workflow") => release::write_workflow(name, value("--channel")),
         ("release", [name]) => {
@@ -924,12 +1054,15 @@ fn run(args: &[String]) -> Out {
                 notes: value("--notes").unwrap_or(""),
                 platforms: platform::resolve(&platforms, platform::host()?)?,
                 patch_from: list("--patch-from"),
+                min_from: value("--min-from"),
+                commit: has("--commit"),
                 dir: value("--dir").map(Path::new),
                 data: value("--data").map(Path::new),
                 no_build: has("--no-build"),
                 allow_dirty: has("--allow-dirty"),
                 appimage: has("--appimage"),
                 unsigned: has("--unsigned"),
+                key: value("--key").map(Path::new),
             };
             match has("--android") {
                 true => release::run_android(name, &ask),
@@ -971,8 +1104,19 @@ fn run(args: &[String]) -> Out {
         // A machine named for the OS (AIO_LAB_*): over ssh; else (or --boot) a container here.
         ("lab", [app, os]) => {
             let machine = lab::machine(os, &|k| std::env::var(k).ok().filter(|v| !v.is_empty())).is_ok();
-            let boxed =
-                ["--boot", "--status", "--reset", "--ram", "--cpus", "--disk", "--os-version", "--apk", "--port"];
+            let boxed = [
+                "--boot",
+                "--status",
+                "--reset",
+                "--ram",
+                "--cpus",
+                "--disk",
+                "--os-version",
+                "--apk",
+                "--port",
+                "--dist",
+                "--tunnel",
+            ];
             if machine && !boxed.iter().any(|f| has(f)) {
                 return lab::run(app, os, has("--stop"));
             }
@@ -987,12 +1131,15 @@ fn run(args: &[String]) -> Out {
                 version: value("--os-version"),
                 port,
                 apk: value("--apk"),
+                tunnel: has("--tunnel"),
             };
             let what = ["status", "stop", "reset"].into_iter().find(|w| has(&format!("--{w}"))).unwrap_or("boot");
             let meta = dev::metadata()?;
-            let dist =
-                Path::new(meta["workspace_root"].as_str().ok_or("cargo metadata: no workspace_root")?).join("dist");
-            dev::locate(&meta, app)?;
+            let dist = match value("--dist") {
+                // Docker mounts an absolute path.
+                Some(d) => std::path::absolute(d).map_err(|e| format!("--dist {d}: {e}"))?,
+                None => build::dist_of(&meta, app)?,
+            };
             boxlab::run(os, what, &ask, &dist)
         }
         ("smoke", [artifact]) => {
@@ -1024,8 +1171,12 @@ fn run(args: &[String]) -> Out {
             select.extend(["--deb", "--appimage"].iter().filter(|f| has(f)).map(|f| &f[2..]));
             let select = select.join(",");
             let since = std::time::SystemTime::now();
-            let built =
-                build::run(app, Some(select.as_str()).filter(|s| !s.is_empty()), value("--platforms"), has("--smoke"));
+            let smoke = match (has("--smoke-strict"), has("--smoke")) {
+                (true, _) => smoke::Smoke::Strict,
+                (false, true) => smoke::Smoke::On,
+                _ => smoke::Smoke::Off,
+            };
+            let built = build::run(app, Some(select.as_str()).filter(|s| !s.is_empty()), value("--platforms"), smoke);
             match (json, build::manifest_of(app, since)) {
                 (true, Some(m)) => {
                     let v = |text: &str, ok: bool| {
@@ -1051,9 +1202,8 @@ fn run(args: &[String]) -> Out {
                 }
                 None => aio::discovery::WAIT,
             };
-            let to = std::net::SocketAddr::from((std::net::Ipv4Addr::BROADCAST, aio::discovery::port()));
-            let found = aio::rt().block_on(aio::discovery::probe(&[to], wait));
-            found.map(|f| places::discovered(&f, json)).map_err(|e| format!("can't probe the LAN: {e}"))
+            let found = aio::rt().block_on(aio::discovery::probe_lan(aio::discovery::port(), wait));
+            found.map(|f| places::discovered(&f, json)).map_err(|e| e.to_string())
         }
         ("feedback", name) => places::feedback(&places::feedback_dir(&env), name.first().copied(), has("--create")),
         ("events" | "timeline", [app, cell @ ..]) => {
@@ -1180,8 +1330,8 @@ fn run(args: &[String]) -> Out {
             let one = |n: &str| {
                 let t = t(n)?;
                 let line = match args[0].as_str() {
-                    "restart" => start::restart(n, &t, &|| app_bin(&t), &typed, wait),
-                    _ => start::run(&t, &app_bin(&t)?, &typed, value("--display"), wait),
+                    "restart" => start::restart(n, &t, &|a| app_bin(&t, a), &typed, wait),
+                    _ => start::run(&t, &app_bin(&t, &typed)?, &typed, value("--display"), wait),
                 }?;
                 Ok::<_, String>(if json { started(&t, &line, wait).to_string() } else { line })
             };
@@ -1215,12 +1365,12 @@ fn run(args: &[String]) -> Out {
             typed.extend(words.iter().map(|w| w.to_string()));
             typed.extend(has("--cdp").then(|| "--cdp".to_string()));
             let line = match args[0].as_str() {
-                "restart" => start::restart(app, &t, &|| app_bin(&t), &typed, wait)?,
+                "restart" => start::restart(app, &t, &|a| app_bin(&t, a), &typed, wait)?,
                 _ => {
                     if has("--fresh") {
                         dev::throw_away(Some(&t.plan))?;
                     }
-                    start::run(&t, &app_bin(&t)?, &typed, value("--display"), wait)?
+                    start::run(&t, &app_bin(&t, &typed)?, &typed, value("--display"), wait)?
                 }
             };
             Ok(if json { started(&t, &line, wait).to_string() } else { line })
@@ -1522,8 +1672,8 @@ fn run(args: &[String]) -> Out {
             };
             match value("--types") {
                 Some(f) => {
-                    std::fs::write(f, live::peer_types(&name, &cells)).map_err(|e| format!("{f}: {e}"))?;
-                    Ok(format!("wrote {f}: {} cells of {name}, their methods by name", cells.len()))
+                    let what = format!("{} cells of {name}, their methods by name", cells.len());
+                    write_or_say(f, live::peer_types(&name, &cells), &what)
                 }
                 None => Ok(live::peer(&cells, json)),
             }
@@ -1559,28 +1709,52 @@ fn run(args: &[String]) -> Out {
                 |r: &travel::Row| live::call(&door(&t, &r.cell)?, &r.cell, &r.method, r.args.clone(), &user(None));
             travel::replay(&rows, &version, &call, has("--dry"))
         }
-        ("record", [app, cell, file, spec @ ..]) => {
+        ("record", [app, rest @ ..]) if !rest.is_empty() => {
+            let (only, file, spec) = record::args(rest)?;
+            if only.is_none() && value("--type").is_some() {
+                return Err("--type names one cell's type: ax record <app> <cell> <file> --type path".into());
+            }
             let t = t(app)?;
-            let db = open(&value("--from").map_or_else(|| t.store(), PathBuf::from))?;
-            let rows: Vec<travel::Row> = travel::rows(&db, travel::range(spec.first().copied())?)?
-                .into_iter()
-                .filter(|r| r.cell == *cell)
-                .collect();
-            let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
-                return Err(format!("no events of {cell} in that range (ax events {app} {cell} lists them)"));
-            };
             let store = value("--from").map_or_else(|| t.store(), PathBuf::from);
-            let ask = std::collections::BTreeMap::from([(cell.to_string(), vec![first.seq, last.seq])]);
-            let at = states_of(&t, &store, value("--from").is_some(), &ask)?.remove(*cell).unwrap_or_default();
-            let none = serde_json::Value::Null;
-            let (before, after) = (at.get(&(first.seq - 1)).unwrap_or(&none), at.get(&last.seq).unwrap_or(&none));
-            // The cell's crate: the app's library (beside its aio.toml), else its package.
+            let rows: Vec<travel::Row> = travel::rows(&open(&store)?, travel::range(spec.first().copied())?)?
+                .into_iter()
+                .filter(|r| only.is_none_or(|c| r.cell == c))
+                .collect();
+            // Per cell: its first and last event in the range.
+            let mut span = std::collections::BTreeMap::<String, (u64, u64)>::new();
+            for r in &rows {
+                span.entry(r.cell.clone()).and_modify(|s| s.1 = r.seq).or_insert((r.seq, r.seq));
+            }
+            if span.is_empty() {
+                let whose = only.map_or_else(|| app.to_string(), String::from);
+                return Err(format!("no events of {whose} in that range (ax events {app} lists them)"));
+            }
+            let ask: std::collections::BTreeMap<String, Vec<u64>> =
+                span.iter().map(|(c, &(a, b))| (c.clone(), vec![a, b])).collect();
+            let mut at = states_of(&t, &store, value("--from").is_some(), &ask)?;
+            // The cells' crate: the app's library (beside its aio.toml), else its package.
             let krate = app_lib(app)
                 .map(|(lib, _)| lib)
                 .unwrap_or_else(|_| t.pkg.as_ref().map_or(t.id.clone(), |p| p.name.clone()))
                 .replace('-', "_");
-            let ty = value("--type").map_or_else(|| format!("{krate}::{}", record::type_of(cell)), String::from);
-            let text = record::test(app, &ty, &record::name_of(file), before, &rows, after, record::exact(&rows));
+            // The state before a cell's first event, and the one its last left.
+            let states: Vec<(&String, serde_json::Value, serde_json::Value)> = span
+                .iter()
+                .map(|(c, &(a, b))| {
+                    let mut of = at.remove(c).unwrap_or_default();
+                    (c, of.remove(&(a - 1)).unwrap_or_default(), of.remove(&b).unwrap_or_default())
+                })
+                .collect();
+            let cells: Vec<record::Recorded> = states
+                .iter()
+                .map(|(c, before, after)| record::Recorded {
+                    id: c,
+                    ty: value("--type").map_or_else(|| format!("{krate}::{}", record::type_of(c)), String::from),
+                    before,
+                    after,
+                })
+                .collect();
+            let text = record::test(app, &record::name_of(file), &cells, &rows, record::exact(&rows));
             if Path::new(file).exists() {
                 return Err(format!("{file} exists: pick a new name"));
             }
@@ -1588,7 +1762,12 @@ fn run(args: &[String]) -> Out {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             }
             std::fs::write(file, text).map_err(|e| format!("{file}: {e}"))?;
-            Ok(format!("wrote {file}: {} events of {cell}; its `use {ty};` must name the cell's type", rows.len()))
+            let tys: Vec<&str> = cells.iter().map(|c| c.ty.as_str()).collect();
+            Ok(format!(
+                "wrote {file}: {} events of {}; its `use` lines must name the cells' types",
+                rows.len(),
+                tys.join(", ")
+            ))
         }
         ("persist", [app]) => {
             let t = t(app)?;
@@ -1647,10 +1826,38 @@ fn run(args: &[String]) -> Out {
         ("prune", []) => {
             let f: Vec<&str> = flags.iter().map(String::as_str).collect();
             aio_shell::runtime::migrate();
-            prune::run(&aio_shell::runtime::root(), &f, std::time::SystemTime::now())
+            let said = prune::run(&aio_shell::runtime::root(), &f, std::time::SystemTime::now())?;
+            let yes = has("--yes") || has("-y");
+            match prune::legacy(&upgrade::legacy_target(&aio::paths::tool_home()), yes)? {
+                Some(old) => Ok(format!("{said}\n{old}")),
+                None => Ok(said),
+            }
         }
         ("runtime", []) => runtime(has("--fetch")),
-        ("setup", []) => setup::run(has("--check")),
+        ("setup", []) if has("--warm") => {
+            let said = setup::run(has("--check"))?;
+            Ok(format!("{said}\n{}", setup_warm(value("--aio").map(Path::new))?))
+        }
+        ("setup", []) => {
+            let said = setup::run(has("--check"))?;
+            // A first app's start is a launch, not aio-rs's 20 s build: built
+            // now, in the background (the installers run `ax setup`).
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr()) && !json;
+            let env = std::env::var("AIORT_NO_WARM").ok();
+            if !setup_warms(has("--check"), terminal, env.as_deref()) {
+                return Ok(said);
+            }
+            let here = std::env::current_dir().map_err(|e| e.to_string())?;
+            let log = warm_target(&here).join("aio").join("setup-warm.log");
+            Ok(match dev::in_background(&here, &["setup", "--warm"], &log) {
+                Ok(()) => format!(
+                    "{said}\nwarm: building aio-rs for ax dev in the background ({}), so a first app starts in \
+                     seconds (AIORT_NO_WARM=1: not)",
+                    log.display()
+                ),
+                Err(e) => format!("{said}\nwarm: not started: {e}"),
+            })
+        }
         ("pair", [app]) => pair_code(&t(app)?, has("--plain")),
         ("pair", [app, addr, code]) => pair(&t(app)?, addr, code),
         ("pair", [_, addr]) => {
@@ -1736,7 +1943,7 @@ fn run(args: &[String]) -> Out {
                 false => Ok(doctor::render(&facts)),
             }
         }
-        ("profile", [app]) => profile(&t(app)?, value("--out")),
+        ("profile", [app]) => profile(&t(app)?, value("--out"), has("--link")),
         ("import", [app, file]) => {
             let t = t(app)?;
             let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
@@ -1807,12 +2014,19 @@ fn main() -> ExitCode {
     if let Some(code) = hotpatch::hook() {
         return code;
     }
-    // Every cargo ax runs builds into one folder per machine.
+    // ax as rustc's wrapper for `ax dev --warm --pack`: this machine's paths remapped.
+    if let Some(code) = prebuilt::hook() {
+        return code;
+    }
+    // Every cargo ax runs builds into one folder per machine and toolchain.
     // SAFETY: before any thread is started.
-    unsafe { std::env::set_var("CARGO_TARGET_DIR", dev::shared_target()) };
+    unsafe { dev::keep_persons_target() };
+    // SAFETY: before any thread is started.
+    let shared = || unsafe { dev::set_shared_target() };
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Its own exit codes (aio's aiol): 1 errors found, 2 bad usage.
     if args.first().map(String::as_str) == Some("lint") {
+        shared();
         return lint::main(&args[1..]);
     }
     let json = args.first().map(String::as_str) != Some("dev")
@@ -1825,6 +2039,8 @@ fn main() -> ExitCode {
     {
         eprintln!("ax: no workspace here, but ./{app} is one: in it, as after `cd {app}`");
     }
+    // Here, in the app's folder: its toolchain names the folder.
+    shared();
     let asked = verbs::read(&args, &here);
     // Its own exit codes (aio's): 0 started, 1 stopped, 2 on the way.
     if let Ok(verbs::Ask::Run(a)) = &asked
@@ -1859,6 +2075,44 @@ mod tests {
     use super::*;
     use aio::prelude::*;
 
+    #[test]
+    fn the_share_link_carries_the_key_encoded() {
+        let p = aio::serde_json::json!({ "host": "192.0.2.7", "port": 8443, "tls": true, "key": "ab12" });
+        assert_eq!(share_link(&p), "https://192.0.2.7:8443/?token=ab12");
+        let p = aio::serde_json::json!({ "host": "::1", "port": 80, "tls": false, "key": "a b&c" });
+        assert_eq!(share_link(&p), "http://[::1]:80/?token=a%20b%26c");
+    }
+
+    #[test]
+    fn ax_start_builds_as_release_runs_unless_devtools_are_asked() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!asks_dev(&v(&[])), "no door, no DevTools port, hardened");
+        assert!(!asks_dev(&v(&["--seed", "demo"])));
+        assert!(!asks_dev(&v(&["--", "--cdp"])), "the app's own word");
+        assert!(asks_dev(&v(&["--cdp"])) && asks_dev(&v(&["--cdp=9333"])));
+    }
+
+    #[test]
+    fn ax_setup_at_a_terminal_builds_aio_rs_in_the_background() {
+        assert!(setup_warms(false, true, None), "the installer's ax setup, a person watching");
+        assert!(!setup_warms(true, true, None), "--check only looks");
+        assert!(!setup_warms(false, false, None), "CI, a script, an agent");
+        assert!(!setup_warms(false, true, Some("1")), "AIORT_NO_WARM=1");
+    }
+
+    #[test]
+    fn the_warm_scratch_app_is_made_again_by_another_ax_or_pin() {
+        let d = tempfile::tempdir().unwrap();
+        let stamp = "0.3.0 1.98.0 Tag(\"v0.3.0\")\n";
+        assert!(!scratch_current(d.path(), stamp), "none yet");
+        std::fs::write(d.path().join("Cargo.toml"), "").unwrap();
+        assert!(!scratch_current(d.path(), stamp), "one an older ax made, unstamped");
+        std::fs::write(d.path().join(WARM_STAMP), stamp).unwrap();
+        assert!(scratch_current(d.path(), stamp));
+        assert!(!scratch_current(d.path(), "0.3.1 1.98.0 Tag(\"v0.3.1\")\n"), "a newer ax");
+        assert!(!scratch_current(d.path(), "0.3.0 1.99.0 Tag(\"v0.3.0\")\n"), "another toolchain pin");
+    }
+
     #[cell(persist)]
     pub struct Notes {
         pub text: String,
@@ -1875,6 +2129,18 @@ mod tests {
         pub fn seal(&mut self, secret: String) {
             self.text = format!("sealed {}", secret.len());
         }
+    }
+
+    #[test]
+    fn a_file_or_dash_for_stdout() {
+        assert_eq!(write_or_say("-", "pub mod notes {}".into(), "x"), Ok("pub mod notes {}".into()));
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("peer.rs");
+        assert_eq!(
+            write_or_say(f.to_str().unwrap(), "t".into(), "1 cell"),
+            Ok(format!("wrote {}: 1 cell", f.display()))
+        );
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "t");
     }
 
     #[test]

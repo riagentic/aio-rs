@@ -7,7 +7,8 @@ each promises and how each is made.
 ## aio-rs's version
 
 aio-rs is `0.x`. The crates (`aio-rs`, `aio-rs-shell`, `aio-rs-macros`,
-`aio-rs-config`, `aio-rs-config-macro`, `aio-rs-cli`) share one version,
+`aio-rs-config`, `aio-rs-config-macro`, `aio-rs-air`, `aio-rs-air-macro`,
+`aio-rs-hotpatch`, `aio-rs-cli`) share one version,
 the workspace's, and are released together; `ax version` and
 `aio::VERSION` say it.
 
@@ -28,13 +29,16 @@ when a minor version breaks something.
 - **The API**: what `cargo doc` shows for the crates
   ([API map](../reference/api.md)). Items marked `#[doc(hidden)]` (the
   macros' helpers, such as `aio::__config_lit`) and private modules are
-  not part of it.
+  not part of it. `./ci.sh` checks it against the snapshot in
+  `scripts/api/` (`scripts/public-api --check`), so every change to it
+  shows in review.
 - **`aio.toml`**: every section and key ([reference](../reference/aio-toml.md)).
   The file is checked as the app builds, so a removed key is a compile
   error that names it, never a silent change.
 - **`ax`**: its verbs and flags ([ax](../clients/ax.md)).
 - **The data on disk**: the store's tables, stamped as SQLite's
-  `user_version` (layout 2 today). A newer aio-rs opens an older file and
+  `user_version` (layout 2 today; in an aio `state.db` that stays the
+  app's, and aio-rs's tables say the layout). A newer aio-rs opens an older file and
   moves it on; an older one refuses a newer file instead of guessing.
   A cell's own data has its own `version` ([persistence](../persistence/README.md)).
 - **The wire**: aio-rs's protocol on `/ws` (`x-aio-wire: 2`), and aio's
@@ -49,18 +53,16 @@ meaning does not), the layout of `crates/`, anything only a test uses.
 An item on its way out stays and works for the rest of its minor line at
 least, marked `#[deprecated]` with the replacement in its note, so the
 compiler names every use. Where the change is mechanical, `ax lint --fix`
-does it. An example in 0.1: `aio::config::build`, the older launcher's
+does it. An example: `aio::config::build`, the older launcher's
 `build.rs` step, still builds, warns, and `ax lint --fix` deletes it.
-Features keep their names too: `testing` and `video` do nothing now but
-stay, so older manifests still resolve.
 
 ### Gaps against aio's policy
 
-- No API snapshot gate: aio checks its exported surface against a
-  committed snapshot in CI; aio-rs relies on review and the CHANGELOG.
-- No `experimental` marker: every public item carries the same 0.x promise.
+- No `experimental` marker: every public item carries the same 0.x
+  promise, so a marker would say nothing yet. The API snapshot gate is
+  aio's: `scripts/public-api --check` in CI.
 - No release phases or freeze: aio froze its surface before its 1.0; aio-rs
-  is at its first alpha, and a minor version may break things.
+  is early alpha, and a minor version may break things.
 
 ## Your app's version
 

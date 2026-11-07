@@ -45,6 +45,12 @@ keep = 3
 network = ["example.org"]                # the hosts the app may reach
 ```
 
+The `[updates] url` is all it takes: ax's builds (`ax build`, `ax
+release`, `ax dev`) turn on the shell's updater for an app that has one,
+and an app without one carries none of it. A plain `cargo build` of such
+an app needs `--features aio-shell/updates`; without it the app says at
+start that it never looks for a release.
+
 ## Every `[updates]` key
 
 | Key | Default | Means |
@@ -52,11 +58,12 @@ network = ["example.org"]                # the hosts the app may reach
 | `url` | none: updates off | where releases are ([sources](#where-releases-come-from)) |
 | `keys` | `[]` | the release keys the app trusts, `ed25519:<base64>` from `ax keygen`; a git source's may be `ssh-ed25519 …` lines |
 | `channel` | `"stable"` | the channel followed ([channels](#channels-and-checks)): letters, digits, `-`, `_`, `.`, at most 64 |
-| `every` | `"6h"` | how often a running app looks; `"off"`: only when the app asks (`check`) |
-| `every_by_channel` | `{}` | `every` per channel: `{ dev = "1m", beta = "5m" }` |
+| `every` | `"6h"` | how often a running app looks; `dev` at least every minute and `test` every 5 minutes; `"off"`: only when the app asks (`check`) |
+| `every_by_channel` | `{}` | `every` per channel, over the above: `{ beta = "5m", nightly = "off" }` |
 | `auto` | `true` | download in the background, install at the next start (a server: at once); `false`: only offer it |
 | `prerelease` | unset | offer prereleases (`1.5.0-beta.1`); unset: only off `stable`, or to an app on a prerelease already |
 | `keep` | `3` | installed versions kept, the running one included (at least 2: a rollback needs the one before) |
+| `sign_commit` | `false` | every `ax release` signs in the commit it was built from (`--commit`) |
 
 A misspelt key, a `url` that is neither https, loopback http,
 `github:` nor `git+…`, or a host missing from `[capabilities] network`
@@ -103,11 +110,25 @@ signature. **Every field** of the release is signed, in a fixed order:
 | `releasedAt`, `notes` | when, and the notes the app shows |
 | `data` | what it can read: the store's layout and each cell's data version |
 | `roster` | the keys to trust from this release on, signed by keys trusted already |
+| `minFrom` | the oldest version it installs over (`--min-from`); left out when none |
+| `commit` | the commit it was built from, with `--commit` or `[updates] sign_commit = true` (from the build's `dist/<id>.manifest.json`); its build number is the version's third part |
+
+A manifest with `minFrom` or `commit` is read by installs on aio-rs 0.3
+or newer; an install on 0.2 refuses a field it doesn't know, so a plain
+release names neither. Such an install can't update at all while the
+channel's newest release names either: first publish a plain release
+built on aio-rs 0.3 (no `--commit`, no `--min-from`, `sign_commit` off)
+as a bridge, and wait for those installs to take it. `ax release` warns,
+in one line, each time a release names either. From 0.3 an install
+checks the signature over the release exactly as it was signed, then reads past a field it doesn't
+know: a later `ax release`'s fields never strand it, and a field added
+after signing still breaks the signature.
 
 An app checks, in order: the format; that the release is for this app,
 channel, OS and architecture (`it is for app todo, not notes`); that the
 version and file name are plain names (letters, digits, `.`, `-`, `_`,
-`+`, not starting with `.`: no paths); the roster, if any; that the key
+`+`, not starting with `.`: no paths); that `minFrom`, if any, is a
+version; the roster, if any; that the key
 is trusted; the signature. Then, once downloaded, the bundle's size and
 SHA-256. Any miss refuses the release (`release refused: …`), said in the
 log and to the `updates` cell.
@@ -131,6 +152,8 @@ let release = Release {
     notes: "Faster lists".into(),
     data: Contract { schema: 1, cells: [("notes".to_string(), 2)].into() },
     roster: None,
+    min_from: None,
+    commit: Some("9f3ac2b1".into()),
 };
 let expect = Expect { id: "notes", channel: "stable", os: "linux", arch: "x86_64" };
 let m = sign(release.clone(), &key).unwrap();
@@ -163,6 +186,8 @@ assert_eq!(trusted_after, [next_public]);
 | `--platforms a,b`, `--windows`, `--appimage` | the platforms released, as `ax build` |
 | `--android` | its signed APKs too, offered to open on the device |
 | `--patch-from 1.4.10,1.4.11` | patches from those releases (their bundles kept in `dist/<c>/`) |
+| `--min-from 1.4.10` | installs only over 1.4.10 or newer ([stepping stones](#stepping-stones)); needs installs on aio-rs 0.3 or newer |
+| `--commit` | signs in the commit it was built from (`[updates] sign_commit = true`: always); needs installs on aio-rs 0.3 or newer |
 | `--dir d` | lays the channel out in `d/<c>/` |
 | `--data file` | what this release reads, from a contract file, instead of asking the build |
 | `--no-build` | releases the bundles `ax build` left in `dist/` |
@@ -195,6 +220,7 @@ signs the manifest, and lays out in `dist/<channel>/` the bundle,
 | `[updates] url` | The app looks at |
 |---|---|
 | `https://host/path` | `https://host/path/<channel>/<os>-<arch>.json` (a loopback `http://127.0.0.1` for tests) |
+| `file:///mnt/releases/notes` | the same files in a folder: a mounted share, a USB stick, a CI artifact (Windows: `file:///C:/releases/notes`) |
 | `github:<owner>/<repo>` | that repository's GitHub releases, as above |
 | `git+https://…`, `git+ssh://…`, `git+file://…` | a repository whose `channel` branch or tag is built on this machine when its commit or tag is signed by one of `keys` (OpenSSH `ssh-ed25519` lines allowed) |
 
@@ -208,19 +234,24 @@ git verifies its signature (or its tag's) against the keys, asked what
 data it reads, and staged like a download. What each commit came to is
 kept, so it is built or refused once.
 
+A folder source is checked as a host is: the manifest's signature, then
+the bundle's size and SHA-256. It needs no `[capabilities] network` entry.
+
 ### Other delivery
 
-When releases reach the app some other way (a store, a file share, your
-own server), keep the `updates` cell and bring the I/O:
-`aio::update::install(runtime)` with your own `aio::update::Runtime`
-(`check` returns what it found, `apply` installs). The cell, its UI and
-its tests stay as they are; what the runtime trusts is then yours to
-check.
+When releases reach the app some other way (a store, your own server),
+keep the `updates` cell and bring the I/O: `aio::update::install(runtime)`
+with your own `aio::update::Runtime` (`check` returns what it found,
+`apply` installs), before `aio_shell::start`. The cell opens on it, with
+or without `[updates] url`, and the built-in checks never run beside it
+(a `url` too is said once at start: `the app brings its own runtime`).
+The cell, its UI and its tests stay as they are; what the runtime trusts
+is then yours to check.
 
 ## Channels and checks
 
-- The channel followed is, most specific first: `AIORT_UPDATE_CHANNEL`
-  (this run), the user's choice (`set_channel` on the `updates` cell,
+- The channel followed is, most specific first: the launch flag
+  `--channel=<c>`, then `AIORT_UPDATE_CHANNEL` (this run), the user's choice (`set_channel` on the `updates` cell,
   kept across runs), the channel the build was released for (a beta
   build never updates itself into stable), then `[updates] channel`.
 - A running installed app first looks 30 to 90 s after start (spread, so
@@ -236,6 +267,22 @@ check.
 - A release older than or equal to the running version, one the person
   dismissed, and one that failed here before are never offered; a newer
   one is.
+- The boot report says it in one line: `updates stable · manifest
+  https://example.org/notes · every 6h · auto (aio.toml)`, or `updates
+  not configured`.
+
+### Stepping stones
+
+`ax release notes --min-from 1.4.10` makes a release that installs only
+over 1.4.10 or newer: for a step an older version can't make in one go
+(a data format it can't read yet, a key it doesn't know yet). Keep
+1.4.10 published on the channel. An older install finds the release
+`blocked`, with one reason: `2.0.0 installs only over 1.4.10 or newer,
+and this is 1.3.2: install 1.4.10 first, then update again`. Nothing gets
+past it, not `apply_anyway` nor `start_fresh`: the download refuses it
+too. `minFrom` is signed, so a host can't strip it, and a `minFrom` that
+isn't a version refuses the release. `--min-from` above the release's
+own version is refused by `ax release`.
 
 ## Delta updates
 
@@ -246,8 +293,11 @@ instead of the whole bundle (`made from 1.4.11 and a patch`), checks
 every file it made against the signed list, and falls back to the whole
 bundle when anything doesn't match (`no patch used (…): downloading the
 whole release`). A patch over half the release's size isn't used. An
-AppImage is released whole. Keep the bundles of the releases you patch
-from in `dist/<channel>/`.
+AppImage's patch is one file, the image made from the image here (its
+staged copy, else the AppImage it runs from), listed as
+`<os>-<arch>.appimage.patches.json`: `ax release notes --appimage
+--patch-from 1.4.11`. Keep the bundles (or images) of the releases you
+patch from in `dist/<channel>/`.
 
 ## The data gate
 
@@ -417,14 +467,23 @@ assert_eq!(h.state().dismissed.as_deref(), Some("1.5.0"));
 | `dismiss`, `undismiss` | not this release (a newer one is offered) |
 | `set_channel(c)` | follow another channel from now on (kept) |
 
+The cell syncs to the app's clients too (a web page, a thin client, a
+synced copy: `aio::sync::Remote<Updates>`), served beside the app's own
+cells. A client sees all of it but `backup` and `retired` (paths on the
+server's disk), and a path in `error` or `failed` is said as `…`; any client may `check`, `dismiss` and `undismiss`;
+`apply`, `apply_anyway`, `start_fresh` and `set_channel` are an admin's
+(`role = "admin"`: restarting the app is not a visitor's verb). An app
+with its own runtime shares its cell with `aio::update::share(handle)`.
+
 | State | Is |
 |---|---|
 | `on` | updates are set up (`[updates] url` and an installed copy) |
 | `phase` | `Idle`, `Checking`, `Available`, `Blocked`, `Downloading`, `Installing`, `Restarting`, `Error` |
 | `channel`, `current` | the channel followed, the running version |
-| `available` | an `Offer`: `version`, `notes`, `size` (0 once staged), `released_at`, `key`, `staged` |
+| `available` | an `Offer`: `version`, `reason` (why it is offered, in the user's words), `notes`, `size` (0 once staged), `released_at`, `key`, `staged`, `migrates` (it moves a cell's data to a newer version; a backup is taken first) |
 | `blocked` | a `Blocked`: `version` and `blockers`, the data gate's reasons |
 | `progress` | percent of the download |
+| `progress_of` | which download `progress` measures: `App`, then `Runtime` (the Electron the new version needs, once per machine: `progress` counts from 0 again); `None` when none runs |
 | `checked_at` | when the last check answered (ms) |
 | `error` | the last failure, verbatim |
 | `failed` | an install that failed: (version, why), said again while it is offered |
@@ -470,7 +529,7 @@ only when the APK is signed with the same key
   installs `ax` from the commit its `Cargo.lock` pins. One `ax create`
   made (a path to a local checkout, which a runner doesn't have) gets
   aio-rs checked out beside it in `aio-rs/`, at the release tag of the
-  `ax` that wrote the workflow (`v0.2.0`; the repository variables
+  `ax` that wrote the workflow (`v0.3.0`; the repository variables
   `AIO_REPO` and `AIO_REF` name another), its `Cargo.toml` paths pointed
   there, and `ax` installed from it. Nothing to change in the app.
 - One job then puts every file on the tag's GitHub release, files before
@@ -512,6 +571,7 @@ only when the APK is signed with the same key
 | a leaked key | rotate: the next release's roster drops it |
 | a release that breaks on this machine's data | the data gate; a backup first; the old version back on a failed first start |
 | a release older than the one installed | only newer versions are offered |
+| a release an old install can't step to in one go | `minFrom`, signed: it is blocked there, with the version to install first |
 
 What it doesn't do: OS code signing and notarization (Windows, macOS),
 revocation of a key without a release, or checks on a custom `Runtime`'s
@@ -539,14 +599,19 @@ source.
   button, a server's unattended install, the terminal prompt); a desktop
   app's `auto` install at the next start is not asked, and nothing warns
   when no veto is set.
-- aio refuses a custom runtime together with `updates:` in its config;
-  aio-rs's `install(runtime)` replaces the built-in one silently.
 - OS code signing for desktop bundles (aio-rs 0.1.0).
+- aio offers a new build of the version installed (`same version, new
+  build`). aio-rs offers only a newer version: it numbers builds from
+  commits, so a new commit is a new version, and an install keeps each
+  version in its own folder, the one it rolls back to.
+- aio's `ship github` deploys a GitHub Pages site. aio-rs reads GitHub
+  releases (`url = "github:<owner>/<repo>"`): no second host.
 
 ## API
 
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::update`
 (`Updates`, `Runtime`, `Stub`, `Manifest`, `Release`, `Roster`,
-`Contract`, `check`, `blockers`, `can_apply`), `aio::lifecycle`
+`Contract`, `check`, `check_served`, `blockers`, `migrates`, `below_min_from`,
+`can_apply`, `installed`), `aio::lifecycle`
 (`ask_stop`, `ask_restart`, `exit_code`, `STAYS_DOWN`); `cargo doc -p
 aio-rs-shell --no-deps --open`: `aio_shell::update`.

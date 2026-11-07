@@ -55,9 +55,10 @@ assert_eq!(h.store(|s| s.state_at(events[0].seq)).unwrap().n, 2, "any past state
 - `persist` is what lets a cell use `#[transient]`, `save`, `restore`,
   `retire` and `#[table]`, and what saves a page's cell in the browser.
   On this machine the store saves the cell it is opened on whether or
-  not it says `persist`: a cell that must start empty each launch is
-  opened with `Handle::memory()` (a limit: aio's `persist: "none"` has
-  no flag here).
+  not it says `persist`, so an app's data stays where it was.
+  `#[cell(persist = false)]` (aio's `persist: "none"`) is never saved:
+  a draft, a selection, a wizard's step start from their defaults on
+  every launch, wherever the cell is opened.
 - The log keeps every call with its arguments, its caller (`by`), its
   time and what it read from the world (`cx.now()`, `cx.id()`,
   `cx.rand()`), so a replay makes the same state. `ax events <app>`
@@ -217,9 +218,15 @@ of them react to each other, that file's cells take calls one at a time
 (as aio's one reduce does), while a file without reactions keeps taking
 them side by side, each cell on its own connection.
 
-**Snapshots.** Every 256 events, and at a boot that replayed any, the
-cell's saved state is written to `snap`. A failed snapshot only costs
-time: the next boot replays more of the log.
+**Snapshots.** Every 256 events, at a boot that replayed any, and at a
+stop (`ax stop`, a closed window, SIGTERM, logoff or shutdown, `ax dev`'s
+restart), the cell's saved state is written to `snap`, so the next start
+reads what the calls left and replays none of them with code changed
+meanwhile. `ax dev` snapshots every cell before each hot-patch too: a
+later start replays only calls the patched code made. A failed snapshot
+only costs time: the next boot replays more of the log. A kill (SIGKILL,
+power loss) loses at most a `#[coalesce]` run still held (100 ms); every
+other acknowledged call is in the log.
 
 **Boot**, for each persist cell, in order:
 
@@ -228,7 +235,8 @@ time: the next boot replays more of the log.
 2. Leftovers of a crash beside the file (a half-made copy, a half-written
    temp file) are removed.
 3. SQLite's `quick_check`. A damaged file is set aside as
-   `state.db.damaged-<ms>` and the daily good copy (`state.db.good`) takes
+   `state.db.damaged-<ms>` and the good copy (`state.db.good`, daily, or
+   every `[data] snapshot_every`) takes
    its place, said in the log and as `aio::Recovered`; with no good copy
    the boot is refused and the file kept as is.
 4. The file is checked to be aio-rs's (or, for a ported app, aio's); a
@@ -238,10 +246,23 @@ time: the next boot replays more of the log.
 6. Retired cells are deleted, `#[table]` fields' tables made or brought
    to their declared shape.
 7. The snapshot is migrated (`migrate`) if needed, then the events after
-   it are replayed with the current code.
-8. `restore` runs and `#[transient]` fields reset; a change is a
-   `$restore` event.
-9. The good copy is refreshed if it is a day old.
+   it are replayed with the current code. An event that no longer applies
+   (a method changed its arguments, a version without its `migrate`)
+   **quarantines** the cell in a release build (aio's): it runs at its last
+   snapshot, refuses every call (`PERSIST_ERROR`, naming the event), serves
+   no synced client, and keeps its log and snapshot as they are for a
+   fixed build; `Store::quarantined` says why. A dev build (a debug
+   build, `ax dev`'s or `ax test`'s) refuses the boot instead, so the fix
+   comes first.
+   `aio::testing::quarantine(true)` boots a test as a release build does.
+8. `restore` runs and `#[transient]` fields reset; after a recovery
+   (step 3), `#[cell(recovered = f)]` (`fn(Self, &aio::Recovered) ->
+   Self`, aio's `onCheckpointRestore`) returns the state to boot on (say
+   from when the data is, ask the server again); a change is a `$restore`
+   event.
+9. The good copy is refreshed if it is a day old; with `[data]
+   snapshot_every = "15m"` also every 15 minutes while the app runs. A
+   copy that fails `quick_check` never replaces the last good one.
 
 **One writer.** Each cell's store refuses writes when something else
 added to its log (a second process, a tool writing the file) or the file
@@ -335,7 +356,7 @@ keep = "30d"
 | the app closes cleanly | kept | written at the close |
 | power loss, `normal` | the last commits may be lost | the last commits may be lost |
 | power loss, `full` | kept | the last ≤100 ms lost |
-| the file is damaged | the good copy, up to a day old | the same |
+| the file is damaged | the good copy, up to a day old (or `[data] snapshot_every`) | the same |
 
 aio needed `journal: true` to make a returned call durable; aio-rs has
 no journal because every plain call already is.
@@ -427,9 +448,11 @@ assert!(t.saved::<Notes>(1, json!({"other": 1})).is_err(), "data that doesn't fi
   `state.db.v<old>-<seq>.bak`, and an update backs the store up again
   before it installs ([files](files.md#backups)).
 - Data that doesn't fit refuses to boot; it is never reset. Data from a
-  newer build (a higher version) is refused too, so an older build never
-  overwrites what it can't read. To roll back past a shape change, put
-  the backup back (`ax restore`).
+  newer build (a higher version, a rollback) boots on what this build
+  declares, keeps the newer build's other fields in every write and
+  parks a copy under `__downgraded:<cell>`, as aio does; refused only
+  when it doesn't fit. To roll back past a shape change, put the backup
+  back (`ax restore`).
 - The events after the snapshot are replayed with the new code. An event
   an older version wrote that the new methods can't apply refuses the
   boot, naming it: open the data once with the old build (which writes a
@@ -493,8 +516,11 @@ counts twice, a set's `insert` keeps both). Prose needs
 - **No store layouts to pick.** aio's `persistMode: "single" | "multi"`
   doesn't apply: aio-rs keeps a log and snapshots per cell. A ported app
   reads and writes aio's layout as aio left it ([data](../migration/data.md)).
-- **No `cellDefaults`.** A cell says its own flags; the app-wide switch is
-  `[data] persist`.
+- **`cellDefaults`.** `persist: "none"` for every cell is `[data]
+  only_persist = true` (then only `#[cell(persist)]` cells are saved);
+  one cell's is `#[cell(persist = false)]`. A visibility filter is each
+  cell's own `visible = f`, checked against its type (an app-wide field
+  list can't be).
 - **Strict restore when rolling forward.** Data an older build wrote over
   a newer build's keeps the older build's own fields too; the newer build
   then refuses to drop them silently (declare them, or migrate them away).

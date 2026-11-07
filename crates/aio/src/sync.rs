@@ -33,7 +33,7 @@ use axum::extract::ws::{Message as AxMsg, WebSocket, WebSocketUpgrade};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -219,6 +219,10 @@ pub struct Options {
     /// `{aio:1, name, title, port, tls, cert, key}` (`cert` = the root to pin).
     #[cfg(feature = "tls")]
     pub pairing: Option<Arc<crate::pairing::Pairing>>,
+    /// The app the profile names (`[app] id`), as a client asks for it;
+    /// empty: the cell's id.
+    #[cfg(feature = "tls")]
+    pub app: String,
     /// Serve over TLS (`wss://`).
     #[cfg(feature = "tls")]
     pub tls: Option<crate::tls::Tls>,
@@ -242,6 +246,64 @@ pub struct Options {
     /// Open on purpose (`[server] open`): links and routes need no key;
     /// minting a PIN still does. Ignored with `auth` or users.
     pub open: bool,
+    /// Take a web page's console into the log (`POST /__aio/log`, `[server] page_log`).
+    pub page_log: bool,
+}
+
+/// The most page console lines taken a second; the rest are counted and said.
+pub const PAGE_LINES_PER_SEC: u32 = 100;
+
+/// What a page posted to `/__aio/log` (`[{level, msg}]`): each line at its
+/// level, cut at 4 KB, keys masked, without escapes, made safe for a
+/// terminal (pure).
+fn page_entries(body: &[u8]) -> Vec<(crate::log::Level, String)> {
+    use crate::log::Level;
+    let entries: Vec<Value> = serde_json::from_slice(body).unwrap_or_default();
+    let line = |e: &Value| {
+        let level = match e["level"].as_str() {
+            Some("error") => Level::Error,
+            Some("warn") => Level::Warn,
+            Some("debug") => Level::Debug,
+            _ => Level::Info,
+        };
+        // No escapes at all: a page's colours could pass for the log's own.
+        let msg: String = e["msg"].as_str()?.chars().filter(|c| *c != '\u{1b}').take(4096).collect();
+        Some((level, crate::log::safe(&crate::report::redact(&msg))))
+    };
+    entries.iter().filter_map(line).collect()
+}
+
+/// One client's page lines' pace: [`PAGE_LINES_PER_SEC`] a second.
+#[derive(Default)]
+struct PageBudget {
+    since: Option<std::time::Instant>,
+    taken: u32,
+    dropped: u32,
+}
+
+impl PageBudget {
+    /// A new second begun at `now`: the last one's drops to say, if any.
+    fn take(&mut self, now: std::time::Instant) -> Option<String> {
+        if self.since.is_some_and(|s| now.duration_since(s) < std::time::Duration::from_secs(1)) {
+            return None;
+        }
+        self.since = Some(now);
+        self.taken = 0;
+        let n = std::mem::take(&mut self.dropped);
+        (n > 0).then(|| format!("{n} page console lines were dropped (over {PAGE_LINES_PER_SEC} a second)"))
+    }
+
+    /// Still in its second at `now`.
+    fn live(&self, now: std::time::Instant) -> bool {
+        self.since.is_some_and(|s| now.duration_since(s) < std::time::Duration::from_secs(1))
+    }
+
+    /// Room for one more line this second (else it is counted as dropped).
+    fn room(&mut self) -> bool {
+        let ok = self.taken < PAGE_LINES_PER_SEC;
+        if ok { self.taken += 1 } else { self.dropped += 1 }
+        ok
+    }
 }
 
 /// A client's address, for `ConnectInfo` on any listener.
@@ -368,7 +430,7 @@ fn ws<T: Cell>(
                         };
                         match (&creds.key, &creds.users) {
                             (None, _) => {}
-                            (Some(_), Some(u)) => match shown.as_deref().and_then(|t| u.who(t)) {
+                            (Some(_), Some(u)) => match who_off(Some(u), shown.clone()).await {
                                 Some(s) => {
                                     recheck = shown.clone().map(|t| (u.clone(), t, s.clone()));
                                     known = Some((By::User(s.user), s.role));
@@ -386,7 +448,15 @@ fn ws<T: Cell>(
                             (a.clone(), crate::auth::routes::session_token(&headers, T::ID).unwrap_or_default());
                         match tokio::task::spawn_blocking(move || (live(&a, &t), t)).await {
                             Ok((Some(s), t)) => Some((By::User(s.user), t)),
-                            Ok((None, t)) => return refuse(!t.is_empty(), "sign in first"),
+                            // Not a session: a service's key beside the accounts, if the app knows it.
+                            Ok((None, t)) => match (&creds.users, who_off(creds.users.as_ref(), Some(t.clone())).await) {
+                                (Some(u), Some(s)) => {
+                                    recheck = Some((u.clone(), t, s.clone()));
+                                    known = Some((By::User(s.user), s.role));
+                                    None
+                                }
+                                _ => return refuse(!t.is_empty(), "sign in first"),
+                            },
                             Err(_) => return refuse(false, "sign in first"),
                         }
                     }
@@ -412,11 +482,15 @@ fn ws<T: Cell>(
                     return (StatusCode::UPGRADE_REQUIRED, why).into_response();
                 }
                 let from = ext.get::<ConnectInfo<Peer>>().map_or("door".into(), |c| c.0.0.to_string());
-                let gate = match (&auth, &signed, &known, &creds.key) {
-                    (Some(a), Some((_, t)), ..) => Gate::Signed(a.clone(), t.clone()),
-                    (_, _, Some((_, role)), _) => Gate::Known(role.clone()),
+                // A known user's role follows their token's re-check, live.
+                let (gate, push) = match (&auth, &signed, &known, &creds.key) {
+                    (Some(a), Some((_, t)), ..) => (Gate::Signed(a.clone(), t.clone()), None),
+                    (_, _, Some((_, role)), _) => {
+                        let (k, push) = crate::link::Known::live(role.clone());
+                        (Gate::Known(k), Some(push))
+                    }
                     // Never the door's rights over the network.
-                    _ => Gate::Key,
+                    _ => (Gate::Key, None),
                 };
                 let slots = open_links.clone();
                 let mut reply = ws.max_message_size(MAX_MESSAGE)
@@ -470,7 +544,7 @@ fn ws<T: Cell>(
                             },
                             (_, _, Some((u, t, was))) => tokio::select! {
                                 r = run => r,
-                                () = users_ended(u, t, was) => Err("its token no longer resolves: its socket is closed".into()),
+                                () = users_ended(u, t, was, push) => Err("its token no longer resolves: its socket is closed".into()),
                             },
                             _ => run.await,
                         };
@@ -536,12 +610,21 @@ fn ui_socket<T: Cell>(
                 let mut recheck = None;
                 // (user, credential): `None` is a signed-out tab.
                 let who: Option<(Option<String>, String)> = match (&auth, &creds.users, &creds.key) {
-                    (Some(a), ..) => {
+                    (Some(a), users, _) => {
                         let (a, t) = (a.clone(), session.unwrap_or_default());
-                        let s = tokio::task::spawn_blocking(move || (live(&a, &t), t)).await.ok();
-                        s.and_then(|(s, t)| Some((Some(s?.user), t)))
+                        match tokio::task::spawn_blocking(move || (live(&a, &t), t)).await.ok() {
+                            Some((Some(s), t)) => Some((Some(s.user), t)),
+                            Some((None, t)) => match (users, who_off(users.as_ref(), Some(t.clone())).await) {
+                                (Some(u), Some(s)) => {
+                                    recheck = Some((u.clone(), t.clone(), s.clone()));
+                                    Some((Some(s.user), t))
+                                }
+                                _ => None,
+                            },
+                            None => None,
+                        }
                     }
-                    (None, Some(u), _) => match session.as_deref().and_then(|t| u.who(t)) {
+                    (None, Some(u), _) => match who_off(Some(u), session.clone()).await {
                         Some(s) => {
                             let t = session.unwrap_or_default();
                             recheck = Some((u.clone(), t.clone(), s.clone()));
@@ -559,7 +642,7 @@ fn ui_socket<T: Cell>(
                     }
                     (None, None, None) => Some((None, String::new())),
                 };
-                let ended_with = auth.clone().zip(who.as_ref().filter(|_| auth.is_some()).map(|(_, t)| t.clone()));
+                let ended_with = auth.clone().zip(who.as_ref().filter(|_| auth.is_some() && recheck.is_none()).map(|(_, t)| t.clone()));
                 ws.max_message_size(limits.max_message)
                     .on_upgrade(move |s| async move {
                         let (ours, wire) = tokio::io::duplex(1 << 20);
@@ -568,7 +651,7 @@ fn ui_socket<T: Cell>(
                         let pump = tab_pump(s, ours);
                         match (ended_with, recheck) {
                             (Some((a, t)), _) => tokio::select! { () = pump => {}, () = ended(a, t) => {} },
-                            (_, Some((u, t, was))) => tokio::select! { () = pump => {}, () = users_ended(u, t, was) => {} },
+                            (_, Some((u, t, was))) => tokio::select! { () = pump => {}, () = users_ended(u, t, was, None) => {} },
                             _ => pump.await,
                         }
                         tab.abort();
@@ -641,16 +724,17 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         eprintln!("[aio] {} isn't #[cell(shared)]: only its HTTP routes are served, never its state", T::ID);
     }
     #[cfg(feature = "tls")]
-    let Options { token, pairing, tls, limits, hosts, http, auth, strict_origin, trust_proxy, security, open } = opts;
+    let Options { token, pairing, app: named, tls, limits, hosts, http, auth, strict_origin, trust_proxy, security, open, page_log } =
+        opts;
     #[cfg(not(feature = "tls"))]
-    let (Options { token, limits, hosts, http, auth, strict_origin, trust_proxy, security, open }, tls) =
+    let (Options { token, limits, hosts, http, auth, strict_origin, trust_proxy, security, open, page_log }, tls) =
         (opts, None::<std::convert::Infallible>);
     auth.iter().for_each(crate::auth::serve);
     // `[server] hosts` and the plugins' `allowed_origins`, merged (aio's `allowedOrigins`).
     let mut hosts = hosts;
     http.hosts.iter().for_each(|h| if !hosts.contains(h) { hosts.push(h.clone()) });
-    // Users known by token count only without accounts (sessions say who then).
-    let users = http.users.clone().filter(|_| auth.is_none());
+    // Users known by token; with accounts, asked after the sessions (service keys).
+    let users = http.users.clone();
     #[cfg(feature = "tls")]
     let own_cert = tls.as_ref().is_some_and(|t| t.own);
     #[cfg(not(feature = "tls"))]
@@ -661,6 +745,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     let local = listener.local_addr()?;
     let token = Arc::new(token);
     let fns = Arc::new(http.fns.clone());
+    let mut names: Vec<String> = fns.names().map(String::from).collect();
+    names.sort();
+    crate::boot::serving(http.route_count(), names);
     let (watched, started) = (h.clone(), std::time::Instant::now());
     let guessed = Guessed::default();
     let creds = Creds { key: Some(token.clone()), users: users.clone(), guessed: guessed.clone(), open };
@@ -703,8 +790,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             .layer(axum::extract::DefaultBodyLimit::max(4096)),
         );
         let root = tls.as_ref().map(|t| t.root_pem.clone());
+        let name = if named.is_empty() { T::ID } else { &named };
         let profile = Arc::new(
-            json!({ "aio": 1, "name": T::ID, "title": T::ID, "port": local.port(), "tls": root.is_some(), "cert": root, "key": *token }),
+            json!({ "aio": 1, "name": name, "title": name, "port": local.port(), "tls": root.is_some(), "cert": root, "key": *token }),
         );
         let fp = Arc::new(tls.as_ref().map(|t| crate::cpace::fingerprint(&t.leaf_der)).unwrap_or_default());
         app = app.route(
@@ -721,9 +809,64 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             .layer(axum::extract::DefaultBodyLimit::max(4096)),
         );
     }
+    // A web page's console (aio's client log, a release too): `[page]` lines,
+    // paced per client. Who may write them is who may read health: anonymous
+    // only on this machine; else the key (its cookie too: a page sends it)
+    // or a session.
+    if page_log {
+        let budgets = Arc::new(std::sync::Mutex::new(HashMap::<std::net::IpAddr, PageBudget>::new()));
+        let who = Diagnostics { auth: auth.clone(), users: users.clone(), key: token.clone(), open };
+        let (guessed, trust) = (guessed.clone(), Arc::new(trust_proxy.clone()));
+        app = app.route(
+            "/__aio/log",
+            axum::routing::post(
+                move |ConnectInfo(Peer(from)): ConnectInfo<Peer>,
+                      headers: HeaderMap,
+                      crate::http::Query(q): crate::http::Query,
+                      body: axum::body::Bytes| {
+                    let (budgets, who, guessed, trust) = (budgets.clone(), who.clone(), guessed.clone(), trust.clone());
+                    async move {
+                        let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
+                        let cookie = crate::http::parse_cookies(&headers).remove(&format!("aio_key_{}", T::ID));
+                        let keyed = !who.key.is_empty() && cookie.is_some_and(|k| same(&k, &who.key));
+                        if !keyed && !who.admits(here, &headers, &q, T::ID).await {
+                            return unauthorized(&guessed, from.ip(), shown_key(&headers, &q).is_some(), "sign in first");
+                        }
+                        let client = crate::gate::client(from.ip(), &headers, trust.as_deref());
+                        let now = std::time::Instant::now();
+                        let mut all = budgets.lock().unwrap_or_else(|e| e.into_inner());
+                        // A quiet client's drops are said as it is let go.
+                        let mut said = vec![];
+                        all.retain(|_, b| {
+                            b.live(now) || {
+                                said.extend(b.take(now).map(|over| (crate::log::Level::Warn, over)));
+                                false
+                            }
+                        });
+                        let b = all.entry(client).or_default();
+                        for (level, line) in page_entries(&body) {
+                            if let Some(over) = b.take(now) {
+                                said.push((crate::log::Level::Warn, over));
+                            }
+                            if b.room() {
+                                said.push((level, line));
+                            }
+                        }
+                        drop(all);
+                        for (level, line) in said {
+                            crate::log::emit(level, module_path!(), Some("page"), format_args!("{line}"), &[]);
+                        }
+                        axum::http::StatusCode::NO_CONTENT.into_response()
+                    }
+                },
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        );
+    }
     // For monitoring (aio's `/__aio/metrics`, `/__aio/health`, `/__aio/vitals`).
     for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
         let (h, guessed, trust) = (watched.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
+        let beside = Arc::new(http.beside.clone());
         let who = Diagnostics { auth: auth.clone(), users: users.clone(), key: token.clone(), open };
         app = app.route(
             path,
@@ -731,7 +874,8 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                 move |ConnectInfo(Peer(from)): ConnectInfo<Peer>,
                       headers: HeaderMap,
                       crate::http::Query(q): crate::http::Query| {
-                    let (h, who, guessed, trust) = (h.clone(), who.clone(), guessed.clone(), trust.clone());
+                    let (h, who, guessed, trust, beside) =
+                        (h.clone(), who.clone(), guessed.clone(), trust.clone(), beside.clone());
                     async move {
                         let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
                         if !who.admits(here, &headers, &q, T::ID).await {
@@ -751,7 +895,17 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                             }
                             "/__aio/vitals" => {
                                 let (snap, loopback) = crate::vitals::snapshot();
-                                let doc = crate::vitals::doc(&snap, loopback, &crate::vitals::get());
+                                let t = crate::vitals::get();
+                                let mut doc = crate::vitals::doc(&snap, loopback, &t);
+                                let main = crate::link::Beside::vitals(&h);
+                                let cells: Vec<_> = std::iter::once((T::ID, main.0, main.1))
+                                    .chain(beside.iter().map(|b| {
+                                        let (n, on) = b.vitals();
+                                        (b.id(), n, on)
+                                    }))
+                                    .collect();
+                                let more = crate::vitals::served(&crate::link::links(), &cells, &t);
+                                more.as_object().into_iter().flatten().for_each(|(k, v)| doc[k] = v.clone());
                                 ([no_store], crate::http::json(doc)).into_response()
                             }
                             _ => ([no_store], crate::http::json(health_now(&h))).into_response(),
@@ -761,8 +915,8 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             ),
         );
     }
-    // aio's `/__aio/snapshot` (a dev build's only): the whole state out, or in.
-    if cfg!(debug_assertions) {
+    // aio's `/__aio/snapshot` (`ax dev`'s tooling only): the whole state out, or in.
+    if cfg!(feature = "dev") {
         let (h, auth, key, guessed, trust) =
             (watched.clone(), auth.clone(), token.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
         let snap = move |ConnectInfo(Peer(from)): ConnectInfo<Peer>,
@@ -846,6 +1000,7 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         let (http, key) = (http.clone(), key.clone());
         async move { crate::http::answer(&http, &key, req, from.ip()).await }
     });
+    let hosts = hosts.into_iter().chain(crate::gate::machine_name()).collect();
     let guard = Arc::new(Guard { hosts, strict_origin: strict_origin && !local.ip().is_loopback(), trust_proxy, page });
     let app = app
         .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
@@ -919,6 +1074,7 @@ fn monitored<T: Cell>(h: &Handle<T>, started: std::time::Instant) -> String {
         memory: crate::health::memory(),
         clients: lock(clients()).values().filter(|c| c.cell == T::ID).count(),
         calls: crate::log::calls(),
+        broadcast: crate::link::broadcast(),
         cell: (T::ID.into(), h.enabled(), h.failures()),
         up: crate::health::now(T::ID)["status"] == "healthy",
         degraded: degraded.into_iter().map(|(n, e)| (n, e.failures)).collect(),
@@ -1119,9 +1275,10 @@ impl Diagnostics {
         }
         let session = crate::auth::routes::session_token(headers, id).unwrap_or(shown);
         match (&self.auth, &self.users) {
-            (Some(a), _) => {
-                let a = a.clone();
-                tokio::task::spawn_blocking(move || live(&a, &session).is_some()).await.unwrap_or(false)
+            (Some(a), u) => {
+                let (a, u) = (a.clone(), u.clone());
+                let known = move || live(&a, &session).is_some() || u.is_some_and(|u| u.who(&session).is_some());
+                tokio::task::spawn_blocking(known).await.unwrap_or(false)
             }
             (None, Some(u)) => {
                 let u = u.clone();
@@ -1130,6 +1287,13 @@ impl Diagnostics {
             (None, None) => false,
         }
     }
+}
+
+/// Who `token` is to `u`, asked off the async threads: an async resolver
+/// may await what this runtime drives, so its thread is never held.
+async fn who_off(u: Option<&crate::auth::Users>, token: Option<String>) -> Option<crate::auth::Session> {
+    let (u, t) = (u?.clone(), token?);
+    tokio::task::spawn_blocking(move || u.who(&t)).await.ok().flatten()
 }
 
 /// Returns once the session of `token` is over: re-checked on every account
@@ -1153,9 +1317,10 @@ async fn ended(a: Arc<crate::auth::Auth>, token: String) {
 /// [`crate::auth::USERS_RECHECK`] and on every change its resolver ticks. A
 /// resolver that panics ends it (fail closed); one slower than
 /// [`crate::auth::USERS_WAIT`] keeps the last verdict, is said, and is not
-/// called again until it answers. A changed role ends it too: the client
-/// reconnects with the new one.
-async fn users_ended(u: crate::auth::Users, token: String, was: crate::auth::Session) {
+/// called again until it answers. A changed role for the same user is
+/// `push`ed: its links see that role's view at once; without one (a tab)
+/// it ends it, and the reconnect has the new role.
+async fn users_ended(u: crate::auth::Users, token: String, mut was: crate::auth::Session, push: Option<crate::link::Push>) {
     let mut changes = u.changes();
     let mut asked: Option<tokio::task::JoinHandle<Option<crate::auth::Session>>> = None;
     loop {
@@ -1172,6 +1337,11 @@ async fn users_ended(u: crate::auth::Users, token: String, was: crate::auth::Ses
         });
         match tokio::time::timeout(crate::auth::USERS_WAIT, &mut call).await {
             Ok(Ok(Some(s))) if s.user == was.user && s.role == was.role => {}
+            // Another role for the same user: its links see that role's view now (aio's push).
+            Ok(Ok(Some(s))) if s.user == was.user && push.is_some() => {
+                push.iter().for_each(|p| p.set(s.role.clone()));
+                was = s;
+            }
             Ok(_) => return,
             Err(_) => {
                 eprintln!("[aio] auth: the users resolver has not answered in {:?}: its socket keeps its last verdict", crate::auth::USERS_WAIT);
@@ -1186,6 +1356,21 @@ type Refusal = Arc<dyn Fn(&str, &Rejected) + Send + Sync>;
 type OnSync = Arc<dyn Fn(&Synced) + Send + Sync>;
 type OnConflict = Arc<dyn Fn(&[crate::merge::Conflict]) + Send + Sync>;
 type OnPatch = Arc<dyn Fn(&Value) + Send + Sync>;
+type OnPart = Box<dyn FnMut(Value) + Send>;
+type OnUnreached = Arc<dyn Fn(&std::io::Error) + Send + Sync>;
+
+/// Where a copy's server is, settable while it runs ([`Remote::relink`]).
+struct Slot {
+    /// None: it waits for one (a client whose connect page is up).
+    link: Mutex<Option<Link>>,
+    /// A relink ends the wait for a link, or a backoff, at once.
+    wake: tokio::sync::Notify,
+    /// Bumped by each relink: a connection opened before one is dropped.
+    moves: AtomicU64,
+    /// A relink may follow ([`Remote::connect_later`]): a refusal waits
+    /// for one instead of ending the copy's link.
+    later: bool,
+}
 
 /// What one catch-up did (aio's `SyncStats`): the server's whole view reached
 /// the copy, on a reconnect or after a gap.
@@ -1231,11 +1416,18 @@ struct Pending {
     /// `#[client(predict = false)]`: not shown before the server ran it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     waits: bool,
+    /// Its pieces asked for ([`Remote::stream`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 impl Pending {
     fn msg(&self) -> Value {
-        json!({ "t": "call", "op": self.op, "method": self.method, "args": self.args })
+        let mut m = json!({ "t": "call", "op": self.op, "method": self.method, "args": self.args });
+        if self.stream {
+            m["stream"] = true.into();
+        }
+        m
     }
 }
 
@@ -1313,7 +1505,7 @@ impl<T: Cell> Copy<T> {
 
 /// What a copy keeps on disk (`Remote::connect_saved`): the server's view it
 /// last had and the calls still waiting for it.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Saved {
     cell: String,
     v: u32,
@@ -1322,14 +1514,255 @@ struct Saved {
     pending: Vec<Pending>,
 }
 
+/// Is the saved copy `s` (in `file`) this cell's at this version? If not
+/// and calls still wait in it, the file is kept aside, never dropped, and
+/// said (aio's `sync-orphan-queue`): those calls were made on another
+/// shape of the cell; send them by hand, or delete the file to drop them.
+fn kept_aside<T: Cell>(file: &std::path::Path, s: &Saved) -> bool {
+    if s.cell == T::ID && s.v == T::VERSION {
+        return true;
+    }
+    if !s.pending.is_empty() {
+        let kept = aside(file, &format!("orphan-{}-v{}", s.cell, s.v), s)
+            .and_then(|p| std::fs::remove_file(file).map(|()| p))
+            .map_or_else(|e| format!("not moved: {e}"), |p| format!("kept as {}", p.display()));
+        let msg = format!(
+            "{}: {} calls made offline on {} version {} never reached the server and this build can't send them \
+             ({} version {}): {kept}",
+            T::ID,
+            s.pending.len(),
+            s.cell,
+            s.v,
+            T::ID,
+            T::VERSION
+        );
+        eprintln!("[aio] WARN {msg}");
+        crate::report::tell_kept("sync:orphan-queue", &msg);
+    }
+    false
+}
+
+/// Keep `s` beside `file` as `<file>.<tag>-<ms>` (0600), never over an
+/// earlier one: where it went.
+fn aside(file: &std::path::Path, tag: &str, s: &Saved) -> std::io::Result<std::path::PathBuf> {
+    let bytes = serde_json::to_vec(s).map_err(std::io::Error::other)?;
+    let mut at = crate::store::now_ms();
+    loop {
+        let p = file.with_extension(format!("{tag}-{at}"));
+        match crate::paths::write_private(&p, &bytes) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => at += 1,
+            r => return r.map(|()| p),
+        }
+    }
+}
+
+/// How long a dropped copy, or the process's exit, waits for its last
+/// save to be written.
+const SAVE_WAIT: Duration = Duration::from_secs(2);
+
+/// The one writer of a saved copy's file in this process: saves are
+/// written in order, the newest last, never an older one over a newer one.
+/// The file belongs to its latest opener: a copy still open (a dropped one
+/// whose link is closing) can't write over what the new one keeps.
+struct Saver {
+    file: std::path::PathBuf,
+    st: Mutex<Saving>,
+    /// The save the file holds: renamed over it only while held, so an
+    /// older one never lands after a newer one.
+    disk: Mutex<u64>,
+}
+
+#[derive(Default)]
+struct Saving {
+    /// The copy the file is saved for (its latest opener).
+    owner: u64,
+    /// The last save asked, and the last written.
+    asked: u64,
+    written: u64,
+    /// The newest save, until it is written.
+    newest: Option<Arc<Saved>>,
+    /// A writer thread runs.
+    busy: bool,
+}
+
+type Savers = std::collections::BTreeMap<std::path::PathBuf, std::sync::Weak<Saver>>;
+
+/// Every saved copy's writer in this process, by file.
+static SAVERS: Mutex<Savers> = Mutex::new(std::collections::BTreeMap::new());
+
+/// `m` locked, trying until `by` if given: never stuck on a lock a thread
+/// killed at the exit (Windows ends the others first) still holds.
+fn lock_by<X>(m: &Mutex<X>, by: Option<std::time::Instant>) -> Option<MutexGuard<'_, X>> {
+    let Some(by) = by else { return Some(lock(m)) };
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < by => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+impl Saver {
+    /// Open `file` for a new copy: its writer, the copy's mark as its
+    /// owner, and the save not written yet (newer than the file), if any.
+    fn claim(file: &std::path::Path) -> (Arc<Self>, u64, Option<Arc<Saved>>) {
+        flush_at_exit();
+        let key = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+        let s = {
+            let mut all = lock(&SAVERS);
+            all.retain(|_, w| w.strong_count() > 0);
+            all.get(&key).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| {
+                let s = Arc::new(Self { file: file.to_path_buf(), st: Mutex::default(), disk: Mutex::new(0) });
+                all.insert(key, Arc::downgrade(&s));
+                s
+            })
+        };
+        let (owner, newest) = {
+            let mut st = lock(&s.st);
+            st.owner += 1;
+            (st.owner, st.newest.clone())
+        };
+        (s, owner, newest)
+    }
+
+    /// Save `s` for `owner`, written soon on a thread of its own (never
+    /// waited for here). A copy the file no longer belongs to saves nothing.
+    fn put(self: &Arc<Self>, owner: u64, s: Saved) {
+        let mut st = lock(&self.st);
+        if st.owner != owner {
+            return;
+        }
+        st.asked += 1;
+        st.newest = Some(Arc::new(s));
+        if std::mem::replace(&mut st.busy, true) {
+            return;
+        }
+        drop(st);
+        let me = self.clone();
+        if let Err(e) = std::thread::Builder::new().name("aio-save".into()).spawn(move || me.background()) {
+            eprintln!("[aio] sync: no thread to save the copy ({e}); saving it here");
+            self.background();
+        }
+    }
+
+    /// The writer thread: the newest save until none is left.
+    fn background(&self) {
+        loop {
+            _ = self.write(None);
+            let mut st = lock(&self.st);
+            if st.written >= st.asked {
+                st.busy = false;
+                return;
+            }
+        }
+    }
+
+    /// Write the newest save not written yet, in this thread, waiting for
+    /// a lock until `by` if given (else as long as it takes): false when
+    /// one could not be written.
+    fn write(&self, by: Option<std::time::Instant>) -> bool {
+        let (at, s) = {
+            let Some(st) = lock_by(&self.st, by) else { return false };
+            match &st.newest {
+                Some(s) if st.written < st.asked => (st.asked, s.clone()),
+                _ => return true,
+            }
+        };
+        // A temp file of its own, renamed over the file: a write cut short
+        // (a thread killed at the exit) leaves the file whole.
+        let tmp = self.file.with_extension(format!("saving-{}", crate::uuid_v4().simple()));
+        let r = serde_json::to_vec(&*s)
+            .map_err(std::io::Error::other)
+            .and_then(|b| {
+                let mut f = crate::paths::create(&tmp, true)?;
+                std::io::Write::write_all(&mut f, &b)?;
+                f.sync_all()
+            })
+            .and_then(|()| {
+                let mut disk = lock_by(&self.disk, by).ok_or_else(|| std::io::Error::other("still being saved"))?;
+                if *disk < at {
+                    crate::paths::rename_over(&tmp, &self.file)?;
+                    *disk = at;
+                }
+                Ok(())
+            })
+            .and_then(|()| crate::paths::sync_dir(crate::paths::parent(&self.file)));
+        _ = std::fs::remove_file(&tmp);
+        if let Err(e) = &r {
+            eprintln!("[aio] sync {}: can't save the copy: {e}", s.cell);
+        }
+        let Some(mut st) = lock_by(&self.st, by) else { return false };
+        st.written = st.written.max(at);
+        // Kept when unwritten: a copy opened again here still starts from it.
+        if st.asked == at && r.is_ok() {
+            st.newest = None;
+        }
+        r.is_ok()
+    }
+
+    /// Write the last save asked now, in this thread, by `by`: whether it is
+    /// on disk (the writer thread's own write, landing later, is older).
+    fn flush(&self, by: std::time::Instant) -> bool {
+        self.write(Some(by)) && lock_by(&self.st, Some(by)).is_some_and(|st| st.written >= st.asked)
+    }
+}
+
+/// Write every saved copy's last save in this thread, by `wait` in all
+/// ([`crate::shutdown`], the process's exit): the files not saved by then.
+pub(crate) fn flush_saves(wait: Duration) -> Vec<std::path::PathBuf> {
+    let by = std::time::Instant::now() + wait;
+    let all: Vec<_> = lock_by(&SAVERS, Some(by)).map(|a| a.values().filter_map(std::sync::Weak::upgrade).collect()).unwrap_or_default();
+    all.iter().filter(|s| !s.flush(by)).map(|s| s.file.clone()).collect()
+}
+
+/// [`flush_saves`] at the process's exit too (a return from `main`,
+/// `std::process::exit`): a call made offline just before is never lost.
+/// It writes in the exiting thread: on Windows the others are gone by then.
+fn flush_at_exit() {
+    extern "C" fn at_exit() {
+        for f in flush_saves(SAVE_WAIT) {
+            eprintln!("[aio] sync: the copy in {} was not saved at the exit", f.display());
+        }
+    }
+    #[cfg(windows)]
+    unsafe extern "C" {
+        fn atexit(f: extern "C" fn()) -> std::ffi::c_int;
+    }
+    #[cfg(unix)]
+    use libc::atexit;
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: registers a plain function; its waits are bounded.
+    ONCE.call_once(|| _ = unsafe { atexit(at_exit) });
+}
+
+/// The server refused the key itself (HTTP 401): the one refusal that
+/// signs a copy out. Another (another cell, a cleartext link) keeps what
+/// waits.
+#[derive(Debug)]
+struct WrongKey;
+
+impl std::fmt::Display for WrongKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("refused: wrong key")
+    }
+}
+
+impl std::error::Error for WrongKey {}
+
 /// A server fn call's answer to come, and whether a person is deciding.
 type Running = (tokio::sync::oneshot::Sender<Result<Value>>, tokio::sync::watch::Sender<bool>);
 
 struct Inner<T: Cell> {
     /// Who this copy calls as (the server sees the same).
     by: By,
-    /// Where the copy is kept, newest first (a writer task saves it).
-    save: Option<tokio::sync::mpsc::UnboundedSender<Saved>>,
+    /// Where the copy is kept: its file's writer, and this copy's mark.
+    save: Option<(Arc<Saver>, u64)>,
+    /// The file it is kept in ([`Remote::connect_saved`]).
+    file: Option<std::path::PathBuf>,
     /// The server's limits, once heard.
     limits: Mutex<Option<Limits>>,
     copy: Mutex<Copy<T>>,
@@ -1342,6 +1775,8 @@ struct Inner<T: Cell> {
     running: Mutex<HashMap<String, Running>>,
     /// The parts of streamed server fn calls, by call.
     parts: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>,
+    /// Streamed async calls' piece handlers, by op ([`Remote::stream`]).
+    streams: Mutex<HashMap<String, OnPart>>,
     online: AtomicBool,
     /// When the server's state last reached the copy (ms).
     last_sync: Mutex<Option<i64>>,
@@ -1361,6 +1796,25 @@ struct Inner<T: Cell> {
     conflicts: Mutex<Vec<OnConflict>>,
     patches: Mutex<Vec<OnPatch>>,
     owned: Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>,
+    slot: Arc<Slot>,
+    unreached: Mutex<Vec<OnUnreached>>,
+    /// The token to show at each reconnect ([`Remote::token_with`]).
+    token: Mutex<Option<Arc<dyn Fn() -> String + Send + Sync>>>,
+    /// The server refused this copy's credential (a dead session): new
+    /// calls are refused until a link is made again.
+    signed_out: AtomicBool,
+}
+
+/// The last handle gone: its last save is written before the drop ends
+/// (bounded), so a reopen or an exit right after never loses it.
+impl<T: Cell> Drop for Inner<T> {
+    fn drop(&mut self) {
+        if let Some((s, _)) = &self.save
+            && !s.flush(std::time::Instant::now() + SAVE_WAIT)
+        {
+            eprintln!("[aio] sync {}: the copy's last save was not written within {SAVE_WAIT:?}", T::ID);
+        }
+    }
 }
 
 /// A synced copy of a cell on a server: reads and calls are local at once,
@@ -1474,8 +1928,11 @@ async fn socket(
     let bad = |m: String| std::io::Error::other(m);
     let stream = tokio::net::TcpStream::connect(&link.addr).await?;
     let mut req = format!("{scheme}://{}/ws", link.addr).into_client_request().map_err(|e| bad(e.to_string()))?;
-    req.headers_mut()
-        .insert("authorization", format!("Bearer {}", link.token).parse().map_err(|_| bad("bad token".into()))?);
+    // No key: none shown (an empty one would count as a wrong guess).
+    if !link.token.is_empty() {
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {}", link.token).parse().map_err(|_| bad("bad token".into()))?);
+    }
     if wire2 {
         req.headers_mut().insert(WIRE_HEADER, axum::http::HeaderValue::from_static("2"));
         req.headers_mut().insert(crate::mux::HEADER, axum::http::HeaderValue::from_static("1"));
@@ -1492,7 +1949,7 @@ async fn socket(
     match r {
         Ok((w, r)) => Ok((w, wire2 && r.headers().get(crate::mux::HEADER).is_some_and(|v| v == "1"))),
         Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == 401 => {
-            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "refused: wrong key"))
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, WrongKey))
         }
         Err(tokio_tungstenite::tungstenite::Error::Io(e)) => Err(e),
         // The server says why (a limit): pass its words on.
@@ -1546,37 +2003,63 @@ impl<T: Cell> Remote<T> {
 
     /// `connect`, over TLS when `link` has a root to pin.
     pub async fn connect_to(link: Link, user: &str) -> std::io::Result<Self> {
-        Self::start(link, user, None, false).await
+        Self::start(Some(link), user, None, false, false).await.map(|(r, _)| r)
     }
 
     /// `connect_to` another app's local door as a peer ([`crate::peer`]).
     pub(crate) async fn peer(link: Link, user: &str) -> std::io::Result<Self> {
-        Self::start(link, user, None, true).await
+        Self::start(Some(link), user, None, true, false).await.map(|(r, _)| r)
     }
 
     /// `connect_to`, keeping the copy in `file` (0600): when the server can't
     /// be reached it starts from the saved copy (offline-first), and calls
     /// still waiting for the server survive a restart and are sent later.
     pub async fn connect_saved(link: Link, user: &str, file: &std::path::Path) -> std::io::Result<Self> {
-        Self::start(link, user, Some(file.to_path_buf()), false).await
+        Self::start(Some(link), user, Some(file.to_path_buf()), false, false).await.map(|(r, _)| r)
     }
 
-    async fn start(link: Link, user: &str, file: Option<std::path::PathBuf>, peer: bool) -> std::io::Result<Self> {
-        let saved: Option<Saved> = file
-            .as_ref()
-            .and_then(|f| std::fs::read(f).ok())
-            .and_then(|b| serde_json::from_slice::<Saved>(&b).ok())
-            .filter(|s| s.cell == T::ID && s.v == T::VERSION);
-        let first = match open::<T>(&link, user, peer).await {
-            Ok(c) => Some(c),
+    /// [`Self::connect_saved`] that never fails to start (a window's
+    /// client, whose connect page asks where its server is): with no
+    /// `link`, or one that can't be reached or refuses, the copy starts
+    /// offline (from the saved copy, else the cell's default) and waits for
+    /// [`Self::relink`]. Why its first connect failed comes back beside it.
+    pub async fn connect_later(
+        link: Option<Link>,
+        user: &str,
+        file: &std::path::Path,
+    ) -> std::io::Result<(Self, Option<std::io::Error>)> {
+        Self::start(link, user, Some(file.to_path_buf()), false, true).await
+    }
+
+    async fn start(
+        link: Option<Link>,
+        user: &str,
+        file: Option<std::path::PathBuf>,
+        peer: bool,
+        later: bool,
+    ) -> std::io::Result<(Self, Option<std::io::Error>)> {
+        let claimed = file.as_deref().map(Saver::claim);
+        // A save still on its way (a copy dropped just now) is newer than the file.
+        let saved: Option<Saved> = match claimed.as_ref().and_then(|(_, _, n)| n.as_deref()) {
+            Some(n) => Some(n.clone()),
+            None => file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()),
+        }
+        .filter(|s| file.as_deref().is_none_or(|f| kept_aside::<T>(f, s)));
+        let first = match &link {
+            Some(link) => open::<T>(link, user, peer).await.map(Some),
+            None => Ok(None),
+        };
+        let (first, failed) = match first {
+            Ok(c) => (c, None),
             // Offline (not refused): start from the saved copy, connect later.
             Err(e)
                 if saved.is_some()
                     && !matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported) =>
             {
                 eprintln!("[aio] sync {}: {e}; starting offline from the saved copy", T::ID);
-                None
+                (None, Some(e))
             }
+            Err(e) if later => (None, Some(e)),
             Err(e) => return Err(e),
         };
         let pending = saved.as_ref().map(|s| s.pending.clone()).unwrap_or_default();
@@ -1584,32 +2067,17 @@ impl<T: Cell> Remote<T> {
         let (w, seq, view) = match (first, saved) {
             (Some((w, m)), _) => (Some(w), m["seq"].as_u64().unwrap_or(0), m["state"].clone()),
             (None, Some(s)) => (None, s.seq, s.view),
-            (None, None) => unreachable!("offline without a saved copy returned above"),
+            // A copy waiting for its server: the cell's default until it comes.
+            (None, None) => (None, 0, serde_json::to_value(T::default()).map_err(std::io::Error::other)?),
         };
         let st: Arc<T> = Arc::new(crate::copy_of(view.clone()).map_err(std::io::Error::other)?);
-        let save = file.map(|f| {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Saved>();
-            tokio::spawn(async move {
-                while let Some(mut s) = rx.recv().await {
-                    // Only the newest matters.
-                    while let Ok(newer) = rx.try_recv() {
-                        s = newer;
-                    }
-                    let bytes = serde_json::to_vec(&s).unwrap_or_default();
-                    let f = f.clone();
-                    let r = tokio::task::spawn_blocking(move || crate::paths::write_atomic(&f, &bytes, true)).await;
-                    if let Ok(Err(e)) = r {
-                        eprintln!("[aio] sync {}: can't save the copy: {e}", T::ID);
-                    }
-                }
-            });
-            tx
-        });
+        let save = claimed.map(|(s, owner, _)| (s, owner));
         let connected = w.is_some();
         let copy = Copy::new(seq, view, st, pending, By::User(user.into()));
         let inner = Arc::new(Inner {
             by: By::User(user.into()),
             save,
+            file,
             limits: Mutex::new(limits.as_ref().and_then(limits_from_wire)),
             copy: Mutex::new(copy),
             out: Mutex::new(None),
@@ -1617,6 +2085,7 @@ impl<T: Cell> Remote<T> {
             ends: Mutex::default(),
             running: Mutex::default(),
             parts: Mutex::default(),
+            streams: Mutex::default(),
             online: AtomicBool::new(false),
             last_sync: Mutex::new(connected.then(crate::store::now_ms)),
             asked: Mutex::default(),
@@ -1631,48 +2100,87 @@ impl<T: Cell> Remote<T> {
             conflicts: Mutex::default(),
             patches: Mutex::default(),
             owned: Mutex::default(),
+            slot: Arc::new(Slot { link: Mutex::new(link), wake: tokio::sync::Notify::new(), moves: AtomicU64::new(0), later }),
+            unreached: Mutex::default(),
+            token: Mutex::default(),
+            signed_out: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&inner);
+        let slot = inner.slot.clone();
         let user = user.to_string();
         tokio::spawn(async move {
             let mut first = w;
             let mut wait = Duration::from_millis(250);
             let mut told = false;
             loop {
+                let at = slot.moves.load(Ordering::SeqCst);
                 let w = match first.take() {
                     Some(w) => w,
-                    None => match (tokio::time::Instant::now(), open::<T>(&link, &user, peer).await) {
-                        (asked, Ok((w, first))) => {
-                            let Some(inner) = weak.upgrade() else { return };
-                            *lock(&inner.asked) = Some(asked);
-                            Remote { inner }.take(first);
-                            w
-                        }
-                        (_, Err(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                            eprintln!("[aio] sync {}: {e}; not retrying", T::ID);
-                            return;
-                        }
-                        (_, Err(e)) => {
-                            // A version skew may end (the server is updated or rolled back): say it once, keep trying.
-                            if e.kind() == std::io::ErrorKind::Unsupported && !told {
-                                eprintln!("[aio] sync {}: {e}", T::ID);
-                                told = true;
-                            }
-                            // Jittered backoff, so many clients don't return at once.
-                            let jitter = Duration::from_millis(u64::from(crate::uuid_v4().as_bytes()[0]) * 2);
-                            tokio::time::sleep(wait + jitter).await;
-                            wait = (wait * 2).min(Duration::from_secs(10));
-                            if weak.strong_count() == 0 {
-                                return;
-                            }
+                    None => {
+                        let Some(link) = lock(&slot.link).clone() else {
+                            slot.wake.notified().await;
                             continue;
+                        };
+                        // aio's token function: asked again before each reconnect.
+                        let fresh = weak.upgrade().and_then(|i| lock(&i.token).clone());
+                        let link = match fresh {
+                            Some(f) => Link { token: f(), ..link },
+                            None => link,
+                        };
+                        match (tokio::time::Instant::now(), open::<T>(&link, &user, peer).await) {
+                            (asked, Ok((w, first))) => {
+                                let Some(inner) = weak.upgrade() else { return };
+                                *lock(&inner.asked) = Some(asked);
+                                inner.signed_out.store(false, Ordering::SeqCst);
+                                Remote { inner }.take(first);
+                                w
+                            }
+                            (_, Err(e)) => {
+                                let Some(inner) = weak.upgrade() else { return };
+                                let hear = lock(&inner.unreached).clone();
+                                hear.iter().for_each(|f| f(&e));
+                                let refused = e.kind() == std::io::ErrorKind::PermissionDenied;
+                                // A dead credential: new calls refused until a link is made again.
+                                let dead = e.get_ref().is_some_and(|e| e.is::<WrongKey>());
+                                let fresh = dead && lock(&inner.token).is_some();
+                                if dead {
+                                    Remote { inner }.signed_out_now(&e.to_string());
+                                } else {
+                                    drop(inner);
+                                }
+                                if refused && !fresh {
+                                    eprintln!("[aio] sync {}: {e}; not retrying", T::ID);
+                                    if !slot.later {
+                                        return;
+                                    }
+                                    // Until it is pointed elsewhere (the connect page).
+                                    slot.wake.notified().await;
+                                    continue;
+                                }
+                                // A version skew may end (the server is updated or rolled back): say it once, keep trying.
+                                if e.kind() == std::io::ErrorKind::Unsupported && !told {
+                                    eprintln!("[aio] sync {}: {e}", T::ID);
+                                    told = true;
+                                }
+                                // Jittered backoff, so many clients don't return at once (a token
+                                // function is asked again after it); a relink ends it.
+                                let jitter = Duration::from_millis(u64::from(crate::uuid_v4().as_bytes()[0]) * 2);
+                                tokio::select! {
+                                    () = tokio::time::sleep(wait + jitter) => wait = (wait * 2).min(Duration::from_secs(10)),
+                                    () = slot.wake.notified() => wait = Duration::from_millis(250),
+                                }
+                                if weak.strong_count() == 0 {
+                                    return;
+                                }
+                                continue;
+                            }
                         }
-                    },
+                    }
                 };
                 wait = Duration::from_millis(250);
                 let Some(inner) = weak.upgrade() else { return };
                 let r = Remote { inner };
-                r.pump(w).await;
+                r.pump(w, at).await;
                 if weak.strong_count() <= 1 {
                     return;
                 }
@@ -1688,12 +2196,26 @@ impl<T: Cell> Remote<T> {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        Ok(r)
+        Ok((r, failed))
+    }
+
+    /// Point the copy at another server (a client's connect page): its next
+    /// connect goes there, at once: a link it holds now is dropped.
+    pub fn relink(&self, link: Link) {
+        *lock(&self.inner.slot.link) = Some(link);
+        self.inner.slot.moves.fetch_add(1, Ordering::SeqCst);
+        self.inner.slot.wake.notify_one();
+    }
+
+    /// Call `f` with why each connect to the server failed (unreachable,
+    /// refused, another app's server): what a connect page shows.
+    pub fn on_unreached(&self, f: impl Fn(&std::io::Error) + Send + Sync + 'static) {
+        lock(&self.inner.unreached).push(Arc::new(f));
     }
 
     /// Run one connection: send what waits, then move messages both ways
-    /// until it drops.
-    async fn pump(&self, w: Wire) {
+    /// until it drops or a relink (after `at`) points the copy elsewhere.
+    async fn pump(&self, w: Wire, at: u64) {
         let (mut sink, mut stream) = w.split();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
         for p in lock(&self.inner.copy).pending.clone() {
@@ -1786,7 +2308,12 @@ impl<T: Cell> Remote<T> {
                 }
             }
         };
-        tokio::select! { _ = writer => {}, _ = reader => {}, _ = watchdog => {} }
+        let moved = async {
+            while self.inner.slot.moves.load(Ordering::SeqCst) == at {
+                self.inner.slot.wake.notified().await;
+            }
+        };
+        tokio::select! { _ = writer => {}, _ = reader => {}, _ = watchdog => {}, () = moved => {} }
         self.inner.online.store(false, Ordering::SeqCst);
         self.inner.rtt.store(0, Ordering::Relaxed);
         *lock(&self.inner.out) = None;
@@ -1871,6 +2398,9 @@ impl<T: Cell> Remote<T> {
                     let fs = lock(&self.inner.refusals).clone();
                     fs.iter().for_each(|f| f(&method, e));
                 }
+                if r.is_err() {
+                    lock(&self.inner.streams).remove(&op);
+                }
                 if let Err(e) = &r
                     && let Some(end) = lock(&self.inner.ends).remove(&op)
                 {
@@ -1886,8 +2416,21 @@ impl<T: Cell> Remote<T> {
                     Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
                     None => Ok(m["ok"].clone()),
                 };
-                if let Some(end) = m["op"].as_str().and_then(|op| lock(&self.inner.ends).remove(op)) {
-                    end.send(r);
+                if let Some(op) = m["op"].as_str() {
+                    lock(&self.inner.streams).remove(op);
+                    if let Some(end) = lock(&self.inner.ends).remove(op) {
+                        end.send(r);
+                    }
+                }
+            }
+            // A streamed async call's piece, before its end.
+            // Run here, in order: each before the end that follows it.
+            Some("part") => {
+                let op = m["op"].as_str().unwrap_or_default();
+                let taken = lock(&self.inner.streams).remove(op);
+                if let Some(mut f) = taken {
+                    f(m["c"].clone());
+                    lock(&self.inner.streams).insert(op.into(), f);
                 }
             }
             Some("sfnc") => {
@@ -1918,7 +2461,10 @@ impl<T: Cell> Remote<T> {
                 Ok(t) => {
                     let ls = lock(&self.inner.tells).clone();
                     ls.iter().for_each(|f| f(&t));
-                    crate::tell::show(&t);
+                    // No window and nobody listening (a CLI client): said, never lost.
+                    if !crate::tell::show(&t) && ls.is_empty() {
+                        crate::info!(cat: "cli", "{}", t.line());
+                    }
                 }
                 Err(e) => eprintln!("[aio] sync {}: a tell this build can't read: {e}", T::ID),
             },
@@ -1959,7 +2505,7 @@ impl<T: Cell> Remote<T> {
             let mut c = lock(&self.inner.copy);
             f(&mut c);
             c.reshow();
-            if let Some(tx) = &self.inner.save {
+            if let Some((s, owner)) = &self.inner.save {
                 let saved = Saved {
                     cell: T::ID.into(),
                     v: T::VERSION,
@@ -1967,7 +2513,7 @@ impl<T: Cell> Remote<T> {
                     view: c.view.clone(),
                     pending: c.pending.clone(),
                 };
-                _ = tx.send(saved);
+                s.put(*owner, saved);
             }
         }
         self.tell();
@@ -2014,6 +2560,61 @@ impl<T: Cell> Remote<T> {
     /// Calls to `method` waiting for the server (a spinner on its button).
     pub fn pending_of(&self, method: &str) -> usize {
         lock(&self.inner.copy).pending.iter().filter(|p| p.method == method).count()
+    }
+
+    /// Ask `f` for the token before each reconnect (aio's `token` as a
+    /// function: a short-lived JWT, a session refreshed elsewhere). With
+    /// it, a refused credential is tried again with what `f` gives next.
+    pub fn token_with(&self, f: impl Fn() -> String + Send + Sync + 'static) {
+        *lock(&self.inner.token) = Some(Arc::new(f));
+    }
+
+    /// Has the server refused this copy's credential (signed out: a
+    /// revoked key or a dead session)? New calls are refused meanwhile.
+    pub fn signed_out(&self) -> bool {
+        self.inner.signed_out.load(Ordering::SeqCst)
+    }
+
+    /// The credential is dead (aio's "Signed out"): the calls waiting are
+    /// refused with `ACCESS_DENIED` and taken off the copy, never sent as
+    /// someone they no longer are. A saved copy keeps them beside its file
+    /// (`<file>.signed-out-<ms>`) and says so (`sync:signed-out-queue`):
+    /// they are never lost; if they can't be kept there, they stay waiting.
+    fn signed_out_now(&self, why: &str) {
+        self.inner.signed_out.store(true, Ordering::SeqCst);
+        let saved = {
+            let c = lock(&self.inner.copy);
+            Saved { cell: T::ID.into(), v: T::VERSION, seq: c.seq, view: c.view.clone(), pending: c.pending.clone() }
+        };
+        if saved.pending.is_empty() {
+            return;
+        }
+        let kept = match self.inner.file.as_deref().map(|f| aside(f, "signed-out", &saved)) {
+            Some(Ok(p)) => format!("; kept as {}", p.display()),
+            Some(Err(e)) => {
+                let msg = format!("{}: signed out ({why}): {} calls made offline can't be kept aside ({e}): they stay waiting", T::ID, saved.pending.len());
+                eprintln!("[aio] WARN {msg}");
+                return crate::report::tell("sync:signed-out-queue", &msg);
+            }
+            None => String::new(),
+        };
+        let gone = saved.pending;
+        self.update(|c| c.pending.clear());
+        let msg = format!("{}: signed out ({why}): {} calls made offline were not sent{kept}", T::ID, gone.len());
+        eprintln!("[aio] WARN {msg}");
+        crate::report::tell_kept("sync:signed-out-queue", &msg);
+        let why = Rejected::coded(crate::Code::AccessDenied, format!("signed out ({why}): not sent{kept}"));
+        let fs = lock(&self.inner.refusals).clone();
+        for p in gone {
+            lock(&self.inner.streams).remove(&p.op);
+            if let Some(tx) = lock(&self.inner.waiting).remove(&p.op) {
+                _ = tx.send(Err(why.clone()));
+            }
+            if let Some(end) = lock(&self.inner.ends).remove(&p.op) {
+                end.send(Err(why.clone()));
+            }
+            fs.iter().for_each(|f| f(&p.method, &why));
+        }
     }
 
     pub fn online(&self) -> bool {
@@ -2097,8 +2698,15 @@ impl<T: Cell> Remote<T> {
     /// this copy and the server both changed it (aio's `sync.merge`), not
     /// the call replayed alone: what the copy shows until the server's
     /// answer comes. The server keeps what its methods make: a method that
-    /// edits (`n += d`, a push, a patched text) keeps both there too.
+    /// edits (`n += d`, a push, a patched text) keeps both there too. A
+    /// field the cell doesn't have panics, naming the ones it has (aio's typo check).
     pub fn merge(&self, field: &str, how: crate::merge::Merge) {
+        let saved = serde_json::to_value(T::default()).unwrap_or_default();
+        let has = saved.get(field).is_some() || T::FIELDS.iter().any(|f| f.name == field);
+        if !has {
+            let names: Vec<&str> = saved.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+            panic!("{}: merge(\"{field}\"): no such field (it has {})", T::ID, names.join(", "));
+        }
         self.update(|c| {
             c.merges.retain(|(f, _)| f != field);
             c.merges.push((field.into(), how));
@@ -2114,15 +2722,18 @@ impl<T: Cell> Remote<T> {
         args: Value,
         waiter: Option<mpsc::Sender<Result<Value>>>,
         end: Option<crate::Reply>,
+        parts: Option<OnPart>,
     ) -> Result<(String, Value)> {
         let (op, out, p, dropped) = {
             let mut c = lock(&self.inner.copy);
             let keep = *lock(&self.inner.keep);
+            if self.inner.signed_out.load(Ordering::SeqCst) {
+                return Err(Rejected::coded(crate::Code::AccessDenied, "signed out: sign in again to call"));
+            }
             let room = evictable(c.pending.first().map(|p| p.at), keep, crate::store::now_ms());
-            crate::ensure!(
-                c.pending.len() < PENDING_MAX || room.is_some(),
-                "blocked: {PENDING_MAX} calls wait for the server"
-            );
+            if !(c.pending.len() < PENDING_MAX || room.is_some()) {
+                return Err(crate::Rejected::coded(crate::Code::QueueOverflow, format!("blocked: {PENDING_MAX} calls wait for the server")));
+            }
             let op = crate::cx::Op::new();
             let cx = Cx::synced(crate::store::now_ms(), T::ID, &self.inner.by, &op);
             let waits = T::UNPREDICTED.contains(&method);
@@ -2139,7 +2750,7 @@ impl<T: Cell> Remote<T> {
             };
             let at = cx.now();
             let (method, inputs) = (method.into(), cx.into_asks().inputs);
-            let p = Pending { op: op.to_string(), method, args, inputs, at, waits };
+            let p = Pending { op: op.to_string(), method, args, inputs, at, waits, stream: parts.is_some() };
             // Too big for the server: refused here, at once, instead of being
             // sent (and re-sent after every close) forever.
             if let Some(l) = *lock(&self.inner.limits) {
@@ -2165,6 +2776,7 @@ impl<T: Cell> Remote<T> {
                 waited.as_secs()
             ));
             eprintln!("[aio] sync {}: {}: {}", T::ID, gone.method, why.why);
+            lock(&self.inner.streams).remove(&gone.op);
             if let Some(tx) = lock(&self.inner.waiting).remove(&gone.op) {
                 _ = tx.send(Err(why.clone()));
             }
@@ -2179,6 +2791,9 @@ impl<T: Cell> Remote<T> {
         }
         if let Some(end) = end {
             lock(&self.inner.ends).insert(op.clone(), end);
+        }
+        if let Some(parts) = parts {
+            lock(&self.inner.streams).insert(op.clone(), parts);
         }
         self.update(|_| {});
         self.send(p.msg());
@@ -2311,7 +2926,7 @@ impl<T: Cell> Remote<T> {
             // An async method's answer is its end: up to its wait for the
             // reply, and the call ceiling for its awaits.
             let (end, answer) = crate::Reply::new(method);
-            let (op, _) = self.predict(method, args, None, Some(end))?;
+            let (op, _) = self.predict(method, args, None, Some(end), None)?;
             let r = match wait {
                 Some(w) => crate::rt().block_on(tokio::time::timeout(w + crate::effect::call_ceiling(), answer)).ok(),
                 None => Some(crate::rt().block_on(answer)),
@@ -2322,7 +2937,7 @@ impl<T: Cell> Remote<T> {
             });
         }
         let (tx, rx) = mpsc::channel();
-        let (op, _) = self.predict(method, args, Some(tx), None)?;
+        let (op, _) = self.predict(method, args, Some(tx), None, None)?;
         let r = match wait {
             Some(w) => rx.recv_timeout(w).ok(),
             None => rx.recv().ok(),
@@ -2335,13 +2950,37 @@ impl<T: Cell> Remote<T> {
     }
 }
 
+impl<T: Cell> Remote<T> {
+    /// Call async method `method` and get its pieces as it sends them
+    /// (`cx.part(v)` in it; aio's `peer().stream()` and `emitChunk`): each
+    /// reaches `on_part`, typed `C`, in order, all before its end. Predicted
+    /// and queued like any call; only the server's run sends pieces, a
+    /// piece that isn't a `C` is skipped.
+    pub fn stream<C: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        args: Value,
+        mut on_part: impl FnMut(C) + Send + 'static,
+    ) -> Result<crate::Answer> {
+        crate::ensure!(T::async_mode(method).is_some(), "{method}: only an async method sends pieces");
+        let (end, answer) = crate::Reply::new(method);
+        let each: OnPart = Box::new(move |v| {
+            if let Ok(c) = serde_json::from_value(v) {
+                on_part(c);
+            }
+        });
+        self.predict(method, args, None, Some(end), Some(each))?;
+        Ok(answer)
+    }
+}
+
 impl<T: Cell> Door<T> for Remote<T> {
     /// Predicted: applied to the copy at once and sent; the server confirms
     /// or refuses later (`on_refused`). Works offline (queued). A
     /// `predict = false` method is only sent: it shows once the server ran it
     /// (`pending_of` counts it until then).
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.predict(method, args, None, None).map(|(_, out)| out)
+        self.predict(method, args, None, None, None).map(|(_, out)| out)
     }
 
     /// Predicted like `call`; an async method's end comes from the server
@@ -2351,7 +2990,7 @@ impl<T: Cell> Door<T> for Remote<T> {
             return self.call(method, args).map(|v| crate::Answer::ready(Ok(v)));
         }
         let (end, answer) = crate::Reply::new(method);
-        self.predict(method, args, None, Some(end))?;
+        self.predict(method, args, None, Some(end), None)?;
         Ok(answer)
     }
 
@@ -2554,4 +3193,26 @@ impl Live {
             _ => Ok(false),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_pages_console_lines_are_cut_masked_and_paced() {
+    use crate::log::Level;
+    let body = br#"[{"level":"warn","msg":"low"},{"level":"log","msg":"a\u001b[2Jb"},{"msg":7},{"msg":"\u001b[31mred"}]"#;
+    let got = page_entries(body);
+    assert_eq!(got.len(), 3, "a line with no text is none");
+    assert_eq!(got[0], (Level::Warn, "low".into()));
+    assert!(!got[1].1.contains('\u{1b}') && !got[1].1.contains("\\x1b"), "no terminal escapes: {:?}", got[1]);
+    assert_eq!(got[2].1, "[31mred", "no colour either: a page's line can't pass for the log's own");
+    assert!(page_entries(b"not json").is_empty());
+    let mut b = PageBudget::default();
+    let t0 = std::time::Instant::now();
+    assert_eq!(b.take(t0), None);
+    let taken = (0..150).filter(|_| b.room()).count();
+    assert_eq!(taken, PAGE_LINES_PER_SEC as usize);
+    assert_eq!(b.take(t0 + std::time::Duration::from_millis(500)), None, "the same second");
+    let said = b.take(t0 + std::time::Duration::from_secs(1)).unwrap();
+    assert!(said.starts_with("50 page console lines were dropped"), "{said}");
+    assert!(b.room(), "a new second");
 }

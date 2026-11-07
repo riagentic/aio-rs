@@ -59,3 +59,27 @@ pub fn use_window_event(f: impl FnMut(WindowEvent) + 'static) {
     });
     on_cleanup(move || ls.all.borrow_mut().retain(|(i, _)| *i != id));
 }
+
+/// Hear the window's `kind` events, any DOM event type (`"visibilitychange"`,
+/// `"online"`, `"scroll"`, `"pointermove"` with no throttle), while this
+/// component lives (a hook; aio's `onWindowEvent(type)`): `f` gets the
+/// event's plain fields (`type`, `key`, `clientX`…) as JSON. Each event
+/// crosses to the app: a frequent one costs a message each. Needs no
+/// [`GlobalKeys`](super::GlobalKeys).
+pub fn use_window_listener(kind: &str, f: impl FnMut(serde_json::Value) + 'static) {
+    let run = callback(f);
+    let (id, kind) = (serde_json::Value::from(super::use_id("win")), serde_json::Value::from(kind));
+    let js = format!(
+        "const f = (e) => {{ const o = {{}}; for (const k in e) {{ const v = e[k]; \
+         if (v === null || ['number', 'string', 'boolean'].includes(typeof v)) o[k] = v }} aio.send(o) }}; \
+         addEventListener({kind}, f, {{ passive: true }}); \
+         (window.__aioOff = window.__aioOff || {{}})[{id}] = () => removeEventListener({kind}, f)"
+    );
+    task(move || async move {
+        let mut e = eval(&js);
+        while let Ok(v) = e.recv::<serde_json::Value>().await {
+            run.call(v);
+        }
+    });
+    on_cleanup(move || _ = eval(&format!("window.__aioOff && window.__aioOff[{id}] && window.__aioOff[{id}]()")));
+}

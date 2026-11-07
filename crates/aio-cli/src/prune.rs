@@ -106,6 +106,22 @@ pub fn run(root: &Path, args: &[&str], now: SystemTime) -> Out {
     }
 }
 
+/// ax 0.2's build folder `dir`, unused since builds moved to aio's cache
+/// home: what to say of it, removed when `yes` (`None`: none here).
+pub fn legacy(dir: &Path, yes: bool) -> Result<Option<String>, String> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    if !yes {
+        return Ok(Some(format!(
+            "ax 0.2's build folder {} is unused (builds go to aio's cache home now): `ax prune --yes` removes it",
+            dir.display()
+        )));
+    }
+    std::fs::remove_dir_all(dir).map_err(|e| format!("not removed: {}: {e}", dir.display()))?;
+    Ok(Some(format!("removed ax 0.2's build folder {}", dir.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +153,18 @@ mod tests {
             .filter_map(|l| l.strip_prefix("remove "))
             .map(|l| l.split_whitespace().next().unwrap().into())
             .collect()
+    }
+
+    #[test]
+    fn ax_0_2s_build_folder_is_said_then_removed_with_yes() {
+        let t = tempfile::tempdir().unwrap();
+        let old = t.path().join("target");
+        assert_eq!(legacy(&old, true).unwrap(), None, "none here");
+        std::fs::create_dir_all(old.join("debug")).unwrap();
+        assert!(legacy(&old, false).unwrap().unwrap().contains("ax prune --yes"));
+        assert!(old.is_dir(), "said, never removed without --yes");
+        assert!(legacy(&old, true).unwrap().unwrap().starts_with("removed"));
+        assert!(!old.exists());
     }
 
     #[test]

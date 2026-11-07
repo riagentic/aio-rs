@@ -99,13 +99,28 @@ impl Doors {
         let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost");
         let scheme = if secure { "https" } else { "http" };
         let redirect = p.cfg_redirect().unwrap_or_else(|| format!("{scheme}://{host}/__aio/auth/oidc/callback"));
+        // The first sign-in says what it sends: the provider must have it registered (aio's).
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if op == "oidc/start" && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[aio] auth: OIDC sign-in sends redirect_uri={redirect}: the provider must list it exactly");
+        }
+        let cookies = crate::http::parse_cookies(headers);
+        let binder = cookies.get(super::oidc::BINDER).map(String::as_str);
         match op {
-            "oidc/start" => super::oidc::start(p, &self.auth, q.get("redirect").map(String::as_str), &redirect, secure),
+            "oidc/start" => super::oidc::start(p, &self.auth, q, binder, &redirect, secure),
             _ => {
-                let cookies = crate::http::parse_cookies(headers);
-                let binder = cookies.get(super::oidc::BINDER).map(String::as_str);
                 match super::oidc::callback(p, &self.auth, q, binder, &redirect, secure) {
                     Err(page) => page,
+                    // An app's: the code goes to its loopback, never a cookie here.
+                    Ok(super::oidc::Landed { user, clear, app: Some((port, claim)), .. }) => {
+                        match self.auth.sso_code(&user.id, &claim) {
+                            Err(e) => (503, vec![], e.to_string()),
+                            Ok(code) => {
+                                let to = format!("http://127.0.0.1:{port}/?code={code}");
+                                (302, vec![("location".into(), to), ("set-cookie".into(), clear)], String::new())
+                            }
+                        }
+                    }
                     Ok(l) => match self.auth.issue(&l.user.id, &l.user.role) {
                         Err(e) => (503, vec![], e.to_string()),
                         Ok(token) => {
@@ -237,7 +252,7 @@ impl Doors {
                     let user = self.caller(bearer).map_err(fail)?.map(|u| json!({ "id": u.id, "role": u.role }));
                     let (mail, oidc) = (self.mail.is_some(), self.oidc.is_some());
                     let features =
-                        json!({ "signup": self.auth.policy().signup, "totp": true, "oidc": oidc, "mail": mail });
+                        json!({ "signup": self.auth.policy().signup, "totp": self.auth.policy().totp, "oidc": oidc, "mail": mail });
                     Ok((200, json!({ "user": user, "features": features })))
                 }
                 _ => Err(err(404, "unknown_auth_route")),
@@ -316,6 +331,18 @@ impl Doors {
                     Err(Refusal::InvalidCode) => Err(self.failed(&key, now, "invalid_code")),
                     Err(r) => Err(refused(&r)),
                 }
+            }
+            // An app's provider sign-in, handed over to its loopback.
+            "oidc/redeem" => {
+                if self.oidc.is_none() {
+                    return Err(err(404, "no_identity_provider"));
+                }
+                let (Some(code), Some(verifier)) = (s("code"), s("verifier")) else {
+                    return Err(err(400, "code_and_verifier_required"));
+                };
+                let u = self.auth.sso_redeem(code, verifier).map_err(fail)?;
+                let u = u.ok_or_else(|| err(400, "sso_expired"))?;
+                Ok(signed(self.auth.issue(&u.id, &u.role).map_err(fail)?, &u, 200))
             }
             "logout" => {
                 if let Some(t) = bearer {
@@ -413,6 +440,7 @@ impl Doors {
                 eprintln!("[aio] auth: a password reset completed for {id}");
                 Ok((200, json!({ "ok": true })))
             }
+            "totp/setup" | "totp/enable" if !self.auth.policy().totp => Err(err(403, "totp_disabled")),
             "totp/setup" => {
                 let u = me()?;
                 let secret = self.auth.totp_setup(&u.id).map_err(fail)?;
@@ -498,10 +526,12 @@ pub(crate) fn router(doors: Arc<Doors>) -> axum::Router {
             })
             .await
             .unwrap_or_else(|_| (String::new(), err(500, "auth_failed")));
-            let cookie = doors.cookie(&op, status, &v, &headers);
+            // `[accounts] cookie = false`: the session is the token alone.
+            let jar = doors.auth.policy().cookie;
+            let cookie = doors.cookie(&op, status, &v, &headers).filter(|_| jar);
             // A page that keeps its session in the cookie only gets no token to hold.
             let mut v = v;
-            if headers.get(super::client::SESSION_HEADER).is_some_and(|h| h == "cookie")
+            if jar && headers.get(super::client::SESSION_HEADER).is_some_and(|h| h == "cookie")
                 && let Some(o) = v.as_object_mut()
             {
                 o.remove("token");

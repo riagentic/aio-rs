@@ -27,6 +27,8 @@ native! {
     mod cells;
     pub mod cli;
     pub mod config;
+    #[cfg(not(target_arch = "wasm32"))]
+    pub mod connect;
     pub mod cost;
     #[cfg(feature = "tls")]
     pub mod cpace;
@@ -42,7 +44,6 @@ native! {
     pub mod gate;
     mod handle;
     pub mod health;
-    pub mod held;
     #[cfg(feature = "server")]
     pub mod http;
     pub mod ipc;
@@ -83,9 +84,13 @@ pub mod auth {
     pub mod client;
 }
 mod answer;
+pub mod big;
+pub use big::Big;
 pub mod colors;
 pub mod columns;
 pub mod compat;
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
+pub mod held;
 mod hidden;
 #[cfg(any(feature = "server", all(feature = "web", target_arch = "wasm32")))]
 mod mux;
@@ -110,6 +115,9 @@ pub mod merge;
 pub mod patch;
 pub mod route;
 pub mod sha256;
+// Page text made smaller as the app builds (`shrunk!`): tooling, not API.
+#[doc(hidden)]
+pub mod shrink;
 mod status;
 pub mod tell;
 pub mod ui;
@@ -129,7 +137,7 @@ pub use aio_config_macro::hue;
 pub use aio_macros::{cell, data, methods};
 pub use answer::Answer;
 #[doc(hidden)]
-pub use answer::{Reply, Step, finish, ttl_key};
+pub use answer::{Reply, Step, call_key, finish, ttl_key};
 pub use cx::{Backoff, By, Cx, Inputs, On, Plan};
 pub use derived::{Cache, Derived, Reads, Ver, Watching};
 pub use effect::{Effect, Mode};
@@ -142,6 +150,11 @@ pub use uuid::Uuid;
 
 /// aio-rs's version (the `aio-rs` crate's, as Cargo.lock has it): what an app's About names.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A build made to work on the app: a debug build, or `ax dev`'s and
+/// `ax test`'s (aio's `dev` feature, without debug assertions). It says
+/// more and refuses sooner than the build people get.
+pub(crate) const DEV_BUILD: bool = cfg!(any(debug_assertions, feature = "dev"));
 
 /// What aio is told built this side: the hello's `ver` and meta.json's `aio`.
 /// aio only shows them (as `aio <ver>`, at most 64 chars), never compares
@@ -276,9 +289,11 @@ pub struct Transaction {
 
 /// The kinds of refusal aio makes, on either side of the wire (aio
 /// `errorCode`). Stable: a code keeps its meaning and its wire name
-/// (`ACCESS_DENIED`) across versions; new ones may be added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+/// (`ACCESS_DENIED`) across versions; new ones may be added, and one this
+/// build doesn't know (a newer server's) is kept as [`Code::Other`]. Its
+/// prefix says the layer, as aio's: `REDUCE_` a method, `INIT_` its start
+/// hook, `QUEUE_`/`DISPATCH_` the calls' way in, `PERSIST_` the store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Code {
     /// The caller may not: sign in, or ask for the role.
@@ -290,23 +305,81 @@ pub enum Code {
     /// A transaction's write met another call's (`#[cell(transaction)]`):
     /// nothing it wrote committed; call it again.
     TxConflict,
+    /// The method panicked: a bug, its call changed nothing.
+    ReduceError,
+    /// An `#[on_start]` hook refused or panicked.
+    InitError,
+    /// The offline queue is full (500 calls wait for the server).
+    QueueOverflow,
+    /// The app is closing, the cell disabled or paused by time travel.
+    DispatchClosed,
+    /// The call's await was aborted, superseded or cut off before it answered.
+    DispatchAborted,
+    /// Refused in a call storm (`[perf.storm]`).
+    DispatchLoop,
+    /// The store could not write the call.
+    PersistError,
+    /// A code this build doesn't know, verbatim (a newer server's).
+    Other(String),
 }
+
+const CODES: [(Code, &str); 11] = [
+    (Code::AccessDenied, "ACCESS_DENIED"),
+    (Code::ActionRefused, "ACTION_REFUSED"),
+    (Code::ConnectionLost, "CONNECTION_LOST"),
+    (Code::TxConflict, "TX_CONFLICT"),
+    (Code::ReduceError, "REDUCE_ERROR"),
+    (Code::InitError, "INIT_ERROR"),
+    (Code::QueueOverflow, "QUEUE_OVERFLOW"),
+    (Code::DispatchClosed, "DISPATCH_CLOSED"),
+    (Code::DispatchAborted, "DISPATCH_ABORTED"),
+    (Code::DispatchLoop, "DISPATCH_LOOP"),
+    (Code::PersistError, "PERSIST_ERROR"),
+];
 
 impl Code {
     /// Its wire name (`ACCESS_DENIED`).
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
-            Self::AccessDenied => "ACCESS_DENIED",
-            Self::ActionRefused => "ACTION_REFUSED",
-            Self::ConnectionLost => "CONNECTION_LOST",
-            Self::TxConflict => "TX_CONFLICT",
+            Self::Other(s) => s,
+            c => CODES.iter().find(|(k, _)| k == c).map_or("", |(_, n)| n),
         }
     }
 
-    /// The code a wire message carries in `code` (`None`: none, or one this
-    /// build doesn't know).
+    /// The code a wire message carries in `code` (`None`: none); one this
+    /// build doesn't know is kept as [`Code::Other`] (aio's `errorCode`).
     pub fn of(v: &Value) -> Option<Self> {
-        serde_json::from_value(v.clone()).ok()
+        let s = v.as_str().filter(|s| !s.is_empty())?;
+        Some(CODES.iter().find(|(_, n)| *n == s).map_or_else(|| Self::Other(s.into()), |(c, _)| c.clone()))
+    }
+}
+
+impl Serialize for Code {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Code {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(d)?;
+        Self::of(&Value::String(s)).ok_or_else(|| serde::de::Error::custom("an empty code"))
+    }
+}
+
+/// One line for a log, a CI gate or an agent (aio's `errorSummary`): the
+/// code, when there is one, and the first sentence of the words, at most
+/// 160 characters. Branch on [`Rejected::code`], never on this.
+pub fn error_summary(e: &Rejected) -> String {
+    let first = e.why.lines().next().unwrap_or_default();
+    let first = first.find(". ").map_or(first, |i| &first[..=i]);
+    let line = match &e.code {
+        Some(c) => format!("{}: {first}", c.as_str()),
+        None => first.to_string(),
+    };
+    match line.char_indices().nth(159) {
+        Some((i, _)) => format!("{}…", &line[..i]),
+        None => line,
     }
 }
 
@@ -337,7 +410,7 @@ impl Rejected {
 
     /// Its code (aio's `errorCode`): `None` for the method's own refusal.
     pub fn code(&self) -> Option<Code> {
-        self.code
+        self.code.clone()
     }
 }
 
@@ -391,15 +464,24 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// stay out of the live timeline, reports and the debug log. Its state
     /// and events are kept as ever.
     const DIAGNOSTICS: bool = true;
+    /// `#[cell(persist = false)]` (aio's `persist: "none"`): the cell is
+    /// never saved, also when opened on a file: it starts from its defaults
+    /// on every launch. Without it, a cell opened on a store is saved there.
+    const SAVED: bool = true;
     /// `#[cell(coalesce)]` (aio's debounced persistence for the whole cell):
     /// every plain method is `#[coalesce]` (see `Cell::COALESCED`).
     const COALESCE: bool = false;
+    /// `#[cell(redact)]` (aio's `redactActions: ["vault:*"]`): every method
+    /// is `#[redact]` (see `Cell::REDACTED`).
+    const REDACT: bool = false;
     /// Turn state saved by version `from` into this one. An `Err` refuses to
     /// boot (after the backup), never resets the data.
     fn migrate(old: Value, from: u32) -> std::result::Result<Self, String> {
         let _ = from;
         serde_json::from_value(old).map_err(|e| e.to_string())
     }
+    /// `#[cell(visible = f)]` is set: [`Self::project`] runs the app's code.
+    const SCREENED: bool = false;
     /// What `viewer` (who, with their role now) may see of the state, as
     /// sent to a synced client: without `#[server]` fields, filtered by
     /// `#[cell(visible = f)]`.
@@ -429,6 +511,21 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     ///
     /// On a shared cell it is an [`Hidden`]: a copy never has it, and
     /// reading it there fails loudly instead of reading a default.
+    ///
+    /// A name that may be a secret (`seed`, `token`, `master_key`…) is
+    /// warned about (aio's warning tier); `#[public]` says a field named
+    /// like a secret is meant to be sent (aio's `publicFields`):
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// #[aio::cell(shared)]
+    /// pub struct Game { pub seed: u64 }
+    /// ```
+    /// ```
+    /// #![deny(deprecated)]
+    /// #[aio::cell(shared)]
+    /// pub struct Game { #[public] pub seed: u64, #[public] pub api_key: String }
+    /// ```
     ///
     /// ```compile_fail
     /// #[aio::cell(shared)]
@@ -483,6 +580,16 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     fn restore(self) -> Self {
         self
     }
+    /// The state to boot on when the store came back from a damaged file
+    /// (`#[cell(recovered = f)]`, `fn(Self, &aio::Recovered) -> Self`;
+    /// aio's `onCheckpointRestore` returning a state): `self` is the good
+    /// copy's state, `r` says from when. The boot logs what it returns as a
+    /// `$restore` event.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recovered(self, r: &Recovered) -> Self {
+        let _ = r;
+        self
+    }
     /// `#[cell(machine = field)]`: move the machine for `method` before it
     /// runs, or refuse it (see [`mod@machine`]).
     fn advance(&mut self, method: &str) -> Result {
@@ -507,6 +614,12 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     fn changed_fields(&self, other: &Self) -> u64 {
         let _ = other;
         !0
+    }
+    /// Set the fields of bits `mask` ([`CellData::changed_fields`]' bits,
+    /// below the 64th) to `from`'s.
+    #[doc(hidden)]
+    fn take_fields(&mut self, from: &Self, mask: u64) {
+        let _ = (from, mask);
     }
 }
 
@@ -611,15 +724,43 @@ pub trait Cell: CellData {
     /// Its `pub async fn` methods, each with its `#[mode]` (`Queue` unless
     /// set): a call of one ends later, in a step ([`crate::Answer`]).
     const ASYNC: &'static [(&'static str, crate::Mode)] = &[];
+    /// Its `#[skip_if_running]` async methods: a schedule's tick of one,
+    /// whoever set it (`cx.every`, `cx.after`…), is skipped while one runs
+    /// (aio's `skipIfRunning`).
+    const SKIP_IF_RUNNING: &'static [&'static str] = &[];
+    /// Its `#[skip_travel]` methods (aio's `skipActions`): time travel's
+    /// steps and its timeline pass over their events (a tick, a hover);
+    /// they stay in the log.
+    const UNTRAVELED: &'static [&'static str] = &[];
     /// Its `#[ttl]` async methods: their effects are keyed by their arguments too.
     const TTL: &'static [&'static str] = &[];
+    /// Each async method's reads of its own state, as `#[methods]` finds
+    /// them in its body: the fields it reads, or `None` when it may read
+    /// any (it passes `self` on, calls a method of `self`). A field it only
+    /// assigns (`self.f = …`) is a blind write: in a `#[cell(transaction)]`
+    /// it never conflicts (aio's read tracking).
+    #[doc(hidden)]
+    const READS: &'static [(&'static str, Option<&'static [&'static str]>)] = &[];
+    /// The fields `method` writes blind ([`Cell::READS`]), as
+    /// [`CellData::changed_fields`]' bits (the 64th and later never).
+    #[doc(hidden)]
+    fn blind(method: &str) -> u64 {
+        let Some((_, Some(read))) = Self::READS.iter().find(|(m, _)| *m == method) else { return 0 };
+        Self::FIELDS
+            .iter()
+            .take(63)
+            .enumerate()
+            .filter(|(_, f)| !read.contains(&f.name))
+            .fold(0, |m, (i, _)| m | 1 << i)
+    }
     /// The async method `method` is, and its mode (`None`: a plain method).
     fn async_mode(method: &str) -> Option<crate::Mode> {
         Self::ASYNC.iter().find(|(m, _)| *m == method).map(|(_, mode)| *mode)
     }
     /// Is `method` (or a step of it, `method.N`) `#[redact]`?
     fn redacts(method: &str) -> bool {
-        Self::REDACTED.iter().any(|r| method.strip_prefix(r).is_some_and(|s| s.is_empty() || s.starts_with('.')))
+        Self::REDACT
+            || Self::REDACTED.iter().any(|r| method.strip_prefix(r).is_some_and(|s| s.is_empty() || s.starts_with('.')))
     }
     /// The `#[on_start]` method: called as the cell goes live (it starts,
     /// or is enabled again), after the cells it depends on.
@@ -882,10 +1023,12 @@ fn run_hooks(what: &str, hooks: Vec<Hook>, limit: std::time::Duration) -> Vec<St
 
 /// Stop the app, within `budget` in all: its `on_stopping` hooks, then
 /// every store this process opened (`Source::open`), drained and closed,
-/// then its `on_stop` hooks. Stores and `on_stop` each get at least
-/// `FLOOR` (500 ms). What was cut at a deadline, named: effects, and hooks that
-/// were left behind. Call it from outside the runtime (the app's main
-/// thread), once its window is gone; a second call has nothing left to do.
+/// then its `on_stop` hooks, then every synced copy's last save
+/// (`Remote::connect_saved`). Stores, `on_stop` and the saves each get at
+/// least `FLOOR` (500 ms). What was cut at a deadline, named: effects,
+/// hooks that were left behind, and saved copies not written. Call it
+/// from outside the runtime (the app's main thread), once its window is
+/// gone; a second call has nothing left to do.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn shutdown(budget: std::time::Duration) -> Vec<String> {
     // `ax status` says stopping from here on.
@@ -899,6 +1042,9 @@ pub fn shutdown(budget: std::time::Duration) -> Vec<String> {
     let drained = rt().block_on(async { futures_util::future::join_all(fs.iter().map(|f| f(stores))).await });
     cut.extend(drained.into_iter().flat_map(|d| d.aborted));
     cut.extend(run_hooks("on_stop", stop, left()));
+    // Every synced copy's last save (a call made offline just now) on disk.
+    #[cfg(feature = "server")]
+    cut.extend(sync::flush_saves(left()).into_iter().map(|f| format!("the saved copy {}", f.display())));
     // Its doors: nothing is served past here.
     ipc::unlink_all();
     // Last: a program the app started and never ended would outlive it.
@@ -907,11 +1053,38 @@ pub fn shutdown(budget: std::time::Duration) -> Vec<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+type Checkpoint = Box<dyn Fn() -> Result + Send>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn checkpoints() -> &'static std::sync::Mutex<Vec<Checkpoint>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Vec<Checkpoint>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn on_shutdown<T: Cell>(h: Handle<T>) {
+    let c = h.clone();
+    checkpoints().lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(move || c.checkpoint()));
     closers().lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(move |budget| {
         let h = h.clone();
         Box::pin(async move { h.shutdown(budget).await })
     }));
+}
+
+/// Every cell the app opened, its state snapshotted now
+/// ([`Handle::checkpoint`]): `ax dev` does it before a hot-patch changes
+/// the code, so a later start replays only calls the new code made. The
+/// cells that couldn't, named with why.
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn checkpoint_all() -> Vec<String> {
+    checkpoints()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(|c| c().err())
+        .map(|e| e.to_string())
+        .collect()
 }
 
 #[doc(hidden)]
@@ -1012,7 +1185,7 @@ mod tests {
 
     #[test]
     fn a_refusal_says_its_kind_by_a_typed_code_never_by_its_words() {
-        use super::Code;
+        use super::{CODES, Code, error_summary};
         assert_eq!(Rejected::denied("give", "is not a #[client] method").code(), Some(Code::AccessDenied));
         assert_eq!(Rejected::unknown("nope").code(), Some(Code::ActionRefused));
         // The method's own words are never mistaken for aio's.
@@ -1022,7 +1195,17 @@ mod tests {
         // The wire names are the contract.
         assert_eq!(serde_json::to_value(Code::AccessDenied).unwrap(), "ACCESS_DENIED");
         assert_eq!(Code::of(&serde_json::json!("CONNECTION_LOST")), Some(Code::ConnectionLost));
-        assert_eq!(Code::of(&serde_json::json!("FROM_A_NEWER_AIO")), None);
+        assert_eq!(Code::of(&serde_json::json!("FROM_A_NEWER_AIO")), Some(Code::Other("FROM_A_NEWER_AIO".into())));
+        assert_eq!(Code::of(&serde_json::json!(null)), None);
+        for (c, n) in CODES {
+            assert_eq!((c.as_str(), Code::of(&serde_json::json!(n))), (n, Some(c.clone())));
+            assert_eq!(serde_json::to_value(&c).unwrap(), serde_json::json!(n));
+        }
+        let long =
+            Rejected::coded(Code::ReduceError, format!("notes.add panicked: {}. Then more.\nsecond", "x".repeat(200)));
+        let s = error_summary(&long);
+        assert!(s.starts_with("REDUCE_ERROR: notes.add panicked: xxx") && s.chars().count() == 160, "{s}");
+        assert_eq!(error_summary(&Rejected::new("over budget. Try later.\nmore")), "over budget.");
         assert_eq!(Code::ActionRefused.as_str(), "ACTION_REFUSED");
     }
 }

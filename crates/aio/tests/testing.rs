@@ -226,7 +226,10 @@ fn the_apps_list_boots_in_dependency_order_on_the_test_clock() {
     t.advance(1);
     expect(&feed, "dismissed on time", |s| s.toast.is_none());
     cells.disable(Feed::ID).unwrap();
-    assert_eq!(feed.notify("x".into()), Err(Rejected::new(format!("{} is disabled", Feed::ID))));
+    assert_eq!(
+        feed.notify("x".into()),
+        Err(Rejected::coded(aio::Code::DispatchClosed, format!("{} is disabled", Feed::ID)))
+    );
 }
 
 #[test]
@@ -522,6 +525,28 @@ async fn a_served_app_says_its_metrics_and_health() {
     for l in ["# TYPE aio_uptime_seconds gauge", "aio_cell_enabled{cell=\"stall\"} 1", "aio_clients_connected 0"] {
         assert!(m.body.contains(l), "{l} not in {}", m.body);
     }
+    // What clients were sent: server totals, counted as states and patches go out.
+    let sent = |body: &str, name: &str| -> u64 {
+        let line = body.lines().find(|l| l.starts_with(&format!("{name} "))).unwrap_or_else(|| panic!("no {name}"));
+        line[name.len() + 1..].parse().unwrap()
+    };
+    let (bytes, msgs) = (sent(&m.body, "aio_broadcast_bytes_total"), sent(&m.body, "aio_broadcast_messages_total"));
+    let c = s.client("ana").await.unwrap();
+    s.handle.sell().unwrap();
+    s.converged(&[&c]).await;
+    let m = s.fetch("GET", "/__aio/metrics", "").await.unwrap().body;
+    assert!(sent(&m, "aio_broadcast_messages_total") >= msgs + 2, "its state and the patch: {m}");
+    assert!(sent(&m, "aio_broadcast_bytes_total") > bytes);
+    // Vitals: the link's liveness and payloads, the cell's size.
+    let v: serde_json::Value = serde_json::from_str(&s.fetch("GET", "/__aio/vitals", "").await.unwrap().body).unwrap();
+    let row = v["clients"].as_array().unwrap().iter().find(|c| c["cell"] == "stall").expect("the link is listed");
+    assert_eq!(row["status"], "healthy");
+    assert!(
+        row["gap"].as_u64().unwrap() < 5_000
+            && row["totalBytes"].as_u64().unwrap() >= row["lastPayloadBytes"].as_u64().unwrap()
+    );
+    assert!(v["cellSizes"]["stall"].as_u64().unwrap() > 0 && v["breakers"] == serde_json::json!([]), "{v}");
+    assert!(v["loop"]["drainRate"].is_u64());
     let h = s.fetch("GET", "/__aio/health", "").await.unwrap();
     let doc: serde_json::Value = serde_json::from_str(&h.body).unwrap();
     assert_eq!((doc["cell"]["id"].as_str(), doc["cell"]["enabled"].as_bool()), (Some("stall"), Some(true)));
@@ -868,4 +893,52 @@ fn a_schedule_on_a_cell_the_app_doesnt_hold_is_a_failure() {
     t.advance(3_000);
     let f = t.failures();
     assert!(f.iter().any(|f| f.contains("archive is not one of the app's cells")), "{f:?}");
+}
+
+/// aio's client log in a release: a page's console posted to its server
+/// lands in the log as `[page]` lines; `[server] page_log = false` takes none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pages_console_reaches_the_servers_log_unless_turned_off() {
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keep = lines.clone();
+    aio::log::set_sink(Some(std::sync::Arc::new(move |_, l: &str| keep.lock().unwrap().push(l.into()))));
+    let body = r#"[{"level":"warn","msg":"page-probe low disk"}]"#;
+    let json = [("Content-Type", "application/json")];
+    let on = aio::sync::Options { page_log: true, ..Default::default() };
+    let s = aio::testing::TestServer::start_with(Handle::<Shop>::memory(), on).await.unwrap();
+    assert_eq!(s.page().fetch_with("POST", "/__aio/log", &json, body).await.unwrap().status, 204);
+    let off = aio::testing::TestServer::start_with(Handle::<Shop>::memory(), Default::default()).await.unwrap();
+    let refused = off.page().fetch_with("POST", "/__aio/log", &json, body).await.unwrap().status;
+    aio::log::set_sink(None);
+    let said: Vec<String> = lines.lock().unwrap().iter().filter(|l| l.contains("page-probe")).cloned().collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].contains("WARN") && said[0].contains("[page] page-probe low disk"), "{said:?}");
+    assert_ne!(refused, 204, "off: nothing taken");
+}
+
+/// `/__aio/log` is a door like health: a stranger on the network (here, a
+/// request a proxy relayed) needs the key, as a bearer or the page's key
+/// cookie; this machine's own tools need none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_strangers_page_log_needs_the_key() {
+    let on = aio::sync::Options { page_log: true, ..Default::default() };
+    let s = aio::testing::TestServer::start_with(Handle::<Shop>::memory(), on).await.unwrap();
+    let body = r#"[{"msg":"x"}]"#;
+    let relayed = ("X-Forwarded-For", "192.0.2.7");
+    let post = |h: Vec<(&'static str, String)>| {
+        let s = &s;
+        async move {
+            let json = std::iter::once(("Content-Type", "application/json"));
+            let h: Vec<(&str, &str)> = json.chain(h.iter().map(|(k, v)| (*k, v.as_str()))).collect();
+            s.fetch_with("POST", "/__aio/log", &h, body).await.unwrap().status
+        }
+    };
+    let far = |more: Option<(&'static str, String)>| {
+        std::iter::once((relayed.0, relayed.1.to_string())).chain(more).collect::<Vec<_>>()
+    };
+    assert_eq!(post(far(None)).await, 401, "no key from afar");
+    assert_eq!(post(far(Some(("Authorization", "Bearer nope".into())))).await, 401, "a wrong key");
+    assert_eq!(post(far(Some(("Authorization", format!("Bearer {}", s.token))))).await, 204);
+    assert_eq!(post(far(Some(("Cookie", format!("aio_key_{}={}", Shop::ID, s.token))))).await, 204, "a page's cookie");
+    assert_eq!(post(vec![]).await, 204, "this machine");
 }

@@ -80,6 +80,8 @@ struct Node {
     extra: Option<Box<Extra>>,
     /// The root (window) it belongs to: where what it draws goes.
     root: u32,
+    /// An effect its own writes don't run again ([`effect_quiet`]).
+    quiet: bool,
 }
 
 /// AIR's guard (`signal.ts:418`): this many flush rounds in a row is a loop.
@@ -103,6 +105,9 @@ struct Rt {
     frames: Vec<Option<Rc<Frame>>>,
     /// The root the running code draws in.
     root: u32,
+    /// The effect whose run this is, whatever reads follow meanwhile
+    /// (`untrack`): its own writes don't wake a quiet one.
+    running: Option<Key>,
 }
 
 enum Later {
@@ -164,6 +169,20 @@ impl Drop for Restore {
     fn drop(&mut self) {
         rt(|rt| (rt.observer, rt.owner, rt.root) = (self.0, self.1, self.2));
     }
+}
+
+/// Restores the running effect when dropped (a panic unwinding too).
+struct Running(Option<Key>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        rt(|rt| rt.running = self.0);
+    }
+}
+
+/// Effect `e`'s run, until the guard drops.
+fn running(e: Key) -> Running {
+    rt(|rt| Running(rt.running.replace(e)))
 }
 
 /// Run as `owner` (in its root), reads followed by `observer`.
@@ -237,6 +256,12 @@ fn take_cleanups(k: Key) -> Vec<Box<dyn FnOnce()>> {
 /// still there: a cleanup reads its view's signals, as Solid's
 /// do), then their slots are freed.
 pub(crate) fn dispose(k: Key) {
+    dispose_then(k, false)
+}
+
+/// [`dispose`]; `soon`: what the nodes held is kept in [`LEFT`] and dropped
+/// by [`drop_left`] (a list's rows that left: the frame goes out first).
+fn dispose_then(k: Key, soon: bool) {
     take_cleanups(k).into_iter().for_each(|f| f());
     let (cleanups, trash) = rt(|rt| {
         let mut stack = vec![k];
@@ -257,8 +282,20 @@ pub(crate) fn dispose(k: Key) {
         (cleanups, trash)
     });
     // Values, bodies and cleanups outside the runtime's borrow (they may touch it).
-    drop(trash);
+    match soon {
+        true => LEFT.with_borrow_mut(|l| l.push(Box::new(trash))),
+        false => drop(trash),
+    }
     cleanups.into_iter().rev().for_each(|f| f());
+}
+
+thread_local!(static LEFT: RefCell<Vec<Box<dyn Any>>> = const { RefCell::new(Vec::new()) });
+
+/// Drop what the views that ended soon (`Owner::dispose_soon`) held:
+/// after a frame's edits are sent (the page applies them meanwhile), and
+/// at the next event at the latest.
+pub fn drop_left() {
+    drop(LEFT.take());
 }
 
 /// Dispose what `k`'s last run made, keeping `k` (and what it keeps).
@@ -315,7 +352,9 @@ fn notify(s: Key, checked: bool) {
         // Only subscriptions of an effect's current run stay.
         let live: Vec<(Key, u32)> =
             subs.into_iter().filter(|(e, r)| rt.node(*e).is_some_and(|n| n.runs == *r)).collect();
-        rt.queue.extend(live.iter().map(|(e, _)| *e));
+        let deaf = |e: Key| rt.running == Some(e) && rt.node(e).is_some_and(|n| n.quiet);
+        let woken: Vec<Key> = live.iter().map(|(e, _)| *e).filter(|e| !deaf(*e)).collect();
+        rt.queue.extend(woken);
         if let Some(n) = rt.node_mut(s) {
             // Re-subscribed by the re-run; keep them so a write in a batch
             // before the flush still reaches them.
@@ -408,18 +447,14 @@ fn run_effect(e: Key) {
     });
     let Some(body) = body else { return };
     let _f = push_frame(None);
-    let _r = enter(Some(e), Some(e));
+    let (_r, _e) = (enter(Some(e), Some(e)), running(e));
     (body.borrow_mut())();
 }
 
 /// An effect that read nothing and made, kept and provided nothing is
 /// dropped after its first run: a static hole costs nothing later.
 fn drop_if_idle(e: Key) {
-    let idle = rt(|rt| {
-        rt.node(e)
-            .is_some_and(|n| n.deps.is_empty() && n.owned.is_empty() && n.cleanups.is_empty() && n.extra.is_none())
-    });
-    if idle {
+    if idle(e) {
         dispose(e);
     }
 }
@@ -427,11 +462,39 @@ fn drop_if_idle(e: Key) {
 /// A node of `kind` that runs `f` now and again whenever what it read
 /// changes, owned by the current owner.
 pub(crate) fn effect_of(kind: Kind, f: impl FnMut() + 'static) -> Key {
-    let e = rt(|rt| rt.alloc(Node { kind, run: Some(Rc::new(RefCell::new(f))), ..Node::default() }));
-    // In a batch: what its first run writes waits for it to end.
-    batch(|| run_effect(e));
-    drop_if_idle(e);
+    let e = rt(|rt| rt.alloc(Node { kind, ..Node::default() }));
+    // The first run by value: a hole that reads and makes nothing (most of
+    // a row's) is freed without its body ever boxed. In a batch: what the
+    // run writes waits for it to end, and the body is in place by then.
+    let mut f = Some(f);
+    batch(|| {
+        rt(|rt| _ = rt.node_mut(e).map(|n| n.runs += 1));
+        {
+            let _f = push_frame(None);
+            let (_r, _e) = (enter(Some(e), Some(e)), running(e));
+            f.as_mut().expect("run once here")();
+        }
+        if !idle(e) {
+            let body = f.take().map(|f| Rc::new(RefCell::new(f)) as Run);
+            rt(|rt| _ = rt.node_mut(e).map(|n| n.run = body));
+        }
+    });
+    if f.is_some() {
+        rt(|rt| {
+            if rt.node_mut(e).map(|n| n.live = false).is_some() {
+                rt.free.push(e.idx);
+            }
+        });
+    }
     e
+}
+
+/// Has effect `e` read, made, kept and provided nothing (pure)?
+fn idle(e: Key) -> bool {
+    RT.with_borrow(|rt| {
+        rt.node(e)
+            .is_some_and(|n| n.deps.is_empty() && n.owned.is_empty() && n.cleanups.is_empty() && n.extra.is_none())
+    })
 }
 
 /// `f()`, and whether it read a signal (a probe: nothing stays subscribed;
@@ -518,6 +581,12 @@ impl Owner {
     /// End it and all it made (cleanups run, signals end, holes stop).
     pub fn dispose(self) {
         dispose(self.0)
+    }
+
+    /// [`Self::dispose`], but what it held (values, closures) is dropped
+    /// at [`drop_left`]: its holes stop now, the frame isn't kept waiting.
+    pub(crate) fn dispose_soon(self) {
+        dispose_then(self.0, true)
     }
 
     /// Is it still there?
@@ -1192,7 +1261,12 @@ impl<T: std::fmt::Debug + 'static> std::fmt::Debug for Memo<T> {
 }
 
 /// A memo made now, under the current owner (not a hook).
-pub(crate) fn memo_now<T: PartialEq + 'static>(mut f: impl FnMut() -> T + 'static) -> Memo<T> {
+pub(crate) fn memo_now<T: PartialEq + 'static>(f: impl FnMut() -> T + 'static) -> Memo<T> {
+    memo_dyn(Box::new(f))
+}
+
+/// [`memo_now`]'s work once per value type, not per closure.
+fn memo_dyn<T: PartialEq + 'static>(mut f: Box<dyn FnMut() -> T>) -> Memo<T> {
     let out: Rc<Cell<Option<Signal<T>>>> = Rc::default();
     let owner = current_owner();
     let o = out.clone();
@@ -1213,22 +1287,52 @@ pub(crate) fn memo_now<T: PartialEq + 'static>(mut f: impl FnMut() -> T + 'stati
 /// `f`'s value, made again when what it read changes (a hook).
 #[track_caller]
 pub fn memo<T: PartialEq + 'static>(f: impl FnMut() -> T + 'static) -> Memo<T> {
-    hook("memo", || memo_now(f))
+    memo_hook(Box::new(f))
+}
+
+fn memo_hook<T: PartialEq + 'static>(f: Box<dyn FnMut() -> T>) -> Memo<T> {
+    hook("memo", || memo_dyn(f))
 }
 
 // ---------------------------------------------------------------- effects
 
 /// An app's effect made now, its first run once the view is drawn.
-pub(crate) fn effect_now(f: impl FnMut() + 'static) {
-    let e = rt(|rt| rt.alloc(Node { kind: Kind::Effect, run: Some(Rc::new(RefCell::new(f))), ..Node::default() }));
-    rt(|rt| rt.later.push(Later::Effect(e)));
-    flush_if_idle();
+pub(crate) fn effect_now(f: impl FnMut() + 'static) -> Effect {
+    effect_kept(f, false)
 }
 
-/// Run `f` after the view is drawn, and again whenever what it read changes (a hook).
+fn effect_kept(f: impl FnMut() + 'static, quiet: bool) -> Effect {
+    let e =
+        rt(|rt| rt.alloc(Node { kind: Kind::Effect, run: Some(Rc::new(RefCell::new(f))), quiet, ..Node::default() }));
+    rt(|rt| rt.later.push(Later::Effect(e)));
+    flush_if_idle();
+    Effect(e)
+}
+
+/// An effect, to stop before its view goes ([`Effect::dispose`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Effect(Key);
+
+impl Effect {
+    /// It runs no more (its cleanups run now).
+    pub fn dispose(self) {
+        dispose(self.0)
+    }
+}
+
+/// Run `f` after the view is drawn, and again whenever what it read
+/// changes, its own writes too (aio's `rerunOnSelfWrite: true`) (a hook).
 #[track_caller]
-pub fn effect(f: impl FnMut() + 'static) {
+pub fn effect(f: impl FnMut() + 'static) -> Effect {
     hook("effect", || effect_now(f))
+}
+
+/// [`effect`], but a signal it read and then wrote itself doesn't run it
+/// again (aio's default `effect`): `log.update(|l| l.push(x.get()))` can't
+/// loop on `log` (a hook).
+#[track_caller]
+pub fn effect_quiet(f: impl FnMut() + 'static) -> Effect {
+    hook("effect", || effect_kept(f, true))
 }
 
 /// Run `f(deps)` once the view is drawn (a hook). A view runs once, so
@@ -1236,7 +1340,7 @@ pub fn effect(f: impl FnMut() + 'static) {
 /// from a signal or a cell part inside `f`, as in [`effect`].
 #[track_caller]
 pub fn watch<D: Clone + PartialEq + 'static>(deps: D, mut f: impl FnMut(D) + 'static) {
-    hook("watch", move || effect_now(move || f(deps.clone())))
+    hook("watch", move || _ = effect_now(move || f(deps.clone())))
 }
 
 /// Run `f` when the view goes away (a hook).
@@ -1472,6 +1576,55 @@ mod tests {
         assert_eq!(runs.get(), 3, "a batch flushes once");
         o.dispose();
         assert_eq!(live(), Live::default(), "an owner frees all it made");
+    }
+
+    #[test]
+    fn a_quiet_effect_is_deaf_to_its_own_writes_and_a_disposed_one_runs_no_more() {
+        let runs = Rc::new(Cell::new(0));
+        let ((s, other, e), o) = scope(|| {
+            let (s, other) = (Signal::new(0), Signal::new(0));
+            let r = runs.clone();
+            let e = effect_kept(
+                move || {
+                    r.set(r.get() + 1);
+                    other.get();
+                    let v = s.get();
+                    s.set(v + 1);
+                },
+                true,
+            );
+            (s, other, e)
+        });
+        assert_eq!((runs.get(), s.get_untracked()), (1, 1), "its own write: heard by others, not by it");
+        other.set(1);
+        assert_eq!((runs.get(), s.get_untracked()), (2, 2));
+        e.dispose();
+        other.set(2);
+        assert_eq!(runs.get(), 2, "disposed: runs no more");
+        o.dispose();
+    }
+
+    #[test]
+    fn a_quiet_effects_own_write_is_its_own_untracked_too() {
+        let runs = Rc::new(Cell::new(0));
+        let ((s, other), o) = scope(|| {
+            let (s, other) = (Signal::new(0), Signal::new(0));
+            let r = runs.clone();
+            effect_kept(
+                move || {
+                    r.set(r.get() + 1);
+                    other.get();
+                    let v = s.get();
+                    untrack(|| s.set(v + 1));
+                },
+                true,
+            );
+            (s, other)
+        });
+        assert_eq!((runs.get(), s.get_untracked()), (1, 1), "written untracked: still its own");
+        other.set(1);
+        assert_eq!((runs.get(), s.get_untracked()), (2, 2));
+        o.dispose();
     }
 
     #[test]

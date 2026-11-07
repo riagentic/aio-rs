@@ -15,6 +15,8 @@ use std::rc::Rc;
 pub fn RadioGroup(
     #[props(into)] options: Prop<Vec<Opt>>,
     #[props(default, into)] value: Prop<String>,
+    /// Wired to a form's field ([`Form::bind`](super::Form::bind)).
+    bind: Option<super::Bind>,
     /// The group's name; required unless a `Field` around it names it.
     #[props(into)]
     label: Prop<Option<String>>,
@@ -27,6 +29,10 @@ pub fn RadioGroup(
     let own = use_id("radio");
     let name = name.unwrap_or(own);
     let w = use_field(false, true);
+    let value = match bind.clone() {
+        Some(b) => Prop::from(memo(move || b.value())),
+        None => value,
+    };
     rsx! {
         div {
             class: join("aio-radios", &class.get()),
@@ -46,11 +52,19 @@ pub fn RadioGroup(
                         disabled: disabled.get() || o.disabled,
                         "aria-label": "{o.label}",
                         oninput: {
-                            let v = o.value.clone();
-                            move |_| if let Some(f) = onchange { f.call(v.clone()) }
+                            let (v, bind) = (o.value.clone(), bind.clone());
+                            move |_| {
+                                if let Some(b) = &bind {
+                                    b.input(v.clone());
+                                    b.blur();
+                                }
+                                if let Some(f) = onchange {
+                                    f.call(v.clone())
+                                }
+                            }
                         },
                     }
-                    span { "{o.label}" }
+                    span { {o.view.clone().unwrap_or_else(|| rsx! { "{o.label}" })} }
                 }
             }
         }
@@ -62,6 +76,8 @@ pub fn RadioGroup(
 #[component]
 pub fn Switch(
     #[props(default)] checked: Prop<bool>,
+    /// Wired to a form's bool field ([`Form::bind_check`](super::Form::bind_check)).
+    bind: Option<super::Bind>,
     #[props(default)] disabled: Prop<bool>,
     /// Beside it: text or any view.
     label: Option<View>,
@@ -72,6 +88,7 @@ pub fn Switch(
     let labelled = label.is_some();
     let w = use_field(labelled, false);
     let named = use_id("switch");
+    let (checked, onchange) = super::bound_check(bind, checked, onchange);
     let input = rsx! {
         input {
             r#type: "checkbox",
@@ -408,6 +425,20 @@ pub enum Placement {
     #[default]
     Top,
     Bottom,
+    /// Beside the trigger, on the screen's left or right (in any direction of text).
+    Left,
+    Right,
+}
+
+impl Placement {
+    fn key(self) -> &'static str {
+        match self {
+            Placement::Top => "top",
+            Placement::Bottom => "bottom",
+            Placement::Left => "left",
+            Placement::Right => "right",
+        }
+    }
 }
 
 /// The bubble id of the [`Tooltip`] around a kit control, which the control
@@ -435,7 +466,7 @@ pub fn Tooltip(
     let hidden = signal(|| false);
     rsx! {
         span {
-            class: join(&format!("aio-tip aio-tip--{}", if placement.get() == Placement::Top { "top" } else { "bottom" }), &class.get()),
+            class: join(&format!("aio-tip aio-tip--{}", placement.get().key()), &class.get()),
             "data-hidden": hidden.get().then_some(""),
             onkeydown: move |e| if e.key() == Key::Escape { hidden.set(true) },
             onfocusout: move |_| hidden.set(false),
@@ -639,7 +670,8 @@ impl Crumb {
 #[component]
 pub fn Breadcrumb(
     #[props(into)] items: Prop<Vec<Crumb>>,
-    #[props(default = String::from("/"), into)] separator: Prop<String>,
+    /// Between two crumbs: text, state or any view; unset: `/`.
+    separator: Option<View>,
     #[props(default = String::from("Breadcrumb"), into)] label: Prop<String>,
     #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
@@ -660,7 +692,7 @@ pub fn Breadcrumb(
                             a { href: c.href.clone(), onclick: move |_| if let Some(f) = c.onclick { f.call(()) }, {c.label.clone()} }
                         }
                         if !last {
-                            span { class: "aio-crumbs__sep", "aria-hidden": "true", "{separator}" }
+                            span { class: "aio-crumbs__sep", "aria-hidden": "true", {separator.clone().unwrap_or_else(|| rsx! { "/" })} }
                         }
                     }
                 }
@@ -707,9 +739,8 @@ pub fn Skeleton(
 pub fn EmptyState(
     /// Text or any view.
     title: View,
-    /// A glyph; decorative.
-    #[props(into)]
-    icon: Prop<Option<String>>,
+    /// A glyph or any view; decorative.
+    icon: Option<View>,
     description: Option<View>,
     action: Option<View>,
     #[props(default, into)] class: Prop<String>,
@@ -717,8 +748,8 @@ pub fn EmptyState(
 ) -> View {
     rsx! {
         div { class: join("aio-empty", &class.get()), ..attributes,
-            if icon.with(Option::is_some) {
-                div { class: "aio-empty__icon", "aria-hidden": "true", {icon.get()} }
+            if icon.is_some() {
+                div { class: "aio-empty__icon", "aria-hidden": "true", {icon.clone()} }
             }
             p { class: "aio-empty__title", {title} }
             if description.is_some() {

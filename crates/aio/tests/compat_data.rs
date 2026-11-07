@@ -280,6 +280,26 @@ fn the_multi_layout_and_another_persist_key_are_kept() {
 }
 
 #[test]
+fn the_app_s_own_user_version_is_never_read_or_written() {
+    // aio leaves `PRAGMA user_version` to the app (its own SQL migrations).
+    for app_v in [1, 2, 7] {
+        let (_d, p) = aio_file(&[("app:__persistKey", json!("app"))]);
+        let uv = |p: &Path| -> i64 {
+            rusqlite::Connection::open(p).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+        };
+        rusqlite::Connection::open(&p).unwrap().execute_batch(&format!("PRAGMA user_version = {app_v}")).unwrap();
+        for _ in 0..2 {
+            let mut s = Store::<Tally>::open_aio(&p, "app").unwrap_or_else(|e| panic!("user_version {app_v}: {}", e.0));
+            s.call(&By::Test, "on_add", Value::Null).unwrap();
+        }
+        assert_eq!(uv(&p), app_v, "the app's stamp stays");
+        assert_eq!(Store::<Tally>::open_aio(&p, "app").unwrap().state().n, 2);
+        let local = aio::update::local_data(&p).unwrap().unwrap();
+        assert_eq!(local.schema, 2, "aio-rs's layout, from its tables");
+    }
+}
+
+#[test]
 fn a_new_home_gets_a_file_aio_can_open() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("state.db");
@@ -629,6 +649,43 @@ fn a_store_by_another_name_backs_up_and_restores_once() {
     aio::backup::restore("w", &file, &vault, &dirs).unwrap().unwrap();
     assert_eq!(Store::<Tally>::open_aio(&vault, "w").unwrap().state().n, 1, "the backed-up store, in place");
     assert_eq!(aio_reads(&vault, "w")["tally"], json!({ "n": 1 }));
+}
+
+/// An update to aio-rs 0.3 that never starts is rolled back: the version
+/// before it (aio-rs 0.2) puts back the backup it took before the swap, so
+/// it opens the aio file as it left it. Never the one 0.3 adopted, where
+/// 0.2 would refuse aio-rs's tables in a file `user_version` doesn't stamp.
+#[test]
+fn a_rolled_back_update_gives_the_version_before_the_aio_file_it_left() {
+    let d = tempfile::tempdir().unwrap();
+    let dirs = aio::paths::AppDirs::at(d.path(), "w").unwrap();
+    let store = dirs.data.join("state.db");
+    let c = rusqlite::Connection::open(&store).unwrap();
+    c.execute_batch("CREATE TABLE aio_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)").unwrap();
+    c.execute("INSERT INTO aio_kv (k, v) VALUES ('w:__persistKey', '\"state\"')", []).unwrap();
+    drop(c);
+    let before = kv(&store);
+    let tables = |p: &Path| -> Vec<String> {
+        let db = rusqlite::Connection::open(p).unwrap();
+        let mut q = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").unwrap();
+        q.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    let uv = |p: &Path| -> i64 {
+        rusqlite::Connection::open(p).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    };
+    // The version before takes its backup, as the updater does before the swap.
+    let backup = dirs.data.join("backups/pre-0.3.0.db");
+    std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+    aio::backup::backup("w", &store, &backup).unwrap();
+    // The new version's first start adopts the file, then fails.
+    let mut s = Store::<Tally>::open_aio(&store, "w").unwrap();
+    s.call(&By::Test, "on_add", Value::Null).unwrap();
+    drop(s);
+    assert!(tables(&store).contains(&"log".to_string()) && uv(&store) == 0, "adopted, unstamped");
+    // Rolled back: the version before restores its backup at start, before any cell opens.
+    aio::backup::restore("w", &backup, &store, &dirs).unwrap();
+    assert_eq!(tables(&store), ["aio_kv"], "no aio-rs table for 0.2 to refuse");
+    assert_eq!((uv(&store), kv(&store)), (0, before), "the file exactly as it left it");
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]

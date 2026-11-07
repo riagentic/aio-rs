@@ -32,7 +32,7 @@ grows with that crate, not with the edit. Measured with `ax dev` in
 0.1 (headless, 32 cores; the two bigger apps build their libraries at
 `opt-level = 1`, so their first build is longer); the compile, which is
 most of each, is the same in 0.2, and the template's patch now lands in
-~0.45 s ([dev](dev.md)):
+~0.3 s ([dev](dev.md)):
 
 | The edited crate | A patch lands | A start after an edit | A start, nothing changed | First build |
 |---|---|---|---|---|
@@ -82,6 +82,7 @@ ax build notes                   # an installable app for this OS, in dist/
 ax build notes --list            # the target kinds, and the app's targets
 ax build notes --smoke           # then start each Linux bundle headless and stop it
 ax build notes --sizes           # the release binary against its budget
+ax build notes --quick           # a release to try in seconds: no LTO, bigger; never to ship
 ```
 
 Without `[build] targets` it makes this OS's bundle,
@@ -155,6 +156,33 @@ text = "{title}"
   build`, `ax dev` or `ax start` (they tell cargo; a plain `cargo build`
   doesn't see a new file). `[server] dirs` serves folders at run time
   instead, behind the key.
+
+### Release build time
+
+The template's `[profile.release]` (fat LTO, `opt-level = "z"`, one
+codegen unit, stripped) makes the smallest binary, so `ax build` keeps
+it. Its cost is the link: the whole program is optimised as one unit,
+on one core, at each build. Measured on the template (4 build jobs, a
+loaded machine, `cargo rustc --release` with ax's link flags):
+
+| `lto`, `codegen-units` | Clean build | One line changed | Binary |
+|---|---|---|---|
+| `true` (fat), 1: the template's | 56 s | 27 s | **5.42 MB** |
+| `"thin"`, 1 | 46 s | 10 s | 6.23 MB (+15%) |
+| `"thin"`, 16 | 40 s | 12 s | 6.83 MB (+26%) |
+| `false` (within each crate), 16 | **35 s** | **2.1 s** | 7.43 MB (+37%) |
+| `true` (fat), 16 | 60 s | 31 s | 5.70 MB |
+
+`opt-level = "s"` was bigger and slower to build than `"z"`. To try a
+release build quickly, not to ship it, `ax build --quick` builds every
+target (desktop, Android, web) without LTO, in 16 codegen units: the
+template's `ax build` after a one-line change takes 2.2 s, from 27 s.
+Cargo keeps both builds apart, so going back and forth rebuilds nothing.
+`--sizes` and a Mac over ssh refuse it; `ax release` never builds so.
+
+```sh
+ax build notes --quick --smoke
+```
 
 ### What lands in `dist/`
 

@@ -38,8 +38,8 @@ pub fn refusal(
         return Some((
             403,
             format!(
-                "Host \"{h}\" is not a name this app is served as (an IP address, localhost, a .local name, or one \
-                 listed in [server] hosts)"
+                "Host \"{h}\" is not a name this app is served as (an IP address, localhost, a .local name, this \
+                 machine's name, or one listed in [server] hosts)"
             ),
         ));
     };
@@ -124,6 +124,28 @@ pub fn proxy_warning(peer: IpAddr, headers: &HeaderMap, trust: Option<&str>) -> 
             )),
         },
     }
+}
+
+/// This machine's own name, lowercase, once (`None`: the OS gave none): a
+/// LAN browser reaches an exposed app by it, so it is served as the app
+/// (aio's machine hostname).
+pub fn machine_name() -> Option<String> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(unix)]
+        let name = {
+            let mut b = [0u8; 256];
+            // SAFETY: the buffer and its length are this call's own.
+            let ok = unsafe { libc::gethostname(b.as_mut_ptr().cast(), b.len()) } == 0;
+            ok.then(|| String::from_utf8_lossy(&b[..b.iter().position(|c| *c == 0).unwrap_or(b.len())]).into_owned())
+        };
+        #[cfg(windows)]
+        let name = std::env::var("COMPUTERNAME").ok();
+        #[cfg(not(any(unix, windows)))]
+        let name = None;
+        name.map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty())
+    })
+    .clone()
 }
 
 /// `host[:port]` → host (an IPv6 literal keeps its brackets).

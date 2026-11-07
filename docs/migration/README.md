@@ -26,6 +26,7 @@ and is many times slower than the aio app it replaces.
 6. [The wire: aio pages, tools and apps](#6-the-wire-aio-pages-tools-and-apps)
 7. [Checklist](#7-checklist)
 8. [0.1 → 0.2: Dioxus is gone](#8-01--02-dioxus-is-gone)
+9. [0.2 → 0.3](#9-02--03)
 
 ## 1. Project and boot
 
@@ -37,7 +38,7 @@ and is many times slower than the aio app it replaces.
 | `main.ts` | `app/src/main.rs`: `aio_shell::start`, `aio::Source::for_app`, `aio_shell::run` |
 | `src/cell/*.ts` | `src/*.rs` modules, one per aio cell file |
 | `src/ui/*.tsx` | `src/ui/*.rs` modules, one per aio component file |
-| `am create` | `ax create <name>` (`--template app`, `cli`, `service`; `--aio-version`, `--target`, `--css tailwind`) |
+| `am create` | `ax create <name>` (`--template app`, `todo`, `canvas`, `cli`, `service`; `--aio-version`, `--target`, `--css tailwind`) |
 | `am pin`, `am pin <v>\|main\|latest\|<path>`, `am fix` | `ax pin`, `ax pin <v>\|main\|latest\|<path>`: the app's aio-rs (Cargo.toml and Cargo.lock); a clone needs no repair |
 | `am upgrade`, `am uninstall` | `ax upgrade`, `ax uninstall` |
 
@@ -53,10 +54,10 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 |---|---|
 | `appId`, `cells` | `[app] id`; the launcher opens each cell (`Source::for_app`), `aio::Cells::with(h, after)` orders their start |
 | `localFirst` | built in: a synced copy predicts every call and confirms it with the server |
-| `cellDefaults` | none: flags are per cell (`#[cell(persist, visible = f)]`) |
+| `cellDefaults` | `persist: "none"`: `[data] only_persist = true`; `visible`: per cell (`#[cell(visible = f)]`) |
 | `port`, `host`, `expose` | `[server] listen`; `--port`, `--host`, `--expose` per launch |
 | `tls` | `[server] tls`, `cert`, `key` |
-| `appDir`, `profiles`, `dbPath` | the home rules ([files](../persistence/files.md)), `--home`, `--profile`, `--instance`; `[data] store` names the file; `Handle::memory()` is aio's `":memory:"`. No switch turns profiles off |
+| `appDir`, `profiles`, `dbPath` | `[home] dir`, `[app] profiles = false`; the home rules ([files](../persistence/files.md)), `--home`, `--profile`, `--instance`; `[data] store` names the file; `Handle::memory()` is aio's `":memory:"` |
 | `dbPragmas` | `[data] pragmas` |
 | `checkIntegrityOnBoot` | built in: every boot runs `quick_check`, and a damaged store is set aside and recovered |
 | `updates`, `feedback` | `[updates]`, `[feedback]` |
@@ -64,12 +65,14 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `persistDebounceMs` | `#[coalesce]` on a method, `#[cell(coalesce)]` on a cell (writes held up to `aio::PERSIST_DEBOUNCE`) |
 | `ui` (title, size, entry, head, lang, dir, theme, chrome, tray) | `[app] name`, `lang`, `dir`; `[ui]`; `aio_shell::Window` in the launcher; `aio::head::use_head` ([desktop](../clients/desktop.md)) |
 | `baseDir`, `serveDirs`, `assets` | the app's `assets/` (built in), `[server.dirs]`, `[server.public_dirs]` |
-| `client` (`electron`, `browser`, `cli`, `server-only`) | `[app] mode` (`standalone`, `client-server`, `server`, `client`, `cli`) and `[app] ui = "browser"` |
+| `client` (`electron`, `browser`, `cli`, `server-only`) | `[app] mode` (`standalone`, `client-server`, `server`, `client`, `cli`) and `[app] ui = "browser"`; `--client=window\|browser\|server-only` per launch |
 | `keepServer` | `aio_shell::Window { keep_server: true }`, or `--keep-server` per launch: the app serves on once its window closes |
 | `localConnectHooks`, `onConnect`, `onDisconnect` | `Http::on_link(f)`, `Plugin::on_link(f)`: each link's `Presence`; `Http::door_links(true)` hears the local door's links too |
 | `transport` | built in: the window talks over IPC, other local tools over the local door, the network over `/ws` |
 | `takeover`, `singleton` | always one instance per home; `--takeover` per launch; `--instance <n>` for a second, private one |
-| `serverUrl` | `mode = "client"` with `[client] server`, or a pairing (`ax pair`) |
+| `serverUrl` | `mode = "client"` with `[client] server`, a pairing (`ax pair`), the connect page, or `--server-url` per launch ([desktop](../clients/desktop.md#the-connect-page)) |
+| `electron: { strictPin }`, `--strict-pin` | `[client] strict_pin`, `--strict-pin` |
+| `electron: { unsandboxedChildWindows }` | `Window { web: Web { unsandboxed_windows: true, .. } }`, `Child { unsandboxed: true }` |
 | `users`, `key` | the app's key (`AIORT_TOKEN`, else `data/sync.token`), `[server] open`; per-user tokens: `[accounts]` ([accounts](../auth/README.md)) |
 | `pairing` | `[server] pairing`, `ax pair <app>` (the code), `ax pair <app> <host:port> <code>` |
 | `resolveUser`, `sessions`, `auth` | `[accounts]` (users, roles, sessions, TOTP, OIDC) |
@@ -91,15 +94,15 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `maxConnections`, `wsLimits` | `[server.limits]` (`clients`, `max_message`, `calls_per_sec`, `bytes_per_sec`) |
 | `allowedOrigins`, `strictOrigin`, `trustProxyHeader` | `[server] hosts`, `strict_origin`, `trust_proxy` |
 | `security` | `[server.security]` |
-| `appFlags` | not needed: `aio::paths::Ask::app_args` hands the app every argument aio didn't take |
+| `appFlags` | `[app] flags`: a launch flag one typo from a declared one is refused with it; `aio::paths::Ask::app_args` hands the app every argument aio didn't take |
 | `routes` | `aio::http::Http`, `Route::get(..)` |
 | `plugins` | `aio::plugin::Plugin` |
 | `schedules` | `#[every]`, `#[cron]` on a cell's methods |
-| `isolate` | none: open only the cells you want in a test (`TestCells`) |
+| `isolate` | `AIORT_ISOLATE=todo,mail` starts only those cells; in a test, open only the cells you want (`TestCells`) |
 | `beforeReduce`, `onAction` | `aio::before_call(f)`: it sees each call and may refuse it; `aio::on_action(f)` hears each committed one |
 | `onEffect` | `aio::on_effect(f)` |
 | `onStart`, `onStopping`, `onStop` | `#[on_start]`, `#[on_stop]` on a cell's methods |
-| `fatalOnStart` | none: an `#[on_start]` refusal is logged and reported; the app boots on |
+| `fatalOnStart` | `Cells::fatal_on_start()`: a refused start hook fails the boot; without it a refusal is logged and reported and the app boots on |
 | `onError` | `aio::report::on_problem(f)` ([errors](../debugging/errors.md)) |
 | `onRestore` | `#[cell(restore = f)]` |
 | `logging` | `[log]` |
@@ -124,12 +127,11 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | a selector with `deps: ["other"]` | `#[derived] fn f(&self, other: &Arc<Other>) -> R` |
 | `s.$call("other", ..)` | call the method directly, or `listens_to` across cells |
 | `machine:` / guard lines on a status field | `aio::machine!` + `#[cell(machine = field)]`, or `ensure!` |
-| `transaction: true` | nothing: every call is atomic |
 | `onInit` / `onDestroy` | `#[on_start]` / `#[on_stop]` |
 | `beforeReduce` | `aio::before_call(..)` |
 | `onEffect` | `aio::on_effect(..)` |
 | `scope: "client"` (view state) | a cell without `persist`/`shared` in the view's module, or a `Global` |
-| `redactActions` | `#[redact]` |
+| `redactActions` | `#[redact]`; a whole cell's (`"vault:*"`): `#[cell(redact)]` |
 | `diagnostics: false` | `#[cell(diagnostics = false)]` |
 | `definePlugin` | `aio::plugin::Plugin` |
 | `validate: s => .. \|\| "why"` | `#[invariant] fn f(&self) -> aio::Result` (checked after every call; a failing one refuses it) |
@@ -259,11 +261,13 @@ Rename it (`begin`) when porting.
 | aio | aio-rs |
 |---|---|
 | `call` | `aio::call!(door, method(..))` |
-| `self("tick")`, `own` | a method calls its own cell's method directly, or `cx.after(key, ms, "tick", args)` |
+| `self("tick")` | a method calls its own cell's method directly, or `cx.after(key, ms, "tick", args)` |
+| `own` | `h.own(key, Some(Box::new(res)))` (`Door::own`): kept under its key, the one it replaces dropped; `None` drops it |
 | `blocking` | `tokio::task::spawn_blocking` inside an effect |
 | `spawn`, `runCommand` (`aio/server`) | `aio::process::Command::new(p).args(..).on_line(f)`, `.spawn()` (a `Child`: `write`, `close_stdin`, `pause`, `resume`, `kill`, `wait`) or `.run(timeout)`; aborting the effect kills the tree |
 | `isCellWorker` | none (no worker cells) |
-| `table`, `pk`, `integer`, `text`, `real`, `bytes`, `count`, `ref` | `#[table("name")]` on a `Vec`/map field of `#[data]` rows; columns are the row's Rust types |
+| `table`, `pk`, `integer`, `text`, `real`, `ref` | `#[table("name")]` on a `Vec`/map field of `#[data]` rows; columns are the row's Rust types |
+| `bytes`, `count`, `dur` (formatting) | `aio::fmt::bytes`, `aio::fmt::count`, `aio::fmt::dur` |
 | `serverUser`, `serverRequest` | `cx.by()`, `cx.role()` in a method; the request in a route or server function |
 | `serverAuth`, `createAuthClient`, `authClient` | `[accounts]`; `aio::auth::client::Client` |
 | `serverImport`, `aio/server-only`, `aio/client-only` | `#[cfg(..)]` and Cargo features: server code isn't in the web build ([dev](../build/dev.md)) |
@@ -822,8 +826,8 @@ literal, each an effect that writes only its own part of the page.
 | `let s = shop(); rsx! { "{s.stock}" }` | `rsx! { {shop().stock} }` (better: `part(\|s\| &s.stock)`) |
 | `let ok = !draft.get().is_empty(); .. disabled: !ok` | `let ok = memo(move \|\| !draft.with(String::is_empty)); .. disabled: !ok.get()` |
 | a prop `text: String` given `text.get()` (re-rendered with the parent) | `text: Prop<String>` (follows `text.get()`), or a `Signal` / `part` handle |
-| `if let Some(x) = opt { .. }` in `rsx!` | refused: `{opt.map(\|x\| rsx! { .. })}`, or a bool for `if` |
-| `match page { A => rsx! { .. }, .. }` as a node | a hole: `{match page.get() { A => rsx! { .. }, .. }}` |
+| `if let Some(x) = opt { .. }` in `rsx!` | the same (0.2.0 refused it); its branch is made again when what it binds changes |
+| `match page { A => rsx! { .. }, .. }` as a node | `match page.get() { A => { .. }, .. }` (0.2.0 refused it); an arm's view is kept until another arm matches |
 | `for x in xs { li { .. } }` | `for x in xs.get() { li { key: "{x.id}", .. } }`: `key:` on the row's first node, items `Clone + PartialEq` |
 | `items.iter().map(\|i\| rsx! { .. })` | `for i in items.get() { Row { key: "{i.id}", .. } }` |
 | a `Transition { class, .. }` box (`div.aio-transition`) | no box: its content's first element plays the animation |
@@ -833,11 +837,6 @@ as the view mounted and never changes. Read state where it is shown
 (`"{n}"`, `.get()` inside `rsx!`) or in a `memo`; keep `once` for
 one-time setup and `effect` / `watch` for work that follows state
 ([views](../ui/views.md#common-mistakes)).
-
-Two shapes Dioxus took that air doesn't yet: an attribute given a
-function's borrowed result (`title: t(&x)`; a formatted string works:
-`title: "{t(&x)}"`), and a hole that borrows from a temporary it made
-(`{t(&sig.get())}`, error E0716).
 
 ### The test kit is a dev-dependency in 0.2
 
@@ -869,3 +868,102 @@ before. The unreleased framework verb is `ax pin` too.
 | `ax pin <app> [--plain]` (a pairing code) | `ax pair <app> [--plain]` |
 | `ax pair <app> <host:port> <code>` | the same |
 | the framework verb, `[version] [--aio dir]` (unreleased) | `ax pin [app] [version]`, `ax pin <checkout dir>` |
+
+## 9. 0.2 → 0.3
+
+No `aio.toml` key is removed or renamed. Most of what breaks is found
+by the compiler: new fields and variants, a few signatures; then a few
+behaviors and `ax`'s builds, listed below. Move the dependency with `ax
+pin 0.3.0`, then `cargo check` finds every place of the first two
+tables.
+
+### New fields and variants
+
+A struct literal without `..` names every field, and a `match` without
+`_` every variant: each one 0.3 adds breaks it.
+
+| 0.2 | 0.3 |
+|---|---|
+| `aio_shell::Window { title, .. }` with every field named | `Window { title, ..Default::default() }` (new: `chrome`, `devtools`); the same for `guest::Child` (`permissions`, `unsandboxed`), `guest::Web` (`unsandboxed_windows`), `db::Opts` (`readonly`), `sync::Options` (`app`, `page_log`), `paths::Ask` (`cdp`, `channel`, `client`, `connect`, `height`, `server_url`, `strict_pin`, `width`), `auth::client::Me` (`oidc`), the kit's `CheckboxProps`, `SwitchProps`, `RadioGroupProps` (`bind`), and aio-config's `Config` (`dev`), `App` (`flags`, `profiles`), `Accounts` and `auth::Policy` (`totp`, `cookie`), `Build` (`out`), `Client` (`strict_pin`), `Data` (`only_persist`, `snapshot_every`), `History` (`travel`), `Home` (`dir`), `Log` (`dir`), `Server` (`page_log`), `Target` (`platforms`, `title`, `ui`), `Updates` (`sign_commit`) |
+| `Opt { value, label, .. }` with every field named | `view: None`, or `..Opt::from(value)` |
+| `Motion { keyframes, ms, delay_ms, easing, css }` | `tick: None` beside them, or `Motion::new(keyframes).ms(ms)` |
+| a literal of `update::Release`, `update::Offer`, `update::Updates`, `vitals::Loop`, `health::Metrics`, `health::MemoryReport`, `report::Diagnostic`, `auth::Session` | the new fields named: `min_from: None, commit: None`; `reason`, `migrates`; `progress_of: None`; `drained`; `broadcast`; `trend`; `cell: None, call: None, numbers: vec![]`; `extra` (or `..Default::default()` where the type has it) |
+| a `match` over `aio::update::Step` (`Downloaded`, `Installing`) | a `Step::Runtime(percent)` arm (the Electron runtime's download), or `_` |
+| a `match` over `Merge`, `GuestEvent`, `Go`, `Placement` | arms for `Merge::Keys`, `Merge::SetRemove(_)`, `GuestEvent::PreloadRefused { .. }`, `Go::Css(_)`, `Go::Zoom(_)`, `Go::DevTools`, `Placement::Left`, `Placement::Right`, or `_` |
+
+### Changed signatures
+
+| 0.2 | 0.3 |
+|---|---|
+| `aio::discovery::probe_lan(port).await` | `probe_lan(port, aio::discovery::WAIT).await` (how long it listens) |
+| `aio::config::listen(&server, &ask)` | `listen(&server, &ask, &\|k\| std::env::var_os(k).map(Into::into))`: the environment it reads `AIORT_PORT` from (`aio::paths::Env`) |
+| `aio_shell::runtime::prefetch(version, sha)` | `prefetch(version, sha, &\|_\| {})`: a callback hears the percent |
+| `aio_shell::switches::cdp(port, debug)` | `cdp(typed, env, debug, devtools)`: the launch's `--cdp`, `AIORT_CDP`, a dev build, the app's `Window { devtools }` |
+| `aio::cli::watch::<T, _>(..)` with any `T: 'static` | `T: Send + Sync + 'static` |
+| `let f: [&str; 12] = aio::paths::FLAGS;` | `[&str; 20]`, or `&aio::paths::FLAGS[..]` (new: `--channel=`, `--width=`, `--height=`, `--cdp=`, `--server-url=`, `--connect`, `--strict-pin`, `--client=`) |
+| `let c: Code = e.code; f(c); g(c);` (`Code: Copy`) | `f(c.clone()); g(c);`, or match `&e.code` |
+| `code.as_str()` on a `Code` value, a `&'static str` | the same, borrowing the code: `&str` |
+| `impl IntoAttr for T { fn into_attr(self) -> AttrValue { .. } }` | `impl IntoAttr<'_> for T { fn into_attr(self) -> AttrValue<'_> { .. } }` |
+| `Attribute::new(name, v)`, `live`, `derive`, `value()` with `AttrValue` | the same with `IntoAttr<'static>` / `AttrValue<'static>` |
+| `move \|\| effect(f)` where the closure returns `()` | `move \|\| _ = effect(f)` (`effect` returns its `Effect`) |
+| `FieldProps { hint: "…".into(), .. }`, `BreadcrumbProps { separator }`, `EmptyStateProps { icon }` as `Prop<String>` | `Option<View>`: `Some(rsx! { "…" })`; in `rsx!` (`hint: "…"`) nothing changes |
+| `Hidden<&str>` deserialized | `Hidden<String>` (`T: DeserializeOwned`) |
+
+### Behavior
+
+| 0.2 | 0.3 |
+|---|---|
+| `args.text("name")`, `on`, `number`, `list` of a name the spec hasn't, or of another kind: `None` | it panics naming it: declare the flag in the spec, with its kind |
+| `aio::health::on_memory(f)`: `f` once per change of level | `f` on every sample while high or critical: compare `report.level` with the last one for once per change |
+| `[updates] every` on the `dev` and `test` channels | they look at least every minute and every 5 minutes: `[updates.every_by_channel]` with `dev = "1h"`, `test = "1h"` keeps a slower pace |
+| accounts on with `Http::users`: the users ignored | they are service keys beside the accounts (a `Bearer` that is no session is asked of them): drop `Http::users` if they weren't meant to sign in |
+| a client given a server's address alone (the connect page with no code, `aio::connect::open_at`) sent the app's own key | it sends no key: pair with the server's code, or name it with its key (`--server-url` with `AIORT_TOKEN`, `[client] server`) |
+| `aio::kit::DevTimeTravel` mounted by the app shows every `client!` cell's history in any build | only in a build with aio's `dev` (`ax dev`); place `TimeTravelPanel` for a panel in every build |
+
+### Builds and `ax`
+
+| 0.2 | 0.3 |
+|---|---|
+| `ax dev` ran a debug build: `cfg!(debug_assertions)` true, overflow checks on | as a release build: both off, and `ax test` the same. Code that must run only under `ax dev` can't tell by `debug_assertions`; a plain `cargo test` still has them |
+| a plain debug build (`cargo run`) had the dev tooling: the operator door (`ax call`, `ax ui`, `ax timetravel`), `AIORT_CDP`, `AIORT_WINDOW_SIZE`, the page's dev mode | only a build with the `dev` features (aio's and aio-shell's, as `ax dev` builds): `ax dev`, or `cargo run --features aio/dev,aio-shell/dev` |
+| `aio-shell = { .., default-features = false }` and `aio::update::install` (the app's own update runtime) | add `features = ["updates"]`: the updater is a feature, on by default; ax turns it on by itself only for an `[updates] url` |
+| `ax start` ran a debug build with that tooling | the release build's way, hardened, no tooling: `ax start <app> --cdp` asks for it |
+| the dev binary at `<target>/<triple>/desktop-dev/<app>`, the build folder per app | `<target>/desktop-dev/<app>`, one shared folder per machine and toolchain (`~/.cache/aio-rt/target/<toolchain>` on Linux, `AIORT_TARGET_DIR` names another); `ax prune --yes` removes 0.2's |
+
+### releases and old installs
+
+- An install on aio-rs 0.2 refuses a manifest that names `commit` or
+  `minFrom` and then can't update at all. Before using `--commit`,
+  `--min-from` or `[updates] sign_commit = true`, publish a plain release
+  built on 0.3 as a bridge and let installs take it. `ax release` warns
+  each time.
+
+### rolling back
+
+- An update to 0.3 that never starts is rolled back by the updater: the
+  version before restores the backup it took before the swap, so 0.2
+  opens its data as it left it.
+- A build on 0.2 of an app that came to 0.3 straight from aio can't open
+  that aio `state.db` (0.3 doesn't stamp `user_version`; 0.2 refuses
+  aio-rs's tables then). Go back by hand only to a backup made before
+  (`ax restore`).
+- 0.2 stamped `user_version = 2` in aio files it adopted. 0.3 leaves it
+  (it can't be told from an app's own 2): an app that keeps its own
+  `user_version` sets it again.
+
+### Synced copies
+
+- Only a refused key (401) signs a copy out now; other refusals
+  (`PermissionDenied`) keep the waiting calls. A signed-out saved copy
+  keeps its calls in `copy.signed-out-<ms>` beside its file: send them by
+  hand, or delete the file.
+- Orphaned queues are now `copy.orphan-<cell>-v<n>-<ms>` (was
+  `copy.orphan-<cell>-v<n>`); a script that looked for the old name
+  should match the prefix.
+
+### Dev builds
+
+- `ax dev` and `ax test` builds now act as dev builds (the `dev` feature
+  counts, not only debug assertions): a log that no longer replays
+  refuses the boot there instead of quarantining, and problem reports say
+  `"build": "dev"`.

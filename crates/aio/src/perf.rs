@@ -120,7 +120,7 @@ pub(crate) fn storm(cell: &str, method: &str) -> crate::Result {
         }
     }
     if refuse {
-        crate::reject!("{label}: refused during a call storm ([perf.storm] breaker)");
+        return Err(crate::Rejected::coded(crate::Code::DispatchLoop, format!("{label}: refused during a call storm ([perf.storm] breaker)")));
     }
     Ok(())
 }
@@ -227,7 +227,8 @@ fn violated(kind: &str, label: &str, took: Duration, budget: Duration, phases: O
         let more = if kept > 0 { format!(" ({kept} more in the last {}s)", QUIET.as_secs()) } else { String::new() };
         crate::warn!(cat: "perf", "{}", crate::report::teach(&format!("{l}{more}"), &fix(kind, label, took)));
     }
-    crate::report::tell(&format!("budget:{kind}"), &l);
+    let ms = |d: Duration| d.as_millis() as i64;
+    crate::report::tell_n(&format!("budget:{kind}"), &l, vec![("took_ms", ms(took)), ("budget_ms", ms(budget))]);
 }
 
 /// The await ceiling of async methods (`[perf] call_ceiling`).
@@ -351,7 +352,7 @@ mod tests {
         );
         assert_eq!((b.effect("hw.poll"), b.effect("hw.read")), (250 * MS, 5 * MS));
         let d = Budgets::default();
-        assert_eq!(d.method("a.b"), if cfg!(debug_assertions) { 16 * MS } else { 100 * MS });
+        assert_eq!(d.method("a.b"), if crate::DEV_BUILD { 16 * MS } else { 100 * MS });
         assert!(toml::from_str::<Budgets>("reduce = 5").is_err(), "a typo is an error");
         // A key naming no method of its cell is found; other cells' are not ours.
         let b: Budgets =

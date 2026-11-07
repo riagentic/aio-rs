@@ -60,8 +60,25 @@ pub(crate) static APP: std::sync::OnceLock<(String, String)> = std::sync::OnceLo
 /// Its macOS bundle id (`Config::mac_bundle_id`): its window's must match
 /// the `.app`'s, or the Dock shows two apps.
 pub(crate) static BUNDLE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-/// `[app] ui` of the app that started (`start`).
-pub(crate) static SHOWN: std::sync::OnceLock<aio::config::Shown> = std::sync::OnceLock::new();
+/// How the app that started shows (`start`): `[app] ui`, or the launch's
+/// `--client`; `None`: no window at all (`--client=server-only`).
+pub(crate) static SHOWN: std::sync::OnceLock<Option<aio::config::Shown>> = std::sync::OnceLock::new();
+
+/// How a launch's `--client=<word>` (aio's) shows the app, `[app] ui` its
+/// default (pure): `None` is no window, served until asked to stop.
+pub(crate) fn shown(client: Option<&str>, ui: aio::config::Shown) -> io::Result<Option<aio::config::Shown>> {
+    use aio::config::Shown;
+    match client {
+        None => Ok(Some(ui)),
+        Some("window" | "electron") => Ok(Some(Shown::Window)),
+        Some("browser") => Ok(Some(Shown::Browser)),
+        Some("server-only") => Ok(None),
+        Some(c) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("--client={c}: one of window (electron), browser, server-only"),
+        )),
+    }
+}
 /// Its hue (`[ui] hue`, else its id's) and its splash: what is drawn
 /// outside its page (`splash`, `firstrun`).
 pub(crate) static LOOK: std::sync::OnceLock<(u16, Option<aio::config::Splash>)> = std::sync::OnceLock::new();
@@ -93,11 +110,17 @@ pub fn quit_at(id: &str, data: &Path) -> io::Result<()> {
 /// A server's door (as a window's: it takes later launches, and `aio
 /// stop` asks here, the graceful way on every OS: Windows has no SIGTERM,
 /// and a kill would skip the last save and restart under the supervisor).
-/// No door is not fatal: SIGTERM still stops it where there is one.
+/// No door is not fatal: SIGTERM still stops it where there is one. Once
+/// a stop is asked, a launch is told it is ending and waits for the lock
+/// (the window's own end, [`crate::ending`], is no stop: a server kept
+/// after its window still serves).
 pub(crate) fn take_stops(id: &str, data: &Path) {
     let _rt = aio::rt().enter();
     match hand_addr(id, data).and_then(|a| aio::ipc::Listener::bind(&a)) {
-        Ok(l) => _ = aio::rt().spawn(crate::take_launches(l, Default::default(), aio::lifecycle::ask_stop)),
+        Ok(l) => {
+            let ending = aio::lifecycle::stopping;
+            _ = aio::rt().spawn(crate::take_launches(l, Default::default(), aio::lifecycle::ask_stop, ending));
+        }
         Err(e) => eprintln!("[aio] {id}: no door for `ax stop` ({e})"),
     }
 }
@@ -107,7 +130,7 @@ pub(crate) fn take_stops(id: &str, data: &Path) {
 pub const DEV_ARGS: &str = "AIORT_DEV_ARGS";
 
 /// Run this binary again with `args` (Unix: in its place, the same process).
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev")]
 fn run_with(args: Vec<String>) -> io::Result<Start> {
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.args(args).env_remove(DEV_ARGS);
@@ -127,7 +150,7 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
     // Windows: before anything starts a console program (the installer's
     // `reg`, a dialog's PowerShell, the app's own), so none opens a window.
     aio::process::hide_console();
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev")]
     if let Some(args) = std::env::var(DEV_ARGS).ok().and_then(|a| serde_json::from_str::<Vec<String>>(&a).ok()) {
         return run_with(args);
     }
@@ -177,30 +200,52 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
     }
     let ask = aio::paths::Ask::parse(&args).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     _ = KEEP_SERVER.set(ask.keep_server);
+    let shows = shown(ask.client.as_deref(), built(option_env!("AIORT_BUILT_UI"), cfg.app.ui))?;
     let plan = aio::paths::plan_app(cfg, &ask)?;
     // `<app> --quit`: the instance running on these dirs is asked to stop,
     // the graceful way (Windows has no SIGTERM: scripts, the smoke test).
     if args.iter().any(|a| a == "--quit") {
         return quit_at(id, &plan.data).map(|()| Start::Done);
     }
-    match claim(id, &plan, ask.takeover) {
+    let claimed = match claim(id, &plan, ask.takeover) {
+        // Held by aio (or an aio-rs not answering): say who holds it.
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            match hand_over(&hand_addr(id, &plan.data)?, &std::env::current_dir()?, &args) {
+                Ok(()) => return Ok(Start::HandedOver),
+                // The instance holding it is ending: this launch starts once it is gone.
+                Err(h) if ending(&h) => wait_lock(id, &plan).map_err(|w| match w.kind() {
+                    io::ErrorKind::WouldBlock => io::Error::new(h.kind(), format!("{e}; {h}")),
+                    _ => w,
+                }),
+                Err(h) => Err(io::Error::new(h.kind(), format!("{e}; {h}"))),
+            }
+        }
+        r => r,
+    };
+    match claimed {
         Ok(d) => {
             aio::boot::begin(cfg, version, &d)?;
             crate::feedback::wire(cfg);
             _ = APP.set((id.into(), version.into()));
             _ = BUNDLE_ID.set(cfg.mac_bundle_id());
-            _ = SHOWN.set(cfg.app.ui);
+            _ = SHOWN.set(shows);
             _ = LOOK.set((cfg.hue(), cfg.build.splash.clone()));
             _ = ASSETS.set(cfg.build.asset_files);
             _ = crate::firstrun::WORDS.set(crate::firstrun::words_of(cfg, version));
+            #[cfg(feature = "updates")]
             if let crate::update::Next::Exit = crate::update::on_start(cfg, version, &d)? {
                 aio::health::stop();
                 aio::log::finish();
                 return Ok(Start::Done);
             }
             // Updates are never a reason not to start.
+            #[cfg(feature = "updates")]
             if let Err(e) = crate::update::open(cfg, version, &d) {
                 eprintln!("[aio] no updates cell: {e}");
+            }
+            #[cfg(not(feature = "updates"))]
+            if let Some(w) = crate::update::left_out(cfg.updates.url.is_some(), aio::update::installed()) {
+                eprintln!("{w}");
             }
             // No window to wait for (a server, a CLI): booted is started.
             if matches!(cfg.app.mode, aio::config::Mode::Server | aio::config::Mode::Cli) {
@@ -209,14 +254,9 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
             if cfg.app.mode == aio::config::Mode::Server {
                 take_stops(id, &d.data);
             }
+            #[cfg(feature = "updates")]
             crate::update::watch(cfg, version, &d.data);
             Ok(Start::Run(d))
-        }
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-            // Held by aio (or an aio-rs not answering): say who holds it.
-            hand_over(&hand_addr(id, &plan.data)?, &std::env::current_dir()?, &args)
-                .map_err(|h| io::Error::new(h.kind(), format!("{e}; {h}")))?;
-            Ok(Start::HandedOver)
         }
         Err(e) => Err(e),
     }
@@ -235,6 +275,19 @@ fn claim(id: &str, plan: &aio::paths::Plan, takeover: bool) -> io::Result<aio::p
         }
         _ => return first,
     }
+    wait_lock(id, plan)
+}
+
+/// Whether a hand-over failed because the instance holding the lock is
+/// ending (pure): it said so, or its door is already gone (removed as it
+/// stops, the lock not yet let go).
+fn ending(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::ResourceBusy | io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused)
+}
+
+/// The dirs `plan` names, locked once their holder lets go (30 s at most,
+/// so a slow final save is not cut short).
+fn wait_lock(id: &str, plan: &aio::paths::Plan) -> io::Result<aio::paths::AppDirs> {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match aio::paths::AppDirs::planned(id, plan.clone()) {
@@ -246,7 +299,12 @@ fn claim(id: &str, plan: &aio::paths::Plan, takeover: bool) -> io::Result<aio::p
     }
 }
 
-/// Send one launch, wait for the running instance's "ok".
+/// What an ending instance answers a launch: it isn't taken, and the
+/// launch waits for the lock ([`hand_over`]'s `ResourceBusy`).
+pub(crate) const STOPPING: &str = "stopping";
+
+/// Send one launch, wait for the running instance's "ok" (`ResourceBusy`:
+/// it is ending, and took nothing).
 pub fn hand_over(addr: &str, cwd: &Path, args: &[String]) -> io::Result<()> {
     exchange(addr, json!({ "cwd": cwd, "args": args }).to_string())
 }
@@ -269,8 +327,10 @@ fn exchange(addr: &str, line: String) -> io::Result<()> {
     let reply = rx
         .recv_timeout(std::time::Duration::from_secs(10))
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("the running app did not answer ({addr})")))??;
-    if reply.trim() != "ok" {
-        return Err(io::Error::other(format!("the running app said {reply:?}")));
+    match reply.trim() {
+        "ok" => {}
+        STOPPING => return Err(io::Error::new(io::ErrorKind::ResourceBusy, "the running app is ending")),
+        _ => return Err(io::Error::other(format!("the running app said {reply:?}"))),
     }
     Ok(())
 }
@@ -282,9 +342,39 @@ pub(crate) fn read_launch(line: &str) -> Option<Launch> {
     Some(Launch { cwd: PathBuf::from(v["cwd"].as_str()?), args })
 }
 
+/// Where the UI shows: a `[build] targets` ui this build was stamped
+/// with (`stamp`), else `[app] ui` (pure); a launch's `--client` outranks it.
+fn built(stamp: Option<&str>, app: aio::config::Shown) -> aio::config::Shown {
+    match stamp {
+        Some("browser") => aio::config::Shown::Browser,
+        Some("window") => aio::config::Shown::Window,
+        _ => app,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launchs_client_picks_how_the_app_shows() {
+        // aio's --client=X, per run over `[app] ui`.
+        use aio::config::Shown;
+        assert_eq!(shown(None, Shown::Browser).unwrap(), Some(Shown::Browser));
+        assert_eq!(shown(Some("electron"), Shown::Browser).unwrap(), Some(Shown::Window));
+        assert_eq!(shown(Some("window"), Shown::Browser).unwrap(), Some(Shown::Window));
+        assert_eq!(shown(Some("browser"), Shown::Window).unwrap(), Some(Shown::Browser));
+        assert_eq!(shown(Some("server-only"), Shown::Window).unwrap(), None);
+        assert!(shown(Some("cli"), Shown::Window).unwrap_err().to_string().contains("one of window"));
+    }
+
+    #[test]
+    fn a_targets_stamped_ui_wins_over_the_apps() {
+        use aio::config::Shown::{Browser, Window};
+        assert_eq!(built(Some("browser"), Window), Browser);
+        assert_eq!(built(Some("window"), Browser), Window);
+        assert_eq!(built(None, Browser), Browser);
+    }
 
     #[test]
     fn paths_resolve_against_the_launchs_dir() {
@@ -352,7 +442,7 @@ mod tests {
         let _in = aio::rt().enter();
         let l = aio::ipc::Listener::bind(&addr).unwrap();
         let stop = || _ = STOPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        aio::rt().spawn(crate::take_launches(l, Default::default(), stop));
+        aio::rt().spawn(crate::take_launches(l, Default::default(), stop, || false));
         exchange(&addr, QUIT.into()).unwrap();
         // The door answers, then stops: the stop lands just after the reply.
         let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -360,6 +450,52 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(STOPPED.load(std::sync::atomic::Ordering::SeqCst), 1, "asked once, stopped once");
+    }
+
+    #[test]
+    fn an_ending_instance_takes_no_launch_and_the_launch_starts_after_it() {
+        let d = tempfile::tempdir().unwrap();
+        let id = format!("ending-{}", std::process::id());
+        let env = |k: &str| (k == "AIORT_DATA").then(|| d.path().to_path_buf());
+        let plan = aio::paths::plan(&id, None, &aio::paths::Ask::default(), &env).unwrap();
+        let running = aio::paths::AppDirs::planned(&id, plan.clone()).unwrap();
+        let _in = aio::rt().enter();
+        let l = aio::ipc::Listener::bind(&hand_addr(&id, &plan.data).unwrap()).unwrap();
+        aio::rt().spawn(crate::take_launches(l, Default::default(), || {}, || true));
+        let addr = hand_addr(&id, &plan.data).unwrap();
+        let busy = hand_over(&addr, Path::new("/"), &[]).unwrap_err();
+        assert_eq!(busy.kind(), io::ErrorKind::ResourceBusy, "{busy}");
+        assert!(ending(&busy));
+        // Its door already gone as it stops: ending too; a refusal of another kind isn't.
+        let gone = hand_over(&aio::ipc::addr(d.path(), "no-door"), Path::new("/"), &[]).unwrap_err();
+        assert!(ending(&gone), "{gone:?}");
+        assert!(!ending(&io::Error::other("the running app said \"bad launch\"")));
+        // It lets go of the lock a moment later: the launch then has it.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(running);
+        });
+        let dirs = wait_lock(&id, &plan).unwrap();
+        assert!(aio::paths::running(&dirs.data));
+        _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &dirs.data).unwrap());
+    }
+
+    #[test]
+    fn a_servers_door_takes_no_launch_once_stopping() {
+        let d = tempfile::tempdir().unwrap();
+        let id = format!("stopping-{}", std::process::id());
+        let _in = aio::rt().enter();
+        // Listening, as a server's main is: a stop asked is then no signal.
+        let wait = aio::lifecycle::stop_asked().unwrap();
+        take_stops(&id, d.path());
+        let addr = hand_addr(&id, d.path()).unwrap();
+        hand_over(&addr, Path::new("/"), &[]).unwrap();
+        aio::lifecycle::ask_stop();
+        let busy = hand_over(&addr, Path::new("/"), &[]).unwrap_err();
+        assert_eq!(busy.kind(), io::ErrorKind::ResourceBusy, "{busy}");
+        // The stop taken here, so no other test's window hears it.
+        aio::rt().block_on(wait);
+        _ = std::fs::remove_dir_all(aio::paths::sockets(&id, d.path()).unwrap());
     }
 
     #[test]

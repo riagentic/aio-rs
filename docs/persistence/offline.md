@@ -113,12 +113,40 @@ rt.block_on(async {
   (mode 0600): the server's last view and the calls still waiting. With
   the server unreachable it starts from that file, and the waiting calls
   survive a restart. An app in `client` mode does this on its own, in
-  `data/copy.json` ([files](files.md#whats-in-data)). A saved copy of
-  another cell or another version is ignored.
+  `data/copy.json` ([files](files.md#whats-in-data)). Saves are written
+  in the background, one writer per file, in order: a call never waits
+  for the disk. The last copy dropped writes its last save before the
+  drop ends (2 s at most), and so do `aio::shutdown` and the process's
+  exit (a return from `main`, `std::process::exit`, on Windows too: the
+  exiting thread writes it): a call made offline just before is never
+  lost. A copy opened again at once starts from the
+  newest save; a copy still open (its link closing) never saves over the
+  one opened after it. A saved copy of
+  another cell or another version is not used; calls still waiting in it
+  are kept beside it (`copy.orphan-<cell>-v<n>-<ms>`, in a page
+  `<key>.orphan-v<n>`, then `-2`…; never over an earlier set) and said once (`sync:orphan-queue`, aio's
+  `sync-orphan-queue`), never dropped silently: send them by hand, or
+  delete the file.
 - `Remote::connect(addr, token, user)` keeps nothing on disk: it needs
   the server to start, then works offline the same way while it runs.
-- A refused link (a wrong key: `PermissionDenied`) is not "offline": the
-  copy stops and says why instead of retrying.
+- A refused key (a wrong key, a revoked or ended session: the server's
+  401) is not "offline": the copy is signed out (`remote.signed_out()`,
+  aio's "Signed out"). The calls waiting are refused with
+  `ACCESS_DENIED` and taken off the copy, never sent as someone the
+  person no longer is, and new calls are refused too. A saved copy keeps
+  them beside its file (`copy.signed-out-<ms>`) and says so
+  (`sync:signed-out-queue`, each one: the bus holds back a repeat of the
+  same message, never another path): they are never lost. A page asks the server
+  over HTTP, since a browser can't read a refused socket's 401; signing
+  in again links it.
+- Any other refusal (`PermissionDenied`: a server of another cell, a
+  plain link a phone won't use) signs nothing out: the calls waiting stay,
+  and the copy stops trying until it is pointed elsewhere
+  (`Remote::relink`).
+- `remote.token_with(|| fresh_token())` asks for the token before each
+  reconnect (aio's `token` as a function: a short-lived JWT); with it, a
+  refused one is tried again with the next, and a good one links the
+  copy again.
 - A page built with `ax build --web` keeps the same thing in the
   browser's storage, so calls made offline survive a reload. Two tabs of
   one app share it: neither drops the other's waiting calls, and a call
@@ -284,9 +312,16 @@ top-level field both sides changed merged, not the call replayed alone:
 `Text` (both edits by `text3`; a part both changed shows the copy's, a
 conflict), `Counter` (both changes added, never a conflict), `SetAdd(id)`
 (either side's additions stay, what the copy took out goes; items the
-same by the key `id`, or whole). It is what the copy shows until the
+same by the key `id`, or whole), `Keys` (a record: each key from the side
+that changed it, the copy's where both did, a key either side took out
+gone; aio's `lww-per-key`), `SetRemove(id)` (what either side added
+stays, what either took out goes, an edited item shows edited; aio's
+`set-remove`). Under `Keys` and `SetRemove` only a key or item both
+sides changed their own way, or one took out and the other edited, is a
+conflict. It is what the copy shows until the
 server answers: a method that assigns (`self.body = text`) still
-replaces the value there, so write methods that edit.
+replaces the value there, so write methods that edit. A field the cell doesn't have panics, naming the ones it
+has.
 
 ```rust
 use aio::merge::{Conflict, Merge, conflicts, merged};
@@ -431,9 +466,11 @@ since its cursor ([wire](../migration/wire.md)).
   ([merging](#merging-edits)), as aio's own CRDT ops go through its
   methods. A copy may show a field merged while its call waits
   ([shown merged](#shown-merged-while-a-call-waits): `Text`, `Counter`,
-  `SetAdd`); aio's `lww-per-key` and `set-remove` view merges and its
-  hybrid logical clock have no counterpart. Every merge goes through a
-  server, as in aio.
+  `SetAdd`, `Keys`, `SetRemove`). aio's hybrid logical clock has no
+  counterpart, by design: the server puts every call in one order, so no
+  two clocks have to agree and a skewed one can't win. `Keys` merges each
+  key on its own, where aio's `lww-per-key` keeps one clock per record.
+  Every merge goes through a server, as in aio.
 - **A full queue refuses.** 500 waiting calls, as aio's `pendingCap`; a
   full queue refuses the new call unless `retention` lets an old one go,
   where aio drops the new op (`prune-failed`). Both keep the queue across
@@ -442,8 +479,14 @@ since its cursor ([wire](../migration/wire.md)).
   lags (its staleness multipliers); aio-rs paces every link
   (`sync_interval_ms`), and a slow reader is sent the newest view once it
   reads again.
-- **No path subscriptions.** One link is one cell, so a copy gets every
-  patch of that cell, not only the paths it reads.
+- **No path subscriptions, by design.** One link is one cell, so a copy
+  gets every patch of that cell: it predicts calls by running them, which
+  needs the whole cell. Two tools do the job better. `visible` sends each
+  viewer only what they may see, checked on the server, so less travels
+  without trusting the client to ask for less. And a part some screens
+  never read is its own cell (`#[cell(shared)]` each): its own link, its
+  own patches, its own `visible`, and still predicted, which a copy of
+  some paths could not be.
 - The sync wire is JSON; binary payloads go on a side channel
   ([transports](../clients/transports.md#binary-data)).
 

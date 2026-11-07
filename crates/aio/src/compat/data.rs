@@ -378,6 +378,20 @@ impl Slice {
     }
 }
 
+/// A `#[aio_cell]` field's type: its cell type, as is or in a [`crate::Big`].
+#[doc(hidden)]
+pub trait SliceType {
+    type Cell: crate::CellData;
+}
+
+impl<C: crate::CellData> SliceType for C {
+    type Cell = C;
+}
+
+impl<C: crate::CellData> SliceType for crate::Big<C> {
+    type Cell = C;
+}
+
 /// A slice read as `C` and written again: `C`'s fields only.
 fn fit<C: crate::CellData>(v: Value) -> Result<Value, String> {
     serde_json::from_value::<C>(v).and_then(serde_json::to_value).map_err(|e| e.to_string())

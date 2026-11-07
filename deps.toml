@@ -279,3 +279,8 @@ skip = [
 "app kit,net" = 120
 "aio-rs-cli" = 146
 "workspace all (dev+build)" = 166
+
+# Features an app's graph (`app kit`) must keep on, for its size: `scripts/slim-metrics --check`
+# fails when one is off. "<crate>/<feature>" = why.
+[kept-features]
+"zstd-sys/thin" = "aio-rs-shell via zstd: zstd's small build (one Huffman decoder, no inlining), 60 KB (1%) off a desktop app; delta updates are a few MB, its speed unseen"

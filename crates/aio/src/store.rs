@@ -207,6 +207,8 @@ pub struct Store<T: Cell> {
     /// stamped with that version (never lowered: rolling forward again
     /// migrates nothing twice).
     ahead: Option<(u32, Value)>,
+    /// Why its log no longer replays ([`Store::quarantined`]).
+    quarantined: Option<String>,
     /// `#[cell(transaction)]`: its async calls in flight.
     txs: tx::Txs<T>,
     /// Synced clients' calls their method or the invariants refused, by
@@ -325,6 +327,20 @@ fn told_recovered(cell: &str, r: &Recovered) {
     }
 }
 
+/// `[data] only_persist` (aio's `cellDefaults: { persist: "none" }`): a cell
+/// without `persist` opens in memory. Set once by the app's boot.
+pub(crate) static ONLY_PERSIST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `[history] travel` (aio's `diagnostics.dev.timeTravel`): `false` refuses
+/// every time-travel step.
+pub(crate) static TRAVEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// A cell whose log no longer replays boots quarantined (aio's) in a
+/// release build; a dev build ([`crate::DEV_BUILD`]: `ax dev`'s) refuses
+/// the boot instead, so the fix comes first. [`crate::testing::quarantine`]
+/// sets it in a test.
+pub(crate) static QUARANTINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(!crate::DEV_BUILD);
+
 /// A good copy is made at boot when the last one is older than this.
 const GOOD_EVERY: std::time::Duration = std::time::Duration::from_secs(86_400);
 
@@ -416,27 +432,79 @@ pub(crate) fn recover(path: &Path, why: String) -> Result<Recovered, Error> {
     Ok(Recovered { quarantined, why, from })
 }
 
-/// Refresh the good copy when it's missing or a day old: `VACUUM INTO` a
-/// temp file, flushed, renamed over.
+/// Refresh the good copy when it's missing or a day old.
 pub(crate) fn refresh_good(db: &Connection, path: &Path) -> Result<(), Error> {
-    let good = good_copy(path);
-    let fresh = std::fs::metadata(&good)
+    let fresh = std::fs::metadata(good_copy(path))
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|age| age < GOOD_EVERY);
-    if fresh {
-        return Ok(());
-    }
+    if fresh { Ok(()) } else { make_good(db, path) }
+}
+
+/// The good copy made now: `VACUUM INTO` a temp file, `quick_check`ed (a
+/// copy of a damaged file never replaces a good one), flushed, renamed over.
+fn make_good(db: &Connection, path: &Path) -> Result<(), Error> {
+    let good = good_copy(path);
     let mut tmp = good.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp: std::path::PathBuf = tmp.into();
     _ = std::fs::remove_file(&tmp);
     db.execute("VACUUM INTO ?1", [tmp.to_string_lossy()])?;
+    if let Err(why) = healthy(&tmp) {
+        _ = std::fs::remove_file(&tmp);
+        return Err(Error(format!("good copy: the copy fails its check ({why}); the last good one is kept")));
+    }
     crate::paths::sync_file(&tmp)
         .and_then(|()| crate::paths::rename_over(&tmp, &good))
         .map_err(|e| Error(format!("good copy: {e}")))?;
     crate::paths::sync_dir(crate::paths::parent(path)).map_err(|e| Error(e.to_string()))
+}
+
+/// One at a time beside a store's file: a cell's boot (its sweep, its good
+/// copy) and a timed snapshot. An app's cells share a file, and none may
+/// take or remove another's half-made good copy.
+static BOOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `[data] snapshot_every`: the store at `path`'s good copy made again
+/// every `every` while the app runs, so a damaged store comes back with at
+/// most that much lost. A failed one is said; the last good copy stays.
+/// One thread per store, however many cells boot on it, until its file is
+/// gone: whether this call started it.
+pub(crate) fn snapshot_every(path: &Path, every: std::time::Duration) -> bool {
+    static TIMED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let timed = || TIMED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut on = timed();
+    if on.iter().any(|p| p == path) {
+        return false;
+    }
+    let path = path.to_path_buf();
+    let at = path.clone();
+    let run = move || {
+        loop {
+            std::thread::sleep(every);
+            let _one = BOOT.lock().unwrap_or_else(|e| e.into_inner());
+            if !path.exists() {
+                return timed().retain(|p| *p != path);
+            }
+            let made = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| Error(e.to_string()))
+                .and_then(|db| make_good(&db, &path));
+            if let Err(e) = made {
+                eprintln!("[aio] storage: {}: {e}", path.display());
+            }
+        }
+    };
+    match std::thread::Builder::new().name("aio-snapshot".into()).spawn(run) {
+        Ok(_) => {
+            on.push(at);
+            true
+        }
+        Err(e) => {
+            eprintln!("[aio] storage: no thread for snapshots: {e}");
+            false
+        }
+    }
 }
 
 /// Which file a path names now.
@@ -532,32 +600,52 @@ fn init(db: &Connection, aio_file: bool) -> Result<(), Error> {
            PRIMARY KEY (cell, op));",
     )?;
     // 1 → 2: one added column, in the same transaction as the stamp.
-    if v == 1 {
+    if v == 1 && !has_cron(&tx)? {
         tx.execute_batch("ALTER TABLE sched ADD COLUMN cron TEXT")?;
     }
     if aio_file {
         tx.execute_batch(crate::compat::data::KV_TABLE)?;
     }
-    tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA}"))?;
+    // An aio file's `user_version` is the app's own (aio never touches it).
+    if !has_table(&tx, "aio_kv")? {
+        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA}"))?;
+    }
     tx.commit()?;
     Ok(())
+}
+
+fn has_table(db: &Connection, t: &str) -> rusqlite::Result<bool> {
+    db.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)", [t], |r| r.get(0))
+}
+
+fn has_cron(db: &Connection) -> rusqlite::Result<bool> {
+    db.query_row("SELECT EXISTS (SELECT 1 FROM pragma_table_info('sched') WHERE name = 'cron')", [], |r| r.get(0))
+}
+
+/// The file's layout stamp ([`SCHEMA`]; 0: none yet). SQLite's
+/// `user_version`, except in an aio `state.db`, where that is the app's own
+/// (aio reads and writes it nowhere): there aio-rs's tables say it.
+pub(crate) fn schema(db: &Connection) -> rusqlite::Result<i64> {
+    if !has_table(db, "aio_kv")? {
+        return db.query_row("PRAGMA user_version", [], |r| r.get(0));
+    }
+    for t in ["log", "snap", "floor"] {
+        if !has_table(db, t)? {
+            return Ok(0);
+        }
+    }
+    Ok(if has_table(db, "sched")? && !has_cron(db)? { 1 } else { SCHEMA })
 }
 
 /// Read only: the file's layout stamp, when it is one to set up (new, aio-rs's,
 /// or with `aio` an aio `state.db`), else why it isn't.
 fn ours(db: &Connection, aio_file: bool) -> Result<i64, Error> {
-    let v: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let v = schema(db)?;
     let tables: i64 = db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'", [], |r| r.get(0))?;
     if v > SCHEMA {
         return Err(Error(format!("store from a newer aio-rs (schema {v} > {SCHEMA})")));
     }
-    let has = |t: &str| -> Result<bool, Error> {
-        Ok(db.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-            [t],
-            |r| r.get(0),
-        )?)
-    };
+    let has = |t: &str| -> Result<bool, Error> { Ok(has_table(db, t)?) };
     if v == 0 && tables > 0 {
         if !aio_file || !has("aio_kv")? {
             return Err(Error("not an aio-rs store (it has other tables): import it with `ax port --data`".into()));
@@ -947,19 +1035,32 @@ fn unsaved_from<T: Cell>(v: &mut Value, was: &Value) {
     }
 }
 
-/// What a problem report shows of `st`: what is saved of it. During a
-/// panic the cell's own `save` is not run (a second panic would abort the
-/// process): its `#[transient]` fields are still left out.
-/// Its `#[server]` fields are left out: a report may leave the machine.
+/// What a problem report shows of `st`: what is saved of it, as a client
+/// with the key may see it (aio's screening by `visible`). During a panic
+/// the cell's own `save` and `visible` are not run (a second panic would
+/// abort the process): its `#[transient]` fields are still left out, and a
+/// cell with `visible` keeps its state to itself. Its `#[server]` fields
+/// are left out: a report may leave the machine.
 pub(crate) fn reported<T: Cell>(st: &T) -> Option<Value> {
-    let mut v = match std::thread::panicking() {
+    let v = match std::thread::panicking() {
         false => shaped(st).ok()?.or_else(|| json(st).ok())?,
+        true if T::SCREENED => return None,
         true => json(st).ok()?,
     };
+    // Screened by `visible` as a client with the key sees it (aio's), which
+    // leaves out the `#[server]` fields too.
+    let saved = (!std::thread::panicking()).then(|| serde_json::from_value::<T>(v.clone()).ok()).flatten();
+    let mut v = match saved {
+        Some(saved) => saved.project(&crate::Caller::default()),
+        None => {
+            let mut v = v;
+            if let Some(m) = v.as_object_mut() {
+                T::SERVER.iter().for_each(|k| _ = m.remove(*k));
+            }
+            v
+        }
+    };
     unsaved_out::<T>(&mut v);
-    if let Some(m) = v.as_object_mut() {
-        T::SERVER.iter().for_each(|k| _ = m.remove(*k));
-    }
     Some(v)
 }
 
@@ -1025,10 +1126,10 @@ pub(crate) fn apply_guarded<T: Cell>(st: &mut T, cx: &Cx, method: &str, args: Va
     // In `ax dev`, through the hot-patch jump table: an edited method runs
     // its new code at once (a release build calls it directly).
     let run = || {
+        // `ax dev`'s hot-patch: with no patch applied, the function itself.
         #[cfg(feature = "dev")]
-        if cfg!(debug_assertions) {
-            return aio_hotpatch::HotFn::current(<T as Cell>::apply).call((st, cx, method, args));
-        }
+        return aio_hotpatch::HotFn::current(<T as Cell>::apply).call((st, cx, method, args));
+        #[cfg(not(feature = "dev"))]
         st.apply(cx, method, args)
     };
     let run = || crate::report::during(|| format!("{}.{method}", T::ID), run);
@@ -1047,7 +1148,7 @@ impl From<Applied> for Rejected {
     fn from(a: Applied) -> Self {
         match a {
             Applied::Refused(r) => r,
-            Applied::Panicked(why) => Rejected::new(format!("panicked: {why}")),
+            Applied::Panicked(why) => Rejected::coded(crate::Code::ReduceError, format!("panicked: {why}")),
         }
     }
 }
@@ -1223,6 +1324,7 @@ impl<T: Cell> Store<T> {
             coalesce: PERSIST_DEBOUNCE,
             journal_wm: None,
             ahead: None,
+            quarantined: None,
         };
         s.snap(true).expect("in-memory snapshot");
         s
@@ -1255,9 +1357,9 @@ impl<T: Cell> Store<T> {
 
     fn boot(path: &Path, app: Option<&str>) -> Result<Self, Error> {
         machine_ok::<T>()?;
-        // One boot at a time: an app's cells share a file, and one cell's
-        // sweep must not take another's half-made good copy.
-        static BOOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        if !T::SAVED || (ONLY_PERSIST.load(std::sync::atomic::Ordering::Relaxed) && !T::PERSIST) {
+            return Ok(Self::memory());
+        }
         let _one = BOOT.lock().unwrap_or_else(|e| e.into_inner());
         let Opened { db, recovered, aio_kv, seed } = open(path, app, T::ID, T::VERSION, T::TABLES, T::AIO_CELLS)?;
         if let Some(r) = &recovered {
@@ -1293,9 +1395,33 @@ impl<T: Cell> Store<T> {
             (v, serde_json::from_str(&text).unwrap_or(Value::Null))
         });
         let last = last.max(from);
-        replay(&c, &mut st, from, last, true)?;
+        let at_snapshot = st.clone();
+        let quarantined = match replay(&c, &mut st, from, last, true) {
+            Ok(()) => None,
+            Err(e) if QUARANTINE.load(std::sync::atomic::Ordering::Relaxed) => {
+                eprintln!(
+                    "[aio] {}: QUARANTINED: {e}. It runs at its last snapshot (event {from}) and refuses calls; its \
+                     log and snapshot are kept as they are for a fixed build: fix the method or the version, and start again",
+                    T::ID
+                );
+                crate::report::problem("quarantined", &format!("{}: {e}", T::ID));
+                st = at_snapshot;
+                Some(e.0)
+            }
+            Err(e) => return Err(e),
+        };
         drop(c);
         let back = restored(&st)?;
+        let back = match &recovered {
+            Some(r) => {
+                let keep = back.clone();
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| back.recovered(r))).unwrap_or_else(|_| {
+                    eprintln!("[aio] {}: `recovered` panicked; the good copy's state boots", T::ID);
+                    keep
+                })
+            }
+            None => back,
+        };
         let file = file_id(path).map(|id| (path.to_path_buf(), id));
         let mut s = Self {
             state: Arc::new(st),
@@ -1323,7 +1449,14 @@ impl<T: Cell> Store<T> {
             coalesce: PERSIST_DEBOUNCE,
             journal_wm: None,
             ahead,
+            quarantined,
         };
+        // Quarantined: the snapshot's state, repaired as any boot's, at its
+        // own event; nothing is written.
+        if s.quarantined.is_some() {
+            (s.state, s.seq) = (Arc::new(back), from);
+            return Ok(s);
+        }
         // A failed snapshot only costs time: the next boot replays the log.
         if (migrated || last > from)
             && let Err(e) = s.snap(true)
@@ -1487,7 +1620,7 @@ impl<T: Cell> Store<T> {
     pub(crate) fn call_as(
         &mut self,
         by: &By,
-        role: Option<&str>,
+        who: Option<&crate::Caller>,
         method: &str,
         args: Value,
         op: Option<&str>,
@@ -1495,7 +1628,7 @@ impl<T: Cell> Store<T> {
     ) -> Result<Option<Value>> {
         let now = self.now();
         let Some(op) = op else {
-            let cx = Cx::live(now, by).with_role(role).with_reply(reply);
+            let cx = Cx::live(now, by).with_who(who).with_reply(reply);
             let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
             if let Some(sweep) = tx::On::<T>::SWEEP {
                 sweep(self);
@@ -1518,7 +1651,7 @@ impl<T: Cell> Store<T> {
         if let Some(e) = self.refused.0.get(&op.to_string()) {
             return Err(e.clone());
         }
-        let cx = Cx::synced(now, T::ID, by, &op).with_role(role).with_reply(reply);
+        let cx = Cx::synced(now, T::ID, by, &op).with_who(who).with_reply(reply);
         let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
         if let Some(sweep) = tx::On::<T>::SWEEP {
             sweep(self);
@@ -1547,7 +1680,7 @@ impl<T: Cell> Store<T> {
         fired: Option<&Due>,
         op: Option<&str>,
     ) -> Result<Value> {
-        crate::log::in_call(|| self.apply_and_commit_in_call(by, method, args, cx, fired, op))
+        crate::log::in_call(T::ID, || self.apply_and_commit_in_call(by, method, args, cx, fired, op))
     }
 
     fn apply_and_commit_in_call(
@@ -1616,8 +1749,8 @@ impl<T: Cell> Store<T> {
                 let now = std::time::Instant::now();
                 self.panics.retain(|t| now.duration_since(*t) < PANIC_WINDOW);
                 self.panics.push(now);
-                eprintln!("[aio] {}.{method} panicked: {why} ({} within a minute)", T::ID, self.panics.len());
-                crate::reject!("{}.{method} panicked: {why}", T::ID);
+                eprintln!("{}", panicked(method, &why, self.panics.len(), &*self.state));
+                return Err(Rejected::coded(crate::Code::ReduceError, format!("{}.{method} panicked: {why}", T::ID)));
             }
             Err(Applied::Refused(e)) => return Err(self.refused_op(op, e)),
             Ok(out) => out,
@@ -1746,6 +1879,31 @@ impl<T: Cell> Store<T> {
         }
     }
 
+    /// The close (a stop, a drop): the held run into the log, then a
+    /// snapshot of the state, so the next boot starts from what the calls
+    /// left and replays none of them (with code that may have changed).
+    pub(crate) fn close(&mut self) {
+        if let Err(e) = self.flush() {
+            eprintln!("[aio] {}: a held run could not be saved at close: {e}", T::ID);
+        }
+        if self.unsnapped > 0
+            && let Err(e) = self.snap(false)
+        {
+            eprintln!("[aio] {}: snapshot at close failed: {e}", T::ID);
+        }
+    }
+
+    /// The held run into the log and a snapshot of the state now (one that
+    /// brings it back whole), as before code changes under a running app
+    /// (`ax dev`'s hot-patch): a later boot replays only calls of the new code.
+    pub fn checkpoint(&mut self) -> Result {
+        self.flush()?;
+        if self.unsnapped > 0 {
+            self.snap(true).map_err(|e| Rejected::new(format!("storage: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// Is a run of coalesced calls waiting to go into the log?
     pub fn holds(&self) -> bool {
         self.held.is_some()
@@ -1773,6 +1931,10 @@ impl<T: Cell> Store<T> {
         fired: Option<&Due>,
         earlier: &[(String, Value, i64)],
     ) -> Result {
+        if let Some(why) = &self.quarantined {
+            let why = format!("{} is quarantined (its log no longer replays: {why}): fix the build and start again", T::ID);
+            return Err(Rejected::coded(crate::Code::PersistError, why));
+        }
         // A schedule names a method by its name: a typo is refused now, by the
         // call that set it, not found when it fires.
         for p in &asks.plans {
@@ -1815,7 +1977,7 @@ impl<T: Cell> Store<T> {
             }),
             false => None,
         };
-        let db = |e: rusqlite::Error| Rejected::new(format!("storage: {e}"));
+        let db = |e: rusqlite::Error| Rejected::coded(crate::Code::PersistError, format!("storage: {e}"));
         if let Some((path, id)) = &self.file
             && file_id(path) != Some(*id)
         {
@@ -1930,7 +2092,7 @@ impl<T: Cell> Store<T> {
         self.committed.push((self.seq, ev));
         self.seq = seq;
         // A dev build at `debug` says what each call changed, key by key.
-        if cfg!(debug_assertions)
+        if crate::DEV_BUILD
             && crate::log::enabled(crate::log::Level::Debug)
             && !crate::log::suppressed(T::ID, method)
             && kept.is_none()
@@ -2139,6 +2301,13 @@ impl<T: Cell> Store<T> {
     }
 
     /// Set when this open recovered from a damaged file (tell the user).
+    /// Why the cell is quarantined: its log no longer replays (a release
+    /// run), so it runs at its last snapshot, refuses calls and keeps its
+    /// log as it is (aio's quarantine).
+    pub fn quarantined(&self) -> Option<&str> {
+        self.quarantined.as_deref()
+    }
+
     pub fn recovered(&self) -> Option<&Recovered> {
         self.recovered.as_ref()
     }
@@ -2194,10 +2363,19 @@ impl<T: Cell> Store<T> {
 
     /// The newest `n` events, oldest first.
     pub fn newest(&self, n: usize) -> Result<Vec<Event>, Error> {
+        self.newest_of(n, |_| true)
+    }
+
+    /// The newest `n` events time travel steps through (none of a
+    /// `#[skip_travel]` method's), oldest first.
+    pub fn travel_steps(&self, n: usize) -> Result<Vec<Event>, Error> {
+        self.newest_of(n, |m| !untraveled::<T>(m))
+    }
+
+    fn newest_of(&self, n: usize, keep: impl Fn(&str) -> bool) -> Result<Vec<Event>, Error> {
         let c = self.db.conn();
-        let mut q =
-            c.prepare("SELECT seq, method, args, inputs, by, at, v FROM (SELECT * FROM log WHERE cell = ?1 ORDER BY seq DESC LIMIT ?2) ORDER BY seq")?;
-        let rows = q.query_map(params![T::ID, i64::try_from(n).unwrap_or(-1)], |r| {
+        let mut q = c.prepare("SELECT seq, method, args, inputs, by, at, v FROM log WHERE cell = ?1 ORDER BY seq DESC")?;
+        let rows = q.query_map(params![T::ID], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get(1)?,
@@ -2208,7 +2386,8 @@ impl<T: Cell> Store<T> {
                 r.get(6)?,
             ))
         })?;
-        rows.map(|row| {
+        let kept = rows.filter(|row| row.as_ref().map_or(true, |r: &(i64, String, String, String, String, i64, u32)| keep(&r.1)));
+        let mut out = kept.take(n).map(|row| {
             let (seq, method, args, inputs, by, at, v) = row?;
             let bad = |e: serde_json::Error| Error(format!("{}: corrupt event {seq}: {e}", T::ID));
             Ok(Event {
@@ -2221,7 +2400,9 @@ impl<T: Cell> Store<T> {
                 v,
             })
         })
-        .collect()
+        .collect::<Result<Vec<Event>, Error>>()?;
+        out.reverse();
+        Ok(out)
     }
 
     fn floor(&self) -> Result<u64, Error> {
@@ -2291,12 +2472,17 @@ impl<T: Cell> Store<T> {
         let mut q = c.prepare("SELECT seq, method, args FROM log WHERE cell = ?1 ORDER BY seq")?;
         let rows =
             q.query_map([T::ID], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
-        rows.map(|r| {
+        let mut out = vec![];
+        for r in rows {
             let (seq, method, args) = r?;
+            // A `#[skip_travel]` method's event is no step of its own.
+            if untraveled::<T>(&method) {
+                continue;
+            }
             let to = (method == REWIND).then(|| serde_json::from_str::<Value>(&args).ok()?["to"].as_u64()).flatten();
-            Ok((seq as u64, to))
-        })
-        .collect()
+            out.push((seq as u64, to));
+        }
+        Ok(out)
     }
 
     /// Where the cell is in its history ([`Position`]).
@@ -2307,6 +2493,9 @@ impl<T: Cell> Store<T> {
     /// Step through the history ([`Travel`]): returns the event the state is
     /// right after now.
     pub fn travel(&mut self, by: &By, t: Travel) -> Result<u64> {
+        if !TRAVEL.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Rejected::new("time travel is off ([history] travel = false)"));
+        }
         self.flush()?;
         let (log, floor) = (self.steps().map_err(|e| Rejected::new(e.0))?, self.floor().map_err(|e| Rejected::new(e.0))?);
         let to = Position::target(&log, floor, t).map_err(Rejected::new)?;
@@ -2364,7 +2553,7 @@ impl<T: Cell> Store<T> {
     }
 
     fn fold_kept(&mut self) -> Result<usize, Error> {
-        let Some(keep) = self.keep else { return Ok(0) };
+        let Some(keep) = self.keep.filter(|_| self.quarantined.is_none()) else { return Ok(0) };
         self.fold_before(self.now().saturating_sub(keep))
     }
 
@@ -2437,20 +2626,102 @@ fn rearm<T: Cell>(db: &Connection, d: &Due, now: i64) -> rusqlite::Result<()> {
 
 impl<T: Cell> Drop for Store<T> {
     fn drop(&mut self) {
-        if let Err(e) = self.flush() {
-            eprintln!("[aio] {}: a held run could not be saved at close: {e}", T::ID);
-        }
-        if self.unsnapped > 0
-            && let Err(e) = self.snap(false)
-        {
-            eprintln!("[aio] {}: snapshot at close failed: {e}", T::ID);
-        }
+        self.close();
     }
+}
+
+/// Is `method` (a step's, `add.1` too) one of `T`'s `#[skip_travel]` methods?
+fn untraveled<T: Cell>(method: &str) -> bool {
+    T::UNTRAVELED.contains(&method.split('.').next().unwrap_or(method))
+}
+
+/// How many characters of the state a panic's line shows.
+const PANIC_STATE: usize = 2000;
+
+/// A method's panic, said: in a debug build with the state it ran on (aio's
+/// error box), as saved, every string masked, at most [`PANIC_STATE`]
+/// characters; a cell with `#[redact]` methods keeps its state to itself.
+pub(crate) fn panicked<T: Cell>(method: &str, why: &str, n: usize, state: &T) -> String {
+    let line = format!("[aio] {}.{method} panicked: {why} ({n} within a minute)", T::ID);
+    if !crate::DEV_BUILD || !T::REDACTED.is_empty() {
+        return line;
+    }
+    let Ok(v) = crate::json(state) else { return line };
+    let shown = crate::report::masked(&v).to_string();
+    let more = if shown.chars().count() > PANIC_STATE { "…" } else { "" };
+    format!("{line}\n  the state it ran on: {}{more}", shown.chars().take(PANIC_STATE).collect::<String>())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ax dev`'s build (aio's `dev`, no debug assertions) refuses a boot
+    /// whose log no longer replays, and says the state a method panicked on.
+    #[test]
+    fn a_dev_build_refuses_an_unreplayable_boot_and_shows_a_panics_state() {
+        let dev = cfg!(any(debug_assertions, feature = "dev"));
+        assert_eq!(QUARANTINE.load(std::sync::atomic::Ordering::Relaxed), !dev);
+        let said = panicked("add", "boom", 1, &Cursor { rows: vec![], at: 1 });
+        assert_eq!(said.contains("the state it ran on"), dev, "{said}");
+    }
+
+    #[test]
+    fn a_timed_snapshot_waits_for_a_boot_and_runs_once_per_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        Connection::open(&path).unwrap().execute_batch("CREATE TABLE t(x)").unwrap();
+        let every = std::time::Duration::from_millis(20);
+        let boot = BOOT.lock().unwrap();
+        assert!(snapshot_every(&path, every));
+        assert!(!snapshot_every(&path, every), "one thread per store");
+        std::thread::sleep(every * 5);
+        assert!(!good_copy(&path).exists(), "never beside a boot");
+        drop(boot);
+        let made = (0..300).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            good_copy(&path).exists()
+        });
+        assert!(made && healthy(&good_copy(&path)).is_ok());
+        // Windows: a snapshot may hold the file open a moment.
+        let removed = (0..300).any(|_| {
+            std::fs::remove_file(&path).is_ok() || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(removed);
+        let ended = (0..300).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            snapshot_every(&path, std::time::Duration::from_secs(3600))
+        });
+        assert!(ended, "its file gone, the thread ends; a new store starts one");
+    }
+
+    #[test]
+    fn a_panic_is_said_with_the_state_it_ran_on_masked_and_bounded() {
+        let mut c = Cursor { rows: vec!["a link with token=0123456789abcdef".into()], at: 3 };
+        let said = panicked("add", "boom", 1, &c);
+        assert!(said.starts_with("[aio] cursor.add panicked: boom (1 within a minute)\n  the state it ran on: {"), "{said}");
+        assert!(said.contains("\"at\":3") && !said.contains("0123456789"), "masked: {said}");
+        c.rows = vec!["x".repeat(5000)];
+        assert!(panicked("add", "boom", 1, &c).ends_with("…"), "bounded");
+        let v = Vault { pin: "1234".into() };
+        assert_eq!(panicked("set", "boom", 1, &v), "[aio] vault.set panicked: boom (1 within a minute)");
+    }
+
+    #[crate::cell(id = "vault")]
+    pub struct Vault {
+        pin: String,
+    }
+
+    #[crate::methods]
+    impl Vault {
+        #[redact]
+        pub fn set(&mut self, pin: String) {
+            self.pin = pin;
+        }
+    }
 
     #[crate::cell(persist, id = "cursor")]
     pub struct Cursor {

@@ -135,6 +135,21 @@ pub struct Session {
     pub user: String,
     pub role: String,
     pub expires_at: i64,
+    /// What else the app's resolver knows of them ([`Known::extra`]);
+    /// empty for an account's session.
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Who a token is, as the app's resolver says ([`Users::resolve_with`]):
+/// the user, their role, and anything else it knows (aio's extra
+/// `AioUser` fields: a tenant, a display name), which routes and server
+/// fns read ([`crate::http::Req::extra`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Known {
+    pub user: String,
+    pub role: String,
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Users the app knows by their token, without accounts (aio's `users` /
@@ -160,8 +175,21 @@ pub const USERS_RECHECK: std::time::Duration = std::time::Duration::from_secs(5)
 /// last verdict, and the call is not made again until it answers.
 pub const USERS_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Token → (user, role).
-type Resolve = dyn Fn(&str) -> Option<(String, String)> + Send + Sync;
+/// Token → who.
+type Resolve = dyn Fn(&str) -> Option<Known> + Send + Sync;
+
+/// `f` run to its end from sync code anywhere: a runtime's worker lends its
+/// thread, any other thread waits on aio's runtime.
+fn wait<F: Future + Send>(f: F) -> F::Output
+where
+    F::Output: Send,
+{
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| h.block_on(f)),
+        _ => std::thread::scope(|s| s.spawn(|| crate::rt().block_on(f)).join().ok()).expect("the resolver panicked"),
+    }
+}
 
 impl Users {
     /// A fixed map, token → (user, role), compared in constant time. A
@@ -184,6 +212,22 @@ impl Users {
     /// The app's own resolver, token → (user, role); one that panics
     /// resolves no one.
     pub fn resolve(f: impl Fn(&str) -> Option<(String, String)> + Send + Sync + 'static) -> Self {
+        Self::known(move |t| f(t).map(|(user, role)| Known { user, role, ..Default::default() }))
+    }
+
+    /// The app's own resolver, async (aio's `resolveUser`): a JWT checked
+    /// against keys it fetches, a database lookup. It sees the app's state
+    /// through the handles it captures, and may say more of the user
+    /// ([`Known::extra`]). One that panics resolves no one.
+    pub fn resolve_with<F, Fut>(f: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<Known>> + Send + 'static,
+    {
+        Self::known(move |t| wait(f(t.to_string())))
+    }
+
+    fn known(f: impl Fn(&str) -> Option<Known> + Send + Sync + 'static) -> Self {
         Self { resolve: Arc::new(f), changes: None }
     }
 
@@ -194,8 +238,8 @@ impl Users {
     pub fn sessions(auth: Arc<Auth>, then: Option<Users>) -> Self {
         let changes = Some(auth.changes());
         let resolve = move |t: &str| match auth.session(t) {
-            Ok(Some(s)) => Some((s.user, s.role)),
-            Ok(None) => then.as_ref().and_then(|u| u.who(t)).map(|s| (s.user, s.role)),
+            Ok(Some(s)) => Some(Known { user: s.user, role: s.role, extra: s.extra }),
+            Ok(None) => then.as_ref().and_then(|u| u.who(t)).map(|s| Known { user: s.user, role: s.role, extra: s.extra }),
             Err(e) => {
                 eprintln!("[aio] sync: {e}");
                 None
@@ -215,8 +259,8 @@ impl Users {
         if token.is_empty() {
             return None;
         }
-        let (user, role) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.resolve)(token))).ok()??;
-        Some(Session { user, role, expires_at: i64::MAX })
+        let k = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.resolve)(token))).ok()??;
+        Some(Session { user: k.user, role: k.role, expires_at: i64::MAX, extra: k.extra })
     }
 }
 
@@ -755,6 +799,24 @@ impl Auth {
         Ok(token)
     }
 
+    /// A provider sign-in for an app ([`client::Client::sso`]): a code its
+    /// loopback gets, spent once within two minutes with the verifier whose
+    /// hash is `claim`.
+    #[cfg(feature = "oidc")]
+    pub(crate) fn sso_code(&self, user: &str, claim: &str) -> Result<String> {
+        self.one_shot_with("oidc-app", user, 2 * 60_000, Some(claim))
+    }
+
+    /// The account [`Self::sso_code`] handed over, if `verifier` is its
+    /// app's. A wrong verifier spends the code too.
+    #[cfg(feature = "server")]
+    pub(crate) fn sso_redeem(&self, code: &str, verifier: &str) -> Result<Option<User>> {
+        match self.consume_with("oidc-app", code)? {
+            Some((id, Some(claim))) if claim == hashed(verifier) => self.user(&id),
+            _ => Ok(None),
+        }
+    }
+
     /// Spend a one-shot token: its subject, or `None` (unknown, expired, spent).
     fn consume(&self, kind: &str, token: &str) -> Result<Option<String>> {
         Ok(self.consume_with(kind, token)?.map(|r| r.0))
@@ -819,7 +881,7 @@ impl Auth {
             expires_at = now + self.policy.ttl_ms;
             db(c.execute("UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2", params![expires_at, h]))?;
         }
-        Ok(Some(Session { user, role: live.unwrap_or(role), expires_at }))
+        Ok(Some(Session { user, role: live.unwrap_or(role), expires_at, extra: Default::default() }))
     }
 
     /// Renew a live session to a full TTL; false when it isn't live.
