@@ -524,7 +524,7 @@ fn heap(db: &Connection, health: Option<&serde_json::Value>, json: bool) -> Out 
 fn schedules(db: &Connection, json: bool) -> Out {
     let mut q = db.prepare("SELECT * FROM sched ORDER BY due, cell, key").map_err(|e| e.to_string())?;
     // `cron` is there from store schema 2 on.
-    let has_cron = q.column_names().contains(&"cron");
+    let has_cron = q.column_names().any(|c| c == "cron");
     let rows = q
         .query_map([], |r| {
             let (cell, key, due, every, method): (String, String, i64, Option<i64>, String) =

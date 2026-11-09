@@ -318,12 +318,13 @@ impl Nap {
         }));
     }
 
-    /// Real I/O under a timeout: a thread answers after 50 ms.
+    /// Real I/O under a timeout: a thread answers after 1 s, half the
+    /// timeout (virtual time's 2 s pass long before, on a slow runner too).
     pub fn ask_device(&mut self, cx: &Cx) {
         cx.run(Effect::new("device", |h: Handle<Nap>| async move {
             let (tx, rx) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_secs(1));
                 _ = tx.send(());
             });
             let out = tokio::time::timeout(Duration::from_secs(2), rx).await;

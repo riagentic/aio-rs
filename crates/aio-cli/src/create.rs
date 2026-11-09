@@ -233,19 +233,22 @@ impl std::fmt::Display for Aio {
 /// The newest release tag in `git ls-remote --tags` text (pure); a
 /// prerelease only when there is nothing else.
 pub fn newest(ls_remote: &str) -> Option<String> {
-    let tags: Vec<(&str, bool)> = ls_remote
+    newest_first(ls_remote).into_iter().next()
+}
+
+/// The version tags in `git ls-remote --tags` text, newest first (pure):
+/// the releases, then the prereleases.
+pub fn newest_first(ls_remote: &str) -> Vec<String> {
+    let mut tags: Vec<(&str, bool)> = ls_remote
         .lines()
         .filter_map(|l| l.split_whitespace().nth(1)?.strip_prefix("refs/tags/"))
         .filter(|t| t.starts_with('v') && !t.ends_with("^{}"))
         .filter_map(|t| aio::update::parse_version(t).map(|(_, pre)| (t, pre.is_none())))
         .collect();
-    let pick = |release: bool| {
-        tags.iter()
-            .filter(|(_, r)| *r || !release)
-            .map(|(t, _)| *t)
-            .max_by(|a, b| aio::update::compare(a, b).unwrap_or(std::cmp::Ordering::Equal))
-    };
-    pick(true).or_else(|| pick(false)).map(String::from)
+    tags.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| aio::update::compare(b.0, a.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    tags.into_iter().map(|(t, _)| t.to_string()).collect()
 }
 
 /// aio-rs's tags, for `latest` (`git ls-remote`).
@@ -295,10 +298,10 @@ fn drop_kv(line: &mut String, key: &str) {
 /// `aio` (pure); None: it has none.
 pub fn repoint(text: &str, aio: &Aio, up: usize) -> Option<String> {
     let mut hit = false;
-    let out = text
-        .split_inclusive('\n')
-        .map(|line| {
-            let Some((package, _)) = crate::pin::asked(line, up) else { return line.to_string() };
+    let out = crate::pin::lines_in_patch(text)
+        .map(|(line, patch)| {
+            // A [patch] swaps a source for another: moving it too would make both the same.
+            let Some((package, _)) = crate::pin::asked(line, up).filter(|_| !patch) else { return line.to_string() };
             let mut line = line.to_string();
             for key in ["path", "git", "tag", "branch", "rev", "version"] {
                 drop_kv(&mut line, key);
@@ -1052,6 +1055,7 @@ mod tests {
             Some("v0.3.0-alpha10")
         );
         assert_eq!(newest(""), None);
+        assert_eq!(newest_first(ls), ["v0.9.0", "v0.2.0", "v0.1.0", "v0.10.0-beta.1"], "releases first");
         assert!(Aio::version("latest", || Ok(String::new())).unwrap_err().contains("no release tag"));
         assert_eq!(Aio::this(), Aio::Tag(format!("v{}", env!("CARGO_PKG_VERSION"))));
     }
@@ -1111,6 +1115,18 @@ mod tests {
             "x = { package = \"aio-rs-macros\", path = \"../c/aio-macros\" }\n"
         );
         assert_eq!(repoint("[dependencies]\nserde = \"1\"\n", &Aio::this(), 0), None);
+        let patched = "[dependencies]\naio = { package = \"aio-rs\", git = \"https://github.com/riagentic/aio-rs\", tag = \"v0.3.0\" }\n\
+                       [patch.\"https://github.com/riagentic/aio-rs\"]\naio-rs = { path = \"../aio-rs/crates/aio\" }\n";
+        let out = repoint(patched, &Aio::Tag("v0.4.0".into()), 0).unwrap();
+        assert!(
+            out.contains("tag = \"v0.4.0\"") && out.ends_with("aio-rs = { path = \"../aio-rs/crates/aio\" }\n"),
+            "{out}"
+        );
+        assert_eq!(
+            repoint("[patch.crates-io]\naio-rs = { path = \"../a\" }\n", &Aio::this(), 0),
+            None,
+            "a [patch] alone"
+        );
     }
 
     /// The bar of CR1/CR2: a new app holds nothing of the machine it was made

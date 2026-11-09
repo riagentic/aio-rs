@@ -298,13 +298,14 @@ asks for (a release tag, a branch, a checkout), what `Cargo.lock` built
 (version, source, commit), this `ax`'s version and whether they match,
 and aio-rs's releases (its git tags; offline: said). Then, as aio does:
 drift (Cargo.lock built something Cargo.toml didn't ask for: exit 1),
-files that disagree, no Cargo.lock yet, a local-dev pin, how many releases
+files that disagree, a `[patch]` that swaps aio-rs for another source
+(that is what builds), no Cargo.lock yet, a local-dev pin, how many releases
 behind the newest it is, and what to type next.
 
 With a version, every aio-rs dependency of every `Cargo.toml` (workspace
 dependencies too) moves there, and `Cargo.lock` follows (`cargo update -p`
-for the aio-rs crates only; offline, from what cargo has, said); a move
-cargo can't resolve changes nothing:
+for the aio-rs crates only; offline, from what cargo has, said); a
+`[patch]` stays as it is; a move cargo can't resolve changes nothing:
 
 | version | moves to |
 |---|---|
@@ -1764,7 +1765,9 @@ ax uninstall [--tools]
 `ax upgrade` moves `ax` itself to aio-rs's newest release (or `version`):
 it takes the release's install script, checks its SHA-256 against the
 release's `SHA256SUMS`, and runs it (the script checks the archive's
-SHA-256 before anything runs). `--aio dir`: `ax` built from that checkout
+SHA-256 before anything runs). A newer tag whose release has no files
+yet (still being built) is skipped and named, and `ax upgrade` never
+installs an older `ax` than the one running. `--aio dir`: `ax` built from that checkout
 (`cargo install`); plain `ax upgrade` returns to a release. Apps keep their
 own aio-rs: [`ax pin`](#ax-pin).
 

@@ -92,6 +92,19 @@ fn value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     line[at..].find('"').map(|e| &line[at..at + e])
 }
 
+/// Each line of Cargo.toml text `text` (its newline kept), with whether
+/// it sits in a `[patch…]` table: one that swaps a source, not a
+/// dependency (pure).
+pub fn lines_in_patch(text: &str) -> impl Iterator<Item = (&str, bool)> {
+    text.split_inclusive('\n').scan(false, |patch, line| {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            *patch = t.starts_with("[patch");
+        }
+        Some((line, *patch))
+    })
+}
+
 /// The aio-rs package a Cargo.toml line depends on and where from, `up`
 /// folders below the app's root (pure): `aio = { package = "aio-rs", … }`
 /// or `aio-rs = { … }`, as one line; None for any other line (and for
@@ -192,6 +205,8 @@ pub fn latest(tags: &[String], within: Option<u64>) -> Option<String> {
 pub struct Info {
     /// Each aio-rs dependency: its file (relative to the root), package, source.
     pub asks: Vec<(String, String, Src)>,
+    /// Each `[patch]` of an aio-rs crate, as `asks`: what builds instead.
+    pub patches: Vec<(String, String, Src)>,
     pub locked: Vec<Locked>,
     pub lock_file: bool,
     pub ax: String,
@@ -240,6 +255,7 @@ impl Info {
         json!({
             "pinned": self.pinned().map(src),
             "asks": self.asks.iter().map(|(f, p, s)| json!({ "file": f, "package": p, "source": src(s) })).collect::<Vec<_>>(),
+            "patches": self.patches.iter().map(|(f, p, s)| json!({ "file": f, "package": p, "source": src(s) })).collect::<Vec<_>>(),
             "built": self.built().map(|b| json!({ "version": b.version, "source": src(&b.src), "commit": b.commit })),
             "locked": self.locked.iter().map(|l| json!({ "name": l.name, "version": l.version, "source": src(&l.src), "commit": l.commit })).collect::<Vec<_>>(),
             "ax": self.ax,
@@ -299,6 +315,8 @@ impl Info {
             }
             b
         };
+        // Cargo takes a [patch] only when its version fits: then the build isn't the pin.
+        let patched = !self.patches.is_empty() && self.pinned().zip(self.built()).is_none_or(|(p, b)| !p.same(&b.src));
         if self.pinned().is_none() {
             out.push(block(
                 "!",
@@ -306,13 +324,30 @@ impl Info {
                 &self.asks.iter().map(|(f, p, s)| format!("{f}: {p} {s}")).collect::<Vec<_>>().join("; "),
                 Some("ax pin <version>   (moves every one)"),
             ));
-        } else if self.drift() {
+        } else if self.drift() && !patched {
             let b = self.built().expect("drift has a build");
             out.push(block(
                 "!",
                 "Drift — this app is built against something it did not ask for.".into(),
                 &format!("Cargo.toml asks for {}; Cargo.lock built {} ({}).", pinned, b.version, b.src.locked()),
                 Some("ax pin <what Cargo.toml asks for>   (re-resolves Cargo.lock)"),
+            ));
+        }
+        if let Some((f, _, s)) = self.patches.first() {
+            let (head, body) = match patched {
+                true => {
+                    (format!("Patched — a [patch] in {f} swaps aio-rs for {s}."), "That is what builds, not the pin")
+                }
+                false => (
+                    format!("Unused [patch] — {f} patches aio-rs with {s}."),
+                    "Cargo.lock built the pin: the versions differ",
+                ),
+            };
+            out.push(block(
+                "!",
+                head,
+                &format!("{body}; ax pin leaves the [patch] as it is."),
+                Some("remove the [patch] of aio-rs when it is no longer needed"),
             ));
         }
         if !self.lock_file || self.locked.is_empty() {
@@ -355,11 +390,15 @@ impl Info {
 
 /// Where the app at `root` stands; `tags`: `git ls-remote --tags` of aio-rs.
 pub fn info(root: &Path, tags: impl FnOnce() -> Result<String, String>) -> Result<Info, String> {
-    let mut asks = vec![];
+    let (mut asks, mut patches) = (vec![], vec![]);
     for (file, up) in create::manifests(root) {
         let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
         let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy().replace('\\', "/");
-        asks.extend(text.lines().filter_map(|l| asked(l, up)).map(|(p, s)| (rel.clone(), p, s)));
+        for (line, patch) in lines_in_patch(&text) {
+            if let Some((p, s)) = asked(line, up) {
+                if patch { &mut patches } else { &mut asks }.push((rel.clone(), p, s));
+            }
+        }
     }
     if asks.is_empty() {
         return Err(format!("{}: no aio-rs dependency in its Cargo.toml files", root.display()));
@@ -367,6 +406,7 @@ pub fn info(root: &Path, tags: impl FnOnce() -> Result<String, String>) -> Resul
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).ok();
     Ok(Info {
         asks,
+        patches,
         locked: lock.as_deref().map(locked).unwrap_or_default(),
         lock_file: lock.is_some(),
         ax: env!("CARGO_PKG_VERSION").into(),
@@ -797,6 +837,7 @@ version = "0.1.0"
     fn of(asks: &[(&str, Src)], lock: &str, releases: Result<Vec<String>, String>) -> Info {
         Info {
             asks: asks.iter().map(|(f, s)| (f.to_string(), "aio-rs".into(), s.clone())).collect(),
+            patches: vec![],
             locked: locked(lock),
             lock_file: !lock.is_empty(),
             ax: "0.1.0".into(),
@@ -814,6 +855,20 @@ version = "0.1.0"
         assert!(text.contains("i  3 releases behind v1.0.0."), "{text}");
         assert!(text.contains("  ax pin <path>     follow an aio-rs checkout on this machine"), "{text}");
         assert!(!text.contains("Drift"), "{text}");
+        assert!(!text.contains("Patched"), "{text}");
+        let patched = Info {
+            patches: vec![("Cargo.toml".into(), "aio-rs".into(), Src::Path("../aio-rs/crates".into()))],
+            ..of(&[("Cargo.toml", tag.clone())], LOCK, Ok(vec![]))
+        };
+        let said = patched.render();
+        assert!(said.contains("!  Unused [patch] — Cargo.toml patches aio-rs with "), "the lock built the tag: {said}");
+        assert_eq!(patched.json()["patches"][0]["source"]["kind"], "path");
+        let used = Info { locked: locked(&LOCK.replace("source = \"git+", "x = \"")), ..patched };
+        let said = used.render();
+        assert!(
+            said.contains("!  Patched — a [patch] in Cargo.toml swaps aio-rs for ") && !said.contains("Drift"),
+            "{said}"
+        );
         let j = i.json();
         assert_eq!(j["pinned"], json!({ "kind": "tag", "name": "v0.1.0" }));
         assert_eq!(

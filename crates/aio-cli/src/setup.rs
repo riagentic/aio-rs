@@ -409,7 +409,8 @@ pub fn run(check: bool) -> Result<String, String> {
         bindgen.map(|p| format!("at {}", p.display())),
     ));
     if os != "macos" {
-        let zig = if check { crate::zig::here() } else { crate::zig::ensure() };
+        // Optional and big: the first macOS build fetches it, never setup.
+        let zig = crate::zig::here();
         needs.push(need(
             format!("zig {}", crate::zig::VERSION),
             "ax build --platforms macos,macos-arm64 here, with Rust's targets (rustup target add aarch64-apple-darwin x86_64-apple-darwin)",

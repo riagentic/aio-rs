@@ -1786,8 +1786,12 @@ impl Saver {
             }
         };
         // A temp file of its own, renamed over the file: a write cut short
-        // (a thread killed at the exit) leaves the file whole.
-        let tmp = self.file.with_extension(format!("saving-{}", crate::uuid_v4().simple()));
+        // (a thread killed at the exit) leaves the file whole. Named by
+        // process and count, not at random: Windows' random source is gone
+        // at the exit.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = self.file.with_extension(format!("saving-{}-{n}", std::process::id()));
         let r = serde_json::to_vec(&*s)
             .map_err(std::io::Error::other)
             .and_then(|b| {
@@ -1836,10 +1840,11 @@ pub(crate) fn flush_saves(wait: Duration) -> Vec<std::path::PathBuf> {
 /// `std::process::exit`): a call made offline just before is never lost.
 /// It writes in the exiting thread: on Windows the others are gone by then.
 fn flush_at_exit() {
-    extern "C" fn at_exit() {
-        for f in flush_saves(SAVE_WAIT) {
-            eprintln!("[aio] sync: the copy in {} was not saved at the exit", f.display());
-        }
+    // Windows: the program's TLS callback too, linked in by this read.
+    // SAFETY: a plain read of a static.
+    #[cfg(windows)]
+    {
+        _ = unsafe { std::ptr::from_ref(&ON_DETACH).read_volatile() };
     }
     #[cfg(windows)]
     unsafe extern "C" {
@@ -1850,6 +1855,28 @@ fn flush_at_exit() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     // SAFETY: registers a plain function; its waits are bounded.
     ONCE.call_once(|| _ = unsafe { atexit(at_exit) });
+}
+
+extern "C" fn at_exit() {
+    for f in flush_saves(SAVE_WAIT) {
+        eprintln!("[aio] sync: the copy in {} was not saved at the exit", f.display());
+    }
+}
+
+/// Windows: `std::process::exit` is `ExitProcess`, which skips `atexit`
+/// with MSVC's C runtime; the program's TLS callbacks still run, in the
+/// exiting thread, once the others are gone (a second flush is a no-op).
+#[cfg(windows)]
+#[used]
+#[unsafe(link_section = ".CRT$XLB")]
+static ON_DETACH: unsafe extern "system" fn(*mut std::ffi::c_void, u32, *mut std::ffi::c_void) = on_detach;
+
+#[cfg(windows)]
+unsafe extern "system" fn on_detach(_: *mut std::ffi::c_void, reason: u32, _: *mut std::ffi::c_void) {
+    const DLL_PROCESS_DETACH: u32 = 0;
+    if reason == DLL_PROCESS_DETACH {
+        at_exit();
+    }
 }
 
 /// The server refused the key itself (HTTP 401): the one refusal that

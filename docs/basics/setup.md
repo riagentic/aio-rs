@@ -80,7 +80,9 @@ ax upgrade --aio ../aio-rs    # ax built from a checkout (plain ax upgrade retur
 
 `ax upgrade` takes the release's install script, checks its SHA-256
 against the release's `SHA256SUMS`, and runs it: the script checks the
-archive's own SHA-256 before anything is unpacked. An app keeps its own
+archive's own SHA-256 before anything is unpacked. A tag whose release
+is still being built is skipped, and plain `ax upgrade` never goes back
+to an older `ax`. An app keeps its own
 aio-rs until `ax pin` moves it (below).
 
 ### Where an app gets aio-rs from
@@ -149,7 +151,7 @@ Rust's compile time, ~25 s); `ax setup --warm` does it anywhere.
 | aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
 | Android SDK, NDK, JDK 17-23, Gradle 8.9+ | yes | yes | yes | `ax build --android`, `ax dev --android` | the build says what is missing |
 | `x86_64-w64-mingw32-gcc` + its rustup target | yes | yes | – | `ax build --windows` (cross-built) | `ax build --windows` names the package |
-| zig 0.15.2 + `aarch64-apple-darwin`, `x86_64-apple-darwin` | fetched | – | fetched | `ax build --platforms macos,macos-arm64` away from a Mac | fetches zig (SHA-256 pinned in ax); the build names the `rustup target add` line |
+| zig 0.15.2 + `aarch64-apple-darwin`, `x86_64-apple-darwin` | fetched | – | fetched | `ax build --platforms macos,macos-arm64` away from a Mac | says whether zig is here; the first macOS build fetches it (SHA-256 pinned in ax) and names the `rustup target add` line |
 | `dpkg-deb`, `mksquashfs` | yes | – | – | `ax build --deb`, `--appimage` | the build says what is missing |
 
 Every app `ax create` makes pins aio-rs's Rust in its

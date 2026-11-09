@@ -296,8 +296,9 @@ samples, steady where a median swings with the machine's other work) is
 over its ceiling, twice the most it measured. `./ci.sh` runs it in the
 release build (`cargo test -p aio-rs --release --test rt_gate`), the
 workspace's run in the debug one, each with its own ceilings, on Linux
-x86_64 (the machine they were measured on). A ceiling moves only with the
-numbers that justify it, in the same commit.
+x86_64 (the machine they were measured on); a CI runner (`CI` set)
+skips it and says so, its speed swinging several-fold. A ceiling moves
+only with the numbers that justify it, in the same commit.
 A store's open is bound by its disk syncs, so its time swings with the
 disk's other work (13 ms quiet, over 50 ms beside a parallel build): its
 ceiling stays loose (62 ms release, 91 ms debug) and the syncs are gated

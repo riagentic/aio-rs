@@ -764,9 +764,13 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let pid_file = d.path().join("pid");
         let stop = Stop::default();
-        let s = stop.clone();
+        let (s, written) = (stop.clone(), pid_file.clone());
+        // The save comes once the grandchild runs and its pid is written
+        // (PowerShell starts slowly on a CI runner).
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+            while std::fs::read_to_string(&written).unwrap_or_default().trim().is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             s.stale();
         });
         let started = std::time::Instant::now();

@@ -221,7 +221,7 @@ command that adds it:
 | `host` | this machine's | |
 
 On a Mac, its own tools build both CPUs. On Linux or Windows, zig links
-the app: `ax setup` (or the first macOS build) fetches zig 0.15.2 into
+the app: the first macOS build fetches zig 0.15.2 (`ax setup` only says if it is here) into
 aio-rt's tools and checks its SHA-256. Add Rust's targets once:
 
 ```sh

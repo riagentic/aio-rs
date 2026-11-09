@@ -34,7 +34,7 @@ pub fn query(db: &Connection, sql: &str) -> Out {
     if !st.readonly() {
         return Err("ax sql is read-only: SELECT (or WITH … SELECT) only".into());
     }
-    let cols: Vec<String> = st.column_names().into_iter().map(String::from).collect();
+    let cols: Vec<String> = st.column_names().map(String::from).collect();
     let mut rows = st.query([]).map_err(|e| e.to_string())?;
     let (mut out, mut bytes) = (Vec::new(), 0);
     while let Some(r) = rows.next().map_err(|e| e.to_string())? {

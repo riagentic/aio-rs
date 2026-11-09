@@ -6,7 +6,10 @@
 //! ceilings are the debug build's (`cargo test`) and the release build's
 //! (`cargo test --release`, as `./ci.sh` runs it), on Linux x86_64, the
 //! machine they were measured on (as aio's gate is one machine's); a
-//! ceiling moves only with the numbers that justify it.
+//! ceiling moves only with the numbers that justify it. A CI runner (`CI`
+//! set) skips it: a shared machine's speed swings several-fold, and no
+//! one number scales the ceilings to it (a JSON round trip 2x slower, a
+//! call 7x); `./ci.sh` on the measured machine gates each release.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use aio::prelude::*;
 use std::time::{Duration, Instant};
@@ -58,6 +61,10 @@ fn gate(metric: &str, took: Duration) {
 
 #[test]
 fn a_start_a_call_and_a_saved_call_stay_under_their_ceilings() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("rt-gate: skipped on a CI runner (CI is set): its ceilings are one machine's");
+        return;
+    }
     gate(
         "boot",
         p10(100, || {

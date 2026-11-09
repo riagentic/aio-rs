@@ -110,6 +110,6 @@ fn am_lists_reads_and_calls_an_aio_rs_app() {
     assert_eq!(unmarked["status"], 403, "aio's X-AIO header");
     assert_eq!(
         h.store(|s| s.events().unwrap()).last().unwrap().by,
-        By::User(std::env::var("USER").unwrap_or_else(|_| "am".into()))
+        By::User(std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "am".into()))
     );
 }

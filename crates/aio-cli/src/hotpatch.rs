@@ -549,6 +549,9 @@ pub fn fat_build(req: &Request) -> Result<Fat, Refused> {
         let _ = std::fs::remove_file(&c.stamp_file);
         fat_link(&c.link, app, &c.linker, c.msvc, &c.exe, &c.target, false)?;
         // Kept for the next start with nothing changed (a hard link: no copy).
+        // Windows: the last kept one may be the app still running (a rebuild
+        // before its restart): moved aside, as it can't be removed.
+        set_aside(&c.kept_exe);
         let _ = std::fs::remove_file(&c.kept_exe);
         let saved = std::fs::hard_link(&c.exe, &c.kept_exe).or_else(|_| std::fs::copy(&c.exe, &c.kept_exe).map(|_| ()));
         if let (Ok(()), Some(st)) = (saved, stamp_of(&c.link_file)) {

@@ -40,10 +40,17 @@ pub fn upgrade(to: Option<&str>, checkout: Option<&Path>) -> Result<String, Stri
             _ => Err(format!("cargo install from {} failed (cargo said why, above)", dir.display())),
         };
     }
-    let tag = match to.unwrap_or("latest") {
-        "latest" => crate::create::newest(&crate::create::tags()?).ok_or("aio-rs has no release yet")?,
+    let have = env!("CARGO_PKG_VERSION");
+    let tags = match to.unwrap_or("latest") {
+        "latest" => {
+            let all = crate::create::newest_first(&crate::create::tags()?);
+            if all.is_empty() {
+                return Err("aio-rs has no release yet".into());
+            }
+            newer(all, have)
+        }
         v => match crate::create::Aio::version(v, || Err("unused".into()))? {
-            crate::create::Aio::Tag(t) => t,
+            crate::create::Aio::Tag(t) => vec![t],
             _ => {
                 return Err(format!(
                     "ax upgrade {v}: a release (0.4.0) or latest; a branch builds from source: \
@@ -53,28 +60,47 @@ pub fn upgrade(to: Option<&str>, checkout: Option<&Path>) -> Result<String, Stri
             }
         },
     };
-    let version = tag.trim_start_matches('v');
-    if to.is_none() && version == env!("CARGO_PKG_VERSION") {
-        return Ok(format!("ax {version} is aio-rs's newest release (ax upgrade {version} installs it again)"));
-    }
-    let url = crate::release::aio_release_url(version);
     let script = if cfg!(windows) { "install.ps1" } else { "install.sh" };
-    let tmp = std::env::temp_dir().join(format!("ax-upgrade-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    let r = install(&url, script, &tmp);
-    _ = std::fs::remove_dir_all(&tmp);
-    r.map(|()| format!("ax {version} installed in {}", bin().display()))
+    let mut unready = Vec::new();
+    for tag in tags {
+        let version = tag.trim_start_matches('v');
+        let url = crate::release::aio_release_url(version);
+        let tmp = std::env::temp_dir().join(format!("ax-upgrade-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let sums =
+            aio_shell::runtime::download(&format!("{url}/SHA256SUMS"), &tmp.join("SHA256SUMS"), &mut |_, _| true);
+        let r = match sums {
+            // A tag whose release has no files yet (still being built): the one before it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && to.is_none() => {
+                unready.push(tag.clone());
+                Ok(false)
+            }
+            Err(e) => Err(e.to_string()),
+            Ok(_) => install(&url, script, &tmp).map(|()| true),
+        };
+        _ = std::fs::remove_dir_all(&tmp);
+        if r? {
+            return Ok(format!("ax {version} installed in {}", bin().display()));
+        }
+    }
+    let unready = match unready.is_empty() {
+        true => String::new(),
+        false => format!("; no release files yet for {}", unready.join(", ")),
+    };
+    Ok(format!("ax {have} is up to date (ax upgrade {have} installs it again){unready}"))
 }
 
-/// Get `script` of the release at `url` into `tmp`, check it against the
-/// release's `SHA256SUMS`, and run it.
+/// The tags in `newest_first` newer than ax's version `have` (pure):
+/// `latest` never goes back.
+fn newer(newest_first: Vec<String>, have: &str) -> Vec<String> {
+    newest_first.into_iter().filter(|t| aio::update::compare(t, have) == Some(std::cmp::Ordering::Greater)).collect()
+}
+
+/// Get `script` of the release at `url` into `tmp` (its `SHA256SUMS`
+/// already there), check it against those, and run it.
 fn install(url: &str, script: &str, tmp: &Path) -> Result<(), String> {
-    let get = |f: &str| {
-        aio_shell::runtime::download(&format!("{url}/{f}"), &tmp.join(f), &mut |_, _| true)
-            .map_err(|e| format!("{url}/{f}: {e}"))
-    };
-    get("SHA256SUMS")?;
-    let sha = get(script)?;
+    let sha = aio_shell::runtime::download(&format!("{url}/{script}"), &tmp.join(script), &mut |_, _| true)
+        .map_err(|e| e.to_string())?;
     let sums = std::fs::read_to_string(tmp.join("SHA256SUMS")).map_err(|e| format!("SHA256SUMS: {e}"))?;
     if !listed(&sums, script, &sha) {
         return Err(format!("{url}/{script}: SHA-256 {sha} is not the release's (SHA256SUMS): not run"));
@@ -162,6 +188,14 @@ mod tests {
         assert!(!listed(sums, "install.sh", "def456"), "another file's sum");
         assert!(!listed(sums, "install.sh", "abc12"), "a part of it");
         assert!(!listed("", "install.sh", "abc123"));
+    }
+
+    #[test]
+    fn latest_never_goes_back() {
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(newer(tags(&["v0.5.0", "v0.4.1", "v0.4.0", "v0.3.0"]), "0.4.0"), ["v0.5.0", "v0.4.1"]);
+        assert!(newer(tags(&["v0.4.0", "v0.3.0"]), "0.4.1").is_empty(), "a newer build stays");
+        assert!(newer(tags(&["v0.4.0"]), "0.4.0").is_empty());
     }
 
     #[test]

@@ -625,7 +625,6 @@ fn rows(db: &Connection, table: &str, cols: &[Col]) -> Result<Vec<Value>, String
     let mut q = db.prepare(&format!("SELECT * FROM {}", quoted(table))).map_err(err)?;
     let names: Vec<(String, Kind)> = q
         .column_names()
-        .into_iter()
         .map(|n| (n.to_string(), cols.iter().find(|c| c.0 == n).map_or(Kind::Plain, |c| c.2)))
         .collect();
     let rows = q

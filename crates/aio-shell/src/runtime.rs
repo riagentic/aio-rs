@@ -328,7 +328,13 @@ fn get_text(url: &str) -> io::Result<String> {
 /// chunk's (got, total) to `on`, which says whether to go on (`Interrupted`
 /// when not); every 10% to the log.
 pub fn download(url: &str, to: &Path, on: &mut dyn FnMut(u64, Option<u64>) -> bool) -> io::Result<String> {
-    let res = agent().get(url).call().map_err(|e| io::Error::other(format!("{url}: {e}")))?;
+    let res = agent().get(url).call().map_err(|e| {
+        let kind = match e {
+            ureq::Error::StatusCode(404) => io::ErrorKind::NotFound,
+            _ => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, format!("{url}: {e}"))
+    })?;
     let total: Option<u64> = res.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse().ok());
     let total = total.filter(|t| *t > 0);
     let mut r = res.into_body().into_reader();

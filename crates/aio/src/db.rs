@@ -200,7 +200,7 @@ fn one<'c>(c: &'c Connection, sql: &str) -> Result<rusqlite::Statement<'c>, Erro
 
 fn rows(c: &Connection, sql: &str, params: &[Sql]) -> Result<Rows, Error> {
     let mut s = one(c, sql)?;
-    let columns: Vec<String> = s.column_names().into_iter().map(String::from).collect();
+    let columns: Vec<String> = s.column_names().map(String::from).collect();
     let n = columns.len();
     let rows = s
         .query_map(rusqlite::params_from_iter(params), |r| (0..n).map(|i| r.get::<_, Sql>(i)).collect())
@@ -296,7 +296,7 @@ fn lock(m: &Mutex<Seen>) -> std::sync::MutexGuard<'_, Seen> {
 impl Worker {
     fn start(
         name: String,
-        c: Connection,
+        mut c: Connection,
         feed: Option<Arc<Feed>>,
     ) -> Result<Self, Error> {
         use rusqlite::hooks::{AuthAction as A, Authorization};

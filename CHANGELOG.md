@@ -7,6 +7,51 @@ version may break things.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-09
+
+A fix release: `ax upgrade` past a tag with no release files, `ax pin`
+in an app with a `[patch]`, no zig fetched by setup, SQLite's security
+fix, and the Windows (MSVC) and CI-runner fixes GitHub's CI found.
+
+### Fixed
+
+- `ax upgrade` takes the newest release that has its files: a tag whose
+  release is still being built (or was never published) is skipped and
+  named, never a 404; and `latest` never installs an older ax than the
+  one running.
+- `ax pin <version>` in an app with a `[patch]` of aio-rs: the `[patch]`
+  stays as it is (it was moved too, so it pointed at its own source and
+  cargo refused the move), and `ax pin` says the `[patch]` is what builds.
+- `ax setup` (and so the installers and `ax upgrade`) no longer fetches
+  zig: the first `ax build --platforms macos` away from a Mac does;
+  setup says whether it is here.
+- Windows: `ax dev` started again with nothing changed runs the last
+  build as it is after a rebuild-and-restart too (the app still running
+  held the kept binary, so it wasn't kept, and the next start built the
+  app crate again).
+- Windows with MSVC: a call made offline just before
+  `std::process::exit` is saved (MSVC's C runtime skips `atexit` there;
+  the program's TLS callback saves it now).
+
+### Security
+
+- SQLite: rusqlite 0.41 with libsqlite3-sys 0.39, past
+  [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459)
+  (C SQLite's CVE-2026-119375).
+
+### Testing
+
+- The runtime gate (`tests/rt_gate.rs`) is skipped on a CI runner (`CI`
+  set), saying so: a shared machine's speed swings several-fold, so its
+  one-machine ceilings gate in `./ci.sh` on that machine, for each
+  release.
+- Tests that depended on the machine: the Windows console probe gets a
+  console of its own, the hot-patch stop waits for the grandchild's pid,
+  `am`'s caller is read as the code reads it (`USERNAME`), a frozen sync
+  link is frozen before the server changes, the pace test's ticker has
+  ended before its last change, and the virtual-time timeout test's
+  device answers well after virtual time ran out.
+
 ## [0.4.0] - 2026-11-08
 
 aio-rs 0.4.0 has what aio had and 0.3 lacked, and is faster where an app
@@ -2320,6 +2365,7 @@ a time ([migration guide](docs/migration/README.md)).
 - The prebuilt archives and app bundles are not OS-signed yet: Windows
   SmartScreen and macOS Gatekeeper warn on first start.
 
+[0.4.1]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.1
 [0.4.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.0
 [0.3.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.3.0
 [0.2.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.2.0

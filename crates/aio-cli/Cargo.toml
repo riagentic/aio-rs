@@ -23,7 +23,7 @@ aio-config = { workspace = true, features = ["toml", "png"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 # `ax ui --browser`: the manager served to the browser's tabs (`aio_shell::web`).
 aio-shell = { workspace = true, features = ["web"] }
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 notify = "8"

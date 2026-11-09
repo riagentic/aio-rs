@@ -101,6 +101,8 @@ async fn stream(screen: Screen) -> Took {
     tokio::time::sleep(Duration::from_secs(4)).await;
     took.lock().unwrap().2 = false;
     ticker.abort();
+    // Ended, not just asked to: a tick on another thread could land after "last".
+    _ = ticker.await;
     let cpu = aio::health::cpu_ms().unwrap_or(0) - cpu;
     // The newest state always comes, however far apart.
     h.set("last".into()).unwrap();

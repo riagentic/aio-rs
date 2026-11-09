@@ -146,7 +146,9 @@ fn this() -> Result<(String, &'static str, PathBuf), String> {
 
 /// aio's zig, when it is here (nothing fetched).
 pub fn here() -> Result<PathBuf, String> {
-    Some(this()?.2).filter(|p| p.is_file()).ok_or_else(|| "not here; ax setup fetches it".into())
+    Some(this()?.2)
+        .filter(|p| p.is_file())
+        .ok_or_else(|| "not here; the first ax build --platforms macos fetches it".into())
 }
 
 /// zig here: aio's own, fetched once (checked).

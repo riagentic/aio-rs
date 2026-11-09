@@ -2503,8 +2503,10 @@ mod tests {
         let probe = |detach: bool| {
             let mut cmd = Command::new(std::env::current_exe().unwrap());
             cmd.args(["--exact", "dev::tests::console_probe"]).env("AX_CONSOLE_PROBE", &said);
-            if detach {
-                detached(&mut cmd);
+            match detach {
+                true => detached(&mut cmd),
+                // A console of its own: this test's may have none (a CI runner).
+                false => _ = std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x10),
             }
             assert!(cmd.output().unwrap().status.success());
             std::fs::read_to_string(&said).unwrap()

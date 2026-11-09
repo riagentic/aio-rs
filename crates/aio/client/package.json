@@ -1,6 +1,6 @@
 {
   "name": "aio-rs-client",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "aio-rs's client for any view library: an aio-rs app's cells, patches, calls and offline queue, with React, Solid and Vue bindings",
   "license": "MIT",
   "type": "module",

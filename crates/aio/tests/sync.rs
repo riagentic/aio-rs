@@ -1408,24 +1408,56 @@ async fn a_token_function_is_asked_at_each_reconnect_and_a_dead_one_signs_out() 
 
 /// A relay whose live connections can be frozen: open, but nothing passes
 /// (a dead Wi-Fi link that never says goodbye). New connections still work.
-async fn freezer(to: String) -> (String, std::sync::Arc<tokio::sync::Notify>) {
+async fn freezer(to: String) -> (String, Freeze) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    let freeze = std::sync::Arc::new(tokio::sync::Notify::new());
-    let f = freeze.clone();
+    let freeze =
+        Freeze { on: tokio::sync::watch::channel(false).0, live: Default::default(), frozen: Default::default() };
+    let (on, live, frozen) = (freeze.on.clone(), freeze.live.clone(), freeze.frozen.clone());
     tokio::spawn(async move {
         while let Ok((mut a, _)) = l.accept().await {
-            let (to, f) = (to.clone(), f.clone());
+            let (to, mut on, live, frozen) = (to.clone(), on.subscribe(), live.clone(), frozen.clone());
             tokio::spawn(async move {
                 let mut b = tokio::net::TcpStream::connect(to).await.unwrap();
+                // One opened after the freeze passes.
+                let late = *on.borrow_and_update();
+                if late {
+                    _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+                    return;
+                }
+                live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 tokio::select! {
-                    _ = tokio::io::copy_bidirectional(&mut a, &mut b) => {}
-                    _ = f.notified() => std::future::pending::<()>().await,
+                    biased;
+                    _ = async { _ = on.wait_for(|f| *f).await } => {
+                        frozen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::future::pending::<()>().await
+                    }
+                    _ = tokio::io::copy_bidirectional(&mut a, &mut b) => {
+                        live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    }
                 }
             });
         }
     });
     (addr, freeze)
+}
+
+/// [`freezer`]'s switch.
+struct Freeze {
+    on: tokio::sync::watch::Sender<bool>,
+    live: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    frozen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Freeze {
+    /// Freeze the live connections, back once each has stopped passing.
+    async fn now(&self) {
+        self.on.send_replace(true);
+        until("frozen", || {
+            self.frozen.load(std::sync::atomic::Ordering::SeqCst) >= self.live.load(std::sync::atomic::Ordering::SeqCst)
+        })
+        .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1435,7 +1467,7 @@ async fn a_silent_link_is_found_dead_within_seconds() {
     let a = Remote::<Board>::connect(&via, "secret", "ana").await.unwrap();
     assert!(a.online());
     // The link goes silent; the server changes meanwhile.
-    freeze.notify_waiters();
+    freeze.now().await;
     let id = h.add("while silent".into()).unwrap();
     let t = std::time::Instant::now();
     // The copy finds the link dead, reconnects (new links pass) and catches up.
