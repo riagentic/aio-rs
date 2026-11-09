@@ -5,6 +5,7 @@
 //! [`Progress`], [`Spinner`] and [`watch`] draw for a person on a terminal and
 //! plain lines for a pipe. Parsing and drawing are pure (`parse`, `help`,
 //! `table`, `frame`); the doors only add the process's streams.
+pub use aio_macros::Options;
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
@@ -37,11 +38,16 @@ pub struct Flag {
     short: Option<char>,
     default: Option<String>,
     required: bool,
+    /// The type each value must parse as, and its name ([`Flag::typed`]).
+    typed: Option<Typed>,
 }
+
+/// Whether a value parses as a flag's type, and the type's name.
+type Typed = (fn(&str) -> bool, &'static str);
 
 impl Flag {
     fn of(name: &str, kind: Kind) -> Self {
-        Self { name: name.into(), kind, help: String::new(), short: None, default: None, required: false }
+        Self { name: name.into(), kind, help: String::new(), short: None, default: None, required: false, typed: None }
     }
 
     pub fn switch(name: &str) -> Self {
@@ -82,6 +88,73 @@ impl Flag {
     pub fn required(mut self) -> Self {
         self.required = true;
         self
+    }
+
+    /// Each value refused unless it parses as a `T` (`--port` as a `u16`:
+    /// `70000` and `1.5` are refused naming it); `#[derive(Options)]` sets
+    /// it from the field's type.
+    pub fn typed<T: std::str::FromStr>(mut self) -> Self {
+        let name = std::any::type_name::<T>();
+        self.typed = Some((|v| v.trim().parse::<T>().is_ok(), name.rsplit("::").next().unwrap_or(name)));
+        self
+    }
+}
+
+/// Command-line options as a typed struct, its spec made from the fields
+/// (`#[derive(aio::cli::Options)]`): each field's type is its flag's kind
+/// and the type its value parses as, so reading one is a field, checked
+/// by the compiler (aio inferred the flags' types from the spec).
+///
+/// ```
+/// use aio::cli::Options;
+///
+/// /// copy files
+/// #[derive(Options)]
+/// struct Copy {
+///     /// how many at once
+///     #[cli(default = 4)]
+///     jobs: u8,
+///     verbose: bool,
+/// }
+///
+/// let c = Copy::parse(&["--jobs", "2"]).unwrap();
+/// assert_eq!((c.jobs, c.verbose), (2, false));
+/// ```
+///
+/// A default of another type than its field is a compile error:
+///
+/// ```compile_fail
+/// #[derive(aio::cli::Options)]
+/// struct Copy {
+///     #[cli(default = "four")]
+///     jobs: u8,
+/// }
+/// ```
+///
+/// and so is a field no flag reads as, or a misread name (a field):
+///
+/// ```compile_fail
+/// #[derive(aio::cli::Options)]
+/// struct Copy {
+///     to: std::collections::HashMap<String, String>,
+/// }
+/// ```
+pub trait Options: Sized {
+    /// The spec the fields make (add to it: `.command(..)` is for an app
+    /// that reads `Args` itself).
+    fn spec() -> Spec;
+    /// The fields from `a`, parsed against [`spec`](Self::spec).
+    fn from_args(a: &Args) -> Self;
+
+    /// `argv` (without the program) parsed (pure).
+    fn parse<S: AsRef<str>>(argv: &[S]) -> Result<Self, Stop> {
+        parse(&Self::spec(), argv).map(|a| Self::from_args(&a))
+    }
+
+    /// The process's arguments, as [`args`] reads them: `--help` and a
+    /// wrong invocation end the process.
+    fn args() -> Self {
+        Self::from_args(&args(&Self::spec()))
     }
 }
 
@@ -161,10 +234,11 @@ impl Spec {
             .iter()
             .map(|f| {
                 let short = f.short.map_or("    ".into(), |c| format!("-{c}, "));
-                let value = match f.kind {
-                    Kind::Switch => "",
-                    Kind::Number => "=<number>",
-                    Kind::Text | Kind::List => "=<text>",
+                let value = match (f.kind, f.typed) {
+                    (Kind::Switch, _) => String::new(),
+                    (Kind::Number, _) => "=<number>".into(),
+                    (_, Some((_, ty))) if ty != "String" => format!("=<{}>", ty.to_lowercase()),
+                    _ => "=<text>".into(),
                 };
                 let tail = match &f.default {
                     _ if f.required => " (required)".into(),
@@ -230,6 +304,19 @@ impl Args {
     /// A list flag's values (its default when none was given).
     pub fn list(&self, name: &str) -> &[String] {
         self.read(name, Kind::List).map_or(&[], Vec::as_slice)
+    }
+
+    /// Flag `name`'s last value (or its default) as a `T`, whatever its
+    /// kind but a switch: what `#[derive(Options)]` reads, its type checked by [`Flag::typed`].
+    #[doc(hidden)]
+    pub fn get<T: std::str::FromStr>(&self, name: &str) -> Option<T> {
+        self.values.get(name)?.last()?.trim().parse().ok()
+    }
+
+    /// Every value of list flag `name` as a `T`.
+    #[doc(hidden)]
+    pub fn get_all<T: std::str::FromStr>(&self, name: &str) -> Vec<T> {
+        self.list(name).iter().filter_map(|v| v.trim().parse().ok()).collect()
     }
 
     /// A named positional.
@@ -330,6 +417,9 @@ pub fn parse<S: AsRef<str>>(spec: &Spec, argv: &[S]) -> Result<Args, Stop> {
         };
         if f.kind == Kind::Number && !v.trim().parse::<f64>().is_ok_and(f64::is_finite) {
             return Err(refuse(format!("--{name} expects a number, got {v:?}")));
+        }
+        if let Some((_, ty)) = f.typed.filter(|(ok, _)| !ok(&v)) {
+            return Err(refuse(format!("--{name} expects a {ty}, got {v:?}")));
         }
         // The first given replaces the default; a list keeps the rest.
         let slot = values.entry(name.clone()).or_default();
@@ -973,6 +1063,64 @@ mod cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// notes on the command line
+    #[derive(Options, Debug, PartialEq)]
+    #[cli(name = "notes", version = "0.1.0", command("add", "add a note"), command("list", "list them"))]
+    struct Opts {
+        #[cli(command)]
+        cmd: String,
+        /// its tag
+        #[cli(short = 't')]
+        tag: Option<String>,
+        /// at most this many
+        #[cli(default = 20)]
+        limit: u32,
+        /// answer as JSON
+        json: bool,
+        port: Option<u16>,
+        ratio: Option<f64>,
+        also: Vec<u8>,
+        #[cli(default = "home")]
+        shelf: String,
+        dry_run: bool,
+        #[cli(positional)]
+        file: Option<String>,
+        #[cli(rest)]
+        text: Vec<String>,
+    }
+
+    #[test]
+    fn options_derived_from_a_struct_read_as_their_types() {
+        let o = Opts::parse(&["add", "-t", "x", "--port", "80", "--also", "1", "--also=2", "--dry-run", "f", "a", "b"]);
+        let want = Opts {
+            cmd: "add".into(),
+            tag: Some("x".into()),
+            limit: 20,
+            json: false,
+            port: Some(80),
+            ratio: None,
+            also: vec![1, 2],
+            shelf: "home".into(),
+            dry_run: true,
+            file: Some("f".into()),
+            text: vec!["a".into(), "b".into()],
+        };
+        assert_eq!(o, Ok(want));
+        let refused = |argv: &[&str]| match Opts::parse(argv) {
+            Err(Stop::Refused { why, .. }) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(refused(&["add", "--port", "70000"]).starts_with("--port expects a u16, got \"70000\""));
+        assert!(refused(&["add", "--limit", "1.5"]).starts_with("--limit expects a u32"));
+        assert!(refused(&["add", "--also", "300"]).starts_with("--also expects a u8"));
+        assert!(refused(&["ad"]).contains("did you mean add"));
+        let help = Opts::spec().help();
+        for line in ["notes on the command line", "-t, --tag=<text>", "--limit=<number>", "at most this many (default: \"20\")", "--dry-run", "--also=<u8>"] {
+            assert!(help.contains(line), "{line} in {help}");
+        }
+        assert_eq!(Opts::parse(&["--version"]), Err(Stop::Say("notes 0.1.0".into())));
+    }
 
     fn todo() -> Spec {
         Spec::new("todo")

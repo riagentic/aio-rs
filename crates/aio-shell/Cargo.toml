@@ -43,8 +43,9 @@ default = ["updates"]
 # Updates (`update`): the built-in runtime that checks `[updates] url`,
 # stages and installs, and the `updates` cell (an app's own runtime,
 # `aio::update::install`, too). Without it the app never looks for one and
-# carries none of it (~0.5 MB); a new version still confirms its first boot.
-updates = []
+# carries none of it (~0.5 MB, and as much again of a debug build's aio-rs:
+# its `updates`); a new version still confirms its first boot.
+updates = ["aio/updates"]
 # Nothing more: the views are always air's (the feature an app on air named
 # before 0.2.0, `default-features = false, features = ["air"]`, still builds).
 air = []
@@ -70,6 +71,14 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 
 [[test]]
 name = "web"
+required-features = ["web"]
+
+[[test]]
+name = "updates_stub"
+required-features = ["updates"]
+
+[[test]]
+name = "js_client"
 required-features = ["web"]
 
 [target.'cfg(unix)'.dependencies]

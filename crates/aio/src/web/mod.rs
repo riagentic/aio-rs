@@ -10,16 +10,30 @@ pub mod storage;
 
 #[cfg(target_arch = "wasm32")]
 mod handle;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub(crate) mod lazy;
 #[cfg(target_arch = "wasm32")]
 pub mod notify;
 #[cfg(target_arch = "wasm32")]
 mod source;
 #[cfg(target_arch = "wasm32")]
 pub mod sync;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub(crate) mod worker;
 #[cfg(target_arch = "wasm32")]
 pub use handle::Handle;
 #[cfg(target_arch = "wasm32")]
 pub use source::Source;
+
+/// The file of a split web build's chunk (`aio::lazy!`): lazy entry
+/// `slot`'s, or the common one (`None`), of the build `hash` (pure).
+#[doc(hidden)]
+pub fn chunk_file(hash: &str, slot: Option<u32>) -> String {
+    match slot {
+        Some(s) => format!("app.{hash}.{s}.wasm"),
+        None => format!("app.{hash}.c.wasm"),
+    }
+}
 
 /// The `/ws` of the server that served the page (its `location`), as an aio-rs
 /// copy, with the page's key if its address has one (`?token=`, a key
@@ -29,6 +43,22 @@ pub fn ws_url(protocol: &str, host: &str, search: &str) -> String {
     let token = search.trim_start_matches('?').split('&').find_map(|p| p.strip_prefix("token="));
     let token = token.map_or(String::new(), |t| format!("&token={t}"));
     format!("{scheme}://{host}/ws?wire=2{token}")
+}
+
+/// What a server's first paint of this page says cell `id` starts from
+/// (`aio::ui::paint`'s seed: its `seq`, `state` and `user`), taken: a copy
+/// opened again links as usual.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn seeded(id: &str) -> Option<serde_json::Value> {
+    thread_local!(static SEED: std::cell::RefCell<Option<serde_json::Value>> = Default::default());
+    SEED.with_borrow_mut(|s| {
+        let seed = s.get_or_insert_with(|| {
+            let d = web_sys::window().and_then(|w| w.document());
+            let text = d.and_then(|d| d.get_element_by_id("aio-seed")).and_then(|e| e.text_content());
+            text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        });
+        seed.as_object_mut()?.remove(id)
+    })
 }
 
 /// The page's clock (ms since the epoch): a browser has no system clock.
@@ -114,13 +144,9 @@ pub async fn sign_out() {
     restart();
 }
 
-/// Who this page is signed in as (aio's `useUser`), as `(id, role)`: its
-/// `get()` is `None` while the server is asked, then `Some(None)` signed out
-/// (or no accounts). A hook; read it in a hole.
+/// Who this page is signed in as (aio's `useUser`): [`crate::kit::use_user`].
 #[cfg(all(target_arch = "wasm32", feature = "kit"))]
-pub fn use_user() -> crate::ui::Resource<Option<(String, String)>> {
-    crate::ui::resource(|| async { client().me(None).await.ok().and_then(|m| m.user) })
-}
+pub use crate::kit::use_user;
 
 /// The page's `localStorage` as a [`storage::Kv`]: none in a context that
 /// has it switched off (then copies live in memory only).
@@ -163,14 +189,16 @@ impl storage::Kv for Local {
 /// in this module with no socket: each flush's edits handed to it as a
 /// view of the module's memory (no copy), its events straight to the
 /// root. Set the cells' sources (`aio::client!`'s `SOURCE`) first. The
-/// page's splash goes once the view is drawn (`aio:mounted`). No server
-/// paint on air: the page's view is the first.
+/// page's splash goes once the view is drawn (`aio:mounted`). A page the
+/// server painted (`aio::http::Http::painted`) is hydrated: the view takes
+/// the painted nodes over in place (`air::ssr`).
 #[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
 pub fn launch(root: fn() -> crate::ui::View) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     // A `notify` tell is the page's notification, unless the app shows its own.
     crate::tell::show_unless_set(notify::show);
+    std::panic::set_hook(Box::new(panicked));
     let open = SYNCING.with_borrow(Clone::clone);
     for (app, cells) in &open {
         warn_orphans(app, &cells.iter().map(String::as_str).collect::<Vec<_>>());
@@ -189,6 +217,62 @@ pub fn launch(root: fn() -> crate::ui::View) {
     send.forget();
     listen.forget();
     _ = js_sys::Reflect::set(&w, &"__aioWire".into(), &wire);
+    // `ax dev --web`'s markup edits (its page's live reload hands them in):
+    // the views built again in place, their state kept, nothing built.
+    #[cfg(feature = "dev")]
+    {
+        let hot = Closure::<dyn Fn(String)>::new(|json: String| {
+            let params = serde_json::from_str(&json).map_err(|e| e.to_string());
+            match params.and_then(|p| crate::ui::hot_markup(&p)) {
+                Ok((files, markup)) => {
+                    air::hot::set_markup(&files, markup);
+                    on_air::with_root(air::Root::hot);
+                    on_air::flush();
+                }
+                Err(e) => say(&format!("ax dev's markup edit didn't apply: {e}")),
+            }
+        });
+        _ = js_sys::Reflect::set(&w, &"__aioHot".into(), hot.as_ref());
+        hot.forget();
+        // `ax dev --web`'s patches of the page's Rust: its loader (the live
+        // reload) reaches the module (`__aioWasm`: its memory, table and
+        // stack pointer), loads a patch into them and hands its map of
+        // table slots in (`__aioPatched`); the views run the new code from
+        // their root, their state kept.
+        _ = js_sys::Reflect::set(&w, &"__aioWasm".into(), &wasm_bindgen::exports());
+        // Named, so the module keeps it (ax finds it by its symbol).
+        std::hint::black_box(&raw const AIO_PATCH_ARENA);
+        let patched = Closure::<dyn Fn(String)>::new(|map: String| {
+            let n: Vec<u64> = map.split(',').filter_map(|v| v.parse().ok()).collect();
+            let map = n.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
+            let table = aio_hotpatch::JumpTable {
+                lib: Default::default(),
+                map,
+                aslr_reference: 0,
+                new_base_address: 0,
+                ifunc_count: 0,
+            };
+            // SAFETY: the page loaded ax dev's patch of this very module into its table.
+            if let Err(e) = unsafe { aio_hotpatch::apply_patch(table) } {
+                say(&format!("ax dev's patch didn't apply: {e}"));
+            }
+        });
+        _ = js_sys::Reflect::set(&w, &"__aioPatched".into(), patched.as_ref());
+        patched.forget();
+        if let Ok(e) = web_sys::Event::new("aio:wasm") {
+            _ = w.dispatch_event(&e);
+        }
+        aio_hotpatch::register_handler(std::sync::Arc::new(|| {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // SAFETY: read at once, not kept across patches.
+            let fns = unsafe { aio_hotpatch::get_jump_table() }.map_or(0, |t| t.map.len());
+            web_sys::console::info_1(&format!("[aio] hot-patch {n} applied ({fns} functions)").into());
+            air::hot::clear_markup();
+            on_air::with_root(air::Root::hot);
+            on_air::flush();
+        }));
+    }
     // The interpreter, then the views once it has run.
     let started = Closure::once_into_js(move || {
         air::on_wake(on_air::woken);
@@ -213,11 +297,41 @@ pub fn launch(root: fn() -> crate::ui::View) {
     }
 }
 
+/// The memory `ax dev --web`'s patches put their data in: a dev page's,
+/// apart from the heap, zeros its module's file doesn't hold.
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit", feature = "dev"))]
+#[unsafe(no_mangle)]
+static mut AIO_PATCH_ARENA: [u8; 16 << 20] = [0; 16 << 20];
+
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
+pub(crate) use on_air::seed_resources;
+
 /// The views of the page, on air: one root, flushed after each event, and
 /// whenever a task wakes (once per turn of the page's event loop).
 #[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
 mod on_air {
     use std::cell::{Cell, RefCell};
+
+    /// The values a streamed page carried for its seeded resources (its
+    /// `data-aio-data` blocks), for the first frame (`air::ssr::seed`): read
+    /// as that frame's first seeded resource asks (`aio::ui::seeded_resource`),
+    /// so a build with none links none of this.
+    pub(crate) fn seed_resources() {
+        thread_local!(static READ: Cell<bool> = const { Cell::new(false) });
+        // The first frame is built before the root is kept: after it, none.
+        if READ.replace(true) || ROOT.with_borrow(Option::is_some) {
+            return;
+        }
+        let Some(d) = web_sys::window().and_then(|w| w.document()) else { return };
+        let Ok(blocks) = d.query_selector_all("script[data-aio-data]") else { return };
+        for i in 0..blocks.length() {
+            let text = blocks.item(i).and_then(|b| b.text_content()).unwrap_or_default();
+            let Ok(serde_json::Value::Object(all)) = serde_json::from_str(&text) else { continue };
+            for (k, v) in all {
+                air::ssr::seed(k, v.to_string());
+            }
+        }
+    }
 
     thread_local! {
         static ROOT: RefCell<Option<air::Root>> = const { RefCell::new(None) };
@@ -226,7 +340,18 @@ mod on_air {
 
     pub(super) fn mount(app: fn() -> crate::ui::View) {
         let root = air::Root::new();
+        // A dev page's root through `ax dev`'s patches: the patched view once one came.
+        #[cfg(feature = "dev")]
+        root.show(move || aio_hotpatch::HotFn::current(app).call(()));
+        #[cfg(not(feature = "dev"))]
         root.show(app);
+        // A dev build's page: its cells in the Redux DevTools extension too,
+        // beside the app (not in `#main`: a painted page hydrates as it is).
+        #[cfg(feature = "dev")]
+        root.beside(|| {
+            use crate::ui::prelude::*;
+            rsx! { crate::kit::ReduxDevTools {} }
+        });
         #[cfg(feature = "dev")]
         root.within(crate::ui::audit::watch_page);
         ROOT.set(Some(root));
@@ -276,6 +401,21 @@ mod on_air {
         if let Some(w) = web_sys::window() {
             _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(wasm_bindgen::JsCast::unchecked_ref(&run), 0);
         }
+    }
+}
+
+/// A panic of the page's Rust, where it happened (a browser drops stderr,
+/// and the wasm trap names no place): on the page's console (which a
+/// release page sends to its server's log, `[server] page_log`), and open
+/// in a dev page's overlay.
+#[cfg(all(target_arch = "wasm32", feature = "web", feature = "kit"))]
+fn panicked(info: &std::panic::PanicHookInfo) {
+    use wasm_bindgen::JsCast;
+    let text = info.to_string();
+    web_sys::console::error_1(&format!("[aio] {text}").into());
+    let diag = web_sys::window().and_then(|w| js_sys::Reflect::get(&w, &"__aioDiag".into()).ok());
+    if let Some(f) = diag.and_then(|f| f.dyn_into::<js_sys::Function>().ok()) {
+        _ = f.call3(&wasm_bindgen::JsValue::NULL, &"panic".into(), &text.into(), &wasm_bindgen::JsValue::TRUE);
     }
 }
 

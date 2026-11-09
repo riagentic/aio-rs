@@ -948,3 +948,113 @@ fn the_test_kit_given_through_the_workspace_counts() {
         lint(project(&[("Cargo.toml", &renamed), ("app/Cargo.toml", &inherit("aio")), ("app/src/lib.rs", lib)]).path());
     assert!(!r.issues.iter().any(|i| i.message.contains("`testing` feature")), "{:?}", r.issues);
 }
+
+#[test]
+fn a_class_two_stylesheets_set_differently_is_a_warning_on_the_later_rule() {
+    let d = project(&[
+        ("assets/a.css", ".track { height: 3rem; color: red }\n.row { gap: 1px }\n"),
+        (
+            "assets/b.css",
+            "/* a comment\n */\n.track {\n  color: red;\n  height: 1lh;\n  &:hover { height: 9px }\n}\n\
+             .track:hover { height: 2px }\n@media (width < 9px) { .track { height: 0 } }\n.row { --gap: 2px; padding: 0 }\n\
+             /* aio-ok(css): print sizes */\n.row, .cell { gap: 4px }\n",
+        ),
+        ("assets/vendor.css", "/*! generated */\n.track { height: 0 }\n"),
+    ]);
+    let r = lint(d.path());
+    let css: Vec<_> = r.issues.iter().filter(|i| i.area == "css").collect();
+    assert_eq!(css.len(), 1, "{css:?}");
+    assert_eq!((css[0].severity, css[0].file.as_deref(), css[0].line), (Severity::Warn, Some("assets/b.css"), Some(3)));
+    assert!(css[0].message.contains(".track") && css[0].message.contains("`height`"), "{}", css[0].message);
+    assert!(css[0].message.contains("assets/a.css:1 says `3rem`, here `1lh`"), "{}", css[0].message);
+}
+
+/// aio's perf hint: sync I/O in async code stalls the runtime thread.
+#[test]
+fn blocking_std_io_in_async_code_is_a_perf_warning() {
+    let d = project(&[(
+        "src/fx.rs",
+        r#"
+use std::fs;
+use std::thread::sleep;
+
+pub async fn load(p: &str) -> Vec<u8> {
+    fs::read(p).unwrap()
+}
+
+pub fn effect() -> impl std::future::Future<Output = ()> {
+    async {
+        sleep(std::time::Duration::from_millis(5));
+        let _ = tokio::fs::read("x").await;
+        let _ = tokio::task::spawn_blocking(|| std::fs::read("y")).await;
+        // aio-ok(perf): a tiny file, once at start
+        let _ = std::fs::read_to_string("z");
+    }
+}
+
+pub fn plain() -> Vec<u8> {
+    std::fs::read("w").unwrap()
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let perf: Vec<_> = r.issues.iter().filter(|i| i.area == "perf").collect();
+    assert_eq!(
+        perf.iter().map(|i| (i.line.unwrap(), i.message.split('`').nth(1).unwrap())).collect::<Vec<_>>(),
+        [(6, "fs::read"), (11, "sleep")],
+        "{perf:?}"
+    );
+    assert!(
+        perf.iter()
+            .all(|i| i.severity == Severity::Warn && i.fix.as_deref().unwrap().contains("aio::effect::blocking"))
+    );
+}
+
+/// aio's `[fixable]`: a finding a flag fixes says which.
+#[test]
+fn a_finding_a_flag_fixes_is_marked_fixable() {
+    let root = Path::new("/ws");
+    let fixed = serde_json::json!({"reason": "compiler-message", "message": {"level": "warning", "message": "m",
+        "code": {"code": "unused_imports"}, "spans": [{"file_name": "src/a.rs", "line_start": 1, "is_primary": true}],
+        "children": [{"spans": [{"suggestion_applicability": "MachineApplicable"}]}]}});
+    let asked = serde_json::json!({"reason": "compiler-message", "message": {"level": "warning", "message": "n",
+        "code": {"code": "clippy::x"}, "spans": [{"file_name": "src/a.rs", "line_start": 2, "is_primary": true,
+        "suggestion_applicability": "MaybeIncorrect"}]}});
+    let got = clippy_issues(&format!("{fixed}\n{asked}"), root, root);
+    assert_eq!(got.iter().map(|i| i.fixable).collect::<Vec<_>>(), [Some("--safe-fix"), None]);
+    let d = project(&[("build.rs", "fn main() { aio::config::build(\"aio.toml\"); }\n")]);
+    let mut r = lint(d.path());
+    assert!(r.issues.iter().any(|i| i.area == "migrate" && i.fixable == Some("--fix")), "{:?}", r.issues);
+    r.issues.extend(got);
+    let h = human(&r, Path::new("/p"), false);
+    assert!(
+        h.contains("[rustc] m  [fixable: --safe-fix]") && h.contains("1 finding fixable: ax lint --safe-fix"),
+        "{h}"
+    );
+    assert!(h.contains("1 finding fixable: ax lint --fix"), "{h}");
+    assert_eq!(json(&r)["issues"].as_array().unwrap().iter().filter(|i| i["fixable"] == "--safe-fix").count(), 1);
+}
+
+#[test]
+fn a_crate_too_big_to_edit_fast_is_a_perf_hint_at_its_manifest() {
+    let view = "fn v() {}\n".repeat(CRATE_LINES / 2);
+    let d = project(&[
+        ("Cargo.toml", "[package]\nname = \"a\"\n"),
+        ("src/lib.rs", &view),
+        ("src/more.rs", &(view.clone() + "fn w() {}\n")),
+        ("tests/big.rs", &view.repeat(3)),
+        ("pages/p/Cargo.toml", "[package]\nname = \"p\"\n"),
+        ("pages/p/src/lib.rs", &view),
+    ]);
+    let r = lint(d.path());
+    let perf: Vec<&Issue> = r.issues.iter().filter(|i| i.area == "perf").collect();
+    assert_eq!(perf.len(), 1, "the root crate alone: {:?}", found(&r));
+    assert_eq!(perf[0].file.as_deref(), Some("Cargo.toml"));
+    assert_eq!(perf[0].severity, Severity::Hint);
+    assert!(
+        perf[0].message.starts_with(&format!("{} lines of Rust in one crate", CRATE_LINES + 1)),
+        "{}",
+        perf[0].message
+    );
+    assert!(perf[0].fix.as_deref().unwrap().contains("ax add <app> page <name>"));
+}

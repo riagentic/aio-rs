@@ -1241,6 +1241,26 @@ fn a_transition_plays_its_enter_and_keeps_the_content_until_its_exit_is_over() {
     }
 }
 
+/// aio's `options`: one timing for both motions, shared by many transitions.
+#[test]
+fn a_transitions_options_time_its_enter_and_exit() {
+    const QUICK: Timing = Timing { ms: Some(100), delay_ms: None, easing: None };
+    let mut ui = TestUi::new(|| {
+        let show = signal(|| true);
+        rsx! {
+            button { "data-t": "toggle", onclick: move |_| show.toggle(), "toggle" }
+            Transition { show: show.get(), enter: Motion::FADE, exit: Motion::SCALE, options: QUICK,
+                p { "data-t": "msg", "hello" }
+            }
+        }
+    });
+    assert_eq!(played(&mut ui), "aio-fade 0.1s normal");
+    ui.click("toggle");
+    assert_eq!(played(&mut ui), "aio-scale 0.1s reverse");
+    ui.wait(Duration::from_millis(150));
+    assert!(ui.absent("msg"), "gone once its 100 ms exit is over");
+}
+
 /// A motion written as a function plays the frames it gives.
 #[test]
 fn a_motion_written_as_a_function_plays_its_frames() {
@@ -1989,6 +2009,130 @@ mod travel {
     }
 }
 
+/// The Redux DevTools bridge on the real engine, against a stand-in of the
+/// extension's page API (`connect`: `init`, `send`, `subscribe`).
+#[cfg(feature = "dev")]
+mod redux {
+    use super::*;
+    use aio::prelude::*;
+    use aio::serde_json::{Value, json};
+
+    #[cell]
+    pub struct Tally {
+        pub n: i64,
+    }
+
+    #[methods]
+    impl Tally {
+        pub fn add(&mut self, by: i64) {
+            self.n += by;
+        }
+    }
+
+    aio::client!(Tally, tally);
+
+    const EXTENSION: &str = "window.__rd = { sent: [], subs: [] };
+        window.__REDUX_DEVTOOLS_EXTENSION__ = { connect: (o) => (window.__rd.opts = o, {
+          init: (s) => window.__rd.sent.push(['init', s]),
+          send: (a, s) => window.__rd.sent.push([a, s]),
+          subscribe: (f) => window.__rd.subs.push(f),
+          unsubscribe: () => { window.__rd.subs = [] },
+        }) }; true";
+
+    fn app() -> View {
+        use_live();
+        let on = signal(|| false);
+        rsx! {
+            p { "data-t": "n", "{tally().n}" }
+            button { r#type: "button", "data-t": "add", onclick: |_| _ = act!(add(2)), "add" }
+            button { r#type: "button", "data-t": "bridge", onclick: move |_| on.set(true), "bridge" }
+            if on.get() { ReduxDevTools {} }
+        }
+    }
+
+    fn sent(ui: &mut TestUi) -> Vec<Value> {
+        ui.eval("window.__rd.sent").as_array().cloned().unwrap_or_default()
+    }
+
+    fn ext_says(ui: &mut TestUi, m: Value) {
+        ui.eval(&format!("window.__rd.subs.forEach((f) => f({m})), true"));
+    }
+
+    /// Wait (real time: the page answers on its own) until `n` messages were sent.
+    fn until_sent(ui: &mut TestUi, n: usize) -> Vec<Value> {
+        for _ in 0..200 {
+            let s = sent(ui);
+            if s.len() >= n {
+                return s;
+            }
+            ui.wait(Duration::from_millis(25));
+        }
+        panic!("{n} messages never sent: {:?}", sent(ui));
+    }
+
+    fn jump(id: u64) -> Value {
+        json!({ "type": "DISPATCH", "payload": { "type": "JUMP_TO_ACTION", "actionId": id }, "state": "{}" })
+    }
+
+    #[test]
+    fn a_dev_builds_cells_show_in_redux_devtools_and_its_jumps_travel() {
+        let mut ui = TestUi::new(app);
+        ui.click("add");
+        ui.eval(EXTENSION);
+        ui.click("bridge");
+        let s = until_sent(&mut ui, 1);
+        assert_eq!(s[0], json!(["init", { "n": 2 }]), "the state as it is when it connects");
+        let opts = ui.eval("window.__rd.opts");
+        assert_eq!((opts["name"].clone(), opts["features"]["jump"].clone()), (json!("tally"), json!(true)));
+        ui.click("add");
+        ui.click("add");
+        let s = until_sent(&mut ui, 3);
+        assert_eq!(s[1], json!([{ "type": "add", "args": [2] }, { "n": 4 }]), "the view's call, its arguments");
+        assert_eq!(s[2][1], json!({ "n": 6 }));
+
+        // A jump travels: the store's state after that action, held.
+        ext_says(&mut ui, jump(1));
+        ui.until_text("n", "4");
+        ui.click("add");
+        assert_eq!(ui.text("n"), "4", "held where the jump put it");
+        assert_eq!(ui.failures().len(), 1, "the call was refused, not dropped as if it ran");
+        ext_says(&mut ui, jump(0));
+        ui.until_text("n", "2");
+        // The newest action: there, and calls are taken again.
+        ext_says(&mut ui, jump(2));
+        ui.until_text("n", "6");
+        ui.click("add");
+        let s = until_sent(&mut ui, 4);
+        assert_eq!(s.len(), 4, "the jumps are no actions: {s:?}");
+        assert_eq!(s[3][1], json!({ "n": 8 }));
+
+        // Its dispatcher calls a method; its pause stops the sending.
+        ext_says(&mut ui, json!({ "type": "ACTION", "payload": r#"{"type":"add","args":[10]}"# }));
+        ui.until_text("n", "18");
+        let s = until_sent(&mut ui, 5);
+        assert_eq!(s[4], json!([{ "type": "add", "args": [10] }, { "n": 18 }]));
+        ext_says(&mut ui, json!({ "type": "DISPATCH", "payload": { "type": "PAUSE_RECORDING", "status": true } }));
+        ui.click("add");
+        ui.wait(Duration::from_millis(300));
+        assert_eq!(sent(&mut ui).len(), 5, "paused: not recorded");
+        // Its commit: the history starts again from the state now.
+        ext_says(&mut ui, json!({ "type": "DISPATCH", "payload": { "type": "COMMIT" } }));
+        let s = until_sent(&mut ui, 6);
+        assert_eq!(s[5], json!(["init", { "n": 20 }]));
+    }
+
+    /// No extension in the page (a desktop window's): nothing is sent, nothing breaks.
+    #[test]
+    fn without_the_extension_the_bridge_stays_quiet() {
+        let mut ui = TestUi::new(app);
+        ui.click("bridge");
+        ui.click("add");
+        ui.wait(Duration::from_millis(300));
+        assert_eq!(ui.text("n"), "2");
+        assert!(ui.failures().is_empty(), "{:?}", ui.failures());
+    }
+}
+
 #[derive(aio::serde::Serialize, Clone, PartialEq)]
 #[serde(crate = "aio::serde")]
 struct Chart {
@@ -2276,6 +2420,45 @@ fn a_field_array_edits_its_rows() {
     assert_eq!(ui.text("rows"), "a");
 }
 
+/// aio's `useOptimistic`: the actions show on the value at once, and go
+/// when the value they were added on changes (the answer came); `clear`
+/// drops them when nothing changed (a refusal).
+#[test]
+fn an_optimistic_value_shows_its_actions_until_the_answer_comes() {
+    let mut ui = TestUi::new(|| {
+        let sent = signal(Vec::<String>::new);
+        let shown = use_optimistic(
+            move || sent.get(),
+            |v: &Vec<String>, a: &String| {
+                let mut v = v.clone();
+                v.push(format!("{a}…"));
+                v
+            },
+        );
+        rsx! {
+            p { "data-t": "shown", {shown.get().join(",")} }
+            p { "data-t": "pending", {shown.pending().to_string()} }
+            button { "data-t": "send", onclick: move |_| shown.add("hi".to_string()), "send" }
+            button { "data-t": "more", onclick: move |_| shown.add("yo".to_string()), "more" }
+            button { "data-t": "answer", onclick: move |_| sent.write().push("hi".into()), "answer" }
+            button { "data-t": "refused", onclick: move |_| shown.clear(), "refused" }
+        }
+    });
+    assert_eq!(ui.text("shown"), "");
+    ui.click("send");
+    ui.click("more");
+    assert_eq!(ui.text("shown"), "hi…,yo…");
+    ui.click("answer");
+    assert_eq!(ui.text("shown"), "hi", "the answer replaces them, never shown twice");
+    assert_eq!(ui.text("pending"), "false");
+    ui.click("more");
+    assert_eq!(ui.text("shown"), "hi,yo…");
+    assert_eq!(ui.text("pending"), "true");
+    ui.click("refused");
+    assert_eq!(ui.text("shown"), "hi", "a refusal that changed nothing drops them");
+    assert_eq!(ui.text("pending"), "false");
+}
+
 /// A reaction to a change (aio's `onChange`): only the selector is
 /// followed, it waits for a change, and its cleanup runs before the next
 /// change and when the view goes.
@@ -2405,4 +2588,120 @@ fn shows(ui: &mut TestUi, f: impl Fn(&TestUi) -> bool) {
         ui.wait(Duration::from_millis(25));
     }
     panic!("never shown:\n{}", ui.surface());
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct Join {
+    name: String,
+    age: String,
+    site: String,
+}
+
+#[derive(Debug, PartialEq)]
+struct Member {
+    name: String,
+    age: u8,
+    site: Option<String>,
+}
+
+fn join_schema() -> Schema<Join, Member> {
+    let name = text().trim().required("Your name, please");
+    let age = text().parse::<u8>("A number").range(18..=130, "18 or more");
+    let site = optional(text().trim().check(|s| s.starts_with("https://"), "An https:// address"));
+    Schema::new(move |p: &mut Parse<Join>| {
+        let (name, age, site) =
+            (p.field(aio::field!(name), &name), p.field(aio::field!(age), &age), p.field(aio::field!(site), &site));
+        Some(Member { name: name?, age: age?, site: site? })
+    })
+    .wait(aio::field!(name), Duration::from_millis(300), |name: String| async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        (name.trim() == "taken").then(|| "That name is taken".to_string())
+    })
+}
+
+/// aio's `useForm` with a Standard Schema (Zod, Valibot): each field's rule
+/// declared once, its problem on its field, `parsed()` the typed value, a
+/// check that waits.
+#[test]
+fn a_schema_form_says_each_fields_problem_and_parses_into_the_apps_type() {
+    let mut ui = TestUi::new(|| {
+        let form = use_form_schema(Join::default, join_schema());
+        rsx! {
+            Field { label: "Name", error: form.error("name"), "data-t": "name-field", Input { "data-t": "name", bind: form.bind(aio::field!(name)) } }
+            Field { label: "Age", error: form.error("age"), "data-t": "age-field", Input { "data-t": "age", bind: form.bind(aio::field!(age)) } }
+            Field { label: "Site", error: form.error("site"), "data-t": "site-field", Input { "data-t": "site", bind: form.bind(aio::field!(site)) } }
+            p { "data-t": "parsed", {format!("{:?}", form.parsed())} }
+            button { "data-t": "submit", onclick: move |_| if let Some(m) = form.submit_parsed() { log(format!("{m:?}")) }, "join" }
+        }
+    });
+    ui.click("submit");
+    assert!(said().is_empty());
+    assert!(ui.text("name-field").contains("Your name, please") && ui.text("age-field").contains("A number"));
+    ui.type_text("name", "ada");
+    ui.type_text("age", "12");
+    ui.type_text("site", "http://x");
+    assert!(ui.text("age-field").contains("18 or more") && ui.text("site-field").contains("An https:// address"));
+    ui.set_value("age", "36");
+    ui.set_value("site", "");
+    pass(&mut ui, 500);
+    assert_eq!(ui.text("parsed"), "Some(Member { name: \"ada\", age: 36, site: None })", "the typed value");
+    ui.set_value("name", "taken");
+    assert_eq!(ui.text("parsed"), "None", "a waiting check holds it");
+    pass(&mut ui, 500);
+    assert!(ui.text("name-field").contains("That name is taken"));
+    ui.set_value("name", "  Ada ");
+    pass(&mut ui, 500);
+    ui.click("submit");
+    assert_eq!(said(), ["Member { name: \"Ada\", age: 36, site: None }"]);
+}
+
+/// aio's `<UiStyles/>`: the kit's sheet as an element.
+#[test]
+fn ui_styles_put_the_kits_sheet_on_the_page() {
+    let mut ui = TestUi::new(|| {
+        rsx! {
+            UiStyles { hue: 200, scheme: aio::ui::Scheme::Dark }
+            Button { "data-t": "b", "Save" }
+        }
+    });
+    assert_eq!(ui.count("style[data-aio-ui]"), 1);
+    assert_eq!(ui.style("b", "cursor"), "pointer", "the kit's button rule applies");
+    let bg = ui
+        .eval("getComputedStyle(document.querySelector('[data-theme]') ?? document.body).getPropertyValue('--aio-bg')");
+    assert!(!bg.as_str().unwrap_or_default().trim().is_empty(), "the tokens are set: {bg}");
+}
+
+/// aio's `TransitionFn` was given the element: a motion here reads its box
+/// as `--aio-w` and `--aio-h`, measured before its first frame.
+#[test]
+fn a_motion_reads_the_box_of_what_it_moves() {
+    let mut ui = TestUi::new(|| {
+        let show = signal(|| false);
+        rsx! {
+            button { "data-t": "show", onclick: move |_| show.set(true), "show" }
+            Transition { show: show.get(), enter: Motion::of("aio-test-drop", |t| format!("height:calc(var(--aio-h) * {t});overflow:hidden")).ms(60_000),
+                div { "data-t": "box", style: "height: 40px", "hi" }
+            }
+        }
+    });
+    ui.click("show");
+    assert_eq!(ui.style("box", "--aio-h").trim(), "40px", "its own height, without the animation");
+    let h = ui.rect("box").height;
+    assert!(h < 20.0, "the frames scale by it: {h}");
+}
+
+/// aio's `h()`: SVG built without `rsx!` is SVG.
+#[test]
+fn an_svg_built_without_rsx_draws_in_svgs_namespace() {
+    let mut ui = TestUi::new(|| {
+        h("svg")
+            .attr("data-t", "pic")
+            .attr("width", "20")
+            .attr("height", "20")
+            .child(h("circle").attr("data-t", "dot").attr("r", "4").attr("cx", "10").attr("cy", "10"))
+            .view()
+    });
+    let ns = ui.eval("document.querySelector('[data-t=dot]').namespaceURI");
+    assert_eq!(ns.as_str(), Some("http://www.w3.org/2000/svg"));
+    assert_eq!(ui.rect("dot").width, 8.0, "drawn: a circle of radius 4");
 }

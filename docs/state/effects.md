@@ -101,6 +101,17 @@ other.
   when the effect awaiting it ends early (`cx.abort`, a timeout, the app
   stopping). Its result comes back as a call like any other: no cell
   needs its own thread.
+- `aio::effect::off_thread(key, f, input).await` is the same on every
+  target: `f(input)` on a worker thread natively (as `blocking`), in a
+  web build in a Web Worker running the app's own module (aio's worker
+  cells and browser workers), so the page stays responsive. `f` is a plain
+  `fn` (a worker shares no memory with the page: it gets what it needs as
+  `input`); input and output cross as JSON. Up to a core less than the
+  device has run at once; more wait their turn. `cancel_blocking(key)`,
+  or the effect ending early, stops it (in a page at once: its worker
+  ends); a panic is a refusal with its message. A worker loads the lazy
+  views' chunks the page has, so `f` may be one only a
+  [lazy view](../ui/islands.md#lazy-views-lazy) uses.
 - `aio::effect::retry(retries, timeout, || io())` runs `io` again up to
   `retries` more times while it fails, each try cut off after `timeout`
   (aio's `call({ timeoutMs, retries })`).
@@ -704,11 +715,11 @@ What aio has and aio-rs does not, or does differently:
 - **Blocking work stops when it looks.** `aio::effect::blocking`'s work
   runs on a worker thread and stops at its next `cancel.cancelled()`
   check, as aio's does at its next message; a thread can't be killed.
-- **Tests see effects as descriptions**, since an effect is a closure,
-  not data. aio's `testCell` hands the effect objects to the test (`t.getEffects()`, `isScheduleEffect`); `TestCells`
-  lists them by key (`t.effects()`) and as `HeldEffect`s (key, mode,
-  timeout: `t.held_effects()`), and runs them (`t.settle()`); schedules
-  are `ax schedules` and `Store::schedules`.
+- **An effect is a closure, its test value a description.** aio's
+  `t.getEffects()` is `t.last_asked()`: the last call's effects
+  (`HeldEffect`: cell, key, mode, timeout), schedules (`Plan`), tells
+  and aborts, each an `AskedFor` (`is_effect`, `is_schedule`, `is_tell`,
+  `is_abort`); `t.settle()` runs the effects.
 - A command-line client prints no tell.
 
 ## API

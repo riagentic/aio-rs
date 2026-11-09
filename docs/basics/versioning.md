@@ -59,8 +59,10 @@ does it. An example: `aio::config::build`, the older launcher's
 ### Gaps against aio's policy
 
 - No `experimental` marker: every public item carries the same 0.x
-  promise, so a marker would say nothing yet. The API snapshot gate is
-  aio's: `scripts/public-api --check` in CI.
+  promise, and the API snapshot gate (`scripts/public-api --check` in
+  CI) fails on any change, additive or not, so a marker would classify
+  nothing. aio's marker only turned a removal into an additive change
+  for its gate, and aio's own policy has no experimental items left.
 - No release phases or freeze: aio froze its surface before its 1.0; aio-rs
   is early alpha, and a minor version may break things.
 

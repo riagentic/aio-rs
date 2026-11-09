@@ -25,6 +25,8 @@ has no port at all, as an aio desktop app has none.
   - `wire`: protocol v3 on `/ws` for aio pages and tools (with `server`). A cell's `#[aio_cell]` fields are aio cells of their own there: `state`, `patches`, `subs` and `resync` per slice; `<slice>:<m>` calls the cell's `<slice>_<m>`, else `m`.
   - `crdt`: aio's offline sync (`op`, `sync-req`) on aio-rs's event log: an op is a synced call (its id made from the op's id and stamp, so a re-send is acked again, never run twice), `serverTs` its event's seq; every catch-up is a snapshot at the cell's seq (aio's answer after a compaction); no `push` frames (aio's client asks again when state frames differ). aio's own client proves it: `AIO_DENO_SRC=<copy of aio>/src cargo test -p aio-rs --all-features --test compat_wire` (needs deno).
   - `AioLink`: an aio-rs app as a client of an aio app (proto, state, patches, action/ack, server fns).
+  - `local`: aio's lock record (`<lock dir>/<key>.lock`, aio's folder and key) and aio's local socket (NDJSON lines of aio's envelope, `ctl` → `ctlr`), so `am instances` lists a running aio-rs app and `am state`, `am dispatch` reach it through its doors, a debug build's only (aio's trojan is dev-only); `/__aio/health` on any build. No `server` needed. [ax](../clients/ax.md#what-am-sees-of-an-aio-rs-app)
+  - `AioPeer`: an aio app on this machine called as this app, proven (aio's `peer()`): found by its lock record, reached on its local socket (a named pipe on Windows), aio's identity hello first; aio's socket sends no `boot`, so its first `state` ends the hello there. aio's own app proves it: `AIO_DENO_SRC=<copy of aio>/src cargo test -p aio-rs --all-features --test compat_peer` (needs deno).
   - `scatter`: aio's one-time move of a scattered layout into the home ([data](data.md) 7).
   - `#[on_aio]`: a cell's hook on what aio changed in its `state.db`.
 - Without it: a `/ws` client that doesn't send `x-aio-wire: 2` (or `?wire=2`) gets HTTP 426 before the upgrade; `#[on_aio]` fails the build with the line to add. Every aio-rs client sends the marker. `ax clients` shows each link's wire: `aio-rs`, `aio` or `tool`.
@@ -89,6 +91,8 @@ has no port at all, as an aio desktop app has none.
   - `{op:"append", path, value}` means `old + value`.
   - `path[0]` is the cell name. Refuse any `__proto__` segment.
 - **Subscribe:** `subs {subs:[dot paths]|["*"]}`, at most 1024 paths, never empty. `resync` asks for the state again.
+  - aio narrows to whole cells (`todos.items` subscribes `todos`), and so does aio-rs; aio-rs's `exact: true` narrows to the paths themselves (aio never sends it).
+- **Backpressure:** `vitals-ping {t1, ms?, h?}`, `ms` the page's render staleness: past 100 ms the client's patches go 2x the window apart, past 300 ms 4x; three under 100 ms step it back.
 - **Call:** `action {type:"<cell>:<method>", payload:{args:[…]}, cid?, stream?}`. The server strips `_source` and refuses `cell:__*`.
 - **Reply:** `ack {cid, ok, value?, error?, code?, retryAfterMs?, unsaved?, short?}`. `chunk {cid, value}` frames come before a streamed `ack`.
 - **CRDT:** `op`, `sync-req`, `sync-res`, `sync-ack`, `op-rejected`, `sync-err`.
@@ -102,7 +106,7 @@ has no port at all, as an aio desktop app has none.
 - **Directory:** `$XDG_RUNTIME_DIR/aio`, else `/tmp/aio`, mode 0700.
 - **File:** `<appId>.lock`, `<appId>@<profile>.lock` or `<appId>@<fnv1a8(home)>.lock`.
 - **JSON:** `appId, pid, port, startedAt, status(starting|started|stopping), cwd`, plus optional `discovery {title?, tls, needsAuth}`, `socketPath`, `httpSocketPath`, and others.
-- aio-rs writes none of these: it claims the home (`.aio-instance.lock`, `.aio-instance.json`, [data](data.md)), so aio and aio-rs never run on the same data, but `am instances` doesn't list a running aio-rs app; `ax apps` does.
+- With feature `compat` an aio-rs app files its own (`compat::local`): at its first served cell (with `socketPath`: aio's local socket, for `am`), or at the first `AioPeer` link (without one: listed, reached by nothing). Its key is aio's `lockKey` (a profile names it only where the home is that profile's), with `home`, `dataDir`, `startToken`, `aioVersion`, and one per-run `<home>/data/control.key` (0600) for `am`'s `X-Aio-Control` and the `x-aio-peer` proofs both. A clean stop (`aio::shutdown`) removes the record and the key; a crash leaves a record aio drops as stale. It still claims the home (`.aio-instance.lock`, [data](data.md)), so aio and aio-rs never run on the same data.
 
 ## Blobs
 

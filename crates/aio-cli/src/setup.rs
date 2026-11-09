@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// `bytes` as the executable `to` (written aside, then moved in place).
-fn write_exe(bytes: &[u8], to: &Path) -> Result<(), String> {
+pub fn write_exe(bytes: &[u8], to: &Path) -> Result<(), String> {
     let tmp = to.with_extension("partial");
     std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
     #[cfg(unix)]
@@ -124,11 +124,14 @@ fn bindgen_version(said: &str) -> &str {
 pub fn wasm_bindgen_at(version: &str) -> Result<PathBuf, String> {
     let path = ran("wasm-bindgen", &["--version"]);
     let found = path.as_deref().map(bindgen_version).unwrap_or("none");
-    let own = wasm_bindgen_home(&aio::paths::tool_home(), version);
-    match () {
-        _ if found == version => Ok("wasm-bindgen".into()),
-        _ if own.is_file() => Ok(own),
-        _ => Err(format!("found {found}")),
+    // A test's sandbox (another test's, at once) hides the person's tools:
+    // the one `ax setup` put there is looked for too.
+    let homes = [aio::paths::tool_home(), aio::paths::real_tool_home()];
+    let own = homes.iter().map(|h| wasm_bindgen_home(h, version)).find(|p| p.is_file());
+    match (found == version, own) {
+        (true, _) => Ok("wasm-bindgen".into()),
+        (false, Some(own)) => Ok(own),
+        (false, None) => Err(format!("found {found}")),
     }
 }
 
@@ -405,6 +408,15 @@ pub fn run(check: bool) -> Result<String, String> {
         false,
         bindgen.map(|p| format!("at {}", p.display())),
     ));
+    if os != "macos" {
+        let zig = if check { crate::zig::here() } else { crate::zig::ensure() };
+        needs.push(need(
+            format!("zig {}", crate::zig::VERSION),
+            "ax build --platforms macos,macos-arm64 here, with Rust's targets (rustup target add aarch64-apple-darwin x86_64-apple-darwin)",
+            false,
+            zig.map(|p| format!("at {}", p.display())),
+        ));
+    }
     needs.extend(optionals(os, crate::display::desktop(), &|p, a| ran(p, &[a])));
     report(os, arch, &needs)
 }

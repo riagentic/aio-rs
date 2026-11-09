@@ -25,11 +25,17 @@
 //! the same arguments ([`RELAUNCH`]), and that start installs it as above
 //! (the data backed up while nothing writes it).
 use aio::sha256::Sha256;
-use aio::update::{self as up, Data, Found, Manifest, Offer, Ready, Step, Updates, UpdatesCalls};
-use std::io::{self, IsTerminal, Read};
+use aio::update::{self as up, Data, Found, Manifest, Offer, Step};
+#[cfg(feature = "updates")]
+use aio::update::{Ready, Updates, UpdatesCalls};
+#[cfg(feature = "updates")]
+use std::io::IsTerminal;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::OnceLock;
+#[cfg(feature = "updates")]
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// How long a new version has to open its window.
@@ -320,6 +326,18 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
     }
     let Some(m) = staged(&d, version) else { return Ok(Next::Boot) };
     let to = m.release.version.clone();
+    // The app's say first (aio's canApply, awaited at every install): "not
+    // now" keeps the release staged for a later start.
+    match asked() {
+        Some(Err(why)) => {
+            eprintln!("[aio] update {to} waits: the app says not now: {why}; it installs at a later start");
+            return Ok(Next::Boot);
+        }
+        None => eprintln!(
+            "[aio] update {to} installs now with no veto: aio::update::can_apply lets the app say not now (mid-recording, a sync not done)"
+        ),
+        Some(Ok(())) => {}
+    }
     // Checked again now: the data may have moved on since the download.
     let store = dirs.store.clone();
     let local = up::local_data(&store).map_err(io::Error::other)?;
@@ -388,6 +406,14 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
         return Ok(Next::Boot);
     }
     Ok(Next::Exit)
+}
+
+/// The app's veto ([`up::veto`]), awaited on aio's runtime from a thread of
+/// its own (this one may be inside another runtime); a veto that panics
+/// says not now.
+fn asked() -> Option<Result<(), String>> {
+    std::thread::scope(|s| s.spawn(|| aio::rt().block_on(up::veto())).join())
+        .unwrap_or_else(|_| Some(Err("its can_apply panicked".into())))
 }
 
 /// This start (a window's: the helper waits on it) is the first of
@@ -932,6 +958,7 @@ fn room(dir: &Path, size: u64, free: Option<u64>) -> io::Result<()> {
 /// How long after `failures` failed checks in a row the next one comes:
 /// `every`, doubled each time (at most 64 times), up to 4 × `every` but at
 /// least an hour, and never past a day (aio updateBackoffMs).
+#[cfg(feature = "updates")]
 fn backoff(every: Duration, failures: u32) -> Duration {
     const HOUR: Duration = Duration::from_secs(3600);
     if failures == 0 {
@@ -944,7 +971,11 @@ fn backoff(every: Duration, failures: u32) -> Duration {
 /// The channel this app follows now: the `updates` cell's once it is open
 /// (where `set_channel` changes it), else as at start.
 fn channel(cfg: &aio::config::Config) -> String {
-    cell().map(|c| c.state().channel.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| resolved(cfg, None))
+    #[cfg(feature = "updates")]
+    if let Some(c) = cell().map(|c| c.state().channel.clone()).filter(|c| !c.is_empty()) {
+        return c;
+    }
+    resolved(cfg, None)
 }
 
 /// The channel at start (`aio::update::channel`), the user's `pinned` one
@@ -1623,11 +1654,13 @@ impl up::Runtime for Shell {
     }
 }
 
+#[cfg(feature = "updates")]
 static CELL: RwLock<Option<aio::Source<Updates>>> = RwLock::new(None);
 
 /// The app's `updates` cell, once `start` ran with `[updates] url` set:
 /// what a UI shows of its updates (available, blocked, progress), and the
 /// verbs it calls (`check`, `apply`, `dismiss`).
+#[cfg(feature = "updates")]
 pub fn cell() -> Option<aio::Source<Updates>> {
     CELL.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -1637,6 +1670,7 @@ pub fn cell() -> Option<aio::Source<Updates>> {
 /// steps through to `Restarting` touching nothing ([`up::Stub`]): the app's
 /// own update UI is driven on it as on the real one. Its handle, to wait on
 /// its effects (`done("check")`).
+#[cfg(feature = "updates")]
 pub fn stub(current: &str, found: Found) -> aio::Handle<Updates> {
     up::install(Arc::new(up::Stub(found)));
     let h = aio::Handle::<Updates>::memory();
@@ -1648,6 +1682,7 @@ pub fn stub(current: &str, found: Found) -> aio::Handle<Updates> {
 
 /// The app brought its own update runtime (`aio::update::install` before
 /// start): the built-in one never checks.
+#[cfg(feature = "updates")]
 static OWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What a build without `updates` says at start when the app asks for
@@ -1670,7 +1705,7 @@ pub(crate) fn left_out(url: bool, own: bool) -> Option<&'static str> {
 
 /// Open the `updates` cell (`updates.db`, beside the app's data) on the
 /// built-in runtime, or on the app's own when it installed one.
-#[cfg_attr(not(feature = "updates"), allow(dead_code))]
+#[cfg(feature = "updates")]
 pub(crate) fn open(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::AppDirs) -> io::Result<()> {
     let own = up::installed();
     if (cfg.updates.url.is_none() && !own) || cell().is_some() {
@@ -1815,6 +1850,7 @@ fn staged_binary(dir: &Path, bin: &str) -> Option<PathBuf> {
 }
 
 /// What an app with no window does about a release a check found.
+#[cfg(feature = "updates")]
 #[derive(Debug, PartialEq, Eq)]
 enum Act {
     None,
@@ -1828,6 +1864,7 @@ enum Act {
 /// a staged release installs now, unattended (a server may never start
 /// again on its own); without, a person on the terminal is asked. With a
 /// window, the app's UI decides, and `auto` installs at the next start.
+#[cfg(feature = "updates")]
 fn headless(cfg: &aio::config::Config, f: &Found, tty: bool) -> Act {
     use aio::config::Mode;
     let Found::Offer(o) = f else { return Act::None };
@@ -1840,6 +1877,7 @@ fn headless(cfg: &aio::config::Config, f: &Found, tty: bool) -> Act {
 }
 
 /// `question` on the terminal: true for y or yes.
+#[cfg(feature = "updates")]
 fn ask(question: &str) -> bool {
     use std::io::Write;
     print!("\n{question}");
@@ -1848,12 +1886,14 @@ fn ask(question: &str) -> bool {
     std::io::stdin().read_line(&mut line).is_ok() && yes(&line)
 }
 
+#[cfg(feature = "updates")]
 fn yes(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
 /// Look for releases in the background, while the app runs from an
 /// installed version: soon after start, then every `[updates] every`.
+#[cfg(feature = "updates")]
 pub fn watch(cfg: &aio::config::Config, version: &str, data: &Path) {
     if cfg.updates.url.is_none()
         || OWN.load(std::sync::atomic::Ordering::Relaxed)
@@ -2014,6 +2054,23 @@ mod tests {
         // A test is no AppImage: releases are named as for its bundle.
         assert_eq!(appimage(), None);
         assert_eq!(manifest_name(), platform());
+    }
+
+    /// aio's `canApply` at the install a start makes: awaited, even from
+    /// inside another runtime; one that panics says not now.
+    #[test]
+    fn a_start_awaits_the_apps_veto() {
+        assert_eq!(asked(), None, "none set");
+        up::can_apply(|| async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Err("mid-recording".into())
+        });
+        let inside = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert_eq!(inside.block_on(async { asked() }), Some(Err("mid-recording".into())));
+        up::can_apply(|| async { panic!("a bug in the veto") });
+        assert_eq!(asked(), Some(Err("its can_apply panicked".into())));
+        up::can_apply(|| async { Ok(()) });
+        assert_eq!(asked(), Some(Ok(())));
     }
 
     #[test]

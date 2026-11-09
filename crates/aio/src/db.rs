@@ -11,6 +11,9 @@
 //! reads, through any `Db` of the same file in this process; both sides are
 //! known from SQLite itself, not from parsing SQL.
 use crate::Error;
+pub use query::{MAX_PARAMS, Op, Order, Select, Where};
+mod query;
+
 use rusqlite::Connection;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

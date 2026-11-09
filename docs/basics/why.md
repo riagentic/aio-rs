@@ -3,7 +3,7 @@
 Any aio-rs app could be written with plain Rust: a UI crate, SQLite, a
 sync layer and a packager, glued by hand. This page says what aio-rs
 gives over that, and when plain Rust (or something else) is the better
-choice. Every line is a feature of aio-rs 0.3.0 with the page that shows it.
+choice. Every line is a feature of aio-rs 0.4.0 with the page that shows it.
 
 ## What you'd write yourself, what aio-rs gives
 
@@ -40,7 +40,7 @@ app builds, so a typo in it is one too.
 
 ## When not to use aio-rs
 
-- **It is alpha.** 0.3.0 is the third release; until 1.0.0 a minor
+- **It is alpha.** 0.4.0 is the fourth release; until 1.0.0 a minor
   version may break things ([versions](versioning.md)).
 - **Not on crates.io yet.** An app takes aio-rs from git at a release
   tag ([setup](setup.md#where-an-app-gets-aio-rs-from)).
@@ -51,15 +51,17 @@ app builds, so a typo in it is one too.
   system webview and a small download matter most, Tauri or another
   system-webview stack fits better ([comparison](../comparison.md)).
 - **Rust compile times.** A Rust edit recompiles its whole crate:
-  0.6 s in the template, ~10 s in a crate of about 74 000 lines; a first build
-  takes 15 s to ~60 s. Splitting a big app into crates brings a page edit
-  to ~1.9 s ([what an edit costs](../build/README.md#what-an-edit-costs)).
-  No hot-patching in the web build or on Android.
-- **No iOS.**
+  0.3 s in the template, ~5.5 s in a crate of about 74 000 lines; a first
+  build takes 15 s to ~60 s. Splitting a big app into page crates (`ax add
+  <app> page`) brings a page edit to ~0.5 s ([what an edit
+  costs](../build/README.md#what-an-edit-costs)).
+- **No app on iOS itself.** An iPhone or iPad gets a thin client of a
+  server (`ax build --ios`), as with aio ([targets](../build/targets.md#ios)).
 - **Not OS-signed yet.** Windows SmartScreen and macOS Gatekeeper warn on
   first start of the prebuilt archives and app bundles.
-- **`aio::ui` views only** in the app's window; another view library comes
-  in as an island or as a separate client over the wire.
+- **`aio::ui` views in the app's window**; another view library (React,
+  Solid, Svelte, Vue) comes in as an island, or draws a served page of its
+  own, through the JS client ([JS client](../clients/js.md)).
 - **The state isn't the point.** Server-rendered, SEO-first pages; state
   redrawn every frame (a game, a 3D scene); one state across many servers;
   millions of stateless requests per second: each app is one process

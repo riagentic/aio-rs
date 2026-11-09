@@ -16,6 +16,7 @@ what each bundle holds and how the targets differ.
 | Service | cells served to clients, no window | `ax create --template service`, kind `cli` | `ax dev <app>` |
 | CLI | one command on a saved cell, then out | `ax create --template cli`, kind `cli` | `ax dev <app> -- <args>` |
 | Thin client | a window (or a phone app) on cells another process serves | `[app] mode = "client"` | `ax dev <app>` |
+| iPhone, iPad | the app's server page in a WKWebView (an Xcode project), or in Safari on the Home Screen | `ax build <app> --ios` | `ax dev <app>` (the server) |
 
 What a machine needs for each: [setup](../basics/setup.md). Releasing and
 updating each: [release](release.md).
@@ -78,6 +79,7 @@ dirty (a dirty build is never a release).
 | `cli` | a headless binary on `PATH`, no menu entry; a server's also gets its supervisor file | each of `platforms` |
 | `android` | signed APKs, one per CPU, and an `.aab` when asked (`--android`) | Linux, macOS, Windows |
 | `web` | the installable web app in `dist/<id>-web/` (`--web` alone) | anywhere with the `wasm32` target |
+| `ios` | the Xcode project of an iPhone and iPad client in `dist/<id>-ios/` (`--ios` alone) | anywhere; Xcode on a Mac builds it |
 
 Nothing declared: `desktop`, or `cli` for a `server` or `cli` app.
 
@@ -214,15 +216,32 @@ command that adds it:
 | `linux-arm64` | `aarch64-unknown-linux-gnu` | `aarch64-linux-gnu-gcc` (`gcc-aarch64-linux-gnu`) |
 | `windows` | `x86_64-pc-windows-gnu` | `x86_64-w64-mingw32-gcc` (`gcc-mingw-w64-x86-64`) |
 | `windows-arm64` | `aarch64-pc-windows-gnullvm` | `aarch64-w64-mingw32-clang` (llvm-mingw) |
-| `macos` | `x86_64-apple-darwin` | none: built on a Mac |
-| `macos-arm64` | `aarch64-apple-darwin` | none: built on a Mac |
+| `macos` | `x86_64-apple-darwin` | zig (fetched by ax) |
+| `macos-arm64` | `aarch64-apple-darwin` | zig (fetched by ax) |
 | `host` | this machine's | |
 
-A macOS binary links against Apple's SDK, so it is built on a Mac. Away
-from one, `[build.macos] host` (or `AIO_MACOS_SSH`, which it outranks)
-names one over ssh (`[ssh options] [user@]host`): the sources go there,
-it builds (and smoke-tests with `--smoke`) there, the files come back
-into `dist/`.
+On a Mac, its own tools build both CPUs. On Linux or Windows, zig links
+the app: `ax setup` (or the first macOS build) fetches zig 0.15.2 into
+aio-rt's tools and checks its SHA-256. Add Rust's targets once:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+ax build notes --platforms macos-arm64,macos
+```
+
+- No Apple SDK is needed or copied. zig carries its own libSystem stubs;
+  ax writes stubs for the two other system libraries an app links
+  (CoreFoundation, for the local time zone, and libiconv): the names of
+  the functions used, nothing more. A library that links another macOS
+  framework fails to link here, naming it: build that app on a Mac.
+- zig's linker signs the arm64 binary ad hoc, as Apple silicon requires.
+  The bundle is not sealed (`codesign` runs on a Mac only); it opens like
+  one built on a Mac.
+- A `.dmg` and `--smoke` need a Mac. `[build.macos] host` (or
+  `AIO_MACOS_SSH`, which it outranks) names one over ssh
+  (`[ssh options] [user@]host`): the sources go there, it builds (and
+  smoke-tests with `--smoke`) there, the files come back into `dist/`.
+  With one named, every macOS target is built there.
 
 ### Size: `--sizes` and the budget
 
@@ -391,8 +410,9 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
   remembered. `AIORT_MOVE_TO_APPLICATIONS=never` turns the offer off,
   `move` moves without asking (an unattended install). An update that
   can't replace the app is refused before it downloads, saying why.
-- Built on a Mac (`codesign`, `sips`, `hdiutil`, `ditto`), or on one over
-  ssh ([platforms](#other-operating-systems-platforms)).
+- Built on a Mac (`codesign`, `hdiutil`, `ditto`), on one over ssh, or
+  as an unsealed `.zip` on Linux or Windows
+  ([platforms](#other-operating-systems-platforms)).
 
 ### The splash
 
@@ -536,8 +556,13 @@ ax dev notes --android --native        # the app itself, rebuilt on each save
   is built once and installed once beside the real app
   (`<application id>.dev`, "Notes (dev)"); `ax dev --web` serves the page
   on this machine, `adb reverse` brings it to the device's
-  `http://127.0.0.1:<port>`, and each edit rebuilds it there and reloads
-  it on the device. The page is the web build's: its cells run in the
+  `http://127.0.0.1:<port>`. A Rust edit of the page's crate is
+  hot-patched into the page on the device, its state kept (an emulator:
+  0.2 s for a view, 0.3 s for a cell method, save to screen); an edit a
+  patch can't take rebuilds the page and reloads it there (its cells
+  kept in the page's storage); a stylesheet or markup edit shows on the
+  device at once (0.02 s), nothing built, the views' state kept
+  ([dev](dev.md#the-web-build-while-you-work)). The page is the web build's: its cells run in the
   page, not in a native library. Ctrl-C removes ax's reverse (only its
   own); one a killed session left is removed at the next start.
 - `--native`, or an app without a web build: the app's own library as a
@@ -654,10 +679,11 @@ pub fn web() {
   port); `aio::web::sync::Remote` is a synced copy of a server's cell over
   its `/ws`, whose offline calls wait in the browser's storage, twin tabs
   mirrored.
-- Served by the app's own server, `aio_shell::web::painted` paints each
+- Served by the app's own server, `Http::painted(App)` paints each
   viewer's first page on the server (what that viewer may see: no
   `#[server]` field, `visible` rules applied), so it shows before the
-  wasm runs; then the page's own views take over.
+  wasm runs; then the page's own views hydrate it in place
+  ([views](../ui/views.md#server-rendering-and-hydration)).
 - Left out in a browser: the store's history, files, blobs, SQL, the
   server, time travel and anything native. Code behind
   `#[cfg(not(target_arch = "wasm32"))]` stays out of the page.
@@ -737,6 +763,50 @@ calls while offline and catches up on reconnect
 like any desktop or Android app. A client of a server in another place
 keeps the server's address built in; a person can pair it with another.
 
+## iOS
+
+No Rust runs on an iPhone: the app's server runs elsewhere (`client-server`
+or `server`, serving a page: [a served app's page](../clients/web.md#a-served-apps-page)),
+and the phone shows its page. Two ways:
+
+| Way | Needs | Make it |
+|---|---|---|
+| The server's page on the Home Screen | Safari | nothing: open the server's address, pair, Share → Add to Home Screen |
+| A native app: a WKWebView on the server | Xcode on a Mac, an Apple ID to put it on a phone | `ax build <app> --ios` |
+
+**The pairing page.** A browser that opens the server with no key gets
+its pairing page (still a 401): the app's name, a field for a 6-digit
+code (`ax pair <app> --plain` on the server's machine shows one for 3
+minutes; the server needs `[server] pairing = true`) and nothing else. The code fetches the app's key, and a link
+with it sets the key's HttpOnly cookie: the app opens, and opens again
+by that cookie. The page is an installable web app: a manifest that opens
+the app's root, an icon, and an offline shell that says the server can't
+be reached instead of a blank error (installed only where the app's own
+web build has no service worker). iOS keeps a Home Screen app's cookies
+apart from Safari's: it pairs once more there. A server with TLS shows
+its own certificate: trust its root on the phone first (`ax trust`).
+
+**The Xcode project.** `ax build <app> --ios` (kind `ios`) writes
+`dist/<id>-ios/` on any machine: `App.xcodeproj`, the Swift sources, the
+`Info.plist`, a 1024 px opaque icon (`assets/icon.png`, else the
+monogram) and a bundled page. The page asks for the server (`[client]
+server` built in, then the last five used) and opens it; the server's
+pairing page pairs the device. A server that can't be reached brings
+the page back, saying so.
+
+- Bundle id: `[build.macos] bundle_id`, else `aio.rt.<id>`; version: the
+  app's numbers (`1.2.3`), its build number Android's version code.
+- iOS 15.4 or newer; App Transport Security lets any address load
+  unless the built-in server is `https://`.
+- Building, signing and putting it on a phone need Xcode (an Apple ID
+  for a device, a developer account for the App Store): open
+  `App.xcodeproj`, pick your team, run or Archive. On a Mac with Xcode,
+  `ax build --ios` also makes an unsigned simulator build.
+- Tested: the Swift is type-checked against UIKit and WebKit on a Mac
+  with only the Command Line Tools (Mac Catalyst's frameworks); the
+  bundled page and the pairing page are driven in WebKit. No Xcode build
+  runs in aio-rs's tests.
+
 ## How the targets differ
 
 | Concern | Desktop | Android | Web (page cells) | Web (synced) | Service | CLI |
@@ -764,18 +834,21 @@ The same `aio.toml` is built into every target; what a target can't use
   won't update the installed one.
 - A service built as `desktop`: it gets a window bundle and no
   supervisor; build it as `cli`.
-- A macOS bundle or a `.dmg` built on Linux: it needs a Mac
-  (`[build.macos] host`).
+- A `.dmg` built on Linux: it needs a Mac (`[build.macos] host`); the
+  `.zip` doesn't.
 - Sizing with `cargo build --release`: use `ax build --sizes`.
 - Serving the web build over plain http off localhost: the browser
   refuses its service worker (the page says so); use HTTPS.
 
 ## Limits
 
-- No iOS target.
-- A macOS bundle is built on a Mac (or one over ssh, `[build.macos]
-  host`): a macOS binary links Apple's frameworks, whose SDK only a Mac
-  may carry; aio's Deno binary cross-compiled to an unsigned `.app` on any host.
+- An iPhone app is a thin client: Rust doesn't run on iOS. Its Xcode
+  project is written anywhere; building and signing it needs Xcode.
+- The pairing page takes 6-digit codes; an 8-digit (PAKE) code pairs
+  aio-rs's own clients only.
+- Away from a Mac, a macOS app links only libSystem, CoreFoundation's
+  time zone calls and libiconv (what aio-rs uses); one whose libraries
+  need more is built on a Mac.
 - macOS and Windows bundles are not OS-signed or notarized yet.
 - No client connect page, on desktop or Android, yet: a client names its
   server in `[client] server`; pair a device with `ax pair`.
@@ -788,7 +861,7 @@ The same `aio.toml` is built into every target; what a target can't use
 ## API
 
 `cargo doc -p aio-rs-shell --no-deps --open`: `start`, `run`, `serve`,
-`Window`, `android_app!`, `android::App`, `web::painted`;
+`Window`, `android_app!`, `android::App`, `web::tabs`;
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::web`,
-`aio::Source`, `aio::config::Build`, `aio::config::AndroidBuild`,
+`aio::Source`, `aio::http::Http::painted`, `aio::config::Build`, `aio::config::AndroidBuild`,
 `aio::config::MacBuild`, `aio::config::Splash`.

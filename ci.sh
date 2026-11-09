@@ -60,7 +60,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-
 if cargo hack --version >/dev/null 2>&1; then
   cargo hack clippy -p aio-rs --lib --each-feature --locked -- -D warnings
 else
-  for f in "" outbound server tls oidc br net kit air imbl web dev testing video compat; do
+  for f in "" outbound server tls oidc br net kit air imbl updates web dev testing video compat; do
     cargo clippy -p aio-rs --lib --no-default-features --features "$f" --locked -- -D warnings
   done
 fi
@@ -93,6 +93,10 @@ cargo test -p aio-rs --no-default-features --features net --test sync --test htt
 # air's gates (no leaks, misuse failing, planted faults failing a test) in a
 # release build too.
 cargo test -p aio-rs-air --release --all-features --locked
+# The runtime's benchmark gate (aio's D12): a start, a store's open, a call,
+# a saved call, each under twice what it measured, in the release build
+# (the debug build's ceilings: in the workspace's run below).
+cargo test -p aio-rs --release --test rt_gate --locked
 # The web build's browser test binds with the lock's wasm-bindgen, on PATH or
 # aio's own (`ax setup` fetches it); without it the test skips, said here and
 # last. With AIO_CI_WEB set (GitHub CI) a browser test that would skip fails.
@@ -101,6 +105,16 @@ wb_own="${XDG_DATA_HOME:-$HOME/.local/share}/aio-rt/tools/wasm-bindgen-$wb/wasm-
 if [ ! -x "$wb_own" ] && [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $wb" ]; then
   web_skip="ci: the web build's browser test SKIPPED: no wasm-bindgen $wb (ax setup fetches it into $wb_own)"
   echo "$web_skip" >&2
+fi
+# The JS client's dev packages (React, Solid, esbuild, TypeScript) for its
+# tests (aio-rs-shell's js_client); without npm they are skipped, said here
+# and last (with AIO_CI_WEB set they fail).
+js_skip=""
+if command -v npm >/dev/null 2>&1; then
+  npm ci --prefix crates/aio/client --no-audit --no-fund
+else
+  js_skip="ci: the JS client's tests SKIPPED: no npm (npm ci in crates/aio/client)"
+  echo "$js_skip" >&2
 fi
 cargo test --workspace --all-features --locked
 # ax dev's builds run the app as release does: the template's tests and a
@@ -134,7 +148,7 @@ else
   echo "$apk_skip" >&2
 fi
 fi
-for skip in "$web_skip" "$apk_skip"; do
+for skip in "$web_skip" "$apk_skip" "${js_skip:-}"; do
   if [ -n "$skip" ]; then
     echo "$skip" >&2
   fi

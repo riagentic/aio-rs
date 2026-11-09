@@ -29,6 +29,7 @@ async fn the_window_fetches_the_app_s_routes_over_its_socket_and_nothing_else_is
             Reply::text(format!("hi {} {}", r.param("who").unwrap_or(""), r.query("x").unwrap_or("")))
         }))
         .route(Route::post("/api/echo", |r| async move { Reply::text(String::from_utf8_lossy(r.body()).into_owned()) }))
+        .route(Route::get("/api/never", |_| std::future::pending()))
         .route(Route::get("/api/feed", |_| async {
             Reply::stream("application/x-ndjson", futures_util::stream::iter(["{\"n\":1}\n", "{\"n\":2}\n"]))
         }));
@@ -46,6 +47,8 @@ async fn the_window_fetches_the_app_s_routes_over_its_socket_and_nothing_else_is
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .env("TMPDIR", d.path())
+        // aio's AIO_SOCKET_TIMEOUT_MS: how long a route may take to its first byte.
+        .env("AIORT_SOCKET_TIMEOUT_MS", "1500")
         .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", d.path().join("no-bus").display()))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -106,6 +109,12 @@ async fn the_window_fetches_the_app_s_routes_over_its_socket_and_nothing_else_is
                 for (;;) { const { done, value } = await rd.read(); if (done) return s; s += new TextDecoder().decode(value) } })";
     assert_eq!(eval(feed).await, "{\"n\":1}\n{\"n\":2}\n");
     assert_eq!(eval(&text("'/nope'")).await, "404 Not Found");
+    // A route that never answers: a 504 after AIORT_SOCKET_TIMEOUT_MS, saying so.
+    let never = eval(&text("'/api/never'")).await.as_str().unwrap_or_default().to_string();
+    assert!(
+        never.starts_with("504 ") && never.contains("after 1500 ms") && never.contains("AIORT_SOCKET_TIMEOUT_MS"),
+        "{never}"
+    );
     // Bodies nobody reads (20 images of a missing path) hold none of the
     // 6 connections: the routes still answer.
     let missing = "Promise.all(Array.from({ length: 20 }, (_, i) => new Promise((ok) => { \

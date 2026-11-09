@@ -143,6 +143,42 @@ pub struct HeldEffect {
     pub timeout: Option<Duration>,
 }
 
+/// One thing a call asked for besides its state change, as a value (aio's
+/// effect objects from `t.getEffects()`, `isScheduleEffect`): an effect
+/// (held until `settle`), a schedule set or cancelled (already saved; it
+/// fires under `advance`), a notification or other tell, an abort.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AskedFor {
+    Effect(HeldEffect),
+    Schedule(crate::Plan),
+    Tell(crate::tell::Tell),
+    Abort(String),
+}
+
+impl AskedFor {
+    pub(crate) fn effect<T>(key: String, mode: crate::Mode, timeout: Option<Duration>) -> Self {
+        Self::Effect(HeldEffect { cell: name::<T>(), key, mode, timeout })
+    }
+
+    pub fn is_effect(&self) -> bool {
+        matches!(self, Self::Effect(_))
+    }
+
+    /// aio's `isScheduleEffect`.
+    pub fn is_schedule(&self) -> bool {
+        matches!(self, Self::Schedule(_))
+    }
+
+    /// aio's `isNotifyEffect`, `isAppIconEffect`.
+    pub fn is_tell(&self) -> bool {
+        matches!(self, Self::Tell(_))
+    }
+
+    pub fn is_abort(&self) -> bool {
+        matches!(self, Self::Abort(_))
+    }
+}
+
 /// What `TestCells` needs of each cell, whatever its type.
 trait Booted {
     fn held(&self) -> Vec<String>;
@@ -151,7 +187,7 @@ trait Booted {
     fn running(&self) -> Vec<String>;
     fn fire_due(&self, now: i64);
     fn failed(&self) -> Vec<String>;
-    fn last(&self) -> (u64, Vec<String>);
+    fn last(&self) -> (u64, Vec<AskedFor>);
 }
 
 impl<T: Cell> Booted for Handle<T> {
@@ -185,9 +221,8 @@ impl<T: Cell> Booted for Handle<T> {
         self.take_failed().into_iter().map(|f| format!("{}.{f}", name::<T>())).collect()
     }
 
-    fn last(&self) -> (u64, Vec<String>) {
-        let (at, keys) = self.last_held();
-        (at, keys.into_iter().map(|k| format!("{}.{k}", name::<T>())).collect())
+    fn last(&self) -> (u64, Vec<AskedFor>) {
+        self.last_held()
     }
 }
 
@@ -200,7 +235,7 @@ impl<T: Cell> Booted for Handle<T> {
 /// effects (`sleep`, `timeout`, `interval`, `Effect::timeout`) runs on
 /// whenever nothing else can, so a 10 s backoff settles at once, timers firing
 /// in their order, and never trails the schedule clock. An effect that waits
-/// on real I/O under a timeout belongs in a `TestServer` test.
+/// on real I/O under a timeout runs under [`TestCells::real_time`].
 /// A schedule or effect whose call fails (refused, or a panic) fails the
 /// test when it ends, unless the test took it with `failures`: nothing a
 /// test didn't look at fails silently.
@@ -214,6 +249,8 @@ pub struct TestCells {
     /// The tokio instant and the schedule clock at the start: tokio's virtual
     /// time is kept at least `clock - epoch.1` past `epoch.0`.
     epoch: (tokio::time::Instant, i64),
+    /// Effects' timers on the wall clock ([`TestCells::real_time`]).
+    real: bool,
     /// Its own world: no test reaches the user's data (`paths::sandbox`).
     _sandbox: crate::paths::Sandbox,
 }
@@ -226,8 +263,21 @@ impl Default for TestCells {
 
 impl TestCells {
     pub fn new() -> Self {
+        Self::on(false)
+    }
+
+    /// Effects' timers on the wall clock (aio's `t.settle(ms)` on real
+    /// timers): an effect that waits on real I/O (a device, a socket, a
+    /// thread) under a timeout gets the time it needs, where virtual time
+    /// jumps to the timeout the moment nothing else runs. Schedules still
+    /// move only with `advance`.
+    pub fn real_time() -> Self {
+        Self::on(true)
+    }
+
+    fn on(real: bool) -> Self {
         let rt =
-            tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build().expect("runtime");
+            tokio::runtime::Builder::new_current_thread().enable_all().start_paused(!real).build().expect("runtime");
         let start = rt.block_on(async { tokio::time::Instant::now() });
         let clock = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(crate::store::now_ms()));
         let at = clock.load(std::sync::atomic::Ordering::Relaxed);
@@ -237,6 +287,7 @@ impl TestCells {
             dir: Default::default(),
             clock,
             epoch: (start, at),
+            real,
             _sandbox: crate::paths::sandbox().expect("a test sandbox"),
         }
     }
@@ -295,7 +346,18 @@ impl TestCells {
     /// newest one's, of any cell here (`Cell.key`, in order); `[]` when it
     /// asked none. [`Self::effects`] is every one still waiting.
     pub fn last_effects(&self) -> Vec<String> {
-        self.cells.iter().map(|c| c.last()).max_by_key(|(at, _)| *at).map(|(_, keys)| keys).unwrap_or_default()
+        let effect = |a: AskedFor| match a {
+            AskedFor::Effect(e) => Some(format!("{}.{}", e.cell, e.key)),
+            _ => None,
+        };
+        self.last_asked().into_iter().filter_map(effect).collect()
+    }
+
+    /// Everything the last commit asked for, of any cell here, as values
+    /// (aio's `t.getEffects()`): its effects, schedules, tells and aborts,
+    /// in order; `[]` when it asked none.
+    pub fn last_asked(&self) -> Vec<AskedFor> {
+        self.cells.iter().map(|c| c.last()).max_by_key(|(at, _)| *at).map(|(_, a)| a).unwrap_or_default()
     }
 
     /// Cell `h` back at its default state with `seed` merged in (aio's
@@ -348,6 +410,19 @@ impl TestCells {
             // Idle, the paused clock jumps to the next timer: an effect's, or this 1 ms.
             self.rt.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await });
         }
+    }
+
+    /// Let the effects run `ms` (aio's `t.settle(ms)`): on the wall clock
+    /// under [`Self::real_time`], on virtual time otherwise (at once), then
+    /// [`Self::settle`]. For work an effect leaves running on its own (a
+    /// thread, a device's answer) that `settle` can't see.
+    pub fn settle_for(&mut self, ms: u64) {
+        {
+            let _in = self.rt.enter();
+            self.cells.iter().for_each(|c| _ = c.start_held());
+        }
+        self.rt.block_on(async { tokio::time::sleep(Duration::from_millis(ms)).await });
+        self.settle();
     }
 
     /// Seeded random calls (aio's `t.fuzz`): `n` picks from `calls` (a method
@@ -413,6 +488,19 @@ impl TestCells {
         })
     }
 
+    /// [`Self::fuzz_methods`] over every method on a fresh seed each run
+    /// (aio's unseeded `t.randomActions(n)`): the cell's invariants are the
+    /// property. The seed is printed first, and a failure names it, so
+    /// `fuzz_methods(&h, seed, n, &[], ..)` replays the run exactly. Returns
+    /// the seed and the calls made.
+    #[track_caller]
+    pub fn random_calls<T: Cell>(&mut self, h: &Handle<T>, n: usize) -> (u64, Vec<String>) {
+        use std::hash::BuildHasher;
+        let seed = std::collections::hash_map::RandomState::new().hash_one(Instant::now());
+        eprintln!("random_calls: fuzz seed {seed} (fuzz_methods(&h, {seed}, {n}, &[], ..) replays it)");
+        (seed, self.fuzz_methods(h, seed, n, &[], |_| true))
+    }
+
     #[track_caller]
     fn run_fuzz<T: Cell>(
         &mut self,
@@ -453,12 +541,17 @@ impl TestCells {
 
     /// Move the schedule clock `ms` on, fire every schedule then due (a
     /// repeat missed more than once fires once, as after a sleep), and settle.
-    /// Effects' timers due by then fire too (tokio's clock moved as far).
+    /// Effects' timers due by then fire too (tokio's clock moved as far;
+    /// under `real_time` they keep the wall clock).
     pub fn advance(&mut self, ms: i64) {
         let now = self.clock.fetch_add(ms, std::sync::atomic::Ordering::Relaxed) + ms;
-        let at = self.epoch.0 + Duration::from_millis(now.saturating_sub(self.epoch.1).max(0) as u64);
-        self.rt
-            .block_on(async { tokio::time::advance(at.saturating_duration_since(tokio::time::Instant::now())).await });
+        // On the wall clock, effects' timers keep their own time.
+        if !self.real {
+            let at = self.epoch.0 + Duration::from_millis(now.saturating_sub(self.epoch.1).max(0) as u64);
+            self.rt.block_on(async {
+                tokio::time::advance(at.saturating_duration_since(tokio::time::Instant::now())).await
+            });
+        }
         self.cells.iter().for_each(|c| c.fire_due(now));
         self.settle();
     }
@@ -485,11 +578,11 @@ pub struct AsClient<T: Cell> {
 #[cfg(feature = "server")]
 impl<T: Cell> Door<T> for AsClient<T> {
     fn call(&self, method: &str, args: Value) -> crate::Result<Value> {
-        self.h.call_by(&self.who, method, args, None).map(Option::unwrap_or_default)
+        self.h.call_by(&self.who, None, method, args, None).map(Option::unwrap_or_default)
     }
 
     fn ask(&self, method: &str, args: Value) -> crate::Result<crate::Answer> {
-        self.h.ask_by(Some(&self.who), method, args, None, None).map(|(_, a)| a)
+        self.h.ask_by(Some(&self.who), None, method, args, None, None).map(|(_, a)| a)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {

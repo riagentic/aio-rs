@@ -671,12 +671,17 @@ pub(crate) struct Ui {
     pub(crate) tab: OnTab,
 }
 
-/// Who asks for the shell's page ([`Http::paint`]): the session's (or a
-/// known token's) user and role; `None`: the key's holder.
+/// Who asks for the shell's page ([`Http::paint`]), and where: the
+/// session's (or a known token's) user and role (`None`: the key's holder,
+/// or with accounts a visitor not signed in), whether it may link the
+/// app's cells (it shows the key or a session), and the address asked
+/// (its path and query).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Viewer {
     pub user: Option<String>,
     pub role: Option<String>,
+    pub linked: bool,
+    pub path: String,
 }
 
 /// A page's first paint: its view's HTML for `<div id="main">`, the title
@@ -688,13 +693,32 @@ pub struct Paint {
     pub body: String,
 }
 
-pub(crate) type OnPaint = Arc<dyn Fn(&Viewer) -> Paint + Send + Sync>;
+/// A paint's parts as they are made: the page (and whether more follows),
+/// then each view that waited, as it loads ([`air::ssr::stream`]).
+pub(crate) enum Painted {
+    Page(Paint, bool),
+    #[cfg_attr(not(feature = "kit"), allow(dead_code))]
+    More(String),
+}
+
+pub(crate) type OnPaint = Arc<dyn Fn(&Viewer, &mut dyn FnMut(Painted)) + Send + Sync>;
+
+/// How long a painted page's stream waits for the seeded resources its
+/// views wait on (`aio::ui::seeded_resource`); what still waits then is
+/// the client's to load.
+#[cfg(feature = "kit")]
+pub(crate) const PAINT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `page` with `p` in it (pure): its body in the page's empty `<div
-/// id="main">`, its title in `<title>`, its head before `</head>`. A page
-/// without them is as it was.
+/// id="main">`, marked painted (the page's view hydrates it, and the
+/// splash stays down), its title in `<title>`, its head before `</head>`.
+/// A page without them is as it was; an empty body leaves `#main` as it is.
 pub fn painted(page: &str, p: &Paint) -> String {
-    let mut page = page.replacen("<div id=\"main\"></div>", &format!("<div id=\"main\">{}</div>", p.body), 1);
+    let main = format!("<div id=\"main\" data-aio-painted>{}</div><style>#aio-splash{{display:none}}</style>", p.body);
+    let mut page = match p.body.is_empty() {
+        true => page.to_string(),
+        false => page.replacen("<div id=\"main\"></div>", &main, 1),
+    };
     if let (Some(t), Some(at), Some(end)) = (&p.title, page.find("<title>"), page.find("</title>")) {
         let t = t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
         page.replace_range(at + "<title>".len()..end, &t);
@@ -721,6 +745,9 @@ pub struct Http {
     pub(crate) oidc: Option<Arc<crate::auth::oidc::Provider>>,
     pub(crate) ui: Option<Ui>,
     paint: Option<OnPaint>,
+    /// The view [`Http::painted`] paints with.
+    #[cfg(feature = "kit")]
+    view: Option<fn() -> crate::ui::View>,
     door_links: bool,
     peers: Option<crate::link::Peers>,
     pub(crate) beside: Vec<Arc<dyn crate::link::Beside>>,
@@ -743,6 +770,8 @@ impl Default for Http {
             oidc: None,
             ui: None,
             paint: None,
+            #[cfg(feature = "kit")]
+            view: None,
             door_links: false,
             peers: None,
             beside: Vec::new(),
@@ -793,6 +822,7 @@ impl Http {
     }
 
     /// Whether it serves a cell `id` beside the app's own.
+    #[cfg(feature = "updates")]
     pub(crate) fn serves_cell(&self, id: &str) -> bool {
         self.beside.iter().any(|c| c.id() == id)
     }
@@ -953,7 +983,34 @@ impl Http {
     /// `aio_shell::web::painted`): `f`'s first paint in it before any
     /// script runs ([`painted`]). A painted page is never cached.
     pub fn paint(mut self, f: impl Fn(&Viewer) -> Paint + Send + Sync + 'static) -> Self {
-        self.paint = Some(Arc::new(f));
+        self.paint = Some(Arc::new(move |v, send| send(Painted::Page(f(v), false))));
+        self
+    }
+
+    /// The shell's page painted on the server with view `app` (aio's SSR):
+    /// for each viewer, at the address asked, its cells as that viewer's
+    /// socket shows them, the app's own and each [`Http::cell`]
+    /// ([`crate::ui::paint`]); the web build's view then hydrates it.
+    #[cfg(feature = "kit")]
+    pub fn painted(mut self, app: fn() -> crate::ui::View) -> Self {
+        self.view = Some(app);
+        self
+    }
+
+    /// [`Http::painted`]'s paint, now that the app's own cell `h` is known.
+    #[cfg(feature = "kit")]
+    pub(crate) fn paint_cells<T: crate::Cell>(mut self, h: &crate::Handle<T>) -> Self {
+        let Some(app) = self.view else { return self };
+        let cells: Vec<Arc<dyn crate::link::Beside>> =
+            std::iter::once(Arc::new(h.clone()) as Arc<dyn crate::link::Beside>).chain(self.beside.clone()).collect();
+        self.paint = Some(Arc::new(move |v, send| {
+            let seed = cells.iter().fold(crate::ui::Seed::new(v), |s, c| c.seed(s));
+            let until = std::time::Instant::now() + PAINT_WAIT;
+            if let Err(e) = crate::ui::paint_streaming(app, v, seed, until, send) {
+                crate::error!(cat: "http", "the page's first paint failed, served unpainted: {e}");
+                send(Painted::Page(Paint::default(), false));
+            }
+        }));
         self
     }
 
@@ -1150,6 +1207,8 @@ pub(crate) struct Key {
     pub(crate) ancestors: String,
     /// `[server] open`: no key is asked (with accounts, sessions still are).
     pub(crate) open: bool,
+    /// The app's name, on the page a browser with no key pairs on.
+    pub(crate) title: String,
 }
 
 /// Serve `http`'s routes and files to the app's window alone (aio's
@@ -1172,6 +1231,7 @@ pub async fn serve_window(http: Http, l: crate::ipc::Listener) -> std::io::Resul
         users: None,
         ancestors: String::new(),
         open: true,
+        title: String::new(),
     });
     // The window has its own page: no browser shell for an unknown path.
     let http = Arc::new(Http { ui: None, ..http });
@@ -1310,6 +1370,10 @@ pub(crate) async fn answer(
         let shown = crate::sync::shown_key(&head.headers, &q).is_some()
             || parse_cookies(&head.headers).contains_key(&key.cookie)
             || shown_session;
+        // A person's browser that holds no key: the page to pair it on.
+        if !shown && key.auth.is_none() && key.users.is_none() && crate::doorstep::navigated(&head.headers) {
+            return crate::doorstep::unpaired(&key.title);
+        }
         return crate::sync::unauthorized(&key.guessed, ip, shown, "wrong or missing key");
     }
     if cookie.is_some() {
@@ -1367,10 +1431,18 @@ pub(crate) async fn answer(
         None if method != "GET" && method != "HEAD" => plain(405, "Method Not Allowed").header("allow", "GET, HEAD"),
         None if locate(&http.roots, &path).0.is_some_and(|r| r.shell) => {
             let r = serve_static(&http.roots, &asked, &path).await;
-            let page = route_shaped(&path) || path.ends_with("/index.html");
-            let viewer = Viewer { user: session.as_ref().map(|s| s.user.clone()), role: session.map(|s| s.role) };
+            // A browser's navigation (or a crawler's plain GET) is painted;
+            // what a page's script fetches (the worker's offline copy) is the shell.
+            let navigated = asked.get("sec-fetch-mode").is_none_or(|m| m == "navigate");
+            let page = navigated && (route_shaped(&path) || path.ends_with("/index.html"));
+            let viewer = Viewer {
+                user: session.as_ref().map(|s| s.user.clone()),
+                linked: ok || session.is_some(),
+                role: session.map(|s| s.role),
+                path: head.uri.path_and_query().map_or_else(|| path.clone(), |p| p.to_string()),
+            };
             let r = match http.paint.clone().filter(|_| page) {
-                Some(f) => paint_reply(r, f, viewer).await,
+                Some(f) => paint_reply(r, f, viewer, &key.page).await,
                 None => r,
             };
             stamped(&key.page, r)
@@ -1461,23 +1533,46 @@ async fn serve_blob(blobs: &crate::blobs::Blobs, asked: &HeaderMap, method: &str
 }
 
 /// The shell's page `r` (whole, an HTML 200) painted for `viewer` by `f`,
-/// off the async threads (a view renders); never cached, nor tagged.
-async fn paint_reply(r: Reply, f: OnPaint, viewer: Viewer) -> Reply {
+/// off the async threads (a view renders); never cached, nor tagged. A
+/// paint whose views wait for seeded resources is streamed: the page up
+/// to its end (its scripts nonced by `page`'s policy), each view as it
+/// loads, then the end.
+async fn paint_reply(r: Reply, f: OnPaint, viewer: Viewer, page: &crate::security::Page) -> Reply {
+    use futures_util::StreamExt;
     let html = r.headers.iter().any(|(k, v)| k == "content-type" && v.starts_with("text/html"));
-    let Some(page) = (r.status == 200 && r.window.is_none() && html)
+    let Some(shell) = (r.status == 200 && r.window.is_none() && html)
         .then(|| String::from_utf8(r.body.clone()).ok())
         .flatten()
     else {
         return r;
     };
-    match tokio::task::spawn_blocking(move || painted(&page, &f(&viewer))).await {
-        Ok(page) => {
-            let mut r = Reply { body: page.into_bytes(), ..r };
-            r.headers.retain(|(k, _)| k != "etag" && k != "cache-control");
-            r.header("cache-control", "no-store")
-        }
-        Err(e) => broken(&format!("the page's first paint failed: {e}")),
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let painting = tokio::task::spawn_blocking(move || f(&viewer, &mut |p| _ = tx.send(p)));
+    let Some(Painted::Page(p, more)) = rx.recv().await else {
+        let e = painting.await.err().map_or_else(|| "nothing painted".into(), |e| e.to_string());
+        return broken(&format!("the page's first paint failed: {e}"));
+    };
+    let mut r = Reply { body: painted(&shell, &p).into_bytes(), ..r };
+    r.headers.retain(|(k, _)| k != "etag" && k != "cache-control");
+    let r = r.header("cache-control", "no-store");
+    if !more {
+        return r;
     }
+    let r = stamped(page, r);
+    let html = String::from_utf8_lossy(&r.body).into_owned();
+    let end = html.rfind("</body>").unwrap_or(html.len());
+    let (head, tail) = (html[..end].to_string(), html[end..].to_string());
+    let views = futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Some(Painted::More(part)) => Some((part, rx)),
+            _ => None,
+        }
+    });
+    let parts = futures_util::stream::iter([head]).chain(views).chain(futures_util::stream::iter([tail]));
+    let mut s = Reply::stream("text/html; charset=utf-8", parts);
+    s.headers.retain(|(k, _)| k != "cache-control");
+    s.headers.extend(r.headers.into_iter().filter(|(k, _)| k != "content-type" && k != "content-length"));
+    s
 }
 
 /// A shell page with its scripts nonced and the policy naming the nonce,
@@ -1485,7 +1580,8 @@ async fn paint_reply(r: Reply, f: OnPaint, viewer: Viewer) -> Reply {
 /// as no two answers are the same.
 fn stamped(page: &crate::security::Page, r: Reply) -> Reply {
     let html = r.headers.iter().any(|(k, v)| k == "content-type" && v.starts_with("text/html"));
-    let Some((body, csp)) = (r.status == 200 && r.window.is_none() && html)
+    // A streamed page was stamped before its first part.
+    let Some((body, csp)) = (r.status == 200 && r.window.is_none() && r.stream.is_none() && html)
         .then(|| std::str::from_utf8(&r.body).ok())
         .flatten()
         .and_then(|h| page.stamp(h))
@@ -1799,9 +1895,13 @@ mod tests {
         let p = Paint { title: None, head: "<meta name=\"d\" content=\"1\">".into(), body: "<p>3 items</p>".into() };
         assert_eq!(
             painted(page, &p),
-            "<html><head><title>A</title><meta name=\"d\" content=\"1\"></head><body><div id=\"main\"><p>3 \
-             items</p></div><script src=x></script></body></html>"
+            "<html><head><title>A</title><meta name=\"d\" content=\"1\"></head><body><div id=\"main\" \
+             data-aio-painted><p>3 items</p></div><style>#aio-splash{display:none}</style><script src=x></script>\
+             </body></html>"
         );
+        // An empty paint (its view failed) leaves the page to its script: not marked painted.
+        let failed = Paint { body: String::new(), ..p.clone() };
+        assert!(painted(page, &failed).contains("<div id=\"main\"></div><script"));
         // The view's title replaces the page's, as text.
         let t = Paint { title: Some("Post <1>".into()), ..p.clone() };
         assert!(painted(page, &t).starts_with("<html><head><title>Post &lt;1&gt;</title><meta"));

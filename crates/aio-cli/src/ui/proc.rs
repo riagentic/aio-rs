@@ -468,6 +468,8 @@ pub fn run_task(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     aio::lifecycle::scrub(&mut cmd, true);
+    // Shown to a person as it comes: an ax verb's text, though its stdout is a pipe.
+    cmd.env("AIORT_OUTPUT", "text");
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = match cmd.spawn() {

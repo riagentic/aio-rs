@@ -129,6 +129,14 @@ pub fn tool_home() -> PathBuf {
     tool_home_in(&env)
 }
 
+/// aio-rt's tool home in the person's world, a test's [`Sandbox`] or not:
+/// where `ax setup` put the tools a build runs, read only (a tool fetched
+/// goes in [`tool_home`]).
+#[doc(hidden)]
+pub fn real_tool_home() -> PathBuf {
+    tool_home_in(&real_env)
+}
+
 /// The Electron version aio pins: the shared runtime windows open in
 /// (aio-shell fetches it) and the UI tests drive (`aio::testing`).
 #[doc(hidden)]
@@ -249,11 +257,21 @@ pub(crate) fn create(p: &std::path::Path, private: bool) -> io::Result<std::fs::
 /// Flush a file's bytes to disk (opened for writing: Windows flushes no
 /// read-only handle).
 pub(crate) fn sync_file(p: &std::path::Path) -> io::Result<()> {
+    #[cfg(test)]
+    SYNCS.with(|n| n.set(n.get() + 1));
     std::fs::OpenOptions::new().write(true).open(p)?.sync_all()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// This thread's disk syncs (aio-rs's own, and SQLite's where a test counts them).
+    pub(crate) static SYNCS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Flush a directory's entries (a new or renamed file in it) to disk.
 pub(crate) fn sync_dir(d: &std::path::Path) -> io::Result<()> {
+    #[cfg(all(unix, test))]
+    SYNCS.with(|n| n.set(n.get() + 1));
     #[cfg(unix)]
     std::fs::File::open(d)?.sync_all()?;
     #[cfg(not(unix))]
@@ -554,11 +572,14 @@ pub struct Ask {
     /// `--client=<window|browser|server-only>` (aio's): how this run shows
     /// the app, over `[app] ui`.
     pub client: Option<String>,
+    /// `--transport=<auto|ws|poll>` (aio's): how a client reaches its
+    /// server this launch, over `[client] transport`.
+    pub transport: Option<String>,
 }
 
 /// The flags aio takes from a launch for itself, spelled once: a flag
 /// with `=` takes a value (`--home=<dir>` or `--home <dir>`).
-pub const FLAGS: [&str; 20] = [
+pub const FLAGS: [&str; 21] = [
     "--home=",
     "--profile=",
     "--instance=",
@@ -579,6 +600,7 @@ pub const FLAGS: [&str; 20] = [
     "--connect",
     "--strict-pin",
     "--client=",
+    "--transport=",
 ];
 
 /// What the window host and the router read from a launch beside [`FLAGS`].
@@ -657,6 +679,7 @@ impl Ask {
                 "--cdp" => &mut a.cdp,
                 "--server-url" => &mut a.server_url,
                 "--client" => &mut a.client,
+                "--transport" => &mut a.transport,
                 _ => continue,
             };
             let v = match inline {
@@ -801,7 +824,9 @@ pub fn app(id: &str) -> io::Result<AppDirs> {
 /// debug build asks `dev`), its store `[data] store`; [`AppDirs::planned`]
 /// makes and locks them.
 pub fn plan_app(cfg: &crate::config::Config, ask: &Ask) -> io::Result<Plan> {
-    let ask = Ask { dev: ask.dev || cfg!(feature = "dev"), ..ask.clone() };
+    // `ax dev` builds without debug assertions (its `dev` feature says it), a
+    // plain `cargo run`/`cargo test` with them: neither opens the real data.
+    let ask = Ask { dev: ask.dev || cfg!(feature = "dev") || cfg!(debug_assertions), ..ask.clone() };
     let refused = |e: String| io::Error::new(io::ErrorKind::InvalidInput, e);
     let p = plan_in(&cfg.app.id, cfg.app.port_of.as_deref(), &cfg.home, &ask, &env).map_err(refused)?;
     one_home(cfg.app.profiles, p.from).map_err(refused)?;
@@ -921,6 +946,14 @@ impl AppDirs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_persons_tool_home_stays_in_sight_while_a_test_runs_sandboxed() {
+        let s = sandbox().unwrap();
+        assert!(tool_home().starts_with(s.root()), "what a test fetches stays in its world");
+        assert_eq!(real_tool_home(), tool_home_in(&real_env));
+        assert!(!real_tool_home().starts_with(s.root()), "what ax setup put there is found");
+    }
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
@@ -1088,6 +1121,7 @@ mod tests {
             connect: false,
             strict_pin: false,
             client: None,
+            transport: None,
         };
         assert_eq!(a, want);
         let client = Ask::parse(&args(&[
@@ -1097,6 +1131,7 @@ mod tests {
             "--client",
             "browser",
             "--cdp=9222",
+            "--transport=poll",
         ]))
         .unwrap();
         assert_eq!(
@@ -1104,6 +1139,7 @@ mod tests {
             (Some("https://192.0.2.7:8100"), true, Some("browser"), Some("9222"))
         );
         assert!(client.strict_pin);
+        assert_eq!(client.transport.as_deref(), Some("poll"));
         assert_eq!(Ask::app_args(&args(&["--connect", "--client", "window", "--server-url=x", "y"])), ["y"]);
         assert_eq!(Ask::app_args(&args(&["--channel", "beta", "x"])), ["x"], "aio's flag, not the app's");
         assert!(Ask::parse(&args(&["--no-tls"])).unwrap().no_tls);
@@ -1157,6 +1193,17 @@ mod tests {
         assert_eq!(p.port_of.as_ref().map(|(h, _)| h.join("data")), port_of.map(|_| p.data.clone()));
         assert_eq!(p.store, p.data.join("state.db"));
         Ok((p.data.display().to_string(), p.cache.display().to_string(), p.profile, p.from))
+    }
+
+    #[test]
+    fn a_debug_build_never_plans_the_real_home() {
+        // Tests are debug builds: `cargo run`/`cargo test` get `[home] dev`.
+        let cfg = crate::config::Config::parse(
+            "[app]\nid = \"purse-rs\"\nport_of = \"purse-dbg\"\n[home]\ndev = \".purse-dbg-dev\"",
+        )
+        .unwrap();
+        let p = plan_app(&cfg, &Ask::default()).unwrap();
+        assert_eq!((p.from, p.data.ends_with(".purse-dbg-dev/data")), ("[home] dev", true));
     }
 
     #[test]

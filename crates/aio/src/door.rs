@@ -51,6 +51,24 @@ pub fn at(app: &str, data: &std::path::Path, cell: &str) -> std::io::Result<Stri
     Ok(crate::ipc::addr(&crate::paths::sockets(app, data)?, &format!("cell-{cell}")))
 }
 
+/// The cells whose doors the running app `app` (data dir `data`) has open
+/// (its socket folder; on Windows, the pipes named for it), sorted.
+pub fn open(app: &str, data: &std::path::Path) -> Vec<String> {
+    let dir = crate::paths::sockets_at(app, data);
+    let (at, prefix) = match cfg!(windows) {
+        true => (
+            std::path::PathBuf::from(r"\\.\pipe\"),
+            crate::ipc::addr(&dir, "cell-").rsplit('\\').next().unwrap_or_default().to_string(),
+        ),
+        false => (dir, "cell-".to_string()),
+    };
+    let names = std::fs::read_dir(at).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+    let mut cells: Vec<String> =
+        names.filter_map(|n| Some(n.strip_prefix(&prefix)?.trim_end_matches(".sock").to_string())).collect();
+    cells.sort();
+    cells
+}
+
 /// One frame's bytes (pure).
 pub(crate) fn encode(m: Msg) -> Bytes {
     let (kind, body) = match m {
@@ -89,7 +107,7 @@ pub(crate) async fn send(f: &mut Frames, m: Msg) -> std::io::Result<()> {
 }
 
 /// A client's end of door `addr`: connected, its version said.
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "compat"))]
 pub(crate) async fn dial(addr: &str) -> std::io::Result<Frames> {
     let mut s = crate::ipc::connect(addr).await?;
     tokio::io::AsyncWriteExt::write_u8(&mut s, VERSION).await?;

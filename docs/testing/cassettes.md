@@ -63,7 +63,11 @@ there, `save()` it, commit the file; every run after needs neither.
 - Clones share one tape: hand a clone to each effect that needs it.
 - Arguments that don't serialize are refused (`cassette <id>: its
   arguments don't serialize, and they key the tape: …`): a key that
-  can't match on replay never gets recorded.
+  can't match on replay never gets recorded. `Cassette::record(..)
+  .lenient()` (and the same on the replaying tape) keeps them, as aio's
+  `String(args)` does: such a call is keyed `(unserializable: <why>)`,
+  so every such call of an id shares one key and replays in recorded
+  order.
 - `open` of a file that is there but isn't a tape fails
   (`cassette: not a tape: … record it again with AIO_CASSETTE=rerecord`):
   it never records over a broken fixture unasked.
@@ -257,7 +261,7 @@ is a token in the repository.
 | a corrupt file is re-recorded | a corrupt file fails, naming `AIO_CASSETTE=rerecord`, which records afresh |
 | `createCassette(mode, { initial })` | `Cassette::replay(&text)` |
 | `tape.wrap(id, fn)` | `tape.wrap(id, f)`: an async fn whose calls go through the tape |
-| an unserializable argument falls back to `String(args)` (never replays) | refused: the call is named, and why its arguments don't serialize |
+| an unserializable argument falls back to `String(args)` | refused, the call named and why; `lenient()` keeps it, keyed by why, replayed in order |
 | frames `ok`, `value`, `error` | `answer: {"Ok": ..}` or `{"Err": ..}` |
 
 ## Common mistakes

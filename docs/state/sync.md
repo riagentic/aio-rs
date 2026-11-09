@@ -543,7 +543,14 @@ session instead and the user is the session's ([accounts](../auth/README.md)).
   nothing is loaded at run time.
 - **aio apps**: with feature `compat` a served aio-rs app speaks aio's
   protocol to aio pages and tools, and `aio::compat::AioLink` calls an
-  aio app ([wire](../migration/wire.md)).
+  aio app ([wire](../migration/wire.md)). On this machine
+  `aio::compat::AioPeer::find(app)` reaches a running aio app over its
+  local socket as this app, proven (aio's `peer()`: its `resolvePeer`
+  sees this app's id): `call(cell, method, args)` waits as long as the
+  aio app takes; `link()` keeps one connection (state, many calls,
+  leases). On its first use the app files an aio lock record and a
+  per-boot `control.key` (0600) for aio to check the proof with;
+  `aio::shutdown` takes both back. On Windows it reaches aio's named pipe.
 
 ## Merging
 

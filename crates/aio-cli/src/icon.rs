@@ -130,6 +130,34 @@ pub fn icns_from_png(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
     }))
 }
 
+/// The iPhone's 1024 px icon from `png_bytes` (the app's own, else None:
+/// the monogram drawn full-bleed): opaque RGB, as the App Store takes it
+/// (iOS rounds the corners itself); a transparent pixel goes onto white.
+pub fn ios_icon(png_bytes: Option<&[u8]>, name: &str, hue: u16) -> Result<Vec<u8>, String> {
+    const S: u32 = 1024;
+    let img = match png_bytes {
+        Some(b) => {
+            let img = image::load_from_memory_with_format(b, image::ImageFormat::Png)
+                .map_err(|e| format!("icon.png: {e}"))?
+                .to_rgba8();
+            image::imageops::resize(&img, S, S, image::imageops::FilterType::Lanczos3)
+        }
+        None => {
+            let mut px = aio_config::icon::pixels(name, hue, S);
+            px.chunks_mut(4).for_each(|p| p[3] = 255);
+            image::RgbaImage::from_raw(S, S, px).ok_or("the monogram's size")?
+        }
+    };
+    let rgb = image::RgbImage::from_fn(S, S, |x, y| {
+        let p = img.get_pixel(x, y).0;
+        let a = u16::from(p[3]);
+        image::Rgb(std::array::from_fn(|i| ((u16::from(p[i]) * a + 255 * (255 - a)) / 255) as u8))
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    rgb.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    Ok(out.into_inner())
+}
+
 /// What to say about the icons in app folder `dir` (aio's hints): the one
 /// the build reads is `assets/icon.png`, a square PNG (512 px or more for
 /// every target); an `assets/icon.svg` is not read; an `icon.png` elsewhere
@@ -181,6 +209,21 @@ mod tests {
         assert_eq!(u32::from_le_bytes(i[34..38].try_into().unwrap()), 41);
         assert_eq!(&i[38..], [1, 2, 3, 4]);
         assert_eq!(icon_ico("Notes", 61)[4], 4);
+    }
+
+    #[test]
+    fn the_iphone_icon_is_1024_px_and_opaque() {
+        let rgb = |b: Vec<u8>| image::load_from_memory(&b).unwrap();
+        let mono = rgb(ios_icon(None, "Notes", 61).unwrap());
+        assert_eq!((mono.width(), mono.height(), mono.color()), (1024, 1024, image::ColorType::Rgb8));
+        let corner = mono.to_rgb8().get_pixel(0, 0).0;
+        assert_ne!(corner, [255, 255, 255], "full-bleed: iOS rounds the corners");
+        // An own icon with a transparent pixel: scaled, that pixel white.
+        let mut own = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]));
+        own.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
+        let own = rgb(ios_icon(Some(&aio_config::icon::png(own.as_raw(), 8, 8)), "x", 0).unwrap());
+        assert_eq!((own.width(), own.color()), (1024, image::ColorType::Rgb8));
+        assert_eq!(own.to_rgb8().get_pixel(1023, 1023).0, [10, 20, 30]);
     }
 
     #[test]

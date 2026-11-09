@@ -143,6 +143,15 @@ impl<T: Cell> Source<T> {
         }
     }
 
+    /// The views showed the state as it is now: a synced copy tells its
+    /// server how far its screen lags ([`Remote::rendered`]).
+    pub fn rendered(&self) {
+        #[cfg(feature = "server")]
+        if let Self::Remote(r) = self {
+            r.rendered();
+        }
+    }
+
     pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
         match self {
             Self::Local(h) => h.listen(f),
@@ -294,6 +303,13 @@ impl<T: Cell> Source<T> {
         let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into());
         let args: Vec<String> = std::env::args().skip(1).collect();
         let ask = crate::paths::Ask::parse(&args).map_err(std::io::Error::other)?;
+        let transport = match ask.transport.as_deref() {
+            None => cfg.client.transport,
+            Some(t) => serde_json::from_value(Value::from(t)).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("--transport={t}: auto, ws or poll"))
+            })?,
+        };
+        crate::sync::set_transport(transport);
         let kept = crate::connect::saved(&dirs.data);
         let named = match (&ask.server_url, kept, &cfg.client.server) {
             (Some(u), kept, _) => {
@@ -411,7 +427,11 @@ impl<T: Cell> Source<T> {
                 return Err(crate::left_out("tls", what));
             }
         }
-        let mut http = crate::update::beside(http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files));
+        let mut http = http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files);
+        #[cfg(feature = "updates")]
+        {
+            http = crate::update::beside(http);
+        }
         if let Some(why) = cfg.accounts.unverifiable(http.mail.is_some()) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
         }
@@ -503,7 +523,13 @@ impl<T: Cell> Source<T> {
     fn serve_door(&self, dirs: &crate::paths::AppDirs, http: &Http) {
         let Some(h) = self.local().cloned() else { return };
         let _in = crate::rt().enter();
-        let l = crate::door::at(&dirs.id, &dirs.data, T::ID).and_then(|a| crate::ipc::Listener::bind(&a));
+        let addr = crate::door::at(&dirs.id, &dirs.data, T::ID);
+        let l = addr.as_ref().map_err(|e| std::io::Error::new(e.kind(), e.to_string())).and_then(|a| crate::ipc::Listener::bind(a));
+        // aio's tools see the app too (`am instances`, `am state`).
+        #[cfg(feature = "compat")]
+        if let (Ok(a), Ok(_)) = (&addr, &l) {
+            crate::compat::local::serve(&dirs.id, &dirs.data, dirs.profile.as_deref(), T::ID, a.clone());
+        }
         #[cfg(feature = "server")]
         let (calls, hooks) =
             (crate::fns::Served { fns: std::sync::Arc::new(http.fns.clone()), ..crate::link::no_calls() }, http.door_hooks());

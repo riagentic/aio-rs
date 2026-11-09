@@ -29,7 +29,7 @@ const SERVICE_LIB: &str = include_str!("create/service_lib.rs");
 const TODO_LIB: &str = include_str!("create/todo_lib.rs");
 const CANVAS_LIB: &str = include_str!("create/canvas_lib.rs");
 
-const APP_MAIN: &str = "// The launcher: the app is the library, so `ax dev` can hot-patch all of it.
+pub(crate) const APP_MAIN: &str = "// The launcher: the app is the library, so `ax dev` can hot-patch all of it.
 // A release build on Windows is a window app: no console opens with it.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = \"windows\")]
 use aio_shell::Start;
@@ -44,7 +44,7 @@ fn main() -> std::io::Result<()> {
 
 /// The window app on Android (`ax build <app> --android`): the launcher's
 /// library, the same window and cell as `main.rs`, in the system WebView.
-const APP_ANDROID: &str = "// The app on Android (`ax build --android`): the same window and cell as
+pub(crate) const APP_ANDROID: &str = "// The app on Android (`ax build --android`): the same window and cell as
 // `main.rs`, hosted by the system WebView. Other systems build none of it.
 #![cfg(target_os = \"android\")]
 
@@ -60,7 +60,7 @@ aio_shell::android_app!(aio_shell::android::App {
 });
 ";
 
-const CLI_MAIN: &str = "// The launcher: one command on the tool's cell, then out.
+pub(crate) const CLI_MAIN: &str = "// The launcher: one command on the tool's cell, then out.
 use aio_shell::Start;
 
 fn main() -> std::process::ExitCode {
@@ -90,7 +90,7 @@ fn main() -> std::process::ExitCode {
 }
 ";
 
-const SERVICE_MAIN: &str = "// The launcher: the cells served until the service is asked to stop.
+pub(crate) const SERVICE_MAIN: &str = "// The launcher: the cells served until the service is asked to stop.
 use aio_shell::Start;
 
 fn main() -> std::io::Result<std::process::ExitCode> {
@@ -175,7 +175,7 @@ impl Aio {
                     n[2],
                     pre.map_or(String::new(), |p| format!("-{p}"))
                 ))),
-                None => Err(format!("aio-rs version {v}: a release (0.3.0), main or latest")),
+                None => Err(format!("aio-rs version {v}: a release (0.4.0), main or latest")),
             },
         }
     }
@@ -1043,7 +1043,7 @@ mod tests {
         assert_eq!(Aio::version("0.2", none), Ok(Aio::Tag("v0.2.0".into())), "a tag has three numbers");
         assert_eq!(Aio::version("0.3.0-beta.1", none), Ok(Aio::Tag("v0.3.0-beta.1".into())));
         assert_eq!(Aio::version("main", none), Ok(Aio::Branch("main".into())));
-        assert!(Aio::version("newest", none).unwrap_err().contains("a release (0.3.0), main or latest"));
+        assert!(Aio::version("newest", none).unwrap_err().contains("a release (0.4.0), main or latest"));
         let ls = "a1\trefs/tags/v0.1.0\nb2\trefs/tags/v0.10.0-beta.1\nc3\trefs/tags/v0.2.0\nd4\trefs/tags/v0.2.0^{}\n\
                   e5\trefs/tags/nightly\nf6\trefs/tags/v0.9.0\n";
         assert_eq!(Aio::version("latest", || Ok(ls.into())), Ok(Aio::Tag("v0.9.0".into())), "a release, not a beta");

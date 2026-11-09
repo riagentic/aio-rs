@@ -81,12 +81,12 @@ pub fn check(rel: &str, text: &str, out: &mut Vec<Issue>) {
     let name = rel.rsplit('/').next().unwrap_or_default();
     if name == "build.rs" && old_build_rs(text) {
         let msg = "this build.rs only parses aio.toml, which aio::config!() now does itself".into();
-        out.push(Issue::new(Severity::Warn, "migrate", msg, rel, 1).fix(FIX));
+        out.push(Issue::new(Severity::Warn, "migrate", msg, rel, 1).fix(FIX).fixable("--fix"));
     }
     if name.ends_with(".rs") {
         for (i, _) in text.lines().enumerate().filter(|(_, l)| l.contains(OLD_CONFIG)) {
             let msg = "aio::config!() is the config now, no Result: drop the `?`".into();
-            out.push(Issue::new(Severity::Error, "migrate", msg, rel, i + 1).fix(FIX));
+            out.push(Issue::new(Severity::Error, "migrate", msg, rel, i + 1).fix(FIX).fixable("--fix"));
         }
         for (i, line) in text.lines().enumerate() {
             for (old, new) in RENAMED.iter().filter(|(old, new)| swap(line, old, new).is_some()) {
@@ -94,7 +94,7 @@ pub fn check(rel: &str, text: &str, out: &mut Vec<Issue>) {
                 if *old == "aio::fns::Caller" {
                     msg += ": its user and role are `req.who` (`req.who.user()`, `req.who.role`), a Caller";
                 }
-                out.push(Issue::new(Severity::Error, "migrate", msg, rel, i + 1).fix(FIX));
+                out.push(Issue::new(Severity::Error, "migrate", msg, rel, i + 1).fix(FIX).fixable("--fix"));
             }
             if typed_newline(line) {
                 let msg =
@@ -118,11 +118,11 @@ pub fn check(rel: &str, text: &str, out: &mut Vec<Issue>) {
         }
         if section == "[build-dependencies]" {
             let msg = "a build-dependency on aio-rs builds it a second time, for the host; nothing needs it now".into();
-            out.push(Issue::new(Severity::Warn, "migrate", msg, rel, i + 1).fix(FIX));
+            out.push(Issue::new(Severity::Warn, "migrate", msg, rel, i + 1).fix(FIX).fixable("--fix"));
         } else if let Some(f) = OLD_FEATURES.iter().find(|f| line.contains(**f)) {
             let msg =
                 format!("aio-rs's {f} feature is the test kit's own now: `testing` brings it (`ax test --video`)");
-            out.push(Issue::new(Severity::Warn, "migrate", msg, rel, i + 1).fix(FIX));
+            out.push(Issue::new(Severity::Warn, "migrate", msg, rel, i + 1).fix(FIX).fixable("--fix"));
         }
     }
 }

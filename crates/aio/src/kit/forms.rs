@@ -115,21 +115,51 @@ impl<T: Clone> State<T> {
     }
 }
 
-/// A form's handle ([`use_form`]): `Copy`, for every handler.
-pub struct Form<T: 'static> {
+/// What a form's check makes of its values: `O`, or the problems.
+type Check<T, O> = Rc<dyn Fn(&T) -> Result<O, Problems>>;
+
+/// A form's handle ([`use_form`], [`use_form_schema`](super::use_form_schema)):
+/// `Copy`, for every handler. `O` is what its values parse into ([`Form::parsed`]).
+pub struct Form<T: 'static, O: 'static = T> {
     state: Signal<State<T>>,
-    check: fn(&T) -> Problems,
+    check: Signal<Check<T, O>>,
 }
 
-impl<T> Clone for Form<T> {
+impl<T, O> Clone for Form<T, O> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for Form<T> {}
+impl<T, O> Copy for Form<T, O> {}
 
-impl<T: Clone + PartialEq + 'static> Form<T> {
+impl<T: Clone + PartialEq + 'static, O: 'static> Form<T, O> {
+    /// A form at `initial`, checked by `check` (a hook).
+    pub(super) fn made(initial: impl FnOnce() -> T, check: Check<T, O>) -> Self {
+        let state = signal(|| State::new(initial()));
+        let check = signal(|| check);
+        Self { state, check }
+    }
+
+    /// The problems with `v` (none: it parses).
+    fn problems(&self, v: &T) -> Problems {
+        self.check.with_untracked(|c| c(v)).err().unwrap_or_default()
+    }
+
+    /// The values parsed (aio's `form.parsed()`, typed): `O` once there is
+    /// no problem and no waiting check running or refusing, else none.
+    /// Reading subscribes the view.
+    pub fn parsed(&self) -> Option<O> {
+        let s = self.state.read();
+        let settled = s.late.is_empty() && s.checking.is_empty();
+        settled.then(|| self.check.with_untracked(|c| c(&s.values)).ok()).flatten()
+    }
+
+    /// Try a submit, as [`submit`](Self::submit): the values parsed if valid.
+    pub fn submit_parsed(self) -> Option<O> {
+        self.submit().and_then(|_| self.parsed())
+    }
+
     /// The values now (reading subscribes the view).
     pub fn values(&self) -> T {
         self.state.read().values.clone()
@@ -154,7 +184,7 @@ impl<T: Clone + PartialEq + 'static> Form<T> {
 
     fn own(&self, field: &'static str) -> Option<String> {
         let s = self.state.read();
-        let now = (self.check)(&s.values);
+        let now = self.problems(&s.values);
         now.into_iter().find(|(f, _)| *f == field).map(|(_, m)| m).or_else(|| s.late.get(field).cloned())
     }
 
@@ -175,7 +205,7 @@ impl<T: Clone + PartialEq + 'static> Form<T> {
     /// No problem, and no waiting rule still running or refusing.
     pub fn valid(&self) -> bool {
         let s = self.state.read();
-        (self.check)(&s.values).is_empty() && s.late.is_empty() && s.checking.is_empty()
+        self.problems(&s.values).is_empty() && s.late.is_empty() && s.checking.is_empty()
     }
 
     pub fn checking(&self, field: &'static str) -> bool {
@@ -271,22 +301,28 @@ impl<T: Clone + PartialEq + 'static> Form<T> {
 
 /// A form starting at `initial`, checked by `check` (a hook).
 pub fn use_form<T: Clone + PartialEq + 'static>(initial: impl FnOnce() -> T, check: fn(&T) -> Problems) -> Form<T> {
-    let state = signal(|| State::new(initial()));
-    Form { state, check }
+    Form::made(
+        initial,
+        Rc::new(move |v: &T| {
+            let p = check(v);
+            if p.is_empty() { Ok(v.clone()) } else { Err(p) }
+        }),
+    )
 }
 
 /// A rule that waits, on `field` (`part` of the values) (a hook): run
 /// `debounce` after the last edit of it, unless the field's own check
 /// already fails; an answer for a value since changed is dropped. The form
 /// is not valid while it runs or refuses.
-pub fn use_async_rule<T, V, F>(
-    form: Form<T>,
+pub fn use_async_rule<T, O, V, F>(
+    form: Form<T, O>,
     field: &'static str,
     part: fn(&T) -> V,
     debounce: Duration,
     rule: impl Fn(V) -> F + 'static,
 ) where
     T: Clone + PartialEq + 'static,
+    O: 'static,
     V: Clone + PartialEq + 'static,
     F: Future<Output = Option<String>> + 'static,
 {
@@ -303,7 +339,7 @@ pub fn use_async_rule<T, V, F>(
         }
         let run = *runs.read_untracked() + 1;
         runs.set(run);
-        if (form.check)(&state.read_untracked().values).iter().any(|(f, _)| *f == field) {
+        if form.problems(&state.read_untracked().values).iter().any(|(f, _)| *f == field) {
             state.write().checking.remove(field);
             return;
         }

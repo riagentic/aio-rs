@@ -203,10 +203,137 @@ fn overlay(base: &Value, kept: Option<&Value>, paths: &[&[&str]]) -> Option<Valu
     }
 }
 
+/// What a subscription's `paths` (dot paths into objects) pick of `v`: each
+/// named part whole, and the objects on the way to it. A path that meets a
+/// list or a value before its end keeps that whole.
+pub(crate) fn pick(v: &Value, paths: &[String]) -> Value {
+    let paths: Vec<Vec<&str>> = paths.iter().map(|p| segs(p)).collect();
+    let paths: Vec<&[&str]> = paths.iter().map(Vec::as_slice).collect();
+    picked(v, &paths).unwrap_or_else(|| Value::Object(Map::new()))
+}
+
+fn picked(v: &Value, paths: &[&[&str]]) -> Option<Value> {
+    match v {
+        _ if paths.iter().any(|p| p.is_empty()) => Some(v.clone()),
+        Value::Object(m) => Some(Value::Object(
+            m.iter()
+                .filter_map(|(k, x)| {
+                    let sub: Vec<&[&str]> = paths.iter().filter(|p| p[0] == k).map(|p| &p[1..]).collect();
+                    (!sub.is_empty()).then(|| picked(x, &sub)).flatten().map(|x| (k.clone(), x))
+                })
+                .collect(),
+        )),
+        _ => Some(v.clone()),
+    }
+}
+
+/// `base` with the parts `paths` name taken from `kept`: a whole state
+/// again, its other parts `base`'s.
+#[cfg(any(feature = "server", target_arch = "wasm32", test))]
+pub(crate) fn fill(kept: &Value, base: &Value, paths: &[String]) -> Value {
+    let paths: Vec<Vec<&str>> = paths.iter().map(|p| segs(p)).collect();
+    let paths: Vec<&[&str]> = paths.iter().map(Vec::as_slice).collect();
+    filled(Some(kept), base, &paths)
+}
+
+#[cfg(any(feature = "server", target_arch = "wasm32", test))]
+fn filled(kept: Option<&Value>, base: &Value, paths: &[&[&str]]) -> Value {
+    match (kept, base) {
+        (None, b) => b.clone(),
+        (Some(k), _) if paths.iter().any(|p| p.is_empty()) => k.clone(),
+        (Some(Value::Object(k)), Value::Object(b)) => {
+            let mut out = b.clone();
+            for (key, x) in k {
+                let sub: Vec<&[&str]> = paths.iter().filter(|p| p[0] == key).map(|p| &p[1..]).collect();
+                if !sub.is_empty() {
+                    out.insert(key.clone(), filled(Some(x), b.get(key).unwrap_or(&Value::Null), &sub));
+                }
+            }
+            Value::Object(out)
+        }
+        (Some(k), _) => k.clone(),
+    }
+}
+
+/// The paths one link may subscribe to, at most, and the longest (aio's).
+const MAX_PATHS: usize = 1024;
+const MAX_PATH_LEN: usize = 256;
+
+/// A subscription's paths (pure): absent, `null` or one `"*"`: the whole
+/// view (empty); else 1 to [`MAX_PATHS`] dot paths of at most 256 bytes,
+/// no segment empty. Anything else is refused whole, saying why: a client
+/// that thinks it holds a part it doesn't would show it stale for good.
+pub(crate) fn paths_of(v: &Value) -> Result<std::sync::Arc<[String]>, String> {
+    let list = match v {
+        Value::Null => return Ok(std::sync::Arc::from([])),
+        Value::Array(l) => l,
+        _ => return Err("paths: a list of dot paths".into()),
+    };
+    if list.is_empty() || list.len() > MAX_PATHS {
+        return Err(format!("paths: 1 to {MAX_PATHS} of them, or [\"*\"] for the whole cell; got {}", list.len()));
+    }
+    let mut out = Vec::with_capacity(list.len());
+    for p in list {
+        let p = p.as_str().ok_or("paths: each a string")?;
+        if p == "*" {
+            return Ok(std::sync::Arc::from([]));
+        }
+        if p.len() > MAX_PATH_LEN || p.split('.').any(str::is_empty) {
+            return Err(format!("paths: {p:?} isn't a dot path of at most {MAX_PATH_LEN} bytes"));
+        }
+        out.push(p.to_string());
+    }
+    out.sort();
+    out.dedup();
+    Ok(out.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn subscription_paths_are_checked_like_aios_subs() {
+        assert_eq!(&*paths_of(&Value::Null).unwrap(), &[] as &[String]);
+        assert_eq!(&*paths_of(&json!(["b", "a.x", "*"])).unwrap(), &[] as &[String], "* is all of it");
+        assert_eq!(&*paths_of(&json!(["b", "a.x", "b"])).unwrap(), &["a.x".to_string(), "b".into()]);
+        for bad in [
+            json!([]),
+            json!("a"),
+            json!([1]),
+            json!(["a..b"]),
+            json!([".a"]),
+            json!(["x".repeat(257)]),
+            json!(vec!["a"; 1025]),
+        ] {
+            assert!(paths_of(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_subscription_picks_its_paths_and_fills_the_rest_from_the_base() {
+        let st = json!({ "items": [1, 2], "log": ["a"], "me": { "name": "ana", "mail": "m" }, "rows": [{ "id": 1, "t": 2 }] });
+        let paths = ["items".to_string(), "me.name".into(), "rows.id".into(), "nope.x".into()];
+        let kept = pick(&st, &paths);
+        // A list is kept whole, even when the path goes on into its items.
+        assert_eq!(kept, json!({ "items": [1, 2], "me": { "name": "ana" }, "rows": [{ "id": 1, "t": 2 }] }));
+        let base = json!({ "items": [], "log": [], "me": { "name": "", "mail": "" }, "rows": [] });
+        assert_eq!(
+            fill(&kept, &base, &paths),
+            json!({ "items": [1, 2], "log": [], "me": { "name": "ana", "mail": "" }, "rows": [{ "id": 1, "t": 2 }] })
+        );
+        // A part named whole is the kept one, never merged with the base's.
+        let base = json!({ "items": [9], "me": { "name": "x", "extra": 1 } });
+        assert_eq!(
+            fill(&json!({ "me": { "name": "ana" } }), &base, &["me".into()]),
+            json!({ "items": [9], "me": { "name": "ana" } })
+        );
+        // Only the named parts come from `kept`, whole or not.
+        assert_eq!(fill(&st, &base, &paths), fill(&kept, &base, &paths));
+        // A null on the way (an `Option` unset) is kept as it is.
+        assert_eq!(pick(&json!({ "p": null, "q": 1 }), &["p.a".into()]), json!({ "p": null }));
+    }
 
     const EX: Filter = Filter { include: &[], exclude: &["feeds.*.busy", "cache", "a.b", "panel.tabs.*"] };
 

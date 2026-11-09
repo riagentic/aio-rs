@@ -59,6 +59,13 @@ air::GlobalMemo::memo: fn memo(&self) -> Memo<T>
 air::GlobalMemo::new: const fn new(f: fn() -> T) -> Self
 air::GlobalMemo::read: fn read(&self) -> ReadGuard<T>
 air::GlobalMemo::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::H::attr: fn attr<V: IntoAttr<'static> + Clone + 'static>(self, name: &'static str, v: V) -> Self
+air::H::attr_with: fn attr_with<V: IntoAttr<'static>>(self, name: &'static str, f: impl Fn() -> V + 'static) -> Self
+air::H::child: fn child<C: IntoChild + Clone + 'static>(self, c: C) -> Self
+air::H::child_with: fn child_with<C: IntoChild>(self, f: impl Fn() -> C + 'static) -> Self
+air::H::children: fn children<C: IntoChild + Clone + 'static>(self, cs: impl IntoIterator<Item = C>) -> Self
+air::H::on: fn on<T: FromRaw, M: 'static, F: IntoHandler<T, M> + Clone + 'static>(self, name: &'static str, f: F) -> Self
+air::H::view: fn view(self) -> View
 air::IntoAttr::into_attr: fn into_attr(self) -> AttrValue<'a>
 air::IntoChild::into_child: fn into_child(self) -> Child
 air::IntoHandler::into_handler: fn into_handler(self) -> Box<dyn FnMut(Event<T>)>
@@ -117,6 +124,11 @@ air::MouseData::modifiers: fn modifiers(&self) -> Modifiers
 air::MouseData::page_coordinates: fn page_coordinates(&self) -> PagePoint
 air::MouseData::screen_coordinates: fn screen_coordinates(&self) -> ScreenPoint
 air::MouseData::trigger_button: fn trigger_button(&self) -> Option<MouseButton>
+air::Optimistic::add: fn add(&self, a: A)
+air::Optimistic::clear: fn clear(&self)
+air::Optimistic::get: fn get(&self) -> T
+air::Optimistic::pending: fn pending(&self) -> bool
+air::Optimistic::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
 air::Owner(_)
 air::Owner::alive: fn alive(self) -> bool
 air::Owner::dispose: fn dispose(self)
@@ -175,6 +187,7 @@ air::Resource::suspend: fn suspend(&self) -> Result<T, crate::dom::ViewError> wh
 air::Resource::with: fn with<R>(&self, f: impl FnOnce(Option<&T>) -> R) -> R
 air::Retry(_)
 air::Retry::retry: fn retry(self)
+air::Root::beside: fn beside(&self, f: impl Fn() -> View + 'static)
 air::Root::event: fn event(&self, frame: &[u8]) -> bool
 air::Root::hot: fn hot(&self)
 air::Root::mount: fn mount(app: impl Fn() -> View + 'static) -> Self
@@ -212,6 +225,11 @@ air::SuspenseProps.children: View
 air::SuspenseProps.fallback: View
 air::Task::alive: fn alive(self) -> bool
 air::Task::cancel: fn cancel(self)
+air::TrackedMemo::get: fn get(&self, k: &K) -> V
+air::TrackedMemo::is_empty: fn is_empty(&self) -> bool
+air::TrackedMemo::len: fn len(&self) -> usize
+air::TrackedMemo::max: const fn max(self, max: usize) -> Self
+air::TrackedMemo::new: const fn new(f: fn(&K) -> V) -> Self
 air::Tree(_)
 air::Tree::empty: fn empty() -> Self
 air::Tree::is_empty: fn is_empty(&self) -> bool
@@ -222,6 +240,7 @@ air::VisibleData::is_intersecting: fn is_intersecting(&self) -> Result<bool, Str
 air::WheelData::delta: fn delta(&self) -> WheelDelta
 air::batch: fn batch<R>(f: impl FnOnce() -> R) -> R
 air::callback: fn callback<A: 'static, R: 'static>(f: impl FnMut(A) -> R + 'static) -> Callback<A, R>
+air::comp: fn comp<P: Clone + 'static, M: 'static>(c: impl crate::Component<P, M>, props: P) -> crate::dom::View
 air::components: fn components() -> Vec<Mounted>
 air::context: fn context<T: Clone + 'static>() -> T
 air::current_owner: fn current_owner() -> Option<Owner>
@@ -266,6 +285,7 @@ air::geometry::WheelDelta::Lines(Vector)
 air::geometry::WheelDelta::Pages(Vector)
 air::geometry::WheelDelta::Pixels(Vector)
 air::geometry::WheelDelta::strip_units: fn strip_units(&self) -> Vector
+air::h: fn h(tag: &'static str) -> H
 air::hot::Markup.col: u32
 air::hot::Markup.count: u32
 air::hot::Markup.file: String
@@ -293,10 +313,18 @@ air::resource: fn resource<T: 'static, F: Future<Output = T> + 'static>(f: impl 
 air::retry: fn retry() -> Retry
 air::run_tasks: fn run_tasks() -> usize
 air::scope: fn scope<R>(f: impl FnOnce() -> R) -> (R, Owner)
+air::seeded_resource: fn seeded_resource<T: 'static, F: Future<Output = T> + 'static>(encode: fn(&T) -> Option<String>, decode: fn(&str) -> Option<T>, f: impl FnMut() -> F + 'static) -> Resource<T>
 air::selector: fn selector<K: Hash + Eq + Clone + 'static>(src: impl Fn() -> K + 'static) -> Selector<K>
 air::signal: fn signal<T: 'static>(init: impl FnOnce() -> T) -> Signal<T>
 air::spawn: fn spawn(fut: impl Future<Output = ()> + 'static) -> Task
 air::spawn_forever: fn spawn_forever(fut: impl Future<Output = ()> + 'static) -> Task
+air::ssr::Streaming::finish: fn finish(self, until: std::time::Instant, send: impl FnMut(String))
+air::ssr::Streaming::ready: fn ready(&mut self) -> String
+air::ssr::Streaming::waiting: fn waiting(&self) -> bool
+air::ssr::render: fn render<R>(app: impl Fn() -> crate::dom::View + 'static, read: impl FnOnce() -> R) -> Result<(String, R), String>
+air::ssr::render_to_string: fn render_to_string(app: impl Fn() -> crate::dom::View + 'static) -> Result<String, String>
+air::ssr::seed: fn seed(key: String, json: String)
+air::ssr::stream: fn stream<R>(app: impl Fn() -> crate::dom::View + 'static, read: impl FnOnce() -> R) -> Result<(String, R, Streaming), String>
 air::styled: fn styled(view: View, property: &'static str, f: impl Fn() -> Option<String> + 'static) -> View
 air::take_edits: fn take_edits() -> Vec<u8>
 air::task: fn task<F: Future + 'static>(f: impl FnOnce() -> F + 'static)
@@ -313,6 +341,7 @@ air::testing::TestPage::flush: fn flush(&mut self)
 air::testing::TestPage::html: fn html(&self) -> String
 air::testing::TestPage::input: fn input(&mut self, t: &str, value: &str)
 air::testing::TestPage::key: fn key(&mut self, t: &str, key: &str)
+air::testing::TestPage::markup: fn markup(&self) -> String
 air::testing::TestPage::mount: fn mount(app: impl Fn() -> View + 'static) -> Self
 air::testing::TestPage::named: fn named(&self) -> usize
 air::testing::TestPage::on: fn on(root: Root) -> Self
@@ -324,10 +353,15 @@ air::testing::TestPage::within: fn within<R>(&mut self, f: impl FnOnce() -> R) -
 air::text_view: fn text_view(f: impl Fn() -> String + 'static) -> View
 air::try_context: fn try_context<T: Clone + 'static>() -> Option<T>
 air::untrack: fn untrack<R>(f: impl FnOnce() -> R) -> R
+air::use_optimistic: fn use_optimistic<T: Clone + PartialEq + 'static, A: 'static>(base: impl Fn() -> T + 'static, apply: impl Fn(&T, &A) -> T + 'static) -> Optimistic<T, A>
 air::watch: fn watch<D: Clone + PartialEq + 'static>(deps: D, f: impl FnMut(D) + 'static)
 air::with_owner: fn with_owner<R>(owner: Owner, f: impl FnOnce() -> R) -> R
+const air::ANSWERED: [u8; 1]
+const air::ASKED: u8
 const air::PAGE_JS: &str
 const air::RENDERS_KEPT: usize
+const air::ssr::SWAP_JS: &str
+const air::ssr::TEXT_MARK: &str
 enum air::AttrValue<'a>
 enum air::Child
 enum air::MouseButton
@@ -343,6 +377,7 @@ impl Clone for ElementPoint
 impl Clone for Eval
 impl Clone for FileData
 impl Clone for FormData
+impl Clone for H
 impl Clone for KeyboardData
 impl Clone for Live
 impl Clone for Markup
@@ -468,6 +503,7 @@ impl Eq for MouseButtons
 impl Eq for Owner
 impl Eq for ScrollBehavior
 impl Eq for Task
+impl From<H> for crate::dom::View
 impl FromRaw for DragData
 impl FromRaw for FormData
 impl FromRaw for KeyboardData
@@ -479,6 +515,7 @@ impl FromRaw for ScrollData
 impl FromRaw for VisibleData
 impl FromRaw for WheelData
 impl Hash for MouseButton
+impl IntoChild for H
 impl IntoChild for Tree
 impl PartialEq for Attribute
 impl PartialEq for ClientPoint
@@ -572,6 +609,8 @@ impl<E: std::error::Error> From<E> for ViewError
 impl<F: Fn() -> View + 'static> Component<(), NoProps> for F
 impl<K> Clone for Selector<K>
 impl<K> PartialEq for Selector<K>
+impl<T, A> Clone for Optimistic<T, A>
+impl<T, A> Copy for Optimistic<T, A>
 impl<T: 'static> Deref for ReadGuard<T>
 impl<T: 'static> Deref for WriteGuard<T>
 impl<T: 'static> DerefMut for WriteGuard<T>
@@ -589,6 +628,7 @@ impl<T: std::fmt::Debug + 'static> Debug for Memo<T>
 impl<T: std::fmt::Debug + 'static> Debug for Signal<T>
 impl<T: std::fmt::Debug> Debug for Event<T>
 impl<T: std::fmt::Debug> Debug for Prop<T>
+impl<T: std::fmt::Display + 'static, A> Display for Optimistic<T, A>
 impl<T: std::fmt::Display + 'static> Display for Global<T>
 impl<T: std::fmt::Display + 'static> Display for Memo<T>
 impl<T: std::fmt::Display + 'static> Display for Signal<T>
@@ -613,6 +653,7 @@ impl<T> PartialEq for Signal<T>
 mod air
 mod air::geometry
 mod air::hot
+mod air::ssr
 mod air::testing
 struct air::Attribute
 struct air::Callback<A, R>
@@ -627,6 +668,7 @@ struct air::FormData
 struct air::FragmentProps
 struct air::Global<T: 'static>
 struct air::GlobalMemo<T: PartialEq + 'static>
+struct air::H
 struct air::KeyboardData
 struct air::Live
 struct air::Memo<T>
@@ -635,6 +677,7 @@ struct air::MountedData
 struct air::MouseButtons
 struct air::MouseData
 struct air::NoProps
+struct air::Optimistic<T: 'static, A: 'static>
 struct air::Owner
 struct air::PlainData
 struct air::PointerData
@@ -650,6 +693,7 @@ struct air::Selector<K>
 struct air::Signal<T>
 struct air::SuspenseProps
 struct air::Task
+struct air::TrackedMemo<K: 'static, V: 'static>
 struct air::Tree
 struct air::ViewError
 struct air::VisibleData
@@ -664,6 +708,7 @@ struct air::geometry::Rect
 struct air::geometry::ScreenPoint
 struct air::geometry::Vector
 struct air::hot::Markup
+struct air::ssr::Streaming
 struct air::testing::TestPage
 trait air::Component<P, M>: 'static
 trait air::FromRaw: Sized + 'static

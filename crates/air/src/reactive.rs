@@ -82,6 +82,8 @@ struct Node {
     root: u32,
     /// An effect its own writes don't run again ([`effect_quiet`]).
     quiet: bool,
+    /// A signal's writes so far: a [`TrackedMemo`](crate::TrackedMemo) entry is fresh while they stay.
+    writes: u32,
 }
 
 /// AIR's guard (`signal.ts:418`): this many flush rounds in a row is a loop.
@@ -93,6 +95,8 @@ struct Rt {
     free: Vec<u32>,
     seq: u64,
     observer: Option<Key>,
+    /// While a server render's hole runs once ([`probe`]): whether it read a signal.
+    probe: Option<bool>,
     owner: Option<Key>,
     batch: u32,
     queue: Vec<Key>,
@@ -313,7 +317,12 @@ fn reset(k: Key) {
 
 fn track(s: Key) {
     rt(|rt| {
-        let Some(e) = rt.observer else { return };
+        let Some(e) = rt.observer else {
+            if let Some(p) = &mut rt.probe {
+                *p = true;
+            }
+            return;
+        };
         let Some(n) = rt.node_mut(e) else { return };
         if n.deps.contains(&s) {
             return;
@@ -346,7 +355,10 @@ fn notify(s: Key, checked: bool) {
             return Err(what);
         }
         let subs = match rt.node_mut(s) {
-            Some(n) => std::mem::take(&mut n.subs),
+            Some(n) => {
+                n.writes = n.writes.wrapping_add(1);
+                std::mem::take(&mut n.subs)
+            }
             None => return Ok(false),
         };
         // Only subscriptions of an effect's current run stay.
@@ -419,7 +431,8 @@ fn run_queue() {
                 return None;
             }
             let mut q = std::mem::take(&mut rt.queue);
-            q.sort_by_key(|k| rt.node(*k).map_or(0, |n| n.seq));
+            let seq = |k: &Key| rt.node(*k).map_or(0, |n| n.seq);
+            crate::sort_by(&mut q, |a, b| seq(a).cmp(&seq(b)));
             q.dedup();
             Some(q)
         });
@@ -462,24 +475,38 @@ fn drop_if_idle(e: Key) {
 /// A node of `kind` that runs `f` now and again whenever what it read
 /// changes, owned by the current owner.
 pub(crate) fn effect_of(kind: Kind, f: impl FnMut() + 'static) -> Key {
-    let e = rt(|rt| rt.alloc(Node { kind, ..Node::default() }));
     // The first run by value: a hole that reads and makes nothing (most of
-    // a row's) is freed without its body ever boxed. In a batch: what the
-    // run writes waits for it to end, and the body is in place by then.
+    // a row's) is freed without its body ever boxed.
     let mut f = Some(f);
+    first_run(kind, &mut |keep| match keep {
+        false => {
+            f.as_mut().expect("run once here")();
+            None
+        }
+        true => f.take().map(|f| Rc::new(RefCell::new(f)) as Run),
+    })
+}
+
+/// [`effect_of`] past its body's type (one copy, not one per body): `body`
+/// runs it (`false`), or hands it over boxed (`true`). In a batch: what
+/// the run writes waits for it to end, and the body is in place by then.
+fn first_run(kind: Kind, body: &mut dyn FnMut(bool) -> Option<Run>) -> Key {
+    let e = rt(|rt| rt.alloc(Node { kind, ..Node::default() }));
+    let mut kept = false;
     batch(|| {
         rt(|rt| _ = rt.node_mut(e).map(|n| n.runs += 1));
         {
             let _f = push_frame(None);
             let (_r, _e) = (enter(Some(e), Some(e)), running(e));
-            f.as_mut().expect("run once here")();
+            body(false);
         }
         if !idle(e) {
-            let body = f.take().map(|f| Rc::new(RefCell::new(f)) as Run);
-            rt(|rt| _ = rt.node_mut(e).map(|n| n.run = body));
+            let run = body(true);
+            kept = true;
+            rt(|rt| _ = rt.node_mut(e).map(|n| n.run = run));
         }
     });
-    if f.is_some() {
+    if !kept {
         rt(|rt| {
             if rt.node_mut(e).map(|n| n.live = false).is_some() {
                 rt.free.push(e.idx);
@@ -500,19 +527,70 @@ fn idle(e: Key) -> bool {
 /// `f()`, and whether it read a signal (a probe: nothing stays subscribed;
 /// what `f` makes is the current owner's).
 pub(crate) fn reads<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    let (k, owner) = rt(Rt::probe_node);
+    let r = {
+        let _r = enter(Some(k), owner);
+        f()
+    };
+    (r, read_by(k))
+}
+
+impl Rt {
+    /// A probe's node ([`reads`]), owned by no one, and the current owner.
+    fn probe_node(&mut self) -> (Key, Option<Key>) {
+        let owner = self.owner.take();
+        let k = self.alloc(Node { kind: Kind::Memo, ..Node::default() });
+        self.owner = owner;
+        (k, owner)
+    }
+}
+
+/// Did probe `k` read a signal? It goes.
+fn read_by(k: Key) -> bool {
+    let read = RT.with_borrow(|rt| rt.node(k).is_some_and(|n| !n.deps.is_empty()));
+    dispose(k);
+    read
+}
+
+/// A signal as read at one moment: its key and its writes then.
+pub(crate) type Mark = (Key, u32);
+
+/// `f()`, and the signals it read as they were (a probe: nothing stays
+/// subscribed, the running code doesn't follow them; it may not write).
+pub(crate) fn recorded<R>(f: impl FnOnce() -> R) -> (R, Vec<Mark>) {
     let (k, owner) = rt(|rt| {
         let owner = rt.owner.take();
         let k = rt.alloc(Node { kind: Kind::Memo, ..Node::default() });
         rt.owner = owner;
         (k, owner)
     });
+    struct Probe(Key);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            dispose(self.0);
+        }
+    }
+    let probe = Probe(k);
     let r = {
         let _r = enter(Some(k), owner);
         f()
     };
-    let read = RT.with_borrow(|rt| rt.node(k).is_some_and(|n| !n.deps.is_empty()));
-    dispose(k);
-    (r, read)
+    let marks = RT.with_borrow(|rt| {
+        let deps = rt.node(k).map_or(&[][..], |n| &n.deps[..]);
+        deps.iter().filter_map(|d| Some((*d, rt.node(*d)?.writes))).collect()
+    });
+    drop(probe);
+    (r, marks)
+}
+
+/// Is every signal of `marks` alive and unwritten since?
+pub(crate) fn fresh(marks: &[Mark]) -> bool {
+    RT.with_borrow(|rt| marks.iter().all(|(k, w)| rt.node(*k).is_some_and(|n| n.writes == *w)))
+}
+
+/// Subscribe the running code to the signals of `marks`, as reading them would.
+pub(crate) fn replay(marks: &[Mark]) {
+    marks.iter().for_each(|(k, _)| track(*k));
 }
 
 /// A hole: `f` now and whenever what it read changes; it may not write.
@@ -615,43 +693,77 @@ pub fn detached<R>(f: impl FnOnce() -> R) -> R {
 /// `f` when the current owner is disposed or re-runs (AIR `onCleanup`);
 /// nothing to run it with no owner.
 pub(crate) fn cleanup(f: impl FnOnce() + 'static) {
+    cleanup_boxed(Box::new(f))
+}
+
+fn cleanup_boxed(f: Box<dyn FnOnce()>) {
     rt(|rt| {
         if let Some(o) = rt.owner
             && let Some(n) = rt.node_mut(o)
         {
-            n.cleanups.push(Box::new(f));
+            n.cleanups.push(f);
         }
     });
 }
 
 /// Writes in `f` flush once, at its end (AIR `batch`; every event handler runs in one).
 pub fn batch<R>(f: impl FnOnce() -> R) -> R {
-    struct Close;
-    impl Drop for Close {
-        fn drop(&mut self) {
-            rt(|rt| rt.batch -= 1);
-        }
-    }
-    rt(|rt| rt.batch += 1);
     let r = {
-        let _c = Close;
+        let _c = Batch::open();
         f()
     };
     flush_if_idle();
     r
 }
 
+/// A batch open while it lives (closed by a panic unwinding too).
+struct Batch;
+
+impl Batch {
+    fn open() -> Self {
+        rt(|rt| rt.batch += 1);
+        Self
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        rt(|rt| rt.batch -= 1);
+    }
+}
+
 /// `f`'s reads subscribe nothing (AIR `untrack`).
 pub fn untrack<R>(f: impl FnOnce() -> R) -> R {
-    let o = rt(|rt| rt.observer.take());
-    struct Back(Option<Key>);
-    impl Drop for Back {
-        fn drop(&mut self) {
-            rt(|rt| rt.observer = self.0);
-        }
-    }
-    let _b = Back(o);
+    let _b = Unfollowed::new(None);
     f()
+}
+
+/// Restores the observer and the probe when dropped (a panic unwinding too).
+struct Unfollowed(Option<Key>, Option<bool>);
+
+impl Unfollowed {
+    /// The observer taken, and the probe set to `probe`.
+    fn new(probe: Option<bool>) -> Self {
+        rt(|rt| Self(rt.observer.take(), std::mem::replace(&mut rt.probe, probe)))
+    }
+}
+
+impl Drop for Unfollowed {
+    fn drop(&mut self) {
+        rt(|rt| (rt.observer, rt.probe) = (self.0, self.1));
+    }
+}
+
+/// `f()` untracked, and whether it read a signal: a server render's hole
+/// runs once when it read none (no node made; [`reads`] makes one).
+pub(crate) fn probe<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    let _b = Unfollowed::new(Some(false));
+    let r = f();
+    (r, probed())
+}
+
+fn probed() -> bool {
+    RT.with_borrow(|rt| rt.probe == Some(true))
 }
 
 /// Is code of the app's views running on this thread now (a view's body,
@@ -837,6 +949,11 @@ fn frame(hook: &str) -> Rc<Frame> {
     })
 }
 
+/// The place of the next hook of the view whose body runs now.
+pub(crate) fn hook_at(name: &str) -> usize {
+    frame(name).at.get()
+}
+
 /// `f()` the first time this view's body runs, kept for its life; later
 /// runs get a clone (a view runs once, unless it waited for a resource).
 /// What `f` makes lives as long as the view. The other hooks are made of it.
@@ -846,23 +963,30 @@ pub fn once<T: Clone + 'static>(f: impl FnOnce() -> T) -> T {
 }
 
 pub(crate) fn hook<T: Clone + 'static>(name: &str, f: impl FnOnce() -> T) -> T {
+    let mut f = Some(f);
+    let v = hook_any(name, TypeId::of::<T>(), &mut |o| Rc::new(with_owner(o, f.take().expect("made once"))));
+    v.downcast_ref::<T>().expect("a hook of its type").clone()
+}
+
+/// [`hook`] past its value's type (one copy, not one per hook): the slot's
+/// value if it is a `T` (`t`), else the one `make` makes under its keeper.
+fn hook_any(name: &str, t: TypeId, make: &mut dyn FnMut(Owner) -> Rc<dyn Any>) -> Rc<dyn Any> {
     let fr = frame(name);
     let i = fr.at.get();
     fr.at.set(i + 1);
     let had = fr.slots.borrow().get(i).cloned();
     if let Some(v) = had {
-        match v.downcast_ref::<T>() {
-            Some(v) => return v.clone(),
+        match (*v).type_id() == t {
+            true => return v,
             // Its code changed (a hot reload): this hook and the ones after start afresh.
-            None if fr.adopted.get() => fr.slots.borrow_mut().truncate(i),
-            None => panic!(
+            false if fr.adopted.get() => fr.slots.borrow_mut().truncate(i),
+            false => panic!(
                 "air: this view called its hooks in another order than before (`{name}` at place {i}): call them at the top of the body, never in a branch or a loop"
             ),
         }
     }
-    let k = fr.keeper();
-    let v = with_owner(Owner(k), f);
-    fr.slots.borrow_mut().push(Rc::new(v.clone()));
+    let v = make(Owner(fr.keeper()));
+    fr.slots.borrow_mut().push(v.clone());
     v
 }
 
@@ -1302,8 +1426,11 @@ pub(crate) fn effect_now(f: impl FnMut() + 'static) -> Effect {
 }
 
 fn effect_kept(f: impl FnMut() + 'static, quiet: bool) -> Effect {
-    let e =
-        rt(|rt| rt.alloc(Node { kind: Kind::Effect, run: Some(Rc::new(RefCell::new(f))), quiet, ..Node::default() }));
+    effect_run(Rc::new(RefCell::new(f)), quiet)
+}
+
+fn effect_run(run: Run, quiet: bool) -> Effect {
+    let e = rt(|rt| rt.alloc(Node { kind: Kind::Effect, run: Some(run), quiet, ..Node::default() }));
     rt(|rt| rt.later.push(Later::Effect(e)));
     flush_if_idle();
     Effect(e)
@@ -1441,6 +1568,90 @@ impl<A: 'static, R: 'static, F: FnMut(A) -> R + 'static> From<F> for Callback<A,
 #[track_caller]
 pub fn callback<A: 'static, R: 'static>(f: impl FnMut(A) -> R + 'static) -> Callback<A, R> {
     hook("callback", || Callback::new(f))
+}
+
+// -------------------------------------------------------------- optimistic
+
+/// What shows while actions are on their way ([`use_optimistic`]): `Copy`.
+pub struct Optimistic<T: 'static, A: 'static> {
+    shown: Memo<T>,
+    base: Memo<T>,
+    /// The actions added, and the base they were added on.
+    pending: Signal<(Option<T>, Vec<A>)>,
+}
+
+impl<T, A> Clone for Optimistic<T, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T, A> Copy for Optimistic<T, A> {}
+
+impl<T: Clone + PartialEq + 'static, A: 'static> Optimistic<T, A> {
+    /// The value shown: the base with the pending actions applied (subscribes).
+    #[track_caller]
+    pub fn get(&self) -> T {
+        self.shown.get()
+    }
+
+    #[track_caller]
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        self.shown.with(f)
+    }
+
+    /// Show `a` at once, until the base changes (the call landed or was refused) or [`clear`](Self::clear).
+    pub fn add(&self, a: A) {
+        let base = self.base.get_untracked();
+        self.pending.update(|(on, acts)| {
+            if on.as_ref() != Some(&base) {
+                *on = Some(base);
+                acts.clear();
+            }
+            acts.push(a);
+        });
+    }
+
+    /// Drop the pending actions: the base shows (a call that failed and changed nothing).
+    pub fn clear(&self) {
+        self.pending.update(|(on, acts)| {
+            *on = None;
+            acts.clear();
+        });
+    }
+
+    /// Actions are pending.
+    pub fn pending(&self) -> bool {
+        let base = self.base.get();
+        self.pending.with(|(on, acts)| on.as_ref() == Some(&base) && !acts.is_empty())
+    }
+}
+
+impl<T: std::fmt::Display + 'static, A> std::fmt::Display for Optimistic<T, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.shown.fmt(f)
+    }
+}
+
+/// An optimistic value (aio's `useOptimistic`, a hook): `base()` (what the
+/// app holds: a cell's part, a resource) with each action [`add`](Optimistic::add)ed
+/// since applied by `apply`, shown at once. A change of the base drops the
+/// actions: the real answer is in. `clear` drops them too (a refusal that
+/// changed nothing, which aio's hook can't tell).
+#[track_caller]
+pub fn use_optimistic<T: Clone + PartialEq + 'static, A: 'static>(
+    base: impl Fn() -> T + 'static,
+    apply: impl Fn(&T, &A) -> T + 'static,
+) -> Optimistic<T, A> {
+    let base = memo(base);
+    let pending = signal(|| (None::<T>, Vec::<A>::new()));
+    let shown = memo(move || {
+        let b = base.get();
+        pending.with(|(on, acts)| match on.as_ref() == Some(&b) {
+            true => acts.iter().fold(b.clone(), |v, a| apply(&v, a)),
+            false => b,
+        })
+    });
+    Optimistic { shown, base, pending }
 }
 
 // ---------------------------------------------------------------- selector

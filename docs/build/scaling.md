@@ -220,6 +220,8 @@ files.
 | `visible` per viewer | smaller patches, and none to who sees nothing changed |
 | `#[coalesce]` on frequent writers | one write and one push per 100 ms run |
 | `[server.limits] clients` raised | 256 by default |
+| `remote.subscribe(paths)` on copies that read a part | only those parts and their patches ([path subscriptions](../persistence/offline.md#path-subscriptions)) |
+| nothing: slow screens pace themselves | a copy or aio page whose screen lags is sent its patches 2x or 4x apart (aio's render-staleness backpressure; [what travels](../persistence/offline.md#what-travels-patches)) |
 | `ax cost <app>` | what each cell sends, full resends, its methods' p95 |
 
 ### Frequent calls (over 10 a second)
@@ -285,16 +287,40 @@ What is measured, in aio-rs's own repository:
 - Stateless APIs: an app is its cells; a server function or route is
   the way to answer without state.
 
+## The benchmark gate
+
+As aio's D12 gate, the runtime's speed is a test: `crates/aio/tests/rt_gate.rs`
+measures a cell started in memory, a store opened, a call in memory and a
+saved call, many times each, and fails when a p10 (the floor of the
+samples, steady where a median swings with the machine's other work) is
+over its ceiling, twice the most it measured. `./ci.sh` runs it in the
+release build (`cargo test -p aio-rs --release --test rt_gate`), the
+workspace's run in the debug one, each with its own ceilings, on Linux
+x86_64 (the machine they were measured on). A ceiling moves only with the
+numbers that justify it, in the same commit.
+A store's open is bound by its disk syncs, so its time swings with the
+disk's other work (13 ms quiet, over 50 ms beside a parallel build): its
+ceiling stays loose (62 ms release, 91 ms debug) and the syncs are gated
+exactly instead, at most 4 for a new store's open and close (a unit test
+counts SQLite's through a counting VFS and aio-rs's own; 13 before).
+
+| Metric | p10, release | p10, debug |
+|---|---|---|
+| a cell started in memory | 74 µs | 126 µs |
+| a store opened (a new file) | 13 ms | 12 ms |
+| a call in memory | 7.2 µs | 13.3 µs |
+| a saved call | 120 µs | 192 µs |
+
+The developer loop has its own gate (`scripts/dx-metrics --check`), and
+list costs theirs in tests.
+
 ## Not in aio-rs
 
-- aio's render-staleness backpressure (a page whose paint lags is sent
-  less): aio-rs paces every link the same (`[server.limits]
-  sync_interval_ms`, aio's `syncIntervalMs`) and sends a big patch as the
-  view (`full_state_percent`, aio's `fullStateThreshold`).
-- aio's `perfCheck: "off"` switch: aio-rs's budgets are always on and
-  cost a clock read per call.
-- A benchmark gate on the runtime (aio's D12 perf gate): aio-rs gates the
-  developer loop (`scripts/dx-metrics --check`) and list costs in tests.
+- aio's `perfCheck: "off"` switch: aio-rs's per-call accounting (the
+  phases' clock reads, the budget, `ax cost`'s meter, the vitals' last
+  call) is always on, measured at 0.2 µs a call (0.6 µs in a debug
+  build), about 0.2 % of a stored call's 92 µs: nothing to switch off
+  (`perf::tests::a_calls_accounting_costs_under_two_microseconds`).
 
 ## API
 

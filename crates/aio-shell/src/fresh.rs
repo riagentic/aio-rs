@@ -57,6 +57,10 @@ where
             if !stale {
                 return Poll::Ready(Some(f));
             }
+            // A dropped key the page asked is still answered (main.js counts the answers).
+            if matches!(&f, Ok(b) if b.first() == Some(&air::ASKED)) {
+                return Poll::Ready(Some(Ok(vec![air::ASKED])));
+            }
         }
         if this.ended { Poll::Ready(None) } else { Poll::Pending }
     }
@@ -109,6 +113,15 @@ mod tests {
             [&sent[0], &sent[3], &sent[4], &sent[5], &sent[6]].map(Clone::clone),
             "the first press, the newest repeats"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stale_asked_repeat_leaves_its_mark_to_be_answered() {
+        let mut asked = key("keydown", "ArrowDown", true).unwrap();
+        asked[0] = air::ASKED;
+        let sent = vec![Ok::<_, ()>(asked.clone()), Ok(asked.clone())];
+        let got: Vec<_> = Fresh::new(futures_util::stream::iter(sent)).collect().await;
+        assert_eq!(got, [Ok(vec![air::ASKED]), Ok(asked)], "an empty ask in place of the stale one, then the newest");
     }
 
     #[test]

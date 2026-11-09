@@ -43,6 +43,17 @@ struct Copy<T> {
     base: Option<(Value, Arc<T>)>,
     /// Fields shown merged ([`Remote::merge`]).
     merges: Vec<(String, crate::merge::Merge)>,
+    /// The parts it holds ([`Remote::subscribe`]; empty: all of it).
+    paths: Vec<String>,
+}
+
+/// A copy's hello, holding `paths` of the cell (empty: all of it).
+fn hello_of<T: Cell>(paths: &[String]) -> Value {
+    let mut hello = json!({ "t": "hello", "cell": T::ID, "v": T::VERSION });
+    if !paths.is_empty() {
+        hello["paths"] = json!(paths);
+    }
+    hello
 }
 
 /// `method` on `st` as the server runs it: its machine, then the method,
@@ -63,7 +74,14 @@ impl<T: Cell> Copy<T> {
             true => self.base = None,
             false => _ = self.base.get_or_insert_with(|| (self.view.clone(), self.confirmed.clone())),
         }
-        let st = self.replayed(&self.confirmed);
+        let mut st = self.replayed(&self.confirmed);
+        // A predicted call shows only in the parts the copy holds.
+        if !self.paths.is_empty()
+            && !self.pending.is_empty()
+            && let Some(h) = serde_json::to_value(&st).ok().and_then(|v| crate::held::<T>(&self.paths, &v).ok())
+        {
+            st = h;
+        }
         self.shown = Arc::new(match &self.base {
             Some((view, base)) if !self.merges.is_empty() => {
                 match (serde_json::to_value(self.replayed(base)), serde_json::to_value(&st)) {
@@ -109,6 +127,7 @@ impl<T: Cell> Copy<T> {
             view: self.view.clone(),
             pending: self.pending.clone(),
             sched: Vec::new(),
+            paths: self.paths.clone(),
         }
     }
 }
@@ -131,6 +150,16 @@ struct Inner<T: Cell> {
     ends: Mutex<std::collections::HashMap<String, crate::Reply>>,
     /// The server refused this page's credential (aio's "Signed out").
     signed_out: AtomicBool,
+    /// Since when (ms) a state waits to be shown, the longest wait since
+    /// last said, and whether anything renders it ([`Remote::rendered`]).
+    screen: Mutex<(Option<i64>, i64, bool)>,
+    /// What this link's server understands of what a copy may say.
+    can: Mutex<Vec<String>>,
+}
+
+/// What a server's first state says it understands of a copy.
+fn can_of(first: &Value) -> Vec<String> {
+    first["can"].as_array().map(|l| l.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default()
 }
 
 /// A synced copy of a server's cell in the page. Reads and calls are local
@@ -384,17 +413,27 @@ impl<T: Cell> Remote<T> {
         super::syncing(app, T::ID);
         let saved =
             storage::load(&Local, &key, say).and_then(|d| storage::current(&Local, &key, d, T::ID, T::VERSION, say));
-        let hello = json!({ "t": "hello", "cell": T::ID, "v": T::VERSION });
-        let first = match Link::open(url, &hello).await {
-            Ok(l) => Some(l),
-            Err(Failed::Offline(e)) if saved.is_some() => {
-                say(&format!("sync {}: {e}; starting offline from the saved copy", T::ID));
-                None
-            }
-            Err(Failed::Offline(e) | Failed::Skew(e) | Failed::Refused(e)) => return Err(std::io::Error::other(e)),
+        // A saved copy holds what it held.
+        let paths = saved.as_ref().map(|s| s.paths.clone()).unwrap_or_default();
+        // A server's first paint of this page: its state, unless this
+        // browser kept a newer copy; linked meanwhile (the paint is the view).
+        let newer = |m: &Value, s: &Doc| m["user"] != s.user.as_str() || m["seq"].as_u64() >= Some(s.seq);
+        let seed = super::seeded(T::ID).filter(|m| saved.as_ref().is_none_or(|s| newer(m, s)));
+        let first = match seed {
+            Some(_) => None,
+            None => match Link::open(url, &hello_of::<T>(&paths)).await {
+                Ok(l) => Some(l),
+                Err(Failed::Offline(e)) if saved.is_some() => {
+                    say(&format!("sync {}: {e}; starting offline from the saved copy", T::ID));
+                    None
+                }
+                Err(Failed::Offline(e) | Failed::Skew(e) | Failed::Refused(e)) => {
+                    return Err(std::io::Error::other(e));
+                }
+            },
         };
-        let (seq, view, user, pending) = match (&first, saved) {
-            (Some((_, m)), saved) => {
+        let (seq, view, user, pending) = match (first.as_ref().map(|(_, m)| m).or(seed.as_ref()), saved) {
+            (Some(m), saved) => {
                 let user = m["user"].as_str().unwrap_or("peer").to_string();
                 // Another user's calls are never sent as this one (they stay stored).
                 let pending = saved.filter(|s| s.user == user).map(|s| s.pending).unwrap_or_default();
@@ -403,9 +442,9 @@ impl<T: Cell> Remote<T> {
             (None, Some(s)) => (s.seq, s.view, s.user, s.pending),
             (None, None) => unreachable!("offline without a saved copy returned above"),
         };
-        let st: Arc<T> = Arc::new(crate::copy_of(view.clone()).map_err(std::io::Error::other)?);
+        let st: Arc<T> = Arc::new(crate::held(&paths, &view).map_err(std::io::Error::other)?);
         let mut copy =
-            Copy { seq, view, confirmed: st.clone(), pending, shown: st, user, base: None, merges: Vec::new() };
+            Copy { seq, view, confirmed: st.clone(), pending, shown: st, user, base: None, merges: Vec::new(), paths };
         copy.reshow();
         let connected = first.is_some();
         let inner = Arc::new(Inner {
@@ -422,12 +461,15 @@ impl<T: Cell> Remote<T> {
             owned: Mutex::default(),
             ends: Mutex::default(),
             signed_out: AtomicBool::new(false),
+            screen: Mutex::default(),
+            can: Mutex::new(first.as_ref().map(|(_, m)| can_of(m)).unwrap_or_default()),
         });
         let r = Self { inner };
         r.mirror_twins();
+        wasm_bindgen_futures::spawn_local(report(Arc::downgrade(&r.inner)));
         r.update(|_| {});
         let (weak, url) = (Arc::downgrade(&r.inner), url.to_string());
-        wasm_bindgen_futures::spawn_local(run(weak, url, hello, first.map(|(l, _)| l)));
+        wasm_bindgen_futures::spawn_local(run(weak, url, first.map(|(l, _)| l)));
         // Online once the pump runs.
         for _ in 0..if connected { 20 } else { 0 } {
             if r.online() {
@@ -455,7 +497,7 @@ impl<T: Cell> Remote<T> {
             }
             r.update(|c| {
                 c.pending.extend(new.iter().cloned());
-                c.pending.sort_by(|a, b| (a.at, &a.op).cmp(&(b.at, &b.op)));
+                crate::sort_by(&mut c.pending, |a, b| (a.at, &a.op).cmp(&(b.at, &b.op)));
             });
             new.iter().for_each(|q| r.send(q.msg()));
         });
@@ -472,7 +514,7 @@ impl<T: Cell> Remote<T> {
             *lock(&self.inner.last_sync) = Some(super::now_ms());
         }
         match m["t"].as_str() {
-            Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
+            Some("state") => match crate::held::<T>(&self.paths(), &m["state"]) {
                 Ok(st) => {
                     let before = lock(&self.inner.copy).before(&m["op"]);
                     let met = self.met(before, &m["state"]);
@@ -481,15 +523,16 @@ impl<T: Cell> Remote<T> {
                         c.view = m["state"].clone();
                         c.confirmed = Arc::new(st);
                     });
+                    lock(&self.inner.screen).0.get_or_insert_with(super::now_ms);
                     self.conflicted(&met);
                 }
                 Err(e) => say(&format!("sync {}: bad state: {e}", T::ID)),
             },
             Some("patch") => {
                 let (prev, seq) = (m["prev"].as_u64().unwrap_or(0), m["seq"].as_u64().unwrap_or(0));
-                let (mine, view, before) = {
+                let (mine, view, before, paths) = {
                     let c = lock(&self.inner.copy);
-                    (c.seq, c.view.clone(), c.before(&m["op"]))
+                    (c.seq, c.view.clone(), c.before(&m["op"]), c.paths.clone())
                 };
                 if seq <= mine {
                     return;
@@ -498,7 +541,7 @@ impl<T: Cell> Remote<T> {
                     return self.send(json!({ "t": "resync" })); // a gap: never guess
                 }
                 let st = patched(&view, &m)
-                    .and_then(|v| crate::copy_of::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
+                    .and_then(|v| crate::held::<T>(&paths, &v).map(|st| (v, st)).map_err(|e| e.to_string()));
                 match st {
                     Ok((view, st)) => {
                         let met = self.met(before, &view);
@@ -507,6 +550,7 @@ impl<T: Cell> Remote<T> {
                             c.view = view;
                             c.confirmed = Arc::new(st);
                         });
+                        lock(&self.inner.screen).0.get_or_insert_with(super::now_ms);
                         self.conflicted(&met);
                     }
                     Err(e) => {
@@ -554,6 +598,11 @@ impl<T: Cell> Remote<T> {
             },
             _ => {}
         }
+    }
+
+    /// The parts the copy holds (the lock let go at once).
+    fn paths(&self) -> Vec<String> {
+        lock(&self.inner.copy).paths.clone()
     }
 
     fn send(&self, m: Value) {
@@ -678,6 +727,33 @@ impl<T: Cell> Remote<T> {
         lock(&self.inner.conflicts).push(Arc::new(f));
     }
 
+    /// As a native copy's [`crate::sync::Remote::subscribe`].
+    pub fn subscribe(&self, paths: &[&str]) -> Result<()> {
+        let paths = match paths.is_empty() {
+            true => std::sync::Arc::from([]),
+            false => crate::filter::paths_of(&json!(paths)).map_err(Rejected::new)?,
+        };
+        self.update(|c| {
+            c.paths = paths.to_vec();
+            if let Ok(s) = crate::held::<T>(&c.paths, &c.view) {
+                c.confirmed = Arc::new(s);
+            }
+        });
+        if lock(&self.inner.can).iter().any(|c| c == "paths") {
+            self.send(json!({ "t": "paths", "paths": if paths.is_empty() { json!(["*"]) } else { json!(*paths) } }));
+        }
+        Ok(())
+    }
+
+    /// As a native copy's [`crate::sync::Remote::rendered`].
+    pub fn rendered(&self) {
+        let mut s = lock(&self.inner.screen);
+        s.2 = true;
+        if let Some(t) = s.0.take() {
+            s.1 = s.1.max(super::now_ms() - t);
+        }
+    }
+
     /// As a native copy's [`crate::sync::Remote::merge`].
     pub fn merge(&self, field: &str, how: crate::merge::Merge) {
         self.update(|c| {
@@ -715,15 +791,21 @@ fn patched(view: &Value, m: &Value) -> std::result::Result<Value, String> {
 
 /// The copy's link, until every handle is gone: linked, it moves messages
 /// both ways; dropped, it is opened again with jittered backoff.
-async fn run<T: Cell>(weak: Weak<Inner<T>>, url: String, hello: Value, mut first: Option<Link>) {
+async fn run<T: Cell>(weak: Weak<Inner<T>>, url: String, mut first: Option<Link>) {
     let mut wait = 250u32;
     let mut told = false;
     loop {
         let link = match first.take() {
             Some(l) => l,
-            None => match Link::open(&url, &hello).await {
+            None => match Link::open(
+                &url,
+                &hello_of::<T>(&weak.upgrade().map(|i| lock(&i.copy).paths.clone()).unwrap_or_default()),
+            )
+            .await
+            {
                 Ok((l, m)) => {
                     let Some(inner) = weak.upgrade() else { return };
+                    *lock(&inner.can) = can_of(&m);
                     Remote { inner }.take(m);
                     l
                 }
@@ -754,6 +836,23 @@ async fn run<T: Cell>(weak: Weak<Inner<T>>, url: String, hello: Value, mut first
         pump(Remote { inner }, link).await;
         if weak.strong_count() == 0 {
             return;
+        }
+    }
+}
+
+/// Each second, how far the page's screen lags, to a server that paces by
+/// it, once something renders the copy; until every handle is gone.
+async fn report<T: Cell>(weak: Weak<Inner<T>>) {
+    loop {
+        super::sleep(1000).await;
+        let Some(inner) = weak.upgrade() else { return };
+        let lag = {
+            let mut s = lock(&inner.screen);
+            let now = s.0.map_or(0, |t| super::now_ms() - t);
+            (s.2, std::mem::take(&mut s.1).max(now))
+        };
+        if lag.0 && lock(&inner.can).iter().any(|c| c == "seen") {
+            Remote { inner }.send(json!({ "t": "seen", "ms": lag.1.max(0) }));
         }
     }
 }

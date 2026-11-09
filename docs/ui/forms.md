@@ -144,7 +144,8 @@ What happens, step by step:
 
 ## The form handle
 
-`use_form` returns `Form<T>`, which is `Copy`: move it into every handler.
+`use_form` returns `Form<T>` (`use_form_schema`: `Form<T, O>`, `O` what
+the values parse into), which is `Copy`: move it into every handler.
 
 | Call | Gives | Does |
 |---|---|---|
@@ -159,6 +160,7 @@ What happens, step by step:
 | `f.dirty()` | `bool` | the values differ from where they started |
 | `f.edited(field)` | `bool` | the field was edited |
 | `f.submit()` | `Option<T>` | every error shows; the values when valid |
+| `f.parsed()`, `f.submit_parsed()` | `Option<O>` | the values parsed by the [schema](#a-schema) (`use_form`'s: the values) when valid; the second tries a submit first |
 | `f.reset()` | | back to the initial values; nothing left or tried |
 
 `T` needs `Clone + PartialEq + 'static`. `Problems` is
@@ -177,10 +179,9 @@ regex built once).
 - **A rule about no single field uses `""`.** It shows through
   `f.form_error()`, once a submit was tried, and an edit to any field hides
   it until the next check.
-- **A schema is a function.** Where aio took a Zod or Valibot schema,
-  aio-rs takes Rust: parse into the type you send in `check` and push a
-  problem per failure. The same function can run in the method too, so the
-  rule is written once:
+- **A check is a function.** Parse into the type you send and push a
+  problem per failure; the same function can run in the method too, so
+  the rule is written once. Or declare it as a [schema](#a-schema):
 
 ```rust
 use aio::kit::Problems;
@@ -218,6 +219,156 @@ assert!(check(&Signup { password: "long enough".into(), confirm: "long enough".i
 
 A check you can call without a view is also a check you can unit-test
 without one.
+
+## A schema
+
+Where aio's `useForm` took a Standard Schema (Zod, Valibot),
+`use_form_schema(initial, schema)` takes a `Schema`: each field's rule
+declared once, the values parsed into the type the app sends, each
+problem on its field, and checks that wait. `f.parsed()` is that typed
+value (aio's `form.parsed()`, typed where aio's was `unknown`);
+`f.submit_parsed()` tries a submit and gives it.
+
+```rust
+use aio::kit::{Parse, Schema, optional, text};
+use std::time::Duration;
+
+/// What the inputs hold: text.
+#[derive(Clone, Default, PartialEq)]
+pub struct Join {
+    pub name: String,
+    pub age: String,
+    pub site: String,
+}
+
+/// What the app sends.
+#[derive(Debug, PartialEq)]
+pub struct Member {
+    pub name: String,
+    pub age: u8,
+    pub site: Option<String>,
+}
+
+pub fn schema() -> Schema<Join, Member> {
+    let name = text().trim().required("Your name, please");
+    let age = text().parse::<u8>("A number").range(18..=130, "18 or more");
+    let site = optional(text().trim().check(|s| s.starts_with("https://"), "An https:// address"));
+    Schema::new(move |p: &mut Parse<Join>| {
+        // Every field first, so each one's problem is said at once.
+        let name = p.field(aio::field!(name), &name);
+        let age = p.field(aio::field!(age), &age);
+        let site = p.field(aio::field!(site), &site);
+        Some(Member { name: name?, age: age?, site: site? })
+    })
+    .wait(aio::field!(name), Duration::from_millis(300), |name: String| async move {
+        (name == "admin").then(|| "That name is taken".to_string())
+    })
+}
+
+# fn main() {
+let ok = Join { name: " Ada ".into(), age: "36".into(), site: String::new() };
+assert_eq!(schema().parse(&ok), Ok(Member { name: "Ada".into(), age: 36, site: None }));
+let bad = Join { age: "12".into(), ..ok };
+assert_eq!(schema().parse(&bad).unwrap_err(), [("age", "18 or more".to_string())]);
+# }
+```
+
+In a view: `let f = use_form_schema(Join::default, schema());`, then
+`Input { bind: f.bind(aio::field!(age)) }` in a `Field { error:
+f.error("age"), .. }`, and `f.submit_parsed()` on submit: a `Member`.
+
+| Rule | Does |
+|---|---|
+| `text()`, `rule::<T>()` | a field as it is (text; any type: `rule::<bool>()`) |
+| `.trim()` | without the spaces around |
+| `.required(msg)`, `.min_len(n, msg)`, `.max_len(n, msg)`, `.email(msg)` | refuses an empty, short, long or non-email text |
+| `.parse::<N>(msg)` | text into any `FromStr` type (a number, the app's own), refused if it doesn't parse |
+| `.range(a..=b, msg)` | refuses a value outside |
+| `.check(\|v\| ok, msg)` | any rule of the app's |
+| `.map(f)`, `.then(\|v\| Ok(..) / Err(msg))` | a step that changes the value, or may refuse |
+| `optional(rule)` | an empty text is `None`, else the rule's `Some` |
+| `p.problem(field, msg)` | a rule across fields, on the field it names (`""`: the form) |
+| `.wait(field, debounce, check)` | a check that waits ([below](#rules-that-wait)) |
+
+`Schema::parse(&values)` runs without a view, so a schema is
+unit-tested as above and can run in the cell's method too.
+
+### One schema with a TypeScript client: JSON Schema
+
+aio's `useForm` took the Zod, Valibot or ArkType object as it is. Each
+of them exports it as JSON Schema (`z.toJSONSchema(s)`,
+`toJsonSchema(s)` of `@valibot/to-json-schema`, ArkType's
+`t.toJsonSchema()`), and `Schema::json` reads that file: the same rules
+check the TypeScript client and the Rust form.
+
+```rust
+use aio::kit::Schema;
+
+/// What the inputs hold.
+#[derive(Clone, Default, PartialEq, aio::serde::Serialize)]
+#[serde(crate = "aio::serde")]
+pub struct Join {
+    pub name: String,
+    pub age: String,
+    pub plan: String,
+}
+
+/// What the app sends.
+#[derive(Debug, PartialEq, aio::serde::Deserialize)]
+#[serde(crate = "aio::serde")]
+pub struct Member {
+    pub name: String,
+    pub age: u8,
+    pub plan: String,
+}
+
+/// In the app: `Schema::json(include_str!("../shared/join.schema.json"))`.
+const JOIN: &str = r#"{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "errorMessage": "Your name, please" },
+    "age": { "type": "integer", "minimum": 18, "maximum": 130 },
+    "plan": { "enum": ["free", "pro"] }
+  },
+  "required": ["name", "age", "plan"]
+}"#;
+
+# fn main() {
+let schema = Schema::<Join, Member>::json(JOIN).expect("a schema aio-rs can check");
+let ok = Join { name: "Ada".into(), age: "36".into(), plan: "pro".into() };
+assert_eq!(schema.parse(&ok), Ok(Member { name: "Ada".into(), age: 36, plan: "pro".into() }));
+let bad = Join { name: String::new(), age: "12".into(), ..ok };
+assert_eq!(
+    schema.parse(&bad).unwrap_err(),
+    [("age", "At least 18".to_string()), ("name", "Your name, please".into())]
+);
+# }
+```
+
+- Each property is a field of the form's values, by name; what passes
+  is deserialized into the app's type, and a field that won't
+  deserialize is a problem on the form (`""`).
+- A text input's value is read as its field's type: `"36"` is 36 for an
+  `integer`, `""` is no value for a number, a boolean or a nullable field
+  (`X | null`). A missing `required` field says `Required`.
+- Checked: `type`, `minLength`, `maxLength`, `pattern` (ECMAScript, as
+  Zod writes it: classes, groups, lazy and greedy repeats, lookahead),
+  `format` (`email`, `uri`, `url`, `uuid`, `date`, `date-time`, `time`,
+  `ipv4`, `ipv6`), `minimum`, `maximum`, `exclusiveMinimum`,
+  `exclusiveMaximum`, `multipleOf`, `enum`, `const`, `items`,
+  `minItems`, `maxItems`, `uniqueItems`, `required`, `anyOf` of one
+  schema and `null`. Notes (`title`, `description`, `default`, ...) are
+  read past.
+- Any other keyword, a lookbehind or a backreference in a `pattern`, a
+  nested object or `$ref` is an error from `Schema::json`, naming it:
+  never a rule skipped. Read it once (`include_str!` builds it in; a
+  test that calls `Schema::json` fails the build's tests on such a file).
+- Messages: the schema's own `errorMessage` (ajv-errors: one text, or
+  one per keyword; `errorMessage.required` at the top, by field), else
+  plain English (`At least 18`, `Not a valid email address`). Problems
+  come in the fields' name order.
+- A rule across fields or a check that waits: write that schema in Rust
+  (above); `.wait(..)` adds a waiting check to a `Schema::json` too.
 
 ## Rules that wait
 
@@ -415,15 +566,15 @@ handlers (`oninput`, `onchange: f.touch(..)`) is touched on `change`
 
 ## Gaps
 
-- aio's `useForm` took a Standard Schema (Zod, Valibot, ArkType) and had
-  `parsed()` for its output: aio-rs has no schema adapter. The check is a
-  Rust function; parse into your own type in it. By design: the check is
-  typed against the form's own struct and compiled, with no schema
-  library in the bundle.
+- aio's `useForm` ran the Zod, Valibot or ArkType object itself, so a
+  `.refine` or `.transform` written in TypeScript ran too; JSON Schema
+  can't carry code, so aio-rs reads what they export (`Schema::json`)
+  and a rule written as code is written again in Rust (above).
 
 ## API
 
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::kit::use_form`,
+`use_form_schema`, `Schema`, `Schema::json`, `Rule`, `Parse`, `text`, `rule`, `optional`,
 `Form`, `Problems`, `use_async_rule`, `move_item`, `Field`, `Input`,
 `Textarea`, `Select`, `Opt`, `Checkbox`, `RadioGroup`, `Switch`, `Button`;
 `aio::Rejected`, `aio::Code`.

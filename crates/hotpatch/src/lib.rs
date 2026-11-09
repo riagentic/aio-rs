@@ -3,8 +3,8 @@
 //! library and a [`JumpTable`] (old function address → new), the app loads
 //! it with [`apply_patch`], and each call through [`HotFn`] takes the new
 //! code from then on. A port of subsecond 0.7.10's runtime (MIT OR
-//! Apache-2.0), desktop only (Linux, macOS, Windows): the same table and
-//! the same calls, so the builder's output is unchanged.
+//! Apache-2.0), on the desktop (Linux, macOS, Windows) and in a page
+//! (wasm, `ax dev --web`): the same table and the same calls.
 //!
 //! Only a build with aio's `dev` feature (`ax dev`'s) has it; with no
 //! patch loaded, a [`HotFn`] is a plain call.
@@ -112,12 +112,18 @@ pub fn aslr_reference() -> usize {
 }
 
 /// Load the patch `table` names and make it the one in force: its map is
-/// rebased onto where the binary and the library are loaded.
+/// rebased onto where the binary and the library are loaded. In a page
+/// (wasm) the page loaded the patch into the module's table: its map is
+/// of table slots, as they are.
 ///
 /// # Safety
 /// The library runs code as it loads, and its functions take the place of
 /// the binary's: it must be `ax dev`'s patch of this very binary.
 pub unsafe fn apply_patch(mut table: JumpTable) -> Result<(), PatchError> {
+    if cfg!(target_arch = "wasm32") {
+        commit(table);
+        return Ok(());
+    }
     // SAFETY: the caller's: the library is a patch of this binary.
     let main = unsafe { os::open_main(&table.lib) }.map_err(PatchError::Dlopen)?;
     let old = aslr_reference().wrapping_sub(table.aslr_reference as usize);

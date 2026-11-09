@@ -29,11 +29,16 @@ create`), recorded in scripts/dx-trend.csv, one row per run:
                    with no rebuild and no restart
   live_error_s     a syntax error saved → its errors on the page's overlay,
                    said once, the app running on (no build, no restart)
+  live_back_s      an rsx! text saved back as the running build has it (an
+                   edit undone) → on the page, with no build
   live_fixed_s     the fix saved → the overlay clear, the edit on the page
   live_shape_s     a field added to the cell → ax dev restarts the app (a
                    reason said, the session alive) → its window ready again
   dev_restart_s    ax dev again with nothing changed → window ready (the
                    last fat binary run as it is: no build, no link)
+  dev_changed_s    ax dev again after a code edit made with it off → the
+                   edit on the page (the last build started, the edit
+                   patched in as it comes up: no build, no link)
   air_web_b        `ax build --web`'s folder (bytes)
   air_apk_b        the arm64 APK (`--apk`, `ax build --android`)
   air_*            the rest: before 0.2.0, the template on air beside the one
@@ -115,7 +120,7 @@ COLUMNS = ["date", "commit", "machine", "crates", "clean_debug_s", "clean_debug_
            "core_crates", "kit_crates", "debug_target_mb", "live_css_s", "live_rsx_s", "live_logic_s", "window_dirty_mb",
            "air_rebuild_s", "air_rebuild_cpu", "air_binary_b", "air_targz_b", "air_appimage_b", "air_web_b", "air_apk_b",
            "air_live_css_s", "air_live_rsx_s", "air_live_logic_s", "live_tempsave_s", "live_error_s", "live_fixed_s",
-           "live_shape_s", "dev_restart_s"]
+           "live_shape_s", "dev_restart_s", "live_back_s", "dev_changed_s"]
 # Over the rolling best or median, by this much.
 MEDIAN = lambda v: sorted(v)[len(v) // 2]  # noqa: E731
 STEADY, MEMORY, NOISY = (min, 1.05), (MEDIAN, 1.15), (MEDIAN, 1.5)
@@ -145,6 +150,8 @@ GATED = {
     "live_tempsave_s": (NOISY, 0.25, LIVE),
     "live_error_s": (NOISY, 0.5, LIVE),
     "live_fixed_s": (NOISY, 0.5, LIVE),
+    "live_back_s": (NOISY, 0.25, LIVE),
+    "dev_changed_s": (NOISY, 0.5, LIVE),
     "live_shape_s": (NOISY, 2, LIVE),
     "dev_restart_s": (NOISY, 0.5, LIVE),
     "air_web_b": (STEADY, 10_000, "`ax build <app> --web`: du -b dist/<app>-web/*"),
@@ -158,7 +165,8 @@ SHORT = {"crates": "app", "core_crates": "core", "kit_crates": "kit", "clean_deb
          "release_cpu": "release", "debug_target_mb": "disk", "binary_b": "binary", "targz_b": "tar.gz",
          "appimage_b": "AppImage", "boot_s": "boot", "window_dirty_mb": "window", "live_css_s": "css", "live_rsx_s": "rsx",
          "live_logic_s": "logic", "air_web_b": "web", "air_apk_b": "apk", "live_tempsave_s": "tmpsave",
-         "live_error_s": "error", "live_fixed_s": "fixed", "live_shape_s": "shape", "dev_restart_s": "restart"}
+         "live_error_s": "error", "live_fixed_s": "fixed", "live_shape_s": "shape", "dev_restart_s": "restart",
+         "live_back_s": "back", "dev_changed_s": "changed"}
 NAME = "dxapp"
 # The live edits: (file, text before, after, the page once it shows). None: appended.
 COUNT = "document.querySelector('[data-t=count]')"
@@ -179,10 +187,12 @@ OVERLAY = "[...(document.querySelector('[data-aio-dev=overlay]')?.shadowRoot?.qu
 FAILS = [
     ("live_tempsave_s", "src/lib.rs", '"Add one"', '"Add two"', "rename",
      "document.querySelector('button').textContent == 'Add two'", (), ("building", "restarting")),
+    ("live_back_s", "src/lib.rs", '"Add two"', '"Add one"', "write",
+     "document.querySelector('button').textContent == 'Add one'", ("as built again",), ("building", "restarting")),
     ("live_error_s", "src/lib.rs", '"Subtract" }', '"Subtract" ', "write", OVERLAY,
      ("doesn't compile",), ("building", "restarting")),
     ("live_fixed_s", "src/lib.rs", '"Subtract" ', '"Subtract" }', "write",
-     f"!({OVERLAY}) && document.querySelector('button').textContent == 'Add two'", ("fixed",), ("restarting",)),
+     f"!({OVERLAY}) && document.querySelector('button').textContent == 'Add one'", ("fixed",), ("restarting",)),
     ("live_shape_s", "src/lib.rs", "pub count: i64,", "pub count: i64,\n    pub seen: u32,", "write", None,
      ("changed shape", "restarting"), ()),
 ]
@@ -446,6 +456,35 @@ def live(aio, app, env, home):
         row["dev_restart_s"] = time.time() - started
         if "the last fat binary" not in said()[before:]:
             fail("dev_restart_s: nothing changed, yet it built")
+        # ax dev again after a code edit made with it off (a pull): the last
+        # build started at once, the edit patched in as it comes up.
+        stop_dev(dev)
+        f = app / "src/lib.rs"
+        f.write_bytes(f.read_bytes().decode().replace('"Subtract" }', '{format!("Sub{}", 7)} }', 1).encode())
+        before = len(said())
+        with log.open("a") as out:
+            started = time.time()
+            dev = subprocess.Popen([aio, "dev", NAME, "--display", "current", "--home", home], cwd=app, env=env,
+                                   stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+        while "[aio] window ready" not in said()[before:]:
+            if dev.poll() is not None or time.monotonic() > end + 120:
+                fail("dev_changed_s: no window")
+            time.sleep(0.01)
+        shows = "[...document.querySelectorAll('button')].some(b => b.textContent == 'Sub7')"
+        js = f"new Promise(r => {{ const t = setInterval(() => {{ if ({shows}) {{ clearInterval(t); r(Date.now()); }} }}, 5); }})"
+        try:
+            shown, _ = page(js).communicate(timeout=60)
+            row["dev_changed_s"] = json.loads(shown) / 1000 - started
+        except (subprocess.TimeoutExpired, ValueError):
+            fail("dev_changed_s: the edit didn't show in 60 s")
+        # Said once the patch is in (the page may show it first).
+        while "patched in" not in said()[before:] and time.monotonic() < end + 180:
+            time.sleep(0.05)
+        lines = [l for l in said()[before:].splitlines() if l.startswith("ax dev:")]
+        for line in lines:
+            print(f"dev_changed_s: {line}", file=sys.stderr)
+        if not any("patched in" in l for l in lines) or any("building" in l for l in lines):
+            fail("dev_changed_s: the edit wasn't patched into the last build")
         return row
     finally:
         stop_dev(dev)
@@ -529,6 +568,7 @@ def live_only(tmp):
     run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], ROOT, os.environ)
     env = {k: v for k, v in os.environ.items() if k not in ("CARGO_INCREMENTAL", "DISPLAY", "WAYLAND_DISPLAY")}
     env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
+    env["AIORT_OUTPUT"] = "text"  # ax's lines as a person reads them (a pipe would get JSON)
     env["CARGO_TARGET_DIR"] = str(tmp / "target")
     aio = here / "debug" / ("ax.exe" if WINDOWS else "ax")
     app = template(aio, ROOT, tmp, env)
@@ -555,6 +595,7 @@ def measure(tmp, root=ROOT, full=True, part=None):
     run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], root, os.environ | {"CARGO_TARGET_DIR": str(cli)})
     env = {k: v for k, v in os.environ.items() if k not in ("CARGO_INCREMENTAL", "DISPLAY", "WAYLAND_DISPLAY")}
     env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
+    env["AIORT_OUTPUT"] = "text"  # ax's lines as a person reads them (a pipe would get JSON)
     aio = cli / "debug" / "ax"
     env["CARGO_TARGET_DIR"] = str(tmp / "target")
     app = template(aio, root, tmp, env)
@@ -857,7 +898,7 @@ def main():
         with scratch() as tmp:
             row = live_only(pathlib.Path(tmp))
         print(f"live edits, machine {machine()}, commit {commit()}:")
-        for col in [*EDITS, *(f[0] for f in FAILS), "dev_restart_s"]:
+        for col in [*EDITS, *(f[0] for f in FAILS), "dev_restart_s", "dev_changed_s"]:
             print(f"{col:16} {row.get(col, ''):>8}")
         return
     check = "--check" in args

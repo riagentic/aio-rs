@@ -624,3 +624,62 @@ mod tests {
         assert!(run(&target_of(&p), sh, &[], Some("current"), WAIT).unwrap_err().contains("already running"));
     }
 }
+
+/// `ax watch <app> [dir…]` (aio's `am watch`): the app up (`start`, unless
+/// `running`), then restarted (`restart`: built anew) after each burst of
+/// saves `saves` hears, each said with what changed; never two at once (a
+/// save during a restart is the next burst). Until the watcher ends.
+pub fn watch(
+    saves: &std::sync::mpsc::Receiver<Vec<PathBuf>>,
+    running: bool,
+    start: &dyn Fn() -> Result<String, String>,
+    restart: &dyn Fn() -> Result<String, String>,
+    say: &dyn Fn(Result<String, String>),
+    cwd: &Path,
+) {
+    if !running {
+        say(start());
+    }
+    while let Ok(first) = saves.recv() {
+        let changed = crate::watch::settle(saves, first);
+        eprintln!("ax watch: {} changed: restarting", crate::watch::describe(&changed, cwd));
+        say(restart());
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn each_burst_of_saves_is_one_restart_and_a_stopped_app_starts_first() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let said = RefCell::new(vec![]);
+        tx.send(vec![PathBuf::from("/a/src/lib.rs")]).unwrap();
+        tx.send(vec![PathBuf::from("/a/src/ui.rs")]).unwrap();
+        let t = tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(crate::watch::DEBOUNCE_MAX * 2);
+            t.send(vec![PathBuf::from("/a/src/lib.rs")]).unwrap();
+        });
+        drop(tx);
+        let n = RefCell::new(0);
+        watch(
+            &rx,
+            false,
+            &|| Ok("started".into()),
+            &|| {
+                *n.borrow_mut() += 1;
+                Err("the build failed".into())
+            },
+            &|r| said.borrow_mut().push(r),
+            Path::new("/a"),
+        );
+        assert_eq!(*n.borrow(), 2, "two bursts, two restarts");
+        assert_eq!(
+            said.into_inner(),
+            [Ok("started".into()), Err("the build failed".into()), Err("the build failed".into())]
+        );
+    }
+}

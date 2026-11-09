@@ -29,11 +29,14 @@ pub struct Inputs {
     /// The caller's role, when the method read it ([`Cx::role`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// When the call was made, when the method read it ([`Cx::made`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made: Option<i64>,
 }
 
 impl Inputs {
     pub fn is_empty(&self) -> bool {
-        self.ids.is_empty() && self.rands.is_empty() && self.role.is_none()
+        self.ids.is_empty() && self.rands.is_empty() && self.role.is_none() && self.made.is_none()
     }
 }
 
@@ -159,6 +162,8 @@ pub struct Cx {
     by: By,
     /// The network caller, and their role now (accounts on), as the gate proved it.
     who: Option<crate::Caller>,
+    /// Where the network call came from, for [`crate::before_call`] alone.
+    from: Option<Arc<crate::Request>>,
     replay: Option<Inputs>,
     /// A synced call's ids come from its call id (`derive_ids`), not chance.
     derive: Option<Derive>,
@@ -184,6 +189,7 @@ impl Cx {
             at,
             by: by.clone(),
             who: None,
+            from: None,
             replay: None,
             derive: None,
             used: RefCell::default(),
@@ -283,9 +289,19 @@ impl Cx {
         Self { replay: Some(inputs), ..Self::live(at, by) }
     }
 
-    /// The call made by this network caller.
-    pub(crate) fn with_who(self, who: Option<&crate::Caller>) -> Self {
-        Self { who: who.cloned(), ..self }
+    /// The call made by this network caller, from `from`.
+    pub(crate) fn with_who(self, who: Option<&crate::Caller>, from: Option<&Arc<crate::Request>>) -> Self {
+        Self { who: who.cloned(), from: from.cloned(), ..self }
+    }
+
+    /// Where the network call came from, unrecorded: for [`crate::before_call`].
+    pub(crate) fn request(&self) -> Option<&crate::Request> {
+        self.from.as_deref()
+    }
+
+    /// [`Self::request`], to hand on (a parked call).
+    pub(crate) fn from(&self) -> Option<&Arc<crate::Request>> {
+        self.from.as_ref()
     }
 
     /// The network caller, unrecorded: for [`crate::before_call`] and the
@@ -432,6 +448,23 @@ impl Cx {
     /// The call's time, in ms since the Unix epoch: one value per call.
     pub fn now(&self) -> i64 {
         self.at
+    }
+
+    /// When the call was made, in ms since the Unix epoch: a synced call's
+    /// on the device that made it (its id's time; a clock more than
+    /// `Op::MAX_AHEAD_MS` ahead of the server's is refused), else
+    /// [`Self::now`]. Where aio orders edits by its hybrid logical clock, a
+    /// method that wants the later of two edits made offline to win (by
+    /// when it was made, not when it reached the server) compares this.
+    /// Saved with the event once read, so replay sees the same.
+    pub fn made(&self) -> i64 {
+        let made = match (&self.replay, &self.derive) {
+            (Some(r), _) => r.made.unwrap_or(self.at),
+            (None, Some(d)) => i64::try_from(d.ms).unwrap_or(self.at),
+            (None, None) => self.at,
+        };
+        self.used.borrow_mut().made = Some(made);
+        made
     }
 
     /// A new UUIDv7.

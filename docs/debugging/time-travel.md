@@ -211,6 +211,30 @@ A synced copy's history is its server's: there `use_time_travel()` is
 against an aio-rs server too (feature `compat`), for the `admin` role
 only: a step moves the state of every user.
 
+## In Redux DevTools
+
+A dev build (`ax dev`, `ax dev --web`) shows each `client!` cell in the
+Redux DevTools browser extension, as an instance named by the cell's id
+(aio's `connectReduxDevTools`, with no code in the app):
+
+- Each commit is an action with the state after it: a view's call is
+  named by its method, with its arguments (`{"type": "add", "args": [2]}`);
+  an effect's or a schedule's by the store's method names; else
+  `@@aio/state`.
+- A jump (the slider, a click on an action) travels: a store's cell goes
+  to that action's event (`TimeAsk::Goto`), paused, and the newest action
+  takes calls again; a page's own cell (a web build's) takes the state the
+  extension holds. A jump is never an action of its own.
+- The dispatcher calls a method: `{"type": "add", "args": [10]}` (JSON, or
+  a bare method name). Pause stops the sending; commit starts the history
+  from the state now; revert and reset go back to its start.
+
+It needs a page the extension reaches: a web build's in a browser that has
+it. Electron puts no extension in a desktop window's own `aio://` page (its
+content scripts match web pages only), so there the bridge stays quiet; use
+the panel above, or `ax dev --web`. A synced copy's jumps are refused (its
+history is its server's). A release build carries none of it.
+
 ## How far back
 
 The log keeps every event for `[history] keep`, so a cell travels back
@@ -281,6 +305,9 @@ methods are pure (randomness from the seed in the state, time from
 
 ## Not as in aio
 
+- aio's Redux DevTools bridge sends actions and state but takes no jump
+  (it says to use the Ctrl+. panel); aio-rs's takes jumps, dispatches and
+  commits too, one instance per cell.
 - aio's time travel is dev-only and a ring of 2000 entries (128 MB) in
   memory. aio-rs's reads the store, so it works in a release build, on
   the whole history, after a restart.
@@ -296,4 +323,4 @@ methods are pure (randomness from the seed in the state, time from
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::Handle`
 (`travel`, `pause`, `paused`, `store`), `aio::TimeAsk`, `aio::Timeline`,
 `aio::Moment`, `aio::Store::fold_before`, `aio::kit::TimeTravelPanel`,
-`aio::client!`.
+`aio::kit::ReduxDevTools`, `aio::client!`.

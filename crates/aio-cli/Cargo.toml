@@ -42,7 +42,7 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "sync"] }
 # `ax shot`: the DevTools protocol of a window the app opened it for.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }

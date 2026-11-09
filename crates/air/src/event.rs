@@ -107,6 +107,12 @@ impl R<'_> {
 /// The frame kinds the page sends.
 pub(crate) const EVENT: u8 = 1;
 pub(crate) const EVAL: u8 = 2;
+/// An event the page waits on (a key: `page.js` holds the frame it would
+/// draw next until the key's edits are in): taken as an event, and the host
+/// sends [`ANSWERED`] after the flush that follows it.
+pub const ASKED: u8 = 3;
+/// The frame that ends the answer to an [`ASKED`] event: one byte, no edit.
+pub const ANSWERED: [u8; 1] = [0];
 
 impl Raw {
     /// The frame the page sends (`page.js` writes the same).
@@ -148,7 +154,7 @@ impl Raw {
     /// An event frame, or `None` if malformed.
     pub fn decode(b: &[u8]) -> Option<Raw> {
         let mut r = R { b, p: 0 };
-        if r.u8()? != EVENT {
+        if !matches!(r.u8()?, EVENT | ASKED) {
             return None;
         }
         let n = r.u16()?;
@@ -886,6 +892,9 @@ mod tests {
             values: vec![("name".into(), "Ann".into())],
             ..Raw::default()
         };
+        let mut asked = e.encode();
+        asked[0] = ASKED;
+        assert_eq!(Raw::decode(&asked).as_ref(), Some(&e), "a key the page waits on is the same event");
         assert_eq!(Raw::decode(&e.encode()), Some(e));
         assert_eq!(Raw::decode(&[1, 2]), None, "cut short");
         assert_eq!(Raw::decode(&[9]), None, "not an event");

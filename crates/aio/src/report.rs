@@ -36,13 +36,23 @@ pub struct About {
     /// Problems are reported by themselves (`[feedback] auto`); `false`:
     /// only the user's reports are written.
     pub auto: bool,
+    /// The timeline carries the calls' arguments (`[feedback] args`).
+    pub args: bool,
 }
 
 impl Default for About {
     fn default() -> Self {
         let (id, version, dir, log, channel) = Default::default();
-        Self { id, version, dir, log, channel, keep: KEEP, auto: true }
+        Self { id, version, dir, log, channel, keep: KEEP, auto: true, args: false }
     }
+}
+
+/// [`About::args`] of the app reporting now.
+static ARGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Does the timeline keep the calls' arguments (`[feedback] args`)?
+pub(crate) fn args_kept() -> bool {
+    ARGS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 type Sink = (std::time::Duration, std::sync::Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>);
@@ -88,6 +98,7 @@ fn reporter() -> std::sync::MutexGuard<'static, Option<Reporter>> {
 
 /// Start reporting for this app (`aio::boot` does, once).
 pub fn init(about: About) {
+    ARGS.store(about.args, std::sync::atomic::Ordering::Relaxed);
     *reporter() = Some(Reporter { about, seen: HashSet::new(), auto: 0 });
 }
 
@@ -266,6 +277,11 @@ pub struct Diagnostic {
     /// The numbers behind it, by name (a budget's `took_ms` and
     /// `budget_ms`; aio's `DiagEvent.detail`).
     pub numbers: Vec<(&'static str, i64)>,
+    /// The state of the cell it happened in, at the time (aio's
+    /// `stateSnapshot`): screened as a problem report's is (`visible` as a
+    /// client sees it, no `#[server]` fields, every string masked), and
+    /// none for a cell with `#[redact]` methods or over [`STATE_BYTES`].
+    pub state: Option<Value>,
 }
 
 impl Diagnostic {
@@ -273,6 +289,53 @@ impl Diagnostic {
     pub fn code(&self) -> Code {
         Code::of(&self.kind)
     }
+
+    /// aio's error code for it, where aio-rs has the same situation
+    /// (aio's `onError` `code`): a method's panic `REDUCE_ERROR`, an
+    /// effect past its timeout `EFFECT_TIMEOUT`, a reaction that failed
+    /// `HOOK_ERROR`, `#[on_start]` refused `INIT_ERROR`, `#[on_stop]`
+    /// refused `DESTROY_ERROR`.
+    pub fn error_code(&self) -> Option<crate::Code> {
+        Some(match self.kind.as_str() {
+            "panic" if self.cell.is_some() => crate::Code::ReduceError,
+            "effect:timeout" => crate::Code::EffectTimeout,
+            "reaction" => crate::Code::HookError,
+            "hook" => crate::Code::InitError,
+            "hook:stop" => crate::Code::DestroyError,
+            _ => return None,
+        })
+    }
+}
+
+/// A cell and its screened state handed to the next diagnostic ([`problem_in`]).
+type Handed = Option<(&'static str, Option<Value>)>;
+thread_local!(static STATE: std::cell::RefCell<Handed> = const { std::cell::RefCell::new(None) });
+
+/// [`problem`] of cell `T`, which and its state `st` going with the diagnostic.
+pub(crate) fn problem_in<T: crate::Cell>(kind: &str, message: &str, st: &T) {
+    let v = screened(T::REDACT || !T::REDACTED.is_empty(), || crate::store::reported(st));
+    STATE.set(Some((T::ID, v)));
+    problem(kind, message);
+    STATE.set(None);
+}
+
+/// A cell's state as a report holds it (pure but for `snap`): none when
+/// `withheld`, unreadable or over [`STATE_BYTES`]; every string masked.
+fn screened(withheld: bool, snap: impl FnOnce() -> Option<Value>) -> Option<Value> {
+    let v = (!withheld).then(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(snap)).ok().flatten())??;
+    (v.to_string().len() <= STATE_BYTES).then(|| masked(&v))
+}
+
+/// The cell a diagnostic is of and its state: the one handed over
+/// ([`problem_in`]), else the call's cell and, if the app watches it, its state.
+fn cell_and_state() -> (Option<String>, Option<Value>) {
+    if let Some((id, v)) = STATE.take() {
+        return (Some(id.into()), v);
+    }
+    let Some(cell) = crate::log::call_cell() else { return (None, None) };
+    let cells = CELLS.lock().unwrap_or_else(|e| e.into_inner());
+    let state = cells.iter().find(|(id, ..)| *id == cell).and_then(|(_, withheld, snap)| screened(*withheld, snap));
+    (Some(cell.into()), state)
 }
 
 /// The same kind within this many ms is counted, not said again.
@@ -332,8 +395,9 @@ impl Bus {
             }
         };
         let tip = Code::of(kind).tip();
-        let (cell, call) = (crate::log::call_cell().map(String::from), Some(crate::log::call_id()).filter(|c| *c > 0));
-        let d = Diagnostic { at, kind: kind.into(), message: cut(message, 2000), held, severity, tip, cell, call, numbers };
+        let ((cell, state), call) = (cell_and_state(), Some(crate::log::call_id()).filter(|c| *c > 0));
+        let message = cut(message, 2000);
+        let d = Diagnostic { at, kind: kind.into(), message, held, severity, tip, cell, call, numbers, state };
         if self.recent.len() == RECENT {
             self.recent.pop_front();
         }
@@ -485,7 +549,8 @@ pub struct Context {
     pub state: serde_json::Map<String, Value>,
     /// Cells left out of `state`, and why.
     pub withheld: Vec<String>,
-    /// The newest calls: `{at, call, refused?}`, never their arguments.
+    /// The newest calls: `{at, call, ms, id, refused?}`, their arguments
+    /// (`args`) only with `[feedback] args`.
     pub timeline: Vec<Value>,
     pub diagnostics: Vec<Diagnostic>,
     pub contact: Option<String>,
@@ -512,13 +577,23 @@ pub(crate) fn own(id: &str) -> bool {
 }
 
 /// A call ran, in `took`: the newest [`TIMELINE`] are kept in memory
-/// ([`timeline`]) and go in reports (no arguments: they may be anything the
-/// user typed).
-pub(crate) fn called(cell: &str, method: &str, at: i64, took: std::time::Duration, refused: Option<&str>) {
+/// ([`timeline`]) and go in reports; its arguments (`args`) only with
+/// `[feedback] args` (they may be anything the user typed).
+pub(crate) fn called(
+    cell: &str,
+    method: &str,
+    at: i64,
+    took: std::time::Duration,
+    refused: Option<&str>,
+    args: Option<&Value>,
+) {
     let ms = (took.as_secs_f64() * 1e6).round() / 1e3;
     let mut e = json!({ "at": crate::log::stamp(at), "call": format!("{cell}.{method}"), "ms": ms, "id": crate::log::call_id() });
     if let Some(r) = refused {
         e["refused"] = cut(&redact(r), 200).into();
+    }
+    if let Some(a) = args {
+        e["args"] = cut(&redact(&a.to_string()), 1024).into();
     }
     let mut c = CALLS.lock().unwrap_or_else(|e| e.into_inner());
     if c.len() == TIMELINE {
@@ -911,6 +986,7 @@ mod tests {
             cell: Some("notes".into()),
             call: Some(7),
             numbers: vec![("took_ms", 9)],
+            state: None,
         });
         let r = build(&about, "i", 0, "user", "t", None, &[], &x);
         assert_eq!(r["state"]["notes"], json!({ "url": "https://h/?token=…", "n": 3 }), "state is masked too");

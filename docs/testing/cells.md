@@ -104,12 +104,15 @@ cell booted on it (`t.cell::<C>()`) is a real `Handle<C>` whose calls are
 | `start(cells)` | start an `aio::Cells` list as the app does: order, `#[on_start]`, missed schedules |
 | `effects()` | the effects asked for and not started yet, `Cell.key`, in order |
 | `last_effects()` | the effects the last commit asked for (aio's `expect.effects`), `[]` for none |
+| `last_asked()` | everything the last commit asked for, as values (aio's `t.getEffects()`): `AskedFor::Effect` (a `HeldEffect`), `Schedule` (a `Plan`: set or cancelled), `Tell` (a notification), `Abort`; `is_effect()`, `is_schedule()` (aio's `isScheduleEffect`), `is_tell()`, `is_abort()` |
 | `settle()` | start them and wait until they, and all they lead to, are done (5 s at most) |
 | `advance(ms)` | move both clocks on, fire what is due, settle |
+| `settle_for(ms)` | let the effects run `ms` (on the wall clock under `real_time()`), then settle |
 | `failures()` | take the failed schedules and effects so far |
 | `as_client(&h, caller)` | `h` as a network caller reaches it (feature `server`) |
 | `fuzz(&h, seed, n, &calls, holds)` | `n` seeded random calls, checked after each |
 | `fuzz_methods(&h, seed, n, &skip, holds)` | the same over the cell's own methods, arguments made from their types |
+| `random_calls(&h, n)` | `fuzz_methods` over every method on a fresh seed, said and returned (aio's `randomActions`) |
 | `reset(&h, json)` | `h` back at its default with `json` merged in, mid-test (aio's `t.init`; `json!({})`: `t.destroy`) |
 | `budget::<C>(method, ms)` | a call of `C.method` slower than `ms` fails the test (aio's `perfBudget`) |
 
@@ -239,9 +242,14 @@ assert!(t.effects().is_empty(), "a refused call asks for nothing");
   once, timers fire in their order.
 - An async method (`pub async fn`) is a method plus effects: call it,
   then `settle()`, then assert ([Effects](../state/effects.md#async-methods)).
-- An effect that waits on real I/O (a socket, a process) under a timeout
-  belongs in a [`TestServer` test](multi-app.md): on the paused clock its
-  timeout would pass before the I/O answers.
+- An effect that waits on real I/O (a socket, a process, a device) under
+  a timeout runs under `TestCells::real_time()` (aio's `t.settle(ms)` on
+  real timers): on the virtual clock its timeout would pass before the
+  I/O answers. There the effects' timers keep the wall clock, `settle()`
+  waits for them, and `settle_for(ms)` gives work an effect left running
+  on its own (a thread, a device's answer) `ms` to land. Schedules still
+  move only with `advance`. A whole server goes in a
+  [`TestServer` test](multi-app.md).
 
 ### Time and schedules: `advance`
 
@@ -648,8 +656,11 @@ assert!(why.starts_with("fuzz seed 7: account.audit panicked: unlucky audit"), "
   method its arguments with `fuzz`. A skipped name the cell lacks fails.
 - `fuzz` returns the calls it made (`withdraw([12])`, …): assert on them,
   or print them while you write the test.
-- Pick the seed: there is no generated one. Several seeds in a loop cover
-  more ground; each failure still names its own.
+- Pick the seed, or let `random_calls(&h, n)` pick a fresh one each run
+  (aio's `t.randomActions(n)`): every method, `n` calls, the invariants
+  as the property. It prints `random_calls: fuzz seed <s>` first and a
+  failure names it, so `fuzz_methods(&h, <s>, n, &[], ..)` replays the
+  run exactly. A fixed seed is the regression test; a fresh one explores.
 
 ## Testing a failure on purpose: `fails`
 
@@ -747,9 +758,8 @@ drives it ([Debugging](../debugging/README.md)).
 |---|---|
 | `t.init(seed)` mid-test, `t.destroy()` | `reset(&h, seed)`: hooks run, waiting effects dropped, one event (the history stays) |
 | `t.expect.effects([..])` per last action | `last_effects()`; `effects()` is every waiting one |
-| `t.fuzz` with a generated seed, `skip` | `fuzz_methods` with `skip`; the seed is always given |
-| `t.randomActions(n)` (unseeded) | none: every fuzz is seeded |
-| `t.settle(ms)` for real timers | kept out: timers are virtual, so a 10 s backoff settles at once; real I/O goes to `TestServer` |
+| `t.getEffects()`, `isScheduleEffect` | `last_asked()`, `AskedFor::is_schedule` |
+| `t.fuzz` with a generated seed, `skip` | `fuzz_methods` with `skip` and a given seed, or `random_calls` with a fresh one |
 | `perfBudget` per test | `budget::<C>(method, ms)`: over it, the test fails (not a log line) |
 | `testCell` skips `onInit` (a warning) | every booted cell runs `#[on_start]`, as the app does |
 

@@ -231,6 +231,7 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
         channel: cfg.updates.channel.clone(),
         keep: cfg.feedback.keep,
         auto: cfg.feedback.auto,
+        args: cfg.feedback.args,
     });
     crate::report::on_panic();
     // air's dev-build warnings (an event whose element was drawn again) on the bus.

@@ -117,6 +117,12 @@ impl<T: Cell> Handle<T> {
         lock(&self.inner.state).clone()
     }
 
+    /// Put the state back to `st`, saved and told as a call's (a dev
+    /// build's Redux DevTools jump).
+    pub(crate) fn put(&self, st: T) {
+        self.commit(st, Vec::new());
+    }
+
     /// Call `f` with the state after each call.
     pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
         lock(&self.inner.listeners).push(Arc::new(f));
@@ -140,11 +146,16 @@ impl<T: Cell> Handle<T> {
 
     /// Run one call atomically; an async method's end goes to `reply`.
     fn run(&self, method: &str, args: Value, reply: Option<crate::Reply>) -> Result<Value> {
-        let args =
-            crate::ask_before(&Call { cell: T::ID, method, args: &args, by: &self.by, role: None })?.unwrap_or(args);
+        let now = self.state();
+        let call = Call { cell: T::ID, method, args: &args, by: &self.by, role: None, state: &*now, request: None };
+        let args = crate::ask_before(&call)?.unwrap_or(args);
         let cx = Cx::live(super::now_ms(), &self.by).with_reply(reply);
-        let mut st = (*self.state()).clone();
+        let mut st = (*now).clone();
         st.advance(method)?;
+        // `ax dev --web`: through the hot-patch jump table, an edited method's new code.
+        #[cfg(feature = "dev")]
+        let out = aio_hotpatch::HotFn::current(<T as crate::Cell>::apply).call((&mut st, &cx, method, args))?;
+        #[cfg(not(feature = "dev"))]
         let out = st.apply(&cx, method, args)?;
         st.check()?;
         let asks = cx.into_asks();
@@ -207,7 +218,7 @@ impl<T: Cell> Handle<T> {
         lock(&self.inner.timer).take();
         let now = super::now_ms();
         let mut due: Vec<storage::Due> = lock(&self.inner.sched).iter().filter(|d| d.due <= now).cloned().collect();
-        due.sort_by_key(|d| d.due);
+        crate::sort_by(&mut due, |a, b| a.due.cmp(&b.due));
         for d in &due {
             storage::rearm(&mut lock(&self.inner.sched), d, now);
             let m = d.method.as_str();
@@ -281,6 +292,7 @@ impl<T: Cell> Handle<T> {
             view: kept(st),
             pending: Vec::new(),
             sched: lock(&self.inner.sched).clone(),
+            paths: Vec::new(),
         };
         if let Err(e) = storage::save(&super::Local, key, doc, &Default::default(), super::say) {
             super::say(&format!("{}: not saved in this browser ({e}); it lives on in this page", T::ID));

@@ -60,7 +60,7 @@ socket (aio://app/<path>): no TCP port`.
   read at once, so a body nobody reads (an `<img>`'s 404) never holds a
   connection; anything else streamed both ways (`Reply::stream`, an
   upload), and a stream the page drops closes its connection. No first
-  byte in 30 s (`AIO_SOCKET_TIMEOUT_MS`) is a 504 and a line in the log;
+  byte in 30 s (`AIORT_SOCKET_TIMEOUT_MS`, aio's `AIO_SOCKET_TIMEOUT_MS`) is a 504 and a line in the log;
   an app that can't be reached is a 502 that says so.
 - **The page may fetch its own origin, and only it**: with routes its
   policy is `connect-src 'self'` (`aio://app`), without them `'none'`.
@@ -166,6 +166,7 @@ one TCP port for everything network-facing:
 | Path | What |
 |---|---|
 | `/ws` | sync: a WebSocket, one JSON message per frame ([sync](../state/sync.md)); server functions ride it |
+| `/__aio/poll` | the same sync over plain HTTP requests, for a copy whose WebSocket doesn't get through ([below](#when-websockets-dont-get-through)) |
 | `/__aio/…` | aio-rs's own: pairing, sign-in and accounts, the UI tabs; never an app's |
 | the app's routes | `aio::http::Route`s given to `Http::route` |
 | the shell and dirs | `Http::shell(dir)`, `[server.dirs]`, `[server.public_dirs]` |
@@ -299,21 +300,56 @@ Other big or binary data travels these ways:
 | live values that change often | a cell field with `coalesce`, read per field by the view ([performance](../performance.md)) |
 | compression | every 200 is gzip (and Brotli with feature `br`) when the client asks (`aio::http::encoding`) |
 
+## When WebSockets don't get through
+
+aio's `transport` (`uds`, `ws`, `auto`; `--transport`) picks the wire
+between an app's window and its server. An aio-rs window has no such
+choice to make: it always talks over its private sockets, and there is
+no WebSocket in it to fall back from. What does meet a network is a
+copy's link to its server, and there a proxy or a CDN in front of the
+server may drop the WebSocket upgrade. `[client] transport` (or
+`--transport=` per launch, or `aio::sync::set_transport`) picks how a
+copy gets through:
+
+| `transport` | A copy's links |
+|---|---|
+| `"auto"` (default) | a WebSocket at `/ws`; when the upgrade is answered with an error or cut on the way (not refused by the server, not unreachable), plain HTTP requests to `/__aio/poll`, said once in the log |
+| `"ws"` | a WebSocket only |
+| `"poll"` | plain HTTP requests only |
+
+- **Polling carries the same thing**: mux's frames, so every link of the
+  copy rides one polled socket, with the same hello, rights, `visible`,
+  pacing, patches and pings. `POST /__aio/poll` shows what `/ws` asks
+  (the key, a token, a session) and gets a random id only it learns;
+  `POST ?id=&n=` sends frames, `n` counting those sent before, so a batch
+  sent again applies once; `GET ?id=&ack=` takes the frames after those
+  it has, waiting up to 20 s for one, and a frame is kept until acked, so
+  an answer lost on the way is taken again. A socket asked nothing for
+  30 s, or holding 64 MB unacked, is closed.
+- Two kept-alive connections (one takes, one sends), HTTP/1.1, TLS when
+  the link pins a root; chunked answers (a proxy's) are read too.
+- A page's copy and an aio page keep their WebSocket.
+- A local door is always its socket.
+
 ## Gaps
 
-What aio has here and aio-rs doesn't yet:
+What aio has here and aio-rs doesn't yet: none. Two differences, by design:
 
-- No `transport` switch: `--port`, `--host` and `--expose` only move
-  where a serving mode listens; they open no port on a `standalone` or
-  `client` app.
 - A release build's door serves any process of this user as a client
   would, unless `[server] local_peers = false` (aio's `allowLocalPeers`,
   which aio leaves off): `ax state` and `ax call` work on a release by
   default. By design: the window's own sockets are always locked to the
   window this app spawned (its pid and start time), and a process of this
-  user that could use the door can read the app's key and store anyway.
+  user that could use the door can read the app's key and store anyway,
+  so turning it off would guard nothing that isn't open beside it. What
+  the door gives is a client's rights, never the operator's
+  (`a_release_door_gives_a_client_s_rights_never_the_operator_s`).
   `local_peers = false` is aio's default lockdown, and stricter: no door
-  at all (`ax stop` and `ax health` work without it).
+  at all (`a_release_app_with_local_peers_off_opens_no_door`; `ax stop`
+  and `ax health` work without it).
+- aio's `transport` picks the window's wire; aio-rs's window has one
+  (its private sockets), and `[client] transport` picks a copy's
+  instead ([above](#when-websockets-dont-get-through)), which aio can't.
 
 ## Common mistakes
 
@@ -335,5 +371,5 @@ What aio has here and aio-rs doesn't yet:
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::ipc`
 (`addr`, `Listener`, `Only`, `connect`), `aio::door` (`serve`, `at`,
 `VERSION`, `OPERATOR`), `aio::sync` (`Link`, `Remote`, `Live`, `PING`,
-`DEAD`, `SEND_TIMEOUT`), `aio::http` (`Http`, `Route`, `serve_file`,
+`DEAD`, `SEND_TIMEOUT`, `Transport`, `set_transport`), `aio::http` (`Http`, `Route`, `serve_file`,
 `encoding`), `aio::gate`, `aio::blobs`, `aio::paths::sockets`.

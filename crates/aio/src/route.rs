@@ -347,10 +347,20 @@ pub fn unbased(base: &str, address: &str) -> String {
     }
 }
 
-/// Where the app starts: in a browser the page's address (a reload or a
-/// shared link lands where it was; the server answers every route with the
-/// app), elsewhere the launch's `--route` ([`start`]).
+/// Where a server's first paint of the app starts (a root context): the
+/// address its page was asked at.
+#[derive(Clone, Debug)]
+pub struct StartAt(pub String);
+
+/// Where the app starts: a server's first paint where it was asked
+/// ([`StartAt`]); in a browser the page's address (a reload or a shared
+/// link lands where it was; the server answers every route with the app),
+/// elsewhere the launch's `--route` ([`start`]).
 pub fn start_place() -> String {
+    #[cfg(feature = "kit")]
+    if let Some(StartAt(at)) = crate::ui::try_context::<StartAt>() {
+        return at;
+    }
     #[cfg(target_arch = "wasm32")]
     if let Some(l) = web_sys::window().map(|w| w.location()) {
         return unbased(&page_base(), &[l.pathname(), l.search(), l.hash()].map(Result::unwrap_or_default).concat());
@@ -541,6 +551,62 @@ impl Backs {
     }
 }
 
+/// Whether `fields` are exactly the named params of `pattern` (`:id`,
+/// `*path`; a bare `*` names none), in any order (`routes!` checks it as it
+/// builds).
+#[doc(hidden)]
+pub const fn fields_are_params(pattern: &str, fields: &[&str]) -> bool {
+    let p = pattern.as_bytes();
+    let (mut i, mut params) = (0, 0);
+    while i < p.len() {
+        // A segment: `p[i..end]`.
+        let mut end = i;
+        while end < p.len() && p[end] != b'/' {
+            end += 1;
+        }
+        if end > i + 1 && (p[i] == b':' || (p[i] == b'*' && word(p, i + 1, end))) {
+            params += 1;
+            let mut k = 0;
+            let mut found = false;
+            while k < fields.len() {
+                found = found || same(fields[k].as_bytes(), p, i + 1, end);
+                k += 1;
+            }
+            if !found {
+                return false;
+            }
+        }
+        i = end + 1;
+    }
+    params == fields.len()
+}
+
+/// `p[from..to]` is letters, digits and `_` (a `*name`; else a literal) (const).
+const fn word(p: &[u8], mut from: usize, to: usize) -> bool {
+    while from < to {
+        if !(p[from].is_ascii_alphanumeric() || p[from] == b'_') {
+            return false;
+        }
+        from += 1;
+    }
+    true
+}
+
+/// `a == p[from..to]` (const).
+const fn same(a: &[u8], p: &[u8], from: usize, to: usize) -> bool {
+    if a.len() != to - from {
+        return false;
+    }
+    let mut k = 0;
+    while k < a.len() {
+        if a[k] != p[from + k] {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
 /// Typed routes: an enum whose variants are the app's pages, each with its
 /// pattern; fields are the pattern's params, parsed (`FromStr`) and written
 /// back (`Display`).
@@ -563,6 +629,16 @@ impl Backs {
 /// `parse` takes the first variant, in written order, whose pattern matches
 /// and whose params parse (one page shows, where aio rendered every
 /// matching `<Route>`).
+///
+/// The fields must be the pattern's params, by name: a typo fails the build.
+///
+/// ```compile_fail
+/// aio::routes! {
+///     enum Page {
+///         User { idd: u32 } = "/users/:id",
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! routes {
     ($(#[$m:meta])* $vis:vis enum $name:ident {
@@ -571,6 +647,15 @@ macro_rules! routes {
         $(#[$m])*
         #[derive(Clone, Debug, PartialEq)]
         $vis enum $name { $($(#[$vm])* $v $({ $($f: $t),* })?),* }
+
+        // A field that is not a param of its pattern, or a param with no
+        // field, fails the build (aio typed `useRoute`'s param names).
+        const _: () = {$(
+            assert!(
+                $crate::route::fields_are_params($pat, &[$($(stringify!($f)),*)?]),
+                concat!("routes!: the fields of ", stringify!($v), " must be the params of \"", $pat, "\"")
+            );
+        )*};
 
         impl $name {
             /// The page at `path` (a query or fragment is ignored), if any.
@@ -817,6 +902,18 @@ mod tests {
 
     fn p(kv: &[(&str, &str)]) -> Option<Params> {
         Some(kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    #[test]
+    fn a_routes_fields_are_its_patterns_params_by_name() {
+        assert!(fields_are_params("/", &[]));
+        assert!(fields_are_params("/users/:id/posts/:post", &["post", "id"]));
+        assert!(fields_are_params("/files/*path", &["path"]));
+        assert!(fields_are_params("/files/*", &[]), "a bare * names none");
+        assert!(fields_are_params("/a*b/x-*y", &[]), "literals");
+        assert!(!fields_are_params("/users/:id", &["idd"]), "a typo");
+        assert!(!fields_are_params("/users/:id", &[]), "a param with no field");
+        assert!(!fields_are_params("/users", &["id"]), "a field with no param");
     }
 
     #[test]

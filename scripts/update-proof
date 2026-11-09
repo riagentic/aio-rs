@@ -61,6 +61,7 @@ class Proof:
         self.data = Path(tempfile.mkdtemp(prefix="aio-up-", dir=None if WIN else "/tmp"))
         env = {k: v for k, v in os.environ.items() if not k.startswith(("AIORT_", "XDG_"))}
         env.update(
+            AIORT_OUTPUT="text",  # ax's lines as a person reads them (a pipe would get JSON)
             HOME=str(home),
             USERPROFILE=str(home),
             APPDATA=str(home / "AppData" / "Roaming"),

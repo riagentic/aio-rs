@@ -8,6 +8,7 @@
 //! ```ignore
 //! let Some(billing) = Peer::find("billing", "shop")? else { return Ok(()) }; // not running
 //! billing.describe("ledger").await?;                    // what this caller may call
+//! billing.describe_all().await?;                        // of every cell at once
 //! let id = billing.call("ledger", "credit", json!([42])).await?;  // by name, no source
 //! let ledger = billing.cell::<Ledger>().await?;         // typed: state, calls, server fns, streams
 //! let receipt = billing.blobs().read(&id, 0, u64::MAX)?;  // its blobs, ranges too
@@ -70,6 +71,17 @@ impl Peer {
     pub async fn describe(&self, cell: &str) -> std::io::Result<Value> {
         let mut live = Live::peer(&self.door(cell)?, cell, &self.user).await?;
         live.ask(serde_json::json!({ "t": "peer", "user": self.user })).await
+    }
+
+    /// [`Self::describe`] for every cell whose door it has open (aio's
+    /// app-wide `peer().describe()`), by cell id.
+    pub async fn describe_all(&self) -> std::io::Result<serde_json::Map<String, Value>> {
+        let mut all = serde_json::Map::new();
+        for cell in crate::door::open(&self.app, &self.data) {
+            let d = self.describe(&cell).await?;
+            all.insert(cell, d);
+        }
+        Ok(all)
     }
 
     /// A typed copy of its cell `T` (a crate both apps use): its state as

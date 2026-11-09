@@ -77,7 +77,15 @@ pub fn mutants(name: &str) -> Result<String, String> {
 }
 
 /// Run app `name`'s tests, a video of each UI test into `video`.
-pub fn run(name: &str, filter: Option<&str>, video: Option<&str>, pace: Option<&str>) -> Result<String, String> {
+pub fn run(
+    name: &str,
+    filter: Option<&str>,
+    video: Option<&str>,
+    (pace, scheme): (Option<&str>, Option<&str>),
+) -> Result<String, String> {
+    if let Some(s) = scheme.filter(|s| !["light", "dark"].contains(s)) {
+        return Err(format!("--video-scheme {s}: light or dark"));
+    }
     if let Some(p) = pace
         && !p.parse::<u64>().is_ok_and(|ms| ms > 0)
     {
@@ -95,6 +103,9 @@ pub fn run(name: &str, filter: Option<&str>, video: Option<&str>, pace: Option<&
     }
     if let Some(p) = pace {
         cmd.env("AIO_TEST_VIDEO_PACE", p);
+    }
+    if let Some(s) = scheme {
+        cmd.env("AIO_TEST_VIDEO_SCHEME", s);
     }
     let mut child = cmd.spawn().map_err(|e| format!("can't run cargo: {e}"))?;
     // libtest's lines shown as they come, and kept to count what ran.
@@ -136,7 +147,10 @@ mod tests {
             args(&todo, "aio", Some("adds"), true),
             ["test", "-p", "todo-app", "-p", "todo", "--features", "aio/video", "adds"]
         );
-        assert!(run("x", None, None, Some("0")).unwrap_err().contains("--pace 0"));
+        assert!(run("x", None, None, (Some("0"), None)).unwrap_err().contains("--pace 0"));
+        assert!(
+            run("x", None, None, (None, Some("sepia"))).unwrap_err().contains("--video-scheme sepia: light or dark")
+        );
     }
 
     #[test]

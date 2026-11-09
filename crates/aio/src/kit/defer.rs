@@ -1,16 +1,17 @@
 //! Deferred content (aio's `Defer`): a placeholder until the trigger fires,
 //! then the content, for good (one-shot per mount; a new `key` defers
-//! again). An app's code is all in its binary, so there is no module to
-//! fetch: what waits is the render, and data the content loads itself
+//! again). What waits is the render, the code of a lazy view
+//! ([`lazy!`](crate::lazy!): a web build fetches it), and data the content loads itself
 //! (`use_resource`, [`use_held`](super::use_held)) with its own loading
 //! and error states, or `load` here (aio's `load`, `loading`, `error`,
 //! `loadingMinMs`): the content made once its data came.
+use super::Instant;
 use super::join;
 use crate::ui::prelude::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How [`Defer`] makes its content once triggered (aio's `load`): an
 /// async fn whose view (or the failure it says) shows when it is done.
@@ -33,6 +34,42 @@ where
     Fut: Future<Output = Result<View, String>> + 'static,
 {
     Load(Rc::new(move || Box::pin(f())))
+}
+
+/// A [`Load`] of a lazy view (`aio::lazy!`, its `entry`): in a split web
+/// build its code is fetched the first time; elsewhere it is in the binary.
+#[doc(hidden)]
+pub fn lazy_view(entry: fn() -> View) -> Load {
+    load(move || async move {
+        // Called by its address, never directly: what only it reaches can be split off.
+        let entry = std::hint::black_box(entry);
+        #[cfg(all(target_arch = "wasm32", feature = "web"))]
+        crate::web::lazy::load(entry as usize as u32).await?;
+        Ok(entry())
+    })
+}
+
+/// A view whose code a web build fetches only when it first shows (aio's
+/// `lazy(() => import("./View.tsx"))` in a `Suspense`): a [`Load`] for
+/// [`Defer`], which shows `loading` meanwhile and `error` if the fetch
+/// fails (offline before the page cached it; the next show tries again).
+/// `ax build --web` puts the code only lazy views reach into chunks, one
+/// per view (what two share, in a common one); on the desktop and Android
+/// it is in the one binary, as is a dev build's. The view captures nothing
+/// (it is made by a plain `fn`): it reads its state from cells and hooks.
+///
+/// ```rust,ignore
+/// Defer { trigger: Trigger::Now, load: aio::lazy!(rsx! { Chart {} }), loading: rsx! { p { "Loading…" } } }
+/// ```
+#[macro_export]
+macro_rules! lazy {
+    ($view:expr) => {{
+        #[inline(never)]
+        fn __aio_lazy() -> $crate::ui::View {
+            $view
+        }
+        $crate::kit::lazy_view(__aio_lazy)
+    }};
 }
 
 /// Where a [`Defer`] with a [`Load`] is.
@@ -89,7 +126,7 @@ pub fn Defer(
         let at = Instant::now();
         spawn(async move {
             let got = (load.0)().await;
-            if let Some(rest) = Duration::from_millis(loading_min_ms).checked_sub(at.elapsed()) {
+            if let Some(rest) = Duration::from_millis(loading_min_ms).checked_sub(Instant::now() - at) {
                 super::sleep(rest).await;
             }
             stage.set(match got {

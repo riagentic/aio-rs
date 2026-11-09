@@ -14,7 +14,7 @@
 //! whole. Edits go out as one binary buffer per flush ([`take_edits`];
 //! format in `docs/design/air.md`); the page's interpreter (`page.js`)
 //! applies them and sends events back ([`Root::event`]).
-use crate::event::{EVAL, EVENT, Event, Flow, FromRaw, R, Raw};
+use crate::event::{ASKED, EVAL, EVENT, Event, Flow, FromRaw, R, Raw};
 use crate::reactive::{
     Callback, Frame, Owner, Signal, batch, body, child_scope, cleanup, current_owner, current_root, detached, in_root,
     memo_now, provide_on, render, render_comp, scope, set_root, try_context, untrack, with_owner,
@@ -60,7 +60,7 @@ pub(crate) mod op {
 }
 
 /// An event hole's handler: the page's event, and its flow (stop, prevent).
-type Handler = Rc<RefCell<dyn FnMut(&Raw, &Rc<Flow>)>>;
+pub(crate) type Handler = Rc<RefCell<dyn FnMut(&Raw, &Rc<Flow>)>>;
 
 struct Listening {
     name: &'static str,
@@ -96,6 +96,30 @@ struct Dom {
     /// The mounted root's owner and the errors no boundary caught.
     root: Option<Owner>,
     uncaught: Vec<String>,
+    /// A server root's page ([`Root::serving`]): no edits go out.
+    server: Option<Box<dyn Serve>>,
+}
+
+/// A server root's page ([`crate::ssr::Page`]) behind a vtable: only a
+/// build that renders on a server ([`Root::serving`]) links its code.
+pub(crate) trait Serve {
+    fn page(&mut self) -> &mut crate::ssr::Page;
+    /// Template `t` cloned at `base` (`hot`: its markup sent live).
+    fn clone_of(&mut self, t: &'static Template, hot: Option<(&[u8], u64)>, base: u32);
+    /// A `Suspense` at `first..=at` (kids before anchor `at`), its fallback showing while `showing`.
+    fn bound(&mut self, first: u32, at: u32, kids: Option<u32>, showing: Rc<Cell<bool>>);
+    fn set_text(&mut self, id: u32, s: &str);
+    /// A text node of its own, not in the page yet.
+    fn text_node(&mut self, id: u32, s: &str);
+    /// An attribute edit (`SET_ATTR`, `REMOVE_ATTR`, `SET_PROP`, `SET_BOOL`: `v` "true"/"false").
+    fn edit(&mut self, id: u32, code: u8, name: &str, v: &str);
+    /// The view `first..` put before node `at`.
+    fn insert(&mut self, at: u32, first: u32);
+    fn append(&mut self, first: u32);
+    /// The view `first..` out of the page (removed or parked).
+    fn unplace(&mut self, first: u32);
+    /// CSS `property` of the first element of the view `first..` set to `v` (empty: removed).
+    fn style(&mut self, first: u32, property: &str, v: &str);
 }
 
 thread_local! {
@@ -124,20 +148,95 @@ impl Dom {
         base
     }
     fn insert(&mut self, at: u32, v: Range) {
-        if let Some((a, b)) = v.0 {
-            self.op(op::INSERT).u32(at).u32(a).u32(b);
+        match (v.0, &mut self.server) {
+            (Some((a, _)), Some(s)) => s.insert(at, a),
+            (Some((a, b)), None) => _ = self.op(op::INSERT).u32(at).u32(a).u32(b),
+            (None, _) => {}
         }
     }
     fn remove(&mut self, v: Range) {
-        if let Some((a, b)) = v.0 {
-            self.op(op::REMOVE).u32(a).u32(b);
+        match (v.0, &mut self.server) {
+            (Some((a, _)), Some(s)) => s.unplace(a),
+            (Some((a, b)), None) => _ = self.op(op::REMOVE).u32(a).u32(b),
+            (None, _) => {}
         }
     }
     fn park(&mut self, v: Range) {
-        if let Some((a, b)) = v.0 {
-            self.op(op::PARK).u32(a).u32(b);
+        match (v.0, &mut self.server) {
+            (Some((a, _)), Some(s)) => s.unplace(a),
+            (Some((a, b)), None) => _ = self.op(op::PARK).u32(a).u32(b),
+            (None, _) => {}
         }
     }
+    fn set_text(&mut self, id: u32, s: &str) {
+        match &mut self.server {
+            Some(p) => p.set_text(id, s),
+            None => _ = self.op(op::SET_TEXT).u32(id).str(s),
+        }
+    }
+    /// A text node of its own, id `id`.
+    fn text_node(&mut self, id: u32, s: &str) {
+        match &mut self.server {
+            Some(p) => p.text_node(id, s),
+            None => _ = self.op(op::TEXT).u32(id).str(s),
+        }
+    }
+    /// An attribute edit (`SET_BOOL`'s `v`: "true" or "false").
+    fn edit(&mut self, code: u8, id: u32, name: &str, v: &str) {
+        if let Some(p) = &mut self.server {
+            return p.edit(id, code, name, v);
+        }
+        self.op(code).u32(id).str(name);
+        match code {
+            op::REMOVE_ATTR => {}
+            op::SET_BOOL => self.out.push((v == "true") as u8),
+            _ => _ = self.str(v),
+        }
+    }
+}
+
+/// Is the current root a server's ([`Root::serving`])? Its holes that read
+/// no signal run once.
+fn serving() -> bool {
+    dom(|d| d.server.is_some())
+}
+
+/// A seeded resource's load under way in a server root: its stream waits
+/// for it ([`crate::ssr::Streaming`]).
+pub(crate) struct Loading(u32);
+
+impl Loading {
+    pub(crate) fn new() -> Option<Self> {
+        let root = current_root();
+        dom(|d| d.server.as_mut().map(|s| s.page().loading += 1)).map(|()| Self(root))
+    }
+}
+
+impl Drop for Loading {
+    fn drop(&mut self) {
+        _ = DOMS.try_with(|ds| {
+            if let Ok(mut ds) = ds.try_borrow_mut()
+                && let Some(s) = ds.get_mut(&self.0).and_then(|d| d.server.as_mut())
+            {
+                s.page().loading -= 1;
+            }
+        });
+    }
+}
+
+/// May a resource's value land now? Not a plain one's in a server root
+/// whose page is out: the client loads it (its first frame waits too).
+pub(crate) fn lands(seeded: bool) -> bool {
+    seeded || dom(|d| d.server.as_mut().is_none_or(|s| !s.page().painted))
+}
+
+/// A seeded resource's value loaded in a server root, for its page.
+pub(crate) fn loaded(key: &Rc<str>, json: String) {
+    dom(|d| {
+        if let Some(s) = &mut d.server {
+            s.page().data.push((key.clone(), json));
+        }
+    });
 }
 
 /// The current root's page.
@@ -149,6 +248,7 @@ fn dom<R>(f: impl FnOnce(&mut Dom) -> R) -> R {
 /// The edits made since the last call for the current root's page (the
 /// last made, outside one; [`Root::take_edits`] with more than one).
 pub fn take_edits() -> Vec<u8> {
+    crate::ssr::end_seeds();
     dom(|d| std::mem::take(&mut d.out))
 }
 
@@ -174,7 +274,7 @@ impl Tree {
         Self(None)
     }
 
-    fn build(&self) -> Range {
+    pub(crate) fn build(&self) -> Range {
         self.0.as_ref().map_or_else(Range::default, |f| f.run())
     }
 
@@ -321,6 +421,12 @@ pub fn tpl(t: &'static Template) -> u32 {
     // Markup `ax dev` sent for it (a hot reload): defined anew in the page.
     let hot = crate::hot::markup_of(t);
     dom(|d| {
+        if let Some(s) = &mut d.server {
+            let base = d.next;
+            d.next += t.marks;
+            s.clone_of(t, hot.as_ref().map(|o| (&o.nodes[..], o.generation)), base);
+            return base;
+        }
         let at = (t as *const Template as usize, hot.as_ref().map_or(0, |o| o.generation));
         let id = match d.defined.get(&at) {
             Some(id) => *id,
@@ -357,7 +463,7 @@ static SLOT: Template = Template {
     at: crate::hot::At { file: "", line: 0, col: 0, idx: 0 },
 };
 
-fn slot() -> (Range, u32) {
+pub(crate) fn slot() -> (Range, u32) {
     let b = tpl(&SLOT);
     (view(&SLOT, b), b + 1)
 }
@@ -382,6 +488,12 @@ impl<R, F: Fn() -> R> Hole<R> for F {
 /// A text hole: node `id` shows `f()`, re-written when it changes.
 #[doc(hidden)]
 pub fn text(id: u32, f: Box<dyn Hole<String>>) {
+    if serving() {
+        let (s, read) = crate::reactive::probe(|| f.run());
+        if !read {
+            return dom(|d| d.set_text(id, &s));
+        }
+    }
     let mut last: Option<String> = None;
     render(move || {
         let s = f.run();
@@ -389,10 +501,20 @@ pub fn text(id: u32, f: Box<dyn Hole<String>>) {
             return;
         }
         if last.as_ref() != Some(&s) {
-            dom(|d| _ = d.op(op::SET_TEXT).u32(id).str(&s));
+            dom(|d| d.set_text(id, &s));
             last = Some(s);
         }
     });
+}
+
+/// A text hole of one name shown as it is (`"{x}"`): its value's own
+/// `Display`, followed as [`text`] follows it. Generic over the type
+/// alone, so every such hole of a type shares its code (a closure each
+/// was most of an `rsx!`-heavy crate's compile).
+#[doc(hidden)]
+pub fn text_of<T: std::fmt::Display + Clone + 'static>(id: u32, v: &T) {
+    let v = v.clone();
+    text(id, Box::new(move || v.to_string()));
 }
 
 /// What an attribute hole holds: a value, presence (`false`: none, but
@@ -541,27 +663,38 @@ impl AttrSlot {
     }
 }
 
+/// An attribute hole of one name shown as it is (`class: "{x}"`), as
+/// [`text_of`]: no closure of its own per hole.
+#[doc(hidden)]
+pub fn attr_of<T: std::fmt::Display + Clone + 'static>(id: u32, name: &'static str, v: &T) {
+    let v = v.clone();
+    attr(id, name, Box::new(move |s: &mut AttrSlot| s.set(IntoAttr::into_attr(v.to_string()))));
+}
+
 /// An attribute hole: `name` of node `id` is what `f` hands its slot.
 #[doc(hidden)]
 pub fn attr(id: u32, name: &'static str, f: Box<dyn AttrHole>) {
     let mut slot = AttrSlot { id, name, last: None };
+    if serving() && !crate::reactive::probe(|| f.run(&mut slot)).1 {
+        return;
+    }
     render(move || f.run(&mut slot));
 }
 
 /// `name` of node `id` set to `v` now (no hole).
 pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue<'_>) {
-    dom(|d| match (v, is_prop(name)) {
-        (AttrValue::Bool(b), _) if is_text_bool(name) => {
-            _ = d.op(op::SET_ATTR).u32(id).str(name).str(if *b { "true" } else { "false" })
-        }
-        (AttrValue::Str(s), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(s),
-        (AttrValue::Str(s), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(s),
-        (AttrValue::Bool(b), true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(*b as u8),
-        (AttrValue::None, true) if is_flag_prop(name) => d.op(op::SET_BOOL).u32(id).str(name).out.push(0),
-        (AttrValue::Bool(true), true) => _ = d.op(op::SET_PROP).u32(id).str(name).str(""),
-        (AttrValue::Bool(true), false) => _ = d.op(op::SET_ATTR).u32(id).str(name).str(""),
-        (AttrValue::Bool(false) | AttrValue::None, _) => _ = d.op(op::REMOVE_ATTR).u32(id).str(name),
-    });
+    let bool = |b: bool| if b { "true" } else { "false" };
+    let (code, v) = match (v, is_prop(name)) {
+        (AttrValue::Bool(b), _) if is_text_bool(name) => (op::SET_ATTR, bool(*b)),
+        (AttrValue::Str(s), false) => (op::SET_ATTR, &**s),
+        (AttrValue::Str(s), true) => (op::SET_PROP, &**s),
+        (AttrValue::Bool(b), true) if is_flag_prop(name) => (op::SET_BOOL, bool(*b)),
+        (AttrValue::None, true) if is_flag_prop(name) => (op::SET_BOOL, "false"),
+        (AttrValue::Bool(true), true) => (op::SET_PROP, ""),
+        (AttrValue::Bool(true), false) => (op::SET_ATTR, ""),
+        (AttrValue::Bool(false) | AttrValue::None, _) => (op::REMOVE_ATTR, ""),
+    };
+    dom(|d| d.edit(code, id, name, v));
 }
 
 /// What an event attribute takes: a closure of the event (that may be
@@ -646,6 +779,10 @@ pub fn mounted_fn<M, R: HandlerReturn<M>>(
 /// An `onmounted` handler: it runs once the element is drawn.
 #[doc(hidden)]
 pub fn mounted<M>(id: u32, f: impl IntoHandler<MountedData, M>) {
+    // A server's page is never drawn.
+    if serving() {
+        return;
+    }
     let mut f = f.into_handler();
     let (owner, comp) = (current_owner(), crate::tree::current_frame());
     crate::reactive::later(move || {
@@ -662,6 +799,10 @@ pub fn mounted<M>(id: u32, f: impl IntoHandler<MountedData, M>) {
 /// An event hole: `name` on node `id` runs `h` (in a batch: its writes are drawn once).
 #[doc(hidden)]
 pub fn on(id: u32, name: &'static str, h: Handler) {
+    // A server's page sends no event.
+    if serving() {
+        return;
+    }
     let (owner, comp) = (current_owner(), crate::tree::current_frame());
     dom(|d| {
         d.handlers.entry(id).or_default().push(Listening { name, run: h, owner, comp });
@@ -761,34 +902,51 @@ enum Shown {
 /// re-written in place, views are replaced (what made them is disposed).
 #[doc(hidden)]
 pub fn child(at: u32, f: Box<dyn Hole<Child>>) {
+    if serving() {
+        let (c, read) = crate::reactive::probe(|| f.run());
+        if !read {
+            show_child(at, c);
+            return;
+        }
+    }
+    child_live(at, f)
+}
+
+/// [`child`] as a hole that follows what it reads (its first run too).
+fn child_live(at: u32, f: Box<dyn Hole<Child>>) {
     let mut shown = Shown::Views(vec![]);
     render(move || {
         let c = f.run();
         if let (Shown::Text(id, last), Child::Text(s)) = (&mut shown, &c) {
             if last != s {
-                dom(|d| _ = d.op(op::SET_TEXT).u32(*id).str(s));
+                dom(|d| d.set_text(*id, s));
                 *last = s.clone();
             }
             return;
         }
         dom(|d| match &shown {
-            Shown::Text(id, _) => _ = d.op(op::REMOVE).u32(*id).u32(*id),
+            Shown::Text(id, _) => d.remove(Range(Some((*id, *id)))),
             Shown::Views(v) => v.iter().for_each(|v| d.remove(*v)),
         });
-        shown = match c {
-            Child::Text(s) => dom(|d| {
-                let id = d.alloc(1);
-                d.op(op::TEXT).u32(id).str(&s);
-                d.op(op::INSERT).u32(at).u32(id).u32(id);
-                Shown::Text(id, s)
-            }),
-            Child::Views(v) => {
-                let built: Vec<Range> = v.into_iter().map(place).collect();
-                dom(|d| built.iter().for_each(|r| d.insert(at, *r)));
-                Shown::Views(built)
-            }
-        };
+        shown = show_child(at, c);
     });
+}
+
+/// `c` put before anchor `at`.
+fn show_child(at: u32, c: Child) -> Shown {
+    match c {
+        Child::Text(s) => dom(|d| {
+            let id = d.alloc(1);
+            d.text_node(id, &s);
+            d.insert(at, Range(Some((id, id))));
+            Shown::Text(id, s)
+        }),
+        Child::Views(v) => {
+            let built: Vec<Range> = v.into_iter().map(place).collect();
+            dom(|d| built.iter().for_each(|r| d.insert(at, *r)));
+            Shown::Views(built)
+        }
+    }
 }
 
 /// Text as a view: `f()` in one text node, re-written when what it reads
@@ -796,10 +954,13 @@ pub fn child(at: u32, f: Box<dyn Hole<Child>>) {
 pub fn text_view(f: impl Fn() -> String + 'static) -> View {
     let f: Rc<dyn Fn() -> String> = Rc::new(f);
     Ok(Tree::new(move || {
-        let (s, live) = crate::reactive::reads(|| f());
+        let (s, live) = match serving() {
+            true => crate::reactive::probe(|| f()),
+            false => crate::reactive::reads(|| f()),
+        };
         let id = dom(|d| {
             let id = d.alloc(1);
-            d.op(op::TEXT).u32(id).str(&s);
+            d.text_node(id, &s);
             id
         });
         if live {
@@ -821,13 +982,23 @@ pub fn styled(view: View, property: &'static str, f: impl Fn() -> Option<String>
         if let Some((a, b)) = r.0 {
             let f = f.clone();
             let mut last: Option<Option<String>> = None;
-            render(move || {
-                let v = f();
+            let mut set = move |v: Option<String>| {
                 if last.as_ref() != Some(&v) {
-                    dom(|d| _ = d.op(op::STYLE).u32(a).u32(b).str(property).str(v.as_deref().unwrap_or("")));
+                    dom(|d| match &mut d.server {
+                        Some(s) => s.style(a, property, v.as_deref().unwrap_or("")),
+                        None => _ = d.op(op::STYLE).u32(a).u32(b).str(property).str(v.as_deref().unwrap_or("")),
+                    });
                     last = Some(v);
                 }
-            });
+            };
+            if serving() {
+                let (v, read) = crate::reactive::probe(|| f());
+                set(v);
+                if !read {
+                    return r;
+                }
+            }
+            render(move || set(f()));
         }
         r
     }))
@@ -871,8 +1042,16 @@ fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Hole<View>>) {
 /// `then()` or `otherwise()` before anchor `at`, swapped only when `cond()` flips.
 #[doc(hidden)]
 pub fn show(at: u32, cond: Box<dyn Hole<bool>>, then: Box<dyn Hole<View>>, otherwise: Box<dyn Hole<View>>) {
+    if serving() {
+        let (c, read) = crate::reactive::probe(|| cond.run());
+        if !read {
+            let v = untrack(|| if c { then.run() } else { otherwise.run() });
+            show_child(at, Child::Views(vec![v]));
+            return;
+        }
+    }
     let c = memo_now(move || cond.run());
-    child(
+    child_live(
         at,
         Box::new(move || {
             Child::Views(vec![if c.get() { untrack(|| then.run()) } else { untrack(|| otherwise.run()) }])
@@ -886,6 +1065,13 @@ pub fn show(at: u32, cond: Box<dyn Hole<bool>>, then: Box<dyn Hole<View>>, other
 /// binds names).
 #[doc(hidden)]
 pub fn branch(at: u32, f: Box<dyn Hole<(u32, View)>>) {
+    if serving() {
+        let ((_, v), read) = crate::reactive::probe(|| f.run());
+        if !read {
+            show_child(at, Child::Views(vec![v]));
+            return;
+        }
+    }
     let next: Rc<RefCell<Option<View>>> = Rc::default();
     let n = next.clone();
     let mut runs = 0u32;
@@ -895,7 +1081,8 @@ pub fn branch(at: u32, f: Box<dyn Hole<(u32, View)>>) {
         runs = runs.wrapping_add(1);
         (k, if k == u32::MAX { runs } else { 0 })
     });
-    child(
+    // Its view is taken once made: a hole that runs once.
+    child_live(
         at,
         Box::new(move || {
             key.with(|_| ());
@@ -935,6 +1122,20 @@ where
     I: PartialEq + Clone + 'static,
     K: Hash + Eq + Clone + 'static,
 {
+    let (first, read) = match serving() {
+        true => crate::reactive::probe(&items),
+        false => (vec![], true),
+    };
+    if !read {
+        // Each row once, in order, under the list's owner (nothing re-runs).
+        let mut seen = std::collections::HashSet::with_capacity(first.len());
+        for (i, item) in first.into_iter().enumerate() {
+            unique(i, seen.insert(key(&item)), std::any::type_name::<K>());
+            let r = place(row(item));
+            dom(|d| d.insert(at, r));
+        }
+        return;
+    }
     let outer = current_owner();
     let placed = placed_rows();
     // Row `i`'s key and item, as `placed[i]`.
@@ -948,13 +1149,7 @@ where
             let old = std::mem::take(&mut rows);
             for (at, item) in next.into_iter().enumerate() {
                 let k = key(&item);
-                if !seen.insert(k.clone()) {
-                    panic!(
-                        "air: row {at} of a list has the key of a row before it (a `{}` key): keyed siblings must each \
-                         have a unique key (an id, not a place or a name)",
-                        std::any::type_name::<K>()
-                    );
-                }
+                unique(at, seen.insert(k.clone()), std::any::type_name::<K>());
                 let kept = by_key.remove(&k).filter(|i| old[*i].1 == item);
                 src.push(kept.map_or(-1, |i| i as isize));
                 rows.push((k, item));
@@ -962,6 +1157,16 @@ where
             reconcile(at, outer, &mut placed.borrow_mut(), &src, &|i| row(rows[i].1.clone()));
         });
     });
+}
+
+/// Row `at`'s key is not one a row before it has (`new`).
+fn unique(at: usize, new: bool, key: &str) {
+    if !new {
+        panic!(
+            "air: row {at} of a list has the key of a row before it (a `{key}` key): keyed siblings must each have a \
+             unique key (an id, not a place or a name)"
+        );
+    }
 }
 
 /// A list's rows in the page; the list's owner ending ends them (they
@@ -1122,6 +1327,12 @@ pub fn Suspense(p: SuspenseProps) -> View {
         let fallback = fallback.clone();
         let fb: Rc<Cell<Option<Range>>> = Rc::default();
         let showing = Rc::new(Cell::new(false));
+        // A server's stream sends the children later if they wait now.
+        dom(|d| {
+            if let (Some(s), Some((first, _))) = (&mut d.server, range.0) {
+                s.bound(first, at, kids.0.map(|k| k.0), showing.clone());
+            }
+        });
         let (f, s) = (fb.clone(), showing.clone());
         // Whichever is parked when it ends leaves the page with it.
         cleanup(move || {
@@ -1190,7 +1401,9 @@ pub fn eval(js: &str) -> Eval {
         d.next_eval += 1;
         let id = d.next_eval;
         d.evals.insert(id, EvalState { inbox: VecDeque::new(), done: None, waker: None });
-        d.op(op::EVAL).u32(id).str(js);
+        if d.server.is_none() {
+            d.op(op::EVAL).u32(id).str(js);
+        }
         id
     });
     cleanup(move || dom(|d| _ = d.evals.remove(&id)));
@@ -1200,13 +1413,18 @@ pub fn eval(js: &str) -> Eval {
 /// Run `js` in the page and forget it (no reply is kept): what a view's
 /// cleanup tells the page as it goes.
 pub fn exec(js: &str) {
-    dom(|d| _ = d.op(op::EVAL).u32(0).str(js));
+    dom(|d| {
+        if d.server.is_none() {
+            d.op(op::EVAL).u32(0).str(js);
+        }
+    });
 }
 
 impl Eval {
     /// Hand the script a JSON value (its `await aio.recv()`).
     pub fn send_json(&self, json: &str) -> Result<(), String> {
         dom(|d| match d.evals.contains_key(&self.id) {
+            true if d.server.is_some() => Ok(()),
             true => Ok(_ = d.op(op::EVAL_SEND).u32(self.id).str(json)),
             false => Err("the script's view ended".into()),
         })
@@ -1346,6 +1564,9 @@ pub struct Root {
     /// What it shows, and the owner of its views (built again by [`Root::hot`]).
     app: RefCell<Option<Rc<dyn Fn() -> View>>>,
     shown: Rc<Cell<Option<Owner>>>,
+    /// The places of what runs beside the app ([`Root::beside`]): not the
+    /// app's, so [`Root::hot`] leaves them be.
+    besides: RefCell<Vec<Box<str>>>,
 }
 
 impl Root {
@@ -1369,7 +1590,27 @@ impl Root {
             dom(|d| d.root = Some(owner));
             owner
         });
-        Self { id, owner, range: Rc::default(), app: RefCell::default(), shown: Rc::default() }
+        Self {
+            id,
+            owner,
+            range: Rc::default(),
+            app: RefCell::default(),
+            shown: Rc::default(),
+            besides: RefCell::default(),
+        }
+    }
+
+    /// A root for a server's render ([`crate::ssr`]): it sends no edits,
+    /// its page is kept to be written as markup ([`Self::markup`]).
+    pub(crate) fn serving() -> Self {
+        let r = Self::new();
+        in_root(r.id, || dom(|d| d.server = Some(Box::<crate::ssr::Page>::default())));
+        r
+    }
+
+    /// `f` of a server root's page (`None`: not a server's).
+    pub(crate) fn page<R>(&self, f: impl FnOnce(&mut crate::ssr::Page) -> R) -> Option<R> {
+        in_root(self.id, || dom(|d| d.server.as_mut().map(|s| f(s.page()))))
     }
 
     /// The edits this root made since the last call, for its page (one frame).
@@ -1394,7 +1635,10 @@ impl Root {
                 let (r, at) = slot();
                 range.set(r);
                 if let Some((a, b)) = r.0 {
-                    dom(|d| _ = d.op(op::APPEND).u32(0).u32(a).u32(b));
+                    dom(|d| match &mut d.server {
+                        Some(s) => s.append(a),
+                        None => _ = d.op(op::APPEND).u32(0).u32(a).u32(b),
+                    });
                 }
                 comp_as(at, None, Box::new(move || app()));
             });
@@ -1402,14 +1646,34 @@ impl Root {
         });
     }
 
+    /// `f` as a component of this root whose view never goes in the page:
+    /// what runs beside the app with nothing to show (a dev build's
+    /// tooling), so the page's markup stays the app's alone (a server's
+    /// paint hydrates node for node). It ends with the root.
+    pub fn beside(&self, f: impl Fn() -> View + 'static) {
+        let before = crate::tree::frames(self.id);
+        self.within(move || {
+            let (_, at) = slot();
+            comp_as(at, None, Box::new(f));
+        });
+        let new = crate::tree::frames(self.id).into_keys().filter(|k| !before.contains_key(k));
+        self.besides.borrow_mut().extend(new.map(String::into_boxed_str));
+    }
+
     /// Build the views again in place, each one's hooks handing back what
     /// they made (by its place among the mounted components): after a hot
     /// reload's markup ([`hot::set_markup`](crate::hot::set_markup)) or a
-    /// patch of the code (the app's body runs it). Their page is drawn anew.
+    /// patch of the code (the app's body runs it). Their page is drawn anew;
+    /// what runs beside the app runs on as it was.
     pub fn hot(&self) {
         let Some(app) = self.app.borrow().clone() else { return };
+        let besides = self.besides.borrow().clone();
+        let beside =
+            |k: &str| besides.iter().any(|b| k.strip_prefix(&**b).is_some_and(|r| r.is_empty() || r.starts_with('/')));
         in_root(self.id, || {
-            crate::hot::keep(crate::tree::frames(self.id));
+            let mut frames = crate::tree::frames(self.id);
+            frames.retain(|k, _| !beside(k));
+            crate::hot::keep(frames);
             dom(|d| d.remove(self.range.take()));
             if let Some(o) = self.shown.take() {
                 o.dispose();
@@ -1439,7 +1703,7 @@ impl Root {
         crate::reactive::drop_left();
         match frame.first() {
             Some(&EVAL) => return eval_reply(frame),
-            Some(&EVENT) => {}
+            Some(&EVENT | &ASKED) => {}
             _ => return false,
         }
         let Some(raw) = Raw::decode(frame) else { return false };

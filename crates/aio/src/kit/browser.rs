@@ -114,6 +114,103 @@ pub async fn run_js(id: &str, js: &str) -> Option<Value> {
     eval(&guest_js(id, &then)).join::<Option<Value>>().await.ok().flatten()
 }
 
+/// Every method of Electron's `<webview>`, by name: what [`webview`] takes
+/// (aio handed out the element itself).
+pub const WEBVIEW_METHODS: &[&str] = &[
+    "loadURL",
+    "downloadURL",
+    "getURL",
+    "getTitle",
+    "isLoading",
+    "isLoadingMainFrame",
+    "isWaitingForResponse",
+    "stop",
+    "reload",
+    "reloadIgnoringCache",
+    "canGoBack",
+    "canGoForward",
+    "canGoToOffset",
+    "clearHistory",
+    "goBack",
+    "goForward",
+    "goToIndex",
+    "goToOffset",
+    "isCrashed",
+    "setUserAgent",
+    "getUserAgent",
+    "insertCSS",
+    "removeInsertedCSS",
+    "executeJavaScript",
+    "openDevTools",
+    "closeDevTools",
+    "isDevToolsOpened",
+    "isDevToolsFocused",
+    "inspectElement",
+    "inspectSharedWorker",
+    "inspectServiceWorker",
+    "setAudioMuted",
+    "isAudioMuted",
+    "isCurrentlyAudible",
+    "undo",
+    "redo",
+    "cut",
+    "copy",
+    "centerSelection",
+    "paste",
+    "pasteAndMatchStyle",
+    "delete",
+    "selectAll",
+    "unselect",
+    "scrollToTop",
+    "scrollToBottom",
+    "adjustSelection",
+    "replace",
+    "replaceMisspelling",
+    "insertText",
+    "findInPage",
+    "stopFindInPage",
+    "print",
+    "printToPDF",
+    "capturePage",
+    "send",
+    "sendToFrame",
+    "sendInputEvent",
+    "setZoomFactor",
+    "setZoomLevel",
+    "getZoomFactor",
+    "getZoomLevel",
+    "setVisualZoomLevelLimits",
+    "showDefinitionForSelection",
+    "getWebContentsId",
+];
+
+/// Call `method` ([`WEBVIEW_METHODS`]) of the guest of the `Browser` with element
+/// id `id` with `args`: its value as JSON, a promise awaited
+/// (`capturePage`'s image as a PNG data URL, `printToPDF`'s bytes in
+/// base64). `None` when that guest is not there, the method is none of a
+/// `<webview>`'s (said), or it threw.
+pub async fn webview(id: &str, method: &str, args: Vec<Value>) -> Option<Value> {
+    if !WEBVIEW_METHODS.contains(&method) {
+        crate::warn!(cat: "ui", "<Browser> has no method {method:?}: aio::kit::WEBVIEW_METHODS lists them");
+        return None;
+    }
+    let then = format!(
+        "try {{
+          const v = await w[{}](...{});
+          if (v && typeof v.toDataURL === 'function') return v.toDataURL();
+          if (v instanceof Uint8Array) {{
+            let s = '';
+            for (let i = 0; i < v.length; i += 32768) s += String.fromCharCode.apply(null, v.subarray(i, i + 32768));
+            return btoa(s);
+          }}
+          return v === undefined ? null : v;
+        }} catch (e) {{ return null }}",
+        Value::from(method),
+        Value::from(args)
+    );
+    eval(&guest_js(id, &then)).join::<Option<Value>>().await.ok().flatten()
+}
+
 /// `then` with `w` the guest's `<webview>`, once it is attached.
 fn guest_js(id: &str, then: &str) -> String {
     format!(

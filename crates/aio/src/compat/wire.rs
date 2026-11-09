@@ -7,9 +7,10 @@
 //! `sfn {cid, ns, name, args: [..]}`, answered by `sfnr {cid, ok, value |
 //! error, code?}` when it is done (calls run side by side); meanwhile `sfnh
 //! {cid, hold}` says a person is at a picker (`deciding::start`). `vitals-ping
-//! {t1}` is answered `vitals-pong {t1, t2}` (the page's watchdog); `cdiag
-//! {name, kind: down | up, …}` goes to the app's health while the page is
-//! linked. A dev build writes a page's forwarded console (`log {level,
+//! {t1, ms?}` is answered `vitals-pong {t1, t2}` (the page's watchdog), its
+//! `ms` (how far the page's paint lags) pacing the link as aio's
+//! backpressure does; `cdiag {name, kind: down | up, …}` goes to the app's
+//! health while the page is linked. A dev build writes a page's forwarded console (`log {level,
 //! msg}`) into the app's log as `[page]` lines.
 //!
 //! Time travel (aio's panel): `tt-cmd {cmd}` moves the cell (`undo`, `redo`,
@@ -24,7 +25,9 @@
 //! `settings`), the app's cell keeping its other fields ([`cells`]). Each
 //! is subscribed, patched, snapshotted and called on its own: `settings:m`
 //! calls the app cell's method `settings_m`, or `m` when it has none
-//! ([`super::data::method_of`]). A path inside a cell subscribes the whole cell.
+//! ([`super::data::method_of`]). A path inside a cell subscribes the whole
+//! cell, as aio's pages expect; `subs {subs, exact: true}` (aio-rs's, which
+//! aio never sends) holds only the parts the paths name, and their patches.
 //!
 //! aio's offline CRDT sync (`op`, `sync-req`) is [`super::crdt`].
 use crate::link::{Sock, View, next_ax, send_ax};
@@ -67,20 +70,44 @@ pub fn negotiate(theirs: &Value) -> Result<u64, String> {
     Ok(effective)
 }
 
-/// The cells a `subs` list covers: `None` = all (`"*"`); refused when not a
-/// list of 1..=1024 strings.
-fn parse_subs(raw: &Value) -> Result<Option<Vec<String>>, ()> {
+/// What a page subscribed to: the cells (`None`: all), and with `exact`
+/// the dot paths into them it holds (empty: the cells whole).
+#[derive(Debug, Default, PartialEq)]
+struct Subs {
+    cells: Option<Vec<String>>,
+    paths: std::sync::Arc<[String]>,
+}
+
+impl Subs {
+    /// What it sees of `all`, every cell a page may see.
+    fn of(&self, all: Value) -> Value {
+        let cells = shown(all, &self.cells);
+        match self.paths.is_empty() {
+            true => cells,
+            false => crate::filter::pick(&cells, &self.paths),
+        }
+    }
+}
+
+/// A `subs` list (`exact`: as paths): refused when not 1..=1024 strings
+/// (and, exact, dot paths of at most 256 bytes).
+fn parse_subs(raw: &Value, exact: bool) -> Result<Subs, ()> {
     let list = raw.as_array().ok_or(())?;
     if list.is_empty() || list.len() > MAX_SUBS {
         return Err(());
     }
     let paths: Vec<&str> = list.iter().map(Value::as_str).collect::<Option<_>>().ok_or(())?;
     if paths.contains(&"*") {
-        return Ok(None);
+        return Ok(Subs::default());
     }
     let mut cells: Vec<String> = paths.iter().map(|p| p.split('.').next().unwrap_or_default().to_string()).collect();
+    cells.sort();
     cells.dedup();
-    Ok(Some(cells))
+    let paths = match exact {
+        true => crate::filter::paths_of(raw).map_err(|_| ())?,
+        false => std::sync::Arc::from([]),
+    };
+    Ok(Subs { cells: Some(cells), paths })
 }
 
 /// An `sfn` frame's `cid` and the server fn it names (`ns.name`); `None`
@@ -261,7 +288,7 @@ impl Others {
     }
 }
 
-/// Send what changed since `view` in the cells `subs` shows; `view` is now.
+/// Send what changed since `view` in what `subs` shows; `view` is now.
 #[allow(clippy::too_many_arguments)]
 async fn catch_up<T: Cell>(
     w: &mut Sock,
@@ -269,20 +296,25 @@ async fn catch_up<T: Cell>(
     others: &mut Others,
     h: &Handle<T>,
     viewer: &crate::Caller,
-    subs: &Option<Vec<String>>,
+    subs: &Subs,
     pushes: &mut crate::budgets::Pushes,
     full_percent: u32,
 ) -> Result<(), String> {
     let now = View::of(h, viewer);
+    let before = (!subs.paths.is_empty()).then(|| subs.of(others.all(cells::<T>(&view.shown))));
     let mut ops = crate::patch::diff(&cells::<T>(&view.shown), &cells::<T>(&now.shown));
     *view = View { size: view.size, ..now };
     ops.extend(others.advance(viewer));
-    ops.retain(|op| subs.as_ref().is_none_or(|s| cell_of(op).is_some_and(|c| s.iter().any(|x| x == c))));
+    match before {
+        // Only the parts it holds: the patch between what it held and holds.
+        Some(b) if !ops.is_empty() => ops = crate::patch::diff(&b, &subs.of(others.all(cells::<T>(&view.shown)))),
+        _ => ops.retain(|op| subs.cells.as_ref().is_none_or(|s| cell_of(op).is_some_and(|c| s.iter().any(|x| x == c)))),
+    }
     if !ops.is_empty() {
         // Over aio's `fullStateThreshold` of the view: the view instead.
-        let all = || shown(others.all(cells::<T>(&view.shown)), subs);
+        let all = || subs.of(others.all(cells::<T>(&view.shown)));
         let msg = match crate::link::whole(&ops, full_percent, &mut view.size, || crate::patch::json_len(&all())) {
-            true => json!({ "v": 2, "t": "state", "d": all(), "s": subs }),
+            true => json!({ "v": 2, "t": "state", "d": all(), "s": subs.cells }),
             false => enc("patches", wire_ops(&ops)),
         };
         pushes.push(&msg, crate::store::now_ms());
@@ -333,6 +365,7 @@ pub async fn session<T: Cell>(
     // What the page says is degraded on its side (`cdiag`), by name.
     let mut down = std::collections::BTreeMap::<String, Value>::new();
     let viewer = signed.unwrap_or_else(|| By::User("peer".into()));
+    let req = crate::link::request_of(&calls);
     // What it sees goes by its role too, read again on every account change
     // (heard before the read: no change between them is missed).
     let mut accounts = gate.changes();
@@ -346,8 +379,8 @@ pub async fn session<T: Cell>(
     let mut others = Others::new(beside.iter().filter(|c| c.id() != T::ID).cloned().collect(), &seer);
     let mut watching = tokio::task::JoinSet::new();
     let mut moved = others.watch(&mut watching);
-    let mut subs: Option<Vec<String>> = None;
-    let state = |view: &View, others: &Others, subs: &Option<Vec<String>>| json!({ "v": 2, "t": "state", "d": shown(others.all(cells::<T>(&view.shown)), subs), "s": subs });
+    let mut subs = Subs::default();
+    let state = |view: &View, others: &Others, subs: &Subs| json!({ "v": 2, "t": "state", "d": subs.of(others.all(cells::<T>(&view.shown))), "s": subs.cells });
     let hello = json!({ "v": VERSION, "min": MIN, "ver": crate::BUILT_BY, "maxMessageBytes": limits.max_message, "rate": limits.calls_per_sec, "cfg": false, "appId": T::ID, "user": null });
     send_ax(&mut w, &enc("proto", hello)).await?;
     let mut pushes = crate::budgets::Pushes::default();
@@ -443,7 +476,7 @@ pub async fn session<T: Cell>(
                         _ = w.send(crate::link::Msg::Close(MISMATCH, format!("__proto-err:{reason}").chars().take(120).collect())).await;
                         return Err(format!("aio client refused: {reason}"));
                     },
-                    "subs" => match parse_subs(&d["subs"]) {
+                    "subs" => match parse_subs(&d["subs"], d["exact"] == true) {
                         Ok(s) => {
                             subs = s;
                             send_ax(&mut w, &state(&view, &others, &subs)).await?;
@@ -491,6 +524,10 @@ pub async fn session<T: Cell>(
                     },
                     // The page's watchdog judges the link by this answer.
                     "vitals-ping" if d["t1"].is_number() => {
+                        // Its render staleness paces this link (aio's backpressure).
+                        if let Some(ms) = d["ms"].as_f64() {
+                            paced.stale.said(ms.max(0.0) as u64, &who);
+                        }
                         send_ax(&mut w, &enc("vitals-pong", json!({ "t1": d["t1"], "t2": crate::store::now_ms() }))).await?;
                     }
                     "cdiag" => if let Some(name) = d["name"].as_str().filter(|n| !n.is_empty()) {
@@ -517,7 +554,7 @@ pub async fn session<T: Cell>(
                     },
                     // aio's CRDT sync: its change first, then what the op says.
                     "op" => {
-                        let said = match super::crdt::take(&h, &gate, &viewer, link, d).await? {
+                        let said = match super::crdt::take(&h, &gate, &viewer, req.as_ref(), link, d).await? {
                             super::crdt::Taken::Said(f) => f,
                             super::crdt::Taken::Held(f) => Some(f),
                         };
@@ -529,7 +566,7 @@ pub async fn session<T: Cell>(
                     }
                     "sync-req" => {
                         passed.get_or_insert_with(|| h.aio_sync().ops.subscribe());
-                        let frames = super::crdt::answer(&h, &gate, &seer, link, d).await?;
+                        let frames = super::crdt::answer(&h, &gate, &seer, req.as_ref(), link, d).await?;
                         while events.try_recv().is_ok() {}
                         catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
                         for f in frames {
@@ -553,13 +590,13 @@ pub async fn session<T: Cell>(
                         let r = match method {
                             None => Err(crate::Rejected::coded(crate::Code::ActionRefused, format!("unknown action {kind}"))),
                             Some((i, m)) => {
-                                let (hh, gate, by) = (h.clone(), gate.clone(), viewer.clone());
+                                let (hh, gate, by, req) = (h.clone(), gate.clone(), viewer.clone(), req.clone());
                                 let other = i.map(|i| others.cells[i].clone());
                                 let args = d["payload"]["args"].clone();
                                 let args = if args.is_null() { json!([]) } else { args };
                                 let r = tokio::task::spawn_blocking(move || match other {
-                                    None => gate.ask(&hh, &by, &m, args, None, None),
-                                    Some(o) => o.ask(&gate, &by, &m, args),
+                                    None => gate.ask(&hh, &by, req.as_ref(), &m, args, None, None),
+                                    Some(o) => o.ask(&gate, &by, req.as_ref(), &m, args),
                                 });
                                 r.await.map_err(|e| e.to_string())?
                             }
@@ -685,8 +722,19 @@ impl AioLink {
     /// Connect with `link`'s key, agree on the protocol (aio's hello), and
     /// take the first state.
     pub async fn connect(link: &crate::sync::Link) -> std::io::Result<Self> {
-        let w = crate::sync::dial(link, false).await?;
+        Self::open(crate::sync::dial(link, false).await?, None).await
+    }
+
+    /// Agree on the protocol over `w` and take the first state. `proof`:
+    /// over aio's local socket, aio's identity hello (an `x-aio-peer`
+    /// value), sent as the first frame; its refusal is the error, in aio's
+    /// words.
+    pub(super) async fn open(w: crate::sync::Wire, proof: Option<&str>) -> std::io::Result<Self> {
         let mut l = Self { w, cells: json!({}), boot: String::new(), cid: 0 };
+        let mut hello = proof.map(|_| crate::uuid_v4().to_string());
+        if let (Some(proof), Some(cid)) = (proof, &hello) {
+            l.send(&enc("type", json!({ "kind": "peer", "proof": proof, "cid": cid }))).await?;
+        }
         let first = tokio::time::timeout(crate::sync::CALL_TIMEOUT, l.next())
             .await
             .map_err(|_| std::io::Error::other("no answer"))??;
@@ -694,11 +742,37 @@ impl AioLink {
             return Err(std::io::Error::other(format!("not an aio app: it said {}", first["t"])));
         }
         negotiate(&first["d"]).map_err(|e| std::io::Error::new(std::io::ErrorKind::Unsupported, e))?;
-        l.send(&enc("proto", json!({ "v": VERSION, "min": MIN, "ver": crate::BUILT_BY }))).await?;
-        while l.boot.is_empty() {
-            let m = l.next().await?;
-            l.take(&m).await?;
+        if proof.is_some() && first["d"]["peerHello"] != true {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the aio app predates aio's identity hello on its socket: it can't tell who calls (update its aio)",
+            ));
         }
+        l.send(&enc("proto", json!({ "v": VERSION, "min": MIN, "ver": crate::BUILT_BY }))).await?;
+        // aio's socket sends no `boot`: there its first state ends the hello.
+        let mut state = false;
+        let rest = async {
+            while (l.boot.is_empty() && !(proof.is_some() && state)) || hello.is_some() {
+                let m = l.next().await?;
+                if m["t"] == "ack" && hello.as_deref() == m["d"]["cid"].as_str() {
+                    if m["d"]["ok"] != true {
+                        let why = m["d"]["error"].as_str().unwrap_or("no reason given");
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!("the aio app refused this app's identity: {why}"),
+                        ));
+                    }
+                    hello = None;
+                } else {
+                    state |= m["t"] == "state";
+                    l.take(&m).await?;
+                }
+            }
+            Ok(())
+        };
+        tokio::time::timeout(crate::sync::CALL_TIMEOUT, rest)
+            .await
+            .map_err(|_| std::io::Error::other("no answer"))??;
         Ok(l)
     }
 
@@ -714,7 +788,8 @@ impl AioLink {
         serde_json::from_value(v.clone()).map_err(|e| crate::Rejected::new(format!("{cell}: {e}")))
     }
 
-    /// The aio server's boot id: a new one means it restarted.
+    /// The aio server's boot id: a new one means it restarted (empty over
+    /// its local socket, which sends none).
     pub fn boot(&self) -> &str {
         &self.boot
     }
@@ -748,6 +823,20 @@ impl AioLink {
     /// ack (up to `CALL_TIMEOUT`); its change is in `cells` by then (aio
     /// sends the change before the ack).
     pub async fn call(&mut self, cell: &str, method: &str, args: Value) -> crate::Result<Value> {
+        self.call_for(cell, method, args, Some(crate::sync::CALL_TIMEOUT)).await
+    }
+
+    /// [`Self::call`], waiting up to `wait` for the ack; `None`: as long as
+    /// the aio app takes (aio's `ackTimeoutMs: 0`, what a queueing service
+    /// asks of its callers). A dropped link still
+    /// ends it.
+    pub async fn call_for(
+        &mut self,
+        cell: &str,
+        method: &str,
+        args: Value,
+        wait: Option<std::time::Duration>,
+    ) -> crate::Result<Value> {
         let gone = |e: std::io::Error| {
             crate::Rejected::lost(format!("{cell}.{method}: the link dropped ({e}); it may have run"))
         };
@@ -764,12 +853,13 @@ impl AioLink {
                 self.take(&m).await?;
             }
         };
-        let d = tokio::time::timeout(crate::sync::CALL_TIMEOUT, ack)
-            .await
-            .map_err(|_| {
-                crate::Rejected::new(format!("{cell}.{method}: no answer in {:?}", crate::sync::CALL_TIMEOUT))
-            })?
-            .map_err(gone)?;
+        let d = match wait {
+            Some(t) => tokio::time::timeout(t, ack)
+                .await
+                .map_err(|_| crate::Rejected::new(format!("{cell}.{method}: no answer in {t:?}")))?,
+            None => ack.await,
+        }
+        .map_err(gone)?;
         match d["ok"].as_bool() {
             Some(true) => Ok(d["value"].clone()),
             _ => Err(crate::Rejected {
@@ -863,11 +953,24 @@ mod tests {
 
     #[test]
     fn subs_are_checked_like_aio() {
-        assert_eq!(parse_subs(&json!(["*"])), Ok(None));
-        assert_eq!(parse_subs(&json!(["board", "board.notes"])), Ok(Some(vec!["board".into()])));
-        assert!(parse_subs(&json!([])).is_err());
-        assert!(parse_subs(&json!([1])).is_err());
-        assert!(parse_subs(&json!(vec!["a"; 1025])).is_err());
+        let cells = |c: &[&str]| Subs { cells: Some(c.iter().map(|c| c.to_string()).collect()), paths: [].into() };
+        assert_eq!(parse_subs(&json!(["*"]), false), Ok(Subs::default()));
+        assert_eq!(parse_subs(&json!(["board", "board.notes"]), false), Ok(cells(&["board"])));
+        assert_eq!(parse_subs(&json!(["b.x", "a", "b"]), false), Ok(cells(&["a", "b"])));
+        assert!(parse_subs(&json!([]), false).is_err());
+        assert!(parse_subs(&json!([1]), false).is_err());
+        assert!(parse_subs(&json!(vec!["a"; 1025]), false).is_err());
+        // Exact: the paths themselves, checked as a copy's.
+        let s = parse_subs(&json!(["board.notes", "x"]), true).unwrap();
+        assert_eq!(
+            (s.cells, &*s.paths),
+            (Some(vec!["board".into(), "x".into()]), &["board.notes".to_string(), "x".into()][..])
+        );
+        assert!(parse_subs(&json!(["board..notes"]), true).is_err());
+        assert_eq!(
+            Subs { cells: None, paths: ["b.n".to_string()].into() }.of(json!({ "a": 1, "b": { "n": 2, "m": 3 } })),
+            json!({ "b": { "n": 2 } })
+        );
     }
 
     #[test]

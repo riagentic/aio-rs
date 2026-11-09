@@ -9,6 +9,7 @@ use crate::reactive::{
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Wake, Waker};
 
@@ -309,25 +310,54 @@ impl<T: 'static> Resource<T> {
 }
 
 /// A resource made now, under the current owner (not a hook).
-pub(crate) fn resource_now<T: 'static, F: Future<Output = T> + 'static>(
+pub(crate) fn resource_now<T: 'static, F: Future<Output = T> + 'static>(f: impl FnMut() -> F + 'static) -> Resource<T> {
+    resource_with(f, None)
+}
+
+/// What a seeded resource's value is known by in the page (its view's
+/// place and its hook's), how it is written, and the page's value for it.
+struct Seeded<T> {
+    key: Rc<str>,
+    encode: fn(&T) -> Option<String>,
+    start: Option<T>,
+}
+
+fn resource_with<T: 'static, F: Future<Output = T> + 'static>(
     mut f: impl FnMut() -> F + 'static,
+    mut seeded: Option<Seeded<T>>,
 ) -> Resource<T> {
-    let (value, pending, again, off) = (Signal::new(None), Signal::new(true), Signal::new(0u64), Signal::new(false));
+    let start = seeded.as_mut().and_then(|s| s.start.take());
+    let mut from_page = start.is_some();
+    let (value, pending) = (Signal::new(start), Signal::new(!from_page));
+    let (again, off) = (Signal::new(0u64), Signal::new(false));
+    let record = seeded.map(|s| (s.key, s.encode));
     effect_of(Kind::Effect, move || {
         if off.get() {
             return pending.set_quiet(false);
         }
         again.track();
         let fut = f();
+        // The page's value: no load (what `f` read is followed from now).
+        if std::mem::take(&mut from_page) {
+            return;
+        }
         pending.set_quiet(true);
+        let record = record.clone();
+        let loading = record.as_ref().and_then(|_| crate::dom::Loading::new());
         let load = async move {
             let v = fut.await;
             crate::reactive::batch(|| {
-                if value.alive() && !off.get_untracked() {
+                if value.alive() && !off.get_untracked() && crate::dom::lands(record.is_some()) {
+                    if let Some((key, encode)) = &record
+                        && let Some(json) = encode(&v)
+                    {
+                        crate::dom::loaded(key, json);
+                    }
                     value.update(|s| *s = Some(v));
                     pending.set_quiet(false);
                 }
-            })
+            });
+            drop(loading);
         };
         // Its first poll now, so what it reads before its first `.await` is followed.
         let t = spawn(load);
@@ -341,4 +371,25 @@ pub(crate) fn resource_now<T: 'static, F: Future<Output = T> + 'static>(
 #[track_caller]
 pub fn resource<T: 'static, F: Future<Output = T> + 'static>(f: impl FnMut() -> F + 'static) -> Resource<T> {
     hook("resource", || resource_now(f))
+}
+
+/// [`resource`], its value carried to the client in a server's streamed
+/// page ([`ssr::stream`](crate::ssr::stream)): written by `encode` (JSON),
+/// read back by `decode`. The client's first frame starts from the value
+/// the server loaded, with no load of its own, so a `Suspense` the server
+/// filled in stays filled in; what the closure reads before its `async`
+/// is followed from there. A server waits for these only (a plain
+/// resource's later value never reaches the page: the client loads it).
+#[track_caller]
+pub fn seeded_resource<T: 'static, F: Future<Output = T> + 'static>(
+    encode: fn(&T) -> Option<String>,
+    decode: fn(&str) -> Option<T>,
+    f: impl FnMut() -> F + 'static,
+) -> Resource<T> {
+    let at = crate::reactive::hook_at("resource");
+    hook("resource", move || {
+        let key: Rc<str> = format!("{}:{at}", crate::tree::place(crate::tree::current())).into();
+        let start = crate::ssr::seed_of(&key).and_then(|s| decode(&s));
+        resource_with(f, Some(Seeded { key, encode, start }))
+    })
 }

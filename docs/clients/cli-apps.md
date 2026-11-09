@@ -58,6 +58,7 @@ assert!(out.contains("buy milk"));
 | `Flag::number(name)` | the same, refused unless a number (`Args::number`) |
 | `Flag::list(name)` | `--name a --name b`: every value (`Args::list`) |
 | `.short('t')`, `.default("v")`, `.required()`, `.help("…")` | on any flag |
+| `.typed::<u16>()` | on any flag: each value refused unless it parses as that type (`--port expects a u16, got "70000"`) |
 | `.about(..)`, `.version(..)` | the first line of `--help`; what `--version` prints |
 
 A switch named `json` turns refusals into `{"error": "…"}` on stdout, the
@@ -68,6 +69,61 @@ number flag, or `a.on("jsn")` the spec doesn't name, panics naming it
 (`--n is a Number flag, read as Text`), so a misread fails the first run
 instead of reading `None` for good. `Args::pos` holds to the spec's
 positionals the same way.
+
+### Options as a typed struct
+
+`#[derive(aio::cli::Options)]` makes the spec from a struct and reads
+the command line into it (aio inferred the flags' types from its spec):
+each field is a flag, its type says its kind and the type each value
+parses as, so a read is a field, checked by the compiler, and a value of
+the wrong type is refused like any wrong invocation.
+
+```rust
+use aio::cli::{Options, Stop};
+
+/// notes on the command line
+#[derive(Options, Debug)]
+#[cli(name = "notes", version = "0.1.0", command("add", "add a note"), command("list", "list the notes"))]
+struct Notes {
+    #[cli(command)]
+    command: String,
+    /// its tag
+    #[cli(short = 't')]
+    tag: Option<String>,
+    /// at most this many
+    #[cli(default = 20)]
+    limit: u32,
+    /// answer as JSON
+    json: bool,
+    #[cli(rest)]
+    text: Vec<String>,
+}
+
+# fn main() {
+let n = Notes::parse(&["add", "-t", "home", "buy", "milk"]).unwrap();
+assert_eq!((n.command.as_str(), n.tag.as_deref(), n.limit, n.text.join(" ")), ("add", Some("home"), 20, "buy milk".into()));
+assert!(matches!(Notes::parse(&["list", "--limit", "-1"]), Err(Stop::Refused { why, .. }) if why.starts_with("--limit expects a u32")));
+# }
+```
+
+In `main`: `let n = Notes::args();` (`--help` and a refusal end the
+process, as [`args`](#parse-refuse-draw) does).
+
+| Field | Flag |
+|---|---|
+| `bool` | a switch, `--dry-run` for `dry_run` |
+| `T` | a flag that must be given, unless `#[cli(default = v)]` (`v` of type `T`) |
+| `Option<T>` | a flag that may be absent |
+| `Vec<T>` | a list |
+| `#[cli(positional)] Option<String>`, `#[cli(rest)] Vec<String>` | the next word, the words after |
+| `#[cli(command)] String` | the sub-command, one of the struct's `#[cli(command("name", "help"))]` |
+
+`T` is any `FromStr` type: a number makes a number flag, anything else
+text. `#[cli(short = 'x')]` gives the short name; the doc comment is the
+help, the struct's its about line; `#[cli(name = "..")]` names the
+program (unset: the crate), `#[cli(version)]` gives `--version` (the
+crate's, or `version = ".."`). A field of a type no flag reads, or a
+default of another type, is a compile error at the field.
 
 ### How a command line is read
 
@@ -128,7 +184,7 @@ fn main() {
 - `aio::cli::args` leaves aio's own launch flags out (`--home`,
   `--profile`, `--instance`, `--port`, `--host`, `--expose`,
   `--takeover`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key`, `--channel`, `--width`, `--height`,
-  `--cdp`, `--server-url`, `--connect`, `--strict-pin`, `--client`), so the same binary answers both and neither refuses the
+  `--cdp`, `--server-url`, `--connect`, `--strict-pin`, `--client`, `--transport`), so the same binary answers both and neither refuses the
   other's.
 - `aio::cli::fail(why, code, json)` ends with `error: why` on stderr (or
   `{"error"}` on stdout under `--json`) and the exit code.
@@ -263,7 +319,7 @@ printed.
 A tool's binary takes aio's launch flags too: `--home`, `--profile`,
 `--instance` (where its data lives), `--takeover`, `--port`, `--host`,
 `--expose`, `--no-persist`, `--no-tls`, `--tls-cert`, `--tls-key`, `--channel`, `--width`, `--height`,
-`--cdp`, `--server-url`, `--connect`, `--strict-pin`, `--client` (`aio::paths::FLAGS`). `aio::cli::args` removes those (and
+`--cdp`, `--server-url`, `--connect`, `--strict-pin`, `--client`, `--transport` (`aio::paths::FLAGS`). `aio::cli::args` removes those (and
 their values) before parsing, so the spec never lists them and a typo in
 either is refused with a did-you-mean. `aio::paths::Ask::app_args(&argv)`
 does the same for an app that parses its arguments some other way.
@@ -285,10 +341,6 @@ does the same for an app that parses its arguments some other way.
 - aio's `testIO()` records the raw-mode toggles of an app's own secret
   prompt; aio-rs's only one is `Prompt::password`, which turns the echo
   off itself, so there is nothing of the app's to record.
-- aio's flag types are inferred from the spec at compile time
-  (`a.flags.n: number`); aio-rs reads by name and kind (`a.number("n")`),
-  and a name the spec hasn't, or a read of another kind, panics naming it
-  on the first run.
 - aio's `connectCli` client prints the notifications the server sends;
   an aio-rs client shows them only once the app says how
   (`aio::tell::show_with(f)`).

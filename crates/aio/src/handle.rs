@@ -183,9 +183,10 @@ struct Inner<T: Cell> {
     tells: tokio::sync::broadcast::Sender<crate::tell::Tell>,
     /// Set by a test (`aio::testing`): effects wait here until it starts them.
     held: Mutex<Option<Vec<Effect<T>>>>,
-    /// Held, the keys of the effects its last commit asked for, stamped
-    /// in commit order across cells (`TestCells::last_effects`).
-    last_held: Mutex<(u64, Vec<String>)>,
+    /// Held, what its last commit asked for, stamped in commit order
+    /// across cells (`TestCells::last_asked`).
+    #[cfg(feature = "testing")]
+    last_held: Mutex<(u64, Vec<crate::testing::AskedFor>)>,
     /// A test's ledger: its schedules' and effects' failures, until it takes them.
     failed: Mutex<Vec<String>>,
     /// Disabled (`Cells::disable`): calls refused, schedules paused.
@@ -288,6 +289,7 @@ impl<T: Cell> Handle<T> {
             events: tokio::sync::broadcast::channel(1024).0,
             tells: tokio::sync::broadcast::channel(64).0,
             held: Mutex::default(),
+            #[cfg(feature = "testing")]
             last_held: Mutex::default(),
             failed: Mutex::default(),
             off: AtomicBool::new(false),
@@ -317,6 +319,12 @@ impl<T: Cell> Handle<T> {
     /// [`Store::open_aio`]: aio app `app`'s `state.db`, kept readable by aio.
     pub fn open_aio(path: impl AsRef<Path>, app: &str) -> Result<Self, Error> {
         Store::open_aio(path, app).map(Self::new)
+    }
+
+    /// Is `other` a handle of this same store?
+    #[cfg(all(feature = "kit", feature = "server"))]
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// The same store, with calls recorded as caused by `by`.
@@ -430,7 +438,7 @@ impl<T: Cell> Handle<T> {
             };
             let msg = format!("{}: its reaction to {}.{method} {why}", T::ID, S::ID);
             eprintln!("[aio] {msg}");
-            crate::report::problem("reaction", &msg);
+            me.problem("reaction", &msg);
         };
         source.inner.file.react();
         self.inner.file.react();
@@ -479,35 +487,57 @@ impl<T: Cell> Handle<T> {
             let acting = crate::action_hooks();
             let done: Vec<crate::Event> =
                 if acting.is_empty() { vec![] } else { events.iter().map(|(_, e)| e.clone()).collect() };
+            #[cfg(feature = "testing")]
             let committed = !events.is_empty();
             for e in events {
                 // No subscribers is fine: nobody syncs this cell.
                 _ = self.inner.events.send(e);
             }
             let started = !effects.is_empty();
+            #[cfg(feature = "testing")]
             let mut asked = vec![];
+            #[cfg(feature = "testing")]
+            let holding = lock(&self.inner.held).is_some();
+            #[cfg(feature = "testing")]
+            let mut note = |a| _ = holding.then(|| asked.push(a));
             for e in effects {
                 match e.downcast::<Effect<T>>() {
                     Ok(e) => match lock(&self.inner.held).as_mut() {
+                        #[cfg(feature = "testing")]
                         Some(held) => {
-                            asked.push(e.key.clone());
+                            note(crate::testing::AskedFor::effect::<T>(e.key.clone(), e.mode, e.timeout));
                             held.push(*e)
                         }
+                        #[cfg(not(feature = "testing"))]
+                        Some(held) => held.push(*e),
                         None => self.spawn(*e),
                     },
                     Err(e) => match e.downcast::<Abort>() {
-                        Ok(a) => self.abort(&a.0),
+                        Ok(a) => {
+                            self.abort(&a.0);
+                            #[cfg(feature = "testing")]
+                            note(crate::testing::AskedFor::Abort(a.0));
+                        }
                         Err(e) => match e.downcast::<crate::tell::Tell>() {
-                            Ok(t) => self.say(*t),
+                            Ok(t) => {
+                                #[cfg(feature = "testing")]
+                                note(crate::testing::AskedFor::Tell((*t).clone()));
+                                self.say(*t)
+                            }
                             Err(e) => match e.downcast::<crate::answer::Answered>() {
                                 Ok(a) => self.answer(*a),
+                                #[cfg(feature = "testing")]
+                                Err(e) if e.is::<crate::Plan>() => {
+                                    note(crate::testing::AskedFor::Schedule(*e.downcast().expect("a plan")))
+                                }
                                 Err(_) => eprintln!("[aio] {}: an effect for another cell was dropped", T::ID),
                             },
                         },
                     },
                 }
             }
-            if committed && lock(&self.inner.held).is_some() {
+            #[cfg(feature = "testing")]
+            if committed && holding {
                 static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 *lock(&self.inner.last_held) = (STAMP.fetch_add(1, Ordering::Relaxed) + 1, asked);
             }
@@ -595,8 +625,18 @@ impl<T: Cell> Handle<T> {
             let msg = format!("{} disabled after {n} failures; the last: {last}", T::ID);
             eprintln!("[aio] {msg}");
             crate::health::degrade(&format!("cell {}", T::ID), &msg);
-            crate::report::problem("tripped", &msg);
+            self.problem("tripped", &msg);
             self.switch(false);
+        }
+    }
+
+    /// A problem of this cell: its state, read without waiting, goes with
+    /// the diagnostic (aio's `stateSnapshot`).
+    fn problem(&self, kind: &str, msg: &str) {
+        let st = self.inner.shown.try_lock().map(|s| s.1.clone());
+        match st {
+            Ok(st) => crate::report::problem_in(kind, msg, &*st),
+            Err(_) => _ = crate::report::problem(kind, msg),
         }
     }
 
@@ -646,11 +686,9 @@ impl<T: Cell> Handle<T> {
         Door::call(self, m, Value::Null).map(drop).map_err(|e| {
             let msg = format!("{}: #[{hook}] {m} refused: {e}", T::ID);
             eprintln!("[aio] {msg}");
-            crate::report::problem("hook", &msg);
-            match on {
-                true => crate::Rejected::coded(crate::Code::InitError, msg),
-                false => crate::Rejected::new(msg),
-            }
+            let (kind, code) = if on { ("hook", crate::Code::InitError) } else { ("hook:stop", crate::Code::DestroyError) };
+            self.problem(kind, &msg);
+            crate::Rejected::coded(code, msg)
         })
     }
 
@@ -695,6 +733,7 @@ impl<T: Cell> Handle<T> {
         let id = self.inner.ran.fetch_add(1, Ordering::Relaxed);
         let end = Ended { inner: self.inner.clone(), key: e.key.clone(), id, _next: next };
         let (h, timeout) = (self.by(By::Effect(e.key.clone())), e.timeout);
+        let me = self.clone();
         let (mut run, key) = ((e.run)(h), e.key.clone());
         // Each step timed against the effect budget (`perf`).
         let fut = std::future::poll_fn(move |cx| crate::perf::step(T::ID, &key, || run.as_mut().poll(cx)));
@@ -707,10 +746,14 @@ impl<T: Cell> Handle<T> {
             }
             drop(waiting);
             let Some(d) = timeout else { return fut.await };
-            if tokio::time::timeout(d, fut).await.is_err() {
+            let mut run = Box::pin(tokio::time::timeout(d, fut));
+            if run.as_mut().await.is_err() {
                 let msg = format!("{}: effect `{}` timed out after {d:?}", T::ID, end.key);
                 eprintln!("[aio] {msg}");
-                crate::report::problem("effect:timeout", &msg);
+                me.problem("effect:timeout", &msg);
+                // Its call, if it waits, hears why (aio's EFFECT_TIMEOUT).
+                let why = crate::Rejected::coded(crate::Code::EffectTimeout, msg);
+                crate::answer::cut_off(why, || drop(run));
             }
         });
         running.entry(e.key).or_default().push((id, task.abort_handle()));
@@ -744,6 +787,7 @@ impl<T: Cell> Handle<T> {
     fn enter(
         &self,
         who: Option<&crate::Caller>,
+        from: Option<&Arc<crate::Request>>,
         method: &str,
         args: Value,
         op: Option<&str>,
@@ -776,7 +820,7 @@ impl<T: Cell> Handle<T> {
         let out = {
             let mut s = lock(&self.inner.store);
             match who.map_or(Ok(()), |w| s.state().allow(w, method, &args)) {
-                Ok(()) => s.call_as(&self.by, who, method, args, op, reply.clone()),
+                Ok(()) => s.call_as(&self.by, who, from, method, args, op, reply.clone()),
                 Err(e) => Err(e),
             }
         };
@@ -830,7 +874,7 @@ impl<T: Cell> Handle<T> {
             return Err(crate::Rejected::coded(crate::Code::DispatchAborted, why));
         }
         let turn = self.turn();
-        let out = lock(&self.inner.store).call_as(&self.by, None, method, args, None, reply);
+        let out = lock(&self.inner.store).call_as(&self.by, None, None, method, args, None, reply);
         self.settle(turn, out).map(Option::unwrap_or_default)
     }
 
@@ -883,8 +927,8 @@ impl<T: Cell> Handle<T> {
     }
 
     #[cfg(feature = "testing")]
-    /// The keys its last commit asked for while held, with the commit's stamp.
-    pub(crate) fn last_held(&self) -> (u64, Vec<String>) {
+    /// What its last commit asked for while held, with the commit's stamp.
+    pub(crate) fn last_held(&self) -> (u64, Vec<crate::testing::AskedFor>) {
         lock(&self.inner.last_held).clone()
     }
 
@@ -1059,21 +1103,22 @@ impl<T: Cell> Handle<T> {
 
     /// A synced client's call (see `Store::call_from`); `Ok(None)`: a re-send, not applied again.
     pub fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
-        self.enter(None, method, args, Some(op), None).map(|(v, _)| v)
+        self.enter(None, None, method, args, Some(op), None).map(|(v, _)| v)
     }
 
     /// A call from the network by `who`, with the synced client's `op` if
     /// any: refused unless the method's `#[client]` rule lets `who` in, asked
-    /// on the very state the call then runs on.
+    /// on the very state the call then runs on. `from`: where it came from.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn call_by(
         &self,
         who: &crate::Caller,
+        from: Option<&Arc<crate::Request>>,
         method: &str,
         args: Value,
         op: Option<&str>,
     ) -> Result<Option<Value>> {
-        self.enter(Some(who), method, args, op, None).map(|(v, _)| v)
+        self.enter(Some(who), from, method, args, op, None).map(|(v, _)| v)
     }
 
     /// [`Self::call_by`], followed to its end: an async method's answer comes later.
@@ -1081,12 +1126,13 @@ impl<T: Cell> Handle<T> {
     pub(crate) fn ask_by(
         &self,
         who: Option<&crate::Caller>,
+        from: Option<&Arc<crate::Request>>,
         method: &str,
         args: Value,
         op: Option<&str>,
         parts: Option<crate::answer::Parts>,
     ) -> Result<(Option<Value>, crate::Answer)> {
-        self.enter(who, method, args, op, parts)
+        self.enter(who, from, method, args, op, parts)
     }
 
     /// Committed events from now on, each with the event before it. A
@@ -1367,11 +1413,11 @@ fn wait_ms(next: Option<i64>, now: i64) -> u64 {
 
 impl<T: Cell> Door<T> for Handle<T> {
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.enter(None, method, args, None, None).map(|(v, _)| v.unwrap_or_default())
+        self.enter(None, None, method, args, None, None).map(|(v, _)| v.unwrap_or_default())
     }
 
     fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
-        self.enter(None, method, args, None, None).map(|(_, a)| a)
+        self.enter(None, None, method, args, None, None).map(|(_, a)| a)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {

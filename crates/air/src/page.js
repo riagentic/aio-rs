@@ -61,7 +61,10 @@
   const send = (ids, e) => {
     const t = e.target || {}, form = e.type === 'submit' && t instanceof HTMLFormElement ? [...new FormData(t)] : []
     const sc = t instanceof Element ? t : document.scrollingElement || {}
-    const parts = [['u8', 1], ['u16', ids.length], ...ids.map((i) => ['u32', i]), s(e.type), s(e.key), s(e.code), ['u8', e.location || 0]]
+    // A key is asked (air::ASKED) where the wire can wait for its answer:
+    // its edits are in before the frame is drawn.
+    const ask = e.type === 'keydown' && !reading && window.__aioWire.ask
+    const parts = [['u8', ask ? 3 : 1], ['u16', ids.length], ...ids.map((i) => ['u32', i]), s(e.type), s(e.key), s(e.code), ['u8', e.location || 0]]
     const flags = !!e.shiftKey | (!!e.ctrlKey << 1) | (!!e.altKey << 2) | (!!e.metaKey << 3) | (!!e.repeat << 4) |
       (!!e.isComposing << 5) | ((t.checked === true) << 6) | (!!e.isPrimary << 7)
     parts.push(['u8', flags], ['u8', typeof e.button === 'number' ? e.button : 255], ['u16', e.buttons || 0])
@@ -75,7 +78,7 @@
     const picked = e.type === 'submit' ? form.filter(([, v]) => typeof v !== 'string' && v.name)
       : (e.type === 'input' || e.type === 'change') && t instanceof HTMLInputElement && t.type === 'file' && t.files ? [...t.files].map((v) => ['', v]) : []
     const out = () => window.__aioWire.send(frame(parts))
-    if (!picked.length && !reading) return parts.push(['u16', 0]), out()
+    if (!picked.length && !reading) return parts.push(['u16', 0]), ask ? window.__aioWire.ask(frame(parts)) : out()
     // Reading is async: the events after it wait, so the views get them in order.
     reading++
     queue = queue.then(async () => {
@@ -150,8 +153,59 @@
     n[k] = v
   }
 
+  // A page the server painted (`air::ssr`, `data-aio-painted` on #main):
+  // the first frame is built apart, then its nodes' ids, listeners and
+  // values go to the page's own nodes, which stay (no flash; scroll, focus
+  // and typed text kept, what was typed told to the views). A node of
+  // another kind takes the built one in its place; an attribute or a text
+  // that differs is written.
+  let painted = nodes.get(0).hasAttribute('data-aio-painted')
+  // The page's children of `p` as air built them: `<!--a-->` marks a text
+  // node HTML would have merged or dropped (`air::ssr::TEXT_MARK`).
+  const built = (p) => {
+    const out = []
+    for (let c = p.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType !== 8 || c.data !== 'a') { out.push(c); continue }
+      const t = c.nextSibling && c.nextSibling.nodeType === 3 ? c.nextSibling : document.createTextNode('')
+      c.replaceWith(t)
+      out.push((c = t))
+    }
+    return out
+  }
+  const alike = (v, r) => v.nodeType === r.nodeType && (v.nodeType !== 1 || (v.namespaceURI === r.namespaceURI && v.tagName === r.tagName))
+  const adopt = (v, r, told) => {
+    told.n++
+    v.__airReal = r
+    if (v.__airId !== undefined) (r.__airId = v.__airId), nodes.set(v.__airId, r)
+    if (v.__airOn) {
+      r.__airOn = v.__airOn
+      resizes?.unobserve(v), visibles?.unobserve(v)
+      for (const k of v.__airOn) observe(r, k)
+    }
+    if (v.nodeType !== 1) return void (r.nodeValue !== v.nodeValue && (r.nodeValue = v.nodeValue))
+    const typed = 'defaultValue' in r && r.value !== r.defaultValue
+    const ticked = (r.type === 'checkbox' || r.type === 'radio') && r.checked !== r.defaultChecked
+    for (const a of [...r.attributes]) if (!v.hasAttribute(a.name)) r.removeAttribute(a.name)
+    for (const a of v.attributes) if (r.getAttribute(a.name) !== a.value) r.setAttribute(a.name, a.value)
+    if (typed) told.push([r, 'input'])
+    else if ('value' in v && r.value !== v.value) r.value = v.value
+    if (ticked) told.push([r, 'change'])
+    else if ('checked' in v && r.checked !== v.checked) r.checked = v.checked
+    if (r.tagName !== 'TEXTAREA') kids(v, r, told)
+  }
+  const kids = (v, r, told) => {
+    const vs = [...v.childNodes], rs = built(r)
+    vs.forEach((c, i) => {
+      if (rs[i] && alike(c, rs[i])) adopt(c, rs[i], told)
+      else (rs[i] ? rs[i].replaceWith(c) : r.appendChild(c)), told.missed++
+    })
+    for (const c of rs.slice(vs.length)) c.remove(), told.missed++
+  }
+
   const apply = (fr) => {
     const t0 = performance.now()
+    const main = painted && nodes.get(0)
+    if (main) (painted = false), nodes.set(0, document.createElement('div'))
     const b = fr instanceof Uint8Array ? fr : new Uint8Array(fr)
     const v = new DataView(b.buffer, b.byteOffset, b.byteLength)
     let p = 0
@@ -168,6 +222,9 @@
       return n
     }
     const range = () => span(node(), node())
+    // Elements whose animation changed: their box, measured below.
+    const moving = new Set()
+    const animating = (e, was) => e.style.animation !== was && e.style.animationName && moving.add(e)
     // `style:<property>`: a CSS property (rsx!'s style attributes), else an
     // attribute. A `style` string keeps the properties it doesn't set:
     // `position: "fixed", style: "inset: 0"` is both.
@@ -220,7 +277,7 @@
           break
         }
         case 3: node().nodeValue = str(); break
-        case 4: { const n = node(); attr(n, str(), str()); break }
+        case 4: { const n = node(), was = n.style?.animation; attr(n, str(), str()); if (n.style) animating(n, was); break }
         case 5: { const n = node(), k = str(); k.startsWith('style:') ? n.style.removeProperty(k.slice(6)) : n.removeAttribute(k); break }
         case 6: { const n = node(); prop(n, str(), str()); break }
         case 7: { const n = node(); n[str()] = u8() !== 0; break }
@@ -249,11 +306,40 @@
         case 15: { const id = u32(), m = str(), to = evals.get(id); if (to) to(JSON.parse(m)); break }
         case 16: {
           const list = range(), k = str(), v = str(), e = list.find((n) => n.nodeType === 1)
-          if (e) e.style.setProperty(k, v)
+          if (e) {
+            const was = e.style.animation
+            e.style.setProperty(k, v)
+            animating(e, was)
+          }
           break
         }
         default: throw new Error('air: unknown edit at ' + (p - 1))
       }
+    }
+    if (main) {
+      const told = Object.assign([], { n: 0, missed: 0 })
+      kids(nodes.get(0), main, told)
+      nodes.set(0, main)
+      // A motion measures the page's node that took the built one's place.
+      for (const e of [...moving]) if (e.__airReal) moving.delete(e), moving.add(e.__airReal)
+      main.removeAttribute('data-aio-painted')
+      for (const [n, e] of told) n.dispatchEvent(new Event(e, { bubbles: true }))
+      // What hydration kept and what it put in place (`air::ssr`).
+      window.__airHydrated = { kept: told.n, replaced: told.missed }
+      if (told.missed) console.warn('[air] ' + told.missed + ' nodes of the server paint differed from the view and were replaced')
+    }
+    // A motion may measure what it moves (aio's TransitionFn got the node):
+    // `--aio-w` and `--aio-h`, the element's box without the animation, set
+    // before its first frame, all of them in one layout.
+    if (moving.size) {
+      const els = [...moving].filter((e) => e.isConnected), held = els.map((e) => e.style.animation)
+      for (const e of els) e.style.animation = 'none'
+      const box = els.map((e) => (e.offsetWidth === undefined ? e.getBoundingClientRect() : { width: e.offsetWidth, height: e.offsetHeight }))
+      els.forEach((e, i) => {
+        e.style.animation = held[i]
+        e.style.setProperty('--aio-w', box[i].width + 'px')
+        e.style.setProperty('--aio-h', box[i].height + 'px')
+      })
     }
     if (window.__aioPainted) window.__aioPainted(t0)
   }

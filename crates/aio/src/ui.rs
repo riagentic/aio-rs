@@ -23,8 +23,39 @@ mod css;
 pub use css::{collect_css, css};
 #[cfg(feature = "kit")]
 mod on_air;
+#[cfg(all(feature = "kit", feature = "server", not(target_arch = "wasm32")))]
+mod paint;
 #[cfg(feature = "kit")]
 pub use on_air::*;
+#[cfg(all(feature = "kit", feature = "server", not(target_arch = "wasm32")))]
+pub(crate) use paint::paint_streaming;
+#[cfg(all(feature = "kit", feature = "server", not(target_arch = "wasm32")))]
+pub use paint::{SEED_ID, Seed, paint};
+
+/// `ax dev`'s hot reload, as sent (the desktop door's `Aio.hot`, the web
+/// dev page's): `{"files": [file], "templates": [{file, line, col, idx,
+/// nodes (base64), count}]}`, read as the files and their edited templates.
+#[cfg(feature = "kit")]
+#[doc(hidden)]
+pub fn hot_markup(params: &serde_json::Value) -> Result<(Vec<String>, Vec<air::hot::Markup>), String> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let one = |t: &serde_json::Value| -> Option<air::hot::Markup> {
+        Some(air::hot::Markup {
+            file: t["file"].as_str()?.into(),
+            line: u32::try_from(t["line"].as_u64()?).ok()?,
+            col: u32::try_from(t["col"].as_u64()?).ok()?,
+            idx: u32::try_from(t["idx"].as_u64()?).ok()?,
+            nodes: b64.decode(t["nodes"].as_str()?).ok()?,
+            count: u32::try_from(t["count"].as_u64()?).ok()?,
+        })
+    };
+    let ts = params["templates"].as_array().ok_or("no templates")?;
+    let markup = ts.iter().map(one).collect::<Option<Vec<_>>>().ok_or("a template is malformed")?;
+    let files = params["files"].as_array().ok_or("no files")?;
+    let files = files.iter().map(|f| f.as_str().map(String::from)).collect::<Option<Vec<_>>>();
+    Ok((files.ok_or("a file is not text")?, markup))
+}
 
 /// Everything a view file needs.
 #[cfg(feature = "kit")]
@@ -32,10 +63,11 @@ pub mod prelude {
     pub use super::on_air::events::*;
     pub use super::on_air::{
         Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler,
-        Fragment, FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props,
-        Resource, Signal, Suspense, SuspenseProps, Task, View, ViewError, callback, component, context, effect, eval,
-        geometry, in_views, key_event, memo, on_cleanup, once, provide, provide_root, resource, rsx, signal, spawn,
-        spawn_forever, task, try_context, untrack, watch,
+        Fragment, FragmentProps, Global, GlobalMemo, H, Key, Location, Memo, Modifiers, MouseButton, Optimistic, Prop,
+        Props, Resource, Signal, Suspense, SuspenseProps, Task, TrackedMemo, View, ViewError, callback, comp,
+        component, context, effect, eval, geometry, h, in_views, key_event, memo, on_cleanup, once, provide,
+        provide_root, resource, rsx, seeded_resource, signal, spawn, spawn_forever, task, try_context, untrack,
+        use_optimistic, watch,
     };
     pub use super::on_air::{Effect, Retry, effect_quiet, on_change, retry};
     pub use crate::{act, use_css};
@@ -569,7 +601,9 @@ pub fn back_pressed() -> impl std::future::Future<Output = bool> {
 /// the `router!`): asked before those who listened earlier.
 pub fn back_presses() -> tokio::sync::mpsc::UnboundedReceiver<BackAsk> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    BACK.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+    let mut back = BACK.lock().unwrap_or_else(|e| e.into_inner());
+    back.retain(|t| !t.is_closed());
+    back.push(tx);
     rx
 }
 
@@ -598,6 +632,8 @@ pub fn open_link(url: &str) {
 pub fn links() -> tokio::sync::mpsc::UnboundedReceiver<String> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut l = LINKS.lock().unwrap_or_else(|e| e.into_inner());
+    // A listener gone (a server's first paint, a closed window) is let go.
+    l.0.retain(|t| !t.is_closed());
     for url in l.1.drain(..) {
         _ = tx.send(url);
     }
@@ -1015,6 +1051,20 @@ macro_rules! client {
                 timeline: use_time_travel,
                 ask: time_travel,
             });
+            // And a dev build's Redux DevTools shows it (`kit::ReduxDevTools`).
+            if $crate::ui::DEV {
+                $crate::kit::redux::register($crate::kit::redux::Bridged {
+                    cell: <$cell as $crate::CellData>::ID,
+                    state: || $crate::serde_json::to_value(&*$read()).unwrap_or_default(),
+                    steps: || $crate::kit::redux::steps(&HANDLE.read_untracked()),
+                    jump: |seq, state, newest| {
+                        let r = $crate::kit::redux::jump(&HANDLE.read_untracked(), seq, state, newest);
+                        tell(true);
+                        r
+                    },
+                    dispatch: |m, a| $crate::Door::<$cell>::call(&Ui, m, a).map(drop).map_err(|e| e.why),
+                });
+            }
             let tx = $crate::ui::once(|| {
                 let _ = PARTS.read_untracked();
                 let (tx, mut rx) = $crate::__tokio::sync::mpsc::unbounded_channel::<()>();
@@ -1036,6 +1086,7 @@ macro_rules! client {
                             while rx.try_recv().is_ok() {}
                         }
                         tell(false);
+                        HANDLE.read_untracked().rendered();
                     }
                 });
                 tx
@@ -1063,7 +1114,12 @@ macro_rules! client {
                 // The state before the call is the one the views know of.
                 let _ = PARTS.read_untracked();
                 let h = HANDLE.get_untracked();
+                // A dev build's Redux DevTools names the commit by it.
+                let shown = $crate::ui::DEV.then(|| args.clone());
                 let r = $crate::Door::call(&h, method, args);
+                if let (Some(a), Ok(_)) = (shown, &r) {
+                    $crate::kit::redux::called(<$cell as $crate::CellData>::ID, method, a);
+                }
                 // At once, with what came off the UI thread meanwhile (aio
                 // `flushAllUrgent`); a call that changed nothing (Down on the
                 // last row) re-renders nothing.
@@ -1074,7 +1130,11 @@ macro_rules! client {
             fn ask(&self, method: &str, args: $crate::serde_json::Value) -> $crate::Result<$crate::Answer> {
                 let _ = PARTS.read_untracked();
                 let h = HANDLE.get_untracked();
+                let shown = $crate::ui::DEV.then(|| args.clone());
                 let r = $crate::Door::ask(&h, method, args);
+                if let (Some(a), Ok(_)) = (shown, &r) {
+                    $crate::kit::redux::called(<$cell as $crate::CellData>::ID, method, a);
+                }
                 tell(true);
                 r
             }

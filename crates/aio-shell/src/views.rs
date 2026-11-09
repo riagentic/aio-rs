@@ -115,13 +115,14 @@ pub(crate) mod on_air {
 
     /// The app's view, its body through the patched code when a patch came
     /// (`ax dev`'s hot-patch, a dev build's), and beside it a dev build's
-    /// time-travel panel (Ctrl+.: every `client!` cell's history).
+    /// time-travel panel (Ctrl+.: every `client!` cell's history) and its
+    /// Redux DevTools bridge.
     fn current(app: fn() -> View) -> View {
         #[cfg(feature = "dev")]
         {
             use aio::ui::prelude::*;
             let app = aio_hotpatch::HotFn::current(app).call(());
-            rsx! { {app} aio::kit::DevTimeTravel {} }
+            rsx! { {app} aio::kit::DevTimeTravel {} aio::kit::ReduxDevTools {} }
         }
         #[cfg(not(feature = "dev"))]
         app()
@@ -143,7 +144,13 @@ pub(crate) mod on_air {
             None => d.message.clone(),
         };
         let q = |s: &str| aio::serde_json::to_string(s).unwrap_or_default();
-        format!("window.__aioDiag && window.__aioDiag({}, {})", q(&format!("app: {}", d.kind)), q(&detail))
+        let level = if d.severity == aio::report::Severity::Error { "error" } else { "warning" };
+        format!(
+            "window.__aioDiag && window.__aioDiag({}, {}, false, {})",
+            q(&format!("app: {}", d.kind)),
+            q(&detail),
+            q(level)
+        )
     }
 
     /// The page's frames to the root (its events, its scripts' replies),
@@ -171,10 +178,14 @@ pub(crate) mod on_air {
         #[cfg(feature = "dev")]
         root.within(aio::ui::audit::watch_page);
         let _kept = Kept;
+        // An asked event (a key the page waits on) is answered after the
+        // flush that follows it.
+        let mut asked = false;
         loop {
             air::run_tasks();
             let edits = root.take_edits();
-            if !edits.is_empty() {
+            let sent = !edits.is_empty();
+            if sent {
                 if cfg!(feature = "dev") {
                     let (tree, (renders, total)) = root.within(|| (air::components(), air::renders()));
                     keep_tree(Some((
@@ -184,6 +195,11 @@ pub(crate) mod on_air {
                     )));
                 }
                 to_page.send(edits).await.map_err(|_| "the page is gone".to_string())?;
+            }
+            if std::mem::take(&mut asked) {
+                to_page.send(air::ANSWERED.to_vec()).await.map_err(|_| "the page is gone".to_string())?;
+            }
+            if sent {
                 // What rows that left held is dropped while the page applies the frame.
                 air::drop_left();
             }
@@ -192,7 +208,10 @@ pub(crate) mod on_air {
             }
             tokio::select! {
                 f = from_page.next() => match f {
-                    Some(Ok(f)) => _ = root.event(&f),
+                    Some(Ok(f)) => {
+                        asked = f.first() == Some(&air::ASKED);
+                        _ = root.event(&f);
+                    }
                     _ => return Ok(()),
                 },
                 _ = woke.notified() => {}
@@ -207,6 +226,54 @@ pub(crate) mod on_air {
 mod tests {
     use super::*;
 
+    /// A key the page waits on gets its edits, then `air::ANSWERED`; a
+    /// key sent plainly gets its edits alone.
+    async fn next(
+        page: &mut tokio_util::codec::Framed<tokio::io::DuplexStream, tokio_util::codec::LengthDelimitedCodec>,
+    ) -> Vec<u8> {
+        use futures_util::StreamExt;
+        let f = tokio::time::timeout(std::time::Duration::from_secs(10), page.next()).await.unwrap();
+        f.unwrap().unwrap().to_vec()
+    }
+
+    #[tokio::test]
+    async fn an_asked_key_is_answered_after_its_edits() {
+        use aio::ui::prelude::*;
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_util::codec::{Framed, LengthDelimitedCodec};
+        let _turn = crate::WINDOW_TURN.lock().await;
+        let (ours, page) = tokio::io::duplex(1 << 20);
+        let app = || {
+            let n = signal(|| 0u32);
+            rsx! { p { onkeydown: move |_| n += 1, "pressed {n}" } }
+        };
+        let window = tokio::spawn(async move { Views::new().launch(Box::new(ours), app).await });
+        let codec = LengthDelimitedCodec::builder().max_frame_length(256 << 20).new_codec();
+        let mut page = Framed::new(page, codec);
+        let first = page.next().await.unwrap().unwrap();
+        // The `p`'s node id, in its listen edit: 8, the id, the name's length, "keydown".
+        let at = first.windows(7).position(|w| w == b"keydown").unwrap();
+        let id = u32::from_le_bytes(first[at - 8..at - 4].try_into().unwrap());
+        let key = |kind: u8| {
+            let mut f =
+                air::Raw { ids: vec![id], name: "keydown".into(), key: "a".into(), ..Default::default() }.encode();
+            f[0] = kind;
+            f
+        };
+        page.send(bytes::Bytes::from(key(air::ASKED))).await.unwrap();
+        assert!(String::from_utf8_lossy(&next(&mut page).await).contains("pressed 1"), "its edits first");
+        assert_eq!(next(&mut page).await, air::ANSWERED, "then the answer's end");
+        let plain = key(1);
+        page.send(bytes::Bytes::from(plain)).await.unwrap();
+        assert!(String::from_utf8_lossy(&next(&mut page).await).contains("pressed 2"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), page.next()).await.is_err(),
+            "nothing more for a plain key"
+        );
+        drop(page);
+        window.await.unwrap().unwrap();
+    }
+
     #[test]
     fn the_app_s_problems_reach_the_dev_overlay_as_written() {
         let d = aio::report::Diagnostic {
@@ -219,11 +286,14 @@ mod tests {
             cell: None,
             call: None,
             numbers: vec![],
+            state: None,
         };
         assert_eq!(
             on_air::overlay_js(&d),
-            r#"window.__aioDiag && window.__aioDiag("app: call:notes.add", "it said \"no\" · look at the method")"#
+            r#"window.__aioDiag && window.__aioDiag("app: call:notes.add", "it said \"no\" · look at the method", false, "error")"#
         );
+        let warned = aio::report::Diagnostic { severity: aio::report::Severity::Warn, ..d };
+        assert!(on_air::overlay_js(&warned).ends_with(r#", false, "warning")"#), "a warning is amber");
     }
 }
 
@@ -319,7 +389,11 @@ mod dev_tests {
         aio::report::problem("test:overlay", "the store is slow");
         let next =
             tokio::time::timeout(std::time::Duration::from_secs(10), page.next()).await.unwrap().unwrap().unwrap();
-        assert!(said(&next).contains(r#"__aioDiag("app: test:overlay", "the store is slow")"#), "{}", said(&next));
+        assert!(
+            said(&next).contains(r#"__aioDiag("app: test:overlay", "the store is slow", false, "#),
+            "{}",
+            said(&next)
+        );
         drop(page);
         window.await.unwrap().unwrap();
     }

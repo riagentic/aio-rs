@@ -46,22 +46,41 @@ async fn findings() -> Option<Vec<String>> {
 /// A dev build's page, audited a second after it changes, as `TestUi`
 /// audits a test's (aio's dev mode): each finding said once in the log
 /// (`ui` warnings: the app's log on the desktop, `ax dev`'s under
-/// `--web`). Started with the views.
+/// `--web`) and shown in the page's overlay as a warning while it holds
+/// (fixed, its row goes). Started with the views.
 #[cfg(feature = "dev")]
 pub fn watch_page() {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
     static SAID: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
     crate::ui::prelude::spawn(async {
+        let mut shown = BTreeSet::new();
         loop {
             crate::ui::clock::sleep(std::time::Duration::from_secs(1)).await;
-            for f in findings().await.unwrap_or_default() {
+            let Some(now) = findings().await else { continue };
+            let now: BTreeSet<String> = now.into_iter().collect();
+            for f in now.difference(&shown) {
                 if SAID.lock().unwrap_or_else(|e| e.into_inner()).insert(f.clone()) {
                     crate::warn!(cat: "ui", "{f}");
                 }
             }
+            if let Some(js) = overlay_js(&shown, &now) {
+                air::exec(&js);
+            }
+            shown = now;
         }
     });
+}
+
+/// What the overlay is told when the findings go from `was` to `now`: the
+/// new ones added as warnings, the gone ones dropped (pure).
+#[cfg(any(feature = "dev", test))]
+fn overlay_js(was: &std::collections::BTreeSet<String>, now: &std::collections::BTreeSet<String>) -> Option<String> {
+    let q = |s: &String| Value::from(s.as_str());
+    let add = now.difference(was).map(|f| format!("window.__aioDiag({}, '', false, 'warning');", q(f)));
+    let drop = was.difference(now).map(|f| format!("window.__aioDiagDrop({});", q(f)));
+    let js: String = add.chain(drop).collect();
+    (!js.is_empty()).then(|| format!("if (window.__aioDiag) {{ {js} }}"))
 }
 
 /// `s` cut to `max` chars, with `…`.
@@ -100,6 +119,15 @@ fn needed(size: f32, weight: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finding_shows_in_the_overlay_while_it_holds() {
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<std::collections::BTreeSet<_>>();
+        let js = overlay_js(&set(&["a", "b"]), &set(&["b", "c"])).unwrap();
+        assert!(js.contains(r#"__aioDiag("c", '', false, 'warning')"#) && js.contains(r#"__aioDiagDrop("a")"#), "{js}");
+        assert!(!js.contains(r#""b""#), "one still there is not told again");
+        assert_eq!(overlay_js(&set(&["b"]), &set(&["b"])), None);
+    }
 
     #[test]
     fn contrast_is_wcags_ratio_and_large_text_needs_less() {

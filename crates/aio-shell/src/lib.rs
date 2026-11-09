@@ -1527,7 +1527,8 @@ mod tests {
     }
 
     /// aio tests/dev-overlay.test.ts, in Node: a page error is on the page,
-    /// once with a count, bounded, behind a badge; a release page has none.
+    /// once with a count, newest first, bounded, behind a badge red for an
+    /// error and amber for warnings only; `clear` empties it; a release page has none.
     #[test]
     fn a_dev_page_shows_its_errors_on_the_page() {
         assert!(overlay(false).is_empty(), "a release page carries no overlay");
@@ -1541,6 +1542,7 @@ mod tests {
                setAttribute(k, v) {{ this.attrs[k] = v; }},
                attachShadow() {{ return this; }},
                appendChild(c) {{ this.kids.push(c); }},
+               remove() {{ document.body.kids = document.body.kids.filter((k) => k !== this); }},
                set textContent(t) {{ this._t = t; if (t === '') this.kids = []; }}, get textContent() {{ return this._t; }} }});
              globalThis.document = {{ body: el('body'), createElement: el }};
              {OVERLAY}
@@ -1549,11 +1551,19 @@ mod tests {
              for (let i = 0; i < 30; i++) window.__aioDiag('e' + i);
              const root = document.body.kids[0], [list, badge] = root.kids;
              console.log(JSON.stringify([document.body.kids.length, list.kids.length, list.kids[0].textContent,
-               badge.textContent, list.style.cssText.includes('display:none'), root.style.cssText.includes('pointer-events:none')]));
+               badge.textContent, list.style.display, root.style.cssText.includes('pointer-events:none')]));
              window.__aioDiag('build failed', 'error[E0609]', true);
-             const failed = badge.textContent;
+             const failed = [badge.textContent, list.kids[0].textContent, list.style.display];
              window.__aioDiagDrop('build failed');
-             console.log(JSON.stringify([failed, badge.textContent, list.kids.length]));"
+             console.log(JSON.stringify([...failed, badge.textContent, list.kids.length]));
+             list.kids[list.kids.length - 1].onclick();
+             const cleared = document.body.kids.length;
+             window.__aioDiag('accessibility: a button has no name', '', false, 'warning');
+             window.__aioDiag('accessibility: a button has no name', '', false, 'warning');
+             const warned = document.body.kids[0].kids[1];
+             const amber = [warned.textContent, warned.style.background];
+             window.__aioDiag('boom');
+             console.log(JSON.stringify([cleared, ...amber, warned.style.background]));"
         );
         let Ok(out) = std::process::Command::new("node").args(["-e", &js]).output() else {
             return eprintln!("skipped: no node");
@@ -1561,10 +1571,17 @@ mod tests {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let out = String::from_utf8_lossy(&out.stdout);
         let mut lines = out.lines().map(|l| aio::serde_json::from_str::<aio::serde_json::Value>(l).unwrap());
-        // 32 errors, 20 rows (the oldest went), behind a closed badge, never over the page.
-        assert_eq!(lines.next(), Some(aio::serde_json::json!([1, 20, "e10", "34 page errors", true, true])));
-        // A fixed build takes its failure away, the page's own errors stay.
-        assert_eq!(lines.next(), Some(aio::serde_json::json!(["35 page errors", "34 page errors", 19])));
+        use aio::serde_json::json;
+        // 34 problems, 20 rows (the oldest went) and `clear`, newest first,
+        // behind a closed badge, never over the page.
+        assert_eq!(lines.next(), Some(json!([1, 21, "e29", "20 problems", "none", true])));
+        // A failed build opens it; fixed, its row goes, the page's own errors stay.
+        assert_eq!(
+            lines.next(),
+            Some(json!(["20 problems", "build failed — error[E0609]", "block", "19 problems", 20]))
+        );
+        // Cleared, it is gone; warnings alone are amber, an error makes it red.
+        assert_eq!(lines.next(), Some(json!([0, "2 problems", "#7a5900", "#b3261e"])));
     }
 
     /// aio tests/render-meter: each paint graded by `[vitals] render`; a step

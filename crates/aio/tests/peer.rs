@@ -35,6 +35,20 @@ impl Ledger {
     }
 }
 
+/// A second cell on the app's doors.
+#[cell(shared)]
+pub struct Tips {
+    pub n: u32,
+}
+
+#[methods]
+impl Tips {
+    #[client]
+    pub fn tip(&mut self) {
+        self.n += 1;
+    }
+}
+
 const COUNT: ServerFn<(u32,), String> = ServerFn::new("ledger.count");
 
 /// The app `billing` running in `root` (locked), its ledger on its door.
@@ -141,6 +155,15 @@ async fn a_peer_calls_by_name_what_a_client_may_and_nothing_more() {
     let may = |m: &str| d["methods"].as_array().unwrap().iter().find(|x| x["method"] == m).unwrap()["may"].clone();
     assert_eq!(may("credit"), "yes");
     assert!(may("reset").as_str().unwrap().starts_with("no:"), "{d}");
+    // Every cell at once (aio's app-wide describe()), the same answers.
+    let tips = aio::ipc::Listener::bind(&aio::sync::door(&dirs.id, &dirs.data, "tips").unwrap()).unwrap();
+    let tips = tokio::spawn(async move {
+        _ = aio::sync::serve_door_with(Handle::<Tips>::memory(), tips, Default::default(), &Http::default()).await
+    });
+    let all = p.describe_all().await.unwrap();
+    assert_eq!(all.keys().collect::<Vec<_>>(), ["ledger", "tips"]);
+    assert_eq!((&all["ledger"], all["tips"]["methods"][0]["may"].as_str()), (&d, Some("yes")));
+    tips.abort();
     // Gone: refused at once, never queued.
     door.abort();
     drop(dirs);

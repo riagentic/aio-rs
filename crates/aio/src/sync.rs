@@ -37,7 +37,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::{Message as TMsg, client::IntoClientRequest};
+pub(crate) use tokio_tungstenite::tungstenite::Message as TMsg;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 /// The header an aio-rs client sends; without it the server speaks aio's protocol
 /// (feature `compat`) or refuses.
@@ -48,6 +49,9 @@ const WIRE_HEADER: &str = "x-aio-wire";
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Calls waiting for the server, at most; then calls are refused.
 pub const PENDING_MAX: usize = 500;
+
+/// aio-rs's JS client (`crates/aio/client`), served at `/__aio/client.js`.
+const CLIENT_JS: &str = include_str!("../client/index.js");
 
 /// A client's link: a WebSocket, or the local door's frames as the same messages.
 pub(crate) type Wire = Box<dyn Duplex>;
@@ -64,7 +68,7 @@ impl<D> Duplex for D where
 {
 }
 
-type WsError = tokio_tungstenite::tungstenite::Error;
+pub(crate) type WsError = tokio_tungstenite::tungstenite::Error;
 
 pub use crate::door::{at as door, is_door};
 pub use crate::link::{DEAD, PING, SEND_TIMEOUT};
@@ -387,10 +391,31 @@ struct Creds {
     open: bool,
 }
 
-/// `/ws`: clients that show the key (or with `users`, their token) get a
-/// session; with accounts (`auth`), clients show a live session instead,
-/// and its socket closes when the session ends.
-fn ws<T: Cell>(
+/// A client admitted on `/ws` or `/__aio/poll`: who it is, what it may
+/// call, and what ends its socket. It holds one of the `clients` slots.
+pub(crate) struct Admitted {
+    /// With accounts: its session's user and token.
+    signed: Option<(By, String)>,
+    /// A user known by token, with their role.
+    known: Option<(By, String)>,
+    /// Re-checked while open: the users, the token, the session it resolved to.
+    recheck: Option<(crate::auth::Users, String, crate::auth::Session)>,
+    gate: Gate,
+    push: Option<crate::link::Push>,
+    from: String,
+    ip: Option<std::net::IpAddr>,
+    headers: axum::http::HeaderMap,
+}
+
+/// What a socket of `/ws` is: a WebSocket, or a polled one ([`crate::poll`]).
+pub(crate) enum Socket {
+    Ws(Box<WebSocket>),
+    Polled((crate::mux::Sends, crate::mux::Takes)),
+}
+
+/// What `/ws` and `/__aio/poll` serve a client: the cell, the ones beside
+/// it, the server fns, how clients are told apart and counted.
+pub(crate) struct Doors<T: Cell> {
     h: Handle<T>,
     creds: Creds,
     auth: Option<Arc<crate::auth::Auth>>,
@@ -398,169 +423,215 @@ fn ws<T: Cell>(
     fns: Arc<crate::fns::Fns>,
     on_link: Option<crate::http::OnLink>,
     beside: Arc<Vec<Arc<dyn crate::link::Beside>>>,
-) -> axum::routing::MethodRouter {
+    open_links: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<T: Cell> Clone for Doors<T> {
+    fn clone(&self) -> Self {
+        Self {
+            h: self.h.clone(),
+            creds: self.creds.clone(),
+            auth: self.auth.clone(),
+            limits: self.limits,
+            fns: self.fns.clone(),
+            on_link: self.on_link.clone(),
+            beside: self.beside.clone(),
+            open_links: self.open_links.clone(),
+        }
+    }
+}
+
+impl<T: Cell> Doors<T> {
+    /// Admit a client by what it shows (the key, or with `users` its token;
+    /// with accounts a live session), taking a slot; else the answer that
+    /// refuses it.
+    /// The largest message a link takes.
+    pub(crate) fn max_message(&self) -> usize {
+        self.limits.max_message
+    }
+
+    pub(crate) async fn admit(
+        &self,
+        headers: axum::http::HeaderMap,
+        q: &HashMap<String, String>,
+        ext: &axum::http::Extensions,
+    ) -> std::result::Result<Admitted, Box<axum::response::Response>> {
+        use axum::extract::ConnectInfo;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let creds = &self.creds;
+        let ip = ext.get::<ConnectInfo<Peer>>().map(|c| c.0.0.ip());
+        let refuse = |shown: bool, why: &str| match ip {
+            Some(ip) => Box::new(unauthorized(&creds.guessed, ip, shown, why)),
+            None => Box::new((StatusCode::UNAUTHORIZED, why.to_string()).into_response()),
+        };
+        let mut known = None;
+        // A user known by token: the socket re-checks it while open.
+        let mut recheck = None;
+        let signed = match &self.auth {
+            None => {
+                // A page in the browser shows its cookie, as on `/__aio/ui`.
+                // With users, the signed-in cookie outranks a `?token=`:
+                // a link can't make a tab act as the link's user.
+                let shown = match &creds.users {
+                    Some(_) => users_token(&headers, q, T::ID),
+                    None => shown_key(&headers, q)
+                        .or_else(|| crate::http::parse_cookies(&headers).remove(&format!("aio_key_{}", T::ID))),
+                };
+                match (&creds.key, &creds.users) {
+                    (None, _) => {}
+                    (Some(_), Some(u)) => match who_off(Some(u), shown.clone()).await {
+                        Some(s) => {
+                            recheck = shown.clone().map(|t| (u.clone(), t, s.clone()));
+                            known = Some((By::User(s.user), s.role));
+                        }
+                        None => return Err(refuse(shown.is_some(), "wrong or missing token")),
+                    },
+                    (Some(key), None) if creds.open || shown.as_ref().is_some_and(|k| same(k, key)) => {}
+                    (Some(_), None) => return Err(refuse(shown.is_some(), "wrong or missing key")),
+                }
+                None
+            }
+            // A session only in the header: tokens never go in URLs.
+            Some(a) => {
+                let (a, t) = (a.clone(), crate::auth::routes::session_token(&headers, T::ID).unwrap_or_default());
+                match tokio::task::spawn_blocking(move || (live(&a, &t), t)).await {
+                    Ok((Some(s), t)) => Some((By::User(s.user), t)),
+                    // Not a session: a service's key beside the accounts, if the app knows it.
+                    Ok((None, t)) => match (&creds.users, who_off(creds.users.as_ref(), Some(t.clone())).await) {
+                        (Some(u), Some(s)) => {
+                            recheck = Some((u.clone(), t, s.clone()));
+                            known = Some((By::User(s.user), s.role));
+                            None
+                        }
+                        _ => return Err(refuse(!t.is_empty(), "sign in first")),
+                    },
+                    Err(_) => return Err(refuse(false, "sign in first")),
+                }
+            }
+        };
+        if self.open_links.fetch_add(1, Ordering::SeqCst) >= self.limits.clients {
+            self.open_links.fetch_sub(1, Ordering::SeqCst);
+            let why = format!("too many clients (the limit is {}): try again later", self.limits.clients);
+            return Err(Box::new(
+                (StatusCode::SERVICE_UNAVAILABLE, crate::http::json(json!({ "error": why, "retryAfterMs": 5000 }))).into_response(),
+            ));
+        }
+        let from = ext.get::<ConnectInfo<Peer>>().map_or("door".into(), |c| c.0.0.to_string());
+        // A known user's role follows their token's re-check, live.
+        let (gate, push) = match (&self.auth, &signed, &known, &creds.key) {
+            (Some(a), Some((_, t)), ..) => (Gate::Signed(a.clone(), t.clone()), None),
+            (_, _, Some((_, role)), _) => {
+                let (k, push) = crate::link::Known::live(role.clone());
+                (Gate::Known(k), Some(push))
+            }
+            // Never the door's rights over the network.
+            _ => (Gate::Key, None),
+        };
+        Ok(Admitted { signed, known, recheck, gate, push, from, ip, headers })
+    }
+
+    /// Serve admitted client `a` on `s` until it ends, then give back its
+    /// slot: every link of it on the one socket (`mux`), else one aio-rs
+    /// link (`wire2`) or, with `compat`, an aio client.
+    pub(crate) async fn serve(self, s: Socket, a: Admitted, mux: bool, #[cfg_attr(not(feature = "compat"), allow(unused_variables))] wire2: bool) {
+        let Self { h, auth, limits, fns, on_link, beside, open_links, .. } = self;
+        let Admitted { signed, known, recheck, gate, push, from, ip, headers } = a;
+        let viewer = signed.as_ref().or(known.as_ref()).map(|(by, _)| by.clone());
+        let account = auth.clone().zip(signed.as_ref().map(|(_, t)| t.clone()));
+        let caller = known.map(|(by, role)| match by {
+            By::User(_) => crate::Caller { by, role: Some(role) },
+            _ => crate::Caller::default(),
+        });
+        let calls = crate::fns::Served { fns, account, known: caller, from: (ip, fn_headers(headers)) };
+        let slots = open_links.clone();
+        let run = async {
+            let s = match s {
+                Socket::Ws(s) if !mux => *s,
+                s => {
+                    let ends = match s {
+                        Socket::Ws(w) => crate::mux::ends(*w),
+                        Socket::Polled(ends) => ends,
+                    };
+                    let run: crate::mux::Run = Arc::new(move |w| {
+                        let (h, beside, from, gate, viewer, calls, on_link) =
+                            (h.clone(), beside.clone(), from.clone(), gate.clone(), viewer.clone(), calls.clone(), on_link.clone());
+                        Box::pin(linked(h, beside, w, limits, from, gate, viewer, calls, on_link))
+                    });
+                    return crate::mux::serve(ends, run, slots, limits.clients, limits.max_message).await;
+                }
+            };
+            #[cfg(not(feature = "compat"))]
+            let r = linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
+            #[cfg(feature = "compat")]
+            let r = if wire2 {
+                linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
+            } else {
+                let user = match &viewer {
+                    Some(By::User(u)) => u.clone(),
+                    _ => "peer".into(),
+                };
+                let _heard = Heard::new(on_link, &user, &from);
+                let who = format!("{user} from {from} (aio)");
+                let listed = Listed::new(Client::new(T::ID, user, "aio", from));
+                let link = (listed.0, who);
+                crate::compat::wire::session(h, &beside, Sock::Ws(s), limits, gate, viewer, calls, link).await
+            };
+            r
+        };
+        // Dropping the session closes its socket.
+        let r = match (auth, signed, recheck) {
+            (Some(a), Some((_, t)), _) => tokio::select! {
+                r = run => r,
+                () = ended(a, t) => Err("a session ended: its socket is closed".into()),
+            },
+            (_, _, Some((u, t, was))) => tokio::select! {
+                r = run => r,
+                () = users_ended(u, t, was, push) => Err("its token no longer resolves: its socket is closed".into()),
+            },
+            _ => run.await,
+        };
+        open_links.fetch_sub(1, Ordering::SeqCst);
+        if let Err(e) = r {
+            eprintln!("[aio] sync: {e}");
+        }
+    }
+}
+
+/// `/ws`: clients that show the key (or with `users`, their token) get a
+/// session; with accounts (`auth`), clients show a live session instead,
+/// and its socket closes when the session ends.
+fn ws<T: Cell>(doors: Doors<T>) -> axum::routing::MethodRouter {
     use crate::http::Query;
-    use axum::extract::ConnectInfo;
     use axum::http::{Extensions, HeaderMap, StatusCode};
     use axum::response::IntoResponse;
-    let open_links = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    axum::routing::get(
-        move |ws: WebSocketUpgrade, headers: HeaderMap, ext: Extensions, Query(q): Query| {
-            let (h, creds, auth, open_links, fns, on_link, beside) =
-                (h.clone(), creds.clone(), auth.clone(), open_links.clone(), fns.clone(), on_link.clone(), beside.clone());
-            async move {
-                let ip = ext.get::<ConnectInfo<Peer>>().map(|c| c.0.0.ip());
-                let refuse = |shown: bool, why: &str| match ip {
-                    Some(ip) => unauthorized(&creds.guessed, ip, shown, why),
-                    None => (StatusCode::UNAUTHORIZED, why.to_string()).into_response(),
-                };
-                let mut known = None;
-                // A user known by token: the socket re-checks it while open.
-                let mut recheck = None;
-                let signed = match &auth {
-                    None => {
-                        // A page in the browser shows its cookie, as on `/__aio/ui`.
-                        // With users, the signed-in cookie outranks a `?token=`:
-                        // a link can't make a tab act as the link's user.
-                        let shown = match &creds.users {
-                            Some(_) => users_token(&headers, &q, T::ID),
-                            None => shown_key(&headers, &q).or_else(|| {
-                                crate::http::parse_cookies(&headers).remove(&format!("aio_key_{}", T::ID))
-                            }),
-                        };
-                        match (&creds.key, &creds.users) {
-                            (None, _) => {}
-                            (Some(_), Some(u)) => match who_off(Some(u), shown.clone()).await {
-                                Some(s) => {
-                                    recheck = shown.clone().map(|t| (u.clone(), t, s.clone()));
-                                    known = Some((By::User(s.user), s.role));
-                                }
-                                None => return refuse(shown.is_some(), "wrong or missing token"),
-                            },
-                            (Some(key), None) if creds.open || shown.as_ref().is_some_and(|k| same(k, key)) => {}
-                            (Some(_), None) => return refuse(shown.is_some(), "wrong or missing key"),
-                        }
-                        None
-                    }
-                    // A session only in the header: tokens never go in URLs.
-                    Some(a) => {
-                        let (a, t) =
-                            (a.clone(), crate::auth::routes::session_token(&headers, T::ID).unwrap_or_default());
-                        match tokio::task::spawn_blocking(move || (live(&a, &t), t)).await {
-                            Ok((Some(s), t)) => Some((By::User(s.user), t)),
-                            // Not a session: a service's key beside the accounts, if the app knows it.
-                            Ok((None, t)) => match (&creds.users, who_off(creds.users.as_ref(), Some(t.clone())).await) {
-                                (Some(u), Some(s)) => {
-                                    recheck = Some((u.clone(), t, s.clone()));
-                                    known = Some((By::User(s.user), s.role));
-                                    None
-                                }
-                                _ => return refuse(!t.is_empty(), "sign in first"),
-                            },
-                            Err(_) => return refuse(false, "sign in first"),
-                        }
-                    }
-                };
-                if open_links.fetch_add(1, Ordering::SeqCst) >= limits.clients {
-                    open_links.fetch_sub(1, Ordering::SeqCst);
-                    let why = format!("too many clients (the limit is {}): try again later", limits.clients);
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        crate::http::json(json!({ "error": why, "retryAfterMs": 5000 })),
-                    )
-                        .into_response();
-                }
-                // A browser can't set a header on its socket: it says `?wire=2`.
-                let wire2 = headers.get(WIRE_HEADER).is_some_and(|v| v == "2") || q.get("wire").is_some_and(|v| v == "2");
-                // Every link of the client on this one socket (a page asks by protocol).
-                let ws = if wire2 { ws.protocols([crate::mux::PROTOCOL]) } else { ws };
-                let mux = wire2
-                    && (headers.get(crate::mux::HEADER).is_some_and(|v| v == "1") || ws.selected_protocol().is_some());
-                if !wire2 && !cfg!(feature = "compat") {
-                    open_links.fetch_sub(1, Ordering::SeqCst);
-                    let why = "this app speaks aio-rs's wire 2 only: send `x-aio-wire: 2` or `?wire=2` (aio clients need aio-rs's feature `compat`)";
-                    return (StatusCode::UPGRADE_REQUIRED, why).into_response();
-                }
-                let from = ext.get::<ConnectInfo<Peer>>().map_or("door".into(), |c| c.0.0.to_string());
-                // A known user's role follows their token's re-check, live.
-                let (gate, push) = match (&auth, &signed, &known, &creds.key) {
-                    (Some(a), Some((_, t)), ..) => (Gate::Signed(a.clone(), t.clone()), None),
-                    (_, _, Some((_, role)), _) => {
-                        let (k, push) = crate::link::Known::live(role.clone());
-                        (Gate::Known(k), Some(push))
-                    }
-                    // Never the door's rights over the network.
-                    _ => (Gate::Key, None),
-                };
-                let slots = open_links.clone();
-                let mut reply = ws.max_message_size(MAX_MESSAGE)
-                    .on_upgrade(move |s| async move {
-                        let viewer = signed.as_ref().or(known.as_ref()).map(|(by, _)| by.clone());
-                        let account = auth.clone().zip(signed.as_ref().map(|(_, t)| t.clone()));
-                        let caller = known.map(|(by, role)| match by {
-                            By::User(_) => crate::Caller { by, role: Some(role) },
-                            _ => crate::Caller::default(),
-                        });
-                        let calls = crate::fns::Served { fns, account, known: caller, from: (ip, fn_headers(headers)) };
-                        let run = async {
-                            if mux {
-                                let run: crate::mux::Run = Arc::new(move |w| {
-                                    let (h, beside, from, gate, viewer, calls, on_link) = (
-                                        h.clone(),
-                                        beside.clone(),
-                                        from.clone(),
-                                        gate.clone(),
-                                        viewer.clone(),
-                                        calls.clone(),
-                                        on_link.clone(),
-                                    );
-                                    Box::pin(linked(h, beside, w, limits, from, gate, viewer, calls, on_link))
-                                });
-                                return crate::mux::serve(s, run, slots, limits.clients, limits.max_message).await;
-                            }
-                            #[cfg(not(feature = "compat"))]
-                            let r = linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await;
-                            #[cfg(feature = "compat")]
-                            let r = if wire2 {
-                                linked(h, beside, Sock::Ws(s), limits, from, gate, viewer, calls, on_link).await
-                            } else {
-                                let user = match &viewer {
-                                    Some(By::User(u)) => u.clone(),
-                                    _ => "peer".into(),
-                                };
-                                let _heard = Heard::new(on_link, &user, &from);
-                                let who = format!("{user} from {from} (aio)");
-                                let listed = Listed::new(Client::new(T::ID, user, "aio", from));
-                                let link = (listed.0, who);
-                                crate::compat::wire::session(h, &beside, Sock::Ws(s), limits, gate, viewer, calls, link).await
-                            };
-                            r
-                        };
-                        // Dropping the session closes its socket.
-                        let r = match (auth, signed, recheck) {
-                            (Some(a), Some((_, t)), _) => tokio::select! {
-                                r = run => r,
-                                () = ended(a, t) => Err("a session ended: its socket is closed".into()),
-                            },
-                            (_, _, Some((u, t, was))) => tokio::select! {
-                                r = run => r,
-                                () = users_ended(u, t, was, push) => Err("its token no longer resolves: its socket is closed".into()),
-                            },
-                            _ => run.await,
-                        };
-                        open_links.fetch_sub(1, Ordering::SeqCst);
-                        if let Err(e) = r {
-                            eprintln!("[aio] sync: {e}");
-                        }
-                    })
-                    .into_response();
-                if mux {
-                    reply.headers_mut().insert(crate::mux::HEADER, axum::http::HeaderValue::from_static("1"));
-                }
-                reply
+    axum::routing::get(move |ws: WebSocketUpgrade, headers: HeaderMap, ext: Extensions, Query(q): Query| {
+        let doors = doors.clone();
+        async move {
+            // A browser can't set a header on its socket: it says `?wire=2`.
+            let wire2 = headers.get(WIRE_HEADER).is_some_and(|v| v == "2") || q.get("wire").is_some_and(|v| v == "2");
+            // Every link of the client on this one socket (a page asks by protocol).
+            let ws = if wire2 { ws.protocols([crate::mux::PROTOCOL]) } else { ws };
+            let mux = wire2 && (headers.get(crate::mux::HEADER).is_some_and(|v| v == "1") || ws.selected_protocol().is_some());
+            let a = match doors.admit(headers, &q, &ext).await {
+                Ok(a) => a,
+                Err(r) => return *r,
+            };
+            if !wire2 && !cfg!(feature = "compat") {
+                doors.open_links.fetch_sub(1, Ordering::SeqCst);
+                let why = "this app speaks aio-rs's wire 2 only: send `x-aio-wire: 2` or `?wire=2` (aio clients need aio-rs's feature `compat`)";
+                return (StatusCode::UPGRADE_REQUIRED, why).into_response();
             }
-        },
-    )
+            let mut reply = ws
+                .max_message_size(MAX_MESSAGE)
+                .on_upgrade(move |s| doors.serve(Socket::Ws(Box::new(s)), a, mux, wire2))
+                .into_response();
+            if mux {
+                reply.headers_mut().insert(crate::mux::HEADER, axum::http::HeaderValue::from_static("1"));
+            }
+            reply
+        }
+    })
 }
 
 /// One aio-rs link on `/ws`: to the cell its hello names, `h`'s or one
@@ -730,6 +801,13 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     let (Options { token, limits, hosts, http, auth, strict_origin, trust_proxy, security, open, page_log }, tls) =
         (opts, None::<std::convert::Infallible>);
     auth.iter().for_each(crate::auth::serve);
+    #[cfg(feature = "tls")]
+    let title = if named.is_empty() { T::ID.to_string() } else { named.clone() };
+    #[cfg(not(feature = "tls"))]
+    let title = T::ID.to_string();
+    // A painted shell paints with the app's own cell and the others served.
+    #[cfg(feature = "kit")]
+    let http = http.paint_cells(&h);
     // `[server] hosts` and the plugins' `allowed_origins`, merged (aio's `allowedOrigins`).
     let mut hosts = hosts;
     http.hosts.iter().for_each(|h| if !hosts.contains(h) { hosts.push(h.clone()) });
@@ -757,7 +835,17 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             app = app.route("/__aio/ui", ui_socket::<T>(ui, creds.clone(), auth.clone(), limits));
         }
         let beside = Arc::new(http.beside.clone());
-        app = app.route("/ws", ws(h, creds, auth.clone(), limits, fns, http.on_link.clone(), beside));
+        let doors = Doors {
+            h,
+            creds,
+            auth: auth.clone(),
+            limits,
+            fns,
+            on_link: http.on_link.clone(),
+            beside,
+            open_links: Default::default(),
+        };
+        app = app.route("/ws", ws(doors.clone())).route("/__aio/poll", crate::poll::route(doors));
     }
     #[cfg(feature = "tls")]
     if let Some(pairing) = pairing {
@@ -863,6 +951,16 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
         );
     }
+    // aio-rs's JS client (aio's `aio/state-core`), for a page drawn by
+    // another view library: public, as any library is; what it reaches
+    // (`/ws`) asks the key.
+    app = app.route(
+        "/__aio/client.js",
+        axum::routing::get(|| async {
+            use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+            ([(CONTENT_TYPE, "text/javascript; charset=utf-8"), (CACHE_CONTROL, "no-cache")], CLIENT_JS)
+        }),
+    );
     // For monitoring (aio's `/__aio/metrics`, `/__aio/health`, `/__aio/vitals`).
     for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
         let (h, guessed, trust) = (watched.clone(), guessed.clone(), Arc::new(trust_proxy.clone()));
@@ -994,7 +1092,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         users,
         ancestors: crate::security::frame_ancestors(&hosts),
         open,
+        title: title.clone(),
     });
+    app = crate::doorstep::routes(app, &title, aio_config::icon::hue(T::ID));
     let http = Arc::new(http);
     app = app.fallback(move |ConnectInfo(Peer(from)): ConnectInfo<Peer>, req: axum::extract::Request| {
         let (http, key) = (http.clone(), key.clone());
@@ -1444,12 +1544,14 @@ struct Copy<T> {
     base: Option<(Value, Arc<T>)>,
     /// Fields shown merged ([`Remote::merge`]).
     merges: Vec<(String, crate::merge::Merge)>,
+    /// The parts it holds ([`Remote::subscribe`]; empty: all of it).
+    paths: Vec<String>,
 }
 
 impl<T: Cell> Copy<T> {
-    fn new(seq: u64, view: Value, st: Arc<T>, pending: Vec<Pending>, by: By) -> Self {
+    fn new(seq: u64, view: Value, st: Arc<T>, pending: Vec<Pending>, by: By, paths: Vec<String>) -> Self {
         let base = (!pending.is_empty()).then(|| (view.clone(), st.clone()));
-        let mut c = Self { seq, view, confirmed: st.clone(), pending, shown: st, by, base, merges: Vec::new() };
+        let mut c = Self { seq, view, confirmed: st.clone(), pending, shown: st, by, base, merges: Vec::new(), paths };
         c.reshow();
         c
     }
@@ -1461,7 +1563,15 @@ impl<T: Cell> Copy<T> {
         if self.pending.is_empty() {
             self.base = None;
         }
-        let st = self.replayed(&self.confirmed);
+        let mut st = self.replayed(&self.confirmed);
+        // A predicted call shows only in the parts the copy holds: the rest
+        // stay the defaults, never a guess made from them.
+        if !self.paths.is_empty()
+            && !self.pending.is_empty()
+            && let Some(h) = serde_json::to_value(&st).ok().and_then(|v| crate::held::<T>(&self.paths, &v).ok())
+        {
+            st = h;
+        }
         self.shown = Arc::new(match &self.base {
             Some((view, base)) if !self.merges.is_empty() => {
                 let local = serde_json::to_value(self.replayed(base));
@@ -1512,6 +1622,9 @@ struct Saved {
     seq: u64,
     view: Value,
     pending: Vec<Pending>,
+    /// The parts it held (its view is of them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
 }
 
 /// Is the saved copy `s` (in `file`) this cell's at this version? If not
@@ -1743,7 +1856,7 @@ fn flush_at_exit() {
 /// signs a copy out. Another (another cell, a cleartext link) keeps what
 /// waits.
 #[derive(Debug)]
-struct WrongKey;
+pub(crate) struct WrongKey;
 
 impl std::fmt::Display for WrongKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1803,6 +1916,30 @@ struct Inner<T: Cell> {
     /// The server refused this copy's credential (a dead session): new
     /// calls are refused until a link is made again.
     signed_out: AtomicBool,
+    /// How far its screen lags ([`Remote::rendered`]).
+    screen: Mutex<Screen>,
+    /// What this link's server understands of what a copy may say (`paths`,
+    /// `seen`): an older one ends a link on a message it doesn't know.
+    can: Mutex<Vec<String>>,
+}
+
+/// A copy's screen, once something renders it ([`Remote::rendered`]):
+/// since when a state it took waits to be shown, and the longest wait since
+/// last said.
+#[derive(Default)]
+struct Screen {
+    on: bool,
+    since: Option<tokio::time::Instant>,
+    peak: Duration,
+}
+
+impl Screen {
+    /// What to tell the server now (ms), if anything renders this copy.
+    fn lag(&mut self) -> Option<u64> {
+        let now = self.since.map_or(Duration::ZERO, |t| t.elapsed());
+        let lag = std::mem::take(&mut self.peak).max(now);
+        self.on.then_some(lag.as_millis() as u64)
+    }
 }
 
 /// The last handle gone: its last save is written before the drop ends
@@ -1884,6 +2021,53 @@ fn cleartext_refusal(os: &str, link: &Link) -> Option<String> {
     })
 }
 
+/// One link of a window page's JS client ([`crate::kit::use_js_client`]) carried
+/// to `link`'s server as it is: its `hello`, then its frames both ways (the
+/// server's pings answered by the page).
+#[cfg(feature = "kit")]
+pub(crate) async fn relay(link: Link, mut sock: crate::link::Sock, hello: Value) {
+    use crate::link::Msg;
+    use futures_util::{SinkExt, StreamExt};
+    let mut w = match dial(&link, true).await {
+        Ok(w) => w,
+        Err(e) => {
+            let why = json!({ "t": "refused", "why": format!("the server can't be reached: {e}"), "skew": true });
+            _ = sock.send(Msg::Text(why.to_string())).await;
+            return;
+        }
+    };
+    if w.send(TMsg::text(hello.to_string())).await.is_err() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            m = sock.recv() => {
+                let m = match m {
+                    Some(Msg::Text(t)) => TMsg::text(t),
+                    Some(Msg::Pong(p)) => TMsg::Pong(p.into()),
+                    Some(Msg::Ping(p)) => TMsg::Ping(p.into()),
+                    Some(Msg::Close(..)) | None => return,
+                };
+                if w.send(m).await.is_err() {
+                    return;
+                }
+            }
+            m = w.next() => {
+                let m = match m {
+                    Some(Ok(TMsg::Text(t))) => Msg::Text(t.to_string()),
+                    Some(Ok(TMsg::Ping(p))) => Msg::Ping(p.to_vec()),
+                    Some(Ok(TMsg::Pong(p))) => Msg::Pong(p.to_vec()),
+                    Some(Ok(_)) => continue,
+                    _ => return,
+                };
+                if sock.send(m).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// The socket to `link`'s `/ws`, the key shown; `wire2`: as an aio-rs client
 /// (else the server speaks aio's protocol v3, as to an aio page).
 pub(crate) async fn dial(link: &Link, wire2: bool) -> std::io::Result<Wire> {
@@ -1909,11 +2093,60 @@ pub(crate) async fn dial(link: &Link, wire2: bool) -> std::io::Result<Wire> {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, why));
     }
     crate::capabilities::check("sync", &link.addr)?;
-    match wire2 {
-        // Every link to this server on one socket.
-        true => crate::mux::link(link, socket(link, true, scheme, connector)).await,
-        false => Ok(socket(link, false, scheme, connector).await?.0),
+    if !wire2 {
+        return Ok(socket(link, false, scheme, connector).await?.0);
     }
+    // Every link to this server on one socket: a WebSocket, or polled.
+    let polled = async { Ok((crate::poll::dial(link).await?, true)) };
+    match transport() {
+        Transport::Ws => crate::mux::link(link, socket(link, true, scheme, connector)).await,
+        Transport::Poll => crate::mux::link(link, polled).await,
+        Transport::Auto => {
+            let either = async {
+                match socket(link, true, scheme, connector).await {
+                    // Refused, or nothing listens: polling would be too.
+                    Err(e) if blocked(&e) => match polled.await {
+                        Ok(w) => {
+                            eprintln!("[aio] sync: {} took no WebSocket ({e}): its links go over plain HTTP", link.addr);
+                            Ok(w)
+                        }
+                        Err(_) => Err(e),
+                    },
+                    r => r,
+                }
+            };
+            crate::mux::link(link, either).await
+        }
+    }
+}
+
+pub use crate::config::Transport;
+
+static TRANSPORT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// How this process's copies reach their servers from now on (`[client]
+/// transport`; aio's `transport`): [`Transport::Auto`] (the default) a
+/// WebSocket, plain HTTP requests when the upgrade doesn't get through;
+/// `Ws` or `Poll` only that. A local door is always its socket.
+pub fn set_transport(t: Transport) {
+    TRANSPORT.store(t as u8, Ordering::Relaxed);
+}
+
+fn transport() -> Transport {
+    match TRANSPORT.load(Ordering::Relaxed) {
+        1 => Transport::Ws,
+        2 => Transport::Poll,
+        _ => Transport::Auto,
+    }
+}
+
+/// Did a WebSocket fail as one blocked on the way does (a proxy that
+/// answers the upgrade with an error, or cuts it), not as the server
+/// refusing or not being there?
+fn blocked(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind as K;
+    !matches!(e.kind(), K::PermissionDenied | K::ConnectionRefused | K::TimedOut | K::AddrNotAvailable | K::HostUnreachable | K::NetworkUnreachable)
+        && !e.to_string().starts_with("refused (503)")
 }
 
 /// A new socket to `link`'s `/ws` (`wire2`: asking for every link on it); is
@@ -1985,12 +2218,21 @@ fn door_wire(f: crate::door::Frames) -> impl Duplex {
     })
 }
 
-/// `open_raw` for a copy of `T`: the server's state must fit it. `peer`:
-/// as another app on a local door ([`crate::peer`]).
-async fn open<T: Cell>(link: &Link, user: &str, peer: bool) -> std::io::Result<(Wire, Value)> {
-    let hello = json!({ "t": "hello", "cell": T::ID, "v": T::VERSION, "user": user, "peer": peer });
+/// What a server's first state says it understands of a copy.
+fn can_of(first: &Value) -> Vec<String> {
+    first["can"].as_array().map(|l| l.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+/// `open_raw` for a copy of `T` holding `paths` of it (empty: all): the
+/// server's state must fit it. `peer`: as another app on a local door
+/// ([`crate::peer`]).
+async fn open<T: Cell>(link: &Link, user: &str, peer: bool, paths: &[String]) -> std::io::Result<(Wire, Value)> {
+    let mut hello = json!({ "t": "hello", "cell": T::ID, "v": T::VERSION, "user": user, "peer": peer });
+    if !paths.is_empty() {
+        hello["paths"] = json!(paths);
+    }
     let (w, first) = open_raw(link, &hello).await?;
-    serde_json::from_value::<T>(first["state"].clone()).map_err(std::io::Error::other)?;
+    crate::held::<T>(paths, &first["state"]).map_err(std::io::Error::other)?;
     Ok((w, first))
 }
 
@@ -2003,19 +2245,27 @@ impl<T: Cell> Remote<T> {
 
     /// `connect`, over TLS when `link` has a root to pin.
     pub async fn connect_to(link: Link, user: &str) -> std::io::Result<Self> {
-        Self::start(Some(link), user, None, false, false).await.map(|(r, _)| r)
+        Self::start(Some(link), user, None, false, false, vec![]).await.map(|(r, _)| r)
+    }
+
+    /// `connect_to`, holding only `paths` of the cell (dot paths, as
+    /// [`Self::subscribe`]): the server sends this copy those parts and only
+    /// their patches, from the first state on.
+    pub async fn connect_paths(link: Link, user: &str, paths: &[&str]) -> std::io::Result<Self> {
+        let paths = paths.iter().map(|p| p.to_string()).collect();
+        Self::start(Some(link), user, None, false, false, paths).await.map(|(r, _)| r)
     }
 
     /// `connect_to` another app's local door as a peer ([`crate::peer`]).
     pub(crate) async fn peer(link: Link, user: &str) -> std::io::Result<Self> {
-        Self::start(Some(link), user, None, true, false).await.map(|(r, _)| r)
+        Self::start(Some(link), user, None, true, false, vec![]).await.map(|(r, _)| r)
     }
 
     /// `connect_to`, keeping the copy in `file` (0600): when the server can't
     /// be reached it starts from the saved copy (offline-first), and calls
     /// still waiting for the server survive a restart and are sent later.
     pub async fn connect_saved(link: Link, user: &str, file: &std::path::Path) -> std::io::Result<Self> {
-        Self::start(Some(link), user, Some(file.to_path_buf()), false, false).await.map(|(r, _)| r)
+        Self::start(Some(link), user, Some(file.to_path_buf()), false, false, vec![]).await.map(|(r, _)| r)
     }
 
     /// [`Self::connect_saved`] that never fails to start (a window's
@@ -2028,7 +2278,7 @@ impl<T: Cell> Remote<T> {
         user: &str,
         file: &std::path::Path,
     ) -> std::io::Result<(Self, Option<std::io::Error>)> {
-        Self::start(link, user, Some(file.to_path_buf()), false, true).await
+        Self::start(link, user, Some(file.to_path_buf()), false, true, vec![]).await
     }
 
     async fn start(
@@ -2037,6 +2287,7 @@ impl<T: Cell> Remote<T> {
         file: Option<std::path::PathBuf>,
         peer: bool,
         later: bool,
+        paths: Vec<String>,
     ) -> std::io::Result<(Self, Option<std::io::Error>)> {
         let claimed = file.as_deref().map(Saver::claim);
         // A save still on its way (a copy dropped just now) is newer than the file.
@@ -2045,8 +2296,13 @@ impl<T: Cell> Remote<T> {
             None => file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()),
         }
         .filter(|s| file.as_deref().is_none_or(|f| kept_aside::<T>(f, s)));
+        // A saved copy holds what it held.
+        let paths = match &saved {
+            Some(s) if paths.is_empty() => s.paths.clone(),
+            _ => paths,
+        };
         let first = match &link {
-            Some(link) => open::<T>(link, user, peer).await.map(Some),
+            Some(link) => open::<T>(link, user, peer, &paths).await.map(Some),
             None => Ok(None),
         };
         let (first, failed) = match first {
@@ -2064,16 +2320,17 @@ impl<T: Cell> Remote<T> {
         };
         let pending = saved.as_ref().map(|s| s.pending.clone()).unwrap_or_default();
         let limits = first.as_ref().map(|(_, m)| m["limits"].clone());
+        let can = first.as_ref().map(|(_, m)| can_of(m)).unwrap_or_default();
         let (w, seq, view) = match (first, saved) {
             (Some((w, m)), _) => (Some(w), m["seq"].as_u64().unwrap_or(0), m["state"].clone()),
             (None, Some(s)) => (None, s.seq, s.view),
             // A copy waiting for its server: the cell's default until it comes.
             (None, None) => (None, 0, serde_json::to_value(T::default()).map_err(std::io::Error::other)?),
         };
-        let st: Arc<T> = Arc::new(crate::copy_of(view.clone()).map_err(std::io::Error::other)?);
+        let st: Arc<T> = Arc::new(crate::held(&paths, &view).map_err(std::io::Error::other)?);
         let save = claimed.map(|(s, owner, _)| (s, owner));
         let connected = w.is_some();
-        let copy = Copy::new(seq, view, st, pending, By::User(user.into()));
+        let copy = Copy::new(seq, view, st, pending, By::User(user.into()), paths);
         let inner = Arc::new(Inner {
             by: By::User(user.into()),
             save,
@@ -2104,6 +2361,8 @@ impl<T: Cell> Remote<T> {
             unreached: Mutex::default(),
             token: Mutex::default(),
             signed_out: AtomicBool::new(false),
+            screen: Mutex::default(),
+            can: Mutex::new(can),
         });
         let weak = Arc::downgrade(&inner);
         let slot = inner.slot.clone();
@@ -2127,10 +2386,12 @@ impl<T: Cell> Remote<T> {
                             Some(f) => Link { token: f(), ..link },
                             None => link,
                         };
-                        match (tokio::time::Instant::now(), open::<T>(&link, &user, peer).await) {
+                        let paths = weak.upgrade().map(|i| lock(&i.copy).paths.clone()).unwrap_or_default();
+                        match (tokio::time::Instant::now(), open::<T>(&link, &user, peer, &paths).await) {
                             (asked, Ok((w, first))) => {
                                 let Some(inner) = weak.upgrade() else { return };
                                 *lock(&inner.asked) = Some(asked);
+                                *lock(&inner.can) = can_of(&first);
                                 inner.signed_out.store(false, Ordering::SeqCst);
                                 Remote { inner }.take(first);
                                 w
@@ -2199,6 +2460,12 @@ impl<T: Cell> Remote<T> {
         Ok((r, failed))
     }
 
+    /// The server it links to now, if it has one.
+    #[cfg(feature = "kit")]
+    pub(crate) fn link_now(&self) -> Option<Link> {
+        lock(&self.inner.slot.link).clone()
+    }
+
     /// Point the copy at another server (a client's connect page): its next
     /// connect goes there, at once: a link it holds now is dropped.
     pub fn relink(&self, link: Link) {
@@ -2241,6 +2508,8 @@ impl<T: Cell> Remote<T> {
         let calls_per_sec = lock(&self.inner.limits).map_or(Limits::default().calls_per_sec, |l| l.calls_per_sec);
         let writer = async {
             let mut ping = tokio::time::interval(PING);
+            let mut report = tokio::time::interval(Duration::from_secs(1));
+            let seen = lock(&self.inner.can).iter().any(|c| c == "seen");
             // send calls at the server's advertised rate.
             let mut pace = Pace::new(calls_per_sec);
             let mut told = Vec::new();
@@ -2254,6 +2523,10 @@ impl<T: Cell> Remote<T> {
                         None => break,
                     },
                     Some(d) = bus.recv() => frame(&d),
+                    _ = report.tick(), if seen => match lock(&self.inner.screen).lag() {
+                        Some(ms) => frame(&json!({ "t": "seen", "ms": ms })),
+                        None => continue,
+                    },
                     _ = ping.tick() => {
                         // What is degraded here, for the server's health (aio's `cdiag`): said when it changes.
                         let down: Vec<Value> = crate::health::degraded()
@@ -2332,11 +2605,13 @@ impl<T: Cell> Remote<T> {
             fs.iter().for_each(|f| f(&m));
         }
         match m["t"].as_str() {
-            Some("state") => match crate::copy_of::<T>(m["state"].clone()) {
+            Some("state") => match crate::held::<T>(&self.paths(), &m["state"]) {
                 Ok(st) => {
                     let mut events = 0;
                     let before = lock(&self.inner.copy).before(&m["op"]);
                     let met = self.met(before, &m["state"]);
+                    // Marked first: a render the update wakes clears it.
+                    self.shown_at();
                     self.update(|c| {
                         if let Some(l) = limits_from_wire(&m["limits"]) {
                             *lock(&self.inner.limits) = Some(l);
@@ -2357,9 +2632,9 @@ impl<T: Cell> Remote<T> {
             },
             Some("patch") => {
                 let (prev, seq) = (m["prev"].as_u64().unwrap_or(0), m["seq"].as_u64().unwrap_or(0));
-                let (mine, view, before) = {
+                let (mine, view, before, paths) = {
                     let c = lock(&self.inner.copy);
-                    (c.seq, c.view.clone(), c.before(&m["op"]))
+                    (c.seq, c.view.clone(), c.before(&m["op"]), c.paths.clone())
                 };
                 if seq <= mine {
                     return; // already in the copy
@@ -2368,10 +2643,11 @@ impl<T: Cell> Remote<T> {
                     return self.resync(); // a gap: never guess
                 }
                 let st = patched(&view, &m)
-                    .and_then(|v| crate::copy_of::<T>(v.clone()).map(|st| (v, st)).map_err(|e| e.to_string()));
+                    .and_then(|v| crate::held::<T>(&paths, &v).map(|st| (v, st)).map_err(|e| e.to_string()));
                 match st {
                     Ok((view, st)) => {
                         let met = self.met(before, &view);
+                        self.shown_at();
                         self.update(|c| {
                             c.seq = seq;
                             c.view = view;
@@ -2488,9 +2764,33 @@ impl<T: Cell> Remote<T> {
         fs.iter().for_each(|f| f(met));
     }
 
+    /// The parts the copy holds (the lock let go at once).
+    fn paths(&self) -> Vec<String> {
+        lock(&self.inner.copy).paths.clone()
+    }
+
     fn send(&self, m: Value) {
         if let Some(tx) = lock(&self.inner.out).as_ref() {
             _ = tx.send(m);
+        }
+    }
+
+    /// A state came that the screen hasn't shown yet.
+    fn shown_at(&self) {
+        lock(&self.inner.screen).since.get_or_insert_with(tokio::time::Instant::now);
+    }
+
+    /// Its screen showed the copy as it is now (the views call this after
+    /// each render; a custom renderer may too). From the first call on, the
+    /// copy tells its server how far the screen lags, each second, and a
+    /// server sends a lagging one changes less often (aio's render-staleness
+    /// backpressure): a slow screen gets fewer, folded patches. A copy
+    /// nothing renders never says, and is never slowed.
+    pub fn rendered(&self) {
+        let mut s = lock(&self.inner.screen);
+        s.on = true;
+        if let Some(t) = s.since.take() {
+            s.peak = s.peak.max(t.elapsed());
         }
     }
 
@@ -2512,6 +2812,7 @@ impl<T: Cell> Remote<T> {
                     seq: c.seq,
                     view: c.view.clone(),
                     pending: c.pending.clone(),
+                    paths: c.paths.clone(),
                 };
                 s.put(*owner, saved);
             }
@@ -2584,7 +2885,14 @@ impl<T: Cell> Remote<T> {
         self.inner.signed_out.store(true, Ordering::SeqCst);
         let saved = {
             let c = lock(&self.inner.copy);
-            Saved { cell: T::ID.into(), v: T::VERSION, seq: c.seq, view: c.view.clone(), pending: c.pending.clone() }
+            Saved {
+                cell: T::ID.into(),
+                v: T::VERSION,
+                seq: c.seq,
+                view: c.view.clone(),
+                pending: c.pending.clone(),
+                paths: c.paths.clone(),
+            }
         };
         if saved.pending.is_empty() {
             return;
@@ -2692,6 +3000,33 @@ impl<T: Cell> Remote<T> {
     /// what its methods make. Its own call's change is never one.
     pub fn on_conflict(&self, f: impl Fn(&[crate::merge::Conflict]) + Send + Sync + 'static) {
         lock(&self.inner.conflicts).push(Arc::new(f));
+    }
+
+    /// Hold only `paths` of the cell (aio's `subs`, finer: dot paths inside
+    /// it, as `persist(include)` names them; `[]` or `["*"]`: all of it).
+    /// The server then sends this copy those parts and only their patches;
+    /// the parts it doesn't hold read as the cell's defaults. A call is
+    /// still predicted, and shown in the parts it holds; one whose outcome
+    /// there depends on a part it doesn't hold is shown as the server's
+    /// answer makes it. Kept for each reconnect (and in a saved copy). A
+    /// list that isn't 1 to 1024 dot paths is refused.
+    pub fn subscribe(&self, paths: &[&str]) -> Result<()> {
+        let paths = match paths.is_empty() {
+            true => Arc::from([]),
+            false => crate::filter::paths_of(&json!(paths)).map_err(Rejected::new)?,
+        };
+        self.update(|c| {
+            c.paths = paths.to_vec();
+            // Narrower: at once. Wider: once the server's view of it comes.
+            if let Ok(s) = crate::held::<T>(&c.paths, &c.view) {
+                c.confirmed = Arc::new(s);
+            }
+        });
+        // An older server sends the whole cell anyway: it is held as said.
+        if lock(&self.inner.can).iter().any(|c| c == "paths") {
+            self.send(json!({ "t": "paths", "paths": if paths.is_empty() { json!(["*"]) } else { json!(*paths) } }));
+        }
+        Ok(())
     }
 
     /// Show top-level `field` merged as `how` says while a waiting call of
@@ -3029,15 +3364,27 @@ impl Live {
         Self::open(link, cell, user, true).await
     }
 
+    /// `connect` to a debug build's local door as the app's own server code
+    /// (aio's `dispatch --as-server`): its calls are `By::System`'s, so a
+    /// `before_call` that refuses users lets them in. `user` is who asked,
+    /// for the app's log. A release build's door refuses it.
+    pub async fn as_server(link: &Link, cell: &str, user: &str) -> std::io::Result<Self> {
+        let hello = json!({ "t": "hello", "cell": cell, "tool": true, "user": user, "peer": false, "server": true });
+        Ok(Self::of(open_raw(link, &hello).await?))
+    }
+
     async fn open(link: &Link, cell: &str, user: &str, peer: bool) -> std::io::Result<Self> {
         let hello = json!({ "t": "hello", "cell": cell, "tool": true, "user": user, "peer": peer });
-        let (w, first) = open_raw(link, &hello).await?;
-        Ok(Self {
+        Ok(Self::of(open_raw(link, &hello).await?))
+    }
+
+    fn of((w, first): (Wire, Value)) -> Self {
+        Self {
             w,
             version: first["v"].as_u64().unwrap_or(0),
             seq: first["seq"].as_u64().unwrap_or(0),
             view: first["state"].clone(),
-        })
+        }
     }
 
     /// What this user may see of the state, as the server last sent it.
@@ -3106,6 +3453,36 @@ impl Live {
         match m.get("err").and_then(Value::as_str) {
             Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
             None => Ok(m["ok"].clone()),
+        }
+    }
+
+    /// Run the app's server function `name` with `args` (its arguments as
+    /// a JSON list) and wait for its answer, as long as a person is deciding
+    /// on it, else up to `CALL_TIMEOUT` (`ax call --fn`).
+    pub async fn run(&mut self, name: &str, args: Value) -> Result<Value> {
+        let gone = |e: std::io::Error| Rejected::lost(format!("{name}: the link dropped ({e}); it may have run"));
+        self.w
+            .send(frame(&json!({ "t": "sfn", "id": 1, "name": name, "args": args })))
+            .await
+            .map_err(|e| gone(std::io::Error::other(e)))?;
+        let mut held = false;
+        loop {
+            let next = tokio::time::timeout(CALL_TIMEOUT, self.next());
+            let m = match next.await {
+                Ok(m) => m.map_err(gone)?,
+                Err(_) if held => continue,
+                Err(_) => return Err(Rejected::new(format!("{name}: no answer in {CALL_TIMEOUT:?} (it may still run)"))),
+            };
+            match m["t"].as_str() {
+                Some("sfnr") => {
+                    return match m["err"].as_str() {
+                        Some(e) => Err(Rejected { why: e.into(), code: crate::Code::of(&m["code"]) }),
+                        None => Ok(m["ok"].clone()),
+                    };
+                }
+                Some("sfnh") => held = m["hold"] == true,
+                _ => _ = self.take(&m).await.map_err(gone)?,
+            }
         }
     }
 

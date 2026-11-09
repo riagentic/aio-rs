@@ -426,6 +426,25 @@ pub struct Client {
     /// proves it holds the app's key is pinned again (`--strict-pin` per launch).
     #[serde(default)]
     pub strict_pin: bool,
+    /// How the copy reaches its server (aio's `transport`): `"auto"` (a
+    /// WebSocket, plain HTTP requests when one doesn't get through), `"ws"`
+    /// (WebSocket only) or `"poll"` (HTTP requests only).
+    #[serde(default)]
+    pub transport: Transport,
+}
+
+/// How a synced copy reaches its server.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// A WebSocket; plain HTTP requests when the upgrade is blocked (a
+    /// proxy or CDN that drops it).
+    #[default]
+    Auto,
+    /// A WebSocket only.
+    Ws,
+    /// Plain HTTP requests only (long polls).
+    Poll,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
@@ -1470,11 +1489,15 @@ pub struct Feedback {
     /// Report a problem by itself when the app breaks; `false`: only the
     /// user's reports.
     pub auto: bool,
+    /// A report's timeline carries each call's arguments (aio's timeline
+    /// payloads): a `#[redact]` method's as `[redacted]`, keys masked, each
+    /// cut at 1 KB. Off by default: a report may leave the machine.
+    pub args: bool,
 }
 
 impl Default for Feedback {
     fn default() -> Self {
-        Self { url: None, timeout: Duration::from_secs(15), keep: crate::report::KEEP, auto: true }
+        Self { url: None, timeout: Duration::from_secs(15), keep: crate::report::KEEP, auto: true, args: false }
     }
 }
 

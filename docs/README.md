@@ -4,7 +4,7 @@ aio-rs is a Rust framework for apps whose state is cells with an event
 log: every change is saved, replayable, inspectable and synced; one
 codebase runs as a desktop window, in a browser, on Android, as a server
 or as a command-line tool. Its command is `ax`. This is the guide for
-aio-rs 0.3.0 (alpha). Every Rust example in it compiles and runs as a
+aio-rs 0.4.0 (alpha). Every Rust example in it compiles and runs as a
 test of aio-rs, and every `ax` command shown exists with those flags.
 
 Coming from aio, or choosing between them: [aio and aio-rs compared](aio-vs-aio-rs.md).
@@ -89,6 +89,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [The desktop window](clients/desktop.md): the shared Electron runtime, the window, keys, tray, notifications, programs it runs.
 - [In a browser](clients/web.md): the web build, a browser tab, embedded web views.
 - [Transports and streams](clients/transports.md): how clients reach the app: sockets, IPC, HTTP, binary data.
+- [Other view libraries: the JS client](clients/js.md): React, Solid, Svelte, Vue or plain DOM on an app's cells; `ax tsgen` types.
 
 **Examples**
 - [Examples](examples/README.md): whole apps, each built and tested.

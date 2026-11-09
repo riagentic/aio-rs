@@ -24,6 +24,11 @@ fn Row(label: String) -> View {
     rsx! { li { "data-t": "{label}", onclick: move |_| hits += 1, "{label} {hits}" } }
 }
 
+/// A panic in the page's Rust, for the test to see where it is said.
+fn boom() {
+    panic!("boom in the page");
+}
+
 #[component]
 fn App() -> View {
     use_live();
@@ -42,6 +47,7 @@ fn App() -> View {
                 }
             }
             button { "data-t": "flip", onclick: move |_| rows.update(|r| r.reverse()), "Flip" }
+            button { "data-t": "boom", onclick: |_| boom(), "Boom" }
         }
     }
 }

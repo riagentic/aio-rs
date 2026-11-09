@@ -75,8 +75,9 @@ assert_eq!(h.state().n, 2); // the refused call changed nothing
 | `aio::Derived`, `Cache`, `Reads`, `Ver`, `Watching` | derived values, memoized on the fields they read |
 | `aio::machine`, `machine!` | a cell's state machine: states and the methods that move between them |
 | `aio::merge` | merging concurrent offline edits (`text3`, tokens) |
-| `aio::before_call`, `aio::rewrite_call`, `aio::on_action`, `aio::on_effect` | hooks on every call, every committed call and every effect (aio's `beforeReduce`, `onAction`, `onEffect`) |
+| `aio::before_call`, `aio::rewrite_call`, `aio::on_action`, `aio::on_effect` | hooks on every call (`aio::Call`: its state, and a network call's `aio::Request`), every committed call and every effect (aio's `beforeReduce`, `onAction`, `onEffect`) |
 | `aio::visible` | the rows a caller may see |
+| `aio::visible_by_default` | one `visible` for every cell without its own (aio's `cellDefaults.visible`) |
 | `aio::keys!` | an enum of names usable as keys, CSS classes and handles |
 
 ## Effects, schedules, time
@@ -151,7 +152,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | Item | What it is |
 |---|---|
 | `aio::Store`, `Event`, `Position`, `Travel`, `Steps` | the store: state and its event log, one SQLite file |
-| `aio::db` (`Db`, `Opts`, `Rows`, `Tx`, `Live`) | raw SQL in the app's own file, live queries |
+| `aio::db` (`Db`, `Opts`, `Rows`, `Tx`, `Live`, `Select`, `Where`) | raw SQL in the app's own file, live queries, aio's `where` objects |
 | `aio::blobs` | content-addressed bytes beside the cells |
 | `aio::backup` | backup and restore of the store |
 | `aio::patch` | JSON patches (what travels on the wire) |
@@ -203,7 +204,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `table(...)` columns | `#[table]` fields ([SQL](../persistence/sql.md)) |
 | `createSelector` | `aio::Derived` |
 | `beforeReduce` | `aio::before_call` |
-| `testCell`, `t.send`, `t.settle`, `t.randomActions` | `TestCells`, typed calls, `settle`, `fuzz` |
+| `testCell`, `t.send`, `t.settle`, `t.randomActions` | `TestCells`, typed calls, `settle` (`settle_for` under `real_time`), `random_calls` |
 | `testUI`, `testServer`, `testBrowser` | `TestUi`, `TestServer`, `TestBrowser` |
 | `log.info(tag, msg)` | `aio::info!` |
 | `parseCli` | `aio::cli::args` |

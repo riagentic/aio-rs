@@ -16,13 +16,20 @@
 //!   cell fields every client gets, impure methods (I/O, clock, randomness,
 //!   threads), hooks off a component's top level, rsx! markup without
 //!   accessible names, duplicate cell ids, cells no test names, `aio.toml`,
-//!   `.env` files git would commit.
+//!   `.env` files git would commit, a class two stylesheets define
+//!   differently;
+//! - **perf hints**: blocking std I/O (a file, a socket, `thread::sleep`,
+//!   `ureq`) in async code, which stalls the runtime thread.
+//!
+//! A finding a flag fixes says so, `[fixable: --safe-fix]` (clippy's
+//! machine-applicable fixes) or `[fixable: --fix]` (the older layout).
 //!
 //! `// aio-ok: <why>` (or `aio-ok(<area>): <why>`) on the line or in the
 //! comment block right above silences one finding; a reason is required.
 //! Exit: 0 clean (warnings and hints don't fail), 1 errors, 2 bad usage.
+mod css;
 mod layout;
-mod rust;
+pub(crate) mod rust;
 
 /// aio-rs 0.1's renderer, by its crates' prefix: what `ax lint` refuses in
 /// an app and the template and web build tests find in none.
@@ -59,16 +66,23 @@ pub struct Issue {
     pub file: Option<String>,
     pub line: Option<usize>,
     pub fix: Option<String>,
+    /// The flag of `ax lint` that fixes it (`--safe-fix`, `--fix`): aio's `[fixable]`.
+    pub fixable: Option<&'static str>,
 }
 
 impl Issue {
     pub fn new(severity: Severity, area: &'static str, message: String, file: &str, line: usize) -> Self {
         let line = (line > 0).then_some(line);
-        Self { severity, area, message, file: Some(file.into()), line, fix: None }
+        Self { severity, area, message, file: Some(file.into()), line, fix: None, fixable: None }
     }
 
     pub fn fix(mut self, fix: &str) -> Self {
         self.fix = Some(fix.into());
+        self
+    }
+
+    pub fn fixable(mut self, flag: &'static str) -> Self {
+        self.fixable = Some(flag);
         self
     }
 }
@@ -157,6 +171,7 @@ pub fn lint(dir: &Path) -> Report {
     let mut texts: HashMap<String, String> = HashMap::new();
     // The first test line naming aio::testing, and whether a manifest gives the tests its feature.
     let (mut kit_used, mut manifests): (Option<(String, usize)>, Vec<String>) = (None, Vec::new());
+    let mut styles = Vec::new();
     for path in paths {
         let rel = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
         let name = rel.rsplit('/').next().unwrap_or_default().to_string();
@@ -190,6 +205,9 @@ pub fn lint(dir: &Path) -> Report {
             rust::file(&rel, &text, is_test_path(&rel), &mut facts);
         } else if !is_test_path(&rel) {
             secrets::text(&rel, &text, &mut facts.issues);
+            if ext == "css" {
+                styles.extend(css::rules(&rel, &text));
+            }
             if name == "Cargo.toml" {
                 manifests.push(text.clone());
                 rust::manifest(&rel, &text, &mut facts.issues);
@@ -215,6 +233,8 @@ pub fn lint(dir: &Path) -> Report {
             .fix("in Cargo.toml: [dev-dependencies] aio = { package = \"aio-rs\", <its source>, features = [\"testing\"] }"),
         );
     }
+    facts.issues.extend(css::collisions(&styles));
+    facts.issues.extend(big_crates(&texts));
     across(&mut facts, &mut report);
     // One place for every `aio-ok`.
     facts.issues.retain(|i| {
@@ -227,6 +247,32 @@ pub fn lint(dir: &Path) -> Report {
     report.cells = facts.cells.len();
     report.tests = facts.tests;
     report
+}
+
+/// The lines of Rust in one crate past which `ax dev`'s patch of an edit
+/// there takes about a second: rustc recompiles the whole crate (measured:
+/// ~0.07 s per 1 000 lines of views and logic).
+const CRATE_LINES: usize = 15_000;
+
+/// Each crate (a folder with a Cargo.toml) of more than [`CRATE_LINES`]
+/// lines of Rust in its `src`, tests left out (pure).
+fn big_crates(texts: &HashMap<String, String>) -> Vec<Issue> {
+    let roots: Vec<&str> = texts.keys().filter_map(|r| r.strip_suffix("Cargo.toml")).collect();
+    let mut lines: BTreeMap<&str, usize> = BTreeMap::new();
+    for (rel, text) in texts.iter().filter(|(r, _)| r.ends_with(".rs") && !is_test_path(r)) {
+        if let Some(root) = roots.iter().filter(|d| rel.starts_with(&format!("{d}src/"))).max_by_key(|d| d.len()) {
+            *lines.entry(root).or_default() += text.lines().count();
+        }
+    }
+    let big = lines.into_iter().filter(|(_, n)| *n > CRATE_LINES);
+    big.map(|(root, n)| {
+        let msg = format!(
+            "{n} lines of Rust in one crate: `ax dev` recompiles all of it for an edit anywhere in it (~1 s per {CRATE_LINES} lines)"
+        );
+        Issue::new(Severity::Hint, "perf", msg, &format!("{root}Cargo.toml"), 0)
+            .fix("keep its views in crates of their own, each a page an edit recompiles alone: ax add <app> page <name>")
+    })
+    .collect()
 }
 
 /// The aio checks of each saved `.rs` file alone (`ax dev`, after each
@@ -352,6 +398,12 @@ pub fn clippy_issues(stdout: &str, root: &Path, dir: &Path) -> Vec<Issue> {
         let file = root.join(span["file_name"].as_str().unwrap_or_default());
         let Ok(rel) = file.strip_prefix(dir) else { continue };
         let code = m["code"]["code"].as_str().unwrap_or("");
+        // A suggestion cargo can apply unasked: `--safe-fix` applies it.
+        let children = m["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let machine = spans
+            .iter()
+            .chain(children.iter().flat_map(|c| c["spans"].as_array().map(Vec::as_slice).unwrap_or_default()))
+            .any(|s| s["suggestion_applicability"] == "MachineApplicable");
         let issue = Issue {
             severity,
             area: if code.starts_with("clippy::") { "clippy" } else { "rustc" },
@@ -359,6 +411,7 @@ pub fn clippy_issues(stdout: &str, root: &Path, dir: &Path) -> Vec<Issue> {
             file: Some(rel.to_string_lossy().replace('\\', "/")),
             line: span["line_start"].as_u64().map(|l| l as usize),
             fix: (!code.is_empty()).then(|| format!("see {code}")),
+            fixable: machine.then_some("--safe-fix"),
         };
         if !out.contains(&issue) {
             out.push(issue);
@@ -413,6 +466,7 @@ pub fn json(r: &Report) -> serde_json::Value {
                 ("file", i.file.clone().map(Into::into)),
                 ("line", i.line.map(Into::into)),
                 ("fix", i.fix.clone().map(Into::into)),
+                ("fixable", i.fixable.map(Into::into)),
             ] {
                 if let Some(x) = x {
                     v[k] = x;
@@ -449,7 +503,8 @@ pub fn human(r: &Report, dir: &Path, hide_hints: bool) -> String {
             (Some(f), None) => format!("{f}  "),
             _ => String::new(),
         };
-        out.push(format!("  {mark} {} {at}[{}] {}", i.severity.name(), i.area, i.message));
+        let fixable = i.fixable.map(|f| format!("  [fixable: {f}]")).unwrap_or_default();
+        out.push(format!("  {mark} {} {at}[{}] {}{fixable}", i.severity.name(), i.area, i.message));
         out.extend(i.fix.as_ref().map(|f| format!("      fix: {f}")));
     }
     let (e, w, h) = summary(r);
@@ -461,6 +516,12 @@ pub fn human(r: &Report, dir: &Path, hide_hints: bool) -> String {
         plural(w, "warning", "warnings"),
         plural(h, "hint", "hints")
     ));
+    for flag in ["--safe-fix", "--fix"] {
+        let n = r.issues.iter().filter(|i| i.fixable == Some(flag)).count();
+        if n > 0 {
+            out.push(format!("  {} fixable: ax lint {flag}", plural(n, "finding", "findings")));
+        }
+    }
     out.join("\n")
 }
 
@@ -594,6 +655,7 @@ pub fn main(args: &[String]) -> ExitCode {
                 file: None,
                 line: None,
                 fix: Some("cargo clippy --all-targets says why".into()),
+                fixable: None,
             }),
         }
     }

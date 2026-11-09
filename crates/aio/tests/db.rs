@@ -360,3 +360,59 @@ async fn a_read_only_database_reads_and_refuses_every_write() {
     assert!(Db::open(dir.path().join("none.db"), Opts { readonly: true, ..Default::default() }).is_err());
     assert_eq!(notes(&db).await, ["kept"]);
 }
+
+/// aio's `where` objects: a filter, an order and a page, values always
+/// parameters, names always plain.
+#[tokio::test]
+async fn a_where_selects_by_parameters_and_refuses_what_could_inject() {
+    use aio::db::{Order, Select, Where};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("shop.db"), Opts::default()).unwrap();
+    db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, who TEXT, total REAL, note TEXT)", vec![]).await.unwrap();
+    let evil = "x'); DROP TABLE orders; --";
+    for (who, total, note) in
+        [("ana", 5.0, Some("gift")), ("bo", 20.0, None), ("cy", 50.0, Some(evil)), ("di", 8.0, None)]
+    {
+        let note: Sql = note.map(String::from).into();
+        let row = vec![text(who), Sql::Real(total), note];
+        db.execute("INSERT INTO orders (who, total, note) VALUES (?, ?, ?)", row).await.unwrap();
+    }
+    let whos = |r: aio::db::Rows| r.rows.iter().map(|r| r[1].clone()).collect::<Vec<_>>();
+    let q = |w: Where| Select::from("orders").filter(w).order_by("total", Order::Asc);
+    let (sql, params) =
+        q(Where::gt("total", 6.0).and(Where::ne("who", "bo".to_string()))).limit(5).offset(1).sql().unwrap();
+    assert_eq!(sql, "SELECT * FROM orders WHERE (total > ?) AND (who != ?) ORDER BY total ASC LIMIT 5 OFFSET 1");
+    assert_eq!(params, [Sql::Real(6.0), text("bo")]);
+    let got = |w| {
+        let db = &db;
+        async move { whos(db.select(&q(w)).await.unwrap()) }
+    };
+    assert_eq!(got(Where::lt("total", 10.0)).await, [text("ana"), text("di")]);
+    assert_eq!(got(Where::is_in("who", ["bo", "cy"].map(String::from))).await, [text("bo"), text("cy")]);
+    assert_eq!(got(Where::is_in("who", Vec::<String>::new())).await, Vec::<Sql>::new(), "none in: no row");
+    assert_eq!(got(Where::eq("note", Sql::Null)).await, [text("di"), text("bo")]);
+    assert_eq!(got(Where::like("note", "g%").or(Where::gte("total", 50))).await, [text("ana"), text("cy")]);
+    // A value is data, whatever it holds: matched as text, never run.
+    assert_eq!(got(Where::eq("note", evil.to_string())).await, [text("cy")]);
+    assert_eq!(got(Where::eq("who", "' OR 1=1 --".to_string())).await, Vec::<Sql>::new());
+    // aio's object form: fields all, a list any, operators by name.
+    let w = Where::object(&json!({ "total": { "gte": 8, "lt": 50 }, "note": null })).unwrap();
+    assert_eq!(got(w).await, [text("di"), text("bo")]);
+    let w = Where::object(&json!([{ "who": "ana" }, { "who": { "in": ["cy"] } }])).unwrap();
+    assert_eq!(got(w).await, [text("ana"), text("cy")]);
+    for bad in [json!({ "who": { "regex": "a" } }), json!({ "who": [1] }), json!({ "who": { "like": 1 } }), json!(3)] {
+        assert!(Where::object(&bad).is_err(), "{bad}");
+    }
+    // A name goes into the statement: only a plain one.
+    for name in ["who; DROP TABLE orders", "who --", "1who", "", "\"who\""] {
+        let e = Select::from("orders").filter(Where::eq(name, 1)).sql().unwrap_err();
+        assert!(e.0.contains("not a plain"), "{name}: {e:?}");
+        assert!(Select::from("orders").order_by(name, Order::Desc).sql().is_err(), "{name}");
+        assert!(Select::from(name).sql().is_err(), "{name}");
+    }
+    let many = Where::is_in("id", 0..40_000i64);
+    assert!(Select::from("orders").filter(many).sql().unwrap_err().0.contains("at most 32766"));
+    assert_eq!(db.query("SELECT count(*) FROM orders", vec![]).await.unwrap().rows[0][0], Sql::Integer(4), "all there");
+    db.close().await;
+}

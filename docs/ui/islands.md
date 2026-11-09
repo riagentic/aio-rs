@@ -10,6 +10,7 @@ cells (held resources, deferred content, sizes). Everything here is in
 | Need | aio-rs | aio |
 |---|---|---|
 | a JS library or React component in a view | `WebIsland` + `Island::js` / `Island::react` | `island()`, `reactIsland()` |
+| the island reading and calling the app's cells | the JS client (`useCell`, `useCall`; [JS client](../clients/js.md)) | `aio/state-core`, `useAio` |
 | the same, for code the app doesn't vouch for | `Island::js(..).sandboxed()` | |
 | someone else's site in a view | `Browser { src }` | `<Browser>` |
 | content drawn at the app's root (a dialog out of an `overflow: hidden` box) | `Portal` + `PortalHost` | `Portal` |
@@ -110,6 +111,26 @@ reactDomClient, component }`, React, `react-dom/client` and the component
 component gets the props plus `emit`; a prop change re-renders it in
 place; the box leaving unmounts its root. aio-rs itself depends on no
 React.
+
+The component reads and calls the app's cells itself with the JS
+client's hooks, so it shows the same state as the page's own view, and
+a call from either reaches both ([JS client](../clients/js.md#in-an-aio-rs-page-islands)):
+
+```jsx
+import { connect } from "aio-rs-client";
+import { useCall, useCell } from "aio-rs-client/react";
+
+const cell = connect().cell({ id: "tally", v: 1 });
+function Tally() {
+  const n = useCell(cell, (s) => s.n);
+  const [add] = useCall(cell, "add", (s, by) => ({ ...s, n: s.n + by }));
+  return <button onClick={() => add(2)}>{n}</button>;
+}
+```
+
+In the desktop window, whose page may connect nowhere, `use_js_client`
+in the root view carries the client over the window's own wire
+([JS client](../clients/js.md#in-the-desktop-window)).
 
 ### Bundling
 
@@ -235,6 +256,9 @@ ui.until_text("drawn", "the heavy chart");
 
 `placeholder` shows (in a box of its own) until the trigger fires, then
 the children, for good: a new `key` defers again.
+With `load` (aio's `load`), `load(|| async { … Ok(rsx! { … }) })` runs
+once triggered, `loading` shows meanwhile (at least `loading_min_ms`),
+then what it made, or `error` of what it said.
 
 | `Trigger` | Fires | aio |
 |---|---|---|
@@ -245,9 +269,71 @@ the children, for good: a new `key` defers again.
 | `Hover` | when the pointer comes over it | `"hover"` |
 | `Interaction` | at a click or a key on it | `"interaction"` |
 
-An app's code is all in its binary, so there is no module to fetch (aio's
-`lazy` and `Suspense` split a bundle): what waits is the render, and any
-data the content loads itself.
+What waits is the render, the code of a [lazy view](#lazy-views-lazy),
+and any data the content loads itself.
+
+## Lazy views: `lazy!`
+
+A view used by few (a report, an editor, a settings page) need not be in
+what a web build's page fetches first. `aio::lazy!(view)` is a `Load` for
+`Defer` (aio's `lazy(() => import(…))` in a `Suspense`):
+
+```rust,no_run
+use aio::kit::{Defer, Trigger};
+use aio::ui::prelude::*;
+
+#[component]
+fn Chart() -> View {
+    rsx! { div { "data-t": "chart", "the heavy chart" } }
+}
+
+#[component]
+fn Reports() -> View {
+    rsx! {
+        Defer { trigger: Trigger::Now,
+            load: aio::lazy!(rsx! { Chart {} }),
+            loading: rsx! { p { "Loading…" } },
+            error: |e: String| rsx! { p { "{e}" } },
+        }
+    }
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(Reports);
+ui.until_text("chart", "the heavy chart");
+# }
+```
+
+- `ax build --web` (a release) moves the code only lazy views reach into
+  chunks beside the bundle: one per view, and one for what two views
+  share. The page fetches a view's chunk the first time the view shows
+  (`loading` meanwhile), once. `ax build` says their size.
+- The trigger is `Defer`'s: `Trigger::Now`, or fetch it when the
+  placeholder scrolls into view (`Viewport`) or the pointer comes near
+  (`Hover`).
+- The view is made by a plain `fn` the macro writes: it captures nothing
+  from around it, and reads its state from cells and hooks, as a
+  component does.
+- On the desktop, Android and in a dev build (`ax dev --web`) the view is
+  in the one binary: nothing is fetched, and it shows at once.
+- A chunk the page can't fetch (offline before the service worker held
+  it) is `error`'s; the next show tries again. The service worker holds
+  every chunk once the first view is drawn. A chunk of another build is
+  refused, never run.
+- Code the rest of the app also reaches stays in the main module, and so
+  does data (strings, tables): a chunk holds code.
+- Measured on a page with a heavy lazy view (PNG encoding and brotli,
+  used by that view only), gzipped: the first download 762 → 543 KB
+  (aio-rs 0.3: one module with its names). See
+  [performance](../performance.md#measured).
+
+How: a release keeps the linker's relocations. After `wasm-bindgen`, `ax`
+finds each function only lazy views reach (by calls, function pointers
+and vtables, which the relocations name), moves its code into the view's
+chunk and leaves a stub in the main module. A chunk shares the main
+module's memory, table and globals; instantiated, it puts its functions
+into the table. aio's `lazy` defers evaluating a module, not its
+download: aio ships one bundle.
 
 ## Held resources: `use_held`
 
@@ -325,6 +411,8 @@ ui.until_text("preview", "camera back");
   `resource(move || async move { .. })`. It re-runs when a signal it
   reads changes; `.get()` is `None` while loading; `.restart()` runs it
   again; `.suspend()?` shows the nearest `Suspense`'s fallback meanwhile.
+  `seeded_resource` is one a served page loads on the server and carries,
+  streamed in ([views](views.md#server-rendering-and-hydration)).
 - **A reaction to a cell's change** ("when the city changes, reconnect")
   is neither a render nor a handler: `h.on_change(immediate, |s|
   s.city.clone(), |city, old| ..)` on the cell's handle keeps what the
@@ -361,20 +449,17 @@ once when a kit control renders on a page that doesn't style the kit.
 
 ## Gaps
 
-- **No server-side rendering.** aio's `renderToString`, `renderToStream`
-  and hydration have no aio-rs counterpart: views render in the page
-  (desktop, Android) or in the browser (the web build).
-- **No code splitting.** One binary holds every view; `Defer` defers the
-  render, not a download, and loads, as aio's: `load:
-  load(|| async { … Ok(rsx! { … }) })` runs once it is triggered,
-  `loading` shows meanwhile (at least `loading_min_ms`), then what it
-  made, or `error` of what it said. By design: one binary has no chunk
-  to fail loading offline or half-way through an update.
-- **Only `aio::ui` views.** aio's `aio/state-core` let Svelte, Vue or other
-  frameworks drive a page; aio-rs has no such adapter. Another UI reaches
-  the app over its transports instead ([transports](../clients/transports.md)),
-  or sits in a view as an island. One renderer keeps events, focus, the
-  audits and `TestUi` paths the same on every page.
+- **An island is painted as its empty box.** A served page is rendered
+  on the server and hydrated ([views](views.md#server-rendering-and-hydration));
+  an island's script runs once the page's view has hydrated.
+- **Another view library drives an island or a served page, not the
+  window's root.** aio's `aio/state-core` let Svelte, Vue or other
+  frameworks drive a page; aio-rs's JS client does the same for a page
+  served to a browser and for an island in it, in a browser or in the
+  desktop window (React, Solid and Vue bindings, Svelte's store
+  contract, typed by `ax tsgen`; [JS client](../clients/js.md)). The
+  window's root stays `rsx!`: one renderer keeps events, focus, the audits
+  and `TestUi` paths the same on every page.
 
 ## Common mistakes
 

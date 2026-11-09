@@ -852,6 +852,31 @@ mod tests {
         assert!(!d.join("warning.1.log").exists());
     }
 
+    /// aio's `logBudget` is enforced at boot, so a run may outgrow it; here
+    /// the folder is within `keep × file_mb` per log at every write. aio's
+    /// `--no-backup-logs` is `per_run` with `keep = 1`.
+    #[test]
+    fn the_logs_stay_within_budget_at_every_write_and_keep_one_per_run_wipes() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        let size = || std::fs::read_dir(d).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).sum::<u64>();
+        let mut r = Rotating::open(d, 200).unwrap().keeping(3);
+        for i in 0..500 {
+            r.line(0, &format!("line {i} of a run that never restarts")).unwrap();
+            assert!(size() <= 3 * 200, "{} bytes after line {i}", size());
+        }
+        drop(r);
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        for run in 0..3 {
+            let mut r = Rotating::open(d, 1 << 20).unwrap().keeping(1).fresh().unwrap();
+            r.line(0, &format!("run {run}")).unwrap();
+        }
+        let names: Vec<_> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["app.log"], "only this run's");
+        assert!(std::fs::read_to_string(d.join("app.log")).unwrap().ends_with("run 2\n"));
+    }
+
     #[test]
     fn a_line_has_level_category_message_and_fields() {
         let (peer, n) = ("a1", 3);

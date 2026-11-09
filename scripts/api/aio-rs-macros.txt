@@ -1,5 +1,6 @@
 mod aio_macros
 proc_macro aio_macros::Lit (derive)
+proc_macro aio_macros::Options (derive)
 proc_macro aio_macros::cell (attr)
 proc_macro aio_macros::data (attr)
 proc_macro aio_macros::methods (attr)

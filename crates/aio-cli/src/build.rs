@@ -226,6 +226,44 @@ pub struct Built {
     pub look: crate::fleet::Look,
 }
 
+/// `ax build --force` (aio's `--force`, its build cache skipped): the
+/// `cargo clean` runs that drop the release builds of the workspace's own
+/// `members`, on the host and on each of `triples` (those with a release
+/// folder), so they are compiled anew; their libraries' builds stay (pure).
+pub fn clean_args(members: &[String], triples: &[&str]) -> Vec<Vec<String>> {
+    let base: Vec<String> = ["clean", "--release"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(members.iter().flat_map(|m| ["-p".into(), m.clone()]))
+        .collect();
+    std::iter::once(base.clone())
+        .chain(triples.iter().map(|t| [base.clone(), vec!["--target".into(), t.to_string()]].concat()))
+        .collect()
+}
+
+/// [`clean_args`] run for the workspace `meta` describes; what it said.
+pub fn force(meta: &serde_json::Value) -> Result<String, String> {
+    let ids: Vec<&str> =
+        meta["workspace_members"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+    let members: Vec<String> = meta["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["id"].as_str().is_some_and(|id| ids.contains(&id)))
+        .filter_map(|p| p["name"].as_str().map(String::from))
+        .collect();
+    let target = Path::new(meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?);
+    let triples: Vec<&str> =
+        crate::platform::ALL.iter().map(|p| p.triple).filter(|t| target.join(t).join("release").is_dir()).collect();
+    for args in clean_args(&members, &triples) {
+        let o = Command::new("cargo").args(&args).output().map_err(|e| format!("cargo clean: {e}"))?;
+        if !o.status.success() {
+            return Err(format!("cargo {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim()));
+        }
+    }
+    Ok(format!("--force: {} built anew (their libraries' builds kept)", members.join(", ")))
+}
+
 /// What builds keep between runs: `~/.cache/aio-rt`.
 pub fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
@@ -343,7 +381,8 @@ fn cargo_for(what: &str, args: &[&str], cross: Option<&'static Platform>) -> Res
     let Some(p) = cross else { return Ok(cargo) };
     let missing = missing_targets(&[p.triple]);
     let has_target = |t: &str| !missing.contains(&t);
-    if let Some(why) = crate::platform::blocker(p, crate::platform::host()?, &has_target, &on_path) {
+    let host = crate::platform::host()?;
+    if let Some(why) = crate::platform::blocker(p, host, &has_target, &on_path) {
         return Err(why);
     }
     cargo.args(["--target", p.triple]);
@@ -351,7 +390,11 @@ fn cargo_for(what: &str, args: &[&str], cross: Option<&'static Platform>) -> Res
     if let Some(l) = p.linker
         && std::env::var_os(&var).is_none()
     {
-        cargo.env(var, l);
+        cargo.env(&var, l);
+    }
+    // A Mac's binary away from a Mac: zig links it, unless a linker is named.
+    if p.os == "macos" && host.os != "macos" && std::env::var_os(&var).is_none() {
+        cargo.envs(crate::zig::env(p.triple)?);
     }
     Ok(cargo)
 }
@@ -1061,6 +1104,7 @@ fn target(
             return android(&t.bin, crate::android::Ask::RELEASE);
         }
         Kind::Web => return crate::web::build(&t.bin, false).map(|(said, out)| (said, vec![out])),
+        Kind::Ios => return crate::ios::build(&t.bin).map(|(said, out)| (said, vec![out])),
         Kind::Windows => t.platform.unwrap_or(windows()),
         Kind::Deb | Kind::AppImage if host.os != "linux" => {
             return Err(format!("{} is a Linux package: build it on Linux", t.kind.name()));
@@ -1177,6 +1221,15 @@ fn package(kind: Kind, _: &Built) -> Result<(String, Vec<PathBuf>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn force_cleans_the_apps_own_release_builds_on_each_target_built() {
+        let m = ["notes".to_string(), "notes-app".to_string()];
+        let a = clean_args(&m, &["x86_64-pc-windows-gnu"]);
+        assert_eq!(a[0], ["clean", "--release", "-p", "notes", "-p", "notes-app"]);
+        assert_eq!(a[1][6..], ["--target", "x86_64-pc-windows-gnu"]);
+        assert_eq!(a.len(), 2);
+    }
 
     #[cfg(unix)]
     #[test]

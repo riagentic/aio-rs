@@ -54,7 +54,8 @@ async fn an_await_past_the_ceiling_is_cut_off_and_a_long_one_is_not() {
     assert_eq!(t0.elapsed(), aio::effect::CALL_CEILING, "cut off at the ceiling");
     assert_eq!(h.state().status, "waiting", "its later steps never ran");
     let e = end.await.unwrap_err();
-    assert!(e.why.contains("hang: ended before it answered"), "its caller is told: {e}");
+    assert!(e.why.contains("job: effect `hang` timed out after 30s"), "its caller is told: {e}");
+    assert_eq!(e.code(), Some(aio::Code::EffectTimeout), "aio's code for it");
 
     // `[perf] call_ceiling` sets another.
     aio::perf::set(aio::perf::Budgets { call_ceiling: Some(1000), ..Default::default() });
@@ -96,6 +97,23 @@ async fn retry_tries_again_while_it_fails_each_try_timed() {
     let e = aio::effect::retry(1, Some(Duration::from_secs(5)), slow).await;
     assert_eq!(e, Err(Rejected::new("timed out after 5s")));
     assert_eq!(aio::effect::retry(0, Some(Duration::from_secs(11)), slow).await, Ok(1));
+}
+
+/// `off_thread`: the same app code off the thread on every target; here
+/// on a worker thread, as `blocking`, its panic a refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn off_thread_work_runs_on_another_thread_and_a_panic_is_a_refusal() {
+    fn thread(n: u64) -> (u64, String) {
+        (n * 2, format!("{:?}", std::thread::current().id()))
+    }
+    let (n, on) = aio::effect::off_thread("double", thread, 21).await.unwrap();
+    assert_eq!(n, 42);
+    assert_ne!(on, format!("{:?}", std::thread::current().id()), "off this thread");
+    fn boom(_: ()) -> u8 {
+        panic!("boom");
+    }
+    let e = aio::effect::off_thread("boom", boom, ()).await.unwrap_err();
+    assert!(e.to_string().starts_with("blocking `boom` failed"), "{e}");
 }
 
 /// aio's `blocking(id, fn)` and `blocking.cancel(id)`.

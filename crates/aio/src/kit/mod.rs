@@ -24,12 +24,19 @@ mod form;
 mod forms;
 mod held;
 mod island;
+#[cfg(not(target_arch = "wasm32"))]
+mod js_client;
+mod json_schema;
 mod keys;
 mod layout;
 pub mod markdown;
 mod modal;
 mod motion;
+mod pattern;
 mod portal;
+#[doc(hidden)]
+pub mod redux;
+mod schema;
 #[cfg(any(feature = "server", target_arch = "wasm32"))]
 mod signin;
 pub mod theme;
@@ -42,16 +49,18 @@ mod window;
 mod zoom;
 
 pub use back::use_back_button;
-pub use browser::{Browser, Go, GuestEvent, HostKey, go, run_js};
+pub use browser::{Browser, Go, GuestEvent, HostKey, WEBVIEW_METHODS, go, run_js, webview};
 pub use change::{use_on_change, use_on_change_now};
 #[cfg(not(target_arch = "wasm32"))]
 pub use connect::{ConnectPage, use_connect_page};
 pub use controls::*;
-pub use defer::{Defer, Load, Trigger, load};
+pub use defer::{Defer, Load, Trigger, lazy_view, load};
 pub use form::*;
 pub use forms::{Bind, FieldArray, FieldOf, Form, Problems, move_item, use_async_rule, use_field_array, use_form};
 pub use held::use_held;
 pub use island::{Island, WebIsland};
+#[cfg(not(target_arch = "wasm32"))]
+pub use js_client::{JsCell, use_js_client};
 pub use keys::{
     Chord, ChordSpec, GlobalKeys, Hit, MOVE_MS, field_key, keycap_match, normalize_key, use_global_key, use_key_claim,
 };
@@ -60,9 +69,11 @@ pub use markdown::Markdown;
 pub use modal::*;
 pub use motion::{FRAME, Spring, SpringValue, spring_step, use_frame, use_interval, use_spring};
 pub use portal::{Portal, PortalHost};
+pub use redux::ReduxDevTools;
+pub use schema::{Parse, Rule, Schema, optional, rule, text, use_form_schema};
 #[cfg(any(feature = "server", target_arch = "wasm32"))]
 pub use signin::SignIn;
-pub use transition::{Motion, Transition, TransitionGroup, merge_rows, moved};
+pub use transition::{Motion, Timing, Transition, TransitionGroup, merge_rows, moved};
 #[cfg(not(target_arch = "wasm32"))]
 pub use travel::{DevTimeTravel, TimeTravelPanel};
 pub use vlist::{VirtualList, window};
@@ -83,6 +94,18 @@ pub fn theme_css(hue: u16) -> String {
     #[cfg(not(target_arch = "wasm32"))]
     let css = CSS;
     theme::tokens_css(hue, false) + "\n" + css
+}
+
+/// The kit's whole stylesheet as an element, once near the app's root
+/// (aio's `<UiStyles/>`): the theme's tokens in hue `hue` (`aio::hue!()`:
+/// the app's), the look and every control's rules, light or dark as
+/// `scheme` says (unset: the app's `[ui] scheme`). The same sheet as
+/// `style { {page_css(&[&theme_css(hue)], scheme)} }`, which an app adding
+/// sheets of its own writes instead.
+#[::air::component]
+pub fn UiStyles(hue: u16, scheme: Option<crate::ui::Scheme>) -> crate::ui::prelude::View {
+    let css = crate::ui::page_css(&[&theme_css(hue)], scheme.unwrap_or_else(crate::ui::scheme));
+    ::air::rsx! { style { "data-aio-ui": "", {css} } }
 }
 
 pub(crate) use crate::ui::clock::{Instant, sleep};
@@ -143,6 +166,34 @@ fn note_unstyled(base: &str) {
     if let Some(why) = unstyled(&crate::ui::page_sheet(), cls) {
         crate::warn!(cat: "ui", "{why}");
     }
+}
+
+/// Who a window's views are signed in as (`set_user`), per app instance.
+#[cfg(not(target_arch = "wasm32"))]
+static USER: crate::ui::Global<Option<(String, String)>> = crate::ui::Global::new(|| None);
+
+/// Who this view is signed in as (aio's `useUser`), as `(id, role)`: its
+/// `get()` is `None` while it is asked, then `Some(None)` signed out (or
+/// no accounts). A hook; read it in a hole. In a page the page's server is
+/// asked; in a desktop or Android window it is the session a `SignIn` of
+/// this app signed in, until [`set_user`] says otherwise.
+pub fn use_user() -> crate::ui::Resource<Option<(String, String)>> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::ui::resource(|| async { crate::web::client().me(None).await.ok().and_then(|m| m.user) });
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::ui::resource(|| {
+        let user = USER.get();
+        async move { user }
+    })
+}
+
+/// The user a window's views are signed in as (`None`: signed out), for
+/// [`use_user`]: `SignIn` sets it; a sign-out (after
+/// `Client::logout`) or the app's own sign-in sets it here. On the views'
+/// thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_user(user: Option<(String, String)>) {
+    USER.signal().set(user);
 }
 
 /// A stable id per component instance (for `aria-controls`, `for` and

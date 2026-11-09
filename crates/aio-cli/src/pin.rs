@@ -3,7 +3,7 @@
 //! ```text
 //! ax pin                  what the app's Cargo.toml files ask for, what its
 //!                         Cargo.lock built, this ax, and the releases
-//! ax pin 0.3.0            every aio-rs dependency to that release, Cargo.lock with it
+//! ax pin 0.4.0            every aio-rs dependency to that release, Cargo.lock with it
 //! ax pin main             follow the branch tip (a moving target)
 //! ax pin latest           the newest release in the app's major (--major: any)
 //! ax pin ../aio-rs        an aio-rs checkout on this machine (local development)
@@ -441,14 +441,19 @@ pub fn back_note(from: Option<&Src>, to: &Aio) -> Option<String> {
 /// `ax pin <target>`: every aio-rs dependency of the app at `root` moved to
 /// `to`, then `relock` (Cargo.lock): all or nothing. What it did, as text
 /// or JSON.
+#[allow(clippy::too_many_arguments)]
 pub fn pin(
     root: &Path,
     requested: &str,
     to: &Aio,
     before: Option<&Src>,
     relock: impl FnOnce(&Path, &Aio) -> Result<Option<String>, String>,
+    api: impl Fn(&Path) -> Result<Api, String>,
+    force: bool,
     json: bool,
 ) -> Result<String, String> {
+    let lock_was = std::fs::read_to_string(root.join("Cargo.lock")).ok();
+    let api_was = api(root);
     let mut was = vec![];
     for (file, up) in create::manifests(root) {
         let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -470,6 +475,28 @@ pub fn pin(
             return Err(format!("{e}\nnothing changed"));
         }
     };
+    // aio's preflight: what the app uses that the target removed, named
+    // before the move stays; nothing changed unless --force.
+    let gone = match (api_was, api(root)) {
+        (Ok(was), Ok(now)) => uses(root, &was.difference(&now).cloned().collect()),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("! no preflight of removed APIs ({e}): cargo check names any");
+            vec![]
+        }
+    };
+    if !gone.is_empty() && !force {
+        for (f, _, old, _) in &was {
+            _ = write(f, old);
+        }
+        match &lock_was {
+            Some(l) => _ = write(&root.join("Cargo.lock"), l),
+            None => _ = std::fs::remove_file(root.join("Cargo.lock")),
+        }
+        return Err(format!(
+            "{to} removed what the app uses:\n{}\nnothing changed: move those first, or --force (cargo check then names each)",
+            gone.join("\n")
+        ));
+    }
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).map(|t| locked(&t)).unwrap_or_default();
     let built = lock.iter().find(|l| l.name == "aio-rs");
     let back = back_note(before, to);
@@ -486,6 +513,7 @@ pub fn pin(
             "built": built.map(|b| json!({ "version": b.version, "commit": b.commit })),
             "note": note,
             "movedBack": back,
+            "removedInUse": gone,
         })
         .to_string());
     }
@@ -497,6 +525,9 @@ pub fn pin(
         out.push_str(&format!("  (resolved from \"{requested}\")"));
     }
     out.push_str(&format!("\n  recorded in {}", files.join(", ")));
+    if !gone.is_empty() {
+        out.push_str(&format!("\n  --force: the app uses what it removed:\n    {}", gone.join("\n    ")));
+    }
     if let Some(b) = built {
         let c = b.commit.as_deref().map_or(String::new(), |c| format!(" @ {}", &c[..c.len().min(7)]));
         out.push_str(&format!("\n  Cargo.lock: aio-rs {}{c}", b.version));
@@ -513,6 +544,101 @@ pub fn pin(
     }
     out.push_str("\n  commit Cargo.toml and Cargo.lock so a clone builds against the same version");
     Ok(out)
+}
+
+/// The public API an aio-rs release has: each item's path (`aio::Cx::now`,
+/// `aio::By::User`, `aio::Backoff.base`), from its `scripts/api/*.txt`.
+pub type Api = std::collections::BTreeSet<String>;
+
+/// The items an API listing names (pure): each line's path, before its
+/// `: ` signature or its `(` fields.
+pub fn api_items(text: &str) -> Api {
+    text.lines()
+        .map(|l| l.split(": ").next().unwrap_or_default().split('(').next().unwrap_or_default().trim().to_string())
+        .filter(|i| !i.is_empty())
+        .collect()
+}
+
+/// The API of the aio-rs the app at `root` resolves to now (its
+/// Cargo.lock's, as cargo fetched it): the listings beside its source.
+pub fn api_of(root: &Path) -> Result<Api, String> {
+    let o = std::process::Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--offline"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cargo metadata: {e}"))?;
+    if !o.status.success() {
+        return Err(format!(
+            "cargo metadata: {}",
+            String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("failed")
+        ));
+    }
+    let meta: Value = serde_json::from_slice(&o.stdout).map_err(|e| e.to_string())?;
+    let aio = meta["packages"].as_array().into_iter().flatten().find(|p| p["name"] == "aio-rs").ok_or("no aio-rs")?;
+    let manifest = Path::new(aio["manifest_path"].as_str().ok_or("no manifest_path")?);
+    let dir = manifest.ancestors().nth(3).ok_or("no checkout")?.join("scripts").join("api");
+    let mut all = Api::new();
+    for e in
+        std::fs::read_dir(&dir).map_err(|e| format!("{}: {e} (an aio-rs older than 0.2 lists none)", dir.display()))?
+    {
+        let p = e.map_err(|e| e.to_string())?.path();
+        all.extend(api_items(&std::fs::read_to_string(&p).map_err(|e| e.to_string())?));
+    }
+    Ok(all)
+}
+
+/// Where the app at `root` uses one of `removed` (`file:line: item`): a
+/// line of its Rust naming the item's last name as a word, in a file
+/// that names its type too (`Cx::now`: `Cx` and `now`; a module's item
+/// by its own name), its build output and dot folders aside.
+pub fn uses(root: &Path, removed: &Api) -> Vec<String> {
+    let word = |text: &str, w: &str| {
+        text.match_indices(w).any(|(i, _)| {
+            let ident = |c: char| c.is_alphanumeric() || c == '_';
+            !text[..i].ends_with(ident) && !text[i + w.len()..].starts_with(ident)
+        })
+    };
+    let mut out = vec![];
+    for file in rust_files(root) {
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy().replace('\\', "/");
+        for item in removed {
+            let parts: Vec<&str> = item.split(['.', ':']).filter(|p| !p.is_empty()).collect();
+            let [.., parent, last] = parts.as_slice() else { continue };
+            let typed = parent.starts_with(|c: char| c.is_ascii_uppercase());
+            if typed && !word(&text, parent) {
+                continue;
+            }
+            if let Some(n) = text.lines().position(|l| word(l, last)) {
+                out.push(format!("{rel}:{}: {item}", n + 1));
+            }
+        }
+    }
+    out
+}
+
+/// The app's Rust files under `root`, build output and dot folders aside.
+fn rust_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let (p, n) = (e.path(), e.file_name().to_string_lossy().into_owned());
+            match e.file_type() {
+                Ok(t)
+                    if t.is_dir()
+                        && !n.starts_with('.')
+                        && !["target", "dist", "node_modules"].contains(&n.as_str()) =>
+                {
+                    dirs.push(p)
+                }
+                Ok(t) if t.is_file() && n.ends_with(".rs") => out.push(p),
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Cargo.lock after `ax pin` moved aio-rs: only the aio-rs crates
@@ -563,7 +689,12 @@ pub fn root_of(word: Option<&str>) -> Result<std::path::PathBuf, String> {
 }
 
 /// `ax pin [app] [target] [--major]`.
-pub fn run(app: Option<&str>, target: Option<&str>, cross: bool, json: bool) -> Result<String, String> {
+pub fn run(
+    app: Option<&str>,
+    target: Option<&str>,
+    (cross, force): (bool, bool),
+    json: bool,
+) -> Result<String, String> {
     let root = root_of(app)?;
     let tags = || create::tags();
     let now = info(&root, tags)?;
@@ -585,7 +716,7 @@ pub fn run(app: Option<&str>, target: Option<&str>, cross: bool, json: bool) -> 
              Return to a release with \"ax pin latest\"."
         );
     }
-    pin(&root, target, &to, now.pinned(), relock, json)
+    pin(&root, target, &to, now.pinned(), relock, api_of, force, json)
 }
 
 #[cfg(test)]
@@ -740,6 +871,56 @@ version = "0.1.0"
         assert_eq!(back_note(Some(&v1), &Aio::Tag("v0.2.0".into())), None);
     }
 
+    fn no_api(_: &Path) -> Result<Api, String> {
+        Err("no listing".into())
+    }
+
+    #[test]
+    fn an_api_listing_names_its_items() {
+        let text = "aio::Cx::now: fn now(&self) -> i64\naio::By::User(String)\naio::Backoff.base: i64\naio::Big(_)\n";
+        let got: Vec<String> = api_items(text).into_iter().collect();
+        assert_eq!(got, ["aio::Backoff.base", "aio::Big", "aio::By::User", "aio::Cx::now"]);
+    }
+
+    /// aio's `am pin` preflight: a move to a release that removed what the
+    /// app uses is refused, naming each use, nothing changed; `--force` moves.
+    #[test]
+    fn a_move_that_removes_what_the_app_uses_names_it_and_changes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let (target, installed) = (d.path().join("target"), d.path().join("install"));
+        let made = create::run(d.path(), &create::New::of("notes"), (&target, &installed), false).unwrap();
+        let root = made.at;
+        std::fs::write(
+            root.join("src/extra.rs"),
+            "use aio::Cx;\nfn at(cx: &Cx) -> i64 {\n    cx.now()\n}\nfn new() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("Cargo.lock"), "the lock as it was").unwrap();
+        let calls = std::cell::Cell::new(0);
+        // Before the move four items; after it only `Cx::id` is left.
+        let api = |_: &Path| {
+            calls.set(calls.get() + 1);
+            let all: &[&str] = match calls.get() {
+                1 => &["aio::Cx::now", "aio::Cx::id", "aio::Big::new", "aio::kit::Gone"],
+                _ => &["aio::Cx::id"],
+            };
+            Ok(all.iter().map(|s| s.to_string()).collect())
+        };
+        let relock =
+            |r: &Path, _: &Aio| std::fs::write(r.join("Cargo.lock"), "moved").map(|()| None).map_err(|e| e.to_string());
+        let before = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let e = pin(&root, "9.9.9", &Aio::Tag("v9.9.9".into()), None, relock, api, false, false).unwrap_err();
+        assert!(e.contains("src/extra.rs:3: aio::Cx::now") && e.contains("nothing changed"), "{e}");
+        assert!(!e.contains("Big::new"), "`new` alone, no `Big` in the file: not a use: {e}");
+        assert!(!e.contains("kit::Gone"), "not named: {e}");
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.lock")).unwrap(), "the lock as it was");
+        calls.set(0);
+        let said = pin(&root, "9.9.9", &Aio::Tag("v9.9.9".into()), None, relock, api, true, false).unwrap();
+        assert!(said.contains("--force: the app uses what it removed:\n    src/extra.rs:3: aio::Cx::now"), "{said}");
+        assert_ne!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), before);
+    }
+
     #[test]
     fn moves_every_aio_rs_dependency_all_or_nothing() {
         let no_lock = |_: &Path, _: &Aio| Ok(None);
@@ -758,7 +939,8 @@ version = "0.1.0"
         let now = info(&root, || Err("offline".into())).unwrap();
         assert_eq!(now.pinned(), Some(&Src::Tag(tag.clone())));
         assert_eq!(now.asks.len(), 4, "four aio-rs lines in two files (the tests' one too)");
-        let said = pin(&root, "9.9.9", &Aio::Tag("v9.9.9".into()), now.pinned(), no_lock, false).unwrap();
+        let said =
+            pin(&root, "9.9.9", &Aio::Tag("v9.9.9".into()), now.pinned(), no_lock, no_api, false, false).unwrap();
         assert!(said.starts_with("pinned to aio-rs v9.9.9\n  recorded in Cargo.toml, app/Cargo.toml"), "{said}");
         assert!(said.ends_with("commit Cargo.toml and Cargo.lock so a clone builds against the same version"));
         let app = std::fs::read_to_string(root.join("app/Cargo.toml")).unwrap();
@@ -767,15 +949,25 @@ version = "0.1.0"
             "{app}"
         );
         assert_eq!(info(&root, || Err("x".into())).unwrap().pinned(), Some(&Src::Tag("v9.9.9".into())));
-        let j: Value =
-            serde_json::from_str(&pin(&root, "main", &Aio::Branch("main".into()), None, no_lock, true).unwrap())
-                .unwrap();
+        let j: Value = serde_json::from_str(
+            &pin(&root, "main", &Aio::Branch("main".into()), None, no_lock, no_api, false, true).unwrap(),
+        )
+        .unwrap();
         assert_eq!((j["pinned"].as_str(), j["requested"].as_str()), (Some("main (a branch)"), Some("main")));
         assert_eq!(j["recordedIn"], json!(["Cargo.toml", "app/Cargo.toml"]));
         // Cargo refuses the move (no such tag, no network): every file as it was.
         let before = std::fs::read_to_string(root.join("app/Cargo.toml")).unwrap();
-        let e =
-            pin(&root, "x", &Aio::Branch("gone".into()), None, |_, _| Err("no branch gone".into()), false).unwrap_err();
+        let e = pin(
+            &root,
+            "x",
+            &Aio::Branch("gone".into()),
+            None,
+            |_, _| Err("no branch gone".into()),
+            no_api,
+            false,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(e, "no branch gone\nnothing changed");
         assert_eq!(std::fs::read_to_string(root.join("app/Cargo.toml")).unwrap(), before);
         // An app's other crates are its own: a dot folder or build output is never read.
@@ -788,7 +980,7 @@ version = "0.1.0"
         std::fs::write(bare.join("aio.toml"), "").unwrap();
         assert!(info(&bare, || Err("x".into())).unwrap_err().contains("no aio-rs dependency"));
         assert!(
-            pin(&bare, "main", &Aio::Branch("main".into()), None, no_lock, false)
+            pin(&bare, "main", &Aio::Branch("main".into()), None, no_lock, no_api, false, false)
                 .unwrap_err()
                 .contains("no aio-rs dependency")
         );

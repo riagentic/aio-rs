@@ -912,8 +912,8 @@ pub fn discard_fresh(plan: &aio::paths::Plan) -> Option<Result<(), String>> {
 /// `dev:android`): on the attached emulator (before a phone) or phone, else
 /// an emulator booted (`AIO_AVD`). An app with a web build runs as its dev
 /// page: a thin dev APK, installed once beside the real app, shows what
-/// `ax dev --web` serves over `adb reverse`, and each edit reloads it
-/// there. Else (or `--native`) the app itself, as a debug dev copy beside
+/// `ax dev --web` serves over `adb reverse`, and each edit shows there as
+/// in a browser tab. Else (or `--native`) the app itself, as a debug dev copy beside
 /// the real app, built for that device's CPU only and installed again on
 /// every saved change. The app's log, its page's console and a crash reach
 /// the terminal (`[device]`).
@@ -934,34 +934,25 @@ pub fn android(name: &str, device: Option<&str>, native: bool) -> Result<String,
             crate::install::install_on(&dev, &apk)?;
             _ = std::fs::write(&record, &hash);
         }
-        // A session ended by a signal leaves its reverse: drop it now. Only
-        // ax's own: another tool's reverses on the device stay.
+        // One a session left (its end killed): dropped now.
         let reversed = target.join("aio").join("android-dev").join(format!("{}-{id}.reverse", dev.serial));
-        if let Ok(p) = std::fs::read_to_string(&reversed) {
-            _ = crate::install::adb_out(&["-s", &dev.serial, "reverse", "--remove", p.trim()]);
-            _ = std::fs::remove_file(&reversed);
-        }
+        crate::install::unreverse(&dev.serial, &reversed);
         let mut logs = crate::install::logcat(&dev.serial)?;
         let on = dev.clone();
         let record = reversed.clone();
         let ran = crate::web::dev_then(name, crate::web::Serve::default(), move |port| {
-            let p = format!("tcp:{port}");
-            crate::install::adb_out(&["-s", &on.serial, "reverse", &p, &p])
+            crate::install::reverse(&on.serial, &format!("tcp:{port}"), &record)
                 .map_err(|e| format!("{e}: the app can't reach the dev server"))?;
-            _ = std::fs::write(&record, &p);
             let url = format!("http://127.0.0.1:{port}/");
             match crate::install::start_on(&on, &format!("{id}/{}", crate::android::DEV), &["--es", "url", &url]) {
-                Ok(()) => eprintln!("ax dev: on {} → {url}: edits reload it there; Ctrl-C ends it", on.label()),
+                Ok(()) => eprintln!("ax dev: on {} → {url}: edits show there; Ctrl-C ends it", on.label()),
                 Err(why) => eprintln!("ax dev: installed, but did not start ({why}): open \"(dev)\" from the launcher"),
             }
             Ok(())
         });
         _ = logs.kill();
         _ = logs.wait();
-        if let Ok(p) = std::fs::read_to_string(&reversed) {
-            _ = crate::install::adb_out(&["-s", &dev.serial, "reverse", "--remove", p.trim()]);
-            _ = std::fs::remove_file(&reversed);
-        }
+        crate::install::unreverse(&dev.serial, &reversed);
         return ran;
     }
     let (_w, rx) = crate::watch::Watch::new(&watched(&pkg, Path::new(""), &Watching::All))?;
@@ -1178,12 +1169,28 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     // What the running app was built from: markup edits are told against it.
     // Rust is hot-patched by ax itself: a fat build, then patches.
     let (mut fat, mut patching) = (None, true);
-    // A window at once while the first build runs (ax's own: the app is as without it).
-    let splash_title = title.clone().unwrap_or_else(|| name.to_string());
-    crate::splash::open(&splash_title, &put, &shared_target().join("aio").join("dev-splash"));
-    // aio-rs's libraries prebuilt for this toolchain, when a server has them.
-    if let Some(said) = crate::prebuilt::fetch(&app_dir, &workspace, &target, &feature) {
-        eprintln!("{said}");
+    // Sources changed while ax dev was off (a pull, an edit): the last fat
+    // build starts at once, nothing built or linked, and the change compiled
+    // beside its start is patched in as its window comes up.
+    // An app the last session stopped may still be ending: the start waits
+    // for it as a build would have (else the new one finds its lock held).
+    let ended = |(_, p): &(String, aio::paths::Plan)| {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while aio::paths::running(&p.data) && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !aio::paths::running(&p.data)
+    };
+    let resumed =
+        resume(&pkg, name, &target, &saves, &cwd).filter(|_| logs.is_some() && window.as_ref().is_some_and(ended));
+    if resumed.is_none() {
+        // A window at once while the first build runs (ax's own: the app is as without it).
+        let splash_title = title.clone().unwrap_or_else(|| name.to_string());
+        crate::splash::open(&splash_title, &put, &shared_target().join("aio").join("dev-splash"));
+        // aio-rs's libraries prebuilt for this toolchain, when a server has them.
+        if let Some(said) = crate::prebuilt::fetch(&app_dir, &workspace, &target, &feature) {
+            eprintln!("{said}");
+        }
     }
     let current = |fat: &mut _, patching: &mut _| {
         until_current(
@@ -1196,7 +1203,20 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             },
         )
     };
-    let (mut built, bin) = current(&mut fat, &mut patching);
+    let (mut built, bin, mut resumed) = match resumed {
+        Some(r) => {
+            let (mut fat, files) = (r.fat, r.changed.clone());
+            let compile = std::thread::spawn(move || {
+                let c = crate::hotpatch::compile(&mut fat, &files);
+                (fat, c)
+            });
+            (Some(r.built), Some(r.exe), Some((compile, r.now, r.changed)))
+        }
+        None => {
+            let (built, bin) = current(&mut fat, &mut patching);
+            (built, bin, None)
+        }
+    };
     // A failed build's errors are on the page (once it runs) until a good one.
     let mut red = bin.is_none();
     match (&bin, &logs) {
@@ -1258,6 +1278,39 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
             _ = std::fs::write(l.join(PATCHED), now_ms().to_string());
         }
     };
+    if let Some((compile, now, changed)) = resumed.take() {
+        let said = crate::watch::describe(&changed, &cwd);
+        let (mut f, compiled) = compile.join().map_err(|_| "ax dev: the patch's compile panicked")?;
+        let linked = compiled.and_then(|c| {
+            let (_, _, aslr, base) = door_when_up(window.as_ref(), &mut app)?;
+            crate::hotpatch::link_patch(&mut f, c, aslr, base)
+        });
+        match linked.and_then(|p| hot_patch(window.as_ref(), &mut f, &changed, Some((p, "compiled as it started")))) {
+            Ok(patched) => {
+                eprintln!("ax dev: {said} changed while ax dev was off: its last build started, the change patched in");
+                eprintln!("{patched}");
+                refresh.patched(on_exit());
+                built = Some(now);
+                landed();
+            }
+            Err(crate::hotpatch::Refused::Code(errors)) => {
+                eprint!("{}", with_hints(&errors));
+                eprintln!("ax dev: {said}: doesn't compile; its last build runs (save a fix)");
+                red = true;
+                keep_failed(logs.as_deref(), &errors);
+                if let Some(w) = window.clone() {
+                    show_once_up(w, show_failed(&crate::web::fatal(&errors)));
+                }
+            }
+            Err(e) => {
+                eprintln!("ax dev: {said} changed while ax dev was off; not patched ({e}): building");
+                if let Some(l) = &logs {
+                    _ = ask_restart(l);
+                }
+            }
+        }
+        fat = Some(f);
+    }
     loop {
         // Wait for a change, then for the burst of saves to settle; or for `ax restart`, `ax stop`.
         let restart = match rx.recv_timeout(Duration::from_millis(250)) {
@@ -1361,7 +1414,8 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                 if let Some(f) = fat.as_mut().filter(|_| up && reshaped.is_empty() && !manifest(&changed)) {
                     eprintln!("ax dev: {said} changed");
                     let snapshot = crate::reload::Built::snapshot(&pkg.dirs);
-                    match hot_patch(window.as_ref(), f, &changed, ahead.take().and_then(|a| a.take(&changed))) {
+                    let ready = ahead.take().and_then(|a| a.take(&changed)).map(|p| (p, "begun with the first save"));
+                    match hot_patch(window.as_ref(), f, &changed, ready) {
                         Ok(said) => {
                             eprintln!("{said}");
                             refresh.patched(on_exit());
@@ -1664,6 +1718,7 @@ fn fat_request(pkg: &Pkg, name: &str, stop: &Stop) -> Option<crate::hotpatch::Re
         ax: std::env::current_exe().unwrap_or_else(|_| "ax".into()),
         stop: stop.clone(),
         low: false,
+        sources: pkg.dirs.clone(),
     })
 }
 
@@ -1697,11 +1752,7 @@ pub fn env_on(v: Option<&str>) -> bool {
 /// group, on Windows with no console: a Ctrl-C at the terminal, or the
 /// terminal closing, leaves it), its words in `log`.
 pub fn warm_in_background(dir: &Path, name: &str, log: &Path) -> Result<(), String> {
-    in_background(dir, &["dev", name, "--warm"], log)
-}
-
-/// `ax <args>` in `dir`, in the background as [`warm_in_background`]'s.
-pub fn in_background(dir: &Path, args: &[&str], log: &Path) -> Result<(), String> {
+    let args = ["dev", name, "--warm"];
     if let Some(d) = log.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
@@ -1789,6 +1840,68 @@ fn reshaped(built: &crate::reload::Built, changed: &[PathBuf], cwd: &Path) -> Ve
     out
 }
 
+/// [`resume`]'s start: the last fat build, the change compiling beside it.
+struct Resumed {
+    exe: PathBuf,
+    /// The sources the binary was built from.
+    built: crate::reload::Built,
+    /// The sources now, and the changed ones among them.
+    now: crate::reload::Built,
+    changed: Vec<PathBuf>,
+    fat: crate::hotpatch::Fat,
+}
+
+/// A start whose sources changed since the last fat build of `name` only
+/// in what a patch takes (`.rs` files of its crates, no type's shape):
+/// that build, kept as it was, to patch the change into. `None`:
+/// nothing changed (cargo finds the build current), or a build is needed
+/// (a manifest, the lock, `aio.toml`, a file outside the crates, a shape).
+fn resume(pkg: &Pkg, name: &str, target: &Path, stop: &Stop, cwd: &Path) -> Option<Resumed> {
+    let (fat, read) = crate::hotpatch::last(target, &fat_request(pkg, name, stop)?)?;
+    let at = std::fs::metadata(&fat.exe).and_then(|m| m.modified()).ok()?;
+    let now = crate::hotpatch::sources_of(&pkg.dirs);
+    let mut changed: Vec<PathBuf> =
+        now.iter().filter(|(f, t)| read.get(*f) != Some(*t)).map(|(f, _)| f.clone()).collect();
+    changed.extend(read.keys().filter(|f| !now.contains_key(*f)).cloned());
+    if changed.is_empty() {
+        return None;
+    }
+    // Anything else the build read, saved since: a build's.
+    let root = workspace_root(pkg.dirs.first()?);
+    let manifests =
+        pkg.dirs.iter().map(|d| d.join("Cargo.toml")).chain([root.join("Cargo.lock"), root.join("Cargo.toml")]);
+    let newer = |f: &PathBuf| std::fs::metadata(f).and_then(|m| m.modified()).is_ok_and(|t| t > at);
+    if deps_of(&fat.exe).into_iter().chain(manifests).any(|f| !now.contains_key(&f) && newer(&f)) {
+        return None;
+    }
+    let built = crate::reload::Built::of(read, at);
+    if !reshaped(&built, &changed, cwd).is_empty() {
+        return None;
+    }
+    let now = crate::reload::Built::of(now, std::time::SystemTime::now());
+    Some(Resumed { exe: fat.exe.clone(), built, now, changed, fat })
+}
+
+/// [`patch_door`] once the app just launched has opened it (while it runs).
+fn door_when_up(
+    window: Option<&(String, aio::paths::Plan)>,
+    app: &mut Option<(Child, aio::lifecycle::Watch)>,
+) -> Result<(tokio::runtime::Runtime, crate::cdp::Session, u64, Option<u64>), crate::hotpatch::Refused> {
+    let until = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match patch_door(window) {
+            Ok(d) => return Ok(d),
+            Err(e) => {
+                let up = app.as_mut().is_some_and(|(c, _)| c.try_wait().ok().flatten().is_none());
+                if !up || std::time::Instant::now() > until {
+                    return Err(e);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// The running app's window: a session on its door, and where its binary
 /// is loaded (`aio_hotpatch::aslr_reference`; Windows: the patch's room).
 fn patch_door(
@@ -1814,7 +1927,7 @@ fn compile_patch(
 }
 
 /// What `files` hold now (`None`: gone), each with its path.
-fn contents(files: &[PathBuf]) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+pub(crate) fn contents(files: &[PathBuf]) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     files.iter().map(|f| (f.clone(), std::fs::read(f).ok())).collect()
 }
 
@@ -1871,19 +1984,18 @@ impl Drop for Early {
 
 /// Patch the running app's code with `changed` (its window's door: where
 /// it is loaded, then the patch), or send it `ready`, compiled already;
-/// then the app crate's own replay a patch of libraries alone owes, sent
-/// too when its code changed: what to say.
+/// then what a patch of the edited libraries alone owes (the crates built
+/// on them replayed), sent too when their code changed: what to say.
 fn hot_patch(
     window: Option<&(String, aio::paths::Plan)>,
     fat: &mut crate::hotpatch::Fat,
     changed: &[PathBuf],
-    ready: Option<crate::hotpatch::Patch>,
+    ready: Option<(crate::hotpatch::Patch, &str)>,
 ) -> Result<String, crate::hotpatch::Refused> {
     let (rt, mut s, aslr, base) = patch_door(window)?;
-    let early = ready.is_some();
-    let p = match ready {
-        Some(p) => p,
-        None => crate::hotpatch::patch(fat, aslr, base, changed)?,
+    let (p, how) = match ready {
+        Some((p, how)) => (p, format!("; {how}")),
+        None => (crate::hotpatch::patch(fat, aslr, base, changed)?, String::new()),
     };
     let send = |s: &mut crate::cdp::Session, p: &crate::hotpatch::Patch| -> Result<(), crate::hotpatch::Refused> {
         let table = serde_json::to_value(&p.table).map_err(|e| e.to_string())?;
@@ -1894,19 +2006,18 @@ fn hot_patch(
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     let t = p.times;
     let mut said = format!(
-        "ax dev: hot-patched in {:.0} ms (rustc {:.0}, stub {:.0}, link {:.0}{}), state kept",
+        "ax dev: hot-patched in {:.0} ms (rustc {:.0}, stub {:.0}, link {:.0}{how}), state kept",
         ms(t.total),
         ms(t.compile),
         ms(t.stub),
         ms(t.link),
-        if early { "; begun with the first save" } else { "" }
     );
     // Where the next patch loads is the app's to say again (Windows).
     let at = rt.block_on(s.call(aio_shell::inspect::ASLR, serde_json::json!({})))?;
     if let Some(p) = crate::hotpatch::finish(fat, aslr, at["base"].as_u64())? {
         send(&mut s, &p)?;
         said.push_str(&format!(
-            "\nax dev: the binary crate's code changed with it: patched again in {:.0} ms",
+            "\nax dev: the crates built on it changed with it: patched again in {:.0} ms",
             ms(p.times.total)
         ));
     }
@@ -1918,20 +2029,19 @@ fn reload_markup(
     window: Option<&(String, aio::paths::Plan)>,
     edits: &[(String, Vec<crate::reload::Edited>)],
 ) -> Result<String, String> {
+    // A file whose markup is as built again (an edit undone) is sent too:
+    // the window drops what an earlier reload gave it.
     let n: usize = edits.iter().map(|(_, e)| e.len()).sum();
-    if n == 0 {
-        return Ok("ax dev: no markup changed: nothing to build".into());
-    }
     let (id, p) = window.ok_or("no app to reload")?;
     let door = crate::cdp::door(id, p).ok_or("it isn't running")?;
     let t = std::time::Instant::now();
     let windows = crate::reload::send(&door, edits)?;
     let ms = t.elapsed().as_secs_f64() * 1000.0;
-    Ok(format!(
-        "ax dev: reloaded {n} template{} in {windows} window{} ({ms:.0} ms), state kept",
-        plural(n),
-        plural(windows as usize)
-    ))
+    let what = match n {
+        0 => "the markup as built again".to_string(),
+        n => format!("reloaded {n} template{}", plural(n)),
+    };
+    Ok(format!("ax dev: {what} in {windows} window{} ({ms:.0} ms), state kept", plural(windows as usize)))
 }
 
 fn plural(n: usize) -> &'static str {

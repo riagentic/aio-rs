@@ -51,5 +51,6 @@ fn the_live_timeline_times_each_call_and_leaves_out_quiet_cells() {
     assert_eq!(t[1]["refused"], "empty note");
     assert!(t[2]["ms"].as_f64().unwrap() >= 30.0, "{}", t[2]);
     assert!(t.iter().all(|e| e["at"].is_string() && e["ms"].is_number()));
+    assert!(t.iter().all(|e| e.get("args").is_none()), "no arguments unless `[feedback] args`");
     assert_eq!(clock.state().ticks, 2, "its state and events are kept as ever");
 }

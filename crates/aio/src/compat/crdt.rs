@@ -169,6 +169,7 @@ pub(crate) async fn take<T: Cell>(
     h: &Handle<T>,
     gate: &crate::link::Gate,
     who: &crate::By,
+    req: Option<&std::sync::Arc<crate::Request>>,
     link: u64,
     raw: &Value,
 ) -> Result<Taken, String> {
@@ -195,7 +196,8 @@ pub(crate) async fn take<T: Cell>(
         return Ok(Taken::Said(Some(rejected(op.id, op.cell, why, Some(now)))));
     }
     let id = op_id(op.id, op.hlc.0);
-    let (hh, gate, by, args) = (h.clone(), gate.clone(), who.clone(), raw["payload"]["args"].clone());
+    let (hh, gate, by, req, args) =
+        (h.clone(), gate.clone(), who.clone(), req.cloned(), raw["payload"]["args"].clone());
     let args = if args.is_array() { args } else { json!([]) };
     let stale = now - op.hlc.0 > crate::cx::Op::MAX_AGE_MS - MAX_DRIFT_MS;
     let ran = tokio::task::spawn_blocking(move || {
@@ -205,7 +207,7 @@ pub(crate) async fn take<T: Cell>(
         }
         let r = match known {
             Some(_) => Ok(None),
-            None => gate.call(&hh, &by, &method, args, Some(&id)),
+            None => gate.call(&hh, &by, req.as_ref(), &method, args, Some(&id)),
         };
         Some(r.map(|v| (v.is_some(), hh.op_seq(&id))))
     });
@@ -284,6 +286,7 @@ pub(crate) async fn answer<T: Cell>(
     h: &Handle<T>,
     gate: &crate::link::Gate,
     seer: &crate::Caller,
+    req: Option<&std::sync::Arc<crate::Request>>,
     link: u64,
     d: &Value,
 ) -> Result<Vec<Value>, String> {
@@ -299,7 +302,7 @@ pub(crate) async fn answer<T: Cell>(
     }
     let mut out = Vec::new();
     for op in pending {
-        match take(h, gate, &seer.by, link, op).await? {
+        match take(h, gate, &seer.by, req, link, op).await? {
             Taken::Said(f) => out.extend(f),
             // The rest waits for the page's next ask.
             Taken::Held(f) => {
@@ -341,7 +344,7 @@ pub(crate) async fn answer<T: Cell>(
 pub(crate) fn sees_whole<T: Cell>(h: &Handle<T>, seer: &crate::Caller, cell: &str) -> bool {
     let (_, st) = h.snapshot();
     let all = cells::<T>(&serde_json::to_value(&*st).unwrap_or(Value::Null));
-    let theirs = cells::<T>(&st.project(seer));
+    let theirs = cells::<T>(&crate::shown(&*st, seer));
     all.get(cell).is_some() && all.get(cell) == theirs.get(cell)
 }
 

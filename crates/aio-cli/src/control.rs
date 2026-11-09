@@ -46,6 +46,7 @@ pub const VERBS: &[&str] = &[
     "config",
     "report",
     "testgen",
+    "tsgen",
     "stop",
     "restart",
 ];

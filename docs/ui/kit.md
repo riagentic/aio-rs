@@ -34,7 +34,10 @@ tests and agents: a tab's or menu item's id, `menuTrigger`, `menuScrim`,
 The kit's stylesheet comes with the theme: the app template passes
 `aio::kit::theme_css(hue)` first to `aio::use_css!`, or
 `aio::kit::theme::sheet(&cfg.ui, &cfg.app.id, ships_css)` to let
-`[ui]` decide ([theming](theming.md#the-pages-css)). `aio::kit::CSS` is the
+`[ui]` decide ([theming](theming.md#the-pages-css)). An app with no
+sheet of its own can place `UiStyles { hue: aio::hue!() }` once near its
+root instead (aio's `<UiStyles/>`; `scheme` unset: the app's `[ui]
+scheme`). `aio::kit::CSS` is the
 kit's rules alone, without tokens. Forget it and the controls render as
 bare HTML (a `Menu` draws its items inline); a debug build says so once
 in the log, naming the control. A rule of the app's own that names a kit
@@ -461,9 +464,9 @@ moved), `use_spring`, `use_frame` and `use_interval` are on
 
 | Item | Is |
 |---|---|
-| `Transition { show, enter, exit, children }` | content that plays CSS keyframes as it comes and goes; the leaving content stays until its exit is over |
+| `Transition { show, enter, exit, options, children }` | content that plays CSS keyframes as it comes and goes; the leaving content stays until its exit is over; `options: Timing` times both motions (aio's `options`) |
 | `Motion::FADE`, `SLIDE`, `SCALE` (300 ms), `Motion::new("keyframes")`, `.ms(..)` | what plays |
-| `TransitionGroup { items: Vec<(key, View)>, enter, exit, flip, flip_ms, row_class }` | a keyed list whose rows animate; `flip` slides moved rows |
+| `TransitionGroup { items: Vec<(key, View)>, enter, exit, options, flip, flip_ms, row_class }` | a keyed list whose rows animate; `flip` slides moved rows |
 | `use_spring(initial, Spring::default())` | a number springing to `.to(target)` (stiffness 170, damping 26); `.value()` |
 | `use_frame(active, \|since_start, since_last\| ..)`, `use_interval(every, active, \|\| ..)` | per frame, on a timer, while `active` |
 
@@ -582,8 +585,6 @@ The kit matches aio's `aio/ui` component for component and adds the
 controls aio apps wrote by hand (`Tabs`' right-to-left keys, `Defer`,
 `ZoomPan`'s math, `TransitionGroup`); what aio has beyond it:
 
-- **`<UiStyles/>`**: none; the stylesheet comes with the theme
-  (`theme_css`, `theme::sheet`) rather than a component.
 - **Data grids, charts, date pickers**: neither has them; mount a
   library as an [island](islands.md).
 

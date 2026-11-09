@@ -87,7 +87,7 @@ builds as it is; `ax pin <version>` moves it (aio's `am pin`).
 | one state across many servers or regions | a distributed database; aio-rs serves each app from one process |
 | millions of stateless requests per second | a plain HTTP framework behind a load balancer |
 | a dataset far bigger than memory in one cell (a call copies the state) | `#[table]` rows, `aio::imbl`, or plain SQL on the store ([persistence](../persistence/README.md)) |
-| a native iOS app | nothing yet: aio-rs has no iOS client |
+| a native iOS app | a native iOS stack: aio-rs, as aio, gives an iPhone a thin client of a server (`ax build --ios`) |
 
 aio-rs fits when the state is the product: tools, local-first apps, small
 servers and their clients, command-line tools on saved state.

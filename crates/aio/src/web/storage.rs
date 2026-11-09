@@ -57,6 +57,9 @@ pub struct Doc {
     /// A page cell's schedules (a synced copy has none: its server runs them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sched: Vec<Due>,
+    /// The parts a synced copy held (its view is of them; empty: all).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 /// A schedule a page's cell set (`cx.after`, `every`, `at`, `cron`, and its
@@ -188,7 +191,7 @@ pub fn merge(mine: &[Queued], theirs: &[Queued], done: &HashSet<String>) -> Vec<
     let have: HashSet<&str> = mine.iter().map(|q| q.op.as_str()).collect();
     let mut all: Vec<Queued> = mine.to_vec();
     all.extend(theirs.iter().filter(|q| !have.contains(q.op.as_str()) && !done.contains(&q.op)).cloned());
-    all.sort_by(|a, b| (a.at, &a.op).cmp(&(b.at, &b.op)));
+    crate::sort_by(&mut all, |a, b| (a.at, &a.op).cmp(&(b.at, &b.op)));
     all
 }
 
@@ -244,7 +247,7 @@ pub fn orphans(kv: &impl Kv, app: &str, syncing: &[&str]) -> Vec<(String, usize)
             (n > 0).then(|| (cell.to_string(), n))
         })
         .collect();
-    out.sort();
+    crate::sort_by(&mut out, Ord::cmp);
     out
 }
 
@@ -300,7 +303,7 @@ mod tests {
 
     fn doc(user: &str, seq: u64, pending: Vec<Queued>) -> Doc {
         let view = serde_json::json!({ "seq": seq });
-        Doc { cell: "todos".into(), v: 1, user: user.into(), seq, view, pending, sched: Vec::new() }
+        Doc { cell: "todos".into(), v: 1, user: user.into(), seq, view, pending, sched: Vec::new(), paths: Vec::new() }
     }
 
     fn ops(kv: &Map, key: &str) -> Vec<String> {

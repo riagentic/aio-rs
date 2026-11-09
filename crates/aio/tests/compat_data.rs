@@ -397,6 +397,22 @@ fn an_aio_journal_past_its_save_is_replayed_once_and_aio_finds_it_folded() {
 }
 
 #[test]
+fn a_dbpath_stores_journal_beside_it_is_replayed() {
+    // aio given `dbPath: <data>/vault.db` journals to `vault.db.journal`
+    // (`.base` beside it), never `<data>/journal`.
+    let (_d, db) = crashed();
+    let data = db.parent().unwrap();
+    let vault = data.join("vault.db");
+    std::fs::rename(&db, &vault).unwrap();
+    std::fs::rename(data.join("journal"), data.join("vault.db.journal")).unwrap();
+    std::fs::rename(data.join("journal.base"), data.join("vault.db.journal.base")).unwrap();
+    let s = Store::<Inbox>::open_aio(&vault, APP).unwrap();
+    assert_eq!(s.state().posts[10..], ["p54", "p59"], "the two calls the kill left in the journal");
+    drop(s);
+    assert_eq!(kv(&vault)[WM], json!(12));
+}
+
+#[test]
 fn a_journal_of_another_cells_calls_is_left_to_aio() {
     let (_d, db) = crashed();
     let s = Store::<Tally>::open_aio(&db, APP).unwrap();
@@ -412,6 +428,7 @@ fn a_journal_aio_rs_cant_replay_refuses_the_boot_and_keeps_the_file() {
         (line(r#"{"seq":11,"type":"aio:__timeTravel","payload":{},"ts":1}"#), "carries state"),
         (line(r#"{"seq":11,"type":"inbox:__setPosts","payload":{},"ts":1}"#), "carries state"),
         (line(r#"{"seq":11,"type":"custom","payload":{},"ts":1}"#), "no call aio-rs can replay"),
+        (line(r#"{"seq":11,"type":"inbox:archive","payload":{"args":[]},"ts":1}"#), "no method `archive`"),
         (
             line(r#"{"seq":11,"type":"inbox:post","payload":{"args":["a"]},"ts":1}"#)
                 + &line(r#"{"seq":12,"type":"tally:onAdd","payload":{"args":[]},"ts":1}"#),
@@ -439,14 +456,16 @@ fn torn_withheld_and_bookkeeping_lines_are_skipped_as_aio_skips_them() {
         r#"{"seq":11,"type":"__aioBatch","entries":[{"seq":11,"type":"inbox:post","payload":{"args":["a"]},"ts":1}]}"#,
         r#"{"seq":12,"type":"inbox:post","payload":"[redacted]","redacted":true,"ts":1}"#,
         r#"{"seq":13,"type":"__aioSyncApplied","ts":1}"#,
-        r#"{"seq":14,"type":"inbox:po"#,
+        // Another cell that saves nothing: no data of its own to wait for.
+        r#"{"seq":14,"fmt":2,"type":"sync:set","payload":"[redacted]","ts":1,"unstored":true}"#,
+        r#"{"seq":15,"type":"inbox:po"#,
     ];
     std::fs::write(db.with_file_name("journal"), lines.join("\n")).unwrap();
     let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
     assert_eq!(s.state().posts.last().map(String::as_str), Some("a"), "the batch's call, not the one before the save");
     assert_eq!(s.state().posts.len(), 11);
     drop(s);
-    assert_eq!(kv(&db)[WM], json!(13), "past every entry it read");
+    assert_eq!(kv(&db)[WM], json!(14), "past every entry it read");
 }
 
 /// What aio reads of the file at `p` for app `app` (`stored-state.ts`): an

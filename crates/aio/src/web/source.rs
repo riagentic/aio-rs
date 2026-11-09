@@ -53,10 +53,29 @@ impl<T: Cell> Source<T> {
         }
     }
 
+    /// The views showed the state as it is now ([`Remote::rendered`]).
+    pub fn rendered(&self) {
+        if let Self::Remote(r) = self {
+            r.rendered();
+        }
+    }
+
     pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
         match self {
             Self::Local(h) => h.listen(f),
             Self::Remote(r) => r.listen(f),
+        }
+    }
+
+    /// Put the page's own cell back to `state` (a dev build's Redux
+    /// DevTools jump); a synced copy's history is its server's.
+    pub(crate) fn put(&self, state: &Value) -> std::result::Result<(), String> {
+        match self {
+            Self::Local(h) => {
+                h.put(serde_json::from_value(state.clone()).map_err(|e| format!("{}: {e}", T::ID))?);
+                Ok(())
+            }
+            Self::Remote(_) => Err(format!("{}: a synced copy travels on its server (ax timetravel)", T::ID)),
         }
     }
 

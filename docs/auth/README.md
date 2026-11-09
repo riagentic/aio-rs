@@ -529,6 +529,12 @@ the session comes back to the app ([apps](#an-app-outside-a-browser)):
 the person signs in where their provider session and password manager
 already are, and `on_signed` gets the session.
 
+`aio::kit::use_user()` is who a view is signed in as (aio's `useUser`),
+in a page, a desktop window and Android alike: `None` while it is
+asked, `Some(None)` signed out, `Some(Some((id, role)))`. A page asks
+its server; a window knows whom its `SignIn` signed in, and
+`aio::kit::set_user(None)` (after `Client::logout`) signs it out.
+
 ### Users the app resolves itself
 
 Without accounts, an app may know its callers by their token: a
@@ -980,9 +986,6 @@ What aio has that aio-rs does not, or does differently:
   names (`[server] hosts`).
 - **Health and metrics need a credential beyond this machine**, also
   without accounts (aio answered them to anyone on an app without a key).
-- **`useUser()` is a browser hook only** (`aio::web::use_user()`):
-  elsewhere `Client::me` answers who is signed in, and `SignIn`'s
-  `on_signed` hands the session to the app.
 - **Lockout and budgets are fixed** (5 tries, 15 minutes; the per-address
   table above), as in aio; there are no keys to tune them.
 - **No passkeys (WebAuthn)**, as in aio.

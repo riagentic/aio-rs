@@ -1,6 +1,7 @@
 //! A view served to browser tabs from the process (aio's tools: `ax ui
 //! --browser`), in a real browser (a headless Chromium; skipped without
-//! one): each tab its own view, under the page's strict policy.
+//! one): each tab its own view, under the page's strict policy. And a
+//! server's first paint hydrated by air's interpreter (`air::ssr`).
 #![cfg(unix)]
 use aio::prelude::*;
 use aio::serde_json::{Value, json};
@@ -230,6 +231,129 @@ async fn a_tab_reconnects_and_starts_again_from_the_server() {
         let other =
             format!("document.getElementById('view') && document.getElementById('view').textContent !== {first}");
         p.until(&other, json!(true)).await;
+    })
+    .await
+}
+
+/// What a page's first paint and its view's first frame are made of: the
+/// server's (`painted`) or the client's, which may differ.
+fn shown(painted: bool) -> View {
+    let n = signal(move || if painted { 3 } else { 5 });
+    let typed = signal(String::new);
+    // A motion that measures its element (`--aio-w`, `--aio-h`).
+    let motion = signal(|| "display: block; width: 40px; height: 10px; animation: grow 1s".to_string());
+    rsx! {
+        h1 { id: "n", "{n} items" }
+        button { id: "add", onclick: move |_| n += 1, "+" }
+        input { id: "name", oninput: move |e| typed.set(e.value()) }
+        p { id: "typed", "{typed}" }
+        p { "a" {typed.get()} }
+        if painted { p { id: "differs", "server" } } else { div { id: "differs", "client" } }
+        div { id: "moves", style: "{motion}" }
+    }
+}
+
+/// The page's frames (events) for the view, from its wire.
+async fn sent(p: &mut Page) -> Vec<Vec<u8>> {
+    let frames = p.eval("window.sent.splice(0)").await;
+    aio::serde_json::from_value(frames).unwrap()
+}
+
+/// `frame` applied by the page's interpreter.
+async fn apply(p: &mut Page, frame: &[u8]) {
+    p.eval(&format!("window.__airApply(new Uint8Array({})); true", aio::serde_json::to_string(frame).unwrap())).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_painted_page_is_hydrated_in_place_its_nodes_kept_and_wired() {
+    within(async {
+        let dir = tempfile::tempdir().unwrap();
+        let painted = air::ssr::render_to_string(|| shown(true)).unwrap();
+        let page = format!(
+            "<!doctype html><html><body><div id=\"main\" data-aio-painted>{painted}</div>\
+             <script src=\"wire.js\"></script><script src=\"page.js\"></script></body></html>"
+        );
+        std::fs::write(dir.path().join("index.html"), page).unwrap();
+        let wire = "window.sent = []; window.__aioWire = { send: (b) => window.sent.push([...b]), listen: () => {} }";
+        std::fs::write(dir.path().join("wire.js"), wire).unwrap();
+        std::fs::write(dir.path().join("page.js"), air::PAGE_JS).unwrap();
+        let Some(c) = Chromium::open(&format!("file://{}", dir.path().join("index.html").display())) else {
+            return eprintln!("no Chromium: skipped");
+        };
+        let mut p = c.page().await;
+        p.until("typeof window.__airApply", json!("function")).await;
+        // The paint as the server sent it; someone types before the view runs.
+        p.eval(
+            "window.before = [...document.querySelectorAll('#main *')]; document.getElementById('name').value = 'hey'",
+        )
+        .await;
+        let root = air::Root::mount(|| shown(false));
+        apply(&mut p, &root.take_edits()).await;
+        // Every element kept, but the one of another kind; its text written.
+        let kept = "[...document.querySelectorAll('#main *')].map((n, i) => n === window.before[i])";
+        assert_eq!(p.eval(kept).await, json!([true, true, true, true, true, false, true]));
+        // A motion on a kept node is measured there, before its first frame.
+        let measured = "[document.getElementById('moves') === window.before[6], \
+                        document.getElementById('moves').style.getPropertyValue('--aio-w')]";
+        assert_eq!(p.eval(measured).await, json!([true, "40px"]));
+        assert_eq!(p.eval("window.__airHydrated.replaced").await, json!(1));
+        p.text("n", "5 items").await;
+        p.text("differs", "client").await;
+        assert_eq!(p.eval("document.getElementById('main').innerHTML.includes('<!--a-->')").await, json!(false));
+        assert_eq!(p.eval("document.getElementById('main').hasAttribute('data-aio-painted')").await, json!(false));
+        // What was typed stays, and is told to the view.
+        assert_eq!(p.eval("document.getElementById('name').value").await, json!("hey"));
+        for f in sent(&mut p).await {
+            assert!(root.event(&f));
+        }
+        apply(&mut p, &root.take_edits()).await;
+        p.text("typed", "hey").await;
+        assert_eq!(p.eval("window.before[3] === document.getElementById('typed')").await, json!(true));
+        // The kept button's click reaches the view, which writes the kept heading.
+        p.eval("document.getElementById('add').click()").await;
+        let clicks = sent(&mut p).await;
+        assert_eq!(clicks.len(), 1);
+        assert!(root.event(&clicks[0]));
+        apply(&mut p, &root.take_edits()).await;
+        p.text("n", "6 items").await;
+        assert_eq!(p.eval("window.before[0] === document.getElementById('n')").await, json!(true));
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dev_builds_page_hydrates_with_no_node_replaced_its_tooling_beside_the_app() {
+    within(async {
+        let dir = tempfile::tempdir().unwrap();
+        let painted = air::ssr::render_to_string(|| shown(true)).unwrap();
+        let page = format!(
+            "<!doctype html><html><body><div id=\"main\" data-aio-painted>{painted}</div>\
+             <script src=\"wire.js\"></script><script src=\"page.js\"></script></body></html>"
+        );
+        std::fs::write(dir.path().join("index.html"), page).unwrap();
+        let wire = "window.__aioWire = { send: () => {}, listen: () => {} }";
+        std::fs::write(dir.path().join("wire.js"), wire).unwrap();
+        std::fs::write(dir.path().join("page.js"), air::PAGE_JS).unwrap();
+        let Some(c) = Chromium::open(&format!("file://{}", dir.path().join("index.html").display())) else {
+            return eprintln!("no Chromium: skipped");
+        };
+        let mut p = c.page().await;
+        p.until("typeof window.__airApply", json!("function")).await;
+        // As `aio::web::launch` mounts a dev build: the app, its tooling beside it.
+        let root = air::Root::new();
+        root.show(|| shown(true));
+        root.beside(|| rsx! { aio::kit::ReduxDevTools {} });
+        apply(&mut p, &root.take_edits()).await;
+        assert_eq!(p.eval("window.__airHydrated").await, json!({ "kept": 17, "replaced": 0 }));
+        // The tooling in the view's own markup (its old place) replaced nodes.
+        p.eval("location.reload(); true").await;
+        p.until("typeof window.__airApply", json!("function")).await;
+        let inside = air::Root::mount(|| {
+            let app = shown(true);
+            rsx! { {app} aio::kit::ReduxDevTools {} }
+        });
+        apply(&mut p, &inside.take_edits()).await;
+        assert_ne!(p.eval("window.__airHydrated.replaced").await, json!(0));
     })
     .await
 }

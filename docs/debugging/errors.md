@@ -81,9 +81,13 @@ assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRe
 | `TxConflict` | `TX_CONFLICT` | a transaction's write met another call's | call it again |
 | `ReduceError` | `REDUCE_ERROR` | the method panicked: a bug, its call changed nothing | fix the method; `ax errors` has the panic |
 | `InitError` | `INIT_ERROR` | an `#[on_start]` refused or panicked | the log and `ax errors` say why |
+| `DestroyError` | `DESTROY_ERROR` | an `#[on_stop]` refused or panicked (the cell still stops) | the log and `ax errors` say why |
+| `EffectTimeout` | `EFFECT_TIMEOUT` | an async call's awaited I/O ran past the call ceiling (`[perf] call_ceiling`, `#[long(ms)]`) and was cut off | call again, or give the method `#[long]` |
+| `EffectError` | `EFFECT_ERROR` | an async call's awaited I/O panicked before it answered: a bug | fix the I/O; `ax errors` has the panic |
+| `HookError` | `HOOK_ERROR` | a reaction (`listens_to`) to another cell's call refused or panicked; on the bus, never a caller's answer | the log says why |
 | `QueueOverflow` | `QUEUE_OVERFLOW` | a synced copy's 500 calls wait for the server | wait for the link; tell the person their changes wait |
 | `DispatchClosed` | `DISPATCH_CLOSED` | the app is closing (`retry after … ms`), the cell disabled or paused by time travel | retry later |
-| `DispatchAborted` | `DISPATCH_ABORTED` | its await was aborted (`cx.abort`), superseded (`#[mode(newest)]`), cut off after the call ceiling, or the app stopped | nothing, or call again |
+| `DispatchAborted` | `DISPATCH_ABORTED` | its await was aborted (`cx.abort`), superseded (`#[mode(newest)]`), or the app stopped | nothing, or call again |
 | `DispatchLoop` | `DISPATCH_LOOP` | refused during a call storm (`[perf.storm]`) | find the loop that calls it |
 | `PersistError` | `PERSIST_ERROR` | the store could not write the call (disk full, another writer) | the log says why; nothing of the call stayed |
 | `Other(name)` | as sent | a code this build doesn't know (a newer server's), kept verbatim | treat as a refusal; compare with the codes you know |
@@ -206,9 +210,20 @@ assert!(heard.iter().any(|l| l.starts_with("degraded:errors-page-thumbs: disk fu
   (`at`, `kind`, `message`, `held`, `severity`, `tip`, `code()`; `cell`
   and `call`, the call it happened in; `numbers`, the figures behind it,
   as a budget's `took_ms` and `budget_ms`: aio's `DiagEvent` and
-  `onError` context): the same kind is let through at most once per 5 s
+  `onError` context; `state`, the cell's state when it failed, aio's
+  `stateSnapshot`; `error_code()`, aio's code for it): the same kind is let through at most once per 5 s
   (`QUIET_MS`), with how many were held back meanwhile. A report carries
   them all.
+- A failing call, effect or hook puts its cell's state on its
+  diagnostic (`state`), screened as a problem report's: as a client sees
+  it (`visible`, no `#[server]` fields), every string masked; none for a
+  cell with `#[redact]` methods or over 256 KB. A method's panic carries
+  it for the app's own cells (opened with `Source::open`); a reaction, a
+  hook, an effect past its timeout or a tripped cell for any cell.
+  `error_code()` says aio's code: a method's panic `REDUCE_ERROR`, an
+  effect past its timeout `EFFECT_TIMEOUT`, a failed reaction
+  `HOOK_ERROR`, `#[on_start]` refused `INIT_ERROR`, `#[on_stop]` refused
+  `DESTROY_ERROR` (kind `hook:stop`).
 - `aio::report::recent()`: the newest 200 diagnostics, oldest first
   (what a report carries).
 - `aio::report::timeline()`: the newest 100 calls, oldest first: when,
@@ -270,7 +285,10 @@ instruction:
   forces it on. Files are never coloured.
 - Rotation: a file rotates at `[log] file_mb` (10) to `app.1.log`, …;
   `[log] keep` (5) files are kept per log. The three logs stay within 3 ×
-  `keep` × `file_mb`.
+  `keep` × `file_mb` at every write (aio's `logBudget` is a folder
+  ceiling checked at boot, so one long run outgrows it until the next
+  start). aio's `--no-backup-logs` (each run on fresh files, nothing kept)
+  is `[log] per_run = true` with `keep = 1`.
 - When the log closes, its last line counts the run's errors and
   warnings; every `[log] heartbeat` seconds (3600) a line says uptime,
   calls and errors.
@@ -294,11 +312,14 @@ problem report. A release build says the panic alone.
 
 ### In the window
 
-A debug build's page shows its own errors where the person is looking:
-a small corner badge (`2 page errors`) that opens a list, one row per
-problem with a count (a per-frame failure is one row, `×2043`), at most
-20 rows. It hears uncaught errors, unhandled rejections, `ax dev`'s
-failed build (the badge clears once the build is fixed) and, in a `ax dev`
+A debug build's page shows its own problems where the person is
+looking: a small corner badge (`2 problems`, red for an error, amber for
+warnings only) that opens a list, newest first, one row per problem with
+a count (a per-frame failure is one row, `×2043`), at most 20 rows, and
+`clear`. It hears uncaught errors, unhandled rejections, `ax dev`'s
+failed build (the badge clears once the build is fixed), the live
+accessibility and contrast findings (each a warning while it holds: fixed,
+its row goes), a web page's Rust panic with its place and, in a `ax dev`
 window, the app's own problems and warnings from the diagnostic bus
 (`app: call:notes.add`, a degraded part, a vitals step up), each with its
 tip. It is plain DOM, so it still reports when the renderer is what
@@ -329,20 +350,11 @@ origin is skipped.
 
 What aio has and aio-rs doesn't, with what to use instead:
 
-- **`onError`'s `original` and `stateSnapshot`.** The bus's
-  `Diagnostic` is the typed event (code, cell, call, numbers); the state
-  goes in a problem report, not in every event, and a panic's text and
-  place are in the message.
-- **aio's effect and hook codes** (`EFFECT_ERROR`, `EFFECT_TIMEOUT`,
-  `HOOK_ERROR`, `DESTROY_ERROR`, `MEMORY_*`, `BUDGET_*`, the test
-  harness codes): an async method's own `?` is its own `Rejected`, an
-  effect's failure, a budget or memory step is a problem kind on the bus
-  (`report::Code`), and the test harnesses fail with words.
-- **A source-mapped `client.log`.** aio-rs has no bundled JavaScript to
-  map: the window's lines go into `app.log` as `[page]`, and Rust panics
-  carry their file and line.
-- **`am logs` budgets** (`logBudget`, `--no-backup-logs`): aio-rs bounds
-  the folder with `file_mb` × `keep` instead.
+- **`onError`'s `original`.** A panic's text and place are in the
+  diagnostic's message; there is no thrown value to keep.
+- **aio's `MEMORY_*`, `BUDGET_*` and test harness codes**: a budget or
+  memory step is a problem kind on the bus (`report::Code`), and the
+  test harnesses fail with words.
 
 ## API
 

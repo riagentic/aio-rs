@@ -121,6 +121,7 @@ full_state_percent = 50
 [client]
 retention = "off"
 strict_pin = false
+transport = "auto"
 
 [accounts]
 on = false
@@ -185,6 +186,7 @@ every = "10s"
 timeout = "15s"
 keep = 50
 auto = true
+args = false
 
 [ui]
 theme = "auto"
@@ -428,6 +430,7 @@ For `mode = "client"`, and the synced copy of a `client-server` app.
 | `server` | `host:port` | none | The app's server. A link the device keeps (`ax pair`, `ax import`, the connect page) wins over it, and the launch's `--server-url` over both. Reached without a `[capabilities] network` entry: naming it is the consent. |
 | `retention` | span or off | `"off"` | How long a call made offline is kept once the queue is full: then a new call drops the oldest past it, and says so. `"off"`: nothing is dropped; a full queue refuses new calls. |
 | `strict_pin` | bool | `false` | A paired server whose certificate its pinned root no longer covers is refused until paired again (aio's `strictPin`; `--strict-pin` for one launch). Unset, one that proves it holds the app's key is pinned again ([desktop](../clients/desktop.md#a-certificate-that-changed)). |
+| `transport` | `"auto"`, `"ws"`, `"poll"` | `"auto"` | How the copy reaches its server (aio's `transport`; `--transport=` for one launch): a WebSocket, plain HTTP requests when one doesn't get through, or only one of them ([transports](../clients/transports.md#when-websockets-dont-get-through)). |
 
 ### [client.timeouts]
 
@@ -764,6 +767,7 @@ when it breaks. Always kept on disk first (`ax report <app>`).
 | `timeout` | span | `"15s"` | How long a POST may take before the report counts as not delivered. At least 1 s. |
 | `keep` | number | `50` | Reports kept on disk, newest first. At least 1. |
 | `auto` | bool | `true` | Report a problem by itself when the app breaks; `false`: only the user's reports. |
+| `args` | bool | `false` | A report's timeline carries each call's arguments (aio's timeline payloads): a `#[redact]` method's as `[redacted]`, keys masked, 1 KB each. Off: none, since a report may leave the machine. |
 
 ## [ui]
 
@@ -842,7 +846,7 @@ see [views](../ui/views.md) and the tables in
 | `methods` | `#[methods] impl Cell { pub fn m(&mut self, …) -> Result }`; types in arguments are `#[aio::data]` |
 | `scope: "client"` | a cell neither `persist` nor `shared`, in the view's module, or an `aio::ui::Global` |
 | `cancelOn` | `cx.abort("key")` from the method that should cancel ([effects](../state/effects.md)) |
-| `concurrency` | `#[mode(newest)]`, `#[mode(first)]` on a `pub async fn` (`first` joins any running call of the method, not only one with the same arguments); per effect, `.mode(Mode::Newest / Queue / First)`; calls are always one at a time per cell |
+| `concurrency` | `#[mode(newest)]`, `#[mode(first)]` on a `pub async fn` (`first` joins a running call with the same arguments); per effect, `.mode(Mode::Newest / Queue / First)`; calls are always one at a time per cell |
 | `ttl` | `#[ttl(ms)]` on a `pub async fn` |
 | `long` | `#[long]` on a `pub async fn` |
 | `selectors` | `#[derived] fn f(&self) -> T`; `#[derived(reads = [a, b])]` for a memo kept while those fields stay the same |
@@ -876,7 +880,7 @@ see [views](../ui/views.md) and the tables in
 | `appId` | `[app] id` |
 | `cells` | the handles the launcher opens (`aio::Source::for_app`, `Handle::open`), or one `aio::Cells` list |
 | `localFirst` | built in: synced copies predict each call and replay offline calls on the server |
-| `cellDefaults` | `persist`: `[data] only_persist = true` (aio's `persist: "none"` for every cell but `#[cell(persist)]` ones); `visible`: each cell's own `visible = f`, checked against its type |
+| `cellDefaults` | `persist`: `[data] only_persist = true` (aio's `persist: "none"` for every cell but `#[cell(persist)]` ones); `visible`: `aio::visible_by_default(f)`, for every cell without its own `visible = f` |
 | `port`, `host`, `expose` | `[server] listen`; `--port`, `--host`, `--expose` per launch |
 | `tls` | `[server] tls`, `cert`, `key` |
 | `appDir` | `[home] dir`; per launch `--home`, `--profile`, `--instance`, `AIORT_DATA` |

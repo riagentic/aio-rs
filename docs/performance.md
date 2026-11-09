@@ -275,6 +275,11 @@ pub fn App() -> View {
 - `data-aio-prevent="ArrowDown PageDown Home End Tab"`: the page keeps
   those keys from the browser inside the element; `prevent_default()` in a
   handler comes too late in a window.
+- A key is answered before the window draws again: the page waits for
+  the edits a keydown causes (at most 50 ms) and applies them in its key
+  handler, so the frame planned when the key came shows it, as in aio,
+  where the work runs in the page ([the wire](design/air.md#the-wire)).
+  A handler that takes longer than that shows a frame later.
 - Held keys: a binding fires once while held unless it is movement or
   `Chord::repeating(true)` (aio's `REPEATABLE_KEYS`). When the views fall
   behind, waiting repeats are dropped for the newest, so the cursor stops
@@ -293,7 +298,7 @@ the state; I/O and computing go elsewhere.
 | Work | Where |
 |---|---|
 | I/O: a fetch, a file, a service | an [effect](state/effects.md#an-effect) or an [async method](state/effects.md#async-methods): the runtime waits, not the cell |
-| CPU: parsing, hashing, a big sort | `tokio::task::spawn_blocking` inside an effect, the result back as a call |
+| CPU: parsing, hashing, a big sort | `aio::effect::off_thread` inside an effect (a worker thread; in a browser a Web Worker), or `tokio::task::spawn_blocking` natively; the result back as a call |
 | a blocking library call (a sync API, FFI) | `spawn_blocking` likewise |
 | slow work on a timer | `#[every]` or `#[cron]` whose method starts such an effect |
 | big state a client doesn't need | `#[cell(visible = f)]`: don't send it at all ([visibility](state/visibility.md)) |
@@ -344,7 +349,9 @@ assert_eq!(h.state().top, [9, 7, 4]);
 
 `.await` is no escape for CPU work: an effect step that computes for
 200 ms holds one of the runtime's threads for 200 ms (and `[perf] effect`
-says so). Only `spawn_blocking` moves it to a thread of its own.
+says so). Only `off_thread` or `spawn_blocking` moves it to a thread of
+its own; in a browser, only `off_thread` (a Web Worker): the page has one
+thread.
 
 ## 7. Share big fields: `aio::Big`
 
@@ -636,6 +643,24 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
   report, the runtime found) takes 7 ms; the rest is Electron's. The
   app's process holds 9 MB (RSS) with its window up.
 
+- A web build with a heavy [lazy view](ui/islands.md#lazy-views-lazy):
+  the split test's page (`crates/aio-cli/src/web/lazy.rs`) whose lazy view
+  also encodes a PNG and brotli-compresses text (`image` and `brotli`,
+  used by that view only). A release, served gzipped, a headless
+  Chromium with no cache and CPU ×4, 11 loads each, the median:
+
+  | | 0.3: one module, its names | names dropped | split |
+  |---|---|---|---|
+  | first download, gzip / brotli | 762 / 607 KB | 722 / 569 KB | **543 / 428 KB** |
+  | the lazy view's chunk, gzip | in the first download | in it | 178 KB, when shown |
+  | interactive (`aio:mounted`), 4G: 9 Mbit/s, 60 ms | 1705 ms | 1131 ms | **1006 ms** |
+  | interactive, Fast 3G: 1.6 Mbit/s, 150 ms | 4724 ms | 4579 ms | **3618 ms** |
+  | the lazy view shown, its first time, 4G / Fast 3G | 40 / 43 ms | 43 / 51 ms | 338 / 1101 ms |
+
+  The view's first show pays for its chunk, once; prefetch it with
+  `Defer`'s `Viewport` or `Hover` trigger. On localhost (no throttling)
+  a loaded machine's runs varied more than the split changed them.
+
 - `ax heap <app>` shows memory per cell (`--watch`: every 2 s);
   `ax metrics <app>` each cell's size.
 - Big state: keep large fields as [`aio::Big`](#7-share-big-fields-aiobig)
@@ -662,17 +687,6 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
 
 ## Gaps against aio
 
-- aio bundles browser `Worker` scripts written as
-  `new Worker(new URL("./w.ts", import.meta.url))`; aio-rs has no
-  worker bundling. Heavy work in aio-rs runs in Rust, off the cell's
-  thread (`spawn_blocking`), with the cell's own types and no message
-  copy across a boundary; a web build's own worker script is the app's to
-  ship as a file.
-- By a frame's stamp, aio is still ahead on Home and Tab over 1000
-  rows (Home: aio 9.1 ms, aio-rs 13.4 ms); by when the frame ran,
-  aio-rs is ahead on every key ([measured](aio-vs-aio-rs.md#key-to-paint)).
-  An aio-rs key crosses from the page to the app and back (~1.2 ms)
-  before a frame can show it; aio's work starts in the page.
 - aio's renderer yields at a 12 ms frame deadline mid-render; air runs
   the holes a change woke in one batch per tick, by design: one change
   waking 10 000 holes (one signal read by 10 000 rows' text, a release
@@ -684,9 +698,11 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
   windows, rows by props).
 - `ax components` has no time per component in the tree (aio DevTools'
   `lastRenderMs`): the time is per render, in `--renders`.
-- aio's `blocking.cancel(id)` stops a running task; `spawn_blocking`
-  can't be stopped once it runs: `cx.abort(key)` drops the effect at
-  its next await, and the thread's result is thrown away.
+- aio's `blocking.cancel(id)` stops a running task; natively
+  `spawn_blocking` can't be stopped once it runs: `cx.abort(key)` drops
+  the effect at its next await, and the thread's result is thrown away
+  (`blocking` hands its work a `Cancel` to check). In a browser
+  `off_thread` work is stopped at once: its worker ends.
 
 ## API
 

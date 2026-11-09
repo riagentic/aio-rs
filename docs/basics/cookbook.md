@@ -275,8 +275,10 @@ rt.block_on(async {
   `remote.call_confirmed(..)` waits for one call's answer.
 - A standalone app commits in-process before the call returns, so there
   is nothing to predict.
-- Gap: aio's `useOptimistic` (a pending value layered over any state in
-  a view) has no aio-rs hook; prediction lives in the synced copy.
+- What a copy doesn't predict (a server fn's effect, a `predict = false`
+  call) shows ahead with `use_optimistic(base, apply)`, aio's
+  `useOptimistic`: the actions added fold onto the value until it
+  changes, or `clear()` drops them (a refusal that changed nothing).
 
 [Sync: offline and reconnects](../state/sync.md#offline-and-reconnects).
 
@@ -720,13 +722,13 @@ assert_eq!(ui.text("account"), "Signed in as ana");
 # }
 ```
 
-- In the browser build `aio::web::use_user()` gives exactly that value
-  and `aio::web::sign_out()` ends the session. `aio::kit::SignIn {
-  client, on_signed }` is the form itself, on an `aio::auth::client::Client`.
-- Gap: aio's `useUser` works in every window. In an aio-rs desktop or
-  Android window there is no such hook; the user is the server's
-  `Caller` (`cx.by()`, `cx.role()`), and a view shows what `visible`
-  sent it for that user.
+- `aio::kit::use_user()` gives exactly that value (aio's `useUser`):
+  `Account { who: use_user().get() }` in a hole. In a page it asks the
+  page's server; in a desktop or Android window it is whom this app's
+  `SignIn` signed in. `aio::kit::SignIn { client, on_signed }` is the
+  form itself, on an `aio::auth::client::Client`.
+- Signing out: in a page `aio::web::sign_out()`; in a window
+  `Client::logout`, then `aio::kit::set_user(None)`.
 
 [Security: accounts](../auth/README.md).
 

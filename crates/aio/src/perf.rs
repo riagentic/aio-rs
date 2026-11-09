@@ -324,6 +324,24 @@ mod tests {
         }
     }
 
+    /// aio's `perfCheck: "off"` took its reduce timers off the dispatch
+    /// path; aio-rs's per-call accounting (the phases' clock reads, the
+    /// budget, `ax cost`'s meter, the vitals' last call) is always on
+    /// because it costs about 0.2 µs (0.6 µs in a debug build; measured).
+    #[test]
+    fn a_calls_accounting_costs_under_two_microseconds() {
+        let n = 20_000u32;
+        let t = Instant::now();
+        for _ in 0..n {
+            let t0 = Instant::now();
+            let (t1, t2, t3) = (Instant::now(), Instant::now(), Instant::now());
+            method("perf-probe", "m", Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() });
+        }
+        let each = t.elapsed() / n;
+        eprintln!("a call's accounting: {each:?}");
+        assert!(each < Duration::from_micros(2), "{each:?}");
+    }
+
     #[test]
     fn a_violation_says_where_the_time_went_and_the_fix() {
         let p = Phases { clone: MS / 10, apply: 40 * MS, check: Duration::ZERO, commit: 2 * MS };

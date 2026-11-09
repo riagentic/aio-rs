@@ -149,6 +149,8 @@ def main():
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
     env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
     env["AIORT_NO_WARM"] = "1"
+    # ax's answers as text, as a person reads them (a pipe would get JSON).
+    env["AIORT_OUTPUT"] = "text"
     here = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
     run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], ROOT, env)
     ax = here / "debug" / ("ax.exe" if WINDOWS else "ax")

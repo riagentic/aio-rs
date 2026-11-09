@@ -1,5 +1,6 @@
 //! `ax`: aio-rs's command (aio: `am`). Read-only views into an app's store work
 //! while the app runs (SQLite WAL readers never block its writer).
+mod add;
 mod agent;
 /// APKs: made by the NDK and Gradle (Linux, macOS, Windows).
 mod android;
@@ -8,6 +9,7 @@ mod boxlab;
 mod build;
 mod bundle;
 mod cdp;
+mod check;
 mod components;
 mod control;
 mod create;
@@ -16,6 +18,7 @@ mod dev;
 mod display;
 mod doctor;
 mod eval;
+mod fetched;
 mod fleet;
 mod freeze;
 mod headless;
@@ -24,6 +27,7 @@ mod icon;
 /// `ax install --android`: next to the APK build.
 mod install;
 mod installed;
+mod ios;
 mod lab;
 mod lint;
 mod live;
@@ -45,6 +49,7 @@ mod release;
 mod reload;
 mod remote;
 mod replayed;
+mod runs;
 mod service;
 mod setup;
 mod shape;
@@ -63,6 +68,7 @@ mod testrun;
 mod theme;
 mod travel;
 mod trust;
+mod tsgen;
 mod ui;
 mod upgrade;
 mod verbs;
@@ -70,6 +76,7 @@ mod version;
 mod video;
 mod watch;
 mod web;
+mod zig;
 
 use rusqlite::{Connection, OpenFlags, params};
 use std::path::{Path, PathBuf};
@@ -332,6 +339,17 @@ fn now_ms() -> i64 {
 }
 
 /// App `app`'s library (the package in the folder of its aio.toml) and that folder.
+/// A call's arguments: `--body` (the one object), else the words or `--args`.
+fn call_body(words: &[&str], args: Option<&str>, body: Option<&str>) -> Result<serde_json::Value, String> {
+    match body {
+        Some(_) if !words.is_empty() || args.is_some() => {
+            Err("--body is the one argument: no words or --args with it".into())
+        }
+        Some(b) => live::body(b),
+        None => live::call_args(words, args),
+    }
+}
+
 fn app_lib(app: &str) -> Result<(String, PathBuf), String> {
     let meta = dev::metadata()?;
     let pkg = dev::locate(&meta, app)?;
@@ -371,6 +389,24 @@ fn states_of(
     replayed::states(&lib, &dir, file, ask)
 }
 
+/// The version every build of this run says (pure): `--app-version`, else
+/// `AIORT_BUILD_VERSION`, else aio's `AIO_BUILD_VERSION`.
+fn build_version(flag: Option<&str>, ours: Option<String>, aios: Option<String>) -> Option<String> {
+    flag.map(String::from).or(ours).or(aios)
+}
+
+/// `ax call --wait <s>`: its answer waited for that long at most.
+fn call_wait(s: Option<&str>) -> Result<Option<std::time::Duration>, String> {
+    s.map(|s| {
+        s.parse::<f64>()
+            .ok()
+            .filter(|s| *s > 0.0 && s.is_finite())
+            .map(std::time::Duration::from_secs_f64)
+            .ok_or(format!("--wait {s}: seconds, more than 0"))
+    })
+    .transpose()
+}
+
 /// Who the verbs that reach the running app are: `--as`, else this OS user.
 fn user(as_user: Option<&str>) -> String {
     as_user.map(String::from).unwrap_or_else(|| {
@@ -386,6 +422,18 @@ fn door(t: &Target, cell: &str) -> Result<aio::sync::Link, String> {
     }
     let addr = aio::sync::door(&t.id, &t.plan.data, cell).map_err(|e| e.to_string())?;
     Ok(aio::sync::Link { addr, token: String::new(), root: None })
+}
+
+/// The cells whose doors the running app `t` has open (its socket folder;
+/// a Windows pipe's name), and those its store holds, sorted.
+fn doors(t: &Target) -> Vec<String> {
+    let mut cells: Vec<String> = aio::door::open(&t.id, &t.plan.data)
+        .into_iter()
+        .chain(open(&t.store()).and_then(|db| metrics::cells(&db)).unwrap_or_default())
+        .collect();
+    cells.sort();
+    cells.dedup();
+    cells
 }
 
 /// Live from the running app; else the stored snapshot, saying why.
@@ -529,8 +577,8 @@ fn scratch_current(at: &Path, stamp: &str) -> bool {
     at.join("Cargo.toml").is_file() && std::fs::read_to_string(at.join(WARM_STAMP)).is_ok_and(|s| s == stamp)
 }
 
-/// Whether `ax setup` (the installers' last step) starts `ax setup --warm`
-/// in the background (pure): not for `--check`, else as `ax create` warms.
+/// Whether `ax setup` (the installers' last step) runs `ax setup --warm`'s
+/// build before it returns (pure): not for `--check`, else as `ax create` warms.
 fn setup_warms(check: bool, terminal: bool, env: Option<&str>) -> bool {
     !check && dev::warms_after_create(terminal, false, env)
 }
@@ -747,6 +795,66 @@ fn vitals_say_each_layer_and_the_likely_cause() {
 }
 
 /// The problem reports: a list, or the one whose id starts with `id`.
+/// `ax report <app> --new` (aio's `am report`): a problem report filed now.
+/// A running app files it itself (its cells, calls and what its bus heard);
+/// a stopped one's is written here: its log's newest lines and its last
+/// versions, no state (what `#[redact]` withholds is the app's to know).
+fn new_report(t: &Target, title: &str, json: bool) -> Out {
+    let made = match aio::paths::running(&t.plan.data) {
+        true => {
+            let ask = serde_json::json!({ "t": "report", "title": title });
+            let filed = doors(t).into_iter().find_map(|c| {
+                let link = door(t, &c).ok()?;
+                aio::rt()
+                    .block_on(async { aio::sync::Live::connect(&link, &c, &user(None)).await?.ask(ask.clone()).await })
+                    .ok()
+            });
+            PathBuf::from(
+                filed
+                    .and_then(|p| p.as_str().map(String::from))
+                    .ok_or(format!("{} runs, and filed no report: its doors refused", t.name))?,
+            )
+        }
+        false => {
+            let last: serde_json::Value = std::fs::read(t.plan.data.join("health.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+            let about = aio::report::About {
+                id: t.id.clone(),
+                version: last["version"].as_str().unwrap_or("?").into(),
+                dir: t.plan.data.join("reports"),
+                log: t.plan.logs.join("app.log"),
+                channel: String::new(),
+                keep: aio::report::KEEP,
+                auto: false,
+                args: false,
+            };
+            let at = now_ms();
+            let id = format!("{}-ax", chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ"));
+            let logs: Vec<String> =
+                log_lines(&t.plan.logs, aio::report::LOG_LINES).unwrap_or_default().lines().map(String::from).collect();
+            let x = aio::report::Context {
+                withheld: vec!["the app wasn't running: no state taken".into()],
+                ..Default::default()
+            };
+            let mut r = aio::report::build(&about, &id, at, "user", title, None, &logs, &x);
+            r["app"]["aio"] = last["aio"].clone();
+            r["app"]["pid"] = serde_json::Value::Null;
+            aio::paths::private_dir(&about.dir).map_err(|e| format!("{}: {e}", about.dir.display()))?;
+            let p = about.dir.join(format!("{id}.json"));
+            let text = format!("{}\n", serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?);
+            aio::paths::write_atomic(&p, text.as_bytes(), true).map_err(|e| format!("{}: {e}", p.display()))?;
+            p
+        }
+    };
+    let id = made.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    match json {
+        true => Ok(serde_json::json!({ "id": id, "file": made }).to_string()),
+        false => Ok(format!("filed report {id}: {} (ax report {} {id})", made.display(), t.name)),
+    }
+}
+
 fn report(data: &Path, id: Option<&str>, json: bool) -> Out {
     let dir = data.join("reports");
     let all = aio::report::list(&dir);
@@ -947,8 +1055,9 @@ fn run(args: &[String]) -> Out {
     };
     // The window's DevTools protocol: `--cdp`'s port, else the app's own door.
     let reach = |t: &Target| cdp::reach(value("--cdp"), cdp::recorded(&t.plan), cdp::door(&t.id, &t.plan));
-    if let Some(v) = value("--app-version") {
-        version::ask(v)?;
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let Some(v) = build_version(value("--app-version"), var("AIORT_BUILD_VERSION"), var("AIO_BUILD_VERSION")) {
+        version::ask(&v)?;
     }
     if let Some(d) = value("--out") {
         build::ask_out(d)?;
@@ -967,10 +1076,11 @@ fn run(args: &[String]) -> Out {
         }
         ("dev", [name, rest @ ..]) if rest.contains(&"--web") => web::dev(name, web::Serve::parse(rest)?),
         ("dev", [name, ..]) => dev::run(name, &pos[1..]),
+        ("check", [name]) => check::run(name, has("--release")),
         ("test", [name]) if has("--android") => install::lane(name, value("--device")),
         ("test", [name]) if has("--mutants") => testrun::mutants(name),
         ("test", [name, filter @ ..]) if filter.len() <= 1 => {
-            testrun::run(name, filter.first().copied(), value("--video"), value("--pace"))
+            testrun::run(name, filter.first().copied(), value("--video"), (value("--pace"), value("--video-scheme")))
         }
         ("preview", [app, component, props @ ..]) if props.len() <= 1 => {
             let (lib, dir) = app_lib(app)?;
@@ -1028,9 +1138,11 @@ fn run(args: &[String]) -> Out {
             }
             Ok(made.said(json))
         }
-        ("pin", [w]) if pin::is_target(w) => pin::run(None, Some(w), has("--major"), json),
+        ("add", [app, "page", name]) => add::page(&pin::root_of(Some(app))?, name, json),
+        ("add", [app, kind, name]) => add::run(&pin::root_of(Some(app))?, add::Kind::of(kind)?, name, json),
+        ("pin", [w]) if pin::is_target(w) => pin::run(None, Some(w), (has("--major"), has("--force")), json),
         ("pin", [app, rest @ ..]) if rest.len() <= 1 => {
-            pin::run(Some(app), rest.first().copied(), has("--major"), json)
+            pin::run(Some(app), rest.first().copied(), (has("--major"), has("--force")), json)
         }
         ("upgrade", rest) if rest.len() <= 1 => upgrade::upgrade(rest.first().copied(), value("--aio").map(Path::new)),
         ("uninstall", []) => {
@@ -1044,7 +1156,9 @@ fn run(args: &[String]) -> Out {
                 has("--windows").then_some("x86_64-pc-windows-gnu").into_iter().chain(value("--target")).collect();
             release::aio(&targets, value("--dir").map(Path::new), value("--url").unwrap_or(""))
         }
-        ("release", [name]) if has("--workflow") => release::write_workflow(name, value("--channel")),
+        ("release", [name]) if has("--workflow") => {
+            release::write_workflow(name, value("--channel"), (has("--pages"), has("--web")))
+        }
         ("release", [name]) => {
             let list = |f| value(f).map(|v| v.split(',').filter(|v| !v.is_empty()).collect()).unwrap_or_default();
             let mut platforms: Vec<&str> = list("--platforms");
@@ -1161,6 +1275,7 @@ fn run(args: &[String]) -> Out {
             false => Err("--debug is an Android build's: ax build <app> --android --debug".into()),
         },
         ("build", [app]) if has("--web") => web::build(app, has("--dev")).map(|(said, _)| said),
+        ("build", [app]) if has("--ios") => ios::build(app).map(|(said, _)| said),
         ("build", [app]) => {
             // The kind flags name targets too; --deb and --appimage come with the bundle.
             let mut select: Vec<&str> = value("--targets").into_iter().collect();
@@ -1170,6 +1285,9 @@ fn run(args: &[String]) -> Out {
             }
             select.extend(["--deb", "--appimage"].iter().filter(|f| has(f)).map(|f| &f[2..]));
             let select = select.join(",");
+            if has("--force") {
+                eprintln!("ax build: {}", build::force(&dev::metadata()?)?);
+            }
             let since = std::time::SystemTime::now();
             let smoke = match (has("--smoke-strict"), has("--smoke")) {
                 (true, _) => smoke::Smoke::Strict,
@@ -1316,6 +1434,7 @@ fn run(args: &[String]) -> Out {
             };
             if ok { Ok(text) } else { Err(text) }
         }
+        ("kill", []) if has("--stale") => stop::kill_stale(&stop::stale(), json),
         ("kill", [app]) => {
             let s = stop::stopped(app, &t(app)?, true, Some(std::time::Duration::ZERO))?;
             Ok(if json { s.json().to_string() } else { s.said() })
@@ -1354,6 +1473,40 @@ fn run(args: &[String]) -> Out {
                 false => start::each(&names, &one),
             }
         }
+        ("watch", [app, dirs @ ..]) => {
+            let t = t(app)?;
+            let root = pin::root_of(Some(app))?;
+            let dirs: Vec<PathBuf> = match dirs {
+                [] => vec![root.join("src")],
+                d => d.iter().map(|d| root.join(d)).collect(),
+            };
+            if let Some(d) = dirs.iter().find(|d| !d.is_dir()) {
+                return Err(format!("ax watch: {} is no folder of {app}: name one to watch (src)", d.display()));
+            }
+            let (_w, saves) = watch::Watch::new(&dirs)?;
+            let typed = start::home_args(&ask);
+            let wait = wait()?;
+            let said = |r: Out| match r {
+                Ok(line) => println!("{line}"),
+                Err(e) => eprintln!("ax watch: {e} (the last good build runs on; the next save tries again)"),
+            };
+            eprintln!(
+                "ax watch: {} for changes: the app restarts, built anew, on each save (Ctrl-C ends it)",
+                watch::describe(&dirs, &root)
+            );
+            start::watch(
+                &saves,
+                aio::paths::running(&t.plan.data),
+                &|| start::run(&t, &app_bin(&t, &typed)?, &typed, value("--display"), start::WAIT),
+                &|| start::restart(app, &t, &|a| app_bin(&t, a), &typed, wait),
+                &said,
+                &root,
+            );
+            Err("ax watch: its watcher stopped".into())
+        }
+        ("run", [link, app @ ..]) if app.len() <= 1 => {
+            fetched::run(link, app.first().copied(), value("--ref"), has("--yes"), has("--dev"))
+        }
         ("start" | "restart", [app, words @ ..]) => {
             let t = t(app)?;
             let wait = match value("--wait") {
@@ -1385,6 +1538,9 @@ fn run(args: &[String]) -> Out {
             let cells = metrics::uses(&db, &|cell| door(&t, cell).ok(), &user(value("--as")))?;
             metrics::show(health.as_ref(), &cells, metrics::schedules(&db)?, json)
         }
+        ("report", [app]) if has("--new") => {
+            new_report(&t(app)?, value("--title").unwrap_or("filed by ax report"), json)
+        }
         ("report", [app]) => report(&t(app)?.plan.data, None, json),
         ("report", [app, id]) => report(&t(app)?.plan.data, Some(id), json),
         ("state", [app, cell, path @ ..]) if has("--watch") => {
@@ -1393,25 +1549,42 @@ fn run(args: &[String]) -> Out {
         // Under --json, the state alone (the path "" is all of it).
         ("state", [app, cell]) => state(&t(app)?, cell, json.then_some(""), value("--as")),
         ("state", [app, cell, path]) => state(&t(app)?, cell, Some(path), value("--as")),
-        ("call", [app, cell, method, words @ ..]) => {
-            let args = match value("--body") {
-                Some(_) if !words.is_empty() || value("--args").is_some() => {
-                    return Err("--body is the one argument: no words or --args with it".into());
+        ("call", [app, words @ ..]) if value("--fn").is_some() => {
+            let t = t(app)?;
+            let args = call_body(words, value("--args"), value("--body"))?;
+            let name = value("--fn").unwrap_or_default();
+            // Server functions are served on the doors of the cells whose launch gave them: each is tried.
+            let who = user(value("--as"));
+            let mut last = Err(format!("{} has no cell to reach it by", t.name));
+            for cell in doors(&t) {
+                let Ok(link) = door(&t, &cell) else { continue };
+                let wait = call_wait(value("--wait"))?;
+                last = live::call_within(
+                    &link,
+                    &cell,
+                    live::Called::Fn(name),
+                    args.clone(),
+                    (&who, has("--as-server")),
+                    wait,
+                );
+                if !last.as_ref().is_err_and(|e| e.contains("is not served by this app")) {
+                    break;
                 }
-                Some(b) => live::body(b)?,
-                None => live::call_args(words, value("--args"))?,
-            };
-            let within = match value("--wait") {
-                Some(s) => Some(
-                    s.parse::<f64>()
-                        .ok()
-                        .filter(|s| *s > 0.0 && s.is_finite())
-                        .map(std::time::Duration::from_secs_f64)
-                        .ok_or(format!("--wait {s}: seconds, more than 0"))?,
-                ),
-                None => None,
-            };
-            live::call_within(&door(&t(app)?, cell)?, cell, method, args, &user(value("--as")), within)
+            }
+            last
+        }
+        ("call", [app, cell, method, words @ ..]) => {
+            let args = call_body(words, value("--args"), value("--body"))?;
+            let who = user(value("--as"));
+            let link = door(&t(app)?, cell)?;
+            live::call_within(
+                &link,
+                cell,
+                live::Called::Method(method),
+                args,
+                (&who, has("--as-server")),
+                call_wait(value("--wait"))?,
+            )
         }
         ("expect", [app, cell, path, op, want @ ..]) => {
             let wait = match value("--wait") {
@@ -1529,6 +1702,14 @@ fn run(args: &[String]) -> Out {
                 let mut s = cdp::window_within(&at, window()?, wait_client()?).await?;
                 testgen::run(&mut s, app, &out).await
             })
+        }
+        ("where", [app]) => runs::run(app, None, json),
+        ("where", [app, item]) => runs::run(app, Some(item), json),
+        ("tsgen", [app]) => {
+            let (_, dir) = app_lib(app)?;
+            let out = value("--out").map_or_else(|| dir.join(tsgen::OUT).display().to_string(), String::from);
+            let ts = tsgen::render(app, &tsgen::sources(&dir)?)?;
+            write_or_say(&out, ts, "its shared cells' state and #[client] methods, typed")
         }
         ("control", [app]) => {
             let port = match value("--port") {
@@ -1841,22 +2022,16 @@ fn run(args: &[String]) -> Out {
         ("setup", []) => {
             let said = setup::run(has("--check"))?;
             // A first app's start is a launch, not aio-rs's 20 s build: built
-            // now, in the background (the installers run `ax setup`).
+            // now, before setup returns (the installers run `ax setup`), so
+            // no first `ax dev` waits on it or races it. Ctrl-C leaves the
+            // rest to the first build.
             let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr()) && !json;
             let env = std::env::var("AIORT_NO_WARM").ok();
             if !setup_warms(has("--check"), terminal, env.as_deref()) {
                 return Ok(said);
             }
-            let here = std::env::current_dir().map_err(|e| e.to_string())?;
-            let log = warm_target(&here).join("aio").join("setup-warm.log");
-            Ok(match dev::in_background(&here, &["setup", "--warm"], &log) {
-                Ok(()) => format!(
-                    "{said}\nwarm: building aio-rs for ax dev in the background ({}), so a first app starts in \
-                     seconds (AIORT_NO_WARM=1: not)",
-                    log.display()
-                ),
-                Err(e) => format!("{said}\nwarm: not started: {e}"),
-            })
+            eprintln!("{said}\nwarm: building aio-rs for ax dev, once per machine (AIORT_NO_WARM=1: not)…");
+            Ok(setup_warm(None).unwrap_or_else(|e| format!("{e}; the first ax dev builds it")))
         }
         ("pair", [app]) => pair_code(&t(app)?, has("--plain")),
         ("pair", [app, addr, code]) => pair(&t(app)?, addr, code),
@@ -1998,12 +2173,36 @@ fn as_json(code: u8, out: &Out) -> String {
     v.to_string()
 }
 
+/// The verbs whose answer is a document or a stream, never wrapped: an
+/// agent brief, a test, a type table, a state to load back, log lines.
+const DOCUMENTS: [&str; 10] =
+    ["dev", "lint", "agent", "testgen", "record", "peer", "snapshot", "logs", "help", "version"];
+
+/// Whether ax answers in JSON though `--json` wasn't typed (aio's `am`: a
+/// pipe is read by a program): its stdout isn't a terminal, or
+/// `AIORT_OUTPUT=json`; `--text` or `AIORT_OUTPUT=text` keeps the text
+/// (pure). A document verb and help or version are never wrapped.
+fn piped_json(args: &[String], terminal: bool, output: Option<&str>) -> bool {
+    let Some(verb) = args.first() else { return false };
+    let flags = || args.iter().take_while(|a| *a != "--");
+    let asked = flags().any(|a| ["--json", "--text", "--help", "-h", "--version", "-V"].contains(&a.as_str()));
+    if asked || DOCUMENTS.contains(&verb.as_str()) || verb.starts_with('-') {
+        return false;
+    }
+    match output {
+        Some("text") => false,
+        Some("json") => true,
+        _ => !terminal,
+    }
+}
+
 /// Run beside an app's folder (`ax dev notes` where `notes/` is, in no
 /// workspace): the app named that folder, as if after `cd notes` (pure:
 /// which folder, if any). Only the verbs on an app's source; `in_workspace`:
 /// a Cargo.toml here or above, so nothing to step into.
 fn steps_in<'a>(args: &'a [String], in_workspace: bool, has_manifest: &dyn Fn(&str) -> bool) -> Option<&'a str> {
-    const SOURCE: [&str; 9] = ["dev", "test", "build", "release", "keygen", "preview", "config", "lab", "install"];
+    const SOURCE: [&str; 10] =
+        ["dev", "test", "check", "build", "release", "keygen", "preview", "config", "lab", "install"];
     let (verb, app) = (args.first()?, args.get(1)?);
     let plain = !app.starts_with('-') && !app.contains(['/', '\\', '.']);
     (SOURCE.contains(&verb.as_str()) && plain && !in_workspace && has_manifest(app)).then_some(app.as_str())
@@ -2018,6 +2217,11 @@ fn main() -> ExitCode {
     if let Some(code) = prebuilt::hook() {
         return code;
     }
+    // ax as a macOS cross build's C compiler and linker (zig's).
+    if let Some(code) = zig::hook() {
+        return code;
+    }
+    _ = fetched::PERSONS_TOOLCHAIN.set(std::env::var_os("RUSTUP_TOOLCHAIN"));
     // Every cargo ax runs builds into one folder per machine and toolchain.
     // SAFETY: before any thread is started.
     unsafe { dev::keep_persons_target() };
@@ -2028,6 +2232,11 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("lint") {
         shared();
         return lint::main(&args[1..]);
+    }
+    let mut args = args;
+    let output = std::env::var("AIORT_OUTPUT").ok();
+    if piped_json(&args, std::io::IsTerminal::is_terminal(&std::io::stdout()), output.as_deref()) {
+        args.insert(1, "--json".into());
     }
     let json = args.first().map(String::as_str) != Some("dev")
         && args.iter().take_while(|a| *a != "--").any(|a| a == "--json");
@@ -2075,12 +2284,48 @@ mod tests {
     use super::*;
     use aio::prelude::*;
 
+    /// A method's and a server function's arguments read the same: words, `--args` or `--body`.
+    #[test]
+    fn a_calls_body_is_its_one_object_and_nothing_with_it() {
+        let j = aio::serde_json::json!([{ "items": [1, 2] }]);
+        assert_eq!(call_body(&[], None, Some(r#"{"items":[1,2]}"#)), Ok(j.clone()));
+        assert_eq!(call_body(&["items=[1,2]"], None, None), Ok(j));
+        assert!(call_body(&["x"], None, Some("{}")).unwrap_err().contains("no words or --args"));
+        assert!(call_body(&[], Some("[]"), Some("{}")).unwrap_err().contains("no words or --args"));
+    }
+
     #[test]
     fn the_share_link_carries_the_key_encoded() {
         let p = aio::serde_json::json!({ "host": "192.0.2.7", "port": 8443, "tls": true, "key": "ab12" });
         assert_eq!(share_link(&p), "https://192.0.2.7:8443/?token=ab12");
         let p = aio::serde_json::json!({ "host": "::1", "port": 80, "tls": false, "key": "a b&c" });
         assert_eq!(share_link(&p), "http://[::1]:80/?token=a%20b%26c");
+    }
+
+    #[test]
+    fn the_build_version_is_the_flags_then_aio_rs_then_aios_variable() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(build_version(Some("1.0.0"), s("2.0.0"), s("3.0.0")), s("1.0.0"));
+        assert_eq!(build_version(None, s("2.0.0"), s("3.0.0")), s("2.0.0"));
+        assert_eq!(build_version(None, None, s("3.0.0")), s("3.0.0"), "aio's AIO_BUILD_VERSION");
+        assert_eq!(build_version(None, None, None), None);
+    }
+
+    #[test]
+    fn a_pipe_gets_json_unless_text_is_asked_and_documents_never() {
+        let a = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert!(piped_json(&a("state notes counter"), false, None), "a pipe: aio's am");
+        assert!(!piped_json(&a("state notes counter"), true, None), "a terminal: text");
+        assert!(piped_json(&a("state notes counter"), true, Some("json")));
+        assert!(!piped_json(&a("state notes counter"), false, Some("text")));
+        assert!(!piped_json(&a("state notes counter --text"), false, None));
+        assert!(!piped_json(&a("state notes counter --json"), false, None), "asked already");
+        assert!(!piped_json(&a("call notes c m -- --text"), true, Some("text")));
+        assert!(piped_json(&a("call notes c m -- --text"), false, None), "an arg, not ax's flag");
+        for doc in ["agent", "snapshot notes", "logs notes", "dev notes", "lint notes", "help"] {
+            assert!(!piped_json(&a(doc), false, Some("json")), "{doc}");
+        }
+        assert!(!piped_json(&a("--version"), false, None) && !piped_json(&a("version --help"), false, None));
     }
 
     #[test]
@@ -2447,6 +2692,25 @@ mod tests {
         assert!(t.plan.data.ends_with("instances/agent1/no-such-app-0a1b/data"), "{:?}", t.plan.data);
         let both = aio::paths::Ask { profile: Some("x".into()), ..none };
         assert!(target::of("a@y", &both).unwrap_err().contains("both name a profile"));
+    }
+
+    #[test]
+    fn a_report_is_filed_for_a_stopped_app_from_its_log_without_state() {
+        let d = tempfile::tempdir().unwrap();
+        let home = aio::paths::Ask { home: Some(d.path().display().to_string()), ..Default::default() };
+        let t = target::of("no-such-app-0a1b", &home).unwrap();
+        std::fs::create_dir_all(&t.plan.logs).unwrap();
+        std::fs::write(t.plan.logs.join("app.log"), "2026-11-08T10:00:00.000Z ERROR boom token=s3cret\n").unwrap();
+        let said: serde_json::Value = serde_json::from_str(&new_report(&t, "it froze", true).unwrap()).unwrap();
+        let file = PathBuf::from(said["file"].as_str().unwrap());
+        assert!(file.starts_with(t.plan.data.join("reports")), "{file:?}");
+        let r: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!((r["title"].as_str(), r["kind"].as_str()), (Some("it froze"), Some("user")));
+        assert_eq!(r["state"], serde_json::json!({}), "no state of a stopped app");
+        let logs = r["logs"].to_string();
+        assert!(logs.contains("ERROR boom") && !logs.contains("s3cret"), "masked: {logs}");
+        let listed = report(&t.plan.data, None, false).unwrap();
+        assert!(listed.contains("it froze"), "{listed}");
     }
 
     #[test]

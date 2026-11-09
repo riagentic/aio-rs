@@ -265,7 +265,47 @@ pub fn apply(v: &mut Value, ops: &[Op]) -> Result<(), String> {
 /// value digests the same, whatever its key order), the first 16 bytes in
 /// hex. Part of the wire: both sides compare it.
 pub fn digest(v: &Value) -> String {
-    fn feed(v: &Value, h: &mut crate::sha256::Sha256) {
+    hashed(v, &|n| n.to_string())
+}
+
+/// [`digest`] as a JavaScript page can make it of what `JSON.parse` gave
+/// it (a client that says `digest: "js"` in its hello): each number as
+/// JavaScript writes the double it reads (`1.0` is `1`, `1e21` is `1e+21`,
+/// an integer past 2^53 the nearest double), so a page checks its copy
+/// against the server's without the server's number text.
+pub fn js_digest(v: &Value) -> String {
+    hashed(v, &|n| js_number(n.as_f64().unwrap_or(f64::NAN)))
+}
+
+/// `x` as JavaScript's `String(x)` writes it (pure): the shortest digits
+/// that read back as `x`, in plain form from 1e-6 up to 1e21, else with an
+/// exponent; `-0` is `0`.
+pub fn js_number(x: f64) -> String {
+    if x == 0.0 {
+        return "0".into();
+    }
+    // Rust's shortest round-trip digits and exponent: `d.ddde±x`.
+    let e = format!("{:e}", x.abs());
+    let (mant, exp) = e.split_once('e').unwrap_or((&e, "0"));
+    let digits: String = mant.chars().filter(char::is_ascii_digit).collect();
+    let (k, n) = (digits.len() as i64, exp.parse::<i64>().unwrap_or(0) + 1);
+    let sign = if x < 0.0 { "-" } else { "" };
+    let body = match () {
+        () if k <= n && n <= 21 => format!("{digits}{}", "0".repeat((n - k) as usize)),
+        () if 0 < n && n <= 21 => format!("{}.{}", &digits[..n as usize], &digits[n as usize..]),
+        () if -6 < n && n <= 0 => format!("0.{}{digits}", "0".repeat((-n) as usize)),
+        () => {
+            let rest = if k > 1 { format!(".{}", &digits[1..]) } else { String::new() };
+            format!("{}{rest}e{}{}", &digits[..1], if n > 0 { "+" } else { "-" }, (n - 1).abs())
+        }
+    };
+    format!("{sign}{body}")
+}
+
+/// SHA-256 of `v`'s JSON, its object keys sorted and each number as
+/// `number` writes it; the first 16 bytes in hex.
+fn hashed(v: &Value, number: &dyn Fn(&serde_json::Number) -> String) -> String {
+    fn feed(v: &Value, h: &mut crate::sha256::Sha256, number: &dyn Fn(&serde_json::Number) -> String) {
         let list = |h: &mut crate::sha256::Sha256, i: usize| h.update(if i == 0 { &b""[..] } else { b"," });
         match v {
             Value::Object(m) => {
@@ -276,7 +316,7 @@ pub fn digest(v: &Value) -> String {
                     list(h, i);
                     h.update(Value::String(k.clone()).to_string().as_bytes());
                     h.update(b":");
-                    feed(&m[k], h);
+                    feed(&m[k], h, number);
                 }
                 h.update(b"}");
             }
@@ -284,15 +324,16 @@ pub fn digest(v: &Value) -> String {
                 h.update(b"[");
                 for (i, x) in a.iter().enumerate() {
                     list(h, i);
-                    feed(x, h);
+                    feed(x, h, number);
                 }
                 h.update(b"]");
             }
+            Value::Number(n) => h.update(number(n).as_bytes()),
             x => h.update(x.to_string().as_bytes()),
         }
     }
     let mut h = crate::sha256::Sha256::new();
-    feed(v, &mut h);
+    feed(v, &mut h, number);
     h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -300,6 +341,45 @@ pub fn digest(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The same text is parsed and digested by the JS client's tests.
+    const JS_FIXTURE: &str = r#"{"a":1.0,"big":9007199254740993,"e":1e21,"s":"q\"\n\u0001é","￿":0,"😀":-0.0,"f":1.5e-7,"m":[0.1,-2.5e-6,123e-20,18446744073709551615,[],{}]}"#;
+
+    #[test]
+    fn numbers_are_written_as_javascript_writes_them() {
+        for (x, js) in [
+            (1.0, "1"),
+            (-0.0, "0"),
+            (0.1, "0.1"),
+            (-2.5, "-2.5"),
+            (100.0, "100"),
+            (1e21, "1e+21"),
+            (1e20, "100000000000000000000"),
+            (123456789012345680000.0, "123456789012345680000"),
+            (1.5e-6, "0.0000015"),
+            (1e-7, "1e-7"),
+            (1.5e-7, "1.5e-7"),
+            (123e-20, "1.23e-18"),
+            (5e-324, "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (9007199254740993.0, "9007199254740992"),
+            (u64::MAX as f64, "18446744073709552000"),
+        ] {
+            assert_eq!(js_number(x), js, "{x:e}");
+        }
+    }
+
+    #[test]
+    fn the_js_digest_is_of_what_javascript_holds() {
+        let v: Value = serde_json::from_str(JS_FIXTURE).unwrap();
+        assert_eq!(js_digest(&v), "d927e64dc549c00e27bdf6711408285f");
+        // 1.0 and 1, and an integer past 2^53 and its nearest double, read the same in JS
+        let js: Value =
+            serde_json::from_str(&JS_FIXTURE.replace("1.0", "1").replace("9007199254740993", "9007199254740992"))
+                .unwrap();
+        assert_eq!(js_digest(&js), js_digest(&v));
+        assert_ne!(digest(&js), digest(&v), "the native digest keeps every digit");
+    }
 
     #[test]
     fn a_change_is_said_key_by_key_with_strings_quoted() {

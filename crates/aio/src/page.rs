@@ -195,6 +195,10 @@ pub fn render_probe(v: &crate::vitals::Vitals) -> String {
     )
 }
 
+/// A streamed page's views put in place as they arrive, before the
+/// page's view hydrates them (`air::ssr::stream`, `Http::painted`).
+pub const SWAP: &str = air::ssr::SWAP_JS;
+
 /// Keys pressed with nothing focused land on `<body>` (after a click on
 /// nothing, a dialog closed onto nothing); they go to the app's root
 /// element instead, down and up, so app-wide shortcuts work then too (aio
@@ -346,23 +350,30 @@ pub const DIALOG: &str = "(() => {
 })();";
 
 
-/// Dev builds only: the page's errors on the page (aio dev-overlay), where
+/// Dev builds only: the page's problems on the page (aio dev-overlay), where
 /// the person is looking. Plain DOM (the renderer may be what broke), one
 /// row per problem with a count (a per-frame failure is one problem),
-/// at most 20 rows, a small corner badge that never covers the page.
-/// `window.__aioDiag(title, detail, show)` adds one (`show`: the list open);
-/// `window.__aioDiagDrop(title)` takes those titled so away (a fixed build).
+/// newest first, at most 20 rows, a `clear`, a small corner badge (red for
+/// an error, amber for warnings only) that never covers the page.
+/// `window.__aioDiag(title, detail, show, level)` adds one (`show`: the list
+/// open; `level`: `error`, the default, or `warning`): the page's errors,
+/// the app's problems, a failed build, the live accessibility and contrast
+/// findings. `window.__aioDiagDrop(title)` takes those titled so away (a
+/// fixed build, a finding gone).
 pub const OVERLAY: &str = "(() => {
   const rows = new Map();
-  let root = null, list = null, badge = null, open = false, total = 0;
+  let root = null, list = null, badge = null, clear = null, open = false;
   const css = (el, s) => { el.style.cssText = s; return el; };
   const ensure = () => {
     if (root) return;
     root = css(document.createElement('div'), 'position:fixed;right:8px;bottom:8px;z-index:2147483647;max-width:min(560px,90vw);pointer-events:none;font:12px/1.4 ui-monospace,monospace');
     root.setAttribute('data-aio-dev', 'overlay');
     list = css(document.createElement('div'), 'display:none;max-height:40vh;overflow:auto;background:#1b1b1f;color:#f3f3f3;border-radius:6px;padding:6px 8px;margin-bottom:4px;pointer-events:auto');
-    badge = css(document.createElement('button'), 'float:right;pointer-events:auto;background:#b3261e;color:#fff;border:0;border-radius:10px;padding:2px 9px;cursor:pointer');
+    badge = css(document.createElement('button'), 'float:right;pointer-events:auto;color:#fff;border:0;border-radius:10px;padding:2px 9px;cursor:pointer');
     badge.onclick = () => { open = !open; draw(); };
+    clear = css(document.createElement('button'), 'margin-top:4px;background:none;color:inherit;border:1px solid #fff4;border-radius:4px;font:inherit;cursor:pointer');
+    clear.textContent = 'clear';
+    clear.onclick = () => { rows.clear(); draw(); };
     // In its own shadow root: the app's queries (a button, a div) never meet it.
     const own = root.attachShadow({ mode: 'open' });
     own.appendChild(list);
@@ -370,34 +381,38 @@ pub const OVERLAY: &str = "(() => {
     document.body.appendChild(root);
   };
   const draw = () => {
+    if (!rows.size) { if (root) root.remove(); root = null; open = false; return; }
+    ensure();
     list.textContent = '';
-    for (const r of rows.values()) {
-      const el = css(document.createElement('div'), 'white-space:pre-wrap');
+    const all = [...rows.values()].reverse();
+    for (const r of all) {
+      const el = css(document.createElement('div'), 'white-space:pre-wrap;color:' + (r.level === 'error' ? '#f2b8b5' : '#ffd8a8'));
       el.textContent = (r.count > 1 ? '×' + r.count + ' ' : '') + r.title + (r.detail ? ' — ' + r.detail : '');
       list.appendChild(el);
     }
-    badge.textContent = total + (total === 1 ? ' page error' : ' page errors');
+    list.appendChild(clear);
+    const total = all.reduce((n, r) => n + r.count, 0);
+    badge.style.background = all.some((r) => r.level === 'error') ? '#b3261e' : '#7a5900';
+    badge.textContent = total + (total === 1 ? ' problem' : ' problems');
     list.style.display = open ? 'block' : 'none';
   };
-  const add = (title, detail, show) => {
+  const add = (title, detail, show, level) => {
     title = String(title || 'error'); detail = String(detail || '');
     if (show) open = true;
     const k = title + '\\n' + detail, r = rows.get(k);
-    total++;
     if (r) r.count++;
     else {
       if (rows.size >= 20) rows.delete(rows.keys().next().value);
-      rows.set(k, { title, detail, count: 1 });
+      rows.set(k, { title, detail, count: 1, level: level === 'warning' ? 'warning' : 'error' });
     }
-    ensure();
     draw();
   };
   window.addEventListener('error', (e) => add(e.message, e.filename ? e.filename + ':' + e.lineno : ''));
   window.addEventListener('unhandledrejection', (e) => add('unhandled rejection', e.reason && e.reason.stack || e.reason));
   window.__aioDiag = add;
   window.__aioDiagDrop = (title) => {
-    for (const [k, r] of rows) if (r.title === title) { rows.delete(k); total -= r.count; }
-    if (root && !rows.size) { root.remove(); root = null; open = false; } else if (root) draw();
+    for (const [k, r] of rows) if (r.title === title) rows.delete(k);
+    draw();
   };
 })();";
 

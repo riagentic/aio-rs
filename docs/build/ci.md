@@ -18,6 +18,11 @@ starting point.
 | size | `ax build notes --sizes` | the release binary against its budget (`[build] budget_mb`, 10 by default, 15 on Windows), and which crates take the space |
 | docs | `cargo doc --no-deps` | broken links in your own API docs |
 
+`ax check notes` runs format, lint and tests in that order, stopping at
+the first that fails (aio's `deno task check` and `deno task test`);
+`ax check notes --release` adds the size and smoke steps, the automated
+part of [before a release](#before-a-release) in one command.
+
 - `ax test` is `cargo test` with what aio-rs's tests need: UI tests draw
   in the Electron runtime the app's window runs, headless (no display);
   `ax setup` fetches that runtime. `AIORT_RUNTIME=<folder>` points the
@@ -50,7 +55,7 @@ two ways:
   `Cargo.lock` then pins the commit.
 - **Check aio-rs out beside the app** and point the paths there, as the
   release workflow does: `actions/checkout` with `repository:
-  riagentic/aio-rs`, `ref: v0.3.0`, `path: aio-rs`, the app's own checkout
+  riagentic/aio-rs`, `ref: v0.4.0`, `path: aio-rs`, the app's own checkout
   at `path: app`, then rewrite each `path = "…/aio"`, `"…/aio-shell"` to
   `$GITHUB_WORKSPACE/aio-rs/crates/…`.
 
@@ -129,8 +134,8 @@ on:
 - `cargo audit` (or `cargo deny`): advisories for the dependencies
   appear without any change of yours.
 - `ax build notes --platforms linux,windows,macos`: the cross builds
-  (`--windows` needs `gcc-mingw-w64-x86-64` on Linux; a macOS bundle is
-  built on a Mac).
+  (`--windows` needs `gcc-mingw-w64-x86-64` on Linux; a macOS one Rust's
+  `*-apple-darwin` targets, zig comes with ax).
 - The tests against the newest aio-rs commit, to see a break before you
   move the pin.
 
@@ -138,7 +143,7 @@ on:
 
 The automated part, on the release commit:
 
-- [ ] CI green: fmt, `ax lint`, `ax test`, `ax build --smoke`.
+- [ ] CI green: fmt, `ax lint`, `ax test`, `ax build --smoke` (`ax check <app> --release` runs them all).
 - [ ] `ax build <app> --sizes` within budget.
 - [ ] `[app] version` raised where the data or the behaviour changed;
   a cell whose saved shape changed has its `version` and `migrate`
@@ -251,10 +256,8 @@ the one on the old renderer) as the trend's history.
 
 ## Not in aio-rs
 
-- aio's `deno task check` / `deno task test` pair and their workflow
-  template: aio-rs has `ax lint` and `ax test` (neither `am create` nor
-  `ax create` writes a CI file; `ax release <app> --workflow` writes one).
 - aio's lab boots throwaway containers and VMs; `ax lab` uses machines
   you already have.
-- aio's one-command validation of the whole release matrix: the hand
-  checks above stay a list.
+- aio's `check:matrix` boots every target example of aio itself; an
+  app's `ax check <app> --release` is the app's own gate, and the hand
+  checks on real machines above stay a list, as aio's runbook keeps its.

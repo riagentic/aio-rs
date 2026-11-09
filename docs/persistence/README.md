@@ -240,7 +240,10 @@ other acknowledged call is in the log.
    its place, said in the log and as `aio::Recovered`; with no good copy
    the boot is refused and the file kept as is.
 4. The file is checked to be aio-rs's (or, for a ported app, aio's); a
-   file with other tables is refused, never written.
+   file with other tables is refused, never written. A new file is made
+   whole under a temp name, flushed once and linked in only if nothing is
+   at the path yet (a crash leaves only a temp file, removed at step 2):
+   a first start opens in about 13 ms, not 31.
 5. The newest snapshot is read. If it was written by an older cell
    version, the file is first copied to `state.db.v<old>-<seq>.bak`.
 6. Retired cells are deleted, `#[table]` fields' tables made or brought
@@ -262,7 +265,8 @@ other acknowledged call is in the log.
    event.
 9. The good copy is refreshed if it is a day old; with `[data]
    snapshot_every = "15m"` also every 15 minutes while the app runs. A
-   copy that fails `quick_check` never replaces the last good one.
+   copy that fails `quick_check` never replaces the last good one; it is
+   written unsynced and flushed once before its rename.
 
 **One writer.** Each cell's store refuses writes when something else
 added to its log (a second process, a tool writing the file) or the file
@@ -518,9 +522,8 @@ counts twice, a set's `insert` keeps both). Prose needs
   reads and writes aio's layout as aio left it ([data](../migration/data.md)).
 - **`cellDefaults`.** `persist: "none"` for every cell is `[data]
   only_persist = true` (then only `#[cell(persist)]` cells are saved);
-  one cell's is `#[cell(persist = false)]`. A visibility filter is each
-  cell's own `visible = f`, checked against its type (an app-wide field
-  list can't be).
+  one cell's is `#[cell(persist = false)]`. `visible` for every cell is
+  `aio::visible_by_default(f)` ([visibility](../state/visibility.md)).
 - **Strict restore when rolling forward.** Data an older build wrote over
   a newer build's keeps the older build's own fields too; the newer build
   then refuses to drop them silently (declare them, or migrate them away).

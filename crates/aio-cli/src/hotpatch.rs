@@ -32,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Set by [`fat_build`] on cargo: ax was run as rustc's workspace wrapper;
 /// each crate's call is recorded in this folder.
-const RUSTC_ENV: &str = "AX_HOTPATCH_RUSTC";
+pub(crate) const RUSTC_ENV: &str = "AX_HOTPATCH_RUSTC";
 /// Set on rustc for the app crate: ax was run as its linker; the link args
 /// go to this file and no binary is linked.
 const LINK_ENV: &str = "AX_HOTPATCH_LINK";
@@ -58,10 +58,10 @@ pub fn hook() -> Option<ExitCode> {
 
 /// One crate's rustc call: args (the first is rustc), env and folder.
 #[derive(Clone, Debug)]
-struct Rustc {
-    args: Vec<String>,
-    envs: Vec<(String, String)>,
-    cwd: PathBuf,
+pub(crate) struct Rustc {
+    pub(crate) args: Vec<String>,
+    pub(crate) envs: Vec<(String, String)>,
+    pub(crate) cwd: PathBuf,
 }
 
 impl Rustc {
@@ -69,7 +69,7 @@ impl Rustc {
         serde_json::json!({ "args": self.args, "envs": self.envs, "cwd": self.cwd }).to_string()
     }
 
-    fn from_json(text: &str) -> Option<Rustc> {
+    pub(crate) fn from_json(text: &str) -> Option<Rustc> {
         let v: serde_json::Value = serde_json::from_str(text).ok()?;
         let strings = |v: &serde_json::Value| -> Option<Vec<String>> {
             v.as_array()?.iter().map(|s| s.as_str().map(String::from)).collect()
@@ -118,7 +118,7 @@ impl Rustc {
     }
 
     /// The source files rustc read for this crate, from its dep-info file.
-    fn sources(&self) -> Vec<PathBuf> {
+    pub(crate) fn sources(&self) -> Vec<PathBuf> {
         let Some(dir) = self.out_dir() else { return vec![] };
         let d = dir.join(format!("{}{}.d", self.name(), self.codegen("extra-filename").unwrap_or_default()));
         std::fs::read_to_string(d).map_or_else(|_| vec![], |text| dep_info(&text, &self.cwd))
@@ -132,7 +132,7 @@ impl Rustc {
 
     /// Run it again as recorded: its outputs rewritten in place. `link`:
     /// the file the app crate's link args go to.
-    fn replay(&self, link: Option<&Path>) -> Result<(), Refused> {
+    pub(crate) fn replay(&self, link: Option<&Path>) -> Result<(), Refused> {
         let mut cmd = Command::new(&self.args[0]);
         cmd.args(&self.args[1..]).current_dir(&self.cwd).env_clear().envs(self.envs.iter().cloned());
         if let Some(file) = link {
@@ -154,7 +154,7 @@ fn dep_info(text: &str, cwd: &Path) -> Vec<PathBuf> {
     deps.map(|p| canonical(&cwd.join(p.replace("\\ ", " ")))).collect()
 }
 
-fn canonical(p: &Path) -> PathBuf {
+pub(crate) fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
 }
 
@@ -259,8 +259,8 @@ fn recorded_env() -> Vec<(String, String)> {
 
 /// A recorded link: its args and env.
 #[derive(Clone)]
-struct Link {
-    args: Vec<String>,
+pub(crate) struct Link {
+    pub(crate) args: Vec<String>,
     envs: Vec<(String, String)>,
 }
 
@@ -417,6 +417,9 @@ pub struct Request {
     pub stop: cargo_out::Stop,
     /// At low priority (a refresh behind a session): cargo, rustc, the link.
     pub low: bool,
+    /// The folders whose `.rs` files a fat build keeps as it read them
+    /// ([`last`]: what the kept binary was built from).
+    pub sources: Vec<PathBuf>,
 }
 
 /// A fat build: the binary to run and what each patch is made from.
@@ -446,8 +449,9 @@ pub struct Fat {
     /// with the running code's app crate objects (`scope/app`: the fat
     /// binary's, then those of each patch that had the app crate).
     last_link: Link,
-    /// A patch of libraries alone went first: the app crate's replay is owed ([`finish`]).
-    owed: bool,
+    /// A patch of the edited libraries alone went first: the libraries
+    /// built on them (these) and the app crate's replay are owed ([`finish`]).
+    owed: Option<BTreeSet<String>>,
 }
 
 /// A patch's times: rustc (the edited crates, then the app's), the stub
@@ -532,6 +536,7 @@ pub fn fat_build(req: &Request) -> Result<Fat, Refused> {
         false => {
             let objects = app_objects(&c.link.args, app);
             keep_app_objects(&c.scope.join(FAT_APP), &c.link.args);
+            keep_libs(&c.scope.join(FAT_LIBS), &c.crates);
             let _ = std::fs::write(&objects_file, objects_text(&objects));
             Some(objects)
         }
@@ -539,6 +544,7 @@ pub fn fat_build(req: &Request) -> Result<Fat, Refused> {
     // The session's copy of the running code's app crate objects: a patch
     // of libraries alone links them (none: it builds the app crate too).
     let app_objects = app_objects.filter(|_| copy_links(&c.scope.join(FAT_APP), &c.scope.join("app")));
+    copy_links(&c.scope.join(FAT_LIBS), &c.scope.join(LIBS));
     if !c.kept {
         let _ = std::fs::remove_file(&c.stamp_file);
         fat_link(&c.link, app, &c.linker, c.msvc, &c.exe, &c.target, false)?;
@@ -546,7 +552,8 @@ pub fn fat_build(req: &Request) -> Result<Fat, Refused> {
         let _ = std::fs::remove_file(&c.kept_exe);
         let saved = std::fs::hard_link(&c.exe, &c.kept_exe).or_else(|_| std::fs::copy(&c.exe, &c.kept_exe).map(|_| ()));
         if let (Ok(()), Some(st)) = (saved, stamp_of(&c.link_file)) {
-            let _ = std::fs::write(&c.stamp_file, st);
+            let _ = std::fs::write(&c.stamp_file, &st);
+            keep_sources(&c.scope, &st, &c.read);
         }
     }
     let link = started.elapsed();
@@ -566,7 +573,7 @@ pub fn fat_build(req: &Request) -> Result<Fat, Refused> {
         patches: 0,
         app_objects,
         last_link: c.link,
-        owed: false,
+        owed: None,
     })
 }
 
@@ -585,6 +592,7 @@ pub fn refresh(req: &Request) -> Result<bool, Refused> {
     let _ = std::fs::remove_file(&c.stamp_file);
     let objects = app_objects(&c.link.args, app);
     keep_app_objects(&c.scope.join(FAT_APP), &c.link.args);
+    keep_libs(&c.scope.join(FAT_LIBS), &c.crates);
     let _ = std::fs::write(c.scope.join("app-objects"), objects_text(&objects));
     // Linked apart (the running one is the session's), then in its place.
     let fresh = c.scope.join("fresh");
@@ -595,9 +603,99 @@ pub fn refresh(req: &Request) -> Result<bool, Refused> {
     set_aside(&c.kept_exe);
     std::fs::rename(&out, &c.kept_exe).map_err(|e| format!("hot-patch: {}: {e}", c.kept_exe.display()))?;
     if let Some(st) = stamp_of(&c.link_file) {
-        let _ = std::fs::write(&c.stamp_file, st);
+        let _ = std::fs::write(&c.stamp_file, &st);
+        keep_sources(&c.scope, &st, &c.read);
     }
     Ok(true)
+}
+
+/// The `.rs` files under `dirs` and what each holds (the build folder and
+/// hidden ones left out).
+pub fn sources_of(dirs: &[PathBuf]) -> BTreeMap<PathBuf, String> {
+    let mut out = BTreeMap::new();
+    let mut todo = dirs.to_vec();
+    while let Some(dir) = todo.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let (p, name) = (e.path(), e.file_name());
+            if name == "target" || name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            match e.file_type() {
+                Ok(t) if t.is_dir() => todo.push(p),
+                Ok(_) if p.extension().is_some_and(|x| x == "rs") => {
+                    if let Ok(text) = std::fs::read_to_string(&p) {
+                        out.insert(p, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The kept fat binary's sources, beside it: valid while its stamp is `stamp`.
+const SOURCES: &str = "fat-sources.json";
+
+fn keep_sources(scope: &Path, stamp: &str, read: &BTreeMap<PathBuf, String>) {
+    let json = serde_json::json!({ "stamp": stamp, "files": read });
+    let _ = write_new(&scope.join(SOURCES), json.to_string().as_bytes());
+}
+
+/// The sources the kept binary of `scope` was built from, if its stamp is still the build's.
+fn kept_sources(scope: &Path) -> Option<BTreeMap<PathBuf, String>> {
+    let stamped = std::fs::read_to_string(scope.join("fat.stamp")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(scope.join(SOURCES)).ok()?).ok()?;
+    (v["stamp"] == stamped.as_str()).then_some(())?;
+    serde_json::from_value(v["files"].clone()).ok()
+}
+
+/// The last fat build of `req` in build folder `target`, as it was kept,
+/// without cargo: its binary back where cargo puts it, what a patch is made
+/// from, and the sources it was built from. `None`: there is none whole
+/// (never built, a build failed or runs now, built by an older ax).
+pub fn last(target: &Path, req: &Request) -> Option<(Fat, BTreeMap<PathBuf, String>)> {
+    host().ok()?;
+    let scope = scope_of(target, req);
+    let lock = std::fs::File::create(scope.join("fat.lock")).ok()?;
+    lock.try_lock().ok()?;
+    let kept_exe = last_good(target, req)?;
+    let read = kept_sources(&scope)?;
+    let tip = req.bin.replace('-', "_");
+    let link = read_link(&scope.join("fat-link.json")).ok()?;
+    let crates = recorded(&scope.join("rustc"), &tip, &link.args);
+    let app = crates.get(&format!("{tip}.bin"))?;
+    // Built with other variables (its assets' stamp): cargo builds again.
+    if req.envs.iter().any(|(k, v)| !app.envs.iter().any(|(r, w)| r == k && w == v)) {
+        return None;
+    }
+    let msvc = COFF && target_triple(req).ok()?.ends_with("-msvc");
+    let linker = if msvc { rust_lld(app).ok()? } else { linker(app, &req.ax) };
+    let exe = app.out_dir()?.with_file_name(exe_name(&req.bin));
+    remove_patches(&scope, &tip);
+    put_back(&kept_exe, &exe).ok()?;
+    let app_objects = std::fs::read_to_string(scope.join("app-objects")).ok().map(|t| objects_from(&t));
+    let app_objects = app_objects.filter(|_| copy_links(&scope.join(FAT_APP), &scope.join("app")));
+    copy_links(&scope.join(FAT_LIBS), &scope.join(LIBS));
+    let symbols = Symbols::of(&exe).ok()?;
+    let fat = Fat {
+        exe,
+        build: Duration::ZERO,
+        link: Duration::ZERO,
+        kept: true,
+        scope,
+        tip,
+        crates,
+        linker,
+        msvc,
+        symbols,
+        modified: BTreeSet::new(),
+        patches: 0,
+        app_objects,
+        last_link: link,
+        owed: None,
+    };
+    Some((fat, read))
 }
 
 /// What a fat build's cargo left: the recorded calls and link, and whether
@@ -615,6 +713,8 @@ struct Cargoed {
     link: Link,
     crates: BTreeMap<String, Rustc>,
     linker: String,
+    /// The sources as cargo began (`req.sources`): what the binary is built from.
+    read: BTreeMap<PathBuf, String>,
 }
 
 impl Cargoed {
@@ -665,6 +765,7 @@ fn cargo_fat(req: &Request, session: bool) -> Result<(Cargoed, std::fs::File), R
     // binary kept from then, for these same link args, is run as it was.
     let (stamp_file, kept_exe) = (scope.join("fat.stamp"), scope.join("fat-exe"));
     let before = stamp_of(&link_file);
+    let read = sources_of(&req.sources);
     let mut exe = cargo(req, &rustc_dir, &link_file, msvc)?;
     let relinked = link_file.is_file() && stamp_of(&link_file) != before;
     let stamped = std::fs::read_to_string(&stamp_file).ok();
@@ -681,7 +782,8 @@ fn cargo_fat(req: &Request, session: bool) -> Result<(Cargoed, std::fs::File), R
     let crates = recorded(&rustc_dir, &tip, &link.args);
     let app = crates.get(&format!("{tip}.bin")).ok_or_else(|| format!("hot-patch: no rustc call of {tip} recorded"))?;
     let linker = if msvc { rust_lld(app)? } else { linker(app, &req.ax) };
-    let c = Cargoed { msvc, target, tip, scope, link_file, stamp_file, kept_exe, exe, kept, link, crates, linker };
+    let c =
+        Cargoed { msvc, target, tip, scope, link_file, stamp_file, kept_exe, exe, kept, link, crates, linker, read };
     Ok((c, lock))
 }
 
@@ -952,7 +1054,7 @@ fn cargo(req: &Request, rustc_dir: &Path, link_file: &Path, msvc: bool) -> Resul
         .ok_or_else(|| Refused::Rebuild(format!("hot-patch: cargo built no binary {}", req.bin)))
 }
 
-fn read_link(file: &Path) -> Result<Link, String> {
+pub(crate) fn read_link(file: &Path) -> Result<Link, String> {
     let fail = |e: &dyn std::fmt::Display| format!("hot-patch: no link args ({}): {e}", file.display());
     let text = std::fs::read_to_string(file).map_err(|e| fail(&e))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| fail(&e))?;
@@ -1221,6 +1323,11 @@ struct Symbols {
 }
 
 impl Symbols {
+    /// Whether the binary defines `name` (not one it imports).
+    fn has(&self, name: &str) -> bool {
+        self.table.get(name).is_some_and(|s| !s.undefined)
+    }
+
     fn of(exe: &Path) -> Result<Symbols, String> {
         let fail = |e: &dyn std::fmt::Display| format!("hot-patch: {}: {e}", exe.display());
         let bytes = std::fs::read(exe).map_err(|e| fail(&e))?;
@@ -1910,26 +2017,116 @@ fn sh_link_info(b: &[u8], header: usize) -> usize {
 /// file no crate builds from (a manifest, a build script): an error, for a
 /// rebuild.
 pub fn patch(fat: &mut Fat, aslr_reference: u64, base: Option<u64>, changed: &[PathBuf]) -> Result<Patch, Refused> {
-    let base = patch_base(base)?;
+    patch_base(base)?;
+    let c = compile(fat, changed)?;
+    link_patch(fat, c, aslr_reference, base)
+}
+
+/// A patch compiled, not linked yet: [`compile`] needs nothing of the
+/// running app, [`link_patch`] where it is loaded.
+pub struct Compiled {
+    app: Rustc,
+    /// The app crate replayed with it: its link. `None`: libraries alone.
+    link: Option<Link>,
+    /// The libraries built on the edited ones, owed with the app crate.
+    later: BTreeSet<String>,
+    started: Instant,
+    compile: Duration,
+}
+
+/// [`patch`]'s compile: the edited crates replayed, and those built on
+/// them when the app crate is too (it needs their metadata). Else they
+/// are owed, with the app crate ([`finish`], off the time to the screen):
+/// a page crate's edit compiles that crate alone.
+pub fn compile(fat: &mut Fat, changed: &[PathBuf]) -> Result<Compiled, Refused> {
     let started = Instant::now();
     let Some(edited) = fat.edited(changed)? else { return Err(Refused::Unchanged) };
-    let compiled = fat.order(&fat.dependents(&edited))?;
-    for key in &compiled {
-        fat.crates[key].replay(None)?;
-    }
-    // A replayed library's rlib is the patch's now, not what cargo built:
-    // cargo builds it again next time (a source put back with its old
-    // modification time would else find the patched code fresh).
-    let libs: Vec<String> = compiled.iter().filter_map(|k| k.strip_suffix(".lib")).map(String::from).collect();
-    if let Some(dir) = fat.crates.get(&format!("{}.bin", fat.tip)).and_then(|a| a.out_dir()) {
-        bust(&dir.with_file_name(".fingerprint"), &fat.tip, &libs);
-    }
-    fat.modified.extend(compiled.iter().cloned());
     let app = fat.crates[&format!("{}.bin", fat.tip)].clone();
     let app_sources = app.sources();
     let app_edited = changed.iter().any(|f| app_sources.contains(&canonical(f)));
-    if compiled.is_empty() || app_edited || fat.app_objects.is_none() {
-        return with_app(fat, &app, aslr_reference, base, started);
+    let with_app = edited.is_empty() || app_edited || fat.app_objects.is_none();
+    let mut later: BTreeSet<String> = fat.dependents(&edited).difference(&edited).cloned().collect();
+    later.extend(fat.owed.iter().flatten().cloned());
+    let (now, later) = match with_app {
+        true => (&later | &edited, BTreeSet::new()),
+        false => (edited.clone(), &later - &edited),
+    };
+    let before = (!with_app).then(|| codegen_units(fat, &now));
+    replay_libs(fat, &now)?;
+    // Owed only while each edited library still defines all it did that
+    // the running binary lacks (an earlier patch's): the crates built on
+    // it may use any of that (a generic's copy they share), and a patch
+    // links their running objects.
+    let gone = before.map(|b| dropped(&b, &codegen_units(fat, &now))).unwrap_or_default();
+    let (with_app, later) = match gone.iter().any(|s| !fat.symbols.has(s)) {
+        true => {
+            replay_libs(fat, &later)?;
+            (true, BTreeSet::new())
+        }
+        false => (with_app, later),
+    };
+    let link = match with_app {
+        true => Some(replay_app(fat, &app)?),
+        false => None,
+    };
+    Ok(Compiled { app, link, later, started, compile: started.elapsed() })
+}
+
+/// The objects of the running code's copies of `libs`, by codegen unit.
+fn codegen_units(fat: &Fat, libs: &BTreeSet<String>) -> HashMap<String, Vec<u8>> {
+    let rlibs = libs.iter().filter_map(|k| fat.running_rlib(k)).filter_map(|r| members(&r).ok());
+    rlibs.flatten().map(|(n, b)| (cgu(&n).to_string(), b)).collect()
+}
+
+/// The global symbols `before`'s objects define and `after`'s don't
+/// (pure): only the changed ones are read.
+fn dropped(before: &HashMap<String, Vec<u8>>, after: &HashMap<String, Vec<u8>>) -> HashSet<String> {
+    let globals = |of: &HashMap<String, Vec<u8>>, other: &HashMap<String, Vec<u8>>| -> HashSet<String> {
+        let changed =
+            of.iter().filter(|(k, b)| other.get(*k) != Some(*b)).filter_map(|(_, b)| object::File::parse(&**b).ok());
+        let names = |f: object::File| -> Vec<String> {
+            let defined = f.symbols().filter(|s| s.is_global() && !s.is_undefined());
+            defined.filter_map(|s| s.name().ok().map(String::from)).collect()
+        };
+        changed.flat_map(names).collect()
+    };
+    &globals(before, after) - &globals(after, before)
+}
+
+/// `libs` replayed in build order. A replayed library's rlib is the
+/// patch's now, not what cargo built: cargo builds it again next time (a
+/// source put back with its old modification time would else find the
+/// patched code fresh).
+fn replay_libs(fat: &mut Fat, libs: &BTreeSet<String>) -> Result<(), Refused> {
+    let patched = fat.scope.join(PATCHED);
+    let _ = std::fs::create_dir_all(&patched);
+    for key in &fat.order(libs)? {
+        fat.crates[key].replay(None)?;
+        // Kept apart: a refresh behind the session rewrites cargo's copy.
+        if let Some(rlib) = fat.crates[key].rlib()
+            && let Some(name) = rlib.file_name()
+        {
+            let to = patched.join(name);
+            let _ = std::fs::remove_file(&to);
+            std::fs::hard_link(&rlib, &to)
+                .or_else(|_| std::fs::copy(&rlib, &to).map(|_| ()))
+                .map_err(|e| format!("hot-patch: {}: {e}", to.display()))?;
+        }
+    }
+    let names: Vec<String> = libs.iter().filter_map(|k| k.strip_suffix(".lib")).map(String::from).collect();
+    if let Some(dir) = fat.crates.get(&format!("{}.bin", fat.tip)).and_then(|a| a.out_dir()) {
+        bust(&dir.with_file_name(".fingerprint"), &fat.tip, &names);
+    }
+    fat.modified.extend(libs.iter().cloned());
+    Ok(())
+}
+
+/// [`patch`]'s link of what [`compile`] built, for the app loaded at
+/// `aslr_reference` (Windows: the patch at `base`).
+pub fn link_patch(fat: &mut Fat, c: Compiled, aslr_reference: u64, base: Option<u64>) -> Result<Patch, Refused> {
+    let base = patch_base(base)?;
+    if let Some(link) = c.link {
+        return patch_with(fat, &c.app, link, aslr_reference, base, (c.started, c.compile));
     }
     // Libraries alone: the app crate's code is the running one's as long as
     // its objects come out the same (`finish` replays it after, off the
@@ -1946,27 +2143,37 @@ pub fn patch(fat: &mut Fat, aslr_reference: u64, base: Option<u64>, changed: &[P
         .collect();
     link.args.retain(|a| !a.ends_with(".rcgu.o"));
     link.args.extend(kept);
-    let compile = started.elapsed();
-    let thin = thin_link(fat, &app, &link, aslr_reference, base);
+    let thin = thin_link(fat, &c.app, &link, aslr_reference, base);
     remove_link_temps(&fat.scope);
     let (lib, stub, link) = thin?;
     let table = jump_table(&lib, &fat.symbols)?;
-    fat.owed = true;
-    Ok(Patch { table, times: Times { compile, stub, link, total: started.elapsed() } })
+    fat.owed = Some(c.later);
+    Ok(Patch { table, times: Times { compile: c.compile, stub, link, total: c.started.elapsed() } })
 }
 
-/// The app crate's replay a patch of libraries alone owed: `None` when its
-/// objects came out as the running ones (nothing more to send), else the
-/// patch with them.
+/// What a patch of the edited libraries alone owed: the libraries built on
+/// them, then the app crate, replayed. `None` when their objects came out
+/// as the running ones (nothing more to send), else the patch with them.
 pub fn finish(fat: &mut Fat, aslr_reference: u64, base: Option<u64>) -> Result<Option<Patch>, Refused> {
-    if !std::mem::take(&mut fat.owed) {
-        return Ok(None);
-    }
+    let Some(later) = fat.owed.take() else { return Ok(None) };
     let base = patch_base(base)?;
     let started = Instant::now();
+    // Each library's code by codegen unit, as [`app_objects`] tells the app crate's.
+    let objects = |fat: &Fat| -> Vec<BTreeMap<String, u64>> {
+        let of = |k: &String| fat.running_rlib(k).and_then(|r| members(&r).ok()).unwrap_or_default();
+        let digests =
+            |m: Vec<(String, Vec<u8>)>| m.iter().filter_map(|(n, b)| Some((cgu(n).into(), code_digest(b)?))).collect();
+        later.iter().map(|k| digests(of(k))).collect()
+    };
+    let before = objects(fat);
+    if let Err(e) = replay_libs(fat, &later) {
+        fat.owed = Some(later);
+        return Err(e);
+    }
+    let libs_same = objects(fat) == before;
     let app = fat.crates[&format!("{}.bin", fat.tip)].clone();
     let link = replay_app(fat, &app)?;
-    if fat.app_objects.as_ref() == Some(&app_objects(&link.args, &app)) {
+    if libs_same && fat.app_objects.as_ref() == Some(&app_objects(&link.args, &app)) {
         remove_temps(&link.args, &app);
         if let Some(o) = output_arg(&link.args) {
             let _ = std::fs::remove_file(o);
@@ -1974,7 +2181,7 @@ pub fn finish(fat: &mut Fat, aslr_reference: u64, base: Option<u64>) -> Result<O
         fat.last_link = link;
         return Ok(None);
     }
-    patch_with(fat, &app, link, aslr_reference, base, started).map(Some)
+    patch_with(fat, &app, link, aslr_reference, base, (started, started.elapsed())).map(Some)
 }
 
 /// Where a patch loads: Windows needs the app's word for it.
@@ -1996,12 +2203,6 @@ fn replay_app(fat: &Fat, app: &Rustc) -> Result<Link, Refused> {
     Ok(read_link(&link_file)?)
 }
 
-/// The patch of the replayed libraries and the app crate, replayed now.
-fn with_app(fat: &mut Fat, app: &Rustc, aslr_reference: u64, base: u64, started: Instant) -> Result<Patch, Refused> {
-    let link = replay_app(fat, app)?;
-    patch_with(fat, app, link, aslr_reference, base, started)
-}
-
 /// The patch of the replayed libraries and the app crate's objects `link`
 /// names; those objects are the running ones after it.
 fn patch_with(
@@ -2010,9 +2211,8 @@ fn patch_with(
     link: Link,
     aslr_reference: u64,
     base: u64,
-    started: Instant,
+    (started, compile): (Instant, Duration),
 ) -> Result<Patch, Refused> {
-    let compile = started.elapsed();
     let objects = app_objects(&link.args, app);
     let thin = thin_link(fat, app, &link, aslr_reference, base);
     // Its objects, for a later patch of libraries alone (each patch
@@ -2031,7 +2231,7 @@ fn patch_with(
     let table = jump_table(&lib, &fat.symbols)?;
     fat.app_objects = Some(objects);
     fat.last_link = link;
-    fat.owed = false;
+    fat.owed = None;
     Ok(Patch { table, times: Times { compile, stub, link: link_time, total: started.elapsed() } })
 }
 
@@ -2039,6 +2239,27 @@ fn patch_with(
 /// beside its `app-objects` hashes; a session links its own copy
 /// (`scope/app`), which its patches replace.
 const FAT_APP: &str = "fat-app";
+
+/// The workspace libraries' rlibs of the kept fat binary (hard links), as
+/// [`FAT_APP`]; a session's copy (`scope/<LIBS>`) is what its patches tell
+/// a library's changed objects by ([`needed`]).
+const FAT_LIBS: &str = "fat-libs";
+const LIBS: &str = "libs";
+/// Each library's rlib as a patch last replayed it.
+const PATCHED: &str = "patched";
+
+/// Each workspace library's rlib linked (else copied) into `dir`, in place
+/// of what it held.
+fn keep_libs(dir: &Path, crates: &BTreeMap<String, Rustc>) {
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::create_dir_all(dir);
+    for rlib in crates.iter().filter(|(k, _)| k.ends_with(".lib")).filter_map(|(_, c)| c.rlib()) {
+        if let Some(name) = rlib.file_name() {
+            let to = dir.join(name);
+            let _ = std::fs::hard_link(&rlib, &to).or_else(|_| std::fs::copy(&rlib, &to).map(|_| ()));
+        }
+    }
+}
 
 /// `from`'s files linked (else copied) into `to`, in place of what it
 /// held: whether any `.rcgu.o` is there.
@@ -2151,21 +2372,35 @@ fn thin_link(
         objects.push(rewritten.unwrap_or(o));
     }
     objects.sort();
-    let wanted: HashMap<String, PathBuf> =
-        fat.modified.iter().filter_map(|k| Some((fat.crates[k].lib_stem(), fat.crates[k].rlib()?))).collect();
-    // The replayed libraries in the fat link's order, every object of each
-    // (a patch of libraries alone has no app crate pulling them from an
-    // archive), rewritten too (statics redirected) where the platform can.
+    // The replayed libraries and those built on them, in the fat link's
+    // order: a replayed one's rlib, else the running binary's copy. One
+    // reach over them all: an object calling changed code in another
+    // library (a page's view, the app's root view in the crate above it)
+    // is linked too, from the running copy when its own library wasn't
+    // replayed. A patch of libraries alone has no app crate pulling them
+    // from an archive.
+    let reach = fat.dependents(&fat.modified);
+    let libs: HashMap<String, &String> = reach.iter().map(|k| (fat.crates[k].lib_stem(), k)).collect();
     let linked = link_args.iter().filter(|a| a.ends_with(".rlib")).filter_map(|a| Path::new(a).file_stem()?.to_str());
-    for rlib in linked.filter_map(|s| wanted.get(s)) {
-        let into = work.join("libs");
-        std::fs::create_dir_all(&into).map_err(|e| format!("hot-patch: {}: {e}", into.display()))?;
-        for (name, bytes) in members(rlib)? {
-            let o = into.join(name);
-            std::fs::write(&o, bytes).map_err(|e| format!("hot-patch: {}: {e}", o.display()))?;
-            let rewritten = if REWRITES { maybe_rewrite(&o, &fat.symbols, &into)? } else { None };
-            objects.push(rewritten.unwrap_or(o));
+    let (mut all, mut running) = (vec![], HashMap::new());
+    for key in linked.filter_map(|s| libs.get(s)) {
+        let fat_copy = fat.crates[*key].rlib().and_then(|r| Some(fat.scope.join(LIBS).join(r.file_name()?)));
+        let fat_copy = fat_copy.and_then(|r| members(&r).ok()).unwrap_or_default();
+        match fat.modified.contains(*key) {
+            true => all.extend(members(&fat.running_rlib(key).ok_or("hot-patch: a replayed library has no rlib")?)?),
+            false => all.extend(fat_copy.iter().cloned()),
         }
+        running.extend(fat_copy.into_iter().map(|(n, b)| (cgu(&n).to_string(), b)));
+    }
+    let keep = needed(&all, &running, &|s| fat.symbols.has(s))?;
+    let into = work.join("libs");
+    std::fs::create_dir_all(&into).map_err(|e| format!("hot-patch: {}: {e}", into.display()))?;
+    // Rewritten too (statics redirected) where the platform can.
+    for ((name, bytes), _) in all.into_iter().zip(keep).filter(|(_, k)| *k) {
+        let o = into.join(name);
+        std::fs::write(&o, bytes).map_err(|e| format!("hot-patch: {}: {e}", o.display()))?;
+        let rewritten = if REWRITES { maybe_rewrite(&o, &fat.symbols, &into)? } else { None };
+        objects.push(rewritten.unwrap_or(o));
     }
     let stub = fat.scope.join("stub.o");
     let bytes = stub_object(&fat.symbols, &objects, aslr_reference)?;
@@ -2251,6 +2486,13 @@ impl Fat {
             edited.extend(users.into_iter().filter(|k| k.ends_with(".lib")).cloned());
         }
         Ok(read.then_some(edited))
+    }
+
+    /// The rlib of library `key` the running code is from: its last
+    /// replay's, else the fat build's.
+    fn running_rlib(&self, key: &str) -> Option<PathBuf> {
+        let name = self.crates[key].rlib()?.file_name()?.to_owned();
+        Some(self.scope.join(if self.modified.contains(key) { PATCHED } else { LIBS }).join(name))
     }
 
     /// `libs` and every library built on them, by key.
@@ -2402,6 +2644,173 @@ fn thin_link_args(link_args: &[String]) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// Of a replayed library's objects (`all`), those a patch links: each
+/// with a section not as the running binary's library has it (`running`,
+/// by codegen unit), each with a section using one of those, up to the
+/// roots (running code reaches new code only through its callers), and
+/// each defining a symbol a linked one uses that the running binary lacks
+/// (`has`: its linker dropped it). The rest the stub points at the running
+/// binary's copy: a big crate's edit links the few objects it touched, not
+/// every one of its codegen units.
+fn needed<'a>(
+    all: &'a [(String, Vec<u8>)],
+    running: &HashMap<String, Vec<u8>>,
+    has: &dyn Fn(&str) -> bool,
+) -> Result<Vec<bool>, String> {
+    let weigh = |(name, bytes): &'a (String, Vec<u8>)| -> Result<Vec<Part<'a>>, String> {
+        let fail = |e: object::Error| format!("hot-patch: {name}: {e}");
+        let old = running.get(cgu(name));
+        let mut parts = parts_of(bytes, old.is_some_and(|o| o != bytes)).map_err(fail)?;
+        match old {
+            Some(old) if old == bytes => {}
+            Some(old) => {
+                let old: HashMap<&str, u64> =
+                    parts_of(old, true).map_err(fail)?.into_iter().map(|p| (p.name, p.sig)).collect();
+                parts.iter_mut().for_each(|p| p.dirty = old.get(p.name) != Some(&p.sig));
+            }
+            None => parts.iter_mut().for_each(|p| p.dirty = true),
+        }
+        Ok(parts)
+    };
+    // Parsed on every core: a big crate's objects are most of a patch's stub time.
+    let n = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
+    let chunk = all.len().div_ceil(n).max(1);
+    let objs: Vec<Vec<Part<'a>>> = std::thread::scope(|s| {
+        let parts: Vec<_> =
+            all.chunks(chunk).map(|c| s.spawn(move || c.iter().map(weigh).collect::<Result<Vec<_>, _>>())).collect();
+        parts
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err("hot-patch: an object's parse panicked".into())))
+            .collect::<Result<Vec<_>, _>>()
+    })?
+    .into_iter()
+    .flatten()
+    .collect();
+    Ok(reach(&objs, has))
+}
+
+/// A section of an object, as [`needed`] weighs it.
+#[derive(Debug, Default)]
+struct Part<'a> {
+    name: &'a str,
+    /// Its bytes' and relocations' hash (a local target by its name).
+    sig: u64,
+    /// The global symbols it defines.
+    defines: Vec<&'a str>,
+    uses: Vec<Use<'a>>,
+    /// Not as the running binary has it.
+    dirty: bool,
+}
+
+/// A relocation's target: a global symbol (defined anywhere, or not at
+/// all), or a section of its own object.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Use<'a> {
+    Global(&'a str),
+    Local(usize),
+}
+
+/// `bytes`' sections as [`Part`]s, each clean; `sig`: hashed too.
+fn parts_of(bytes: &[u8], sig: bool) -> Result<Vec<Part<'_>>, object::Error> {
+    use object::{ObjectSection as _, RelocationTarget};
+    use std::hash::{Hash, Hasher};
+    let file = object::File::parse(bytes)?;
+    let at: HashMap<object::SectionIndex, usize> = file.sections().enumerate().map(|(i, s)| (s.index(), i)).collect();
+    let mut out: Vec<Part> = vec![];
+    for sec in file.sections() {
+        let mut h = std::hash::DefaultHasher::new();
+        let name = sec.name().unwrap_or_default();
+        if sig {
+            (&name, sec.data().unwrap_or_default()).hash(&mut h);
+        }
+        let mut uses = vec![];
+        for (off, r) in sec.relocations() {
+            let (key, used) = match r.target() {
+                RelocationTarget::Symbol(i) => {
+                    let sym = file.symbol_by_index(i)?;
+                    let n = sym.name().unwrap_or_default();
+                    match sym.section_index().and_then(|s| at.get(&s)).filter(|_| !sym.is_global()) {
+                        Some(&local) => (n, Use::Local(local)),
+                        None => (n, Use::Global(n)),
+                    }
+                }
+                RelocationTarget::Section(s) => match at.get(&s) {
+                    Some(&local) => (file.section_by_index(s)?.name().unwrap_or_default(), Use::Local(local)),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if sig {
+                (off, &key, r.addend(), r.kind()).hash(&mut h);
+            }
+            uses.push(used);
+        }
+        uses.sort_unstable();
+        uses.dedup();
+        out.push(Part { name, sig: h.finish(), uses, ..Part::default() });
+    }
+    for sym in file.symbols().filter(|s| s.is_global() && !s.is_undefined()) {
+        if let Some(&i) = sym.section_index().and_then(|s| at.get(&s)) {
+            out[i].defines.push(sym.name()?);
+        }
+    }
+    Ok(out)
+}
+
+/// Which objects (pure): those with a dirty part once each part using a
+/// dirty one is dirty too, and each defining what a linked one uses that
+/// the running binary lacks (`has`).
+fn reach(objs: &[Vec<Part<'_>>], has: &dyn Fn(&str) -> bool) -> Vec<bool> {
+    let mut users: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+    let mut local: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    let mut definer: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (o, parts) in objs.iter().enumerate() {
+        for (p, part) in parts.iter().enumerate() {
+            for u in &part.uses {
+                match u {
+                    Use::Global(s) => users.entry(s).or_default().push((o, p)),
+                    Use::Local(t) => local.entry((o, *t)).or_default().push(p),
+                }
+            }
+            part.defines.iter().for_each(|s| definer.entry(s).or_default().push(o));
+        }
+    }
+    let mut dirty: HashSet<(usize, usize)> = HashSet::new();
+    let mut todo: Vec<(usize, usize)> = objs
+        .iter()
+        .enumerate()
+        .flat_map(|(o, ps)| ps.iter().enumerate().filter(|(_, p)| p.dirty).map(move |(p, _)| (o, p)))
+        .collect();
+    while let Some((o, p)) = todo.pop() {
+        if !dirty.insert((o, p)) {
+            continue;
+        }
+        let callers = objs[o][p].defines.iter().filter_map(|s| users.get(s)).flatten().copied();
+        let near = local.get(&(o, p)).into_iter().flatten().map(|&q| (o, q));
+        todo.extend(callers.chain(near).filter(|k| !dirty.contains(k)));
+    }
+    let mut keep = vec![false; objs.len()];
+    let mut todo: Vec<usize> = dirty.iter().map(|&(o, _)| o).collect();
+    while let Some(o) = todo.pop() {
+        if std::mem::replace(&mut keep[o], true) {
+            continue;
+        }
+        let uses = objs[o].iter().flat_map(|p| &p.uses);
+        let dropped = uses.filter_map(|u| match u {
+            Use::Global(s) if !has(s) => definer.get(s),
+            _ => None,
+        });
+        todo.extend(dropped.flatten().copied().filter(|&d| !keep[d]));
+    }
+    keep
+}
+
+/// An rlib member's codegen unit: its name less the part rustc draws anew
+/// each build (`crate-hash.cgu.<random>.rcgu.o`).
+fn cgu(member: &str) -> &str {
+    member.strip_suffix(".rcgu.o").and_then(|n| n.rsplit_once('.')).map_or(member, |(c, _)| c)
 }
 
 /// An object defining each symbol `objects` (objects, rlibs) use but don't
@@ -2633,6 +3042,42 @@ fn jump_table(lib: &Path, symbols: &Symbols) -> Result<JumpTable, String> {
 mod tests {
     use super::*;
 
+    fn part<'a>(defines: &[&'a str], uses: Vec<Use<'a>>, dirty: bool) -> Part<'a> {
+        Part { defines: defines.to_vec(), uses, dirty, ..Part::default() }
+    }
+
+    #[test]
+    fn a_patch_links_the_changed_objects_their_callers_and_what_the_binary_dropped() {
+        use Use::{Global, Local};
+        let objs = vec![
+            vec![part(&["root"], vec![Global("view")], false)],
+            vec![part(&["view"], vec![Global("logic")], false)],
+            // A changed part beside one as it was (`shared`, a generic every object uses).
+            vec![part(&["logic"], vec![Global("gone"), Local(1)], true), part(&["shared"], vec![], false)],
+            vec![part(&["other"], vec![Global("shared")], false)],
+            vec![part(&["gone"], vec![], false)],
+            vec![part(&["kept"], vec![], false)],
+        ];
+        let has = |s: &str| s != "gone";
+        assert_eq!(reach(&objs, &has), [true, true, true, false, true, false]);
+        // A part using a changed one of its own object is changed too.
+        let objs = vec![
+            vec![part(&[], vec![], true), part(&["calls_it"], vec![Local(0)], false)],
+            vec![part(&["top"], vec![Global("calls_it")], false)],
+        ];
+        assert_eq!(reach(&objs, &|_| true), [true, true]);
+        // Nothing changed: nothing linked.
+        let objs = vec![vec![part(&["a"], vec![Global("b")], false)], vec![part(&["b"], vec![], false)]];
+        assert_eq!(reach(&objs, &|_| true), [false, false]);
+    }
+
+    #[test]
+    fn a_codegen_unit_is_its_member_name_less_the_builds_random_part() {
+        assert_eq!(cgu("big-54d6.030um1qz.1xsei0x.rcgu.o"), "big-54d6.030um1qz");
+        assert_eq!(cgu("big-54d6.030um1qz.1gufugw.rcgu.o"), cgu("big-54d6.030um1qz.1xsei0x.rcgu.o"));
+        assert_eq!(cgu("lib.rmeta"), "lib.rmeta");
+    }
+
     #[test]
     fn an_objects_code_digest_reads_its_code_and_relocations_not_its_debug_info() {
         use object::write::{Relocation, Symbol};
@@ -2693,6 +3138,7 @@ mod tests {
             ax: "ax".into(),
             stop: Default::default(),
             low: false,
+            sources: vec![],
         };
         let scope = scope_of(d.path(), &req);
         std::fs::create_dir_all(scope.join("rustc")).unwrap();

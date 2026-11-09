@@ -4,10 +4,23 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 let onFrame = null
 const early = []
-ipcRenderer.on('aio:wire', (_e, f) => (onFrame ? onFrame(f) : early.push(f)))
+// The app's frames in the order main.js numbered them: a key's answer
+// (`ask`) overtakes the frames still on their way, which wait for it.
+let next = 1
+const held = new Map()
+const take = (n, f) => {
+  if (n < next) return
+  held.set(n, f)
+  for (let g; (g = held.get(next)) !== undefined; next++) held.delete(next), onFrame ? onFrame(g) : early.push(g)
+}
+ipcRenderer.on('aio:wire', (_e, f, n) => take(n, f))
 
 contextBridge.exposeInMainWorld('__aioWire', {
   send: (bytes) => ipcRenderer.send('aio:wire', bytes),
+  // An event whose answer the page waits for (main.js `aio:ask`): its
+  // frames, and those sent before it not yet here, are applied before
+  // this returns.
+  ask: (bytes) => { for (const [n, f] of ipcRenderer.sendSync('aio:ask', bytes, next)) take(n, f) },
   listen: (f) => {
     onFrame = f
     early.splice(0).forEach(f)

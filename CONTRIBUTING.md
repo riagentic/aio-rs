@@ -57,6 +57,10 @@ The gates, in order:
 - `cargo test --workspace --all-features`, plus `aio-rs` without `compat`.
   The web build's browser test needs the lock's `wasm-bindgen` (`ax setup`
   fetches it); without it the test is skipped and `./ci.sh` says so.
+  The JS client's tests (`crates/aio/client`: its unit tests, type check,
+  and React, Solid, Svelte, Vue and plain pages in a browser and in the
+  window) need its dev packages, which `./ci.sh` installs with `npm ci`;
+  without npm they are skipped.
   GitHub CI sets `AIO_CI_WEB`: there a browser test that would skip fails.
 - `scripts/dx-metrics --check`: a template app built, edited live under
   `ax dev` and smoke-run; its row (build times, sizes, memory) is appended

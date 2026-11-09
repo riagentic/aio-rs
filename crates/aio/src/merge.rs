@@ -135,7 +135,7 @@ pub fn text3(base: &str, mine: &str, theirs: &str) -> Merged {
         }
     }
     // In base order; at one point, mine first.
-    all.sort_by_key(|(h, mine)| (h.from, h.to, !mine));
+    crate::sort_by(&mut all, |(h, mine), (o, theirs)| (h.from, h.to, !mine).cmp(&(o.from, o.to, !theirs)));
     let (mut out, mut at) = (String::new(), 0);
     for (h, _) in all {
         if h.from < at {

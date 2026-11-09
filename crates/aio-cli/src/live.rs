@@ -373,25 +373,42 @@ pub(crate) fn expect(
 
 /// Call `method` with `args`, as `user`; the method's answer.
 pub(crate) fn call(link: &Link, cell: &str, method: &str, args: Value, user: &str) -> Out {
-    call_within(link, cell, method, args, user, None)
+    call_within(link, cell, Called::Method(method), args, (user, false), None)
 }
 
-/// [`call`], its answer waited for `wait` at most (`--wait`).
+/// What `ax call` runs: a cell's method, or a server function (`--fn`).
+pub(crate) enum Called<'a> {
+    Method(&'a str),
+    Fn(&'a str),
+}
+
+/// [`call`] or a server function, as `user` (`server`: as the app's own
+/// server code, `--as-server`), its answer waited for `wait` at most (`--wait`).
 pub(crate) fn call_within(
     link: &Link,
     cell: &str,
-    method: &str,
+    what: Called,
     args: Value,
-    user: &str,
+    (user, server): (&str, bool),
     wait: Option<std::time::Duration>,
 ) -> Out {
-    let mut t = connect(link, cell, user).map_err(|e| e.to_string())?;
+    let mut t = match server {
+        true => aio::rt().block_on(Live::as_server(link, cell, user)),
+        false => connect(link, cell, user),
+    }
+    .map_err(|e| e.to_string())?;
     let r = aio::rt().block_on(async {
+        let run = async {
+            match what {
+                Called::Method(m) => t.call(m, args).await,
+                Called::Fn(f) => t.run(f, args).await,
+            }
+        };
         match wait {
-            Some(w) => tokio::time::timeout(w, t.call(method, args)).await.map_err(|_| {
+            Some(w) => tokio::time::timeout(w, run).await.map_err(|_| {
                 format!("no answer within {} s (it may still run in the app: ax events says)", w.as_secs_f64())
             }),
-            None => Ok(t.call(method, args).await),
+            None => Ok(run.await),
         }
     })?;
     Ok(pretty(&r.map_err(|e| format!("refused: {e}"))?))
@@ -735,6 +752,36 @@ mod tests {
         assert_eq!(text, "diary v1\n  fields: audit never sent", "{text}");
         let mem = json!({ "cell": "x", "v": 1, "fields": { "persist": false }, "methods": [] });
         assert!(peer(&[mem], false).ends_with("fields: kept in memory, never saved"));
+    }
+
+    /// aio's plain action `am dispatch BulkUpdate items='[1,2]'`: `ax call
+    /// --fn` takes the same named payload, one object argument.
+    #[test]
+    fn a_server_fn_takes_key_value_words_as_its_one_object() {
+        use aio::fns::{Access, ServerFn};
+        #[derive(aio::serde::Deserialize)]
+        #[serde(crate = "aio::serde")]
+        struct Bulk {
+            items: Vec<u32>,
+            tag: String,
+        }
+        const BULK: ServerFn<(Bulk,), String> = ServerFn::new("rows.bulk_update");
+        let d = tempfile::tempdir().unwrap();
+        let addr = aio::ipc::addr(d.path(), "cell-conn");
+        let http = aio::http::Http::default()
+            .server_fn(BULK, Access::Open, |_, (b,)| async move { Ok(format!("{} {:?}", b.tag, b.items)) });
+        let l = {
+            let _in = aio::rt().enter();
+            aio::ipc::Listener::bind(&addr).unwrap()
+        };
+        aio::rt().spawn(async move {
+            aio::sync::serve_door_with(Handle::<Conn>::memory(), l, Default::default(), &http).await
+        });
+        let link = Link { addr, token: String::new(), root: None };
+        let run = |args| call_within(&link, "conn", Called::Fn("rows.bulk_update"), args, ("ops", false), None);
+        assert_eq!(run(call_args(&["items=[1,2]", "tag=x"], None).unwrap()), Ok("\"x [1, 2]\"".into()));
+        assert_eq!(run(body("{\"items\":[3],\"tag\":\"y\"}").unwrap()), Ok("\"y [3]\"".into()));
+        assert!(run(call_args(&["items=[1]"], None).unwrap()).unwrap_err().contains("tag"), "a missing field is said");
     }
 
     #[test]

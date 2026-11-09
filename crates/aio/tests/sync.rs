@@ -230,6 +230,50 @@ fn call_ids_from_a_clock_far_ahead_or_too_old_are_refused() {
     assert_eq!(h.store(|s| s.events().unwrap().len()), 1);
 }
 
+/// aio orders peers' edits by a hybrid logical clock; aio-rs's server puts
+/// calls in one order, and a method that wants aio's last-writer-wins by
+/// when an edit was made compares `cx.made()`: the call's own time, bounded
+/// by the server's clock, kept for replay.
+#[cell(persist, shared)]
+pub struct Titled {
+    pub title: String,
+    pub made: i64,
+    pub plain: String,
+}
+
+#[methods]
+impl Titled {
+    #[client]
+    pub fn retitle(&mut self, cx: &Cx, title: String) {
+        if cx.made() >= self.made {
+            (self.title, self.made) = (title.clone(), cx.made());
+        }
+        self.plain = title;
+    }
+}
+
+#[test]
+fn the_later_made_edit_wins_where_a_method_asks_and_replays_the_same() {
+    let at = |ms: i64| uuid::Builder::from_unix_timestamp_millis(ms as u64, &[7; 10]).into_uuid().to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let h = Handle::<Titled>::memory().by(By::User("ana".into()));
+    // Bo's edit, made now, arrives first; Ana's, made offline a minute
+    // ago, arrives after it.
+    h.call_from("retitle", serde_json::json!(["bo's, made later"]), &at(now)).unwrap();
+    h.call_from("retitle", serde_json::json!(["ana's, made earlier"]), &at(now - 60_000)).unwrap();
+    let st = h.state();
+    assert_eq!((st.title.as_str(), st.made), ("bo's, made later", now), "made later wins");
+    assert_eq!(st.plain, "ana's, made earlier", "a plain field keeps the server's order");
+    // A clock far ahead can't win every comparison: refused.
+    assert!(h.call_from("retitle", serde_json::json!(["skewed"]), &at(now + 3_600_000)).is_err());
+    // A local call was made now.
+    h.retitle("local".into()).unwrap();
+    assert_eq!(h.state().title, "local");
+    // Replayed from its events (one step back): each call's time was kept.
+    h.travel(Some(aio::TimeAsk::Undo)).unwrap();
+    assert_eq!(*h.state(), *st);
+}
+
 /// A TCP relay the test can cut and pause (paused: new connections are dropped).
 struct Relay {
     addr: String,
@@ -553,6 +597,70 @@ async fn an_aio_client_gets_only_the_cells_it_subscribed_to() {
     assert_eq!((&d["t"], &d["d"]["type"]), (&json!("diag"), &json!("subs-refused")));
     h.add("still".into()).unwrap();
     assert_eq!(recv(&mut w).await["t"], "patches");
+}
+
+/// `subs {exact: true}` (aio-rs's; aio's pages never send it): only the
+/// parts the paths name, and only their patches.
+#[cfg(feature = "compat")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aio_client_that_asks_exact_paths_gets_only_their_parts() {
+    use serde_json::json;
+    let (h, addr) = server().await;
+    h.add("first".into()).unwrap();
+    let (mut w, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?token=secret")).await.unwrap();
+    for _ in 0..3 {
+        recv(&mut w).await; // proto, state, boot
+    }
+    send(&mut w, json!({ "v": 2, "t": "subs", "d": { "subs": ["board.luck"], "exact": true } })).await;
+    let st = recv(&mut w).await;
+    assert_eq!((&st["d"], &st["s"]), (&json!({ "board": { "luck": h.state().luck } }), &json!(["board"])));
+    h.add("second".into()).unwrap();
+    let p = recv(&mut w).await;
+    assert_eq!(p["t"], "patches");
+    assert!(p["d"].as_array().unwrap().iter().all(|op| op["path"] == json!(["board", "luck"])), "{p}");
+    // A bad path is refused out loud, the set kept.
+    send(&mut w, json!({ "v": 2, "t": "subs", "d": { "subs": ["board..luck"], "exact": true } })).await;
+    assert_eq!(recv(&mut w).await["d"]["type"], "subs-refused");
+}
+
+/// aio's render-staleness backpressure: a page whose paint lags (its
+/// `vitals-ping {ms}`) is sent its patches further apart.
+#[cfg(feature = "compat")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aio_page_whose_paint_lags_is_sent_fewer_patches() {
+    use serde_json::json;
+    async fn patches(lag: Option<u64>) -> Vec<std::time::Instant> {
+        let (h, addr) = server().await;
+        let (mut w, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?token=secret")).await.unwrap();
+        for _ in 0..3 {
+            recv(&mut w).await;
+        }
+        if let Some(ms) = lag {
+            send(&mut w, json!({ "v": 2, "t": "vitals-ping", "d": { "t1": 1, "ms": ms } })).await;
+            assert_eq!(recv(&mut w).await["t"], "vitals-pong");
+        }
+        let writer = tokio::spawn(async move {
+            for i in 0..300 {
+                h.add(format!("n{i}")).unwrap();
+                tokio::time::sleep(Duration::from_millis(4)).await;
+            }
+        });
+        let mut at = vec![];
+        let end = tokio::time::Instant::now() + Duration::from_millis(1200);
+        while let Ok(Some(Ok(m))) = tokio::time::timeout_at(end, w.next()).await {
+            if m.to_text().is_ok_and(|t| t.contains("\"patches\"")) {
+                at.push(std::time::Instant::now());
+            }
+        }
+        writer.abort();
+        at
+    }
+    let fresh = patches(None).await;
+    let lagging = patches(Some(400)).await;
+    let gaps: Vec<u128> = lagging.windows(2).map(|w| (w[1] - w[0]).as_millis()).collect();
+    assert!(fresh.len() >= 12, "every 50 ms: {}", fresh.len());
+    assert!(lagging.len() <= 8, "every 200 ms: {}", lagging.len());
+    assert!(gaps.iter().all(|g| *g >= 150), "{gaps:?}");
 }
 
 #[cfg(feature = "compat")]
@@ -1398,6 +1506,36 @@ async fn clients_get_small_patches_and_their_own_reply_at_once() {
     let reply = recv(&mut w).await;
     assert_eq!((reply["t"].as_str(), reply["op"].as_str()), (Some("reply"), Some(op.as_str())));
     assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_js_client_that_asks_gets_a_digest_of_the_view_as_javascript_holds_it() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let (h, addr) = server().await;
+    let addr = &addr;
+    let open = |digest: Option<&'static str>| async move {
+        let mut req = format!("ws://{addr}/ws?token=secret").into_client_request().unwrap();
+        req.headers_mut().insert("x-aio-wire", "2".parse().unwrap());
+        let (mut w, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+        let mut hello = serde_json::json!({ "t": "hello", "cell": "board", "v": 1, "user": "ana" });
+        if let Some(d) = digest {
+            hello["digest"] = d.into();
+        }
+        send(&mut w, hello).await;
+        assert_eq!(recv(&mut w).await["t"], "state");
+        w
+    };
+    let (mut js, mut native) = (open(Some("js")).await, open(None).await);
+    h.add("x".into()).unwrap();
+    let view = serde_json::to_value(h.state().as_ref()).unwrap();
+    let p = recv(&mut js).await;
+    assert_eq!(
+        (&p["digest"], &p["jsdigest"]),
+        (&aio::patch::digest(&view).into(), &aio::patch::js_digest(&view).into())
+    );
+    let p = recv(&mut native).await;
+    assert_eq!(p["digest"], aio::patch::digest(&view));
+    assert!(p.get("jsdigest").is_none(), "a copy that didn't ask gets the patch as before");
 }
 
 async fn limited(limits: aio::sync::Limits) -> (Handle<Board>, String) {
@@ -2357,5 +2495,169 @@ mod hidden_by_the_view {
         let admin = Caller { by: By::User("cy".into()), role: Some("admin".into()) };
         assert_eq!(h.state().project(&admin)["salary"], 100, "an admin's view has it");
         assert_eq!(*h.state().salary, 100, "the app holds it");
+    }
+}
+
+/// Path subscriptions (aio's `subs`, inside a cell) and render-staleness
+/// backpressure, on a real server.
+mod paths_and_pace {
+    use super::*;
+    use aio::sync::Link;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct Me {
+        pub name: String,
+        pub mail: String,
+    }
+
+    #[cell(shared)]
+    pub struct Shop {
+        pub items: Vec<String>,
+        pub log: Vec<String>,
+        pub me: Me,
+    }
+
+    #[methods]
+    impl Shop {
+        #[client]
+        pub fn add(&mut self, item: String) -> Result {
+            self.log.push(format!("+{item}"));
+            self.items.push(item);
+            Ok(())
+        }
+
+        #[client]
+        pub fn note(&mut self, line: String) -> Result {
+            self.log.push(line);
+            Ok(())
+        }
+
+        /// Refused once the log is long: what a copy that doesn't hold
+        /// the log can't foresee.
+        #[client]
+        pub fn add_quiet(&mut self, item: String) -> Result {
+            ensure!(self.log.len() < 3, "too loud");
+            self.items.push(item);
+            Ok(())
+        }
+
+        #[client]
+        pub fn rename(&mut self, name: String) -> Result {
+            self.me.name = name;
+            Ok(())
+        }
+    }
+
+    async fn shop() -> (Handle<Shop>, Link) {
+        let h = Handle::<Shop>::memory();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(serve(h.clone(), l, "secret".into()));
+        (h, Link { addr, token: "secret".into(), root: None })
+    }
+
+    /// Messages and bytes a copy took (`on_patch`).
+    fn metered(r: &Remote<Shop>) -> Arc<(AtomicUsize, AtomicUsize)> {
+        let m = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
+        let n = m.clone();
+        r.on_patch(move |p| {
+            n.0.fetch_add(1, Ordering::SeqCst);
+            n.1.fetch_add(p.to_string().len(), Ordering::SeqCst);
+        });
+        m
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_copy_holds_and_is_sent_only_the_paths_it_subscribed_to() {
+        let (h, link) = shop().await;
+        h.add("tea".into()).unwrap();
+        h.rename("ana".into()).unwrap();
+        let whole = Remote::<Shop>::connect_to(link.clone(), "bo").await.unwrap();
+        let part = Remote::<Shop>::connect_paths(link.clone(), "cy", &["items", "me.name"]).await.unwrap();
+        let took = metered(&part);
+        // What it holds is the server's; the rest reads as the defaults.
+        let st = part.state();
+        assert_eq!((&st.items, &st.me.name), (&h.state().items, &h.state().me.name));
+        assert_eq!((st.log.len(), st.me.mail.as_str()), (0, ""));
+        // A change it doesn't hold is never sent to it.
+        for i in 0..20 {
+            whole.note(format!("line {i}")).unwrap();
+        }
+        until("the whole copy has them", || whole.pending() == 0 && whole.state().log.len() == 21).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(took.0.load(Ordering::SeqCst), 0, "no patch for parts it doesn't hold");
+        // One it holds is, as a patch of that part only.
+        whole.add("jam".into()).unwrap();
+        until("the server has it", || h.state().items.len() == 2).await;
+        until("part follows", || part.state().items == h.state().items).await;
+        assert_eq!(took.0.load(Ordering::SeqCst), 1);
+        assert_eq!(part.state().log.len(), 0);
+        // Its own call is predicted where it holds: shown at once, the
+        // parts it doesn't hold left as they were; confirmed without a resync.
+        part.add("milk".into()).unwrap();
+        assert_eq!(part.state().items.last().map(String::as_str), Some("milk"));
+        assert!(part.state().log.is_empty(), "never a guess in a part it doesn't hold");
+        until("confirmed", || part.pending() == 0).await;
+        assert_eq!(part.state().items, h.state().items);
+        assert_eq!(part.confirmed().items, h.state().items);
+        // A call whose outcome turns on a part it doesn't hold: shown as
+        // predicted, then as the server's answer makes it.
+        assert!(part.add_quiet("more".into()).is_ok(), "predicted from the default log");
+        until("refused and rolled back", || part.pending() == 0).await;
+        assert_eq!(part.state().items, h.state().items);
+        assert!(!h.state().items.contains(&"more".to_string()));
+        // Wider, live: the log comes; refused lists change nothing.
+        assert!(part.subscribe(&["a..b"]).is_err());
+        assert!(part.subscribe(&vec!["x"; 1025]).is_err());
+        part.subscribe(&["items", "log"]).unwrap();
+        until("the log comes", || part.state().log == h.state().log).await;
+        assert_eq!(part.state().me.name, "", "no longer held");
+        // All of it.
+        part.subscribe(&[]).unwrap();
+        until("all of it", || *part.state() == *h.state()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_copy_keeps_its_paths_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("shop.json");
+        let (h, link) = shop().await;
+        h.add("tea".into()).unwrap();
+        h.note("x".into()).unwrap();
+        {
+            let r = Remote::<Shop>::connect_saved(link.clone(), "cy", &file).await.unwrap();
+            r.subscribe(&["items"]).unwrap();
+            until("narrowed", || r.state().log.is_empty()).await;
+        }
+        let r = Remote::<Shop>::connect_saved(link, "cy", &file).await.unwrap();
+        assert_eq!((r.state().items.clone(), r.state().log.len()), (h.state().items.clone(), 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_paths_in_a_hello_are_refused_out_loud() {
+        let (_h, link) = shop().await;
+        let e = Remote::<Shop>::connect_paths(link, "cy", &["items", ""]).await.err().unwrap();
+        assert!(e.to_string().contains("isn't a dot path"), "{e}");
+    }
+
+    #[test]
+    fn the_server_says_what_a_copy_may_say() {
+        // An older server's first state has no `can`: a copy then never
+        // says `paths` or `seen` (it would end the link).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (_h, link) = shop().await;
+            let (mut w, _) =
+                tokio_tungstenite::connect_async(format!("ws://{}/ws?token=secret&wire=2", link.addr)).await.unwrap();
+            w.send(Message::text(json!({ "t": "hello", "cell": <Shop as aio::CellData>::ID, "v": <Shop as aio::CellData>::VERSION, "user": "cy" }).to_string()))
+                .await
+                .unwrap();
+            let first = next_text(&mut w).await;
+            assert_eq!(first["can"], json!(["paths", "seen"]));
+            assert!(first.get("paths").is_none(), "the whole cell");
+        });
     }
 }

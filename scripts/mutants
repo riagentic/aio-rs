@@ -144,7 +144,8 @@ def built_deb(ax_bin):
 
 
 def smoke(ax_bin, deb):
-    p = subprocess.run([ax_bin, "smoke", deb], capture_output=True, text=True)
+    # ax's lines as a person reads them (a pipe would get JSON).
+    p = subprocess.run([ax_bin, "smoke", deb], capture_output=True, text=True, env=dict(os.environ, AIORT_OUTPUT="text"))
     return p.returncode, p.stdout + p.stderr
 
 

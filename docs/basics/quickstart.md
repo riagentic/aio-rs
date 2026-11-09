@@ -33,7 +33,7 @@ ax create board --template service   # cells served to clients, no window
 ax create list --template todo       # a window on a saved todo list
 ax create balls --template canvas    # a window drawing a world a pure function moves
 ax create notes --id notes-dev       # its id apart from its name (its data's home)
-ax create notes --aio-version 0.3.0  # another aio-rs release (main, latest)
+ax create notes --aio-version 0.4.0  # another aio-rs release (main, latest)
 ax create notes --aio ../aio-rs      # an aio-rs checkout instead, named relative to the app
 ax create notes --target deb,android # its [build] targets
 ax create notes --css tailwind       # Tailwind writes its stylesheet
@@ -45,7 +45,7 @@ ax create notes --force              # into a folder that holds files already
 | `<name>` | the folder, the package, the binary: lowercase letters, digits and `-`, starting with a letter, not `app` or ending in `-app` | – |
 | `--template` | `app`, `todo`, `canvas`, `cli` or `service` | `app` |
 | `--id` | `[app] id`: where its data lives; refused when an installed app has it (the two would share data) | the name |
-| `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.3.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
+| `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.4.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
 | `--aio` | an aio-rs checkout (`crates/aio`, `crates/aio-shell`) instead, named relative to the app; the two share a folder below the root | – |
 | `--target` | `[build] targets`: the kinds `ax build` makes (`ax build <app> --list`); `android` a window app's | none: this OS's bundle |
 | `--css tailwind` | `[build] css` runs `tailwindcss -i src/app.css -o assets/style.css` before every build; `src/app.css` starts with the template's styles (window app) | – |

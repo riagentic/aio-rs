@@ -72,6 +72,7 @@ aio_config::config::Client.retention: Option<std::time::Duration>
 aio_config::config::Client.server: Option<String>
 aio_config::config::Client.strict_pin: bool
 aio_config::config::Client.timeouts: std::collections::BTreeMap<String, Option<std::time::Duration>>
+aio_config::config::Client.transport: Transport
 aio_config::config::ColorScheme::Dark
 aio_config::config::ColorScheme::Light
 aio_config::config::ColorScheme::System
@@ -125,6 +126,7 @@ aio_config::config::Durability::Full
 aio_config::config::Durability::Normal
 aio_config::config::Extras::Keep
 aio_config::config::Extras::Strip
+aio_config::config::Feedback.args: bool
 aio_config::config::Feedback.auto: bool
 aio_config::config::Feedback.keep: usize
 aio_config::config::Feedback.timeout: std::time::Duration
@@ -239,6 +241,9 @@ aio_config::config::Target.title: Option<String>
 aio_config::config::Target.ui: Option<Shown>
 aio_config::config::TextPosition::Below
 aio_config::config::TextPosition::Over
+aio_config::config::Transport::Auto
+aio_config::config::Transport::Poll
+aio_config::config::Transport::Ws
 aio_config::config::Tz::Local
 aio_config::config::Tz::Utc
 aio_config::config::Ui.hue: Option<u16>
@@ -353,6 +358,7 @@ enum aio_config::config::Shown
 enum aio_config::config::SplashPosition
 enum aio_config::config::SplashShow
 enum aio_config::config::TextPosition
+enum aio_config::config::Transport
 enum aio_config::config::Tz
 enum aio_config::log::Level
 enum aio_config::security::Directive
@@ -405,6 +411,7 @@ impl Clone for Storm
 impl Clone for Target
 impl Clone for TextPosition
 impl Clone for Tier
+impl Clone for Transport
 impl Clone for Tz
 impl Clone for Ui
 impl Clone for Updates
@@ -434,6 +441,7 @@ impl Copy for Status
 impl Copy for Storm
 impl Copy for TextPosition
 impl Copy for Tier
+impl Copy for Transport
 impl Copy for Tz
 impl Copy for Ui
 impl Copy for Vitals
@@ -484,6 +492,7 @@ impl Debug for Storm
 impl Debug for Target
 impl Debug for TextPosition
 impl Debug for Tier
+impl Debug for Transport
 impl Debug for Tz
 impl Debug for Ui
 impl Debug for Updates
@@ -531,6 +540,7 @@ impl Default for SplashShow
 impl Default for Storm
 impl Default for Target
 impl Default for TextPosition
+impl Default for Transport
 impl Default for Tz
 impl Default for Ui
 impl Default for Updates
@@ -582,6 +592,7 @@ impl Eq for Storm
 impl Eq for Target
 impl Eq for TextPosition
 impl Eq for Tier
+impl Eq for Transport
 impl Eq for Tz
 impl Eq for Ui
 impl Eq for Updates
@@ -633,6 +644,7 @@ impl Lit for Storm
 impl Lit for Target
 impl Lit for TextPosition
 impl Lit for Tier
+impl Lit for Transport
 impl Lit for Tz
 impl Lit for Ui
 impl Lit for Updates
@@ -686,6 +698,7 @@ impl PartialEq for Storm
 impl PartialEq for Target
 impl PartialEq for TextPosition
 impl PartialEq for Tier
+impl PartialEq for Transport
 impl PartialEq for Tz
 impl PartialEq for Ui
 impl PartialEq for Updates
@@ -738,6 +751,7 @@ impl Serialize for Storm
 impl Serialize for Target
 impl Serialize for TextPosition
 impl Serialize for Tier
+impl Serialize for Transport
 impl Serialize for Tz
 impl Serialize for Ui
 impl Serialize for Updates
@@ -789,6 +803,7 @@ impl StructuralPartialEq for Storm
 impl StructuralPartialEq for Target
 impl StructuralPartialEq for TextPosition
 impl StructuralPartialEq for Tier
+impl StructuralPartialEq for Transport
 impl StructuralPartialEq for Tz
 impl StructuralPartialEq for Ui
 impl StructuralPartialEq for Updates
@@ -840,6 +855,7 @@ impl<'de> Deserialize<'de> for Storm where Storm: _serde::__private229::Default
 impl<'de> Deserialize<'de> for Target
 impl<'de> Deserialize<'de> for TextPosition
 impl<'de> Deserialize<'de> for Tier
+impl<'de> Deserialize<'de> for Transport
 impl<'de> Deserialize<'de> for Tz
 impl<'de> Deserialize<'de> for Ui where Ui: _serde::__private229::Default
 impl<'de> Deserialize<'de> for Updates

@@ -7,7 +7,8 @@
 //! goes through the tape (aio's `tape.wrap(id, fn)`). `AIO_CASSETTE=rerecord`
 //! makes [`Cassette::open`] record afresh over a tape that is there, even an
 //! unreadable one (aio re-recorded a corrupt tape silently; here a tape that
-//! doesn't read is refused unless asked).
+//! doesn't read is refused unless asked). Arguments that don't serialize are
+//! refused too, unless [`Cassette::lenient`] keys them as aio does.
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -48,12 +49,14 @@ pub struct Cassette {
     mode: Mode,
     path: Option<PathBuf>,
     tape: Arc<Mutex<Tape>>,
+    /// Arguments that don't serialize key the tape by their error ([`Self::lenient`]).
+    lenient: bool,
 }
 
 impl Cassette {
     /// Keep every call's answer, for [`Self::save`] (to `path`) or [`Self::text`].
     pub fn record(path: Option<PathBuf>) -> Self {
-        Self { mode: Mode::Record, path, tape: Default::default() }
+        Self { mode: Mode::Record, path, tape: Default::default(), lenient: false }
     }
 
     /// Answer from a tape (`include_str!` of a saved one, in a test).
@@ -64,11 +67,11 @@ impl Cassette {
         for f in frames {
             tape.queued.entry((f.id.clone(), f.key.clone())).or_default().push_back(f);
         }
-        Ok(Self { mode: Mode::Replay, path: None, tape: Arc::new(Mutex::new(tape)) })
+        Ok(Self { mode: Mode::Replay, path: None, tape: Arc::new(Mutex::new(tape)), lenient: false })
     }
 
     pub fn passthrough() -> Self {
-        Self { mode: Mode::Passthrough, path: None, tape: Default::default() }
+        Self { mode: Mode::Passthrough, path: None, tape: Default::default(), lenient: false }
     }
 
     /// The tape at `path` replayed, or recorded there when there is none
@@ -95,6 +98,14 @@ impl Cassette {
         }
     }
 
+    /// Arguments that don't serialize are kept, not refused (aio's
+    /// `String(args)` fallback): such a call is keyed by
+    /// `(unserializable: <why>)`, so every such call of an id shares one
+    /// key and replays in its recorded order, whatever its arguments were.
+    pub fn lenient(self) -> Self {
+        Self { lenient: true, ..self }
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -106,7 +117,7 @@ impl Cassette {
     /// `run`, as this cassette says: called and kept, answered from the
     /// tape, or just called. An error (the real one, or a recorded one) is
     /// its text. Arguments that don't serialize are refused (they key the
-    /// tape), naming the call and why.
+    /// tape), naming the call and why, unless the tape is [`Self::lenient`].
     pub async fn call<A, R, E, F>(&self, id: &str, args: &A, run: impl FnOnce() -> F) -> Result<R, String>
     where
         A: Serialize,
@@ -114,7 +125,7 @@ impl Cassette {
         E: std::fmt::Display,
         F: std::future::Future<Output = Result<R, E>>,
     {
-        self.keyed(id, key_of(id, args)?, run).await
+        self.keyed(id, key_of(id, args, self.lenient)?, run).await
     }
 
     /// `f` with every call of it going through this tape as `id` (aio's
@@ -128,7 +139,7 @@ impl Cassette {
     {
         let (tape, id) = (self.clone(), id.to_string());
         async move |args: A| {
-            let key = key_of(&id, &args)?;
+            let key = key_of(&id, &args, tape.lenient)?;
             tape.keyed(&id, key, || f(args)).await
         }
     }
@@ -187,10 +198,15 @@ impl Cassette {
     }
 }
 
-/// A call's arguments as the tape keys them (JSON); unserializable ones refused.
-fn key_of(id: &str, args: &impl Serialize) -> Result<String, String> {
-    serde_json::to_string(args)
-        .map_err(|e| format!("cassette {id}: its arguments don't serialize, and they key the tape: {e}"))
+/// A call's arguments as the tape keys them (JSON); unserializable ones
+/// refused, or `lenient`, keyed by why.
+fn key_of(id: &str, args: &impl Serialize, lenient: bool) -> Result<String, String> {
+    serde_json::to_string(args).or_else(|e| match lenient {
+        true => Ok(format!("(unserializable: {e})")),
+        false => Err(format!(
+            "cassette {id}: its arguments don't serialize, and they key the tape: {e} (Cassette::lenient keeps such calls)"
+        )),
+    })
 }
 
 #[cfg(test)]
@@ -285,5 +301,23 @@ mod tests {
         let bad: HashMap<(u8, u8), u8> = [((1, 2), 3)].into();
         let e = block(Cassette::record(None).call("grid.cell", &bad, || async { Ok::<u8, String>(0) })).unwrap_err();
         assert!(e.starts_with("cassette grid.cell: its arguments don't serialize"), "{e}");
+    }
+
+    #[test]
+    fn a_lenient_tape_keeps_unserializable_arguments_and_replays_them_in_order() {
+        let bad: HashMap<(u8, u8), u8> = [((1, 2), 3)].into();
+        let rec = Cassette::record(None).lenient();
+        let got = block(async {
+            let one = rec.call("grid.cell", &bad, || async { Ok::<u8, String>(1) }).await;
+            [one, rec.call("grid.cell", &bad, || async { Ok::<u8, String>(2) }).await]
+        });
+        assert_eq!(got, [Ok(1), Ok(2)]);
+        assert!(rec.frames()[0].key.starts_with("(unserializable: "), "{:?}", rec.frames());
+        let play = Cassette::replay(&rec.text()).unwrap().lenient();
+        let again = block(async {
+            let one = play.call("grid.cell", &bad, || async { Ok::<u8, String>(9) }).await;
+            [one, play.call("grid.cell", &bad, || async { Ok::<u8, String>(9) }).await]
+        });
+        assert_eq!(again, got, "replayed in recorded order, nothing ran");
     }
 }

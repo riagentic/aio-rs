@@ -215,6 +215,29 @@ pub fn adb_out(args: &[&str]) -> Result<String, String> {
     if out.status.success() { Ok(text) } else { Err(format!("adb {}: {}", args.join(" "), text.trim())) }
 }
 
+/// `adb reverse` of `p` (`tcp:<port>`) on `serial`, said in `record`: removed
+/// by [`unreverse`], or by adb started as a signal ends ax (Ctrl-C, the
+/// terminal closing).
+pub fn reverse(serial: &str, p: &str, record: &Path) -> Result<(), String> {
+    adb_out(&["-s", serial, "reverse", p, p])?;
+    _ = std::fs::write(record, p);
+    let args = ["-s", serial, "reverse", "--remove", p].map(String::from).to_vec();
+    let cwd = record.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let log = record.with_extension("removed.log");
+    crate::hotpatch::cargo_out::arm(crate::hotpatch::cargo_out::OnExit { program: adb(), args, cwd, log });
+    Ok(())
+}
+
+/// The reverse `record` says on `serial` removed (one a killed session left
+/// too); only ax's own: another tool's stay.
+pub fn unreverse(serial: &str, record: &Path) {
+    crate::hotpatch::cargo_out::disarm();
+    if let Ok(p) = std::fs::read_to_string(record) {
+        _ = adb_out(&["-s", serial, "reverse", "--remove", p.trim()]);
+        _ = std::fs::remove_file(record);
+    }
+}
+
 /// adb's own `ANDROID_SERIAL`, when set.
 fn serial_env() -> Option<String> {
     std::env::var("ANDROID_SERIAL").ok().filter(|s| !s.is_empty())
@@ -550,6 +573,44 @@ mod tests {
 R5CT12ABCDE            device usb:1-3 product:a52qxx model:SM_A525F device:a52q
 emulator-5554          device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64
 ";
+
+    /// Not a test alone: run by the next one in a process of its own, with
+    /// `ANDROID_HOME` a fake SDK: reverses a port, then ends by SIGINT.
+    #[cfg(unix)]
+    #[test]
+    fn reverse_probe() {
+        let Some(record) = std::env::var_os("AX_REVERSE_PROBE") else { return };
+        reverse("emulator-5600", "tcp:4321", Path::new(&record)).unwrap();
+        // SAFETY: a signal to this process, as a Ctrl-C in its terminal.
+        unsafe { libc::raise(libc::SIGINT) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ctrl_c_removes_the_reverse_ax_dev_made() {
+        use std::os::unix::{fs::PermissionsExt, process::ExitStatusExt};
+        let d = tempfile::tempdir().unwrap();
+        let tools = d.path().join("platform-tools");
+        std::fs::create_dir(&tools).unwrap();
+        let calls = d.path().join("calls");
+        std::fs::write(tools.join("adb"), format!("#!/bin/sh\necho \"$@\" >> '{}'\n", calls.display())).unwrap();
+        std::fs::set_permissions(tools.join("adb"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--nocapture", "install::tests::reverse_probe"])
+            .env("AX_REVERSE_PROBE", d.path().join("dev.reverse"))
+            .env("ANDROID_HOME", d.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGINT), "ended by the signal");
+        let want = "-s emulator-5600 reverse tcp:4321 tcp:4321\n-s emulator-5600 reverse --remove tcp:4321\n";
+        let t = Instant::now();
+        while std::fs::read_to_string(&calls).unwrap_or_default() != want && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), want);
+    }
 
     fn devices(s: &str) -> Vec<Device> {
         parse_devices(&format!("List of devices attached\n{s}"))

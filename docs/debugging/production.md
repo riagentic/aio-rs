@@ -350,8 +350,11 @@ degraded part named `cell <id>` until `Cells::enable` turns it back on.
 
 ## Not in aio-rs
 
-- aio's V8 heap limits and heap snapshots (`v8Flags`): aio-rs has no
-  garbage-collected heap; memory is the process's resident set.
+- aio's V8 heap limits (`v8Flags`): aio-rs has no garbage-collected
+  heap to limit or snapshot; memory is the process's resident set, held
+  by `[memory]`. aio's `am heap` (its heap against the V8 ceiling, the
+  resident set, each cell's size) is `ax heap`, which adds each cell's
+  events and their arguments' bytes.
 - aio's startup linter of cell config at `aio.run()`: aio-rs checks cell
   flags when the app compiles (the macros) and `aio.toml` when it
   builds; `ax lint` adds what types can't check.

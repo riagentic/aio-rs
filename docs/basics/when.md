@@ -25,11 +25,11 @@ purpose.
 
 | You need | Why not | Use instead |
 |---|---|---|
-| SEO-first, server-rendered pages (a blog, a shop front, marketing) | no server rendering or hydration; the web build is an app page drawn in the browser ([views](../ui/views.md#gaps-against-aio)) | a site framework (Next.js, Astro, Leptos SSR) |
+| SEO-first content sites (a blog, a shop front, marketing) | an app's pages are rendered per request and hydrated ([views](../ui/views.md#server-rendering-and-hydration)), and streamed, with code splitting, but there is no static generation | a site framework (Next.js, Astro, Leptos SSR) |
 | A CDN or the edge (serverless functions, Workers) | an app is one long-running process with its data on a disk | an edge runtime and a hosted database |
 | One state across many servers, or millions of stateless requests per second | each app is one process owning its cells ([FAQ](faq.md)) | a stateless API behind a load balancer and a shared database |
 | State redrawn every frame (a game, a 3D scene) | views redraw on a change of state, not per frame | a game engine, wgpu |
-| iOS | no iOS client yet | aio (the TypeScript line) has one |
+| An app running on iOS itself | an iPhone or iPad gets a thin client of a server (`ax build --ios`, or the server's page on the Home Screen), as with aio ([targets](../build/targets.md#ios)) | a native iOS stack |
 | A frozen API today | 0.x: a minor version may break ([versions](versioning.md)) | aio 1.x, or pin aio-rs (below) |
 | A small download with the system webview | desktop windows draw in one shared Electron runtime ([why](why.md#when-not-to-use-aio-rs)) | Tauri, or another system-webview stack ([comparison](../comparison.md)) |
 
@@ -39,9 +39,9 @@ Never build on aio-rs's `main`: build on a release tag, and move on
 purpose.
 
 ```sh
-ax create notes --aio-version 0.3.0   # the app depends on the tag v0.3.0
+ax create notes --aio-version 0.4.0   # the app depends on the tag v0.4.0
 ax pin notes                          # says which aio-rs the app uses
-ax pin notes 0.3.0                    # moves it, read the CHANGELOG first
+ax pin notes 0.4.0                    # moves it, read the CHANGELOG first
 ```
 
 `Cargo.lock` pins the commit; commit it. Read the
@@ -63,10 +63,11 @@ per release; it may change more in a minor version.
 | Signed updates, delta patches, the way back | proven (Linux, Windows and macOS in CI, `scripts/update-proof`) |
 | Sync between a server and its clients | proven |
 | Android | **experimental**: gated by an emulator run before each release (`scripts/android-gate`), no Play Store flow |
-| The web build (wasm, PWA) | **experimental**: no hot-patching, tested in one browser |
+| The web build (wasm, PWA) | **experimental**: tested in one browser |
 | Peers, pairing, discovery on the LAN | **experimental** |
 | aio's wire and data (`compat`) | **experimental**: an app may move between aio and aio-rs, checked against aio's fixtures |
 | Islands (another view library in the window) | **experimental** |
+| The JS client (React, Solid, Svelte, Vue or plain DOM on the cells) | **experimental**: tested in one browser, not on npm yet |
 | iOS | not there |
 
 Coming from aio: [aio and aio-rs compared](../aio-vs-aio-rs.md).

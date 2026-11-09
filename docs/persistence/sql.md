@@ -213,6 +213,46 @@ rt.block_on(async {
   list of bytes).
 - A request that panics fails its caller only; the thread goes on.
 
+### Where objects
+
+`aio::db::Select` is aio's query builder (`table.where(..)` with
+`orderBy`, `limit`, `offset`): one `SELECT * FROM table`, its values
+always parameters.
+
+```rust
+use aio::db::{Db, Opts, Order, Select, Where};
+use serde_json::json;
+
+# fn main() {
+let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+rt.block_on(async {
+    let db = Db::open(":memory:", Opts::default()).unwrap();
+    db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, total REAL)", vec![]).await.unwrap();
+    let open = Where::eq("status", "open".to_string()).and(Where::gt("total", 10.0));
+    let q = Select::from("orders").filter(open).order_by("total", Order::Desc).limit(20);
+    assert_eq!(q.sql().unwrap().0, "SELECT * FROM orders WHERE (status = ?) AND (total > ?) ORDER BY total DESC LIMIT 20");
+    assert!(db.select(&q).await.unwrap().rows.is_empty());
+    // aio's object form, as JSON: each field all, a list any.
+    let w = Where::object(&json!({ "status": { "in": ["open", "held"] }, "total": { "gte": 5 } })).unwrap();
+    assert!(db.select(&Select::from("orders").filter(w)).await.is_ok());
+});
+# }
+```
+
+- `Where::eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `like` (`%`, `_`),
+  `is_in` (none: no row); `and`, `or` nest. `eq` and `ne` with
+  `Sql::Null` are `IS NULL` and `IS NOT NULL`.
+- `Where::object(&json)` takes aio's `where` object: `{"col": value}` or
+  `{"col": {"gt": 1, "in": [..], "like": "a%"}}`, and a list of them for
+  any one (aio's `whereOr`). An unknown operator, or a value that is not
+  a number, string, bool or null, is refused.
+- Values are never part of the statement: `'; DROP TABLE` is matched as
+  text. Table and column names are: each must be a plain identifier
+  (letters, digits, `_`), or the query is refused before it runs.
+- At most `aio::db::MAX_PARAMS` (32 766) values in one query, as SQLite
+  allows: more is refused with what to do instead.
+- `q.sql()` gives the statement and its parameters, for `db.live`.
+
 ### Live queries
 
 `db.live(sql, params)` (aio's `reactiveDB().select`) runs the query now
@@ -477,8 +517,6 @@ under about a megabyte.
 
 ## Limits, compared with aio
 
-- **No query builder.** `aio::db` takes plain SQL, which says more than
-  aio's `where` objects did, with bound parameters.
 - **Live queries are this process's**: no cross-process invalidation, as
   in aio.
 - **A blob stream is a blocking reader** (`Blobs::stream`, `Read`):
@@ -503,7 +541,8 @@ under about a megabyte.
 ## API
 
 `cargo doc -p aio-rs --no-deps --open`: `aio::db` (`Db`, `Opts`, `Rows`,
-`Done`, `Live`, `Tx`, `Sql`, `PRAGMAS`, `TIMEOUT`), `aio::columns` (`Col`,
+`Done`, `Live`, `Tx`, `Sql`, `Select`, `Where`, `Op`, `Order`, `PRAGMAS`,
+`TIMEOUT`, `MAX_PARAMS`), `aio::columns` (`Col`,
 `Columns`, `pk`, `text`, `integer`, `real`, `refs`, `boolean`, `json`, `sql`,
 `create`), `aio::blobs` (`Blobs`,
 `Blob`, `url`, `id_ok`), `aio::http` (`Route::streamed`, `Req::body_reader`,

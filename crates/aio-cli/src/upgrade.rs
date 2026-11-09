@@ -46,7 +46,7 @@ pub fn upgrade(to: Option<&str>, checkout: Option<&Path>) -> Result<String, Stri
             crate::create::Aio::Tag(t) => t,
             _ => {
                 return Err(format!(
-                    "ax upgrade {v}: a release (0.3.0) or latest; a branch builds from source: \
+                    "ax upgrade {v}: a release (0.4.0) or latest; a branch builds from source: \
                      cargo install --locked --git {} --branch {v} aio-rs-cli",
                     crate::create::REPO
                 ));

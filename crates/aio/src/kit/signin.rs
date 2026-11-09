@@ -98,6 +98,12 @@ pub fn SignIn(
     });
     let me = memo(move || offers.get().flatten().unwrap_or_default());
     let tab = client.tab();
+    // A window's views know who signed in ([`super::use_user`]); a page asks its server.
+    let on_signed = move |s: Signed| {
+        #[cfg(not(target_arch = "wasm32"))]
+        super::set_user(Some((s.user.clone(), s.role.clone())));
+        on_signed.call(s)
+    };
     // Outside a page: a sign-in under way in the browser, a new one once it fails.
     let sso_at = signal(|| None::<String>);
     #[cfg(not(target_arch = "wasm32"))]
@@ -112,7 +118,7 @@ pub fn SignIn(
                 sso_at.set(Some(s.url.clone()));
                 let c = c.clone();
                 match asked(async move { c.sso_done(s).await }).await {
-                    Ok(s) => return on_signed.call(s),
+                    Ok(s) => return on_signed(s),
                     Err(e) => error.set(Some(said(&e))),
                 }
             }
@@ -168,7 +174,7 @@ pub fn SignIn(
                 Ok(Done::Signed(s)) => {
                     pending.set(None);
                     password.set(String::new());
-                    on_signed.call(s);
+                    on_signed(s);
                 }
                 Ok(Done::Totp(p)) => pending.set(Some(p)),
                 Ok(Done::Told(n)) => {

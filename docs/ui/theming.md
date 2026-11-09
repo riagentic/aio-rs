@@ -367,6 +367,18 @@ own by component (`.timeline-track`, not `.track`). Two components that
 pick the same name share rules, and the symptom is visual, which no test
 sees. Classes starting `aio-` are the kit's.
 
+- **Scoped classes** (aio's `css` tag): `aio::ui::css("color: red;
+  &:hover { … }")` is a class named by a hash of its rule (FNV-1a, as
+  aio's), so it can't meet another; its rule goes in the page once per
+  window, scoped by native nesting (`@keyframes` lifted out), and
+  `aio::ui::collect_css()` gives every rule.
+- **Two sheets, one class** (aio's `aiol` styles check): `ax lint` warns
+  when two top-level `.track { … }` rules of the app's stylesheets set one
+  property to two values, naming both places; a selector with more to it
+  (`.track:hover`), a rule inside `@media`, custom properties and a
+  generated sheet (starting `/*!`) are left alone, and `/* aio-ok(css):
+  why */` above the rule says it is meant.
+
 ## Right to left
 
 `[app] dir = "rtl"` (or `auto`) sets `<html dir>`; `[app] lang` sets
@@ -377,13 +389,8 @@ keys.
 
 ## Gaps against aio
 
-- **Scoped classes.** aio's `css` tag makes a class from a hash of its
-  rule, and `aiol` warns when two stylesheets define one class
-  differently. `aio::ui::css("color: red; &:hover { … }")` is that class
-  (FNV-1a of the rule, as aio's), its rule put in the page once per
-  window and scoped by native nesting (`@keyframes` lifted out), and
-  `aio::ui::collect_css()` gives every rule; no warning, since a class is
-  its rule's hash.
+None: aio's scoped classes and its warning for a class two sheets define
+differently are both here ([class names](#class-names)).
 
 ## Common mistakes
 

@@ -194,6 +194,7 @@ assert_eq!(trusted_after, [next_public]);
 | `--allow-dirty` | a build of uncommitted edits too (its version says `-dirty.<hash>`) |
 | `--unsigned` | a key made for this release only: to look at, never taken |
 | `--workflow` | writes the GitHub workflow that does this on a tag |
+| `--pages`, `--web` | with `--workflow`: the channel deployed to GitHub Pages too; the app's web build at the site's root ([below](#github-pages)) |
 
 What it does: builds the bundle, starts it once to ask which data it
 reads (the cells it opens and their versions, the store's layout),
@@ -212,6 +213,18 @@ signs the manifest, and lays out in `dist/<channel>/` the bundle,
   `gh release create` (or `gh release upload --clobber`) line.
 - **The workflow.** `ax release <app> --workflow` writes
   `.github/workflows/release-<app>.yml` ([below](#github-workflow)).
+- **GitHub Pages.** `--workflow --pages` deploys the channel there too
+  ([below](#github-pages)).
+
+A release of a version already laid out in that folder with other bytes
+is refused: an install that has the version is never offered another
+build of it (an update needs a newer version). A new build is a new
+version: a commit raises the build number (`git commit --allow-empty -m
+rebuild` when nothing changed but the build). The same bytes again go
+over it. aio offers "the same version, new build" by comparing digests,
+which an install that never recorded one can't see, and a stale copy of
+the older build can offer back; here every build reaches every install
+as the next version, and the version alone orders them.
 - An app caches the manifest with its ETag, so a check that finds nothing
   new costs a `304`.
 
@@ -419,7 +432,8 @@ the release.
 ## The app's own update UI
 
 The `updates` cell (`aio_shell::update::cell()`, an
-`aio::update::Updates`) is what a UI shows and calls. With `auto = false`
+`aio::update::Updates`; aio-rs-shell's `updates` feature, which
+turns on aio-rs's) is what a UI shows and calls. With `auto = false`
 a release is only offered, and installs when the app calls `apply`. The
 cell's I/O is a runtime; tests use a stub:
 
@@ -442,13 +456,18 @@ let s = h.state();
 assert_eq!(s.phase, Phase::Available);
 assert_eq!(s.available.as_ref().map(|o| o.notes.as_str()), Some("Faster lists"));
 
-// The app's say before any install: "not now" while a recording runs.
-can_apply(|| match RECORDING.load(std::sync::atomic::Ordering::SeqCst) {
-    true => Err("a recording is running".into()),
-    false => Ok(()),
+// The app's say before any install, awaited: "not now" while a recording runs.
+can_apply(|| async {
+    match RECORDING.load(std::sync::atomic::Ordering::SeqCst) {
+        true => Err("a recording is running".into()),
+        false => Ok(()),
+    }
 });
 RECORDING.store(true, std::sync::atomic::Ordering::SeqCst);
-assert!(h.apply().unwrap_err().why.contains("not now: a recording is running"));
+h.apply().unwrap();
+h.done("apply").await;
+assert_eq!(h.state().error.as_deref(), Some("the app says not now: a recording is running"));
+assert_eq!(h.state().phase, Phase::Available, "still offered");
 RECORDING.store(false, std::sync::atomic::Ordering::SeqCst);
 h.apply().unwrap();
 h.done("apply").await;
@@ -491,8 +510,16 @@ with its own runtime shares its cell with `aio::update::share(handle)`.
 | `retired` | where a fresh start to this version set the data aside (`archive/<id>-<version>-<time>`), for the app to say on its first start (aio's `freshStartNotice`) |
 | `dismissed`, `pinned` | the release said no to, the channel chosen: the only saved fields |
 
-- `aio::update::can_apply(veto)`: asked before every install; `Err(why)`
-  refuses it (`the app says not now: …`).
+- `aio::update::can_apply(veto)` (aio's `canApply`): an async closure
+  awaited before every install: the cell's `apply`, `apply_anyway` and
+  `start_fresh`, a server's unattended install, and a staged release's
+  install at the next start (set it in `main`, before `aio_shell::start`).
+  It runs off the cell, so it may do work first (a backup, a sync to
+  finish). `Err(why)` is "not now": the release stays offered, `error`
+  says `the app says not now: …`; at a start it stays staged for a later
+  one (`update 1.5.0 waits: the app says not now: …` in the log). A start
+  that installs with no veto set says so in the log, as aio warns. A veto
+  that panics says not now.
 - Only `dismissed` and `pinned` are saved: the rest is learned again
   each run, so a stale "available" never survives a restart.
 - A release that failed its first start here comes back in `ready` as
@@ -529,7 +556,7 @@ only when the APK is signed with the same key
   installs `ax` from the commit its `Cargo.lock` pins. One `ax create`
   made (a path to a local checkout, which a runner doesn't have) gets
   aio-rs checked out beside it in `aio-rs/`, at the release tag of the
-  `ax` that wrote the workflow (`v0.3.0`; the repository variables
+  `ax` that wrote the workflow (`v0.4.0`; the repository variables
   `AIO_REPO` and `AIO_REF` name another), its `Cargo.toml` paths pointed
   there, and `ax` installed from it. Nothing to change in the app.
 - One job then puts every file on the tag's GitHub release, files before
@@ -538,6 +565,31 @@ only when the APK is signed with the same key
 - Put the text of the key file in the repository secret
   `AIO_SIGNING_KEY`; without it the workflow fails, since an app refuses
   an unsigned release. Pair it with `url = "github:<owner>/<repo>"`.
+
+### GitHub Pages
+
+`ax release <app> --workflow --pages` (aio's `ship github`) also deploys
+the channel to the repository's GitHub Pages site, after the files are
+on the release: `<channel>/<os>-<arch>.json` and its bundles, so an app
+reads them as from any web host:
+
+```toml
+[updates]
+url = "https://<owner>.github.io/<repo>"   # the channel under it
+
+[capabilities]
+network = ["<owner>.github.io"]
+```
+
+- Once in the repository: Settings > Pages > Source: GitHub Actions; and
+  let a tag deploy: Settings > Environments > github-pages, a tag rule
+  `v*` (by default only the default branch may).
+- `--web` adds a job that builds the app for the web (`ax build <app>
+  --web`) and puts it at the site's root: the app's page at
+  `https://<owner>.github.io/<repo>/`, its updates beside it.
+- A deploy replaces the whole site: one channel per site. Pages takes
+  files up to 100 MB; a bigger bundle stays on the release
+  (`github:<owner>/<repo>`).
 
 ## Signing for the OS
 
@@ -593,19 +645,7 @@ source.
 
 ## Not in aio-rs
 
-- aio's `canApply` is awaited, may do work (a backup) and guards every
-  install, and a desktop app with `auto` and no hook is warned at boot.
-  aio-rs's `can_apply` is a plain function asked before each `apply` (the
-  button, a server's unattended install, the terminal prompt); a desktop
-  app's `auto` install at the next start is not asked, and nothing warns
-  when no veto is set.
 - OS code signing for desktop bundles (aio-rs 0.1.0).
-- aio offers a new build of the version installed (`same version, new
-  build`). aio-rs offers only a newer version: it numbers builds from
-  commits, so a new commit is a new version, and an install keeps each
-  version in its own folder, the one it rolls back to.
-- aio's `ship github` deploys a GitHub Pages site. aio-rs reads GitHub
-  releases (`url = "github:<owner>/<repo>"`): no second host.
 
 ## API
 

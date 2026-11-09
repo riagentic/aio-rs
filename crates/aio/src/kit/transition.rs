@@ -34,6 +34,16 @@ impl PartialEq for Motion {
     }
 }
 
+/// One duration, delay and easing for both of a transition's motions
+/// (aio's `options` prop): each field given replaces the motion's own. A
+/// `const` of it is the defaults many transitions share.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Timing {
+    pub ms: Option<u32>,
+    pub delay_ms: Option<u32>,
+    pub easing: Option<&'static str>,
+}
+
 /// How many steps a [`Motion::of`] is sampled in (aio's `KEYFRAME_STEPS`).
 const STEPS: u32 = 20;
 
@@ -52,7 +62,10 @@ impl Motion {
     /// A motion written as a function (aio's `TransitionFn` `css(t)`):
     /// `css(t)` is the style at progress `t`, 0 hidden to 1 shown
     /// (`|t| format!("opacity:{t};transform:scale({t})")`). `name` names
-    /// its `@keyframes`: one name, one function.
+    /// its `@keyframes`: one name, one function. Where aio's function was
+    /// given the element, the frames read its box: `var(--aio-w)` and
+    /// `var(--aio-h)`, set on it (measured without the animation) before its
+    /// first frame.
     pub const fn of(name: &'static str, css: fn(f64) -> String) -> Self {
         Self { css: Some(css), ..Self::new(name) }
     }
@@ -82,6 +95,16 @@ impl Motion {
 
     pub const fn ms(self, ms: u32) -> Self {
         Self { ms, ..self }
+    }
+
+    /// With `t`'s fields where it gives them.
+    pub fn timed(self, t: Timing) -> Self {
+        Self {
+            ms: t.ms.unwrap_or(self.ms),
+            delay_ms: t.delay_ms.unwrap_or(self.delay_ms),
+            easing: t.easing.unwrap_or(self.easing),
+            ..self
+        }
     }
 
     /// `tick(t, u)` each frame while it plays, entering 0 → 1, leaving 1 → 0
@@ -124,11 +147,24 @@ impl Motion {
     }
 }
 
+/// `enter` and `exit` with `options` over each (pure).
+fn both(enter: Option<Motion>, exit: Option<Motion>, options: Option<Timing>) -> (Option<Motion>, Option<Motion>) {
+    let t = |m: Option<Motion>| m.map(|m| options.map_or(m, |o| m.timed(o)));
+    (t(enter), t(exit))
+}
+
 /// Content that animates as `show` changes (aio's `Transition`): with no
 /// `exit`, it goes at once. No box of its own: its content's first element
-/// plays the animation (its own style kept).
+/// plays the animation (its own style kept). `options` times both motions.
 #[component]
-pub fn Transition(show: Prop<bool>, enter: Option<Motion>, exit: Option<Motion>, children: View) -> View {
+pub fn Transition(
+    show: Prop<bool>,
+    enter: Option<Motion>,
+    exit: Option<Motion>,
+    options: Option<Timing>,
+    children: View,
+) -> View {
+    let (enter, exit) = both(enter, exit, options);
     once(|| enter.iter().chain(&exit).for_each(Motion::install));
     let on = signal(|| show.get_untracked());
     let leaving = signal(|| false);
@@ -203,17 +239,20 @@ pub fn moved<K: Eq + std::hash::Hash + Clone>(
 /// A keyed list whose rows animate as they come and go (aio
 /// `TransitionGroup`); with `flip`, rows that moved slide from where they
 /// were over `flip_ms`. Each row sits in a box of its own (`row_class`).
+/// `options` times both motions.
 #[component]
 pub fn TransitionGroup(
     #[props(into)] items: Prop<Vec<(String, View)>>,
     enter: Option<Motion>,
     exit: Option<Motion>,
+    options: Option<Timing>,
     #[props(default)] flip: bool,
     #[props(default = 300)] flip_ms: u32,
     #[props(default, into)] class: Prop<String>,
     #[props(default, into)] row_class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
+    let (enter, exit) = both(enter, exit, options);
     once(|| enter.iter().chain(&exit).for_each(Motion::install));
     // The rows drawn (key, leaving), each row's view and handle.
     let drawn = signal(Vec::<(String, bool)>::new);
@@ -383,6 +422,11 @@ mod tests {
             (Motion::FADE.rule(), grow, grow.css(false)),
             (None, Motion::of("grow", |_| String::new()), "animation:grow 300ms ease 0ms 1 normal both".into())
         );
+        const QUICK: Timing = Timing { ms: Some(120), delay_ms: None, easing: Some("ease-out") };
+        let (e, x) = both(Some(Motion::FADE), Some(m), Some(QUICK));
+        assert_eq!(e.unwrap().css(false), "animation:aio-fade 120ms ease-out 0ms 1 normal both");
+        assert_eq!(x.unwrap().css(true), "animation:aio-fade 120ms ease-out 50ms 1 reverse both", "its own delay kept");
+        assert_eq!(both(None, Some(m), None), (None, Some(m)), "no options: as given");
         assert_eq!(
             row_style(None, Some(&((0.0, -40.0), false)), 300),
             "transform:translate(0px,-40px);transition:none"

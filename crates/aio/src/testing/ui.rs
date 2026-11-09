@@ -169,7 +169,7 @@ impl Mount {
         // A window on no screen has no focus of its own: the page behaves as
         // the focused window a person types into (`:focus`, Tab, focus events).
         page.cmd("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }));
-        let scheme = if self.dark { "dark" } else { "light" };
+        let scheme = super::video::scheme_asked(self.dark);
         page.cmd("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }));
         if !self.scrollbars {
             page.cmd("Emulation.setScrollbarsHidden", json!({ "hidden": true }));

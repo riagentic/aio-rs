@@ -68,25 +68,121 @@ again after each change below):
 
 | | aio `am dev` | aio-rs `ax dev` |
 |---|---|---|
-| First start on a fresh machine, before `ax setup`'s warm-up has run | **2.6 s** | 24.2 s: Rust's compile time for aio-rs and its dependencies, once per machine |
-| First start of an app, aio-rs built (`ax setup`'s warm-up, an earlier app) | 2.6 s | **1.7 s** (the app's own crates compiled, linked) |
-| First start while the warm-up still runs | 2.6 s | it waits on cargo's lock, then builds only its own crates: the window as the warm-up ends (20 s for one started 3 s into it) |
+| First start on a fresh install (`ax setup` at a terminal, then `ax create`, `ax dev`) | 2.6 s | **1.9 s** (0.4.0: aio-rs built by `ax setup` before it returns, the app's own crates by `ax create` behind it) |
+| First start of an app, aio-rs built, the app not (`ax create --no-warm`) | 2.6 s | 2.6 s (median of 1.8, 2.6 and 5.0 s: the app's own crates compiled, linked, its window's first profile made) |
+| First start with nothing built (no terminal at `ax setup`, `AIORT_NO_WARM=1`) | **2.6 s** | 24.2 s: Rust's compile time for aio-rs and its dependencies, once per machine |
 | Start, nothing changed | 1.1 s | **0.33 s** |
 | Start after an edited session | 0.8 s | **0.35 s** (built behind the session, or by the warm-up its end started) |
-| Start, the sources changed while `ax dev` was off (a pull) | **0.8 s** | 1.0 s (the changed crates compiled, linked) |
+| Start, the sources changed while `ax dev` was off (a pull) | 0.8 s | **0.42 s** (0.4.0: the last build started, the edit patched in as it comes up; 1.0 s before, 1.3 s for a view's logic edit on 2026-11-08) |
 | A stylesheet line | 0.31 s, a reload | **0.01 s**, state kept |
 | Markup (`App.tsx` text, an `rsx!` text) | 0.50 s | **0.008 s**, state kept |
 | A view's logic | 0.41 s, the page patched | **0.27 s**, hot-patched, state kept |
 | A cell method's logic | 0.84 s, the app restarted | **0.40 s**, hot-patched, state kept |
 | A cell's field added | a restart | 2.1 s, rebuilt and restarted, the state back from its log |
 
-aio-rs wins every edit and every start but two: a first start on a
-machine where aio-rs was never built, and one after the sources changed
-with `ax dev` off. Both compile Rust, which aio, running TypeScript from
-source, never does; the first is ~25 s once per machine, so `ax setup` (the
-installers' last step) builds aio-rs in the background at once, and
-`ax create` builds each new app the same way. Prebuilt libraries
-([dev](build/dev.md)) cut it further on a fresh machine.
+aio-rs wins every edit and every start but a first start on a machine
+where aio-rs was never built: it compiles Rust, which aio, running
+TypeScript from source, never does (~25 s once per machine). So `ax
+setup` (the installers' last step) builds aio-rs before it returns, and
+`ax create` builds each new app's own crates in the background.
+
+What 0.4.0 changed, measured on 2026-11-08 the same way (aio-rs's release
+`ax`, CARGO_BUILD_JOBS=4 on 12 shared cores, load 6-9; medians of 3 to 5
+runs, before and after on the same machine the same hour):
+
+- A start after an edit made with `ax dev` off (a view's logic, the
+  template): 1.33 s → 0.42 s. The last fat build starts at once, nothing
+  built or linked; the edited crates compile beside its start and the
+  patch goes in as its window comes up ([dev](build/dev.md#the-session)).
+  Code that ran as the app started ran as built before, as with an edit
+  in a session.
+- A fresh install's first start: `ax setup` built aio-rs in the
+  background, so a first `ax dev` soon after waited for it; it builds it
+  before it returns now (34 s here), then `ax create` builds the app's
+  crates behind it (1.5 s): the first `ax dev` 1.46-1.89 s (median 1.9 s).
+- `ax dev --web` (and the Android dev page, the same page), beside aio's
+  page reload:
+
+  | | aio `am dev` | `ax dev --web` before | `ax dev --web` 0.4.0 |
+  |---|---|---|---|
+  | A stylesheet line | 0.31 s, a reload | never shown (the page's live read was off) | **0.02 s**, state kept |
+  | Markup | 0.50 s, a reload | 1.03 s, a build and a reload | **0.008-0.015 s**, state kept |
+  | A view's logic | 0.41 s, a reload | 1.13 s, a build and a reload | **0.18 s**, hot-patched, state kept (0.58 s, a build and a reload, before the hot-patch) |
+  | A cell method's logic | 0.84 s, a restart | 1.1 s | **0.17 s**, hot-patched, state kept (0.76 s, a build and a reload, before) |
+
+  The page is told of a change as it comes (its question held by the
+  server) instead of asking every 250 ms. A Rust edit of the page's crate
+  is hot-patched: rustc compiles the crate again (~0.11 s), its objects
+  are linked into a side module against the running module's addresses
+  and table slots (~0.05 s), and the page loads it into its own memory
+  and function table. The views and the cell methods are called through
+  a jump table, so the new code runs on the kept state; wasm-bindgen
+  doesn't run. Medians of 10 warm edits (the first, cold: 0.36 and 0.25
+  s); a cell edit is timed to the patch applied, its next call the new
+  code. Each dev build takes ~0.04 s more (a start 0.39 → 0.42 s): every
+  function gets a table slot and each JS import a wrapper. An edit a patch
+  can't take (a new JS import, a function called as another type, another
+  crate's file) is a full build and a reload. Before the hot-patch, the
+  follow-up built it from the first
+  save (while the burst settles) and optimizes the dev build's libraries
+  with no debug info linked: the bound module 4.7 → 2.2 MB, the build
+  0.83-0.91 → 0.48-0.57 s (cargo ~0.3 s, wasm-bindgen ~0.2 s), the reload
+  ~0.15 s. Medians of 3 (the first, cold, left out: 1.26 s). Under aio's
+  0.41 s needed wasm-bindgen out of the loop, hence the hot-patch.
+  Profiled: cargo 0.19 s (rustc 0.14 s, 0.06 s of it the link),
+  wasm-bindgen 0.22 s, the reload ~0.15 s. wasm-bindgen has no flag that
+  skips a pass, and its output can't be reused for a new module even with
+  the same imports and exports: it drops ~3 000 of the module's 7 900
+  functions (its descriptors and what only they reach), rewrites the
+  imports and moves JS values into a table, so the bound module differs in
+  every function index. Stripped names or a smaller build (`opt-level =
+  "s"`) left it at 0.22-0.29 s.
+- A crate of about 74 000 lines (generated: 660 modules, each an
+  `#[component]` with a 60-line `rsx!` and plain Rust): a logic edit
+  hot-patched in 7.4 s (0.3.0) and 7.0 s (0.4.0), rustc 5.4-6.8 s of it;
+  aio, on an aio app of the same shape and size (660 generated modules,
+  76 000 lines, 2.7 MB, `am create --client=electron` grown by the same
+  script, one session): a view's logic edit 1.6-1.8 s (its bundle 1.0-1.25
+  s, then a reload), a cell edit's restart ~1.3 s; no ~3 s. The follow-up: 4.9-6.9 s (median of 4: 6.0 s, the
+  machine's load 9-17), rustc 4.4-6.3 s, stub 0.36-0.44 s, link 0.06-0.11
+  s. A patch links only the objects it needs (6 of the crate's 256: the
+  stub and link took 0.8-4.6 s writing its 140 MB library out whole), and
+  a `"{x}"` hole of one name expands to a shared generic call instead of
+  a closure each (the expansion 20 → 16.6 MB; air's bench crate: expanded
+  -20%, metadata -18%, LLVM IR -18%, its view edit's build 1.5 → 1.1 s;
+  the held-key latency unchanged, p50 1.0 / 1.5-1.6 ms). The front end
+  stays the floor (`-Z time-passes` of one edit's rebuild, 4.5 s:
+  expansion 0.9 s, names 0.33 s, type and borrow checks 0.64 s, the
+  metadata with its monomorphization 1.0 s, the incremental cache 0.31
+  s; aio-rs's macros optimized: expansion 0.2 s less, lost in the noise
+  end to end, so not shipped): rustc's incremental build of one crate reruns its
+  whole front end: every macro, name resolution, the crate's metadata.
+  The same lines as plain Rust (no `rsx!`) rebuild in 2.6 s: the
+  expansion of 660 `rsx!` (16.6 MB from 2.7 MB of source) is the rest.
+  No rustc setting on stable moves it (the same rebuild, 3 runs each:
+  4.7-5.1 s as built, 4.4-5.1 s with 64 codegen units, 4.6-4.8 s with
+  1024, 4.6-4.7 s without debug info, 4.6-6.0 s without the metadata
+  file). The same app in page crates is under aio (the same script grown
+  into 10 crates of 66 modules on a kit crate each module's label goes
+  through, `ax dev` headless (Chromium's own ozone), CDP 5 ms polls,
+  2026-11-08):
+
+  | ~74 000 lines | aio `am dev` | `ax dev` before | `ax dev` 0.4.0 |
+  |---|---|---|---|
+  | one crate, a view's logic | **1.6-1.8 s** | 5.7-6.2 s (median 6.0) | 5.0-6.0 s (median 5.5): unchanged, rustc 4.6-5.4 s |
+  | page crates, a page's view logic | 1.6-1.8 s | 1.9 s (0.1's measure); 0.4.0 before this: patched in 0.6-0.9 s, the window kept the old view | **0.47-0.52 s** (median 0.48), rustc ~0.4 s |
+  | page crates, the kit every page calls | 1.6-1.8 s | 8-14 s (0.1) | 1.0-1.9 s: rustc 0.03 s, the patch of every caller 0.45-0.55 s stub and 0.2 s link, its 94 000-function table |
+
+  What changed: an edit compiles its own crate alone and is patched in;
+  the crates built on it compile after, off the time to the screen,
+  patched again only when their code changed. A patch's reach to the
+  roots spans the app's libraries (a caller in the crate above, linked
+  from the running copy), where it stopped at the edited crate's own (the
+  view stayed old: the app's root view, in the crate above, never got the
+  patch). An edit dropping a symbol an earlier patch added compiles the
+  crates above with it (their running objects may use it). `ax add <app>
+  page <name>` makes a page crate, and `ax lint` hints at a crate past
+  15 000 lines ([what an edit costs](build/README.md#what-an-edit-costs)).
 
 What closed the other rows:
 

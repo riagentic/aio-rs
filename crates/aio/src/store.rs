@@ -443,14 +443,20 @@ pub(crate) fn refresh_good(db: &Connection, path: &Path) -> Result<(), Error> {
 }
 
 /// The good copy made now: `VACUUM INTO` a temp file, `quick_check`ed (a
-/// copy of a damaged file never replaces a good one), flushed, renamed over.
+/// copy of a damaged file never replaces a good one), flushed once, renamed over.
 fn make_good(db: &Connection, path: &Path) -> Result<(), Error> {
     let good = good_copy(path);
     let mut tmp = good.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp: std::path::PathBuf = tmp.into();
     _ = std::fs::remove_file(&tmp);
-    db.execute("VACUUM INTO ?1", [tmp.to_string_lossy()])?;
+    // The copy takes the connection's `synchronous`; unsynced here (a crash
+    // leaves only a stray `.tmp`), it is flushed once below before the rename.
+    let was: i64 = db.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+    db.execute_batch("PRAGMA synchronous = OFF")?;
+    let copied = db.execute("VACUUM INTO ?1", [tmp.to_string_lossy()]);
+    db.execute_batch(&format!("PRAGMA synchronous = {was}"))?;
+    copied?;
     if let Err(why) = healthy(&tmp) {
         _ = std::fs::remove_file(&tmp);
         return Err(Error(format!("good copy: the copy fails its check ({why}); the last good one is kept")));
@@ -579,6 +585,45 @@ pub(crate) const SCHEMA: i64 = 2;
 /// The tables below, which an aio file must not already have.
 const TABLES: [&str; 5] = ["log", "snap", "floor", "sched", "ops"];
 
+/// aio-rs's tables.
+const LAYOUT: &str = "CREATE TABLE IF NOT EXISTS log (seq INTEGER PRIMARY KEY AUTOINCREMENT, cell TEXT NOT NULL, method TEXT NOT NULL,
+       args TEXT NOT NULL, inputs TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, v INTEGER NOT NULL);
+     CREATE INDEX IF NOT EXISTS log_cell ON log (cell, seq);
+     CREATE TABLE IF NOT EXISTS snap (cell TEXT NOT NULL, seq INTEGER NOT NULL, v INTEGER NOT NULL,
+       state TEXT NOT NULL, PRIMARY KEY (cell, seq));
+     CREATE TABLE IF NOT EXISTS floor (cell TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+     CREATE TABLE IF NOT EXISTS sched (cell TEXT NOT NULL, key TEXT NOT NULL, due INTEGER NOT NULL,
+       every INTEGER, method TEXT NOT NULL, args TEXT NOT NULL, cron TEXT, PRIMARY KEY (cell, key));
+     CREATE TABLE IF NOT EXISTS ops (cell TEXT NOT NULL, op TEXT NOT NULL, seq INTEGER NOT NULL,
+       PRIMARY KEY (cell, op));";
+
+/// A new store file made whole under a temp name (no journal, unsynced: a
+/// crash leaves only a stray `.tmp`, swept), flushed once and linked in only
+/// if `path` is still missing: 2 fsyncs instead of a rollback-journaled WAL
+/// switch's 6. On any failure (no hard links there) it is made in place as before.
+fn born(path: &Path) -> Result<(), Error> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = crate::paths::parent(path).join(format!(".{name}.{}-{}.tmp", std::process::id(), now_ms()));
+    let made = Connection::open(&tmp)
+        .and_then(|db| {
+            db.execute_batch(&format!(
+                "PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; {LAYOUT}; PRAGMA user_version = {SCHEMA}; PRAGMA journal_mode = WAL;"
+            ))?;
+            db.close().map_err(|(_, e)| e)
+        })
+        .map_err(|e| Error(e.to_string()))
+        .and_then(|()| crate::paths::sync_file(&tmp).map_err(|e| Error(e.to_string())));
+    let linked = made.and_then(|()| match std::fs::hard_link(&tmp, path) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(Error(e.to_string())),
+        _ => Ok(()),
+    });
+    _ = std::fs::remove_file(&tmp);
+    for ext in ["-wal", "-shm"] {
+        _ = std::fs::remove_file(format!("{}{ext}", tmp.display()));
+    }
+    linked.and_then(|()| crate::paths::sync_dir(crate::paths::parent(path)).map_err(|e| Error(e.to_string())))
+}
+
 /// Set up a store file, or refuse one that isn't ours: a file with other
 /// tables (a prototype store) is never written to or wiped. `aio`: an aio
 /// `state.db` (it has `aio_kv`) is adopted, its tables left as they are.
@@ -587,18 +632,7 @@ fn init(db: &Connection, aio_file: bool) -> Result<(), Error> {
     let v = ours(db, aio_file)?;
     db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
     let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-    tx.execute_batch(
-        "CREATE TABLE IF NOT EXISTS log (seq INTEGER PRIMARY KEY AUTOINCREMENT, cell TEXT NOT NULL, method TEXT NOT NULL,
-           args TEXT NOT NULL, inputs TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, v INTEGER NOT NULL);
-         CREATE INDEX IF NOT EXISTS log_cell ON log (cell, seq);
-         CREATE TABLE IF NOT EXISTS snap (cell TEXT NOT NULL, seq INTEGER NOT NULL, v INTEGER NOT NULL,
-           state TEXT NOT NULL, PRIMARY KEY (cell, seq));
-         CREATE TABLE IF NOT EXISTS floor (cell TEXT PRIMARY KEY, seq INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS sched (cell TEXT NOT NULL, key TEXT NOT NULL, due INTEGER NOT NULL,
-           every INTEGER, method TEXT NOT NULL, args TEXT NOT NULL, cron TEXT, PRIMARY KEY (cell, key));
-         CREATE TABLE IF NOT EXISTS ops (cell TEXT NOT NULL, op TEXT NOT NULL, seq INTEGER NOT NULL,
-           PRIMARY KEY (cell, op));",
-    )?;
+    tx.execute_batch(LAYOUT)?;
     // 1 → 2: one added column, in the same transaction as the stamp.
     if v == 1 && !has_cron(&tx)? {
         tx.execute_batch("ALTER TABLE sched ADD COLUMN cron TEXT")?;
@@ -607,7 +641,7 @@ fn init(db: &Connection, aio_file: bool) -> Result<(), Error> {
         tx.execute_batch(crate::compat::data::KV_TABLE)?;
     }
     // An aio file's `user_version` is the app's own (aio never touches it).
-    if !has_table(&tx, "aio_kv")? {
+    if v != SCHEMA && !has_table(&tx, "aio_kv")? {
         tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA}"))?;
     }
     tx.commit()?;
@@ -695,6 +729,9 @@ fn open(
         Ok(()) => None,
         Err(why) => Some(recover(path, why)?),
     };
+    if app.is_none() && !path.exists() {
+        _ = born(path);
+    }
     let file = Db::open(path)?;
     let db = file.conn();
     let aio_kv = app.map(|a| crate::compat::data::Kv::find(&db, a)).transpose().map_err(Error)?;
@@ -832,12 +869,11 @@ fn journal_tail<T: Cell>(
     kv: &crate::compat::data::Kv,
     path: &Path,
 ) -> Result<Vec<crate::compat::data::Journaled>, Error> {
-    let data = crate::paths::parent(path);
     let wm = kv.journal_wm(db).map_err(Error)?;
-    crate::compat::data::journal_tail::<T>(data, wm).map_err(|e| {
+    crate::compat::data::journal_tail::<T>(&crate::compat::data::journal_of(path), wm).map_err(|e| {
         Error(format!(
             "{}: {e}: start the aio app once and stop it (it folds its journal into the snapshot), then open it here",
-            data.display()
+            crate::paths::parent(path).display()
         ))
     })
 }
@@ -1044,14 +1080,14 @@ fn unsaved_from<T: Cell>(v: &mut Value, was: &Value) {
 pub(crate) fn reported<T: Cell>(st: &T) -> Option<Value> {
     let v = match std::thread::panicking() {
         false => shaped(st).ok()?.or_else(|| json(st).ok())?,
-        true if T::SCREENED => return None,
+        true if crate::screened::<T>() => return None,
         true => json(st).ok()?,
     };
     // Screened by `visible` as a client with the key sees it (aio's), which
     // leaves out the `#[server]` fields too.
     let saved = (!std::thread::panicking()).then(|| serde_json::from_value::<T>(v.clone()).ok()).flatten();
     let mut v = match saved {
-        Some(saved) => saved.project(&crate::Caller::default()),
+        Some(saved) => crate::shown(&saved, &crate::Caller::default()),
         None => {
             let mut v = v;
             if let Some(m) = v.as_object_mut() {
@@ -1612,15 +1648,17 @@ impl<T: Cell> Store<T> {
     /// `op` its id. A call with an `op` seen before is not applied again:
     /// `Ok(None)`.
     pub fn call_from(&mut self, by: &By, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
-        self.call_as(by, None, method, args, Some(op), None)
+        self.call_as(by, None, None, method, args, Some(op), None)
     }
 
-    /// A network caller's call, with the role its gate proved ([`Cx::role`]);
-    /// with an `op`, as [`Self::call_from`].
+    /// A network caller's call, with the role its gate proved ([`Cx::role`])
+    /// and where it came from; with an `op`, as [`Self::call_from`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn call_as(
         &mut self,
         by: &By,
         who: Option<&crate::Caller>,
+        from: Option<&Arc<crate::Request>>,
         method: &str,
         args: Value,
         op: Option<&str>,
@@ -1628,7 +1666,7 @@ impl<T: Cell> Store<T> {
     ) -> Result<Option<Value>> {
         let now = self.now();
         let Some(op) = op else {
-            let cx = Cx::live(now, by).with_who(who).with_reply(reply);
+            let cx = Cx::live(now, by).with_who(who, from).with_reply(reply);
             let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
             if let Some(sweep) = tx::On::<T>::SWEEP {
                 sweep(self);
@@ -1651,7 +1689,7 @@ impl<T: Cell> Store<T> {
         if let Some(e) = self.refused.0.get(&op.to_string()) {
             return Err(e.clone());
         }
-        let cx = Cx::synced(now, T::ID, by, &op).with_who(who).with_reply(reply);
+        let cx = Cx::synced(now, T::ID, by, &op).with_who(who, from).with_reply(reply);
         let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
         if let Some(sweep) = tx::On::<T>::SWEEP {
             sweep(self);
@@ -1692,6 +1730,8 @@ impl<T: Cell> Store<T> {
         fired: Option<&Due>,
         op: Option<&str>,
     ) -> Result<Value> {
+        let shown = (T::DIAGNOSTICS && crate::report::args_kept())
+            .then(|| if T::redacts(method) { Value::from("[redacted]") } else { args.clone() });
         let (panics, t) = (self.panics.last().copied(), std::time::Instant::now());
         let out = self.apply_and_commit_once(by, method, args, cx, fired, op);
         let took = t.elapsed();
@@ -1701,7 +1741,7 @@ impl<T: Cell> Store<T> {
         let refused = out.as_ref().err().map(|e| e.why.as_str());
         if T::DIAGNOSTICS {
             crate::log::called(T::ID, method, took, refused);
-            crate::report::called(T::ID, method, self.now(), took, refused);
+            crate::report::called(T::ID, method, self.now(), took, refused, shown.as_ref());
         }
         let panicked = self.panics.last().copied() != panics;
         if let Err(e) = &out
@@ -1727,7 +1767,16 @@ impl<T: Cell> Store<T> {
     ) -> Result<Value> {
         let at = cx.now();
         crate::perf::storm(T::ID, method)?;
-        let rewritten = crate::ask_before(&crate::Call { cell: T::ID, method, args: &args, by, role: cx.caller_role() })?;
+        let call = crate::Call {
+            cell: T::ID,
+            method,
+            args: &args,
+            by,
+            role: cx.caller_role(),
+            state: &*self.state,
+            request: cx.request(),
+        };
+        let rewritten = crate::ask_before(&call)?;
         let args = rewritten.unwrap_or(args);
         if self.panics.len() >= PANICS_MAX {
             crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", T::ID);
@@ -2068,6 +2117,9 @@ impl<T: Cell> Store<T> {
         }
         tx.commit().map_err(db)?;
         drop(c);
+        // A test reads the schedules a call set as values (`TestCells::last_asked`).
+        #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+        self.effects.extend(asks.plans.iter().map(|p| Box::new(p.clone()) as Box<dyn std::any::Any + Send>));
         self.journal_wm = None;
         for ((m, a, t), s) in earlier.iter().zip(logged_seqs) {
             let ev = Event { seq: s, method: m.clone(), args: a.clone(), inputs: Default::default(), by: by.clone(), at: *t, v: T::VERSION };
@@ -2664,6 +2716,106 @@ mod tests {
         assert_eq!(QUARANTINE.load(std::sync::atomic::Ordering::Relaxed), !dev);
         let said = panicked("add", "boom", 1, &Cursor { rows: vec![], at: 1 });
         assert_eq!(said.contains("the state it ran on"), dev, "{said}");
+    }
+
+    /// SQLite's syncs on this thread counted: a default VFS that is the
+    /// system's with each file's `xSync` wrapped (the rest passed through).
+    #[cfg(unix)]
+    mod syncs {
+        use rusqlite::ffi;
+        use std::os::raw::{c_char, c_int};
+        use std::sync::{Mutex, Once, atomic::AtomicPtr, atomic::Ordering::SeqCst};
+
+        static REAL: AtomicPtr<ffi::sqlite3_vfs> = AtomicPtr::new(std::ptr::null_mut());
+        /// (ours, the system's) method tables, by address.
+        static TABLES: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+        unsafe extern "C" fn open(
+            _: *mut ffi::sqlite3_vfs,
+            name: *const c_char,
+            file: *mut ffi::sqlite3_file,
+            flags: c_int,
+            out: *mut c_int,
+        ) -> c_int {
+            let real = REAL.load(SeqCst);
+            let rc = unsafe { ((*real).xOpen.unwrap())(real, name, file, flags, out) };
+            let m = unsafe { (*file).pMethods };
+            if rc == ffi::SQLITE_OK && !m.is_null() {
+                let mut t = TABLES.lock().unwrap();
+                let ours = match t.iter().find(|(_, r)| *r == m as usize) {
+                    Some((o, _)) => *o,
+                    None => {
+                        let mut c = unsafe { *m };
+                        c.xSync = Some(sync);
+                        let o = Box::leak(Box::new(c)) as *const ffi::sqlite3_io_methods as usize;
+                        t.push((o, m as usize));
+                        o
+                    }
+                };
+                unsafe { (*file).pMethods = ours as *const ffi::sqlite3_io_methods };
+            }
+            rc
+        }
+
+        unsafe extern "C" fn sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
+            crate::paths::SYNCS.with(|n| n.set(n.get() + 1));
+            let ours = unsafe { (*file).pMethods } as usize;
+            let real = TABLES.lock().unwrap().iter().find(|(o, _)| *o == ours).map(|(_, r)| *r).unwrap();
+            unsafe { ((*(real as *const ffi::sqlite3_io_methods)).xSync.unwrap())(file, flags) }
+        }
+
+        /// The disk syncs `f` made on this thread, SQLite's and aio-rs's.
+        pub(super) fn count(f: impl FnOnce()) -> u32 {
+            static ONCE: Once = Once::new();
+            ONCE.call_once(|| unsafe {
+                let real = ffi::sqlite3_vfs_find(std::ptr::null());
+                REAL.store(real, SeqCst);
+                let mut v = *real;
+                v.zName = c"aio-count".as_ptr();
+                v.xOpen = Some(open);
+                v.pNext = std::ptr::null_mut();
+                assert_eq!(ffi::sqlite3_vfs_register(Box::leak(Box::new(v)), 1), ffi::SQLITE_OK);
+            });
+            let before = crate::paths::SYNCS.get();
+            f();
+            crate::paths::SYNCS.get() - before
+        }
+    }
+
+    /// A new store's open is bound by its disk syncs: counted, not timed (a
+    /// clock flakes on a shared disk). 4: the new file and its folder, the
+    /// good copy and its folder; 13 before files were made whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_store_opens_and_closes_with_four_disk_syncs() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("s{i}.db"));
+            let n = syncs::count(|| drop(Store::<Cursor>::open(&path).unwrap()));
+            assert!(n <= 4, "{n} disk syncs for a new store's open and close");
+            let again = syncs::count(|| drop(Store::<Cursor>::open(&path).unwrap()));
+            assert!(again <= 2, "{again} disk syncs to open it again");
+        }
+    }
+
+    #[test]
+    fn a_new_store_file_comes_in_whole_and_never_over_one_already_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        born(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        let mode: String = db.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!((mode.as_str(), ours(&db, false).unwrap()), ("wal", SCHEMA));
+        assert!(TABLES.iter().all(|t| has_table(&db, t).unwrap()));
+        drop(db);
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["s.db"], "no temp file left");
+        // Someone else's file at the path is kept, byte for byte.
+        let other = dir.path().join("o.db");
+        Connection::open(&other).unwrap().execute_batch("CREATE TABLE t(x)").unwrap();
+        let before = std::fs::read(&other).unwrap();
+        born(&other).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), before);
     }
 
     #[test]

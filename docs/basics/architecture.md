@@ -75,6 +75,43 @@ CPU-heavy work (aio's `worker: true` cells) runs in
 `tokio::task::spawn_blocking` inside an effect; its result comes back as
 a call. No cell needs its own thread or isolate.
 
+### Ask: `ax where`
+
+`ax where <app> [item]` (aio's `am where`) answers from the app's crate
+graph and the `cfg`s on the way to each item, never a guess: which
+builds compile its crate (the launcher: the app's process only; the
+library the web build binds, and the crates it uses: the page too), each
+`cfg` from the crate's root through its modules to the item evaluated
+for both builds, then what the item is (a component, a method, a
+`#[client]` method) and the app's `mode`.
+
+```text
+$ ax where notes Counter::add
+  item        Counter::add (src/lib.rs:17)
+  runs        both: a method: it runs where the cell lives: the app's process, or the page in a web build (its cells run there)
+  reached by  notes-app → notes: src/lib.rs
+  cfg         none
+  · it may run twice (a copy's prediction, then the server): no I/O, no clock, no randomness but cx
+  · I/O goes in an effect, an awaited future, a route or a server function
+  · in the page: no store history, files, blobs, SQL, server or anything native; keep that behind #[cfg(not(target_arch = "wasm32"))]
+```
+
+| Verdict | Means |
+|---|---|
+| `server` | a method of a served app (`mode` `server`, `client-server`, `client`) that isn't `#[client]`: only the server runs it |
+| `both` | in every build, or a `#[client]` method: the server, and each synced copy as a prediction |
+| `window/page` | a view (`#[component]`, a fn returning a `View`): the window, and the page in a web build |
+| `window` | a view of an app with no web build |
+| `wasm-only` | only the web build has it (`cfg(target_arch = "wasm32")`) |
+| `native-only` | the app's process only: the launcher, or `cfg(not(target_arch = "wasm32"))` on the way to it |
+| `tests-only` | `cfg(test)` |
+| `never` | its cfgs rule out every build |
+
+A `cfg` that depends on a feature or the OS is said with the item
+(`cfg(feature = "pg")`). The item is a name (`add`), `Type::method`, a
+module path's tail, or a file (`src/server.rs`: its items); with none,
+every item, a line each. `--json` for a script.
+
 When lost:
 
 1. Is it a method? It runs where the cell lives, and on a copy as a
@@ -286,9 +323,6 @@ over to the first).
 
 ## Gaps against aio
 
-- No `am where`: aio answers which context a file runs in from its module
-  graph. In aio-rs the answer is the table above, and the compiler
-  enforces the one boundary that matters (`cfg(target_arch = "wasm32")`).
 - No module-boundary gate inside `aio-rs`: the crate split and Cargo
   features are the boundaries.
 

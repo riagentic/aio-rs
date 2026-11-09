@@ -2,8 +2,9 @@
 //! target is built for, from one machine (aio's `build.platforms`). Each is a
 //! Rust target; a cross build needs it installed and a linker for it, and
 //! which is missing is said before cargo runs, with the command that adds
-//! it. A macOS binary links against Apple's SDK: it is built on a Mac (both
-//! CPUs there). Nothing declared: this machine.
+//! it. A macOS binary is linked by zig away from a Mac (`zig`, fetched on
+//! the first such build); on a Mac by its own tools (both CPUs there).
+//! Nothing declared: this machine.
 
 /// One OS and CPU.
 #[derive(Debug, PartialEq, Eq)]
@@ -16,7 +17,7 @@ pub struct Platform {
     /// `std::env::consts::ARCH`'s word.
     pub arch: &'static str,
     /// The C compiler that links it from another machine (None: the
-    /// toolchain's own, or only on its own OS).
+    /// toolchain's own, or zig's for a Mac).
     pub linker: Option<&'static str>,
     /// What installs that linker.
     pub get: &'static str,
@@ -122,14 +123,6 @@ pub fn blocker(
     if p == host {
         return None;
     }
-    if p.os == "macos" && host.os != "macos" {
-        return Some(format!(
-            "{}: a macOS binary links against Apple's SDK, which runs on a Mac: build it there (either CPU), or \
-             name one to build it on over SSH ([build.macos] host, or {}=[user@]mac)",
-            p.name,
-            crate::remote::HOST_ENV
-        ));
-    }
     if !has_target(p.triple) {
         return Some(format!(
             "{}: Rust's {} target is not installed: rustup target add {}",
@@ -187,8 +180,8 @@ mod tests {
         assert!(e.ends_with("rustup target add aarch64-unknown-linux-gnu"), "{e}");
         let e = blocker(named("linux-arm64"), linux, &all, &none).unwrap();
         assert_eq!(e, "linux-arm64: no aarch64-linux-gnu-gcc to link it: apt install gcc-aarch64-linux-gnu");
-        let e = blocker(mac, linux, &all, &all).unwrap();
-        assert!(e.contains("Apple's SDK, which runs on a Mac"), "{e}");
+        assert_eq!(blocker(mac, linux, &all, &none), None, "zig links a Mac's binary anywhere");
+        assert!(blocker(mac, linux, &none, &all).unwrap().ends_with("rustup target add aarch64-apple-darwin"));
         assert_eq!(blocker(named("macos"), mac, &all, &all), None, "a Mac builds both CPUs");
         assert!(blocker(named("macos"), mac, &none, &all).unwrap().ends_with("rustup target add x86_64-apple-darwin"));
         assert!(blocker(named("windows"), mac, &all, &none).unwrap().contains("x86_64-w64-mingw32-gcc"));

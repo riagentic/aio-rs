@@ -133,16 +133,12 @@ pub struct Built {
 impl Built {
     /// The `.rs` files under `dirs`, read now (a build starts).
     pub fn snapshot(dirs: &[PathBuf]) -> Self {
-        let mut files = std::collections::HashMap::new();
-        let now = std::time::SystemTime::now();
-        for d in dirs {
-            for f in rs_files(d) {
-                if let Ok(t) = std::fs::read_to_string(&f) {
-                    files.insert(f, (t, now));
-                }
-            }
-        }
-        Self { files }
+        Self::of(crate::hotpatch::sources_of(dirs), std::time::SystemTime::now())
+    }
+
+    /// `files` as a build that began `at` read them.
+    pub fn of(files: std::collections::BTreeMap<PathBuf, String>, at: std::time::SystemTime) -> Self {
+        Self { files: files.into_iter().map(|(f, t)| (f, (t, at))).collect() }
     }
 
     /// The text of `f` as the build read it.
@@ -172,24 +168,6 @@ impl Built {
             })
             .collect()
     }
-}
-
-fn rs_files(dir: &Path) -> Vec<PathBuf> {
-    let mut out = vec![];
-    let Ok(rd) = std::fs::read_dir(dir) else { return out };
-    for e in rd.flatten() {
-        let p = e.path();
-        let name = e.file_name();
-        if name == "target" || name.to_string_lossy().starts_with('.') {
-            continue;
-        }
-        match e.file_type() {
-            Ok(t) if t.is_dir() => out.extend(rs_files(&p)),
-            Ok(_) if p.extension().is_some_and(|x| x == "rs") => out.push(p),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// The `Aio.hot` call's params for `edits` (base64 markup).

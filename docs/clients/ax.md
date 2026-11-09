@@ -22,6 +22,7 @@ buttons ([below](#ax-ui-the-visual-app-manager)).
 | Does this machine have what making apps needs? | `ax setup` |
 | Run it while I edit | `ax dev` |
 | Run it in the background, and is it up? | `ax start`, `ax status`, `ax health` |
+| Run an app straight from its repository | `ax run` |
 | What is in a cell right now? | `ax state`, `ax snapshot` |
 | What happened, and in what order? | `ax events`, `ax logs`, `ax errors` |
 | Call a method, check the result | `ax call`, `ax expect` |
@@ -34,6 +35,8 @@ buttons ([below](#ax-ui-the-visual-app-manager)).
 | What does it cost (memory, bytes sent)? | `ax heap`, `ax metrics`, `ax cost` |
 | Make the files a person installs | `ax build`, `ax release` |
 | Find what types can't check | `ax lint` |
+| Where does this code run: the server, the window, the page? | `ax where` |
+| Everything CI runs, in one | `ax check` |
 
 ## Conventions
 
@@ -118,13 +121,19 @@ is refused with exit 2 and the right usage, never guessed or dropped:
   `instances` names `ax apps`, `publish` `ax release <app> …`, `compile`
   `ax build`, `watch` `ax dev`, `actions` `ax events`, `client` `ax
   components`, `migrate` `ax lint --from`, `link` `ax pin <app> <dir>`,
-  `dispatch` `ax call`, a bare `theme` `ax theme adopt`; `check`, `where`
-  and `add` say what does their job.
+  `dispatch` `ax call`, a bare `theme` `ax theme adopt`. `check` is `ax
+  check`: aio's static checks, and the rest of what CI runs; `where` is
+  `ax where`.
 
 ### Output and exit codes
 
-- Text in a terminal, the same text in a pipe; `--json` for a script.
-- With `--json`, every verb prints one object: `{"ok":true,"value":…}` when
+- Text in a terminal; in a pipe, JSON (aio's `am`: a pipe is read by a
+  program), as with `--json`. `--text` keeps the text in a pipe;
+  `AIORT_OUTPUT=text` or `json` sets it for every run. The verbs whose
+  answer is a document or a stream stay as they are in a pipe: `dev`,
+  `lint`, `agent`, `testgen`, `record`, `peer`, `snapshot`, `logs`,
+  `help`, `version`.
+- With `--json` (or a pipe), every verb prints one object: `{"ok":true,"value":…}` when
   the answer is JSON (a state, a call's answer, a list), `{"ok":true,
   "text":"…"}` when it is text, `{"ok":false,"error":"…","exit":1}` when it
   failed. The verbs scripts branch on answer objects, not sentences:
@@ -222,7 +231,7 @@ written in it.
 | `--template todo` | a window on a saved todo list: add, tick, remove, filter (the window's own), clear done |
 | `--template canvas` | a window drawing bouncing balls: `step`, the pure function that moves them, tested; one script draws a frame |
 | `--id id` | its id, its data's home (default: the name; refused when an installed app has it) |
-| `--aio-version v` | the aio-rs release it takes from git: `0.3.0`, `main` (the branch), `latest` (the newest release); default: this `ax`'s |
+| `--aio-version v` | the aio-rs release it takes from git: `0.4.0`, `main` (the branch), `latest` (the newest release); default: this `ax`'s |
 | `--aio dir` | an aio-rs checkout instead, named relative to the app (they share a folder below the root) |
 | `--target a,b` | its `[build] targets` (`ax build <app> --list` names the kinds) |
 | `--css tailwind` | `[build] css` runs Tailwind on `src/app.css` into `assets/style.css` (a window app) |
@@ -240,10 +249,45 @@ ax test notes && ax dev notes
 
 [Quickstart](../basics/quickstart.md), [the files it makes](../basics/project.md).
 
+### `ax add`
+
+```text
+ax add <app> cell <name>
+ax add <app> server <name>
+ax add <app> page <name>
+```
+
+Writes a new part into an existing app and wires it in, so it builds and
+runs at once (aio's `am add`). `<app>` is left out inside it (`ax add cell
+tally`). The name is a letter, then letters, digits, `-` or `_`, and no
+Rust keyword: it becomes a file and an identifier (`due-date`: module
+`due_date`, type `DueDate`).
+
+| Kind | Writes | Wires |
+|---|---|---|
+| `cell` | `src/<name>.rs`: a saved cell with a method and its test; with its views' `client!` in an app with a window | `pub mod <name>;` in `src/lib.rs`; its source opened beside the first one by each launcher in `app/src` (`main.rs`, Android's `lib.rs`) and by the browser build's `web()` |
+| `server` | `src/<name>.rs`: a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs`; the launcher's source becomes `Source::for_app_with(.., <name>::http(..))`; aio's `server` feature on in `Cargo.toml` |
+| `page` | `pages/<name>`: a crate of its own (`<app>-<name>`) on the app's aio-rs, with a view, `<name>::<Name>` | a member of the app's workspace and a dependency of its library (`<name>`) in `Cargo.toml` |
+
+A name the app has already is refused and nothing is written; a launcher
+it can't wire (a service's `for_server` takes no functions) is named,
+with the line to add. A new cell's views update once the root view calls
+`<name>::use_live()`. A page shows where the app's view calls it
+(`due_date::DueDate {}`). `ax dev` recompiles a page crate alone for an
+edit in it, however big the app grows: keep a big app's views by area in
+pages ([what an edit costs](../build/README.md#what-an-edit-costs)).
+
+```sh
+ax add notes cell tally && ax test notes
+ax call notes tally add 1
+ax add notes server tools && ax call notes --fn tools.list
+ax add notes page settings && ax dev notes
+```
+
 ### `ax pin`
 
 ```text
-ax pin <app> [version] [--major]
+ax pin <app> [version] [--major] [--force]
 ```
 
 Which aio-rs the app uses, and how to change it (aio's `am pin`). `<app>`
@@ -264,13 +308,17 @@ cargo can't resolve changes nothing:
 
 | version | moves to |
 |---|---|
-| `0.3.0`, `v0.3.0`, `0.3` | that release's git tag (refused when aio-rs has no such tag) |
+| `0.4.0`, `v0.4.0`, `0.4` | that release's git tag (refused when aio-rs has no such tag) |
 | `latest` | the newest release in the app's major; `--major`: any (a breaking move, said) |
 | `main` | the branch tip; `Cargo.lock` holds the exact commit; re-run to advance |
 | `../aio-rs` | an aio-rs checkout, named relative to the app: this machine only (said) |
 
-A move back to an older release says what may break. `--json`: the facts,
-or what moved, as one object.
+A move back to an older release says what may break. A move to an aio-rs
+that removed what the app uses is refused before it stays (aio's
+preflight): each use is named `file:line: item`, from the API listings
+of both releases (`scripts/api/*.txt`, aio-rs 0.2 and newer), and nothing
+changes; `--force` moves all the same (`cargo check` then names each).
+`--json`: the facts, or what moved (`removedInUse` too), as one object.
 
 ```text
 $ ax pin notes
@@ -336,7 +384,7 @@ A failed build's errors are in the app's `logs/build.log`. `ax shot`, `ax eval`,
 ### `ax test`
 
 ```text
-ax test <app> [filter] [--video out] [--pace ms] [--android] [--device serial] [--mutants]
+ax test <app> [filter] [--video out] [--pace ms] [--video-scheme s] [--android] [--device serial] [--mutants]
 ```
 
 The app's tests (`cargo test`), UI tests included, headless: no window on
@@ -347,6 +395,7 @@ the screen.
 | `filter` | only tests whose name holds it |
 | `--video out` | record each UI test, no test changed: `out` a folder (a video per test) or one `.mp4`/`.webm` |
 | `--pace ms` | each step this long on screen in the video (800) |
+| `--video-scheme s` | the video drawn `light` or `dark` (`prefers-color-scheme`; aio's `--video-scheme`, `AIO_VIDEO_SCHEME`); default: each test's own |
 | `--android` | the emulator lane instead: its APK for the device built, installed and started; passed once its window is ready and it still runs (`AIO_AVD` booted when none is attached) |
 | `--device serial` | with `--android`: that device (else `ANDROID_SERIAL`) |
 | `--mutants` | `cargo mutants` over the app's packages: each function broken in turn, the ones no test noticed listed and failing the run (`cargo install cargo-mutants`; [proving the tests](../testing/proving.md)) |
@@ -358,6 +407,31 @@ ax test notes --video videos/
 ```
 
 [Testing](../testing/README.md).
+
+### `ax check`
+
+```text
+ax check <app> [--release]
+```
+
+What CI runs, in one command (aio's `deno task check` and `deno task
+test`): `cargo fmt --all --check`, `ax lint`, for an app with a web build
+its library checked for the page (`cargo check --target
+wasm32-unknown-unknown -p <its package> --lib`: aio's `am check`, does
+the code the page runs build without the server's), `ax test <app>`, in
+order, each the real command with its own output. The first that fails
+ends the run, named; each says its time.
+
+| Flag | Does |
+|---|---|
+| `--release` | then the release gate: `ax build <app> --sizes` (the binary within its budget) and `ax build <app> --smoke` (the bundle started headless, stopped, its log checked) |
+
+```sh
+ax check notes
+ax check notes --release
+```
+
+[CI](../build/ci.md).
 
 ### `ax lint`
 
@@ -422,6 +496,37 @@ ax start --all
 One instance per home: a second launch of a running app hands its
 arguments to the running one, which comes to the front, and exits.
 
+### `ax run`
+
+```text
+ax run <link> [app] [--ref r] [--yes] [--dev]
+```
+
+Runs an app straight from its git repository (aio's `run.sh`), without
+piping a script into a shell:
+
+1. `<link>` is a git URL (`https://…`, `git@host:path`), `github:user/repo`,
+   `user/repo` (GitHub) or a folder (`./app`, `/path`).
+2. It is cloned into ax's cache (`<cache>/run/<name>-<hash>`); a second
+   run fetches. One commit is checked out alone: `--ref` names a branch,
+   tag or commit (7 to 40 hex digits), else the default branch. Nothing
+   of an earlier run is left in the clone.
+3. Before any of its code runs, ax shows the link, the commit and its
+   apps, says that building runs the repository's code, and asks at a
+   terminal. `--yes` doesn't ask; with no terminal and no `--yes` nothing
+   runs. A commit let run once isn't asked again; a moved branch is.
+4. It is built and started as `ax start` does (`--dev`: `ax dev`, edits
+   in the clone live). `app` picks one of its apps; one app needs none.
+
+```sh
+ax run github:someone/notes
+ax run https://example.org/team/board.git board --ref v1.2.0
+ax run github:someone/notes --ref 3f2a9c1 --yes   # a script: this commit only
+```
+
+The line `this commit again: ax run <link> --ref <commit>` it prints pins
+what you saw. `ax stop <app>` stops it; the clone stays in the cache.
+
 ### `ax stop`
 
 ```text
@@ -462,14 +567,36 @@ Stops it if it runs, then starts it again with the flags it was started
 with. A flag given here replaces the recorded one of its name; args after
 `--` replace the recorded args whole.
 
+### `ax watch`
+
+```text
+ax watch <app> [dir…] [--wait s] [--display d]
+```
+
+Starts the app as `ax start` does (its release build), then restarts it,
+built anew, after each burst of saves in its `src/` (or the folders
+named, of the app's folder): aio's `am watch`. Never two restarts at once:
+a save during one is the next. A build that fails is said, and the app
+that runs stays up. Until Ctrl-C. `ax dev` patches the running app
+instead, its state kept; `ax watch` runs what people get.
+
 ### `ax kill`
 
 ```text
-ax kill <app>
+ax kill <app> [--stale]
 ```
 
 Ends the app now, no asking: no shutdown runs. The pid comes from its
 `health.json`. For an app that won't answer `ax stop`.
+
+`ax kill --stale` (no app; aio's `am kill --stale`) ends every app of
+yours that no verb reaches: one still running on a data folder that was
+deleted or made again while it ran. It holds the lock of a file that is
+gone, so `ax status` says stopped, and a new start beside it would run two
+apps on one data folder. Each is found by the open files the OS lists
+(Linux `/proc`, macOS `lsof`), never by a claim over a socket, is sent
+SIGTERM, then SIGKILL, and is named with its folder. None: said, exit 0.
+Windows is not searched.
 
 ### `ax status`
 
@@ -831,11 +958,15 @@ it. aio's `--lines N` is `--last N`.
 ### `ax report`
 
 ```text
-ax report <app> [id]
+ax report <app> [id] [--new] [--title t]
 ```
 
 The app's problem reports, newest first; one in full by id (its first
-letters are enough). [Problem reports](../debugging/README.md#5-problem-reports-and-health).
+letters are enough). `--new` files one now (aio's `am report`), titled
+`--title`: a running app files it itself, over its door (its cells, its
+newest calls, what its bus heard, its log); a stopped one's is written
+here from its log and its last versions, no state (a `#[redact]` cell is
+the app's to withhold). [Problem reports](../debugging/README.md#5-problem-reports-and-health).
 
 ### `ax health`
 
@@ -954,7 +1085,8 @@ signature, for `aio::peer::Peer::call`: a renamed method fails to compile.
 ### `ax call`
 
 ```text
-ax call <app> <cell> <method> [arg…] [--args json] [--body json] [--wait s] [--as user]
+ax call <app> <cell> <method> [arg…] [--args json] [--body json] [--wait s] [--as user] [--as-server]
+ax call <app> --fn <name> [arg…] [--args json] [--body json] [--wait s] [--as user]
 ```
 
 Calls a method of the running app and prints its answer (JSON), or its
@@ -968,6 +1100,8 @@ refusal (exit 1).
 | `--body json` | one JSON object as the one argument (aio's `--body`) |
 | `--wait s` | its answer waited for `s` seconds at most (default: until it comes); then exit 1, the call maybe still running |
 | `--as user` | as that user (default: you) |
+| `--as-server` | as the app's own server code (aio's `--as-server`): the call is `By::System`'s, so a `before_call` that refuses users lets it in; a debug build's door only, said in the app's log |
+| `--fn name` | the app's server function `name` instead of a method (aio's plain, non-cell actions): `ax call notes --fn shop.quote tea 2`; `k=v` words, `--args` and `--body` as a method's (`ax call notes --fn rows.bulk_update items='[1,2]' tag=x`: aio's `am dispatch BulkUpdate items='[1,2]'`); name the app |
 
 ```sh
 ax call notes todo add "buy milk"
@@ -1192,6 +1326,38 @@ writes `ui.click(ui_names::SaveButton)`; after a UI change run it again,
 and a test naming a renamed element no longer compiles. Default `--out`:
 `tests/ui_names/mod.rs` in the app.
 
+### `ax tsgen`
+
+```text
+ax tsgen <app> [--out file]
+```
+
+TypeScript types of the app's `#[cell(shared)]` cells for aio-rs's JS
+client, read from its source: each cell's state as serde writes it, and
+each `#[client]` method's arguments and answer, as a typed `CellRef`
+(`client.cell(tally)`). Default `--out`: `aio-types.ts` beside the app's
+`aio.toml`; `-` prints it ([JS client](js.md#types-ax-tsgen)).
+
+### `ax where`
+
+```text
+ax where <app> [item] [--json]
+```
+
+Where the app's code runs (aio's `am where`), answered from its crate
+graph and the `cfg`s on the way to each item: `server`, `both`,
+`window/page`, `window`, `wasm-only`, `native-only`, `tests-only`,
+`never`. The item is a name (`add`), `Type::method`, a module path's
+tail or a file (`src/server.rs`: its items), said with the crates and
+modules that reach it, its `cfg`s and the rules that follow; with none,
+every item, a line each ([architecture](../basics/architecture.md#ask-ax-where)).
+
+```sh
+ax where notes                 # every item
+ax where notes Counter::add    # one, with why
+ax where notes src/server.rs   # a file's items
+```
+
 ### `ax eval`
 
 ```text
@@ -1257,7 +1423,7 @@ ax preview notes ui::Card 'title: "Inbox".into(), count: 0'
 ### `ax build`
 
 ```text
-ax build <app> [--targets a,b] [--platforms a,b] [--app-version v] [--out dir] [--list] [--sizes] [--smoke] [--smoke-strict] [--deb] [--appimage] [--android] [--debug] [--windows] [--web] [--dev]
+ax build <app> [--targets a,b] [--platforms a,b] [--app-version v] [--out dir] [--list] [--sizes] [--smoke] [--smoke-strict] [--quick] [--force] [--deb] [--appimage] [--android] [--debug] [--windows] [--web] [--dev]
 ```
 
 The app's `[build] targets` (`aio.toml`), else an installable app for this
@@ -1268,7 +1434,7 @@ OS: `dist/<id>-<version>-<os>-<arch>.*` (Linux `.tar.gz`, macOS zipped
 |---|---|
 | `--targets a,b` | some of the declared targets (by label), or kinds |
 | `--list` | the kinds and the declared targets |
-| `--app-version v` | built as that version (`1.2.3`, `1.2.3-beta`), over `[app] version` and git (aio's `--version`) |
+| `--app-version v` | built as that version (`1.2.3`, `1.2.3-beta`), over `[app] version` and git (aio's `--version`); without it `AIORT_BUILD_VERSION`, then aio's `AIO_BUILD_VERSION` |
 | `--out dir` | into that folder, over `[build] out` (default `dist/`; aio's `--out`) |
 | `--platforms a,b` | each desktop target for each of `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host` (`[build] platforms`); `all`: every one, what this machine can't build said with why and left out (aio's `--all-platforms`) |
 | `--windows` | cross-built for Windows from Linux |
@@ -1278,12 +1444,15 @@ OS: `dist/<id>-<version>-<os>-<arch>.*` (Linux `.tar.gz`, macOS zipped
 | `--debug` | with `--android`: debug APKs, debuggable, the page in `chrome://inspect` |
 | `--web` | an installable web app (PWA) in `dist/<id>-web/` instead: the app for wasm32, a manifest, icons, an offline service worker |
 | `--dev` | with `--web`: a debug build that shows its errors on its page |
+| `--ios` | the Xcode project of an iPhone and iPad thin client in `dist/<id>-ios/` instead (Xcode on a Mac builds and signs it; [iOS](../build/targets.md#ios)) |
 | `--sizes` | the release binary against its budget, and which crates take its space; packs nothing |
 | `--smoke` | then start each Linux bundle, `.deb` and AppImage headless, stop it, check its log (a macOS app's `.zip` on the Mac that built it, this one or `[build.macos] host` / `AIO_MACOS_SSH`; a Windows bundle on Windows, or over `AIO_WINDOWS_SSH`); every other artifact listed as `not smoke-tested`, with why) |
 | `--smoke-strict` | `--smoke`, and an artifact not smoke-tested fails the build |
+| `--force` | the app's own crates compiled anew: their release builds cleaned first, on each target built; their libraries' builds kept (aio's `--force`) |
 
-A macOS target built on Linux or Windows is built on a Mac over ssh
-(`[build.macos] host`, else `AIO_MACOS_SSH`). Size a binary with `ax build
+A macOS target built on Linux or Windows is linked by zig there, or built
+on a Mac over ssh when one is named (`[build.macos] host`, else
+`AIO_MACOS_SSH`; a `.dmg` needs one). Size a binary with `ax build
 --sizes`, not a plain `cargo build --release`, which lacks `ax`'s link
 flags. [Build](../build/README.md#build-ax-build), [targets](../build/targets.md).
 
@@ -1295,8 +1464,8 @@ ax build notes --platforms all
 ax build notes --web
 ```
 
-`ax build` always builds anew (cargo rebuilds what changed), so aio's
-`--force` has nothing to force.
+`ax build` rebuilds what changed (cargo); `--force` when a build should
+not trust that (a tool outside cargo changed what the app embeds).
 
 ### `ax smoke`
 
@@ -1663,7 +1832,8 @@ ax surface notes --json
 ax stop notes
 ```
 
-- Read `--json` answers by `ok`, then `value` or `text`.
+- Read `--json` answers (any answer into a pipe) by `ok`, then `value`
+  or `text`; `--text` when a script wants the person's words.
 - Run throwaway copies with `AIORT_DATA=<dir>` (and a nested display:
   `ax dev` picks one when there is no terminal), never on a person's data
   or screen.
@@ -1692,9 +1862,14 @@ ax stop notes
 | `am create --template=…` | `ax create --template app\|todo\|canvas\|cli\|service` |
 | `am dev`, `am build`, `am compile` | `ax dev`, `ax build`, `ax build --targets <one>` |
 | `am start`, `am stop`, `am restart`, `am kill`, `am status` | the same verbs (`--wait s`, `--no-wait`) |
-| `am instances` | `ax apps` |
+| `am instances` | `ax apps`; `am instances` lists a running aio-rs app built with `compat` too ([below](#what-am-sees-of-an-aio-rs-app)) |
+| `am kill --stale` | `ax kill --stale` |
+| `am add cell\|server <name>` | `ax add <app> cell\|server <name>` |
+| `am watch [dir]` | `ax watch <app> [dir…]` |
+| `am report` | `ax report <app> --new` |
 | `am start --port=N` | `ax start <app> -- --port=N` (or `AIORT_PORT=N`) |
-| `am dispatch cell:method args`, `k=v`, `--body`, `--wait=N` | `ax call <app> <cell> <method> args`, `k=v`, `--body`, `--wait N` |
+| `am dispatch cell:method args`, `k=v`, `--body`, `--wait=N`, `--as-server` | `ax call <app> <cell> <method> args`, `k=v`, `--body`, `--wait N`, `--as-server` |
+| `am dispatch <Type> k=v` (a plain action) | `ax call <app> --fn <name> k=v` (a server function, aio-rs's non-cell call: `k=v` words are its one object, as a plain action's payload; `args`, `--args`, `--body`) |
 | `am state`, `am state --ui <user>` | `ax state`, `ax state --as <user>` |
 | `am state --prod` | `ax state` on a release build (its door gives the client's view) |
 | `am state --offline` | `ax state` on a stopped app (it falls back to the store) |
@@ -1707,10 +1882,10 @@ ax stop notes
 | `am client`, `am top [secs]` | `ax components`, `ax top <app> [secs]` |
 | `am cost --window=5m`, `am discover --timeout=ms` | `ax cost --window 5m`, `ax discover --timeout ms` |
 | `am peer <app\|url> --types[=<file>]` | `ax peer <app\|profile.aioapp> --types <file>` (Rust consts; `-`: stdout) |
-| `am testgen` | `ax testgen` (a Rust name table) |
+| `am testgen` | `ax testgen` (a Rust name table); `ax tsgen` (TypeScript types of the cells, for the JS client) |
 | `am migrate --from=X`, `--tests` | `ax lint --from X`, `--tests` |
 | `am lab <os> --status\|--stop\|--reset`, `--ram --cpus --disk --version --apk --port --dist --tunnel` | `ax lab <app> <os>` the same, `--os-version` |
-| `am build --all-platforms`, `--out` | `ax build --platforms all`, `--out` (`[build] out`) |
+| `am build --all-platforms`, `--out`, `--force` | `ax build --platforms all`, `--out` (`[build] out`), `--force` |
 | `am doctor`, `am fix --harden` | `ax doctor`, `ax doctor --harden` |
 | `/__aio/trojan/*` (the control REST API) | `ax control <app>`: the verbs over loopback HTTP |
 | `--quiet`, `--json` | `--quiet`, `--json` |
@@ -1719,35 +1894,39 @@ ax stop notes
 | `am help --all` | `ax help --all` (`--commands`) |
 | `am pair` (a new PIN) | `ax pair <app>`; `ax pair <app> <host:port> <code>` pairs this device |
 | `am ui`, `am ui --client=browser` | `ax ui`, `ax ui --browser` |
-| `am pin`, `am pin <v>\|main\|latest\|<path>`, `--latest`, `--major` | `ax pin`, `ax pin <v>\|main\|latest\|<path>`, `--major`; `ax create --aio-version` |
+| `am pin`, `am pin <v>\|main\|latest\|<path>`, `--latest`, `--major`, `--force` | `ax pin`, `ax pin <v>\|main\|latest\|<path>`, `--major`, `--force` (its preflight of removed APIs); `ax create --aio-version` |
 | `am upgrade`, `am uninstall` | `ax upgrade`, `ax uninstall` (an app's aio-rs: `ax pin`) |
 | `am prune versions` | nothing to prune: an app pins aio-rs in its `Cargo.lock` |
 | `am fix`, `am link` | nothing to repair: a clone builds as it is (aio-rs from git); `ax pin <v>` moves a checkout's path back to a release |
-| `am check`, `am where` | the compiler: client and server code are resolved by rustc |
+| `am check`, `am where` | `ax check` (its `web` step: the page's code builds for wasm32), `ax where` |
 
 The full map of aio's commands and constructs: [migration](../migration/README.md).
 
 ### What `am` has that `ax` hasn't
 
-Not in aio-rs today; each with what to do instead:
+Each of `am`'s verbs has its `ax` form ([above](#coming-from-aios-am)).
+What is left, each with why:
 
-- **`am kill --stale`** (orphans serving without a lock): an aio-rs app's
-  lock is the OS's, held by the process itself, so there are none to reap.
-- **`am dispatch` plain actions and `--as-server`**: there are no
-  non-cell actions; a dev build's door already has the operator's rights.
-- **`am pin`'s preflight** (a forward move refused while the app uses an
-  API the target removed, `--force`), its Electron alignment and its
-  `requires Deno ≥`: `cargo check` after `ax pin` names each removed API
-  at its line; an app's Electron and Rust come with its aio-rs crates.
-- **`am build --force`**: `ax build` always builds anew.
 - **`am publish --no-data`**: a release always carries the data contract
-  an update checks before it replaces a version; a bundle for another OS
-  names it with `--data`.
-- **`am watch`, `am add cell|server`**: `ax dev` watches; cells are
-  written by hand.
-- **`am report`** collecting a new report from the CLI: `ax report` lists
-  and shows the reports the app made.
-- **Piped output as JSON by default**: `ax` prints the same text to a pipe;
-  ask for `--json`.
+  an update checks before it replaces a version, so an update never
+  installs over data it can't read; aio's flag dropped that check. A
+  bundle for another OS names its contract with `--data`; `ax release`
+  asks this machine's build of the app for it otherwise.
+- **`am pin`'s** Electron alignment and its `requires Deno ≥`: an app's
+  Electron and Rust come with its aio-rs crates.
 - **amui's** V8 heap: aio-rs has no such reading;
   `ax ui` shows its counterparts ([above](#ax-ui-the-visual-app-manager)).
+
+### What `am` sees of an aio-rs app
+
+An aio-rs app built with feature `compat` writes aio's lock record for
+itself (`<XDG_RUNTIME_DIR or /tmp>/aio/<key>.lock`, aio's rules for the
+folder and the key), so `am instances` lists it, and answers on aio's
+local socket (`socketPath`, NDJSON lines of aio's envelope), so `am state`
+and `am dispatch` (`--as-server` too) reach it without `/ws`: through its
+own doors, with the same gates. aio's trojan is dev-only, and so is this:
+a release build answers `/__aio/health` and nothing else. The key `am`
+sends is `<home>/data/control.key`, made at each start (0600). The record
+goes at a clean stop; one a crash leaves is aio's to judge dead and
+remove. [Compared](../aio-vs-aio-rs.md#the-wire).
+

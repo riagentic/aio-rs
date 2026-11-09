@@ -42,13 +42,27 @@ most of each, is the same in 0.2, and the template's patch now lands in
 
 Keep a big app fast to edit by splitting it into crates of a few
 thousand lines (its views by area, say), each a path dependency and a
-member of the app's workspace: an edit then recompiles its own crate and
-every crate that depends on it, one after another, and relinks. So keep
-the often-edited code (views, pages) in leaf crates, and the shared core
-small and stable. Measured on a 74 000-line app split into 10 crates: an
-edit in a page crate lands in 1.9 s (was 10 s); one in the shared kit or
-core still takes 8-14 s. `ax dev` watches every workspace crate the app
-uses, and patches the ones that changed.
+member of the app's workspace. `ax add <app> page <name>` makes one
+([ax add](../clients/ax.md#ax-add)), and `ax lint` hints at a crate of
+more than 15 000 lines. An edit then recompiles its own crate alone and
+is patched in; the crates built on it compile after, off the time to the
+screen ([dev](dev.md#hot-patching)). So keep the often-edited code
+(views, pages) in leaf crates, and the shared core small and stable.
+`ax dev` watches every workspace crate the app uses, and patches the ones
+that changed.
+
+Measured in 0.4.0 with `ax dev` (headless, CARGO_BUILD_JOBS=4 on 12
+shared cores, from the save to the window showing it, medians of 4-5):
+
+| The app (~74 000 lines, 660 generated modules, each a 60-line `rsx!` and plain Rust) | An edit lands |
+|---|---|
+| one crate | 5.5 s (rustc 4.8-5.4 s of it: its whole front end) |
+| 10 page crates and a kit crate under them: a page's edit | **0.48 s** (rustc ~0.4 s) |
+| … an edit in the kit every page calls | 1.0-1.9 s (most of it the patch of every page's caller of it: 94 000 functions) |
+
+Before 0.4.0 an edit compiled every crate built on the edited one before
+its patch: a page's edit 1.9 s, one in the shared kit or core 8-14 s
+(measured in 0.1).
 
 Splitting has a cost in release builds: generic code, async functions
 included, is copied into each crate that uses it, so the binary grows a
@@ -132,8 +146,9 @@ text = "{title}"
   `--targets a,b` builds some of them.
 - `platforms`: each desktop target for each of `linux`, `linux-arm64`,
   `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`
-  (`--platforms` for one run). A macOS bundle is made on a Mac:
-  `[build.macos] host` (or `AIO_MACOS_SSH`) names one over ssh.
+  (`--platforms` for one run). A macOS `.zip` is made anywhere (zig
+  links it away from a Mac); a `.dmg` on a Mac: `[build.macos] host` (or
+  `AIO_MACOS_SSH`) names one over ssh.
 - `budget_mb`: the desktop binary's size budget (default 10, 15 on Windows); a build
   above it fails and names the crates that take the space. Size with
   `--sizes`, not a plain `cargo build --release` (it lacks ax's link
@@ -264,7 +279,7 @@ builds, signs and publishes on a `v*` tag ([release](release.md#github-workflow)
 
 - Sizing with `cargo build --release`: use `ax build --sizes`.
 - `--deb` without `[app] maintainer`: refused, it names the key.
-- A macOS bundle from Linux: it needs a Mac (`[build.macos] host`).
+- A `.dmg` from Linux: it needs a Mac (`[build.macos] host`).
 - Expecting `ax dev` to keep in-memory view state across a restart: a
   hot patch keeps it, a rebuild starts the views again (the cells'
   state is saved).

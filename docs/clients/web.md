@@ -6,7 +6,7 @@ its own window a fourth:
 | Way | What runs in the browser | Make it |
 |---|---|---|
 | [The web build](#the-web-build) | the app's views and cells, as wasm: an installable web app (PWA) that works offline | `ax build <app> --web` |
-| [A served app's page](#a-served-apps-page) | the web build, from the app's own server, its first paint made on the server | `aio_shell::web::painted` on the app's `Http` |
+| [A served app's page](#a-served-apps-page) | the web build, from the app's own server, its first paint made on the server | `Http::painted(App)` on the app's `Http` |
 | [`[app] ui = "browser"`](#the-ui-in-the-system-browser) | a client-server app's UI in the system browser instead of a window | `aio.toml` |
 | [Embedded pages](#embedded-pages) | someone else's site in a box of a view, or in a child window | `aio::kit::Browser`, `aio_shell::open_window` |
 
@@ -77,8 +77,8 @@ page's own socket ([sync](../state/sync.md)):
 With `[accounts]` on, `aio::kit::SignIn` in a view signs in against the
 server that served the page (`aio::web::client()`): the session lives in
 an HttpOnly cookie, never in the page's storage or address.
-`aio::web::use_user()` is who the page is (`None` while it asks,
-`Some(None)` signed out); `aio::web::sign_out().await` ends the session;
+`aio::kit::use_user()` (also `aio::web::use_user()`) is who the page
+is (`None` while it asks, `Some(None)` signed out); `aio::web::sign_out().await` ends the session;
 `aio::web::restart()` starts the page again, so its copies link as the
 new user ([auth](../auth/README.md)).
 
@@ -98,20 +98,31 @@ own `<input type="file">` and `window.print()` in a page.
 A client-server app serves its own web build to browsers, each page
 painted on the server for its viewer (no `#[server]` field, its
 `visible` rows and role), so it shows before the script loads; then the
-page's own view takes its place, keeping the scroll, focus and typed text
-of the paint.
+page's own view hydrates it in place, keeping the scroll, focus and typed
+text of the paint ([views](../ui/views.md#server-rendering-and-hydration)).
+A view waiting for a `seeded_resource` is streamed in once it loads,
+before the script runs.
 
-| `aio_shell::web` item | Does |
+| Item | Does |
 |---|---|
-| `painted(http, handle, App, dist)` | `http` serving the web build in `dist` as the app's shell, each page painted for its viewer |
-| `tabs(http, App, win)` | each browser tab a live view in this process, drawn over its socket (what `ax ui --browser` uses) |
-| `page(&win)` | the tab page a `Window` describes |
+| `Http::shell(dist).painted(App)` | the web build in `dist` as the app's shell, each navigation painted for its viewer with the app's cells, its head and its seed |
+| `aio::ui::paint(App, &viewer, seed)` | one page's `Paint`, for a server of the app's own making |
+| `aio::ui::seeded_resource(..)` | a `resource` the server loads for the page, streamed in with its value; the page's first frame starts from it |
+| `aio_shell::web::tabs(http, App, win)` | each browser tab a live view in this process, drawn over its socket (what `ax ui --browser` uses) |
+| `aio_shell::web::page(&win)` | the tab page a `Window` describes |
 
 The `Http` goes to `aio::Source::for_app_with(&cfg, &dirs, http)`. The
 shell answers unknown route-shaped paths with its `index.html`, so a deep
 link works, and needs the app's key, or with accounts a session
 ([sync](../state/sync.md#server-functions-and-routes)). The page connects
 only to its own server (`connect-src 'self'`) and runs no `eval`.
+
+A browser that opens the server with no key (a phone, a tablet) gets the
+server's pairing page instead of a bare 401: a 6-digit code from `ax pair
+<app> --plain` sets the key's cookie and opens the app. The page installs
+to the Home Screen with its icon and an offline shell
+([iOS](../build/targets.md#ios)). A tool that asks without a key still
+gets `401 wrong or missing key`.
 
 ## The UI in the system browser
 
@@ -189,7 +200,7 @@ The window must allow it: `aio_shell::Window { web: Web { browser: true,
 | `host_keys` | 1 to 16 `KeyboardEvent.key` names the guest hands back, even from its frames (`GuestEvent::Key`) |
 | `popups` | a link that opens a window goes to the system browser after a real click; without it, nothing |
 | `onevent` | `GuestEvent`: `Navigated { url, back, forward }`, `Title`, `Key(HostKey)`, `Message { channel, args }` (its preload's `ipcRenderer.sendToHost`), `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive`, `PreloadRefused { preload, reason }` |
-| `id` | the element's id, for `aio::kit::go(id, Go::Back \| Forward \| Reload \| Stop \| Send { channel, args } \| Css(sheet) \| Zoom(f) \| DevTools)` (`Css`: `insertCSS`, until it navigates; `Zoom`: `setZoomFactor`; `DevTools`: its own DevTools window) and `aio::kit::run_js(id, js).await` (`executeJavaScript`: its value as JSON, `None` when the guest isn't there or the script threw) |
+| `id` | the element's id, for `aio::kit::go(id, Go::Back \| Forward \| Reload \| Stop \| Send { channel, args } \| Css(sheet) \| Zoom(f) \| DevTools)` (`Css`: `insertCSS`, until it navigates; `Zoom`: `setZoomFactor`; `DevTools`: its own DevTools window) and `aio::kit::run_js(id, js).await` (`executeJavaScript`: its value as JSON, `None` when the guest isn't there or the script threw); every other `<webview>` method by name: `aio::kit::webview(id, "getURL", vec![]).await` (`WEBVIEW_METHODS` lists them; its value as JSON, a promise awaited, `capturePage` a PNG data URL, `printToPDF` base64; `None` when the guest isn't there, the name is none of them (said) or it threw) |
 
 ### A preload for the guest
 
@@ -279,7 +290,18 @@ host stops sending at its first 404.
 ```text
 ax dev: [page] warn: low disk
 ax dev: [page] error: [uncaught] TypeError: x is undefined
+ax dev: [page] error: [aio] panicked at src/app.rs:12:5: no rows
 ```
+
+A panic of the page's Rust is said on its console with its place (the
+wasm trap alone names none), so it reaches the same log, a release's too:
+aio's source-mapped `client.log`, with no bundled JavaScript to map. A
+dev page also shows it, open, in its overlay.
+
+A dev web build (`ax dev --web`, `ax build --web --dev`) has aio-rs's
+`dev` on, as `ax dev`'s native build: its overlay shows the page's
+errors and its live accessibility and contrast findings, and its cells
+show in Redux DevTools ([time travel](../debugging/time-travel.md#in-redux-devtools)).
 
 ## Notifications
 
@@ -300,9 +322,10 @@ app's service worker shows it. `aio::tell::show_with(f)` set before
 ## Gaps
 
 - A page's copy has no time travel, history or blobs.
-- `Browser` wraps the `<webview>` methods apps use (`go`, `run_js`,
-  `Css`, `Zoom`, `DevTools`); aio handed out the element itself. Anything else runs in the
-  guest through `run_js`.
+- aio handed out the `<webview>` element itself; aio-rs calls each of
+  its methods by name (`webview`, all of `WEBVIEW_METHODS`), with `go`
+  and `run_js` for the common ones. `capturePage` needs a display: a
+  headless runtime has no surface to capture a guest from (`None`).
 - `Browser` is Electron's `<webview>`: a desktop window's only, not a
   web build's or Android's.
 
@@ -322,7 +345,8 @@ app's service worker shows it. `aio::tell::show_with(f)` set before
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::web`
 (`launch`, `sync::Remote`, `Handle`, `storage`, `client`, `use_user`),
 `aio::kit::Browser`, `aio::kit::GuestEvent`, `Go`, `go`,
-`aio::http::Http` (`shell`, `paint`). `cargo doc -p aio-rs-shell
---no-deps --open`: `web` (`painted`, `tabs`), `guest` (`Web`, `Child`,
+`aio::http::Http` (`shell`, `painted`, `paint`), `aio::ui::paint`,
+`aio::ui::Seed`, `air::ssr`. `cargo doc -p aio-rs-shell
+--no-deps --open`: `web` (`tabs`, `page`), `guest` (`Web`, `Child`,
 `open_window`). `aio::web` is built for `wasm32` only: document it with
 `--target wasm32-unknown-unknown`.

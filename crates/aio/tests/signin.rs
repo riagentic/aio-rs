@@ -98,6 +98,30 @@ fn a_person_signs_in_and_a_wrong_password_is_said_in_words() {
     assert!(ui.absent("signinSso"), "no identity provider: no SSO link");
 }
 
+/// aio's `useUser()` in a window: who its `SignIn` signed in, until signed out.
+#[test]
+fn a_windows_views_know_who_signed_in() {
+    app(false);
+    let mut ui = TestUi::new(|| {
+        let me = aio::kit::use_user();
+        let who = memo(move || match me.get() {
+            None => "asking".to_string(),
+            Some(None) => "nobody".into(),
+            Some(Some((id, role))) => format!("{id} {role}"),
+        });
+        rsx! {
+            p { "data-t": "who", "{who}" }
+            button { "data-t": "out", onclick: |_| aio::kit::set_user(None), "Sign out" }
+            {form()}
+        }
+    });
+    shows(&mut ui, "who", "nobody");
+    enter(&mut ui, "ann", PW);
+    shows(&mut ui, "who", "ann user");
+    ui.click("out");
+    shows(&mut ui, "who", "nobody");
+}
+
 #[test]
 fn sign_up_shows_when_the_server_allows_it_and_signs_in_the_new_account() {
     app(true);

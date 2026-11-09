@@ -7,6 +7,27 @@ aio::client!(Board, board);
 const DOUBLE: aio::kit::Island =
     aio::kit::Island::js("return (el, p, emit) => { el.textContent = 'island ' + p.n; emit(p.n * 2); };");
 
+/// A count the server loads slowly (the page waits for it in a stream);
+/// the page's own load would count one more, so a page that loads again
+/// instead of taking the server's value shows it.
+#[component]
+fn Slow() -> View {
+    let n = seeded_resource(|| async {
+        #[cfg(target_arch = "wasm32")]
+        {
+            aio::web::sleep(150).await;
+            8u32
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            7u32
+        }
+    })
+    .suspend()?;
+    rsx! { p { id: "slow", "{n} counted" } }
+}
+
 fn view() -> View {
     use_live();
     let items = part(|b| &b.items);
@@ -32,5 +53,6 @@ fn view() -> View {
             onevent: move |v: i64| doubled.set(v),
         }
         p { id: "doubled", "{doubled}" }
+        Suspense { fallback: rsx! { p { id: "slow", "counting" } }, Slow {} }
     }
 }

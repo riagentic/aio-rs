@@ -153,8 +153,6 @@ impl<F: Fn() -> Head + 'static> HeadOf for F {
 /// is followed, the page written only when the merged head changed.
 #[cfg(feature = "kit")]
 pub fn use_head(head: impl HeadOf) {
-    use std::{cell::RefCell, rc::Rc};
-    type Shared = Rc<RefCell<Heads>>;
     let heads = crate::ui::try_context::<Shared>().unwrap_or_else(|| air::provide_root(Shared::default()));
     let id = crate::ui::once(|| heads.borrow_mut().owner());
     let h = heads.clone();
@@ -169,6 +167,11 @@ pub fn use_head(head: impl HeadOf) {
         write(&heads.borrow().merged());
     });
 }
+
+/// A root's heads, its views' [`use_head`]s (a server's first paint
+/// provides its own and reads it back: aio's `collectHead`).
+#[cfg(feature = "kit")]
+pub(crate) type Shared = std::rc::Rc<std::cell::RefCell<Heads>>;
 
 /// `m` written to the page: through its DOM in a browser (its policy runs
 /// no code from the app), as a page script in a window.
@@ -200,9 +203,19 @@ fn write_page(m: &Merged) {
         }
     }
     let Some(head) = d.head() else { return };
-    if let Ok(old) = head.query_selector_all("[data-aio-head]") {
-        (0..old.length()).filter_map(|i| old.item(i)).for_each(|n| _ = head.remove_child(&n));
+    let Ok(old) = head.query_selector_all("[data-aio-head]") else { return };
+    let old: Vec<web_sys::Element> =
+        (0..old.length()).filter_map(|i| old.item(i)).filter_map(|n| wasm_bindgen::JsCast::dyn_into(n).ok()).collect();
+    // The tags a server's first paint wrote stay (hydration): nothing to redo.
+    let same = |e: &web_sys::Element, (kind, attrs): &(&str, Tag)| {
+        e.local_name() == *kind
+            && e.get_attribute_names().length() as usize == attrs.len() + 1
+            && attrs.iter().all(|(k, v)| e.get_attribute(k).as_deref() == Some(v.as_str()))
+    };
+    if old.len() == m.tags.len() && old.iter().zip(&m.tags).all(|(e, t)| same(e, t)) {
+        return;
     }
+    old.iter().for_each(|n| _ = head.remove_child(n));
     for (kind, attrs) in &m.tags {
         let Ok(e) = d.create_element(kind) else { continue };
         attrs.iter().for_each(|(k, v)| _ = e.set_attribute(k, v));

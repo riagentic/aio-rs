@@ -82,15 +82,28 @@ needed. It needs:
   ASLR in `ax dev`; a system that forces ASLR gets a rebuild and restart.
 
 An edit in a library crate (the template's app crate is one: its
-launcher is a separate binary) is compiled with the crates built on it
-and applied without compiling the launcher: the launcher's running
-objects are linked into the patch as they are, so its calls reach the new
-code. The launcher is compiled after that, off the time to the screen:
-when its objects come out as the running ones (the same code and
-relocations, debug info apart: it compiles in nothing of the edit)
-nothing more is sent; when they differ (a generic or an inlined function
-of the library) a second patch follows with them, and the terminal says
-so.
+launcher is a separate binary) is compiled alone and applied at once:
+the launcher's running objects, and those of the crates built on the
+edited one, are linked into the patch as they are, so their calls reach
+the new code. Those crates and the launcher are compiled after, off the
+time to the screen: when their objects come out as the running ones (the
+same code and relocations, debug info apart: they compile in nothing of
+the edit) nothing more is sent; when they differ (a generic or an
+inlined function of the edited crate) a second patch follows with them,
+and the terminal says so. So an edit in a page crate compiles that crate
+alone, not the app above it. One exception: an edit that drops a symbol
+an earlier patch added (a generic's copy the crates above may share) is
+compiled with them, before the patch.
+
+A patch links only the library objects (codegen units) it needs: those
+whose code differs from the running binary's (section by section, its
+bytes and relocations), the ones that call into those, in any of the
+app's libraries built on the edited one (from the running binary's copy
+when that library wasn't compiled), up to the roots, and any defining a
+symbol the running binary's linker dropped. The rest the patch reaches in
+the running binary. In a crate of about 74 000 lines that is 6 of its 256
+objects, and the patch's stub and link take ~0.4 s where they took
+0.8-4.6 s (the 140 MB library written out whole).
 
 ### The session
 
@@ -109,6 +122,16 @@ so.
   ~1.15 s (a 60 MB binary on Apple silicon; the check itself scales with
   its size). An ad-hoc signature (`codesign -s -`) gets the same for
   ~170 ms; the same path or inode gets nothing.
+- A start after code edits made with `ax dev` off (a pull, an editor
+  without a session): the last fat build starts at once, nothing built or
+  linked, while the edited crates compile beside it; the patch goes in as
+  its window comes up, state kept (~0.45 s for the template, where a
+  build and a launch took 1.0 s). Code that ran as the app started (its
+  `main`, a cell's first load) ran as built before, as with an edit in a
+  session; `ax restart` runs it all anew. The next start's build follows
+  behind, as after any patch. A change no patch takes builds as before: a
+  `Cargo.toml`, the lock, `aio.toml` or another file the build read, a
+  type's shape, a build that is running (`--warm`).
 - One `ax dev` per app. An app an earlier session left running (its
   terminal closed) is stopped first, by its recorded pid and start time
   (on every OS: a pid the OS handed out again is no match), never by name.
@@ -218,17 +241,37 @@ ax dev notes --web
 ```
 
 Builds the app's library for `wasm32` (debug), serves it on a free
-loopback port (`--port N`: that one) and prints the address. `--expose`
+loopback port (`--port N`: that one) and prints the address. A dev build
+turns on aio-rs's `dev` feature in the page (as the desktop window has it). `--expose`
 serves it to the network (`0.0.0.0`) over TLS behind a key made for the
 run: open the printed `https://<lan-ip>:<port>/?token=…` link on a phone
 or another machine (the browser asks to trust aio-rs's own certificate;
 the link sets a cookie, so the page's own requests need no key in their
 address). A saved stylesheet shows at once in
-every open tab; any other saved source builds the bundle again and the
-tabs reload. A failed build keeps the last page and shows the errors on
-it. There is no hot-patching in the browser: every Rust edit is a new
-bundle. It needs the `wasm32-unknown-unknown` target and the
-wasm-bindgen the lock names (`ax setup` fetches it).
+every open tab. Markup alone (an `rsx!` text, a static attribute, as on
+the desktop) goes to every open tab at the first save, nothing built: its
+views are built again in place, their state kept (~10 ms). Any other saved
+source builds the bundle again and the tabs reload; the cells come back
+from the browser's storage; the build starts at the first save, while
+a burst of saves settles. The dev build optimizes the libraries
+(`opt-level = 1`) and links no debug info (wasm-bindgen drops it anyway):
+half the module, so binding it and loading it take half the time. A tab asks the server and is answered as soon
+as something changes (no polling interval). A failed build keeps the last
+page and shows the errors on it. It needs the `wasm32-unknown-unknown`
+target and the wasm-bindgen the lock names (`ax setup` fetches it).
+
+A Rust edit of the page's crate is hot-patched into the open tabs, state
+kept (~0.18 s for the template, to the page). rustc compiles the crate
+again; ax links its objects into a small side module against the running
+module (its statics' addresses, its functions' table slots) and the page
+loads it into its own memory and function table. The views and the cell
+methods are called through a jump table, so the next render and the next
+call run the new code. wasm-bindgen doesn't run. For this the dev build
+gives every function a table slot and each JS import a wrapper (~0.04 s
+more per build). A patch's new statics take a 16 MB arena in the page.
+An edit a patch can't take is a full build and the tabs reload, the
+terminal says why: a new JS import (`#[wasm_bindgen]` extern), a function
+called as another type, another crate's file, the arena full.
 
 ## On a phone while you work
 
@@ -240,8 +283,9 @@ ax dev notes --android --native         # the app's own library, rebuilt on each
 
 As aio's `dev:android`: a thin dev APK, installed once beside the real
 app ("Notes (dev)"), shows the page `ax dev --web` serves, reached over
-`adb reverse`; each edit rebuilds the page on this machine and reloads
-it on the device, no APK built again. `--native` (or an app without a web
+`adb reverse`; each edit shows there as in a browser tab (Rust
+hot-patched, markup and stylesheets live, state kept), no APK built
+again. `--native` (or an app without a web
 build): a debug dev copy of the app, built for the device's CPU only and
 installed again on every save. The app's log, its page's console and a
 crash come to the terminal as `[device] …`. The details:
@@ -413,15 +457,13 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
 
 ## Limits
 
-- No hot-patching in the web build or on Android: each edit is a build
-  and the page reloads, slower than a patch (on Android, of the page
-  only, unless `--native`).
-- No run-from-a-link command, by design: aio's one-liner pipes a script
-  from the net into a shell, then builds and runs whatever the link
-  holds. A person gets the app from its signed release instead (`ax
-  release`'s bundles and their checked updates); a developer clones and
-  starts it, two commands that show what they run: `git clone <link> &&
-  cd <name> && ax start`.
+- In the web build only the page's crate is hot-patched: an edit of
+  another crate is a build and the page reloads, its cells kept.
+  `--android --native` builds and installs again on each save.
+- `ax run <link>` builds and starts the app as `ax start` does; it
+  installs nothing (aio's `run.sh` installed its build). A person gets
+  an app from its signed release (`ax release`). It needs `ax`: no
+  script is piped into a shell.
 
 ## API
 

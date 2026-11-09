@@ -274,6 +274,46 @@ assert_eq!(ui.count("li"), 0);
 | trusted HTML | `div { dangerous_inner_html: "{html}" }`: never with text a person typed; the kit's `Markdown` is safe |
 | SVG | `svg { path { d: "M0 0L8 8" } }`, attributes as SVG names them |
 
+### Without `rsx!`
+
+`h(tag)` builds an element as code (aio's `h()`): the same templates
+and holes `rsx!` makes, for views made by a function, a generator or a
+port of aio's `h()` code. `comp(Component, props)` places a component.
+
+```rust
+use aio::ui::prelude::*;
+
+fn counter() -> View {
+    let n = signal(|| 0);
+    h("div")
+        .attr("class", "counter")
+        .attr_with("title", move || format!("{} clicks", n.get()))
+        .child(h("button").attr("data-t", "add").on("click", move |_: MouseEvent| n.update(|v| *v += 1)).child("Add"))
+        .child(h("p").attr("data-t", "n").child(n))
+        .view()
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(counter);
+ui.click("add");
+assert_eq!(ui.text("n"), "1");
+# }
+```
+
+| Call | Does |
+|---|---|
+| `.attr(name, v)` | an attribute: a string, a `bool`, an `Option`, a `Signal` or `Memo` (followed) |
+| `.attr_with(name, \|\| v)` | an attribute that follows what the closure reads |
+| `.on(event, \|e: MouseEvent\| ..)` | a handler (`"click"`, `"input"`: the DOM's names); its event type says its data |
+| `.child(c)`, `.children(cs)` | text, a number, a view, an element, an `Option`, a `Signal` (followed) |
+| `.child_with(\|\| c)` | a child that follows what the closure reads |
+| `.view()` | the `View`; an `H` is a child as it is |
+| `comp(Row, RowProps { .. })` | component `Row`, in the tree by its name |
+
+Inside `h("svg")` the elements are SVG's. `rsx!` stays the shorter way
+to write markup: it checks props at compile time and `ax dev` reloads its
+markup without a build.
+
 ### Events
 
 | Handler | Gets | Typical |
@@ -346,9 +386,12 @@ assert_eq!(ui.read(&THEME), "dark");
 | `static S: Global<T> = Global::new(\|\| v)` | one value for the whole app (per app instance), the same methods | module-level `signal()` |
 | `.get_untracked()`, `.with_untracked(..)`, `.read_untracked()`, `untrack(\|\| ..)` | reads without following | `.peek()`, `untrack` |
 | `memo(move \|\| ..)` | a derived value, re-made when what it reads changes; equal answers wake no reader | `computed()`, `useMemo` |
+| `static M: TrackedMemo<K, V> = TrackedMemo::new(\|k\| ..)`, `M.get(&k)` | values made from state, by key, one cache for every component (per app instance): a hit follows what making it read, as a miss does, and is made again once that changed; `.max(n)` keeps the `n` used last | `trackedMemo()` |
+| `use_optimistic(move \|\| base, \|v, a\| ..)` | the base (a part, a resource) with each `add(a)`ed action applied, shown at once; dropped when the base changes, or by `clear()` (a refusal that changed nothing); `pending()` | `useOptimistic` |
 | `effect(move \|\| ..)` | runs once the view is drawn, again when what it reads changes, its own writes too; returns an `Effect`, `e.dispose()` stops it | `effect(fn, { rerunOnSelfWrite: true })`, `useEffect` |
 | `effect_quiet(move \|\| ..)` | `effect`, but a signal it read and then wrote itself doesn't run it again, so `log.update(\|l\| l.push(x.get()))` can't loop | `effect()` |
 | `resource(move \|\| async move { .. })` | an async value, re-run when what it reads changes; `.get()` is `None` until ready, `.suspend()?` waits under a `Suspense`; `.restart()`, `.mutate(v)` shows `v` at once (the next load replaces it), `.dispose()` loads no more | `useResource`, `resource()` |
+| `seeded_resource(move \|\| async move { .. })` | `resource` whose value a served page carries: the server waits for it while the page streams, the page's first frame starts from it ([server rendering](#server-rendering-and-hydration)); its value is `Serialize` and `Deserialize` | none |
 | `watch(deps, move \|deps\| ..)` | runs once the view is drawn, again when `deps` (values the view made, e.g. of its props) differ | |
 | `on_change(move \|\| .., \|next, prev\| ..)` | runs when the first closure's value changes (not at the start), with the old one; only what it reads is followed, the second runs untracked | `watch(source, fn)`, `effect(on(..))` |
 | `callback(move \|x\| ..)` | a handler made once, for a prop | `useCallback` |
@@ -472,7 +515,10 @@ logged and gives `None`.
 
 A synced copy shows a call at once and confirms it with the server
 later; a refusal rolls the view back ([sync](../state/sync.md)). There is
-no separate optimistic layer to keep: the copy is it.
+no separate optimistic layer to keep: the copy is it. A value the copy
+doesn't predict (a call with `#[client(predict = false)]`, another app's
+answer, a resource) is shown ahead of its answer with `use_optimistic`
+([hooks](#local-state-and-hooks)).
 
 ```rust
 use aio::act;
@@ -558,27 +604,88 @@ What changes in the way of thinking:
   are checked by the compiler; a misspelt field is a build error, not
   `undefined`.
 
+## Server rendering and hydration
+
+A served app's page is rendered on the server for each viewer, streamed,
+then hydrated by the web build (aio's `renderToString`, `renderToStream`,
+`collectHead` and `hydrate`). One call on the app's `Http`:
+`Http::default().shell("dist/notes-web").painted(App)`.
+
+- **What is painted.** `App` at the address asked (the `router!` starts
+  there), with each served cell as that viewer's socket shows it: no
+  `#[server]` field, `visible` applied, by its role. A visitor with no key
+  and no session (a public sign-in page) sees empty cells.
+- **The head.** What the views ask with `use_head` (title, `<meta>`,
+  `<link>`) is in the page's `<head>`; the page's view finds it there and
+  writes nothing again.
+- **The state.** The page carries the cells it was painted with (a JSON
+  script, `aio::ui::SEED_ID`); `Remote::open` starts from it (unless this
+  browser kept a newer copy) and links meanwhile, so the first frame is
+  the paint's, with no wait for the socket.
+- **Hydration.** The view's first frame takes the painted nodes over in
+  place: their ids, listeners and values move to them. Nothing is
+  redrawn, so there is no flash and the scroll, focus and typed text stay
+  (what was typed before the view ran is sent to it as an `input`). A text
+  or an attribute that differs is written; a node of another kind is
+  replaced, and the console says how many. A dev build's tooling (the
+  Redux DevTools bridge) runs beside the app (`Root::beside`), not in
+  `#main`, so a dev build hydrates node for node too.
+- **Streamed.** A `Suspense` whose children wait for a
+  `seeded_resource` shows its fallback in the page sent at once. The
+  server keeps the views while those load (up to 5 s), then sends each
+  one's children in place of its fallback, with the values they loaded.
+  The page's script puts them in place as they arrive, before the view
+  runs; the view's first frame starts from those values, with no load of
+  its own, so it hydrates what came. No script is sent inline (the
+  values are a JSON block). A plain `resource` is the client's to load:
+  the server shows its fallback and sends no later value.
+- **Only navigations are painted.** A script's fetch of the page (the
+  service worker's offline copy) gets the shell as built. A client-server
+  app's worker asks the server for each navigation first, so it is
+  painted fresh; offline, the worker's shell starts the page as before.
+- **Without a server.** `aio::ui::paint(App, &viewer, seed)` renders one
+  page to a `Paint` (body, title, head with the seed);
+  `air::ssr::render_to_string(view)` is the markup alone, and
+  `air::ssr::stream(view, ..)` the markup now and each waiting view later.
+- **How it renders.** A server root sends no edits: each template is
+  kept as an instance with what its holes wrote, and the markup is written
+  from them. A hole that reads no signal runs once and leaves nothing
+  behind; one that reads runs as in a page, so a resource that loads, a
+  `Suspense` and an `ErrorBoundary` settle as the client's would. Every
+  SSR test checks the server's markup against the client's settled page
+  (`TestPage::markup`).
+
+Measured (`aio-cli`'s `a_served_page_is_painted_on_the_server_then_hydrated_in_place`,
+loopback, median of 6): the board's rows show 7 ms after the navigation
+painted, 35 ms when the page draws them itself (the module fetched,
+compiled and linked first). On a real network the gap is the module's
+download and a round trip more.
+
+Streamed (`a_streamed_page_shows_at_once_and_fills_in_what_waited_before_its_view_hydrates`,
+a view waiting 150 ms for its data, median of 5): the first byte comes
+at 3 ms and the fallback shows at 9 ms; the count is in place at 155 ms,
+as the last byte comes. A page rendered whole would send its first byte
+then (154 ms).
+
+Render speed (`cargo run --release -p aio-rs-air --example ssr_speed`,
+a table of rows, three cells each, median of many renders):
+
+| Rows | air | aio's `renderToString` |
+|---|---|---|
+| 2 | 1.9 µs | 4.7 µs |
+| 50 | 27 µs | 100 µs |
+| 1000 | 0.45 ms | 2.5 ms |
+
+Rows from a signal cost 5% more (the list follows it).
+
 ## Gaps against aio
 
-- **Server rendering.** aio renders a page to HTML on the server
-  (`renderToString`, `renderToStream`) and hydrates it; aio-rs's views
-  run where the window is (the page, or the app process over its wire),
-  so there is no HTML-first page to crawl. By design: a desktop or
-  Android page is local and draws its first frame from memory, and no
-  hydration means no mismatch between two renders; a public page's HTML
-  for crawlers and previews is `ax preview --html` and `aio::head::html`.
-- **Redux DevTools.** aio sends its actions to the browser extension;
-  aio-rs has `use_time_travel()` with `kit::TimeTravelPanel`,
-  `ax timetravel` and `ax events` instead: no browser extension, every
-  target, release builds too, and the whole store rather than 2000 entries.
-- **`useOptimistic`.** None: a synced copy already shows a call at once
-  and rolls a refusal back.
-- **`trackedMemo()`.** aio's cache of derived values by key, shared by
-  components: a `memo` per component, or a `GlobalMemo` per value, each
-  following what it reads.
-- **`h()` without JSX, the React compat layer.** `rsx!` only; React
-  components come in as islands. One renderer keeps events, focus, the
-  audits and `TestUi` paths the same on every page.
+- **The React compat layer** (AIR's React-named hooks): none, by design.
+  React itself runs instead: a React tree is an island of the page, or a
+  served page of its own, and reads and calls the same cells through the
+  JS client's hooks (`useCell`, `useCall`, `useStatus`;
+  [JS client](../clients/js.md)). One renderer keeps events, focus, the
+  audits and `TestUi` paths the same on every `rsx!` page.
 
 ## The page
 

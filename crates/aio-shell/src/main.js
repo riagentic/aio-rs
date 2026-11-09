@@ -152,12 +152,12 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'aio', privileges: { standard: t
 // (electron-shared.ts tmplSocketFetch), as it is: at most 6 connections, as
 // Chromium per host; a small or error body read here, so a body nobody reads
 // (an <img>'s 404) never holds a connection; everything else streamed, and a
-// dropped stream closes its connection; no first byte in AIO_SOCKET_TIMEOUT_MS
-// (30 s) is a 504, a dead socket a 502, both in words.
+// dropped stream closes its connection; no first byte in AIORT_SOCKET_TIMEOUT_MS
+// (aio's AIO_SOCKET_TIMEOUT_MS too; 30 s) is a 504, a dead socket a 502, both in words.
 const HTTP_SOCK = arg('http')
 const MAX_SOCKETS = 6
 const SMALL_BODY = 64 * 1024
-const REQ_TIMEOUT_MS = ((s) => /^[0-9]+$/.test(s) && Number(s) > 0 ? Number(s) : 30000)(String(process.env.AIO_SOCKET_TIMEOUT_MS || '').trim())
+const REQ_TIMEOUT_MS = ((s) => /^[0-9]+$/.test(s) && Number(s) > 0 ? Number(s) : 30000)(String(process.env.AIORT_SOCKET_TIMEOUT_MS || process.env.AIO_SOCKET_TIMEOUT_MS || '').trim())
 let agent = null
 function socketFetch(reqPath, method, headers, body) {
   const http = require('node:http')
@@ -218,7 +218,7 @@ function socketFetch(reqPath, method, headers, body) {
     })
     r.on('error', (e) => resolve(new Response(`aio: cannot reach the app over its ${where}: ${e.message}`, { status: 502, headers: { 'Content-Type': 'text/plain' } })))
     deadline = setTimeout(() => {
-      const msg = `aio: no answer from the app for ${method} ${reqPath} after ${REQ_TIMEOUT_MS} ms over its ${where}. The request was dropped so the window keeps working; if this route is that slow to its first byte, raise AIO_SOCKET_TIMEOUT_MS.`
+      const msg = `aio: no answer from the app for ${method} ${reqPath} after ${REQ_TIMEOUT_MS} ms over its ${where}. The request was dropped so the window keeps working; if this route is that slow to its first byte, raise AIORT_SOCKET_TIMEOUT_MS.`
       try { console.error(`[aio-shell] ${msg}`) } catch (_) {}
       resolve(new Response(msg, { status: 504, headers: { 'Content-Type': 'text/plain' } }))
       try { r.destroy(new Error(`aio: request timed out after ${REQ_TIMEOUT_MS} ms`)) } catch (_) {}
@@ -391,23 +391,69 @@ app.whenReady().then(() => {
   ctl.on('error', (e) => console.error(`[aio-shell] control: ${e.message}`))
   // No answer (an old app, a broken line): open at the declared size anyway.
   setTimeout(() => { if (!w) open({}) }, 2000)
-  ipcMain.on('aio:wire', (e, bytes) => {
-    if (!w || e.sender !== w.webContents) return
+  const toApp = (bytes) => {
     const b = Buffer.from(bytes)
     const head = Buffer.alloc(4)
     head.writeUInt32BE(b.length)
     wire.write(Buffer.concat([head, b]))
+  }
+  ipcMain.on('aio:wire', (e, bytes) => {
+    if (w && e.sender === w.webContents) toApp(bytes)
+  })
+  // A key the page waits on (air's page.js `ask`): the page holds its
+  // frame, so the frame shows the key's answer, as a page that does its
+  // work in its key handler shows it. The app's frames up to its `[0]`
+  // (air::ANSWERED) are the answer, given back at once; at most ASK_MS,
+  // then the rest comes as any frame does. The app answers in order:
+  // `owed` counts the ends still to come, a late one's included.
+  const ASK_MS = 50
+  let asked = null
+  let owed = 0
+  const answer = () => {
+    if (!asked) return
+    clearTimeout(asked.timer)
+    asked.e.returnValue = asked.frames
+    asked = null
+  }
+  // `next`: the first frame the page has not applied. The frames sent to
+  // it lately that it may not have yet go first in the answer (it skips
+  // what it has), so a stream of frames (an animation) can't hold it back.
+  ipcMain.on('aio:ask', (e, bytes, next) => {
+    if (!w || e.sender !== w.webContents) return void (e.returnValue = [])
+    toApp(bytes)
+    owed++
+    if (asked) return void (e.returnValue = [])
+    while (recent.length && recent[0][0] < next) recent.shift()
+    asked = { e, frames: recent.map(([n, f]) => [n, f]), timer: setTimeout(answer, ASK_MS) }
   })
   // One connection to the app per page load: the app renders a fresh view
   // tree for each (its state is in its cells). Frames wait until the page
-  // has loaded. The app closing the current one ends the runtime.
+  // has loaded. The app closing the current one ends the runtime. Each
+  // frame to a page is numbered: an answer overtakes the frames still on
+  // their way, and the preload applies them in order.
   let loaded = false
   let early = []
+  let sent = 0
+  // The frames sent in the last RECENT_MS, for an answer to repeat.
+  const RECENT_MS = 250
+  let recent = []
+  const toPage = (f) => {
+    sent++
+    if (asked) return void asked.frames.push([sent, f])
+    w.webContents.send('aio:wire', f, sent)
+    const now = performance.now()
+    while (recent.length && recent[0][2] < now - RECENT_MS) recent.shift()
+    recent.push([sent, f, now])
+  }
   const connect = () => {
     const s = net.connect(arg('sock'))
     s.on('data', frames((f) => {
       if (s !== wire) return
-      if (loaded && w && !w.isDestroyed() && !w.webContents.isCrashed()) w.webContents.send('aio:wire', f)
+      if (f.length === 1 && f[0] === 0) {
+        owed = Math.max(0, owed - 1)
+        return void (owed || answer())
+      }
+      if (loaded && w && !w.isDestroyed() && !w.webContents.isCrashed()) toPage(f)
       else early.push(f)
     }))
     s.on('error', (e) => console.error(`[aio-shell] app socket: ${e.message}`))
@@ -417,8 +463,12 @@ app.whenReady().then(() => {
   let wire = connect()
   // The page anew, on a new connection (a crash, a reload key).
   function reload(clean) {
+    answer()
     loaded = false
     early = []
+    sent = 0
+    owed = 0
+    recent = []
     const old = wire
     wire = connect()
     old.destroy()
@@ -752,7 +802,7 @@ app.whenReady().then(() => {
     }, SHELL.showCapMs)
     w.webContents.on('did-finish-load', () => {
       loaded = true
-      for (const f of early.splice(0)) w.webContents.send('aio:wire', f)
+      for (const f of early.splice(0)) toPage(f)
       tell({ t: 'window', state: 'loaded' })
       if (arg('smoke') === '1' && !smoked) {
         smoked = true

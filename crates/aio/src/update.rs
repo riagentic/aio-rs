@@ -1,6 +1,6 @@
 //! Updates, the verifiable part: release manifests, their Ed25519
 //! signatures and key rosters, versions, the data gate, and the app-facing
-//! `updates` cell ([`Updates`], on a [`Runtime`]). No network here:
+//! `updates` cell (`Updates`, on a [`Runtime`]; feature `updates`). No network here:
 //! `aio_shell::update` fetches and installs, `ax release` signs.
 //!
 //! Trust is built in: the keys in the app's `aio.toml` (`[updates] keys`),
@@ -18,12 +18,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 mod cell;
-#[cfg(feature = "server")]
-pub(crate) use cell::beside;
-pub use cell::{
-    Blocked, Data, Found, Offer, Phase, ProgressOf, Ready, Runtime, Step, Stub, Updates, UpdatesCalls, Veto, can_apply,
-    install, installed, share,
-};
+#[cfg(feature = "updates")]
+mod updates;
+pub use cell::{Blocked, Data, Found, Offer, Phase, ProgressOf, Ready, Runtime, Step, Stub, can_apply, install, installed, veto};
+#[cfg(all(feature = "updates", feature = "server"))]
+pub(crate) use updates::beside;
+#[cfg(feature = "updates")]
+pub use updates::{Updates, UpdatesCalls, share};
 
 /// The manifest format this build reads.
 pub const FORMAT: u32 = 1;

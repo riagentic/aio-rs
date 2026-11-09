@@ -318,6 +318,29 @@ impl Nap {
         }));
     }
 
+    /// Real I/O under a timeout: a thread answers after 50 ms.
+    pub fn ask_device(&mut self, cx: &Cx) {
+        cx.run(Effect::new("device", |h: Handle<Nap>| async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                _ = tx.send(());
+            });
+            let out = tokio::time::timeout(Duration::from_secs(2), rx).await;
+            _ = h.woke(if out.is_ok() { "answered" } else { "timed out" }.into());
+        }));
+    }
+
+    /// Work left running on its own: a thread calls back after 50 ms.
+    pub fn later_on_a_thread(&mut self, cx: &Cx) {
+        cx.run(Effect::new("thread", |h: Handle<Nap>| async move {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                _ = h.woke("from the thread".into());
+            });
+        }));
+    }
+
     pub fn mark(&mut self, cx: &Cx) {
         cx.run(Effect::new("mark", |_: Handle<Nap>| async {
             MARKS.with(|m| m.borrow_mut().push(tokio::time::Instant::now()));
@@ -338,6 +361,36 @@ fn timers_in_effects_run_on_virtual_time_in_their_order() {
     // Under the 10 s nap: never waited for. (The paused clock steps 1 ms at
     // a time; a slow machine takes seconds for these 30 s, a macOS VM 2 s.)
     assert!(real.elapsed() < Duration::from_secs(10), "took real time: {:?}", real.elapsed());
+}
+
+/// aio's `t.settle(ms)` on real timers: virtual time jumps to a timeout
+/// while real I/O is pending; the wall clock gives the I/O its time.
+#[test]
+fn real_io_under_a_timeout_needs_real_time() {
+    let mut t = TestCells::new();
+    let nap = t.cell::<Nap>();
+    nap.ask_device().unwrap();
+    t.settle();
+    expect(&nap, "virtual time ran out first", |s| s.woke == ["timed out"]);
+
+    let mut t = TestCells::real_time();
+    let nap = t.cell::<Nap>();
+    nap.ask_device().unwrap();
+    t.settle();
+    expect(&nap, "the device answered in time", |s| s.woke == ["answered"]);
+    // Schedules still move only with `advance`.
+    t.advance(60_000);
+}
+
+#[test]
+fn settle_for_waits_for_work_an_effect_left_running() {
+    let mut t = TestCells::real_time();
+    let nap = t.cell::<Nap>();
+    nap.later_on_a_thread().unwrap();
+    t.settle();
+    expect(&nap, "settle sees no running effect", |s| s.woke.is_empty());
+    t.settle_for(500);
+    expect(&nap, "the thread called back", |s| s.woke == ["from the thread"]);
 }
 
 #[test]
@@ -767,6 +820,54 @@ fn the_last_call_s_effects_are_its_own() {
     t.settle();
 }
 
+#[cell]
+pub struct Timer {
+    pub on: bool,
+}
+
+#[methods]
+impl Timer {
+    pub fn begin(&mut self, cx: &Cx) -> Result {
+        self.on = true;
+        cx.every("tick", 1000, "tick", ())?;
+        cx.tell(aio::tell::Tell::notify("Timer", "started"))?;
+        cx.run(Effect::new("sound", |_: Handle<Timer>| async {}));
+        Ok(())
+    }
+
+    pub fn halt(&mut self, cx: &Cx) {
+        self.on = false;
+        cx.cancel("tick");
+        cx.abort("sound");
+    }
+
+    pub fn tick(&mut self) {}
+}
+
+/// aio's `t.getEffects()`: what the last call asked for, as values.
+#[test]
+fn the_last_call_s_effects_schedules_and_tells_are_values() {
+    use aio::Plan;
+    use aio::testing::{AskedFor, HeldEffect};
+    let mut t = TestCells::new();
+    let timer = t.cell::<Timer>();
+    timer.begin().unwrap();
+    let asked = t.last_asked();
+    assert_eq!(
+        asked.iter().map(|a| (a.is_schedule(), a.is_tell(), a.is_effect())).collect::<Vec<_>>(),
+        [(true, false, false), (false, true, false), (false, false, true)]
+    );
+    let AskedFor::Schedule(Plan::Set { key, every, method, .. }) = &asked[0] else { panic!("{asked:?}") };
+    assert_eq!((key.as_str(), *every, method.as_str()), ("tick", Some(1000), "tick"));
+    assert_eq!(asked[1], AskedFor::Tell(aio::tell::Tell::notify("Timer", "started")));
+    let AskedFor::Effect(HeldEffect { cell, key, .. }) = &asked[2] else { panic!("{asked:?}") };
+    assert_eq!((*cell, key.as_str()), ("Timer", "sound"));
+    timer.halt().unwrap();
+    assert_eq!(t.last_asked(), [AskedFor::Schedule(Plan::Cancel("tick".into())), AskedFor::Abort("sound".into())]);
+    assert!(t.last_asked().iter().all(|a| !a.is_effect()) && t.last_asked()[1].is_abort());
+    t.settle();
+}
+
 /// aio's `t.init(seed)` / `t.destroy()` mid-test.
 #[test]
 fn a_cell_is_reset_mid_test() {
@@ -795,6 +896,33 @@ fn a_fuzz_finds_the_methods_and_makes_their_arguments() {
     assert_eq!(again.fuzz_methods(&b, 5, 300, &["audit"], |_| true), run, "the same seed is the same run");
     let e = aio::testing::fails(|| _ = again.fuzz_methods(&b, 5, 1, &["audt"], |_| true));
     assert!(e.contains("Account has no method audt"), "{e}");
+}
+
+/// aio's `t.randomActions(n)`: a fresh seed each run, said, and replayed
+/// by `fuzz_methods`.
+#[test]
+fn random_calls_pick_a_fresh_seed_that_replays() {
+    let mut t = TestCells::new();
+    let a = t.cell::<Account>();
+    // Under 13 moves: the audit's bug stays out of this one.
+    let (seed, run) = t.random_calls(&a, 12);
+    let (other, _) = TestCells::new().random_calls(&TestCells::new().cell::<Account>(), 1);
+    assert_ne!(seed, other, "a fresh seed each run");
+    let mut again = TestCells::new();
+    let b = again.cell::<Account>();
+    assert_eq!(again.fuzz_methods(&b, seed, 12, &[], |_| true), run, "its seed replays it");
+}
+
+#[test]
+fn random_calls_find_the_panic_naming_the_seed() {
+    let caught = (0..500).find_map(|_| {
+        let mut t = TestCells::new();
+        let a = t.cell::<Account>();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| _ = t.random_calls(&a, 40))).err()
+    });
+    let e = caught.expect("a run found the panic");
+    let e = e.downcast_ref::<String>().expect("its message");
+    assert!(e.starts_with("fuzz seed ") && e.contains("account.audit panicked: unlucky audit"), "{e}");
 }
 
 #[test]

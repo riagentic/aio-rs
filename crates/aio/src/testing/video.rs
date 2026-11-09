@@ -22,6 +22,25 @@ pub(crate) fn asked(video: Option<&str>, pace: Option<&str>, name: &str) -> Opti
     Some((out, Duration::from_millis(ms)))
 }
 
+/// The `prefers-color-scheme` a test's page is drawn in (pure): the test's
+/// own (`dark`), unless a video is asked (`video`) in a scheme
+/// (`AIO_TEST_VIDEO_SCHEME`, aio's `AIO_VIDEO_SCHEME`: `light` or `dark`).
+pub(crate) fn scheme(dark: bool, video: Option<&str>, asked: Option<&str>) -> &'static str {
+    match (video.filter(|v| !v.is_empty()), asked.map(str::trim)) {
+        (Some(_), Some("dark")) => "dark",
+        (Some(_), Some("light")) => "light",
+        _ if dark => "dark",
+        _ => "light",
+    }
+}
+
+/// [`scheme`], as this process's environment asks.
+pub(crate) fn scheme_asked(dark: bool) -> &'static str {
+    let env = |k: &str| std::env::var(k).ok();
+    let asked = env("AIO_TEST_VIDEO_SCHEME").or_else(|| env("AIO_VIDEO_SCHEME"));
+    scheme(dark, env("AIO_TEST_VIDEO").as_deref(), asked.as_deref())
+}
+
 /// A test's name as a file name: `ui::adds_a_todo` → `ui-adds_a_todo`.
 fn file_name(name: &str) -> String {
     let s = name.replace("::", "-");
@@ -93,6 +112,15 @@ mod tests {
         );
         assert_eq!(asked(Some("demo.webm"), Some("200"), "t"), Some((PathBuf::from("demo.webm"), ms(200))));
         assert_eq!(asked(Some("v"), Some("x"), "t").unwrap().1, ms(800), "a bad pace is the default");
+    }
+
+    #[test]
+    fn a_video_is_drawn_in_the_scheme_asked_else_the_tests_own() {
+        assert_eq!(scheme(false, Some("v"), Some("dark")), "dark", "aio's AIO_VIDEO_SCHEME");
+        assert_eq!(scheme(true, Some("v"), Some(" light ")), "light");
+        assert_eq!(scheme(true, None, Some("light")), "dark", "no video: the test's own");
+        assert_eq!(scheme(false, Some(""), Some("dark")), "light");
+        assert_eq!(scheme(true, Some("v"), Some("sepia")), "dark", "a scheme no page has: the test's own");
     }
 
     fn swatch() -> crate::ui::View {

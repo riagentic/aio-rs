@@ -49,18 +49,36 @@ pub(crate) const PARTS_WAITING: usize = 64;
 /// The biggest piece `cx.part` sends (aio's 1 MiB).
 pub(crate) const PART_MAX: usize = 1 << 20;
 
+thread_local!(static CUT: std::cell::RefCell<Option<Rejected>> = const { std::cell::RefCell::new(None) });
+
+/// Run `f` (which drops calls' replies) with `why` as their answer: an
+/// effect past its timeout cuts its call off with `EFFECT_TIMEOUT`.
+pub(crate) fn cut_off(why: Rejected, f: impl FnOnce()) {
+    CUT.set(Some(why));
+    f();
+    CUT.set(None);
+}
+
 impl Drop for Slot {
     fn drop(&mut self) {
         if let Some(f) = self.gone.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
             f();
         }
-        let why = format!(
-            "{}: ended before it answered (its await was aborted, superseded, cut off after the call ceiling, \
-             or the app stopped)",
-            self.method
-        );
+        let why = CUT.with_borrow(Clone::clone).unwrap_or_else(|| {
+            // Dropped as its effect unwinds: the effect panicked (aio's EFFECT_ERROR).
+            if std::thread::panicking() {
+                let why = format!("{}: its effect panicked before it answered", self.method);
+                return Rejected::coded(crate::Code::EffectError, why);
+            }
+            let why = format!(
+                "{}: ended before it answered (its await was aborted, superseded, cut off after the call ceiling, \
+                 or the app stopped)",
+                self.method
+            );
+            Rejected::coded(crate::Code::DispatchAborted, why)
+        });
         for tx in std::mem::take(&mut *self.to.lock().unwrap_or_else(|e| e.into_inner())) {
-            _ = tx.send(Err(Rejected::coded(crate::Code::DispatchAborted, why.clone())));
+            _ = tx.send(Err(why.clone()));
         }
     }
 }
@@ -233,7 +251,7 @@ impl Cache {
         }
         self.0.retain(|_, (at, ms, _)| fresh(*at, *ms, now));
         let mut old: Vec<(i64, String)> = self.0.iter().map(|(k, (at, _, _))| (*at, k.clone())).collect();
-        old.sort();
+        crate::sort_by(&mut old, Ord::cmp);
         let over = old.len().saturating_sub(Self::MAX);
         old.into_iter().take(over).for_each(|(_, k)| _ = self.0.remove(&k));
     }

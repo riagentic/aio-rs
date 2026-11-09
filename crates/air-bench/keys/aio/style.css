@@ -1,0 +1,4 @@
+body{margin:0;font:13px sans-serif}#nav{display:flex;gap:8px;height:100vh;outline:none}
+.panel{flex:1;overflow:auto}.row{display:flex;gap:8px;padding:2px 6px;transition:none}
+.row[data-cursor]{background:#36c;color:#fff}.name{flex:1}.neg{color:#c33}.pos{color:#3a3}
+.tag{width:40px;opacity:.7}

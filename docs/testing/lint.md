@@ -70,6 +70,17 @@ ax lint 0.1.0 · notes
 `✓` lines are what passed: the cells found, each `aio.toml` that parses,
 "all N cells are tested".
 
+A finding a flag fixes ends in `[fixable: --safe-fix]` (clippy has a
+machine-applicable fix) or `[fixable: --fix]` (the older layout), aio's
+`[fixable]`, and the summary counts them under the command:
+
+```text
+  ⚠ warn src/lib.rs:3  [rustc] unused import: `std::fmt`  [fixable: --safe-fix]
+      fix: see unused_imports
+  …
+  1 finding fixable: ax lint --safe-fix
+```
+
 ### JSON
 
 `--json` prints aio's shape, so CI tools written for `aiol` read it:
@@ -93,7 +104,8 @@ ax lint 0.1.0 · notes
 }
 ```
 
-`file`, `line` and `fix` are left out when a finding has none.
+`file`, `line`, `fix` and `fixable` (`"--safe-fix"`, `"--fix"`) are left
+out when a finding has none.
 
 ## What it checks
 
@@ -131,6 +143,20 @@ Each finding has an area, in brackets in the report.
 A method runs again on replay, sync and time travel: whatever it reads
 from the world must come from the call ([Methods do no
 I/O](../state/cells.md#methods-do-no-io)).
+
+### `perf`
+
+| Finding | Level |
+|---|---|
+| blocking std I/O in async code (an `async fn`, an `async` block or closure): `std::fs`, `File`, `OpenOptions`, `std::net` sockets, `thread::sleep`, `ureq`, `reqwest::blocking`, by full path or through a `use std::…` | warn: use the async one (`tokio::fs`, `tokio::time::sleep`), or `aio::effect::blocking(…)` |
+| a crate (a folder with a `Cargo.toml`) of more than 15 000 lines of Rust in its `src`, tests left out | hint, at its `Cargo.toml`: `ax dev` recompiles all of it for an edit anywhere in it (~1 s per 15 000 lines); keep its views in page crates (`ax add <app> page <name>`) |
+
+aio's sync-I/O hint: an effect that blocks holds the runtime thread, so
+every effect and call behind it waits. A plain closure's body is left
+alone (`spawn_blocking(|| …)` is where blocking work goes). aio's other
+perf hints are measured here instead: render cost with
+`TestUi::components` and `ax components`, a method's time with `[perf]`
+budgets.
 
 ### `hooks`
 
@@ -178,6 +204,7 @@ name has no [auto name](ui.md#auto-names) either.
 | `testing` | tests that use `aio::testing` with no manifest giving them aio-rs's `testing` feature (its own dependency, or `workspace = true` on a `[workspace.dependencies]` aio-rs, renamed or not) | error |
 | `testing` | a `#[test]` that checks nothing: no assertion, `?`, `unwrap`/`expect` or harness wait in it (`no-assertions`; `#[should_panic]` is a check) | warn |
 | `testing` | `assert_eq!(x, x)`, `assert_ne!(x, x)`: a thing compared with itself (`self-comparison`) | warn |
+| `css` | a class two of the app's stylesheets define at their top level (`.track { … }`) with one property set to two values: whichever loads last wins, silently (aio's `aiol` styles check; `:hover` and longer selectors, rules inside `@media`, custom properties and a generated sheet starting `/*!` are left alone) | warn |
 | `config` | an `aio.toml` that doesn't parse or check | error |
 | `migrate` | an older layout: a launcher `build.rs`, `aio::config!()?`, renamed paths, an aio-rs build-dependency, the `video` feature (`testing` brings it) | warn or error (`--fix` moves it) |
 | `scan` | a `.rs` file that doesn't parse, a text file over 1 MiB (not checked) | warn, hint |
@@ -263,9 +290,8 @@ go red. Break the line it covers once, by hand, and watch it fail.
 | aio | aio-rs |
 |---|---|
 | `aiol` checks of types, imports, the client/server split, state shapes, effects dropped | compile errors: nothing to lint |
-| perf hints (`useAio()` over direct reads, sync I/O in a cell) | the `cells` I/O errors; render cost is measured with `TestUi::components` and `ax components` |
+| perf hints: `useAio()` over direct reads | render cost measured with `TestUi::components` and `ax components` (sync I/O: the `perf` warning) |
 | `--safe-fix` of `deno.json` config, imports and removed spellings | `--safe-fix` applies clippy's fixes; `--fix` moves an older layout |
-| `[fixable]` marks per finding | none: `--safe-fix` and `--fix` say what they did |
 
 ## API
 

@@ -37,6 +37,8 @@ native! {
     #[cfg(feature = "tls")]
     pub mod discovery;
     pub mod door;
+    #[cfg(feature = "server")]
+    mod doorstep;
     pub mod feedback;
     #[cfg(feature = "server")]
     pub mod fns;
@@ -59,6 +61,8 @@ native! {
     pub mod peer;
     pub mod perf;
     pub mod plugin;
+    #[cfg(feature = "server")]
+    mod poll;
     pub mod process;
     pub mod report;
     pub mod security;
@@ -92,7 +96,7 @@ pub mod compat;
 #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub mod held;
 mod hidden;
-#[cfg(any(feature = "server", all(feature = "web", target_arch = "wasm32")))]
+#[cfg(any(feature = "server", feature = "kit", all(feature = "web", target_arch = "wasm32")))]
 mod mux;
 pub use hidden::Hidden;
 pub mod cron;
@@ -231,6 +235,20 @@ pub fn uuid_v7() -> Uuid {
     Uuid::from_u128(*last)
 }
 
+/// `v` sorted by `cmp`, stably, through the one sort every caller shares (a
+/// sort of `u32` positions): each element type's own sort is ~3 KB of a web
+/// build's code.
+pub(crate) fn sort_by<T>(v: &mut Vec<T>, cmp: impl Fn(&T, &T) -> std::cmp::Ordering) {
+    if v.len() < 2 {
+        return;
+    }
+    let mut order: Vec<u32> = (0..v.len() as u32).collect();
+    let by: &mut dyn FnMut(&u32, &u32) -> std::cmp::Ordering = &mut |a, b| cmp(&v[*a as usize], &v[*b as usize]);
+    order.sort_by(by);
+    let mut old: Vec<Option<T>> = std::mem::take(v).into_iter().map(Some).collect();
+    v.extend(order.iter().filter_map(|&i| old[i as usize].take()));
+}
+
 /// What this build can't do: aio's `feature` does it, and the build left it out.
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "tls")))]
 pub(crate) fn left_out(feature: &str, what: &str) -> std::io::Error {
@@ -292,7 +310,9 @@ pub struct Transaction {
 /// (`ACCESS_DENIED`) across versions; new ones may be added, and one this
 /// build doesn't know (a newer server's) is kept as [`Code::Other`]. Its
 /// prefix says the layer, as aio's: `REDUCE_` a method, `INIT_` its start
-/// hook, `QUEUE_`/`DISPATCH_` the calls' way in, `PERSIST_` the store.
+/// hook, `DESTROY_` its stop hook, `EFFECT_` an async call's effect,
+/// `HOOK_` a reaction, `QUEUE_`/`DISPATCH_` the calls' way in, `PERSIST_`
+/// the store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Code {
@@ -319,11 +339,21 @@ pub enum Code {
     DispatchLoop,
     /// The store could not write the call.
     PersistError,
+    /// An async call's effect panicked before it answered.
+    EffectError,
+    /// An async call's effect ran past its timeout (the call ceiling, or
+    /// `Effect::timeout`) and was cut off.
+    EffectTimeout,
+    /// A reaction to another cell's call failed (aio's hooks:
+    /// `onAction`, `onEffect`); said on the bus, never a caller's answer.
+    HookError,
+    /// An `#[on_stop]` hook refused or panicked.
+    DestroyError,
     /// A code this build doesn't know, verbatim (a newer server's).
     Other(String),
 }
 
-const CODES: [(Code, &str); 11] = [
+const CODES: [(Code, &str); 15] = [
     (Code::AccessDenied, "ACCESS_DENIED"),
     (Code::ActionRefused, "ACTION_REFUSED"),
     (Code::ConnectionLost, "CONNECTION_LOST"),
@@ -335,6 +365,10 @@ const CODES: [(Code, &str); 11] = [
     (Code::DispatchAborted, "DISPATCH_ABORTED"),
     (Code::DispatchLoop, "DISPATCH_LOOP"),
     (Code::PersistError, "PERSIST_ERROR"),
+    (Code::EffectError, "EFFECT_ERROR"),
+    (Code::EffectTimeout, "EFFECT_TIMEOUT"),
+    (Code::HookError, "HOOK_ERROR"),
+    (Code::DestroyError, "DESTROY_ERROR"),
 ];
 
 impl Code {
@@ -684,6 +718,52 @@ pub fn visible<S, M>(f: impl Visible<S, M>, s: &S, who: &Caller) -> S {
     f.show(s, who)
 }
 
+type Shown = std::sync::Arc<dyn Fn(&str, Value, &Caller) -> Value + Send + Sync>;
+
+static VISIBLE: std::sync::RwLock<Option<Shown>> = std::sync::RwLock::new(None);
+
+/// The app's `visible` for every cell without its own `#[cell(visible = f)]`
+/// (aio's `cellDefaults.visible`): `f(cell, view, viewer)` gets what a
+/// client would see of the cell (its `#[server]` fields already out) and
+/// returns what it may see. A field it leaves out reaches the client as its
+/// default, so the client's copy still reads; one that panics shows the
+/// cell's default state (fail closed). A second call replaces the first.
+pub fn visible_by_default(f: impl Fn(&str, Value, &Caller) -> Value + Send + Sync + 'static) {
+    *VISIBLE.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+}
+
+/// Is there a [`visible_by_default`] for cells without their own `visible`?
+pub(crate) fn screened<T: CellData>() -> bool {
+    T::SCREENED || VISIBLE.read().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+/// What `viewer` may see of `st`: its own `visible`, else the app's
+/// [`visible_by_default`].
+pub(crate) fn shown<T: CellData>(st: &T, viewer: &Caller) -> Value {
+    let view = st.project(viewer);
+    let Some(f) = VISIBLE.read().unwrap_or_else(|e| e.into_inner()).clone().filter(|_| !T::SCREENED) else {
+        return view;
+    };
+    let keys: Vec<String> = view.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let shown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(T::ID, view, viewer)));
+    let mut shown = shown.unwrap_or_else(|_| {
+        eprintln!("[aio] the visible_by_default hook panicked on {}: its default state is shown", T::ID);
+        Value::Null
+    });
+    if !shown.is_object() {
+        shown = Value::Object(Default::default());
+    }
+    let blank = serde_json::to_value(T::default()).unwrap_or(Value::Null);
+    if let Some(m) = shown.as_object_mut() {
+        for k in keys {
+            if !m.contains_key(&k) {
+                m.insert(k.clone(), blank[&k].clone());
+            }
+        }
+    }
+    shown
+}
+
 /// A schedule a method declares (`#[every("5m")]`, `#[cron("0 9 * * 1")]`,
 /// aio's `schedules:`): armed whenever the cell goes live, under the key
 /// `@<method>`; one no longer declared is removed. `skip_if_running`: a
@@ -874,6 +954,35 @@ pub struct Call<'a> {
     pub by: &'a By,
     /// The network caller's role (see [`Cx::role`]).
     pub role: Option<&'a str>,
+    /// The cell's state the call runs on: read it with [`Call::state`].
+    pub state: &'a dyn std::any::Any,
+    /// Where a network call came from (`None`: the app's own, a tool's).
+    pub request: Option<&'a Request>,
+}
+
+impl Call<'_> {
+    /// The cell's state, as its type `T` (`None`: another cell's call).
+    pub fn state<T: Cell>(&self) -> Option<&T> {
+        self.state.downcast_ref()
+    }
+}
+
+/// Where a network call came from (aio's request in `beforeReduce`): the
+/// client's address (the TCP peer, or a trusted proxy's last hop) and the
+/// headers its link opened with, its credentials (`authorization`,
+/// `cookie`) left out. Never recorded: replay doesn't ask the hooks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Request {
+    pub ip: Option<std::net::IpAddr>,
+    /// Each header as `(name, value)`, the name lower case.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Request {
+    /// The first value of header `name` (any case).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
 }
 
 type Before = std::sync::Arc<dyn Fn(&Call) -> Result + Send + Sync>;
@@ -884,7 +993,8 @@ static BEFORE: std::sync::RwLock<Option<Before>> = std::sync::RwLock::new(None);
 /// an `Err` refuses the call, said to its caller, and nothing runs or is
 /// saved; one that panics refuses too (fail closed). Replay never asks it:
 /// what it let in is in the log. It runs while the cell is locked: decide
-/// from the call alone, never call a cell from it.
+/// from the call, the state it runs on ([`Call::state`]) and where it came
+/// from ([`Call::request`]), never call a cell from it.
 pub fn before_call(f: impl Fn(&Call) -> Result + Send + Sync + 'static) {
     *BEFORE.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
@@ -1047,6 +1157,8 @@ pub fn shutdown(budget: std::time::Duration) -> Vec<String> {
     cut.extend(sync::flush_saves(left()).into_iter().map(|f| format!("the saved copy {}", f.display())));
     // Its doors: nothing is served past here.
     ipc::unlink_all();
+    #[cfg(feature = "compat")]
+    compat::local::remove_record();
     // Last: a program the app started and never ended would outlive it.
     process::reap();
     cut
@@ -1148,6 +1260,16 @@ pub(crate) fn copy_of<T: CellData>(view: Value) -> serde_json::Result<T> {
     Ok(t)
 }
 
+/// The state a copy that holds `paths` of its cell (empty: all of it) makes
+/// of the server's `view`: the parts it doesn't hold are the cell's defaults.
+#[cfg(any(feature = "server", target_arch = "wasm32"))]
+pub(crate) fn held<T: CellData>(paths: &[String], view: &Value) -> serde_json::Result<T> {
+    match paths.is_empty() {
+        true => copy_of(view.clone()),
+        false => copy_of(filter::fill(view, &serde_json::to_value(T::default())?, paths)),
+    }
+}
+
 #[doc(hidden)]
 pub fn typed<R: DeserializeOwned>(r: Result<Value>) -> Result<R> {
     serde_json::from_value(r?).map_err(|e| Rejected::new(format!("bad result: {e}")))
@@ -1207,5 +1329,18 @@ mod tests {
         assert!(s.starts_with("REDUCE_ERROR: notes.add panicked: xxx") && s.chars().count() == 160, "{s}");
         assert_eq!(error_summary(&Rejected::new("over budget. Try later.\nmore")), "over budget.");
         assert_eq!(Code::ActionRefused.as_str(), "ACTION_REFUSED");
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    #[test]
+    fn sort_by_is_stable_and_keeps_every_element() {
+        let mut v = vec![(2, 'a'), (1, 'b'), (2, 'c'), (0, 'd'), (1, 'e')];
+        super::sort_by(&mut v, |a, b| a.0.cmp(&b.0));
+        assert_eq!(v, [(0, 'd'), (1, 'b'), (1, 'e'), (2, 'a'), (2, 'c')]);
+        let mut one = vec![String::from("x")];
+        super::sort_by(&mut one, Ord::cmp);
+        assert_eq!(one, ["x"]);
     }
 }

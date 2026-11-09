@@ -1,10 +1,13 @@
 //! App-wide state in a `static`, one per app instance (per mounted
 //! [`Root`](crate::Root), so per test): made on first use, under the root
 //! (its context is the root's), ended with it.
-use crate::reactive::{Memo, ReadGuard, Signal, WriteGuard, current_root, detached, memo_now, with_owner};
+use crate::reactive::{
+    Mark, Memo, ReadGuard, Signal, WriteGuard, current_root, detached, fresh, memo_now, recorded, replay, with_owner,
+};
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::rc::Rc;
 
 /// Each root's globals (by root, then by the static: its name, else its address).
@@ -174,5 +177,76 @@ impl<T: PartialEq + 'static> GlobalMemo<T> {
 impl<T: PartialEq + std::fmt::Display + 'static> std::fmt::Display for GlobalMemo<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.memo().fmt(f)
+    }
+}
+
+/// A cache of values made from state, by key, shared by every view that
+/// asks (aio's `trackedMemo`): `static SHOWN: TrackedMemo<String, Vec<Row>> =
+/// TrackedMemo::new(|q| ROWS.with(|r| r.iter().filter(|r| r.name.contains(q.as_str())).cloned().collect()));`
+/// then `SHOWN.get(&q)` in a hole. A hit subscribes the reader to what
+/// making the value read, as a miss does, and a value whose reads changed
+/// since is made again: no dependency list, no stale hit. One cache per app
+/// instance; [`max`](Self::max) bounds it (the least recently used goes).
+pub struct TrackedMemo<K: 'static, V: 'static> {
+    f: fn(&K) -> V,
+    max: usize,
+}
+
+/// A [`TrackedMemo`]'s entries: by key, the value, what made it read, its last use.
+struct Entries<K, V> {
+    map: HashMap<K, (V, Vec<Mark>, u64)>,
+    uses: u64,
+}
+
+impl<K: Hash + Eq + Clone + 'static, V: Clone + 'static> TrackedMemo<K, V> {
+    /// Unbounded.
+    pub const fn new(f: fn(&K) -> V) -> Self {
+        Self { f, max: 0 }
+    }
+
+    /// At most `max` entries (0: unbounded).
+    pub const fn max(self, max: usize) -> Self {
+        Self { max, ..self }
+    }
+
+    fn entries(&self) -> Rc<RefCell<Entries<K, V>>> {
+        get_or(Key::At(self as *const Self as usize), || {
+            Rc::new(RefCell::new(Entries { map: HashMap::new(), uses: 0 }))
+        })
+    }
+
+    /// The value for `k`, made now unless a fresh one is kept; the running
+    /// code follows what making it read either way.
+    pub fn get(&self, k: &K) -> V {
+        let cache = self.entries();
+        {
+            let mut c = cache.borrow_mut();
+            c.uses += 1;
+            let now = c.uses;
+            if let Some((v, marks, used)) = c.map.get_mut(k).filter(|e| fresh(&e.1)) {
+                *used = now;
+                replay(marks);
+                return v.clone();
+            }
+        }
+        let (v, marks) = recorded(|| (self.f)(k));
+        replay(&marks);
+        let mut c = cache.borrow_mut();
+        let now = c.uses;
+        c.map.insert(k.clone(), (v.clone(), marks, now));
+        if self.max > 0 && c.map.len() > self.max {
+            let oldest = c.map.iter().min_by_key(|(_, e)| e.2).map(|(k, _)| k.clone());
+            oldest.map(|o| c.map.remove(&o));
+        }
+        v
+    }
+
+    /// How many values are kept now.
+    pub fn len(&self) -> usize {
+        self.entries().borrow().map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }

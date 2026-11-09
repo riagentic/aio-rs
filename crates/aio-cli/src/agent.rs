@@ -29,8 +29,8 @@ editing (this, then aio-rs's docs/README.md) · check → run → test · clean 
 2. NEVER take over the human's screen. Windows an agent opens go on a nested
    display (Xvfb/Xephyr), never the human's; ax build --smoke runs headless.
 3. NEVER script around ax. Assert: ax expect. Watch: ax state --watch (one
-   line per change, pushed). Every verb takes --json and exits 0 ok, 1 failed,
-   2 bad usage.
+   line per change, pushed). Every verb takes --json (a pipe gets it; --text
+   not) and exits 0 ok, 1 failed, 2 bad usage. New cell: ax add <app> cell <n>.
 4. LEARN BEFORE EDITING. aio-rs is Rust (views: aio::ui), not aio's TypeScript: guessed code
    compiles to the wrong thing or not at all. Read this, then the guide (docs/README.md
    in aio-rs: every part with examples that compile; a port from aio:
@@ -121,6 +121,9 @@ changed) · cargo check → ax dev <app> → tests",
   ax create sets it to the name, or --id, and refuses an installed app's;
   name, mode = standalone | client-server | client | server, version = \"M.m\":
   builds are M.m.<git commit count>, -dirty.<hash> while uncommitted).
+- A big app keeps its views by area in page crates (ax add <app> page <n>):
+  ax dev recompiles the edited crate alone (~0.5 s; one crate of 70 000
+  lines: ~5 s). ax lint hints past 15 000 lines in one crate.
 - main: let cfg = aio::config!();  (the nearest aio.toml, parsed and checked
   as the app builds: a mistake is a compile error; no build.rs)
   let aio_shell::Start::Run(dirs) = aio_shell::start(&cfg, aio::app_version!())?

@@ -267,12 +267,25 @@ async fn built_in_assets_are_served_at_their_paths_to_anyone() {
     assert_eq!(fetch(&addr, "GET", "/media/other.mp3", &[], "").await.0, 401, "only what is built in");
 }
 
+/// The JS client for other view libraries (`crates/aio/client`): served
+/// to anyone, as any library (what it reaches, `/ws`, asks the key).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_js_client_is_served_to_anyone() {
+    let addr = serve(Handle::memory(), Http::default()).await;
+    let (status, headers, body) = fetch(&addr, "GET", "/__aio/client.js", &[], "").await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: text/javascript"), "{headers}");
+    assert_eq!(body, include_str!("../client/index.js"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_open_app_needs_no_key_but_minting_a_pin_still_does() {
+    // Its own pairing: a PIN minted here never replaces another test's.
+    let pairing = std::sync::Arc::new(aio::pairing::Pairing::default());
     let opts = |open| aio::sync::Options {
         token: "secret".into(),
         http: routes(&Handle::memory()),
-        pairing: Some(aio::pairing::pairing()),
+        pairing: Some(pairing.clone()),
         open,
         ..Default::default()
     };
@@ -952,4 +965,49 @@ async fn a_socket_route_carries_binary_frames_per_kind() {
     let s = seen.lock().unwrap().clone();
     assert_eq!(s[..4].iter().map(|x| x.1).collect::<Vec<_>>(), [Seen::Next; 4], "interleaved kinds are no gap");
     assert_eq!(s[4], (2, Seen::Gap(1)));
+}
+
+/// A browser that holds no key opens the server: the page to pair it on,
+/// an installable web app; paired, the key's cookie opens the app.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_with_no_key_pairs_on_the_servers_page_and_lands_in_the_app() {
+    let pairing = std::sync::Arc::new(aio::pairing::Pairing::default());
+    let opts = aio::sync::Options {
+        token: "secret".into(),
+        http: routes(&Handle::memory()),
+        pairing: Some(pairing.clone()),
+        ..Default::default()
+    };
+    let addr = format!("127.0.0.1:{}", serve_opts("127.0.0.1:0", opts).await);
+    let nav = ("Sec-Fetch-Mode", "navigate");
+    let (status, head, body) = fetch(&addr, "GET", "/ok", &[nav], "").await;
+    assert_eq!(status, 401, "still unauthorized");
+    assert!(head.contains("content-type: text/html") && head.contains("frame-ancestors 'none'"), "{head}");
+    assert!(body.contains(r#"<link rel="manifest" href="/__aio/connect.webmanifest">"#), "{body}");
+    assert_eq!(fetch(&addr, "GET", "/ok", &[], "").await.2, "wrong or missing key", "a tool is told plainly");
+    let wrong = ("Authorization", "Bearer nope");
+    assert_eq!(
+        fetch(&addr, "GET", "/ok", &[nav, wrong], "").await.2,
+        "wrong or missing key",
+        "a wrong key is no pairing"
+    );
+    // Its files are public: a phone has nothing yet.
+    assert!(fetch(&addr, "GET", "/__aio/connect", &[], "").await.2.contains(r#"<script src="/__aio/connect.js">"#));
+    let (s, _, js) = fetch(&addr, "GET", "/__aio/connect.js", &[], "").await;
+    assert!(s == 200 && js.contains("/__aio/pair"), "{js}");
+    let m: serde_json::Value =
+        serde_json::from_str(&fetch(&addr, "GET", "/__aio/connect.webmanifest", &[], "").await.2).unwrap();
+    assert_eq!((m["start_url"].as_str(), m["name"].as_str()), (Some("/"), Some("hooks")));
+    let (_, head, _) = fetch(&addr, "GET", "/__aio/connect-sw.js", &[], "").await;
+    assert!(head.contains("service-worker-allowed: /"), "it may serve the app's pages offline: {head}");
+    let (s, _, png) = fetch_raw(&addr, "GET", "/__aio/connect.png", &[], "").await;
+    assert!(s == 200 && png.starts_with(b"\x89PNG"), "an icon for the Home Screen");
+    // What the page does: the code for the profile, then the key's link sets the cookie.
+    let pin = pairing.new_pin();
+    let (s, _, profile) = fetch(&addr, "POST", "/__aio/pair", &[JSON], &format!(r#"{{"pin":"{pin}"}}"#)).await;
+    let key = serde_json::from_str::<serde_json::Value>(&profile).unwrap()["key"].as_str().unwrap().to_string();
+    assert_eq!((s, key.as_str()), (200, "secret"));
+    let (s, head, _) = fetch(&addr, "GET", &format!("/ok?token={key}"), &[nav], "").await;
+    assert!(s == 200 && head.contains("set-cookie: aio_key_hooks=secret; path=/; httponly"), "{head}");
+    assert_eq!(fetch(&addr, "GET", "/ok", &[nav, ("Cookie", "aio_key_hooks=secret")], "").await.2, "fine");
 }

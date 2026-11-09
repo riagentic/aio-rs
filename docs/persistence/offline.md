@@ -395,7 +395,8 @@ assert_eq!(diff(&a, &b), [Op::Append { path: vec![Step::Key("reply".into())], va
   filtered by `visible` ([visibility](../state/visibility.md)). A patch is
   the diff of *that* view, so a change another user can't see sends this
   viewer nothing, and a change of role sends the new view whole.
-- One link carries one cell: a copy gets only the cell it follows. A
+- One link carries one cell: a copy gets only the cell it follows, or
+  only the parts of it it subscribed to ([path subscriptions](#path-subscriptions)). A
   server serves every shared cell on one `/ws` (`Http::cell`), and a
   client's links (one per cell, each naming its cell in its hello) share
   one socket.
@@ -411,8 +412,97 @@ assert_eq!(diff(&a, &b), [Op::Append { path: vec![Step::Key("reply".into())], va
   missed: it gets one patch to the newest view. One that stops reading
   for 10 s (`aio::sync::SEND_TIMEOUT`) is dropped and gets the whole view
   when it comes back.
+- **A screen that lags is sent less** (aio's render-staleness
+  backpressure). A copy whose views render it (`client!`'s `use_live`,
+  or `remote.rendered()` from a renderer of your own) tells its server
+  each second how far its screen lags behind what it took (`seen {ms}`),
+  as an aio page says in its `vitals-ping`. Past 100 ms its patches go
+  twice the window apart, past 300 ms four times (at least 50 ms each,
+  so a server that paces nothing still eases off); three reports under
+  100 ms in a row step it back. A person's change waits too, except the
+  copy's own calls, whose change goes with their reply. A copy that
+  nothing renders never says and is never slowed. Measured (release, a
+  price changed each 3 ms for 4 s beside a 5000-row catalog,
+  `tests/pace.rs`): a screen that keeps up gets 78 patches, each folding
+  12 changes, 10.7 KB; a frozen one gets 20, each folding 47, 2.8 KB, and
+  the process (server and copy) spends 256 ms of CPU against 405 ms when
+  the same copy never says.
 - `ax cost <app>` shows what each cell sent its clients: pushes, bytes a
   second, full resends, and its biggest keys (`--keys`).
+
+### Path subscriptions
+
+A copy may hold only some parts of its cell (aio's `subs`, finer: aio
+subscribes whole cells, aio-rs dot paths inside one). The server then
+sends it those parts, and only the patches under them:
+
+```rust
+use aio::prelude::*;
+use aio::sync::{Link, Remote};
+use std::time::Duration;
+
+#[cell(shared)]
+pub struct Shop {
+    pub items: Vec<String>,
+    pub log: Vec<String>,
+}
+
+#[methods]
+impl Shop {
+    #[client]
+    pub fn add(&mut self, item: String) -> Result {
+        self.log.push(format!("+{item}"));
+        self.items.push(item);
+        Ok(())
+    }
+}
+
+# fn main() {
+let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+rt.block_on(async {
+    let h = Handle::<Shop>::memory();
+    h.add("tea".into()).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let link = Link { addr: l.local_addr().unwrap().to_string(), token: "key".into(), root: None };
+    tokio::spawn(aio::sync::serve(h.clone(), l, "key".into()));
+    // From the first state on: the list, not the log.
+    let r = Remote::<Shop>::connect_paths(link, "ana", &["items"]).await.unwrap();
+    assert_eq!((r.state().items.len(), r.state().log.len()), (1, 0));
+    // Predicted where it holds; a part it doesn't hold stays as it was.
+    r.add("milk".into()).unwrap();
+    assert_eq!((r.state().items.len(), r.state().log.len()), (2, 0));
+    // Live: more of it (`&[]` or `&["*"]`: all of it again).
+    r.subscribe(&["items", "log"]).unwrap();
+    for _ in 0..300 {
+        if r.state().log.len() == 2 {
+            break;
+        }
+        aio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.state().log, ["+tea", "+milk"]);
+});
+# }
+```
+
+- The paths are dot paths into the state, as `persist(include)` names
+  them; one that meets a list keeps the whole list. 1 to 1024 of them,
+  each at most 256 bytes, no empty segment: anything else is refused
+  whole, saying why (aio's `subs` rules), and the copy keeps what it had.
+- What it doesn't hold reads as the cell's defaults.
+- Calls are still predicted, and shown in the parts it holds at once; a
+  guess is never shown in a part it doesn't hold. A call whose outcome in
+  its parts depends on a part it doesn't hold is predicted from the
+  defaults, then shown as the server's answer makes it (a refusal rolls
+  it back, as any).
+- The patches are diffs of the subscribed view, with its digest, so a
+  gap or a mismatch still takes the view again.
+- Kept across reconnects, and in a saved copy (`connect_saved`). The
+  wire stays as it was: an older server ignores the paths and sends the
+  whole cell, which the copy then holds as said (its first state says
+  what it understands: `can`), and an older copy is sent the whole cell.
+- An aio page keeps aio's meaning: a path inside a cell subscribes the
+  whole cell, which its views expect. A protocol-3 client that wants only
+  the paths says `subs {subs, exact: true}` (aio-rs's; aio never sends it).
 
 ### Shaping state for the wire
 
@@ -468,25 +558,26 @@ since its cursor ([wire](../migration/wire.md)).
   ([shown merged](#shown-merged-while-a-call-waits): `Text`, `Counter`,
   `SetAdd`, `Keys`, `SetRemove`). aio's hybrid logical clock has no
   counterpart, by design: the server puts every call in one order, so no
-  two clocks have to agree and a skewed one can't win. `Keys` merges each
+  two clocks have to agree and a skewed one can't win. Where an edit made
+  later should win over one made earlier but sent later (aio's `lww`), the
+  method compares `cx.made()`: when the call was made on its device,
+  bounded by the server's clock (5 minutes ahead at most) and kept with
+  the event for replay
+  (`the_later_made_edit_wins_where_a_method_asks_and_replays_the_same`). `Keys` merges each
   key on its own, where aio's `lww-per-key` keeps one clock per record.
   Every merge goes through a server, as in aio.
 - **A full queue refuses.** 500 waiting calls, as aio's `pendingCap`; a
   full queue refuses the new call unless `retention` lets an old one go,
   where aio drops the new op (`prune-failed`). Both keep the queue across
   a reload (aio in the page's storage, aio-rs on disk or in the browser's).
-- **No render-staleness backpressure.** aio slows a page whose paint
-  lags (its staleness multipliers); aio-rs paces every link
-  (`sync_interval_ms`), and a slow reader is sent the newest view once it
-  reads again.
-- **No path subscriptions, by design.** One link is one cell, so a copy
-  gets every patch of that cell: it predicts calls by running them, which
-  needs the whole cell. Two tools do the job better. `visible` sends each
-  viewer only what they may see, checked on the server, so less travels
-  without trusting the client to ask for less. And a part some screens
-  never read is its own cell (`#[cell(shared)]` each): its own link, its
-  own patches, its own `visible`, and still predicted, which a copy of
-  some paths could not be.
+- **Render-staleness backpressure as aio's**, its steps and thresholds
+  the same ([above](#what-travels-patches)), for aio pages (their
+  `vitals-ping {ms}`) and aio-rs copies (`seen {ms}`, said by the copy's
+  own clock off the UI thread, so a frozen screen still says it).
+- **Path subscriptions, finer than aio's**: dot paths inside a cell,
+  where aio's narrow to whole cells ([path
+  subscriptions](#path-subscriptions)); `visible` still decides what each
+  viewer may see first.
 - The sync wire is JSON; binary payloads go on a side channel
   ([transports](../clients/transports.md#binary-data)).
 
@@ -510,7 +601,7 @@ since its cursor ([wire](../migration/wire.md)).
 ## API
 
 `cargo doc -p aio-rs --no-deps --open`: `aio::sync` (`Remote`,
-`connect_saved`, `Link`, `Synced`, `PENDING_MAX`, `CALL_TIMEOUT`, `PING`,
+`connect_saved`, `connect_paths`, `subscribe`, `rendered`, `Link`, `Synced`, `PENDING_MAX`, `CALL_TIMEOUT`, `PING`,
 `DEAD`, `SEND_TIMEOUT`), `aio::Status`, `aio::Conn`, `aio::merge`
 (`text3`, `Merged`, `MAX_TOKENS`), `aio::patch` (`diff`, `apply`,
 `digest`, `Op`, `Step`, `APPEND_MIN`).

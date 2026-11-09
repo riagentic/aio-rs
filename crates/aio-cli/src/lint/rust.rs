@@ -136,7 +136,95 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
     }
     split_tests(&mut ast.items, f);
     secrets::tokens(rel, ast.to_token_stream(), &mut f.issues);
+    blocking(rel, text, &ast, &mut f.issues);
     Checks { file: rel, f, repeats: 0 }.visit_file(&ast);
+}
+
+/// Blocking std I/O in async code (aio's sync-I/O perf hint): the runtime
+/// thread waits on it, and every effect and call queued behind it.
+fn blocking(rel: &str, text: &str, ast: &syn::File, out: &mut Vec<Issue>) {
+    let mut b = Blocking { std: HashSet::new(), depth: 0, found: vec![] };
+    ast.items.iter().for_each(|i| {
+        if let Item::Use(u) = i {
+            std_names(&u.tree, false, &mut b.std)
+        }
+    });
+    b.visit_file(ast);
+    let lines: Vec<&str> = text.lines().collect();
+    for (path, line) in b.found.into_iter().filter(|(_, l)| !super::suppressed(&lines, l - 1, "perf")) {
+        let msg =
+            format!("`{path}` blocks in async code: the runtime thread waits, and every effect and call behind it");
+        let fix =
+            "use the async one (tokio::fs, tokio::time::sleep), or move it off the thread: aio::effect::blocking(…)";
+        out.push(Issue::new(Severity::Warn, "perf", msg, rel, line).fix(fix));
+    }
+}
+
+/// The names `use std::…` brings in (`fs`, `File`, `sleep`).
+fn std_names(t: &syn::UseTree, under_std: bool, out: &mut HashSet<String>) {
+    match t {
+        syn::UseTree::Path(p) => std_names(&p.tree, under_std || p.ident == "std", out),
+        syn::UseTree::Name(n) if under_std => _ = out.insert(n.ident.to_string()),
+        syn::UseTree::Rename(r) if under_std => _ = out.insert(r.rename.to_string()),
+        syn::UseTree::Group(g) => g.items.iter().for_each(|i| std_names(i, under_std, out)),
+        _ => {}
+    }
+}
+
+/// Is a path, from std (`std` or a name `use std::…` brought), one that
+/// blocks: a file, a socket, a sleep; or a blocking HTTP client (pure)?
+pub fn blocks(segs: &[String], std: &HashSet<String>) -> bool {
+    let first = segs.first().map_or("", String::as_str);
+    if first == "ureq" || (first == "reqwest" && segs.iter().any(|s| s == "blocking")) {
+        return true;
+    }
+    if first != "std" && !std.contains(first) {
+        return false;
+    }
+    match impure(segs) {
+        Some("file I/O") => true,
+        Some("network or process I/O") => !segs.iter().any(|s| s == "Command"),
+        Some("a thread") => segs.last().is_some_and(|s| s == "sleep"),
+        _ => segs.len() == 1 && first == "sleep",
+    }
+}
+
+/// Paths in async code ([`blocks`]); a plain closure's body is not async
+/// (`spawn_blocking(|| …)` is where blocking work goes).
+struct Blocking {
+    std: HashSet<String>,
+    depth: u32,
+    found: Vec<(String, usize)>,
+}
+
+impl Blocking {
+    fn within(&mut self, on: bool, f: impl FnOnce(&mut Self)) {
+        let was = self.depth;
+        self.depth = if on { was + 1 } else { 0 };
+        f(self);
+        self.depth = was;
+    }
+}
+
+impl<'ast> Visit<'ast> for Blocking {
+    fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
+        self.within(i.sig.asyncness.is_some(), |b| visit::visit_item_fn(b, i));
+    }
+    fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
+        self.within(i.sig.asyncness.is_some(), |b| visit::visit_impl_item_fn(b, i));
+    }
+    fn visit_expr_async(&mut self, e: &'ast syn::ExprAsync) {
+        self.within(true, |b| visit::visit_expr_async(b, e));
+    }
+    fn visit_expr_closure(&mut self, e: &'ast syn::ExprClosure) {
+        self.within(e.asyncness.is_some(), |b| visit::visit_expr_closure(b, e));
+    }
+    fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if self.depth > 0 && blocks(&segs, &self.std) {
+            self.found.push((segs.join("::"), p.span().start().line));
+        }
+    }
 }
 
 /// Tests that can pass without checking anything (aio's `check:vacuous`):

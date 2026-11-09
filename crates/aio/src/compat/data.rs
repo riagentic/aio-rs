@@ -859,21 +859,36 @@ pub(crate) enum Journaled {
     Skip { seq: i64, why: Option<String> },
 }
 
-/// What `<data>/journal` (aio's `journal.ts`, one JSON entry a line) holds past
-/// `wm` (the store's `__journal_wm`) for cell type `T`, in order; empty when
-/// it holds nothing of `T`'s cells. Refused when aio-rs can't replay it as
-/// aio would: a store older than what the journal already dropped
-/// (`journal.base`), an entry that isn't a plain call (a time-travel or
-/// write-set line, an action without a cell), or a tail mixing `T`'s calls
-/// with another cell's (only aio could then move the watermark). A torn line
-/// (a crash mid-append) is skipped, as aio does.
-pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<Journaled>, String> {
-    let text = match std::fs::read_to_string(data.join("journal")) {
+/// The journal aio keeps for the store at `store` (aio's `aio-boot.ts`): a
+/// store given by `dbPath` has `<dbPath>.journal` beside it; aio's own
+/// `<data>/state.db` has `<data>/journal`. Its sidecar is `<journal>.base`.
+pub(crate) fn journal_of(store: &Path) -> PathBuf {
+    let mut beside = store.as_os_str().to_owned();
+    beside.push(".journal");
+    let beside = PathBuf::from(beside);
+    match store.file_name() == Some("state.db".as_ref()) && !beside.exists() {
+        true => crate::paths::parent(store).join("journal"),
+        false => beside,
+    }
+}
+
+/// What `journal` (aio's `journal.ts`, one JSON entry a line; see
+/// [`journal_of`]) holds past `wm` (the store's `__journal_wm`) for cell type
+/// `T`, in order; empty when it holds nothing of `T`'s cells. Refused when
+/// aio-rs can't replay it as aio would: a store older than what the journal
+/// already dropped (`<journal>.base`), an entry that isn't a plain call (a
+/// time-travel or write-set line, an action without a cell), or a tail mixing
+/// `T`'s calls with another cell's (only aio could then move the watermark).
+/// A torn line (a crash mid-append) is skipped, as aio does.
+pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Vec<Journaled>, String> {
+    let text = match std::fs::read_to_string(journal) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(format!("{}/journal: {e}", data.display())),
+        Err(e) => return Err(format!("{}: {e}", journal.display())),
     };
-    if let Ok(b) = std::fs::read(data.join("journal.base"))
+    let mut base = journal.as_os_str().to_owned();
+    base.push(".base");
+    if let Ok(b) = std::fs::read(PathBuf::from(base))
         && let Some(dropped) = serde_json::from_slice::<Value>(&b).ok().and_then(|v| v["wm"].as_i64())
         && dropped > wm
     {
@@ -887,8 +902,8 @@ pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<J
             Ok(e) if e["type"] == "__aioBatch" => lines.extend(e["entries"].as_array().cloned().unwrap_or_default()),
             Ok(e) => lines.push(e),
             Err(_) => eprintln!(
-                "[aio] data: {}/journal line {} is torn (a crash mid-write): skipped, as aio does",
-                data.display(),
+                "[aio] data: {} line {} is torn (a crash mid-write): skipped, as aio does",
+                journal.display(),
                 i + 1
             ),
         }
@@ -904,6 +919,12 @@ pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<J
             }
             continue;
         };
+        // A call on a cell that saves nothing (aio's `unstored`), any cell's:
+        // no stored state to replay, never another cell's data to wait for.
+        if e["unstored"] == true {
+            ours.push(Journaled::Skip { seq, why: None });
+            continue;
+        }
         let Some(method) = method_of::<T>(cell, m) else {
             match m.starts_with("__") && (cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell)) || cell == "aio"
             {
@@ -914,15 +935,22 @@ pub(crate) fn journal_tail<T: crate::Cell>(data: &Path, wm: i64) -> Result<Vec<J
             }
             continue;
         };
-        let j = match (e["unstored"] == true, e["redacted"] == true) {
-            (true, _) => Journaled::Skip { seq, why: None },
-            (_, true) => Journaled::Skip {
+        let j = match e["redacted"] == true {
+            true => Journaled::Skip {
                 seq,
                 why: Some(format!(
                     "journal entry {seq} ({kind}): aio withheld its arguments (redactActions), so it can't run again: skipped, as aio does"
                 )),
             },
-            _ => Journaled::Call {
+            // Refused here, before anything is written: a write would tell aio
+            // the store moved past its journal, and aio would then drop it.
+            false if !T::METHODS.contains(&method.as_str()) => {
+                return Err(format!(
+                    "journal entry {seq} ({kind}) has no method `{method}` of {} to run it again",
+                    T::ID
+                ));
+            }
+            false => Journaled::Call {
                 seq,
                 method,
                 args: match &e["payload"]["args"] {

@@ -176,6 +176,7 @@ of aio-rs.
 | `outbound` | aio's HTTPS client, held to `[capabilities] network` |
 | `br` | Brotli answers beside gzip |
 | `imbl` | `aio::imbl` persistent collections |
+| `updates` | the `updates` cell (`aio::update::Updates`, `share`); aio-rs-shell's `updates` turns it on |
 | `web` | the app in the browser's page (`ax build --web`) |
 | `compat` | talking to aio (Deno) live: aio pages and tools on `/ws`, `aio::compat::AioLink`, `#[on_aio]` ([migration](../migration/README.md)); a ported app's `state.db` needs none of it |
 | `dev` | `ax dev`'s hot-patching (never in a release; `ax dev` turns it on) |
@@ -185,12 +186,12 @@ The templates: `app` uses `kit` (and `web` for its browser build),
 dev-dependency. A feature is added in the app's `Cargo.toml`:
 
 ```toml
-aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.3.0", features = ["kit", "net"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.4.0", features = ["kit", "net"] }
 ```
 
 `aio-rs-shell` has two features an app names: `dev` (what `ax dev` builds
 with: live `rsx!` reloads, Rust hot-patched) and `web` (`aio_shell::web`:
-the app's page served to browsers, its first paint rendered per viewer).
+the app's views served to browser tabs, `ax ui --browser`'s way).
 ax turns on two more from `aio.toml`: `updates` (the updater and the
 `updates` cell, ~0.5 MB) in every build of an app with an `[updates] url`,
 and `native-splash` in `ax build` for an app with a `[build.splash]`.

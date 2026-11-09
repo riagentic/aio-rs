@@ -1,7 +1,7 @@
 //! ax dev's own hot-patching (`src/hotpatch.rs`), end to end: a fixture
-//! workspace (a library and an app on aio-rs-hotpatch) built fat, run, and
-//! patched three times while it runs: twice in the app's crate, once in
-//! the library; the app prints the new values without a restart. On Linux
+//! workspace (a library, a library on it, and an app on aio-rs-hotpatch)
+//! built fat, run, and patched while it runs: in the app's crate and in
+//! the first library; the app prints the new values without a restart. On Linux
 //! x86_64 and Windows the patched code sees the running binary's
 //! thread-locals and statics (an `AtomicU32` and a `OnceLock` set before
 //! the patch), while a static the patch adds is its own; a static the patch
@@ -38,10 +38,11 @@ fn value() -> u32 {
     1
 }
 
-// The library's generic, compiled into this crate: a patch of the library
-// alone changes it only once this crate is built again (`finish`).
+// The library's generic, compiled into the library on it: a patch of the
+// library alone changes it only once that one is built again (`finish`).
+// Its copy here (of no value: 0) is this crate's or the library's.
 fn doubled() -> u32 {
-    fixture_lib::twice(1u8)
+    fixture_mid::doubled() + fixture_lib::twice(0u8)
 }
 
 // Read by each patch's own copy of this function: the app's thread-locals
@@ -140,7 +141,7 @@ fn main() {
         HITS.fetch_add(1, Ordering::Relaxed);
         let _ = NAME.set("app".to_string());
         let app = aio_hotpatch::HotFn::current(value).call(());
-        let lib = aio_hotpatch::HotFn::current(fixture_lib::value).call(());
+        let lib = aio_hotpatch::HotFn::current(fixture_mid::value).call(());
         let ticks = aio_hotpatch::HotFn::current(ticks).call(());
         let stats = aio_hotpatch::HotFn::current(stats).call(());
         let named = aio_hotpatch::HotFn::current(named).call(());
@@ -161,6 +162,11 @@ fn main() {
 
 const LIB: &str = "thread_local! {\n    pub static SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };\n}\n\npub fn twice<T: Into<u32>>(t: T) -> u32 {\n    t.into() * 2\n}\n\npub fn value() -> u32 {\n    10\n}\n";
 
+// The library on the first: a call of its function (the app's way to it,
+// linked from the running copy when only the first library is replayed)
+// and its generic, compiled in here.
+const MID: &str = "pub fn value() -> u32 {\n    fixture_lib::value()\n}\n\npub fn doubled() -> u32 {\n    fixture_lib::twice(1u8)\n}\n";
+
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
@@ -168,19 +174,25 @@ fn write(path: &Path, text: &str) {
 
 /// The fixture workspace in `dir`, its versions locked as aio's.
 fn fixture(dir: &Path) {
-    write(&dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\", \"lib\"]\nresolver = \"2\"\n");
+    write(&dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\", \"lib\", \"mid\"]\nresolver = \"2\"\n");
     let hotpatch = concat!(env!("CARGO_MANIFEST_DIR"), "/../hotpatch");
     write(
         &dir.join("app/Cargo.toml"),
         &format!(
             "[package]\nname = \"fixture-app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n\
-             fixture-lib = {{ path = \"../lib\" }}\nserde_json = \"1\"\n\
+             fixture-lib = {{ path = \"../lib\" }}\nfixture-mid = {{ path = \"../mid\" }}\nserde_json = \"1\"\n\
              aio-hotpatch = {{ package = \"aio-rs-hotpatch\", path = {hotpatch:?} }}\n"
         ),
     );
     write(&dir.join("app/src/main.rs"), APP);
     write(&dir.join("lib/Cargo.toml"), "[package]\nname = \"fixture-lib\"\nversion = \"0.1.0\"\nedition = \"2024\"\n");
     write(&dir.join("lib/src/lib.rs"), LIB);
+    write(
+        &dir.join("mid/Cargo.toml"),
+        "[package]\nname = \"fixture-mid\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\nfixture-lib = { path = \"../lib\" }\n",
+    );
+    write(&dir.join("mid/src/lib.rs"), MID);
     std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"), dir.join("Cargo.lock")).unwrap();
 }
 
@@ -234,6 +246,7 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
         ax: PathBuf::from(env!("CARGO_BIN_EXE_ax")),
         stop: Default::default(),
         low,
+        sources: vec![ws.join("app"), ws.join("lib"), ws.join("mid")],
     };
     let req = request(false);
     let mut fat = hotpatch::fat_build(&req).unwrap();
@@ -271,25 +284,34 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     // Each edit, the value it shows (`T`, `S`: the ticks and statics after
     // as many loops as tables sent), and whether the app crate's replay
     // (`finish`) patches again, with the value then: a library's edit is
-    // patched alone first, and again only when the app crate's own code
-    // changed with it (the generic it compiles in). `None`: either (the
+    // patched alone first (the library on it owed too), and again only when
+    // the code of either changed with it (the generic the library on it
+    // compiles in). `None`: either (the
     // library's first static may move which crate's copy of an atomic
     // load the app crate calls: rustc's choice, by platform).
     let steps = [
         // A library's edit first: no app crate's objects (they'd pull its
-        // code from the archive) in the patch, its objects all linked.
+        // code from the archive) in the patch, its objects all linked, and
+        // the caller the app reaches it by, from the library on it.
         (&lib_rs, "    10\n", "    11\n", "value 1 11 T S 1 2", Some(None)),
         (&main_rs, "    1\n", "    2\n", "value 2 11 T S 1 2", Some(None)),
         (&main_rs, "    2\n", "    3\n", "value 3 11 T S 1 2", Some(None)),
         (&lib_rs, "    11\n", new_static, "value 3 20 T S 1 2", None),
-        // A library edit the app crate compiles nothing of: one patch.
+        // A library edit nothing else compiles any of: one patch.
         (&lib_rs, "new(20)", "new(30)", "value 3 30 T S 1 2", Some(None)),
         // A backtrace in patched code names its function: the first one
         // resolved, and one after a later patch.
         (&main_rs, "TRACE: u32 = 0", "TRACE: u32 = 2", "value 3 30 T S 2 2", Some(None)),
         (&main_rs, "TRACE: u32 = 2", "TRACE: u32 = 3", "value 3 30 T S L 2", Some(None)),
-        // The generic the app crate compiles in: its second patch carries it.
+        // The generic the library on it compiles in: its second patch carries it.
         (&lib_rs, "* 2", "* 3", "value 3 30 T S L 2", Some(Some("value 3 30 T S L 3"))),
+        // The library compiles that generic's copy itself (the library
+        // on it may share it then), and an edit drops it with a change the
+        // app reaches through the library on it: that one's running
+        // objects (and the app crate's) use the copy gone, so they are
+        // built with it, not owed.
+        (&lib_rs, "Relaxed)\n", "Relaxed) + 0 * twice(2u8)\n", "value 3 30 T S L 3", None),
+        (&lib_rs, "+ 0 * twice(2u8)", "+ 3", "value 3 33 T S L 3", Some(None)),
     ];
     let mut loops = 1;
     let mut shown = |want: &str| {
@@ -342,11 +364,11 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     edit(&lib_rs, "new(30)", "new(40)");
     let patch = hotpatch::patch(&mut fat, aslr, base, std::slice::from_ref(&lib_rs)).unwrap();
     send(&patch.table, "after-refresh".into());
-    assert_eq!(next(), shown("value 3 40 T S L 3"), "a patch after the refresh");
+    assert_eq!(next(), shown("value 3 43 T S L 3"), "a patch after the refresh");
     base = free(next());
     if let Some(p) = hotpatch::finish(&mut fat, aslr, base).unwrap() {
         send(&p.table, "after-refresh-app".into());
-        assert_eq!(next(), shown("value 3 40 T S L 3"), "its app crate");
+        assert_eq!(next(), shown("value 3 43 T S L 3"), "its app crate");
     }
     assert!(hotpatch::refresh(&request(true)).unwrap(), "behind that patch: built");
     assert!(!hotpatch::refresh(&request(true)).unwrap(), "up to date: nothing to build");
@@ -370,6 +392,32 @@ fn a_running_app_takes_patches_of_its_crate_and_of_a_library() {
     // The next start: the refreshed binary as it is, nothing built or linked.
     let next_start = hotpatch::fat_build(&req).unwrap();
     assert!(next_start.kept, "the next start builds nothing");
+    drop(next_start);
+
+    // A start after an edit made with no session running (a pull): the
+    // kept build as it is, without cargo, with the sources it was built
+    // from; the edit compiled before the app runs, linked once it says
+    // where it is loaded, and the fresh process runs it.
+    edit(&main_rs, "    3\n", "    5\n");
+    let target = dir.path().join("target");
+    let (mut last, built) = hotpatch::last(&target, &req).expect("the kept build, whole");
+    assert!(built[&main_rs].contains("    3\n"), "the sources the kept build read");
+    let compiled = hotpatch::compile(&mut last, std::slice::from_ref(&main_rs)).unwrap();
+    let mut started = Command::new(&last.exe).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut stdin = started.stdin.take().unwrap();
+    let mut lines = BufReader::new(started.stdout.take().unwrap()).lines();
+    let mut next = || lines.next().unwrap().unwrap();
+    let aslr_now: u64 = next().strip_prefix("aslr ").unwrap().parse().unwrap();
+    assert!(next().starts_with("value 3 "), "as built");
+    let base_now = free(next());
+    let patch = hotpatch::link_patch(&mut last, compiled, aslr_now, base_now).unwrap();
+    let file = dir.path().join("table-start.json");
+    std::fs::write(&file, serde_json::to_string(&patch.table).unwrap()).unwrap();
+    writeln!(stdin, "{}", file.display()).unwrap();
+    assert!(next().starts_with("value 5 "), "the edit, patched in at the start");
+    drop(stdin);
+    assert!(started.wait().unwrap().success());
+    edit(&main_rs, "    5\n", "    3\n");
 
     // Code that doesn't compile: the compiler's errors, for the person to
     // fix (ax dev tries no other build); the fat build stays as it was.

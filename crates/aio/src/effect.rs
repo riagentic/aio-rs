@@ -130,14 +130,67 @@ pub async fn blocking<R: Send + 'static>(key: &str, f: impl FnOnce(&Cancel) -> R
     }
 }
 
-/// Cancel the [`blocking`] work running under `key`: how many were asked.
-#[cfg(not(target_arch = "wasm32"))]
+/// Cancel the [`blocking`] or [`off_thread`] work running under `key`:
+/// how many were asked. In a page, [`off_thread`] work is stopped at once
+/// (its worker ends).
 pub fn cancel_blocking(key: &str) -> usize {
-    let t = tokens().lock().unwrap_or_else(|e| e.into_inner());
-    t.get(key).map_or(0, |v| {
-        v.iter().for_each(Cancel::set);
-        v.len()
-    })
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let t = tokens().lock().unwrap_or_else(|e| e.into_inner());
+        t.get(key).map_or(0, |v| {
+            v.iter().for_each(Cancel::set);
+            v.len()
+        })
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    return crate::web::worker::cancel(key);
+    #[cfg(all(target_arch = "wasm32", not(feature = "web")))]
+    {
+        _ = key;
+        0
+    }
+}
+
+/// `f(input)` off the thread, on every target (aio's worker cells): on
+/// the desktop, Android and a server as [`blocking`] (a worker thread);
+/// in a web build in a Web Worker running the app's own module, so the
+/// page stays responsive. `f` is a plain `fn` (it captures nothing: a
+/// worker shares no memory with the page); its input and output cross as
+/// JSON. A panic in `f` is a refusal; [`cancel_blocking`]`(key)`, or the
+/// effect ending early, stops it (in a page at once: its worker ends).
+pub async fn off_thread<I, O>(key: &str, f: fn(I) -> O, input: I) -> crate::Result<O>
+where
+    I: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
+    O: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    return blocking(key, move |_| f(input)).await;
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    {
+        let refused = |e: String| crate::Rejected::new(format!("blocking `{key}` failed: {e}"));
+        let input = serde_json::to_vec(&input).map_err(|e| refused(e.to_string()))?;
+        let out = crate::web::worker::run(key, runner::<I, O>, f as usize, input).await;
+        let out = out.map_err(|e| match e.ends_with("was cancelled") {
+            true => crate::Rejected::new(e),
+            false => refused(e),
+        })?;
+        serde_json::from_slice(&out).map_err(|e| refused(e.to_string()))
+    }
+    #[cfg(all(target_arch = "wasm32", not(feature = "web")))]
+    {
+        _ = key;
+        Ok(f(input))
+    }
+}
+
+/// In a worker: `f` (an `fn(I) -> O`'s table index) on `input` (JSON), its output as JSON.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+fn runner<I: serde::de::DeserializeOwned, O: serde::Serialize>(f: usize, input: &[u8]) -> Result<Vec<u8>, String> {
+    // SAFETY: `f` is an `fn(I) -> O` of this module, taken by `off_thread::<I, O>`
+    // in the page, which sent it with this runner of the same `I` and `O`.
+    let f = unsafe { std::mem::transmute::<usize, fn(I) -> O>(f) };
+    let input = serde_json::from_slice(input).map_err(|e| e.to_string())?;
+    serde_json::to_vec(&f(input)).map_err(|e| e.to_string())
 }
 
 /// `f`'s output, unless `d` passes first: on tokio's clock natively, on the

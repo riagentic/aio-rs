@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <code>0.3.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
+  <code>0.4.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -18,7 +18,7 @@
 
 ---
 
-**aio-rs is early ALPHA.** 0.3.0 is its third release; until 1.0.0 a
+**aio-rs is early ALPHA.** 0.4.0 is its fourth release; until 1.0.0 a
 minor version may break things ([versions](docs/basics/versioning.md)).
 
 **Read first: [when to use aio-rs, and when not](docs/basics/when.md).**
@@ -46,18 +46,18 @@ at the release tag (an app takes aio-rs from git at its `ax`'s release, so
 no checkout is needed afterwards):
 
 ```sh
-git clone --branch v0.3.0 https://github.com/riagentic/aio-rs
-cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.3.0
+git clone --branch v0.4.0 https://github.com/riagentic/aio-rs
+cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.4.0
 ax setup                                             # checks the machine, fetches the runtime
 ```
 
 Or a prebuilt `ax` for Linux x86_64 and macOS arm64 and x86_64 (Windows
 x86_64: `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.3.0)), each
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.4.0)), each
 archive's SHA-256 pinned in the installer:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.3.0/install.sh | sh   # then runs ax setup
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.4.0/install.sh | sh   # then runs ax setup
 ```
 
 An `ax` built from `main` writes `main`'s templates but pins its release
@@ -187,9 +187,10 @@ plain Rust: [why aio-rs](docs/basics/why.md).
   update back (`scripts/update-proof`). The README's numbers rerun with
   `scripts/numbers`. Not gated: a physical Android device and
   OS-signing of bundles (SmartScreen and Gatekeeper warn on first start).
-- 🚧 **Not there yet.** No iOS, crates not on crates.io (an app takes aio-rs from git), no
-  hot-patching in the web build or on Android. A Rust edit recompiles its
-  crate: keep a big app in several crates
+- 🚧 **Not there yet.** No app running on iOS itself (`ax build --ios`
+  makes a thin client of a server, as aio's), crates not on crates.io (an
+  app takes aio-rs from git). A Rust edit recompiles its crate: keep a big
+  app in page crates
   ([what an edit costs](docs/build/README.md#what-an-edit-costs)).
 - ✅ **Built for** apps where the state is the product: desktop tools,
   local-first apps, small servers and the clients that sync with them,

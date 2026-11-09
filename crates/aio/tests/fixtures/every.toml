@@ -43,6 +43,7 @@ clients = 9
 retention = "7d"
 timeouts = { "lit.slow" = "60s", "lit.wait" = "off" }
 strict_pin = true
+transport = "poll"
 [accounts]
 on = true
 max_sessions = 4
@@ -137,6 +138,7 @@ broadcast_rate = "20.5/s"
 [feedback]
 url = "https://example.org/fb"
 timeout = "30s"
+args = true
 [ui]
 theme = "full"
 scheme = "light"

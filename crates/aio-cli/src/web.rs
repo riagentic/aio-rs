@@ -9,6 +9,9 @@ use aio::sha256::Sha256;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod hot;
+mod split;
+
 /// The page's bundle, as `wasm-bindgen --out-name` names it.
 const BUNDLE: &str = "app";
 
@@ -77,15 +80,53 @@ pub fn head(title: &str, hue: u16, icon: &str, touch: &str) -> String {
     .join("\n")
 }
 
-/// What starts the page (`start.js`, a module): the offline cache, which
-/// says why when the browser refuses it (`file://`, plain http off
+/// What starts the page (`start.js`, a module): where the site's files
+/// are (lazy views' chunks, the worker), the offline cache once the app
+/// has drawn its view (its download then takes nothing from the page's),
+/// which says why when the browser refuses it (`file://`, plain http off
 /// localhost), then the bundle, which starts the app. A dev build has no
 /// offline cache: each reload is the newest build (pure).
 pub fn start_js(dev: bool) -> String {
-    let cache = "if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch((e) =>
-  console.error('[aio] the offline cache (service worker) is not registered: the app works online only. It needs https (or localhost):', e));
+    let cache = "if ('serviceWorker' in navigator) document.addEventListener('aio:mounted', () =>
+  navigator.serviceWorker.register('./sw.js').catch((e) =>
+    console.error('[aio] the offline cache (service worker) is not registered: the app works online only. It needs https (or localhost):', e)), { once: true });
 ";
-    format!("{}import start from './app.js';\nstart();\n", if dev { "" } else { cache })
+    format!("{BASE}{}import start from './app.js';\nstart();\n", if dev { "" } else { cache })
+}
+
+/// Where the site's files are, beside the script that says it.
+const BASE: &str = "globalThis.__aioBase = new URL('./', import.meta.url).href;\n";
+
+/// The worker of `aio::effect::off_thread` (`worker.js`, a module): the
+/// app's own module, handed compiled by the page, not started as the app
+/// (`__aioWorker`), runs each job it is sent: its steps in turn (the
+/// page's lazy chunks, then the function on its input) through the
+/// module's one export; it answers the last one's output or why it failed
+/// (a panic's message).
+pub const WORKER_JS: &str = "globalThis.__aioWorker = true;
+let ready;
+onmessage = async ({ data: [module, steps] }) => {
+  try {
+    ready ??= import('./app.js').then(async (m) => (await m.default({ module_or_path: module }), m));
+    const m = await ready;
+    let out;
+    for (const [step, arg] of steps) out = await m.__aio_work(step, arg);
+    postMessage([true, out], [out.buffer]);
+  } catch (e) {
+    postMessage([false, globalThis.__aioPanic || String(e)]);
+  }
+};
+";
+
+/// The bundle's glue `js` with its start held in a worker: there the
+/// module runs work, not the app (pure).
+pub fn held(js: &str) -> Result<String, String> {
+    const START: &str = "wasm.__wbindgen_start();";
+    match (js.contains("__wbindgen_start"), js.matches(START).count()) {
+        (false, _) => Ok(js.into()),
+        (true, 1) => Ok(js.replacen(START, &format!("if (!globalThis.__aioWorker) {START}"), 1)),
+        _ => Err("the wasm-bindgen glue starts the app in a way this ax does not know".into()),
+    }
 }
 
 /// The window's page scripts (`page.js`): keys, focus, drag data and
@@ -94,12 +135,12 @@ pub fn start_js(dev: bool) -> String {
 /// the console sent on ([`CONSOLE`]) where something takes it (`logged`:
 /// a dev build, or an app with a server and `[server] page_log`) (pure).
 pub fn page_js(dev: bool, logged: bool) -> String {
-    use aio::page::{DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, WHEEL};
+    use aio::page::{DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, SWAP, WHEEL};
     // `;` after each piece: an `(() => …)()` piece followed by another
     // would otherwise call its result
     let pieces: &[&str] = match dev {
-        true => &[OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS, RELOAD],
-        false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, aio_shell::splash::PAGE_JS],
+        true => &[OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, SWAP, aio_shell::splash::PAGE_JS, RELOAD],
+        false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, SWAP, aio_shell::splash::PAGE_JS],
     };
     // The console to `ax dev`'s log, or in a release to the app server's (`[server] page_log`).
     let console = CONSOLE.replace("ENDPOINT", if dev { "/aio-dev/log" } else { "/__aio/log" });
@@ -159,11 +200,13 @@ pub fn content_hash(files: &[(String, Vec<u8>)]) -> String {
 /// precached under a cache named by the app, the build and its scope
 /// (one origin hosts many apps and paths), fetched past the HTTP cache and
 /// checked against its digest (code only); same-origin GETs answered
-/// cache-first, a navigation the host can't answer (offline, or a client
-/// route it has no file for) given the page; the app's own server (its
+/// cache-first, but `served` (the app's own server serves the page, and may
+/// paint each one: `Http::painted`) a navigation asks the server first; a
+/// navigation the host can't answer (offline, or a client route it has no
+/// file for) given the page; the app's own server (its
 /// socket and `/__aio/`) never cached; older builds' caches dropped when
 /// it takes over. A new build is a new `sw.js`, which installs it (pure).
-pub fn service_worker(id: &str, files: &[(String, Vec<u8>)]) -> String {
+pub fn service_worker(id: &str, files: &[(String, Vec<u8>)], served: bool) -> String {
     let url = |f: &str| format!("./{}", f.replace('%', "%25").replace('#', "%23").replace('?', "%3F"));
     let list: Vec<String> = std::iter::once("./".to_string()).chain(files.iter().map(|(f, _)| url(f))).collect();
     let sri: serde_json::Map<String, serde_json::Value> = files
@@ -183,6 +226,7 @@ const PREFIX = {prefix};\n\
 const V = {version} + self.registration.scope;\n\
 const FILES = {};\n\
 const SRI = {};\n\
+const SERVED = {served};\n\
 const req = (f) => new Request(f, {{ cache: 'reload', integrity: SRI[f] || '' }});\n\
 self.addEventListener('install', (e) => {{\n\
   e.waitUntil(caches.open(V).then((c) => c.addAll(FILES.map(req))).then(() => self.skipWaiting(), (err) => {{\n\
@@ -205,9 +249,10 @@ self.addEventListener('fetch', (e) => {{\n\
   const r = e.request, u = new URL(r.url);\n\
   if (r.method !== 'GET' || u.origin !== location.origin || own(u)) return;\n\
   const page = (c) => c.match('./');\n\
-  e.respondWith(caches.open(V).then((c) => c.match(r, {{ ignoreSearch: true }}).then((hit) => hit || fetch(r).then(\n\
-    (res) => (r.mode === 'navigate' && res.status === 404 ? page(c).then((p) => p || res) : res),\n\
-    (err) => {{ if (r.mode === 'navigate') return page(c); throw err; }}))));\n\
+  const nav = r.mode === 'navigate';\n\
+  e.respondWith(caches.open(V).then((c) => ((SERVED && nav) ? Promise.resolve() : c.match(r, {{ ignoreSearch: true }})).then((hit) => hit || fetch(r).then(\n\
+    (res) => (nav && res.status === 404 ? page(c).then((p) => p || res) : res),\n\
+    (err) => {{ if (nav) return page(c); throw err; }}))));\n\
 }});\n",
         serde_json::Value::from(list),
         serde_json::Value::Object(sri)
@@ -322,6 +367,27 @@ pub fn launch_images(png: &[u8], (w, h): (u32, u32), bg: &str) -> Result<Vec<(St
         .collect()
 }
 
+/// cargo's arguments for [`bind`]'s build of `pkg` (pure): a release, or
+/// a dev build with `dev`'s feature (aio-rs's dev tooling), its libraries
+/// optimized and no debug info linked (wasm-bindgen drops it anyway): half
+/// the module, so wasm-bindgen and the page's load take half the time of
+/// each Rust edit; the app's own crates built as written.
+fn cargo_args<'a>(pkg: &'a str, dev: Option<&'a str>) -> Vec<&'a str> {
+    let mut args = vec!["rustc", "--target", "wasm32-unknown-unknown", "-p", pkg, "--lib", "--crate-type", "cdylib"];
+    match dev {
+        Some(tooling) => args.extend([
+            "--features",
+            tooling,
+            "--config",
+            "profile.dev.package.\"*\".opt-level=1",
+            "--config",
+            "profile.dev.strip=\"debuginfo\"",
+        ]),
+        None => args.push("--release"),
+    }
+    args
+}
+
 /// What a page needs beside the bundle `wasm-bindgen` made in `out`: the
 /// icons, the manifest, the page (with its splash, from the app's folder
 /// `dir`) and its service worker. `body`: the page's first paint. What was
@@ -371,11 +437,13 @@ pub fn pack(
     let logged = dev || (cfg.app.mode != aio::config::Mode::Standalone && cfg.server.page_log);
     std::fs::write(out.join("page.js"), page_js(dev, logged)).map_err(|e| e.to_string())?;
     std::fs::write(out.join("start.js"), start_js(dev)).map_err(|e| e.to_string())?;
+    std::fs::write(out.join("worker.js"), format!("{BASE}{WORKER_JS}")).map_err(|e| e.to_string())?;
     let mut files = site_files(out, out).map_err(|e| e.to_string())?;
     // iOS fetches its launch images itself: the worker needn't hold them.
     files.retain(|(f, _)| f != "sw.js" && !f.starts_with("apple-splash-"));
     files.sort();
-    std::fs::write(out.join("sw.js"), service_worker(&app.id, &files)).map_err(|e| e.to_string())?;
+    let served = cfg.app.mode != aio::config::Mode::Standalone;
+    std::fs::write(out.join("sw.js"), service_worker(&app.id, &files, served)).map_err(|e| e.to_string())?;
     Ok(problem.into_iter().collect())
 }
 
@@ -398,17 +466,23 @@ fn site_files(root: &Path, at: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>>
 /// Build package `pkg`'s lib `lib` (in workspace `root`, built into
 /// `target`) for the browser, as a cdylib (natively it stays a plain
 /// library), bound into `out`: its `.wasm` and `app.js`; `dev`: a debug
-/// build. `wasm-bindgen` must be the version the lock has, as they talk to
-/// each other; `fetch`: aio's is fetched when none is here.
+/// build with aio-rs's `dev` (its dev tooling in the page: the audits, the
+/// Redux DevTools bridge, live CSS), aio-rs being `aio` to `pkg`.
+/// `wasm-bindgen` must be the version the lock has, as they talk to each
+/// other; `fetch`: aio's is fetched when none is here. `hot` (a dev build's:
+/// this ax and a folder): the module set up for hot-patching, its lib's
+/// rustc call recorded in the folder; what a patch is linked against.
+#[allow(clippy::too_many_arguments)]
 pub fn bind(
     root: &Path,
     target: &Path,
-    (pkg, lib): (&str, &str),
+    (pkg, lib, aio): (&str, &str, &str),
     app: &App,
     out: &Path,
     dev: bool,
     fetch: bool,
-) -> Result<(), String> {
+    hot: Option<(&Path, &Path)>,
+) -> Result<Option<hot::Base>, String> {
     // A new app has no lock before its first build: it names the wasm-bindgen.
     if !root.join("Cargo.lock").is_file() {
         let made = Command::new("cargo").arg("generate-lockfile").current_dir(root).status();
@@ -423,13 +497,18 @@ pub fn bind(
         false => crate::setup::wasm_bindgen_at(&want)
             .map_err(|found| format!("the web build needs wasm-bindgen {want} ({found}): ax setup fetches it"))?,
     };
-    let mut args = vec!["rustc", "--target", "wasm32-unknown-unknown", "-p", pkg, "--lib", "--crate-type", "cdylib"];
-    if !dev {
-        args.push("--release");
-    }
-    let mut cargo = crate::freeze::cargo("the web build", &args)?;
+    let tooling = format!("{aio}/dev");
+    let mut cargo = crate::freeze::cargo("the web build", &cargo_args(pkg, dev.then_some(tooling.as_str())))?;
     if !dev {
         crate::build::remap(&mut cargo, root);
+        // The linker's relocations kept: the split reads them (`split`).
+        cargo.args(["--", "-C", "link-arg=--emit-relocs"]);
+    }
+    // Hot-patching: the lib's rustc call recorded (ax as cargo's workspace
+    // wrapper), the linker's symbols kept.
+    if let (true, Some((ax, record))) = (dev, hot) {
+        cargo.env("RUSTC_WORKSPACE_WRAPPER", ax).env(crate::hotpatch::RUSTC_ENV, record);
+        cargo.args(["--", "-C", "link-arg=--emit-relocs"]);
     }
     // Cargo's errors are said here and kept for the dev page (`ax dev --web`).
     // As it comes (it was silent until the end: 25 s of nothing on a first build).
@@ -444,24 +523,68 @@ pub fn bind(
         });
     }
     let profile = if dev { "debug" } else { "release" };
-    let wasm = target.join("wasm32-unknown-unknown").join(profile).join(format!("{lib}.wasm"));
+    let linked = target.join("wasm32-unknown-unknown").join(profile).join(format!("{lib}.wasm"));
+    // A release's module without what the page never reads, bound; the linker's kept for the split.
+    let pre = (!dev).then(|| std::fs::read(&linked)).transpose().map_err(|e| e.to_string())?;
+    let mut base = None;
+    let wasm = match &pre {
+        Some(b) => {
+            let to = linked.with_extension("stripped.wasm");
+            std::fs::write(&to, split::strip(b, true)?).map_err(|e| e.to_string())?;
+            to
+        }
+        None if hot.is_some() => match hot::prepare(&std::fs::read(&linked).map_err(|e| e.to_string())?) {
+            Ok((wasm, b)) => {
+                let to = linked.with_extension("hot.wasm");
+                std::fs::write(&to, wasm).map_err(|e| e.to_string())?;
+                base = Some(b);
+                to
+            }
+            Err(e) => {
+                eprintln!("ax dev: no hot-patching of this build ({e}): a Rust edit rebuilds");
+                linked
+            }
+        },
+        None => linked,
+    };
     _ = std::fs::remove_dir_all(out);
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    // A release's names as the linker has them: the split matches them to its relocations.
     let ok = Command::new(&bindgen)
         .args(["--target", "web", "--no-typescript", "--out-name", BUNDLE, "--out-dir"])
         .arg(out)
+        .args((!dev).then_some("--no-demangle"))
         .arg(&wasm)
         .status()
         .map_err(|e| e.to_string())?;
     if !ok.success() {
         return Err(format!("wasm-bindgen could not bind {}", wasm.display()));
     }
-    // A release's glue without its indentation and comment lines: ~20% less to fetch.
-    let glue = out.join(format!("{BUNDLE}.js"));
-    if let Some(js) = std::fs::read_to_string(&glue).ok().filter(|_| !dev).and_then(|js| trimmed(&js)) {
-        std::fs::write(&glue, js).map_err(|e| e.to_string())?;
+    if let Some(pre) = pre {
+        let bound = out.join(format!("{BUNDLE}_bg.wasm"));
+        let post = std::fs::read(&bound).map_err(|e| e.to_string())?;
+        let main = match split::split(&pre, &post) {
+            Ok(Some(s)) => {
+                for (f, b) in &s.chunks {
+                    std::fs::write(out.join(f), b).map_err(|e| e.to_string())?;
+                }
+                s.main
+            }
+            Ok(None) => split::strip(&post, false)?,
+            Err(e) => {
+                eprintln!("ax build: the lazy views stay in the one module ({e})");
+                split::strip(&post, false)?
+            }
+        };
+        std::fs::write(&bound, main).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    // The glue held in a worker; a release's without its indentation and
+    // comment lines: ~20% less to fetch.
+    let glue = out.join(format!("{BUNDLE}.js"));
+    let js = held(&std::fs::read_to_string(&glue).map_err(|e| e.to_string())?)?;
+    let js = if dev { js } else { trimmed(&js).unwrap_or(js) };
+    std::fs::write(&glue, js).map_err(|e| e.to_string())?;
+    Ok(base)
 }
 
 /// `js` through [`aio::shrink::js`]; None: it keeps its text as written.
@@ -471,6 +594,9 @@ fn trimmed(js: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// What a site's build said, and what a patch of it is linked against.
+type Made = Result<(Vec<String>, Option<hot::Base>), String>;
+
 /// An app's web build: its package, its cdylib lib, and where cargo builds.
 struct Site {
     pkg: crate::dev::Pkg,
@@ -479,6 +605,8 @@ struct Site {
     lib: String,
     /// The package with that lib: the app's own, or the library its launcher uses.
     lib_pkg: String,
+    /// What that package calls aio-rs.
+    aio: String,
     target: PathBuf,
     root: PathBuf,
 }
@@ -487,7 +615,7 @@ struct Site {
 /// first of `dirs` (the app's package, then the library its launcher uses,
 /// as `ax create` lays them out) whose package has a library and uses
 /// wasm-bindgen (its `#[wasm_bindgen(start)]`).
-fn web_lib(meta: &serde_json::Value, dirs: &[PathBuf]) -> Option<(String, String)> {
+pub(crate) fn web_lib(meta: &serde_json::Value, dirs: &[PathBuf]) -> Option<(String, String)> {
     let pkgs = meta["packages"].as_array()?;
     let lib_kinds = ["lib", "rlib", "cdylib"];
     let is_lib = |t: &&serde_json::Value| {
@@ -501,6 +629,15 @@ fn web_lib(meta: &serde_json::Value, dirs: &[PathBuf]) -> Option<(String, String
         let t = p["targets"].as_array()?.iter().find(is_lib).filter(|_| binds(p))?;
         Some((p["name"].as_str()?.to_string(), t["name"].as_str()?.replace('-', "_")))
     })
+}
+
+/// What package `pkg` calls aio-rs: its dependency's rename (`aio`, as
+/// `ax create` writes it), else `aio-rs` (pure).
+fn aio_named(meta: &serde_json::Value, pkg: &str) -> String {
+    let pkgs = meta["packages"].as_array().into_iter().flatten();
+    let deps = pkgs.filter(|p| p["name"] == pkg).flat_map(|p| p["dependencies"].as_array().into_iter().flatten());
+    let aio = deps.filter(|d| d["name"] == "aio-rs" && d["kind"].is_null()).find_map(|d| d["rename"].as_str());
+    aio.unwrap_or("aio-rs").to_string()
 }
 
 impl Site {
@@ -517,16 +654,19 @@ impl Site {
             )
         })?;
         let dir = |k: &str| meta[k].as_str().map(PathBuf::from).ok_or(format!("cargo metadata: no {k}"));
-        Ok(Self { lib, lib_pkg, target: dir("target_directory")?, root: dir("workspace_root")?, pkg, app, cfg })
+        let aio = aio_named(&meta, &lib_pkg);
+        Ok(Self { lib, lib_pkg, aio, target: dir("target_directory")?, root: dir("workspace_root")?, pkg, app, cfg })
     }
 
-    /// Its CSS step, the bundle and the page into `out`.
-    fn make(&self, out: &Path, dev: bool) -> Result<Vec<String>, String> {
+    /// Its CSS step, the bundle and the page into `out` (`hot`: [`bind`]'s);
+    /// what was said, and what a patch is linked against.
+    fn make(&self, out: &Path, dev: bool, hot: Option<(&Path, &Path)>) -> Made {
         if let Some(did) = crate::css::step(&self.cfg, &app_dir(&self.pkg)?)? {
             eprintln!("ax build: {did}");
         }
-        bind(&self.root, &self.target, (&self.lib_pkg, &self.lib), &self.app, out, dev, true)?;
-        pack(&self.app, &self.cfg, &app_dir(&self.pkg)?, out, "", dev)
+        let lib = (self.lib_pkg.as_str(), self.lib.as_str(), self.aio.as_str());
+        let base = bind(&self.root, &self.target, lib, &self.app, out, dev, true, hot)?;
+        Ok((pack(&self.app, &self.cfg, &app_dir(&self.pkg)?, out, "", dev)?, base))
     }
 }
 
@@ -547,9 +687,21 @@ pub fn build(name: &str, dev: bool) -> Result<(String, PathBuf), String> {
     let profile = if dev { "dev" } else { "release" };
     eprintln!("ax build: {} {} for the web ({profile})…", site.app.name, site.app.version);
     let out = crate::build::dist(&site.root, &site.cfg).join(format!("{}-web", site.app.id));
-    let said = site.make(&out, dev)?;
+    let (said, _) = site.make(&out, dev, None)?;
     let (raw, gz) = wasm_size(&out).map_err(|e| e.to_string())?;
-    let size = format!("wasm: {} KB, {} KB gzipped", raw / 1000, gz / 1000);
+    let mut size = format!("wasm: {} KB, {} KB gzipped", raw / 1000, gz / 1000);
+    // The lazy views' chunks (`split`): fetched when their views first show.
+    let chunks: Vec<u64> = std::fs::read_dir(&out)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name().to_str().is_some_and(|f| f.starts_with(&format!("{BUNDLE}.")) && f.ends_with(".wasm"))
+        })
+        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
+        .collect();
+    if !chunks.is_empty() {
+        size += &format!("; lazy views: {} KB in {} chunks", chunks.iter().sum::<u64>() / 1000, chunks.len());
+    }
     let lines: Vec<String> =
         said.into_iter().chain([size, format!("{}: put it on any HTTPS host", out.display())]).collect();
     Ok((lines.join("\n"), out))
@@ -563,20 +715,52 @@ pub fn fatal(stderr: &str) -> String {
     blocks.filter(|b| !b.is_empty()).collect::<Vec<_>>().join("\n\n")
 }
 
-/// The dev page's live reload (`page.js` in a dev build): the page starts
-/// again once `ax dev --web` built anew (`/aio-dev/build`); a failed
-/// build's errors show on the page, open (aio's diagnostic page), until a
-/// good one reloads it. With no dev server (a static `--dev` build) it
-/// stops asking.
+/// The dev page's live reload (`page.js` in a dev build), asked of `ax
+/// dev --web` and held there until something changes (`/aio-dev/build`):
+/// markup edited since the build goes to the page's views (`__aioHot`:
+/// built again in place, their state kept); a patch of its Rust is loaded
+/// into the page's module (its memory and table, `__aioWasm`; each call
+/// into the page by the table slot it imports, from `s`; wasm-bindgen's
+/// descriptors, dead code there, as no-ops from `d`) and its map
+/// handed in (`__aioPatched`), one patch at a time, one that is no longer
+/// the newest skipped; a new build reloads the page (its cells come back
+/// from the browser's storage); a failed build's errors show on the page,
+/// open (aio's diagnostic page), until a good one reloads it. With no dev
+/// server (a static `--dev` build) it stops asking.
 pub const RELOAD: &str = "(() => {
-  let seen = null, failed = null;
-  const tick = () => fetch('/aio-dev/build', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((b) => {
+  let v = null, n = null, failed = null, hot = 0, patch = 0, patching = Promise.resolve();
+  const wasm = () => window.__aioWasm || new Promise((r) => addEventListener('aio:wasm', () => r(window.__aioWasm), { once: true }));
+  const load = async (p) => {
+    const w = await wasm(), t = w.__aio_table;
+    const r = await fetch('/aio-dev/patch?g=' + p.g, { cache: 'no-store' });
+    if (r.status === 409 || p.g !== patch) return;
+    if (!r.ok) throw new Error('/aio-dev/patch: ' + r.status);
+    if (t.length < p.table) t.grow(p.table - t.length);
+    const env = { memory: w.memory, __indirect_function_table: t, __stack_pointer: w.__aio_sp };
+    const d = new Proxy({}, { get: () => () => {} });
+    await WebAssembly.instantiate(await r.arrayBuffer(), { env, d, s: new Proxy({}, { get: (_, k) => t.get(+k) }) });
+    window.__aioPatched(p.map.join(','));
+  };
+  const tick = () => fetch('/aio-dev/build' + (v === null ? '' : '?after=' + v), { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((b) => {
     if (!b) return;
-    if (seen !== null && b.n !== seen) return location.reload();
-    seen = b.n;
+    if (n !== null && b.n !== n) return location.reload();
+    n = b.n;
+    v = b.v;
+    if (b.patch && b.patch.g !== patch) {
+      const p = b.patch;
+      patch = p.g;
+      patching = patching.then(() => load(p)).catch((e) => {
+        console.error('[aio] the patch did not load:', e);
+        if (window.__aioDiag) window.__aioDiag('hot-patch failed', String(e), true);
+      });
+    }
+    if (b.hot && b.hot.g !== hot && window.__aioHot) {
+      hot = b.hot.g;
+      window.__aioHot(JSON.stringify(b.hot));
+    }
     if (b.error && b.error !== failed && window.__aioDiag) window.__aioDiag('build failed', b.error, true);
     failed = b.error || null;
-    setTimeout(tick, 250);
+    tick();
   }, () => setTimeout(tick, 1000));
   tick();
 })();";
@@ -693,27 +877,32 @@ pub fn dev_then(
     serve: Serve,
     ready: impl FnOnce(u16) -> Result<(), String> + Send + 'static,
 ) -> Result<String, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
     let site = Site::of(name)?;
     let out = site.target.join("aio").join("web-dev").join(&site.app.id);
     eprintln!("ax dev: {} for the web (dev)…", site.app.name);
-    site.make(&out, true)?;
-    let built = std::sync::Arc::new(AtomicU64::new(1));
-    let dirs: Vec<PathBuf> = site.pkg.dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
-    let paths = crate::dev::watched(&site.pkg, Path::new(""), &crate::dev::Watching::All);
+    let mut built = crate::reload::Built::snapshot(&site.pkg.dirs);
+    let ax = std::env::current_exe().map_err(|e| e.to_string())?;
+    let hot_dir = site.target.join("aio").join("web-dev").join(format!("{}-hot", site.app.id));
+    let dev = DevBuild { out: out.clone(), ax, hot_dir, site };
+    let mut hot = dev.session(dev.make()?.1);
+    let live = std::sync::Arc::new(Live::default());
+    let dirs: Vec<PathBuf> = dev.site.pkg.dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
+    let paths = crate::dev::watched(&dev.site.pkg, Path::new(""), &crate::dev::Watching::All);
     let (w, rx) = crate::watch::Watch::new(&paths)?;
     // What the wasm build read beside the app's folders (`aio.toml`, an aio-rs checkout).
-    let deps = site.target.join("wasm32-unknown-unknown").join("debug").join(format!("{}.wasm", site.lib));
+    let deps = dev.site.target.join("wasm32-unknown-unknown").join("debug").join(format!("{}.wasm", dev.site.lib));
     w.add_files(crate::dev::deps_of(&deps));
     let cwd = std::env::current_dir().unwrap_or_default();
-    // The last build's errors, until a good one.
-    let failed = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    let (n, error) = (built.clone(), failed.clone());
+    let said_live = live.clone();
     let http = aio::http::Http::default()
         .shell(&out)
-        .route(aio::http::Route::get("/aio-dev/build", move |_| {
-            let b = serde_json::json!({ "n": n.load(Ordering::SeqCst), "error": *error.lock().unwrap() });
-            async move { aio::http::Reply::json(&b).header("cache-control", "no-store") }
+        // The page's live reload: held until something changed since `?after=`.
+        .route(aio::http::Route::get("/aio-dev/build", move |r| {
+            let (live, after) = (said_live.clone(), r.query("after").and_then(|v| v.parse::<u64>().ok()));
+            async move {
+                let b = live.after(after, std::time::Duration::from_secs(20)).await;
+                aio::http::Reply::json(&b).header("cache-control", "no-store")
+            }
         }))
         // The page's console, in this log (`CONSOLE`).
         .route(aio::http::Route::post("/aio-dev/log", |r| {
@@ -738,7 +927,9 @@ pub fn dev_then(
     // Exposed: over TLS (aio-rs's own root, as an exposed app), behind a key
     // made for this run, which the printed link carries once (a cookie then).
     let tls = match serve.expose {
-        true => Some(aio::tls::server(&aio::paths::tool_home().join("tls"), &site.app.id).map_err(|e| e.to_string())?),
+        true => {
+            Some(aio::tls::server(&aio::paths::tool_home().join("tls"), &dev.site.app.id).map_err(|e| e.to_string())?)
+        }
         false => None,
     };
     let token = match serve.expose {
@@ -761,34 +952,102 @@ pub fn dev_then(
             }
             false => eprintln!("ax dev: http://127.0.0.1:{port}/ (Ctrl-C ends it)"),
         }
+        let patch_live = live.clone();
+        // The newest patch's module; 409: the page asked for an older one.
+        let http = http.route(aio::http::Route::get("/aio-dev/patch", move |r| {
+            let (g, wasm) = patch_live.wasm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let asked = r.query("g").and_then(|v| v.parse::<u64>().ok());
+            async move {
+                match asked == Some(g) {
+                    true => {
+                        aio::http::Reply::stream("application/wasm", futures_util::stream::once(async move { wasm }))
+                    }
+                    false => aio::http::Reply::text("not the newest patch").status(409),
+                }
+            }
+        }));
         let opts = aio::sync::Options { open: !serve.expose, token, tls, http, ..Default::default() };
         tokio::spawn(aio::sync::serve_with(aio::Handle::<DevSite>::memory(), l, opts));
         tokio::task::spawn_blocking(move || ready(port)).await.map_err(|e| e.to_string())??;
         tokio::task::spawn_blocking(move || {
+            let site = &dev.site;
             while let Ok(first) = rx.recv() {
-                // A burst of saves is one change.
-                let changed = crate::watch::settle(&rx, first);
+                // Markup alone: to the open pages at the first save, their views
+                // built again in place, nothing built; again once the burst settled.
+                let early = built.edits(&first, &dev.site.root);
+                if let Some(edits) = &early {
+                    live.hot(crate::reload::params(edits));
+                }
+                // A burst of saves is one change. Rust: built from its first
+                // saves while it settles, kept if the burst was just these
+                // (each file as the build found it): the quiet costs no time.
+                // A Rust edit of the page's crate is patched into the open
+                // pages ([`DevBuild::remake`]).
+                let (changed, ahead) = std::thread::scope(|s| {
+                    let (hot, dev, edited) = (&mut hot, &dev, first.clone());
+                    let begin = move || {
+                        let read = crate::dev::contents(&edited);
+                        let snapshot = crate::reload::Built::snapshot(&dev.site.pkg.dirs);
+                        (read, snapshot, std::time::Instant::now(), s.spawn(move || dev.remake(hot, &edited)))
+                    };
+                    let job = (early.is_none() && rebuilds(&first)).then(begin);
+                    let changed = crate::watch::settle(&rx, first);
+                    (changed, job.map(|(read, snap, at, h)| (read, snap, at, h.join())))
+                });
                 let said = crate::watch::describe(&changed, &cwd);
                 if !rebuilds(&changed) {
                     eprintln!("ax dev: {said} changed: restyled");
                     continue;
                 }
-                eprintln!("ax dev: {said} changed — building…");
-                let started = std::time::Instant::now();
-                match site.make(&out, true) {
-                    Ok(_) => {
-                        w.add_files(crate::dev::deps_of(&deps));
-                        // Red to green: said; the page drops its errors as it reloads.
-                        if failed.lock().unwrap().take().is_some() {
+                if let Some(edits) = built.edits(&changed, &site.root) {
+                    if early.as_ref() != Some(&edits) {
+                        live.hot(crate::reload::params(&edits));
+                    }
+                    let n: usize = edits.iter().map(|(_, e)| e.len()).sum();
+                    eprintln!(
+                        "ax dev: {said} changed: {n} template{} to the page, state kept",
+                        if n == 1 { "" } else { "s" }
+                    );
+                    continue;
+                }
+                let (made, snapshot, started) = match ahead {
+                    Some((read, snapshot, at, Ok(made))) if crate::dev::contents(&changed) == read => {
+                        (made, snapshot, at)
+                    }
+                    _ => {
+                        eprintln!("ax dev: {said} changed — building…");
+                        let started = std::time::Instant::now();
+                        (dev.remake(&mut hot, &changed), crate::reload::Built::snapshot(&site.pkg.dirs), started)
+                    }
+                };
+                match made {
+                    Remade::Patched(p) => {
+                        built = snapshot;
+                        let ms = |d: std::time::Duration| d.as_millis();
+                        if live.patched(p.wasm, p.table, &p.map) {
                             eprintln!("ax dev: fixed: the build is good again");
                         }
-                        built.fetch_add(1, Ordering::SeqCst);
+                        eprintln!(
+                            "ax dev: {said} changed: hot-patched in {} ms (rustc {} ms, link {} ms), state kept",
+                            ms(started.elapsed()),
+                            ms(p.compile),
+                            ms(p.link)
+                        );
+                    }
+                    Remade::Built(Ok((_, base))) => {
+                        w.add_files(crate::dev::deps_of(&deps));
+                        built = snapshot;
+                        hot = dev.session(base);
+                        // Red to green: said; the page drops its errors as it reloads.
+                        if live.built() {
+                            eprintln!("ax dev: fixed: the build is good again");
+                        }
                         eprintln!("ax dev: built in {} ms; the page reloads", started.elapsed().as_millis());
                     }
-                    Err(e) => {
+                    Remade::Built(Err(e)) => {
                         let first = e.lines().next().unwrap_or_default();
                         eprintln!("ax dev: {first}; the page keeps the last build and shows why");
-                        *failed.lock().unwrap() = Some(e);
+                        live.failed(e);
                     }
                 }
             }
@@ -800,12 +1059,151 @@ pub fn dev_then(
     })
 }
 
+/// `ax dev --web`'s builds of `site` into `out`, this `ax` recording its
+/// lib's rustc call and linking patches in `hot_dir`.
+struct DevBuild {
+    site: Site,
+    out: PathBuf,
+    ax: PathBuf,
+    hot_dir: PathBuf,
+}
+
+impl DevBuild {
+    fn make(&self) -> Made {
+        self.site.make(&self.out, true, Some((&self.ax, &self.hot_dir.join("rustc"))))
+    }
+
+    /// Hot-patching of the build that gave `base`, if it can.
+    fn session(&self, base: Option<hot::Base>) -> Option<hot::Hot> {
+        let call = self.hot_dir.join("rustc").join(format!("{}.cdylib.json", self.site.lib));
+        let h = base.map(|b| hot::Hot::new(b, &call, self.hot_dir.join("patch"), self.ax.clone()));
+        h.transpose().map_err(|e| eprintln!("ax dev: no hot-patching ({e}): a Rust edit rebuilds")).ok().flatten()
+    }
+
+    /// A Rust edit: a patch the open pages load, else (when the patch
+    /// can't take it) a new bundle they reload; rustc's errors as a
+    /// failed build's.
+    fn remake(&self, hot: &mut Option<hot::Hot>, changed: &[PathBuf]) -> Remade {
+        if let Some(h) = hot.as_mut() {
+            match h.patch(changed) {
+                Ok(p) => return Remade::Patched(p),
+                Err(crate::hotpatch::Refused::Code(e)) => return Remade::Built(Err(e)),
+                Err(e) => eprintln!("ax dev: a full build: {e}"),
+            }
+        }
+        Remade::Built(self.make())
+    }
+}
+
+/// What a Rust edit made: a patch, or a build (or rustc's errors).
+enum Remade {
+    Patched(hot::Patch),
+    Built(Made),
+}
+
+/// What `ax dev --web`'s page is told (`/aio-dev/build`): the build it
+/// runs (`n`, a new one reloads it), the last build's errors, the markup
+/// edited since (`hot`, by generation `g`), the patch of its Rust since
+/// (`patch`: its generation `g`, the table size it needs, its map of slots,
+/// flat; its module at `/aio-dev/patch`), each change a new version `v`.
+#[derive(Default)]
+struct Live {
+    state: std::sync::Mutex<serde_json::Value>,
+    changed: tokio::sync::Notify,
+    /// The newest patch's module, by its generation.
+    wasm: std::sync::Mutex<(u64, Vec<u8>)>,
+}
+
+impl Live {
+    fn change(&self, f: impl FnOnce(&mut serde_json::Value)) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.is_null() {
+            *s = serde_json::json!({ "v": 0, "n": 1, "error": null, "hot": null });
+        }
+        f(&mut s);
+        s["v"] = (s["v"].as_u64().unwrap_or_default() + 1).into();
+        self.changed.notify_waiters();
+    }
+
+    /// A good build: the page reloads on it. Whether the last one failed.
+    fn built(&self) -> bool {
+        let mut was = false;
+        self.change(|s| {
+            was = !s["error"].is_null();
+            s["n"] = (s["n"].as_u64().unwrap_or_default() + 1).into();
+            (s["error"], s["hot"], s["patch"]) = Default::default();
+        });
+        was
+    }
+
+    /// A patch of the page's Rust (each patch holds all edits since the
+    /// build): the pages load it, the markup sent before is in it. Whether
+    /// the last build failed.
+    fn patched(&self, wasm: Vec<u8>, table: u32, map: &[(u32, u32)]) -> bool {
+        let mut was = false;
+        self.change(|s| {
+            was = !s["error"].is_null();
+            let g = s["patch"]["g"].as_u64().unwrap_or_default() + 1;
+            *self.wasm.lock().unwrap_or_else(|e| e.into_inner()) = (g, wasm);
+            let map: Vec<u32> = map.iter().flat_map(|&(a, b)| [a, b]).collect();
+            s["patch"] = serde_json::json!({ "g": g, "table": table, "map": map });
+            (s["error"], s["hot"]) = Default::default();
+        });
+        was
+    }
+
+    fn failed(&self, errors: String) {
+        self.change(|s| s["error"] = errors.into());
+    }
+
+    /// Markup edited since the build (`crate::reload::params`'s).
+    fn hot(&self, mut params: serde_json::Value) {
+        self.change(|s| {
+            let g = s["hot"]["g"].as_u64().unwrap_or_default() + 1;
+            params["g"] = g.into();
+            s["hot"] = params;
+        });
+    }
+
+    /// The state, once its version is past `after` (at once without one),
+    /// or as it is after `wait`.
+    async fn after(&self, after: Option<u64>, wait: std::time::Duration) -> serde_json::Value {
+        let until = tokio::time::Instant::now() + wait;
+        loop {
+            let notified = self.changed.notified();
+            let now = self.now();
+            if after.is_none_or(|a| now["v"].as_u64() != Some(a)) {
+                return now;
+            }
+            if tokio::time::timeout_at(until, notified).await.is_err() {
+                return self.now();
+            }
+        }
+    }
+
+    fn now(&self) -> serde_json::Value {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match s.is_null() {
+            true => serde_json::json!({ "v": 0, "n": 1, "error": null, "hot": null }),
+            false => s,
+        }
+    }
+}
+
 /// What `ax dev --web`'s server serves besides the page: nothing.
 #[aio::cell(shared)]
 pub struct DevSite {}
 
 #[aio::methods]
 impl DevSite {}
+
+/// A test that can't run here says why and ends; where these tests
+/// must run (`AIO_CI_WEB` set: CI, the tools fetched) it fails instead.
+#[cfg(test)]
+pub(crate) fn skipped(why: &str) {
+    assert!(std::env::var_os("AIO_CI_WEB").is_none(), "{why}: AIO_CI_WEB is set, so this test must run");
+    eprintln!("{why}: skipped");
+}
 
 #[cfg(test)]
 mod tests {
@@ -817,6 +1215,19 @@ mod tests {
             "/**\n * The app.\n */\nexport function web() {\n    // Cast intrinsic for `x`.\n    wasm.web();\n}\n";
         assert_eq!(trimmed(glue).unwrap(), "/**\n* The app.\n*/\nexport function web() {\nwasm.web();\n}\n");
         assert_eq!(trimmed("const s = `a\n  b`;\n"), None, "a template literal over lines stays as it is");
+    }
+
+    #[test]
+    fn the_glue_starts_the_app_only_off_a_worker() {
+        let glue = "function fin(i) {\n    wasm = i.exports;\n    wasm.__wbindgen_start();\n    return wasm;\n}";
+        let held = held(glue).unwrap();
+        assert!(held.contains("    if (!globalThis.__aioWorker) wasm.__wbindgen_start();\n"), "{held}");
+        assert_eq!(super::held("no start here").unwrap(), "no start here");
+        let twice = format!("{glue}{glue}");
+        assert!(super::held(&twice).is_err() && super::held("wasm.__wbindgen_start(x);").is_err());
+        // The worker is not the app: it holds the start, and answers each job.
+        assert!(WORKER_JS.starts_with("globalThis.__aioWorker = true;"));
+        assert!(WORKER_JS.contains("await m.__aio_work(step, arg)"));
     }
 
     #[test]
@@ -861,6 +1272,29 @@ mod tests {
     }
 
     #[test]
+    fn a_dev_web_build_optimizes_the_libraries_and_links_no_debug_info_a_release_is_a_release() {
+        let dev = cargo_args("hello", Some("aio/dev")).join(" ");
+        assert!(dev.contains("-p hello --lib --crate-type cdylib --features aio/dev"), "{dev}");
+        assert!(dev.contains("--config profile.dev.package.\"*\".opt-level=1"), "{dev}");
+        assert!(dev.contains("--config profile.dev.strip=\"debuginfo\""), "{dev}");
+        let release = cargo_args("hello", None).join(" ");
+        assert!(release.ends_with("--release") && !release.contains("--config"), "{release}");
+    }
+
+    #[test]
+    fn a_dev_web_build_turns_on_aio_rs_dev_by_the_name_the_package_gives_it() {
+        let meta = serde_json::json!({ "packages": [
+            { "name": "hello", "dependencies": [
+                { "name": "aio-rs", "rename": "aio", "kind": "dev" },
+                { "name": "aio-rs", "rename": "core", "kind": null },
+            ] },
+            { "name": "plain", "dependencies": [{ "name": "aio-rs", "kind": null }] },
+        ]});
+        assert_eq!(aio_named(&meta, "hello"), "core", "the normal dependency's name, not the tests'");
+        assert_eq!(aio_named(&meta, "plain"), "aio-rs");
+    }
+
+    #[test]
     fn the_manifest_installs_the_app_in_its_own_colours() {
         let m: serde_json::Value =
             serde_json::from_str(&manifest("Notes \"1\"", 210, &[("icon-192.png".into(), 192)])).unwrap();
@@ -892,11 +1326,15 @@ mod tests {
         ] {
             assert!(h.contains(want), "{want}: {h}");
         }
-        // The worker registers from start.js, saying why when it can't; a dev build's has none.
+        // The worker registers from start.js once the view is drawn (its
+        // download takes nothing from the page's), saying why when it can't;
+        // a dev build's has none. Both say where the site's files are.
         let start = start_js(false);
         assert!(start.contains("register('./sw.js')") && start.contains("It needs https (or localhost)"));
+        assert!(start.contains("addEventListener('aio:mounted', () =>\n  navigator.serviceWorker.register("));
         assert!(start.find("register(").unwrap() < start.find("start();").unwrap());
         assert!(!start_js(true).contains("serviceWorker") && start_js(true).contains("start();"));
+        assert!(start.starts_with(BASE) && start_js(true).starts_with(BASE));
         let app = |toml: &str| aio::config::Config::parse(&format!("[app]\nid = \"t\"\n{toml}")).unwrap().app;
         let p = index_html("A <b>", &app("lang = \"cs\""), &h, "<p>first</p>");
         assert!(p.contains(r#"<html lang="cs">"#) && p.contains("<title>A &lt;b&gt;</title>"), "{p}");
@@ -986,29 +1424,30 @@ mod tests {
             "error[E0425]: cannot find value `y` in this scope\n --> src/ui.rs:3:9\n  |\n3 |     y\n  |     ^"
         );
         assert_eq!(fatal("   Compiling notes\nwarning: x\n"), "", "no error: nothing on the page");
+        // Each answer is held by the server until something changed: the
+        // page asks again at once, past the version it has.
         let js = format!(
-            "const on = {{}}, ticks = [], answers = [{{ n: 1, error: null }}, {{ n: 1, error: {e:?} }}, {{ n: 1, error: {e:?} }}, {{ n: 2, error: null }}];
+            "const on = {{}}, asked = [], hot = [], answers = [{{ v: 0, n: 1, error: null, hot: null }},
+               {{ v: 1, n: 1, error: {e:?}, hot: null }}, {{ v: 2, n: 1, error: {e:?}, hot: null }},
+               {{ v: 3, n: 1, error: {e:?}, hot: {{ g: 1, files: ['src/lib.rs'], templates: [] }} }},
+               {{ v: 4, n: 1, error: {e:?}, hot: {{ g: 1, files: ['src/lib.rs'], templates: [] }} }},
+               {{ v: 5, n: 2, error: null, hot: null }}];
              let reloaded = false;
-             globalThis.window = {{ addEventListener: (k, f) => on[k] = f }};
+             globalThis.window = {{ addEventListener: (k, f) => on[k] = f, __aioHot: (j) => hot.push(JSON.parse(j).g) }};
              globalThis.location = {{ reload: () => reloaded = true }};
-             globalThis.setTimeout = (f) => ticks.push(f);
-             globalThis.fetch = () => Promise.resolve({{ ok: true, json: () => answers.shift() }});
+             globalThis.setTimeout = () => {{}};
+             globalThis.fetch = (url) => (asked.push(url), Promise.resolve({{ ok: true, json: () => answers.shift() }}));
              const el = (tag) => ({{ tag, kids: [], style: {{}}, attrs: {{}}, textContent: '',
                setAttribute(k, v) {{ this.attrs[k] = v; }},
                attachShadow() {{ return this; }},
                appendChild(c) {{ this.kids.push(c); }} }});
              globalThis.document = {{ body: el('body'), createElement: el }};
              {}\n{RELOAD}
-             const flush = () => new Promise((r) => setImmediate(r));
-             const step = () => {{ ticks.shift()(); return flush(); }};
-             (async () => {{
-               await flush(); const before = document.body.kids.length;
-               await step(); await step();
+             setImmediate(() => setImmediate(() => setImmediate(() => {{
                const [list, badge] = document.body.kids[0].kids;
                const shown = [list.kids.length, list.kids[0].textContent, list.style.display, badge.textContent];
-               await step();
-               console.log(JSON.stringify([before, ...shown, reloaded]));
-             }})();",
+               console.log(JSON.stringify([...shown, hot, reloaded, asked]));
+             }})));",
             aio::page::OVERLAY
         );
         let Ok(out) = std::process::Command::new("node").args(["-e", &js]).output() else {
@@ -1016,8 +1455,43 @@ mod tests {
         };
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        // Nothing while it builds; the error once (asked twice), open; a good build reloads.
-        assert_eq!(got, serde_json::json!([0, 1, format!("build failed — {e}"), "block", "1 page error", true]));
+        // The error once (told twice), open; the markup once (told twice); a good build reloads.
+        let asked: Vec<String> = ["".into()].into_iter().chain((0..5).map(|v| format!("?after={v}"))).collect();
+        let asked: Vec<String> = asked.iter().map(|q| format!("/aio-dev/build{q}")).collect();
+        assert_eq!(got, serde_json::json!([2, format!("build failed — {e}"), "block", "1 problem", [1], true, asked]));
+    }
+
+    #[test]
+    fn a_dev_page_is_told_each_change_as_it_comes_its_markup_until_a_build() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let live = std::sync::Arc::new(Live::default());
+        let wait = std::time::Duration::from_secs(5);
+        rt.block_on(async {
+            let first = live.after(None, wait).await;
+            assert_eq!(first, serde_json::json!({ "v": 0, "n": 1, "error": null, "hot": null }), "at once");
+            // Held until a change: then answered with it.
+            let l = live.clone();
+            let held = tokio::spawn(async move { l.after(Some(0), wait).await });
+            tokio::task::yield_now().await;
+            live.hot(serde_json::json!({ "files": ["src/lib.rs"], "templates": [] }));
+            let got = held.await.unwrap();
+            assert_eq!(
+                (&got["v"], &got["hot"]["g"], &got["hot"]["files"][0]),
+                (&1.into(), &1.into(), &"src/lib.rs".into())
+            );
+            live.hot(serde_json::json!({ "files": ["src/lib.rs"], "templates": [] }));
+            assert_eq!(live.after(Some(1), wait).await["hot"]["g"], 2, "each edit a new generation");
+            live.failed("error: x".into());
+            assert!(live.built(), "red to green");
+            let now = live.after(Some(3), wait).await;
+            assert_eq!(
+                (&now["n"], &now["error"], &now["hot"]),
+                (&2.into(), &serde_json::Value::Null, &serde_json::Value::Null)
+            );
+            // Nothing new: the same state once the wait is up.
+            let quiet = live.after(Some(4), std::time::Duration::from_millis(20)).await;
+            assert_eq!(quiet["v"], 4);
+        });
     }
 
     #[test]
@@ -1040,16 +1514,21 @@ mod tests {
     #[test]
     fn the_worker_is_named_by_the_build_and_pins_only_code() {
         let files = vec![("app.js".to_string(), b"js".to_vec()), ("icon 1#.png".into(), b"png".to_vec())];
-        let sw = service_worker("notes", &files);
+        let sw = service_worker("notes", &files, false);
         assert!(sw.contains(r#"const FILES = ["./","./app.js","./icon 1%23.png"];"#), "{sw}");
         assert!(sw.contains(r#""./app.js":"sha256-"#) && !sw.contains(r#""./icon 1%23.png":"sha256"#), "{sw}");
         assert!(sw.contains(&format!("aio-notes-{}@", content_hash(&files))));
         // Another build is another worker; the same build the same.
         let other = vec![("app.js".to_string(), b"js2".to_vec())];
         assert_ne!(content_hash(&files), content_hash(&other));
-        assert_eq!(sw, service_worker("notes", &files));
+        assert_eq!(sw, service_worker("notes", &files, false));
         // The app's own server is never cached.
         assert!(sw.contains("u.pathname === '/ws' || u.pathname.startsWith('/__aio/')"));
+        // A static host's page from the cache at once; a server's asked first (it paints it fresh).
+        assert!(
+            sw.contains("const SERVED = false;")
+                && service_worker("notes", &files, true).contains("const SERVED = true;")
+        );
     }
 }
 
@@ -1058,6 +1537,7 @@ mod tests {
 /// synced copy of its server's cell, offline too, twin tabs mirrored.
 #[cfg(all(test, unix))]
 pub(crate) mod browser {
+    pub(crate) use super::skipped;
     use super::*;
     use aio::prelude::*;
     use aio::serde_json::{Value, json};
@@ -1068,13 +1548,6 @@ pub(crate) mod browser {
     include!("web/board.rs");
 
     const KEY: &str = "a-long-random-app-key-for-tests";
-
-    /// A test that can't run here says why and ends; where these tests
-    /// must run (`AIO_CI_WEB` set: CI, the tools fetched) it fails instead.
-    pub(crate) fn skipped(why: &str) {
-        assert!(std::env::var_os("AIO_CI_WEB").is_none(), "{why}: AIO_CI_WEB is set, so this test must run");
-        eprintln!("{why}: skipped");
-    }
 
     /// The test page's site, built and bound into `dir/site`; `None` (said)
     /// without the wasm32 target or the right wasm-bindgen.
@@ -1111,12 +1584,12 @@ pub(crate) mod browser {
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
         let app = App { id: "web-test".into(), name: "Web test".into(), version: "1.0.0".into(), icon: None };
         let out = dir.join("site");
-        match bind(&page, &target, ("webpage", "webpage"), &app, &out, false, false) {
+        match bind(&page, &target, ("webpage", "webpage", "aio"), &app, &out, false, false, None) {
             Err(e) if e.contains("needs wasm-bindgen") => {
                 skipped(&e);
                 return None;
             }
-            r => r.unwrap(),
+            r => _ = r.unwrap(),
         }
         let cfg = aio::config::Config::parse(
             "[app]\nid = \"web-test\"\nname = \"Web test\"\nlang = \"cs\"\ndir = \"auto\"\n\
@@ -1437,6 +1910,180 @@ pub(crate) mod browser {
         assert!(want("[page] error: [unhandled rejection] Error: no answer"), "{got:?}");
     }
 
+    /// The board's view, natively: what the server paints the page with.
+    mod shown {
+        use super::{Board, BoardCalls};
+        include!("web/view.rs");
+
+        pub(crate) fn app() -> View {
+            view()
+        }
+    }
+
+    /// Notes, from the page's first script, when `#items` first shows a row
+    /// (`window.shownAt`, ms) and what the page held when air's interpreter
+    /// took its first frame (`window.painted`: `#main`'s elements, the rows).
+    const WATCH: &str = "new MutationObserver((_, o) => { if (document.querySelector('#items li')) \
+                         { window.shownAt = performance.now(); o.disconnect() } }).observe(document, { childList: true, subtree: true }); \
+                         Object.defineProperty(window, '__airApply', { configurable: true, set(f) { \
+                         Object.defineProperty(window, '__airApply', { configurable: true, writable: true, value: (fr) => { \
+                         window.painted ||= { nodes: [...document.querySelectorAll('#main *')], \
+                         rows: [...document.querySelectorAll('#items li')].map((l) => l.textContent) }; return f(fr) } }) } })";
+
+    /// A board of `a` and `b` served with the site, painted on the server or
+    /// not; its address and the board.
+    async fn board_site(site: &Path, painted: bool) -> (String, Handle<Board>) {
+        let h = Handle::<Board>::memory();
+        for i in ["a", "b"] {
+            h.call("add", json!([i])).unwrap();
+        }
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let http = aio::http::Http::default().shell(site);
+        let http = if painted { http.painted(shown::app) } else { http };
+        let opts = aio::sync::Options { token: KEY.into(), http, ..Default::default() };
+        tokio::spawn(aio::sync::serve_with(h.clone(), l, opts));
+        (addr, h)
+    }
+
+    /// Tab `t` (its first script [`WATCH`]ing) gone to `url`: when its rows showed.
+    async fn shown_at(t: &mut crate::cdp::Session, url: &str) -> f64 {
+        t.call("Page.navigate", json!({ "url": url })).await.unwrap();
+        until(t, "window.ready", json!("yes")).await;
+        until(t, "typeof window.shownAt", json!("number")).await;
+        t.eval("window.shownAt").await.unwrap().as_f64().unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_served_page_is_painted_on_the_server_then_hydrated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(site) = tokio::task::spawn_blocking({
+            let d = dir.path().to_path_buf();
+            move || site(&d)
+        })
+        .await
+        .unwrap() else {
+            return;
+        };
+        let (addr, h) = board_site(&site, true).await;
+        let Some(c) = Chromium::open("about:blank") else {
+            return skipped("no Chromium");
+        };
+        let mut t = c.tabs("about:blank", 1).await.remove(0);
+        t.call("Page.enable", json!({})).await.unwrap();
+        t.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": WATCH })).await.unwrap();
+        // Each navigation reaches the server (a standalone site's worker would
+        // answer it with the page as built); the files come from the HTTP cache.
+        t.call("Network.enable", json!({})).await.unwrap();
+        t.call("Network.setBypassServiceWorker", json!({ "bypass": true })).await.unwrap();
+        let painted_at = shown_at(&mut t, &format!("http://{addr}/?token={KEY}")).await;
+        // The rows were in the page before the view ran, and the view took
+        // its nodes over: none replaced, every element the server's.
+        assert_eq!(t.eval("window.painted.rows").await.unwrap(), json!(["a", "b"]));
+        until(&mut t, "!!window.__airHydrated", json!(true)).await;
+        assert_eq!(t.eval("window.__airHydrated.replaced").await.unwrap(), json!(0));
+        let kept = "window.painted.nodes.every((n) => n.isConnected) && \
+                    window.painted.nodes.length === document.querySelectorAll('#main *').length";
+        assert_eq!(t.eval(kept).await.unwrap(), json!(true));
+        // The head the view asked for, from the server, written once.
+        assert_eq!(t.eval("document.title").await.unwrap(), json!("2 items"));
+        let tags = "document.querySelectorAll('meta[name=description][data-aio-head]').length";
+        assert_eq!(t.eval(tags).await.unwrap(), json!(1));
+        // Wired: a click on the server's button is the cell's call, its row
+        // drawn in the server's list; the copy links and stays in sync.
+        until(&mut t, "document.getElementById('link').textContent", json!("online")).await;
+        t.eval("document.getElementById('add').click()").await.unwrap();
+        served(&h, &["a", "b", "ui"]).await;
+        let rows = "[...document.querySelectorAll('#items li')].map((l) => l.textContent)";
+        until(&mut t, rows, json!(["a", "b", "ui"])).await;
+        assert_eq!(t.eval("window.painted.nodes[0] === document.getElementById('items')").await.unwrap(), json!(true));
+        h.call("add", json!(["server"])).unwrap();
+        until(&mut t, rows, json!(["a", "b", "ui", "server"])).await;
+        // The same site unpainted: its rows show only once the module ran and
+        // linked. Each warmed once, then taken in turn; the medians compared.
+        let (other, _) = board_site(&site, false).await;
+        let urls = [format!("http://{addr}/?token={KEY}"), format!("http://{other}/?token={KEY}")];
+        shown_at(&mut t, &urls[1]).await;
+        assert_eq!(t.eval("window.painted.rows").await.unwrap(), json!([]));
+        let mut at = [vec![painted_at], vec![]];
+        for _ in 0..5 {
+            for (i, url) in urls.iter().enumerate() {
+                at[i].push(shown_at(&mut t, url).await);
+                let painted = t.eval("window.painted.rows.length > 0").await.unwrap();
+                assert_eq!(painted, json!(i == 0), "{url}");
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let (painted, drawn) = (median(&mut at[0]), median(&mut at[1]));
+        eprintln!("rows shown, median ms from navigation: {painted:.1} painted, {drawn:.1} drawn by the page ({at:?})");
+        assert!(painted < drawn, "painted {painted} ms, drawn by the page {drawn} ms");
+    }
+
+    /// Notes, from the page's first script, when `#slow` first shows and
+    /// when it shows its count (`window.slow`: ms, and the texts it showed).
+    const SLOW: &str = "window.slow = { texts: [] }; new MutationObserver(() => { const s = document.getElementById('slow'); \
+                        const t = s && s.textContent; if (t && t !== window.slow.texts.at(-1)) { window.slow.texts.push(t); \
+                        window.slow[t] = performance.now() } }).observe(document, { childList: true, subtree: true, characterData: true })";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_streamed_page_shows_at_once_and_fills_in_what_waited_before_its_view_hydrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(site) = tokio::task::spawn_blocking({
+            let d = dir.path().to_path_buf();
+            move || site(&d)
+        })
+        .await
+        .unwrap() else {
+            return;
+        };
+        let (addr, _h) = board_site(&site, true).await;
+        let Some(c) = Chromium::open("about:blank") else {
+            return skipped("no Chromium");
+        };
+        let mut t = c.tabs("about:blank", 1).await.remove(0);
+        t.call("Page.enable", json!({})).await.unwrap();
+        t.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": SLOW })).await.unwrap();
+        t.call("Network.enable", json!({})).await.unwrap();
+        t.call("Network.setBypassServiceWorker", json!({ "bypass": true })).await.unwrap();
+        let url = format!("http://{addr}/?token={KEY}");
+        let timing = "(() => { const n = performance.getEntriesByType('navigation')[0], \
+                      p = performance.getEntriesByName('first-contentful-paint')[0]; \
+                      return [n.responseStart, n.responseEnd, p ? p.startTime : -1, window.slow.counting ?? -1, \
+                      window.slow['7 counted'] ?? -1] })()";
+        let mut runs = vec![];
+        for _ in 0..5 {
+            t.call("Page.navigate", json!({ "url": url })).await.unwrap();
+            until(&mut t, "window.ready", json!("yes")).await;
+            until(&mut t, "!!window.__airHydrated", json!(true)).await;
+            // The fallback came with the page, the count in place of it
+            // before the view ran, which took both over as they were.
+            assert_eq!(t.eval("window.slow.texts").await.unwrap(), json!(["counting", "7 counted"]));
+            assert_eq!(t.eval("window.__airHydrated.replaced").await.unwrap(), json!(0));
+            let at: Vec<f64> = aio::serde_json::from_value(t.eval(timing).await.unwrap()).unwrap();
+            runs.push(at);
+        }
+        // The page took the server's value: its own load (8) never ran.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(t.eval("document.getElementById('slow').textContent").await.unwrap(), json!("7 counted"));
+        let median = |i: usize| {
+            let mut v: Vec<f64> = runs.iter().map(|r| r[i]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let (first_byte, last_byte, first_paint, fallback, filled) =
+            (median(0), median(1), median(2), median(3), median(4));
+        eprintln!(
+            "streamed, median ms from navigation: first byte {first_byte:.1}, first paint {first_paint:.1}, \
+             fallback {fallback:.1}, filled in {filled:.1}, last byte {last_byte:.1} ({runs:?})"
+        );
+        // A page rendered whole would send its first byte after its last.
+        assert!(first_byte + 100.0 < last_byte, "first byte {first_byte} ms, last {last_byte} ms");
+        assert!(fallback < filled && filled <= last_byte + 50.0, "fallback {fallback} ms, filled {filled} ms");
+    }
+
     /// Types `text` into the field `t` names, as a person does.
     fn typed(t: &str, text: &str) -> String {
         format!(
@@ -1558,12 +2205,12 @@ mod browser_air {
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
         let app = App { id: "air-web-test".into(), name: "Air web test".into(), version: "1.0.0".into(), icon: None };
         let out = dir.join("site");
-        match bind(&page, &target, ("airpage", "airpage"), &app, &out, true, false) {
+        match bind(&page, &target, ("airpage", "airpage", "aio"), &app, &out, true, false, None) {
             Err(e) if e.contains("needs wasm-bindgen") => {
                 skipped(&e);
                 return None;
             }
-            r => r.unwrap(),
+            r => _ = r.unwrap(),
         }
         let cfg = aio::config::Config::parse("[app]\nid = \"air-web-test\"\nname = \"Air web test\"").unwrap();
         assert_eq!(pack(&app, &cfg, &page, &out, "", true).unwrap(), Vec::<String>::new());
@@ -1580,7 +2227,7 @@ mod browser_air {
     }
 
     /// The site's files over HTTP, by path (a static host), until dropped.
-    fn serve(site: PathBuf, l: tokio::net::TcpListener) -> tokio::task::JoinHandle<()> {
+    pub(super) fn serve(site: PathBuf, l: tokio::net::TcpListener) -> tokio::task::JoinHandle<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         tokio::spawn(async move {
             while let Ok((mut s, _)) = l.accept().await {
@@ -1614,6 +2261,15 @@ mod browser_air {
         })
     }
 
+    /// The Redux DevTools extension's page API, as a stand-in that keeps
+    /// what it is told; and the console's errors.
+    const EXTENSION: &str = "window.__rd = { sent: [], subs: [] };
+        window.__REDUX_DEVTOOLS_EXTENSION__ = { connect: () => ({
+          init: (s) => window.__rd.sent.push(['init', s]), send: (a, s) => window.__rd.sent.push([a, s]),
+          subscribe: (f) => window.__rd.subs.push(f), unsubscribe: () => { window.__rd.subs = [] } }) };
+        window.__errs = []; const err = console.error.bind(console);
+        console.error = (...a) => { window.__errs.push(a.join(' ')); err(...a) };";
+
     const REFUSED: &str = "window.refused = []; document.addEventListener('securitypolicyviolation', \
                            (e) => window.refused.push(e.violatedDirective + ' ' + e.blockedURI))";
 
@@ -1637,6 +2293,7 @@ mod browser_air {
         let mut t = c.tabs(&url, 1).await.remove(0);
         t.call("Page.enable", json!({})).await.unwrap();
         t.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": REFUSED })).await.unwrap();
+        t.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": EXTENSION })).await.unwrap();
         t.eval("location.reload()").await.ok();
         let text = |id: &str| format!("document.querySelector('[data-t={id}]')?.textContent ?? null");
         until(&mut t, &text("n"), json!("0")).await;
@@ -1646,6 +2303,21 @@ mod browser_air {
             t.eval("document.querySelector('[data-t=add]').click()").await.unwrap();
         }
         until(&mut t, &text("n"), json!("2")).await;
+        // A dev page's cell in Redux DevTools: its calls, its states; a jump
+        // puts the page's own cell back to the state the extension holds.
+        let add = |n: u64| json!([{ "type": "add", "args": [1] }, { "n": n }]);
+        until(&mut t, "window.__rd.sent", json!([["init", { "n": 0 }], add(1), add(2)])).await;
+        let jump = |id: u64, n: u64| {
+            let state = format!("{{\"n\":{n}}}");
+            let m =
+                json!({ "type": "DISPATCH", "payload": { "type": "JUMP_TO_STATE", "actionId": id }, "state": state });
+            format!("window.__rd.subs.forEach((f) => f({m})), true")
+        };
+        t.eval(&jump(1, 1)).await.unwrap();
+        until(&mut t, &text("n"), json!("1")).await;
+        t.eval(&jump(2, 2)).await.unwrap();
+        until(&mut t, &text("n"), json!("2")).await;
+        assert_eq!(t.eval("window.__rd.sent.length").await.unwrap(), json!(3), "a jump is no action");
         // Typing: the value follows, and what shows it.
         let typed = "{ const i = document.querySelector('[data-t=name]'); i.value = 'hey'; \
                      i.dispatchEvent(new Event('input', { bubbles: true })); }";
@@ -1660,8 +2332,164 @@ mod browser_air {
         // The page's policy refused nothing (the interpreter is a script of the page's own making).
         assert_eq!(t.eval("window.refused").await.unwrap(), json!([]));
         // Reloaded: the cell as the browser kept it.
+        // (`stale`: the old page, until the new one replaced it.)
         tokio::time::sleep(Duration::from_millis(300)).await;
+        t.eval("window.stale = true; location.reload()").await.ok();
+        until(&mut t, &format!("window.stale ? null : {}", text("n")), json!("2")).await;
+        // A panic of the page's Rust: its place on the console, open in the overlay.
+        t.eval("document.querySelector('[data-t=boom]').click()").await.ok();
+        let said = "window.__errs.some((e) => e.startsWith('[aio] panicked at src/lib.rs:') && e.endsWith('boom in the page'))";
+        until(&mut t, said, json!(true)).await;
+        let shown = "document.querySelector('[data-aio-dev=overlay]').shadowRoot.textContent";
+        until(&mut t, &format!("{shown}.includes('panic — panicked at src/lib.rs:')"), json!(true)).await;
+    }
+}
+
+/// A release web build split (a real headless Chromium, the wasm32 target
+/// and the lock's wasm-bindgen; skipped without them): a lazy view's code
+/// in its own chunk, fetched only when the view first shows, and work off
+/// the page's thread in workers running the page's own module.
+#[cfg(all(test, unix))]
+mod browser_split {
+    use super::browser::{Chromium, skipped, until};
+    use super::*;
+    use aio::serde_json::json;
+    use std::time::Duration;
+
+    /// The test page's site, a release, built and bound into `dir/site`;
+    /// `None` (said) without the wasm32 target or the right wasm-bindgen.
+    fn site(dir: &Path) -> Option<PathBuf> {
+        let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
+        let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
+        if !sysroot.join("lib/rustlib/wasm32-unknown-unknown").is_dir() {
+            skipped("no wasm32 target");
+            return None;
+        }
+        let page = dir.join("page");
+        std::fs::create_dir_all(page.join("src")).unwrap();
+        let aio = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aio");
+        let manifest = format!(
+            "[package]\nname = \"splitpage\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n\
+             [lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n\
+             aio = {{ package = \"aio-rs\", path = {:?}, default-features = false, features = [\"web\", \"air\"] }}\n\
+             wasm-bindgen = \"0.2\"\njs-sys = \"0.3\"\n\n[workspace]\n",
+            aio.display().to_string()
+        );
+        for (f, text) in [
+            ("Cargo.toml", manifest.as_str()),
+            ("Cargo.lock", include_str!("../../../Cargo.lock")),
+            ("rust-toolchain.toml", include_str!("../../../rust-toolchain.toml")),
+            ("src/lib.rs", include_str!("web/lazy.rs")),
+        ] {
+            std::fs::write(page.join(f), text).unwrap();
+        }
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
+        let app = App { id: "split-test".into(), name: "Split test".into(), version: "1.0.0".into(), icon: None };
+        let out = dir.join("site");
+        match bind(&page, &target, ("splitpage", "splitpage", "aio"), &app, &out, false, false, None) {
+            Err(e) if e.contains("needs wasm-bindgen") => {
+                skipped(&e);
+                return None;
+            }
+            r => _ = r.unwrap(),
+        }
+        let cfg = aio::config::Config::parse("[app]\nid = \"split-test\"\nname = \"Split test\"").unwrap();
+        assert_eq!(pack(&app, &cfg, &page, &out, "", false).unwrap(), Vec::<String>::new());
+        Some(out)
+    }
+
+    /// The page's errors, kept.
+    const ERRORS: &str = "window.__errs = []; const err = console.error.bind(console);
+        console.error = (...a) => { window.__errs.push(a.join(' ')); err(...a) };
+        addEventListener('error', (e) => window.__errs.push(String(e.message)));
+        addEventListener('unhandledrejection', (e) => window.__errs.push(String(e.reason)));";
+
+    /// The page's fetches: each file's name.
+    const FETCHED: &str = "performance.getEntriesByType('resource').map((e) => e.name.split('/').pop())";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lazy_views_code_is_fetched_when_it_shows_and_work_runs_off_the_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(site) = tokio::task::spawn_blocking({
+            let d = dir.path().to_path_buf();
+            move || site(&d)
+        })
+        .await
+        .unwrap() else {
+            return;
+        };
+        // One chunk, for the one lazy view; the main module without names.
+        let files: Vec<String> =
+            std::fs::read_dir(&site).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        let chunks: Vec<&String> = files.iter().filter(|f| f.starts_with("app.") && f.ends_with(".wasm")).collect();
+        assert_eq!(chunks.len(), 1, "{files:?}");
+        let chunk = chunks[0].clone();
+        // The view's code moved out: the kit's markdown parser and more.
+        let (main, moved) = (wasm_size(&site).unwrap(), std::fs::metadata(site.join(&chunk)).unwrap().len());
+        eprintln!(
+            "the first module: {} KB ({} KB gzipped); the lazy view's chunk: {} KB",
+            main.0 / 1000,
+            main.1 / 1000,
+            moved / 1000
+        );
+        // ~49 KB: air's hooks and effects keep their type-free part in the
+        // first module (one copy), so less of each view is its own.
+        assert!(moved > 45_000, "{moved} bytes moved");
+        let sw = std::fs::read_to_string(site.join("sw.js")).unwrap();
+        assert!(sw.contains(&format!("./{chunk}")) && sw.contains("./worker.js"), "held offline: {sw}");
+        // The chunk not there at first: the host is behind (or the page offline).
+        let held = site.join(format!("{chunk}.held"));
+        std::fs::rename(site.join(&chunk), &held).unwrap();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let _server = super::browser_air::serve(site.clone(), l);
+        let Some(c) = Chromium::open(&url) else {
+            return skipped("no Chromium");
+        };
+        let mut t = c.tabs(&url, 1).await.remove(0);
+        t.call("Page.enable", json!({})).await.unwrap();
+        t.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": ERRORS })).await.unwrap();
         t.eval("location.reload()").await.ok();
-        until(&mut t, &text("n"), json!("2")).await;
+        let text = |id: &str| format!("document.querySelector('[data-t={id}]')?.textContent ?? null");
+        let click = |id: &str| format!("document.querySelector('[data-t={id}]').click()");
+        until(&mut t, &text("tick"), json!("ticks 0")).await;
+        let fetched = |f: &str| format!("{FETCHED}.includes('{f}')");
+        assert_eq!(t.eval(&fetched("app_bg.wasm")).await.unwrap(), json!(true));
+        assert_eq!(t.eval(&fetched(&chunk)).await.unwrap(), json!(false), "not shown: not fetched");
+        // Work in a worker: its answer, counted off the page.
+        t.eval(&click("count")).await.unwrap();
+        until(&mut t, &text("counted"), json!("(348513, true)")).await;
+        // Work that never ends: the page goes on; stopped, its worker ends.
+        t.eval(&click("spin")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        t.eval(&click("tick")).await.unwrap();
+        until(&mut t, &text("tick"), json!("ticks 1")).await;
+        assert_eq!(t.eval(&text("spun")).await.unwrap(), json!(""));
+        t.eval(&click("stop")).await.unwrap();
+        until(&mut t, &text("spun"), json!("refused: blocking `spin` was cancelled")).await;
+        // A panic in the worker: refused, with its message.
+        t.eval(&click("boom")).await.unwrap();
+        let spun = "document.querySelector('[data-t=spun]').textContent";
+        let said = format!("{spun}.includes('panicked') && {spun}.includes('boom in the worker')");
+        until(&mut t, &said, json!(true)).await;
+        assert_eq!(t.eval(&fetched(&chunk)).await.unwrap(), json!(false), "the worker's fetches are its own");
+        // Shown while its chunk can't be fetched: `error` says so; shown
+        // again, it is fetched again.
+        t.eval(&click("open")).await.unwrap();
+        let failed =
+            "(document.querySelector('[data-t=failed]')?.textContent ?? '').includes('could not be loaded: HTTP 404')";
+        until(&mut t, failed, json!(true)).await;
+        std::fs::rename(&held, site.join(&chunk)).unwrap();
+        t.eval(&click("close")).await.unwrap();
+        // Shown: its chunk fetched, once more; its markdown, clicks and work run.
+        t.eval(&click("open")).await.unwrap();
+        until(&mut t, "document.querySelector('[data-t=heavy] h1')?.textContent ?? null", json!("Heavy")).await;
+        let fetches = format!("{FETCHED}.filter((f) => f === '{chunk}').length");
+        assert_eq!(t.eval(&fetches).await.unwrap(), json!(2));
+        t.eval(&click("hit")).await.unwrap();
+        until(&mut t, &text("hit"), json!("hits 1")).await;
+        t.eval(&click("sum")).await.unwrap();
+        until(&mut t, &text("summed"), json!("(385, true)")).await;
+        assert_eq!(t.eval("window.__errs").await.unwrap(), json!([]));
     }
 }

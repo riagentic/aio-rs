@@ -25,7 +25,8 @@ pub fn child() -> Verb {
     Arc::new(|args: Vec<String>, cwd: Option<PathBuf>| {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut cmd = std::process::Command::new(exe);
-        cmd.args(&args).stdin(std::process::Stdio::null());
+        // Its answers are shown as said: text, though its stdout is a pipe.
+        cmd.args(&args).stdin(std::process::Stdio::null()).env("AIORT_OUTPUT", "text");
         if let Some(d) = cwd.filter(|d| d.is_dir()) {
             cmd.current_dir(d);
         }

@@ -292,6 +292,26 @@ fn an_app_whose_cell_lives_here_opens_its_door() {
     _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &dirs.data).unwrap());
 }
 
+/// aio's `allowLocalPeers` is off unless set; aio-rs's door is on unless
+/// `[server] local_peers = false`, and then a release build opens none (a
+/// release door gives a tool only a client's rights: `door.rs`'s
+/// `a_release_door_gives_a_client_s_rights_never_the_operator_s`); a debug
+/// build's door is the developer's and stays.
+#[test]
+fn a_release_app_with_local_peers_off_opens_no_door() {
+    let d = tempfile::tempdir().unwrap();
+    let id = format!("door-off-{}", std::process::id());
+    let cfg = aio::config::Config::parse(&format!("[app]\nid = \"{id}\"\n[server]\nlocal_peers = false")).unwrap();
+    let dirs = aio::paths::AppDirs::at(d.path(), &id).unwrap();
+    let s = aio::Source::<Board>::for_app(&cfg, &dirs).unwrap();
+    s.call("add", serde_json::json!(["standalone"])).unwrap();
+    let addr = aio::sync::door(&id, &dirs.data, "board").unwrap();
+    let link = Link { addr, token: String::new(), root: None };
+    let opened = aio::rt().block_on(Live::connect(&link, "board", "ops")).is_ok();
+    assert_eq!(opened, aio::door::OPERATOR, "a release build: no door to knock on");
+    _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &dirs.data).unwrap());
+}
+
 #[test]
 fn a_server_binary_opens_its_store_and_refuses_client_mode() {
     let d = tempfile::tempdir().unwrap();
@@ -525,4 +545,98 @@ async fn the_operator_writes_now_and_drops_a_cell_nothing_declares() {
     assert_eq!(t.ask(json!({ "t": "drop", "cell": "steps" })).await.unwrap(), false, "gone already");
     let e = t.ask(json!({ "t": "drop", "cell": "kept" })).await.unwrap_err();
     assert!(e.to_string().contains("never dropped"), "{e}");
+}
+
+/// Only `a_tool_calls_as_the_server_and_runs_a_server_fn` serves it: users
+/// may read it, only the app's own code may change it (aio's `access: false`).
+#[cell(shared)]
+pub struct Serverside {
+    pub n: u32,
+}
+
+#[methods]
+impl Serverside {
+    pub fn set(&mut self, n: u32) {
+        self.n = n;
+    }
+}
+
+/// aio's `am dispatch --as-server` and its plain actions: a tool on a debug
+/// build's door calls as the app's server code (`By::System`, past a
+/// `before_call` that refuses users) and runs the app's server functions.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_calls_as_the_server_and_runs_a_server_fn() {
+    use aio::fns::{Access, ServerFn};
+    use serde_json::json;
+    const DOUBLE: ServerFn<(u32,), u32> = ServerFn::new("math.double");
+    aio::before_call(|c| match (c.cell, c.by) {
+        ("serverside", By::User(_)) => Err(Rejected::new("server-only writes")),
+        _ => Ok(()),
+    });
+    let d = tempfile::tempdir().unwrap();
+    let h = Handle::<Serverside>::memory();
+    let addr = aio::ipc::addr(d.path(), "cell-serverside");
+    let http = aio::http::Http::default().server_fn(DOUBLE, Access::Open, |_, (n,)| async move { Ok(n * 2) });
+    let l = aio::ipc::Listener::bind(&addr).unwrap();
+    let served = h.clone();
+    tokio::spawn(async move { aio::sync::serve_door_with(served, l, Default::default(), &http).await });
+    let link = Link { addr, token: String::new(), root: None };
+    let mut user = Live::connect(&link, "serverside", "ops").await.unwrap();
+    assert_eq!(user.call("set", json!([3])).await.unwrap_err().why, "server-only writes");
+    assert_eq!(user.run("math.double", json!([21])).await, Ok(json!(42)), "a server fn, no cell method");
+    assert!(user.run("math.nope", json!([])).await.is_err());
+    let operator = aio::door::OPERATOR;
+    match Live::as_server(&link, "serverside", "ops").await {
+        Ok(mut server) => {
+            assert!(operator);
+            assert_eq!(server.call("set", json!([3])).await, Ok(json!(null)));
+            assert_eq!(server.view()["n"], 3);
+            assert_eq!(h.store(|s| s.events().unwrap()).last().unwrap().by, By::System, "the server's call");
+        }
+        Err(e) => {
+            assert!(!operator, "{e}");
+            assert!(e.to_string().contains("needs a debug build's door"), "{e}");
+        }
+    }
+}
+
+/// Only `a_tool_has_the_app_file_a_report` serves it.
+#[cell(shared)]
+pub struct Filed {
+    pub n: u32,
+}
+
+#[methods]
+impl Filed {}
+
+/// aio's `am report`: a tool on the door has the running app file a
+/// report now (`ax report <app> --new`), never a network caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_has_the_app_file_a_report() {
+    use serde_json::json;
+    let d = tempfile::tempdir().unwrap();
+    aio::report::init(aio::report::About {
+        id: "door".into(),
+        version: "1.0.0".into(),
+        dir: d.path().join("reports"),
+        log: d.path().join("app.log"),
+        channel: String::new(),
+        keep: 10,
+        auto: true,
+        args: false,
+    });
+    let h = Handle::<Filed>::memory();
+    let mut t = Live::connect(&door(&h, d.path(), "cell-filed"), "filed", "ops").await.unwrap();
+    let file = t.ask(json!({ "t": "report", "title": "it froze" })).await.unwrap();
+    let r: serde_json::Value = serde_json::from_slice(&std::fs::read(file.as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(
+        (r["title"].as_str(), r["kind"].as_str(), r["app"]["id"].as_str()),
+        (Some("it froze"), Some("user"), Some("door"))
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(aio::sync::serve(h.clone(), l, "secret".into()));
+    let mut net = Live::connect(&Link { addr, token: "secret".into(), root: None }, "filed", "cy").await.unwrap();
+    let e = net.ask(json!({ "t": "report" })).await.unwrap_err();
+    assert!(e.to_string().contains("only on the app's local door"), "{e}");
 }

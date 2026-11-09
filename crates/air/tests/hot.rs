@@ -28,6 +28,24 @@ fn app() -> View {
     }
 }
 
+thread_local!(static BESIDE: Cell<Option<Signal<u32>>> = const { Cell::new(None) });
+
+#[component]
+fn Tooling() -> View {
+    BESIDE.set(Some(signal(|| 5)));
+    rsx! {}
+}
+
+#[test]
+fn what_runs_beside_the_app_runs_on_through_a_hot_reload() {
+    let page = TestPage::mount(app);
+    page.root().beside(|| rsx! { Tooling {} });
+    let made = BESIDE.get().unwrap();
+    page.root().hot();
+    assert_eq!(made.get_untracked(), 5, "its state is alive, not ended with the app's views");
+    assert_eq!(BESIDE.get().unwrap(), made, "not built again");
+}
+
 #[test]
 fn views_built_again_keep_their_state_by_place() {
     let mut page = TestPage::mount(app);

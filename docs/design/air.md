@@ -328,9 +328,13 @@ side; node 0 is `#main`.
 | 13 | PARK | first, last (moved off the page, still named: a `Suspense`'s hidden side) |
 | 14 | EVAL | script id, code (run as a script of the page's own making, `aio::page::RUN`) |
 | 15 | EVAL_SEND | script id, JSON (its `await aio.recv()`) |
+| 16 | STYLE | first, last, property, value: one style property of the range's first element |
 
 A template is sent once per page, cloned with `cloneNode` (which keeps
-empty text holes). A `value` property set by the views is skipped while
+empty text holes). An element whose `animation` an edit changed (by STYLE or
+its `style` attribute) gets `--aio-w` and `--aio-h`, its box measured
+without the animation, at the end of that frame's edits: a motion's
+frames read them (aio's `TransitionFn` was given the element). A `value` property set by the views is skipped while
 it is an older echo of what the person typed (aio's typing rule, in
 `page.js`). Page → Rust, one frame each, its first byte its kind:
 `1` an event (`air::Raw`: the listening ids on its path, innermost
@@ -338,7 +342,32 @@ first; its name, key, code, location, modifier and state flags, mouse
 button and buttons, client/page/offset/screen points, wheel deltas and
 mode, the target's value and scroll box, pointer id and type, a
 submitted form's fields), `2` a script's reply (id, kind: a value, its
-return or its failure, JSON).
+return or its failure, JSON), `3` an event the page waits on (as `1`; a
+window's keydown, `air::ASKED`).
+
+A key's answer comes before the page draws again. In a window, `page.js`
+sends a keydown as `3` through the preload's `ask`, which blocks the page
+(Electron's `sendSync`). The app runs the handlers, sends the flush that
+follows, then `[0]` (`air::ANSWERED`). `main.js` hands the frames up to
+that `[0]` back to the page as the answer, and the page applies them
+before its keydown handler returns. So the frame Chromium planned when
+the key came shows the key, as in a page that does its work in its key
+handler. At most 50 ms are waited (`ASK_MS`); a slower answer's frames
+come after, as any frame. `main.js` numbers each frame to the page and
+the preload applies them in that order, so an answer never passes a
+frame sent before it; the frames of the last 250 ms the page has not
+applied yet go first in the answer, so a stream of frames (an
+animation) doesn't hold a key's answer back.
+
+The ask goes through the window's main process: 0.2-0.3 ms each way.
+No shorter path keeps the window's model. The page is sandboxed with no
+network (`connect-src 'none'`) and the app opens no TCP port: a
+`MessagePort` ends in an Electron process (main or a utility one), never
+in the app; a loopback socket would open a port any local process can
+reach and still pass Chromium's network process; `Atomics.wait` is
+refused on a page's main thread and shares no memory with another
+program. A held key's stale repeat is still answered (an
+empty `3`). The browser and Android pages send no `3`.
 
 ## Hot reload and hot patch
 
@@ -688,7 +717,10 @@ as on air.
   Dioxus may live beside air on the dev branch only. If air isn't through
   the gates, 0.2.0 ships on Dioxus and air moves to the next minor.
 - Out of scope, intentional cuts (listed in `docs/aio-vs-aio-rs.md`):
-  server rendering, hydration, head collection, code splitting.
+  code splitting. Server rendering, streaming, hydration and head
+  collection came in 0.4.0 (`air::ssr`, `page.js`'s hydration,
+  `Http::painted`): a server root keeps template instances and writes
+  markup from them; a hole that reads no signal runs once.
 
 ## What Dioxus covers today that air must replace
 

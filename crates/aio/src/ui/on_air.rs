@@ -7,11 +7,29 @@ use serde::de::DeserializeOwned;
 
 pub use air::{
     Attribute, Callback, Code, Component, Effect, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment,
-    FragmentProps, Global, GlobalMemo, Key, Location, Memo, Modifiers, MouseButton, Prop, Props, ReadGuard, Resource,
-    Retry, Signal, Suspense, SuspenseProps, Task, View, ViewError, WriteGuard, callback, component, context, effect,
-    effect_quiet, geometry, in_views, is_empty, key_event, memo, on_cleanup, once, parent_context, provide,
-    provide_now, provide_root, resource, retry, rsx, signal, spawn, spawn_forever, task, try_context, untrack, watch,
+    FragmentProps, Global, GlobalMemo, H, Key, Location, Memo, Modifiers, MouseButton, Optimistic, Prop, Props,
+    ReadGuard, Resource, Retry, Signal, Suspense, SuspenseProps, Task, TrackedMemo, View, ViewError, WriteGuard,
+    callback, comp, component, context, effect, effect_quiet, geometry, h, in_views, is_empty, key_event, memo,
+    on_cleanup, once, parent_context, provide, provide_now, provide_root, resource, retry, rsx, signal, spawn,
+    spawn_forever, task, try_context, untrack, use_optimistic, watch,
 };
+
+/// [`resource`] whose value a served page carries (`Http::painted`): the
+/// server waits for it (up to a deadline) while the page streams, sends
+/// the `Suspense` it filled in with the value, and the web build's first
+/// frame starts from that value with no load of its own. What the closure
+/// reads before its `async` is followed from there:
+/// `seeded_resource(move || { let id = id.get(); async move { load(id).await } })`.
+#[track_caller]
+pub fn seeded_resource<T, F>(f: impl FnMut() -> F + 'static) -> Resource<T>
+where
+    T: Serialize + DeserializeOwned + 'static,
+    F: std::future::Future<Output = T> + 'static,
+{
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    crate::web::seed_resources();
+    air::seeded_resource(|v: &T| serde_json::to_string(v).ok(), |s| serde_json::from_str(s).ok(), f)
+}
 
 /// Run `f(next, prev)` each time `read()`'s value changes, not at the
 /// start (a hook; aio's `watch(source, fn)` and `effect(on(..))`): only

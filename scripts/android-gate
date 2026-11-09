@@ -120,6 +120,7 @@ class Gate:
         home = work / "home"
         env = {k: v for k, v in os.environ.items() if not k.startswith(("AIORT_", "XDG_"))}
         env.update(
+            AIORT_OUTPUT="text",  # ax's lines as a person reads them (a pipe would get JSON)
             HOME=str(home),
             XDG_DATA_HOME=str(home / ".local" / "share"),
             XDG_CONFIG_HOME=str(home / ".config"),

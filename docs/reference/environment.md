@@ -58,6 +58,7 @@ Read by `aio_shell::run` and the shared Electron runtime.
 | `AIORT_CDP` | a port (unset) | An `ax dev` build's window opens the DevTools protocol on 127.0.0.1 at that port. Another build (a release, a plain `cargo build`) never reads it; one whose app says `Window { devtools: true }` opens one on the launch's typed `--cdp=<port>`. `ax shot`, `ax eval`, `ax surface` and `ax trigger` attach to it when `--cdp` is not given |
 | `AIORT_DIALOG` | `none`, `browser` (unset) | The first-run and error windows (the runtime download, Retry or Quit): `none` shows none (the log has it all); `browser` uses a browser page instead of zenity or yad on Linux |
 | `AIORT_TITLE` | a title (unset) | The window's title for this run instead of the app's (aio's `--title=`); `ax dev --title` sets it |
+| `AIORT_SOCKET_TIMEOUT_MS` | milliseconds, digits only (`30000`) | How long the window waits for the app's first byte of an answer to one of its routes (`aio://app/…`, over its private socket) before it gives the page a 504 naming the request; a stream that goes quiet after its headers is never cut off. aio's `AIO_SOCKET_TIMEOUT_MS` is read too, under it |
 | `AIORT_NO_OPEN` | non-empty (unset) | The app hands nothing to the person's browser or file manager: each open is refused, naming what it would have opened. `ax dev` sets it for a caller with no terminal; a test sandbox has it always |
 
 ## `ax` and building
@@ -69,11 +70,13 @@ Read by `ax` (the `aio-rs-cli` binary) and the install scripts.
 | `AIORT_DISPLAY` | `ax dev`, `ax start` | Where the window goes when `--display` is not given: `auto` (default: no terminal, a nested display), `isolated`, `current` or `:N` |
 | `AIORT_UI_ROOTS` | `ax ui` | More folders to find projects in (stopped apps), `:`-separated (`;` on Windows), beside `~/aio-apps`, the home folder, the current folder and the running apps' folders. [`ax ui`](../clients/ax.md#ax-ui-the-visual-app-manager) |
 | `AIORT_NO_SPLASH` | `ax dev` | `1`: no splash window while the first build runs (its progress and errors are on the terminal either way); `0` or empty: as unset |
-| `AIORT_NO_WARM` | `ax create`, `ax setup` | `1`: no build in the background (of the new app, as `--no-warm`; of aio-rs after `ax setup`); `0` or empty: as unset |
+| `AIORT_NO_WARM` | `ax create`, `ax setup` | `1`: no build ahead (of the new app in the background, as `--no-warm`; of aio-rs by `ax setup` before it returns); `0` or empty: as unset |
 | `AIORT_PREBUILT_URL` | `ax dev` | where the first build fetches prebuilt registry and git libraries (`<url>/<key>/SHA256SUMS`, `<key>.zip`); `https://` only; unset: none (a prototype) |
 | `AIORT_PREBUILT_KEY` | `ax dev` | the `ed25519:` public key `SHA256SUMS.sig` must verify against. Required: without it nothing is fetched |
 | `AIORT_PREBUILT_SIGN` | `ax dev --warm --pack` | the key file (`ax keygen --aio`) `SHA256SUMS` is signed with |
 | `AIORT_TARGET_DIR` | every `ax` verb that runs cargo | ax's build folder, instead of the shared one per toolchain (`<cache home>/target/<toolchain>`, the toolchain of the workspace's root, which ax then sets as `RUSTUP_TOOLCHAIN` for its cargo); wins over `CARGO_TARGET_DIR` |
+| `AIORT_OUTPUT` | every `ax` verb | `text`: answers as text even into a pipe (as `--text`); `json`: as JSON even at a terminal (as `--json`); unset: JSON into a pipe, text at a terminal (aio's `am`) |
+| `AIORT_BUILD_VERSION` | `ax build`, `ax release`, `ax install` | The version every build of the run says, when `--app-version` is not given (aio's `AIO_BUILD_VERSION`, read too, under it): a full `1.2.3`, a stage allowed |
 | `AIORT_SMOKE_DISPLAY` | `ax build --smoke` | A display (`:N`) to start each bundle on, instead of one started for it (Xvfb) or the runtime's headless one |
 | `AIO_MACOS_SSH` | `ax build` (macOS targets) | `[ssh options] [user@]host` of a Mac, so another OS builds the `.app` and `.dmg` there |
 | `AIO_MACOS_DIR` | `ax build` (macOS targets) | The folder on that Mac, under its home (`.cache/aio-build`) |
@@ -114,7 +117,7 @@ no supported effect.
 | `AIORT_WATCH_FD` | `ax dev` and the test harness: the child stops gracefully when its parent goes, even on `kill -9` |
 | `AIORT_DEV_CLOSED`, `AIORT_WINDOW_SIZE` | `ax dev` (`--size`): its window's tooling (aio-shell's `dev` feature, which only ax dev's builds have, and `ax start --cdp`'s); ignored by any other build, `ax start`'s too |
 | `AIORT_BOOT` | `ax dev`: `brief`, the app's boot report in one line on its terminal (all of it in the log) |
-| `AIO_TEST_VIDEO`, `AIO_TEST_VIDEO_PACE` | `ax test --video` and `--pace`: each UI test recorded to a folder (one `.mp4` per test) or one `.mp4`/`.webm` file, each step on screen that many ms (`800`). [Testing](../testing/README.md) |
+| `AIO_TEST_VIDEO`, `AIO_TEST_VIDEO_PACE`, `AIO_TEST_VIDEO_SCHEME` | `ax test --video`, `--pace` and `--video-scheme`: each UI test recorded to a folder (one `.mp4` per test) or one `.mp4`/`.webm` file, each step on screen that many ms (`800`), drawn `light` or `dark` (default: the test's own; aio's `AIO_VIDEO_SCHEME` is read too). [Testing](../testing/README.md) |
 
 ## Diagnostics and aio-rs's own tests
 
@@ -157,11 +160,9 @@ Known gaps or deliberate changes against aio's list:
 | `AIO_ELECTRON_ARGS`, `AIO_ELECTRON_SANDBOX`, `AIO_CDP` | `AIORT_ELECTRON_ARGS`, `AIORT_SANDBOX`, `AIORT_CDP` (a port, `ax dev` builds only) |
 | `ELECTRON_PATH`, `ELECTRON_MIRROR` | `AIORT_RUNTIME`, `AIORT_ELECTRON_MIRROR` (`AIO_SHARED_ELECTRON_DIR` is read as aio reads it: the store is one) |
 | `AIO_DIALOG` | `AIORT_DIALOG` |
-| `AIO_VIDEO`, `AIO_VIDEO_PACE` | `ax test --video`, `--pace`; no `AIO_VIDEO_SCHEME` (gap) |
-| `AIO_BUILD_VERSION` | `ax build --app-version v` and `ax release --app-version v`: a flag, not a variable |
+| `AIO_VIDEO`, `AIO_VIDEO_PACE` | `ax test --video`, `--pace` (`AIO_VIDEO_SCHEME` is read as aio reads it) |
 | `AIO_BUILD_COMMIT`, `AIO_PROBE_NONCE`, `AIO_BUILD_PROBE`, `AIO_BUILD_NOTES` | none: no runtime probe of the entry; the data contract is `AIORT_DATA_CONTRACT` |
 | `AIO_PARENT_PID`, `AIO_PARENT_PID_FROM`, `AIO_LOCK_HANDOFF`, `AIO_APP_CWD`, `AIO_ELECTRON_RUNTIME` | none: `AIORT_WATCH_FD`, `AIORT_RELAUNCH_AFTER` and the home lock cover them |
-| `AIO_SOCKET_TIMEOUT_MS` | gap: the window's request timeout is fixed |
 | `AIO_DEV_SUPERVISED`, `AIO_DEV_RESTART_PORT`, `AIO_DEV_RESTART_SAVED`, `AIO_NO_DEV_RESTART` | none: `ax dev` hot-patches instead of restarting |
 | `AIO_MAX_HEAP_MB` | none: no V8 heap in the app's process |
 | `AIO_STDOUT_IS_LOG` | none: the log masks secrets everywhere |

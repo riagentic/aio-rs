@@ -330,6 +330,10 @@ fn lay_out(
 ) -> Result<(Vec<String>, up::Manifest), String> {
     let min_from = min_from(min, &b.app.version)?;
     let bytes = std::fs::read(bundle).map_err(|e| format!("{}: {e}", bundle.display()))?;
+    let json = out.join(format!("{named}.json"));
+    if let Some(why) = rebuilt(std::fs::read_to_string(&json).ok().as_deref(), &b.app.version, &sha256_hex(&bytes)) {
+        return Err(why);
+    }
     let file = bundle.file_name().and_then(|f| f.to_str()).ok_or("bad bundle name")?.to_string();
     let release = up::Release {
         format: up::FORMAT,
@@ -354,7 +358,6 @@ fn lay_out(
     let manifest = up::sign(release, key)?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     std::fs::copy(bundle, out.join(&file)).map_err(|e| format!("{}: {e}", out.join(&file).display()))?;
-    let json = out.join(format!("{named}.json"));
     let text = aio::serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     aio::paths::write_atomic(&json, format!("{text}\n").as_bytes(), false).map_err(|e| e.to_string())?;
     // An AppImage is one file: its patch is a one-file tree (zstd against the image here).
@@ -375,6 +378,23 @@ fn lay_out(
     let mut all = vec![json.display().to_string(), out.join(&file).display().to_string()];
     all.extend(extra.iter().map(|p| p.display().to_string()));
     Ok((all, manifest))
+}
+
+/// Why a release of `version` (its bundle's `sha256`) can't go over the
+/// manifest `old` laid out there: the same version with other bytes (aio's
+/// "same version, new build"). An install that has that version is never
+/// offered another build of it, so a new build is a new version: a commit
+/// raises the build number. The same bytes again (a rebuild that matched)
+/// go over it (pure).
+fn rebuilt(old: Option<&str>, version: &str, sha256: &str) -> Option<String> {
+    let old: up::Manifest = aio::serde_json::from_str(old?).ok()?;
+    (old.release.version == version && old.release.sha256 != sha256).then(|| {
+        format!(
+            "{version} is released here already with other bytes: an install that has {version} would never be offered \
+             these. A new build is a new version: commit (git commit --allow-empty -m rebuild raises the build number), \
+             then release again"
+        )
+    })
 }
 
 /// `--min-from`, checked: a version, at most the release's own (pure).
@@ -659,7 +679,11 @@ fn aio_source(pkg: &aio::serde_json::Value) -> Option<(String, String)> {
 /// create --aio`): aio-rs is checked out beside the app at this `ax`'s
 /// release tag (repository variables `AIO_REPO`, `AIO_REF` name another),
 /// the app's aio-rs paths pointed there, and `ax` installed from it.
-pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>) -> String {
+/// `pages` (aio's `ship github`): the channel's files also deployed to
+/// GitHub Pages, under `<channel>/`, for `[updates] url =
+/// "https://<owner>.github.io/<repo>"`; `web`: the app's web build at the
+/// site's root beside them.
+pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>, (pages, web): (bool, bool)) -> String {
     let get_aio = match aio {
         Some((src, rev)) => format!(
             "      - name: Install ax\n        run: cargo install --locked --git \"{src}\" --rev \"{rev}\" aio-rs-cli\n"
@@ -701,6 +725,77 @@ pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>) -
             ),
             format!("\n            gh release edit {channel} --draft=false"),
         )
+    };
+    let web_job = match web {
+        false => String::new(),
+        true => format!(
+            r#"
+  # The app's web build, for the root of the Pages site.
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+          fetch-depth: 0
+      - run: rustup toolchain install && rustup target add wasm32-unknown-unknown
+        working-directory: app
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+{get_aio}      - name: Build it for the web
+        working-directory: app
+        run: ax build {bin} --web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: app/dist/{id}-web
+          if-no-files-found: error
+"#
+        ),
+    };
+    let (needs, get_web) = match web {
+        false => ("build", String::new()),
+        true => (
+            "[build, web]",
+            "      - uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: site
+"
+            .into(),
+        ),
+    };
+    let pages_job = match pages {
+        false => String::new(),
+        true => format!(
+            r#"      # The Pages site: what an app on url = "https://<owner>.github.io/<repo>"
+      # reads, the channel's files under {channel}/. A deploy replaces the
+      # whole site: one channel per site. Pages takes files up to 100 MB.
+      - name: Lay out the Pages site
+        run: mkdir -p site/{channel} && cp out/* site/{channel}/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    # One deploy at a time: two racing would leave half of each.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{{{ steps.deploy.outputs.page_url }}}}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+"#
+        ),
     };
     format!(
         r#"# Made by `ax release {bin} --workflow`. Edit freely: it is yours now.
@@ -771,9 +866,9 @@ jobs:
           name: {id}-${{{{ strategy.job-index }}}}
           path: app/dist/{channel}/*
           if-no-files-found: error
-
+{web_job}
   publish:
-    needs: build
+    needs: {needs}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -783,9 +878,10 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
+          pattern: {id}-[0-9]*
           path: out
           merge-multiple: true
-      - name: Put the files on the release, then publish it
+{get_web}      - name: Put the files on the release, then publish it
         env:
           GH_TOKEN: ${{{{ github.token }}}}
         run: |
@@ -800,7 +896,7 @@ jobs:
           gh release upload {tag} out/*.json --clobber
           if [ -n "$made" ]; then{latest}
           fi
-"#
+{pages_job}"#
     )
 }
 
@@ -811,7 +907,10 @@ const REPOINT: &str =
 
 /// `ax release <app> --workflow`: the workflow in the workspace's
 /// `.github/workflows/release-<app>.yml`, never over one there.
-pub fn write_workflow(name: &str, channel: Option<&str>) -> Result<String, String> {
+pub fn write_workflow(name: &str, channel: Option<&str>, (pages, web): (bool, bool)) -> Result<String, String> {
+    if web && !pages {
+        return Err("--web puts the web build on the Pages site: with --pages".into());
+    }
     let meta = crate::dev::metadata()?;
     let pkg = crate::dev::locate(&meta, name)?;
     let (app, cfg) = crate::build::app_of(&pkg)?;
@@ -824,7 +923,7 @@ pub fn write_workflow(name: &str, channel: Option<&str>) -> Result<String, Strin
         return Err(format!("{} exists: it is yours now (remove it to make it again)", file.display()));
     }
     std::fs::create_dir_all(file.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
-    let text = workflow(&app.id, name, channel, source.as_ref().map(|(g, r)| (g.as_str(), r.as_str())));
+    let text = workflow(&app.id, name, channel, source.as_ref().map(|(g, r)| (g.as_str(), r.as_str())), (pages, web));
     std::fs::write(&file, text).map_err(|e| e.to_string())?;
     let from = match &source {
         Some((g, r)) => format!("ax is installed from {g} at {r}"),
@@ -834,8 +933,16 @@ pub fn write_workflow(name: &str, channel: Option<&str>) -> Result<String, Strin
             env!("CARGO_PKG_VERSION")
         ),
     };
+    let pages = match pages {
+        true => format!(
+            "\nGitHub Pages: Settings > Pages > Source: GitHub Actions; let a tag deploy (Settings > Environments > \
+             github-pages > a tag rule v*); then in aio.toml [updates] url = \"https://<owner>.github.io/<repo>\" \
+             (channel {channel} under it), its host in [capabilities] network"
+        ),
+        false => String::new(),
+    };
     Ok(format!(
-        "wrote {}\n{from}\nnext: put the text of {} in the repository secret AIO_SIGNING_KEY, then push a tag v{}",
+        "wrote {}\n{from}\nnext: put the text of {} in the repository secret AIO_SIGNING_KEY, then push a tag v{}{pages}",
         file.display(),
         keys_dir().join(format!("{}.key", app.id)).display(),
         app.version
@@ -1463,6 +1570,17 @@ mod tests {
         assert_eq!((r.sha256.clone(), r.size), (sha256_hex(&new), new.len() as u64));
         let expect = up::Expect { id: "notes", channel: "beta", os: "linux", arch: "x86_64" };
         assert!(up::check(&m, &b.cfg.updates.keys, &expect).is_ok(), "an app on beta takes it");
+        // The same version with other bytes is refused; the same bytes again go over it.
+        bundle(&dist, "1.1.0", b"rebuilt");
+        let again = || {
+            let ask = ("beta", "fixes", data.clone(), None, false);
+            lay_out(&b, (&built, "linux-x86_64"), &out, ask, (&k, std::slice::from_ref(&k)), &[])
+        };
+        let e = again().unwrap_err();
+        assert!(e.starts_with("1.1.0 is released here already with other bytes") && e.contains("--allow-empty"), "{e}");
+        assert_eq!(std::fs::read(out.join("notes-1.1.0-linux-x64.tar.gz")).unwrap(), new, "nothing replaced");
+        std::fs::write(&built, &new).unwrap();
+        assert_eq!(again().unwrap().1.release.sha256, sha256_hex(&new));
         // A contract file that isn't one is refused, not published as nothing.
         assert!(contract_in(&d.path().join("none.json")).unwrap_err().starts_with("--data"));
         std::fs::write(&file, r#"{ "cells": {} }"#).unwrap();
@@ -1542,7 +1660,7 @@ mod tests {
 
     #[test]
     fn the_workflow_releases_every_os_from_a_tag_and_publishes_files_before_manifests() {
-        let w = workflow("notes", "notes", "stable", Some(("https://example.org/me/aio", "abc123")));
+        let w = workflow("notes", "notes", "stable", Some(("https://example.org/me/aio", "abc123")), (false, false));
         for want in [
             "tags: [\"v*\"]",
             "cargo install --locked --git \"https://example.org/me/aio\" --rev \"abc123\" aio-rs-cli",
@@ -1560,11 +1678,42 @@ mod tests {
         // Files, then manifests.
         assert!(w.find("! -name '*.json'").unwrap() < w.find("out/*.json --clobber").unwrap());
         // Another channel: its own moving prerelease, never "latest".
-        let beta = workflow("notes", "notes", "beta", None);
+        let beta = workflow("notes", "notes", "beta", None, (false, false));
         assert!(beta.contains("gh release create beta --draft --prerelease") && !beta.contains("--latest"));
         for w in [&w, &beta] {
             assert!(!w.contains("{{ os") && !w.contains("${{{{"), "no format braces left");
             assert!(w.contains("path: app\n") && w.contains("path: app/dist/"), "the app checked out in app/");
+        }
+        // aio's `ship github`: the channel on GitHub Pages too, the web build at its root.
+        assert!(!w.contains("deploy-pages") && !w.contains("\n  web:"), "neither unasked");
+        let pages = workflow("notes", "notes", "beta", None, (true, false));
+        let site = workflow("notes", "notes", "beta", None, (true, true));
+        for want in [
+            "mkdir -p site/beta && cp out/* site/beta/",
+            "uses: actions/upload-pages-artifact@v3\n        with:\n          path: site",
+            "  pages:\n    needs: publish",
+            "pages: write\n      id-token: write",
+            "url: ${{ steps.deploy.outputs.page_url }}",
+            "uses: actions/deploy-pages@v4",
+            "pattern: notes-[0-9]*",
+        ] {
+            assert!(pages.contains(want) && site.contains(want), "{want}\n{pages}");
+        }
+        assert!(!pages.contains("ax build notes --web"));
+        for want in [
+            "  web:\n    runs-on: ubuntu-24.04",
+            "rustup target add wasm32-unknown-unknown",
+            "run: ax build notes --web",
+            "path: app/dist/notes-web",
+            "needs: [build, web]",
+            "name: web\n          path: site",
+        ] {
+            assert!(site.contains(want), "{want}\n{site}");
+        }
+        // The web build lands first, then the channel's files beside it.
+        assert!(site.find("path: site\n").unwrap() < site.find("mkdir -p site/beta").unwrap());
+        for w in [&pages, &site] {
+            assert!(!w.contains("{{ os") && !w.contains("${{{{") && !w.contains("{get_aio}"), "no format braces left");
         }
         // A path dependency (`ax create --aio`): aio-rs at this ax's tag beside the app.
         let v = env!("CARGO_PKG_VERSION");
@@ -1805,6 +1954,30 @@ mod tests {
         let (ok, said) = install(&sha);
         assert!(ok, "{said}");
         assert_eq!(std::fs::read_to_string(bin.join("said")).unwrap(), "ran setup\n", "ax setup ran after it");
+        // curl | sh: the script on stdin, the release's files in a folder
+        // (air-gapped: AIO_DOWNLOAD names it), run from elsewhere.
+        let (sh, _) = installers("9.9.9", "https://192.0.2.1/never", &[(triple.into(), sha.clone())]);
+        let piped = |script: &[u8], from: &Path| {
+            use std::io::Write;
+            std::fs::remove_file(bin.join("ax")).ok();
+            let mut c = std::process::Command::new("sh")
+                .current_dir(d.path())
+                .env("HOME", &home)
+                .env_remove("CARGO_HOME")
+                .env("AIO_DOWNLOAD", from)
+                .stdin(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            c.stdin.take().unwrap().write_all(script).unwrap();
+            let o = c.wait_with_output().unwrap();
+            (o.status.success(), bin.join("ax").exists(), String::from_utf8_lossy(&o.stderr).into_owned())
+        };
+        let (ok, installed, said) = piped(sh.as_bytes(), &rel);
+        assert!(ok && installed, "from a folder, piped: {said}");
+        let cut = sh.find("tar -xzf").unwrap();
+        let (ok, installed, said) = piped(&sh.as_bytes()[..cut], &rel);
+        assert!(!ok && !installed, "a download cut short runs nothing: {said}");
         std::fs::remove_dir_all(home.join(".cargo")).unwrap();
         let (ok, said) = install(&sha);
         assert!(!ok && said.contains("install Rust first"), "{said}");

@@ -371,15 +371,20 @@ assert_eq!(h.state().resets, 0);
 # }
 ```
 
-- `aio::Call` holds `cell`, `method`, `args`, `by` and `role` (the
-  network caller's, proven by its session).
+- `aio::Call` holds `cell`, `method`, `args`, `by`, `role` (the
+  network caller's, proven by its session), the state the call runs on
+  (`call.state::<T>()`, `None` for another cell's call) and, for a
+  network call, `request` (aio's request in `beforeReduce`): the
+  client's address (`ip`) and the headers its link opened with
+  (`header("user-agent")`), its credentials (`authorization`, `cookie`)
+  left out. Neither is recorded: replay never asks the gate.
 - There is one gate: a second `before_call` replaces the first. It lets
   a call in or refuses it; `aio::rewrite_call(|call| ..)` may also change
   it (aio's `beforeReduce` returning another action): `Ok(Some(args))`
   runs it with those arguments, logged as it ran, so replay never asks
   again.
-- It runs while the cell is locked: decide from the call alone, and never
-  call a cell from it.
+- It runs while the cell is locked: decide from the call, its state and
+  its request, and never call a cell from it.
 - `aio::on_effect(|cell, key| ..)` hears each effect as it starts (aio's
   `onEffect`); those hooks add up (a plugin's and the app's all hear).
 

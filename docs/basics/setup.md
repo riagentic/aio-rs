@@ -26,23 +26,41 @@ rustup already put on `PATH`.
 x86_64:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.3.0/install.sh | sh
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.4.0/install.sh | sh
 ```
 
-Windows x86_64: download `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.3.0), then
-`powershell -ExecutionPolicy Bypass -File install.ps1`.
+Windows x86_64, in PowerShell (aio's one line):
+
+```powershell
+irm https://github.com/riagentic/aio-rs/releases/download/v0.4.0/install.ps1 | iex
+```
+
+or download `install.ps1` from the
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.4.0), then
+`powershell -ExecutionPolicy Bypass -File install.ps1`. A failure is said
+and leaves the window open (under `-File`, exit code 1).
 
 Each archive's SHA-256 is pinned in the installer and checked before
 anything is unpacked or run: a wrong checksum installs nothing and says
 so. A platform with no prebuilt `ax` or a failed download installs nothing
-and prints the source build instead. Run beside a release's files (`sh install.sh`), the installer
-takes them instead of downloading. Then it runs `ax setup`.
+and prints the source build instead. The script runs only once all of it
+has come: a download cut short runs nothing. Then it runs `ax setup`.
+
+**Offline, or air-gapped:** copy the release's files (the archives,
+`install.sh`, `install.ps1`) to a folder on the machine and run the
+installer there (`sh install.sh`, `install.ps1`): it takes them instead
+of downloading. From elsewhere, name the folder: `AIO_DOWNLOAD=<folder>
+sh install.sh` (`$env:AIO_DOWNLOAD`). `AIO_DOWNLOAD=<url>` takes them
+from a mirror. `ax setup` then fetches the window runtime and
+wasm-bindgen once: without a network, point `AIORT_RUNTIME` at an
+Electron folder copied over and put `wasm-bindgen` on `PATH`
+([ax setup](#3-ax-setup)); an app's crates come with it
+(`cargo vendor`).
 
 **From source** (minutes):
 
 ```sh
-git clone --branch v0.3.0 https://github.com/riagentic/aio-rs
+git clone --branch v0.4.0 https://github.com/riagentic/aio-rs
 cargo install --locked --path aio-rs/crates/aio-cli
 ```
 
@@ -56,7 +74,7 @@ The package is `aio-rs-cli`, its binary `ax`.
 
 ```sh
 ax upgrade                    # to aio-rs's newest release
-ax upgrade 0.3.0              # to that release (again, if it is this one)
+ax upgrade 0.4.0              # to that release (again, if it is this one)
 ax upgrade --aio ../aio-rs    # ax built from a checkout (plain ax upgrade returns)
 ```
 
@@ -71,7 +89,7 @@ aio-rs is not on crates.io: an app `ax create` makes takes it from git,
 at this `ax`'s release tag, in both of its `Cargo.toml` files:
 
 ```toml
-aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.3.0", features = ["kit"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.4.0", features = ["kit"] }
 ```
 
 `Cargo.lock` pins the commit. A clone builds on any machine, with or
@@ -79,9 +97,9 @@ without an aio-rs checkout, and nothing of the machine the app was made on
 is in it. To pick or change the version (aio's `am pin`):
 
 ```sh
-ax create notes --aio-version 0.3.0   # another release (main: the branch; latest: the newest)
+ax create notes --aio-version 0.4.0   # another release (main: the branch; latest: the newest)
 ax pin                                # in the app: what Cargo.toml asks for, what Cargo.lock built, the releases
-ax pin 0.3.0                          # every one moved to that release, Cargo.lock with it
+ax pin 0.4.0                          # every one moved to that release, Cargo.lock with it
 ax pin ../aio-rs                      # to a checkout, co-developing aio-rs
 ```
 
@@ -103,14 +121,13 @@ Each missing piece is one line with the command that gets it; the exit
 code is 1 until every needed one is there.
 
 At a terminal (the installers end with `ax setup`), it then builds
-aio-rs and its dependencies for `ax dev` in the background (`ax setup
---warm`, about 25 s on a fresh machine; its log is named on the
-terminal), so an app's first start compiles only the app's own crates
-(~1.7 s). An `ax dev` started while that runs waits on cargo's lock and
-then builds only its own crates: nothing is built twice. `--check`, a
-run with no terminal (CI, scripts, agents) and `AIORT_NO_WARM=1` leave it
-out; `ax setup --warm` does it in the foreground. Before it ends, a first
-start is Rust's compile time: ~25 s.
+aio-rs and its dependencies for `ax dev` before it returns (`ax setup
+--warm`, cargo's progress on the terminal; about 25 s on a fresh machine,
+once per machine and toolchain), so an app's first `ax dev` compiles
+only the app's own crates: ~1.7 s, under aio's 2.6 s. Ctrl-C leaves the
+rest to the first build. `--check`, a run with no terminal (CI, scripts,
+agents) and `AIORT_NO_WARM=1` leave it out (then the first start is
+Rust's compile time, ~25 s); `ax setup --warm` does it anywhere.
 
 ### Needed
 
@@ -132,6 +149,7 @@ start is Rust's compile time: ~25 s.
 | aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
 | Android SDK, NDK, JDK 17-23, Gradle 8.9+ | yes | yes | yes | `ax build --android`, `ax dev --android` | the build says what is missing |
 | `x86_64-w64-mingw32-gcc` + its rustup target | yes | yes | – | `ax build --windows` (cross-built) | `ax build --windows` names the package |
+| zig 0.15.2 + `aarch64-apple-darwin`, `x86_64-apple-darwin` | fetched | – | fetched | `ax build --platforms macos,macos-arm64` away from a Mac | fetches zig (SHA-256 pinned in ax); the build names the `rustup target add` line |
 | `dpkg-deb`, `mksquashfs` | yes | – | – | `ax build --deb`, `--appimage` | the build says what is missing |
 
 Every app `ax create` makes pins aio-rs's Rust in its
@@ -183,7 +201,7 @@ with aio's apps, [desktop](../clients/desktop.md#one-store-with-aio)). `~` is
 | the window's browser profile | `<app home>/data/electron/profile/` | the same | the same |
 | a private instance (`--instance n`) | `<tool home>/instances/<n>/<id>/` | the same | the same |
 | the shared Electron runtime (aio's store, shared with aio's apps) | `~/.local/share/aio/electron/<version>-<os>-<arch>/` (`$XDG_DATA_HOME`) | `~/Library/Application Support/aio/electron/…` | `%LOCALAPPDATA%\aio\electron\…` |
-| wasm-bindgen (fetched) | `<tool home>/tools/` | the same | the same |
+| wasm-bindgen, zig (fetched) | `<tool home>/tools/` | the same | the same |
 | ax's one build folder | `~/.cache/aio-rt/target/<toolchain>/` (`$XDG_CACHE_HOME`; `AIORT_TARGET_DIR`, then `CARGO_TARGET_DIR` win) | `~/Library/Caches/aio-rt/target/…` | `%LOCALAPPDATA%\aio-rt\cache\target\…` |
 | this machine's TLS root (`ax trust`) | `<tool home>/tls/` | the same | the same |
 | release signing keys (`ax keygen`) | `~/.config/aio-rt/keys/` (`$XDG_CONFIG_HOME`) | the same | the same |

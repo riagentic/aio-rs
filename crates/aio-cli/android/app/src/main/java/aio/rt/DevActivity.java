@@ -18,8 +18,8 @@ import android.widget.TextView;
 
 /** The dev APK's window (`ax dev <app> --android`): the page `ax dev --web`
  *  serves on the computer, reached as http://localhost over `adb reverse`.
- *  No library: an edit rebuilds the page there and it reloads here, so the
- *  APK is installed once. The address comes with each start (`--es url`),
+ *  No library: an edit is patched into the page or reloads it, so the APK
+ *  is installed once. The address comes with each start (`--es url`),
  *  kept for a start from the launcher. */
 public final class DevActivity extends Activity {
     private WebView web;

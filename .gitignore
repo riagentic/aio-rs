@@ -1,3 +1,4 @@
 /target
 __pycache__/
 /dist
+/crates/aio/client/node_modules

@@ -1,6 +1,7 @@
 //! The macOS and Windows bundles `ax build` makes (Linux's is in `build`):
 //! `<id>-<version>-macos-<arch>.zip` holding `<Name>.app`, signed ad hoc
-//! (unzip it, drag it to Applications), and `<id>-<version>-windows-<arch>.zip`
+//! (unzip it, drag it to Applications; made away from a Mac, its binary
+//! alone is signed, by zig's linker), and `<id>-<version>-windows-<arch>.zip`
 //! holding `<id>.exe` (the update artifact), beside the same exe as the
 //! one-click download `<id>-<version>-windows-<arch>.exe`: double-clicked,
 //! it installs itself (`aio_shell::oneclick`; `--install` too). As on
@@ -47,11 +48,12 @@ fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
     Err(format!("{what}: {}", String::from_utf8_lossy(&out.stderr).trim()))
 }
 
-/// `<Name>.app` from `binary`, as `bundle_id`, signed, in `staging` (made
-/// on a Mac: `sips`, `codesign`). Its own runtime (`runtime`, an offline
-/// build) goes in as `Contents/MacOS/electron/Electron.app`, where the
-/// binary looks, and only that: `codesign` takes nothing but code there, so
-/// Electron's licences go in `Resources`.
+/// `<Name>.app` from `binary`, as `bundle_id`, in `staging`: on a Mac
+/// signed ad hoc whole (`codesign`); elsewhere unsealed, its binary signed
+/// by its linker. Its own runtime (`runtime`, an offline build) goes in as
+/// `Contents/MacOS/electron/Electron.app`, where the binary looks, and only
+/// that: `codesign` takes nothing but code there, so Electron's licences go
+/// in `Resources`.
 pub fn mac_app(
     app: &App,
     bundle_id: &str,
@@ -80,20 +82,94 @@ pub fn mac_app(
     }
     if let Some(rt) = runtime {
         let into = contents.join("MacOS").join(aio_shell::runtime::BUNDLED).join("Electron.app");
-        run(Command::new("/usr/bin/ditto").arg(rt.join("Electron.app")).arg(into), "ditto")?;
+        // Its links and modes kept (ditto on a Mac, cp elsewhere).
+        std::fs::create_dir_all(into.parent().ok_or("no folder")?).map_err(e)?;
+        let copy = match cfg!(target_os = "macos") {
+            true => Command::new("/usr/bin/ditto").arg(rt.join("Electron.app")).arg(&into).output(),
+            false => Command::new("cp").arg("-R").arg("-P").arg(rt.join("Electron.app")).arg(&into).output(),
+        };
+        match copy {
+            Ok(o) if o.status.success() => {}
+            _ => return Err(format!("could not copy the runtime into {}", bundle.display())),
+        }
         for f in ["LICENSE", "LICENSES.chromium.html"].map(|f| rt.join(f)).iter().filter(|f| f.is_file()) {
             std::fs::copy(f, contents.join("Resources").join(f.file_name().unwrap_or_default())).map_err(e)?;
         }
     }
     // Ad hoc: Apple Silicon runs nothing unsigned. A Developer ID and
     // notarization replace it for downloads (Gatekeeper).
-    run(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(&bundle), "codesign")?;
+    if cfg!(target_os = "macos") {
+        run(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(&bundle), "codesign")?;
+    }
     Ok(bundle)
 }
 
-/// `bundle` (a `.app`) zipped into `out`, its links and signature kept.
+/// `bundle` (a `.app`) zipped into `out`, its links, modes and signature
+/// kept (`ditto` on a Mac).
 pub fn mac_zip(bundle: &Path, out: &Path) -> Result<(), String> {
-    run(Command::new("/usr/bin/ditto").args(["-c", "-k", "--keepParent"]).arg(bundle).arg(out), "ditto")
+    if cfg!(target_os = "macos") {
+        return run(Command::new("/usr/bin/ditto").args(["-c", "-k", "--keepParent"]).arg(bundle).arg(out), "ditto");
+    }
+    let e = |e: std::io::Error| e.to_string();
+    let parent = bundle.parent().ok_or("the bundle has no folder")?;
+    let mut all = vec![];
+    walk(bundle, &mut all).map_err(|e| format!("{}: {e}", bundle.display()))?;
+    all.sort();
+    let mut z = zip::ZipWriter::new(std::fs::File::create(out).map_err(e)?);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip_now());
+    for f in all {
+        let name = f.strip_prefix(parent).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
+        let meta = std::fs::symlink_metadata(&f).map_err(e)?;
+        if meta.is_symlink() {
+            let to = std::fs::read_link(&f).map_err(e)?;
+            z.add_symlink(name, to.to_string_lossy().replace('\\', "/"), opts).map_err(|e| e.to_string())?;
+            continue;
+        }
+        z.start_file(name, opts.unix_permissions(mode(&f, &meta))).map_err(|e| e.to_string())?;
+        z.write_all(&std::fs::read(&f).map_err(e)?).map_err(e)?;
+    }
+    z.finish().map(drop).map_err(|e| e.to_string())
+}
+
+/// Every file and link under `dir`.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let p = e?.path();
+        match std::fs::symlink_metadata(&p)?.is_dir() {
+            true => walk(&p, out)?,
+            false => out.push(p),
+        }
+    }
+    Ok(())
+}
+
+/// A file's mode in the zip: 0755 when it runs, else 0644, whatever this
+/// machine's umask; on Windows, which has no modes, what `Contents/MacOS`
+/// holds runs.
+fn mode(f: &Path, meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    let runs = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0 && f.is_file();
+    #[cfg(not(unix))]
+    let runs = meta.is_file() && f.parent().is_some_and(|d| d.ends_with("Contents/MacOS"));
+    if runs { 0o755 } else { 0o644 }
+}
+
+/// Now, as a zip's time (its UTC fields; a zip has no zone).
+fn zip_now() -> zip::DateTime {
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    let s = aio::log::stamp(ms);
+    let n = |a: usize, b: usize| s.get(a..b).and_then(|v| v.parse().ok()).unwrap_or(0);
+    zip::DateTime::from_date_and_time(
+        n(0, 4),
+        n(5, 7) as u8,
+        n(8, 10) as u8,
+        n(11, 13) as u8,
+        n(14, 16) as u8,
+        n(17, 19) as u8,
+    )
+    .unwrap_or_default()
 }
 
 /// `hdiutil`'s arguments for the disk image `out` of folder `stage` (the
@@ -234,6 +310,39 @@ mod tests {
         // Linux: the AppImage (aio's default artifact) is named beside the bundle.
         let how = how_to_install(&app(false), "linux", Path::new("/d/notes-1.2.0-linux-x64.tar.gz"));
         assert!(how.starts_with("install: tar -xzf notes-1.2.0-linux-x64.tar.gz") && how.contains("--appimage"));
+    }
+
+    /// Away from a Mac (no codesign, no ditto): the bundle is assembled,
+    /// zipped with its binary executable and the runtime's links kept.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_mac_app_is_made_and_zipped_off_a_mac_its_modes_and_links_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("notes");
+        std::fs::write(&bin, b"\xcf\xfa\xed\xfe fake").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fw = d.path().join("rt/Electron.app/Contents/Frameworks/E.framework");
+        std::fs::create_dir_all(fw.join("Versions/A")).unwrap();
+        std::fs::write(fw.join("Versions/A/E"), b"lib").unwrap();
+        std::os::unix::fs::symlink("Versions/A/E", fw.join("E")).unwrap();
+        let staging = d.path().join("stage");
+        std::fs::create_dir_all(&staging).unwrap();
+        let made = mac_app(&app(false), "aio.rt.notes", &bin, Some(&d.path().join("rt")), &staging).unwrap();
+        assert_eq!(made, staging.join("Notes & Co.app"));
+        let out = d.path().join("n.zip");
+        mac_zip(&made, &out).unwrap();
+        let mut z = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let mode = |z: &mut zip::ZipArchive<std::fs::File>, n: &str| z.by_name(n).unwrap().unix_mode().unwrap();
+        assert_eq!(mode(&mut z, "Notes & Co.app/Contents/MacOS/notes") & 0o777, 0o755);
+        assert_eq!(mode(&mut z, "Notes & Co.app/Contents/Info.plist") & 0o777, 0o644, "data stays data");
+        assert!(z.by_name("Notes & Co.app/Contents/PkgInfo").unwrap().last_modified().unwrap().year() >= 2026);
+        let link = "Notes & Co.app/Contents/MacOS/electron/Electron.app/Contents/Frameworks/E.framework/E";
+        let mut f = z.by_name(link).unwrap();
+        assert!(f.is_symlink());
+        let mut to = String::new();
+        std::io::Read::read_to_string(&mut f, &mut to).unwrap();
+        assert_eq!(to, "Versions/A/E");
     }
 
     #[test]

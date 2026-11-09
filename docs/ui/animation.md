@@ -54,6 +54,7 @@ assert!(ui.absent("msg"), "gone once it is over");
 | `show` | `Prop<bool>` | whether the content is there (an expression follows: `show: open.get()`) |
 | `enter` | `Option<Motion>` | played as it arrives (none: it appears at once) |
 | `exit` | `Option<Motion>` | played backwards as it leaves; the content stays until it is over (none: it goes at once) |
+| `options` | `Option<Timing>` | one duration, delay and easing over both motions (aio's `options`): each field given replaces the motion's own |
 
 - No box of its own: the content's first element plays the animation
   (its `animation` style set, the rest of its style kept), so give the
@@ -82,6 +83,7 @@ own keyframes for something gentler.
 | Field or call | Default | Does |
 |---|---|---|
 | `Motion::new("my-keyframes")` | | your own `@keyframes`, in the app's CSS |
+| `Motion::of("name", \|t\| css)` | | the style at progress `t` (0 hidden, 1 shown), sampled into `@keyframes name` (aio's `TransitionFn` `css`); it may read the element's box as `var(--aio-w)` and `var(--aio-h)`, set on the element as its motion starts (aio's function was given the element) |
 | `.ms(200)` | 300 | how long |
 | `delay_ms` | 0 | wait before playing (`Motion { delay_ms: 50, ..Motion::FADE }`) |
 | `easing` | `"ease"` | any CSS timing function (`Motion { easing: "ease-out", ..m }`) |
@@ -99,6 +101,23 @@ const RISE: Motion = Motion { easing: "ease-out", ..Motion::new("rise").ms(180) 
 assert_eq!(RISE.css(false), "animation:rise 180ms ease-out 0ms 1 normal both");
 assert_eq!(RISE.css(true), "animation:rise 180ms ease-out 0ms 1 reverse both");
 assert_eq!(RISE.total().as_millis(), 180);
+# }
+```
+
+### Shared timing: `Timing`
+
+aio's `options` prop: one duration, delay and easing for both motions of
+a transition. A `const` of it is the defaults many transitions share.
+
+```rust
+use aio::kit::{Motion, Timing};
+
+const QUICK: Timing = Timing { ms: Some(120), delay_ms: None, easing: Some("ease-out") };
+
+# fn main() {
+// `Transition { show, enter: Motion::FADE, exit: Motion::SCALE, options: QUICK, .. }`
+// plays each motion so:
+assert_eq!(Motion::SCALE.timed(QUICK).css(true), "animation:aio-scale 120ms ease-out 0ms 1 reverse both");
 # }
 ```
 
@@ -135,6 +154,7 @@ assert!(ui.absent("eggs") && ui.present("tea"));
 |---|---|---|
 | `items` | | the rows, `Prop<Vec<(key, View)>>`, in order; the key says which row is which |
 | `enter`, `exit` | none | as `Transition`'s, per row |
+| `options` | none | as `Transition`'s |
 | `flip` | `false` | rows that moved slide from where they were |
 | `flip_ms` | 300 | how long that slide takes |
 | `class` | | on the group's box (`div.aio-tgroup`) |
@@ -255,20 +275,20 @@ in a cell).
 ## Gaps
 
 - aio's transitions took a `TransitionFn` (a `css(t)` function of
-  progress); aio-rs takes CSS `@keyframes` by name, or `Motion::of("grow",
-  |t| format!("opacity:{t};transform:scale({t})"))`, that function
-  sampled into `@keyframes grow` (20 steps, as aio's) and put in the page
-  once; `u` is `1 - t`, and `.ticking(f)` is aio's `tick(t, u)`. aio's
-  function was given the element to measure it; in aio-rs a transform's
-  percentages are of the element's own box (`translateY(100%)` is its
-  height), so the keyframes need no measuring and stay one rule per name.
-- aio's `options` prop on `Transition` and `TransitionGroup` set one
-  duration, delay and easing for both; in aio-rs each `Motion` carries its
-  own.
+  progress, given the element); aio-rs takes CSS `@keyframes` by name, or
+  `Motion::of("grow", |t| format!("opacity:{t};transform:scale({t})"))`,
+  that function sampled into `@keyframes grow` (20 steps, as aio's) and
+  put in the page once; `u` is `1 - t`, and `.ticking(f)` is aio's
+  `tick(t, u)`. Where aio's function measured the element, the frames
+  read its box: `--aio-w` and `--aio-h` are set on the element as its
+  motion starts, measured without the animation before its first frame
+  (`|t| format!("height:calc(var(--aio-h) * {t});overflow:hidden")`
+  opens to its own height), and a transform's percentages are of its own
+  box. So the keyframes stay one rule per name.
 
 ## API
 
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::kit::Transition`,
-`TransitionGroup`, `Motion`, `merge_rows`, `moved`, `use_spring`,
+`TransitionGroup`, `Motion`, `Timing`, `merge_rows`, `moved`, `use_spring`,
 `SpringValue`, `Spring`, `spring_step`, `FRAME`, `use_frame`,
 `use_interval`.

@@ -5,7 +5,7 @@
 //! local HTTP server. The page is read and driven over the shell's own
 //! DevTools line (`{"t":"cdp"}`). Skipped where the runtime is not installed.
 use crate::{Window, guest, install, runtime};
-use aio::kit::{Browser, Go, GuestEvent, go, run_js};
+use aio::kit::{Browser, Go, GuestEvent, WEBVIEW_METHODS, go, run_js, webview};
 use aio::serde_json::{Value, json};
 use aio::ui::prelude::*;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -57,6 +57,7 @@ fn app() -> View {
             },
             "run"
         }
+        button { id: "wv", onclick: move |_| _ = spawn(webview_tour(log)), "wv" }
         if on.get() {
             Browser {
                 id: "b",
@@ -89,6 +90,41 @@ fn app() -> View {
         // No alt: a dev build's audit says so.
         img { src: "data:," }
     }
+}
+
+/// Calls of the guest `b`'s `<webview>` methods by name, each said in `log`.
+async fn webview_tour(log: Signal<Vec<String>>) {
+    let said = |m: &str, v: Option<Value>| log.write().push(format!("wv {m} {v:?}"));
+    let color = || webview("b", "executeJavaScript", vec![json!("getComputedStyle(document.body).color")]);
+    let key = webview("b", "insertCSS", vec![json!("body { color: rgb(4, 5, 6) }")]).await;
+    said("insertCSS-color", color().await);
+    said("removeInsertedCSS", webview("b", "removeInsertedCSS", vec![key.unwrap_or_default()]).await);
+    said("removed-color", color().await);
+    for (m, args) in [
+        ("setAudioMuted", vec![json!(true)]),
+        ("isAudioMuted", vec![]),
+        ("setUserAgent", vec![json!("aio-test-agent")]),
+        ("getUserAgent", vec![]),
+        ("setZoomLevel", vec![json!(2)]),
+        ("getZoomLevel", vec![]),
+        ("getTitle", vec![]),
+        ("canGoToOffset", vec![json!(1)]),
+        ("isCrashed", vec![]),
+        ("getWebContentsId", vec![]),
+        ("findInPage", vec![json!("c")]),
+        ("remove", vec![]),
+    ] {
+        said(m, webview("b", m, args).await);
+    }
+    let png = webview("b", "capturePage", vec![]).await;
+    // A headless runtime has no surface to capture a guest from (Electron
+    // refuses: UnknownVizError): there it is None; on a display, a PNG.
+    said(
+        "capturePage",
+        Some(json!(png.as_ref().is_none_or(|v| v.as_str().is_some_and(|p| p.starts_with("data:image/png;base64,"))))),
+    );
+    let pdf = webview("b", "printToPDF", vec![json!({})]).await;
+    said("printToPDF", pdf.map(|v| json!(v.as_str().is_some_and(|p| p.starts_with("JVBERi0")))));
 }
 
 /// Serve `/<path>` as a page titled `path`; every request's path is told.
@@ -282,6 +318,12 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(audited(), "{:?}", logged.lock().unwrap());
+        // And shown on the page, in its overlay, as a warning.
+        sh.until(
+            "[...document.querySelector('[data-aio-dev=overlay]').shadowRoot.children]\
+             .some((e) => e.textContent.includes('accessibility: <img>: missing \"alt\"'))",
+        )
+        .await;
     }
     // A themed window: aio's title bar, its title the page's, its maximize the window's.
     sh.until("document.querySelector('.aio-titlebar-title').textContent === 'guests'").await;
@@ -387,6 +429,33 @@ async fn a_browser_shows_another_site_in_its_own_session_and_the_shell_guards_it
          document.getElementById('log').textContent.includes('ran Some(String(\"rgb(1, 2, 3)\"))')",
     )
     .await;
+
+    // Every <webview> method, by name (aio handed out the element itself).
+    let list = aio::serde_json::to_string(&WEBVIEW_METHODS).unwrap();
+    let missing = format!("{list}.filter((m) => typeof document.querySelector('#b webview')[m] !== 'function')");
+    assert_eq!(sh.eval(&missing).await, json!([]), "each is the real <webview>'s");
+    sh.eval("document.getElementById('wv').click()").await;
+    sh.until("document.getElementById('log').textContent.includes('wv printToPDF')").await;
+    let log = sh.eval("document.getElementById('log').textContent").await;
+    let log = log.as_str().unwrap();
+    for want in [
+        "wv insertCSS-color Some(String(\"rgb(4, 5, 6)\"))",
+        "wv removed-color Some(String(\"rgb(1, 2, 3)\"))",
+        "wv isAudioMuted Some(Bool(true))",
+        "wv getUserAgent Some(String(\"aio-test-agent\"))",
+        "wv getZoomLevel Some(Number(2))",
+        "wv getTitle Some(String(\"/",
+        "wv canGoToOffset Some(Bool(true))",
+        "wv isCrashed Some(Bool(false))",
+        "wv getWebContentsId Some(Number(",
+        "wv findInPage Some(Number(",
+        "wv remove None",
+        "wv capturePage Some(Bool(true))",
+        "wv printToPDF Some(Bool(true))",
+    ] {
+        assert!(log.contains(want), "{want} in {log}");
+    }
+    assert!(logged.lock().unwrap().iter().any(|l| l.contains("<Browser> has no method \"remove\"")), "said");
 
     // A child window: opened on an http page with a declared preload, in a
     // session of its own; refused, with the reason, otherwise.
@@ -562,4 +631,58 @@ async fn ctrl_dot_shows_the_time_travel_panel_in_a_dev_window() {
     sh.until("document.querySelector('[data-t=timeTravel]') !== null").await;
     sh.eval("document.querySelector('[data-t=ttUndo]').click()").await;
     sh.until("document.getElementById('n').textContent === '1'").await;
+}
+
+/// A key whose answer the page waits for, a key that stalls the app for
+/// 2 s, and a button whose frame can be on its way when a key is asked:
+/// the window of `a_key_s_answer_is_in_before_the_page_draws`.
+fn keys() -> View {
+    let (mut n, clicks) = (signal(|| 0u32), signal(|| 0u32));
+    let key = move |e: KeyboardEvent| {
+        if e.key() == Key::Character("s".into()) {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        n += 1;
+    };
+    rsx! {
+        p { id: "k", onkeydown: key, "pressed {n}" }
+        button { id: "b", onclick: move |_| clicks += 1, "clicked {clicks}" }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_s_answer_is_in_before_the_page_draws() {
+    let _turn = crate::WINDOW_TURN.lock().await;
+    if !runtime::exe(&runtime::dir()).exists() {
+        return eprintln!("skipped: no Electron runtime in {}", runtime::dir().display());
+    }
+    let (mut shell, _dir) = open(&Window::default(), keys).await;
+    shell.until("document.getElementById('k').textContent === 'pressed 0'").await;
+    // A key in the page: its text right after, and how long the page was held.
+    let press = |k: &str| {
+        format!(
+            "(() => {{ const p = document.getElementById('k'), t = performance.now(); p.dispatchEvent(new KeyboardEvent('keydown', {{ key: '{k}', bubbles: true }})); return [p.textContent, performance.now() - t] }})()"
+        )
+    };
+    for i in 1..=20 {
+        let v = shell.eval(&press("a")).await;
+        assert_eq!(v[0], json!(format!("pressed {i}")), "the key's edits are in as its handler returns");
+    }
+    // A click's frame on its way (the page busy 500 ms, so it is sent and not
+    // yet applied) when a key is asked: the answer brings it first, then the key's.
+    let both = "(() => { document.getElementById('b').dispatchEvent(new MouseEvent('click', { bubbles: true })); \
+                const end = performance.now() + 500; while (performance.now() < end); \
+                document.getElementById('k').dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true })); \
+                return [document.getElementById('b').textContent, document.getElementById('k').textContent] })()";
+    assert_eq!(shell.eval(both).await, json!(["clicked 1", "pressed 21"]), "the frame on its way, then the answer");
+    // The app stalled 2 s: each key holds the page ASK_MS (50 ms), no longer.
+    for k in ["s", "a", "a"] {
+        let v = shell.eval(&press(k)).await;
+        assert_eq!(v[0], json!("pressed 21"), "not waited for");
+        assert!(v[1].as_f64().unwrap() < 200.0, "held {} ms by a stalled app", v[1]);
+    }
+    shell.until("document.getElementById('k').textContent === 'pressed 24'").await;
+    let v = shell.eval(&press("a")).await;
+    assert_eq!(v[0], json!("pressed 25"), "answered at once again after the late ones");
+    _ = shell.child.kill().await;
 }

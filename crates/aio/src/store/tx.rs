@@ -39,6 +39,7 @@ pub(super) struct Tx<T> {
 pub(super) struct Parked {
     by: By,
     who: Option<crate::Caller>,
+    from: Option<std::sync::Arc<crate::Request>>,
     method: String,
     args: Value,
     op: Option<String>,
@@ -156,9 +157,9 @@ impl<T: Cell> Store<T> {
         let tx = match method.split_once('.') {
             None => {
                 if cfg.serialize && self.txs.turn.is_some_and(|t| t != id) {
-                    let who = cx.caller().cloned();
+                    let (who, from) = (cx.caller().cloned(), cx.from().cloned());
                     let (method, op) = (method.to_string(), op.map(String::from));
-                    self.txs.parked.push_back(Parked { by: by.clone(), who, method, args, op, reply });
+                    self.txs.parked.push_back(Parked { by: by.clone(), who, from, method, args, op, reply });
                     return Ok(Value::Null);
                 }
                 Tx {
@@ -335,7 +336,7 @@ impl<T: Cell> Store<T> {
             ran = true;
             let r = p.reply.clone();
             if let Err(e) =
-                self.call_as(&p.by, p.who.as_ref(), &p.method, p.args, p.op.as_deref(), Some(p.reply))
+                self.call_as(&p.by, p.who.as_ref(), p.from.as_ref(), &p.method, p.args, p.op.as_deref(), Some(p.reply))
             {
                 r.send(Err(e));
             }

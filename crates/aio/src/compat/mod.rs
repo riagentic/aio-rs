@@ -4,7 +4,7 @@
 //! `state.db` in aio's layout (`aio_kv`, `#[aio_cell]` slices, the home
 //! claim; docs/migration/data.md). Feature `compat` adds the rest: aio's
 //! protocol v3 on `/ws` for aio pages and tools, an aio-rs app calling an
-//! aio app ([`AioLink`]), aio's one-time move of a scattered layout into
+//! aio app ([`AioLink`]; on this machine as itself, proven: [`AioPeer`]), aio's one-time move of a scattered layout into
 //! its home ([`scatter`]) and `#[on_aio]`. Without the feature a `/ws`
 //! client must say `x-aio-wire: 2` (or `?wire=2`) and `#[on_aio]` is a
 //! build error.
@@ -12,6 +12,12 @@
 pub(crate) mod crdt;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod data;
+#[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
+mod peer;
+#[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
+pub use peer::AioPeer;
+#[cfg(all(feature = "compat", not(target_arch = "wasm32")))]
+pub mod local;
 #[cfg(all(feature = "compat", not(target_arch = "wasm32")))]
 pub mod scatter;
 #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]

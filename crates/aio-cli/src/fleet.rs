@@ -18,11 +18,21 @@ pub enum Kind {
     Cli,
     Android,
     Web,
+    Ios,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] =
-        [Kind::Desktop, Kind::Windows, Kind::Deb, Kind::AppImage, Kind::Dmg, Kind::Cli, Kind::Android, Kind::Web];
+    pub const ALL: [Kind; 9] = [
+        Kind::Desktop,
+        Kind::Windows,
+        Kind::Deb,
+        Kind::AppImage,
+        Kind::Dmg,
+        Kind::Cli,
+        Kind::Android,
+        Kind::Web,
+        Kind::Ios,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -34,6 +44,7 @@ impl Kind {
             Kind::Cli => "cli",
             Kind::Android => "android",
             Kind::Web => "web",
+            Kind::Ios => "ios",
         }
     }
 
@@ -47,6 +58,7 @@ impl Kind {
             Kind::Cli => "a headless binary on PATH, no menu entry (a cli or server app, or a remote client's bin)",
             Kind::Android => "signed APKs, one per CPU type (the app's lib calls android_app!)",
             Kind::Web => "the app as a static site, an installable PWA (the app's lib runs in the page, aio::web)",
+            Kind::Ios => "the Xcode project of an iPhone and iPad thin client on the app's server (Xcode builds it)",
         }
     }
 
@@ -140,7 +152,7 @@ pub fn across(plan: Vec<Planned>, platforms: &[&'static Platform]) -> Vec<Planne
                 Kind::Windows => p.os == "windows",
                 Kind::Deb | Kind::AppImage => p.os == "linux",
                 Kind::Dmg => p.os == "macos",
-                Kind::Android | Kind::Web => false,
+                Kind::Android | Kind::Web | Kind::Ios => false,
             };
             let on: Vec<&'static Platform> = platforms.iter().filter(fits).copied().collect();
             if on.is_empty() {

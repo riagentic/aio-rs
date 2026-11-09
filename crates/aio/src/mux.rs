@@ -18,6 +18,7 @@
 #[cfg(feature = "server")]
 pub(crate) const HEADER: &str = "x-aio-mux";
 /// The WebSocket protocol a page asks with (a browser sets no header).
+#[cfg(any(feature = "server", target_arch = "wasm32"))]
 pub(crate) const PROTOCOL: &str = "aio-mux";
 /// Links one socket carries at most.
 #[cfg(feature = "server")]
@@ -139,7 +140,11 @@ mod net {
         }
     }
 
-    type Out = Arc<tokio::sync::Mutex<SplitSink<WebSocket, AxMsg>>>;
+    /// What a socket's frames go out on: a WebSocket's, or a polled one's ([`crate::poll`]).
+    pub(crate) type Sends = Pin<Box<dyn Sink<AxMsg, Error = axum::Error> + Send>>;
+    /// What a socket's frames come in on.
+    pub(crate) type Takes = Pin<Box<dyn Stream<Item = Result<AxMsg, axum::Error>> + Send>>;
+    type Out = Arc<tokio::sync::Mutex<Sends>>;
 
     async fn put(out: &Out, text: String) -> std::io::Result<()> {
         out.lock().await.send(AxMsg::Text(text.into())).await.map_err(std::io::Error::other)
@@ -172,19 +177,24 @@ mod net {
     pub(crate) type Run =
         Arc<dyn Fn(Sock) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>> + Send + Sync>;
 
+    /// A WebSocket's two ends, for [`serve`].
+    pub(crate) fn ends(ws: WebSocket) -> (Sends, Takes) {
+        let (sink, stream) = ws.split();
+        (Box::pin(sink), Box::pin(stream))
+    }
+
     /// Serve the links of socket `ws`, each run by `run`, until it closes or
     /// has had none for `IDLE`. The socket's own slot of `open` (of `max`,
     /// taken by the caller) holds its first link; each one more takes one.
     /// `max_message`: a link's largest message; it may let 8 MB wait unread
     /// (what a socket's buffers would hold), or one such message.
     pub(crate) async fn serve(
-        ws: WebSocket,
+        (sink, mut stream): (Sends, Takes),
         run: Run,
         open: Arc<AtomicUsize>,
         max: usize,
         max_message: usize,
     ) -> std::result::Result<(), String> {
-        let (sink, mut stream) = ws.split();
         let out: Out = Arc::new(tokio::sync::Mutex::new(sink));
         let mut chans: HashMap<u32, Inbox<Msg>> = HashMap::new();
         let mut tasks = tokio::task::JoinSet::new();

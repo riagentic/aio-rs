@@ -258,6 +258,7 @@ aio::rt().block_on(checkout(500)).unwrap();
 | `Peer::at(app, data, user)` | the same for an app whose data is at `data` (a profile, a ported aio home) |
 | `.call(cell, method, args)` | one call by name, `args` a JSON list; refused at once if the app stopped, never queued |
 | `.describe(cell)` | what this caller may call: methods, signatures, and whether each rule lets it in |
+| `.describe_all()` | `describe` of every cell whose door is open, by cell id (aio's app-wide `describe()`) |
 | `.cell::<T>()` | a typed `aio::sync::Remote<T>`: live state, typed calls, `run` and `run_streamed` for its server functions |
 | `.blobs()` | its blob store (`aio::blobs::Blobs`): content-addressed, read and put directly |
 

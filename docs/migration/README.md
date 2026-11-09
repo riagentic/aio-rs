@@ -27,6 +27,7 @@ and is many times slower than the aio app it replaces.
 7. [Checklist](#7-checklist)
 8. [0.1 → 0.2: Dioxus is gone](#8-01--02-dioxus-is-gone)
 9. [0.2 → 0.3](#9-02--03)
+10. [0.3 → 0.4](#10-03--04)
 
 ## 1. Project and boot
 
@@ -54,7 +55,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 |---|---|
 | `appId`, `cells` | `[app] id`; the launcher opens each cell (`Source::for_app`), `aio::Cells::with(h, after)` orders their start |
 | `localFirst` | built in: a synced copy predicts every call and confirms it with the server |
-| `cellDefaults` | `persist: "none"`: `[data] only_persist = true`; `visible`: per cell (`#[cell(visible = f)]`) |
+| `cellDefaults` | `persist: "none"`: `[data] only_persist = true`; `visible`: `aio::visible_by_default(f)` (a cell's own `#[cell(visible = f)]` wins) |
 | `port`, `host`, `expose` | `[server] listen`; `--port`, `--host`, `--expose` per launch |
 | `tls` | `[server] tls`, `cert`, `key` |
 | `appDir`, `profiles`, `dbPath` | `[home] dir`, `[app] profiles = false`; the home rules ([files](../persistence/files.md)), `--home`, `--profile`, `--instance`; `[data] store` names the file; `Handle::memory()` is aio's `":memory:"` |
@@ -68,7 +69,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `client` (`electron`, `browser`, `cli`, `server-only`) | `[app] mode` (`standalone`, `client-server`, `server`, `client`, `cli`) and `[app] ui = "browser"`; `--client=window\|browser\|server-only` per launch |
 | `keepServer` | `aio_shell::Window { keep_server: true }`, or `--keep-server` per launch: the app serves on once its window closes |
 | `localConnectHooks`, `onConnect`, `onDisconnect` | `Http::on_link(f)`, `Plugin::on_link(f)`: each link's `Presence`; `Http::door_links(true)` hears the local door's links too |
-| `transport` | built in: the window talks over IPC, other local tools over the local door, the network over `/ws` |
+| `transport`, `--transport` | built in: the window talks over IPC, other local tools over the local door; a copy over `/ws`, or plain HTTP when it doesn't get through: `[client] transport`, `--transport` |
 | `takeover`, `singleton` | always one instance per home; `--takeover` per launch; `--instance <n>` for a second, private one |
 | `serverUrl` | `mode = "client"` with `[client] server`, a pairing (`ax pair`), the connect page, or `--server-url` per launch ([desktop](../clients/desktop.md#the-connect-page)) |
 | `electron: { strictPin }`, `--strict-pin` | `[client] strict_pin`, `--strict-pin` |
@@ -141,7 +142,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `sync: true`, merge strategies | `#[cell(shared)]`; methods merge by replay (see the sync table) |
 | `onPersist`, `onRestore` | `#[cell(save = f, restore = f)]` |
 | `retired cells`, `am persist --drop` | `#[cell(retire = ["old"])]` |
-| `worker: true`, `workerRespawn` | none: every cell is native code on its own lock; blocking work goes to `tokio::task::spawn_blocking` in an effect |
+| `worker: true`, `workerRespawn` | none: every cell is native code on its own lock; heavy work goes to `aio::effect::off_thread` in an effect (a worker thread; in a browser a Web Worker), or `tokio::task::spawn_blocking` natively |
 | `bindCell`, `composeCells` | `aio::client!(Cell, name)`; one cell holding others as fields (`#[aio_cell]` in a port) |
 
 A method named like one of `Handle`'s own (`start`, `state`, `call`,
@@ -178,7 +179,7 @@ Rename it (`begin`) when porting.
 | `visible` / `visible.forUser` | `#[cell(visible = f)]`, `fn(&Self, &By)` or `fn(&Self, &Caller)` |
 | server-only fields (a read on the client throws) | `#[server] pub f: Hidden<T>` on a shared cell (a read on a copy panics) |
 | `access` per method | `#[client]`, `#[client(role = "admin", allow = f)]` |
-| optimistic calls, `useOptimistic` | built in: copies predict; `#[client(predict = false)]` to wait |
+| optimistic calls, `useOptimistic` | built in: copies predict; `#[client(predict = false)]` to wait; `use_optimistic(base, apply)` for any other value |
 | CRDT strategies (`counter`, `set-add`, `text`) | methods merge by replay; `aio::merge::text3` for prose; `remote.merge(field, Merge::..)` shows a field merged while a call waits |
 | `serverFns`, `serverFn("pay").charge(..)` | `aio::fns::ServerFn` + `Http::server_fn`, `remote.run(F, args)` |
 | `routes`, `route()` | `aio::http::Http`, `Route::get(..)` |
@@ -208,13 +209,13 @@ Rename it (`begin`) when porting.
 | `memo(Component)` | nothing: a body runs once; a prop that follows is a `Prop<T>` |
 | `batch(..)` | nothing: a handler's writes reach the page in one flush |
 | `useVirtualList` | `aio::kit::VirtualList`, `aio::kit::window` |
-| `useForm`, `useFieldArray` | `aio::kit::use_form`, `move_item` |
+| `useForm`, `useFieldArray` | `aio::kit::use_form`, `move_item`; a form with a `schema`: `use_form_schema` and a `Schema` ([forms](../ui/forms.md#a-schema)) |
 | `useRoute`, `navigate`, `<Route>`, `<Outlet>`, `<Link>` | `aio::routes!`, `aio::router!()`: `here()`, `go`, `Route`, `Outlet`, `Link` ([routing](../ui/routing.md)) |
 | `useHead`, `collectHead` | `aio::head::use_head` (`aio_shell::page::use_head` re-exports it) |
-| `useUser`, `<SignIn>` | `aio::kit::SignIn`, the session's `Caller` |
+| `useUser`, `<SignIn>` | `aio::kit::use_user()`, `aio::kit::SignIn` |
 | `ErrorBoundary` | `ErrorBoundary { fallback: \|e: String\| rsx! { .. }, .. }` |
 | `aio/ui`: `Alert` `Avatar` `Breadcrumb` `Button` `Card` `Checkbox` `Confirm` `ConfirmButton` `EmptyState` `Field` `Input` `Markdown` `Menu` `Modal` `Pagination` `Progress` `RadioGroup` `Row` `Select` `Skeleton` `Spinner` `Stack` `Switch` `Table` `Tabs` `Textarea` `ToastHost` `toast` `Tooltip` `ZoomPan` `fitView` `zoomAt` | `aio::kit`, the same names (`fit_view`, `zoom_at`) ([kit](../ui/kit.md)) |
-| `UI_CSS`, `UiStyles`, `css`, `collectCss`, `cx` | `aio::kit::CSS`, `aio::use_css!`, `aio::ui::cx(&[("on", cond)])` |
+| `UI_CSS`, `UiStyles`, `css`, `collectCss`, `cx` | `aio::kit::CSS`, `aio::kit::UiStyles { hue }`, `aio::ui::css`, `collect_css`, `aio::use_css!`, `aio::ui::cx(&[("on", cond)])` |
 | `guestPreload` | built in: `aio::kit::Browser` loads aio-shell's guest script |
 | aio's theme, `ui.theme`, `ui.hue`, `ui.layout` | `aio::kit::theme_css(hue)`, `--aio-*` tokens, `[ui]` ([theming](../ui/theming.md)) |
 | CSS files, `build.css` | `aio::use_css!(dark, &theme; "assets/style.css")`, `[build] css` |
@@ -225,16 +226,16 @@ Rename it (`begin`) when porting.
 
 | aio | aio-rs |
 |---|---|
-| `h`, `Fragment` | `rsx!`, `Fragment {}` |
+| `h`, `Fragment` | `rsx!`, or `h(tag)` and `comp(C, props)` without it ([views](../ui/views.md#without-rsx)); `Fragment {}` |
 | `mount`, `hydrate`, `page` | `aio_shell::run(App, ..)` (the window), `aio::web::launch(App)` (the web build) |
-| `renderToString`, `renderToStream` | `ax preview <app> <component> --html`; a served page paints its first view itself ([web](../clients/web.md)) |
-| `Show`, `Suspense`, `lazy` | `if`; `Suspense { fallback, .. }` with `resource(..).suspend()?`; no lazy component loading (one binary) |
+| `renderToString`, `renderToStream` | `Http::painted(App)` paints and streams each navigation ([views](../ui/views.md#server-rendering-and-hydration)); `air::ssr::render_to_string`, `air::ssr::stream`; `ax preview <app> <component> --html` |
+| `Show`, `Suspense`, `lazy` | `if`; `Suspense { fallback, .. }` with `resource(..).suspend()?`; `lazy(() => import(…))` is `aio::lazy!(view)` in a `Defer` (a web build fetches the view's code when it first shows) |
 | `Defer` | `aio::kit::Defer` |
 | `Portal` | `aio::kit::Portal`, `PortalHost` |
 | `NavLink`, `Redirect`, `routePath`, `routeSearch`, `useNavigate` | from `aio::router!()`: `Link`, `Redirect`, `here()`, `params()`, `go(..)` |
 | `TransitionGroup`, `fade`, `scale`, `slide` | `aio::kit::TransitionGroup`, `Motion` |
 | `createContext`, `useContext`, `useContextSelector` | `provide(\|\| v)`, `context::<T>()`; `aio::kit::use_context_select` |
-| `useSignal`, `untrack`, `trackedMemo` | `signal`; `s.get_untracked()`; `part(..)` / `name_at(..)` |
+| `useSignal`, `untrack`, `trackedMemo` | `signal`; `s.get_untracked()`; `TrackedMemo` (or `part(..)` / `name_at(..)`) |
 | `useRef` | `signal`, or `onmounted` for an element |
 | `useId` | `aio::kit::use_id(prefix)` |
 | `useInterval`, `useRaf` | `aio::kit::use_interval`, `use_frame` |
@@ -280,14 +281,15 @@ Rename it (`begin`) when porting.
 | `route`, `serverFn`, `serverFns`, `schedule` | see the tables above |
 | `aio/updates` (`updates` cell) | `aio::update::Updates` |
 | `aio/feedback` (`feedback` cell) | `aio::feedback::Feedback`, `aio::feedback::cell()` |
-| `aio/cli` (`EXIT`, `fail`, `parseCli`) | `aio::cli` (`OK`, `ERROR`, `USAGE`, `fail`, `Spec`, `parse`) ([CLI apps](../clients/cli-apps.md)) |
+| `aio/cli` (`EXIT`, `fail`, `parseCli`) | `aio::cli` (`OK`, `ERROR`, `USAGE`, `fail`, `Spec`, `parse`; typed flags: `#[derive(Options)]`) ([CLI apps](../clients/cli-apps.md)) |
 | `aio/db` (`DB`, `createDB`, `reactiveDB`) | `aio::db::Db`, live queries ([SQL](../persistence/sql.md)) |
 | `aio/sync` (HLC, `mergeField`, `rebase`, `compactSyncOps`) | internal: `aio::merge` for app merges; aio's ops are read by `compat` |
 | `aio/extras` (`teachMessage`, `checkCells`, `deepFreeze`) | `aio::report::teach`; `ax lint`; not needed |
 | `aio/build`, `aio/ship`, `aio/build-all`, `aio/dev-android`, `aio/android-install`, `aio/electron-install` | `ax build`, `ax release`, `ax dev --android`, `ax install --android`, `ax setup` |
 | `aio/am`, `aio/amui`, `aio/doctor` | `ax`, `ax ui`, `ax doctor` |
 | `aio/aiol` | none |
-| `aio/state-core`, `aio/jsx-runtime`, `aio/air/compat` | not needed |
+| `aio/state-core` | aio-rs's JS client (`/__aio/client.js`, `aio-rs-client`), its React and Solid bindings, `ax tsgen` ([JS client](../clients/js.md)) |
+| `aio/jsx-runtime`, `aio/air/compat` | not needed |
 
 ### Keys
 
@@ -328,6 +330,8 @@ Rename it (`begin`) when porting.
 | `am dev` | `ax dev <app>` (edits hot-patch in) |
 | `am build`, `am compile` | `ax build <app>` (`--deb`, `--appimage`, `--windows`, `--android`, `--web`) |
 | `am release`, `am publish`, signing keys | `ax keygen <app>`, `ax release <app>` ([release](../build/release.md)) |
+| `run.sh` / `run.ps1` (`curl … \| sh -s owner/repo`) | `ax run owner/repo` (shown and asked first, one commit; [ax](../clients/ax.md#ax-run)) |
+| an `ios-client` project | `ax build <app> --ios` ([targets](../build/targets.md#ios)) |
 | `build.targets`, `--platforms` | `[build] targets`, `[build] platforms` ([targets](../build/targets.md)) |
 | the `updates` cell, `canApply` | `aio::update::Updates`, `aio::update::can_apply` |
 
@@ -967,3 +971,26 @@ A struct literal without `..` names every field, and a `match` without
   counts, not only debug assertions): a log that no longer replays
   refuses the boot there instead of quarantining, and problem reports say
   `"build": "dev"`.
+
+## 10. 0.3 → 0.4
+
+No `aio.toml` key is removed or renamed, and the data needs nothing:
+0.4 opens 0.3's store as it is. Move the dependency with `ax pin 0.4.0`,
+then `cargo check` finds the new fields and the changed signatures
+below; the behaviors after them the compiler can't find.
+
+| 0.3 | 0.4 |
+|---|---|
+| `Viewer { user, role }` | `Viewer { user, role, linked: true, path: "/".into() }`, or `..Default::default()` (`linked`: it may link the app's cells; `path`: the address asked) |
+| a literal of `aio::Inputs`, `report::Diagnostic`, `report::About`, `paths::Ask`, `web::storage::Doc`, aio-config's `Client`, `Feedback` | the new fields named: `made: None`; `state: None`; `args: false`; `transport: None`; `paths: vec![]`; `transport: Transport::Auto`; `args: false` (or `..Default::default()`) |
+| a literal or full pattern of `aio::Call` | `state` (the state the call runs on) and `request` (`Option<&aio::Request>`) named, or `..` in the pattern |
+| `let f: [&str; 20] = aio::paths::FLAGS;` | `[&str; 21]` (new: `--transport=`), or `&aio::paths::FLAGS[..]` |
+| `use_async_rule::<Signup, String, _>(form, "name", part, wait, rule)` | `use_async_rule::<Signup, Signup, String, _>(..)`: `Form<T>` is `Form<T, O = T>`, `O` what its values parse into; a call that names no type parameters is unchanged |
+| `impl<T> Helper for Form<T>` | `impl<T, O> Helper for Form<T, O>` where it must cover a `use_form_schema` form too |
+| `can_apply(\|\| match busy() { true => Err("a recording".into()), false => Ok(()) })` (a `Veto`, a plain `fn`) | `can_apply(\|\| async { match busy() { true => Err("a recording".into()), false => Ok(()) } })`: awaited off the cell, so it may do work first; `aio::update::Veto` is gone |
+| `h.apply()` refused with `the app says not now: …` | `apply` answers; the release stays offered and `state().error` says `the app says not now: …`: read it there |
+| an async call cut off at the call ceiling: `Code::DispatchAborted` | `Code::EffectTimeout` (aio's `EFFECT_TIMEOUT`); one whose awaited I/O panicked: `Code::EffectError`, was `DispatchAborted` |
+| an `#[on_stop]` refusal's problem kind `hook` | `hook:stop` (`error_code()`: `DESTROY_ERROR`); an `on_problem` that matched `"hook"` for it matches both |
+| `aio::update::Updates`, `UpdatesCalls` or `share` with `aio-shell = { .., default-features = false }` | add `features = ["updates"]` to aio-shell (it turns on aio-rs's `updates`, the cell's feature), or aio-rs's `updates` alone where no shell is used; ax turns it on by itself for an `[updates] url` |
+| `aio::http::painted(page, &paint)` | the same, and the painted `#main` is marked `data-aio-painted` and the splash hidden: a page script that waited for the splash to go sees it gone at once |
+| `ax status notes \| grep running` (text into a pipe) | `ax status notes --text \| grep running`, or `AIORT_OUTPUT=text`; or read the JSON (`\| jq`), as with aio's `am`. `dev`, `lint`, `agent`, `testgen`, `record`, `peer`, `snapshot`, `logs`, `help` and `version` stay text |

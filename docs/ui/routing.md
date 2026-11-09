@@ -41,7 +41,10 @@ assert_eq!(Page::User { id: 7 }.head().title.as_deref(), Some("User 7"));
 ```
 
 - Each variant is a page with its pattern; its fields are the pattern's
-  params, parsed with `FromStr` and written back with `Display`.
+  params, parsed with `FromStr` and written back with `Display`. The
+  fields must be the params, by name: `User { idd: u32 } = "/users/:id"`
+  fails the build (aio's typed `useRoute(pattern)` param names), as does
+  a param with no field. A bare `*` names none.
 - `parse(path)` gives the first variant, in written order, whose pattern
   matches and whose params parse; a query or fragment is ignored.
 - `href()` is the path a link uses, params percent-encoded.
@@ -307,17 +310,15 @@ sheet), then step history; at the first place the host does its default
 
 ## Gaps against aio
 
-- **Typed `useRoute(pattern)`.** aio types the param names of a literal
-  pattern; aio-rs's `routes!` types the values as well (`id: u32`), and
-  `match_path` / `params()` give strings by name. By design: `Page::parse(&here().path)`
-  is the typed route, its values parsed, where aio typed only names.
+- **`useRoute(pattern)` for a one-off pattern.** aio typed the param
+  names of any literal pattern at its call; in aio-rs a typed pattern is
+  a `routes!` variant (its names checked as it builds, its values parsed,
+  where aio typed only names), and `match_path` / `params()` give an
+  untyped one's strings by name.
 - **`navigate(-1)`, `navigate(to, { replace })`.** `back()` and
   `redirect(to)`; Forward is `NAV.write().go(1)`.
 - **`NavLink`.** `Link` marks its own active state (`active_class`,
   `exact`).
-- **`collectHead()` after a server render.** aio-rs has no server
-  rendering of views; `aio::head::html(&merged)` writes the tags of a
-  merged head for a page an app serves itself.
 
 ## Common mistakes
 

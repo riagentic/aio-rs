@@ -42,7 +42,7 @@ Each says what it found in words, with `--json` for scripts.
 | a method holds the cell's thread | `WARN [perf]` with the method and its phases; vitals hint `The call notes.import took 840 ms` | move the slow part into an effect ([effects](../state/effects.md)); budget it with `[perf.methods]` if it is meant to be slow |
 | the effect queue backed up | vitals hint `The effect queue backed up` | debounce (`cx.after` with one key) or `Mode::Newest` |
 | the page's own code blocks it | vitals hint `The client's main thread was blocked`; `ax eval <app> "performance.now()"` is slow to answer | profile the page; less DOM work per render |
-| a panic in a view | a debug build's corner badge (`1 page error`); `ax logs <app> --client` | fix the view; refusals are `Result`s, not panics |
+| a panic in a view | a debug build's corner badge (`1 problem`); `ax logs <app> --client` | fix the view; refusals are `Result`s, not panics |
 | the renderer crashed | `window:crashed` in `ax report <app>` | the report has the page's last lines |
 | nothing is drawn at all | `ax shot <app>` is empty; `ax surface <app>` lists nothing | `ax errors <app>` (a failed build), `ax logs <app> --client` |
 
@@ -179,7 +179,8 @@ More pitfalls, by symptom: [FAQ and pitfalls](../basics/faq.md#pitfalls).
 | builds fail: no `cc` | no Command Line Tools | `xcode-select --install` |
 | "can't be opened" / "unidentified developer" for a downloaded app | the bundle is signed ad hoc, not with a Developer ID (not notarized yet) | Control-click → Open once, or `xattr -dr com.apple.quarantine Notes.app` |
 | `ax discover` or pairing finds nothing on the LAN | macOS asks before an app uses the local network (`ax discover` says so when its probe could not be sent) | allow it in System Settings → Privacy & Security → Local Network |
-| `ax build` can't make a `.dmg` or a macOS bundle on Linux | they are made on a Mac | build on one, or set `[build.macos] host` (or `AIO_MACOS_SSH`) to a Mac over SSH |
+| `ax build` can't make a `.dmg` on Linux | `hdiutil` runs on a Mac | build the `.zip` (`desktop`), or set `[build.macos] host` (or `AIO_MACOS_SSH`) to a Mac over SSH |
+| a macOS build on Linux fails to link a framework | a library links more of macOS than aio-rs does | build that app on a Mac, or over SSH (`[build.macos] host`) |
 
 ## Android
 

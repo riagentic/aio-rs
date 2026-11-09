@@ -1350,6 +1350,191 @@ fn lit_arm(pat: Tokens, path: Tokens, fields: &syn::Fields) -> Tokens {
     }
 }
 
+/// `#[derive(aio::cli::Options)]` on a struct of named fields: its
+/// `aio::cli::Options` impl. A field is a flag named after it (`dry_run`:
+/// `--dry-run`), its kind and value type from its type: `bool` a switch,
+/// `Vec<T>` a list, `Option<T>` an optional flag, any other `T` one that
+/// must be given unless it has a `default`; a number a number flag, else
+/// text; every value must parse as `T` (`FromStr`). Its doc comment is its
+/// help. `#[cli(short = 'n')]`; `#[cli(default = 20)]` (an expression of
+/// its type, shown by `Display`); `#[cli(positional)]` (`Option<String>`),
+/// `#[cli(rest)]` (`Vec<String>`), `#[cli(command)]` (`String`: the
+/// sub-command, one of the struct's `#[cli(command("add", "add a note"))]`).
+/// On the struct: `#[cli(name = "notes", version)]` (`version`: the
+/// crate's; `version = "1.2"`); its doc comment is the about line. A type
+/// that can't be read is a compile error at the field.
+#[proc_macro_derive(Options, attributes(cli))]
+pub fn options(item: TokenStream) -> TokenStream {
+    options_impl(&parse_macro_input!(item as syn::DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// The doc comment of `attrs`, its lines joined.
+fn doc_of(attrs: &[Attribute]) -> String {
+    let lines: Vec<String> = attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .filter_map(|a| match &a.meta {
+            syn::Meta::NameValue(syn::MetaNameValue {
+                value: Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }),
+                ..
+            }) => Some(s.value().trim().to_string()),
+            _ => None,
+        })
+        .collect();
+    lines.join(" ").trim().to_string()
+}
+
+/// `Name<Inner>`'s inner type when the last segment is `name`.
+fn inner_of<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    match &seg.arguments {
+        PathArguments::AngleBracketed(a) if seg.ident == name && a.args.len() == 1 => match &a.args[0] {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_named(ty: &Type, names: &[&str]) -> bool {
+    matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.segments.len() == 1
+        && names.iter().any(|n| p.path.segments[0].ident == n) && p.path.segments[0].arguments.is_empty())
+}
+
+const NUMBERS: [&str; 14] =
+    ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64"];
+
+fn options_impl(input: &syn::DeriveInput) -> syn::Result<Tokens> {
+    let name = &input.ident;
+    let syn::Data::Struct(syn::DataStruct { fields: syn::Fields::Named(fields), .. }) = &input.data else {
+        return Err(syn::Error::new(input.ident.span(), "#[derive(Options)]: on a struct with named fields"));
+    };
+    let (mut prog, mut version, mut commands) = (quote!(env!("CARGO_PKG_NAME")), quote!(), vec![]);
+    for a in input.attrs.iter().filter(|a| a.path().is_ident("cli")) {
+        a.parse_nested_meta(|m| {
+            if m.path.is_ident("name") {
+                let s: LitStr = m.value()?.parse()?;
+                prog = quote!(#s);
+            } else if m.path.is_ident("version") {
+                version = match m.input.peek(syn::Token![=]) {
+                    true => {
+                        let v: LitStr = m.value()?.parse()?;
+                        quote!(.version(#v))
+                    }
+                    false => quote!(.version(env!("CARGO_PKG_VERSION"))),
+                };
+            } else if m.path.is_ident("command") {
+                let c;
+                syn::parenthesized!(c in m.input);
+                let (n, _, h): (LitStr, syn::Token![,], LitStr) = (c.parse()?, c.parse()?, c.parse()?);
+                commands.push(quote!(.command(#n, #h)));
+            } else {
+                return Err(m.error("#[cli]: name, version or command(\"name\", \"help\")"));
+            }
+            Ok(())
+        })?;
+    }
+    let about = doc_of(&input.attrs);
+    let (mut spec, mut reads) = (vec![], vec![]);
+    for f in &fields.named {
+        let id = f.ident.as_ref().expect("named");
+        let flag = id.to_string().trim_start_matches("r#").replace('_', "-");
+        let ty = &f.ty;
+        let (mut short, mut default, mut role) = (None, None, None);
+        for a in f.attrs.iter().filter(|a| a.path().is_ident("cli")) {
+            a.parse_nested_meta(|m| {
+                if m.path.is_ident("short") {
+                    short = Some(m.value()?.parse::<syn::LitChar>()?);
+                } else if m.path.is_ident("default") {
+                    default = Some(m.value()?.parse::<Expr>()?);
+                } else if ["positional", "rest", "command"].iter().any(|r| m.path.is_ident(r)) {
+                    role = m.path.get_ident().map(Ident::to_string);
+                } else {
+                    return Err(m.error("#[cli]: short = 'c', default = <value>, positional, rest or command"));
+                }
+                Ok(())
+            })?;
+        }
+        let help = doc_of(&f.attrs);
+        let need = |ok: bool, what: &str| match ok {
+            true => Ok(()),
+            false => Err(syn::Error::new(
+                ty.span(),
+                format!("#[cli({})] takes a field of type {what}", role.as_deref().unwrap_or("")),
+            )),
+        };
+        match role.as_deref() {
+            Some("positional") => {
+                need(inner_of(ty, "Option").is_some_and(|t| is_named(t, &["String"])), "Option<String>")?;
+                spec.push(quote!(.positional(#flag)));
+                reads.push(quote!(#id: a.pos(#flag).map(::std::string::ToString::to_string)));
+                continue;
+            }
+            Some("rest") => {
+                need(inner_of(ty, "Vec").is_some_and(|t| is_named(t, &["String"])), "Vec<String>")?;
+                spec.push(quote!(.rest(#flag)));
+                reads.push(quote!(#id: a.rest.clone()));
+                continue;
+            }
+            Some(_) => {
+                need(is_named(ty, &["String"]), "String")?;
+                reads.push(quote!(#id: a.command.clone().unwrap_or_default()));
+                continue;
+            }
+            None => {}
+        }
+        let help = quote!(.help(#help));
+        let short = short.map(|c| quote!(.short(#c)));
+        if is_named(ty, &["bool"]) {
+            if let Some(d) = &default {
+                return Err(syn::Error::new(d.span(), "#[cli(default)]: a switch is off unless given"));
+            }
+            spec.push(quote!(.flag(::aio::cli::Flag::switch(#flag) #help #short)));
+            reads.push(quote!(#id: a.on(#flag)));
+            continue;
+        }
+        let (list, opt) = (inner_of(ty, "Vec"), inner_of(ty, "Option"));
+        let one = list.or(opt).unwrap_or(ty);
+        let kind = match (list.is_some(), is_named(one, &NUMBERS)) {
+            (true, _) => quote!(list),
+            (false, true) => quote!(number),
+            (false, false) => quote!(text),
+        };
+        let default = match (&default, list.is_some() || opt.is_some()) {
+            (Some(d), true) => {
+                return Err(syn::Error::new(
+                    d.span(),
+                    "#[cli(default)]: a list or an Option has none (absent: empty, None)",
+                ));
+            }
+            // Typed by the field (a text's default as `&str`): a default of another type doesn't compile.
+            (Some(d), false) if is_named(ty, &["String"]) => quote!(.default({ let d: &str = #d; d })),
+            (Some(d), false) => quote!(.default(&::std::string::ToString::to_string(&{ let d: #ty = #d; d }))),
+            (None, false) => quote!(.required()),
+            (None, true) => quote!(),
+        };
+        spec.push(quote!(.flag(::aio::cli::Flag::#kind(#flag).typed::<#one>() #help #short #default)));
+        reads.push(match (list.is_some(), opt.is_some()) {
+            (true, _) => quote!(#id: a.get_all::<#one>(#flag)),
+            (false, true) => quote!(#id: a.get::<#one>(#flag)),
+            (false, false) => quote!(#id: a.get::<#one>(#flag).unwrap_or_else(|| {
+                ::std::panic!("Options::from_args: --{} is not in these Args (they come from another spec)", #flag)
+            })),
+        });
+    }
+    Ok(quote! {
+        impl ::aio::cli::Options for #name {
+            fn spec() -> ::aio::cli::Spec {
+                ::aio::cli::Spec::new(#prog).about(#about) #version #(#commands)* #(#spec)*
+            }
+            fn from_args(a: &::aio::cli::Args) -> Self {
+                Self { #(#reads),* }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HANDLE_METHODS, credential, expand, reads, secretish, span_ms, words};

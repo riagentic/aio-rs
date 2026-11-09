@@ -9,8 +9,8 @@ use crate::event::Raw;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
-enum Kind {
-    El(String, Vec<(String, String)>),
+pub(crate) enum Kind {
+    El(std::rc::Rc<str>, Vec<(String, String)>),
     Text(String),
     Comment,
     /// A clone's roots until placed, or a parked view (a DocumentFragment).
@@ -18,14 +18,14 @@ enum Kind {
 }
 
 #[derive(Clone, Debug)]
-struct Node {
-    kind: Kind,
-    children: Vec<usize>,
+pub(crate) struct Node {
+    pub(crate) kind: Kind,
+    pub(crate) children: Vec<usize>,
     parent: Option<usize>,
     listen: Vec<String>,
     id: Option<u32>,
     /// Properties set (`value`, `checked`).
-    props: Vec<(String, String)>,
+    pub(crate) props: Vec<(String, String)>,
 }
 
 struct Tpl {
@@ -37,8 +37,9 @@ struct Tpl {
 
 /// The page: `#main` and what the views put in it.
 pub struct TestPage {
-    nodes: Vec<Node>,
-    ids: HashMap<u32, usize>,
+    pub(crate) nodes: Vec<Node>,
+    /// Each id's node (ids are dense: the views hand them out in order).
+    ids: Vec<Option<usize>>,
     tpls: HashMap<u32, Tpl>,
     root: Root,
     /// Scripts the views asked the page to run (`eval`), in order: id and code.
@@ -49,17 +50,17 @@ pub struct TestPage {
     pub frames: usize,
 }
 
-struct Rd<'a> {
-    b: &'a [u8],
-    p: usize,
+pub(crate) struct Rd<'a> {
+    pub(crate) b: &'a [u8],
+    pub(crate) p: usize,
 }
 
 impl Rd<'_> {
-    fn u8(&mut self) -> u8 {
+    pub(crate) fn u8(&mut self) -> u8 {
         self.p += 1;
         self.b[self.p - 1]
     }
-    fn u16(&mut self) -> u16 {
+    pub(crate) fn u16(&mut self) -> u16 {
         self.p += 2;
         u16::from_le_bytes(self.b[self.p - 2..self.p].try_into().unwrap())
     }
@@ -67,7 +68,7 @@ impl Rd<'_> {
         self.p += 4;
         u32::from_le_bytes(self.b[self.p - 4..self.p].try_into().unwrap())
     }
-    fn str(&mut self) -> String {
+    pub(crate) fn str(&mut self) -> String {
         let n = self.u32() as usize;
         self.p += n;
         String::from_utf8(self.b[self.p - n..self.p].to_vec()).unwrap()
@@ -85,19 +86,16 @@ impl TestPage {
 
     /// A page for `root` (made, maybe shown, by the test).
     pub fn on(root: Root) -> Self {
-        let mut main = node(Kind::El("div".into(), vec![("id".into(), "main".into())]));
-        main.id = Some(0);
-        let mut p = Self {
-            nodes: vec![main],
-            ids: HashMap::from([(0, 0)]),
-            tpls: HashMap::new(),
-            root,
-            scripts: vec![],
-            bytes: 0,
-            frames: 0,
-        };
+        let mut p = Self::unsettled(root);
         p.flush();
         p
+    }
+
+    /// A page for `root`, nothing applied yet.
+    pub(crate) fn unsettled(root: Root) -> Self {
+        let mut main = node(Kind::El("div".into(), vec![("id".into(), "main".into())]));
+        main.id = Some(0);
+        Self { nodes: vec![main], ids: vec![Some(0)], tpls: HashMap::new(), root, scripts: vec![], bytes: 0, frames: 0 }
     }
 
     pub fn root(&self) -> &Root {
@@ -106,6 +104,12 @@ impl TestPage {
 
     /// Run the ready tasks and apply the edits waiting, until none is left.
     pub fn flush(&mut self) {
+        let uncaught = self.settle();
+        assert!(uncaught.is_empty(), "a view failed and no ErrorBoundary is above it: {}", uncaught.join("; "));
+    }
+
+    /// [`Self::flush`]; the errors no boundary caught.
+    pub(crate) fn settle(&mut self) -> Vec<String> {
         loop {
             crate::run_tasks();
             let b = self.root.take_edits();
@@ -118,8 +122,7 @@ impl TestPage {
             // The frame is out: what rows that left held goes, as a host does.
             crate::drop_left();
         }
-        let uncaught = self.root.uncaught();
-        assert!(uncaught.is_empty(), "a view failed and no ErrorBoundary is above it: {}", uncaught.join("; "));
+        self.root.uncaught()
     }
 
     /// `f` in the root's scope (its globals, its context), then flush.
@@ -142,7 +145,11 @@ impl TestPage {
 
     fn at(&self, r: &mut Rd) -> usize {
         let id = r.u32();
-        *self.ids.get(&id).unwrap_or_else(|| panic!("air: an edit names node {id}, which the page doesn't have"))
+        self.ids
+            .get(id as usize)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| panic!("air: an edit names node {id}, which the page doesn't have"))
     }
 
     fn apply(&mut self, b: &[u8]) {
@@ -165,7 +172,6 @@ impl TestPage {
                     let t = &self.tpls[&tid];
                     let frag = self.nodes.len();
                     let off = frag + 1;
-                    let marks: Vec<usize> = t.marks.iter().map(|m| m + off).collect();
                     let mut f = node(Kind::Frag);
                     f.children = t.roots.iter().map(|r| r + off).collect();
                     self.nodes.push(f);
@@ -174,10 +180,11 @@ impl TestPage {
                         n.parent = Some(n.parent.map_or(frag, |p| p + off));
                         n
                     }));
-                    for (j, m) in marks.into_iter().enumerate() {
-                        let id = base + j as u32;
-                        self.nodes[m].id = Some(id);
-                        self.ids.insert(id, m);
+                    let end = (base as usize + t.marks.len()).max(self.ids.len());
+                    self.ids.resize(end, None);
+                    for (j, m) in t.marks.iter().enumerate() {
+                        self.nodes[m + off].id = Some(base + j as u32);
+                        self.ids[base as usize + j] = Some(m + off);
                     }
                 }
                 op::SET_TEXT => {
@@ -219,26 +226,21 @@ impl TestPage {
                 }
                 op::INSERT => {
                     let at = self.at(&mut r);
-                    let span = self.span(&mut r);
+                    let span = self.take(&mut r);
                     let parent = self.nodes[at].parent.expect("an anchor in the page");
-                    for n in span {
-                        self.detach(n);
-                        let i = self.nodes[parent].children.iter().position(|c| *c == at).unwrap();
-                        self.nodes[parent].children.insert(i, n);
-                        self.nodes[n].parent = Some(parent);
-                    }
+                    span.iter().for_each(|&n| self.nodes[n].parent = Some(parent));
+                    // From the end: a list's anchor is its last node.
+                    let i = self.nodes[parent].children.iter().rposition(|c| *c == at).unwrap();
+                    self.nodes[parent].children.splice(i..i, span);
                 }
                 op::APPEND => {
                     let parent = self.at(&mut r);
-                    for n in self.span(&mut r) {
-                        self.detach(n);
-                        self.nodes[parent].children.push(n);
-                        self.nodes[n].parent = Some(parent);
-                    }
+                    let span = self.take(&mut r);
+                    span.iter().for_each(|&n| self.nodes[n].parent = Some(parent));
+                    self.nodes[parent].children.extend(span);
                 }
                 op::REMOVE => {
-                    for n in self.span(&mut r) {
-                        self.detach(n);
+                    for n in self.take(&mut r) {
                         self.forget(n);
                     }
                 }
@@ -247,16 +249,17 @@ impl TestPage {
                     let mut n = node(Kind::Text(r.str()));
                     n.id = Some(id);
                     self.nodes.push(n);
-                    self.ids.insert(id, self.nodes.len() - 1);
+                    if self.ids.len() <= id as usize {
+                        self.ids.resize(id as usize + 1, None);
+                    }
+                    self.ids[id as usize] = Some(self.nodes.len() - 1);
                 }
                 op::PARK => {
                     let frag = self.nodes.len();
                     self.nodes.push(node(Kind::Frag));
-                    for n in self.span(&mut r) {
-                        self.detach(n);
-                        self.nodes[frag].children.push(n);
-                        self.nodes[n].parent = Some(frag);
-                    }
+                    let span = self.take(&mut r);
+                    span.iter().for_each(|&n| self.nodes[n].parent = Some(frag));
+                    self.nodes[frag].children = span;
                 }
                 op::EVAL => {
                     let id = r.u32();
@@ -283,33 +286,37 @@ impl TestPage {
     /// A view's siblings, first to last.
     fn span(&self, r: &mut Rd) -> Vec<usize> {
         let (a, b) = (self.at(r), self.at(r));
-        let Some(p) = self.nodes[a].parent else { return vec![a] };
+        self.range(a, b).map_or_else(|| vec![a], |(p, i, j)| self.nodes[p].children[i..=j].to_vec())
+    }
+
+    /// Where the view `a..=b` is: its parent and its first and last places there.
+    fn range(&self, a: usize, b: usize) -> Option<(usize, usize, usize)> {
+        let p = self.nodes[a].parent?;
         let c = &self.nodes[p].children;
         let i = c.iter().position(|x| *x == a).unwrap();
-        let j = c
+        let j = i + c[i..]
             .iter()
             .position(|x| *x == b)
             .unwrap_or_else(|| panic!("air: a range's last node is not its first's sibling"));
-        c[i..=j].to_vec()
+        Some((p, i, j))
+    }
+
+    /// A view's siblings, first to last, taken out of their parent at once.
+    fn take(&mut self, r: &mut Rd) -> Vec<usize> {
+        let (a, b) = (self.at(r), self.at(r));
+        let Some((p, i, j)) = self.range(a, b) else { return vec![a] };
+        let span: Vec<usize> = self.nodes[p].children.drain(i..=j).collect();
+        span.iter().for_each(|&n| self.nodes[n].parent = None);
+        span
     }
 
     fn set_prop(&mut self, n: usize, k: String, v: String) {
-        let p = &mut self.nodes[n].props;
-        match p.iter_mut().find(|(x, _)| *x == k) {
-            Some(x) => x.1 = v,
-            None => p.push((k, v)),
-        }
-    }
-
-    fn detach(&mut self, n: usize) {
-        if let Some(p) = self.nodes[n].parent.take() {
-            self.nodes[p].children.retain(|c| *c != n);
-        }
+        set_prop(&mut self.nodes[n].props, k, v)
     }
 
     fn forget(&mut self, n: usize) {
         if let Some(id) = self.nodes[n].id {
-            self.ids.remove(&id);
+            self.ids[id as usize] = None;
         }
         for c in self.nodes[n].children.clone() {
             self.forget(c);
@@ -318,7 +325,7 @@ impl TestPage {
 
     /// How many nodes the page can still name (a removed row's are forgotten).
     pub fn named(&self) -> usize {
-        self.ids.len()
+        self.ids.iter().flatten().count()
     }
 
     fn attrs(&self, n: usize) -> &[(String, String)] {
@@ -448,8 +455,16 @@ impl TestPage {
     }
 }
 
+/// Property `k` set to `v`.
+pub(crate) fn set_prop(p: &mut Vec<(String, String)>, k: String, v: String) {
+    match p.iter_mut().find(|(x, _)| *x == k) {
+        Some(x) => x.1 = v,
+        None => p.push((k, v)),
+    }
+}
+
 /// Attribute `k` set to `v` (`style:<property>`: that CSS property).
-fn set_attr(a: &mut Vec<(String, String)>, k: String, v: String) {
+pub(crate) fn set_attr(a: &mut Vec<(String, String)>, k: String, v: String) {
     if let Some(p) = k.strip_prefix("style:") {
         return set_style(a, p, &v);
     }
@@ -474,7 +489,7 @@ fn decls(s: &str) -> impl Iterator<Item = &str> {
 }
 
 /// CSS property `k` of the `style` attribute set to `v` (empty: removed), as `style.setProperty`.
-fn set_style(a: &mut Vec<(String, String)>, k: &str, v: &str) {
+pub(crate) fn set_style(a: &mut Vec<(String, String)>, k: &str, v: &str) {
     let mut style: Vec<String> =
         a.iter().find(|(x, _)| x == "style").map(|(_, s)| decls(s).map(str::to_owned).collect()).unwrap_or_default();
     style.retain(|d| d.split(':').next().map(str::trim) != Some(k));
@@ -497,7 +512,7 @@ fn read_tnode(r: &mut Rd, t: &mut Tpl, parent: Option<usize>, left: &mut u32) ->
                 set_attr(&mut attrs, k, v);
             }
             let children = r.u16();
-            (Kind::El(tag, attrs), children, r.u8() != 0)
+            (Kind::El(tag.into(), attrs), children, r.u8() != 0)
         }
         2 => (Kind::Text(r.str()), 0, false),
         3 => (Kind::Text(String::new()), 0, true),

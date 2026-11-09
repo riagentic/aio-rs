@@ -204,9 +204,36 @@ assert_eq!(n.project(&key_only)["count"], 2);
   local door, so `ax state <app> <cell> --as <user>` shows exactly what
   that user's client gets.
 
+### One filter for every cell
+
+`aio::visible_by_default(|cell, view, who| ..)` (aio's
+`cellDefaults.visible`) filters every cell that has no `visible` of its
+own. It gets the view as JSON, the `#[server]` fields already out, and
+returns what `who` may see:
+
+```rust
+use aio::prelude::*;
+
+# fn main() {
+aio::visible_by_default(|_cell, mut view, who| {
+    if who.role.as_deref() != Some("admin") {
+        if let Some(m) = view.as_object_mut() {
+            m.remove("notes");
+        }
+    }
+    view
+});
+# }
+```
+
+- A field it leaves out reaches the client as its default, so the
+  client's typed copy still reads.
+- One that panics shows the cell's default state, never a fuller view.
+- A cell's own `visible = f` wins: the default never runs for it.
+- A second call replaces the first.
+
 Limits, compared with aio: aio's `include` / `exclude` lists, dot paths
-and `"none"` are all written as the function's body; there is no
-`cellDefaults` for a default filter across cells.
+and `"none"` are all written as the function's body.
 
 ### Test a view
 

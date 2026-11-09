@@ -49,6 +49,9 @@ imbl = { version = "7", features = ["serde"], optional = true }
 # air, aio-rs's renderer (docs/design/air.md): the views, the kit and TestUi (`kit`).
 air = { workspace = true, optional = true }
 
+# `ax dev`'s hot-patch of cell methods and views (`dev`), in a window and in a page.
+aio-hotpatch = { workspace = true, optional = true }
+
 [features]
 # The core alone: cells, the event log, replay, the local door. Each
 # feature adds one capability; an app picks one fixed set (a template's).
@@ -57,7 +60,7 @@ default = []
 outbound = ["dep:ureq"]
 # Sync and its server (`aio::sync`, `aio::http`, server fns, accounts'
 # doors), plain HTTP and WebSocket.
-server = ["dep:axum", "dep:tokio-tungstenite", "dep:percent-encoding", "dep:flate2"]
+server = ["dep:axum", "dep:tokio-tungstenite", "dep:percent-encoding", "dep:flate2", "aio-config/png"]
 # The server over TLS, pairing (PIN, CPace) and LAN discovery.
 tls = ["server", "dep:rustls", "dep:tokio-rustls", "dep:time", "dep:curve25519-dalek", "dep:rcgen", "dep:socket2", "tokio-tungstenite/__rustls-tls"]
 # Sign-in with an identity provider (`aio::auth::oidc`).
@@ -83,6 +86,10 @@ compat = []
 dev = ["dep:aio-hotpatch", "air?/dev", "aio-config/dev"]
 # `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
 imbl = ["dep:imbl"]
+# The `updates` cell (`aio::update::Updates`, `share`): what an app's UI shows
+# of its updates. aio-rs-shell's `updates` turns it on; an app without
+# updates compiles none of it (~0.5 MB of a debug build).
+updates = []
 # `aio::testing`, the test kit (TestCells, TestServer, TestUi with `kit`):
 # an app's tests get it as a dev-dependency (`features = ["testing"]`, as
 # `ax create` writes it), so its own builds never compile it.
@@ -132,11 +139,23 @@ name = "wire"
 required-features = ["kit", "net"]
 
 [[test]]
+name = "paint"
+required-features = ["kit", "net"]
+
+[[test]]
 name = "signin"
 required-features = ["net"]
 
 [[test]]
 name = "sync"
+required-features = ["net"]
+
+[[test]]
+name = "transport"
+required-features = ["net"]
+
+[[test]]
+name = "pace"
 required-features = ["net"]
 
 [[test]]
@@ -149,7 +168,11 @@ required-features = ["net", "kit"]
 
 [[test]]
 name = "one_socket"
-required-features = ["net"]
+required-features = ["net", "updates"]
+
+[[test]]
+name = "compat_local"
+required-features = ["compat"]
 
 [[test]]
 name = "compat_wire"
@@ -185,8 +208,6 @@ ring = "0.17"
 # The local door's frames (`door`).
 bytes = "1"
 tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
-# `ax dev`'s hot-patch of cell methods (`dev`).
-aio-hotpatch = { workspace = true, optional = true }
 
 # The browser build: the page's clock, randomness, socket and storage.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -198,7 +219,7 @@ sha2 = "0.10"
 # build --web` binds with (aio-cli `setup::WASM_BINDGEN`, fetched prebuilt).
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "console", "Document", "Element", "Event", "EventTarget", "Headers", "History", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "Notification", "NotificationOptions", "NotificationPermission", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "Url", "WebSocket", "Window"] }
+web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "console", "Document", "Element", "Event", "EventTarget", "Headers", "History", "HtmlHeadElement", "Location", "MessageEvent", "Node", "NodeList", "Notification", "NotificationOptions", "NotificationPermission", "RequestCredentials", "RequestInit", "Response", "Crypto", "Storage", "StorageEvent", "Url", "WebSocket", "Window", "Worker", "WorkerOptions", "WorkerType", "Navigator"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -243,6 +264,14 @@ name = "fns"
 required-features = ["server"]
 
 [[test]]
+name = "call_request"
+required-features = ["server"]
+
+[[test]]
+name = "visible_default"
+required-features = ["server"]
+
+[[test]]
 name = "testing"
 required-features = ["server"]
 
@@ -253,3 +282,7 @@ required-features = ["kit"]
 [[test]]
 name = "list_speed"
 required-features = ["kit"]
+
+[[test]]
+name = "compat_peer"
+required-features = ["net", "compat"]

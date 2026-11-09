@@ -203,7 +203,10 @@ the framework).
   report taken mid-panic runs none of the app's code, so a cell with
   `visible` is withheld from it.
 - aio's timeline entries carry their payloads and diffs (screened);
-  aio-rs's never carry arguments.
+  aio-rs's carry each call's arguments with `[feedback] args = true`
+  (a `#[redact]` method's as `[redacted]`, keys masked, 1 KB each), never
+  by default: a report may leave the machine. The state's diff is the
+  report's state.
 - aio's `am report path` prints the folder: `ax data <app>` does.
 
 ## API

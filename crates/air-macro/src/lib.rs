@@ -1729,6 +1729,20 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>, lets
     }
 }
 
+/// The one name a text's format shows as it is (`"{x}"`: `x`), if that
+/// is all it holds and a hole clones it (`r`: what it captures; a constant
+/// or a static is read where it is) (pure).
+fn lone(f: &TokenStream, r: &[String]) -> Option<Ident> {
+    match f.clone().into_iter().collect::<Vec<_>>().as_slice() {
+        [TokenTree::Literal(l), TokenTree::Punct(p), TokenTree::Ident(i)]
+            if l.to_string() == "\"{}\"" && p.as_char() == ',' && r == [i.to_string()] =>
+        {
+            Some(i.clone())
+        }
+        _ => None,
+    }
+}
+
 /// `{ let a = a.clone(); … }` for the names a hole reads.
 fn clones(names: &[String]) -> TokenStream {
     let n = names.iter().map(|n| match n.strip_prefix("r#") {
@@ -1863,9 +1877,14 @@ impl Tpl {
             Node::Fmt(f, r) => {
                 self.bytes.push(3);
                 let id = self.mark();
-                let c = clones(r);
-                self.holes
-                    .push(quote!(air::__rt::text(#id, { #c ::std::boxed::Box::new(move || ::std::format!(#f)) });));
+                let hole = match lone(f, r) {
+                    Some(name) => quote!(air::__rt::text_of(#id, &#name);),
+                    None => {
+                        let c = clones(r);
+                        quote!(air::__rt::text(#id, { #c ::std::boxed::Box::new(move || ::std::format!(#f)) });)
+                    }
+                };
+                self.holes.push(hole);
             }
             Node::El { tag, attrs, spreads, children, .. } => {
                 let outer = IN_SVG.get();
@@ -1901,6 +1920,9 @@ impl Tpl {
                             Val::Static(s) if k == "innerHTML" => {
                                 let (head, set) = attr_fn();
                                 quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(#head #set(air::IntoAttr::into_attr(#s))));)
+                            }
+                            Val::Fmt(f, r) if let Some(name) = lone(f, r) => {
+                                quote!(air::__rt::attr_of(#id, #k, &#name);)
                             }
                             Val::Fmt(f, r) => {
                                 let c = clones(r);
@@ -2308,6 +2330,17 @@ mod tests {
             ["m"],
             "a let read by a view inside"
         );
+    }
+
+    #[test]
+    fn a_hole_of_one_captured_name_shown_as_it_is_shares_a_generic_call() {
+        let lone_of = |f: &str, r: &[&str]| {
+            lone(&f.parse().unwrap(), &r.iter().map(|s| s.to_string()).collect::<Vec<_>>()).map(|i| i.to_string())
+        };
+        assert_eq!(lone_of("\"{}\", x", &["x"]).as_deref(), Some("x"));
+        assert_eq!(lone_of("\"{} items\", x", &["x"]), None, "more text: its own format");
+        assert_eq!(lone_of("\"{:>4}\", x", &["x"]), None, "a format spec");
+        assert_eq!(lone_of("\"{}\", X", &[]), None, "a static, not captured (it may not be Clone)");
     }
 
     #[test]

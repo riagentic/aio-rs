@@ -363,14 +363,15 @@ mod tests {
                 .map(|c| c.feedback)
         };
         assert_eq!(f("").unwrap(), Feedback::default());
-        let set = f("url = \"https://r.example/in\"\ntimeout = \"5s\"\nkeep = 7\nauto = false").unwrap();
+        let set = f("url = \"https://r.example/in\"\ntimeout = \"5s\"\nkeep = 7\nauto = false\nargs = true").unwrap();
         assert_eq!(
             set,
             Feedback {
                 url: Some("https://r.example/in".into()),
                 timeout: Duration::from_secs(5),
                 keep: 7,
-                auto: false
+                auto: false,
+                args: true
             }
         );
         assert!(f("url = \"http://r.example/in\"").unwrap_err().contains("https"), "never in the clear");

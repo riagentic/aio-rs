@@ -60,9 +60,11 @@ extern crate self as air;
 mod dom;
 mod event;
 mod global;
+mod h;
 pub mod hot;
 mod props;
 mod reactive;
+pub mod ssr;
 mod task;
 pub mod testing;
 mod tree;
@@ -74,15 +76,16 @@ pub use dom::{
     longest_increasing, retry, styled, take_edits, text_view,
 };
 pub use event::*;
-pub use global::{Global, GlobalMemo};
+pub use global::{Global, GlobalMemo, TrackedMemo};
+pub use h::{H, comp, h};
 pub use props::{Attribute, IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, Prop, Props};
 pub use reactive::{
-    Callback, Effect, EventHandler, Memo, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback, context,
-    current_owner, detached, drop_left, effect, effect_quiet, follow, in_body, in_views, memo, on_cleanup, once,
-    parent_context, provide, provide_now, provide_root, scope, selector, signal, try_context, untrack, watch,
-    with_owner,
+    Callback, Effect, EventHandler, Memo, Optimistic, Owner, ReadGuard, Selector, Signal, WriteGuard, batch, callback,
+    context, current_owner, detached, drop_left, effect, effect_quiet, follow, in_body, in_views, memo, on_cleanup,
+    once, parent_context, provide, provide_now, provide_root, scope, selector, signal, try_context, untrack,
+    use_optimistic, watch, with_owner,
 };
-pub use task::{Resource, Task, live_tasks, on_wake, resource, run_tasks, spawn, spawn_forever, task};
+pub use task::{Resource, Task, live_tasks, on_wake, resource, run_tasks, seeded_resource, spawn, spawn_forever, task};
 pub use tree::{Mounted, RENDERS_KEPT, Render, components, renders};
 
 #[cfg(feature = "fault")]
@@ -151,6 +154,20 @@ pub fn on_warn(f: impl Fn(&str, &str) + Send + Sync + 'static) {
     *WARN.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
 
+/// `v` sorted by `cmp`, stably, through the one sort every caller shares (a
+/// sort of `u32` positions): each element type's own sort is ~3 KB of a web
+/// build's code.
+pub(crate) fn sort_by<T>(v: &mut Vec<T>, cmp: impl Fn(&T, &T) -> std::cmp::Ordering) {
+    if v.len() < 2 {
+        return;
+    }
+    let mut order: Vec<u32> = (0..v.len() as u32).collect();
+    let by: &mut dyn FnMut(&u32, &u32) -> std::cmp::Ordering = &mut |a, b| cmp(&v[*a as usize], &v[*b as usize]);
+    order.sort_by(by);
+    let mut old: Vec<Option<T>> = std::mem::take(v).into_iter().map(Some).collect();
+    v.extend(order.iter().filter_map(|&i| old[i as usize].take()));
+}
+
 pub(crate) fn warn(kind: &str, msg: &str) {
     let hook = WARN.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match hook {
@@ -170,8 +187,8 @@ pub mod __rt {
     /// logged), as the app's expanded templates see it.
     pub const DEV: bool = cfg!(feature = "dev");
     pub use crate::dom::{
-        AttrSlot, Range, Template, attr, branch, child, comp, each, handler, handler_fn, mounted, mounted_fn, on, show,
-        text, tpl, view,
+        AttrSlot, Range, Template, attr, attr_of, branch, child, comp, each, handler, handler_fn, mounted, mounted_fn,
+        on, show, text, text_of, tpl, view,
     };
     pub use crate::event::{
         DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ResizeData, ScrollData, VisibleData,
@@ -184,4 +201,17 @@ pub mod __rt {
         builder_of, spread, with_attributes,
     };
     pub use crate::tree::{KeyByDebug, KeyByDisplay, KeyByNone, KeyOf};
+}
+
+#[cfg(test)]
+mod sort_tests {
+    #[test]
+    fn sort_by_is_stable_and_keeps_every_element() {
+        let mut v = vec![(2, 'a'), (1, 'b'), (2, 'c'), (0, 'd'), (1, 'e')];
+        super::sort_by(&mut v, |a, b| a.0.cmp(&b.0));
+        assert_eq!(v, [(0, 'd'), (1, 'b'), (1, 'e'), (2, 'a'), (2, 'c')]);
+        let mut one = vec![String::from("x")];
+        super::sort_by(&mut one, Ord::cmp);
+        assert_eq!(one, ["x"]);
+    }
 }
