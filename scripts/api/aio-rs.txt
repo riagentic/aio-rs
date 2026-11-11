@@ -642,6 +642,9 @@ aio::compat::data::Home.data: std::path::PathBuf
 aio::compat::data::Home.home: std::path::PathBuf
 aio::compat::data::Home::open: fn open(home: &Path, app: &str, profile: Option<&str>) -> io::Result<Self>
 aio::compat::data::Home::state_db: fn state_db(&self) -> PathBuf
+aio::compat::data::Replay::As(String, serde_json::Value)
+aio::compat::data::Replay::Refuse
+aio::compat::data::Replay::Skip(String)
 aio::compat::data::Slice.cell: &'static str
 aio::compat::data::Slice.field: &'static str
 aio::compat::data::Slice.fit: fn(serde_json::Value) -> Result<serde_json::Value, String>
@@ -654,6 +657,7 @@ aio::compat::data::Slice::of: const fn of<C: crate::CellData>(field: &'static st
 aio::compat::data::android_store_file: fn android_store_file(dir: &std::path::Path, key: &str) -> std::path::PathBuf
 aio::compat::data::home: fn home(app: &str, home: Option<&str>, profile: Option<&str>) -> Result<(std::path::PathBuf, Option<String>), String>
 aio::compat::data::import_android: fn import_android(files: &std::path::Path, app: &str, store: &std::path::Path) -> io::Result<bool>
+aio::compat::data::on_journal: fn on_journal(f: impl Fn(&str, &str, &serde_json::Value) -> Replay + Send + Sync + 'static)
 aio::compat::data::refusal: fn refusal(app: &str, home: &std::path::Path, user: &std::path::Path) -> Option<String>
 aio::compat::data::resolve: fn resolve(app: &str, home: Option<&str>, profile: Option<&str>, apps_dir: Option<&std::path::Path>, user: &std::path::Path) -> Result<(std::path::PathBuf, Option<String>), String>
 aio::compat::data::retire: fn retire(data: &std::path::Path, names: &[String]) -> io::Result<Vec<std::path::PathBuf>>
@@ -2872,6 +2876,7 @@ enum aio::cli::Kind
 enum aio::cli::Stop
 enum aio::columns::Columns
 enum aio::columns::Fill
+enum aio::compat::data::Replay
 enum aio::compat::scatter::Outcome
 enum aio::config::Gate
 enum aio::db::Op
@@ -3074,6 +3079,7 @@ impl Clone for Refusal
 impl Clone for Rejected
 impl Clone for Release
 impl Clone for Render
+impl Clone for Replay
 impl Clone for Reply
 impl Clone for Req
 impl Clone for Request
@@ -3315,6 +3321,7 @@ impl Debug for Refused
 impl Debug for Rejected
 impl Debug for Release
 impl Debug for Render
+impl Debug for Replay
 impl Debug for Reply
 impl Debug for Req
 impl Debug for Request
@@ -3692,6 +3699,7 @@ impl PartialEq for Refused
 impl PartialEq for Rejected
 impl PartialEq for Release
 impl PartialEq for Render
+impl PartialEq for Replay
 impl PartialEq for Reply
 impl PartialEq for Req
 impl PartialEq for Request
@@ -3917,6 +3925,7 @@ impl StructuralPartialEq for Refused
 impl StructuralPartialEq for Rejected
 impl StructuralPartialEq for Release
 impl StructuralPartialEq for Render
+impl StructuralPartialEq for Replay
 impl StructuralPartialEq for Reply
 impl StructuralPartialEq for Req
 impl StructuralPartialEq for Request

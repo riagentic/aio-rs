@@ -490,6 +490,9 @@ fn a_foreign_store_file_is_refused_and_left_alone() {
 #[test]
 fn local_file_urls_are_escaped() {
     assert_eq!(aio::ui::local_file_url("/a b/ü#?.png"), "aio://app/file/a%20b/%C3%BC%23%3F.png");
+    if cfg!(windows) {
+        assert_eq!(aio::ui::local_file_url(r"C:\Users\a b\v.webm"), "aio://app/file/C%3A/Users/a%20b/v.webm");
+    }
 }
 
 #[test]

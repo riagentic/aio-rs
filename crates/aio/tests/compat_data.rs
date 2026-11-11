@@ -1680,3 +1680,37 @@ fn a_bool_or_a_list_in_a_plain_column_is_refused_naming_the_column_kind() {
     let e = s.call(&By::Test, "add", json!([1, "plan", [], null])).unwrap_err().why;
     assert!(e.contains("done = false") && e.contains("a bool needs a BOOLEAN column"), "{e}");
 }
+
+/// A port that renamed aio's methods says how to run its journal's calls
+/// (`on_journal`): renamed, skipped (said), or refused as without a hook.
+#[test]
+fn a_ports_hook_runs_renamed_calls_and_skips_what_it_folded() {
+    use aio::compat::data::{Replay, on_journal};
+    // Only this test's names: every other test still meets the refusal.
+    on_journal(|cell, method, args| match (cell, method) {
+        ("inbox", "addPost") => Replay::As("post".into(), args.clone()),
+        ("board", "pinHook") => Replay::Skip("a view of the port's, rebuilt at start".into()),
+        _ => Replay::Refuse,
+    });
+    let (_d, db) = crashed();
+    let lines = [
+        r#"{"seq":11,"type":"inbox:addPost","payload":{"args":["renamed"]},"ts":1}"#,
+        r#"{"seq":12,"type":"board:pinHook","payload":{"args":[1]},"ts":1}"#,
+    ];
+    std::fs::write(db.with_file_name("journal"), lines.join("\n")).unwrap();
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().posts.last().map(String::as_str), Some("renamed"));
+    assert_eq!(s.state().posts.len(), 11);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(12), "past both: aio replays neither again");
+    // A name the hook gives that the cell lacks refuses, the file kept.
+    on_journal(|cell, method, _| match (cell, method) {
+        ("inbox", "addPost") => Replay::As("nope".into(), json!([])),
+        _ => Replay::Refuse,
+    });
+    let (_d, db) = crashed();
+    std::fs::write(db.with_file_name("journal"), lines[0]).unwrap();
+    let before = dump(&db);
+    assert!(Store::<Inbox>::open_aio(&db, APP).err().unwrap().0.contains("the port named `nope`"));
+    assert_eq!(dump(&db), before);
+}

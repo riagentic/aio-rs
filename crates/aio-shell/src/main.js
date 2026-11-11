@@ -315,7 +315,9 @@ app.whenReady().then(() => {
       return enet.fetch(pathToFileURL(path.join(dir, 'index.html')).toString())
     }
     if (u.host === 'app' && u.pathname.startsWith('/file/')) {
-      const p = path.resolve(decodeURIComponent(u.pathname.slice('/file'.length)))
+      // Windows: `/C:/a/b` (aio::ui::local_file_url) is `C:/a/b`.
+      const f = decodeURIComponent(u.pathname.slice('/file'.length))
+      const p = path.resolve(process.platform === 'win32' && /^\/[A-Za-z]:/.test(f) ? f.slice(1) : f)
       if (IMAGE.test(p) || MEDIA.test(p)) return enet.fetch(pathToFileURL(p).toString())
     }
     // The app's built-in files ([build] assets), at their own paths.
@@ -774,7 +776,6 @@ app.whenReady().then(() => {
       frame: SHELL.frame,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(dir, 'preload.js'), webviewTag: SHELL.browser },
     })
-    if (p.maximized) w.maximize()
     if (TRAY) openTray()
     for (const t of Object.keys(looks)) showIcon(t)
     // The normal rect (also while maximized or fullscreen) and the flags.
@@ -788,8 +789,13 @@ app.whenReady().then(() => {
     w.on('close', report)
     // shown once painted, at most SHELL.showCapMs later (Window { show_cap_ms }); 0: at once.
     // Rust learns it is on screen: the OS's splash (presplash.rs) goes after its minimum.
+    // Maximized here, not at creation: maximize() shows a hidden window,
+    // and a window shown early would never tell Rust (the splash stayed up).
+    let told = false
     const show = () => endSplash(() => {
-      if (w.isDestroyed() || w.isVisible()) return
+      if (w.isDestroyed() || told) return
+      told = true
+      if (p.maximized) w.maximize()
       w.show()
       tell({ t: 'window', state: 'shown', normal: w.getNormalBounds() })
     })

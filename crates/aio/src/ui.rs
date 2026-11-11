@@ -549,6 +549,11 @@ pub fn light_dark(css: &str, dark: bool) -> String {
 /// origin, `https://app.invalid/file/<path>`; `file://` is blocked).
 pub fn local_file_url(abs: &str) -> String {
     let mut out = String::from(if cfg!(target_os = "android") { "https://app.invalid/file" } else { "aio://app/file" });
+    // A Windows path (`C:\a\b`) as a URL path: `/C:/a/b` (the shell takes the `/` off again).
+    let abs = if cfg!(windows) { abs.replace('\\', "/") } else { abs.to_string() };
+    if !abs.starts_with('/') {
+        out.push('/');
+    }
     for b in abs.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => out.push(b as char),

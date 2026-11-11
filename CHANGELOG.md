@@ -7,6 +7,34 @@ version may break things.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-11
+
+A fix release from porting a large app: aio crash-journal replay for a
+port that renamed aio's methods, a maximized window behind the splash,
+Windows local files, and `ax build --platforms macos` with a `[patch]`.
+
+### Added
+
+- `aio::compat::data::on_journal(f)`: a port that renamed aio's methods
+  (or folded aio cells into one) says how to replay an aio crash journal's
+  call it can't run as named: `Replay::As(method, args)`, `Replay::Skip(why)`
+  (said at boot) or `Replay::Refuse`. Without it such a call still refuses
+  the boot ("start the aio app once and stop it").
+
+### Fixed
+
+- Desktop: an app whose window was last left maximized showed it at once
+  (Electron's `maximize()` shows a hidden window), so the shell never said
+  it was shown and the OS splash covered it until its 30 s cap. The window
+  is now maximized when it shows, and "shown" is always said once.
+- Windows: `aio::ui::local_file_url` made `aio://app/fileC%3A%5C…` of a
+  `C:\…` path, which the shell could not serve (a cached video or image
+  never showed). It is now `aio://app/file/C%3A/…`, and the shell reads it
+  back as `C:/…`.
+- `ax build --platforms macos` over ssh refused an app that uses aio-rs
+  through a `[patch]` to a checkout ("no aio-rs checkout"): the resolved
+  metadata now names it.
+
 ## [0.4.1] - 2026-11-09
 
 A fix release: `ax upgrade` past a tag with no release files, `ax pin`
@@ -2365,6 +2393,7 @@ a time ([migration guide](docs/migration/README.md)).
 - The prebuilt archives and app bundles are not OS-signed yet: Windows
   SmartScreen and macOS Gatekeeper warn on first start.
 
+[0.4.2]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.2
 [0.4.1]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.1
 [0.4.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.0
 [0.3.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.3.0

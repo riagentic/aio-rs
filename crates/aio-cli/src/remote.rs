@@ -172,6 +172,18 @@ fn pipe(mut a: Command, input: Option<String>, mut b: Command, what: &str) -> Re
     Ok(())
 }
 
+/// The local aio-rs package of workspace `ws` (a `[patch]` to a checkout):
+/// its folder, from the resolved metadata (a package with no source).
+fn patched_aio(ws: &Path) -> Option<PathBuf> {
+    let out = Command::new("cargo").args(["metadata", "--format-version", "1"]).current_dir(ws).output().ok()?;
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    meta["packages"].as_array()?.iter().find_map(|p| {
+        (p["name"] == "aio-rs" && p["source"].is_null())
+            .then(|| Path::new(p["manifest_path"].as_str()?).parent().map(Path::to_path_buf))
+            .flatten()
+    })
+}
+
 /// Build target `label` of app `name` (`meta`: its workspace) on the Mac
 /// `h`, for `platform` (None: the Mac's own); how to install them, and the
 /// files it made, in `dist`; `smoke`: each then smoke-tested there.
@@ -195,10 +207,13 @@ pub fn build(
     let deps = packages.iter().flat_map(|p| p["dependencies"].as_array().into_iter().flatten());
     let deps = deps.filter_map(|d| Some((d["name"].as_str()?, Path::new(d["path"].as_str()?))));
     let local: Vec<(&str, PathBuf)> = members.chain(deps).map(|(n, d)| (n, real(d))).collect();
+    // A `[patch]` to a checkout is no dependency path: the full metadata names it.
     let aio = local
         .iter()
         .find(|(n, _)| *n == "aio-rs")
-        .and_then(|(_, d)| d.ancestors().nth(2))
+        .map(|(_, d)| d.clone())
+        .or_else(|| patched_aio(&ws).map(|d| real(&d)))
+        .and_then(|d| d.ancestors().nth(2).map(Path::to_path_buf))
         .filter(|r| r.join("crates/aio-cli/Cargo.toml").is_file())
         .ok_or("the app builds with no aio-rs checkout (crates/aio-cli beside its aio-rs) to build ax from on the Mac")?
         .to_path_buf();

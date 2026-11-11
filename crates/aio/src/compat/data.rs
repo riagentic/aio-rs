@@ -858,6 +858,73 @@ pub(crate) enum Journaled {
     Skip { seq: i64, why: Option<String> },
 }
 
+/// What an app says of an aio journal call aio-rs can't run as it is named
+/// (an aio method the port renamed, or a cell it folded or dropped): see
+/// [`on_journal`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Replay {
+    /// Run as this method of the port's cell, with these arguments.
+    As(String, Value),
+    /// Nothing to run (its change is the port's no more, or comes back
+    /// another way): skipped, the reason said at boot.
+    Skip(String),
+    /// Refused as without a hook: the boot asks for the aio app first.
+    Refuse,
+}
+
+type Hook = std::sync::Arc<dyn Fn(&str, &str, &Value) -> Replay + Send + Sync>;
+
+static HOOK: std::sync::RwLock<Option<Hook>> = std::sync::RwLock::new(None);
+
+/// How this port replays an aio crash journal's call it can't run as named:
+/// `f(cell, method, args)`, asked once per such call when the store opens
+/// (set it in `main`, before the store opens). Without it such a call
+/// refuses the boot: start the aio app once and stop it. aio's journal
+/// holds its last debounce window (100 ms by default) of calls not yet in
+/// the snapshot; a [`Replay::Skip`]ped one is gone for aio too, once this
+/// store has written.
+pub fn on_journal(f: impl Fn(&str, &str, &Value) -> Replay + Send + Sync + 'static) {
+    *HOOK.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+}
+
+/// The hook's answer for `cell:method` (None: no hook, or it refused).
+fn hooked<T: crate::Cell>(
+    seq: i64,
+    kind: &str,
+    cell: &str,
+    method: &str,
+    e: &Value,
+) -> Option<Result<Journaled, String>> {
+    let hook = HOOK.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+    match hook(cell, method, &args_of(e)) {
+        Replay::Refuse => None,
+        Replay::Skip(why) => {
+            Some(Ok(Journaled::Skip { seq, why: Some(format!("journal entry {seq} ({kind}): {why}")) }))
+        }
+        Replay::As(m, _) if !T::METHODS.contains(&m.as_str()) => {
+            Some(Err(format!("journal entry {seq} ({kind}): the port named `{m}`, no method of {}", T::ID)))
+        }
+        Replay::As(method, args) => Some(Ok(call_of(seq, method, args, e))),
+    }
+}
+
+fn args_of(e: &Value) -> Value {
+    match &e["payload"]["args"] {
+        Value::Null => json!([]),
+        a => a.clone(),
+    }
+}
+
+fn call_of(seq: i64, method: String, args: Value, e: &Value) -> Journaled {
+    Journaled::Call {
+        seq,
+        method,
+        args,
+        by: e["user"]["id"].as_str().map_or(crate::By::System, |u| crate::By::User(u.into())),
+        at: e["ts"].as_i64().unwrap_or(0),
+    }
+}
+
 /// The journal aio keeps for the store at `store` (aio's `aio-boot.ts`): a
 /// store given by `dbPath` has `<dbPath>.journal` beside it; aio's own
 /// `<data>/state.db` has `<data>/journal`. Its sidecar is `<journal>.base`.
@@ -930,7 +997,11 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
                 true => {
                     return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay"));
                 }
-                false => others.push(kind.to_string()),
+                // Another cell's call: the port's hook may own it (a cell it folded in).
+                false => match hooked::<T>(seq, kind, cell, m, &e) {
+                    Some(j) => ours.push(j?),
+                    None => others.push(kind.to_string()),
+                },
             }
             continue;
         };
@@ -943,22 +1014,16 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
             },
             // Refused here, before anything is written: a write would tell aio
             // the store moved past its journal, and aio would then drop it.
-            false if !T::METHODS.contains(&method.as_str()) => {
-                return Err(format!(
-                    "journal entry {seq} ({kind}) has no method `{method}` of {} to run it again",
-                    T::ID
-                ));
-            }
-            false => Journaled::Call {
-                seq,
-                method,
-                args: match &e["payload"]["args"] {
-                    Value::Null => json!([]),
-                    a => a.clone(),
-                },
-                by: e["user"]["id"].as_str().map_or(crate::By::System, |u| crate::By::User(u.into())),
-                at: e["ts"].as_i64().unwrap_or(0),
+            false if !T::METHODS.contains(&method.as_str()) => match hooked::<T>(seq, kind, cell, m, &e) {
+                Some(j) => j?,
+                None => {
+                    return Err(format!(
+                        "journal entry {seq} ({kind}) has no method `{method}` of {} to run it again",
+                        T::ID
+                    ));
+                }
             },
+            false => call_of(seq, method, args_of(&e), &e),
         };
         ours.push(j);
     }
