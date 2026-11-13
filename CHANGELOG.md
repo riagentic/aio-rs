@@ -110,6 +110,23 @@ version may break things.
 - air: an error thrown by an `ErrorBoundary`'s own fallback showed a blank
   boundary (or looped to the 1000-round panic); it goes to the boundary
   above.
+- aio's journal replay read the watermark from the store only: an older
+  aio's, kept in `<journal>.wm`, was ignored and the snapshot's calls ran
+  twice. The higher of the two holds, as in aio.
+- A journal call stamped with another version (`"v"`) ran through the new
+  method on migrated state. It is skipped and said, as aio skips it (an
+  older stamp only for a cell with `migrate`).
+- `on_journal`'s `Replay::As` for another aio cell's call refused the boot
+  of a port cell lacking that method; it is now left to that cell.
+  `aio::compat::data::replaying()` names the port cell asking.
+- `scatter` moved `./data.db.journal` to `<data>/journal` beside a store
+  of another name, where replay never looks: it now lands at
+  `<store>.journal`.
+- A `#[table]` with a composite key, or id-less rows, collapsed rows that
+  share a key: removed rows stayed and came back at boot. Such tables are
+  written whole.
+- A row removed from a `#[table]` whose key column has no type stayed
+  (its key bound as text). The key is bound as stored.
 
 ## [0.4.2] - 2026-11-11
 

@@ -514,6 +514,10 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
         let _ = from;
         serde_json::from_value(old).map_err(|e| e.to_string())
     }
+    /// `#[cell(migrate = f)]` is set: the cell converts its state across
+    /// versions (aio's `onMigrate`), so an aio journal call stamped with an
+    /// older version is skipped, as aio skips it.
+    const MIGRATES: bool = false;
     /// `#[cell(visible = f)]` is set: [`Self::project`] runs the app's code.
     const SCREENED: bool = false;
     /// What `viewer` (who, with their role now) may see of the state, as

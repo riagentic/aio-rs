@@ -51,6 +51,7 @@ aio::CellData::COALESCE: const bool
 aio::CellData::DIAGNOSTICS: const bool
 aio::CellData::FIELDS: const &'static [Field]
 aio::CellData::ID: const &'static str
+aio::CellData::MIGRATES: const bool
 aio::CellData::PERSIST: const bool
 aio::CellData::PERSIST_INCLUDE: const &'static [&'static str]
 aio::CellData::REDACT: const bool
@@ -650,6 +651,7 @@ aio::compat::data::Slice.field: &'static str
 aio::compat::data::Slice.fit: fn(serde_json::Value) -> Result<serde_json::Value, String>
 aio::compat::data::Slice.include: &'static [&'static str]
 aio::compat::data::Slice.migrate: fn(serde_json::Value, u32) -> Result<serde_json::Value, String>
+aio::compat::data::Slice.migrates: bool
 aio::compat::data::Slice.tables: &'static [Bound]
 aio::compat::data::Slice.transient: &'static [&'static str]
 aio::compat::data::Slice.version: u32
@@ -659,6 +661,7 @@ aio::compat::data::home: fn home(app: &str, home: Option<&str>, profile: Option<
 aio::compat::data::import_android: fn import_android(files: &std::path::Path, app: &str, store: &std::path::Path) -> io::Result<bool>
 aio::compat::data::on_journal: fn on_journal(f: impl Fn(&str, &str, &serde_json::Value) -> Replay + Send + Sync + 'static)
 aio::compat::data::refusal: fn refusal(app: &str, home: &std::path::Path, user: &std::path::Path) -> Option<String>
+aio::compat::data::replaying: fn replaying() -> Option<&'static str>
 aio::compat::data::resolve: fn resolve(app: &str, home: Option<&str>, profile: Option<&str>, apps_dir: Option<&std::path::Path>, user: &std::path::Path) -> Result<(std::path::PathBuf, Option<String>), String>
 aio::compat::data::retire: fn retire(data: &std::path::Path, names: &[String]) -> io::Result<Vec<std::path::PathBuf>>
 aio::compat::local::serve: fn serve(id: &str, data: &std::path::Path, profile: Option<&str>, cell: &'static str, addr: String)
@@ -1877,6 +1880,7 @@ aio::prelude::CellData::COALESCE: const bool
 aio::prelude::CellData::DIAGNOSTICS: const bool
 aio::prelude::CellData::FIELDS: const &'static [Field]
 aio::prelude::CellData::ID: const &'static str
+aio::prelude::CellData::MIGRATES: const bool
 aio::prelude::CellData::PERSIST: const bool
 aio::prelude::CellData::PERSIST_INCLUDE: const &'static [&'static str]
 aio::prelude::CellData::REDACT: const bool
@@ -3486,6 +3490,7 @@ impl Display for Rejected
 impl Display for UpdateError
 impl Drop for Child
 impl Drop for Deciding
+impl Drop for Frames
 impl Drop for Listener
 impl Drop for Sandbox
 impl Drop for Spinner

@@ -339,6 +339,7 @@ pub fn cell(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn migrate(old: ::aio::serde_json::Value, from: u32) -> ::std::result::Result<Self, ::std::string::String> {
                 #p(old, from)
             }
+            const MIGRATES: bool = true;
         }
     });
     let transient =
