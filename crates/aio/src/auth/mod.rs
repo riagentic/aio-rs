@@ -863,6 +863,12 @@ impl Auth {
     /// The live session of `token`, with its user's role now; `None` when
     /// unknown, expired or revoked. One used past half its life is renewed.
     pub fn session(&self, token: &str) -> Result<Option<Session>> {
+        Ok(self.sliding(token)?.map(|(s, _)| s))
+    }
+
+    /// [`Auth::session`], and whether this use renewed it (its cookie is
+    /// then sent again, or the browser drops it at the old end).
+    pub(crate) fn sliding(&self, token: &str) -> Result<Option<(Session, bool)>> {
         let (c, h, now) = (lock(&self.db), hashed(token), self.now());
         let row: Option<(String, String, i64, Option<String>)> = db(c
             .query_row(
@@ -877,11 +883,12 @@ impl Auth {
             db(c.execute("DELETE FROM sessions WHERE token_hash = ?1", [&h]))?;
             return Ok(None);
         }
-        if expires_at - now < self.policy.ttl_ms / 2 {
+        let renewed = expires_at - now < self.policy.ttl_ms / 2;
+        if renewed {
             expires_at = now + self.policy.ttl_ms;
             db(c.execute("UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2", params![expires_at, h]))?;
         }
-        Ok(Some(Session { user, role: live.unwrap_or(role), expires_at, extra: Default::default() }))
+        Ok(Some((Session { user, role: live.unwrap_or(role), expires_at, extra: Default::default() }, renewed)))
     }
 
     /// Renew a live session to a full TTL; false when it isn't live.

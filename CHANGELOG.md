@@ -52,6 +52,11 @@ version may break things.
 
 ### Fixed
 
+- A browser's session cookie never slid with its session: a session used
+  past half its life is renewed on the server, but the cookie kept the
+  life it was given at sign-in, so the browser dropped it and a user
+  active every day was signed out after `[accounts] session` all the
+  same. A renewed session's cookie is sent again with its new life.
 - A form from a JSON Schema refused a required nullable field (Zod's
   `.nullable()`, which is `required`) when left empty or null, with
   "Required". It is null, as Zod has it.

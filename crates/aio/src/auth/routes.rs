@@ -173,18 +173,10 @@ impl Doors {
     /// sign-out); `None` for other answers.
     fn cookie(&self, op: &str, status: u16, v: &Value, headers: &axum::http::HeaderMap) -> Option<String> {
         let secure = self.secure || crate::gate::proxied_https(headers, self.trust.as_deref());
-        let opts = |max_age| crate::http::CookieOpts {
-            path: Some("/".into()),
-            max_age: Some(max_age),
-            http_only: true,
-            secure,
-            same_site: Some(crate::http::SameSite::Strict),
-            ..Default::default()
-        };
         let name = cookie_name(&self.title);
         match v["token"].as_str() {
-            Some(t) if status < 300 => crate::http::set_cookie(&name, t, &opts(self.auth.policy().ttl_ms / 1000)),
-            _ if op == "logout" => crate::http::set_cookie(&name, "", &opts(0)),
+            Some(t) if status < 300 => session_cookie(&name, t, self.auth.policy().ttl_ms / 1000, secure),
+            _ if op == "logout" => session_cookie(&name, "", 0, secure),
             _ => None,
         }
     }
@@ -481,6 +473,19 @@ pub(crate) fn bearer(headers: &axum::http::HeaderMap) -> Option<String> {
 }
 
 /// The session cookie of app `id` (per app: cookies ignore the port).
+/// The `Set-Cookie` of a browser's session `token`, kept `max_age` seconds.
+pub(crate) fn session_cookie(name: &str, token: &str, max_age: i64, secure: bool) -> Option<String> {
+    let opts = crate::http::CookieOpts {
+        path: Some("/".into()),
+        max_age: Some(max_age),
+        http_only: true,
+        secure,
+        same_site: Some(crate::http::SameSite::Strict),
+        ..Default::default()
+    };
+    crate::http::set_cookie(name, token, &opts)
+}
+
 pub(crate) fn cookie_name(id: &str) -> String {
     format!("aio_session_{id}")
 }

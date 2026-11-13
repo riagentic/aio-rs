@@ -1349,15 +1349,26 @@ pub(crate) async fn answer(
         _ if key.open && key.auth.is_none() => (true, None),
         _ => keyed(key, &head.headers, &query),
     };
-    let shown = crate::auth::routes::bearer(&head.headers)
-        .or_else(|| parse_cookies(&head.headers).remove(&key.session_cookie).filter(|t| !t.is_empty()));
+    let bearer = crate::auth::routes::bearer(&head.headers);
+    let by_cookie = bearer.is_none();
+    let shown = bearer.or_else(|| parse_cookies(&head.headers).remove(&key.session_cookie).filter(|t| !t.is_empty()));
     let shown_session = shown.is_some();
+    // A cookie's session renewed by this use: the cookie is sent again with
+    // its new life, or the browser drops it at the old end (sliding).
+    let mut slid = None;
     let session = match (&key.auth, &key.users, shown) {
         // A session, else a service's key beside the accounts.
         (Some(a), u, Some(t)) if !ok || public => {
             let (a, u) = (a.clone(), u.clone());
-            let who = move || crate::link::live(&a, &t).or_else(|| u?.who(&t));
-            tokio::task::spawn_blocking(who).await.ok().flatten()
+            let who = move || match a.sliding(&t).inspect_err(|e| eprintln!("[aio] sync: {e}")).ok().flatten() {
+                Some((s, renewed)) => Some((s, renewed.then(|| (t, a.policy().ttl_ms / 1000)))),
+                None => u?.who(&t).map(|s| (s, None)),
+            };
+            let found = tokio::task::spawn_blocking(who).await.ok().flatten();
+            found.map(|(s, renewed)| {
+                slid = renewed.filter(|_| by_cookie);
+                s
+            })
         }
         (None, Some(u), Some(t)) => {
             let u = u.clone();
@@ -1365,6 +1376,7 @@ pub(crate) async fn answer(
         }
         _ => None,
     };
+    let secure = key.secure || crate::gate::proxied_https(&head.headers, key.trust.as_deref());
     if !ok && !public && session.is_none() {
         let q: HashMap<String, String> = query.iter().filter(|(k, _)| k == "token").cloned().collect();
         let shown = crate::sync::shown_key(&head.headers, &q).is_some()
@@ -1448,6 +1460,20 @@ pub(crate) async fn answer(
             stamped(&key.page, r)
         }
         None => serve_static(&http.roots, &asked, &path).await,
+    };
+    let reply = match slid {
+        // Unless the answer sets the cookie itself (a sign-in, a sign-out).
+        Some((t, max_age))
+            if !reply.headers.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case("set-cookie") && v.starts_with(&format!("{}=", key.session_cookie))
+            }) =>
+        {
+            let mut reply = reply;
+            let c = crate::auth::routes::session_cookie(&key.session_cookie, &t, max_age, secure);
+            reply.headers.extend(c.map(|c| ("set-cookie".to_string(), c)));
+            reply
+        }
+        _ => reply,
     };
     // A reply that hands out the key (a `?token=` link's) is never kept by a
     // cache, nor revalidated from one.
