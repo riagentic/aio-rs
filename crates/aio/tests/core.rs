@@ -416,6 +416,39 @@ mod upgrade {
     }
 
     #[test]
+    fn a_fold_after_an_upgrade_keeps_the_boot() {
+        let (_d, p) = super::tmp();
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["a"])).unwrap();
+        old.checkpoint().unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["b"])).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["c"])).unwrap();
+        drop(old);
+        rusqlite::Connection::open(&p).unwrap().execute("UPDATE log SET at = 0 WHERE seq <= 2", []).unwrap();
+        let mut s = Store::<Notes>::open(&p).unwrap();
+        s.keep_history(std::time::Duration::from_secs(86_400)).unwrap();
+        assert_eq!(s.state().lines, ["c"]);
+        drop(s);
+        assert_eq!(Store::<Notes>::open(&p).unwrap().state().lines, ["c"]);
+    }
+
+    #[test]
+    fn a_fold_by_an_older_build_keeps_the_newer_builds_fields() {
+        let (_d, p) = super::tmp();
+        let h = Handle::<Notes>::open(&p).unwrap();
+        h.push("a".into()).unwrap();
+        h.push("b".into()).unwrap();
+        drop(h);
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["t"])).unwrap();
+        old.checkpoint().unwrap();
+        rusqlite::Connection::open(&p).unwrap().execute("UPDATE log SET at = 0", []).unwrap();
+        old.keep_history(std::time::Duration::from_secs(86_400)).unwrap();
+        drop(old);
+        assert_eq!(Store::<Notes>::open(&p).unwrap().state().lines, ["a", "b"]);
+    }
+
+    #[test]
     fn events_an_old_build_left_unsnapped_replay_after_the_upgrade() {
         let (_d, p) = super::tmp();
         use v1::NotesCalls as _;

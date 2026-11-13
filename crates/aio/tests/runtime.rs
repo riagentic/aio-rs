@@ -134,6 +134,16 @@ impl Feed {
         cx.after("m", 10, "tik", ())
     }
 
+    /// Two schedules due together: the first cancels the second.
+    pub fn race(&mut self, cx: &Cx) -> Result {
+        cx.after("first", 0, "unremind", ())?;
+        cx.after("remind", 1, "save", ())
+    }
+
+    pub fn unremind(&mut self, cx: &Cx) {
+        cx.cancel("remind");
+    }
+
     pub fn weekly(&mut self, cx: &Cx, expr: String) -> Result {
         cx.cron("weekly", &expr, "tick", ())
     }
@@ -311,6 +321,15 @@ fn schedules_survive_restart_and_missed_runs_fire_once() {
     let left = s.schedules().unwrap();
     assert_eq!(left.len(), 1);
     assert!(left[0].due > now);
+}
+
+#[test]
+fn a_schedule_cancelled_by_an_earlier_one_due_with_it_never_fires() {
+    let mut s = Store::<Feed>::memory();
+    s.call(&By::Test, "race", serde_json::Value::Null).unwrap();
+    s.fire_due(aio_now() + 1_000).unwrap();
+    assert_eq!(s.state().saves, 0);
+    assert!(s.schedules().unwrap().is_empty());
 }
 
 #[test]

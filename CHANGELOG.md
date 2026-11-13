@@ -43,6 +43,16 @@ version may break things.
   the night of the change) got the first 02:30, already past: it fired at
   once, and again on every pass, for up to an hour. That wall time has
   been: the next run is the next day's.
+- `[history] keep`: after a cell's version upgrade, the boot's fold of
+  history older than `keep` replayed across the upgrade and refused the
+  boot ("event N is from before the upgrade"). It now folds at the
+  upgrade's snapshot.
+- An older build on a newer build's data (aio's downgrade) folded its
+  history into a snapshot of its own version, so the newer build's fields
+  came back as defaults on roll-forward. A fold now leaves a snapshot of
+  another version as it is.
+- A schedule cancelled or moved by an earlier one due in the same batch
+  (after a sleep or a restart) still fired once. It no longer does.
 - The README and the aio-vs-aio-rs page installed and named 0.4.0;
   `scripts/docs-check` now holds them to the workspace's version.
 
