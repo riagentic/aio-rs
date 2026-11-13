@@ -315,26 +315,6 @@ mod net {
         r
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        /// A socket dropped mid-flight (its session ended, `Doors::serve`'s
-        /// select) gives back every slot its links took beyond its own.
-        #[tokio::test]
-        async fn a_dropped_socket_gives_back_its_links_slots() {
-            let sink: Sends = Box::pin(futures_util::sink::drain().sink_map_err(|e| match e {}));
-            let frames = ["1:{}", "2:{}", "3:{}"].map(|t| Ok(AxMsg::Text(t.into())));
-            let takes: Takes = Box::pin(futures_util::stream::iter(frames).chain(futures_util::stream::pending()));
-            let run: Run = Arc::new(|_| Box::pin(std::future::pending()));
-            let open = Arc::new(AtomicUsize::new(1)); // the caller's, for the socket
-            let served = serve((sink, takes), run, open.clone(), 10, 1 << 20);
-            let r = tokio::time::timeout(Duration::from_millis(200), served).await;
-            assert!(r.is_err(), "still serving when dropped");
-            assert_eq!(open.load(Ordering::SeqCst), 1, "only the caller's slot is left (it gives it back)");
-        }
-    }
-
     /// A client's socket that carries its links to one server.
     struct Shared {
         sink: tokio::sync::Mutex<SplitSink<crate::sync::Wire, TMsg>>,
@@ -577,5 +557,27 @@ mod tests {
         ] {
             assert_eq!(decode(t), None, "{t}");
         }
+    }
+
+    /// A socket dropped mid-flight (its session ended, `Doors::serve`'s
+    /// select) gives back every slot its links took beyond its own.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_dropped_socket_gives_back_its_links_slots() {
+        use super::net::{Run, Sends, Takes, serve};
+        use axum::extract::ws::Message as AxMsg;
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        let sink: Sends = Box::pin(futures_util::sink::drain().sink_map_err(|e| match e {}));
+        let frames = ["1:{}", "2:{}", "3:{}"].map(|t| Ok(AxMsg::Text(t.into())));
+        let takes: Takes = Box::pin(futures_util::stream::iter(frames).chain(futures_util::stream::pending()));
+        let run: Run = Arc::new(|_| Box::pin(std::future::pending()));
+        let open = Arc::new(AtomicUsize::new(1)); // the caller's, for the socket
+        let served = serve((sink, takes), run, open.clone(), 10, 1 << 20);
+        let r = tokio::time::timeout(Duration::from_millis(200), served).await;
+        assert!(r.is_err(), "still serving when dropped");
+        assert_eq!(open.load(Ordering::SeqCst), 1, "only the caller's slot is left (it gives it back)");
     }
 }
