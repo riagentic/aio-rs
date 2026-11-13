@@ -52,6 +52,11 @@ version may break things.
 
 ### Fixed
 
+- A transaction with `conflict = "warn"` that lengthened a text (256
+  bytes or more) committed only its tail: when another call had changed
+  that text meanwhile, the result was the other call's text with this
+  one's tail glued on, neither value, though the warning says it commits
+  over the other write. It sets the text as written.
 - `lifecycle::terminate`, `alive` and `wait_gone` took pid 0 as a
   process, but to `kill` it is the caller's own process group: a
   `"pid": 0` in a damaged `health.json` made `ax stop` signal (or

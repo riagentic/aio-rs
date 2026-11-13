@@ -54,9 +54,10 @@ pub fn diff(old: &Value, new: &Value) -> Vec<Op> {
     ops
 }
 
-/// [`diff`] with a resized array as one `set` of it, never by index: for
-/// ops put on a state others may have changed since (a transaction's
-/// commit), where an index would name another item.
+/// [`diff`] with a resized array as one `set` of it, never by index, and a
+/// lengthened text set whole, never an `append`: for ops put on a state
+/// others may have changed since (a transaction's commit), where an index
+/// would name another item and a tail would land on another text.
 pub(crate) fn diff_whole(old: &Value, new: &Value) -> Vec<Op> {
     let mut ops = Vec::new();
     walk(old, new, &mut Vec::new(), &mut ops, false);
@@ -85,7 +86,9 @@ fn walk(old: &Value, new: &Value, path: &mut Vec<Step>, ops: &mut Vec<Op>, narro
         }
         (Value::Array(a), Value::Array(b)) if a.len() == b.len() => items(a, b, path, ops, narrow),
         (Value::Array(a), Value::Array(b)) if narrow => resized(a, b, path, ops),
-        (Value::String(a), Value::String(b)) if a.len() >= APPEND_MIN && b.starts_with(a.as_str()) => {
+        // Whole (a transaction's commit, onto a state others may have
+        // changed): a text is set as written, never glued onto theirs.
+        (Value::String(a), Value::String(b)) if narrow && a.len() >= APPEND_MIN && b.starts_with(a.as_str()) => {
             ops.push(Op::Append { path: path.clone(), value: b[a.len()..].to_string() })
         }
         _ => ops.push(Op::Set { path: path.clone(), value: new.clone() }),

@@ -264,6 +264,40 @@ fn conflict_warn_commits_anyway() {
     assert_eq!(h.state().n, 10, "said, and committed over the other call's write");
 }
 
+#[cell(transaction(conflict = "warn"))]
+pub struct LooseText {
+    pub text: String,
+}
+
+#[methods]
+impl LooseText {
+    pub fn set(&mut self, text: String) {
+        self.text = text;
+    }
+
+    pub async fn extend(&mut self) -> Result {
+        let _: i64 = fetch(1).await;
+        self.text.push_str(" and more");
+        Ok(())
+    }
+}
+
+/// Committed over a conflict, a text the transaction lengthened is what it
+/// wrote, not the other call's text with its tail glued on.
+#[test]
+fn conflict_warn_writes_a_lengthened_text_whole() {
+    let mut t = TestCells::new();
+    let h = t.cell::<LooseText>();
+    let long = "x".repeat(300);
+    h.set(long.clone()).unwrap();
+    t.settle();
+    let mut a = h.extend().unwrap();
+    h.set("theirs".into()).unwrap();
+    t.settle();
+    a.now().unwrap().unwrap();
+    assert_eq!(h.state().text, format!("{long} and more"), "committed over the other call's write");
+}
+
 /// Without the flag, an async method keeps aio's live reads: each part commits.
 #[cell]
 pub struct Live {
