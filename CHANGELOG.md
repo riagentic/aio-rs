@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- A span in `aio.toml` too long to count (`keep = "213503982334602d"`)
+  overflowed: a panic in a debug build (the build's config check), and
+  in a release build a wrapped value (some hours) taken silently. It is
+  an error.
 - Problem reports took two problems alike in their first 200 characters
   as one: the same long panic text at two places (where it was comes
   after the text) was reported once, the second place never. A problem

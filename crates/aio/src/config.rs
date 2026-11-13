@@ -729,6 +729,8 @@ mod tests {
         assert!(Config::parse("[app]\nid = \"t\"\nport_of = \"../x\"").unwrap_err().contains("[app] port_of"));
         assert!(Config::parse("[app]\nid = \"t\"\n[history]\nkeep = \"3w\"").is_err());
         assert!(parse_span("10").is_err());
+        assert!(parse_span("213503982334602d").is_err(), "too long a span is an error, not wrapped round");
+        assert!(Config::parse("[app]\nid = \"t\"\n[history]\nkeep = \"213503982334602d\"").is_err());
     }
 
     #[test]
