@@ -220,8 +220,15 @@ pub fn token(data: &std::path::Path) -> std::io::Result<String> {
         return Ok(warn(t, "AIORT_TOKEN"));
     }
     let p = data.join("sync.token");
-    if let Ok(t) = std::fs::read_to_string(&p) {
-        return Ok(warn(t.trim().to_string(), "data/sync.token"));
+    match std::fs::read_to_string(&p) {
+        Ok(t) if !t.trim().is_empty() => return Ok(warn(t.trim().to_string(), "data/sync.token")),
+        // Empty (a write cut short, a file blanked): no key, and `?token=`
+        // would show this one. A new one in its place.
+        Ok(_) => {
+            eprintln!("[aio] security: data/sync.token was empty: a new random key is made in its place");
+            std::fs::remove_file(&p)?;
+        }
+        Err(_) => {}
     }
     let t = format!("{}{}", crate::uuid_v4().simple(), crate::uuid_v4().simple());
     crate::paths::write_private(&p, t.as_bytes())?;
@@ -845,6 +852,24 @@ mod tests {
         let a = token(&d).unwrap();
         assert_eq!(a.len(), 64);
         assert_eq!(token(&d).unwrap(), a);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(d.join("sync.token")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// An empty key file (a write cut short by a crash, a file blanked by
+    /// hand) is no key: an empty key would be shown by `?token=`, to anyone.
+    #[test]
+    fn an_empty_token_file_gets_a_new_key() {
+        let d = std::env::temp_dir().join(format!("aio-token-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("sync.token"), "\n").unwrap();
+        let a = token(&d).unwrap();
+        assert_eq!(a.len(), 64, "{a:?}");
+        assert_eq!(token(&d).unwrap(), a, "and kept");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

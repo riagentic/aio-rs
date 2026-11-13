@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- An empty `data/sync.token` (a write cut short by a crash, a file
+  blanked by hand) was taken as the app key: the empty key, which a
+  request shows by `?token=` or an empty bearer, so anyone reaching the
+  app was let in. An empty file gets a new random key.
 - `Command::run` with a timeout dropped what the program wrote when the
   clock ran out while its output was still being read (the program had
   exited; a child of its own still held its stdout): `stdout` came back
