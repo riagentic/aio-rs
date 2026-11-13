@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- Problem reports took two problems alike in their first 200 characters
+  as one: the same long panic text at two places (where it was comes
+  after the text) was reported once, the second place never. A problem
+  is the same only when its whole message is.
 - `db.execute("SAVEPOINT …")` (or `db.query`) outside a transaction was
   run, and SQLite takes it there as a BEGIN: the next callers' writes
   were acknowledged but held uncommitted in it, a `ROLLBACK TO` undid

@@ -476,7 +476,9 @@ pub fn problem(kind: &str, message: &str) -> Option<PathBuf> {
     let about = {
         let mut g = reporter();
         let r = g.as_mut().filter(|r| r.about.auto)?;
-        let key = format!("{kind}:{}", cut(message, 200));
+        // The whole message's digest: two problems alike in a long first
+        // part (a panic text, then where it was) are two; kept small.
+        let key = format!("{kind}:{}", crate::sha256::hex(&crate::sha256::Sha256::digest(message)));
         if r.seen.contains(&key) {
             return None;
         }
@@ -1059,6 +1061,12 @@ mod tests {
         assert_eq!((v["title"].as_str(), v["logs"].as_array().unwrap().len()), (Some("panic: boom"), 2));
         // The same problem again: not reported twice.
         assert_eq!(problem("panic", "boom\nmore"), None);
+        // Problems alike in their first 200 characters are still two (a long
+        // panic text, then where it was).
+        let long = "x".repeat(250);
+        assert!(problem("panic", &format!("{long} at a.rs:1")).is_some());
+        assert!(problem("panic", &format!("{long} at b.rs:9")).is_some(), "another place, another problem");
+        assert_eq!(problem("panic", &format!("{long} at b.rs:9")), None);
         for i in 0..20 {
             problem("panic", &format!("other {i}"));
         }
