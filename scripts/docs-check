@@ -11,6 +11,8 @@
   app template that ax's own tests compile: its first line says so, and
   every other line is one of the template's.
 - docs/clients/ax.md names every ax verb.
+- README.md's current release (the version line, the install commands)
+  and the maturity row of docs/aio-vs-aio-rs.md are the workspace's.
 - Those pages name no personal path or address, and none of the words in
   the file AIO_PRIVATE_TERMS names; their prose calls the Deno-based
   framework aio, never v1 (identifiers in `code` aside).
@@ -169,6 +171,25 @@ for page in pages:
             flag = re.match(r"--[a-z][a-z-]*", word)
             if flag and flag.group(0) not in flags_of[verb]:
                 say(page, n, f"`ax {verb} {flag.group(0)}`: not a flag of ax {verb}")
+
+# The release the README installs is the workspace's (bumped with it).
+VERSION = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
+CURRENT = [
+    (ROOT / "README.md", r"<code>(\d+\.\d+\.\d+)</code> · <b>early"),
+    (ROOT / "README.md", r"early ALPHA\*\* \((\d+\.\d+\.\d+)"),
+    (ROOT / "README.md", r"--branch v(\d+\.\d+\.\d+)"),
+    (ROOT / "README.md", r"# ax (\d+\.\d+\.\d+)"),
+    (ROOT / "README.md", r"releases/(?:tag|download)/v(\d+\.\d+\.\d+)"),
+    (DOCS / "aio-vs-aio-rs.md", r"early alpha, \w+ release \((\d+\.\d+\.\d+)\)"),
+]
+for page, pattern in CURRENT:
+    text = page.read_text()
+    found = list(re.finditer(pattern, text))
+    if not found:
+        say(page, 1, f"no current version where /{pattern}/ expects one")
+    for m in found:
+        if m.group(1) != VERSION:
+            say(page, text.count("\n", 0, m.start()) + 1, f"{m.group(1)}: the workspace is {VERSION}")
 
 for p in problems:
     print(p, file=sys.stderr)

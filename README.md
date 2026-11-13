@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <code>0.4.0</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
+  <code>0.4.2</code> · <b>early ALPHA</b> · <a href="LICENSE">MIT</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -18,7 +18,7 @@
 
 ---
 
-**aio-rs is early ALPHA.** 0.4.0 is its fourth release; until 1.0.0 a
+**aio-rs is early ALPHA** (0.4.2, its sixth release); until 1.0.0 a
 minor version may break things ([versions](docs/basics/versioning.md)).
 
 **Read first: [when to use aio-rs, and when not](docs/basics/when.md).**
@@ -46,18 +46,18 @@ at the release tag (an app takes aio-rs from git at its `ax`'s release, so
 no checkout is needed afterwards):
 
 ```sh
-git clone --branch v0.4.0 https://github.com/riagentic/aio-rs
-cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.4.0
+git clone --branch v0.4.2 https://github.com/riagentic/aio-rs
+cargo install --locked --path aio-rs/crates/aio-cli   # ax 0.4.2
 ax setup                                             # checks the machine, fetches the runtime
 ```
 
 Or a prebuilt `ax` for Linux x86_64 and macOS arm64 and x86_64 (Windows
 x86_64: `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.4.0)), each
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.4.2)), each
 archive's SHA-256 pinned in the installer:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.4.0/install.sh | sh   # then runs ax setup
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.4.2/install.sh | sh   # then runs ax setup
 ```
 
 An `ax` built from `main` writes `main`'s templates but pins its release

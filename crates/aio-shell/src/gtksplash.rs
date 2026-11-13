@@ -34,10 +34,12 @@ macro_rules! gtk_fns {
             /// signature written here.
             unsafe fn load(h: P) -> Result<Self, String> {
                 Ok(Self { $($name: {
+                    // SAFETY: `h` is a live dlopen handle (`load`'s contract) and the name a NUL-terminated literal.
                     let p = unsafe { libc::dlsym(h, concat!(stringify!($name), "\0").as_ptr().cast()) };
                     if p.is_null() {
                         return Err(format!("libgtk-3.so.0 has no {}", stringify!($name)));
                     }
+                    // SAFETY: `p` is the non-null address of the C function named, whose signature is the one written (`load`'s contract); fn pointers and data pointers have one size here.
                     unsafe { std::mem::transmute::<P, unsafe extern "C" fn($($a),*) $(-> $r)?>(p) }
                 },)* })
             }
@@ -201,12 +203,14 @@ fn init() -> Result<Gtk, String> {
         let why = if why.is_null() {
             String::new()
         } else {
+            // SAFETY: dlerror's text is a NUL-terminated string, non-null here, read before any other dl call.
             unsafe { std::ffi::CStr::from_ptr(why) }.to_string_lossy().into_owned()
         };
         return Err(format!("libgtk-3.so.0 could not be opened ({why})"));
     }
     // SAFETY: the handle is live; the signatures are GTK 3's.
     let g = unsafe { Gtk::load(h) }?;
+    // SAFETY: the table was just loaded from a live handle; GTK's first calls, on this thread, which stays GTK's only one.
     unsafe {
         // The app's process keeps its C locale: GTK's own setlocale would
         // change it for every thread.
@@ -342,6 +346,7 @@ fn lock(s: &Mutex<Status>) -> std::sync::MutexGuard<'_, Status> {
 
 /// Every pending GTK event, handled now: never waits.
 unsafe fn pump(g: &Gtk) {
+    // SAFETY: `pump`'s contract: on GTK's thread, with the table loaded.
     unsafe {
         for _ in 0..500 {
             if (g.gtk_events_pending)() == 0 {
@@ -353,6 +358,7 @@ unsafe fn pump(g: &Gtk) {
 }
 
 unsafe fn destroy(g: &Gtk, win: P) {
+    // SAFETY: `destroy`'s contract: on GTK's thread, `win` a live widget made by `build`.
     unsafe {
         (g.gtk_widget_destroy)(win);
         pump(g);
@@ -362,6 +368,7 @@ unsafe fn destroy(g: &Gtk, win: P) {
 /// One turn: on screen yet (said once), kept on top; false: it never
 /// appeared and is given up.
 unsafe fn tick(g: &Gtk, d: &mut Drawn) -> bool {
+    // SAFETY: `tick`'s contract: on GTK's thread; `d`'s widgets are live until `destroy`.
     unsafe {
         if DISMISSED.load(Ordering::Relaxed) {
             lock(&d.status).cancelled = true;
@@ -395,6 +402,7 @@ unsafe fn tick(g: &Gtk, d: &mut Drawn) -> bool {
 }
 
 unsafe fn update(g: &Gtk, d: &Drawn, pct: Option<u64>, text: &str) {
+    // SAFETY: `update`'s contract: on GTK's thread; `d`'s widgets are live (each null one skipped); `z` keeps the text's CString alive for the call.
     unsafe {
         if !d.label.is_null() {
             (g.gtk_label_set_text)(d.label, z(text).as_ptr());
@@ -422,6 +430,7 @@ fn rect([x, y, width, height]: [i32; 4]) -> crate::place::Rect {
 /// The display's monitors' work areas and its primary (the first when none
 /// is marked).
 unsafe fn screens(g: &Gtk) -> (Vec<crate::place::Rect>, Option<crate::place::Rect>) {
+    // SAFETY: `screens`'s contract: on GTK's thread after init (a default display); each monitor pointer is GDK's, valid for the call.
     unsafe {
         let d = (g.gdk_display_get_default)();
         let area = |m: P| {
@@ -441,6 +450,7 @@ unsafe fn screens(g: &Gtk) -> (Vec<crate::place::Rect>, Option<crate::place::Rec
 /// `GTK_THEME` ends in `:dark`.
 unsafe fn theme_dark(g: &Gtk) -> bool {
     let env = std::env::var("GTK_THEME").ok();
+    // SAFETY: `theme_dark`'s contract: on GTK's thread. g_object_get is looked up from the library already loaded (RTLD_NOLOAD), its variadic C signature written out, and called with property-name/out-pointer pairs ending in NULL.
     unsafe {
         let s = (g.gtk_settings_get_default)();
         if s.is_null() {
@@ -505,6 +515,7 @@ unsafe fn build(g: &Gtk, o: &Open, status: Arc<Mutex<Status>>) -> Result<Drawn, 
     let l = &o.look;
     let (w, h) = (l.w as i32, l.h as i32);
     let bp = l.bp as i32;
+    // SAFETY: `build`'s contract: on GTK's thread with the table loaded; every C string passed is a CString kept alive past its call.
     unsafe {
         let dark = theme_dark(g);
         let css_src = z(&css(&o.colors[dark as usize], o));

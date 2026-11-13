@@ -7,6 +7,34 @@ version may break things.
 
 ## [Unreleased]
 
+### Security
+
+- `ax upgrade` checks the release's `SHA256SUMS` against its signature
+  (`SHA256SUMS.sig`) and aio-rs's release key, pinned in ax
+  (`crates/aio-cli/release.pub`), before it runs the install script: a
+  release with no signature, or another key's, is refused. (The SHA-256
+  check alone proved the files matched the list, not who made the list.)
+  Releases before 0.5.0 are unsigned: `ax upgrade` to one of them from an
+  ax that pins a key refuses; its `install.sh` still installs it.
+- A release is never unsigned: the release workflow stops without the
+  `AIO_RELEASE_KEY` secret or a pinned key, and `ax release --aio` refuses
+  a key that isn't the pinned one (CONTRIBUTING.md, Signing).
+
+### Changed
+
+- Every crate declares `rust-version = "1.98"`, the toolchain
+  `rust-toolchain.toml` pins (`./ci.sh` keeps them the same).
+- Every `unsafe` block says why it is sound (`// SAFETY:`), and clippy's
+  `undocumented_unsafe_blocks` keeps it so (`[workspace.lints]`).
+- `#[component]` and `#[derive(Props)]` point their misuse errors at the
+  token at fault, not the whole item; `#[methods]` on a type without a
+  name is an error, never a panic in the macro.
+
+### Fixed
+
+- The README and the aio-vs-aio-rs page installed and named 0.4.0;
+  `scripts/docs-check` now holds them to the workspace's version.
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

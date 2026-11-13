@@ -55,6 +55,29 @@
 //! fn Hello(name: String) -> View { rsx! { p { "{name}" } } }
 //! fn app() -> View { rsx! { Hello { name: "x", "data-t": "h" } } }
 //! ```
+//!
+//! `#[component]` goes on a fn, and `#[derive(Props)]` on a struct with
+//! named fields:
+//!
+//! ```compile_fail
+//! use air::component;
+//! #[component]
+//! struct Hello { name: String }
+//! ```
+//!
+//! ```compile_fail
+//! use air::Props;
+//! #[derive(Clone, Props)]
+//! struct HelloProps(String);
+//! ```
+//!
+//! ```
+//! use air::{Props, View, component, rsx};
+//! #[component]
+//! fn Hello(name: String) -> View { rsx! { p { "{name}" } } }
+//! #[derive(Clone, Props)]
+//! struct GreetProps { name: String }
+//! ```
 extern crate self as air;
 
 mod dom;

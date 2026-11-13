@@ -121,6 +121,7 @@ pub fn watched(cmd: &mut Command) -> io::Result<Watch> {
     if !made {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: pipe() succeeded, so both fds are open and owned by nothing else: each OwnedFd takes sole ownership.
     let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
     let fd = read.as_raw_fd();
     cmd.env(ENV, fd.to_string());
@@ -205,6 +206,7 @@ pub fn watch_parent() {
         _ = std::thread::Builder::new().name("aio-parent".into()).spawn(move || {
             let mut b = [0u8; 1];
             // Blocks until the parent's end closes (EOF) or fails.
+            // SAFETY: `b` is a 1-byte buffer and read(2) is asked for 1 byte; `fd` stays open for the process's life (never closed here).
             while unsafe { libc::read(fd, b.as_mut_ptr().cast(), 1) } > 0 {}
             eprintln!("[aio] the parent process is gone; stopping");
             ask_stop();

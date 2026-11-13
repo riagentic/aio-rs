@@ -4,10 +4,11 @@ members = ["crates/air", "crates/air-macro", "crates/air-bench", "crates/aio", "
 
 [workspace.package]
 edition = "2024"
+# The toolchain rust-toolchain.toml pins: the oldest aio-rs is built and tested with.
+rust-version = "1.98"
 version = "0.4.2"
 license = "MIT"
 repository = "https://github.com/riagentic/aio-rs"
-homepage = "https://github.com/riagentic/aio-rs"
 readme = "README.md"
 keywords = ["app", "event-sourcing", "ui", "desktop", "sync"]
 categories = ["gui", "database", "development-tools"]
@@ -34,3 +35,8 @@ debug = false
 # app's test build, a held key's work per step 30-40 % less, a cold build 51 -> 62 s,
 # a warm rebuild 36 -> 32 s, the build dir 0.99 -> 0.89 GB.
 opt-level = 1
+
+# Every crate's (`[lints] workspace = true`): ./ci.sh's clippy denies them.
+[workspace.lints.clippy]
+# Each `unsafe` block says why it is sound (`// SAFETY: …`).
+undocumented_unsafe_blocks = "warn"

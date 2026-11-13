@@ -2,10 +2,10 @@
 name = "aio-rs-cli"
 description = "ax, the aio-rs command: make, run, test and ship aio-rs apps"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities", "development-tools", "gui"]
@@ -58,3 +58,6 @@ tempfile = "3"
 aio = { workspace = true, features = ["kit", "net", "testing", "dev"] }
 # A web build's pages painted by its server (`aio_shell::web::painted`).
 aio-shell = { workspace = true, features = ["web"] }
+
+[lints]
+workspace = true

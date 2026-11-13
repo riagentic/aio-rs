@@ -910,6 +910,7 @@ fn free_bytes(dir: &Path) -> Option<u64> {
         let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
         // SAFETY: a valid C string and a zeroed out-struct.
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` is a NUL-terminated path alive for the call; `s` is ours to fill.
         (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
     }
     #[cfg(windows)]

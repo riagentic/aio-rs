@@ -760,8 +760,11 @@ fn reads(body: Tokens, in_macro: bool) -> Option<Vec<String>> {
 fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
     let ty = imp.self_ty.clone();
     let Type::Path(tp) = &*ty else { return Err(syn::Error::new(ty.span(), "#[methods] goes on `impl Cell`")) };
-    let calls = format_ident!("{}Calls", tp.path.segments.last().expect("type name").ident);
-    let derived_trait = format_ident!("{}Derived", tp.path.segments.last().expect("type name").ident);
+    let Some(type_name) = tp.path.segments.last().map(|s| s.ident.clone()) else {
+        return Err(syn::Error::new(ty.span(), "#[methods] goes on `impl Cell`: a type by its name"));
+    };
+    let calls = format_ident!("{}Calls", type_name);
+    let derived_trait = format_ident!("{}Derived", type_name);
     let (mut arms, mut names, mut clients, mut invs, mut sigs, mut bodies) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
     let (mut dsigs, mut dbodies) = (vec![], vec![]);
@@ -888,7 +891,7 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
             return Err(syn::Error::new(m.span(), "`call` and `read` are taken by aio::Door"));
         }
         if HANDLE_METHODS.contains(&mname.as_str()) {
-            let cell = tp.path.segments.last().expect("type name").ident.to_string().to_lowercase();
+            let cell = type_name.to_string().to_lowercase();
             let why = format!(
                 "`{mname}` is also `aio::Handle::{mname}`, which wins on a handle: `h.{mname}(..)` would \
                  call `Handle::{mname}`, never this method. Rename it (e.g. `{mname}_{cell}`)"
@@ -1202,9 +1205,7 @@ fn derive_one(ty: &Type, sig: &syn::Signature, attr: &Attribute) -> syn::Result<
             }
             let list: syn::ExprArray = m.value()?.parse()?;
             let fields = list.elems.iter().map(|e| match e {
-                Expr::Path(p) if p.path.get_ident().is_some() => {
-                    Ok(syn::Member::Named(p.path.get_ident().expect("an ident").clone()))
-                }
+                Expr::Path(p) if let Some(id) = p.path.get_ident() => Ok(syn::Member::Named(id.clone())),
                 e => Err(syn::Error::new(e.span(), "reads = [field, …]: the state's fields it reads")),
             });
             reads = Some(fields.collect::<syn::Result<_>>()?);

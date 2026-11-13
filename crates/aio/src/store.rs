@@ -2738,13 +2738,16 @@ mod tests {
             out: *mut c_int,
         ) -> c_int {
             let real = REAL.load(SeqCst);
+            // SAFETY: SQLite calls this VFS's xOpen with its own arguments; `real` is the default VFS `count` stored before registering this one, and every built-in VFS has an xOpen.
             let rc = unsafe { ((*real).xOpen.unwrap())(real, name, file, flags, out) };
+            // SAFETY: `file` is the sqlite3_file the real xOpen just filled in (pMethods null when it failed).
             let m = unsafe { (*file).pMethods };
             if rc == ffi::SQLITE_OK && !m.is_null() {
                 let mut t = TABLES.lock().unwrap();
                 let ours = match t.iter().find(|(_, r)| *r == m as usize) {
                     Some((o, _)) => *o,
                     None => {
+                        // SAFETY: `m` is the non-null method table the real VFS set: copied by value.
                         let mut c = unsafe { *m };
                         c.xSync = Some(sync);
                         let o = Box::leak(Box::new(c)) as *const ffi::sqlite3_io_methods as usize;
@@ -2752,6 +2755,7 @@ mod tests {
                         o
                     }
                 };
+                // SAFETY: `file` is SQLite's, valid for this call; `ours` is a leaked (never freed) copy of its table.
                 unsafe { (*file).pMethods = ours as *const ffi::sqlite3_io_methods };
             }
             rc
@@ -2759,14 +2763,17 @@ mod tests {
 
         unsafe extern "C" fn sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
             crate::paths::SYNCS.with(|n| n.set(n.get() + 1));
+            // SAFETY: SQLite calls xSync with a file this VFS opened, so pMethods is one of `ours`.
             let ours = unsafe { (*file).pMethods } as usize;
             let real = TABLES.lock().unwrap().iter().find(|(o, _)| *o == ours).map(|(_, r)| *r).unwrap();
+            // SAFETY: `real` is the system table `ours` was copied from (TABLES pairs them); built-in tables have an xSync. A miss panics: an abort across this extern "C" fn, in a test only.
             unsafe { ((*(real as *const ffi::sqlite3_io_methods)).xSync.unwrap())(file, flags) }
         }
 
         /// The disk syncs `f` made on this thread, SQLite's and aio-rs's.
         pub(super) fn count(f: impl FnOnce()) -> u32 {
             static ONCE: Once = Once::new();
+            // SAFETY: once per process: the default VFS is copied (never mutated in place) and the leaked copy registered as the default, as SQLite's VFS API requires (a pointer that lives forever).
             ONCE.call_once(|| unsafe {
                 let real = ffi::sqlite3_vfs_find(std::ptr::null());
                 REAL.store(real, SeqCst);

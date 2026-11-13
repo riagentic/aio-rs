@@ -75,15 +75,17 @@ impl Drop for Bus {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            // SAFETY: kill(2) on the bus's own process group (it leads it).
             let group = -(self.child.id() as libc::pid_t);
+            // SAFETY: kill(2) on the bus's own process group (it leads it).
             unsafe { libc::kill(group, libc::SIGTERM) };
             let until = Instant::now() + Duration::from_secs(2);
             // A helper still in the group after the bus is gone gets no second ask.
+            // SAFETY: kill(2) with signal 0 only asks whether the group is there.
             while unsafe { libc::kill(group, 0) } == 0 && Instant::now() < until {
                 _ = self.child.try_wait();
                 std::thread::sleep(Duration::from_millis(20));
             }
+            // SAFETY: as above: the bus's own group.
             unsafe { libc::kill(group, libc::SIGKILL) };
         }
         _ = self.child.kill();

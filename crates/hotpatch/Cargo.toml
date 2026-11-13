@@ -2,10 +2,10 @@
 name = "aio-rs-hotpatch"
 description = "aio-rs's hot-patch runtime: `ax dev` loads a patch library into the running app and its hot functions call the new code"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories = ["development-tools"]
@@ -23,3 +23,6 @@ libc = "0.2"
 
 [dev-dependencies]
 serde_json = "1"
+
+[lints]
+workspace = true

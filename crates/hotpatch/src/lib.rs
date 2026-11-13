@@ -164,6 +164,7 @@ impl<A, M, F: HotFunction<A, M>> HotFn<A, M, F> {
         // SAFETY: a table entry's target is the patched `call_it` of `F`,
         // with the same signature.
         if let Some(ptr) = unsafe { get_jump_table() }.and_then(|t| t.map.get(&known).copied()) {
+            // SAFETY: as above: `ptr` is a function with `call_it`'s signature.
             let call_it = unsafe { std::mem::transmute::<*const (), fn(&mut F, A) -> F::Return>(ptr as *const ()) };
             return call_it(&mut self.inner, args);
         }
@@ -207,6 +208,7 @@ macro_rules! hot_function {
             unsafe fn call_as_ptr(&mut self, ($($arg,)*): ($($arg,)*)) -> R {
                 // SAFETY: the caller's: `Self` is a `fn` pointer of this signature.
                 let real = unsafe { std::mem::transmute_copy::<Self, Self::Real>(self) };
+                // SAFETY: the table is only read here; it is replaced whole, never mutated in place.
                 if let Some(ptr) = unsafe { get_jump_table() }.and_then(|t| t.map.get(&(real as usize as u64)).copied()) {
                     // SAFETY: the table moved this function to `ptr`, same signature.
                     let moved = unsafe { std::mem::transmute::<usize, Self::Real>(ptr as usize) };
@@ -238,7 +240,11 @@ mod os {
     fn last_error() -> String {
         // SAFETY: dlerror's text is valid until the next dl call on this thread.
         let e = unsafe { libc::dlerror() };
-        if e.is_null() { "unknown error".into() } else { unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned() }
+        if e.is_null() {
+            return "unknown error".into();
+        }
+        // SAFETY: non-null, a NUL-terminated string dlerror owns, read before any other dl call.
+        unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
     }
 
     pub fn main_of_process() -> usize {
@@ -289,11 +295,13 @@ mod os {
         // SAFETY: the caller's: the library is a patch of this binary.
         let h = unsafe { LoadLibraryW(wide.as_ptr()) };
         if h.is_null() {
+            // SAFETY: GetLastError only reads this thread's last error.
             return Err(format!("{}: error {}", lib.display(), unsafe { GetLastError() }));
         }
         // SAFETY: a lookup in the module just loaded.
         let main = unsafe { GetProcAddress(h, c"main".as_ptr().cast()) };
         if main.is_null() {
+            // SAFETY: GetLastError only reads this thread's last error.
             return Err(format!("{}: no `main`: error {}", lib.display(), unsafe { GetLastError() }));
         }
         Ok(main as usize)
@@ -366,8 +374,10 @@ mod tests {
             new_base_address: 0,
             ifunc_count: 0,
         };
+        // SAFETY: a library that can't load: nothing is patched.
         let e = unsafe { apply_patch(t) }.unwrap_err();
         assert!(e.to_string().contains("nonexistent"), "{e}");
+        // SAFETY: only read, and no patch was applied.
         assert!(unsafe { get_jump_table() }.is_none());
     }
 }

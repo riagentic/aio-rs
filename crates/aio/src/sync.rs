@@ -1841,9 +1841,9 @@ pub(crate) fn flush_saves(wait: Duration) -> Vec<std::path::PathBuf> {
 /// It writes in the exiting thread: on Windows the others are gone by then.
 fn flush_at_exit() {
     // Windows: the program's TLS callback too, linked in by this read.
-    // SAFETY: a plain read of a static.
     #[cfg(windows)]
     {
+        // SAFETY: a plain read of a static.
         _ = unsafe { std::ptr::from_ref(&ON_DETACH).read_volatile() };
     }
     #[cfg(windows)]

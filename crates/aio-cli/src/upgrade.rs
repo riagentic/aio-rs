@@ -1,7 +1,8 @@
 //! `ax upgrade` and `ax uninstall` (aio's `am upgrade`, `am uninstall`): ax
 //! itself from an aio-rs release (its install script, checked against the
 //! release's `SHA256SUMS`, checks each archive's SHA-256 before anything
-//! runs) or from a checkout; or gone, the apps and their data untouched.
+//! runs; `SHA256SUMS` itself checked against aio-rs's release key pinned in
+//! `release.pub`) or from a checkout; or gone, the apps and their data untouched.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,6 +18,30 @@ pub fn bin() -> PathBuf {
 
 fn exe_in(bin: &Path, name: &str) -> PathBuf {
     bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// aio-rs's release key (`ed25519:<base64>`), pinned at build time: the
+/// public half of `AIO_RELEASE_KEY`, which signs every release's
+/// `SHA256SUMS`. Empty in a build made before a key was pinned.
+const RELEASE_PUB: &str = include_str!("../release.pub");
+
+pub fn pinned() -> Option<&'static str> {
+    Some(RELEASE_PUB.trim()).filter(|k| !k.is_empty())
+}
+
+/// Whether a release's `SHA256SUMS` may be trusted (pure): with a key
+/// `pinned`, only when `sig` (`SHA256SUMS.sig`) is that key's signature of
+/// `sums` (fail closed: no signature refuses); with none, `Ok` and the
+/// warning to say (a build of ax from before the key).
+pub fn trusted(pinned: Option<&str>, sums: &[u8], sig: Option<&str>) -> Result<Option<String>, String> {
+    let Some(key) = pinned else {
+        return Ok(Some("this ax has no release key pinned: the release is checked by SHA-256 only".into()));
+    };
+    match sig {
+        None => Err("the release has no SHA256SUMS.sig (releases before 0.5.0 are unsigned): not run".into()),
+        Some(sig) if aio::update::verify(key, sums, sig.trim()) => Ok(None),
+        Some(_) => Err(format!("SHA256SUMS.sig is not aio-rs's release key's ({key}): not run")),
+    }
 }
 
 /// Whether `sums` (`SHA256SUMS`) lists `file` with SHA-256 `sha` (pure).
@@ -76,7 +101,7 @@ pub fn upgrade(to: Option<&str>, checkout: Option<&Path>) -> Result<String, Stri
                 Ok(false)
             }
             Err(e) => Err(e.to_string()),
-            Ok(_) => install(&url, script, &tmp).map(|()| true),
+            Ok(_) => signed(&url, &tmp).and_then(|()| install(&url, script, &tmp)).map(|()| true),
         };
         _ = std::fs::remove_dir_all(&tmp);
         if r? {
@@ -94,6 +119,22 @@ pub fn upgrade(to: Option<&str>, checkout: Option<&Path>) -> Result<String, Stri
 /// `latest` never goes back.
 fn newer(newest_first: Vec<String>, have: &str) -> Vec<String> {
     newest_first.into_iter().filter(|t| aio::update::compare(t, have) == Some(std::cmp::Ordering::Greater)).collect()
+}
+
+/// The release at `url`'s `SHA256SUMS` (already in `tmp`) checked against
+/// its signature and the pinned key ([`trusted`]).
+fn signed(url: &str, tmp: &Path) -> Result<(), String> {
+    let sums = std::fs::read(tmp.join("SHA256SUMS")).map_err(|e| format!("SHA256SUMS: {e}"))?;
+    let at = tmp.join("SHA256SUMS.sig");
+    let sig = match aio_shell::runtime::download(&format!("{url}/SHA256SUMS.sig"), &at, &mut |_, _| true) {
+        Ok(_) => Some(std::fs::read_to_string(&at).map_err(|e| format!("SHA256SUMS.sig: {e}"))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{url}/SHA256SUMS.sig: {e}")),
+    };
+    if let Some(warn) = trusted(pinned(), &sums, sig.as_deref()).map_err(|e| format!("{url}: {e}"))? {
+        eprintln!("ax upgrade: {warn}");
+    }
+    Ok(())
 }
 
 /// Get `script` of the release at `url` into `tmp` (its `SHA256SUMS`
@@ -188,6 +229,27 @@ mod tests {
         assert!(!listed(sums, "install.sh", "def456"), "another file's sum");
         assert!(!listed(sums, "install.sh", "abc12"), "a part of it");
         assert!(!listed("", "install.sh", "abc123"));
+    }
+
+    #[test]
+    fn sums_run_only_signed_by_the_pinned_key() {
+        let (pkcs8, key) = aio::update::keygen().unwrap();
+        let (_, other) = aio::update::keygen().unwrap();
+        let sums = b"abc123  install.sh\n";
+        let sig = aio::update::sign_with(&pkcs8, sums).unwrap();
+        assert_eq!(trusted(Some(&key), sums, Some(&sig)), Ok(None));
+        assert!(trusted(Some(&key), sums, Some(&format!("{sig}\n"))).is_ok(), "the file's newline");
+        assert!(trusted(Some(&other), sums, Some(&sig)).unwrap_err().contains("not aio-rs's"), "another key");
+        assert!(trusted(Some(&key), b"def456  install.sh\n", Some(&sig)).is_err(), "other sums");
+        assert!(trusted(Some(&key), sums, None).unwrap_err().contains("no SHA256SUMS.sig"), "fail closed");
+        assert!(trusted(None, sums, None).unwrap().unwrap().contains("no release key"), "a build before the key");
+    }
+
+    #[test]
+    fn the_pinned_key_is_a_key_or_none() {
+        if let Some(k) = pinned() {
+            assert!(aio_config::update::raw_key(k).is_ok(), "release.pub: {k}");
+        }
     }
 
     #[test]
