@@ -52,6 +52,13 @@ version may break things.
 
 ### Fixed
 
+- A cassette numbered repeated calls (equal arguments) as they finished,
+  but replays them as they start: calls that overlapped got each other's
+  answers on replay. They are numbered as they start.
+- A cassette keyed a call whose arguments hold a hash map in that map's
+  order, which changes with each process: a tape recorded in one run
+  failed in the next ("no recorded call"). A map's entries key in sorted
+  order; a tape recorded before is read the same way.
 - A `cron` schedule in local time searched from inside the hour that
   repeats when clocks go back (an app started, or woken, at 02:10 CET on
   the night of the change) got the first 02:30, already past: it fired at
