@@ -52,6 +52,12 @@ version may break things.
 
 ### Fixed
 
+- Two spellings of one place (`/caf%c3%a9` and `/café`, `%2D` and `-`, a
+  query's `'` and the `%27` a browser makes of it) were two `Loc`s,
+  though the docs say they are equal: going where the app already was
+  added a Back step, and the browser's Back to such a place replaced the
+  page in history instead of stepping back (Forward was lost). A `Loc`
+  spells its escapes one way.
 - A route param filled into a link (`fill`, `routes!`'s `href()`) kept a
   `\`, `.` or `..` as written, and going there read it as a `/` or a
   step: `/users/a\b` matched no user, `..` led to `/`, and a slug of
