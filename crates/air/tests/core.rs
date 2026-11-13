@@ -353,6 +353,35 @@ fn each_global_is_its_own_state_per_app_instance_and_a_global_memo_follows_them(
     assert_eq!(p.text("left"), "0", "a new app instance starts again");
 }
 
+#[test]
+fn an_effect_older_than_a_global_memo_it_reads_never_sees_it_stale() {
+    fn app() -> View {
+        effect(|| log(format!("{} {}", LEFT.get(), SUM.get())));
+        rsx! { button { "data-t": "left", onclick: move |_| LEFT.update(|n| *n += 1), "+" } }
+    }
+    said();
+    let mut p = TestPage::mount(app);
+    assert_eq!(said(), ["0 10"]);
+    p.click("left");
+    assert_eq!(said(), ["1 11"], "one run, with the sum of the new left");
+}
+
+#[test]
+fn an_error_in_a_boundarys_own_fallback_reaches_the_boundary_above() {
+    fn app() -> View {
+        let fail = signal(|| true);
+        rsx! {
+            ErrorBoundary { fallback: |e: String| rsx! { p { "data-t": "outer", "{e}" } },
+                ErrorBoundary { fallback: |_: String| -> View { Err(ViewError::new("fb")) },
+                    Fails { fail }
+                }
+            }
+        }
+    }
+    let p = TestPage::mount(app);
+    assert_eq!(p.text("outer"), "fb");
+}
+
 /// The same named global as hot-patched code sees it after its type
 /// changed (`ax dev`, air's `dev`): made again with its first value, never a
 /// panic. Without `dev` there is no hot-patch: two types is a bug, said loudly.

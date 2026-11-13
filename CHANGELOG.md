@@ -79,6 +79,16 @@ version may break things.
   lost with a link) ran a second time, side effects and all, and its
   caller got the second run's conflict or storage error. The re-send now
   joins the running call and gets its end.
+- air: a `memo` read after a write it follows, in the same handler, batch
+  or effect, gave its old value. A memo waiting to run again is made on
+  read (as AIR's `computed`).
+- air: an effect or hole older than a memo it reads (a `GlobalMemo` made
+  on its first read) ran once with the memo's old value, then again.
+- air: a `Prop` or attribute given an expression that reads state ran it
+  twice at mount. It runs once.
+- air: an error thrown by an `ErrorBoundary`'s own fallback showed a blank
+  boundary (or looped to the 1000-round panic); it goes to the boundary
+  above.
 
 ## [0.4.2] - 2026-11-11
 
