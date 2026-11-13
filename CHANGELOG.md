@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- `lifecycle::terminate`, `alive` and `wait_gone` took pid 0 as a
+  process, but to `kill` it is the caller's own process group: a
+  `"pid": 0` in a damaged `health.json` made `ax stop` signal (or
+  SIGKILL) itself and its shell job. pid 0 is no process.
 - Two spellings of one place (`/caf%c3%a9` and `/café`, `%2D` and `-`, a
   query's `'` and the `%27` a browser makes of it) were two `Loc`s,
   though the docs say they are equal: going where the app already was

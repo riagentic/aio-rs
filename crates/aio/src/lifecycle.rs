@@ -234,9 +234,13 @@ pub fn stop(child: &mut Child, budget: Duration) {
     _ = child.wait();
 }
 
-/// End process `pid`: `hard`, at once (SIGKILL, Windows `TerminateProcess`);
+/// End process `pid` (0 is none: `InvalidInput`): `hard`, at once (SIGKILL, Windows `TerminateProcess`);
 /// else asked (SIGTERM; Windows has none: `Unsupported`).
 pub fn terminate(pid: u32, hard: bool) -> io::Result<()> {
+    // pid 0 is no process: `kill(0)` is the caller's whole process group.
+    if pid == 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     #[cfg(unix)]
     {
         let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -270,6 +274,9 @@ pub fn terminate(pid: u32, hard: bool) -> io::Result<()> {
 /// Wait until process `pid` is gone, at most `budget` (an updater waiting
 /// for the app it replaces). A pid that can't be a process is gone.
 pub fn wait_gone(pid: u32, budget: Duration) {
+    if pid == 0 {
+        return;
+    }
     let end = std::time::Instant::now() + budget;
     #[cfg(unix)]
     {
@@ -298,6 +305,10 @@ pub fn wait_gone(pid: u32, budget: Duration) {
 
 /// Is there a process `pid` (one of another user's counts: it exists)?
 pub fn alive(pid: u32) -> bool {
+    // pid 0 is no process (`kill(0, 0)` asks about the caller's group).
+    if pid == 0 {
+        return false;
+    }
     #[cfg(unix)]
     {
         let Ok(pid) = i32::try_from(pid) else { return false };
@@ -441,6 +452,17 @@ pub fn scrub(cmd: &mut Command, aio: bool) {
 
 #[cfg(test)]
 mod tests {
+
+    /// pid 0 is no process: to `kill` it is the caller's own process group
+    /// (a `"pid": 0` in a hand-edited file would end `ax` and its shell job).
+    #[test]
+    fn pid_0_is_no_process() {
+        assert!(!super::alive(0), "alive");
+        let t = std::time::Instant::now();
+        super::wait_gone(0, std::time::Duration::from_secs(2));
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "waited for it");
+        assert_eq!(super::terminate(0, false).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
     use super::{STAYS_DOWN, scrubbed, stop_code};
 
     #[test]
