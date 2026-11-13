@@ -794,6 +794,11 @@ impl<T: Cell> Handle<T> {
         parts: Option<crate::answer::Parts>,
     ) -> Result<(Option<Value>, crate::Answer)> {
         self.open_for_calls()?;
+        // Refused, it touches nothing: no kept answer, no running call to
+        // join or supersede. Asked again below, on the state it runs on.
+        if let Some(w) = who {
+            lock(&self.inner.store).state().allow(w, method, &args)?;
+        }
         if op.is_none()
             && let Some(v) = self.answers(method, &args, who)
         {

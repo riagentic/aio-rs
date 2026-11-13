@@ -19,6 +19,12 @@ version may break things.
 - A release is never unsigned: the release workflow stops without the
   `AIO_RELEASE_KEY` secret or a pinned key, and `ax release --aio` refuses
   a key that isn't the pinned one (CONTRIBUTING.md, Signing).
+- A network call its `#[client]` rule refuses no longer supersedes a
+  running `#[mode(newest)]` call of the same method: before, any caller
+  could abort an admin's call with one refused call (`DispatchAborted`).
+- The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
+  out or a running `#[mode(first)]` call is joined: a caller the state now
+  refuses (an `allow` rule) no longer gets the answer it was let in for.
 
 ### Changed
 
