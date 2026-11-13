@@ -281,6 +281,9 @@ fn http() -> Http {
 - `send(kind, body, droppable)`: past `side::HIGH_WATER` (4 MB) waiting
   for a slow receiver, a droppable frame is dropped (`Ok(false)`) and any
   other closes the stream with 1011 `backpressure`, never a silent desync.
+- Once `Frames` is dropped (its handler is done), what is queued has 10 s
+  to reach the receiver; one that stopped reading is then let go, its
+  socket closed.
 - `recv` gives each frame with `Seen::Next`, `Gap(n)` or `Old` against
   the last of its kind: a gap on a droppable kind is information, on
   another a broken stream to tear down.

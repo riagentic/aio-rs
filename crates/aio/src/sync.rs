@@ -2628,6 +2628,17 @@ impl<T: Cell> Remote<T> {
         *lock(&self.inner.out) = None;
         // Never re-sent: what waited is told now (after `out`, so none slips in).
         lock(&self.inner.running).clear();
+        // Replied to, its end to come on this link: that end went with it.
+        let sent: std::collections::HashSet<String> = lock(&self.inner.copy).pending.iter().map(|p| p.op.clone()).collect();
+        let gone: Vec<_> = {
+            let mut ends = lock(&self.inner.ends);
+            let ops: Vec<String> = ends.keys().filter(|op| !sent.contains(*op)).cloned().collect();
+            ops.into_iter().filter_map(|op| ends.remove_entry(&op)).collect()
+        };
+        for (op, end) in gone {
+            lock(&self.inner.streams).remove(&op);
+            end.send(Err(Rejected::lost(format!("{}: ran; its end went with that link", end.method()))));
+        }
         self.tell();
     }
 

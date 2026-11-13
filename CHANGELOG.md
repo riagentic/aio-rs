@@ -59,6 +59,14 @@ version may break things.
   order, which changes with each process: a tape recorded in one run
   failed in the next ("no recorded call"). A map's entries key in sorted
   order; a tape recorded before is read the same way.
+- An async method's call replied to, whose end then went with a dropped
+  link, now fails with `ConnectionLost` as the link drops (native and
+  web): before, `ask`/`stream`'s answer never came, `call_confirmed`
+  waited out its ceiling (or forever) saying it stayed queued, and its
+  piece handler was kept.
+- A side channel whose receiver stopped reading (a frozen tab) is let go
+  10 s after its handler returns: before, its writer, socket and up to
+  4 MB of queue were kept forever.
 - A `cron` schedule in local time searched from inside the hour that
   repeats when clocks go back (an app started, or woken, at 02:10 CET on
   the night of the change) got the first 02:30, already past: it fired at

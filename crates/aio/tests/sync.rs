@@ -2611,6 +2611,57 @@ mod streamed {
         // And so are the refused ones'.
         until("signed out", || r.signed_out() && Arc::strong_count(&held) == 1).await;
     }
+
+    /// Lets `Slow::slow` go on.
+    static GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    #[cell(shared)]
+    pub struct Slow {
+        pub done: u32,
+    }
+
+    async fn gate() -> u32 {
+        while !GO.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        1
+    }
+
+    #[methods]
+    impl Slow {
+        #[client]
+        pub async fn slow(&mut self) -> Result<u32> {
+            let n: u32 = gate().await;
+            self.done += n;
+            Ok(self.done)
+        }
+    }
+
+    /// Replied to, then its link dropped while it awaits: its end goes with
+    /// that link, and its caller is told so, never left waiting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_async_call_whose_end_went_with_the_link_says_so() {
+        use std::sync::atomic::Ordering;
+        let h = Handle::<Slow>::memory();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(serve(h.clone(), l, "secret".into()));
+        let relay = relay(addr).await;
+        let r = Remote::<Slow>::connect(&relay.addr, "secret", "ann").await.unwrap();
+        let held = Arc::new(());
+        let k = held.clone();
+        let end = r.stream("slow", serde_json::json!([]), move |_: String| _ = &k).unwrap();
+        until("replied", || r.pending() == 0).await;
+        relay.live.lock().unwrap().drain(..).for_each(|t| t.abort());
+        tokio::time::sleep(Duration::from_millis(300)).await; // the link is gone
+        GO.store(true, Ordering::SeqCst);
+        until("done on the server", || h.state().done == 1).await;
+        let got = tokio::time::timeout(Duration::from_secs(5), end).await;
+        let e = got.expect("its caller is told, not left waiting").unwrap_err();
+        assert_eq!(e.code(), Some(aio::Code::ConnectionLost), "{e}");
+        assert!(e.why.contains("went with that link"), "{e}");
+        assert_eq!(Arc::strong_count(&held), 1, "its piece handler is gone");
+    }
 }
 
 /// aio throws when client code reads a field its view hides; a `Hidden<T>`

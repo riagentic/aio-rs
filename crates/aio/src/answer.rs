@@ -124,6 +124,11 @@ impl Reply {
         parts.is_some_and(|p| p.tx.try_send(serde_json::json!({ "t": "part", "op": p.op, "c": piece })).is_ok())
     }
 
+    /// The method called.
+    pub(crate) fn method(&self) -> &str {
+        &self.0.method
+    }
+
     /// Send the end to whoever waits (once: later sends are dropped).
     pub(crate) fn send(&self, r: Result<Value>) {
         for tx in std::mem::take(&mut *self.0.to.lock().unwrap_or_else(|e| e.into_inner())) {

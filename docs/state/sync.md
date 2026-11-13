@@ -196,9 +196,12 @@ rt.block_on(async {
   fail it: the call is sent again on reconnect and applies once (an
   async method still running joins it: its end is the answer). If it
   had already run, its answer went with that link: it fails with `ran
-  before …` (`ConnectionLost`), never a made-up `null`. With no
-  answer in time it fails with `no answer in …` and stays queued. It
-  blocks its thread: call it from `spawn_blocking` or a plain thread.
+  before …` (`ConnectionLost`), never a made-up `null`; so does an
+  async method's call (`call_confirmed`, `ask`, `stream`) whose reply
+  came but whose end went with the link: `ran; its end went with that
+  link`, as the link drops. With no answer in time it fails with `no
+  answer in …` and stays queued. It blocks its thread: call it from
+  `spawn_blocking` or a plain thread.
 - A `#[client(predict = false)]` method returns nothing, by rule: the
   copy can't know its answer, so it only sends it, and it shows once the
   server ran it (`pending_of(method)` counts it until then).
