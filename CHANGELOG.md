@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- Pairing on a dual-stack listener (`[::]`) counted every IPv4 client
+  (`::ffff:a.b.c.d`) as one address: 8 wrong PINs from one host locked
+  out every IPv4 device, and 2 open exchanges were shared by all of
+  them. An IPv4 client is its own address, as sign-in budgets have it.
 - An account signed in by OpenID Connect was looked up by its id
   normalized (NFC, trimmed) but kept exactly: a `sub` spelled differently
   (a decomposed accent, a trailing space) found another account and was

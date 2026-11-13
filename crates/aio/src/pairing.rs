@@ -88,9 +88,11 @@ pub fn pairing() -> Arc<Pairing> {
     P.get_or_init(Arc::default).clone()
 }
 
-/// An address as aio counts it: IPv6 by its /64.
+/// An address as aio counts it: IPv6 by its /64, an IPv4 client of a
+/// dual-stack listener (`::ffff:a.b.c.d`) as its IPv4 address.
 fn bucket(ip: IpAddr) -> IpAddr {
     match ip {
+        IpAddr::V6(v6) if let Some(v4) = v6.to_ipv4_mapped() => IpAddr::V4(v4),
         IpAddr::V6(v6) => {
             let s = v6.segments();
             IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
@@ -737,5 +739,20 @@ mod tests {
             _ = p.check(wrong, ip(&format!("10.0.1.{i}")), Instant::now());
         }
         assert_eq!(p.check(&pin, ip("10.0.2.1"), Instant::now()), Err(Refused::Invalid));
+    }
+
+    /// On a dual-stack listener (`[::]`) an IPv4 client is `::ffff:a.b.c.d`:
+    /// it is its own address, not one /64 with every other IPv4 client.
+    #[test]
+    fn an_ipv4_client_on_a_dual_stack_listener_is_its_own_address() {
+        let p = Pairing::default();
+        let pin = p.new_pin();
+        let wrong = if pin == "000000" { "000001" } else { "000000" };
+        for _ in 0..PER_ADDRESS {
+            _ = p.check(wrong, ip("::ffff:10.0.0.2"), Instant::now());
+        }
+        assert_eq!(p.check(&pin, ip("::ffff:10.0.0.2"), Instant::now()), Err(Refused::TooMany));
+        assert_eq!(p.check(&pin, ip("10.0.0.2"), Instant::now()), Err(Refused::TooMany), "one machine");
+        assert_eq!(p.check(&pin, ip("::ffff:10.0.0.3"), Instant::now()), Ok(()));
     }
 }
