@@ -155,7 +155,8 @@ impl Doors {
 
     /// The verification mail for `id` at `to`, with a fresh token.
     fn verify_mail(&self, id: &str, to: &str) -> Result<super::Mail, Refusal> {
-        let token = self.auth.one_shot("verify", id, super::VERIFY_MS)?;
+        // The token names the address: it proves that mailbox, no later one.
+        let token = self.auth.one_shot_with("verify", id, super::VERIFY_MS, Some(to))?;
         Ok(super::Mail {
             to: to.into(),
             subject: format!("Verify your {} account", self.title),
@@ -385,9 +386,12 @@ impl Doors {
             }
             "verify" => {
                 let token = s("token").ok_or_else(|| err(400, "token_required"))?;
-                let id = self.auth.consume("verify", token).map_err(fail)?;
-                let id = id.filter(|i| i != DECOY).ok_or_else(|| err(401, "invalid_or_expired_token"))?;
-                self.auth.mark_verified(&id).map_err(fail)?;
+                let spent = self.auth.consume_with("verify", token).map_err(fail)?;
+                let (id, to) = spent.filter(|(i, _)| i != DECOY).ok_or_else(|| err(401, "invalid_or_expired_token"))?;
+                // The account's email changed since it was mailed: that mailbox proves nothing.
+                if !self.auth.mark_verified_at(&id, to.as_deref()).map_err(fail)? {
+                    return Err(err(401, "invalid_or_expired_token"));
+                }
                 Ok((200, json!({ "ok": true })))
             }
             "reset/request" => {
@@ -398,8 +402,9 @@ impl Doors {
                         // An external identity's password is its provider's: treated as a miss.
                         let u = self.auth.user(id).map_err(fail)?.filter(|u| !u.id.starts_with(super::EXTERNAL_PREFIX));
                         let subject = u.as_ref().map_or(DECOY, |u| u.id.as_str());
-                        let token = self.auth.one_shot("reset", subject, super::RESET_MS).map_err(fail)?;
-                        if let Some(to) = u.and_then(|u| u.email) {
+                        let to = u.as_ref().and_then(|u| u.email.clone());
+                        let token = self.auth.one_shot_with("reset", subject, super::RESET_MS, to.as_deref()).map_err(fail)?;
+                        if let Some(to) = to {
                             let text = format!(
                                 "Your password reset token (valid 15 minutes): {token}\n\nPOST {{ token, password }} to /__aio/auth/reset."
                             );
@@ -418,8 +423,8 @@ impl Doors {
                 if pw.chars().count() < 8 {
                     return Err(refused(&Refusal::PasswordTooShort));
                 }
-                let id = self.auth.consume("reset", token).map_err(fail)?;
-                let id = id.filter(|i| i != DECOY).ok_or_else(|| err(401, "invalid_or_expired_token"))?;
+                let spent = self.auth.consume_with("reset", token).map_err(fail)?;
+                let (id, to) = spent.filter(|(i, _)| i != DECOY).ok_or_else(|| err(401, "invalid_or_expired_token"))?;
                 if id.starts_with(super::EXTERNAL_PREFIX) {
                     return Err(err(403, "external_identity"));
                 }
@@ -427,8 +432,8 @@ impl Doors {
                 if !self.auth.set_password(&id, pw).map_err(fail)? {
                     return Err(err(401, "invalid_or_expired_token"));
                 }
-                // The mailbox is proven too.
-                self.auth.mark_verified(&id).map_err(fail)?;
+                // The mailbox it went to is proven too (if it is still the account's).
+                self.auth.mark_verified_at(&id, to.as_deref()).map_err(fail)?;
                 eprintln!("[aio] auth: a password reset completed for {id}");
                 Ok((200, json!({ "ok": true })))
             }

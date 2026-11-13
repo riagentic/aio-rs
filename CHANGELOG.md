@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- A mailed verification or password-reset token verified whatever email
+  the account had when it was spent: after `Auth::set_email`, an old
+  token marked the new, never-mailed address verified. A token proves
+  the address it went to, and only while that is still the account's.
 - Pairing on a dual-stack listener (`[::]`) counted every IPv4 client
   (`::ffff:a.b.c.d`) as one address: 8 wrong PINs from one host locked
   out every IPv4 device, and 2 open exchanges were shared by all of

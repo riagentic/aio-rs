@@ -363,6 +363,38 @@ async fn a_verified_email_comes_by_a_mailed_token_that_works_once() {
     assert_eq!(post(&addr, "verify", None, json!({ "token": token_to(&sent, "dee@example.com") })).await.0, 200);
 }
 
+/// A mailed token proves the mailbox it went to: after the account's email
+/// changes, it verifies nothing (the new address is unverified until its own
+/// mail is answered).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mailed_token_proves_only_the_address_it_went_to() {
+    let (auth, addr, sent) = mailing(Policy { signup: true, ..Default::default() }, false).await;
+    post(&addr, "signup", None, json!({ "id": "cy", "password": PW, "email": "cy@example.com" })).await;
+    until("the mail", || sent.lock().unwrap().len() == 1).await;
+    let token = token_to(&sent, "cy@example.com");
+    auth.set_email("cy", "boss@example.org").unwrap();
+    assert_eq!(post(&addr, "verify", None, json!({ "token": token })).await.0, 401);
+    assert!(!auth.user("cy").unwrap().unwrap().verified, "boss@example.org was never proven");
+    // A reset asked for before the change resets the password, but proves no new address.
+    auth.create("dee", PW, None).unwrap();
+    auth.set_email("dee", "dee@example.com").unwrap();
+    assert_eq!(post(&addr, "reset/request", None, json!({ "id": "dee" })).await.0, 200);
+    until("the reset mail", || sent.lock().unwrap().iter().any(|m| m.to == "dee@example.com")).await;
+    let reset = token_to(&sent, "dee@example.com");
+    auth.set_email("dee", "boss@example.org").unwrap();
+    let new = json!({ "token": reset, "password": "a new long password" });
+    assert_eq!(post(&addr, "reset", None, new).await.0, 200);
+    assert!(!auth.user("dee").unwrap().unwrap().verified, "boss@example.org was never proven");
+    // Unchanged, the token still proves its address.
+    auth.create("eve", PW, None).unwrap();
+    auth.set_email("eve", "eve@example.com").unwrap();
+    let e = login(&addr, "eve").await;
+    assert_eq!(post(&addr, "verify/request", Some(&e), json!({})).await.0, 200);
+    until("eve's mail", || sent.lock().unwrap().iter().any(|m| m.to == "eve@example.com")).await;
+    assert_eq!(post(&addr, "verify", None, json!({ "token": token_to(&sent, "eve@example.com") })).await.0, 200);
+    assert!(auth.user("eve").unwrap().unwrap().verified);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn with_verification_required_no_one_signs_in_before_their_email_is_proven() {
     let policy = Policy { signup: true, require_verified: true, ..Default::default() };

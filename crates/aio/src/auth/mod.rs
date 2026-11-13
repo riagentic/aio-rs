@@ -642,6 +642,17 @@ impl Auth {
         self.update("UPDATE users SET verified = 1 WHERE id = ?2", None, id)
     }
 
+    /// A mailed token proves the mailbox it went to: verified only while
+    /// that is still the account's email (`None`: a token minted before
+    /// tokens named it).
+    #[cfg(feature = "server")]
+    pub(crate) fn mark_verified_at(&self, id: &str, mailed: Option<&str>) -> Result<bool> {
+        match mailed {
+            Some(to) => self.update("UPDATE users SET verified = 1 WHERE id = ?2 AND email IS ?1", Some(to), id),
+            None => self.mark_verified(id),
+        }
+    }
+
     fn update(&self, sql: &str, v: Option<&str>, id: &str) -> Result<bool> {
         let id = normalize(id);
         let c = lock(&self.db);

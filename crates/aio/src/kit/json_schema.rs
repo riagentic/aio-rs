@@ -519,9 +519,11 @@ mod tests {
     /// an empty input, or null, is its value, never `Required`.
     #[test]
     fn a_required_nullable_field_takes_null() {
-        let f = fields(r#"{ "type": "object",
+        let f = fields(
+            r#"{ "type": "object",
           "properties": { "site": { "anyOf": [{ "type": "string", "format": "uri" }, { "type": "null" }] } },
-          "required": ["site"] }"#)
+          "required": ["site"] }"#,
+        )
         .unwrap();
         for empty in [json!(""), json!(null)] {
             assert_eq!(f.parse(&json!({ "site": empty })), Ok(json!({ "site": null })), "{empty}");
