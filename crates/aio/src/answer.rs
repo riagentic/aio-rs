@@ -151,6 +151,8 @@ impl Reply {
 pub(crate) struct Inflight {
     first: Mutex<HashMap<String, Weak<Slot>>>,
     newest: Mutex<HashMap<String, Weak<Slot>>>,
+    /// Synced clients' calls still running, by `op` (and caller).
+    ops: Mutex<HashMap<String, Weak<Slot>>>,
 }
 
 impl Inflight {
@@ -168,6 +170,23 @@ impl Inflight {
         if mode == crate::Mode::First
             && let Some(a) = m.get(&key).and_then(Weak::upgrade).and_then(|s| Reply(s).join())
         {
+            return Some(a);
+        }
+        m.retain(|_, w| w.strong_count() > 0);
+        m.insert(key, Arc::downgrade(&reply.0));
+        None
+    }
+
+    /// A synced client's call `op`, whose end goes to `reply`: when it was
+    /// sent before and still runs (its reply went with a link, the copy sent
+    /// it again), the running one's answer to share; it doesn't run twice.
+    pub(crate) fn resent(&self, op: &str, who: Option<&crate::Caller>, reply: &Reply) -> Option<Answer> {
+        let key = match who {
+            Some(w) => format!("{op}@{:?}/{:?}", w.by, w.role),
+            None => op.into(),
+        };
+        let mut m = self.ops.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(a) = m.get(&key).and_then(Weak::upgrade).and_then(|s| Reply(s).join()) {
             return Some(a);
         }
         m.retain(|_, w| w.strong_count() > 0);

@@ -69,6 +69,16 @@ version may break things.
   (after a sleep or a restart) still fired once. It no longer does.
 - The README and the aio-vs-aio-rs page installed and named 0.4.0;
   `scripts/docs-check` now holds them to the workspace's version.
+- `call_confirmed` whose reply went with a dropped link returned
+  `Ok(null)` when its re-send was answered: the server ran it before and
+  its answer is gone. It now fails with `ran before …` (`ConnectionLost`).
+- A call made just as a copy's link came back could miss both the queue
+  that link took and the link itself: it waited, unsent, for the next
+  reconnect (`Syncing`, `call_confirmed` timing out).
+- A `#[cell(transaction)]` async call re-sent while it awaited (its reply
+  lost with a link) ran a second time, side effects and all, and its
+  caller got the second run's conflict or storage error. The re-send now
+  joins the running call and gets its end.
 
 ## [0.4.2] - 2026-11-11
 

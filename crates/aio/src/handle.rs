@@ -816,6 +816,13 @@ impl<T: Cell> Handle<T> {
             }
             None => (None, None),
         };
+        // Sent again while it still runs (an awaiting transaction's op is
+        // written only at its commit): the same call, joined.
+        if let (Some(op), Some(r)) = (op, &reply)
+            && let Some(running) = self.inner.inflight.resent(op, who, r)
+        {
+            return Ok((Some(Value::Null), running));
+        }
         if let (Some(mode), Some(r)) = (mode, &reply)
             && let Some(shared) = self.inner.inflight.enter(mode, crate::answer::key_of::<T>(method, &args, who), r)
         {

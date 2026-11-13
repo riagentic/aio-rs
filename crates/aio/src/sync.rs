@@ -50,6 +50,10 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Calls waiting for the server, at most; then calls are refused.
 pub const PENDING_MAX: usize = 500;
 
+/// Tests only: run as a copy of cell `id` takes its queue onto a new link.
+#[doc(hidden)]
+pub static LINKING: Mutex<Option<fn(&str)>> = Mutex::new(None);
+
 /// aio-rs's JS client (`crates/aio/client`), served at `/__aio/client.js`.
 const CLIENT_JS: &str = include_str!("../client/index.js");
 
@@ -2512,8 +2516,14 @@ impl<T: Cell> Remote<T> {
     async fn pump(&self, w: Wire, at: u64) {
         let (mut sink, mut stream) = w.split();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-        for p in lock(&self.inner.copy).pending.clone() {
-            _ = tx.send(p.msg());
+        // The queue and the link go live together: a call made meanwhile is
+        // in one or the other, never neither ([`Self::predict`]).
+        {
+            let c = lock(&self.inner.copy);
+            c.pending.iter().for_each(|p| _ = tx.send(p.msg()));
+            let linking = *lock(&LINKING);
+            linking.inspect(|f| f(T::ID));
+            *lock(&self.inner.out) = Some(tx);
         }
         // What this process's bus hears, for the server's (a relayed one is
         // not sent back): heard from before the link is said online, so a
@@ -2524,7 +2534,6 @@ impl<T: Cell> Remote<T> {
                 _ = heard_tx.send(json!({ "t": "heard", "kind": d.kind, "message": d.message, "held": d.held, "severity": d.severity }));
             }
         });
-        *lock(&self.inner.out) = Some(tx);
         self.inner.online.store(true, Ordering::SeqCst);
         self.tell();
         // a link that goes silent (Wi-Fi gone, no close) is dead within
@@ -2696,10 +2705,10 @@ impl<T: Cell> Remote<T> {
                 };
                 let method = lock(&self.inner.copy).pending.iter().find(|p| p.op == op).map(|p| p.method.clone());
                 self.update(|c| c.pending.retain(|p| p.op != op));
-                if let (Err(e), Some(method)) = (&r, method) {
+                if let (Err(e), Some(method)) = (&r, &method) {
                     eprintln!("[aio] sync {}: the server refused {method}: {e}", T::ID);
                     let fs = lock(&self.inner.refusals).clone();
-                    fs.iter().for_each(|f| f(&method, e));
+                    fs.iter().for_each(|f| f(method, e));
                 }
                 if r.is_err() {
                     lock(&self.inner.streams).remove(&op);
@@ -2710,6 +2719,15 @@ impl<T: Cell> Remote<T> {
                     end.send(Err(e.clone()));
                 }
                 if let Some(tx) = lock(&self.inner.waiting).remove(&op) {
+                    // Re-sent, it ran before: applied, but its answer went
+                    // with that link (`ok` is no answer, never `null`).
+                    let r = match r {
+                        Ok(_) if m["again"] == true => Err(Rejected::lost(format!(
+                            "{}: ran before, when this call was first sent; its answer went with that link",
+                            method.as_deref().unwrap_or("call")
+                        ))),
+                        r => r,
+                    };
                     _ = tx.send(r);
                 }
             }
@@ -3086,7 +3104,7 @@ impl<T: Cell> Remote<T> {
         end: Option<crate::Reply>,
         parts: Option<OnPart>,
     ) -> Result<(String, Value)> {
-        let (op, out, p, dropped) = {
+        let (op, out, p, dropped, link) = {
             let mut c = lock(&self.inner.copy);
             let keep = *lock(&self.inner.keep);
             if self.inner.signed_out.load(Ordering::SeqCst) {
@@ -3128,7 +3146,10 @@ impl<T: Cell> Remote<T> {
                 c.base = Some((c.view.clone(), c.confirmed.clone()));
             }
             c.pending.push(p.clone());
-            (p.op.clone(), out, p, dropped)
+            // The link it goes on, taken with the queue: one that goes live
+            // after this took it in its queue ([`Self::pump`]).
+            let link = lock(&self.inner.out).clone();
+            (p.op.clone(), out, p, dropped, link)
         };
         if let Some((gone, waited)) = dropped {
             // aio's drop report: what is known, and only that.
@@ -3158,7 +3179,9 @@ impl<T: Cell> Remote<T> {
             lock(&self.inner.streams).insert(op.clone(), parts);
         }
         self.update(|_| {});
-        self.send(p.msg());
+        if let Some(tx) = link {
+            _ = tx.send(p.msg());
+        }
         Ok((op, out))
     }
 
