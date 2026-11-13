@@ -54,7 +54,8 @@ pub(crate) fn encode(chan: u32, f: &Frame) -> String {
 pub(crate) fn decode(t: &str) -> Option<(u32, Frame<'_>)> {
     let at = t.find(|c: char| !c.is_ascii_digit()).filter(|at| *at > 0)?;
     let chan = t[..at].parse().ok()?;
-    let rest = &t[at + 1..];
+    // A non-ASCII char where the kind should be is none of them (no slice inside it).
+    let rest = t.get(at + 1..)?;
     let unhex = |s: &str| -> Option<Vec<u8>> {
         s.len()
             .is_multiple_of(2)
@@ -529,7 +530,22 @@ mod tests {
 
     #[test]
     fn what_isnt_a_frame_is_none() {
-        for t in ["", ":x", "{\"t\":1}", "1", "1x", "1?0", "1?zz", "1!", "1!code why", "4294967296:x", "-1:x"] {
+        for t in [
+            "",
+            ":x",
+            "{\"t\":1}",
+            "1",
+            "1x",
+            "1?0",
+            "1?zz",
+            "1!",
+            "1!code why",
+            "4294967296:x",
+            "-1:x",
+            "1é",
+            "1€x",
+            "12ü?00",
+        ] {
             assert_eq!(decode(t), None, "{t}");
         }
     }

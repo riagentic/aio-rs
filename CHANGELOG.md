@@ -52,6 +52,11 @@ version may break things.
 
 ### Fixed
 
+- A multiplexed socket's frame with a non-ASCII character after its
+  channel number (`1é`) panicked the server's task for that socket
+  instead of being refused, and the client slots it held were never given
+  back: enough such frames from any admitted client and the server turned
+  everyone away ("too many clients"). It is not a frame.
 - A transaction with `conflict = "warn"` that lengthened a text (256
   bytes or more) committed only its tail: when another call had changed
   that text meanwhile, the result was the other call's text with this
