@@ -180,7 +180,8 @@ fn coerce(c: &Check, v: Value) -> Result<Option<Value>, String> {
         // member it spells, a number or a boolean as well as a string.
         Value::String(s) if c.types.is_empty() && c.one_of.is_some() => {
             let all = c.one_of.as_deref().unwrap_or_default();
-            let spelled = |m: &&Value| m.as_str().map_or_else(|| m.to_string() == s.trim(), |t| t == s);
+            let read = serde_json::from_str::<Value>(s.trim()).ok();
+            let spelled = |m: &&Value| m.as_str().map_or_else(|| read.as_ref() == Some(*m), |t| t == s);
             match all.iter().find(|m| m.is_string() && m.as_str() == Some(&s)).or_else(|| all.iter().find(spelled)) {
                 Some(m) => Some(m.clone()),
                 None if s.trim().is_empty() => None,

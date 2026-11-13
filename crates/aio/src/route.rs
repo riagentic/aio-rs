@@ -127,7 +127,11 @@ fn encode(s: &str, also: &str) -> String {
             }
             None => {
                 let bad = c <= b' ' || c >= 0x7F || b"\"<>`{}".contains(&c) || also.contains(&c);
-                if bad { out.push_str(&format!("%{c:02X}")) } else { out.push(c as char) }
+                if bad {
+                    out.push_str(&format!("%{c:02X}"))
+                } else {
+                    out.push(c as char)
+                }
                 i += 1;
             }
         }
