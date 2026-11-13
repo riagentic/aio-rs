@@ -700,6 +700,8 @@ pub fn workflow(id: &str, bin: &str, channel: &str, aio: Option<(&str, &str)>, (
       - name: Point the app's aio-rs paths at that checkout
         run: |
           find app -name Cargo.toml -not -path '*/target/*' -exec perl -pi -e '{REPOINT}' {{}} +
+          # Out of git's sight: an edited tree builds a -dirty version, never released.
+          git -C app ls-files -z -- '*Cargo.toml' | xargs -0 git -C app update-index --skip-worktree
       - name: Install ax
         working-directory: aio-rs
         run: cargo install --locked --path crates/aio-cli
@@ -1772,6 +1774,52 @@ mod tests {
                 assert_eq!(out.contains(r#"path = "..""#), text.contains(r#"path = "..""#));
             }
         }
+    }
+
+    /// The workflow's repointing step, run on a committed `ax create --aio`
+    /// app: its tree still clean for `ax release` (a dirty one is refused).
+    #[test]
+    fn the_repointed_app_is_still_a_clean_tree() {
+        let has = |c: &str| std::process::Command::new(c).arg("--version").output().is_ok();
+        if !has("perl") || !has("git") || !has("bash") {
+            eprintln!("no perl, git or bash here: skipped");
+            return;
+        }
+        let w = workflow("notes", "notes", "beta", None, (false, false));
+        let step = w.split("aio-rs paths at that checkout\n        run: |\n").nth(1).unwrap();
+        let step = step.split("\n      - name:").next().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("app");
+        let aio = crate::create::Aio::Path("../my aio/crates".into());
+        for (rel, text) in crate::create::files(&crate::create::New { aio, ..crate::create::New::of("notes") }).unwrap()
+        {
+            let f = app.join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, text).unwrap();
+        }
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&app)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "notes"]);
+        let ran = std::process::Command::new("bash")
+            .args(["-c", step])
+            .current_dir(d.path())
+            .env("GITHUB_WORKSPACE", d.path())
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+        assert!(std::fs::read_to_string(app.join("Cargo.toml")).unwrap().contains("/aio-rs/crates/aio\""));
+        let (_, dirty) = crate::manifest::tree(&[app]).unwrap();
+        assert_eq!(dirty, None, "{step}");
     }
 
     #[test]

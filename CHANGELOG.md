@@ -152,6 +152,15 @@ version may break things.
 - Updates: a release staged on the old channel (or a prerelease no longer
   followed) installed at the next start after `set_channel`. A start now
   installs only one of the channel it follows.
+- `ax build` of a macOS target over ssh built it as `M.m.0-nogit.<hash>`
+  (the copy has no `.git`), so `ax release --no-build` found it "not
+  built". The Mac now builds the version resolved here.
+- The release workflow of an `ax create --aio` app repointed its
+  `Cargo.toml`s and then refused to release the `-dirty` build. The edits
+  are now hidden from git (`--skip-worktree`).
+- An `aio.toml` edit under `ax dev` was hot-patched with the old build's
+  features (an added `[updates] url` left the updater off). It now
+  rebuilds, with the features it turns on.
 
 ## [0.4.2] - 2026-11-11
 
