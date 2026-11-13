@@ -201,7 +201,16 @@ mod net {
         let mut tasks = tokio::task::JoinSet::new();
         // Links ended lately: their late frames open nothing (a client
         // numbers its links afresh, but their hellos may come in any order).
-        let (mut ended, mut held) = (std::collections::BTreeSet::<u32>::new(), 1usize);
+        let mut ended = std::collections::BTreeSet::<u32>::new();
+        // The slots its links hold, its own first: given back however it
+        // ends, dropped mid-flight too (its session's end drops it).
+        struct Held(Arc<AtomicUsize>, usize);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.fetch_sub(self.1 - 1, Ordering::SeqCst);
+            }
+        }
+        let mut held = Held(open.clone(), 1);
         fn end(ended: &mut std::collections::BTreeSet<u32>, id: u32) {
             ended.insert(id);
             if ended.len() > ENDED {
@@ -235,9 +244,9 @@ mod net {
                                 // Past its first link, each takes a client's slot.
                                 let full = match tasks.len() {
                                     n if n >= MAX_CHANS => Some(MAX_CHANS),
-                                    n if n < held => None,
+                                    n if n < held.1 => None,
                                     _ if open.fetch_add(1, Ordering::SeqCst) < max => {
-                                        held += 1;
+                                        held.1 += 1;
                                         None
                                     }
                                     _ => {
@@ -283,9 +292,9 @@ mod net {
                     if tasks.is_empty() {
                         quiet = tokio::time::Instant::now();
                     }
-                    while held > tasks.len().max(1) {
+                    while held.1 > tasks.len().max(1) {
                         open.fetch_sub(1, Ordering::SeqCst);
-                        held -= 1;
+                        held.1 -= 1;
                     }
                     let end = match &r {
                         Ok(()) => Frame::Close(1000, ""),
@@ -302,8 +311,28 @@ mod net {
         // Each link sees its end; one that doesn't finish soon is dropped.
         drop(chans);
         _ = tokio::time::timeout(Duration::from_secs(1), async { while tasks.join_next().await.is_some() {} }).await;
-        open.fetch_sub(held - 1, Ordering::SeqCst);
+        drop(held);
         r
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A socket dropped mid-flight (its session ended, `Doors::serve`'s
+        /// select) gives back every slot its links took beyond its own.
+        #[tokio::test]
+        async fn a_dropped_socket_gives_back_its_links_slots() {
+            let sink: Sends = Box::pin(futures_util::sink::drain().sink_map_err(|e| match e {}));
+            let frames = ["1:{}", "2:{}", "3:{}"].map(|t| Ok(AxMsg::Text(t.into())));
+            let takes: Takes = Box::pin(futures_util::stream::iter(frames).chain(futures_util::stream::pending()));
+            let run: Run = Arc::new(|_| Box::pin(std::future::pending()));
+            let open = Arc::new(AtomicUsize::new(1)); // the caller's, for the socket
+            let served = serve((sink, takes), run, open.clone(), 10, 1 << 20);
+            let r = tokio::time::timeout(Duration::from_millis(200), served).await;
+            assert!(r.is_err(), "still serving when dropped");
+            assert_eq!(open.load(Ordering::SeqCst), 1, "only the caller's slot is left (it gives it back)");
+        }
     }
 
     /// A client's socket that carries its links to one server.

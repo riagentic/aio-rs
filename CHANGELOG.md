@@ -52,6 +52,11 @@ version may break things.
 
 ### Fixed
 
+- A multiplexed socket whose session ended (signed out, revoked, a token
+  that no longer resolves) kept the client slots its links beyond the
+  first had taken: each such sign-out of a client with several cells
+  open leaked them, until the server turned everyone away. They are given
+  back however the socket ends.
 - A multiplexed socket's frame with a non-ASCII character after its
   channel number (`1é`) panicked the server's task for that socket
   instead of being refused, and the client slots it held were never given
