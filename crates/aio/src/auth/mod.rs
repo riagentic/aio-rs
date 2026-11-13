@@ -333,9 +333,14 @@ fn hashed(token: &str) -> String {
     hex(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
 }
 
-/// The one key of an id: NFC, trimmed.
+/// The one key of an id: NFC, trimmed. An external account's id is
+/// exact, as its provider's `sub` is (OIDC Core): never rewritten onto
+/// another's.
 pub fn normalize(id: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
+    if id.starts_with(EXTERNAL_PREFIX) {
+        return id.to_string();
+    }
     id.nfc().collect::<String>().trim().to_string()
 }
 

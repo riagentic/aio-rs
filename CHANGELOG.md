@@ -52,6 +52,12 @@ version may break things.
 
 ### Fixed
 
+- An account signed in by OpenID Connect was looked up by its id
+  normalized (NFC, trimmed) but kept exactly: a `sub` spelled differently
+  (a decomposed accent, a trailing space) found another account and was
+  signed in as it, with its role and its email overwritten; a `sub` not
+  in NFC signed in once, then never again ("user exists"). An external
+  id is exact, as a provider's `sub` is.
 - A browser's session cookie never slid with its session: a session used
   past half its life is renewed on the server, but the cookie kept the
   life it was given at sign-in, so the browser dropped it and a user
