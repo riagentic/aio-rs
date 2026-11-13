@@ -274,28 +274,44 @@ fn the_later_made_edit_wins_where_a_method_asks_and_replays_the_same() {
     assert_eq!(*h.state(), *st);
 }
 
-/// A TCP relay the test can cut and pause (paused: new connections are dropped).
+/// A TCP relay the test can cut and pause (paused: new connections are
+/// dropped), and hold (held: what the server sends waits in the relay).
 struct Relay {
     addr: String,
     live: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
     paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    held: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 async fn relay(to: String) -> Relay {
     use std::sync::atomic::Ordering;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    let r = Relay { addr, live: Default::default(), paused: Default::default() };
-    let (live, paused) = (r.live.clone(), r.paused.clone());
+    let r = Relay { addr, live: Default::default(), paused: Default::default(), held: Default::default() };
+    let (live, paused, held) = (r.live.clone(), r.paused.clone(), r.held.clone());
     tokio::spawn(async move {
-        while let Ok((mut a, _)) = l.accept().await {
+        while let Ok((a, _)) = l.accept().await {
             if paused.load(Ordering::SeqCst) {
                 continue; // dropped: the client sees the connection fail
             }
-            let to = to.clone();
+            let (to, held) = (to.clone(), held.clone());
             let t = tokio::spawn(async move {
-                let mut b = tokio::net::TcpStream::connect(to).await.unwrap();
-                _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let b = tokio::net::TcpStream::connect(to).await.unwrap();
+                let ((mut ar, mut aw), (mut br, mut bw)) = (a.into_split(), b.into_split());
+                let up = tokio::io::copy(&mut ar, &mut bw);
+                let down = async {
+                    let mut buf = vec![0; 64 * 1024];
+                    while let Ok(n @ 1..) = br.read(&mut buf).await {
+                        while held.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        if aw.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                };
+                tokio::select! { _ = up => {}, () = down => {} }
             });
             live.lock().unwrap().push(t.abort_handle());
         }
@@ -320,6 +336,127 @@ async fn reconnects_and_sends_what_waited() {
     assert_eq!(h.state().notes[&id], "while offline");
     until("caught up", || *r.state() == *h.state()).await;
     assert_eq!(h.state().notes.len(), 2);
+}
+
+#[cell(shared)]
+pub struct Lane {
+    pub n: u32,
+}
+
+#[methods]
+impl Lane {
+    #[client]
+    pub fn bump(&mut self) {
+        self.n += 1;
+    }
+}
+
+static LANE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LANE_LINKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A new link of a `Lane` copy, once armed, takes its time going live.
+fn lane_linking(cell: &str) {
+    use std::sync::atomic::Ordering;
+    if cell == "lane" && LANE_ARMED.swap(false, Ordering::SeqCst) {
+        LANE_LINKING.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_made_as_the_link_comes_back_is_sent_on_it() {
+    use std::sync::atomic::Ordering;
+    let h = Handle::<Lane>::memory();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(serve(h.clone(), l, "secret".into()));
+    let relay = relay(addr).await;
+    let r = Remote::<Lane>::connect(&relay.addr, "secret", "ana").await.unwrap();
+    *aio::sync::LINKING.lock().unwrap() = Some(lane_linking);
+    LANE_ARMED.store(true, Ordering::SeqCst);
+    relay.live.lock().unwrap().drain(..).for_each(|t| t.abort());
+    // Made as the new link takes the queue: sent on that link, not left
+    // waiting for the next one.
+    until("linking again", || LANE_LINKING.load(Ordering::SeqCst)).await;
+    let r2 = r.clone();
+    let made = std::thread::spawn(move || r2.bump().unwrap());
+    until("sent on the new link", || r.pending() == 0 && h.state().n == 1).await;
+    made.join().unwrap();
+    assert_eq!(r.status().conn, aio::Conn::Online);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_call_whose_answer_went_with_the_link_says_so() {
+    use std::sync::atomic::Ordering;
+    let (h, addr) = server().await;
+    let relay = relay(addr).await;
+    let r = Remote::<Board>::connect(&relay.addr, "secret", "ana").await.unwrap();
+    let refused = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let told = refused.clone();
+    r.on_refused(move |m, e| told.lock().unwrap().push(format!("{m}: {e}")));
+    // The server runs it; its reply is held, then cut with the link.
+    relay.held.store(true, Ordering::SeqCst);
+    let r2 = r.clone();
+    let asked = tokio::task::spawn_blocking(move || r2.call_confirmed("add", serde_json::json!(["x"])));
+    until("run on the server", || h.state().notes.len() == 1).await;
+    relay.live.lock().unwrap().drain(..).for_each(|t| t.abort());
+    relay.held.store(false, Ordering::SeqCst);
+    // Re-sent on the next link: applied once, and its lost answer is said,
+    // never a silent `null` for the id it returned.
+    let got = asked.await.unwrap();
+    assert!(got.as_ref().is_err_and(|e| e.why.contains("ran before")), "{got:?}");
+    until("confirmed", || r.pending() == 0).await;
+    assert_eq!(h.state().notes.len(), 1);
+    assert!(refused.lock().unwrap().is_empty(), "it applied: not a refusal {:?}", refused.lock().unwrap());
+}
+
+/// A transaction that awaits slow I/O (a payment), long enough for a
+/// dropped link to come back and send the call again.
+#[cell(shared, transaction)]
+pub struct Checkout {
+    pub sold: u32,
+}
+
+static CHARGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+async fn charge() -> u32 {
+    CHARGED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    1
+}
+
+#[methods]
+impl Checkout {
+    #[client]
+    pub async fn sell(&mut self) -> Result<u32> {
+        let n: u32 = self.sold;
+        let paid: u32 = charge().await;
+        self.sold = n + paid;
+        Ok(self.sold)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transaction_sent_again_while_it_awaits_runs_once() {
+    use std::sync::atomic::Ordering;
+    let h = Handle::<Checkout>::memory();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(serve(h.clone(), l, "secret".into()));
+    let relay = relay(addr).await;
+    let r = Remote::<Checkout>::connect(&relay.addr, "secret", "ana").await.unwrap();
+    // Its reply is held, then cut with the link while it awaits: the copy
+    // sends it again at once.
+    relay.held.store(true, Ordering::SeqCst);
+    let r2 = r.clone();
+    let asked = tokio::task::spawn_blocking(move || r2.call_confirmed("sell", serde_json::json!([])));
+    until("awaiting on the server", || CHARGED.load(Ordering::SeqCst) == 1).await;
+    relay.live.lock().unwrap().drain(..).for_each(|t| t.abort());
+    relay.held.store(false, Ordering::SeqCst);
+    let got = asked.await.unwrap();
+    assert_eq!(CHARGED.load(Ordering::SeqCst), 1, "its await ran once");
+    assert_eq!(got.unwrap(), serde_json::json!(1));
+    assert_eq!(h.state().sold, 1);
 }
 
 fn mine(b: &Diary, viewer: &Caller) -> Diary {
@@ -2473,6 +2610,57 @@ mod streamed {
         r.relink(aio::sync::Link { addr, token: "revoked".into(), root: None });
         // And so are the refused ones'.
         until("signed out", || r.signed_out() && Arc::strong_count(&held) == 1).await;
+    }
+
+    /// Lets `Slow::slow` go on.
+    static GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    #[cell(shared)]
+    pub struct Slow {
+        pub done: u32,
+    }
+
+    async fn gate() -> u32 {
+        while !GO.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        1
+    }
+
+    #[methods]
+    impl Slow {
+        #[client]
+        pub async fn slow(&mut self) -> Result<u32> {
+            let n: u32 = gate().await;
+            self.done += n;
+            Ok(self.done)
+        }
+    }
+
+    /// Replied to, then its link dropped while it awaits: its end goes with
+    /// that link, and its caller is told so, never left waiting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_async_call_whose_end_went_with_the_link_says_so() {
+        use std::sync::atomic::Ordering;
+        let h = Handle::<Slow>::memory();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(serve(h.clone(), l, "secret".into()));
+        let relay = relay(addr).await;
+        let r = Remote::<Slow>::connect(&relay.addr, "secret", "ann").await.unwrap();
+        let held = Arc::new(());
+        let k = held.clone();
+        let end = r.stream("slow", serde_json::json!([]), move |_: String| _ = &k).unwrap();
+        until("replied", || r.pending() == 0).await;
+        relay.live.lock().unwrap().drain(..).for_each(|t| t.abort());
+        tokio::time::sleep(Duration::from_millis(300)).await; // the link is gone
+        GO.store(true, Ordering::SeqCst);
+        until("done on the server", || h.state().done == 1).await;
+        let got = tokio::time::timeout(Duration::from_secs(5), end).await;
+        let e = got.expect("its caller is told, not left waiting").unwrap_err();
+        assert_eq!(e.code(), Some(aio::Code::ConnectionLost), "{e}");
+        assert!(e.why.contains("went with that link"), "{e}");
+        assert_eq!(Arc::strong_count(&held), 1, "its piece handler is gone");
     }
 }
 

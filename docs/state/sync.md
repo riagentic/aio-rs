@@ -193,9 +193,15 @@ rt.block_on(async {
 - `remote.call_confirmed(method, args)` waits for the server's answer
   (15 s, `aio::sync::CALL_TIMEOUT`, unless `[client] timeouts` says
   otherwise) and returns it as JSON. A link that drops meanwhile doesn't
-  fail it: the call is sent again on reconnect and applies once. With no
-  answer in time it fails with `no answer in …` and stays queued. It
-  blocks its thread: call it from `spawn_blocking` or a plain thread.
+  fail it: the call is sent again on reconnect and applies once (an
+  async method still running joins it: its end is the answer). If it
+  had already run, its answer went with that link: it fails with `ran
+  before …` (`ConnectionLost`), never a made-up `null`; so does an
+  async method's call (`call_confirmed`, `ask`, `stream`) whose reply
+  came but whose end went with the link: `ran; its end went with that
+  link`, as the link drops. With no answer in time it fails with `no
+  answer in …` and stays queued. It blocks its thread: call it from
+  `spawn_blocking` or a plain thread.
 - A `#[client(predict = false)]` method returns nothing, by rule: the
   copy can't know its answer, so it only sends it, and it shows once the
   server ran it (`pending_of(method)` counts it until then).
@@ -205,7 +211,7 @@ rt.block_on(async {
 | `None` | the method's own refusal (`ensure!`, `reject!`) |
 | `Some(Code::AccessDenied)` | not `#[client]`, or its `role` or `allow` rule said no |
 | `Some(Code::ActionRefused)` | no such method |
-| `Some(Code::ConnectionLost)` | the link dropped or never came up: it may have run (server functions) |
+| `Some(Code::ConnectionLost)` | the link dropped or never came up: it may have run (server functions), or ran and its answer went with the link (`ran before …`) |
 
 ## Offline and reconnects
 

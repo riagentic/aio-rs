@@ -9,7 +9,7 @@
 //! follows what it reads and every other prop takes its value once. A
 //! required prop left out is a compile error (`build` needs it).
 use crate::dom::{AttrSlot, AttrValue, IntoAttr, attr, set_attr_now};
-use crate::reactive::{Callback, Memo, Signal, memo_now, reads};
+use crate::reactive::{Callback, Mark, Memo, Signal, fresh, memo_seeded, recorded, replay};
 
 /// A props struct `rsx!` can build: `#[component]` and `#[derive(Props)]` make one.
 pub trait Props: Sized {
@@ -269,8 +269,9 @@ impl<T: 'static> Prop<T> {
     where
         T: PartialEq,
     {
-        let (v, live) = reads(&f);
-        if live { Self::Live(memo_now(f)) } else { Self::Const(v) }
+        // Its first value is the probe's: `f` runs once at mount.
+        let (v, marks) = recorded(&f);
+        if marks.is_empty() { Self::Const(v) } else { Self::Live(memo_seeded(f, v, marks)) }
     }
 
     /// `f` of the value; subscribes.
@@ -350,8 +351,12 @@ pub struct Attribute {
 #[derive(Clone)]
 enum AttrSrc {
     Const(AttrValue<'static>),
-    Live(std::rc::Rc<dyn Fn() -> AttrValue<'static>>),
+    /// `f`, and its probe's value with what it read: the first hole that
+    /// sets it takes that, so `f` runs once at mount.
+    Live(std::rc::Rc<dyn Fn() -> AttrValue<'static>>, Seed),
 }
+
+type Seed = std::rc::Rc<std::cell::Cell<Option<(AttrValue<'static>, Vec<Mark>)>>>;
 
 impl Attribute {
     /// `name` set to `v`.
@@ -361,8 +366,11 @@ impl Attribute {
 
     /// `name` set to `f()`, again whenever what it read changes.
     pub fn derive(name: &'static str, f: Box<dyn Fn() -> AttrValue<'static>>) -> Self {
-        let (v, live) = reads(&f);
-        let value = if live { AttrSrc::Live(f.into()) } else { AttrSrc::Const(v) };
+        let (v, marks) = recorded(&f);
+        let value = match marks.is_empty() {
+            true => AttrSrc::Const(v),
+            false => AttrSrc::Live(f.into(), std::rc::Rc::new(std::cell::Cell::new(Some((v, marks))))),
+        };
         Self { name, value }
     }
 
@@ -376,7 +384,7 @@ impl Attribute {
     pub fn value(&self) -> AttrValue<'static> {
         match &self.value {
             AttrSrc::Const(v) => v.clone(),
-            AttrSrc::Live(f) => crate::untrack(|| f()),
+            AttrSrc::Live(f, _) => crate::untrack(|| f()),
         }
     }
 }
@@ -399,7 +407,19 @@ pub fn spread(id: u32, attrs: Vec<Attribute>) {
     for a in attrs {
         match a.value {
             AttrSrc::Const(v) => set_attr_now(id, a.name, &v),
-            AttrSrc::Live(f) => attr(id, a.name, Box::new(move |s: &mut AttrSlot| s.set(f()))),
+            AttrSrc::Live(f, seed) => attr(
+                id,
+                a.name,
+                Box::new(move |s: &mut AttrSlot| {
+                    s.set(match seed.take() {
+                        Some((v, marks)) if fresh(&marks) => {
+                            replay(&marks);
+                            v
+                        }
+                        _ => f(),
+                    })
+                }),
+            ),
         }
     }
 }

@@ -19,9 +19,29 @@ version may break things.
 - A release is never unsigned: the release workflow stops without the
   `AIO_RELEASE_KEY` secret or a pinned key, and `ax release --aio` refuses
   a key that isn't the pinned one (CONTRIBUTING.md, Signing).
+- An app's update follows a key roster from a release newer than itself
+  only: an old manifest served again (its roster still vouched by a
+  trusted key) brought back a key a later roster had dropped, so a leaked
+  key could sign the next release again.
+- A network call its `#[client]` rule refuses no longer supersedes a
+  running `#[mode(newest)]` call of the same method: before, any caller
+  could abort an admin's call with one refused call (`DispatchAborted`).
+- The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
+  out or a running `#[mode(first)]` call is joined: a caller the state now
+  refuses (an `allow` rule) no longer gets the answer it was let in for.
 
 ### Changed
 
+- **Breaking: `aio::update` fails with `UpdateError`**, not `String`
+  (`#[non_exhaustive]`: `BadSignature`, `UntrustedKey`, `Refused`,
+  `Http { status, .. }`, `NoPatch`, `KeyFormat`, `Io`, …), each one's text
+  as before. `check`, `check_served`, `follow`, `patch_for`, `sign`,
+  `sign_with`, `sign_patches`, `roster`, `keygen`, `public_key`,
+  `ssh_fingerprint`, `allowed_signers`, `git_ref_commit`, `local_data` and
+  `Runtime::{check, apply}` return it. An app's own `Runtime` returns
+  `UpdateError::Other(why)` (an `io::Error` converts with `?`); a caller
+  that wants the old text writes `.map_err(|e| e.to_string())`. A veto
+  (`can_apply`, `veto`) is still the app's own `String`.
 - Every crate declares `rust-version = "1.98"`, the toolchain
   `rust-toolchain.toml` pins (`./ci.sh` keeps them the same).
 - Every `unsafe` block says why it is sound (`// SAFETY:`), and clippy's
@@ -32,8 +52,58 @@ version may break things.
 
 ### Fixed
 
+- A cassette numbered repeated calls (equal arguments) as they finished,
+  but replays them as they start: calls that overlapped got each other's
+  answers on replay. They are numbered as they start.
+- A cassette keyed a call whose arguments hold a hash map in that map's
+  order, which changes with each process: a tape recorded in one run
+  failed in the next ("no recorded call"). A map's entries key in sorted
+  order; a tape recorded before is read the same way.
+- An async method's call replied to, whose end then went with a dropped
+  link, now fails with `ConnectionLost` as the link drops (native and
+  web): before, `ask`/`stream`'s answer never came, `call_confirmed`
+  waited out its ceiling (or forever) saying it stayed queued, and its
+  piece handler was kept.
+- A side channel whose receiver stopped reading (a frozen tab) is let go
+  10 s after its handler returns: before, its writer, socket and up to
+  4 MB of queue were kept forever.
+- A `cron` schedule in local time searched from inside the hour that
+  repeats when clocks go back (an app started, or woken, at 02:10 CET on
+  the night of the change) got the first 02:30, already past: it fired at
+  once, and again on every pass, for up to an hour. That wall time has
+  been: the next run is the next day's.
+- `[history] keep`: after a cell's version upgrade, the boot's fold of
+  history older than `keep` replayed across the upgrade and refused the
+  boot ("event N is from before the upgrade"). It now folds at the
+  upgrade's snapshot.
+- An older build on a newer build's data (aio's downgrade) folded its
+  history into a snapshot of its own version, so the newer build's fields
+  came back as defaults on roll-forward. A fold now leaves a snapshot of
+  another version as it is.
+- A schedule cancelled or moved by an earlier one due in the same batch
+  (after a sleep or a restart) still fired once. It no longer does.
 - The README and the aio-vs-aio-rs page installed and named 0.4.0;
   `scripts/docs-check` now holds them to the workspace's version.
+- `call_confirmed` whose reply went with a dropped link returned
+  `Ok(null)` when its re-send was answered: the server ran it before and
+  its answer is gone. It now fails with `ran before …` (`ConnectionLost`).
+- A call made just as a copy's link came back could miss both the queue
+  that link took and the link itself: it waited, unsent, for the next
+  reconnect (`Syncing`, `call_confirmed` timing out).
+- A `#[cell(transaction)]` async call re-sent while it awaited (its reply
+  lost with a link) ran a second time, side effects and all, and its
+  caller got the second run's conflict or storage error. The re-send now
+  joins the running call and gets its end.
+- air: a `memo` read after a write it follows, in the same handler, batch
+  or effect, gave its old value. A memo waiting to run again is made on
+  read (as AIR's `computed`).
+- air: an effect or hole older than a memo it reads (a `GlobalMemo` made
+  on its first read) ran once with the memo's old value, then again.
+- air: a `Prop` or attribute given an expression that reads state ran it
+  twice at mount. It runs once.
+- air: an error thrown by an `ErrorBoundary`'s own fallback showed a blank
+  boundary (or looped to the 1000-round panic); it goes to the boundary
+  above.
 
 ## [0.4.2] - 2026-11-11
 

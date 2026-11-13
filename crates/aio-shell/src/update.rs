@@ -822,10 +822,14 @@ fn get(
     if let Some(e) = etag {
         req = req.header("if-none-match", e);
     }
-    let res = req.call().map_err(|e| {
-        let kind =
-            if matches!(e, ureq::Error::StatusCode(404)) { io::ErrorKind::NotFound } else { io::ErrorKind::Other };
-        io::Error::new(kind, format!("{url}: {e}"))
+    // Typed (`up::UpdateError`) through to the cell's runtime: a 404 is still
+    // `NotFound` here.
+    let res = req.call().map_err(|e| match e {
+        ureq::Error::StatusCode(status) => {
+            let kind = if status == 404 { io::ErrorKind::NotFound } else { io::ErrorKind::Other };
+            io::Error::new(kind, up::UpdateError::Http { url: url.into(), status })
+        }
+        e => io::Error::other(up::UpdateError::Network { url: url.into(), message: e.to_string() }),
     })?;
     if res.status() == 304 {
         return Ok(None);
@@ -1011,16 +1015,19 @@ fn look(cfg: &aio::config::Config, version: &str, data: &Path, d: &Path) -> io::
     let trusted: Vec<String> = read_json(&keys_file).unwrap_or_else(|| u.keys.clone());
     let expect = up::Expect { id: &cfg.app.id, channel: &ch, os: std::env::consts::OS, arch: std::env::consts::ARCH };
     let (m, next_keys) = up::check_served(&body, &trusted, &expect)
-        .map_err(|e| io::Error::other(format!("release refused: {e} ({url})")))?;
+        .map_err(|e| io::Error::other(up::UpdateError::Refused { url: url.clone(), why: Box::new(e) }))?;
     let r = &m.release;
-    if next_keys != trusted {
-        aio::paths::write_atomic(&keys_file, aio::serde_json::to_string(&next_keys)?.as_bytes(), true)?;
-        eprintln!("[aio] release keys updated by {}'s signed roster", r.version);
-    }
     let pre = up::follows_prereleases(u.prerelease, version, &ch);
     if !up::newer(&r.version, version, pre) {
         let why = up::skipped_prerelease(&r.version, version, pre).unwrap_or_else(|| format!("{version} is current"));
         return Ok((current(why), None));
+    }
+    // Only a newer release's roster is followed: an old manifest served
+    // again (its roster vouched by a key still trusted) would bring back a
+    // key a later roster dropped (a leaked one).
+    if next_keys != trusted {
+        aio::paths::write_atomic(&keys_file, aio::serde_json::to_string(&next_keys)?.as_bytes(), true)?;
+        eprintln!("[aio] release keys updated by {}'s signed roster", r.version);
     }
     if dismissed(d).contains(&r.version) {
         return Ok((current(format!("{} failed here before: not offered", r.version)), None));
@@ -1647,11 +1654,11 @@ struct Shell {
 }
 
 impl up::Runtime for Shell {
-    fn check(&self) -> Result<Found, String> {
-        check(&self.cfg, &self.version, &self.data).map_err(|e| e.to_string())
+    fn check(&self) -> Result<Found, up::UpdateError> {
+        check(&self.cfg, &self.version, &self.data).map_err(up::UpdateError::from)
     }
-    fn apply(&self, version: &str, how: Data, step: &dyn Fn(Step)) -> Result<(), String> {
-        apply_now(&self.cfg, &self.version, &self.data, version, how, step).map_err(|e| e.to_string())
+    fn apply(&self, version: &str, how: Data, step: &dyn Fn(Step)) -> Result<(), up::UpdateError> {
+        apply_now(&self.cfg, &self.version, &self.data, version, how, step).map_err(up::UpdateError::from)
     }
 }
 
@@ -2449,6 +2456,28 @@ mod tests {
         // A release that failed here is never offered again.
         dismiss(&d, "1.1.0").unwrap();
         assert!(said(&look(&cfg, "1.0.0", &data, &d).unwrap().0).contains("failed here before"));
+    }
+
+    /// A roster is followed from a release newer than this one only: an old
+    /// manifest served again (its roster signed, by a key still trusted)
+    /// never brings back a key a later roster dropped.
+    #[test]
+    fn an_old_release_served_again_never_brings_back_a_dropped_key() {
+        let ((a, pa), (b, pb)) = (up::keygen().unwrap(), up::keygen().unwrap());
+        let t = tempfile::tempdir().unwrap();
+        let (data, d) = (t.path().join("data"), t.path().join("install"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
+        // 1.5 rotated A → A+B; 1.6 dropped A (leaked): this install trusts B.
+        let mut m = release(&a, "1.5.0", b"b", up::Contract::default());
+        m.release.roster = Some(up::roster(&[pa.clone(), pb.clone()], &[a.clone(), b.clone()]).unwrap());
+        let m = up::sign(m.release, &a).unwrap();
+        let keys = data.join("update-keys.json");
+        std::fs::write(&keys, aio::serde_json::to_vec(&[&pb]).unwrap()).unwrap();
+        let (found, _) = look(&config(&serve(&m, b"b"), &pa, ""), "1.6.0", &data, &d).unwrap();
+        assert_eq!(found, current("1.6.0 is current".into()));
+        let trusted: Vec<String> = aio::serde_json::from_slice(&std::fs::read(&keys).unwrap()).unwrap();
+        assert_eq!(trusted, [pb], "A stays dropped");
     }
 
     #[test]

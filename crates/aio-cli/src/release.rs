@@ -62,10 +62,10 @@ fn new_key(dir: &Path, id: &str, rotate: bool) -> Result<(PathBuf, Vec<String>),
             return Err(format!("{} exists: keep it (losing it ends updates), or --rotate", key.display()));
         }
         let old = read_key(&key)?;
-        keys.push(up::public_key(&old)?);
+        keys.push(up::public_key(&old).map_err(|e| e.to_string())?);
         write_key(&previous, &old)?;
     }
-    let (pkcs8, public) = up::keygen()?;
+    let (pkcs8, public) = up::keygen().map_err(|e| e.to_string())?;
     write_key(&key, &pkcs8)?;
     keys.push(public);
     Ok((key, keys))
@@ -166,7 +166,7 @@ fn patches(
         _ = std::fs::remove_file(&json);
         return Ok(files);
     }
-    let signed = up::sign_patches(m, list, key)?;
+    let signed = up::sign_patches(m, list, key).map_err(|e| e.to_string())?;
     let text = aio::serde_json::to_string_pretty(&signed).map_err(|e| e.to_string())?;
     aio::paths::write_atomic(&json, format!("{text}\n").as_bytes(), false).map_err(|e| e.to_string())?;
     files.insert(0, json);
@@ -348,14 +348,14 @@ fn lay_out(
         released_at: now(),
         notes: notes.to_string(),
         data,
-        roster: Some(up::roster(&b.cfg.updates.keys, signers)?),
+        roster: Some(up::roster(&b.cfg.updates.keys, signers).map_err(|e| e.to_string())?),
         min_from,
         commit: signed_commit(commit || b.cfg.updates.sign_commit, &b.dist, &b.app.id)?,
     };
     if let Some(w) = unread_before_0_3(&release) {
         eprintln!("{w}");
     }
-    let manifest = up::sign(release, key)?;
+    let manifest = up::sign(release, key).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     std::fs::copy(bundle, out.join(&file)).map_err(|e| format!("{}: {e}", out.join(&file).display()))?;
     let text = aio::serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
@@ -457,7 +457,7 @@ fn signed(unsigned: bool) -> &'static str {
 /// release alone, which no app trusts (a local look at a release).
 fn signing_keys(id: &str, name: &str, u: &aio::config::Updates, ask: &Ask) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
     if ask.unsigned {
-        let (key, _) = up::keygen()?;
+        let (key, _) = up::keygen().map_err(|e| e.to_string())?;
         return Ok((key.clone(), vec![key]));
     }
     // `--key <file>`: that key, its previous one beside it (`<name>.previous.key`).
@@ -468,7 +468,7 @@ fn signing_keys(id: &str, name: &str, u: &aio::config::Updates, ask: &Ask) -> Re
             "{e} (ax keygen {name} makes it, in $XDG_CONFIG_HOME/aio-rt/keys; --key: another file; --unsigned: a local release without)"
         ),
     })?;
-    if !u.keys.contains(&up::public_key(&key)?) {
+    if !u.keys.contains(&up::public_key(&key).map_err(|e| e.to_string())?) {
         return Err("aio.toml's [updates] keys don't include this signing key: the app would refuse the release".into());
     }
     let mut signers = vec![key.clone()];
@@ -522,7 +522,8 @@ fn android_releases(
             size: bytes.len() as u64,
             ..base.clone()
         };
-        let text = aio::serde_json::to_string_pretty(&up::sign(release, key)?).map_err(|e| e.to_string())?;
+        let text = aio::serde_json::to_string_pretty(&up::sign(release, key).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
         let json = out.join(format!("android-{arch}.json"));
         if apk != &out.join(file) {
             match keep {
@@ -618,7 +619,7 @@ pub fn run_android(name: &str, ask: &Ask) -> Result<String, String> {
         released_at: now(),
         notes: ask.notes.to_string(),
         data,
-        roster: Some(up::roster(&u.keys, &signers)?),
+        roster: Some(up::roster(&u.keys, &signers).map_err(|e| e.to_string())?),
         min_from: min_from(ask.min_from, &app.version)?,
         commit: signed_commit(ask.commit || u.sign_commit, &dist, &app.id)?,
     };
@@ -1128,7 +1129,7 @@ fn sign_sums(out: &Path, key: Option<&Path>) -> Result<String, String> {
         return Ok(unsigned(what, &format!("{RELEASE_KEY}, or ax keygen --aio")));
     };
     let key = read_key(key)?;
-    let public = up::public_key(&key)?;
+    let public = up::public_key(&key).map_err(|e| e.to_string())?;
     // The ax that installs the release checks it against the key it pins.
     if let Some(pinned) = crate::upgrade::pinned().filter(|p| *p != public) {
         return Err(format!(
@@ -1136,7 +1137,8 @@ fn sign_sums(out: &Path, key: Option<&Path>) -> Result<String, String> {
         ));
     }
     let sums = std::fs::read(out.join("SHA256SUMS")).map_err(|e| format!("SHA256SUMS: {e}"))?;
-    std::fs::write(&sig, up::sign_with(&key, &sums)? + "\n").map_err(|e| format!("SHA256SUMS.sig: {e}"))?;
+    std::fs::write(&sig, up::sign_with(&key, &sums).map_err(|e| e.to_string())? + "\n")
+        .map_err(|e| format!("SHA256SUMS.sig: {e}"))?;
     Ok(format!("  {what}: signed by {public}"))
 }
 

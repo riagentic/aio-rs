@@ -23,6 +23,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub const MOD: u32 = 1 << 24;
 /// Bytes waiting for the receiver past which a frame isn't queued.
 pub const HIGH_WATER: usize = 4 << 20;
+/// Once its handler is done, how long what is queued has to reach the
+/// receiver: one that stopped reading (a frozen tab) is then let go.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 1 } else { 10 });
 
 /// `body` as frame `seq` (wrapped) of `kind`.
 pub fn encode(kind: u8, seq: u32, body: &[u8]) -> Vec<u8> {
@@ -103,6 +106,8 @@ pub struct Frames {
     tx: tokio::sync::mpsc::UnboundedSender<Message>,
     queued: Arc<AtomicUsize>,
     kill: Arc<(AtomicBool, tokio::sync::Notify)>,
+    /// Told when this is dropped (its handler is done).
+    done: Arc<tokio::sync::Notify>,
     out: Seqs,
     seen: Seqs,
     high_water: usize,
@@ -114,8 +119,20 @@ impl Frames {
         let (tx, queue) = tokio::sync::mpsc::unbounded_channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let kill = Arc::new((AtomicBool::new(false), tokio::sync::Notify::new()));
-        tokio::spawn(write(sink, queue, queued.clone(), kill.clone()));
-        Self { rx, tx, queued, kill, out: Seqs::default(), seen: Seqs::default(), high_water: HIGH_WATER }
+        let done = Arc::new(tokio::sync::Notify::new());
+        let lingered = {
+            let done = done.clone();
+            async move {
+                done.notified().await;
+                tokio::time::sleep(LINGER).await;
+            }
+        };
+        // Its socket and queue go with the writer.
+        let writing = write(sink, queue, queued.clone(), kill.clone());
+        tokio::spawn(async move {
+            tokio::select! { () = writing => {}, () = lingered => {} }
+        });
+        Self { rx, tx, queued, kill, done, out: Seqs::default(), seen: Seqs::default(), high_water: HIGH_WATER }
     }
 
     /// Queue `body` as the next frame of `kind`: `Ok(false)` when it is
@@ -164,6 +181,12 @@ impl Frames {
     fn high_water(mut self, n: usize) -> Self {
         self.high_water = n;
         self
+    }
+}
+
+impl Drop for Frames {
+    fn drop(&mut self) {
+        self.done.notify_one();
     }
 }
 
@@ -272,5 +295,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(closed, Some(1011));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_receiver_that_stopped_reading_is_let_go_once_the_handler_is_done() {
+        use axum::extract::WebSocketUpgrade;
+        let (got, mut frames) = tokio::sync::mpsc::unbounded_channel::<Frames>();
+        let app = axum::Router::new().route(
+            "/s",
+            axum::routing::get(move |ws: WebSocketUpgrade| {
+                let got = got.clone();
+                async move { ws.on_upgrade(move |s| async move { _ = got.send(Frames::new(s)) }) }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        // Connected, and never read: a frozen tab.
+        let (_client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/s")).await.unwrap();
+        let mut f = frames.recv().await.unwrap();
+        let big = vec![0u8; 64 << 10];
+        while f.send(1, &big, true).unwrap() {
+            tokio::task::yield_now().await;
+        }
+        // The handler returns: its writer, socket and queue go, in time.
+        let writer = f.kill.clone();
+        drop(f);
+        let gone = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while Arc::strong_count(&writer) > 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "the writer still waits on a receiver that doesn't read");
     }
 }

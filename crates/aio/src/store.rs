@@ -2298,7 +2298,13 @@ impl<T: Cell> Store<T> {
     /// [`Self::fire_due`], re-arming without a call the schedules `skip` names.
     pub(crate) fn fire_due_but(&mut self, now: i64, skip: impl Fn(&Due) -> bool) -> Result<usize, Error> {
         let due: Vec<Due> = self.schedules()?.into_iter().filter(|d| d.due <= now).collect();
+        let mut fired = 0;
         for d in &due {
+            // An earlier one in this batch may have cancelled or moved it.
+            if !self.armed(d)? {
+                continue;
+            }
+            fired += 1;
             if skip(d) {
                 rearm::<T>(&self.db.conn(), d, now)?;
                 continue;
@@ -2315,7 +2321,16 @@ impl<T: Cell> Store<T> {
                 rearm::<T>(&self.db.conn(), d, now)?;
             }
         }
-        Ok(due.len())
+        Ok(fired)
+    }
+
+    /// Is `d` still set as it was read (same key, same due)?
+    fn armed(&self, d: &Due) -> Result<bool, Error> {
+        Ok(self.db.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM sched WHERE cell = ?1 AND key = ?2 AND due = ?3)",
+            params![T::ID, d.key, d.due],
+            |r| r.get(0),
+        )?)
     }
 
     /// Arm the cell's declared schedules (`Cell::SCHEDULES`) as `@<method>`:
@@ -2619,22 +2634,39 @@ impl<T: Cell> Store<T> {
                 r.get(0)
             })?;
         let Some(cut) = cut else { return Ok(0) };
-        let text = snapshot(&self.state_at(cut as u64)?, true)?;
+        let snap: Option<(i64, u32)> = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT seq, v FROM snap WHERE cell = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT 1",
+                params![T::ID, cut],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        // Another version's events between that snapshot (or the floor) and
+        // the cut: an older build's, left before an upgrade.
+        let from = snap.map_or(self.floor()? as i64, |(s, _)| s);
+        let older: bool = self.db.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2 AND seq <= ?3 AND v != ?4)",
+            params![T::ID, from, cut, T::VERSION],
+            |r| r.get(0),
+        )?;
+        // A snapshot of another version (an upgrade, or a newer build's data
+        // under a rollback) or another version's events: they don't replay
+        // in this build, and a snapshot is never rewritten as this build's
+        // (that would drop the newer build's fields). Fold at the snapshot,
+        // as it is, or not at all.
+        let text = match snap {
+            Some((_, v)) if v != T::VERSION => None,
+            _ if older => None,
+            _ => snapshot(&self.state_at(cut as u64)?, true)?,
+        };
         // What is saved of that state can't bring it back whole: fold at the
         // newest snapshot before it instead, which the events after it follow.
-        let cut = match text {
-            Some(_) => cut,
-            None => {
-                let snap: Option<i64> = self.db.conn().query_row(
-                    "SELECT MAX(seq) FROM snap WHERE cell = ?1 AND seq <= ?2",
-                    params![T::ID, cut],
-                    |r| r.get(0),
-                )?;
-                match snap {
-                    Some(s) if s as u64 > self.floor()? => s,
-                    _ => return Ok(0),
-                }
-            }
+        let cut = match (text.is_some(), snap) {
+            (true, _) => cut,
+            (false, Some((s, _))) if s as u64 > self.floor()? => s,
+            _ => return Ok(0),
         };
         let c = self.db.conn();
         let tx = Atomic::new(&c)?;

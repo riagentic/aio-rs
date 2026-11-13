@@ -21,6 +21,8 @@ mod cell;
 #[cfg(feature = "updates")]
 mod updates;
 pub use cell::{Blocked, Data, Found, Offer, Phase, ProgressOf, Ready, Runtime, Step, Stub, can_apply, install, installed, veto};
+mod error;
+pub use error::UpdateError;
 #[cfg(all(feature = "updates", feature = "server"))]
 pub(crate) use updates::beside;
 #[cfg(feature = "updates")]
@@ -96,51 +98,51 @@ pub fn verify(key: &str, msg: &[u8], sig: &str) -> bool {
 }
 
 /// A new signing key: (its PKCS#8 bytes, to keep secret; its public key).
-pub fn keygen() -> Result<(Vec<u8>, String), String> {
+pub fn keygen() -> Result<(Vec<u8>, String), UpdateError> {
     use base64::Engine;
     let rng = ring::rand::SystemRandom::new();
-    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| "no key generated")?;
-    let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| "bad key")?;
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| UpdateError::Keygen)?;
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| UpdateError::KeyFormat("bad key".into()))?;
     Ok((pkcs8.as_ref().to_vec(), format!("ed25519:{}", b64().encode(pair.public_key().as_ref()))))
 }
 
 /// The public key of a PKCS#8 signing key.
-pub fn public_key(pkcs8: &[u8]) -> Result<String, String> {
+pub fn public_key(pkcs8: &[u8]) -> Result<String, UpdateError> {
     use base64::Engine;
-    let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| "not an Ed25519 PKCS#8 key")?;
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| UpdateError::not_pkcs8())?;
     Ok(format!("ed25519:{}", b64().encode(pair.public_key().as_ref())))
 }
 
 /// `msg` signed with `pkcs8`: the signature, base64.
-pub fn sign_with(pkcs8: &[u8], msg: &[u8]) -> Result<String, String> {
+pub fn sign_with(pkcs8: &[u8], msg: &[u8]) -> Result<String, UpdateError> {
     use base64::Engine;
-    let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| "not an Ed25519 PKCS#8 key")?;
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| UpdateError::not_pkcs8())?;
     Ok(b64().encode(pair.sign(msg).as_ref()))
 }
 
 /// A roster of `keys`, signed by each of `signers` (PKCS#8).
-pub fn roster(keys: &[String], signers: &[Vec<u8>]) -> Result<Roster, String> {
-    let msg = serde_json::to_vec(keys).map_err(|e| e.to_string())?;
+pub fn roster(keys: &[String], signers: &[Vec<u8>]) -> Result<Roster, UpdateError> {
+    let msg = serde_json::to_vec(keys).map_err(UpdateError::Json)?;
     let signatures =
-        signers.iter().map(|s| Ok([public_key(s)?, sign_with(s, &msg)?])).collect::<Result<Vec<_>, String>>()?;
+        signers.iter().map(|s| Ok([public_key(s)?, sign_with(s, &msg)?])).collect::<Result<Vec<_>, UpdateError>>()?;
     Ok(Roster { keys: keys.to_vec(), signatures })
 }
 
 /// `release` signed with `pkcs8`.
-pub fn sign(release: Release, pkcs8: &[u8]) -> Result<Manifest, String> {
+pub fn sign(release: Release, pkcs8: &[u8]) -> Result<Manifest, UpdateError> {
     let signature = sign_with(pkcs8, &signed_bytes(&release))?;
     Ok(Manifest { key: public_key(pkcs8)?, signature, release })
 }
 
 /// The keys trusted after a roster: its keys, if a key in `trusted` signed it.
-pub fn follow(trusted: &[String], roster: &Roster) -> Result<Vec<String>, String> {
-    let msg = serde_json::to_vec(&roster.keys).map_err(|e| e.to_string())?;
+pub fn follow(trusted: &[String], roster: &Roster) -> Result<Vec<String>, UpdateError> {
+    let msg = serde_json::to_vec(&roster.keys).map_err(UpdateError::Json)?;
     let vouched = roster.signatures.iter().any(|[k, s]| trusted.contains(k) && verify(k, &msg, s));
     if !vouched {
-        return Err("its key roster is not signed by a trusted key".into());
+        return Err(UpdateError::UntrustedRoster);
     }
     if roster.keys.is_empty() {
-        return Err("its key roster is empty".into());
+        return Err(UpdateError::EmptyRoster);
     }
     Ok(roster.keys.clone())
 }
@@ -156,7 +158,7 @@ pub struct Expect<'a> {
 
 /// Check a manifest against the trusted keys: the release, and the keys to
 /// trust from now on (the roster's, if it carries one).
-pub fn check(m: &Manifest, trusted: &[String], expect: &Expect) -> Result<Vec<String>, String> {
+pub fn check(m: &Manifest, trusted: &[String], expect: &Expect) -> Result<Vec<String>, UpdateError> {
     verified(&m.release, (&m.key, &m.signature), &signed_bytes(&m.release), trusted, expect)
 }
 
@@ -165,7 +167,11 @@ pub fn check(m: &Manifest, trusted: &[String], expect: &Expect) -> Result<Vec<St
 /// a field this build doesn't know (a newer `ax release`'s) is signed too,
 /// so it is read past, never trusted unsigned. The manifest, and the keys
 /// to trust from now on.
-pub fn check_served(bytes: &[u8], trusted: &[String], expect: &Expect) -> Result<(Manifest, Vec<String>), String> {
+pub fn check_served(
+    bytes: &[u8],
+    trusted: &[String],
+    expect: &Expect,
+) -> Result<(Manifest, Vec<String>), UpdateError> {
     #[derive(Deserialize)]
     struct Served<'a> {
         #[serde(borrow)]
@@ -173,12 +179,12 @@ pub fn check_served(bytes: &[u8], trusted: &[String], expect: &Expect) -> Result
         key: String,
         signature: String,
     }
-    let s: Served = serde_json::from_slice(bytes).map_err(|e| format!("not a manifest: {e}"))?;
+    let s: Served = serde_json::from_slice(bytes).map_err(|e| UpdateError::malformed("manifest", e))?;
     // The signed bytes first: nothing of the release is read unverified.
     if !verify(&s.key, &compact(s.release.get()), &s.signature) {
-        return Err("its signature is wrong".into());
+        return Err(UpdateError::BadSignature);
     }
-    let release: Release = serde_json::from_str(s.release.get()).map_err(|e| format!("not a release: {e}"))?;
+    let release: Release = serde_json::from_str(s.release.get()).map_err(|e| UpdateError::malformed("release", e))?;
     let next = verified(&release, (&s.key, &s.signature), &compact(s.release.get()), trusted, expect)?;
     Ok((Manifest { release, key: s.key, signature: s.signature }, next))
 }
@@ -207,9 +213,9 @@ fn verified(
     signed: &[u8],
     trusted: &[String],
     expect: &Expect,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, UpdateError> {
     if r.format != FORMAT {
-        return Err(format!("manifest format {} (this build reads {FORMAT})", r.format));
+        return Err(UpdateError::Format(r.format));
     }
     for (what, got, want) in [
         ("app", &r.id, expect.id),
@@ -218,24 +224,24 @@ fn verified(
         ("arch", &r.arch, expect.arch),
     ] {
         if got != want {
-            return Err(format!("it is for {what} {got}, not {want}"));
+            return Err(UpdateError::NotForThisApp { what, got: got.clone(), want: want.into() });
         }
     }
     if !safe_name(&r.version) || !safe_name(&r.file) {
-        return Err("its version or file name is not a plain name".into());
+        return Err(UpdateError::NotPlainName("version or file name"));
     }
     if let Some(min) = r.min_from.as_deref().filter(|m| parse_version(m).is_none()) {
-        return Err(format!("its minFrom {min:?} is not a version"));
+        return Err(UpdateError::MinFrom(min.into()));
     }
     let next = match &r.roster {
         Some(roster) => follow(trusted, roster)?,
         None => trusted.to_vec(),
     };
     if !next.iter().any(|k| k == key) {
-        return Err("it is signed by a key this app doesn't trust".into());
+        return Err(UpdateError::UntrustedKey);
     }
     if !verify(key, signed, signature) {
-        return Err("its signature is wrong".into());
+        return Err(UpdateError::BadSignature);
     }
     Ok(next)
 }
@@ -271,31 +277,33 @@ pub struct Patches {
 }
 
 /// `patches` to `m`'s release, signed with `pkcs8` (the key that signed `m`).
-pub fn sign_patches(m: &Manifest, patches: Vec<Patch>, pkcs8: &[u8]) -> Result<Patches, String> {
+pub fn sign_patches(m: &Manifest, patches: Vec<Patch>, pkcs8: &[u8]) -> Result<Patches, UpdateError> {
     let r = &m.release;
     let list = PatchList { id: r.id.clone(), version: r.version.clone(), sha256: r.sha256.clone(), patches };
-    let signature = sign_with(pkcs8, &serde_json::to_vec(&list).map_err(|e| e.to_string())?)?;
+    let signature = sign_with(pkcs8, &serde_json::to_vec(&list).map_err(UpdateError::Json)?)?;
     Ok(Patches { list, key: public_key(pkcs8)?, signature })
 }
 
 /// The patch to `m` (checked already) from `installed`: signed by `m`'s key
 /// for `m`'s very release, and at most half its size (more is not worth it).
-pub fn patch_for<'a>(p: &'a Patches, m: &Manifest, installed: &str) -> Result<&'a Patch, String> {
+pub fn patch_for<'a>(p: &'a Patches, m: &Manifest, installed: &str) -> Result<&'a Patch, UpdateError> {
     let (r, l) = (&m.release, &p.list);
     if p.key != m.key || !verify(&p.key, &serde_json::to_vec(l).unwrap_or_default(), &p.signature) {
-        return Err("its patch list is not signed by the release's key".into());
+        return Err(UpdateError::UnsignedPatches);
     }
     if (&l.id, &l.version, &l.sha256) != (&r.id, &r.version, &r.sha256) {
-        return Err("its patch list is for another release".into());
+        return Err(UpdateError::PatchesForAnotherRelease);
     }
-    let patch = l.patches.iter().find(|x| x.from == installed).ok_or_else(|| {
-        format!("none of its {} patches starts from {installed}, the version installed here", l.patches.len())
-    })?;
+    let patch = l
+        .patches
+        .iter()
+        .find(|x| x.from == installed)
+        .ok_or_else(|| UpdateError::NoPatch { from: installed.into(), patches: l.patches.len() })?;
     if !safe_name(&patch.file) {
-        return Err("its patch's file name is not a plain name".into());
+        return Err(UpdateError::NotPlainName("patch's file name"));
     }
     if patch.size.saturating_mul(2) > r.size {
-        return Err(format!("its patch is {} bytes, over half of the whole release ({})", patch.size, r.size));
+        return Err(UpdateError::PatchTooBig { size: patch.size, release: r.size });
     }
     Ok(patch)
 }
@@ -384,33 +392,35 @@ pub use aio_config::update::{channel_refused, git_remote, github_repo, ssh_key};
 /// exactly the branch, else the tag (the commit an annotated tag points at),
 /// else a full ref name (`HEAD`), the order `git clone --branch` takes them.
 /// A ref that only ends with `name` (`feature/main`) is never it.
-pub fn git_ref_commit(ls_remote: &str, name: &str) -> Result<String, String> {
+pub fn git_ref_commit(ls_remote: &str, name: &str) -> Result<String, UpdateError> {
     let lines: Vec<(&str, &str)> = ls_remote.lines().filter_map(|l| l.split_once(char::is_whitespace)).collect();
     let find = |r: &str| lines.iter().find(|(_, n)| n.trim() == r).map(|(sha, _)| *sha);
     let full = [format!("refs/heads/{name}"), format!("refs/tags/{name}"), name.to_string()];
     let sha = full.iter().find_map(|r| find(&format!("{r}^{{}}")).or_else(|| find(r))).ok_or_else(|| {
         let seen: Vec<&str> = lines.iter().map(|(_, n)| n.trim()).collect();
-        format!("no branch or tag named exactly {name:?} (the remote has {})", seen.join(", "))
+        UpdateError::NoRef { name: name.into(), remote_has: seen.join(", ") }
     })?;
     match sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         true => Ok(sha.to_ascii_lowercase()),
-        false => Err(format!("{name}: {sha:?} is not a commit id")),
+        false => Err(UpdateError::NotACommit { name: name.into(), sha: sha.into() }),
     }
 }
 
 /// `key`'s OpenSSH fingerprint (`SHA256:<base64>`), as git names a signer.
-pub fn ssh_fingerprint(key: &str) -> Result<String, String> {
+pub fn ssh_fingerprint(key: &str) -> Result<String, UpdateError> {
     use base64::Engine;
-    let ssh = ssh_key(key)?;
-    let blob = b64().decode(&ssh["ssh-ed25519 ".len()..]).map_err(|_| "bad base64")?;
+    let ssh = ssh_key(key).map_err(UpdateError::KeyFormat)?;
+    let blob = b64().decode(&ssh["ssh-ed25519 ".len()..]).map_err(|_| UpdateError::KeyFormat("bad base64".into()))?;
     let digest = ring::digest::digest(&ring::digest::SHA256, &blob);
     Ok(format!("SHA256:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)))
 }
 
 /// `keys` as git's SSH allowed-signers file: the only keys whose signed
 /// commits and tags a git source builds.
-pub fn allowed_signers(keys: &[String]) -> Result<String, String> {
-    keys.iter().map(|k| Ok(format!("aio-release namespaces=\"git\" {}\n", ssh_key(k)?))).collect()
+pub fn allowed_signers(keys: &[String]) -> Result<String, UpdateError> {
+    keys.iter()
+        .map(|k| Ok(format!("aio-release namespaces=\"git\" {}\n", ssh_key(k).map_err(UpdateError::KeyFormat)?)))
+        .collect()
 }
 
 /// The channel `ax release --channel` built this binary for, if any.
@@ -439,21 +449,21 @@ pub fn release_dir(url: &str, channel: &str) -> String {
 
 /// The data on this machine: the store's layout and each cell's newest
 /// data version (`None`: no store yet).
-pub fn local_data(store: &Path) -> Result<Option<Contract>, String> {
+pub fn local_data(store: &Path) -> Result<Option<Contract>, UpdateError> {
     if !store.exists() {
         return Ok(None);
     }
     let db = rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| e.to_string())?;
-    let schema = crate::store::schema(&db).map_err(|e| e.to_string())? as u32;
+        .map_err(UpdateError::store)?;
+    let schema = crate::store::schema(&db).map_err(UpdateError::store)? as u32;
     let mut q = db
         .prepare("SELECT cell, MAX(v) FROM (SELECT cell, v FROM snap UNION ALL SELECT cell, v FROM log) GROUP BY cell")
-        .map_err(|e| e.to_string())?;
+        .map_err(UpdateError::store)?;
     let cells = q
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))
-        .map_err(|e| e.to_string())?
+        .map_err(UpdateError::store)?
         .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
+        .map_err(UpdateError::store)?;
     Ok(Some(Contract { schema, cells }))
 }
 
@@ -547,24 +557,24 @@ mod tests {
             sha256: "cd".repeat(32),
         };
         let p = sign_patches(&m, vec![patch("1.0.0", 4), patch("0.9.0", 5)], &k).unwrap();
-        assert_eq!(patch_for(&p, &m, "1.0.0"), Ok(&patch("1.0.0", 4)));
-        assert!(patch_for(&p, &m, "1.0.1").unwrap_err().contains("none of its 2 patches starts from 1.0.1"));
+        assert_eq!(patch_for(&p, &m, "1.0.0").unwrap(), &patch("1.0.0", 4));
+        assert!(patch_for(&p, &m, "1.0.1").unwrap_err().to_string().contains("none of its 2 patches starts from 1.0.1"));
         // Over half the release is not worth it.
         let big = sign_patches(&m, vec![patch("1.0.0", 6)], &k).unwrap();
-        assert!(patch_for(&big, &m, "1.0.0").unwrap_err().contains("over half"));
+        assert!(patch_for(&big, &m, "1.0.0").unwrap_err().to_string().contains("over half"));
         // Another key, an edited list, or the list of another build of the release: not used.
         let foreign = sign_patches(&m, vec![patch("1.0.0", 4)], &other).unwrap();
-        assert!(patch_for(&foreign, &m, "1.0.0").unwrap_err().contains("not signed"));
+        assert!(patch_for(&foreign, &m, "1.0.0").unwrap_err().to_string().contains("not signed"));
         let mut edited = p.clone();
         edited.list.patches[0].sha256 = "ef".repeat(32);
-        assert!(patch_for(&edited, &m, "1.0.0").unwrap_err().contains("not signed"));
+        assert!(patch_for(&edited, &m, "1.0.0").unwrap_err().to_string().contains("not signed"));
         let rebuilt = sign(Release { sha256: "00".repeat(32), ..release("1.1.0") }, &k).unwrap();
-        assert!(patch_for(&p, &rebuilt, "1.0.0").unwrap_err().contains("another release"));
+        assert!(patch_for(&p, &rebuilt, "1.0.0").unwrap_err().to_string().contains("another release"));
         // A file name is a name, never a path.
         let mut bad = patch("1.0.0", 4);
         bad.file = "../x.patch".into();
         let bad = sign_patches(&m, vec![bad], &k).unwrap();
-        assert!(patch_for(&bad, &m, "1.0.0").unwrap_err().contains("plain name"));
+        assert!(patch_for(&bad, &m, "1.0.0").unwrap_err().to_string().contains("plain name"));
     }
 
     #[test]
@@ -572,10 +582,10 @@ mod tests {
         let (k, public) = keygen().unwrap();
         let (other, _) = keygen().unwrap();
         let m = sign(release("1.1.0"), &k).unwrap();
-        assert_eq!(check(&m, std::slice::from_ref(&public), &EXPECT), Ok(vec![public.clone()]));
+        assert_eq!(check(&m, std::slice::from_ref(&public), &EXPECT).unwrap(), vec![public.clone()]);
         // No trust on first use: a key the app wasn't built with fails.
         let foreign = sign(release("1.1.0"), &other).unwrap();
-        assert!(check(&foreign, std::slice::from_ref(&public), &EXPECT).unwrap_err().contains("doesn't trust"));
+        assert!(check(&foreign, std::slice::from_ref(&public), &EXPECT).unwrap_err().to_string().contains("doesn't trust"));
         // Any field changed after signing breaks it.
         for change in [
             |r: &mut Release| r.sha256 = "cd".repeat(32),
@@ -586,13 +596,13 @@ mod tests {
         ] {
             let mut t = m.clone();
             change(&mut t.release);
-            assert_eq!(check(&t, std::slice::from_ref(&public), &EXPECT), Err("its signature is wrong".into()));
+            assert!(matches!(check(&t, std::slice::from_ref(&public), &EXPECT), Err(UpdateError::BadSignature)));
         }
         // Another app's, channel's or machine's release is refused.
         let mut wrong = release("1.1.0");
         wrong.arch = "aarch64".into();
         let w = sign(wrong, &k).unwrap();
-        assert!(check(&w, std::slice::from_ref(&public), &EXPECT).unwrap_err().contains("arch"));
+        assert!(check(&w, std::slice::from_ref(&public), &EXPECT).unwrap_err().to_string().contains("arch"));
         // A file name is never a path.
         let mut sneaky = release("1.1.0");
         sneaky.file = "../../.bashrc".into();
@@ -612,9 +622,9 @@ mod tests {
         // Release N+1, signed by the new key, retires the old one.
         let mut n1 = release("1.2.0");
         n1.roster = Some(roster(std::slice::from_ref(&new_pub), std::slice::from_ref(&new)).unwrap());
-        assert_eq!(check(&sign(n1.clone(), &new).unwrap(), &trusted, &EXPECT), Ok(vec![new_pub.clone()]));
+        assert_eq!(check(&sign(n1.clone(), &new).unwrap(), &trusted, &EXPECT).unwrap(), vec![new_pub.clone()]);
         // An app that only trusts the old key can't be talked into the new one.
-        assert!(check(&sign(n1, &new).unwrap(), &built_in, &EXPECT).unwrap_err().contains("roster"));
+        assert!(check(&sign(n1, &new).unwrap(), &built_in, &EXPECT).unwrap_err().to_string().contains("roster"));
         // A roster signed by an untrusted key is refused.
         let (evil, evil_pub) = keygen().unwrap();
         let mut e = release("1.3.0");
@@ -674,10 +684,10 @@ mod tests {
         assert_eq!(git_ref_commit(&tag, "v1").unwrap(), c);
         assert_eq!(git_ref_commit(&format!("{a}\trefs/tags/v2\n"), "v2").unwrap(), a, "a light tag");
         assert_eq!(git_ref_commit(&format!("{c}\tHEAD\n"), "HEAD").unwrap(), c);
-        let e = git_ref_commit(&format!("{a}\trefs/heads/feature/main\n"), "main").unwrap_err();
+        let e = git_ref_commit(&format!("{a}\trefs/heads/feature/main\n"), "main").unwrap_err().to_string();
         assert!(e.contains("exactly \"main\"") && e.contains("refs/heads/feature/main"), "{e}");
         assert!(git_ref_commit("", "main").is_err());
-        assert!(git_ref_commit("xyz\trefs/heads/main\n", "main").unwrap_err().contains("not a commit"));
+        assert!(git_ref_commit("xyz\trefs/heads/main\n", "main").unwrap_err().to_string().contains("not a commit"));
     }
 
     #[test]
@@ -704,9 +714,12 @@ mod tests {
         // Stripping minFrom off a signed release breaks its signature.
         let mut stripped = m.clone();
         stripped.release.min_from = None;
-        assert_eq!(check(&stripped, std::slice::from_ref(&public), &EXPECT), Err("its signature is wrong".into()));
+        assert_eq!(check(&stripped, std::slice::from_ref(&public), &EXPECT).unwrap_err().to_string(), "its signature is wrong");
         let bad = sign(Release { min_from: Some("soon".into()), ..release("2.0.0") }, &k).unwrap();
-        assert_eq!(check(&bad, std::slice::from_ref(&public), &EXPECT), Err("its minFrom \"soon\" is not a version".into()));
+        assert_eq!(
+            check(&bad, std::slice::from_ref(&public), &EXPECT).unwrap_err().to_string(),
+            "its minFrom \"soon\" is not a version"
+        );
         assert_eq!(
             below_min_from(&r, "1.1.9").as_deref(),
             Some("2.0.0 installs only over 1.2.0 or newer, and this is 1.1.9: install 1.2.0 first, then update again")
@@ -787,13 +800,13 @@ mod tests {
         let mut forged: serde_json::Value = serde_json::from_str(&served).unwrap();
         forged["release"]["mirror"] = "https://evil.example".into();
         let forged = serde_json::to_vec(&forged).unwrap();
-        assert_eq!(check_served(&forged, trusted, &EXPECT).unwrap_err(), "its signature is wrong");
+        assert_eq!(check_served(&forged, trusted, &EXPECT).unwrap_err().to_string(), "its signature is wrong");
         // A typed check of what it read can't vouch for the dropped field: refused too.
-        assert_eq!(check(&m, trusted, &EXPECT).unwrap_err(), "its signature is wrong");
+        assert_eq!(check(&m, trusted, &EXPECT).unwrap_err().to_string(), "its signature is wrong");
         // Verified before it is read: a release that isn't one, unsigned, is a wrong signature.
         let mut odd: serde_json::Value = serde_json::from_str(&served).unwrap();
         odd["release"]["size"] = "big".into();
-        assert_eq!(check_served(&serde_json::to_vec(&odd).unwrap(), trusted, &EXPECT).unwrap_err(), "its signature is wrong");
+        assert_eq!(check_served(&serde_json::to_vec(&odd).unwrap(), trusted, &EXPECT).unwrap_err().to_string(), "its signature is wrong");
         // Whitespace inside a string is the release's own.
         assert_eq!(compact("{ \"a\" : \"x y\\\" z\" ,\n \"b\": [1, 2] }"), b"{\"a\":\"x y\\\" z\",\"b\":[1,2]}");
     }
@@ -818,7 +831,7 @@ mod tests {
     fn local_data_is_read_without_touching_the_store() {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("state.db");
-        assert_eq!(local_data(&f), Ok(None));
+        assert_eq!(local_data(&f).unwrap(), None);
         let db = rusqlite::Connection::open(&f).unwrap();
         db.execute_batch(
             "CREATE TABLE snap (cell TEXT, seq INTEGER, v INTEGER, state TEXT);

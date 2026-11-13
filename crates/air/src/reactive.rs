@@ -82,6 +82,8 @@ struct Node {
     root: u32,
     /// An effect its own writes don't run again ([`effect_quiet`]).
     quiet: bool,
+    /// A memo queued to run again: a read makes it now ([`pull`]).
+    dirty: bool,
     /// A signal's writes so far: a [`TrackedMemo`](crate::TrackedMemo) entry is fresh while they stay.
     writes: u32,
 }
@@ -366,6 +368,13 @@ fn notify(s: Key, checked: bool) {
             subs.into_iter().filter(|(e, r)| rt.node(*e).is_some_and(|n| n.runs == *r)).collect();
         let deaf = |e: Key| rt.running == Some(e) && rt.node(e).is_some_and(|n| n.quiet);
         let woken: Vec<Key> = live.iter().map(|(e, _)| *e).filter(|e| !deaf(*e)).collect();
+        for e in &woken {
+            if let Some(n) = rt.node_mut(*e)
+                && n.kind == Kind::Memo
+            {
+                n.dirty = true;
+            }
+        }
         rt.queue.extend(woken);
         if let Some(n) = rt.node_mut(s) {
             // Re-subscribed by the re-run; keep them so a write in a batch
@@ -445,6 +454,10 @@ fn run_queue() {
             );
         }
         for e in q {
+            // A memo a read made already ([`pull`]) has nothing left to do.
+            if RT.with_borrow(|rt| rt.node(e).is_some_and(|n| n.kind == Kind::Memo && !n.dirty)) {
+                continue;
+            }
             run_effect(e);
         }
     }
@@ -455,6 +468,7 @@ fn run_effect(e: Key) {
     let body = rt(|rt| {
         let n = rt.node_mut(e)?;
         n.runs += 1;
+        n.dirty = false;
         n.deps.clear();
         n.run.clone()
     });
@@ -1314,6 +1328,8 @@ pub fn signal<T: 'static>(init: impl FnOnce() -> T) -> Signal<T> {
 /// changes; its readers are told only when the value differs.
 pub struct Memo<T> {
     out: Signal<T>,
+    /// The computation (dead once it ran and read nothing).
+    node: Key,
 }
 
 impl<T> Clone for Memo<T> {
@@ -1330,13 +1346,22 @@ impl<T> PartialEq for Memo<T> {
 }
 
 impl<T: 'static> Memo<T> {
+    /// Its value, made again first if a write it read waits in the queue
+    /// (in a batch, a handler, a flush), as AIR's `computed` makes a dirty
+    /// value on read (`signal.ts:859`). Pulled one level: a memo of a memo
+    /// that waits is made again when that one runs.
+    fn pulled(&self) -> Signal<T> {
+        pull(self.node);
+        self.out
+    }
+
     /// The value, cloned; subscribes.
     #[track_caller]
     pub fn get(&self) -> T
     where
         T: Clone,
     {
-        self.out.get()
+        self.pulled().get()
     }
 
     #[track_caller]
@@ -1344,27 +1369,27 @@ impl<T: 'static> Memo<T> {
     where
         T: Clone,
     {
-        self.out.get_untracked()
+        self.pulled().get_untracked()
     }
 
     #[track_caller]
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        self.out.with(f)
+        self.pulled().with(f)
     }
 
     #[track_caller]
     pub fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        self.out.with_untracked(f)
+        self.pulled().with_untracked(f)
     }
 
     #[track_caller]
     pub fn read(&self) -> ReadGuard<T> {
-        self.out.read()
+        self.pulled().read()
     }
 
     #[track_caller]
     pub fn read_untracked(&self) -> ReadGuard<T> {
-        self.out.read_untracked()
+        self.pulled().read_untracked()
     }
 
     pub fn alive(&self) -> bool {
@@ -1374,28 +1399,47 @@ impl<T: 'static> Memo<T> {
 
 impl<T: std::fmt::Display + 'static> std::fmt::Display for Memo<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.out.fmt(f)
+        self.pulled().fmt(f)
     }
 }
 
 impl<T: std::fmt::Debug + 'static> std::fmt::Debug for Memo<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.out.fmt(f)
+        self.pulled().fmt(f)
+    }
+}
+
+/// Memo `e`'s run now if it is queued ([`Node::dirty`]); the queue then skips it.
+fn pull(e: Key) {
+    if RT.with_borrow(|rt| rt.node(e).is_some_and(|n| n.dirty)) {
+        run_effect(e);
     }
 }
 
 /// A memo made now, under the current owner (not a hook).
 pub(crate) fn memo_now<T: PartialEq + 'static>(f: impl FnMut() -> T + 'static) -> Memo<T> {
-    memo_dyn(Box::new(f))
+    memo_dyn(Box::new(f), None)
+}
+
+/// [`memo_now`] whose first value is `v`, which `f` made just now reading
+/// `marks` ([`recorded`]): `f` doesn't run again for it (a prop's probe).
+pub(crate) fn memo_seeded<T: PartialEq + 'static>(f: Box<dyn FnMut() -> T>, v: T, marks: Vec<Mark>) -> Memo<T> {
+    memo_dyn(f, Some((v, marks)))
 }
 
 /// [`memo_now`]'s work once per value type, not per closure.
-fn memo_dyn<T: PartialEq + 'static>(mut f: Box<dyn FnMut() -> T>) -> Memo<T> {
+fn memo_dyn<T: PartialEq + 'static>(mut f: Box<dyn FnMut() -> T>, mut seed: Option<(T, Vec<Mark>)>) -> Memo<T> {
     let out: Rc<Cell<Option<Signal<T>>>> = Rc::default();
     let owner = current_owner();
     let o = out.clone();
-    effect_of(Kind::Memo, move || {
-        let v = f();
+    let node = effect_of(Kind::Memo, move || {
+        let v = match seed.take() {
+            Some((v, marks)) if fresh(&marks) => {
+                replay(&marks);
+                v
+            }
+            _ => f(),
+        };
         match o.get() {
             Some(s) => s.set_quiet(v),
             // Made by the memo's owner, not this effect: a re-run keeps it.
@@ -1405,7 +1449,7 @@ fn memo_dyn<T: PartialEq + 'static>(mut f: Box<dyn FnMut() -> T>) -> Memo<T> {
             })),
         }
     });
-    Memo { out: out.get().expect("air: a memo ran") }
+    Memo { out: out.get().expect("air: a memo ran"), node }
 }
 
 /// `f`'s value, made again when what it read changes (a hook).
@@ -1415,7 +1459,7 @@ pub fn memo<T: PartialEq + 'static>(f: impl FnMut() -> T + 'static) -> Memo<T> {
 }
 
 fn memo_hook<T: PartialEq + 'static>(f: Box<dyn FnMut() -> T>) -> Memo<T> {
-    hook("memo", || memo_dyn(f))
+    hook("memo", || memo_dyn(f, None))
 }
 
 // ---------------------------------------------------------------- effects
@@ -1896,6 +1940,28 @@ mod tests {
         assert_eq!(runs.get(), 1, "still odd");
         s.set(4);
         assert_eq!(runs.get(), 2);
+        o.dispose();
+        assert_eq!(live(), Live::default());
+    }
+
+    #[test]
+    fn a_memo_read_after_a_write_in_the_same_batch_is_fresh_and_made_once() {
+        let runs = Rc::new(Cell::new(0));
+        let ((n, d), o) = scope(|| {
+            let n = Signal::new(0);
+            let r = runs.clone();
+            let d = memo_now(move || {
+                r.set(r.get() + 1);
+                n.get() * 2
+            });
+            (n, d)
+        });
+        batch(|| {
+            n.set(1);
+            assert_eq!(d.get_untracked(), 2, "read in the batch that wrote what it reads");
+            assert_eq!(d.with(|v| *v), 2);
+        });
+        assert_eq!((d.get_untracked(), runs.get()), (2, 2), "made again once, not again at the flush");
         o.dispose();
         assert_eq!(live(), Live::default());
     }

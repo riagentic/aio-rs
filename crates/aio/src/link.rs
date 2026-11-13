@@ -1250,7 +1250,7 @@ pub(crate) async fn session<T: Cell>(
                                         _ = tx.send(end);
                                     });
                                 }
-                                Ok(v.unwrap_or(Value::Null))
+                                Ok(v)
                             }
                             Err(e) => Err(e),
                         };
@@ -1264,10 +1264,14 @@ pub(crate) async fn session<T: Cell>(
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
-                        let mut reply = match r {
-                            Ok(v) => json!({ "t": "reply", "op": msg["op"], "ok": v }),
+                        let mut reply = match &r {
+                            Ok(v) => json!({ "t": "reply", "op": msg["op"], "ok": v.as_ref().unwrap_or(&Value::Null) }),
                             Err(e) => json!({ "t": "reply", "op": msg["op"], "err": e.why, "code": e.code }),
                         };
+                        if !is_async && matches!(r, Ok(None)) {
+                            // Re-sent: it ran before, its answer went with that link.
+                            reply["again"] = true.into();
+                        }
                         if is_async && reply.get("ok").is_some() {
                             // Its answer is the `end` that follows.
                             reply["async"] = true.into();

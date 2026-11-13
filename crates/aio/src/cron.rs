@@ -136,18 +136,27 @@ impl Cron {
     /// The next run after `after` (ms since the epoch), in `tz`'s wall time.
     pub fn next_in<Z: TimeZone>(&self, tz: &Z, after: i64) -> Option<i64> {
         let from = tz.timestamp_millis_opt(after).single()?.naive_local();
-        self.next_with(from, |n| tz.from_local_datetime(&n).map(|t| t.timestamp_millis()))
+        self.next_with(from, after, |n| tz.from_local_datetime(&n).map(|t| t.timestamp_millis()))
     }
 
-    /// The next run after wall time `from`; `resolve` turns a wall time into
-    /// its instants (none: skipped; two: it happens twice).
-    fn next_with(&self, mut from: NaiveDateTime, resolve: impl Fn(NaiveDateTime) -> LocalResult<i64>) -> Option<i64> {
+    /// The next run after instant `after`, whose wall time is `from`;
+    /// `resolve` turns a wall time into its instants (none: skipped; two: it
+    /// happens twice).
+    fn next_with(
+        &self,
+        mut from: NaiveDateTime,
+        after: i64,
+        resolve: impl Fn(NaiveDateTime) -> LocalResult<i64>,
+    ) -> Option<i64> {
         loop {
             let n = self.next_naive(from)?;
             match resolve(n) {
                 LocalResult::Single(t) => return Some(t),
-                // Happens twice (clocks went back): the first one.
-                LocalResult::Ambiguous(first, _) => return Some(first),
+                // Happens twice (clocks went back): the first one. Searched
+                // from inside the repeated hour, the first one is past: that
+                // wall time has been, and it runs once, so on to the next.
+                LocalResult::Ambiguous(first, _) if first > after => return Some(first),
+                LocalResult::Ambiguous(..) => from = n,
                 // Skipped (clocks went forward): the first minute that exists.
                 LocalResult::None => {
                     let mut m = n;
@@ -245,15 +254,22 @@ mod tests {
     fn dst_skips_run_after_the_gap_and_repeats_run_once() {
         let c = Cron::parse("30 2 * * *").unwrap();
         // Spring forward: 02:30 doesn't exist on Mar 29: it runs at 03:00 CEST.
-        let t = c.next_with(wall("2026-03-29 01:00"), prague).unwrap();
+        let t = c.next_with(wall("2026-03-29 01:00"), ms("2026-03-29T00:00:00Z"), prague).unwrap();
         assert_eq!(at(t), "2026-03-29 01:00 Sun", "03:00 CEST is 01:00 UTC");
         // Fall back: 02:30 happens twice on Oct 25; it runs the first time…
-        let t = c.next_with(wall("2026-10-25 01:00"), prague).unwrap();
+        let t = c.next_with(wall("2026-10-25 01:00"), ms("2026-10-24T23:00:00Z"), prague).unwrap();
         assert_eq!(at(t), "2026-10-25 00:30 Sun", "02:30 CEST");
         // …and the run after it (searched from that run's wall time, as the
         // scheduler does) is the next day, not 02:30 CET an hour later.
         let from =
             Utc.timestamp_millis_opt(t).unwrap().with_timezone(&FixedOffset::east_opt(7200).unwrap()).naive_local();
-        assert_eq!(at(c.next_with(from, prague).unwrap()), "2026-10-26 01:30 Mon");
+        assert_eq!(at(c.next_with(from, t, prague).unwrap()), "2026-10-26 01:30 Mon");
+        // Searched from inside the repeated hour (02:10 CET, a start or a wake
+        // then): 02:30 CEST is past, and 02:30 CET is the same wall time again:
+        // the next day, never a time in the past (fired at once, over and over).
+        let after = ms("2026-10-25T01:10:00Z");
+        let next = c.next_with(wall("2026-10-25 02:10"), after, prague).unwrap();
+        assert!(next > after, "{}", at(next));
+        assert_eq!(at(next), "2026-10-26 01:30 Mon");
     }
 }

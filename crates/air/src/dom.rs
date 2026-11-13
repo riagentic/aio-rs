@@ -1269,17 +1269,32 @@ pub struct ErrorBoundaryProps {
 pub fn ErrorBoundary(p: ErrorBoundaryProps) -> View {
     let error = Signal::new(None::<String>);
     let owner = current_owner().expect("air: a boundary is made in a view");
-    provide_on(owner, Catch(Rc::new(move |e| error.set_quiet(Some(e)))));
+    // What its own fallback throws goes to the boundary above, not to this
+    // one: it would replace the fallback that threw (or loop).
+    let (outer, failed) = (try_context::<Catch>(), Rc::new(Cell::new(false)));
+    let f = failed.clone();
+    provide_on(
+        owner,
+        Catch(Rc::new(move |e| match (f.get(), &outer) {
+            (true, Some(c)) => (c.0)(e),
+            (true, None) => panic!("air: a view failed outside any app root: {e}"),
+            (false, _) => error.set_quiet(Some(e)),
+        })),
+    );
     provide_on(owner, Retry(error));
     let ErrorBoundaryProps { fallback, children } = p;
     Ok(Tree::new(move || {
         let (range, at) = slot();
-        let children = children.clone();
+        let (children, failed) = (children.clone(), failed.clone());
         child(
             at,
-            Box::new(move || match error.get() {
-                None => children.clone().into_child(),
-                Some(e) => untrack(|| fallback.call(e)).into_child(),
+            Box::new(move || {
+                let e = error.get();
+                failed.set(e.is_some());
+                match e {
+                    None => children.clone().into_child(),
+                    Some(e) => untrack(|| fallback.call(e)).into_child(),
+                }
             }),
         );
         range

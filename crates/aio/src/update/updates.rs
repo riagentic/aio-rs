@@ -12,12 +12,14 @@ fn runtime() -> std::result::Result<Arc<dyn Runtime>, String> {
 
 const NOT_CONFIGURED: &str = "updates are not configured for this app: set [updates] url and keys in aio.toml";
 
-/// Run a blocking runtime call off the cell.
+/// Run a blocking runtime call off the cell: its error, as the cell keeps it
+/// (its words).
 async fn blocking<R: Send + 'static>(
-    f: impl FnOnce(Arc<dyn Runtime>) -> std::result::Result<R, String> + Send + 'static,
+    f: impl FnOnce(Arc<dyn Runtime>) -> std::result::Result<R, UpdateError> + Send + 'static,
 ) -> std::result::Result<R, String> {
     let rt = runtime()?;
-    tokio::task::spawn_blocking(move || f(rt)).await.map_err(|e| format!("the update runtime failed: {e}"))?
+    let r = tokio::task::spawn_blocking(move || f(rt)).await.map_err(|e| format!("the update runtime failed: {e}"))?;
+    r.map_err(|e| e.to_string())
 }
 
 /// The app's updates. Only `dismissed` is saved: the rest is learned again
@@ -352,12 +354,12 @@ mod tests {
     }
 
     impl Runtime for Stub {
-        fn check(&self) -> std::result::Result<Found, String> {
+        fn check(&self) -> std::result::Result<Found, UpdateError> {
             *self.checks.lock().unwrap() += 1;
             std::thread::sleep(self.slow);
             Ok(self.found.lock().unwrap().clone())
         }
-        fn apply(&self, version: &str, data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), String> {
+        fn apply(&self, version: &str, data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), UpdateError> {
             self.applies.lock().unwrap().push((version.into(), data));
             std::thread::sleep(self.slow);
             for p in [30, 70, 100] {
@@ -365,7 +367,7 @@ mod tests {
             }
             step(Step::Runtime(40));
             step(Step::Installing);
-            self.fail.clone().map_or(Ok(()), Err)
+            self.fail.clone().map_or(Ok(()), |e| Err(UpdateError::Other(e)))
         }
     }
 
