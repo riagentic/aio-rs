@@ -277,8 +277,13 @@ impl Child {
         let _held = tokio::task::spawn_blocking(move || _ = ended.recv());
         let s = self.child.wait().await?;
         self.stdin = None;
-        for r in self.readers.iter_mut().filter_map(Option::take) {
-            _ = r.await;
+        // Each reader is let go only once read to the end: a wait cut short
+        // (a timeout's) leaves it for the next one (`kill`'s).
+        for slot in &mut self.readers {
+            if let Some(r) = slot.as_mut() {
+                _ = r.await;
+            }
+            *slot = None;
         }
         self.status = Some(s);
         Ok(s)
@@ -565,6 +570,16 @@ mod tests {
         let pid = c.id();
         drop(c);
         assert!(!lock().iter().any(|g| g.pid == pid));
+    }
+
+    /// Cut short while its output is still being read (the program exited,
+    /// a child of its own holds its stdout): what it wrote is kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timeout_while_its_output_is_read_keeps_what_it_wrote() {
+        let script = "exec 2>&-; printf partial; sleep 30 &";
+        let out = Command::new("sh").args(["-c", script]).run(Some(Duration::from_millis(300))).await.unwrap();
+        assert_eq!(out.stdout, "partial");
     }
 
     #[cfg(unix)]

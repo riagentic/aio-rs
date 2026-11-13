@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- `Command::run` with a timeout dropped what the program wrote when the
+  clock ran out while its output was still being read (the program had
+  exited; a child of its own still held its stdout): `stdout` came back
+  empty. What it wrote is kept, as the docs say.
 - `[server] local_peers = false` was ignored by an app whose store is in
   memory (`[data] persist = false`, `--no-persist`): a release build
   opened its local door all the same, and this user's other processes
