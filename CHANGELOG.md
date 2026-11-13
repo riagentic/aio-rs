@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- `[server] local_peers = false` was ignored by an app whose store is in
+  memory (`[data] persist = false`, `--no-persist`): a release build
+  opened its local door all the same, and this user's other processes
+  could reach it. It opens none, as with a store on disk.
 - A multiplexed socket whose session ended (signed out, revoked, a token
   that no longer resolves) kept the client slots its links beyond the
   first had taken: each such sign-out of a client with several cells

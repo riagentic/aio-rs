@@ -301,15 +301,20 @@ fn an_app_whose_cell_lives_here_opens_its_door() {
 fn a_release_app_with_local_peers_off_opens_no_door() {
     let d = tempfile::tempdir().unwrap();
     let id = format!("door-off-{}", std::process::id());
-    let cfg = aio::config::Config::parse(&format!("[app]\nid = \"{id}\"\n[server]\nlocal_peers = false")).unwrap();
-    let dirs = aio::paths::AppDirs::at(d.path(), &id).unwrap();
-    let s = aio::Source::<Board>::for_app(&cfg, &dirs).unwrap();
-    s.call("add", serde_json::json!(["standalone"])).unwrap();
-    let addr = aio::sync::door(&id, &dirs.data, "board").unwrap();
-    let link = Link { addr, token: String::new(), root: None };
-    let opened = aio::rt().block_on(Live::connect(&link, "board", "ops")).is_ok();
-    assert_eq!(opened, aio::door::OPERATOR, "a release build: no door to knock on");
-    _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &dirs.data).unwrap());
+    // Kept on disk, or in memory (`[data] persist = false`, `--no-persist`).
+    for (n, data) in ["", "\n[data]\npersist = false"].into_iter().enumerate() {
+        let id = format!("{id}-{n}");
+        let cfg =
+            aio::config::Config::parse(&format!("[app]\nid = \"{id}\"{data}\n[server]\nlocal_peers = false")).unwrap();
+        let dirs = aio::paths::AppDirs::at(d.path(), &id).unwrap();
+        let s = aio::Source::<Board>::for_app(&cfg, &dirs).unwrap();
+        s.call("add", serde_json::json!(["standalone"])).unwrap();
+        let addr = aio::sync::door(&id, &dirs.data, "board").unwrap();
+        let link = Link { addr, token: String::new(), root: None };
+        let opened = aio::rt().block_on(Live::connect(&link, "board", "ops")).is_ok();
+        assert_eq!(opened, aio::door::OPERATOR, "a release build: no door to knock on ({data:?})");
+        _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &dirs.data).unwrap());
+    }
 }
 
 #[test]
