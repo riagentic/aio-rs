@@ -271,8 +271,10 @@ pub fn start(logs: &Path) -> io::Result<()> {
         libc::close(fds[1]);
         File::from_raw_fd(term)
     };
+    // SAFETY: fds[0] is the pipe's read end, just made and owned by nothing else.
     let pipe = unsafe { File::from_raw_fd(fds[0]) };
     // A second copy of the terminal, to give fd 2 back at `finish`.
+    // SAFETY: dup(2) of an fd `term` holds open; the copy's ownership is `back`'s (closed at `finish`).
     let back = unsafe { libc::dup(term.as_raw_fd()) };
     let paint = colour_for(&term);
     let copier =
@@ -676,6 +678,8 @@ pub fn start(logs: &Path) -> io::Result<()> {
         }
         term
     };
+    // SAFETY: CreatePipe succeeded: both handles are open and owned by nothing
+    // else (`w` is now also the std error handle, given back before it is dropped).
     let (pipe, w) = unsafe { (File::from_raw_handle(r), OwnedHandle::from_raw_handle(w)) };
     // A GUI app has no terminal: then the log alone.
     let has_term = !term.is_null() && term != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;

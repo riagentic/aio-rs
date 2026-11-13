@@ -108,6 +108,8 @@ struct Prepared {
 
 // SAFETY: `ptrs` point into `argv`, owned alongside and never changed.
 unsafe impl Sync for Prepared {}
+// SAFETY: as above: the pointers move with the strings they point into
+// (a CString's buffer is on the heap: moving the Vec doesn't move it).
 unsafe impl Send for Prepared {}
 
 static ON_EXIT: std::sync::OnceLock<Prepared> = std::sync::OnceLock::new();

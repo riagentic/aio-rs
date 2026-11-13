@@ -1128,9 +1128,16 @@ fn sign_sums(out: &Path, key: Option<&Path>) -> Result<String, String> {
         return Ok(unsigned(what, &format!("{RELEASE_KEY}, or ax keygen --aio")));
     };
     let key = read_key(key)?;
+    let public = up::public_key(&key)?;
+    // The ax that installs the release checks it against the key it pins.
+    if let Some(pinned) = crate::upgrade::pinned().filter(|p| *p != public) {
+        return Err(format!(
+            "{RELEASE_KEY} is {public}, but crates/aio-cli/release.pub pins {pinned}: ax upgrade would refuse this release"
+        ));
+    }
     let sums = std::fs::read(out.join("SHA256SUMS")).map_err(|e| format!("SHA256SUMS: {e}"))?;
     std::fs::write(&sig, up::sign_with(&key, &sums)? + "\n").map_err(|e| format!("SHA256SUMS.sig: {e}"))?;
-    Ok(format!("  {what}: signed by {}", up::public_key(&key)?))
+    Ok(format!("  {what}: signed by {public}"))
 }
 
 /// aio-rs's archives of `version` named in `names` that this run did not

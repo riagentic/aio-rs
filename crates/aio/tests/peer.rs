@@ -89,6 +89,7 @@ async fn until(what: &str, f: impl Fn() -> bool) {
 #[tokio::test(flavor = "multi_thread")]
 async fn peers() {
     let sockets = tempfile::tempdir().unwrap();
+    // SAFETY: the binary's one test, before it starts anything that reads the environment.
     unsafe { std::env::set_var("XDG_RUNTIME_DIR", sockets.path()) };
     a_peer_calls_by_name_what_a_client_may_and_nothing_more().await;
     a_peer_cell_is_typed_and_its_server_functions_stream().await;

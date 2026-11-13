@@ -164,7 +164,9 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
         return quote!(::core::compile_error!("air: #[component] goes on a fn")).into();
     };
     let Some(TokenTree::Ident(name)) = toks.get(fn_at + 1).cloned() else {
-        return quote!(::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`")).into();
+        let span = toks.get(fn_at + 1).unwrap_or(&toks[fn_at]).span();
+        return quote_spanned!(span=> ::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`");)
+            .into();
     };
     // `<R: Clone + 'static>`: the props are generic as the fn is.
     let (generics, mut at) = (generic_params(&toks, fn_at + 2), fn_at + 2);
@@ -173,7 +175,11 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
     }
     let args = match toks.get(at) {
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => g.stream(),
-        _ => return quote!(::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`")).into(),
+        other => {
+            let span = other.map_or(name.span(), |t| t.span());
+            return quote_spanned!(span=> ::core::compile_error!("air: #[component] goes on a `fn Name(props…) -> View`");)
+                .into();
+        }
     };
     let (gp, gn) = match &generics {
         Some((params, _)) => split_generics(params),
@@ -218,7 +224,11 @@ pub fn props(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         Some((Some(TokenTree::Ident(n)), Some(TokenTree::Group(g)))) if g.delimiter() == Delimiter::Brace => {
             (n.clone(), g.stream())
         }
-        _ => return quote!(::core::compile_error!("air: #[derive(Props)] goes on a struct with named fields (no generics)");).into(),
+        _ => {
+            let span = at.and_then(|a| toks.get(a + 1).or(toks.get(a))).map_or(Span::call_site(), |t| t.span());
+            return quote_spanned!(span=> ::core::compile_error!("air: #[derive(Props)] goes on a struct with named fields (no generics)");)
+                .into();
+        }
     };
     let vis = toks[..at.unwrap_or(0)].iter().find(|t| is_ident(t, "pub")).map(|_| quote!(pub));
     let fields: Vec<Field> =

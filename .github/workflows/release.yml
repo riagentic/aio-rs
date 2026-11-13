@@ -49,7 +49,7 @@ jobs:
           path: dist/aio-rs-*-${{ matrix.triple }}.tar.gz
           if-no-files-found: error
   # Linux, last: builds Linux and Windows, pins every archive (the Macs' too)
-  # in the installers, writes SHA256SUMS and signs it when the key is set.
+  # in the installers, writes SHA256SUMS and signs it (never unsigned).
   assemble:
     needs: macos
     runs-on: ubuntu-24.04
@@ -63,18 +63,25 @@ jobs:
           pattern: ax-*
           path: dist
           merge-multiple: true
-      - name: the update key (only when the secret is set)
+      # Never an unsigned release: ax upgrade checks SHA256SUMS.sig against
+      # the key ax pins (crates/aio-cli/release.pub; release.rs refuses a
+      # key that isn't the one pinned).
+      - name: the update key
         env:
           KEY: ${{ secrets.AIO_RELEASE_KEY }}
         run: |
-          if [ -n "$KEY" ]; then
-            umask 077
-            printf '%s\n' "$KEY" > "$RUNNER_TEMP/aio.release.key"
-            echo "AIO_RELEASE_KEY=$RUNNER_TEMP/aio.release.key" >> "$GITHUB_ENV"
+          if [ -z "$KEY" ]; then
+            echo "::error::the AIO_RELEASE_KEY secret is not set: a release is always signed (CONTRIBUTING.md, Releasing)"; exit 1
           fi
+          if ! grep -q '^ed25519:' crates/aio-cli/release.pub; then
+            echo "::error::crates/aio-cli/release.pub pins no key: ax upgrade could not check this release"; exit 1
+          fi
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/aio.release.key"
+          echo "AIO_RELEASE_KEY=$RUNNER_TEMP/aio.release.key" >> "$GITHUB_ENV"
       - run: cargo run --locked -p aio-rs-cli -- release --aio --windows --dir dist
       - run: rm -f "$RUNNER_TEMP/aio.release.key"
-      - run: cd dist && sha256sum -c SHA256SUMS
+      - run: cd dist && sha256sum -c SHA256SUMS && test -s SHA256SUMS.sig
       - name: every OS is pinned
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do

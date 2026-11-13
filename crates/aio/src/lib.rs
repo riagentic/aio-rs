@@ -777,6 +777,50 @@ pub struct Declared {
 }
 
 /// What `#[methods]` generates: calls by name, for the log and replay.
+///
+/// `call` and `read` are aio::Door's, never a method's name:
+///
+/// ```compile_fail
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     pub fn call(&mut self) { self.n += 1 }
+/// }
+/// ```
+/// ```
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     pub fn bump(&mut self) { self.n += 1 }
+/// }
+/// ```
+///
+/// and `#[derived(reads = […])]` lists the state's fields by name:
+///
+/// ```compile_fail
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     #[derived(reads = ["n"])]
+///     pub fn double(&self) -> i64 { self.n * 2 }
+/// }
+/// ```
+/// ```
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     #[derived(reads = [n])]
+///     pub fn double(&self) -> i64 { self.n * 2 }
+/// }
+/// ```
 pub trait Cell: CellData {
     const METHODS: &'static [&'static str];
     /// Each method as its Rust signature (`add(text: String) -> Uuid`), in

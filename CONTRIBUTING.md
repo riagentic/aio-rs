@@ -140,8 +140,9 @@ Set the version (below), then, on the commit to release:
    (`.github/workflows/release.yml`) builds `ax` on macOS (arm64 and
    x86_64, each on its own runner), then on Linux the Linux and Windows
    archives, pins every archive in `install.sh` / `install.ps1`, writes
-   `SHA256SUMS` (signed when the repository secret `AIO_RELEASE_KEY`
-   holds the update key file), installs it on each OS and makes a
+   `SHA256SUMS` and signs it with the repository secret `AIO_RELEASE_KEY`
+   (the update key file; without it, or with no key pinned in
+   `crates/aio-cli/release.pub`, the release stops), installs it on each OS and makes a
    **draft** release with every file. A tag that isn't the version
    fails it.
 4. **Check and publish**: download the draft's files,
@@ -173,6 +174,20 @@ can't be used (a missing file, a password not set) stops the release.
 | Windows Authenticode | `AIO_WINDOWS_CERT` (a `.pfx`), `AIO_WINDOWS_CERT_PASSWORD`; `AIO_WINDOWS_TIMESTAMP_URL` (optional, default DigiCert's RFC 3161 server) | `osslsigncode`, in the Linux run | `ax.exe`, before it is zipped |
 | macOS codesign + notarize | `AIO_MACOS_SIGN_IDENTITY` (`Developer ID Application: …`, in the login keychain); `AIO_MACOS_NOTARY_PROFILE` (a profile saved by `xcrun notarytool store-credentials`) | `codesign` (hardened runtime, timestamp), `notarytool submit --wait`, in the Mac run | `ax`, before it is packed; without the profile it is signed, not notarized, and says so |
 | aio-rs's update key | `AIO_RELEASE_KEY` (a key file), else `aio.release.key` in the keys dir (`ax keygen --aio` makes it) | ax, in the Linux run | `SHA256SUMS`, as `SHA256SUMS.sig` (Ed25519, base64) |
+
+aio-rs's update key is the one signature a release can't go without:
+`ax upgrade` checks `SHA256SUMS.sig` against the public key ax pins in
+`crates/aio-cli/release.pub` before it runs the install script, and
+refuses a release with no signature or another key's. Set it up once:
+
+1. `ax keygen --aio`: the key in the keys dir, its public key printed.
+2. Put the public key (`ed25519:<base64>`, one line) in
+   `crates/aio-cli/release.pub` and commit it.
+3. `gh secret set AIO_RELEASE_KEY < ~/.config/aio-rt/keys/aio.release.key`.
+
+`ax release --aio` refuses a key that isn't the one pinned. Rotating the
+key: a new `release.pub` in one release signed by the old key, so every
+ax can reach it; the next release is signed by the new one.
 
 The keys dir is `$XDG_CONFIG_HOME/aio-rt/keys` (else `~/.config/aio-rt/keys`).
 Never commit a key; back each up: a lost update key ends the updates it

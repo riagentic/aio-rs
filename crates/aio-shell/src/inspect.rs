@@ -185,6 +185,7 @@ fn patch_base() -> Option<u64> {
         // SAFETY: a query of this process's own address space into a local.
         let mut m: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+        // SAFETY: as above, into `m`, of `size` bytes.
         if unsafe { VirtualQuery(at as *const _, &mut m, size) } == 0 {
             return None;
         }

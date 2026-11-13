@@ -1002,11 +1002,13 @@ mod cursor {
         static OLD: [OnceLock<libc::sigaction>; 2] = [OnceLock::new(), OnceLock::new()];
         extern "C" fn show() {
             // write(2) only: what a signal handler may call.
+            // SAFETY: write(2) is async-signal-safe; SHOW is a static, valid for its length.
             unsafe { libc::write(1, SHOW.as_ptr().cast(), SHOW.len()) };
         }
         extern "C" fn on_signal(sig: libc::c_int, info: *mut libc::siginfo_t, cx: *mut libc::c_void) {
             show();
             let Some(old) = OLD[usize::from(sig == libc::SIGTERM)].get() else { return };
+            // SAFETY: in a signal handler: only async-signal-safe calls (signal, raise) or the handler that was installed before ours, called as its flags say it takes its arguments (SA_SIGINFO: three, else one), with the arguments the kernel gave us.
             unsafe {
                 match old.sa_sigaction {
                     libc::SIG_DFL => {
@@ -1022,6 +1024,7 @@ mod cursor {
                 }
             }
         }
+        // SAFETY: process-wide setup, once (Once in the caller): `show` is an extern "C" fn taking nothing, as atexit wants; the sigaction structs are zeroed C structs (all-zero is valid) filled before use.
         unsafe {
             libc::atexit(show);
             for (i, sig) in [libc::SIGINT, libc::SIGTERM].into_iter().enumerate() {
@@ -1053,6 +1056,8 @@ mod cursor {
         unsafe extern "C" {
             fn atexit(f: extern "C" fn()) -> i32;
         }
+        // SAFETY: process-wide setup, once (`hide`'s Once): `show` is an extern
+        // "C" fn taking nothing, as atexit wants; the console handler is a plain fn.
         unsafe {
             atexit(show);
             SetConsoleCtrlHandler(Some(on_ctrl), 1);
@@ -1183,6 +1188,7 @@ mod tests {
         let Ok(how) = std::env::var("AIO_TEST_CURSOR") else { return };
         cursor::hide();
         if how == "int" {
+            // SAFETY: raise(3) on this process, in a child test process made for it.
             unsafe { libc::raise(libc::SIGINT) };
         }
         std::process::exit(3);

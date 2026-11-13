@@ -2,10 +2,10 @@
 name = "aio-rs"
 description = "aio-rs core: cells, the event log, replay and time travel"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -286,3 +286,6 @@ required-features = ["kit"]
 [[test]]
 name = "compat_peer"
 required-features = ["net", "compat"]
+
+[lints]
+workspace = true

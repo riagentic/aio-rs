@@ -498,9 +498,9 @@ fn local_file_urls_are_escaped() {
 #[test]
 fn app_dirs_are_private_and_ids_are_checked() {
     let d = tempfile::tempdir().unwrap();
-    // SAFETY: this test binary's only env change; no other test reads AIORT_DATA.
     // The caller's sandbox comes back after: never the real data dir.
     let caller = std::env::var_os("AIORT_DATA");
+    // SAFETY: this test binary's only env change; no other test reads AIORT_DATA.
     unsafe { std::env::set_var("AIORT_DATA", d.path()) };
     let dirs = aio::paths::app("todo").unwrap();
     assert_eq!(dirs.data, d.path().join("data"));
@@ -521,8 +521,11 @@ fn app_dirs_are_private_and_ids_are_checked() {
     for bad in ["", "../x", ".hidden", "a/b"] {
         assert!(aio::paths::app(bad).is_err(), "{bad}");
     }
+    // SAFETY: as at the start: the one test here that touches AIORT_DATA.
     match caller {
+        // SAFETY: as above.
         Some(v) => unsafe { std::env::set_var("AIORT_DATA", v) },
+        // SAFETY: as above.
         None => unsafe { std::env::remove_var("AIORT_DATA") },
     }
 }
