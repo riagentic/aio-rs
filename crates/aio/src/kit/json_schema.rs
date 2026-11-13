@@ -176,6 +176,17 @@ fn coerce(c: &Check, v: Value) -> Result<Option<Value>, String> {
         Value::Null => None,
         // An empty input of a nullable field (Zod's `.nullable()`) is null.
         Value::String(s) if s.trim().is_empty() && c.types.contains(&Ty::Null) => None,
+        // An untyped `enum` (Valibot's `picklist([1, 2])`): the text is the
+        // member it spells, a number or a boolean as well as a string.
+        Value::String(s) if c.types.is_empty() && c.one_of.is_some() => {
+            let all = c.one_of.as_deref().unwrap_or_default();
+            let spelled = |m: &&Value| m.as_str().map_or_else(|| m.to_string() == s.trim(), |t| t == s);
+            match all.iter().find(|m| m.is_string() && m.as_str() == Some(&s)).or_else(|| all.iter().find(spelled)) {
+                Some(m) => Some(m.clone()),
+                None if s.trim().is_empty() => None,
+                None => Some(Value::String(s)),
+            }
+        }
         Value::String(s) if wants(Ty::Text) => Some(Value::String(s)),
         Value::String(s) if s.trim().is_empty() => None,
         Value::String(s) if wants(Ty::Integer) || wants(Ty::Number) => {
@@ -399,8 +410,13 @@ impl Fields {
         let mut out = Map::new();
         let mut bad = vec![];
         for (name, c, required) in &self.fields {
-            match coerce(c, values.get(*name).cloned().unwrap_or(Value::Null)) {
+            let given = values.get(*name);
+            match coerce(c, given.cloned().unwrap_or(Value::Null)) {
                 Err(m) => bad.push((*name, m)),
+                // Required but nullable (Zod's `.nullable()`): an empty input is its null.
+                Ok(None) if *required && given.is_some() && c.types.contains(&Ty::Null) => {
+                    out.insert(name.to_string(), Value::Null);
+                }
                 Ok(None) if *required => {
                     let m = self.missing.get(*name).and_then(Value::as_str).map(str::to_string);
                     bad.push((*name, m.unwrap_or_else(|| said(c, "required", "Required".into()))));
@@ -497,6 +513,31 @@ mod tests {
             .unwrap_err();
         assert_eq!(missing, vec![("age", "Required".to_string())]);
         assert_eq!(f.parse(&json!({ "name": "A", "age": "x" })).unwrap_err()[0], ("age", "A number".into()), "by name");
+    }
+
+    /// Zod's `.nullable()` (not `.optional()`) is `required` and takes null:
+    /// an empty input, or null, is its value, never `Required`.
+    #[test]
+    fn a_required_nullable_field_takes_null() {
+        let f = fields(r#"{ "type": "object",
+          "properties": { "site": { "anyOf": [{ "type": "string", "format": "uri" }, { "type": "null" }] } },
+          "required": ["site"] }"#)
+        .unwrap();
+        for empty in [json!(""), json!(null)] {
+            assert_eq!(f.parse(&json!({ "site": empty })), Ok(json!({ "site": null })), "{empty}");
+        }
+        assert_eq!(f.parse(&json!({})).unwrap_err(), vec![("site", "Required".to_string())], "left out");
+    }
+
+    /// An `enum` with no `type` (Valibot's `picklist([1, 2, 3])`): the form's
+    /// text is the member it spells.
+    #[test]
+    fn an_untyped_enum_reads_text_as_its_members() {
+        let f = fields(r#"{ "type": "object", "properties": { "n": { "enum": [1, 2, "three", true] } } }"#).unwrap();
+        assert_eq!(f.parse(&json!({ "n": "2" })), Ok(json!({ "n": 2 })));
+        assert_eq!(f.parse(&json!({ "n": "three" })), Ok(json!({ "n": "three" })));
+        assert_eq!(f.parse(&json!({ "n": "true" })), Ok(json!({ "n": true })));
+        assert!(f.parse(&json!({ "n": "4" })).is_err());
     }
 
     #[derive(Clone, PartialEq, Default, Serialize)]

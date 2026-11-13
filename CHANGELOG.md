@@ -52,6 +52,12 @@ version may break things.
 
 ### Fixed
 
+- A form from a JSON Schema refused a required nullable field (Zod's
+  `.nullable()`, which is `required`) when left empty or null, with
+  "Required". It is null, as Zod has it.
+- A form from a JSON Schema refused a typed-in member of an `enum` with no
+  `type` that isn't a string (Valibot's `picklist([1, 2])`: "2" was not
+  one of them). The text is the member it spells.
 - A cassette numbered repeated calls (equal arguments) as they finished,
   but replays them as they start: calls that overlapped got each other's
   answers on replay. They are numbered as they start.
