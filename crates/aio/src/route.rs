@@ -245,11 +245,18 @@ fn segments(pat: &[&str], path: &[&str], exact: bool, out: &mut Params) -> bool 
 /// value encoded as one segment; a `*` takes it segment by segment.
 pub fn fill(pattern: &str, params: &[(&str, String)]) -> String {
     let get = |n: &str| params.iter().find(|(k, _)| *k == n).map(|(_, v)| v.as_str());
+    // A segment as itself: a `\` is no `/` (nor `/\host` another host), a
+    // `.` or `..` no step (both decode back to the value when matched).
+    let one = |v: &str, also: &str| match encode(v, also) {
+        e if e == "." => "%2E".to_string(),
+        e if e == ".." => "%2E%2E".to_string(),
+        e => e,
+    };
     let segs = pattern.split('/').map(|seg| match (seg.strip_prefix(':'), star(seg)) {
-        (Some(n), _) => get(n).map_or(seg.into(), |v| encode(v, "/?#%")),
-        (_, Some(n)) => {
-            get(n).map_or(seg.into(), |v| v.split('/').map(|p| encode(p, "?#%")).collect::<Vec<_>>().join("/"))
-        }
+        (Some(n), _) => get(n).map_or(seg.into(), |v| one(v, "/?#%\\")),
+        (_, Some(n)) => get(n).map_or(seg.into(), |v| {
+            v.trim_start_matches('/').split('/').map(|p| one(p, "?#%\\")).collect::<Vec<_>>().join("/")
+        }),
         _ => seg.into(),
     });
     let out = segs.collect::<Vec<String>>().join("/");
@@ -1106,6 +1113,27 @@ mod tests {
         assert_eq!(fill("/", &[]), "/");
         let href = fill("/u/:id", &[("id", "100%41/é".into())]);
         assert_eq!(match_path("/u/:id", &href, true), p(&[("id", "100%41/é")]), "round trip");
+    }
+
+    /// A param the app goes to (`go`, `Link`) comes back as it was: a `\`
+    /// or a `.`/`..` value is one segment, never a step up, another path, or
+    /// (`/\host`) a link off the app.
+    #[test]
+    fn a_filled_param_survives_going_there() {
+        let root = Loc::parse("/").unwrap();
+        for v in ["a\\b", "..", ".", "\\evil.com", "x/.."] {
+            let href = fill("/users/:id", &[("id", v.into())]);
+            let at = resolve(&href, &root).expect(&href);
+            assert_eq!(match_path("/users/:id", &at.path, true), p(&[("id", v)]), "{v}: {href}");
+            let href = fill("/:s", &[("s", v.into())]);
+            let at = resolve(&href, &root).unwrap_or_else(|| panic!("{href} leaves the app"));
+            assert_eq!(match_path("/:s", &at.path, true), p(&[("s", v)]), "{v}: {href}");
+        }
+        for (v, segs) in [("a/../b", "a/%2E%2E/b"), ("/x/y", "x/y"), ("\\h/.", "%5Ch/%2E")] {
+            let href = fill("/f/*path", &[("path", v.into())]);
+            assert_eq!(href, format!("/f/{segs}"));
+            assert_eq!(resolve(&href, &root).unwrap().path, href, "{v}");
+        }
     }
 
     #[test]

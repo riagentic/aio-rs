@@ -52,6 +52,11 @@ version may break things.
 
 ### Fixed
 
+- A route param filled into a link (`fill`, `routes!`'s `href()`) kept a
+  `\`, `.` or `..` as written, and going there read it as a `/` or a
+  step: `/users/a\b` matched no user, `..` led to `/`, and a slug of
+  `\evil.com` made `/\evil.com`, a link off the app (opened in a new
+  tab). Such a value is one segment, escaped, and comes back as it was.
 - A mailed verification or password-reset token verified whatever email
   the account had when it was spent: after `Auth::set_email`, an old
   token marked the new, never-mailed address verified. A token proves
