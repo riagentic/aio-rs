@@ -146,6 +146,12 @@ version may break things.
   written whole.
 - A row removed from a `#[table]` whose key column has no type stayed
   (its key bound as text). The key is bound as stored.
+- Updates with `auto = true`: a release the user dismissed was still
+  staged by the next check and installed at the next start. It is now
+  neither.
+- Updates: a release staged on the old channel (or a prerelease no longer
+  followed) installed at the next start after `set_channel`. A start now
+  installs only one of the channel it follows.
 
 ## [0.4.2] - 2026-11-11
 
