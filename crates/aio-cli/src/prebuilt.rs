@@ -420,8 +420,11 @@ pub fn pack(pkg: &str, dir: &Path, workspace: &Path, feature: &str, out: &Path) 
     if let Some(keyfile) = std::env::var_os("AIORT_PREBUILT_SIGN") {
         // A key file as `ax keygen --aio` writes it.
         let pkcs8 = crate::release::read_key(Path::new(&keyfile)).map_err(|e| format!("AIORT_PREBUILT_SIGN: {e}"))?;
-        std::fs::write(at.join("SHA256SUMS.sig"), aio::update::sign_with(&pkcs8, sums.as_bytes())? + "\n")
-            .map_err(|e| e.to_string())?;
+        std::fs::write(
+            at.join("SHA256SUMS.sig"),
+            aio::update::sign_with(&pkcs8, sums.as_bytes()).map_err(|e| e.to_string())? + "\n",
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(format!("prebuilt {k}: {n} files, {} MB, in {}", bytes.len() >> 20, at.display()))
 }

@@ -17,6 +17,8 @@ name = "aio"
 aio-macros = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+# `aio::update::UpdateError`'s Display and source.
+thiserror = "2"
 # aio.toml's types and checks; never its parser (that runs in `aio::config!()`, on the build's host).
 aio-config = { workspace = true }
 # `aio::config!()`: aio.toml parsed as the app builds (the parser runs on the build's host only).

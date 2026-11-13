@@ -2586,12 +2586,36 @@ aio::update::Release.size: u64
 aio::update::Release.version: String
 aio::update::Roster.keys: Vec<String>
 aio::update::Roster.signatures: Vec<[String; 2]>
-aio::update::Runtime::apply: fn apply(&self, version: &str, data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), String>
-aio::update::Runtime::check: fn check(&self) -> std::result::Result<Found, String>
+aio::update::Runtime::apply: fn apply(&self, version: &str, data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), UpdateError>
+aio::update::Runtime::check: fn check(&self) -> std::result::Result<Found, UpdateError>
 aio::update::Step::Downloaded(u8)
 aio::update::Step::Installing
 aio::update::Step::Runtime(u8)
 aio::update::Stub(Found)
+aio::update::UpdateError::BadSignature
+aio::update::UpdateError::EmptyRoster
+aio::update::UpdateError::Format(u32)
+aio::update::UpdateError::Http { url: String, status: u16 }
+aio::update::UpdateError::Io(io::Error)
+aio::update::UpdateError::Json(serde_json::Error)
+aio::update::UpdateError::KeyFormat(String)
+aio::update::UpdateError::Keygen
+aio::update::UpdateError::Malformed { what: &'static str, error: serde_json::Error }
+aio::update::UpdateError::MinFrom(String)
+aio::update::UpdateError::Network { url: String, message: String }
+aio::update::UpdateError::NoPatch { from: String, patches: usize }
+aio::update::UpdateError::NoRef { name: String, remote_has: String }
+aio::update::UpdateError::NotACommit { name: String, sha: String }
+aio::update::UpdateError::NotForThisApp { what: &'static str, got: String, want: String }
+aio::update::UpdateError::NotPlainName(&'static str)
+aio::update::UpdateError::Other(String)
+aio::update::UpdateError::PatchTooBig { size: u64, release: u64 }
+aio::update::UpdateError::PatchesForAnotherRelease
+aio::update::UpdateError::Refused { url: String, why: Box<UpdateError> }
+aio::update::UpdateError::Store(Box<dyn std::error::Error + Send + Sync>)
+aio::update::UpdateError::UnsignedPatches
+aio::update::UpdateError::UntrustedKey
+aio::update::UpdateError::UntrustedRoster
 aio::update::Updates.available: Option<Offer>
 aio::update::Updates.backup: Option<String>
 aio::update::Updates.blocked: Option<Blocked>
@@ -2635,35 +2659,35 @@ aio::update::UpdatesCalls::set_channel: fn set_channel(&self, channel: String) -
 aio::update::UpdatesCalls::start_fresh: fn start_fresh(&self) -> ::aio::Result<()>
 aio::update::UpdatesCalls::undismiss: fn undismiss(&self) -> ::aio::Result<()>
 aio::update::UpdatesCalls::vetoed: fn vetoed(&self, why: String) -> ::aio::Result<()>
-aio::update::allowed_signers: fn allowed_signers(keys: &[String]) -> Result<String, String>
+aio::update::allowed_signers: fn allowed_signers(keys: &[String]) -> Result<String, UpdateError>
 aio::update::below_min_from: fn below_min_from(r: &Release, current: &str) -> Option<String>
 aio::update::blockers: fn blockers(contract: &Contract, local: &Contract) -> Vec<String>
 aio::update::can_apply: fn can_apply<F, Fut>(veto: F) where F: Fn() -> Fut + Send + Sync + 'static, Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static
 aio::update::channel: fn channel<'a>(env: Option<&'a str>, pinned: Option<&'a str>, stamp: Option<&'a str>, config: &'a str) -> &'a str
-aio::update::check: fn check(m: &Manifest, trusted: &[String], expect: &Expect<'_>) -> Result<Vec<String>, String>
-aio::update::check_served: fn check_served(bytes: &[u8], trusted: &[String], expect: &Expect<'_>) -> Result<(Manifest, Vec<String>), String>
+aio::update::check: fn check(m: &Manifest, trusted: &[String], expect: &Expect<'_>) -> Result<Vec<String>, UpdateError>
+aio::update::check_served: fn check_served(bytes: &[u8], trusted: &[String], expect: &Expect<'_>) -> Result<(Manifest, Vec<String>), UpdateError>
 aio::update::compare: fn compare(a: &str, b: &str) -> Option<std::cmp::Ordering>
 aio::update::contract: fn contract() -> Contract
-aio::update::follow: fn follow(trusted: &[String], roster: &Roster) -> Result<Vec<String>, String>
+aio::update::follow: fn follow(trusted: &[String], roster: &Roster) -> Result<Vec<String>, UpdateError>
 aio::update::follows_prereleases: fn follows_prereleases(prerelease: Option<bool>, current: &str, channel: &str) -> bool
-aio::update::git_ref_commit: fn git_ref_commit(ls_remote: &str, name: &str) -> Result<String, String>
+aio::update::git_ref_commit: fn git_ref_commit(ls_remote: &str, name: &str) -> Result<String, UpdateError>
 aio::update::install: fn install(rt: std::sync::Arc<dyn Runtime>)
 aio::update::installed: fn installed() -> bool
-aio::update::keygen: fn keygen() -> Result<(Vec<u8>, String), String>
-aio::update::local_data: fn local_data(store: &std::path::Path) -> Result<Option<Contract>, String>
+aio::update::keygen: fn keygen() -> Result<(Vec<u8>, String), UpdateError>
+aio::update::local_data: fn local_data(store: &std::path::Path) -> Result<Option<Contract>, UpdateError>
 aio::update::migrates: fn migrates(contract: &Contract, local: Option<&Contract>) -> bool
 aio::update::newer: fn newer(release: &str, current: &str, prereleases: bool) -> bool
 aio::update::parse_version: fn parse_version(v: &str) -> Option<(Vec<u64>, Option<String>)>
-aio::update::patch_for: fn patch_for<'a>(p: &'a Patches, m: &Manifest, installed: &str) -> Result<&'a Patch, String>
-aio::update::public_key: fn public_key(pkcs8: &[u8]) -> Result<String, String>
+aio::update::patch_for: fn patch_for<'a>(p: &'a Patches, m: &Manifest, installed: &str) -> Result<&'a Patch, UpdateError>
+aio::update::public_key: fn public_key(pkcs8: &[u8]) -> Result<String, UpdateError>
 aio::update::release_dir: fn release_dir(url: &str, channel: &str) -> String
-aio::update::roster: fn roster(keys: &[String], signers: &[Vec<u8>]) -> Result<Roster, String>
+aio::update::roster: fn roster(keys: &[String], signers: &[Vec<u8>]) -> Result<Roster, UpdateError>
 aio::update::share: fn share(h: Handle<Updates>)
-aio::update::sign: fn sign(release: Release, pkcs8: &[u8]) -> Result<Manifest, String>
-aio::update::sign_patches: fn sign_patches(m: &Manifest, patches: Vec<Patch>, pkcs8: &[u8]) -> Result<Patches, String>
-aio::update::sign_with: fn sign_with(pkcs8: &[u8], msg: &[u8]) -> Result<String, String>
+aio::update::sign: fn sign(release: Release, pkcs8: &[u8]) -> Result<Manifest, UpdateError>
+aio::update::sign_patches: fn sign_patches(m: &Manifest, patches: Vec<Patch>, pkcs8: &[u8]) -> Result<Patches, UpdateError>
+aio::update::sign_with: fn sign_with(pkcs8: &[u8], msg: &[u8]) -> Result<String, UpdateError>
 aio::update::skipped_prerelease: fn skipped_prerelease(release: &str, current: &str, prereleases: bool) -> Option<String>
-aio::update::ssh_fingerprint: fn ssh_fingerprint(key: &str) -> Result<String, String>
+aio::update::ssh_fingerprint: fn ssh_fingerprint(key: &str) -> Result<String, UpdateError>
 aio::update::verify: fn verify(key: &str, msg: &[u8], sig: &str) -> bool
 aio::update::veto: async fn veto() -> Option<std::result::Result<(), String>>
 aio::uuid_v4: fn uuid_v4() -> Uuid
@@ -2922,6 +2946,7 @@ enum aio::update::Found
 enum aio::update::Phase
 enum aio::update::ProgressOf
 enum aio::update::Step
+enum aio::update::UpdateError
 enum aio::vitals::Severity
 impl Cell for Feedback
 impl Cell for Updates
@@ -3369,6 +3394,7 @@ impl Debug for Travel
 impl Debug for Trend
 impl Debug for Trigger
 impl Debug for Unit
+impl Debug for UpdateError
 impl Debug for Updates
 impl Debug for User
 impl Debug for Variant
@@ -3457,6 +3483,7 @@ impl Display for EvalError
 impl Display for Loc
 impl Display for Refusal
 impl Display for Rejected
+impl Display for UpdateError
 impl Drop for Child
 impl Drop for Deciding
 impl Drop for Listener
@@ -3579,9 +3606,11 @@ impl Error for Error
 impl Error for EvalError
 impl Error for Refusal
 impl Error for Rejected
+impl Error for UpdateError
 impl From<&str> for ChordSpec
 impl From<&str> for Rejected
 impl From<Error> for Error
+impl From<Error> for UpdateError
 impl From<String> for Rejected
 impl Hash for Code
 impl Hash for Encoding

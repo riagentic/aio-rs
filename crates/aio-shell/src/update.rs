@@ -822,10 +822,14 @@ fn get(
     if let Some(e) = etag {
         req = req.header("if-none-match", e);
     }
-    let res = req.call().map_err(|e| {
-        let kind =
-            if matches!(e, ureq::Error::StatusCode(404)) { io::ErrorKind::NotFound } else { io::ErrorKind::Other };
-        io::Error::new(kind, format!("{url}: {e}"))
+    // Typed (`up::UpdateError`) through to the cell's runtime: a 404 is still
+    // `NotFound` here.
+    let res = req.call().map_err(|e| match e {
+        ureq::Error::StatusCode(status) => {
+            let kind = if status == 404 { io::ErrorKind::NotFound } else { io::ErrorKind::Other };
+            io::Error::new(kind, up::UpdateError::Http { url: url.into(), status })
+        }
+        e => io::Error::other(up::UpdateError::Network { url: url.into(), message: e.to_string() }),
     })?;
     if res.status() == 304 {
         return Ok(None);
@@ -1011,7 +1015,7 @@ fn look(cfg: &aio::config::Config, version: &str, data: &Path, d: &Path) -> io::
     let trusted: Vec<String> = read_json(&keys_file).unwrap_or_else(|| u.keys.clone());
     let expect = up::Expect { id: &cfg.app.id, channel: &ch, os: std::env::consts::OS, arch: std::env::consts::ARCH };
     let (m, next_keys) = up::check_served(&body, &trusted, &expect)
-        .map_err(|e| io::Error::other(format!("release refused: {e} ({url})")))?;
+        .map_err(|e| io::Error::other(up::UpdateError::Refused { url: url.clone(), why: Box::new(e) }))?;
     let r = &m.release;
     if next_keys != trusted {
         aio::paths::write_atomic(&keys_file, aio::serde_json::to_string(&next_keys)?.as_bytes(), true)?;
@@ -1647,11 +1651,11 @@ struct Shell {
 }
 
 impl up::Runtime for Shell {
-    fn check(&self) -> Result<Found, String> {
-        check(&self.cfg, &self.version, &self.data).map_err(|e| e.to_string())
+    fn check(&self) -> Result<Found, up::UpdateError> {
+        check(&self.cfg, &self.version, &self.data).map_err(up::UpdateError::from)
     }
-    fn apply(&self, version: &str, how: Data, step: &dyn Fn(Step)) -> Result<(), String> {
-        apply_now(&self.cfg, &self.version, &self.data, version, how, step).map_err(|e| e.to_string())
+    fn apply(&self, version: &str, how: Data, step: &dyn Fn(Step)) -> Result<(), up::UpdateError> {
+        apply_now(&self.cfg, &self.version, &self.data, version, how, step).map_err(up::UpdateError::from)
     }
 }
 

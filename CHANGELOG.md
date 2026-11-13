@@ -28,6 +28,16 @@ version may break things.
 
 ### Changed
 
+- **Breaking: `aio::update` fails with `UpdateError`**, not `String`
+  (`#[non_exhaustive]`: `BadSignature`, `UntrustedKey`, `Refused`,
+  `Http { status, .. }`, `NoPatch`, `KeyFormat`, `Io`, …), each one's text
+  as before. `check`, `check_served`, `follow`, `patch_for`, `sign`,
+  `sign_with`, `sign_patches`, `roster`, `keygen`, `public_key`,
+  `ssh_fingerprint`, `allowed_signers`, `git_ref_commit`, `local_data` and
+  `Runtime::{check, apply}` return it. An app's own `Runtime` returns
+  `UpdateError::Other(why)` (an `io::Error` converts with `?`); a caller
+  that wants the old text writes `.map_err(|e| e.to_string())`. A veto
+  (`can_apply`, `veto`) is still the app's own `String`.
 - Every crate declares `rust-version = "1.98"`, the toolchain
   `rust-toolchain.toml` pins (`./ci.sh` keeps them the same).
 - Every `unsafe` block says why it is sound (`// SAFETY:`), and clippy's
