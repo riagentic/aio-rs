@@ -198,7 +198,29 @@ fn one<'c>(c: &'c Connection, sql: &str) -> Result<rusqlite::Statement<'c>, Erro
     }
 }
 
+/// A statement run outside a transaction that left one open (a `SAVEPOINT`
+/// there is SQLite's BEGIN): rolled back and refused, or the next caller's
+/// writes would be held in it.
+fn left_open(c: &Connection, was: bool, sql: &str) -> Result<(), Error> {
+    if !was || c.is_autocommit() {
+        return Ok(());
+    }
+    _ = c.execute_batch("ROLLBACK");
+    Err(Error(format!(
+        "db: \"{}\" opened a transaction (outside one, a SAVEPOINT begins one): refused and rolled back, so it \
+         can't swallow another caller's writes. Nest it in db.transaction.",
+        sql.trim()
+    )))
+}
+
 fn rows(c: &Connection, sql: &str, params: &[Sql]) -> Result<Rows, Error> {
+    let was = c.is_autocommit();
+    let r = rows_in(c, sql, params);
+    left_open(c, was, sql)?;
+    r
+}
+
+fn rows_in(c: &Connection, sql: &str, params: &[Sql]) -> Result<Rows, Error> {
     let mut s = one(c, sql)?;
     let columns: Vec<String> = s.column_names().map(String::from).collect();
     let n = columns.len();
@@ -210,6 +232,13 @@ fn rows(c: &Connection, sql: &str, params: &[Sql]) -> Result<Rows, Error> {
 }
 
 fn exec(c: &Connection, sql: &str, params: &[Sql]) -> Result<Done, Error> {
+    let was = c.is_autocommit();
+    let r = exec_in(c, sql, params);
+    left_open(c, was, sql)?;
+    r
+}
+
+fn exec_in(c: &Connection, sql: &str, params: &[Sql]) -> Result<Done, Error> {
     let mut s = one(c, sql)?;
     // A statement that returns rows (`INSERT … RETURNING`, a pragma) still runs to the end.
     let changes = if s.column_count() > 0 {

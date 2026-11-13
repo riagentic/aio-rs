@@ -52,6 +52,12 @@ version may break things.
 
 ### Fixed
 
+- `db.execute("SAVEPOINT …")` (or `db.query`) outside a transaction was
+  run, and SQLite takes it there as a BEGIN: the next callers' writes
+  were acknowledged but held uncommitted in it, a `ROLLBACK TO` undid
+  them, and `db.transaction` failed. A statement that leaves a
+  transaction open outside one is rolled back and refused; nested in
+  `db.transaction`, a savepoint is fine.
 - One line on stderr that wasn't UTF-8 (a child process's, a C
   library's) ended the log copier: nothing more reached `app.log` or the
   terminal, and the next write to stderr panicked (then aborted in the

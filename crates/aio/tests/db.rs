@@ -67,6 +67,32 @@ async fn one_statement_per_call_and_transactions_are_the_apis() {
     assert!(!controls_tx("ROLLBACK TRANSACTION TO sp") && !controls_tx("SELECT 'BEGIN'"));
 }
 
+/// A `SAVEPOINT` outside a transaction opens one (SQLite's BEGIN): then
+/// the next caller's write would be held in it, and a `ROLLBACK TO` would
+/// undo it after it was acknowledged. Outside `db.transaction` it is
+/// refused, and nothing is left open; inside one it nests and is fine.
+#[tokio::test]
+async fn a_savepoint_outside_a_transaction_swallows_no_ones_writes() {
+    for readers in [0, 2] {
+        let (_dir, db) = with_notes(Opts { readers, ..Default::default() }).await;
+        assert!(db.execute("SAVEPOINT s", vec![]).await.is_err(), "readers {readers}");
+        assert!(db.query("SAVEPOINT s", vec![]).await.is_err(), "readers {readers}");
+        db.execute("INSERT INTO n (t) VALUES ('kept')", vec![]).await.unwrap();
+        _ = db.execute("ROLLBACK TO s", vec![]).await;
+        assert_eq!(notes(&db).await, ["kept"], "readers {readers}");
+        db.transaction(|tx| {
+            tx.execute("SAVEPOINT s", &[])?;
+            tx.execute("INSERT INTO n (t) VALUES ('undone')", &[])?;
+            tx.execute("ROLLBACK TO s", &[])?;
+            tx.execute("RELEASE s", &[])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(notes(&db).await, ["kept"], "readers {readers}");
+    }
+}
+
 #[tokio::test]
 async fn a_transaction_commits_whole_or_not_at_all() {
     let (_dir, db) = with_notes(Opts::default()).await;
