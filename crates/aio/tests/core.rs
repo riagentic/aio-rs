@@ -432,6 +432,24 @@ mod upgrade {
         assert_eq!(Store::<Notes>::open(&p).unwrap().state().lines, ["c"]);
     }
 
+    /// The same with no snapshot of the old build's before the cut (it
+    /// snapshotted only as it closed): nothing replays the old events.
+    #[test]
+    fn a_fold_after_an_upgrade_keeps_the_boot_with_no_older_snapshot() {
+        let (_d, p) = super::tmp();
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        for t in ["a", "b", "c"] {
+            old.call(&By::Test, "set", serde_json::json!([t])).unwrap();
+        }
+        drop(old);
+        rusqlite::Connection::open(&p).unwrap().execute("UPDATE log SET at = 0 WHERE seq <= 2", []).unwrap();
+        let mut s = Store::<Notes>::open(&p).unwrap();
+        s.keep_history(std::time::Duration::from_secs(86_400)).unwrap();
+        assert_eq!(s.state().lines, ["c"]);
+        drop(s);
+        assert_eq!(Store::<Notes>::open(&p).unwrap().state().lines, ["c"]);
+    }
+
     #[test]
     fn a_fold_by_an_older_build_keeps_the_newer_builds_fields() {
         let (_d, p) = super::tmp();

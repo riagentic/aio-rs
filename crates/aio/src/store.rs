@@ -2643,12 +2643,22 @@ impl<T: Cell> Store<T> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        // Another version's events between that snapshot (or the floor) and
+        // the cut: an older build's, left before an upgrade.
+        let from = snap.map_or(self.floor()? as i64, |(s, _)| s);
+        let older: bool = self.db.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2 AND seq <= ?3 AND v != ?4)",
+            params![T::ID, from, cut, T::VERSION],
+            |r| r.get(0),
+        )?;
         // A snapshot of another version (an upgrade, or a newer build's data
-        // under a rollback): the events before it don't replay past it, and
-        // it is never rewritten as this build's (that would drop the newer
-        // build's fields). Fold at it, as it is.
+        // under a rollback) or another version's events: they don't replay
+        // in this build, and a snapshot is never rewritten as this build's
+        // (that would drop the newer build's fields). Fold at the snapshot,
+        // as it is, or not at all.
         let text = match snap {
             Some((_, v)) if v != T::VERSION => None,
+            _ if older => None,
             _ => snapshot(&self.state_at(cut as u64)?, true)?,
         };
         // What is saved of that state can't bring it back whole: fold at the
