@@ -19,6 +19,10 @@ version may break things.
 - A release is never unsigned: the release workflow stops without the
   `AIO_RELEASE_KEY` secret or a pinned key, and `ax release --aio` refuses
   a key that isn't the pinned one (CONTRIBUTING.md, Signing).
+- An app's update follows a key roster from a release newer than itself
+  only: an old manifest served again (its roster still vouched by a
+  trusted key) brought back a key a later roster had dropped, so a leaked
+  key could sign the next release again.
 - A network call its `#[client]` rule refuses no longer supersedes a
   running `#[mode(newest)]` call of the same method: before, any caller
   could abort an admin's call with one refused call (`DispatchAborted`).
