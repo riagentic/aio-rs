@@ -52,6 +52,11 @@ version may break things.
 
 ### Fixed
 
+- One line on stderr that wasn't UTF-8 (a child process's, a C
+  library's) ended the log copier: nothing more reached `app.log` or the
+  terminal, and the next write to stderr panicked (then aborted in the
+  panic hook). Such a line is logged as best it reads, and the copier
+  goes on.
 - An empty `data/sync.token` (a write cut short by a crash, a file
   blanked by hand) was taken as the app key: the empty key, which a
   request shows by `?token=` or an empty bearer, so anyone reaching the

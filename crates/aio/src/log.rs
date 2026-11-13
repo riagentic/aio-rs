@@ -314,8 +314,15 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
         logcat(line);
         _ = log.line(now_ms(), line);
     };
-    for line in io::BufReader::new(pipe).lines() {
-        let Ok(line) = line else { break };
+    // By bytes: a line that isn't UTF-8 (a child's, a C library's) is read
+    // as best it can be, never the copier's end (its pipe would close, and
+    // the next write to stderr panic).
+    for line in io::BufReader::new(pipe).split(b'\n') {
+        let Ok(mut line) = line else { break };
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let line = String::from_utf8_lossy(&line).into_owned();
         // No credential reaches a log: a token in a URL, a pairing code.
         let line = crate::report::redact(&line);
         let line = runtime_noise(&line).unwrap_or(line);
@@ -787,6 +794,26 @@ fn finish_by(wait: Option<std::time::Duration>) {
 
 #[cfg(test)]
 mod tests {
+    /// A line that isn't UTF-8 (a child's, a C library's) is logged as
+    /// best it reads, and every line after it too: the copier never stops
+    /// (stopped, its pipe closes and the next write to stderr panics).
+    #[test]
+    fn a_line_that_isnt_utf8_stops_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let input = d.path().join("in");
+        std::fs::write(&input, b"INFO  [app] a\n\xff\xfeb\r\nINFO  [app] after\n").unwrap();
+        let logs = d.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let sinks = super::Sinks::open(&logs).unwrap();
+        super::copy(std::fs::File::open(&input).unwrap(), None::<Vec<u8>>, false, sinks);
+        let all: String = std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default())
+            .collect();
+        assert!(all.contains("[app] after"), "{all}");
+        assert!(all.contains("\u{fffd}\u{fffd}b") && !all.contains('\r'), "{all:?}");
+    }
+
     #[test]
     fn ax_devs_terminal_has_the_boot_report_in_one_line() {
         let mut b = super::BriefBoot { on: true, rows: vec![] };
