@@ -32,6 +32,11 @@ version may break things.
 
 ### Fixed
 
+- A `cron` schedule in local time searched from inside the hour that
+  repeats when clocks go back (an app started, or woken, at 02:10 CET on
+  the night of the change) got the first 02:30, already past: it fired at
+  once, and again on every pass, for up to an hour. That wall time has
+  been: the next run is the next day's.
 - The README and the aio-vs-aio-rs page installed and named 0.4.0;
   `scripts/docs-check` now holds them to the workspace's version.
 
