@@ -217,7 +217,7 @@ rt.block_on(async {
 
 `aio::db::Select` is aio's query builder (`table.where(..)` with
 `orderBy`, `limit`, `offset`): one `SELECT * FROM table`, its values
-always parameters.
+always parameters, its names always quoted (a column may be called `order`).
 
 ```rust
 use aio::db::{Db, Opts, Order, Select, Where};
@@ -230,7 +230,7 @@ rt.block_on(async {
     db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, total REAL)", vec![]).await.unwrap();
     let open = Where::eq("status", "open".to_string()).and(Where::gt("total", 10.0));
     let q = Select::from("orders").filter(open).order_by("total", Order::Desc).limit(20);
-    assert_eq!(q.sql().unwrap().0, "SELECT * FROM orders WHERE (status = ?) AND (total > ?) ORDER BY total DESC LIMIT 20");
+    assert_eq!(q.sql().unwrap().0, r#"SELECT * FROM "orders" WHERE ("status" = ?) AND ("total" > ?) ORDER BY "total" DESC LIMIT 20"#);
     assert!(db.select(&q).await.unwrap().rows.is_empty());
     // aio's object form, as JSON: each field all, a list any.
     let w = Where::object(&json!({ "status": { "in": ["open", "held"] }, "total": { "gte": 5 } })).unwrap();

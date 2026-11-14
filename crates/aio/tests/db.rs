@@ -408,7 +408,10 @@ async fn a_where_selects_by_parameters_and_refuses_what_could_inject() {
     let q = |w: Where| Select::from("orders").filter(w).order_by("total", Order::Asc);
     let (sql, params) =
         q(Where::gt("total", 6.0).and(Where::ne("who", "bo".to_string()))).limit(5).offset(1).sql().unwrap();
-    assert_eq!(sql, "SELECT * FROM orders WHERE (total > ?) AND (who != ?) ORDER BY total ASC LIMIT 5 OFFSET 1");
+    assert_eq!(
+        sql,
+        r#"SELECT * FROM "orders" WHERE ("total" > ?) AND ("who" != ?) ORDER BY "total" ASC LIMIT 5 OFFSET 1"#
+    );
     assert_eq!(params, [Sql::Real(6.0), text("bo")]);
     let got = |w| {
         let db = &db;
@@ -437,6 +440,14 @@ async fn a_where_selects_by_parameters_and_refuses_what_could_inject() {
         assert!(Select::from("orders").order_by(name, Order::Desc).sql().is_err(), "{name}");
         assert!(Select::from(name).sql().is_err(), "{name}");
     }
+    // A plain name that is also a keyword is still a name.
+    db.execute(r#"CREATE TABLE "order" ("group" TEXT, "limit" INTEGER)"#, vec![]).await.unwrap();
+    db.execute(r#"INSERT INTO "order" VALUES ('a', 2), ('b', 1)"#, vec![]).await.unwrap();
+    let kw = Select::from("order").filter(Where::gt("limit", 0)).order_by("group", Order::Desc);
+    assert_eq!(
+        db.select(&kw).await.unwrap().rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
+        [text("b"), text("a")]
+    );
     let many = Where::is_in("id", 0..40_000i64);
     assert!(Select::from("orders").filter(many).sql().unwrap_err().0.contains("at most 32766"));
     assert_eq!(db.query("SELECT count(*) FROM orders", vec![]).await.unwrap().rows[0][0], Sql::Integer(4), "all there");

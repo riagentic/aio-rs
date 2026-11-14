@@ -52,6 +52,11 @@ version may break things.
 
 ### Fixed
 
+- `db::Select` put table and column names into its statement unquoted,
+  so a plain name that is also an SQL keyword (`order`, `group`,
+  `limit`) made a syntax error. Every name is quoted now.
+- The vitals hint for a backed-up effect queue missed a queue of exactly
+  the frozen threshold (1000 by default), which is already graded frozen.
 - A span in `aio.toml` too long to count (`keep = "213503982334602d"`)
   overflowed: a panic in a debug build (the build's config check), and
   in a release build a wrapped value (some hours) taken silently. It is
