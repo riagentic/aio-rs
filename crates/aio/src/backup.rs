@@ -69,19 +69,48 @@ fn files(dir: &Path, at: &str, store: &str, out: &mut Vec<String>) -> io::Result
     Ok(())
 }
 
-/// The bytes of `file`: a SQLite database copied consistently (its WAL in).
-fn bytes_of(file: &Path, scratch: &Path) -> io::Result<Vec<u8>> {
-    let raw = std::fs::read(file)?;
-    if !raw.starts_with(b"SQLite format 3\0") {
-        return Ok(raw);
+/// How much of a file one row of a whole backup holds: SQLite takes at most
+/// 1e9 bytes in one value, so a bigger file is kept in parts (`aio_parts`).
+const PART: u64 = if cfg!(test) { 1000 } else { 256 << 20 };
+
+/// `file` into the backup `db` as `rel`: a SQLite database copied
+/// consistently (its WAL in), and read a part at a time, never whole.
+fn put(db: &Connection, rel: &str, file: &Path, scratch: &Path) -> io::Result<()> {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let n = std::fs::File::open(file)?.read(&mut head)?;
+    let from = if head[..n] == *b"SQLite format 3\0" {
+        _ = std::fs::remove_file(scratch);
+        let src = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+        src.execute("VACUUM INTO ?1", [scratch.to_string_lossy()]).map_err(err)?;
+        scratch
+    } else {
+        file
+    };
+    let put = (|| {
+        let mut f = std::fs::File::open(from)?;
+        for n in 0i64.. {
+            let mut part = Vec::new();
+            (&mut f).take(PART).read_to_end(&mut part)?;
+            if n > 0 && part.is_empty() {
+                break;
+            }
+            let (table, last) = (if n == 0 { "aio_files" } else { "aio_parts" }, (part.len() as u64) < PART);
+            match n {
+                0 => db.execute("INSERT INTO aio_files VALUES (?1, ?2)", rusqlite::params![rel, part]),
+                _ => db.execute("INSERT INTO aio_parts VALUES (?1, ?2, ?3)", rusqlite::params![rel, n, part]),
+            }
+            .map_err(|e| err(format!("{rel}: {table}: {e}")))?;
+            if last {
+                break;
+            }
+        }
+        Ok(())
+    })();
+    if from == scratch {
+        _ = std::fs::remove_file(scratch);
     }
-    _ = std::fs::remove_file(scratch);
-    let db = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
-    db.execute("VACUUM INTO ?1", [scratch.to_string_lossy()]).map_err(err)?;
-    drop(db);
-    let b = std::fs::read(scratch);
-    _ = std::fs::remove_file(scratch);
-    b
+    put
 }
 
 fn make(id: &str, store: &Path, to: &Path, all: bool) -> io::Result<()> {
@@ -104,11 +133,15 @@ fn make(id: &str, store: &Path, to: &Path, all: bool) -> io::Result<()> {
             let data = crate::paths::parent(store);
             let mut list = Vec::new();
             files(data, "", &name(store), &mut list)?;
-            db.execute_batch("CREATE TABLE aio_files (path TEXT PRIMARY KEY, bytes BLOB NOT NULL)").map_err(err)?;
+            db.execute_batch(
+                "CREATE TABLE aio_files (path TEXT PRIMARY KEY, bytes BLOB NOT NULL);
+                 CREATE TABLE aio_parts (path TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL,
+                                         PRIMARY KEY (path, n))",
+            )
+            .map_err(err)?;
             let scratch = with_suffix(&partial, ".db");
             for f in list {
-                let b = bytes_of(&data.join(&f), &scratch)?;
-                db.execute("INSERT INTO aio_files VALUES (?1, ?2)", rusqlite::params![f, b]).map_err(err)?;
+                put(&db, &f, &data.join(&f), &scratch)?;
             }
         }
         drop(db);
@@ -211,22 +244,37 @@ pub fn restore(id: &str, file: &Path, store: &Path, _dirs: &crate::paths::AppDir
     std::fs::copy(file, &incoming)?;
     let db = Connection::open(&incoming).map_err(err)?;
     // A whole backup (`aio_files`) is all of data/; a store-only one isn't.
-    let (whole, files): (bool, Vec<(String, Vec<u8>)>) =
-        match db.prepare("SELECT path, bytes FROM aio_files ORDER BY path") {
-            Ok(mut q) => (
-                true,
-                q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.collect::<Result<_, _>>().map_err(err)?,
-            ),
-            Err(_) => (false, Vec::new()),
-        };
-    db.execute_batch("DROP TABLE aio_backup; DROP TABLE IF EXISTS aio_files").map_err(err)?;
-    drop(db);
+    let (whole, files): (bool, Vec<String>) = match db.prepare("SELECT path FROM aio_files ORDER BY path") {
+        Ok(mut q) => (true, q.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?),
+        Err(_) => (false, Vec::new()),
+    };
     // Never a path out of the data dir, whatever the file says.
-    if let Some((bad, _)) =
-        files.iter().find(|(p, _)| p.split('/').any(|c| c.is_empty() || c == "." || c == "..") || left_out(p))
-    {
+    if let Some(bad) = files.iter().find(|p| p.split('/').any(|c| c.is_empty() || c == "." || c == "..") || left_out(p)) {
+        drop(db);
         _ = std::fs::remove_file(&incoming);
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} holds a bad path: {bad}", file.display())));
+    }
+    // Each file is written out of the backup a part at a time, beside where
+    // it goes (`.tmp`: no backup takes it), before anything is replaced.
+    let staged = with_suffix(store, ".restoring.tmp");
+    _ = std::fs::remove_dir_all(&staged);
+    let unpacked = (|| {
+        for path in &files {
+            unpack(&db, path, &staged.join(path))?;
+        }
+        db.execute_batch("DROP TABLE aio_backup; DROP TABLE IF EXISTS aio_files; DROP TABLE IF EXISTS aio_parts")
+            .map_err(err)?;
+        // The files' bytes are no part of the store.
+        if whole {
+            db.execute_batch("VACUUM").map_err(err)?;
+        }
+        Ok::<_, io::Error>(())
+    })();
+    drop(db);
+    if let Err(e) = unpacked {
+        _ = std::fs::remove_dir_all(&staged);
+        _ = std::fs::remove_file(&incoming);
+        return Err(e);
     }
     crate::paths::sync_file(&incoming)?;
     let mark = format!(".replaced-{}", crate::store::now_ms());
@@ -238,16 +286,18 @@ pub fn restore(id: &str, file: &Path, store: &Path, _dirs: &crate::paths::AppDir
     if whole {
         let mut now = Vec::new();
         self::files(crate::paths::parent(store), "", &name(store), &mut now)?;
-        for path in now.iter().filter(|p| !files.iter().any(|(f, _)| f == *p)) {
+        for path in now.iter().filter(|p| !files.contains(p)) {
             set_aside(&crate::paths::parent(store).join(path), &mark)?;
         }
     }
-    for (path, bytes) in &files {
+    for path in &files {
         let to = crate::paths::parent(store).join(path);
         set_aside(&to, &mark)?;
         std::fs::create_dir_all(crate::paths::parent(&to))?;
-        crate::paths::write_atomic(&to, bytes, true)?;
+        crate::paths::rename_over(&staged.join(path), &to)?;
+        crate::paths::sync_dir(crate::paths::parent(&to))?;
     }
+    _ = std::fs::remove_dir_all(&staged);
     // The good copy is of the data set aside: the next boot makes a new one.
     match std::fs::remove_file(with_suffix(store, ".good")) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
@@ -255,6 +305,29 @@ pub fn restore(id: &str, file: &Path, store: &Path, _dirs: &crate::paths::AppDir
     }
     crate::paths::sync_dir(crate::paths::parent(store))?;
     Ok(aside)
+}
+
+/// File `path` of the backup `db`, its parts in order, written to `to`
+/// (only this user's) and flushed.
+fn unpack(db: &Connection, path: &str, to: &Path) -> io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(crate::paths::parent(to))?;
+    let mut f = crate::paths::create(to, true)?;
+    let first: Vec<u8> =
+        db.query_row("SELECT bytes FROM aio_files WHERE path = ?1", [path], |r| r.get(0)).map_err(err)?;
+    f.write_all(&first)?;
+    // A backup made before files were kept in parts has no `aio_parts`.
+    let parted: bool = db
+        .query_row("SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'aio_parts'", [], |r| r.get(0))
+        .map_err(err)?;
+    if parted {
+        let mut q = db.prepare("SELECT bytes FROM aio_parts WHERE path = ?1 ORDER BY n").map_err(err)?;
+        let mut rows = q.query([path]).map_err(err)?;
+        while let Some(r) = rows.next().map_err(err)? {
+            f.write_all(&r.get::<_, Vec<u8>>(0).map_err(err)?)?;
+        }
+    }
+    f.sync_all()
 }
 
 #[cfg(test)]
@@ -268,6 +341,34 @@ mod tests {
         assert_eq!(ours.len(), 3);
         assert_eq!(gone, ["notes-auto-2026-01-01.aio-backup"]);
         assert!(timed_names("notes", names.iter().map(|n| n.to_string()), 0).1.len() == 2, "at least one kept");
+    }
+
+    #[test]
+    fn a_file_bigger_than_a_part_comes_back_whole() {
+        let d = tempfile::tempdir().unwrap();
+        let data = d.path().join("app/data");
+        let store = data.join("state.db");
+        std::fs::create_dir_all(data.join("media")).unwrap();
+        Connection::open(&store).unwrap().execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1)").unwrap();
+        let sizes = [0, 1, PART - 1, PART, PART + 1, 3 * PART + 7];
+        let body = |n: u64| (0..n).map(|i| (i * 31 % 251) as u8).collect::<Vec<u8>>();
+        for n in sizes {
+            std::fs::write(data.join(format!("media/{n}.bin")), body(n)).unwrap();
+        }
+        let file = d.path().join("app.aio-backup");
+        backup_all("app", &store, &file).unwrap();
+        for n in sizes {
+            std::fs::write(data.join(format!("media/{n}.bin")), "later").unwrap();
+        }
+        let dirs = crate::paths::AppDirs::at(&d.path().join("app"), "app").unwrap();
+        restore("app", &file, &store, &dirs).unwrap();
+        for n in sizes {
+            assert_eq!(std::fs::read(data.join(format!("media/{n}.bin"))).unwrap(), body(n), "{n} bytes");
+        }
+        let db = Connection::open(&store).unwrap();
+        let left: i64 = db.query_row("SELECT count(*) FROM sqlite_master WHERE name LIKE 'aio_%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "the backup's own tables go");
+        assert!(!with_suffix(&store, ".restoring.tmp").exists());
     }
 
     #[test]

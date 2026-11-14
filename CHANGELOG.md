@@ -52,6 +52,12 @@ version may break things.
 
 ### Fixed
 
+- A whole backup (`ax backup`, `backup_every`) of a data dir holding a
+  file over 1 GB failed with "string or blob too big": SQLite holds at
+  most 1e9 bytes in one value. A file is now kept in 256 MB parts, read
+  and restored a part at a time instead of whole in memory, and a
+  restored store no longer keeps the files' space. A backup holding a
+  file over 256 MB needs this version to restore.
 - `db::Select` put table and column names into its statement unquoted,
   so a plain name that is also an SQL keyword (`order`, `group`,
   `limit`) made a syntax error. Every name is quoted now.

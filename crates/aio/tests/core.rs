@@ -841,6 +841,44 @@ fn a_whole_backup_holds_the_app_files_but_not_its_keys() {
     assert!(aio::backup::left_out("reports/.r2.json.9.tmp") && !aio::backup::left_out("reports/r1.json"));
 }
 
+/// SQLite holds at most 1e9 bytes in one value: a bigger file still goes
+/// into a whole backup and comes back whole. Ignored: it writes over 2 GB
+/// (`cargo test --test core -- --ignored a_file_over`).
+#[test]
+#[ignore]
+fn a_file_over_a_gigabyte_is_backed_up_and_restored() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("app");
+    let data = root.join("data");
+    let store = data.join("state.db");
+    std::fs::create_dir_all(&data).unwrap();
+    Handle::<Todo>::open(&store).unwrap().add("one").unwrap();
+    let big = data.join("video.bin");
+    let len = 1_100_000_000u64;
+    let mut f = std::fs::File::create(&big).unwrap();
+    f.set_len(len).unwrap();
+    f.write_all(b"head").unwrap();
+    f.seek(SeekFrom::End(-4)).unwrap();
+    f.write_all(b"tail").unwrap();
+    drop(f);
+    let file = d.path().join("todo.aio-backup");
+    aio::backup::backup_all("todo", &store, &file).unwrap();
+    std::fs::write(&big, "later").unwrap();
+    let dirs = aio::paths::AppDirs::at(&root, "todo").unwrap();
+    aio::backup::restore("todo", &file, &store, &dirs).unwrap();
+    drop(dirs);
+    let mut f = std::fs::File::open(&big).unwrap();
+    assert_eq!(f.metadata().unwrap().len(), len);
+    let mut b = [0u8; 4];
+    f.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"head");
+    f.seek(SeekFrom::End(-4)).unwrap();
+    f.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"tail");
+    assert_eq!(Handle::<Todo>::open(&store).unwrap().state().items.len(), 1);
+}
+
 /// Run as a child by `a_dead_holder_frees_the_lock`: hold the lock, then wait to be killed.
 #[test]
 fn lock_holder() {

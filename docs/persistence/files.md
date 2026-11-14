@@ -205,9 +205,10 @@ for a whole home.
 ## Limits, compared with aio
 
 - No WAL-checkpoint setting: SQLite checkpoints on its own.
-- A whole backup reads each file of `data/` into memory as it copies it:
-  a `files/` folder of many gigabytes makes a backup that large and slow.
-  Back very large blob stores up with your own tools.
+- A whole backup copies all of `data/` into one file, a part of each
+  file (256 MB) at a time: a `files/` folder of many gigabytes makes a
+  backup that large and slow, and a restore needs that much free space
+  again. Back very large blob stores up with your own tools.
 
 ## Common mistakes
 
