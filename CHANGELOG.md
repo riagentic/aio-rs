@@ -52,6 +52,10 @@ version may break things.
 
 ### Fixed
 
+- A memo of a memo could still glitch: an effect older than the outer
+  memo, reading it and a signal the inner one follows, ran once with the
+  outer memo's old value and once more with the new one. A read now
+  first makes each memo it depends on that waits, however deep.
 - A whole backup (`ax backup`, `backup_every`) of a data dir holding a
   file over 1 GB failed with "string or blob too big": SQLite holds at
   most 1e9 bytes in one value. A file is now kept in 256 MB parts, read

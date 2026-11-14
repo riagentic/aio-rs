@@ -366,6 +366,21 @@ fn an_effect_older_than_a_global_memo_it_reads_never_sees_it_stale() {
     assert_eq!(said(), ["1 11"], "one run, with the sum of the new left");
 }
 
+static DOUBLE: GlobalMemo<u32> = GlobalMemo::new(|| SUM.get() * 2);
+
+#[test]
+fn an_effect_older_than_a_memo_of_a_memo_never_sees_it_stale() {
+    fn app() -> View {
+        effect(|| log(format!("{} {}", LEFT.get(), DOUBLE.get())));
+        rsx! { button { "data-t": "left", onclick: move |_| LEFT.update(|n| *n += 1), "+" } }
+    }
+    said();
+    let mut p = TestPage::mount(app);
+    assert_eq!(said(), ["0 20"]);
+    p.click("left");
+    assert_eq!(said(), ["1 22"], "one run, with the double of the new sum");
+}
+
 #[test]
 fn an_error_in_a_boundarys_own_fallback_reaches_the_boundary_above() {
     fn app() -> View {

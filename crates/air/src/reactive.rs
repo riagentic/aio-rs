@@ -84,6 +84,8 @@ struct Node {
     quiet: bool,
     /// A memo queued to run again: a read makes it now ([`pull`]).
     dirty: bool,
+    /// A memo's value (its signal): the memo that makes it ([`pull`]).
+    maker: Option<Key>,
     /// A signal's writes so far: a [`TrackedMemo`](crate::TrackedMemo) entry is fresh while they stay.
     writes: u32,
 }
@@ -114,6 +116,8 @@ struct Rt {
     /// The effect whose run this is, whatever reads follow meanwhile
     /// (`untrack`): its own writes don't wake a quiet one.
     running: Option<Key>,
+    /// How many memos are [`Node::dirty`]: none, and a read pulls nothing.
+    waiting: u32,
 }
 
 enum Later {
@@ -275,6 +279,7 @@ fn dispose_then(k: Key, soon: bool) {
         while let Some(k) = stack.pop() {
             let Some(n) = rt.node_mut(k) else { continue };
             n.live = false;
+            let was = std::mem::take(&mut n.dirty);
             trash.push((n.value.take(), n.run.take(), n.extra.as_mut().map(|e| std::mem::take(&mut e.ctx))));
             n.subs = vec![];
             n.deps = vec![];
@@ -284,6 +289,7 @@ fn dispose_then(k: Key, soon: bool) {
             }
             cleanups.append(&mut n.cleanups);
             rt.free.push(k.idx);
+            rt.waiting = rt.waiting.saturating_sub(u32::from(was));
         }
         (cleanups, trash)
     });
@@ -371,8 +377,10 @@ fn notify(s: Key, checked: bool) {
         for e in &woken {
             if let Some(n) = rt.node_mut(*e)
                 && n.kind == Kind::Memo
+                && !n.dirty
             {
                 n.dirty = true;
+                rt.waiting += 1;
             }
         }
         rt.queue.extend(woken);
@@ -468,9 +476,11 @@ fn run_effect(e: Key) {
     let body = rt(|rt| {
         let n = rt.node_mut(e)?;
         n.runs += 1;
-        n.dirty = false;
+        let was = std::mem::take(&mut n.dirty);
         n.deps.clear();
-        n.run.clone()
+        let run = n.run.clone();
+        rt.waiting = rt.waiting.saturating_sub(u32::from(was));
+        run
     });
     let Some(body) = body else { return };
     let _f = push_frame(None);
@@ -1348,8 +1358,8 @@ impl<T> PartialEq for Memo<T> {
 impl<T: 'static> Memo<T> {
     /// Its value, made again first if a write it read waits in the queue
     /// (in a batch, a handler, a flush), as AIR's `computed` makes a dirty
-    /// value on read (`signal.ts:859`). Pulled one level: a memo of a memo
-    /// that waits is made again when that one runs.
+    /// value on read (`signal.ts:859`), and first each memo it read that
+    /// waits (a memo of a memo), however deep.
     fn pulled(&self) -> Signal<T> {
         pull(self.node);
         self.out
@@ -1409,8 +1419,24 @@ impl<T: std::fmt::Debug + 'static> std::fmt::Debug for Memo<T> {
     }
 }
 
-/// Memo `e`'s run now if it is queued ([`Node::dirty`]); the queue then skips it.
+/// Memo `e`'s run now if it is queued ([`Node::dirty`]), or if a memo it
+/// read waits and its run makes a new value; the queue then skips them.
 fn pull(e: Key) {
+    if RT.with_borrow(|rt| rt.waiting > 0) {
+        settle(e, 0);
+    }
+}
+
+/// [`pull`] of `e`: the memos it read first, deepest first (`depth`: a
+/// guard, memos never read themselves round).
+fn settle(e: Key, depth: u32) {
+    let makers: Vec<Key> = RT.with_borrow(|rt| match rt.node(e) {
+        Some(n) if !n.dirty && depth < 256 => n.deps.iter().filter_map(|s| rt.node(*s)?.maker).collect(),
+        _ => vec![],
+    });
+    for m in makers {
+        settle(m, depth + 1);
+    }
     if RT.with_borrow(|rt| rt.node(e).is_some_and(|n| n.dirty)) {
         run_effect(e);
     }
@@ -1449,7 +1475,9 @@ fn memo_dyn<T: PartialEq + 'static>(mut f: Box<dyn FnMut() -> T>, mut seed: Opti
             })),
         }
     });
-    Memo { out: out.get().expect("air: a memo ran"), node }
+    let out = out.get().expect("air: a memo ran");
+    rt(|rt| _ = rt.node_mut(out.key).map(|n| n.maker = Some(node)));
+    Memo { out, node }
 }
 
 /// `f`'s value, made again when what it read changes (a hook).
