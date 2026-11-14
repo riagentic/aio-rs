@@ -130,7 +130,7 @@ pub fn hint(s: &Snapshot, t: &Vitals, loopback: bool) -> Option<Hint> {
         });
     }
     if let Some(at) = lp.layer.since
-        && lp.queue > t.queue.frozen
+        && lp.queue >= t.queue.frozen
         && tr.since.is_none_or(|tr| at < tr)
     {
         let top = lp.last.as_ref().map_or("none".into(), |(c, _)| c.clone());
@@ -566,6 +566,9 @@ mod tests {
         };
         let h = hint(&s, &t(), false).unwrap();
         assert!(h.cause.contains("queue backed up to 1500") && h.evidence[1].contains("market.tick"), "{h:?}");
+        // Exactly at the threshold the loop is graded frozen, so it's named too.
+        let at = Snapshot { event_loop: Loop { queue: t().queue.frozen, ..s.event_loop.clone() }, ..s.clone() };
+        assert!(hint(&at, &t(), false).is_some_and(|h| h.cause.contains("queue backed up")));
         // The link went bad first: the queue is not the cause.
         let late = Snapshot { transport: Layer { since: Some(10), ..s.transport.clone() }, ..s };
         assert_eq!(hint(&late, &t(), false), None);
