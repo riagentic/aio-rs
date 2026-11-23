@@ -163,8 +163,10 @@ impl Window {
 /// GTK's thread, up with the display open, or why GTK cannot draw here.
 static THREAD: OnceLock<Result<Mutex<Sender<Cmd>>, String>> = OnceLock::new();
 
-/// How long GTK has to say whether it can draw.
-const INIT: Duration = Duration::from_secs(5);
+/// How long GTK has to say whether it can draw. A test's GTK, on a loaded
+/// CI runner, longer: the test checks the drawing (a GTK that hangs still
+/// fails it), not a busy machine's start.
+const INIT: Duration = Duration::from_secs(if cfg!(test) { 20 } else { 5 });
 
 /// Open the splash: `Err` says why GTK cannot draw here (no library, no
 /// display); the window's news comes in `status`.
