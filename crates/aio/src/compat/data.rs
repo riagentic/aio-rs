@@ -250,7 +250,8 @@ impl Home {
         // profile ever opens it; aio's own meta.json is kept as it is.
         let meta = data.join("meta.json");
         if !meta.exists() {
-            let now = format!("{:.3}", jiff::Timestamp::now());
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+            let now = crate::log::stamp(now as i64);
             let mut m = json!({ "appId": app, "aio": crate::BUILT_BY, "createdAt": now, "updatedAt": now });
             if let Some(p) = profile {
                 m["profile"] = json!(p);

@@ -23,7 +23,8 @@ air = { package = "aio-rs-air", version = "0.4.2", path = "crates/air" }
 air-macro = { package = "aio-rs-air-macro", version = "0.4.2", path = "crates/air-macro" }
 aio-hotpatch = { package = "aio-rs-hotpatch", version = "0.4.2", path = "crates/hotpatch" }
 aio-shell = { package = "aio-rs-shell", version = "0.4.2", path = "crates/aio-shell" }
-# Dates and time zones (chrono is unmaintained: RUSTSEC-2026-0543).
+# ax's dates and time zones, the tz database the runtime's tests check
+# against (chrono is unmaintained: RUSTSEC-2026-0543).
 jiff = { version = "1", default-features = false, features = ["std"] }
 
 # Small debug builds: line numbers for our crates, no debug info for the

@@ -20,8 +20,11 @@ version may break things.
   the `AIO_RELEASE_KEY` secret or a pinned key (a dry run without the
   secret, as a fork's pull request, is unsigned), and `ax release --aio`
   refuses a key that isn't the pinned one (CONTRIBUTING.md, Signing).
-- chrono, unmaintained (RUSTSEC-2026-0543), is replaced by jiff: dates,
-  time zones and cron's wall times.
+- chrono, unmaintained (RUSTSEC-2026-0543), is gone. The runtime keeps
+  its own calendar and asks the OS for the local offset (`localtime_r`,
+  Windows' time zone API, the page's `Date`): no date crate in an app,
+  and cron's DST rules checked against the tz database in its tests.
+  `ax` reads dates with jiff.
 - An app's update follows a key roster from a release newer than itself
   only: an old manifest served again (its roster still vouched by a
   trusted key) brought back a key a later roster had dropped, so a leaked
@@ -32,6 +35,11 @@ version may break things.
 - The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.
+
+### Added
+
+- `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
+  it, or with an offset) as ms since the epoch.
 
 ### Changed
 

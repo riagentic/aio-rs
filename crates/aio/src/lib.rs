@@ -89,6 +89,7 @@ pub mod auth {
 }
 mod answer;
 pub mod big;
+mod civil;
 pub use big::Big;
 pub mod colors;
 pub mod columns;

@@ -150,7 +150,6 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-util",
- "jiff",
  "jni",
  "libc",
  "serde",

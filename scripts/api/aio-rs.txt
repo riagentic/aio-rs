@@ -1651,6 +1651,7 @@ aio::log::configure: fn configure(cfg: &crate::config::Log)
 aio::log::enabled: fn enabled(level: Level) -> bool
 aio::log::finish: fn finish()
 aio::log::painted: fn painted(line: &str) -> std::borrow::Cow<'_, str>
+aio::log::parse_stamp: fn parse_stamp(s: &str) -> Option<i64>
 aio::log::render: fn render(level: Level, cat: &str, msg: &str, data: &[(&str, &dyn Display)]) -> String
 aio::log::runtime_noise: fn runtime_noise(line: &str) -> Option<String>
 aio::log::safe: fn safe(s: &str) -> String
