@@ -34,7 +34,7 @@ fn level(word: &str) -> Option<Level> {
 
 /// Ms since the epoch of an RFC 3339 time (`2026-10-27T23:01:02.123Z`).
 fn utc(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.timestamp_millis())
+    s.parse::<jiff::Timestamp>().ok().map(|t| t.as_millisecond())
 }
 
 /// A file line split into its stamp and its text (pure).
@@ -133,12 +133,13 @@ pub fn since(raw: &str, now: i64) -> Option<i64> {
     if let Some(t) = utc(raw) {
         return Some(t);
     }
-    use chrono::{NaiveDate, NaiveDateTime, TimeZone};
+    use jiff::civil::{Date, DateTime};
     let t = ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M"]
         .iter()
-        .find_map(|f| NaiveDateTime::parse_from_str(raw, f).ok())
-        .or_else(|| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?.and_hms_opt(0, 0, 0))?;
-    chrono::Local.from_local_datetime(&t).earliest().map(|t| t.timestamp_millis())
+        .find_map(|f| DateTime::strptime(f, raw).ok())
+        .or_else(|| Some(Date::strptime("%Y-%m-%d", raw).ok()?.at(0, 0, 0, 0)))?;
+    // A time that happens twice: the first; one skipped: just after the gap.
+    jiff::tz::TimeZone::system().to_timestamp(t).ok().map(|t| t.as_millisecond())
 }
 
 /// The flags `ax logs` takes, parsed; unknown ones are refused (else a

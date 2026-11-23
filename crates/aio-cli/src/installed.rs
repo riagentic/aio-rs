@@ -189,7 +189,7 @@ pub fn from_appimage(p: &Places, app: &crate::build::App, image: &Path) -> Resul
     std::fs::copy(image, &part).map_err(e(&part))?;
     std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).map_err(e(&part))?;
     std::fs::rename(&part, &file).map_err(e(&file))?;
-    let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let at = jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ");
     let source = image.file_name().unwrap_or_default().to_string_lossy();
     let rec =
         serde_json::json!({ "id": app.id, "version": app.version, "source": source, "installedAt": at.to_string() });

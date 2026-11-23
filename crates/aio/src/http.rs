@@ -152,7 +152,7 @@ pub struct CookieOpts {
     pub domain: Option<String>,
     /// Seconds.
     pub max_age: Option<i64>,
-    pub expires: Option<chrono::DateTime<chrono::Utc>>,
+    pub expires: Option<std::time::SystemTime>,
     pub http_only: bool,
     pub secure: bool,
     pub same_site: Option<SameSite>,
@@ -191,7 +191,7 @@ pub fn set_cookie(name: &str, value: &str, o: &CookieOpts) -> Option<String> {
         s += &format!("; Max-Age={m}");
     }
     if let Some(e) = o.expires {
-        s += &format!("; Expires={}", e.format("%a, %d %b %Y %H:%M:%S GMT"));
+        s += &format!("; Expires={}", httpdate::fmt_http_date(e));
     }
     if o.http_only {
         s += "; HttpOnly";
@@ -1854,7 +1854,7 @@ mod tests {
         let all = CookieOpts {
             domain: Some("x.local".into()),
             max_age: Some(60),
-            expires: chrono::DateTime::from_timestamp(0, 0),
+            expires: Some(std::time::SystemTime::UNIX_EPOCH),
             secure: true,
             same_site: Some(SameSite::Strict),
             path: Some("/a; HttpOnly".into()),

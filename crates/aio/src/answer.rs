@@ -124,7 +124,8 @@ impl Reply {
         parts.is_some_and(|p| p.tx.try_send(serde_json::json!({ "t": "part", "op": p.op, "c": piece })).is_ok())
     }
 
-    /// The method called.
+    /// The method called (a lost link's error names it).
+    #[cfg(any(feature = "server", target_arch = "wasm32"))]
     pub(crate) fn method(&self) -> &str {
         &self.0.method
     }

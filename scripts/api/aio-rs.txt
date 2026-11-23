@@ -752,7 +752,6 @@ aio::cpace::start: fn start(pin: &str, fp: &[u8], y: [u8; 32], sid: [u8; 16]) ->
 aio::cpace::unb64: fn unb64<const N: usize>(s: &serde_json::Value) -> Option<[u8; N]>
 aio::cpace::unb64_vec: fn unb64_vec(s: &serde_json::Value) -> Option<Vec<u8>>
 aio::cron::Cron::next: fn next(&self, after: i64) -> Option<i64>
-aio::cron::Cron::next_in: fn next_in<Z: TimeZone>(&self, tz: &Z, after: i64) -> Option<i64>
 aio::cron::Cron::parse: fn parse(expr: &str) -> Result<Self, String>
 aio::cron::local: fn local() -> bool
 aio::cron::set_local: fn set_local(local: bool)
@@ -1013,7 +1012,7 @@ aio::held::State::Open(std::sync::Arc<T>)
 aio::held::State::Opening
 aio::held::State::value: fn value(&self) -> Option<&Arc<T>>
 aio::http::CookieOpts.domain: Option<String>
-aio::http::CookieOpts.expires: Option<chrono::DateTime<chrono::Utc>>
+aio::http::CookieOpts.expires: Option<std::time::SystemTime>
 aio::http::CookieOpts.http_only: bool
 aio::http::CookieOpts.max_age: Option<i64>
 aio::http::CookieOpts.path: Option<String>

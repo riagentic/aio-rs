@@ -2,102 +2,125 @@
 //! caller can act on. Each one's text is the message it always was, so logs
 //! and the `updates` cell's `error` read the same.
 use super::FORMAT;
-use std::io;
+use std::{fmt, io};
 
 /// Why an update step failed: a release refused (its signature, its keys,
 /// what it is for), a patch that can't be used, a key that isn't one, the
 /// data here unreadable, or the runtime's transport. Its `Display` is the
 /// message for a person (`release refused: {e}`).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum UpdateError {
     /// The signature doesn't hold over what was signed: tampered with, or
     /// a damaged download.
-    #[error("its signature is wrong")]
     BadSignature,
     /// Signed by a key the app doesn't trust (not built in, nor vouched for
     /// by a roster it trusts).
-    #[error("it is signed by a key this app doesn't trust")]
     UntrustedKey,
     /// Its key roster isn't signed by a key the app trusts.
-    #[error("its key roster is not signed by a trusted key")]
     UntrustedRoster,
     /// Its key roster names no key.
-    #[error("its key roster is empty")]
     EmptyRoster,
     /// Its patch list isn't signed by the release's own key.
-    #[error("its patch list is not signed by the release's key")]
     UnsignedPatches,
     /// The release served at `url` was refused, and why (a runtime's
     /// [`check_served`](super::check_served) of what it downloaded).
-    #[error("release refused: {why} ({url})")]
     Refused {
         url: String,
-        #[source]
         why: Box<UpdateError>,
     },
     /// A manifest format this build doesn't read (a newer `ax release`'s).
-    #[error("manifest format {0} (this build reads {FORMAT})")]
     Format(u32),
     /// A release for another app, channel, OS or CPU (`what`: `app`,
     /// `channel`, `os` or `arch`).
-    #[error("it is for {what} {got}, not {want}")]
     NotForThisApp { what: &'static str, got: String, want: String },
     /// A version or file name that is a path, not a plain name.
-    #[error("its {0} is not a plain name")]
     NotPlainName(&'static str),
     /// Its `minFrom` is not a version.
-    #[error("its minFrom {0:?} is not a version")]
     MinFrom(String),
     /// Bytes that aren't a manifest, or a release (`what`), as JSON.
-    #[error("not a {what}: {error}")]
     Malformed {
         what: &'static str,
-        #[source]
         error: serde_json::Error,
     },
     /// The patch list is for another release (or another build of it).
-    #[error("its patch list is for another release")]
     PatchesForAnotherRelease,
     /// None of the release's patches starts from the version installed: the
     /// whole release is downloaded instead.
-    #[error("none of its {patches} patches starts from {from}, the version installed here")]
     NoPatch { from: String, patches: usize },
     /// The patch is over half the release: not worth it.
-    #[error("its patch is {size} bytes, over half of the whole release ({release})")]
     PatchTooBig { size: u64, release: u64 },
     /// A git source has no branch or tag `name`.
-    #[error("no branch or tag named exactly {name:?} (the remote has {remote_has})")]
     NoRef { name: String, remote_has: String },
     /// A git ref that names something other than a commit id.
-    #[error("{name}: {sha:?} is not a commit id")]
     NotACommit { name: String, sha: String },
     /// Not a key: not an Ed25519 PKCS#8 signing key, not `ed25519:<base64>`
     /// or `ssh-ed25519 …`; why, in words.
-    #[error("{0}")]
     KeyFormat(String),
     /// The system's randomness gave no key.
-    #[error("no key generated")]
     Keygen,
     /// The store here can't be read (to know its data's versions).
-    #[error("{0}")]
-    Store(#[source] Box<dyn std::error::Error + Send + Sync>),
+    Store(Box<dyn std::error::Error + Send + Sync>),
     /// JSON that couldn't be written (a roster's keys, a patch list).
-    #[error("{0}")]
-    Json(#[source] serde_json::Error),
+    Json(serde_json::Error),
     /// The host answered `url` with HTTP `status` (404: no such release).
-    #[error("{url}: http status: {status}")]
     Http { url: String, status: u16 },
     /// `url` couldn't be reached: why, in words.
-    #[error("{url}: {message}")]
     Network { url: String, message: String },
     /// A file, a process or a download failed (its kind says how).
-    #[error(transparent)]
     Io(io::Error),
     /// A runtime's own failure (an app's own [`Runtime`](super::Runtime)),
     /// in its words.
-    #[error("{0}")]
     Other(String),
+}
+
+impl fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadSignature => f.write_str("its signature is wrong"),
+            Self::UntrustedKey => f.write_str("it is signed by a key this app doesn't trust"),
+            Self::UntrustedRoster => f.write_str("its key roster is not signed by a trusted key"),
+            Self::EmptyRoster => f.write_str("its key roster is empty"),
+            Self::UnsignedPatches => f.write_str("its patch list is not signed by the release's key"),
+            Self::Refused { url, why } => write!(f, "release refused: {why} ({url})"),
+            Self::Format(n) => write!(f, "manifest format {n} (this build reads {FORMAT})"),
+            Self::NotForThisApp { what, got, want } => write!(f, "it is for {what} {got}, not {want}"),
+            Self::NotPlainName(what) => write!(f, "its {what} is not a plain name"),
+            Self::MinFrom(v) => write!(f, "its minFrom {v:?} is not a version"),
+            Self::Malformed { what, error } => write!(f, "not a {what}: {error}"),
+            Self::PatchesForAnotherRelease => f.write_str("its patch list is for another release"),
+            Self::NoPatch { from, patches } => {
+                write!(f, "none of its {patches} patches starts from {from}, the version installed here")
+            }
+            Self::PatchTooBig { size, release } => {
+                write!(f, "its patch is {size} bytes, over half of the whole release ({release})")
+            }
+            Self::NoRef { name, remote_has } => {
+                write!(f, "no branch or tag named exactly {name:?} (the remote has {remote_has})")
+            }
+            Self::NotACommit { name, sha } => write!(f, "{name}: {sha:?} is not a commit id"),
+            Self::KeyFormat(m) | Self::Other(m) => f.write_str(m),
+            Self::Keygen => f.write_str("no key generated"),
+            Self::Store(e) => e.fmt(f),
+            Self::Json(e) => e.fmt(f),
+            Self::Http { url, status } => write!(f, "{url}: http status: {status}"),
+            Self::Network { url, message } => write!(f, "{url}: {message}"),
+            Self::Io(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for UpdateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Refused { why, .. } => Some(why),
+            Self::Malformed { error, .. } | Self::Json(error) => Some(error),
+            Self::Store(e) => Some(&**e),
+            // Transparent: the I/O error's own source, not that error.
+            Self::Io(e) => e.source(),
+            _ => None,
+        }
+    }
 }
 
 impl UpdateError {

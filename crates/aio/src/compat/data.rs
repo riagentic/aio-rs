@@ -250,7 +250,7 @@ impl Home {
         // profile ever opens it; aio's own meta.json is kept as it is.
         let meta = data.join("meta.json");
         if !meta.exists() {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let now = format!("{:.3}", jiff::Timestamp::now());
             let mut m = json!({ "appId": app, "aio": crate::BUILT_BY, "createdAt": now, "updatedAt": now });
             if let Some(p) = profile {
                 m["profile"] = json!(p);

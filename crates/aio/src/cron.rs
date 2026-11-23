@@ -8,7 +8,8 @@
 //! exists after it; a time that happens twice runs once, the first time. The
 //! next run is always found after the last one, so a clock step back never
 //! runs a slot twice (and after sleep a missed run fires once: the scheduler).
-use chrono::{Datelike, Duration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use jiff::ToSpan;
+use jiff::civil::{Date, DateTime};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static LOCAL: AtomicBool = AtomicBool::new(false);
@@ -100,9 +101,9 @@ impl Cron {
         })
     }
 
-    fn day_ok(&self, d: NaiveDate) -> bool {
+    fn day_ok(&self, d: Date) -> bool {
         let dom = self.days & (1 << d.day()) != 0;
-        let dow = self.weekdays & (1 << d.weekday().num_days_from_sunday()) != 0;
+        let dow = self.weekdays & (1 << d.weekday().to_sunday_zero_offset()) != 0;
         match (self.days_set, self.weekdays_set) {
             (true, true) => dom || dow,
             (true, false) => dom,
@@ -111,21 +112,21 @@ impl Cron {
         }
     }
 
-    /// The first matching local wall-clock minute after `t` (naive local time).
-    fn next_naive(&self, t: NaiveDateTime) -> Option<NaiveDateTime> {
-        let mut t = t.with_second(0)?.with_nanosecond(0)? + Duration::minutes(1);
+    /// The first matching wall-clock minute after wall time `t`.
+    fn next_wall(&self, t: DateTime) -> Option<DateTime> {
+        let mut t = t.date().at(t.hour(), t.minute(), 0, 0).checked_add(1.minute()).ok()?;
         // Five years is past any match a valid expression has (Feb 29 + a weekday).
-        let end = t + Duration::days(5 * 366);
+        let end = t.checked_add((5 * 366).days()).ok()?;
         while t < end {
             if self.months & (1 << t.month()) == 0 {
                 let (y, m) = if t.month() == 12 { (t.year() + 1, 1) } else { (t.year(), t.month() + 1) };
-                t = NaiveDate::from_ymd_opt(y, m, 1)?.and_hms_opt(0, 0, 0)?;
+                t = Date::new(y, m, 1).ok()?.at(0, 0, 0, 0);
             } else if !self.day_ok(t.date()) {
-                t = t.date().succ_opt()?.and_hms_opt(0, 0, 0)?;
+                t = t.date().tomorrow().ok()?.at(0, 0, 0, 0);
             } else if self.hours & (1 << t.hour()) == 0 {
-                t = t.with_minute(0)? + Duration::hours(1);
+                t = t.date().at(t.hour(), 0, 0, 0).checked_add(1.hour()).ok()?;
             } else if self.minutes & (1 << t.minute()) == 0 {
-                t += Duration::minutes(1);
+                t = t.checked_add(1.minute()).ok()?;
             } else {
                 return Some(t);
             }
@@ -133,36 +134,31 @@ impl Cron {
         None
     }
 
-    /// The next run after `after` (ms since the epoch), in `tz`'s wall time.
-    pub fn next_in<Z: TimeZone>(&self, tz: &Z, after: i64) -> Option<i64> {
-        let from = tz.timestamp_millis_opt(after).single()?.naive_local();
-        self.next_with(from, after, |n| tz.from_local_datetime(&n).map(|t| t.timestamp_millis()))
+    /// The next run after `after` (ms since the epoch), in local wall time
+    /// (`true`) or UTC's.
+    fn next_in(&self, local: bool, after: i64) -> Option<i64> {
+        self.next_with(zone::wall(local, after)?, after, |n| zone::instants(local, n))
     }
 
     /// The next run after instant `after`, whose wall time is `from`;
     /// `resolve` turns a wall time into its instants (none: skipped; two: it
     /// happens twice).
-    fn next_with(
-        &self,
-        mut from: NaiveDateTime,
-        after: i64,
-        resolve: impl Fn(NaiveDateTime) -> LocalResult<i64>,
-    ) -> Option<i64> {
+    fn next_with(&self, mut from: DateTime, after: i64, resolve: impl Fn(DateTime) -> Instants) -> Option<i64> {
         loop {
-            let n = self.next_naive(from)?;
+            let n = self.next_wall(from)?;
             match resolve(n) {
-                LocalResult::Single(t) => return Some(t),
+                Instants::One(t) => return Some(t),
                 // Happens twice (clocks went back): the first one. Searched
                 // from inside the repeated hour, the first one is past: that
                 // wall time has been, and it runs once, so on to the next.
-                LocalResult::Ambiguous(first, _) if first > after => return Some(first),
-                LocalResult::Ambiguous(..) => from = n,
+                Instants::Two(first, _) if first > after => return Some(first),
+                Instants::Two(..) => from = n,
                 // Skipped (clocks went forward): the first minute that exists.
-                LocalResult::None => {
+                Instants::None => {
                     let mut m = n;
                     for _ in 0..24 * 60 {
-                        m += Duration::minutes(1);
-                        if let Some(t) = resolve(m).earliest() {
+                        m = m.checked_add(1.minute()).ok()?;
+                        if let Some(t) = resolve(m).first() {
                             return Some(t);
                         }
                     }
@@ -174,9 +170,99 @@ impl Cron {
 
     /// The next run after `after`: in UTC, or local time after [`set_local`].
     pub fn next(&self, after: i64) -> Option<i64> {
-        match local() {
-            true => self.next_in(&Local, after),
-            false => self.next_in(&Utc, after),
+        self.next_in(local(), after)
+    }
+}
+
+/// A wall time's instants (ms since the epoch): one; two, the first and the
+/// second (clocks went back over it); or none (clocks went forward over it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Instants {
+    One(i64),
+    Two(i64, i64),
+    None,
+}
+
+impl Instants {
+    fn first(self) -> Option<i64> {
+        match self {
+            Self::One(t) | Self::Two(t, _) => Some(t),
+            Self::None => None,
+        }
+    }
+}
+
+/// Wall times in UTC or this machine's zone: its tz database's rules.
+#[cfg(not(target_arch = "wasm32"))]
+mod zone {
+    use super::Instants;
+    use jiff::civil::DateTime;
+    use jiff::tz::{AmbiguousOffset, TimeZone};
+
+    fn tz(local: bool) -> TimeZone {
+        if local { TimeZone::system() } else { TimeZone::UTC }
+    }
+
+    /// The wall time at instant `ms`.
+    pub(super) fn wall(local: bool, ms: i64) -> Option<DateTime> {
+        Some(tz(local).to_datetime(jiff::Timestamp::from_millisecond(ms).ok()?))
+    }
+
+    pub(super) fn instants(local: bool, t: DateTime) -> Instants {
+        instants_in(&tz(local), t)
+    }
+
+    pub(super) fn instants_in(tz: &TimeZone, t: DateTime) -> Instants {
+        let at = |o: jiff::tz::Offset| o.to_timestamp(t).ok().map(|t| t.as_millisecond());
+        match tz.to_ambiguous_timestamp(t).offset() {
+            AmbiguousOffset::Unambiguous { offset } => at(offset).map_or(Instants::None, Instants::One),
+            AmbiguousOffset::Fold { before, after } => match (at(before), at(after)) {
+                (Some(a), Some(b)) => Instants::Two(a, b),
+                (a, b) => a.or(b).map_or(Instants::None, Instants::One),
+            },
+            AmbiguousOffset::Gap { .. } => Instants::None,
+        }
+    }
+}
+
+/// Wall times in UTC or the page's zone: the browser's `Date`, as it reads
+/// them. A clock change there moves by an hour: a wall time `Date` places
+/// that reads back otherwise was skipped; one an hour later that reads the
+/// same happens twice.
+#[cfg(target_arch = "wasm32")]
+mod zone {
+    use super::Instants;
+    use jiff::civil::{Date, DateTime};
+    use jiff::{Timestamp, tz::TimeZone};
+
+    pub(super) fn wall(local: bool, ms: i64) -> Option<DateTime> {
+        if !local {
+            return Some(TimeZone::UTC.to_datetime(Timestamp::from_millisecond(ms).ok()?));
+        }
+        let d = js_sys::Date::new(&(ms as f64).into());
+        let n = |v: u32| i8::try_from(v).ok();
+        let y = i16::try_from(d.get_full_year()).ok()?;
+        Some(Date::new(y, n(d.get_month() + 1)?, n(d.get_date())?).ok()?.at(
+            n(d.get_hours())?,
+            n(d.get_minutes())?,
+            0,
+            0,
+        ))
+    }
+
+    pub(super) fn instants(local: bool, t: DateTime) -> Instants {
+        if !local {
+            return TimeZone::UTC.to_timestamp(t).map_or(Instants::None, |t| Instants::One(t.as_millisecond()));
+        }
+        let (mo, d, h, mi) = (t.month() - 1, t.day(), t.hour(), t.minute());
+        let at =
+            js_sys::Date::new_with_year_month_day_hr_min(t.year() as u32, mo.into(), d.into(), h.into(), mi.into());
+        let at = at.get_time() as i64;
+        const HOUR: i64 = 3_600_000;
+        match (wall(true, at) == Some(t), wall(true, at + HOUR) == Some(t)) {
+            (false, _) => Instants::None,
+            (true, true) => Instants::Two(at, at + HOUR),
+            (true, false) => Instants::One(at),
         }
     }
 }
@@ -184,14 +270,14 @@ impl Cron {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::FixedOffset;
+    use jiff::{Timestamp, tz::Offset};
 
     fn ms(s: &str) -> i64 {
-        chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()
+        s.parse::<Timestamp>().unwrap().as_millisecond()
     }
 
     fn at(t: i64) -> String {
-        Utc.timestamp_millis_opt(t).unwrap().format("%Y-%m-%d %H:%M %a").to_string()
+        Timestamp::from_millisecond(t).unwrap().strftime("%Y-%m-%d %H:%M %a").to_string()
     }
 
     #[test]
@@ -212,15 +298,14 @@ mod tests {
         assert_eq!(at(c.next(ms("2026-10-28T10:00:00Z")).unwrap()), "2026-10-29 09:00 Thu");
         set_local(true);
         let t = ms("2026-10-28T10:00:00Z");
-        assert_eq!(c.next(t), c.next_in(&Local, t), "[app] tz = \"local\"");
+        assert_eq!(c.next(t), c.next_in(true, t), "[app] tz = \"local\"");
         set_local(false);
-        assert_eq!(c.next(t), c.next_in(&Utc, t));
+        assert_eq!(c.next(t), c.next_in(false, t));
     }
 
     #[test]
     fn the_next_run_follows_the_fields() {
-        let utc = Utc;
-        let next = |e: &str, from: &str| at(Cron::parse(e).unwrap().next_in(&utc, ms(from)).unwrap());
+        let next = |e: &str, from: &str| at(Cron::parse(e).unwrap().next_in(false, ms(from)).unwrap());
         assert_eq!(next("0 9 * * 1", "2026-10-28T10:00:00Z"), "2026-11-02 09:00 Mon");
         assert_eq!(next("*/15 * * * *", "2026-10-28T10:07:30Z"), "2026-10-28 10:15 Wed");
         assert_eq!(next("0 0 29 2 *", "2026-03-01T00:00:00Z"), "2028-02-29 00:00 Tue");
@@ -231,23 +316,23 @@ mod tests {
     }
 
     /// Europe/Prague's 2026 clock changes: wall time → its instants.
-    fn prague(naive: NaiveDateTime) -> LocalResult<i64> {
-        let (cest, cet) = (FixedOffset::east_opt(7200).unwrap(), FixedOffset::east_opt(3600).unwrap());
-        let d = |s: &str| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
-        let at = |o: FixedOffset| o.from_local_datetime(&naive).unwrap().timestamp_millis();
+    fn prague(naive: DateTime) -> Instants {
+        let (cest, cet) = (Offset::constant(2), Offset::constant(1));
+        let d = wall;
+        let at = |o: Offset| o.to_timestamp(naive).unwrap().as_millisecond();
         if naive >= d("2026-03-29 02:00") && naive < d("2026-03-29 03:00") {
-            LocalResult::None
+            Instants::None
         } else if naive >= d("2026-10-25 02:00") && naive < d("2026-10-25 03:00") {
-            LocalResult::Ambiguous(at(cest), at(cet))
+            Instants::Two(at(cest), at(cet))
         } else if naive >= d("2026-03-29 03:00") && naive < d("2026-10-25 03:00") {
-            LocalResult::Single(at(cest))
+            Instants::One(at(cest))
         } else {
-            LocalResult::Single(at(cet))
+            Instants::One(at(cet))
         }
     }
 
-    fn wall(s: &str) -> NaiveDateTime {
-        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
+    fn wall(s: &str) -> DateTime {
+        DateTime::strptime("%Y-%m-%d %H:%M", s).unwrap()
     }
 
     #[test]
@@ -261,8 +346,7 @@ mod tests {
         assert_eq!(at(t), "2026-10-25 00:30 Sun", "02:30 CEST");
         // …and the run after it (searched from that run's wall time, as the
         // scheduler does) is the next day, not 02:30 CET an hour later.
-        let from =
-            Utc.timestamp_millis_opt(t).unwrap().with_timezone(&FixedOffset::east_opt(7200).unwrap()).naive_local();
+        let from = Offset::constant(2).to_datetime(Timestamp::from_millisecond(t).unwrap());
         assert_eq!(at(c.next_with(from, t, prague).unwrap()), "2026-10-26 01:30 Mon");
         // Searched from inside the repeated hour (02:10 CET, a start or a wake
         // then): 02:30 CEST is past, and 02:30 CET is the same wall time again:
@@ -271,5 +355,20 @@ mod tests {
         let next = c.next_with(wall("2026-10-25 02:10"), after, prague).unwrap();
         assert!(next > after, "{}", at(next));
         assert_eq!(at(next), "2026-10-26 01:30 Mon");
+    }
+
+    /// The tz database's rules are the ones the scheduler is tested with
+    /// above: every minute around both of Prague's 2026 clock changes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_real_zone_resolves_wall_times_as_its_clock_changes_say() {
+        let tz = jiff::tz::TimeZone::get("Europe/Prague").unwrap();
+        for day in ["2026-03-29 00:00", "2026-10-25 00:00", "2026-07-01 00:00"] {
+            let mut w = wall(day);
+            for _ in 0..6 * 60 {
+                assert_eq!(zone::instants_in(&tz, w), prague(w), "{w}");
+                w = w.checked_add(1.minute()).unwrap();
+            }
+        }
     }
 }

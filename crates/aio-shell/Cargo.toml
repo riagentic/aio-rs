@@ -21,7 +21,7 @@ base64 = "0.23"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 # The store's ISO times, as aio writes them (`toISOString`).
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 # air, aio-rs's renderer: the windows' views, their frames read for a held key's repeats.
 air = { workspace = true }
 # `ax dev`'s hot-patch (`dev`): the patch loaded into the running app.
