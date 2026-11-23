@@ -1778,6 +1778,8 @@ mod tests {
 
     /// The workflow's repointing step, run on a committed `ax create --aio`
     /// app: its tree still clean for `ax release` (a dirty one is refused).
+    /// Unix only, as the step: the workflow runs it on Linux and macOS.
+    #[cfg(unix)]
     #[test]
     fn the_repointed_app_is_still_a_clean_tree() {
         let has = |c: &str| std::process::Command::new(c).arg("--version").output().is_ok();

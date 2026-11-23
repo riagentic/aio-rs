@@ -130,7 +130,8 @@ Set the version (below), then, on the commit to release:
      data kept; [ci](docs/build/ci.md#the-android-gate));
    - a dry run of the release workflow (Actions → release → Run
      workflow): every archive built, smoked and installed by the one-line
-     installer on its OS, the files as the artifact `aio-rs-release`.
+     installer on its OS, the files as the artifact `aio-rs-release`
+     (unsigned when the run has no `AIO_RELEASE_KEY` secret).
 2. **Template app** (the app pipeline proven on each OS): in a throwaway
    folder, `ax create template`, `git init` and one commit (the build
    number), then on Linux `ax build template --deb --appimage --smoke`,

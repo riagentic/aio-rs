@@ -16,9 +16,12 @@ version may break things.
   check alone proved the files matched the list, not who made the list.)
   Releases before 0.5.0 are unsigned: `ax upgrade` to one of them from an
   ax that pins a key refuses; its `install.sh` still installs it.
-- A release is never unsigned: the release workflow stops without the
-  `AIO_RELEASE_KEY` secret or a pinned key, and `ax release --aio` refuses
-  a key that isn't the pinned one (CONTRIBUTING.md, Signing).
+- A release is never unsigned: the release workflow stops on a tag without
+  the `AIO_RELEASE_KEY` secret or a pinned key (a dry run without the
+  secret, as a fork's pull request, is unsigned), and `ax release --aio`
+  refuses a key that isn't the pinned one (CONTRIBUTING.md, Signing).
+- chrono, unmaintained (RUSTSEC-2026-0543), is replaced by jiff: dates,
+  time zones and cron's wall times.
 - An app's update follows a key roster from a release newer than itself
   only: an old manifest served again (its roster still vouched by a
   trusted key) brought back a key a later roster had dropped, so a leaked
@@ -42,6 +45,9 @@ version may break things.
   `UpdateError::Other(why)` (an `io::Error` converts with `?`); a caller
   that wants the old text writes `.map_err(|e| e.to_string())`. A veto
   (`can_apply`, `veto`) is still the app's own `String`.
+- **Breaking: `aio::http::CookieOpts::expires` is a `SystemTime`**, not
+  chrono's `DateTime<Utc>`; **`aio::cron::Cron::next_in` is gone** (chrono's
+  `TimeZone` in its signature): `Cron::next` follows `cron::set_local`.
 - Every crate declares `rust-version = "1.98"`, the toolchain
   `rust-toolchain.toml` pins (`./ci.sh` keeps them the same).
 - Every `unsafe` block says why it is sound (`// SAFETY:`), and clippy's
