@@ -461,6 +461,9 @@ version may break things.
   feature on for every target, the page's too, where it doesn't build:
   `ax check`, `ax dev --web` and `ax build --web` failed after it. The
   feature goes on the native builds alone.
+- `ax check` with no terminal (CI, an agent) printed its `ax test` step's
+  answer as JSON among its text, and its steps' output on stdout, so
+  `ax check --json` wasn't one object. The steps say text, on stderr.
 
 ## [0.4.2] - 2026-11-11
 
