@@ -856,6 +856,8 @@ fn arms(toks: &[TokenTree]) -> Res<Vec<Arm>> {
 /// An element's or component's `{ … }`: `name: value,` pairs, then children.
 fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
     let (mut attrs, mut props, mut spreads, mut children, mut key, mut i) = (vec![], vec![], vec![], vec![], None, 0);
+    // The names given so far (as the page names them): a second is refused.
+    let mut given: Vec<String> = vec![];
     while i < toks.len() {
         if is_punct(toks.get(i), ',') {
             i += 1;
@@ -887,6 +889,24 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
             }
             t => t.to_string().trim_start_matches("r#").to_string(),
         };
+        // An element's style attribute: its page name says so (`style:align-items`).
+        let style = match (&name_tok, path.first()) {
+            (TokenTree::Ident(_), Some(t)) if !comp => style_attr(t.to_string().trim_start_matches("r#"), &name),
+            _ => None,
+        };
+        let page_name = style.map_or_else(|| attr_name(&name), |css| format!("style:{css}"));
+        if !page_name.starts_with("on") || comp {
+            if given.contains(&page_name) {
+                return Err((
+                    name_tok.span(),
+                    format!(
+                        "air: `{name}` is given twice here: the second would replace the first (give it once: \
+                         `class: \"a b\"`, `class: aio::ui::cx(&[..])`)"
+                    ),
+                ));
+            }
+            given.push(page_name.clone());
+        }
         if name == "key" {
             key = Some(match value.clone().into_iter().next() {
                 Some(TokenTree::Literal(l)) if lit_str(&l).is_some() => match text(&lit_str(&l).unwrap(), l.span()) {
@@ -909,12 +929,6 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
                     format!("air: no event `{name}` (a DOM event's name, as in `onclick`, `onkeydown`, `oninput`)"),
                 ));
             }
-            // A style attribute: its page name says so (`style:align-items`).
-            let style = match (&name_tok, path.first()) {
-                (TokenTree::Ident(_), Some(t)) => style_attr(t.to_string().trim_start_matches("r#"), &name),
-                _ => None,
-            };
-            let page_name = style.map_or_else(|| attr_name(&name), |css| format!("style:{css}"));
             attrs.push((page_name, attr_val(&name, value)));
         }
     }
@@ -2359,6 +2373,16 @@ mod tests {
         assert_eq!(error_at("ul {\n    for x in xs { li { \"x\" } }\n}"), Some((2, 4)));
         assert_eq!(error_at("ul { for x in xs { if x { li { key: x } } } }"), Some((1, 5)), "a row that is an `if`");
         assert_eq!(error_at("ul { for x in xs { li { key: x } } }"), None);
+    }
+
+    #[test]
+    fn an_attribute_given_twice_is_said_at_the_second() {
+        assert_eq!(error_at("div { class: \"a\", class: \"b\" }"), Some((1, 18)));
+        assert_eq!(error_at("div { aria_label: \"a\", \"aria-label\": x }"), Some((1, 23)), "one page name");
+        assert_eq!(error_at("p { width: \"1px\", width: w }"), Some((1, 18)), "a style attribute");
+        assert_eq!(error_at("Row { name: a, \"data-t\": t, name: b }"), Some((1, 28)), "a component's prop");
+        assert_eq!(error_at("li { key: a, key: b }"), Some((1, 13)));
+        assert_eq!(error_at("div { class: \"a\", style: \"b\", onclick: f, onclick: g }"), None, "two handlers run");
     }
 
     #[test]

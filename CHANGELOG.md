@@ -534,6 +534,11 @@ version may break things.
   (storage full) was said to be kept. A second goes to `<key>.corrupt-2`
   (then `-3`…), and a refused one is said as not kept.
 
+- An attribute or prop given twice in one `rsx!` element or component
+  (`class: "a", class: "b"`, `aria_label` and `"aria-label"`, `key`) was
+  taken silently, the second replacing the first; it is a compile error
+  at the second now (two handlers of one event still both run).
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

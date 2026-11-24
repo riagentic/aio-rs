@@ -278,6 +278,7 @@ compile error naming it.
 | an attribute | `class: "row"`, `"data-t": "x"`, `"aria-label": "Close"`; any string (`String`, `&str`, `Cow`), number or `bool`: `title: t(&name.get())` |
 | a value that may be absent | `title: tip` where `tip: Option<String>`: `None` leaves it out |
 | classes by condition | `class: aio::ui::cx(&[("row", true), ("on", on)])` |
+| each attribute once | a name given twice on one element or component is a compile error (classes go in one: `class: "a b"`, or `cx`) |
 | inline style | `style: "width: {w}px"`, or one property: `width: "{w}px"` |
 | a condition | `if on.get() { X {} } else { Y {} }`: swaps only when it flips |
 | a value that may be absent | `if let Some(n) = note.get() { p { "{n}" } }`: made again when what it binds changes |
