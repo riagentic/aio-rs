@@ -163,6 +163,12 @@ version may break things.
   its cell's name and state: when another thread was showing a commit of
   that cell at that moment, the state wasn't read. It now always is.
 
+- An async call whose effect panicked was sometimes answered "ended
+  before it answered" (`DISPATCH_ABORTED`) instead of "its effect
+  panicked" (`EFFECT_ERROR`): when the effect panicked before the call
+  itself had finished on its own thread, that thread decided the answer.
+  The panic now decides it, whichever goes last.
+
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.
