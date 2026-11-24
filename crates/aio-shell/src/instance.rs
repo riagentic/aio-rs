@@ -524,6 +524,21 @@ mod tests {
         _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &plan.data).unwrap());
     }
 
+    /// A launch that connects and never says its line (a frozen process)
+    /// holds up no other: the next is taken at once, not after it.
+    #[test]
+    fn a_silent_launch_holds_up_no_other() {
+        let d = tempfile::tempdir().unwrap();
+        let addr = aio::ipc::addr(d.path(), &format!("silent{}", std::process::id()));
+        let _in = aio::rt().enter();
+        let l = aio::ipc::Listener::bind(&addr).unwrap();
+        aio::rt().spawn(crate::take_launches(l, Default::default(), || {}, || false));
+        let _silent = aio::ipc::connect_blocking(&addr).unwrap();
+        let at = std::time::Instant::now();
+        hand_over(&addr, Path::new("/"), &[]).unwrap();
+        assert!(at.elapsed() < std::time::Duration::from_secs(5), "{:?}", at.elapsed());
+    }
+
     #[test]
     fn a_servers_door_takes_no_launch_once_stopping() {
         let d = tempfile::tempdir().unwrap();

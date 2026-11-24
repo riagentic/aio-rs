@@ -1147,39 +1147,45 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
 
 /// Take later launches' hand-overs: each is delivered to the app
 /// (`instance::launches`) and brings the window forward ("focus"), if
-/// there is one; a stop asked is `stop()`.
+/// there is one; a stop asked is `stop()`. Each is read on its own, so one
+/// that never says its line holds up no other.
 pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, stop: fn(), ending: fn() -> bool) {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     while let Ok(s) = listener.accept().await {
-        let (r, mut w) = tokio::io::split(s);
-        let mut line = String::new();
-        // A hand-over is a line of paths: 1 MiB is plenty, and the most held.
-        if tokio::io::BufReader::new(r.take(1 << 20)).read_line(&mut line).await.is_err() {
-            continue;
-        }
-        // `ax` stopping the app where there is no SIGTERM (Windows).
-        if line.trim() == instance::QUIT {
-            // Stop first: an "ok" says the stop is already under way.
-            stop();
-            _ = w.write_all(b"ok\n").await;
-            continue;
-        }
-        let Some(launch) = instance::read_launch(&line) else {
-            _ = w.write_all(b"bad launch\n").await;
-            continue;
-        };
-        // Ending: the launch would be lost with this instance; it waits for the lock instead.
-        if ending() {
-            _ = w.write_all(format!("{}\n", instance::STOPPING).as_bytes()).await;
-            continue;
-        }
-        eprintln!("[aio] handed a launch: {:?}", launch.args);
-        instance::deliver(launch);
-        if let Some(c) = ctl.lock().await.as_mut() {
-            _ = c.write_all(b"focus\n").await;
-        }
-        _ = w.write_all(b"ok\n").await;
+        tokio::spawn(take_launch(s, ctl.clone(), stop, ending));
     }
+}
+
+/// One later launch's hand-over ([`take_launches`]).
+async fn take_launch(s: aio::ipc::Stream, ctl: Ctl, stop: fn(), ending: fn() -> bool) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let (r, mut w) = tokio::io::split(s);
+    let mut line = String::new();
+    // A hand-over is a line of paths: 1 MiB is plenty, and the most held.
+    if tokio::io::BufReader::new(r.take(1 << 20)).read_line(&mut line).await.is_err() {
+        return;
+    }
+    // `ax` stopping the app where there is no SIGTERM (Windows).
+    if line.trim() == instance::QUIT {
+        // Stop first: an "ok" says the stop is already under way.
+        stop();
+        _ = w.write_all(b"ok\n").await;
+        return;
+    }
+    let Some(launch) = instance::read_launch(&line) else {
+        _ = w.write_all(b"bad launch\n").await;
+        return;
+    };
+    // Ending: the launch would be lost with this instance; it waits for the lock instead.
+    if ending() {
+        _ = w.write_all(format!("{}\n", instance::STOPPING).as_bytes()).await;
+        return;
+    }
+    eprintln!("[aio] handed a launch: {:?}", launch.args);
+    instance::deliver(launch);
+    if let Some(c) = ctl.lock().await.as_mut() {
+        _ = c.write_all(b"focus\n").await;
+    }
+    _ = w.write_all(b"ok\n").await;
 }
 
 /// How long Electron, then the stores, get to finish at shutdown.

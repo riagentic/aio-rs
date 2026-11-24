@@ -176,6 +176,9 @@ version may break things.
   reads (lines queued up, or a long one) arrived as two replacement
   characters: a notice's title, a dialog's title or start folder, a tray
   tooltip. The runtime reads the line as UTF-8 text whole.
+- A launch that connected to the running app and never sent its line (a
+  frozen process) held up every later launch and `ax stop` on Windows:
+  each hand-over is read on its own.
 - A second launch while the app was starting (its lock taken, its door
   for launches not open yet: a double click, two files opened at once)
   waited 30 s and failed, its arguments lost. It is handed over once the
