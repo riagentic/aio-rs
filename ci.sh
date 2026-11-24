@@ -36,6 +36,13 @@ scripts/air-ship --self-test
 # The guide (docs/): links resolve, each page with Rust is a doctest (run by
 # the workspace tests below), the verb list is whole, the wording public.
 scripts/docs-check
+# Each published crate carries the licence text (an app's credits and a
+# crate's package take it from the crate's folder): the root's, unchanged.
+for f in crates/*/Cargo.toml; do
+  d=$(dirname "$f")
+  grep -q '^publish = false' "$f" && continue
+  cmp -s LICENSE "$d/LICENSE" || { echo "ci: $d/LICENSE is not the root LICENSE (cp LICENSE $d/)" >&2; exit 1; }
+done
 # The mutation ledger holds together: each break's line found once, its test there
 # (scripts/mutants runs the breaks; GitHub CI runs the fast ones).
 scripts/mutants --check
