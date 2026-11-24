@@ -2855,8 +2855,10 @@ mod tests {
                 s.call(&By::Test, "add", serde_json::json!([format!("row {i}")])).unwrap();
             }
         });
-        // 1: a WAL restarted (its header synced) after the thread's checkpoint.
-        assert!(n <= 1, "{n} disk syncs on the calls' thread");
+        // At most one per WAL restarted (its header synced) after a thread's
+        // checkpoint: 1200 calls fill ~3.6 WALs of 1000 pages. In the call,
+        // each checkpoint synced 2 more: 28.
+        assert!(n <= 4, "{n} disk syncs on the calls' thread");
         let copied = (0..1000).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(10));
             std::fs::metadata(&path).unwrap().len() > 2 * born
