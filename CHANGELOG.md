@@ -158,6 +158,9 @@ version may break things.
 
 ### Fixed
 
+- `rsx!`'s error for a `for` whose row has no `key:` pointed at the whole
+  `rsx!`; it points at the `for` now, and says that a row starting with
+  an `if`, a `match` or text goes in an element that has the key.
 - `VirtualList` given a `scroll_to` at mount opened at the top: the
   scroll waited for the list's element, which came after it looked, and
   never looked again.
