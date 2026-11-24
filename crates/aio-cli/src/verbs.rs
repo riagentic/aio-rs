@@ -29,8 +29,8 @@ default), cli (a command-line tool), service (served, no window), todo
 tested function moves);
 --id: its id (its data's home; default: the name, refused when an
 installed app has it); --aio-version: its aio-rs release from git (default:
-this ax's; main, latest); --aio: an aio-rs checkout instead, named relative
-to the app; --target: its [build] targets (ax build --list); --css
+this ax's; main, latest); --aio: an aio-rs checkout instead (a folder
+from here; Cargo.toml names it relative to the app); --target: its [build] targets (ax build --list); --css
 tailwind: Tailwind writes its stylesheet; a failure leaves nothing behind;
 at a terminal it then builds the app for ax dev in the background, so the
 first ax dev is a launch (--no-warm, AIORT_NO_WARM=1: not)",
@@ -680,6 +680,8 @@ const MOVED: &[(&str, &str)] = &[
     ("publish", "ax release <app> [--channel c] [--dir d] [--notes t] [--key file] [--app-version v]"),
     ("migrate", "ax lint <app> --from <version> [--tests]: what a newer aio-rs retired that the app still uses"),
     ("link", "ax pin <app> <dir>: the app's aio-rs from that checkout (ax pin <app> <version>: a release)"),
+    ("new", "ax create <name> [--template t]: a new app in ./<name> (ax help create)"),
+    ("init", "ax create <name> [--template t]: a new app in ./<name> (ax help create)"),
 ];
 
 /// Other spellings of a verb: these words, then this flag, read as that
@@ -1093,6 +1095,10 @@ mod tests {
             "a verb now"
         );
         assert!(r("publish app").unwrap_err().starts_with("ax release <app>"));
+        // cargo's and the scaffolders' word for a new app: not `dev`, the nearest spelling.
+        for new in ["new notes", "init notes"] {
+            assert!(r(new).unwrap_err().starts_with("ax create <name>"), "{new}");
+        }
     }
 
     #[test]

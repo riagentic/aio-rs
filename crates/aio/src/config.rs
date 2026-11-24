@@ -296,13 +296,17 @@ mod tests {
         };
         assert_eq!(c("").unwrap().updates, Updates::default());
         assert!(c("url = \"https://x.example/todo\"").unwrap_err().contains("needs keys"));
-        assert!(c("url = \"http://x.example/todo\"\nkeys = [\"ed25519:k\"]").unwrap_err().contains("https"));
+        // A key no release can be checked with builds an app that never updates: refused at the build.
+        let e = c("url = \"https://x.example/todo\"\nkeys = [\"ed25519:k\"]").unwrap_err();
+        assert!(e.contains("[updates] keys") && e.contains("ax keygen"), "{e}");
+        let k = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        assert!(c(&format!("url = \"http://x.example/todo\"\nkeys = [\"{k}\"]")).unwrap_err().contains("https"));
         let ok =
-            c("url = \"https://x.example/todo\"\nkeys = [\"ed25519:k\"]\nchannel = \"beta\"\nevery = \"1h\"").unwrap();
+            c(&format!("url = \"https://x.example/todo\"\nkeys = [\"{k}\"]\nchannel = \"beta\"\nevery = \"1h\"")).unwrap();
         assert_eq!((ok.updates.channel.as_str(), ok.updates.every), ("beta", Some(Duration::from_secs(3600))));
         let d = c("").unwrap().updates;
         assert_eq!((d.auto, d.prerelease, d.keep, d.every), (true, None, 3, Some(Duration::from_secs(6 * 3600))));
-        let keys = "keys = [\"ed25519:k\"]";
+        let keys = format!("keys = [\"{k}\"]");
         let u = c(&format!(
             "url = \"github:some_one/app.rs\"\n{keys}\nevery = \"off\"\nauto = false\nprerelease = true\nkeep = 5"
         ))
@@ -315,7 +319,7 @@ mod tests {
         let (_, key) = crate::update::keygen().unwrap();
         let git = c(&format!("url = \"git+ssh://git@git.example/me/todo\"\nkeys = [\"{key}\"]\nchannel = \"main\""));
         assert_eq!(git.unwrap().updates.channel, "main");
-        assert!(c(&format!("url = \"git+https://git.example/todo\"\n{keys}")).unwrap_err().contains("keys: key"));
+        assert!(c("url = \"git+https://git.example/todo\"\nkeys = [\"ed25519:k\"]").unwrap_err().contains("keys: key"));
         assert!(c(&format!("url = \"git+http://git.example/todo\"\n{keys}")).unwrap_err().contains("git+https://"));
         let only = |net: &str, url: &str| {
             Config::parse(&format!(
@@ -442,6 +446,14 @@ mod tests {
         assert_eq!(c.data.durability, Durability::Full);
         assert!(Config::parse("[app]\nid = \"t\"\n[data]\ndurability = \"max\"").is_err());
         assert!(Config::parse("[app]\nid = \"t\"\nmode = \"server\"").unwrap_err().contains("[server] listen"));
+        // An address no socket takes fails the build, not the boot (or a bind with the OS's words).
+        let at = |l: &str| Config::parse(&format!("[app]\nid = \"t\"\nmode = \"server\"\n[server]\nlisten = \"{l}\""));
+        for ok in ["127.0.0.1:7420", "0.0.0.0:0", "[::1]:8443", "localhost:65535"] {
+            assert!(at(ok).is_ok(), "{ok}");
+        }
+        for bad in ["nonsense", "127.0.0.1:99999", "127.0.0.1:", ":7420", "127.0.0.1:http", ""] {
+            assert!(at(bad).unwrap_err().contains("[server] listen"), "{bad}");
+        }
     }
 
     #[test]
@@ -637,7 +649,7 @@ mod tests {
     #[test]
     fn the_hosts_aio_toml_names_must_be_in_its_network() {
         let c = |s: &str| Config::parse(&format!("[app]\nid = \"t\"\n{s}"));
-        let keys = "keys = [\"ed25519:k\"]";
+        let keys = "keys = [\"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"]";
         let e = c(&format!("[updates]\nurl = \"https://dl.example.org/t\"\n{keys}")).unwrap_err();
         assert_eq!(
             e,

@@ -52,7 +52,7 @@ totp = false
 network = ["api.example.org", "example.org"]
 [updates]
 url = "https://example.org/releases"
-keys = ["ed25519:k"]
+keys = ["ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]
 every = "off"
 every_by_channel = { dev = "1m" }
 prerelease = true

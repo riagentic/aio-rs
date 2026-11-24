@@ -12,14 +12,14 @@ use std::time::Instant;
 /// `web` the package of the app's web build, if it has one.
 pub fn steps(ax: &str, app: &str, web: Option<&str>, release: bool) -> Vec<(&'static str, Vec<String>)> {
     let w = |ws: &[&str]| ws.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let mut s = vec![("format", w(&["cargo", "fmt", "--all", "--check"])), ("lint", w(&[ax, "lint"]))];
+    let mut s = vec![("format", w(&["cargo", "fmt", "--all", "--check"])), ("lint", w(&[ax, "lint", "--text"]))];
     if let Some(p) = web {
         s.push(("web", w(&["cargo", "check", "--target", "wasm32-unknown-unknown", "-p", p, "--lib"])));
     }
-    s.push(("tests", w(&[ax, "test", app])));
+    s.push(("tests", w(&[ax, "test", app, "--text"])));
     if release {
-        s.push(("size", w(&[ax, "build", app, "--sizes"])));
-        s.push(("bundle", w(&[ax, "build", app, "--smoke"])));
+        s.push(("size", w(&[ax, "build", app, "--sizes", "--text"])));
+        s.push(("bundle", w(&[ax, "build", app, "--smoke", "--text"])));
     }
     s
 }
@@ -56,8 +56,10 @@ pub fn run(app: &str, release: bool) -> Result<String, String> {
         crate::web::web_lib(&m, &p.dirs).map(|(pkg, _)| pkg)
     });
     run_steps(steps(&ax.to_string_lossy(), app, web.as_deref(), release), |words| {
+        // Its stdout is check's answer alone (one JSON object with --json): the steps' words go to stderr.
         std::process::Command::new(&words[0])
             .args(&words[1..])
+            .stdout(std::io::stderr())
             .status()
             .map(|s| s.success())
             .map_err(|e| format!("{}: {e}", words[0]))
@@ -73,8 +75,15 @@ mod tests {
         let names = |web, r| {
             steps("ax", "notes", web, r).into_iter().map(|(n, w)| format!("{n}: {}", w.join(" "))).collect::<Vec<_>>()
         };
-        assert_eq!(names(None, false), ["format: cargo fmt --all --check", "lint: ax lint", "tests: ax test notes"]);
-        assert_eq!(names(None, true)[3..], ["size: ax build notes --sizes", "bundle: ax build notes --smoke"]);
+        // Each ax step says its own words as text: check's stdout is no terminal in CI, and a piped ax is JSON.
+        assert_eq!(
+            names(None, false),
+            ["format: cargo fmt --all --check", "lint: ax lint --text", "tests: ax test notes --text"]
+        );
+        assert_eq!(
+            names(None, true)[3..],
+            ["size: ax build notes --sizes --text", "bundle: ax build notes --smoke --text"]
+        );
         assert_eq!(
             names(Some("notes"), false)[2],
             "web: cargo check --target wasm32-unknown-unknown -p notes --lib",

@@ -86,6 +86,9 @@ fn impure_paths() {
     let p = |s: &str| rust::impure(&s.split("::").map(String::from).collect::<Vec<_>>());
     assert_eq!(p("Utc::now"), Some("the clock"));
     assert_eq!(p("chrono::Local::now"), Some("the clock"));
+    assert_eq!(p("jiff::Timestamp::now"), Some("the clock"));
+    assert_eq!(p("jiff::Zoned::now"), Some("the clock"));
+    assert_eq!(p("fastrand::i64"), Some("randomness"));
     assert_eq!(p("Uuid::new_v4"), Some("randomness"));
     assert_eq!(p("aio::uuid_v7"), Some("randomness"));
     assert_eq!(p("tokio::spawn"), Some("a task"));
@@ -721,6 +724,12 @@ fn exit_is_1_on_errors_only() {
     assert_eq!(main(&a(bad.path())), ExitCode::FAILURE);
     let hinted = project(&[("Cargo.toml", ""), ("src/a.rs", "#[cell]\npub struct Lone { pub n: u32 }")]);
     assert_eq!(main(&a(hinted.path())), ExitCode::SUCCESS);
+    // ax's global --text and --quiet, as every verb takes them (a script adds them to each).
+    let plain = |p: &Path, f: &str| vec![p.to_string_lossy().into_owned(), "--no-clippy".into(), f.into()];
+    for f in ["--text", "--quiet"] {
+        assert_eq!(main(&plain(hinted.path(), f)), ExitCode::SUCCESS, "{f}");
+        assert_eq!(main(&plain(bad.path(), f)), ExitCode::FAILURE, "{f}");
+    }
 }
 
 #[test]

@@ -1647,7 +1647,7 @@ fn run(args: &[String]) -> Out {
             let t = t(app)?;
             let out = match file.first() {
                 Some(f) => PathBuf::from(f),
-                None => PathBuf::from(format!("{}-{}.png", t.id, jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S"))),
+                None => shot::default_file(&t.id),
             };
             let base = match (value("--check"), value("--update")) {
                 (Some(_), Some(_)) => return Err("--check and --update are opposites: pick one".into()),

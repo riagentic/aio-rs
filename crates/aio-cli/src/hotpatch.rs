@@ -158,13 +158,28 @@ pub(crate) fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
 }
 
-/// rustc's JSON diagnostics as it renders them; other lines as they are (pure).
+/// rustc's JSON diagnostics as it renders them, plain (cargo asks for its
+/// colours whatever the terminal); other lines as they are (pure).
 fn rendered(stderr: &str) -> String {
     let line = |l: &str| match serde_json::from_str::<serde_json::Value>(l) {
         Ok(v) => v["rendered"].as_str().map(String::from),
         Err(_) => Some(format!("{l}\n")),
     };
-    stderr.lines().filter_map(line).collect()
+    uncoloured(&stderr.lines().filter_map(line).collect::<String>())
+}
+
+/// `s` without its ANSI colour sequences (`ESC [ … letter`) (pure).
+pub(crate) fn uncoloured(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\x1b' if it.clone().next() == Some('[') => _ = it.by_ref().skip(1).find(char::is_ascii_alphabetic),
+            '\x1b' => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// As cargo's workspace wrapper: record the call (not for build scripts
@@ -3047,6 +3062,18 @@ mod tests {
 
     fn part<'a>(defines: &[&'a str], uses: Vec<Use<'a>>, dirty: bool) -> Part<'a> {
         Part { defines: defines.to_vec(), uses, dirty, ..Part::default() }
+    }
+
+    /// cargo asks rustc for coloured diagnostics whatever the terminal: a
+    /// patch's errors in `build.log`, `ax errors --json` and the window's
+    /// overlay (`web::fatal` finds the `error` lines) are plain text.
+    #[test]
+    fn a_patchs_errors_are_plain_text() {
+        let json = serde_json::json!({
+            "rendered": "\x1b[1m\x1b[91merror[E0277]\x1b[0m\x1b[1m: cannot multiply\x1b[0m\n  \x1b[1m\x1b[94m--> \x1b[0msrc/lib.rs:18:26\n"
+        });
+        let said = rendered(&format!("{json}\nnot json\n"));
+        assert_eq!(said, "error[E0277]: cannot multiply\n  --> src/lib.rs:18:26\nnot json\n");
     }
 
     #[test]

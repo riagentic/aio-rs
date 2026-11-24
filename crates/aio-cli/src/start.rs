@@ -1,10 +1,10 @@
-//! `aio start` and `aio restart` (aio: `am start`, `am restart`): run an app
+//! `ax start` and `ax restart` (aio: `am start`, `am restart`): run an app
 //! in the background, detached from the caller, and wait until it is up:
 //! its lock held (the OS's, so a dead start leaves no zombie to clean) and a
 //! `health.json` written by this start. What it prints meanwhile goes to
 //! `logs/start.log`; a start that ends at once says why with its tail. The
 //! launch is recorded (`logs/start.json`: args, binary, pid, who) so
-//! `aio restart` replays its flags and `aio apps` says who started it.
+//! `ax restart` replays its flags and `ax apps` says who started it.
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -135,7 +135,7 @@ fn put_display(
 }
 
 /// Where the window goes for `asked` (`--display`, else `AIORT_DISPLAY`),
-/// as `aio dev` decides it; a nested display started for it comes along,
+/// as `ax dev` decides it; a nested display started for it comes along,
 /// handed to the app once it is up (it ends with its last window).
 fn place(asked: Option<&str>) -> Result<(Option<String>, Option<crate::display::Nested>), String> {
     use crate::display::Choice;
@@ -144,7 +144,7 @@ fn place(asked: Option<&str>) -> Result<(Option<String>, Option<crate::display::
     Ok(match crate::display::choose(asked.as_deref(), std::io::stdin().is_terminal(), crate::display::desktop())? {
         Choice::Current => (None, None),
         Choice::Named(d) => (Some(d), None),
-        Choice::Nested => match crate::display::nest(asked.as_deref(), "aio start", false)? {
+        Choice::Nested => match crate::display::nest(asked.as_deref(), "ax start", false)? {
             Some(n) => (Some(n.name.clone()), Some(n)),
             None => (None, None),
         },
@@ -154,9 +154,13 @@ fn place(asked: Option<&str>) -> Result<(Option<String>, Option<crate::display::
 /// Whether app `t` opens a window (its `aio.toml`, in its workspace): a
 /// start of one is up once its window is ready, not just its health.
 pub fn windowed(t: &crate::target::Target) -> bool {
+    t.pkg.as_ref().and_then(|p| crate::build::app_of(p).ok()).is_some_and(|(_, c)| has_window(&c.app.mode))
+}
+
+/// Whether an app of `mode` opens a window (pure): a server or a CLI doesn't.
+pub fn has_window(mode: &aio::config::Mode) -> bool {
     use aio::config::Mode;
-    let cfg = t.pkg.as_ref().and_then(|p| crate::build::app_of(p).ok()).map(|(_, c)| c.app.mode);
-    matches!(cfg, Some(Mode::Standalone | Mode::Client | Mode::ClientServer))
+    matches!(mode, Mode::Standalone | Mode::Client | Mode::ClientServer)
 }
 
 /// Start `bin args` for app `t` and wait at most `wait` for it to be up
@@ -173,18 +177,15 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
             return match waited {
                 true => Ok(format!("{name}: another start brought it up: {line}")),
                 false => Err(format!(
-                    "{name} is already running: `aio status {name}` says how, `aio restart {name}` starts it again"
+                    "{name} is already running: `ax status {name}` says how, `ax restart {name}` starts it again"
                 )),
             };
         }
         if Instant::now() >= end {
-            return Err(format!(
-                "{name} is still starting or stopping after {} s: `aio status {name}`",
-                wait.as_secs()
-            ));
+            return Err(format!("{name} is still starting or stopping after {} s: `ax status {name}`", wait.as_secs()));
         }
         if !waited {
-            eprintln!("aio start: {name} is starting or stopping: waiting for it");
+            eprintln!("ax start: {name} is starting or stopping: waiting for it");
             waited = true;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -222,7 +223,7 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
     if wait.is_zero() {
         std::mem::forget(nested);
         return Ok(format!(
-            "{name}: spawned (pid {}), not waited for: `aio status {name}` says when it is up",
+            "{name}: spawned (pid {}), not waited for: `ax status {name}` says when it is up",
             child.id()
         ));
     }
@@ -235,7 +236,7 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
         match verdict(ended, aio::paths::running(&plan.data), health.as_ref(), since, now_ms()) {
             Some(Ok(_)) if !ready && Instant::now() >= end => {
                 return Err(format!(
-                    "{name}: up, but its window isn't ready after {} s (pid {}): `aio logs {name}`, {} say why",
+                    "{name}: up, but its window isn't ready after {} s (pid {}): `ax logs {name}`, {} say why",
                     wait.as_secs(),
                     child.id(),
                     log.display()
@@ -259,8 +260,8 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
             }
             None if Instant::now() >= end => {
                 return Err(format!(
-                    "{name}: not up after {} s (pid {}, still running): `aio status {name}`, `aio logs {name}`, \
-                     {} say why; `aio stop {name}` ends it",
+                    "{name}: not up after {} s (pid {}, still running): `ax status {name}`, `ax logs {name}`, \
+                     {} say why; `ax stop {name}` ends it",
                     wait.as_secs(),
                     child.id(),
                     log.display()
@@ -271,7 +272,7 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
     }
 }
 
-/// `aio start --all` and `aio restart --all` (aio: a project's components,
+/// `ax start --all` and `ax restart --all` (aio: a project's components,
 /// all at once): `one` for each app of the workspace, in order, a line
 /// each; one already up is fine, any other failure fails the whole (the
 /// rest still go).
@@ -303,7 +304,7 @@ pub fn home_args(ask: &aio::paths::Ask) -> Vec<String> {
         .collect()
 }
 
-/// `aio restart`: stop the app if it runs, then start it again with the
+/// `ax restart`: stop the app if it runs, then start it again with the
 /// flags it was started with, merged with `typed`. Notes on stderr.
 pub fn restart(
     name: &str,
@@ -326,11 +327,11 @@ pub fn restart(
     let (launch, replayed, over) = merge(&recorded, typed);
     if !replayed.is_empty() {
         let over = if over.is_empty() { String::new() } else { format!(" (overridden here: {})", over.join(" ")) };
-        eprintln!("aio restart: replaying the start's flags: {}{over}", replayed.join(" "));
+        eprintln!("ax restart: replaying the start's flags: {}{over}", replayed.join(" "));
     }
     let running = aio::paths::running(&t.plan.data);
     if running && rec.is_none() {
-        eprintln!("aio restart: {name} wasn't started by aio start, so its flags are unknown: starting it with these");
+        eprintln!("ax restart: {name} wasn't started by ax start, so its flags are unknown: starting it with these");
     }
     if running {
         eprintln!("{}", crate::stop::one(name, t, false, Duration::from_secs(15))?);
@@ -339,10 +340,10 @@ pub fn restart(
     run(t, &bin(&launch)?, &launch, asked.as_deref(), wait)
 }
 
-/// How long a restart under `aio dev` waits at least: a whole build.
+/// How long a restart under `ax dev` waits at least: a whole build.
 const DEV_WAIT: Duration = Duration::from_secs(180);
 
-/// `aio restart` of an app `aio dev` runs: the session rebuilds it whole
+/// `ax restart` of an app `ax dev` runs: the session rebuilds it whole
 /// and starts it again, with its flags on its display (`aio start`'s own
 /// would be a second app, elsewhere); up once healthy with its window open.
 fn via_dev(t: &crate::target::Target, wait: Duration) -> Out {
@@ -350,7 +351,7 @@ fn via_dev(t: &crate::target::Target, wait: Duration) -> Out {
     let health = || std::fs::read(data.join("health.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     let before = health().map(|h| h["startedAt"].clone());
     crate::dev::ask_restart(&t.plan.logs).map_err(|e| format!("{}: {e}", t.plan.logs.display()))?;
-    eprintln!("aio restart: {name} runs under `aio dev`: it rebuilds it and starts it again, with its flags");
+    eprintln!("ax restart: {name} runs under `ax dev`: it rebuilds it and starts it again, with its flags");
     let (since, wait) = (now_ms(), wait.max(DEV_WAIT));
     let end = Instant::now() + wait;
     loop {
@@ -364,11 +365,11 @@ fn via_dev(t: &crate::target::Target, wait: Duration) -> Out {
                     .map_err(|e| format!("{name}: up, but its window isn't ready: {e}"))?;
             }
             let took = (now_ms() - since) as f64 / 1000.0;
-            return Ok(format!("{name}: restarted by `aio dev` in {took:.1} s: {line}"));
+            return Ok(format!("{name}: restarted by `ax dev` in {took:.1} s: {line}"));
         }
         if Instant::now() >= end {
             return Err(format!(
-                "{name}: not up again after {} s: the `aio dev` session's output, or `aio errors {name}`, says why",
+                "{name}: not up again after {} s: the `ax dev` session's output, or `ax errors {name}`, says why",
                 wait.as_secs()
             ));
         }
@@ -532,7 +533,7 @@ mod tests {
         });
         let never = |_: &[String]| -> Result<PathBuf, String> { panic!("nothing built or started by aio start") };
         let said = restart("notes", &target_of(&p), &never, &[], WAIT).unwrap();
-        assert!(said.starts_with("notes: restarted by `aio dev`") && said.contains("healthy"), "{said}");
+        assert!(said.starts_with("notes: restarted by `ax dev`") && said.contains("healthy"), "{said}");
         session.join().unwrap();
         std::fs::write(p.logs.join("dev.pid"), "4194999").unwrap();
         assert!(!crate::dev::session(&p.logs), "a session that ended");
@@ -543,7 +544,7 @@ mod tests {
         let names = s(&["relay", "agent", "control"]);
         let one = |n: &str| match n {
             "relay" => Ok("relay: started in 0.4 s".to_string()),
-            "agent" => Err("agent is already running: `aio status agent` says how".into()),
+            "agent" => Err("agent is already running: `ax status agent` says how".into()),
             _ => Ok(format!("{n}: started")),
         };
         assert_eq!(each(&names, &one).unwrap(), "relay: started in 0.4 s\nagent: already running\ncontrol: started");
@@ -594,7 +595,7 @@ mod tests {
         // Detached: its own process group, nothing of this terminal.
         let e = run(&target_of(&p), sh, &s(&["-c", "exec sleep 5"]), Some("current"), Duration::from_millis(300))
             .unwrap_err();
-        assert!(e.contains("not up after 0 s") && e.contains("aio stop notes"), "{e}");
+        assert!(e.contains("not up after 0 s") && e.contains("`ax stop notes`") && !e.contains("`aio "), "{e}");
         let pid = record(&p.logs).unwrap()["pid"].as_u64().unwrap() as u32;
         let pgid = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
         assert_eq!(pgid.split_whitespace().nth(4), Some(pid.to_string().as_str()), "its own group");

@@ -468,8 +468,12 @@ fn signing_keys(id: &str, name: &str, u: &aio::config::Updates, ask: &Ask) -> Re
             "{e} (ax keygen {name} makes it, in $XDG_CONFIG_HOME/aio-rt/keys; --key: another file; --unsigned: a local release without)"
         ),
     })?;
-    if !u.keys.contains(&up::public_key(&key).map_err(|e| e.to_string())?) {
-        return Err("aio.toml's [updates] keys don't include this signing key: the app would refuse the release".into());
+    let public = up::public_key(&key).map_err(|e| e.to_string())?;
+    if !u.keys.contains(&public) {
+        return Err(format!(
+            "aio.toml's [updates] keys don't include this signing key: the app would refuse the release; \
+             its line there is keys = [\"{public}\"] (with [updates] url: what ax keygen {name} printed)"
+        ));
     }
     let mut signers = vec![key.clone()];
     let stem = file.file_stem().map_or_else(Default::default, |s| s.to_string_lossy().into_owned());
@@ -1390,11 +1394,13 @@ mod tests {
         let file = d.path().join("ci.key");
         let ask = Ask { key: Some(&file), ..Default::default() };
         let public = up::public_key(&read_key(&file).unwrap()).unwrap();
-        let u = aio::config::Updates { keys: vec![public], ..Default::default() };
+        let u = aio::config::Updates { keys: vec![public.clone()], ..Default::default() };
         let (key, signers) = signing_keys("notes", "notes", &u, &ask).unwrap();
         assert_eq!((key, signers.len()), (read_key(&file).unwrap(), 2), "the rotated key signs the roster too");
         let other = aio::config::Updates { keys: vec![], ..Default::default() };
-        assert!(signing_keys("notes", "notes", &other, &ask).unwrap_err().contains("don't include this signing key"));
+        let e = signing_keys("notes", "notes", &other, &ask).unwrap_err();
+        assert!(e.contains("don't include this signing key"), "{e}");
+        assert!(e.contains(&format!("keys = [\"{public}\"]")), "the line to add: {e}");
         let none = d.path().join("none.key");
         let e = signing_keys("notes", "notes", &u, &Ask { key: Some(&none), ..Default::default() }).unwrap_err();
         assert!(e.contains("none.key") && !e.contains("ax keygen"), "{e}");

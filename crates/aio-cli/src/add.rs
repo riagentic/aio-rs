@@ -122,8 +122,8 @@ fn deeper(line: &str) -> String {
     }
 }
 
-/// `lib` with `pub mod <snake>;` after its last top-level `mod x;`, else after
-/// its crate docs (pure); `native`: on native builds only (a browser build
+/// `lib` with `pub mod <snake>;` among its top-level `mod x;` lines in
+/// rustfmt's order, else after its crate docs (pure); `native`: on native builds only (a browser build
 /// serves nothing). None: it has the module already.
 pub fn with_mod(lib: &str, snake: &str, native: bool) -> Option<String> {
     let has = |l: &str| {
@@ -134,10 +134,18 @@ pub fn with_mod(lib: &str, snake: &str, native: bool) -> Option<String> {
         return None;
     }
     let lines: Vec<&str> = lib.lines().collect();
-    let at = match lines.iter().rposition(|l| (l.starts_with("mod ") || l.starts_with("pub mod ")) && l.ends_with(';'))
-    {
-        Some(i) => i + 1,
-        None => lines.iter().take_while(|l| l.starts_with("//!")).count(),
+    fn name(l: &str) -> Option<&str> {
+        l.strip_prefix("pub ").unwrap_or(l).strip_prefix("mod ")?.strip_suffix(';')
+    }
+    // rustfmt's order: before the first one named after it (and its attributes), else after the last.
+    let after = lines
+        .iter()
+        .position(|l| name(l).is_some_and(|n| n > snake))
+        .map(|i| i - lines[..i].iter().rev().take_while(|l| l.starts_with("#[")).count());
+    let at = match (after, lines.iter().rposition(|l| name(l).is_some())) {
+        (Some(i), _) => i,
+        (None, Some(i)) => i + 1,
+        (None, None) => lines.iter().take_while(|l| l.starts_with("//!")).count(),
     };
     let cfg = if native { "#[cfg(not(target_arch = \"wasm32\"))]\n" } else { "" };
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
@@ -247,36 +255,61 @@ pub fn wire_server(launcher: &str, snake: &str) -> Result<Option<String>, String
 
 /// `manifest` (the library's Cargo.toml) with aio's `server` feature on its
 /// `aio` dependency (pure); None: a feature that brings it is on already.
+/// An app with a browser build gets it on its native builds alone, in a
+/// table of their own: the feature doesn't build for wasm32.
 pub fn with_server_feature(manifest: &str) -> Result<Option<String>, String> {
+    const NATIVE: &str = "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]";
+    let web = manifest.contains("[target.'cfg(target_arch = \"wasm32\")'.dependencies]");
     let mut section = "";
+    let mut aio = None;
     for (i, line) in manifest.lines().enumerate() {
         let t = line.trim();
         if t.starts_with('[') {
             section = t;
             continue;
         }
-        if section != "[dependencies]" || !(t.starts_with("aio ") || t.starts_with("aio=")) {
+        if !(section == "[dependencies]" || section == NATIVE) || !(t.starts_with("aio ") || t.starts_with("aio=")) {
             continue;
         }
         if ["\"server\"", "\"tls\"", "\"net\"", "\"oidc\"", "\"br\""].iter().any(|f| t.contains(f)) {
             return Ok(None);
         }
-        let new = match (line.find("features = ["), line.rfind('}')) {
-            (Some(at), _) => {
-                let open = at + "features = [".len();
-                let sep = if line[open..].starts_with(']') { "" } else { ", " };
-                format!("{}\"server\"{sep}{}", &line[..open], &line[open..])
-            }
-            (None, Some(end)) => format!("{}, features = [\"server\"] {}", line[..end].trim_end(), &line[end..]),
-            (None, None) => {
-                return Err(format!("its aio dependency isn't one line: add features = [\"server\"] to it: {t}"));
-            }
-        };
-        let mut out: Vec<&str> = manifest.lines().collect();
-        out[i] = &new;
-        return Ok(Some(out.join("\n") + "\n"));
+        if section == "[dependencies]" {
+            aio = Some((i, line));
+        }
     }
-    Err("no aio dependency under [dependencies] in its Cargo.toml".into())
+    let (i, line) = aio.ok_or("no aio dependency under [dependencies] in its Cargo.toml")?;
+    // Its source alone (a native table adds to it), or the line with the feature added.
+    let line = match web {
+        true => match (line.find(", features = ["), line.rfind('}')) {
+            (Some(at), Some(end)) => format!("{}{}", &line[..at], &line[end..]),
+            _ => line.to_string(),
+        },
+        false => line.to_string(),
+    };
+    let new = match (line.find("features = ["), line.rfind('}')) {
+        (Some(at), _) => {
+            let open = at + "features = [".len();
+            let sep = if line[open..].starts_with(']') { "" } else { ", " };
+            format!("{}\"server\"{sep}{}", &line[..open], &line[open..])
+        }
+        (None, Some(end)) => format!("{}, features = [\"server\"] {}", line[..end].trim_end(), &line[end..]),
+        (None, None) => {
+            return Err(format!(
+                "its aio dependency isn't one line: add features = [\"server\"] to it: {}",
+                line.trim()
+            ));
+        }
+    };
+    if web {
+        return Ok(Some(format!(
+            "{}\n\n# Server functions (ax add server): on the native builds; a page calls them.\n{NATIVE}\n{new}\n",
+            manifest.trim_end()
+        )));
+    }
+    let mut out: Vec<&str> = manifest.lines().collect();
+    out[i] = &new;
+    Ok(Some(out.join("\n") + "\n"))
 }
 
 /// The launchers under `root/app/src` (`main.rs`, Android's `lib.rs`).
@@ -445,6 +478,12 @@ mod tests {
         );
         assert_eq!(with_mod(lib, "a", false), None);
         assert_eq!(with_mod("pub(crate) mod a {\n}\n", "a", false), None);
+        // In rustfmt's order (cargo fmt --check, ax check, passes), its attributes going with it.
+        let lib = "//! A.\npub mod tasks;\n";
+        let cfg = "#[cfg(not(target_arch = \"wasm32\"))]\n";
+        assert_eq!(with_mod(lib, "api", true).unwrap(), format!("//! A.\n{cfg}pub mod api;\npub mod tasks;\n"));
+        let lib = format!("//! A.\npub mod a;\n{cfg}pub mod c;\n");
+        assert_eq!(with_mod(&lib, "b", false).unwrap(), format!("//! A.\npub mod a;\npub mod b;\n{cfg}pub mod c;\n"));
     }
 
     #[test]
@@ -490,6 +529,22 @@ mod tests {
         );
         assert_eq!(wire_server(&w, "tools"), Ok(None));
         assert!(wire_server(crate::create::SERVICE_MAIN, "tools").unwrap_err().contains("for_app"));
+    }
+
+    /// An app with a browser build (the window templates) gets `server` on
+    /// its native builds alone: the feature doesn't build for wasm32 (`ax
+    /// check`'s web step, `ax dev --web`, `ax build --web` failed after it).
+    #[test]
+    fn an_app_with_a_page_gets_the_server_feature_natively() {
+        let all = crate::create::files(&crate::create::New::of("x")).unwrap();
+        let m = &all.iter().find(|(f, _)| f == "Cargo.toml").unwrap().1;
+        let on = with_server_feature(m).unwrap().unwrap();
+        let native = "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]\n\
+                      aio = { package = \"aio-rs\", git = \"https://github.com/riagentic/aio-rs\", tag = \"v";
+        assert!(on.contains(native) && on.contains("\", features = [\"server\"] }\n"), "{on}");
+        let dependencies = on.lines().skip_while(|l| *l != "[dependencies]").nth(1).unwrap();
+        assert!(dependencies.ends_with("features = [\"kit\"] }"), "every target's as it was: {dependencies}");
+        assert_eq!(with_server_feature(&on), Ok(None), "once");
     }
 
     #[test]
@@ -565,7 +620,10 @@ mod tests {
         let said: serde_json::Value =
             serde_json::from_str(&run(d.path(), Kind::Server, "tools", true).unwrap()).unwrap();
         assert_eq!(said["created"], "src/tools.rs");
-        assert!(get("Cargo.toml").contains("\"server\", \"kit\""));
+        assert!(get("Cargo.toml").contains(
+            "'.dependencies]\naio = { package = \"aio-rs\", git = \"https://github.com/riagentic/aio-rs\", tag = \"v"
+        ));
+        assert!(get("Cargo.toml").ends_with(", features = [\"server\"] }\n"), "natively: {}", get("Cargo.toml"));
         assert!(get("app/src/main.rs").contains("app::tools::http(aio::http::Http::default())"));
         assert!(run(d.path(), Kind::Cell, "../x", false).is_err());
     }
