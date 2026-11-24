@@ -457,6 +457,10 @@ version may break things.
 - `ax add` put each new `mod` line after the last one, so a second part
   (`tasks`, then `api`) left them out of the order `cargo fmt` keeps and
   `ax check` failed at its format step. They go in that order.
+- `ax add <app> server <name>` in a window app turned aio's `server`
+  feature on for every target, the page's too, where it doesn't build:
+  `ax check`, `ax dev --web` and `ax build --web` failed after it. The
+  feature goes on the native builds alone.
 
 ## [0.4.2] - 2026-11-11
 

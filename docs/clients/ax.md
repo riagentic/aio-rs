@@ -267,7 +267,7 @@ Rust keyword: it becomes a file and an identifier (`due-date`: module
 | Kind | Writes | Wires |
 |---|---|---|
 | `cell` | `src/<name>.rs`: a saved cell with a method and its test; with its views' `client!` in an app with a window | `pub mod <name>;` in `src/lib.rs`; its source opened beside the first one by each launcher in `app/src` (`main.rs`, Android's `lib.rs`) and by the browser build's `web()` |
-| `server` | `src/<name>.rs`: a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs`; the launcher's source becomes `Source::for_app_with(.., <name>::http(..))`; aio's `server` feature on in `Cargo.toml` |
+| `server` | `src/<name>.rs`: a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs`; the launcher's source becomes `Source::for_app_with(.., <name>::http(..))`; aio's `server` feature on in `Cargo.toml` (an app with a page: for its native builds alone) |
 | `page` | `pages/<name>`: a crate of its own (`<app>-<name>`) on the app's aio-rs, with a view, `<name>::<Name>` | a member of the app's workspace and a dependency of its library (`<name>`) in `Cargo.toml` |
 
 A name the app has already is refused and nothing is written; a launcher
