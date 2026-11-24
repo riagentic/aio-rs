@@ -76,8 +76,13 @@ fn declared_schedules_are_armed_when_the_cell_goes_live() {
     assert_eq!(h.state().ticks, 1);
     t.advance(180_000);
     assert_eq!(h.state().ticks, 2, "missed ones fire once");
+    // The test clock starts at the wall clock's time: 9:00 UTC may have
+    // come in these 4 minutes (it is now 60 s + 180 s past `@tick`'s arming).
+    let (morning, now) = (s[0].due, s[1].due + 180_000);
+    let fired = u32::from(morning <= now);
+    assert_eq!(h.state().mornings, fired);
     t.advance(86_400_000);
-    assert_eq!(h.state().mornings, 1);
+    assert_eq!(h.state().mornings, fired + 1, "once a day");
 }
 
 #[test]

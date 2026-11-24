@@ -214,4 +214,22 @@ async fn a_peer_reads_and_puts_blobs_here_and_fetches_them_from_a_server() {
     let wrong = aio::sync::Link { token: "nope".into(), ..link.clone() };
     assert_eq!(aio::peer::blob(&wrong, &b.id, 0, 1).await.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
     assert!(aio::peer::blob(&link, "../etc", 0, 1).await.is_err(), "never a path");
+
+    // A server that ignores the range (or sends more than asked): only the
+    // bytes asked for are read and returned.
+    for status in ["200 OK", "206 Partial Content"] {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let answer =
+            format!("HTTP/1.1 {status}\r\ncontent-length: 20\r\nconnection: close\r\n\r\n01234567890123456789");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut c, _) = l.accept().unwrap();
+            let mut req = [0u8; 4096];
+            _ = c.read(&mut req);
+            _ = c.write_all(answer.as_bytes());
+        });
+        let link = aio::sync::Link { addr, token: "secret".into(), root: None };
+        assert_eq!(aio::peer::blob(&link, &b.id, 0, 4).await.unwrap(), b"0123", "{status}");
+    }
 }

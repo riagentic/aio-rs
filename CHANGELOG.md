@@ -62,6 +62,14 @@ version may break things.
   `\\?\`, `\\.\`) on every OS: opening `\\host\share\x.png` connected to
   that host over SMB and handed it the user's NTLM hash.
 
+- A native saved copy (`Remote::connect_saved`, a client's
+  `data/copy.json`) keeps who it is: opened as another user, or linked
+  to a server that now says another user (a relink to another account),
+  it was shown offline and its waiting calls were sent as the new user.
+  Now it is never shown and its calls are never sent: with calls waiting
+  it is kept aside (`copy.other-user-<ms>`) and said (`sync:other-user`),
+  as a page's copy already was. A copy saved before is no one's.
+
 ### Added
 
 - `GuestEvent::LoadFailed { url, code, description }`: a `Browser`'s guest
@@ -213,6 +221,42 @@ version may break things.
   closed or failed, the last 64 at most: Windows may never say `close`
   for one moved to the Action Center, so every one shown stayed in the
   runtime's memory for good.
+- A page's synced copy no longer serialises its whole view and writes
+  the browser's storage on every patch: a call made is kept at once, the
+  server's patches at most every 250 ms (a burst is one write) and as
+  the page hides or closes, so nothing is lost on close.
+
+- A cron line with a `*`-led day step beside another given day field
+  (`0 0 */2 * 1`) is said once in the log, as aio said it: here either
+  day field matching is enough, where Vixie cron needs both.
+
+- `health.json` is replaced whole every 10 s without two disk syncs each
+  time (disk wear, a laptop's or phone's disk woken): a status lost to
+  a power cut is harmless.
+
+- `data/sync.token`: two processes starting at once (an app and `ax`)
+  no longer fail with "already exists": the second reads the key the
+  first made (it could also read it half-written, call it empty and
+  make another). A key file that isn't text says so and what to do,
+  where it said "already exists". `aio::paths::write_private` writes a
+  file whole (a temp file linked in), never seen part-written.
+
+- Blobs: a blob's name file (`<id>.json`) is written whole to a temp
+  file, synced, and linked in: a crash (or a full disk) between its
+  creation and its write left it empty, and the blob's name was lost for
+  good (where there are no hard links, Android's app sandbox, it is made
+  in place as before).
+
+- `aio::peer::blob(link, id, start, end)` returns bytes `start..end` only:
+  a server that ignored the range (from 0) or sent more than asked had
+  its whole answer read into memory and returned.
+
+- `aio::process`: a `Child` waited for and dropped later signalled its
+  process group by the program's pid after the program was reaped: by
+  then a process that took the pid over (and led a group of its own, as
+  a shell's job does) got the SIGTERM and SIGKILL. The program is now
+  reaped only after its group's last signal.
+
 - A cell's diagnostic (a refused reaction, a timed-out effect, a refused
   `#[on_stop]`, a cell disabled after failures) sometimes came without
   its cell's name and state: when another thread was showing a commit of

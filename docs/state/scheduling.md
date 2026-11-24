@@ -295,7 +295,12 @@ changes) set `[app] tz = "local"` in `aio.toml`.
 Each field takes `*`, a number, a range `a-b`, a list `a,b,c` and a step
 `/n` (`*/15`, `10-50/10`, `5/15` from 5 on). As in cron, when both the
 day of month and the day of week are given, either one matching is
-enough: `0 9 1 * mon` is the 1st and every Monday.
+enough: `0 9 1 * mon` is the 1st and every Monday. A `*`-led step
+(`*/2`) counts as given, so `0 0 */2 * 1` is odd days and Mondays; Vixie
+cron reads a `*`-led day field as not given (there: odd days that are
+Mondays), so such a line is said once in the log. For either one, write
+the step as a range (`1-31/2`, `0-6/2`); for both, keep one day field `*`
+and check the other in the method.
 
 | Line | Runs |
 |---|---|

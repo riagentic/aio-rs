@@ -1359,6 +1359,70 @@ async fn a_save_that_failed_is_written_again_at_the_drop() {
     assert!(saved(&file).contains("while the disk refused"), "written at the drop");
 }
 
+/// A copy saved as one user and opened as another is never shown, and its
+/// calls are never sent as the other: kept aside and said.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_users_saved_copy_is_kept_aside_never_shown_or_sent() {
+    let (h, addr) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let saved = |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    let _bus = aio::report::subscribe(move |d| {
+        if d.kind == "sync:other-user" {
+            into.lock().unwrap().push(d.message.clone());
+        }
+    });
+    let (a, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    a.add("ana's".into()).unwrap();
+    drop(a);
+    assert!(saved(&file).contains("ana's"));
+    // Offline, as bob: none of ana's copy.
+    let (b, _) = Remote::<Board>::connect_later(None, "bob", &file).await.unwrap();
+    assert!(b.state().notes.is_empty());
+    assert_eq!(b.pending(), 0);
+    let kept = asides(dir.path(), "copy.other-user-");
+    assert_eq!(kept.len(), 1);
+    assert!(saved(&kept[0]).contains("ana's"), "kept, not dropped");
+    assert!(heard.lock().unwrap().iter().any(|m| m.contains("1 calls made offline by another user")));
+    // Online as bob: nothing of ana's reaches the server.
+    b.relink(aio::sync::Link { addr, token: "secret".into(), root: None });
+    until("online", || b.online()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.state().notes.is_empty());
+}
+
+/// The server says the copy is someone else than it said before (relinked
+/// to another account): the calls waiting are not sent as them.
+#[tokio::test(flavor = "multi_thread")]
+async fn calls_waiting_are_not_sent_once_the_server_says_another_user() {
+    let (h, addr) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let saved = |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default();
+    let (a, _) = Remote::<Board>::connect_later(None, "bob", &file).await.unwrap();
+    a.add("made as ana".into()).unwrap();
+    drop(a);
+    // Last linked, the server said this copy was ana.
+    let mut doc: serde_json::Value = serde_json::from_str(&saved(&file)).unwrap();
+    doc["seen"] = serde_json::json!("ana");
+    std::fs::write(&file, doc.to_string()).unwrap();
+    let (b, _) = Remote::<Board>::connect_later(None, "bob", &file).await.unwrap();
+    assert_eq!(b.pending(), 1, "offline, who it is can't be told: shown as it was");
+    b.relink(aio::sync::Link { addr, token: "secret".into(), root: None });
+    until("online", || b.online()).await;
+    assert_eq!(b.pending(), 0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.state().notes.is_empty(), "never sent as bob");
+    let kept = asides(dir.path(), "copy.other-user-");
+    assert_eq!(kept.len(), 1);
+    assert!(saved(&kept[0]).contains("made as ana"));
+    drop(b);
+    // Saved as bob's now.
+    assert!(saved(&file).contains("\"seen\":\"bob\""));
+}
+
 /// The files in `dir` whose name starts with `prefix`, sorted.
 fn asides(dir: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
     let mut all: Vec<_> = std::fs::read_dir(dir)
