@@ -296,12 +296,25 @@ pub(crate) fn parent(p: &std::path::Path) -> &std::path::Path {
     p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))
 }
 
-/// Write a new private file (mode 0600), on disk when this returns; an
-/// existing one is an error.
+/// Write a new private file (mode 0600), whole, on disk when this
+/// returns; an existing one is an error (`AlreadyExists`), also between
+/// writers racing. Written to a temp file and linked in (a link never
+/// replaces a file), so no reader or crash sees it part-written; where
+/// there are no hard links (Android's app sandbox) it is made in place.
 pub fn write_private(p: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = create(p, true)?;
-    std::io::Write::write_all(&mut f, bytes)?;
-    f.sync_all()?;
+    let whole = |at: &std::path::Path| {
+        let mut f = create(at, true)?;
+        std::io::Write::write_all(&mut f, bytes)?;
+        f.sync_all()
+    };
+    let name = p.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
+    let tmp = p.with_file_name(format!(".{}.{}.tmp", name.to_string_lossy(), crate::uuid_v4().simple()));
+    let made = whole(&tmp).and_then(|()| match std::fs::hard_link(&tmp, p) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => whole(p),
+        r => r,
+    });
+    _ = std::fs::remove_file(&tmp);
+    made?;
     sync_dir(parent(p))
 }
 

@@ -220,19 +220,39 @@ pub fn token(data: &std::path::Path) -> std::io::Result<String> {
         return Ok(warn(t, "AIORT_TOKEN"));
     }
     let p = data.join("sync.token");
-    match std::fs::read_to_string(&p) {
-        Ok(t) if !t.trim().is_empty() => return Ok(warn(t.trim().to_string(), "data/sync.token")),
+    let read = || match std::fs::read(&p) {
+        Ok(b) => String::from_utf8(b).map(|t| Some(t.trim().to_string())).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} isn't text: write the key in it, or delete it for a new random key", p.display()),
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(std::io::Error::new(e.kind(), format!("{}: {e}", p.display()))),
+    };
+    match read()? {
+        Some(t) if !t.is_empty() => return Ok(warn(t, "data/sync.token")),
         // Empty (a write cut short, a file blanked): no key, and `?token=`
         // would show this one. A new one in its place.
-        Ok(_) => {
+        Some(_) => {
             eprintln!("[aio] security: data/sync.token was empty: a new random key is made in its place");
-            std::fs::remove_file(&p)?;
+            match std::fs::remove_file(&p) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
         }
-        Err(_) => {}
+        None => {}
     }
     let t = format!("{}{}", crate::uuid_v4().simple(), crate::uuid_v4().simple());
-    crate::paths::write_private(&p, t.as_bytes())?;
-    Ok(t)
+    match crate::paths::write_private(&p, t.as_bytes()) {
+        Ok(()) => Ok(t),
+        // Another process made it first: its key is the key.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match read()? {
+            Some(t) if !t.is_empty() => Ok(warn(t, "data/sync.token")),
+            _ => Err(e),
+        },
+        Err(e) => Err(e),
+    }
 }
 
 /// A key a guesser finds at network speed: under 16 characters, or under
@@ -903,5 +923,31 @@ mod tests {
             assert_eq!(std::fs::metadata(d.join("sync.token")).unwrap().permissions().mode() & 0o777, 0o600);
         }
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Processes starting at once each get the one key the first made,
+    /// never "already exists" (nor one key each).
+    #[test]
+    fn processes_making_the_token_at_once_get_the_same_one() {
+        for _ in 0..20 {
+            let d = tempfile::tempdir().unwrap();
+            let all: Vec<_> = (0..4)
+                .map(|_| {
+                    let d = d.path().to_path_buf();
+                    std::thread::spawn(move || token(&d))
+                })
+                .collect();
+            let got: Vec<String> = all.into_iter().map(|t| t.join().unwrap().unwrap()).collect();
+            assert!(got.iter().all(|t| *t == got[0]), "{got:?}");
+        }
+    }
+
+    /// A key file that isn't text says so, and what to do: never "already exists".
+    #[test]
+    fn a_token_file_that_isnt_text_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("sync.token"), [0xff, 0xfe]).unwrap();
+        let e = token(d.path()).unwrap_err().to_string();
+        assert!(e.contains("sync.token isn't text") && e.contains("delete it"), "{e}");
     }
 }

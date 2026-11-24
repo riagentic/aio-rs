@@ -171,6 +171,13 @@ version may break things.
 
 ### Fixed
 
+- `data/sync.token`: two processes starting at once (an app and `ax`)
+  no longer fail with "already exists": the second reads the key the
+  first made (it could also read it half-written, call it empty and
+  make another). A key file that isn't text says so and what to do,
+  where it said "already exists". `aio::paths::write_private` writes a
+  file whole (a temp file linked in), never seen part-written.
+
 - Blobs: a blob's name file (`<id>.json`) is written whole to a temp
   file, synced, and linked in: a crash (or a full disk) between its
   creation and its write left it empty, and the blob's name was lost for
