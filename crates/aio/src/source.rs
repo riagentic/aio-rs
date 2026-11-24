@@ -209,6 +209,16 @@ impl<T: Cell> Source<T> {
         Self::boot::<true>(cfg, dirs, http)
     }
 
+    /// [`Self::for_server`], serving the app's own routes and files too.
+    #[cfg(feature = "server")]
+    pub fn for_server_with(
+        cfg: &crate::config::Config,
+        dirs: &crate::paths::AppDirs,
+        http: crate::http::Http,
+    ) -> std::io::Result<Self> {
+        Self::boot::<false>(cfg, dirs, http)
+    }
+
     /// `CLIENT`: client mode is built in (a constant, so a server's binary
     /// leaves the client out).
     fn boot<const CLIENT: bool>(

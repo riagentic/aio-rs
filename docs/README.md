@@ -98,6 +98,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [A CLI and a service](examples/cli-service.md): a command-line tool talking to a headless service.
 - [A desktop app](examples/desktop-app.md): a window app with menus, files and updates.
 - [Integrations](examples/integrations.md): calling outside services: HTTP, OIDC, webhooks.
+- [A secret-holding relay](examples/relay.md): a partner API's key kept on a server, its calls made for the app.
 
 ## 3. Reference
 

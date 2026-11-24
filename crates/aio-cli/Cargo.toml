@@ -59,6 +59,8 @@ tempfile = "3"
 aio = { workspace = true, features = ["kit", "net", "testing", "dev"] }
 # A web build's pages painted by its server (`aio_shell::web::painted`).
 aio-shell = { workspace = true, features = ["web"] }
+# The relay template's HTTPS client, compiled and tested as aio's own (create/relay_lib.rs).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [lints]
 workspace = true

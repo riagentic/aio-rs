@@ -32,6 +32,7 @@ ax create notes --template cli       # a command-line tool on a saved cell
 ax create board --template service   # cells served to clients, no window
 ax create list --template todo       # a window on a saved todo list
 ax create balls --template canvas    # a window drawing a world a pure function moves
+ax create proxy --template relay     # a partner API's calls, its key held on the server
 ax create notes --id notes-dev       # its id apart from its name (its data's home)
 ax create notes --aio-version 0.4.0  # another aio-rs release (main, latest)
 ax create notes --aio ../aio-rs      # an aio-rs checkout instead (a folder from here)
@@ -43,7 +44,7 @@ ax create notes --force              # into a folder that holds files already
 | Option | What it does | Default |
 |---|---|---|
 | `<name>` | the folder, the package, the binary: lowercase letters, digits and `-`, starting with a letter, not `app` or ending in `-app`, nor a name Rust or cargo keeps (`core`, `std`, `build`, `deps`, `examples`, `incremental`) | – |
-| `--template` | `app`, `todo`, `canvas`, `cli` or `service` | `app` |
+| `--template` | `app`, `todo`, `canvas`, `cli`, `service` or `relay` | `app` |
 | `--id` | `[app] id`: where its data lives; refused when an installed app has it (the two would share data) | the name |
 | `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.4.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
 | `--aio` | an aio-rs checkout (`crates/aio`, `crates/aio-shell`) instead, a folder named from where you run it; the app's `Cargo.toml` names it relative to the app, so the two share a folder below the root | – |
