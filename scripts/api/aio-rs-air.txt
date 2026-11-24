@@ -375,9 +375,11 @@ impl Clone for DataTransfer
 impl Clone for DragData
 impl Clone for Effect
 impl Clone for ElementPoint
+impl Clone for ErrorBoundaryProps
 impl Clone for Eval
 impl Clone for FileData
 impl Clone for FormData
+impl Clone for FragmentProps
 impl Clone for H
 impl Clone for KeyboardData
 impl Clone for Live
@@ -401,6 +403,7 @@ impl Clone for Retry
 impl Clone for ScreenPoint
 impl Clone for ScrollBehavior
 impl Clone for ScrollData
+impl Clone for SuspenseProps
 impl Clone for Task
 impl Clone for Tree
 impl Clone for Vector

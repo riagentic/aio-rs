@@ -685,6 +685,52 @@ version may break things.
   answer as JSON among its text, and its steps' output on stdout, so
   `ax check --json` wasn't one object. The steps say text, on stderr.
 
+- An attribute or prop given twice in one `rsx!` element or component
+  (`class: "a", class: "b"`, `aria_label` and `"aria-label"`, `key`) was
+  taken silently, the second replacing the first; it is a compile error
+  at the second now (two handlers of one event still both run).
+
+- `input { value: v }` with `v` going from `Some` to `None` removed the
+  `value` attribute and left the field showing the old text (what a field
+  shows is its property): `None` clears it now, as `dangerous_inner_html`'s.
+
+- `Some(500)` given to an optional prop (`Option<usize>`,
+  `Prop<Option<usize>>`, as `VirtualList`'s `scroll_to`) didn't compile:
+  the literal was an `i32`. `Some(<literal>)` and `None` take the prop's
+  type now, as a bare `500` does.
+
+- `callback(f)` kept the closure of its body's first run: a body run
+  again (after a `follow`, a wait) handed it a new `f` that was dropped,
+  so `use_window_event`, `use_back_button` and a handler prop called a
+  closure that saw the first run's values (their docs said the latest
+  runs). It is the same handler still, calling the latest run's closure.
+
+- A cleanup (`on_cleanup`, a hook's end) ran under whatever owner was
+  current, often the view that was ending: an `eval` or a `spawn` in it
+  belonged to that view and ended at once (an `eval`'s answer was "the
+  script's view ended"), or lived on with an unrelated one. Cleanups run
+  under no owner now: what they start lives as long as its handle, or
+  until it is done.
+
+- `key:` on an element or a component outside a `for` row was ignored
+  (`ax lint` warned it was): it makes what it is on again, its state
+  afresh, when the key changes now (React's remount: `Editor { key:
+  "{doc.id}", .. }` starts over for another document). `ax lint` warns
+  only on a key on a row's later node (it keys no row).
+
+- A component's plain props were read once: `for p in procs.get() { Row {
+  key: "{p.pid}", data: lookup(p.pid) } }` kept the row's first props
+  when `lookup`'s source arrived later ("no data" forever). A plain prop
+  is followed now: when what it read changes and the props built again
+  differ (`PartialEq`, field by field; a `Prop`, a view, a handler and
+  attributes follow by themselves), the body runs again with them, its
+  own and its children's state kept, and its new view takes the old one's
+  place in the page node by node (the focus, a field's typed text and
+  scroll stay; a new `MORPH` edit). **Breaking:** a hand-written props
+  struct placed by `rsx!` is `Clone` (`#[derive(Clone, Props)]`, as the
+  docs show); `#[component]`'s is `Clone` when its fields are (it asked
+  every type parameter before: `EventHandler<E>` needs no `E: Clone`).
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

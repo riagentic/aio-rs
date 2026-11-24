@@ -342,7 +342,7 @@ pub struct MountedComponent {
     /// Its `key:` in a list, as text.
     pub key: Option<String>,
     /// Times it rendered since it mounted, the first included. A body runs
-    /// once (again only after a wait or a `follow`): a state change shows
+    /// once (again only after a wait, a `follow` or new props): a state change shows
     /// in `updates`.
     pub renders: u32,
     /// Times one of its own holes wrote its part of the page again (what a

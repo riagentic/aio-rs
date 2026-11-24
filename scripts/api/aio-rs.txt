@@ -4099,9 +4099,9 @@ impl<K, T> Clone for Held<K, T>
 impl<K: Clone + Eq + Hash + Send + Sync + 'static, T: Send + Sync + 'static> Drop for Hold<K, T>
 impl<K: PartialEq, R: Clone> Default for Derived<K, R>
 impl<R: $crate::clone::Clone + 'static> Clone for Column<R>
-impl<R: $crate::clone::Clone + Clone + PartialEq + 'static> Clone for TableProps<R>
 impl<R: $crate::cmp::PartialEq + 'static> PartialEq for Column<R>
 impl<R: $crate::cmp::PartialEq + 'static> StructuralPartialEq for Column<R>
+impl<R: Clone + PartialEq + 'static> Clone for TableProps<R> where Vec<Column<R>>: ::core::clone::Clone, Prop<Vec<R>>: ::core::clone::Clone, Option<Callback<R, String>>: ::core::clone::Clone, Option<EventHandler<(R, usize)>>: ::core::clone::Clone
 impl<R: Clone + PartialEq + 'static> Props for TableProps<R>
 impl<R: DeserializeOwned> Future for Answer<R>
 impl<R> Debug for Answer<R>

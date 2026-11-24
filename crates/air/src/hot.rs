@@ -116,6 +116,19 @@ pub(crate) fn end_kept() {
     }
 }
 
+/// `f()` with `frames` (each detached from its hole) kept for the views it
+/// builds, then the ones no view took end: a component's body run again
+/// with new props hands its children's state on to the views built in
+/// their places. What was kept before is kept again after.
+pub(crate) fn keeping_in<R>(frames: HashMap<String, Rc<Frame>>, f: impl FnOnce() -> R) -> R {
+    let was = KEPT.replace(Some(frames));
+    let r = f();
+    if let Some(left) = KEPT.replace(was) {
+        left.values().for_each(|f| f.end());
+    }
+    r
+}
+
 /// Whether a root is being built again now (a place is worth computing).
 pub(crate) fn keeping() -> bool {
     KEPT.with_borrow(Option::is_some)

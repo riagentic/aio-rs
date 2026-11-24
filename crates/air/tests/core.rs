@@ -808,3 +808,119 @@ fn a_signal_read_again_after_a_memo_of_it_reruns_its_hole_once() {
     p.within(|| a.set(3));
     assert_eq!((p.text("t"), RUNS.get() - runs), ("3-30-3".to_string(), 2));
 }
+
+#[component]
+fn Caller(go: Callback<(), String>) -> View {
+    let out = signal(String::new);
+    rsx! {
+        button { "data-t": "call", onclick: move |_| out.set(go.call(())), "Call" }
+        p { "data-t": "out", "{out}" }
+    }
+}
+
+/// `callback` hands back the same handler on every run of its body (a prop
+/// keeps it), calling the closure of the latest run: what that run saw.
+#[test]
+fn a_callback_calls_the_closure_of_its_bodys_latest_run() {
+    let mut p = TestPage::mount(|| {
+        let n = signal(|| 0);
+        let seen = follow(|| n.get());
+        let go = callback(move |()| format!("run {seen}"));
+        let first = once(|| go);
+        rsx! {
+            button { "data-t": "inc", onclick: move |_| n += 1, "+" }
+            p { "data-t": "same", "{first == go}" }
+            Caller { go }
+        }
+    });
+    p.click("call");
+    assert_eq!(p.text("out"), "run 0");
+    p.click("inc");
+    p.click("call");
+    assert_eq!(
+        (p.text("out"), p.text("same")),
+        ("run 1".into(), "true".into()),
+        "the latest closure, the same handler"
+    );
+}
+
+/// A cleanup's script belongs to no view (the one whose cleanup runs is
+/// ending): it lives as long as its handle, whatever owner is current as
+/// the cleanup runs (here the ending view's own: its async handler closed it).
+#[test]
+fn a_script_a_cleanup_runs_ends_with_its_handle_not_with_a_view() {
+    thread_local!(static GOT: RefCell<Option<Result<String, String>>> = const { RefCell::new(None) });
+    #[component]
+    fn Bye(close: Callback) -> View {
+        on_cleanup(|| {
+            let e = eval("return 1");
+            spawn_forever(async move { GOT.set(Some(e.join_json().await)) });
+        });
+        rsx! { button { "data-t": "close", onclick: move |_| async move { close.call(()) }, "Close" } }
+    }
+    let open = Signal::new(true);
+    let mut p = TestPage::mount(move || rsx! { if open.get() { Bye { close: move |()| open.set(false) } } });
+    p.click("close");
+    let (id, js) = p.scripts.last().cloned().unwrap();
+    assert_eq!(js, "return 1");
+    p.answer(id, 1, "1");
+    assert_eq!(GOT.take(), Some(Ok("1".into())), "its answer comes back");
+    assert_eq!(air::live().scripts, 0, "and it is gone with its handle");
+}
+
+thread_local!(static PROC_BODIES: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) });
+
+#[component]
+fn Toggle(at: u32) -> View {
+    let on = signal(|| false);
+    rsx! { button { "data-t": "toggle-{at}", onclick: move |_| on.toggle(), "{on}" } }
+}
+
+#[component]
+fn Proc(pid: u32, data: Option<String>) -> View {
+    PROC_BODIES.with_borrow_mut(|b| b.push(pid));
+    let opened = signal(|| false);
+    let shown = data.unwrap_or_else(|| "no data".into());
+    rsx! {
+        li {
+            button { "data-t": "open-{pid}", onclick: move |_| opened.set(true), "{opened}" }
+            input { "data-t": "note-{pid}", oninput: move |_| {} }
+            span { "data-t": "data-{pid}", "{shown}" }
+            Toggle { at: pid }
+        }
+    }
+}
+
+/// A component whose plain props read state (`data: lookup(p.pid)`) runs
+/// its body again when what they read changes and the props differ: its
+/// own state, its children's and the page's nodes (a field's typed text)
+/// are kept. Props that come out the same run nothing.
+#[test]
+fn a_keyed_component_takes_new_props_and_keeps_its_state() {
+    let info = Signal::new(std::collections::HashMap::<u32, String>::new());
+    let mut p = TestPage::mount(move || {
+        let lookup = move |pid: u32| info.with(|m| m.get(&pid).cloned());
+        rsx! { ul { for pid in [1u32, 2] { Proc { key: "{pid}", pid, data: lookup(pid) } } } }
+    });
+    assert_eq!(PROC_BODIES.take(), [1, 2]);
+    p.click("open-1");
+    p.click("toggle-1");
+    p.input("note-1", "typed");
+    p.within(|| info.update(|m| _ = m.insert(1, "cpu 5%".into())));
+    assert_eq!((p.text("data-1"), p.text("data-2")), ("cpu 5%".into(), "no data".into()), "the new props shown");
+    assert_eq!(PROC_BODIES.take(), [1], "only the row whose props changed ran again");
+    assert_eq!(
+        (p.text("open-1"), p.text("toggle-1")),
+        ("true".into(), "true".into()),
+        "its state and its child's kept"
+    );
+    assert_eq!(p.attr("note-1", "value").as_deref(), Some("typed"), "the page's field kept, with what was typed");
+    let live = air::live();
+    p.within(|| info.update(|m| _ = m.insert(3, "not shown".into())));
+    assert_eq!(PROC_BODIES.take(), [] as [u32; 0], "the same props: no body runs");
+    for n in 0..5 {
+        p.within(|| info.update(|m| _ = m.insert(1, format!("cpu {n}%"))));
+    }
+    assert_eq!((p.text("data-1"), PROC_BODIES.take().len()), ("cpu 4%".into(), 5));
+    assert_eq!(air::live(), live, "nothing piles up across its runs");
+}

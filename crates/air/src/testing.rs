@@ -278,6 +278,16 @@ impl TestPage {
                         set_style(a, &k, &v);
                     }
                 }
+                op::MORPH => {
+                    let (was, now) = (self.span(&mut r), self.span(&mut r));
+                    let parent = self.nodes[was[0]].parent.expect("a view in the page");
+                    let at = self.nodes[parent].children.iter().position(|c| *c == was[0]).unwrap();
+                    let out = self.retake_all(was.clone(), now);
+                    for &n in &out {
+                        self.nodes[n].parent = Some(parent);
+                    }
+                    self.nodes[parent].children.splice(at..at + was.len(), out);
+                }
                 o => panic!("air: unknown edit {o}"),
             }
         }
@@ -308,6 +318,58 @@ impl TestPage {
         let span: Vec<usize> = self.nodes[p].children.drain(i..=j).collect();
         span.iter().for_each(|&n| self.nodes[n].parent = None);
         span
+    }
+
+    /// `now` in the place of `was`, pair by pair (`page.js`'s MORPH): a node
+    /// alike stays, taking the new one's id, listeners, attributes and the
+    /// properties its view set (one it doesn't set, what was typed, stays);
+    /// the nodes in their places.
+    fn retake_all(&mut self, was: Vec<usize>, now: Vec<usize>) -> Vec<usize> {
+        let mut out = Vec::with_capacity(now.len());
+        for (i, &v) in now.iter().enumerate() {
+            match was.get(i).copied() {
+                Some(r) if self.alike(v, r) => {
+                    self.retake(v, r);
+                    out.push(r);
+                }
+                Some(r) => {
+                    self.forget(r);
+                    out.push(v);
+                }
+                None => out.push(v),
+            }
+        }
+        was.iter().skip(now.len()).for_each(|&r| self.forget(r));
+        out
+    }
+
+    fn alike(&self, v: usize, r: usize) -> bool {
+        match (&self.nodes[v].kind, &self.nodes[r].kind) {
+            (Kind::El(a, _), Kind::El(b, _)) => a == b,
+            (Kind::Text(_), Kind::Text(_)) | (Kind::Comment, Kind::Comment) => true,
+            _ => false,
+        }
+    }
+
+    fn retake(&mut self, v: usize, r: usize) {
+        if let Some(id) = self.nodes[r].id.filter(|id| Some(*id) != self.nodes[v].id) {
+            self.ids[id as usize] = None;
+        }
+        self.nodes[r].id = self.nodes[v].id;
+        if let Some(id) = self.nodes[v].id {
+            self.ids[id as usize] = Some(r);
+        }
+        self.nodes[r].listen = std::mem::take(&mut self.nodes[v].listen);
+        self.nodes[r].kind = self.nodes[v].kind.clone();
+        for (k, x) in std::mem::take(&mut self.nodes[v].props) {
+            set_prop(&mut self.nodes[r].props, k, x);
+        }
+        let (now, was) = (self.nodes[v].children.clone(), self.nodes[r].children.clone());
+        let out = self.retake_all(was, now);
+        for &n in &out {
+            self.nodes[n].parent = Some(r);
+        }
+        self.nodes[r].children = out;
     }
 
     fn set_prop(&mut self, n: usize, k: String, v: String) {

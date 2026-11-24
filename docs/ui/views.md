@@ -168,11 +168,20 @@ readers told when that value changes.
 ## Components, props and children
 
 A component is a function returning `View`; `#[component]` turns its
-arguments into props. Its body runs once, and so are its props
-evaluated, unless a prop is a `Prop<T>` (or a `Signal`, a `Part`): given
-an expression (`value: name.get()`), a `Prop` follows it; given a
-constant, it is that constant. Rows that take their data by props and
-a key stay put when the list around them changes.
+arguments into props. Its body runs once. A `Prop<T>` (or a `Signal`, a
+`Part`) follows what it is given (`value: name.get()`) by itself, in the
+holes that read it. A plain prop is read where the component is placed:
+when what it read changes (`data: lookup(p.pid)`, its source loaded
+later), the props are built again and, if they differ (`PartialEq`; a
+type without it always does), the body runs again with them: its own
+state (signals, memos, hooks), its children's and the page's nodes (the
+focus, a field's text and selection, scroll) are kept, and its new view
+takes the old one's place node by node. A hook keeps what its first run
+made (an `effect`'s or a `memo`'s closure too): one that must follow a
+prop takes it as a `Prop`. No remount: a keyed row stays
+the same component. Rows that take their data by props and a key stay
+put when the list around them changes; a row whose item itself changed
+is made anew (the item is the row's identity with its key).
 
 ```rust
 use aio::ui::prelude::*;
@@ -259,7 +268,7 @@ assert_eq!(ui.count("li"), 0);
 No prop needs `into`: every prop converts what it is given. A plain
 prop (`label: String`) takes anything `Into` its type (`label: "Save"`,
 `size: 5` for a `u8`); an `Option<T>` a `T`, what converts to one, or an
-`Option`; a `Prop<T>` the same, or a `Signal`, `Memo` or `Prop` of one,
+`Option` (`Some(500)` and `None` take the prop's type, as `500` does); a `Prop<T>` the same, or a `Signal`, `Memo` or `Prop` of one,
 which it follows. `#[props(into)]` is accepted and changes nothing. The
 one exception: a prop whose type names the component's own type
 parameter (`items: Vec<R>`) takes exactly that type.
@@ -278,12 +287,14 @@ compile error naming it.
 | an attribute | `class: "row"`, `"data-t": "x"`, `"aria-label": "Close"`; any string (`String`, `&str`, `Cow`), number or `bool`: `title: t(&name.get())` |
 | a value that may be absent | `title: tip` where `tip: Option<String>`: `None` leaves it out |
 | classes by condition | `class: aio::ui::cx(&[("row", true), ("on", on)])` |
+| each attribute once | a name given twice on one element or component is a compile error (classes go in one: `class: "a b"`, or `cx`) |
 | inline style | `style: "width: {w}px"`, or one property: `width: "{w}px"` |
 | a condition | `if on.get() { X {} } else { Y {} }`: swaps only when it flips |
 | a value that may be absent | `if let Some(n) = note.get() { p { "{n}" } }`: made again when what it binds changes |
 | a match | `match page.get() { Page::A => { A {} } Page::B(id) if id > 9 => p { "{id}" }, _ => {} }`: an arm's view is kept until another arm matches (one that binds names: until they change) |
 | a repeat | `for`, never `while` or `loop` (refused): a view says what shows, not how long to repeat |
 | a list | `for x in xs.get() { li { key: "{x.id}", .. } }` (`key:` on every row's first node: `rsx!` refuses a row without one; items are `Clone + PartialEq`) |
+| a fresh start | `key:` outside a list: `Editor { key: "{doc.id}", .. }` is made again (its state afresh) when the key changes |
 | several roots | a component may return them side by side: `rsx! { A {} B {} }` |
 | an element made elsewhere | `{elem}` where `elem: View` |
 | trusted HTML | `div { dangerous_inner_html: "{html}" }`: never with text a person typed; the kit's `Markdown` is safe |
@@ -409,7 +420,7 @@ assert_eq!(ui.read(&THEME), "dark");
 | `seeded_resource(move \|\| async move { .. })` | `resource` whose value a served page carries: the server waits for it while the page streams, the page's first frame starts from it ([server rendering](#server-rendering-and-hydration)); its value is `Serialize` and `Deserialize` | none |
 | `watch(deps, move \|deps\| ..)` | runs once the view is drawn, again when `deps` (values the view made, e.g. of its props) differ | |
 | `on_change(move \|\| .., \|next, prev\| ..)` | runs when the first closure's value changes (not at the start), with the old one; only what it reads is followed, the second runs untracked | `watch(source, fn)`, `effect(on(..))` |
-| `callback(move \|x\| ..)` | a handler made once, for a prop | `useCallback` |
+| `callback(move \|x\| ..)` | a handler made once, for a prop: the same handler on every run of the body, calling the latest run's closure | `useCallback` |
 | `task(move \|\| async move { .. })` | work for the view's life: started at mount, stopped at unmount | `onMount` + a loop |
 | `once(\|\| ..)` | made once, as the view mounts | `onMount`, `useRef` |
 | `on_cleanup(\|\| ..)` | runs as the component goes (unmount) | `onCleanup`, `onUnmount` |
@@ -430,7 +441,7 @@ assert_eq!(ui.read(&THEME), "dark");
 
 | Moment | Write |
 |---|---|
-| mount | the component's body (once); `once(\|\| ..)`: runs once, its value kept |
+| mount | the component's body (once, and again with new props: its hooks hand back what they made); `once(\|\| ..)`: runs once, its value kept |
 | when what it read changed | `effect(move \|\| ..)` |
 | the element is in the page | `onmounted: move \|e\| ..` on it |
 | a change | the holes that read it: keep them free of side effects |
