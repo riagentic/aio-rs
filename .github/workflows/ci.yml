@@ -101,9 +101,21 @@ jobs:
         with:
           key: ${{ matrix.part }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Gradle's downloads (its wrapper, the Android plugin's jars): fetched
-      # once per template, not from Maven Central on every run (it answers
-      # a burst of runs with 429).
+      # Gradle's downloads (its wrapper, the Android plugin's jars): kept per
+      # template, and Maven Central's taken from Google's mirror of it
+      # (Central answers a burst of CI runs with 429).
+      - if: matrix.part == 'apk'
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/central-mirror.gradle <<'EOF'
+          settingsEvaluated { s ->
+              [s.pluginManagement.repositories, s.dependencyResolutionManagement.repositories].each { rs ->
+                  rs.withType(MavenArtifactRepository).configureEach { r ->
+                      if (r.url.toString().startsWith('https://repo.maven.apache.org/')) r.url = 'https://maven-central.storage-download.googleapis.com/maven2/'
+                  }
+              }
+          }
+          EOF
       - if: matrix.part == 'apk'
         uses: actions/cache@v4
         with:
