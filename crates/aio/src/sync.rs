@@ -1606,6 +1606,14 @@ impl<T: Cell> Copy<T> {
         st
     }
 
+    /// Own call `op` is in the confirmed copy (the server sends its change
+    /// before its reply): no longer replayed on top of it.
+    fn ran(&mut self, op: &Value) {
+        if let Some(op) = op.as_str() {
+            self.pending.retain(|p| p.op != op);
+        }
+    }
+
     /// Before a server view comes: what to check it against for conflicts
     /// (its view, what it shows), unless no call waits or `own` is one of them
     /// (the change is its own).
@@ -2668,6 +2676,7 @@ impl<T: Cell> Remote<T> {
                         c.seq = seq;
                         c.view = m["state"].clone();
                         c.confirmed = Arc::new(st);
+                        c.ran(&m["op"]);
                     });
                     let elapsed = lock(&self.inner.asked).take().map_or(Duration::ZERO, |t| t.elapsed());
                     let synced = Synced { events, elapsed, status: self.status(), conflicts: met.len() };
@@ -2699,6 +2708,7 @@ impl<T: Cell> Remote<T> {
                             c.seq = seq;
                             c.view = view;
                             c.confirmed = Arc::new(st);
+                            c.ran(&m["op"]);
                         });
                         self.conflicted(&met);
                     }

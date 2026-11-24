@@ -84,6 +84,10 @@ version may break things.
 
 ### Fixed
 
+- A synced copy showed its own call twice for a moment: the server sends
+  a call's change, then its reply, and in between the copy replayed the
+  call on a state that already had it (a list showed 1, 2, 1). The change
+  that names the call now ends its prediction.
 - A memo of a memo could still glitch: an effect older than the outer
   memo, reading it and a signal the inner one follows, ran once with the
   outer memo's old value and once more with the new one. A read now

@@ -101,6 +101,17 @@ jobs:
         with:
           key: ${{ matrix.part }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Gradle's downloads (its wrapper, the Android plugin's jars): fetched
+      # once per template, not from Maven Central on every run (it answers
+      # a burst of runs with 429).
+      - if: matrix.part == 'apk'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('crates/aio-cli/android/**', 'crates/aio-cli/src/android.rs') }}
+          restore-keys: gradle-
       - id: pins
         run: echo "key=$(sh scripts/ci-pins)" >> "$GITHUB_OUTPUT"
       - id: tools
