@@ -15,6 +15,14 @@ use crate::reactive::{Callback, Mark, Memo, Signal, fresh, memo_seeded, recorded
 pub trait Props: Sized {
     type Builder;
     fn builder() -> Self::Builder;
+
+    /// Would a body run with `other` show what it shows with these? Its
+    /// plain props are equal (`PartialEq`; one without it never is); a
+    /// `Prop`, a view, a handler and attributes follow by themselves.
+    #[doc(hidden)]
+    fn __same(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 /// A component with no props.
@@ -22,6 +30,38 @@ impl Props for () {
     type Builder = NoPropsBuilder;
     fn builder() -> NoPropsBuilder {
         NoPropsBuilder
+    }
+
+    fn __same(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// Two values of a prop, compared where their type can be
+/// (`(&&Same(a, b)).same()`: method lookup tries `&Same` first).
+#[doc(hidden)]
+pub struct Same<'a, T>(pub &'a T, pub &'a T);
+
+#[doc(hidden)]
+pub trait SameByEq {
+    fn same(&self) -> bool;
+}
+
+impl<T: PartialEq> SameByEq for &Same<'_, T> {
+    fn same(&self) -> bool {
+        self.0 == self.1
+    }
+}
+
+#[doc(hidden)]
+pub trait SameByNone {
+    fn same(&self) -> bool;
+}
+
+impl<T> SameByNone for Same<'_, T> {
+    /// Not comparable: taken as changed.
+    fn same(&self) -> bool {
+        false
     }
 }
 
@@ -89,6 +129,23 @@ impl<T: Clone + 'static> IntoOpt<T, ByMemo> for Memo<Option<T>> {
 impl<T: Clone + 'static> IntoOpt<T, ByProp> for Prop<Option<T>> {
     fn into_opt(self) -> Option<T> {
         self.get()
+    }
+}
+
+/// What an optional prop takes as a value: a `T` or an `Option` of one
+/// (`5`, `Some(5)`: the literal is the prop's type).
+#[doc(hidden)]
+pub trait OptVal<T> {
+    fn into_opt_val(self) -> Option<T>;
+}
+impl<T> OptVal<T> for T {
+    fn into_opt_val(self) -> Option<T> {
+        Some(self)
+    }
+}
+impl<T> OptVal<T> for Option<T> {
+    fn into_opt_val(self) -> Option<T> {
+        self
     }
 }
 

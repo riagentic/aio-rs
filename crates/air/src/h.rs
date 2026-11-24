@@ -6,7 +6,7 @@
 //! attribute or a child, or an `attr_with` / `child_with` closure).
 use crate::dom::{
     AttrHole, AttrSlot, Child, IntoAttr, IntoChild, IntoHandler, Range, Template, Tree, View, attr, child,
-    comp as place, handler, on, tpl, view,
+    comp_with as place, handler, on, tpl, view,
 };
 use crate::event::FromRaw;
 use std::cell::{Cell, RefCell};
@@ -178,7 +178,8 @@ pub fn comp<P: Clone + 'static, M: 'static>(c: impl crate::Component<P, M>, prop
     Ok(Tree::new(move || {
         let (range, at) = crate::dom::slot();
         let (c, props) = (c.clone(), props.clone());
-        place(at, name, None, Box::new(move || c.call(props.clone())));
+        // Given as a value: its props never change.
+        place(at, name, None, move || props.clone(), |_, _| true, move |p| c.call(p));
         range
     }))
 }

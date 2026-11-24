@@ -216,6 +216,43 @@
     for (const c of rs.slice(vs.length)) c.remove(), told.missed++
   }
 
+  // A component drawn again with new props (MORPH): its new nodes' ids,
+  // listeners, attributes and what the view set go to the page's nodes
+  // where they are alike, which stay (focus, scroll, a field's selection
+  // and what was typed where the view sets no value); a node of another
+  // kind takes the new one's place.
+  const retake = (v, r) => {
+    if (r.__airId !== undefined && r.__airId !== v.__airId) nodes.delete(r.__airId)
+    if (v.__airId === undefined) delete r.__airId
+    else (r.__airId = v.__airId), nodes.set(v.__airId, r)
+    v.__airReal = r
+    resizes?.unobserve(r), visibles?.unobserve(r)
+    if (v.__airOn) {
+      resizes?.unobserve(v), visibles?.unobserve(v)
+      r.__airOn = v.__airOn
+      for (const k of v.__airOn) observe(r, k)
+    } else delete r.__airOn
+    if (v.nodeType !== 1) return void (r.nodeValue !== v.nodeValue && (r.nodeValue = v.nodeValue))
+    for (const a of [...r.attributes]) if (!v.hasAttribute(a.name)) r.removeAttribute(a.name)
+    for (const a of v.attributes) if (r.getAttribute(a.name) !== a.value) r.setAttribute(a.name, a.value)
+    const set = v.__airProps
+    if (set) for (const k of set) if (k !== 'innerHTML' && r[k] !== v[k]) prop(r, k, v[k])
+    r.__airProps = set
+    if (set && set.has('innerHTML')) return void (r.innerHTML !== v.innerHTML && (r.innerHTML = v.innerHTML))
+    if (r.tagName !== 'TEXTAREA') retakeAll(r, [...v.childNodes], [...r.childNodes])
+  }
+  // `now` in the place of the page's `was`, pair by pair.
+  const retakeAll = (parent, now, was) => {
+    const end = was.length ? was[was.length - 1].nextSibling : null
+    now.forEach((v, i) => {
+      const r = was[i]
+      if (r && alike(v, r)) retake(v, r)
+      else if (r) forget(r), r.replaceWith(v)
+      else parent.insertBefore(v, end)
+    })
+    for (const r of was.slice(now.length)) forget(r), r.remove()
+  }
+
   const apply = (fr) => {
     const t0 = performance.now()
     const main = painted && nodes.get(0)
@@ -336,6 +373,7 @@
           }
           break
         }
+        case 17: { const was = range(), now = range(); retakeAll(was[0].parentNode, now, was); break }
         default: throw new Error('air: unknown edit at ' + (p - 1))
       }
     }
@@ -343,14 +381,14 @@
       const told = Object.assign([], { n: 0, missed: 0 })
       kids(nodes.get(0), main, told)
       nodes.set(0, main)
-      // A motion measures the page's node that took the built one's place.
-      for (const e of [...moving]) if (e.__airReal) moving.delete(e), moving.add(e.__airReal)
       main.removeAttribute('data-aio-painted')
       for (const [n, e] of told) n.dispatchEvent(new Event(e, { bubbles: true }))
       // What hydration kept and what it put in place (`air::ssr`).
       window.__airHydrated = { kept: told.n, replaced: told.missed }
       if (told.missed) console.warn('[air] ' + told.missed + ' nodes of the server paint differed from the view and were replaced')
     }
+    // A motion measures the page's node that took the built one's place.
+    for (const e of [...moving]) if (e.__airReal) moving.delete(e), moving.add(e.__airReal)
     // A motion may measure what it moves (aio's TransitionFn got the node):
     // `--aio-w` and `--aio-h`, the element's box without the animation, set
     // before its first frame, all of them in one layout.

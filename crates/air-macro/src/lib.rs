@@ -205,9 +205,23 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
     });
     let pats = fields.iter().map(|f| &f.pat);
     let builder = builder(vis.clone(), &props, &name.to_string(), &fields, &gp, &gn);
+    // Clone when its fields are (a derive would ask it of every type
+    // parameter: `E` of an `EventHandler<E>` needn't be).
+    let mut generic_names = vec![];
+    idents_in(&gn.clone().into_iter().collect::<Vec<_>>(), &mut generic_names);
+    let tys = fields.iter().map(|f| &f.ty).filter(|ty| {
+        let mut used = vec![];
+        idents_in(&TokenStream::clone(ty).into_iter().collect::<Vec<_>>(), &mut used);
+        used.iter().any(|u| generic_names.contains(u))
+    });
+    let (names, names2) = (fields.iter().map(|f| &f.name), fields.iter().map(|f| &f.name));
     quote!(
-        #[derive(Clone)]
         #vis struct #props<#gp> { #(#decl),* }
+        impl<#gp> ::core::clone::Clone for #props<#gn> where #(#tys: ::core::clone::Clone,)* {
+            fn clone(&self) -> Self {
+                Self { #(#names: ::core::clone::Clone::clone(&self.#names2),)* }
+            }
+        }
         #builder
         #[allow(non_snake_case)]
         #head fn #name<#gp>(#props { #(#pats),* }: #props<#gn>) #rest
@@ -406,6 +420,20 @@ fn builder(
     let names: Vec<&Ident> = fields.iter().map(|f| &f.name).collect();
     let tys: Vec<&TokenStream> = fields.iter().map(|f| &f.ty).collect();
     let unit = params.iter().map(|_| quote!(()));
+    // The props a body's view is made of: a `Prop`, a view, a handler and
+    // attributes follow by themselves.
+    let compared: Vec<&Ident> = fields
+        .iter()
+        .filter(|f| {
+            let inner = match &f.kind {
+                Kind::Plain => f.ty.clone(),
+                Kind::Opt(i) => i.clone(),
+                _ => return false,
+            };
+            !f.extends && !is_callback(ty_head(&inner.into_iter().collect::<Vec<_>>()).0.as_deref())
+        })
+        .map(|f| &f.name)
+        .collect();
     let air = quote!(air);
     let mut generic_names = vec![];
     idents_in(&gn.clone().into_iter().collect::<Vec<_>>(), &mut generic_names);
@@ -442,7 +470,7 @@ fn builder(
             _ if exact => (
                 quote!(),
                 quote!(f: impl ::core::ops::FnOnce() -> #ty),
-                quote!(#air::untrack(f)),
+                quote!(f()),
                 quote!(),
                 quote!(v: #ty),
                 quote!(v),
@@ -450,7 +478,7 @@ fn builder(
             Kind::Opt(i) => (
                 quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
-                quote!(#air::__rt::IntoOpt::into_opt(#air::untrack(f))),
+                quote!(#air::__rt::IntoOpt::into_opt(f())),
                 quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
                 quote!(v: __X),
                 quote!(#air::__rt::IntoOpt::into_opt(v)),
@@ -490,7 +518,7 @@ fn builder(
             Kind::Plain => (
                 quote!(<__X: ::core::convert::Into<#ty>>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
-                quote!(::core::convert::Into::into(#air::untrack(f))),
+                quote!(::core::convert::Into::into(f())),
                 quote!(<__X: ::core::convert::Into<#ty>>),
                 quote!(v: __X),
                 quote!(::core::convert::Into::into(v)),
@@ -506,18 +534,21 @@ fn builder(
         } else {
             (fgen, fparam, fval)
         };
-        // `__val_n(v)`: a literal number, `true`, `Variant::A`: the type is the prop's.
+        // `__val_n(v)`: a literal number, `true`, `Variant::A` (an optional
+        // prop's `Some(5)` too): the type is the prop's.
         let vname = format_ident!("__val_{}", n.to_string().trim_start_matches("r#"));
+        let opt = quote!(#air::__rt::OptVal::into_opt_val(v));
         let (vty, vval) = match &f.kind {
-            Kind::Opt(i) => (i.clone(), quote!(::core::option::Option::Some(v))),
+            Kind::Opt(i) => (i.clone(), opt.clone()),
             Kind::Prop(i, false) => (i.clone(), quote!(#air::Prop::new(v))),
-            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::new(::core::option::Option::Some(v)))),
+            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::new(#opt))),
             Kind::OptView => (quote!(#air::View), quote!(::core::option::Option::Some(v))),
             Kind::Plain | Kind::View => (ty.clone(), quote!(v)),
         };
         // A view prop takes text as a value too (`label: 7`).
         let (vgen, vparam, vval) = match &f.kind {
             Kind::View | Kind::OptView if !exact => (fgen.clone(), fparam.clone(), fval.clone()),
+            Kind::Opt(_) | Kind::Prop(_, true) => (quote!(<__V: #air::__rt::OptVal<#vty>>), quote!(v: __V), vval),
             _ => (quote!(), quote!(v: #vty), vval),
         };
         let docs = &f.docs;
@@ -613,6 +644,11 @@ fn builder(
             fn builder() -> Self::Builder {
                 #b { #(#names: ::core::option::Option::None,)* __s: ::core::marker::PhantomData }
             }
+            fn __same(&self, other: &Self) -> bool {
+                #[allow(unused_imports)]
+                use #air::__rt::{SameByEq as _, SameByNone as _};
+                true #(&& (&&#air::__rt::Same(&self.#compared, &other.#compared)).same())*
+            }
         }
         #[allow(non_camel_case_types)]
         impl<#gp #(#params),*> #b<#gn #(#params),*> {
@@ -641,6 +677,7 @@ type Res<T> = Result<T, (Span, String)>;
 /// A `match` arm in `rsx!`: its pattern, its guard, its nodes.
 pub(crate) type Arm = (TokenStream, Option<TokenStream>, Vec<Node>);
 
+#[derive(Clone)]
 pub(crate) enum Node {
     Text(String),
     /// A `"…{x}…"` text: `format!`'s literal and arguments, and the names it reads.
@@ -655,6 +692,8 @@ pub(crate) enum Node {
         spreads: Vec<TokenStream>,
         children: Vec<Node>,
         key: Option<TokenStream>,
+        /// Its key is its `for` row's (the list's), not a remount's.
+        row: bool,
     },
     Comp {
         path: Vec<TokenTree>,
@@ -662,6 +701,7 @@ pub(crate) enum Node {
         spreads: Vec<TokenStream>,
         children: Vec<Node>,
         key: Option<TokenStream>,
+        row: bool,
     },
     For {
         /// Where its `for` is written (a row without a key is said there).
@@ -683,11 +723,13 @@ pub(crate) enum Node {
 }
 
 /// A component's prop: a declared one (a name), or an attribute (`"data-t"`).
+#[derive(Clone)]
 pub(crate) enum PropName {
     Field(Ident),
     Attr(String),
 }
 
+#[derive(Clone)]
 pub(crate) enum Val {
     Static(String),
     Present(bool),
@@ -763,7 +805,11 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         let pat: TokenStream = toks[start..*i].iter().cloned().collect();
         *i += 1;
         let (expr, body) = until_block(toks, i)?;
-        return Ok(Node::For { at, pat, expr, body: parse_nodes(&body)? });
+        let mut body = parse_nodes(&body)?;
+        if let Some(Node::El { row, .. } | Node::Comp { row, .. }) = body.first_mut() {
+            *row = true;
+        }
+        return Ok(Node::For { at, pat, expr, body });
     }
     if is_ident(t, "if") {
         *i += 1;
@@ -856,6 +902,8 @@ fn arms(toks: &[TokenTree]) -> Res<Vec<Arm>> {
 /// An element's or component's `{ … }`: `name: value,` pairs, then children.
 fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
     let (mut attrs, mut props, mut spreads, mut children, mut key, mut i) = (vec![], vec![], vec![], vec![], None, 0);
+    // The names given so far (as the page names them): a second is refused.
+    let mut given: Vec<String> = vec![];
     while i < toks.len() {
         if is_punct(toks.get(i), ',') {
             i += 1;
@@ -887,6 +935,24 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
             }
             t => t.to_string().trim_start_matches("r#").to_string(),
         };
+        // An element's style attribute: its page name says so (`style:align-items`).
+        let style = match (&name_tok, path.first()) {
+            (TokenTree::Ident(_), Some(t)) if !comp => style_attr(t.to_string().trim_start_matches("r#"), &name),
+            _ => None,
+        };
+        let page_name = style.map_or_else(|| attr_name(&name), |css| format!("style:{css}"));
+        if !page_name.starts_with("on") || comp {
+            if given.contains(&page_name) {
+                return Err((
+                    name_tok.span(),
+                    format!(
+                        "air: `{name}` is given twice here: the second would replace the first (give it once: \
+                         `class: \"a b\"`, `class: aio::ui::cx(&[..])`)"
+                    ),
+                ));
+            }
+            given.push(page_name.clone());
+        }
         if name == "key" {
             key = Some(match value.clone().into_iter().next() {
                 Some(TokenTree::Literal(l)) if lit_str(&l).is_some() => match text(&lit_str(&l).unwrap(), l.span()) {
@@ -909,20 +975,14 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
                     format!("air: no event `{name}` (a DOM event's name, as in `onclick`, `onkeydown`, `oninput`)"),
                 ));
             }
-            // A style attribute: its page name says so (`style:align-items`).
-            let style = match (&name_tok, path.first()) {
-                (TokenTree::Ident(_), Some(t)) => style_attr(t.to_string().trim_start_matches("r#"), &name),
-                _ => None,
-            };
-            let page_name = style.map_or_else(|| attr_name(&name), |css| format!("style:{css}"));
             attrs.push((page_name, attr_val(&name, value)));
         }
     }
     if comp {
-        return Ok(Node::Comp { path, props, spreads, children, key });
+        return Ok(Node::Comp { path, props, spreads, children, key, row: false });
     }
     let (tag, at) = (path[0].to_string().trim_start_matches("r#").to_string(), path[0].span());
-    Ok(Node::El { tag, at, attrs, spreads, children, key })
+    Ok(Node::El { tag, at, attrs, spreads, children, key, row: false })
 }
 
 /// The style attributes (the HTML global attributes' `style` namespace, as
@@ -1851,6 +1911,16 @@ fn let_bound(cond: &TokenStream) -> Vec<String> {
 /// Is `n` a placeholder in its template (an anchor its content goes before)?
 fn anchored(n: &Node) -> bool {
     matches!(n, Node::Expr(_) | Node::Comp { .. } | Node::For { .. } | Node::If { .. } | Node::Match { .. })
+        || remounted(n).is_some()
+}
+
+/// The key of an element or component keyed outside a `for` row: what it
+/// is on is made again when the key changes.
+fn remounted(n: &Node) -> Option<&TokenStream> {
+    match n {
+        Node::El { key: Some(k), row: false, .. } | Node::Comp { key: Some(k), row: false, .. } => Some(k),
+        _ => None,
+    }
 }
 
 struct Tpl {
@@ -1896,7 +1966,7 @@ impl Tpl {
                 };
                 self.holes.push(hole);
             }
-            Node::El { tag, attrs, spreads, children, .. } => {
+            Node::El { tag, attrs, spreads, children, .. } if remounted(n).is_none() => {
                 let outer = IN_SVG.get();
                 // 5: an element in SVG's namespace though its template has no `svg` above it.
                 let svg_root = root && tag != "svg" && (outer || SVG_ONLY.contains(&tag.as_str()));
@@ -1994,6 +2064,21 @@ impl Tpl {
                 self.bytes.push(4);
                 let id = self.mark();
                 let hole = match n {
+                    // Its own view in a hole that makes it again when its key changes.
+                    _ if let Some(key) = remounted(n) => {
+                        let mut inner = n.clone();
+                        if let Node::El { row, .. } | Node::Comp { row, .. } = &mut inner {
+                            *row = true;
+                        }
+                        let (mut ck, mut cr) = (vec![], vec![]);
+                        captures(key, &mut ck);
+                        node_captures(std::slice::from_ref(&inner), &mut cr);
+                        let (ck, cr) = (clones(&ck), clones(&cr));
+                        let view = body(std::slice::from_ref(&inner));
+                        quote!(air::__rt::keyed(#id,
+                            { #ck ::std::boxed::Box::new(move || (#key).to_owned()) },
+                            { #cr ::std::boxed::Box::new(move || #view) });)
+                    }
                     Node::Expr(e) => hole_fn(
                         e,
                         quote!(move ||),
@@ -2004,7 +2089,8 @@ impl Tpl {
                         let mut r = vec![];
                         node_captures(std::slice::from_ref(n), &mut r);
                         let c = clones(&r);
-                        let call = comp(n);
+                        let props = comp(n);
+                        let cpath: TokenStream = path.iter().cloned().collect();
                         // Its name and key, for the tree of mounted components.
                         let name = path.iter().rev().find_map(|t| match t {
                             TokenTree::Ident(i) => Some(i.to_string()),
@@ -2018,7 +2104,7 @@ impl Tpl {
                             }),
                             None => quote!(::core::option::Option::None),
                         };
-                        quote!(air::__rt::comp(#id, #name, #key, { #c ::std::boxed::Box::new(move || #call) });)
+                        quote!(air::__rt::comp(#id, #name, #key, #cpath, { #c move || #props });)
                     }
                     Node::For { at, pat, expr, body: rows } => {
                         let key = match rows.first() {
@@ -2126,11 +2212,12 @@ fn hole_fn(
     call(quote!({ #c ::std::boxed::Box::new(#head { #c #v }) }))
 }
 
-/// `Row { a: x, "data-t": t, ..more, children… }` →
-/// `Row(builder().a(move || x).__attr("data-t", move || t).__spread(more).children(move || …).build())`:
+/// `Row { a: x, "data-t": t, ..more, children… }`'s props:
+/// `builder().a(move || x).__attr("data-t", move || t).__spread(more).children(move || …).build()`:
 /// every value a closure (each clones the names it reads), so a `Prop`
-/// follows it and any other prop takes its value once; a closure given
-/// as a value (a handler) goes to `__fn_a`, which types its parameters.
+/// follows it and any other prop is read where the props are built (they
+/// are built again when that changes); a closure given as a value (a
+/// handler) goes to `__fn_a`, which types its parameters.
 fn comp(n: &Node) -> TokenStream {
     let Node::Comp { path, props, spreads, children, .. } = n else { unreachable!() };
     let path: TokenStream = path.iter().cloned().collect();
@@ -2158,6 +2245,11 @@ fn comp(n: &Node) -> TokenStream {
             // A constant needs no closure (and a `Prop` of it holds no state).
             // A literal string converts (`"a"` to a `String`); any other
             // constant is the prop's own type (`5` a `u32`).
+            // `Some(5)`, `None`: the literal takes the prop's type, as `5` does.
+            PropName::Field(f) if some_constant(v) => {
+                let f = format_ident!("__val_{}", f.to_string().trim_start_matches("r#"));
+                quote!(.#f(#v))
+            }
             PropName::Field(f) if constant(v) => {
                 let text = matches!(v.clone().into_iter().next(), Some(TokenTree::Literal(l)) if lit_str(&l).is_some());
                 let f =
@@ -2208,7 +2300,7 @@ fn comp(n: &Node) -> TokenStream {
         #[allow(unused_imports)]
         use air::__rt::{GlobalAttributes as _, GlobalAttributeNames as _};
         let __air_c = &#path;
-        air::Component::call(__air_c, #builder #(#calls)* .build())
+        #builder #(#calls)* .build()
     })
 }
 
@@ -2258,6 +2350,20 @@ fn constant(v: &TokenStream) -> bool {
                     TokenTree::Punct(p) => p.as_char() == ':' && (k % 3 != 0),
                     _ => false,
                 })
+        }
+        _ => false,
+    }
+}
+
+/// Is `v` `None`, or `Some` of a constant other than a string (`Some(500)`,
+/// `Some(-1)`, `Some(Mode::A)`)? A string converts as given (`Some("x")`).
+fn some_constant(v: &TokenStream) -> bool {
+    match v.clone().into_iter().collect::<Vec<_>>().as_slice() {
+        [n] => is_ident(n, "None"),
+        [s, TokenTree::Group(g)] if is_ident(s, "Some") && g.delimiter() == Delimiter::Parenthesis => {
+            let inner = g.stream();
+            let text = matches!(inner.clone().into_iter().next(), Some(TokenTree::Literal(l)) if lit_str(&l).is_some());
+            constant(&inner) && !text
         }
         _ => false,
     }
@@ -2359,6 +2465,16 @@ mod tests {
         assert_eq!(error_at("ul {\n    for x in xs { li { \"x\" } }\n}"), Some((2, 4)));
         assert_eq!(error_at("ul { for x in xs { if x { li { key: x } } } }"), Some((1, 5)), "a row that is an `if`");
         assert_eq!(error_at("ul { for x in xs { li { key: x } } }"), None);
+    }
+
+    #[test]
+    fn an_attribute_given_twice_is_said_at_the_second() {
+        assert_eq!(error_at("div { class: \"a\", class: \"b\" }"), Some((1, 18)));
+        assert_eq!(error_at("div { aria_label: \"a\", \"aria-label\": x }"), Some((1, 23)), "one page name");
+        assert_eq!(error_at("p { width: \"1px\", width: w }"), Some((1, 18)), "a style attribute");
+        assert_eq!(error_at("Row { name: a, \"data-t\": t, name: b }"), Some((1, 28)), "a component's prop");
+        assert_eq!(error_at("li { key: a, key: b }"), Some((1, 13)));
+        assert_eq!(error_at("div { class: \"a\", style: \"b\", onclick: f, onclick: g }"), None, "two handlers run");
     }
 
     #[test]

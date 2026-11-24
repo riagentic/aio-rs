@@ -208,7 +208,8 @@ fn App() -> Element {
     )]);
     let r = lint(d.path());
     let found: Vec<_> = r.issues.iter().map(|i| (i.area, i.line.unwrap())).collect();
-    assert_eq!(found, [("a11y", 5), ("render", 6), ("render", 7)], "{:?}", r.issues);
+    // The arm's `key:` remakes its `p` when `id` changes: nothing to say.
+    assert_eq!(found, [("a11y", 5), ("render", 7)], "{:?}", r.issues);
 }
 
 #[test]
@@ -400,7 +401,7 @@ fn App() -> Element {
 }
 
 #[test]
-fn a_key_dioxus_ignores_is_a_warning() {
+fn a_key_on_a_rows_later_node_is_a_warning() {
     let d = project(&[(
         "src/ui.rs",
         r#"
@@ -431,13 +432,12 @@ fn Avatar(src: String) -> Element {
         r.issues.iter().filter(|i| i.area == "render").map(|i| (i.line.unwrap(), i.message.as_str())).collect();
     assert_eq!(
         got,
-        [
-            (6, "key on <Row>, not its block's first node: aio::ui ignores it (the first node keys the block)"),
-            (11, "key on <Dialog> in no list: aio::ui never remounts it when the key changes"),
-            (13, "key on <li> in no list: aio::ui never remounts it when the key changes"),
-            (20, "key on <img> in no list: aio::ui never remounts it when the key changes"),
-        ],
-        "{:?}",
+        [(
+            6,
+            "key on <Row>, not its row's first node: it keys no row (the first node keys the row), it makes <Row> \
+             again when it changes"
+        )],
+        "a key in no list remounts what it is on, no warning: {:?}",
         r.issues
     );
 }

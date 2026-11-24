@@ -1935,7 +1935,7 @@ fn a_virtual_list_renders_only_the_rows_its_scroll_shows() {
 fn a_virtual_list_opens_at_its_scroll_to() {
     let ui = TestUi::new(|| {
         rsx! {
-            VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: Some(500usize),
+            VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: Some(500),
                 row: |i| rsx! { span { "data-t": "row{i}", "#{i}" } }
             }
         }

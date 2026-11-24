@@ -667,3 +667,28 @@ fn a_link_in_a_box_that_hears_clicks_follows_and_one_with_its_own_handler_does_n
     ui.click("routed");
     assert_eq!(ui.eval("location.hash"), serde_json::json!("#plain"), "a link with a handler is the app's to follow");
 }
+
+static LOADED: Global<Option<String>> = Global::new(|| None);
+
+#[component]
+fn Proc(pid: u32, data: Option<String>) -> View {
+    let shown = data.unwrap_or_else(|| "no data".into());
+    rsx! {
+        li {
+            input { "data-t": "note-{pid}" }
+            span { "data-t": "data-{pid}", "{shown}" }
+        }
+    }
+}
+
+/// A row whose props read state takes new props when it changes, drawn in
+/// the page's own nodes: the field a person types in keeps its focus and text.
+#[test]
+fn a_component_taking_new_props_keeps_the_pages_focus_and_typed_text() {
+    let mut ui = TestUi::new(|| rsx! { ul { for pid in [1u32] { Proc { key: "{pid}", pid, data: LOADED.get() } } } });
+    ui.type_text("note-1", "half a thought");
+    ui.run(|| LOADED.set(Some("cpu 5%".into())));
+    assert_eq!(ui.text("data-1"), "cpu 5%");
+    assert_eq!(ui.focused().as_deref(), Some("note-1"), "the focus stays");
+    assert_eq!(ui.value("note-1"), "half a thought", "and what was typed");
+}

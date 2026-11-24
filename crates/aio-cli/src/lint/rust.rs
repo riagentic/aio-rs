@@ -1058,31 +1058,29 @@ enum Nodes {
     Children,
 }
 
-/// Keys air ignores: one on a block's later node (the first node keys the
-/// block), and one on a node in no list (only a list's items are told apart
-/// by key: a changed key remounts nothing).
+/// A key on a `for` row's later node: it keys no row (the first node keys
+/// the row), it only makes its node again when it changes.
 fn keys(nodes: &[Node], block: Nodes, out: &mut Found) {
     for (i, n) in nodes.iter().enumerate() {
         let keyed = match n {
             Node::El { key: Some(_), .. } | Node::Comp { key: Some(_), .. } => name_of(n),
             _ => None,
         };
-        if let Some((what, line)) = keyed {
-            if i > 0 && block != Nodes::Children {
-                let msg = format!(
-                    "key on <{what}>, not its block's first node: aio::ui ignores it (the first node keys the block)"
-                );
-                out.push((
-                    line,
-                    Severity::Warn,
-                    "render",
-                    msg,
-                    "Fragment { key: \"{item.id}\", … } around the block's nodes",
-                ));
-            } else if !matches!(block, Nodes::Loop | Nodes::Macro) {
-                let msg = format!("key on <{what}> in no list: aio::ui never remounts it when the key changes");
-                out.push((line, Severity::Warn, "render", msg, "a one-item for: for k in [key] { … key: \"{k}\" … }"));
-            }
+        if let Some((what, line)) = keyed
+            && i > 0
+            && block == Nodes::Loop
+        {
+            let msg = format!(
+                "key on <{what}>, not its row's first node: it keys no row (the first node keys the row), it makes \
+                 <{what}> again when it changes"
+            );
+            out.push((
+                line,
+                Severity::Warn,
+                "render",
+                msg,
+                "Fragment { key: \"{item.id}\", … } around the row's nodes",
+            ));
         }
         match n {
             Node::El { children, .. } => keys(children, Nodes::Children, out),

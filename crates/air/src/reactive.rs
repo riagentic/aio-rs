@@ -267,6 +267,17 @@ fn take_cleanups(k: Key) -> Vec<Box<dyn FnOnce()>> {
     out
 }
 
+/// Run cleanups in order, under no owner and untracked: what one makes
+/// (a script, a task) belongs to no view, never to whichever owner is
+/// current as they run (often the one ending).
+fn run_cleanups(fs: Vec<Box<dyn FnOnce()>>) {
+    if fs.is_empty() {
+        return;
+    }
+    let _r = enter(None, None);
+    fs.into_iter().for_each(|f| f());
+}
+
 /// Dispose `k` and all it owns: their cleanups run (while what they own is
 /// still there: a cleanup reads its view's signals, as Solid's
 /// do), then their slots are freed.
@@ -297,8 +308,8 @@ fn dispose_then(k: Key, soon: bool) {
     if bare {
         return;
     }
-    take_cleanups(k).into_iter().for_each(|f| f());
-    let (cleanups, trash) = rt(|rt| {
+    run_cleanups(take_cleanups(k));
+    let (mut cleanups, trash) = rt(|rt| {
         let mut stack = vec![k];
         let (mut cleanups, mut trash) = (vec![], vec![]);
         while let Some(k) = stack.pop() {
@@ -323,7 +334,8 @@ fn dispose_then(k: Key, soon: bool) {
         true => LEFT.with_borrow_mut(|l| l.push(Box::new(trash))),
         false => drop(trash),
     }
-    cleanups.into_iter().rev().for_each(|f| f());
+    cleanups.reverse();
+    run_cleanups(cleanups);
 }
 
 thread_local!(static LEFT: RefCell<Vec<Box<dyn Any>>> = const { RefCell::new(Vec::new()) });
@@ -347,7 +359,7 @@ fn reset(k: Key) {
     // Every cleanup first (what it owned is still there), then the slots go.
     let mut run: Vec<Box<dyn FnOnce()>> = owned.iter().rev().flat_map(|o| take_cleanups(*o)).collect();
     run.extend(cleanups.into_iter().rev());
-    run.into_iter().for_each(|f| f());
+    run_cleanups(run);
     owned.into_iter().rev().for_each(dispose);
 }
 
@@ -729,6 +741,35 @@ pub(crate) fn child_scope<R>(f: impl FnOnce() -> R) -> (R, Owner) {
     (r, Owner(k))
 }
 
+/// A new owner kept by `by` (a hole): it lives across `by`'s re-runs and
+/// ends with it, or by [`end_kept`].
+pub(crate) fn kept_owner(by: Owner) -> Owner {
+    Owner(rt(|rt| {
+        let k = rt.alloc_detached(by.0);
+        if let Some(h) = rt.node_mut(by.0) {
+            h.extra.get_or_insert_default().kept.push(k);
+        }
+        k
+    }))
+}
+
+/// End `o`, a [`kept_owner`] of `by`.
+pub(crate) fn end_kept(o: Owner, by: Owner) {
+    rt(|rt| {
+        if let Some(e) = rt.node_mut(by.0).and_then(|h| h.extra.as_mut()) {
+            e.kept.retain(|k| *k != o.0);
+        }
+    });
+    dispose(o.0);
+}
+
+/// `f` under `o`, its reads followed by the running code (`tracked`) or by none.
+pub(crate) fn under<R>(o: Owner, tracked: bool, f: impl FnOnce() -> R) -> R {
+    let observer = if tracked { RT.with_borrow(|rt| rt.observer) } else { None };
+    let _r = enter(observer, Some(o.0));
+    f()
+}
+
 /// An owner: what was made under it lives until it is disposed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Owner(pub(crate) Key);
@@ -748,6 +789,13 @@ impl Owner {
     /// Is it still there?
     pub fn alive(self) -> bool {
         RT.with_borrow(|rt| rt.node(self.0).is_some())
+    }
+
+    /// Has it nothing (no node, no cleanup, no context)?
+    pub(crate) fn holds_nothing(self) -> bool {
+        RT.with_borrow(|rt| {
+            rt.node(self.0).is_none_or(|n| n.owned.is_empty() && n.cleanups.is_empty() && n.extra.is_none())
+        })
     }
 }
 
@@ -1621,7 +1669,8 @@ pub fn watch<D: Clone + PartialEq + 'static>(deps: D, mut f: impl FnMut(D) + 'st
     hook("watch", move || _ = effect_now(move || f(deps.clone())))
 }
 
-/// Run `f` when the view goes away (a hook).
+/// Run `f` when the view goes away (a hook). What `f` starts (an `eval`,
+/// a `spawn`) is no view's: it lives as long as its handle, or until done.
 #[track_caller]
 pub fn on_cleanup(f: impl FnOnce() + 'static) {
     hook("on_cleanup", || cleanup(f))
@@ -1697,8 +1746,24 @@ impl<A: 'static, R: 'static> Callback<A, R> {
             .with_borrow(|rt| rt.node(self.key).and_then(|n| n.value.clone()))
             .unwrap_or_else(|| panic!("air: a callback called after the view that made it ended"));
         let f = f.downcast_ref::<CallFn<A, R>>().expect("air: a callback of another type");
-        let mut f = f.try_borrow_mut().expect("air: a callback called from inside itself");
-        batch(|| f(a))
+        // Its batch drawn once it returned: a body that runs again then may hand it its latest closure.
+        let r = {
+            let _c = Batch::open();
+            let mut f = f.try_borrow_mut().expect("air: a callback called from inside itself");
+            f(a)
+        };
+        flush_if_idle();
+        r
+    }
+
+    /// Its closure is `f` from now on (the same handler, its latest body's run).
+    fn replace(&self, f: impl FnMut(A) -> R + 'static) {
+        let cell = RT.with_borrow(|rt| rt.node(self.key).and_then(|n| n.value.clone()));
+        if let Some(Ok(mut old)) =
+            cell.as_ref().and_then(|c| c.downcast_ref::<CallFn<A, R>>()).map(|c| c.try_borrow_mut())
+        {
+            *old = Box::new(f);
+        }
     }
 }
 
@@ -1715,10 +1780,17 @@ impl<A: 'static, R: 'static, F: FnMut(A) -> R + 'static> From<F> for Callback<A,
     }
 }
 
-/// A handler made once (a hook), so a prop that takes it keeps it.
+/// A handler made once (a hook), so a prop that takes it keeps it; it
+/// calls the closure of its body's latest run (a body that ran again, as
+/// after a [`follow`], hands it the closure that sees that run's values).
 #[track_caller]
 pub fn callback<A: 'static, R: 'static>(f: impl FnMut(A) -> R + 'static) -> Callback<A, R> {
-    hook("callback", || Callback::new(f))
+    let mut f = Some(f);
+    let cb = hook("callback", || Callback::new(f.take().expect("made once")));
+    if let Some(f) = f {
+        cb.replace(f);
+    }
+    cb
 }
 
 // -------------------------------------------------------------- optimistic
