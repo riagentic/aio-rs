@@ -174,13 +174,9 @@ pub(crate) fn seq() -> u64 {
 }
 
 /// The names of the mounted components placed after [`seq`] was `since`, once each.
-pub(crate) fn mounted_since(since: u64) -> Vec<&'static str> {
+pub(crate) fn mounted_since(since: u64) -> String {
     TREE.with_borrow(|t| {
-        let mut names: Vec<&'static str> =
-            t.slots.iter().filter_map(|(_, c)| c.as_ref()).filter(|c| c.seq > since).map(|c| c.name).collect();
-        names.sort_unstable();
-        names.dedup();
-        names
+        crate::listed(t.slots.iter().filter_map(|(_, c)| c.as_ref()).filter(|c| c.seq > since).map(|c| c.name))
     })
 }
 
