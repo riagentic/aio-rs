@@ -138,6 +138,8 @@ pub(crate) static WINDOW_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 pub mod macmove;
 #[cfg(target_os = "macos")]
 mod macurl;
+#[cfg(test)]
+mod offline;
 pub mod oneclick;
 pub mod os;
 pub mod page;

@@ -70,8 +70,19 @@ version may break things.
   it is kept aside (`copy.other-user-<ms>`) and said (`sync:other-user`),
   as a page's copy already was. A copy saved before is no one's.
 
+- The window fetches no spellcheck dictionary from Google unless the
+  app's `[capabilities] network` reaches `*.gvt1.com`. Chromium's
+  spellchecker on Linux (and on Windows for a language the OS lacks)
+  fetched the person's dictionary from Google's CDN on first launch, in
+  the browser process: past the page's policy and the app's network list,
+  telling Google the machine's address and language. Without the entry a
+  dictionary already in the profile is used, and a language left
+  unchecked is said in the log ([privacy](docs/clients/desktop.md#privacy)).
+
 ### Added
 
+- `aio::capabilities::network()`: this process's `[capabilities] network`
+  list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
   (`page.<16 hex>.js`). The web build names `page.js`, `start.js` and the
   splash so, and the shell serves a file whose name is its content's with
