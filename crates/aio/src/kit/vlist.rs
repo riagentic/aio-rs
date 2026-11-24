@@ -39,7 +39,7 @@ pub fn VirtualList(
     let h = row_height.max(1.0);
     let at = memo(move || scroll_to.get());
     effect(move || {
-        let (Some(i), Some(el)) = (at.get(), el.get_untracked()) else { return };
+        let (Some(i), Some(el)) = (at.get(), el.get()) else { return };
         spawn(async move { _ = el.scroll(PixelsVector2D::new(0.0, i as f64 * h), ScrollBehavior::Instant).await });
     });
     let rows = memo(move || window(len.get(), h, height.get(), overscan, top.get()));

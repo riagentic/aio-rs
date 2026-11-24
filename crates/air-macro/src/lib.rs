@@ -664,6 +664,8 @@ pub(crate) enum Node {
         key: Option<TokenStream>,
     },
     For {
+        /// Where its `for` is written (a row without a key is said there).
+        at: Span,
         pat: TokenStream,
         expr: TokenStream,
         body: Vec<Node>,
@@ -752,6 +754,7 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         return Ok(Node::Expr(g.stream()));
     }
     if is_ident(t, "for") {
+        let at = t.span();
         *i += 1;
         let start = *i;
         while *i < toks.len() && !is_ident(&toks[*i], "in") {
@@ -760,7 +763,7 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         let pat: TokenStream = toks[start..*i].iter().cloned().collect();
         *i += 1;
         let (expr, body) = until_block(toks, i)?;
-        return Ok(Node::For { pat, expr, body: parse_nodes(&body)? });
+        return Ok(Node::For { at, pat, expr, body: parse_nodes(&body)? });
     }
     if is_ident(t, "if") {
         *i += 1;
@@ -791,6 +794,15 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         let start = *i;
         let (path, inner) = until_block(toks, i)?;
         let path: Vec<TokenTree> = path.into_iter().collect();
+        if is_punct(path.get(1), '!') {
+            return Err((
+                t.span(),
+                format!(
+                    "air: `{t}! {{ … }}` in rsx! is a macro call: its value goes in braces (`{{ {t}!(…) }}`); \
+                     an `rsx!` inside one is written as its nodes (a `match` arm: `pattern => {{ p {{ … }} }}`)"
+                ),
+            ));
+        }
         let last = path.iter().rev().find_map(|t| match t {
             TokenTree::Ident(i) => Some(i.to_string()),
             _ => None,
@@ -1783,7 +1795,7 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
                 key.iter().for_each(|k| captures(k, out));
                 node_captures(children, out);
             }
-            Node::For { pat, expr, body } => {
+            Node::For { pat, expr, body, .. } => {
                 captures(expr, out);
                 let mut inner = vec![];
                 node_captures(body, &mut inner);
@@ -2008,13 +2020,15 @@ impl Tpl {
                         };
                         quote!(air::__rt::comp(#id, #name, #key, { #c ::std::boxed::Box::new(move || #call) });)
                     }
-                    Node::For { pat, expr, body: rows } => {
+                    Node::For { at, pat, expr, body: rows } => {
                         let key = match rows.first() {
                             Some(Node::El { key: Some(k), .. } | Node::Comp { key: Some(k), .. }) => k.clone(),
                             _ => {
-                                return self.holes.push(
-                                    quote!(::core::compile_error!("air: a `for` in rsx! needs `key:` on its row");),
-                                );
+                                return self.holes.push(quote_spanned!(*at=> ::core::compile_error!(
+                                    "air: a `for` in rsx! needs `key:` on its row's first element or component \
+                                     (`li { key: row.id, … }`); a row that starts with an `if`, a `match`, a `{…}` \
+                                     or text goes in an element that has the key"
+                                );));
                             }
                         };
                         let (mut ce, mut ck, mut cr) = (vec![], vec![], vec![]);
@@ -2319,6 +2333,32 @@ mod tests {
         let mut out = vec![];
         captures(&src.parse().unwrap(), &mut out);
         out
+    }
+
+    /// Where `expand(src)`'s `compile_error!` points (line, column).
+    fn error_at(src: &str) -> Option<(usize, usize)> {
+        fn find(ts: TokenStream) -> Option<(usize, usize)> {
+            ts.into_iter().find_map(|t| match t {
+                TokenTree::Ident(i) if i == "compile_error" => Some((i.span().start().line, i.span().start().column)),
+                TokenTree::Group(g) => find(g.stream()),
+                _ => None,
+            })
+        }
+        find(expand(src.parse().unwrap(), None))
+    }
+
+    #[test]
+    fn a_macro_call_written_as_a_node_is_said_at_its_name() {
+        assert_eq!(error_at("match n { 0 => rsx! { p {} }, _ => { b {} } }"), Some((1, 15)));
+        assert_eq!(error_at("div { format! { \"x\" } }"), Some((1, 6)));
+        assert_eq!(error_at("match n { 0 => { p {} } _ => { b {} } }"), None);
+    }
+
+    #[test]
+    fn a_for_without_a_key_is_said_at_its_for() {
+        assert_eq!(error_at("ul {\n    for x in xs { li { \"x\" } }\n}"), Some((2, 4)));
+        assert_eq!(error_at("ul { for x in xs { if x { li { key: x } } } }"), Some((1, 5)), "a row that is an `if`");
+        assert_eq!(error_at("ul { for x in xs { li { key: x } } }"), None);
     }
 
     #[test]

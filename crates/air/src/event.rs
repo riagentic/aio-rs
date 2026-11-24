@@ -290,9 +290,9 @@ impl<T> Event<T> {
     }
 
     /// Asked of the page too late to matter (it has moved on when the views
-    /// hear it): a handled `submit` never navigates, a handled click on a
-    /// link never follows it, and keys are kept from the page with
-    /// `data-aio-prevent`. Recorded for [`default_prevented`](Self::default_prevented).
+    /// hear it): a handled `submit` never navigates, a link whose click a
+    /// handler on it (or in it) hears never follows it, and keys are kept
+    /// from the page with `data-aio-prevent`. Recorded for [`default_prevented`](Self::default_prevented).
     pub fn prevent_default(&self) {
         self.flow.prevented.set(true)
     }

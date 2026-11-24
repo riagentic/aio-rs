@@ -532,6 +532,23 @@ fn a_tooltip_sits_on_the_side_it_is_placed() {
     }
 }
 
+fn trail() -> View {
+    rsx! {
+        Breadcrumb { "data-t": "trail",
+            items: vec![Crumb::new("Docs").href("#docs"), Crumb::new("Kit").onclick(EventHandler::new(|_| log("kit"))), Crumb::new("Here")]
+        }
+    }
+}
+
+#[test]
+fn a_crumb_with_an_href_follows_it_and_one_with_onclick_calls_it() {
+    let mut ui = TestUi::new(trail);
+    ui.click("css=[data-t=trail] li:nth-child(1) a");
+    assert_eq!(ui.eval("location.hash"), serde_json::json!("#docs"));
+    ui.click("css=[data-t=trail] li:nth-child(2) a");
+    assert_eq!(said(), ["kit"]);
+}
+
 #[test]
 fn the_current_crumb_is_no_link_and_skeletons_are_not_announced() {
     let ui = TestUi::new(statuses);
@@ -1912,6 +1929,18 @@ fn a_virtual_list_renders_only_the_rows_its_scroll_shows() {
     assert_eq!((ui.count("[data-t=row0]"), ui.count("[data-t=row107]")), (0, 0));
     ui.click("jump");
     assert_eq!((ui.text("row500"), ui.count("[data-t=row499]")), ("#500".into(), 1), "scroll_to moves the scrollbar");
+}
+
+#[test]
+fn a_virtual_list_opens_at_its_scroll_to() {
+    let ui = TestUi::new(|| {
+        rsx! {
+            VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: Some(500usize),
+                row: |i| rsx! { span { "data-t": "row{i}", "#{i}" } }
+            }
+        }
+    });
+    assert_eq!((ui.count("[data-t=row500]"), ui.count("[data-t=row0]")), (1, 0), "drawn at row 500, not the top");
 }
 
 thread_local!(static ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });

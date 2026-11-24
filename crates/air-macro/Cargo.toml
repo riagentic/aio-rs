@@ -18,5 +18,9 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 
+[dev-dependencies]
+# Where a token is written, for the tests that check where an error points.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
 [lints]
 workspace = true

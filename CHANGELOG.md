@@ -169,6 +169,51 @@ version may break things.
   itself had finished on its own thread, that thread decided the answer.
   The panic now decides it, whichever goes last.
 
+- A macro call written as a node in `rsx!` (`0 => rsx! { p {} }` in a
+  `match` arm, `format! { … }`) was read as a component named `rsx!`, and
+  rustc said "expected one of `(`, `[`, or `{`" at the whole `rsx!`. It
+  is an error at the macro's name now, with the way to write it.
+- An element given two handlers for one event (`h(..).on("click", a)
+  .on("click", b)`) ran only the first; it runs each, in order, as the
+  DOM does.
+- `h(tag)` with more than 65 535 children (`.children(rows)` of a big
+  file) wrote a template the page misread (`air: unknown edit`); it says
+  what to do instead now: one child of views, or a `VirtualList`.
+- A `Breadcrumb` crumb with an `href` and no `onclick` was a dead link:
+  it always had a click handler (one that did nothing), so the page kept
+  the click. It has none now and the page follows it.
+- A link in a box that hears clicks never followed: the page kept every
+  click on a link that any handler on its way up heard, so under
+  `GlobalKeys` (its root hears clicks) no `a { href }` worked, the kit's
+  `target: "_blank"` links (Markdown's, `SignIn`'s, the router's external
+  `Link`) neither. Only a link whose own handler (or one inside it) hears
+  the click is the app's to follow now.
+- A hole or effect that reads a signal and a memo of it (`"{n} {label}"`,
+  `label` a memo of `n`) ran twice per write: once for the signal, again
+  for the memo's new value, which its first run had read already. A run
+  told before it ran again is skipped.
+- A hole, memo or effect that reads many signals re-ran in time
+  quadratic in them: each read looked through the reads before it
+  (16 000 signals, a release build: 25 ms a re-run, 0.3 ms now). A read
+  in the same run is told by the signal's last reader.
+- `rsx!`'s error for a `for` whose row has no `key:` pointed at the whole
+  `rsx!`; it points at the `for` now, and says that a row starting with
+  an `if`, a `match` or text goes in an element that has the key.
+- `VirtualList` given a `scroll_to` at mount opened at the top: the
+  scroll waited for the list's element, which came after it looked, and
+  never looked again.
+- `selector` kept a signal for every key ever asked until its owner
+  ended: rows whose keys come and go (a feed, a paged list) grew it
+  without end. Keys no row reads now go as the count doubles. And
+  `sel.is(k)` in the batch that moved the selection (a handler) answered
+  for the old key.
+- A component's handlers piled up state for the component's life on
+  every event: each `async` handler (and each `spawn` in one) left a
+  cleanup behind, and each page script (`eval`, and `MountedData`'s
+  `set_focus`, `scroll_to`, `get_client_rect`) left its entry and a
+  cleanup, its answer read or not (a flip `TransitionGroup` measured every
+  row on every change). An owner now ends its tasks and scripts with one
+  cleanup, and a script goes with the last handle on it.
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.

@@ -657,10 +657,10 @@ as on air.
   `e.modifiers()`, `e.value()`, `e.client_coordinates()`, …), so handler
   code is the same; `prevent_default()` can't reach the page in time on
   either (the page keeps keys with `data-aio-prevent`; a handled `submit`
-  and a handled link click never navigate). A file input's picked
-  files come whole (`e.files()`: name, size, type, `read_bytes().await`),
-  read by the page before it sends the event. Not decoded yet: a drag's
-  files, touch lists.
+  and a click a link's own handler hears never navigate). A file input's
+  picked files come whole (`e.files()`: name, size, type,
+  `read_bytes().await`), read by the page before it sends the event. Not
+  decoded yet: a drag's files, touch lists.
 - **`MountedData`** on air: `set_focus`, `scroll_to`, `scroll`,
   `get_client_rect`, and `run` / `eval` (a script with the element as
   `el`: a canvas, a video, a selection), as page calls on the element
