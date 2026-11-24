@@ -124,6 +124,23 @@ version may break things.
   ([Waiting](docs/testing/ui.md#waiting)).
 - `ax lint` (`render`): a literal `data-t` handle on two elements that
   show together (a branch's arms aside) is a warning.
+- Deep links on every platform: `[app] schemes = ["notes"]`. An install
+  registers them for this user (Linux: the menu entry's `MimeType=
+  x-scheme-handler/…` and `xdg-mime default`; Windows: `HKCU\Software\
+  Classes\<scheme>`, its command `"<exe>" -- "%1"`; macOS: the `.app`'s
+  `CFBundleURLTypes`; Android: an intent filter each, beside
+  `[build.android] schemes`), and its uninstall takes away the ones still
+  its own (`uninstall.sh`, `ax remove`, `--uninstall`). The app hears each
+  link through one door, `aio::ui::links()` (a `router!` goes there),
+  whether the link started it or it was running: a later launch hands its
+  link over (Linux, Windows), macOS's Apple event reaches the running
+  `.app` (it pumps AppKit's events while it waits, AppKit loaded only for
+  an app with schemes), Android's intent the open activity. Names are
+  checked as the app builds (none of the system's: `http`, `https`,
+  `file`, `aio`, `chrome`, `ms-*`…); a link is untrusted input, handed
+  over as data, never run ([deep links](docs/clients/desktop.md#deep-links)).
+  aio-config's `App` has the field `schemes`: a literal naming every
+  field adds `schemes: vec![]` (or `..Default::default()`).
 
 ### Changed
 
@@ -209,6 +226,23 @@ version may break things.
 
 ### Fixed
 
+- The desktop window keeps the app's cookies: Chromium keeps none for
+  `aio://`, so the HttpOnly session cookie a sign-in route sets
+  (`[accounts] cookie = true`) was dropped and the window was never signed
+  in by it. The shell keeps them in the window's cookie store (on disk,
+  until they expire) and sends them with each request to the app's
+  routes, by path; the page's script still never sees an HttpOnly one.
+- A later launch of an app shown in the browser (`[app] ui = "browser"`)
+  opens its page again (it got "ok" and nothing showed); one of an app
+  served only (`mode = "server"`) says it is already running, where it
+  serves and how to stop it, where it ended silently.
+- A launch's text after a bare `--` is never one of aio's flags
+  (`--takeover`, `--home`, `--quit`, `--route`…): `aio::paths::Ask`,
+  `Ask::app_args` (it hands the rest over as given), `--route` and
+  `--quit` stop there, as `[app] flags`' check already did. A link the OS
+  hands over (Windows: after `--`) can't smuggle one in.
+- Links that come while nothing listens (`aio::ui::links`) are held up to
+  the newest 16, where every one was kept.
 - A second launch's arguments reach the app however long its start
   takes: the running instance takes launches from `aio_shell::start` on
   (it did from its window's start, after the app's own setup: past a

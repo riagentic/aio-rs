@@ -68,6 +68,13 @@ pub struct App {
     /// is refused with the one meant; any other goes to the app as ever.
     #[serde(default)]
     pub flags: Vec<String>,
+    /// URL schemes the app opens on every platform (`myapp://users/7`): an
+    /// install registers them with the OS, and each link reaches the app
+    /// (`aio::ui::links`; a `router!` goes there), whether it was running
+    /// or started by it. A link is untrusted input, never a command.
+    /// Lower-case, none of the system's (`https`, `file`…).
+    #[serde(default)]
+    pub schemes: Vec<String>,
     /// The window's own icon, `assets/icon.png` beside `aio.toml`, put in
     /// by `aio::config!()`; empty: none (the desktop shell then draws the
     /// monogram, `aio::icon`, in the app's hue).
@@ -90,6 +97,7 @@ impl Default for App {
             tz: Tz::default(),
             profiles: true,
             flags: vec![],
+            schemes: vec![],
             icon: &[],
         }
     }
@@ -1192,9 +1200,10 @@ pub struct AndroidBuild {
     /// Also an Android App Bundle (`.aab`) for Play.
     #[serde(default)]
     pub aab: bool,
-    /// URL schemes the app opens (`myapp://users/7`): each link reaches the
-    /// running app (`aio::ui::links`; a `router!` goes there). Lower-case,
-    /// none of the system's (`https`, `content`…).
+    /// URL schemes the app opens on Android only (`solana:`), beside
+    /// `[app] schemes` (every platform): each link reaches the running app
+    /// (`aio::ui::links`; a `router!` goes there). Lower-case, none of the
+    /// system's (`https`, `content`…).
     #[serde(default)]
     pub schemes: Vec<String>,
     /// The page may ask for the camera (`getUserMedia({ video: true })`):
@@ -1225,14 +1234,20 @@ pub enum ColorScheme {
     Dark,
 }
 
-/// Schemes Android or the WebView own: an app taking one would take every
-/// web page, file or install link.
-const SYSTEM_SCHEMES: [&str; 18] = [
+/// Schemes an OS, a browser or aio-rs own: an app taking one would take
+/// every web page, file, install or mail link, or the window's own page
+/// (`aio`).
+const SYSTEM_SCHEMES: [&str; 28] = [
     "about",
+    "aio",
     "android-app",
     "blob",
+    "callto",
+    "chrome",
+    "chrome-extension",
     "content",
     "data",
+    "devtools",
     "file",
     "ftp",
     "geo",
@@ -1242,8 +1257,13 @@ const SYSTEM_SCHEMES: [&str; 18] = [
     "javascript",
     "mailto",
     "market",
+    "news",
+    "shell",
     "sms",
+    "smb",
     "tel",
+    "vbscript",
+    "view-source",
     "ws",
     "wss",
 ];
@@ -1258,7 +1278,9 @@ pub fn scheme_refused(s: &str) -> Option<String> {
             "{s:?} is not a URL scheme: a lower-case letter, then lower-case letters, digits, + - or ."
         ));
     }
-    SYSTEM_SCHEMES.contains(&s).then(|| format!("{s:?} is the system's: it would take every {s}: link"))
+    // Windows' own: `ms-settings:`, `ms-windows-store:`…
+    (SYSTEM_SCHEMES.contains(&s) || s.starts_with("ms-"))
+        .then(|| format!("{s:?} is the system's: it would take every {s}: link"))
 }
 
 /// `[build.macos]`: the app's macOS identity, and the Mac it is built on.
@@ -2012,6 +2034,9 @@ impl Config {
                 "aio.toml: [build.android] application_id {id:?} is not an Android package name: two or more \
                  dot-separated segments, each starting with a letter (com.example.notes)"
             ));
+        }
+        if let Some(why) = c.app.schemes.iter().find_map(|s| scheme_refused(s)) {
+            return Err(format!("aio.toml: [app] schemes: {why}"));
         }
         if let Some(why) = c.build.android.schemes.iter().find_map(|s| scheme_refused(s)) {
             return Err(format!("aio.toml: [build.android] schemes: {why}"));

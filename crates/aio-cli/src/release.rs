@@ -365,8 +365,13 @@ fn lay_out(
     let name_of = |v: &str| match image {
         true => format!("{}-{v}-{}.AppImage", b.app.id, b.platform.arch),
         false => {
-            let old =
-                crate::build::App { id: b.app.id.clone(), name: String::new(), version: v.to_string(), icon: None };
+            let old = crate::build::App {
+                id: b.app.id.clone(),
+                name: String::new(),
+                version: v.to_string(),
+                icon: None,
+                schemes: vec![],
+            };
             crate::build::bundle_file(&old, b.platform)
         }
     };
@@ -1542,7 +1547,13 @@ mod tests {
         let mut cfg = aio::config::Config::default();
         cfg.updates.keys = vec![public];
         let linux = crate::platform::of("linux", "x86_64").unwrap();
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.1.0".into(), icon: None };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.1.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let b = crate::build::Built {
             app,
             cfg,
@@ -1614,7 +1625,13 @@ mod tests {
         let mut cfg = aio::config::Config::default();
         cfg.updates.keys = vec![public];
         let p = |n: &str| crate::platform::ALL.iter().find(|p| p.name == n).unwrap();
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.1.0".into(), icon: None };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.1.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let mut b = crate::build::Built {
             app,
             cfg,

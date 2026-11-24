@@ -219,7 +219,8 @@ mod tests {
         assert_eq!(deb_name("My_Notes"), "my-notes");
         assert_eq!(deb_version("1.2.0"), "1.2.0");
         assert_eq!(deb_version("1.2.0-rc.1+b7"), "1.2.0~rc.1", "a prerelease sorts before its release");
-        let app = App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: None };
+        let app =
+            App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: None, schemes: vec![] };
         let c = deb_control(&app, "aarch64", "Ann <ann@example.org>", 9000);
         assert!(c.starts_with("Package: notes\nVersion: 1.2.0\nArchitecture: arm64\n"), "{c}");
         assert_eq!(deb_arch("x86_64"), "amd64");

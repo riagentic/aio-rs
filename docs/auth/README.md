@@ -274,6 +274,13 @@ trust_proxy`, or every client shares the proxy's budgets
   says https. A session never goes in a URL: `/ws?token=<session>` is
   refused. A page that sends `x-aio-session: cookie` gets no token in the
   answer at all, so its script never holds one.
+- In the desktop window the page is `aio://app`, a scheme Chromium keeps
+  no cookies for: the shell keeps the app's cookies itself (the session
+  cookie a sign-in sets, any a route sets), in the window's own cookie
+  store under a stand-in origin no page can load, on disk with its
+  profile until they expire, and sends them with each request to the
+  app's routes, by path, as a browser would. The page's script never
+  sees an HttpOnly one.
 - Every auth answer is `Cache-Control: no-store`.
 - With accounts, the app's page itself (the shell) is served without a
   key, so the sign-in form can load; everything behind it needs a

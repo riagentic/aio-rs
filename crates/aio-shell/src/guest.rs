@@ -487,6 +487,12 @@ mod tests {
              out.src = [src('https://a.example/x'), src('http://a.example'), src('about:blank'), src('data:text/html,x', ['data']), src('FILE:///etc/hosts', ['file'])];
              out.srcNo = [src('file:///etc/passwd'), src('chrome://gpu'), src('javascript:alert(1)'), src('data:text/html,x'), src('about:config'),
                src('blob:https://a.example/1', ['data']), src('nope'), src('view-source:https://a.example')];
+             // The app's cookies, kept for aio:// as a browser would.
+             const now = Date.parse('2026-11-24T12:00:00Z');
+             out.cookie = [G.cookie('aio_session_x=aios_1; Path=/; Max-Age=60; HttpOnly; SameSite=Strict', now, '/__aio/auth/login'),
+               G.cookie('a=1', now, '/__aio/auth/login'), G.cookie('a=1; Path=/x; Expires=Tue, 24 Nov 2026 13:00:00 GMT; Secure; SameSite=None', now, '/'),
+               G.cookie('aio_session_x=; Path=/; Max-Age=0', now, '/'), G.cookie('a=1; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT', now, '/'),
+               G.cookie('a=1; Expires=Thu, 01 Jan 1970 00:00:00 GMT', now, '/q?x=/y'), G.cookie('=1', now, '/'), G.cookie('novalue', now, '/'), G.cookie('a=1; Path=rel', now, '/p/q')];
              console.log(JSON.stringify(out));",
             include_str!("guest.js")
         );
@@ -534,5 +540,28 @@ mod tests {
         assert!(no[..6].iter().all(|w| w.contains("http(s) and about:blank only")), "{no:?}");
         assert!(no[0].contains(r#"Web { schemes: &["file"] } allows it"#), "{}", no[0]);
         assert_eq!((no[6].as_str(), no[7].contains("view-source:")), ("not a URL", true));
+        let at = 1_795_521_600_i64; // 2026-11-24T12:00:00Z
+        let set = |name, value, path, http_only, secure, same_site, exp: Value| {
+            let mut c = json!({ "name": name, "value": value, "path": path, "httpOnly": http_only, "secure": secure, "sameSite": same_site });
+            if !exp.is_null() {
+                c["expirationDate"] = exp;
+            }
+            c
+        };
+        assert_eq!(
+            v["cookie"],
+            json!([
+                set("aio_session_x", "aios_1", "/", true, false, "strict", json!(at + 60)),
+                set("a", "1", "/__aio/auth", false, false, "lax", Value::Null),
+                set("a", "1", "/x", false, true, "no_restriction", json!(at + 3600)),
+                { "name": "aio_session_x", "path": "/", "gone": true },
+                set("a", "1", "/", false, false, "lax", json!(at + 60)),
+                { "name": "a", "path": "/", "gone": true },
+                null,
+                null,
+                set("a", "1", "/p", false, false, "lax", Value::Null),
+            ]),
+            "a session, a folder's default path, Expires, a logout, Max-Age over Expires, no name"
+        );
     }
 }

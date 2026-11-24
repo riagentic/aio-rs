@@ -15,6 +15,8 @@ pub struct Places {
     pub bin: PathBuf,
     /// `<data home>`: `applications/` and `icons/` under it.
     pub share: PathBuf,
+    /// `<config home>`: `mimeapps.list`, the handlers of the apps' schemes.
+    pub config: PathBuf,
 }
 
 impl Places {
@@ -27,6 +29,7 @@ impl Places {
             cache,
             bin: env("XDG_BIN_HOME").unwrap_or_else(|| home.join(".local/bin")),
             share: env("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")),
+            config: env("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
         }
     }
 }
@@ -112,6 +115,11 @@ pub fn remove(p: &Places, id: &str, data: bool) -> Result<String, String> {
     }
     gone(&p.share.join("applications").join(format!("{id}.desktop")))?;
     gone(&p.share.join("icons/hicolor/256x256/apps").join(format!("{id}.png")))?;
+    // Its schemes' handler lines: another app's stay.
+    let list = p.config.join("mimeapps.list");
+    if let Some(kept) = std::fs::read_to_string(&list).ok().and_then(|t| crate::build::unregistered(&t, id)) {
+        std::fs::write(&list, kept).map_err(|e| format!("{}: {e}", list.display()))?;
+    }
     tree(&installed)?;
     tree(&image)?;
     if !data {
@@ -205,6 +213,12 @@ pub fn from_appimage(p: &Places, app: &crate::build::App, image: &Path) -> Resul
     std::fs::write(&desktop, entry).map_err(e(&desktop))?;
     // Some desktops show a new entry only after this (or the next login).
     _ = std::process::Command::new("update-desktop-database").arg(&apps).output();
+    // Its links (`[app] schemes`) open it.
+    for s in &app.schemes {
+        _ = std::process::Command::new("xdg-mime")
+            .args(["default", &format!("{}.desktop", app.id), &format!("x-scheme-handler/{s}")])
+            .output();
+    }
     Ok(format!("{} {} is installed: {}, and in the app menu", app.name, app.version, file.display()))
 }
 
@@ -240,6 +254,7 @@ mod tests {
             cache: root.join("cache"),
             bin: root.join("bin"),
             share: root.join("share"),
+            config: root.join("config"),
         }
     }
 
@@ -265,7 +280,14 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let bin = t.path().join("notes-built");
         std::fs::write(&bin, "#!/bin/sh\necho hi\n").unwrap();
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: None };
+        let schemes = vec!["notes-link".to_string()];
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.2.0".into(),
+            icon: None,
+            schemes,
+        };
         let name = crate::build::bundle_name(&app, crate::platform::host().unwrap());
         let staged = crate::build::stage(&app, &name, &bin, &t.path().join("stage"), true).unwrap();
         let bundle = t.path().join(format!("{name}.tar.gz"));
@@ -273,18 +295,52 @@ mod tests {
         let mut tar = std::process::Command::new("tar");
         tar.arg("-czf").arg(&bundle).arg("-C").arg(t.path().join("stage")).arg(dir);
         assert!(tar.status().unwrap().success());
-        let (home, share, binh) = (t.path().join("home"), t.path().join("share"), t.path().join("bin"));
-        let env =
-            [("HOME", home.as_os_str()), ("XDG_DATA_HOME", share.as_os_str()), ("XDG_BIN_HOME", binh.as_os_str())];
+        let (home, share, binh, config) =
+            (t.path().join("home"), t.path().join("share"), t.path().join("bin"), t.path().join("config"));
+        let env = [
+            ("HOME", home.as_os_str()),
+            ("XDG_DATA_HOME", share.as_os_str()),
+            ("XDG_BIN_HOME", binh.as_os_str()),
+            ("XDG_CONFIG_HOME", config.as_os_str()),
+        ];
         let said = from_bundle(&bundle, &env).unwrap();
         assert!(said.contains("Notes 1.2.0 is installed"), "{said}");
         assert_eq!(std::process::Command::new(binh.join("notes")).output().unwrap().stdout, b"hi\n");
+        // Its links open it: the entry names its scheme, and (with xdg-mime
+        // here) it is this user's handler of it.
+        let entry = std::fs::read_to_string(share.join("applications/notes.desktop")).unwrap();
+        assert!(entry.contains("\nMimeType=x-scheme-handler/notes-link;\n"), "{entry}");
+        let mimeapps = config.join("mimeapps.list");
+        let handler = |l: &str| l == "x-scheme-handler/notes-link=notes.desktop";
+        let xdg =
+            std::process::Command::new("sh").args(["-c", "command -v xdg-mime"]).output().unwrap().status.success();
+        if xdg {
+            let text = std::fs::read_to_string(&mimeapps).unwrap();
+            assert!(text.lines().any(handler), "{text}");
+        }
+        // uninstall.sh takes its handler lines, never another app's.
+        let other = "x-scheme-handler/mail=mail.desktop\nx-scheme-handler/notes-link=notes.desktop;\n";
+        std::fs::write(
+            &mimeapps,
+            format!(
+                "[Default Applications]\n{other}[Added Associations]\nx-scheme-handler/notes-link=notes.desktop;\n"
+            ),
+        )
+        .unwrap();
+        let uninstall = share.join("aio-rt/install/notes/current/uninstall.sh");
+        let out = std::process::Command::new("sh").arg(&uninstall).envs(env).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = std::fs::read_to_string(&mimeapps).unwrap();
+        assert_eq!(text, "[Default Applications]\nx-scheme-handler/mail=mail.desktop\n[Added Associations]\n");
+        assert!(!share.join("applications/notes.desktop").exists());
+        assert!(from_bundle(&bundle, &env).unwrap().contains("is installed"), "again, for what follows");
         let p = Places {
             install: share.join("aio-rt/install"),
             apps: share.join("aio-rt/apps"),
             cache: t.path().join("c"),
             bin: binh.clone(),
             share: share.clone(),
+            config: config.clone(),
         };
         assert!(list(&p, false).starts_with("notes"), "{}", list(&p, false));
         let left = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten();
@@ -296,7 +352,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_appimages_menu_entry_unpacks_it_in_a_private_tmpdir_as_aios_did() {
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: None };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.2.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let e = appimage_entry(&app, Path::new("/h/i/notes.AppImage"), Path::new("/h/c/notes/tmp")).unwrap();
         let exec = r#"Exec=sh -c "D=\\"/h/c/notes/tmp\\"; mkdir -p \\"\\$D\\"; chmod 700 \\"\\$D\\" 2>/dev/null; TMPDIR=\\"\\$D\\" exec \\"/h/i/notes.AppImage\\" \\"\\$@\\"" _ %U"#;
         assert!(e.lines().any(|l| l == exec), "{e}");
@@ -314,8 +376,13 @@ mod tests {
         let p = places(t.path());
         let icon = t.path().join("icon.png");
         std::fs::write(&icon, b"png").unwrap();
-        let app =
-            crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.2.0".into(), icon: Some(icon) };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.2.0".into(),
+            icon: Some(icon),
+            schemes: vec![],
+        };
         // The AppImage: here a script saying where it would unpack, and its arguments.
         let image = t.path().join("notes-1.2.0-x86_64.AppImage");
         std::fs::write(&image, "#!/bin/sh\necho \"$TMPDIR|$*\"\n").unwrap();
@@ -383,6 +450,20 @@ mod tests {
         assert!(std::fs::symlink_metadata(p.bin.join("notes")).is_err());
         assert!(p.apps.join("notes/data").exists(), "the data stays");
         assert!(remove(&p, "notes", false).unwrap_err().contains("not installed"));
+        // Its schemes' handler lines go with it; another app's stay.
+        std::fs::create_dir_all(&p.config).unwrap();
+        let list = p.config.join("mimeapps.list");
+        std::fs::write(
+            &list,
+            "[Default Applications]\nx-scheme-handler/m=mail.desktop\nx-scheme-handler/n=notes.desktop\n",
+        )
+        .unwrap();
+        install(&p, "notes");
+        remove(&p, "notes", false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&list).unwrap(),
+            "[Default Applications]\nx-scheme-handler/m=mail.desktop\n"
+        );
         assert_eq!(remove(&p, "mail", true), Ok("mail and its data are removed".into()));
         assert!(!p.apps.join("mail").exists() && !p.cache.join("mail").exists());
         assert!(p.apps.join("notes").exists(), "only that app's");

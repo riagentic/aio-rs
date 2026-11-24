@@ -74,6 +74,7 @@ lang = "en"
 dir = "ltr"
 tz = "utc"
 profiles = true
+schemes = []                # notes://… links open it
 maintainer = "Example Team <team@example.org>"
 # port_of = "notes"         # a port of the aio app "notes": its home and state.db
 
@@ -217,6 +218,7 @@ Who the app is and where its cells live.
 | `lang` | language tag | `"en"` | The page's language, `<html lang>` (screen readers, spellcheck, translation). Letters, digits and `-`: `"en"`, `"pt-BR"`. |
 | `dir` | `ltr`, `rtl`, `auto` | `"ltr"` | The page's direction, `<html dir>`. `auto` is the browser's guess from the first strong character. Never guessed from `lang`. |
 | `tz` | `utc`, `local` | `"utc"` | The clock cron schedules read (`#[cron]`, `cx.cron`): UTC as aio's, so a port's jobs fire when they did, or this machine's local time (with its daylight-saving changes). |
+| `schemes` | list | `[]` | URL schemes the app opens on every platform (`notes://item/7`): its install registers them with the OS (Linux `x-scheme-handler`, Windows `HKCU\Software\Classes`, macOS `CFBundleURLTypes`, Android intent filters), its uninstall takes them away, and each link reaches the app through `aio::ui::links()` (a `router!` goes there), started by it or running ([deep links](../clients/desktop.md#deep-links)). A link is untrusted input. A lower-case letter, then lower-case letters, digits, `+`, `-` or `.`; none of the system's (`http`, `https`, `file`, `data`, `javascript`, `mailto`, `tel`, `aio`, `chrome`, `ms-*`…). |
 | `flags` | list | `[]` | the app's own launch flags, `--name` each (aio's `appFlags`). Declared, a launch flag (before a bare `--`) one typo from one of them or of aio's own (`--profile`, `--route`, ...) is refused at start: `--verbos: no such flag (did you mean --verbose?)`. A flag far from every name still reaches the app (`aio::paths::Ask::app_args`), so Electron's and the app's undeclared flags stay quiet. Empty: nothing is checked. |
 | `profiles` | bool | `true` | `false` (aio's `profiles: false`: a kiosk, a service): the app runs from one home only, and a launch naming another (`--profile`, `AIORT_PROFILE`, `AIO_PROFILE`, `--home`) is refused at start. `--instance` and `AIORT_DATA` still give a sandbox. |
 | `maintainer` | `"Name <email>"` | none | Who publishes it. A Debian package needs it (`ax build --deb`); `ax create` fills it from git. |
@@ -590,7 +592,7 @@ build a file added later in; a plain `cargo build` doesn't see a new one.
 | `keystore` | path | aio's own key | The release keystore (relative: to the app's folder). Its password is never here: the build reads `AIO_ANDROID_KEYSTORE_PASSWORD`; `AIO_ANDROID_KEYSTORE` overrides the path. |
 | `key_alias` | string | none | The key in it (`AIO_ANDROID_KEY_ALIAS` overrides). |
 | `aab` | bool | `false` | Also an Android App Bundle (`.aab`) for Play. |
-| `schemes` | list | `[]` | URL schemes the app opens (`notes://item/7`): each link reaches the running app (`aio::ui::links`; a `router!` goes there). A lower-case letter, then lower-case letters, digits, `+`, `-` or `.`; none of the system's (`http`, `https`, `content`, `file`, `intent`, `mailto`, `tel`…). |
+| `schemes` | list | `[]` | URL schemes the app opens on Android only, beside `[app] schemes` (every platform) (`notes://item/7`): each link reaches the running app (`aio::ui::links`; a `router!` goes there). A lower-case letter, then lower-case letters, digits, `+`, `-` or `.`; none of the system's (`http`, `https`, `content`, `file`, `intent`, `mailto`, `tel`…). |
 | `camera` | bool | `false` | The page may ask for the camera: the APK declares it and Android asks once. Off: refused. |
 | `color_scheme` | `system`, `light`, `dark` | `"system"` | Light or dark whatever the phone's setting; `system`: the phone's. |
 
