@@ -163,6 +163,10 @@ version may break things.
 
 ### Fixed
 
+- A second launch while the app was starting (its lock taken, its door
+  for launches not open yet: a double click, two files opened at once)
+  waited 30 s and failed, its arguments lost. It is handed over once the
+  door opens.
 - A dialog (`page::pick`, `pick_many`, `save`), `open_window` or
   `clear_partition` still open when the window's runtime went (a
   `keep_server` app's window closed or crashed) waited for ever, and a
