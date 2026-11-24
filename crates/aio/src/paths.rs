@@ -322,19 +322,28 @@ pub fn write_private(p: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
 /// one, never half of one (D2): a temp file, flushed, renamed over, then the
 /// directory flushed. `private`: mode 0600.
 pub fn write_atomic(p: &std::path::Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    replace(p, bytes, private, true)
+}
+
+/// [`write_atomic`], `synced` or not: unsynced, a crash of the process
+/// still leaves the old file or the new one, but a power cut may lose
+/// the write (a status file rewritten every few seconds).
+pub(crate) fn replace(p: &std::path::Path, bytes: &[u8], private: bool, synced: bool) -> io::Result<()> {
     let name = p.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
     let tmp = p.with_file_name(format!(".{}.{}.tmp", name.to_string_lossy(), crate::uuid_v4().simple()));
     let written = (|| {
         let mut f = create(&tmp, private)?;
         std::io::Write::write_all(&mut f, bytes)?;
-        f.sync_all()?;
+        if synced {
+            f.sync_all()?;
+        }
         rename_over(&tmp, p)
     })();
     if written.is_err() {
         _ = std::fs::remove_file(&tmp);
     }
     written?;
-    sync_dir(parent(p))
+    if synced { sync_dir(parent(p)) } else { Ok(()) }
 }
 
 /// Pauses between tries of a rename that Windows refuses while another

@@ -171,6 +171,10 @@ version may break things.
 
 ### Fixed
 
+- `health.json` is replaced whole every 10 s without two disk syncs each
+  time (disk wear, a laptop's or phone's disk woken): a status lost to
+  a power cut is harmless.
+
 - `data/sync.token`: two processes starting at once (an app and `ax`)
   no longer fail with "already exists": the second reads the key the
   first made (it could also read it half-written, call it empty and

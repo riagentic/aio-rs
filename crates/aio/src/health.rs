@@ -738,7 +738,7 @@ pub fn start(data: &Path, limits: crate::config::Memory, config: Value) {
             if f.is_none() || STOPPING.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
-            if let Err(e) = crate::paths::write_atomic(&file, d.to_string().as_bytes(), true) {
+            if let Err(e) = save(&file, &d) {
                 eprintln!("[aio] health.json not written: {e}");
             }
             drop(f);
@@ -748,6 +748,13 @@ pub fn start(data: &Path, limits: crate::config::Memory, config: Value) {
     if let Err(e) = spawned {
         eprintln!("[aio] no health monitor: {e}");
     }
+}
+
+/// Write `health.json` whole, never synced: rewritten every [`EVERY`], a
+/// status lost to a power cut is harmless, and each sync wears the disk
+/// and wakes it (battery).
+fn save(file: &Path, d: &Value) -> std::io::Result<()> {
+    crate::paths::replace(file, d.to_string().as_bytes(), true, false)
 }
 
 /// A sample [`on_memory`] hears ([`hook_hears`]; aio's `onMemoryPressure`
@@ -940,6 +947,23 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Written every 10 s, a status file is never flushed to disk (disk
+    /// wear, battery): whole or the one before, a power cut's loss harmless.
+    #[cfg(unix)]
+    #[test]
+    fn health_json_is_replaced_whole_and_never_synced() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("health.json");
+        let before = crate::paths::SYNCS.get();
+        save(&file, &json!({ "status": "healthy" })).unwrap();
+        save(&file, &json!({ "status": "degraded" })).unwrap();
+        assert_eq!(crate::paths::SYNCS.get(), before, "no sync");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"status":"degraded"}"#);
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1, "no temp file left");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
 
     const GB: u64 = 1 << 30;
 
