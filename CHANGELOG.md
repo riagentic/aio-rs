@@ -158,6 +158,10 @@ version may break things.
 
 ### Fixed
 
+- A macro call written as a node in `rsx!` (`0 => rsx! { p {} }` in a
+  `match` arm, `format! { … }`) was read as a component named `rsx!`, and
+  rustc said "expected one of `(`, `[`, or `{`" at the whole `rsx!`. It
+  is an error at the macro's name now, with the way to write it.
 - An element given two handlers for one event (`h(..).on("click", a)
   .on("click", b)`) ran only the first; it runs each, in order, as the
   DOM does.

@@ -794,6 +794,15 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         let start = *i;
         let (path, inner) = until_block(toks, i)?;
         let path: Vec<TokenTree> = path.into_iter().collect();
+        if is_punct(path.get(1), '!') {
+            return Err((
+                t.span(),
+                format!(
+                    "air: `{t}! {{ … }}` in rsx! is a macro call: its value goes in braces (`{{ {t}!(…) }}`); \
+                     an `rsx!` inside one is written as its nodes (a `match` arm: `pattern => {{ p {{ … }} }}`)"
+                ),
+            ));
+        }
         let last = path.iter().rev().find_map(|t| match t {
             TokenTree::Ident(i) => Some(i.to_string()),
             _ => None,
@@ -2336,6 +2345,13 @@ mod tests {
             })
         }
         find(expand(src.parse().unwrap(), None))
+    }
+
+    #[test]
+    fn a_macro_call_written_as_a_node_is_said_at_its_name() {
+        assert_eq!(error_at("match n { 0 => rsx! { p {} }, _ => { b {} } }"), Some((1, 15)));
+        assert_eq!(error_at("div { format! { \"x\" } }"), Some((1, 6)));
+        assert_eq!(error_at("match n { 0 => { p {} } _ => { b {} } }"), None);
     }
 
     #[test]
