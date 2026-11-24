@@ -65,6 +65,7 @@ fn link(at: &Path, target: &Path, dir: &Path, aumid: &str) -> io::Result<()> {
     type SetValue = unsafe extern "system" fn(*mut c_void, *const Key, *const Value) -> i32;
     /// SAFETY: `this` is a live COM interface whose table has slot `n` of type `F`.
     unsafe fn method<F: Copy>(this: *mut c_void, n: usize) -> F {
+        // SAFETY: the function's contract, above.
         unsafe { *(*(this as *const *const F)).add(n) }
     }
     let ok = |what: &str, hr: i32| match hr {

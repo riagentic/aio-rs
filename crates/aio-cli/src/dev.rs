@@ -251,6 +251,22 @@ impl Pkg {
             self.dev_feature.iter().filter(|_| dev).chain(&self.features).map(String::as_str).collect();
         (!all.is_empty()).then(|| all.join(","))
     }
+
+    /// It with [`Pkg::features`] as its aio.toml says them now: a build in
+    /// an `ax dev` session takes an `[updates]` added since it began.
+    fn now(&self) -> Pkg {
+        let shell = self.dev_feature.as_deref().and_then(|f| f.strip_suffix("/dev"));
+        let cfg = self
+            .dirs
+            .first()
+            .and_then(|d| aio_config::config::find(d))
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|t| aio::config::Config::parse(&t).ok());
+        match cfg {
+            Some(c) => Pkg { features: crate::build::features_of(shell, &c, false), ..self.clone() },
+            None => self.clone(),
+        }
+    }
 }
 
 /// `cargo metadata` for the workspace here.
@@ -468,6 +484,7 @@ pub enum Built {
 
 /// [`build`], or stopped by a newer save (`stop`).
 fn build_or_stale(pkg: &Pkg, logs: Option<&Path>, dev: bool, stop: &Stop) -> Built {
+    let pkg = &pkg.now();
     let name = &pkg.name;
     let stamp = pkg.dirs.first().map_or_else(String::new, |d| crate::build::assets_stamp(d));
     let mut cmd = Command::new("cargo");
@@ -629,10 +646,11 @@ pub fn watched(pkg: &Pkg, app: &Path, w: &Watching) -> Vec<PathBuf> {
     }
 }
 
-/// Whether `changed` has a `Cargo.toml` (a dependency): no patch takes
-/// it in, so the app is built again (pure).
+/// Whether `changed` has a `Cargo.toml` (a dependency) or the `aio.toml`
+/// (the features it turns on, the config built in): no patch takes it in,
+/// so the app is built again (pure).
 fn manifest(changed: &[PathBuf]) -> bool {
-    changed.iter().any(|p| p.file_name().is_some_and(|n| n == "Cargo.toml"))
+    changed.iter().any(|p| p.file_name().is_some_and(|n| n == "Cargo.toml" || n == "aio.toml"))
 }
 
 /// The files the build of `artifact` read, from cargo's dep-info beside it
@@ -1150,11 +1168,11 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     match &watching {
         Watching::Only(_) => eprintln!(
             "ax dev: {name}: a stylesheet or an rsx! markup edit in what --watch names shows at once, a Rust \
-             edit is hot-patched, state kept; a Cargo.toml edit rebuilds"
+             edit is hot-patched, state kept; a Cargo.toml or aio.toml edit rebuilds"
         ),
         _ => eprintln!(
             "ax dev: {name}: a stylesheet or an rsx! markup edit shows at once, a Rust edit is hot-patched, \
-             state kept; a Cargo.toml edit rebuilds"
+             state kept; a Cargo.toml or aio.toml edit rebuilds"
         ),
     }
     let (w, rx) = crate::watch::Watch::new(&paths)?;
@@ -1705,6 +1723,7 @@ fn dev_build(
 /// The fat build of binary `name` of `pkg`, as `ax dev` asks it (`None`:
 /// the app has no window shell, nothing to patch).
 fn fat_request(pkg: &Pkg, name: &str, stop: &Stop) -> Option<crate::hotpatch::Request> {
+    let pkg = &pkg.now();
     let mut cargo_args = layout();
     pkg.dev_feature.as_ref()?;
     cargo_args.extend(["--features".into(), pkg.features_with(true)?]);
@@ -2399,6 +2418,10 @@ mod tests {
         assert_eq!(build_features(&fed, true), ["--features", "aio-shell/dev,aio-shell/updates"]);
         let plain = locate(&meta, "plain").unwrap();
         assert_eq!(build_features(&plain, true), ["--features", "aio-shell/dev"], "no feed: no updater");
+        // A feed added while it runs: the next build has the updater.
+        std::fs::write(w.join("plain/aio.toml"), feed.replace("\"fed\"", "\"plain\"")).unwrap();
+        let req = fat_request(&plain, "plain", &Stop::default()).unwrap();
+        assert!(req.cargo_args.contains(&"aio-shell/dev,aio-shell/updates".into()), "{:?}", req.cargo_args);
     }
 
     #[test]
@@ -2813,6 +2836,7 @@ mod tests {
     fn a_manifest_change_and_an_unchanged_binary_are_told() {
         assert!(manifest(&[PathBuf::from("/w/src/lib.rs"), PathBuf::from("/w/Cargo.toml")]));
         assert!(!manifest(&[PathBuf::from("/w/src/lib.rs")]));
+        assert!(manifest(&[PathBuf::from("/w/aio.toml")]), "its features, its config: a build's");
         assert!(sheets_only(&[PathBuf::from("/w/assets/style.css"), PathBuf::from("/w/assets/kit.css")]));
         assert!(!sheets_only(&[PathBuf::from("/w/assets/style.css"), PathBuf::from("/w/src/lib.rs")]));
         assert!(!sheets_only(&[]));

@@ -2006,7 +2006,7 @@ pub fn parse_span(s: &str) -> Result<Duration, String> {
         "s" => 1,
         _ => return Err(format!("`{s}`: expected a number and d, h, m or s")),
     };
-    Ok(Duration::from_secs(n * secs))
+    n.checked_mul(secs).map(Duration::from_secs).ok_or_else(|| format!("`{s}`: too long a span"))
 }
 
 /// A span as `aio.toml` spells it: the largest unit it is a whole number of.

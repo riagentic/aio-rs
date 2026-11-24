@@ -89,6 +89,7 @@ pub mod auth {
 }
 mod answer;
 pub mod big;
+mod civil;
 pub use big::Big;
 pub mod colors;
 pub mod columns;
@@ -514,6 +515,10 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
         let _ = from;
         serde_json::from_value(old).map_err(|e| e.to_string())
     }
+    /// `#[cell(migrate = f)]` is set: the cell converts its state across
+    /// versions (aio's `onMigrate`), so an aio journal call stamped with an
+    /// older version is skipped, as aio skips it.
+    const MIGRATES: bool = false;
     /// `#[cell(visible = f)]` is set: [`Self::project`] runs the app's code.
     const SCREENED: bool = false;
     /// What `viewer` (who, with their role now) may see of the state, as
@@ -777,6 +782,50 @@ pub struct Declared {
 }
 
 /// What `#[methods]` generates: calls by name, for the log and replay.
+///
+/// `call` and `read` are aio::Door's, never a method's name:
+///
+/// ```compile_fail
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     pub fn call(&mut self) { self.n += 1 }
+/// }
+/// ```
+/// ```
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     pub fn bump(&mut self) { self.n += 1 }
+/// }
+/// ```
+///
+/// and `#[derived(reads = […])]` lists the state's fields by name:
+///
+/// ```compile_fail
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     #[derived(reads = ["n"])]
+///     pub fn double(&self) -> i64 { self.n * 2 }
+/// }
+/// ```
+/// ```
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Counter { pub n: i64 }
+/// #[methods]
+/// impl Counter {
+///     #[derived(reads = [n])]
+///     pub fn double(&self) -> i64 { self.n * 2 }
+/// }
+/// ```
 pub trait Cell: CellData {
     const METHODS: &'static [&'static str];
     /// Each method as its Rust signature (`add(text: String) -> Uuid`), in

@@ -64,8 +64,8 @@ fn num(v: &Value) -> f64 {
 
 /// A time of day from ms since the epoch, this machine's zone.
 pub fn clock(ms: i64) -> String {
-    use chrono::TimeZone;
-    chrono::Local.timestamp_millis_opt(ms).single().map_or("—".into(), |t| t.format("%H:%M:%S").to_string())
+    jiff::Timestamp::from_millisecond(ms)
+        .map_or("—".into(), |t| jiff::tz::TimeZone::system().to_datetime(t).strftime("%H:%M:%S").to_string())
 }
 
 /// A linked client's row (amui's clients table, pure): id, cell, health,

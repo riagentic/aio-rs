@@ -29,17 +29,54 @@ const KEEP: usize = 5;
 pub fn stamp(ms: i64) -> String {
     let (secs, milli) = (ms.div_euclid(1000), ms.rem_euclid(1000));
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Civil date from days (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (y, m, d) = crate::civil::date(days);
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{milli:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Ms since the epoch of an RFC 3339 time: as [`stamp`] writes it, or with
+/// any fraction (to the ms) and an offset (`2026-10-27T23:01:02+01:00`).
+pub fn parse_stamp(s: &str) -> Option<i64> {
+    let n = |at: usize, len: usize| -> Option<i64> {
+        let t = s.get(at..at + len)?;
+        t.bytes().all(|c| c.is_ascii_digit()).then(|| t.parse().ok())?
+    };
+    let sep = |at: usize, c: &[u8]| s.as_bytes().get(at).is_some_and(|b| c.contains(b));
+    if !(sep(4, b"-") && sep(7, b"-") && sep(10, b"Tt ") && sep(13, b":") && sep(16, b":")) {
+        return None;
+    }
+    let (y, mo, d, h, mi, sec) = (n(0, 4)?, n(5, 2)?, n(8, 2)?, n(11, 2)?, n(14, 2)?, n(17, 2)?);
+    let mo = u32::try_from(mo).ok().filter(|m| (1..=12).contains(m))?;
+    let d = u32::try_from(d).ok().filter(|d| (1..=crate::civil::month_len(y, mo)).contains(d))?;
+    if h > 23 || mi > 59 || sec > 59 {
+        return None;
+    }
+    let mut rest = s.get(19..)?;
+    let mut milli = 0;
+    if let Some(f) = rest.strip_prefix('.') {
+        let digits = f.bytes().take_while(u8::is_ascii_digit).count();
+        let kept = digits.min(3);
+        milli = f.get(..kept).filter(|_| digits > 0)?.parse::<i64>().ok()? * 10_i64.pow(3 - kept as u32);
+        rest = &f[digits..];
+    }
+    let east = match rest {
+        "Z" | "z" => 0,
+        _ => {
+            let sign = match rest.as_bytes().first()? {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let o = &rest[1..];
+            let (oh, om) = (o.get(..2).filter(|_| o.len() == 5 && sep(s.len() - 3, b":")), o.get(3..));
+            let (oh, om): (i64, i64) = (oh?.parse().ok()?, om?.parse().ok()?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            sign * (oh * 60 + om)
+        }
+    };
+    let secs = crate::civil::days(y, mo, d) * 86_400 + h * 3600 + mi * 60 + sec - east * 60;
+    Some(secs * 1000 + milli)
 }
 
 fn now_ms() -> i64 {
@@ -271,8 +308,10 @@ pub fn start(logs: &Path) -> io::Result<()> {
         libc::close(fds[1]);
         File::from_raw_fd(term)
     };
+    // SAFETY: fds[0] is the pipe's read end, just made and owned by nothing else.
     let pipe = unsafe { File::from_raw_fd(fds[0]) };
     // A second copy of the terminal, to give fd 2 back at `finish`.
+    // SAFETY: dup(2) of an fd `term` holds open; the copy's ownership is `back`'s (closed at `finish`).
     let back = unsafe { libc::dup(term.as_raw_fd()) };
     let paint = colour_for(&term);
     let copier =
@@ -312,8 +351,15 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
         logcat(line);
         _ = log.line(now_ms(), line);
     };
-    for line in io::BufReader::new(pipe).lines() {
-        let Ok(line) = line else { break };
+    // By bytes: a line that isn't UTF-8 (a child's, a C library's) is read
+    // as best it can be, never the copier's end (its pipe would close, and
+    // the next write to stderr panic).
+    for line in io::BufReader::new(pipe).split(b'\n') {
+        let Ok(mut line) = line else { break };
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let line = String::from_utf8_lossy(&line).into_owned();
         // No credential reaches a log: a token in a URL, a pairing code.
         let line = crate::report::redact(&line);
         let line = runtime_noise(&line).unwrap_or(line);
@@ -676,6 +722,8 @@ pub fn start(logs: &Path) -> io::Result<()> {
         }
         term
     };
+    // SAFETY: CreatePipe succeeded: both handles are open and owned by nothing
+    // else (`w` is now also the std error handle, given back before it is dropped).
     let (pipe, w) = unsafe { (File::from_raw_handle(r), OwnedHandle::from_raw_handle(w)) };
     // A GUI app has no terminal: then the log alone.
     let has_term = !term.is_null() && term != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -783,6 +831,26 @@ fn finish_by(wait: Option<std::time::Duration>) {
 
 #[cfg(test)]
 mod tests {
+    /// A line that isn't UTF-8 (a child's, a C library's) is logged as
+    /// best it reads, and every line after it too: the copier never stops
+    /// (stopped, its pipe closes and the next write to stderr panics).
+    #[test]
+    fn a_line_that_isnt_utf8_stops_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let input = d.path().join("in");
+        std::fs::write(&input, b"INFO  [app] a\n\xff\xfeb\r\nINFO  [app] after\n").unwrap();
+        let logs = d.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let sinks = super::Sinks::open(&logs).unwrap();
+        super::copy(std::fs::File::open(&input).unwrap(), None::<Vec<u8>>, false, sinks);
+        let all: String = std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default())
+            .collect();
+        assert!(all.contains("[app] after"), "{all}");
+        assert!(all.contains("\u{fffd}\u{fffd}b") && !all.contains('\r'), "{all:?}");
+    }
+
     #[test]
     fn ax_devs_terminal_has_the_boot_report_in_one_line() {
         let mut b = super::BriefBoot { on: true, rows: vec![] };
@@ -814,6 +882,40 @@ mod tests {
         assert_eq!(stamp(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(stamp(1_793_142_062_123), "2026-10-27T23:01:02.123Z");
         assert_eq!(stamp(951_782_400_000), "2000-02-29T00:00:00.000Z");
+    }
+
+    #[test]
+    fn a_stamp_reads_back_as_rfc_3339_says() {
+        for ms in [0, 1_793_142_062_123, 951_782_400_000, -1, -62_135_596_800_000, 253_402_300_799_999] {
+            assert_eq!(parse_stamp(&stamp(ms)), Some(ms), "{}", stamp(ms));
+        }
+        let at = 1_793_142_062_000;
+        for (s, want) in [
+            ("2026-10-27T23:01:02Z", at),
+            ("2026-10-27t23:01:02z", at),
+            ("2026-10-27 23:01:02Z", at),
+            ("2026-10-28T00:01:02+01:00", at),
+            ("2026-10-27T18:31:02-04:30", at),
+            ("2026-10-27T23:01:02.1Z", at + 100),
+            ("2026-10-27T23:01:02.123456789Z", at + 123),
+        ] {
+            assert_eq!(parse_stamp(s), Some(want), "{s}");
+        }
+        for bad in [
+            "",
+            "2026-10-27",
+            "2026-10-27T23:01:02",
+            "2026-13-01T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2026-10-27T24:00:00Z",
+            "2026-10-27T23:01:02.Z",
+            "2026-10-27T23:01:02+0100",
+            "2026-10-27T23:01:02+01:00x",
+            "+026-10-27T23:01:02Z",
+            "2026-10-27T23:01:02Zé",
+        ] {
+            assert_eq!(parse_stamp(bad), None, "{bad}");
+        }
     }
 
     #[test]

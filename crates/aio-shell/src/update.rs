@@ -201,16 +201,55 @@ fn dismiss(dir: &Path, version: &str) -> io::Result<()> {
 /// Swaps of one release that could not be made before it is dismissed.
 const MAX_FAILED_SWAPS: u64 = 3;
 
-/// The staged release newest of those newer than `current`, if any.
-fn staged(dir: &Path, current: &str) -> Option<Manifest> {
+/// The staged release newest of those newer than `current` that `wanted`
+/// takes, if any.
+fn staged(dir: &Path, current: &str, wanted: &dyn Fn(&Manifest) -> bool) -> Option<Manifest> {
     let gone = dismissed(dir);
     std::fs::read_dir(dir.join("versions"))
         .ok()?
         .flatten()
         .filter_map(|e| read_json::<Manifest>(&e.path().join("release.json")))
         .filter(|m| up::compare(&m.release.version, current) == Some(std::cmp::Ordering::Greater))
-        .filter(|m| !gone.contains(&m.release.version))
+        .filter(|m| !gone.contains(&m.release.version) && wanted(m))
         .max_by(|a, b| up::compare(&a.release.version, &b.release.version).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// What the user chose in the `updates` cell: (the release they dismissed,
+/// the channel they pinned). The open cell's, else as `updates.db` (in
+/// `data`) saved them: a start installs before the cell opens.
+#[cfg(feature = "updates")]
+fn chosen(data: &Path) -> (Option<String>, Option<String>) {
+    let s = match cell() {
+        Some(c) => c.state(),
+        None => match data.join("updates.db") {
+            db if db.exists() => match aio::Handle::<Updates>::open(&db) {
+                Ok(h) => h.state(),
+                Err(_) => return (None, None),
+            },
+            _ => return (None, None),
+        },
+    };
+    (s.dismissed.clone(), s.pinned.clone())
+}
+
+#[cfg(not(feature = "updates"))]
+fn chosen(_: &Path) -> (Option<String>, Option<String>) {
+    (None, None)
+}
+
+/// The staged release this start installs ([`staged`]): never one the user
+/// dismissed, and only one of the channel followed now, a prerelease only
+/// while they are followed (one staged by hand, [`UNSIGNED`], whatever its
+/// ref).
+fn to_install(cfg: &aio::config::Config, d: &Path, data: &Path, version: &str) -> Option<Manifest> {
+    let (no, pinned) = chosen(data);
+    let ch = resolved(cfg, pinned.as_deref());
+    let pre = up::follows_prereleases(cfg.updates.prerelease, version, &ch);
+    staged(d, version, &|m| {
+        let r = &m.release;
+        no.as_ref() != Some(&r.version)
+            && (m.key == UNSIGNED || (r.channel == ch && up::newer(&r.version, version, pre)))
+    })
 }
 
 /// The swap was never made: the new version never ran, and what held the
@@ -324,7 +363,7 @@ pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::App
     if !installed(id) {
         return Ok(Next::Boot);
     }
-    let Some(m) = staged(&d, version) else { return Ok(Next::Boot) };
+    let Some(m) = to_install(cfg, &d, &dirs.data, version) else { return Ok(Next::Boot) };
     let to = m.release.version.clone();
     // The app's say first (aio's canApply, awaited at every install): "not
     // now" keeps the release staged for a later start.
@@ -822,10 +861,14 @@ fn get(
     if let Some(e) = etag {
         req = req.header("if-none-match", e);
     }
-    let res = req.call().map_err(|e| {
-        let kind =
-            if matches!(e, ureq::Error::StatusCode(404)) { io::ErrorKind::NotFound } else { io::ErrorKind::Other };
-        io::Error::new(kind, format!("{url}: {e}"))
+    // Typed (`up::UpdateError`) through to the cell's runtime: a 404 is still
+    // `NotFound` here.
+    let res = req.call().map_err(|e| match e {
+        ureq::Error::StatusCode(status) => {
+            let kind = if status == 404 { io::ErrorKind::NotFound } else { io::ErrorKind::Other };
+            io::Error::new(kind, up::UpdateError::Http { url: url.into(), status })
+        }
+        e => io::Error::other(up::UpdateError::Network { url: url.into(), message: e.to_string() }),
     })?;
     if res.status() == 304 {
         return Ok(None);
@@ -910,6 +953,7 @@ fn free_bytes(dir: &Path) -> Option<u64> {
         let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
         // SAFETY: a valid C string and a zeroed out-struct.
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` is a NUL-terminated path alive for the call; `s` is ours to fill.
         (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
     }
     #[cfg(windows)]
@@ -1010,16 +1054,19 @@ fn look(cfg: &aio::config::Config, version: &str, data: &Path, d: &Path) -> io::
     let trusted: Vec<String> = read_json(&keys_file).unwrap_or_else(|| u.keys.clone());
     let expect = up::Expect { id: &cfg.app.id, channel: &ch, os: std::env::consts::OS, arch: std::env::consts::ARCH };
     let (m, next_keys) = up::check_served(&body, &trusted, &expect)
-        .map_err(|e| io::Error::other(format!("release refused: {e} ({url})")))?;
+        .map_err(|e| io::Error::other(up::UpdateError::Refused { url: url.clone(), why: Box::new(e) }))?;
     let r = &m.release;
-    if next_keys != trusted {
-        aio::paths::write_atomic(&keys_file, aio::serde_json::to_string(&next_keys)?.as_bytes(), true)?;
-        eprintln!("[aio] release keys updated by {}'s signed roster", r.version);
-    }
     let pre = up::follows_prereleases(u.prerelease, version, &ch);
     if !up::newer(&r.version, version, pre) {
         let why = up::skipped_prerelease(&r.version, version, pre).unwrap_or_else(|| format!("{version} is current"));
         return Ok((current(why), None));
+    }
+    // Only a newer release's roster is followed: an old manifest served
+    // again (its roster vouched by a key still trusted) would bring back a
+    // key a later roster dropped (a leaked one).
+    if next_keys != trusted {
+        aio::paths::write_atomic(&keys_file, aio::serde_json::to_string(&next_keys)?.as_bytes(), true)?;
+        eprintln!("[aio] release keys updated by {}'s signed roster", r.version);
     }
     if dismissed(d).contains(&r.version) {
         return Ok((current(format!("{} failed here before: not offered", r.version)), None));
@@ -1564,7 +1611,10 @@ pub fn said(f: &Found) -> String {
 pub fn check(cfg: &aio::config::Config, version: &str, data: &Path) -> io::Result<Found> {
     let d = dir(&cfg.app.id);
     match look(cfg, version, data, &d)? {
-        (Found::Offer(o), Some(got)) if cfg.updates.auto && !o.staged => {
+        // Never one the user dismissed: the cell would not offer it, nor a start install it.
+        (Found::Offer(o), Some(got))
+            if cfg.updates.auto && !o.staged && chosen(data).0.as_ref() != Some(&o.version) =>
+        {
             download(cfg, &got, &d, version, &|_| {})?;
             Ok(Found::Offer(Offer { staged: true, size: 0, ..o }))
         }
@@ -1646,11 +1696,11 @@ struct Shell {
 }
 
 impl up::Runtime for Shell {
-    fn check(&self) -> Result<Found, String> {
-        check(&self.cfg, &self.version, &self.data).map_err(|e| e.to_string())
+    fn check(&self) -> Result<Found, up::UpdateError> {
+        check(&self.cfg, &self.version, &self.data).map_err(up::UpdateError::from)
     }
-    fn apply(&self, version: &str, how: Data, step: &dyn Fn(Step)) -> Result<(), String> {
-        apply_now(&self.cfg, &self.version, &self.data, version, how, step).map_err(|e| e.to_string())
+    fn apply(&self, version: &str, how: Data, step: &dyn Fn(Step)) -> Result<(), up::UpdateError> {
+        apply_now(&self.cfg, &self.version, &self.data, version, how, step).map_err(up::UpdateError::from)
     }
 }
 
@@ -2450,6 +2500,28 @@ mod tests {
         assert!(said(&look(&cfg, "1.0.0", &data, &d).unwrap().0).contains("failed here before"));
     }
 
+    /// A roster is followed from a release newer than this one only: an old
+    /// manifest served again (its roster signed, by a key still trusted)
+    /// never brings back a key a later roster dropped.
+    #[test]
+    fn an_old_release_served_again_never_brings_back_a_dropped_key() {
+        let ((a, pa), (b, pb)) = (up::keygen().unwrap(), up::keygen().unwrap());
+        let t = tempfile::tempdir().unwrap();
+        let (data, d) = (t.path().join("data"), t.path().join("install"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
+        // 1.5 rotated A → A+B; 1.6 dropped A (leaked): this install trusts B.
+        let mut m = release(&a, "1.5.0", b"b", up::Contract::default());
+        m.release.roster = Some(up::roster(&[pa.clone(), pb.clone()], &[a.clone(), b.clone()]).unwrap());
+        let m = up::sign(m.release, &a).unwrap();
+        let keys = data.join("update-keys.json");
+        std::fs::write(&keys, aio::serde_json::to_vec(&[&pb]).unwrap()).unwrap();
+        let (found, _) = look(&config(&serve(&m, b"b"), &pa, ""), "1.6.0", &data, &d).unwrap();
+        assert_eq!(found, current("1.6.0 is current".into()));
+        let trusted: Vec<String> = aio::serde_json::from_slice(&std::fs::read(&keys).unwrap()).unwrap();
+        assert_eq!(trusted, [pb], "A stays dropped");
+    }
+
     #[test]
     fn a_prerelease_is_offered_only_when_asked_for() {
         let (k, public) = up::keygen().unwrap();
@@ -2969,7 +3041,11 @@ mod tests {
         let m: Manifest = read_json(&d.join("versions/1.0.1/release.json")).unwrap();
         assert_eq!(m.key, UNSIGNED);
         assert!(m.release.notes.starts_with("UNSIGNED:"), "{}", m.release.notes);
-        assert_eq!(staged(&d, "1.0.0").unwrap().release.version, "1.0.1", "the next start installs it");
+        assert_eq!(
+            to_install(&cfg, &d, &data, "1.0.0").unwrap().release.version,
+            "1.0.1",
+            "the next start installs it"
+        );
         assert!(!d.join("git-build").exists() && !d.join("git.json").exists());
         let e = from_git(&cfg, (&remote, "main"), &d, &data, "1.0.1", &fake_build).unwrap_err().to_string();
         assert!(e.contains("not newer than the installed 1.0.1"), "{e}");
@@ -2987,5 +3063,92 @@ mod tests {
         assert_eq!(pick_bundle(&names, "linux", false).unwrap(), "n-1-linux-x64.tar.gz");
         assert_eq!(pick_bundle(&names, "linux", true).unwrap(), "n-1-linux-x64.AppImage");
         assert_eq!(pick_bundle(&names[..1], "windows", false), None);
+    }
+
+    /// A bundle for this machine (`tar -czf`): its one folder holds `notes`.
+    #[cfg(target_os = "linux")]
+    fn tgz(at: &Path, version: &str) -> Vec<u8> {
+        let src = at.join(format!("src-{version}"));
+        unpacked(&src.join("notes"), version);
+        let out = at.join(format!("notes-{version}.tar.gz"));
+        assert!(Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(&src).arg("notes").status().unwrap().success());
+        std::fs::read(out).unwrap()
+    }
+
+    /// `release` of `version` on `channel`, staged in `d` as a download leaves it.
+    fn stage_fake(d: &Path, k: &[u8], version: &str, channel: &str) {
+        let mut m = release(k, version, b"b", up::Contract::default());
+        m.release.channel = channel.into();
+        let vd = d.join("versions").join(version);
+        std::fs::create_dir_all(&vd).unwrap();
+        std::fs::write(vd.join("release.json"), aio::serde_json::to_vec(&m).unwrap()).unwrap();
+    }
+
+    /// "Not this release" holds with `auto` too: what was staged before the
+    /// user said no is not installed, and what they said no to is not staged.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_release_the_user_dismissed_is_neither_staged_nor_installed() {
+        let _turn = TURN.lock().await;
+        let _gone = NoCell;
+        let _world = aio::paths::sandbox().unwrap();
+        let (k, public) = up::keygen().unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let bundle = tgz(t.path(), "1.5.0");
+        let m = release(&k, "1.5.0", &bundle, up::Contract::default());
+        let cfg = config(&serve(&m, &bundle), &public, "auto = true");
+        let dirs = aio::paths::AppDirs::at(&t.path().join("app"), "notes").unwrap();
+        open(&cfg, "1.0.0", &dirs).unwrap();
+        let Some(aio::Source::Local(h)) = cell() else { panic!("no updates cell") };
+        h.check().unwrap();
+        h.done("check").await;
+        assert!(matches!(&h.state().available, Some(o) if o.version == "1.5.0" && o.staged), "{:?}", h.state());
+        let d = dir("notes");
+        h.dismiss().unwrap();
+        // The next start installs what is staged and still wanted.
+        assert!(
+            to_install(&cfg, &d, &dirs.data, "1.0.0").is_none(),
+            "a dismissed release is installed at the next start"
+        );
+        // Dismissed before it was staged: the next background check leaves it.
+        std::fs::remove_dir_all(d.join("versions/1.5.0")).unwrap();
+        check(&cfg, "1.0.0", &dirs.data).unwrap();
+        assert!(!d.join("versions/1.5.0").exists(), "a dismissed release is staged");
+    }
+
+    /// A release staged on one channel is not installed once the app follows
+    /// another (`set_channel`, saved in `updates.db`), nor a prerelease once
+    /// prereleases are no longer followed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_release_staged_on_another_channel_is_not_installed() {
+        let _turn = TURN.lock().await;
+        let _gone = NoCell;
+        let (k, public) = up::keygen().unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let (d, data) = (t.path().join("install"), t.path().join("data"));
+        std::fs::create_dir_all(&data).unwrap();
+        let cfg = config("file:///nowhere", &public, "channel = \"beta\"\nauto = true");
+        stage_fake(&d, &k, "2.0.0-beta.3", "beta");
+        assert_eq!(
+            to_install(&cfg, &d, &data, "1.0.0").unwrap().release.version,
+            "2.0.0-beta.3",
+            "on beta, it installs"
+        );
+        // The user switches to stable: the next start must not install the beta.
+        let h = aio::Handle::<Updates>::open(data.join("updates.db")).unwrap();
+        h.ready(Ready { channel: "beta".into(), current: "1.0.0".into(), ..Ready::default() }).unwrap();
+        h.set_channel("stable".into()).unwrap();
+        drop(h);
+        assert!(
+            to_install(&cfg, &d, &data, "1.0.0").is_none(),
+            "a beta staged before the switch to stable is installed"
+        );
+        // On stable, prereleases followed by hand, then no longer.
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("install");
+        stage_fake(&d, &k, "1.1.0-rc.1", "stable");
+        let on = |more: &str| to_install(&config("file:///nowhere", &public, more), &d, &data, "1.0.0");
+        assert!(on("prerelease = true").is_some(), "followed, it installs");
+        assert!(on("").is_none(), "a prerelease no longer followed is installed");
     }
 }

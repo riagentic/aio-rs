@@ -76,19 +76,23 @@ fn unix(p: &Path) -> String {
 
 /// The script the Mac runs (piped to `bash -s`: zsh, its login shell, would
 /// abort on an unmatched glob): aio built from the copied checkout, then
-/// `ax build <name> --targets <label>` (on `platform`, else the Mac's own)
-/// into a fresh `dist/`: what it says, then [`LISTED`] and what is in
-/// `dist/`. Pure.
+/// `ax build <name> --targets <label>` (on `platform`, else the Mac's own;
+/// as `version`, the one resolved here: the copy has no `.git` to number
+/// it by) into a fresh `dist/`: what it says, then [`LISTED`] and what is
+/// in `dist/`. Pure.
+#[allow(clippy::too_many_arguments)]
 pub fn script(
     dir: &str,
     aio: &Path,
     ws: &Path,
     name: &str,
     label: &str,
+    version: Option<&str>,
     platform: Option<&str>,
     smoke: bool,
 ) -> String {
     let (aio, ws) = (q(&unix(aio)), q(&unix(ws)));
+    let version = version.map_or(String::new(), |v| format!(" --app-version {}", q(v)));
     let on = platform.map_or(String::new(), |p| format!(" --platforms {}", q(p)));
     let smoke = if smoke { " --smoke" } else { "" };
     [
@@ -99,7 +103,7 @@ pub fn script(
         "cargo build --release -p aio-rs-cli >&2".to_string(),
         format!(r#"cd "$root"/{ws}"#),
         "rm -rf dist".to_string(),
-        format!(r#""$root"/{aio}/target/release/ax build {} --targets {}{on}{smoke}"#, q(name), q(label)),
+        format!(r#""$root"/{aio}/target/release/ax build {} --targets {}{version}{on}{smoke}"#, q(name), q(label)),
         format!("echo {LISTED}"),
         "ls -1A dist".to_string(),
     ]
@@ -252,7 +256,11 @@ pub fn build(
     let mut run = ssh(h);
     run.arg("bash -s").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = run.spawn().map_err(|e| format!("ssh: {e}"))?;
-    let text = script(&dir, &rel_of(&aio)?, &rel_of(&ws)?, name, label, platform, smoke);
+    // The version this run builds as (a dirty or no-git one is no
+    // `--app-version`: the Mac marks its own).
+    let version = crate::build::app_of(&crate::dev::locate(meta, name)?)?.0.version;
+    let version = crate::version::pinned(&version).ok();
+    let text = script(&dir, &rel_of(&aio)?, &rel_of(&ws)?, name, label, version.as_deref(), platform, smoke);
     std::io::Write::write_all(&mut child.stdin.take().ok_or("no pipe")?, text.as_bytes()).map_err(|e| e.to_string())?;
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -330,7 +338,16 @@ mod tests {
 
     #[test]
     fn the_mac_builds_aio_then_the_target_into_a_fresh_dist_and_lists_it() {
-        let s = script(".cache/aio-build", Path::new("aio"), Path::new("my apps"), "notes", "dmg", None, false);
+        let s = script(
+            ".cache/aio-build",
+            Path::new("aio"),
+            Path::new("my apps"),
+            "notes",
+            "dmg",
+            Some("0.1.345"),
+            None,
+            false,
+        );
         assert_eq!(
             s.lines().collect::<Vec<_>>(),
             [
@@ -341,12 +358,14 @@ mod tests {
                 "cargo build --release -p aio-rs-cli >&2",
                 r#"cd "$root"/'my apps'"#,
                 "rm -rf dist",
-                r#""$root"/'aio'/target/release/ax build 'notes' --targets 'dmg'"#,
+                // The copy has no `.git`: the version resolved here, not `0.1.0-nogit`.
+                r#""$root"/'aio'/target/release/ax build 'notes' --targets 'dmg' --app-version '0.1.345'"#,
                 "echo --aio-dist--",
                 "ls -1A dist",
             ]
         );
-        let s = script("b", Path::new("aio"), Path::new("w"), "it's", "desktop", Some("macos"), true);
+        // A dirty build's version is no `--app-version`: none asked.
+        let s = script("b", Path::new("aio"), Path::new("w"), "it's", "desktop", None, Some("macos"), true);
         assert!(s.contains("build 'it'\\''s' --targets 'desktop' --platforms 'macos' --smoke\n"), "{s}");
     }
 

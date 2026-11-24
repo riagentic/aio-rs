@@ -7,6 +7,251 @@ version may break things.
 
 ## [Unreleased]
 
+### Security
+
+- `ax upgrade` checks the release's `SHA256SUMS` against its signature
+  (`SHA256SUMS.sig`) and aio-rs's release key, pinned in ax
+  (`crates/aio-cli/release.pub`), before it runs the install script: a
+  release with no signature, or another key's, is refused. (The SHA-256
+  check alone proved the files matched the list, not who made the list.)
+  Releases before 0.5.0 are unsigned: `ax upgrade` to one of them from an
+  ax that pins a key refuses; its `install.sh` still installs it.
+- A release is never unsigned: the release workflow stops on a tag without
+  the `AIO_RELEASE_KEY` secret or a pinned key (a dry run without the
+  secret, as a fork's pull request, is unsigned), and `ax release --aio`
+  refuses a key that isn't the pinned one (CONTRIBUTING.md, Signing).
+- chrono, unmaintained (RUSTSEC-2026-0543), is gone. The runtime keeps
+  its own calendar and asks the OS for the local offset (`localtime_r`,
+  Windows' time zone API, the page's `Date`): no date crate in an app,
+  and cron's DST rules checked against the tz database in its tests.
+  `ax` reads dates with jiff.
+- An app's update follows a key roster from a release newer than itself
+  only: an old manifest served again (its roster still vouched by a
+  trusted key) brought back a key a later roster had dropped, so a leaked
+  key could sign the next release again.
+- A network call its `#[client]` rule refuses no longer supersedes a
+  running `#[mode(newest)]` call of the same method: before, any caller
+  could abort an admin's call with one refused call (`DispatchAborted`).
+- The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
+  out or a running `#[mode(first)]` call is joined: a caller the state now
+  refuses (an `allow` rule) no longer gets the answer it was let in for.
+
+### Added
+
+- `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
+  it, or with an offset) as ms since the epoch.
+
+### Changed
+
+- **Breaking: `aio::update` fails with `UpdateError`**, not `String`
+  (`#[non_exhaustive]`: `BadSignature`, `UntrustedKey`, `Refused`,
+  `Http { status, .. }`, `NoPatch`, `KeyFormat`, `Io`, …), each one's text
+  as before. `check`, `check_served`, `follow`, `patch_for`, `sign`,
+  `sign_with`, `sign_patches`, `roster`, `keygen`, `public_key`,
+  `ssh_fingerprint`, `allowed_signers`, `git_ref_commit`, `local_data` and
+  `Runtime::{check, apply}` return it. An app's own `Runtime` returns
+  `UpdateError::Other(why)` (an `io::Error` converts with `?`); a caller
+  that wants the old text writes `.map_err(|e| e.to_string())`. A veto
+  (`can_apply`, `veto`) is still the app's own `String`.
+- **Breaking: `aio::http::CookieOpts::expires` is a `SystemTime`**, not
+  chrono's `DateTime<Utc>`; **`aio::cron::Cron::next_in` is gone** (chrono's
+  `TimeZone` in its signature): `Cron::next` follows `cron::set_local`.
+- Every crate declares `rust-version = "1.98"`, the toolchain
+  `rust-toolchain.toml` pins (`./ci.sh` keeps them the same).
+- Every `unsafe` block says why it is sound (`// SAFETY:`), and clippy's
+  `undocumented_unsafe_blocks` keeps it so (`[workspace.lints]`).
+- `#[component]` and `#[derive(Props)]` point their misuse errors at the
+  token at fault, not the whole item; `#[methods]` on a type without a
+  name is an error, never a panic in the macro.
+
+### Fixed
+
+- A memo of a memo could still glitch: an effect older than the outer
+  memo, reading it and a signal the inner one follows, ran once with the
+  outer memo's old value and once more with the new one. A read now
+  first makes each memo it depends on that waits, however deep.
+- A whole backup (`ax backup`, `backup_every`) of a data dir holding a
+  file over 1 GB failed with "string or blob too big": SQLite holds at
+  most 1e9 bytes in one value. A file is now kept in 256 MB parts, read
+  and restored a part at a time instead of whole in memory, and a
+  restored store no longer keeps the files' space. A backup holding a
+  file over 256 MB needs this version to restore.
+- `db::Select` put table and column names into its statement unquoted,
+  so a plain name that is also an SQL keyword (`order`, `group`,
+  `limit`) made a syntax error. Every name is quoted now.
+- The vitals hint for a backed-up effect queue missed a queue of exactly
+  the frozen threshold (1000 by default), which is already graded frozen.
+- A span in `aio.toml` too long to count (`keep = "213503982334602d"`)
+  overflowed: a panic in a debug build (the build's config check), and
+  in a release build a wrapped value (some hours) taken silently. It is
+  an error.
+- Problem reports took two problems alike in their first 200 characters
+  as one: the same long panic text at two places (where it was comes
+  after the text) was reported once, the second place never. A problem
+  is the same only when its whole message is.
+- `db.execute("SAVEPOINT …")` (or `db.query`) outside a transaction was
+  run, and SQLite takes it there as a BEGIN: the next callers' writes
+  were acknowledged but held uncommitted in it, a `ROLLBACK TO` undid
+  them, and `db.transaction` failed. A statement that leaves a
+  transaction open outside one is rolled back and refused; nested in
+  `db.transaction`, a savepoint is fine.
+- One line on stderr that wasn't UTF-8 (a child process's, a C
+  library's) ended the log copier: nothing more reached `app.log` or the
+  terminal, and the next write to stderr panicked (then aborted in the
+  panic hook). Such a line is logged as best it reads, and the copier
+  goes on.
+- An empty `data/sync.token` (a write cut short by a crash, a file
+  blanked by hand) was taken as the app key: the empty key, which a
+  request shows by `?token=` or an empty bearer, so anyone reaching the
+  app was let in. An empty file gets a new random key.
+- `Command::run` with a timeout dropped what the program wrote when the
+  clock ran out while its output was still being read (the program had
+  exited; a child of its own still held its stdout): `stdout` came back
+  empty. What it wrote is kept, as the docs say.
+- `[server] local_peers = false` was ignored by an app whose store is in
+  memory (`[data] persist = false`, `--no-persist`): a release build
+  opened its local door all the same, and this user's other processes
+  could reach it. It opens none, as with a store on disk.
+- A multiplexed socket whose session ended (signed out, revoked, a token
+  that no longer resolves) kept the client slots its links beyond the
+  first had taken: each such sign-out of a client with several cells
+  open leaked them, until the server turned everyone away. They are given
+  back however the socket ends.
+- A multiplexed socket's frame with a non-ASCII character after its
+  channel number (`1é`) panicked the server's task for that socket
+  instead of being refused, and the client slots it held were never given
+  back: enough such frames from any admitted client and the server turned
+  everyone away ("too many clients"). It is not a frame.
+- A transaction with `conflict = "warn"` that lengthened a text (256
+  bytes or more) committed only its tail: when another call had changed
+  that text meanwhile, the result was the other call's text with this
+  one's tail glued on, neither value, though the warning says it commits
+  over the other write. It sets the text as written.
+- `lifecycle::terminate`, `alive` and `wait_gone` took pid 0 as a
+  process, but to `kill` it is the caller's own process group: a
+  `"pid": 0` in a damaged `health.json` made `ax stop` signal (or
+  SIGKILL) itself and its shell job. pid 0 is no process.
+- Two spellings of one place (`/caf%c3%a9` and `/café`, `%2D` and `-`, a
+  query's `'` and the `%27` a browser makes of it) were two `Loc`s,
+  though the docs say they are equal: going where the app already was
+  added a Back step, and the browser's Back to such a place replaced the
+  page in history instead of stepping back (Forward was lost). A `Loc`
+  spells its escapes one way.
+- A route param filled into a link (`fill`, `routes!`'s `href()`) kept a
+  `\`, `.` or `..` as written, and going there read it as a `/` or a
+  step: `/u/a\b` matched no user, `..` led to `/`, and a slug of
+  `\evil.com` made `/\evil.com`, a link off the app (opened in a new
+  tab). Such a value is one segment, escaped, and comes back as it was.
+- A mailed verification or password-reset token verified whatever email
+  the account had when it was spent: after `Auth::set_email`, an old
+  token marked the new, never-mailed address verified. A token proves
+  the address it went to, and only while that is still the account's.
+- Pairing on a dual-stack listener (`[::]`) counted every IPv4 client
+  (`::ffff:a.b.c.d`) as one address: 8 wrong PINs from one host locked
+  out every IPv4 device, and 2 open exchanges were shared by all of
+  them. An IPv4 client is its own address, as sign-in budgets have it.
+- An account signed in by OpenID Connect was looked up by its id
+  normalized (NFC, trimmed) but kept exactly: a `sub` spelled differently
+  (a decomposed accent, a trailing space) found another account and was
+  signed in as it, with its role and its email overwritten; a `sub` not
+  in NFC signed in once, then never again ("user exists"). An external
+  id is exact, as a provider's `sub` is.
+- A browser's session cookie never slid with its session: a session used
+  past half its life is renewed on the server, but the cookie kept the
+  life it was given at sign-in, so the browser dropped it and a user
+  active every day was signed out after `[accounts] session` all the
+  same. A renewed session's cookie is sent again with its new life.
+- A form from a JSON Schema refused a required nullable field (Zod's
+  `.nullable()`, which is `required`) when left empty or null, with
+  "Required". It is null, as Zod has it.
+- A form from a JSON Schema refused a typed-in member of an `enum` with no
+  `type` that isn't a string (Valibot's `picklist([1, 2])`: "2" was not
+  one of them). The text is the member it spells.
+- A cassette numbered repeated calls (equal arguments) as they finished,
+  but replays them as they start: calls that overlapped got each other's
+  answers on replay. They are numbered as they start.
+- A cassette keyed a call whose arguments hold a hash map in that map's
+  order, which changes with each process: a tape recorded in one run
+  failed in the next ("no recorded call"). A map's entries key in sorted
+  order; a tape recorded before is read the same way.
+- An async method's call replied to, whose end then went with a dropped
+  link, now fails with `ConnectionLost` as the link drops (native and
+  web): before, `ask`/`stream`'s answer never came, `call_confirmed`
+  waited out its ceiling (or forever) saying it stayed queued, and its
+  piece handler was kept.
+- A side channel whose receiver stopped reading (a frozen tab) is let go
+  10 s after its handler returns: before, its writer, socket and up to
+  4 MB of queue were kept forever.
+- A `cron` schedule in local time searched from inside the hour that
+  repeats when clocks go back (an app started, or woken, at 02:10 CET on
+  the night of the change) got the first 02:30, already past: it fired at
+  once, and again on every pass, for up to an hour. That wall time has
+  been: the next run is the next day's.
+- `[history] keep`: after a cell's version upgrade, the boot's fold of
+  history older than `keep` replayed across the upgrade and refused the
+  boot ("event N is from before the upgrade"). It now folds at the
+  upgrade's snapshot.
+- An older build on a newer build's data (aio's downgrade) folded its
+  history into a snapshot of its own version, so the newer build's fields
+  came back as defaults on roll-forward. A fold now leaves a snapshot of
+  another version as it is.
+- A schedule cancelled or moved by an earlier one due in the same batch
+  (after a sleep or a restart) still fired once. It no longer does.
+- The README and the aio-vs-aio-rs page installed and named 0.4.0;
+  `scripts/docs-check` now holds them to the workspace's version.
+- `call_confirmed` whose reply went with a dropped link returned
+  `Ok(null)` when its re-send was answered: the server ran it before and
+  its answer is gone. It now fails with `ran before …` (`ConnectionLost`).
+- A call made just as a copy's link came back could miss both the queue
+  that link took and the link itself: it waited, unsent, for the next
+  reconnect (`Syncing`, `call_confirmed` timing out).
+- A `#[cell(transaction)]` async call re-sent while it awaited (its reply
+  lost with a link) ran a second time, side effects and all, and its
+  caller got the second run's conflict or storage error. The re-send now
+  joins the running call and gets its end.
+- air: a `memo` read after a write it follows, in the same handler, batch
+  or effect, gave its old value. A memo waiting to run again is made on
+  read (as AIR's `computed`).
+- air: an effect or hole older than a memo it reads (a `GlobalMemo` made
+  on its first read) ran once with the memo's old value, then again.
+- air: a `Prop` or attribute given an expression that reads state ran it
+  twice at mount. It runs once.
+- air: an error thrown by an `ErrorBoundary`'s own fallback showed a blank
+  boundary (or looped to the 1000-round panic); it goes to the boundary
+  above.
+- aio's journal replay read the watermark from the store only: an older
+  aio's, kept in `<journal>.wm`, was ignored and the snapshot's calls ran
+  twice. The higher of the two holds, as in aio.
+- A journal call stamped with another version (`"v"`) ran through the new
+  method on migrated state. It is skipped and said, as aio skips it (an
+  older stamp only for a cell with `migrate`).
+- `on_journal`'s `Replay::As` for another aio cell's call refused the boot
+  of a port cell lacking that method; it is now left to that cell.
+  `aio::compat::data::replaying()` names the port cell asking.
+- `scatter` moved `./data.db.journal` to `<data>/journal` beside a store
+  of another name, where replay never looks: it now lands at
+  `<store>.journal`.
+- A `#[table]` with a composite key, or id-less rows, collapsed rows that
+  share a key: removed rows stayed and came back at boot. Such tables are
+  written whole.
+- A row removed from a `#[table]` whose key column has no type stayed
+  (its key bound as text). The key is bound as stored.
+- Updates with `auto = true`: a release the user dismissed was still
+  staged by the next check and installed at the next start. It is now
+  neither.
+- Updates: a release staged on the old channel (or a prerelease no longer
+  followed) installed at the next start after `set_channel`. A start now
+  installs only one of the channel it follows.
+- `ax build` of a macOS target over ssh built it as `M.m.0-nogit.<hash>`
+  (the copy has no `.git`), so `ax release --no-build` found it "not
+  built". The Mac now builds the version resolved here.
+- The release workflow of an `ax create --aio` app repointed its
+  `Cargo.toml`s and then refused to release the `-dirty` build. The edits
+  are now hidden from git (`--skip-worktree`).
+- An `aio.toml` edit under `ax dev` was hot-patched with the old build's
+  features (an added `[updates] url` left the updater off). It now
+  rebuilds, with the features it turns on.
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

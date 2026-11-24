@@ -300,10 +300,10 @@ fn timed(rows: &mut Vec<serde_json::Value>, read: &[(String, serde_json::Value)]
     for (cell, v) in read {
         for e in v["refused"].as_array().into_iter().flatten() {
             let method = e["call"].as_str().and_then(|c| c.strip_prefix(cell.as_str())?.strip_prefix('.'));
-            let at = e["at"].as_str().and_then(|a| chrono::DateTime::parse_from_rfc3339(a).ok());
+            let at = e["at"].as_str().and_then(|a| a.parse::<jiff::Timestamp>().ok());
             if let (Some(method), Some(at)) = (method, at) {
                 rows.push(serde_json::json!({
-                    "at": at.timestamp_millis(), "cell": cell, "method": method, "ms": e["ms"], "refused": e["refused"],
+                    "at": at.as_millisecond(), "cell": cell, "method": method, "ms": e["ms"], "refused": e["refused"],
                 }));
             }
         }
@@ -831,7 +831,7 @@ fn new_report(t: &Target, title: &str, json: bool) -> Out {
                 args: false,
             };
             let at = now_ms();
-            let id = format!("{}-ax", chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ"));
+            let id = format!("{}-ax", jiff::Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S-%3fZ"));
             let logs: Vec<String> =
                 log_lines(&t.plan.logs, aio::report::LOG_LINES).unwrap_or_default().lines().map(String::from).collect();
             let x = aio::report::Context {
@@ -1646,7 +1646,7 @@ fn run(args: &[String]) -> Out {
             let t = t(app)?;
             let out = match file.first() {
                 Some(f) => PathBuf::from(f),
-                None => PathBuf::from(format!("{}-{}.png", t.id, chrono::Utc::now().format("%Y%m%d-%H%M%S"))),
+                None => PathBuf::from(format!("{}-{}.png", t.id, jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S"))),
             };
             let base = match (value("--check"), value("--update")) {
                 (Some(_), Some(_)) => return Err("--check and --update are opposites: pick one".into()),
@@ -2597,7 +2597,7 @@ mod tests {
                 { "at": "2026-10-28T10:00:01.000Z", "call": "boardx.clear", "ms": 0.1, "refused": "another cell's" },
             ] }),
         )];
-        let at = chrono::DateTime::parse_from_rfc3339("2026-10-28T10:00:00Z").unwrap().timestamp_millis();
+        let at = "2026-10-28T10:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
         let mut rows = vec![row(7, at), row(8, at + 5_000)];
         timed(&mut rows, &read, false);
         assert_eq!((rows.len(), &rows[0]["ms"], rows[1].get("ms")), (2, &serde_json::json!(0.5), None));

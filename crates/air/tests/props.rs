@@ -8,6 +8,7 @@ use std::cell::{Cell, RefCell};
 thread_local! {
     static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static BODIES: Cell<u32> = const { Cell::new(0) };
+    static CALLS: Cell<u32> = const { Cell::new(0) };
 }
 
 fn said() -> Vec<String> {
@@ -120,6 +121,31 @@ fn a_prop_follows_what_it_was_given_and_the_body_runs_once() {
     assert_eq!(p.text("v"), "b (2)", "a signal given to a Prop follows");
     assert_eq!(p.attr("v", "title").as_deref(), Some("many"), "a Prop<Option> takes a value");
     assert_eq!(BODIES.get(), 1, "no body re-ran");
+}
+
+#[test]
+fn a_live_prop_or_attribute_is_worked_out_once_at_mount() {
+    let mut p = TestPage::mount(|| {
+        let name = signal(|| "a".to_string());
+        rsx! {
+            Label { value: { CALLS.set(CALLS.get() + 1); name.get() } }
+            button { "data-t": "name", onclick: move |_| name.set("b".into()), "name" }
+        }
+    });
+    assert_eq!((p.text("v"), CALLS.get()), ("a (0)".into(), 1), "a Prop: once");
+    p.click("name");
+    assert_eq!((p.text("v"), CALLS.get()), ("b (0)".into(), 2));
+    let mut p = TestPage::mount(|| {
+        let on = signal(|| false);
+        rsx! {
+            Badge { "data-t": "a", text: "one",
+                "aria-pressed": { CALLS.set(CALLS.get() + 10); if on.get() { "true" } else { "false" } } }
+            button { "data-t": "flip", onclick: move |_| on.toggle(), "flip" }
+        }
+    });
+    assert_eq!((p.attr("a", "aria-pressed").as_deref(), CALLS.get()), (Some("false"), 12), "an attribute: once");
+    p.click("flip");
+    assert_eq!((p.attr("a", "aria-pressed").as_deref(), CALLS.get()), (Some("true"), 22));
 }
 
 #[test]

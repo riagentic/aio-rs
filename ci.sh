@@ -21,6 +21,9 @@ web_skip=""
 ndk=$(ls -d "${ANDROID_HOME:-$HOME/Android/Sdk}"/ndk/* 2>/dev/null | sort -V | tail -1)
 if on lint; then
 cargo fmt --all --check
+# The MSRV the crates declare is the toolchain CI builds with (rust-toolchain.toml).
+msrv=$(sed -n 's/^channel = "\([0-9]*\.[0-9]*\).*/\1/p' rust-toolchain.toml)
+grep -q "^rust-version = \"$msrv\"" Cargo.toml || { echo "ci: Cargo.toml's rust-version is not rust-toolchain.toml's $msrv" >&2; exit 1; }
 # Every crate listed with its reason, no unlisted duplicate, no set above its ceiling (deps.toml).
 scripts/deps-check
 scripts/slim-metrics --check

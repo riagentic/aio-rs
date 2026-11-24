@@ -2298,7 +2298,13 @@ impl<T: Cell> Store<T> {
     /// [`Self::fire_due`], re-arming without a call the schedules `skip` names.
     pub(crate) fn fire_due_but(&mut self, now: i64, skip: impl Fn(&Due) -> bool) -> Result<usize, Error> {
         let due: Vec<Due> = self.schedules()?.into_iter().filter(|d| d.due <= now).collect();
+        let mut fired = 0;
         for d in &due {
+            // An earlier one in this batch may have cancelled or moved it.
+            if !self.armed(d)? {
+                continue;
+            }
+            fired += 1;
             if skip(d) {
                 rearm::<T>(&self.db.conn(), d, now)?;
                 continue;
@@ -2315,7 +2321,16 @@ impl<T: Cell> Store<T> {
                 rearm::<T>(&self.db.conn(), d, now)?;
             }
         }
-        Ok(due.len())
+        Ok(fired)
+    }
+
+    /// Is `d` still set as it was read (same key, same due)?
+    fn armed(&self, d: &Due) -> Result<bool, Error> {
+        Ok(self.db.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM sched WHERE cell = ?1 AND key = ?2 AND due = ?3)",
+            params![T::ID, d.key, d.due],
+            |r| r.get(0),
+        )?)
     }
 
     /// Arm the cell's declared schedules (`Cell::SCHEDULES`) as `@<method>`:
@@ -2619,22 +2634,39 @@ impl<T: Cell> Store<T> {
                 r.get(0)
             })?;
         let Some(cut) = cut else { return Ok(0) };
-        let text = snapshot(&self.state_at(cut as u64)?, true)?;
+        let snap: Option<(i64, u32)> = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT seq, v FROM snap WHERE cell = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT 1",
+                params![T::ID, cut],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        // Another version's events between that snapshot (or the floor) and
+        // the cut: an older build's, left before an upgrade.
+        let from = snap.map_or(self.floor()? as i64, |(s, _)| s);
+        let older: bool = self.db.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2 AND seq <= ?3 AND v != ?4)",
+            params![T::ID, from, cut, T::VERSION],
+            |r| r.get(0),
+        )?;
+        // A snapshot of another version (an upgrade, or a newer build's data
+        // under a rollback) or another version's events: they don't replay
+        // in this build, and a snapshot is never rewritten as this build's
+        // (that would drop the newer build's fields). Fold at the snapshot,
+        // as it is, or not at all.
+        let text = match snap {
+            Some((_, v)) if v != T::VERSION => None,
+            _ if older => None,
+            _ => snapshot(&self.state_at(cut as u64)?, true)?,
+        };
         // What is saved of that state can't bring it back whole: fold at the
         // newest snapshot before it instead, which the events after it follow.
-        let cut = match text {
-            Some(_) => cut,
-            None => {
-                let snap: Option<i64> = self.db.conn().query_row(
-                    "SELECT MAX(seq) FROM snap WHERE cell = ?1 AND seq <= ?2",
-                    params![T::ID, cut],
-                    |r| r.get(0),
-                )?;
-                match snap {
-                    Some(s) if s as u64 > self.floor()? => s,
-                    _ => return Ok(0),
-                }
-            }
+        let cut = match (text.is_some(), snap) {
+            (true, _) => cut,
+            (false, Some((s, _))) if s as u64 > self.floor()? => s,
+            _ => return Ok(0),
         };
         let c = self.db.conn();
         let tx = Atomic::new(&c)?;
@@ -2738,13 +2770,16 @@ mod tests {
             out: *mut c_int,
         ) -> c_int {
             let real = REAL.load(SeqCst);
+            // SAFETY: SQLite calls this VFS's xOpen with its own arguments; `real` is the default VFS `count` stored before registering this one, and every built-in VFS has an xOpen.
             let rc = unsafe { ((*real).xOpen.unwrap())(real, name, file, flags, out) };
+            // SAFETY: `file` is the sqlite3_file the real xOpen just filled in (pMethods null when it failed).
             let m = unsafe { (*file).pMethods };
             if rc == ffi::SQLITE_OK && !m.is_null() {
                 let mut t = TABLES.lock().unwrap();
                 let ours = match t.iter().find(|(_, r)| *r == m as usize) {
                     Some((o, _)) => *o,
                     None => {
+                        // SAFETY: `m` is the non-null method table the real VFS set: copied by value.
                         let mut c = unsafe { *m };
                         c.xSync = Some(sync);
                         let o = Box::leak(Box::new(c)) as *const ffi::sqlite3_io_methods as usize;
@@ -2752,6 +2787,7 @@ mod tests {
                         o
                     }
                 };
+                // SAFETY: `file` is SQLite's, valid for this call; `ours` is a leaked (never freed) copy of its table.
                 unsafe { (*file).pMethods = ours as *const ffi::sqlite3_io_methods };
             }
             rc
@@ -2759,14 +2795,17 @@ mod tests {
 
         unsafe extern "C" fn sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
             crate::paths::SYNCS.with(|n| n.set(n.get() + 1));
+            // SAFETY: SQLite calls xSync with a file this VFS opened, so pMethods is one of `ours`.
             let ours = unsafe { (*file).pMethods } as usize;
             let real = TABLES.lock().unwrap().iter().find(|(o, _)| *o == ours).map(|(_, r)| *r).unwrap();
+            // SAFETY: `real` is the system table `ours` was copied from (TABLES pairs them); built-in tables have an xSync. A miss panics: an abort across this extern "C" fn, in a test only.
             unsafe { ((*(real as *const ffi::sqlite3_io_methods)).xSync.unwrap())(file, flags) }
         }
 
         /// The disk syncs `f` made on this thread, SQLite's and aio-rs's.
         pub(super) fn count(f: impl FnOnce()) -> u32 {
             static ONCE: Once = Once::new();
+            // SAFETY: once per process: the default VFS is copied (never mutated in place) and the leaked copy registered as the default, as SQLite's VFS API requires (a pointer that lives forever).
             ONCE.call_once(|| unsafe {
                 let real = ffi::sqlite3_vfs_find(std::ptr::null());
                 REAL.store(real, SeqCst);

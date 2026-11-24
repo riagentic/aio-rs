@@ -2,10 +2,10 @@
 name = "aio-rs-air"
 description = "air: aio-rs's fine-grained renderer (views run once, holes follow signals)"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories = ["gui", "web-programming"]
@@ -31,3 +31,6 @@ dev = []
 [[test]]
 name = "fault"
 required-features = ["fault"]
+
+[lints]
+workspace = true

@@ -548,6 +548,11 @@ pub fn shell_features(meta: &serde_json::Value, pkg: &str, cfg: &aio::config::Co
         let d = deps.iter().find(|d| d["name"] == "aio-rs-shell" && d["kind"].is_null())?;
         Some(d["rename"].as_str().unwrap_or("aio-rs-shell").to_string())
     });
+    features_of(shell.as_deref(), cfg, desktop)
+}
+
+/// [`shell_features`], by the name the package gives the shell (pure).
+pub fn features_of(shell: Option<&str>, cfg: &aio::config::Config, desktop: bool) -> Vec<String> {
     let wanted = [("updates", cfg.updates.url.is_some()), ("native-splash", desktop && cfg.build.splash.is_some())];
     shell.map_or_else(Vec::new, |s| wanted.iter().filter(|w| w.1).map(|(f, _)| format!("{s}/{f}")).collect())
 }

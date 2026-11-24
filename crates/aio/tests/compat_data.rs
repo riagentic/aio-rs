@@ -1703,6 +1703,23 @@ fn a_ports_hook_runs_renamed_calls_and_skips_what_it_folded() {
     assert_eq!(s.state().posts.len(), 11);
     drop(s);
     assert_eq!(kv(&db)[WM], json!(12), "past both: aio replays neither again");
+    // Another cell's call the hook renames is that cell's: left to it.
+    let (_d, db) = crashed();
+    std::fs::write(db.with_file_name("journal"), lines[0]).unwrap();
+    let s = Store::<Tally>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().n, 21);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(10), "the watermark is the inbox's to move");
+    // A port cell with a method of that name too: the hook says whose it is.
+    on_journal(|cell, method, args| match (cell, method, aio::compat::data::replaying()) {
+        ("inbox", "addPost", Some("inbox")) => Replay::As("post".into(), args.clone()),
+        _ => Replay::Refuse,
+    });
+    let s = Store::<Twin>::open_aio(&db, APP).unwrap();
+    assert!(s.state().posts.is_empty());
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(10));
+    assert_eq!(Store::<Inbox>::open_aio(&db, APP).unwrap().state().posts.last().unwrap(), "renamed");
     // A name the hook gives that the cell lacks refuses, the file kept.
     on_journal(|cell, method, _| match (cell, method) {
         ("inbox", "addPost") => Replay::As("nope".into(), json!([])),
@@ -1713,4 +1730,159 @@ fn a_ports_hook_runs_renamed_calls_and_skips_what_it_folded() {
     let before = dump(&db);
     assert!(Store::<Inbox>::open_aio(&db, APP).err().unwrap().0.contains("the port named `nope`"));
     assert_eq!(dump(&db), before);
+}
+
+/// A port cell of its own with a method named as inbox's.
+#[cell(persist, id = "twin", version = 0)]
+pub struct Twin {
+    posts: Vec<String>,
+}
+
+#[methods]
+impl Twin {
+    pub fn post(&mut self, t: String) {
+        self.posts.push(t);
+    }
+}
+
+#[test]
+fn an_older_aios_watermark_file_keeps_what_the_snapshot_holds_from_running_twice() {
+    // aio before the watermark moved into the store kept it in `<journal>.wm` only.
+    let (_d, db) = crashed();
+    let c = rusqlite::Connection::open(&db).unwrap();
+    c.execute("DELETE FROM aio_kv WHERE k = ?1", [WM]).unwrap();
+    drop(c);
+    std::fs::remove_file(db.with_file_name("journal.base")).unwrap();
+    let lines: Vec<String> = (1..=12)
+        .map(|i| format!(r#"{{"seq":{i},"type":"inbox:post","payload":{{"args":["e{i}"]}},"ts":1}}"#))
+        .collect();
+    std::fs::write(db.with_file_name("journal"), lines.join("\n")).unwrap();
+    std::fs::write(db.with_file_name("journal.wm"), "10").unwrap();
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().posts.len(), 12, "{:?}", s.state().posts);
+    assert_eq!(s.state().posts[10..], ["e11", "e12"]);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(12));
+}
+
+/// aio's `inbox` ported at version 1 with a `migrate`: an older stamp's
+/// call ran through the old method, on the old shape.
+#[cell(persist, id = "inbox", version = 1, migrate = cents)]
+pub struct Cents {
+    posts: Vec<String>,
+}
+
+fn cents(old: Value, _: u32) -> Result<Cents, String> {
+    serde_json::from_value(old).map_err(|e| e.to_string())
+}
+
+#[methods]
+impl Cents {
+    pub fn post(&mut self, t: String) {
+        self.posts.push(t);
+    }
+}
+
+#[test]
+fn a_journal_call_stamped_with_another_version_is_skipped_as_aio_skips_it() {
+    let line = |seq: u32, t: &str, v: u32| {
+        format!(r#"{{"seq":{seq},"type":"inbox:post","payload":{{"args":["{t}"]}},"ts":1,"v":{{"inbox":{v}}}}}"#)
+    };
+    let lines = [line(11, "old", 0), line(12, "now", 1), line(13, "newer", 2)].join("\n");
+    // A cell that migrates: an older stamp (and a newer one) is skipped.
+    let (_d, db) = crashed();
+    std::fs::write(db.with_file_name("journal"), &lines).unwrap();
+    let s = Store::<Cents>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().posts[10..], ["now"]);
+    drop(s);
+    assert_eq!(kv(&db)[WM], json!(13), "past every entry it read");
+    // One that converts nothing keeps the stored shape: an older stamp replays.
+    let (_d, db) = crashed();
+    std::fs::write(db.with_file_name("journal"), &lines).unwrap();
+    let s = Store::<Inbox>::open_aio(&db, APP).unwrap();
+    assert_eq!(s.state().posts[10..], ["old", "now"]);
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Pair {
+    a: String,
+    b: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Note {
+    id: Option<i64>,
+    body: String,
+}
+
+/// Rows a single key column can't tell apart: a composite key, id-less rows.
+#[cell(persist, id = "pairs", version = 0)]
+pub struct Pairs {
+    #[table("pairs", columns = "a TEXT, b TEXT, PRIMARY KEY(a, b)")]
+    pairs: Vec<Pair>,
+    #[table("notes", columns = "id INTEGER PRIMARY KEY, body TEXT NOT NULL")]
+    notes: Vec<Note>,
+}
+
+#[methods]
+impl Pairs {
+    pub fn pair(&mut self, a: String, b: String) {
+        self.pairs.push(Pair { a, b });
+    }
+    pub fn unpair_last(&mut self) {
+        self.pairs.pop();
+    }
+    pub fn note(&mut self, body: String) {
+        self.notes.push(Note { id: None, body });
+    }
+    pub fn drop_first_note(&mut self) {
+        self.notes.remove(0);
+    }
+}
+
+#[test]
+fn a_table_mirrors_rows_that_share_a_key() {
+    let (_d, p) = aio_file(&[]);
+    let mut s = Store::<Pairs>::open_aio(&p, "app").unwrap();
+    s.call(&By::Test, "pair", json!(["1", "x"])).unwrap();
+    s.call(&By::Test, "pair", json!(["1", "y"])).unwrap();
+    s.call(&By::Test, "unpair_last", Value::Null).unwrap();
+    assert_eq!(table(&p, "pairs"), [r#"Text("1")|Text("x")"#]);
+    s.call(&By::Test, "note", json!(["a"])).unwrap();
+    s.call(&By::Test, "note", json!(["b"])).unwrap();
+    s.call(&By::Test, "drop_first_note", Value::Null).unwrap();
+    assert_eq!(table(&p, "notes").len(), 1, "{:?}", table(&p, "notes"));
+    drop(s);
+    let s = Store::<Pairs>::open_aio(&p, "app").unwrap();
+    assert_eq!(s.state().pairs, [Pair { a: "1".into(), b: "x".into() }]);
+    assert_eq!(s.state().notes.iter().map(|n| n.body.as_str()).collect::<Vec<_>>(), ["b"]);
+}
+
+/// A key column declared without a type (BLOB affinity keeps 5 a number).
+#[cell(persist, id = "loose", version = 0)]
+pub struct Loose {
+    #[table("contacts", columns = "id PRIMARY KEY, name TEXT NOT NULL, email TEXT")]
+    contacts: Vec<Contact>,
+}
+
+#[methods]
+impl Loose {
+    pub fn add(&mut self, id: i64, name: String) {
+        self.contacts.push(Contact { id, name, email: None });
+    }
+    pub fn drop_first(&mut self) {
+        self.contacts.remove(0);
+    }
+}
+
+#[test]
+fn a_row_removed_from_an_untyped_key_column_is_gone_from_the_table() {
+    let (_d, p) = aio_file(&[]);
+    let mut s = Store::<Loose>::open_aio(&p, "app").unwrap();
+    s.call(&By::Test, "add", json!([5, "Ada"])).unwrap();
+    s.call(&By::Test, "add", json!([6, "Bo"])).unwrap();
+    s.call(&By::Test, "drop_first", Value::Null).unwrap();
+    assert_eq!(table(&p, "contacts"), [r#"Integer(6)|Text("Bo")|Null"#]);
+    drop(s);
+    assert_eq!(Store::<Loose>::open_aio(&p, "app").unwrap().state().contacts.len(), 1);
 }

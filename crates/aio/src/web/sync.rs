@@ -885,6 +885,16 @@ async fn pump<T: Cell>(r: Remote<T>, mut link: Link) {
     }
     r.inner.online.store(false, Ordering::SeqCst);
     *lock(&r.inner.out) = None;
+    // Replied to, its end to come on this link: that end went with it.
+    let sent: std::collections::HashSet<String> = lock(&r.inner.copy).pending.iter().map(|q| q.op.clone()).collect();
+    let gone: Vec<_> = {
+        let mut ends = lock(&r.inner.ends);
+        let ops: Vec<String> = ends.keys().filter(|op| !sent.contains(*op)).cloned().collect();
+        ops.into_iter().filter_map(|op| ends.remove(&op)).collect()
+    };
+    for end in gone {
+        end.send(Err(crate::Rejected::lost(format!("{}: ran; its end went with that link", end.method()))));
+    }
     r.tell();
 }
 

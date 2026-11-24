@@ -240,7 +240,10 @@ impl<T: Cell> Source<T> {
                     if matches!(mode, Mode::ClientServer | Mode::Server) {
                         s.serve_app(cfg, dirs, http)?;
                     }
-                    s.serve_door(dirs, &door);
+                    // `[server] local_peers = false`: a release build opens no door, in memory too.
+                    if cfg.server.local_peers || crate::door::OPERATOR {
+                        s.serve_door(dirs, &door);
+                    }
                     return Ok(s);
                 }
                 if let Some(app) = &dirs.port_of {

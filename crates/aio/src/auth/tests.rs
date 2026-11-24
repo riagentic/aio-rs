@@ -385,3 +385,19 @@ fn ids_normalize_as_icu_did_over_the_corpus() {
     assert_eq!(nfc_digest(|s| s.nfc().collect()), ICU_NFC_DIGEST);
     assert_eq!(normalize(" Ame\u{301}lie\t"), "Am\u{e9}lie");
 }
+
+/// A provider's `sub` is exact (OIDC Core): an external account is found
+/// by the id it was made with, never another's that normalizes the same.
+#[test]
+fn an_external_id_is_looked_up_exactly() {
+    let (a, _) = auth(Policy::default());
+    a.create_external("oidc:id.example:\u{e9}", "admin", None).unwrap();
+    assert!(a.user("oidc:id.example:e\u{301}").unwrap().is_none(), "another sub, not the admin");
+    a.create_external("oidc:id.example:e\u{301}", "user", None).unwrap();
+    assert_eq!(a.user("oidc:id.example:e\u{301}").unwrap().unwrap().role, "user");
+    a.create_external("oidc:id.example:bob ", "user", None).unwrap();
+    assert!(a.user("oidc:id.example:bob ").unwrap().is_some(), "found again at the next sign-in");
+    assert!(a.user("oidc:id.example:bob").unwrap().is_none());
+    // A local id still can't be one.
+    assert!(a.create(" oidc:id.example:x", PW, None).is_err());
+}

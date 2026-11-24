@@ -2,10 +2,10 @@
 name = "aio-rs"
 description = "aio-rs core: cells, the event log, replay and time travel"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -35,6 +35,8 @@ curve25519-dalek = { version = "4", default-features = false, optional = true }
 base64 = "0.23"
 # Account ids are one key however they are typed (NFC).
 unicode-normalization = { version = "0.1", default-features = false }
+# A cookie's `Expires` (IMF-fixdate), as axum's hyper writes its `Date`.
+httpdate = { version = "1", optional = true }
 # HTTP answers compressed as the client asks (`aio::http::encoding`).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"], optional = true }
 brotli = { version = "8", optional = true }
@@ -43,7 +45,6 @@ ureq = { version = "3", default-features = false, features = ["rustls"], optiona
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"], optional = true }
 # Ids: their bits from `aio::random_bytes` (ring, or the page's crypto), so no getrandom.
 uuid = { version = "1", features = ["serde"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 imbl = { version = "7", features = ["serde"], optional = true }
 
 # air, aio-rs's renderer (docs/design/air.md): the views, the kit and TestUi (`kit`).
@@ -60,7 +61,7 @@ default = []
 outbound = ["dep:ureq"]
 # Sync and its server (`aio::sync`, `aio::http`, server fns, accounts'
 # doors), plain HTTP and WebSocket.
-server = ["dep:axum", "dep:tokio-tungstenite", "dep:percent-encoding", "dep:flate2", "aio-config/png"]
+server = ["dep:axum", "dep:httpdate", "dep:tokio-tungstenite", "dep:percent-encoding", "dep:flate2", "aio-config/png"]
 # The server over TLS, pairing (PIN, CPace) and LAN discovery.
 tls = ["server", "dep:rustls", "dep:tokio-rustls", "dep:time", "dep:curve25519-dalek", "dep:rcgen", "dep:socket2", "tokio-tungstenite/__rustls-tls"]
 # Sign-in with an identity provider (`aio::auth::oidc`).
@@ -107,6 +108,8 @@ toml = { version = "1", default-features = false, features = ["std", "parse", "s
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tempfile = "3"
+# The tz database the calendar's and cron's tests check against.
+jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
@@ -211,7 +214,6 @@ tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 
 # The browser build: the page's clock, randomness, socket and storage.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-chrono = { version = "0.4", default-features = false, features = ["wasmbind"] }
 js-sys = "0.3"
 # `aio::sha256` in the page (natively it is ring's).
 sha2 = "0.10"
@@ -225,7 +227,7 @@ web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "console", "
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Time"] }
 
 [[test]]
 name = "http"
@@ -286,3 +288,6 @@ required-features = ["kit"]
 [[test]]
 name = "compat_peer"
 required-features = ["net", "compat"]
+
+[lints]
+workspace = true

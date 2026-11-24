@@ -1,7 +1,7 @@
 //! aio's `where` objects over [`super::Db`]: a filter, an order and a page,
 //! made into one parameterized `SELECT`. Every value is a parameter (`?`),
 //! never text in the statement; every name (table, column) must be a plain
-//! identifier, so neither can change what the statement does.
+//! identifier, quoted, so neither can change what the statement does.
 use super::{Rows, Sql};
 use crate::Error;
 use serde_json::Value;
@@ -167,13 +167,13 @@ impl Where {
     }
 }
 
-/// `name` if it is a plain identifier (letters, digits, `_`; not first a
-/// digit), else refused: it goes into the statement as it is.
-fn ident(name: &str) -> Result<&str, Error> {
+/// `name` quoted (`"order"`: a keyword is still a name) if it is a plain
+/// identifier (letters, digits, `_`; not first a digit), else refused.
+fn ident(name: &str) -> Result<String, Error> {
     let mut cs = name.chars();
     let ok = cs.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    ok.then_some(name).ok_or_else(|| Error(format!("db: {name:?} is not a plain table or column name")))
+    ok.then(|| format!("\"{name}\"")).ok_or_else(|| Error(format!("db: {name:?} is not a plain table or column name")))
 }
 
 /// Ascending or descending.

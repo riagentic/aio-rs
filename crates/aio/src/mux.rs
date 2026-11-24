@@ -54,7 +54,8 @@ pub(crate) fn encode(chan: u32, f: &Frame) -> String {
 pub(crate) fn decode(t: &str) -> Option<(u32, Frame<'_>)> {
     let at = t.find(|c: char| !c.is_ascii_digit()).filter(|at| *at > 0)?;
     let chan = t[..at].parse().ok()?;
-    let rest = &t[at + 1..];
+    // A non-ASCII char where the kind should be is none of them (no slice inside it).
+    let rest = t.get(at + 1..)?;
     let unhex = |s: &str| -> Option<Vec<u8>> {
         s.len()
             .is_multiple_of(2)
@@ -200,7 +201,16 @@ mod net {
         let mut tasks = tokio::task::JoinSet::new();
         // Links ended lately: their late frames open nothing (a client
         // numbers its links afresh, but their hellos may come in any order).
-        let (mut ended, mut held) = (std::collections::BTreeSet::<u32>::new(), 1usize);
+        let mut ended = std::collections::BTreeSet::<u32>::new();
+        // The slots its links hold, its own first: given back however it
+        // ends, dropped mid-flight too (its session's end drops it).
+        struct Held(Arc<AtomicUsize>, usize);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.fetch_sub(self.1 - 1, Ordering::SeqCst);
+            }
+        }
+        let mut held = Held(open.clone(), 1);
         fn end(ended: &mut std::collections::BTreeSet<u32>, id: u32) {
             ended.insert(id);
             if ended.len() > ENDED {
@@ -234,9 +244,9 @@ mod net {
                                 // Past its first link, each takes a client's slot.
                                 let full = match tasks.len() {
                                     n if n >= MAX_CHANS => Some(MAX_CHANS),
-                                    n if n < held => None,
+                                    n if n < held.1 => None,
                                     _ if open.fetch_add(1, Ordering::SeqCst) < max => {
-                                        held += 1;
+                                        held.1 += 1;
                                         None
                                     }
                                     _ => {
@@ -282,9 +292,9 @@ mod net {
                     if tasks.is_empty() {
                         quiet = tokio::time::Instant::now();
                     }
-                    while held > tasks.len().max(1) {
+                    while held.1 > tasks.len().max(1) {
                         open.fetch_sub(1, Ordering::SeqCst);
-                        held -= 1;
+                        held.1 -= 1;
                     }
                     let end = match &r {
                         Ok(()) => Frame::Close(1000, ""),
@@ -301,7 +311,7 @@ mod net {
         // Each link sees its end; one that doesn't finish soon is dropped.
         drop(chans);
         _ = tokio::time::timeout(Duration::from_secs(1), async { while tasks.join_next().await.is_some() {} }).await;
-        open.fetch_sub(held - 1, Ordering::SeqCst);
+        drop(held);
         r
     }
 
@@ -529,8 +539,45 @@ mod tests {
 
     #[test]
     fn what_isnt_a_frame_is_none() {
-        for t in ["", ":x", "{\"t\":1}", "1", "1x", "1?0", "1?zz", "1!", "1!code why", "4294967296:x", "-1:x"] {
+        for t in [
+            "",
+            ":x",
+            "{\"t\":1}",
+            "1",
+            "1x",
+            "1?0",
+            "1?zz",
+            "1!",
+            "1!code why",
+            "4294967296:x",
+            "-1:x",
+            "1é",
+            "1€x",
+            "12ü?00",
+        ] {
             assert_eq!(decode(t), None, "{t}");
         }
+    }
+
+    /// A socket dropped mid-flight (its session ended, `Doors::serve`'s
+    /// select) gives back every slot its links took beyond its own.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_dropped_socket_gives_back_its_links_slots() {
+        use super::net::{Run, Sends, Takes, serve};
+        use axum::extract::ws::Message as AxMsg;
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        let sink: Sends = Box::pin(futures_util::sink::drain().sink_map_err(|e| match e {}));
+        let frames = ["1:{}", "2:{}", "3:{}"].map(|t| Ok(AxMsg::Text(t.into())));
+        let takes: Takes = Box::pin(futures_util::stream::iter(frames).chain(futures_util::stream::pending()));
+        let run: Run = Arc::new(|_| Box::pin(std::future::pending()));
+        let open = Arc::new(AtomicUsize::new(1)); // the caller's, for the socket
+        let served = serve((sink, takes), run, open.clone(), 10, 1 << 20);
+        let r = tokio::time::timeout(Duration::from_millis(200), served).await;
+        assert!(r.is_err(), "still serving when dropped");
+        assert_eq!(open.load(Ordering::SeqCst), 1, "only the caller's slot is left (it gives it back)");
     }
 }

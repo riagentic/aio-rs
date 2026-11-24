@@ -363,6 +363,38 @@ async fn a_verified_email_comes_by_a_mailed_token_that_works_once() {
     assert_eq!(post(&addr, "verify", None, json!({ "token": token_to(&sent, "dee@example.com") })).await.0, 200);
 }
 
+/// A mailed token proves the mailbox it went to: after the account's email
+/// changes, it verifies nothing (the new address is unverified until its own
+/// mail is answered).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mailed_token_proves_only_the_address_it_went_to() {
+    let (auth, addr, sent) = mailing(Policy { signup: true, ..Default::default() }, false).await;
+    post(&addr, "signup", None, json!({ "id": "cy", "password": PW, "email": "cy@example.com" })).await;
+    until("the mail", || sent.lock().unwrap().len() == 1).await;
+    let token = token_to(&sent, "cy@example.com");
+    auth.set_email("cy", "boss@example.org").unwrap();
+    assert_eq!(post(&addr, "verify", None, json!({ "token": token })).await.0, 401);
+    assert!(!auth.user("cy").unwrap().unwrap().verified, "boss@example.org was never proven");
+    // A reset asked for before the change resets the password, but proves no new address.
+    auth.create("dee", PW, None).unwrap();
+    auth.set_email("dee", "dee@example.com").unwrap();
+    assert_eq!(post(&addr, "reset/request", None, json!({ "id": "dee" })).await.0, 200);
+    until("the reset mail", || sent.lock().unwrap().iter().any(|m| m.to == "dee@example.com")).await;
+    let reset = token_to(&sent, "dee@example.com");
+    auth.set_email("dee", "boss@example.org").unwrap();
+    let new = json!({ "token": reset, "password": "a new long password" });
+    assert_eq!(post(&addr, "reset", None, new).await.0, 200);
+    assert!(!auth.user("dee").unwrap().unwrap().verified, "boss@example.org was never proven");
+    // Unchanged, the token still proves its address.
+    auth.create("eve", PW, None).unwrap();
+    auth.set_email("eve", "eve@example.com").unwrap();
+    let e = login(&addr, "eve").await;
+    assert_eq!(post(&addr, "verify/request", Some(&e), json!({})).await.0, 200);
+    until("eve's mail", || sent.lock().unwrap().iter().any(|m| m.to == "eve@example.com")).await;
+    assert_eq!(post(&addr, "verify", None, json!({ "token": token_to(&sent, "eve@example.com") })).await.0, 200);
+    assert!(auth.user("eve").unwrap().unwrap().verified);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn with_verification_required_no_one_signs_in_before_their_email_is_proven() {
     let policy = Policy { signup: true, require_verified: true, ..Default::default() };
@@ -715,6 +747,41 @@ async fn a_browser_keeps_its_session_in_a_strict_httponly_cookie_secure_behind_a
     );
     assert_eq!(raw(&addr, "GET", "/__aio/auth/me", &jar, json!(null)).await.2["user"], json!(null));
     assert_eq!(raw(&addr, "GET", "/whoami", &jar, json!(null)).await.0, 401);
+}
+
+/// A session used past half its life is renewed (sliding): its cookie is
+/// sent again with the new life, or the browser drops it at the old end
+/// and a user active every day is signed out all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_renewed_session_sends_its_cookie_again() {
+    use aio::http::{Http, Reply, Route};
+    let auth = Arc::new(Auth::memory(Policy { ttl_ms: 2000, ..Default::default() }).unwrap());
+    auth.create("ann", PW, None).unwrap();
+    let who = Http::default().route(Route::get("/whoami", |r| async move { Reply::text(r.user().unwrap_or("-")) }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let opts = Options { token: "secret".into(), auth: Some(auth), http: who, ..Default::default() };
+    tokio::spawn(serve_with(Handle::<Board>::memory(), l, opts));
+    let (_, _, v) = raw(&addr, "POST", "/__aio/auth/login", &[], json!({ "id": "ann", "password": PW })).await;
+    let token = v["token"].as_str().unwrap().to_string();
+    let cookie = format!("aio_session_board={token}");
+    let jar = [("Cookie", cookie.as_str())];
+    let sets = |head: &str| head.lines().find(|l| l.starts_with("set-cookie: aio_session_board=")).map(str::to_string);
+    let (s, head, _) = raw(&addr, "GET", "/whoami", &jar, json!(null)).await;
+    assert_eq!((s, sets(&head)), (200, None), "not renewed yet: nothing to send");
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let (s, head, _) = raw(&addr, "GET", "/whoami", &jar, json!(null)).await;
+    assert_eq!(s, 200);
+    let line = sets(&head).expect(&head);
+    assert!(line.contains(&token.to_ascii_lowercase()) && line.contains("; max-age=2"), "{line}");
+    for part in ["; path=/", "; httponly", "; samesite=strict"] {
+        assert!(line.contains(part), "{part} in {line}");
+    }
+    // A bearer's session has no cookie to send.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let bearer = format!("Bearer {token}");
+    let (s, head, _) = raw(&addr, "GET", "/whoami", &[("Authorization", bearer.as_str())], json!(null)).await;
+    assert_eq!((s, sets(&head)), (200, None));
 }
 
 #[tokio::test(flavor = "multi_thread")]

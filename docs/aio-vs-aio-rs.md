@@ -21,7 +21,7 @@ which of aio's features aio-rs has. Moving an app over:
 | Install | `install.sh`: installs Deno, clones aio, puts `am` on `PATH` | a prebuilt `ax` (Linux x86_64, Windows x86_64, macOS arm64 and x86_64): `curl \| sh`, `irm \| iex`, from a folder offline, each archive's SHA-256 checked; or from source; an app takes aio-rs from git at a release tag ([setup](basics/setup.md)) |
 | Dev loop | `am dev`: `App.tsx` patched, other edits reload the page, a cell edit restarts the app (0.4-0.8 s; 1.3-1.8 s for a ~74 000-line app) | `ax dev`: Rust hot-patched with the state kept, `rsx!` markup at once, CSS live; a rebuild and restart when a patch can't take it ([dev](build/dev.md)); a ~74 000-line app's view edit 0.5 s in page crates, 5.5 s in one crate ([what an edit costs](build/README.md#what-an-edit-costs)) |
 | Tests | `testCell`, `testUI` (happy-dom), `testServer`, cassettes, `deno test` | `TestCells`, `TestUi` (the real views in the runtime), `TestServer`, cassettes, `cargo test` ([testing](testing/README.md)) |
-| Maturity | beta (1.0.27-beta): the 1.x surface frozen, additions only, an API snapshot gate in CI | early alpha, fourth release (0.4.0); a minor version may break ([versions](basics/versioning.md)) |
+| Maturity | beta (1.0.27-beta): the 1.x surface frozen, additions only, an API snapshot gate in CI | early alpha, sixth release (0.4.2); a minor version may break ([versions](basics/versioning.md)) |
 
 ## App compatibility
 

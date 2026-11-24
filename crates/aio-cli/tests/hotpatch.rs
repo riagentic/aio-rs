@@ -81,6 +81,9 @@ fn refresh_symbols() {
         fn CloseHandle(handle: usize) -> i32;
         fn GetCurrentProcessId() -> u32;
     }
+    // SAFETY: kernel32 calls as declared; SymRefreshModuleList is looked up by
+    // name in dbghelp and called with its signature, under std's backtrace
+    // mutex as std itself takes it; the C strings are NUL-terminated.
     unsafe {
         let module = GetModuleHandleA(b"dbghelp.dll\0".as_ptr());
         let f = if module == 0 { 0 } else { GetProcAddress(module, b"SymRefreshModuleList\0".as_ptr()) };
@@ -114,7 +117,9 @@ fn base() -> usize {
     let main = aio_hotpatch::aslr_reference();
     let mut at = main;
     while at < main + (3 << 29) {
+        // SAFETY: Mbi is a plain C struct: all-zero is valid.
         let mut m: Mbi = unsafe { std::mem::zeroed() };
+        // SAFETY: a query of this process's own address space into a local of the size given.
         if unsafe { VirtualQuery(at, &mut m, std::mem::size_of::<Mbi>()) } == 0 {
             break;
         }
@@ -154,6 +159,7 @@ fn main() {
         }
         let table = std::fs::read_to_string(line.trim()).unwrap();
         let table: aio_hotpatch::JumpTable = serde_json::from_str(&table).unwrap();
+        // SAFETY: the table is ax dev's patch of this very test binary.
         unsafe { aio_hotpatch::apply_patch(table).unwrap() };
         refresh_symbols();
     }

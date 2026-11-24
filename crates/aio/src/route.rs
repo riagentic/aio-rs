@@ -80,7 +80,8 @@ pub fn resolve(to: &str, from: &Loc) -> Option<Loc> {
         p if p.starts_with('/') => (p.to_string(), query.unwrap_or("").to_string()),
         p => (format!("{}{p}", &from.path[..from.path.rfind('/').map_or(0, |i| i + 1)]), query.unwrap_or("").into()),
     };
-    Some(Loc { path: encode(&dots(&path), ""), query: encode(&query, ""), hash: encode(hash, "") })
+    // A browser escapes `'` in a query (WHATWG's special-query set): so does a Loc.
+    Some(Loc { path: encode(&dots(&path), ""), query: encode(&query, "'"), hash: encode(hash, "") })
 }
 
 /// `path` without `.` and `..` segments (RFC 3986 5.2.4); always absolute.
@@ -105,12 +106,35 @@ fn dots(path: &str) -> String {
 }
 
 /// `s` percent-encoded where a URL must be (controls, space, `"<>` and the
-/// like, non-ASCII) and in `also`; existing escapes are kept.
+/// like, non-ASCII) and in `also`; an existing escape is kept, in one
+/// spelling (upper case; a letter, digit, `-`, `_` or `~` as itself, RFC
+/// 3986 6.2.2), so two spellings of one place are equal. An escaped `.`
+/// stays one: it is no dot segment.
 fn encode(s: &str, also: &str) -> String {
+    let (b, also) = (s.as_bytes(), also.as_bytes());
     let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        let bad = b <= b' ' || b >= 0x7F || b"\"<>`{}".contains(&b) || also.as_bytes().contains(&b);
-        if bad { out.push_str(&format!("%{b:02X}")) } else { out.push(b as char) }
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match escape_at(b, i).filter(|_| !also.contains(&b'%')) {
+            Some(o) if (o.is_ascii_alphanumeric() || b"-_~".contains(&o)) && !also.contains(&o) => {
+                out.push(o as char);
+                i += 3;
+            }
+            Some(o) => {
+                out.push_str(&format!("%{o:02X}"));
+                i += 3;
+            }
+            None => {
+                let bad = c <= b' ' || c >= 0x7F || b"\"<>`{}".contains(&c) || also.contains(&c);
+                if bad {
+                    out.push_str(&format!("%{c:02X}"))
+                } else {
+                    out.push(c as char)
+                }
+                i += 1;
+            }
+        }
     }
     out
 }
@@ -245,11 +269,18 @@ fn segments(pat: &[&str], path: &[&str], exact: bool, out: &mut Params) -> bool 
 /// value encoded as one segment; a `*` takes it segment by segment.
 pub fn fill(pattern: &str, params: &[(&str, String)]) -> String {
     let get = |n: &str| params.iter().find(|(k, _)| *k == n).map(|(_, v)| v.as_str());
+    // A segment as itself: a `\` is no `/` (nor `/\host` another host), a
+    // `.` or `..` no step (both decode back to the value when matched).
+    let one = |v: &str, also: &str| match encode(v, also) {
+        e if e == "." => "%2E".to_string(),
+        e if e == ".." => "%2E%2E".to_string(),
+        e => e,
+    };
     let segs = pattern.split('/').map(|seg| match (seg.strip_prefix(':'), star(seg)) {
-        (Some(n), _) => get(n).map_or(seg.into(), |v| encode(v, "/?#%")),
-        (_, Some(n)) => {
-            get(n).map_or(seg.into(), |v| v.split('/').map(|p| encode(p, "?#%")).collect::<Vec<_>>().join("/"))
-        }
+        (Some(n), _) => get(n).map_or(seg.into(), |v| one(v, "/?#%\\")),
+        (_, Some(n)) => get(n).map_or(seg.into(), |v| {
+            v.trim_start_matches('/').split('/').map(|p| one(p, "?#%\\")).collect::<Vec<_>>().join("/")
+        }),
         _ => seg.into(),
     });
     let out = segs.collect::<Vec<String>>().join("/");
@@ -1106,6 +1137,46 @@ mod tests {
         assert_eq!(fill("/", &[]), "/");
         let href = fill("/u/:id", &[("id", "100%41/é".into())]);
         assert_eq!(match_path("/u/:id", &href, true), p(&[("id", "100%41/é")]), "round trip");
+    }
+
+    /// Two spellings of one place are one `Loc`: escapes in any case, an
+    /// escaped letter, the `'` a browser escapes in a query; so the
+    /// browser's Back (`sync`) is a step, not a new place.
+    #[test]
+    fn two_spellings_of_one_place_are_equal() {
+        assert_eq!(Loc::parse("/caf%c3%a9"), Loc::parse("/café"));
+        assert_eq!(Loc::parse("/a%2Db?x=%7e#%41"), Loc::parse("/a-b?x=~#A"));
+        assert_eq!(Loc::parse("/a?q=it's"), Loc::parse("/a?q=it%27s"));
+        assert_ne!(Loc::parse("/a%2Fb"), Loc::parse("/a/b"), "an escaped / is no /");
+        assert_ne!(Loc::parse("/a/%2E%2E"), Loc::parse("/"), "nor an escaped .. a step");
+        let mut h = History::new("/a?q=it's");
+        h.push("/b");
+        assert!(h.sync("/a?q=it%27s") && h.can_go(1), "the browser's Back is one step back");
+        h.push("/caf%c3%a9");
+        let n = h.len();
+        h.push("/café");
+        assert_eq!(h.len(), n, "going where the app already is adds no step");
+    }
+
+    /// A param the app goes to (`go`, `Link`) comes back as it was: a `\`
+    /// or a `.`/`..` value is one segment, never a step up, another path, or
+    /// (`/\host`) a link off the app.
+    #[test]
+    fn a_filled_param_survives_going_there() {
+        let root = Loc::parse("/").unwrap();
+        for v in ["a\\b", "..", ".", "\\evil.com", "x/.."] {
+            let href = fill("/users/:id", &[("id", v.into())]);
+            let at = resolve(&href, &root).expect(&href);
+            assert_eq!(match_path("/users/:id", &at.path, true), p(&[("id", v)]), "{v}: {href}");
+            let href = fill("/:s", &[("s", v.into())]);
+            let at = resolve(&href, &root).unwrap_or_else(|| panic!("{href} leaves the app"));
+            assert_eq!(match_path("/:s", &at.path, true), p(&[("s", v)]), "{v}: {href}");
+        }
+        for (v, segs) in [("a/../b", "a/%2E%2E/b"), ("/x/y", "x/y"), ("\\h/.", "%5Ch/%2E")] {
+            let href = fill("/f/*path", &[("path", v.into())]);
+            assert_eq!(href, format!("/f/{segs}"));
+            assert_eq!(resolve(&href, &root).unwrap().path, href, "{v}");
+        }
     }
 
     #[test]

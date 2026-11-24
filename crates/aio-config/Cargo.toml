@@ -2,10 +2,10 @@
 name = "aio-rs-config"
 description = "aio.toml's types and checks, shared by the app and aio::config!()"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -27,3 +27,6 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"], opti
 dev = []
 toml = ["dep:toml"]
 png = ["dep:flate2"]
+
+[lints]
+workspace = true

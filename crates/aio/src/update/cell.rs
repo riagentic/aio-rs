@@ -4,6 +4,7 @@
 //! [`Runtime`] (`aio_shell` installs the signed-manifest one; an app may
 //! bring its own transport), so the cell stays plain data: every answer comes
 //! back as a method call, and the log replays it.
+use super::UpdateError;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
@@ -101,11 +102,11 @@ pub enum Data {
 /// The I/O behind the cell. Both calls block (they run off the cell).
 pub trait Runtime: Send + Sync + 'static {
     /// Look for a release once.
-    fn check(&self) -> std::result::Result<Found, String>;
+    fn check(&self) -> std::result::Result<Found, UpdateError>;
     /// Download (if needed), check and install `version` now, its `data`
     /// that way; the app stops after, and the new version starts with the
     /// same arguments.
-    fn apply(&self, version: &str, data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), String>;
+    fn apply(&self, version: &str, data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), UpdateError>;
 }
 
 /// The app's say on an install now (aio's `canApply`), awaited: `Err(why)`
@@ -163,10 +164,10 @@ pub struct Ready {
 pub struct Stub(pub Found);
 
 impl Runtime for Stub {
-    fn check(&self) -> std::result::Result<Found, String> {
+    fn check(&self) -> std::result::Result<Found, UpdateError> {
         Ok(self.0.clone())
     }
-    fn apply(&self, _version: &str, _data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), String> {
+    fn apply(&self, _version: &str, _data: Data, step: &dyn Fn(Step)) -> std::result::Result<(), UpdateError> {
         [50, 100].into_iter().for_each(|p| step(Step::Downloaded(p)));
         step(Step::Installing);
         Ok(())

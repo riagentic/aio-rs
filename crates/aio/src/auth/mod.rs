@@ -333,9 +333,14 @@ fn hashed(token: &str) -> String {
     hex(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
 }
 
-/// The one key of an id: NFC, trimmed.
+/// The one key of an id: NFC, trimmed. An external account's id is
+/// exact, as its provider's `sub` is (OIDC Core): never rewritten onto
+/// another's.
 pub fn normalize(id: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
+    if id.starts_with(EXTERNAL_PREFIX) {
+        return id.to_string();
+    }
     id.nfc().collect::<String>().trim().to_string()
 }
 
@@ -637,6 +642,17 @@ impl Auth {
         self.update("UPDATE users SET verified = 1 WHERE id = ?2", None, id)
     }
 
+    /// A mailed token proves the mailbox it went to: verified only while
+    /// that is still the account's email (`None`: a token minted before
+    /// tokens named it).
+    #[cfg(feature = "server")]
+    pub(crate) fn mark_verified_at(&self, id: &str, mailed: Option<&str>) -> Result<bool> {
+        match mailed {
+            Some(to) => self.update("UPDATE users SET verified = 1 WHERE id = ?2 AND email IS ?1", Some(to), id),
+            None => self.mark_verified(id),
+        }
+    }
+
     fn update(&self, sql: &str, v: Option<&str>, id: &str) -> Result<bool> {
         let id = normalize(id);
         let c = lock(&self.db);
@@ -863,6 +879,12 @@ impl Auth {
     /// The live session of `token`, with its user's role now; `None` when
     /// unknown, expired or revoked. One used past half its life is renewed.
     pub fn session(&self, token: &str) -> Result<Option<Session>> {
+        Ok(self.sliding(token)?.map(|(s, _)| s))
+    }
+
+    /// [`Auth::session`], and whether this use renewed it (its cookie is
+    /// then sent again, or the browser drops it at the old end).
+    pub(crate) fn sliding(&self, token: &str) -> Result<Option<(Session, bool)>> {
         let (c, h, now) = (lock(&self.db), hashed(token), self.now());
         let row: Option<(String, String, i64, Option<String>)> = db(c
             .query_row(
@@ -877,11 +899,12 @@ impl Auth {
             db(c.execute("DELETE FROM sessions WHERE token_hash = ?1", [&h]))?;
             return Ok(None);
         }
-        if expires_at - now < self.policy.ttl_ms / 2 {
+        let renewed = expires_at - now < self.policy.ttl_ms / 2;
+        if renewed {
             expires_at = now + self.policy.ttl_ms;
             db(c.execute("UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2", params![expires_at, h]))?;
         }
-        Ok(Some(Session { user, role: live.unwrap_or(role), expires_at, extra: Default::default() }))
+        Ok(Some((Session { user, role: live.unwrap_or(role), expires_at, extra: Default::default() }, renewed)))
     }
 
     /// Renew a live session to a full TTL; false when it isn't live.

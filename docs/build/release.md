@@ -134,7 +134,7 @@ SHA-256. Any miss refuses the release (`release refused: …`), said in the
 log and to the `updates` cell.
 
 ```rust
-use aio::update::{Contract, Expect, Release, check, keygen, roster, sign};
+use aio::update::{Contract, Expect, Release, UpdateError, check, keygen, roster, sign};
 
 # fn main() {
 let (key, public) = keygen().unwrap();
@@ -162,12 +162,14 @@ assert!(check(&m, &[public.clone()], &expect).is_ok());
 // One field changed after signing: refused.
 let mut forged = m.clone();
 forged.release.notes = "Now with a free gift".into();
-assert_eq!(check(&forged, &[public.clone()], &expect).unwrap_err(), "its signature is wrong");
+let refused = check(&forged, &[public.clone()], &expect).unwrap_err();
+assert!(matches!(refused, UpdateError::BadSignature));
+assert_eq!(refused.to_string(), "its signature is wrong");
 
 // Signed by a key the app doesn't have built in: refused.
 let (other, _) = keygen().unwrap();
 let stranger = sign(release.clone(), &other).unwrap();
-assert!(check(&stranger, &[public.clone()], &expect).unwrap_err().contains("doesn't trust"));
+assert!(matches!(check(&stranger, &[public.clone()], &expect), Err(UpdateError::UntrustedKey)));
 
 // Rotation: the old key vouches for the new set, so the new key is taken.
 let (next, next_public) = keygen().unwrap();

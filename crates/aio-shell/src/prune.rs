@@ -30,12 +30,17 @@ pub const USES_PER_APP: usize = 2;
 
 /// `t` as aio writes a time (`toISOString`): `2026-11-01T09:30:00.000Z`.
 pub fn iso(t: SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    let ms = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(|e| -(e.duration().as_millis() as i64), |d| d.as_millis() as i64);
+    aio::log::stamp(ms)
 }
 
 /// A time aio wrote ([`iso`]), or `None`.
 pub fn parse_iso(s: &str) -> Option<SystemTime> {
-    chrono::DateTime::parse_from_rfc3339(s.trim()).ok().map(SystemTime::from)
+    let ms = aio::log::parse_stamp(s.trim())?;
+    let d = std::time::Duration::from_millis(ms.unsigned_abs());
+    if ms >= 0 { std::time::UNIX_EPOCH.checked_add(d) } else { std::time::UNIX_EPOCH.checked_sub(d) }
 }
 
 /// What an installed app records about the runtime it starts from (aio's

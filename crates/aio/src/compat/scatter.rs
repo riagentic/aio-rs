@@ -260,7 +260,9 @@ impl Mover {
         }
         if ours {
             out.extend(self.database(&db, &l.store));
-            out.extend(self.journal(&with(&db, ".journal"), &l.data.join("journal")));
+            // Where the store's replay reads it (`<data>/journal` beside
+            // `state.db`, `<store>.journal` beside another name).
+            out.extend(self.journal(&with(&db, ".journal"), &crate::compat::data::journal_of(&l.store)));
         }
         if theirs {
             out.extend(self.database(&auth, &auth_to));
@@ -373,7 +375,7 @@ mod tests {
         assert_eq!(moves.len(), 8);
         let s = |p: &str| with(&l.store, p);
         assert_eq!([read(&l.store), read(&s("-wal")), read(&s("-shm"))], ["STATE", "WAL", "SHM"]);
-        assert_eq!(read(&l.data.join("journal")), "JOURNAL");
+        assert_eq!(read(&crate::compat::data::journal_of(&l.store)), "JOURNAL");
         assert_eq!(read(&l.data.join("auth.db")), "USERS");
         assert_eq!(read(&l.data.join("tls/tls-key.pem")), "KEY");
         assert_eq!(read(&l.logs.join("app.log")), "LOG");
@@ -407,14 +409,24 @@ mod tests {
     fn the_journals_watermark_travels_with_it_first() {
         let (_d, l) = scattered();
         std::fs::write(l.cwd.join("data.db.journal.wm"), "7").unwrap();
-        std::fs::write(l.data.join("journal.wm"), "old").unwrap();
+        let j = crate::compat::data::journal_of(&l.store);
+        std::fs::write(with(&j, ".wm"), "old").unwrap();
         let moves = adopt(&l);
         // The watermark's target exists: the journal is kept with it.
         assert_eq!(read(&l.cwd.join("data.db.journal")), "JOURNAL");
-        assert!(!exists(&l.data.join("journal")), "{moves:?}");
-        std::fs::remove_file(l.data.join("journal.wm")).unwrap();
+        assert!(!exists(&j), "{moves:?}");
+        std::fs::remove_file(with(&j, ".wm")).unwrap();
         adopt(&l);
-        assert_eq!([read(&l.data.join("journal")), read(&l.data.join("journal.wm"))], ["JOURNAL", "7"]);
+        assert_eq!([read(&j), read(&with(&j, ".wm"))], ["JOURNAL", "7"]);
+    }
+
+    #[test]
+    fn the_journal_lands_where_the_stores_replay_reads_it() {
+        let (_d, l) = scattered();
+        std::fs::write(l.cwd.join("data.db.journal.wm"), "7").unwrap();
+        adopt(&l);
+        let j = crate::compat::data::journal_of(&l.store);
+        assert_eq!([read(&j), read(&with(&j, ".wm"))], ["JOURNAL", "7"]);
     }
 
     #[test]

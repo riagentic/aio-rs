@@ -1187,13 +1187,13 @@ fn a_transition_ticks_each_frame_while_it_plays() {
         }
     });
     ui.click("toggle");
-    ui.wait(Duration::from_millis(250));
+    ui.advance(Duration::from_millis(250));
     let entered = PLAYED.with(|l| std::mem::take(&mut *l.borrow_mut()));
     assert!(entered.len() >= 3, "{entered:?}");
     assert!(entered.windows(2).all(|w| w[0].0 <= w[1].0) && entered.iter().all(|(t, u)| (t + u - 1.0).abs() < 1e-9));
     assert_eq!(entered.last(), Some(&(1.0, 0.0)), "entering ends at 1");
     ui.click("toggle");
-    ui.wait(Duration::from_millis(250));
+    ui.advance(Duration::from_millis(250));
     let left = PLAYED.with(|l| std::mem::take(&mut *l.borrow_mut()));
     assert_eq!(left.last(), Some(&(0.0, 1.0)), "leaving ends at 0: {left:?}");
 }

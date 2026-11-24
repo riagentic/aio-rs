@@ -18,6 +18,7 @@ async fn an_aio_app_sees_this_app_proven_on_its_socket() {
     aio::paths::private_dir(&run).unwrap();
     // aio's lock dir (under XDG_RUNTIME_DIR, on Windows TEMP) and its apps'
     // homes, both in the temp dir, for aio and for this app.
+    // SAFETY: the binary's one test, before it starts anything that reads the environment.
     unsafe {
         std::env::set_var(if cfg!(windows) { "TEMP" } else { "XDG_RUNTIME_DIR" }, &run);
         std::env::set_var("AIO_APPS_DIR", &apps);

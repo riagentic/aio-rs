@@ -583,6 +583,109 @@ mod modes {
     }
 }
 
+/// A network call its `#[client]` rule refuses touches nothing: no kept
+/// answer, no running call to join or supersede.
+#[cfg(all(feature = "server", feature = "testing"))]
+mod admission {
+    use aio::prelude::*;
+    use aio::testing::TestCells;
+
+    #[cell]
+    pub struct Desk {
+        pub members: Vec<String>,
+        pub runs: u32,
+    }
+
+    async fn gather(what: &'static str) -> String {
+        format!("{what} ready")
+    }
+
+    fn is_member(d: &Desk, who: &Caller, _: u32) -> bool {
+        matches!(&who.by, By::User(u) if d.members.contains(u))
+    }
+
+    #[methods]
+    impl Desk {
+        #[client(role = "admin")]
+        #[mode(newest)]
+        pub async fn export(&mut self) -> Result<String> {
+            let v: String = gather("export").await;
+            Ok(v)
+        }
+
+        #[client(allow = is_member)]
+        #[ttl(60_000)]
+        pub async fn report(&mut self, n: u32) -> Result<String> {
+            self.runs += 1;
+            let v: String = gather("report").await;
+            Ok(format!("{v} {n}"))
+        }
+
+        #[client(allow = is_member)]
+        #[mode(first)]
+        pub async fn sync(&mut self, n: u32) -> Result<u32> {
+            self.runs += 1;
+            let _: String = gather("sync").await;
+            Ok(n)
+        }
+
+        pub fn join(&mut self, who: String) {
+            self.members.push(who);
+        }
+
+        pub fn leave(&mut self, who: String) {
+            self.members.retain(|m| *m != who);
+        }
+    }
+
+    fn who(user: &str, role: Option<&str>) -> Caller {
+        Caller { by: By::User(user.into()), role: role.map(Into::into) }
+    }
+
+    fn denied<V: std::fmt::Debug>(r: Result<V>) {
+        let e = r.unwrap_err();
+        assert_eq!(e.code(), Some(Code::AccessDenied), "{e}");
+    }
+
+    #[test]
+    fn a_refused_call_does_not_supersede_a_running_newest_call() {
+        let mut t = TestCells::new();
+        let h = t.cell::<Desk>();
+        let (root, eve) = (t.as_client(&h, who("root", Some("admin"))), t.as_client(&h, who("eve", None)));
+        let mut running = root.export().unwrap();
+        denied(eve.export());
+        t.settle();
+        assert_eq!(running.now(), Some(Ok("export ready".into())), "the admin's call goes on");
+    }
+
+    #[test]
+    fn a_kept_answer_is_not_handed_to_a_caller_the_rule_now_refuses() {
+        let mut t = TestCells::new();
+        let h = t.cell::<Desk>();
+        h.join("ann".into()).unwrap();
+        let ann = t.as_client(&h, who("ann", None));
+        let mut first = ann.report(1).unwrap();
+        t.settle();
+        assert_eq!(first.now(), Some(Ok("report ready 1".into())));
+        h.leave("ann".into()).unwrap();
+        denied(ann.report(1));
+        assert_eq!(h.state().runs, 1);
+    }
+
+    #[test]
+    fn a_running_first_call_is_not_joined_by_a_caller_the_rule_now_refuses() {
+        let mut t = TestCells::new();
+        let h = t.cell::<Desk>();
+        h.join("ann".into()).unwrap();
+        let ann = t.as_client(&h, who("ann", None));
+        let _running = ann.sync(1).unwrap();
+        h.leave("ann".into()).unwrap();
+        denied(ann.sync(1));
+        t.settle();
+        assert_eq!(h.state().runs, 1);
+    }
+}
+
 /// ST1 over the wire: a synced copy's caller gets the server's end of an
 /// async method (its value, or a refusal after an await), and
 /// `call_confirmed` waits for that end.

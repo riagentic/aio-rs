@@ -250,7 +250,8 @@ impl Home {
         // profile ever opens it; aio's own meta.json is kept as it is.
         let meta = data.join("meta.json");
         if !meta.exists() {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+            let now = crate::log::stamp(now as i64);
             let mut m = json!({ "appId": app, "aio": crate::BUILT_BY, "createdAt": now, "updatedAt": now });
             if let Some(p) = profile {
                 m["profile"] = json!(p);
@@ -354,6 +355,8 @@ pub struct Slice {
     pub field: &'static str,
     pub cell: &'static str,
     pub version: u32,
+    /// Its type converts state across versions (`migrate = f`).
+    pub migrates: bool,
     pub transient: &'static [&'static str],
     pub include: &'static [&'static str],
     pub tables: &'static [Bound],
@@ -369,6 +372,7 @@ impl Slice {
             field,
             cell: C::ID,
             version: C::VERSION,
+            migrates: C::MIGRATES,
             transient: C::TRANSIENT,
             include: C::PERSIST_INCLUDE,
             tables: C::TABLES,
@@ -601,10 +605,14 @@ fn columns(db: &Connection, table: &str) -> Result<Option<Vec<Col>>, String> {
         return Ok(None);
     }
     let mut q = db.prepare(&format!("PRAGMA table_info({})", quoted(table))).map_err(|e| format!("storage: {e}"))?;
-    let cols = q
-        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)? == 1, Kind::of(&r.get::<_, String>(2)?))))
+    let mut cols: Vec<Col> = q
+        .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)? > 0, Kind::of(&r.get::<_, String>(2)?))))
         .and_then(|r| r.collect::<Result<Vec<_>, _>>())
         .map_err(|e| format!("storage: {e}"))?;
+    // A key of many columns is no one column's: such rows are written whole.
+    if cols.iter().filter(|c| c.1).count() > 1 {
+        cols.iter_mut().for_each(|c| c.1 = false);
+    }
     Ok(Some(cols))
 }
 
@@ -702,6 +710,15 @@ fn sync(
     let keyed = |v: &Value| rows_of(v, pk);
     let new = keyed(new)?;
     let st = |e: rusqlite::Error| format!("storage: {e}");
+    // A key or plain value as it is stored: a number stays one (an untyped
+    // column keeps 5 apart from '5').
+    let bind = |v: &Value| -> rusqlite::types::Value {
+        match v {
+            Value::String(s) => s.clone().into(),
+            Value::Number(n) => n.as_i64().map_or_else(|| n.as_f64().unwrap_or(f64::NAN).into(), Into::into),
+            v => v.to_string().into(),
+        }
+    };
     let upsert = |r: &Map<String, Value>| -> Result<(), String> {
         let mut names = vec![];
         let mut vals: Vec<rusqlite::types::Value> = vec![];
@@ -714,11 +731,7 @@ fn sync(
                 (Value::Null, _) => rusqlite::types::Value::Null,
                 // Every value as its JSON text: a string reads back a string.
                 (v, Kind::Json) => v.to_string().into(),
-                (Value::String(s), _) => s.clone().into(),
-                (Value::Number(n), _) => match n.as_i64() {
-                    Some(i) => i.into(),
-                    None => n.as_f64().unwrap_or(f64::NAN).into(),
-                },
+                (v @ (Value::String(_) | Value::Number(_)), _) => bind(v),
                 (Value::Bool(b), Kind::Bool) => i64::from(*b).into(),
                 (v, _) => {
                     return Err(format!(
@@ -732,18 +745,29 @@ fn sync(
         let sql = format!("INSERT OR REPLACE INTO {} ({}) VALUES ({marks})", quoted(table), names.join(", "));
         db.execute(&sql, rusqlite::params_from_iter(vals)).map(drop).map_err(st)
     };
-    match (pk, old) {
-        (Some(pk), Some(old)) => {
-            let old: std::collections::HashMap<_, _> = keyed(old)?.into_iter().collect();
+    // By key only while each row has its own: rows that share one (an
+    // id-less row's null) are written whole, as a table without a key is.
+    let distinct = |pk: &str, rows: &[Row]| {
+        let mut seen = std::collections::HashSet::new();
+        rows.iter().all(|(k, r)| r.get(pk).is_some_and(|v| !v.is_null()) && seen.insert(k.clone()))
+    };
+    let old = match (pk, old) {
+        (Some(pk), Some(old)) => Some((pk, keyed(old)?)),
+        _ => None,
+    };
+    match old.filter(|(pk, old)| distinct(pk, old) && distinct(pk, &new)) {
+        Some((pk, old)) => {
             let kept: std::collections::HashSet<&Option<String>> = new.iter().map(|(k, _)| k).collect();
-            for gone in old.keys().filter(|k| !kept.contains(k)).flatten() {
-                db.execute(&format!("DELETE FROM {} WHERE {} = ?1", quoted(table), quoted(pk)), [gone]).map_err(st)?;
+            for (_, r) in old.iter().filter(|(k, _)| !kept.contains(k)) {
+                let sql = format!("DELETE FROM {} WHERE {} = ?1", quoted(table), quoted(pk));
+                db.execute(&sql, [bind(&r[pk])]).map_err(st)?;
             }
+            let old: std::collections::HashMap<_, _> = old.into_iter().collect();
             for (_, r) in new.iter().filter(|(k, r)| old.get(k) != Some(r)) {
                 upsert(r)?;
             }
         }
-        _ => {
+        None => {
             db.execute(&format!("DELETE FROM {}", quoted(table)), []).map_err(st)?;
             for (_, r) in &new {
                 upsert(r)?;
@@ -887,8 +911,21 @@ pub fn on_journal(f: impl Fn(&str, &str, &Value) -> Replay + Send + Sync + 'stat
     *HOOK.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
 
+thread_local! {
+    static REPLAYING: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Inside the [`on_journal`] hook: the id of the port cell whose store is
+/// replaying the journal. A call of an aio cell the port folded is asked of
+/// every port cell's store: the hook answers [`Replay::As`] for the one that
+/// owns it, [`Replay::Refuse`] (left to its own cell) for the others.
+pub fn replaying() -> Option<&'static str> {
+    REPLAYING.get()
+}
+
 /// The hook's answer for `cell:method` (None: no hook, or it refused).
 fn hooked<T: crate::Cell>(
+    own: bool,
     seq: i64,
     kind: &str,
     cell: &str,
@@ -896,8 +933,13 @@ fn hooked<T: crate::Cell>(
     e: &Value,
 ) -> Option<Result<Journaled, String>> {
     let hook = HOOK.read().unwrap_or_else(|e| e.into_inner()).clone()?;
-    match hook(cell, method, &args_of(e)) {
+    REPLAYING.set(Some(T::ID));
+    let answer = hook(cell, method, &args_of(e));
+    REPLAYING.set(None);
+    match answer {
         Replay::Refuse => None,
+        // Another cell's call, as a method this cell lacks: that cell's.
+        Replay::As(m, _) if !own && !T::METHODS.contains(&m.as_str()) => None,
         Replay::Skip(why) => {
             Some(Ok(Journaled::Skip { seq, why: Some(format!("journal entry {seq} ({kind}): {why}")) }))
         }
@@ -923,6 +965,25 @@ fn call_of(seq: i64, method: String, args: Value, e: &Value) -> Journaled {
         by: e["user"]["id"].as_str().map_or(crate::By::System, |u| crate::By::User(u.into())),
         at: e["ts"].as_i64().unwrap_or(0),
     }
+}
+
+/// The cells whose version stamp on journal entry `e` (`"v": {cell: n}`)
+/// isn't this build's (aio's `staleStamps`): a newer one always, an older
+/// one when the cell converts its state (`migrate`). Another cell's stamp
+/// is its own store's to judge.
+fn stale<T: crate::Cell>(e: &Value) -> Vec<String> {
+    let Some(v) = e["v"].as_object() else { return vec![] };
+    v.iter()
+        .filter_map(|(c, stamped)| {
+            let (now, migrates) = match c == T::ID {
+                true => (T::VERSION, T::MIGRATES),
+                false => T::AIO_CELLS.iter().find(|s| s.cell == c).map(|s| (s.version, s.migrates))?,
+            };
+            let n = stamped.as_i64();
+            let older = n.is_some_and(|n| n < i64::from(now));
+            (n != Some(i64::from(now)) && (!older || migrates)).then(|| format!("{c:?} v{stamped} → v{now}"))
+        })
+        .collect()
 }
 
 /// The journal aio keeps for the store at `store` (aio's `aio-boot.ts`): a
@@ -952,9 +1013,18 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(format!("{}: {e}", journal.display())),
     };
-    let mut base = journal.as_os_str().to_owned();
-    base.push(".base");
-    if let Ok(b) = std::fs::read(PathBuf::from(base))
+    let beside = |ext: &str| {
+        let mut p = journal.as_os_str().to_owned();
+        p.push(ext);
+        PathBuf::from(p)
+    };
+    // An older aio kept its watermark in `<journal>.wm` only: the higher one
+    // holds (aio's `journal.ts`), or what the snapshot holds runs twice.
+    let wm = std::fs::read_to_string(beside(".wm"))
+        .ok()
+        .and_then(|t| t.trim().parse::<i64>().ok())
+        .map_or(wm, |f| f.max(wm));
+    if let Ok(b) = std::fs::read(beside(".base"))
         && let Some(dropped) = serde_json::from_slice::<Value>(&b).ok().and_then(|v| v["wm"].as_i64())
         && dropped > wm
     {
@@ -998,13 +1068,14 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
                     return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay"));
                 }
                 // Another cell's call: the port's hook may own it (a cell it folded in).
-                false => match hooked::<T>(seq, kind, cell, m, &e) {
+                false => match hooked::<T>(false, seq, kind, cell, m, &e) {
                     Some(j) => ours.push(j?),
                     None => others.push(kind.to_string()),
                 },
             }
             continue;
         };
+        let stale = stale::<T>(&e);
         let j = match e["redacted"] == true {
             true => Journaled::Skip {
                 seq,
@@ -1012,9 +1083,16 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
                     "journal entry {seq} ({kind}): aio withheld its arguments (redactActions), so it can't run again: skipped, as aio does"
                 )),
             },
+            false if !stale.is_empty() => Journaled::Skip {
+                seq,
+                why: Some(format!(
+                    "journal entry {seq} ({kind}) ran at another version ({}): its method's old code on the old shape, so it can't run again: skipped, as aio does",
+                    stale.join(", ")
+                )),
+            },
             // Refused here, before anything is written: a write would tell aio
             // the store moved past its journal, and aio would then drop it.
-            false if !T::METHODS.contains(&method.as_str()) => match hooked::<T>(seq, kind, cell, m, &e) {
+            false if !T::METHODS.contains(&method.as_str()) => match hooked::<T>(true, seq, kind, cell, m, &e) {
                 Some(j) => j?,
                 None => {
                     return Err(format!(

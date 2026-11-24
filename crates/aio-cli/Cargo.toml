@@ -2,10 +2,10 @@
 name = "aio-rs-cli"
 description = "ax, the aio-rs command: make, run, test and ship aio-rs apps"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities", "development-tools", "gui"]
@@ -25,7 +25,8 @@ toml = { version = "1", default-features = false, features = ["std", "parse", "s
 aio-shell = { workspace = true, features = ["web"] }
 rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 serde_json = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Log and report times, in UTC and this machine's zone.
+jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 notify = "8"
 base64 = "0.23"
 # `ax build --sizes`: a binary's code symbols, by crate. `write`: ax dev's
@@ -58,3 +59,6 @@ tempfile = "3"
 aio = { workspace = true, features = ["kit", "net", "testing", "dev"] }
 # A web build's pages painted by its server (`aio_shell::web::painted`).
 aio-shell = { workspace = true, features = ["web"] }
+
+[lints]
+workspace = true

@@ -67,6 +67,32 @@ async fn one_statement_per_call_and_transactions_are_the_apis() {
     assert!(!controls_tx("ROLLBACK TRANSACTION TO sp") && !controls_tx("SELECT 'BEGIN'"));
 }
 
+/// A `SAVEPOINT` outside a transaction opens one (SQLite's BEGIN): then
+/// the next caller's write would be held in it, and a `ROLLBACK TO` would
+/// undo it after it was acknowledged. Outside `db.transaction` it is
+/// refused, and nothing is left open; inside one it nests and is fine.
+#[tokio::test]
+async fn a_savepoint_outside_a_transaction_swallows_no_ones_writes() {
+    for readers in [0, 2] {
+        let (_dir, db) = with_notes(Opts { readers, ..Default::default() }).await;
+        assert!(db.execute("SAVEPOINT s", vec![]).await.is_err(), "readers {readers}");
+        assert!(db.query("SAVEPOINT s", vec![]).await.is_err(), "readers {readers}");
+        db.execute("INSERT INTO n (t) VALUES ('kept')", vec![]).await.unwrap();
+        _ = db.execute("ROLLBACK TO s", vec![]).await;
+        assert_eq!(notes(&db).await, ["kept"], "readers {readers}");
+        db.transaction(|tx| {
+            tx.execute("SAVEPOINT s", &[])?;
+            tx.execute("INSERT INTO n (t) VALUES ('undone')", &[])?;
+            tx.execute("ROLLBACK TO s", &[])?;
+            tx.execute("RELEASE s", &[])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(notes(&db).await, ["kept"], "readers {readers}");
+    }
+}
+
 #[tokio::test]
 async fn a_transaction_commits_whole_or_not_at_all() {
     let (_dir, db) = with_notes(Opts::default()).await;
@@ -382,7 +408,10 @@ async fn a_where_selects_by_parameters_and_refuses_what_could_inject() {
     let q = |w: Where| Select::from("orders").filter(w).order_by("total", Order::Asc);
     let (sql, params) =
         q(Where::gt("total", 6.0).and(Where::ne("who", "bo".to_string()))).limit(5).offset(1).sql().unwrap();
-    assert_eq!(sql, "SELECT * FROM orders WHERE (total > ?) AND (who != ?) ORDER BY total ASC LIMIT 5 OFFSET 1");
+    assert_eq!(
+        sql,
+        r#"SELECT * FROM "orders" WHERE ("total" > ?) AND ("who" != ?) ORDER BY "total" ASC LIMIT 5 OFFSET 1"#
+    );
     assert_eq!(params, [Sql::Real(6.0), text("bo")]);
     let got = |w| {
         let db = &db;
@@ -411,6 +440,14 @@ async fn a_where_selects_by_parameters_and_refuses_what_could_inject() {
         assert!(Select::from("orders").order_by(name, Order::Desc).sql().is_err(), "{name}");
         assert!(Select::from(name).sql().is_err(), "{name}");
     }
+    // A plain name that is also a keyword is still a name.
+    db.execute(r#"CREATE TABLE "order" ("group" TEXT, "limit" INTEGER)"#, vec![]).await.unwrap();
+    db.execute(r#"INSERT INTO "order" VALUES ('a', 2), ('b', 1)"#, vec![]).await.unwrap();
+    let kw = Select::from("order").filter(Where::gt("limit", 0)).order_by("group", Order::Desc);
+    assert_eq!(
+        db.select(&kw).await.unwrap().rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
+        [text("b"), text("a")]
+    );
     let many = Where::is_in("id", 0..40_000i64);
     assert!(Select::from("orders").filter(many).sql().unwrap_err().0.contains("at most 32766"));
     assert_eq!(db.query("SELECT count(*) FROM orders", vec![]).await.unwrap().rows[0][0], Sql::Integer(4), "all there");

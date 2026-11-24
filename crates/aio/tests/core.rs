@@ -416,6 +416,57 @@ mod upgrade {
     }
 
     #[test]
+    fn a_fold_after_an_upgrade_keeps_the_boot() {
+        let (_d, p) = super::tmp();
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["a"])).unwrap();
+        old.checkpoint().unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["b"])).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["c"])).unwrap();
+        drop(old);
+        rusqlite::Connection::open(&p).unwrap().execute("UPDATE log SET at = 0 WHERE seq <= 2", []).unwrap();
+        let mut s = Store::<Notes>::open(&p).unwrap();
+        s.keep_history(std::time::Duration::from_secs(86_400)).unwrap();
+        assert_eq!(s.state().lines, ["c"]);
+        drop(s);
+        assert_eq!(Store::<Notes>::open(&p).unwrap().state().lines, ["c"]);
+    }
+
+    /// The same with no snapshot of the old build's before the cut (it
+    /// snapshotted only as it closed): nothing replays the old events.
+    #[test]
+    fn a_fold_after_an_upgrade_keeps_the_boot_with_no_older_snapshot() {
+        let (_d, p) = super::tmp();
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        for t in ["a", "b", "c"] {
+            old.call(&By::Test, "set", serde_json::json!([t])).unwrap();
+        }
+        drop(old);
+        rusqlite::Connection::open(&p).unwrap().execute("UPDATE log SET at = 0 WHERE seq <= 2", []).unwrap();
+        let mut s = Store::<Notes>::open(&p).unwrap();
+        s.keep_history(std::time::Duration::from_secs(86_400)).unwrap();
+        assert_eq!(s.state().lines, ["c"]);
+        drop(s);
+        assert_eq!(Store::<Notes>::open(&p).unwrap().state().lines, ["c"]);
+    }
+
+    #[test]
+    fn a_fold_by_an_older_build_keeps_the_newer_builds_fields() {
+        let (_d, p) = super::tmp();
+        let h = Handle::<Notes>::open(&p).unwrap();
+        h.push("a".into()).unwrap();
+        h.push("b".into()).unwrap();
+        drop(h);
+        let mut old = Store::<v1::Notes>::open(&p).unwrap();
+        old.call(&By::Test, "set", serde_json::json!(["t"])).unwrap();
+        old.checkpoint().unwrap();
+        rusqlite::Connection::open(&p).unwrap().execute("UPDATE log SET at = 0", []).unwrap();
+        old.keep_history(std::time::Duration::from_secs(86_400)).unwrap();
+        drop(old);
+        assert_eq!(Store::<Notes>::open(&p).unwrap().state().lines, ["a", "b"]);
+    }
+
+    #[test]
     fn events_an_old_build_left_unsnapped_replay_after_the_upgrade() {
         let (_d, p) = super::tmp();
         use v1::NotesCalls as _;
@@ -498,9 +549,9 @@ fn local_file_urls_are_escaped() {
 #[test]
 fn app_dirs_are_private_and_ids_are_checked() {
     let d = tempfile::tempdir().unwrap();
-    // SAFETY: this test binary's only env change; no other test reads AIORT_DATA.
     // The caller's sandbox comes back after: never the real data dir.
     let caller = std::env::var_os("AIORT_DATA");
+    // SAFETY: this test binary's only env change; no other test reads AIORT_DATA.
     unsafe { std::env::set_var("AIORT_DATA", d.path()) };
     let dirs = aio::paths::app("todo").unwrap();
     assert_eq!(dirs.data, d.path().join("data"));
@@ -521,8 +572,11 @@ fn app_dirs_are_private_and_ids_are_checked() {
     for bad in ["", "../x", ".hidden", "a/b"] {
         assert!(aio::paths::app(bad).is_err(), "{bad}");
     }
+    // SAFETY: as at the start: the one test here that touches AIORT_DATA.
     match caller {
+        // SAFETY: as above.
         Some(v) => unsafe { std::env::set_var("AIORT_DATA", v) },
+        // SAFETY: as above.
         None => unsafe { std::env::remove_var("AIORT_DATA") },
     }
 }
@@ -785,6 +839,44 @@ fn a_whole_backup_holds_the_app_files_but_not_its_keys() {
     assert!(!d.path().join("evil").exists());
     assert!(aio::backup::left_out("electron/Cache/x") && aio::backup::left_out("state.db-wal"));
     assert!(aio::backup::left_out("reports/.r2.json.9.tmp") && !aio::backup::left_out("reports/r1.json"));
+}
+
+/// SQLite holds at most 1e9 bytes in one value: a bigger file still goes
+/// into a whole backup and comes back whole. Ignored: it writes over 2 GB
+/// (`cargo test --test core -- --ignored a_file_over`).
+#[test]
+#[ignore]
+fn a_file_over_a_gigabyte_is_backed_up_and_restored() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("app");
+    let data = root.join("data");
+    let store = data.join("state.db");
+    std::fs::create_dir_all(&data).unwrap();
+    Handle::<Todo>::open(&store).unwrap().add("one").unwrap();
+    let big = data.join("video.bin");
+    let len = 1_100_000_000u64;
+    let mut f = std::fs::File::create(&big).unwrap();
+    f.set_len(len).unwrap();
+    f.write_all(b"head").unwrap();
+    f.seek(SeekFrom::End(-4)).unwrap();
+    f.write_all(b"tail").unwrap();
+    drop(f);
+    let file = d.path().join("todo.aio-backup");
+    aio::backup::backup_all("todo", &store, &file).unwrap();
+    std::fs::write(&big, "later").unwrap();
+    let dirs = aio::paths::AppDirs::at(&root, "todo").unwrap();
+    aio::backup::restore("todo", &file, &store, &dirs).unwrap();
+    drop(dirs);
+    let mut f = std::fs::File::open(&big).unwrap();
+    assert_eq!(f.metadata().unwrap().len(), len);
+    let mut b = [0u8; 4];
+    f.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"head");
+    f.seek(SeekFrom::End(-4)).unwrap();
+    f.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"tail");
+    assert_eq!(Handle::<Todo>::open(&store).unwrap().state().items.len(), 1);
 }
 
 /// Run as a child by `a_dead_holder_frees_the_lock`: hold the lock, then wait to be killed.

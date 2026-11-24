@@ -64,7 +64,12 @@ impl Cassette {
         let mut frames: Vec<Frame> = serde_json::from_str(text).map_err(|e| format!("cassette: not a tape: {e}"))?;
         frames.sort_by_key(|f| f.seq);
         let mut tape = Tape::default();
-        for f in frames {
+        for mut f in frames {
+            // Keyed as [`key_of`] keys now (a tape from before kept a map's
+            // or a struct's entries in their own order).
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&f.key) {
+                f.key = v.to_string();
+            }
             tape.queued.entry((f.id.clone(), f.key.clone())).or_default().push_back(f);
         }
         Ok(Self { mode: Mode::Replay, path: None, tape: Arc::new(Mutex::new(tape)), lenient: false })
@@ -164,16 +169,20 @@ impl Cassette {
                 serde_json::from_value(v).map_err(|e| format!("cassette {id}: the recorded answer doesn't fit: {e}"))
             }
             Mode::Record => {
+                // Numbered as it starts, as a replay takes them: calls that
+                // overlap may finish in another order.
+                let seq = {
+                    let mut t = self.tape();
+                    let n = t.seqs.entry(key.clone()).or_default();
+                    *n += 1;
+                    *n - 1
+                };
                 let out = run().await.map_err(|e| e.to_string());
                 let answer = match &out {
                     Ok(v) => serde_json::to_value(v).map_err(|e| format!("cassette {id}: {e}")),
                     Err(e) => Err(e.clone()),
                 };
-                let mut t = self.tape();
-                let seq = t.seqs.entry(key.clone()).or_default();
-                let frame = Frame { id: key.0, key: key.1, seq: *seq, answer };
-                *seq += 1;
-                t.recorded.push(frame);
+                self.tape().recorded.push(Frame { id: key.0, key: key.1, seq, answer });
                 out
             }
         }
@@ -201,7 +210,9 @@ impl Cassette {
 /// A call's arguments as the tape keys them (JSON); unserializable ones
 /// refused, or `lenient`, keyed by why.
 fn key_of(id: &str, args: &impl Serialize, lenient: bool) -> Result<String, String> {
-    serde_json::to_string(args).or_else(|e| match lenient {
+    // Through a Value: a map's entries sorted (serde_json's Map), never in a
+    // hash map's order, which a new process's hasher changes.
+    serde_json::to_value(args).map(|v| v.to_string()).or_else(|e| match lenient {
         true => Ok(format!("(unserializable: {e})")),
         false => Err(format!(
             "cassette {id}: its arguments don't serialize, and they key the tape: {e} (Cassette::lenient keeps such calls)"
@@ -248,6 +259,42 @@ mod tests {
         let through = Cassette::passthrough();
         assert_eq!(block(device(&through, "x", &calls)), Ok("xpub-x-1".into()));
         assert!(through.frames().is_empty() && through.save().is_ok());
+    }
+
+    /// Calls with equal arguments that overlap: each replays the answer of
+    /// the one that started in its place, whichever finished first.
+    #[test]
+    fn overlapping_repeats_replay_in_the_order_they_started() {
+        async fn rate(c: &Cassette, waits: u32, answer: &str) -> Result<String, String> {
+            c.call("rates.get", &1, || async move {
+                for _ in 0..waits {
+                    tokio::task::yield_now().await;
+                }
+                Ok::<_, String>(answer.to_string())
+            })
+            .await
+        }
+        let rec = Cassette::record(None);
+        let got = block(async { tokio::join!(rate(&rec, 3, "slow"), rate(&rec, 0, "fast")) });
+        assert_eq!(got, (Ok("slow".into()), Ok("fast".into())));
+        let play = Cassette::replay(&rec.text()).unwrap();
+        let again = block(async { tokio::join!(rate(&play, 0, "-"), rate(&play, 0, "-")) });
+        assert_eq!(again, got, "the first call started gets the first answer");
+    }
+
+    /// A map's entries key the call in one order, whatever order a hash
+    /// map holds them in (a new process, a new hasher seed).
+    #[test]
+    fn a_maps_arguments_key_the_same_whatever_its_order() {
+        let pairs = [("q", "x"), ("page", "1"), ("sort", "new"), ("lang", "cs"), ("tz", "utc"), ("n", "20"), ("f", "a")];
+        let hashed: HashMap<&str, &str> = pairs.into_iter().collect();
+        let sorted: std::collections::BTreeMap<&str, &str> = pairs.into_iter().collect();
+        assert_eq!(key_of("api.search", &hashed, false), key_of("api.search", &sorted, false));
+        // A tape keyed in another order (recorded before) still replays.
+        let old = r#"[{"id":"api.search","key":"{\"q\":\"x\",\"page\":\"1\"}","seq":0,"answer":{"Ok":3}}]"#;
+        let play = Cassette::replay(old).unwrap();
+        let args: HashMap<&str, &str> = [("page", "1"), ("q", "x")].into_iter().collect();
+        assert_eq!(block(play.call("api.search", &args, || async { Ok::<u32, String>(0) })), Ok(3));
     }
 
     #[test]

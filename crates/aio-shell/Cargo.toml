@@ -2,10 +2,10 @@
 name = "aio-rs-shell"
 description = "aio-rs's desktop host: the app's view tree in Rust, drawn by the shared Electron runtime"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -20,8 +20,6 @@ aio-config = { workspace = true, features = ["png"] }
 base64 = "0.23"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
-# The store's ISO times, as aio writes them (`toISOString`).
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # air, aio-rs's renderer: the windows' views, their frames read for a held key's repeats.
 air = { workspace = true }
 # `ax dev`'s hot-patch (`dev`): the patch loaded into the running app.
@@ -89,3 +87,6 @@ jni = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Threading", "Win32_Security", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+
+[lints]
+workspace = true
