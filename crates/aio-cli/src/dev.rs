@@ -1119,7 +1119,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     use std::io::IsTerminal;
     let choice = crate::display::choose(asked.as_deref(), std::io::stdin().is_terminal(), crate::display::desktop())?;
     // A service or a command-line tool opens no window: no display, no splash.
-    let windowed = crate::build::app_of(&pkg).map_or(true, |(_, c)| crate::start::has_window(&c.app.mode));
+    let windowed = crate::build::app_of(&pkg).map_or(true, |(_, c)| c.app.mode.has_window());
     // Held for the whole run: dropped, the nested display stops.
     let nested = match choice {
         Choice::Nested if windowed => crate::display::nest(asked.as_deref(), "ax dev", true)?,
@@ -2186,9 +2186,6 @@ mod tests {
     /// edit (it has none to show), and gets no display or splash.
     #[test]
     fn a_windowless_app_is_told_only_what_it_takes_live() {
-        use aio::config::Mode;
-        let (cli, server) = (crate::start::has_window(&Mode::Cli), crate::start::has_window(&Mode::Server));
-        assert!(!cli && !server && crate::start::has_window(&Mode::Standalone));
         assert_eq!(
             live_edits("board", false, false),
             "ax dev: board: a Rust edit is hot-patched, state kept; a Cargo.toml or aio.toml edit rebuilds"

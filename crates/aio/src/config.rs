@@ -451,6 +451,13 @@ mod tests {
         assert!(Config::parse("[app]\nid = \"t\"\nlang = \"pt-BR\"").is_ok());
     }
 
+    /// The one rule `ax dev`, `ax start`, `ax build --smoke` and the updater follow.
+    #[test]
+    fn only_a_server_and_a_cli_have_no_window() {
+        let shown = [Mode::Standalone, Mode::Client, Mode::ClientServer, Mode::Server, Mode::Cli].map(Mode::has_window);
+        assert_eq!(shown, [true, true, true, false, false]);
+    }
+
     #[test]
     fn defaults_are_standalone_and_90_days() {
         let c = Config::parse("[app]\nid = \"todo\"").unwrap();

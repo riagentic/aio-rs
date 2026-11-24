@@ -20,6 +20,13 @@ pub enum Mode {
     Cli,
 }
 
+impl Mode {
+    /// Whether an app of this mode opens a window: a server or a CLI doesn't.
+    pub const fn has_window(self) -> bool {
+        !matches!(self, Mode::Server | Mode::Cli)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct App {

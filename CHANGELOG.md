@@ -72,6 +72,10 @@ version may break things.
 
 ### Added
 
+- `aio::config::Mode::has_window()`: whether an app of that mode opens a
+  window (a server or a CLI doesn't), the one rule `ax dev`, `ax start`,
+  `ax build` (`--smoke`, a bundled runtime) and the updater follow; each
+  kept its own list before.
 - `GuestEvent::LoadFailed { url, code, description }`: a `Browser`'s guest
   could not open an address (`did-fail-load`, its main frame; `-3`, a
   load given up for another, is none). It said nothing before: the panel

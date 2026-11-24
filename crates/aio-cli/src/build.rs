@@ -277,8 +277,8 @@ pub fn cache_dir() -> PathBuf {
 /// the target dir, ready to go in the app's packages (a macOS one is made
 /// on a Mac: it is signed again).
 fn bundled_runtime(app: &App, cfg: &aio::config::Config, p: &Platform, target: &Path) -> Result<PathBuf, String> {
-    use aio::config::{Extras, Mode};
-    if matches!(cfg.app.mode, Mode::Server | Mode::Cli) {
+    use aio::config::Extras;
+    if !cfg.app.mode.has_window() {
         return Err("[build] runtime = \"bundled\": this app has no window, so no Electron to bundle".into());
     }
     let slug = electron_slug(p);
@@ -897,10 +897,7 @@ pub fn run(
         Some(p) => p.split(',').collect(),
         None => cfg.build.platforms.iter().map(String::as_str).collect(),
     };
-    let fallback = match cfg.app.mode {
-        aio::config::Mode::Server | aio::config::Mode::Cli => crate::fleet::Kind::Cli,
-        _ => crate::fleet::Kind::Desktop,
-    };
+    let fallback = if cfg.app.mode.has_window() { crate::fleet::Kind::Desktop } else { crate::fleet::Kind::Cli };
     // Each target across its own platforms, else [build] platforms.
     let mut plan = vec![];
     for t in crate::fleet::plan(name, &cfg.build.targets, select, fallback)? {
