@@ -422,6 +422,9 @@ version may break things.
 - `ax lint` let a cell method read the clock through jiff
   (`Timestamp::now`, `Zoned::now`) or draw from `fastrand`: a replay gave
   another state. They are errors, as chrono's and rand's are.
+- `ax start` and `ax restart` told what to run next as `aio status`,
+  `aio logs`, `aio stop`, `aio errors` and `aio dev`, commands that don't
+  exist: they say `ax …`.
 
 ## [0.4.2] - 2026-11-11
 
