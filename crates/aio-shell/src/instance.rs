@@ -106,6 +106,24 @@ pub(crate) static LOOK: std::sync::OnceLock<(u16, Option<aio::config::Splash>)> 
 pub(crate) static ASSETS: std::sync::OnceLock<&'static [(&'static str, &'static [u8])]> = std::sync::OnceLock::new();
 /// `--keep-server`, as this launch asked it.
 pub(crate) static KEEP_SERVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+/// The app's URL schemes (`[app] schemes`): a launch's links to them go to
+/// `aio::ui::links`.
+pub(crate) static SCHEMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// The arguments of a launch that are links to one of `schemes` (pure):
+/// `myapp://users/7`, its scheme in any case (as the OS may hand it).
+pub(crate) fn links_in<'a>(args: &'a [String], schemes: &[String]) -> Vec<&'a str> {
+    let ours = |a: &str| a.split_once(':').is_some_and(|(s, _)| schemes.iter().any(|k| k.eq_ignore_ascii_case(s)));
+    args.iter().map(String::as_str).filter(|a| ours(a)).collect()
+}
+
+/// Hand `args`' links to the app's schemes to `aio::ui::links`: the
+/// launch's (started by a link) and each later one's.
+pub(crate) fn open_links(args: &[String]) {
+    for l in links_in(args, SCHEMES.get().map_or(&[], Vec::as_slice)) {
+        aio::ui::open_link(l);
+    }
+}
 
 /// The running instance's door for later launches.
 pub(crate) fn hand_addr(id: &str, data: &Path) -> io::Result<String> {
@@ -154,6 +172,18 @@ pub(crate) fn open_door(id: &str, data: &Path) {
         Ok(None) => {}
         Err(e) => eprintln!("[aio] {id}: no door for later launches or `ax stop` ({e})"),
     }
+}
+
+/// What a launch handed to a running app with no page to bring forward
+/// (served only) says (pure): where it serves (its `serving.json`), that it
+/// took the launch, and how to stop it or run another.
+fn handed_to_server(id: &str, serving: Option<String>) -> String {
+    let port = serving.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()?["port"].as_u64());
+    let at = port.map_or(String::new(), |p| format!(" on port {p}"));
+    format!(
+        "[aio] {id} is already running, serving{at} with no window: it took this launch's arguments \
+         (ax stop {id} stops it; --instance <name> runs another copy)"
+    )
 }
 
 /// The app's args `ax dev` gives a debug build as JSON, when dx's own
@@ -235,10 +265,24 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
     let plan = aio::paths::plan_app(cfg, &ask)?;
     // `<app> --quit`: the instance running on these dirs is asked to stop,
     // the graceful way (Windows has no SIGTERM: scripts, the smoke test).
-    if args.iter().any(|a| a == "--quit") {
+    // Never after a bare `--`: a link's text is no flag.
+    if args.iter().take_while(|a| *a != "--").any(|a| a == "--quit") {
         return quit_at(id, &plan.data).map(|()| Start::Done);
     }
-    let Some(d) = claim_or_hand(id, &plan, ask.takeover, &args)? else { return Ok(Start::HandedOver) };
+    _ = SCHEMES.set(cfg.app.schemes.clone());
+    let Some(d) = claim_or_hand(id, &plan, ask.takeover, &args)? else {
+        if shows.is_none() || cfg.app.mode == aio::config::Mode::Server {
+            eprintln!("{}", handed_to_server(id, std::fs::read_to_string(plan.data.join("serving.json")).ok()));
+        }
+        return Ok(Start::HandedOver);
+    };
+    // Started by a link (`myapp://…`): the app hears it once it listens.
+    open_links(&args);
+    // macOS hands links as Apple events to the running `.app`.
+    #[cfg(target_os = "macos")]
+    if !cfg.app.schemes.is_empty() {
+        crate::macurl::listen();
+    }
     aio::boot::begin(cfg, version, &d)?;
     crate::feedback::wire(cfg);
     _ = APP.set((id.into(), version.into()));
@@ -420,6 +464,26 @@ mod tests {
         assert_eq!(built(Some("browser"), Window), Browser);
         assert_eq!(built(Some("window"), Browser), Window);
         assert_eq!(built(None, Browser), Browser);
+    }
+
+    #[test]
+    fn a_launchs_links_are_those_to_the_apps_schemes_in_any_case() {
+        let args: Vec<String> = ["notes.md", "lnk://a?b=c", "LNK:b", "other://x", "lnkx://y", "--", "lnk:", "/lnk:x"]
+            .map(String::from)
+            .into();
+        assert_eq!(links_in(&args, &["lnk".into()]), ["lnk://a?b=c", "LNK:b", "lnk:"]);
+        assert!(links_in(&args, &[]).is_empty(), "no schemes, no links");
+    }
+
+    #[test]
+    fn a_launch_handed_to_a_server_says_where_it_serves_and_how_to_stop_it() {
+        let said = handed_to_server("relay", Some(r#"{"port":8100,"host":"0.0.0.0"}"#.into()));
+        assert_eq!(
+            said,
+            "[aio] relay is already running, serving on port 8100 with no window: it took this launch's arguments \
+             (ax stop relay stops it; --instance <name> runs another copy)"
+        );
+        assert!(handed_to_server("relay", None).starts_with("[aio] relay is already running, serving with no window"));
     }
 
     #[test]

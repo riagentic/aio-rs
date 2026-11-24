@@ -86,6 +86,32 @@ use target::Target;
 
 type Out = Result<String, String>;
 
+/// Why a verb has no answer: its command line was wrong (exit 2, as one
+/// `verbs::read` refuses: a flag's value, flags that don't go together) or
+/// its work failed (exit 1).
+#[derive(Debug, PartialEq)]
+enum Fail {
+    Usage(String),
+    Failed(String),
+}
+
+impl From<String> for Fail {
+    fn from(e: String) -> Self {
+        Fail::Failed(e)
+    }
+}
+
+impl From<&str> for Fail {
+    fn from(e: &str) -> Self {
+        Fail::Failed(e.into())
+    }
+}
+
+/// A usage error: exit 2.
+fn usage(e: impl Into<String>) -> Fail {
+    Fail::Usage(e.into())
+}
+
 /// The last `n` lines across the rotated files, oldest first.
 fn log_lines(dir: &Path, n: usize) -> Out {
     let mut lines: Vec<String> = Vec::new();
@@ -1010,21 +1036,21 @@ fn write_or_say(f: &str, text: String, what: &str) -> Out {
 }
 
 /// Run a verb as `verbs::read` gave it: the verb, its flags, `--`, its words.
-fn run(args: &[String]) -> Out {
+fn run(args: &[String]) -> Result<String, Fail> {
     let cut = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let (flags, pos) = (&args[1..cut], args.get(cut + 1..).unwrap_or_default());
     let has = |f: &str| flags.iter().any(|a| a == f);
     let json = has("--json");
     if args[0] == "build" && has("--quick") {
         if has("--sizes") {
-            return Err("--quick is a build to try: --sizes measures the one you ship (ax build <app> --sizes)".into());
+            return Err(usage("--quick is a build to try: --sizes measures the one you ship (ax build <app> --sizes)"));
         }
         freeze::quick();
         eprintln!("ax build: --quick: no LTO, 16 codegen units (a bigger, slower binary): to try, never to ship");
     }
     let value = |f: &str| flags.iter().position(|a| a == f).and_then(|i| flags.get(i + 1)).map(String::as_str);
     let last: Option<u32> = match value("--last") {
-        Some(n) => Some(n.parse().map_err(|_| "--last needs a number")?),
+        Some(n) => Some(n.parse().map_err(|_| usage("--last needs a number"))?),
         None => None,
     };
     let p: Vec<&str> = pos.iter().map(String::as_str).collect();
@@ -1038,44 +1064,47 @@ fn run(args: &[String]) -> Out {
     // `--wait <s>`: how long a stopping app is given before SIGTERM.
     let wait = || match value("--wait") {
         Some(s) => {
-            s.parse().map(std::time::Duration::from_secs).map_err(|_| format!("--wait {s}: a number of seconds"))
+            s.parse().map(std::time::Duration::from_secs).map_err(|_| usage(format!("--wait {s}: a number of seconds")))
         }
         None => Ok(std::time::Duration::from_secs(15)),
     };
     // `--window <n>`: which of the app's windows (0, the first).
     let window = || match value("--window") {
-        Some(n) => n.parse::<usize>().map_err(|_| format!("--window {n}: 0, 1, 2…")),
+        Some(n) => n.parse::<usize>().map_err(|_| usage(format!("--window {n}: 0, 1, 2…"))),
         None => Ok(0),
     };
     // `--wait-client <ms>`: how long surface and trigger wait for the window.
     let wait_client = || match value("--wait-client") {
-        Some(ms) => {
-            ms.parse().map(std::time::Duration::from_millis).map_err(|_| format!("--wait-client {ms}: milliseconds"))
-        }
+        Some(ms) => ms
+            .parse()
+            .map(std::time::Duration::from_millis)
+            .map_err(|_| usage(format!("--wait-client {ms}: milliseconds"))),
         None => Ok(std::time::Duration::ZERO),
     };
     // The window's DevTools protocol: `--cdp`'s port, else the app's own door.
     let reach = |t: &Target| cdp::reach(value("--cdp"), cdp::recorded(&t.plan), cdp::door(&t.id, &t.plan));
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     if let Some(v) = build_version(value("--app-version"), var("AIORT_BUILD_VERSION"), var("AIO_BUILD_VERSION")) {
-        version::ask(&v)?;
+        version::ask(&v).map_err(usage)?;
     }
     if let Some(d) = value("--out") {
-        build::ask_out(d)?;
+        build::ask_out(d).map_err(usage)?;
     }
-    match (args[0].as_str(), p.as_slice()) {
+    let out: Out = match (args[0].as_str(), p.as_slice()) {
         ("dev", [name, "--android", rest @ ..]) => {
             let (mut device, mut native, mut it) = (None, false, rest.iter());
             while let Some(a) = it.next() {
                 match *a {
-                    "--device" => device = Some(*it.next().ok_or("--device needs a serial")?),
+                    "--device" => device = Some(*it.next().ok_or_else(|| usage("--device needs a serial"))?),
                     "--native" => native = true,
-                    _ => return Err("ax dev <app> --android [--device serial] [--native]".into()),
+                    _ => return Err(usage("ax dev <app> --android [--device serial] [--native]")),
                 }
             }
             dev::android(name, device, native)
         }
-        ("dev", [name, rest @ ..]) if rest.contains(&"--web") => web::dev(name, web::Serve::parse(rest)?),
+        ("dev", [name, rest @ ..]) if rest.contains(&"--web") => {
+            web::dev(name, web::Serve::parse(rest).map_err(usage)?)
+        }
         ("dev", [name, ..]) => dev::run(name, &pos[1..]),
         ("check", [name]) => check::run(name, has("--release")),
         ("test", [name]) if has("--android") => install::lane(name, value("--device")),
@@ -1090,7 +1119,7 @@ fn run(args: &[String]) -> Out {
         ("create", [name]) => {
             let here = std::env::current_dir().map_err(|e| e.to_string())?;
             let aio = match (value("--aio"), value("--aio-version")) {
-                (Some(_), Some(_)) => return Err("--aio (a checkout) or --aio-version (a release), not both".into()),
+                (Some(_), Some(_)) => return Err(usage("--aio (a checkout) or --aio-version (a release), not both")),
                 (Some(d), None) => create::Aio::checkout(&here.join(name), Path::new(d))?,
                 (None, Some(v)) => create::Aio::version(v, create::tags)?,
                 (None, None) => create::Aio::this(),
@@ -1098,7 +1127,7 @@ fn run(args: &[String]) -> Out {
             let css = match value("--css") {
                 None => false,
                 Some("tailwind") => true,
-                Some(c) => return Err(format!("--css {c}: tailwind (any other tool: [build] css in aio.toml)")),
+                Some(c) => return Err(usage(format!("--css {c}: tailwind (any other tool: [build] css in aio.toml)"))),
             };
             let maintainer = create::git_maintainer(&here);
             let new = create::New {
@@ -1110,6 +1139,8 @@ fn run(args: &[String]) -> Out {
                 tailwind: css,
                 ..create::New::of(name)
             };
+            // A name, template, target or --css that can't be is the command line's.
+            create::files(&new).map_err(usage)?;
             // The folder the new app's builds go to: its toolchain is the template's pin.
             let rustup = std::env::var("RUSTUP_TOOLCHAIN").ok();
             let pin = rustup.as_deref().or(Some(crate::setup::toolchain()));
@@ -1198,11 +1229,11 @@ fn run(args: &[String]) -> Out {
             #[cfg(unix)]
             if built.platform.os == "linux" && has("--appimage") {
                 let image = package::appimage(&built)?;
-                return installed::from_appimage(&places(), &built.app, &image).map(|s| s + &note);
+                return Ok(installed::from_appimage(&places(), &built.app, &image)? + &note);
             }
             #[cfg(unix)]
             if built.platform.os == "linux" {
-                return installed::from_bundle(&out, &[]).map(|s| s + &note);
+                return Ok(installed::from_bundle(&out, &[])? + &note);
             }
             Ok(format!("{}\n{}{note}", out.display(), bundle::how_to_install(&built.app, built.platform.os, &out)))
         }
@@ -1233,10 +1264,10 @@ fn run(args: &[String]) -> Out {
                 "--tunnel",
             ];
             if machine && !boxed.iter().any(|f| has(f)) {
-                return lab::run(app, os, has("--stop"));
+                return Ok(lab::run(app, os, has("--stop"))?);
             }
             let port = match value("--port") {
-                Some(p) => Some(p.parse().map_err(|_| format!("--port {p}: a port"))?),
+                Some(p) => Some(p.parse().map_err(|_| usage(format!("--port {p}: a port")))?),
                 None => None,
             };
             let ask = boxlab::Ask {
@@ -1269,11 +1300,11 @@ fn run(args: &[String]) -> Out {
         ("build", [app]) if has("--list") => build::list(app),
         ("build", [app]) if has("--sizes") => build::sizes_of(app),
         ("build", [_]) if has("--dev") && !has("--web") => {
-            Err("--dev is a web build's: ax build <app> --web --dev".into())
+            return Err(usage("--dev is a web build's: ax build <app> --web --dev"));
         }
         ("build", [app]) if has("--debug") => match has("--android") {
             true => build::android(app, android::Ask { debug: true, ..android::Ask::RELEASE }).map(|(said, _)| said),
-            false => Err("--debug is an Android build's: ax build <app> --android --debug".into()),
+            false => return Err(usage("--debug is an Android build's: ax build <app> --android --debug")),
         },
         ("build", [app]) if has("--web") => web::build(app, has("--dev")).map(|(said, _)| said),
         ("build", [app]) if has("--ios") => ios::build(app).map(|(said, _)| said),
@@ -1316,9 +1347,9 @@ fn run(args: &[String]) -> Out {
         ("config", [app]) => config(app),
         ("discover", []) => {
             let wait = match value("--timeout") {
-                Some(ms) => {
-                    std::time::Duration::from_millis(ms.parse().map_err(|_| format!("--timeout {ms}: milliseconds"))?)
-                }
+                Some(ms) => std::time::Duration::from_millis(
+                    ms.parse().map_err(|_| usage(format!("--timeout {ms}: milliseconds")))?,
+                ),
                 None => aio::discovery::WAIT,
             };
             let found = aio::rt().block_on(aio::discovery::probe_lan(aio::discovery::port(), wait));
@@ -1482,7 +1513,7 @@ fn run(args: &[String]) -> Out {
                 d => d.iter().map(|d| root.join(d)).collect(),
             };
             if let Some(d) = dirs.iter().find(|d| !d.is_dir()) {
-                return Err(format!("ax watch: {} is no folder of {app}: name one to watch (src)", d.display()));
+                return Err(format!("ax watch: {} is no folder of {app}: name one to watch (src)", d.display()).into());
             }
             let (_w, saves) = watch::Watch::new(&dirs)?;
             let typed = start::home_args(&ask);
@@ -1589,7 +1620,7 @@ fn run(args: &[String]) -> Out {
         }
         ("expect", [app, cell, path, op, want @ ..]) => {
             let wait = match value("--wait") {
-                Some(s) => std::time::Duration::from_secs_f64(s.parse().map_err(|_| "--wait needs seconds")?),
+                Some(s) => std::time::Duration::from_secs_f64(s.parse().map_err(|_| usage("--wait needs seconds"))?),
                 None => std::time::Duration::ZERO,
             };
             live::expect_usage(op, want.first().copied())?;
@@ -1623,7 +1654,7 @@ fn run(args: &[String]) -> Out {
             let t = t(app)?;
             let still = ["--check", "--update", "--threshold", "--max-diff", "--selector", "--full", "--size"];
             if let Some(f) = still.iter().find(|f| has(f)) {
-                return Err(format!("{f} shapes one picture, not a video: leave it out with --video"));
+                return Err(usage(format!("{f} shapes one picture, not a video: leave it out with --video")));
             }
             let until = match value("--duration") {
                 Some(s) => Some(
@@ -1631,7 +1662,7 @@ fn run(args: &[String]) -> Out {
                         .ok()
                         .filter(|s: &f64| *s > 0.0 && s.is_finite())
                         .map(std::time::Duration::from_secs_f64)
-                        .ok_or(format!("--duration {s}: seconds, more than 0"))?,
+                        .ok_or_else(|| usage(format!("--duration {s}: seconds, more than 0")))?,
                 ),
                 None => None,
             };
@@ -1642,7 +1673,7 @@ fn run(args: &[String]) -> Out {
         }
         ("shot", [app, file @ ..]) if file.len() <= 1 => {
             if let Some(f) = ["--duration", "--markers"].iter().find(|f| has(f)) {
-                return Err(format!("{f} is a --video's"));
+                return Err(usage(format!("{f} is a --video's")));
             }
             let t = t(app)?;
             let out = match file.first() {
@@ -1650,7 +1681,7 @@ fn run(args: &[String]) -> Out {
                 None => shot::default_file(&t.id),
             };
             let base = match (value("--check"), value("--update")) {
-                (Some(_), Some(_)) => return Err("--check and --update are opposites: pick one".into()),
+                (Some(_), Some(_)) => return Err(usage("--check and --update are opposites: pick one")),
                 (Some(b), None) => shot::Baseline::Check(Path::new(b)),
                 (None, Some(b)) => shot::Baseline::Update(Path::new(b)),
                 (None, None) => shot::Baseline::None,
@@ -1671,15 +1702,16 @@ fn run(args: &[String]) -> Out {
         }
         ("surface", [app, path @ ..]) if path.len() <= 1 => {
             let at = reach(&t(app)?)?;
+            let (n, patience) = (window()?, wait_client()?);
+            let depth = match value("--depth") {
+                Some(d) => Some(d.parse().map_err(|_| usage(format!("--depth {d}: 0, 1, 2…")))?),
+                None => None,
+            };
             aio::rt().block_on(async {
-                let mut s = cdp::window_within(&at, window()?, wait_client()?).await?;
+                let mut s = cdp::window_within(&at, n, patience).await?;
                 match has("--names") {
                     true => surface::names(&mut s).await.map(|n| n.join("\n")),
                     false => {
-                        let depth = match value("--depth") {
-                            Some(d) => Some(d.parse().map_err(|_| format!("--depth {d}: 0, 1, 2…"))?),
-                            None => None,
-                        };
                         let r = surface::Read {
                             path: path.first().copied(),
                             rects: has("--rects"),
@@ -1699,8 +1731,9 @@ fn run(args: &[String]) -> Out {
                 None => app_lib(app).map_or_else(|_| PathBuf::from(testgen::OUT), |(_, dir)| dir.join(testgen::OUT)),
             };
             let at = reach(&t(app)?)?;
+            let (n, patience) = (window()?, wait_client()?);
             aio::rt().block_on(async {
-                let mut s = cdp::window_within(&at, window()?, wait_client()?).await?;
+                let mut s = cdp::window_within(&at, n, patience).await?;
                 testgen::run(&mut s, app, &out).await
             })
         }
@@ -1714,7 +1747,7 @@ fn run(args: &[String]) -> Out {
         }
         ("control", [app]) => {
             let port = match value("--port") {
-                Some(p) => p.parse().map_err(|_| format!("--port {p}: a port"))?,
+                Some(p) => p.parse().map_err(|_| usage(format!("--port {p}: a port")))?,
                 None => 0,
             };
             t(app)?;
@@ -1726,8 +1759,9 @@ fn run(args: &[String]) -> Out {
         }
         ("components", [app]) => {
             let at = reach(&t(app)?)?;
+            let (n, patience) = (window()?, wait_client()?);
             aio::rt().block_on(async {
-                let mut s = cdp::window_within(&at, window()?, wait_client()?).await?;
+                let mut s = cdp::window_within(&at, n, patience).await?;
                 components::run(&mut s, json, has("--renders")).await
             })
         }
@@ -1736,13 +1770,14 @@ fn run(args: &[String]) -> Out {
             let at = reach(&t)?;
             // A recording with --markers notes each trigger, where it acted.
             let journal = t.plan.logs.join(video::JOURNAL);
+            let (asked, patience) = (value("--window").map(|_| window()).transpose()?, wait_client()?);
             aio::rt().block_on(async {
                 // No --window: the newest (aio: the newest client).
-                let n = match value("--window") {
-                    Some(_) => window()?,
+                let n = match asked {
+                    Some(n) => n,
                     None => cdp::newest(&at).await.unwrap_or(0),
                 };
-                let mut s = cdp::window_within(&at, n, wait_client()?).await?;
+                let mut s = cdp::window_within(&at, n, patience).await?;
                 if journal.exists() {
                     let rect = surface::rect(&mut s, path).await.ok();
                     video::note(&journal, path, action, rect);
@@ -1766,7 +1801,7 @@ fn run(args: &[String]) -> Out {
             };
             // `ax top --json`: one view (aio's).
             if (args[0] == "heap" && !has("--watch")) || json {
-                return now();
+                return Ok(now()?);
             }
             let every = match secs.first() {
                 Some(s) => s
@@ -1786,7 +1821,7 @@ fn run(args: &[String]) -> Out {
         ("tables", [app]) => sql::tables(&open(&t(app)?.store())?),
         ("sql", [app]) if has("--tables") => sql::tables(&open(&t(app)?.store())?),
         ("sql", [app, words @ ..]) if !words.is_empty() => sql::query(&open(&t(app)?.store())?, &words.join(" ")),
-        ("sql", [_]) => Err("ax sql <app> <query>, or --tables".into()),
+        ("sql", [_]) => return Err(usage("ax sql <app> <query>, or --tables")),
         ("snapshot", [app]) => snapshot(&t(app)?, value("--as")),
         ("snapshot save", [app]) => snapshot_save(&t(app)?, None, value("--as")),
         ("snapshot save", [app, file]) => snapshot_save(&t(app)?, Some(file), value("--as")),
@@ -1803,7 +1838,7 @@ fn run(args: &[String]) -> Out {
             };
             let app: Vec<String> = cells.into_iter().filter(served).collect();
             if app.is_empty() {
-                return Err(format!("{} isn't running, or serves no cell (nothing was loaded)", t.name));
+                return Err(format!("{} isn't running, or serves no cell (nothing was loaded)", t.name).into());
             }
             travel::load(&|cell| door(&t, cell), &text, &user(None), &app, has("--force"))
         }
@@ -1812,13 +1847,13 @@ fn run(args: &[String]) -> Out {
             let remote = app.ends_with(".aioapp") || (Path::new(app).is_file() && !named.is_empty());
             let (cells, name): (Vec<serde_json::Value>, String) = if remote {
                 if value("--as").is_some() || value("--role").is_some() {
-                    return Err("a profile's caller is its key's: --as and --role are a local app's".into());
+                    return Err(usage("a profile's caller is its key's: --as and --role are a local app's"));
                 }
                 let text = std::fs::read_to_string(app).map_err(|e| format!("{app}: {e}"))?;
                 let p: aio::pairing::Profile =
                     serde_json::from_str(&text).map_err(|e| format!("{app}: not a profile: {e}"))?;
                 if named.is_empty() {
-                    return Err(format!("{app}: name its cells (a server lists none): ax peer {app} <cell>…"));
+                    return Err(format!("{app}: name its cells (a server lists none): ax peer {app} <cell>…").into());
                 }
                 let link = aio::sync::Link {
                     addr: format!("{}:{}", p.host.as_deref().unwrap_or("127.0.0.1"), p.port),
@@ -1848,7 +1883,7 @@ fn run(args: &[String]) -> Out {
                 };
                 let cells: Vec<serde_json::Value> = wanted.iter().filter_map(one).collect();
                 if cells.is_empty() && !aio::paths::running(&t.plan.data) {
-                    return Err(format!("{app} isn't running: ax peer asks the running app"));
+                    return Err(format!("{app} isn't running: ax peer asks the running app").into());
                 }
                 (cells, t.id.clone())
             };
@@ -1874,7 +1909,7 @@ fn run(args: &[String]) -> Out {
                     Ok((meter, _)) => rows.push((c, meter)),
                     // A stored cell the running app serves no door for.
                     Err(_) if cell.is_empty() => {}
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(e.into()),
                 }
             }
             Ok(metrics::cost(&rows, has("--keys"), json))
@@ -1894,7 +1929,7 @@ fn run(args: &[String]) -> Out {
         ("record", [app, rest @ ..]) if !rest.is_empty() => {
             let (only, file, spec) = record::args(rest)?;
             if only.is_none() && value("--type").is_some() {
-                return Err("--type names one cell's type: ax record <app> <cell> <file> --type path".into());
+                return Err(usage("--type names one cell's type: ax record <app> <cell> <file> --type path"));
             }
             let t = t(app)?;
             let store = value("--from").map_or_else(|| t.store(), PathBuf::from);
@@ -1909,7 +1944,7 @@ fn run(args: &[String]) -> Out {
             }
             if span.is_empty() {
                 let whose = only.map_or_else(|| app.to_string(), String::from);
-                return Err(format!("no events of {whose} in that range (ax events {app} lists them)"));
+                return Err(format!("no events of {whose} in that range (ax events {app} lists them)").into());
             }
             let ask: std::collections::BTreeMap<String, Vec<u64>> =
                 span.iter().map(|(c, &(a, b))| (c.clone(), vec![a, b])).collect();
@@ -1938,7 +1973,7 @@ fn run(args: &[String]) -> Out {
                 .collect();
             let text = record::test(app, &record::name_of(file), &cells, &rows, record::exact(&rows));
             if Path::new(file).exists() {
-                return Err(format!("{file} exists: pick a new name"));
+                return Err(format!("{file} exists: pick a new name").into());
             }
             if let Some(dir) = Path::new(file).parent().filter(|d| !d.as_os_str().is_empty()) {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -1954,7 +1989,7 @@ fn run(args: &[String]) -> Out {
         ("persist", [app]) => {
             let t = t(app)?;
             if !aio::paths::running(&t.plan.data) {
-                return Err(format!("{app} isn't running: what it held is written as it stops"));
+                return Err(format!("{app} isn't running: what it held is written as it stops").into());
             }
             let cells = metrics::cells(&open(&t.store())?)?;
             // A cell the running app serves answers its door.
@@ -1964,17 +1999,18 @@ fn run(args: &[String]) -> Out {
                     if ask(gone, serde_json::json!({ "t": "fields" })).is_ok() {
                         return Err(format!(
                             "{gone} is a cell of the running app: only a stored cell it no longer declares is dropped"
-                        ));
+                        )
+                        .into());
                     }
                     if !cells.iter().any(|c| c == gone) {
-                        return Err(format!("{gone}: no such cell in the store (ax migrations lists them)"));
+                        return Err(format!("{gone}: no such cell in the store (ax migrations lists them)").into());
                     }
                     let mut why = format!("{app} serves no cell to ask");
                     for c in cells.iter().filter(|c| *c != gone) {
                         match ask(c, serde_json::json!({ "t": "drop", "cell": gone })) {
                             Ok(_) => return Ok(format!("dropped {gone}: its history is gone from the store")),
                             Err(e) if e.contains("isn't running") || e.contains("os error") => why = e,
-                            Err(e) => return Err(e),
+                            Err(e) => return Err(e.into()),
                         }
                     }
                     Err(why)
@@ -1989,7 +2025,7 @@ fn run(args: &[String]) -> Out {
                         })
                         .collect();
                     if done.is_empty() {
-                        return Err(format!("{app} serves none of its stored cells"));
+                        return Err(format!("{app} serves none of its stored cells").into());
                     }
                     Ok(done.join("\n"))
                 }
@@ -2037,7 +2073,9 @@ fn run(args: &[String]) -> Out {
         ("pair", [app]) => pair_code(&t(app)?, has("--plain")),
         ("pair", [app, addr, code]) => pair(&t(app)?, addr, code),
         ("pair", [_, addr]) => {
-            Err(format!("ax pair <app> {addr} <code>: the code too (ax pair <app> on the app's machine makes one)"))
+            return Err(usage(format!(
+                "ax pair <app> {addr} <code>: the code too (ax pair <app> on the app's machine makes one)"
+            )));
         }
         ("auth", [app, what @ ..]) => {
             let f = auth::Fields { role: value("--role"), email: value("--email"), password: value("--password") };
@@ -2130,8 +2168,9 @@ fn run(args: &[String]) -> Out {
         ("backup", [app, file]) => backup(&t(app)?, Some(file), json),
         ("restore", [app, file]) => restore(&t(app)?, file),
         // `verbs::read` lets through only what a verb's usage allows.
-        _ => Err(format!("no way to run: ax {}", args.join(" "))),
-    }
+        _ => return Err(usage(format!("no way to run: ax {}", args.join(" ")))),
+    };
+    Ok(out?)
 }
 
 /// The app of the folder the command runs in.
@@ -2148,7 +2187,8 @@ fn outcome(asked: Result<verbs::Ask, String>) -> (u8, Out) {
         Ok(verbs::Ask::Say(text)) => (0, Ok(text)),
         Ok(verbs::Ask::Run(args)) => match run(&args) {
             Ok(out) => (0, Ok(out)),
-            Err(e) => (1, Err(e)),
+            Err(Fail::Usage(e)) => (2, Err(e)),
+            Err(Fail::Failed(e)) => (1, Err(e)),
         },
         Err(e) => (2, Err(e)),
     }
@@ -2258,13 +2298,7 @@ fn main() -> ExitCode {
     {
         let cut = a.iter().position(|w| w == "--").unwrap_or(a.len());
         let names: Vec<&str> = a[cut + 1..].iter().map(String::as_str).collect();
-        return match aio::paths::Ask::parse(&a[1..cut]) {
-            Ok(ask) => status::main(&names, &ask, json),
-            Err(e) => {
-                eprintln!("ax: {e}");
-                ExitCode::from(2)
-            }
-        };
+        return status::main(&names, aio::paths::Ask::parse(&a[1..cut]), json);
     }
     let (code, out) = outcome(asked);
     // aio's `--quiet`: the exit code says it; a failure still says why.
@@ -2654,6 +2688,19 @@ mod tests {
         assert_eq!(cli("events a --last").0, 2);
         assert!(cli("events a --last x").1.unwrap_err().contains("--last needs a number"));
         assert!(cli("").1.unwrap().contains("ax state"));
+    }
+
+    /// A command line that is wrong is exit 2, also when the verb finds it
+    /// running (a flag's value); the work failing is exit 1.
+    #[test]
+    fn a_usage_error_a_verb_finds_is_exit_2() {
+        let (code, out) = cli("events a --last x");
+        assert_eq!((code, out.unwrap_err()), (2, "--last needs a number".into()));
+        let (code, out) = cli("create x --css sass");
+        assert_eq!(code, 2, "{out:?}");
+        let (code, out) = cli("create x --template nope");
+        assert!(code == 2 && out.unwrap_err().contains("--template nope: one of app"));
+        assert_eq!(cli("events a-r4-app-that-isnt").0, 1, "no such app: the work failed");
     }
 
     fn cli(line: &str) -> (u8, Out) {

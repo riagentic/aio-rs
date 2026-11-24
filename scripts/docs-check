@@ -38,7 +38,8 @@ EXTRA = [re.escape(w.strip()) for w in pathlib.Path(TERMS).read_text().splitline
 PRIVATE = re.compile("|".join([r"/home/|/Users/[a-z]|\bv2\b",
                                r"@(?!users\.noreply\.github\.com|example\.)[a-z0-9-]+\.(?:com|me|org|net)\b"] + EXTRA), re.I)
 EXCERPT = "// ax create's"
-TEMPLATE = [ROOT / "crates/aio-cli/src/create.rs", ROOT / "crates/aio-cli/src/create/app_lib.rs"]
+TEMPLATE = [ROOT / "crates/aio-cli/src/create.rs", ROOT / "crates/aio-cli/src/create/app_lib.rs",
+            ROOT / "crates/aio-cli/src/create/relay_lib.rs"]
 
 problems = []
 

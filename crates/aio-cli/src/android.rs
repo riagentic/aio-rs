@@ -318,19 +318,25 @@ pub fn splash_files(
 }
 
 /// The manifest's lines for `cfg`: the camera's permission (its hardware
-/// optional: the app still installs where there is none), the launch mode
-/// and one VIEW filter per scheme (a link reaches the copy that is open),
-/// and the theme that fixes light or dark (`splashed`: the splash's).
-fn manifest_parts(cfg: &AndroidBuild, splashed: bool) -> [(&'static str, String); 4] {
+/// optional: the app still installs where there is none), the fingerprint
+/// or face's (`aio::secrets::set_biometric`), the launch mode and one VIEW
+/// filter per scheme, the app's (`[app] schemes`) and Android's own (a link
+/// reaches the copy that is open), and the theme that fixes light or dark
+/// (`splashed`: the splash's).
+fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool) -> [(&'static str, String); 5] {
     let camera = if cfg.camera {
         "\n  <uses-permission android:name=\"android.permission.CAMERA\" />\n  \
          <uses-feature android:name=\"android.hardware.camera\" android:required=\"false\" />"
     } else {
         ""
     };
-    let mode = if cfg.schemes.is_empty() { "" } else { "\n      android:launchMode=\"singleTask\"" };
-    let links: String = cfg
-        .schemes
+    let biometric =
+        if cfg.biometric { "\n  <uses-permission android:name=\"android.permission.USE_BIOMETRIC\" />" } else { "" };
+    let mut schemes: Vec<&String> = app.iter().chain(&cfg.schemes).collect();
+    schemes.sort();
+    schemes.dedup();
+    let mode = if schemes.is_empty() { "" } else { "\n      android:launchMode=\"singleTask\"" };
+    let links: String = schemes
         .iter()
         .map(|s| {
             format!(
@@ -342,7 +348,13 @@ fn manifest_parts(cfg: &AndroidBuild, splashed: bool) -> [(&'static str, String)
         })
         .collect();
     let theme = if splashed { SPLASH_THEME } else { system_theme(cfg.color_scheme) };
-    [("{{CAMERA}}", camera.into()), ("{{LAUNCH_MODE}}", mode.into()), ("{{LINKS}}", links), ("{{THEME}}", theme.into())]
+    [
+        ("{{CAMERA}}", camera.into()),
+        ("{{BIOMETRIC}}", biometric.into()),
+        ("{{LAUNCH_MODE}}", mode.into()),
+        ("{{LINKS}}", links),
+        ("{{THEME}}", theme.into()),
+    ]
 }
 
 /// The template, filled in for `app` and its `[build.android]` (`cfg`), its
@@ -362,7 +374,7 @@ pub fn project(
     let page = kind == Apk::Page;
     let abis = ABIS.iter().map(|(a, _)| format!("\"{a}\"")).collect::<Vec<_>>().join(", ");
     let code = version_code(&app.version)?.to_string();
-    let parts = manifest_parts(cfg, !splash.is_empty());
+    let parts = manifest_parts(cfg, &app.schemes, !splash.is_empty());
     let (suffix, label) = match kind != Apk::App {
         true => (".dev", format!("{} (dev)", crate::build::label(app))),
         false => ("", crate::build::label(app).to_string()),
@@ -1191,14 +1203,15 @@ mod tests {
     #[test]
     fn the_manifest_opens_the_apps_schemes_declares_the_camera_and_fixes_the_theme_only_when_asked() {
         // aio tests/android-deep-links.test.ts, build-android-camera.test.ts.
-        let app = App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None };
+        let app =
+            App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
         let manifest = |cfg: &AndroidBuild| {
             let files = project(&app, None, cfg, b"png", &[], &[], Apk::App).unwrap();
             let m = files.into_iter().find(|(p, _)| p == "app/src/main/AndroidManifest.xml").unwrap().1;
             String::from_utf8(m).unwrap()
         };
         let none = manifest(&AndroidBuild::default());
-        for absent in ["action.VIEW", "launchMode", "CAMERA", "uses-feature", "{{"] {
+        for absent in ["action.VIEW", "launchMode", "CAMERA", "BIOMETRIC", "uses-feature", "{{"] {
             assert!(!none.contains(absent), "{absent} in {none}");
         }
         assert!(
@@ -1208,6 +1221,7 @@ mod tests {
         let cfg = AndroidBuild {
             schemes: vec!["myapp".into(), "other".into()],
             camera: true,
+            biometric: true,
             color_scheme: ColorScheme::Dark,
             ..Default::default()
         };
@@ -1217,6 +1231,7 @@ mod tests {
         assert_eq!(all.matches("android.intent.category.BROWSABLE").count(), 2, "a link in a browser opens it");
         assert!(all.contains("android:launchMode=\"singleTask\""), "a link reaches the copy that is open");
         assert!(all.contains("<uses-permission android:name=\"android.permission.CAMERA\" />"));
+        assert!(all.contains("<uses-permission android:name=\"android.permission.USE_BIOMETRIC\" />"));
         assert!(
             all.contains("android:name=\"android.hardware.camera\" android:required=\"false\""),
             "it still installs where there is no camera"
@@ -1225,6 +1240,16 @@ mod tests {
         let light = manifest(&AndroidBuild { color_scheme: ColorScheme::Light, ..Default::default() });
         assert!(light.contains("@android:style/Theme.DeviceDefault.Light\""));
         assert!(!all.contains("{{") && !light.contains("{{"));
+        // `[app] schemes` open it too, beside Android's own; one filter each.
+        let app = App { schemes: vec!["myapp".into(), "every".into()], ..app.clone() };
+        let files = project(&app, None, &cfg, b"png", &[], &[], Apk::App).unwrap();
+        let m = String::from_utf8(files.into_iter().find(|(p, _)| p == "app/src/main/AndroidManifest.xml").unwrap().1)
+            .unwrap();
+        assert_eq!(m.matches("android.intent.action.VIEW").count(), 3, "{m}");
+        for s in ["every", "myapp", "other"] {
+            assert_eq!(m.matches(&format!("<data android:scheme=\"{s}\" />")).count(), 1, "{s}: {m}");
+        }
+        assert!(m.contains("android:launchMode=\"singleTask\""));
     }
 
     #[test]
@@ -1306,7 +1331,8 @@ mod tests {
 
     #[test]
     fn the_splash_is_the_starting_window_s_colour_and_the_activity_s_image_until_the_first_frame() {
-        let app = App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None };
+        let app =
+            App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
         let s = Splash {
             image: "assets/splash@2x.png".into(),
             text: Some("Starting {title} {version}".into()),
@@ -1385,7 +1411,8 @@ mod tests {
 
     #[test]
     fn the_project_is_filled_in() {
-        let app = App { id: "notes".into(), name: "A & B".into(), version: "1.2.3".into(), icon: None };
+        let app =
+            App { id: "notes".into(), name: "A & B".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
         let get = |files: &[(String, Vec<u8>)], p: &str| {
             files.iter().find(|(f, _)| f == p).map(|(_, t)| String::from_utf8_lossy(t).into_owned()).unwrap()
         };
@@ -1418,7 +1445,8 @@ mod tests {
         let paths: Vec<&str> = overlay.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(paths, ["app/src/main/AndroidManifest.xml", "app/src/main/res/drawable/logo.png"]);
         assert_eq!(overlay_of(&d.path().join("none")).unwrap(), vec![], "no android/: the template as is");
-        let app = App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None };
+        let app =
+            App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
         let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &overlay, Apk::App).unwrap();
         let of = |p: &str| files.iter().filter(|(f, _)| f == p).map(|(_, b)| b.clone()).collect::<Vec<_>>();
         assert_eq!(of("app/src/main/AndroidManifest.xml"), [b"<manifest label=\"Notes\"/>".to_vec()], "replaced, once");
@@ -1530,7 +1558,8 @@ mod tests {
         assert_eq!(application_id_of("x", Some("3d"), &none), "aio.rt.x");
         let own = AndroidBuild { application_id: Some("com.example.notes".into()), ..none.clone() };
         assert_eq!(application_id_of("notes-rs", Some("notes"), &own), "com.example.notes", "declared wins");
-        let app = App { id: "notes-rs".into(), name: "Notes".into(), version: "1.3.0".into(), icon: None };
+        let app =
+            App { id: "notes-rs".into(), name: "Notes".into(), version: "1.3.0".into(), icon: None, schemes: vec![] };
         let files = project(&app, Some("notes"), &none, b"png", &[], &[], Apk::App).unwrap();
         let gradle =
             String::from_utf8_lossy(&files.iter().find(|(p, _)| p == "app/build.gradle.kts").unwrap().1).into_owned();
@@ -1562,7 +1591,7 @@ mod tests {
         assert_eq!(label_xml("?quest"), "\\?quest");
         assert_eq!(label_xml("@home"), "\\@home");
         assert_eq!(label_xml("tab\there\u{7f}"), "tabhere");
-        let app = App { id: "notes".into(), name: String::new(), version: "1.0.0".into(), icon: None };
+        let app = App { id: "notes".into(), name: String::new(), version: "1.0.0".into(), icon: None, schemes: vec![] };
         let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &[], Apk::App).unwrap();
         let m = String::from_utf8_lossy(&files.iter().find(|(p, _)| p.ends_with("AndroidManifest.xml")).unwrap().1)
             .into_owned();
@@ -1607,7 +1636,8 @@ mod tests {
 
     #[test]
     fn the_dev_page_apk_is_beside_the_app_without_its_library() {
-        let app = App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None };
+        let app =
+            App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
         let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &[], Apk::Page).unwrap();
         let get =
             |p: &str| files.iter().find(|(f, _)| f.ends_with(p)).map(|(_, b)| String::from_utf8_lossy(b).into_owned());

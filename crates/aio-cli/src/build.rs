@@ -14,13 +14,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// What the package says about the app it builds.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct App {
     pub id: String,
     pub name: String,
     pub version: String,
     /// `assets/icon.png` beside its `aio.toml`, if there is one.
     pub icon: Option<PathBuf>,
+    /// `[app] schemes`: the URL schemes an install registers for it.
+    pub schemes: Vec<String>,
 }
 
 /// The app's `aio.toml`: the one `aio::config!()` builds in, the nearest
@@ -68,19 +70,49 @@ pub fn app_of(pkg: &Pkg) -> Result<(App, aio::config::Config), String> {
     let cfg = aio::config::Config::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?;
     let icon = Some(dir.join("assets/icon.png")).filter(|p| p.exists());
     let version = crate::version::of(cfg.app.version.as_deref(), &pkg.version, &pkg.dirs)?;
-    Ok((App { id: cfg.app.id.clone(), name: cfg.app.name.clone(), version, icon }, cfg))
+    let schemes = cfg.app.schemes.clone();
+    Ok((App { id: cfg.app.id.clone(), name: cfg.app.name.clone(), version, icon, schemes }, cfg))
 }
 
 /// The menu entry, written by `install.sh` with the installed binary's path.
 /// `StartupWMClass` is the app id: the window class aio gives it. `%U`:
-/// the files and links "Open with" hands it, as its arguments.
+/// the files and links "Open with" hands it, as its arguments; `MimeType`:
+/// the links to its `[app] schemes` are its own (`x-scheme-handler`).
 pub fn desktop_entry(app: &App, exec: &str) -> String {
     let icon = if app.icon.is_some() { format!("Icon={}\n", app.id) } else { String::new() };
+    let mime: String = app.schemes.iter().map(|s| format!("x-scheme-handler/{s};")).collect();
+    let mime = if mime.is_empty() { mime } else { format!("MimeType={mime}\n") };
     format!(
-        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\" %U\n{icon}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
+        "[Desktop Entry]\nType=Application\nName={}\nExec=\"{exec}\" %U\n{icon}{mime}StartupWMClass={}\nTerminal=false\nCategories=Utility;\n",
         app.name.replace('\n', " "),
         app.id
     )
+}
+
+/// The shell lines that make `<id>.desktop` the handler of each of the
+/// app's schemes for this user (`xdg-mime default`: `mimeapps.list`).
+fn scheme_handlers(app: &App) -> String {
+    let set: String = app
+        .schemes
+        .iter()
+        .map(|s| format!("  xdg-mime default {}.desktop x-scheme-handler/{s} || true\n", app.id))
+        .collect();
+    match set.is_empty() {
+        true => set,
+        false => format!("if command -v xdg-mime >/dev/null 2>&1; then\n{set}fi\n"),
+    }
+}
+
+/// `mimeapps.list`'s text (`list`) without the lines that make `<id>.desktop`
+/// a scheme's handler (pure): what an uninstall leaves. `None`: none there.
+pub fn unregistered(list: &str, id: &str) -> Option<String> {
+    let ours = |l: &str| {
+        l.strip_prefix("x-scheme-handler/")
+            .and_then(|l| l.split_once('='))
+            .is_some_and(|(_, h)| h.trim_end().trim_end_matches(';') == format!("{id}.desktop"))
+    };
+    let kept: Vec<&str> = list.lines().filter(|l| !ours(l)).collect();
+    (kept.len() < list.lines().count()).then(|| kept.iter().map(|l| format!("{l}\n")).collect())
 }
 
 /// `install.sh`: for this user only, into the XDG dirs. The bundle goes
@@ -103,8 +135,9 @@ pub fn install_sh(app: &App, bundle: &str, menu: bool) -> String {
         true => (
             format!(
                 "mkdir -p \"$data/applications\"\n{icon}cat > \"$data/applications/{id}.desktop\" <<EOF\n{}EOF\n\
-                 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database \"$data/applications\" || true; fi\n",
-                desktop_entry(app, &format!("$bin/{id}"))
+                 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database \"$data/applications\" || true; fi\n{}",
+                desktop_entry(app, &format!("$bin/{id}")),
+                scheme_handlers(app)
             ),
             ", and in the app menu",
         ),
@@ -137,6 +170,10 @@ pub fn uninstall_sh(app: &App) -> String {
          bin=\"${{XDG_BIN_HOME:-$HOME/.local/bin}}\"\ndata=\"${{XDG_DATA_HOME:-$HOME/.local/share}}\"\n\
          cache=\"${{XDG_CACHE_HOME:-$HOME/.cache}}\"\n\
          rm -f \"$bin/{id}\" \"$data/applications/{id}.desktop\" \"$data/icons/hicolor/256x256/apps/{id}.png\"\n\
+         list=\"${{XDG_CONFIG_HOME:-$HOME/.config}}/mimeapps.list\"\n\
+         ours='^x-scheme-handler/[^=]*={id_re}\\.desktop;\\{{0,1\\}}$'\n\
+         if [ -f \"$list\" ] && grep -q \"$ours\" \"$list\"; then grep -v \"$ours\" \"$list\" > \"$list.aio-rt\" || true; cat \"$list.aio-rt\" > \"$list\"; rm -f \"$list.aio-rt\"; fi\n\
+         if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database \"$data/applications\" || true; fi\n\
          rm -rf \"${{AIORT_INSTALL_ROOT:-$data/aio-rt/install}}/{id}\"\n\
          if [ \"${{1:-}}\" = \"--data\" ]; then\n\
          \x20 rm -rf \"$data/aio-rt/apps/{id}\" \"$cache/aio-rt/{id}\"\n\
@@ -145,6 +182,7 @@ pub fn uninstall_sh(app: &App) -> String {
          \x20 echo \"{name} is removed. Its data is still in $data/aio-rt/apps/{id} (uninstall.sh --data removes it).\"\n\
          fi\n",
         name = app.name,
+        id_re = id.replace('.', "\\."),
     )
 }
 
@@ -277,8 +315,8 @@ pub fn cache_dir() -> PathBuf {
 /// the target dir, ready to go in the app's packages (a macOS one is made
 /// on a Mac: it is signed again).
 fn bundled_runtime(app: &App, cfg: &aio::config::Config, p: &Platform, target: &Path) -> Result<PathBuf, String> {
-    use aio::config::{Extras, Mode};
-    if matches!(cfg.app.mode, Mode::Server | Mode::Cli) {
+    use aio::config::Extras;
+    if !cfg.app.mode.has_window() {
         return Err("[build] runtime = \"bundled\": this app has no window, so no Electron to bundle".into());
     }
     let slug = electron_slug(p);
@@ -897,10 +935,7 @@ pub fn run(
         Some(p) => p.split(',').collect(),
         None => cfg.build.platforms.iter().map(String::as_str).collect(),
     };
-    let fallback = match cfg.app.mode {
-        aio::config::Mode::Server | aio::config::Mode::Cli => crate::fleet::Kind::Cli,
-        _ => crate::fleet::Kind::Desktop,
-    };
+    let fallback = if cfg.app.mode.has_window() { crate::fleet::Kind::Desktop } else { crate::fleet::Kind::Cli };
     // Each target across its own platforms, else [build] platforms.
     let mut plan = vec![];
     for t in crate::fleet::plan(name, &cfg.build.targets, select, fallback)? {
@@ -1410,7 +1445,8 @@ mod tests {
         let bundled = cfg("[build]\nruntime = \"bundled\"");
         let rt = kept_runtime(&bundled, d.path(), p).unwrap();
         assert_eq!(rt, d.path().join(format!("aio/notes-electron-{}", aio::paths::electron_slug())));
-        let app = App { id: "notes".into(), name: "Notes".into(), version: "1.0.0".into(), icon: None };
+        let app =
+            App { id: "notes".into(), name: "Notes".into(), version: "1.0.0".into(), icon: None, schemes: vec![] };
         let b = Built {
             app,
             cfg: bundled,
@@ -1435,6 +1471,7 @@ mod tests {
             name: "Notes".into(),
             version: "1.2.0".into(),
             icon: icon.then(|| PathBuf::from("icon.png")),
+            schemes: vec![],
         }
     }
 
@@ -1451,6 +1488,30 @@ mod tests {
         assert_eq!(bundle_file(&notes(false), arm), "notes-1.2.0-linux-arm64.tar.gz");
         let mac = crate::platform::of("macos", "aarch64").unwrap();
         assert_eq!(bundle_file(&notes(false), mac), "notes-1.2.0-macos-arm64.zip");
+        assert!(!e.contains("MimeType") && !install_sh(&notes(true), "b", true).contains("xdg-mime"), "no schemes");
+    }
+
+    #[test]
+    fn an_install_makes_the_app_its_schemes_handler_and_an_uninstall_takes_only_its_own() {
+        let app = App { schemes: vec!["notes".into(), "nt+x".into()], ..notes(false) };
+        let e = desktop_entry(&app, "/b/notes");
+        assert!(e.contains("\nMimeType=x-scheme-handler/notes;x-scheme-handler/nt+x;\n"), "{e}");
+        let sh = install_sh(&app, "b", true);
+        assert!(sh.contains("  xdg-mime default notes.desktop x-scheme-handler/notes || true\n"), "{sh}");
+        assert!(sh.contains("  xdg-mime default notes.desktop x-scheme-handler/nt+x || true\n"), "{sh}");
+        assert!(!install_sh(&app, "b", false).contains("xdg-mime"), "a CLI has no menu entry to name");
+        let list = "[Default Applications]\nx-scheme-handler/notes=notes.desktop\nx-scheme-handler/m=mail.desktop\n\
+                    [Added Associations]\nx-scheme-handler/nt+x=notes.desktop;\nx-scheme-handler/q=notes.desktop;mail.desktop;\n\
+                    x-scheme-handler/r=notes-old.desktop\ntext/plain=notes.desktop\n";
+        assert_eq!(
+            unregistered(list, "notes").as_deref(),
+            Some(
+                "[Default Applications]\nx-scheme-handler/m=mail.desktop\n[Added Associations]\n\
+                 x-scheme-handler/q=notes.desktop;mail.desktop;\nx-scheme-handler/r=notes-old.desktop\ntext/plain=notes.desktop\n"
+            ),
+            "another app's, a shared line and a file type stay"
+        );
+        assert_eq!(unregistered("x-scheme-handler/m=mail.desktop\n", "notes"), None, "nothing to write");
     }
 
     #[test]

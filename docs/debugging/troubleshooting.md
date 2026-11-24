@@ -193,7 +193,7 @@ More pitfalls, by symptom: [FAQ and pitfalls](../basics/faq.md#pitfalls).
 | the app crashes at start on Android 10 | an own `android/` `MainActivity.java` calling API 30 | the build names it; re-base it on the template's (`[build.android] strict = true` refuses it) |
 | `ax install --android` refuses the APK | the newest APK is older than the sources | `--build` builds first, or `--apk <file>` names one |
 | the camera never asks | the APK doesn't declare it | `[build.android] camera = true` |
-| a `notes://` link doesn't open the app | the scheme isn't declared | `[build.android] schemes = ["notes"]` |
+| a `notes://` link doesn't open the app | the scheme isn't declared, or the app isn't installed (`ax dev` registers nothing) | `[app] schemes = ["notes"]`, then install it; on macOS open the `.app` once |
 | a new build won't install over the old one | it is signed by another key | keep one keystore (`[build.android] keystore`), and never change `application_id` |
 
 ## Web (`ax build --web`)

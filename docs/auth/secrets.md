@@ -204,9 +204,15 @@ assert!(!serde_json::to_string(&events).unwrap().contains("482913"), "never the 
 
 ## Secrets the app needs
 
+- A key or token the app keeps for the user between runs (a session
+  key, a refresh token): the OS's secret store, `aio::secrets`
+  ([the OS's secret store](keychain.md)).
 - A provider's API key, a webhook's signing secret: from the environment
   or a file in `data/`, never `aio.toml` (it is built into the binary)
   and never the source.
+- A key the app's installs need but must not hold (a partner's API):
+  a relay holds it and makes their calls
+  ([`ax create --template relay`](../examples/relay.md)).
 - Read it at start, in the app's own code; hand a method only what it
   must store, `#[redact]` and `#[server]`.
 - A service's per-caller tokens: `aio::auth::Users::map` from the

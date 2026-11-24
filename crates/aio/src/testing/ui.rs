@@ -126,17 +126,20 @@ impl Mount {
 
 
 
+    #[track_caller]
     pub fn app(self, app: fn() -> View) -> TestUi {
         self.mount(Box::new(app))
     }
 
     /// Mount one component alone, with its props (aio's `testComponent`).
+    #[track_caller]
     pub fn component<P: Clone + 'static, M: 'static>(self, c: impl Component<P, M>, props: P) -> TestUi {
         self.mount(Box::new(move || c.call(props.clone())))
     }
 
     /// Open the page, then the views on air: a root shown, and a task
     /// that carries the page's frames to it and its edits back.
+    #[track_caller]
     fn mount(self, app: Box<dyn Fn() -> View>) -> TestUi {
         let sandbox = crate::paths::sandbox().expect("a test sandbox");
         UNSEEN.with_borrow_mut(|u| _ = u.get_or_insert_default());
@@ -160,6 +163,7 @@ impl Mount {
     }
 
     /// The test's page, sized and themed as asked.
+    #[track_caller]
     fn page(&self) -> Page {
         // An answered host is reached (the network rule lets it by), never the network.
         let reach: Vec<String> = self.network.iter().cloned().chain(self.stubs.iter().map(|(h, _)| h.clone())).collect();
@@ -178,6 +182,7 @@ impl Mount {
     }
 
     /// The first settle, and the mount's audit.
+    #[track_caller]
     fn started(mut ui: TestUi) -> TestUi {
         ui.settle();
         // Every mount is audited, as aio did: said, not failed (assert on `contrast()` for that).
@@ -444,23 +449,27 @@ fn bits(m: Modifiers) -> u32 {
 
 impl TestUi {
     /// Mount `app` (its globals are fresh: one app instance per test).
+    #[track_caller]
     pub fn new(app: fn() -> View) -> Self {
         Mount::default().app(app)
     }
 
     /// Mount component `c` alone with `props` (aio's `testComponent`).
+    #[track_caller]
     pub fn with<P: Clone + 'static, M: 'static>(c: impl Component<P, M>, props: P) -> Self {
         Mount::default().component(c, props)
     }
 
     /// Take the refusals the view's calls met so far (`method: why`), so
     /// the test's end doesn't fail on them.
+    #[track_caller]
     pub fn failures(&mut self) -> Vec<String> {
         let mine = UNSEEN.with_borrow_mut(|u| u.as_mut().map(std::mem::take).unwrap_or_default());
         [mine, wire_refusals(), self.offline()].concat()
     }
 
     /// The page's requests the network rule refused, taken.
+    #[track_caller]
     fn offline(&self) -> Vec<String> {
         let say = |u: String| {
             format!("network: the page asked for {u}: a UI test refuses the real network (allow its host with Mount::network)")
@@ -469,6 +478,7 @@ impl TestUi {
     }
 
     /// Run the views until `until` is done; a view that panicked fails the test with its panic.
+    #[track_caller]
     fn drive(&mut self, until: impl std::future::Future) {
         self.rt.block_on(self.local.run_until(until));
         if self.task.is_finished() {
@@ -482,6 +492,7 @@ impl TestUi {
     }
 
     /// Run the views for `d` of real time.
+    #[track_caller]
     fn pause(&mut self, d: Duration) {
         let sleep = {
             let _in = self.rt.enter();
@@ -492,6 +503,7 @@ impl TestUi {
 
     /// Hand the page's frames to the views; a submit the browser refused
     /// (a required field left empty) fails the test. How many there were.
+    #[track_caller]
     fn heard(&mut self, back: Value) -> usize {
         if let Some(why) = back["invalid"].as_array().and_then(|i| i.first()).and_then(Value::as_str) {
             panic!("the form can't be submitted: {why}");
@@ -507,6 +519,7 @@ impl TestUi {
     /// Run everything that is ready: the views' renders and tasks, their
     /// edits drawn in the page, the page's events back (mounted, focus,
     /// what its observers saw once it drew), until neither has more.
+    #[track_caller]
     pub fn settle(&mut self) {
         self.settle_now();
         // A commit made off the UI thread waits up to `ui::BACKGROUND` to be
@@ -522,6 +535,7 @@ impl TestUi {
     }
 
     /// [`settle`](Self::settle) without waiting for a commit still to be shown.
+    #[track_caller]
     fn settle_now(&mut self) {
         quiet();
         let yields = || async {
@@ -572,6 +586,7 @@ impl TestUi {
     /// at most; an endless one, a spinner, is drawn where it is). The
     /// pointer shows a `:hover` look only where [`hover`](Self::hover) put
     /// it: one a click left is moved off the page first.
+    #[track_caller]
     pub fn shot(&self) -> Vec<u8> {
         if !self.hovering {
             self.mouse("mouseMoved", (-1.0, -1.0), false, Modifiers::empty(), 0);
@@ -583,6 +598,7 @@ impl TestUi {
     /// `js`'s value in the page (a promise awaited; a throw fails the
     /// test), then settle: what a test reads that no other call reads
     /// (`document.documentElement.scrollTop`, a canvas's pixels).
+    #[track_caller]
     pub fn eval(&mut self, js: &str) -> Value {
         let v = self.page.eval(js);
         self.settle();
@@ -594,17 +610,20 @@ impl TestUi {
     /// settle: the events a test's page can't make. A `Browser`'s guest is
     /// one: the test page has no `<webview>`, so `ui.emit("web",
     /// &GuestEvent::LoadFailed { .. })` stands in for it.
+    #[track_caller]
     pub fn emit(&mut self, t: &str, event: &impl serde::Serialize) {
         self.must("emit", json!({ "path": t, "v": event }));
         self.settle();
     }
 
     /// Global `g`'s value, read in the app's root scope (`ui.read(&DIALOG)`).
+    #[track_caller]
     pub fn read<T: Clone + 'static>(&self, g: &'static crate::ui::Global<T>) -> T {
         self.in_root(|| g.get_untracked())
     }
 
 
+    #[track_caller]
     fn in_root<R>(&self, f: impl FnOnce() -> R) -> R {
         let _in = self.rt.enter();
         let r = air::with_owner(self.view, || air::batch(f));
@@ -662,6 +681,7 @@ impl TestUi {
 
     /// `op` of the page's reader (`aio::ui::SURFACE_JS`): its answer, or its
     /// refusal. A path is taken inside the [`within`](Self::within) scope.
+    #[track_caller]
     fn js(&self, op: &str, mut arg: Value) -> Result<Value, String> {
         if !self.scope.is_empty()
             && let Some(o) = arg.as_object_mut()
@@ -685,13 +705,18 @@ impl TestUi {
     }
 
     /// [`js`](Self::js); a refusal fails the test with what the page shows.
+    #[track_caller]
     fn must(&self, op: &str, arg: Value) -> Value {
-        self.js(op, arg).unwrap_or_else(|why| panic!("{why}{}", self.trace(&why)))
+        match self.js(op, arg) {
+            Ok(v) => v,
+            Err(why) => panic!("{why}{}", self.trace(&why)),
+        }
     }
 
     /// Element `t` and its state (`data-t` handle, else auto name; `outer/t`
     /// inside `outer`; `text=Skip this version`: the one element showing that
     /// text, the button around it when it is the button's: see [`TestUi`]).
+    #[track_caller]
     fn el(&self, t: &str) -> Value {
         self.must("el", json!({ "path": t }))
     }
@@ -701,11 +726,13 @@ impl TestUi {
     /// its role, as one word: `<button>Save</button>` is `SaveButton`, a
     /// field labelled "Email" is `EmailInput`, an unnamed one `Input`. The
     /// same name again, in document order, is `SaveButton2`, `SaveButton3`.
+    #[track_caller]
     pub fn names(&self) -> Vec<String> {
         strings(&self.must("names", json!({})))
     }
 
     /// Run `f` in the app's root scope (where its globals live, and its tasks), then settle.
+    #[track_caller]
     pub fn run<R>(&mut self, f: impl FnOnce() -> R) -> R {
         let r = self.in_root(f);
         self.settle();
@@ -715,6 +742,7 @@ impl TestUi {
     /// Let `d` of real time pass for the app's timers (intervals, springs,
     /// a toast's), then settle; after an [`advance`](Self::advance), `d` of
     /// the views' virtual time.
+    #[track_caller]
     pub fn wait(&mut self, d: Duration) {
         if self.frozen {
             return self.advance(d);
@@ -734,6 +762,7 @@ impl TestUi {
     /// it stands still but for `advance`, and `wait(d)` is `advance(d)`. The
     /// page's own timers (a CSS transition, a page script's `setTimeout`)
     /// and the cells' schedules keep real time (schedules: `TestCells::advance`).
+    #[track_caller]
     pub fn advance(&mut self, d: Duration) {
         let step = {
             let _in = self.rt.enter();
@@ -749,14 +778,17 @@ impl TestUi {
     }
 
     /// Settle until `f` holds (async work such as file I/O finishes off-thread); panics after 5 s.
+    #[track_caller]
     pub fn until(&mut self, what: &str, f: impl Fn() -> bool) {
         self.until_within(PATIENCE, what, f)
     }
 
     /// `until`, failing after `patience`; the failure shows the screen and leaves a trace.
+    #[track_caller]
     pub fn until_within(&mut self, patience: Duration, what: &str, f: impl Fn() -> bool) {
         let (end, mut late) = (Instant::now() + patience, None);
         loop {
+            self.mark(end, &mut late);
             self.settle();
             if self.in_root(&f) {
                 // It may have turned true after that settle (a commit off
@@ -768,14 +800,16 @@ impl TestUi {
                 let why = format!("timed out after {patience:?} waiting for: {what}{}", self.busy(&late));
                 panic!("{why}\n  screen:\n{}{}", self.surface(), self.trace(&why));
             }
-            self.near(end, &mut late);
             self.pause(Duration::from_millis(10));
         }
     }
 
-    /// A wait's last stretch begun (`end` is near): the components then, once.
-    fn near(&self, end: Instant, late: &mut Option<Vec<air::Mounted>>) {
-        if late.is_none() && Instant::now() + LATE >= end {
+    /// The components as a wait's step begins, kept from the step in which
+    /// its last stretch (`LATE` before `end`) begins: what a failure names
+    /// spans that stretch and at least the whole last step, however long a
+    /// step takes on a slow machine.
+    fn mark(&self, end: Instant, late: &mut Option<Vec<air::Mounted>>) {
+        if late.is_none() || Instant::now() + LATE < end {
             *late = Some(self.drawn());
         }
     }
@@ -790,19 +824,23 @@ impl TestUi {
     /// Settle until element `t` is there and shows `want` (a change applied
     /// off-thread reaches the screen a render later; an element still to
     /// come is waited for); panics after 5 s with the screen.
+    #[track_caller]
     pub fn until_text(&mut self, t: &str, want: &str) {
         self.until_shows(t, &format!("show {want:?}"), |s| s == want);
     }
 
     /// [`until_text`](Self::until_text) for a part of the text: `t` shows
     /// `part` somewhere in it ("The list did not load." of a longer note).
+    #[track_caller]
     pub fn until_contains(&mut self, t: &str, part: &str) {
         self.until_shows(t, &format!("show {part:?} in its text"), |s| s.contains(part));
     }
 
+    #[track_caller]
     fn until_shows(&mut self, t: &str, what: &str, ok: impl Fn(&str) -> bool) {
         let (end, mut late) = (Instant::now() + PATIENCE, None);
         loop {
+            self.mark(end, &mut late);
             let now = self.js("el", json!({ "path": t }));
             if now.as_ref().is_ok_and(|e| ok(e["text"].as_str().unwrap_or_default())) {
                 return;
@@ -815,7 +853,6 @@ impl TestUi {
                 let why = format!("timed out after {PATIENCE:?} waiting for {t} to {what}: {seen}{}", self.busy(&late));
                 panic!("{why}\n  screen:\n{}{}", self.surface(), self.trace(&why));
             }
-            self.near(end, &mut late);
             self.wait(Duration::from_millis(10));
         }
     }
@@ -833,6 +870,7 @@ impl TestUi {
     pub fn expect_cell<T: Cell>(&mut self, door: &impl Door<T>, what: &str, f: impl Fn(&T) -> bool) {
         let (end, mut late) = (Instant::now() + PATIENCE, None);
         loop {
+            self.mark(end, &mut late);
             self.settle();
             if self.in_root(|| door.read(&f)) {
                 self.settle();
@@ -842,7 +880,6 @@ impl TestUi {
                 let state = self.in_root(|| door.read(|s| dump(s, 2000)));
                 panic!("{what}{}\n  state: {state}{}", self.busy(&late), self.trace(what));
             }
-            self.near(end, &mut late);
             self.pause(Duration::from_millis(10));
         }
     }
@@ -851,41 +888,49 @@ impl TestUi {
     /// and not hidden by CSS (`display: none` on it or around it,
     /// `visibility`)? `<button>Lock</button>` is `LockButton` with no
     /// `data-t`: [`has_handle`](Self::has_handle) asks for the handle alone.
+    #[track_caller]
     pub fn present(&self, t: &str) -> bool {
         self.must("present", json!({ "path": t })) == true
     }
 
     /// Is an element with `data-t` handle `t` showing (auto names don't count)?
+    #[track_caller]
     pub fn has_handle(&self, t: &str) -> bool {
         self.must("present", json!({ "path": t, "handle": true })) == true
     }
 
     /// Every `data-t` handle in the page, sorted (showing or not).
+    #[track_caller]
     pub fn handles(&self) -> Vec<String> {
         strings(&self.must("handles", json!({})))
     }
 
     /// Is nothing with this handle showing (never rendered, removed, or hidden)?
+    #[track_caller]
     pub fn absent(&self, t: &str) -> bool {
         !self.present(t)
     }
 
     /// How many elements match a CSS selector.
+    #[track_caller]
     pub fn count(&self, selector: &str) -> usize {
         self.must("count", json!({ "selector": selector })).as_u64().unwrap_or(0) as usize
     }
 
     /// Its text, all descendants joined.
+    #[track_caller]
     pub fn text(&self, t: &str) -> String {
         self.el(t)["text"].as_str().unwrap_or_default().into()
     }
 
     /// A field's current value (a `<select>`'s: its chosen option's).
+    #[track_caller]
     pub fn value(&self, t: &str) -> String {
         self.el(t)["value"].as_str().unwrap_or_default().into()
     }
 
     /// An attribute's value (`aria-pressed`, `href`, …); `None`: not set.
+    #[track_caller]
     pub fn attr(&self, t: &str, name: &str) -> Option<String> {
         self.must("attr", json!({ "path": t, "name": name })).as_str().map(String::from)
     }
@@ -893,12 +938,14 @@ impl TestUi {
     /// A property's value now, as a script reads it (`muted`, `volume`,
     /// `indeterminate`: what the person gets, where the attribute may say
     /// otherwise); `Null`: unset, or no string, number or bool.
+    #[track_caller]
     pub fn prop(&self, t: &str, name: &str) -> Value {
         self.must("prop", json!({ "path": t, "name": name }))
     }
 
     /// The OS turns dark (or light) while the app runs: the page's
     /// `prefers-color-scheme` changes, as on a phone at dusk.
+    #[track_caller]
     pub fn set_os_dark(&mut self, dark: bool) {
         let scheme = if dark { "dark" } else { "light" };
         self.page.cmd("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }));
@@ -906,11 +953,13 @@ impl TestUi {
     }
 
     /// A CSS property's computed value (`color`, a custom one: `--split-a`), trimmed.
+    #[track_caller]
     pub fn style(&self, t: &str, property: &str) -> String {
         self.must("style", json!({ "path": t, "name": property })).as_str().unwrap_or_default().into()
     }
 
     /// Its box in the window, CSS px (`getBoundingClientRect`).
+    #[track_caller]
     pub fn rect(&self, t: &str) -> Rect {
         let r = self.must("rect", json!({ "path": t }));
         let n = |k: &str| r[k].as_f64().unwrap_or(0.0);
@@ -918,36 +967,44 @@ impl TestUi {
     }
 
     /// Is the checkbox (or radio) checked, as the person last left it?
+    #[track_caller]
     pub fn checked(&self, t: &str) -> bool {
-        self.el(t)["checked"].as_bool().unwrap_or_else(|| panic!("data-t=\"{t}\" is no checkbox or radio"))
+        let Some(on) = self.el(t)["checked"].as_bool() else { panic!("data-t=\"{t}\" is no checkbox or radio") };
+        on
     }
 
     /// Is it disabled: by its own `disabled`, or a disabled `<fieldset>` around it?
+    #[track_caller]
     pub fn disabled(&self, t: &str) -> bool {
         self.el(t)["disabled"] == true
     }
 
     /// Is the field read-only (`readonly`)?
+    #[track_caller]
     pub fn readonly(&self, t: &str) -> bool {
         self.el(t)["readonly"] == true
     }
 
     /// Must the field be filled in (`required`)?
+    #[track_caller]
     pub fn required(&self, t: &str) -> bool {
         self.el(t)["required"] == true
     }
 
     /// Is the toggle button pressed (`aria-pressed="true"`)?
+    #[track_caller]
     pub fn pressed(&self, t: &str) -> bool {
         self.attr(t, "aria-pressed").as_deref() == Some("true")
     }
 
     /// Is the disclosure or menu open (`aria-expanded="true"`)?
+    #[track_caller]
     pub fn expanded(&self, t: &str) -> bool {
         self.attr(t, "aria-expanded").as_deref() == Some("true")
     }
 
     /// Its tag, role and accessible name.
+    #[track_caller]
     pub fn info(&self, t: &str) -> Info {
         let e = self.el(t);
         let s = |k: &str| e[k].as_str().unwrap_or_default().to_string();
@@ -958,6 +1015,7 @@ impl TestUi {
     /// element with a handle, a role, or one implied by its tag (controls,
     /// links, headings), as `role "name" [handle] state` (aio's `surface()`,
     /// the digest a failure prints).
+    #[track_caller]
     pub fn surface(&self) -> String {
         self.must("surface", json!({ "path": null, "rects": false })).as_str().unwrap_or_default().into()
     }
@@ -969,12 +1027,14 @@ impl TestUi {
     /// click and no `href`, a positive `tabindex`, `aria-hidden` on what
     /// takes focus, `aria-disabled` with a click that still runs. Every
     /// mount says each new one once (as aio's dev mode); assert on it to fail.
+    #[track_caller]
     pub fn a11y(&self) -> Vec<String> {
         strings(&self.must("a11y", json!({})))
     }
 
     /// The surface as a tree of components (aio's `surface()`): each
     /// component with its key, its path, the elements it drew and its text.
+    #[track_caller]
     pub fn surface_tree(&self) -> Surface {
         serde_json::from_value(self.must("tree", json!({}))).expect("the page's surface tree")
     }
@@ -998,6 +1058,7 @@ impl TestUi {
     /// (`ui.within(&ui.find("Row", Some("42")), |ui| ui.click("DeleteButton"))`):
     /// the same names in another row reach that row's. CSS counts
     /// (`count`) stay page-wide.
+    #[track_caller]
     pub fn within<R>(&mut self, t: &str, f: impl FnOnce(&mut Self) -> R) -> R {
         self.el(t);
         self.scope.push(t.to_string());
@@ -1017,12 +1078,14 @@ impl TestUi {
     /// large text), as `<tag class="…"> "text" 2.10:1, needs 4.5:1`. A
     /// backdrop with an image can't be judged and is skipped, as is a
     /// subtree marked `data-aio-contrast="skip"` (an overlay on a video).
+    #[track_caller]
     pub fn contrast(&self) -> Vec<String> {
         crate::ui::audit::contrast(&self.must("contrast", json!({})))
     }
 
     /// The page's HTML, without air's anchor comments: what the app mounted, then
     /// what it put on `<body>` itself (a tooltip, a portal).
+    #[track_caller]
     pub fn html(&self) -> String {
         self.must("html", json!({})).as_str().unwrap_or_default().into()
     }
@@ -1068,12 +1131,14 @@ impl TestUi {
     /// that shows in the window (scrolled in only when none does: a hover
     /// that scrolled would close what it opened); a hidden element, or one
     /// with no box, can't be `doing`.
+    #[track_caller]
     fn point(&self, t: &str, fx: f64, fy: f64, doing: &str) -> (f64, f64) {
         let p = self.must("point", json!({ "path": t, "fx": fx, "fy": fy, "doing": doing }));
         (p["x"].as_f64().unwrap_or(0.0), p["y"].as_f64().unwrap_or(0.0))
     }
 
     /// One mouse event at `(x, y)`; `held`: the main button is down.
+    #[track_caller]
     fn mouse(&self, kind: &str, (x, y): (f64, f64), held: bool, mods: Modifiers, clicks: u32) {
         let button = if kind == "mouseMoved" && !held { "none" } else { "left" };
         let e = json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": u8::from(held), "clickCount": clicks, "modifiers": bits(mods) });
@@ -1082,6 +1147,7 @@ impl TestUi {
 
     /// Move the mouse over the centre of what shows of the element (shows
     /// what `:hover` reveals; nothing scrolls while part of it shows).
+    #[track_caller]
     pub fn hover(&mut self, t: &str) {
         let p = self.point(t, 0.5, 0.5, "hover");
         self.mouse("mouseMoved", p, false, Modifiers::empty(), 0);
@@ -1091,6 +1157,7 @@ impl TestUi {
 
     /// Click the element's centre, as a mouse would: move, press, release
     /// (pointer and mouse events, then `click`; a submit button submits its form).
+    #[track_caller]
     pub fn click(&mut self, t: &str) {
         self.click_with(t, Modifiers::empty());
     }
@@ -1098,18 +1165,21 @@ impl TestUi {
     /// Click holding modifier keys (Ctrl+click to add, Shift+click to extend).
     /// As on a Mac, Ctrl+click there is the context click (no `click`): use
     /// `Modifiers::META` (Command) for what Ctrl does elsewhere.
+    #[track_caller]
     pub fn click_with(&mut self, t: &str, mods: Modifiers) {
         self.click_at_with(t, 0.5, 0.5, mods);
     }
 
     /// Click at a point of the element, as fractions of its size (0.5, 0.5 = centre).
     /// A hidden element can't be clicked: that panics, saying why.
+    #[track_caller]
     pub fn click_at(&mut self, t: &str, fx: f32, fy: f32) {
         self.click_at_with(t, fx, fy, Modifiers::empty());
     }
 
     /// A click whose element moved between press and release (a late
     /// layout shift) went elsewhere: that fails, saying where it went.
+    #[track_caller]
     fn click_at_with(&mut self, t: &str, fx: f32, fy: f32, mods: Modifiers) {
         let p = self.point(t, fx.into(), fy.into(), "click");
         self.hovering = false;
@@ -1122,6 +1192,7 @@ impl TestUi {
     }
 
     /// Double click: two clicks, the second also a `dblclick` (as a browser sends them).
+    #[track_caller]
     pub fn dblclick(&mut self, t: &str) {
         self.click(t);
         let p = self.point(t, 0.5, 0.5, "click");
@@ -1132,12 +1203,14 @@ impl TestUi {
 
     /// Drag with the main button held from the element's centre by
     /// `(dx, dy)` pixels: down, move, up (pointer and mouse events).
+    #[track_caller]
     pub fn drag_by(&mut self, t: &str, dx: f32, dy: f32) {
         self.drag_along(t, &[(dx, dy)]);
     }
 
     /// [`drag_by`](Self::drag_by) through each offset in turn (from the
     /// centre), released at the last: a drag that leaves the element.
+    #[track_caller]
     pub fn drag_along(&mut self, t: &str, path: &[(f32, f32)]) {
         let (x, y) = self.point(t, 0.5, 0.5, "drag");
         self.hovering = false;
@@ -1156,6 +1229,7 @@ impl TestUi {
 
     /// Resize the window to `width`×`height` px: laid out again, and each
     /// element whose box changed size is told (`resize`, its `ResizeObserver`).
+    #[track_caller]
     pub fn resize(&mut self, width: u32, height: u32) {
         self.page.cmd("Emulation.setDeviceMetricsOverride", metrics((width, height)));
         // A page's own `ResizeObserver` hears of it with the next frame.
@@ -1165,6 +1239,7 @@ impl TestUi {
 
     /// Turn the wheel over the element's centre by `(dx, dy)` pixels (`wheel`,
     /// and what scrolls under it scrolls).
+    #[track_caller]
     pub fn wheel(&mut self, t: &str, dx: f64, dy: f64) {
         let (x, y) = self.point(t, 0.5, 0.5, "turn the wheel over");
         self.hovering = false;
@@ -1176,6 +1251,7 @@ impl TestUi {
     /// Pick `files` (name, MIME type, contents) in file input `t`, as a
     /// person does in its picker: `input` and `change` follow, their
     /// `e.files()` (and a form's `submit`) carrying them.
+    #[track_caller]
     pub fn pick_files(&mut self, t: &str, files: &[(&str, &str, &[u8])]) {
         let files: Vec<Value> =
             files.iter().map(|(name, ty, b)| json!({ "name": name, "type": ty, "b64": B64.encode(b) })).collect();
@@ -1186,6 +1262,7 @@ impl TestUi {
 
     /// HTML drag and drop of `t` onto `onto`: `dragstart`, `dragenter`,
     /// `dragover`, `drop`, `dragend`, sharing one data transfer.
+    #[track_caller]
     pub fn drag_to(&mut self, t: &str, onto: &str) {
         self.must("drag", json!({ "path": t, "onto": onto }));
         self.settle();
@@ -1194,6 +1271,7 @@ impl TestUi {
     /// Scroll the element to `top`/`left` pixels (`scroll` follows). It must
     /// be able to get there: a box that doesn't scroll (`overflow` visible)
     /// or a point past its end panics, saying where it stopped.
+    #[track_caller]
     pub fn scroll(&mut self, t: &str, top: f64, left: f64) {
         let at = self.must("scroll", json!({ "path": t, "top": top, "left": left }));
         let n = |k: &str| at[k].as_f64().unwrap_or(0.0);
@@ -1211,20 +1289,26 @@ impl TestUi {
     }
 
     /// A key by its DOM name: "Enter", "Escape", "ArrowLeft", "a", " ".
+    #[track_caller]
     fn key(name: &str) -> Key {
-        name.parse().unwrap_or_else(|_| {
+        let Ok(k) = name.parse() else {
             panic!("no key is named {name:?} (DOM key names: Enter, ArrowLeft, a, …; a chord: \"ctrl+n\", \"mod+shift+k\")")
-        })
+        };
+        k
     }
 
     /// A chord as `use_global_key` takes it ("ctrl+n", "mod+shift+k", see
     /// [`ChordSpec`](crate::kit::ChordSpec)): its key and modifiers (`mod`:
     /// ⌘ on macOS, else Ctrl). A lone key ("+" too) is itself (pure).
+    #[track_caller]
     pub fn chord(spec: &str) -> (String, Modifiers) {
         if spec.chars().count() < 2 || !spec.contains('+') {
             return (spec.into(), Modifiers::empty());
         }
-        let c = crate::ui::chord::Chord::parse(spec).unwrap_or_else(|e| panic!("{e}"));
+        let c = match crate::ui::chord::Chord::parse(spec) {
+            Ok(c) => c,
+            Err(e) => panic!("{e}"),
+        };
         let cmd = if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL };
         let named = [(c.ctrl, Modifiers::CONTROL), (c.meta, Modifiers::META), (c.alt, Modifiers::ALT)];
         let mods = named
@@ -1236,6 +1320,7 @@ impl TestUi {
     }
 
     /// Key `k` down and/or up on the focused element, as the keyboard sends it.
+    #[track_caller]
     fn keys(&self, k: &Key, mods: Modifiers, down: bool, up: bool) {
         let name = match k {
             Key::Character(c) if c == "\n" => "Enter".to_string(),
@@ -1262,6 +1347,7 @@ impl TestUi {
     }
 
     /// Press one key on the focused element (`Key::Enter`, `Key::Character("a")`, …).
+    #[track_caller]
     pub fn press_key(&mut self, key: Key, mods: Modifiers) {
         self.keys(&key, mods, true, true);
         self.settle();
@@ -1271,6 +1357,7 @@ impl TestUi {
     /// person types ahead (`["alt+e", "a", "c"]`): no step waits for the app
     /// to answer the one before, then the views settle. For what an app does
     /// with keys that come before its views caught up (aio key-settle).
+    #[track_caller]
     pub fn burst(&mut self, chords: &[&str]) {
         for c in chords {
             let (key, mods) = Self::chord(c);
@@ -1285,12 +1372,14 @@ impl TestUi {
     /// button is clicked; with none, the form all the same, as aio: `aio::page::ENTER`).
     /// A chord presses its modifiers too: `press("window", "ctrl+n")`, as
     /// `ax trigger <app> window press ctrl+n` ([`chord`](Self::chord)).
+    #[track_caller]
     pub fn press(&mut self, t: &str, key: &str) {
         let (key, mods) = Self::chord(key);
         self.press_with(t, &key, mods);
     }
 
     /// `press`, holding modifiers (Ctrl+Enter; a modified Enter submits nothing).
+    #[track_caller]
     pub fn press_with(&mut self, t: &str, key: &str, mods: Modifiers) {
         let k = Self::key(key);
         self.focus(t);
@@ -1298,6 +1387,7 @@ impl TestUi {
     }
 
     /// Hold a key down on `t` (no keyup until `key_up`).
+    #[track_caller]
     pub fn key_down(&mut self, t: &str, key: &str, mods: Modifiers) {
         let k = Self::key(key);
         self.focus(t);
@@ -1306,6 +1396,7 @@ impl TestUi {
     }
 
     /// Release a key held by `key_down`.
+    #[track_caller]
     pub fn key_up(&mut self, t: &str, key: &str, mods: Modifiers) {
         let k = Self::key(key);
         self.focus(t);
@@ -1318,17 +1409,20 @@ impl TestUi {
     /// submitted). One that can't take focus (no
     /// control, no `tabindex`, disabled) panics, saying why; `"window"`:
     /// none has it, keys go to the document.
+    #[track_caller]
     pub fn focus(&mut self, t: &str) {
         self.must("focus", json!({ "path": t, "verb": "focus" }));
         self.settle();
     }
 
     /// The handle of the element with focus (`None`: none has, or it has no handle).
+    #[track_caller]
     pub fn focused(&self) -> Option<String> {
         self.must("focused", json!({})).as_str().map(String::from)
     }
 
     /// Take focus away from `t` (`change` if it was edited, then `blur`).
+    #[track_caller]
     pub fn blur(&mut self, t: &str) {
         self.must("blur", json!({ "path": t }));
         self.settle();
@@ -1339,6 +1433,7 @@ impl TestUi {
     /// `\t`, `\u{7}`) goes in as text, as a paste would put it, never as a
     /// key: `\n` submits nothing (a line input drops it, as the browser
     /// does a pasted one). Keys are [`press`](Self::press)'s.
+    #[track_caller]
     fn type_chars(&mut self, text: &str) {
         for c in text.chars() {
             if c.is_control() {
@@ -1353,6 +1448,7 @@ impl TestUi {
 
     /// Type text literally at the end of `t`'s text (focused first, no
     /// click; a control character is text, never a key: see `press`).
+    #[track_caller]
     pub fn type_text(&mut self, t: &str, text: &str) {
         self.must("usable", json!({ "path": t, "verb": "type into" }));
         self.focus(t);
@@ -1362,6 +1458,7 @@ impl TestUi {
 
     /// Replace the value of `t`: focus, select all (Ctrl+A), then type
     /// `text` literally (`"a\nb"` types no Enter: `press(t, "Enter")` does).
+    #[track_caller]
     pub fn set_value(&mut self, t: &str, text: &str) {
         self.must("usable", json!({ "path": t, "verb": "type into" }));
         self.focus(t);
@@ -1378,6 +1475,7 @@ impl TestUi {
     /// unless the app took it (`prevent_default`), one `input`
     /// (`insertFromPaste`) with all of it, where `set_value` types a
     /// character at a time.
+    #[track_caller]
     pub fn paste(&mut self, t: &str, text: &str) {
         self.must("usable", json!({ "path": t, "verb": "paste into" }));
         self.focus(t);
@@ -1387,6 +1485,7 @@ impl TestUi {
     }
 
     /// Empty the field `t` (as select all, delete).
+    #[track_caller]
     pub fn clear(&mut self, t: &str) {
         self.set_value(t, "");
     }
@@ -1394,23 +1493,27 @@ impl TestUi {
     /// Pick the option of `<select>` `t` whose value is `value`: `input`,
     /// then `change`. An option that isn't there, or is disabled, can't be
     /// picked: that panics, naming the ones there.
+    #[track_caller]
     pub fn select(&mut self, t: &str, value: &str) {
         self.must("select", json!({ "path": t, "verb": "select on", "value": value }));
         self.settle();
     }
 
     /// Tick box `t` (a click, only when it isn't ticked).
+    #[track_caller]
     pub fn check(&mut self, t: &str) {
         self.set_checked(t, true);
     }
 
     /// Untick box `t` (a click, only when it is ticked).
+    #[track_caller]
     pub fn uncheck(&mut self, t: &str) {
         self.set_checked(t, false);
     }
 
     /// A checkbox, radio or switch (native, or a role with `aria-checked`)
     /// clicked to `on`; anything else has no checked state, and panics.
+    #[track_caller]
     fn set_checked(&mut self, t: &str, on: bool) {
         let verb = if on { "check" } else { "uncheck" };
         if self.must("checked", json!({ "path": t, "verb": verb })) != on {

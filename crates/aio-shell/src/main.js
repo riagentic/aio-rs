@@ -174,8 +174,9 @@ function socketFetch(reqPath, method, headers, body) {
       resolveRaw(r)
     }
     const r = http.request({ socketPath: HTTP_SOCK, agent, path: reqPath, method, headers }, (res) => {
-      const h = {}
-      for (const [k, v] of Object.entries(res.headers)) h[k] = Array.isArray(v) ? v.join(', ') : v
+      // Each Set-Cookie its own (`getSetCookie`, the jar's).
+      const h = new Headers()
+      for (const [k, v] of Object.entries(res.headers)) for (const x of [].concat(v)) h.append(k, x)
       const status = res.statusCode || 200
       // A body-less status carries no stream: Response() throws.
       if (status === 204 || status === 304 || method === 'HEAD') { res.resume(); resolve(new Response(null, { status, headers: h })); return }
@@ -226,6 +227,33 @@ function socketFetch(reqPath, method, headers, body) {
     if (body) Readable.fromWeb(body).pipe(r)
     else r.end()
   })
+}
+
+// The app's cookies: Chromium keeps none for aio:// (not a cookie scheme,
+// whatever its privileges), so an HttpOnly session a sign-in route sets
+// would be dropped. They are kept here instead, as a browser would keep
+// them: in the window's own cookie store (on disk with its profile, until
+// they expire), under a stand-in origin no page can load, and sent with
+// each request to the app's routes. Only the app's page reaches aio://app.
+const JAR = 'https://app.aio.invalid'
+async function keepCookies(lines, reqPath) {
+  const jar = session.defaultSession.cookies
+  for (const l of lines) {
+    const c = G.cookie(l, Date.now(), reqPath)
+    if (!c) continue
+    const url = JAR + c.path
+    try {
+      if (c.gone) await jar.remove(url, c.name)
+      else await jar.set({ url, ...c })
+    } catch (e) {
+      console.error(`[aio-shell] the cookie ${c.name} the app set is not kept: ${e.message}`)
+    }
+  }
+  await jar.flushStore().catch(() => {})
+}
+async function cookiesFor(pathname) {
+  const all = await session.defaultSession.cookies.get({ url: JAR + pathname }).catch(() => [])
+  return all.map((c) => `${c.name}=${c.value}`).join('; ')
 }
 
 // Frames from the app socket, split by their 4-byte big-endian length.
@@ -357,7 +385,7 @@ app.whenReady().then(() => {
   }
   app.on('session-created', guard)
   // The page, and local images and media by absolute path (localFile).
-  protocol.handle('aio', (req) => {
+  protocol.handle('aio', async (req) => {
     const u = new URL(req.url)
     if (u.host === 'app' && (u.pathname === '/' || u.pathname === '/index.html')) {
       return enet.fetch(pathToFileURL(path.join(dir, 'index.html')).toString())
@@ -378,8 +406,14 @@ app.whenReady().then(() => {
     if (u.host === 'app' && HTTP_SOCK) {
       const headers = {}
       req.headers.forEach((v, k) => { headers[k] = v })
+      const jar = await cookiesFor(u.pathname)
+      if (jar) headers.cookie = headers.cookie ? `${headers.cookie}; ${jar}` : jar
       const body = req.method === 'GET' || req.method === 'HEAD' ? null : req.body
-      return socketFetch(u.pathname + u.search, req.method, headers, body)
+      const r = await socketFetch(u.pathname + u.search, req.method, headers, body)
+      // Kept before the page has the answer: its next request carries them.
+      const set = r.headers.getSetCookie()
+      if (set.length) await keepCookies(set, u.pathname)
+      return r
     }
     return new Response('', { status: 404 })
   })

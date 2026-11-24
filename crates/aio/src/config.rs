@@ -451,6 +451,24 @@ mod tests {
         assert!(Config::parse("[app]\nid = \"t\"\nlang = \"pt-BR\"").is_ok());
     }
 
+    /// `[app] version` is read as aio.toml is: `ax config`, `ax dev` and
+    /// `ax test` refuse what `ax build` would, not only the build.
+    #[test]
+    fn an_app_version_that_isnt_one_is_refused_as_the_file_is_read() {
+        let app = |v: &str| Config::parse(&format!("[app]\nid = \"t\"\nversion = \"{v}\""));
+        let e = app("banana").unwrap_err();
+        assert!(e.starts_with("aio.toml: [app] version \"banana\": an app's version is \"major.minor\""), "{e}");
+        assert!(app("1.2.3.4").is_err() && app("1.2-gamma").is_err());
+        assert!(app("1.2").is_ok() && app("1.2.3-rc").is_ok());
+    }
+
+    /// The one rule `ax dev`, `ax start`, `ax build --smoke` and the updater follow.
+    #[test]
+    fn only_a_server_and_a_cli_have_no_window() {
+        let shown = [Mode::Standalone, Mode::Client, Mode::ClientServer, Mode::Server, Mode::Cli].map(Mode::has_window);
+        assert_eq!(shown, [true, true, true, false, false]);
+    }
+
     #[test]
     fn defaults_are_standalone_and_90_days() {
         let c = Config::parse("[app]\nid = \"todo\"").unwrap();
@@ -876,6 +894,21 @@ mod tests {
         }
         assert!(c("camera = \"yes\"").unwrap_err().contains("invalid type"), "never coerced");
         assert!(c("color_scheme = \"night\"").unwrap_err().contains("unknown variant"));
+    }
+
+    #[test]
+    fn the_apps_schemes_are_checked_as_androids_and_the_desktops_own_are_refused() {
+        let c = |t: &str| Config::parse(&format!("[app]\nid = \"t\"\n{t}"));
+        assert_eq!(c("schemes = [\"myapp\", \"my-app.b2+x\"]").unwrap().app.schemes, ["myapp", "my-app.b2+x"]);
+        assert!(c("").unwrap().app.schemes.is_empty(), "opt-in");
+        for bad in ["MyApp", "1app", "my app", "", "my_app", "my:app"] {
+            let e = c(&format!("schemes = [\"{bad}\"]")).unwrap_err();
+            assert!(e.contains("[app] schemes") && e.contains("is not a URL scheme"), "{bad}: {e}");
+        }
+        for system in ["http", "https", "file", "aio", "chrome", "javascript", "mailto", "ms-settings", "view-source"] {
+            let e = c(&format!("schemes = [\"{system}\"]")).unwrap_err();
+            assert!(e.contains("[app] schemes") && e.contains("is the system's"), "{system}: {e}");
+        }
     }
 
     #[test]

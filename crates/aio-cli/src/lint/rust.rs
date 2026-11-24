@@ -715,16 +715,24 @@ pub fn impure(segs: &[String]) -> Option<&'static str> {
     })
 }
 
-/// Paths in a method body that aren't pure. Closures and async blocks are
-/// left out: they are effects, run after the commit.
+/// Paths in a method body that aren't pure, the closures it runs (an
+/// iterator's, one it keeps and calls) among them. A closure handed to
+/// `Effect::new` and an async block are left out: effects, run after the commit.
 #[derive(Default)]
 struct Impure {
     found: Vec<(String, &'static str, usize)>,
 }
 
 impl<'ast> Visit<'ast> for Impure {
-    fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
     fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
+    fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
+        let effect = matches!(&*e.func, Expr::Path(p)
+            if p.path.segments.iter().rev().take(2).map(|s| s.ident.to_string()).eq(["new", "Effect"]));
+        self.visit_expr(&e.func);
+        for a in e.args.iter().filter(|a| !(effect && matches!(a, Expr::Closure(_)))) {
+            self.visit_expr(a);
+        }
+    }
     fn visit_item(&mut self, _: &'ast Item) {}
     fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
         let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();

@@ -205,12 +205,16 @@ pub struct Ask<'a> {
 }
 
 /// Build, sign and lay out a release of `name` for each platform asked.
+/// Its `aio.toml` is read and its key checked first: a release that can't
+/// be signed fails before the release build, not after.
 pub fn run(name: &str, ask: &Ask) -> Result<String, String> {
+    let (app, cfg) = crate::build::app_of(&crate::dev::locate(&crate::dev::metadata()?, name)?)?;
+    let keys = signing_keys(&app.id, name, &cfg.updates, ask)?;
     let platforms: Vec<_> = match ask.platforms.is_empty() {
         true => vec![None],
         false => ask.platforms.iter().map(|p| Some(*p)).collect(),
     };
-    Ok(platforms.into_iter().map(|p| one(name, p, ask)).collect::<Result<Vec<_>, _>>()?.join("\n"))
+    Ok(platforms.into_iter().map(|p| one(name, p, ask, &keys)).collect::<Result<Vec<_>, _>>()?.join("\n"))
 }
 
 /// The contract a `--data` file gives.
@@ -219,8 +223,14 @@ fn contract_in(file: &Path) -> Result<up::Contract, String> {
     aio::serde_json::from_slice(&bytes).map_err(|e| format!("--data {}: not a data contract ({e})", file.display()))
 }
 
-/// The release of `name` for platform `p` (None: this machine's).
-fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> Result<String, String> {
+/// The release of `name` for platform `p` (None: this machine's), signed
+/// by `key` and `signers`.
+fn one(
+    name: &str,
+    p: Option<&'static crate::platform::Platform>,
+    ask: &Ask,
+    (key, signers): &(Vec<u8>, Vec<Vec<u8>>),
+) -> Result<String, String> {
     let (b, bundle) = match ask.no_build {
         true => crate::build::built(name, p)?,
         false => crate::build::make(name, p, ask.channel)?,
@@ -245,7 +255,6 @@ fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> 
             u.channel
         ));
     }
-    let (key, signers) = signing_keys(id, name, u, ask)?;
     // What it reads is the same on every OS: a cross-built bundle is asked
     // through this machine's build of it.
     let data = match ask.data {
@@ -279,7 +288,7 @@ fn one(name: &str, p: Option<&'static crate::platform::Platform>, ask: &Ask) -> 
         (&bundle, &manifest),
         &out,
         (channel, ask.notes, data, ask.min_from, ask.commit),
-        (&key, &signers),
+        (key, signers),
         &ask.patch_from,
     )?;
     // Built for this release: it lives in the channel dir now.
@@ -365,8 +374,13 @@ fn lay_out(
     let name_of = |v: &str| match image {
         true => format!("{}-{v}-{}.AppImage", b.app.id, b.platform.arch),
         false => {
-            let old =
-                crate::build::App { id: b.app.id.clone(), name: String::new(), version: v.to_string(), icon: None };
+            let old = crate::build::App {
+                id: b.app.id.clone(),
+                name: String::new(),
+                version: v.to_string(),
+                icon: None,
+                schemes: vec![],
+            };
             crate::build::bundle_file(&old, b.platform)
         }
     };
@@ -1407,6 +1421,22 @@ mod tests {
         assert!(e.contains("none.key") && !e.contains("ax keygen"), "{e}");
     }
 
+    /// No key, or one aio.toml doesn't trust, is said before the release
+    /// build, not after minutes of it (here a build would fail).
+    #[test]
+    fn the_key_is_checked_before_the_release_build() {
+        let d = tempfile::tempdir().unwrap();
+        let w = |f: &str, text: &str| std::fs::write(d.path().join(f), text).unwrap();
+        w("Cargo.toml", "[package]\nname = \"notes\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\n[workspace]\n");
+        std::fs::create_dir(d.path().join("src")).unwrap();
+        w("src/main.rs", "fn main() { this doesn't build }");
+        w("aio.toml", "[app]\nid = \"notes\"\n");
+        let none = d.path().join("none.key");
+        let ask = Ask { key: Some(&none), no_build: false, ..Default::default() };
+        let e = crate::dev::in_dir(d.path().into(), || run("notes", &ask)).unwrap_err();
+        assert!(e.starts_with(&format!("{}: ", none.display())), "{e}");
+    }
+
     #[test]
     fn an_unsigned_release_needs_no_key_and_is_trusted_by_no_app() {
         let u = aio::config::Updates { keys: vec![], ..Default::default() };
@@ -1542,7 +1572,13 @@ mod tests {
         let mut cfg = aio::config::Config::default();
         cfg.updates.keys = vec![public];
         let linux = crate::platform::of("linux", "x86_64").unwrap();
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.1.0".into(), icon: None };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.1.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let b = crate::build::Built {
             app,
             cfg,
@@ -1614,7 +1650,13 @@ mod tests {
         let mut cfg = aio::config::Config::default();
         cfg.updates.keys = vec![public];
         let p = |n: &str| crate::platform::ALL.iter().find(|p| p.name == n).unwrap();
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.1.0".into(), icon: None };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.1.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let mut b = crate::build::Built {
             app,
             cfg,

@@ -251,6 +251,7 @@ aio::Source::connect: fn connect(addr: &str, token: &str, user: &str) -> std::io
 aio::Source::for_app: fn for_app(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self>
 aio::Source::for_app_with: fn for_app_with(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: crate::http::Http) -> std::io::Result<Self>
 aio::Source::for_server: fn for_server(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self>
+aio::Source::for_server_with: fn for_server_with(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: crate::http::Http) -> std::io::Result<Self>
 aio::Source::listen: fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static)
 aio::Source::on_change: fn on_change<R, M>(&self, immediate: bool, f: impl Fn(&T) -> R + Send + Sync + 'static, on: impl Fn(&R, Option<&R>) -> M + Send + Sync + 'static) -> crate::Watching where R: PartialEq + Clone + Send + 'static, M: Send + 'static
 aio::Source::on_pending: fn on_pending(&self, f: impl Fn() + Send + Sync + 'static)
@@ -490,6 +491,7 @@ aio::boot::begin: fn begin(cfg: &crate::config::Config, version: &str, dirs: &cr
 aio::boot::log_level: fn log_level(cfg: crate::log::Level, env: Option<&str>) -> (crate::log::Level, &'static str)
 aio::boot::no_config_file: fn no_config_file(env: &dyn Fn(&str) -> Option<String>) -> std::io::Result<()>
 aio::boot::rows: fn rows(cfg: &crate::config::Config, version: &str, dirs: &crate::paths::AppDirs, env: &dyn Fn(&str) -> Option<String>, exists: &dyn Fn(&std::path::Path) -> bool) -> Vec<Row>
+aio::boot::said: fn said(rows: &[Row]) -> String
 aio::boot::say: fn say(rows: &[Row])
 aio::boot::up_rows: fn up_rows(cells: &std::collections::BTreeMap<String, u32>, served: Option<&(usize, Vec<String>)>) -> Vec<Row>
 aio::budgets::Breach.detail: String
@@ -1400,6 +1402,12 @@ aio::kit::ProgressProps.label: Prop<Option<String>>
 aio::kit::ProgressProps.max: Prop<f64>
 aio::kit::ProgressProps.show_value: bool
 aio::kit::ProgressProps.value: Prop<Option<f64>>
+aio::kit::QrScanner: fn QrScanner(_: QrScannerProps) -> View
+aio::kit::QrState::Denied
+aio::kit::QrState::Failed(String)
+aio::kit::QrState::NoCamera
+aio::kit::QrState::Scanning
+aio::kit::QrState::Starting
 aio::kit::RadioGroup: fn RadioGroup(_: RadioGroupProps) -> View
 aio::kit::RadioGroupProps.attributes: Vec<Attribute>
 aio::kit::RadioGroupProps.bind: Option<super::Bind>
@@ -1565,6 +1573,7 @@ aio::kit::ZoomView.x: f64
 aio::kit::ZoomView.y: f64
 aio::kit::avatar_hue: fn avatar_hue(name: &str) -> u16
 aio::kit::conn_note: fn conn_note(conn: crate::Conn, lost: bool) -> Option<(&'static str, Tone)>
+aio::kit::decode_qr: fn decode_qr(luma: &[u8], width: usize, height: usize) -> Option<String>
 aio::kit::field_key: fn field_key(e: &KeyboardEvent)
 aio::kit::fit_view: fn fit_view(content: (f64, f64), viewport: (f64, f64), pad: f64, (min, max): (f64, f64)) -> ZoomView
 aio::kit::go: fn go(id: &str, what: Go)
@@ -2171,6 +2180,11 @@ aio::route::start_place: fn start_place() -> String
 aio::route::step_back: fn step_back(h: &mut History) -> bool
 aio::route::unbased: fn unbased(base: &str, address: &str) -> String
 aio::rt: fn rt() -> &'static tokio::runtime::Runtime
+aio::secrets::Secret(_)
+aio::secrets::delete: async fn delete(name: &str) -> io::Result<()>
+aio::secrets::get: async fn get(name: &str) -> io::Result<Option<Secret>>
+aio::secrets::set: async fn set(name: &str, value: &[u8]) -> io::Result<()>
+aio::secrets::set_biometric: async fn set_biometric(name: &str, value: &[u8]) -> io::Result<()>
 aio::security::Page.headers: Vec<(&'static str, String)>
 aio::security::Page::new: fn new(s: &Security, hosts: &[String], own_cert: bool) -> Result<Self, String>
 aio::security::Page::stamp: fn stamp(&self, html: &str) -> Option<(String, String)>
@@ -2946,6 +2960,7 @@ enum aio::kit::Go
 enum aio::kit::GuestEvent
 enum aio::kit::GuestInput
 enum aio::kit::Placement
+enum aio::kit::QrState
 enum aio::kit::Size
 enum aio::kit::Tone
 enum aio::kit::Trigger
@@ -3123,6 +3138,7 @@ impl Clone for Presence
 impl Clone for Profile
 impl Clone for ProgressOf
 impl Clone for ProgressProps
+impl Clone for QrState
 impl Clone for Queued
 impl Clone for RadioGroupProps
 impl Clone for Reading
@@ -3367,6 +3383,7 @@ impl Debug for Position
 impl Debug for Presence
 impl Debug for Profile
 impl Debug for ProgressOf
+impl Debug for QrState
 impl Debug for Queued
 impl Debug for Reading
 impl Debug for Ready
@@ -3387,6 +3404,7 @@ impl Debug for Rows
 impl Debug for SameSite
 impl Debug for Sampler
 impl Debug for Saved
+impl Debug for Secret
 impl Debug for Seen
 impl Debug for Select
 impl Debug for Seqs
@@ -3506,6 +3524,7 @@ impl Default for Updates
 impl Default for Variant
 impl Default for Viewer
 impl Default for ZoomView
+impl Deref for Secret
 impl Display for AuthError
 impl Display for Closed
 impl Display for Error
@@ -3519,6 +3538,7 @@ impl Drop for Deciding
 impl Drop for Frames
 impl Drop for Listener
 impl Drop for Sandbox
+impl Drop for Secret
 impl Drop for Spinner
 impl Drop for Subscription
 impl Drop for TestApps
@@ -3594,6 +3614,7 @@ impl Eq for Plan
 impl Eq for Position
 impl Eq for Presence
 impl Eq for ProgressOf
+impl Eq for QrState
 impl Eq for Reading
 impl Eq for Ready
 impl Eq for Refusal
@@ -3754,6 +3775,7 @@ impl PartialEq for Position
 impl PartialEq for Presence
 impl PartialEq for Profile
 impl PartialEq for ProgressOf
+impl PartialEq for QrState
 impl PartialEq for Queued
 impl PartialEq for Reading
 impl PartialEq for Ready
@@ -3984,6 +4006,7 @@ impl StructuralPartialEq for Position
 impl StructuralPartialEq for Presence
 impl StructuralPartialEq for Profile
 impl StructuralPartialEq for ProgressOf
+impl StructuralPartialEq for QrState
 impl StructuralPartialEq for Queued
 impl StructuralPartialEq for Reading
 impl StructuralPartialEq for Ready
@@ -4237,6 +4260,7 @@ mod aio::prelude
 mod aio::process
 mod aio::report
 mod aio::route
+mod aio::secrets
 mod aio::security
 mod aio::sha256
 mod aio::sync
@@ -4469,6 +4493,7 @@ struct aio::route::History
 struct aio::route::Loc
 struct aio::route::Nest
 struct aio::route::StartAt
+struct aio::secrets::Secret
 struct aio::security::Page
 struct aio::sha256::Sha256
 struct aio::sync::Link

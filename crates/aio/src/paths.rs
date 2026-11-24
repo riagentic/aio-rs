@@ -548,20 +548,27 @@ static TEST_APP: std::sync::Mutex<Option<(PathBuf, AppDirs)>> = std::sync::Mutex
 /// `logs`, `cache`; made on the first ask, gone with the world), so app
 /// code finds its home the same way in the window and in a test.
 pub fn app_dirs() -> io::Result<AppDirs> {
+    app_dirs_in().map(|(d, _)| d)
+}
+
+/// [`app_dirs`], and whether they are the test world's (one answer: a
+/// sandbox ending meanwhile can't mix the two).
+pub(crate) fn app_dirs_in() -> io::Result<(AppDirs, bool)> {
     if let Some(root) = sandboxed() {
         let mut t = lock(&TEST_APP);
         if let Some((at, d)) = t.as_ref()
             && *at == root
         {
-            return Ok(d.clone());
+            return Ok((d.clone(), true));
         }
         let d = AppDirs::at(&root.join("app"), "app")?;
         *t = Some((root, d.clone()));
-        return Ok(d);
+        return Ok((d, true));
     }
-    lock(&BOOTED).clone().ok_or_else(|| {
+    let d = lock(&BOOTED).clone().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "no app dirs yet: the app's main boots them (aio_shell::start)")
-    })
+    })?;
+    Ok((d, false))
 }
 
 /// The app booted on `dirs`: [`app_dirs`] answers them from now on.
@@ -737,6 +744,12 @@ impl Ask {
         let mut out = vec![];
         let mut it = args.iter();
         while let Some(a) = it.next() {
+            // After a bare `--`, nothing is a flag (a link handed by the OS).
+            if a == "--" {
+                out.push(a.clone());
+                out.extend(it.cloned());
+                break;
+            }
             let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
             match FLAGS.iter().find(|f| f.trim_end_matches('=') == flag) {
                 // A value flag without `=`: its value is the next arg.
@@ -748,13 +761,15 @@ impl Ask {
         out
     }
 
-    /// The asks among a launch's `args` (`--home=<dir>` or `--home <dir>`);
-    /// the others are the app's ([`Self::app_args`]).
+    /// The asks among a launch's `args` (`--home=<dir>` or `--home <dir>`),
+    /// before a bare `--` (what follows is data: a link an OS hands over
+    /// may hold anything); the others are the app's ([`Self::app_args`]).
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let mut a = Ask::default();
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
+                "--" => break,
                 "--takeover" => a.takeover = true,
                 "--expose" => a.expose = true,
                 "--keep-server" => a.keep_server = true,
@@ -1313,6 +1328,12 @@ mod tests {
         ]);
         assert_eq!(Ask::app_args(&launch), ["a.md", "-v", "--homes=1"]);
         assert_eq!(Ask::app_args(&args(&["--home"])), Vec::<String>::new(), "a missing value takes nothing else");
+        // After a bare `--`, nothing is a flag: a link the OS handed over
+        // (Windows' `"app.exe" -- "%1"`) can't smuggle one in.
+        let link = args(&["--", "myapp://x", "--takeover", "--home=/h", "--instance", "i"]);
+        assert_eq!(Ask::parse(&link).unwrap(), Ask::default());
+        assert_eq!(Ask::app_args(&link), link, "the app's parser gets them as given");
+        assert!(Ask::parse(&args(&["--takeover", "--", "--home"])).unwrap().takeover);
     }
 
     #[cfg(unix)]

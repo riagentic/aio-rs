@@ -2067,15 +2067,33 @@ impl Screen {
     }
 }
 
-/// The last handle gone: its last save is written before the drop ends
-/// (bounded), so a reopen or an exit right after never loses it.
+/// Write `save`'s last save in this thread (bounded), said if it can't be.
+fn flush_last(save: &Option<(Arc<Saver>, u64)>, cell: &str) {
+    if let Some((s, _)) = save
+        && !s.flush(std::time::Instant::now() + SAVE_WAIT)
+    {
+        eprintln!("[aio] sync {cell}: the copy's last save was not written within {SAVE_WAIT:?}");
+    }
+}
+
+/// The copy gone: what its link (closing) saved since is written too.
 impl<T: Cell> Drop for Inner<T> {
     fn drop(&mut self) {
-        if let Some((s, _)) = &self.save
-            && !s.flush(std::time::Instant::now() + SAVE_WAIT)
-        {
-            eprintln!("[aio] sync {}: the copy's last save was not written within {SAVE_WAIT:?}", T::ID);
-        }
+        flush_last(&self.save, T::ID);
+    }
+}
+
+/// What the app's handles share: the last one dropped writes the copy's
+/// last save before its drop ends (bounded), so a reopen or an exit right
+/// after never loses it, even while the link, still closing, holds the copy.
+struct Handles {
+    save: Option<(Arc<Saver>, u64)>,
+    cell: &'static str,
+}
+
+impl Drop for Handles {
+    fn drop(&mut self) {
+        flush_last(&self.save, self.cell);
     }
 }
 
@@ -2083,11 +2101,13 @@ impl<T: Cell> Drop for Inner<T> {
 /// the server confirms. Reconnects on its own.
 pub struct Remote<T: Cell> {
     inner: Arc<Inner<T>>,
+    /// The app's handles (none: the copy's own tasks).
+    handles: Option<Arc<Handles>>,
 }
 
 impl<T: Cell> Clone for Remote<T> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self { inner: self.inner.clone(), handles: self.handles.clone() }
     }
 }
 
@@ -2521,7 +2541,7 @@ impl<T: Cell> Remote<T> {
                                 *lock(&inner.asked) = Some(asked);
                                 *lock(&inner.can) = can_of(&first);
                                 inner.signed_out.store(false, Ordering::SeqCst);
-                                let r = Remote { inner };
+                                let r = Remote { inner, handles: None };
                                 r.seen_as(&first);
                                 r.take(first);
                                 w
@@ -2535,7 +2555,7 @@ impl<T: Cell> Remote<T> {
                                 let dead = e.get_ref().is_some_and(|e| e.is::<WrongKey>());
                                 let fresh = dead && lock(&inner.token).is_some();
                                 if dead {
-                                    Remote { inner }.signed_out_now(&e.to_string());
+                                    Remote { inner, handles: None }.signed_out_now(&e.to_string());
                                 } else {
                                     drop(inner);
                                 }
@@ -2570,7 +2590,7 @@ impl<T: Cell> Remote<T> {
                 };
                 wait = Duration::from_millis(250);
                 let Some(inner) = weak.upgrade() else { return };
-                let r = Remote { inner };
+                let r = Remote { inner, handles: None };
                 r.pump(w, at).await;
                 if weak.strong_count() <= 1 {
                     return;
@@ -2578,7 +2598,8 @@ impl<T: Cell> Remote<T> {
             }
         });
         // Online once the pump runs.
-        let r = Self { inner };
+        let handles = Some(Arc::new(Handles { save: inner.save.clone(), cell: T::ID }));
+        let r = Self { inner, handles };
         // Saved from the start, so the next run can open offline.
         r.update(|_| {});
         for _ in 0..if connected { 200 } else { 0 } {

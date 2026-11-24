@@ -72,6 +72,28 @@ version may break things.
 
 ### Added
 
+- `aio::config::Mode::has_window()`: whether an app of that mode opens a
+  window (a server or a CLI doesn't), the one rule `ax dev`, `ax start`,
+  `ax build` (`--smoke`, a bundled runtime) and the updater follow; each
+  kept its own list before.
+- `aio::secrets` (feature `secrets`): the OS's secret store, one API
+  everywhere: `set(name, &bytes)`, `get(name)` (a `Secret`: wiped when
+  dropped, never printed), `delete(name)`, async (the OS may ask the
+  user). The Keychain on macOS; the Secret Service (GNOME
+  Keyring, KWallet, KeePassXC) on Linux, through libsecret loaded at run
+  time; DPAPI-sealed files on Windows; files sealed by a Keystore key on
+  Android, and `set_biometric` there, opened only after the user's
+  fingerprint or face. No crate added. Each home of the app has its own
+  (a profile, a dev build, `--home`); the test world keeps them in its
+  sandbox, never the OS's store. Where there is no store (the web, Linux
+  with no Secret Service, a logon without the user's keys) each call is
+  `Unsupported`, never a plain file
+  ([the OS's secret store](docs/auth/keychain.md)).
+- `[build.android] biometric`: the APK declares the fingerprint or face
+  (`USE_BIOMETRIC`) for `aio::secrets::set_biometric`.
+- A whole backup leaves out `data/secrets/` (sealed for this machine), and
+  a restore keeps it as it is, as `sync.token`.
+
 - `GuestEvent::LoadFailed { url, code, description }`: a `Browser`'s guest
   could not open an address (`did-fail-load`, its main frame; `-3`, a
   load given up for another, is none). It said nothing before: the panel
@@ -124,6 +146,41 @@ version may break things.
   ([Waiting](docs/testing/ui.md#waiting)).
 - `ax lint` (`render`): a literal `data-t` handle on two elements that
   show together (a branch's arms aside) is a warning.
+- Deep links on every platform: `[app] schemes = ["notes"]`. An install
+  registers them for this user (Linux: the menu entry's `MimeType=
+  x-scheme-handler/…` and `xdg-mime default`; Windows: `HKCU\Software\
+  Classes\<scheme>`, its command `"<exe>" -- "%1"`; macOS: the `.app`'s
+  `CFBundleURLTypes`; Android: an intent filter each, beside
+  `[build.android] schemes`), and its uninstall takes away the ones still
+  its own (`uninstall.sh`, `ax remove`, `--uninstall`). The app hears each
+  link through one door, `aio::ui::links()` (a `router!` goes there),
+  whether the link started it or it was running: a later launch hands its
+  link over (Linux, Windows), macOS's Apple event reaches the running
+  `.app` (it pumps AppKit's events while it waits, AppKit loaded only for
+  an app with schemes), Android's intent the open activity. Names are
+  checked as the app builds (none of the system's: `http`, `https`,
+  `file`, `aio`, `chrome`, `ms-*`…); a link is untrusted input, handed
+  over as data, never run ([deep links](docs/clients/desktop.md#deep-links)).
+  aio-config's `App` has the field `schemes`: a literal naming every
+  field adds `schemes: vec![]` (or `..Default::default()`).
+- `aio::kit::QrScanner`: the camera's picture and the text of each QR
+  code in it (`onscan`), on the desktop, Android and in a browser. The
+  browser's own reader where there is one (`BarcodeDetector`), else
+  `aio::kit::decode_qr`, aio's own (versions 1 to 40, every level,
+  turned, tilted, shaded, light on dark), on grey frames the page hands
+  the app one at a time. Without a camera, or refused, it says why
+  (`onstate`: `QrState`). An app that shows none builds none of it; one
+  that does grows by about 70 KB in a web build (the reader 42 KB of it)
+  ([kit](docs/ui/kit.md#qr-codes-from-the-camera)).
+- `ax create <name> --template relay`: a server that makes a partner
+  API's calls for the app's installs with the partner's key, which it
+  reads from `RELAY_KEY` and nothing else holds. Only the calls it lists
+  pass (method, path, query keys), each part an install fills in kept in
+  its place; per-install and per-address limits a minute; it keeps
+  nothing and logs nothing of a call. One binary, 5.5 MB on Linux
+  ([relay](docs/examples/relay.md)).
+- `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
+  app's own routes too, without the sync client `for_app_with` holds.
 
 ### Changed
 
@@ -221,6 +278,61 @@ version may break things.
   rename that never replaces a file (`renameat2(RENAME_NOREPLACE)`), where
   the app's sandbox refuses the hard link: they were written in place,
   and a crash mid-write left part of one.
+- The desktop window keeps the app's cookies: Chromium keeps none for
+  `aio://`, so the HttpOnly session cookie a sign-in route sets
+  (`[accounts] cookie = true`) was dropped and the window was never signed
+  in by it. The shell keeps them in the window's cookie store (on disk,
+  until they expire) and sends them with each request to the app's
+  routes, by path; the page's script still never sees an HttpOnly one.
+- A later launch of an app shown in the browser (`[app] ui = "browser"`)
+  opens its page again (it got "ok" and nothing showed); one of an app
+  served only (`mode = "server"`) says it is already running, where it
+  serves and how to stop it, where it ended silently.
+- A launch's text after a bare `--` is never one of aio's flags
+  (`--takeover`, `--home`, `--quit`, `--route`…): `aio::paths::Ask`,
+  `Ask::app_args` (it hands the rest over as given), `--route` and
+  `--quit` stop there, as `[app] flags`' check already did. A link the OS
+  hands over (Windows: after `--`) can't smuggle one in.
+- Links that come while nothing listens (`aio::ui::links`) are held up to
+  the newest 16, where every one was kept.
+- `ax lint` checks the closures a cell method runs (`.map(|_|
+  rand::random())`, one it keeps and calls) for the clock, randomness and
+  I/O: it skipped every closure. A closure handed to `Effect::new` and an
+  `async` block are still the effect's.
+- `ax dev`: an app that exits 0 on its own (a command-line tool done)
+  "finished; a save runs it again", where it said "waiting: save a fix".
+- `ax dev`'s `[aio] boot: … settings in the log` line is said once the
+  boot report ends: it waited for the app's next line, so it came after a
+  hot patch or at stop. `aio::boot::say` writes its rows in one write
+  (`aio::boot::said`, added, the lines).
+- `[app] version` is checked as `aio.toml` is read (`aio::config!()`,
+  `ax config`, `ax dev`, `ax test`, the app's start): `version =
+  "banana"` passed everything but `ax build`. Its form lives in
+  `aio_config::version` (`declared`), which `ax build` reads too.
+- `ax release` reads the app's `aio.toml` and checks its signing key
+  before the release build: a missing key, or one `[updates] keys` doesn't
+  trust, failed only after the build. `--unsigned` makes one key for all
+  the platforms of a run.
+- `ax status --json` prints ax's one object (`{"ok":…,"value":[…]}`,
+  with `error` and `exit` when an app isn't started), as every verb does:
+  it printed a bare list, and an unknown app as text on stderr.
+- `ax` exits 2 for a wrong command line also when the verb finds it as it
+  runs (`--last abc`, `--css sass`, an unknown `--template`, a bad
+  `--wait`, `--window`, `--port`, flags that don't go together): it
+  exited 1, as for a failure, where the docs say 2.
+- A failed `TestUi` step (`click`, `text`, `press`, `eval`, a wait, …),
+  `TestCells::settle`, `settle_for`, `advance`, `reset` and
+  `aio::testing::expect` point at the test's line: the panic named a line
+  in aio's own code.
+- A `TestUi` wait that timed out named no component still rendering when
+  one step of the wait took longer than its last half second (a slow
+  machine): the components are now taken as each step begins, so the
+  last step is always in what it names.
+- A saved copy that was online, its last handle dropped, wrote its last
+  save only once its link had closed (up to half a second later, in the
+  background): a reopen or a read of the file right after could miss it.
+  The drop writes it before it ends, as an offline copy's did.
+
 - A second launch's arguments reach the app however long its start
   takes: the running instance takes launches from `aio_shell::start` on
   (it did from its window's start, after the app's own setup: past a

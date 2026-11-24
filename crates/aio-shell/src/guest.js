@@ -116,3 +116,33 @@ exports.childAllows = (grant, p, from) => !!grant && grant.perms.includes(p) && 
 // A page's beforeunload veto: an exit the app decided leaves anyway; else
 // the person is asked Leave / Stay (`confirm`), or the page keeps its say.
 exports.unload = (leaving, confirm) => (leaving ? 'leave' : confirm ? 'ask' : 'stay')
+
+// A `Set-Cookie` line one of the app's routes sent the window, for its jar
+// (main.js: Chromium keeps no cookie for aio://): what to set, as
+// `cookies.set` takes it, or `{ name, path, gone }` (expired, `Max-Age=0`),
+// or null (no name). Max-Age outranks Expires; no Path: the request's
+// folder (`reqPath`), as RFC 6265 says; Domain is the app's anyway.
+exports.cookie = (line, now, reqPath) => {
+  const [pair, ...attrs] = String(line).split(';')
+  const eq = pair.indexOf('=')
+  const name = eq < 0 ? '' : pair.slice(0, eq).trim()
+  if (!name) return null
+  const dir = String(reqPath).split('?')[0]
+  const c = { name, value: pair.slice(eq + 1).trim(), path: dir.lastIndexOf('/') > 0 ? dir.slice(0, dir.lastIndexOf('/')) : '/', httpOnly: false, secure: false, sameSite: 'lax' }
+  let maxAge, expires
+  for (const a of attrs) {
+    const i = a.indexOf('=')
+    const k = (i < 0 ? a : a.slice(0, i)).trim().toLowerCase()
+    const v = i < 0 ? '' : a.slice(i + 1).trim()
+    if (k === 'path' && v.startsWith('/')) c.path = v
+    if (k === 'httponly') c.httpOnly = true
+    if (k === 'secure') c.secure = true
+    if (k === 'samesite') c.sameSite = { strict: 'strict', none: 'no_restriction' }[v.toLowerCase()] || 'lax'
+    if (k === 'max-age' && /^-?[0-9]+$/.test(v)) maxAge = Number(v)
+    if (k === 'expires' && !Number.isNaN(Date.parse(v))) expires = Date.parse(v) / 1000
+  }
+  const at = maxAge !== undefined ? now / 1000 + maxAge : expires
+  if (at !== undefined && at <= now / 1000) return { name, path: c.path, gone: true }
+  if (at !== undefined) c.expirationDate = at
+  return c
+}
