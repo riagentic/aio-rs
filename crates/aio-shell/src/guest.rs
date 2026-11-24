@@ -259,6 +259,13 @@ pub(crate) fn opened(m: &Value) {
         _ = tx.send(m["error"].as_str().map_or(Ok(()), |e| Err(format!("{refused}: {e}"))));
     }
 }
+/// The runtime is gone: every ask still unanswered fails, never waits on.
+pub(crate) fn gone() {
+    for (_, refused, tx) in std::mem::take(&mut *lock()) {
+        _ = tx.send(Err(format!("{refused}: the window closed before it answered")));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +375,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_runtimes_answer_reaches_the_caller_with_its_reason() {
+        // No window while it runs (a test that stands in for one takes the turn).
+        let _turn = crate::WINDOW_TURN.lock().await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         lock().push((u64::MAX, "the child window was refused", tx));
         opened(&json!({ "t": "opened", "id": u64::MAX, "error": "child windows are off" }));

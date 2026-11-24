@@ -150,12 +150,14 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The icons set so far, as their control lines: said again to a runtime
-/// that connects later.
+/// The icons set so far, as their control lines.
 static ICONS: std::sync::Mutex<Vec<(Icon, String)>> = std::sync::Mutex::new(Vec::new());
 
-pub(crate) fn icon_lines() -> Vec<String> {
-    lock(&ICONS).iter().map(|(_, l)| l.clone()).collect()
+/// The icons and the tray's tooltip set so far, as their control lines:
+/// said again to a runtime that connects later.
+pub(crate) fn look_lines() -> Vec<String> {
+    let tip = lock(&STATE).tooltip.clone().map(|t| json!({ "t": "tooltip", "text": t }).to_string());
+    lock(&ICONS).iter().map(|(_, l)| l.clone()).chain(tip).collect()
 }
 
 /// What a cell's call told the people using the app (`cx.tell`), as this
@@ -407,7 +409,7 @@ mod tests {
         icon(Icon::Tray, &[&a], 8).unwrap();
         icon(Icon::Tray, &[&b], 8).unwrap();
         icon(Icon::Window, &[&a], 8).unwrap();
-        let kept = icon_lines();
+        let kept = look_lines();
         assert_eq!(kept.len(), 2);
         assert!(kept[0].contains(r#""target":"tray""#) && kept[0].contains(&base64_of(&b)));
         // aio's iconState(): what each shows, and the tooltip.
@@ -416,6 +418,8 @@ mod tests {
         let s = icon_state();
         assert_eq!((s.window, s.tray), (Showing::Still, Showing::Animated { frames: 2, fps: 12 }));
         assert_eq!(s.tooltip.as_deref(), Some("Syncing"));
+        // A tooltip set before the window connected is said to it too.
+        assert_eq!(look_lines().last().map(String::as_str), Some(r#"{"t":"tooltip","text":"Syncing"}"#));
         icon(Icon::Window, &[], 1).unwrap();
         assert_eq!(icon_state().window, Showing::Own, "none: the app's own again");
     }
@@ -427,6 +431,8 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_window_a_notice_is_an_error_never_silence() {
+        // No window while it runs (a test that stands in for one takes the turn).
+        let _turn = crate::WINDOW_TURN.lock().await;
         let e = notify(&Notice { title: "x".into(), ..Default::default() }).await.unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotConnected);
     }
@@ -445,6 +451,12 @@ mod tests {
                 { "label": "Pause", "i": 0, "show": false }, "-", { "label": "Library", "i": 2, "show": true } ] })
         );
         assert!(tray_json(Some(&Tray { tooltip: Some("Hi"), ..t }), "P").contains(r#""tooltip":"Hi""#));
+        // One the app set before the tray was made is the tray's first.
+        let js = include_str!("main.js");
+        assert!(
+            js.contains("if (m.t === 'tooltip') tooltip(m.text)")
+                && js.contains("tray.setToolTip(tip ?? TRAY.tooltip)")
+        );
         assert_eq!(tray_json(None, "P"), "null");
     }
 

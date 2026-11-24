@@ -326,3 +326,52 @@ async fn an_island_mounts_updates_emits_and_unmounts_in_the_real_page() {
     assert!(said.contains("[island] its script loaded but mount() threw: Error: no canvas"), "{said}");
     assert!(said.contains("[island] the script failed to load: Error: bad bundle"), "{said}");
 }
+
+/// Android's bridge takes the wire's port from the activity only (a post
+/// with no source window): a sandboxed island posting its own `aio-port`
+/// gets nothing of what the page sends, and takes nothing over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sandboxed_frame_cannot_take_androids_wire() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("index.html");
+    std::fs::write(&file, page_with(&Window { title: "bridge", ..Default::default() }, crate::ANDROID_BRIDGE)).unwrap();
+    let Some(chromium) = Chromium::open(&file) else { return eprintln!("skipped: no Chromium") };
+    let (mut ws, _) = tokio_tungstenite::connect_async(chromium.page()).await.unwrap();
+    let mut id = 0;
+    let mut until = async |expr: &str| {
+        for _ in 0..400 {
+            if eval(&mut ws, &mut id, expr).await == json!(true) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("never true: {expr}");
+    };
+    until("typeof window.__aioWire === 'object'").await;
+    // The activity's port: a post with no source window.
+    until(
+        "(window.__app = [], window.__ch = new MessageChannel(), __ch.port1.onmessage = (m) => __app.push(m.data), \
+         dispatchEvent(new MessageEvent('message', { data: 'aio-port', ports: [__ch.port2] })), true)",
+    )
+    .await;
+    // A sandboxed island posts a port of its own as `aio-port`.
+    let thief = "(el, p, emit) => { const c = new MessageChannel(); c.port1.onmessage = (m) => emit({ stolen: m.data }); \
+                 parent.postMessage('aio-port', '*', [c.port2]); emit({ posted: true }); }";
+    let doc = format!("<!doctype html><meta charset=\"utf-8\"><script>{}</script>", aio::ISLAND_SANDBOX);
+    until(&format!(
+        "(window.__frame = [], window.__f = document.createElement('iframe'), __f.setAttribute('sandbox', 'allow-scripts'), \
+         __f.srcdoc = {}, addEventListener('message', (e) => {{ if (e.source === __f.contentWindow && e.data.t === 'event') __frame.push(e.data.v) }}), \
+         __f.onload = () => __f.contentWindow.postMessage({{ t: 'mount', src: {} }}, '*'), document.body.appendChild(__f), true)",
+        json!(doc),
+        json!(thief)
+    ))
+    .await;
+    until("__frame.some((v) => v.posted)").await;
+    until("(__aioWire.send(new Uint8Array([1, 2])), true)").await;
+    until("__app.length === 1").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        eval(&mut ws, &mut id, "JSON.stringify([__app, __frame])").await,
+        json!(r#"[["AQI="],[{"posted":true}]]"#)
+    );
+}

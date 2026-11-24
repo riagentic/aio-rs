@@ -32,6 +32,11 @@ version may break things.
 - A network call its `#[client]` rule refuses no longer supersedes a
   running `#[mode(newest)]` call of the same method: before, any caller
   could abort an admin's call with one refused call (`DispatchAborted`).
+- Android: the page takes its wire to the app only from the activity. A
+  sandboxed island (`Island::js(..).sandboxed()`) posting its own
+  `aio-port` took the wire over: it heard every event the page sent
+  (the keys typed in any field) and could send the page DOM edits and
+  scripts.
 - The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.
@@ -214,6 +219,35 @@ version may break things.
   cleanup, its answer read or not (a flip `TransitionGroup` measured every
   row on every change). An owner now ends its tasks and scripts with one
   cleanup, and a script goes with the last handle on it.
+- A large frame from the app (a big first render, an image as a `data:`
+  URL) held the window's runtime: it joined the frame's reads again at
+  every read, so 16 MB copied 2 GB and froze every window 0.6 s, 64 MB
+  8 s. Each frame is joined once, as is a long control line (an
+  animated icon), which was split again at every read.
+- `desktop::tooltip` called before the window was up (in `main`, at
+  start) was lost: the tray kept its declared tooltip. The runtime gets
+  it when it connects and the tray shows it when it is made; an icon set
+  while the runtime connects is no longer lost either.
+- A character the app's control line to the window split across two
+  reads (lines queued up, or a long one) arrived as two replacement
+  characters: a notice's title, a dialog's title or start folder, a tray
+  tooltip. The runtime reads the line as UTF-8 text whole.
+- Windows: a launch (or `ax stop`, `--quit`, `--takeover`) that reached
+  the running app just as another connected failed at once, `All pipe
+  instances are busy`, as if the app were not answering: it waits for the
+  pipe's next instance, as the async connect did.
+- A launch that connected to the running app and never sent its line (a
+  frozen process) held up every later launch and `ax stop` on Windows:
+  each hand-over is read on its own.
+- A second launch while the app was starting (its lock taken, its door
+  for launches not open yet: a double click, two files opened at once)
+  waited 30 s and failed, its arguments lost. It is handed over once the
+  door opens.
+- A dialog (`page::pick`, `pick_many`, `save`), `open_window` or
+  `clear_partition` still open when the window's runtime went (a
+  `keep_server` app's window closed or crashed) waited for ever, and a
+  dialog held the clocks of the server fn calls in flight for ever: each
+  fails now, `the window closed before …`.
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.
