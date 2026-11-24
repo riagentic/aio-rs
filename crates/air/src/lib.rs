@@ -220,8 +220,8 @@ pub mod __rt {
     pub use crate::hot::At;
     pub use crate::props::{
         ByMemo, ByOpt, ByProp, BySignal, ByText, ByVal, ByView, CallbackOf, GlobalAttributeNames, GlobalAttributes,
-        IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, NoPropsBuilder, OptVal, Props, Set,
-        builder_of, spread, with_attributes,
+        IntoOpt, IntoOptView, IntoOptViewValue, IntoValue, IntoView, IntoViewValue, NoPropsBuilder, OptVal, Props,
+        Same, SameByEq, SameByNone, Set, builder_of, spread, with_attributes,
     };
     pub use crate::tree::{KeyByDebug, KeyByDisplay, KeyByNone, KeyOf};
 }

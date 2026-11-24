@@ -567,6 +567,19 @@ version may break things.
   "{doc.id}", .. }` starts over for another document). `ax lint` warns
   only on a key on a row's later node (it keys no row).
 
+- A component's plain props were read once: `for p in procs.get() { Row {
+  key: "{p.pid}", data: lookup(p.pid) } }` kept the row's first props
+  when `lookup`'s source arrived later ("no data" forever). A plain prop
+  is followed now: when what it read changes and the props built again
+  differ (`PartialEq`, field by field; a `Prop`, a view, a handler and
+  attributes follow by themselves), the body runs again with them, its
+  own and its children's state kept, and its new view takes the old one's
+  place in the page node by node (the focus, a field's typed text and
+  scroll stay; a new `MORPH` edit). **Breaking:** a hand-written props
+  struct placed by `rsx!` is `Clone` (`#[derive(Clone, Props)]`, as the
+  docs show); `#[component]`'s is `Clone` when its fields are (it asked
+  every type parameter before: `EventHandler<E>` needs no `E: Clone`).
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

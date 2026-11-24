@@ -19,6 +19,7 @@ use crate::reactive::{
     Callback, Frame, Owner, Signal, batch, body, child_scope, cleanup, current_owner, current_root, detached, in_root,
     memo_now, provide_on, render, render_comp, scope, set_root, try_context, untrack, with_owner,
 };
+use std::any::Any;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -57,6 +58,7 @@ pub(crate) mod op {
     pub const EVAL: u8 = 14;
     pub const EVAL_SEND: u8 = 15;
     pub const STYLE: u8 = 16;
+    pub const MORPH: u8 = 17;
 }
 
 /// An event hole's handler: the page's event, and its flow (stop, prevent).
@@ -161,6 +163,18 @@ impl Dom {
             (Some((a, _)), Some(s)) => s.unplace(a),
             (Some((a, b)), None) => _ = self.op(op::REMOVE).u32(a).u32(b),
             (None, _) => {}
+        }
+    }
+    /// View `now` in the place of `was` (before anchor `at`): the page's
+    /// nodes stay where they are alike, taking `now`'s ids, listeners and
+    /// what it set (focus, scroll and typed text kept).
+    fn morph(&mut self, at: u32, was: Range, now: Range) {
+        match (was.0, now.0, &mut self.server) {
+            (Some((a, b)), Some((c, d)), None) => _ = self.op(op::MORPH).u32(a).u32(b).u32(c).u32(d),
+            _ => {
+                self.remove(was);
+                self.insert(at, now);
+            }
         }
     }
     fn park(&mut self, v: Range) {
@@ -1011,23 +1025,129 @@ pub fn styled(view: View, property: &'static str, f: impl Fn() -> Option<String>
     }))
 }
 
-/// A component in a template: `f()` (its body, run once, untracked, with
-/// its hooks kept) and its view before anchor `at`. A body that waits for
-/// a resource runs again once it is loaded, its hooks' state kept.
-/// `name` and `key` place it in the tree of mounted components.
+/// A component in a template: its props as `props()` builds them, and
+/// its body, `c(props)`, run once, untracked, with its hooks kept. A body
+/// that waits for a resource runs again once it is loaded, its hooks'
+/// state kept. A plain prop follows what it read: when that changes and
+/// the props built anew differ ([`Props::__same`](crate::Props)), the
+/// body runs again with them, its hooks' and its children's state kept,
+/// and its new view takes the old one's place in the page node by node
+/// (focus, scroll and typed text kept). `name` and `key` place it in the
+/// tree of mounted components.
 #[doc(hidden)]
-pub fn comp(at: u32, name: &'static str, key: Option<String>, f: Box<dyn Hole<View>>) {
-    comp_as(at, Some(crate::tree::mount(name, key)), f)
+pub fn comp<P: crate::Props + Clone + 'static, M: 'static, C: crate::Component<P, M>>(
+    at: u32,
+    name: &'static str,
+    key: Option<String>,
+    c: C,
+    props: impl Fn() -> P + 'static,
+) {
+    comp_with(at, name, key, props, same_props::<P>, move |p| c.call(p))
 }
 
-fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Hole<View>>) {
+fn same_props<P: crate::Props + 'static>(a: &dyn Any, b: &dyn Any) -> bool {
+    matches!((a.downcast_ref::<P>(), b.downcast_ref::<P>()), (Some(a), Some(b)) if a.__same(b))
+}
+
+/// [`comp`], its props compared by `same` (`h`'s `comp`: given as a value, never changed).
+pub(crate) fn comp_with<P: Clone + 'static>(
+    at: u32,
+    name: &'static str,
+    key: Option<String>,
+    props: impl Fn() -> P + 'static,
+    same: fn(&dyn Any, &dyn Any) -> bool,
+    call: impl Fn(P) -> View + 'static,
+) {
+    let body = Body {
+        props: Box::new(move || Box::new(props())),
+        same,
+        clone: |p| Box::new(p.downcast_ref::<P>().expect("air: a component's props").clone()),
+        call: Box::new(move |p| call(*p.downcast::<P>().expect("air: a component's props"))),
+    };
+    comp_as(at, Some(crate::tree::mount(name, key)), body)
+}
+
+/// A component's props and body, past their types.
+struct Body {
+    props: Box<dyn Fn() -> Box<dyn Any>>,
+    same: fn(&dyn Any, &dyn Any) -> bool,
+    clone: fn(&dyn Any) -> Box<dyn Any>,
+    call: Box<dyn Fn(Box<dyn Any>) -> View>,
+}
+
+impl Body {
+    /// A body of no props (a root's own view).
+    fn of(f: impl Fn() -> View + 'static) -> Self {
+        Self {
+            props: Box::new(|| Box::new(())),
+            same: |_, _| true,
+            clone: |_| Box::new(()),
+            call: Box::new(move |_| f()),
+        }
+    }
+}
+
+/// Props built, and the scope of what building them made (none: nothing).
+type Built = (Box<dyn Any>, Option<Owner>);
+
+/// A component's props: the ones its body runs with, and newer ones for
+/// its next run, with its children's frames to hand on to their views.
+#[derive(Default)]
+struct Given {
+    now: Option<Built>,
+    next: Option<(Built, HashMap<String, Rc<Frame>>)>,
+}
+
+/// `props()` under a scope kept by `by` (the component's hole), followed by
+/// the running code (`tracked`) or recorded; the scope ends if it holds nothing.
+fn build(props: &dyn Fn() -> Box<dyn Any>, by: Owner, tracked: bool) -> (Built, Vec<crate::reactive::Mark>) {
+    use crate::reactive::{end_kept, kept_owner, recorded, under};
+    let s = kept_owner(by);
+    let (p, marks) = match tracked {
+        true => (under(s, true, props), vec![]),
+        false => under(s, false, || recorded(props)),
+    };
+    if s.holds_nothing() {
+        end_kept(s, by);
+        return ((p, None), marks);
+    }
+    ((p, Some(s)), marks)
+}
+
+fn comp_as(at: u32, id: Option<crate::tree::Id>, b: Body) {
+    use crate::reactive::end_kept;
+    let Body { props, same, clone, call } = b;
+    let props: Rc<dyn Fn() -> Box<dyn Any>> = props.into();
+    let given: Rc<RefCell<Given>> = Rc::default();
     let mut frame: Option<Rc<Frame>> = None;
+    let mut watch: Option<crate::Memo<u64>> = None;
     let mut shown = Range::default();
     // Its entry ends with its hole.
     let mounted = id.map(crate::tree::Entry);
     render_comp(move || {
         let _in = crate::tree::enter(mounted.as_ref().map(|m| m.0));
-        dom(|d| d.remove(std::mem::take(&mut shown)));
+        let me = current_owner().expect("air: a component's hole");
+        if frame.is_none() {
+            let (first, marks) = build(&*props, me, false);
+            given.borrow_mut().now = Some(first);
+            if !marks.is_empty() {
+                watch = Some(follow_props(me, id, props.clone(), given.clone(), same, marks));
+            }
+        }
+        if let Some(w) = watch {
+            w.with(|_| ());
+        }
+        let next = given.borrow_mut().next.take();
+        let kept = next.map(|(p, frames)| {
+            if let Some((_, Some(s))) = given.borrow_mut().now.replace(p) {
+                end_kept(s, me);
+            }
+            frames
+        });
+        let (morph, was) = (kept.is_some(), std::mem::take(&mut shown));
+        if !morph {
+            dom(|d| d.remove(was));
+        }
         let fr = frame
             .get_or_insert_with(|| {
                 let place = crate::hot::keeping().then(|| crate::tree::place(id));
@@ -1037,13 +1157,68 @@ fn comp_as(at: u32, id: Option<crate::tree::Id>, f: Box<dyn Hole<View>>) {
             })
             .clone();
         let t0 = crate::tree::start();
-        let v = body(&fr, || f.run());
-        shown = place(v);
+        let p = clone(&*given.borrow().now.as_ref().expect("air: a component's props").0);
+        let v = body(&fr, || call(p));
+        shown = match kept {
+            Some(frames) if !frames.is_empty() => crate::hot::keeping_in(frames, || place(v)),
+            _ => place(v),
+        };
         if let Some(m) = &mounted {
             crate::tree::rendered(m.0, shown.0, t0);
         }
-        dom(|d| d.insert(at, shown));
+        dom(|d| if morph { d.morph(at, was, shown) } else { d.insert(at, shown) });
     });
+}
+
+/// The memo of component `me`'s props, kept by its hole: `props()` again
+/// when what a plain prop read changes, a new version when they differ
+/// from the last built (they wait in `given.next` with its children's
+/// frames, detached, for its body's next run).
+fn follow_props(
+    me: Owner,
+    id: Option<crate::tree::Id>,
+    props: Rc<dyn Fn() -> Box<dyn Any>>,
+    given: Rc<RefCell<Given>>,
+    same: fn(&dyn Any, &dyn Any) -> bool,
+    marks: Vec<crate::reactive::Mark>,
+) -> crate::Memo<u64> {
+    use crate::reactive::{end_kept, kept_owner, memo_seeded, under};
+    let k = kept_owner(me);
+    let g = given.clone();
+    // Its hole ended before its body took them: the frames end.
+    under(k, false, || {
+        cleanup(move || {
+            if let Some((_, frames)) = g.borrow_mut().next.take() {
+                frames.values().for_each(|f| f.end());
+            }
+        })
+    });
+    let mut version = 0u64;
+    let f = move || {
+        let ((p, s), _) = build(&*props, me, true);
+        let mut h = given.borrow_mut();
+        let last = h.next.as_ref().map(|n| &n.0).or(h.now.as_ref());
+        if last.is_some_and(|(l, _)| same(&**l, &*p)) {
+            s.into_iter().for_each(|s| end_kept(s, me));
+            return version;
+        }
+        match &mut h.next {
+            Some((built, _)) => {
+                if let (_, Some(old)) = std::mem::replace(built, (p, s)) {
+                    end_kept(old, me);
+                }
+            }
+            None => {
+                // Its children as they are now, for the views built in their places.
+                let frames = id.map(crate::tree::frames_under).unwrap_or_default();
+                frames.values().for_each(|f| f.detach());
+                h.next = Some(((p, s), frames));
+            }
+        }
+        version += 1;
+        version
+    };
+    under(k, false, || memo_seeded(Box::new(f), 0, marks))
 }
 
 /// `then()` or `otherwise()` before anchor `at`, swapped only when `cond()` flips.
@@ -1284,7 +1459,7 @@ pub fn longest_increasing(seq: &[isize]) -> Vec<bool> {
 // ------------------------------------------------------------- boundaries
 
 /// The props of [`ErrorBoundary`].
-#[derive(air::Props)]
+#[derive(Clone, air::Props)]
 pub struct ErrorBoundaryProps {
     pub fallback: Callback<String, View>,
     pub children: View,
@@ -1348,7 +1523,7 @@ pub fn retry() -> Retry {
 }
 
 /// The props of [`Suspense`].
-#[derive(air::Props)]
+#[derive(Clone, air::Props)]
 pub struct SuspenseProps {
     pub fallback: View,
     pub children: View,
@@ -1416,7 +1591,7 @@ pub fn Suspense(p: SuspenseProps) -> View {
 }
 
 /// The props of [`Fragment`].
-#[derive(air::Props)]
+#[derive(Clone, air::Props)]
 pub struct FragmentProps {
     pub children: View,
 }
@@ -1710,7 +1885,7 @@ impl Root {
                         None => _ = d.op(op::APPEND).u32(0).u32(a).u32(b),
                     });
                 }
-                comp_as(at, None, Box::new(move || app()));
+                comp_as(at, None, Body::of(move || app()));
             });
             shown.set(Some(owner));
         });
@@ -1724,7 +1899,7 @@ impl Root {
         let before = crate::tree::frames(self.id);
         self.within(move || {
             let (_, at) = slot();
-            comp_as(at, None, Box::new(f));
+            comp_as(at, None, Body::of(f));
         });
         let new = crate::tree::frames(self.id).into_keys().filter(|k| !before.contains_key(k));
         self.besides.borrow_mut().extend(new.map(String::into_boxed_str));

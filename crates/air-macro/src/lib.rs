@@ -205,9 +205,23 @@ pub fn component(_: proc_macro::TokenStream, item: proc_macro::TokenStream) -> p
     });
     let pats = fields.iter().map(|f| &f.pat);
     let builder = builder(vis.clone(), &props, &name.to_string(), &fields, &gp, &gn);
+    // Clone when its fields are (a derive would ask it of every type
+    // parameter: `E` of an `EventHandler<E>` needn't be).
+    let mut generic_names = vec![];
+    idents_in(&gn.clone().into_iter().collect::<Vec<_>>(), &mut generic_names);
+    let tys = fields.iter().map(|f| &f.ty).filter(|ty| {
+        let mut used = vec![];
+        idents_in(&TokenStream::clone(ty).into_iter().collect::<Vec<_>>(), &mut used);
+        used.iter().any(|u| generic_names.contains(u))
+    });
+    let (names, names2) = (fields.iter().map(|f| &f.name), fields.iter().map(|f| &f.name));
     quote!(
-        #[derive(Clone)]
         #vis struct #props<#gp> { #(#decl),* }
+        impl<#gp> ::core::clone::Clone for #props<#gn> where #(#tys: ::core::clone::Clone,)* {
+            fn clone(&self) -> Self {
+                Self { #(#names: ::core::clone::Clone::clone(&self.#names2),)* }
+            }
+        }
         #builder
         #[allow(non_snake_case)]
         #head fn #name<#gp>(#props { #(#pats),* }: #props<#gn>) #rest
@@ -406,6 +420,20 @@ fn builder(
     let names: Vec<&Ident> = fields.iter().map(|f| &f.name).collect();
     let tys: Vec<&TokenStream> = fields.iter().map(|f| &f.ty).collect();
     let unit = params.iter().map(|_| quote!(()));
+    // The props a body's view is made of: a `Prop`, a view, a handler and
+    // attributes follow by themselves.
+    let compared: Vec<&Ident> = fields
+        .iter()
+        .filter(|f| {
+            let inner = match &f.kind {
+                Kind::Plain => f.ty.clone(),
+                Kind::Opt(i) => i.clone(),
+                _ => return false,
+            };
+            !f.extends && !is_callback(ty_head(&inner.into_iter().collect::<Vec<_>>()).0.as_deref())
+        })
+        .map(|f| &f.name)
+        .collect();
     let air = quote!(air);
     let mut generic_names = vec![];
     idents_in(&gn.clone().into_iter().collect::<Vec<_>>(), &mut generic_names);
@@ -442,7 +470,7 @@ fn builder(
             _ if exact => (
                 quote!(),
                 quote!(f: impl ::core::ops::FnOnce() -> #ty),
-                quote!(#air::untrack(f)),
+                quote!(f()),
                 quote!(),
                 quote!(v: #ty),
                 quote!(v),
@@ -450,7 +478,7 @@ fn builder(
             Kind::Opt(i) => (
                 quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
-                quote!(#air::__rt::IntoOpt::into_opt(#air::untrack(f))),
+                quote!(#air::__rt::IntoOpt::into_opt(f())),
                 quote!(<__X: #air::__rt::IntoOpt<#i, __M>, __M>),
                 quote!(v: __X),
                 quote!(#air::__rt::IntoOpt::into_opt(v)),
@@ -490,7 +518,7 @@ fn builder(
             Kind::Plain => (
                 quote!(<__X: ::core::convert::Into<#ty>>),
                 quote!(f: impl ::core::ops::FnOnce() -> __X),
-                quote!(::core::convert::Into::into(#air::untrack(f))),
+                quote!(::core::convert::Into::into(f())),
                 quote!(<__X: ::core::convert::Into<#ty>>),
                 quote!(v: __X),
                 quote!(::core::convert::Into::into(v)),
@@ -615,6 +643,11 @@ fn builder(
             type Builder = #b<#gn #(#unit),*>;
             fn builder() -> Self::Builder {
                 #b { #(#names: ::core::option::Option::None,)* __s: ::core::marker::PhantomData }
+            }
+            fn __same(&self, other: &Self) -> bool {
+                #[allow(unused_imports)]
+                use #air::__rt::{SameByEq as _, SameByNone as _};
+                true #(&& (&&#air::__rt::Same(&self.#compared, &other.#compared)).same())*
             }
         }
         #[allow(non_camel_case_types)]
@@ -2056,7 +2089,8 @@ impl Tpl {
                         let mut r = vec![];
                         node_captures(std::slice::from_ref(n), &mut r);
                         let c = clones(&r);
-                        let call = comp(n);
+                        let props = comp(n);
+                        let cpath: TokenStream = path.iter().cloned().collect();
                         // Its name and key, for the tree of mounted components.
                         let name = path.iter().rev().find_map(|t| match t {
                             TokenTree::Ident(i) => Some(i.to_string()),
@@ -2070,7 +2104,7 @@ impl Tpl {
                             }),
                             None => quote!(::core::option::Option::None),
                         };
-                        quote!(air::__rt::comp(#id, #name, #key, { #c ::std::boxed::Box::new(move || #call) });)
+                        quote!(air::__rt::comp(#id, #name, #key, #cpath, { #c move || #props });)
                     }
                     Node::For { at, pat, expr, body: rows } => {
                         let key = match rows.first() {
@@ -2178,11 +2212,12 @@ fn hole_fn(
     call(quote!({ #c ::std::boxed::Box::new(#head { #c #v }) }))
 }
 
-/// `Row { a: x, "data-t": t, ..more, children… }` →
-/// `Row(builder().a(move || x).__attr("data-t", move || t).__spread(more).children(move || …).build())`:
+/// `Row { a: x, "data-t": t, ..more, children… }`'s props:
+/// `builder().a(move || x).__attr("data-t", move || t).__spread(more).children(move || …).build()`:
 /// every value a closure (each clones the names it reads), so a `Prop`
-/// follows it and any other prop takes its value once; a closure given
-/// as a value (a handler) goes to `__fn_a`, which types its parameters.
+/// follows it and any other prop is read where the props are built (they
+/// are built again when that changes); a closure given as a value (a
+/// handler) goes to `__fn_a`, which types its parameters.
 fn comp(n: &Node) -> TokenStream {
     let Node::Comp { path, props, spreads, children, .. } = n else { unreachable!() };
     let path: TokenStream = path.iter().cloned().collect();
@@ -2265,7 +2300,7 @@ fn comp(n: &Node) -> TokenStream {
         #[allow(unused_imports)]
         use air::__rt::{GlobalAttributes as _, GlobalAttributeNames as _};
         let __air_c = &#path;
-        air::Component::call(__air_c, #builder #(#calls)* .build())
+        #builder #(#calls)* .build()
     })
 }
 

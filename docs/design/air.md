@@ -285,10 +285,17 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
 - `onX` handlers are typed by their event (`onkeydown` gets a
   `KeyboardEvent`, `oninput` a `FormEvent`, …); an unknown `onX` is a
   compile error; `onmounted` runs once the element is drawn.
-- A component's props are evaluated once: a prop that must follow state is
-  a `Signal`, a `Part` or typed `Prop<T>` (as in Solid and Leptos): a
-  `Prop` given an expression (`value: name.get()`) follows it, given a
-  constant it is that constant. `#[props(default)]`, `#[props(default =
+- A `Prop<T>` (or a `Signal`, a `Part`) follows what it is given by
+  itself (as in Solid and Leptos): given an expression (`value:
+  name.get()`) it follows it, given a constant it is that constant. The
+  plain props are built where the component is placed, their reads
+  recorded: when one changes, a memo builds them again and compares the
+  plain ones (`PartialEq`, field by field; a `Prop`, a view, a handler
+  and attributes follow by themselves); different, the body runs again
+  with them, its hooks' state kept, its children's frames handed to the
+  views built in their places (by place, as a hot reload), and its new
+  view takes the old one's place with MORPH (the page's nodes stay where
+  alike: focus, scroll and typed text kept). `#[props(default)]`, `#[props(default =
   e)]`, `Option<T>` and `View` props may be left out (an `Option` takes a
   `T`); any other prop left out is a compile error. A `View` prop takes a
   view or text (a string, a number, a format string, a signal), and text
@@ -342,6 +349,7 @@ side; node 0 is `#main`.
 | 14 | EVAL | script id, code (run as a script of the page's own making, `aio::page::RUN`) |
 | 15 | EVAL_SEND | script id, JSON (its `await aio.recv()`) |
 | 16 | STYLE | first, last, property, value: one style property of the range's first element |
+| 17 | MORPH | first, last (in the page), first, last (just built): the built view in the page's place, pair by pair; a node alike stays, taking the built one's id, listeners, attributes and the properties its view set (a field's typed text stays where the view sets no value) |
 
 A template is sent once per page, cloned with `cloneNode` (which keeps
 empty text holes). An element whose `animation` an edit changed (by STYLE or
@@ -650,8 +658,9 @@ as on air.
   a body runs: the reads move into the holes (`"{n}"`, `n.get()` in an
   attribute) or into a `memo` when the swap comes (step 2; a lint spots the
   body reads it can).
-- **Props are evaluated once on air.** On Dioxus a parent's re-render
-  hands new props. `watch(deps, f)` is the facade's bridge for effects that
+- **Props are built where the component is placed.** On Dioxus a parent's
+  re-render hands new props; on air a plain prop's reads are followed and
+  new props run the body again (its state and the page's nodes kept). `watch(deps, f)` is the facade's bridge for effects that
   follow values a view made from props (0.1's `use_effect(use_reactive!(…))`);
   on air a prop that must follow state is a `Signal`, a `Part` or a
   `Prop<T>` (the kit's props are `Prop`s: `value: name.get()` follows).

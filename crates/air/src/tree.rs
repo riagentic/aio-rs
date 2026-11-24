@@ -1,7 +1,7 @@
 //! The mounted components (aio DevTools' `tree`, `devtools-tree.ts`; aio-rs's
 //! `TestUi::components()`): each component an `rsx!` places, by name and
 //! key, with what drew it: how many times its body ran (`renders`: once, or
-//! again after a wait or a [`follow`](crate::follow)) and how many times one
+//! again after a wait, a [`follow`](crate::follow) or new props) and how many times one
 //! of its holes wrote its part of the page again (`updates`: air's
 //! re-render). Counts cost an increment, as in aio; the tree is walked only
 //! when asked. The page's ids of each one's first and last node let a test
@@ -58,7 +58,7 @@ pub struct Render {
     /// How long it took (a body's run: the children it placed included).
     pub ms: f64,
     /// `"mount"`: its body's first run; `"signal"`: a state change ran its
-    /// body again (a wait, a `follow`) or one of its holes.
+    /// body again (a wait, a `follow`, new props) or one of its holes.
     pub trigger: &'static str,
 }
 
@@ -292,6 +292,32 @@ pub(crate) fn frames(root: u32) -> HashMap<String, Rc<Frame>> {
     })
 }
 
+/// The frames of the components inside component `id` (not its own), by
+/// place: what its body run again hands on to the views built in their places.
+pub(crate) fn frames_under(id: Id) -> HashMap<String, Rc<Frame>> {
+    TREE.with_borrow(|t| {
+        let get = |id: Id| t.slots.get(id.0 as usize).filter(|s| s.0 == id.1).and_then(|s| s.1.as_ref());
+        let inside = |mut c: Id| {
+            while let Some(p) = get(c).and_then(|c| c.parent) {
+                if p == id {
+                    return true;
+                }
+                c = p;
+            }
+            false
+        };
+        t.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (g, c))| {
+                let me = Id(i as u32, *g);
+                let f = c.as_ref().filter(|_| inside(me))?.frame.upgrade()?;
+                Some((place_in(t, Some(me)), f))
+            })
+            .collect()
+    })
+}
+
 /// One mounted component ([`components`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mounted {
@@ -299,7 +325,7 @@ pub struct Mounted {
     pub name: &'static str,
     /// Its `key:` in a list, as text.
     pub key: Option<String>,
-    /// Times its body ran: once, and again after a wait or a `follow`.
+    /// Times its body ran: once, and again after a wait, a `follow` or new props.
     pub renders: u32,
     /// Times one of its own holes (not a child component's) wrote its part
     /// of the page again: what a state change cost it.

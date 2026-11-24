@@ -735,6 +735,35 @@ pub(crate) fn child_scope<R>(f: impl FnOnce() -> R) -> (R, Owner) {
     (r, Owner(k))
 }
 
+/// A new owner kept by `by` (a hole): it lives across `by`'s re-runs and
+/// ends with it, or by [`end_kept`].
+pub(crate) fn kept_owner(by: Owner) -> Owner {
+    Owner(rt(|rt| {
+        let k = rt.alloc_detached(by.0);
+        if let Some(h) = rt.node_mut(by.0) {
+            h.extra.get_or_insert_default().kept.push(k);
+        }
+        k
+    }))
+}
+
+/// End `o`, a [`kept_owner`] of `by`.
+pub(crate) fn end_kept(o: Owner, by: Owner) {
+    rt(|rt| {
+        if let Some(e) = rt.node_mut(by.0).and_then(|h| h.extra.as_mut()) {
+            e.kept.retain(|k| *k != o.0);
+        }
+    });
+    dispose(o.0);
+}
+
+/// `f` under `o`, its reads followed by the running code (`tracked`) or by none.
+pub(crate) fn under<R>(o: Owner, tracked: bool, f: impl FnOnce() -> R) -> R {
+    let observer = if tracked { RT.with_borrow(|rt| rt.observer) } else { None };
+    let _r = enter(observer, Some(o.0));
+    f()
+}
+
 /// An owner: what was made under it lives until it is disposed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Owner(pub(crate) Key);
@@ -754,6 +783,13 @@ impl Owner {
     /// Is it still there?
     pub fn alive(self) -> bool {
         RT.with_borrow(|rt| rt.node(self.0).is_some())
+    }
+
+    /// Has it nothing (no node, no cleanup, no context)?
+    pub(crate) fn holds_nothing(self) -> bool {
+        RT.with_borrow(|rt| {
+            rt.node(self.0).is_none_or(|n| n.owned.is_empty() && n.cleanups.is_empty() && n.extra.is_none())
+        })
     }
 }
 

@@ -168,11 +168,20 @@ readers told when that value changes.
 ## Components, props and children
 
 A component is a function returning `View`; `#[component]` turns its
-arguments into props. Its body runs once, and so are its props
-evaluated, unless a prop is a `Prop<T>` (or a `Signal`, a `Part`): given
-an expression (`value: name.get()`), a `Prop` follows it; given a
-constant, it is that constant. Rows that take their data by props and
-a key stay put when the list around them changes.
+arguments into props. Its body runs once. A `Prop<T>` (or a `Signal`, a
+`Part`) follows what it is given (`value: name.get()`) by itself, in the
+holes that read it. A plain prop is read where the component is placed:
+when what it read changes (`data: lookup(p.pid)`, its source loaded
+later), the props are built again and, if they differ (`PartialEq`; a
+type without it always does), the body runs again with them: its own
+state (signals, memos, hooks), its children's and the page's nodes (the
+focus, a field's text and selection, scroll) are kept, and its new view
+takes the old one's place node by node. A hook keeps what its first run
+made (an `effect`'s or a `memo`'s closure too): one that must follow a
+prop takes it as a `Prop`. No remount: a keyed row stays
+the same component. Rows that take their data by props and a key stay
+put when the list around them changes; a row whose item itself changed
+is made anew (the item is the row's identity with its key).
 
 ```rust
 use aio::ui::prelude::*;
@@ -432,7 +441,7 @@ assert_eq!(ui.read(&THEME), "dark");
 
 | Moment | Write |
 |---|---|
-| mount | the component's body (once); `once(\|\| ..)`: runs once, its value kept |
+| mount | the component's body (once, and again with new props: its hooks hand back what they made); `once(\|\| ..)`: runs once, its value kept |
 | when what it read changed | `effect(move \|\| ..)` |
 | the element is in the page | `onmounted: move \|e\| ..` on it |
 | a change | the holes that read it: keep them free of side effects |
