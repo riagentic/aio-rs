@@ -207,58 +207,73 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
     if args.iter().any(|a| a == "--quit") {
         return quit_at(id, &plan.data).map(|()| Start::Done);
     }
-    let claimed = match claim(id, &plan, ask.takeover) {
-        // Held by aio (or an aio-rs not answering): say who holds it.
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-            match hand_over(&hand_addr(id, &plan.data)?, &std::env::current_dir()?, &args) {
-                Ok(()) => return Ok(Start::HandedOver),
-                // The instance holding it is ending: this launch starts once it is gone.
-                Err(h) if ending(&h) => wait_lock(id, &plan).map_err(|w| match w.kind() {
-                    io::ErrorKind::WouldBlock => io::Error::new(h.kind(), format!("{e}; {h}")),
-                    _ => w,
-                }),
-                Err(h) => Err(io::Error::new(h.kind(), format!("{e}; {h}"))),
-            }
-        }
-        r => r,
+    let Some(d) = claim_or_hand(id, &plan, ask.takeover, &args)? else { return Ok(Start::HandedOver) };
+    aio::boot::begin(cfg, version, &d)?;
+    crate::feedback::wire(cfg);
+    _ = APP.set((id.into(), version.into()));
+    _ = BUNDLE_ID.set(cfg.mac_bundle_id());
+    _ = SHOWN.set(shows);
+    _ = LOOK.set((cfg.hue(), cfg.build.splash.clone()));
+    _ = ASSETS.set(cfg.build.asset_files);
+    _ = crate::firstrun::WORDS.set(crate::firstrun::words_of(cfg, version));
+    #[cfg(feature = "updates")]
+    if let crate::update::Next::Exit = crate::update::on_start(cfg, version, &d)? {
+        aio::health::stop();
+        aio::log::finish();
+        return Ok(Start::Done);
+    }
+    // Updates are never a reason not to start.
+    #[cfg(feature = "updates")]
+    if let Err(e) = crate::update::open(cfg, version, &d) {
+        eprintln!("[aio] no updates cell: {e}");
+    }
+    #[cfg(not(feature = "updates"))]
+    if let Some(w) = crate::update::left_out(cfg.updates.url.is_some(), aio::update::installed()) {
+        eprintln!("{w}");
+    }
+    // No window to wait for (a server, a CLI): booted is started.
+    if matches!(cfg.app.mode, aio::config::Mode::Server | aio::config::Mode::Cli) {
+        crate::update::confirm(id, version);
+    }
+    if cfg.app.mode == aio::config::Mode::Server {
+        take_stops(id, &d.data);
+    }
+    #[cfg(feature = "updates")]
+    crate::update::watch(cfg, version, &d.data);
+    Ok(Start::Run(d))
+}
+
+/// The dirs `plan` names, locked; `None`: `args` handed to the instance
+/// holding them. One that has no door yet (starting) or none any more
+/// (ending) is asked again until it takes them or lets go of the lock (30 s
+/// at most); held by aio (or an aio-rs not answering), it says who holds it.
+fn claim_or_hand(
+    id: &str,
+    plan: &aio::paths::Plan,
+    takeover: bool,
+    args: &[String],
+) -> io::Result<Option<aio::paths::AppDirs>> {
+    let e = match claim(id, plan, takeover) {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => e,
+        r => return r.map(Some),
     };
-    match claimed {
-        Ok(d) => {
-            aio::boot::begin(cfg, version, &d)?;
-            crate::feedback::wire(cfg);
-            _ = APP.set((id.into(), version.into()));
-            _ = BUNDLE_ID.set(cfg.mac_bundle_id());
-            _ = SHOWN.set(shows);
-            _ = LOOK.set((cfg.hue(), cfg.build.splash.clone()));
-            _ = ASSETS.set(cfg.build.asset_files);
-            _ = crate::firstrun::WORDS.set(crate::firstrun::words_of(cfg, version));
-            #[cfg(feature = "updates")]
-            if let crate::update::Next::Exit = crate::update::on_start(cfg, version, &d)? {
-                aio::health::stop();
-                aio::log::finish();
-                return Ok(Start::Done);
+    let (addr, cwd) = (hand_addr(id, &plan.data)?, std::env::current_dir()?);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let h = match hand_over(&addr, &cwd, args) {
+            Ok(()) => return Ok(None),
+            Err(h) if ending(&h) => h,
+            Err(h) => return Err(io::Error::new(h.kind(), format!("{e}; {h}"))),
+        };
+        match aio::paths::AppDirs::planned(id, plan.clone()) {
+            Err(w) if w.kind() == io::ErrorKind::WouldBlock && std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            // Updates are never a reason not to start.
-            #[cfg(feature = "updates")]
-            if let Err(e) = crate::update::open(cfg, version, &d) {
-                eprintln!("[aio] no updates cell: {e}");
+            Err(w) if w.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(h.kind(), format!("{e}; {h}")));
             }
-            #[cfg(not(feature = "updates"))]
-            if let Some(w) = crate::update::left_out(cfg.updates.url.is_some(), aio::update::installed()) {
-                eprintln!("{w}");
-            }
-            // No window to wait for (a server, a CLI): booted is started.
-            if matches!(cfg.app.mode, aio::config::Mode::Server | aio::config::Mode::Cli) {
-                crate::update::confirm(id, version);
-            }
-            if cfg.app.mode == aio::config::Mode::Server {
-                take_stops(id, &d.data);
-            }
-            #[cfg(feature = "updates")]
-            crate::update::watch(cfg, version, &d.data);
-            Ok(Start::Run(d))
+            r => return r.map(Some),
         }
-        Err(e) => Err(e),
     }
 }
 
@@ -279,8 +294,8 @@ fn claim(id: &str, plan: &aio::paths::Plan, takeover: bool) -> io::Result<aio::p
 }
 
 /// Whether a hand-over failed because the instance holding the lock is
-/// ending (pure): it said so, or its door is already gone (removed as it
-/// stops, the lock not yet let go).
+/// ending or starting (pure): it said so, or its door is gone (removed as
+/// it stops, the lock not yet let go) or not open yet.
 fn ending(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::ResourceBusy | io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused)
 }
@@ -478,6 +493,50 @@ mod tests {
         let dirs = wait_lock(&id, &plan).unwrap();
         assert!(aio::paths::running(&dirs.data));
         _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &dirs.data).unwrap());
+    }
+
+    /// A launch while the running instance starts (its lock taken, its door
+    /// not yet open: a double click, two files opened at once) is handed
+    /// over once the door opens, never lost after a 30 s wait.
+    #[test]
+    fn a_launch_while_the_app_starts_is_handed_over_once_its_door_opens() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let d = tempfile::tempdir().unwrap();
+        let id = format!("starting-{}", std::process::id());
+        let env = |k: &str| (k == "AIORT_DATA").then(|| d.path().to_path_buf());
+        let plan = aio::paths::plan(&id, None, &aio::paths::Ask::default(), &env).unwrap();
+        let _running = aio::paths::AppDirs::planned(&id, plan.clone()).unwrap();
+        let addr = hand_addr(&id, &plan.data).unwrap();
+        let _in = aio::rt().enter();
+        let took = aio::rt().spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let mut l = aio::ipc::Listener::bind(&addr).unwrap();
+            let (r, mut w) = tokio::io::split(l.accept().await.unwrap());
+            let mut line = String::new();
+            tokio::io::BufReader::new(r).read_line(&mut line).await.unwrap();
+            w.write_all(b"ok\n").await.unwrap();
+            read_launch(&line).unwrap().args
+        });
+        let at = std::time::Instant::now();
+        assert!(claim_or_hand(&id, &plan, false, &["a.md".into()]).unwrap().is_none(), "handed over");
+        assert!(at.elapsed() < std::time::Duration::from_secs(10), "{:?}", at.elapsed());
+        assert_eq!(aio::rt().block_on(took).unwrap(), ["a.md"]);
+        _ = std::fs::remove_dir_all(aio::paths::sockets(&id, &plan.data).unwrap());
+    }
+
+    /// A launch that connects and never says its line (a frozen process)
+    /// holds up no other: the next is taken at once, not after it.
+    #[test]
+    fn a_silent_launch_holds_up_no_other() {
+        let d = tempfile::tempdir().unwrap();
+        let addr = aio::ipc::addr(d.path(), &format!("silent{}", std::process::id()));
+        let _in = aio::rt().enter();
+        let l = aio::ipc::Listener::bind(&addr).unwrap();
+        aio::rt().spawn(crate::take_launches(l, Default::default(), || {}, || false));
+        let _silent = aio::ipc::connect_blocking(&addr).unwrap();
+        let at = std::time::Instant::now();
+        hand_over(&addr, Path::new("/"), &[]).unwrap();
+        assert!(at.elapsed() < std::time::Duration::from_secs(5), "{:?}", at.elapsed());
     }
 
     #[test]

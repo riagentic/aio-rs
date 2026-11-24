@@ -229,16 +229,37 @@ function socketFetch(reqPath, method, headers, body) {
 }
 
 // Frames from the app socket, split by their 4-byte big-endian length.
+// A frame's reads are joined once, when it is whole: joined at each read,
+// a 16 MB frame held the main process 0.6 s (64 KB reads), 64 MB 8 s.
 function frames(onFrame) {
-  let buf = Buffer.alloc(0)
+  let parts = []
+  let have = 0
   return (chunk) => {
-    buf = Buffer.concat([buf, chunk])
-    while (buf.length >= 4) {
-      const n = buf.readUInt32BE(0)
-      if (buf.length < 4 + n) break
+    parts.push(chunk)
+    have += chunk.length
+    while (have >= 4) {
+      if (parts[0].length < 4) parts = [Buffer.concat(parts, have)]
+      const n = parts[0].readUInt32BE(0)
+      if (have < 4 + n) break
+      const buf = parts.length === 1 ? parts[0] : Buffer.concat(parts, have)
       onFrame(buf.subarray(4, 4 + n))
-      buf = buf.subarray(4 + n)
+      const rest = buf.subarray(4 + n)
+      parts = rest.length ? [rest] : []
+      have = rest.length
     }
+  }
+}
+
+// Lines of text from the control socket (its encoding set), split at
+// once only when a read ends one: a long line is never re-split per read.
+function lines(onLine) {
+  let pending = ''
+  return (text) => {
+    pending += text
+    if (!text.includes('\n')) return
+    const all = pending.split('\n')
+    pending = all.pop()
+    all.forEach(onLine)
   }
 }
 
@@ -352,12 +373,9 @@ app.whenReady().then(() => {
   }))
   let w = null
   let icon
-  let pending = ''
-  ctl.on('data', (d) => {
-    const lines = (pending + d.toString()).split('\n')
-    pending = lines.pop()
-    lines.forEach(line)
-  })
+  // Text whole: a character the socket splits in two waits for its rest.
+  ctl.setEncoding('utf8')
+  ctl.on('data', lines(line))
   // One line from the app (the print key says one too).
   function line(l) {
     if (l.startsWith('{')) {
@@ -366,7 +384,7 @@ app.whenReady().then(() => {
       if (m.t === 'pick') pick(m)
       if (m.t === 'save') save(m)
       if (m.t === 'notify') notify(m)
-      if (m.t === 'tooltip' && tray) tray.setToolTip(m.text)
+      if (m.t === 'tooltip') tooltip(m.text)
       if (m.t === 'icon') setIcon(m)
       if (m.t === 'cdp') devtools(m)
       if (m.t === 'cdp-end') undevtools()
@@ -659,6 +677,12 @@ app.whenReady().then(() => {
   // click on the icon shows or hides the window. An item runs in the app
   // ({"t":"tray","i":n}); one with a route brings the window forward first.
   let tray = null
+  // The tooltip the app set, kept until there is a tray to show it.
+  let tip = null
+  function tooltip(text) {
+    tip = text
+    if (tray) tray.setToolTip(tip)
+  }
   function openTray() {
     // Linux with no display (none set, or Chromium's headless ozone: `ax
     // build --smoke` without Xvfb): GTK aborts the whole runtime on a tray.
@@ -693,7 +717,7 @@ app.whenReady().then(() => {
     } catch (e) {
       return console.error(`[aio-shell] tray: no system tray on this desktop: ${e.message}`)
     }
-    tray.setToolTip(TRAY.tooltip)
+    tray.setToolTip(tip ?? TRAY.tooltip)
     const items = TRAY.menu.map((it) => it === '-' ? { type: 'separator' } : {
       label: it.label,
       click: () => {

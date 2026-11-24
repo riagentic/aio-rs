@@ -288,7 +288,18 @@ pub fn connect_blocking(addr: &str) -> io::Result<Blocking> {
 /// Connect from blocking code: a file-like stream.
 #[cfg(windows)]
 pub fn connect_blocking(addr: &str) -> io::Result<Blocking> {
-    std::fs::OpenOptions::new().read(true).write(true).open(addr).map(Blocking)
+    const ERROR_PIPE_BUSY: i32 = 231;
+    // All instances busy (another client just took one): the server makes
+    // the next one at once, as [`connect`] waits for it.
+    let mut tries = 0;
+    loop {
+        match std::fs::OpenOptions::new().read(true).write(true).open(addr) {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && tries < 50 => {}
+            r => return r.map(Blocking),
+        }
+        tries += 1;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// A blocking connection.

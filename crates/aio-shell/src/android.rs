@@ -29,28 +29,6 @@ pub struct App {
     pub setup: fn(&aio::config::Config, &aio::paths::AppDirs) -> std::io::Result<()>,
 }
 
-/// The page's side of the port: `window.__aioWire`, as the desktop preload
-/// gives it, over the port the activity posts as `aio-port`.
-const BRIDGE: &str = "window.__aioWire = (() => {
-  let port = null, onFrame = null;
-  const early = [], out = [];
-  const bytes = (s) => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
-  const text = (u) => { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
-  // The first frame drawn into the page says so: the splash can go.
-  let painted = false;
-  const paint = () => { if (!painted && onFrame && port) { painted = true; port.postMessage('aio-painted'); } };
-  window.addEventListener('message', (e) => {
-    if (e.data !== 'aio-port' || !e.ports[0]) return;
-    port = e.ports[0];
-    port.onmessage = (m) => { const f = bytes(m.data); onFrame ? (onFrame(f), paint()) : early.push(f); };
-    out.splice(0).forEach((s) => port.postMessage(s));
-  });
-  return {
-    send: (u) => { const s = text(u); port ? port.postMessage(s) : out.push(s); },
-    listen: (f) => { onFrame = f; const e = early.splice(0); e.forEach(f); if (e.length) paint(); },
-  };
-})();";
-
 struct Host {
     vm: JavaVM,
     /// `aio.rt.Host`, found on the activity's thread (a native thread's
@@ -127,7 +105,7 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
         rt,
         views: crate::views::Views::new(),
         root: crate::connect::root(app.root, &dirs),
-        page: page_with(&app.window, BRIDGE),
+        page: page_with(&app.window, crate::ANDROID_BRIDGE),
         to_view: Mutex::new(None),
         permissions: app.window.permissions,
         asking: Mutex::new(vec![]),

@@ -186,6 +186,31 @@ mod guide;
 
 pub use guest::{Child, Web, clear_partition, open_window};
 pub use instance::{Launch, Start, launches, start};
+/// Android's page side of the port: `window.__aioWire`, as the desktop
+/// preload gives it, over the port the activity posts as `aio-port`. Only
+/// the activity's post is taken (it has no source window): a frame in the
+/// page (a sandboxed island) posting one would take the wire.
+#[cfg(any(target_os = "android", all(test, unix)))]
+pub(crate) const ANDROID_BRIDGE: &str = "window.__aioWire = (() => {
+  let port = null, onFrame = null;
+  const early = [], out = [];
+  const bytes = (s) => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+  const text = (u) => { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
+  // The first frame drawn into the page says so: the splash can go.
+  let painted = false;
+  const paint = () => { if (!painted && onFrame && port) { painted = true; port.postMessage('aio-painted'); } };
+  window.addEventListener('message', (e) => {
+    if (e.source !== null || e.data !== 'aio-port' || !e.ports[0]) return;
+    port = e.ports[0];
+    port.onmessage = (m) => { const f = bytes(m.data); onFrame ? (onFrame(f), paint()) : early.push(f); };
+    out.splice(0).forEach((s) => port.postMessage(s));
+  });
+  return {
+    send: (u) => { const s = text(u); port ? port.postMessage(s) : out.push(s); },
+    listen: (f) => { onFrame = f; const e = early.splice(0); e.forEach(f); if (e.length) paint(); },
+  };
+})();";
+
 /// The page: an empty root, the DOM-edit interpreter and the page scripts
 /// (`aio::page`), under its policy (`aio::page::sealed`).
 fn page(win: &Window) -> String {
@@ -632,11 +657,14 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             while let Ok(s) = ctl_listener.accept_only(&ctl_only).await {
                 use tokio::io::AsyncWriteExt;
                 let (r, mut w) = tokio::io::split(s);
-                // What it missed: the icons the app set before it connected.
-                for l in desktop::icon_lines() {
+                // What it missed: the icons and the tooltip the app set before
+                // it connected; one set meanwhile waits, then goes to it too.
+                let mut slot = c.lock().await;
+                for l in desktop::look_lines() {
                     _ = w.write_all(format!("{l}\n").as_bytes()).await;
                 }
-                *c.lock().await = Some(w);
+                *slot = Some(w);
+                drop(slot);
                 tokio::spawn(control(r, c.clone(), state.clone(), win));
             }
         });
@@ -1108,43 +1136,56 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
             _ => {}
         }
     }
+    // The runtime is gone (its window closed, a kept server serves on):
+    // what it was still to answer never comes, so it fails now.
+    *ctl.lock().await = None;
+    if CTL.get().is_some_and(|c| Arc::ptr_eq(c, &ctl)) {
+        page::gone();
+        guest::gone();
+    }
 }
 
 /// Take later launches' hand-overs: each is delivered to the app
 /// (`instance::launches`) and brings the window forward ("focus"), if
-/// there is one; a stop asked is `stop()`.
+/// there is one; a stop asked is `stop()`. Each is read on its own, so one
+/// that never says its line holds up no other.
 pub(crate) async fn take_launches(mut listener: aio::ipc::Listener, ctl: Ctl, stop: fn(), ending: fn() -> bool) {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     while let Ok(s) = listener.accept().await {
-        let (r, mut w) = tokio::io::split(s);
-        let mut line = String::new();
-        // A hand-over is a line of paths: 1 MiB is plenty, and the most held.
-        if tokio::io::BufReader::new(r.take(1 << 20)).read_line(&mut line).await.is_err() {
-            continue;
-        }
-        // `ax` stopping the app where there is no SIGTERM (Windows).
-        if line.trim() == instance::QUIT {
-            // Stop first: an "ok" says the stop is already under way.
-            stop();
-            _ = w.write_all(b"ok\n").await;
-            continue;
-        }
-        let Some(launch) = instance::read_launch(&line) else {
-            _ = w.write_all(b"bad launch\n").await;
-            continue;
-        };
-        // Ending: the launch would be lost with this instance; it waits for the lock instead.
-        if ending() {
-            _ = w.write_all(format!("{}\n", instance::STOPPING).as_bytes()).await;
-            continue;
-        }
-        eprintln!("[aio] handed a launch: {:?}", launch.args);
-        instance::deliver(launch);
-        if let Some(c) = ctl.lock().await.as_mut() {
-            _ = c.write_all(b"focus\n").await;
-        }
-        _ = w.write_all(b"ok\n").await;
+        tokio::spawn(take_launch(s, ctl.clone(), stop, ending));
     }
+}
+
+/// One later launch's hand-over ([`take_launches`]).
+async fn take_launch(s: aio::ipc::Stream, ctl: Ctl, stop: fn(), ending: fn() -> bool) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let (r, mut w) = tokio::io::split(s);
+    let mut line = String::new();
+    // A hand-over is a line of paths: 1 MiB is plenty, and the most held.
+    if tokio::io::BufReader::new(r.take(1 << 20)).read_line(&mut line).await.is_err() {
+        return;
+    }
+    // `ax` stopping the app where there is no SIGTERM (Windows).
+    if line.trim() == instance::QUIT {
+        // Stop first: an "ok" says the stop is already under way.
+        stop();
+        _ = w.write_all(b"ok\n").await;
+        return;
+    }
+    let Some(launch) = instance::read_launch(&line) else {
+        _ = w.write_all(b"bad launch\n").await;
+        return;
+    };
+    // Ending: the launch would be lost with this instance; it waits for the lock instead.
+    if ending() {
+        _ = w.write_all(format!("{}\n", instance::STOPPING).as_bytes()).await;
+        return;
+    }
+    eprintln!("[aio] handed a launch: {:?}", launch.args);
+    instance::deliver(launch);
+    if let Some(c) = ctl.lock().await.as_mut() {
+        _ = c.write_all(b"focus\n").await;
+    }
+    _ = w.write_all(b"ok\n").await;
 }
 
 /// How long Electron, then the stores, get to finish at shutdown.
@@ -1319,6 +1360,117 @@ mod tests {
         tokio::spawn(control(r, ctl, Some(d.path().join("window.json")), Window::default()));
         electron.write_all(b"{\"t\":\"back\"}\n").await.unwrap();
         views.recv().await.expect("Back asked").send(true).unwrap();
+    }
+
+    /// A dialog or a child window the runtime had still to answer when it
+    /// went (its window closed, a kept server serving on) fails, never
+    /// waits for ever; the next one is told there is no window.
+    #[tokio::test]
+    async fn what_the_runtime_had_still_to_answer_fails_when_it_goes() {
+        use tokio::io::AsyncBufReadExt;
+        let _turn = WINDOW_TURN.lock().await;
+        let (ours, electron) = pair();
+        let (r, w) = tokio::io::split(ours);
+        let ctl = CTL.get_or_init(|| Arc::new(tokio::sync::Mutex::new(None))).clone();
+        *ctl.lock().await = Some(w);
+        tokio::spawn(control(r, ctl, None, Window::default()));
+        let (child, pick) = (Child { url: "https://x.example".into(), ..Default::default() }, page::Pick::default());
+        // The runtime reads both asks, then goes without answering.
+        let runtime = async {
+            let mut asked = tokio::io::BufReader::new(electron).lines();
+            let mut kinds = vec![];
+            for _ in 0..2 {
+                let l = asked.next_line().await.unwrap().unwrap();
+                kinds.push(
+                    aio::serde_json::from_str::<aio::serde_json::Value>(&l).unwrap()["t"].as_str().unwrap().to_string(),
+                );
+            }
+            kinds.sort();
+            kinds
+        };
+        let all = async { tokio::join!(runtime, page::pick(&pick), open_window(&child)) };
+        let (kinds, pick, opened) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), all).await.expect("an ask still waits");
+        assert_eq!(kinds, ["child", "pick"]);
+        assert!(pick.unwrap_err().to_string().contains("the window closed"));
+        assert!(opened.unwrap_err().to_string().contains("the window closed"));
+        let e = clear_partition("persist:x").await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotConnected);
+    }
+
+    /// A control line whose character the socket splits in two (lines
+    /// queue up, or one is long) reaches the runtime whole: a title, a
+    /// path, a notice's text never turns into replacement characters.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_control_line_split_inside_a_character_arrives_whole() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let rt = runtime::dir();
+        if !runtime::exe(&rt).exists() {
+            return eprintln!("skipped: no Electron runtime in {}", rt.display());
+        }
+        let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
+        let dir = d.path().join("shell");
+        install(&dir, "split", &Window { title: "Split", ..Default::default() }).unwrap();
+        let (mut child, _wires, mut ctls) = splash::tests::headless(&rt, d.path(), &dir, "Split");
+        let ctl = tokio::time::timeout(std::time::Duration::from_secs(60), ctls.accept()).await.unwrap().unwrap();
+        let (r, mut ctl) = tokio::io::split(ctl);
+        let mut told = tokio::io::BufReader::new(r).lines();
+        ctl.write_all(b"{\"t\":\"place\",\"width\":640,\"height\":480}\n").await.unwrap();
+        splash::tests::until(&mut told, r#""state":"loaded""#, &mut vec![]).await;
+        let line = aio::serde_json::json!({ "t": "cdp", "id": 1, "method": "Runtime.evaluate",
+            "params": { "expression": "'Grüße'", "returnByValue": true } })
+        .to_string();
+        let at = line.find('ü').unwrap() + 1;
+        ctl.write_all(&line.as_bytes()[..at]).await.unwrap();
+        ctl.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        ctl.write_all(&[&line.as_bytes()[at..], b"\n"].concat()).await.unwrap();
+        let answer = splash::tests::until(&mut told, r#""t":"cdp","id":1"#, &mut vec![]).await;
+        _ = child.kill().await;
+        let v: aio::serde_json::Value = aio::serde_json::from_str(&answer).unwrap();
+        assert_eq!(v["result"]["result"]["value"], "Grüße", "{answer}");
+    }
+
+    /// The runtime's readers of the app's frames and control lines, in
+    /// Node: whole frames and lines however the reads fall, and a long one
+    /// joined once, not again at every read (a 16 MB frame copied 8 GB).
+    #[test]
+    fn the_runtime_joins_a_long_frame_or_line_once() {
+        let js = include_str!("main.js");
+        let def = |name: &str| {
+            let at = js.find(&format!("function {name}(")).unwrap();
+            &js[at..at + js[at..].find("\n}\n").unwrap() + 2]
+        };
+        let test = format!(
+            "{}\n{}\n
+             const concat = Buffer.concat, cut = String.prototype.split;
+             let copied = 0, scanned = 0;
+             Buffer.concat = (l, t) => {{ const b = concat(l, t); copied += b.length; return b; }};
+             String.prototype.split = function (...a) {{ scanned += this.length; return cut.apply(this, a); }};
+             const frame = (n) => {{ const b = Buffer.alloc(4 + n, 7); b.writeUInt32BE(n); return b; }};
+             const got = [];
+             const f = frames((x) => got.push(x.length));
+             const big = frame(16 << 20);
+             for (let i = 0; i < big.length; i += 65536) f(big.subarray(i, i + 65536));
+             const small = concat([frame(3), frame(0), frame(5)]);
+             f(small.subarray(0, 2)); f(small.subarray(2, 9)); f(small.subarray(9, 13)); f(small.subarray(13));
+             const said = [];
+             const l = lines((x) => said.push(x));
+             for (let i = 0; i < 2000; i++) l('x'.repeat(8192));
+             l('y\\n{{\"a\":'); l('1}}\\n\\nz');
+             console.log(JSON.stringify({{ got, copied, said: said.map((s) => s.length < 20 ? s : s.length), scanned }}));",
+            def("frames"),
+            def("lines")
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &test]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: aio::serde_json::Value = aio::serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["got"], aio::serde_json::json!([16 << 20, 3, 0, 5]));
+        assert!(v["copied"].as_u64().unwrap() < 17 << 20, "{v}");
+        assert_eq!(v["said"], aio::serde_json::json!([2000 * 8192 + 1, "{\"a\":1}", ""]));
+        assert!(v["scanned"].as_u64().unwrap() < 17 << 20, "{v}");
     }
 
     /// A syntax error in the shell is a window that never opens (aio tests
