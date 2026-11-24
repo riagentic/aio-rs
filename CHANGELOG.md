@@ -230,6 +230,11 @@ version may break things.
 
 ### Fixed
 
+- `TestBrowser` and `TestUi`'s runtime start with
+  `--disable-renderer-backgrounding`, `--disable-background-timer-throttling`
+  and `--disable-backgrounding-occluded-windows`, as test browsers do: a
+  hidden or minimized test page kept its full priority only by chance (on
+  macOS a loaded runner starved one past a DevTools call's wait).
 - `ax lint` checks the closures a cell method runs (`.map(|_|
   rand::random())`, one it keeps and calls) for the clock, randomness and
   I/O: it skipped every closure. A closure handed to `Effect::new` (there,
