@@ -67,8 +67,13 @@ pub fn parse_stamp(s: &str) -> Option<i64> {
                 _ => return None,
             };
             let o = &rest[1..];
-            let (oh, om) = (o.get(..2).filter(|_| o.len() == 5 && sep(s.len() - 3, b":")), o.get(3..));
-            let (oh, om): (i64, i64) = (oh?.parse().ok()?, om?.parse().ok()?);
+            if o.len() != 5 || o.as_bytes()[2] != b':' {
+                return None;
+            }
+            let at = |r: std::ops::Range<usize>| -> Option<i64> {
+                o.get(r).filter(|t| t.bytes().all(|c| c.is_ascii_digit()))?.parse().ok()
+            };
+            let (oh, om) = (at(0..2)?, at(3..5)?);
             if oh > 23 || om > 59 {
                 return None;
             }
@@ -913,6 +918,8 @@ mod tests {
             "2026-10-27T23:01:02+01:00x",
             "+026-10-27T23:01:02Z",
             "2026-10-27T23:01:02Zé",
+            "2026-10-27T23:01:02+-1:00",
+            "2026-10-27T23:01:02+01:-5",
         ] {
             assert_eq!(parse_stamp(bad), None, "{bad}");
         }
