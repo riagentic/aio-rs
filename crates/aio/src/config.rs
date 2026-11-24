@@ -451,6 +451,17 @@ mod tests {
         assert!(Config::parse("[app]\nid = \"t\"\nlang = \"pt-BR\"").is_ok());
     }
 
+    /// `[app] version` is read as aio.toml is: `ax config`, `ax dev` and
+    /// `ax test` refuse what `ax build` would, not only the build.
+    #[test]
+    fn an_app_version_that_isnt_one_is_refused_as_the_file_is_read() {
+        let app = |v: &str| Config::parse(&format!("[app]\nid = \"t\"\nversion = \"{v}\""));
+        let e = app("banana").unwrap_err();
+        assert!(e.starts_with("aio.toml: [app] version \"banana\": an app's version is \"major.minor\""), "{e}");
+        assert!(app("1.2.3.4").is_err() && app("1.2-gamma").is_err());
+        assert!(app("1.2").is_ok() && app("1.2.3-rc").is_ok());
+    }
+
     /// The one rule `ax dev`, `ax start`, `ax build --smoke` and the updater follow.
     #[test]
     fn only_a_server_and_a_cli_have_no_window() {

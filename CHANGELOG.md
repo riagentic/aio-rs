@@ -213,6 +213,10 @@ version may break things.
 
 ### Fixed
 
+- `[app] version` is checked as `aio.toml` is read (`aio::config!()`,
+  `ax config`, `ax dev`, `ax test`, the app's start): `version =
+  "banana"` passed everything but `ax build`. Its form lives in
+  `aio_config::version` (`declared`), which `ax build` reads too.
 - `ax release` reads the app's `aio.toml` and checks its signing key
   before the release build: a missing key, or one `[updates] keys` doesn't
   trust, failed only after the build. `--unsigned` makes one key for all

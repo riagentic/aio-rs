@@ -1854,6 +1854,9 @@ impl Config {
                 c.app.mode
             ));
         }
+        if let Some(v) = &c.app.version {
+            crate::version::declared(v)?;
+        }
         if c.app.lang.as_deref().is_some_and(|l| !lang_ok(l)) {
             return Err("aio.toml: [app] lang is a language tag: letters, digits and '-' (\"en\", \"pt-BR\")".into());
         }
