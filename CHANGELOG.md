@@ -64,8 +64,19 @@ version may break things.
   it is kept aside (`copy.other-user-<ms>`) and said (`sync:other-user`),
   as a page's copy already was. A copy saved before is no one's.
 
+- The window fetches no spellcheck dictionary from Google unless the
+  app's `[capabilities] network` reaches `*.gvt1.com`. Chromium's
+  spellchecker on Linux (and on Windows for a language the OS lacks)
+  fetched the person's dictionary from Google's CDN on first launch, in
+  the browser process: past the page's policy and the app's network list,
+  telling Google the machine's address and language. Without the entry a
+  dictionary already in the profile is used, and a language left
+  unchecked is said in the log ([privacy](docs/clients/desktop.md#privacy)).
+
 ### Added
 
+- `aio::capabilities::network()`: this process's `[capabilities] network`
+  list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
   (`page.<16 hex>.js`). The web build names `page.js`, `start.js` and the
   splash so, and the shell serves a file whose name is its content's with
@@ -238,6 +249,9 @@ version may break things.
   stay exhaustive, built with `..Default::default()`, which no new key
   breaks: `#[non_exhaustive]` would forbid that literal outside aio-rs,
   and `aio::config!()` writes the config as one in the app's crate.
+- A commit runs statements prepared once per connection, where it
+  prepared four or more each time: a call in memory takes about half the
+  time (7 -> 3.6 µs, release), a saved one a fifth less (13 -> 10 µs).
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.
@@ -340,6 +354,15 @@ version may break things.
   answered lately (`Doc::done`), which no tab takes or keeps again.
   **Breaking:** `aio::web::storage::Doc` has a field `done`.
 
+- A start removes the temp files a crash left mid-write in the app's data
+  folder (`.<name>.<id>.tmp`, those over a minute old): only a store's
+  open did, beside its own file, so an app with no saved cell (or
+  `[data] store` elsewhere) kept them.
+- Android: a new private file (`aio::paths::write_private`: the sync
+  token, paired keys) and a blob's name are put in place whole, by a
+  rename that never replaces a file (`renameat2(RENAME_NOREPLACE)`), where
+  the app's sandbox refuses the hard link: they were written in place,
+  and a crash mid-write left part of one.
 - The desktop window keeps the app's cookies: Chromium keeps none for
   `aio://`, so the HttpOnly session cookie a sign-in route sets
   (`[accounts] cookie = true`) was dropped and the window was never signed
@@ -582,6 +605,11 @@ version may break things.
   (SwiftShader) now, as `TestUi`'s window does.
 - `TestUi` had no WebGL on macOS: the runtime's SwiftShader makes no
   context there; a Mac's test window draws WebGL with ANGLE's Metal.
+- A `TestUi` test typing into a field could hang (`the test browser did
+  not answer in 30s`): each test page spellchecked, fetching its
+  dictionary from the internet past the network rule, and one that landed
+  as a word was typed hung the page. The test browser spellchecks nothing
+  now and fetches no dictionary.
 - A `TestUi` wait that times out (`until…`, `expect_cell`) and `the
   views and their page never settle` name the components still rendering
   (`still rendering: Gallery/Thumb`), such as one that remounts on its own

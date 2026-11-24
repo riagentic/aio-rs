@@ -14,9 +14,10 @@
 //! the cells it reaches, so no thread may wait for the turn holding one.
 //! A file without reactions never takes the turn: its calls run side by side.
 use super::{FileId, file_id};
-use rusqlite::Connection;
+use rusqlite::{Connection, Statement};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::ThreadId;
@@ -26,7 +27,7 @@ use std::thread::ThreadId;
 pub(crate) struct Shared(Arc<Inner>);
 
 struct Inner {
-    conn: Mutex<Connection>,
+    conn: Mutex<Kept>,
     /// Its checkpoints, off the calls' thread (none in memory).
     checkpoints: Option<Arc<Checkpoints>>,
     /// The thread whose turn it is, and how many times it took it.
@@ -36,6 +37,74 @@ struct Inner {
     reacting: AtomicBool,
     /// Calls running side by side, taking the turn only for the connection.
     loose: AtomicUsize,
+}
+
+/// A connection and the statements its commits run, each prepared on its
+/// first run and kept for the connection's life: a commit prepared 4 or
+/// more from scratch (~3 µs of a call's 7).
+pub(crate) struct Kept {
+    /// Point into `*conn`; cleared before it is freed ([`Drop`]).
+    stmts: RefCell<Vec<(&'static str, Statement<'static>)>>,
+    /// Owned (from `Box::into_raw`), held as a pointer, not a `Box`: moving
+    /// a `Box` asserts unique access to its target, which the statements'
+    /// shared borrows of it would break.
+    conn: NonNull<Connection>,
+}
+
+// SAFETY: the statements are only ever used through `&Kept`, so on the
+// thread that has the connection, and they move with it; a `Connection`
+// may move between threads, and `Kept` owns the one `conn` points to.
+unsafe impl Send for Kept {}
+
+impl Kept {
+    pub(crate) fn new(conn: Connection) -> Self {
+        Self { stmts: RefCell::default(), conn: NonNull::from(Box::leak(Box::new(conn))) }
+    }
+
+    /// `f` on `sql`'s statement, prepared on its first use and kept. Asked
+    /// again from inside `f`, the inner call runs a statement of its own,
+    /// prepared for it and not kept.
+    pub(crate) fn with<R>(
+        &self,
+        sql: &'static str,
+        f: impl FnOnce(&mut Statement<'_>) -> rusqlite::Result<R>,
+    ) -> rusqlite::Result<R> {
+        let Ok(mut stmts) = self.stmts.try_borrow_mut() else {
+            return f(&mut self.prepare(sql)?);
+        };
+        let i = match stmts.iter().position(|(s, _)| *s == sql) {
+            Some(i) => i,
+            None => {
+                let s = self.prepare(sql)?;
+                // SAFETY: `s` borrows `*self.conn`, which stays where it is
+                // and alive until `Drop` has dropped every statement; it is
+                // never lent out past `&self`.
+                let s = unsafe { std::mem::transmute::<Statement<'_>, Statement<'static>>(s) };
+                stmts.push((sql, s));
+                stmts.len() - 1
+            }
+        };
+        f(&mut stmts[i].1)
+    }
+}
+
+impl std::ops::Deref for Kept {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        // SAFETY: `conn` is the live connection `Kept` owns (freed only in
+        // `Drop`), and it is only ever lent out shared.
+        unsafe { self.conn.as_ref() }
+    }
+}
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        // The statements first: they point into the connection.
+        self.stmts.get_mut().clear();
+        // SAFETY: `conn` came from `Box::leak` in `new`, is freed only here,
+        // and nothing borrows it any more.
+        drop(unsafe { Box::from_raw(self.conn.as_ptr()) });
+    }
 }
 
 /// A file open in this process: its path, identity and shared connection.
@@ -151,7 +220,7 @@ impl Checkpoints {
 impl Shared {
     fn new(conn: Connection, checkpoints: Option<Arc<Checkpoints>>) -> Self {
         Self(Arc::new(Inner {
-            conn: Mutex::new(conn),
+            conn: Mutex::new(Kept::new(conn)),
             checkpoints,
             turn: Mutex::new((None, 0)),
             free: Condvar::new(),
@@ -239,7 +308,7 @@ impl Shared {
 /// A store's connections: its own (none in memory: one connection is the
 /// whole database there) and its file's shared one, for joint commits.
 pub(crate) struct Db {
-    own: Option<Connection>,
+    own: Option<Kept>,
     file: Shared,
 }
 
@@ -251,7 +320,7 @@ impl Db {
         if let Some(c) = &file.0.checkpoints {
             c.watch(&mut own)?;
         }
-        Ok(Self { own: Some(own), file })
+        Ok(Self { own: Some(Kept::new(own)), file })
     }
 
     /// A database in memory, its own.
@@ -327,26 +396,26 @@ impl Drop for Loose {
 
 /// The shared connection, while its thread's turn lasts.
 pub(crate) struct FileConn<'a> {
-    c: MutexGuard<'a, Connection>,
+    c: MutexGuard<'a, Kept>,
     _turn: Turn,
 }
 
 impl std::ops::Deref for FileConn<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
+    type Target = Kept;
+    fn deref(&self) -> &Kept {
         &self.c
     }
 }
 
 /// A store's connection ([`Db::conn`]).
 pub(crate) enum Conn<'a> {
-    Own(&'a Connection),
+    Own(&'a Kept),
     File(FileConn<'a>),
 }
 
 impl std::ops::Deref for Conn<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
+    type Target = Kept;
+    fn deref(&self) -> &Kept {
         match self {
             Conn::Own(c) => c,
             Conn::File(f) => f,
@@ -526,5 +595,46 @@ impl Drop for Owner {
         {
             _ = finish(&j, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Kept;
+    use rusqlite::Connection;
+
+    fn kept() -> Kept {
+        let k = Kept::new(Connection::open_in_memory().unwrap());
+        k.execute_batch("CREATE TABLE t (n INTEGER)").unwrap();
+        k
+    }
+
+    const ADD: &str = "INSERT INTO t (n) VALUES (?1)";
+    const COUNT: &str = "SELECT COUNT(*) FROM t";
+
+    #[test]
+    fn a_kept_statement_runs_after_its_kept_moves() {
+        let k = kept();
+        k.with(ADD, |s| s.execute([1])).unwrap();
+        // Moved into a Vec, a Mutex and back, its statements still run.
+        let k = std::sync::Mutex::new(vec![k].pop().unwrap()).into_inner().unwrap();
+        k.with(ADD, |s| s.execute([2])).unwrap();
+        let n: i64 = k.with(COUNT, |s| s.query_row([], |r| r.get(0))).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn a_statement_asked_for_inside_another_runs_one_of_its_own() {
+        let k = kept();
+        let n: i64 = k
+            .with(ADD, |s| {
+                s.execute([1])?;
+                k.with(ADD, |inner| inner.execute([2]))?;
+                k.with(COUNT, |inner| inner.query_row([], |r| r.get(0)))
+            })
+            .unwrap();
+        assert_eq!(n, 2);
+        // The nested ones were not kept: only the outer one is.
+        assert_eq!(k.stmts.borrow().len(), 1);
     }
 }

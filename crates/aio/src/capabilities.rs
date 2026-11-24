@@ -24,6 +24,11 @@ pub fn set(network: &[String]) {
     *NETWORK.write().unwrap_or_else(|e| e.into_inner()) = Some(network.to_vec());
 }
 
+/// This process's list ([`set`]); `None`: not held (not an app).
+pub fn network() -> Option<Vec<String>> {
+    NETWORK.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// A UI test's hold (`TestUi`): this machine and `hosts`, besides the hosts
 /// the test binary's other mounts (or an app it booted) allowed.
 #[cfg(all(feature = "kit", feature = "testing"))]

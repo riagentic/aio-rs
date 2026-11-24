@@ -35,6 +35,9 @@ async function open({ width, height, network = [] }) {
   const id = ++next
   // In memory and per page: one test's storage never reaches another's.
   const s = session.fromPartition(`aio-test-${id}`)
+  // No spellcheck: each session would fetch its dictionary from the
+  // internet, and one landing while a test types hung the page.
+  s.setSpellCheckerLanguages([])
   s.webRequest.onBeforeRequest((d, cb) => {
     if (reaches(d.url, network)) return cb({})
     out({ page: id, refused: d.url })
@@ -47,7 +50,7 @@ async function open({ width, height, network = [] }) {
   })
   // Never shown, yet drawing at full speed (the flags it starts with): an
   // offscreen window copies every frame, which 30 tests at once make crawl.
-  const w = new BrowserWindow({ show: false, width, height, webPreferences: { session: s, backgroundThrottling: false } })
+  const w = new BrowserWindow({ show: false, width, height, webPreferences: { session: s, backgroundThrottling: false, spellcheck: false } })
   const wc = w.webContents
   // As the app's window: the page never navigates away and opens no window.
   wc.setWindowOpenHandler(() => ({ action: 'deny' }))

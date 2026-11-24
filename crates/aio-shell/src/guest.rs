@@ -91,6 +91,15 @@ fn is_scheme(s: &str) -> bool {
         && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-.".contains(&b))
 }
 
+/// Chromium's spellchecker fetches a dictionary it lacks (Linux; Windows,
+/// a language the OS has none for) from Google's CDN, `redirector.gvt1.com`,
+/// sent on to another `*.gvt1.com` host: only when the app's `[capabilities]
+/// network` reaches both. `None` (not an app): never. Pure.
+pub(crate) fn fetches_dictionaries(network: Option<&[String]>) -> bool {
+    network
+        .is_some_and(|n| ["redirector.gvt1.com", "cdn.gvt1.com"].iter().all(|h| aio::capabilities::allows(n, h, None)))
+}
+
 /// `shell.json`: what the runtime allows, checked. A preload name, or a
 /// permission, it would not take is an error here, never a guest that
 /// silently has none.
@@ -126,6 +135,7 @@ pub(crate) fn shell_json(win: &Window) -> io::Result<String> {
         "keys": { "reload": win.keys.reload, "print": win.keys.print },
         "showCapMs": win.show_cap_ms.unwrap_or(5000),
         "frame": win.chrome == crate::Chrome::Standard,
+        "dictionaries": fetches_dictionaries(aio::capabilities::network().as_deref()),
     })
     .to_string())
 }
@@ -299,6 +309,17 @@ mod tests {
     }
 
     #[test]
+    fn spellcheck_dictionaries_come_from_google_only_when_the_app_reaches_its_cdn() {
+        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!fetches_dictionaries(None), "not an app");
+        assert!(!fetches_dictionaries(Some(&n(&[]))));
+        assert!(!fetches_dictionaries(Some(&n(&["redirector.gvt1.com"]))), "it redirects to another host");
+        assert!(!fetches_dictionaries(Some(&n(&["lan", "api.example.org"]))));
+        assert!(fetches_dictionaries(Some(&n(&["*.gvt1.com"]))));
+        assert!(fetches_dictionaries(Some(&n(&["*"]))));
+    }
+
+    #[test]
     fn the_runtime_is_told_only_what_the_app_allows_and_a_bad_declaration_is_an_error() {
         let v: Value = aio::serde_json::from_str(&shell_json(&Window::default()).unwrap()).unwrap();
         // Off by default: no tag, no windows, no preloads, nothing more for the page.
@@ -307,6 +328,7 @@ mod tests {
         assert_eq!((v["preloads"].clone(), v["schemes"].clone()), (json!([]), json!([])));
         assert_eq!((v["allow"].clone(), v["confirmUnload"].clone()), (json!([]), json!(false)));
         assert_eq!(v["keys"], json!({ "reload": false, "print": false }), "the shell keeps its keys");
+        assert_eq!(v["dictionaries"], false, "no spellcheck dictionary from the internet");
         static PRE: [(&str, &str); 2] = [("dapp/preload.js", "1"), ("reader.js", "2")];
         let win = Window {
             web: Web {

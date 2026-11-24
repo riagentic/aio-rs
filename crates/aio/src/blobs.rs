@@ -139,23 +139,23 @@ impl Blobs {
     }
 
     /// Record `name` for `id` unless one is there: the first wins, also
-    /// between puts racing. Written whole to a temp file, synced, then
-    /// linked under its name (a link never replaces a file: atomic, as
-    /// create-new), so a crash never leaves a part-written name. Where
-    /// there are no hard links (Android's app sandbox) it is made in place.
+    /// between puts racing. Written whole to a temp file, synced, then put
+    /// under its name by [`crate::paths::link_new`] (never over a file:
+    /// atomic, as create-new), so a crash never leaves a part-written name;
+    /// only where neither way works is it made in place.
     fn first_name(&self, id: &str, name: &str) -> io::Result<Option<String>> {
         let meta = serde_json::json!({ "name": name }).to_string();
         let at = self.dir.join(format!("{id}.json"));
         let tmp = self.dir.join(format!(".tmp-{}", crate::uuid_v4()));
         let made = std::fs::File::create_new(&tmp)
             .and_then(|mut f| f.write_all(meta.as_bytes()).and_then(|()| f.sync_all()))
-            .and_then(|()| match std::fs::hard_link(&tmp, &at) {
-                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => std::fs::OpenOptions::new()
+            .and_then(|()| match crate::paths::link_new(&tmp, &at)? {
+                true => Ok(()),
+                false => std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(&at)
                     .and_then(|mut f| f.write_all(meta.as_bytes())),
-                r => r,
             });
         _ = std::fs::remove_file(&tmp);
         match made {

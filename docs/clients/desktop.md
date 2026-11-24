@@ -608,6 +608,30 @@ at the address could guess it from the client's half offline. Pair again.
 paired again. Unlike aio's, a client never connects without its key: a
 copy without it would show nothing.
 
+## Privacy
+
+The window reaches no host the app did not declare in `[capabilities]
+network`: its page only its own origin, the runtime nothing of its own
+from launch through typing (a test proves it, behind a proxy that only
+listens).
+
+- **Spellcheck.** macOS checks fields natively, and Windows does for the
+  languages it has installed: nothing is fetched. Chromium's spellchecker
+  on Linux (and on Windows for a language the OS lacks) would fetch the
+  person's dictionary from Google's CDN on first launch, telling Google
+  the machine's address and language. It does so only when the app's list
+  reaches that CDN:
+
+  ```toml
+  [capabilities]
+  network = ["*.gvt1.com"]   # spellcheck dictionaries from Google
+  ```
+
+  Without it none is fetched: one already in the profile
+  (`<data>/electron/profile/Dictionaries/en-US-10-1.bdic`, as Chrome
+  names it) is used, else the app's log says which language goes
+  unchecked, once per launch.
+
 ## Gaps
 
 aio has no app menus beyond macOS's standard ones or a context-menu API,

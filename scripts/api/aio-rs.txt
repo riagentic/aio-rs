@@ -473,6 +473,7 @@ aio::capabilities::agent: fn agent(what: &'static str, config: ureq::config::Con
 aio::capabilities::check: fn check(what: &str, target: &str) -> std::io::Result<()>
 aio::capabilities::grant: fn grant(target: &str)
 aio::capabilities::held: fn held(network: Option<&[String]>, what: &str, target: &str) -> std::io::Result<()>
+aio::capabilities::network: fn network() -> Option<Vec<String>>
 aio::capabilities::refused: fn refused(what: &str, host: &str) -> String
 aio::capabilities::set: fn set(network: &[String])
 aio::cassette::Cassette::call: async fn call<A, R, E, F>(&self, id: &str, args: &A, run: impl FnOnce() -> F) -> Result<R, String> where A: Serialize, R: Serialize + DeserializeOwned, E: std::fmt::Display, F: std::future::Future<Output = Result<R, E>>
