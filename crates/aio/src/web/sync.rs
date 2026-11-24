@@ -556,8 +556,10 @@ impl<T: Cell> Remote<T> {
     /// waits for a timer that may never ring.
     fn flush_on_hide(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let hide = Closure::<dyn FnMut()>::new(move || {
-            let hidden = web_sys::window().and_then(|w| w.document()).is_none_or(|d| d.hidden());
+        let hide = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            // A page going may still say it is visible as `pagehide` fires.
+            let hidden =
+                e.type_() == "pagehide" || web_sys::window().and_then(|w| w.document()).is_none_or(|d| d.hidden());
             if let Some(inner) = weak.upgrade().filter(|_| hidden) {
                 inner.flush();
             }
