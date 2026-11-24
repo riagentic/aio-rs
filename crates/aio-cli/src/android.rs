@@ -1271,6 +1271,18 @@ mod tests {
     }
 
     #[test]
+    fn a_link_leaves_the_app_only_from_its_page_after_a_tap() {
+        // As the desktop's pop-ups (guest.js popup): a frame's navigation, or
+        // one a script starts by itself, never opens another app.
+        for java in [TEMPLATE[6].1, DEV_ACTIVITY.1] {
+            let over = method(java, "public boolean shouldOverrideUrlLoading(");
+            let guard = over.find("if (!r.isForMainFrame() || !r.hasGesture())").expect(over);
+            let refused = &over[guard..over.find("startActivity(").unwrap()];
+            assert!(refused.contains("return true;") && refused.contains("Log.w(\"aio\", \"link NOT opened"), "{over}");
+        }
+    }
+
+    #[test]
     fn a_link_reaches_the_app_cold_and_warm_and_the_splash_waits_for_the_first_frame() {
         let java = TEMPLATE[6].1;
         let create = method(java, "protected void onCreate(");

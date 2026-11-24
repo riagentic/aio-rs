@@ -54,6 +54,19 @@ exports.childNav = (url, origins, ok, landed) => {
   return !landed || ok.has(u.origin) ? null : `${u.origin} is not one of its origins`
 }
 
+// May a <Browser>'s guest show `url` (its src, a load the page asks, a
+// navigation)? http(s) and about:blank, and a scheme the app listed (Web {
+// schemes }); never a file, chrome:, javascript: or data: unasked. null,
+// or why not.
+exports.guestSrc = (url, schemes) => {
+  let u = null
+  try { u = new URL(url) } catch {}
+  if (!u) return 'not a URL'
+  const s = u.protocol.slice(0, -1)
+  if (s === 'http' || s === 'https' || u.href === 'about:blank' || schemes.includes(s)) return null
+  return `a <Browser> shows http(s) and about:blank only, not ${s.slice(0, 32)}: Web { schemes: &["${s.slice(0, 32)}"] } allows it`
+}
+
 // The window's own keys (aio electron.shortcuts): Ctrl+R, Ctrl+Shift+R and
 // Ctrl+F5 reload, Ctrl+P prints, unless `keys` gives them to the page; F12
 // and Ctrl+Shift+I toggle DevTools in a dev build or one whose app asked

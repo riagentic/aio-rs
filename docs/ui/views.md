@@ -732,7 +732,7 @@ rest are fields:
 | `viewport` | the `<meta name="viewport">`; `Some("")`: none |
 | `tray` | a tray icon and its menu (`aio_shell::desktop::Tray`); its clicks reach the views through `desktop::use_asks` |
 | `head` | the app's own `<head>` markup, after aio's policy, which it can only tighten |
-| `web` | other sites inside the app: `browser` (the kit's `Browser`), `windows` (child windows), `preloads`, `fullscreen`, `downloads`, `unsandboxed_windows` |
+| `web` | other sites inside the app: `browser` (the kit's `Browser`), `windows` (child windows), `preloads`, `fullscreen`, `downloads`, `schemes` (a guest's beyond http(s)), `unsandboxed_windows` |
 | `permissions` | what the page may also hold (`"clipboard-read"`…) |
 | `confirm_unload` | a page's `beforeunload` asks Leave / Stay |
 | `keys` | the window's own keys (reload, print) given to the page |

@@ -637,8 +637,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         }
     };
     let socks = aio::paths::sockets(&dirs.id, &dirs.data)?;
-    let (sock, ctl_sock, hand) =
-        (aio::ipc::addr(&socks, "wire"), aio::ipc::addr(&socks, "ctl"), instance::hand_addr(&dirs.id, &dirs.data)?);
+    let (sock, ctl_sock) = (aio::ipc::addr(&socks, "wire"), aio::ipc::addr(&socks, "ctl"));
     // Electron's Node connects to these as spelled: one too long is said now,
     // not as no window.
     aio::ipc::fits(&sock)?;
@@ -650,8 +649,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         // Both serve the window this spawns and no other process of the user,
         // as the app's route door does: the one gate (`Only::window`).
         let only = aio::ipc::Only::window();
-        let ctl: Ctl = Arc::new(tokio::sync::Mutex::new(None));
-        _ = CTL.set(ctl.clone());
+        let ctl = ctl();
         let (c, state, ctl_only) = (ctl.clone(), sized.is_none().then(|| dirs.data.join("window.json")), only.clone());
         tokio::spawn(async move {
             while let Ok(s) = ctl_listener.accept_only(&ctl_only).await {
@@ -668,8 +666,9 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 tokio::spawn(control(r, c.clone(), state.clone(), win));
             }
         });
-        // Later launches of the app hand their arguments over here.
-        tokio::spawn(take_launches(aio::ipc::Listener::bind(&hand)?, ctl.clone(), aio::lifecycle::ask_stop, ending));
+        // Later launches of the app hand their arguments over here (open
+        // since `start`; ax's own window has no `start`).
+        instance::open_door(&dirs.id, &dirs.data);
         // `ax surface`, `trigger`, `shot` and `eval` reach the window here:
         // `ax dev`'s builds only (aio-shell's `dev`: tooling; aio's control
         // API was dev-only); elsewhere no DevTools protocol (AIORT_CDP is ignored).
@@ -876,7 +875,8 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 eprintln!("[aio] {}: the window failed: {e}", dirs.id);
             }
             eprintln!("{}", kept_serving(&dirs.id, std::fs::read_to_string(dirs.data.join("serving.json")).ok()));
-            instance::take_stops(&dirs.id, &dirs.data);
+            // Its door takes launches and stops again, as a server's.
+            ENDING.store(false, std::sync::atomic::Ordering::SeqCst);
             aio::rt().block_on(async {
                 aio::lifecycle::stop_asked()?.await;
                 std::io::Result::Ok(())
@@ -1060,6 +1060,11 @@ pub(crate) type Ctl = Arc<tokio::sync::Mutex<Option<tokio::io::WriteHalf<aio::ip
 
 /// This process's control line, for views asking the runtime (`page::print`).
 static CTL: std::sync::OnceLock<Ctl> = std::sync::OnceLock::new();
+
+/// [`CTL`], made once: empty until a runtime connects.
+pub(crate) fn ctl() -> Ctl {
+    CTL.get_or_init(Ctl::default).clone()
+}
 
 /// Send the runtime one control line: false without a window (tests).
 pub(crate) async fn send_runtime(line: String) -> bool {
@@ -1371,7 +1376,7 @@ mod tests {
         let _turn = WINDOW_TURN.lock().await;
         let (ours, electron) = pair();
         let (r, w) = tokio::io::split(ours);
-        let ctl = CTL.get_or_init(|| Arc::new(tokio::sync::Mutex::new(None))).clone();
+        let ctl = ctl();
         *ctl.lock().await = Some(w);
         tokio::spawn(control(r, ctl, None, Window::default()));
         let (child, pick) = (Child { url: "https://x.example".into(), ..Default::default() }, page::Pick::default());
@@ -1473,6 +1478,65 @@ mod tests {
         assert!(v["scanned"].as_u64().unwrap() < 17 << 20, "{v}");
     }
 
+    /// `aio://app/file/<path>` serves a local image or media file, never a
+    /// network share or a device: on Windows a UNC path is an SMB
+    /// connection that hands the host the user's NTLM hash.
+    #[test]
+    fn the_file_route_serves_local_images_and_never_a_share_or_device() {
+        let js = include_str!("main.js");
+        let at = js.find("function localFile(").unwrap();
+        let def = &js[at..at + js[at..].find("\n}\n").unwrap() + 2];
+        let test = format!(
+            "const path = require('node:path');\n{def}\n
+             const w = (u) => localFile(u, path.win32), x = (u) => localFile(u, path.posix);
+             console.log(JSON.stringify({{
+               win: [w('/file/C:/a%20b/v.webm'), w('/file/C:/a/x.txt')],
+               winShares: ['/file//host/share/x.png', '/file/%5C%5Chost%5Cshare%5Cx.png', '/file/%2F%2Fhost/share/x.png',
+                 '/file//%5Chost/share/x.png', '/file//?/C:/x.png', '/file/%5C%5C%3F%5CC%3A%5Cx.png', '/file/%5C%5C.%5Cpipe%5Cx.png',
+                 '/file//./C:/x.png', '/file/%5C%5C%3F%5CUNC%5Chost%5Cshare%5Cx.png'].map(w),
+               posix: [x('/file/srv/a.png'), x('/file/etc/passwd'), x('/file/%E0%A4%A'), x('/file//host/share/x.png')],
+             }}));"
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &test]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: aio::serde_json::Value = aio::serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["win"], aio::serde_json::json!(["C:\\a b\\v.webm", null]));
+        assert_eq!(
+            v["winShares"],
+            aio::serde_json::json!([null, null, null, null, null, null, null, null, null]),
+            "{v}"
+        );
+        assert_eq!(v["posix"], aio::serde_json::json!(["/srv/a.png", null, null, null]), "{v}");
+    }
+
+    /// A notification is held for its click until it is done, at most
+    /// `NOTES_HELD` of them: Windows may never say `close` for one moved
+    /// to the Action Center, and each held its native toast for good.
+    #[test]
+    fn the_runtime_holds_a_bounded_number_of_notifications() {
+        let js = include_str!("main.js");
+        let at = js.find("function hold(").unwrap();
+        let def = &js[at..at + js[at..].find("\n}\n").unwrap() + 2];
+        let test = format!(
+            "{def}\n
+             const m = new Map();
+             for (let i = 1; i <= 100; i++) hold(m, `#${{i}}`, i, 64);
+             hold(m, 'tag', 'a', 64); hold(m, '#50', 'again', 64); hold(m, 'tag', 'b', 64);
+             console.log(JSON.stringify({{ size: m.size, first: [...m.keys()][0], last: [...m.entries()].slice(-2) }}));"
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &test]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: aio::serde_json::Value = aio::serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["size"], 64, "{v}");
+        assert_eq!(v["first"], "#38", "the oldest let go first: {v}");
+        assert_eq!(v["last"], aio::serde_json::json!([["#50", "again"], ["tag", "b"]]), "a reused key is the newest");
+        assert!(js.contains("hold(notes, key, n, NOTES_HELD)"));
+    }
+
     /// A syntax error in the shell is a window that never opens (aio tests
     /// the generated main parses).
     #[test]
@@ -1515,6 +1579,8 @@ mod tests {
     #[tokio::test]
     async fn a_later_launch_hands_over_its_file_and_brings_the_window_forward() {
         use tokio::io::AsyncReadExt;
+        // Launches are the process's: another test's never reach this one.
+        let _turn = WINDOW_TURN.lock().await;
         let d = tempfile::tempdir().unwrap();
         let sock = aio::ipc::addr(d.path(), &format!("hand{}", std::process::id()));
         let (to_electron, mut electron) = pair();
@@ -1526,8 +1592,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let launch = got.recv().await.unwrap();
-        assert_eq!(launch.args, ["notes.md"]);
+        let launch = loop {
+            let l = got.recv().await.unwrap();
+            if l.args == ["notes.md"] {
+                break l;
+            }
+        };
         assert_eq!(launch.path("notes.md"), d.path().join("notes.md").to_string_lossy());
         let mut b = [0u8; 6];
         electron.read_exact(&mut b).await.unwrap();

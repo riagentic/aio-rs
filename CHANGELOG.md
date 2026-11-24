@@ -40,6 +40,27 @@ version may break things.
 - The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.
+- A `Browser`'s guest shows http(s) and `about:blank` only: any `src`
+  was loaded (`file:`, `chrome:`, `javascript:`, `data:`), from the
+  element, `Guest::load_url` or the page's `loadURL`. Another scheme
+  loads only when the window lists it (`Web { schemes: &["data"] }`,
+  added); its first page, every load and its page's own navigations are
+  asked, and each refusal is said (`<Browser> load REFUSED`).
+- **Breaking:** a `Browser`'s guest shows http(s) and `about:blank`
+  only: any `src` was loaded (`file:`, `chrome:`, `javascript:`,
+  `data:`), from the element, `Guest::load_url` or the page's `loadURL`.
+  Another scheme loads only when the window lists it (`Web { schemes:
+  &["data"] }`, added); its first page, every load and its page's own
+  navigations are asked, and each refusal is said (`<Browser> load
+  REFUSED`).
+- Android: a navigation goes to another app only from the page's own
+  frame after a tap, as on the desktop: any frame's, a script's by itself
+  too, was handed to the app that opens it (the browser, the dialer, a
+  store) with no gesture.
+- Windows: the window's file route (`aio://app/file/…`,
+  `aio::ui::local_file_url`) refuses a UNC or device path (`//host/share`,
+  `\\?\`, `\\.\`) on every OS: opening `\\host\share\x.png` connected to
+  that host over SMB and handed it the user's NTLM hash.
 
 ### Added
 
@@ -180,6 +201,18 @@ version may break things.
 
 ### Fixed
 
+- A second launch's arguments reach the app however long its start
+  takes: the running instance takes launches from `aio_shell::start` on
+  (it did from its window's start, after the app's own setup: past a
+  launch's 30 s wait, the launch failed), and one taken before the app
+  listens is kept for `aio_shell::launches()`'s first listener (the last
+  16; it was dropped: a first start downloading Electron lost every file
+  opened meanwhile). An app shown in the browser or served only takes
+  them too.
+- A desktop notification is held for its click until it is clicked,
+  closed or failed, the last 64 at most: Windows may never say `close`
+  for one moved to the Action Center, so every one shown stayed in the
+  runtime's memory for good.
 - A cell's diagnostic (a refused reaction, a timed-out effect, a refused
   `#[on_stop]`, a cell disabled after failures) sometimes came without
   its cell's name and state: when another thread was showing a commit of

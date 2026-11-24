@@ -412,7 +412,7 @@ the web build's. The library's `Cargo.toml` takes `aio` with `features =
 |---|---|
 | stylesheets | `aio::use_css!(dark; "assets/style.css")`: built into the binary in a release, read from disk (and live) in a debug build |
 | images, fonts, data the app ships | `include_bytes!` / `include_str!`: in the binary, on every target |
-| an image on the user's disk, in the desktop window | `aio::ui::local_file_url("/abs/path.png")`: the window serves image files only, from `aio://app/file/…`; `file://` is blocked |
+| an image on the user's disk, in the desktop window | `aio::ui::local_file_url("/abs/path.png")`: the window serves image and media files only, from `aio://app/file/…`, never a network share (`\\host\share`) or device path; `file://` is blocked |
 | a folder a served app hands out | `[server] dirs` (behind the key) or `[server] public_dirs` ([aio.toml](../reference/aio-toml.md#serverdirs-serverpublicdirs)) |
 | files the user saves | `aio_shell::page::save` (a page's own download is never saved behind the app's back) |
 

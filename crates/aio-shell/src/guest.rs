@@ -25,6 +25,11 @@ pub struct Web {
     pub fullscreen: bool,
     /// A guest or child window may save files (aio's `guestDownloads`).
     pub downloads: bool,
+    /// The schemes a `Browser`'s guest may show beyond http(s) and
+    /// `about:blank`, by name (`&["data"]`): its `src`, a load its page or
+    /// [`aio::kit::Guest`] asks, a navigation. Any other (`file:`,
+    /// `chrome:`, `javascript:`, …) is refused and said. Unset: none.
+    pub schemes: &'static [&'static str],
     /// A child window may be opened without Chromium's sandbox when it
     /// asks ([`Child::unsandboxed`], aio's `unsandboxedChildWindows`): its
     /// preload then runs with Node. Each one is said in the log.
@@ -78,6 +83,13 @@ pub fn preload_refusal(name: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether `s` is a URL scheme's name as a parsed URL spells it (pure):
+/// lower-case, a letter then letters, digits, `+`, `-` or `.`.
+fn is_scheme(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-.".contains(&b))
+}
+
 /// `shell.json`: what the runtime allows, checked. A preload name, or a
 /// permission, it would not take is an error here, never a guest that
 /// silently has none.
@@ -94,6 +106,9 @@ pub(crate) fn shell_json(win: &Window) -> io::Result<String> {
     if let Some(p) = win.permissions.iter().find(|p| !PERMISSIONS.contains(p)) {
         return Err(bad(format!("permission {p:?} is not one a page may hold: {}", PERMISSIONS.join(", "))));
     }
+    if let Some(s) = win.web.schemes.iter().find(|s| !is_scheme(s)) {
+        return Err(bad(format!("Web {{ schemes }}: {s:?} is not a scheme's name, like \"data\" (no `:`)")));
+    }
     let names: Vec<&str> = win.web.preloads.iter().map(|(n, _)| *n).collect();
     Ok(json!({
         "browser": win.web.browser,
@@ -101,6 +116,7 @@ pub(crate) fn shell_json(win: &Window) -> io::Result<String> {
         "preloads": names,
         "guestFullscreen": win.web.fullscreen,
         "downloads": win.web.downloads,
+        "schemes": win.web.schemes,
         "allow": win.permissions,
         "grantable": PERMISSIONS,
         "unsandboxedWindows": win.web.unsandboxed_windows,
@@ -287,7 +303,7 @@ mod tests {
         // Off by default: no tag, no windows, no preloads, nothing more for the page.
         assert_eq!(v["browser"], false);
         assert_eq!(v["windows"], false);
-        assert_eq!(v["preloads"], json!([]));
+        assert_eq!((v["preloads"].clone(), v["schemes"].clone()), (json!([]), json!([])));
         assert_eq!((v["allow"].clone(), v["confirmUnload"].clone()), (json!([]), json!(false)));
         assert_eq!(v["keys"], json!({ "reload": false, "print": false }), "the shell keeps its keys");
         static PRE: [(&str, &str); 2] = [("dapp/preload.js", "1"), ("reader.js", "2")];
@@ -298,6 +314,7 @@ mod tests {
                 preloads: &PRE,
                 fullscreen: true,
                 downloads: false,
+                schemes: &["data"],
                 unsandboxed_windows: true,
             },
             permissions: &["clipboard-read"],
@@ -311,12 +328,20 @@ mod tests {
         assert_eq!(v["keys"]["reload"], true);
         assert_eq!((v["unsandboxedWindows"].clone(), v["devtools"].clone()), (json!(true), json!(false)));
         assert_eq!(v["grantable"], json!(PERMISSIONS), "the names a denial's line may offer");
+        assert_eq!(v["schemes"], json!(["data"]));
         let err = |w: &Window| shell_json(w).unwrap_err().to_string();
         static TWICE: [(&str, &str); 2] = [("a.js", ""), ("a.js", "")];
         static CLIMB: [(&str, &str); 1] = [("../a.js", "")];
         assert!(err(&Window { web: Web { preloads: &TWICE, ..win.web }, ..win }).contains("declared twice"));
         assert!(err(&Window { web: Web { preloads: &CLIMB, ..win.web }, ..win }).contains("`..`"));
         assert!(err(&Window { permissions: &["notifications"], ..win }).contains("not one a page may hold"));
+        for bad in [&["data:"][..], &["File"], &[""], &["1x"]] {
+            assert!(
+                err(&Window { web: Web { schemes: bad, ..win.web }, ..win }).contains("not a scheme's name"),
+                "{bad:?}"
+            );
+        }
+        assert!(shell_json(&Window { web: Web { schemes: &["x-app+v1.2"], ..win.web }, ..win }).is_ok());
     }
 
     #[test]
@@ -404,6 +429,17 @@ mod tests {
         assert!(js.contains("if (m.t === 'clear-partition') clearPartition(m)"));
     }
 
+    #[test]
+    fn a_guests_first_page_every_load_and_its_own_navigations_are_asked() {
+        let js = include_str!("main.js");
+        assert!(js.contains("if (params.src && refusedSrc(params.src)) params.src = ''"));
+        assert!(
+            js.contains("guest.loadURL = (url, o) => refusedSrc(url) ? Promise.resolve() : load.call(guest, url, o)")
+        );
+        assert!(js.contains("guest.on('will-navigate', (e) => { if (refusedSrc(e.url)) e.preventDefault() })"));
+        assert!(js.contains("G.guestSrc(url, SHELL.schemes)"));
+    }
+
     /// guest.js, in Node: aio's main-process policy tests on its pure parts.
     #[test]
     fn the_guest_policy_in_node() {
@@ -446,6 +482,11 @@ mod tests {
              out.child = [G.childAllows(g, 'media', 'https://a.example'), G.childAllows(g, 'media', 'https://b.example'), G.childAllows(g, 'midi', 'https://a.example'), G.childAllows(undefined, 'media', 'https://a.example')];
              // aio electron-unload-veto.test.ts.
              out.unload = [G.unload(true, false), G.unload(false, true), G.unload(false, false)];
+             // A <Browser>'s guest: http(s) and about:blank; any other scheme only one the app listed.
+             const src = (u, s) => G.guestSrc(u, s || []);
+             out.src = [src('https://a.example/x'), src('http://a.example'), src('about:blank'), src('data:text/html,x', ['data']), src('FILE:///etc/hosts', ['file'])];
+             out.srcNo = [src('file:///etc/passwd'), src('chrome://gpu'), src('javascript:alert(1)'), src('data:text/html,x'), src('about:config'),
+               src('blob:https://a.example/1', ['data']), src('nope'), src('view-source:https://a.example')];
              console.log(JSON.stringify(out));",
             include_str!("guest.js")
         );
@@ -488,5 +529,10 @@ mod tests {
         assert!(d[5].contains("DENIED to an embedded page: a page that is not the app's gets none"), "{}", d[5]);
         assert_eq!(v["child"], json!([true, false, false, false]));
         assert_eq!(v["unload"], json!(["leave", "ask", "stay"]));
+        assert_eq!(v["src"], json!([null, null, null, null, null]));
+        let no: Vec<String> = aio::serde_json::from_value(v["srcNo"].clone()).unwrap();
+        assert!(no[..6].iter().all(|w| w.contains("http(s) and about:blank only")), "{no:?}");
+        assert!(no[0].contains(r#"Web { schemes: &["file"] } allows it"#), "{}", no[0]);
+        assert_eq!((no[6].as_str(), no[7].contains("view-source:")), ("not a URL", true));
     }
 }
