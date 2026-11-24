@@ -109,6 +109,14 @@ impl<T: Cell> Copy<T> {
         st
     }
 
+    /// Own call `op` is in the confirmed copy (the server sends its change
+    /// before its reply): no longer replayed on top of it.
+    fn ran(&mut self, op: &Value) {
+        if let Some(op) = op.as_str() {
+            self.pending.retain(|q| q.op != op);
+        }
+    }
+
     /// Before a server view comes: what to check it against for conflicts
     /// (its view, what it shows), unless no call waits or `own` is one of them.
     fn before(&self, own: &Value) -> Option<(Value, Value)> {
@@ -522,6 +530,7 @@ impl<T: Cell> Remote<T> {
                         c.seq = m["seq"].as_u64().unwrap_or(0);
                         c.view = m["state"].clone();
                         c.confirmed = Arc::new(st);
+                        c.ran(&m["op"]);
                     });
                     lock(&self.inner.screen).0.get_or_insert_with(super::now_ms);
                     self.conflicted(&met);
@@ -549,6 +558,7 @@ impl<T: Cell> Remote<T> {
                             c.seq = seq;
                             c.view = view;
                             c.confirmed = Arc::new(st);
+                            c.ran(&m["op"]);
                         });
                         lock(&self.inner.screen).0.get_or_insert_with(super::now_ms);
                         self.conflicted(&met);

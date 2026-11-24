@@ -188,7 +188,10 @@ fn Reader() -> View {
 ```
 
 The window must allow it: `aio_shell::Window { web: Web { browser: true,
-.. }, .. }`. Without it the guest doesn't load.
+.. }, .. }`. Without it the guest doesn't load. It brings its own look (the
+guest fills its box), with or without the kit's sheet; any rule of the
+app's wins over it. In a `TestUi` the page has no `<webview>`: a test
+stands in for the guest with `ui.emit(t, &GuestEvent::..)`.
 
 | Prop | Does |
 |---|---|
@@ -199,8 +202,8 @@ The window must allow it: `aio_shell::Window { web: Web { browser: true,
 | `referrer` | the `Referer` its loads send (an embed that checks it refuses to play without one) |
 | `host_keys` | 1 to 16 `KeyboardEvent.key` names the guest hands back, even from its frames (`GuestEvent::Key`) |
 | `popups` | a link that opens a window goes to the system browser after a real click; without it, nothing |
-| `onevent` | `GuestEvent`: `Navigated { url, back, forward }`, `Title`, `Key(HostKey)`, `Message { channel, args }` (its preload's `ipcRenderer.sendToHost`), `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive`, `PreloadRefused { preload, reason }` |
-| `id` | the element's id, for `aio::kit::go(id, Go::Back \| Forward \| Reload \| Stop \| Send { channel, args } \| Css(sheet) \| Zoom(f) \| DevTools)` (`Css`: `insertCSS`, until it navigates; `Zoom`: `setZoomFactor`; `DevTools`: its own DevTools window) and `aio::kit::run_js(id, js).await` (`executeJavaScript`: its value as JSON, `None` when the guest isn't there or the script threw); every other `<webview>` method by name: `aio::kit::webview(id, "getURL", vec![]).await` (`WEBVIEW_METHODS` lists them; its value as JSON, a promise awaited, `capturePage` a PNG data URL, `printToPDF` base64; `None` when the guest isn't there, the name is none of them (said) or it threw) |
+| `onevent` | `GuestEvent`: `Navigated { url, back, forward, in_page }` (`in_page`: the same document moved, a hash or `pushState`; `false`: a new document, a reload too), `LoadFailed { url, code, description }` (nothing answered there: `-102`, `ERR_CONNECTION_REFUSED`; an error page took the last document's place; `-3`, a load given up for another, is none), `Title`, `Key(HostKey)`, `Message { channel, args }` (its preload's `ipcRenderer.sendToHost`), `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive`, `PreloadRefused { preload, reason }` |
+| `id` | the element's id, for `aio::kit::Guest::new(id)`: `load_url(url)` (its `referrer` sent, `src` left as it was), `url().await`, `reload()`, `stop()`, `go_back()`, `go_forward()`, `send_input(&GuestInput::Key(key, mods) \| Click(x, y, mods))` (a person's key or left click in its page); for `aio::kit::go(id, Go::Back \| Forward \| Reload \| Stop \| Send { channel, args } \| Css(sheet) \| Zoom(f) \| DevTools)` (`Css`: `insertCSS`, until it navigates; `Zoom`: `setZoomFactor`; `DevTools`: its own DevTools window) and `aio::kit::run_js(id, js).await` (`executeJavaScript`: its value as JSON, `None` when the guest isn't there or the script threw); every other `<webview>` method by name: `aio::kit::webview(id, "getURL", vec![]).await` (`WEBVIEW_METHODS` lists them; its value as JSON, a promise awaited, `capturePage` a PNG data URL, `printToPDF` base64; `None` when the guest isn't there, the name is none of them (said) or it threw) |
 
 ### A preload for the guest
 

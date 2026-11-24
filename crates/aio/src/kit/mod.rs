@@ -49,7 +49,7 @@ mod window;
 mod zoom;
 
 pub use back::use_back_button;
-pub use browser::{Browser, Go, GuestEvent, HostKey, WEBVIEW_METHODS, go, run_js, webview};
+pub use browser::{Browser, Go, Guest, GuestEvent, GuestInput, HostKey, WEBVIEW_METHODS, go, run_js, webview};
 pub use change::{use_on_change, use_on_change_now};
 #[cfg(not(target_arch = "wasm32"))]
 pub use connect::{ConnectPage, use_connect_page};

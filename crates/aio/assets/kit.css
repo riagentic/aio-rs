@@ -525,6 +525,3 @@ body{
 .aio-connect ul:empty { display: none; }
 .aio-connect p { margin: 0; }
 .aio-connect > .aio-btn { align-self: flex-start; }
-/* Browser: an embedded page fills its box. */
-.aio-browser { display: flex; min-block-size: 0; }
-.aio-browser > webview { flex: 1; inline-size: 100%; block-size: 100%; }
