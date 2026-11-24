@@ -411,6 +411,9 @@ impl Cx {
         On { cx: self, cell: O::ID, methods: O::METHODS }
     }
 
+    /// Drop this cell's schedule `key` (set by `after`, `every`, `at`,
+    /// `cron`, `backoff` or `on`) when this call commits; none by that key
+    /// is fine. Running effects are [`Self::abort`]'s.
     pub fn cancel(&self, key: &str) {
         self.plans.borrow_mut().push(Plan::Cancel(key.into()));
     }

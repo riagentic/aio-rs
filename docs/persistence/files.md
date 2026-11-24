@@ -205,7 +205,9 @@ for a whole home.
 
 ## Limits, compared with aio
 
-- No WAL-checkpoint setting: SQLite checkpoints on its own.
+- No WAL-checkpoint setting: a thread of the file's checkpoints once its
+  WAL passes 1000 pages, off the calls' thread; a burst of writes with no
+  pause that leaves it 4000 behind checkpoints in the call, as SQLite would.
 - A whole backup copies all of `data/` into one file, a part of each
   file (256 MB) at a time: a `files/` folder of many gigabytes makes a
   backup that large and slow, and a restore needs that much free space

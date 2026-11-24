@@ -37,8 +37,8 @@ fn the_live_timeline_times_each_call_and_leaves_out_quiet_cells() {
     const { assert!(<Notes as CellData>::DIAGNOSTICS && !<Clock as CellData>::DIAGNOSTICS) };
     let d = tempfile::tempdir().unwrap();
     let (notes, clock) = (
-        aio::Source::<Notes>::open(&d.path().join("notes.db")).unwrap(),
-        aio::Source::<Clock>::open(&d.path().join("clock.db")).unwrap(),
+        aio::Source::<Notes>::open(d.path().join("notes.db")).unwrap(),
+        aio::Source::<Clock>::open(d.path().join("clock.db")).unwrap(),
     );
     notes.add("milk".into()).unwrap();
     clock.tick().unwrap();

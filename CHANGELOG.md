@@ -158,6 +158,16 @@ version may break things.
 - `act!(method(args))` needs only the client's `Ui` in scope, no
   `<Cell>Calls` import: it calls through the cell's typed calls, which
   `#[methods]` also makes as a type of their own.
+- A store's checkpoints (its WAL copied into the file: two disk syncs)
+  run on a thread of the file's own, not in the call that passed 1000
+  WAL pages: before, one call in ~150 waited 10-40 ms on the disk, and
+  the views with it. 5000 calls in a row: 32 such waits, 300 ms in all,
+  mean 75 µs a call, before; 5 waits, 40-50 ms, mean 24 µs after. At one
+  call per 2 ms: 20 waits (270 ms, the longest 38 ms) before; 4 (24 ms,
+  the longest 9 ms) after.
+- `Source::open` and `Source::open_aio` take any path (`impl
+  AsRef<Path>`), as `Handle::open` and `Store::open` do:
+  `Source::open("state.db")`.
 - `aio::feedback::cell()` opens the `feedback` cell on its first ask
   (once `aio::boot` has set up reports), no longer at boot: an app that
   never asks (a service) carries none of it. `open()` gives the one open.

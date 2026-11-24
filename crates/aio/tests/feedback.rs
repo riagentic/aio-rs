@@ -39,7 +39,7 @@ async fn a_user_report_is_saved_then_delivered_budgeted_and_kept_to_keep() {
     let d = tempfile::tempdir().unwrap();
     let dir = d.path().join("reports");
     aio::report::init(aio::report::About { id: "notes".into(), dir: dir.clone(), keep: 3, ..Default::default() });
-    let notes = aio::Source::<Notes>::open(&d.path().join("state.db")).unwrap();
+    let notes = aio::Source::<Notes>::open(d.path().join("state.db")).unwrap();
     notes.set("the draft".into()).unwrap();
     let sent = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let next = Arc::new(Mutex::new(Sink::Take));

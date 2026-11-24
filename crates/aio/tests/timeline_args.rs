@@ -25,7 +25,7 @@ impl Vault {
 fn with_feedback_args_the_timeline_carries_each_calls_arguments_but_redacted_ones() {
     aio::report::init(aio::report::About { id: "vault".into(), args: true, ..Default::default() });
     let d = tempfile::tempdir().unwrap();
-    let v = aio::Source::<Vault>::open(&d.path().join("vault.db")).unwrap();
+    let v = aio::Source::<Vault>::open(d.path().join("vault.db")).unwrap();
     v.note("milk".into()).unwrap();
     v.unlock("hunter2".into()).unwrap();
     v.note("see token=abc123".into()).unwrap();

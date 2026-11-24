@@ -254,8 +254,8 @@ aio::Source::for_server: fn for_server(cfg: &crate::config::Config, dirs: &crate
 aio::Source::listen: fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static)
 aio::Source::on_change: fn on_change<R, M>(&self, immediate: bool, f: impl Fn(&T) -> R + Send + Sync + 'static, on: impl Fn(&R, Option<&R>) -> M + Send + Sync + 'static) -> crate::Watching where R: PartialEq + Clone + Send + 'static, M: Send + 'static
 aio::Source::on_pending: fn on_pending(&self, f: impl Fn() + Send + Sync + 'static)
-aio::Source::open: fn open(path: &std::path::Path) -> Result<Self, crate::Error>
-aio::Source::open_aio: fn open_aio(path: &std::path::Path, app: &str) -> Result<Self, crate::Error>
+aio::Source::open: fn open(path: impl AsRef<std::path::Path>) -> Result<Self, crate::Error>
+aio::Source::open_aio: fn open_aio(path: impl AsRef<std::path::Path>, app: &str) -> Result<Self, crate::Error>
 aio::Source::pending: fn pending(&self, method: Option<&str>) -> usize
 aio::Source::rendered: fn rendered(&self)
 aio::Source::serve: fn serve(&self, listen: &str, opts: crate::sync::Options) -> std::io::Result<u16>
