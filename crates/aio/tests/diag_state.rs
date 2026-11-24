@@ -75,7 +75,7 @@ async fn a_failing_call_effect_or_hook_carries_its_screened_state_and_aios_code(
     aio::report::on_panic();
     let d = tempfile::tempdir().unwrap();
     let (all, _sub) = heard();
-    let aio::Source::Local(h) = aio::Source::<Vault>::open(&d.path().join("vault.db")).unwrap() else { unreachable!() };
+    let aio::Source::Local(h) = aio::Source::<Vault>::open(d.path().join("vault.db")).unwrap() else { unreachable!() };
     h.set("see token=abc123".into()).unwrap();
 
     // A method's panic: REDUCE_ERROR, the state as a client sees it, masked.
@@ -100,7 +100,7 @@ async fn a_failing_call_effect_or_hook_carries_its_screened_state_and_aios_code(
     assert!(e.why.contains("crash: its effect panicked before it answered"), "{e}");
 
     // A reaction that fails: HOOK_ERROR (aio's onAction), with the reacting cell's state.
-    let aio::Source::Local(k) = aio::Source::<Keys>::open(&d.path().join("keys.db")).unwrap() else { unreachable!() };
+    let aio::Source::Local(k) = aio::Source::<Keys>::open(d.path().join("keys.db")).unwrap() else { unreachable!() };
     k.listens_to(&h, "set", |_, _| Err::<(), _>(aio::Rejected::new("not this one")));
     h.set("again".into()).unwrap();
     let r = last(&all, "reaction");

@@ -30,7 +30,7 @@ async fn until(what: &str, f: impl Fn() -> bool) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_declared_budget_reaches_health_and_degrades_it() {
     let d = tempfile::tempdir().unwrap();
-    let src = aio::Source::<Feed>::open(&d.path().join("state.db")).unwrap();
+    let src = aio::Source::<Feed>::open(d.path().join("state.db")).unwrap();
     let h = match &src {
         aio::Source::Local(h) => h.clone(),
         _ => unreachable!(),

@@ -27,6 +27,8 @@ pub(crate) struct Shared(Arc<Inner>);
 
 struct Inner {
     conn: Mutex<Connection>,
+    /// Its checkpoints, off the calls' thread (none in memory).
+    checkpoints: Option<Arc<Checkpoints>>,
     /// The thread whose turn it is, and how many times it took it.
     turn: Mutex<(Option<ThreadId>, usize)>,
     free: Condvar,
@@ -49,10 +51,108 @@ fn lock<X>(m: &Mutex<X>) -> MutexGuard<'_, X> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(c) = &self.checkpoints {
+            c.stop();
+        }
+    }
+}
+
+/// WAL pages that make a checkpoint due (SQLite's own mark).
+const CHECKPOINT_PAGES: std::os::raw::c_int = 1000;
+
+/// WAL pages past which a commit checkpoints itself, as SQLite would: the
+/// thread can't keep up (writes without a pause, its WAL never restarts).
+const CHECKPOINT_LAGGING: std::os::raw::c_int = 4 * CHECKPOINT_PAGES;
+
+/// A file's checkpoints (the WAL copied into the file: two disk syncs) on
+/// a thread of their own. SQLite's own ran in the commit that passed 1000
+/// pages: every 150 or so calls, one call (and the views waiting on it)
+/// took the disk's syncs, 10-30 ms on an SSD.
+struct Checkpoints {
+    path: PathBuf,
+    /// Due, stopped, the thread (started at the first due).
+    state: Mutex<(bool, bool, Option<std::thread::JoinHandle<()>>)>,
+    due: Condvar,
+}
+
+impl Checkpoints {
+    /// `c`'s commits make a checkpoint due past [`CHECKPOINT_PAGES`]; it
+    /// runs none itself, unless no thread can be had or the WAL is past
+    /// [`CHECKPOINT_LAGGING`].
+    fn watch(self: &Arc<Self>, c: &mut Connection) -> rusqlite::Result<()> {
+        let me = self.clone();
+        c.wal_hook(Some(move |wal: &mut rusqlite::hooks::Wal, pages| {
+            // Its error would be the commit's, which is made: ignored, as SQLite's own.
+            if pages >= CHECKPOINT_LAGGING || (pages >= CHECKPOINT_PAGES && !me.wake()) {
+                _ = wal.checkpoint();
+            }
+            Ok(())
+        }))
+    }
+
+    /// Make a checkpoint due; false: no thread to run it.
+    fn wake(self: &Arc<Self>) -> bool {
+        let mut s = lock(&self.state);
+        if s.2.is_none() && !s.1 {
+            let me = self.clone();
+            match std::thread::Builder::new().name("aio-checkpoint".into()).spawn(move || me.run()) {
+                Ok(t) => s.2 = Some(t),
+                Err(_) => return false,
+            }
+        }
+        s.0 = true;
+        self.due.notify_one();
+        true
+    }
+
+    fn run(&self) {
+        // Never made here: a file gone stays gone.
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let mut db = None;
+        loop {
+            {
+                let mut s = lock(&self.state);
+                while !s.0 && !s.1 {
+                    s = self.due.wait(s).unwrap_or_else(|e| e.into_inner());
+                }
+                if s.1 {
+                    return;
+                }
+                s.0 = false;
+            }
+            if db.is_none() {
+                db = Connection::open_with_flags(&self.path, flags).ok();
+            }
+            // PASSIVE: the calls' writers never wait for it.
+            if let Some(c) = &db
+                && let Err(e) = c.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
+            {
+                eprintln!("[aio] storage: checkpoint of {}: {e}", self.path.display());
+            }
+        }
+    }
+
+    /// End its thread (after the checkpoint it may be running).
+    fn stop(&self) {
+        let t = {
+            let mut s = lock(&self.state);
+            s.1 = true;
+            self.due.notify_one();
+            s.2.take()
+        };
+        if let Some(t) = t {
+            _ = t.join();
+        }
+    }
+}
+
 impl Shared {
-    fn new(conn: Connection) -> Self {
+    fn new(conn: Connection, checkpoints: Option<Arc<Checkpoints>>) -> Self {
         Self(Arc::new(Inner {
             conn: Mutex::new(conn),
+            checkpoints,
             turn: Mutex::new((None, 0)),
             free: Condvar::new(),
             reacting: AtomicBool::new(false),
@@ -69,9 +169,11 @@ impl Shared {
         if let Some(i) = open.iter().find(|(p, id, _)| (p, id) == (&key.0, &key.1)).and_then(|(_, _, w)| w.upgrade()) {
             return Ok(Self(i));
         }
-        let c = Connection::open(path)?;
+        let mut c = Connection::open(path)?;
         c.execute_batch("PRAGMA synchronous = NORMAL")?;
-        let s = Self::new(c);
+        let checkpoints = Arc::new(Checkpoints { path: key.0.clone(), state: Mutex::new((false, false, None)), due: Condvar::new() });
+        checkpoints.watch(&mut c)?;
+        let s = Self::new(c, Some(checkpoints));
         open.push((key.0, key.1, Arc::downgrade(&s.0)));
         Ok(s)
     }
@@ -144,13 +246,17 @@ pub(crate) struct Db {
 impl Db {
     /// The file at `path`, made if missing.
     pub(crate) fn open(path: &Path) -> rusqlite::Result<Self> {
-        let own = Connection::open(path)?;
-        Ok(Self { own: Some(own), file: Shared::open(path)? })
+        let mut own = Connection::open(path)?;
+        let file = Shared::open(path)?;
+        if let Some(c) = &file.0.checkpoints {
+            c.watch(&mut own)?;
+        }
+        Ok(Self { own: Some(own), file })
     }
 
     /// A database in memory, its own.
     pub(crate) fn memory() -> rusqlite::Result<Self> {
-        Ok(Self { own: None, file: Connection::open_in_memory().map(Shared::new)? })
+        Ok(Self { own: None, file: Shared::new(Connection::open_in_memory()?, None) })
     }
 
     pub(crate) fn file(&self) -> &Shared {
