@@ -90,6 +90,26 @@ mod size {
     }
 }
 
+/// `[build] budget_mb`: MB as a number (`14.5`) or a size (`"14.5MB"`,
+/// `"500KB"`), above zero.
+pub(crate) mod mb {
+    use super::Human;
+    use serde::{Deserialize, Deserializer};
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        let mb = match Human::deserialize(d)? {
+            Human::Num(n) => Some(n),
+            Human::Text(s) => s
+                .trim()
+                .parse()
+                .ok()
+                .or_else(|| super::parse_size(&s, "budget_mb").ok().map(|b| b as f64 / (1u64 << 20) as f64)),
+        };
+        mb.filter(|n| *n > 0.0 && n.is_finite()).map(Some).ok_or_else(|| {
+            serde::de::Error::custom("[build] budget_mb is MB above zero: write it as 14.5 or \"14.5MB\"")
+        })
+    }
+}
+
 mod rate {
     use super::Human;
     use serde::{Deserialize, Deserializer, Serializer};

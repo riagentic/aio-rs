@@ -1295,6 +1295,28 @@ pub fn data(attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// `aio::credits!()`: the app's credits (`ax build` writes them, `AIORT_CREDITS`
+/// names the file), `None` in a build ax didn't make. The `option_env!` makes
+/// cargo build the app again when the variable changes.
+#[proc_macro]
+pub fn credits(input: TokenStream) -> TokenStream {
+    if !input.is_empty() {
+        return syn::Error::new(Tokens::from(input).span(), "aio::credits!() takes nothing")
+            .into_compile_error()
+            .into();
+    }
+    let text = match std::env::var("AIORT_CREDITS") {
+        Ok(p) if !p.is_empty() => quote!(::core::option::Option::Some(::core::include_str!(#p))),
+        _ => quote!(::core::option::Option::None),
+    };
+    quote!({
+        const _: ::core::option::Option<&str> = ::core::option_env!("AIORT_CREDITS");
+        let credits: ::core::option::Option<&'static str> = #text;
+        credits
+    })
+    .into()
+}
+
 /// `#[derive(Lit)]` on an `aio.toml` type (in aio-config): it writes itself
 /// as the Rust expression that makes it (`aio::config::Lit`), so an app's
 /// config is parsed when the app is built, never when it runs. Its path is

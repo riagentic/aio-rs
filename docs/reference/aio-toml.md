@@ -282,9 +282,9 @@ retire = ["old-notes.db"]
 ## [home]
 
 Where the app's home is, as its author fixes it. `--home`, `--profile`,
-`--instance` and `AIORT_DATA` still win. `dir` is any app's; `env`,
-`portable` and `dev` are a port's (`[app] port_of`): the aio app's own
-rules, as its code resolved them, refused without `port_of`.
+`--instance` and `AIORT_DATA` still win. `dir` and `moved` are any app's;
+`env`, `portable` and `dev` are a port's (`[app] port_of`): the aio app's
+own rules, as its code resolved them, refused without `port_of`.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
@@ -292,6 +292,7 @@ rules, as its code resolved them, refused without `port_of`.
 | `env` | variable name | none | A variable naming the home (`NOTES_HOME`); it beats `AIO_APPS_DIR`. |
 | `portable` | file name | none | A folder beside the app's binary (`notes-data`): the home when it exists (a portable install). Not in a debug build. |
 | `dev` | file name | none | A debug build's home in the user's folder (`.notes-dev`), so a dev run never opens the real data. A profile counts from the plain home. |
+| `moved` | list of `{ from, files }` | none | The app's own older layouts, moved into its home once as it starts, before the store opens. `from`: a folder under `~/`, `$HOME/` or `$XDG_DATA_HOME/` (`~/.local/share` where unset); `files`: paths in it, each landing at its own path in the home (`data/vault.db` → `<home>/data/vault.db`). On `aio::compat::scatter`'s rules: never over a file the home has (said, and the old one left whole), a database with its `-wal`, `-shm` and `-journal` or not at all (recorded in `<to>.moving` first), a copy across filesystems takes the name only whole. Only into the app's own home: never a profile's, an instance's, `--home`, `AIORT_DATA` (a test's) or `[home] dev`'s. The boot report says each move. |
 
 ```toml
 [app]
@@ -306,6 +307,12 @@ dev = ".notes-dev"
 ```toml
 [home]
 dir = "/srv/notes"
+```
+
+```toml
+# A first build kept its vault in ~/.local/share/notes: moved in once.
+[home]
+moved = [{ from = "$XDG_DATA_HOME/notes", files = ["data/vault.db", "data/cache.sqlite", "logs/event.log"] }]
 ```
 
 ## [history]
@@ -545,7 +552,7 @@ What `ax build <app>` makes ([build](../build/README.md),
 | `targets` | list | `[]` | Kinds, in order: `desktop` (this OS's bundle), `windows`, `deb`, `appimage`, `dmg`, `cli`, `android`, `web`; or `{ name, kind, bin }` for a labelled one (two of a kind, or another binary of the workspace, which has its own `aio.toml`), which may carry its own `platforms`, `title` and `ui` (over `[build] platforms`, `[app] name` and `ui`; `entry` is aio's spelling of `bin`). Empty: `desktop` (a `cli` or `server` app: `cli`). `ax build <app> --list` lists them, `--targets a,b` picks some. |
 | `platforms` | list | `[]` | The OS and CPU each desktop target is built for: `linux`, `linux-arm64`, `windows`, `windows-arm64`, `macos`, `macos-arm64`, `host`. Empty: this machine. `--platforms a,b` per build. |
 | `out` | folder | `"dist"` | Where `ax build` puts what it makes and `ax release`, `ax install` and `ax lab` look (aio's `build.out`): relative to the workspace, or absolute. `--out dir` wins for one run. |
-| `budget_mb` | number | 10 (a server: 6) | The binary's size budget in MB; the build fails above it and names the crates that take the space (`ax build --sizes`). For apps with heavy libraries. |
+| `budget_mb` | number or size | 10 (a server: 6) | The binary's size budget in MB (`14.5`, or a size as `[budgets]` writes one: `"14.5MB"`); the build fails above it and names the crates that take the space (`ax build --sizes`). For apps with heavy libraries. |
 | `css` | command or list | none | A CSS toolchain run before every build and on every change under `ax dev`: a command line split on spaces, or an argv list. Never through a shell. |
 | `smoke` | bool | `false` | Every build then starts each Linux artifact it made headless, stops it and checks its log (as `--smoke`). |
 | `runtime` | `shared`, `bundled` | `"shared"` | Where a desktop app's Electron comes from: `shared` (one per machine, fetched at the first start) or `bundled` (in the package beside the binary, trimmed: an offline install; a macOS one is made on a Mac). |
@@ -954,7 +961,7 @@ see [views](../ui/views.md) and the tables in
   `ax keygen <app>` and paste its line.
 - A host in `[client] server`, `[updates] url` or `[feedback] url` that
   `[capabilities] network` leaves out: refused, naming the entry to add.
-- `[home]` without `[app] port_of`: refused; `[home]` is only for ports.
+- `[home] env`, `portable` or `dev` without `[app] port_of`: refused; they are a port's rules.
 - A relative `[server] cert` or `key`: refused. The file is built in, so
   give absolute paths, or set them on the machine that serves.
 - Editing `aio.toml` and expecting a running or built app to see it:

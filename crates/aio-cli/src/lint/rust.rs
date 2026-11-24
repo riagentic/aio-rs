@@ -594,6 +594,20 @@ impl<'ast> Visit<'ast> for Checks<'_> {
                 "style { {aio::use_css!(dark; \"assets/style.css\")} } (live from the file, built in for release), or call aio::ui::page_css(..) in the component body",
             );
         }
+        // The person's folders read raw: a test's sandbox can't redirect them.
+        if let Expr::Path(p) = &*e.func
+            && (last_is(&p.path, "var") || last_is(&p.path, "var_os"))
+            && let Some(Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(k), .. })) = e.args.first()
+            && user_dir_var(&k.value())
+        {
+            self.push(
+                Severity::Warn,
+                "paths",
+                format!("{} read from the environment: in a test it is still the person's, and their data", k.value()),
+                p.span().start().line,
+                "aio::paths::user_home() or aio::paths::xdg_data_home(): the test world's in a test",
+            );
+        }
         visit::visit_expr_call(self, e);
     }
 
@@ -651,6 +665,11 @@ impl<'ast> Visit<'ast> for Checks<'_> {
         }
         self.nested_rsx(m.tokens.clone());
     }
+}
+
+/// A variable naming one of the person's folders (pure).
+pub fn user_dir_var(k: &str) -> bool {
+    matches!(k, "HOME" | "USERPROFILE") || k.starts_with("XDG_") && k.ends_with("_HOME")
 }
 
 fn fix_for(what: &str) -> &'static str {

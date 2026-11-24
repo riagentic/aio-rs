@@ -2,10 +2,11 @@
 //!
 //! Every native build has [`data`]: reading and writing a ported app's
 //! `state.db` in aio's layout (`aio_kv`, `#[aio_cell]` slices, the home
-//! claim; docs/migration/data.md). Feature `compat` adds the rest: aio's
+//! claim; docs/migration/data.md) and [`scatter`], the safe one-time move
+//! of an app's older layout into its home (`[home] moved`). Feature `compat` adds the rest: aio's
 //! protocol v3 on `/ws` for aio pages and tools, an aio-rs app calling an
-//! aio app ([`AioLink`]; on this machine as itself, proven: [`AioPeer`]), aio's one-time move of a scattered layout into
-//! its home ([`scatter`]) and `#[on_aio]`. Without the feature a `/ws`
+//! aio app ([`AioLink`]; on this machine as itself, proven: [`AioPeer`]), aio's one-time move of its scattered layout into
+//! the home ([`scatter`]) and `#[on_aio]`. Without the feature a `/ws`
 //! client must say `x-aio-wire: 2` (or `?wire=2`) and `#[on_aio]` is a
 //! build error.
 #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
@@ -18,7 +19,7 @@ mod peer;
 pub use peer::AioPeer;
 #[cfg(all(feature = "compat", not(target_arch = "wasm32")))]
 pub mod local;
-#[cfg(all(feature = "compat", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod scatter;
 #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
 pub(crate) mod wire;

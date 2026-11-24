@@ -55,7 +55,7 @@ aio_config::config::BarStyle::Thin
 aio_config::config::Build.android: AndroidBuild
 aio_config::config::Build.asset_files: &'static [(&'static str, &'static [u8])]
 aio_config::config::Build.assets: std::collections::BTreeMap<String, std::path::PathBuf>
-aio_config::config::Build.budget_mb: Option<u64>
+aio_config::config::Build.budget_mb: Option<f64>
 aio_config::config::Build.chromium_extras: Extras
 aio_config::config::Build.css: Option<Css>
 aio_config::config::Build.download_window: DownloadWindow
@@ -138,6 +138,7 @@ aio_config::config::History.travel: bool
 aio_config::config::Home.dev: Option<String>
 aio_config::config::Home.dir: Option<String>
 aio_config::config::Home.env: Option<String>
+aio_config::config::Home.moved: Vec<Moved>
 aio_config::config::Home.portable: Option<String>
 aio_config::config::Limits.bytes_per_sec: u32
 aio_config::config::Limits.calls_per_sec: u32
@@ -169,6 +170,8 @@ aio_config::config::Mode::Client
 aio_config::config::Mode::ClientServer
 aio_config::config::Mode::Server
 aio_config::config::Mode::Standalone
+aio_config::config::Moved.files: Vec<String>
+aio_config::config::Moved.from: String
 aio_config::config::Neutral::Soft
 aio_config::config::Neutral::Tinted
 aio_config::config::RuntimeFrom::Bundled
@@ -269,6 +272,7 @@ aio_config::config::bundle_id_ok: fn bundle_id_ok(id: &str) -> bool
 aio_config::config::find: fn find(dir: &std::path::Path) -> Option<std::path::PathBuf>
 aio_config::config::hex_color: fn hex_color(s: &str) -> bool
 aio_config::config::lang_ok: fn lang_ok(tag: &str) -> bool
+aio_config::config::moved_from: fn moved_from(from: &str) -> Option<(&'static str, &str)>
 aio_config::config::parse_span: fn parse_span(s: &str) -> Result<std::time::Duration, String>
 aio_config::config::reserved: fn reserved(path: &str) -> bool
 aio_config::config::scheme_refused: fn scheme_refused(s: &str) -> Option<String>
@@ -396,6 +400,7 @@ impl Clone for Look
 impl Clone for MacBuild
 impl Clone for Memory
 impl Clone for Mode
+impl Clone for Moved
 impl Clone for Neutral
 impl Clone for Policy
 impl Clone for RuntimeFrom
@@ -477,6 +482,7 @@ impl Debug for Look
 impl Debug for MacBuild
 impl Debug for Memory
 impl Debug for Mode
+impl Debug for Moved
 impl Debug for Neutral
 impl Debug for Policy
 impl Debug for RuntimeFrom
@@ -527,6 +533,7 @@ impl Default for Look
 impl Default for MacBuild
 impl Default for Memory
 impl Default for Mode
+impl Default for Moved
 impl Default for Neutral
 impl Default for Policy
 impl Default for RuntimeFrom
@@ -578,6 +585,7 @@ impl Eq for Look
 impl Eq for MacBuild
 impl Eq for Memory
 impl Eq for Mode
+impl Eq for Moved
 impl Eq for Neutral
 impl Eq for RuntimeFrom
 impl Eq for Scheme
@@ -631,6 +639,7 @@ impl Lit for Look
 impl Lit for MacBuild
 impl Lit for Memory
 impl Lit for Mode
+impl Lit for Moved
 impl Lit for Neutral
 impl Lit for RuntimeFrom
 impl Lit for Scheme
@@ -684,6 +693,7 @@ impl PartialEq for Look
 impl PartialEq for MacBuild
 impl PartialEq for Memory
 impl PartialEq for Mode
+impl PartialEq for Moved
 impl PartialEq for Neutral
 impl PartialEq for RuntimeFrom
 impl PartialEq for Scheme
@@ -738,6 +748,7 @@ impl Serialize for Look
 impl Serialize for MacBuild
 impl Serialize for Memory
 impl Serialize for Mode
+impl Serialize for Moved
 impl Serialize for Neutral
 impl Serialize for RuntimeFrom
 impl Serialize for Scheme
@@ -789,6 +800,7 @@ impl StructuralPartialEq for Look
 impl StructuralPartialEq for MacBuild
 impl StructuralPartialEq for Memory
 impl StructuralPartialEq for Mode
+impl StructuralPartialEq for Moved
 impl StructuralPartialEq for Neutral
 impl StructuralPartialEq for RuntimeFrom
 impl StructuralPartialEq for Scheme
@@ -842,6 +854,7 @@ impl<'de> Deserialize<'de> for Look
 impl<'de> Deserialize<'de> for MacBuild
 impl<'de> Deserialize<'de> for Memory where Memory: _serde::__private229::Default
 impl<'de> Deserialize<'de> for Mode
+impl<'de> Deserialize<'de> for Moved
 impl<'de> Deserialize<'de> for Neutral
 impl<'de> Deserialize<'de> for RuntimeFrom
 impl<'de> Deserialize<'de> for Scheme
@@ -895,6 +908,7 @@ struct aio_config::config::Limits
 struct aio_config::config::Log
 struct aio_config::config::MacBuild
 struct aio_config::config::Memory
+struct aio_config::config::Moved
 struct aio_config::config::Server
 struct aio_config::config::Splash
 struct aio_config::config::Target

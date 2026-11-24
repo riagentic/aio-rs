@@ -1,7 +1,9 @@
-//! aio's one-time move of a ported app's scattered layout into its home
-//! (`app-dirs-migrate.ts`): `./data.db` (+ `-wal`, `-shm`, `.journal`,
-//! `.journal.wm`) to the store, `~/.local/share/<appId>/auth.db` to
-//! `data/auth.db`, `./.aio-tls/*` to `data/tls/`, `./.aio/log/*` to the logs.
+//! One-time moves into an app's home: an app's own older layout as its
+//! `[home] moved` declares ([`moved`]), and with feature `compat` aio's
+//! move of a ported app's scattered layout (`app-dirs-migrate.ts`):
+//! `./data.db` (+ `-wal`, `-shm`, `.journal`, `.journal.wm`) to the store,
+//! `~/.local/share/<appId>/auth.db` to `data/auth.db`, `./.aio-tls/*` to
+//! `data/tls/`, `./.aio/log/*` to the logs.
 //! It moves what a user cannot make again, so a partial failure is always
 //! survivable: never onto an existing target, a database with its WAL as
 //! one set (recorded in `<to>.moving` first), a copy across filesystems
@@ -144,7 +146,7 @@ impl Mover {
         if out[0].outcome != Outcome::Moved {
             return [out, self.drop_record(to)].concat();
         }
-        for ext in ["-wal", "-shm"] {
+        for ext in ["-wal", "-shm", "-journal"] {
             if exists(&with(from, ext)) {
                 out.push(self.file(&with(from, ext), &with(to, ext)));
             }
@@ -173,8 +175,10 @@ impl Mover {
                 return vec![];
             }
             let mut out = vec![];
-            if exists(&shm) && !exists(&with(to, "-shm")) {
-                out.push(self.file(&shm, &with(to, "-shm")));
+            for ext in ["-shm", "-journal"] {
+                if exists(&with(from, ext)) && !exists(&with(to, ext)) {
+                    out.push(self.file(&with(from, ext), &with(to, ext)));
+                }
             }
             out.extend(self.drop_record(to));
             return out;
@@ -242,6 +246,29 @@ impl Mover {
         out
     }
 
+    /// `[home] moved`: each file to its own path under `home`, as a
+    /// database (with its sidecars) where one is.
+    fn moved(&self, rules: &[crate::config::Moved], home: &Path) -> Vec<Move> {
+        let mut out = vec![];
+        for r in rules {
+            let Some((var, rest)) = crate::config::moved_from(&r.from) else { continue };
+            let base = if var == "HOME" { crate::paths::user_home() } else { crate::paths::xdg_data_home() };
+            for f in &r.files {
+                let (from, to) = (base.join(rest).join(f), home.join(f));
+                if exists(&from)
+                    && !exists(&to)
+                    && let Err(e) = crate::paths::private_dir(crate::paths::parent(&to))
+                {
+                    out.push(Move { from, to, outcome: Outcome::Failed(e.to_string()) });
+                    continue;
+                }
+                out.extend(self.finish(&from, &to));
+                out.extend(self.database(&from, &to));
+            }
+        }
+        out.into_iter().filter(|m| m.outcome != Outcome::Kept || exists(&m.from)).collect()
+    }
+
     fn adopt(&self, l: &Layout) -> Vec<Move> {
         let (db, auth) = (l.cwd.join("data.db"), l.xdg.join("auth.db"));
         let auth_to = l.data.join("auth.db");
@@ -285,6 +312,13 @@ pub fn adopt(l: &Layout) -> Vec<Move> {
     Mover(|a, b| std::fs::rename(a, b)).adopt(l)
 }
 
+/// Move the files of an app's older layouts (`[home] moved`) into its
+/// `home`, as [`adopt`] does: never over one there, a database with its
+/// sidecars. `~/` and `$XDG_DATA_HOME` are a test's own world in a test.
+pub fn moved(rules: &[crate::config::Moved], home: &Path) -> Vec<Move> {
+    Mover(|a, b| std::fs::rename(a, b)).moved(rules, home)
+}
+
 /// What [`adopt`] did, one line a move (none when nothing was there).
 pub fn said(moves: &[Move], data: &Path) -> Vec<String> {
     let moved: Vec<&Move> = moves.iter().filter(|m| m.outcome == Outcome::Moved).collect();
@@ -315,6 +349,7 @@ pub fn said(moves: &[Move], data: &Path) -> Vec<String> {
 /// The move of aio app `app`'s scattered layout (in the folder it starts in)
 /// into its home, each move said. Skipped while the app runs from its
 /// default home in another process: that one holds the files open.
+#[cfg(feature = "compat")]
 pub(crate) fn adopt_here(app: &str, dirs: &crate::paths::AppDirs) {
     let user = crate::paths::home();
     let default = user.join(format!(".{app}")).join("data");
@@ -322,13 +357,24 @@ pub(crate) fn adopt_here(app: &str, dirs: &crate::paths::AppDirs) {
         eprintln!("[aio] data: the scattered files are not moved: {app} is running from {}", default.display());
         return;
     }
-    let xdg = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| user.join(".local/share"), Into::into);
+    let xdg = crate::paths::xdg_data_home();
     let Ok(cwd) = std::env::current_dir() else { return };
     let l =
         Layout { cwd, xdg: xdg.join(app), data: dirs.data.clone(), store: dirs.store.clone(), logs: dirs.logs.clone() };
     for line in said(&adopt(&l), &dirs.data) {
+        eprintln!("[aio] {line}");
+    }
+}
+
+/// [`moved`] into the home of `dirs`, each move said: only the app's own
+/// home, never a profile's, an instance's, `--home`, `AIORT_DATA` (a test's,
+/// a smoke run's) or a debug build's `[home] dev`.
+pub(crate) fn moved_here(rules: &[crate::config::Moved], dirs: &crate::paths::AppDirs) {
+    let own = ["default", "[home] dir", "[home] env", "[home] portable", "AIO_APPS_DIR", "AIORT_APPS_DIR"];
+    if rules.is_empty() || dirs.profile.is_some() || !own.contains(&dirs.from) {
+        return;
+    }
+    for line in said(&moved(rules, crate::paths::parent(&dirs.data)), &dirs.data) {
         eprintln!("[aio] {line}");
     }
 }
@@ -484,5 +530,64 @@ mod tests {
         assert_eq!(moves.iter().map(|m| m.to.clone()).collect::<Vec<_>>(), [l.data.join("auth.db")]);
         assert_eq!(read(&l.cwd.join(".aio/log/app.log")), "LOG");
         assert_eq!(read(&l.cwd.join(".aio-tls/tls-key.pem")), "KEY");
+    }
+
+    #[test]
+    fn an_apps_own_older_layout_moves_in_once_never_over_a_file_and_a_database_with_its_sidecars() {
+        let world = crate::paths::sandbox().unwrap();
+        let name = format!("purse-{}", crate::uuid_v4().simple());
+        let old = crate::paths::xdg_data_home().join(&name);
+        assert!(old.starts_with(world.root()), "a test's own world");
+        std::fs::create_dir_all(old.join("data")).unwrap();
+        std::fs::create_dir_all(old.join("logs")).unwrap();
+        for (f, t) in [
+            ("data/vault.db", "VAULT"),
+            ("data/vault.db-wal", "WAL"),
+            ("data/vault.db-shm", "SHM"),
+            ("data/vault.db-journal", "JOURNAL"),
+            ("data/cache.sqlite", "CACHE"),
+            ("logs/event.log", "LOG"),
+        ] {
+            std::fs::write(old.join(f), t).unwrap();
+        }
+        let files = ["data/vault.db", "data/cache.sqlite", "logs/event.log", "data/gone.db"];
+        let rules = [crate::config::Moved {
+            from: format!("$XDG_DATA_HOME/{name}"),
+            files: files.iter().map(|f| f.to_string()).collect(),
+        }];
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let moves = moved(&rules, h);
+        assert!(moves.iter().all(|m| m.outcome == Outcome::Moved), "{moves:?}");
+        assert_eq!(moves.len(), 6, "the missing file is not said: {moves:?}");
+        let v = h.join("data/vault.db");
+        assert_eq!(
+            [read(&v), read(&with(&v, "-wal")), read(&with(&v, "-shm")), read(&with(&v, "-journal"))],
+            ["VAULT", "WAL", "SHM", "JOURNAL"]
+        );
+        assert_eq!([read(&h.join("data/cache.sqlite")), read(&h.join("logs/event.log"))], ["CACHE", "LOG"]);
+        assert!(!exists(&old.join("data/vault.db")) && !exists(&record_of(&v)));
+        assert!(moved(&rules, h).is_empty(), "once");
+
+        // The home has its own vault: the old one stays whole, the rest moves.
+        for (f, t) in [("data/vault.db", "OLD"), ("data/vault.db-wal", "OLD WAL"), ("data/cache.sqlite", "C2")] {
+            std::fs::write(old.join(f), t).unwrap();
+        }
+        std::fs::remove_file(h.join("data/cache.sqlite")).unwrap();
+        let moves = moved(&rules, h);
+        assert_eq!(read(&v), "VAULT");
+        assert_eq!([read(&old.join("data/vault.db")), read(&old.join("data/vault.db-wal"))], ["OLD", "OLD WAL"]);
+        assert_eq!(read(&with(&v, "-wal")), "WAL", "no orphan sidecar over its own");
+        assert_eq!(moves.iter().find(|m| m.to == v).unwrap().outcome, Outcome::Kept);
+        assert_eq!(read(&h.join("data/cache.sqlite")), "C2");
+        assert!(said(&moves, &h.join("data")).iter().any(|l| l.contains("already exists")));
+
+        // `~/` is the test world's home too.
+        let rules = [crate::config::Moved { from: format!("~/.{name}"), files: vec!["a.db".into()] }];
+        let dot = crate::paths::user_home().join(format!(".{name}"));
+        std::fs::create_dir_all(&dot).unwrap();
+        std::fs::write(dot.join("a.db"), "A").unwrap();
+        moved(&rules, h);
+        assert_eq!(read(&h.join("a.db")), "A");
     }
 }

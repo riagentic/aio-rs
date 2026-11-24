@@ -748,11 +748,36 @@ mod tests {
     }
 
     #[test]
+    fn an_apps_older_layout_is_declared_under_its_home() {
+        let c = |t: &str| Config::parse(&format!("[app]\nid = \"t\"\n[home]\nmoved = [{t}]"));
+        let m = c(r#"{ from = "$XDG_DATA_HOME/t", files = ["data/vault.db", "logs/event.log"] }"#).unwrap().home.moved;
+        assert_eq!((m[0].from.as_str(), m[0].files.len()), ("$XDG_DATA_HOME/t", 2), "any app's, no port_of");
+        assert_eq!(moved_from("~/.t/x"), Some(("HOME", ".t/x")));
+        assert_eq!(moved_from("$HOME/.t"), Some(("HOME", ".t")));
+        assert_eq!(moved_from("$XDG_DATA_HOME/t"), Some(("XDG_DATA_HOME", "t")));
+        for from in ["/var/lib/t", "$XDG_CONFIG_HOME/t", "~/", "~/../t", "t"] {
+            let e = c(&format!("{{ from = {from:?}, files = [\"a\"] }}")).unwrap_err();
+            assert!(e.contains("is a folder under ~/"), "{from}: {e}");
+        }
+        for f in ["", "/etc/passwd", "../x", "data/../../x", "C:\\\\x", "data//x"] {
+            let e = c(&format!("{{ from = \"~/.t\", files = [{f:?}] }}")).unwrap_err();
+            assert!(e.contains("is a path in its folder"), "{f}: {e}");
+        }
+    }
+
+    #[test]
     fn a_heavy_app_declares_its_own_size_budget() {
         let c = |t: &str| Config::parse(&format!("[app]\nid = \"t\"\n[build]\n{t}"));
         assert_eq!(c("").unwrap().build.budget_mb, None);
-        assert_eq!(c("budget_mb = 25").unwrap().build.budget_mb, Some(25));
-        assert!(c("budget_mb = \"25 MB\"").is_err() && c("budget_mb = -1").is_err());
+        assert_eq!(c("budget_mb = 25").unwrap().build.budget_mb, Some(25.0));
+        // A fraction, or a size as `[budgets]` writes one.
+        for (t, mb) in [("14.5", 14.5), ("\"14.5MB\"", 14.5), ("\"25 MB\"", 25.0), ("\"512KB\"", 0.5), ("\"12\"", 12.0)] {
+            assert_eq!(c(&format!("budget_mb = {t}")).unwrap().build.budget_mb, Some(mb), "{t}");
+        }
+        for bad in ["-1", "0", "\"0MB\"", "\"lots\"", "\"14.5 XB\"", "nan", "inf"] {
+            let e = c(&format!("budget_mb = {bad}")).unwrap_err();
+            assert!(e.contains("budget_mb is MB above zero"), "{bad}: {e}");
+        }
         assert!(!c("").unwrap().build.smoke && c("smoke = true").unwrap().build.smoke, "smoke on every build");
         assert!(c("").unwrap().build.platforms.is_empty());
         assert_eq!(c("platforms = [\"linux\", \"windows\"]").unwrap().build.platforms, ["linux", "windows"]);

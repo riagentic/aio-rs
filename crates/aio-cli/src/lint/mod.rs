@@ -233,6 +233,8 @@ pub fn lint(dir: &Path) -> Report {
             .fix("in Cargo.toml: [dev-dependencies] aio = { package = \"aio-rs\", <its source>, features = [\"testing\"] }"),
         );
     }
+    let ax = std::env::var_os("CARGO_TARGET_DIR").map_or_else(crate::dev::shared_target, PathBuf::from);
+    facts.issues.extend(stray_target(dir, &ax));
     facts.issues.extend(css::collisions(&styles));
     facts.issues.extend(big_crates(&texts));
     across(&mut facts, &mut report);
@@ -247,6 +249,26 @@ pub fn lint(dir: &Path) -> Report {
     report.cells = facts.cells.len();
     report.tests = facts.tests;
     report
+}
+
+/// A build folder a plain `cargo` made at the root of the workspace of
+/// `dir` (cargo's `CACHEDIR.TAG` in it), while ax builds in `ax`: its GBs
+/// are built again beside ax's, and nothing cleans them.
+fn stray_target(dir: &Path, ax: &Path) -> Option<Issue> {
+    let t = crate::dev::workspace_root(dir).join("target");
+    let same =
+        |a: &Path, b: &Path| std::fs::canonicalize(a).ok().is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a));
+    if !t.join("CACHEDIR.TAG").is_file() || same(&t, ax) {
+        return None;
+    }
+    let rel = t.strip_prefix(dir).map_or_else(|_| t.display().to_string(), |r| r.display().to_string());
+    let msg = format!(
+        "{rel}/ holds {} a plain cargo built: ax builds in {} and never cleans it",
+        crate::places::human(crate::places::size(&t)),
+        ax.display()
+    );
+    let fix = format!("delete it; to share ax's folder with cargo: export CARGO_TARGET_DIR={}", ax.display());
+    Some(Issue::new(Severity::Hint, "build", msg, &rel, 0).fix(&fix))
 }
 
 /// The lines of Rust in one crate past which `ax dev`'s patch of an edit

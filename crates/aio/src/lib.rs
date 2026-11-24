@@ -949,6 +949,11 @@ macro_rules! call {
     };
 }
 
+/// This app's credits, for its About: every crate it links, with its
+/// licence and licence texts (Markdown), as `ax build` wrote them;
+/// `None` in a build ax didn't make (`ax dev`, `cargo build`).
+pub use aio_macros::credits;
+
 /// This app's version, as `ax build` numbered it from `[app] version`
 /// (`1.2.<commit count>`, `-dirty.<hash>` for uncommitted edits), else
 /// its package's: what it gives `aio_shell::start` and shows.
@@ -1353,6 +1358,11 @@ macro_rules! keys {
 #[cfg(test)]
 mod tests {
     use super::Rejected;
+
+    #[test]
+    fn credits_are_built_in_only_by_ax_build() {
+        assert_eq!(crate::credits!(), None, "a cargo build: ax wrote none");
+    }
 
     #[test]
     fn a_refusal_says_its_kind_by_a_typed_code_never_by_its_words() {

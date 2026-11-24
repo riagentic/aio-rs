@@ -206,6 +206,8 @@ name has no [auto name](ui.md#auto-names) either.
 | `testing` | `assert_eq!(x, x)`, `assert_ne!(x, x)`: a thing compared with itself (`self-comparison`) | warn |
 | `css` | a class two of the app's stylesheets define at their top level (`.track { … }`) with one property set to two values: whichever loads last wins, silently (aio's `aiol` styles check; `:hover` and longer selectors, rules inside `@media`, custom properties and a generated sheet starting `/*!` are left alone) | warn |
 | `config` | an `aio.toml` that doesn't parse or check | error |
+| `paths` | `env::var("HOME")`, `"USERPROFILE"` or an `"XDG_*_HOME"` (`var` or `var_os`) in app code: a test's sandbox can't redirect it, so a test reaches the person's data | warn: `aio::paths::user_home()` or `xdg_data_home()` |
+| `build` | a `target/` a plain `cargo` made at the workspace's root (cargo's `CACHEDIR.TAG` in it) beside ax's shared build folder: its size, built again and never cleaned | hint: delete it; `CARGO_TARGET_DIR=<ax's folder>` shares ax's with cargo |
 | `migrate` | an older layout: a launcher `build.rs`, `aio::config!()?`, renamed paths, an aio-rs build-dependency, the `video` feature (`testing` brings it) | warn or error (`--fix` moves it) |
 | `scan` | a `.rs` file that doesn't parse, a text file over 1 MiB (not checked) | warn, hint |
 | `clippy`, `rustc` | the project's own clippy and compiler warnings, plus `dbg!` (warn), `todo!()` and `unimplemented!()` (error) | as reported |

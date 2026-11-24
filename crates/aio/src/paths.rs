@@ -116,6 +116,19 @@ pub(crate) fn home() -> PathBuf {
     home_in(&env)
 }
 
+/// The person's home folder (`HOME`, else `USERPROFILE`); in the test
+/// world ([`sandbox`]), the sandbox's. Read it here, never from the
+/// environment: a test then never reaches the person's files.
+pub fn user_home() -> PathBuf {
+    home()
+}
+
+/// `XDG_DATA_HOME`, else `<user_home>/.local/share`; in the test world,
+/// the sandbox's (an app's own old XDG data, on any OS).
+pub fn xdg_data_home() -> PathBuf {
+    env("XDG_DATA_HOME").unwrap_or_else(|| home().join(".local/share"))
+}
+
 fn tool_home_in(env: Env) -> PathBuf {
     match std::env::consts::OS {
         "macos" => home_in(env).join("Library/Application Support/aio-rt"),
@@ -955,6 +968,17 @@ mod tests {
         assert!(!real_tool_home().starts_with(s.root()), "what ax setup put there is found");
     }
 
+    #[test]
+    fn the_persons_home_and_xdg_data_are_the_sandboxs_in_a_test() {
+        let s = sandbox().unwrap();
+        assert_eq!(user_home(), s.root().join("home"));
+        assert_eq!(xdg_data_home(), s.root().join("home/.local/share"), "never the person's XDG_DATA_HOME");
+        drop(s);
+        if !in_sandbox() {
+            assert_eq!(user_home(), home_in(&real_env));
+        }
+    }
+
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
     }
@@ -1214,6 +1238,7 @@ mod tests {
             portable: Some(format!("portable-{}", std::process::id())),
             dev: Some(".purse-dev".into()),
             dir: None,
+            moved: vec![],
         };
         let at = |dev, a: &[&str], vars: &[(&str, &str)]| ruled(Some("purse"), &rules, dev, a, vars).unwrap();
         let home = |g: Got| (g.0, g.2, g.3);

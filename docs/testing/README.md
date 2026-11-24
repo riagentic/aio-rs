@@ -347,6 +347,11 @@ the world.
 - `aio::paths::sandbox()` enters (or shares) the same world in a test of
   your own; `aio::paths::in_sandbox()` says which world runs, for code
   that must pick a simulated device over real hardware.
+- The person's folders as app code reads them: `aio::paths::user_home()`
+  (`HOME`, else `USERPROFILE`) and `aio::paths::xdg_data_home()`
+  (`XDG_DATA_HOME`, else `~/.local/share`) answer the sandbox's in a test.
+  `std::env::var("HOME")` (or an `XDG_*_HOME`) still names the person's
+  real ones: `ax lint` warns on it.
 - A test that needs hardware puts the transport behind a trait and gives
   the test world a simulated device, or replays a [cassette](cassettes.md).
 - A UI test's page and aio-rs's own outbound requests are held to this

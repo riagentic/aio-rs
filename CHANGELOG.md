@@ -40,9 +40,28 @@ version may break things.
 
 - `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
   it, or with an offset) as ms since the epoch.
+- `[home] moved = [{ from, files }]`: an app's own older layout
+  (`$XDG_DATA_HOME/<id>`, `~/…`) moved into its home once, before the
+  store opens, on `aio::compat::scatter`'s safe move (never over a file
+  there, a database with its `-wal`, `-shm` and `-journal` or not at all);
+  only into the app's own home, never a profile's, an instance's or a
+  test's. `aio::compat::scatter` (`moved`) is in every native build now,
+  not only with feature `compat`.
+- `aio::paths::user_home()` and `aio::paths::xdg_data_home()`: the
+  person's folders, the sandbox's in a test; `ax lint` warns on
+  `env::var("HOME")`, `"USERPROFILE"` and `"XDG_*_HOME"` in app code.
+- Credits: `ax build` writes the credits of every crate the app links
+  (name, version, licence, repository, licence texts; from cargo, no
+  network, the same bytes for the same lock) and `aio::credits!()` builds
+  them in, for an About; `None` in a build ax didn't make.
+- `ax lint` points at a `target/` a plain `cargo` made beside ax's shared
+  build folder, with its size and the fix.
 
 ### Changed
 
+- **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
+  as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
+  `Option<f64>`.
 - **Breaking: `aio::update` fails with `UpdateError`**, not `String`
   (`#[non_exhaustive]`: `BadSignature`, `UntrustedKey`, `Refused`,
   `Http { status, .. }`, `NoPatch`, `KeyFormat`, `Io`, …), each one's text
@@ -66,6 +85,10 @@ version may break things.
 
 ### Fixed
 
+- aio's scattered-layout move (`compat`) found `$XDG_DATA_HOME` in the
+  person's environment in a test too; it asks `aio::paths::xdg_data_home()`.
+- A database's `-journal` (a rollback journal) moves with it in
+  `aio::compat::scatter`, as its `-wal` and `-shm` do.
 - A memo of a memo could still glitch: an effect older than the outer
   memo, reading it and a signal the inner one follows, ran once with the
   outer memo's old value and once more with the new one. A read now
