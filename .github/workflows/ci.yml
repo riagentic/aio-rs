@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 xvfb ffmpeg
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 xvfb ffmpeg gnome-keyring libsecret-1-0 dbus
       - run: rustup toolchain install && rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
@@ -177,7 +177,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - if: steps.tools.outputs.cache-hit != 'true'
         run: cargo run --locked -p aio-rs-cli -- runtime --fetch
+      # aio::secrets' real round trip: the Keychain, DPAPI (the runner's logon has them).
       - run: cargo test --workspace --all-features --locked --no-fail-fast
+        env:
+          AIO_CI_SECRETS: 1
       # ax dev's hot-patch, its times: on Windows with MSVC (the runner's
       # Rust) and with MinGW (the runner's), each against a rebuild.
       - run: cargo test -p aio-rs-cli --test hotpatch --locked -- --nocapture

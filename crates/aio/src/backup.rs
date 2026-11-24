@@ -34,8 +34,9 @@ pub fn backup_all(id: &str, store: &Path, to: &Path) -> io::Result<()> {
 
 /// What in `data/` a whole backup leaves out (`path`: relative, `/`-separated).
 pub fn left_out(path: &str) -> bool {
-    const OUT: [&str; 7] =
-        ["instance.lock", "health.json", "serving.json", "sync.token", "paired.json", "electron", "backups"];
+    // `secrets`: sealed for this machine (`aio::secrets`), as the keys are.
+    const OUT: [&str; 8] =
+        ["instance.lock", "health.json", "serving.json", "sync.token", "paired.json", "secrets", "electron", "backups"];
     let (top, name) = (path.split('/').next().unwrap_or(path), path.rsplit('/').next().unwrap_or(path));
     OUT.contains(&top) || top.starts_with("state.db") || name.ends_with(".tmp") || name.contains(".replaced-")
 }

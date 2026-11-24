@@ -71,6 +71,7 @@ assets = { "/built" = "media" }
 application_id = "org.example.lit"
 schemes = ["lit"]
 camera = true
+biometric = true
 color_scheme = "light"
 universal = true
 strict = true

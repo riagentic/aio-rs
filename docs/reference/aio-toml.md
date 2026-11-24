@@ -154,6 +154,7 @@ chromium_extras = "keep"
 aab = false
 schemes = []
 camera = false
+biometric = false
 color_scheme = "system"
 
 [log]
@@ -594,6 +595,7 @@ build a file added later in; a plain `cargo build` doesn't see a new one.
 | `aab` | bool | `false` | Also an Android App Bundle (`.aab`) for Play. |
 | `schemes` | list | `[]` | URL schemes the app opens on Android only, beside `[app] schemes` (every platform) (`notes://item/7`): each link reaches the running app (`aio::ui::links`; a `router!` goes there). A lower-case letter, then lower-case letters, digits, `+`, `-` or `.`; none of the system's (`http`, `https`, `content`, `file`, `intent`, `mailto`, `tel`…). |
 | `camera` | bool | `false` | The page may ask for the camera: the APK declares it and Android asks once. Off: refused. |
+| `biometric` | bool | `false` | `aio::secrets::set_biometric` may ask for the user's fingerprint or face: the APK declares it (`USE_BIOMETRIC`). Off: refused ([keychain](../auth/keychain.md)). |
 | `color_scheme` | `system`, `light`, `dark` | `"system"` | Light or dark whatever the phone's setting; `system`: the phone's. |
 
 ### [build.macos]
