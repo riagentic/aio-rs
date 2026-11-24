@@ -677,8 +677,11 @@ pub fn Breadcrumb(
                     li { key: "{i}", class: "aio-crumbs__item",
                         if last || (c.href.is_none() && c.onclick.is_none()) {
                             span { "aria-current": last.then_some("page"), {c.label.clone()} }
+                        } else if let Some(f) = c.onclick {
+                            a { href: c.href.clone(), onclick: move |_| f.call(()), {c.label.clone()} }
                         } else {
-                            a { href: c.href.clone(), onclick: move |_| if let Some(f) = c.onclick { f.call(()) }, {c.label.clone()} }
+                            // No handler: the page follows the link (one that hears its click keeps it).
+                            a { href: c.href.clone(), {c.label.clone()} }
                         }
                         if !last {
                             span { class: "aio-crumbs__sep", "aria-hidden": "true", {separator.clone().unwrap_or_else(|| rsx! { "/" })} }

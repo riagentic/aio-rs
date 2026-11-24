@@ -135,13 +135,20 @@ fn within(svg: bool, v: View) -> View {
 /// Element `tag` with `n` child anchors (`svg`: in SVG's namespace), its
 /// marks the element then each anchor.
 fn template(tag: &'static str, n: usize, svg: bool) -> &'static Template {
+    // The page reads a node's child count as 16 bits.
+    let Ok(n16) = u16::try_from(n) else {
+        panic!(
+            "air: h(\"{tag}\") has {n} children, a template holds at most 65535: give them as one child \
+             (`.child(views)`, a `Vec<View>`), or render a window of them (aio::kit::VirtualList)"
+        )
+    };
     MADE.with_borrow_mut(|m| {
         *m.entry((tag, n, svg)).or_insert_with(|| {
             let mut nodes = vec![if svg { 5 } else { 1 }];
             nodes.extend_from_slice(&(tag.len() as u32).to_le_bytes());
             nodes.extend_from_slice(tag.as_bytes());
             nodes.push(0);
-            nodes.extend_from_slice(&(n as u16).to_le_bytes());
+            nodes.extend_from_slice(&n16.to_le_bytes());
             nodes.push(1);
             nodes.extend(std::iter::repeat_n(4, n));
             let at = crate::hot::At { file: "", line: 0, col: 0, idx: 0 };

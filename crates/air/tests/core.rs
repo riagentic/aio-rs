@@ -687,3 +687,153 @@ fn an_event_for_a_redrawn_element_is_dropped_and_a_dev_build_says_so_once() {
         assert!(heard.is_empty(), "a release build says nothing");
     }
 }
+
+#[test]
+fn a_components_handlers_leave_nothing_behind_per_event() {
+    fn app() -> View {
+        let n = signal(|| 0u32);
+        let el = signal(|| None::<Rc<MountedData>>);
+        rsx! {
+            input { "data-t": "f", onmounted: move |e: MountedEvent| el.set(Some(e.data())) }
+            button { "data-t": "add", onclick: move |_| async move { n += 1 }, "{n}" }
+            button {
+                "data-t": "focus",
+                onclick: move |_| {
+                    let el = el.get_untracked();
+                    async move { if let Some(e) = el { _ = e.set_focus(true).await } }
+                },
+                "focus"
+            }
+            button { "data-t": "say", onclick: move |_| _ = eval("document.title = 'x'"), "say" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let round = |p: &mut TestPage| {
+        p.click("add");
+        p.click("focus");
+        let id = p.scripts.last().unwrap().0;
+        p.answer(id, 1, "true");
+        p.click("say");
+    };
+    round(&mut p);
+    let live = air::live();
+    for _ in 0..20 {
+        round(&mut p);
+    }
+    assert_eq!(p.text("add"), "21");
+    assert_eq!(air::live(), live, "no cleanup, task or script piles up in the component per event");
+}
+
+#[test]
+fn a_script_ends_with_its_owner_while_a_handle_is_kept() {
+    let kept = Rc::new(RefCell::new(None::<Eval>));
+    let k = kept.clone();
+    let open = Signal::new(true);
+    #[component]
+    fn Asker(kept: Rc<RefCell<Option<Eval>>>) -> View {
+        let k = kept.clone();
+        once(move || *k.borrow_mut() = Some(eval("aio.send(1)")));
+        rsx! { p { "asking" } }
+    }
+    let mut p = TestPage::mount(move || rsx! { if open.get() { Asker { kept: k.clone() } } });
+    let scripts = air::live().scripts;
+    p.within(|| open.set(false));
+    assert_eq!(air::live().scripts, scripts - 1, "its view ended: so did the script, though a handle is kept");
+    let e = kept.borrow_mut().take().unwrap();
+    let got = Rc::new(RefCell::new(None));
+    let g = got.clone();
+    p.within(|| _ = spawn_forever(async move { *g.borrow_mut() = Some(e.recv_json().await) }));
+    assert_eq!(*got.borrow(), Some(Err("the script's view ended".to_string())));
+}
+
+#[test]
+fn a_selector_over_keys_that_come_and_go_keeps_only_the_buckets_read() {
+    thread_local!(static NEXT: Cell<Option<Signal<u32>>> = const { Cell::new(None) });
+    fn app() -> View {
+        let (base, cur) = (signal(|| 0u32), signal(|| 0u32));
+        NEXT.set(Some(base));
+        let sel = once(move || selector(move || cur.get()));
+        rsx! {
+            for k in base.get()..base.get() + 10 {
+                p { key: "{k}", class: if sel.is(k) { "on" } else { "" }, "{k}" }
+            }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let base = NEXT.get().unwrap();
+    let live = air::live();
+    let mut most = 0;
+    for _ in 0..100 {
+        p.within(|| base.update(|b| *b += 10));
+        most = most.max(air::live().nodes);
+    }
+    assert!(most <= live.nodes + 64, "a bucket per key ever asked piled up: {most} nodes, {} at first", live.nodes);
+}
+
+#[test]
+fn a_selector_read_in_the_batch_that_moved_it_answers_the_new_key() {
+    let ((cur, sel), o) = air::scope(|| {
+        let cur = Signal::new(0u32);
+        (cur, selector(move || cur.get()))
+    });
+    let seen = batch(|| {
+        cur.set(1);
+        (sel.is(0), sel.is(1))
+    });
+    assert_eq!(seen, (false, true));
+    o.dispose();
+}
+
+thread_local!(static MANY: RefCell<Vec<Signal<u64>>> = const { RefCell::new(Vec::new()) });
+
+/// The best of 5 re-runs of one hole that reads `n` signals.
+fn rerun_of_a_hole_reading(n: usize) -> std::time::Duration {
+    let mut p = TestPage::mount(move || {
+        let sigs: Vec<Signal<u64>> = (0..n).map(|i| Signal::new(i as u64)).collect();
+        MANY.set(sigs.clone());
+        rsx! { p { "data-t": "sum", {sigs.iter().map(|s| s.get()).sum::<u64>().to_string()} } }
+    });
+    let sigs = MANY.take();
+    (0..5)
+        .map(|k| {
+            let t = std::time::Instant::now();
+            p.within(|| sigs[k].set(u64::MAX / 8));
+            t.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn a_hole_reading_many_signals_reruns_in_time_linear_in_them() {
+    let (small, big) = (rerun_of_a_hole_reading(2000), rerun_of_a_hole_reading(16_000));
+    // 8 times the reads: about 8 times the time (a look through the hole's
+    // reads per read made it 64).
+    let ratio = big.as_secs_f64() / small.as_secs_f64();
+    assert!(ratio < 24.0, "{small:?} for 2000 reads, {big:?} for 16000: {ratio:.0}x");
+}
+
+#[test]
+fn a_signal_read_again_after_a_memo_of_it_reruns_its_hole_once() {
+    thread_local!(static RUNS: Cell<u32> = const { Cell::new(0) });
+    thread_local!(static A: Cell<Option<Signal<u32>>> = const { Cell::new(None) });
+    let mut p = TestPage::mount(|| {
+        let a = signal(|| 1u32);
+        A.set(Some(a));
+        let m = memo(move || a.get() * 10);
+        rsx! {
+            p { "data-t": "t",
+                {
+                    RUNS.set(RUNS.get() + 1);
+                    format!("{}-{}-{}", a.get(), m.get(), a.get())
+                }
+            }
+        }
+    });
+    let a = A.get().unwrap();
+    let runs = RUNS.get();
+    p.within(|| a.set(2));
+    assert_eq!((p.text("t"), RUNS.get() - runs), ("2-20-2".to_string(), 1));
+    p.within(|| a.set(3));
+    assert_eq!((p.text("t"), RUNS.get() - runs), ("3-30-3".to_string(), 2));
+}

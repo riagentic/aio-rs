@@ -88,6 +88,8 @@ struct Node {
     maker: Option<Key>,
     /// A signal's writes so far: a [`TrackedMemo`](crate::TrackedMemo) entry is fresh while they stay.
     writes: u32,
+    /// The registries that end what this owner has ([`owner_ends`]).
+    ends: u8,
 }
 
 /// AIR's guard (`signal.ts:418`): this many flush rounds in a row is a loop.
@@ -103,7 +105,9 @@ struct Rt {
     probe: Option<bool>,
     owner: Option<Key>,
     batch: u32,
-    queue: Vec<Key>,
+    /// What runs again, with the run that was told: one that ran since
+    /// (its memo's change woke it a second time) has nothing left to do.
+    queue: Vec<(Key, u32)>,
     flushing: bool,
     /// Effects whose first run waits for the view to be drawn, and other
     /// work for then (`onmounted`), in the order asked.
@@ -254,6 +258,7 @@ fn take_cleanups(k: Key) -> Vec<Box<dyn FnOnce()>> {
             if let Some(e) = &n.extra {
                 stack.extend(e.kept.iter().copied());
             }
+            n.ends = 0;
             out.append(&mut n.cleanups);
         }
         out
@@ -333,7 +338,10 @@ pub fn drop_left() {
 /// Dispose what `k`'s last run made, keeping `k` (and what it keeps).
 fn reset(k: Key) {
     let (owned, cleanups) = rt(|rt| match rt.node_mut(k) {
-        Some(n) => (std::mem::take(&mut n.owned), std::mem::take(&mut n.cleanups)),
+        Some(n) => {
+            n.ends = 0;
+            (std::mem::take(&mut n.owned), std::mem::take(&mut n.cleanups))
+        }
         None => (vec![], vec![]),
     });
     // Every cleanup first (what it owned is still there), then the slots go.
@@ -351,14 +359,20 @@ fn track(s: Key) {
             }
             return;
         };
-        let Some(n) = rt.node_mut(e) else { return };
-        if n.deps.contains(&s) {
+        let Some(runs) = rt.node(e).map(|n| n.runs) else { return };
+        // Read already in this run: the signal's last reader is this one (a
+        // look at the reader's reads was quadratic in a hole of many). One
+        // read since by another (a memo it pulled) only costs a duplicate.
+        let Some(sig) = rt.node_mut(s) else {
+            _ = rt.node_mut(e).map(|n| n.deps.push(s));
+            return;
+        };
+        if sig.subs.last() == Some(&(e, runs)) {
             return;
         }
-        n.deps.push(s);
-        let runs = n.runs;
-        let Some(sig) = rt.node_mut(s) else { return };
         sig.subs.push((e, runs));
+        _ = rt.node_mut(e).map(|n| n.deps.push(s));
+        let Some(sig) = rt.node_mut(s) else { return };
         // A signal never written keeps its readers' old runs: drop them as it doubles.
         let len = sig.subs.len();
         if len >= 64 && len.is_power_of_two() {
@@ -393,8 +407,8 @@ fn notify(s: Key, checked: bool) {
         let live: Vec<(Key, u32)> =
             subs.into_iter().filter(|(e, r)| rt.node(*e).is_some_and(|n| n.runs == *r)).collect();
         let deaf = |e: Key| rt.running == Some(e) && rt.node(e).is_some_and(|n| n.quiet);
-        let woken: Vec<Key> = live.iter().map(|(e, _)| *e).filter(|e| !deaf(*e)).collect();
-        for e in &woken {
+        let woken: Vec<(Key, u32)> = live.iter().copied().filter(|(e, _)| !deaf(*e)).collect();
+        for (e, _) in &woken {
             if let Some(n) = rt.node_mut(*e)
                 && n.kind == Kind::Memo
                 && !n.dirty
@@ -481,7 +495,7 @@ fn run_queue() {
                 return None;
             }
             let mut q = std::mem::take(&mut rt.queue);
-            let seq = |k: &Key| rt.node(*k).map_or(0, |n| n.seq);
+            let seq = |(k, _): &(Key, u32)| rt.node(*k).map_or(0, |n| n.seq);
             crate::sort_by(&mut q, |a, b| seq(a).cmp(&seq(b)));
             q.dedup();
             Some(q)
@@ -494,9 +508,10 @@ fn run_queue() {
                  (an effect loop)"
             );
         }
-        for e in q {
-            // A memo a read made already ([`pull`]) has nothing left to do.
-            if RT.with_borrow(|rt| rt.node(e).is_some_and(|n| n.kind == Kind::Memo && !n.dirty)) {
+        for (e, told) in q {
+            // A memo a read made already ([`pull`]), and one that ran since
+            // it was told, have nothing left to do.
+            if RT.with_borrow(|rt| rt.node(e).is_none_or(|n| n.runs != told || (n.kind == Kind::Memo && !n.dirty))) {
                 continue;
             }
             run_effect(e);
@@ -761,6 +776,31 @@ fn cleanup_boxed(f: Box<dyn FnOnce()>) {
             n.cleanups.push(f);
         }
     });
+}
+
+/// The registries that end what an owner has ([`owner_ends`]).
+pub(crate) mod ends {
+    pub(crate) const TASKS: u8 = 1;
+    pub(crate) const SCRIPTS: u8 = 2;
+}
+
+/// The current owner (if alive), which calls `end` once as it ends or
+/// re-runs, however often it is asked for registry `bit`: the caller keeps
+/// its items (tasks, scripts) by owner and ends them there, where a
+/// cleanup each piled up for the owner's life (a component's handlers
+/// spawn on every event).
+pub(crate) fn owner_ends(bit: u8, end: fn(Owner)) -> Option<Owner> {
+    let (o, arm) = rt(|rt| {
+        let o = rt.owner?;
+        let n = rt.node_mut(o)?;
+        let arm = n.ends & bit == 0;
+        n.ends |= bit;
+        Some((o, arm))
+    })?;
+    if arm {
+        cleanup(move || end(Owner(o)));
+    }
+    Some(Owner(o))
 }
 
 /// Writes in `f` flush once, at its end (AIR `batch`; every event handler runs in one).
@@ -1770,8 +1810,13 @@ pub struct Selector<K> {
 
 struct SelectorInner<K> {
     current: RefCell<Option<K>>,
+    /// A signal per key asked: no one's (the selector's end ends those
+    /// left); one no reader follows goes once their count doubles.
     buckets: RefCell<HashMap<K, Signal<bool>>>,
-    owner: Option<Owner>,
+    /// The count of buckets that next drops the unread ones.
+    prune_at: Cell<usize>,
+    /// Its computation: a read makes it first if it waits ([`pull`]).
+    node: Cell<Option<Key>>,
 }
 
 impl<K> Clone for Selector<K> {
@@ -1788,10 +1833,16 @@ impl<K> PartialEq for Selector<K> {
 
 /// A selector made now, under the current owner (not a hook).
 pub fn selector<K: Hash + Eq + Clone + 'static>(src: impl Fn() -> K + 'static) -> Selector<K> {
-    let inner =
-        Rc::new(SelectorInner { current: RefCell::new(None), buckets: RefCell::default(), owner: current_owner() });
+    let inner = Rc::new(SelectorInner {
+        current: RefCell::new(None),
+        buckets: RefCell::default(),
+        prune_at: Cell::new(64),
+        node: Cell::new(None),
+    });
     let i = inner.clone();
-    effect_of(Kind::Memo, move || {
+    cleanup(move || i.buckets.take().into_values().for_each(|b| dispose(b.key)));
+    let i = inner.clone();
+    let node = effect_of(Kind::Memo, move || {
         let k = src();
         let old = i.current.borrow_mut().replace(k.clone());
         if old.as_ref() == Some(&k) {
@@ -1812,24 +1863,46 @@ pub fn selector<K: Hash + Eq + Clone + 'static>(src: impl Fn() -> K + 'static) -
             })
         });
     });
+    inner.node.set(Some(node));
     Selector { inner }
 }
 
 impl<K: Hash + Eq + Clone + 'static> Selector<K> {
     /// Is `k` the selected key? Tracked per key.
     pub fn is(&self, k: K) -> bool {
+        if let Some(n) = self.inner.node.get() {
+            pull(n);
+        }
         let b = self.inner.buckets.borrow().get(&k).copied();
         let b = b.unwrap_or_else(|| {
+            self.prune();
             let on = self.inner.current.borrow().as_ref() == Some(&k);
-            let make = || Signal::new(on);
-            let s = match self.inner.owner {
-                Some(o) => with_owner(o, make),
-                None => detached(make),
-            };
+            let s = detached(|| Signal::new(on));
             self.inner.buckets.borrow_mut().insert(k, s);
             s
         });
         b.get()
+    }
+
+    /// Drop the buckets no reader follows, once their count reached
+    /// [`SelectorInner::prune_at`] (rows whose keys come and go: a feed).
+    fn prune(&self) {
+        let i = &self.inner;
+        if i.buckets.borrow().len() < i.prune_at.get() {
+            return;
+        }
+        let mut gone = vec![];
+        i.buckets.borrow_mut().retain(|_, b| {
+            let read = RT.with_borrow(|rt| {
+                rt.node(b.key).is_some_and(|n| n.subs.iter().any(|(e, r)| rt.node(*e).is_some_and(|n| n.runs == *r)))
+            });
+            if !read {
+                gone.push(b.key);
+            }
+            read
+        });
+        i.prune_at.set((i.buckets.borrow().len() * 2).max(64));
+        gone.into_iter().for_each(dispose);
     }
 }
 
