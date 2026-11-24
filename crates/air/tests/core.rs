@@ -687,3 +687,61 @@ fn an_event_for_a_redrawn_element_is_dropped_and_a_dev_build_says_so_once() {
         assert!(heard.is_empty(), "a release build says nothing");
     }
 }
+
+#[test]
+fn a_components_handlers_leave_nothing_behind_per_event() {
+    fn app() -> View {
+        let n = signal(|| 0u32);
+        let el = signal(|| None::<Rc<MountedData>>);
+        rsx! {
+            input { "data-t": "f", onmounted: move |e: MountedEvent| el.set(Some(e.data())) }
+            button { "data-t": "add", onclick: move |_| async move { n += 1 }, "{n}" }
+            button {
+                "data-t": "focus",
+                onclick: move |_| {
+                    let el = el.get_untracked();
+                    async move { if let Some(e) = el { _ = e.set_focus(true).await } }
+                },
+                "focus"
+            }
+            button { "data-t": "say", onclick: move |_| _ = eval("document.title = 'x'"), "say" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let round = |p: &mut TestPage| {
+        p.click("add");
+        p.click("focus");
+        let id = p.scripts.last().unwrap().0;
+        p.answer(id, 1, "true");
+        p.click("say");
+    };
+    round(&mut p);
+    let live = air::live();
+    for _ in 0..20 {
+        round(&mut p);
+    }
+    assert_eq!(p.text("add"), "21");
+    assert_eq!(air::live(), live, "no cleanup, task or script piles up in the component per event");
+}
+
+#[test]
+fn a_script_ends_with_its_owner_while_a_handle_is_kept() {
+    let kept = Rc::new(RefCell::new(None::<Eval>));
+    let k = kept.clone();
+    let open = Signal::new(true);
+    #[component]
+    fn Asker(kept: Rc<RefCell<Option<Eval>>>) -> View {
+        let k = kept.clone();
+        once(move || *k.borrow_mut() = Some(eval("aio.send(1)")));
+        rsx! { p { "asking" } }
+    }
+    let mut p = TestPage::mount(move || rsx! { if open.get() { Asker { kept: k.clone() } } });
+    let scripts = air::live().scripts;
+    p.within(|| open.set(false));
+    assert_eq!(air::live().scripts, scripts - 1, "its view ended: so did the script, though a handle is kept");
+    let e = kept.borrow_mut().take().unwrap();
+    let got = Rc::new(RefCell::new(None));
+    let g = got.clone();
+    p.within(|| _ = spawn_forever(async move { *g.borrow_mut() = Some(e.recv_json().await) }));
+    assert_eq!(*got.borrow(), Some(Err("the script's view ended".to_string())));
+}

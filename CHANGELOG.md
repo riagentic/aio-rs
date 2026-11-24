@@ -158,6 +158,13 @@ version may break things.
 
 ### Fixed
 
+- A component's handlers piled up state for the component's life on
+  every event: each `async` handler (and each `spawn` in one) left a
+  cleanup behind, and each page script (`eval`, and `MountedData`'s
+  `set_focus`, `scroll_to`, `get_client_rect`) left its entry and a
+  cleanup, its answer read or not (a flip `TransitionGroup` measured every
+  row on every change). An owner now ends its tasks and scripts with one
+  cleanup, and a script goes with the last handle on it.
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.

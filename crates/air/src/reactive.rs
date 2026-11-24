@@ -88,6 +88,8 @@ struct Node {
     maker: Option<Key>,
     /// A signal's writes so far: a [`TrackedMemo`](crate::TrackedMemo) entry is fresh while they stay.
     writes: u32,
+    /// The registries that end what this owner has ([`owner_ends`]).
+    ends: u8,
 }
 
 /// AIR's guard (`signal.ts:418`): this many flush rounds in a row is a loop.
@@ -254,6 +256,7 @@ fn take_cleanups(k: Key) -> Vec<Box<dyn FnOnce()>> {
             if let Some(e) = &n.extra {
                 stack.extend(e.kept.iter().copied());
             }
+            n.ends = 0;
             out.append(&mut n.cleanups);
         }
         out
@@ -333,7 +336,10 @@ pub fn drop_left() {
 /// Dispose what `k`'s last run made, keeping `k` (and what it keeps).
 fn reset(k: Key) {
     let (owned, cleanups) = rt(|rt| match rt.node_mut(k) {
-        Some(n) => (std::mem::take(&mut n.owned), std::mem::take(&mut n.cleanups)),
+        Some(n) => {
+            n.ends = 0;
+            (std::mem::take(&mut n.owned), std::mem::take(&mut n.cleanups))
+        }
         None => (vec![], vec![]),
     });
     // Every cleanup first (what it owned is still there), then the slots go.
@@ -761,6 +767,31 @@ fn cleanup_boxed(f: Box<dyn FnOnce()>) {
             n.cleanups.push(f);
         }
     });
+}
+
+/// The registries that end what an owner has ([`owner_ends`]).
+pub(crate) mod ends {
+    pub(crate) const TASKS: u8 = 1;
+    pub(crate) const SCRIPTS: u8 = 2;
+}
+
+/// The current owner (if alive), which calls `end` once as it ends or
+/// re-runs, however often it is asked for registry `bit`: the caller keeps
+/// its items (tasks, scripts) by owner and ends them there, where a
+/// cleanup each piled up for the owner's life (a component's handlers
+/// spawn on every event).
+pub(crate) fn owner_ends(bit: u8, end: fn(Owner)) -> Option<Owner> {
+    let (o, arm) = rt(|rt| {
+        let o = rt.owner?;
+        let n = rt.node_mut(o)?;
+        let arm = n.ends & bit == 0;
+        n.ends |= bit;
+        Some((o, arm))
+    })?;
+    if arm {
+        cleanup(move || end(Owner(o)));
+    }
+    Some(Owner(o))
 }
 
 /// Writes in `f` flush once, at its end (AIR `batch`; every event handler runs in one).

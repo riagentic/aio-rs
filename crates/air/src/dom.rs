@@ -82,6 +82,8 @@ struct EvalState {
     inbox: VecDeque<String>,
     done: Option<Result<String, String>>,
     waker: Option<std::task::Waker>,
+    /// What it ends with.
+    owner: Option<Owner>,
 }
 
 #[derive(Default)]
@@ -1410,22 +1412,48 @@ pub fn Fragment(p: FragmentProps) -> View {
 /// Values are JSON text here; `aio::ui::eval` types them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Eval {
-    id: u32,
+    held: Rc<Held>,
 }
 
-/// Run `js` in the page; it ends with the current owner (its replies are dropped).
+/// A script's place in its root's page: dropped with the last handle on
+/// it (none can read its replies any more).
+#[derive(Debug, PartialEq, Eq)]
+struct Held {
+    id: u32,
+    root: u32,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        _ = DOMS.try_with(|ds| {
+            if let Ok(mut ds) = ds.try_borrow_mut()
+                && let Some(d) = ds.get_mut(&self.root)
+            {
+                d.evals.remove(&self.id);
+            }
+        });
+    }
+}
+
+/// Run `js` in the page; it ends with the current owner (its replies are
+/// dropped), or with the last handle on it.
 pub fn eval(js: &str) -> Eval {
+    let owner = crate::reactive::owner_ends(crate::reactive::ends::SCRIPTS, end_scripts);
     let id = dom(|d| {
         d.next_eval += 1;
         let id = d.next_eval;
-        d.evals.insert(id, EvalState { inbox: VecDeque::new(), done: None, waker: None });
+        d.evals.insert(id, EvalState { inbox: VecDeque::new(), done: None, waker: None, owner });
         if d.server.is_none() {
             d.op(op::EVAL).u32(id).str(js);
         }
         id
     });
-    cleanup(move || dom(|d| _ = d.evals.remove(&id)));
-    Eval { id }
+    Eval { held: Rc::new(Held { id, root: current_root() }) }
+}
+
+/// Owner `o` ended: so do its scripts.
+fn end_scripts(o: Owner) {
+    dom(|d| d.evals.retain(|_, e| e.owner != Some(o)));
 }
 
 /// Run `js` in the page and forget it (no reply is kept): what a view's
@@ -1441,9 +1469,10 @@ pub fn exec(js: &str) {
 impl Eval {
     /// Hand the script a JSON value (its `await aio.recv()`).
     pub fn send_json(&self, json: &str) -> Result<(), String> {
-        dom(|d| match d.evals.contains_key(&self.id) {
+        let id = self.held.id;
+        dom(|d| match d.evals.contains_key(&id) {
             true if d.server.is_some() => Ok(()),
-            true => Ok(_ = d.op(op::EVAL_SEND).u32(self.id).str(json)),
+            true => Ok(_ = d.op(op::EVAL_SEND).u32(id).str(json)),
             false => Err("the script's view ended".into()),
         })
     }
@@ -1452,10 +1481,10 @@ impl Eval {
     /// failed or its view ended. A script that returned may still send (its
     /// listeners, its timers), so its return ends no `recv`.
     pub fn recv_json(&self) -> impl std::future::Future<Output = Result<String, String>> + use<> {
-        let id = self.id;
+        let held = self.held.clone();
         std::future::poll_fn(move |cx| {
             dom(|d| {
-                let Some(e) = d.evals.get_mut(&id) else {
+                let Some(e) = d.evals.get_mut(&held.id) else {
                     return std::task::Poll::Ready(Err("the script's view ended".into()));
                 };
                 if let Some(v) = e.inbox.pop_front() {
@@ -1472,10 +1501,10 @@ impl Eval {
 
     /// What the script returned (JSON), or why it failed.
     pub fn join_json(&self) -> impl std::future::Future<Output = Result<String, String>> + use<> {
-        let id = self.id;
+        let held = self.held.clone();
         std::future::poll_fn(move |cx| {
             dom(|d| {
-                let Some(e) = d.evals.get_mut(&id) else {
+                let Some(e) = d.evals.get_mut(&held.id) else {
                     return std::task::Poll::Ready(Err("the script's view ended".into()));
                 };
                 if let Some(done) = e.done.clone() {

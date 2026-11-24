@@ -4,9 +4,10 @@
 //! tasks ([`run_tasks`]) when it is woken ([`on_wake`]); a task's timers
 //! are the host's (tokio's, under aio-rs), polled in its context.
 use crate::reactive::{
-    Kind, Owner, Signal, cleanup, current_owner, current_root, effect_of, hook, untrack, with_owner,
+    Key, Kind, Owner, Signal, current_owner, current_root, effect_of, ends, hook, owner_ends, untrack, with_owner,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -40,6 +41,8 @@ struct Exec {
     slots: Vec<Slot>,
     free: Vec<u32>,
     shared: Arc<Shared>,
+    /// Each owner's tasks, ended with it (ended ones dropped as the list doubles).
+    owned: HashMap<Key, Vec<(u32, u32)>>,
 }
 
 thread_local!(static EXEC: RefCell<Exec> = RefCell::default());
@@ -125,9 +128,22 @@ fn add(fut: Fut, owner: Option<Owner>) -> Task {
 /// effect's): it ends with it. Outside the views it lives for the thread.
 pub fn spawn(fut: impl Future<Output = ()> + 'static) -> Task {
     let t = add(Box::pin(fut), current_owner());
-    let (idx, ver) = (t.idx, t.ver);
-    cleanup(move || cancel(idx, ver));
+    if let Some(o) = owner_ends(ends::TASKS, end_tasks) {
+        EXEC.with_borrow_mut(|x| {
+            let list = x.owned.entry(o.0).or_default();
+            if list.len() >= 8 && list.len().is_power_of_two() {
+                list.retain(|&(i, v)| x.slots[i as usize].ver == v);
+            }
+            list.push((t.idx, t.ver));
+        });
+    }
     t
+}
+
+/// Owner `o` ended: so do its tasks, the last spawned first.
+fn end_tasks(o: Owner) {
+    let list = EXEC.with_borrow_mut(|x| x.owned.remove(&o.0)).unwrap_or_default();
+    list.into_iter().rev().for_each(|(idx, ver)| cancel(idx, ver));
 }
 
 /// Run `fut` until it ends, whatever view ends first: it ends with its
