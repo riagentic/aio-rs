@@ -5,7 +5,8 @@
 //! the id is the content's SHA-256) or as a plain file.
 //!
 //! - `<id>`: the bytes; `<id>.json`: `{name}`, the first name it was put
-//!   with (the name never changes the id: same bytes, one blob).
+//!   with (the name never changes the id: same bytes, one blob), whole or
+//!   absent as the bytes are.
 //! - [`Blobs::put`] streams: the bytes are hashed and written to a temp file
 //!   as they come, synced, then renamed to their hash, so a blob is whole
 //!   under its id or absent. A crash leaves a `.tmp-*`, swept by a later put
@@ -138,13 +139,28 @@ impl Blobs {
     }
 
     /// Record `name` for `id` unless one is there: the first wins, also
-    /// between puts racing (create-new is atomic).
+    /// between puts racing. Written whole to a temp file, synced, then
+    /// linked under its name (a link never replaces a file: atomic, as
+    /// create-new), so a crash never leaves a part-written name. Where
+    /// there are no hard links (Android's app sandbox) it is made in place.
     fn first_name(&self, id: &str, name: &str) -> io::Result<Option<String>> {
         let meta = serde_json::json!({ "name": name }).to_string();
         let at = self.dir.join(format!("{id}.json"));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&at) {
-            Ok(mut f) => {
-                f.write_all(meta.as_bytes())?;
+        let tmp = self.dir.join(format!(".tmp-{}", crate::uuid_v4()));
+        let made = std::fs::File::create_new(&tmp)
+            .and_then(|mut f| f.write_all(meta.as_bytes()).and_then(|()| f.sync_all()))
+            .and_then(|()| match std::fs::hard_link(&tmp, &at) {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&at)
+                    .and_then(|mut f| f.write_all(meta.as_bytes())),
+                r => r,
+            });
+        _ = std::fs::remove_file(&tmp);
+        match made {
+            Ok(()) => {
+                sync_dir(&self.dir);
                 Ok(Some(name.into()))
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => self.name(id),
@@ -364,5 +380,25 @@ mod tests {
         assert!(s.put(Broken, Some("x")).is_err());
         let left: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left.len(), 2, "the put and the fresh tmp: {left:?}");
+    }
+
+    /// A name file is there whole or not at all: never seen empty (a crash
+    /// between its creation and its write lost the name for good).
+    #[test]
+    fn a_name_file_is_never_seen_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Blobs::at(d.path().join("blobs"));
+        let name = "n".repeat(4096);
+        for i in 0..100u32 {
+            let bytes = i.to_le_bytes();
+            let at = d.path().join("blobs").join(format!("{}.json", sha(&bytes)));
+            let reader = std::thread::spawn(move || loop {
+                if let Ok(b) = std::fs::read(&at) {
+                    return b.len();
+                }
+            });
+            s.put(&bytes[..], Some(&name)).unwrap();
+            assert!(reader.join().unwrap() > 4096, "put {i}: a name file seen part-written");
+        }
     }
 }

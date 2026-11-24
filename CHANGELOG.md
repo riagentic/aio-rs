@@ -171,6 +171,12 @@ version may break things.
 
 ### Fixed
 
+- Blobs: a blob's name file (`<id>.json`) is written whole to a temp
+  file, synced, and linked in: a crash (or a full disk) between its
+  creation and its write left it empty, and the blob's name was lost for
+  good (where there are no hard links, Android's app sandbox, it is made
+  in place as before).
+
 - `aio::peer::blob(link, id, start, end)` returns bytes `start..end` only:
   a server that ignored the range (from 0) or sent more than asked had
   its whole answer read into memory and returned.
