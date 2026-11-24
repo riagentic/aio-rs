@@ -425,6 +425,11 @@ version may break things.
 - `ax start` and `ax restart` told what to run next as `aio status`,
   `aio logs`, `aio stop`, `aio errors` and `aio dev`, commands that don't
   exist: they say `ax …`.
+- `ax dev` of an app with no window (`[app] mode` `server` or `cli`: the
+  `service` and `cli` templates) started a nested display and a splash
+  window waiting for a window that never came, and said a stylesheet or
+  markup edit shows at once. It starts neither and says what it takes
+  live: a Rust edit.
 
 ## [0.4.2] - 2026-11-11
 

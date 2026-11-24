@@ -154,9 +154,13 @@ fn place(asked: Option<&str>) -> Result<(Option<String>, Option<crate::display::
 /// Whether app `t` opens a window (its `aio.toml`, in its workspace): a
 /// start of one is up once its window is ready, not just its health.
 pub fn windowed(t: &crate::target::Target) -> bool {
+    t.pkg.as_ref().and_then(|p| crate::build::app_of(p).ok()).is_some_and(|(_, c)| has_window(&c.app.mode))
+}
+
+/// Whether an app of `mode` opens a window (pure): a server or a CLI doesn't.
+pub fn has_window(mode: &aio::config::Mode) -> bool {
     use aio::config::Mode;
-    let cfg = t.pkg.as_ref().and_then(|p| crate::build::app_of(p).ok()).map(|(_, c)| c.app.mode);
-    matches!(cfg, Some(Mode::Standalone | Mode::Client | Mode::ClientServer))
+    matches!(mode, Mode::Standalone | Mode::Client | Mode::ClientServer)
 }
 
 /// Start `bin args` for app `t` and wait at most `wait` for it to be up
@@ -178,10 +182,7 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
             };
         }
         if Instant::now() >= end {
-            return Err(format!(
-                "{name} is still starting or stopping after {} s: `ax status {name}`",
-                wait.as_secs()
-            ));
+            return Err(format!("{name} is still starting or stopping after {} s: `ax status {name}`", wait.as_secs()));
         }
         if !waited {
             eprintln!("ax start: {name} is starting or stopping: waiting for it");
