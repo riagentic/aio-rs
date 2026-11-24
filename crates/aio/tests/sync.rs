@@ -1336,6 +1336,29 @@ async fn an_unreadable_saved_copy_is_kept_aside_never_saved_over() {
     drop(a);
 }
 
+/// A save that failed (the disk full, the folder unwritable a moment) is
+/// written again by the next one, the drop's or the exit's: a call made
+/// offline then is never lost once the disk takes writes again.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_that_failed_is_written_again_at_the_drop() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (folder, file) = (dir.path().join("d"), dir.path().join("d/copy.json"));
+    std::fs::create_dir(&folder).unwrap();
+    let saved = |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default();
+    let (a, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    until_long("saved", || !saved(&file).is_empty()).await;
+    let mode = |m: u32| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o500);
+    a.add("while the disk refused".into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    mode(0o700);
+    assert!(!saved(&file).contains("while the disk refused"), "the folder took a write: nothing failed");
+    drop(a);
+    assert!(saved(&file).contains("while the disk refused"), "written at the drop");
+}
+
 /// The files in `dir` whose name starts with `prefix`, sorted.
 fn asides(dir: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
     let mut all: Vec<_> = std::fs::read_dir(dir)

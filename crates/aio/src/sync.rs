@@ -1806,12 +1806,13 @@ impl Saver {
         }
     }
 
-    /// The writer thread: the newest save until none is left.
+    /// The writer thread: the newest save until none is left, or one
+    /// fails (tried again by the next save, the drop's or the exit's).
     fn background(&self) {
         loop {
-            _ = self.write(None);
+            let ok = self.write(None);
             let mut st = lock(&self.st);
-            if st.written >= st.asked {
+            if !ok || st.written >= st.asked {
                 st.busy = false;
                 return;
             }
@@ -1857,10 +1858,13 @@ impl Saver {
             eprintln!("[aio] sync {}: can't save the copy: {e}", s.cell);
         }
         let Some(mut st) = lock_by(&self.st, by) else { return false };
-        st.written = st.written.max(at);
-        // Kept when unwritten: a copy opened again here still starts from it.
-        if st.asked == at && r.is_ok() {
-            st.newest = None;
+        // Unwritten, it stays to write: a copy opened again here still
+        // starts from it.
+        if r.is_ok() {
+            st.written = st.written.max(at);
+            if st.asked == at {
+                st.newest = None;
+            }
         }
         r.is_ok()
     }
