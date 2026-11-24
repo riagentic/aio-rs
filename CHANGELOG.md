@@ -40,6 +40,10 @@ version may break things.
 - The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.
+- Windows: the window's file route (`aio://app/file/…`,
+  `aio::ui::local_file_url`) refuses a UNC or device path (`//host/share`,
+  `\\?\`, `\\.\`) on every OS: opening `\\host\share\x.png` connected to
+  that host over SMB and handed it the user's NTLM hash.
 
 ### Added
 

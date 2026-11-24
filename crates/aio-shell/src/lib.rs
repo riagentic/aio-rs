@@ -1473,6 +1473,39 @@ mod tests {
         assert!(v["scanned"].as_u64().unwrap() < 17 << 20, "{v}");
     }
 
+    /// `aio://app/file/<path>` serves a local image or media file, never a
+    /// network share or a device: on Windows a UNC path is an SMB
+    /// connection that hands the host the user's NTLM hash.
+    #[test]
+    fn the_file_route_serves_local_images_and_never_a_share_or_device() {
+        let js = include_str!("main.js");
+        let at = js.find("function localFile(").unwrap();
+        let def = &js[at..at + js[at..].find("\n}\n").unwrap() + 2];
+        let test = format!(
+            "const path = require('node:path');\n{def}\n
+             const w = (u) => localFile(u, path.win32), x = (u) => localFile(u, path.posix);
+             console.log(JSON.stringify({{
+               win: [w('/file/C:/a%20b/v.webm'), w('/file/C:/a/x.txt')],
+               winShares: ['/file//host/share/x.png', '/file/%5C%5Chost%5Cshare%5Cx.png', '/file/%2F%2Fhost/share/x.png',
+                 '/file//%5Chost/share/x.png', '/file//?/C:/x.png', '/file/%5C%5C%3F%5CC%3A%5Cx.png', '/file/%5C%5C.%5Cpipe%5Cx.png',
+                 '/file//./C:/x.png', '/file/%5C%5C%3F%5CUNC%5Chost%5Cshare%5Cx.png'].map(w),
+               posix: [x('/file/srv/a.png'), x('/file/etc/passwd'), x('/file/%E0%A4%A'), x('/file//host/share/x.png')],
+             }}));"
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &test]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: aio::serde_json::Value = aio::serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["win"], aio::serde_json::json!(["C:\\a b\\v.webm", null]));
+        assert_eq!(
+            v["winShares"],
+            aio::serde_json::json!([null, null, null, null, null, null, null, null, null]),
+            "{v}"
+        );
+        assert_eq!(v["posix"], aio::serde_json::json!(["/srv/a.png", null, null, null]), "{v}");
+    }
+
     /// A syntax error in the shell is a window that never opens (aio tests
     /// the generated main parses).
     #[test]

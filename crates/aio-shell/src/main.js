@@ -263,6 +263,22 @@ function lines(onLine) {
   }
 }
 
+// The local file `aio://app/file/<path>` names (aio::ui::local_file_url;
+// Windows: `/C:/a/b` is `C:/a/b`), resolved by `P` (node:path, or its
+// win32 or posix), or null: only things an element draws (images and
+// media: the page can show them but never read other files), and never a
+// UNC or device path (`//host/share`, `\\?\`, `\\.\`): on Windows opening
+// one connects to that host over SMB, handing it the user's NTLM hash.
+function localFile(pathname, P) {
+  let f
+  try { f = decodeURIComponent(pathname.slice('/file'.length)) } catch { return null }
+  if (/^[\\/]{2}/.test(f)) return null
+  const win = P.sep === '\\'
+  const p = P.resolve(win && /^\/[A-Za-z]:/.test(f) ? f.slice(1) : f)
+  if (win && !/^[A-Za-z]:\\/.test(p)) return null
+  return /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico|mp4|m4v|webm|ogv|ogg|oga|mp3|wav|m4a|flac|aac|opus)$/i.test(p) ? p : null
+}
+
 app.whenReady().then(() => {
   openSplash()
   // No menu (Electron's default carries DevTools and reload), except on
@@ -326,20 +342,15 @@ app.whenReady().then(() => {
     })
   }
   app.on('session-created', guard)
-  // The page, and local images and media by absolute path (only things an
-  // element draws: the page can show them but never read other files).
-  const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)$/i
-  const MEDIA = /\.(mp4|m4v|webm|ogv|ogg|oga|mp3|wav|m4a|flac|aac|opus)$/i
+  // The page, and local images and media by absolute path (localFile).
   protocol.handle('aio', (req) => {
     const u = new URL(req.url)
     if (u.host === 'app' && (u.pathname === '/' || u.pathname === '/index.html')) {
       return enet.fetch(pathToFileURL(path.join(dir, 'index.html')).toString())
     }
     if (u.host === 'app' && u.pathname.startsWith('/file/')) {
-      // Windows: `/C:/a/b` (aio::ui::local_file_url) is `C:/a/b`.
-      const f = decodeURIComponent(u.pathname.slice('/file'.length))
-      const p = path.resolve(process.platform === 'win32' && /^\/[A-Za-z]:/.test(f) ? f.slice(1) : f)
-      if (IMAGE.test(p) || MEDIA.test(p)) return enet.fetch(pathToFileURL(p).toString())
+      const p = localFile(u.pathname, path)
+      if (p) return enet.fetch(pathToFileURL(p).toString())
     }
     // The app's built-in files ([build] assets), at their own paths.
     const assets = path.join(dir, 'assets')
