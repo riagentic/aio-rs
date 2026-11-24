@@ -121,6 +121,10 @@ LIBSQLITE3_FLAGS = \"-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQL
 -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DEFAULT_MEMSTATUS=0\"
 ";
 
+/// Names an app's binary can't take: Rust's own crates (a binary `core`
+/// hides them from its code) and cargo's build folders.
+const TAKEN: [&str; 6] = ["core", "std", "build", "deps", "examples", "incremental"];
+
 /// A name a package, a binary and an app id can all be (pure): `my-app`.
 pub fn name_ok(name: &str) -> Result<(), String> {
     let ok = name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
@@ -391,6 +395,10 @@ impl<'a> New<'a> {
     }
 }
 
+/// How the template's Rust is formatted (aio-rs's own style): `cargo fmt`
+/// and `ax check` keep a new app as it was written.
+const RUSTFMT: &str = "# cargo fmt's style (aio-rs's): ax check runs cargo fmt --check.\nmax_width = 120\nuse_small_heuristics = \"Max\"\n";
+
 /// `--css tailwind`'s source sheet: Tailwind, then the template's own styles.
 const TAILWIND_SOURCE: &str = "/* The stylesheet's source: `[build] css` (Tailwind) writes assets/style.css from it
    before every build and on each saved change under ax dev. Edit this file, not that one. */
@@ -429,6 +437,17 @@ fn readme(n: &New, ui: bool) -> String {
         }
         false => "",
     };
+    let from = match &n.aio {
+        Aio::Path(_) => format!(
+            "Cargo.toml takes aio-rs from a checkout ({}): a clone builds only with that\n\
+             checkout beside it.",
+            n.aio
+        ),
+        _ => format!(
+            "A fresh clone builds as it is: Cargo.toml takes aio-rs from git ({}), Cargo.lock\npins its commit.",
+            n.aio
+        ),
+    };
     format!(
         "# {name}\n\n\
          An [aio-rs]({REPO}) app ({}): {what}.\n\n\
@@ -439,8 +458,7 @@ fn readme(n: &New, ui: bool) -> String {
          {more}\
          ax release {name}             # a signed release for its users' updates\n\
          ```\n\n\
-         A fresh clone builds as it is: Cargo.toml takes aio-rs from git ({}), Cargo.lock\n\
-         pins its commit. `ax pin` says which; `ax pin <version>` (or `main`, `latest`,\n\
+         {from} `ax pin` says which; `ax pin <version>` (or `main`, `latest`,\n\
          an aio-rs checkout's folder) moves the app to another.\n\
          Needs: `ax` (aio-rs's install script, or `cargo install --locked --git {REPO} aio-rs-cli`),\n\
          then `ax setup` once per machine.\n\n\
@@ -450,7 +468,6 @@ fn readme(n: &New, ui: bool) -> String {
          The app is `src/lib.rs`; `app/` is its launcher; aio.toml its one config.\n\
          The guide: {}/README.md\n",
         n.template,
-        n.aio,
         n.aio.docs()
     )
 }
@@ -517,6 +534,12 @@ fn agents(n: &New, ui: bool) -> String {
 pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
     let (name, template, id) = (n.name, n.template, n.id);
     name_ok(name)?;
+    if TAKEN.contains(&name) {
+        return Err(format!(
+            "{name}: a name Rust or cargo keeps for itself ({}): the app wouldn't build; another, such as my-{name}",
+            TAKEN.join(", ")
+        ));
+    }
     name_ok(id).map_err(|e| format!("--id {e}"))?;
     let (lib, main, mode, server) = match template {
         "app" => (APP_LIB, APP_MAIN, "standalone", ""),
@@ -676,7 +699,10 @@ network = []            # hosts aio may reach besides this machine: "api.example
          [toolchain]\nchannel = \"{}\"\n",
         crate::setup::toolchain()
     );
-    let ignore = "/target\n/.data\n/dist\n\n# Secrets and release keys: never committed\n.env\n*.key\n*.p12\n*.jks\n*.keystore\n";
+    let ignore = format!(
+        "/target\n/.data\n/dist\n# ax shot's pictures, named {id}-<time>.png where it runs\n/{id}-*.png\n\n\
+         # Secrets and release keys: never committed\n.env\n*.key\n*.p12\n*.jks\n*.keystore\n"
+    );
     let attributes = "# LF line endings in every checkout, whatever git's core.autocrlf says:\n\
                       # a Windows clone holds the same bytes as a Linux one.\n* text=auto eol=lf\n";
     let style = ui.then(|| ("assets/style.css".into(), STYLE_CSS.into()));
@@ -690,7 +716,8 @@ network = []            # hosts aio may reach besides this machine: "api.example
         ("app/src/main.rs".into(), main.into()),
         (".cargo/config.toml".into(), CARGO_CONFIG.into()),
         ("rust-toolchain.toml".into(), toolchain),
-        (".gitignore".into(), ignore.into()),
+        ("rustfmt.toml".into(), RUSTFMT.into()),
+        (".gitignore".into(), ignore),
         (".gitattributes".into(), attributes.into()),
         ("README.md".into(), readme(n, ui)),
         ("AGENTS.md".into(), agents(n, ui)),
@@ -965,6 +992,10 @@ mod tests {
             assert!(
                 get(".gitignore").contains("/.data") && get(".gitignore").contains("\n.env\n*.key\n*.p12\n*.jks\n")
             );
+            // A shot taken in the app's folder leaves the tree clean: a build after it is a release.
+            let shot = crate::shot::default_file("my-tool").display().to_string();
+            assert!(shot.starts_with("my-tool-") && shot.ends_with(".png"), "{shot}");
+            assert!(get(".gitignore").lines().any(|l| l == "/my-tool-*.png"), "{}", get(".gitignore"));
             assert!(get(".gitattributes").contains("* text=auto eol=lf\n"));
             let tc = format!("[toolchain]\nchannel = \"{}\"\n", crate::setup::toolchain());
             assert!(get("rust-toolchain.toml").ends_with(&tc), "aio's own Rust: {}", get("rust-toolchain.toml"));
@@ -1011,6 +1042,12 @@ mod tests {
         assert!(APP_LIB.contains("#[wasm_bindgen::prelude::wasm_bindgen(start)]") && APP_LIB.contains("launch(App)"));
         assert!(!get(&of("x", "cli"), "Cargo.toml").contains("wasm32"), "a tool has no page");
         assert!(!get(&of("x", "cli"), "Cargo.toml").contains("kit"), "a tool has no views");
+        // A checkout's README says a clone needs it beside, never that it builds anywhere from git.
+        let readme = files(&New { aio: Aio::Path("../a".into()), ..New::of("x") }).unwrap();
+        let readme = get(&readme, "README.md");
+        assert!(!readme.contains("from git") && !readme.contains("builds as it is"), "{readme}");
+        assert!(readme.contains("a clone builds only with that"), "{readme}");
+        assert!(get(&of("x", "app"), "README.md").contains("A fresh clone builds as it is"));
         let game = files(&New { template: "game", ..New::of("x") });
         assert!(game.unwrap_err().contains("one of app, cli, service, todo, canvas"));
     }
@@ -1226,12 +1263,37 @@ mod tests {
         assert!(said.contains(&d.path().display().to_string()) && said.contains("ax data notes"), "{said}");
     }
 
+    /// `ax check` (cargo fmt --check, as CI runs it) passes on a new app of
+    /// every template: its Rust is formatted as its own rustfmt.toml says.
+    #[test]
+    fn every_template_is_formatted_as_its_rustfmt_toml_says() {
+        for (t, _) in TEMPLATES {
+            let all = files(&New { template: t, ..New::of("x") }).unwrap();
+            let d = tempfile::tempdir().unwrap();
+            write_all(d.path(), &all).unwrap();
+            let rs: Vec<&String> = all.iter().map(|(f, _)| f).filter(|f| f.ends_with(".rs")).collect();
+            let out = std::process::Command::new("rustfmt")
+                .args(["--check", "--edition", "2024"])
+                .args(&rs)
+                .current_dir(d.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{t}: {}", String::from_utf8_lossy(&out.stdout));
+        }
+    }
+
     #[test]
     fn a_name_is_one_a_package_binary_and_id_can_be() {
         assert!(name_ok("notes").is_ok() && name_ok("my-tool2").is_ok());
         for bad in ["", "My", "2x", "a_b", "a.b", "x-", "app", "my-app", "../x"] {
             assert!(name_ok(bad).is_err(), "{bad}");
         }
+        // A name cargo or Rust keeps: an app that never builds (a binary `core` hides Rust's core).
+        for taken in ["core", "std", "build", "deps", "examples", "incremental"] {
+            let e = files(&New::of(taken)).err().unwrap_or_default();
+            assert!(e.contains("Rust or cargo keeps"), "{taken}: {e}");
+        }
+        assert!(files(&New { id: "build", ..New::of("my-build") }).is_ok(), "an id is no binary");
     }
 
     #[test]

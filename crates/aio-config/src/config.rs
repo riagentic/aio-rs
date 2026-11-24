@@ -1834,6 +1834,13 @@ impl Config {
             // A client may get its server from pairing instead (`ax pair`).
             Mode::Standalone | Mode::Cli | Mode::Client => {}
         }
+        if let Some(l) = &c.server.listen
+            && !l.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+        {
+            return Err(format!(
+                "aio.toml: [server] listen {l:?} is host:port, the port 0 to 65535 (\"127.0.0.1:7420\", 0: a free one)"
+            ));
+        }
         if c.app.ui == Shown::Browser && c.app.mode != Mode::ClientServer {
             return Err(format!(
                 "aio.toml: [app] ui = \"browser\" needs mode \"client-server\" (its server serves the page), not {:?}",
@@ -1991,8 +1998,13 @@ impl Config {
                      a repository (git+https://, git+ssh://, git+file://)"
                     .into());
             }
-            if let Some(e) = c.updates.keys.iter().find_map(|k| crate::update::ssh_key(k).err()).filter(|_| git) {
-                return Err(format!("aio.toml: [updates] keys: {e}"));
+            // A key no signature checks against builds an app that never takes an update.
+            let bad = |k: &String| match git {
+                true => crate::update::ssh_key(k).err(),
+                false => crate::update::raw_key(k).err(),
+            };
+            if let Some(e) = c.updates.keys.iter().find_map(bad) {
+                return Err(format!("aio.toml: [updates] keys: {e} (ax keygen <app> prints the app's)"));
             }
         }
         if let Some(id) = c.build.android.application_id.as_deref().filter(|id| !application_id_ok(id)) {

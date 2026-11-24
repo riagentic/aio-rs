@@ -331,7 +331,7 @@ For `mode = "client-server"` and `"server"` ([sync](../state/sync.md)).
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
-| `listen` | `host:port` | none | Where to serve (`"127.0.0.1:7420"`). Required by the two serving modes; a port in use stops the start. `--port`, `--host` and `--expose` change it per launch. |
+| `listen` | `host:port` | none | Where to serve (`"127.0.0.1:7420"`). Required by the two serving modes; a port in use stops the start, one that is no port (over 65535, a name) the build. `--port`, `--host` and `--expose` change it per launch. |
 | `discover` | bool | `false` | Answer LAN discovery probes (UDP 8099, aio's format), so `ax discover` and clients find it. |
 | `pairing` | bool | `false` | Let new devices pair with a PIN (`ax pair`). |
 | `tls` | bool | `false` | Serve over TLS with this machine's local root (`ax trust` explains how browsers trust it). |
@@ -519,7 +519,7 @@ an app without one carries no updater ([project](../basics/project.md)).
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `url` | string | none | Where releases are: `https://…` (`<url>/<channel>/<os>-<arch>.json`), `github:<owner>/<repo>` (its GitHub releases), or a repository (`git+https://`, `git+ssh://`, `git+file://`) whose channel branch or tag is built on the machine when its commit or tag is signed by one of `keys`. `http://127.0.0.1:<port>` only for tests. |
-| `keys` | strings | `[]` | The release keys the app trusts (`ed25519:<base64>`, printed by `ax keygen <app>`); a git source's may be OpenSSH lines (`ssh-ed25519 <base64>`). Required with `url`: no trust on first use. |
+| `keys` | strings | `[]` | The release keys the app trusts (`ed25519:<base64>`, printed by `ax keygen <app>`); a git source's may be OpenSSH lines (`ssh-ed25519 <base64>`). Required with `url`: no trust on first use. One that is no such key fails the build (an app built with it could never check an update). |
 | `channel` | name | `"stable"` | The channel followed: letters, digits, `-` `_` `.`, at most 64, not starting with `.`. `AIORT_UPDATE_CHANNEL` changes it per launch. |
 | `every` | span or off | `"6h"` | How often a running app looks, or `"off"` (only when the app asks: the `updates` cell's `check`). |
 | `auto` | bool | `true` | `true`: downloaded in the background, installed at the next start (a server, with no one to ask: at once). `false`: only offered; installed when the app says (the cell's `apply`). |

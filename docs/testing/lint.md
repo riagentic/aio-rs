@@ -134,8 +134,8 @@ Each finding has an area, in brackets in the report.
 
 | Finding | Level |
 |---|---|
-| a method that reads the clock (`SystemTime::now`, `Instant::now`, chrono's `Utc::now`/`Local::now`, `OffsetDateTime::now_utc`) | error: use `cx.now()` |
-| a method that draws randomness (`rand`, `thread_rng`, `OsRng`, `getrandom`, `Uuid::new_v4`, `aio::uuid_v4`, `random_bytes`) | error: use `cx.rand()` or `cx.id()` |
+| a method that reads the clock (`SystemTime::now`, `Instant::now`, chrono's `Utc::now`/`Local::now`, `OffsetDateTime::now_utc`, jiff's `Timestamp::now`/`Zoned::now`) | error: use `cx.now()` |
+| a method that draws randomness (`rand`, `fastrand`, `thread_rng`, `OsRng`, `getrandom`, `Uuid::new_v4`, `aio::uuid_v4`, `random_bytes`) | error: use `cx.rand()` or `cx.id()` |
 | a method that reads the environment (`env::var`, `args`, `current_dir`) | error: pass it in as an argument |
 | a method that does file, terminal, network or process I/O, or starts a thread or a task | error: do it in an effect |
 | two cells with one id (`#[cell(id = "…")]`, else the type's name in snake case) | error: they would share one store row |

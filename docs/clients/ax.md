@@ -121,7 +121,8 @@ is refused with exit 2 and the right usage, never guessed or dropped:
   `instances` names `ax apps`, `publish` `ax release <app> …`, `compile`
   `ax build`, `watch` `ax dev`, `actions` `ax events`, `client` `ax
   components`, `migrate` `ax lint --from`, `link` `ax pin <app> <dir>`,
-  `dispatch` `ax call`, a bare `theme` `ax theme adopt`. `check` is `ax
+  `dispatch` `ax call`, a bare `theme` `ax theme adopt`; cargo's `new`
+  (and `init`) `ax create`. `check` is `ax
   check`: aio's static checks, and the rest of what CI runs; `where` is
   `ax where`.
 
@@ -232,7 +233,7 @@ written in it.
 | `--template canvas` | a window drawing bouncing balls: `step`, the pure function that moves them, tested; one script draws a frame |
 | `--id id` | its id, its data's home (default: the name; refused when an installed app has it) |
 | `--aio-version v` | the aio-rs release it takes from git: `0.4.0`, `main` (the branch), `latest` (the newest release); default: this `ax`'s |
-| `--aio dir` | an aio-rs checkout instead, named relative to the app (they share a folder below the root) |
+| `--aio dir` | an aio-rs checkout instead, a folder named from here; the app's `Cargo.toml` names it relative to the app (they share a folder below the root) |
 | `--target a,b` | its `[build] targets` (`ax build <app> --list` names the kinds) |
 | `--css tailwind` | `[build] css` runs Tailwind on `src/app.css` into `assets/style.css` (a window app) |
 | `--force` | write the template over a folder that holds files |
@@ -266,7 +267,7 @@ Rust keyword: it becomes a file and an identifier (`due-date`: module
 | Kind | Writes | Wires |
 |---|---|---|
 | `cell` | `src/<name>.rs`: a saved cell with a method and its test; with its views' `client!` in an app with a window | `pub mod <name>;` in `src/lib.rs`; its source opened beside the first one by each launcher in `app/src` (`main.rs`, Android's `lib.rs`) and by the browser build's `web()` |
-| `server` | `src/<name>.rs`: a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs`; the launcher's source becomes `Source::for_app_with(.., <name>::http(..))`; aio's `server` feature on in `Cargo.toml` |
+| `server` | `src/<name>.rs`: a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs`; the launcher's source becomes `Source::for_app_with(.., <name>::http(..))`; aio's `server` feature on in `Cargo.toml` (an app with a page: for its native builds alone) |
 | `page` | `pages/<name>`: a crate of its own (`<app>-<name>`) on the app's aio-rs, with a view, `<name>::<Name>` | a member of the app's workspace and a dependency of its library (`<name>`) in `Cargo.toml` |
 
 A name the app has already is refused and nothing is written; a launcher

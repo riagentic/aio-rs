@@ -554,24 +554,7 @@ pub fn is_warning(line: &str) -> bool {
 pub fn plain(raw: &[u8]) -> String {
     let s = String::from_utf8_lossy(raw);
     let s = s.trim_end_matches(['\n', '\r']);
-    let s = s.rsplit('\r').next().unwrap_or("");
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for d in chars.by_ref() {
-                    if d.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        out.push(c);
-    }
-    out
+    crate::hotpatch::uncoloured(s.rsplit('\r').next().unwrap_or(""))
 }
 
 #[cfg(test)]

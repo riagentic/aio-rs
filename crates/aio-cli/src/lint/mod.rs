@@ -568,6 +568,10 @@ pub fn project_root(dir: &Path) -> PathBuf {
 const FLAGS: [&str; 8] =
     ["--json", "--no-hints", "--quiet-hints", "--no-clippy", "--safe-fix", "--fix", "--tests", "--help"];
 
+/// ax's global flags lint takes as every verb does: `--text` (its answer
+/// is text already) and `--quiet` (nothing on stdout without an error).
+const AX_FLAGS: [&str; 2] = ["--text", "--quiet"];
+
 const USAGE: &str =
     "ax lint [dir] [--json] [--no-hints|--quiet-hints] [--no-clippy] [--safe-fix] [--fix] [--from version] [--tests]
 
@@ -582,6 +586,7 @@ const USAGE: &str =
                migrate findings (aio's am migrate); exit 1 when there is any
   --tests      only the test shapes a newer aio-rs turns red (TestUi's), in order; exit 0
 
+--quiet: nothing on stdout without an error; --text: as it is (ax's flags, as every verb).
 Exit: 0 no errors (warnings and hints don't fail), 1 errors, 2 bad usage.
 Silence one finding with a reason: // aio-ok: <why>, or // aio-ok(<area>): <why>.";
 
@@ -612,7 +617,8 @@ pub fn main(args: &[String]) -> ExitCode {
         }
     }
     let (flags, pos): (Vec<&str>, Vec<&str>) = rest.into_iter().partition(|a| a.starts_with('-'));
-    let unknown: Vec<&&str> = flags.iter().filter(|f| !FLAGS.contains(f) && **f != "-h").collect();
+    let unknown: Vec<&&str> =
+        flags.iter().filter(|f| !FLAGS.contains(f) && !AX_FLAGS.contains(f) && **f != "-h").collect();
     if !unknown.is_empty() || pos.len() > 1 {
         let what = unknown
             .iter()
@@ -637,8 +643,8 @@ pub fn main(args: &[String]) -> ExitCode {
     }
     let dir = project_root(&abs);
     let json_out = has("--json");
-    // Under --json, stdout is the one document: narration goes to stderr.
-    let say = |s: &str| if json_out { eprintln!("{s}") } else { println!("{s}") };
+    // Under --json, stdout is the one document (under --quiet, nothing): narration goes to stderr.
+    let say = |s: &str| if json_out || has("--quiet") { eprintln!("{s}") } else { println!("{s}") };
     if dir != abs {
         say(&format!("ax lint: checking {} (the nearest Cargo.toml)", dir.display()));
     }
@@ -699,12 +705,13 @@ pub fn main(args: &[String]) -> ExitCode {
         }
     }
     report.issues.sort_by(|a, b| (a.severity, &a.file, a.line).cmp(&(b.severity, &b.file, b.line)));
+    let errors = summary(&report).0;
     if json_out {
         println!("{}", json(&report));
-    } else {
+    } else if errors > 0 || !has("--quiet") {
         println!("{}", human(&report, &dir, has("--no-hints") || has("--quiet-hints")));
     }
-    if summary(&report).0 > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if errors > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
 #[cfg(test)]

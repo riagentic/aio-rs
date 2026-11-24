@@ -550,6 +550,63 @@ version may break things.
   (`<key>.corrupt` was written over), and one the browser refused to keep
   (storage full) was said to be kept. A second goes to `<key>.corrupt-2`
   (then `-3`…), and a refused one is said as not kept.
+- `ax dev`: a Rust edit that didn't compile as a hot patch kept rustc's
+  colour codes (cargo asks for them whatever the terminal) in
+  `build.log` and `ax errors` (`--json` too), and the window's overlay
+  said "build failed" with no error in it. They are plain text.
+- `ax shot <app>` run in the app's folder (as its `AGENTS.md` loop does)
+  left its `<id>-<time>.png` there, untracked: the next `ax build` was
+  `-dirty` and `ax release` refused it. An `ax create` app's `.gitignore`
+  leaves the shots out (`/<id>-*.png`).
+- The README of an app made with `ax create --aio <checkout>` said a
+  fresh clone builds as it is, taking aio-rs from git: it takes it from
+  the checkout, so a clone builds only with that checkout beside it, as
+  its `Cargo.toml` says.
+- `ax lint` let a cell method read the clock through jiff
+  (`Timestamp::now`, `Zoned::now`) or draw from `fastrand`: a replay gave
+  another state. They are errors, as chrono's and rand's are.
+- `ax start` and `ax restart` told what to run next as `aio status`,
+  `aio logs`, `aio stop`, `aio errors` and `aio dev`, commands that don't
+  exist: they say `ax …`.
+- `ax dev` of an app with no window (`[app] mode` `server` or `cli`: the
+  `service` and `cli` templates) started a nested display and a splash
+  window waiting for a window that never came, and said a stylesheet or
+  markup edit shows at once. It starts neither and says what it takes
+  live: a Rust edit.
+- `ax lint` refused ax's global `--text` and `--quiet` (exit 2), which
+  every other verb takes: a script adding `--text` to each `ax` call (as
+  0.4.0's note on piped JSON says) failed its lint step. `--text` is as
+  it is; `--quiet` prints nothing without an error.
+- The verb `new` (cargo's habit) for a new app answered "did you mean
+  dev?": `new` and `init` name `ax create <name>`.
+- `ax release` of an app whose `aio.toml` doesn't trust its signing key
+  (a new app has no `[updates]` yet) said so and no more: it names the
+  line to add, `keys = ["ed25519:…"]` with the key's own value.
+- `[server] listen` was taken as any text: `"127.0.0.1:99999"` or
+  `"nonsense:http"` built, and the app failed at boot with the OS's bind
+  error. It is `host:port`, the port 0 to 65535, or the build says so.
+- `[updates] keys` with a key that isn't one (`"ed25519:…"` cut short, a
+  typo) built for an `https://`, `file://` or `github:` source: the app
+  shipped could never check a release, so no update could ever fix it.
+  The build refuses it, as it did for a git source's.
+- `ax create core` (or `std`, `build`, `deps`, `examples`,
+  `incremental`) made an app that never built: a binary named `core` or
+  `std` hides Rust's own crate from its code, and cargo keeps the others
+  for its build folders. Such a name is refused, with another to use.
+- A new app failed `ax check` (and a CI's `cargo fmt --check`) at its
+  first step: every template is written in aio-rs's style, which plain
+  `cargo fmt` reflows. An `ax create` app has that style's
+  `rustfmt.toml`.
+- `ax add` put each new `mod` line after the last one, so a second part
+  (`tasks`, then `api`) left them out of the order `cargo fmt` keeps and
+  `ax check` failed at its format step. They go in that order.
+- `ax add <app> server <name>` in a window app turned aio's `server`
+  feature on for every target, the page's too, where it doesn't build:
+  `ax check`, `ax dev --web` and `ax build --web` failed after it. The
+  feature goes on the native builds alone.
+- `ax check` with no terminal (CI, an agent) printed its `ax test` step's
+  answer as JSON among its text, and its steps' output on stdout, so
+  `ax check --json` wasn't one object. The steps say text, on stderr.
 
 ## [0.4.2] - 2026-11-11
 

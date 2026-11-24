@@ -152,7 +152,9 @@ objects, and the patch's stub and link take ~0.4 s where they took
   line from `logs/app.log`), as the terminal's `ended` line does. A start
   with nothing to compile (the last build reused)
   shows none. The splash is ax's own window on the shared runtime, never
-  part of the app; `AIORT_NO_SPLASH=1` leaves it out.
+  part of the app; `AIORT_NO_SPLASH=1` leaves it out. An app with no
+  window (`[app] mode` `server` or `cli`) gets no splash and no nested
+  display.
 - All builds (`ax dev`, `ax test`, `ax lint`, `ax build`) share one build
   folder (`AIORT_TARGET_DIR` or `CARGO_TARGET_DIR`, else one per machine
   and toolchain in aio's cache home, `~/.cache/aio-rt/target/<toolchain>`

@@ -1016,6 +1016,17 @@ fn dev_ask(args: &[String]) -> Option<aio::paths::Ask> {
     Some(aio::paths::Ask { dev: true, ..aio::paths::Ask::parse(args).ok()? })
 }
 
+/// What `ax dev` takes live for app `name` (pure): a window app's
+/// stylesheets and markup too; `only`: in what `--watch` names.
+fn live_edits(name: &str, windowed: bool, only: bool) -> String {
+    let only = if only { " in what --watch names" } else { "" };
+    let what = match windowed {
+        true => format!("a stylesheet or an rsx! markup edit{only} shows at once, a Rust edit is hot-patched"),
+        false => format!("a Rust edit{only} is hot-patched"),
+    };
+    format!("ax dev: {name}: {what}, state kept; a Cargo.toml or aio.toml edit rebuilds")
+}
+
 pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     let meta = metadata()?;
     let pkg = locate(&meta, name)?;
@@ -1107,9 +1118,11 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     use crate::display::Choice;
     use std::io::IsTerminal;
     let choice = crate::display::choose(asked.as_deref(), std::io::stdin().is_terminal(), crate::display::desktop())?;
+    // A service or a command-line tool opens no window: no display, no splash.
+    let windowed = crate::build::app_of(&pkg).map_or(true, |(_, c)| crate::start::has_window(&c.app.mode));
     // Held for the whole run: dropped, the nested display stops.
     let nested = match choice {
-        Choice::Nested => crate::display::nest(asked.as_deref(), "ax dev", true)?,
+        Choice::Nested if windowed => crate::display::nest(asked.as_deref(), "ax dev", true)?,
         _ => None,
     };
     // Contained unless `current` (aio's `am start`): no browser tab for the person either.
@@ -1165,16 +1178,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         return Ok(if ended.success() { String::new() } else { format!("{name} ended: {ended}{why}") });
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    match &watching {
-        Watching::Only(_) => eprintln!(
-            "ax dev: {name}: a stylesheet or an rsx! markup edit in what --watch names shows at once, a Rust \
-             edit is hot-patched, state kept; a Cargo.toml or aio.toml edit rebuilds"
-        ),
-        _ => eprintln!(
-            "ax dev: {name}: a stylesheet or an rsx! markup edit shows at once, a Rust edit is hot-patched, \
-             state kept; a Cargo.toml or aio.toml edit rebuilds"
-        ),
-    }
+    eprintln!("{}", live_edits(name, windowed, matches!(watching, Watching::Only(_))));
     let (w, rx) = crate::watch::Watch::new(&paths)?;
     let saves = Stop::default();
     let rx = stale_builds(rx, saves.clone());
@@ -1203,8 +1207,10 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         resume(&pkg, name, &target, &saves, &cwd).filter(|_| logs.is_some() && window.as_ref().is_some_and(ended));
     if resumed.is_none() {
         // A window at once while the first build runs (ax's own: the app is as without it).
-        let splash_title = title.clone().unwrap_or_else(|| name.to_string());
-        crate::splash::open(&splash_title, &put, &shared_target().join("aio").join("dev-splash"));
+        if windowed {
+            let splash_title = title.clone().unwrap_or_else(|| name.to_string());
+            crate::splash::open(&splash_title, &put, &shared_target().join("aio").join("dev-splash"));
+        }
         // aio-rs's libraries prebuilt for this toolchain, when a server has them.
         if let Some(said) = crate::prebuilt::fetch(&app_dir, &workspace, &target, &feature) {
             eprintln!("{said}");
@@ -2175,6 +2181,21 @@ mod tests {
     }
 
     use super::*;
+
+    /// A service or a command-line tool is told no stylesheet or markup
+    /// edit (it has none to show), and gets no display or splash.
+    #[test]
+    fn a_windowless_app_is_told_only_what_it_takes_live() {
+        use aio::config::Mode;
+        let (cli, server) = (crate::start::has_window(&Mode::Cli), crate::start::has_window(&Mode::Server));
+        assert!(!cli && !server && crate::start::has_window(&Mode::Standalone));
+        assert_eq!(
+            live_edits("board", false, false),
+            "ax dev: board: a Rust edit is hot-patched, state kept; a Cargo.toml or aio.toml edit rebuilds"
+        );
+        let app = live_edits("notes", true, true);
+        assert!(app.starts_with("ax dev: notes: a stylesheet or an rsx! markup edit in what --watch names"), "{app}");
+    }
 
     #[test]
     fn the_dev_feature_is_named_as_the_manifest_names_aio_shell() {
