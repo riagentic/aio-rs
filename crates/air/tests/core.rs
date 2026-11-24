@@ -812,3 +812,28 @@ fn a_hole_reading_many_signals_reruns_in_time_linear_in_them() {
     let ratio = big.as_secs_f64() / small.as_secs_f64();
     assert!(ratio < 24.0, "{small:?} for 2000 reads, {big:?} for 16000: {ratio:.0}x");
 }
+
+#[test]
+fn a_signal_read_again_after_a_memo_of_it_reruns_its_hole_once() {
+    thread_local!(static RUNS: Cell<u32> = const { Cell::new(0) });
+    thread_local!(static A: Cell<Option<Signal<u32>>> = const { Cell::new(None) });
+    let mut p = TestPage::mount(|| {
+        let a = signal(|| 1u32);
+        A.set(Some(a));
+        let m = memo(move || a.get() * 10);
+        rsx! {
+            p { "data-t": "t",
+                {
+                    RUNS.set(RUNS.get() + 1);
+                    format!("{}-{}-{}", a.get(), m.get(), a.get())
+                }
+            }
+        }
+    });
+    let a = A.get().unwrap();
+    let runs = RUNS.get();
+    p.within(|| a.set(2));
+    assert_eq!((p.text("t"), RUNS.get() - runs), ("2-20-2".to_string(), 1));
+    p.within(|| a.set(3));
+    assert_eq!((p.text("t"), RUNS.get() - runs), ("3-30-3".to_string(), 2));
+}

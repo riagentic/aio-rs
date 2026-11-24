@@ -105,7 +105,9 @@ struct Rt {
     probe: Option<bool>,
     owner: Option<Key>,
     batch: u32,
-    queue: Vec<Key>,
+    /// What runs again, with the run that was told: one that ran since
+    /// (its memo's change woke it a second time) has nothing left to do.
+    queue: Vec<(Key, u32)>,
     flushing: bool,
     /// Effects whose first run waits for the view to be drawn, and other
     /// work for then (`onmounted`), in the order asked.
@@ -405,8 +407,8 @@ fn notify(s: Key, checked: bool) {
         let live: Vec<(Key, u32)> =
             subs.into_iter().filter(|(e, r)| rt.node(*e).is_some_and(|n| n.runs == *r)).collect();
         let deaf = |e: Key| rt.running == Some(e) && rt.node(e).is_some_and(|n| n.quiet);
-        let woken: Vec<Key> = live.iter().map(|(e, _)| *e).filter(|e| !deaf(*e)).collect();
-        for e in &woken {
+        let woken: Vec<(Key, u32)> = live.iter().copied().filter(|(e, _)| !deaf(*e)).collect();
+        for (e, _) in &woken {
             if let Some(n) = rt.node_mut(*e)
                 && n.kind == Kind::Memo
                 && !n.dirty
@@ -493,7 +495,7 @@ fn run_queue() {
                 return None;
             }
             let mut q = std::mem::take(&mut rt.queue);
-            let seq = |k: &Key| rt.node(*k).map_or(0, |n| n.seq);
+            let seq = |(k, _): &(Key, u32)| rt.node(*k).map_or(0, |n| n.seq);
             crate::sort_by(&mut q, |a, b| seq(a).cmp(&seq(b)));
             q.dedup();
             Some(q)
@@ -506,9 +508,10 @@ fn run_queue() {
                  (an effect loop)"
             );
         }
-        for e in q {
-            // A memo a read made already ([`pull`]) has nothing left to do.
-            if RT.with_borrow(|rt| rt.node(e).is_some_and(|n| n.kind == Kind::Memo && !n.dirty)) {
+        for (e, told) in q {
+            // A memo a read made already ([`pull`]), and one that ran since
+            // it was told, have nothing left to do.
+            if RT.with_borrow(|rt| rt.node(e).is_none_or(|n| n.runs != told || (n.kind == Kind::Memo && !n.dirty))) {
                 continue;
             }
             run_effect(e);

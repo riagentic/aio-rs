@@ -158,10 +158,14 @@ version may break things.
 
 ### Fixed
 
+- A hole or effect that reads a signal and a memo of it (`"{n} {label}"`,
+  `label` a memo of `n`) ran twice per write: once for the signal, again
+  for the memo's new value, which its first run had read already. A run
+  told before it ran again is skipped.
 - A hole, memo or effect that reads many signals re-ran in time
   quadratic in them: each read looked through the reads before it
-  (16 000 signals, a release build: 25 ms a re-run, 0.3 ms now). A read in the same run is
-  told by the signal's last reader.
+  (16 000 signals, a release build: 25 ms a re-run, 0.3 ms now). A read
+  in the same run is told by the signal's last reader.
 - `rsx!`'s error for a `for` whose row has no `key:` pointed at the whole
   `rsx!`; it points at the `for` now, and says that a row starting with
   an `if`, a `match` or text goes in an element that has the key.
