@@ -1299,13 +1299,18 @@ fn plain(status: u16, msg: &str) -> Reply {
     Reply::text(msg).status(status)
 }
 
-/// Answer a request no framework route took.
-pub(crate) async fn answer(
-    http: &Http,
-    key: &Key,
+/// Answer a request no framework route took. Boxed here, so its body is
+/// made once, in this crate, not again in the app's (~22 KB).
+pub(crate) fn answer<'a>(
+    http: &'a Http,
+    key: &'a Key,
     req: axum::extract::Request,
     ip: IpAddr,
-) -> axum::response::Response {
+) -> Pin<Box<dyn Future<Output = axum::response::Response> + Send + 'a>> {
+    Box::pin(answer_in(http, key, req, ip))
+}
+
+async fn answer_in(http: &Http, key: &Key, req: axum::extract::Request, ip: IpAddr) -> axum::response::Response {
     let (mut head, body) = req.into_parts();
     let asked = head.headers.clone();
     let method = head.method.as_str().to_ascii_uppercase();
