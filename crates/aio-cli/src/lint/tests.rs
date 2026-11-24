@@ -724,6 +724,12 @@ fn exit_is_1_on_errors_only() {
     assert_eq!(main(&a(bad.path())), ExitCode::FAILURE);
     let hinted = project(&[("Cargo.toml", ""), ("src/a.rs", "#[cell]\npub struct Lone { pub n: u32 }")]);
     assert_eq!(main(&a(hinted.path())), ExitCode::SUCCESS);
+    // ax's global --text and --quiet, as every verb takes them (a script adds them to each).
+    let plain = |p: &Path, f: &str| vec![p.to_string_lossy().into_owned(), "--no-clippy".into(), f.into()];
+    for f in ["--text", "--quiet"] {
+        assert_eq!(main(&plain(hinted.path(), f)), ExitCode::SUCCESS, "{f}");
+        assert_eq!(main(&plain(bad.path(), f)), ExitCode::FAILURE, "{f}");
+    }
 }
 
 #[test]

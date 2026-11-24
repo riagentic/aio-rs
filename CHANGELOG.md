@@ -430,6 +430,10 @@ version may break things.
   window waiting for a window that never came, and said a stylesheet or
   markup edit shows at once. It starts neither and says what it takes
   live: a Rust edit.
+- `ax lint` refused ax's global `--text` and `--quiet` (exit 2), which
+  every other verb takes: a script adding `--text` to each `ax` call (as
+  0.4.0's note on piped JSON says) failed its lint step. `--text` is as
+  it is; `--quiet` prints nothing without an error.
 
 ## [0.4.2] - 2026-11-11
 
