@@ -1588,7 +1588,7 @@ mod tests {
     /// up to warning or frozen said once, the way back as recovered; a hidden
     /// window is never slow.
     #[test]
-    fn a_slow_paint_is_graded_said_on_each_step_and_a_hidden_window_never_is() {
+    fn a_slow_paint_is_graded_said_on_each_step_and_a_slow_display_or_a_hidden_window_never_is() {
         let run = |v: &aio::vitals::Vitals, paints: &str| {
             let js = format!(
                 "let now = 0, raf = [], said = [], vis;
@@ -1599,13 +1599,16 @@ mod tests {
                  globalThis.document = {{ hidden: false, addEventListener: (_, f) => vis = f }};
                  globalThis.window = {{}};
                  {}{RENDER}
-                 const frame = (paintAt) => {{ window.__aioPainted(now); now += paintAt; raf.shift()(); }};
+                 // An update whose frame began at once, then the page held it `held` ms.
+                 const frame = (held) => {{ window.__aioPainted(now); const began = now; now += held; raf.shift()(began); }};
+                 // One whose frame began `ms` later: a display that draws about once a second.
+                 const waited = (ms) => {{ window.__aioPainted(now); now += ms; raf.shift()(now); }};
                  {paints}
-                 window.__aioPainted(now); document.hidden = true; now += 9000; document.hidden = false; vis(); raf.shift()();
+                 window.__aioPainted(now); document.hidden = true; now += 9000; document.hidden = false; vis(); raf.shift()(now);
                  document.hidden = true; for (let i = 0; i < 100; i++) window.__aioPainted(now);
                  const hidden = raf.length; document.hidden = false;
                  for (let i = 0; i < 3; i++) {{ window.__aioPainted(now); now += 100; }}
-                 const asked = raf.length; raf.shift()(); window.__aioPainted(now);
+                 const asked = raf.length; raf.shift()(now - 300); window.__aioPainted(now);
                  said.push('frames ' + [hidden, asked, raf.length]);
                  console.log(JSON.stringify(said));",
                 render_probe(v)
@@ -1616,7 +1619,8 @@ mod tests {
         };
         // aio's defaults: degraded 50, warning 200, frozen 2000 ms.
         let v = aio::vitals::Vitals::default();
-        let Some(said) = run(&v, "frame(16); frame(120); frame(250); frame(400); frame(2500); frame(16); frame(120);")
+        let Some(said) =
+            run(&v, "frame(16); waited(1000); frame(120); frame(250); frame(400); frame(2500); frame(16); frame(120);")
         else {
             return eprintln!("skipped: no node");
         };

@@ -17,8 +17,10 @@ thread_local! {
     static FROM_FIELD: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// Put on a plain `input`'s `onkeydown` (the kit's fields do it already):
-/// global bindings then leave the keystroke to the field.
+/// Put on the `onkeydown` of an element that types though the page can't
+/// tell (a canvas editor, a `div` that takes keys): global bindings then
+/// leave the keystroke to it. Fields (`input`, `textarea`, `select`,
+/// `contenteditable`) need nothing: the page tells their keystrokes apart.
 pub fn field_key(e: &KeyboardEvent) {
     FROM_FIELD.with(|f| *f.borrow_mut() = Some(e.key().to_string()));
 }
@@ -37,18 +39,23 @@ struct Keys {
 
 impl Keys {
     /// One keystroke: the bindings it fires (on a Shift-held press, one
-    /// naming Shift beats one leaving it free). A keystroke a binding took,
-    /// or left to a field, goes no further (`true`).
+    /// naming Shift beats one leaving it free). Typed in a field, only the
+    /// bindings that say [`Chord::in_fields`] hear it. A keystroke a binding
+    /// took goes no further (`true`).
     fn fire(&self, e: KeyboardEvent) -> bool {
         let key = e.key().to_string();
-        let typing = FROM_FIELD.with(|f| f.borrow_mut().take()).is_some_and(|k| k == key);
+        let typing = FROM_FIELD.with(|f| f.borrow_mut().take()).is_some_and(|k| k == key) || e.in_field();
         let (code, mods, again) = (e.code().to_string(), e.modifiers(), e.is_auto_repeating());
         let (runs, matched): (Vec<Callback<KeyboardEvent>>, bool) = {
             let all = self.all.borrow();
-            let hits: Vec<_> = all.iter().filter_map(|b| Some((b, b.chord.hit(&key, &code, mods)?))).collect();
+            let hits: Vec<_> = all
+                .iter()
+                .filter(|b| !typing || b.chord.in_fields)
+                .filter_map(|b| Some((b, b.chord.hit(&key, &code, mods)?)))
+                .collect();
             // A held key's repeat fires only the bindings that repeat; the
             // others take it all the same (nothing else hears it).
-            let taken = |b: &Binding| (!typing || b.chord.in_fields) && (!again || b.chord.repeats);
+            let taken = |b: &Binding| !again || b.chord.repeats;
             let set = hits.iter().any(|(b, h)| *h == Hit::Set && taken(b));
             let runs = hits
                 .iter()
@@ -63,7 +70,7 @@ impl Keys {
         for r in runs {
             r.call(e.clone());
         }
-        matched || typing
+        matched
     }
 }
 
@@ -107,7 +114,9 @@ const PAGE_KEYS: &str = r#"(() => {
   window.__aioClaims = window.__aioClaims || [];
   const root = () => document.querySelector('[data-aio-keys]');
   const copy = (e, on) => on.dispatchEvent(new KeyboardEvent(e.type, e));
-  const field = (t) => t instanceof Element && (t.matches('input, textarea, select') || t.isContentEditable);
+  // A field takes typing (air's page.js, `Raw::field`, says the same).
+  const field = (t) => t instanceof HTMLInputElement ? !/^(checkbox|radio|button|submit|reset|range|color|file|image)$/.test(t.type)
+    : t instanceof Element && (t.matches('textarea, select') || t.isContentEditable);
   const hits = (c, e) => {
     if ((!c.in_fields && field(e.target)) || e.key.toLowerCase() !== c.key.toLowerCase()) return false;
     const symbol = [...c.key].length === 1 && c.key.toLowerCase() === c.key.toUpperCase() && !/\d/.test(c.key);
@@ -210,10 +219,7 @@ pub fn GlobalKeys(#[props(extends = GlobalAttributes)] attributes: Vec<Attribute
 /// it only while it should take the key (a component under an `if`). Needs
 /// a [`GlobalKeys`] around the app.
 pub fn use_key_claim(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) + 'static) {
-    let chord = match chord.into() {
-        ChordSpec(Ok(c)) => c,
-        ChordSpec(Err(e)) => panic!("{e}"),
-    };
+    let chord = chord.into().chord();
     let run = callback(f);
     let claims = try_context::<Claims>().expect("use_key_claim needs a GlobalKeys around the app");
     let keys = claims.keys.read_untracked().clone();
@@ -240,29 +246,34 @@ pub fn use_key_claim(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) +
 }
 
 /// Run `f` on `chord` (a spec, or a [`Chord`]) while this component is
-/// mounted; the latest `f` runs. Needs a [`GlobalKeys`] above it. A bad
-/// spec panics: it is the app's code, not its data.
+/// mounted. Needs a [`GlobalKeys`] above it. A bad spec panics: it is the
+/// app's code, not its data.
 pub fn use_global_key(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) + 'static) {
-    let chord = match chord.into() {
-        ChordSpec(Ok(c)) => c,
-        ChordSpec(Err(e)) => panic!("{e}"),
-    };
-    let run = callback(f);
+    use_global_keys([(chord, f)]);
+}
+
+/// [`use_global_key`] for a list, as one hook (hooks can't be called in a
+/// loop): `use_global_keys(PAGES.iter().map(|&p| (p.key, move |_| page.set(p))))`.
+/// The list is the first render's; a later render may change its chords.
+pub fn use_global_keys<C: Into<ChordSpec>, F: FnMut(KeyboardEvent) + 'static>(list: impl IntoIterator<Item = (C, F)>) {
     let keys = try_context::<Keys>().expect("use_global_key needs a GlobalKeys around the app");
+    let (chords, mut runs): (Vec<Chord>, Vec<F>) = list.into_iter().map(|(c, f)| (c.into().chord(), f)).unzip();
     let id = once(|| {
         let id = keys.next.get();
         keys.next.set(id + 1);
-        keys.all.borrow_mut().push(Binding { id, chord: chord.clone(), run });
+        let bound =
+            chords.iter().zip(runs.drain(..)).map(|(c, f)| Binding { id, chord: c.clone(), run: Callback::new(f) });
+        keys.all.borrow_mut().extend(bound);
         id
     });
-    if let Some(b) = keys.all.borrow_mut().iter_mut().find(|b| b.id == id) {
-        b.chord = chord;
+    for (b, c) in keys.all.borrow_mut().iter_mut().filter(|b| b.id == id).zip(chords) {
+        b.chord = c;
     }
     on_cleanup(move || keys.all.borrow_mut().retain(|b| b.id != id));
 }
 
-/// A chord as [`use_global_key`] and [`use_key_claim`] take it: a `&str`
-/// ([`Chord::parse`]) or a [`Chord`]. The words, case-insensitive, joined
+/// A chord as [`use_global_key`] and [`use_key_claim`] take it: a `&str` or
+/// `String` ([`Chord::parse`]) or a [`Chord`]. The words, case-insensitive, joined
 /// by `+`: modifiers first — `ctrl` (`control`), `meta` (`cmd`, `command`,
 /// `super`), `alt` (`option`), `shift`, and `mod` (Ctrl, or ⌘ on macOS: a
 /// shortcut's usual key) — then one key: a character (`k`, `/`, `+` as in
@@ -274,9 +285,22 @@ pub fn use_global_key(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) 
 /// <chord>` and `TestUi::press` take the same words.
 pub struct ChordSpec(Result<Chord, String>);
 
+impl ChordSpec {
+    /// Its chord; a bad spec panics (it is the app's code).
+    fn chord(self) -> Chord {
+        self.0.unwrap_or_else(|e| panic!("{e}"))
+    }
+}
+
 impl From<&str> for ChordSpec {
     fn from(s: &str) -> Self {
         Self(Chord::parse(s))
+    }
+}
+
+impl From<String> for ChordSpec {
+    fn from(s: String) -> Self {
+        Self(Chord::parse(&s))
     }
 }
 

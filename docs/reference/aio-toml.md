@@ -780,7 +780,7 @@ The page's default look (aio's `ui.theme`, `ui.hue`, `neutral`, `ui.layout`, dar
 | `scheme` | `system`, `light`, `dark` | `"system"` | Light or dark (`aio::ui::scheme()`, the template's `use_css!`): `system` follows the OS as it changes; the others fix one. |
 | `hue` | 0 to 359 | from the id | The accent's hue in degrees, instead of the one hashed from the app's id. |
 | `neutral` | `tinted`, `soft` | `"tinted"` | The page's greys (page, surfaces, borders): tinted with the hue, or near grey (`soft`, aio's `"neutral": "soft"`) for a warm or magenta hue; the accent keeps the hue. |
-| `layout` | bool | `true` | With the look, the page layout: `<main>` as a centred page and the `.card`, `.row`, `.stack`, `.grid` classes. Off: only how elements look. |
+| `layout` | bool | `true` | With the look, the page layout: `.container` as a centred page and the `.card`, `.row`, `.stack`, `.grid` classes. Off: only how elements look. |
 
 ```toml
 [ui]

@@ -153,22 +153,27 @@ pub const ID_AUDIT: &str = "(() => {
 
 
 
-/// The render probe (aio vitals' render meter): how long each update from
-/// the app takes to reach the screen, graded by `[vitals] render` (`T`), and
-/// as the loop and transport probes do, a step up to warning or frozen is
-/// said in the app's log (with `HINT`) and the way back as recovered. A
+/// The render probe (aio vitals' render meter): how long the page held
+/// each update from the app before its frame, graded by `[vitals] render`
+/// (`T`), and as the loop and transport probes do, a step up to warning or
+/// frozen is said in the app's log (with `HINT`) and the way back as
+/// recovered. Timed from the update, or from when its frame began when that
+/// is later: a display that draws seldom (a nested or virtual one, a window
+/// behind others: about once a second) makes an update wait for a frame,
+/// and that wait is the display's, not the app's; a script or a layout
+/// that holds the page holds the frame after it began, and counts. A
 /// hidden window paints nothing, so time spent hidden is never slow, and
 /// it asks for no frame (its frames wait until it shows: one per update
-/// would pile up for as long as it stays hidden). One frame is asked for at
-/// a time, timed from the oldest update it paints (the slowest).
+/// would pile up for as long as it stays hidden). One frame is asked for
+/// at a time, timed from the oldest update it paints (the slowest).
 pub const RENDER: &str = "window.__aioPainted = (() => {
   let worst = 0, shown = 0, asked = false;
   const names = ['healthy', 'degraded', 'warning', 'frozen'];
   const grade = (ms) => ms >= T.frozen ? 3 : ms >= T.warning ? 2 : ms >= T.degraded ? 1 : 0;
   document.addEventListener('visibilitychange', () => { if (!document.hidden) shown = performance.now(); });
-  return (t) => document.hidden || asked || (asked = true, requestAnimationFrame(() => {
+  return (t) => document.hidden || asked || (asked = true, requestAnimationFrame((began) => {
     asked = false;
-    const ms = Math.round(performance.now() - t), g = grade(ms);
+    const ms = Math.round(performance.now() - Math.max(t, began)), g = grade(ms);
     if (document.hidden || shown > t) return;
     if (g === 0) {
       if (worst >= 2) console.info('[vitals] render recovered: an update painted in ' + ms + ' ms');

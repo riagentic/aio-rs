@@ -83,7 +83,7 @@ mod tests {
             own.contains("--aio-hue:210;") && own.contains("body{"),
             "[ui] hue, and the whole look whatever its theme"
         );
-        assert!(!own.contains(":where(main)"), "[ui] layout");
+        assert!(!own.contains(":where(.container)"), "[ui] layout");
     }
 
     #[test]

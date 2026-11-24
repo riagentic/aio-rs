@@ -709,12 +709,23 @@ fn a_confirm_button_acts_only_once_confirmed() {
     assert_eq!((said(), ui.count("[role=dialog]")), (vec!["deleted".to_string()], 0));
 }
 
+/// A toast is a statement: a match arm, a function's last line.
+fn told(ok: bool) {
+    match ok {
+        true => toast_for("Saved", Tone::Success, None),
+        false => toast_for("Failed", Tone::Error, None),
+    }
+}
+
 fn toaster() -> View {
+    let saving = signal(|| None::<Toast>);
     rsx! {
         ToastHost { "data-t": "toasts" }
-        button { "data-t": "ok", onclick: move |_| _ = toast_for("Saved", Tone::Success, None), "ok" }
-        button { "data-t": "bad", onclick: move |_| _ = toast_for("Failed", Tone::Error, None), "bad" }
-        button { "data-t": "brief", onclick: move |_| _ = toast_for("Brief", Tone::Info, Some(std::time::Duration::from_millis(300))), "brief" }
+        button { "data-t": "ok", onclick: move |_| told(true), "ok" }
+        button { "data-t": "bad", onclick: move |_| told(false), "bad" }
+        button { "data-t": "save", onclick: move |_| saving.set(Some(toast_handle("Saving", Tone::Info, None))), "save" }
+        button { "data-t": "saved", onclick: move |_| if let Some(t) = saving.get() { t.dismiss() }, "saved" }
+        button { "data-t": "brief", onclick: move |_| toast_for("Brief", Tone::Info, Some(std::time::Duration::from_millis(300))), "brief" }
     }
 }
 
@@ -732,6 +743,10 @@ fn a_toast_shows_in_the_host_until_dismissed_or_its_time_is_up() {
     assert!(ui.text("toasts").contains("Brief"));
     ui.until("its timer dismisses it", || aio::kit::toasts() == ["Failed"]);
     assert_eq!(ui.text("toasts"), "Failed×");
+    ui.click("save");
+    assert_eq!(aio::kit::toasts(), ["Failed", "Saving"]);
+    ui.click("saved");
+    assert_eq!(aio::kit::toasts(), ["Failed"], "its handle dismisses it");
 }
 
 fn docs() -> View {
@@ -1647,6 +1662,37 @@ fn a_binding_goes_with_its_component() {
     assert_eq!(said(), Vec::<String>::new());
 }
 
+fn typing() -> View {
+    rsx! {
+        GlobalKeys {
+            Pages {}
+            input { "data-t": "search", aria_label: "search" }
+            input { r#type: "checkbox", "data-t": "tick", aria_label: "tick" }
+            div { "data-t": "editor", tabindex: "0", onkeydown: |e| field_key(&e), "an editor of its own" }
+        }
+    }
+}
+
+#[component]
+fn Pages() -> View {
+    use_global_keys(["1", "2"].map(|k| (k, move |_| log(format!("page {k}")))));
+    use_global_key("space", |_| log("pause"));
+    rsx! {}
+}
+
+#[test]
+fn typing_in_a_plain_field_fires_no_binding() {
+    let mut ui = TestUi::new(typing);
+    ui.type_text("search", "Night 2");
+    assert_eq!(ui.value("search"), "Night 2");
+    assert_eq!(said(), Vec::<String>::new(), "the field took 2 and space, as typed");
+    ui.press("tick", "2");
+    ui.press("tick", "1");
+    assert_eq!(said(), ["page 2", "page 1"], "a checkbox types nothing: the bindings hear its keys");
+    ui.press("editor", "2");
+    assert_eq!(said(), Vec::<String>::new(), "an element that types says so with field_key");
+}
+
 #[test]
 fn the_kit_stylesheet_is_the_theme_and_every_component_class() {
     for class in [
@@ -2302,7 +2348,7 @@ fn labels_and_titles_take_any_content() {
             Tabs { tabs: vec![Tab::new("a", rsx! { i { "data-t": "tab-i", "Alpha" } }, rsx! { p { "A" } })] }
             EmptyState { title: rsx! { span { "data-t": "empty-t", "Nothing" } } }
             button { "data-t": "more", onclick: move |_| n += 1, "more" }
-            button { "data-t": "toast", onclick: move |_| _ = toast_view(rsx! { a { "data-t": "undo", href: "#", "Undo" } }, Tone::Info, None), "toast" }
+            button { "data-t": "toast", onclick: move |_| toast_view(rsx! { a { "data-t": "undo", href: "#", "Undo" } }, Tone::Info, None), "toast" }
             ToastHost {}
         }
     });

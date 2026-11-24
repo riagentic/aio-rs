@@ -40,9 +40,25 @@ version may break things.
 
 - `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
   it, or with an offset) as ms since the epoch.
+- `aio::kit::use_global_keys(list)`: many global key bindings in one hook
+  (hooks can't be called in a loop), such as `1`…`9` mapped to pages. A
+  chord may be a `String` too.
+- `aio::kit::toast_handle(text, tone, stay)`: a toast and its `Toast`, to
+  dismiss it early.
+- `KeyboardData::in_field()` (air): the key was pressed in a field that
+  takes typing; `air::Raw::field` carries it from the page.
 
 ### Changed
 
+- **Breaking: `toast`, `toast_for` and `toast_view` return `()`**: a toast
+  is a statement, so a match arm needs no `_ =`. The handle comes from
+  `toast_handle`.
+- **Breaking: the kit theme's page shell is opt-in**: `class="container"`
+  on `<main>` (or any box) makes the centred, padded column a bare
+  `<main>` was; on a `<header>` or `<footer>`, the full-bleed bar lined up
+  with it that a top-level header or footer was. A bare `<main>` is the
+  app's to lay out (a sidebar grid needed `max-width: none; margin: 0`).
+  The `ax create` templates write the class.
 - **Breaking: `aio::update` fails with `UpdateError`**, not `String`
   (`#[non_exhaustive]`: `BadSignature`, `UntrustedKey`, `Refused`,
   `Http { status, .. }`, `NoPatch`, `KeyFormat`, `Io`, …), each one's text
@@ -56,6 +72,9 @@ version may break things.
 - **Breaking: `aio::http::CookieOpts::expires` is a `SystemTime`**, not
   chrono's `DateTime<Utc>`; **`aio::cron::Cron::next_in` is gone** (chrono's
   `TimeZone` in its signature): `Cron::next` follows `cron::set_local`.
+- `ax shot` puts every CSS transition and animation that ends at its end
+  before the shot (an endless one stays where it is): an entrance's
+  opacity half-way left whole pages dim in a shot.
 - Every crate declares `rust-version = "1.98"`, the toolchain
   `rust-toolchain.toml` pins (`./ci.sh` keeps them the same).
 - Every `unsafe` block says why it is sound (`// SAFETY:`), and clippy's
@@ -66,6 +85,20 @@ version may break things.
 
 ### Fixed
 
+- Global key bindings fired while typing in a plain `input` (typing
+  "Night 2" fired the `2` and `space` bindings): a field was told apart
+  only by `aio::kit::field_key` in its `onkeydown`. The page now tells it
+  from the key's target (a text `input`, `textarea`, `select`,
+  `contenteditable`; not a checkbox or a button), as aio did; `field_key`
+  stays for an element that types though it is no field. A key typed in
+  a kit field now reaches `use_window_event`, as one typed in a plain
+  field did.
+- The vitals render probe graded a display's wait for its next frame as
+  the app's: a nested or virtual display (`ax start --cdp`), or a window
+  behind others, draws about once a second, so an update "took ~1000 ms
+  to paint", a render warning and a "1 problem" badge in every shot. An
+  update is now timed from when its frame began, when that is later: a
+  script or a layout that holds the page still counts in full.
 - A memo of a memo could still glitch: an effect older than the outer
   memo, reading it and a signal the inner one follows, ran once with the
   outer memo's old value and once more with the new one. A read now

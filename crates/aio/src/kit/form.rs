@@ -4,7 +4,7 @@
 //! targets the control (`for`), the control is named, described by the hint or
 //! error, `aria-invalid` and `aria-required`. A caller's own attribute wins.
 //! Every prop that may change is a [`Prop`]: the control follows it.
-use super::{join, keys::field_key, use_id};
+use super::{join, use_id};
 use crate::ui::prelude::*;
 
 /// What a button is for.
@@ -258,12 +258,7 @@ pub fn Input(
             },
             onblur: move |_| if let Some(b) = &left { b.blur() },
             onchange: move |e| if let Some(f) = onchange { f.call(e.value()) },
-            onkeydown: move |e| {
-                field_key(&e);
-                if let Some(f) = onkeydown {
-                    f.call(e)
-                }
-            },
+            onkeydown: move |e| if let Some(f) = onkeydown { f.call(e) },
             ..attributes,
         }
     }
@@ -310,12 +305,7 @@ pub fn Textarea(
                 }
             },
             onblur: move |_| if let Some(b) = &left { b.blur() },
-            onkeydown: move |e| {
-                field_key(&e);
-                if let Some(f) = onkeydown {
-                    f.call(e)
-                }
-            },
+            onkeydown: move |e| if let Some(f) = onkeydown { f.call(e) },
             ..attributes,
         }
     }
@@ -390,7 +380,6 @@ pub fn Select(
                 }
             },
             onblur: move |_| if let Some(b) = &left { b.blur() },
-            onkeydown: move |e| field_key(&e),
             ..attributes,
             for o in options.get() {
                 option { key: "{o.value}", value: "{o.value}", disabled: o.disabled, selected: o.value == chosen.get(), "{o.label}" }

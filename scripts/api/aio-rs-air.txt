@@ -76,6 +76,7 @@ air::IntoValue::into_value: fn into_value(self) -> T
 air::IntoView::into_view: fn into_view(self) -> crate::View
 air::IntoViewValue::into_view_value: fn into_view_value(self) -> crate::View
 air::KeyboardData::code: fn code(&self) -> Code
+air::KeyboardData::in_field: fn in_field(&self) -> bool
 air::KeyboardData::is_auto_repeating: fn is_auto_repeating(&self) -> bool
 air::KeyboardData::is_composing: fn is_composing(&self) -> bool
 air::KeyboardData::key: fn key(&self) -> Key
@@ -154,6 +155,7 @@ air::Raw.composing: bool
 air::Raw.ctrl: bool
 air::Raw.delta: [f64; 3]
 air::Raw.delta_mode: u8
+air::Raw.field: bool
 air::Raw.files: Vec<FileData>
 air::Raw.ids: Vec<u32>
 air::Raw.key: String
