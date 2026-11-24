@@ -59,8 +59,7 @@ const TRIED: &str = "first-boot.tried";
 
 /// A server or CLI that a supervisor runs ([`SUPERVISED`]).
 fn supervised(cfg: &aio::config::Config) -> bool {
-    !cfg.app.mode.has_window()
-        && std::env::var_os(SUPERVISED).is_some_and(|v| v == "1")
+    !cfg.app.mode.has_window() && std::env::var_os(SUPERVISED).is_some_and(|v| v == "1")
 }
 
 /// What the update before this start did, for the cell: the release that

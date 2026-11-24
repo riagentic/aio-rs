@@ -191,7 +191,11 @@ mod tests {
         assert_eq!(code(&[s(2), s(1), s(0)]), 1);
         let j: Value = aio::serde_json::from_str(&show(&[of("notes", None, false, 0)], true)).unwrap();
         let stopped = json!({ "status": "stopped", "said": "notes: stopped" });
-        assert_eq!(j, json!({ "ok": false, "error": "notes: stopped", "exit": 1, "value": [stopped] }), "ax's one object");
+        assert_eq!(
+            j,
+            json!({ "ok": false, "error": "notes: stopped", "exit": 1, "value": [stopped] }),
+            "ax's one object"
+        );
         let up = Said { status: "started", line: "a: started".into(), code: 0 };
         let j: Value = aio::serde_json::from_str(&show(&[up], true)).unwrap();
         assert_eq!(j, json!({ "ok": true, "value": [{ "status": "started", "said": "a: started" }] }));

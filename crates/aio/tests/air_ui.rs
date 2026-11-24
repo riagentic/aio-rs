@@ -543,7 +543,6 @@ fn a_canvas_gets_webgl() {
     assert_eq!(ui.eval(gl), serde_json::json!(["ok", "ok"]), "WebGL 2 and 1, drawn by SwiftShader");
 }
 
-
 /// The file `f`'s failure points at (its panic's location).
 fn failed_in(f: impl FnOnce()) -> String {
     thread_local!(static AT: std::cell::RefCell<String> = Default::default());
@@ -606,7 +605,10 @@ fn a_wait_that_times_out_names_the_component_still_rendering() {
                 false
             });
         });
-        assert!(got.contains("waiting for: the field to settle\n  still rendering: Field"), "a step of {step:?}: {got}");
+        assert!(
+            got.contains("waiting for: the field to settle\n  still rendering: Field"),
+            "a step of {step:?}: {got}"
+        );
     }
     let mut ui = TestUi::new(counter);
     let got = fails(|| ui.until_within(std::time::Duration::from_secs(1), "nothing", || false));

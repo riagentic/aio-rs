@@ -1075,9 +1075,10 @@ fn run(args: &[String]) -> Result<String, Fail> {
     };
     // `--wait-client <ms>`: how long surface and trigger wait for the window.
     let wait_client = || match value("--wait-client") {
-        Some(ms) => {
-            ms.parse().map(std::time::Duration::from_millis).map_err(|_| usage(format!("--wait-client {ms}: milliseconds")))
-        }
+        Some(ms) => ms
+            .parse()
+            .map(std::time::Duration::from_millis)
+            .map_err(|_| usage(format!("--wait-client {ms}: milliseconds"))),
         None => Ok(std::time::Duration::ZERO),
     };
     // The window's DevTools protocol: `--cdp`'s port, else the app's own door.
@@ -1101,7 +1102,9 @@ fn run(args: &[String]) -> Result<String, Fail> {
             }
             dev::android(name, device, native)
         }
-        ("dev", [name, rest @ ..]) if rest.contains(&"--web") => web::dev(name, web::Serve::parse(rest).map_err(usage)?),
+        ("dev", [name, rest @ ..]) if rest.contains(&"--web") => {
+            web::dev(name, web::Serve::parse(rest).map_err(usage)?)
+        }
         ("dev", [name, ..]) => dev::run(name, &pos[1..]),
         ("check", [name]) => check::run(name, has("--release")),
         ("test", [name]) if has("--android") => install::lane(name, value("--device")),
@@ -1344,9 +1347,9 @@ fn run(args: &[String]) -> Result<String, Fail> {
         ("config", [app]) => config(app),
         ("discover", []) => {
             let wait = match value("--timeout") {
-                Some(ms) => {
-                    std::time::Duration::from_millis(ms.parse().map_err(|_| usage(format!("--timeout {ms}: milliseconds")))?)
-                }
+                Some(ms) => std::time::Duration::from_millis(
+                    ms.parse().map_err(|_| usage(format!("--timeout {ms}: milliseconds")))?,
+                ),
                 None => aio::discovery::WAIT,
             };
             let found = aio::rt().block_on(aio::discovery::probe_lan(aio::discovery::port(), wait));
@@ -2070,7 +2073,9 @@ fn run(args: &[String]) -> Result<String, Fail> {
         ("pair", [app]) => pair_code(&t(app)?, has("--plain")),
         ("pair", [app, addr, code]) => pair(&t(app)?, addr, code),
         ("pair", [_, addr]) => {
-            return Err(usage(format!("ax pair <app> {addr} <code>: the code too (ax pair <app> on the app's machine makes one)")));
+            return Err(usage(format!(
+                "ax pair <app> {addr} <code>: the code too (ax pair <app> on the app's machine makes one)"
+            )));
         }
         ("auth", [app, what @ ..]) => {
             let f = auth::Fields { role: value("--role"), email: value("--email"), password: value("--password") };

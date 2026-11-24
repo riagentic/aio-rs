@@ -104,12 +104,8 @@ impl Dice {
 }
 "#,
     )]);
-    let cells: Vec<_> = lint(d.path())
-        .issues
-        .into_iter()
-        .filter(|i| i.area == "cells")
-        .map(|i| (i.line.unwrap(), i.message))
-        .collect();
+    let cells: Vec<_> =
+        lint(d.path()).issues.into_iter().filter(|i| i.area == "cells").map(|i| (i.line.unwrap(), i.message)).collect();
     assert_eq!(cells.iter().map(|c| c.0).collect::<Vec<_>>(), [5, 6], "{cells:?}");
     assert!(cells[0].1.contains("`Dice::roll` uses randomness (`rand::random`)"), "{}", cells[0].1);
     assert!(cells[1].1.contains("uses the clock (`std::time::SystemTime::now`)"), "{}", cells[1].1);

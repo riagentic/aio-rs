@@ -133,7 +133,6 @@ fn a_failed_expectation_prints_the_state() {
     expect(&feed, "loaded", |s| !s.items.is_empty());
 }
 
-
 /// The file `f`'s failure points at (its panic's location).
 fn failed_in(f: impl FnOnce()) -> String {
     thread_local!(static AT: std::cell::RefCell<String> = Default::default());
