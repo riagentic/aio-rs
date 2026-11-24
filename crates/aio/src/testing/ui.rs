@@ -554,6 +554,16 @@ impl TestUi {
         v
     }
 
+    /// `event` to the `onevent` of island `t` (a `WebIsland`, a `Browser`,
+    /// or what is inside one), as if its script had emitted it, then
+    /// settle: the events a test's page can't make. A `Browser`'s guest is
+    /// one: the test page has no `<webview>`, so `ui.emit("web",
+    /// &GuestEvent::LoadFailed { .. })` stands in for it.
+    pub fn emit(&mut self, t: &str, event: &impl serde::Serialize) {
+        self.must("emit", json!({ "path": t, "v": event }));
+        self.settle();
+    }
+
     /// Global `g`'s value, read in the app's root scope (`ui.read(&DIALOG)`).
     pub fn read<T: Clone + 'static>(&self, g: &'static crate::ui::Global<T>) -> T {
         self.in_root(|| g.get_untracked())

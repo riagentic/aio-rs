@@ -2215,6 +2215,34 @@ fn a_browser_is_a_box_of_the_view_that_the_page_fills_with_its_guest() {
     ui.wait(Duration::from_millis(30));
     assert_eq!(ui.attr("web", "class").as_deref(), Some("aio-island aio-browser pane"));
     assert!(ui.attr("web", "data-aio-island").is_some());
+    // Its own look with no kit sheet on the page: the guest fills its box.
+    assert_eq!(ui.style("web", "display"), "flex");
+    assert_eq!(ui.style("css=[data-t=web] > webview", "flex-grow"), "1");
+    assert_eq!(unstyled("", "aio-browser"), None, "nothing to warn of");
+}
+
+fn guest_events() -> View {
+    let said = signal(Vec::<String>::new);
+    rsx! {
+        Browser { src: "https://a.example/", "data-t": "web", onevent: move |e: GuestEvent| said.write().push(format!("{e:?}")) }
+        p { "data-t": "said", {said.get().join("; ")} }
+    }
+}
+
+#[test]
+fn a_test_stands_in_for_a_browser_s_guest() {
+    let mut ui = TestUi::new(guest_events);
+    let failed = GuestEvent::LoadFailed {
+        url: "https://nothing.example/".into(),
+        code: -105,
+        description: "ERR_NAME_NOT_RESOLVED".into(),
+    };
+    ui.emit("web", &failed);
+    let moved = GuestEvent::Navigated { url: "https://a.example/#b".into(), back: true, forward: false, in_page: true };
+    ui.emit("web", &moved);
+    assert_eq!(ui.text("said"), format!("{failed:?}; {moved:?}"));
+    // Not an island: said, naming it.
+    assert!(aio::testing::fails(|| ui.emit("said", &moved)).contains("data-t=\"said\" is in no mounted island"));
 }
 
 fn coached() -> View {

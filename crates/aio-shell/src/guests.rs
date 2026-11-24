@@ -5,7 +5,7 @@
 //! local HTTP server. The page is read and driven over the shell's own
 //! DevTools line (`{"t":"cdp"}`). Skipped where the runtime is not installed.
 use crate::{Window, guest, install, runtime};
-use aio::kit::{Browser, Go, GuestEvent, WEBVIEW_METHODS, go, run_js, webview};
+use aio::kit::{Browser, Go, Guest, GuestEvent, GuestInput, WEBVIEW_METHODS, go, run_js, webview};
 use aio::serde_json::{Value, json};
 use aio::ui::prelude::*;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,6 +14,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 /// The guests' server, `http://127.0.0.1:<port>`.
 static BASE: OnceLock<String> = OnceLock::new();
+
+/// `steer`'s server, and an address nothing answers at (this run's).
+static STEER: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
 
 /// A declared preload: says it loaded, answers the app's messages.
 const PROBE: &str = "const { ipcRenderer } = require('electron');
@@ -127,6 +130,44 @@ async fn webview_tour(log: Signal<Vec<String>>) {
     said("printToPDF", pdf.map(|v| json!(v.as_str().is_some_and(|p| p.starts_with("JVBERi0")))));
 }
 
+/// A `Browser` steered by its `Guest`, each event said in the log.
+fn steer() -> View {
+    let (base, dead) = STEER.lock().unwrap().clone();
+    let log = signal(Vec::<String>::new);
+    let g = Guest::new("s");
+    let (a, b, input) = (format!("{base}/a"), format!("{base}/b"), format!("{base}/input"));
+    let url = {
+        let g = g.clone();
+        move |_| {
+            let g = g.clone();
+            spawn(async move {
+                let u = g.url().await;
+                log.write().push(format!("url {u:?}"));
+            });
+        }
+    };
+    let hash = |_| _ = spawn(async { _ = run_js("s", "history.pushState(null, '', '#x')").await });
+    let (g1, g3, g4, g5, g6, g7) = (g.clone(), g.clone(), g.clone(), g.clone(), g.clone(), g);
+    rsx! {
+        button { id: "hash", onclick: hash, "hash" }
+        button { id: "reload", onclick: move |_| g1.reload(), "reload" }
+        button { id: "url", onclick: url, "url" }
+        button { id: "click", onclick: move |_| g3.send_input(&GuestInput::Click(10.0, 12.0, Modifiers::empty())), "click" }
+        button { id: "key", onclick: move |_| g4.send_input(&GuestInput::Key(Key::Character("q".into()), Modifiers::empty())), "key" }
+        // The first load given up for the second: no failure.
+        button { id: "twice", onclick: move |_| { g5.load_url(&a); g5.load_url(&b) }, "twice" }
+        button { id: "dead", onclick: move |_| g6.load_url(&dead), "dead" }
+        button { id: "back", onclick: move |_| g7.go_back(), "back" }
+        Browser {
+            id: "s",
+            src: input,
+            style: "width:400px;height:300px",
+            onevent: move |e: GuestEvent| log.write().push(format!("{e:?}")),
+        }
+        pre { id: "log", {log.get().join("\n")} }
+    }
+}
+
 /// Serve `/<path>` as a page titled `path`; every request's path is told.
 async fn serve(seen: Arc<Mutex<Vec<String>>>) -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -228,6 +269,67 @@ async fn open(win: &Window, app: fn() -> View) -> (Shell, tempfile::TempDir) {
 /// How long a wait for the shell or a guest may take: a hang guard, not a
 /// measure (a guest's page on a loaded machine took past 10 s).
 const PATIENCE: Duration = Duration::from_secs(60);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guest_tells_a_new_document_from_a_move_in_it_and_says_what_it_could_not_open() {
+    let _turn = crate::WINDOW_TURN.lock().await;
+    if !runtime::exe(&runtime::dir()).exists() {
+        return eprintln!("skipped: no Electron runtime in {}", runtime::dir().display());
+    }
+    let base = serve(Arc::default()).await;
+    // A port just let go: nothing listens there.
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let dead = format!("http://{free}/");
+    *STEER.lock().unwrap() = (base.clone(), dead.clone());
+    let win = Window { title: "steer", web: guest::Web { browser: true, ..Default::default() }, ..Default::default() };
+    let (mut sh, _d) = open(&win, steer).await;
+    let has = |s: &str| format!("document.getElementById('log').textContent.includes({})", json!(s));
+    // How many times it landed on `url`, in the page or not.
+    let navs = |url: &str, in_page: bool| {
+        format!(
+            "document.getElementById('log').textContent.split('\\n').filter((l) => l.startsWith({}) && l.endsWith({})).length",
+            json!(format!("Navigated {{ url: \"{url}\", ")),
+            json!(format!("in_page: {in_page} }}"))
+        )
+    };
+    let (input, moved, b) = (format!("{base}/input"), format!("{base}/input#x"), format!("{base}/b"));
+    sh.until(&format!("{} === 1", navs(&input, false))).await;
+    // A move in the page: the same document.
+    sh.eval("document.getElementById('hash').click()").await;
+    sh.until(&format!("{} === 1", navs(&moved, true))).await;
+    // A reload of the same address: a new document.
+    sh.eval("document.getElementById('reload').click()").await;
+    sh.until(&format!("{} === 1", navs(&moved, false))).await;
+    sh.eval("document.getElementById('url').click()").await;
+    sh.until(&has(&format!("url Some(\"{moved}\")"))).await;
+    // A person's input, handed to the guest's own `sendInputEvent` in
+    // order. (Whether its page then hears it is Chromium's: a hidden
+    // headless window's guest draws no frame and may drop it.)
+    let sent = "document.querySelector('#s webview').__sent";
+    sh.eval(&format!(
+        "const w = document.querySelector('#s webview'), send = w.sendInputEvent.bind(w); w.__sent = []; \
+         w.sendInputEvent = (e) => {{ {sent}.push([e.type, e.keyCode || e.x]); return send(e); }}; true"
+    ))
+    .await;
+    sh.eval("document.getElementById('click').click(); document.getElementById('key').click()").await;
+    sh.until(&format!("{sent}.length === 5")).await;
+    assert_eq!(
+        sh.eval(sent).await,
+        json!([["mouseDown", 10], ["mouseUp", 10], ["keyDown", "q"], ["char", "q"], ["keyUp", "q"]])
+    );
+    // Loaded by the handle; the one given up is no failure, the one nothing answers is.
+    sh.eval("document.getElementById('twice').click()").await;
+    sh.until(&format!("{} === 1", navs(&b, false))).await;
+    sh.eval("document.getElementById('dead').click()").await;
+    sh.until(&has(&format!("LoadFailed {{ url: \"{dead}\", code: -102, description: \"ERR_CONNECTION_REFUSED\" }}")))
+        .await;
+    // Its error page took a step of history: back is /b again.
+    sh.eval("document.getElementById('back').click()").await;
+    sh.until(&format!("{} === 2", navs(&b, false))).await;
+    let log = sh.eval("document.getElementById('log').textContent").await;
+    assert!(!log.as_str().unwrap().contains("code: -3"), "{log}");
+    _ = sh.child.kill().await;
+}
 
 /// The runtime under test: its control line, its stderr.
 struct Shell {

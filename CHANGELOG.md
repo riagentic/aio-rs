@@ -38,11 +38,29 @@ version may break things.
 
 ### Added
 
+- `GuestEvent::LoadFailed { url, code, description }`: a `Browser`'s guest
+  could not open an address (`did-fail-load`, its main frame; `-3`, a
+  load given up for another, is none). It said nothing before: the panel
+  stayed blank.
+- `aio::kit::Guest`, a typed handle on a `Browser`'s guest by its element
+  id: `load_url`, `url`, `reload`, `stop`, `go_back`, `go_forward`,
+  `send_input(&GuestInput::Key(..) | Click(..))`.
+- `TestUi::emit(t, &event)`: an event to island `t`'s `onevent` as if its
+  script emitted it, so a test stands in for a `Browser`'s guest (a test
+  page has no `<webview>`).
 - `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
   it, or with an offset) as ms since the epoch.
 
 ### Changed
 
+- **Breaking: `GuestEvent::Navigated` has `in_page`**: `true` when the same
+  document moved (a hash, `pushState`), `false` for a new document, a
+  reload of the same address too, so an app drops what the last document
+  was given (a pending approval) on exactly that. A pattern naming every
+  field adds `in_page` (or `..`).
+- `Browser` brings its own look (its guest fills its box) without the
+  kit's sheet: a page without it no longer warns that `aio-browser` is
+  unstyled. Any rule of the app's wins over it, as before.
 - **Breaking: `aio::update` fails with `UpdateError`**, not `String`
   (`#[non_exhaustive]`: `BadSignature`, `UntrustedKey`, `Refused`,
   `Http { status, .. }`, `NoPatch`, `KeyFormat`, `Io`, …), each one's text

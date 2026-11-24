@@ -1284,15 +1284,27 @@ aio::kit::Go::Reload
 aio::kit::Go::Send { channel: String, args: Vec<serde_json::Value> }
 aio::kit::Go::Stop
 aio::kit::Go::Zoom(f64)
+aio::kit::Guest(_)
+aio::kit::Guest::go_back: fn go_back(&self)
+aio::kit::Guest::go_forward: fn go_forward(&self)
+aio::kit::Guest::load_url: fn load_url(&self, url: &str)
+aio::kit::Guest::new: fn new(id: impl Into<String>) -> Self
+aio::kit::Guest::reload: fn reload(&self)
+aio::kit::Guest::send_input: fn send_input(&self, input: &GuestInput)
+aio::kit::Guest::stop: fn stop(&self)
+aio::kit::Guest::url: async fn url(&self) -> Option<String>
 aio::kit::GuestEvent::Focus
 aio::kit::GuestEvent::Gone { reason: String }
 aio::kit::GuestEvent::Key(HostKey)
+aio::kit::GuestEvent::LoadFailed { url: String, code: i32, description: String }
 aio::kit::GuestEvent::Message { channel: String, args: Vec<serde_json::Value> }
-aio::kit::GuestEvent::Navigated { url: String, back: bool, forward: bool }
+aio::kit::GuestEvent::Navigated { url: String, back: bool, forward: bool, in_page: bool }
 aio::kit::GuestEvent::PreloadRefused { preload: String, reason: String }
 aio::kit::GuestEvent::Responsive
 aio::kit::GuestEvent::Title { title: String }
 aio::kit::GuestEvent::Unresponsive
+aio::kit::GuestInput::Click(f64, f64, Modifiers)
+aio::kit::GuestInput::Key(Key, Modifiers)
 aio::kit::HostKey.alt: bool
 aio::kit::HostKey.code: String
 aio::kit::HostKey.ctrl: bool
@@ -2392,6 +2404,7 @@ aio::testing::TestUi::disabled: fn disabled(&self, t: &str) -> bool
 aio::testing::TestUi::drag_along: fn drag_along(&mut self, t: &str, path: &[(f32, f32)])
 aio::testing::TestUi::drag_by: fn drag_by(&mut self, t: &str, dx: f32, dy: f32)
 aio::testing::TestUi::drag_to: fn drag_to(&mut self, t: &str, onto: &str)
+aio::testing::TestUi::emit: fn emit(&mut self, t: &str, event: &impl serde::Serialize)
 aio::testing::TestUi::eval: fn eval(&mut self, js: &str) -> Value
 aio::testing::TestUi::expanded: fn expanded(&self, t: &str) -> bool
 aio::testing::TestUi::expect_cell: fn expect_cell<T: Cell>(&mut self, door: &impl Door<T>, what: &str, f: impl Fn(&T) -> bool)
@@ -2923,6 +2936,7 @@ enum aio::http::side::Seen
 enum aio::kit::Align
 enum aio::kit::Go
 enum aio::kit::GuestEvent
+enum aio::kit::GuestInput
 enum aio::kit::Placement
 enum aio::kit::Size
 enum aio::kit::Tone
@@ -3029,7 +3043,9 @@ impl Clone for Found
 impl Clone for Frame
 impl Clone for Gate
 impl Clone for Go
+impl Clone for Guest
 impl Clone for GuestEvent
+impl Clone for GuestInput
 impl Clone for Head
 impl Clone for Heads
 impl Clone for HeldEffect
@@ -3281,7 +3297,9 @@ impl Debug for Found
 impl Debug for Frame
 impl Debug for Gate
 impl Debug for Go
+impl Debug for Guest
 impl Debug for GuestEvent
+impl Debug for GuestInput
 impl Debug for Head
 impl Debug for Heads
 impl Debug for HeldEffect
@@ -3529,6 +3547,7 @@ impl Eq for Filter
 impl Eq for Found
 impl Eq for Frame
 impl Eq for Gate
+impl Eq for Guest
 impl Eq for HeldEffect
 impl Eq for Hint
 impl Eq for HostKey
@@ -3670,7 +3689,9 @@ impl PartialEq for Found
 impl PartialEq for Frame
 impl PartialEq for Gate
 impl PartialEq for Go
+impl PartialEq for Guest
 impl PartialEq for GuestEvent
+impl PartialEq for GuestInput
 impl PartialEq for Head
 impl PartialEq for HeldEffect
 impl PartialEq for Hint
@@ -3826,6 +3847,8 @@ impl Serialize for Event
 impl Serialize for Feedback
 impl Serialize for Found
 impl Serialize for Frame
+impl Serialize for GuestEvent
+impl Serialize for HostKey
 impl Serialize for Inputs
 impl Serialize for Manifest
 impl Serialize for Offer
@@ -3898,7 +3921,9 @@ impl StructuralPartialEq for Found
 impl StructuralPartialEq for Frame
 impl StructuralPartialEq for Gate
 impl StructuralPartialEq for Go
+impl StructuralPartialEq for Guest
 impl StructuralPartialEq for GuestEvent
+impl StructuralPartialEq for GuestInput
 impl StructuralPartialEq for Head
 impl StructuralPartialEq for HeldEffect
 impl StructuralPartialEq for Hint
@@ -4361,6 +4386,7 @@ struct aio::kit::FieldArray<V: 'static>
 struct aio::kit::FieldOf<T, V>
 struct aio::kit::FieldProps
 struct aio::kit::Form<T: 'static, O: 'static>
+struct aio::kit::Guest
 struct aio::kit::HostKey
 struct aio::kit::InputProps
 struct aio::kit::Island

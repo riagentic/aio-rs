@@ -13,21 +13,36 @@
 use super::{Island, WebIsland};
 use crate::ui::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 /// What a guest did (`onevent`).
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum GuestEvent {
-    /// It landed on `url` (a load, or a single-page site's own move), and
-    /// whether it can now go back or forward ([`Go`]).
+    /// It landed on `url`, and whether it can now go back or forward
+    /// ([`Go`]). `in_page`: the same document moved (a hash, a single-page
+    /// site's `pushState`); otherwise a new document took its place, a
+    /// reload of the same address too: what the last one was given (an
+    /// approval it asked for) dies with it.
     Navigated {
         url: String,
         back: bool,
         forward: bool,
+        in_page: bool,
+    },
+    /// It could not open `url` (Chromium's net error `code`, negative, and
+    /// its name: `-102`, `ERR_CONNECTION_REFUSED`): nothing answered there,
+    /// or the answer broke off. An empty error page took the last
+    /// document's place (a step of its history), so what that one was
+    /// given dies as on a new one. A load given up for another (`-3`, a new
+    /// address before the last one came) is none.
+    LoadFailed {
+        url: String,
+        code: i32,
+        description: String,
     },
     /// Its page's title.
     Title {
@@ -59,7 +74,7 @@ pub enum GuestEvent {
 }
 
 /// A key a guest handed back (aio's `HostKey`), with the modifiers held.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostKey {
     pub key: String,
     pub code: String,
@@ -104,6 +119,102 @@ pub fn go(id: &str, what: Go) {
         Go::DevTools => "openDevTools()".into(),
     };
     _ = eval(&guest_js(id, &format!("try {{ w.{call} }} catch (e) {{}}")));
+}
+
+/// The guest of the `Browser` with element id `id` (`Guest::new("web")`),
+/// steered: a call on one that is not there (yet) does nothing, a question
+/// gets `None`. [`go`] and [`webview`] reach the rest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Guest(String);
+
+impl Guest {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Open `url`, its `Browser`'s `referrer` sent; `src` stays as it was.
+    /// One that fails is a [`GuestEvent::LoadFailed`].
+    pub fn load_url(&self, url: &str) {
+        let load = format!(
+            "const r = w.getAttribute('httpreferrer'); w.loadURL({}, r ? {{ httpReferrer: r }} : undefined).catch(() => {{}});",
+            Value::from(url)
+        );
+        _ = eval(&guest_js(&self.0, &load));
+    }
+
+    /// The address it shows (`getURL`).
+    pub async fn url(&self) -> Option<String> {
+        webview(&self.0, "getURL", vec![]).await.and_then(|v| v.as_str().map(Into::into))
+    }
+
+    pub fn reload(&self) {
+        go(&self.0, Go::Reload)
+    }
+
+    pub fn stop(&self) {
+        go(&self.0, Go::Stop)
+    }
+
+    pub fn go_back(&self) {
+        go(&self.0, Go::Back)
+    }
+
+    pub fn go_forward(&self) {
+        go(&self.0, Go::Forward)
+    }
+
+    /// `input` in its page as a person's (`sendInputEvent`): a key to what
+    /// has its focus, a click at its point.
+    pub fn send_input(&self, input: &GuestInput) {
+        let send: String = input_events(input).iter().map(|e| format!("w.sendInputEvent({e});")).collect();
+        _ = eval(&guest_js(&self.0, &format!("try {{ {send} }} catch (e) {{}}")));
+    }
+}
+
+/// A person's input for [`Guest::send_input`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuestInput {
+    /// A key pressed and let go, with these modifiers held; a character
+    /// key types its character (unless Ctrl or Meta is held).
+    Key(Key, Modifiers),
+    /// A left click at `(x, y)` of its page, in CSS pixels.
+    Click(f64, f64, Modifiers),
+}
+
+/// `input` as Electron's input events, in order.
+fn input_events(input: &GuestInput) -> Vec<Value> {
+    let held = |m: &Modifiers| {
+        [
+            (Modifiers::SHIFT, "shift"),
+            (Modifiers::CONTROL, "control"),
+            (Modifiers::ALT, "alt"),
+            (Modifiers::META, "meta"),
+        ]
+        .into_iter()
+        .filter(|(b, _)| m.contains(*b))
+        .map(|(_, n)| n)
+        .collect::<Vec<_>>()
+    };
+    match input {
+        GuestInput::Key(key, m) => {
+            // Electron's key names (its accelerators'): `Up`, not `ArrowUp`.
+            let code = match key {
+                Key::Character(c) if c == " " => "Space".to_string(),
+                Key::Character(c) => c.clone(),
+                Key::ArrowUp => "Up".into(),
+                Key::ArrowDown => "Down".into(),
+                Key::ArrowLeft => "Left".into(),
+                Key::ArrowRight => "Right".into(),
+                k => k.to_string(),
+            };
+            let types = matches!(key, Key::Character(_)) && !m.intersects(Modifiers::CONTROL | Modifiers::META);
+            let e = |t: &str| json!({ "type": t, "keyCode": code, "modifiers": held(m) });
+            [Some(e("keyDown")), types.then(|| e("char")), Some(e("keyUp"))].into_iter().flatten().collect()
+        }
+        GuestInput::Click(x, y, m) => ["mouseDown", "mouseUp"]
+            .map(|t| json!({ "type": t, "x": x, "y": y, "button": "left", "clickCount": 1, "modifiers": held(m) }))
+            .into(),
+    }
 }
 
 /// `js` run in the page of the guest of the `Browser` with element id `id`
@@ -273,6 +384,11 @@ const GUEST: Island = Island::js(
       refusals.forEach((f) => f(d));
     });
     let said = false;
+    // Its own look, whether or not the page has the kit's sheet: the guest
+    // fills its box. In the kit's layer, so any rule of the app's wins.
+    const look = new CSSStyleSheet();
+    look.replaceSync('@layer aio { .aio-browser { display: flex; min-block-size: 0 } .aio-browser > webview { flex: 1; inline-size: 100%; block-size: 100% } }');
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, look];
     return (el, p, emit) => {
       const refused = (d) => { if (d.preload === p.preload) emit({ t: 'preloadrefused', preload: d.preload, reason: d.reason }); };
       if (p.preload) refusals.add(refused);
@@ -292,12 +408,16 @@ const GUEST: Island = Island::js(
       // Its history has the entry a task later; before dom-ready the guest
       // cannot be asked: no way back yet.
       const can = (f) => { try { return wv[f](); } catch (e) { return false; } };
-      const nav = (url) => {
+      const nav = (url, in_page) => {
         at = url;
-        setTimeout(() => emit({ t: 'navigated', url, back: can('canGoBack'), forward: can('canGoForward') }), 0);
+        setTimeout(() => emit({ t: 'navigated', url, back: can('canGoBack'), forward: can('canGoForward'), in_page }), 0);
       };
-      wv.addEventListener('did-navigate', (e) => nav(e.url));
-      wv.addEventListener('did-navigate-in-page', (e) => { if (e.isMainFrame) nav(e.url); });
+      wv.addEventListener('did-navigate', (e) => nav(e.url, false));
+      wv.addEventListener('did-navigate-in-page', (e) => { if (e.isMainFrame) nav(e.url, true); });
+      // -3 (ERR_ABORTED): a load given up for another, no failure.
+      wv.addEventListener('did-fail-load', (e) => {
+        if (e.isMainFrame && e.errorCode !== -3) emit({ t: 'loadfailed', url: e.validatedURL, code: e.errorCode, description: e.errorDescription });
+      });
       wv.addEventListener('page-title-updated', (e) => emit({ t: 'title', title: e.title }));
       wv.addEventListener('ipc-message', (e) => emit({ t: 'message', channel: e.channel, args: e.args }));
       wv.addEventListener('focus', () => emit({ t: 'focus' }));
@@ -334,7 +454,8 @@ const GUEST: Island = Island::js(
 /// its loads send (an embed that checks it refuses to play without one).
 /// With `popups`, a link that opens a window goes to the system browser,
 /// after a real click in the page; without, it does nothing. Give it an
-/// `id` to [`go`] its guest.
+/// `id` to steer its guest ([`Guest`]). It brings its own look (it fills
+/// its box), with or without the kit's sheet.
 #[component]
 pub fn Browser(
     src: Prop<String>,
@@ -435,9 +556,22 @@ mod tests {
         let ev = |v: Value| serde_json::from_value::<GuestEvent>(v).unwrap();
         use serde_json::json;
         assert_eq!(
-            ev(json!({ "t": "navigated", "url": "https://a.example/", "back": true, "forward": false })),
-            GuestEvent::Navigated { url: "https://a.example/".into(), back: true, forward: false }
+            ev(
+                json!({ "t": "navigated", "url": "https://a.example/#x", "back": true, "forward": false, "in_page": true })
+            ),
+            GuestEvent::Navigated { url: "https://a.example/#x".into(), back: true, forward: false, in_page: true }
         );
+        let failed = json!({ "t": "loadfailed", "url": "http://127.0.0.1:9/", "code": -102, "description": "ERR_CONNECTION_REFUSED" });
+        assert_eq!(
+            ev(failed.clone()),
+            GuestEvent::LoadFailed {
+                url: "http://127.0.0.1:9/".into(),
+                code: -102,
+                description: "ERR_CONNECTION_REFUSED".into()
+            }
+        );
+        // As the page sends it (a test's stand-in guest, TestUi::emit).
+        assert_eq!(serde_json::to_value(ev(failed.clone())).unwrap(), failed);
         let key = json!({ "t": "key", "key": "Escape", "code": "Escape", "ctrl": false, "shift": true, "alt": false, "meta": false, "repeat": false });
         assert_eq!(
             ev(key),
@@ -453,5 +587,38 @@ mod tests {
             ev(json!({ "t": "preloadrefused", "preload": "nope.js", "reason": "not declared" })),
             GuestEvent::PreloadRefused { preload: "nope.js".into(), reason: "not declared".into() }
         );
+        let k = GuestEvent::Key(HostKey { key: "F6".into(), code: "F6".into(), ..Default::default() });
+        assert_eq!(ev(serde_json::to_value(&k).unwrap()), k);
+    }
+
+    #[test]
+    fn an_input_is_electron_s_events_in_order() {
+        let types = |i: GuestInput| {
+            input_events(&i).iter().map(|e| e["type"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        let a = input_events(&GuestInput::Key(Key::Character("a".into()), Modifiers::SHIFT));
+        assert_eq!(a[1], json!({ "type": "char", "keyCode": "a", "modifiers": ["shift"] }));
+        assert_eq!(
+            types(GuestInput::Key(Key::Character("a".into()), Modifiers::empty())),
+            ["keyDown", "char", "keyUp"]
+        );
+        assert_eq!(
+            types(GuestInput::Key(Key::Character("a".into()), Modifiers::CONTROL)),
+            ["keyDown", "keyUp"],
+            "Ctrl+A types nothing"
+        );
+        assert_eq!(types(GuestInput::Key(Key::Escape, Modifiers::empty())), ["keyDown", "keyUp"]);
+        let code = |k: Key| input_events(&GuestInput::Key(k, Modifiers::empty()))[0]["keyCode"].clone();
+        assert_eq!(
+            (code(Key::ArrowUp), code(Key::Enter), code(Key::Character(" ".into()))),
+            (json!("Up"), json!("Enter"), json!("Space"))
+        );
+        let c = input_events(&GuestInput::Click(10.0, 20.0, Modifiers::CONTROL | Modifiers::META));
+        assert_eq!(c.len(), 2);
+        assert_eq!(
+            c[0],
+            json!({ "type": "mouseDown", "x": 10.0, "y": 20.0, "button": "left", "clickCount": 1, "modifiers": ["control", "meta"] })
+        );
+        assert_eq!(c[1]["type"], "mouseUp");
     }
 }
