@@ -158,6 +158,9 @@ version may break things.
 
 ### Fixed
 
+- An element given two handlers for one event (`h(..).on("click", a)
+  .on("click", b)`) ran only the first; it runs each, in order, as the
+  DOM does.
 - `h(tag)` with more than 65 535 children (`.children(rows)` of a big
   file) wrote a template the page misread (`air: unknown edit`); it says
   what to do instead now: one child of views, or a `VirtualList`.

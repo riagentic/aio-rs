@@ -1758,18 +1758,20 @@ impl Root {
         let mut took = false;
         batch(|| {
             for id in &raw.ids {
-                let h = dom(|d| {
-                    let ls = d.handlers.get(id)?;
-                    ls.iter().find(|l| l.name == raw.name).map(|l| (l.run.clone(), l.owner, l.comp.clone()))
+                // Each handler the node has for it, in the order given (a stop ends the nodes above, not these).
+                let hs: Vec<_> = dom(|d| {
+                    let ls = d.handlers.get(id).map_or(&[][..], |l| &l[..]);
+                    ls.iter().filter(|l| l.name == raw.name).map(|l| (l.run.clone(), l.owner, l.comp.clone())).collect()
                 });
-                let Some((h, owner, comp)) = h else { continue };
-                let run = || (h.borrow_mut())(&raw, &flow);
-                match owner {
-                    Some(o) if o.alive() => with_owner(handler_owner(&comp, o), run),
-                    Some(_) => continue,
-                    None => run(),
+                for (h, owner, comp) in hs {
+                    let run = || (h.borrow_mut())(&raw, &flow);
+                    match owner {
+                        Some(o) if o.alive() => with_owner(handler_owner(&comp, o), run),
+                        Some(_) => continue,
+                        None => run(),
+                    }
+                    took = true;
                 }
-                took = true;
                 if flow.stopped.get() {
                     break;
                 }

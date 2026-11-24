@@ -126,3 +126,21 @@ fn an_optimistic_value_shows_actions_until_the_base_changes_or_they_are_cleared(
 fn an_element_with_more_children_than_a_template_holds_says_so() {
     TestPage::mount(|| h("ul").children((0..70_000u32).map(|i| i.to_string())).view());
 }
+
+#[test]
+fn an_element_hears_every_handler_it_was_given_for_an_event() {
+    let mut p = TestPage::mount(|| {
+        let (a, b) = (signal(|| 0), signal(|| 0));
+        h("div")
+            .child(
+                h("button")
+                    .attr("data-t", "go")
+                    .on("click", move |_: Event<MouseData>| a.update(|v| *v += 1))
+                    .on("click", move |_: Event<MouseData>| b.update(|v| *v += 10)),
+            )
+            .child(h("p").attr("data-t", "n").child_with(move || a.get() + b.get()))
+            .view()
+    });
+    p.click("go");
+    assert_eq!(p.text("n"), "11");
+}
