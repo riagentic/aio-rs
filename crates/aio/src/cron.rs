@@ -11,6 +11,38 @@
 use crate::civil;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Why `dom` and `dow`, the day fields of `c`, run on other days in Vixie
+/// cron, if they do (pure; aio's `warnCronVixieDiff`). A `*`-led day field
+/// (`*/2`) beside another given one is given here, so a day matches when
+/// either one does; Vixie cron reads a `*`-led day field as not given, so
+/// there a day must match both.
+fn vixie_differs(c: &Cron, dom: &str, dow: &str) -> Option<String> {
+    let starred = [(dom, "day-of-month"), (dow, "day-of-week")].into_iter().filter(|(t, _)| t.starts_with('*'));
+    let named: Vec<String> = starred.map(|(t, n)| format!("{n} \"{t}\"")).collect();
+    let every_day = c.days == 0xffff_fffe && c.weekdays == 0x7f;
+    if !(c.days_set && c.weekdays_set) || named.is_empty() || every_day {
+        return None;
+    }
+    Some(format!(
+        "{} is a restriction here, so a day matches when EITHER day field matches (the OR rule). Vixie cron reads a \
+         \"*\"-led day field as unrestricted, so there a day must match BOTH. For the OR reading, write the step as a \
+         range (\"1-31/2\" for day-of-month, \"0-6/2\" for day-of-week) and this is not said again; for the BOTH \
+         reading, keep one day field \"*\" and check the other condition in the method. See docs/state/scheduling.md.",
+        named.join(" and ")
+    ))
+}
+
+/// Say `why` of cron `expr`, once per expression (at most 256: one built
+/// per call must not grow the set).
+fn said_once(expr: &str, why: &str) {
+    static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.len() < 256 && !said.iter().any(|e| e == expr) {
+        said.push(expr.into());
+        crate::warn!(cat: "schedule", "cron \"{expr}\": {why}");
+    }
+}
+
 /// A wall-clock minute: minutes since 1970-01-01 00:00 on that clock (no
 /// zone: the same number is a different instant in each).
 type Wall = i64;
@@ -102,6 +134,11 @@ impl Cron {
             weekdays: (weekdays & 0x7f) as u8,
             days_set: dom != "*",
             weekdays_set: dow != "*",
+        })
+        .inspect(|c| {
+            if let Some(why) = vixie_differs(c, dom, dow) {
+                said_once(expr, &why);
+            }
         })
     }
 
@@ -243,6 +280,28 @@ mod tests {
         }
         let c = Cron::parse("0 0 * * 7").unwrap();
         assert_eq!(c.weekdays, 1, "7 is Sunday");
+    }
+
+    /// aio's `warnCronVixieDiff`: a `*`-led day field beside another given
+    /// one reads otherwise in Vixie cron (there: both must match), and is said.
+    #[test]
+    fn a_starred_step_beside_a_given_day_is_said_to_differ_from_vixie_cron() {
+        let differs = |e: &str| {
+            let f: Vec<&str> = e.split_whitespace().collect();
+            vixie_differs(&Cron::parse(e).unwrap(), f[2], f[4])
+        };
+        let why = differs("0 0 */2 * 1").unwrap();
+        assert!(why.starts_with("day-of-month \"*/2\" is a restriction here"), "{why}");
+        assert!(why.contains("\"1-31/2\" for day-of-month"));
+        assert!(differs("0 0 */2 * */3").unwrap().starts_with("day-of-month \"*/2\" and day-of-week \"*/3\""));
+        assert!(differs("0 0 1 * */2").unwrap().starts_with("day-of-week \"*/2\""));
+        // The same reading in both: one day field `*`, none `*`-led, or every day.
+        for same in ["0 0 */2 * *", "0 0 1-31/2 * 1", "0 9 1 * mon", "*/5 * * * *", "0 0 */1 * *", "0 0 */1 * */1"] {
+            assert_eq!(differs(same), None, "{same}");
+        }
+        // As said: here either day matching is enough (the 3rd: odd, a Thursday).
+        let c = Cron::parse("0 0 */2 * 1").unwrap();
+        assert!(c.next_in(false, ms("2026-12-01T12:00:00Z")).is_some_and(|t| at(t) == "2026-12-03 00:00 Thu"));
     }
 
     #[test]

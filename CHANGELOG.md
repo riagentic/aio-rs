@@ -171,6 +171,10 @@ version may break things.
 
 ### Fixed
 
+- A cron line with a `*`-led day step beside another given day field
+  (`0 0 */2 * 1`) is said once in the log, as aio said it: here either
+  day field matching is enough, where Vixie cron needs both.
+
 - `health.json` is replaced whole every 10 s without two disk syncs each
   time (disk wear, a laptop's or phone's disk woken): a status lost to
   a power cut is harmless.
