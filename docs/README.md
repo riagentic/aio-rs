@@ -75,6 +75,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 **Security**
 - [Accounts, keys and security](auth/README.md): the key, accounts, TOTP, OIDC, TLS, security headers, capabilities.
 - [Secrets and observability](auth/secrets.md): secrets in state and files, redaction, what logs never hold.
+- [The OS's secret store](auth/keychain.md): `aio::secrets`: a key or token kept by the Keychain, the Secret Service, DPAPI or Android's Keystore.
 
 **Shipping**
 - [Develop, build and install](build/README.md): `ax dev`, `ax build`, installing.

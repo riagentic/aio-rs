@@ -204,6 +204,9 @@ assert!(!serde_json::to_string(&events).unwrap().contains("482913"), "never the 
 
 ## Secrets the app needs
 
+- A key or token the app keeps for the user between runs (a session
+  key, a refresh token): the OS's secret store, `aio::secrets`
+  ([the OS's secret store](keychain.md)).
 - A provider's API key, a webhook's signing secret: from the environment
   or a file in `data/`, never `aio.toml` (it is built into the binary)
   and never the source.

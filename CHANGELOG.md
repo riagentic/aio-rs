@@ -72,6 +72,24 @@ version may break things.
 
 ### Added
 
+- `aio::secrets` (feature `secrets`): the OS's secret store, one API
+  everywhere: `set(name, &bytes)`, `get(name)` (a `Secret`: wiped when
+  dropped, never printed), `delete(name)`, async (the OS may ask the
+  user). The Keychain on macOS; the Secret Service (GNOME
+  Keyring, KWallet, KeePassXC) on Linux, through libsecret loaded at run
+  time; DPAPI-sealed files on Windows; files sealed by a Keystore key on
+  Android, and `set_biometric` there, opened only after the user's
+  fingerprint or face. No crate added. Each home of the app has its own
+  (a profile, a dev build, `--home`); the test world keeps them in its
+  sandbox, never the OS's store. Where there is no store (the web, Linux
+  with no Secret Service, a logon without the user's keys) each call is
+  `Unsupported`, never a plain file
+  ([the OS's secret store](docs/auth/keychain.md)).
+- `[build.android] biometric`: the APK declares the fingerprint or face
+  (`USE_BIOMETRIC`) for `aio::secrets::set_biometric`.
+- A whole backup leaves out `data/secrets/` (sealed for this machine), and
+  a restore keeps it as it is, as `sync.token`.
+
 - `GuestEvent::LoadFailed { url, code, description }`: a `Browser`'s guest
   could not open an address (`did-fail-load`, its main frame; `-3`, a
   load given up for another, is none). It said nothing before: the panel
