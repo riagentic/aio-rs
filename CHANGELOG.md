@@ -209,6 +209,10 @@ version may break things.
 
 ### Fixed
 
+- A failed `TestUi` step (`click`, `text`, `press`, `eval`, a wait, …),
+  `TestCells::settle`, `settle_for`, `advance`, `reset` and
+  `aio::testing::expect` point at the test's line: the panic named a line
+  in aio's own code.
 - A `TestUi` wait that timed out named no component still rendering when
   one step of the wait took longer than its last half second (a slow
   machine): the components are now taken as each step begins, so the

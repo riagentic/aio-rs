@@ -543,6 +543,44 @@ fn a_canvas_gets_webgl() {
     assert_eq!(ui.eval(gl), serde_json::json!(["ok", "ok"]), "WebGL 2 and 1, drawn by SwiftShader");
 }
 
+
+/// The file `f`'s failure points at (its panic's location).
+fn failed_in(f: impl FnOnce()) -> String {
+    thread_local!(static AT: std::cell::RefCell<String> = Default::default());
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let was = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |p| {
+            AT.set(p.location().map(|l| l.file().to_string()).unwrap_or_default());
+            was(p)
+        }));
+    });
+    aio::testing::fails(f);
+    AT.take()
+}
+
+/// A step that fails points at the test's line, not into aio.
+#[test]
+fn a_failed_step_points_at_the_test() {
+    let mut ui = TestUi::new(counter);
+    let short = std::time::Duration::from_millis(50);
+    let steps = [
+        ("click", failed_in(|| ui.click("nope"))),
+        ("text", failed_in(|| _ = ui.text("nope"))),
+        ("checked", failed_in(|| _ = ui.checked("add"))),
+        ("type_text", failed_in(|| ui.type_text("nope", "x"))),
+        ("press", failed_in(|| ui.press("name", "Nokey"))),
+        ("chord", failed_in(|| ui.press("name", "hyper+k"))),
+        ("scroll", failed_in(|| ui.scroll("rows", 500.0, 0.0))),
+        ("eval", failed_in(|| _ = ui.eval("throw new Error('x')"))),
+        ("until", failed_in(|| ui.until_within(short, "never", || false))),
+        ("until_text", failed_in(|| ui.until_text("nope", "x"))),
+    ];
+    for (step, at) in steps {
+        assert_eq!(at, file!(), "{step}");
+    }
+}
+
 #[test]
 fn a_wait_that_times_out_names_the_component_still_rendering() {
     static DONE: Global<u32> = Global::new(|| 0);
