@@ -534,6 +534,11 @@ version may break things.
   (SwiftShader) now, as `TestUi`'s window does.
 - `TestUi` had no WebGL on macOS: the runtime's SwiftShader makes no
   context there; a Mac's test window draws WebGL with ANGLE's Metal.
+- A `TestUi` test typing into a field could hang (`the test browser did
+  not answer in 30s`): each test page spellchecked, fetching its
+  dictionary from the internet past the network rule, and one that landed
+  as a word was typed hung the page. The test browser spellchecks nothing
+  now and fetches no dictionary.
 - A `TestUi` wait that times out (`until…`, `expect_cell`) and `the
   views and their page never settle` name the components still rendering
   (`still rendering: Gallery/Thumb`), such as one that remounts on its own

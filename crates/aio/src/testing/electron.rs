@@ -468,6 +468,16 @@ mod tests {
         assert_eq!(body, [0x89, b'P']);
     }
 
+    /// A session spellchecking fetched its dictionary from the internet
+    /// (the network rule never sees it), and one landing while a test
+    /// typed hung the page: 5 runs in 40 of 16 pages typing, 0 without.
+    #[test]
+    fn the_browser_spellchecks_nothing_and_fetches_no_dictionary() {
+        let js = include_str!("electron.js");
+        assert!(js.contains("s.setSpellCheckerLanguages([])"), "no dictionary download");
+        assert!(js.contains("backgroundThrottling: false, spellcheck: false }"), "no spellcheck in the page");
+    }
+
     #[test]
     fn linux_runs_with_no_display_and_none_in_a_sandbox() {
         assert_eq!(flags("linux").last(), Some(&"--ozone-platform=headless"));
