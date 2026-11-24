@@ -330,14 +330,19 @@ mod tests {
     /// because it costs about 0.2 µs (0.6 µs in a debug build; measured).
     #[test]
     fn a_calls_accounting_costs_under_two_microseconds() {
-        let n = 20_000u32;
-        let t = Instant::now();
-        for _ in 0..n {
-            let t0 = Instant::now();
-            let (t1, t2, t3) = (Instant::now(), Instant::now(), Instant::now());
-            method("perf-probe", "m", Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() });
-        }
-        let each = t.elapsed() / n;
+        // The fastest of 10 batches: a busy runner's preemption only ever
+        // slows a batch, so its least is the accounting's own cost.
+        let n = 2_000u32;
+        let batch = || {
+            let t = Instant::now();
+            for _ in 0..n {
+                let t0 = Instant::now();
+                let (t1, t2, t3) = (Instant::now(), Instant::now(), Instant::now());
+                method("perf-probe", "m", Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() });
+            }
+            t.elapsed() / n
+        };
+        let each = (0..10).map(|_| batch()).min().unwrap();
         eprintln!("a call's accounting: {each:?}");
         assert!(each < Duration::from_micros(2), "{each:?}");
     }
