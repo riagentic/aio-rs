@@ -213,6 +213,10 @@ version may break things.
 
 ### Fixed
 
+- `ax release` reads the app's `aio.toml` and checks its signing key
+  before the release build: a missing key, or one `[updates] keys` doesn't
+  trust, failed only after the build. `--unsigned` makes one key for all
+  the platforms of a run.
 - `ax status --json` prints ax's one object (`{"ok":…,"value":[…]}`,
   with `error` and `exit` when an app isn't started), as every verb does:
   it printed a bare list, and an unknown app as text on stderr.
