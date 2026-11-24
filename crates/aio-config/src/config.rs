@@ -1998,8 +1998,13 @@ impl Config {
                      a repository (git+https://, git+ssh://, git+file://)"
                     .into());
             }
-            if let Some(e) = c.updates.keys.iter().find_map(|k| crate::update::ssh_key(k).err()).filter(|_| git) {
-                return Err(format!("aio.toml: [updates] keys: {e}"));
+            // A key no signature checks against builds an app that never takes an update.
+            let bad = |k: &String| match git {
+                true => crate::update::ssh_key(k).err(),
+                false => crate::update::raw_key(k).err(),
+            };
+            if let Some(e) = c.updates.keys.iter().find_map(bad) {
+                return Err(format!("aio.toml: [updates] keys: {e} (ax keygen <app> prints the app's)"));
             }
         }
         if let Some(id) = c.build.android.application_id.as_deref().filter(|id| !application_id_ok(id)) {

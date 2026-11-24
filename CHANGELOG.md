@@ -442,6 +442,10 @@ version may break things.
 - `[server] listen` was taken as any text: `"127.0.0.1:99999"` or
   `"nonsense:http"` built, and the app failed at boot with the OS's bind
   error. It is `host:port`, the port 0 to 65535, or the build says so.
+- `[updates] keys` with a key that isn't one (`"ed25519:…"` cut short, a
+  typo) built for an `https://`, `file://` or `github:` source: the app
+  shipped could never check a release, so no update could ever fix it.
+  The build refuses it, as it did for a git source's.
 
 ## [0.4.2] - 2026-11-11
 
