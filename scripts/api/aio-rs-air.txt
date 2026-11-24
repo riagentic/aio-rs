@@ -135,12 +135,12 @@ air::Owner::dispose: fn dispose(self)
 air::PointerData::is_primary: fn is_primary(&self) -> bool
 air::PointerData::pointer_id: fn pointer_id(&self) -> i32
 air::PointerData::pointer_type: fn pointer_type(&self) -> String
-air::Prop::Const(T)
-air::Prop::Live(crate::reactive::Memo<T>)
+air::Prop(_)
 air::Prop::derive: fn derive(f: Box<dyn Fn() -> T>) -> Self where T: PartialEq
 air::Prop::get: fn get(&self) -> T where T: Clone
 air::Prop::get_untracked: fn get_untracked(&self) -> T where T: Clone
 air::Prop::is_live: fn is_live(&self) -> bool
+air::Prop::new: fn new(v: T) -> Self
 air::Prop::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
 air::Prop::with_untracked: fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R
 air::Props::Builder: type
@@ -365,7 +365,6 @@ const air::ssr::TEXT_MARK: &str
 enum air::AttrValue<'a>
 enum air::Child
 enum air::MouseButton
-enum air::Prop<T: 'static>
 enum air::ScrollBehavior
 enum air::geometry::WheelDelta
 impl Clone for Attribute
@@ -618,8 +617,6 @@ impl<T: 'static> Drop for ReadGuard<T>
 impl<T: 'static> Drop for WriteGuard<T>
 impl<T: Clone + std::ops::Add<Output = T> + 'static> AddAssign<T> for Signal<T>
 impl<T: Clone + std::ops::Sub<Output = T> + 'static> SubAssign<T> for Signal<T>
-impl<T: Clone> Clone for Prop<T>
-impl<T: Copy> Copy for Prop<T>
 impl<T: Default> Default for Prop<T>
 impl<T: PartialEq + Clone> From<Signal<T>> for Prop<T>
 impl<T: PartialEq + Clone> PartialEq for Prop<T>
@@ -638,9 +635,11 @@ impl<T: std::fmt::Display> Display for Prop<T>
 impl<T: std::fmt::Display> IntoChild for Prop<T>
 impl<T> Clone for Event<T>
 impl<T> Clone for Memo<T>
+impl<T> Clone for Prop<T>
 impl<T> Clone for Resource<T>
 impl<T> Clone for Signal<T>
 impl<T> Copy for Memo<T>
+impl<T> Copy for Prop<T>
 impl<T> Copy for Resource<T>
 impl<T> Copy for Signal<T>
 impl<T> Deref for Event<T>
@@ -681,6 +680,7 @@ struct air::Optimistic<T: 'static, A: 'static>
 struct air::Owner
 struct air::PlainData
 struct air::PointerData
+struct air::Prop<T: 'static>
 struct air::Raw
 struct air::ReadGuard<T: 'static>
 struct air::Render

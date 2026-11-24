@@ -71,7 +71,6 @@ macro_rules! page_view {
 
 /// The served app's view (a browser tab).
 mod tab {
-    use super::TallyCalls;
     use aio::kit::WebIsland;
     use aio::ui::prelude::*;
     aio::client!(super::Tally, tally);
@@ -83,7 +82,6 @@ mod tab {
 
 /// The desktop app's view: the window's page reaches the cell over its wire.
 mod window {
-    use super::TallyCalls;
     use aio::kit::{JsCell, WebIsland, use_js_client};
     use aio::ui::prelude::*;
     aio::client!(super::Tally, tally);
@@ -97,7 +95,6 @@ mod window {
 /// A `client` app's window: its cell's copy is its server's, and so is
 /// what the page's client reaches.
 mod client_window {
-    use super::TallyCalls;
     use aio::kit::{JsCell, WebIsland, use_js_client};
     use aio::ui::prelude::*;
     aio::client!(super::Tally, tally);

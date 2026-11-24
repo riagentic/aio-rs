@@ -65,7 +65,8 @@ assert_eq!(h.state().items.len(), 1, "a refusal changes nothing");
 - `#[data]` goes on your own types that a cell holds or a method takes.
   It derives serde through aio, so the app needs no serde dependency.
 - `#[methods]` generates a `<Name>Calls` trait: `h.add(..)` is typed on
-  every door (a `Handle`, a synced copy, a test client). The same method
+  every door (a `Handle`, a synced copy, a test client). A view's
+  `act!(add(..))` needs no import of it. The same method
   can be called by name: `h.call("add", json!(["milk"]))`, which is how
   the log replays and how `ax call` reaches it.
 - A method takes `&mut self` and plain arguments (`&str`, `&[T]` and `&T`

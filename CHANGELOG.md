@@ -40,6 +40,7 @@ version may break things.
 
 - `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
   it, or with an offset) as ms since the epoch.
+- `air::Prop::new(v)`: a constant prop.
 
 ### Changed
 
@@ -63,6 +64,16 @@ version may break things.
 - `#[component]` and `#[derive(Props)]` point their misuse errors at the
   token at fault, not the whole item; `#[methods]` on a type without a
   name is an error, never a panic in the macro.
+- **Breaking: `air::Prop<T>` is `Copy` for every `T`**, as a signal is:
+  one prop goes into two `move` closures with no `memo(move || p.get())`
+  first. A constant's value is held by the view that gave it (as a live
+  prop's memo is), so its variants `Const` and `Live` are private:
+  `Prop::new(v)` or `v.into()` makes a constant, `Prop::from(memo)` a live one.
+- `act!(method(args))` needs only the client's `Ui` in scope, no
+  `<Cell>Calls` import: it calls through the cell's typed calls, which
+  `#[methods]` also makes as a type of their own.
+- Disposing a probe (a prop worked out at mount, a server render's hole)
+  skips the owner walk: mounting rows with props is a little faster.
 
 ### Fixed
 
@@ -73,6 +84,11 @@ version may break things.
 - `ax setup --check` names Xvfb for `ax build --smoke` also when Xephyr
   is here: without Xvfb the smoke runs on the runtime's headless display,
   unlike a user's (no tray).
+- A `format!` inside an `rsx!` hole or handler whose string reads a name a
+  `let` in that same hole bound (`{ let fee = 3; format!("{n}{fee}") }`)
+  failed with E0425 pointing at the whole `rsx!`: the hole tried to clone
+  `fee` in from outside. A format string's `{name}`s follow the same rules
+  as the hole's other names now.
 - A memo of a memo could still glitch: an effect older than the outer
   memo, reading it and a signal the inner one follows, ran once with the
   outer memo's old value and once more with the new one. A read now

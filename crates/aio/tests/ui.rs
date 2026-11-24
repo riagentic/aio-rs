@@ -523,6 +523,51 @@ mod gate {
     }
 }
 
+/// `act!` in a module other than its cell's: `Ui` in scope is enough, no
+/// `<Cell>Calls` import (a method's name is found through its cell).
+mod prefs {
+    use aio::prelude::*;
+
+    #[cell]
+    pub struct Prefs {
+        pub alert: u32,
+    }
+
+    #[methods]
+    impl Prefs {
+        pub fn set_alert(&mut self, at: u32) -> aio::Result<u32> {
+            Ok(std::mem::replace(&mut self.alert, at))
+        }
+
+        pub async fn later(&mut self) -> aio::Result {
+            Ok(())
+        }
+    }
+
+    aio::client!(Prefs, prefs);
+}
+
+mod settings {
+    use super::prefs::{Ui, prefs, use_live};
+    use aio::act;
+    use aio::testing::TestUi;
+    use aio::ui::prelude::*;
+
+    fn app() -> View {
+        use_live();
+        rsx! { button { "data-t": "alert", onclick: move |_| _ = act!(set_alert(40)), "{prefs().alert}" } }
+    }
+
+    #[test]
+    fn act_needs_no_trait_import() {
+        let mut ui = TestUi::new(app);
+        ui.click("alert");
+        ui.until("alert at 40", || prefs().alert == 40);
+        assert_eq!(ui.run(|| act!(set_alert(7))), Some(40), "the method's answer");
+        assert!(ui.run(|| act!(later())).is_some(), "an async method: its answer to follow");
+    }
+}
+
 #[component]
 fn Pictures(port: u16) -> View {
     rsx! {

@@ -939,6 +939,15 @@ pub trait Door<T: Cell> {
     fn own(&self, key: &str, res: Option<Box<dyn std::any::Any + Send>>);
 }
 
+/// The typed calls of a cell as a value of their own: `#[methods]` makes a
+/// type whose methods they are, so `act!` reaches them with no
+/// `<Cell>Calls` import.
+#[doc(hidden)]
+pub trait Typed: Cell {
+    type Calls<'a, D: Door<Self> + ?Sized + 'a>;
+    fn calls<D: Door<Self> + ?Sized>(door: &D) -> Self::Calls<'_, D>;
+}
+
 /// Call a method through a door, logging a refusal: `call!(d, toggle(id))`
 /// gives `Some(result)`, or `None` when refused (needs `<Cell>Calls` in scope).
 /// Under `TestUi` the refusal is on its ledger too: unlooked-at, it fails the test.

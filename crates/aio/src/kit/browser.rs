@@ -358,7 +358,7 @@ pub fn Browser(
         once(|| Rc::new(RefCell::new((Kept { at: start.clone().unwrap_or_default(), src: String::new() }, None))));
     now.borrow_mut().1.clone_from(&keep_alive);
     {
-        let (now, src) = (now.clone(), src.clone());
+        let (now, src) = (now.clone(), src);
         effect(move || src.with(|s| now.borrow_mut().0.src.clone_from(s)));
     }
     {

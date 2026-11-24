@@ -483,3 +483,24 @@ fn rows_that_leave_a_list_stop_at_once_and_are_dropped_once_the_frame_is_out() {
     assert_eq!(p.texts("list"), ["200:1", "201:1", "202:1"]);
     assert_eq!(dropped.get(), 6, "no event needed");
 }
+
+/// A `format!` in a hole reads `{name}`s of its own: an outer name is
+/// cloned in, a `let` inside the hole is read where it is bound.
+#[test]
+fn a_format_in_a_hole_reads_inline_names() {
+    fn app() -> View {
+        let (n, e, cost) = (Signal::new(1u32), "x".to_string(), " $3".to_string());
+        let log = Signal::new(String::new());
+        rsx! {
+            p { "data-t": "a", {format!("{} recorded · {}{cost}", n.get(), e)} }
+            p { "data-t": "b", {{ let fee = n.get() + 1; format!("{} recorded · {}{fee}", n.get(), e) }} }
+            button { "data-t": "go", onclick: move |_| { let fee = 2; log.set(format!("{fee}{cost}")) }, "Go" }
+            p { "data-t": "log", "{log}" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!(p.text("a"), "1 recorded · x $3");
+    assert_eq!(p.text("b"), "1 recorded · x2");
+    p.click("go");
+    assert_eq!(p.text("log"), "2 $3");
+}

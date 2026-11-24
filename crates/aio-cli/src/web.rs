@@ -1912,7 +1912,7 @@ pub(crate) mod browser {
 
     /// The board's view, natively: what the server paints the page with.
     mod shown {
-        use super::{Board, BoardCalls};
+        use super::Board;
         include!("web/view.rs");
 
         pub(crate) fn app() -> View {
