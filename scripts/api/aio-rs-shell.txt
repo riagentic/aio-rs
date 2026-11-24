@@ -18,6 +18,7 @@ aio_shell::Web.browser: bool
 aio_shell::Web.downloads: bool
 aio_shell::Web.fullscreen: bool
 aio_shell::Web.preloads: &'static [(&'static str, &'static str)]
+aio_shell::Web.schemes: &'static [&'static str]
 aio_shell::Web.unsandboxed_windows: bool
 aio_shell::Web.windows: bool
 aio_shell::Window.background: Option<[&'static str; 2]>
@@ -93,6 +94,7 @@ aio_shell::guest::Web.browser: bool
 aio_shell::guest::Web.downloads: bool
 aio_shell::guest::Web.fullscreen: bool
 aio_shell::guest::Web.preloads: &'static [(&'static str, &'static str)]
+aio_shell::guest::Web.schemes: &'static [&'static str]
 aio_shell::guest::Web.unsandboxed_windows: bool
 aio_shell::guest::Web.windows: bool
 aio_shell::guest::clear_partition: async fn clear_partition(partition: &str) -> io::Result<()>

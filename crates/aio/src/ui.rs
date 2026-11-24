@@ -550,7 +550,8 @@ pub fn light_dark(css: &str, dark: bool) -> String {
 
 /// A local image as the page can load it (the shell serves image files
 /// only, from `aio://app/file/<path>`, on Android from the page's own
-/// origin, `https://app.invalid/file/<path>`; `file://` is blocked).
+/// origin, `https://app.invalid/file/<path>`; `file://` is blocked). A
+/// network share (`\\host\share\x.png`) or device path is never served.
 pub fn local_file_url(abs: &str) -> String {
     let mut out = String::from(if cfg!(target_os = "android") { "https://app.invalid/file" } else { "aio://app/file" });
     // A Windows path (`C:\a\b`) as a URL path: `/C:/a/b` (the shell takes the `/` off again).

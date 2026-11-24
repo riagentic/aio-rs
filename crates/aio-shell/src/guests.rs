@@ -147,7 +147,7 @@ fn steer() -> View {
         }
     };
     let hash = |_| _ = spawn(async { _ = run_js("s", "history.pushState(null, '', '#x')").await });
-    let (g1, g3, g4, g5, g6, g7) = (g.clone(), g.clone(), g.clone(), g.clone(), g.clone(), g);
+    let (g1, g3, g4, g5, g6, g7, g8) = (g.clone(), g.clone(), g.clone(), g.clone(), g.clone(), g.clone(), g);
     rsx! {
         button { id: "hash", onclick: hash, "hash" }
         button { id: "reload", onclick: move |_| g1.reload(), "reload" }
@@ -158,12 +158,15 @@ fn steer() -> View {
         button { id: "twice", onclick: move |_| { g5.load_url(&a); g5.load_url(&b) }, "twice" }
         button { id: "dead", onclick: move |_| g6.load_url(&dead), "dead" }
         button { id: "back", onclick: move |_| g7.go_back(), "back" }
+        button { id: "file", onclick: move |_| g8.load_url("file:///etc/hosts"), "file" }
         Browser {
             id: "s",
             src: input,
             style: "width:400px;height:300px",
             onevent: move |e: GuestEvent| log.write().push(format!("{e:?}")),
         }
+        // A scheme the window didn't list: no first page.
+        Browser { id: "chrome", src: "chrome://gpu", style: "width:10px;height:10px" }
         pre { id: "log", {log.get().join("\n")} }
     }
 }
@@ -328,6 +331,18 @@ async fn a_guest_tells_a_new_document_from_a_move_in_it_and_says_what_it_could_n
     sh.until(&format!("{} === 2", navs(&b, false))).await;
     let log = sh.eval("document.getElementById('log').textContent").await;
     assert!(!log.as_str().unwrap().contains("code: -3"), "{log}");
+    // Only http(s) unless the window lists the scheme: refused and said,
+    // its first page and a load asked later; the guest stays where it was.
+    let refused = |s: &str| format!("<Browser> load REFUSED: a <Browser> shows http(s) and about:blank only, not {s}:");
+    sh.eval("document.getElementById('file').click()").await;
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end && !(sh.said(&refused("file")) && sh.said(&refused("chrome"))) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(sh.said(&refused("file")) && sh.said(&refused("chrome")), "{}", sh.said.lock().unwrap().join("\n"));
+    sh.eval("document.getElementById('url').click()").await;
+    sh.until(&has(&format!("url Some(\"{b}\")"))).await;
+    assert_eq!(sh.eval("document.querySelector('#chrome webview').getURL()").await, json!(""));
     _ = sh.child.kill().await;
 }
 

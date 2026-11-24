@@ -263,6 +263,36 @@ function lines(onLine) {
   }
 }
 
+// The local file `aio://app/file/<path>` names (aio::ui::local_file_url;
+// Windows: `/C:/a/b` is `C:/a/b`), resolved by `P` (node:path, or its
+// win32 or posix), or null: only things an element draws (images and
+// media: the page can show them but never read other files), and never a
+// UNC or device path (`//host/share`, `\\?\`, `\\.\`): on Windows opening
+// one connects to that host over SMB, handing it the user's NTLM hash.
+function localFile(pathname, P) {
+  let f
+  try { f = decodeURIComponent(pathname.slice('/file'.length)) } catch { return null }
+  if (/^[\\/]{2}/.test(f)) return null
+  const win = P.sep === '\\'
+  const p = P.resolve(win && /^\/[A-Za-z]:/.test(f) ? f.slice(1) : f)
+  if (win && !/^[A-Za-z]:\\/.test(p)) return null
+  return /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico|mp4|m4v|webm|ogv|ogg|oga|mp3|wav|m4a|flac|aac|opus)$/i.test(p) ? p : null
+}
+
+// Notification `n` held under `key` (a reused key's is the newest), the
+// oldest let go past `max`: Windows may never say `close` for one moved to
+// the Action Center, so a held one could stay for good. One let go keeps
+// showing; only its click is lost.
+const NOTES_HELD = 64
+function hold(notes, key, n, max) {
+  notes.delete(key)
+  notes.set(key, n)
+  for (const k of notes.keys()) {
+    if (notes.size <= max) break
+    notes.delete(k)
+  }
+}
+
 app.whenReady().then(() => {
   openSplash()
   // No menu (Electron's default carries DevTools and reload), except on
@@ -326,20 +356,15 @@ app.whenReady().then(() => {
     })
   }
   app.on('session-created', guard)
-  // The page, and local images and media by absolute path (only things an
-  // element draws: the page can show them but never read other files).
-  const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)$/i
-  const MEDIA = /\.(mp4|m4v|webm|ogv|ogg|oga|mp3|wav|m4a|flac|aac|opus)$/i
+  // The page, and local images and media by absolute path (localFile).
   protocol.handle('aio', (req) => {
     const u = new URL(req.url)
     if (u.host === 'app' && (u.pathname === '/' || u.pathname === '/index.html')) {
       return enet.fetch(pathToFileURL(path.join(dir, 'index.html')).toString())
     }
     if (u.host === 'app' && u.pathname.startsWith('/file/')) {
-      // Windows: `/C:/a/b` (aio::ui::local_file_url) is `C:/a/b`.
-      const f = decodeURIComponent(u.pathname.slice('/file'.length))
-      const p = path.resolve(process.platform === 'win32' && /^\/[A-Za-z]:/.test(f) ? f.slice(1) : f)
-      if (IMAGE.test(p) || MEDIA.test(p)) return enet.fetch(pathToFileURL(p).toString())
+      const p = localFile(u.pathname, path)
+      if (p) return enet.fetch(pathToFileURL(p).toString())
     }
     // The app's built-in files ([build] assets), at their own paths.
     const assets = path.join(dir, 'assets')
@@ -643,8 +668,8 @@ app.whenReady().then(() => {
 
   // Notifications from the main process: no permission to ask, the app's
   // icon, and a click that works while the window is hidden. Each is held
-  // until it is done (one nothing holds is collected, its click lost); a
-  // tag replaces the one before it.
+  // until it is done (one nothing holds is collected, its click lost), the
+  // last NOTES_HELD at most (hold); a tag replaces the one before it.
   const notes = new Map()
   let noteSeq = 0
   let unsupportedSaid = false
@@ -657,7 +682,7 @@ app.whenReady().then(() => {
     const key = m.tag || `#${++noteSeq}`
     notes.get(key)?.close()
     const n = new Notification({ title: m.title, body: m.body, silent: !!m.silent, icon })
-    notes.set(key, n)
+    hold(notes, key, n, NOTES_HELD)
     const done = () => { if (notes.get(key) === n) notes.delete(key) }
     n.on('click', () => {
       done()
@@ -875,6 +900,12 @@ app.whenReady().then(() => {
       if (k === 'devtools') w.webContents.toggleDevTools()
       if (k === 'clear') w.webContents.session.clearCache().then(() => w.webContents.session.clearStorageData()).then(() => reload(true))
     })
+    // What a guest may show (guest.js guestSrc): why not, said, or null.
+    const refusedSrc = (url) => {
+      const why = G.guestSrc(url, SHELL.schemes)
+      if (why) say('guest-src', why, `<Browser> load REFUSED: ${why}`)
+      return why
+    }
     // A <Browser>'s guest, before it exists: it never gets Node, a weaker
     // sandbox or the app's own session (it serves aio://app: a page there
     // could read the app); a preload only one the app declared (Web {
@@ -898,8 +929,19 @@ app.whenReady().then(() => {
         w.webContents.send('aio:guest-refused', { preload: want.startsWith(G.PRELOAD) ? want.slice(G.PRELOAD.length) : want, reason: p.why })
       }
       Object.assign(params, { nodeintegration: false, nodeintegrationinsubframes: false, disablewebsecurity: false })
+      // Its first page, as every later one: none when refused.
+      if (params.src && refusedSrc(params.src)) params.src = ''
     })
-    w.webContents.on('did-attach-webview', (_e, guest) => popups(guest))
+    w.webContents.on('did-attach-webview', (_e, guest) => {
+      popups(guest)
+      // Every later load is a loadURL (the src attribute, the page's and
+      // aio::kit::Guest's); its page's own navigations are will-navigate.
+      // A refused one does nothing, said once (a rejection here is a stack
+      // in the log at every try, past refusal's cap).
+      const load = guest.loadURL
+      guest.loadURL = (url, o) => refusedSrc(url) ? Promise.resolve() : load.call(guest, url, o)
+      guest.on('will-navigate', (e) => { if (refusedSrc(e.url)) e.preventDefault() })
+    })
     // A contained run (AIORT_NO_OPEN) leaves the person's browser alone.
     popups(w.webContents, true)
     w.webContents.on('will-navigate', (e) => e.preventDefault())

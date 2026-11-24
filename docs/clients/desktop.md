@@ -45,8 +45,11 @@ from `[app]`) are listed in [views](../ui/views.md#the-window).
 A second launch of the same app (same data dir) never opens a second
 window: it hands its working dir and arguments to the running instance
 over a private socket and exits; the running one comes to the front.
-The app hears those launches from `aio_shell::launches()`, a broadcast
-receiver of `Launch { cwd, args }`; `launch.path(arg)` makes an argument
+The running one takes them from `aio_shell::start` on, before its window
+is up (a first start may be downloading Electron), and keeps those that
+come before the app listens (the last 16) for its first listener. The
+app hears them from `aio_shell::launches()`, a broadcast receiver of
+`Launch { cwd, args }`; `launch.path(arg)` makes an argument
 absolute against the launch's own dir (URLs and absolute paths stay as
 they are). That is how "open this file with" reaches a running app.
 

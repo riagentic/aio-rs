@@ -195,7 +195,7 @@ stands in for the guest with `ui.emit(t, &GuestEvent::..)`.
 
 | Prop | Does |
 |---|---|
-| `src` | the page; it navigates only when the prop changes, so an address bar that writes `Navigated` back into its state never loops |
+| `src` | the page, http(s) or `about:blank` (another scheme only one the window lists, `Web { schemes }`); it navigates only when the prop changes, so an address bar that writes `Navigated` back into its state never loops |
 | `keep_alive` | an id: a guest dies with its element, and the next `Browser` under this id opens where it was (its cookies are kept; its scroll and forms aren't) |
 | `partition` | its session: two `Browser`s with one share a login; `persist:` keeps it across starts. Unset: the guests' shared `persist:aio-webview`, never the app's own |
 | `preload` | one of the window's declared preloads, by name ([below](#a-preload-for-the-guest)) |
@@ -216,6 +216,7 @@ the window and carried in the binary, so it is there in every build:
 | `preloads` | `&[("reader/preload.js", include_str!("../guest/preload.js"))]`: names the guests may ask for. A name is `/`-separated plain segments, no `..` (`guest::preload_refusal` says why one isn't) |
 | `fullscreen` | a guest may go fullscreen (a video's button); else it holds no permission at all |
 | `downloads` | a guest may save files |
+| `schemes` | the schemes a guest may show beyond http(s) and `about:blank`, by name: `&["data"]`. Its `src`, a `load_url` (or the page's `loadURL`) and its page's own navigations are each asked; another scheme (`file:`, `chrome:`, `javascript:`, `data:` unlisted, …) is not loaded and the log says `<Browser> load REFUSED` with the fix |
 | `windows` | `open_window` may open child windows |
 | `unsandboxed_windows` | a child window that asks (`Child { unsandboxed: true }`) opens without Chromium's sandbox: its preload runs with Node (aio's `unsandboxedChildWindows`) |
 

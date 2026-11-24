@@ -446,9 +446,11 @@ const GUEST: Island = Island::js(
     };"#,
 );
 
-/// An embedded web page at `src`. `partition` names its session (two
-/// `Browser`s with one share a login; `persist:` keeps it across starts;
-/// unset: the guests' shared `persist:aio-webview`, never the app's own).
+/// An embedded web page at `src`: http(s) or `about:blank`, another scheme
+/// only one the window lists (`aio_shell::Web { schemes }`). `partition`
+/// names its session (two `Browser`s with one share a login; `persist:`
+/// keeps it across starts; unset: the guests' shared `persist:aio-webview`,
+/// never the app's own).
 /// `preload` is one of the window's declared preloads, by name, read once
 /// when the guest starts, as `host_keys` are. `referrer` is the `Referer`
 /// its loads send (an embed that checks it refuses to play without one).
