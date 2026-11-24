@@ -1914,6 +1914,18 @@ fn a_virtual_list_renders_only_the_rows_its_scroll_shows() {
     assert_eq!((ui.text("row500"), ui.count("[data-t=row499]")), ("#500".into(), 1), "scroll_to moves the scrollbar");
 }
 
+#[test]
+fn a_virtual_list_opens_at_its_scroll_to() {
+    let ui = TestUi::new(|| {
+        rsx! {
+            VirtualList { "data-t": "list", len: 1000, row_height: 20.0, height: 100.0, overscan: 1, scroll_to: Some(500usize),
+                row: |i| rsx! { span { "data-t": "row{i}", "#{i}" } }
+            }
+        }
+    });
+    assert_eq!((ui.count("[data-t=row500]"), ui.count("[data-t=row0]")), (1, 0), "drawn at row 500, not the top");
+}
+
 thread_local!(static ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
 
 fn counted_list() -> View {

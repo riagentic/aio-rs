@@ -158,6 +158,9 @@ version may break things.
 
 ### Fixed
 
+- `VirtualList` given a `scroll_to` at mount opened at the top: the
+  scroll waited for the list's element, which came after it looked, and
+  never looked again.
 - `selector` kept a signal for every key ever asked until its owner
   ended: rows whose keys come and go (a feed, a paged list) grew it
   without end. Keys no row reads now go as the count doubles. And
