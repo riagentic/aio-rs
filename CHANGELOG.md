@@ -226,6 +226,12 @@ version may break things.
 
 ### Fixed
 
+- The desktop window keeps the app's cookies: Chromium keeps none for
+  `aio://`, so the HttpOnly session cookie a sign-in route sets
+  (`[accounts] cookie = true`) was dropped and the window was never signed
+  in by it. The shell keeps them in the window's cookie store (on disk,
+  until they expire) and sends them with each request to the app's
+  routes, by path; the page's script still never sees an HttpOnly one.
 - A later launch of an app shown in the browser (`[app] ui = "browser"`)
   opens its page again (it got "ok" and nothing showed); one of an app
   served only (`mode = "server"`) says it is already running, where it
