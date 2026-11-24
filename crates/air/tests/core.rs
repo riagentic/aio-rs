@@ -872,3 +872,27 @@ fn a_callback_calls_the_closure_of_its_bodys_latest_run() {
         "the latest closure, the same handler"
     );
 }
+
+/// A cleanup's script belongs to no view (the one whose cleanup runs is
+/// ending): it lives as long as its handle, whatever owner is current as
+/// the cleanup runs (here the ending view's own: its async handler closed it).
+#[test]
+fn a_script_a_cleanup_runs_ends_with_its_handle_not_with_a_view() {
+    thread_local!(static GOT: RefCell<Option<Result<String, String>>> = const { RefCell::new(None) });
+    #[component]
+    fn Bye(close: Callback) -> View {
+        on_cleanup(|| {
+            let e = eval("return 1");
+            spawn_forever(async move { GOT.set(Some(e.join_json().await)) });
+        });
+        rsx! { button { "data-t": "close", onclick: move |_| async move { close.call(()) }, "Close" } }
+    }
+    let open = Signal::new(true);
+    let mut p = TestPage::mount(move || rsx! { if open.get() { Bye { close: move |()| open.set(false) } } });
+    p.click("close");
+    let (id, js) = p.scripts.last().cloned().unwrap();
+    assert_eq!(js, "return 1");
+    p.answer(id, 1, "1");
+    assert_eq!(GOT.take(), Some(Ok("1".into())), "its answer comes back");
+    assert_eq!(air::live().scripts, 0, "and it is gone with its handle");
+}

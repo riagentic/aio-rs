@@ -267,6 +267,17 @@ fn take_cleanups(k: Key) -> Vec<Box<dyn FnOnce()>> {
     out
 }
 
+/// Run cleanups in order, under no owner and untracked: what one makes
+/// (a script, a task) belongs to no view, never to whichever owner is
+/// current as they run (often the one ending).
+fn run_cleanups(fs: Vec<Box<dyn FnOnce()>>) {
+    if fs.is_empty() {
+        return;
+    }
+    let _r = enter(None, None);
+    fs.into_iter().for_each(|f| f());
+}
+
 /// Dispose `k` and all it owns: their cleanups run (while what they own is
 /// still there: a cleanup reads its view's signals, as Solid's
 /// do), then their slots are freed.
@@ -297,8 +308,8 @@ fn dispose_then(k: Key, soon: bool) {
     if bare {
         return;
     }
-    take_cleanups(k).into_iter().for_each(|f| f());
-    let (cleanups, trash) = rt(|rt| {
+    run_cleanups(take_cleanups(k));
+    let (mut cleanups, trash) = rt(|rt| {
         let mut stack = vec![k];
         let (mut cleanups, mut trash) = (vec![], vec![]);
         while let Some(k) = stack.pop() {
@@ -323,7 +334,8 @@ fn dispose_then(k: Key, soon: bool) {
         true => LEFT.with_borrow_mut(|l| l.push(Box::new(trash))),
         false => drop(trash),
     }
-    cleanups.into_iter().rev().for_each(|f| f());
+    cleanups.reverse();
+    run_cleanups(cleanups);
 }
 
 thread_local!(static LEFT: RefCell<Vec<Box<dyn Any>>> = const { RefCell::new(Vec::new()) });
@@ -347,7 +359,7 @@ fn reset(k: Key) {
     // Every cleanup first (what it owned is still there), then the slots go.
     let mut run: Vec<Box<dyn FnOnce()>> = owned.iter().rev().flat_map(|o| take_cleanups(*o)).collect();
     run.extend(cleanups.into_iter().rev());
-    run.into_iter().for_each(|f| f());
+    run_cleanups(run);
     owned.into_iter().rev().for_each(dispose);
 }
 
@@ -1615,7 +1627,8 @@ pub fn watch<D: Clone + PartialEq + 'static>(deps: D, mut f: impl FnMut(D) + 'st
     hook("watch", move || _ = effect_now(move || f(deps.clone())))
 }
 
-/// Run `f` when the view goes away (a hook).
+/// Run `f` when the view goes away (a hook). What `f` starts (an `eval`,
+/// a `spawn`) is no view's: it lives as long as its handle, or until done.
 #[track_caller]
 pub fn on_cleanup(f: impl FnOnce() + 'static) {
     hook("on_cleanup", || cleanup(f))

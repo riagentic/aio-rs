@@ -554,6 +554,13 @@ version may break things.
   closure that saw the first run's values (their docs said the latest
   runs). It is the same handler still, calling the latest run's closure.
 
+- A cleanup (`on_cleanup`, a hook's end) ran under whatever owner was
+  current, often the view that was ending: an `eval` or a `spawn` in it
+  belonged to that view and ended at once (an `eval`'s answer was "the
+  script's view ended"), or lived on with an unrelated one. Cleanups run
+  under no owner now: what they start lives as long as its handle, or
+  until it is done.
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a
