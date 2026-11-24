@@ -130,25 +130,29 @@ pub fn key(app: &str, cell: &str) -> String {
     format!("{}:{cell}", prefix(app))
 }
 
-/// Where a document that can't be read is kept, for whoever wants to look.
-fn corrupt(key: &str) -> String {
-    format!("{key}.corrupt")
+/// `base`, else the first of `base-2`, `base-3`… that is free: never over
+/// a document kept there before.
+fn free(kv: &impl Kv, base: String) -> String {
+    std::iter::once(base.clone())
+        .chain((2..).map(|i| format!("{base}-{i}")))
+        .find(|k| kv.get(k).is_none())
+        .unwrap_or(base)
 }
 
 /// The document at `key`; one that isn't a document (broken JSON, or JSON
-/// of another shape) is kept at `<key>.corrupt` and said, then counts as
-/// none: what it held is lost, but never silently.
+/// of another shape) is kept at `<key>.corrupt` (then `-2`…) and said,
+/// then counts as none: what it held is lost, but never silently.
 pub fn load(kv: &impl Kv, key: &str, say: impl Fn(&str)) -> Option<Doc> {
     let raw = kv.get(key)?;
     match serde_json::from_str::<Doc>(&raw) {
         Ok(d) => Some(d),
         Err(e) => {
-            _ = kv.set(&corrupt(key), &raw);
-            say(&format!(
-                "the offline queue at \"{key}\" can't be read ({e}): its unsent calls are lost; the raw document \
-                 is kept at \"{}\"",
-                corrupt(key)
-            ));
+            let aside = free(kv, format!("{key}.corrupt"));
+            let kept = match kv.set(&aside, &raw) {
+                Ok(()) => format!("the raw document is kept at \"{aside}\""),
+                Err(e) => format!("the raw document could not be kept ({e})"),
+            };
+            say(&format!("the offline queue at \"{key}\" can't be read ({e}): its unsent calls are lost; {kept}"));
             kv.remove(key);
             None
         }
@@ -165,11 +169,7 @@ pub fn current(kv: &impl Kv, key: &str, d: Doc, cell: &str, v: u32, say: impl Fn
     }
     if !d.pending.is_empty() {
         // Never over an earlier one (the same version orphaned twice).
-        let base = format!("{key}.orphan-v{}", d.v);
-        let aside = std::iter::once(base.clone())
-            .chain((2..).map(|i| format!("{base}-{i}")))
-            .find(|k| kv.get(k).is_none())
-            .unwrap_or(base);
+        let aside = free(kv, format!("{key}.orphan-v{}", d.v));
         let kept = match kv.set(&aside, &serde_json::to_string(&d).unwrap_or_default()) {
             Ok(()) => format!("kept at \"{aside}\""),
             Err(e) => format!("not kept: {e}"),
@@ -387,6 +387,21 @@ mod tests {
             assert_eq!(ops(&kv, K), ["a1"]);
             assert_eq!(kv.get("aio.app:todos.corrupt").as_deref(), Some(raw));
         }
+        // A second one is kept beside the first, never over it.
+        let kv = Map::default();
+        for raw in ["{first", "{second"] {
+            kv.set(K, raw).unwrap();
+            assert_eq!(load(&kv, K, |_| {}), None);
+        }
+        assert_eq!(kv.get("aio.app:todos.corrupt").as_deref(), Some("{first"));
+        assert_eq!(kv.get("aio.app:todos.corrupt-2").as_deref(), Some("{second"));
+        // Storage full: said as not kept, never as kept.
+        let kv = Map::default();
+        kv.set(K, "{broken").unwrap();
+        kv.full.set(true);
+        let said = RefCell::new(Vec::new());
+        assert_eq!(load(&kv, K, |m| said.borrow_mut().push(m.to_string())), None);
+        assert!(said.borrow()[0].contains("could not be kept (QuotaExceededError)"), "{:?}", said.borrow());
     }
 
     #[test]

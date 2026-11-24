@@ -439,6 +439,10 @@ version may break things.
   `+01:-5`) as an offset. Each part is two digits.
 - An aio page's sync stamp at the far end of time (`-1e300`) overflowed
   the server's clock check: a panic of its link in a debug build.
+- A page's offline queue that couldn't be read twice kept only the second
+  (`<key>.corrupt` was written over), and one the browser refused to keep
+  (storage full) was said to be kept. A second goes to `<key>.corrupt-2`
+  (then `-3`…), and a refused one is said as not kept.
 
 ## [0.4.2] - 2026-11-11
 
