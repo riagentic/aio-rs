@@ -298,6 +298,12 @@ pub fn optionals(os: &str, desktop: bool, ran: &dyn Fn(&str, &str) -> Option<Str
             used.map(String::from),
             fix,
         ));
+        v.push(optional(
+            "Xvfb",
+            "ax build --smoke on a real X display; without it, the runtime's headless one, unlike a user's (no tray)",
+            xvfb.then(|| "ax build --smoke's display".into()),
+            "sudo apt install xvfb (Debian, Ubuntu) · sudo dnf install xorg-x11-server-Xvfb (Fedora)",
+        ));
     }
     v
 }
@@ -477,6 +483,13 @@ mod tests {
             xephyr(false)[2].found.as_ref().unwrap_err().contains("apt install xvfb"),
             "no desktop: Xephyr holds nothing"
         );
+        // Xephyr alone: --smoke runs on the runtime's headless display, so Xvfb is still named.
+        assert_eq!(
+            (xephyr(true)[3].what.as_str(), linux[3].found.as_deref()),
+            ("Xvfb", Ok("ax build --smoke's display"))
+        );
+        let smoke = &xephyr(true)[3];
+        assert!(smoke.why.contains("--smoke") && smoke.found.as_ref().unwrap_err().contains("apt install xvfb"));
         assert!(optionals("windows", false, &none)[0].found.as_ref().unwrap_err().contains("winget install Git.Git"));
     }
 

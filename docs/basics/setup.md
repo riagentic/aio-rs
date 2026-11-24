@@ -147,6 +147,7 @@ Rust's compile time, ~25 s); `ax setup --warm` does it anywhere.
 | git | package | Command Line Tools | `winget install Git.Git` | build numbers `M.m.<commits>` and releases (without it: `M.m.0-nogit`, no release) | checks |
 | ffmpeg | package | `brew install ffmpeg` | `winget install Gyan.FFmpeg` | `ax test --video`, `ax shot --video` | checks |
 | Xephyr or Xvfb | package | – | – | an agent's windows off the person's screen; on Linux with no desktop (a server, CI), Xvfb is the only way a window opens | checks |
+| Xvfb | package | – | – | `ax build --smoke` on a real X display; without it the runtime's headless one, unlike a user's (no tray) | checks, also when Xephyr is here |
 | wasm-bindgen 0.2.129 | fetched | fetched | fetched (x86_64) | `ax dev --web`, `ax build --web` | fetches it (SHA-256 pinned in ax) |
 | aio-rs's Rust toolchain + `wasm32-unknown-unknown`, `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android` | rustup | rustup | rustup | the web and Android builds | names the `rustup target add --toolchain …` line |
 | Android SDK, NDK, JDK 17-23, Gradle 8.9+ | yes | yes | yes | `ax build --android`, `ax dev --android` | the build says what is missing |

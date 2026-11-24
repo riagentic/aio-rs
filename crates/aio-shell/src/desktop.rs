@@ -477,4 +477,33 @@ mod tests {
         let t = Tray { menu: &BOTH, ..Default::default() };
         assert_eq!(said(asks(&json!({ "t": "tray", "i": 0 }), Some(&t))), ["run pause", "go /b"]);
     }
+
+    /// The real shell with a tray and no display on Linux (Chromium's headless
+    /// ozone, `ax build --smoke` without Xvfb): GTK would abort the runtime on the
+    /// tray, so it is skipped, said once, and the window still opens.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_no_display_the_tray_is_skipped_and_the_window_opens() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let rt = crate::runtime::dir();
+        if !crate::runtime::exe(&rt).exists() {
+            return eprintln!("skipped: no Electron runtime in {}", rt.display());
+        }
+        let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
+        let dir = d.path().join("shell");
+        let tray = Tray { close_to_tray: true, menu: &MENU, ..Default::default() };
+        crate::install(&dir, "trayed", &crate::Window { title: "Trayed", tray: Some(tray), ..Default::default() })
+            .unwrap();
+        let (mut child, _wires, mut ctls) = crate::splash::tests::headless(&rt, d.path(), &dir, "Trayed");
+        let ctl = tokio::time::timeout(std::time::Duration::from_secs(60), ctls.accept()).await.unwrap().unwrap();
+        let (r, mut ctl) = tokio::io::split(ctl);
+        ctl.write_all(b"{\"t\":\"place\",\"width\":640,\"height\":480}\n").await.unwrap();
+        let mut told = tokio::io::BufReader::new(r).lines();
+        crate::splash::tests::until(&mut told, r#""state":"loaded""#, &mut vec![]).await;
+        _ = child.kill().await;
+        let mut said = String::new();
+        tokio::io::AsyncReadExt::read_to_string(child.stderr.as_mut().unwrap(), &mut said).await.unwrap();
+        assert_eq!(said.matches("[aio-shell] tray: ").count(), 1, "said once: {said}");
+        assert!(said.contains("[aio-shell] tray: skipped, no display"), "{said}");
+    }
 }

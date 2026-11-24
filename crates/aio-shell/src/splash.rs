@@ -315,7 +315,7 @@ pub(crate) mod tests {
     }
 
     /// The first line of `lines` that holds `want` (the lines before it kept in `said`).
-    async fn until<R: tokio::io::AsyncBufRead + Unpin>(
+    pub(crate) async fn until<R: tokio::io::AsyncBufRead + Unpin>(
         lines: &mut tokio::io::Lines<R>,
         want: &str,
         said: &mut Vec<String>,
@@ -328,6 +328,40 @@ pub(crate) mod tests {
                 _ => panic!("never said {want:?}: {said:#?}"),
             }
         }
+    }
+
+    /// The real shell (main.js) in `dir` started in runtime `rt` with no
+    /// display (Chromium's headless ozone), its sockets and profile in `d`:
+    /// the runtime (its stderr piped), the wire and the control listeners.
+    pub(crate) fn headless(
+        rt: &std::path::Path,
+        d: &std::path::Path,
+        dir: &std::path::Path,
+        title: &str,
+    ) -> (tokio::process::Child, aio::ipc::Listener, aio::ipc::Listener) {
+        let (sock, ctl_sock) = (aio::ipc::addr(d, "wire"), aio::ipc::addr(d, "ctl"));
+        let wires = aio::ipc::Listener::bind(&sock).unwrap();
+        let ctls = aio::ipc::Listener::bind(&ctl_sock).unwrap();
+        let child = tokio::process::Command::new(crate::runtime::exe(rt))
+            .arg(dir)
+            .args(crate::runtime::sandbox_args(rt))
+            .args(["--ozone-platform=headless", &format!("--aio-title={title}"), "--aio-width=640", "--aio-height=480"])
+            // GL drawn by SwiftShader, as TestUi's: with no display the default GL
+            // fails its start under load and a hidden window may never paint.
+            .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
+            .arg(format!("--user-data-dir={}", d.join("profile").display()))
+            .arg(format!("--aio-sock={sock}"))
+            .arg(format!("--aio-ctl={ctl_sock}"))
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env("TMPDIR", d)
+            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", d.join("no-bus").display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        (child, wires, ctls)
     }
 
     /// The real shell (main.js) in the runtime, headless: the splash is up
@@ -356,28 +390,7 @@ pub(crate) mod tests {
         // Built in: the Windows lane runs this binary away from the source tree.
         let s = Splash { png: include_bytes!("../../aio/tests/fixtures/splash.png"), ..s };
         install(&dir, Some(&s), "Splashed", "1.0.0", &colors(210, None), None).unwrap();
-        let (sock, ctl_sock) = (aio::ipc::addr(d.path(), "wire"), aio::ipc::addr(d.path(), "ctl"));
-        let mut wires = aio::ipc::Listener::bind(&sock).unwrap();
-        let mut ctls = aio::ipc::Listener::bind(&ctl_sock).unwrap();
-        let mut child = tokio::process::Command::new(&exe)
-            .arg(&dir)
-            .args(crate::runtime::sandbox_args(&rt))
-            .args(["--ozone-platform=headless", "--aio-title=Splashed", "--aio-width=640", "--aio-height=480"])
-            // GL drawn by SwiftShader, as TestUi's: with no display the default GL
-            // fails its start under load and a hidden window may never paint.
-            .args(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
-            .arg(format!("--user-data-dir={}", d.path().join("profile").display()))
-            .arg(format!("--aio-sock={sock}"))
-            .arg(format!("--aio-ctl={ctl_sock}"))
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .env("TMPDIR", d.path())
-            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", d.path().join("no-bus").display()))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let (mut child, mut wires, mut ctls) = headless(&rt, d.path(), &dir, "Splashed");
         let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
         let mut said = vec![];
         let ctl = tokio::time::timeout(std::time::Duration::from_secs(60), ctls.accept()).await.unwrap().unwrap();
