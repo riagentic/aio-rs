@@ -176,6 +176,10 @@ version may break things.
   reads (lines queued up, or a long one) arrived as two replacement
   characters: a notice's title, a dialog's title or start folder, a tray
   tooltip. The runtime reads the line as UTF-8 text whole.
+- Windows: a launch (or `ax stop`, `--quit`, `--takeover`) that reached
+  the running app just as another connected failed at once, `All pipe
+  instances are busy`, as if the app were not answering: it waits for the
+  pipe's next instance, as the async connect did.
 - A launch that connected to the running app and never sent its line (a
   frozen process) held up every later launch and `ax stop` on Windows:
   each hand-over is read on its own.
