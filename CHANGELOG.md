@@ -171,6 +171,12 @@ version may break things.
 
 ### Fixed
 
+- `aio::process`: a `Child` waited for and dropped later signalled its
+  process group by the program's pid after the program was reaped: by
+  then a process that took the pid over (and led a group of its own, as
+  a shell's job does) got the SIGTERM and SIGKILL. The program is now
+  reaped only after its group's last signal.
+
 - A cell's diagnostic (a refused reaction, a timed-out effect, a refused
   `#[on_stop]`, a cell disabled after failures) sometimes came without
   its cell's name and state: when another thread was showing a commit of

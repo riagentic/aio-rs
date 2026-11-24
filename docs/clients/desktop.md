@@ -395,7 +395,10 @@ assert!(h.state().output.as_deref().is_some_and(|o| o.starts_with("cargo")));
   only the process you can see.
 - **Dropped is killed**: a `Child` dropped (an effect aborted or timed out
   at its next await) takes its tree with it. One still running when the
-  app stops is killed then, and the log names it.
+  app stops is killed then, and the log names it. On Unix the program is
+  reaped only after its group's last signal (its grace after the drop),
+  so its pid, the group's id, is never another process's by then: a kill
+  never reaches a stranger that took the pid over.
 - **No console windows**: on Windows every program starts without a
   console window, and a release app (no console of its own) adopts one
   hidden console at start, so a console program started any other way

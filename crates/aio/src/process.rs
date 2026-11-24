@@ -175,16 +175,29 @@ impl Command {
         };
         let out = read(child.stdout.take().map(|s| Box::new(s) as _), Stream::Stdout);
         let err = read(child.stderr.take().map(|s| Box::new(s) as _), Stream::Stderr);
+        let stdin = child.stdin.take();
         let group = Arc::new(Group {
             pid,
             name,
             grace: self.grace,
             paused: Default::default(),
+            ended: Default::default(),
+            #[cfg(unix)]
+            _leader: Mutex::new(child),
             #[cfg(windows)]
             job,
         });
         lock().push(group.clone());
-        Ok(Child { stdin: child.stdin.take(), child, readers: [out, err], group, status: None })
+        Ok(Child {
+            stdin,
+            #[cfg(windows)]
+            child,
+            #[cfg(unix)]
+            exit: Exit::Unasked,
+            readers: [out, err],
+            group,
+            status: None,
+        })
     }
 
     /// Run it to its end and keep what it wrote (its lines also go to
@@ -223,11 +236,22 @@ impl Command {
 
 /// A running program. Dropped, its whole tree is killed.
 pub struct Child {
+    #[cfg(windows)]
     child: tokio::process::Child,
+    #[cfg(unix)]
+    exit: Exit,
     stdin: Option<tokio::process::ChildStdin>,
     readers: [Option<tokio::task::JoinHandle<()>>; 2],
     group: Arc<Group>,
     status: Option<ExitStatus>,
+}
+
+/// Unix: the program's exit, read without reaping it ([`Group`]).
+#[cfg(unix)]
+enum Exit {
+    Unasked,
+    Asked(tokio::task::JoinHandle<io::Result<ExitStatus>>),
+    Ended(ExitStatus),
 }
 
 /// What a kill needs, also from the registry at the app's stop.
@@ -238,6 +262,13 @@ struct Group {
     grace: Duration,
     name: String,
     paused: std::sync::atomic::AtomicBool,
+    /// [`Group::end`] ran: once is enough.
+    ended: std::sync::atomic::AtomicBool,
+    /// Unix: the program, reaped only as this drops, after its group's last
+    /// signal: until then its pid, the group's id, is no other process's,
+    /// so a signal meant for the tree never reaches one that took it over.
+    #[cfg(unix)]
+    _leader: Mutex<tokio::process::Child>,
     #[cfg(windows)]
     job: Job,
 }
@@ -284,11 +315,30 @@ impl Child {
         if let Some(s) = self.status {
             return Ok(s);
         }
-        // Held while it runs: a paused (test) clock never jumps past a
-        // program, which runs on the wall clock.
-        let (_running, ended) = std::sync::mpsc::channel::<()>();
-        let _held = tokio::task::spawn_blocking(move || _ = ended.recv());
-        let s = self.child.wait().await?;
+        // A blocking wait, held while it runs: a paused (test) clock never
+        // jumps past a program, which runs on the wall clock.
+        #[cfg(unix)]
+        let s = loop {
+            match &mut self.exit {
+                Exit::Ended(s) => break *s,
+                Exit::Asked(h) => {
+                    let got = h.await;
+                    // Asked again after an error.
+                    self.exit = Exit::Unasked;
+                    self.exit = Exit::Ended(got.map_err(io::Error::other)??);
+                }
+                Exit::Unasked => {
+                    let pid = self.group.pid;
+                    self.exit = Exit::Asked(tokio::task::spawn_blocking(move || exited(pid)));
+                }
+            }
+        };
+        #[cfg(windows)]
+        let s = {
+            let (_running, ended) = std::sync::mpsc::channel::<()>();
+            let _held = tokio::task::spawn_blocking(move || _ = ended.recv());
+            self.child.wait().await?
+        };
         self.stdin = None;
         // Each reader is let go only once read to the end: a wait cut short
         // (a timeout's) leaves it for the next one (`kill`'s).
@@ -345,25 +395,24 @@ impl Group {
         }
     }
 
-    /// The tree ended: on Unix SIGCONT (a stopped process can't take a
-    /// TERM), SIGTERM, then SIGKILL after the grace to what is left of the
-    /// group; on Windows its job ended.
-    fn end(&self) {
+    /// The tree ended, once: on Unix SIGCONT (a stopped process can't take
+    /// a TERM), SIGTERM, then SIGKILL after the grace to what is left of
+    /// the group (the program unreaped until then, so the group is still
+    /// its own); on Windows its job ended.
+    fn end(self: &Arc<Self>) {
+        if self.ended.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         #[cfg(unix)]
         {
             _ = self.group_signal(libc::SIGCONT);
             if self.group_signal(libc::SIGTERM).is_err() {
                 return;
             }
-            let (pid, grace) = (self.pid as i32, self.grace);
+            let me = self.clone();
             _ = std::thread::Builder::new().name("aio-kill".into()).spawn(move || {
-                let until = std::time::Instant::now() + grace;
-                // SAFETY: signal 0 only asks whether the group has a member.
-                while std::time::Instant::now() < until && unsafe { libc::kill(-pid, 0) } == 0 {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                // SAFETY: as above, the child's own group.
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                std::thread::sleep(me.grace);
+                _ = me.group_signal(libc::SIGKILL);
             });
         }
         #[cfg(windows)]
@@ -392,6 +441,30 @@ fn kill_all(left: &[Arc<Group>]) -> Option<String> {
     let names: Vec<String> = left.iter().map(|g| format!("{} (pid {})", g.name, g.pid)).collect();
     (!left.is_empty())
         .then(|| format!("[aio] stopping: killed {} program(s) still running: {}", left.len(), names.join(", ")))
+}
+
+/// Unix: wait for `pid`, a child of this process, to exit, and leave it
+/// unreaped (`WNOWAIT`): its exit status.
+#[cfg(unix)]
+fn exited(pid: u32) -> io::Result<ExitStatus> {
+    use std::os::unix::process::ExitStatusExt;
+    // SAFETY: all zeros is a valid `siginfo_t`; `waitid` fills it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: this process's own child, left as it is (`WNOWAIT`).
+    while unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) } != 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+    // SAFETY: the status of a `WEXITED` siginfo.
+    let st = unsafe { info.si_status() };
+    // As `waitpid` encodes it.
+    Ok(ExitStatus::from_raw(match info.si_code {
+        libc::CLD_EXITED => (st & 0xff) << 8,
+        libc::CLD_DUMPED => st | 0x80,
+        _ => st,
+    }))
 }
 
 /// Read `r` to its end, each line (`\n`, `\r\n` or `\r` ended; the last
@@ -659,6 +732,28 @@ mod tests {
         assert_eq!(c.pause().unwrap_err().kind(), io::ErrorKind::Unsupported);
         // Already in a console (the test's): nothing to adopt.
         hide_console();
+    }
+
+    /// Its pid, its group's id, stays this tree's until the group's last
+    /// signal: never reaped before (a wait leaves it unreaped), so a
+    /// process that took the pid over never gets a signal meant for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn its_pid_is_held_until_its_group_had_its_last_signal() {
+        let mut c = Command::new("true").grace(Duration::from_millis(100)).spawn().unwrap();
+        let pid = c.id() as i32;
+        assert!(c.wait().await.unwrap().success());
+        assert!(c.wait().await.unwrap().success(), "asked again, the same");
+        // SAFETY: signal 0 asks only whether the pid is taken.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "not reaped by the wait: the pid is no one else's");
+        drop(c);
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        // SAFETY: as above.
+        while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: as above.
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "reaped after its group's last signal");
     }
 
     #[cfg(unix)]
