@@ -47,6 +47,25 @@ pub fn fails(f: impl FnOnce()) -> String {
     e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
 }
 
+/// The test world to this test alone, while the guard lives: tests that
+/// share one world of the process (a demo world an app builds in its
+/// sandbox, a global they change) take it first,
+/// `let _world = aio::testing::exclusive();`, and run one at a time; the
+/// rest of the suite still runs in parallel. Once per test: a second take
+/// on the same thread deadlocks. A test that failed holding it passes it on.
+///
+/// ```
+/// let _world = aio::testing::exclusive();
+/// ```
+/// ```compile_fail
+/// let _ = aio::testing::exclusive(); // dropped at once: refused
+/// ```
+#[must_use = "the world is the test's only while the guard lives: `let _world = exclusive();`"]
+pub fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static WORLD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WORLD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Is the failure under way one a test asked for (`fails`)?
 #[cfg(feature = "kit")]
 fn failing_on_purpose() -> bool {
@@ -1335,6 +1354,31 @@ pub fn cdp_key(name: &str, bits: u32) -> Option<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tests_that_take_the_world_run_one_at_a_time_and_a_failed_one_passes_it_on() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static INSIDE: AtomicUsize = AtomicUsize::new(0);
+        fails(|| {
+            let _world = exclusive();
+            panic!("a test failed holding it");
+        });
+        let most = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let _world = exclusive();
+                    let n = INSIDE.fetch_add(1, Ordering::SeqCst) + 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                    INSIDE.fetch_sub(1, Ordering::SeqCst);
+                    n
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .max();
+        assert_eq!(most, Some(1));
+    }
 
     #[cfg(feature = "server")]
     #[test]

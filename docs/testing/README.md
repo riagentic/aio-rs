@@ -352,6 +352,16 @@ the world.
   (`XDG_DATA_HOME`, else `~/.local/share`) answer the sandbox's in a test.
   `std::env::var("HOME")` (or an `XDG_*_HOME`) still names the person's
   real ones: `ax lint` warns on it.
+- `in_sandbox()` is the guard for every side effect a test must not
+  have: a process the app starts (a root helper, an installer), a write
+  outside the app's own dirs (`/etc`, a system service). A UI test clicks
+  "Apply" as a person does, so the code behind it must check. In the test
+  world `aio::process::Command` refuses a program that raises privileges
+  (`pkexec`, `sudo`, `doas`, `su`); `std::process::Command` is not watched.
+- Tests that share one world of the process (a demo world the app
+  builds, a `static` they change) take it in turn:
+  `let _world = aio::testing::exclusive();`, once per test; the others
+  still run in parallel.
 - A test that needs hardware puts the transport behind a trait and gives
   the test world a simulated device, or replays a [cassette](cassettes.md).
 - A UI test's page and aio-rs's own outbound requests are held to this

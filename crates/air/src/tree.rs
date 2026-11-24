@@ -163,6 +163,27 @@ pub(crate) fn current() -> Option<Id> {
     CURRENT.get()
 }
 
+/// The name of the component whose view is built or updated now ("": none).
+pub(crate) fn current_name() -> &'static str {
+    with(CURRENT.get(), |c| c.name).unwrap_or("")
+}
+
+/// The count of components placed so far (on this thread).
+pub(crate) fn seq() -> u64 {
+    TREE.with_borrow(|t| t.seq)
+}
+
+/// The names of the mounted components placed after [`seq`] was `since`, once each.
+pub(crate) fn mounted_since(since: u64) -> Vec<&'static str> {
+    TREE.with_borrow(|t| {
+        let mut names: Vec<&'static str> =
+            t.slots.iter().filter_map(|(_, c)| c.as_ref()).filter(|c| c.seq > since).map(|c| c.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    })
+}
+
 /// Restores the component that was current when dropped.
 pub(crate) struct Enter(Option<Id>);
 

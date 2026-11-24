@@ -310,7 +310,7 @@ Rename it (`begin`) when porting.
 | `t.expect.state(s => ..)` | `assert!(..h.state()..)` |
 | `bootCells`, `advance(ms)` | `TestCells::new()`, `t.advance(ms)`, `t.settle()` |
 | `testUI(App, ..)`, `ui.SaveButton.click()` | `TestUi::new(App)`, `ui.click("SaveButton")` |
-| `ui.expectCell(todo, ..)` | `HANDLE.peek().state()` or `ui.expect_cell(..)` |
+| `ui.expectCell(todo, ..)` | `HANDLE.read_untracked().state()` or `ui.expect_cell(&todo::Ui, ..)` |
 | `testServer`, `testMultiClient` | `TestServer`, `Sim` |
 | `cassette`, `stub` | `aio::cassette::Cassette` |
 | `testComponent(C, props)` | `aio::testing::Mount::default().component(C, props)`; `ax preview <app> <component>` |

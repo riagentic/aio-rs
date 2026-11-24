@@ -158,20 +158,26 @@
       const hits = bySelector(t);
       return hits.length === 1 ? hits[0] : null;
     }
-    const exact = document.querySelector(handle(t));
-    let root = top, inner = t;
-    const cut = t.lastIndexOf("/");
-    if (cut >= 0 && !exact) {
-      root = find(t.slice(0, cut));
-      if (!root) return null;
-      inner = t.slice(cut + 1);
-    }
-    const inside = (el) => el !== root && root.contains(el);
-    if (exact && inside(exact)) return exact;
-    const byHandle = Array.from(document.querySelectorAll(handle(inner))).find(inside);
-    if (byHandle) return byHandle;
+    const [root, inner] = split(t);
+    if (!root) return null;
+    const hits = handled(root, inner);
+    if (hits.length) return hits.length === 1 ? hits[0] : null;
     const byName = named(root).find(([n]) => n === inner);
     return byName ? byName[1] : null;
+  };
+  // A handle path's scope and last part: `outer/t` is `t` inside `outer`,
+  // unless an element's handle is the whole path. No scope: `outer` is gone.
+  const split = (t) => {
+    const cut = t.lastIndexOf("/");
+    if (cut < 0 || document.querySelector(handle(t))) return [top, t];
+    return [find(t.slice(0, cut)), t.slice(cut + 1)];
+  };
+  // The elements in `root` handled `t`; of two or more, the showing ones
+  // when any shows (a person sees those).
+  const handled = (root, t) => {
+    const all = Array.from(document.querySelectorAll(handle(t))).filter((el) => el !== root && root.contains(el));
+    const shown = all.filter((el) => !hidden(el));
+    return all.length > 1 && shown.length ? shown : all;
   };
   const handles = () =>
     [...new Set(Array.from(document.querySelectorAll("[data-t]")).map((e) => e.getAttribute("data-t")))].sort();
@@ -196,6 +202,16 @@
     }
     // A selector given as a handle: say how to give it.
     const looks = /^[#.[]|[\s>:]/.test(t) ? ` (a CSS selector? css=${t})` : "";
+    const [root, inner] = t.startsWith(TEXT) ? [null] : split(t);
+    const twins = root ? handled(root, inner) : [];
+    if (twins.length > 1) {
+      const place = (el) => {
+        const who = el.parentElement?.closest("[data-t]")?.getAttribute("data-t");
+        const text = words(el.textContent);
+        return `<${el.localName}>${text ? " " + debug(cutText(text, 30)) : ""}${who ? ` in data-t="${who}"` : ""}`;
+      };
+      return { error: `${twins.length} elements have data-t="${inner}" (${twins.map(place).join(", ")}): give each its own handle, or name one inside another (outer/${inner})` };
+    }
     if (!t.startsWith(TEXT)) return { error: `no element with data-t="${t}"${looks}; ${there}` };
     const hits = byText(t.slice(TEXT.length)), all = named(top);
     if (!hits.length) return { error: `no showing element has the text ${JSON.stringify(t.slice(TEXT.length))}; ${there}` };

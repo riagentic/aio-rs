@@ -440,6 +440,39 @@ fn Avatar(src: String) -> Element {
 }
 
 #[test]
+fn a_literal_handle_on_two_elements_that_show_together_is_a_warning() {
+    let d = project(&[(
+        "src/ui.rs",
+        r#"
+fn App() -> View {
+    rsx! {
+        nav { button { "data-t": "fleet", "Fleet" } }
+        table { "data-t": "fleet" }
+        if open() { p { "data-t": "note" } } else { p { "data-t": "note" } }
+        match tab() { Tab::A => { Card { "data-t": "card" } } _ => { Card { "data-t": "card" } } }
+        for r in rows() { li { key: "{r.id}", "data-t": "row" } }
+        p { "data-t": "row-{n}" }
+        p { "data-t": "row-{n}" }
+    }
+}
+
+fn Other() -> View {
+    rsx! { Card { "data-t": "card" } }
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let got: Vec<_> =
+        r.issues.iter().filter(|i| i.area == "render").map(|i| (i.line.unwrap(), i.message.as_str())).collect();
+    assert_eq!(
+        got,
+        [(5, "data-t \"fleet\" is on 2 elements that show together: a test naming it can't tell them apart")],
+        "{:?}",
+        r.issues
+    );
+}
+
+#[test]
 fn drag_data_set_in_a_views_dragstart_is_a_warning() {
     let d = project(&[(
         "src/ui.rs",

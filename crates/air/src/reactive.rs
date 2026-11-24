@@ -423,13 +423,26 @@ fn notify(s: Key, checked: bool) {
 
 /// Run queued effects until none is left, owners first; one queued twice
 /// runs once (AIR `_flushSubscribers`); then the effects and calls that
-/// wait for the view to be drawn; until nothing is left of either.
+/// wait for the view to be drawn; until nothing is left of either, or
+/// [`ROUNDS`] of those draw again (a loop).
 fn drain() {
-    loop {
+    let mut since = 0;
+    for round in 0.. {
         run_queue();
         let later = rt(|rt| std::mem::take(&mut rt.later));
         if later.is_empty() {
             break;
+        }
+        if round == ROUNDS - 1 {
+            since = crate::tree::seq();
+        } else if round == ROUNDS {
+            let names = crate::tree::mounted_since(since);
+            let names = if names.is_empty() { "none (an effect's first run?)".into() } else { names.join(", ") };
+            panic!(
+                "air: views still drawn again after {ROUNDS} rounds: what runs once a view is drawn (`onmounted`, an \
+                 effect's first run) writes what draws it again, on and on (a view that remounts on its own \
+                 mount?); still mounting: {names}"
+            );
         }
         rt(|rt| rt.batch += 1);
         struct Unbatch;

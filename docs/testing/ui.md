@@ -123,8 +123,13 @@ Every method takes `t`, which names exactly one showing element:
 | `css=.rows li:nth-child(2)` | the one element a CSS selector matches; `list/css=li` inside `list` |
 | `window` | for `focus` and keys only: no element, keys go to the document |
 
-Two matches for `text=` or `css=` fail, naming them: a test never acts
-on a guess. A `data-t` handle is checked first, then the auto names.
+Two matches fail, naming them: a test never acts on a guess. Two
+showing elements with one `data-t` handle are refused too (`2 elements
+have data-t="fleet" (<button> "Fleet" in data-t="side", <table> …)`):
+give each its own handle, or name one inside another (`side/fleet`); a
+hidden one doesn't count while one shows, and `count`, `present` and
+`handles` count them all (`ax lint` warns on a literal handle written
+twice in one view). A `data-t` handle is checked first, then the auto names.
 
 ### Auto names
 
@@ -336,15 +341,48 @@ The views run when the test acts or waits, never behind its back.
 | `advance(d)` | moves the views' clock `d` on: their timers due by then fire, each at its moment, then settles; from then on their clock is virtual (`wait` is `advance`) |
 
 - Each wait fails with what it waited for, the screen as `surface()`
-  shows it, and a trace file.
+  shows it, and a trace file; and the components that rendered in its
+  last half second (`still rendering: Gallery/Thumb`), where one that
+  never stops (it remounts on its own success) is the usual cause.
 - `settle()` never gives up silently: a view and a page that keep
-  answering each other fail (`the views and their page never settle`).
+  answering each other fail (`the views and their page never settle`),
+  naming the components still rendering; a view that remounts on its own
+  task's end or its own `onmounted` fails in air, naming it.
 - Time in a `TestUi` is real until `advance(d)`: then the views' clock
   (their sleeps, intervals, debounces, `use_live`'s wait) moves only by
   `advance`, so a 10 s timeout is tested at once. The page's own timers (a
   CSS transition, a page script's `setTimeout`) keep real time; test the
   cell's schedules with
   [`TestCells::advance`](cells.md#time-and-schedules-advance).
+
+A view's own timer (a countdown, a debounce) reads the views' clock,
+`aio::ui::clock::{Instant, sleep}`, never `std::time::Instant`: a
+countdown that ticks with `sleep` but reads the wall clock races the
+machine under a loaded suite, while `advance` moves the views' clock for both:
+
+```rust,no_run
+# use aio::ui::prelude::*;
+# use std::time::Duration;
+use aio::ui::clock::{Instant, sleep};
+
+fn countdown() -> View {
+    let left = signal(|| 8u64);
+    task(move || async move {
+        let start = Instant::now();
+        while left.get_untracked() > 0 {
+            sleep(Duration::from_millis(250)).await;
+            left.set(8u64.saturating_sub((Instant::now() - start).as_secs()));
+        }
+    });
+    rsx! { p { "data-t": "left", "{left}" } }
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(countdown);
+ui.advance(Duration::from_secs(10)); // 10 s at once, whatever the load
+assert_eq!(ui.text("left"), "0");
+# }
+```
 
 Every mount says each new `a11y()` finding once on stderr, as aio's dev
 mode warns once; assert on `a11y()` to fail a test on them. A dev build
@@ -640,7 +678,8 @@ shows in a cell and its decisions in plain functions, and test those:
   them with [`TestCells`](cells.md), then assert that the view's controls
   change them (`ui.drag_by("css=canvas", 40.0, 0.0)`, then `expect_cell`).
 - **The drawing is checked by its pixels.** WebGL runs in the test page
-  (drawn on the CPU), so a canvas app starts and draws in a `TestUi`.
+  (drawn on the CPU; on a Mac by its GPU, through Metal), so a canvas app
+  starts and draws in a `TestUi`.
   Check it with `shot()` against a saved image, or read a pixel with
   `ui.eval("…getImageData(…)…")`; on a running app, `ax shot <app> --check
   base.png` and `ax eval <app> <code>`.
@@ -709,7 +748,11 @@ the process: drive its page over the DevTools protocol.
 - Testing a schedule's effect through the page by waiting minutes: test
   it with `TestCells::advance`, the view with a seeded state.
 - Sharing state between tests through a `static`: each mount resets the
-  app's globals, but not a `static` of your own.
+  app's globals, but not a `static` of your own. Tests that must share one
+  world (a demo world the app builds in the sandbox) take it in turn:
+  `let _world = aio::testing::exclusive();` first in each.
+- Waiting real seconds for a countdown: `advance` it (see
+  [Waiting](#waiting)); a `wait` of real time fails on a busy machine.
 
 ## API
 

@@ -354,10 +354,10 @@ at run time · a refusal nobody took · sleeping in a test instead of TestCells:
 - Waiting in real time in a cell test: TestCells::advance(ms) moves the
   schedule and the effects' clock; settle() runs effects to their end.
 - Calling a method from a view without act!/Ui: the view isn't told.
-- A signal read in an if let / while let / match scrutinee (X.peek()…,
-  X.read()) stays borrowed in its block: a write to X there panics
-  (already borrowed). Bind it first: let v = X.peek().map(..); if let
-  Some(id) = v { .. } (ax lint warns).
+- A signal read in an if let / while let / match scrutinee
+  (X.read_untracked()…, X.read()) stays borrowed in its block: a write to
+  X there panics (already borrowed). Bind it first: let v =
+  X.get_untracked(); if let Some(id) = v { .. } (ax lint warns).
 - spawn(..) ends with its component: a dialog that closes drops it (a
   toast after it never comes). Work that outlives it:
   aio::ui::spawn_forever(..), writing with try_write.
