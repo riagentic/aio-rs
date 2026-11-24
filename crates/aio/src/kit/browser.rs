@@ -18,9 +18,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// What a guest did (`onevent`).
+/// What a guest did (`onevent`). Guests learn new things to say: a
+/// `match` ends with `_ => {}`, and a new kind breaks no app.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum GuestEvent {
     /// It landed on `url`, and whether it can now go back or forward
     /// ([`Go`]). `in_page`: the same document moved (a hash, a single-page

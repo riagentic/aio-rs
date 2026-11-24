@@ -180,7 +180,7 @@ preload the app declared. The window must allow it:
 | `referrer` | the `Referer` its loads send |
 | `host_keys` | 1 to 16 key names (`"Escape"`) that come back to the app even while the guest has focus |
 | `popups` | a link that opens a window goes to the system browser, after a real click |
-| `onevent` | a `GuestEvent`: `Navigated { url, back, forward, in_page }` (`in_page: false`: a new document, a reload too), `LoadFailed { url, code, description }` (nothing answered there), `Title`, `Key(HostKey)`, `Message { channel, args }`, `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive` |
+| `onevent` | a `GuestEvent`: `Navigated { url, back, forward, in_page }` (`in_page: false`: a new document, a reload too), `LoadFailed { url, code, description }` (nothing answered there), `Title`, `Key(HostKey)`, `Message { channel, args }`, `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive`; more may come (`#[non_exhaustive]`): end a `match` with `_ => {}` |
 | `id` | so `aio::kit::Guest::new(id)` can steer it: `load_url`, `url`, `reload`, `stop`, `go_back`, `go_forward`, `send_input`; `aio::kit::go(id, Go::Send { channel, args })` and the rest |
 
 A whole window for another site is `aio_shell::guest::open_window` (needs

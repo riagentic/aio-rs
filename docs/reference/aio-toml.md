@@ -44,7 +44,11 @@ aio's `cell(...)` and `aio.run(...)` to where it lives in aio-rs.
 included. `ax doctor <app>` says who decided each setting of a running app
 (the file, a flag or a variable). The types are in `aio::config`
 (`cargo doc -p aio-rs --no-deps`, `aio::config::Config` and one struct
-per section).
+per section). They grow as `aio.toml` gains keys: build one in code with
+`..Default::default()` (`Limits { clients: 9, ..Default::default() }`),
+and a new key never breaks it. They aren't `#[non_exhaustive]`, which
+would forbid that literal outside aio-rs, and `aio::config!()` writes the
+config as one in the app's crate.
 
 ## Value types
 

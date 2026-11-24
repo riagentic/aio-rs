@@ -184,6 +184,14 @@ version may break things.
 - **Breaking: `MountedData::scroll_to` takes a `ScrollBehavior`**, as
   `scroll` does, not a `bool`: `scroll_to(ScrollBehavior::Smooth)` for
   `scroll_to(true)`, `ScrollBehavior::Instant` for `false`.
+- **Breaking: `GuestEvent` is `#[non_exhaustive]`**: each release gave
+  guests more to say (`LoadFailed` in this one), and each broke a `match`
+  over them; one ends with `_ => {}` now and no new kind breaks it.
+- **Breaking:** aio-config's `App` has `schemes` (deep links, above): a
+  literal naming every field adds `schemes: vec![]`. The config structs
+  stay exhaustive, built with `..Default::default()`, which no new key
+  breaks: `#[non_exhaustive]` would forbid that literal outside aio-rs,
+  and `aio::config!()` writes the config as one in the app's crate.
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.
