@@ -99,14 +99,17 @@
   window.__airReading = () => reading
   const handle = (e) => {
     const ids = []
+    // AIR's SPA defaults: a handled submit never navigates, nor a link
+    // handled by itself or what is in it (not a box around it that hears clicks).
+    const link = e.type === 'click' && e.target.closest && e.target.closest('a[href]')
+    let own = false
     for (const n of e.composedPath()) {
       if (n === document || n === window) break
-      if (n.__airOn && n.__airOn.has(e.type)) ids.push(n.__airId)
+      if (n.__airOn && n.__airOn.has(e.type)) ids.push(n.__airId), (own ||= !!link && link.contains(n))
       if (!e.bubbles && n === e.target) break
     }
     if (!ids.length) return
-    // AIR's SPA defaults: a handled submit never navigates, nor a handled link.
-    if (e.type === 'submit' || (e.type === 'click' && e.target.closest && e.target.closest('a[href]'))) e.preventDefault()
+    if (e.type === 'submit' || own) e.preventDefault()
     send(ids, e)
   }
   const unbubbled = (e) => e.bubbles || handle(e)

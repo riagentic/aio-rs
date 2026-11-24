@@ -158,6 +158,12 @@ version may break things.
 
 ### Fixed
 
+- A link in a box that hears clicks never followed: the page kept every
+  click on a link that any handler on its way up heard, so under
+  `GlobalKeys` (its root hears clicks) no `a { href }` worked, the kit's
+  `target: "_blank"` links (Markdown's, `SignIn`'s, the router's external
+  `Link`) neither. Only a link whose own handler (or one inside it) hears
+  the click is the app's to follow now.
 - A hole or effect that reads a signal and a memo of it (`"{n} {label}"`,
   `label` a memo of `n`) ran twice per write: once for the signal, again
   for the memo's new value, which its first run had read already. A run

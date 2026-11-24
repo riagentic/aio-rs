@@ -646,3 +646,24 @@ fn a_handle_two_showing_elements_share_is_refused_naming_both() {
     assert_eq!(ui.count("[data-t=fleet]"), 2);
     assert!(ui.present("fleet"));
 }
+
+fn links() -> View {
+    let n = signal(|| 0u32);
+    rsx! {
+        div { "data-t": "box", onclick: move |_| n += 1,
+            a { "data-t": "plain", href: "#plain", "plain" }
+            a { "data-t": "routed", href: "#routed", onclick: move |_| {}, "routed" }
+            p { "data-t": "n", "{n}" }
+        }
+    }
+}
+
+#[test]
+fn a_link_in_a_box_that_hears_clicks_follows_and_one_with_its_own_handler_does_not() {
+    let mut ui = TestUi::new(links);
+    ui.click("plain");
+    assert_eq!(ui.eval("location.hash"), serde_json::json!("#plain"), "the box's handler is not the link's");
+    assert_eq!(ui.text("n"), "1", "and the box heard it");
+    ui.click("routed");
+    assert_eq!(ui.eval("location.hash"), serde_json::json!("#plain"), "a link with a handler is the app's to follow");
+}
