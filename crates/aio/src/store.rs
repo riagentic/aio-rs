@@ -25,7 +25,7 @@ pub const TX: &str = "$tx";
 
 mod shared;
 mod tx;
-use shared::Db;
+use shared::{Db, Kept};
 pub(crate) use shared::{Hold, Member, Shared, Then, hold, release};
 pub(crate) use tx::On as TxOn;
 mod spare;
@@ -351,31 +351,17 @@ fn good_copy(path: &Path) -> std::path::PathBuf {
 }
 
 /// D6: temp files a crash left beside the store (a half-made good copy, a
-/// half-restored store, a half-written `write_atomic` file) are removed. A
-/// `write_atomic` file under a minute old may be another thread's, mid-write
-/// (the health file): it stays, for the next start.
+/// half-restored store, a half-written `write_atomic` file) are removed
+/// ([`crate::paths::sweep`]).
 pub(crate) fn sweep(path: &Path) {
     let (dir, name) =
         (crate::paths::parent(path), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let f = e.file_name().to_string_lossy().into_owned();
-        let old = || {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > std::time::Duration::from_secs(60))
-        };
-        let stray = f == format!("{name}.good.tmp")
-            || f == format!("{name}.restoring")
-            || (f.starts_with('.') && f.ends_with(".tmp") && old());
-        if stray && std::fs::remove_file(e.path()).is_ok() {
+    for f in [format!("{name}.good.tmp"), format!("{name}.restoring")] {
+        if std::fs::remove_file(dir.join(&f)).is_ok() {
             eprintln!("[aio] storage: removed {f}, left by a crash");
         }
     }
+    crate::paths::sweep(dir);
 }
 
 /// `PRAGMA quick_check` on the file at `path` (fine if it doesn't exist
@@ -544,24 +530,24 @@ fn file_id(path: &Path) -> Option<FileId> {
 
 /// A savepoint: a transaction of its own, or, inside a joint commit
 /// ([`open_joint`]), a part of it. Dropped before `commit`, it is undone.
-struct Atomic<'a>(&'a Connection, bool);
+struct Atomic<'a>(&'a Kept, bool);
 
 impl<'a> Atomic<'a> {
-    fn new(db: &'a Connection) -> rusqlite::Result<Self> {
-        db.execute_batch("SAVEPOINT aio")?;
+    fn new(db: &'a Kept) -> rusqlite::Result<Self> {
+        db.with("SAVEPOINT aio", |s| s.execute([]))?;
         Ok(Self(db, false))
     }
 
     fn commit(mut self) -> rusqlite::Result<()> {
-        self.0.execute_batch("RELEASE aio")?;
+        self.0.with("RELEASE aio", |s| s.execute([]))?;
         self.1 = true;
         Ok(())
     }
 }
 
 impl std::ops::Deref for Atomic<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
+    type Target = Kept;
+    fn deref(&self) -> &Kept {
         self.0
     }
 }
@@ -840,7 +826,7 @@ fn newest(db: &Connection, path: &Path, id: &str, version: u32, aio_file: bool) 
 /// A cell of `#[aio_cell]` fields may retire its own id: aio's slice of that
 /// name (an earlier build's, before it read aio's cells by field) and its
 /// stamp go, its own history here stays.
-fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
+fn retire<T: Cell>(db: &Kept, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
     if T::RETIRED.is_empty() {
         return Ok(());
     }
@@ -853,7 +839,7 @@ fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Res
 
 /// The history of `cells` gone from the file (and, in an aio file, their
 /// slices and stamps), zeroed; whether there was any. `own`'s history is kept.
-fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &str) -> Result<bool, Error> {
+fn erase(db: &Kept, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &str) -> Result<bool, Error> {
     let secure: i64 = db.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
     db.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = Atomic::new(db)?;
@@ -1023,7 +1009,7 @@ fn quick_saved<T: Cell>(
     next: &T,
     was: &T,
     mut prev: Value,
-) -> std::result::Result<(Value, Vec<(&'static crate::compat::data::Slice, Option<Value>)>), Value> {
+) -> std::result::Result<Quick, Value> {
     if !T::PERSIST_INCLUDE.is_empty() || !prev.is_object() || next.save().is_some() {
         return Err(prev);
     }
@@ -1283,17 +1269,42 @@ fn unredacted<T: Cell>(st: &T, made: &Value, v: u32) -> Result<T, String> {
     unshaped(v).map_err(|e| e.0)
 }
 
-/// Apply logged events after `from` up to `to` onto `st`. Each must commit
-/// again with the same inputs, or the log and the code disagree.
-/// Apply the log's events `from..=to` to `st`. `upgrading` (boot after a
-/// version bump): events an older build wrote after its last snapshot (a
-/// crash left them unsnapped) run with this build's code on the migrated
-/// state; one that no longer applies refuses the boot (D10).
+/// Apply the log's events `from..=to` to `st`. Each must commit again
+/// with the same inputs, or the log and the code disagree. `upgrading`
+/// (boot after a version bump): events an older build wrote after its last
+/// snapshot (a crash left them unsnapped) run with this build's code on the
+/// migrated state; one that no longer applies refuses the boot (D10).
 fn replay<T: Cell>(db: &Connection, st: &mut T, from: u64, to: u64, upgrading: bool) -> Result<(), Error> {
+    read_log(db, T::ID, T::VERSION, from, to, upgrading, &mut |ev, older| {
+        *st = apply_event(st, &ev).map_err(|e| match older {
+            Some(v) => format!(
+                "written by v{v}, it doesn't apply to v{}: {e}; open the data once with the v{v} build to finish its log, then upgrade",
+                T::VERSION
+            ),
+            None => e,
+        })?;
+        Ok(())
+    })
+}
+
+/// Cell `id`'s logged events `from..=to`, each read and handed to `apply`
+/// in order, with the version an older build wrote it at when `upgrading`
+/// runs it at `version` (see [`replay`]); an event that doesn't read or
+/// apply stops it, said with its seq and method. The cell type's part is
+/// `apply` alone: this is in the binary once, not once per cell.
+fn read_log(
+    db: &Connection,
+    id: &str,
+    version: u32,
+    from: u64,
+    to: u64,
+    upgrading: bool,
+    apply: &mut dyn FnMut(Event, Option<u32>) -> Result<(), String>,
+) -> Result<(), Error> {
     let mut q = db.prepare(
         "SELECT seq, method, args, inputs, at, v, by FROM log WHERE cell = ?1 AND seq > ?2 AND seq <= ?3 ORDER BY seq",
     )?;
-    let rows = q.query_map(params![T::ID, from as i64, to as i64], |r| {
+    let rows = q.query_map(params![id, from as i64, to as i64], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -1306,28 +1317,14 @@ fn replay<T: Cell>(db: &Connection, st: &mut T, from: u64, to: u64, upgrading: b
     })?;
     for row in rows {
         let (seq, method, args, inputs, at, v, by): (i64, String, String, String, i64, u32, String) = row?;
-        let bad = |what: String| Error(format!("{}: replay of event {seq} ({method}): {what}", T::ID));
+        let bad = |what: String| Error(format!("{id}: replay of event {seq} ({method}): {what}"));
         let args: Value = serde_json::from_str(&args).map_err(|e| bad(e.to_string()))?;
         let inputs: Inputs = serde_json::from_str(&inputs).map_err(|e| bad(e.to_string()))?;
         // The caller, as the method saw it (`Cx::by`).
         let by: By = serde_json::from_str(&by).map_err(|e| bad(e.to_string()))?;
-        let older = upgrading && v < T::VERSION && method != REWIND && made(&args).is_none();
-        let ev = Event {
-            seq: seq as u64,
-            method: method.clone(),
-            args,
-            inputs,
-            by,
-            at,
-            v: if older { T::VERSION } else { v },
-        };
-        *st = apply_event(st, &ev).map_err(|e| {
-            if older {
-                bad(format!("written by v{v}, it doesn't apply to v{}: {e}; open the data once with the v{v} build to finish its log, then upgrade", T::VERSION))
-            } else {
-                bad(e)
-            }
-        })?;
+        let older = (upgrading && v < version && method != REWIND && made(&args).is_none()).then_some(v);
+        let ev = Event { seq: seq as u64, method: method.clone(), args, inputs, by, at, v: if older.is_some() { version } else { v } };
+        apply(ev, older).map_err(bad)?;
     }
     Ok(())
 }
@@ -2053,11 +2050,9 @@ impl<T: Cell> Store<T> {
         let newer: bool = self
             .db
             .conn()
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2)",
-                params![T::ID, self.seq as i64],
-                |r| r.get(0),
-            )
+            .with("SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2)", |s| {
+                s.query_row(params![T::ID, self.seq as i64], |r| r.get(0))
+            })
             .map_err(db)?;
         if newer {
             eprintln!(
@@ -2068,67 +2063,26 @@ impl<T: Cell> Store<T> {
             crate::reject!("storage: something else wrote to this app's data; restart the app to see it");
         }
         self.joining().map_err(db)?;
-        let c = self.db.conn();
-        let tx = Atomic::new(&c).map_err(db)?;
-        let mut logged_seqs = Vec::with_capacity(earlier.len());
-        let calls = earlier.iter().map(|(m, a, t)| (m.as_str(), a, *t, "{}")).chain([(method, args, at, &*inputs_text)]);
-        for (m, a, t, inputs) in calls {
-            tx.execute(
-                "INSERT INTO log (cell, method, args, inputs, by, at, v) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![T::ID, m, a.to_string(), inputs, by_text, t, T::VERSION],
-            )
-            .map_err(db)?;
-            logged_seqs.push(tx.last_insert_rowid() as u64);
-        }
-        let seq = logged_seqs.pop().expect("this call's event");
         let keep = kv_prev.is_some() || quick.is_some();
-        let kept_saved = match (&self.aio_kv, kv_state, &kv_prev) {
-            (Some(kv), _, _) if quick.is_some() => {
-                let (st, was) = quick.expect("checked");
-                was.into_iter()
-                    .try_for_each(|(s, old)| {
-                        let new = st.get(s.field).cloned().unwrap_or_else(|| serde_json::json!({}));
-                        match old.as_ref() == Some(&new) {
-                            true => Ok(()),
-                            false => kv.write(&tx, s.cell, s.version, new, old.as_ref(), s.tables),
-                        }
-                    })
-                    .map(|_| st)
-            }
-            (Some(kv), Some(st), Some(prev)) if !T::AIO_CELLS.is_empty() => kv.write_slices(&tx, T::AIO_CELLS, &st, prev).map(|_| st),
-            (Some(kv), Some(st), prev) => {
-                let copy = st.clone();
-                kv.write(&tx, T::ID, T::VERSION, st, prev.as_ref(), T::TABLES).map(|_| copy)
-            }
-            (None, Some(st), prev) => {
-                let mut rows = st.clone();
-                crate::compat::data::write_bound(&tx, T::ID, &mut rows, prev.as_ref(), T::TABLES).map(|_| st)
-            }
-            _ => Ok(Value::Null),
-        }
-        .map_err(Rejected::new)?;
-        if let (Some(kv), Some(wm)) = (&self.aio_kv, self.journal_wm) {
-            kv.set_journal_wm(&tx, wm).map_err(Rejected::new)?;
-        }
-        if let Some(op) = &asks.op {
-            tx.execute("INSERT INTO ops (cell, op, seq) VALUES (?1, ?2, ?3)", params![T::ID, op, seq as i64])
-                .map_err(db)?;
-        }
-        if let Some(d) = fired {
-            rearm::<T>(&tx, d, at).map_err(db)?;
-        }
-        for p in &asks.plans {
-            match p {
-                Plan::Set { key, due, every, cron, method, args } => tx.execute(
-                    "INSERT OR REPLACE INTO sched (cell, key, due, every, method, args, cron) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![T::ID, key, due, every, method, args.to_string(), cron],
-                ),
-                Plan::Cancel(key) => tx.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2", params![T::ID, key]),
-            }
-            .map_err(db)?;
-        }
-        tx.commit().map_err(db)?;
-        drop(c);
+        let calls = earlier.iter().map(|(m, a, t)| (m.as_str(), a, *t, "{}")).chain([(method, args, at, &*inputs_text)]);
+        let w = Write {
+            cell: T::ID,
+            version: T::VERSION,
+            tables: T::TABLES,
+            slices: T::AIO_CELLS,
+            by: &by_text,
+            calls: calls.collect(),
+            kv: self.aio_kv.as_ref(),
+            quick,
+            kv_state,
+            kv_prev: kv_prev.as_ref(),
+            journal_wm: self.journal_wm,
+            op: asks.op.as_deref(),
+            fired,
+            at,
+            plans: &asks.plans,
+        };
+        let (logged_seqs, seq, kept_saved) = written(&self.db.conn(), w)?;
         // A test reads the schedules a call set as values (`TestCells::last_asked`).
         #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
         self.effects.extend(asks.plans.iter().map(|p| Box::new(p.clone()) as Box<dyn std::any::Any + Send>));
@@ -2318,19 +2272,19 @@ impl<T: Cell> Store<T> {
             }
             fired += 1;
             if skip(d) {
-                rearm::<T>(&self.db.conn(), d, now)?;
+                rearm(&self.db.conn(), T::ID, d, now)?;
                 continue;
             }
             // Another cell's method (`cell:method`): its handle calls it.
             if d.method.contains(':') {
-                rearm::<T>(&self.db.conn(), d, now)?;
+                rearm(&self.db.conn(), T::ID, d, now)?;
                 self.foreign.push(d.clone());
                 continue;
             }
             let by = By::Schedule(d.key.clone());
             if let Err(e) = self.run(&by, &d.method, d.args.clone(), now, Some(d)) {
                 eprintln!("[aio] {}: schedule `{}` ({}) refused: {e}", T::ID, d.key, d.method);
-                rearm::<T>(&self.db.conn(), d, now)?;
+                rearm(&self.db.conn(), T::ID, d, now)?;
             }
         }
         Ok(fired)
@@ -2709,15 +2663,107 @@ impl<T: Cell> Store<T> {
 /// After a fire: a repeating schedule moves to its next slot after `now`
 /// (missed slots fire once, not one by one); a one-shot is removed. Only the
 /// row that fired: a method that set the same key meanwhile keeps its row.
-fn rearm<T: Cell>(db: &Connection, d: &Due, now: i64) -> rusqlite::Result<()> {
+fn rearm(db: &Connection, cell: &str, d: &Due, now: i64) -> rusqlite::Result<()> {
     match crate::cx::next_run(d.due, d.every, d.cron.as_deref(), now) {
         Some(next) => db.execute(
             "UPDATE sched SET due = ?3 WHERE cell = ?1 AND key = ?2 AND due = ?4",
-            params![T::ID, d.key, next, d.due],
+            params![cell, d.key, next, d.due],
         ),
-        None => db.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2 AND due = ?3", params![T::ID, d.key, d.due]),
+        None => db.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2 AND due = ?3", params![cell, d.key, d.due]),
     }
     .map(|_| ())
+}
+
+/// An aio file's saved slices after a commit, and each changed slice with
+/// what it was ([`quick_saved`]).
+type Quick = (Value, Vec<(&'static crate::compat::data::Slice, Option<Value>)>);
+
+/// What a commit writes, in one transaction ([`written`]).
+struct Write<'a> {
+    cell: &'static str,
+    version: u32,
+    tables: &'static [crate::compat::data::Bound],
+    slices: &'static [crate::compat::data::Slice],
+    by: &'a str,
+    /// Each event's method, arguments, time and inputs, in order.
+    calls: Vec<(&'a str, &'a Value, i64, &'a str)>,
+    kv: Option<&'a crate::compat::data::Kv>,
+    /// What changed of an aio file's slices, worked out from the last commit's.
+    quick: Option<Quick>,
+    /// What is saved of the new state, and of the one before.
+    kv_state: Option<Value>,
+    kv_prev: Option<&'a Value>,
+    journal_wm: Option<i64>,
+    op: Option<&'a str>,
+    fired: Option<&'a Due>,
+    at: i64,
+    plans: &'a [Plan],
+}
+
+/// A commit's writes ([`Store::commit`]), all of them or none: its events,
+/// what is saved of the state in its tables, the synced op, the fired
+/// schedule re-armed and the schedules set. The earlier events' seqs, the
+/// last one's, and what is saved of the state. Once in the binary, not once
+/// per cell type.
+fn written(c: &Kept, w: Write<'_>) -> Result<(Vec<u64>, u64, Value)> {
+    let db = |e: rusqlite::Error| Rejected::coded(crate::Code::PersistError, format!("storage: {e}"));
+    let tx = Atomic::new(c).map_err(db)?;
+    let mut logged_seqs = Vec::with_capacity(w.calls.len());
+    for (m, a, t, inputs) in &w.calls {
+        tx.with("INSERT INTO log (cell, method, args, inputs, by, at, v) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", |s| {
+            s.execute(params![w.cell, m, a.to_string(), inputs, w.by, t, w.version])
+        })
+        .map_err(db)?;
+        logged_seqs.push(tx.last_insert_rowid() as u64);
+    }
+    let seq = logged_seqs.pop().expect("this call's event");
+    let kept_saved = match (w.kv, w.kv_state, w.kv_prev) {
+        (Some(kv), _, _) if w.quick.is_some() => {
+            let (st, was) = w.quick.expect("checked");
+            was.into_iter()
+                .try_for_each(|(s, old)| {
+                    let new = st.get(s.field).cloned().unwrap_or_else(|| serde_json::json!({}));
+                    match old.as_ref() == Some(&new) {
+                        true => Ok(()),
+                        false => kv.write(&tx, s.cell, s.version, new, old.as_ref(), s.tables),
+                    }
+                })
+                .map(|_| st)
+        }
+        (Some(kv), Some(st), Some(prev)) if !w.slices.is_empty() => kv.write_slices(&tx, w.slices, &st, prev).map(|_| st),
+        (Some(kv), Some(st), prev) => {
+            let copy = st.clone();
+            kv.write(&tx, w.cell, w.version, st, prev, w.tables).map(|_| copy)
+        }
+        (None, Some(st), prev) => {
+            let mut rows = st.clone();
+            crate::compat::data::write_bound(&tx, w.cell, &mut rows, prev, w.tables).map(|_| st)
+        }
+        _ => Ok(Value::Null),
+    }
+    .map_err(Rejected::new)?;
+    if let (Some(kv), Some(wm)) = (w.kv, w.journal_wm) {
+        kv.set_journal_wm(&tx, wm).map_err(Rejected::new)?;
+    }
+    if let Some(op) = w.op {
+        tx.with("INSERT INTO ops (cell, op, seq) VALUES (?1, ?2, ?3)", |s| s.execute(params![w.cell, op, seq as i64]))
+            .map_err(db)?;
+    }
+    if let Some(d) = w.fired {
+        rearm(&tx, w.cell, d, w.at).map_err(db)?;
+    }
+    for p in w.plans {
+        match p {
+            Plan::Set { key, due, every, cron, method, args } => tx.execute(
+                "INSERT OR REPLACE INTO sched (cell, key, due, every, method, args, cron) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![w.cell, key, due, every, method, args.to_string(), cron],
+            ),
+            Plan::Cancel(key) => tx.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2", params![w.cell, key]),
+        }
+        .map_err(db)?;
+    }
+    tx.commit().map_err(db)?;
+    Ok((logged_seqs, seq, kept_saved))
 }
 
 impl<T: Cell> Drop for Store<T> {
