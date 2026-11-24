@@ -14,7 +14,7 @@
 //! the cells it reaches, so no thread may wait for the turn holding one.
 //! A file without reactions never takes the turn: its calls run side by side.
 use super::{FileId, file_id};
-use rusqlite::Connection;
+use rusqlite::{Connection, Statement};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -26,7 +26,7 @@ use std::thread::ThreadId;
 pub(crate) struct Shared(Arc<Inner>);
 
 struct Inner {
-    conn: Mutex<Connection>,
+    conn: Mutex<Kept>,
     /// Its checkpoints, off the calls' thread (none in memory).
     checkpoints: Option<Arc<Checkpoints>>,
     /// The thread whose turn it is, and how many times it took it.
@@ -36,6 +36,56 @@ struct Inner {
     reacting: AtomicBool,
     /// Calls running side by side, taking the turn only for the connection.
     loose: AtomicUsize,
+}
+
+/// A connection and the statements its commits run, each prepared on its
+/// first run and kept for the connection's life: a commit prepared 4 or
+/// more from scratch (~3 µs of a call's 7).
+pub(crate) struct Kept {
+    /// Declared before `conn`: dropped first, as they point into it.
+    stmts: RefCell<Vec<(&'static str, Statement<'static>)>>,
+    /// Boxed: its place never moves while the statements point into it.
+    conn: Box<Connection>,
+}
+
+// SAFETY: the statements are only ever used through `&Kept`, so on the
+// thread that has the connection, and they move with it; a `Connection`
+// may move between threads.
+unsafe impl Send for Kept {}
+
+impl Kept {
+    pub(crate) fn new(conn: Connection) -> Self {
+        Self { stmts: RefCell::default(), conn: Box::new(conn) }
+    }
+
+    /// `f` on `sql`'s statement, prepared on its first use and kept.
+    pub(crate) fn with<R>(
+        &self,
+        sql: &'static str,
+        f: impl FnOnce(&mut Statement<'_>) -> rusqlite::Result<R>,
+    ) -> rusqlite::Result<R> {
+        let mut stmts = self.stmts.borrow_mut();
+        let i = match stmts.iter().position(|(s, _)| *s == sql) {
+            Some(i) => i,
+            None => {
+                let s = self.conn.prepare(sql)?;
+                // SAFETY: `s` borrows the boxed connection, whose place is
+                // fixed for `self`'s life; it is dropped before the
+                // connection (field order) and never lent out past `&self`.
+                let s = unsafe { std::mem::transmute::<Statement<'_>, Statement<'static>>(s) };
+                stmts.push((sql, s));
+                stmts.len() - 1
+            }
+        };
+        f(&mut stmts[i].1)
+    }
+}
+
+impl std::ops::Deref for Kept {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
 }
 
 /// A file open in this process: its path, identity and shared connection.
@@ -151,7 +201,7 @@ impl Checkpoints {
 impl Shared {
     fn new(conn: Connection, checkpoints: Option<Arc<Checkpoints>>) -> Self {
         Self(Arc::new(Inner {
-            conn: Mutex::new(conn),
+            conn: Mutex::new(Kept::new(conn)),
             checkpoints,
             turn: Mutex::new((None, 0)),
             free: Condvar::new(),
@@ -239,7 +289,7 @@ impl Shared {
 /// A store's connections: its own (none in memory: one connection is the
 /// whole database there) and its file's shared one, for joint commits.
 pub(crate) struct Db {
-    own: Option<Connection>,
+    own: Option<Kept>,
     file: Shared,
 }
 
@@ -251,7 +301,7 @@ impl Db {
         if let Some(c) = &file.0.checkpoints {
             c.watch(&mut own)?;
         }
-        Ok(Self { own: Some(own), file })
+        Ok(Self { own: Some(Kept::new(own)), file })
     }
 
     /// A database in memory, its own.
@@ -327,26 +377,26 @@ impl Drop for Loose {
 
 /// The shared connection, while its thread's turn lasts.
 pub(crate) struct FileConn<'a> {
-    c: MutexGuard<'a, Connection>,
+    c: MutexGuard<'a, Kept>,
     _turn: Turn,
 }
 
 impl std::ops::Deref for FileConn<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
+    type Target = Kept;
+    fn deref(&self) -> &Kept {
         &self.c
     }
 }
 
 /// A store's connection ([`Db::conn`]).
 pub(crate) enum Conn<'a> {
-    Own(&'a Connection),
+    Own(&'a Kept),
     File(FileConn<'a>),
 }
 
 impl std::ops::Deref for Conn<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
+    type Target = Kept;
+    fn deref(&self) -> &Kept {
         match self {
             Conn::Own(c) => c,
             Conn::File(f) => f,

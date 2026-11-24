@@ -25,7 +25,7 @@ pub const TX: &str = "$tx";
 
 mod shared;
 mod tx;
-use shared::Db;
+use shared::{Db, Kept};
 pub(crate) use shared::{Hold, Member, Shared, Then, hold, release};
 pub(crate) use tx::On as TxOn;
 mod spare;
@@ -530,24 +530,24 @@ fn file_id(path: &Path) -> Option<FileId> {
 
 /// A savepoint: a transaction of its own, or, inside a joint commit
 /// ([`open_joint`]), a part of it. Dropped before `commit`, it is undone.
-struct Atomic<'a>(&'a Connection, bool);
+struct Atomic<'a>(&'a Kept, bool);
 
 impl<'a> Atomic<'a> {
-    fn new(db: &'a Connection) -> rusqlite::Result<Self> {
-        db.execute_batch("SAVEPOINT aio")?;
+    fn new(db: &'a Kept) -> rusqlite::Result<Self> {
+        db.with("SAVEPOINT aio", |s| s.execute([]))?;
         Ok(Self(db, false))
     }
 
     fn commit(mut self) -> rusqlite::Result<()> {
-        self.0.execute_batch("RELEASE aio")?;
+        self.0.with("RELEASE aio", |s| s.execute([]))?;
         self.1 = true;
         Ok(())
     }
 }
 
 impl std::ops::Deref for Atomic<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
+    type Target = Kept;
+    fn deref(&self) -> &Kept {
         self.0
     }
 }
@@ -826,7 +826,7 @@ fn newest(db: &Connection, path: &Path, id: &str, version: u32, aio_file: bool) 
 /// A cell of `#[aio_cell]` fields may retire its own id: aio's slice of that
 /// name (an earlier build's, before it read aio's cells by field) and its
 /// stamp go, its own history here stays.
-fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
+fn retire<T: Cell>(db: &Kept, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
     if T::RETIRED.is_empty() {
         return Ok(());
     }
@@ -839,7 +839,7 @@ fn retire<T: Cell>(db: &Connection, kv: Option<&crate::compat::data::Kv>) -> Res
 
 /// The history of `cells` gone from the file (and, in an aio file, their
 /// slices and stamps), zeroed; whether there was any. `own`'s history is kept.
-fn erase(db: &Connection, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &str) -> Result<bool, Error> {
+fn erase(db: &Kept, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &str) -> Result<bool, Error> {
     let secure: i64 = db.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
     db.execute_batch("PRAGMA secure_delete = ON")?;
     let tx = Atomic::new(db)?;
@@ -2039,11 +2039,9 @@ impl<T: Cell> Store<T> {
         let newer: bool = self
             .db
             .conn()
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2)",
-                params![T::ID, self.seq as i64],
-                |r| r.get(0),
-            )
+            .with("SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2)", |s| {
+                s.query_row(params![T::ID, self.seq as i64], |r| r.get(0))
+            })
             .map_err(db)?;
         if newer {
             eprintln!(
@@ -2059,10 +2057,9 @@ impl<T: Cell> Store<T> {
         let mut logged_seqs = Vec::with_capacity(earlier.len());
         let calls = earlier.iter().map(|(m, a, t)| (m.as_str(), a, *t, "{}")).chain([(method, args, at, &*inputs_text)]);
         for (m, a, t, inputs) in calls {
-            tx.execute(
-                "INSERT INTO log (cell, method, args, inputs, by, at, v) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![T::ID, m, a.to_string(), inputs, by_text, t, T::VERSION],
-            )
+            tx.with("INSERT INTO log (cell, method, args, inputs, by, at, v) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", |s| {
+                s.execute(params![T::ID, m, a.to_string(), inputs, by_text, t, T::VERSION])
+            })
             .map_err(db)?;
             logged_seqs.push(tx.last_insert_rowid() as u64);
         }
@@ -2097,7 +2094,7 @@ impl<T: Cell> Store<T> {
             kv.set_journal_wm(&tx, wm).map_err(Rejected::new)?;
         }
         if let Some(op) = &asks.op {
-            tx.execute("INSERT INTO ops (cell, op, seq) VALUES (?1, ?2, ?3)", params![T::ID, op, seq as i64])
+            tx.with("INSERT INTO ops (cell, op, seq) VALUES (?1, ?2, ?3)", |s| s.execute(params![T::ID, op, seq as i64]))
                 .map_err(db)?;
         }
         if let Some(d) = fired {
