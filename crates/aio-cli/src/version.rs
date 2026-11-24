@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub use aio_config::version::{Declared, STAGES, declared};
+use aio_config::version::{Declared, declared};
 
 /// What the tree says about a build.
 #[derive(Debug, PartialEq)]
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn a_stage_rides_the_version_in_one_prerelease_tail() {
-        for s in STAGES {
+        for s in aio_config::version::STAGES {
             assert_eq!(v(&format!("1.2-{s}"), &clean()), format!("1.2.345-{s}"));
         }
         assert_eq!(v("1.2-beta", &dirty()), "1.2.345-beta.dirty.4e1d0c77");
