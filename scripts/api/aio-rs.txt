@@ -2780,6 +2780,7 @@ aio::vitals::severity: fn severity(probes: u32, measured: bool, agree: bool) -> 
 aio::vitals::snapshot: fn snapshot() -> (Snapshot, bool)
 aio::vitals::transport_says: fn transport_says(step: Status, who: &str, rtt: u64) -> String
 aio::web::storage::Doc.cell: String
+aio::web::storage::Doc.done: Vec<String>
 aio::web::storage::Doc.paths: Vec<String>
 aio::web::storage::Doc.pending: Vec<Queued>
 aio::web::storage::Doc.sched: Vec<Due>
@@ -2814,6 +2815,7 @@ aio::web::storage::orphans: fn orphans(kv: &impl Kv, app: &str, syncing: &[&str]
 aio::web::storage::prefix: fn prefix(app: &str) -> String
 aio::web::storage::rearm: fn rearm(have: &mut Vec<Due>, d: &Due, now: i64)
 aio::web::storage::save: fn save(kv: &impl Kv, key: &str, doc: Doc, done: &std::collections::HashSet<String>, say: impl Fn(&str)) -> Result<(), String>
+aio::web::storage::settled: fn settled(mine: &[Queued], theirs: &Doc, user: &str) -> Vec<String>
 aio::web::ws_url: fn ws_url(protocol: &str, host: &str, search: &str) -> String
 const aio::BUILT_BY: &str
 const aio::PERSIST_DEBOUNCE: std::time::Duration
@@ -2923,6 +2925,7 @@ const aio::ui::SEED_ID: &str
 const aio::ui::SURFACE_JS: &str
 const aio::update::FORMAT: u32
 const aio::update::STAMPED_CHANNEL: Option<&str>
+const aio::web::storage::DONE_KEPT: usize
 enum aio::By
 enum aio::Code
 enum aio::Conn

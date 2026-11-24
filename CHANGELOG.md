@@ -281,6 +281,17 @@ version may break things.
   and `--disable-backgrounding-occluded-windows`, as test browsers do: a
   hidden or minimized test page kept its full priority only by chance (on
   macOS a loaded runner starved one past a DevTools call's wait).
+- Web: a twin tab could show a call twice and keep it queued twice. It
+  took the call from a storage event that came late (after the server
+  had applied the call, which the twin saw only as a change), and the tab
+  that made the call wrote it back to storage once it was applied
+  (applied seen in the change, answer still to come). Offline before its
+  own send was answered, the twin then stored it beside the next call. A
+  tab now reads the document as it is when a twin writes, writes a call
+  it saw applied or answered at once, and the document names the calls
+  answered lately (`Doc::done`), which no tab takes or keeps again.
+  **Breaking:** `aio::web::storage::Doc` has a field `done`.
+
 - The desktop window keeps the app's cookies: Chromium keeps none for
   `aio://`, so the HttpOnly session cookie a sign-in route sets
   (`[accounts] cookie = true`) was dropped and the window was never signed
