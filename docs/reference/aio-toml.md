@@ -508,6 +508,10 @@ person picks (the connect page, a pairing, `--server-url`) or the app
 names (`[client] server`) is reached without an entry, that host and port
 alone. Every other host still needs one.
 
+The window holds to it too: Chromium's spellchecker fetches a missing
+dictionary from Google only when the list reaches `"*.gvt1.com"`
+([privacy](../clients/desktop.md#privacy)).
+
 ```toml
 [capabilities]
 network = ["api.example.org", "*.githubusercontent.com", "github.com", "lan"]
