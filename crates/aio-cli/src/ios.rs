@@ -355,7 +355,13 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        App { id: "notes".into(), name: "Notes & <Co>".into(), version: "1.2.3-beta.4".into(), icon: None }
+        App {
+            id: "notes".into(),
+            name: "Notes & <Co>".into(),
+            version: "1.2.3-beta.4".into(),
+            icon: None,
+            schemes: vec![],
+        }
     }
 
     #[test]

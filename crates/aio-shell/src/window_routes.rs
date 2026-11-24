@@ -30,6 +30,24 @@ async fn the_window_fetches_the_app_s_routes_over_its_socket_and_nothing_else_is
         }))
         .route(Route::post("/api/echo", |r| async move { Reply::text(String::from_utf8_lossy(r.body()).into_owned()) }))
         .route(Route::get("/api/never", |_| std::future::pending()))
+        // A sign-in's HttpOnly session, a second cookie, and a sign-out.
+        .route(Route::post("/api/login", |_| async {
+            let session = aio::http::CookieOpts {
+                path: Some("/".into()),
+                max_age: Some(3600),
+                http_only: true,
+                same_site: Some(aio::http::SameSite::Strict),
+                ..Default::default()
+            };
+            let theme = aio::http::CookieOpts { path: Some("/api".into()), ..Default::default() };
+            Reply::text("in").cookie("aio_session_routed", "aios_1", &session).cookie("theme", "dark", &theme)
+        }))
+        .route(Route::get("/api/me", |r| async move { Reply::text(r.header("cookie").unwrap_or("-").to_string()) }))
+        .route(Route::get("/me", |r| async move { Reply::text(r.header("cookie").unwrap_or("-").to_string()) }))
+        .route(Route::post("/api/logout", |_| async {
+            let gone = aio::http::CookieOpts { path: Some("/".into()), max_age: Some(0), ..Default::default() };
+            Reply::text("out").cookie("aio_session_routed", "", &gone)
+        }))
         .route(Route::get("/api/feed", |_| async {
             Reply::stream("application/x-ndjson", futures_util::stream::iter(["{\"n\":1}\n", "{\"n\":2}\n"]))
         }));
@@ -121,6 +139,21 @@ async fn the_window_fetches_the_app_s_routes_over_its_socket_and_nothing_else_is
                    const im = new Image(); im.onerror = () => ok(i); im.src = '/missing/' + i }))).then((a) => a.length)";
     assert_eq!(eval(missing).await, 20);
     assert_eq!(eval(&text("'/api/hi/bob'")).await, "200 hi bob ");
+
+    // aio:// keeps no cookies of its own: the shell keeps the app's, sent
+    // back by path, the HttpOnly one out of the page's reach, until unset.
+    assert_eq!(eval(&text("'/api/me'")).await, "200 -");
+    let post = |path: &str| {
+        text(&format!(
+            "'{path}', {{ method: 'POST', headers: {{ 'content-type': 'application/json' }}, body: '{{}}' }}"
+        ))
+    };
+    assert_eq!(eval(&post("/api/login")).await, "200 in");
+    assert_eq!(eval(&text("'/api/me'")).await, "200 theme=dark; aio_session_routed=aios_1");
+    assert_eq!(eval(&text("'/me'")).await, "200 aio_session_routed=aios_1", "theme is /api's");
+    assert_eq!(eval("document.cookie").await, "", "never the page's to read");
+    assert_eq!(eval(&post("/api/logout")).await, "200 out");
+    assert_eq!(eval(&text("'/api/me'")).await, "200 theme=dark");
 
     // Any other process, this one too: refused (not the window), never answered.
     let mut s = aio::ipc::connect(&http_sock).await.unwrap();
