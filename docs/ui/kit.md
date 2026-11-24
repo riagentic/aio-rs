@@ -21,7 +21,7 @@ tokens: put the theme on the page first
 | Status | `Spinner`, `Progress`, `Skeleton`, `Alert`, `EmptyState`, `ConnectionStatus`, `Avatar` |
 | Lists | `VirtualList`, `window(..)`, `Transition`, `TransitionGroup` |
 | Keys | `GlobalKeys`, `use_global_key`, `use_global_keys`, `use_key_claim`, `Chord` |
-| Other | `Markdown`, `ZoomPan`, `Browser` (a guest web page), `Island` / `WebIsland` (plain JS inside a view), `SignIn`, `ConnectPage`, `TimeTravelPanel`, `Defer`, `use_held`, `use_spring`, `use_frame`, `use_interval`, `use_window_event`, `use_window_listener`, `use_back_button` |
+| Other | `Markdown`, `ZoomPan`, `QrScanner` (QR codes from the camera), `Browser` (a guest web page), `Island` / `WebIsland` (plain JS inside a view), `SignIn`, `ConnectPage`, `TimeTravelPanel`, `Defer`, `use_held`, `use_spring`, `use_frame`, `use_interval`, `use_window_event`, `use_window_listener`, `use_back_button` |
 
 The parts a person uses inside a control carry handles of their own for
 tests and agents: a tab's or menu item's id, `menuTrigger`, `menuScrim`,
@@ -523,6 +523,78 @@ ui.until_text("chart", "1,2");
   `host_keys` gives keys back to the app, `onevent` hears navigations.
 - More on islands, foreign widgets, portals and other sites:
   [islands](islands.md).
+
+## QR codes from the camera
+
+```rust
+use aio::kit::{QrScanner, QrState};
+use aio::ui::prelude::*;
+
+/// Where to pay: scanned, or pasted where there is no camera.
+#[component]
+fn PayTo() -> View {
+    let to = signal(String::new);
+    let scanning = signal(|| false);
+    let camera = signal(|| true);
+    rsx! {
+        button { "data-t": "scan", onclick: move |_| scanning.set(true), "Scan" }
+        if scanning.get() && camera.get() {
+            QrScanner {
+                "data-t": "camera",
+                style: "height: 240px",
+                onscan: move |text: String| {
+                    to.set(text);
+                    scanning.set(false);
+                },
+                onstate: move |s: QrState| camera.set(!matches!(s, QrState::NoCamera | QrState::Denied)),
+            }
+        }
+        if !camera.get() {
+            label { "data-t": "no-camera", "No camera: paste the address "
+                input { "data-t": "paste", oninput: move |e| to.set(e.value()) }
+            }
+        }
+        p { "data-t": "to", "{to}" }
+    }
+}
+# fn main() {
+let mut ui = aio::testing::TestUi::new(PayTo);
+// A page without a camera (plain http): the scanner says so, the app offers a field.
+ui.eval("Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined }); true");
+ui.click("scan");
+ui.until_contains("no-camera", "No camera");
+ui.type_text("paste", "solana:7xKX");
+ui.until_text("to", "solana:7xKX");
+# }
+```
+
+- `QrScanner` shows the camera (the back one first) and calls `onscan`
+  with each code's text: once, and again only after another code. It
+  lets the camera go when it leaves the view.
+- **Where it reads**: with the browser's own reader where there is one
+  (`BarcodeDetector`: Electron and Chrome on macOS, Android's Chrome),
+  else with aio's own ([`decode_qr`](#the-reader)), in the app: grey
+  frames of at most 480 px a side, the next only once the last is read.
+  An app that shows no scanner builds none of it.
+- **The camera must be allowed**: the window's
+  `Window { permissions: &["media"] }`; on Android also
+  `[build.android] camera = true` ([targets](../build/targets.md));
+  in a browser, an https page (or localhost). The system asks once.
+- **No camera**: the box says why (`role="status"`, `.aio-qr__note`), and
+  `onstate` hears it: `Starting`, `Scanning`, `Denied`, `NoCamera`,
+  `Failed(why)`. Offer to paste the text instead.
+- Size it with `class` or `style`; the picture fills its box (`cover`).
+- In a test, stand a canvas in for the camera
+  (`navigator.mediaDevices.getUserMedia` answering
+  `canvas.captureStream()`, set with `ui.eval` before it shows).
+
+### The reader
+
+`aio::kit::decode_qr(luma, width, height)` reads a QR code off a grey
+picture (0 black, row by row): versions 1 to 40, every error-correction
+level, numeric, alphanumeric and byte text (UTF-8, Latin-1 by its ECI);
+turned, tilted, shaded, light on dark. `None`: no whole code, or kanji. A
+picked image file or a pasted screenshot reads with it too.
 
 ## Markdown, zoom, deferred content
 

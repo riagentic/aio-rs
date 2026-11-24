@@ -151,6 +151,24 @@ version may break things.
   over as data, never run ([deep links](docs/clients/desktop.md#deep-links)).
   aio-config's `App` has the field `schemes`: a literal naming every
   field adds `schemes: vec![]` (or `..Default::default()`).
+- `aio::kit::QrScanner`: the camera's picture and the text of each QR
+  code in it (`onscan`), on the desktop, Android and in a browser. The
+  browser's own reader where there is one (`BarcodeDetector`), else
+  `aio::kit::decode_qr`, aio's own (versions 1 to 40, every level,
+  turned, tilted, shaded, light on dark), on grey frames the page hands
+  the app one at a time. Without a camera, or refused, it says why
+  (`onstate`: `QrState`). An app that shows none builds none of it; one
+  that does grows by about 70 KB in a web build (the reader 42 KB of it)
+  ([kit](docs/ui/kit.md#qr-codes-from-the-camera)).
+- `ax create <name> --template relay`: a server that makes a partner
+  API's calls for the app's installs with the partner's key, which it
+  reads from `RELAY_KEY` and nothing else holds. Only the calls it lists
+  pass (method, path, query keys), each part an install fills in kept in
+  its place; per-install and per-address limits a minute; it keeps
+  nothing and logs nothing of a call. One binary, 5.5 MB on Linux
+  ([relay](docs/examples/relay.md)).
+- `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
+  app's own routes too, without the sync client `for_app_with` holds.
 
 ### Changed
 
@@ -241,6 +259,23 @@ version may break things.
   and `--disable-backgrounding-occluded-windows`, as test browsers do: a
   hidden or minimized test page kept its full priority only by chance (on
   macOS a loaded runner starved one past a DevTools call's wait).
+- The desktop window keeps the app's cookies: Chromium keeps none for
+  `aio://`, so the HttpOnly session cookie a sign-in route sets
+  (`[accounts] cookie = true`) was dropped and the window was never signed
+  in by it. The shell keeps them in the window's cookie store (on disk,
+  until they expire) and sends them with each request to the app's
+  routes, by path; the page's script still never sees an HttpOnly one.
+- A later launch of an app shown in the browser (`[app] ui = "browser"`)
+  opens its page again (it got "ok" and nothing showed); one of an app
+  served only (`mode = "server"`) says it is already running, where it
+  serves and how to stop it, where it ended silently.
+- A launch's text after a bare `--` is never one of aio's flags
+  (`--takeover`, `--home`, `--quit`, `--route`…): `aio::paths::Ask`,
+  `Ask::app_args` (it hands the rest over as given), `--route` and
+  `--quit` stop there, as `[app] flags`' check already did. A link the OS
+  hands over (Windows: after `--`) can't smuggle one in.
+- Links that come while nothing listens (`aio::ui::links`) are held up to
+  the newest 16, where every one was kept.
 - `ax lint` checks the closures a cell method runs (`.map(|_|
   rand::random())`, one it keeps and calls) for the clock, randomness and
   I/O: it skipped every closure. A closure handed to `Effect::new` (there,
@@ -275,23 +310,6 @@ version may break things.
   one step of the wait took longer than its last half second (a slow
   machine): the components are now taken as each step begins, so the
   last step is always in what it names.
-- The desktop window keeps the app's cookies: Chromium keeps none for
-  `aio://`, so the HttpOnly session cookie a sign-in route sets
-  (`[accounts] cookie = true`) was dropped and the window was never signed
-  in by it. The shell keeps them in the window's cookie store (on disk,
-  until they expire) and sends them with each request to the app's
-  routes, by path; the page's script still never sees an HttpOnly one.
-- A later launch of an app shown in the browser (`[app] ui = "browser"`)
-  opens its page again (it got "ok" and nothing showed); one of an app
-  served only (`mode = "server"`) says it is already running, where it
-  serves and how to stop it, where it ended silently.
-- A launch's text after a bare `--` is never one of aio's flags
-  (`--takeover`, `--home`, `--quit`, `--route`…): `aio::paths::Ask`,
-  `Ask::app_args` (it hands the rest over as given), `--route` and
-  `--quit` stop there, as `[app] flags`' check already did. A link the OS
-  hands over (Windows: after `--`) can't smuggle one in.
-- Links that come while nothing listens (`aio::ui::links`) are held up to
-  the newest 16, where every one was kept.
 - A second launch's arguments reach the app however long its start
   takes: the running instance takes launches from `aio_shell::start` on
   (it did from its window's start, after the app's own setup: past a

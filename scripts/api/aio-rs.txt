@@ -251,6 +251,7 @@ aio::Source::connect: fn connect(addr: &str, token: &str, user: &str) -> std::io
 aio::Source::for_app: fn for_app(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self>
 aio::Source::for_app_with: fn for_app_with(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: crate::http::Http) -> std::io::Result<Self>
 aio::Source::for_server: fn for_server(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self>
+aio::Source::for_server_with: fn for_server_with(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: crate::http::Http) -> std::io::Result<Self>
 aio::Source::listen: fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static)
 aio::Source::on_change: fn on_change<R, M>(&self, immediate: bool, f: impl Fn(&T) -> R + Send + Sync + 'static, on: impl Fn(&R, Option<&R>) -> M + Send + Sync + 'static) -> crate::Watching where R: PartialEq + Clone + Send + 'static, M: Send + 'static
 aio::Source::on_pending: fn on_pending(&self, f: impl Fn() + Send + Sync + 'static)
@@ -1402,6 +1403,12 @@ aio::kit::ProgressProps.label: Prop<Option<String>>
 aio::kit::ProgressProps.max: Prop<f64>
 aio::kit::ProgressProps.show_value: bool
 aio::kit::ProgressProps.value: Prop<Option<f64>>
+aio::kit::QrScanner: fn QrScanner(_: QrScannerProps) -> View
+aio::kit::QrState::Denied
+aio::kit::QrState::Failed(String)
+aio::kit::QrState::NoCamera
+aio::kit::QrState::Scanning
+aio::kit::QrState::Starting
 aio::kit::RadioGroup: fn RadioGroup(_: RadioGroupProps) -> View
 aio::kit::RadioGroupProps.attributes: Vec<Attribute>
 aio::kit::RadioGroupProps.bind: Option<super::Bind>
@@ -1567,6 +1574,7 @@ aio::kit::ZoomView.x: f64
 aio::kit::ZoomView.y: f64
 aio::kit::avatar_hue: fn avatar_hue(name: &str) -> u16
 aio::kit::conn_note: fn conn_note(conn: crate::Conn, lost: bool) -> Option<(&'static str, Tone)>
+aio::kit::decode_qr: fn decode_qr(luma: &[u8], width: usize, height: usize) -> Option<String>
 aio::kit::field_key: fn field_key(e: &KeyboardEvent)
 aio::kit::fit_view: fn fit_view(content: (f64, f64), viewport: (f64, f64), pad: f64, (min, max): (f64, f64)) -> ZoomView
 aio::kit::go: fn go(id: &str, what: Go)
@@ -2948,6 +2956,7 @@ enum aio::kit::Go
 enum aio::kit::GuestEvent
 enum aio::kit::GuestInput
 enum aio::kit::Placement
+enum aio::kit::QrState
 enum aio::kit::Size
 enum aio::kit::Tone
 enum aio::kit::Trigger
@@ -3125,6 +3134,7 @@ impl Clone for Presence
 impl Clone for Profile
 impl Clone for ProgressOf
 impl Clone for ProgressProps
+impl Clone for QrState
 impl Clone for Queued
 impl Clone for RadioGroupProps
 impl Clone for Reading
@@ -3369,6 +3379,7 @@ impl Debug for Position
 impl Debug for Presence
 impl Debug for Profile
 impl Debug for ProgressOf
+impl Debug for QrState
 impl Debug for Queued
 impl Debug for Reading
 impl Debug for Ready
@@ -3596,6 +3607,7 @@ impl Eq for Plan
 impl Eq for Position
 impl Eq for Presence
 impl Eq for ProgressOf
+impl Eq for QrState
 impl Eq for Reading
 impl Eq for Ready
 impl Eq for Refusal
@@ -3756,6 +3768,7 @@ impl PartialEq for Position
 impl PartialEq for Presence
 impl PartialEq for Profile
 impl PartialEq for ProgressOf
+impl PartialEq for QrState
 impl PartialEq for Queued
 impl PartialEq for Reading
 impl PartialEq for Ready
@@ -3986,6 +3999,7 @@ impl StructuralPartialEq for Position
 impl StructuralPartialEq for Presence
 impl StructuralPartialEq for Profile
 impl StructuralPartialEq for ProgressOf
+impl StructuralPartialEq for QrState
 impl StructuralPartialEq for Queued
 impl StructuralPartialEq for Reading
 impl StructuralPartialEq for Ready
