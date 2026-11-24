@@ -650,7 +650,7 @@ pub(crate) fn masked(v: &Value) -> Value {
     match v {
         Value::String(s) => Value::String(redact(s)),
         Value::Array(a) => Value::Array(a.iter().map(masked).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), masked(v))).collect()),
+        Value::Object(o) => Value::Object(crate::object(o.iter().map(|(k, v)| (k.clone(), masked(v))))),
         v => v.clone(),
     }
 }
@@ -692,7 +692,7 @@ pub fn build(
         .iter()
         .map(|d| {
             let mut v = json!({ "at": crate::log::stamp(d.at), "kind": d.kind, "message": redact(&d.message), "held": d.held, "severity": d.severity });
-            let numbers: serde_json::Map<String, Value> = d.numbers.iter().map(|(k, n)| ((*k).into(), (*n).into())).collect();
+            let numbers = crate::object(d.numbers.iter().map(|(k, n)| ((*k).into(), (*n).into())));
             let more = [("cell", json!(d.cell)), ("call", json!(d.call)), ("numbers", json!(numbers))];
             for (k, x) in more.into_iter().filter(|(_, x)| !x.is_null() && x != &json!({})) {
                 v[k] = x;

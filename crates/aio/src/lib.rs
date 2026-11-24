@@ -250,6 +250,17 @@ pub(crate) fn sort_by<T>(v: &mut Vec<T>, cmp: impl Fn(&T, &T) -> std::cmp::Order
     v.extend(order.iter().filter_map(|&i| old[i as usize].take()));
 }
 
+/// A JSON object of `pairs`, each inserted (the last of a key wins, as
+/// `collect()`'s): a `collect()` into a map makes a sort of its own for each
+/// iterator, ~3.5 KB of a binary each.
+pub(crate) fn object(pairs: impl IntoIterator<Item = (String, Value)>) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    for (k, v) in pairs {
+        m.insert(k, v);
+    }
+    m
+}
+
 /// What this build can't do: aio's `feature` does it, and the build left it out.
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "tls")))]
 pub(crate) fn left_out(feature: &str, what: &str) -> std::io::Error {
