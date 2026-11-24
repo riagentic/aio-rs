@@ -158,6 +158,17 @@ version may break things.
 
 ### Fixed
 
+- A cell's diagnostic (a refused reaction, a timed-out effect, a refused
+  `#[on_stop]`, a cell disabled after failures) sometimes came without
+  its cell's name and state: when another thread was showing a commit of
+  that cell at that moment, the state wasn't read. It now always is.
+
+- An async call whose effect panicked was sometimes answered "ended
+  before it answered" (`DISPATCH_ABORTED`) instead of "its effect
+  panicked" (`EFFECT_ERROR`): when the effect panicked before the call
+  itself had finished on its own thread, that thread decided the answer.
+  The panic now decides it, whichever goes last.
+
 - A macro call written as a node in `rsx!` (`0 => rsx! { p {} }` in a
   `match` arm, `format! { … }`) was read as a component named `rsx!`, and
   rustc said "expected one of `(`, `[`, or `{`" at the whole `rsx!`. It
@@ -203,17 +214,6 @@ version may break things.
   cleanup, its answer read or not (a flip `TransitionGroup` measured every
   row on every change). An owner now ends its tasks and scripts with one
   cleanup, and a script goes with the last handle on it.
-- A cell's diagnostic (a refused reaction, a timed-out effect, a refused
-  `#[on_stop]`, a cell disabled after failures) sometimes came without
-  its cell's name and state: when another thread was showing a commit of
-  that cell at that moment, the state wasn't read. It now always is.
-
-- An async call whose effect panicked was sometimes answered "ended
-  before it answered" (`DISPATCH_ABORTED`) instead of "its effect
-  panicked" (`EFFECT_ERROR`): when the effect panicked before the call
-  itself had finished on its own thread, that thread decided the answer.
-  The panic now decides it, whichever goes last.
-
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.
