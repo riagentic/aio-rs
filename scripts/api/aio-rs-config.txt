@@ -27,6 +27,7 @@ aio_config::config::Align::Left
 aio_config::config::Align::Right
 aio_config::config::AndroidBuild.aab: bool
 aio_config::config::AndroidBuild.application_id: Option<String>
+aio_config::config::AndroidBuild.biometric: bool
 aio_config::config::AndroidBuild.camera: bool
 aio_config::config::AndroidBuild.color_scheme: ColorScheme
 aio_config::config::AndroidBuild.key_alias: Option<String>

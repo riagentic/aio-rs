@@ -112,7 +112,64 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
         dirs,
     };
     eprintln!("[aio] {} started on Android", cfg.app.id);
-    Ok(HOST.get_or_init(|| host).page.clone())
+    let page = HOST.get_or_init(|| host).page.clone();
+    _ = aio::KEYSTORE.set(aio::Keystore { seal: |b, d| keystore("seal", b, d), open: |b, d| keystore("open", b, d) });
+    Ok(page)
+}
+
+/// `aio::secrets`' sealing (`aio.rt.Host.seal` or `open`, `method`), on the
+/// caller's thread (a worker's: it blocks while the user is asked). The
+/// bytes handed across are wiped on the way; a Java exception is said by
+/// its kind: cancelled, nothing to ask with, sealed for a key gone.
+fn keystore(method: &str, biometric: bool, data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let h = HOST.get().ok_or_else(|| std::io::Error::other("the app has not started"))?;
+    let mut env = h.vm.attach_current_thread_permanently().map_err(std::io::Error::other)?;
+    // A frame: this thread stays attached, so its local references go with it.
+    env.with_local_frame(8, |env| -> jni::errors::Result<std::io::Result<Vec<u8>>> {
+        let input = env.byte_array_from_slice(data)?;
+        let args = [JValue::Bool(biometric.into()), JValue::Object(&input)];
+        let called = env.call_static_method(&h.class, method, "(Z[B)[B", &args);
+        let got = match called {
+            Ok(v) => {
+                let out = jni::objects::JByteArray::from(v.l()?);
+                let bytes = env.convert_byte_array(&out)?;
+                env.set_byte_array_region(&out, 0, &vec![0; bytes.len()])?;
+                Ok(bytes)
+            }
+            Err(jni::errors::Error::JavaException) => {
+                let ex = env.exception_occurred()?;
+                env.exception_clear()?;
+                Err(refused(env, &ex)?)
+            }
+            Err(e) => return Err(e),
+        };
+        env.set_byte_array_region(&input, 0, &vec![0; data.len()])?;
+        Ok(got)
+    })
+    .map_err(std::io::Error::other)?
+}
+
+/// The Keystore's exception `ex` (cleared) as an error of its kind.
+fn refused(env: &mut JNIEnv, ex: &jni::objects::JThrowable) -> jni::errors::Result<std::io::Error> {
+    use std::io::ErrorKind;
+    let said = env.call_method(ex, "toString", "()Ljava/lang/String;", &[])?.l()?;
+    let said: String = env.get_string(&JString::from(said))?.into();
+    let mut is = |class: &str| env.is_instance_of(ex, class);
+    let kind = if is("java/util/concurrent/CancellationException")? {
+        ErrorKind::PermissionDenied
+    } else if is("java/lang/UnsupportedOperationException")? {
+        ErrorKind::Unsupported
+    } else if is("android/security/keystore/KeyPermanentlyInvalidatedException")?
+        || is("javax/crypto/AEADBadTagException")?
+    {
+        return Ok(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("the secret can't be opened on this phone any more ({said}): set it again"),
+        ));
+    } else {
+        ErrorKind::Other
+    };
+    Ok(std::io::Error::new(kind, format!("the Keystore: {said}")))
 }
 
 /// A page (re)loaded and posted its port (`aio.rt.Host.connect`): it gets

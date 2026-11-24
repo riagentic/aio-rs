@@ -1201,6 +1201,10 @@ pub struct AndroidBuild {
     /// the APK declares it, and Android asks the user once. Off: refused.
     #[serde(default)]
     pub camera: bool,
+    /// `aio::secrets::set_biometric` may ask for the user's fingerprint or
+    /// face: the APK declares it (`USE_BIOMETRIC`). Off: refused.
+    #[serde(default)]
+    pub biometric: bool,
     /// Light or dark whatever the phone's setting; unset: the phone's.
     #[serde(default)]
     pub color_scheme: ColorScheme,
