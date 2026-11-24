@@ -213,7 +213,9 @@ for a whole home.
 ## Common mistakes
 
 - Building paths from `dirs`/`HOME` in app code: a test or a profile then
-  writes to the real home. Ask `aio::paths::app_dirs()`.
+  writes to the real home. Ask `aio::paths::app_dirs()`; for the person's
+  own folders (an older layout to read), `aio::paths::user_home()` and
+  `xdg_data_home()`, the test's in a test (`ax lint` warns on raw reads).
 - Backing up by copying `state.db` while the app runs: the copy may miss
   the WAL. Use `ax backup`.
 - Restoring over a running app: refused; close it first (`ax stop`).
@@ -227,5 +229,5 @@ for a whole home.
 
 `cargo doc -p aio-rs --no-deps --open`: `aio::paths` (`app_dirs`,
 `AppDirs`, `Ask`, `FLAGS`, `plan`, `write_atomic`, `write_private`,
-`in_sandbox`, `sockets_at`), `aio::backup` (`backup`, `backup_all`,
+`in_sandbox`, `user_home`, `xdg_data_home`, `sockets_at`), `aio::backup` (`backup`, `backup_all`,
 `restore`, `left_out`, `app_of`, `timed`, `timed_once`).

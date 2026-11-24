@@ -1058,3 +1058,50 @@ fn a_crate_too_big_to_edit_fast_is_a_perf_hint_at_its_manifest() {
     );
     assert!(perf[0].fix.as_deref().unwrap().contains("ax add <app> page <name>"));
 }
+
+#[test]
+fn the_persons_folders_read_raw_from_the_environment_warn_in_app_code() {
+    let src = r#"
+fn adopt() {
+    let home = std::env::var("HOME").unwrap();
+    let xdg = std::env::var_os("XDG_DATA_HOME");
+    let fine = std::env::var("RUST_LOG");
+    // aio-ok(paths): the person's own shell, shown as it is
+    let shown = env::var("XDG_CONFIG_HOME");
+}
+
+#[cfg(test)]
+mod tests {
+    fn t() { let h = std::env::var("HOME"); }
+}
+"#;
+    let d = project(&[("src/lib.rs", src), ("tests/it.rs", "fn t() { std::env::var(\"HOME\"); }")]);
+    let r = lint(d.path());
+    let raw: Vec<_> = r.issues.iter().filter(|i| i.area == "paths").collect();
+    assert_eq!(raw.iter().map(|i| i.line).collect::<Vec<_>>(), [Some(3), Some(4)], "{:?}", r.issues);
+    assert_eq!(raw[0].severity, Severity::Warn);
+    assert!(raw[0].message.starts_with("HOME read from the environment"), "{}", raw[0].message);
+    assert!(raw[1].fix.as_deref().unwrap().contains("aio::paths::xdg_data_home()"));
+    let var = super::rust::user_dir_var;
+    assert!(["HOME", "USERPROFILE", "XDG_DATA_HOME", "XDG_STATE_HOME"].iter().all(|k| var(k)));
+    assert!(!["XDG_RUNTIME_DIR", "HOMEBREW", "PATH"].iter().any(|k| var(k)));
+}
+
+#[test]
+fn a_target_folder_a_plain_cargo_made_is_pointed_at_with_its_size() {
+    let d = project(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"app\"]\n"),
+        ("app/Cargo.toml", "[package]\nname = \"app\"\n"),
+        ("target/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55"),
+        ("target/debug/libbig.rlib", &"x".repeat(3 << 20)),
+    ]);
+    let ax = tempfile::tempdir().unwrap();
+    let i = stray_target(&d.path().join("app"), ax.path()).unwrap();
+    assert_eq!((i.severity, i.area), (Severity::Hint, "build"));
+    assert!(i.message.contains("target/ holds 3.0 MB a plain cargo built"), "{}", i.message);
+    assert!(i.fix.unwrap().contains(&format!("CARGO_TARGET_DIR={}", ax.path().display())));
+    // ax's own folder, or a `target` that isn't cargo's: nothing to say.
+    assert_eq!(stray_target(d.path(), &d.path().join("target")), None);
+    std::fs::remove_file(d.path().join("target/CACHEDIR.TAG")).unwrap();
+    assert_eq!(stray_target(d.path(), ax.path()), None);
+}

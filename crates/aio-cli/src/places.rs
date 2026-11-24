@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 /// The bytes under `p` (0 when it isn't there).
-fn size(p: &Path) -> u64 {
+pub fn size(p: &Path) -> u64 {
     match std::fs::symlink_metadata(p) {
         Ok(m) if m.is_dir() => std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| size(&e.path())).sum(),
         Ok(m) => m.len(),

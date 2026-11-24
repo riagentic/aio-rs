@@ -204,6 +204,33 @@ assert_eq!(cfg.mac_bundle_id(), "aio.rt.notes", "unset: aio.rt.<id>");
 # }
 ```
 
+### Two apps, one workspace
+
+Two apps on the same core (a desktop app and a simpler phone app) are two
+app folders, each its own `aio.toml` and launcher, and shared library
+crates both depend on:
+
+```text
+purse/
+  Cargo.toml           [workspace] members = ["core", "desk", "desk/app", "phone", "phone/app"]
+  core/                the cells and logic both use: no aio.toml
+  desk/aio.toml        [app] id = "purse"
+  desk/src/lib.rs      its views, `pub use core::Wallet`
+  desk/app/            its launcher: [[bin]] name = "purse", aio::config!()
+  phone/aio.toml       [app] id = "purse-lite"
+  phone/app/           [[bin]] name = "purse-lite"
+```
+
+`ax build purse` and `ax build purse-lite` each build one app, with its
+own id, version, bundle (`dist/purse-…`, `dist/purse-lite-…`), credits
+and home (`apps/purse`, `apps/purse-lite`): one app's data is never the
+other's, even with the same cells. Each launcher's `aio::config!()` builds
+in the nearest `aio.toml` at or above it, so `aio::config!()` belongs in
+the launchers, never in `core/` (it would find none, or the wrong one).
+The binary names are the ids: two apps of one binary name are refused in
+ax's shared build folder. `[profile.*]`, `.cargo/config.toml` and
+`rust-toolchain.toml` are the workspace's, at its root.
+
 ### Other operating systems: `platforms`
 
 Each platform is a Rust target; a cross build needs it installed and a

@@ -159,14 +159,14 @@ pub const SERVER_BUDGET_MB: u64 = 7;
 /// The budget `cfg` builds within for `os`: its own, else its mode's, half
 /// again on Windows, whose build of the same code is about a third bigger
 /// (the service template: 7.1 MB against 5.3 on Linux).
-pub fn budget_of(cfg: &aio::config::Config, os: &str) -> u64 {
+pub fn budget_of(cfg: &aio::config::Config, os: &str) -> f64 {
     let default = if cfg.app.mode == aio::config::Mode::Server { SERVER_BUDGET_MB } else { BUDGET_MB };
-    cfg.build.budget_mb.unwrap_or(if os == "windows" { default * 3 / 2 } else { default })
+    cfg.build.budget_mb.unwrap_or(if os == "windows" { default * 3 / 2 } else { default } as f64)
 }
 
 /// Why a binary of `bytes` is refused, if it is over `budget_mb`.
-pub fn over_budget(bytes: u64, budget_mb: u64) -> Option<String> {
-    (bytes > budget_mb * 1_000_000).then(|| format!("{:.1} MB is over the {budget_mb} MB budget", bytes as f64 / 1e6))
+pub fn over_budget(bytes: u64, budget_mb: f64) -> Option<String> {
+    (bytes as f64 > budget_mb * 1e6).then(|| format!("{:.1} MB is over the {budget_mb} MB budget", bytes as f64 / 1e6))
 }
 
 /// `<id>-<version>-<os>-<arch>` for platform `p`.
@@ -507,7 +507,10 @@ pub fn release_binary(
     if !features.is_empty() {
         cargo.args(["--features", &features.join(",")]);
     }
-    cargo.arg("--").args(link_args_here(cross.unwrap_or(crate::platform::host()?).triple));
+    let triple = cross.unwrap_or(crate::platform::host()?).triple;
+    let target = Path::new(meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?);
+    crate::credits::stamp(&mut cargo, root, target, pkg, triple, features)?;
+    cargo.arg("--").args(link_args_here(triple));
     if let Some(obj) = link {
         cargo.arg(format!("-Clink-arg={}", obj.display()));
     }
@@ -530,9 +533,8 @@ pub fn release_binary(
     if !ok.success() {
         return Err("the release build failed".into());
     }
-    let target = meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?;
     let os = cross.map_or(std::env::consts::OS, |p| p.os);
-    let bin = crate::bundle::binary(Path::new(target), cross.map(|p| p.triple), name, os);
+    let bin = crate::bundle::binary(target, cross.map(|p| p.triple), name, os);
     no_home_paths(&std::fs::read(&bin).map_err(|e| format!("{}: {e}", bin.display()))?, &bin)?;
     Ok(bin)
 }
@@ -595,19 +597,22 @@ pub fn sizes(
     if !features.is_empty() {
         cargo.args(["--features", &features.join(",")]);
     }
+    let triple = cross.unwrap_or(crate::platform::host()?).triple;
+    let target = Path::new(meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?);
+    // The credits it builds in weigh as in the release build.
+    crate::credits::stamp(&mut cargo, root, target, pkg, triple, features)?;
     let ok = cargo
         .arg("--")
-        .args(link_args_here(cross.unwrap_or(crate::platform::host()?).triple))
+        .args(link_args_here(triple))
         .env("CARGO_PROFILE_RELEASE_STRIP", "none")
         .status()
         .map_err(|e| e.to_string())?;
     if !ok.success() {
         return Err("the size build failed".into());
     }
-    let target = meta["target_directory"].as_str().ok_or("cargo metadata: no target_directory")?;
     let os = cross.map_or(std::env::consts::OS, |p| p.os);
-    let bin = std::fs::read(crate::bundle::binary(Path::new(target), cross.map(|p| p.triple), name, os))
-        .map_err(|e| e.to_string())?;
+    let bin =
+        std::fs::read(crate::bundle::binary(target, cross.map(|p| p.triple), name, os)).map_err(|e| e.to_string())?;
     Ok(crate::sizes::report(&crate::sizes::analyze(&crate::sizes::symbols(&bin)?, 20), crate::sizes::shipped(&bin)?))
 }
 
@@ -1227,6 +1232,70 @@ fn package(kind: Kind, _: &Built) -> Result<(String, Vec<PathBuf>), String> {
 mod tests {
     use super::*;
 
+    /// A workspace of two apps on shared crates (docs/build/targets.md,
+    /// "Two apps, one workspace"): each its own aio.toml, id, home and bundle.
+    #[test]
+    fn two_apps_of_one_workspace_build_each_as_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        let members = r#"["core", "desk", "desk/app", "phone", "phone/app"]"#;
+        let mut files = vec![
+            ("Cargo.toml".to_string(), format!("[workspace]\nresolver = \"3\"\nmembers = {members}\n")),
+            ("core/Cargo.toml".into(), "[package]\nname = \"core\"\nversion = \"0.1.0\"\nedition = \"2024\"\n".into()),
+            ("core/src/lib.rs".into(), String::new()),
+        ];
+        for (app, id) in [("desk", "purse"), ("phone", "purse-lite")] {
+            let pkg = |name: &str, deps: &str| {
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{deps}\n"
+                )
+            };
+            files.extend([
+                (format!("{app}/Cargo.toml"), pkg(app, "core = { path = \"../core\" }")),
+                (format!("{app}/src/lib.rs"), String::new()),
+                (format!("{app}/aio.toml"), format!("[app]\nid = \"{id}\"\nname = \"{app}\"\n")),
+                (
+                    format!("{app}/app/Cargo.toml"),
+                    pkg(&format!("{app}-app"), &format!("{app} = {{ path = \"..\" }}"))
+                        + &format!("\n[[bin]]\nname = \"{id}\"\npath = \"src/main.rs\"\n"),
+                ),
+                (format!("{app}/app/src/main.rs"), "fn main() {}\n".into()),
+            ]);
+        }
+        for (f, text) in &files {
+            std::fs::create_dir_all(w.join(f).parent().unwrap()).unwrap();
+            std::fs::write(w.join(f), text).unwrap();
+        }
+        let out = Command::new("cargo")
+            .args(["metadata", "--format-version", "1", "--no-deps", "--offline"])
+            .current_dir(w)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let host = crate::platform::host().unwrap();
+        let mut bundles = vec![];
+        for (app, id) in [("desk", "purse"), ("phone", "purse-lite")] {
+            let pkg = crate::dev::locate(&meta, id).unwrap();
+            let toml = std::fs::canonicalize(w.join(app).join("aio.toml")).unwrap();
+            assert_eq!(std::fs::canonicalize(toml_of(&pkg).unwrap()).unwrap(), toml, "its own aio.toml");
+            let found = aio_config::config::find(&pkg.dirs[0]).unwrap();
+            assert_eq!(std::fs::canonicalize(found).unwrap(), toml, "the one aio::config!() builds in");
+            let (made, cfg) = app_of(&pkg).unwrap();
+            assert_eq!((made.id.as_str(), cfg.app.id.as_str()), (id, id));
+            let shared = std::fs::canonicalize(w.join("core")).unwrap();
+            assert!(pkg.dirs.iter().any(|p| std::fs::canonicalize(p).ok() == Some(shared.clone())), "{:?}", pkg.dirs);
+            let plan = aio::paths::plan(id, None, &aio::paths::Ask::default(), &|_| None).unwrap();
+            assert!(plan.data.ends_with(format!("apps/{id}/data")), "its own home: {}", plan.data.display());
+            bundles.push(bundle_file(&made, host));
+        }
+        assert_ne!(bundles[0], bundles[1]);
+        let target = w.join("target");
+        for id in ["purse", "purse-lite"] {
+            crate::dev::claim(&target, id, w).expect("one workspace, two binaries");
+        }
+    }
+
     #[test]
     fn force_cleans_the_apps_own_release_builds_on_each_target_built() {
         let m = ["notes".to_string(), "notes-app".to_string()];
@@ -1433,19 +1502,21 @@ mod tests {
 
     #[test]
     fn an_app_over_its_size_budget_is_not_packed() {
-        assert_eq!(over_budget(10_000_000, BUDGET_MB), None);
-        assert_eq!(over_budget(12_340_000, BUDGET_MB).as_deref(), Some("12.3 MB is over the 10 MB budget"));
-        assert_eq!(over_budget(12_340_000, 25), None, "a declared budget");
-        assert_eq!(over_budget(25_000_001, 25).as_deref(), Some("25.0 MB is over the 25 MB budget"));
+        assert_eq!(over_budget(10_000_000, BUDGET_MB as f64), None);
+        assert_eq!(over_budget(12_340_000, BUDGET_MB as f64).as_deref(), Some("12.3 MB is over the 10 MB budget"));
+        assert_eq!(over_budget(12_340_000, 25.0), None, "a declared budget");
+        assert_eq!(over_budget(25_000_001, 25.0).as_deref(), Some("25.0 MB is over the 25 MB budget"));
+        assert_eq!(over_budget(14_600_000, 14.5).as_deref(), Some("14.6 MB is over the 14.5 MB budget"));
         let toml =
             |t: &str| aio::config::Config::parse(&format!("[app]\nid = \"relay\"\nname = \"Relay\"\n{t}")).unwrap();
-        assert_eq!(budget_of(&toml(""), "linux"), BUDGET_MB);
+        assert_eq!(budget_of(&toml(""), "linux"), BUDGET_MB as f64);
         let server = "mode = \"server\"\n[server]\nlisten = \"127.0.0.1:8080\"\n";
-        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB, "a server: 7 MB");
-        assert_eq!(budget_of(&toml(server), "windows"), 10, "half again on Windows");
-        assert_eq!(budget_of(&toml(""), "windows"), 15);
+        assert_eq!(budget_of(&toml(server), "macos"), SERVER_BUDGET_MB as f64, "a server: 7 MB");
+        assert_eq!(budget_of(&toml(server), "windows"), 10.0, "half again on Windows");
+        assert_eq!(budget_of(&toml(""), "windows"), 15.0);
         let own = toml(&format!("{server}[build]\nbudget_mb = 8\n"));
-        assert_eq!((budget_of(&own, "linux"), budget_of(&own, "windows")), (8, 8), "unless it says");
+        assert_eq!((budget_of(&own, "linux"), budget_of(&own, "windows")), (8.0, 8.0), "unless it says");
+        assert_eq!(budget_of(&toml("[build]\nbudget_mb = \"14.5MB\"\n"), "linux"), 14.5);
     }
 
     #[cfg(target_os = "linux")]

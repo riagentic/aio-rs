@@ -958,6 +958,8 @@ pub fn build(
             if !lib.features.is_empty() {
                 cargo.args(["--features", &lib.features.join(",")]);
             }
+            let root = crate::dev::workspace_root(app_dir);
+            crate::credits::stamp(&mut cargo, &root, lib.target_dir, lib.pkg, target, lib.features)?;
             run(
                 cargo
                     // The app's version (`aio::app_version!()`), the APK's as on desktop.
@@ -1052,7 +1054,7 @@ pub fn build(
             _ = std::fs::remove_file(apk.with_extension("apk.idsig"));
             let bytes = std::fs::metadata(&apk).map_err(|e| e.to_string())?.len();
             // The budget is each CPU's; the universal APK is all of them.
-            if let Some(why) = over_budget(bytes, BUDGET_MB).filter(|_| split != "universal") {
+            if let Some(why) = over_budget(bytes, BUDGET_MB as f64).filter(|_| split != "universal") {
                 return Err(format!("{}: {why}", apk.display()));
             }
             apks.push(apk);
