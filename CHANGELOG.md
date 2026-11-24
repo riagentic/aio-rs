@@ -72,6 +72,12 @@ version may break things.
 
 ### Added
 
+- `aio::http::content_name(name, bytes)`: a file's name by its content
+  (`page.<16 hex>.js`). The web build names `page.js`, `start.js` and the
+  splash so, and the shell serves a file whose name is its content's with
+  `Cache-Control: public, max-age=31536000, immutable`: a navigation no
+  longer revalidates them (a 304 each), and a streamed page's parts
+  don't wait on `page.js`'s round trip to be parsed.
 - `aio::config::Mode::has_window()`: whether an app of that mode opens a
   window (a server or a CLI doesn't), the one rule `ax dev`, `ax start`,
   `ax build` (`--smoke`, a bundled runtime) and the updater follow; each
@@ -266,6 +272,15 @@ version may break things.
 
 ### Fixed
 
+- A `TestUi` step waits for the files its event reads: a form's submit
+  read its files as the event went out, and a click that submitted it
+  could end before they were read (the submit unheard on a loaded
+  machine). `pick_files` waited for its own; every settle does now.
+- `TestBrowser` and `TestUi`'s runtime start with
+  `--disable-renderer-backgrounding`, `--disable-background-timer-throttling`
+  and `--disable-backgrounding-occluded-windows`, as test browsers do: a
+  hidden or minimized test page kept its full priority only by chance (on
+  macOS a loaded runner starved one past a DevTools call's wait).
 - The desktop window keeps the app's cookies: Chromium keeps none for
   `aio://`, so the HttpOnly session cookie a sign-in route sets
   (`[accounts] cookie = true`) was dropped and the window was never signed
@@ -285,8 +300,9 @@ version may break things.
   the newest 16, where every one was kept.
 - `ax lint` checks the closures a cell method runs (`.map(|_|
   rand::random())`, one it keeps and calls) for the clock, randomness and
-  I/O: it skipped every closure. A closure handed to `Effect::new` and an
-  `async` block are still the effect's.
+  I/O: it skipped every closure. A closure handed to `Effect::new` (there,
+  or kept in a name the method only hands to it) and an `async` block are
+  still the effect's.
 - `ax dev`: an app that exits 0 on its own (a command-line tool done)
   "finished; a save runs it again", where it said "waiting: save a fix".
 - `ax dev`'s `[aio] boot: … settings in the log` line is said once the

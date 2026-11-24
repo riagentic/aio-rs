@@ -229,6 +229,12 @@ fn flags(profile: &Path, os: &str) -> Vec<String> {
         "--password-store=basic",
         "--use-mock-keychain",
         "--remote-debugging-port=0",
+        // A hidden or covered page keeps its priority and timers, as test
+        // browsers run (macOS lowers a hidden page's process otherwise: a
+        // loaded runner starved it past a CDP call's wait).
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
     ];
     own.iter()
         .chain(&all)
@@ -387,8 +393,9 @@ mod tests {
             "never the person's screen or bus (no portal)"
         );
         assert!(isolated("windows").is_empty() && isolated("macos").is_empty());
-        for f in [&w, &l] {
+        for f in [&w, &l, &flags(p, "macos")] {
             assert!(f.contains(&"--headless=new".into()) && f.contains(&"--remote-debugging-port=0".into()));
+            assert!(f.contains(&"--disable-renderer-backgrounding".into()), "a hidden page keeps its priority");
             assert_eq!(f.last().unwrap(), "--user-data-dir=/tmp/p");
         }
     }

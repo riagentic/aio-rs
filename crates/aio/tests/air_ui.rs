@@ -457,6 +457,30 @@ fn a_file_input_hands_its_files_to_change_and_to_the_forms_submit() {
     );
 }
 
+/// A step waits for the files its event reads (a submit's, read as the
+/// event goes out), however long the read takes (a loaded machine's).
+#[test]
+fn a_submit_whose_files_read_slowly_is_heard_before_the_step_ends() {
+    fn app() -> View {
+        let sent = signal(String::new);
+        rsx! {
+            form { "data-t": "form", onsubmit: move |e: FormEvent| sent.set(e.files().iter().map(|f| f.name()).collect()),
+                input { "data-t": "pick", r#type: "file", name: "photo" }
+                button { "data-t": "send", r#type: "submit", "Send" }
+            }
+            p { "data-t": "sent", "{sent}" }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    ui.pick_files("pick", &[("a.txt", "text/plain", b"a")]);
+    // Every read from here on takes 300 ms.
+    let slow = "const read = Blob.prototype.arrayBuffer; Blob.prototype.arrayBuffer = function () { \
+                return new Promise((r) => setTimeout(r, 300)).then(() => read.call(this)) }; true";
+    ui.eval(slow);
+    ui.click("send");
+    assert_eq!(ui.text("sent"), "a.txt");
+}
+
 // Every event a handler takes (`rsx!`'s own list).
 include!("../../air-macro/src/events.rs");
 

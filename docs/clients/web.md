@@ -116,6 +116,11 @@ shell answers unknown route-shaped paths with its `index.html`, so a deep
 link works, and needs the app's key, or with accounts a session
 ([sync](../state/sync.md#server-functions-and-routes)). The page connects
 only to its own server (`connect-src 'self'`) and runs no `eval`.
+The build names the page's own files (`page.js`, `start.js`, the splash)
+by their content (`aio::http::content_name`: `page.<16 hex>.js`), and the
+shell lets a browser keep such a file a year (`immutable`): a page load
+asks only for `index.html` and the app's bundle, and a streamed part
+waits on no script request. A new build is new names.
 
 A browser that opens the server with no key (a phone, a tablet) gets the
 server's pairing page instead of a bare 401: a 6-digit code from `ax pair

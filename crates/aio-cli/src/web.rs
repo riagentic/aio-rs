@@ -151,14 +151,15 @@ pub fn page_js(dev: bool, logged: bool) -> String {
 /// The page: its language and direction (`[app] lang`, `dir`), viewport,
 /// policy (`aio::page::WEB`: no inline script, no `eval`) and head,
 /// `body` (the first paint, if rendered), then the page scripts and what
-/// starts the app (pure).
-pub fn index_html(title: &str, app: &aio::config::App, head: &str, body: &str) -> String {
+/// starts the app, by their file names (`aio::http::content_name`'s in a
+/// build) (pure).
+pub fn index_html(title: &str, app: &aio::config::App, head: &str, body: &str, (page, start): (&str, &str)) -> String {
     format!(
         "<!doctype html>\n{}\n<head>\n<meta charset=\"utf-8\">\n\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{}\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n\
          <title>{}</title>\n{head}\n</head>\n<body>\n<div id=\"main\">{body}</div>\n\
-         <script src=\"./page.js\"></script>\n<script type=\"module\" src=\"./start.js\"></script>\n</body>\n</html>\n",
+         <script src=\"./{page}\"></script>\n<script type=\"module\" src=\"./{start}\"></script>\n</body>\n</html>\n",
         aio_shell::html_open(app.lang.as_deref(), app.dir),
         aio::page::WEB,
         esc(title),
@@ -405,13 +406,21 @@ pub fn pack(
     let made: Vec<Icon> = icons.iter().filter(|(_, n)| *n != 180).cloned().collect();
     std::fs::write(out.join("manifest.webmanifest"), manifest(&app.name, hue, &made)).map_err(|e| e.to_string())?;
     let mut head = head(&app.name, hue, "icon-192.png", "icon-180.png");
+    // The page's own files are named by their content: a browser keeps
+    // them, never asking again (a 304 per file and page load), and the
+    // streamed parts after `page.js` show without waiting on it.
+    let named = |name: &str, bytes: &[u8]| -> Result<String, String> {
+        let file = aio::http::content_name(name, bytes);
+        std::fs::write(out.join(&file), bytes).map_err(|e| e.to_string())?;
+        Ok(file)
+    };
     // The splash, over the page until the app has drawn its view, and as
     // iOS's launch images (a release build: a Home Screen app starts on it).
     let splash = match &cfg.build.splash {
         Some(s) => {
             let png = dir.join(&s.image);
             let bytes = std::fs::read(&png).map_err(|e| format!("{}: {e}", png.display()))?;
-            std::fs::write(out.join("splash.png"), &bytes).map_err(|e| e.to_string())?;
+            let file = named("splash.png", &bytes)?;
             let s = aio::config::Splash { png: Box::leak(bytes.into_boxed_slice()), ..s.clone() };
             let bg = s.background.as_ref().map(|[l, d]| [l.as_str(), d.as_str()]);
             let colors = aio_shell::splash::colors(hue, bg);
@@ -421,7 +430,7 @@ pub fn pack(
                     head = format!("{head}\n{link}");
                 }
             }
-            aio_shell::splash::markup(&s, &app.name, &app.version, &colors, "./splash.png", true)
+            aio_shell::splash::markup(&s, &app.name, &app.version, &colors, &format!("./{file}"), true)
         }
         None => String::new(),
     };
@@ -431,12 +440,15 @@ pub fn pack(
         std::fs::create_dir_all(to.parent().unwrap_or(out)).map_err(|e| e.to_string())?;
         std::fs::copy(&file, &to).map_err(|e| format!("{}: {e}", file.display()))?;
     }
-    let page = index_html(&app.name, &cfg.app, &head, body).replacen("<body>\n", &format!("<body>\n{splash}"), 1);
-    std::fs::write(out.join("index.html"), page).map_err(|e| e.to_string())?;
     // A standalone app has no server to take its console: none is sent.
     let logged = dev || (cfg.app.mode != aio::config::Mode::Standalone && cfg.server.page_log);
-    std::fs::write(out.join("page.js"), page_js(dev, logged)).map_err(|e| e.to_string())?;
-    std::fs::write(out.join("start.js"), start_js(dev)).map_err(|e| e.to_string())?;
+    let scripts = (named("page.js", page_js(dev, logged).as_bytes())?, named("start.js", start_js(dev).as_bytes())?);
+    let page = index_html(&app.name, &cfg.app, &head, body, (&scripts.0, &scripts.1)).replacen(
+        "<body>\n",
+        &format!("<body>\n{splash}"),
+        1,
+    );
+    std::fs::write(out.join("index.html"), page).map_err(|e| e.to_string())?;
     std::fs::write(out.join("worker.js"), format!("{BASE}{WORKER_JS}")).map_err(|e| e.to_string())?;
     let mut files = site_files(out, out).map_err(|e| e.to_string())?;
     // iOS fetches its launch images itself: the worker needn't hold them.
@@ -1336,7 +1348,7 @@ mod tests {
         assert!(!start_js(true).contains("serviceWorker") && start_js(true).contains("start();"));
         assert!(start.starts_with(BASE) && start_js(true).starts_with(BASE));
         let app = |toml: &str| aio::config::Config::parse(&format!("[app]\nid = \"t\"\n{toml}")).unwrap().app;
-        let p = index_html("A <b>", &app("lang = \"cs\""), &h, "<p>first</p>");
+        let p = index_html("A <b>", &app("lang = \"cs\""), &h, "<p>first</p>", ("page.js", "start.js"));
         assert!(p.contains(r#"<html lang="cs">"#) && p.contains("<title>A &lt;b&gt;</title>"), "{p}");
         assert!(p.contains(r#"<div id="main"><p>first</p></div>"#) && p.contains(r#"src="./start.js""#));
         // The policy before anything runs; the page scripts after the root they watch, before the app.
@@ -1350,10 +1362,11 @@ mod tests {
             "and the sandboxed islands' boot"
         );
         // aio htmlOpen: en unless set; a direction only when asked, never from the language.
-        assert!(index_html("t", &app(""), "", "").contains("<html lang=\"en\">\n"));
-        let p = index_html("t", &app("lang = \"ar\"\ndir = \"rtl\""), "", "");
+        let names = ("page.js", "start.js");
+        assert!(index_html("t", &app(""), "", "", names).contains("<html lang=\"en\">\n"));
+        let p = index_html("t", &app("lang = \"ar\"\ndir = \"rtl\""), "", "", names);
         assert!(p.contains(r#"<html lang="ar" dir="rtl">"#), "{p}");
-        assert!(index_html("t", &app("dir = \"auto\""), "", "").contains(r#"<html lang="en" dir="auto">"#));
+        assert!(index_html("t", &app("dir = \"auto\""), "", "", names).contains(r#"<html lang="en" dir="auto">"#));
         // The window's page scripts; a dev build's shows its errors on the page, a release's doesn't.
         assert!(page_js(false, true).contains("aria-modal") && page_js(false, true).contains("autofocus"));
         assert!(!page_js(false, true).contains("__aioDiag") && page_js(true, true).contains("window.__aioDiag = add"));
@@ -1609,7 +1622,14 @@ pub(crate) mod browser {
         assert_eq!(pack(&app, &cfg, &page, &out, "", false).unwrap(), Vec::<String>::new());
         let index = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(index.contains("<body>\n<style>#aio-splash{") && index.contains("<p>Starting Web test</p>"));
-        assert!(out.join("splash.png").is_file());
+        // The page's own files by their content, as the page names them.
+        let splash = aio::http::content_name("splash.png", include_bytes!("../../aio/tests/fixtures/splash.png"));
+        let page_file = aio::http::content_name("page.js", page_js(false, false).as_bytes());
+        let start_file = aio::http::content_name("start.js", start_js(false).as_bytes());
+        for f in [&splash, &page_file, &start_file] {
+            assert!(out.join(f).is_file() && index.contains(&format!("\"./{f}\"")), "{f}: {index}");
+        }
+        assert!(!out.join("page.js").exists() && !out.join("splash.png").exists());
         // `[build] assets` at their paths, held offline by the worker; iOS's launch images beside.
         assert_eq!(std::fs::read_to_string(out.join("media/hi there.txt")).unwrap(), "hi");
         let sw = std::fs::read_to_string(out.join("sw.js")).unwrap();
@@ -1861,7 +1881,7 @@ pub(crate) mod browser {
             String::from_utf8_lossy(&got).into_owned()
         };
         assert!(page.contains("cache-control: no-store"), "{page}");
-        assert!(page.contains(r#"<div id="main"></div>"#) && page.contains("./start.js"), "{page}");
+        assert!(page.contains(r#"<div id="main"></div>"#) && page.contains("./start."), "{page}");
         // Its head as the view asks for it, written into the page by the view.
         until(&mut a, "document.title", json!("4 items")).await;
         let tags = "document.querySelectorAll('meta[name=description][data-aio-head]').length";
@@ -2065,9 +2085,10 @@ pub(crate) mod browser {
         t.call("Network.setBypassServiceWorker", json!({ "bypass": true })).await.unwrap();
         let url = format!("http://{addr}/?token={KEY}");
         let timing = "(() => { const n = performance.getEntriesByType('navigation')[0], \
-                      p = performance.getEntriesByName('first-contentful-paint')[0]; \
+                      p = performance.getEntriesByName('first-contentful-paint')[0], \
+                      s = performance.getEntriesByType('resource').find((e) => /\\/page(\\.[0-9a-f]{16})?\\.js$/.test(e.name)); \
                       return [n.responseStart, n.responseEnd, p ? p.startTime : -1, window.slow.counting ?? -1, \
-                      window.slow['7 counted'] ?? -1, n.domInteractive] })()";
+                      window.slow['7 counted'] ?? -1, n.domInteractive, s.responseEnd, s.transferSize] })()";
         let mut runs = vec![];
         for _ in 0..5 {
             t.call("Page.navigate", json!({ "url": url })).await.unwrap();
@@ -2092,15 +2113,20 @@ pub(crate) mod browser {
         };
         let (first_byte, last_byte, first_paint, fallback, filled, parsed) =
             (median(0), median(1), median(2), median(3), median(4), median(5));
+        let (script, sent) = (median(6), median(7));
         eprintln!(
             "streamed, median ms from navigation: first byte {first_byte:.1}, first paint {first_paint:.1}, \
-             fallback {fallback:.1}, filled in {filled:.1}, last byte {last_byte:.1}, parsed {parsed:.1} ({runs:?})"
+             fallback {fallback:.1}, filled in {filled:.1}, last byte {last_byte:.1}, parsed {parsed:.1}, \
+             page script {script:.1} ({sent} bytes over the wire) ({runs:?})"
         );
         // A page rendered whole would send its first byte after its last.
         // When the page shows a part is the renderer's (a loaded machine's
         // parses late: the count still shows in the task that read it).
         assert!(first_byte + 100.0 < last_byte, "first byte {first_byte} ms, last {last_byte} ms");
         assert!(fallback < filled, "fallback {fallback} ms, filled {filled} ms");
+        // Named by its content, the page script is never asked for again:
+        // nothing stands between a streamed part and its parse.
+        assert!(runs[1..].iter().all(|r| r[7] == 0.0), "page.js was asked for again: {runs:?}");
     }
 
     /// Types `text` into the field `t` names, as a person does.
