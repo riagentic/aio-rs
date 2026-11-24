@@ -115,6 +115,10 @@ version may break things.
 
 ### Fixed
 
+- Each published aio-rs crate carries its MIT licence text (`LICENSE`),
+  so an app's credits (`aio::credits!()`) and the crates' packages
+  include it, not only the licence's name.
+
 - A window with a tray died at start on Linux with no display (none set,
   or the runtime's headless one: `ax build --smoke` without Xvfb): GTK
   ended the runtime on the tray, so the window never came. It now opens
