@@ -40,6 +40,23 @@ version may break things.
 - The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.
+- A `Browser`'s guest shows http(s) and `about:blank` only: any `src`
+  was loaded (`file:`, `chrome:`, `javascript:`, `data:`), from the
+  element, `Guest::load_url` or the page's `loadURL`. Another scheme
+  loads only when the window lists it (`Web { schemes: &["data"] }`,
+  added); its first page, every load and its page's own navigations are
+  asked, and each refusal is said (`<Browser> load REFUSED`).
+- **Breaking:** a `Browser`'s guest shows http(s) and `about:blank`
+  only: any `src` was loaded (`file:`, `chrome:`, `javascript:`,
+  `data:`), from the element, `Guest::load_url` or the page's `loadURL`.
+  Another scheme loads only when the window lists it (`Web { schemes:
+  &["data"] }`, added); its first page, every load and its page's own
+  navigations are asked, and each refusal is said (`<Browser> load
+  REFUSED`).
+- Android: a navigation goes to another app only from the page's own
+  frame after a tap, as on the desktop: any frame's, a script's by itself
+  too, was handed to the app that opens it (the browser, the dialer, a
+  store) with no gesture.
 - Windows: the window's file route (`aio://app/file/…`,
   `aio::ui::local_file_url`) refuses a UNC or device path (`//host/share`,
   `\\?\`, `\\.\`) on every OS: opening `\\host\share\x.png` connected to

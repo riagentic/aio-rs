@@ -886,6 +886,12 @@ app.whenReady().then(() => {
       if (k === 'devtools') w.webContents.toggleDevTools()
       if (k === 'clear') w.webContents.session.clearCache().then(() => w.webContents.session.clearStorageData()).then(() => reload(true))
     })
+    // What a guest may show (guest.js guestSrc): why not, said, or null.
+    const refusedSrc = (url) => {
+      const why = G.guestSrc(url, SHELL.schemes)
+      if (why) say('guest-src', why, `<Browser> load REFUSED: ${why}`)
+      return why
+    }
     // A <Browser>'s guest, before it exists: it never gets Node, a weaker
     // sandbox or the app's own session (it serves aio://app: a page there
     // could read the app); a preload only one the app declared (Web {
@@ -909,8 +915,19 @@ app.whenReady().then(() => {
         w.webContents.send('aio:guest-refused', { preload: want.startsWith(G.PRELOAD) ? want.slice(G.PRELOAD.length) : want, reason: p.why })
       }
       Object.assign(params, { nodeintegration: false, nodeintegrationinsubframes: false, disablewebsecurity: false })
+      // Its first page, as every later one: none when refused.
+      if (params.src && refusedSrc(params.src)) params.src = ''
     })
-    w.webContents.on('did-attach-webview', (_e, guest) => popups(guest))
+    w.webContents.on('did-attach-webview', (_e, guest) => {
+      popups(guest)
+      // Every later load is a loadURL (the src attribute, the page's and
+      // aio::kit::Guest's); its page's own navigations are will-navigate.
+      // A refused one does nothing, said once (a rejection here is a stack
+      // in the log at every try, past refusal's cap).
+      const load = guest.loadURL
+      guest.loadURL = (url, o) => refusedSrc(url) ? Promise.resolve() : load.call(guest, url, o)
+      guest.on('will-navigate', (e) => { if (refusedSrc(e.url)) e.preventDefault() })
+    })
     // A contained run (AIORT_NO_OPEN) leaves the person's browser alone.
     popups(w.webContents, true)
     w.webContents.on('will-navigate', (e) => e.preventDefault())
