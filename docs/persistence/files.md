@@ -175,8 +175,9 @@ ax snapshot load notes notes-snapshot.json   # each cell put back as a new event
 into `<home>/backups` as `<id>-auto-<time>.aio-backup` while the app
 runs, keeping the newest `backup_keep` (default 7); backups made by hand
 are never removed. The clock runs from the newest timed backup, so a
-restart doesn't put one off; the first is made at the first launch. A
-failed one is said in the log and tried again a turn later. Outside the
+restart doesn't put one off; the first is made at the first launch (a
+backup dated ahead of the clock counts as new, and the one just made is
+never the one pruned). A failed one is said in the log and tried again a turn later. Outside the
 app, run `ax backup` from the OS's scheduler, or call
 `aio::backup::timed_once(id, &dirs.store, dir, keep)` yourself.
 
