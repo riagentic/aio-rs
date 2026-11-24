@@ -32,13 +32,13 @@ impl<T: Cell> Clone for Source<T> {
 
 impl<T: Cell> Source<T> {
     /// The app's own store at `path`, its schedules running.
-    pub fn open(path: &std::path::Path) -> Result<Self, crate::Error> {
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, crate::Error> {
         Self::run(Handle::open(path)?)
     }
 
     /// A ported app's store: aio app `app`'s `state.db` at `path`
     /// ([`crate::Store::open_aio`]), its schedules running.
-    pub fn open_aio(path: &std::path::Path, app: &str) -> Result<Self, crate::Error> {
+    pub fn open_aio(path: impl AsRef<std::path::Path>, app: &str) -> Result<Self, crate::Error> {
         Self::run(Handle::open_aio(path, app)?)
     }
 

@@ -160,6 +160,9 @@ version may break things.
   mean 75 µs a call, before; 5 waits, 40-50 ms, mean 24 µs after. At one
   call per 2 ms: 20 waits (270 ms, the longest 38 ms) before; 4 (24 ms,
   the longest 9 ms) after.
+- `Source::open` and `Source::open_aio` take any path (`impl
+  AsRef<Path>`), as `Handle::open` and `Store::open` do:
+  `Source::open("state.db")`.
 - Disposing a probe (a prop worked out at mount, a server render's hole)
   skips the owner walk: mounting rows with props is a little faster.
 

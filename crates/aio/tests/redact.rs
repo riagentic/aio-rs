@@ -125,7 +125,7 @@ fn a_cell_with_redacted_methods_is_withheld_from_reports() {
     let d = tempfile::tempdir().unwrap();
     let dir = d.path().join("reports");
     aio::report::init(aio::report::About { id: "vault".into(), dir: dir.clone(), ..Default::default() });
-    let s = aio::Source::<Vault>::open(&d.path().join("vault.db")).unwrap();
+    let s = aio::Source::<Vault>::open(d.path().join("vault.db")).unwrap();
     s.note("visible?".into()).unwrap();
     let r: serde_json::Value =
         serde_json::from_slice(&std::fs::read(aio::report::file("t", "b").unwrap()).unwrap()).unwrap();

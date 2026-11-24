@@ -1761,7 +1761,7 @@ pub(crate) fn open(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::
     if (cfg.updates.url.is_none() && !own) || cell().is_some() {
         return Ok(());
     }
-    let s = aio::Source::<Updates>::open(&dirs.data.join("updates.db")).map_err(|e| io::Error::other(e.0))?;
+    let s = aio::Source::<Updates>::open(dirs.data.join("updates.db")).map_err(|e| io::Error::other(e.0))?;
     match own {
         true => {
             OWN.store(true, std::sync::atomic::Ordering::Relaxed);

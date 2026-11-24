@@ -52,8 +52,8 @@ fn a_report_shows_the_cells_and_the_calls_that_led_to_it() {
     let dir = d.path().join("reports");
     aio::report::init(aio::report::About { id: "notes".into(), dir: dir.clone(), ..Default::default() });
     aio::report::on_panic();
-    let s = aio::Source::<Notes>::open(&d.path().join("notes.db")).unwrap();
-    let board = aio::Source::<Board>::open(&d.path().join("board.db")).unwrap();
+    let s = aio::Source::<Notes>::open(d.path().join("notes.db")).unwrap();
+    let board = aio::Source::<Board>::open(d.path().join("board.db")).unwrap();
     board.post("hello".into()).unwrap();
     board.post("private: the door code".into()).unwrap();
     s.add("milk".into()).unwrap();
