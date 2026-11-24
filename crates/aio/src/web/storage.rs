@@ -253,7 +253,7 @@ pub fn orphans(kv: &impl Kv, app: &str, syncing: &[&str]) -> Vec<(String, usize)
 
 /// How often a synced copy's document is written at most, for the
 /// server's patches ([`Saves`]).
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) const SAVE_MS: u32 = 250;
 
 /// When a synced copy's document is written (pure): a change that queued a
