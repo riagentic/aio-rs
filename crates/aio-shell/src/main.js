@@ -321,7 +321,23 @@ function hold(notes, key, n, max) {
   }
 }
 
+// Chromium's spellchecker fetches a dictionary it lacks (Linux; Windows, a
+// language the OS has none for) from Google's CDN, in the browser process:
+// past the page's policy and the app's [capabilities] network. Only when
+// that list reaches the CDN (guest.rs fetches_dictionaries); else from no
+// host (a data: URL, no dictionary): one already in the profile's
+// Dictionaries folder still serves. A language left unchecked is said once.
+const unchecked = new Set()
+app.on('session-created', (s) => s.on('spellcheck-dictionary-download-failure', (_e, lang) => {
+  if (SHELL.dictionaries || unchecked.has(lang)) return
+  unchecked.add(lang)
+  console.error(`[aio-shell] spellcheck: no ${lang} dictionary on this machine, and [capabilities] network does not reach Google's (*.gvt1.com): ${lang} words go unchecked`)
+}))
+
 app.whenReady().then(() => {
+  // One URL for every session (macOS checks natively, with no such call),
+  // set before any session's first fetch.
+  if (!SHELL.dictionaries && process.platform !== 'darwin') session.defaultSession.setSpellCheckerDictionaryDownloadURL('data:,')
   openSplash()
   // No menu (Electron's default carries DevTools and reload), except on
   // macOS: there the standard keys are menu items (no Edit menu, no Cmd+C
