@@ -264,3 +264,17 @@ fn a_view_prop_takes_a_view_or_text_and_text_that_reads_state_follows_it() {
     p.click("inc");
     assert_eq!(all(&p), ["BoldPlain", "2 items2", "7"], "a format string and a signal given as text follow");
 }
+
+#[component]
+fn Scroll(to: Prop<Option<usize>>, #[props(default)] by: Option<u64>) -> View {
+    rsx! { p { "data-t": "at", "{to:?} {by:?}" } }
+}
+
+/// `Some(500)` and `None` given to an optional prop take its type, as `500` does.
+#[test]
+fn an_option_written_as_a_literal_takes_the_props_type() {
+    let p = TestPage::mount(|| rsx! { Scroll { to: Some(500), by: Some(7) } });
+    assert_eq!(p.text("at"), "Some(500) Some(7)");
+    let p = TestPage::mount(|| rsx! { Scroll { to: None, by: None } });
+    assert_eq!(p.text("at"), "None None");
+}

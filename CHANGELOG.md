@@ -543,6 +543,11 @@ version may break things.
   `value` attribute and left the field showing the old text (what a field
   shows is its property): `None` clears it now, as `dangerous_inner_html`'s.
 
+- `Some(500)` given to an optional prop (`Option<usize>`,
+  `Prop<Option<usize>>`, as `VirtualList`'s `scroll_to`) didn't compile:
+  the literal was an `i32`. `Some(<literal>)` and `None` take the prop's
+  type now, as a bare `500` does.
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

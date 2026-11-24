@@ -259,7 +259,7 @@ assert_eq!(ui.count("li"), 0);
 No prop needs `into`: every prop converts what it is given. A plain
 prop (`label: String`) takes anything `Into` its type (`label: "Save"`,
 `size: 5` for a `u8`); an `Option<T>` a `T`, what converts to one, or an
-`Option`; a `Prop<T>` the same, or a `Signal`, `Memo` or `Prop` of one,
+`Option` (`Some(500)` and `None` take the prop's type, as `500` does); a `Prop<T>` the same, or a `Signal`, `Memo` or `Prop` of one,
 which it follows. `#[props(into)]` is accepted and changes nothing. The
 one exception: a prop whose type names the component's own type
 parameter (`items: Vec<R>`) takes exactly that type.

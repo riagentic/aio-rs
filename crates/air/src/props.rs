@@ -92,6 +92,23 @@ impl<T: Clone + 'static> IntoOpt<T, ByProp> for Prop<Option<T>> {
     }
 }
 
+/// What an optional prop takes as a value: a `T` or an `Option` of one
+/// (`5`, `Some(5)`: the literal is the prop's type).
+#[doc(hidden)]
+pub trait OptVal<T> {
+    fn into_opt_val(self) -> Option<T>;
+}
+impl<T> OptVal<T> for T {
+    fn into_opt_val(self) -> Option<T> {
+        Some(self)
+    }
+}
+impl<T> OptVal<T> for Option<T> {
+    fn into_opt_val(self) -> Option<T> {
+        self
+    }
+}
+
 /// What a [`Prop`] takes: a `T` (or what converts to one), or a signal,
 /// memo or prop of one (read: the prop follows it).
 pub trait IntoValue<T, M> {

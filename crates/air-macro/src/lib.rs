@@ -506,18 +506,21 @@ fn builder(
         } else {
             (fgen, fparam, fval)
         };
-        // `__val_n(v)`: a literal number, `true`, `Variant::A`: the type is the prop's.
+        // `__val_n(v)`: a literal number, `true`, `Variant::A` (an optional
+        // prop's `Some(5)` too): the type is the prop's.
         let vname = format_ident!("__val_{}", n.to_string().trim_start_matches("r#"));
+        let opt = quote!(#air::__rt::OptVal::into_opt_val(v));
         let (vty, vval) = match &f.kind {
-            Kind::Opt(i) => (i.clone(), quote!(::core::option::Option::Some(v))),
+            Kind::Opt(i) => (i.clone(), opt.clone()),
             Kind::Prop(i, false) => (i.clone(), quote!(#air::Prop::new(v))),
-            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::new(::core::option::Option::Some(v)))),
+            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::new(#opt))),
             Kind::OptView => (quote!(#air::View), quote!(::core::option::Option::Some(v))),
             Kind::Plain | Kind::View => (ty.clone(), quote!(v)),
         };
         // A view prop takes text as a value too (`label: 7`).
         let (vgen, vparam, vval) = match &f.kind {
             Kind::View | Kind::OptView if !exact => (fgen.clone(), fparam.clone(), fval.clone()),
+            Kind::Opt(_) | Kind::Prop(_, true) => (quote!(<__V: #air::__rt::OptVal<#vty>>), quote!(v: __V), vval),
             _ => (quote!(), quote!(v: #vty), vval),
         };
         let docs = &f.docs;
@@ -2172,6 +2175,11 @@ fn comp(n: &Node) -> TokenStream {
             // A constant needs no closure (and a `Prop` of it holds no state).
             // A literal string converts (`"a"` to a `String`); any other
             // constant is the prop's own type (`5` a `u32`).
+            // `Some(5)`, `None`: the literal takes the prop's type, as `5` does.
+            PropName::Field(f) if some_constant(v) => {
+                let f = format_ident!("__val_{}", f.to_string().trim_start_matches("r#"));
+                quote!(.#f(#v))
+            }
             PropName::Field(f) if constant(v) => {
                 let text = matches!(v.clone().into_iter().next(), Some(TokenTree::Literal(l)) if lit_str(&l).is_some());
                 let f =
@@ -2272,6 +2280,20 @@ fn constant(v: &TokenStream) -> bool {
                     TokenTree::Punct(p) => p.as_char() == ':' && (k % 3 != 0),
                     _ => false,
                 })
+        }
+        _ => false,
+    }
+}
+
+/// Is `v` `None`, or `Some` of a constant other than a string (`Some(500)`,
+/// `Some(-1)`, `Some(Mode::A)`)? A string converts as given (`Some("x")`).
+fn some_constant(v: &TokenStream) -> bool {
+    match v.clone().into_iter().collect::<Vec<_>>().as_slice() {
+        [n] => is_ident(n, "None"),
+        [s, TokenTree::Group(g)] if is_ident(s, "Some") && g.delimiter() == Delimiter::Parenthesis => {
+            let inner = g.stream();
+            let text = matches!(inner.clone().into_iter().next(), Some(TokenTree::Literal(l)) if lit_str(&l).is_some());
+            constant(&inner) && !text
         }
         _ => false,
     }
