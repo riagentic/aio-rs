@@ -67,8 +67,13 @@ pub fn parse_stamp(s: &str) -> Option<i64> {
                 _ => return None,
             };
             let o = &rest[1..];
-            let (oh, om) = (o.get(..2).filter(|_| o.len() == 5 && sep(s.len() - 3, b":")), o.get(3..));
-            let (oh, om): (i64, i64) = (oh?.parse().ok()?, om?.parse().ok()?);
+            if o.len() != 5 || o.as_bytes()[2] != b':' {
+                return None;
+            }
+            let at = |r: std::ops::Range<usize>| -> Option<i64> {
+                o.get(r).filter(|t| t.bytes().all(|c| c.is_ascii_digit()))?.parse().ok()
+            };
+            let (oh, om) = (at(0..2)?, at(3..5)?);
             if oh > 23 || om > 59 {
                 return None;
             }
@@ -186,6 +191,8 @@ fn text(v: &dyn Display) -> String {
 
 /// The most of one text a line holds.
 const MAX_TEXT: usize = 8192;
+/// The most of one line of stderr the log keeps (the rest is counted).
+const MAX_LINE: usize = 64 << 10;
 
 /// Untrusted text made safe for a terminal and a log (pure): capped, line
 /// breaks as `\n`, every other control character (C0 but tab, DEL, C1) as
@@ -353,13 +360,30 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
     };
     // By bytes: a line that isn't UTF-8 (a child's, a C library's) is read
     // as best it can be, never the copier's end (its pipe would close, and
-    // the next write to stderr panic).
-    for line in io::BufReader::new(pipe).split(b'\n') {
-        let Ok(mut line) = line else { break };
+    // the next write to stderr panic). A line is cut at `MAX_LINE`.
+    let mut r = io::BufReader::new(pipe);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match io::Read::take(&mut r, MAX_LINE as u64).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let cut = match line.last() {
+            Some(b'\n') => {
+                line.pop();
+                0
+            }
+            _ if line.len() == MAX_LINE => skip_line(&mut r),
+            _ => 0,
+        };
         if line.last() == Some(&b'\r') {
             line.pop();
         }
-        let line = String::from_utf8_lossy(&line).into_owned();
+        let mut line = String::from_utf8_lossy(&line).into_owned();
+        if cut > 0 {
+            _ = write!(line, " … [truncated {cut} bytes]");
+        }
         // No credential reaches a log: a token in a URL, a pairing code.
         let line = crate::report::redact(&line);
         let line = runtime_noise(&line).unwrap_or(line);
@@ -382,6 +406,22 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
             _ = writeln!(t, "{l}");
         }
     }
+}
+
+/// Read past the rest of a line, its `\n` too: how many bytes it had.
+fn skip_line(r: &mut impl BufRead) -> usize {
+    let mut n = 0;
+    while let Ok(buf) = r.fill_buf()
+        && !buf.is_empty()
+    {
+        let (len, end) = buf.iter().position(|&b| b == b'\n').map_or((buf.len(), false), |i| (i, true));
+        r.consume(len + usize::from(end));
+        n += len;
+        if end {
+            break;
+        }
+    }
+    n
 }
 
 /// `ax dev`'s terminal (`AIORT_BOOT=brief`): the boot report, a dozen rows
@@ -851,6 +891,26 @@ mod tests {
         assert!(all.contains("\u{fffd}\u{fffd}b") && !all.contains('\r'), "{all:?}");
     }
 
+    /// A line with no end in sight (a child dumping a blob to stderr) is
+    /// cut at `MAX_LINE`: neither the copier's memory nor the log's budget
+    /// grows with it, and the lines after it are logged.
+    #[test]
+    fn an_endless_line_is_cut_and_the_next_one_logged() {
+        let d = tempfile::tempdir().unwrap();
+        let input = d.path().join("in");
+        let long = "x".repeat(3 * super::MAX_LINE);
+        std::fs::write(&input, format!("INFO  [app] {long}\nINFO  [app] after\n")).unwrap();
+        let logs = d.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let sinks = super::Sinks::open(&logs).unwrap();
+        super::copy(std::fs::File::open(&input).unwrap(), None::<Vec<u8>>, false, sinks);
+        let app = std::fs::read_to_string(logs.join("app.log")).unwrap();
+        let first = app.lines().next().unwrap();
+        assert!(first.len() < super::MAX_LINE + 100, "{}", first.len());
+        assert!(first.ends_with(&format!(" … [truncated {} bytes]", 2 * super::MAX_LINE + 12)), "{}", &first[first.len() - 60..]);
+        assert!(app.lines().nth(1).unwrap().ends_with("INFO  [app] after"), "{app:.200}");
+    }
+
     #[test]
     fn ax_devs_terminal_has_the_boot_report_in_one_line() {
         let mut b = super::BriefBoot { on: true, rows: vec![] };
@@ -913,6 +973,8 @@ mod tests {
             "2026-10-27T23:01:02+01:00x",
             "+026-10-27T23:01:02Z",
             "2026-10-27T23:01:02Zé",
+            "2026-10-27T23:01:02+-1:00",
+            "2026-10-27T23:01:02+01:-5",
         ] {
             assert_eq!(parse_stamp(bad), None, "{bad}");
         }
