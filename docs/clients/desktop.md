@@ -57,6 +57,66 @@ they are). That is how "open this file with" reaches a running app.
 up to 30 s for its lock: a new build replacing an old one.
 `aio_shell::instance::quit(id)` asks the same from code.
 
+### Deep links
+
+An app opens its own links (`notes://item/7`) when it declares their
+scheme:
+
+```toml
+[app]
+id = "notes"
+schemes = ["notes"]
+```
+
+- **Registered by its install**, for this user, and taken away by its
+  uninstall (only while still its own: a scheme another app took since
+  stays that app's):
+
+  | OS | Registered | By |
+  |---|---|---|
+  | Linux | its menu entry says `MimeType=x-scheme-handler/notes;`, and `xdg-mime default <id>.desktop x-scheme-handler/notes` makes it the handler | `install.sh`, `ax install` (an AppImage too); `uninstall.sh`, `ax remove` take its `mimeapps.list` lines |
+  | Windows | `HKCU\Software\Classes\notes`, its command `"<exe>" -- "%1"` | the installer (`--install`, the one-click download); `--uninstall` |
+  | macOS | the `.app`'s `Info.plist` (`CFBundleURLTypes`) | macOS, once the app is in Applications or was opened once; deleting the app forgets it |
+  | Android | one VIEW intent filter per scheme (`BROWSABLE`), `singleTask` | the APK (`[build.android] schemes` adds Android-only ones) |
+
+- **Received through one door**, `aio::ui::links()` (an
+  `UnboundedReceiver<String>` of each link as sent), whether the link
+  started the app or reached it running: a later launch hands its link
+  over and ends (Linux, Windows), macOS sends the running `.app` an Apple
+  event, Android the open activity a new intent. Links that come before
+  anything listens wait for the first listener (the newest 16). A
+  `router!` listens: it goes to what follows the scheme
+  (`notes://item/7` is `/item/7`), with a Back step.
+- A link's scheme is matched in any case (`NOTES://x`); the link itself
+  is handed over as sent. Arguments that are not links to the app's
+  schemes stay in `aio_shell::launches()` only.
+- `ax dev` registers nothing: try a link with a second launch,
+  `<app> notes://item/7`, while the app runs.
+- A scheme an update adds is registered by the next install (Linux,
+  Windows): an update swaps the program, not its registration. macOS and
+  Android read theirs from the new bundle.
+
+Names are checked as the app builds: RFC 3986's form in lower case, and
+none of the system's (`http`, `https`, `file`, `data`, `javascript`,
+`mailto`, `tel`, `aio` (the window's own), `chrome`, `ms-*`…): taking
+one would take every web page, file or mail link.
+
+**A link is untrusted input.** Any web page, any program of the user, any
+app on the phone can open one, with any text after the scheme. So:
+
+- Nothing is run from a link, by the app or by aio-rs: it is a string
+  handed to the app. On Windows it comes after `--`, so a link that
+  holds `" --takeover` or `--home=…` is never one of the app's flags
+  (`aio::paths::Ask` and `--route` read nothing after a bare `--`).
+- Treat it as a request to show something, never as a command: a route
+  a link reaches shows what it would show anyway and asks before it acts
+  (a payment, a deletion, a sign-in to another server), with what it
+  will do in plain view. Parse and check every part you use (an id is a
+  number, an amount is in range), and never put a link's text into a
+  path, a command or a query unchecked.
+- A link may come at any time, many at once: the app keeps no more than
+  16 waiting for a listener, and a later launch's line is 1 MiB at most.
+
 ### Closing and stopping
 
 - Closing the window ends the app (`aio_shell::run` returns), unless

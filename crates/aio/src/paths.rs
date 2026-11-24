@@ -672,6 +672,12 @@ impl Ask {
         let mut out = vec![];
         let mut it = args.iter();
         while let Some(a) = it.next() {
+            // After a bare `--`, nothing is a flag (a link handed by the OS).
+            if a == "--" {
+                out.push(a.clone());
+                out.extend(it.cloned());
+                break;
+            }
             let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
             match FLAGS.iter().find(|f| f.trim_end_matches('=') == flag) {
                 // A value flag without `=`: its value is the next arg.
@@ -683,13 +689,15 @@ impl Ask {
         out
     }
 
-    /// The asks among a launch's `args` (`--home=<dir>` or `--home <dir>`);
-    /// the others are the app's ([`Self::app_args`]).
+    /// The asks among a launch's `args` (`--home=<dir>` or `--home <dir>`),
+    /// before a bare `--` (what follows is data: a link an OS hands over
+    /// may hold anything); the others are the app's ([`Self::app_args`]).
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let mut a = Ask::default();
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
+                "--" => break,
                 "--takeover" => a.takeover = true,
                 "--expose" => a.expose = true,
                 "--keep-server" => a.keep_server = true,
@@ -1212,6 +1220,12 @@ mod tests {
         ]);
         assert_eq!(Ask::app_args(&launch), ["a.md", "-v", "--homes=1"]);
         assert_eq!(Ask::app_args(&args(&["--home"])), Vec::<String>::new(), "a missing value takes nothing else");
+        // After a bare `--`, nothing is a flag: a link the OS handed over
+        // (Windows' `"app.exe" -- "%1"`) can't smuggle one in.
+        let link = args(&["--", "myapp://x", "--takeover", "--home=/h", "--instance", "i"]);
+        assert_eq!(Ask::parse(&link).unwrap(), Ask::default());
+        assert_eq!(Ask::app_args(&link), link, "the app's parser gets them as given");
+        assert!(Ask::parse(&args(&["--takeover", "--", "--home"])).unwrap().takeover);
     }
 
     #[cfg(unix)]

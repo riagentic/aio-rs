@@ -1582,7 +1582,13 @@ pub(crate) mod browser {
             std::fs::write(page.join(f), text).unwrap();
         }
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
-        let app = App { id: "web-test".into(), name: "Web test".into(), version: "1.0.0".into(), icon: None };
+        let app = App {
+            id: "web-test".into(),
+            name: "Web test".into(),
+            version: "1.0.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let out = dir.join("site");
         match bind(&page, &target, ("webpage", "webpage", "aio"), &app, &out, false, false, None) {
             Err(e) if e.contains("needs wasm-bindgen") => {
@@ -2203,7 +2209,13 @@ mod browser_air {
             std::fs::write(page.join(f), text).unwrap();
         }
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
-        let app = App { id: "air-web-test".into(), name: "Air web test".into(), version: "1.0.0".into(), icon: None };
+        let app = App {
+            id: "air-web-test".into(),
+            name: "Air web test".into(),
+            version: "1.0.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let out = dir.join("site");
         match bind(&page, &target, ("airpage", "airpage", "aio"), &app, &out, true, false, None) {
             Err(e) if e.contains("needs wasm-bindgen") => {
@@ -2384,7 +2396,13 @@ mod browser_split {
             std::fs::write(page.join(f), text).unwrap();
         }
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| page.join("target"), PathBuf::from);
-        let app = App { id: "split-test".into(), name: "Split test".into(), version: "1.0.0".into(), icon: None };
+        let app = App {
+            id: "split-test".into(),
+            name: "Split test".into(),
+            version: "1.0.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let out = dir.join("site");
         match bind(&page, &target, ("splitpage", "splitpage", "aio"), &app, &out, false, false, None) {
             Err(e) if e.contains("needs wasm-bindgen") => {
