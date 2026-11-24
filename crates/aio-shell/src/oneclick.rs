@@ -118,9 +118,57 @@ fn security_dir(pe: &[u8]) -> Option<(usize, usize)> {
     (off > 0 && len > 0 && off <= pe.len()).then_some((entry, off))
 }
 
+/// The registry values that make the installed `exe` the handler of the
+/// app's URL `scheme` for this user (`HKCU\Software\Classes\<scheme>`), as
+/// (key, value name, data); `None`: the key's default value (pure). The
+/// link comes after `--`: whatever it holds (a quote, a space, `--x`) is
+/// one argument the app reads as data, never one of its flags.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn scheme_values(scheme: &str, name: &str, exe: &str) -> [(String, Option<&'static str>, String); 4] {
+    let key = scheme_key(scheme);
+    [
+        (key.clone(), None, format!("URL:{name}")),
+        (key.clone(), Some("URL Protocol"), String::new()),
+        (format!(r"{key}\DefaultIcon"), None, format!("\"{exe}\",0")),
+        (format!(r"{key}\shell\open\command"), None, format!("\"{exe}\" -- \"%1\"")),
+    ]
+}
+
+/// The registry key of URL `scheme`'s handler for this user.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn scheme_key(scheme: &str) -> String {
+    format!(r"HKCU\Software\Classes\{scheme}")
+}
+
+/// Whether `reg query`'s answer for a scheme's open command (`said`) names
+/// the installed `exe` (pure): an uninstall takes only its own handler,
+/// never another app's that took the scheme since.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn opens_with(said: &str, exe: &str) -> bool {
+    said.to_lowercase().contains(&format!("\"{}\" -- ", exe.to_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scheme_opens_the_installed_exe_with_its_link_after_a_bare_double_dash() {
+        let exe = r"C:\Users\a\AppData\Local\Programs\notes\notes.exe";
+        let v = scheme_values("notes", "Notes", exe);
+        let k = r"HKCU\Software\Classes\notes";
+        assert_eq!(v[0], (k.to_string(), None, "URL:Notes".to_string()));
+        assert_eq!(v[1], (k.to_string(), Some("URL Protocol"), String::new()), "what makes it a URL scheme");
+        assert_eq!(v[2].0, format!(r"{k}\DefaultIcon"));
+        assert_eq!(v[3], (format!(r"{k}\shell\open\command"), None, format!("\"{exe}\" -- \"%1\"")));
+        let said = format!(
+            "\r\n{k}\\shell\\open\\command\r\n    (Default)    REG_SZ    \"{}\" -- \"%1\"\r\n",
+            exe.to_uppercase()
+        );
+        assert!(opens_with(&said, exe), "paths are case-blind");
+        assert!(!opens_with("    (Default)    REG_SZ    \"C:\\other\\mail.exe\" \"%1\"", exe), "another app's stays");
+        assert!(!opens_with(&said, r"C:\Users\a\AppData\Local\Programs\notes\notes"), "the whole path");
+    }
 
     #[test]
     fn an_offline_download_carries_its_runtime_after_the_exe() {

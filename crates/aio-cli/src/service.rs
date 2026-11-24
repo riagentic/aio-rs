@@ -274,7 +274,7 @@ mod tests {
     use super::*;
 
     fn app(name: &str) -> App {
-        App { id: "relay".into(), name: name.into(), version: "1.2.0".into(), icon: None }
+        App { id: "relay".into(), name: name.into(), version: "1.2.0".into(), icon: None, schemes: vec![] }
     }
 
     #[test]

@@ -223,6 +223,18 @@ fn place(cfg: &aio::config::Config, version: &str, shortcut: bool) -> io::Result
     for (v, t, d) in values {
         run(Command::new("reg").args(["add", &key, "/v", v, "/t", t, "/d", &d, "/f"]), "the Settings entry")?;
     }
+    // Its links (`[app] schemes`) open it.
+    for s in &cfg.app.schemes {
+        for (key, value, data) in crate::oneclick::scheme_values(s, name, &exe.display().to_string()) {
+            let mut reg = Command::new("reg");
+            reg.args(["add", &key]);
+            match value {
+                Some(v) => reg.args(["/v", v]),
+                None => reg.arg("/ve"),
+            };
+            run(reg.args(["/t", "REG_SZ", "/d", &data, "/f"]), &format!("the {s}: links"))?;
+        }
+    }
     Ok(())
 }
 
@@ -279,6 +291,15 @@ pub fn uninstall(cfg: &aio::config::Config) -> io::Result<()> {
     let (id, name) = (&cfg.app.id, &cfg.app.name);
     _ = std::fs::remove_file(shortcut(name, id));
     _ = Command::new("reg").args(["delete", &uninstall_key(id), "/f"]).output();
+    // Its schemes' handlers, unless another app took one since.
+    let exe = installed_exe(id).display().to_string();
+    for s in &cfg.app.schemes {
+        let key = crate::oneclick::scheme_key(s);
+        let said = Command::new("reg").args(["query", &format!(r"{key}\shell\open\command"), "/ve"]).output();
+        if said.is_ok_and(|o| crate::oneclick::opens_with(&String::from_utf8_lossy(&o.stdout), &exe)) {
+            _ = Command::new("reg").args(["delete", &key, "/f"]).output();
+        }
+    }
     // This .exe is running: a detached shell removes it once it has exited,
     // and its versions (the updater's), as uninstall.sh does on Linux.
     let (dir, versions) = (crate::instance::programs(id), crate::update::dir(id));

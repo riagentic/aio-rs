@@ -13,10 +13,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The `.app`'s `Info.plist` (pure). The bundle only launches the app, so it
-/// is no Dock entry of its own (`LSUIElement`): its window's bundle is.
+/// is no Dock entry of its own (`LSUIElement`): its window's bundle is. Its
+/// `[app] schemes` are its URL types: macOS hands it their links (an Apple
+/// event to this bundle, `aio_shell`'s `macurl`), once it is in
+/// Applications or was opened once.
 pub fn info_plist(app: &App, bundle_id: &str) -> String {
     let x = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let icon = if app.icon.is_some() { "\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>\n" } else { "" };
+    let schemes: String = app.schemes.iter().map(|s| format!("\t\t\t\t<string>{}</string>\n", x(s))).collect();
+    let urls = match schemes.is_empty() {
+        true => schemes,
+        false => format!(
+            "\t<key>CFBundleURLTypes</key>\n\t<array>\n\t\t<dict>\n\
+             \t\t\t<key>CFBundleURLName</key>\n\t\t\t<string>{}</string>\n\
+             \t\t\t<key>CFBundleURLSchemes</key>\n\t\t\t<array>\n{schemes}\t\t\t</array>\n\
+             \t\t</dict>\n\t</array>\n",
+            x(bundle_id)
+        ),
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -29,6 +43,7 @@ pub fn info_plist(app: &App, bundle_id: &str) -> String {
          \t<key>CFBundleShortVersionString</key>\n\t<string>{v}</string>\n\
          \t<key>CFBundleVersion</key>\n\t<string>{v}</string>\n\
          {icon}\
+         {urls}\
          \t<key>LSMinimumSystemVersion</key>\n\t<string>11.0</string>\n\
          \t<key>LSUIElement</key>\n\t<true/>\n\
          \t<key>NSHighResolutionCapable</key>\n\t<true/>\n\
@@ -272,6 +287,7 @@ mod tests {
             name: "Notes & Co".into(),
             version: "1.2.0".into(),
             icon: icon.then(|| "i.png".into()),
+            schemes: vec![],
         }
     }
 
@@ -283,6 +299,13 @@ mod tests {
         assert!(p.contains("<key>LSUIElement</key>\n\t<true/>") && p.contains("AppIcon"));
         assert!(!info_plist(&app(false), "x.y").contains("CFBundleIconFile"));
         assert!(info_plist(&app(false), "com.example.notes").contains("<string>com.example.notes</string>"));
+        assert!(!p.contains("CFBundleURLTypes"), "no schemes, no URL types");
+        let linked = info_plist(&App { schemes: vec!["notes".into(), "n+x".into()], ..app(false) }, "aio.rt.notes");
+        let urls = "\t<key>CFBundleURLTypes</key>\n\t<array>\n\t\t<dict>\n\
+                    \t\t\t<key>CFBundleURLName</key>\n\t\t\t<string>aio.rt.notes</string>\n\
+                    \t\t\t<key>CFBundleURLSchemes</key>\n\t\t\t<array>\n\
+                    \t\t\t\t<string>notes</string>\n\t\t\t\t<string>n+x</string>\n\t\t\t</array>\n\t\t</dict>\n\t</array>\n";
+        assert!(linked.contains(urls), "{linked}");
     }
 
     #[test]
