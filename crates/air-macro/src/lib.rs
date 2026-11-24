@@ -434,7 +434,7 @@ fn builder(
                     quote!(#air::Prop::derive(::std::boxed::Box::new(f))),
                     quote!(),
                     quote!(v: #t),
-                    quote!(#air::Prop::Const(v)),
+                    quote!(#air::Prop::new(v)),
                 )
             }
             _ if exact => (
@@ -465,7 +465,7 @@ fn builder(
                     quote!(#air::Prop::derive(::std::boxed::Box::new(move || #call))),
                     quote!(<__X: #tr, __M>),
                     quote!(v: __X),
-                    quote!(#air::Prop::Const({ let f = || v; #call })),
+                    quote!(#air::Prop::new({ let f = || v; #call })),
                 )
             }
             // A view or text: the closure itself, so text that reads state follows it.
@@ -508,8 +508,8 @@ fn builder(
         let vname = format_ident!("__val_{}", n.to_string().trim_start_matches("r#"));
         let (vty, vval) = match &f.kind {
             Kind::Opt(i) => (i.clone(), quote!(::core::option::Option::Some(v))),
-            Kind::Prop(i, false) => (i.clone(), quote!(#air::Prop::Const(v))),
-            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::Const(::core::option::Option::Some(v)))),
+            Kind::Prop(i, false) => (i.clone(), quote!(#air::Prop::new(v))),
+            Kind::Prop(i, true) => (i.clone(), quote!(#air::Prop::new(::core::option::Option::Some(v)))),
             Kind::OptView => (quote!(#air::View), quote!(::core::option::Option::Some(v))),
             Kind::Plain | Kind::View => (ty.clone(), quote!(v)),
         };
@@ -578,10 +578,10 @@ fn builder(
     let fill = fields.iter().map(|f| {
         let n = &f.name;
         let or = match (&f.default, &f.kind) {
-            (Some(d), Kind::Prop(..)) => quote!(#air::Prop::Const(#d)),
+            (Some(d), Kind::Prop(..)) => quote!(#air::Prop::new(#d)),
             (Some(d), _) => d.clone(),
             (None, Kind::Opt(_) | Kind::OptView) => quote!(::core::option::Option::None),
-            (None, Kind::Prop(_, true)) => quote!(#air::Prop::Const(::core::option::Option::None)),
+            (None, Kind::Prop(_, true)) => quote!(#air::Prop::new(::core::option::Option::None)),
             (None, Kind::View) => quote!(::core::result::Result::Ok(#air::Tree::empty())),
             (None, _) if f.extends => quote!(::std::vec::Vec::new()),
             (None, _) => quote!(::core::unreachable!()),
@@ -1720,7 +1720,12 @@ fn scan(toks: &[TokenTree], out: &mut Vec<String>, bound: &mut Vec<String>, lets
                             && let Some(s) = lit_str(l)
                             && let Node::Fmt(_, r) = text(&s, l.span())
                         {
-                            out.extend(r);
+                            // A `{name}` a `let` inside the hole bound is read there.
+                            for n in r {
+                                if !out.contains(&n) && !lets.contains(&n) {
+                                    out.push(n);
+                                }
+                            }
                         }
                         scan(&inner, out, bound, lets);
                     }
@@ -2331,6 +2336,11 @@ mod tests {
         assert_eq!(names("{ let start = start.clone(); move |_| start() }"), ["start"], "a closure, cloned in");
         assert_eq!(names("{ let (h, k) = (h.clone(), k.clone()); move |e| f(h, k, e, z) }"), ["h", "k", "z"]);
         assert_eq!(names("{ let n = 1; n + m }"), ["m"], "a let's own name, after it");
+        assert_eq!(
+            names("{ let fee = 3; format!(\"{} {}{fee}{m}{m}\", n, e) }"),
+            ["m", "n", "e"],
+            "a format's inline name: a let's own, once"
+        );
         assert_eq!(names("move |_| if let Some(f) = on { f.call(v) }"), ["on", "v"]);
         assert_eq!(names("for x in xs { g(x) }"), ["xs"]);
         assert_eq!(names("if a && let Some(t) = top() { t.go() }"), ["a"], "a let chain");

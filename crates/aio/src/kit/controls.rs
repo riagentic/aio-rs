@@ -189,28 +189,19 @@ pub fn Tabs(
     let base = use_id("tabs");
     let around = try_context::<Rtl>();
     let rtl = memo(move || rtl.get().unwrap_or_else(|| around.is_some_and(|Rtl(r)| r.get())));
-    let first = {
-        let tabs = tabs.clone();
-        memo(move || {
-            tabs.with(|t| t.iter().find(|t| !t.disabled).or(t.first()).map(|t| t.id.clone()).unwrap_or_default())
-        })
-    };
+    let first = memo(move || {
+        tabs.with(|t| t.iter().find(|t| !t.disabled).or(t.first()).map(|t| t.id.clone()).unwrap_or_default())
+    });
     let inner = signal(|| value.get_untracked().unwrap_or(first.get_untracked()));
     let els = signal(HashMap::<String, Rc<MountedData>>::new);
     let controlled = value.is_live() || value.with_untracked(Option::is_some);
-    let active = {
-        let (tabs, value) = (tabs.clone(), value.clone());
-        memo(move || {
-            value.get().unwrap_or_else(|| {
-                let i = inner.get();
-                if tabs.with(|t| t.iter().any(|t| t.id == i)) { i } else { first.get() }
-            })
+    let active = memo(move || {
+        value.get().unwrap_or_else(|| {
+            let i = inner.get();
+            if tabs.with(|t| t.iter().any(|t| t.id == i)) { i } else { first.get() }
         })
-    };
-    let shown = {
-        let tabs = tabs.clone();
-        memo(move || tabs.with(|t| t.iter().find(|t| t.id == active.get()).cloned()))
-    };
+    });
+    let shown = memo(move || tabs.with(|t| t.iter().find(|t| t.id == active.get()).cloned()));
     let stop = memo(move || shown.with(|s| s.as_ref().map(|t| t.id.clone())).unwrap_or_else(|| first.get()));
     let select = move |id: String| {
         if !controlled {
@@ -220,10 +211,8 @@ pub fn Tabs(
             f.call(id)
         }
     };
-    let rows = {
-        let tabs = tabs.clone();
-        memo(move || tabs.with(|t| t.iter().map(|t| (t.id.clone(), t.label.clone(), t.disabled)).collect::<Vec<_>>()))
-    };
+    let rows =
+        memo(move || tabs.with(|t| t.iter().map(|t| (t.id.clone(), t.label.clone(), t.disabled)).collect::<Vec<_>>()));
     rsx! {
         div { class: join("aio-tabs", &class.get()), ..attributes,
             div { class: "aio-tablist", role: "tablist", "aria-label": label,

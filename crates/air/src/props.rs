@@ -216,21 +216,28 @@ impl<C: CallbackOf> CallbackOf for Option<C> {
 
 /// A prop that follows state: given `value: name.get()`, the component
 /// sees each new value (read it in a hole: `"{value}"`, `value.get()` in an
-/// attribute). Given a plain value, it is that value and costs nothing.
-pub enum Prop<T: 'static> {
-    Const(T),
+/// attribute). Given a plain value, it is that value. `Copy`, as a signal
+/// is: a handle whose value lives as long as the view that gave it.
+pub struct Prop<T: 'static>(Held<T>);
+
+enum Held<T: 'static> {
+    /// A constant: a signal nothing writes, read untracked.
+    Const(Signal<T>),
     Live(Memo<T>),
 }
 
-impl<T: Clone> Clone for Prop<T> {
+impl<T> Clone for Prop<T> {
     fn clone(&self) -> Self {
-        match self {
-            Self::Const(v) => Self::Const(v.clone()),
-            Self::Live(m) => Self::Live(*m),
-        }
+        *self
     }
 }
-impl<T: Copy> Copy for Prop<T> {}
+impl<T> Copy for Prop<T> {}
+impl<T> Clone for Held<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Held<T> {}
 
 impl<T: PartialEq + Clone> PartialEq for Prop<T> {
     /// The same value now (untracked).
@@ -241,13 +248,13 @@ impl<T: PartialEq + Clone> PartialEq for Prop<T> {
 
 impl<T: Default> Default for Prop<T> {
     fn default() -> Self {
-        Self::Const(T::default())
+        Self::new(T::default())
     }
 }
 
 impl<T> From<T> for Prop<T> {
     fn from(v: T) -> Self {
-        Self::Const(v)
+        Self::new(v)
     }
 }
 
@@ -259,11 +266,16 @@ impl<T: PartialEq + Clone> From<Signal<T>> for Prop<T> {
 
 impl<T> From<Memo<T>> for Prop<T> {
     fn from(m: Memo<T>) -> Self {
-        Self::Live(m)
+        Self(Held::Live(m))
     }
 }
 
 impl<T: 'static> Prop<T> {
+    /// A constant.
+    pub fn new(v: T) -> Self {
+        Self(Held::Const(Signal::new(v)))
+    }
+
     /// `f()`, again whenever what it read changes; a constant if it read nothing.
     pub fn derive(f: Box<dyn Fn() -> T>) -> Self
     where
@@ -271,21 +283,21 @@ impl<T: 'static> Prop<T> {
     {
         // Its first value is the probe's: `f` runs once at mount.
         let (v, marks) = recorded(&f);
-        if marks.is_empty() { Self::Const(v) } else { Self::Live(memo_seeded(f, v, marks)) }
+        if marks.is_empty() { Self::new(v) } else { Self(Held::Live(memo_seeded(f, v, marks))) }
     }
 
     /// `f` of the value; subscribes.
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        match self {
-            Self::Const(v) => f(v),
-            Self::Live(m) => m.with(f),
+        match self.0 {
+            Held::Const(s) => s.with_untracked(f),
+            Held::Live(m) => m.with(f),
         }
     }
 
     pub fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        match self {
-            Self::Const(v) => f(v),
-            Self::Live(m) => m.with_untracked(f),
+        match self.0 {
+            Held::Const(s) => s.with_untracked(f),
+            Held::Live(m) => m.with_untracked(f),
         }
     }
 
@@ -306,7 +318,7 @@ impl<T: 'static> Prop<T> {
 
     /// Does it follow something (else it is a constant)?
     pub fn is_live(&self) -> bool {
-        matches!(self, Self::Live(_))
+        matches!(self.0, Held::Live(_))
     }
 }
 

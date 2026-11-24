@@ -103,15 +103,12 @@ pub fn Avatar(
     #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
 ) -> View {
-    let style = {
-        let name = name.clone();
-        memo(move || {
-            let size = size.get();
-            let bg = color.get().unwrap_or_else(|| format!("hsl({}, 55%, 45%)", avatar_hue(&name.get())));
-            let font = (f64::from(size) * 0.4).round();
-            format!("width:{size}px;height:{size}px;font-size:{font}px;background:{bg}")
-        })
-    };
+    let style = memo(move || {
+        let size = size.get();
+        let bg = color.get().unwrap_or_else(|| format!("hsl({}, 55%, 45%)", avatar_hue(&name.get())));
+        let font = (f64::from(size) * 0.4).round();
+        format!("width:{size}px;height:{size}px;font-size:{font}px;background:{bg}")
+    });
     rsx! {
         span {
             class: join("aio-avatar", &class.get()),

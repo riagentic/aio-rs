@@ -156,7 +156,9 @@ readers told when that value changes.
   follow anything; a dev build names, once, each view body that reads it
   (`[hint]` in the log).
 - `act!(method(args))` calls the method; a refusal is logged and gives
-  `None`, an answer `Some(value)`. A view's call shows at once; commits
+  `None`, an answer `Some(value)`. It needs only the client's `Ui` in
+  scope (`use crate::prefs::Ui;` in another module), never the
+  `<Cell>Calls` trait. A view's call shows at once; commits
   from effects, schedules and other threads reach the views at most once
   per `aio::ui::BACKGROUND` (150 ms).
 - A refusal is the cell's last word, not the view's message: check the
@@ -247,12 +249,25 @@ assert_eq!(ui.count("li"), 0);
 | `name: String` | required |
 | `#[props(default)] n: u32` | may be left out: `Default` |
 | `#[props(default = 3)] rows: u32` | may be left out: that value |
-| `#[props(into)] label: String` | takes `&str` too |
-| `value: Prop<String>` | follows the expression given (`value: name.get()`); `.get()` reads it in a hole |
+| `value: Prop<String>` | follows the expression given (`value: name.get()`); `.get()` reads it in a hole; `Copy`, as a signal |
 | `note: Option<String>` | may be left out (`None`); `note: "x"` gives `Some` |
-| `children: View` | what the caller writes inside |
+| `hint: Prop<Option<String>>` | may be left out (`None`); takes `"x"`, an `Option`, or a signal of an `Option` |
+| `children: View` | what the caller writes inside; may be left out (empty); takes text too (`label: "Save"`, `label: 7`) |
 | `onpick: EventHandler<String>` | a handler the caller passes; `onpick.call(v)` |
 | `#[props(extends = GlobalAttributes)] attributes: Vec<Attribute>` | any HTML attribute, spread with `..attributes` |
+
+No prop needs `into`: every prop converts what it is given. A plain
+prop (`label: String`) takes anything `Into` its type (`label: "Save"`,
+`size: 5` for a `u8`); an `Option<T>` a `T`, what converts to one, or an
+`Option`; a `Prop<T>` the same, or a `Signal`, `Memo` or `Prop` of one,
+which it follows. `#[props(into)]` is accepted and changes nothing. The
+one exception: a prop whose type names the component's own type
+parameter (`items: Vec<R>`) takes exactly that type.
+
+Left out, a prop is its `#[props(default)]` (`Default`) or
+`#[props(default = e)]` value; an `Option`, a `Prop<Option<T>>` and a
+`View` are `None` or empty without either; any other left out is a
+compile error naming it.
 
 ### Markup
 

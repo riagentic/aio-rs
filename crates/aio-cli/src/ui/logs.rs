@@ -68,10 +68,9 @@ pub fn LogView(
     on_follow: EventHandler<()>,
 ) -> View {
     let view = context::<ViewState>();
-    let l = logs.clone();
     // The lines kept: they follow the log, the floor and the filter.
     let lines = memo(move || {
-        l.with(|all| {
+        logs.with(|all| {
             let all = all.as_deref().unwrap_or(&[]);
             view.log_query.with(|q| shown(all, view.log_floor.get(), q).into_iter().cloned().collect::<Vec<LogLine>>())
         })

@@ -590,7 +590,6 @@ impl Tally {
 
 #[cfg(feature = "dev")]
 mod tally {
-    use super::TallyCalls;
     use aio::ui::prelude::*;
     aio::client!(super::Tally, tally);
 

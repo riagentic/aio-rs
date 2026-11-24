@@ -164,10 +164,7 @@ pub fn Field(
 ) -> View {
     let base = use_id("field");
     let labelled = label.is_some();
-    let error = {
-        let error = error.clone();
-        memo(move || error.get().filter(|e| !e.is_empty()))
-    };
+    let error = memo(move || error.get().filter(|e| !e.is_empty()));
     let said = {
         let (base, hinted, required) = (base.clone(), hint.is_some(), required);
         memo(move || Said {
