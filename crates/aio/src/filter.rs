@@ -149,14 +149,10 @@ fn keep(v: &Value, paths: &[&[&str]]) -> Option<Value> {
         return Some(v.clone());
     }
     match v {
-        Value::Object(m) => Some(Value::Object(
-            m.iter()
-                .filter_map(|(k, x)| {
-                    let sub: Vec<&[&str]> = paths.iter().filter(|p| p[0] == k).map(|p| &p[1..]).collect();
-                    (!sub.is_empty()).then(|| keep(x, &sub)).flatten().map(|x| (k.clone(), x))
-                })
-                .collect(),
-        )),
+        Value::Object(m) => Some(Value::Object(crate::object(m.iter().filter_map(|(k, x)| {
+            let sub: Vec<&[&str]> = paths.iter().filter(|p| p[0] == k).map(|p| &p[1..]).collect();
+            (!sub.is_empty()).then(|| keep(x, &sub)).flatten().map(|x| (k.clone(), x))
+        })))),
         Value::Array(a) => {
             Some(Value::Array(a.iter().map(|x| keep(x, paths).unwrap_or_else(|| Value::Object(Map::new()))).collect()))
         }
@@ -215,14 +211,10 @@ pub(crate) fn pick(v: &Value, paths: &[String]) -> Value {
 fn picked(v: &Value, paths: &[&[&str]]) -> Option<Value> {
     match v {
         _ if paths.iter().any(|p| p.is_empty()) => Some(v.clone()),
-        Value::Object(m) => Some(Value::Object(
-            m.iter()
-                .filter_map(|(k, x)| {
-                    let sub: Vec<&[&str]> = paths.iter().filter(|p| p[0] == k).map(|p| &p[1..]).collect();
-                    (!sub.is_empty()).then(|| picked(x, &sub)).flatten().map(|x| (k.clone(), x))
-                })
-                .collect(),
-        )),
+        Value::Object(m) => Some(Value::Object(crate::object(m.iter().filter_map(|(k, x)| {
+            let sub: Vec<&[&str]> = paths.iter().filter(|p| p[0] == k).map(|p| &p[1..]).collect();
+            (!sub.is_empty()).then(|| picked(x, &sub)).flatten().map(|x| (k.clone(), x))
+        })))),
         _ => Some(v.clone()),
     }
 }

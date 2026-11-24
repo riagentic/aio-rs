@@ -854,7 +854,7 @@ pub(crate) fn tell(f: &OnLink, link: &Presence) {
 /// for calls of this run). A step pauses the cell, as `pause` does
 /// ([`Handle::pause`]: calls refused, schedules held), so it stays where
 /// travel put it.
-pub(crate) fn travel<T: Cell>(h: &Handle<T>, by: &By, msg: &Value) -> Value {
+fn travel(h: &dyn Linked, by: &By, msg: &Value) -> Value {
     use crate::TimeAsk;
     let err = |e: String| json!({ "t": "travel", "err": e });
     let ask = match (msg["cmd"].as_str().unwrap_or("where"), msg["to"].as_u64()) {
@@ -866,7 +866,7 @@ pub(crate) fn travel<T: Cell>(h: &Handle<T>, by: &By, msg: &Value) -> Value {
         ("where", _) => None,
         (c, _) => return err(format!("unknown time travel {c:?}: undo, redo, goto <seq>, pause, resume")),
     };
-    match h.by(by.clone()).travel(ask) {
+    match h.travel(by, ask) {
         Ok(tl) => {
             let steps: Vec<Value> = tl
                 .steps
@@ -1005,10 +1005,14 @@ pub(crate) trait Linked: Send + Sync {
         op: Option<&str>,
         parts: Option<crate::answer::Parts>,
     ) -> Result<(Option<Value>, crate::Answer)>;
-    /// [`travel`] on it.
-    fn travel(&self, by: &By, msg: &Value) -> Value;
-    /// [`operate`] on it.
-    fn operate(&self, by: &By, ask: &Value) -> std::result::Result<Value, String>;
+    /// Time travel as `by` ([`Handle::travel`]).
+    fn travel(&self, by: &By, ask: Option<crate::TimeAsk>) -> Result<crate::Timeline>;
+    /// How long events `seqs` took, those that ran in this run.
+    fn took(&self, seqs: &[u64]) -> Vec<(u64, Duration)>;
+    /// Whether it is enabled (not tripped), and its effects running or queued.
+    fn load(&self) -> (bool, usize);
+    /// [`operate`]'s asks that read or write the store.
+    fn operate_store(&self, by: &By, ask: &Value) -> std::result::Result<Value, String>;
 }
 
 impl<T: Cell> Linked for Handle<T> {
@@ -1062,12 +1066,38 @@ impl<T: Cell> Linked for Handle<T> {
         gate.ask(self, viewer, from, method, args, op, parts)
     }
 
-    fn travel(&self, by: &By, msg: &Value) -> Value {
-        travel(self, by, msg)
+    fn travel(&self, by: &By, ask: Option<crate::TimeAsk>) -> Result<crate::Timeline> {
+        self.by(by.clone()).travel(ask)
     }
 
-    fn operate(&self, by: &By, ask: &Value) -> std::result::Result<Value, String> {
-        operate(self, by, ask)
+    fn took(&self, seqs: &[u64]) -> Vec<(u64, Duration)> {
+        self.store(|s| seqs.iter().filter_map(|q| Some((*q, s.took(*q)?))).collect())
+    }
+
+    fn load(&self) -> (bool, usize) {
+        (self.enabled(), self.pending(None))
+    }
+
+    fn operate_store(&self, by: &By, ask: &Value) -> std::result::Result<Value, String> {
+        match ask["t"].as_str() {
+            Some("fields") => Ok(fields::<T>()),
+            Some("load") => {
+                self.store(|s| s.load(by, ask["state"].clone())).map_err(|e| e.why)?;
+                Ok(self.snapshot().0.into())
+            }
+            Some("flush") => self.store(|s| s.flush()).map(|_| json!(self.snapshot().0)).map_err(|e| e.why),
+            Some("drop") => {
+                let cell = ask["cell"].as_str().unwrap_or_default();
+                self.store(|s| s.drop_cell(cell)).map(Value::Bool).map_err(|e| e.0)
+            }
+            Some("peer") => Ok(peer::<T>(&self.state(), ask)),
+            Some("at") => {
+                let at = ask["to"].as_u64().unwrap_or_default();
+                let st = self.store(|s| s.state_at(at)).map_err(|e| e.0)?;
+                serde_json::to_value(&st).map_err(|e| e.to_string())
+            }
+            _ => self.store(|s| s.shape()).map(|shape| json!({ "v": T::VERSION, "shape": shape })).map_err(|e| e.0),
+        }
     }
 }
 
@@ -1427,7 +1457,7 @@ async fn linked(
                     Some("travel") => {
                         let reply = if door {
                             let (hh, by) = (h.clone(), viewer.clone());
-                            tokio::task::spawn_blocking(move || hh.travel(&by, &msg)).await.map_err(|e| e.to_string())?
+                            tokio::task::spawn_blocking(move || travel(&*hh, &by, &msg)).await.map_err(|e| e.to_string())?
                         } else {
                             json!({ "t": "travel", "err": not_here })
                         };
@@ -1471,7 +1501,7 @@ async fn linked(
                             }
                         };
                         let (hh, by) = (h.clone(), viewer.clone());
-                        let r = tokio::task::spawn_blocking(move || hh.operate(&by, &ask))
+                        let r = tokio::task::spawn_blocking(move || operate(&*hh, &by, &ask))
                             .await
                             .map_err(|e| e.to_string())?;
                         while events.try_recv().is_ok() {}
@@ -1520,12 +1550,10 @@ pub(crate) fn peer<T: Cell>(st: &T, ask: &Value) -> Value {
 /// time each of events `seqs` took, when it ran in this run (`ms`, by seq),
 /// and the cell's refused calls of late (`refused`: `{at, call, ms,
 /// refused}`, never their arguments).
-fn took<T: Cell>(h: &Handle<T>, ask: &Value) -> Value {
+fn took(h: &dyn Linked, ask: &Value) -> Value {
     let seqs: Vec<u64> = ask["seqs"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
-    let ms: serde_json::Map<String, Value> = h.store(|s| {
-        seqs.iter().filter_map(|q| Some((q.to_string(), (s.took(*q)?.as_secs_f64() * 1000.0).into()))).collect()
-    });
-    let mine = format!("{}.", T::ID);
+    let ms = crate::object(h.took(&seqs).into_iter().map(|(q, d)| (q.to_string(), (d.as_secs_f64() * 1000.0).into())));
+    let mine = format!("{}.", h.id());
     let refused: Vec<Value> = crate::report::timeline()
         .into_iter()
         .filter(|e| e["refused"].is_string() && e["call"].as_str().is_some_and(|c| c.starts_with(&mine)))
@@ -1548,36 +1576,26 @@ pub(crate) fn fields<T: Cell>() -> Value {
 /// (`peer`), which fields are saved and which are sent (`fields`), write
 /// what is held now (`flush`), `drop` a stored cell nothing declares.
 /// The answer, or why not.
-pub(crate) fn operate<T: Cell>(h: &Handle<T>, by: &By, ask: &Value) -> std::result::Result<Value, String> {
+fn operate(h: &dyn Linked, by: &By, ask: &Value) -> std::result::Result<Value, String> {
     match ask["t"].as_str() {
-        Some("fields") => Ok(fields::<T>()),
-        Some("load") => {
-            h.store(|s| s.load(by, ask["state"].clone())).map_err(|e| e.why)?;
-            Ok(h.snapshot().0.into())
-        }
         Some("cost") => {
-            let mut c = crate::cost::report(T::ID, ask["window"].as_i64());
-            (c["enabled"], c["effects"]) = (h.enabled().into(), h.pending(None).into());
+            let mut c = crate::cost::report(h.id(), ask["window"].as_i64());
+            let (enabled, effects) = h.load();
+            (c["enabled"], c["effects"]) = (enabled.into(), effects.into());
             Ok(c)
         }
         Some("took") => Ok(took(h, ask)),
-        // `ax persist`: what is held (a coalesced run) written now.
-        Some("flush") => h.store(|s| s.flush()).map(|_| json!(h.snapshot().0)).map_err(|e| e.why),
         // `ax persist --drop`: a stored cell no cell of this app declares.
         Some("drop") => {
             let cell = ask["cell"].as_str().ok_or("drop: `cell` names the stored cell")?;
             if crate::report::own(cell) {
                 return Err(format!("{cell} is a cell of this app: only a cell no build declares is dropped"));
             }
-            h.store(|s| s.drop_cell(cell)).map(Value::Bool).map_err(|e| e.0)
+            h.operate_store(by, ask)
         }
-        Some("peer") => Ok(peer::<T>(&h.state(), ask)),
-        Some("at") => {
-            let at = ask["to"].as_u64().ok_or("at: `to` names an event (a number)")?;
-            let st = h.store(|s| s.state_at(at)).map_err(|e| e.0)?;
-            serde_json::to_value(&st).map_err(|e| e.to_string())
-        }
-        _ => h.store(|s| s.shape()).map(|shape| json!({ "v": T::VERSION, "shape": shape })).map_err(|e| e.0),
+        Some("at") if !ask["to"].is_u64() => Err("at: `to` names an event (a number)".into()),
+        // `load`, `fields`, `peer`, `at`, the `shape`; `flush` (`ax persist`): what is held written now.
+        _ => h.operate_store(by, ask),
     }
 }
 
