@@ -32,6 +32,11 @@ version may break things.
 - A network call its `#[client]` rule refuses no longer supersedes a
   running `#[mode(newest)]` call of the same method: before, any caller
   could abort an admin's call with one refused call (`DispatchAborted`).
+- Android: the page takes its wire to the app only from the activity. A
+  sandboxed island (`Island::js(..).sandboxed()`) posting its own
+  `aio-port` took the wire over: it heard every event the page sent
+  (the keys typed in any field) and could send the page DOM edits and
+  scripts.
 - The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.

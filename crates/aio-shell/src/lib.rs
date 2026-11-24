@@ -186,6 +186,31 @@ mod guide;
 
 pub use guest::{Child, Web, clear_partition, open_window};
 pub use instance::{Launch, Start, launches, start};
+/// Android's page side of the port: `window.__aioWire`, as the desktop
+/// preload gives it, over the port the activity posts as `aio-port`. Only
+/// the activity's post is taken (it has no source window): a frame in the
+/// page (a sandboxed island) posting one would take the wire.
+#[cfg(any(target_os = "android", all(test, unix)))]
+pub(crate) const ANDROID_BRIDGE: &str = "window.__aioWire = (() => {
+  let port = null, onFrame = null;
+  const early = [], out = [];
+  const bytes = (s) => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+  const text = (u) => { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
+  // The first frame drawn into the page says so: the splash can go.
+  let painted = false;
+  const paint = () => { if (!painted && onFrame && port) { painted = true; port.postMessage('aio-painted'); } };
+  window.addEventListener('message', (e) => {
+    if (e.source !== null || e.data !== 'aio-port' || !e.ports[0]) return;
+    port = e.ports[0];
+    port.onmessage = (m) => { const f = bytes(m.data); onFrame ? (onFrame(f), paint()) : early.push(f); };
+    out.splice(0).forEach((s) => port.postMessage(s));
+  });
+  return {
+    send: (u) => { const s = text(u); port ? port.postMessage(s) : out.push(s); },
+    listen: (f) => { onFrame = f; const e = early.splice(0); e.forEach(f); if (e.length) paint(); },
+  };
+})();";
+
 /// The page: an empty root, the DOM-edit interpreter and the page scripts
 /// (`aio::page`), under its policy (`aio::page::sealed`).
 fn page(win: &Window) -> String {
