@@ -296,12 +296,25 @@ pub(crate) fn parent(p: &std::path::Path) -> &std::path::Path {
     p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))
 }
 
-/// Write a new private file (mode 0600), on disk when this returns; an
-/// existing one is an error.
+/// Write a new private file (mode 0600), whole, on disk when this
+/// returns; an existing one is an error (`AlreadyExists`), also between
+/// writers racing. Written to a temp file and linked in (a link never
+/// replaces a file), so no reader or crash sees it part-written; where
+/// there are no hard links (Android's app sandbox) it is made in place.
 pub fn write_private(p: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = create(p, true)?;
-    std::io::Write::write_all(&mut f, bytes)?;
-    f.sync_all()?;
+    let whole = |at: &std::path::Path| {
+        let mut f = create(at, true)?;
+        std::io::Write::write_all(&mut f, bytes)?;
+        f.sync_all()
+    };
+    let name = p.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
+    let tmp = p.with_file_name(format!(".{}.{}.tmp", name.to_string_lossy(), crate::uuid_v4().simple()));
+    let made = whole(&tmp).and_then(|()| match std::fs::hard_link(&tmp, p) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => whole(p),
+        r => r,
+    });
+    _ = std::fs::remove_file(&tmp);
+    made?;
     sync_dir(parent(p))
 }
 
@@ -309,19 +322,28 @@ pub fn write_private(p: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
 /// one, never half of one (D2): a temp file, flushed, renamed over, then the
 /// directory flushed. `private`: mode 0600.
 pub fn write_atomic(p: &std::path::Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    replace(p, bytes, private, true)
+}
+
+/// [`write_atomic`], `synced` or not: unsynced, a crash of the process
+/// still leaves the old file or the new one, but a power cut may lose
+/// the write (a status file rewritten every few seconds).
+pub(crate) fn replace(p: &std::path::Path, bytes: &[u8], private: bool, synced: bool) -> io::Result<()> {
     let name = p.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
     let tmp = p.with_file_name(format!(".{}.{}.tmp", name.to_string_lossy(), crate::uuid_v4().simple()));
     let written = (|| {
         let mut f = create(&tmp, private)?;
         std::io::Write::write_all(&mut f, bytes)?;
-        f.sync_all()?;
+        if synced {
+            f.sync_all()?;
+        }
         rename_over(&tmp, p)
     })();
     if written.is_err() {
         _ = std::fs::remove_file(&tmp);
     }
     written?;
-    sync_dir(parent(p))
+    if synced { sync_dir(parent(p)) } else { Ok(()) }
 }
 
 /// Pauses between tries of a rename that Windows refuses while another

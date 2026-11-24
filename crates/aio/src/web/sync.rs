@@ -150,6 +150,8 @@ struct Inner<T: Cell> {
     last_sync: Mutex<Option<i64>>,
     /// A refused write was said (once, until one lands again).
     unsaved: AtomicBool,
+    /// When the document is written next.
+    saves: Mutex<storage::Saves>,
     listeners: Mutex<Vec<Listener<T>>>,
     refusals: Mutex<Vec<Refusal>>,
     conflicts: Mutex<Vec<OnConflict>>,
@@ -163,6 +165,37 @@ struct Inner<T: Cell> {
     screen: Mutex<(Option<i64>, i64, bool)>,
     /// What this link's server understands of what a copy may say.
     can: Mutex<Vec<String>>,
+}
+
+impl<T: Cell> Inner<T> {
+    /// Write the document if a write is due.
+    fn flush(&self) {
+        if lock(&self.saves).flush() {
+            self.write();
+        }
+    }
+
+    /// Write the document to the browser's storage.
+    fn write(&self) {
+        let doc = lock(&self.copy).doc();
+        let done: HashSet<String> = lock(&self.done).iter().cloned().collect();
+        match storage::save(&Local, &self.key, doc, &done, say) {
+            Ok(()) => self.unsaved.store(false, Ordering::Relaxed),
+            Err(e) if !self.unsaved.swap(true, Ordering::Relaxed) => say(&format!(
+                "sync {}: the copy can't be kept in this browser ({e}): it goes on in this page, but its unsent \
+                 calls won't survive a reload",
+                T::ID
+            )),
+            Err(_) => {}
+        }
+    }
+}
+
+/// The last copy dropped writes what is due.
+impl<T: Cell> Drop for Inner<T> {
+    fn drop(&mut self) {
+        self.flush();
+    }
 }
 
 /// What a server's first state says it understands of a copy.
@@ -463,6 +496,7 @@ impl<T: Cell> Remote<T> {
             online: AtomicBool::new(false),
             last_sync: Mutex::new(connected.then(super::now_ms)),
             unsaved: AtomicBool::new(false),
+            saves: Mutex::default(),
             listeners: Mutex::default(),
             refusals: Mutex::default(),
             conflicts: Mutex::default(),
@@ -474,6 +508,7 @@ impl<T: Cell> Remote<T> {
         });
         let r = Self { inner };
         r.mirror_twins();
+        r.flush_on_hide();
         wasm_bindgen_futures::spawn_local(report(Arc::downgrade(&r.inner)));
         r.update(|_| {});
         let (weak, url) = (Arc::downgrade(&r.inner), url.to_string());
@@ -514,6 +549,29 @@ impl<T: Cell> Remote<T> {
         }
         // Heard for the page's life (a dropped copy's is a no-op).
         heard.forget();
+    }
+
+    /// Write what is due as the page hides (a tab switched away, an app
+    /// sent to the background) or goes (closed, navigated away): nothing
+    /// waits for a timer that may never ring.
+    fn flush_on_hide(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        let hide = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            // A page going may still say it is visible as `pagehide` fires.
+            let hidden =
+                e.type_() == "pagehide" || web_sys::window().and_then(|w| w.document()).is_none_or(|d| d.hidden());
+            if let Some(inner) = weak.upgrade().filter(|_| hidden) {
+                inner.flush();
+            }
+        });
+        if let Some(w) = web_sys::window() {
+            _ = w.add_event_listener_with_callback("pagehide", hide.as_ref().unchecked_ref());
+            if let Some(d) = w.document() {
+                _ = d.add_event_listener_with_callback("visibilitychange", hide.as_ref().unchecked_ref());
+            }
+        }
+        // Heard for the page's life (a dropped copy's is a no-op).
+        hide.forget();
     }
 
     /// One message from the server.
@@ -648,22 +706,27 @@ impl<T: Cell> Remote<T> {
         self.tell();
     }
 
+    /// Change the copy, recompute what's shown, keep it ([`storage::Saves`]),
+    /// tell the listeners.
     fn update(&self, f: impl FnOnce(&mut Copy<T>)) {
-        let doc = {
+        let queued = {
             let mut c = lock(&self.inner.copy);
+            let had: HashSet<String> = c.pending.iter().map(|q| q.op.clone()).collect();
             f(&mut c);
             c.reshow();
-            c.doc()
+            c.pending.iter().any(|q| !had.contains(&q.op))
         };
-        let done: HashSet<String> = lock(&self.inner.done).iter().cloned().collect();
-        match storage::save(&Local, &self.inner.key, doc, &done, say) {
-            Ok(()) => self.inner.unsaved.store(false, Ordering::Relaxed),
-            Err(e) if !self.inner.unsaved.swap(true, Ordering::Relaxed) => say(&format!(
-                "sync {}: the copy can't be kept in this browser ({e}): it goes on in this page, but its unsent \
-                 calls won't survive a reload",
-                T::ID
-            )),
-            Err(_) => {}
+        let save = lock(&self.inner.saves).changed(queued);
+        match save {
+            storage::Save::Now => self.inner.write(),
+            storage::Save::Arm => {
+                let weak = Arc::downgrade(&self.inner);
+                wasm_bindgen_futures::spawn_local(async move {
+                    super::sleep(storage::SAVE_MS).await;
+                    weak.upgrade().inspect(|i| i.flush());
+                });
+            }
+            storage::Save::Armed => {}
         }
         self.tell();
     }

@@ -129,7 +129,13 @@ rt.block_on(async {
   delete the file. A saved copy that can't be read (torn by a disk fault,
   edited by hand) is moved aside (`copy.unreadable-<ms>`, in a page
   `<key>.corrupt`, then `-2`…) and said (`sync:unreadable-copy`), never
-  saved over.
+  saved over. A saved copy keeps who it is: the `user` it was opened as
+  and the user the server last said it is. Opened as another user (or
+  the server now says another), it is never shown and its calls are
+  never sent as this one: with calls waiting it is kept beside its file
+  (`copy.other-user-<ms>`) and said (`sync:other-user`); a copy saved by
+  an aio-rs before 0.5 is no one's. A page does the same with the user
+  its server says.
 - `Remote::connect(addr, token, user)` keeps nothing on disk: it needs
   the server to start, then works offline the same way while it runs.
 - A refused key (a wrong key, a revoked or ended session: the server's
@@ -153,7 +159,9 @@ rt.block_on(async {
 - A page built with `ax build --web` keeps the same thing in the
   browser's storage, so calls made offline survive a reload. Two tabs of
   one app share it: neither drops the other's waiting calls, and a call
-  sent twice is applied once.
+  sent twice is applied once. A call is kept the moment it is made; the
+  server's patches are kept at most every 250 ms (a burst is one write)
+  and when the page hides or closes.
 
 ### What the UI reads
 

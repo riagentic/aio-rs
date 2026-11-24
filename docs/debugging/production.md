@@ -65,7 +65,8 @@ reads only the `aio.toml` it was built with).
 
 ## Health
 
-Every 10 s the app writes `data/health.json` (owner-only):
+Every 10 s the app writes `data/health.json` (owner-only, replaced whole,
+never flushed to disk: a status lost to a power cut is harmless):
 
 ```json
 {

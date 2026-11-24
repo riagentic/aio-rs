@@ -1550,14 +1550,34 @@ struct Copy<T> {
     merges: Vec<(String, crate::merge::Merge)>,
     /// The parts it holds ([`Remote::subscribe`]; empty: all of it).
     paths: Vec<String>,
+    /// Who the server last said this copy is (empty: never linked).
+    seen: String,
 }
 
 impl<T: Cell> Copy<T> {
-    fn new(seq: u64, view: Value, st: Arc<T>, pending: Vec<Pending>, by: By, paths: Vec<String>) -> Self {
+    fn new(seq: u64, view: Value, st: Arc<T>, pending: Vec<Pending>, by: By, paths: Vec<String>, seen: String) -> Self {
         let base = (!pending.is_empty()).then(|| (view.clone(), st.clone()));
-        let mut c = Self { seq, view, confirmed: st.clone(), pending, shown: st, by, base, merges: Vec::new(), paths };
+        let mut c =
+            Self { seq, view, confirmed: st.clone(), pending, shown: st, by, base, merges: Vec::new(), paths, seen };
         c.reshow();
         c
+    }
+
+    /// What is kept on disk of it.
+    fn saved(&self) -> Saved {
+        Saved {
+            cell: T::ID.into(),
+            v: T::VERSION,
+            user: match &self.by {
+                By::User(u) => u.clone(),
+                _ => String::new(),
+            },
+            seen: self.seen.clone(),
+            seq: self.seq,
+            view: self.view.clone(),
+            pending: self.pending.clone(),
+            paths: self.paths.clone(),
+        }
     }
 
     /// What the client shows: the confirmed copy + the calls still waiting
@@ -1631,6 +1651,13 @@ impl<T: Cell> Copy<T> {
 struct Saved {
     cell: String,
     v: u32,
+    /// Who opened it (`user` of [`Remote::connect_saved`]); empty in a copy
+    /// saved before it was kept: no one's.
+    #[serde(default)]
+    user: String,
+    /// Who the server said it is, last linked (empty: never linked).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    seen: String,
     seq: u64,
     view: Value,
     pending: Vec<Pending>,
@@ -1663,6 +1690,29 @@ fn kept_aside<T: Cell>(file: &std::path::Path, s: &Saved) -> bool {
         );
         eprintln!("[aio] WARN {msg}");
         crate::report::tell_kept("sync:orphan-queue", &msg);
+    }
+    false
+}
+
+/// Is the saved copy `s` (in `file`) this user's: opened as `user` and,
+/// once the server said who this copy is (`said`), seen as them? Another
+/// user's is never shown and its calls never sent as this one: with calls
+/// waiting it is kept aside (`<file>.other-user-<ms>`) and said.
+fn of_user<T: Cell>(file: &std::path::Path, s: &Saved, user: &str, said: Option<&str>) -> bool {
+    if s.user == user && (s.seen.is_empty() || said.is_none_or(|u| u == s.seen)) {
+        return true;
+    }
+    if !s.pending.is_empty() {
+        let kept = aside(file, "other-user", s)
+            .and_then(|p| std::fs::remove_file(file).map(|()| p))
+            .map_or_else(|e| format!("not moved: {e}"), |p| format!("kept as {}", p.display()));
+        let msg = format!(
+            "{}: {} calls made offline by another user were not sent, and their copy is not shown: {kept}",
+            T::ID,
+            s.pending.len()
+        );
+        eprintln!("[aio] WARN {msg}");
+        crate::report::tell_kept("sync:other-user", &msg);
     }
     false
 }
@@ -2370,7 +2420,7 @@ impl<T: Cell> Remote<T> {
             Some(n) => Some(n.clone()),
             None => file.as_deref().and_then(read_saved::<T>),
         }
-        .filter(|s| file.as_deref().is_none_or(|f| kept_aside::<T>(f, s)));
+        .filter(|s| file.as_deref().is_none_or(|f| kept_aside::<T>(f, s) && of_user::<T>(f, s, user, None)));
         // A saved copy holds what it held.
         let paths = match &saved {
             Some(s) if paths.is_empty() => s.paths.clone(),
@@ -2393,6 +2443,9 @@ impl<T: Cell> Remote<T> {
             Err(e) if later => (None, Some(e)),
             Err(e) => return Err(e),
         };
+        let said = first.as_ref().and_then(|(_, m)| m["user"].as_str()).map(String::from);
+        let saved = saved.filter(|s| file.as_deref().is_none_or(|f| of_user::<T>(f, s, user, said.as_deref())));
+        let seen = said.or_else(|| saved.as_ref().map(|s| s.seen.clone())).unwrap_or_default();
         let pending = saved.as_ref().map(|s| s.pending.clone()).unwrap_or_default();
         let limits = first.as_ref().map(|(_, m)| m["limits"].clone());
         let can = first.as_ref().map(|(_, m)| can_of(m)).unwrap_or_default();
@@ -2405,7 +2458,7 @@ impl<T: Cell> Remote<T> {
         let st: Arc<T> = Arc::new(crate::held(&paths, &view).map_err(std::io::Error::other)?);
         let save = claimed.map(|(s, owner, _)| (s, owner));
         let connected = w.is_some();
-        let copy = Copy::new(seq, view, st, pending, By::User(user.into()), paths);
+        let copy = Copy::new(seq, view, st, pending, By::User(user.into()), paths, seen);
         let inner = Arc::new(Inner {
             by: By::User(user.into()),
             save,
@@ -2468,7 +2521,9 @@ impl<T: Cell> Remote<T> {
                                 *lock(&inner.asked) = Some(asked);
                                 *lock(&inner.can) = can_of(&first);
                                 inner.signed_out.store(false, Ordering::SeqCst);
-                                Remote { inner }.take(first);
+                                let r = Remote { inner };
+                                r.seen_as(&first);
+                                r.take(first);
                                 w
                             }
                             (_, Err(e)) => {
@@ -2908,15 +2963,7 @@ impl<T: Cell> Remote<T> {
             f(&mut c);
             c.reshow();
             if let Some((s, owner)) = &self.inner.save {
-                let saved = Saved {
-                    cell: T::ID.into(),
-                    v: T::VERSION,
-                    seq: c.seq,
-                    view: c.view.clone(),
-                    pending: c.pending.clone(),
-                    paths: c.paths.clone(),
-                };
-                s.put(*owner, saved);
+                s.put(*owner, c.saved());
             }
         }
         self.tell();
@@ -2985,35 +3032,46 @@ impl<T: Cell> Remote<T> {
     /// they are never lost; if they can't be kept there, they stay waiting.
     fn signed_out_now(&self, why: &str) {
         self.inner.signed_out.store(true, Ordering::SeqCst);
-        let saved = {
-            let c = lock(&self.inner.copy);
-            Saved {
-                cell: T::ID.into(),
-                v: T::VERSION,
-                seq: c.seq,
-                view: c.view.clone(),
-                pending: c.pending.clone(),
-                paths: c.paths.clone(),
-            }
-        };
+        self.unsent("signed-out", "sync:signed-out-queue", &format!("signed out ({why})"), true);
+    }
+
+    /// The server now says this copy is another user than it last said (a
+    /// relink to another account): the calls waiting, made as the one
+    /// before, are never sent as this one ([`Self::unsent`]).
+    fn seen_as(&self, first: &Value) {
+        let Some(said) = first["user"].as_str() else { return };
+        let was = lock(&self.inner.copy).seen.clone();
+        if !was.is_empty() && was != said {
+            self.unsent("other-user", "sync:other-user", &format!("the server now says this is {said}, not {was}"), false);
+        }
+        lock(&self.inner.copy).seen = said.into();
+    }
+
+    /// The calls waiting are refused with `ACCESS_DENIED` and taken off the
+    /// copy, `why`. A saved copy keeps them beside its file (`<file>.<tag>-<ms>`)
+    /// and says so (`kind`): they are never lost; if they can't be kept
+    /// there, they stay waiting when `stay`, else they are dropped.
+    fn unsent(&self, tag: &str, kind: &str, why: &str, stay: bool) {
+        let saved = lock(&self.inner.copy).saved();
         if saved.pending.is_empty() {
             return;
         }
-        let kept = match self.inner.file.as_deref().map(|f| aside(f, "signed-out", &saved)) {
+        let kept = match self.inner.file.as_deref().map(|f| aside(f, tag, &saved)) {
             Some(Ok(p)) => format!("; kept as {}", p.display()),
-            Some(Err(e)) => {
-                let msg = format!("{}: signed out ({why}): {} calls made offline can't be kept aside ({e}): they stay waiting", T::ID, saved.pending.len());
+            Some(Err(e)) if stay => {
+                let msg = format!("{}: {why}: {} calls made offline can't be kept aside ({e}): they stay waiting", T::ID, saved.pending.len());
                 eprintln!("[aio] WARN {msg}");
-                return crate::report::tell("sync:signed-out-queue", &msg);
+                return crate::report::tell(kind, &msg);
             }
+            Some(Err(e)) => format!("; can't be kept aside ({e}): dropped"),
             None => String::new(),
         };
         let gone = saved.pending;
         self.update(|c| c.pending.clear());
-        let msg = format!("{}: signed out ({why}): {} calls made offline were not sent{kept}", T::ID, gone.len());
+        let msg = format!("{}: {why}: {} calls made offline were not sent{kept}", T::ID, gone.len());
         eprintln!("[aio] WARN {msg}");
-        crate::report::tell_kept("sync:signed-out-queue", &msg);
-        let why = Rejected::coded(crate::Code::AccessDenied, format!("signed out ({why}): not sent{kept}"));
+        crate::report::tell_kept(kind, &msg);
+        let why = Rejected::coded(crate::Code::AccessDenied, format!("{why}: not sent{kept}"));
         let fs = lock(&self.inner.refusals).clone();
         for p in gone {
             lock(&self.inner.streams).remove(&p.op);

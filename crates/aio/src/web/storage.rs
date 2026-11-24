@@ -251,8 +251,71 @@ pub fn orphans(kv: &impl Kv, app: &str, syncing: &[&str]) -> Vec<(String, usize)
     out
 }
 
+/// How often a synced copy's document is written at most, for the
+/// server's patches ([`Saves`]).
+#[cfg(target_arch = "wasm32")]
+pub(crate) const SAVE_MS: u32 = 250;
+
+/// When a synced copy's document is written (pure): a change that queued a
+/// call at once (a crash must not lose it); any other (a patch of the
+/// server's) only marks it due, written by one timer the first arms
+/// ([`SAVE_MS`]), and on the page's hide or close. A burst of patches is
+/// one write, not one whole-view serialising and storage write each.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Default)]
+pub(crate) struct Saves {
+    due: bool,
+}
+
+/// What a change asks of [`Saves`].
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum Save {
+    /// Write now.
+    Now,
+    /// Due: arm the timer.
+    Arm,
+    /// Due, and a timer is armed.
+    Armed,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl Saves {
+    /// A change; `queued`: it queued a call.
+    pub(crate) fn changed(&mut self, queued: bool) -> Save {
+        match (queued, std::mem::replace(&mut self.due, !queued)) {
+            (true, _) => Save::Now,
+            (false, false) => Save::Arm,
+            (false, true) => Save::Armed,
+        }
+    }
+
+    /// The timer rang, or the page hides or closes: is a write due?
+    pub(crate) fn flush(&mut self) -> bool {
+        std::mem::take(&mut self.due)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// A burst of the server's patches is one write; a queued call is
+    /// written at once; whatever is due is written on the page's hide.
+    #[test]
+    fn patches_are_written_once_per_burst_and_calls_at_once() {
+        let mut s = Saves::default();
+        assert_eq!(s.changed(false), Save::Arm);
+        for _ in 0..100 {
+            assert_eq!(s.changed(false), Save::Armed);
+        }
+        assert!(s.flush(), "the timer writes them");
+        assert!(!s.flush(), "once");
+        assert_eq!(s.changed(false), Save::Arm);
+        assert_eq!(s.changed(true), Save::Now);
+        assert!(!s.flush(), "the call's write took the patch too");
+        assert_eq!(s.changed(false), Save::Arm);
+        assert!(s.flush(), "hidden: written");
+    }
+
     use super::*;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
