@@ -84,7 +84,10 @@ pub fn dump(state: &impl Serialize, max: usize) -> String {
 /// Assert `f` holds for the state; a failure says `what` and prints the state.
 #[track_caller]
 pub fn expect<T: Cell>(door: &impl Door<T>, what: &str, f: impl FnOnce(&T) -> bool) {
-    door.read(|s| assert!(f(s), "{what}\n  state: {}", dump(s, 2000)));
+    let failed = door.read(|s| (!f(s)).then(|| dump(s, 2000)));
+    if let Some(state) = failed {
+        panic!("{what}\n  state: {state}");
+    }
 }
 
 /// Merge `patch` into `base`: objects key by key, all the way down; anything
@@ -129,8 +132,10 @@ fn empty(v: &Value) -> bool {
 pub fn seeded<T: CellData>(seed: Value) -> T {
     let mut want = serde_json::to_value(T::default()).expect("the state serializes");
     merge(&mut want, seed);
-    let st: T =
-        serde_json::from_value(want.clone()).unwrap_or_else(|e| panic!("the seed doesn't fit {}: {e}", name::<T>()));
+    let st: T = match serde_json::from_value(want.clone()) {
+        Ok(st) => st,
+        Err(e) => panic!("the seed doesn't fit {}: {e}", name::<T>()),
+    };
     let got = serde_json::to_value(&st).expect("the state serializes");
     if let Some((key, has)) = lost(&want, &got, "") {
         panic!("seed `{key}` isn't part of {}'s state; it has: {}", name::<T>(), has.join(", "));
@@ -388,7 +393,9 @@ impl TestCells {
         let st = serde_json::to_value(seeded::<T>(seed)).expect("the state serializes");
         _ = h.live(false);
         h.drop_held();
-        h.store(|s| s.load(&By::Test, st)).unwrap_or_else(|e| panic!("reset {}: {e}", name::<T>()));
+        if let Err(e) = h.store(|s| s.load(&By::Test, st)) {
+            panic!("reset {}: {e}", name::<T>());
+        }
         _ = h.live(true);
     }
 
@@ -414,6 +421,7 @@ impl TestCells {
 
     /// Start the waiting effects and wait until they, and every effect they
     /// lead to, are done; panics after 5 s naming those still running.
+    #[track_caller]
     pub fn settle(&mut self) {
         let end = Instant::now() + PATIENCE;
         loop {
@@ -435,6 +443,7 @@ impl TestCells {
     /// under [`Self::real_time`], on virtual time otherwise (at once), then
     /// [`Self::settle`]. For work an effect leaves running on its own (a
     /// thread, a device's answer) that `settle` can't see.
+    #[track_caller]
     pub fn settle_for(&mut self, d: Duration) {
         {
             let _in = self.rt.enter();
@@ -562,16 +571,19 @@ impl TestCells {
     /// repeat missed more than once fires once, as after a sleep), and settle.
     /// Effects' timers due by then fire too (tokio's clock moved as far;
     /// under `real_time` they keep the wall clock).
+    #[track_caller]
     pub fn advance(&mut self, by: Duration) {
         self.step(i64::try_from(by.as_millis()).unwrap_or(i64::MAX));
     }
 
     /// Step the schedule clock `by` back, as the machine's clock may (NTP,
     /// a person setting it), and settle; effects' timers never run backwards.
+    #[track_caller]
     pub fn rewind(&mut self, by: Duration) {
         self.step(-i64::try_from(by.as_millis()).unwrap_or(i64::MAX));
     }
 
+    #[track_caller]
     fn step(&mut self, ms: i64) {
         let now = self.clock.fetch_add(ms, std::sync::atomic::Ordering::Relaxed) + ms;
         // On the wall clock, effects' timers keep their own time.

@@ -229,6 +229,7 @@ written in it.
 | `--template app` | a window app (the default) |
 | `--template cli` | a command-line tool ([cli apps](cli-apps.md)) |
 | `--template service` | a served app, no window |
+| `--template relay` | a partner API's calls made for the app's installs, the key held on the server ([relay](../examples/relay.md)) |
 | `--template todo` | a window on a saved todo list: add, tick, remove, filter (the window's own), clear done |
 | `--template canvas` | a window drawing bouncing balls: `step`, the pure function that moves them, tested; one script draws a frame |
 | `--id id` | its id, its data's home (default: the name; refused when an installed app has it) |
@@ -617,7 +618,9 @@ One line an app, from its lock and `health.json`:
 | `stopped` | 1 | not running; `crashed or killed, last seen …` when it didn't stop cleanly |
 
 For several apps: 0 when all are started, else 1 when any is stopped,
-else 2.
+else 2. With `--json`, ax's one object: each app's `{"status","said"}`
+as `value`; `ok` when all are started, else `error` (the others' lines)
+and `exit`.
 
 ```sh
 until ax status notes; do test $? -eq 2 || exit 1; sleep 1; done   # wait out a start
@@ -1865,7 +1868,7 @@ ax stop notes
 
 | `am` | `ax` |
 |---|---|
-| `am create --template=…` | `ax create --template app\|todo\|canvas\|cli\|service` |
+| `am create --template=…` | `ax create --template app\|todo\|canvas\|cli\|service\|relay` |
 | `am dev`, `am build`, `am compile` | `ax dev`, `ax build`, `ax build --targets <one>` |
 | `am start`, `am stop`, `am restart`, `am kill`, `am status` | the same verbs (`--wait s`, `--no-wait`) |
 | `am instances` | `ax apps`; `am instances` lists a running aio-rs app built with `compat` too ([below](#what-am-sees-of-an-aio-rs-app)) |

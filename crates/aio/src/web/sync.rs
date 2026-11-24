@@ -136,6 +136,7 @@ impl<T: Cell> Copy<T> {
             pending: self.pending.clone(),
             sched: Vec::new(),
             paths: self.paths.clone(),
+            done: Vec::new(),
         }
     }
 }
@@ -178,7 +179,7 @@ impl<T: Cell> Inner<T> {
     /// Write the document to the browser's storage.
     fn write(&self) {
         let doc = lock(&self.copy).doc();
-        let done: HashSet<String> = lock(&self.done).iter().cloned().collect();
+        let done: HashSet<String> = lock(&self.done).iter().rev().take(storage::DONE_KEPT).cloned().collect();
         match storage::save(&Local, &self.key, doc, &done, say) {
             Ok(()) => self.unsaved.store(false, Ordering::Relaxed),
             Err(e) if !self.unsaved.swap(true, Ordering::Relaxed) => say(&format!(
@@ -524,21 +525,27 @@ impl<T: Cell> Remote<T> {
     }
 
     /// A twin tab's write: the calls it queued that this tab lacks are
-    /// shown and sent here too.
+    /// shown and sent here too; those it saw answered go. Read from the
+    /// document as it is now: an event comes when it comes, and one that
+    /// comes late names a call the server has applied since (this tab saw
+    /// the change, not the answer), which would show twice.
     fn mirror_twins(&self) {
         let (weak, key) = (Arc::downgrade(&self.inner), self.inner.key.clone());
         let heard = Closure::<dyn FnMut(web_sys::StorageEvent)>::new(move |e: web_sys::StorageEvent| {
             let Some(inner) = weak.upgrade().filter(|_| e.key().as_deref() == Some(&key)) else { return };
-            let Some(theirs) = e.new_value().and_then(|v| serde_json::from_str::<Doc>(&v).ok()) else { return };
+            let Some(theirs) = storage::load(&Local, &key, say) else { return };
             let r = Remote { inner };
-            let new = {
+            let (new, gone) = {
                 let (c, done) = (lock(&r.inner.copy), lock(&r.inner.done));
-                storage::adopt(&c.pending, &theirs, &c.user, &done.iter().cloned().collect())
+                let new = storage::adopt(&c.pending, &theirs, &c.user, &done.iter().cloned().collect());
+                (new, storage::settled(&c.pending, &theirs, &c.user))
             };
-            if new.is_empty() {
+            if new.is_empty() && gone.is_empty() {
                 return;
             }
+            lock(&r.inner.done).extend(gone.iter().cloned());
             r.update(|c| {
+                c.pending.retain(|q| !gone.contains(&q.op));
                 c.pending.extend(new.iter().cloned());
                 crate::sort_by(&mut c.pending, |a, b| (a.at, &a.op).cmp(&(b.at, &b.op)));
             });
@@ -574,6 +581,19 @@ impl<T: Cell> Remote<T> {
         hide.forget();
     }
 
+    /// The server applied call `op` (its change came named, or its answer):
+    /// never taken again from a twin tab, nor written back to the document.
+    fn applied(&self, op: &Value) {
+        let Some(op) = op.as_str() else { return };
+        let mut done = lock(&self.inner.done);
+        if !done.iter().any(|d| d == op) {
+            done.push_back(op.into());
+            if done.len() > DONE_MAX {
+                done.pop_front();
+            }
+        }
+    }
+
     /// One message from the server.
     fn take(&self, m: Value) {
         if matches!(m["t"].as_str(), Some("state" | "patch" | "reply")) {
@@ -584,6 +604,7 @@ impl<T: Cell> Remote<T> {
                 Ok(st) => {
                     let before = lock(&self.inner.copy).before(&m["op"]);
                     let met = self.met(before, &m["state"]);
+                    self.applied(&m["op"]);
                     self.update(|c| {
                         c.seq = m["seq"].as_u64().unwrap_or(0);
                         c.view = m["state"].clone();
@@ -612,6 +633,7 @@ impl<T: Cell> Remote<T> {
                 match st {
                     Ok((view, st)) => {
                         let met = self.met(before, &view);
+                        self.applied(&m["op"]);
                         self.update(|c| {
                             c.seq = seq;
                             c.view = view;
@@ -630,13 +652,7 @@ impl<T: Cell> Remote<T> {
             Some("reply") => {
                 let op = m["op"].as_str().unwrap_or_default().to_string();
                 let method = lock(&self.inner.copy).pending.iter().find(|q| q.op == op).map(|q| q.method.clone());
-                {
-                    let mut done = lock(&self.inner.done);
-                    done.push_back(op.clone());
-                    if done.len() > DONE_MAX {
-                        done.pop_front();
-                    }
-                }
+                self.applied(&m["op"]);
                 self.update(|c| c.pending.retain(|q| q.op != op));
                 if let Some(e) = m.get("err").and_then(Value::as_str) {
                     let e = Rejected { why: e.into(), code: crate::Code::of(&m["code"]) };
@@ -709,14 +725,15 @@ impl<T: Cell> Remote<T> {
     /// Change the copy, recompute what's shown, keep it ([`storage::Saves`]),
     /// tell the listeners.
     fn update(&self, f: impl FnOnce(&mut Copy<T>)) {
-        let queued = {
+        // A call queued or answered is written at once: a twin tab reads it.
+        let calls = {
             let mut c = lock(&self.inner.copy);
             let had: HashSet<String> = c.pending.iter().map(|q| q.op.clone()).collect();
             f(&mut c);
             c.reshow();
-            c.pending.iter().any(|q| !had.contains(&q.op))
+            c.pending.len() != had.len() || c.pending.iter().any(|q| !had.contains(&q.op))
         };
-        let save = lock(&self.inner.saves).changed(queued);
+        let save = lock(&self.inner.saves).changed(calls);
         match save {
             storage::Save::Now => self.inner.write(),
             storage::Save::Arm => {

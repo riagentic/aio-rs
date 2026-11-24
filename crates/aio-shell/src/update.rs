@@ -63,8 +63,7 @@ const TRIED: &str = "first-boot.tried";
 
 /// A server or CLI that a supervisor runs ([`SUPERVISED`]).
 fn supervised(cfg: &aio::config::Config) -> bool {
-    matches!(cfg.app.mode, aio::config::Mode::Server | aio::config::Mode::Cli)
-        && std::env::var_os(SUPERVISED).is_some_and(|v| v == "1")
+    !cfg.app.mode.has_window() && std::env::var_os(SUPERVISED).is_some_and(|v| v == "1")
 }
 
 /// What the update before this start did, for the cell: the release that
@@ -1531,7 +1530,7 @@ fn download(cfg: &aio::config::Config, (m, raw): &Got, d: &Path, version: &str, 
     // first start doesn't wait on a download inside FIRST_BOOT. One that
     // carries its own (an offline build: beside its binary) needs none.
     let staged = d.join("versions").join(&r.version);
-    if !matches!(cfg.app.mode, aio::config::Mode::Server | aio::config::Mode::Cli)
+    if cfg.app.mode.has_window()
         && let Some(exe) = staged_binary(&staged, &cfg.app.id)
         && !exe.parent().is_some_and(crate::runtime::carries_runtime)
         && let Some(rt) = std::fs::read(&exe).ok().as_deref().and_then(crate::runtime::pinned_in)
@@ -1942,9 +1941,8 @@ enum Act {
 /// window, the app's UI decides, and `auto` installs at the next start.
 #[cfg(feature = "updates")]
 fn headless(cfg: &aio::config::Config, f: &Found, tty: bool) -> Act {
-    use aio::config::Mode;
     let Found::Offer(o) = f else { return Act::None };
-    match (matches!(cfg.app.mode, Mode::Server | Mode::Cli), cfg.updates.auto) {
+    match (!cfg.app.mode.has_window(), cfg.updates.auto) {
         (false, _) => Act::None,
         (true, true) if o.staged => Act::Apply(o.version.clone()),
         (true, false) if tty => Act::Ask(o.version.clone()),

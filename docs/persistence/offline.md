@@ -115,8 +115,8 @@ rt.block_on(async {
   survive a restart. An app in `client` mode does this on its own, in
   `data/copy.json` ([files](files.md#whats-in-data)). Saves are written
   in the background, one writer per file, in order: a call never waits
-  for the disk. The last copy dropped writes its last save before the
-  drop ends (2 s at most), and so do `aio::shutdown` and the process's
+  for the disk. The app's last handle on a copy dropped (online or not)
+  writes its last save before the drop ends (2 s at most), and so do `aio::shutdown` and the process's
   exit (a return from `main`, `std::process::exit`, on Windows too: the
   exiting thread writes it): a call made offline just before is never
   lost. A copy opened again at once starts from the
@@ -158,8 +158,9 @@ rt.block_on(async {
   copy again.
 - A page built with `ax build --web` keeps the same thing in the
   browser's storage, so calls made offline survive a reload. Two tabs of
-  one app share it: neither drops the other's waiting calls, and a call
-  sent twice is applied once. A call is kept the moment it is made; the
+  one app share it: neither drops the other's waiting calls, a call
+  sent twice is applied once, and a call one tab saw applied is never
+  taken again by the other (never shown twice). A call is kept the moment it is made; the
   server's patches are kept at most every 250 ms (a burst is one write)
   and when the page hides or closes.
 

@@ -483,20 +483,27 @@ static TEST_APP: std::sync::Mutex<Option<(PathBuf, AppDirs)>> = std::sync::Mutex
 /// `logs`, `cache`; made on the first ask, gone with the world), so app
 /// code finds its home the same way in the window and in a test.
 pub fn app_dirs() -> io::Result<AppDirs> {
+    app_dirs_in().map(|(d, _)| d)
+}
+
+/// [`app_dirs`], and whether they are the test world's (one answer: a
+/// sandbox ending meanwhile can't mix the two).
+pub(crate) fn app_dirs_in() -> io::Result<(AppDirs, bool)> {
     if let Some(root) = sandboxed() {
         let mut t = lock(&TEST_APP);
         if let Some((at, d)) = t.as_ref()
             && *at == root
         {
-            return Ok(d.clone());
+            return Ok((d.clone(), true));
         }
         let d = AppDirs::at(&root.join("app"), "app")?;
         *t = Some((root, d.clone()));
-        return Ok(d);
+        return Ok((d, true));
     }
-    lock(&BOOTED).clone().ok_or_else(|| {
+    let d = lock(&BOOTED).clone().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "no app dirs yet: the app's main boots them (aio_shell::start)")
-    })
+    })?;
+    Ok((d, false))
 }
 
 /// The app booted on `dirs`: [`app_dirs`] answers them from now on.

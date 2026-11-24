@@ -457,6 +457,30 @@ fn a_file_input_hands_its_files_to_change_and_to_the_forms_submit() {
     );
 }
 
+/// A step waits for the files its event reads (a submit's, read as the
+/// event goes out), however long the read takes (a loaded machine's).
+#[test]
+fn a_submit_whose_files_read_slowly_is_heard_before_the_step_ends() {
+    fn app() -> View {
+        let sent = signal(String::new);
+        rsx! {
+            form { "data-t": "form", onsubmit: move |e: FormEvent| sent.set(e.files().iter().map(|f| f.name()).collect()),
+                input { "data-t": "pick", r#type: "file", name: "photo" }
+                button { "data-t": "send", r#type: "submit", "Send" }
+            }
+            p { "data-t": "sent", "{sent}" }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    ui.pick_files("pick", &[("a.txt", "text/plain", b"a")]);
+    // Every read from here on takes 300 ms.
+    let slow = "const read = Blob.prototype.arrayBuffer; Blob.prototype.arrayBuffer = function () { \
+                return new Promise((r) => setTimeout(r, 300)).then(() => read.call(this)) }; true";
+    ui.eval(slow);
+    ui.click("send");
+    assert_eq!(ui.text("sent"), "a.txt");
+}
+
 // Every event a handler takes (`rsx!`'s own list).
 include!("../../air-macro/src/events.rs");
 
@@ -543,14 +567,49 @@ fn a_canvas_gets_webgl() {
     assert_eq!(ui.eval(gl), serde_json::json!(["ok", "ok"]), "WebGL 2 and 1, drawn by SwiftShader");
 }
 
+/// The file `f`'s failure points at (its panic's location).
+fn failed_in(f: impl FnOnce()) -> String {
+    thread_local!(static AT: std::cell::RefCell<String> = Default::default());
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let was = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |p| {
+            AT.set(p.location().map(|l| l.file().to_string()).unwrap_or_default());
+            was(p)
+        }));
+    });
+    aio::testing::fails(f);
+    AT.take()
+}
+
+/// A step that fails points at the test's line, not into aio.
+#[test]
+fn a_failed_step_points_at_the_test() {
+    let mut ui = TestUi::new(counter);
+    let short = std::time::Duration::from_millis(50);
+    let steps = [
+        ("click", failed_in(|| ui.click("nope"))),
+        ("text", failed_in(|| _ = ui.text("nope"))),
+        ("checked", failed_in(|| _ = ui.checked("add"))),
+        ("type_text", failed_in(|| ui.type_text("nope", "x"))),
+        ("press", failed_in(|| ui.press("name", "Nokey"))),
+        ("chord", failed_in(|| ui.press("name", "hyper+k"))),
+        ("scroll", failed_in(|| ui.scroll("rows", 500.0, 0.0))),
+        ("eval", failed_in(|| _ = ui.eval("throw new Error('x')"))),
+        ("until", failed_in(|| ui.until_within(short, "never", || false))),
+        ("until_text", failed_in(|| ui.until_text("nope", "x"))),
+    ];
+    for (step, at) in steps {
+        assert_eq!(at, file!(), "{step}");
+    }
+}
+
 #[test]
 fn a_wait_that_times_out_names_the_component_still_rendering() {
     static DONE: Global<u32> = Global::new(|| 0);
-    // Remounts on its own success, through the page: drawn, its size is
-    // told (`onresize`), which gives it a new key.
     #[component]
     fn Field(n: u32) -> View {
-        rsx! { p { onresize: move |_| DONE.set(n + 1), "field" } }
+        rsx! { p { "field {n}" } }
     }
     fn app() -> View {
         rsx! {
@@ -558,14 +617,23 @@ fn a_wait_that_times_out_names_the_component_still_rendering() {
             for n in [DONE.get()] { Field { key: n, n } }
         }
     }
-    let got = fails(|| {
-        let mut ui = TestUi::new(app);
-        ui.until_within(std::time::Duration::from_secs(1), "the field to settle", || false);
-    });
-    // Where the page tells the size within the edits' own step, the
-    // mount's settle fails first; else the wait times out.
-    let failed = got.contains("never settle") || got.contains("waiting for: the field to settle\n");
-    assert!(failed && got.contains("still rendering: Field"), "{got}");
+    // Each look of the wait remounts the field (a new key). A step as long
+    // as the wait itself, as on a slow machine, still names it.
+    let patience = std::time::Duration::from_secs(1);
+    for step in [std::time::Duration::ZERO, patience] {
+        let got = fails(|| {
+            let mut ui = TestUi::new(app);
+            ui.until_within(patience, "the field to settle", || {
+                DONE.set(DONE.get_untracked() + 1);
+                std::thread::sleep(step);
+                false
+            });
+        });
+        assert!(
+            got.contains("waiting for: the field to settle\n  still rendering: Field"),
+            "a step of {step:?}: {got}"
+        );
+    }
     let mut ui = TestUi::new(counter);
     let got = fails(|| ui.until_within(std::time::Duration::from_secs(1), "nothing", || false));
     assert!(!got.contains("still rendering"), "a still page names none: {got}");

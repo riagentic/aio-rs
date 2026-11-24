@@ -75,6 +75,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 **Security**
 - [Accounts, keys and security](auth/README.md): the key, accounts, TOTP, OIDC, TLS, security headers, capabilities.
 - [Secrets and observability](auth/secrets.md): secrets in state and files, redaction, what logs never hold.
+- [The OS's secret store](auth/keychain.md): `aio::secrets`: a key or token kept by the Keychain, the Secret Service, DPAPI or Android's Keystore.
 
 **Shipping**
 - [Develop, build and install](build/README.md): `ax dev`, `ax build`, installing.
@@ -98,6 +99,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [A CLI and a service](examples/cli-service.md): a command-line tool talking to a headless service.
 - [A desktop app](examples/desktop-app.md): a window app with menus, files and updates.
 - [Integrations](examples/integrations.md): calling outside services: HTTP, OIDC, webhooks.
+- [A secret-holding relay](examples/relay.md): a partner API's key kept on a server, its calls made for the app.
 
 ## 3. Reference
 

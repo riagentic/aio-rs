@@ -20,6 +20,13 @@ pub enum Mode {
     Cli,
 }
 
+impl Mode {
+    /// Whether an app of this mode opens a window: a server or a CLI doesn't.
+    pub const fn has_window(self) -> bool {
+        !matches!(self, Mode::Server | Mode::Cli)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct App {
@@ -1213,6 +1220,10 @@ pub struct AndroidBuild {
     /// the APK declares it, and Android asks the user once. Off: refused.
     #[serde(default)]
     pub camera: bool,
+    /// `aio::secrets::set_biometric` may ask for the user's fingerprint or
+    /// face: the APK declares it (`USE_BIOMETRIC`). Off: refused.
+    #[serde(default)]
+    pub biometric: bool,
     /// Light or dark whatever the phone's setting; unset: the phone's.
     #[serde(default)]
     pub color_scheme: ColorScheme,
@@ -1871,6 +1882,9 @@ impl Config {
                 "aio.toml: [app] ui = \"browser\" needs mode \"client-server\" (its server serves the page), not {:?}",
                 c.app.mode
             ));
+        }
+        if let Some(v) = &c.app.version {
+            crate::version::declared(v)?;
         }
         if c.app.lang.as_deref().is_some_and(|l| !lang_ok(l)) {
             return Err("aio.toml: [app] lang is a language tag: letters, digits and '-' (\"en\", \"pt-BR\")".into());

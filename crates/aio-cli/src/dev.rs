@@ -1119,7 +1119,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
     use std::io::IsTerminal;
     let choice = crate::display::choose(asked.as_deref(), std::io::stdin().is_terminal(), crate::display::desktop())?;
     // A service or a command-line tool opens no window: no display, no splash.
-    let windowed = crate::build::app_of(&pkg).map_or(true, |(_, c)| crate::start::has_window(&c.app.mode));
+    let windowed = crate::build::app_of(&pkg).map_or(true, |(_, c)| c.app.mode.has_window());
     // Held for the whole run: dropped, the nested display stops.
     let nested = match choice {
         Choice::Nested if windowed => crate::display::nest(asked.as_deref(), "ax dev", true)?,
@@ -1513,7 +1513,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                     }
                     // Its own reason, said again last (its stderr scrolls by).
                     let why = said_why(logs.as_deref(), pid).map(|w| format!(": {w}")).unwrap_or_default();
-                    eprintln!("ax dev: {name} ended ({status}){why}; waiting: save a fix, or ax restart {name}");
+                    eprintln!("{}", ended_on_its_own(name, &status, status.success(), &why));
                     crate::splash::not_started(&format!("{name} ended ({status}) before its window opened{why}"));
                 }
                 continue;
@@ -1574,6 +1574,15 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         }
     }
     Ok(String::new())
+}
+
+/// What `ax dev` says of an app that ended on its own (pure): a clean exit
+/// (a command-line tool's work done) is nothing to fix.
+fn ended_on_its_own(name: &str, status: &impl std::fmt::Display, ok: bool, why: &str) -> String {
+    match ok {
+        true => format!("ax dev: {name} finished ({status}); a save runs it again, or ax restart {name}"),
+        false => format!("ax dev: {name} ended ({status}){why}; waiting: save a fix, or ax restart {name}"),
+    }
 }
 
 /// How long a session is quiet before the next start's build is brought
@@ -2184,11 +2193,17 @@ mod tests {
 
     /// A service or a command-line tool is told no stylesheet or markup
     /// edit (it has none to show), and gets no display or splash.
+    /// A CLI that exits 0 finished its work: no fix is waited for.
+    #[test]
+    fn a_clean_exit_finished_and_a_failed_one_waits_for_a_fix() {
+        let done = ended_on_its_own("tool", &"exit status: 0", true, "");
+        assert_eq!(done, "ax dev: tool finished (exit status: 0); a save runs it again, or ax restart tool");
+        let failed = ended_on_its_own("tool", &"exit status: 101", false, ": it panicked");
+        assert!(failed.ends_with("ended (exit status: 101): it panicked; waiting: save a fix, or ax restart tool"));
+    }
+
     #[test]
     fn a_windowless_app_is_told_only_what_it_takes_live() {
-        use aio::config::Mode;
-        let (cli, server) = (crate::start::has_window(&Mode::Cli), crate::start::has_window(&Mode::Server));
-        assert!(!cli && !server && crate::start::has_window(&Mode::Standalone));
         assert_eq!(
             live_edits("board", false, false),
             "ax dev: board: a Rust edit is hot-patched, state kept; a Cargo.toml or aio.toml edit rebuilds"

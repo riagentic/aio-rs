@@ -119,6 +119,8 @@ pub mod machine;
 pub mod merge;
 pub mod patch;
 pub mod route;
+#[cfg(feature = "secrets")]
+pub mod secrets;
 pub mod sha256;
 // Page text made smaller as the app builds (`shrunk!`): tooling, not API.
 #[doc(hidden)]
@@ -1110,6 +1112,21 @@ pub fn rt() -> &'static tokio::runtime::Runtime {
             .expect("aio background runtime")
     })
 }
+
+/// Android's Keystore, as aio-shell's host hands it in at start: seal and
+/// open with the app's key (`true`: the one a fingerprint or face
+/// unlocks), blocking while the user is asked. `aio::secrets` seals with it.
+#[cfg(target_os = "android")]
+#[doc(hidden)]
+pub struct Keystore {
+    pub seal: fn(bool, &[u8]) -> std::io::Result<Vec<u8>>,
+    pub open: fn(bool, &[u8]) -> std::io::Result<Vec<u8>>,
+}
+
+/// The [`Keystore`] aio-shell's Android host handed in.
+#[cfg(target_os = "android")]
+#[doc(hidden)]
+pub static KEYSTORE: std::sync::OnceLock<Keystore> = std::sync::OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
 type Closer =

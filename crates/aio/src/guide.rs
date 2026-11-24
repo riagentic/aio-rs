@@ -88,6 +88,8 @@ pages! {
     Auth = "auth/README.md",
     #[cfg(feature = "server")]
     Secrets = "auth/secrets.md",
+    #[cfg(feature = "secrets")]
+    Keychain = "auth/keychain.md",
     #[cfg(feature = "kit")]
     Performance = "performance.md",
     #[cfg(feature = "kit")]
@@ -103,4 +105,5 @@ pages! {
     ExDashboard = "examples/dashboard.md",
     #[cfg(feature = "oidc")]
     ExIntegrations = "examples/integrations.md",
+    ExRelay = "examples/relay.md",
 }

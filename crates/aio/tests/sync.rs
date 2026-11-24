@@ -1423,6 +1423,32 @@ async fn calls_waiting_are_not_sent_once_the_server_says_another_user() {
     assert!(saved(&file).contains("\"seen\":\"bob\""));
 }
 
+/// The last handle of a copy that is online, dropped, writes its last
+/// save before the drop ends, as an offline one does: its link (still
+/// closing) never holds the save back.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_online_copy_dropped_writes_its_last_save_before_the_drop_ends() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_h, addr) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (folder, file) = (dir.path().join("d"), dir.path().join("d/copy.json"));
+    std::fs::create_dir(&folder).unwrap();
+    let saved = |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default();
+    let link = aio::sync::Link { addr, token: "secret".into(), root: None };
+    let a = Remote::<Board>::connect_saved(link, "ana", &file).await.unwrap();
+    assert!(a.online());
+    until_long("saved", || !saved(&file).is_empty()).await;
+    let mode = |m: u32| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o500);
+    a.add("while the disk refused".into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    mode(0o700);
+    assert!(!saved(&file).contains("while the disk refused"), "the folder took a write: nothing failed");
+    drop(a);
+    assert!(saved(&file).contains("while the disk refused"), "written at the drop");
+}
+
 /// The files in `dir` whose name starts with `prefix`, sorted.
 fn asides(dir: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
     let mut all: Vec<_> = std::fs::read_dir(dir)

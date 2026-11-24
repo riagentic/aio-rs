@@ -147,6 +147,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::tls`, `aio::pairing`, `aio::cpace`, `aio::discovery` | `tls` | TLS, PIN pairing, LAN discovery |
 | `aio::auth` | none (`oidc` for `auth::oidc`) | accounts, roles, passwords, TOTP, sessions |
 | `aio::capabilities` | none (`outbound` for the client) | the hosts outbound requests may reach |
+| `aio::secrets` (`set`, `get`, `delete`, `set_biometric`, `Secret`) | `secrets` | the OS's secret store: Keychain, Secret Service, DPAPI, Android's Keystore ([keychain](../auth/keychain.md)) |
 | `aio::plugin` | none | a crate's cells, routes and hooks as one value |
 | `aio::compat` | `compat` (data: none) | aio's `state.db`, aio clients on `/ws`, `AioLink` |
 

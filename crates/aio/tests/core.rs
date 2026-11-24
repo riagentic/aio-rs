@@ -785,6 +785,8 @@ fn a_whole_backup_holds_the_app_files_but_not_its_keys() {
     std::fs::write(data.join("reports/r1.json"), "{}").unwrap();
     std::fs::write(data.join("copy.json"), "v1").unwrap();
     std::fs::write(data.join("sync.token"), "secret").unwrap();
+    std::fs::create_dir_all(data.join("secrets")).unwrap();
+    std::fs::write(data.join("secrets/s_session"), "sealed here").unwrap();
     std::fs::write(data.join("health.json"), "{}").unwrap();
     // Another database, open in WAL with a row only in its log.
     let auth = rusqlite::Connection::open(data.join("auth.db")).unwrap();
@@ -797,6 +799,7 @@ fn a_whole_backup_holds_the_app_files_but_not_its_keys() {
     std::fs::write(data.join("copy.json"), "v2").unwrap();
     std::fs::remove_file(data.join("reports/r1.json")).unwrap();
     std::fs::write(data.join("sync.token"), "newer").unwrap();
+    std::fs::write(data.join("secrets/s_session"), "sealed later").unwrap();
     std::fs::write(data.join("reports/later.json"), "after the backup").unwrap();
     let dirs = aio::paths::AppDirs::at(&root, "todo").unwrap();
     aio::backup::restore("todo", &file, &store, &dirs).unwrap().unwrap();
@@ -811,6 +814,8 @@ fn a_whole_backup_holds_the_app_files_but_not_its_keys() {
     assert_eq!(std::fs::read_to_string(data.join("copy.json")).unwrap(), "v1");
     assert!(data.join("reports/r1.json").exists());
     assert_eq!(std::fs::read_to_string(data.join("sync.token")).unwrap(), "newer", "keys stay on their machine");
+    // Sealed secrets (aio::secrets) open on this machine only: never backed up, never replaced.
+    assert_eq!(std::fs::read_to_string(data.join("secrets/s_session")).unwrap(), "sealed later");
     let n: String = rusqlite::Connection::open(data.join("auth.db"))
         .unwrap()
         .query_row("SELECT n FROM u", [], |r| r.get(0))
@@ -825,7 +830,7 @@ fn a_whole_backup_holds_the_app_files_but_not_its_keys() {
     assert_eq!(kept.len(), 1, "{kept:?}");
     assert_eq!(std::fs::read_to_string(data.join(&kept[0])).unwrap(), "v2");
     // A file that names a path out of the data dir, or a key, restores nothing.
-    for bad in ["../evil", "reports/../../evil", "sync.token"] {
+    for bad in ["../evil", "reports/../../evil", "sync.token", "secrets/s_session"] {
         let crafted = d.path().join("crafted.aio-backup");
         std::fs::copy(&file, &crafted).unwrap();
         let db = rusqlite::Connection::open(&crafted).unwrap();

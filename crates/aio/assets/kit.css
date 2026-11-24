@@ -381,6 +381,9 @@ body{
 .aio-zoompan__capture { position: fixed; inset: -100vmax; z-index: 2147483647; cursor: grabbing; } /* past the window's edges wherever the box sits */
 .aio-zoompan__controls { position: absolute; inset-inline-end: .5em; bottom: .5em; display: flex; gap: .25em; }
 .aio-zoompan__btn { min-width: 2em; padding: .25em .5em; border: 1px solid var(--aio-ui-line); background: var(--aio-ui-bg); color: var(--aio-ui-ink); border-radius: var(--aio-ui-radius); cursor: pointer; font: inherit; }
+.aio-qr { position: relative; display: block; overflow: hidden; min-height: 12em; background: var(--aio-ui-ink); color: var(--aio-ui-bg); }
+.aio-qr > video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.aio-qr__note { position: absolute; inset: 0; margin: 0; display: flex; align-items: center; justify-content: center; padding: 1em; text-align: center; font-family: var(--aio-ui-font); }
 
 .aio-toasts { position: fixed; bottom: 1rem; inset-inline-end: 1rem; display: flex; flex-direction: column; gap: .5em; z-index: 1100; max-width: min(24rem, 90vw); }
 .aio-toast { display: flex; align-items: center; gap: .6em; padding: .7em .9em; border-radius: var(--aio-ui-radius); background: var(--aio-ui-bg); color: var(--aio-ui-ink); border: 1px solid var(--aio-ui-line); border-inline-start: 3px solid var(--aio-ui-ink-soft); box-shadow: 0 6px 20px rgba(0,0,0,.18); font-family: var(--aio-ui-font); animation: aio-toast-in .18s ease-out; }

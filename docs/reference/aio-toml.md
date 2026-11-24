@@ -157,6 +157,7 @@ chromium_extras = "keep"
 aab = false
 schemes = []
 camera = false
+biometric = false
 color_scheme = "system"
 
 [log]
@@ -216,7 +217,7 @@ Who the app is and where its cells live.
 | `id` | id | required | The app's identity: its data's home, its install, its sockets. Never change it once the app has run: the data is found by it. |
 | `name` | string | `""` | The name people see: the window title (`aio_shell::Window::of`), the menu entry, `{title}` in the splash. |
 | `mode` | `standalone`, `client-server`, `server`, `client`, `cli` | `"standalone"` | Where the cells live. `standalone`: in the app, nothing listens. `client-server`: in the app, served to clients, with a window. `server`: served, no window. `client`: a window on another process's cells (`[client] server`, or a pairing). `cli`: a command-line tool. See [concepts](../basics/concepts.md#where-code-runs). |
-| `version` | string | the package's | `major.minor`: builds are numbered from git, `1.4.<commit count>` (`1.4.0-nogit` without git). Or a pinned `major.minor.patch`. Either may carry a stage: `1.4-beta` builds `1.4.<n>-beta` (`-alpha` < `-beta` < `-rc` < none). Unset: `Cargo.toml`'s version, as written. |
+| `version` | string | the package's | `major.minor`: builds are numbered from git, `1.4.<commit count>` (`1.4.0-nogit` without git). Or a pinned `major.minor.patch`. Either may carry a stage: `1.4-beta` builds `1.4.<n>-beta` (`-alpha` < `-beta` < `-rc` < none). Unset: `Cargo.toml`'s version, as written. Any other form is refused as the file is read. |
 | `ui` | `window`, `browser` | `"window"` | Where a `client-server` app shows its UI: `window` (the shared runtime's) or `browser` (its own page in the system browser, running until asked to stop). A launch's `--client=window`, `browser` or `server-only` (no window, served until asked to stop) decides for one run (aio's `--client`). |
 | `lang` | language tag | `"en"` | The page's language, `<html lang>` (screen readers, spellcheck, translation). Letters, digits and `-`: `"en"`, `"pt-BR"`. |
 | `dir` | `ltr`, `rtl`, `auto` | `"ltr"` | The page's direction, `<html dir>`. `auto` is the browser's guess from the first strong character. Never guessed from `lang`. |
@@ -597,6 +598,7 @@ build a file added later in; a plain `cargo build` doesn't see a new one.
 | `aab` | bool | `false` | Also an Android App Bundle (`.aab`) for Play. |
 | `schemes` | list | `[]` | URL schemes the app opens on Android only, beside `[app] schemes` (every platform) (`notes://item/7`): each link reaches the running app (`aio::ui::links`; a `router!` goes there). A lower-case letter, then lower-case letters, digits, `+`, `-` or `.`; none of the system's (`http`, `https`, `content`, `file`, `intent`, `mailto`, `tel`…). |
 | `camera` | bool | `false` | The page may ask for the camera: the APK declares it and Android asks once. Off: refused. |
+| `biometric` | bool | `false` | `aio::secrets::set_biometric` may ask for the user's fingerprint or face: the APK declares it (`USE_BIOMETRIC`). Off: refused ([keychain](../auth/keychain.md)). |
 | `color_scheme` | `system`, `light`, `dark` | `"system"` | Light or dark whatever the phone's setting; `system`: the phone's. |
 
 ### [build.macos]
