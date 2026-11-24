@@ -233,7 +233,7 @@ written in it.
 | `--template canvas` | a window drawing bouncing balls: `step`, the pure function that moves them, tested; one script draws a frame |
 | `--id id` | its id, its data's home (default: the name; refused when an installed app has it) |
 | `--aio-version v` | the aio-rs release it takes from git: `0.4.0`, `main` (the branch), `latest` (the newest release); default: this `ax`'s |
-| `--aio dir` | an aio-rs checkout instead, named relative to the app (they share a folder below the root) |
+| `--aio dir` | an aio-rs checkout instead, a folder named from here; the app's `Cargo.toml` names it relative to the app (they share a folder below the root) |
 | `--target a,b` | its `[build] targets` (`ax build <app> --list` names the kinds) |
 | `--css tailwind` | `[build] css` runs Tailwind on `src/app.css` into `assets/style.css` (a window app) |
 | `--force` | write the template over a folder that holds files |

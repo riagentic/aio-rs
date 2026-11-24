@@ -29,8 +29,8 @@ default), cli (a command-line tool), service (served, no window), todo
 tested function moves);
 --id: its id (its data's home; default: the name, refused when an
 installed app has it); --aio-version: its aio-rs release from git (default:
-this ax's; main, latest); --aio: an aio-rs checkout instead, named relative
-to the app; --target: its [build] targets (ax build --list); --css
+this ax's; main, latest); --aio: an aio-rs checkout instead (a folder
+from here; Cargo.toml names it relative to the app); --target: its [build] targets (ax build --list); --css
 tailwind: Tailwind writes its stylesheet; a failure leaves nothing behind;
 at a terminal it then builds the app for ax dev in the background, so the
 first ax dev is a launch (--no-warm, AIORT_NO_WARM=1: not)",
