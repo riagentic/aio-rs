@@ -66,6 +66,13 @@ version may break things.
 
 ### Fixed
 
+- A window with a tray died at start on Linux with no display (none set,
+  or the runtime's headless one: `ax build --smoke` without Xvfb): GTK
+  ended the runtime on the tray, so the window never came. It now opens
+  without the tray, and the log says so once.
+- `ax setup --check` names Xvfb for `ax build --smoke` also when Xephyr
+  is here: without Xvfb the smoke runs on the runtime's headless display,
+  unlike a user's (no tray).
 - A memo of a memo could still glitch: an effect older than the outer
   memo, reading it and a signal the inner one follows, ran once with the
   outer memo's old value and once more with the new one. A read now

@@ -660,6 +660,11 @@ app.whenReady().then(() => {
   // ({"t":"tray","i":n}); one with a route brings the window forward first.
   let tray = null
   function openTray() {
+    // Linux with no display (none set, or Chromium's headless ozone: `ax
+    // build --smoke` without Xvfb): GTK aborts the whole runtime on a tray.
+    if (process.platform === 'linux' && (app.commandLine.getSwitchValue('ozone-platform') === 'headless' || !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY)) {
+      return console.error('[aio-shell] tray: skipped, no display (headless)')
+    }
     // Linux: a tray needs a host (a StatusNotifierWatcher on the session
     // bus); without one the icon never shows, so close-to-tray minimizes
     // instead. null: unknown (no dbus-send), hide.

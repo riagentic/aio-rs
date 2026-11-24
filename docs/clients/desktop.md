@@ -196,6 +196,10 @@ to show a tray icon:
 | `close_to_tray` | closing the window hides it to the tray; Quit (or the app stopping) still closes it. A Linux desktop with no tray minimizes instead. |
 | `menu` | `&[Item { label, run, route }]`: `run` (a `fn()`) runs in the app's views, then the window comes forward and goes to `route`. An item with an empty label is a separator. The menu always ends with Show, Hide and Quit. |
 
+A Linux window with no display (none set, or the runtime's headless one:
+`ax build --smoke` without Xvfb) has no tray, and its log says so once:
+GTK would end the runtime on one.
+
 A click on the icon shows or hides the window. A tray item and a click on
 a notification reach the views through `aio_shell::desktop::use_asks(go)`,
 called once in the root component with the router's `go` (`router!` makes
