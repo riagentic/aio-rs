@@ -436,6 +436,9 @@ version may break things.
   it is; `--quiet` prints nothing without an error.
 - `ax new notes` (cargo's habit) answered "did you mean dev?": `new` and
   `init` name `ax create <name>`.
+- `ax release` of an app whose `aio.toml` doesn't trust its signing key
+  (a new app has no `[updates]` yet) said so and no more: it names the
+  line to add, `keys = ["ed25519:…"]` with the key's own value.
 
 ## [0.4.2] - 2026-11-11
 
