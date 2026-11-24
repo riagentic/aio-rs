@@ -818,6 +818,13 @@ impl TestUi {
         self.must("attr", json!({ "path": t, "name": name })).as_str().map(String::from)
     }
 
+    /// A property's value now, as a script reads it (`muted`, `volume`,
+    /// `indeterminate`: what the person gets, where the attribute may say
+    /// otherwise); `Null`: unset, or no string, number or bool.
+    pub fn prop(&self, t: &str, name: &str) -> Value {
+        self.must("prop", json!({ "path": t, "name": name }))
+    }
+
     /// The OS turns dark (or light) while the app runs: the page's
     /// `prefers-color-scheme` changes, as on a phone at dusk.
     pub fn set_os_dark(&mut self, dark: bool) {

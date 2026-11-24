@@ -69,6 +69,7 @@ fn a_controls_properties_are_written_as_what_shows_them_before_any_script() {
             select { option { value: "1", "one" } option { value: "2", selected: true, "two" } }
             br {}
             div { dangerous_inner_html: "<b>bold</b>" }
+            video { muted: true, volume: 0.5 }
         }
     }
     let html = render_to_string(app).unwrap();
@@ -80,6 +81,7 @@ fn a_controls_properties_are_written_as_what_shows_them_before_any_script() {
         "<option value=\"2\" selected=\"\">two</option>",
         "<br>",
         "<div><b>bold</b></div>",
+        "<video muted></video>",
     ] {
         assert!(html.contains(want), "{want} in {html}");
     }

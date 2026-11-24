@@ -17,6 +17,8 @@ use proc_macro2::{Delimiter, Ident, Literal, Spacing, Span, TokenStream, TokenTr
 use quote::{ToTokens, format_ident, quote, quote_spanned};
 use std::cell::RefCell;
 
+include!("events.rs");
+
 /// Elements, text, `{expr}`, components, `for … in … { … }` (keyed rows:
 /// `key:` on the row), `if … { … } else { … }`. A
 /// literal is static; a `"{x}"` string and every other expression is a
@@ -1327,6 +1329,7 @@ const STYLE_ATTRS: &[(&str, &str)] = &[
 /// An HTML element's own attributes that share a style attribute's name
 /// (the HTML elements'): `img { width }` is the attribute, `div { width }` the CSS property.
 const OWN_ATTRS: &[(&str, &[&str])] = &[
+    ("audio", &["volume"]),
     ("canvas", &["height", "width"]),
     ("embed", &["height", "width"]),
     ("iframe", &["height", "width"]),
@@ -1336,7 +1339,7 @@ const OWN_ATTRS: &[(&str, &[&str])] = &[
     ("object", &["height", "width"]),
     ("select", &["size"]),
     ("u", &["alt"]),
-    ("video", &["height", "width"]),
+    ("video", &["height", "volume", "width"]),
 ];
 
 /// The CSS property a named attribute of HTML element `tag` sets, if it is
@@ -1380,6 +1383,8 @@ fn attr_name(name: &str) -> String {
         ("base_frequency", "baseFrequency"),
         ("num_octaves", "numOctaves"),
         ("stitch_tiles", "stitchTiles"),
+        ("current_time", "currentTime"),
+        ("playback_rate", "playbackRate"),
         ("dangerous_inner_html", "innerHTML"),
     ];
     CAMEL.iter().find(|(k, _)| *k == name).map_or_else(|| name.replace('_', "-"), |(_, v)| v.to_string())
@@ -1388,29 +1393,7 @@ fn attr_name(name: &str) -> String {
 /// The DOM event an `on…` attribute listens for, and the payload its
 /// handler gets (`onkeydown` a `KeyboardEvent`, `oninput` a `FormEvent`, …).
 fn payload(ev: &str) -> Option<(String, &'static str)> {
-    let p = match ev {
-        "keydown" | "keyup" | "keypress" => "KeyboardData",
-        "click" | "contextmenu" | "mousedown" | "mouseup" | "mousemove" | "mouseover" | "mouseout" | "mouseenter"
-        | "mouseleave" | "auxclick" | "dblclick" | "doubleclick" => "MouseData",
-        "drag" | "dragstart" | "dragend" | "dragenter" | "dragleave" | "dragover" | "drop" | "dragexit" => "DragData",
-        "pointerdown" | "pointerup" | "pointermove" | "pointerover" | "pointerout" | "pointerenter"
-        | "pointerleave" | "pointercancel" | "gotpointercapture" | "lostpointercapture" | "touchstart" | "touchend"
-        | "touchmove" | "touchcancel" => "PointerData",
-        "wheel" => "WheelData",
-        "resize" => "ResizeData",
-        "visible" => "VisibleData",
-        "input" | "change" | "submit" | "reset" | "invalid" => "FormData",
-        "scroll" | "scrollend" => "ScrollData",
-        "mounted" => "",
-        "focus" | "blur" | "focusin" | "focusout" | "copy" | "cut" | "paste" | "compositionstart"
-        | "compositionupdate" | "compositionend" | "animationstart" | "animationend" | "animationiteration"
-        | "transitionend" | "transitionstart" | "transitionrun" | "transitioncancel" | "toggle" | "beforetoggle"
-        | "load" | "error" | "abort" | "canplay" | "canplaythrough" | "durationchange" | "emptied" | "encrypted"
-        | "ended" | "loadeddata" | "loadedmetadata" | "loadstart" | "pause" | "play" | "playing" | "progress"
-        | "ratechange" | "seeked" | "seeking" | "stalled" | "suspend" | "timeupdate" | "volumechange" | "waiting"
-        | "select" | "selectstart" | "selectionchange" | "cancel" | "close" => "PlainData",
-        _ => return None,
-    };
+    let &(_, p) = EVENTS.iter().find(|(n, _)| *n == ev)?;
     let dom = if ev == "doubleclick" { "dblclick" } else { ev };
     Some((dom.to_string(), p))
 }
@@ -1910,7 +1893,7 @@ impl Tpl {
                 let stat: Vec<(&String, String)> = attrs
                     .iter()
                     .filter_map(|(k, v)| match v {
-                        Val::Static(_) if k == "innerHTML" => None,
+                        Val::Static(_) | Val::Present(_) if prop_only(k) => None,
                         Val::Static(s) => Some((k, s.clone())),
                         Val::Present(b) if text_bool(k) => Some((k, b.to_string())),
                         Val::Present(true) => Some((k, String::new())),
@@ -1923,18 +1906,22 @@ impl Tpl {
                     self.str(v);
                 }
                 self.bytes.extend_from_slice(&(children.len() as u16).to_le_bytes());
-                // `innerHTML` is a property set at mount, as the page's guard sees it, not
-                // a template attribute.
+                // A property no attribute sets (`innerHTML`, as the page's guard sees it;
+                // `muted`) is set at mount, not a template attribute.
                 let dynamic = !spreads.is_empty()
-                    || attrs.iter().any(|(k, v)| k == "innerHTML" || !matches!(v, Val::Static(_) | Val::Present(_)));
+                    || attrs.iter().any(|(k, v)| prop_only(k) || !matches!(v, Val::Static(_) | Val::Present(_)));
                 self.bytes.push(dynamic as u8);
                 if dynamic || root {
                     let id = self.mark();
                     for (k, v) in attrs {
                         let hole = match v {
-                            Val::Static(s) if k == "innerHTML" => {
+                            Val::Static(s) if prop_only(k) => {
                                 let (head, set) = attr_fn();
                                 quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(#head #set(air::IntoAttr::into_attr(#s))));)
+                            }
+                            Val::Present(b) if prop_only(k) => {
+                                let (head, set) = attr_fn();
+                                quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(#head #set(air::IntoAttr::into_attr(#b))));)
                             }
                             Val::Fmt(f, r) if let Some(name) = lone(f, r) => {
                                 quote!(air::__rt::attr_of(#id, #k, &#name);)
@@ -2224,6 +2211,14 @@ fn is_closure(v: &TokenStream) -> bool {
     }
     let at = usize::from(t.first().is_some_and(|t| is_ident(t, "move")));
     is_punct(t.get(at), '|')
+}
+
+/// The properties no attribute sets on an element a script made (the
+/// `muted` attribute is its `defaultMuted`): set at mount as properties,
+/// never template attributes (air's `is_prop` less `value`, `checked` and
+/// `selected`, whose attribute is what a new element shows).
+fn prop_only(name: &str) -> bool {
+    matches!(name, "innerHTML" | "indeterminate" | "muted" | "volume" | "currentTime" | "playbackRate")
 }
 
 /// air's `is_text_bool`: `true`/`false` is text for `aria-*`, `data-*` and
