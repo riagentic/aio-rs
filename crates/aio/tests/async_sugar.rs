@@ -551,7 +551,7 @@ mod modes {
         assert_eq!(fast.await, Ok("hits for ab".into()));
         let e = slow.await.unwrap_err();
         assert!(e.why.contains("ended before it answered"), "{e}");
-        assert_eq!(e.code(), Some(Code::DispatchAborted), "aio's code for it");
+        assert_eq!(e.code, Some(Code::DispatchAborted), "aio's code for it");
         assert_eq!(h.state().shown, ["hits for ab"], "the superseded call shows nothing");
     }
 
@@ -644,7 +644,7 @@ mod admission {
 
     fn denied<V: std::fmt::Debug>(r: Result<V>) {
         let e = r.unwrap_err();
-        assert_eq!(e.code(), Some(Code::AccessDenied), "{e}");
+        assert_eq!(e.code, Some(Code::AccessDenied), "{e}");
     }
 
     #[test]

@@ -530,7 +530,7 @@ field. Signals in views: [views](../ui/views.md#local-state-and-hooks).
   `h.state()` (an `Arc`, cheap) and drop it.
 - A credential-named shared field without `#[server]`: the build fails,
   on purpose.
-- Matching on a refusal's words: match on `e.code()` ([debugging](../debugging/README.md#1-read-the-error)).
+- Matching on a refusal's words: match on `e.code` ([debugging](../debugging/README.md#1-read-the-error)).
 - "no method named `add` found for struct `Handle<Todo>`": the
   `TodoCalls` trait is not in scope. Import it, or use `aio::prelude::*`
   in the cell's own module.

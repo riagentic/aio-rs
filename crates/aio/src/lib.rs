@@ -470,11 +470,6 @@ impl Rejected {
     pub fn lost(why: impl Into<String>) -> Self {
         Self::coded(Code::ConnectionLost, why)
     }
-
-    /// Its code (aio's `errorCode`): `None` for the method's own refusal.
-    pub fn code(&self) -> Option<Code> {
-        self.code.clone()
-    }
 }
 
 impl From<String> for Rejected {
@@ -1464,11 +1459,11 @@ mod tests {
     #[test]
     fn a_refusal_says_its_kind_by_a_typed_code_never_by_its_words() {
         use super::{CODES, Code, error_summary};
-        assert_eq!(Rejected::denied("give", "is not a #[client] method").code(), Some(Code::AccessDenied));
-        assert_eq!(Rejected::unknown("nope").code(), Some(Code::ActionRefused));
+        assert_eq!(Rejected::denied("give", "is not a #[client] method").code, Some(Code::AccessDenied));
+        assert_eq!(Rejected::unknown("nope").code, Some(Code::ActionRefused));
         // The method's own words are never mistaken for aio's.
         for own in ["access denied: `x` by me", "unknown method `y`", "sign in first"] {
-            assert_eq!(Rejected::new(own).code(), None, "{own}");
+            assert_eq!(Rejected::new(own).code, None, "{own}");
         }
         // The wire names are the contract.
         assert_eq!(serde_json::to_value(Code::AccessDenied).unwrap(), "ACCESS_DENIED");

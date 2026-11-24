@@ -72,7 +72,7 @@ assert_eq!(h.call("add", json!(["Bo", null, []])).unwrap(), json!(2));
 let bad = h.call("add", json!([1, 2, 3])).unwrap_err();
 assert!(bad.why.starts_with("bad arguments"), "{}", bad.why);
 let unknown = h.call("remove", json!([0])).unwrap_err();
-assert_eq!(unknown.code(), Some(Code::ActionRefused));
+assert_eq!(unknown.code, Some(Code::ActionRefused));
 # }
 ```
 
@@ -511,7 +511,7 @@ let mut late = h.refresh().unwrap();
 assert_eq!(h.state().status, "", "nothing is seen before its end");
 h.transfer(5).unwrap();
 t.settle();
-assert_eq!(late.now().unwrap().unwrap_err().code(), Some(Code::TxConflict));
+assert_eq!(late.now().unwrap().unwrap_err().code, Some(Code::TxConflict));
 assert_eq!((h.state().balance, h.state().status.as_str()), (-5, ""), "the transfer stands");
 # _ = t.failures();
 

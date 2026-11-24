@@ -157,6 +157,9 @@ version may break things.
   `advance(d)`, `settle_for(d)` and `budget::<C>(method, d)` (were ms):
   `t.advance(Duration::from_secs(60))`. A step back is `rewind(d)`
   (was `advance(-ms)`).
+- **Breaking: `Rejected::code()` is gone**: the field says the same
+  (`e.code`, as `e.why`): `e.code() == Some(Code::X)` is
+  `e.code == Some(Code::X)`.
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.

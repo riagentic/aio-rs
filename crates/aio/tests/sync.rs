@@ -1659,7 +1659,7 @@ async fn a_token_function_is_asked_at_each_reconnect_and_a_dead_one_signs_out() 
     until("signed out, the waiting call refused", || a.signed_out() && a.pending() == 0).await;
     assert!(asked.load(Ordering::SeqCst) >= 1, "asked before the reconnect");
     assert!(!a.state().notes.contains_key(&waiting), "and taken off the copy");
-    assert_eq!(a.add("now".into()).unwrap_err().code(), Some(Code::AccessDenied));
+    assert_eq!(a.add("now".into()).unwrap_err().code, Some(Code::AccessDenied));
     // A good token again: linked, and calls go through.
     good.store(true, Ordering::SeqCst);
     until("linked again", || a.online() && !a.signed_out()).await;
@@ -2783,7 +2783,7 @@ mod streamed {
         until("done on the server", || h.state().done == 1).await;
         let got = tokio::time::timeout(Duration::from_secs(5), end).await;
         let e = got.expect("its caller is told, not left waiting").unwrap_err();
-        assert_eq!(e.code(), Some(aio::Code::ConnectionLost), "{e}");
+        assert_eq!(e.code, Some(aio::Code::ConnectionLost), "{e}");
         assert!(e.why.contains("went with that link"), "{e}");
         assert_eq!(Arc::strong_count(&held), 1, "its piece handler is gone");
     }

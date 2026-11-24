@@ -205,7 +205,6 @@ aio::Recovered.quarantined: std::path::PathBuf
 aio::Recovered.why: String
 aio::Rejected.code: Option<Code>
 aio::Rejected.why: String
-aio::Rejected::code: fn code(&self) -> Option<Code>
 aio::Rejected::coded: fn coded(code: Code, why: impl Into<String>) -> Self
 aio::Rejected::denied: fn denied(method: &str, why: &str) -> Self
 aio::Rejected::lost: fn lost(why: impl Into<String>) -> Self
@@ -1945,7 +1944,6 @@ aio::prelude::Mode::Newest
 aio::prelude::Mode::Queue
 aio::prelude::Rejected.code: Option<Code>
 aio::prelude::Rejected.why: String
-aio::prelude::Rejected::code: fn code(&self) -> Option<Code>
 aio::prelude::Rejected::coded: fn coded(code: Code, why: impl Into<String>) -> Self
 aio::prelude::Rejected::denied: fn denied(method: &str, why: &str) -> Self
 aio::prelude::Rejected::lost: fn lost(why: impl Into<String>) -> Self

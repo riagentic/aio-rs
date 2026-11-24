@@ -146,7 +146,7 @@ async fn a_client_runs_typed_server_fns() {
     assert!(r.run(ADMIN, ()).await.unwrap_err().why.contains("access denied"));
     let declined = r.run(DECLINE, (5,)).await.unwrap_err();
     assert!(declined.why.contains("access denied"));
-    assert_eq!(declined.code(), Some(aio::Code::AccessDenied), "the code crosses the wire");
+    assert_eq!(declined.code, Some(aio::Code::AccessDenied), "the code crosses the wire");
     assert!(r.run(MISSING, ()).await.unwrap_err().why.contains("not served"));
     let wrong: ServerFn<(String,), i64> = ServerFn::new("math.add");
     assert!(r.run(wrong, ("2".into(),)).await.unwrap_err().why.contains("bad arguments"));
@@ -234,7 +234,7 @@ async fn with_accounts_the_role_is_checked_at_every_call() {
     assert!(bob.run(ADMIN, ()).await.unwrap_err().why.contains("access denied"));
     // Signed in, the function itself answers.
     let declined = bob.run(DECLINE, (5,)).await.unwrap_err();
-    assert_eq!((declined.why.as_str(), declined.code()), ("card declined for 5", None), "the function's own");
+    assert_eq!((declined.why.as_str(), declined.code), ("card declined for 5", None), "the function's own");
     // A new role counts from the next call.
     auth.set_role("bob", "admin").unwrap();
     assert_eq!(bob.run(ADMIN, ()).await, Ok("bob".into()));
@@ -339,7 +339,7 @@ async fn an_aio_rs_app_runs_an_aio_apps_server_fns() {
         aio::compat::AioLink::connect(&aio::sync::Link { addr, token: "secret".into(), root: None }).await.unwrap();
     assert_eq!(deno.run("math", "add", json!([20, 22])).await, Ok(json!(42)));
     let denied = deno.run("math", "admin", json!([])).await.unwrap_err();
-    assert_eq!(denied.code(), Some(aio::Code::AccessDenied), "{denied}");
+    assert_eq!(denied.code, Some(aio::Code::AccessDenied), "{denied}");
     assert!(deno.run("math", "constructor", json!([])).await.unwrap_err().why.contains("not served"));
 }
 

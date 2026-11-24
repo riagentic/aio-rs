@@ -169,7 +169,7 @@ rt.block_on(async {
     let ana = Remote::<Tally>::connect(&addr, "secret", "ana").await.unwrap();
     let refused = Arc::new(Mutex::new(vec![]));
     let r = refused.clone();
-    ana.on_refused(move |method, why| r.lock().unwrap().push((method.to_string(), why.code())));
+    ana.on_refused(move |method, why| r.lock().unwrap().push((method.to_string(), why.code.clone())));
 
     assert_eq!(ana.add(2).unwrap(), 2, "the copy's answer, at once");
     assert!(ana.add(0).is_err(), "refused on the copy: never sent");

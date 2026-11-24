@@ -273,7 +273,7 @@ Rename it (`begin`) when porting.
 | `serverAuth`, `createAuthClient`, `authClient` | `[accounts]`; `aio::auth::client::Client` |
 | `serverImport`, `aio/server-only`, `aio/client-only` | `#[cfg(..)]` and Cargo features: server code isn't in the web build ([dev](../build/dev.md)) |
 | `degraded`, `degradedReport` | `aio::health::part(name)`, `aio::health::degraded()` |
-| `errorCode`, `errorSummary` | `Rejected::code()`, `Rejected::why` |
+| `errorCode`, `errorSummary` | `Rejected::code`, `Rejected::why` |
 | `log` | `aio::info!`, `aio::warn!`, … ([errors](../debugging/errors.md#logs)) |
 | `dur` | `aio::fmt::dur` |
 | `VERSION` | `aio::VERSION` |

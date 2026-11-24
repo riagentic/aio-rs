@@ -39,9 +39,9 @@ impl Vault {
 # fn main() {
 let h = Handle::<Vault>::memory();
 let e = h.unlock("1".into()).unwrap_err();
-assert_eq!((e.why.as_str(), e.code()), ("a PIN has at least 4 digits", None), "the app's own refusal");
+assert_eq!((e.why.as_str(), e.code), ("a PIN has at least 4 digits", None), "the app's own refusal");
 let e = h.call("nope", serde_json::json!([])).unwrap_err();
-assert_eq!(e.code(), Some(Code::ActionRefused), "one of aio-rs's: unknown method");
+assert_eq!(e.code, Some(Code::ActionRefused), "one of aio-rs's: unknown method");
 # }
 ```
 

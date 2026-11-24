@@ -49,7 +49,7 @@ impl Contacts {
 
 /// What a UI does with a failed call: branch on the code, never the words.
 fn say(e: &Rejected) -> String {
-    match e.code() {
+    match e.code {
         Some(Code::AccessDenied) => "sign in to do that".into(),
         Some(Code::ConnectionLost) => "offline: try again when connected".into(),
         Some(Code::ActionRefused) => "this app is older than the page: reload".into(),
@@ -67,7 +67,7 @@ assert!(h.add("ada@example.org".into()).is_err(), "a duplicate");
 assert_eq!(h.state().emails.len(), 1, "a refused call changed nothing");
 
 let e = h.call("remove", serde_json::json!(["ada@example.org"])).unwrap_err();
-assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRefused), Some("ACTION_REFUSED")));
+assert_eq!((e.code.clone(), e.code.as_ref().map(Code::as_str)), (Some(Code::ActionRefused), Some("ACTION_REFUSED")));
 # }
 ```
 
@@ -100,7 +100,7 @@ assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRe
 - `aio::error_summary(&e)` is one line for a log or a CI gate (aio's
   `errorSummary`): the code and the first sentence, at most 160
   characters.
-- The words are not stable. Branch on `code()`, never on `why`.
+- The words are not stable. Branch on `code`, never on `why`.
 - A refusal crosses the wire as `why` and the wire name, so a synced copy,
   a `Link`, an aio client (`errorCode(err)`) and `ax call` all see the
   same code.
